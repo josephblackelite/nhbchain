@@ -62,7 +62,7 @@ sudo snap install go --classic
 Next, clone the repository and compile the node software into a single executable.
 
 # Clone the repository from GitHub
-git clone [https://github.com/your-username/nhbchain.git](https://github.com/your-username/nhbchain.git)
+git clone [https://github.com/josephblackelite/nhbchain.git](https://github.com/josephblackelite/nhbchain.git)
 
 # Navigate into the project directory
 cd nhbchain
