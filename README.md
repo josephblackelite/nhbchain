@@ -102,7 +102,7 @@ ValidatorKey = ""
 # A list of trusted nodes to connect to on startup
 BootstrapPeers = [
     # Add the public IP of the main network's bootstrap node here
-    # e.g., "123.45.67.89:6001"
+    # e.g., "34.67.8.77:6001"
 ]
 
 4. Running the Node
