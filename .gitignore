@@ -1,0 +1,29 @@
+# Build artifacts
+/bin/
+/build/
+/dist/
+/out/
+*.exe
+*.test
+*.out
+
+# Go workspace/vendor (if you vendor, you can remove this)
+vendor/
+
+# Runtime / DB state (leveldb/rocksdb/bolt/etc.)
+nhb-data/
+nhb-data-peer/
+nhb-data-mainnet/
+**/CURRENT
+**/LOCK
+**/LOG
+**/LOG.old
+**/MANIFEST-*
+**/*.sst
+**/*.ldb
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

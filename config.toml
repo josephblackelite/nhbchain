@@ -1,0 +1,4 @@
+ListenAddress = ":6001"
+RPCAddress = ":8080"
+DataDir = "./nhb-data"
+ValidatorKey = "87bbbc188ea45e5440d6b22cdf17fe0b3d7c4d041c4ba5475c0be2ff0d1097d7"

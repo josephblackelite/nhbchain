@@ -1,0 +1,233 @@
+Excellent. Your node is now a persistent, professional client, running silently and reliably. This is the perfect foundation.
+
+As we discussed, the node is now an engine waiting for instructions. It's time to build the "steering wheel"—the nhb-cli application. This new tool will be our primary way to interact with the running node, allowing us to query the state and eventually send transactions.
+
+To do this, we first need to teach our node's RPC server how to answer a basic question: "What is the balance of this address?"
+
+## Step 1: Upgrade the RPC Server to Handle Balance Inquiries
+We'll add a new API endpoint called nhb_getBalance to our RPC server.
+
+In file: nhbchain/rpc/http.go, make the following two changes.
+
+First, add a new RPCResponse struct and a BalanceResponse struct to define the structure of our API's answers. You can add these near the top of the file.
+
+Go
+
+// A generic structure for a JSON-RPC response.
+type RPCResponse struct {
+	ID     int         `json:"id"`
+	Result interface{} `json:"result,omitempty"`
+	Error  string      `json:"error,omitempty"`
+}
+
+// BalanceResponse is the specific structure for a getBalance response.
+type BalanceResponse struct {
+	Address     string   `json:"address"`
+	BalanceNHB  *big.Int `json:"balanceNHB"`
+	BalanceZNHB *big.Int `json:"balanceZNHB"`
+	Username    string   `json:"username"`
+	Nonce       uint64   `json:"nonce"`
+}
+Second, add a new case to the switch statement inside the handle function to process the new method.
+
+Go
+
+	switch req.Method {
+	case "nhb_sendTransaction":
+		// ... (existing code) ...
+
+	case "nhb_getBalance": // NEW: Handle balance requests
+		var addrStr string
+		if err := json.Unmarshal(req.Params[0], &addrStr); err != nil {
+			// ... (error handling) ...
+			return
+		}
+		
+		addr, err := crypto.DecodeAddress(addrStr)
+		if err != nil {
+			// ... (error handling) ...
+			return
+		}
+
+		account, err := s.node.GetAccount(addr.Bytes()) // This function doesn't exist yet, we'll add it.
+		if err != nil {
+			// ... (error handling) ...
+			return
+		}
+		
+		resp := BalanceResponse{
+			Address:     addrStr,
+			BalanceNHB:  account.BalanceNHB,
+			BalanceZNHB: account.BalanceZNHB,
+			Username:    account.Username,
+			Nonce:       account.Nonce,
+		}
+		
+		json.NewEncoder(w).Encode(RPCResponse{ID: req.ID, Result: resp})
+
+	default:
+		// ... (existing code) ...
+	}
+## Step 2: Add the GetAccount Method to the Node
+The RPC server needs a way to ask the node for account data.
+
+In nhbchain/core/node.go, add this new function to the end of the file:
+
+Go
+
+// GetAccount retrieves an account from the state processor.
+func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
+	return n.state.GetAccount(addr)
+}
+(Note: This works because we already have a helper function named getAccount inside the StateProcessor that we can reuse!)
+
+## Step 3: Create the CLI Application
+Now we can build the new tool.
+
+First, create the new directory structure:
+
+Bash
+
+mkdir -p cmd/nhb-cli
+Second, create the main file for our new application. This program is completely separate from the node. It will have two commands to start: generate-key to create a new wallet file, and balance to query an address.
+
+File: nhbchain/cmd/nhb-cli/main.go
+
+Go
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+
+	"nhbchain/core/types"
+	"nhbchain/crypto"
+)
+
+const rpcEndpoint = "http://localhost:8080"
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		return
+	}
+
+	command := os.Args[1]
+	switch command {
+	case "generate-key":
+		generateKey()
+	case "balance":
+		if len(os.Args) < 3 {
+			fmt.Println("Error: Please provide an address.")
+			printUsage()
+			return
+		}
+		getBalance(os.Args[2])
+	default:
+		fmt.Printf("Unknown command: %s\n", command)
+		printUsage()
+	}
+}
+
+func generateKey() {
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		panic(err)
+	}
+
+	fileName := "wallet.key"
+	if err := os.WriteFile(fileName, key.Bytes(), 0600); err != nil {
+		panic(fmt.Sprintf("Failed to save key to %s: %v", fileName, err))
+	}
+
+	fmt.Printf("Generated new key and saved to %s\n", fileName)
+	fmt.Printf("Your public address is: %s\n", key.PubKey().Address().String())
+}
+
+func getBalance(addr string) {
+	// Construct the JSON-RPC request payload
+	payload, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "nhb_getBalance",
+		"params":  []string{addr},
+	})
+
+	// Send the request to the node's RPC server
+	resp, err := http.Post(rpcEndpoint, "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		fmt.Printf("Error: Failed to connect to the node at %s. Is it running?\n", rpcEndpoint)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Decode the response
+	var rpcResp struct {
+		Result types.Account `json:"result"`
+		Error  string        `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		fmt.Println("Error: Failed to decode response from node.")
+		return
+	}
+
+	if rpcResp.Error != "" {
+		fmt.Printf("Error from node: %s\n", rpcResp.Error)
+		return
+	}
+
+	// Print the results
+	fmt.Printf("Balance for: %s\n", addr)
+	fmt.Printf("  Username: %s\n", rpcResp.Result.Username)
+	fmt.Printf("  NHBCoin:  %s\n", rpcResp.Result.BalanceNHB.String())
+	fmt.Printf("  ZapNHB:   %s\n", rpcResp.Result.BalanceZNHB.String())
+	fmt.Printf("  Nonce:    %d\n", rpcResp.Result.Nonce)
+}
+
+func printUsage() {
+	fmt.Println("Usage: nhb-cli <command> [arguments]")
+	fmt.Println("Commands:")
+	fmt.Println("  generate-key          - Generates a new private key and saves it to wallet.key")
+	fmt.Println("  balance <address>     - Checks the balance of an address")
+}
+## Test Your New CLI
+Start your node in one terminal. It needs to be running in the background.
+
+Bash
+
+go run cmd/nhb/main.go
+In a second terminal, use your new CLI.
+
+First, generate a wallet:
+
+Bash
+
+go run cmd/nhb-cli/main.go generate-key
+This will create a wallet.key file and print your public address.
+
+Second, check its balance: (Copy the address that was just printed)
+
+Bash
+
+go run cmd/nhb-cli/main.go balance nhb1...
+Expected Output:
+
+Plaintext
+
+Balance for: nhb1...
+  Username:
+  NHBCoin:  0
+  ZapNHB:   0
+  Nonce:    0
+This is correct, as this new account has never been used. You have successfully built an interactive CLI for your L1. The next step is to add the send command to it.
+
+
+
+
+
+go run cmd/nhb-cli/main.go generate-key
+go run cmd/nhb-cli/main.go balance <the-address-that-was-just-printed>

@@ -1,0 +1,21 @@
+# Treat all files as text and normalize to LF in repo
+* text=auto eol=lf
+
+# Be explicit for common text/code
+*.go    text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.ps1   text eol=lf
+
+# Keep binaries as-is
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.a     binary
