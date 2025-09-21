@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -24,6 +25,9 @@ import (
 )
 
 const MINIMUM_STAKE = 1000
+
+// Privileged arbitrator address (replace with multisig in production).
+var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
 
 type StateProcessor struct {
 	Trie           *trie.Trie
@@ -97,7 +101,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		toAddrPtr, toAcc = &ta, taAcc
 	}
 
-	// 2) Build contexts + message (struct literal)
+	// 2) Build contexts + message (struct literal in v1.16)
 	blockCtx := gethvm.BlockContext{
 		Coinbase:    common.Address{},
 		BlockNumber: big.NewInt(0),
@@ -106,26 +110,25 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	}
 
 	msg := gethcore.Message{
-		From:                  fromAddr,
-		To:                    toAddrPtr,
-		Nonce:                 tx.Nonce,
-		Value:                 tx.Value,
-		GasLimit:              tx.GasLimit,
-		GasPrice:              tx.GasPrice,
-		GasFeeCap:             tx.GasPrice, // simple: reuse
-		GasTipCap:             tx.GasPrice, // simple: reuse
-		Data:                  tx.Data,
-		AccessList:            nil,
-		BlobGasFeeCap:         nil,
-		BlobHashes:            nil,
-		SetCodeAuthorizations: nil,
-		// NOTE: no SkipAccountChecks field in v1.16; do not set
+		From:          fromAddr,
+		To:            toAddrPtr,
+		Nonce:         tx.Nonce,
+		Value:         tx.Value,
+		GasLimit:      tx.GasLimit,
+		GasPrice:      tx.GasPrice,
+		GasFeeCap:     tx.GasPrice, // simple: reuse
+		GasTipCap:     tx.GasPrice, // simple: reuse
+		Data:          tx.Data,
+		AccessList:    nil,
+		BlobGasFeeCap: nil,
+		BlobHashes:    nil,
+		// NOTE: v1.16 has no SkipAccountChecks; do not set
 	}
 	txCtx := gethcore.NewEVMTxContext(&msg) // pointer expected
 
-	// 3) NewEVM uses 4-arg signature; set tx context separately
+	// 3) NewEVM signature for v1.16, then set tx context
 	evm := gethvm.NewEVM(blockCtx, statedb, params.TestChainConfig, gethvm.Config{
-		NoBaseFee: true, // disable basefee for this environment
+		NoBaseFee: true, // disable basefee in this environment
 	})
 	evm.SetTxContext(txCtx)
 
@@ -166,7 +169,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	return nil
 }
 
-// --- Native handlers (same semantics as before) ---
+// --- Native handlers (original semantics + new dispute flow) ---
 
 func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 	sender, err := tx.From()
@@ -197,6 +200,16 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 		return sp.applyUnstake(tx)
 	case types.TxTypeHeartbeat:
 		return sp.applyHeartbeat(tx)
+
+	// --- NEW DISPUTE RESOLUTION CASES ---
+	case types.TxTypeLockEscrow:
+		return sp.applyLockEscrow(tx)
+	case types.TxTypeDisputeEscrow:
+		return sp.applyDisputeEscrow(tx)
+	case types.TxTypeArbitrateRelease:
+		return sp.applyArbitrate(tx, true)
+	case types.TxTypeArbitrateRefund:
+		return sp.applyArbitrate(tx, false)
 	}
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }
@@ -224,37 +237,63 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction) error {
 }
 
 func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
-	from, _ := tx.From()
+	from, _ := tx.From() // This is the person creating the escrow (always the seller with the asset)
+
+	// The data payload can now optionally contain a pre-defined buyer
 	var escrowData struct {
-		Seller []byte
-		Amount *big.Int
+		Seller []byte   `json:"seller"`
+		Amount *big.Int `json:"amount"`
+		Buyer  []byte   `json:"buyer,omitempty"` // Optional: The buyer accepting a "Want to Buy" offer
 	}
 	if err := json.Unmarshal(tx.Data, &escrowData); err != nil {
 		return fmt.Errorf("invalid escrow data: %w", err)
 	}
 	if escrowData.Amount == nil || escrowData.Amount.Cmp(big.NewInt(0)) <= 0 {
-		return fmt.Errorf("amount must be positive")
+		return fmt.Errorf("escrow amount must be positive")
 	}
-	buyerAccount, _ := sp.getAccount(from)
-	if buyerAccount.BalanceNHB.Cmp(escrowData.Amount) < 0 {
-		return fmt.Errorf("insufficient funds")
+
+	sellerAccount, _ := sp.getAccount(from)
+	if sellerAccount.BalanceNHB.Cmp(escrowData.Amount) < 0 {
+		return fmt.Errorf("insufficient funds to create escrow")
 	}
-	buyerAccount.BalanceNHB.Sub(buyerAccount.BalanceNHB, escrowData.Amount)
-	buyerAccount.Nonce++
+
+	// Debit the seller's account and increment their nonce
+	sellerAccount.BalanceNHB.Sub(sellerAccount.BalanceNHB, escrowData.Amount)
+	sellerAccount.Nonce++
+
 	escrowID, _ := tx.Hash()
 	newEscrow := escrow.Escrow{
 		ID:     escrowID,
-		Buyer:  from,
-		Seller: escrowData.Seller,
+		Seller: from, // The creator of the tx is always the seller with the asset
 		Amount: escrowData.Amount,
-		Status: escrow.StatusOpen,
 	}
-	sp.setAccount(from, buyerAccount)
-	sp.setEscrow(escrowID, &newEscrow)
-	fmt.Printf("Escrow created: %s -> %s, Amount: %s, ID: %x\n",
-		crypto.NewAddress(crypto.NHBPrefix, from).String(),
-		crypto.NewAddress(crypto.NHBPrefix, escrowData.Seller).String(),
-		newEscrow.Amount.String(), newEscrow.ID)
+
+	// --- THE SYMMETRICAL ESCROW UPGRADE ---
+	if escrowData.Buyer != nil {
+		// This is a "Buy Offer" being accepted. The escrow starts locked.
+		newEscrow.Buyer = escrowData.Buyer
+		newEscrow.Status = escrow.StatusInProgress
+		fmt.Printf("Symmetrical Escrow Created (In Progress): Seller %s locks funds for Buyer %s, Amount: %s, ID: %x\n",
+			crypto.NewAddress(crypto.NHBPrefix, from).String(),
+			crypto.NewAddress(crypto.NHBPrefix, escrowData.Buyer).String(),
+			newEscrow.Amount.String(), newEscrow.ID)
+	} else {
+		// This is a standard "Sell Offer". The escrow starts open, and the seller is the initial "buyer".
+		newEscrow.Buyer = from
+		newEscrow.Status = escrow.StatusOpen
+		fmt.Printf("Standard Escrow Created (Open): Seller %s lists %s NHBCoin, ID: %x\n",
+			crypto.NewAddress(crypto.NHBPrefix, from).String(),
+			newEscrow.Amount.String(), newEscrow.ID)
+	}
+
+	// Save the final state to the trie
+	if err := sp.setAccount(from, sellerAccount); err != nil {
+		return err
+	}
+	if err := sp.setEscrow(escrowID, &newEscrow); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -307,6 +346,112 @@ func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction) error {
 	sp.setAccount(sender, senderAccount)
 	fmt.Printf("Escrow refunded: Funds (%s NHB) to buyer %s.\n",
 		e.Amount.String(), crypto.NewAddress(crypto.NHBPrefix, e.Buyer).String())
+	return nil
+}
+
+// --- NEW: Lock -> Dispute -> Arbitrate flow ---
+
+func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction) error {
+	sender, _ := tx.From() // prospective buyer engaging the escrow
+	escrowID := tx.Data
+	e, err := sp.getEscrow(escrowID)
+	if err != nil {
+		return err
+	}
+
+	if e.Status != escrow.StatusOpen {
+		return fmt.Errorf("escrow is not open to be locked")
+	}
+
+	e.Buyer = sender
+	e.Status = escrow.StatusInProgress
+
+	senderAccount, _ := sp.getAccount(sender)
+	senderAccount.Nonce++
+
+	if err := sp.setEscrow(escrowID, e); err != nil {
+		return err
+	}
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
+
+	fmt.Printf("Escrow Locked: Escrow %x is now in progress for buyer %s.\n",
+		escrowID, crypto.NewAddress(crypto.NHBPrefix, sender).String())
+	return nil
+}
+
+func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction) error {
+	sender, _ := tx.From()
+	escrowID := tx.Data
+	e, err := sp.getEscrow(escrowID)
+	if err != nil {
+		return err
+	}
+
+	if e.Status != escrow.StatusInProgress {
+		return fmt.Errorf("only an in-progress escrow can be disputed")
+	}
+	if !bytes.Equal(sender, e.Buyer) {
+		return fmt.Errorf("only the buyer can dispute an escrow")
+	}
+
+	e.Status = escrow.StatusDisputed
+
+	senderAccount, _ := sp.getAccount(sender)
+	senderAccount.Nonce++
+
+	if err := sp.setEscrow(escrowID, e); err != nil {
+		return err
+	}
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
+
+	fmt.Printf("Escrow Disputed: Escrow %x has been flagged for arbitration.\n", escrowID)
+	return nil
+}
+
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, releaseToBuyer bool) error {
+	sender, _ := tx.From()
+
+	// Only the privileged arbitrator can execute
+	if !bytes.Equal(sender, ARBITRATOR_ADDRESS.Bytes()) {
+		return fmt.Errorf("sender is not the authorized arbitrator")
+	}
+
+	escrowID := tx.Data
+	e, err := sp.getEscrow(escrowID)
+	if err != nil {
+		return err
+	}
+
+	if e.Status != escrow.StatusDisputed {
+		return fmt.Errorf("escrow is not in a disputed state")
+	}
+
+	if releaseToBuyer {
+		e.Status = escrow.StatusReleased
+		buyerAccount, _ := sp.getAccount(e.Buyer)
+		buyerAccount.BalanceNHB.Add(buyerAccount.BalanceNHB, e.Amount)
+		if err := sp.setAccount(e.Buyer, buyerAccount); err != nil {
+			return err
+		}
+		fmt.Printf("Arbitration complete: Escrow %x released to buyer.\n", escrowID)
+	} else {
+		e.Status = escrow.StatusRefunded
+		sellerAccount, _ := sp.getAccount(e.Seller)
+		sellerAccount.BalanceNHB.Add(sellerAccount.BalanceNHB, e.Amount)
+		if err := sp.setAccount(e.Seller, sellerAccount); err != nil {
+			return err
+		}
+		fmt.Printf("Arbitration complete: Escrow %x refunded to seller.\n", escrowID)
+	}
+
+	// Save final escrow state
+	if err := sp.setEscrow(escrowID, e); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -388,6 +533,7 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 	}
 	return account, nil
 }
+
 func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error {
 	key := ethcrypto.Keccak256(addr)
 	encoded, err := rlp.EncodeToBytes(account)
@@ -396,6 +542,7 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	}
 	return sp.Trie.Put(key, encoded)
 }
+
 func (sp *StateProcessor) setEscrow(id []byte, e *escrow.Escrow) error {
 	key := append([]byte("escrow-"), id...)
 	encoded, err := rlp.EncodeToBytes(e)
@@ -404,6 +551,7 @@ func (sp *StateProcessor) setEscrow(id []byte, e *escrow.Escrow) error {
 	}
 	return sp.Trie.Put(key, encoded)
 }
+
 func (sp *StateProcessor) getEscrow(id []byte) (*escrow.Escrow, error) {
 	key := append([]byte("escrow-"), id...)
 	data, err := sp.Trie.Get(key)
@@ -416,9 +564,8 @@ func (sp *StateProcessor) getEscrow(id []byte) (*escrow.Escrow, error) {
 	}
 	return e, nil
 }
-func (sp *StateProcessor) GetAccount(addr []byte) (*types.Account, error) {
-	return sp.getAccount(addr)
-}
+
+func (sp *StateProcessor) GetAccount(addr []byte) (*types.Account, error) { return sp.getAccount(addr) }
 func (sp *StateProcessor) IsValidator(addr []byte) bool {
 	_, ok := sp.ValidatorSet[string(addr)]
 	return ok

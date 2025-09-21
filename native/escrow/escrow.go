@@ -6,10 +6,11 @@ import "math/big"
 type Status byte
 
 const (
-	StatusOpen     Status = 0x01 // Escrow is funded and awaiting action
-	StatusReleased Status = 0x02 // Funds have been released to the seller
-	StatusRefunded Status = 0x03 // Funds have been returned to the buyer
-	StatusDisputed Status = 0x04 // A dispute has been raised
+	StatusOpen       Status = 0x01 // Escrow is listed and available
+	StatusInProgress Status = 0x02 // NEW: A buyer has committed, locking the escrow
+	StatusReleased   Status = 0x03 // Funds released to seller
+	StatusRefunded   Status = 0x04 // Funds returned to seller (if listing is cancelled)
+	StatusDisputed   Status = 0x05 // NEW: A dispute has been raised by the buyer
 )
 
 // Escrow holds the state of a single P2P escrow transaction.
