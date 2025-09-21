@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big" // NEW: Import for balance types
+	"math/big"
 	"net/http"
 	"nhbchain/core"
 	"nhbchain/core/types"
-	"nhbchain/crypto" // NEW: Import for decoding addresses
+	"nhbchain/crypto"
 )
 
 // Server is the JSON-RPC server that exposes methods to interact with the node.
@@ -35,20 +35,22 @@ type RPCRequest struct {
 	ID     int               `json:"id"`
 }
 
-// NEW: A generic structure for a JSON-RPC response.
+// A generic structure for a JSON-RPC response.
 type RPCResponse struct {
 	ID     int         `json:"id"`
 	Result interface{} `json:"result,omitempty"`
 	Error  string      `json:"error,omitempty"`
 }
 
-// NEW: The specific structure for a getBalance response.
+// UPDATED: The response structure now includes all on-chain account data.
 type BalanceResponse struct {
-	Address     string   `json:"address"`
-	BalanceNHB  *big.Int `json:"balanceNHB"`
-	BalanceZNHB *big.Int `json:"balanceZNHB"`
-	Username    string   `json:"username"`
-	Nonce       uint64   `json:"nonce"`
+	Address         string   `json:"address"`
+	BalanceNHB      *big.Int `json:"balanceNHB"`
+	BalanceZNHB     *big.Int `json:"balanceZNHB"`
+	Stake           *big.Int `json:"stake"` // NEW: The user's staked balance
+	Username        string   `json:"username"`
+	Nonce           uint64   `json:"nonce"`
+	EngagementScore uint64   `json:"engagementScore"` // NEW: The user's engagement score
 }
 
 // handle is the main request handler.
@@ -66,9 +68,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.node.AddTransaction(&tx)
-		json.NewEncoder(w).Encode(RPCResponse{ID: req.ID, Result: "Transaction received"})
+		json.NewEncoder(w).Encode(RPCResponse{ID: req.ID, Result: "Transaction received by node."})
 
-	case "nhb_getBalance": // NEW: Handle balance requests
+	case "nhb_getBalance":
 		var addrStr string
 		if err := json.Unmarshal(req.Params[0], &addrStr); err != nil {
 			json.NewEncoder(w).Encode(RPCResponse{ID: req.ID, Error: "invalid address parameter"})
@@ -87,12 +89,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// UPDATED: The response object is now populated with the complete account state.
 		resp := BalanceResponse{
-			Address:     addrStr,
-			BalanceNHB:  account.BalanceNHB,
-			BalanceZNHB: account.BalanceZNHB,
-			Username:    account.Username,
-			Nonce:       account.Nonce,
+			Address:         addrStr,
+			BalanceNHB:      account.BalanceNHB,
+			BalanceZNHB:     account.BalanceZNHB,
+			Stake:           account.Stake,
+			Username:        account.Username,
+			Nonce:           account.Nonce,
+			EngagementScore: account.EngagementScore,
 		}
 		json.NewEncoder(w).Encode(RPCResponse{ID: req.ID, Result: resp})
 

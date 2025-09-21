@@ -34,6 +34,13 @@ func main() {
 			return
 		}
 		getBalance(os.Args[2])
+	case "claim-username": // NEW: Handle the new command
+		if len(os.Args) < 4 {
+			fmt.Println("Error: Please provide a username and a key file.")
+			printUsage()
+			return
+		}
+		claimUsername(os.Args[2], os.Args[3])
 	case "stake": // NEW: Handle the stake command
 		if len(os.Args) < 4 {
 			fmt.Println("Error: Please provide an amount and a key file.")
@@ -200,6 +207,40 @@ func getBalance(addr string) {
 	fmt.Printf("  Nonce:    %d\n", account.Nonce)
 }
 
+func claimUsername(username string, keyFile string) {
+	privKey, err := loadPrivateKey(keyFile)
+	if err != nil {
+		fmt.Printf("Error loading private key: %v\n", err)
+		return
+	}
+	pubAddr := privKey.PubKey().Address().String()
+
+	account, err := fetchAccount(pubAddr)
+	if err != nil {
+		fmt.Printf("Error fetching account details: %v\n", err)
+		return
+	}
+
+	// Construct the native TxTypeRegisterIdentity transaction
+	tx := types.Transaction{
+		Type:  types.TxTypeRegisterIdentity, // Type 2
+		Nonce: account.Nonce,
+		// The username is passed in the Data field as a byte slice
+		Data:  []byte(username),
+		Value: big.NewInt(0), // This transaction transfers no NHBCoin
+		// Gas can be added here if needed by your L1's fee model for native txs
+	}
+	tx.Sign(privKey.PrivateKey)
+
+	if err := sendTransaction(&tx); err != nil {
+		fmt.Printf("Error sending claim-username transaction: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Successfully sent transaction to claim username '%s'.\n", username)
+	fmt.Println("Check the node logs for confirmation and wait for the next block.")
+}
+
 // --- RPC HELPER FUNCTIONS ---
 
 func fetchAccount(addr string) (*types.Account, error) {
@@ -298,6 +339,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  generate-key                      - Generates a new key and saves to wallet.key")
 	fmt.Println("  balance <address>                 - Checks the balance and stake of an address")
+	fmt.Println("  claim-username <username> <key_file>     - Claims a unique username for your wallet") // NEW LINE
 	fmt.Println("  stake <amount> <path_to_key_file> - Stakes a specified amount of ZapNHB")
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
