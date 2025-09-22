@@ -118,3 +118,8 @@ func (n *Node) GetHeight() uint64                    { return n.chain.GetHeight(
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
 }
+
+// Chain returns a reference to the node's blockchain object.
+func (n *Node) Chain() *Blockchain { // ✅ same package, no prefix
+    return n.chain
+}

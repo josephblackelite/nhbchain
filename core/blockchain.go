@@ -135,3 +135,16 @@ func createGenesisBlock() *types.Block {
 	}
 	return types.NewBlock(header, []*types.Transaction{})
 }
+
+
+func (bc *Blockchain) CurrentHeader() *types.BlockHeader {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	// A more robust implementation would handle the case where tip is nil
+	block, _ := bc.GetBlockByHash(bc.tip)
+	if block != nil {
+		return block.Header
+	}
+	return nil
+}
