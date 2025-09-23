@@ -1,3 +1,4 @@
+// core/genesis/loader.go
 package genesis
 
 import (
@@ -41,6 +42,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		TxRoot:    gethtypes.EmptyRootHash.Bytes(),
 	}
 
+	// ---- Real state execution (deterministic) ----
 	stateTrie, err := trie.NewTrie(db, nil)
 	if err != nil {
 		return nil, fmt.Errorf("init state trie: %w", err)
@@ -48,6 +50,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 	manager := state.NewManager(stateTrie)
 	parentRoot := stateTrie.Root()
 
+	// 1) Tokens (sorted)
 	tokens := append([]NativeTokenSpec(nil), spec.NativeTokens...)
 	sort.Slice(tokens, func(i, j int) bool {
 		return strings.ToUpper(tokens[i].Symbol) < strings.ToUpper(tokens[j].Symbol)
@@ -73,6 +76,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		}
 	}
 
+	// 2) Allocations (outer: addresses sorted; inner: symbols sorted)
 	allocAddresses := make([]string, 0, len(spec.Alloc))
 	for addr := range spec.Alloc {
 		allocAddresses = append(allocAddresses, addr)
@@ -125,6 +129,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		}
 	}
 
+	// 3) Roles (role name sorted; addresses sorted)
 	roleNames := make([]string, 0, len(spec.Roles))
 	for role := range spec.Roles {
 		roleNames = append(roleNames, role)
@@ -144,6 +149,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		}
 	}
 
+	// 4) Validators (sorted by address)
 	validators := append([]ValidatorSpec(nil), spec.Validators...)
 	sort.Slice(validators, func(i, j int) bool {
 		return strings.Compare(validators[i].Address, validators[j].Address) < 0
@@ -184,12 +190,12 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		return nil, fmt.Errorf("store consensus validators: %w", err)
 	}
 
+	// 5) Commit and set StateRoot
 	newRoot, err := stateTrie.Commit(parentRoot, 0)
 	if err != nil {
 		return nil, fmt.Errorf("commit state: %w", err)
 	}
 	header.StateRoot = newRoot.Bytes()
 
-	block := types.NewBlock(header, nil)
-	return block, nil
+	return types.NewBlock(header, nil), nil
 }

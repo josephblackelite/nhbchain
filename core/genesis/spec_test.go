@@ -1,3 +1,4 @@
+// core/genesis/spec_test.go
 package genesis
 
 import (
@@ -23,7 +24,9 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	addr1 := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
 	addr2 := crypto.NewAddress(crypto.ZNHBPrefix, bytes.Repeat([]byte{0x02}, 20)).String()
 
+	chainID := uint64(42)
 	paused := true
+
 	spec := GenesisSpec{
 		GenesisTime: "2024-01-01T00:00:00Z",
 		NativeTokens: []NativeTokenSpec{
@@ -60,6 +63,7 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 		Roles: map[string][]string{
 			"role.nhb": {addr1, addr2},
 		},
+		ChainID: &chainID,
 	}
 
 	dir := t.TempDir()
@@ -85,6 +89,10 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	}
 	if len(loaded.Validators) != len(spec.Validators) {
 		t.Fatalf("unexpected validator count: got %d want %d", len(loaded.Validators), len(spec.Validators))
+	}
+
+	if id, ok := loaded.ChainIDValue(); !ok || id != chainID {
+		t.Fatalf("unexpected chain id: got %d (ok=%t) want %d", id, ok, chainID)
 	}
 
 	expectedTimestamp, err := time.Parse(time.RFC3339, spec.GenesisTime)
@@ -131,7 +139,7 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	}
 	sort.Strings(tokens)
 	expectedTokens := []string{"NHB", "ZNHB"}
-	if len(tokens) != len(expectedTokens) {
+	if len(tokens) != len(expectedTokens)) {
 		t.Fatalf("unexpected token list size: got %d want %d", len(tokens), len(expectedTokens))
 	}
 	for i, symbol := range expectedTokens {
