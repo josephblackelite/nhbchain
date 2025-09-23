@@ -2,16 +2,19 @@ package bft
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"nhbchain/crypto"
-	"nhbchain/p2p"
+	"sort"
 	"sync"
 	"time"
 
-	// THE FIX IS HERE: Import the ethereum crypto library for signing functions
+	"nhbchain/crypto"
+	"nhbchain/p2p"
+
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -30,20 +33,37 @@ type Engine struct {
 	node         NodeInterface
 
 	currentState    State
-	activeProposal  *Proposal
-	receivedVotes   map[VoteType]map[string]*Vote
+	activeProposal  *SignedProposal
+	receivedVotes   map[VoteType]map[string]*SignedVote
 	committedBlocks map[uint64]bool
+
+	proposalCh chan *SignedProposal
+	voteCh     chan *SignedVote
+
+	proposalTimeout  time.Duration
+	prevoteTimeout   time.Duration
+	precommitTimeout time.Duration
+	commitTimeout    time.Duration
+
+	prevoteSent   bool
+	precommitSent bool
 }
 
 func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broadcaster) *Engine {
 	return &Engine{
-		node:            node,
-		privKey:         key,
-		validatorSet:    node.GetValidatorSet(),
-		broadcaster:     broadcaster,
-		currentState:    State{Height: 1, Round: 0},
-		receivedVotes:   make(map[VoteType]map[string]*Vote),
-		committedBlocks: make(map[uint64]bool),
+		node:             node,
+		privKey:          key,
+		validatorSet:     node.GetValidatorSet(),
+		broadcaster:      broadcaster,
+		currentState:     State{Height: 1, Round: 0},
+		receivedVotes:    make(map[VoteType]map[string]*SignedVote),
+		committedBlocks:  make(map[uint64]bool),
+		proposalCh:       make(chan *SignedProposal, 16),
+		voteCh:           make(chan *SignedVote, 128),
+		proposalTimeout:  2 * time.Second,
+		prevoteTimeout:   2 * time.Second,
+		precommitTimeout: 2 * time.Second,
+		commitTimeout:    4 * time.Second,
 	}
 }
 
@@ -51,125 +71,403 @@ func (e *Engine) Start() {
 	fmt.Println("BFT Consensus Engine Started.")
 	time.Sleep(5 * time.Second)
 	for {
-		e.startNewRound()
-		proposer := e.selectProposer(e.currentState.Round)
-		myAddr := e.privKey.PubKey().Address().Bytes()
-		if bytes.Equal(proposer, myAddr) {
-			go e.propose()
+		e.runRound()
+	}
+}
+
+func (e *Engine) runRound() {
+	e.startNewRound()
+
+	e.mu.RLock()
+	height := e.currentState.Height
+	round := e.currentState.Round
+	e.mu.RUnlock()
+
+	proposer := e.selectProposer(round)
+	myAddr := e.privKey.PubKey().Address().Bytes()
+	if bytes.Equal(proposer, myAddr) {
+		if err := e.propose(); err != nil {
+			fmt.Printf("failed to propose block: %v\n", err)
+		} else {
+			e.prevote()
 		}
-		<-time.After(2 * time.Second)
-		go e.prevote()
-		<-time.After(2 * time.Second)
-		go e.precommit()
-		<-time.After(2 * time.Second)
-		go e.commit()
-		<-time.After(4 * time.Second)
+	}
+
+	proposalTimer := time.NewTimer(e.proposalTimeout)
+	prevoteTimer := time.NewTimer(e.prevoteTimeout)
+	precommitTimer := time.NewTimer(e.precommitTimeout)
+	commitTimer := time.NewTimer(e.commitTimeout)
+	defer func() {
+		stopTimer(proposalTimer)
+		stopTimer(prevoteTimer)
+		stopTimer(precommitTimer)
+		stopTimer(commitTimer)
+	}()
+
+	for {
+		select {
+		case <-proposalTimer.C:
+			e.prevote()
+		case <-prevoteTimer.C:
+			e.precommit()
+		case <-precommitTimer.C:
+			if e.commit() {
+				return
+			}
+		case <-commitTimer.C:
+			return
+		case sp := <-e.proposalCh:
+			if sp == nil || sp.Proposal == nil || sp.Proposal.Block == nil || sp.Proposal.Block.Header == nil {
+				continue
+			}
+			if sp.Proposal.Block.Header.Height != height || sp.Proposal.Round != round {
+				continue
+			}
+			if e.acceptProposal(sp) {
+				fmt.Printf("Received block proposal for height %d from %x\n", sp.Proposal.Block.Header.Height, sp.Proposer)
+				e.prevote()
+			}
+		case sv := <-e.voteCh:
+			if sv == nil || sv.Vote == nil {
+				continue
+			}
+			if sv.Vote.Height != height || sv.Vote.Round != round {
+				continue
+			}
+			added, reachedPrevote, reachedPrecommit := e.addVoteIfRelevant(sv)
+			if added {
+				fmt.Printf("Received %s vote for block %x from %x\n", sv.Vote.Type, sv.Vote.BlockHash, sv.Validator)
+			}
+			if reachedPrevote {
+				e.precommit()
+			}
+			if reachedPrecommit && e.commit() {
+				return
+			}
+		}
+
+		e.mu.RLock()
+		committed := e.committedBlocks[height]
+		e.mu.RUnlock()
+		if committed {
+			return
+		}
 	}
 }
 
-func (e *Engine) HandleProposal(p *Proposal) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.activeProposal == nil {
-		fmt.Printf("Received block proposal for height %d from %x\n", p.Block.Header.Height, p.Proposer)
-		e.activeProposal = p
+func (e *Engine) HandleProposal(p *SignedProposal) error {
+	if err := e.verifySignedProposal(p); err != nil {
+		return err
 	}
-	return nil
+	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
+		return fmt.Errorf("invalid proposal payload")
+	}
+	if _, ok := e.validatorSet(string(p.Proposer)); !ok {
+		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
+	}
+
+	e.mu.RLock()
+	height := e.currentState.Height
+	round := e.currentState.Round
+	e.mu.RUnlock()
+
+	if p.Proposal.Block.Header.Height != height || p.Proposal.Round < round {
+		return nil
+	}
+
+	select {
+	case e.proposalCh <- p:
+		return nil
+	default:
+		return fmt.Errorf("proposal queue full")
+	}
 }
 
-func (e *Engine) HandleVote(v *Vote) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if _, ok := e.receivedVotes[v.Type]; !ok {
-		e.receivedVotes[v.Type] = make(map[string]*Vote)
+func (e *Engine) HandleVote(v *SignedVote) error {
+	if err := e.verifySignedVote(v); err != nil {
+		return err
 	}
-	fmt.Printf("Received %s vote for block %x from %x\n", v.Type, v.BlockHash, v.Validator)
-	e.receivedVotes[v.Type][string(v.Validator)] = v
-	return nil
+	if v == nil || v.Vote == nil {
+		return fmt.Errorf("invalid vote payload")
+	}
+	if _, ok := e.validatorSet(string(v.Validator)); !ok {
+		return fmt.Errorf("vote from non-validator %x", v.Validator)
+	}
+
+	e.mu.RLock()
+	height := e.currentState.Height
+	round := e.currentState.Round
+	e.mu.RUnlock()
+
+	if v.Vote.Height != height || v.Vote.Round < round {
+		return nil
+	}
+
+	select {
+	case e.voteCh <- v:
+		return nil
+	default:
+		return fmt.Errorf("vote queue full")
+	}
 }
 
-func (e *Engine) propose() {
+func (e *Engine) propose() error {
 	txs := e.node.GetMempool()
 	if len(txs) == 0 {
-		return
+		return fmt.Errorf("no transactions available for proposal")
 	}
+
 	block, err := e.node.CreateBlock(txs)
 	if err != nil {
-		fmt.Printf("failed to build block: %v\n", err)
-		return
+		return fmt.Errorf("failed to build block: %w", err)
 	}
-	proposal := &Proposal{Block: block, Round: e.currentState.Round, Proposer: e.privKey.PubKey().Address().Bytes()}
-	msgPayload, _ := json.Marshal(proposal)
-	msg := &p2p.Message{Type: p2p.MsgTypeProposal, Payload: msgPayload}
+
+	e.mu.RLock()
+	round := e.currentState.Round
+	e.mu.RUnlock()
+
+	proposal := &Proposal{Block: block, Round: round}
+	proposalHash := sha256.Sum256(proposal.bytes())
+	sig, err := ethcrypto.Sign(proposalHash[:], e.privKey.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to sign proposal: %w", err)
+	}
+
+	signedProposal := &SignedProposal{
+		Proposal:  proposal,
+		Proposer:  e.privKey.PubKey().Address().Bytes(),
+		Signature: &Signature{Scheme: SignatureSchemeSecp256k1, Signature: sig},
+	}
+
+	e.acceptProposal(signedProposal)
+
+	payload, err := json.Marshal(signedProposal)
+	if err != nil {
+		return fmt.Errorf("failed to marshal proposal: %w", err)
+	}
+	msg := &p2p.Message{Type: p2p.MsgTypeProposal, Payload: payload}
 	e.broadcaster.Broadcast(msg)
 	fmt.Println("PROPOSE: Broadcasting our new block proposal.")
+	return nil
 }
 
 func (e *Engine) prevote() {
-	e.mu.RLock()
-	if e.activeProposal == nil {
-		e.mu.RUnlock()
+	e.mu.Lock()
+	if e.prevoteSent || e.activeProposal == nil {
+		e.mu.Unlock()
 		return
 	}
-	blockHash, _ := e.activeProposal.Block.Header.Hash()
-	e.mu.RUnlock()
-	vote := e.createVote(Prevote, blockHash)
-	msgPayload, _ := json.Marshal(vote)
-	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: msgPayload}
-	e.broadcaster.Broadcast(msg)
+	blockHash, err := e.activeProposal.Proposal.Block.Header.Hash()
+	if err != nil {
+		e.mu.Unlock()
+		fmt.Printf("failed to hash block for prevote: %v\n", err)
+		return
+	}
+	round := e.currentState.Round
+	height := e.currentState.Height
+	e.prevoteSent = true
+	e.mu.Unlock()
+
+	vote, err := e.createVote(Prevote, blockHash, round, height)
+	if err != nil {
+		fmt.Printf("failed to create prevote: %v\n", err)
+		e.mu.Lock()
+		e.prevoteSent = false
+		e.mu.Unlock()
+		return
+	}
+
+	added, reachedPrevote, reachedPrecommit := e.addVoteIfRelevant(vote)
+	if added {
+		fmt.Printf("PREVOTE: Recorded our prevote for block %x\n", blockHash)
+	}
+
+	e.broadcastVote(vote)
 	fmt.Println("PREVOTE: Broadcasting our prevote.")
+
+	if reachedPrevote {
+		e.precommit()
+	}
+	if reachedPrecommit {
+		e.commit()
+	}
 }
 
 func (e *Engine) precommit() {
-	e.mu.RLock()
-	if e.activeProposal == nil {
-		e.mu.RUnlock()
+	e.mu.Lock()
+	if e.precommitSent || e.activeProposal == nil {
+		e.mu.Unlock()
 		return
 	}
 	if len(e.receivedVotes[Prevote]) < e.twoThirdsMajority() {
-		e.mu.RUnlock()
+		e.mu.Unlock()
 		return
 	}
-	blockHash, _ := e.activeProposal.Block.Header.Hash()
-	e.mu.RUnlock()
-	vote := e.createVote(Precommit, blockHash)
-	msgPayload, _ := json.Marshal(vote)
-	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: msgPayload}
-	e.broadcaster.Broadcast(msg)
+	blockHash, err := e.activeProposal.Proposal.Block.Header.Hash()
+	if err != nil {
+		e.mu.Unlock()
+		fmt.Printf("failed to hash block for precommit: %v\n", err)
+		return
+	}
+	round := e.currentState.Round
+	height := e.currentState.Height
+	e.precommitSent = true
+	e.mu.Unlock()
+
+	vote, err := e.createVote(Precommit, blockHash, round, height)
+	if err != nil {
+		fmt.Printf("failed to create precommit: %v\n", err)
+		e.mu.Lock()
+		e.precommitSent = false
+		e.mu.Unlock()
+		return
+	}
+
+	added, _, reachedPrecommit := e.addVoteIfRelevant(vote)
+	if added {
+		fmt.Printf("PRECOMMIT: Recorded our precommit for block %x\n", blockHash)
+	}
+
+	e.broadcastVote(vote)
 	fmt.Println("PRECOMMIT: Broadcasting our precommit.")
+
+	if reachedPrecommit {
+		e.commit()
+	}
 }
 
-func (e *Engine) commit() {
+func (e *Engine) commit() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.activeProposal == nil || e.committedBlocks[e.currentState.Height] {
-		return
+
+	if e.activeProposal == nil {
+		return false
+	}
+	if e.committedBlocks[e.currentState.Height] {
+		return true
 	}
 	if len(e.receivedVotes[Precommit]) < e.twoThirdsMajority() {
-		return
+		return false
 	}
-	fmt.Printf("COMMIT: Attempting to commit block %d.\n", e.activeProposal.Block.Header.Height)
-	if err := e.node.CommitBlock(e.activeProposal.Block); err != nil {
+
+	// Try to commit the block; on failure, broadcast prevote(nil) and reset.
+	block := e.activeProposal.Proposal.Block
+	fmt.Printf("COMMIT: Attempting to commit block %d.\n", block.Header.Height)
+	if err := e.node.CommitBlock(block); err != nil {
 		fmt.Printf("failed to commit block: %v\n", err)
-		e.broadcastPrevoteNilLocked(err)
-		e.resetProposalStateLocked()
-		return
+		e.broadcastPrevoteNilLocked(err) // assumes lock is held
+		e.resetProposalStateLocked()     // reset for next round
+		return false
 	}
-	fmt.Printf("COMMIT: Successfully committed block %d.\n", e.activeProposal.Block.Header.Height)
+	fmt.Printf("COMMIT: Successfully committed block %d.\n", block.Header.Height)
+
 	e.committedBlocks[e.currentState.Height] = true
 	e.currentState.Height++
 	e.currentState.Round = 0
+	e.activeProposal = nil
+	e.prevoteSent = false
+	e.precommitSent = false
+	e.validatorSet = e.node.GetValidatorSet()
+	return true
 }
 
+func (e *Engine) broadcastVote(vote *SignedVote) {
+	payload, err := json.Marshal(vote)
+	if err != nil {
+		fmt.Printf("failed to marshal vote: %v\n", err)
+		return
+	}
+	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: payload}
+	e.broadcaster.Broadcast(msg)
+}
+
+func (e *Engine) createVote(t VoteType, blockHash []byte, round int, height uint64) (*SignedVote, error) {
+	vote := &Vote{BlockHash: blockHash, Round: round, Type: t, Height: height}
+	voteHash := sha256.Sum256(vote.bytes())
+	sig, err := ethcrypto.Sign(voteHash[:], e.privKey.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign vote: %w", err)
+	}
+	return &SignedVote{
+		Vote:      vote,
+		Validator: e.privKey.PubKey().Address().Bytes(),
+		Signature: &Signature{Scheme: SignatureSchemeSecp256k1, Signature: sig},
+	}, nil
+}
+
+func (e *Engine) acceptProposal(p *SignedProposal) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.activeProposal != nil {
+		return false
+	}
+	e.activeProposal = p
+	return true
+}
+
+func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.activeProposal == nil || v == nil || v.Vote == nil {
+		return false, false, false
+	}
+
+	expectedHash, err := e.activeProposal.Proposal.Block.Header.Hash()
+	if err != nil {
+		fmt.Printf("failed to hash active proposal: %v\n", err)
+		return false, false, false
+	}
+	if !bytes.Equal(expectedHash, v.Vote.BlockHash) {
+		return false, false, false
+	}
+
+	voteMap, ok := e.receivedVotes[v.Vote.Type]
+	if !ok {
+		voteMap = make(map[string]*SignedVote)
+		e.receivedVotes[v.Vote.Type] = voteMap
+	}
+	key := string(v.Validator)
+	if _, exists := voteMap[key]; exists {
+		return false, len(e.receivedVotes[Prevote]) >= e.twoThirdsMajority(), len(e.receivedVotes[Precommit]) >= e.twoThirdsMajority()
+	}
+	voteMap[key] = v
+
+	reachedPrevote := len(e.receivedVotes[Prevote]) >= e.twoThirdsMajority()
+	reachedPrecommit := len(e.receivedVotes[Precommit]) >= e.twoThirdsMajority()
+	return true, reachedPrevote, reachedPrecommit
+}
+
+func stopTimer(t *time.Timer) {
+	if t == nil {
+		return
+	}
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// NOTE: called with e.mu **locked**
 func (e *Engine) broadcastPrevoteNilLocked(execErr error) {
 	if e.broadcaster == nil {
 		return
 	}
-	vote := e.createVote(Prevote, nil)
+	round := e.currentState.Round
+	height := e.currentState.Height
+
+	vote, err := e.createVote(Prevote, nil, round, height) // nil = vote for NIL
+	if err != nil {
+		fmt.Printf("failed to create prevote nil: %v\n", err)
+		return
+	}
+
 	if _, ok := e.receivedVotes[Prevote]; !ok {
-		e.receivedVotes[Prevote] = make(map[string]*Vote)
+		e.receivedVotes[Prevote] = make(map[string]*SignedVote)
 	}
 	e.receivedVotes[Prevote][string(vote.Validator)] = vote
+
 	payload, _ := json.Marshal(vote)
 	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: payload}
 	if err := e.broadcaster.Broadcast(msg); err != nil {
@@ -179,15 +477,21 @@ func (e *Engine) broadcastPrevoteNilLocked(execErr error) {
 	fmt.Printf("PREVOTE NIL: Broadcasting nil vote due to execution failure: %v\n", execErr)
 }
 
+// NOTE: called with e.mu **locked**
 func (e *Engine) resetProposalStateLocked() {
 	e.activeProposal = nil
-	e.receivedVotes[Prevote] = make(map[string]*Vote)
-	e.receivedVotes[Precommit] = make(map[string]*Vote)
+	e.prevoteSent = false
+	e.precommitSent = false
+	e.receivedVotes = map[VoteType]map[string]*SignedVote{
+		Prevote:   make(map[string]*SignedVote),
+		Precommit: make(map[string]*SignedVote),
+	}
 }
 
 func (e *Engine) startNewRound() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.committedBlocks[e.currentState.Height] {
 		e.currentState.Height++
 		e.currentState.Round = 0
@@ -195,75 +499,136 @@ func (e *Engine) startNewRound() {
 		e.currentState.Round++
 	}
 	e.activeProposal = nil
-	e.receivedVotes[Prevote] = make(map[string]*Vote)
-	e.receivedVotes[Precommit] = make(map[string]*Vote)
+	e.prevoteSent = false
+	e.precommitSent = false
+	e.receivedVotes = map[VoteType]map[string]*SignedVote{
+		Prevote:   make(map[string]*SignedVote),
+		Precommit: make(map[string]*SignedVote),
+	}
+	e.validatorSet = e.node.GetValidatorSet()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
 }
 
 func (e *Engine) selectProposer(round int) []byte {
-	var validators [][]byte
-	var totalPower = big.NewInt(0)
-	weights := make(map[string]*big.Int)
-
-	// Step 1: Calculate the "Power" (total weight) of each validator.
+	keys := make([]string, 0, len(e.validatorSet))
 	for addrStr := range e.validatorSet {
+		keys = append(keys, addrStr)
+	}
+	sort.Slice(keys, func(i, j int) bool { return bytes.Compare([]byte(keys[i]), []byte(keys[j])) < 0 })
+
+	var (
+		validators [][]byte
+		weights    []*big.Int
+		totalPower = big.NewInt(0)
+	)
+
+	for _, addrStr := range keys {
 		addrBytes := []byte(addrStr)
 		account, err := e.node.GetAccount(addrBytes)
 		if err != nil {
-			continue // Skip validator if we can't get their account
+			continue
 		}
 
-		// Power = Stake + EngagementScore
-		// This balances capital investment with network activity.
 		stake := account.Stake
 		engagement := new(big.Int).SetUint64(account.EngagementScore)
 		power := new(big.Int).Add(stake, engagement)
 
-		weights[addrStr] = power
-		totalPower.Add(totalPower, power)
 		validators = append(validators, addrBytes)
+		weights = append(weights, power)
+		totalPower.Add(totalPower, power)
 	}
 
 	if len(validators) == 0 {
 		return nil
 	}
-	if totalPower.Cmp(big.NewInt(0)) == 0 {
-		// Fallback to round-robin if no validator has any power
+	if totalPower.Sign() == 0 {
 		return validators[round%len(validators)]
 	}
 
-	// Step 2: Pick a winning "ticket" based on the round number.
-	// This is a deterministic pseudo-random selection.
-	seed := new(big.Int).SetBytes(big.NewInt(int64(round)).Bytes())
-	pick := new(big.Int).Mod(seed, totalPower)
+	lastCommit := e.node.GetLastCommitHash()
+	roundBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(roundBytes, uint64(round))
+	seedInput := append(append([]byte{}, lastCommit...), roundBytes...)
+	seedHash := sha256.Sum256(seedInput)
+	pick := new(big.Int).Mod(new(big.Int).SetBytes(seedHash[:]), totalPower)
 
-	// Step 3: Find which validator holds the winning ticket.
-	for _, addrBytes := range validators {
-		addrStr := string(addrBytes)
-		power := weights[addrStr]
-		if pick.Cmp(power) < 0 {
-			// This validator is the winner
-			fmt.Printf("POTSO Proposer Selection: %s (Power: %s)\n", crypto.NewAddress(crypto.NHBPrefix, addrBytes).String(), power.String())
+	for i, addrBytes := range validators {
+		weight := weights[i]
+		if pick.Cmp(weight) < 0 {
+			fmt.Printf("Deterministic proposer selection: %s (Power: %s)\n", crypto.NewAddress(crypto.NHBPrefix, addrBytes).String(), weight.String())
 			return addrBytes
 		}
-		pick.Sub(pick, power)
+		pick.Sub(pick, weight)
 	}
 
-	// Should not be reached, but as a fallback:
 	return validators[0]
 }
 
-func (e *Engine) createVote(t VoteType, blockHash []byte) *Vote {
-	vote := &Vote{BlockHash: blockHash, Round: e.currentState.Round, Type: t, Validator: e.privKey.PubKey().Address().Bytes()}
-	voteHash := sha256.Sum256(vote.bytes())
-	// THE FIX IS HERE: Use ethcrypto.Sign to access the correct signing function.
-	sig, _ := ethcrypto.Sign(voteHash[:], e.privKey.PrivateKey)
-	vote.Signature = sig
-	return vote
+func (e *Engine) verifySignedProposal(p *SignedProposal) error {
+	if p == nil || p.Proposal == nil || p.Signature == nil {
+		return fmt.Errorf("invalid signed proposal")
+	}
+	if p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
+		return fmt.Errorf("proposal missing block header")
+	}
+	if !bytes.Equal(p.Proposer, p.Proposal.Block.Header.Validator) {
+		return fmt.Errorf("proposal proposer mismatch")
+	}
+
+	hash := sha256.Sum256(p.Proposal.bytes())
+	return verifySignature(hash[:], p.Signature, p.Proposer)
 }
 
-func (e *Engine) twoThirdsMajority() int { return (2*len(e.validatorSet))/3 + 1 }
-func (v *Vote) bytes() []byte            { b, _ := json.Marshal(v); return b }
+func (e *Engine) verifySignedVote(v *SignedVote) error {
+	if v == nil || v.Vote == nil || v.Signature == nil {
+		return fmt.Errorf("invalid signed vote")
+	}
+	hash := sha256.Sum256(v.Vote.bytes())
+	return verifySignature(hash[:], v.Signature, v.Validator)
+}
+
+func verifySignature(msgHash []byte, sig *Signature, expectedAddr []byte) error {
+	if sig == nil {
+		return fmt.Errorf("missing signature")
+	}
+	switch sig.Scheme {
+	case SignatureSchemeSecp256k1:
+		if len(sig.Signature) != 65 {
+			return fmt.Errorf("invalid secp256k1 signature length")
+		}
+		pubKey, err := ethcrypto.SigToPub(msgHash, sig.Signature)
+		if err != nil {
+			return fmt.Errorf("secp256k1 recover failed: %w", err)
+		}
+		recovered := ethcrypto.PubkeyToAddress(*pubKey).Bytes()
+		if !bytes.Equal(recovered, expectedAddr) {
+			return fmt.Errorf("signature address mismatch")
+		}
+		return nil
+	case SignatureSchemeEd25519:
+		if len(sig.PublicKey) != ed25519.PublicKeySize {
+			return fmt.Errorf("invalid ed25519 public key length")
+		}
+		if !ed25519.Verify(sig.PublicKey, msgHash, sig.Signature) {
+			return fmt.Errorf("invalid ed25519 signature")
+		}
+		recovered := ethcrypto.Keccak256(sig.PublicKey)[12:]
+		if !bytes.Equal(recovered, expectedAddr) {
+			return fmt.Errorf("signature address mismatch")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported signature scheme %q", sig.Scheme)
+	}
+}
+
+func (e *Engine) twoThirdsMajority() int {
+	if len(e.validatorSet) == 0 {
+		return 0
+	}
+	return (2*len(e.validatorSet))/3 + 1
+}
+
 func (vt VoteType) String() string {
 	if vt == Prevote {
 		return "Prevote"

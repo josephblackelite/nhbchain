@@ -28,10 +28,13 @@ type Node struct {
 func NewNode(db storage.Database, key *crypto.PrivateKey) (*Node, error) {
 	validatorAddr := key.PubKey().Address()
 	fmt.Printf("Starting node with validator address: %s\n", validatorAddr.String())
+
 	chain, err := NewBlockchain(db)
 	if err != nil {
 		return nil, err
 	}
+
+	// Load current state root from the chain tip (if any), then open the trie.
 	var root []byte
 	if header := chain.CurrentHeader(); header != nil {
 		root = header.StateRoot
@@ -74,16 +77,18 @@ func (n *Node) HandleMessage(msg *p2p.Message) error {
 			return err
 		}
 		n.AddTransaction(tx)
+
 	case p2p.MsgTypeProposal:
-		proposal := new(bft.Proposal)
+		proposal := new(bft.SignedProposal)
 		if err := json.Unmarshal(msg.Payload, proposal); err != nil {
 			return err
 		}
 		if n.bftEngine != nil {
 			return n.bftEngine.HandleProposal(proposal)
 		}
+
 	case p2p.MsgTypeVote:
-		vote := new(bft.Vote)
+		vote := new(bft.SignedVote)
 		if err := json.Unmarshal(msg.Payload, vote); err != nil {
 			return err
 		}
@@ -103,7 +108,7 @@ func (n *Node) AddTransaction(tx *types.Transaction) {
 func (n *Node) GetMempool() []*types.Transaction {
 	txs := make([]*types.Transaction, len(n.mempool))
 	copy(txs, n.mempool)
-	n.mempool = []*types.Transaction{}
+	n.mempool = []*types.Transaction{} // drain after read
 	return txs
 }
 
@@ -115,12 +120,14 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 		Validator: n.validatorKey.PubKey().Address().Bytes(),
 	}
 
+	// Compute TxRoot over ordered transactions
 	txRoot, err := ComputeTxRoot(txs)
 	if err != nil {
 		return nil, err
 	}
 	header.TxRoot = txRoot
 
+	// Execute against a copy of StateDB to derive StateRoot
 	stateCopy, err := n.state.Copy()
 	if err != nil {
 		return nil, err
@@ -137,8 +144,8 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 }
 
 func (n *Node) CommitBlock(b *types.Block) error {
+	// Remember parent root for rollback on any failure
 	parentRoot := n.state.CurrentRoot()
-
 	rollback := func() error {
 		if err := n.state.ResetToRoot(parentRoot); err != nil {
 			return fmt.Errorf("rollback to parent root: %w", err)
@@ -146,6 +153,7 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		return nil
 	}
 
+	// Verify TxRoot before executing
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {
 		return err
@@ -154,6 +162,7 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		return fmt.Errorf("tx root mismatch")
 	}
 
+	// Apply transactions; abort (and rollback) on the first failure
 	for i, tx := range b.Transactions {
 		if err := n.state.ApplyTransaction(tx); err != nil {
 			if rbErr := rollback(); rbErr != nil {
@@ -163,6 +172,7 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		}
 	}
 
+	// Check derived StateRoot matches header (if header set) or fill it
 	pendingRoot := n.state.PendingRoot()
 	pendingBytes := pendingRoot.Bytes()
 	if len(b.Header.StateRoot) == 0 {
@@ -174,6 +184,7 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		return fmt.Errorf("state root mismatch")
 	}
 
+	// Commit state at this height
 	committedRoot, err := n.state.Commit(b.Header.Height)
 	if err != nil {
 		if rbErr := rollback(); rbErr != nil {
@@ -186,6 +197,7 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		return fmt.Errorf("state root mismatch after commit")
 	}
 
+	// Persist block to the chain
 	if err := n.chain.AddBlock(b); err != nil {
 		return err
 	}
@@ -198,12 +210,19 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
 }
 
-// ChainID exposes the chain identifier derived from the genesis block.
+// --- Both accessors are needed by different subsystems ---
+
+// ChainID exposes the chain identifier (used by P2P authenticated handshake).
 func (n *Node) ChainID() uint64 {
 	return n.chain.ChainID()
 }
 
+// GetLastCommitHash returns a commit hash/seed (used by BFT proposer selection).
+func (n *Node) GetLastCommitHash() []byte {
+	return n.chain.Tip()
+}
+
 // Chain returns a reference to the node's blockchain object.
-func (n *Node) Chain() *Blockchain { // ✅ same package, no prefix
+func (n *Node) Chain() *Blockchain {
 	return n.chain
 }
