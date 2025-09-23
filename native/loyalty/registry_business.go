@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"nhbchain/core/state"
 )
 
 var zeroBusinessID BusinessID
@@ -27,10 +25,10 @@ func (r *Registry) RegisterBusiness(owner [20]byte, name string) (BusinessID, er
 		Name:      trimmed,
 		Merchants: make([][20]byte, 0),
 	}
-	if err := r.st.KVPut(state.LoyaltyBusinessKey(id), business); err != nil {
+	if err := r.st.KVPut(businessKey(id), business); err != nil {
 		return zeroBusinessID, err
 	}
-	if err := r.st.KVAppend(state.LoyaltyBusinessOwnerKey(owner[:]), id[:]); err != nil {
+	if err := r.st.KVAppend(businessOwnerKey(owner), id[:]); err != nil {
 		return zeroBusinessID, err
 	}
 	return id, nil
@@ -47,7 +45,7 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 	if business.Paymaster == newPaymaster {
 		return nil
 	}
-	ownerKey := state.LoyaltyOwnerPaymasterKey(business.Owner[:])
+	ownerKey := ownerPaymasterKey(business.Owner)
 	var active BusinessID
 	hasActive, err := r.st.KVGet(ownerKey, &active)
 	if err != nil {
@@ -71,7 +69,7 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 		}
 	}
 	business.Paymaster = newPaymaster
-	return r.st.KVPut(state.LoyaltyBusinessKey(business.ID), business)
+	return r.st.KVPut(businessKey(business.ID), business)
 }
 
 func (r *Registry) AddMerchantAddress(id BusinessID, addr [20]byte) error {
@@ -96,10 +94,10 @@ func (r *Registry) AddMerchantAddress(id BusinessID, addr [20]byte) error {
 			return bytes.Compare(business.Merchants[i][:], business.Merchants[j][:]) < 0
 		})
 	}
-	if err := r.st.KVPut(state.LoyaltyBusinessKey(business.ID), business); err != nil {
+	if err := r.st.KVPut(businessKey(business.ID), business); err != nil {
 		return err
 	}
-	return r.st.KVPut(state.LoyaltyMerchantIndexKey(addr[:]), business.ID)
+	return r.st.KVPut(merchantBusinessIndexKey(addr), business.ID)
 }
 
 func (r *Registry) RemoveMerchantAddress(id BusinessID, addr [20]byte) error {
@@ -118,16 +116,16 @@ func (r *Registry) RemoveMerchantAddress(id BusinessID, addr [20]byte) error {
 		}
 	}
 	business.Merchants = updated
-	if err := r.st.KVPut(state.LoyaltyBusinessKey(business.ID), business); err != nil {
+	if err := r.st.KVPut(businessKey(business.ID), business); err != nil {
 		return err
 	}
-	return r.st.KVPut(state.LoyaltyMerchantIndexKey(addr[:]), zeroBusinessID)
+	return r.st.KVPut(merchantBusinessIndexKey(addr), zeroBusinessID)
 }
 
 func (r *Registry) PrimaryPaymaster(owner [20]byte) ([20]byte, bool) {
 	var zeroAddr [20]byte
 	var id BusinessID
-	exists, err := r.st.KVGet(state.LoyaltyOwnerPaymasterKey(owner[:]), &id)
+	exists, err := r.st.KVGet(ownerPaymasterKey(owner), &id)
 	if err == nil && exists && id != zeroBusinessID {
 		if business, ok := r.getBusiness(id); ok && !isZeroAddress(business.Paymaster) {
 			return business.Paymaster, true
@@ -147,7 +145,7 @@ func (r *Registry) PrimaryPaymaster(owner [20]byte) ([20]byte, bool) {
 
 func (r *Registry) IsMerchant(addr [20]byte) (BusinessID, bool) {
 	var id BusinessID
-	exists, err := r.st.KVGet(state.LoyaltyMerchantIndexKey(addr[:]), &id)
+	exists, err := r.st.KVGet(merchantBusinessIndexKey(addr), &id)
 	if err != nil || !exists || id == zeroBusinessID {
 		return zeroBusinessID, false
 	}
@@ -156,7 +154,7 @@ func (r *Registry) IsMerchant(addr [20]byte) (BusinessID, bool) {
 
 func (r *Registry) getBusiness(id BusinessID) (*Business, bool) {
 	business := new(Business)
-	exists, err := r.st.KVGet(state.LoyaltyBusinessKey(id), business)
+	exists, err := r.st.KVGet(businessKey(id), business)
 	if err != nil || !exists {
 		return nil, false
 	}
@@ -165,7 +163,7 @@ func (r *Registry) getBusiness(id BusinessID) (*Business, bool) {
 
 func (r *Registry) listBusinessesByOwner(owner [20]byte) ([]BusinessID, error) {
 	var raw [][]byte
-	if err := r.st.KVGetList(state.LoyaltyBusinessOwnerKey(owner[:]), &raw); err != nil {
+	if err := r.st.KVGetList(businessOwnerKey(owner), &raw); err != nil {
 		return nil, err
 	}
 	ids := make([]BusinessID, 0, len(raw))
@@ -181,7 +179,7 @@ func (r *Registry) listBusinessesByOwner(owner [20]byte) ([]BusinessID, error) {
 }
 
 func (r *Registry) nextBusinessID() (BusinessID, error) {
-	key := state.LoyaltyBusinessCounterKey()
+	key := businessCounterKey()
 	var counter uint64
 	_, err := r.st.KVGet(key, &counter)
 	if err != nil {

@@ -10,12 +10,12 @@ import (
 // All monetary values are expressed in the smallest denomination of the
 // respective token (i.e. wei-style integers).
 type GlobalConfig struct {
-	Active       bool     `rlp:"1"`
-	Treasury     []byte   `rlp:"2"`
-	BaseBps      uint32   `rlp:"3"`
-	MinSpend     *big.Int `rlp:"4"`
-	CapPerTx     *big.Int `rlp:"5"`
-	DailyCapUser *big.Int `rlp:"6"`
+	Active       bool
+	Treasury     []byte
+	BaseBps      uint32
+	MinSpend     *big.Int
+	CapPerTx     *big.Int
+	DailyCapUser *big.Int
 }
 
 // Clone produces a deep copy of the configuration.

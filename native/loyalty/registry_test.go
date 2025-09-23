@@ -1,4 +1,4 @@
-package loyalty
+package loyalty_test
 
 import (
 	"errors"
@@ -7,6 +7,7 @@ import (
 
 	"nhbchain/core/events"
 	"nhbchain/core/state"
+	loyalty "nhbchain/native/loyalty"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
@@ -19,7 +20,9 @@ func (c *capturingEmitter) Emit(e events.Event) {
 	c.events = append(c.events, e)
 }
 
-func newTestRegistry(t *testing.T) (*Registry, *state.Manager) {
+const roleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
+
+func newTestRegistry(t *testing.T) (*loyalty.Registry, *state.Manager) {
 	t.Helper()
 	db := storage.NewMemDB()
 	t.Cleanup(db.Close)
@@ -31,7 +34,7 @@ func newTestRegistry(t *testing.T) (*Registry, *state.Manager) {
 	if err := manager.RegisterToken("ZNHB", "ZapNHB", 18); err != nil {
 		t.Fatalf("register token: %v", err)
 	}
-	registry := NewRegistry(manager)
+	registry := loyalty.NewRegistry(manager)
 	return registry, manager
 }
 
@@ -41,13 +44,13 @@ func TestRegistryCreateAndListPrograms(t *testing.T) {
 	owner[19] = 0x11
 	var pool [20]byte
 	pool[18] = 0x22
-	var id ProgramID
+	var id loyalty.ProgramID
 	id[31] = 0xAA
 
 	emitter := &capturingEmitter{}
 	registry.SetEmitter(emitter)
 
-	program := &Program{
+	program := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		Pool:         pool,
@@ -96,10 +99,10 @@ func TestRegistryCreateProgramUnauthorized(t *testing.T) {
 	owner[0] = 0x01
 	var caller [20]byte
 	caller[0] = 0x02
-	var id ProgramID
+	var id loyalty.ProgramID
 	id[0] = 0x01
 
-	program := &Program{
+	program := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		TokenSymbol:  "ZNHB",
@@ -110,7 +113,7 @@ func TestRegistryCreateProgramUnauthorized(t *testing.T) {
 		Active:       true,
 	}
 	err := registry.CreateProgram(caller, program)
-	if !errors.Is(err, ErrUnauthorized) {
+	if !errors.Is(err, loyalty.ErrUnauthorized) {
 		t.Fatalf("expected unauthorized error, got %v", err)
 	}
 }
@@ -121,10 +124,10 @@ func TestRegistryUpdateProgramByOwner(t *testing.T) {
 	owner[0] = 0x01
 	var pool [20]byte
 	pool[0] = 0x02
-	var id ProgramID
+	var id loyalty.ProgramID
 	id[0] = 0xFF
 
-	base := &Program{
+	base := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		Pool:         pool,
@@ -140,7 +143,7 @@ func TestRegistryUpdateProgramByOwner(t *testing.T) {
 		t.Fatalf("create program: %v", err)
 	}
 
-	update := &Program{
+	update := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		Pool:         pool,
@@ -182,10 +185,10 @@ func TestRegistryUpdateProgramByAdmin(t *testing.T) {
 	owner[0] = 0x03
 	var admin [20]byte
 	admin[0] = 0x04
-	var id ProgramID
+	var id loyalty.ProgramID
 	id[0] = 0x05
 
-	base := &Program{
+	base := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		TokenSymbol:  "ZNHB",
@@ -202,7 +205,7 @@ func TestRegistryUpdateProgramByAdmin(t *testing.T) {
 		t.Fatalf("set role: %v", err)
 	}
 
-	update := &Program{
+	update := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		TokenSymbol:  "ZNHB",
@@ -223,10 +226,10 @@ func TestRegistryRejectsImmutableChanges(t *testing.T) {
 	owner[0] = 0x07
 	var other [20]byte
 	other[0] = 0x08
-	var id ProgramID
+	var id loyalty.ProgramID
 	id[0] = 0x09
 
-	base := &Program{
+	base := &loyalty.Program{
 		ID:           id,
 		Owner:        owner,
 		TokenSymbol:  "ZNHB",
@@ -239,7 +242,7 @@ func TestRegistryRejectsImmutableChanges(t *testing.T) {
 		t.Fatalf("create program: %v", err)
 	}
 
-	update := &Program{
+	update := &loyalty.Program{
 		ID:           id,
 		Owner:        other,
 		TokenSymbol:  "ZNHB",
@@ -249,7 +252,7 @@ func TestRegistryRejectsImmutableChanges(t *testing.T) {
 		DailyCapUser: big.NewInt(1),
 	}
 	err := registry.UpdateProgram(owner, update)
-	if !errors.Is(err, ErrImmutableField) {
+	if !errors.Is(err, loyalty.ErrImmutableField) {
 		t.Fatalf("expected immutable field error, got %v", err)
 	}
 }
