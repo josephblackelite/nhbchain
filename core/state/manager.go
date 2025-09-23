@@ -12,6 +12,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"nhbchain/core/identity"
 	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
 	"nhbchain/storage/trie"
@@ -55,6 +56,8 @@ var (
 	escrowModuleSeedPrefix     = "module/escrow/vault/"
 	tradeRecordPrefix          = []byte("trade/record/")
 	tradeEscrowIndexPrefix     = []byte("trade/index/escrow/")
+	identityAliasPrefix        = []byte("identity/alias/")
+	identityReversePrefix      = []byte("identity/reverse/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -200,6 +203,20 @@ func tradeStorageKey(id [32]byte) []byte {
 	copy(buf, tradeRecordPrefix)
 	copy(buf[len(tradeRecordPrefix):], id[:])
 	return ethcrypto.Keccak256(buf)
+}
+
+func identityAliasKey(alias string) []byte {
+	buf := make([]byte, len(identityAliasPrefix)+len(alias))
+	copy(buf, identityAliasPrefix)
+	copy(buf[len(identityAliasPrefix):], alias)
+	return kvKey(buf)
+}
+
+func identityReverseKey(addr []byte) []byte {
+	buf := make([]byte, len(identityReversePrefix)+len(addr))
+	copy(buf, identityReversePrefix)
+	copy(buf[len(identityReversePrefix):], addr)
+	return kvKey(buf)
 }
 
 func tradeEscrowIndexKey(escrowID [32]byte) []byte {
@@ -930,6 +947,77 @@ func (m *Manager) IsEscrowFunded(id [32]byte) (bool, error) {
 		return false, fmt.Errorf("escrow not found")
 	}
 	return esc.Status == escrow.EscrowFunded, nil
+}
+
+// IdentitySetAlias registers or updates the alias associated with the provided address.
+func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
+	if len(addr) != 20 {
+		return fmt.Errorf("identity: address must be 20 bytes")
+	}
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return err
+	}
+	aliasKey := identityAliasKey(normalized)
+	existing, err := m.trie.Get(aliasKey)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		if len(existing) != 20 {
+			return fmt.Errorf("identity: corrupt alias mapping")
+		}
+		if !bytes.Equal(existing, addr) {
+			return identity.ErrAliasTaken
+		}
+	}
+	reverseKey := identityReverseKey(addr)
+	currentAliasBytes, err := m.trie.Get(reverseKey)
+	if err != nil {
+		return err
+	}
+	currentAlias := string(currentAliasBytes)
+	if currentAlias != "" && currentAlias != normalized {
+		if err := m.trie.Update(identityAliasKey(currentAlias), nil); err != nil {
+			return err
+		}
+	}
+	var storedAddr [20]byte
+	copy(storedAddr[:], addr)
+	if err := m.trie.Update(aliasKey, storedAddr[:]); err != nil {
+		return err
+	}
+	if err := m.trie.Update(reverseKey, []byte(normalized)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// IdentityResolve resolves an alias to its owning address.
+func (m *Manager) IdentityResolve(alias string) ([20]byte, bool) {
+	var zero [20]byte
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return zero, false
+	}
+	data, err := m.trie.Get(identityAliasKey(normalized))
+	if err != nil || len(data) != 20 {
+		return zero, false
+	}
+	copy(zero[:], data)
+	return zero, true
+}
+
+// IdentityReverse resolves an address to its registered alias.
+func (m *Manager) IdentityReverse(addr []byte) (string, bool) {
+	if len(addr) != 20 {
+		return "", false
+	}
+	data, err := m.trie.Get(identityReverseKey(addr))
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	return string(data), true
 }
 
 // KVPut stores the provided value under the supplied key using RLP encoding.

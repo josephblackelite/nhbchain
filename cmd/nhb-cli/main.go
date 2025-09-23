@@ -90,6 +90,12 @@ func main() {
 			return
 		}
 		deploy(args[1], args[2])
+	case "id":
+		code := runIdentityCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "escrow":
 		code := runEscrowCommand(args[1:], os.Stdout, os.Stderr)
 		if code != 0 {
@@ -775,6 +781,7 @@ func printUsage() {
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
+	fmt.Println("  id                                 - Identity alias management subcommands")
 	fmt.Println("  escrow                             - Escrow management subcommands")
 	fmt.Println("  p2p                                - P2P trade orchestration subcommands")
 }
