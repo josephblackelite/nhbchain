@@ -219,6 +219,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleEscrowDispute(w, r, req)
 	case "escrow_resolve":
 		s.handleEscrowResolve(w, r, req)
+	case "p2p_createTrade":
+		s.handleP2PCreateTrade(w, r, req)
+	case "p2p_getTrade":
+		s.handleP2PGetTrade(w, r, req)
+	case "p2p_settle":
+		s.handleP2PSettle(w, r, req)
+	case "p2p_dispute":
+		s.handleP2PDispute(w, r, req)
+	case "p2p_resolve":
+		s.handleP2PResolve(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}

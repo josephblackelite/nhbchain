@@ -96,6 +96,12 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "p2p":
+		code := runP2PCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "loyalty-create-business":
 		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-create-business <owner> <name>")
@@ -769,4 +775,6 @@ func printUsage() {
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
+	fmt.Println("  escrow                             - Escrow management subcommands")
+	fmt.Println("  p2p                                - P2P trade orchestration subcommands")
 }

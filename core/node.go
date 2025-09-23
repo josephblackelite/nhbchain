@@ -2,10 +2,12 @@ package core
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -245,6 +247,8 @@ func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, erro
 var (
 	// ErrEscrowNotFound is returned when an escrow record is missing from state.
 	ErrEscrowNotFound = errors.New("escrow not found")
+	// ErrTradeNotFound is returned when a trade record is missing from state.
+	ErrTradeNotFound = errors.New("trade not found")
 )
 
 type escrowEventEmitter struct {
@@ -276,6 +280,14 @@ func (n *Node) newEscrowEngine(manager *nhbstate.Manager) *escrow.Engine {
 	engine.SetEmitter(escrowEventEmitter{node: n})
 	engine.SetFeeTreasury(n.escrowTreasury)
 	return engine
+}
+
+func (n *Node) newTradeEngine(manager *nhbstate.Manager) *escrow.TradeEngine {
+	escrowEngine := n.newEscrowEngine(manager)
+	tradeEngine := escrow.NewTradeEngine(escrowEngine)
+	tradeEngine.SetState(manager)
+	tradeEngine.SetEmitter(escrowEventEmitter{node: n})
+	return tradeEngine
 }
 
 func (n *Node) EscrowCreate(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediator *[20]byte, meta [32]byte) ([32]byte, error) {
@@ -355,6 +367,121 @@ func (n *Node) EscrowGet(id [32]byte) (*escrow.Escrow, error) {
 		return nil, ErrEscrowNotFound
 	}
 	return esc, nil
+}
+
+func (n *Node) EscrowVaultAddress(token string) ([20]byte, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	return manager.EscrowVaultAddress(token)
+}
+
+func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
+	baseToken string, baseAmt *big.Int,
+	quoteToken string, quoteAmt *big.Int,
+	deadline int64) (tradeID [32]byte, escrowBaseID, escrowQuoteID [32]byte, err error) {
+
+	trimmedOffer := strings.TrimSpace(offerID)
+	if trimmedOffer == "" {
+		return [32]byte{}, [32]byte{}, [32]byte{}, fmt.Errorf("trade: offerId is required")
+	}
+	normalizedBase, err := escrow.NormalizeToken(baseToken)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, err
+	}
+	normalizedQuote, err := escrow.NormalizeToken(quoteToken)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, err
+	}
+	if baseAmt == nil || baseAmt.Sign() <= 0 {
+		return [32]byte{}, [32]byte{}, [32]byte{}, fmt.Errorf("trade: base amount must be positive")
+	}
+	if quoteAmt == nil || quoteAmt.Sign() <= 0 {
+		return [32]byte{}, [32]byte{}, [32]byte{}, fmt.Errorf("trade: quote amount must be positive")
+	}
+	now := time.Now().Unix()
+	if deadline < now {
+		return [32]byte{}, [32]byte{}, [32]byte{}, fmt.Errorf("trade: deadline must be in the future")
+	}
+
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, fmt.Errorf("trade: failed to derive nonce: %w", err)
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	tradeEngine := n.newTradeEngine(manager)
+
+	trade, err := tradeEngine.CreateTrade(trimmedOffer, buyer, seller, normalizedQuote, quoteAmt, normalizedBase, baseAmt, deadline, nonce)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, err
+	}
+	return trade.ID, trade.EscrowBase, trade.EscrowQuote, nil
+}
+
+func (n *Node) P2PGetTrade(id [32]byte) (*escrow.Trade, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	trade, ok := manager.TradeGet(id)
+	if !ok {
+		return nil, ErrTradeNotFound
+	}
+	return trade.Clone(), nil
+}
+
+func (n *Node) P2PSettle(id [32]byte, caller [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	trade, ok := manager.TradeGet(id)
+	if !ok {
+		return ErrTradeNotFound
+	}
+	if caller != trade.Buyer && caller != trade.Seller {
+		return fmt.Errorf("trade: caller not participant")
+	}
+	tradeEngine := n.newTradeEngine(manager)
+	return tradeEngine.SettleAtomic(id)
+}
+
+func (n *Node) P2PDispute(id [32]byte, caller [20]byte, msg string) error {
+	_ = msg
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	trade, ok := manager.TradeGet(id)
+	if !ok {
+		return ErrTradeNotFound
+	}
+	if caller != trade.Buyer && caller != trade.Seller {
+		return fmt.Errorf("trade: caller not participant")
+	}
+	tradeEngine := n.newTradeEngine(manager)
+	return tradeEngine.TradeDispute(id, caller)
+}
+
+func (n *Node) P2PResolve(id [32]byte, arbitrator [20]byte, outcome string) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	if !n.state.HasRole("ROLE_ARBITRATOR", arbitrator[:]) {
+		return fmt.Errorf("trade: caller lacks arbitrator role")
+	}
+	if _, ok := manager.TradeGet(id); !ok {
+		return ErrTradeNotFound
+	}
+	tradeEngine := n.newTradeEngine(manager)
+	return tradeEngine.TradeResolve(id, outcome)
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
