@@ -12,6 +12,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
 	"nhbchain/storage/trie"
 )
@@ -49,6 +50,9 @@ var (
 	loyaltyMerchantIndexPrefix = []byte("loyalty/merchant-index/")
 	loyaltyBusinessCounterKey  = []byte("loyalty/business/counter")
 	loyaltyOwnerPaymasterPref  = []byte("loyalty/owner-paymaster/")
+	escrowRecordPrefix         = []byte("escrow/record/")
+	escrowVaultPrefix          = []byte("escrow/vault/")
+	escrowModuleSeedPrefix     = "module/escrow/vault/"
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -170,6 +174,106 @@ func roleKey(role string) []byte {
 
 func kvKey(key []byte) []byte {
 	return ethcrypto.Keccak256(key)
+}
+
+func escrowStorageKey(id [32]byte) []byte {
+	buf := make([]byte, len(escrowRecordPrefix)+len(id))
+	copy(buf, escrowRecordPrefix)
+	copy(buf[len(escrowRecordPrefix):], id[:])
+	return ethcrypto.Keccak256(buf)
+}
+
+func escrowVaultKey(id [32]byte, token string) []byte {
+	normalized := strings.ToUpper(strings.TrimSpace(token))
+	buf := make([]byte, len(escrowVaultPrefix)+len(normalized)+1+len(id))
+	copy(buf, escrowVaultPrefix)
+	copy(buf[len(escrowVaultPrefix):], normalized)
+	buf[len(escrowVaultPrefix)+len(normalized)] = ':'
+	copy(buf[len(escrowVaultPrefix)+len(normalized)+1:], id[:])
+	return ethcrypto.Keccak256(buf)
+}
+
+func escrowModuleAddress(token string) ([20]byte, error) {
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return [20]byte{}, err
+	}
+	seed := escrowModuleSeedPrefix + normalized
+	hash := ethcrypto.Keccak256([]byte(seed))
+	var addr [20]byte
+	copy(addr[:], hash[len(hash)-20:])
+	return addr, nil
+}
+
+type storedEscrow struct {
+	ID        [32]byte
+	Payer     [20]byte
+	Payee     [20]byte
+	Mediator  [20]byte
+	Token     string
+	Amount    *big.Int
+	FeeBps    uint32
+	Deadline  *big.Int
+	CreatedAt *big.Int
+	MetaHash  [32]byte
+	Status    uint8
+}
+
+func newStoredEscrow(e *escrow.Escrow) *storedEscrow {
+	if e == nil {
+		return nil
+	}
+	amount := big.NewInt(0)
+	if e.Amount != nil {
+		amount = new(big.Int).Set(e.Amount)
+	}
+	deadline := big.NewInt(e.Deadline)
+	created := big.NewInt(e.CreatedAt)
+	return &storedEscrow{
+		ID:        e.ID,
+		Payer:     e.Payer,
+		Payee:     e.Payee,
+		Mediator:  e.Mediator,
+		Token:     e.Token,
+		Amount:    amount,
+		FeeBps:    e.FeeBps,
+		Deadline:  deadline,
+		CreatedAt: created,
+		MetaHash:  e.MetaHash,
+		Status:    uint8(e.Status),
+	}
+}
+
+func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
+	if s == nil {
+		return nil, fmt.Errorf("escrow: nil storage record")
+	}
+	out := &escrow.Escrow{
+		ID:       s.ID,
+		Payer:    s.Payer,
+		Payee:    s.Payee,
+		Mediator: s.Mediator,
+		Token:    s.Token,
+		Amount: func() *big.Int {
+			if s.Amount == nil {
+				return big.NewInt(0)
+			}
+			return new(big.Int).Set(s.Amount)
+		}(),
+		FeeBps:   s.FeeBps,
+		MetaHash: s.MetaHash,
+		Status:   escrow.EscrowStatus(s.Status),
+	}
+	if s.Deadline != nil {
+		out.Deadline = s.Deadline.Int64()
+	}
+	if s.CreatedAt != nil {
+		out.CreatedAt = s.CreatedAt.Int64()
+	}
+	if !out.Status.Valid() {
+		return nil, fmt.Errorf("escrow: invalid status in storage")
+	}
+	return out, nil
 }
 
 func (m *Manager) loadTokenList() ([]string, error) {
@@ -530,6 +634,112 @@ func (m *Manager) TokenExists(symbol string) bool {
 		return false
 	}
 	return true
+}
+
+// EscrowPut persists the provided escrow definition after validating and
+// normalising its contents.
+func (m *Manager) EscrowPut(e *escrow.Escrow) error {
+	if e == nil {
+		return fmt.Errorf("escrow: nil value")
+	}
+	sanitized, err := escrow.SanitizeEscrow(e)
+	if err != nil {
+		return err
+	}
+	record := newStoredEscrow(sanitized)
+	encoded, err := rlp.EncodeToBytes(record)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(escrowStorageKey(sanitized.ID), encoded)
+}
+
+// EscrowGet retrieves an escrow definition by identifier. The returned boolean
+// indicates whether the escrow exists in state.
+func (m *Manager) EscrowGet(id [32]byte) (*escrow.Escrow, bool) {
+	data, err := m.trie.Get(escrowStorageKey(id))
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	stored := new(storedEscrow)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false
+	}
+	escrowValue, err := stored.toEscrow()
+	if err != nil {
+		return nil, false
+	}
+	sanitized, err := escrow.SanitizeEscrow(escrowValue)
+	if err != nil {
+		return nil, false
+	}
+	return sanitized, true
+}
+
+// EscrowVaultAddress returns the deterministic module address that holds funds
+// for escrows denominated in the supplied token.
+func (m *Manager) EscrowVaultAddress(token string) ([20]byte, error) {
+	return escrowModuleAddress(token)
+}
+
+// EscrowCredit increases the tracked escrow balance for the supplied token.
+// Attempts to operate on unknown escrows, unsupported tokens or negative
+// amounts result in an error.
+func (m *Manager) EscrowCredit(id [32]byte, token string, amt *big.Int) error {
+	if amt == nil {
+		amt = big.NewInt(0)
+	}
+	if amt.Sign() < 0 {
+		return fmt.Errorf("escrow: negative credit")
+	}
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return err
+	}
+	exists, err := m.trie.Get(escrowStorageKey(id))
+	if err != nil {
+		return err
+	}
+	if len(exists) == 0 {
+		return fmt.Errorf("escrow not found")
+	}
+	if amt.Sign() == 0 {
+		return nil
+	}
+	key := escrowVaultKey(id, normalized)
+	balance, err := m.loadBigInt(key)
+	if err != nil {
+		return err
+	}
+	updated := new(big.Int).Add(balance, amt)
+	return m.writeBigInt(key, updated)
+}
+
+// EscrowDebit decreases the tracked escrow balance for the supplied token.
+func (m *Manager) EscrowDebit(id [32]byte, token string, amt *big.Int) error {
+	if amt == nil {
+		amt = big.NewInt(0)
+	}
+	if amt.Sign() < 0 {
+		return fmt.Errorf("escrow: negative debit")
+	}
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return err
+	}
+	key := escrowVaultKey(id, normalized)
+	balance, err := m.loadBigInt(key)
+	if err != nil {
+		return err
+	}
+	if balance.Cmp(amt) < 0 {
+		return fmt.Errorf("escrow: insufficient balance")
+	}
+	if amt.Sign() == 0 {
+		return nil
+	}
+	updated := new(big.Int).Sub(balance, amt)
+	return m.writeBigInt(key, updated)
 }
 
 // KVPut stores the provided value under the supplied key using RLP encoding.

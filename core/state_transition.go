@@ -343,7 +343,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 	sellerAccount.Nonce++
 
 	escrowID, _ := tx.Hash()
-	newEscrow := escrow.Escrow{
+	newEscrow := escrow.LegacyEscrow{
 		ID:     escrowID,
 		Seller: from, // The creator of the tx is always the seller with the asset
 		Amount: escrowData.Amount,
@@ -353,7 +353,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 	if escrowData.Buyer != nil {
 		// This is a "Buy Offer" being accepted. The escrow starts locked.
 		newEscrow.Buyer = escrowData.Buyer
-		newEscrow.Status = escrow.StatusInProgress
+		newEscrow.Status = escrow.LegacyStatusInProgress
 		fmt.Printf("Symmetrical Escrow Created (In Progress): Seller %s locks funds for Buyer %s, Amount: %s, ID: %x\n",
 			crypto.NewAddress(crypto.NHBPrefix, from).String(),
 			crypto.NewAddress(crypto.NHBPrefix, escrowData.Buyer).String(),
@@ -361,7 +361,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 	} else {
 		// This is a standard "Sell Offer". The escrow starts open, and the seller is the initial "buyer".
 		newEscrow.Buyer = from
-		newEscrow.Status = escrow.StatusOpen
+		newEscrow.Status = escrow.LegacyStatusOpen
 		fmt.Printf("Standard Escrow Created (Open): Seller %s lists %s NHBCoin, ID: %x\n",
 			crypto.NewAddress(crypto.NHBPrefix, from).String(),
 			newEscrow.Amount.String(), newEscrow.ID)
@@ -385,13 +385,13 @@ func (sp *StateProcessor) applyReleaseEscrow(tx *types.Transaction) error {
 	if err != nil {
 		return err
 	}
-	if e.Status != escrow.StatusOpen {
+	if e.Status != escrow.LegacyStatusOpen {
 		return fmt.Errorf("escrow not open")
 	}
 	if string(sender) != string(e.Buyer) {
 		return fmt.Errorf("only buyer can release")
 	}
-	e.Status = escrow.StatusReleased
+	e.Status = escrow.LegacyStatusReleased
 	sellerAccount, _ := sp.getAccount(e.Seller)
 	senderAccount, _ := sp.getAccount(sender)
 	sellerAccount.BalanceNHB.Add(sellerAccount.BalanceNHB, e.Amount)
@@ -411,13 +411,13 @@ func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction) error {
 	if err != nil {
 		return err
 	}
-	if e.Status != escrow.StatusOpen {
+	if e.Status != escrow.LegacyStatusOpen {
 		return fmt.Errorf("escrow not open")
 	}
 	if string(sender) != string(e.Seller) {
 		return fmt.Errorf("only seller can refund")
 	}
-	e.Status = escrow.StatusRefunded
+	e.Status = escrow.LegacyStatusRefunded
 	buyerAccount, _ := sp.getAccount(e.Buyer)
 	senderAccount, _ := sp.getAccount(sender)
 	buyerAccount.BalanceNHB.Add(buyerAccount.BalanceNHB, e.Amount)
@@ -440,12 +440,12 @@ func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction) error {
 		return err
 	}
 
-	if e.Status != escrow.StatusOpen {
+	if e.Status != escrow.LegacyStatusOpen {
 		return fmt.Errorf("escrow is not open to be locked")
 	}
 
 	e.Buyer = sender
-	e.Status = escrow.StatusInProgress
+	e.Status = escrow.LegacyStatusInProgress
 
 	senderAccount, _ := sp.getAccount(sender)
 	senderAccount.Nonce++
@@ -470,14 +470,14 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction) error {
 		return err
 	}
 
-	if e.Status != escrow.StatusInProgress {
+	if e.Status != escrow.LegacyStatusInProgress {
 		return fmt.Errorf("only an in-progress escrow can be disputed")
 	}
 	if !bytes.Equal(sender, e.Buyer) {
 		return fmt.Errorf("only the buyer can dispute an escrow")
 	}
 
-	e.Status = escrow.StatusDisputed
+	e.Status = escrow.LegacyStatusDisputed
 
 	senderAccount, _ := sp.getAccount(sender)
 	senderAccount.Nonce++
@@ -507,12 +507,12 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, releaseToBuyer b
 		return err
 	}
 
-	if e.Status != escrow.StatusDisputed {
+	if e.Status != escrow.LegacyStatusDisputed {
 		return fmt.Errorf("escrow is not in a disputed state")
 	}
 
 	if releaseToBuyer {
-		e.Status = escrow.StatusReleased
+		e.Status = escrow.LegacyStatusReleased
 		buyerAccount, _ := sp.getAccount(e.Buyer)
 		buyerAccount.BalanceNHB.Add(buyerAccount.BalanceNHB, e.Amount)
 		if err := sp.setAccount(e.Buyer, buyerAccount); err != nil {
@@ -520,7 +520,7 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, releaseToBuyer b
 		}
 		fmt.Printf("Arbitration complete: Escrow %x released to buyer.\n", escrowID)
 	} else {
-		e.Status = escrow.StatusRefunded
+		e.Status = escrow.LegacyStatusRefunded
 		sellerAccount, _ := sp.getAccount(e.Seller)
 		sellerAccount.BalanceNHB.Add(sellerAccount.BalanceNHB, e.Amount)
 		if err := sp.setAccount(e.Seller, sellerAccount); err != nil {
@@ -940,7 +940,7 @@ func (sp *StateProcessor) persistValidatorSet() error {
 	return sp.Trie.Update(validatorSetKey, encoded)
 }
 
-func (sp *StateProcessor) setEscrow(id []byte, e *escrow.Escrow) error {
+func (sp *StateProcessor) setEscrow(id []byte, e *escrow.LegacyEscrow) error {
 	hashedKey := ethcrypto.Keccak256(append([]byte("escrow-"), id...))
 	encoded, err := rlp.EncodeToBytes(e)
 	if err != nil {
@@ -949,13 +949,13 @@ func (sp *StateProcessor) setEscrow(id []byte, e *escrow.Escrow) error {
 	return sp.Trie.Update(hashedKey, encoded)
 }
 
-func (sp *StateProcessor) getEscrow(id []byte) (*escrow.Escrow, error) {
+func (sp *StateProcessor) getEscrow(id []byte) (*escrow.LegacyEscrow, error) {
 	hashedKey := ethcrypto.Keccak256(append([]byte("escrow-"), id...))
 	data, err := sp.Trie.Get(hashedKey)
 	if err != nil || data == nil {
 		return nil, fmt.Errorf("escrow with ID %x not found", id)
 	}
-	e := new(escrow.Escrow)
+	e := new(escrow.LegacyEscrow)
 	if err := rlp.DecodeBytes(data, e); err != nil {
 		return nil, err
 	}
