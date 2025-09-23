@@ -5,12 +5,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 
+	"nhbchain/core/genesis"
 	"nhbchain/core/types"
 	"nhbchain/storage"
 )
@@ -75,7 +75,7 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 
 	genesisHash, err := db.Get(genesisKey)
 	if err != nil {
-		genesis, loadErr := genesisFromSource(strings.TrimSpace(genesisPath), allowAutogenesis)
+		genesis, loadErr := genesisFromSource(strings.TrimSpace(genesisPath), allowAutogenesis, db)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -248,10 +248,14 @@ func createGenesisBlock() *types.Block {
 	return types.NewBlock(header, []*types.Transaction{})
 }
 
-func genesisFromSource(path string, allowAutogenesis bool) (*types.Block, error) {
+func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) (*types.Block, error) {
 	if path != "" {
 		fmt.Printf("No genesis block found. Loading from %s.\n", path)
-		return loadGenesisFromFile(path)
+		spec, err := genesis.LoadGenesisSpec(path)
+		if err != nil {
+			return nil, err
+		}
+		return genesis.BuildGenesisFromSpec(spec, db)
 	}
 
 	if !allowAutogenesis {
@@ -260,24 +264,6 @@ func genesisFromSource(path string, allowAutogenesis bool) (*types.Block, error)
 
 	fmt.Println("No genesis block found. Creating a new one.")
 	return createGenesisBlock(), nil
-}
-
-func loadGenesisFromFile(path string) (*types.Block, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read genesis file %s: %w", path, err)
-	}
-
-	var block types.Block
-	if err := json.Unmarshal(data, &block); err != nil {
-		return nil, fmt.Errorf("unmarshal genesis file %s: %w", path, err)
-	}
-
-	if block.Header == nil {
-		return nil, fmt.Errorf("genesis file %s missing header", path)
-	}
-
-	return &block, nil
 }
 
 func persistGenesisBlock(db storage.Database, genesis *types.Block) ([]byte, error) {
