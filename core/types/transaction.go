@@ -58,8 +58,12 @@ type Transaction struct {
 	Paymaster []byte `json:"paymaster,omitempty"` // NEW: Address of the gas fee sponsor
 
 	// Signatures
-	R, S, V                            *big.Int `json:"r"`                    // Sender's signature
-	PaymasterR, PaymasterS, PaymasterV *big.Int `json:"paymasterR,omitempty"` // NEW: Paymaster's signature
+	R          *big.Int `json:"r"` // Sender's signature
+	S          *big.Int `json:"s"`
+	V          *big.Int `json:"v"`
+	PaymasterR *big.Int `json:"paymasterR,omitempty"` // NEW: Paymaster's signature
+	PaymasterS *big.Int `json:"paymasterS,omitempty"`
+	PaymasterV *big.Int `json:"paymasterV,omitempty"`
 
 	from []byte
 }

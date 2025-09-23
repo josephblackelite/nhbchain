@@ -25,6 +25,7 @@ func (n *failingNode) GetValidatorSet() map[string]*big.Int { return n.validator
 func (n *failingNode) GetAccount(addr []byte) (*types.Account, error) {
 	return &types.Account{Stake: big.NewInt(1)}, nil
 }
+func (n *failingNode) GetLastCommitHash() []byte { return nil }
 
 type recordingBroadcaster struct {
 	messages []*p2p.Message
@@ -52,11 +53,22 @@ func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 
 	engine.mu.Lock()
 	engine.currentState = State{Height: 1, Round: 0}
-	engine.activeProposal = &Proposal{
-		Block: types.NewBlock(&types.BlockHeader{Height: 1}, nil),
-		Round: 0,
+	engine.activeProposal = &SignedProposal{
+		Proposal: &Proposal{
+			Block: types.NewBlock(&types.BlockHeader{Height: 1}, nil),
+			Round: 0,
+		},
 	}
-	engine.receivedVotes[Precommit] = map[string]*Vote{string(validatorAddr): {Validator: validatorAddr}}
+	engine.receivedVotes[Precommit] = map[string]*SignedVote{
+		string(validatorAddr): {
+			Vote: &Vote{
+				Round:  0,
+				Type:   Precommit,
+				Height: 1,
+			},
+			Validator: validatorAddr,
+		},
+	}
 	engine.mu.Unlock()
 
 	engine.commit()
