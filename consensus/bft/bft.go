@@ -162,7 +162,7 @@ func (e *Engine) HandleProposal(p *SignedProposal) error {
 	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
 		return fmt.Errorf("invalid proposal payload")
 	}
-	if _, ok := e.validatorSet[string(p.Proposer)]; !ok {
+	if _, ok := e.validatorSet(string(p.Proposer)); !ok {
 		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
 	}
 
@@ -190,7 +190,7 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 	if v == nil || v.Vote == nil {
 		return fmt.Errorf("invalid vote payload")
 	}
-	if _, ok := e.validatorSet[string(v.Validator)]; !ok {
+	if _, ok := e.validatorSet(string(v.Validator)); !ok {
 		return fmt.Errorf("vote from non-validator %x", v.Validator)
 	}
 
@@ -339,6 +339,7 @@ func (e *Engine) precommit() {
 func (e *Engine) commit() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.activeProposal == nil {
 		return false
 	}
@@ -349,12 +350,16 @@ func (e *Engine) commit() bool {
 		return false
 	}
 
+	// Try to commit the block; on failure, broadcast prevote(nil) and reset.
 	block := e.activeProposal.Proposal.Block
-	fmt.Printf("COMMIT: Committing block %d and adding to chain.\n", block.Header.Height)
+	fmt.Printf("COMMIT: Attempting to commit block %d.\n", block.Header.Height)
 	if err := e.node.CommitBlock(block); err != nil {
 		fmt.Printf("failed to commit block: %v\n", err)
+		e.broadcastPrevoteNilLocked(err) // assumes lock is held
+		e.resetProposalStateLocked()     // reset for next round
 		return false
 	}
+	fmt.Printf("COMMIT: Successfully committed block %d.\n", block.Header.Height)
 
 	e.committedBlocks[e.currentState.Height] = true
 	e.currentState.Height++
@@ -441,6 +446,45 @@ func stopTimer(t *time.Timer) {
 		case <-t.C:
 		default:
 		}
+	}
+}
+
+// NOTE: called with e.mu **locked**
+func (e *Engine) broadcastPrevoteNilLocked(execErr error) {
+	if e.broadcaster == nil {
+		return
+	}
+	round := e.currentState.Round
+	height := e.currentState.Height
+
+	vote, err := e.createVote(Prevote, nil, round, height) // nil = vote for NIL
+	if err != nil {
+		fmt.Printf("failed to create prevote nil: %v\n", err)
+		return
+	}
+
+	if _, ok := e.receivedVotes[Prevote]; !ok {
+		e.receivedVotes[Prevote] = make(map[string]*SignedVote)
+	}
+	e.receivedVotes[Prevote][string(vote.Validator)] = vote
+
+	payload, _ := json.Marshal(vote)
+	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: payload}
+	if err := e.broadcaster.Broadcast(msg); err != nil {
+		fmt.Printf("failed to broadcast prevote nil: %v\n", err)
+		return
+	}
+	fmt.Printf("PREVOTE NIL: Broadcasting nil vote due to execution failure: %v\n", execErr)
+}
+
+// NOTE: called with e.mu **locked**
+func (e *Engine) resetProposalStateLocked() {
+	e.activeProposal = nil
+	e.prevoteSent = false
+	e.precommitSent = false
+	e.receivedVotes = map[VoteType]map[string]*SignedVote{
+		Prevote:   make(map[string]*SignedVote),
+		Precommit: make(map[string]*SignedVote),
 	}
 }
 
