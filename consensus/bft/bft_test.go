@@ -86,18 +86,21 @@ func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 	if msg.Type != p2p.MsgTypeVote {
 		t.Fatalf("expected vote message, got %d", msg.Type)
 	}
-	var vote Vote
-	if err := json.Unmarshal(msg.Payload, &vote); err != nil {
+	var signedVote SignedVote
+	if err := json.Unmarshal(msg.Payload, &signedVote); err != nil {
 		t.Fatalf("unmarshal vote: %v", err)
 	}
-	if vote.Type != Prevote {
-		t.Fatalf("expected prevote type, got %v", vote.Type)
+	if signedVote.Vote == nil {
+		t.Fatalf("expected vote payload to be populated")
 	}
-	if len(vote.BlockHash) != 0 {
-		t.Fatalf("expected nil block hash in prevote, got %x", vote.BlockHash)
+	if signedVote.Vote.Type != Prevote {
+		t.Fatalf("expected prevote type, got %v", signedVote.Vote.Type)
 	}
-	if _, ok := engine.receivedVotes[Prevote][string(validatorAddr)]; !ok {
-		t.Fatalf("expected prevote record for validator")
+	if len(signedVote.Vote.BlockHash) != 0 {
+		t.Fatalf("expected nil block hash in prevote, got %x", signedVote.Vote.BlockHash)
+	}
+	if len(engine.receivedVotes[Prevote]) != 0 {
+		t.Fatalf("expected prevote records to be cleared after failure")
 	}
 	if engine.committedBlocks[engine.currentState.Height] {
 		t.Fatalf("block should not be marked committed on execution failure")

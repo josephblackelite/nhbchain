@@ -17,15 +17,26 @@ import (
 	"nhbchain/storage"
 )
 
-const validatorPassEnv = "NHB_VALIDATOR_PASS"
+const (
+	validatorPassEnv = "NHB_VALIDATOR_PASS"
+	genesisPathEnv   = "NHB_GENESIS"
+)
 
 func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
+	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
+	allowAutogenesis := flag.Bool("allow-autogenesis", true, "Allow automatic genesis creation when no stored genesis exists")
 	flag.Parse()
 
 	cfg, err := config.Load(*configFile)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load config: %v", err))
+	}
+
+	genesisPath, err := resolveGenesisPath(*genesisFlag, cfg.GenesisFile, *allowAutogenesis, os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve genesis path: %v\n", err)
+		os.Exit(1)
 	}
 
 	db, err := storage.NewLevelDB(cfg.DataDir)
@@ -40,7 +51,7 @@ func main() {
 	}
 
 	// 1. Create the core node.
-	node, err := core.NewNode(db, privKey)
+	node, err := core.NewNode(db, privKey, genesisPath, *allowAutogenesis)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
@@ -70,6 +81,35 @@ func main() {
 	fmt.Println("--- NHBCoin Node Initialized and Running ---")
 	go node.StartConsensus()
 	select {}
+}
+
+type envLookupFunc func(string) (string, bool)
+
+func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, lookup envLookupFunc) (string, error) {
+	trimmedCLI := strings.TrimSpace(cliPath)
+	if trimmedCLI != "" {
+		return trimmedCLI, nil
+	}
+
+	if lookup != nil {
+		if value, ok := lookup(genesisPathEnv); ok {
+			trimmedEnv := strings.TrimSpace(value)
+			if trimmedEnv != "" {
+				return trimmedEnv, nil
+			}
+		}
+	}
+
+	trimmedCfg := strings.TrimSpace(cfgPath)
+	if trimmedCfg != "" {
+		return trimmedCfg, nil
+	}
+
+	if allowAutogenesis {
+		return "", nil
+	}
+
+	return "", fmt.Errorf("no genesis file provided; supply one via --genesis, %s, or config, or enable --allow-autogenesis", genesisPathEnv)
 }
 
 func loadValidatorKey(cfg *config.Config) (*crypto.PrivateKey, error) {

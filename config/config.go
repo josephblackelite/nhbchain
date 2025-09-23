@@ -14,6 +14,7 @@ type Config struct {
 	ListenAddress         string   `toml:"ListenAddress"`
 	RPCAddress            string   `toml:"RPCAddress"`
 	DataDir               string   `toml:"DataDir"`
+	GenesisFile           string   `toml:"GenesisFile"`
 	ValidatorKeystorePath string   `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI       string   `toml:"ValidatorKMSURI"`
 	ValidatorKMSEnv       string   `toml:"ValidatorKMSEnv"`
@@ -89,6 +90,7 @@ func createDefault(path string) (*Config, error) {
 		ListenAddress:  ":6001",
 		RPCAddress:     ":8080",
 		DataDir:        "./nhb-data",
+		GenesisFile:    "",
 		BootstrapPeers: []string{},
 	}
 	cfg.ValidatorKeystorePath = keystorePath

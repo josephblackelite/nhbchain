@@ -1,6 +1,7 @@
 ListenAddress = "0.0.0.0:6002"
 RPCAddress = "0.0.0.0:8081"
 DataDir = "./nhb-data-local"
+GenesisFile = ""
 ValidatorKeystorePath = "./validator-local.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

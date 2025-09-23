@@ -25,11 +25,11 @@ type Node struct {
 	bftEngine    *bft.Engine
 }
 
-func NewNode(db storage.Database, key *crypto.PrivateKey) (*Node, error) {
+func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool) (*Node, error) {
 	validatorAddr := key.PubKey().Address()
 	fmt.Printf("Starting node with validator address: %s\n", validatorAddr.String())
 
-	chain, err := NewBlockchain(db)
+	chain, err := NewBlockchain(db, genesisPath, allowAutogenesis)
 	if err != nil {
 		return nil, err
 	}

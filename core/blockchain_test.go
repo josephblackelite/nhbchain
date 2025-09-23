@@ -2,9 +2,12 @@ package core
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"nhbchain/core/types"
 	"nhbchain/storage"
 )
@@ -14,8 +17,62 @@ func newTestBlock(height uint64, prevHash []byte) *types.Block {
 		Height:    height,
 		Timestamp: int64(height),
 		PrevHash:  append([]byte(nil), prevHash...),
+		TxRoot:    gethtypes.EmptyRootHash.Bytes(),
 	}
 	return types.NewBlock(header, nil)
+}
+
+func TestNewBlockchainRequiresGenesisWhenAutogenesisDisabled(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	if _, err := NewBlockchain(db, "", false); err == nil {
+		t.Fatalf("expected error when genesis is required but unavailable")
+	}
+}
+
+func TestNewBlockchainLoadsGenesisFromFile(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	genesis := types.NewBlock(&types.BlockHeader{Height: 0, Timestamp: 1}, nil)
+	data, err := json.Marshal(genesis)
+	if err != nil {
+		t.Fatalf("marshal genesis: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	bc, err := NewBlockchain(db, path, false)
+	if err != nil {
+		t.Fatalf("new blockchain with file genesis: %v", err)
+	}
+
+	if bc.GetHeight() != 0 {
+		t.Fatalf("expected height 0 after loading genesis file, got %d", bc.GetHeight())
+	}
+
+	loadedGenesis, err := bc.GetBlockByHeight(0)
+	if err != nil {
+		t.Fatalf("get genesis block: %v", err)
+	}
+	if loadedGenesis.Header.Timestamp != genesis.Header.Timestamp {
+		t.Fatalf("unexpected genesis header timestamp: got %d want %d", loadedGenesis.Header.Timestamp, genesis.Header.Timestamp)
+	}
+}
+
+func TestNewBlockchainReturnsErrorForMissingGenesisFile(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	missingPath := filepath.Join(t.TempDir(), "missing.json")
+	if _, err := NewBlockchain(db, missingPath, false); err == nil {
+		t.Fatalf("expected error when genesis file cannot be read")
+	}
 }
 
 func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
@@ -27,7 +84,7 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
-	bc, err := NewBlockchain(db)
+	bc, err := NewBlockchain(db, "", true)
 	if err != nil {
 		t.Fatalf("failed to create blockchain: %v", err)
 	}
@@ -62,7 +119,7 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 	}
 	defer reopenedDB.Close()
 
-	reopenedBC, err := NewBlockchain(reopenedDB)
+	reopenedBC, err := NewBlockchain(reopenedDB, "", true)
 	if err != nil {
 		t.Fatalf("failed to reopen blockchain: %v", err)
 	}
