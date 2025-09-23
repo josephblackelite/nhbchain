@@ -18,29 +18,36 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	addr1 := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
 	addr2 := crypto.NewAddress(crypto.ZNHBPrefix, bytes.Repeat([]byte{0x02}, 20)).String()
 
+	chainID := uint64(42)
 	spec := GenesisSpec{
 		GenesisTime: "2024-01-01T00:00:00Z",
-		Tokens: []TokenSpec{
+		NativeTokens: []NativeTokenSpec{
 			{
-				Symbol:   "NHB",
-				Name:     "NHBCoin",
-				Decimals: 18,
+				Symbol:        "NHB",
+				Name:          "NHBCoin",
+				Decimals:      18,
+				MintAuthority: addr1,
 			},
 		},
 		Validators: []ValidatorSpec{
 			{
-				Name:    "validator-1",
 				Address: addr1,
 				Power:   10,
+				Moniker: "validator-1",
 			},
 		},
-		Balances: map[string]string{
-			addr1: "1000",
-			addr2: "2000",
+		Alloc: map[string]map[string]string{
+			addr1: {
+				"NHB": "1000",
+			},
+			addr2: {
+				"NHB": "2000",
+			},
 		},
 		Roles: map[string][]string{
 			"role.nhb": []string{addr1, addr2},
 		},
+		ChainID: &chainID,
 	}
 
 	dir := t.TempDir()
@@ -61,11 +68,15 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	if loaded.GenesisTime != spec.GenesisTime {
 		t.Fatalf("genesisTime mismatch: got %q want %q", loaded.GenesisTime, spec.GenesisTime)
 	}
-	if len(loaded.Tokens) != len(spec.Tokens) {
-		t.Fatalf("unexpected token count: got %d want %d", len(loaded.Tokens), len(spec.Tokens))
+	if len(loaded.NativeTokens) != len(spec.NativeTokens) {
+		t.Fatalf("unexpected token count: got %d want %d", len(loaded.NativeTokens), len(spec.NativeTokens))
 	}
 	if len(loaded.Validators) != len(spec.Validators) {
 		t.Fatalf("unexpected validator count: got %d want %d", len(loaded.Validators), len(spec.Validators))
+	}
+
+	if id, ok := loaded.ChainIDValue(); !ok || id != chainID {
+		t.Fatalf("unexpected chain id: got %d (ok=%t) want %d", id, ok, chainID)
 	}
 
 	expectedTimestamp, err := time.Parse(time.RFC3339, spec.GenesisTime)
