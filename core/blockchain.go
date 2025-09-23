@@ -1,10 +1,13 @@
 package core
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"nhbchain/core/types"
 	"nhbchain/storage"
@@ -12,7 +15,7 @@ import (
 
 // Blockchain manages the collection of blocks.
 type Blockchain struct {
-	db      storage.Database // CHANGED: Now uses the generic Database interface
+	db      storage.Database // Uses the generic Database interface
 	tip     []byte
 	height  uint64
 	heights map[uint64][]byte
@@ -61,16 +64,18 @@ func cloneBytes(b []byte) []byte {
 }
 
 // NewBlockchain creates a new blockchain using the provided Database interface.
-func NewBlockchain(db storage.Database) (*Blockchain, error) { // CHANGED: Accepts the interface
+func NewBlockchain(db storage.Database) (*Blockchain, error) {
 	bc := &Blockchain{
-		db:      db, // Use the provided database
+		db:      db,
 		heights: make(map[uint64][]byte),
 	}
 
 	genesisHash, err := db.Get(genesisKey)
 	if err != nil {
+		// No genesis present; create and persist one.
 		fmt.Println("No genesis block found. Creating a new one.")
 		genesis := createGenesisBlock()
+
 		genesisBytes, err := json.Marshal(genesis)
 		if err != nil {
 			return nil, fmt.Errorf("marshal genesis: %w", err)
@@ -103,7 +108,7 @@ func NewBlockchain(db storage.Database) (*Blockchain, error) { // CHANGED: Accep
 		bc.height = 0
 		bc.heights[0] = cloneBytes(genesisHash)
 	} else {
-		// A full implementation would load the entire heights map from the DB on startup.
+		// Existing chain: load tip, height, and the height index.
 		fmt.Println("Found existing genesis block.")
 		tipHash, err := db.Get(tipKey)
 		if err != nil {
@@ -134,10 +139,21 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
-	if string(b.Header.PrevHash) != string(bc.tip) {
+	// Basic linkage check: parent hash must match current tip.
+	if !bytes.Equal(b.Header.PrevHash, bc.tip) {
 		return fmt.Errorf("block prevhash mismatch")
 	}
 
+	// Verify TxRoot against the computed root for this block's tx list.
+	expectedTxRoot, err := ComputeTxRoot(b.Transactions)
+	if err != nil {
+		return fmt.Errorf("compute tx root: %w", err)
+	}
+	if !bytes.Equal(expectedTxRoot, b.Header.TxRoot) {
+		return fmt.Errorf("transaction root mismatch")
+	}
+
+	// Persist block
 	blockBytes, err := json.Marshal(b)
 	if err != nil {
 		return fmt.Errorf("marshal block: %w", err)
@@ -150,7 +166,6 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 	if err := bc.db.Put(blockHash, blockBytes); err != nil {
 		return fmt.Errorf("store block: %w", err)
 	}
-
 	if err := bc.db.Put(tipKey, blockHash); err != nil {
 		return fmt.Errorf("store tip: %w", err)
 	}
@@ -166,6 +181,7 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 		return fmt.Errorf("store hash index: %w", err)
 	}
 
+	// Update in-memory pointers after successful persistence.
 	bc.tip = cloneBytes(blockHash)
 	bc.height = newHeight
 	bc.heights[newHeight] = cloneBytes(blockHash)
@@ -232,7 +248,7 @@ func createGenesisBlock() *types.Block {
 		Height:    0,
 		Timestamp: 1672531200,
 		PrevHash:  []byte{},
-		StateRoot: []byte{},
+		StateRoot: gethtypes.EmptyRootHash.Bytes(),
 	}
 	return types.NewBlock(header, []*types.Transaction{})
 }

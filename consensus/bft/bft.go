@@ -93,7 +93,11 @@ func (e *Engine) propose() {
 	if len(txs) == 0 {
 		return
 	}
-	block := e.node.CreateBlock(txs)
+	block, err := e.node.CreateBlock(txs)
+	if err != nil {
+		fmt.Printf("failed to build block: %v\n", err)
+		return
+	}
 	proposal := &Proposal{Block: block, Round: e.currentState.Round, Proposer: e.privKey.PubKey().Address().Bytes()}
 	msgPayload, _ := json.Marshal(proposal)
 	msg := &p2p.Message{Type: p2p.MsgTypeProposal, Payload: msgPayload}
@@ -145,7 +149,10 @@ func (e *Engine) commit() {
 		return
 	}
 	fmt.Printf("COMMIT: Committing block %d and adding to chain.\n", e.activeProposal.Block.Header.Height)
-	e.node.CommitBlock(e.activeProposal.Block)
+	if err := e.node.CommitBlock(e.activeProposal.Block); err != nil {
+		fmt.Printf("failed to commit block: %v\n", err)
+		return
+	}
 	e.committedBlocks[e.currentState.Height] = true
 	e.currentState.Height++
 	e.currentState.Round = 0
