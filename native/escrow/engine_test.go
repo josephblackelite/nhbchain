@@ -16,6 +16,8 @@ type mockState struct {
 	accounts      map[[20]byte]*types.Account
 	vaultBalances map[string]map[[32]byte]*big.Int
 	vaultAddrs    map[string][20]byte
+	trades        map[[32]byte]*Trade
+	tradeByEscrow map[[32]byte][32]byte
 }
 
 func newMockState() *mockState {
@@ -23,6 +25,8 @@ func newMockState() *mockState {
 		escrows:       make(map[[32]byte]*Escrow),
 		accounts:      make(map[[20]byte]*types.Account),
 		vaultBalances: make(map[string]map[[32]byte]*big.Int),
+		trades:        make(map[[32]byte]*Trade),
+		tradeByEscrow: make(map[[32]byte][32]byte),
 		vaultAddrs: map[string][20]byte{
 			"NHB":  newTestAddress(0xAA),
 			"ZNHB": newTestAddress(0xBB),
@@ -184,6 +188,58 @@ func (m *mockState) account(addr [20]byte) *types.Account {
 		return cloneAccount(acc)
 	}
 	return &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+}
+
+func (m *mockState) TradePut(t *Trade) error {
+	if t == nil {
+		return fmt.Errorf("nil trade")
+	}
+	sanitized, err := SanitizeTrade(t)
+	if err != nil {
+		return err
+	}
+	m.trades[sanitized.ID] = sanitized.Clone()
+	return nil
+}
+
+func (m *mockState) TradeGet(id [32]byte) (*Trade, bool) {
+	tr, ok := m.trades[id]
+	if !ok {
+		return nil, false
+	}
+	return tr.Clone(), true
+}
+
+func (m *mockState) TradeSetStatus(id [32]byte, status TradeStatus) error {
+	if !status.Valid() {
+		return fmt.Errorf("invalid status")
+	}
+	trade, ok := m.trades[id]
+	if !ok {
+		return fmt.Errorf("trade not found")
+	}
+	if trade.Status == status {
+		return nil
+	}
+	clone := trade.Clone()
+	clone.Status = status
+	m.trades[id] = clone
+	return nil
+}
+
+func (m *mockState) TradeIndexEscrow(escrowID [32]byte, tradeID [32]byte) error {
+	m.tradeByEscrow[escrowID] = tradeID
+	return nil
+}
+
+func (m *mockState) TradeLookupByEscrow(escrowID [32]byte) ([32]byte, bool, error) {
+	tradeID, ok := m.tradeByEscrow[escrowID]
+	return tradeID, ok, nil
+}
+
+func (m *mockState) TradeRemoveByEscrow(escrowID [32]byte) error {
+	delete(m.tradeByEscrow, escrowID)
+	return nil
 }
 
 type capturingEmitter struct {

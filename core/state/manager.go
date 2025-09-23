@@ -53,6 +53,8 @@ var (
 	escrowRecordPrefix         = []byte("escrow/record/")
 	escrowVaultPrefix          = []byte("escrow/vault/")
 	escrowModuleSeedPrefix     = "module/escrow/vault/"
+	tradeRecordPrefix          = []byte("trade/record/")
+	tradeEscrowIndexPrefix     = []byte("trade/index/escrow/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -193,6 +195,20 @@ func escrowVaultKey(id [32]byte, token string) []byte {
 	return ethcrypto.Keccak256(buf)
 }
 
+func tradeStorageKey(id [32]byte) []byte {
+	buf := make([]byte, len(tradeRecordPrefix)+len(id))
+	copy(buf, tradeRecordPrefix)
+	copy(buf[len(tradeRecordPrefix):], id[:])
+	return ethcrypto.Keccak256(buf)
+}
+
+func tradeEscrowIndexKey(escrowID [32]byte) []byte {
+	buf := make([]byte, len(tradeEscrowIndexPrefix)+len(escrowID))
+	copy(buf, tradeEscrowIndexPrefix)
+	copy(buf[len(tradeEscrowIndexPrefix):], escrowID[:])
+	return ethcrypto.Keccak256(buf)
+}
+
 func escrowModuleAddress(token string) ([20]byte, error) {
 	normalized, err := escrow.NormalizeToken(token)
 	if err != nil {
@@ -272,6 +288,90 @@ func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
 	}
 	if !out.Status.Valid() {
 		return nil, fmt.Errorf("escrow: invalid status in storage")
+	}
+	return out, nil
+}
+
+type storedTrade struct {
+	ID          [32]byte
+	OfferID     string
+	Buyer       [20]byte
+	Seller      [20]byte
+	QuoteToken  string
+	QuoteAmount *big.Int
+	EscrowQuote [32]byte
+	BaseToken   string
+	BaseAmount  *big.Int
+	EscrowBase  [32]byte
+	Deadline    *big.Int
+	CreatedAt   *big.Int
+	Status      uint8
+}
+
+func newStoredTrade(t *escrow.Trade) *storedTrade {
+	if t == nil {
+		return nil
+	}
+	quote := big.NewInt(0)
+	if t.QuoteAmount != nil {
+		quote = new(big.Int).Set(t.QuoteAmount)
+	}
+	base := big.NewInt(0)
+	if t.BaseAmount != nil {
+		base = new(big.Int).Set(t.BaseAmount)
+	}
+	return &storedTrade{
+		ID:          t.ID,
+		OfferID:     t.OfferID,
+		Buyer:       t.Buyer,
+		Seller:      t.Seller,
+		QuoteToken:  t.QuoteToken,
+		QuoteAmount: quote,
+		EscrowQuote: t.EscrowQuote,
+		BaseToken:   t.BaseToken,
+		BaseAmount:  base,
+		EscrowBase:  t.EscrowBase,
+		Deadline:    big.NewInt(t.Deadline),
+		CreatedAt:   big.NewInt(t.CreatedAt),
+		Status:      uint8(t.Status),
+	}
+}
+
+func (s *storedTrade) toTrade() (*escrow.Trade, error) {
+	if s == nil {
+		return nil, fmt.Errorf("trade: nil storage record")
+	}
+	out := &escrow.Trade{
+		ID:         s.ID,
+		OfferID:    s.OfferID,
+		Buyer:      s.Buyer,
+		Seller:     s.Seller,
+		QuoteToken: s.QuoteToken,
+		QuoteAmount: func() *big.Int {
+			if s.QuoteAmount == nil {
+				return big.NewInt(0)
+			}
+			return new(big.Int).Set(s.QuoteAmount)
+		}(),
+		EscrowQuote: s.EscrowQuote,
+		BaseToken:   s.BaseToken,
+		BaseAmount: func() *big.Int {
+			if s.BaseAmount == nil {
+				return big.NewInt(0)
+			}
+			return new(big.Int).Set(s.BaseAmount)
+		}(),
+		EscrowBase: s.EscrowBase,
+		Status:     escrow.TradeStatus(s.Status),
+	}
+	if s.Deadline != nil {
+		out.Deadline = s.Deadline.Int64()
+	}
+	if s.CreatedAt != nil {
+		out.CreatedAt = s.CreatedAt.Int64()
+	}
+	if !out.Status.Valid() {
+		return nil, fmt.Errorf("trade: invalid status in storage")
 	}
 	return out, nil
 }
@@ -740,6 +840,96 @@ func (m *Manager) EscrowDebit(id [32]byte, token string, amt *big.Int) error {
 	}
 	updated := new(big.Int).Sub(balance, amt)
 	return m.writeBigInt(key, updated)
+}
+
+// TradePut persists the provided trade definition after validation.
+func (m *Manager) TradePut(t *escrow.Trade) error {
+	if t == nil {
+		return fmt.Errorf("trade: nil value")
+	}
+	sanitized, err := escrow.SanitizeTrade(t)
+	if err != nil {
+		return err
+	}
+	record := newStoredTrade(sanitized)
+	encoded, err := rlp.EncodeToBytes(record)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(tradeStorageKey(sanitized.ID), encoded)
+}
+
+// TradeGet retrieves a stored trade by identifier.
+func (m *Manager) TradeGet(id [32]byte) (*escrow.Trade, bool) {
+	data, err := m.trie.Get(tradeStorageKey(id))
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	stored := new(storedTrade)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false
+	}
+	trade, err := stored.toTrade()
+	if err != nil {
+		return nil, false
+	}
+	sanitized, err := escrow.SanitizeTrade(trade)
+	if err != nil {
+		return nil, false
+	}
+	return sanitized, true
+}
+
+// TradeSetStatus updates the status of an existing trade.
+func (m *Manager) TradeSetStatus(id [32]byte, status escrow.TradeStatus) error {
+	if !status.Valid() {
+		return fmt.Errorf("trade: invalid status %d", status)
+	}
+	trade, ok := m.TradeGet(id)
+	if !ok {
+		return fmt.Errorf("trade: not found")
+	}
+	if trade.Status == status {
+		return nil
+	}
+	trade.Status = status
+	return m.TradePut(trade)
+}
+
+// TradeIndexEscrow associates an escrow with a trade for quick lookups.
+func (m *Manager) TradeIndexEscrow(escrowID [32]byte, tradeID [32]byte) error {
+	key := tradeEscrowIndexKey(escrowID)
+	return m.trie.Update(key, append([]byte(nil), tradeID[:]...))
+}
+
+// TradeLookupByEscrow resolves the trade identifier owning the provided escrow.
+func (m *Manager) TradeLookupByEscrow(escrowID [32]byte) ([32]byte, bool, error) {
+	key := tradeEscrowIndexKey(escrowID)
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
+	if len(data) != len([32]byte{}) {
+		return [32]byte{}, false, nil
+	}
+	var id [32]byte
+	copy(id[:], data)
+	return id, true, nil
+}
+
+// TradeRemoveByEscrow removes the reverse index entry for the escrow.
+func (m *Manager) TradeRemoveByEscrow(escrowID [32]byte) error {
+	key := tradeEscrowIndexKey(escrowID)
+	return m.trie.Update(key, nil)
+}
+
+// IsEscrowFunded reports whether the escrow currently holds funds.
+func (m *Manager) IsEscrowFunded(id [32]byte) (bool, error) {
+	esc, ok := m.EscrowGet(id)
+	if !ok {
+		return false, fmt.Errorf("escrow not found")
+	}
+	return esc.Status == escrow.EscrowFunded, nil
 }
 
 // KVPut stores the provided value under the supplied key using RLP encoding.
