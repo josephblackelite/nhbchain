@@ -133,7 +133,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusBadRequest
 		message := "failed to read request body"
-		if errors.Is(err, http.ErrBodyTooLarge) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
 			status = http.StatusRequestEntityTooLarge
 			message = fmt.Sprintf("request body exceeds %d bytes", maxRequestBytes)
 		}
