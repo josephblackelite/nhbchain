@@ -1,6 +1,7 @@
 ListenAddress = ":6002"
 RPCAddress = ":8081"
 DataDir = "./nhb-data-peer"
+GenesisFile = ""
 ValidatorKeystorePath = "./validator-peer.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

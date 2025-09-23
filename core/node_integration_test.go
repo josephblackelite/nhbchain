@@ -19,7 +19,7 @@ func TestCommitBlockRollsBackOnApplyError(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey)
+	node, err := NewNode(db, validatorKey, "", true)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}

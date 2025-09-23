@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -65,7 +67,7 @@ func cloneBytes(b []byte) []byte {
 }
 
 // NewBlockchain creates a new blockchain using the provided Database interface.
-func NewBlockchain(db storage.Database) (*Blockchain, error) {
+func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis bool) (*Blockchain, error) {
 	bc := &Blockchain{
 		db:      db,
 		heights: make(map[uint64][]byte),
@@ -73,36 +75,14 @@ func NewBlockchain(db storage.Database) (*Blockchain, error) {
 
 	genesisHash, err := db.Get(genesisKey)
 	if err != nil {
-		// No genesis present; create and persist one.
-		fmt.Println("No genesis block found. Creating a new one.")
-		genesis := createGenesisBlock()
-
-		genesisBytes, err := json.Marshal(genesis)
-		if err != nil {
-			return nil, fmt.Errorf("marshal genesis: %w", err)
-		}
-		genesisHash, err = genesis.Header.Hash()
-		if err != nil {
-			return nil, fmt.Errorf("hash genesis: %w", err)
+		genesis, loadErr := genesisFromSource(strings.TrimSpace(genesisPath), allowAutogenesis)
+		if loadErr != nil {
+			return nil, loadErr
 		}
 
-		if err := db.Put(genesisHash, genesisBytes); err != nil {
-			return nil, fmt.Errorf("store genesis block: %w", err)
-		}
-		if err := db.Put(genesisKey, genesisHash); err != nil {
-			return nil, fmt.Errorf("store genesis hash: %w", err)
-		}
-		if err := db.Put(tipKey, genesisHash); err != nil {
-			return nil, fmt.Errorf("store tip: %w", err)
-		}
-		if err := db.Put(heightKeyName, encodeUint64(0)); err != nil {
-			return nil, fmt.Errorf("store height: %w", err)
-		}
-		if err := db.Put(heightKey(0), genesisHash); err != nil {
-			return nil, fmt.Errorf("store height index: %w", err)
-		}
-		if err := db.Put(hashKey(genesisHash), encodeUint64(0)); err != nil {
-			return nil, fmt.Errorf("store hash index: %w", err)
+		genesisHash, err = persistGenesisBlock(db, genesis)
+		if err != nil {
+			return nil, err
 		}
 
 		if len(genesisHash) < 8 {
@@ -112,38 +92,39 @@ func NewBlockchain(db storage.Database) (*Blockchain, error) {
 		bc.height = 0
 		bc.heights[0] = cloneBytes(genesisHash)
 		bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
-	} else {
-		// Existing chain: load tip, height, and the height index.
-		fmt.Println("Found existing genesis block.")
-		tipHash, err := db.Get(tipKey)
-		if err != nil {
-			return nil, fmt.Errorf("load tip: %w", err)
-		}
-		bc.tip = cloneBytes(tipHash)
-
-		heightBytes, err := db.Get(heightKeyName)
-		if err != nil {
-			return nil, fmt.Errorf("load height: %w", err)
-		}
-		bc.height = decodeUint64(heightBytes)
-
-		for i := uint64(0); i <= bc.height; i++ {
-			hashBytes, err := db.Get(heightKey(i))
-			if err != nil {
-				return nil, fmt.Errorf("load height index %d: %w", i, err)
-			}
-			bc.heights[i] = cloneBytes(hashBytes)
-		}
-
-		genesisHash, ok := bc.heights[0]
-		if !ok {
-			return nil, fmt.Errorf("missing genesis hash in height index")
-		}
-		if len(genesisHash) < 8 {
-			return nil, fmt.Errorf("genesis hash too short: %d", len(genesisHash))
-		}
-		bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
+		return bc, nil
 	}
+
+	// Existing chain: load tip, height, and the height index.
+	fmt.Println("Found existing genesis block.")
+	tipHash, err := db.Get(tipKey)
+	if err != nil {
+		return nil, fmt.Errorf("load tip: %w", err)
+	}
+	bc.tip = cloneBytes(tipHash)
+
+	heightBytes, err := db.Get(heightKeyName)
+	if err != nil {
+		return nil, fmt.Errorf("load height: %w", err)
+	}
+	bc.height = decodeUint64(heightBytes)
+
+	for i := uint64(0); i <= bc.height; i++ {
+		hashBytes, err := db.Get(heightKey(i))
+		if err != nil {
+			return nil, fmt.Errorf("load height index %d: %w", i, err)
+		}
+		bc.heights[i] = cloneBytes(hashBytes)
+	}
+
+	genesisHash, ok := bc.heights[0]
+	if !ok {
+		return nil, fmt.Errorf("missing genesis hash in height index")
+	}
+	if len(genesisHash) < 8 {
+		return nil, fmt.Errorf("genesis hash too short: %d", len(genesisHash))
+	}
+	bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
 
 	return bc, nil
 }
@@ -265,6 +246,78 @@ func createGenesisBlock() *types.Block {
 		StateRoot: gethtypes.EmptyRootHash.Bytes(),
 	}
 	return types.NewBlock(header, []*types.Transaction{})
+}
+
+func genesisFromSource(path string, allowAutogenesis bool) (*types.Block, error) {
+	if path != "" {
+		fmt.Printf("No genesis block found. Loading from %s.\n", path)
+		return loadGenesisFromFile(path)
+	}
+
+	if !allowAutogenesis {
+		return nil, fmt.Errorf("no genesis block present and autogenesis disabled")
+	}
+
+	fmt.Println("No genesis block found. Creating a new one.")
+	return createGenesisBlock(), nil
+}
+
+func loadGenesisFromFile(path string) (*types.Block, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read genesis file %s: %w", path, err)
+	}
+
+	var block types.Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		return nil, fmt.Errorf("unmarshal genesis file %s: %w", path, err)
+	}
+
+	if block.Header == nil {
+		return nil, fmt.Errorf("genesis file %s missing header", path)
+	}
+
+	return &block, nil
+}
+
+func persistGenesisBlock(db storage.Database, genesis *types.Block) ([]byte, error) {
+	if genesis == nil {
+		return nil, fmt.Errorf("genesis block is nil")
+	}
+	if genesis.Header == nil {
+		return nil, fmt.Errorf("genesis block missing header")
+	}
+
+	genesisBytes, err := json.Marshal(genesis)
+	if err != nil {
+		return nil, fmt.Errorf("marshal genesis: %w", err)
+	}
+
+	genesisHash, err := genesis.Header.Hash()
+	if err != nil {
+		return nil, fmt.Errorf("hash genesis: %w", err)
+	}
+
+	if err := db.Put(genesisHash, genesisBytes); err != nil {
+		return nil, fmt.Errorf("store genesis block: %w", err)
+	}
+	if err := db.Put(genesisKey, genesisHash); err != nil {
+		return nil, fmt.Errorf("store genesis hash: %w", err)
+	}
+	if err := db.Put(tipKey, genesisHash); err != nil {
+		return nil, fmt.Errorf("store tip: %w", err)
+	}
+	if err := db.Put(heightKeyName, encodeUint64(0)); err != nil {
+		return nil, fmt.Errorf("store height: %w", err)
+	}
+	if err := db.Put(heightKey(0), genesisHash); err != nil {
+		return nil, fmt.Errorf("store height index: %w", err)
+	}
+	if err := db.Put(hashKey(genesisHash), encodeUint64(0)); err != nil {
+		return nil, fmt.Errorf("store hash index: %w", err)
+	}
+
+	return genesisHash, nil
 }
 
 func (bc *Blockchain) CurrentHeader() *types.BlockHeader {
