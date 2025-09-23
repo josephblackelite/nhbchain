@@ -2,6 +2,7 @@ package genesis
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -11,25 +12,28 @@ import (
 )
 
 type GenesisSpec struct {
-	GenesisTime string              `json:"genesisTime"`
-	Tokens      []TokenSpec         `json:"tokens"`
-	Validators  []ValidatorSpec     `json:"validators"`
-	Balances    map[string]string   `json:"balances"`
-	Roles       map[string][]string `json:"roles"`
+	GenesisTime  string                       `json:"genesisTime"`
+	NativeTokens []NativeTokenSpec            `json:"nativeTokens"`
+	Alloc        map[string]map[string]string `json:"alloc"`
+	Roles        map[string][]string          `json:"roles"`
+	Validators   []ValidatorSpec              `json:"validators"`
 
 	genesisTimestamp time.Time
 }
 
-type TokenSpec struct {
-	Symbol   string `json:"symbol"`
-	Name     string `json:"name"`
-	Decimals uint8  `json:"decimals"`
+type NativeTokenSpec struct {
+	Symbol            string `json:"symbol"`
+	Name              string `json:"name"`
+	Decimals          uint8  `json:"decimals"`
+	MintAuthority     string `json:"mintAuthority,omitempty"`
+	InitialMintPaused *bool  `json:"initialMintPaused,omitempty"`
 }
 
 type ValidatorSpec struct {
-	Name    string `json:"name"`
 	Address string `json:"address"`
 	Power   uint64 `json:"power"`
+	Moniker string `json:"moniker,omitempty"`
+	PubKey  string `json:"pubKey,omitempty"`
 }
 
 func LoadGenesisSpec(path string) (*GenesisSpec, error) {
@@ -67,14 +71,14 @@ func (s *GenesisSpec) validate() error {
 	}
 	s.genesisTimestamp = parsedTime
 
-	tokenSymbols := make(map[string]struct{}, len(s.Tokens))
-	for i := range s.Tokens {
-		if err := s.Tokens[i].validate(); err != nil {
-			return fmt.Errorf("token[%d]: %w", i, err)
+	tokenSymbols := make(map[string]struct{}, len(s.NativeTokens))
+	for i := range s.NativeTokens {
+		if err := s.NativeTokens[i].validate(); err != nil {
+			return fmt.Errorf("nativeTokens[%d]: %w", i, err)
 		}
-		symbolKey := strings.ToUpper(strings.TrimSpace(s.Tokens[i].Symbol))
+		symbolKey := strings.ToUpper(strings.TrimSpace(s.NativeTokens[i].Symbol))
 		if _, exists := tokenSymbols[symbolKey]; exists {
-			return fmt.Errorf("token[%d]: duplicate symbol %q", i, s.Tokens[i].Symbol)
+			return fmt.Errorf("nativeTokens[%d]: duplicate symbol %q", i, s.NativeTokens[i].Symbol)
 		}
 		tokenSymbols[symbolKey] = struct{}{}
 	}
@@ -92,6 +96,13 @@ func (s *GenesisSpec) validate() error {
 		if v.Power == 0 {
 			return fmt.Errorf("validator[%d]: power must be greater than zero", i)
 		}
+		if strings.TrimSpace(v.PubKey) != "" {
+			pk := strings.TrimSpace(v.PubKey)
+			pk = strings.TrimPrefix(pk, "0x")
+			if _, err := hex.DecodeString(pk); err != nil {
+				return fmt.Errorf("validator[%d]: invalid pubKey: %w", i, err)
+			}
+		}
 		addrKey := string(addr[:])
 		if _, exists := validatorAddresses[addrKey]; exists {
 			return fmt.Errorf("validator[%d]: duplicate address %q", i, v.Address)
@@ -99,15 +110,32 @@ func (s *GenesisSpec) validate() error {
 		validatorAddresses[addrKey] = struct{}{}
 	}
 
-	for account, amount := range s.Balances {
+	for account, balances := range s.Alloc {
 		if _, err := ParseBech32Account(account); err != nil {
-			return fmt.Errorf("balances[%q]: %w", account, err)
+			return fmt.Errorf("alloc[%q]: %w", account, err)
 		}
-		if strings.TrimSpace(amount) == "" {
-			return fmt.Errorf("balances[%q]: amount must be provided", account)
+		if balances == nil {
+			continue
 		}
-		if _, ok := new(big.Int).SetString(amount, 10); !ok {
-			return fmt.Errorf("balances[%q]: invalid amount %q", account, amount)
+		seen := make(map[string]struct{}, len(balances))
+		for symbol, amount := range balances {
+			normalized := strings.ToUpper(strings.TrimSpace(symbol))
+			if normalized == "" {
+				return fmt.Errorf("alloc[%q]: token symbol must be provided", account)
+			}
+			if _, exists := tokenSymbols[normalized]; !exists {
+				return fmt.Errorf("alloc[%q]: unknown token %q", account, symbol)
+			}
+			if _, exists := seen[normalized]; exists {
+				return fmt.Errorf("alloc[%q]: duplicate token %q", account, symbol)
+			}
+			seen[normalized] = struct{}{}
+			if strings.TrimSpace(amount) == "" {
+				return fmt.Errorf("alloc[%q][%q]: amount must be provided", account, symbol)
+			}
+			if _, ok := new(big.Int).SetString(amount, 10); !ok {
+				return fmt.Errorf("alloc[%q][%q]: invalid amount %q", account, symbol, amount)
+			}
 		}
 	}
 
@@ -125,7 +153,7 @@ func (s *GenesisSpec) validate() error {
 	return nil
 }
 
-func (t *TokenSpec) validate() error {
+func (t *NativeTokenSpec) validate() error {
 	if strings.TrimSpace(t.Symbol) == "" {
 		return fmt.Errorf("symbol must be provided")
 	}
@@ -134,6 +162,11 @@ func (t *TokenSpec) validate() error {
 	}
 	if t.Decimals > 18 {
 		return fmt.Errorf("decimals must be 18 or fewer")
+	}
+	if strings.TrimSpace(t.MintAuthority) != "" {
+		if _, err := ParseBech32Account(t.MintAuthority); err != nil {
+			return fmt.Errorf("mintAuthority: %w", err)
+		}
 	}
 	return nil
 }

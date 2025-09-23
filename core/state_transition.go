@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"time"
 
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
@@ -15,7 +16,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	gethcore "github.com/ethereum/go-ethereum/core"
-	"github.com/ethereum/go-ethereum/core/state"
+	gethstate "github.com/ethereum/go-ethereum/core/state"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	gethvm "github.com/ethereum/go-ethereum/core/vm"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -37,7 +38,7 @@ var (
 
 type StateProcessor struct {
 	Trie           *trie.Trie
-	stateDB        *state.CachingDB
+	stateDB        *gethstate.CachingDB
 	LoyaltyEngine  *loyalty.Engine
 	usernameToAddr map[string][]byte
 	ValidatorSet   map[string]*big.Int
@@ -45,7 +46,7 @@ type StateProcessor struct {
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
-	stateDB := state.NewDatabase(tr.TrieDB(), nil)
+	stateDB := gethstate.NewDatabase(tr.TrieDB(), nil)
 	sp := &StateProcessor{
 		Trie:           tr,
 		stateDB:        stateDB,
@@ -133,7 +134,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		return err
 	}
 	parentRoot := sp.Trie.Hash()
-	statedb, err := state.New(parentRoot, sp.stateDB)
+	statedb, err := gethstate.New(parentRoot, sp.stateDB)
 	if err != nil {
 		return fmt.Errorf("statedb init: %w", err)
 	}
@@ -729,6 +730,24 @@ func (sp *StateProcessor) loadStateAccount(addr []byte) (*gethtypes.StateAccount
 	}
 	stateAcc := new(gethtypes.StateAccount)
 	if err := rlp.DecodeBytes(data, stateAcc); err != nil {
+		slim := new(gethtypes.SlimAccount)
+		if errSlim := rlp.DecodeBytes(data, slim); errSlim == nil {
+			restored := &gethtypes.StateAccount{
+				Nonce:   slim.Nonce,
+				Balance: slim.Balance,
+				Root:    gethtypes.EmptyRootHash,
+				CodeHash: func() []byte {
+					if len(slim.CodeHash) == 0 {
+						return gethtypes.EmptyCodeHash.Bytes()
+					}
+					return append([]byte(nil), slim.CodeHash...)
+				}(),
+			}
+			if len(slim.Root) != 0 {
+				restored.Root = common.BytesToHash(slim.Root)
+			}
+			return restored, nil
+		}
 		legacy := new(types.Account)
 		if errLegacy := rlp.DecodeBytes(data, legacy); errLegacy != nil {
 			return nil, err
@@ -872,15 +891,12 @@ func (sp *StateProcessor) loadValidatorSet() error {
 	if err != nil {
 		return err
 	}
-	if len(data) == 0 {
-		return nil
-	}
-	stored := make(map[string]*big.Int)
-	if err := rlp.DecodeBytes(data, &stored); err != nil {
+	decoded, err := nhbstate.DecodeValidatorSet(data)
+	if err != nil {
 		return err
 	}
-	sp.ValidatorSet = make(map[string]*big.Int, len(stored))
-	for k, v := range stored {
+	sp.ValidatorSet = make(map[string]*big.Int, len(decoded))
+	for k, v := range decoded {
 		if v == nil {
 			v = big.NewInt(0)
 		}
@@ -890,14 +906,7 @@ func (sp *StateProcessor) loadValidatorSet() error {
 }
 
 func (sp *StateProcessor) persistValidatorSet() error {
-	stored := make(map[string]*big.Int, len(sp.ValidatorSet))
-	for k, v := range sp.ValidatorSet {
-		if v == nil {
-			continue
-		}
-		stored[k] = new(big.Int).Set(v)
-	}
-	encoded, err := rlp.EncodeToBytes(stored)
+	encoded, err := nhbstate.EncodeValidatorSet(sp.ValidatorSet)
 	if err != nil {
 		return err
 	}
