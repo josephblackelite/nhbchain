@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 )
 
 const rpcEndpoint = "http://localhost:8080" // Assumes the CLI is run on the same machine as the node
+var rpcAuthToken = os.Getenv("NHB_RPC_TOKEN")
 
 func main() {
 	if len(os.Args) < 2 {
@@ -102,9 +104,12 @@ func stake(amount int64, keyFile string) {
 	}
 
 	tx := types.Transaction{
-		Type:  types.TxTypeStake,
-		Nonce: account.Nonce,
-		Value: big.NewInt(amount), // For a stake tx, Value is the amount of ZapNHB
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeStake,
+		Nonce:    account.Nonce,
+		Value:    big.NewInt(amount), // For a stake tx, Value is the amount of ZapNHB
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
 	}
 	tx.Sign(privKey.PrivateKey)
 
@@ -133,9 +138,12 @@ func unStake(amount int64, keyFile string) {
 	}
 
 	tx := types.Transaction{
-		Type:  types.TxTypeUnstake,
-		Nonce: account.Nonce,
-		Value: big.NewInt(amount),
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeUnstake,
+		Nonce:    account.Nonce,
+		Value:    big.NewInt(amount),
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
 	}
 	tx.Sign(privKey.PrivateKey)
 
@@ -164,9 +172,12 @@ func heartbeat(keyFile string) {
 	}
 
 	tx := types.Transaction{
-		Type:  types.TxTypeHeartbeat,
-		Nonce: account.Nonce,
-		Value: big.NewInt(0), // Heartbeats transfer no value
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeHeartbeat,
+		Nonce:    account.Nonce,
+		Value:    big.NewInt(0), // Heartbeats transfer no value
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
 	}
 	tx.Sign(privKey.PrivateKey)
 
@@ -223,12 +234,13 @@ func claimUsername(username string, keyFile string) {
 
 	// Construct the native TxTypeRegisterIdentity transaction
 	tx := types.Transaction{
-		Type:  types.TxTypeRegisterIdentity, // Type 2
-		Nonce: account.Nonce,
-		// The username is passed in the Data field as a byte slice
-		Data:  []byte(username),
-		Value: big.NewInt(0), // This transaction transfers no NHBCoin
-		// Gas can be added here if needed by your L1's fee model for native txs
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeRegisterIdentity, // Type 2
+		Nonce:    account.Nonce,
+		Data:     []byte(username),
+		Value:    big.NewInt(0), // This transaction transfers no NHBCoin
+		GasLimit: 50000,
+		GasPrice: big.NewInt(1),
 	}
 	tx.Sign(privKey.PrivateKey)
 
@@ -248,21 +260,24 @@ func fetchAccount(addr string) (*types.Account, error) {
 		"id": 1, "method": "nhb_getBalance", "params": []string{addr},
 	})
 
-	resp, err := http.Post(rpcEndpoint, "application/json", bytes.NewBuffer(payload))
+	resp, err := doRPCRequest(payload, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to the node at %s. Is it running?", rpcEndpoint)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var rpcResp struct {
 		Result types.Account `json:"result"`
-		Error  string        `json:"error"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
 		return nil, fmt.Errorf("failed to decode response from node")
 	}
-	if rpcResp.Error != "" {
-		return nil, fmt.Errorf("error from node: %s", rpcResp.Error)
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("error from node: %s", rpcResp.Error.Message)
 	}
 	return &rpcResp.Result, nil
 }
@@ -271,13 +286,50 @@ func sendTransaction(tx *types.Transaction) error {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"id": 1, "method": "nhb_sendTransaction", "params": []interface{}{tx},
 	})
-	resp, err := http.Post(rpcEndpoint, "application/json", bytes.NewBuffer(payload))
+	resp, err := doRPCRequest(payload, true)
 	if err != nil {
-		return fmt.Errorf("failed to connect to the node")
+		return err
 	}
 	defer resp.Body.Close()
-	// A full implementation would check the response for errors here.
+
+	var rpcResp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return fmt.Errorf("failed to decode response from node")
+	}
+	if rpcResp.Error != nil {
+		return fmt.Errorf("error from node: %s", rpcResp.Error.Message)
+	}
 	return nil
+}
+
+func doRPCRequest(payload []byte, requireAuth bool) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, rpcEndpoint, bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if requireAuth {
+		if rpcAuthToken == "" {
+			return nil, fmt.Errorf("privileged RPC call requires NHB_RPC_TOKEN to be set")
+		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(rpcAuthToken))
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		target := "the node"
+		if requireAuth {
+			target = "the authenticated node"
+		}
+		return nil, fmt.Errorf("failed to connect to %s", target)
+	}
+	return resp, nil
 }
 
 func loadPrivateKey(path string) (*crypto.PrivateKey, error) {
@@ -315,6 +367,7 @@ func deploy(bytecodeFile string, keyFile string) {
 	}
 
 	tx := types.Transaction{
+		ChainID:  types.NHBChainID(),
 		Type:     types.TxTypeTransfer, // EVM transactions use the standard transfer type
 		Nonce:    account.Nonce,
 		To:       nil, // To is nil for contract creation

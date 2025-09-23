@@ -162,6 +162,24 @@ Note: For commands that require a private key (stake, heartbeat, etc.), first ge
 >   Staked:   0 ZapNHB
 >   Nonce:    0
 
+### RPC authentication and allow-listed methods
+
+The JSON-RPC service now enforces authentication for privileged operations. Set an application secret in the environment before starting a node:
+
+```
+export NHB_RPC_TOKEN="choose-a-strong-shared-secret"
+```
+
+Clients that need to submit privileged requests (including `nhb_sendTransaction`) must send an `Authorization: Bearer <token>` header that matches `NHB_RPC_TOKEN`. The bundled CLI reads the same environment variable to attach the header automatically.
+
+Read-only NHBPortal integrations are restricted to the following allow-listed methods:
+
+* `nhb_getBalance`
+* `nhb_getLatestBlocks`
+* `nhb_getLatestTransactions`
+
+Any other method, including `nhb_sendTransaction`, will return a JSON-RPC authentication error unless the request is properly signed with the bearer token.
+
 # Stake 5000 ZapNHB to become a validator candidate
 ./nhb-cli stake 5000 wallet.key
 > Successfully sent stake transaction for 5000 ZapNHB.

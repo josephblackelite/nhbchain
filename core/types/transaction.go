@@ -4,10 +4,26 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
+
+var nhbChainID = big.NewInt(0x4e4842) // ASCII "NHB"
+
+// NHBChainID returns the canonical chain ID for the NHBCoin network.
+func NHBChainID() *big.Int {
+	return new(big.Int).Set(nhbChainID)
+}
+
+// IsValidChainID reports whether the provided chain ID matches the NHBCoin network.
+func IsValidChainID(chainID *big.Int) bool {
+	if chainID == nil {
+		return false
+	}
+	return chainID.Cmp(nhbChainID) == 0
+}
 
 // TxType defines the purpose of a transaction.
 type TxType byte
@@ -30,6 +46,7 @@ const (
 // Transaction now has a Type field to distinguish its intent.
 // Transaction now supports gas fees and a paymaster.
 type Transaction struct {
+	ChainID  *big.Int `json:"chainId"`
 	Type     TxType   `json:"type"`
 	Nonce    uint64   `json:"nonce"`
 	To       []byte   `json:"to"`
@@ -50,6 +67,7 @@ type Transaction struct {
 // Hash logic must now include the new Type field.
 func (tx *Transaction) Hash() ([]byte, error) {
 	txData := struct {
+		ChainID  *big.Int
 		Type     TxType
 		Nonce    uint64
 		To       []byte
@@ -57,7 +75,7 @@ func (tx *Transaction) Hash() ([]byte, error) {
 		Data     []byte
 		GasLimit uint64
 		GasPrice *big.Int
-	}{tx.Type, tx.Nonce, tx.To, tx.Value, tx.Data, tx.GasLimit, tx.GasPrice}
+	}{tx.ChainID, tx.Type, tx.Nonce, tx.To, tx.Value, tx.Data, tx.GasLimit, tx.GasPrice}
 
 	b, err := json.Marshal(txData)
 	if err != nil {
@@ -69,6 +87,9 @@ func (tx *Transaction) Hash() ([]byte, error) {
 
 // ... (Sign and From methods remain the same)
 func (tx *Transaction) Sign(privKey *ecdsa.PrivateKey) error {
+	if tx.ChainID == nil {
+		return fmt.Errorf("chain id required")
+	}
 	hash, err := tx.Hash()
 	if err != nil {
 		return err
@@ -86,6 +107,9 @@ func (tx *Transaction) Sign(privKey *ecdsa.PrivateKey) error {
 func (tx *Transaction) From() ([]byte, error) {
 	if tx.from != nil {
 		return tx.from, nil
+	}
+	if tx.R == nil || tx.S == nil || tx.V == nil {
+		return nil, fmt.Errorf("transaction missing signature")
 	}
 	hash, err := tx.Hash()
 	if err != nil {
