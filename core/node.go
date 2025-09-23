@@ -198,6 +198,11 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
 }
 
+// ChainID exposes the chain identifier derived from the genesis block.
+func (n *Node) ChainID() uint64 {
+	return n.chain.ChainID()
+}
+
 // Chain returns a reference to the node's blockchain object.
 func (n *Node) Chain() *Blockchain { // ✅ same package, no prefix
 	return n.chain

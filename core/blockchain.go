@@ -20,6 +20,7 @@ type Blockchain struct {
 	height  uint64
 	heights map[uint64][]byte
 	mu      sync.RWMutex
+	chainID uint64
 }
 
 var (
@@ -104,9 +105,13 @@ func NewBlockchain(db storage.Database) (*Blockchain, error) {
 			return nil, fmt.Errorf("store hash index: %w", err)
 		}
 
+		if len(genesisHash) < 8 {
+			return nil, fmt.Errorf("genesis hash too short: %d", len(genesisHash))
+		}
 		bc.tip = cloneBytes(genesisHash)
 		bc.height = 0
 		bc.heights[0] = cloneBytes(genesisHash)
+		bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
 	} else {
 		// Existing chain: load tip, height, and the height index.
 		fmt.Println("Found existing genesis block.")
@@ -129,6 +134,15 @@ func NewBlockchain(db storage.Database) (*Blockchain, error) {
 			}
 			bc.heights[i] = cloneBytes(hashBytes)
 		}
+
+		genesisHash, ok := bc.heights[0]
+		if !ok {
+			return nil, fmt.Errorf("missing genesis hash in height index")
+		}
+		if len(genesisHash) < 8 {
+			return nil, fmt.Errorf("genesis hash too short: %d", len(genesisHash))
+		}
+		bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
 	}
 
 	return bc, nil
@@ -263,4 +277,9 @@ func (bc *Blockchain) CurrentHeader() *types.BlockHeader {
 		return block.Header
 	}
 	return nil
+}
+
+// ChainID returns the identifier derived from the genesis block hash.
+func (bc *Blockchain) ChainID() uint64 {
+	return bc.chainID
 }
