@@ -1,5 +1,7 @@
 ListenAddress = "0.0.0.0:6002"
 RPCAddress = "0.0.0.0:8081"
 DataDir = "./nhb-data-local"
-ValidatorKey = "2a324ae18d36aec1011a2f1043532f6bfaa02c6328399e2113264b7a271403d4"
+ValidatorKeystorePath = "./validator-local.keystore"
+ValidatorKMSURI = ""
+ValidatorKMSEnv = ""
 BootstrapPeers = ["34.67.8.77:6001"]

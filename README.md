@@ -86,7 +86,7 @@ You will now have two new files: nhb-node (the blockchain client) and nhb-cli (t
 3. Configuration
 The node is configured using a simple config.toml file.
 
-On your very first run, the node will automatically generate a config.toml file for you with a new, unique private key. You can also create one manually:
+On your very first run, the node will automatically generate a config.toml file for you with a new, encrypted validator key. You can also create one manually:
 
 config.toml
 
@@ -101,14 +101,31 @@ RPCAddress = "0.0.0.0:8080"
 # Path to the blockchain database
 DataDir = "./nhb-data"
 
-# On first run, leave this blank. The node will generate and save a key here.
-ValidatorKey = ""
+# The node stores validator keys in Ethereum-compatible keystore files.
+# Leave this blank on first run and it will be populated automatically.
+ValidatorKeystorePath = ""
+
+# Optional: configure an external key management service instead of a local keystore.
+ValidatorKMSURI = ""
+ValidatorKMSEnv = ""
 
 # A list of trusted nodes to connect to on startup
 BootstrapPeers = [
     # Add the public IP of the main network's bootstrap node here
     # e.g., "34.67.8.77:6001"
 ]
+
+Set the validator keystore passphrase in the `NHB_VALIDATOR_PASS` environment variable before starting the node:
+
+```
+export NHB_VALIDATOR_PASS="choose-a-strong-passphrase"
+```
+
+If you have an older configuration that still contains a plaintext `ValidatorKey`, convert it using the migration helper:
+
+```
+go run ./cmd/nhbctl migrate-keystore --config ./config.toml
+```
 
 4. Running the Node
 To ensure your node runs 24/7, we recommend using a terminal multiplexer like tmux.
