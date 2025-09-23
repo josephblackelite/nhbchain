@@ -28,6 +28,7 @@ func TestCommitBlockRollsBackOnApplyError(t *testing.T) {
 	parentPending := node.state.PendingRoot()
 
 	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
 		Type:     types.TxTypeRegisterIdentity,
 		Nonce:    0,
 		GasLimit: 21000,
