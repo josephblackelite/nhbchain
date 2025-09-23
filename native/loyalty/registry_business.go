@@ -45,6 +45,7 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 	if business.Paymaster == newPaymaster {
 		return nil
 	}
+	oldPaymaster := business.Paymaster
 	ownerKey := ownerPaymasterKey(business.Owner)
 	var active BusinessID
 	hasActive, err := r.st.KVGet(ownerKey, &active)
@@ -69,7 +70,11 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 		}
 	}
 	business.Paymaster = newPaymaster
-	return r.st.KVPut(businessKey(business.ID), business)
+	if err := r.st.KVPut(businessKey(business.ID), business); err != nil {
+		return err
+	}
+	r.emit(newPaymasterRotatedEvent(business, caller, oldPaymaster, newPaymaster))
+	return nil
 }
 
 func (r *Registry) AddMerchantAddress(id BusinessID, addr [20]byte) error {

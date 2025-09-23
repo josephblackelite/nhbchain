@@ -65,3 +65,53 @@ func ownerPaymasterKey(owner [20]byte) []byte {
 	copy(key[len(ownerPaymasterPrefix):], owner[:])
 	return key
 }
+
+// PauseProgram transitions the specified program into an inactive state. The
+// caller must be either the program owner or hold the loyalty admin role.
+func (r *Registry) PauseProgram(caller [20]byte, id ProgramID) error {
+	program := new(Program)
+	found, err := r.st.KVGet(programKey(id), program)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrProgramNotFound
+	}
+	if caller != program.Owner && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
+		return ErrUnauthorized
+	}
+	if !program.Active {
+		return nil
+	}
+	program.Active = false
+	if err := r.st.KVPut(programKey(program.ID), program); err != nil {
+		return err
+	}
+	r.emit(newProgramPausedEvent(program, caller))
+	return nil
+}
+
+// ResumeProgram reactivates the specified program. The caller must be either
+// the program owner or hold the loyalty admin role.
+func (r *Registry) ResumeProgram(caller [20]byte, id ProgramID) error {
+	program := new(Program)
+	found, err := r.st.KVGet(programKey(id), program)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrProgramNotFound
+	}
+	if caller != program.Owner && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
+		return ErrUnauthorized
+	}
+	if program.Active {
+		return nil
+	}
+	program.Active = true
+	if err := r.st.KVPut(programKey(program.ID), program); err != nil {
+		return err
+	}
+	r.emit(newProgramResumedEvent(program, caller))
+	return nil
+}

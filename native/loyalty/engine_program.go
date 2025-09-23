@@ -123,6 +123,10 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 		emitProgramSkip(st, ctx, program, business, "program_not_found", nil)
 		return
 	}
+	if !programActiveForTimestamp(program, timestamp) {
+		emitProgramSkip(st, ctx, program, business, "program_inactive", nil)
+		return
+	}
 
 	if token := strings.ToUpper(strings.TrimSpace(baseCtx.Token)); token != "NHB" {
 		emitProgramSkip(st, ctx, program, business, "token_not_supported", map[string]string{"token": baseCtx.Token})

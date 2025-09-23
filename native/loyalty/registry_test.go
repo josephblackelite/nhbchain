@@ -118,6 +118,78 @@ func TestRegistryCreateProgramUnauthorized(t *testing.T) {
 	}
 }
 
+func TestRegistryPauseProgramUnauthorized(t *testing.T) {
+	registry, _ := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x01
+	var outsider [20]byte
+	outsider[0] = 0x02
+	var id loyalty.ProgramID
+	id[0] = 0x03
+
+	program := &loyalty.Program{
+		ID:          id,
+		Owner:       owner,
+		TokenSymbol: "ZNHB",
+		AccrualBps:  100,
+		Active:      true,
+	}
+	if err := registry.CreateProgram(owner, program); err != nil {
+		t.Fatalf("create program: %v", err)
+	}
+	if err := registry.PauseProgram(outsider, id); !errors.Is(err, loyalty.ErrUnauthorized) {
+		t.Fatalf("expected unauthorized error, got %v", err)
+	}
+}
+
+func TestRegistryPauseAndResumeProgram(t *testing.T) {
+	registry, manager := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x11
+	var admin [20]byte
+	admin[0] = 0x12
+	var id loyalty.ProgramID
+	id[0] = 0x13
+
+	base := &loyalty.Program{
+		ID:          id,
+		Owner:       owner,
+		TokenSymbol: "ZNHB",
+		AccrualBps:  100,
+		Active:      true,
+	}
+	if err := registry.CreateProgram(owner, base); err != nil {
+		t.Fatalf("create program: %v", err)
+	}
+	emitter := &capturingEmitter{}
+	registry.SetEmitter(emitter)
+
+	if err := registry.PauseProgram(owner, id); err != nil {
+		t.Fatalf("pause program: %v", err)
+	}
+	stored, ok := registry.GetProgram(id)
+	if !ok || stored.Active {
+		t.Fatalf("expected program to be inactive after pause")
+	}
+	if len(emitter.events) != 1 || emitter.events[0].EventType() != events.TypeLoyaltyProgramPaused {
+		t.Fatalf("expected pause event, got %#v", emitter.events)
+	}
+
+	if err := manager.SetRole(roleLoyaltyAdmin, admin[:]); err != nil {
+		t.Fatalf("assign admin role: %v", err)
+	}
+	if err := registry.ResumeProgram(admin, id); err != nil {
+		t.Fatalf("resume program: %v", err)
+	}
+	stored, ok = registry.GetProgram(id)
+	if !ok || !stored.Active {
+		t.Fatalf("expected program to be active after resume")
+	}
+	if len(emitter.events) != 2 || emitter.events[1].EventType() != events.TypeLoyaltyProgramResumed {
+		t.Fatalf("expected resume event, got %#v", emitter.events)
+	}
+}
+
 func TestRegistryUpdateProgramByOwner(t *testing.T) {
 	registry, _ := newTestRegistry(t)
 	var owner [20]byte

@@ -1,6 +1,7 @@
 package loyalty
 
 import (
+	"encoding/hex"
 	"math/big"
 	"testing"
 	"time"
@@ -191,6 +192,62 @@ func TestApplyProgramRewardHappyPath(t *testing.T) {
 	}
 }
 
+func TestApplyProgramRewardProgramPaused(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[0] = 0x01
+	var merchant [20]byte
+	merchant[0] = 0x02
+	var paymaster [20]byte
+	paymaster[0] = 0x03
+	var programID ProgramID
+	programID[0] = 0x04
+	var businessID BusinessID
+	businessID[0] = 0x05
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:          programID,
+		Owner:       merchant,
+		TokenSymbol: "ZNHB",
+		AccrualBps:  500,
+		Active:      false,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{ID: businessID, Owner: merchant, Paymaster: paymaster, Merchants: [][20]byte{merchant}})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	baseCtx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: baseCtx, ProgramHint: &programID})
+
+	if baseCtx.FromAccount.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected no reward for paused program")
+	}
+	paymasterAcc, _ := state.GetAccount(paymaster[:])
+	if paymasterAcc.BalanceZNHB.Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("expected paymaster balance unchanged, got %s", paymasterAcc.BalanceZNHB.String())
+	}
+	if len(state.events) != 1 || state.events[0].Type != eventProgramSkipped {
+		t.Fatalf("expected program skipped event, got %#v", state.events)
+	}
+	if reason := state.events[0].Attributes["reason"]; reason != "program_inactive" {
+		t.Fatalf("expected program_inactive reason, got %q", reason)
+	}
+}
+
 func TestApplyProgramRewardInsufficientPaymaster(t *testing.T) {
 	treasury := []byte("treasury")
 	cfg := newConfig(0, 0, 0, 0, treasury)
@@ -240,5 +297,90 @@ func TestApplyProgramRewardInsufficientPaymaster(t *testing.T) {
 	}
 	if state.events[0].Attributes["reason"] != "paymaster_insufficient" {
 		t.Fatalf("unexpected skip reason %s", state.events[0].Attributes["reason"])
+	}
+}
+
+func TestApplyProgramRewardPaymasterRotation(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[0] = 0x01
+	var merchant [20]byte
+	merchant[0] = 0x02
+	var oldPaymaster [20]byte
+	oldPaymaster[0] = 0x03
+	var newPaymaster [20]byte
+	newPaymaster[0] = 0x04
+	var programID ProgramID
+	programID[0] = 0x05
+	var businessID BusinessID
+	businessID[0] = 0x06
+
+	state.addAccount(oldPaymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	state.addAccount(newPaymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:           programID,
+		Owner:        merchant,
+		TokenSymbol:  "ZNHB",
+		AccrualBps:   500,
+		MinSpendWei:  big.NewInt(0),
+		DailyCapUser: nil,
+		Active:       true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{ID: businessID, Owner: merchant, Paymaster: oldPaymaster, Merchants: [][20]byte{merchant}})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx, ProgramHint: &programID})
+
+	paymasterAcc, _ := state.GetAccount(oldPaymaster[:])
+	if paymasterAcc.BalanceZNHB.String() != "950" {
+		t.Fatalf("expected old paymaster balance 950, got %s", paymasterAcc.BalanceZNHB.String())
+	}
+	if len(state.events) == 0 {
+		t.Fatalf("expected program accrued event, got none")
+	}
+	if got := state.events[len(state.events)-1].Attributes["paymaster"]; got != hex.EncodeToString(oldPaymaster[:]) {
+		t.Fatalf("expected paymaster attribute %s, got %s", hex.EncodeToString(oldPaymaster[:]), got)
+	}
+
+	// Rotate paymaster and apply reward again.
+	state.addBusinessMapping(merchant, &Business{ID: businessID, Owner: merchant, Paymaster: newPaymaster, Merchants: [][20]byte{merchant}})
+	ctx2 := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   ctx.Timestamp.Add(24 * time.Hour),
+		FromAccount: fromAccount,
+	}
+	engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx2, ProgramHint: &programID})
+
+	newPaymasterAcc, _ := state.GetAccount(newPaymaster[:])
+	if newPaymasterAcc.BalanceZNHB.String() != "950" {
+		t.Fatalf("expected new paymaster balance 950, got %s", newPaymasterAcc.BalanceZNHB.String())
+	}
+	paymasterAcc, _ = state.GetAccount(oldPaymaster[:])
+	if paymasterAcc.BalanceZNHB.String() != "950" {
+		t.Fatalf("expected old paymaster balance unchanged after rotation, got %s", paymasterAcc.BalanceZNHB.String())
+	}
+	if len(state.events) == 0 {
+		t.Fatalf("expected accrued event after rotation")
+	}
+	if got := state.events[len(state.events)-1].Attributes["paymaster"]; got != hex.EncodeToString(newPaymaster[:]) {
+		t.Fatalf("expected paymaster attribute %s, got %s", hex.EncodeToString(newPaymaster[:]), got)
 	}
 }

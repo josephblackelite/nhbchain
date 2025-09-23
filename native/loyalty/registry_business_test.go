@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"nhbchain/core/events"
 	loyalty "nhbchain/native/loyalty"
 )
 
@@ -80,5 +81,49 @@ func TestSetPaymasterSingleActivePerOwner(t *testing.T) {
 	stored, ok := registry.PrimaryPaymaster(owner)
 	if !ok || stored != secondPaymaster {
 		t.Fatalf("expected primary paymaster to be second")
+	}
+}
+
+func TestSetPaymasterEmitsRotationEvent(t *testing.T) {
+	registry, _ := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x21
+	businessID, err := registry.RegisterBusiness(owner, "Example")
+	if err != nil {
+		t.Fatalf("register business: %v", err)
+	}
+	var first [20]byte
+	first[0] = 0x31
+	emitter := &capturingEmitter{}
+	registry.SetEmitter(emitter)
+
+	if err := registry.SetPaymaster(businessID, owner, first); err != nil {
+		t.Fatalf("set initial paymaster: %v", err)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected one event, got %d", len(emitter.events))
+	}
+	evt, ok := emitter.events[0].(events.LoyaltyPaymasterRotated)
+	if !ok {
+		t.Fatalf("unexpected event type %T", emitter.events[0])
+	}
+	if evt.NewPaymaster != first {
+		t.Fatalf("expected new paymaster recorded in event")
+	}
+
+	var second [20]byte
+	second[0] = 0x32
+	if err := registry.SetPaymaster(businessID, owner, second); err != nil {
+		t.Fatalf("rotate paymaster: %v", err)
+	}
+	if len(emitter.events) != 2 {
+		t.Fatalf("expected two events, got %d", len(emitter.events))
+	}
+	evt, ok = emitter.events[1].(events.LoyaltyPaymasterRotated)
+	if !ok {
+		t.Fatalf("unexpected event type %T", emitter.events[1])
+	}
+	if evt.OldPaymaster != first || evt.NewPaymaster != second {
+		t.Fatalf("unexpected event payload %#v", evt)
 	}
 }
