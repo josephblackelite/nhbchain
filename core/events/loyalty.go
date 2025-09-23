@@ -9,6 +9,14 @@ const (
 	// TypeLoyaltyProgramUpdated is emitted when a loyalty program's mutable
 	// configuration is updated.
 	TypeLoyaltyProgramUpdated = "loyalty.program.updated"
+	// TypeLoyaltyProgramPaused is emitted when a loyalty program is paused.
+	TypeLoyaltyProgramPaused = "loyalty.program.paused"
+	// TypeLoyaltyProgramResumed is emitted when a loyalty program is
+	// resumed.
+	TypeLoyaltyProgramResumed = "loyalty.program.resumed"
+	// TypeLoyaltyPaymasterRotated is emitted when a business rotates its
+	// paymaster configuration.
+	TypeLoyaltyPaymasterRotated = "loyalty.paymaster.rotated"
 )
 
 // LoyaltyProgramCreated captures the key metadata of a newly created loyalty
@@ -41,3 +49,35 @@ type LoyaltyProgramUpdated struct {
 
 // EventType implements the Event interface.
 func (LoyaltyProgramUpdated) EventType() string { return TypeLoyaltyProgramUpdated }
+
+// LoyaltyProgramPaused captures the pause operation for a loyalty program.
+type LoyaltyProgramPaused struct {
+	ID     [32]byte
+	Owner  [20]byte
+	Caller [20]byte
+}
+
+// EventType implements the Event interface.
+func (LoyaltyProgramPaused) EventType() string { return TypeLoyaltyProgramPaused }
+
+// LoyaltyProgramResumed captures the resume operation for a loyalty program.
+type LoyaltyProgramResumed struct {
+	ID     [32]byte
+	Owner  [20]byte
+	Caller [20]byte
+}
+
+// EventType implements the Event interface.
+func (LoyaltyProgramResumed) EventType() string { return TypeLoyaltyProgramResumed }
+
+// LoyaltyPaymasterRotated captures the paymaster rotation for a business.
+type LoyaltyPaymasterRotated struct {
+	BusinessID   [32]byte
+	Owner        [20]byte
+	Caller       [20]byte
+	OldPaymaster [20]byte
+	NewPaymaster [20]byte
+}
+
+// EventType implements the Event interface.
+func (LoyaltyPaymasterRotated) EventType() string { return TypeLoyaltyPaymasterRotated }
