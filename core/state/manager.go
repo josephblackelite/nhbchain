@@ -43,6 +43,7 @@ var (
 	loyaltyGlobalKeyBytes      = ethcrypto.Keccak256([]byte("loyalty:global"))
 	loyaltyDailyPrefix         = []byte("loyalty-meter:base-daily:")
 	loyaltyTotalPrefix         = []byte("loyalty-meter:base-total:")
+	loyaltyProgramDailyPrefix  = []byte("loyalty-meter:program-daily:")
 	loyaltyBusinessPrefix      = []byte("loyalty/business/")
 	loyaltyBusinessOwnerPrefix = []byte("loyalty/business-owner/")
 	loyaltyMerchantIndexPrefix = []byte("loyalty/merchant-index/")
@@ -68,6 +69,18 @@ func LoyaltyBaseTotalMeterKey(addr []byte) []byte {
 	buf := make([]byte, len(loyaltyTotalPrefix)+len(addr))
 	copy(buf, loyaltyTotalPrefix)
 	copy(buf[len(loyaltyTotalPrefix):], addr)
+	return ethcrypto.Keccak256(buf)
+}
+
+func LoyaltyProgramDailyMeterKey(id loyalty.ProgramID, addr []byte, day string) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(loyaltyProgramDailyPrefix)+len(id)+1+len(trimmed)+1+len(addr))
+	copy(buf, loyaltyProgramDailyPrefix)
+	copy(buf[len(loyaltyProgramDailyPrefix):], id[:])
+	buf[len(loyaltyProgramDailyPrefix)+len(id)] = ':'
+	copy(buf[len(loyaltyProgramDailyPrefix)+len(id)+1:], trimmed)
+	buf[len(loyaltyProgramDailyPrefix)+len(id)+1+len(trimmed)] = ':'
+	copy(buf[len(loyaltyProgramDailyPrefix)+len(id)+1+len(trimmed)+1:], addr)
 	return ethcrypto.Keccak256(buf)
 }
 
@@ -398,6 +411,30 @@ func (m *Manager) LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error) {
 		return nil, fmt.Errorf("address must not be empty")
 	}
 	return m.loadBigInt(LoyaltyBaseTotalMeterKey(addr))
+}
+
+// SetLoyaltyProgramDailyAccrued stores the accrued program rewards for the
+// provided address and UTC day (YYYY-MM-DD).
+func (m *Manager) SetLoyaltyProgramDailyAccrued(id loyalty.ProgramID, addr []byte, day string, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	return m.writeBigInt(LoyaltyProgramDailyMeterKey(id, addr, day), amount)
+}
+
+// LoyaltyProgramDailyAccrued returns the accrued program rewards for the
+// supplied address and day.
+func (m *Manager) LoyaltyProgramDailyAccrued(id loyalty.ProgramID, addr []byte, day string) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	return m.loadBigInt(LoyaltyProgramDailyMeterKey(id, addr, day))
 }
 
 // SetRole associates an address with the specified role. Duplicate assignments

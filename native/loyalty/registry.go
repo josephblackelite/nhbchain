@@ -8,38 +8,27 @@ import (
 	"strings"
 
 	"nhbchain/core/events"
-	"nhbchain/core/state"
 )
 
 const roleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
 
-var (
-	programPrefix       = []byte("loyalty/program/")
-	merchantIndexPrefix = []byte("loyalty/merchant/")
-)
-
-func programKey(id ProgramID) []byte {
-	key := make([]byte, len(programPrefix)+len(id))
-	copy(key, programPrefix)
-	copy(key[len(programPrefix):], id[:])
-	return key
-}
-
-func merchantIdxKey(owner [20]byte) []byte {
-	key := make([]byte, len(merchantIndexPrefix)+len(owner))
-	copy(key, merchantIndexPrefix)
-	copy(key[len(merchantIndexPrefix):], owner[:])
-	return key
+type registryState interface {
+	TokenExists(symbol string) bool
+	HasRole(role string, addr []byte) bool
+	KVGet(key []byte, out interface{}) (bool, error)
+	KVPut(key []byte, value interface{}) error
+	KVAppend(key []byte, value []byte) error
+	KVGetList(key []byte, out interface{}) error
 }
 
 // Registry manages persistence and retrieval of loyalty programs.
 type Registry struct {
-	st      *state.Manager
+	st      registryState
 	emitter events.Emitter
 }
 
 // NewRegistry creates a registry backed by the provided state manager.
-func NewRegistry(st *state.Manager) *Registry {
+func NewRegistry(st registryState) *Registry {
 	return &Registry{st: st, emitter: events.NoopEmitter{}}
 }
 

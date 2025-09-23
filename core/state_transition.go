@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -1075,4 +1076,75 @@ func (sp *StateProcessor) GetAccount(addr []byte) (*types.Account, error) { retu
 func (sp *StateProcessor) IsValidator(addr []byte) bool {
 	_, ok := sp.ValidatorSet[string(addr)]
 	return ok
+}
+
+func (sp *StateProcessor) LoyaltyProgramByID(id loyalty.ProgramID) (*loyalty.Program, bool, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	program := new(loyalty.Program)
+	ok, err := manager.KVGet(loyalty.ProgramStorageKey(id), program)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return program, true, nil
+}
+
+func (sp *StateProcessor) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	var raw [][]byte
+	if err := manager.KVGetList(loyalty.ProgramOwnerIndexKey(owner), &raw); err != nil {
+		return nil, err
+	}
+	ids := make([]loyalty.ProgramID, 0, len(raw))
+	seen := make(map[[32]byte]struct{}, len(raw))
+	for _, entry := range raw {
+		if len(entry) != len(loyalty.ProgramID{}) {
+			continue
+		}
+		var id loyalty.ProgramID
+		copy(id[:], entry)
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	return ids, nil
+}
+
+func (sp *StateProcessor) LoyaltyBusinessByMerchant(merchant [20]byte) (*loyalty.Business, bool, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	var id loyalty.BusinessID
+	exists, err := manager.KVGet(nhbstate.LoyaltyMerchantIndexKey(merchant[:]), &id)
+	if err != nil || !exists {
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	if id == (loyalty.BusinessID{}) {
+		return nil, false, nil
+	}
+	business := new(loyalty.Business)
+	ok, err := manager.KVGet(nhbstate.LoyaltyBusinessKey(id), business)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return business, true, nil
+}
+
+func (sp *StateProcessor) LoyaltyProgramDailyAccrued(programID loyalty.ProgramID, addr []byte, day string) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyAccrued(programID, addr, day)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramDailyAccrued(programID loyalty.ProgramID, addr []byte, day string, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramDailyAccrued(programID, addr, day, amount)
 }

@@ -1,8 +1,10 @@
-package loyalty
+package loyalty_test
 
 import (
 	"errors"
 	"testing"
+
+	loyalty "nhbchain/native/loyalty"
 )
 
 func TestSetPaymasterRequiresAuthorization(t *testing.T) {
@@ -17,7 +19,7 @@ func TestSetPaymasterRequiresAuthorization(t *testing.T) {
 	paymaster[0] = 0xBB
 	var outsider [20]byte
 	outsider[0] = 0xCC
-	if err := registry.SetPaymaster(businessID, outsider, paymaster); !errors.Is(err, ErrUnauthorized) {
+	if err := registry.SetPaymaster(businessID, outsider, paymaster); !errors.Is(err, loyalty.ErrUnauthorized) {
 		t.Fatalf("expected unauthorized error, got %v", err)
 	}
 	if err := registry.SetPaymaster(businessID, owner, paymaster); err != nil {
@@ -65,7 +67,7 @@ func TestSetPaymasterSingleActivePerOwner(t *testing.T) {
 	}
 	var secondPaymaster [20]byte
 	secondPaymaster[0] = 0x22
-	if err := registry.SetPaymaster(secondID, owner, secondPaymaster); !errors.Is(err, ErrPaymasterConflict) {
+	if err := registry.SetPaymaster(secondID, owner, secondPaymaster); !errors.Is(err, loyalty.ErrPaymasterConflict) {
 		t.Fatalf("expected paymaster conflict, got %v", err)
 	}
 	var zeroAddr [20]byte
