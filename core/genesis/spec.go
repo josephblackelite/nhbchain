@@ -1,7 +1,9 @@
+// core/genesis/spec.go
 package genesis
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -12,12 +14,12 @@ import (
 )
 
 type GenesisSpec struct {
-	GenesisTime  string                       `json:"genesisTime"`
-	NativeTokens []NativeTokenSpec            `json:"nativeTokens"`
-	Validators   []ValidatorSpec              `json:"validators"`
-	Alloc        map[string]map[string]string `json:"alloc"`
-	Roles        map[string][]string          `json:"roles"`
-	ChainID      *uint64                      `json:"chainId,omitempty"`
+	GenesisTime   string                       `json:"genesisTime"`
+	NativeTokens  []NativeTokenSpec            `json:"nativeTokens"`
+	Validators    []ValidatorSpec              `json:"validators"`
+	Alloc         map[string]map[string]string `json:"alloc"`           // addr -> token -> amount
+	Roles         map[string][]string          `json:"roles"`           // role -> []addr
+	ChainID       *uint64                      `json:"chainId,omitempty"`
 
 	genesisTimestamp time.Time
 	chainIDValue     uint64
@@ -25,14 +27,11 @@ type GenesisSpec struct {
 }
 
 type NativeTokenSpec struct {
-	Symbol        string `json:"symbol"`
-	Name          string `json:"name"`
-	Decimals      uint8  `json:"decimals"`
-	MintAuthority string `json:"mintAuthority,omitempty"`
-	Paused        bool   `json:"paused"`
-
-	mintAuthorityAddr [20]byte
-	hasMintAuthority  bool
+	Symbol            string `json:"symbol"`
+	Name              string `json:"name"`
+	Decimals          uint8  `json:"decimals"`
+	MintAuthority     string `json:"mintAuthority,omitempty"`
+	InitialMintPaused *bool  `json:"initialMintPaused,omitempty"`
 }
 
 type ValidatorSpec struct {
@@ -46,34 +45,25 @@ func LoadGenesisSpec(path string) (*GenesisSpec, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("genesis spec path must be provided")
 	}
-
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read genesis spec %q: %w", path, err)
 	}
-
 	var spec GenesisSpec
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&spec); err != nil {
 		return nil, fmt.Errorf("decode genesis spec %q: %w", path, err)
 	}
-
 	if err := spec.validate(); err != nil {
-		return nil, fmt.Errorf("invalid genesis spec %q: %w", path, err)
+	 return nil, fmt.Errorf("invalid genesis spec %q: %w", path, err)
 	}
-
 	return &spec, nil
 }
 
-func (s *GenesisSpec) GenesisTimestamp() time.Time {
-	return s.genesisTimestamp
-}
-
+func (s *GenesisSpec) GenesisTimestamp() time.Time { return s.genesisTimestamp }
 func (s *GenesisSpec) ChainIDValue() (uint64, bool) {
-	if s.hasChainID {
-		return s.chainIDValue, true
-	}
+	if s.hasChainID { return s.chainIDValue, true }
 	return 0, false
 }
 
@@ -91,18 +81,20 @@ func (s *GenesisSpec) validate() error {
 		s.chainIDValue = *s.ChainID
 	}
 
+	// native tokens
 	tokenSymbols := make(map[string]struct{}, len(s.NativeTokens))
 	for i := range s.NativeTokens {
 		if err := s.NativeTokens[i].validate(); err != nil {
 			return fmt.Errorf("nativeToken[%d]: %w", i, err)
 		}
-		symbolKey := strings.ToUpper(strings.TrimSpace(s.NativeTokens[i].Symbol))
-		if _, exists := tokenSymbols[symbolKey]; exists {
+		key := strings.ToUpper(strings.TrimSpace(s.NativeTokens[i].Symbol))
+		if _, exists := tokenSymbols[key]; exists {
 			return fmt.Errorf("nativeToken[%d]: duplicate symbol %q", i, s.NativeTokens[i].Symbol)
 		}
-		tokenSymbols[symbolKey] = struct{}{}
+		tokenSymbols[key] = struct{}{}
 	}
 
+	// validators
 	validatorAddresses := make(map[string]struct{}, len(s.Validators))
 	for i := range s.Validators {
 		v := &s.Validators[i]
@@ -116,6 +108,13 @@ func (s *GenesisSpec) validate() error {
 		if v.Power == 0 {
 			return fmt.Errorf("validator[%d]: power must be greater than zero", i)
 		}
+		if strings.TrimSpace(v.PubKey) != "" {
+			pk := strings.TrimSpace(v.PubKey)
+			pk = strings.TrimPrefix(pk, "0x")
+			if _, err := hex.DecodeString(pk); err != nil {
+				return fmt.Errorf("validator[%d]: invalid pubKey: %w", i, err)
+			}
+		}
 		addrKey := string(addr[:])
 		if _, exists := validatorAddresses[addrKey]; exists {
 			return fmt.Errorf("validator[%d]: duplicate address %q", i, v.Address)
@@ -123,27 +122,21 @@ func (s *GenesisSpec) validate() error {
 		validatorAddresses[addrKey] = struct{}{}
 	}
 
+	// alloc
 	if len(s.Alloc) > 0 {
 		accounts := make([]string, 0, len(s.Alloc))
-		for account := range s.Alloc {
-			accounts = append(accounts, account)
-		}
+		for account := range s.Alloc { accounts = append(accounts, account) }
 		sort.Strings(accounts)
-
 		for _, account := range accounts {
 			if _, err := ParseBech32Account(account); err != nil {
 				return fmt.Errorf("alloc[%q]: %w", account, err)
 			}
 			tokenAlloc := s.Alloc[account]
-			if len(tokenAlloc) == 0 {
-				continue
-			}
+			if len(tokenAlloc) == 0 { continue }
 			symbols := make([]string, 0, len(tokenAlloc))
-			for symbol := range tokenAlloc {
-				symbols = append(symbols, symbol)
-			}
+			for symbol := range tokenAlloc { symbols = append(symbols, symbol) }
 			sort.Strings(symbols)
-
+			seen := make(map[string]struct{}, len(symbols))
 			for _, symbol := range symbols {
 				amount := tokenAlloc[symbol]
 				if strings.TrimSpace(amount) == "" {
@@ -152,32 +145,33 @@ func (s *GenesisSpec) validate() error {
 				if _, ok := new(big.Int).SetString(amount, 10); !ok {
 					return fmt.Errorf("alloc[%q][%q]: invalid amount %q", account, symbol, amount)
 				}
-				symbolKey := strings.ToUpper(strings.TrimSpace(symbol))
-				if _, exists := tokenSymbols[symbolKey]; !exists {
+				symKey := strings.ToUpper(strings.TrimSpace(symbol))
+				if _, exists := tokenSymbols[symKey]; !exists {
 					return fmt.Errorf("alloc[%q][%q]: undefined token", account, symbol)
 				}
+				if _, dup := seen[symKey]; dup {
+					return fmt.Errorf("alloc[%q]: duplicate token %q", account, symbol)
+				}
+				seen[symKey] = struct{}{}
 			}
 		}
 	}
 
+	// roles
 	roleNames := make([]string, 0, len(s.Roles))
-	for role := range s.Roles {
-		roleNames = append(roleNames, role)
-	}
+	for role := range s.Roles { roleNames = append(roleNames, role) }
 	sort.Strings(roleNames)
-
 	for _, role := range roleNames {
-		accounts := s.Roles[role]
 		if strings.TrimSpace(role) == "" {
 			return fmt.Errorf("roles: role name must be provided")
 		}
+		accounts := s.Roles[role]
 		for i, account := range accounts {
 			if _, err := ParseBech32Account(account); err != nil {
 				return fmt.Errorf("roles[%q][%d]: %w", role, i, err)
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -191,26 +185,13 @@ func (t *NativeTokenSpec) validate() error {
 	if t.Decimals > 18 {
 		return fmt.Errorf("decimals must be 18 or fewer")
 	}
-	trimmedAuthority := strings.TrimSpace(t.MintAuthority)
-	t.hasMintAuthority = false
-	t.mintAuthorityAddr = [20]byte{}
-	if trimmedAuthority != "" {
-		addr, err := ParseBech32Account(trimmedAuthority)
-		if err != nil {
+	if strings.TrimSpace(t.MintAuthority) != "" {
+		if _, err := ParseBech32Account(t.MintAuthority); err != nil {
 			return fmt.Errorf("mintAuthority: %w", err)
 		}
-		t.MintAuthority = trimmedAuthority
-		t.mintAuthorityAddr = addr
-		t.hasMintAuthority = true
 	}
+	// InitialMintPaused is optional; no extra check needed.
 	return nil
-}
-
-func (t *NativeTokenSpec) MintAuthorityAddress() ([20]byte, bool) {
-	if t.hasMintAuthority {
-		return t.mintAuthorityAddr, true
-	}
-	return [20]byte{}, false
 }
 
 func parseGenesisTime(value string) (time.Time, error) {

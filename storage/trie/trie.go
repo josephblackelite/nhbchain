@@ -97,7 +97,7 @@ func (t *Trie) Copy() (*Trie, error) {
 // root hash. After committing the wrapper recreates the underlying trie so it
 // can be reused for subsequent transitions.
 func (t *Trie) Commit(parent common.Hash, blockNumber uint64) (common.Hash, error) {
-	newRoot, nodes := t.trie.Commit(true)
+	newRoot, nodes := t.trie.Commit(false)
 	if nodes != nil {
 		merged := trienode.NewMergedNodeSet()
 		if err := merged.Merge(nodes); err != nil {
