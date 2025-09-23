@@ -1078,6 +1078,39 @@ func (sp *StateProcessor) IsValidator(addr []byte) bool {
 	return ok
 }
 
+func (sp *StateProcessor) ResolveUsername(username string) ([]byte, bool) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		return nil, false
+	}
+	addr, ok := sp.usernameToAddr[trimmed]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), addr...), true
+}
+
+func (sp *StateProcessor) HasRole(role string, addr []byte) bool {
+	if len(addr) == 0 {
+		return false
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.HasRole(role, addr)
+}
+
+func (sp *StateProcessor) LoyaltyBusinessByID(id loyalty.BusinessID) (*loyalty.Business, bool, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	business := new(loyalty.Business)
+	ok, err := manager.KVGet(nhbstate.LoyaltyBusinessKey(id), business)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return business, true, nil
+}
+
 func (sp *StateProcessor) LoyaltyProgramByID(id loyalty.ProgramID) (*loyalty.Program, bool, error) {
 	manager := nhbstate.NewManager(sp.Trie)
 	program := new(loyalty.Program)

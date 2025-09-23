@@ -173,6 +173,36 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetLatestBlocks(w, r, req)
 	case "nhb_getLatestTransactions":
 		s.handleGetLatestTransactions(w, r, req)
+	case "loyalty_createBusiness":
+		s.handleLoyaltyCreateBusiness(w, r, req)
+	case "loyalty_setPaymaster":
+		s.handleLoyaltySetPaymaster(w, r, req)
+	case "loyalty_addMerchant":
+		s.handleLoyaltyAddMerchant(w, r, req)
+	case "loyalty_removeMerchant":
+		s.handleLoyaltyRemoveMerchant(w, r, req)
+	case "loyalty_createProgram":
+		s.handleLoyaltyCreateProgram(w, r, req)
+	case "loyalty_updateProgram":
+		s.handleLoyaltyUpdateProgram(w, r, req)
+	case "loyalty_pauseProgram":
+		s.handleLoyaltyPauseProgram(w, r, req)
+	case "loyalty_resumeProgram":
+		s.handleLoyaltyResumeProgram(w, r, req)
+	case "loyalty_getBusiness":
+		s.handleLoyaltyGetBusiness(w, r, req)
+	case "loyalty_listPrograms":
+		s.handleLoyaltyListPrograms(w, r, req)
+	case "loyalty_programStats":
+		s.handleLoyaltyProgramStats(w, r, req)
+	case "loyalty_userDaily":
+		s.handleLoyaltyUserDaily(w, r, req)
+	case "loyalty_paymasterBalance":
+		s.handleLoyaltyPaymasterBalance(w, r, req)
+	case "loyalty_resolveUsername":
+		s.handleLoyaltyResolveUsername(w, r, req)
+	case "loyalty_userQR":
+		s.handleLoyaltyUserQR(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}

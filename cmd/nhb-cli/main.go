@@ -81,6 +81,97 @@ func main() {
 			return
 		}
 		deploy(os.Args[2], os.Args[3])
+	case "loyalty-create-business":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: loyalty-create-business <owner> <name>")
+			return
+		}
+		name := strings.Join(os.Args[3:], " ")
+		loyaltyCreateBusiness(os.Args[2], name)
+	case "loyalty-set-paymaster":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: loyalty-set-paymaster <caller> <businessId> <paymaster>")
+			return
+		}
+		loyaltySetPaymaster(os.Args[2], os.Args[3], os.Args[4])
+	case "loyalty-add-merchant":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: loyalty-add-merchant <caller> <businessId> <merchant>")
+			return
+		}
+		loyaltyModifyMerchant("loyalty_addMerchant", os.Args[2], os.Args[3], os.Args[4])
+	case "loyalty-remove-merchant":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: loyalty-remove-merchant <caller> <businessId> <merchant>")
+			return
+		}
+		loyaltyModifyMerchant("loyalty_removeMerchant", os.Args[2], os.Args[3], os.Args[4])
+	case "loyalty-create-program":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: loyalty-create-program <caller> <businessId> <programSpecJSON>")
+			return
+		}
+		loyaltyCreateProgram(os.Args[2], os.Args[3], os.Args[4])
+	case "loyalty-update-program":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: loyalty-update-program <caller> <programSpecJSON>")
+			return
+		}
+		loyaltyUpdateProgram(os.Args[2], os.Args[3])
+	case "loyalty-pause-program":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: loyalty-pause-program <caller> <programId>")
+			return
+		}
+		loyaltyLifecycle("loyalty_pauseProgram", os.Args[2], os.Args[3])
+	case "loyalty-resume-program":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: loyalty-resume-program <caller> <programId>")
+			return
+		}
+		loyaltyLifecycle("loyalty_resumeProgram", os.Args[2], os.Args[3])
+	case "loyalty-get-business":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: loyalty-get-business <businessId>")
+			return
+		}
+		loyaltyGetBusiness(os.Args[2])
+	case "loyalty-list-programs":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: loyalty-list-programs <businessId>")
+			return
+		}
+		loyaltyListPrograms(os.Args[2])
+	case "loyalty-program-stats":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: loyalty-program-stats <programId> <day>")
+			return
+		}
+		loyaltyProgramStats(os.Args[2], os.Args[3])
+	case "loyalty-user-daily":
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: loyalty-user-daily <user> <programId> <day>")
+			return
+		}
+		loyaltyUserDaily(os.Args[2], os.Args[3], os.Args[4])
+	case "loyalty-paymaster-balance":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: loyalty-paymaster-balance <businessId>")
+			return
+		}
+		loyaltyPaymasterBalance(os.Args[2])
+	case "loyalty-resolve-username":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: loyalty-resolve-username <username>")
+			return
+		}
+		loyaltyResolveUsername(os.Args[2])
+	case "loyalty-user-qr":
+		if len(os.Args) < 4 {
+			fmt.Println("Usage: loyalty-user-qr <mode:username|address> <value>")
+			return
+		}
+		loyaltyUserQR(os.Args[2], os.Args[3])
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		printUsage()
@@ -338,6 +429,244 @@ func loadPrivateKey(path string) (*crypto.PrivateKey, error) {
 		return nil, err
 	}
 	return crypto.PrivateKeyFromBytes(keyBytes)
+}
+
+func callLoyaltyRPC(method string, param interface{}, requireAuth bool) (json.RawMessage, error) {
+	payload := map[string]interface{}{"id": 1, "method": method}
+	if param != nil {
+		payload["params"] = []interface{}{param}
+	} else {
+		payload["params"] = []interface{}{}
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := doRPCRequest(body, requireAuth)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var rpcResp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response from node")
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("error from node: %s", rpcResp.Error.Message)
+	}
+	return rpcResp.Result, nil
+}
+
+func printJSONResult(result json.RawMessage) {
+	if len(result) == 0 {
+		fmt.Println("No result.")
+		return
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, result, "", "  "); err != nil {
+		fmt.Println(string(result))
+		return
+	}
+	fmt.Println(buf.String())
+}
+
+func decodeStringResult(result json.RawMessage) (string, error) {
+	var out string
+	if err := json.Unmarshal(result, &out); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+func loyaltyCreateBusiness(owner, name string) {
+	param := map[string]string{"caller": owner, "name": name}
+	result, err := callLoyaltyRPC("loyalty_createBusiness", param, true)
+	if err != nil {
+		fmt.Printf("Error creating business: %v\n", err)
+		return
+	}
+	id, err := decodeStringResult(result)
+	if err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return
+	}
+	fmt.Printf("Business created: %s\n", id)
+}
+
+func loyaltySetPaymaster(caller, businessID, paymaster string) {
+	param := map[string]string{
+		"caller":     caller,
+		"businessId": businessID,
+		"paymaster":  paymaster,
+	}
+	if _, err := callLoyaltyRPC("loyalty_setPaymaster", param, true); err != nil {
+		fmt.Printf("Error setting paymaster: %v\n", err)
+		return
+	}
+	fmt.Println("Paymaster updated.")
+}
+
+func loyaltyModifyMerchant(method, caller, businessID, merchant string) {
+	param := map[string]string{
+		"caller":     caller,
+		"businessId": businessID,
+		"merchant":   merchant,
+	}
+	if _, err := callLoyaltyRPC(method, param, true); err != nil {
+		fmt.Printf("Error modifying merchant: %v\n", err)
+		return
+	}
+	fmt.Println("Operation successful.")
+}
+
+func loyaltyCreateProgram(caller, businessID, spec string) {
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(spec), &raw); err != nil {
+		fmt.Printf("Invalid program spec JSON: %v\n", err)
+		return
+	}
+	param := map[string]interface{}{
+		"caller":     caller,
+		"businessId": businessID,
+		"spec":       raw,
+	}
+	result, err := callLoyaltyRPC("loyalty_createProgram", param, true)
+	if err != nil {
+		fmt.Printf("Error creating program: %v\n", err)
+		return
+	}
+	id, err := decodeStringResult(result)
+	if err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return
+	}
+	fmt.Printf("Program created: %s\n", id)
+}
+
+func loyaltyUpdateProgram(caller, spec string) {
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(spec), &raw); err != nil {
+		fmt.Printf("Invalid program spec JSON: %v\n", err)
+		return
+	}
+	param := map[string]interface{}{
+		"caller": caller,
+		"spec":   raw,
+	}
+	if _, err := callLoyaltyRPC("loyalty_updateProgram", param, true); err != nil {
+		fmt.Printf("Error updating program: %v\n", err)
+		return
+	}
+	fmt.Println("Program updated.")
+}
+
+func loyaltyLifecycle(method, caller, programID string) {
+	param := map[string]string{
+		"caller":    caller,
+		"programId": programID,
+	}
+	if _, err := callLoyaltyRPC(method, param, true); err != nil {
+		fmt.Printf("Error performing operation: %v\n", err)
+		return
+	}
+	fmt.Println("Operation successful.")
+}
+
+func loyaltyGetBusiness(businessID string) {
+	param := map[string]string{"businessId": businessID}
+	result, err := callLoyaltyRPC("loyalty_getBusiness", param, false)
+	if err != nil {
+		fmt.Printf("Error fetching business: %v\n", err)
+		return
+	}
+	printJSONResult(result)
+}
+
+func loyaltyListPrograms(businessID string) {
+	param := map[string]string{"businessId": businessID}
+	result, err := callLoyaltyRPC("loyalty_listPrograms", param, false)
+	if err != nil {
+		fmt.Printf("Error listing programs: %v\n", err)
+		return
+	}
+	printJSONResult(result)
+}
+
+func loyaltyProgramStats(programID, day string) {
+	param := map[string]string{"programId": programID, "day": day}
+	result, err := callLoyaltyRPC("loyalty_programStats", param, false)
+	if err != nil {
+		fmt.Printf("Error fetching stats: %v\n", err)
+		return
+	}
+	printJSONResult(result)
+}
+
+func loyaltyUserDaily(user, programID, day string) {
+	param := map[string]string{"user": user, "programId": programID, "day": day}
+	result, err := callLoyaltyRPC("loyalty_userDaily", param, false)
+	if err != nil {
+		fmt.Printf("Error fetching user meter: %v\n", err)
+		return
+	}
+	value, err := decodeStringResult(result)
+	if err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return
+	}
+	fmt.Printf("Daily accrued: %s\n", value)
+}
+
+func loyaltyPaymasterBalance(businessID string) {
+	param := map[string]string{"businessId": businessID}
+	result, err := callLoyaltyRPC("loyalty_paymasterBalance", param, false)
+	if err != nil {
+		fmt.Printf("Error fetching paymaster balance: %v\n", err)
+		return
+	}
+	balance, err := decodeStringResult(result)
+	if err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return
+	}
+	fmt.Printf("Paymaster balance (ZNHB): %s\n", balance)
+}
+
+func loyaltyResolveUsername(username string) {
+	param := map[string]string{"username": username}
+	result, err := callLoyaltyRPC("loyalty_resolveUsername", param, false)
+	if err != nil {
+		fmt.Printf("Error resolving username: %v\n", err)
+		return
+	}
+	address, err := decodeStringResult(result)
+	if err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return
+	}
+	fmt.Printf("Username %s resolves to %s\n", username, address)
+}
+
+func loyaltyUserQR(mode, value string) {
+	param := make(map[string]string)
+	switch strings.ToLower(mode) {
+	case "username":
+		param["username"] = value
+	case "address":
+		param["address"] = value
+	default:
+		fmt.Println("Mode must be either 'username' or 'address'.")
+		return
+	}
+	result, err := callLoyaltyRPC("loyalty_userQR", param, false)
+	if err != nil {
+		fmt.Printf("Error fetching QR payload: %v\n", err)
+		return
+	}
+	printJSONResult(result)
 }
 
 // NEW: deploy reads contract bytecode and sends a creation transaction.

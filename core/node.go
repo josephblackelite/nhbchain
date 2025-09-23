@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"nhbchain/consensus/bft"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/loyalty"
 	"nhbchain/p2p"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
@@ -208,6 +210,34 @@ func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorS
 func (n *Node) GetHeight() uint64                    { return n.chain.GetHeight() }
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
+}
+
+func (n *Node) LoyaltyManager() *nhbstate.Manager {
+	return nhbstate.NewManager(n.state.Trie)
+}
+
+func (n *Node) LoyaltyRegistry() *loyalty.Registry {
+	return loyalty.NewRegistry(n.LoyaltyManager())
+}
+
+func (n *Node) LoyaltyBusinessByID(id loyalty.BusinessID) (*loyalty.Business, bool, error) {
+	return n.state.LoyaltyBusinessByID(id)
+}
+
+func (n *Node) LoyaltyProgramByID(id loyalty.ProgramID) (*loyalty.Program, bool, error) {
+	return n.state.LoyaltyProgramByID(id)
+}
+
+func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, error) {
+	return n.state.LoyaltyProgramsByOwner(owner)
+}
+
+func (n *Node) ResolveUsername(username string) ([]byte, bool) {
+	return n.state.ResolveUsername(username)
+}
+
+func (n *Node) HasRole(role string, addr []byte) bool {
+	return n.state.HasRole(role, addr)
 }
 
 // --- Both accessors are needed by different subsystems ---
