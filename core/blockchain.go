@@ -1,9 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"nhbchain/core/types"
 	"nhbchain/storage"
@@ -58,6 +61,14 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 
 	if string(b.Header.PrevHash) != string(bc.tip) {
 		return fmt.Errorf("block prevhash mismatch")
+	}
+
+	expectedTxRoot, err := ComputeTxRoot(b.Transactions)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(expectedTxRoot, b.Header.TxRoot) {
+		return fmt.Errorf("transaction root mismatch")
 	}
 
 	blockBytes, _ := json.Marshal(b)
@@ -131,11 +142,10 @@ func createGenesisBlock() *types.Block {
 		Height:    0,
 		Timestamp: 1672531200,
 		PrevHash:  []byte{},
-		StateRoot: []byte{},
+		StateRoot: gethtypes.EmptyRootHash.Bytes(),
 	}
 	return types.NewBlock(header, []*types.Transaction{})
 }
-
 
 func (bc *Blockchain) CurrentHeader() *types.BlockHeader {
 	bc.mu.RLock()

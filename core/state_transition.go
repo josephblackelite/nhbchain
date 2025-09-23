@@ -34,6 +34,7 @@ type StateProcessor struct {
 	LoyaltyEngine  *loyalty.Engine
 	usernameToAddr map[string][]byte
 	ValidatorSet   map[string]*big.Int
+	committedRoot  common.Hash
 }
 
 func NewStateProcessor(tr *trie.Trie) *StateProcessor {
@@ -42,7 +43,63 @@ func NewStateProcessor(tr *trie.Trie) *StateProcessor {
 		LoyaltyEngine:  loyalty.NewEngine(),
 		usernameToAddr: make(map[string][]byte),
 		ValidatorSet:   make(map[string]*big.Int),
+		committedRoot:  tr.Root(),
 	}
+}
+
+// CurrentRoot returns the last committed state root.
+func (sp *StateProcessor) CurrentRoot() common.Hash {
+	return sp.committedRoot
+}
+
+// PendingRoot returns the root of the trie including in-memory mutations.
+func (sp *StateProcessor) PendingRoot() common.Hash {
+	return sp.Trie.Hash()
+}
+
+// ResetToRoot discards any in-memory changes and reloads the trie at the
+// provided root hash.
+func (sp *StateProcessor) ResetToRoot(root common.Hash) error {
+	if err := sp.Trie.Reset(root); err != nil {
+		return err
+	}
+	sp.committedRoot = root
+	return nil
+}
+
+// Commit persists the current trie contents and returns the resulting state
+// root.
+func (sp *StateProcessor) Commit(blockNumber uint64) (common.Hash, error) {
+	newRoot, err := sp.Trie.Commit(sp.committedRoot, blockNumber)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	sp.committedRoot = newRoot
+	return newRoot, nil
+}
+
+// Copy returns a shallow clone of the state processor that can be used for
+// speculative execution without mutating the canonical state.
+func (sp *StateProcessor) Copy() (*StateProcessor, error) {
+	trieCopy, err := sp.Trie.Copy()
+	if err != nil {
+		return nil, err
+	}
+	usernameCopy := make(map[string][]byte, len(sp.usernameToAddr))
+	for k, v := range sp.usernameToAddr {
+		usernameCopy[k] = append([]byte(nil), v...)
+	}
+	validatorCopy := make(map[string]*big.Int, len(sp.ValidatorSet))
+	for k, v := range sp.ValidatorSet {
+		validatorCopy[k] = new(big.Int).Set(v)
+	}
+	return &StateProcessor{
+		Trie:           trieCopy,
+		LoyaltyEngine:  sp.LoyaltyEngine,
+		usernameToAddr: usernameCopy,
+		ValidatorSet:   validatorCopy,
+		committedRoot:  sp.committedRoot,
+	}, nil
 }
 
 func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
@@ -519,9 +576,12 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
 
 func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 	key := ethcrypto.Keccak256(addr)
-	data, _ := sp.Trie.Get(key)
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
 	account := new(types.Account)
-	if data != nil {
+	if len(data) != 0 {
 		if err := rlp.DecodeBytes(data, account); err != nil {
 			return nil, err
 		}
@@ -540,21 +600,21 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	if err != nil {
 		return err
 	}
-	return sp.Trie.Put(key, encoded)
+	return sp.Trie.Update(key, encoded)
 }
 
 func (sp *StateProcessor) setEscrow(id []byte, e *escrow.Escrow) error {
-	key := append([]byte("escrow-"), id...)
+	hashedKey := ethcrypto.Keccak256(append([]byte("escrow-"), id...))
 	encoded, err := rlp.EncodeToBytes(e)
 	if err != nil {
 		return err
 	}
-	return sp.Trie.Put(key, encoded)
+	return sp.Trie.Update(hashedKey, encoded)
 }
 
 func (sp *StateProcessor) getEscrow(id []byte) (*escrow.Escrow, error) {
-	key := append([]byte("escrow-"), id...)
-	data, err := sp.Trie.Get(key)
+	hashedKey := ethcrypto.Keccak256(append([]byte("escrow-"), id...))
+	data, err := sp.Trie.Get(hashedKey)
 	if err != nil || data == nil {
 		return nil, fmt.Errorf("escrow with ID %x not found", id)
 	}
