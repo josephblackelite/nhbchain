@@ -1,19 +1,23 @@
 package config
 
 import (
-	"encoding/hex"
-	"nhbchain/crypto"
+	"fmt"
 	"os"
+	"path/filepath"
+
+	"nhbchain/crypto"
 
 	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	ListenAddress  string   `toml:"ListenAddress"`
-	RPCAddress     string   `toml:"RPCAddress"`
-	DataDir        string   `toml:"DataDir"`
-	ValidatorKey   string   `toml:"ValidatorKey"`
-	BootstrapPeers []string `toml:"BootstrapPeers"` // THE MISSING FIELD
+	ListenAddress         string   `toml:"ListenAddress"`
+	RPCAddress            string   `toml:"RPCAddress"`
+	DataDir               string   `toml:"DataDir"`
+	ValidatorKeystorePath string   `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI       string   `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv       string   `toml:"ValidatorKMSEnv"`
+	BootstrapPeers        []string `toml:"BootstrapPeers"`
 }
 
 // Load loads the configuration from the given path.
@@ -23,28 +27,50 @@ func Load(path string) (*Config, error) {
 		return createDefault(path)
 	}
 
-	if _, err := toml.DecodeFile(path, cfg); err != nil {
+	meta, err := toml.DecodeFile(path, cfg)
+	if err != nil {
 		return nil, err
 	}
 
-	if cfg.ValidatorKey == "" {
-		key, err := crypto.GeneratePrivateKey()
-		if err != nil {
-			return nil, err
+	for _, undecoded := range meta.Undecoded() {
+		if len(undecoded) == 1 && undecoded[0] == "ValidatorKey" {
+			return nil, fmt.Errorf("config file %s uses deprecated ValidatorKey field; run nhbctl migrate-keystore", path)
 		}
-		cfg.ValidatorKey = hex.EncodeToString(key.Bytes())
+	}
 
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-
-		if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+	if cfg.ValidatorKMSURI == "" && cfg.ValidatorKMSEnv == "" {
+		if err := ensureKeystore(path, cfg); err != nil {
 			return nil, err
 		}
 	}
+
 	return cfg, nil
+}
+
+func ensureKeystore(configPath string, cfg *Config) error {
+	keystorePath := cfg.ValidatorKeystorePath
+	if keystorePath == "" {
+		keystorePath = defaultKeystorePath(configPath)
+	}
+
+	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
+		key, genErr := crypto.GeneratePrivateKey()
+		if genErr != nil {
+			return genErr
+		}
+		if err := crypto.SaveToKeystore(keystorePath, key, ""); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	if cfg.ValidatorKeystorePath != keystorePath {
+		cfg.ValidatorKeystorePath = keystorePath
+		return persist(configPath, cfg)
+	}
+
+	return nil
 }
 
 // createDefault creates and saves a default configuration file.
@@ -54,24 +80,46 @@ func createDefault(path string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := &Config{
-		ListenAddress: ":6001",
-		RPCAddress:    ":8080",
-		DataDir:       "./nhb-data",
-		ValidatorKey:  hex.EncodeToString(key.Bytes()),
-		// Initialize with an empty list of peers by default.
-		BootstrapPeers: []string{},
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
+	keystorePath := defaultKeystorePath(path)
+	if err := crypto.SaveToKeystore(keystorePath, key, ""); err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
-	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+	cfg := &Config{
+		ListenAddress:  ":6001",
+		RPCAddress:     ":8080",
+		DataDir:        "./nhb-data",
+		BootstrapPeers: []string{},
+	}
+	cfg.ValidatorKeystorePath = keystorePath
+
+	if err := persist(path, cfg); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
+}
+
+func persist(path string, cfg *Config) error {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	return toml.NewEncoder(f).Encode(cfg)
+}
+
+func defaultKeystorePath(configPath string) string {
+	dir := filepath.Dir(configPath)
+	if dir == "." || dir == "" {
+		dir = ""
+	}
+	return filepath.Join(dir, "validator.keystore")
 }
