@@ -17,6 +17,13 @@ import (
 type NodeClient interface {
 	EscrowCreate(ctx context.Context, req EscrowCreateRequest) (*EscrowCreateResponse, error)
 	EscrowGet(ctx context.Context, id string) (*EscrowState, error)
+	EscrowRelease(ctx context.Context, escrowID, caller string) error
+	EscrowRefund(ctx context.Context, escrowID, caller string) error
+	EscrowDispute(ctx context.Context, escrowID, caller string) error
+	EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error
+	P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error)
+	P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error)
+	FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error)
 }
 
 // RPCNodeClient implements NodeClient against the nhb JSON-RPC server.
@@ -86,6 +93,66 @@ func (c *RPCNodeClient) EscrowGet(ctx context.Context, id string) (*EscrowState,
 		return nil, err
 	}
 	return &result, nil
+}
+
+func (c *RPCNodeClient) EscrowRelease(ctx context.Context, escrowID, caller string) error {
+	params := map[string]string{"id": escrowID, "caller": caller}
+	return c.call(ctx, "escrow_release", []interface{}{params}, nil)
+}
+
+func (c *RPCNodeClient) EscrowRefund(ctx context.Context, escrowID, caller string) error {
+	params := map[string]string{"id": escrowID, "caller": caller}
+	return c.call(ctx, "escrow_refund", []interface{}{params}, nil)
+}
+
+func (c *RPCNodeClient) EscrowDispute(ctx context.Context, escrowID, caller string) error {
+	params := map[string]string{"id": escrowID, "caller": caller}
+	return c.call(ctx, "escrow_dispute", []interface{}{params}, nil)
+}
+
+func (c *RPCNodeClient) EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error {
+	params := map[string]string{"id": escrowID, "caller": caller, "outcome": outcome}
+	return c.call(ctx, "escrow_resolve", []interface{}{params}, nil)
+}
+
+func (c *RPCNodeClient) P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error) {
+	payload := map[string]interface{}{
+		"offerId":     req.OfferID,
+		"buyer":       req.Buyer,
+		"seller":      req.Seller,
+		"baseToken":   req.BaseToken,
+		"baseAmount":  req.BaseAmount,
+		"quoteToken":  req.QuoteToken,
+		"quoteAmount": req.QuoteAmount,
+		"deadline":    req.Deadline,
+	}
+	var result P2PAcceptResponse
+	if err := c.call(ctx, "p2p_createTrade", []interface{}{payload}, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *RPCNodeClient) P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error) {
+	var result P2PTradeState
+	if err := c.call(ctx, "p2p_getTrade", []interface{}{map[string]string{"tradeId": tradeID}}, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *RPCNodeClient) FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error) {
+	params := map[string]interface{}{
+		"after": afterSeq,
+	}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	var result []NodeEvent
+	if err := c.call(ctx, "events_since", []interface{}{params}, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (c *RPCNodeClient) call(ctx context.Context, method string, params interface{}, out interface{}) error {
@@ -163,4 +230,60 @@ type EscrowState struct {
 	CreatedAt int64   `json:"createdAt"`
 	Status    string  `json:"status"`
 	Meta      string  `json:"meta"`
+}
+
+// P2PAcceptRequest captures the gateway request forwarded to the node RPC when
+// creating a dual-escrow trade.
+type P2PAcceptRequest struct {
+	OfferID     string `json:"offerId"`
+	Buyer       string `json:"buyer"`
+	Seller      string `json:"seller"`
+	BaseToken   string `json:"baseToken"`
+	BaseAmount  string `json:"baseAmount"`
+	QuoteToken  string `json:"quoteToken"`
+	QuoteAmount string `json:"quoteAmount"`
+	Deadline    int64  `json:"deadline"`
+}
+
+// P2PAcceptResponse mirrors the node RPC response for trade creation.
+type P2PAcceptResponse struct {
+	TradeID       string                         `json:"tradeId"`
+	EscrowBaseID  string                         `json:"escrowBaseId"`
+	EscrowQuoteID string                         `json:"escrowQuoteId"`
+	PayIntents    map[string]P2PPayIntentPayload `json:"payIntents"`
+}
+
+// P2PPayIntentPayload mirrors a pay intent object returned by the node.
+type P2PPayIntentPayload struct {
+	To     string `json:"to"`
+	Token  string `json:"token"`
+	Amount string `json:"amount"`
+	Memo   string `json:"memo"`
+}
+
+// P2PTradeState mirrors the node RPC response for fetching trade details.
+type P2PTradeState struct {
+	ID          string `json:"id"`
+	OfferID     string `json:"offerId"`
+	Buyer       string `json:"buyer"`
+	Seller      string `json:"seller"`
+	QuoteToken  string `json:"quoteToken"`
+	QuoteAmount string `json:"quoteAmount"`
+	EscrowQuote string `json:"escrowQuoteId"`
+	BaseToken   string `json:"baseToken"`
+	BaseAmount  string `json:"baseAmount"`
+	EscrowBase  string `json:"escrowBaseId"`
+	Deadline    int64  `json:"deadline"`
+	CreatedAt   int64  `json:"createdAt"`
+	Status      string `json:"status"`
+}
+
+// NodeEvent represents an emitted escrow or trade event returned by the node.
+type NodeEvent struct {
+	Sequence   int64             `json:"sequence"`
+	Type       string            `json:"type"`
+	Attributes map[string]string `json:"attributes"`
+	Height     uint64            `json:"height"`
+	TxHash     string            `json:"txHash"`
+	Timestamp  int64             `json:"timestamp"`
 }
