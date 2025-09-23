@@ -16,7 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	gethcore "github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core/tracing"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	gethvm "github.com/ethereum/go-ethereum/core/vm"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
@@ -29,22 +29,38 @@ const MINIMUM_STAKE = 1000
 // Privileged arbitrator address (replace with multisig in production).
 var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
 
+var (
+	accountMetadataPrefix = []byte("account-meta:")
+	usernameIndexKey      = ethcrypto.Keccak256([]byte("username-index"))
+	validatorSetKey       = ethcrypto.Keccak256([]byte("validator-set"))
+)
+
 type StateProcessor struct {
 	Trie           *trie.Trie
+	stateDB        *state.CachingDB
 	LoyaltyEngine  *loyalty.Engine
 	usernameToAddr map[string][]byte
 	ValidatorSet   map[string]*big.Int
 	committedRoot  common.Hash
 }
 
-func NewStateProcessor(tr *trie.Trie) *StateProcessor {
-	return &StateProcessor{
+func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
+	stateDB := state.NewDatabase(tr.TrieDB(), nil)
+	sp := &StateProcessor{
 		Trie:           tr,
+		stateDB:        stateDB,
 		LoyaltyEngine:  loyalty.NewEngine(),
 		usernameToAddr: make(map[string][]byte),
 		ValidatorSet:   make(map[string]*big.Int),
 		committedRoot:  tr.Root(),
 	}
+	if err := sp.loadUsernameIndex(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadValidatorSet(); err != nil {
+		return nil, err
+	}
+	return sp, nil
 }
 
 // CurrentRoot returns the last committed state root.
@@ -95,6 +111,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 	}
 	return &StateProcessor{
 		Trie:           trieCopy,
+		stateDB:        sp.stateDB,
 		LoyaltyEngine:  sp.LoyaltyEngine,
 		usernameToAddr: usernameCopy,
 		ValidatorSet:   validatorCopy,
@@ -115,50 +132,20 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	if err != nil {
 		return err
 	}
-
-	// 1) Build ephemeral Geth StateDB
-	memdb := state.NewDatabaseForTesting()
-	statedb, err := state.New(common.Hash{}, memdb)
+	parentRoot := sp.Trie.Hash()
+	statedb, err := state.New(parentRoot, sp.stateDB)
 	if err != nil {
 		return fmt.Errorf("statedb init: %w", err)
 	}
 
-	// Seed helper: mirror balance & nonce from our trie -> statedb
-	seed := func(addrBz []byte) (common.Address, *types.Account, error) {
-		if addrBz == nil {
-			return common.Address{}, nil, nil
-		}
-		addr := common.BytesToAddress(addrBz)
-		acc, err := sp.getAccount(addrBz)
-		if err != nil {
-			return common.Address{}, nil, err
-		}
-		statedb.CreateAccount(addr)
-		if acc.BalanceNHB == nil {
-			acc.BalanceNHB = big.NewInt(0)
-		}
-		u, _ := uint256.FromBig(acc.BalanceNHB)
-		statedb.SetBalance(addr, u, tracing.BalanceChangeUnspecified)
-		statedb.SetNonce(addr, acc.Nonce, tracing.NonceChangeUnspecified)
-		return addr, acc, nil
-	}
-
-	fromAddr, fromAcc, err := seed(from)
-	if err != nil {
-		return err
-	}
-
+	fromAddr := common.BytesToAddress(from)
 	var toAddrPtr *common.Address
-	var toAcc *types.Account
 	if tx.To != nil {
-		ta, taAcc, err := seed(tx.To)
-		if err != nil {
-			return err
-		}
-		toAddrPtr, toAcc = &ta, taAcc
+		addr := common.BytesToAddress(tx.To)
+		toAddrPtr = &addr
 	}
 
-	// 2) Build contexts + message (struct literal in v1.16)
+	// Build contexts + message (struct literal in v1.16)
 	blockCtx := gethvm.BlockContext{
 		Coinbase:    common.Address{},
 		BlockNumber: big.NewInt(0),
@@ -199,27 +186,37 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		return fmt.Errorf("EVM error: %w", result.Err)
 	}
 
-	// 5) Sync balances & nonces back into our trie
-	{
-		u := statedb.GetBalance(fromAddr) // *uint256.Int
-		fromAcc.BalanceNHB = new(big.Int).Set(u.ToBig())
-		fromAcc.Nonce = statedb.GetNonce(fromAddr)
-		if err := sp.setAccount(from, fromAcc); err != nil {
-			return err
-		}
+	newRoot, err := statedb.Commit(0, false, false)
+	if err != nil {
+		return fmt.Errorf("statedb commit: %w", err)
 	}
-	if toAddrPtr != nil && toAcc != nil {
-		u := statedb.GetBalance(*toAddrPtr)
-		toAcc.BalanceNHB = new(big.Int).Set(u.ToBig())
-		toAcc.Nonce = statedb.GetNonce(*toAddrPtr)
-		if err := sp.setAccount(tx.To, toAcc); err != nil {
+	if err := sp.Trie.Reset(newRoot); err != nil {
+		return fmt.Errorf("trie reset: %w", err)
+	}
+
+	fromAcc, err := sp.getAccount(from)
+	if err != nil {
+		return err
+	}
+	var toAcc *types.Account
+	if tx.To != nil {
+		toAcc, err = sp.getAccount(tx.To)
+		if err != nil {
 			return err
 		}
 	}
 
-	// Native loyalty hook
 	if tx.To != nil {
 		sp.LoyaltyEngine.OnTransactionSuccess(fromAcc, toAcc)
+	}
+
+	if err := sp.setAccount(from, fromAcc); err != nil {
+		return err
+	}
+	if tx.To != nil && toAcc != nil {
+		if err := sp.setAccount(tx.To, toAcc); err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("EVM transaction processed. Gas used: %d. Output: %x\n", result.UsedGas, result.ReturnData)
@@ -286,7 +283,6 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction) error {
 	}
 	fromAccount.Username = username
 	fromAccount.Nonce++
-	sp.usernameToAddr[username] = from
 	sp.setAccount(from, fromAccount)
 	fmt.Printf("Identity processed: Username '%s' registered to %s.\n",
 		username, crypto.NewAddress(crypto.NHBPrefix, from).String())
@@ -518,6 +514,7 @@ func (sp *StateProcessor) applyStake(tx *types.Transaction) error {
 	if stakeAmount == nil || stakeAmount.Cmp(big.NewInt(0)) <= 0 {
 		return fmt.Errorf("stake must be positive")
 	}
+	wasValidator := sp.IsValidator(sender)
 	senderAccount, _ := sp.getAccount(sender)
 	if senderAccount.BalanceZNHB.Cmp(stakeAmount) < 0 {
 		return fmt.Errorf("insufficient ZapNHB")
@@ -527,8 +524,7 @@ func (sp *StateProcessor) applyStake(tx *types.Transaction) error {
 	senderAccount.Nonce++
 	sp.setAccount(sender, senderAccount)
 	senderAddr := crypto.NewAddress(crypto.NHBPrefix, sender)
-	if senderAccount.Stake.Cmp(big.NewInt(MINIMUM_STAKE)) >= 0 {
-		sp.ValidatorSet[string(sender)] = senderAccount.Stake
+	if !wasValidator && senderAccount.Stake.Cmp(big.NewInt(MINIMUM_STAKE)) >= 0 {
 		fmt.Printf("Account %s is now an active validator.\n", senderAddr.String())
 	}
 	fmt.Printf("Stake processed: Account %s staked %s ZapNHB.\n",
@@ -542,6 +538,7 @@ func (sp *StateProcessor) applyUnstake(tx *types.Transaction) error {
 	if unStakeAmount == nil || unStakeAmount.Cmp(big.NewInt(0)) <= 0 {
 		return fmt.Errorf("unstake must be positive")
 	}
+	wasValidator := sp.IsValidator(sender)
 	senderAccount, _ := sp.getAccount(sender)
 	if senderAccount.Stake.Cmp(unStakeAmount) < 0 {
 		return fmt.Errorf("insufficient staked balance")
@@ -551,11 +548,8 @@ func (sp *StateProcessor) applyUnstake(tx *types.Transaction) error {
 	senderAccount.Nonce++
 	sp.setAccount(sender, senderAccount)
 	senderAddr := crypto.NewAddress(crypto.NHBPrefix, sender)
-	if senderAccount.Stake.Cmp(big.NewInt(MINIMUM_STAKE)) < 0 {
-		if _, ok := sp.ValidatorSet[string(sender)]; ok {
-			delete(sp.ValidatorSet, string(sender))
-			fmt.Printf("Account %s is no longer an active validator.\n", senderAddr.String())
-		}
+	if wasValidator && senderAccount.Stake.Cmp(big.NewInt(MINIMUM_STAKE)) < 0 {
+		fmt.Printf("Account %s is no longer an active validator.\n", senderAddr.String())
 	}
 	fmt.Printf("Un-stake processed: Account %s un-staked %s ZapNHB.\n",
 		senderAddr.String(), unStakeAmount.String())
@@ -572,35 +566,342 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
 	return nil
 }
 
+type accountMetadata struct {
+	BalanceZNHB     *big.Int
+	Stake           *big.Int
+	Username        string
+	EngagementScore uint64
+}
+
+func ensureAccountDefaults(account *types.Account) {
+	if account.BalanceNHB == nil {
+		account.BalanceNHB = big.NewInt(0)
+	}
+	if account.BalanceZNHB == nil {
+		account.BalanceZNHB = big.NewInt(0)
+	}
+	if account.Stake == nil {
+		account.Stake = big.NewInt(0)
+	}
+	if len(account.StorageRoot) == 0 {
+		account.StorageRoot = gethtypes.EmptyRootHash.Bytes()
+	}
+	if len(account.CodeHash) == 0 {
+		account.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	}
+}
+
 // --- Helpers ---
 
 func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
-	key := ethcrypto.Keccak256(addr)
-	data, err := sp.Trie.Get(key)
+	stateAcc, err := sp.loadStateAccount(addr)
 	if err != nil {
 		return nil, err
 	}
-	account := new(types.Account)
-	if len(data) != 0 {
-		if err := rlp.DecodeBytes(data, account); err != nil {
-			return nil, err
-		}
-	} else {
-		account.BalanceNHB = big.NewInt(0)
-		account.BalanceZNHB = big.NewInt(0)
-		account.Stake = big.NewInt(0)
-		account.EngagementScore = 0
+	meta, err := sp.loadAccountMetadata(addr)
+	if err != nil {
+		return nil, err
 	}
+
+	account := &types.Account{
+		BalanceNHB:      big.NewInt(0),
+		BalanceZNHB:     big.NewInt(0),
+		Stake:           big.NewInt(0),
+		EngagementScore: 0,
+		StorageRoot:     gethtypes.EmptyRootHash.Bytes(),
+		CodeHash:        gethtypes.EmptyCodeHash.Bytes(),
+	}
+	if stateAcc != nil {
+		if stateAcc.Balance != nil {
+			account.BalanceNHB = new(big.Int).Set(stateAcc.Balance.ToBig())
+		}
+		account.Nonce = stateAcc.Nonce
+		account.StorageRoot = stateAcc.Root.Bytes()
+		account.CodeHash = common.CopyBytes(stateAcc.CodeHash)
+	}
+	if meta != nil {
+		account.BalanceZNHB = new(big.Int).Set(meta.BalanceZNHB)
+		account.Stake = new(big.Int).Set(meta.Stake)
+		account.Username = meta.Username
+		account.EngagementScore = meta.EngagementScore
+	}
+	ensureAccountDefaults(account)
 	return account, nil
 }
 
 func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error {
-	key := ethcrypto.Keccak256(addr)
-	encoded, err := rlp.EncodeToBytes(account)
+	if account == nil {
+		return fmt.Errorf("nil account")
+	}
+	ensureAccountDefaults(account)
+
+	prevMeta, err := sp.loadAccountMetadata(addr)
+	if err != nil {
+		return err
+	}
+
+	balance, overflow := uint256.FromBig(account.BalanceNHB)
+	if overflow {
+		return fmt.Errorf("balance overflow")
+	}
+
+	stateAcc := &gethtypes.StateAccount{
+		Nonce:    account.Nonce,
+		Balance:  balance,
+		Root:     common.BytesToHash(account.StorageRoot),
+		CodeHash: common.CopyBytes(account.CodeHash),
+	}
+	if len(stateAcc.CodeHash) == 0 {
+		stateAcc.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	}
+	if stateAcc.Root == (common.Hash{}) {
+		stateAcc.Root = gethtypes.EmptyRootHash
+	}
+
+	if err := sp.writeStateAccount(addr, stateAcc); err != nil {
+		return err
+	}
+
+	meta := &accountMetadata{
+		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
+		Stake:           new(big.Int).Set(account.Stake),
+		Username:        account.Username,
+		EngagementScore: account.EngagementScore,
+	}
+	if err := sp.writeAccountMetadata(addr, meta); err != nil {
+		return err
+	}
+
+	prevUsername := ""
+	prevStake := big.NewInt(0)
+	if prevMeta != nil {
+		prevUsername = prevMeta.Username
+		if prevMeta.Stake != nil {
+			prevStake = new(big.Int).Set(prevMeta.Stake)
+		}
+	}
+
+	if prevUsername != "" && prevUsername != account.Username {
+		delete(sp.usernameToAddr, prevUsername)
+	}
+	if account.Username != "" {
+		sp.usernameToAddr[account.Username] = append([]byte(nil), addr...)
+	}
+	if err := sp.persistUsernameIndex(); err != nil {
+		return err
+	}
+
+	minStake := big.NewInt(MINIMUM_STAKE)
+	if prevStake.Cmp(minStake) >= 0 && account.Stake.Cmp(minStake) < 0 {
+		delete(sp.ValidatorSet, string(addr))
+	}
+	if account.Stake.Cmp(minStake) >= 0 {
+		sp.ValidatorSet[string(addr)] = new(big.Int).Set(account.Stake)
+	} else if account.Stake.Cmp(minStake) < 0 {
+		delete(sp.ValidatorSet, string(addr))
+	}
+	if err := sp.persistValidatorSet(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func accountStateKey(addr []byte) []byte {
+	return ethcrypto.Keccak256(addr)
+}
+
+func accountMetadataKey(addr []byte) []byte {
+	buf := make([]byte, len(accountMetadataPrefix)+len(addr))
+	copy(buf, accountMetadataPrefix)
+	copy(buf[len(accountMetadataPrefix):], addr)
+	return ethcrypto.Keccak256(buf)
+}
+
+func (sp *StateProcessor) loadStateAccount(addr []byte) (*gethtypes.StateAccount, error) {
+	key := accountStateKey(addr)
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	stateAcc := new(gethtypes.StateAccount)
+	if err := rlp.DecodeBytes(data, stateAcc); err != nil {
+		legacy := new(types.Account)
+		if errLegacy := rlp.DecodeBytes(data, legacy); errLegacy != nil {
+			return nil, err
+		}
+		migrated, migrateErr := sp.migrateLegacyAccount(addr, legacy)
+		if migrateErr != nil {
+			return nil, migrateErr
+		}
+		return migrated, nil
+	}
+	return stateAcc, nil
+}
+
+func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Account) (*gethtypes.StateAccount, error) {
+	ensureAccountDefaults(legacy)
+
+	balance, overflow := uint256.FromBig(legacy.BalanceNHB)
+	if overflow {
+		return nil, fmt.Errorf("balance overflow")
+	}
+
+	stateAcc := &gethtypes.StateAccount{
+		Nonce:    legacy.Nonce,
+		Balance:  balance,
+		Root:     common.BytesToHash(legacy.StorageRoot),
+		CodeHash: common.CopyBytes(legacy.CodeHash),
+	}
+	if len(stateAcc.CodeHash) == 0 {
+		stateAcc.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	}
+	if stateAcc.Root == (common.Hash{}) {
+		stateAcc.Root = gethtypes.EmptyRootHash
+	}
+	if err := sp.writeStateAccount(addr, stateAcc); err != nil {
+		return nil, err
+	}
+
+	meta := &accountMetadata{
+		BalanceZNHB:     new(big.Int).Set(legacy.BalanceZNHB),
+		Stake:           new(big.Int).Set(legacy.Stake),
+		Username:        legacy.Username,
+		EngagementScore: legacy.EngagementScore,
+	}
+	if err := sp.writeAccountMetadata(addr, meta); err != nil {
+		return nil, err
+	}
+
+	if legacy.Username != "" {
+		sp.usernameToAddr[legacy.Username] = append([]byte(nil), addr...)
+		if err := sp.persistUsernameIndex(); err != nil {
+			return nil, err
+		}
+	}
+	minStake := big.NewInt(MINIMUM_STAKE)
+	if legacy.Stake.Cmp(minStake) >= 0 {
+		sp.ValidatorSet[string(addr)] = new(big.Int).Set(legacy.Stake)
+		if err := sp.persistValidatorSet(); err != nil {
+			return nil, err
+		}
+	}
+	return stateAcc, nil
+}
+
+func (sp *StateProcessor) writeStateAccount(addr []byte, stateAcc *gethtypes.StateAccount) error {
+	key := accountStateKey(addr)
+	encoded, err := rlp.EncodeToBytes(stateAcc)
 	if err != nil {
 		return err
 	}
 	return sp.Trie.Update(key, encoded)
+}
+
+func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
+	key := accountMetadataKey(addr)
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	meta := &accountMetadata{
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	}
+	if len(data) == 0 {
+		return meta, nil
+	}
+	if err := rlp.DecodeBytes(data, meta); err != nil {
+		return nil, err
+	}
+	if meta.BalanceZNHB == nil {
+		meta.BalanceZNHB = big.NewInt(0)
+	}
+	if meta.Stake == nil {
+		meta.Stake = big.NewInt(0)
+	}
+	return meta, nil
+}
+
+func (sp *StateProcessor) writeAccountMetadata(addr []byte, meta *accountMetadata) error {
+	if meta.BalanceZNHB == nil {
+		meta.BalanceZNHB = big.NewInt(0)
+	}
+	if meta.Stake == nil {
+		meta.Stake = big.NewInt(0)
+	}
+	encoded, err := rlp.EncodeToBytes(meta)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(accountMetadataKey(addr), encoded)
+}
+
+func (sp *StateProcessor) loadUsernameIndex() error {
+	data, err := sp.Trie.Get(usernameIndexKey)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	stored := make(map[string][]byte)
+	if err := rlp.DecodeBytes(data, &stored); err != nil {
+		return err
+	}
+	sp.usernameToAddr = make(map[string][]byte, len(stored))
+	for k, v := range stored {
+		sp.usernameToAddr[k] = append([]byte(nil), v...)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) persistUsernameIndex() error {
+	encoded, err := rlp.EncodeToBytes(sp.usernameToAddr)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(usernameIndexKey, encoded)
+}
+
+func (sp *StateProcessor) loadValidatorSet() error {
+	data, err := sp.Trie.Get(validatorSetKey)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	stored := make(map[string]*big.Int)
+	if err := rlp.DecodeBytes(data, &stored); err != nil {
+		return err
+	}
+	sp.ValidatorSet = make(map[string]*big.Int, len(stored))
+	for k, v := range stored {
+		if v == nil {
+			v = big.NewInt(0)
+		}
+		sp.ValidatorSet[k] = new(big.Int).Set(v)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) persistValidatorSet() error {
+	stored := make(map[string]*big.Int, len(sp.ValidatorSet))
+	for k, v := range sp.ValidatorSet {
+		if v == nil {
+			continue
+		}
+		stored[k] = new(big.Int).Set(v)
+	}
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(validatorSetKey, encoded)
 }
 
 func (sp *StateProcessor) setEscrow(id []byte, e *escrow.Escrow) error {

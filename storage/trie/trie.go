@@ -120,3 +120,11 @@ func (t *Trie) Commit(parent common.Hash, blockNumber uint64) (common.Hash, erro
 func (t *Trie) Store() storage.Database {
 	return t.store
 }
+
+// TrieDB exposes the underlying triedb.Database used by the trie. The returned
+// handle can be shared with other state management layers (e.g. go-ethereum's
+// state package) to ensure all state mutations operate on the same backing
+// storage.
+func (t *Trie) TrieDB() *triedb.Database {
+	return t.trieDB
+}
