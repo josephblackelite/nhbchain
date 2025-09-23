@@ -34,8 +34,8 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		TxRoot:    gethtypes.EmptyRootHash.Bytes(),
 	}
 
-	// TODO: initialize the token registry using spec.Tokens once state management is available.
-	// TODO: credit account balances from spec.Balances.
+	// TODO: initialize the token registry using spec.NativeTokens once state management is available.
+	// TODO: credit account balances from spec.Alloc.
 	// TODO: assign account roles from spec.Roles.
 	// TODO: register validators from spec.Validators.
 	// TODO: persist the initialized state into db.

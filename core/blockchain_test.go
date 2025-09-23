@@ -41,7 +41,7 @@ func TestNewBlockchainLoadsGenesisFromFile(t *testing.T) {
 	addr := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
 	spec := genesis.GenesisSpec{
 		GenesisTime: "2024-01-01T00:00:00Z",
-		Tokens: []genesis.TokenSpec{
+		NativeTokens: []genesis.NativeTokenSpec{
 			{
 				Symbol:   "NHB",
 				Name:     "NHBCoin",
@@ -50,13 +50,14 @@ func TestNewBlockchainLoadsGenesisFromFile(t *testing.T) {
 		},
 		Validators: []genesis.ValidatorSpec{
 			{
-				Name:    "validator-1",
 				Address: addr,
 				Power:   1,
 			},
 		},
-		Balances: map[string]string{
-			addr: "1000",
+		Alloc: map[string]map[string]string{
+			addr: {
+				"NHB": "1000",
+			},
 		},
 	}
 	data, err := json.Marshal(spec)
