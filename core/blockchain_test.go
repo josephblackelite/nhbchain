@@ -6,9 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"nhbchain/core/genesis"
 	"nhbchain/core/types"
+	"nhbchain/crypto"
 	"nhbchain/storage"
 )
 
@@ -35,10 +38,30 @@ func TestNewBlockchainLoadsGenesisFromFile(t *testing.T) {
 	db := storage.NewMemDB()
 	defer db.Close()
 
-	genesis := types.NewBlock(&types.BlockHeader{Height: 0, Timestamp: 1}, nil)
-	data, err := json.Marshal(genesis)
+	addr := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
+	spec := genesis.GenesisSpec{
+		GenesisTime: "2024-01-01T00:00:00Z",
+		Tokens: []genesis.TokenSpec{
+			{
+				Symbol:   "NHB",
+				Name:     "NHBCoin",
+				Decimals: 18,
+			},
+		},
+		Validators: []genesis.ValidatorSpec{
+			{
+				Name:    "validator-1",
+				Address: addr,
+				Power:   1,
+			},
+		},
+		Balances: map[string]string{
+			addr: "1000",
+		},
+	}
+	data, err := json.Marshal(spec)
 	if err != nil {
-		t.Fatalf("marshal genesis: %v", err)
+		t.Fatalf("marshal spec: %v", err)
 	}
 
 	dir := t.TempDir()
@@ -60,8 +83,13 @@ func TestNewBlockchainLoadsGenesisFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get genesis block: %v", err)
 	}
-	if loadedGenesis.Header.Timestamp != genesis.Header.Timestamp {
-		t.Fatalf("unexpected genesis header timestamp: got %d want %d", loadedGenesis.Header.Timestamp, genesis.Header.Timestamp)
+
+	expectedTimestamp, err := time.Parse(time.RFC3339, spec.GenesisTime)
+	if err != nil {
+		t.Fatalf("parse genesisTime: %v", err)
+	}
+	if loadedGenesis.Header.Timestamp != expectedTimestamp.Unix() {
+		t.Fatalf("unexpected genesis header timestamp: got %d want %d", loadedGenesis.Header.Timestamp, expectedTimestamp.Unix())
 	}
 }
 
