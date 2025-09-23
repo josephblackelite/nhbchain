@@ -203,6 +203,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLoyaltyResolveUsername(w, r, req)
 	case "loyalty_userQR":
 		s.handleLoyaltyUserQR(w, r, req)
+	case "escrow_create":
+		s.handleEscrowCreate(w, r, req)
+	case "escrow_get":
+		s.handleEscrowGet(w, r, req)
+	case "escrow_fund":
+		s.handleEscrowFund(w, r, req)
+	case "escrow_release":
+		s.handleEscrowRelease(w, r, req)
+	case "escrow_refund":
+		s.handleEscrowRefund(w, r, req)
+	case "escrow_expire":
+		s.handleEscrowExpire(w, r, req)
+	case "escrow_dispute":
+		s.handleEscrowDispute(w, r, req)
+	case "escrow_resolve":
+		s.handleEscrowResolve(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}

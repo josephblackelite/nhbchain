@@ -3,14 +3,18 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"nhbchain/consensus/bft"
+	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
 	"nhbchain/p2p"
 	"nhbchain/storage"
@@ -19,12 +23,14 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db           storage.Database
-	state        *StateProcessor
-	chain        *Blockchain
-	validatorKey *crypto.PrivateKey
-	mempool      []*types.Transaction
-	bftEngine    *bft.Engine
+	db             storage.Database
+	state          *StateProcessor
+	chain          *Blockchain
+	validatorKey   *crypto.PrivateKey
+	mempool        []*types.Transaction
+	bftEngine      *bft.Engine
+	stateMu        sync.Mutex
+	escrowTreasury [20]byte
 }
 
 func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool) (*Node, error) {
@@ -50,12 +56,16 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		return nil, err
 	}
 
+	var treasury [20]byte
+	copy(treasury[:], validatorAddr.Bytes())
+
 	return &Node{
-		db:           db,
-		state:        stateProcessor,
-		chain:        chain,
-		validatorKey: key,
-		mempool:      make([]*types.Transaction, 0),
+		db:             db,
+		state:          stateProcessor,
+		chain:          chain,
+		validatorKey:   key,
+		mempool:        make([]*types.Transaction, 0),
+		escrowTreasury: treasury,
 	}, nil
 }
 
@@ -230,6 +240,121 @@ func (n *Node) LoyaltyProgramByID(id loyalty.ProgramID) (*loyalty.Program, bool,
 
 func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, error) {
 	return n.state.LoyaltyProgramsByOwner(owner)
+}
+
+var (
+	// ErrEscrowNotFound is returned when an escrow record is missing from state.
+	ErrEscrowNotFound = errors.New("escrow not found")
+)
+
+type escrowEventEmitter struct {
+	node *Node
+}
+
+type eventWithPayload interface {
+	Event() *types.Event
+}
+
+func (e escrowEventEmitter) Emit(evt events.Event) {
+	if e.node == nil || evt == nil {
+		return
+	}
+	payload, ok := evt.(eventWithPayload)
+	if !ok {
+		return
+	}
+	event := payload.Event()
+	if event == nil {
+		return
+	}
+	e.node.state.AppendEvent(event)
+}
+
+func (n *Node) newEscrowEngine(manager *nhbstate.Manager) *escrow.Engine {
+	engine := escrow.NewEngine()
+	engine.SetState(manager)
+	engine.SetEmitter(escrowEventEmitter{node: n})
+	engine.SetFeeTreasury(n.escrowTreasury)
+	return engine
+}
+
+func (n *Node) EscrowCreate(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediator *[20]byte, meta [32]byte) ([32]byte, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	esc, err := engine.Create(payer, payee, token, amount, feeBps, deadline, mediator, meta)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return esc.ID, nil
+}
+
+func (n *Node) EscrowFund(id [32]byte, from [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	return engine.Fund(id, from)
+}
+
+func (n *Node) EscrowRelease(id [32]byte, caller [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	return engine.Release(id, caller)
+}
+
+func (n *Node) EscrowRefund(id [32]byte, caller [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	return engine.Refund(id, caller)
+}
+
+func (n *Node) EscrowExpire(id [32]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	return engine.Expire(id, time.Now().Unix())
+}
+
+func (n *Node) EscrowDispute(id [32]byte, caller [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	return engine.Dispute(id, caller)
+}
+
+func (n *Node) EscrowResolve(id [32]byte, caller [20]byte, outcome string) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newEscrowEngine(manager)
+	return engine.Resolve(id, caller, outcome)
+}
+
+func (n *Node) EscrowGet(id [32]byte) (*escrow.Escrow, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	esc, ok := manager.EscrowGet(id)
+	if !ok {
+		return nil, ErrEscrowNotFound
+	}
+	return esc, nil
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
