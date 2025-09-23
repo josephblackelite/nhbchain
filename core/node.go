@@ -136,6 +136,13 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 func (n *Node) CommitBlock(b *types.Block) error {
 	parentRoot := n.state.CurrentRoot()
 
+	rollback := func() error {
+		if err := n.state.ResetToRoot(parentRoot); err != nil {
+			return fmt.Errorf("rollback to parent root: %w", err)
+		}
+		return nil
+	}
+
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {
 		return err
@@ -144,10 +151,12 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		return fmt.Errorf("tx root mismatch")
 	}
 
-	for _, tx := range b.Transactions {
+	for i, tx := range b.Transactions {
 		if err := n.state.ApplyTransaction(tx); err != nil {
-			_ = n.state.ResetToRoot(parentRoot)
-			return err
+			if rbErr := rollback(); rbErr != nil {
+				return fmt.Errorf("apply transaction %d: %v (rollback failed: %w)", i, err, rbErr)
+			}
+			return fmt.Errorf("apply transaction %d: %w", i, err)
 		}
 	}
 
@@ -156,14 +165,18 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	if len(b.Header.StateRoot) == 0 {
 		b.Header.StateRoot = pendingBytes
 	} else if !bytes.Equal(b.Header.StateRoot, pendingBytes) {
-		_ = n.state.ResetToRoot(parentRoot)
+		if rbErr := rollback(); rbErr != nil {
+			return fmt.Errorf("state root mismatch: %w", rbErr)
+		}
 		return fmt.Errorf("state root mismatch")
 	}
 
 	committedRoot, err := n.state.Commit(b.Header.Height)
 	if err != nil {
-		_ = n.state.ResetToRoot(parentRoot)
-		return err
+		if rbErr := rollback(); rbErr != nil {
+			return fmt.Errorf("state commit failed: %v (rollback failed: %w)", err, rbErr)
+		}
+		return fmt.Errorf("state commit failed: %w", err)
 	}
 	committedBytes := committedRoot.Bytes()
 	if !bytes.Equal(b.Header.StateRoot, committedBytes) {
