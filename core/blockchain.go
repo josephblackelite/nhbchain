@@ -75,7 +75,8 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 
 	genesisHash, err := db.Get(genesisKey)
 	if err != nil {
-		genesis, loadErr := genesisFromSource(strings.TrimSpace(genesisPath), allowAutogenesis, db)
+		trimmedPath := strings.TrimSpace(genesisPath)
+		genesis, spec, loadErr := genesisFromSource(trimmedPath, allowAutogenesis, db)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -92,6 +93,10 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 		bc.height = 0
 		bc.heights[0] = cloneBytes(genesisHash)
 		bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
+		if spec != nil {
+			fmt.Printf("Loaded genesis from %s  hash=0x%x  chainID=%d  accounts=%d  validators=%d\n",
+				trimmedPath, genesisHash, bc.chainID, len(spec.Alloc), len(spec.Validators))
+		}
 		return bc, nil
 	}
 
@@ -248,22 +253,37 @@ func createGenesisBlock() *types.Block {
 	return types.NewBlock(header, []*types.Transaction{})
 }
 
-func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) (*types.Block, error) {
+func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) (*types.Block, *genesis.GenesisSpec, error) {
 	if path != "" {
 		fmt.Printf("No genesis block found. Loading from %s.\n", path)
 		spec, err := genesis.LoadGenesisSpec(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return genesis.BuildGenesisFromSpec(spec, db)
+		block, err := genesis.BuildGenesisFromSpec(spec, db)
+		if err != nil {
+			return nil, nil, err
+		}
+		hash, err := block.Header.Hash()
+		if err != nil {
+			return nil, nil, fmt.Errorf("hash genesis: %w", err)
+		}
+		if len(hash) < 8 {
+			return nil, nil, fmt.Errorf("genesis hash too short: %d", len(hash))
+		}
+		derivedID := binary.BigEndian.Uint64(hash[:8])
+		if spec.ChainID != nil && *spec.ChainID != derivedID {
+			return nil, nil, fmt.Errorf("chainId mismatch: spec=%d derived=%d", *spec.ChainID, derivedID)
+		}
+		return block, spec, nil
 	}
 
 	if !allowAutogenesis {
-		return nil, fmt.Errorf("no genesis block present and autogenesis disabled")
+		return nil, nil, fmt.Errorf("no genesis block present and autogenesis disabled")
 	}
 
-	fmt.Println("No genesis block found. Creating a new one.")
-	return createGenesisBlock(), nil
+	fmt.Println("Auto-genesis created (dev mode)")
+	return createGenesisBlock(), nil, nil
 }
 
 func persistGenesisBlock(db storage.Database, genesis *types.Block) ([]byte, error) {
