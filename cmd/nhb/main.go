@@ -46,7 +46,7 @@ func main() {
 	}
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
-	p2pServer := p2p.NewServer(cfg.ListenAddress, node)
+	p2pServer := p2p.NewServer(cfg.ListenAddress, node, privKey, node.ChainID())
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
 	bftEngine := bft.NewEngine(node, privKey, p2pServer)
