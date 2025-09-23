@@ -203,6 +203,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLoyaltyResolveUsername(w, r, req)
 	case "loyalty_userQR":
 		s.handleLoyaltyUserQR(w, r, req)
+	case "identity_setAlias":
+		s.handleIdentitySetAlias(w, r, req)
+	case "identity_resolve":
+		s.handleIdentityResolve(w, r, req)
+	case "identity_reverse":
+		s.handleIdentityReverse(w, r, req)
 	case "escrow_create":
 		s.handleEscrowCreate(w, r, req)
 	case "escrow_get":

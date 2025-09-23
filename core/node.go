@@ -484,6 +484,52 @@ func (n *Node) P2PResolve(id [32]byte, arbitrator [20]byte, outcome string) erro
 	return tradeEngine.TradeResolve(id, outcome)
 }
 
+func (n *Node) IdentitySetAlias(addr [20]byte, alias string) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	previous, _ := manager.IdentityReverse(addr[:])
+	if err := manager.IdentitySetAlias(addr[:], alias); err != nil {
+		return err
+	}
+	current, ok := manager.IdentityReverse(addr[:])
+	if !ok || current == "" {
+		return fmt.Errorf("identity: failed to persist alias")
+	}
+	if previous == current {
+		if previous == "" {
+			evt := events.IdentityAliasSet{Alias: current, Address: addr}.Event()
+			if evt != nil {
+				n.state.AppendEvent(evt)
+			}
+		}
+		return nil
+	}
+	if previous == "" {
+		evt := events.IdentityAliasSet{Alias: current, Address: addr}.Event()
+		if evt != nil {
+			n.state.AppendEvent(evt)
+		}
+	} else {
+		evt := events.IdentityAliasRenamed{OldAlias: previous, NewAlias: current, Address: addr}.Event()
+		if evt != nil {
+			n.state.AppendEvent(evt)
+		}
+	}
+	return nil
+}
+
+func (n *Node) IdentityResolve(alias string) ([20]byte, bool) {
+	manager := nhbstate.NewManager(n.state.Trie)
+	return manager.IdentityResolve(alias)
+}
+
+func (n *Node) IdentityReverse(addr [20]byte) (string, bool) {
+	manager := nhbstate.NewManager(n.state.Trie)
+	return manager.IdentityReverse(addr[:])
+}
+
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
 	return n.state.ResolveUsername(username)
 }
