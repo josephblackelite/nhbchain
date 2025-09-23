@@ -40,7 +40,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	stateProcessor := NewStateProcessor(stateTrie)
+	stateProcessor, err := NewStateProcessor(stateTrie)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Node{
 		db:           db,
