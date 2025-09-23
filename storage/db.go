@@ -1,82 +1,91 @@
 package storage
 
 import (
-	"fmt"
-	"sync"
-
-	"github.com/syndtr/goleveldb/leveldb"
+	ethdb "github.com/ethereum/go-ethereum/ethdb"
+	ethdbleveldb "github.com/ethereum/go-ethereum/ethdb/leveldb"
+	"github.com/ethereum/go-ethereum/ethdb/memorydb"
+	"github.com/ethereum/go-ethereum/triedb"
 )
 
-// Database is a generic interface for a key-value store.
-// This allows our blockchain to use any database backend (in-memory or persistent).
+// Database is a generic interface for a key-value store that also exposes the
+// underlying trie database used for the canonical state.
 type Database interface {
 	Put(key []byte, value []byte) error
 	Get(key []byte) ([]byte, error)
-	Close() // A way to gracefully shut down the database connection.
+	TrieDB() *triedb.Database
+	Close()
 }
 
 // --- In-Memory DB (for testing) ---
 
 type MemDB struct {
-	mu   sync.RWMutex
-	data map[string][]byte
+	db     ethdb.Database
+	trieDB *triedb.Database
 }
 
 func NewMemDB() *MemDB {
+	mem := memorydb.New()
 	return &MemDB{
-		data: make(map[string][]byte),
+		db:     mem,
+		trieDB: triedb.NewDatabase(mem, triedb.HashDefaults),
 	}
 }
 
 func (db *MemDB) Put(key []byte, value []byte) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	db.data[string(key)] = value
-	return nil
+	return db.db.Put(key, value)
 }
 
 func (db *MemDB) Get(key []byte) ([]byte, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	value, ok := db.data[string(key)]
-	if !ok {
-		return nil, fmt.Errorf("key not found")
-	}
-	return value, nil
+	return db.db.Get(key)
+}
+
+func (db *MemDB) TrieDB() *triedb.Database {
+	return db.trieDB
 }
 
 // Close satisfies the Database interface for MemDB.
 func (db *MemDB) Close() {
-	// Nothing to close for an in-memory database.
+	db.trieDB.Close()
+	db.db.Close()
 }
 
 // --- Persistent DB (for mainnet) ---
 
-// LevelDB is a persistent key-value store using LevelDB.
+// LevelDB is a persistent key-value store using go-ethereum's LevelDB wrapper.
 type LevelDB struct {
-	db *leveldb.DB
+	db     ethdb.Database
+	trieDB *triedb.Database
 }
 
 // NewLevelDB creates or opens a LevelDB database at the specified path.
 func NewLevelDB(path string) (*LevelDB, error) {
-	db, err := leveldb.OpenFile(path, nil)
+	db, err := ethdbleveldb.New(path, 128, 64, "nhbchain/db", false)
 	if err != nil {
 		return nil, err
 	}
-	return &LevelDB{db: db}, nil
+	return &LevelDB{
+		db:     db,
+		trieDB: triedb.NewDatabase(db, triedb.HashDefaults),
+	}, nil
 }
 
 // Put inserts or updates a key-value pair.
 func (ldb *LevelDB) Put(key []byte, value []byte) error {
-	return ldb.db.Put(key, value, nil)
+	return ldb.db.Put(key, value)
 }
 
 // Get retrieves a value for a given key.
 func (ldb *LevelDB) Get(key []byte) ([]byte, error) {
-	return ldb.db.Get(key, nil)
+	return ldb.db.Get(key)
+}
+
+// TrieDB exposes the trie database handle used for MPT storage.
+func (ldb *LevelDB) TrieDB() *triedb.Database {
+	return ldb.trieDB
 }
 
 // Close closes the database connection.
 func (ldb *LevelDB) Close() {
+	ldb.trieDB.Close()
 	ldb.db.Close()
 }

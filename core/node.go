@@ -1,16 +1,18 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"time"
+
 	"nhbchain/consensus/bft"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/p2p"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
-	"time"
 )
 
 // Node is the central controller, wiring all components together.
@@ -26,8 +28,15 @@ type Node struct {
 func NewNode(db storage.Database, key *crypto.PrivateKey) (*Node, error) {
 	validatorAddr := key.PubKey().Address()
 	fmt.Printf("Starting node with validator address: %s\n", validatorAddr.String())
-	stateTrie := trie.NewTrie(db, nil)
 	chain, err := NewBlockchain(db)
+	if err != nil {
+		return nil, err
+	}
+	var root []byte
+	if header := chain.CurrentHeader(); header != nil {
+		root = header.StateRoot
+	}
+	stateTrie, err := trie.NewTrie(db, root)
 	if err != nil {
 		return nil, err
 	}
@@ -95,22 +104,76 @@ func (n *Node) GetMempool() []*types.Transaction {
 	return txs
 }
 
-func (n *Node) CreateBlock(txs []*types.Transaction) *types.Block {
+func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	header := &types.BlockHeader{
 		Height:    n.chain.GetHeight() + 1,
 		Timestamp: time.Now().Unix(),
 		PrevHash:  n.chain.Tip(),
-		StateRoot: n.state.Trie.Root,
 		Validator: n.validatorKey.PubKey().Address().Bytes(),
 	}
-	return types.NewBlock(header, txs)
+
+	txRoot, err := ComputeTxRoot(txs)
+	if err != nil {
+		return nil, err
+	}
+	header.TxRoot = txRoot
+
+	stateCopy, err := n.state.Copy()
+	if err != nil {
+		return nil, err
+	}
+	for _, tx := range txs {
+		if err := stateCopy.ApplyTransaction(tx); err != nil {
+			return nil, err
+		}
+	}
+	stateRoot := stateCopy.PendingRoot()
+	header.StateRoot = stateRoot.Bytes()
+
+	return types.NewBlock(header, txs), nil
 }
 
-func (n *Node) CommitBlock(b *types.Block) {
-	for _, tx := range b.Transactions {
-		n.state.ApplyTransaction(tx)
+func (n *Node) CommitBlock(b *types.Block) error {
+	parentRoot := n.state.CurrentRoot()
+
+	txRoot, err := ComputeTxRoot(b.Transactions)
+	if err != nil {
+		return err
 	}
-	n.chain.AddBlock(b)
+	if !bytes.Equal(txRoot, b.Header.TxRoot) {
+		return fmt.Errorf("tx root mismatch")
+	}
+
+	for _, tx := range b.Transactions {
+		if err := n.state.ApplyTransaction(tx); err != nil {
+			_ = n.state.ResetToRoot(parentRoot)
+			return err
+		}
+	}
+
+	pendingRoot := n.state.PendingRoot()
+	pendingBytes := pendingRoot.Bytes()
+	if len(b.Header.StateRoot) == 0 {
+		b.Header.StateRoot = pendingBytes
+	} else if !bytes.Equal(b.Header.StateRoot, pendingBytes) {
+		_ = n.state.ResetToRoot(parentRoot)
+		return fmt.Errorf("state root mismatch")
+	}
+
+	committedRoot, err := n.state.Commit(b.Header.Height)
+	if err != nil {
+		_ = n.state.ResetToRoot(parentRoot)
+		return err
+	}
+	committedBytes := committedRoot.Bytes()
+	if !bytes.Equal(b.Header.StateRoot, committedBytes) {
+		return fmt.Errorf("state root mismatch after commit")
+	}
+
+	if err := n.chain.AddBlock(b); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorSet }
@@ -121,5 +184,5 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 
 // Chain returns a reference to the node's blockchain object.
 func (n *Node) Chain() *Blockchain { // ✅ same package, no prefix
-    return n.chain
+	return n.chain
 }
