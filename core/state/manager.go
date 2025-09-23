@@ -1,9 +1,11 @@
 package state
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -114,6 +116,10 @@ func roleKey(role string) []byte {
 	copy(buf, rolePrefix)
 	copy(buf[len(rolePrefix):], role)
 	return ethcrypto.Keccak256(buf)
+}
+
+func kvKey(key []byte) []byte {
+	return ethcrypto.Keccak256(key)
 }
 
 func (m *Manager) loadTokenList() ([]string, error) {
@@ -413,4 +419,141 @@ func (m *Manager) RoleMembers(role string) ([][]byte, error) {
 		return nil, err
 	}
 	return members, nil
+}
+
+// HasRole reports whether the provided address is associated with the
+// specified role. Errors while reading the underlying state result in a false
+// return, matching the best-effort semantics required by the callers.
+func (m *Manager) HasRole(role string, addr []byte) bool {
+	if len(addr) == 0 {
+		return false
+	}
+	key := roleKey(strings.TrimSpace(role))
+	data, err := m.trie.Get(key)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	var members [][]byte
+	if err := rlp.DecodeBytes(data, &members); err != nil {
+		return false
+	}
+	for _, member := range members {
+		if bytes.Equal(member, addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TokenExists reports whether the provided token symbol is registered.
+func (m *Manager) TokenExists(symbol string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	if normalized == "" {
+		return false
+	}
+	meta, err := m.loadTokenMetadata(normalized)
+	if err != nil || meta == nil {
+		return false
+	}
+	return true
+}
+
+// KVPut stores the provided value under the supplied key using RLP encoding.
+// The key is automatically hashed with keccak256 to match the requirements of
+// the underlying trie implementation.
+func (m *Manager) KVPut(key []byte, value interface{}) error {
+	if len(key) == 0 {
+		return fmt.Errorf("kv: key must not be empty")
+	}
+	encoded, err := rlp.EncodeToBytes(value)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(kvKey(key), encoded)
+}
+
+// KVGet retrieves the value stored under the supplied key and decodes it into
+// the provided destination. The boolean return value indicates whether the key
+// existed in state.
+func (m *Manager) KVGet(key []byte, out interface{}) (bool, error) {
+	if len(key) == 0 {
+		return false, fmt.Errorf("kv: key must not be empty")
+	}
+	data, err := m.trie.Get(kvKey(key))
+	if err != nil {
+		return false, err
+	}
+	if len(data) == 0 {
+		return false, nil
+	}
+	if out == nil {
+		return true, nil
+	}
+	if err := rlp.DecodeBytes(data, out); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// KVAppend appends the provided value to the RLP-encoded byte slice list stored
+// under the supplied key. Duplicate values are ignored to keep the index
+// deterministic.
+func (m *Manager) KVAppend(key []byte, value []byte) error {
+	if len(key) == 0 {
+		return fmt.Errorf("kv: key must not be empty")
+	}
+	hashed := kvKey(key)
+	data, err := m.trie.Get(hashed)
+	if err != nil {
+		return err
+	}
+	var list [][]byte
+	if len(data) > 0 {
+		if err := rlp.DecodeBytes(data, &list); err != nil {
+			return err
+		}
+	}
+	found := false
+	for _, existing := range list {
+		if bytes.Equal(existing, value) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		list = append(list, append([]byte(nil), value...))
+	}
+	encoded, err := rlp.EncodeToBytes(list)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(hashed, encoded)
+}
+
+// KVGetList retrieves an RLP-encoded slice stored under the provided key and
+// decodes it into the supplied destination slice pointer. When no value is
+// present the destination is initialised with an empty slice to avoid nil
+// surprises for callers.
+func (m *Manager) KVGetList(key []byte, out interface{}) error {
+	if len(key) == 0 {
+		return fmt.Errorf("kv: key must not be empty")
+	}
+	hashed := kvKey(key)
+	data, err := m.trie.Get(hashed)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		val := reflect.ValueOf(out)
+		if val.Kind() != reflect.Ptr || val.IsNil() {
+			return fmt.Errorf("kv: destination must be a non-nil pointer")
+		}
+		elem := val.Elem()
+		if elem.Kind() != reflect.Slice {
+			return fmt.Errorf("kv: destination must point to a slice")
+		}
+		elem.Set(reflect.MakeSlice(elem.Type(), 0, 0))
+		return nil
+	}
+	return rlp.DecodeBytes(data, out)
 }
