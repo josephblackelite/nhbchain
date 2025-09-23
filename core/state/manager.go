@@ -36,13 +36,18 @@ type TokenMetadata struct {
 }
 
 var (
-	tokenPrefix           = []byte("token:")
-	tokenListKey          = ethcrypto.Keccak256([]byte("token-list"))
-	balancePrefix         = []byte("balance:")
-	rolePrefix            = []byte("role:")
-	loyaltyGlobalKeyBytes = ethcrypto.Keccak256([]byte("loyalty:global"))
-	loyaltyDailyPrefix    = []byte("loyalty-meter:base-daily:")
-	loyaltyTotalPrefix    = []byte("loyalty-meter:base-total:")
+	tokenPrefix                = []byte("token:")
+	tokenListKey               = ethcrypto.Keccak256([]byte("token-list"))
+	balancePrefix              = []byte("balance:")
+	rolePrefix                 = []byte("role:")
+	loyaltyGlobalKeyBytes      = ethcrypto.Keccak256([]byte("loyalty:global"))
+	loyaltyDailyPrefix         = []byte("loyalty-meter:base-daily:")
+	loyaltyTotalPrefix         = []byte("loyalty-meter:base-total:")
+	loyaltyBusinessPrefix      = []byte("loyalty/business/")
+	loyaltyBusinessOwnerPrefix = []byte("loyalty/business-owner/")
+	loyaltyMerchantIndexPrefix = []byte("loyalty/merchant-index/")
+	loyaltyBusinessCounterKey  = []byte("loyalty/business/counter")
+	loyaltyOwnerPaymasterPref  = []byte("loyalty/owner-paymaster/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -64,6 +69,38 @@ func LoyaltyBaseTotalMeterKey(addr []byte) []byte {
 	copy(buf, loyaltyTotalPrefix)
 	copy(buf[len(loyaltyTotalPrefix):], addr)
 	return ethcrypto.Keccak256(buf)
+}
+
+func LoyaltyBusinessKey(id loyalty.BusinessID) []byte {
+	key := make([]byte, len(loyaltyBusinessPrefix)+len(id))
+	copy(key, loyaltyBusinessPrefix)
+	copy(key[len(loyaltyBusinessPrefix):], id[:])
+	return key
+}
+
+func LoyaltyBusinessOwnerKey(owner []byte) []byte {
+	key := make([]byte, len(loyaltyBusinessOwnerPrefix)+len(owner))
+	copy(key, loyaltyBusinessOwnerPrefix)
+	copy(key[len(loyaltyBusinessOwnerPrefix):], owner)
+	return key
+}
+
+func LoyaltyMerchantIndexKey(addr []byte) []byte {
+	key := make([]byte, len(loyaltyMerchantIndexPrefix)+len(addr))
+	copy(key, loyaltyMerchantIndexPrefix)
+	copy(key[len(loyaltyMerchantIndexPrefix):], addr)
+	return key
+}
+
+func LoyaltyBusinessCounterKey() []byte {
+	return append([]byte(nil), loyaltyBusinessCounterKey...)
+}
+
+func LoyaltyOwnerPaymasterKey(owner []byte) []byte {
+	key := make([]byte, len(loyaltyOwnerPaymasterPref)+len(owner))
+	copy(key, loyaltyOwnerPaymasterPref)
+	copy(key[len(loyaltyOwnerPaymasterPref):], owner)
+	return key
 }
 
 func tokenMetadataKey(symbol string) []byte {

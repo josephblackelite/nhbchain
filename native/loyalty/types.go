@@ -21,3 +21,15 @@ type Program struct {
 	EndTime      uint64
 	Active       bool
 }
+
+// BusinessID uniquely identifies a registered business entity.
+type BusinessID [32]byte
+
+// Business captures the on-chain configuration for a registered business.
+type Business struct {
+	ID        BusinessID
+	Owner     [20]byte
+	Name      string
+	Paymaster [20]byte
+	Merchants [][20]byte
+}
