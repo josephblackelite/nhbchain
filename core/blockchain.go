@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -18,6 +19,47 @@ type Blockchain struct {
 	mu      sync.RWMutex
 }
 
+var (
+	tipKey        = []byte("tip")
+	genesisKey    = []byte("genesis")
+	heightKeyName = []byte("height")
+	heightPrefix  = []byte("height:")
+	hashPrefix    = []byte("hash:")
+)
+
+func encodeUint64(v uint64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, v)
+	return buf
+}
+
+func decodeUint64(b []byte) uint64 {
+	return binary.BigEndian.Uint64(b)
+}
+
+func heightKey(height uint64) []byte {
+	key := make([]byte, len(heightPrefix)+8)
+	copy(key, heightPrefix)
+	binary.BigEndian.PutUint64(key[len(heightPrefix):], height)
+	return key
+}
+
+func hashKey(hash []byte) []byte {
+	key := make([]byte, len(hashPrefix)+len(hash))
+	copy(key, hashPrefix)
+	copy(key[len(hashPrefix):], hash)
+	return key
+}
+
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	return cp
+}
+
 // NewBlockchain creates a new blockchain using the provided Database interface.
 func NewBlockchain(db storage.Database) (*Blockchain, error) { // CHANGED: Accepts the interface
 	bc := &Blockchain{
@@ -25,27 +67,63 @@ func NewBlockchain(db storage.Database) (*Blockchain, error) { // CHANGED: Accep
 		heights: make(map[uint64][]byte),
 	}
 
-	genesisHash, err := db.Get([]byte("genesis"))
+	genesisHash, err := db.Get(genesisKey)
 	if err != nil {
 		fmt.Println("No genesis block found. Creating a new one.")
 		genesis := createGenesisBlock()
-		genesisBytes, _ := json.Marshal(genesis)
-		genesisHash, _ = genesis.Header.Hash()
+		genesisBytes, err := json.Marshal(genesis)
+		if err != nil {
+			return nil, fmt.Errorf("marshal genesis: %w", err)
+		}
+		genesisHash, err = genesis.Header.Hash()
+		if err != nil {
+			return nil, fmt.Errorf("hash genesis: %w", err)
+		}
 
-		db.Put(genesisHash, genesisBytes)
-		db.Put([]byte("genesis"), genesisHash)
-		db.Put([]byte("tip"), genesisHash)
+		if err := db.Put(genesisHash, genesisBytes); err != nil {
+			return nil, fmt.Errorf("store genesis block: %w", err)
+		}
+		if err := db.Put(genesisKey, genesisHash); err != nil {
+			return nil, fmt.Errorf("store genesis hash: %w", err)
+		}
+		if err := db.Put(tipKey, genesisHash); err != nil {
+			return nil, fmt.Errorf("store tip: %w", err)
+		}
+		if err := db.Put(heightKeyName, encodeUint64(0)); err != nil {
+			return nil, fmt.Errorf("store height: %w", err)
+		}
+		if err := db.Put(heightKey(0), genesisHash); err != nil {
+			return nil, fmt.Errorf("store height index: %w", err)
+		}
+		if err := db.Put(hashKey(genesisHash), encodeUint64(0)); err != nil {
+			return nil, fmt.Errorf("store hash index: %w", err)
+		}
 
-		bc.tip = genesisHash
+		bc.tip = cloneBytes(genesisHash)
 		bc.height = 0
-		bc.heights[0] = genesisHash
+		bc.heights[0] = cloneBytes(genesisHash)
 	} else {
 		// A full implementation would load the entire heights map from the DB on startup.
 		fmt.Println("Found existing genesis block.")
-		tipHash, _ := db.Get([]byte("tip"))
-		bc.tip = tipHash
-		// To make this fully persistent, we would also need to load the last known height
-		// and rebuild the heights map here. For now, this is sufficient for the simulation.
+		tipHash, err := db.Get(tipKey)
+		if err != nil {
+			return nil, fmt.Errorf("load tip: %w", err)
+		}
+		bc.tip = cloneBytes(tipHash)
+
+		heightBytes, err := db.Get(heightKeyName)
+		if err != nil {
+			return nil, fmt.Errorf("load height: %w", err)
+		}
+		bc.height = decodeUint64(heightBytes)
+
+		for i := uint64(0); i <= bc.height; i++ {
+			hashBytes, err := db.Get(heightKey(i))
+			if err != nil {
+				return nil, fmt.Errorf("load height index %d: %w", i, err)
+			}
+			bc.heights[i] = cloneBytes(hashBytes)
+		}
 	}
 
 	return bc, nil
@@ -60,14 +138,37 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 		return fmt.Errorf("block prevhash mismatch")
 	}
 
-	blockBytes, _ := json.Marshal(b)
-	blockHash, _ := b.Header.Hash()
+	blockBytes, err := json.Marshal(b)
+	if err != nil {
+		return fmt.Errorf("marshal block: %w", err)
+	}
+	blockHash, err := b.Header.Hash()
+	if err != nil {
+		return fmt.Errorf("hash block: %w", err)
+	}
 
-	bc.db.Put(blockHash, blockBytes)
-	bc.db.Put([]byte("tip"), blockHash)
-	bc.tip = blockHash
-	bc.height++
-	bc.heights[bc.height] = blockHash
+	if err := bc.db.Put(blockHash, blockBytes); err != nil {
+		return fmt.Errorf("store block: %w", err)
+	}
+
+	if err := bc.db.Put(tipKey, blockHash); err != nil {
+		return fmt.Errorf("store tip: %w", err)
+	}
+
+	newHeight := bc.height + 1
+	if err := bc.db.Put(heightKeyName, encodeUint64(newHeight)); err != nil {
+		return fmt.Errorf("store height: %w", err)
+	}
+	if err := bc.db.Put(heightKey(newHeight), blockHash); err != nil {
+		return fmt.Errorf("store height index: %w", err)
+	}
+	if err := bc.db.Put(hashKey(blockHash), encodeUint64(newHeight)); err != nil {
+		return fmt.Errorf("store hash index: %w", err)
+	}
+
+	bc.tip = cloneBytes(blockHash)
+	bc.height = newHeight
+	bc.heights[newHeight] = cloneBytes(blockHash)
 
 	fmt.Printf("Added new block! Height: %d, Hash: %x\n", bc.height, blockHash)
 	return nil
@@ -135,7 +236,6 @@ func createGenesisBlock() *types.Block {
 	}
 	return types.NewBlock(header, []*types.Transaction{})
 }
-
 
 func (bc *Blockchain) CurrentHeader() *types.BlockHeader {
 	bc.mu.RLock()
