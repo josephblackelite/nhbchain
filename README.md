@@ -40,7 +40,7 @@ Networking Layer: A robust peer-to-peer network with automatic chain synchroniza
 Follow these instructions to clone, build, and run your own NHBCoin node, connecting it to the network.
 
 Prerequisites
-Go: Version 1.18 or higher.
+Go: Version 1.22.6 (this repository is pinned to this release).
 
 Git: For cloning the repository.
 
@@ -55,8 +55,11 @@ sudo apt update
 # Install Git and other build tools
 sudo apt install git build-essential -y
 
-# Install the Go programming language
-sudo snap install go --classic
+# Install the Go programming language (1.22.6)
+wget https://go.dev/dl/go1.22.6.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.22.6.linux-amd64.tar.gz
+echo 'export PATH="/usr/local/go/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 
 2. Clone and Build
 Next, clone the repository and compile the node software into a single executable.
@@ -75,6 +78,8 @@ go build -o nhb-node ./cmd/nhb/
 
 # Build the Command-Line Interface (CLI) tool
 go build -o nhb-cli ./cmd/nhb-cli/
+
+> **Note:** The helper scripts in `scripts/` automatically target Go 1.22.6 and default `GOFLAGS` to `-buildvcs=false`. Override `GO_VERSION`, `GO_CMD`, or `GOFLAGS` if you already manage the toolchain yourself.
 
 You will now have two new files: nhb-node (the blockchain client) and nhb-cli (the tool to interact with it).
 
