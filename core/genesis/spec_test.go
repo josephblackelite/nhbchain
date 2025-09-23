@@ -106,9 +106,15 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	db := storage.NewMemDB()
 	defer db.Close()
 
-	block, err := BuildGenesisFromSpec(loaded, db)
+	block, finalize, err := BuildGenesisFromSpec(loaded, db)
 	if err != nil {
 		t.Fatalf("BuildGenesisFromSpec: %v", err)
+	}
+	if finalize == nil {
+		t.Fatalf("expected finalize callback")
+	}
+	if err := finalize(); err != nil {
+		t.Fatalf("finalize genesis: %v", err)
 	}
 
 	if block.Header.Height != 0 {
@@ -139,7 +145,7 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	}
 	sort.Strings(tokens)
 	expectedTokens := []string{"NHB", "ZNHB"}
-	if len(tokens) != len(expectedTokens)) {
+	if len(tokens) != len(expectedTokens) {
 		t.Fatalf("unexpected token list size: got %d want %d", len(tokens), len(expectedTokens))
 	}
 	for i, symbol := range expectedTokens {
@@ -207,9 +213,15 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 		t.Fatalf("unexpected persisted validator count: %d", len(validators))
 	}
 
-	block2, err := BuildGenesisFromSpec(loaded, db)
+	block2, finalize2, err := BuildGenesisFromSpec(loaded, db)
 	if err != nil {
 		t.Fatalf("BuildGenesisFromSpec second call: %v", err)
+	}
+	if finalize2 == nil {
+		t.Fatalf("expected finalize callback on second run")
+	}
+	if err := finalize2(); err != nil {
+		t.Fatalf("finalize second genesis: %v", err)
 	}
 	hash1, err := block.Header.Hash()
 	if err != nil {
