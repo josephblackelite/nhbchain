@@ -16,166 +16,209 @@ import (
 	"nhbchain/crypto"
 )
 
-const rpcEndpoint = "http://localhost:8080" // Assumes the CLI is run on the same machine as the node
+var rpcEndpoint = defaultRPCEndpoint() // Defaults to localhost, can be overridden via RPC_URL or --rpc flag
 var rpcAuthToken = os.Getenv("NHB_RPC_TOKEN")
 
 func main() {
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+	var err error
+	rpcEndpoint = defaultRPCEndpoint()
+	args, err = applyGlobalFlags(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if len(args) < 1 {
 		printUsage()
 		return
 	}
 
-	command := os.Args[1]
+	command := args[0]
 	switch command {
 	case "generate-key":
 		generateKey()
 	case "balance":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Error: Please provide an address.")
 			printUsage()
 			return
 		}
-		getBalance(os.Args[2])
+		getBalance(args[1])
 	case "claim-username": // NEW: Handle the new command
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Error: Please provide a username and a key file.")
 			printUsage()
 			return
 		}
-		claimUsername(os.Args[2], os.Args[3])
+		claimUsername(args[1], args[2])
 	case "stake": // NEW: Handle the stake command
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Error: Please provide an amount and a key file.")
 			printUsage()
 			return
 		}
-		amount, err := strconv.ParseInt(os.Args[2], 10, 64)
+		amount, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			fmt.Println("Error: Invalid amount.")
 			return
 		}
-		stake(amount, os.Args[3])
+		stake(amount, args[2])
 	case "un-stake": // NEW: Handle the un-stake command
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Error: Please provide an amount and a key file.")
 			printUsage()
 			return
 		}
-		amount, err := strconv.ParseInt(os.Args[2], 10, 64)
+		amount, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			fmt.Println("Error: Invalid amount.")
 			return
 		}
-		unStake(amount, os.Args[3])
+		unStake(amount, args[2])
 	case "heartbeat": // NEW: Handle the heartbeat command
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Error: Please provide a key file.")
 			printUsage()
 			return
 		}
-		heartbeat(os.Args[2])
+		heartbeat(args[1])
 	case "deploy": // NEW: Handle the deploy command
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Error: Please provide a bytecode file and a key file.")
 			printUsage()
 			return
 		}
-		deploy(os.Args[2], os.Args[3])
+		deploy(args[1], args[2])
+	case "escrow":
+		code := runEscrowCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "loyalty-create-business":
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-create-business <owner> <name>")
 			return
 		}
-		name := strings.Join(os.Args[3:], " ")
-		loyaltyCreateBusiness(os.Args[2], name)
+		name := strings.Join(args[2:], " ")
+		loyaltyCreateBusiness(args[1], name)
 	case "loyalty-set-paymaster":
-		if len(os.Args) < 5 {
+		if len(args) < 4 {
 			fmt.Println("Usage: loyalty-set-paymaster <caller> <businessId> <paymaster>")
 			return
 		}
-		loyaltySetPaymaster(os.Args[2], os.Args[3], os.Args[4])
+		loyaltySetPaymaster(args[1], args[2], args[3])
 	case "loyalty-add-merchant":
-		if len(os.Args) < 5 {
+		if len(args) < 4 {
 			fmt.Println("Usage: loyalty-add-merchant <caller> <businessId> <merchant>")
 			return
 		}
-		loyaltyModifyMerchant("loyalty_addMerchant", os.Args[2], os.Args[3], os.Args[4])
+		loyaltyModifyMerchant("loyalty_addMerchant", args[1], args[2], args[3])
 	case "loyalty-remove-merchant":
-		if len(os.Args) < 5 {
+		if len(args) < 4 {
 			fmt.Println("Usage: loyalty-remove-merchant <caller> <businessId> <merchant>")
 			return
 		}
-		loyaltyModifyMerchant("loyalty_removeMerchant", os.Args[2], os.Args[3], os.Args[4])
+		loyaltyModifyMerchant("loyalty_removeMerchant", args[1], args[2], args[3])
 	case "loyalty-create-program":
-		if len(os.Args) < 5 {
+		if len(args) < 4 {
 			fmt.Println("Usage: loyalty-create-program <caller> <businessId> <programSpecJSON>")
 			return
 		}
-		loyaltyCreateProgram(os.Args[2], os.Args[3], os.Args[4])
+		loyaltyCreateProgram(args[1], args[2], args[3])
 	case "loyalty-update-program":
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-update-program <caller> <programSpecJSON>")
 			return
 		}
-		loyaltyUpdateProgram(os.Args[2], os.Args[3])
+		loyaltyUpdateProgram(args[1], args[2])
 	case "loyalty-pause-program":
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-pause-program <caller> <programId>")
 			return
 		}
-		loyaltyLifecycle("loyalty_pauseProgram", os.Args[2], os.Args[3])
+		loyaltyLifecycle("loyalty_pauseProgram", args[1], args[2])
 	case "loyalty-resume-program":
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-resume-program <caller> <programId>")
 			return
 		}
-		loyaltyLifecycle("loyalty_resumeProgram", os.Args[2], os.Args[3])
+		loyaltyLifecycle("loyalty_resumeProgram", args[1], args[2])
 	case "loyalty-get-business":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Usage: loyalty-get-business <businessId>")
 			return
 		}
-		loyaltyGetBusiness(os.Args[2])
+		loyaltyGetBusiness(args[1])
 	case "loyalty-list-programs":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Usage: loyalty-list-programs <businessId>")
 			return
 		}
-		loyaltyListPrograms(os.Args[2])
+		loyaltyListPrograms(args[1])
 	case "loyalty-program-stats":
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-program-stats <programId> <day>")
 			return
 		}
-		loyaltyProgramStats(os.Args[2], os.Args[3])
+		loyaltyProgramStats(args[1], args[2])
 	case "loyalty-user-daily":
-		if len(os.Args) < 5 {
+		if len(args) < 4 {
 			fmt.Println("Usage: loyalty-user-daily <user> <programId> <day>")
 			return
 		}
-		loyaltyUserDaily(os.Args[2], os.Args[3], os.Args[4])
+		loyaltyUserDaily(args[1], args[2], args[3])
 	case "loyalty-paymaster-balance":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Usage: loyalty-paymaster-balance <businessId>")
 			return
 		}
-		loyaltyPaymasterBalance(os.Args[2])
+		loyaltyPaymasterBalance(args[1])
 	case "loyalty-resolve-username":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Println("Usage: loyalty-resolve-username <username>")
 			return
 		}
-		loyaltyResolveUsername(os.Args[2])
+		loyaltyResolveUsername(args[1])
 	case "loyalty-user-qr":
-		if len(os.Args) < 4 {
+		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-user-qr <mode:username|address> <value>")
 			return
 		}
-		loyaltyUserQR(os.Args[2], os.Args[3])
+		loyaltyUserQR(args[1], args[2])
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		printUsage()
 	}
+}
+
+func defaultRPCEndpoint() string {
+	if v := strings.TrimSpace(os.Getenv("RPC_URL")); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+func applyGlobalFlags(args []string) ([]string, error) {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--rpc" {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("missing value for --rpc")
+			}
+			rpcEndpoint = args[i+1]
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--rpc=") {
+			rpcEndpoint = strings.TrimPrefix(arg, "--rpc=")
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, nil
 }
 
 // NEW: stake creates and sends a transaction to stake ZapNHB.
