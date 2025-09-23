@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -42,6 +43,8 @@ type StateProcessor struct {
 	Trie           *trie.Trie
 	stateDB        *gethstate.CachingDB
 	LoyaltyEngine  *loyalty.Engine
+	EscrowEngine   *escrow.Engine
+	TradeEngine    *escrow.TradeEngine
 	usernameToAddr map[string][]byte
 	ValidatorSet   map[string]*big.Int
 	committedRoot  common.Hash
@@ -50,10 +53,14 @@ type StateProcessor struct {
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	stateDB := gethstate.NewDatabase(tr.TrieDB(), nil)
+	escEngine := escrow.NewEngine()
+	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
 		Trie:           tr,
 		stateDB:        stateDB,
 		LoyaltyEngine:  loyalty.NewEngine(),
+		EscrowEngine:   escEngine,
+		TradeEngine:    tradeEngine,
 		usernameToAddr: make(map[string][]byte),
 		ValidatorSet:   make(map[string]*big.Int),
 		committedRoot:  tr.Root(),
@@ -1047,6 +1054,58 @@ func (sp *StateProcessor) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.In
 	}
 	key := nhbstate.LoyaltyBaseTotalMeterKey(addr)
 	return sp.writeBigInt(key, amount)
+}
+
+func (sp *StateProcessor) configureTradeEngine() (*escrow.TradeEngine, *nhbstate.Manager) {
+	manager := nhbstate.NewManager(sp.Trie)
+	if sp.EscrowEngine == nil {
+		sp.EscrowEngine = escrow.NewEngine()
+	}
+	sp.EscrowEngine.SetState(manager)
+	sp.EscrowEngine.SetEmitter(stateProcessorEmitter{sp: sp})
+	if sp.TradeEngine == nil {
+		sp.TradeEngine = escrow.NewTradeEngine(sp.EscrowEngine)
+	}
+	sp.TradeEngine.SetState(manager)
+	sp.TradeEngine.SetEmitter(stateProcessorEmitter{sp: sp})
+	return sp.TradeEngine, manager
+}
+
+type stateProcessorEmitter struct {
+	sp *StateProcessor
+}
+
+func (e stateProcessorEmitter) Emit(evt events.Event) {
+	if e.sp == nil || evt == nil {
+		return
+	}
+	if provider, ok := evt.(interface{ Event() *types.Event }); ok {
+		if payload := provider.Event(); payload != nil {
+			e.sp.AppendEvent(payload)
+		}
+		return
+	}
+	e.sp.AppendEvent(&types.Event{Type: evt.EventType(), Attributes: map[string]string{}})
+}
+
+func (sp *StateProcessor) SettleTradeAtomic(tradeID [32]byte) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.SettleAtomic(tradeID)
+}
+
+func (sp *StateProcessor) TradeTryExpire(tradeID [32]byte, now int64) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.TradeTryExpire(tradeID, now)
+}
+
+func (sp *StateProcessor) OnTradeFundingProgress(tradeID [32]byte) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.OnFundingProgress(tradeID)
+}
+
+func (sp *StateProcessor) OnEscrowFunded(escrowID [32]byte) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.HandleEscrowFunded(escrowID)
 }
 
 func (sp *StateProcessor) AppendEvent(evt *types.Event) {
