@@ -11,15 +11,18 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"nhbchain/native/loyalty"
 )
 
 type GenesisSpec struct {
 	GenesisTime   string                       `json:"genesisTime"`
 	NativeTokens  []NativeTokenSpec            `json:"nativeTokens"`
 	Validators    []ValidatorSpec              `json:"validators"`
-	Alloc         map[string]map[string]string `json:"alloc"`           // addr -> token -> amount
-	Roles         map[string][]string          `json:"roles"`           // role -> []addr
+	Alloc         map[string]map[string]string `json:"alloc"` // addr -> token -> amount
+	Roles         map[string][]string          `json:"roles"` // role -> []addr
 	ChainID       *uint64                      `json:"chainId,omitempty"`
+	LoyaltyGlobal *LoyaltyGlobalSpec           `json:"loyaltyGlobal,omitempty"`
 
 	genesisTimestamp time.Time
 	chainIDValue     uint64
@@ -41,6 +44,22 @@ type ValidatorSpec struct {
 	Moniker string `json:"moniker,omitempty"`
 }
 
+type LoyaltyGlobalSpec struct {
+	Active       bool   `json:"active"`
+	Treasury     string `json:"treasury"`
+	BaseBps      uint32 `json:"baseBps"`
+	MinSpend     string `json:"minSpend"`
+	CapPerTx     string `json:"capPerTx"`
+	DailyCapUser string `json:"dailyCapUser"`
+	SeedZNHB     string `json:"seedZNHB"`
+
+	treasuryAddr []byte
+	minSpendAmt  *big.Int
+	capPerTxAmt  *big.Int
+	dailyCapAmt  *big.Int
+	seedZNHB     *big.Int
+}
+
 func LoadGenesisSpec(path string) (*GenesisSpec, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("genesis spec path must be provided")
@@ -56,14 +75,16 @@ func LoadGenesisSpec(path string) (*GenesisSpec, error) {
 		return nil, fmt.Errorf("decode genesis spec %q: %w", path, err)
 	}
 	if err := spec.validate(); err != nil {
-	 return nil, fmt.Errorf("invalid genesis spec %q: %w", path, err)
+		return nil, fmt.Errorf("invalid genesis spec %q: %w", path, err)
 	}
 	return &spec, nil
 }
 
 func (s *GenesisSpec) GenesisTimestamp() time.Time { return s.genesisTimestamp }
 func (s *GenesisSpec) ChainIDValue() (uint64, bool) {
-	if s.hasChainID { return s.chainIDValue, true }
+	if s.hasChainID {
+		return s.chainIDValue, true
+	}
 	return 0, false
 }
 
@@ -92,6 +113,12 @@ func (s *GenesisSpec) validate() error {
 			return fmt.Errorf("nativeToken[%d]: duplicate symbol %q", i, s.NativeTokens[i].Symbol)
 		}
 		tokenSymbols[key] = struct{}{}
+	}
+
+	if s.LoyaltyGlobal != nil {
+		if err := s.LoyaltyGlobal.validate(tokenSymbols); err != nil {
+			return fmt.Errorf("loyaltyGlobal: %w", err)
+		}
 	}
 
 	// validators
@@ -125,16 +152,22 @@ func (s *GenesisSpec) validate() error {
 	// alloc
 	if len(s.Alloc) > 0 {
 		accounts := make([]string, 0, len(s.Alloc))
-		for account := range s.Alloc { accounts = append(accounts, account) }
+		for account := range s.Alloc {
+			accounts = append(accounts, account)
+		}
 		sort.Strings(accounts)
 		for _, account := range accounts {
 			if _, err := ParseBech32Account(account); err != nil {
 				return fmt.Errorf("alloc[%q]: %w", account, err)
 			}
 			tokenAlloc := s.Alloc[account]
-			if len(tokenAlloc) == 0 { continue }
+			if len(tokenAlloc) == 0 {
+				continue
+			}
 			symbols := make([]string, 0, len(tokenAlloc))
-			for symbol := range tokenAlloc { symbols = append(symbols, symbol) }
+			for symbol := range tokenAlloc {
+				symbols = append(symbols, symbol)
+			}
 			sort.Strings(symbols)
 			seen := make(map[string]struct{}, len(symbols))
 			for _, symbol := range symbols {
@@ -159,7 +192,9 @@ func (s *GenesisSpec) validate() error {
 
 	// roles
 	roleNames := make([]string, 0, len(s.Roles))
-	for role := range s.Roles { roleNames = append(roleNames, role) }
+	for role := range s.Roles {
+		roleNames = append(roleNames, role)
+	}
 	sort.Strings(roleNames)
 	for _, role := range roleNames {
 		if strings.TrimSpace(role) == "" {
@@ -192,6 +227,83 @@ func (t *NativeTokenSpec) validate() error {
 	}
 	// InitialMintPaused is optional; no extra check needed.
 	return nil
+}
+
+func parseAmountString(value string) (*big.Int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	amount, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid amount %q", value)
+	}
+	if amount.Sign() < 0 {
+		return nil, fmt.Errorf("amount must not be negative")
+	}
+	return amount, nil
+}
+
+func (l *LoyaltyGlobalSpec) validate(tokenSymbols map[string]struct{}) error {
+	if l == nil {
+		return nil
+	}
+	trimmedTreasury := strings.TrimSpace(l.Treasury)
+	if trimmedTreasury == "" {
+		return fmt.Errorf("treasury must be provided")
+	}
+	addr, err := ParseBech32Account(trimmedTreasury)
+	if err != nil {
+		return fmt.Errorf("treasury: %w", err)
+	}
+	l.treasuryAddr = append([]byte(nil), addr[:]...)
+	if l.BaseBps > 10_000 {
+		return fmt.Errorf("baseBps must be 10_000 or fewer")
+	}
+	minSpend, err := parseAmountString(l.MinSpend)
+	if err != nil {
+		return fmt.Errorf("minSpend: %w", err)
+	}
+	capPerTx, err := parseAmountString(l.CapPerTx)
+	if err != nil {
+		return fmt.Errorf("capPerTx: %w", err)
+	}
+	dailyCap, err := parseAmountString(l.DailyCapUser)
+	if err != nil {
+		return fmt.Errorf("dailyCapUser: %w", err)
+	}
+	seed, err := parseAmountString(l.SeedZNHB)
+	if err != nil {
+		return fmt.Errorf("seedZNHB: %w", err)
+	}
+	if seed.Sign() > 0 {
+		if _, ok := tokenSymbols["ZNHB"]; !ok {
+			return fmt.Errorf("seedZNHB provided but token ZNHB not registered")
+		}
+	}
+	l.minSpendAmt = minSpend
+	l.capPerTxAmt = capPerTx
+	l.dailyCapAmt = dailyCap
+	l.seedZNHB = seed
+	return nil
+}
+
+func (l *LoyaltyGlobalSpec) Config() (*loyalty.GlobalConfig, *big.Int, error) {
+	if l == nil {
+		return nil, nil, nil
+	}
+	if l.treasuryAddr == nil {
+		return nil, nil, fmt.Errorf("loyalty global spec not validated")
+	}
+	cfg := &loyalty.GlobalConfig{
+		Active:       l.Active,
+		Treasury:     append([]byte(nil), l.treasuryAddr...),
+		BaseBps:      l.BaseBps,
+		MinSpend:     new(big.Int).Set(l.minSpendAmt),
+		CapPerTx:     new(big.Int).Set(l.capPerTxAmt),
+		DailyCapUser: new(big.Int).Set(l.dailyCapAmt),
+	}
+	return cfg, new(big.Int).Set(l.seedZNHB), nil
 }
 
 func parseGenesisTime(value string) (time.Time, error) {

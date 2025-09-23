@@ -10,6 +10,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"nhbchain/native/loyalty"
 	"nhbchain/storage/trie"
 )
 
@@ -33,11 +34,35 @@ type TokenMetadata struct {
 }
 
 var (
-	tokenPrefix   = []byte("token:")
-	tokenListKey  = ethcrypto.Keccak256([]byte("token-list"))
-	balancePrefix = []byte("balance:")
-	rolePrefix    = []byte("role:")
+	tokenPrefix           = []byte("token:")
+	tokenListKey          = ethcrypto.Keccak256([]byte("token-list"))
+	balancePrefix         = []byte("balance:")
+	rolePrefix            = []byte("role:")
+	loyaltyGlobalKeyBytes = ethcrypto.Keccak256([]byte("loyalty:global"))
+	loyaltyDailyPrefix    = []byte("loyalty-meter:base-daily:")
+	loyaltyTotalPrefix    = []byte("loyalty-meter:base-total:")
 )
+
+func LoyaltyGlobalStorageKey() []byte {
+	return append([]byte(nil), loyaltyGlobalKeyBytes...)
+}
+
+func LoyaltyBaseDailyMeterKey(addr []byte, day string) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(loyaltyDailyPrefix)+len(trimmed)+1+len(addr))
+	copy(buf, loyaltyDailyPrefix)
+	copy(buf[len(loyaltyDailyPrefix):], trimmed)
+	buf[len(loyaltyDailyPrefix)+len(trimmed)] = ':'
+	copy(buf[len(loyaltyDailyPrefix)+len(trimmed)+1:], addr)
+	return ethcrypto.Keccak256(buf)
+}
+
+func LoyaltyBaseTotalMeterKey(addr []byte) []byte {
+	buf := make([]byte, len(loyaltyTotalPrefix)+len(addr))
+	copy(buf, loyaltyTotalPrefix)
+	copy(buf[len(loyaltyTotalPrefix):], addr)
+	return ethcrypto.Keccak256(buf)
+}
 
 func tokenMetadataKey(symbol string) []byte {
 	buf := make([]byte, len(tokenPrefix)+len(symbol))
@@ -53,6 +78,35 @@ func balanceKey(addr []byte, symbol string) []byte {
 	buf[len(balancePrefix)+len(symbol)] = ':'
 	copy(buf[len(balancePrefix)+len(symbol)+1:], addr)
 	return ethcrypto.Keccak256(buf)
+}
+
+func (m *Manager) loadBigInt(key []byte) (*big.Int, error) {
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return big.NewInt(0), nil
+	}
+	value := new(big.Int)
+	if err := rlp.DecodeBytes(data, value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func (m *Manager) writeBigInt(key []byte, amount *big.Int) error {
+	if amount == nil {
+		amount = big.NewInt(0)
+	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("negative value not allowed")
+	}
+	encoded, err := rlp.EncodeToBytes(amount)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(key, encoded)
 }
 
 func roleKey(role string) []byte {
@@ -227,6 +281,80 @@ func (m *Manager) Balance(addr []byte, symbol string) (*big.Int, error) {
 		return nil, err
 	}
 	return amount, nil
+}
+
+// SetLoyaltyGlobalConfig stores the global configuration for the loyalty engine.
+func (m *Manager) SetLoyaltyGlobalConfig(cfg *loyalty.GlobalConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("nil config")
+	}
+	normalized := cfg.Clone().Normalize()
+	if err := normalized.Validate(); err != nil {
+		return err
+	}
+	encoded, err := rlp.EncodeToBytes(normalized)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(loyaltyGlobalKeyBytes, encoded)
+}
+
+// LoyaltyGlobalConfig retrieves the stored global configuration, if any.
+func (m *Manager) LoyaltyGlobalConfig() (*loyalty.GlobalConfig, error) {
+	data, err := m.trie.Get(loyaltyGlobalKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	cfg := new(loyalty.GlobalConfig)
+	if err := rlp.DecodeBytes(data, cfg); err != nil {
+		return nil, err
+	}
+	return cfg.Normalize(), nil
+}
+
+// SetLoyaltyBaseDailyAccrued stores the accrued base rewards for the provided
+// address and UTC day string (YYYY-MM-DD).
+func (m *Manager) SetLoyaltyBaseDailyAccrued(addr []byte, day string, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	return m.writeBigInt(LoyaltyBaseDailyMeterKey(addr, day), amount)
+}
+
+// LoyaltyBaseDailyAccrued returns the accrued base rewards for the supplied
+// address and day.
+func (m *Manager) LoyaltyBaseDailyAccrued(addr []byte, day string) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	return m.loadBigInt(LoyaltyBaseDailyMeterKey(addr, day))
+}
+
+// SetLoyaltyBaseTotalAccrued stores the lifetime accrued base rewards for the
+// provided address.
+func (m *Manager) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	return m.writeBigInt(LoyaltyBaseTotalMeterKey(addr), amount)
+}
+
+// LoyaltyBaseTotalAccrued returns the lifetime accrued base rewards for the
+// supplied address.
+func (m *Manager) LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	return m.loadBigInt(LoyaltyBaseTotalMeterKey(addr))
 }
 
 // SetRole associates an address with the specified role. Duplicate assignments

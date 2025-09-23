@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	nhbstate "nhbchain/core/state"
@@ -43,6 +44,7 @@ type StateProcessor struct {
 	usernameToAddr map[string][]byte
 	ValidatorSet   map[string]*big.Int
 	committedRoot  common.Hash
+	events         []types.Event
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -54,6 +56,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		usernameToAddr: make(map[string][]byte),
 		ValidatorSet:   make(map[string]*big.Int),
 		committedRoot:  tr.Root(),
+		events:         make([]types.Event, 0),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -110,6 +113,14 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 	for k, v := range sp.ValidatorSet {
 		validatorCopy[k] = new(big.Int).Set(v)
 	}
+	eventsCopy := make([]types.Event, len(sp.events))
+	for i := range sp.events {
+		attrs := make(map[string]string, len(sp.events[i].Attributes))
+		for k, v := range sp.events[i].Attributes {
+			attrs[k] = v
+		}
+		eventsCopy[i] = types.Event{Type: sp.events[i].Type, Attributes: attrs}
+	}
 	return &StateProcessor{
 		Trie:           trieCopy,
 		stateDB:        sp.stateDB,
@@ -117,6 +128,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		usernameToAddr: usernameCopy,
 		ValidatorSet:   validatorCopy,
 		committedRoot:  sp.committedRoot,
+		events:         eventsCopy,
 	}, nil
 }
 
@@ -208,7 +220,21 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	}
 
 	if tx.To != nil {
-		sp.LoyaltyEngine.OnTransactionSuccess(fromAcc, toAcc)
+		ctx := &loyalty.BaseRewardContext{
+			From:  append([]byte(nil), from...),
+			To:    append([]byte(nil), tx.To...),
+			Token: "NHB",
+			Amount: func() *big.Int {
+				if tx.Value == nil {
+					return big.NewInt(0)
+				}
+				return new(big.Int).Set(tx.Value)
+			}(),
+			Timestamp:   time.Unix(int64(blockCtx.Time), 0),
+			FromAccount: fromAcc,
+			ToAccount:   toAcc,
+		}
+		sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
 	}
 
 	if err := sp.setAccount(from, fromAcc); err != nil {
@@ -933,6 +959,116 @@ func (sp *StateProcessor) getEscrow(id []byte) (*escrow.Escrow, error) {
 		return nil, err
 	}
 	return e, nil
+}
+
+func (sp *StateProcessor) loadBigInt(key []byte) (*big.Int, error) {
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return big.NewInt(0), nil
+	}
+	value := new(big.Int)
+	if err := rlp.DecodeBytes(data, value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func (sp *StateProcessor) writeBigInt(key []byte, amount *big.Int) error {
+	if amount == nil {
+		amount = big.NewInt(0)
+	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("negative value not allowed")
+	}
+	encoded, err := rlp.EncodeToBytes(amount)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(key, encoded)
+}
+
+func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error {
+	return sp.setAccount(addr, account)
+}
+
+func (sp *StateProcessor) LoyaltyGlobalConfig() (*loyalty.GlobalConfig, error) {
+	key := nhbstate.LoyaltyGlobalStorageKey()
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	cfg := new(loyalty.GlobalConfig)
+	if err := rlp.DecodeBytes(data, cfg); err != nil {
+		return nil, err
+	}
+	return cfg.Normalize(), nil
+}
+
+func (sp *StateProcessor) LoyaltyBaseDailyAccrued(addr []byte, day string) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseDailyMeterKey(addr, day)
+	return sp.loadBigInt(key)
+}
+
+func (sp *StateProcessor) SetLoyaltyBaseDailyAccrued(addr []byte, day string, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseDailyMeterKey(addr, day)
+	return sp.writeBigInt(key, amount)
+}
+
+func (sp *StateProcessor) LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseTotalMeterKey(addr)
+	return sp.loadBigInt(key)
+}
+
+func (sp *StateProcessor) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseTotalMeterKey(addr)
+	return sp.writeBigInt(key, amount)
+}
+
+func (sp *StateProcessor) AppendEvent(evt *types.Event) {
+	if evt == nil {
+		return
+	}
+	attrs := make(map[string]string, len(evt.Attributes))
+	for k, v := range evt.Attributes {
+		attrs[k] = v
+	}
+	sp.events = append(sp.events, types.Event{Type: evt.Type, Attributes: attrs})
+}
+
+func (sp *StateProcessor) Events() []types.Event {
+	out := make([]types.Event, len(sp.events))
+	for i := range sp.events {
+		attrs := make(map[string]string, len(sp.events[i].Attributes))
+		for k, v := range sp.events[i].Attributes {
+			attrs[k] = v
+		}
+		out[i] = types.Event{Type: sp.events[i].Type, Attributes: attrs}
+	}
+	return out
 }
 
 func (sp *StateProcessor) GetAccount(addr []byte) (*types.Account, error) { return sp.getAccount(addr) }

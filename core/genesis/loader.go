@@ -14,6 +14,7 @@ import (
 	"nhbchain/consensus/store"
 	"nhbchain/core/state"
 	"nhbchain/core/types"
+	"nhbchain/native/loyalty"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
 )
@@ -50,6 +51,30 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 	}
 	manager := state.NewManager(stateTrie)
 	parentRoot := stateTrie.Root()
+
+	var loyaltyCfg *loyalty.GlobalConfig
+	var loyaltySeed *big.Int
+	var loyaltyTreasury string
+	if spec.LoyaltyGlobal != nil {
+		cfg, seed, err := spec.LoyaltyGlobal.Config()
+		if err != nil {
+			return nil, nil, fmt.Errorf("loyalty global config: %w", err)
+		}
+		loyaltyCfg = cfg
+		loyaltySeed = seed
+		loyaltyTreasury = spec.LoyaltyGlobal.Treasury
+		if loyaltySeed.Sign() > 0 {
+			if spec.Alloc == nil {
+				spec.Alloc = make(map[string]map[string]string)
+			}
+			entry := spec.Alloc[loyaltyTreasury]
+			if entry == nil {
+				entry = make(map[string]string)
+				spec.Alloc[loyaltyTreasury] = entry
+			}
+			entry["ZNHB"] = loyaltySeed.String()
+		}
+	}
 
 	// 1) Tokens (sorted)
 	tokens := append([]NativeTokenSpec(nil), spec.NativeTokens...)
@@ -127,6 +152,12 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 
 		if err := manager.PutAccount(addrBytes, account); err != nil {
 			return nil, nil, fmt.Errorf("persist account %q: %w", addrStr, err)
+		}
+	}
+
+	if loyaltyCfg != nil {
+		if err := manager.SetLoyaltyGlobalConfig(loyaltyCfg); err != nil {
+			return nil, nil, fmt.Errorf("set loyalty global config: %w", err)
 		}
 	}
 
