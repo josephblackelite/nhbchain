@@ -75,7 +75,7 @@ func (n *Node) HandleMessage(msg *p2p.Message) error {
 		}
 		n.AddTransaction(tx)
 	case p2p.MsgTypeProposal:
-		proposal := new(bft.Proposal)
+		proposal := new(bft.SignedProposal)
 		if err := json.Unmarshal(msg.Payload, proposal); err != nil {
 			return err
 		}
@@ -83,7 +83,7 @@ func (n *Node) HandleMessage(msg *p2p.Message) error {
 			return n.bftEngine.HandleProposal(proposal)
 		}
 	case p2p.MsgTypeVote:
-		vote := new(bft.Vote)
+		vote := new(bft.SignedVote)
 		if err := json.Unmarshal(msg.Payload, vote); err != nil {
 			return err
 		}
@@ -196,6 +196,10 @@ func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorS
 func (n *Node) GetHeight() uint64                    { return n.chain.GetHeight() }
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
+}
+
+func (n *Node) GetLastCommitHash() []byte {
+	return n.chain.Tip()
 }
 
 // Chain returns a reference to the node's blockchain object.
