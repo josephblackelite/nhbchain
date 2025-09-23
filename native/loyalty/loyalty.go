@@ -1,9 +1,6 @@
 package loyalty
 
-import (
-	"math/big"
-	"nhbchain/core/types"
-)
+import "nhbchain/core/types"
 
 // Engine represents the native loyalty and rewards module.
 type Engine struct {
@@ -15,15 +12,10 @@ func NewEngine() *Engine {
 	return &Engine{}
 }
 
-// OnTransactionSuccess is called by the state processor after a successful transaction.
-// It updates the accounts with their ZapNHB rewards.
+// OnTransactionSuccess is called by the state processor after a successful
+// transaction. Loyalty rewards are not yet distributed at this stage; the
+// registry focuses on program discovery and governance first.
 func (e *Engine) OnTransactionSuccess(fromAccount *types.Account, toAccount *types.Account) {
-	// Define the reward amount (1 ZapNHB)
-	rewardAmount := big.NewInt(1)
-
-	// Add the reward to the sender's ZapNHB balance
-	fromAccount.BalanceZNHB.Add(fromAccount.BalanceZNHB, rewardAmount)
-
-	// Add the reward to the recipient's ZapNHB balance
-	toAccount.BalanceZNHB.Add(toAccount.BalanceZNHB, rewardAmount)
+	_ = fromAccount
+	_ = toAccount
 }
