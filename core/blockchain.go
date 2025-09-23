@@ -260,7 +260,7 @@ func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) 
 		if err != nil {
 			return nil, nil, err
 		}
-		block, err := genesis.BuildGenesisFromSpec(spec, db)
+		block, finalize, err := genesis.BuildGenesisFromSpec(spec, db)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -274,6 +274,11 @@ func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) 
 		derivedID := binary.BigEndian.Uint64(hash[:8])
 		if spec.ChainID != nil && *spec.ChainID != derivedID {
 			return nil, nil, fmt.Errorf("chainId mismatch: spec=%d derived=%d", *spec.ChainID, derivedID)
+		}
+		if finalize != nil {
+			if err := finalize(); err != nil {
+				return nil, nil, err
+			}
 		}
 		return block, spec, nil
 	}

@@ -2,9 +2,11 @@ package core
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
+	"nhbchain/storage/trie"
 )
 
 func newTestBlock(height uint64, prevHash []byte) *types.Block {
@@ -191,6 +194,82 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 	}
 	if len(genesis.Header.PrevHash) != 0 {
 		t.Fatalf("expected genesis prev hash to be empty")
+	}
+
+}
+
+func TestNewBlockchainChainIDMismatchDoesNotPersistState(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	addr := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
+
+	spec := genesis.GenesisSpec{
+		GenesisTime: "2024-01-01T00:00:00Z",
+		NativeTokens: []genesis.NativeTokenSpec{
+			{
+				Symbol:   "NHB",
+				Name:     "NHBCoin",
+				Decimals: 18,
+			},
+		},
+		Validators: []genesis.ValidatorSpec{
+			{
+				Address: addr,
+				Power:   1,
+			},
+		},
+		Alloc: map[string]map[string]string{
+			addr: {
+				"NHB": "1000",
+			},
+		},
+	}
+
+	tempDB := storage.NewMemDB()
+	defer tempDB.Close()
+	block, finalize, err := genesis.BuildGenesisFromSpec(&spec, tempDB)
+	if err != nil {
+		t.Fatalf("build genesis for derived chain id: %v", err)
+	}
+	if finalize == nil {
+		t.Fatalf("expected finalize callback")
+	}
+	hash, err := block.Header.Hash()
+	if err != nil {
+		t.Fatalf("hash genesis: %v", err)
+	}
+	derivedID := binary.BigEndian.Uint64(hash[:8])
+	mismatch := derivedID + 1
+	spec.ChainID = &mismatch
+
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "genesis.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write genesis file: %v", err)
+	}
+
+	if _, err := NewBlockchain(db, path, false); err == nil {
+		t.Fatalf("expected chain id mismatch error")
+	} else if !strings.Contains(err.Error(), "chainId mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := db.Get([]byte("consensus/validatorset")); err == nil {
+		t.Fatalf("consensus validator set should not be persisted on mismatch")
+	}
+
+	stateTrie, err := trie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("open state trie: %v", err)
+	}
+	if stateTrie.Hash() != gethtypes.EmptyRootHash {
+		t.Fatalf("state trie should remain empty on mismatch")
 	}
 
 }

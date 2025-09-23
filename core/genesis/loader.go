@@ -2,6 +2,7 @@
 package genesis
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -17,19 +18,19 @@ import (
 	"nhbchain/storage/trie"
 )
 
-func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block, error) {
+func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block, func() error, error) {
 	if spec == nil {
-		return nil, fmt.Errorf("genesis spec must not be nil")
+		return nil, nil, fmt.Errorf("genesis spec must not be nil")
 	}
 	if db == nil {
-		return nil, fmt.Errorf("database must not be nil")
+		return nil, nil, fmt.Errorf("database must not be nil")
 	}
 
 	ts := spec.GenesisTimestamp()
 	if ts.IsZero() {
 		parsed, err := parseGenesisTime(spec.GenesisTime)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ts = parsed
 	}
@@ -45,7 +46,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 	// ---- Real state execution (deterministic) ----
 	stateTrie, err := trie.NewTrie(db, nil)
 	if err != nil {
-		return nil, fmt.Errorf("init state trie: %w", err)
+		return nil, nil, fmt.Errorf("init state trie: %w", err)
 	}
 	manager := state.NewManager(stateTrie)
 	parentRoot := stateTrie.Root()
@@ -58,20 +59,20 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 	for i := range tokens {
 		token := &tokens[i]
 		if err := manager.RegisterToken(token.Symbol, token.Name, token.Decimals); err != nil {
-			return nil, fmt.Errorf("register token %q: %w", token.Symbol, err)
+			return nil, nil, fmt.Errorf("register token %q: %w", token.Symbol, err)
 		}
 		if strings.TrimSpace(token.MintAuthority) != "" {
 			addr, err := ParseBech32Account(token.MintAuthority)
 			if err != nil {
-				return nil, fmt.Errorf("token %q mintAuthority: %w", token.Symbol, err)
+				return nil, nil, fmt.Errorf("token %q mintAuthority: %w", token.Symbol, err)
 			}
 			if err := manager.SetTokenMintAuthority(token.Symbol, addr[:]); err != nil {
-				return nil, fmt.Errorf("token %q: %w", token.Symbol, err)
+				return nil, nil, fmt.Errorf("token %q: %w", token.Symbol, err)
 			}
 		}
 		if token.InitialMintPaused != nil {
 			if err := manager.SetTokenMintPaused(token.Symbol, *token.InitialMintPaused); err != nil {
-				return nil, fmt.Errorf("token %q: %w", token.Symbol, err)
+				return nil, nil, fmt.Errorf("token %q: %w", token.Symbol, err)
 			}
 		}
 	}
@@ -85,7 +86,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 	for _, addrStr := range allocAddresses {
 		parsed, err := ParseBech32Account(addrStr)
 		if err != nil {
-			return nil, fmt.Errorf("alloc[%q]: %w", addrStr, err)
+			return nil, nil, fmt.Errorf("alloc[%q]: %w", addrStr, err)
 		}
 		addrBytes := parsed[:]
 		balances := spec.Alloc[addrStr]
@@ -95,7 +96,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 
 		account, err := manager.GetAccount(addrBytes)
 		if err != nil {
-			return nil, fmt.Errorf("load account %q: %w", addrStr, err)
+			return nil, nil, fmt.Errorf("load account %q: %w", addrStr, err)
 		}
 
 		symbolMap := make(map[string]*big.Int, len(balances))
@@ -104,7 +105,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 			normalized := strings.ToUpper(strings.TrimSpace(symbol))
 			amount, ok := new(big.Int).SetString(strings.TrimSpace(amountStr), 10)
 			if !ok {
-				return nil, fmt.Errorf("alloc[%q][%q]: invalid amount %q", addrStr, symbol, amountStr)
+				return nil, nil, fmt.Errorf("alloc[%q][%q]: invalid amount %q", addrStr, symbol, amountStr)
 			}
 			symbolMap[normalized] = amount
 			symbols = append(symbols, normalized)
@@ -114,7 +115,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		for _, symbol := range symbols {
 			amount := new(big.Int).Set(symbolMap[symbol])
 			if err := manager.SetBalance(addrBytes, symbol, amount); err != nil {
-				return nil, fmt.Errorf("alloc[%q][%q]: %w", addrStr, symbol, err)
+				return nil, nil, fmt.Errorf("alloc[%q][%q]: %w", addrStr, symbol, err)
 			}
 			switch symbol {
 			case "NHB":
@@ -125,7 +126,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		}
 
 		if err := manager.PutAccount(addrBytes, account); err != nil {
-			return nil, fmt.Errorf("persist account %q: %w", addrStr, err)
+			return nil, nil, fmt.Errorf("persist account %q: %w", addrStr, err)
 		}
 	}
 
@@ -141,10 +142,10 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		for _, addrStr := range addresses {
 			parsed, err := ParseBech32Account(addrStr)
 			if err != nil {
-				return nil, fmt.Errorf("roles[%q]: %w", role, err)
+				return nil, nil, fmt.Errorf("roles[%q]: %w", role, err)
 			}
 			if err := manager.SetRole(role, parsed[:]); err != nil {
-				return nil, fmt.Errorf("roles[%q]: %w", role, err)
+				return nil, nil, fmt.Errorf("roles[%q]: %w", role, err)
 			}
 		}
 	}
@@ -159,7 +160,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 	for _, v := range validators {
 		parsed, err := ParseBech32Account(v.Address)
 		if err != nil {
-			return nil, fmt.Errorf("validator %q: %w", v.Address, err)
+			return nil, nil, fmt.Errorf("validator %q: %w", v.Address, err)
 		}
 		addrCopy := append([]byte(nil), parsed[:]...)
 		validatorPowers[string(addrCopy)] = new(big.Int).SetUint64(v.Power)
@@ -170,7 +171,7 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 			pk = strings.TrimPrefix(pk, "0x")
 			decoded, err := hex.DecodeString(pk)
 			if err != nil {
-				return nil, fmt.Errorf("validator %q pubKey: %w", v.Address, err)
+				return nil, nil, fmt.Errorf("validator %q pubKey: %w", v.Address, err)
 			}
 			pubKeyBytes = decoded
 		}
@@ -182,20 +183,30 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block,
 		})
 	}
 	if err := manager.WriteValidatorSet(validatorPowers); err != nil {
-		return nil, fmt.Errorf("persist validator set: %w", err)
+		return nil, nil, fmt.Errorf("persist validator set: %w", err)
 	}
+
+	header.StateRoot = stateTrie.Hash().Bytes()
 
 	consensusStore := store.New(db)
-	if err := consensusStore.SaveValidators(consensusValidators); err != nil {
-		return nil, fmt.Errorf("store consensus validators: %w", err)
+	committed := false
+	finalize := func() error {
+		if committed {
+			return nil
+		}
+		newRoot, err := stateTrie.Commit(parentRoot, 0)
+		if err != nil {
+			return fmt.Errorf("commit state: %w", err)
+		}
+		if !bytes.Equal(newRoot.Bytes(), header.StateRoot) {
+			return fmt.Errorf("state root mismatch: committed=%x expected=%x", newRoot.Bytes(), header.StateRoot)
+		}
+		if err := consensusStore.SaveValidators(consensusValidators); err != nil {
+			return fmt.Errorf("store consensus validators: %w", err)
+		}
+		committed = true
+		return nil
 	}
 
-	// 5) Commit and set StateRoot
-	newRoot, err := stateTrie.Commit(parentRoot, 0)
-	if err != nil {
-		return nil, fmt.Errorf("commit state: %w", err)
-	}
-	header.StateRoot = newRoot.Bytes()
-
-	return types.NewBlock(header, nil), nil
+	return types.NewBlock(header, nil), finalize, nil
 }
