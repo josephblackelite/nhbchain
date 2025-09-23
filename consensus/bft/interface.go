@@ -12,4 +12,5 @@ type NodeInterface interface {
 	CommitBlock(block *types.Block) error
 	GetValidatorSet() map[string]*big.Int
 	GetAccount(addr []byte) (*types.Account, error)
+	GetLastCommitHash() []byte
 }
