@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	ethdb "github.com/ethereum/go-ethereum/ethdb"
 	ethdbleveldb "github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
@@ -24,10 +25,11 @@ type MemDB struct {
 }
 
 func NewMemDB() *MemDB {
-	mem := memorydb.New()
+	backend := memorydb.New()
+	db := rawdb.NewDatabase(backend)
 	return &MemDB{
-		db:     mem,
-		trieDB: triedb.NewDatabase(mem, triedb.HashDefaults),
+		db:     db,
+		trieDB: triedb.NewDatabase(db, triedb.HashDefaults),
 	}
 }
 
@@ -59,10 +61,11 @@ type LevelDB struct {
 
 // NewLevelDB creates or opens a LevelDB database at the specified path.
 func NewLevelDB(path string) (*LevelDB, error) {
-	db, err := ethdbleveldb.New(path, 128, 64, "nhbchain/db", false)
+	backend, err := ethdbleveldb.New(path, 128, 64, "nhbchain/db", false)
 	if err != nil {
 		return nil, err
 	}
+	db := rawdb.NewDatabase(backend)
 	return &LevelDB{
 		db:     db,
 		trieDB: triedb.NewDatabase(db, triedb.HashDefaults),

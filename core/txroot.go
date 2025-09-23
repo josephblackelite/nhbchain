@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -15,7 +16,8 @@ import (
 // transaction trie semantics by storing RLP-encoded transactions keyed by their
 // index in RLP form.
 func ComputeTxRoot(txs []*types.Transaction) ([]byte, error) {
-	db := memorydb.New()
+	backend := memorydb.New()
+	db := rawdb.NewDatabase(backend)
 	trieDB := triedb.NewDatabase(db, triedb.HashDefaults)
 	trie, err := gethtrie.New(gethtrie.TrieID(gethtypes.EmptyRootHash), trieDB)
 	if err != nil {
