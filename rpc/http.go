@@ -233,6 +233,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetEpochSummary(w, r, req)
 	case "nhb_getEpochSnapshot":
 		s.handleGetEpochSnapshot(w, r, req)
+	case "nhb_getRewardEpoch":
+		s.handleGetRewardEpoch(w, r, req)
+	case "nhb_getRewardPayout":
+		s.handleGetRewardPayout(w, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(w, r, req)
 	case "stake_delegate":
