@@ -22,10 +22,16 @@ var (
 )
 
 type accountMetadata struct {
-	BalanceZNHB     *big.Int
-	Stake           *big.Int
-	Username        string
-	EngagementScore uint64
+	BalanceZNHB             *big.Int
+	Stake                   *big.Int
+	Username                string
+	EngagementScore         uint64
+	EngagementDay           string
+	EngagementMinutes       uint64
+	EngagementTxCount       uint64
+	EngagementEscrowEvents  uint64
+	EngagementGovEvents     uint64
+	EngagementLastHeartbeat uint64
 }
 
 type validatorEntry struct {
@@ -78,12 +84,18 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 	}
 
 	account := &types.Account{
-		BalanceNHB:      big.NewInt(0),
-		BalanceZNHB:     big.NewInt(0),
-		Stake:           big.NewInt(0),
-		EngagementScore: 0,
-		StorageRoot:     gethtypes.EmptyRootHash.Bytes(),
-		CodeHash:        gethtypes.EmptyCodeHash.Bytes(),
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(0),
+		EngagementScore:         0,
+		EngagementDay:           "",
+		EngagementMinutes:       0,
+		EngagementTxCount:       0,
+		EngagementEscrowEvents:  0,
+		EngagementGovEvents:     0,
+		EngagementLastHeartbeat: 0,
+		StorageRoot:             gethtypes.EmptyRootHash.Bytes(),
+		CodeHash:                gethtypes.EmptyCodeHash.Bytes(),
 	}
 	if stateAcc != nil {
 		if stateAcc.Balance != nil {
@@ -102,6 +114,12 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		}
 		account.Username = meta.Username
 		account.EngagementScore = meta.EngagementScore
+		account.EngagementDay = meta.EngagementDay
+		account.EngagementMinutes = meta.EngagementMinutes
+		account.EngagementTxCount = meta.EngagementTxCount
+		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
+		account.EngagementGovEvents = meta.EngagementGovEvents
+		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
 	}
 	ensureAccountDefaults(account)
 	return account, nil
@@ -138,10 +156,16 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 	}
 
 	meta := &accountMetadata{
-		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
-		Stake:           new(big.Int).Set(account.Stake),
-		Username:        account.Username,
-		EngagementScore: account.EngagementScore,
+		BalanceZNHB:             new(big.Int).Set(account.BalanceZNHB),
+		Stake:                   new(big.Int).Set(account.Stake),
+		Username:                account.Username,
+		EngagementScore:         account.EngagementScore,
+		EngagementDay:           account.EngagementDay,
+		EngagementMinutes:       account.EngagementMinutes,
+		EngagementTxCount:       account.EngagementTxCount,
+		EngagementEscrowEvents:  account.EngagementEscrowEvents,
+		EngagementGovEvents:     account.EngagementGovEvents,
+		EngagementLastHeartbeat: account.EngagementLastHeartbeat,
 	}
 	if err := m.writeAccountMetadata(addr, meta); err != nil {
 		return err
