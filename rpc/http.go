@@ -307,6 +307,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleEscrowDispute(w, r, req)
 	case "escrow_resolve":
 		s.handleEscrowResolve(w, r, req)
+	case "p2p_info":
+		s.handleP2PInfo(w, r, req)
+	case "p2p_peers":
+		s.handleP2PPeers(w, r, req)
 	case "p2p_createTrade":
 		s.handleP2PCreateTrade(w, r, req)
 	case "p2p_getTrade":

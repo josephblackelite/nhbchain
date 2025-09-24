@@ -87,9 +87,14 @@ func main() {
 		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
 		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
 		MaxMessageBytes:  cfg.MaxMsgBytes,
-		MaxMsgsPerSecond: cfg.MaxMsgsPerSecond,
+		RateMsgsPerSec:   cfg.P2P.RateMsgsPerSec,
+		RateBurst:        cfg.P2P.Burst,
+		BanScore:         cfg.P2P.BanScore,
+		GreyScore:        cfg.P2P.GreyScore,
+		HandshakeTimeout: time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
 	}
 	p2pServer := p2p.NewServer(node, privKey, p2pCfg)
+	node.SetP2PServer(p2pServer)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
 	bftEngine := bft.NewEngine(node, privKey, p2pServer)

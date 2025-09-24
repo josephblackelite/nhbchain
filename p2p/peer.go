@@ -15,17 +15,22 @@ import (
 )
 
 type Peer struct {
-	id         string
-	conn       net.Conn
-	reader     *bufio.Reader
-	outbound   chan *Message
-	server     *Server
-	remoteAddr string
-	dialAddr   string
-	inbound    bool
-	persistent bool
+	id            string
+	conn          net.Conn
+	reader        *bufio.Reader
+	outbound      chan *Message
+	server        *Server
+	remoteAddr    string
+	dialAddr      string
+	inbound       bool
+	persistent    bool
+	wallet        string
+	clientVersion string
 
-	limiter *tokenBucket
+	limiter   *tokenBucket
+	baseRate  float64
+	baseBurst float64
+	throttled bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -34,29 +39,46 @@ type Peer struct {
 	closed    chan struct{}
 }
 
-func newPeer(id string, conn net.Conn, reader *bufio.Reader, server *Server, inbound bool, persistent bool, dialAddr string) *Peer {
+func newPeer(id string, wallet string, clientVersion string, conn net.Conn, reader *bufio.Reader, server *Server, inbound bool, persistent bool, dialAddr string) *Peer {
 	ctx, cancel := context.WithCancel(context.Background())
-	burst := server.cfg.MaxMsgsPerSecond * 2
-	if burst < 1 {
-		burst = 1
+	rate := server.ratePerPeer
+	burst := server.rateBurst
+	if burst < rate {
+		burst = rate
 	}
-	limiter := newTokenBucket(server.cfg.MaxMsgsPerSecond, burst)
+	limiter := newTokenBucket(rate, burst)
 	dialAddr = strings.TrimSpace(dialAddr)
 	return &Peer{
-		id:         id,
-		conn:       conn,
-		reader:     reader,
-		outbound:   make(chan *Message, outboundQueueSize),
-		server:     server,
-		remoteAddr: conn.RemoteAddr().String(),
-		dialAddr:   dialAddr,
-		inbound:    inbound,
-		persistent: persistent,
-		limiter:    limiter,
-		ctx:        ctx,
-		cancel:     cancel,
-		closed:     make(chan struct{}),
+		id:            id,
+		wallet:        wallet,
+		conn:          conn,
+		reader:        reader,
+		outbound:      make(chan *Message, outboundQueueSize),
+		server:        server,
+		remoteAddr:    conn.RemoteAddr().String(),
+		dialAddr:      dialAddr,
+		inbound:       inbound,
+		persistent:    persistent,
+		limiter:       limiter,
+		baseRate:      rate,
+		baseBurst:     burst,
+		clientVersion: clientVersion,
+		ctx:           ctx,
+		cancel:        cancel,
+		closed:        make(chan struct{}),
 	}
+}
+
+func (p *Peer) setGreylisted(on bool) {
+	if p == nil || p.limiter == nil {
+		return
+	}
+	if on {
+		p.limiter.setRate(p.baseRate*greylistRateMultiplier, p.baseBurst*greylistRateMultiplier)
+	} else {
+		p.limiter.setRate(p.baseRate, p.baseBurst)
+	}
+	p.throttled = on
 }
 
 func (p *Peer) start() {
@@ -118,6 +140,10 @@ func (p *Peer) readLoop() {
 		}
 
 		now := time.Now()
+		if !p.server.allowIP(p.remoteAddr, now) {
+			p.server.handleRateLimit(p, false)
+			return
+		}
 		if !p.limiter.allow(now) {
 			p.server.handleRateLimit(p, false)
 			return
