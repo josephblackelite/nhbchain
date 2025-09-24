@@ -54,6 +54,8 @@ var (
 	escrowRecordPrefix         = []byte("escrow/record/")
 	escrowVaultPrefix          = []byte("escrow/vault/")
 	escrowModuleSeedPrefix     = "module/escrow/vault/"
+	claimableRecordPrefix      = []byte("claimable/record/")
+	claimableNoncePrefix       = []byte("claimable/nonce/")
 	tradeRecordPrefix          = []byte("trade/record/")
 	tradeEscrowIndexPrefix     = []byte("trade/index/escrow/")
 	identityAliasPrefix        = []byte("identity/alias/")
