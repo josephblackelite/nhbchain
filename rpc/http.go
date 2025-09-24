@@ -261,6 +261,18 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleP2PDispute(w, r, req)
 	case "p2p_resolve":
 		s.handleP2PResolve(w, r, req)
+	case "engagement_register_device":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleEngagementRegisterDevice(w, r, req)
+	case "engagement_submit_heartbeat":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleEngagementSubmitHeartbeat(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}

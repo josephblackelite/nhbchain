@@ -22,14 +22,25 @@ var (
 )
 
 type accountMetadata struct {
+	// Staking / balances
 	BalanceZNHB        *big.Int
 	Stake              *big.Int
 	LockedZNHB         *big.Int
 	DelegatedValidator []byte
 	Unbonding          []stakeUnbond
 	UnbondingSeq       uint64
-	Username           string
-	EngagementScore    uint64
+
+	// Identity
+	Username string
+
+	// Engagement (EMA + daily meters)
+	EngagementScore         uint64
+	EngagementDay           string
+	EngagementMinutes       uint64
+	EngagementTxCount       uint64
+	EngagementEscrowEvents  uint64
+	EngagementGovEvents     uint64
+	EngagementLastHeartbeat uint64
 }
 
 type validatorEntry struct {
@@ -100,12 +111,18 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 	}
 
 	account := &types.Account{
-		BalanceNHB:      big.NewInt(0),
-		BalanceZNHB:     big.NewInt(0),
-		Stake:           big.NewInt(0),
-		EngagementScore: 0,
-		StorageRoot:     gethtypes.EmptyRootHash.Bytes(),
-		CodeHash:        gethtypes.EmptyCodeHash.Bytes(),
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(0),
+		EngagementScore:         0,
+		EngagementDay:           "",
+		EngagementMinutes:       0,
+		EngagementTxCount:       0,
+		EngagementEscrowEvents:  0,
+		EngagementGovEvents:     0,
+		EngagementLastHeartbeat: 0,
+		StorageRoot:             gethtypes.EmptyRootHash.Bytes(),
+		CodeHash:                gethtypes.EmptyCodeHash.Bytes(),
 	}
 	if stateAcc != nil {
 		if stateAcc.Balance != nil {
@@ -149,7 +166,15 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		}
 		account.NextUnbondingID = meta.UnbondingSeq
 		account.Username = meta.Username
+
+		// Engagement
 		account.EngagementScore = meta.EngagementScore
+		account.EngagementDay = meta.EngagementDay
+		account.EngagementMinutes = meta.EngagementMinutes
+		account.EngagementTxCount = meta.EngagementTxCount
+		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
+		account.EngagementGovEvents = meta.EngagementGovEvents
+		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
 	}
 	ensureAccountDefaults(account)
 	return account, nil
@@ -206,15 +231,27 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 			ReleaseTime: entry.ReleaseTime,
 		}
 	}
+
 	meta := &accountMetadata{
+		// Staking / balances
 		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
 		Stake:              new(big.Int).Set(account.Stake),
 		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
-		Username:           account.Username,
-		EngagementScore:    account.EngagementScore,
+
+		// Identity
+		Username: account.Username,
+
+		// Engagement
+		EngagementScore:         account.EngagementScore,
+		EngagementDay:           account.EngagementDay,
+		EngagementMinutes:       account.EngagementMinutes,
+		EngagementTxCount:       account.EngagementTxCount,
+		EngagementEscrowEvents:  account.EngagementEscrowEvents,
+		EngagementGovEvents:     account.EngagementGovEvents,
+		EngagementLastHeartbeat: account.EngagementLastHeartbeat,
 	}
 	if err := m.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -232,6 +269,7 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		account = &types.Account{}
 	}
 	ensureAccountDefaults(account)
+
 	var delegated []byte
 	if len(account.DelegatedValidator) > 0 {
 		delegated = append([]byte(nil), account.DelegatedValidator...)
@@ -253,15 +291,27 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 			ReleaseTime: entry.ReleaseTime,
 		}
 	}
+
 	meta := &accountMetadata{
+		// Staking / balances
 		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
 		Stake:              new(big.Int).Set(account.Stake),
 		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
-		Username:           account.Username,
-		EngagementScore:    account.EngagementScore,
+
+		// Identity
+		Username: account.Username,
+
+		// Engagement
+		EngagementScore:         account.EngagementScore,
+		EngagementDay:           account.EngagementDay,
+		EngagementMinutes:       account.EngagementMinutes,
+		EngagementTxCount:       account.EngagementTxCount,
+		EngagementEscrowEvents:  account.EngagementEscrowEvents,
+		EngagementGovEvents:     account.EngagementGovEvents,
+		EngagementLastHeartbeat: account.EngagementLastHeartbeat,
 	}
 	return m.writeAccountMetadata(addr, meta)
 }
