@@ -23,6 +23,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
+	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
@@ -905,12 +906,123 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 	return txHash, nil
 }
 
+func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (string, bool, error) {
+	if voucher == nil {
+		return "", false, fmt.Errorf("swap: voucher required")
+	}
+	if strings.TrimSpace(voucher.Domain) != swap.VoucherDomainV1 {
+		return "", false, ErrSwapInvalidDomain
+	}
+	if voucher.ChainID != n.chain.ChainID() {
+		return "", false, ErrSwapInvalidChainID
+	}
+	if voucher.Expiry <= time.Now().Unix() {
+		return "", false, ErrSwapExpired
+	}
+	if voucher.Amount == nil || voucher.Amount.Sign() <= 0 {
+		return "", false, fmt.Errorf("swap: invalid amount")
+	}
+	if len(voucher.Nonce) == 0 {
+		return "", false, fmt.Errorf("swap: nonce required")
+	}
+	if voucher.Recipient == ([20]byte{}) {
+		return "", false, fmt.Errorf("swap: recipient required")
+	}
+	orderID := strings.TrimSpace(voucher.OrderID)
+	if orderID == "" {
+		return "", false, fmt.Errorf("swap: orderId required")
+	}
+	token := strings.ToUpper(strings.TrimSpace(voucher.Token))
+	if token != "ZNHB" {
+		return "", false, ErrSwapInvalidToken
+	}
+	hash := voucher.Hash()
+	if len(hash) == 0 {
+		return "", false, ErrSwapInvalidSignature
+	}
+	if len(signature) != 65 {
+		return "", false, ErrSwapInvalidSignature
+	}
+	pubKey, err := ethcrypto.SigToPub(hash, signature)
+	if err != nil {
+		return "", false, fmt.Errorf("swap: recover signer: %w", err)
+	}
+	recovered := ethcrypto.PubkeyToAddress(*pubKey)
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	tokenMeta, err := manager.Token(token)
+	if err != nil {
+		return "", false, err
+	}
+	if tokenMeta == nil {
+		return "", false, ErrSwapInvalidToken
+	}
+	if tokenMeta.MintPaused {
+		return "", false, ErrSwapMintPaused
+	}
+	if len(tokenMeta.MintAuthority) != 20 {
+		return "", false, fmt.Errorf("swap: mint authority not configured")
+	}
+	if !bytes.Equal(tokenMeta.MintAuthority, recovered.Bytes()) {
+		return "", false, ErrSwapInvalidSigner
+	}
+	if manager.HasSeenSwapNonce(orderID) {
+		return "", false, ErrSwapNonceUsed
+	}
+	if err := n.state.MintToken(token, voucher.Recipient[:], voucher.Amount); err != nil {
+		return "", false, err
+	}
+	if err := manager.MarkSwapNonce(orderID); err != nil {
+		return "", false, err
+	}
+
+	txHashBytes := ethcrypto.Keccak256(append(hash, signature...))
+	txHash := "0x" + hex.EncodeToString(txHashBytes)
+
+	evt := events.SwapMinted{
+		OrderID:    orderID,
+		Recipient:  voucher.Recipient,
+		Amount:     new(big.Int).Set(voucher.Amount),
+		Fiat:       voucher.Fiat,
+		FiatAmount: voucher.FiatAmount,
+		Rate:       voucher.Rate,
+	}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+
+	return txHash, true, nil
+}
+
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
 	return n.state.ResolveUsername(username)
 }
 
 func (n *Node) HasRole(role string, addr []byte) bool {
 	return n.state.HasRole(role, addr)
+}
+
+func (n *Node) Events() []types.Event {
+	if n == nil || n.state == nil {
+		return nil
+	}
+	return n.state.Events()
+}
+
+func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
+	if fn == nil {
+		return fmt.Errorf("state callback required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	return fn(manager)
 }
 
 // --- Both accessors are needed by different subsystems ---

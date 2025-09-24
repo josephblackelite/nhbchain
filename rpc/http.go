@@ -239,6 +239,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetRewardPayout(w, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(w, r, req)
+	case "swap_submitVoucher":
+		s.handleSwapSubmitVoucher(w, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(w, r, req)
 	case "stake_undelegate":
