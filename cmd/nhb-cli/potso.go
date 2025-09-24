@@ -47,6 +47,8 @@ func runPotsoCommand(args []string, stdout, stderr io.Writer) int {
 		return runPotsoUserMeters(args[1:], stdout, stderr)
 	case "top":
 		return runPotsoTop(args[1:], stdout, stderr)
+	case "stake":
+		return runPotsoStake(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "Unknown potso subcommand: %s\n", args[0])
 		fmt.Fprintln(stderr, potsoUsage())
@@ -61,6 +63,7 @@ func potsoUsage() string {
 	fmt.Fprintln(buf, "  heartbeat     Submit a signed heartbeat")
 	fmt.Fprintln(buf, "  user-meters   Fetch the raw meters for a user")
 	fmt.Fprintln(buf, "  top           List top participants for a day")
+	fmt.Fprintln(buf, "  stake         Manage ZapNHB staking locks")
 	return buf.String()
 }
 
@@ -220,6 +223,10 @@ func runPotsoTop(args []string, stdout, stderr io.Writer) int {
 }
 
 func callPotsoRPC(method string, param interface{}) (json.RawMessage, error) {
+	return callPotsoRPCWithAuth(method, param, false)
+}
+
+func callPotsoRPCWithAuth(method string, param interface{}, requireAuth bool) (json.RawMessage, error) {
 	payload := map[string]interface{}{"id": 1, "method": method}
 	if param != nil {
 		payload["params"] = []interface{}{param}
@@ -227,7 +234,7 @@ func callPotsoRPC(method string, param interface{}) (json.RawMessage, error) {
 		payload["params"] = []interface{}{}
 	}
 	body, _ := json.Marshal(payload)
-	resp, err := doRPCRequest(body, false)
+	resp, err := doRPCRequest(body, requireAuth)
 	if err != nil {
 		return nil, err
 	}

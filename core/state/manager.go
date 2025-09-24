@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -66,6 +67,12 @@ var (
 	potsoHeartbeatPrefix       = []byte("potso/heartbeat/")
 	potsoMeterPrefix           = []byte("potso/meter/")
 	potsoDayIndexPrefix        = []byte("potso/day-index/")
+	potsoStakeTotalPrefix      = []byte("potso/stake/")
+	potsoStakeNoncePrefix      = []byte("potso/stake/nonce/")
+	potsoStakeLocksPrefix      = []byte("potso/stake/locks/")
+	potsoStakeLockIndexPrefix  = []byte("potso/stake/locks/index/")
+	potsoStakeQueuePrefix      = []byte("potso/stake/unbondq/")
+	potsoStakeModuleSeedPrefix = "module/potso/stake/vault"
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -231,6 +238,45 @@ func potsoDayIndexKey(day string) []byte {
 	return kvKey(buf)
 }
 
+func potsoStakeTotalKey(owner []byte) []byte {
+	buf := make([]byte, len(potsoStakeTotalPrefix)+len(owner))
+	copy(buf, potsoStakeTotalPrefix)
+	copy(buf[len(potsoStakeTotalPrefix):], owner)
+	return kvKey(buf)
+}
+
+func potsoStakeNonceKey(owner []byte) []byte {
+	buf := make([]byte, len(potsoStakeNoncePrefix)+len(owner))
+	copy(buf, potsoStakeNoncePrefix)
+	copy(buf[len(potsoStakeNoncePrefix):], owner)
+	return kvKey(buf)
+}
+
+func potsoStakeLockIndexKey(owner []byte) []byte {
+	buf := make([]byte, len(potsoStakeLockIndexPrefix)+len(owner))
+	copy(buf, potsoStakeLockIndexPrefix)
+	copy(buf[len(potsoStakeLockIndexPrefix):], owner)
+	return kvKey(buf)
+}
+
+func potsoStakeLockKey(owner []byte, nonce uint64) []byte {
+	nonceStr := strconv.FormatUint(nonce, 10)
+	buf := make([]byte, len(potsoStakeLocksPrefix)+len(owner)+1+len(nonceStr))
+	copy(buf, potsoStakeLocksPrefix)
+	copy(buf[len(potsoStakeLocksPrefix):], owner)
+	buf[len(potsoStakeLocksPrefix)+len(owner)] = ':'
+	copy(buf[len(potsoStakeLocksPrefix)+len(owner)+1:], nonceStr)
+	return kvKey(buf)
+}
+
+func potsoStakeQueueKey(day string) []byte {
+	trimmed := potso.NormaliseDay(day)
+	buf := make([]byte, len(potsoStakeQueuePrefix)+len(trimmed))
+	copy(buf, potsoStakeQueuePrefix)
+	copy(buf[len(potsoStakeQueuePrefix):], trimmed)
+	return kvKey(buf)
+}
+
 // HasSeenSwapNonce reports whether the provided swap order identifier has been processed.
 func (m *Manager) HasSeenSwapNonce(orderID string) bool {
 	trimmed := strings.TrimSpace(orderID)
@@ -327,6 +373,164 @@ func (m *Manager) PotsoListParticipants(day string) ([][20]byte, error) {
 	return result, nil
 }
 
+// PotsoStakeBondedTotal returns the currently bonded stake total for the owner.
+func (m *Manager) PotsoStakeBondedTotal(owner [20]byte) (*big.Int, error) {
+	return m.loadBigInt(potsoStakeTotalKey(owner[:]))
+}
+
+// PotsoStakeSetBondedTotal updates the bonded stake total tracked for the owner.
+func (m *Manager) PotsoStakeSetBondedTotal(owner [20]byte, amount *big.Int) error {
+	return m.writeBigInt(potsoStakeTotalKey(owner[:]), amount)
+}
+
+// PotsoStakeAllocateNonce reserves and returns the next lock nonce for the owner.
+func (m *Manager) PotsoStakeAllocateNonce(owner [20]byte) (uint64, error) {
+	key := potsoStakeNonceKey(owner[:])
+	var next uint64
+	ok, err := m.KVGet(key, &next)
+	if err != nil {
+		return 0, err
+	}
+	if !ok || next == 0 {
+		next = 1
+	}
+	if err := m.KVPut(key, next+1); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// PotsoStakeLockNonces lists all lock nonces tracked for the owner in creation order.
+func (m *Manager) PotsoStakeLockNonces(owner [20]byte) ([]uint64, error) {
+	key := potsoStakeLockIndexKey(owner[:])
+	var nonces []uint64
+	ok, err := m.KVGet(key, &nonces)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []uint64{}, nil
+	}
+	return nonces, nil
+}
+
+// PotsoStakePutLockNonces persists the supplied nonce ordering for the owner.
+func (m *Manager) PotsoStakePutLockNonces(owner [20]byte, nonces []uint64) error {
+	key := potsoStakeLockIndexKey(owner[:])
+	if len(nonces) == 0 {
+		return m.trie.Update(key, nil)
+	}
+	return m.KVPut(key, nonces)
+}
+
+// PotsoStakeGetLock retrieves a specific stake lock by owner and nonce.
+func (m *Manager) PotsoStakeGetLock(owner [20]byte, nonce uint64) (*potso.StakeLock, bool, error) {
+	var lock potso.StakeLock
+	ok, err := m.KVGet(potsoStakeLockKey(owner[:], nonce), &lock)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return &lock, true, nil
+}
+
+// PotsoStakePutLock stores the supplied lock data.
+func (m *Manager) PotsoStakePutLock(owner [20]byte, nonce uint64, lock *potso.StakeLock) error {
+	if lock == nil {
+		return fmt.Errorf("potso: stake lock must not be nil")
+	}
+	return m.KVPut(potsoStakeLockKey(owner[:], nonce), lock)
+}
+
+// PotsoStakeDeleteLock removes the referenced lock from storage.
+func (m *Manager) PotsoStakeDeleteLock(owner [20]byte, nonce uint64) error {
+	return m.trie.Update(potsoStakeLockKey(owner[:], nonce), nil)
+}
+
+// PotsoStakeQueueEntries returns the withdrawal queue entries for the provided day.
+func (m *Manager) PotsoStakeQueueEntries(day string) ([]potso.WithdrawalRef, error) {
+	key := potsoStakeQueueKey(day)
+	var entries []potso.WithdrawalRef
+	ok, err := m.KVGet(key, &entries)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []potso.WithdrawalRef{}, nil
+	}
+	return entries, nil
+}
+
+// PotsoStakePutQueueEntries overwrites the queue bucket for the provided day.
+func (m *Manager) PotsoStakePutQueueEntries(day string, entries []potso.WithdrawalRef) error {
+	key := potsoStakeQueueKey(day)
+	if len(entries) == 0 {
+		return m.trie.Update(key, nil)
+	}
+	return m.KVPut(key, entries)
+}
+
+// PotsoStakeQueueAppend adds the supplied entry to the day bucket if not already present.
+func (m *Manager) PotsoStakeQueueAppend(day string, entry potso.WithdrawalRef) error {
+	key := potsoStakeQueueKey(day)
+	var entries []potso.WithdrawalRef
+	ok, err := m.KVGet(key, &entries)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		entries = []potso.WithdrawalRef{}
+	}
+	found := false
+	for _, existing := range entries {
+		if existing.Nonce == entry.Nonce && bytes.Equal(existing.Owner[:], entry.Owner[:]) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		clone := potso.WithdrawalRef{Owner: entry.Owner, Nonce: entry.Nonce}
+		if entry.Amount != nil {
+			clone.Amount = new(big.Int).Set(entry.Amount)
+		} else {
+			clone.Amount = big.NewInt(0)
+		}
+		entries = append(entries, clone)
+	}
+	return m.KVPut(key, entries)
+}
+
+// PotsoStakeQueueRemove removes the matching entry from the withdrawal queue bucket.
+func (m *Manager) PotsoStakeQueueRemove(day string, owner [20]byte, nonce uint64) error {
+	key := potsoStakeQueueKey(day)
+	var entries []potso.WithdrawalRef
+	ok, err := m.KVGet(key, &entries)
+	if err != nil {
+		return err
+	}
+	if !ok || len(entries) == 0 {
+		return nil
+	}
+	filtered := make([]potso.WithdrawalRef, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Nonce == nonce && bytes.Equal(entry.Owner[:], owner[:]) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if len(filtered) == len(entries) {
+		return nil
+	}
+	return m.PotsoStakePutQueueEntries(day, filtered)
+}
+
+// PotsoStakeVaultAddress returns the deterministic module vault used for staking locks.
+func (m *Manager) PotsoStakeVaultAddress() [20]byte {
+	return potsoStakeModuleAddress()
+}
+
 func escrowStorageKey(id [32]byte) []byte {
 	buf := make([]byte, len(escrowRecordPrefix)+len(id))
 	copy(buf, escrowRecordPrefix)
@@ -382,6 +586,13 @@ func escrowModuleAddress(token string) ([20]byte, error) {
 	var addr [20]byte
 	copy(addr[:], hash[len(hash)-20:])
 	return addr, nil
+}
+
+func potsoStakeModuleAddress() [20]byte {
+	hash := ethcrypto.Keccak256([]byte(potsoStakeModuleSeedPrefix))
+	var addr [20]byte
+	copy(addr[:], hash[len(hash)-20:])
+	return addr
 }
 
 type storedEscrow struct {
