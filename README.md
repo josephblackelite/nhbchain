@@ -1,220 +1,245 @@
-NHBCoin L1 Node 🚀
-Welcome to the official Go implementation of the NHBCoin Layer 1 blockchain. This repository contains the full source code for running a node on the NHBCoin network, a next-generation payment rail designed for simplicity, security, and mainstream adoption.
+# NHBCoin Layer 1 Node
 
+Welcome to the official Go implementation of the NHBCoin Layer 1 (L1) blockchain. This repository hosts the production codebase used to run validator and full nodes that power NHBCoin—a purpose-built payment rail engineered for instant settlement, mainstream usability, and institutional-grade compliance.
+
+```
       _   _ _____ _____ ____  ____   ___  _   _ _____
      | \ | | ____|_   _| __ )|  _ \ / _ \| \ | |_   _|
      |  \| |  _|   | | |  _ \| | | | | | |  \| | | |
      | |\  | |___  | | | |_) | |_| | |_| | |\  | | |
      |_| \_|_____| |_| |____/|____/ \___/|_| \_| |_|
+```
 
+NHBCoin abstracts away the traditional complexities of crypto networks. Native account abstraction, on-chain identity, fee sponsorship, and loyalty incentives are all protocol features—not afterthoughts—so that the experience of paying with NHB is as intuitive as the best consumer FinTech products.
 
-NHBCoin is engineered with a singular purpose: to serve as the world's most efficient, secure, and accessible payment rail. Unlike general-purpose blockchains, every component of our L1 is optimized for financial transactions and a seamless user experience, abstracting away the complexities of crypto to deliver a service that feels as intuitive as the best modern FinTech applications.
+---
 
-✨ Key Features
-The NHBCoin L1 is not just another blockchain. It's a purpose-built platform with powerful features integrated directly into the protocol.
+## Contents
 
-⚡ Proof of Time Spent Online (POTSO): A unique BFT consensus mechanism where a validator's chance to produce blocks is weighted by both their financial Stake and their on-chain Engagement Score. This rewards active participation, not just capital.
+- [Why NHBCoin Matters](#why-nhbcoin-matters)
+- [Protocol Pillars](#protocol-pillars)
+- [Architecture Overview](#architecture-overview)
+- [Token Economics](#token-economics)
+- [Quick Start for Node Operators](#quick-start-for-node-operators)
+  - [Prerequisites](#prerequisites)
+  - [Clone and Build](#clone-and-build)
+  - [Initial Configuration](#initial-configuration)
+  - [Starting a Node](#starting-a-node)
+- [Joining the Network as a Peer or Validator](#joining-the-network-as-a-peer-or-validator)
+- [Command-Line Interface](#command-line-interface)
+- [APIs, SDKs, and Documentation](#apis-sdks-and-documentation)
+- [Security, Compliance, and Operations](#security-compliance-and-operations)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Legal Notice & License](#legal-notice--license)
 
-** Seamless Account Abstraction (NAA):** Every account is a smart contract account by default. Our native Paymaster model allows transaction fees to be sponsored, enabling a true "gasless" experience for end-users.
+---
 
-🏦 Native Dual-Token System: The protocol natively manages two tokens: NHBCoin, the primary payment stablecoin, and ZapNHB, the loyalty and staking token.
+## Why NHBCoin Matters
 
-🔐 Native P2P Escrow: A trustless escrow system is built into the chain's logic, enabling a secure P2P marketplace without the need for complex smart contracts.
+NHBCoin is designed to be the next-generation money movement network—faster, safer, and more aligned with real-world commerce than generalized smart-contract chains.
 
-🆔 Native Identity: Users can claim unique, human-readable usernames that are securely linked to their on-chain address, preventing "wrong address" errors.
+- **Developers** gain a full-stack payment substrate with built-in account abstraction, identity, and escrow primitives that are programmable via familiar Go and Solidity tooling.
+- **Regulators and auditors** benefit from deterministic on-chain identity records, policy-aware RPC authentication, and transparent consensus metrics for validating operational integrity.
+- **Investors and businesses** access a zero-fee settlement rail coupled with a network-wide loyalty economy that compounds adoption and utility.
+- **End users** experience instant payments, human-readable usernames, and sponsored fees so that sending NHB feels like using modern digital wallets.
 
-🚀 EVM Compatibility: The node includes an integrated Go Ethereum (Geth) EVM, making the chain instantly compatible with the entire ecosystem of Solidity smart contracts, dApps, and developer tools.
+## Protocol Pillars
 
-🏛️ Architectural Overview
-The NHBCoin L1 is constructed from four distinct, interconnected layers that work in concert.
+NHBCoin L1 differentiates itself through protocol-native capabilities that directly support retail and enterprise payment flows:
 
-Consensus Layer: The BFT engine powered by our custom POTSO algorithm.
+- ⚡ **Proof of Time Spent Online (POTSO)** — A Byzantine fault tolerant consensus that weights block production by both staked ZapNHB and an on-chain Engagement Score, rewarding validators that actively maintain network health.
+- 🧾 **Native Account Abstraction (NAA)** — Every account is a contract account; Paymasters can sponsor gas, enabling truly fee-less experiences for retail users.
+- 🏦 **Dual-Token Model** — NHBCoin (stable settlement currency) and ZapNHB (staking & loyalty asset) are managed directly by the protocol for predictable monetary policy.
+- 🤝 **Embedded P2P Escrow** — Trust-minimized escrow flows enable marketplaces without bespoke contract engineering.
+- 🆔 **On-Chain Identity** — Human-readable usernames, verified emails, and avatars are part of the base chain, reducing user error and enabling compliant discovery flows.
+- ♻️ **EVM Compatibility** — A bundled Go-Ethereum (Geth) engine lets developers deploy Solidity smart contracts and reuse the broader Ethereum tooling ecosystem.
 
-Execution Layer: A hybrid engine that uses our efficient Go code for native features and the Geth EVM for transfers and smart contracts.
+## Architecture Overview
 
-Application Layer: The native modules for Identity, Escrow, Loyalty, and more.
+The L1 is organized into modular layers that together deliver the payment network:
 
-Networking Layer: A robust peer-to-peer network with automatic chain synchronization.
+1. **Consensus Layer** — Implements POTSO BFT consensus, validator set management, and engagement scoring.
+2. **Execution Layer** — Combines optimized Go modules for native payments/escrow with the embedded Geth EVM for smart contracts.
+3. **Application Layer** — Ships identity, escrow, loyalty, and other financial primitives as first-class modules.
+4. **Networking Layer** — Provides peer discovery, gossip, and fast state synchronization for geographically distributed nodes.
 
-🚀 Getting Started: Running Your Own Node
-Follow these instructions to clone, build, and run your own NHBCoin node, connecting it to the network.
+## Token Economics
 
-Prerequisites
-Go: Version 1.22.6 (this repository is pinned to this release).
+- **NHBCoin (NHB)** — Stable, dollar-pegged medium of exchange for all payments and settlements.
+- **ZapNHB** — Earned through usage and staking; secures the network, unlocks loyalty rewards, and governs validator elections.
+- **Staking** — Validators must bond ZapNHB, maintain uptime, and submit heartbeat transactions to maximize their Engagement Score under POTSO.
 
-Git: For cloning the repository.
+## Quick Start for Node Operators
 
-An Ubuntu 22.04 LTS server is recommended for deployment.
+### Prerequisites
 
-1. Installation
-First, connect to your server and install the necessary dependencies.
+- **Operating System** — Ubuntu 22.04 LTS (recommended) or any modern Linux distribution.
+- **Go Toolchain** — Version 1.22.6.
+- **Git** — For cloning the repository.
 
-# Update package lists
+Update your server and install dependencies:
+
+```bash
 sudo apt update
-
-# Install Git and other build tools
-sudo apt install git build-essential -y
-
-# Install the Go programming language (1.22.6)
+sudo apt install git build-essential tmux -y
 wget https://go.dev/dl/go1.22.6.linux-amd64.tar.gz
 sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.22.6.linux-amd64.tar.gz
 echo 'export PATH="/usr/local/go/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
+```
 
-2. Clone and Build
-Next, clone the repository and compile the node software into a single executable.
+> The helper scripts in [`scripts/`](./scripts) default to Go 1.22.6 and set `GOFLAGS=-buildvcs=false`. Override `GO_VERSION`, `GO_CMD`, or `GOFLAGS` if you manage the toolchain manually.
 
-# Clone the repository from GitHub
-git clone [https://github.com/josephblackelite/nhbchain.git](https://github.com/josephblackelite/nhbchain.git)
+### Clone and Build
 
-# Navigate into the project directory
+```bash
+git clone https://github.com/josephblackelite/nhbchain.git
 cd nhbchain
-
-# Download all the necessary Go dependencies
 go mod tidy
-
-# Build the node executable
 go build -o nhb-node ./cmd/nhb/
-
-# Build the Command-Line Interface (CLI) tool
 go build -o nhb-cli ./cmd/nhb-cli/
+```
 
-> **Note:** The helper scripts in `scripts/` automatically target Go 1.22.6 and default `GOFLAGS` to `-buildvcs=false`. Override `GO_VERSION`, `GO_CMD`, or `GOFLAGS` if you already manage the toolchain yourself.
+This produces two executables:
 
-You will now have two new files: nhb-node (the blockchain client) and nhb-cli (the tool to interact with it).
+- `nhb-node` — the full node / validator client.
+- `nhb-cli` — the command-line utility for wallet, staking, and maintenance operations.
 
-3. Configuration
-The node is configured using a simple config.toml file.
+### Initial Configuration
 
-On your very first run, the node will automatically generate a config.toml file for you with a new, encrypted validator key. You can also create one manually:
+On first launch the node creates `config.toml` alongside an encrypted validator keystore. To pre-configure or inspect settings, edit `config.toml`:
 
-config.toml
-
-# NHBCoin Node Configuration File
-
-# P2P: Use 0.0.0.0 to listen for connections from the internet
+```toml
 ListenAddress = "0.0.0.0:6001"
-
-# RPC: Use 0.0.0.0 to allow the CLI to connect from anywhere
-RPCAddress = "0.0.0.0:8080"
-
-# Path to the blockchain database
-DataDir = "./nhb-data"
-
-# The node stores validator keys in Ethereum-compatible keystore files.
-# Leave this blank on first run and it will be populated automatically.
+RPCAddress    = "0.0.0.0:8080"
+DataDir       = "./nhb-data"
 ValidatorKeystorePath = ""
-
-# Optional: configure an external key management service instead of a local keystore.
-ValidatorKMSURI = ""
-ValidatorKMSEnv = ""
-
-# A list of trusted nodes to connect to on startup
 BootstrapPeers = [
-    # Add the public IP of the main network's bootstrap node here
-    # e.g., "34.67.8.77:6001"
+  # e.g. "34.67.8.77:6001"
 ]
-
-Set the validator keystore passphrase in the `NHB_VALIDATOR_PASS` environment variable before starting the node:
-
 ```
+
+Set required secrets as environment variables before bootstrapping:
+
+```bash
 export NHB_VALIDATOR_PASS="choose-a-strong-passphrase"
-```
-
-If you have an older configuration that still contains a plaintext `ValidatorKey`, convert it using the migration helper:
-
-```
-go run ./cmd/nhbctl migrate-keystore --config ./config.toml
-```
-
-4. Running the Node
-To ensure your node runs 24/7, we recommend using a terminal multiplexer like tmux.
-
-# Install tmux
-sudo apt install tmux -y
-
-# Start a new persistent session named "node"
-tmux new -s node
-
-# Inside the tmux session, start your node
-./nhb-node
-
-The node will start, print its initialization logs, and then run silently. To detach from the session (leaving the node running in the background), press Ctrl+B, release the keys, and then press D.
-
-You can re-attach to the session at any time with tmux attach -t node.
-
-🛠️ Using the CLI (nhb-cli)
-The nhb-cli is your command center for interacting with a running node.
-
-Note: For commands that require a private key (stake, heartbeat, etc.), first generate a key and ensure the resulting wallet.key file is in the same directory.
-
-# Generate a new wallet and save it to wallet.key
-./nhb-cli generate-key
-> Generated new key and saved to wallet.key
-> Your public address is: nhb1...
-
-# Check the balance of any address
-./nhb-cli balance nhb1...
-> State for: nhb1...
->   Username:
->   NHBCoin:  0
->   ZapNHB:   0
->   Staked:   0 ZapNHB
->   Nonce:    0
-
-### RPC authentication and allow-listed methods
-
-The JSON-RPC service now enforces authentication for privileged operations. Set an application secret in the environment before starting a node:
-
-```
 export NHB_RPC_TOKEN="choose-a-strong-shared-secret"
 ```
 
-Clients that need to submit privileged requests (including `nhb_sendTransaction`) must send an `Authorization: Bearer <token>` header that matches `NHB_RPC_TOKEN`. The bundled CLI reads the same environment variable to attach the header automatically.
+If migrating from legacy plaintext keys, convert them with:
 
-Read-only NHBPortal integrations are restricted to the following allow-listed methods:
+```bash
+go run ./cmd/nhbctl migrate-keystore --config ./config.toml
+```
 
-* `nhb_getBalance`
-* `nhb_getLatestBlocks`
-* `nhb_getLatestTransactions`
+### Starting a Node
 
-Any other method, including `nhb_sendTransaction`, will return a JSON-RPC authentication error unless the request is properly signed with the bearer token.
+Run the node inside a persistent `tmux` session to maintain uptime:
 
-# Stake 5000 ZapNHB to become a validator candidate
-./nhb-cli stake 5000 wallet.key
-> Successfully sent stake transaction for 5000 ZapNHB.
+```bash
+tmux new -s nhb-node
+./nhb-node
+```
 
-# Un-stake 1000 ZapNHB
-./nhb-cli un-stake 1000 wallet.key
-> Successfully sent un-stake transaction for 1000 ZapNHB.
+Detach with `Ctrl+B`, `D` and reattach via `tmux attach -t nhb-node`. Logs will confirm chain synchronization and peer connectivity.
 
-# Send a heartbeat transaction to boost your Engagement Score
-./nhb-cli heartbeat wallet.key
-> Successfully sent heartbeat transaction.
+## Joining the Network as a Peer or Validator
 
-# Deploy a smart contract
-./nhb-cli deploy ./path/to/contract.hex wallet.key
-> Successfully sent contract deployment transaction.
+1. **Discover Peers** — Populate `BootstrapPeers` with known validator endpoints or connect to NHBCoin’s bootstrap nodes published via governance notices.
+2. **Sync the Chain** — Allow `nhb-node` to download and verify state. Monitor progress via RPC (`nhb_getLatestBlocks`).
+3. **Generate Wallet Keys** — Use `./nhb-cli generate-key` to create a wallet; secure `wallet.key` offline.
+4. **Acquire ZapNHB** — Request testnet allocations or participate in mainnet offerings to stake.
+5. **Stake to Validate** — Bond at least 5,000 ZapNHB to enter the validator candidate set:
+   ```bash
+   ./nhb-cli stake 5000 wallet.key
+   ```
+6. **Maintain Engagement** — Submit periodic heartbeat transactions to maximize POTSO weight:
+   ```bash
+   ./nhb-cli heartbeat wallet.key
+   ```
+7. **Unstake When Needed** — Withdraw bonded ZapNHB while respecting unbonding schedules:
+   ```bash
+   ./nhb-cli un-stake 1000 wallet.key
+   ```
 
-🗺️ Roadmap
-The core L1 is feature-complete. Our focus has now shifted to:
+Non-validating peers may omit staking but should still configure RPC authentication to protect privileged endpoints. Read-only integrations are limited to allow-listed methods (`nhb_getBalance`, `nhb_getLatestBlocks`, `nhb_getLatestTransactions`) unless presenting the bearer token.
 
-Security Hardening: Rigorous internal testing and multiple external security audits.
+## Command-Line Interface
 
-Frontend Development: Building the beautiful, Venmo-style nhbcoin.com web application and wallet.
+`nhb-cli` streamlines wallet management and operational tasks:
 
-Testnet Expansion: Growing the public testnet with more community validators.
+```bash
+./nhb-cli generate-key              # Creates a new NHB wallet (saves to wallet.key)
+./nhb-cli balance nhb1...            # Queries balances and staking state
+./nhb-cli send <to> <amount> wallet.key
+./nhb-cli deploy <contract.hex> wallet.key
+./nhb-cli id register <alias> wallet.key
+```
 
-Mainnet Launch: The final public release of the NHBCoin network.
+For the full identity management toolkit, refer to [`docs/identity-cli.md`](./docs/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control.
 
-🤝 Contributing
-We welcome contributions from the community! If you'd like to help, please feel free to:
+## APIs, SDKs, and Documentation
 
-Open an issue to report a bug or suggest a new feature.
+All protocol modules ship with reference documentation under [`docs/`](./docs):
 
-Fork the repository and submit a pull request with your improvements.
+- **Identity & Username Directory** — Concepts, RPC specs, and gateway flows (`docs/identity.md`, `docs/identity-api.md`, `docs/identity-gateway.md`).
+- **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow.md`, `docs/codex-epic-escrow-gateway.md`).
+- **Loyalty & Rewards** — Network-wide loyalty engine overview (`docs/loyalty.md`).
+- **Pay-by-Username** — UX flows and examples (`docs/pay-by-username.md`, `docs/examples/identity`).
+- **OpenAPI Specification** — Machine-readable schema for REST integrations (`docs/openapi/identity.yaml`).
 
-Join our community channels (coming soon) to participate in the discussion.
+> Additional SDKs and tooling (TypeScript, Rust) are in development. Subscribe to governance releases for updates.
 
-📜 License
-The NHBCoin L1 Node is open-source software licensed under the MIT License.
+## Security, Compliance, and Operations
+
+- **Authentication** — RPC bearer tokens protect privileged calls; rotate secrets regularly.
+- **Key Management** — Validator keys default to encrypted Ethereum-compatible keystores. Integrate with external KMS via `ValidatorKMSURI` and `ValidatorKMSEnv`.
+- **Observability** — Monitor validator uptime, engagement scores, and staking state using CLI commands or forthcoming telemetry dashboards.
+- **Compliance Alignment** — Native identity modules provide audit trails, verified contact points, and consent-driven discovery suitable for regulatory review.
+- **Audits** — Internal hardening is ongoing, and multiple external security assessments are scheduled prior to mainnet launch.
+
+## Roadmap
+
+- **Security Hardening** — Exhaustive internal testing plus third-party audits.
+- **Frontend & Wallet** — Launch of nhbcoin.com consumer and merchant experiences with embedded Paymaster support.
+- **Testnet Expansion** — Onboarding community validators and ecosystem partners.
+- **Mainnet Launch** — Final production release with full loyalty activation.
+
+## Contributing
+
+We welcome community collaboration:
+
+1. Open an issue to report bugs or propose enhancements.
+2. Fork the repository and submit pull requests.
+3. Join forthcoming community channels to participate in technical governance and product feedback.
+
+## Legal Notice & License
+
+© 2025 NHBCoin.com. All rights reserved. NHBCoin, NHBCoin L1, ZapNHB, and Proof of Time Spent Online (POTSO) are proprietary innovations owned exclusively by NHBCoin. No portion of the POTSO consensus design, related trademarks, or brand assets may be copied, replicated, or distributed without written authorization from NHBCoin.
+
+This codebase is released under the MIT License:
+
+```
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+By running or contributing to this project you acknowledge the above ownership terms and agree to respect NHBCoin’s intellectual property and brand guidelines.
