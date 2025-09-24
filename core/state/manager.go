@@ -61,6 +61,7 @@ var (
 	identityAliasPrefix        = []byte("identity/alias/")
 	identityReversePrefix      = []byte("identity/reverse/")
 	mintInvoicePrefix          = []byte("mint/invoice/")
+	swapOrderPrefix            = []byte("swap/order/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -191,6 +192,37 @@ func MintInvoiceKey(invoiceID string) []byte {
 	copy(buf, mintInvoicePrefix)
 	copy(buf[len(mintInvoicePrefix):], trimmed)
 	return buf
+}
+
+func swapOrderKey(orderID string) []byte {
+	trimmed := strings.TrimSpace(orderID)
+	buf := make([]byte, len(swapOrderPrefix)+len(trimmed))
+	copy(buf, swapOrderPrefix)
+	copy(buf[len(swapOrderPrefix):], trimmed)
+	return buf
+}
+
+// HasSeenSwapNonce reports whether the provided swap order identifier has been processed.
+func (m *Manager) HasSeenSwapNonce(orderID string) bool {
+	trimmed := strings.TrimSpace(orderID)
+	if trimmed == "" {
+		return false
+	}
+	var used bool
+	ok, err := m.KVGet(swapOrderKey(trimmed), &used)
+	if err != nil {
+		return false
+	}
+	return ok && used
+}
+
+// MarkSwapNonce records the supplied order identifier to prevent future replays.
+func (m *Manager) MarkSwapNonce(orderID string) error {
+	trimmed := strings.TrimSpace(orderID)
+	if trimmed == "" {
+		return fmt.Errorf("swap: order id must not be empty")
+	}
+	return m.KVPut(swapOrderKey(trimmed), true)
 }
 
 func escrowStorageKey(id [32]byte) []byte {

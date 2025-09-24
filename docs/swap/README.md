@@ -170,7 +170,7 @@ Responses follow JSON-RPC 2.0 semantics. Any non-200 status or RPC error must be
 2. **Order creation** — Frontend submits recipient address and reference. Gateway stores pending order and returns `payUrl`.
 3. **Fiat payment** — Customer completes checkout on NowPayments (or chosen PSP).
 4. **Webhook** — PSP POSTs to `/webhooks/payment`. Gateway verifies HMAC, signs voucher, submits to node, updates status to `MINT_SUBMITTED`.
-5. **Mint finalization** — Node mints ZNHB and will emit events; future extensions can poll or subscribe to confirm and mark order `MINTED`.
+5. **Mint finalization** — Node mints ZNHB, records the `orderId` replay nonce, and emits a `swap.minted` event with `{orderId, recipient, amount, fiat, fiatAmount, rate}`. Downstream services can poll or subscribe to confirm and mark the order `MINTED`.
 
 ## 8. Frontend Implementation Guide
 
@@ -229,7 +229,40 @@ Responses follow JSON-RPC 2.0 semantics. Any non-200 status or RPC error must be
 - **PSP** — Payment Service Provider (e.g., NowPayments).
 - **Wei** — Smallest unit (1e-18 ZNHB).
 
-## 14. Change Log
+## 14. Audience-Specific Guidance
+
+### 14.1 Frontend Developers
+
+- Integrate `/swap/quote`, `/swap/order`, and `/orders/{orderId}` flows described above; always surface gateway error messages to the user so they can retry or contact support.
+- Validate NHB bech32 addresses client-side and provide username lookup via the identity RPC if your product supports aliases.
+- Use the `swap.minted` event (polled via RPC or indexed service) to flip UI state from `MINT_SUBMITTED` to `MINTED` and display the resulting wei balance alongside the fiat amount paid.
+- Implement exponential backoff when retrying JSON-RPC requests; duplicate submissions are safe because the node enforces `orderId` idempotency.
+
+### 14.2 Auditors
+
+- Confirm the minter key registered on-chain (`SetTokenMintAuthority`) matches the signing key configured in the gateway environment.
+- Review persisted order records and verify each `orderId` maps 1:1 with a `swap.minted` event and PSP receipt.
+- Inspect state proofs (e.g., trie snapshots) to ensure `swap/order/<orderId>` entries are created for every mint, preventing double spends.
+
+### 14.3 Regulators
+
+- Ensure KYC/AML checks occur before order creation when mandated; the gateway can be extended to block requests that lack verified identities.
+- Retain voucher JSON, webhook payloads, and emitted event logs for the jurisdiction’s required retention period.
+- Leverage the deterministic voucher hash and `txHash` returned by the node to trace fiat inflows to on-chain issuance for reporting.
+
+### 14.4 Investors
+
+- Monitor aggregate swap volume by indexing `swap.minted` events (amount, fiat, rate) to understand revenue and token distribution trends.
+- Track failure rates (invalid vouchers, unauthorized signers) as operational risk indicators for the business.
+
+### 14.5 Consumers
+
+- The checkout displays the exact conversion rate and expected on-chain amount; funds typically arrive once the fiat payment clears (minutes for cards, longer for bank transfers).
+- Customers can verify receipt by querying the wallet address through existing NHB explorers or RPC `nhb_getBalance`.
+- Support channels should educate users on safe address handling and the irreversibility of on-chain mints once `swap_submitVoucher` succeeds.
+
+## 15. Change Log
 
 - **SWAP-1** — Introduced Swap Gateway with quoting, order creation, webhook signing, voucher submission, and documentation.
+- **SWAP-2** — Added on-chain voucher verification, replay protection, `swap.minted` events, and expanded audience-specific guidance.
 

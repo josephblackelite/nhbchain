@@ -2026,3 +2026,36 @@ func (sp *StateProcessor) SetLoyaltyProgramDailyAccrued(programID loyalty.Progra
 	manager := nhbstate.NewManager(sp.Trie)
 	return manager.SetLoyaltyProgramDailyAccrued(programID, addr, day, amount)
 }
+
+func (sp *StateProcessor) MintToken(symbol string, addr []byte, amount *big.Int) error {
+	if len(addr) != 20 {
+		return fmt.Errorf("mint: address must be 20 bytes")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return fmt.Errorf("mint: invalid amount")
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	if normalized == "" {
+		return fmt.Errorf("mint: token symbol required")
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return err
+	}
+	switch normalized {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+		return sp.setAccount(addr, account)
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+		return sp.setAccount(addr, account)
+	default:
+		manager := nhbstate.NewManager(sp.Trie)
+		balance, err := manager.Balance(addr, normalized)
+		if err != nil {
+			return err
+		}
+		updated := new(big.Int).Add(balance, amount)
+		return manager.SetBalance(addr, normalized, updated)
+	}
+}
