@@ -209,6 +209,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleIdentityResolve(w, r, req)
 	case "identity_reverse":
 		s.handleIdentityReverse(w, r, req)
+	case "claimable_create":
+		s.handleClaimableCreate(w, r, req)
+	case "claimable_claim":
+		s.handleClaimableClaim(w, r, req)
+	case "claimable_cancel":
+		s.handleClaimableCancel(w, r, req)
+	case "claimable_get":
+		s.handleClaimableGet(w, r, req)
 	case "escrow_create":
 		s.handleEscrowCreate(w, r, req)
 	case "escrow_get":

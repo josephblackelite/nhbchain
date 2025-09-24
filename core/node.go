@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"nhbchain/consensus/bft"
+	"nhbchain/core/claimable"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -528,6 +529,114 @@ func (n *Node) IdentityResolve(alias string) ([20]byte, bool) {
 func (n *Node) IdentityReverse(addr [20]byte) (string, bool) {
 	manager := nhbstate.NewManager(n.state.Trie)
 	return manager.IdentityReverse(addr[:])
+}
+
+func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64) ([32]byte, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	evt := events.ClaimableCreated{
+		ID:        record.ID,
+		Payer:     record.Payer,
+		Token:     record.Token,
+		Amount:    record.Amount,
+		Deadline:  record.Deadline,
+		CreatedAt: record.CreatedAt,
+	}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return record.ID, nil
+}
+
+func (n *Node) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, changed, err := manager.ClaimableClaim(id, preimage, payee)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	evt := events.ClaimableClaimed{
+		ID:     record.ID,
+		Payer:  record.Payer,
+		Payee:  payee,
+		Token:  record.Token,
+		Amount: record.Amount,
+	}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return nil
+}
+
+func (n *Node) ClaimableCancel(id [32]byte, caller [20]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, changed, err := manager.ClaimableCancel(id, caller, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	evt := events.ClaimableCancelled{
+		ID:     record.ID,
+		Payer:  record.Payer,
+		Token:  record.Token,
+		Amount: record.Amount,
+	}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return nil
+}
+
+func (n *Node) ClaimableExpire(id [32]byte) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, changed, err := manager.ClaimableExpire(id, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	evt := events.ClaimableExpired{
+		ID:     record.ID,
+		Payer:  record.Payer,
+		Token:  record.Token,
+		Amount: record.Amount,
+	}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return nil
+}
+
+func (n *Node) ClaimableGet(id [32]byte) (*claimable.Claimable, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, ok := manager.ClaimableGet(id)
+	if !ok {
+		return nil, claimable.ErrNotFound
+	}
+	return record, nil
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
