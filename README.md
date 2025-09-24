@@ -3,12 +3,12 @@
 Welcome to the official Go implementation of the NHBCoin Layer 1 (L1) blockchain. This repository hosts the production codebase used to run validator and full nodes that power NHBCoin—a purpose-built payment rail engineered for instant settlement, mainstream usability, and institutional-grade compliance.
 
 ```
-███████╗   █████╗   ██████╗ ███╗   ██╗██╗  ██╗██████╗
-╚══███╔╝  ██╔══██╗  ██╔══██╗████╗  ██║██║  ██║██╔══██╗
-  ███╔╝   ███████║  ██████╔╝██╔██╗ ██║███████║██████╔╝
- ███╔╝    ██╔══██║  ██╔═══╝ ██║╚██╗██║██╔══██║██╔══██╗
-███████╗  ██║  ██║  ██║     ██║ ╚████║██║  ██║██████╔╝
-╚══════╝  ╚═╝  ╚═╝  ╚═╝     ╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝
+███╗   ██╗██╗  ██╗██████╗   ██████╗ ██████╗ ██╗███╗   ██╗
+████╗  ██║██║  ██║██╔══██╗ ██╔════╝██╔═══██╗██║████╗  ██║
+██╔██╗ ██║███████║██████╔╝ ██║     ██║   ██║██║██╔██╗ ██║
+██║╚██╗██║██╔══██║██╔══██╗ ██║     ██╚═══██╗██║██║╚██╗██║
+██║ ╚████║██║  ██║██████╔╝ ╚██████╗ ╚██████╔╝██║██║ ╚████║
+╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝   ╚═════╝  ╚═════╝ ╚═╝╚═╝  ╚═══╝
 
 ```
 
