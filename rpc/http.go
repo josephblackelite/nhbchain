@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nhbchain/core"
+	"nhbchain/core/epoch"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 )
@@ -120,6 +121,51 @@ type BalanceResponse struct {
 	EngagementScore uint64   `json:"engagementScore"`
 }
 
+type EpochSummaryResult struct {
+	Epoch                  uint64   `json:"epoch"`
+	Height                 uint64   `json:"height"`
+	FinalizedAt            int64    `json:"finalizedAt"`
+	TotalWeight            string   `json:"totalWeight"`
+	ActiveValidators       []string `json:"activeValidators"`
+	EligibleValidatorCount int      `json:"eligibleValidatorCount"`
+}
+
+type EpochWeightResult struct {
+	Address    string `json:"address"`
+	Stake      string `json:"stake"`
+	Engagement uint64 `json:"engagement"`
+	Composite  string `json:"compositeWeight"`
+}
+
+type EpochSnapshotResult struct {
+	Epoch       uint64              `json:"epoch"`
+	Height      uint64              `json:"height"`
+	FinalizedAt int64               `json:"finalizedAt"`
+	TotalWeight string              `json:"totalWeight"`
+	Weights     []EpochWeightResult `json:"weights"`
+	Selected    []string            `json:"selectedValidators"`
+}
+
+func parseEpochParam(raw json.RawMessage) (uint64, bool, error) {
+	if raw == nil {
+		return 0, false, nil
+	}
+
+	var direct uint64
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, true, nil
+	}
+
+	var wrapper struct {
+		Epoch *uint64 `json:"epoch"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err == nil && wrapper.Epoch != nil {
+		return *wrapper.Epoch, true, nil
+	}
+
+	return 0, false, fmt.Errorf("invalid epoch parameter")
+}
+
 // handle is the main request handler that routes to specific handlers.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	reader := http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -173,6 +219,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetLatestBlocks(w, r, req)
 	case "nhb_getLatestTransactions":
 		s.handleGetLatestTransactions(w, r, req)
+	case "nhb_getEpochSummary":
+		s.handleGetEpochSummary(w, r, req)
+	case "nhb_getEpochSnapshot":
+		s.handleGetEpochSnapshot(w, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(w, r, req)
 	case "loyalty_createBusiness":
@@ -324,6 +374,122 @@ func (s *Server) handleGetLatestTransactions(w http.ResponseWriter, _ *http.Requ
 		txs = txs[:count]
 	}
 	writeResult(w, req.ID, txs)
+}
+
+func (s *Server) handleGetEpochSummary(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	var epochNumber uint64
+	var haveEpoch bool
+	if len(req.Params) > 0 {
+		value, ok, err := parseEpochParam(req.Params[0])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+			return
+		}
+		if ok {
+			epochNumber = value
+			haveEpoch = true
+		}
+	}
+
+	var (
+		summary *epoch.Summary
+		exists  bool
+	)
+	if haveEpoch {
+		summary, exists = s.node.EpochSummary(epochNumber)
+	} else {
+		summary, exists = s.node.LatestEpochSummary()
+	}
+	if !exists || summary == nil {
+		writeError(w, http.StatusNotFound, req.ID, codeServerError, "epoch summary not found", nil)
+		return
+	}
+
+	active := make([]string, len(summary.ActiveValidators))
+	for i := range summary.ActiveValidators {
+		active[i] = "0x" + hex.EncodeToString(summary.ActiveValidators[i])
+	}
+	total := big.NewInt(0)
+	if summary.TotalWeight != nil {
+		total = new(big.Int).Set(summary.TotalWeight)
+	}
+	result := EpochSummaryResult{
+		Epoch:                  summary.Epoch,
+		Height:                 summary.Height,
+		FinalizedAt:            summary.FinalizedAt,
+		TotalWeight:            total.String(),
+		ActiveValidators:       active,
+		EligibleValidatorCount: summary.EligibleCount,
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	var epochNumber uint64
+	var haveEpoch bool
+	if len(req.Params) > 0 {
+		value, ok, err := parseEpochParam(req.Params[0])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+			return
+		}
+		if ok {
+			epochNumber = value
+			haveEpoch = true
+		}
+	}
+
+	var (
+		snapshot *epoch.Snapshot
+		exists   bool
+	)
+	if haveEpoch {
+		snapshot, exists = s.node.EpochSnapshot(epochNumber)
+	} else {
+		snapshot, exists = s.node.LatestEpochSnapshot()
+	}
+	if !exists || snapshot == nil {
+		writeError(w, http.StatusNotFound, req.ID, codeServerError, "epoch snapshot not found", nil)
+		return
+	}
+
+	weights := make([]EpochWeightResult, len(snapshot.Weights))
+	for i := range snapshot.Weights {
+		stake := big.NewInt(0)
+		if snapshot.Weights[i].Stake != nil {
+			stake = new(big.Int).Set(snapshot.Weights[i].Stake)
+		}
+		composite := big.NewInt(0)
+		if snapshot.Weights[i].Composite != nil {
+			composite = new(big.Int).Set(snapshot.Weights[i].Composite)
+		}
+		weights[i] = EpochWeightResult{
+			Address:    "0x" + hex.EncodeToString(snapshot.Weights[i].Address),
+			Stake:      stake.String(),
+			Engagement: snapshot.Weights[i].Engagement,
+			Composite:  composite.String(),
+		}
+	}
+
+	selected := make([]string, len(snapshot.Selected))
+	for i := range snapshot.Selected {
+		selected[i] = "0x" + hex.EncodeToString(snapshot.Selected[i])
+	}
+
+	total := big.NewInt(0)
+	if snapshot.TotalWeight != nil {
+		total = new(big.Int).Set(snapshot.TotalWeight)
+	}
+
+	result := EpochSnapshotResult{
+		Epoch:       snapshot.Epoch,
+		Height:      snapshot.Height,
+		FinalizedAt: snapshot.FinalizedAt,
+		TotalWeight: total.String(),
+		Weights:     weights,
+		Selected:    selected,
+	}
+	writeResult(w, req.ID, result)
 }
 
 func (s *Server) requireAuth(r *http.Request) *RPCError {

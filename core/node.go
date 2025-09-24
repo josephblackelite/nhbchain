@@ -15,6 +15,7 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
+	"nhbchain/core/epoch"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -194,6 +195,13 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	}
 
 	// Check derived StateRoot matches header (if header set) or fill it
+	if err := n.state.ProcessBlockLifecycle(b.Header.Height, b.Header.Timestamp); err != nil {
+		if rbErr := rollback(); rbErr != nil {
+			return fmt.Errorf("block lifecycle: %v (rollback failed: %w)", err, rbErr)
+		}
+		return fmt.Errorf("block lifecycle: %w", err)
+	}
+
 	pendingRoot := n.state.PendingRoot()
 	pendingBytes := pendingRoot.Bytes()
 	if len(b.Header.StateRoot) == 0 {
@@ -229,6 +237,35 @@ func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorS
 func (n *Node) GetHeight() uint64                    { return n.chain.GetHeight() }
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
+}
+
+func (n *Node) EpochConfig() epoch.Config {
+	return n.state.EpochConfig()
+}
+
+func (n *Node) SetEpochConfig(cfg epoch.Config) error {
+	return n.state.SetEpochConfig(cfg)
+}
+
+func (n *Node) EpochSnapshot(epochNumber uint64) (*epoch.Snapshot, bool) {
+	return n.state.EpochSnapshot(epochNumber)
+}
+
+func (n *Node) LatestEpochSnapshot() (*epoch.Snapshot, bool) {
+	return n.state.LatestEpochSnapshot()
+}
+
+func (n *Node) LatestEpochSummary() (*epoch.Summary, bool) {
+	return n.state.LatestEpochSummary()
+}
+
+func (n *Node) EpochSummary(epochNumber uint64) (*epoch.Summary, bool) {
+	snapshot, ok := n.state.EpochSnapshot(epochNumber)
+	if !ok {
+		return nil, false
+	}
+	summary := snapshot.Summary()
+	return &summary, true
 }
 
 func (n *Node) LoyaltyManager() *nhbstate.Manager {

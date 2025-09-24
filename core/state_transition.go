@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nhbchain/core/engagement"
+	"nhbchain/core/epoch"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -39,19 +40,24 @@ var (
 	accountMetadataPrefix = []byte("account-meta:")
 	usernameIndexKey      = ethcrypto.Keccak256([]byte("username-index"))
 	validatorSetKey       = ethcrypto.Keccak256([]byte("validator-set"))
+	validatorEligibleKey  = ethcrypto.Keccak256([]byte("validator-eligible-set"))
+	epochHistoryKey       = ethcrypto.Keccak256([]byte("epoch-history"))
 )
 
 type StateProcessor struct {
-	Trie             *trie.Trie
-	stateDB          *gethstate.CachingDB
-	LoyaltyEngine    *loyalty.Engine
-	EscrowEngine     *escrow.Engine
-	TradeEngine      *escrow.TradeEngine
-	usernameToAddr   map[string][]byte
-	ValidatorSet     map[string]*big.Int
-	committedRoot    common.Hash
-	events           []types.Event
-	engagementConfig engagement.Config
+	Trie               *trie.Trie
+	stateDB            *gethstate.CachingDB
+	LoyaltyEngine      *loyalty.Engine
+	EscrowEngine       *escrow.Engine
+	TradeEngine        *escrow.TradeEngine
+	usernameToAddr     map[string][]byte
+	ValidatorSet       map[string]*big.Int
+	EligibleValidators map[string]*big.Int
+	committedRoot      common.Hash
+	events             []types.Event
+	engagementConfig   engagement.Config
+	epochConfig        epoch.Config
+	epochHistory       []epoch.Snapshot
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -59,21 +65,27 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	escEngine := escrow.NewEngine()
 	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
-		Trie:             tr,
-		stateDB:          stateDB,
-		LoyaltyEngine:    loyalty.NewEngine(),
-		EscrowEngine:     escEngine,
-		TradeEngine:      tradeEngine,
-		usernameToAddr:   make(map[string][]byte),
-		ValidatorSet:     make(map[string]*big.Int),
-		committedRoot:    tr.Root(),
-		events:           make([]types.Event, 0),
-		engagementConfig: engagement.DefaultConfig(),
+		Trie:               tr,
+		stateDB:            stateDB,
+		LoyaltyEngine:      loyalty.NewEngine(),
+		EscrowEngine:       escEngine,
+		TradeEngine:        tradeEngine,
+		usernameToAddr:     make(map[string][]byte),
+		ValidatorSet:       make(map[string]*big.Int),
+		EligibleValidators: make(map[string]*big.Int),
+		committedRoot:      tr.Root(),
+		events:             make([]types.Event, 0),
+		engagementConfig:   engagement.DefaultConfig(),
+		epochConfig:        epoch.DefaultConfig(),
+		epochHistory:       make([]epoch.Snapshot, 0),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
 	}
 	if err := sp.loadValidatorSet(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadEpochHistory(); err != nil {
 		return nil, err
 	}
 	return sp, nil
@@ -92,6 +104,21 @@ func (sp *StateProcessor) SetEngagementConfig(cfg engagement.Config) error {
 		return err
 	}
 	sp.engagementConfig = cfg
+	return nil
+}
+
+// EpochConfig returns the active epoch configuration.
+func (sp *StateProcessor) EpochConfig() epoch.Config {
+	return sp.epochConfig
+}
+
+// SetEpochConfig replaces the epoch configuration after validation.
+func (sp *StateProcessor) SetEpochConfig(cfg epoch.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.epochConfig = cfg
+	sp.pruneEpochHistory()
 	return nil
 }
 
@@ -141,6 +168,10 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 	for k, v := range sp.ValidatorSet {
 		validatorCopy[k] = new(big.Int).Set(v)
 	}
+	eligibleCopy := make(map[string]*big.Int, len(sp.EligibleValidators))
+	for k, v := range sp.EligibleValidators {
+		eligibleCopy[k] = new(big.Int).Set(v)
+	}
 	eventsCopy := make([]types.Event, len(sp.events))
 	for i := range sp.events {
 		attrs := make(map[string]string, len(sp.events[i].Attributes))
@@ -149,17 +180,57 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		}
 		eventsCopy[i] = types.Event{Type: sp.events[i].Type, Attributes: attrs}
 	}
+	historyCopy := make([]epoch.Snapshot, len(sp.epochHistory))
+	for i := range sp.epochHistory {
+		snapshot := sp.epochHistory[i]
+		totalWeight := big.NewInt(0)
+		if snapshot.TotalWeight != nil {
+			totalWeight = new(big.Int).Set(snapshot.TotalWeight)
+		}
+		copied := epoch.Snapshot{
+			Epoch:       snapshot.Epoch,
+			Height:      snapshot.Height,
+			FinalizedAt: snapshot.FinalizedAt,
+			TotalWeight: totalWeight,
+			Weights:     make([]epoch.Weight, len(snapshot.Weights)),
+			Selected:    make([][]byte, len(snapshot.Selected)),
+		}
+		for j := range snapshot.Weights {
+			stake := big.NewInt(0)
+			if snapshot.Weights[j].Stake != nil {
+				stake = new(big.Int).Set(snapshot.Weights[j].Stake)
+			}
+			composite := big.NewInt(0)
+			if snapshot.Weights[j].Composite != nil {
+				composite = new(big.Int).Set(snapshot.Weights[j].Composite)
+			}
+			copied.Weights[j] = epoch.Weight{
+				Address:    append([]byte(nil), snapshot.Weights[j].Address...),
+				Stake:      stake,
+				Engagement: snapshot.Weights[j].Engagement,
+				Composite:  composite,
+			}
+		}
+		for j := range snapshot.Selected {
+			copied.Selected[j] = append([]byte(nil), snapshot.Selected[j]...)
+		}
+		historyCopy[i] = copied
+	}
+
 	return &StateProcessor{
-		Trie:             trieCopy,
-		stateDB:          sp.stateDB,
-		LoyaltyEngine:    sp.LoyaltyEngine,
-		EscrowEngine:     sp.EscrowEngine,
-		TradeEngine:      sp.TradeEngine,
-		usernameToAddr:   usernameCopy,
-		ValidatorSet:     validatorCopy,
-		committedRoot:    sp.committedRoot,
-		events:           eventsCopy,
-		engagementConfig: sp.engagementConfig,
+		Trie:               trieCopy,
+		stateDB:            sp.stateDB,
+		LoyaltyEngine:      sp.LoyaltyEngine,
+		EscrowEngine:       sp.EscrowEngine,
+		TradeEngine:        sp.TradeEngine,
+		usernameToAddr:     usernameCopy,
+		ValidatorSet:       validatorCopy,
+		EligibleValidators: eligibleCopy,
+		committedRoot:      sp.committedRoot,
+		events:             eventsCopy,
+		engagementConfig:   sp.engagementConfig,
+		epochConfig:        sp.epochConfig,
+		epochHistory:       historyCopy,
 	}, nil
 }
 
@@ -842,12 +913,8 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	}
 
 	prevUsername := ""
-	prevStake := big.NewInt(0)
 	if prevMeta != nil {
 		prevUsername = prevMeta.Username
-		if prevMeta.Stake != nil {
-			prevStake = new(big.Int).Set(prevMeta.Stake)
-		}
 	}
 
 	if prevUsername != "" && prevUsername != account.Username {
@@ -861,16 +928,37 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	}
 
 	minStake := big.NewInt(MINIMUM_STAKE)
-	if prevStake.Cmp(minStake) >= 0 && account.Stake.Cmp(minStake) < 0 {
-		delete(sp.ValidatorSet, string(addr))
+	meetsStake := account.Stake.Cmp(minStake) >= 0
+	addrKey := string(addr)
+
+	if sp.EligibleValidators == nil {
+		sp.EligibleValidators = make(map[string]*big.Int)
 	}
-	if account.Stake.Cmp(minStake) >= 0 {
-		sp.ValidatorSet[string(addr)] = new(big.Int).Set(account.Stake)
-	} else if account.Stake.Cmp(minStake) < 0 {
-		delete(sp.ValidatorSet, string(addr))
+	if meetsStake {
+		sp.EligibleValidators[addrKey] = new(big.Int).Set(account.Stake)
+	} else {
+		delete(sp.EligibleValidators, addrKey)
 	}
-	if err := sp.persistValidatorSet(); err != nil {
+	if err := sp.persistEligibleValidatorSet(); err != nil {
 		return err
+	}
+
+	if !sp.epochConfig.RotationEnabled {
+		if meetsStake {
+			sp.ValidatorSet[addrKey] = new(big.Int).Set(account.Stake)
+		} else {
+			delete(sp.ValidatorSet, addrKey)
+		}
+		if err := sp.persistValidatorSet(); err != nil {
+			return err
+		}
+	} else if !meetsStake {
+		if _, exists := sp.ValidatorSet[addrKey]; exists {
+			delete(sp.ValidatorSet, addrKey)
+			if err := sp.persistValidatorSet(); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
@@ -1125,7 +1213,15 @@ func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Accoun
 	}
 	minStake := big.NewInt(MINIMUM_STAKE)
 	if legacy.Stake.Cmp(minStake) >= 0 {
-		sp.ValidatorSet[string(addr)] = new(big.Int).Set(legacy.Stake)
+		if sp.EligibleValidators == nil {
+			sp.EligibleValidators = make(map[string]*big.Int)
+		}
+		key := string(addr)
+		sp.EligibleValidators[key] = new(big.Int).Set(legacy.Stake)
+		sp.ValidatorSet[key] = new(big.Int).Set(legacy.Stake)
+		if err := sp.persistEligibleValidatorSet(); err != nil {
+			return nil, err
+		}
 		if err := sp.persistValidatorSet(); err != nil {
 			return nil, err
 		}
@@ -1241,6 +1337,28 @@ func (sp *StateProcessor) loadValidatorSet() error {
 		}
 		sp.ValidatorSet[k] = new(big.Int).Set(v)
 	}
+	eligibleData, err := sp.Trie.Get(validatorEligibleKey)
+	if err != nil {
+		return err
+	}
+	if len(eligibleData) == 0 {
+		sp.EligibleValidators = make(map[string]*big.Int, len(sp.ValidatorSet))
+		for k, v := range sp.ValidatorSet {
+			sp.EligibleValidators[k] = new(big.Int).Set(v)
+		}
+		return nil
+	}
+	eligibleDecoded, err := nhbstate.DecodeValidatorSet(eligibleData)
+	if err != nil {
+		return err
+	}
+	sp.EligibleValidators = make(map[string]*big.Int, len(eligibleDecoded))
+	for k, v := range eligibleDecoded {
+		if v == nil {
+			v = big.NewInt(0)
+		}
+		sp.EligibleValidators[k] = new(big.Int).Set(v)
+	}
 	return nil
 }
 
@@ -1250,6 +1368,14 @@ func (sp *StateProcessor) persistValidatorSet() error {
 		return err
 	}
 	return sp.Trie.Update(validatorSetKey, encoded)
+}
+
+func (sp *StateProcessor) persistEligibleValidatorSet() error {
+	encoded, err := nhbstate.EncodeValidatorSet(sp.EligibleValidators)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(validatorEligibleKey, encoded)
 }
 
 func (sp *StateProcessor) setEscrow(id []byte, e *escrow.LegacyEscrow) error {
