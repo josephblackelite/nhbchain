@@ -78,6 +78,9 @@ var (
 	potsoRewardMetaKeyFormat   = "potso/rewards/epoch/%d/meta"
 	potsoRewardWinnersFormat   = "potso/rewards/epoch/%d/winners"
 	potsoRewardPayoutFormat    = "potso/rewards/epoch/%d/payout/%x"
+	potsoMetricsMeterPrefix    = []byte("potso/metrics/meter/")
+	potsoMetricsIndexPrefix    = []byte("potso/metrics/index/")
+	potsoMetricsSnapshotPrefix = []byte("potso/metrics/snapshot/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -282,6 +285,32 @@ func potsoStakeQueueKey(day string) []byte {
 	return kvKey(buf)
 }
 
+func potsoMetricsMeterKey(epoch uint64, addr []byte) []byte {
+	epochStr := strconv.FormatUint(epoch, 10)
+	buf := make([]byte, len(potsoMetricsMeterPrefix)+len(epochStr)+1+len(addr))
+	copy(buf, potsoMetricsMeterPrefix)
+	copy(buf[len(potsoMetricsMeterPrefix):], epochStr)
+	buf[len(potsoMetricsMeterPrefix)+len(epochStr)] = ':'
+	copy(buf[len(potsoMetricsMeterPrefix)+len(epochStr)+1:], addr)
+	return kvKey(buf)
+}
+
+func potsoMetricsIndexKey(epoch uint64) []byte {
+	epochStr := strconv.FormatUint(epoch, 10)
+	buf := make([]byte, len(potsoMetricsIndexPrefix)+len(epochStr))
+	copy(buf, potsoMetricsIndexPrefix)
+	copy(buf[len(potsoMetricsIndexPrefix):], epochStr)
+	return kvKey(buf)
+}
+
+func potsoMetricsSnapshotKey(epoch uint64) []byte {
+	epochStr := strconv.FormatUint(epoch, 10)
+	buf := make([]byte, len(potsoMetricsSnapshotPrefix)+len(epochStr))
+	copy(buf, potsoMetricsSnapshotPrefix)
+	copy(buf[len(potsoMetricsSnapshotPrefix):], epochStr)
+	return kvKey(buf)
+}
+
 func potsoRewardMetaKey(epoch uint64) []byte {
 	return []byte(fmt.Sprintf(potsoRewardMetaKeyFormat, epoch))
 }
@@ -365,6 +394,81 @@ func (m *Manager) PotsoPutMeter(addr [20]byte, meter *potso.Meter) error {
 		return err
 	}
 	return m.PotsoAddParticipant(meter.Day, addr)
+}
+
+// PotsoMetricsSetMeter stores the raw engagement meters for an epoch.
+func (m *Manager) PotsoMetricsSetMeter(epoch uint64, addr [20]byte, meter *potso.EngagementMeter) error {
+	if meter == nil {
+		return fmt.Errorf("potso: engagement meter must not be nil")
+	}
+	key := potsoMetricsMeterKey(epoch, addr[:])
+	if err := m.KVPut(key, meter); err != nil {
+		return err
+	}
+	indexKey := potsoMetricsIndexKey(epoch)
+	var existing [][]byte
+	if err := m.KVGetList(indexKey, &existing); err != nil {
+		return err
+	}
+	for _, entry := range existing {
+		if bytes.Equal(entry, addr[:]) {
+			return nil
+		}
+	}
+	existing = append(existing, append([]byte(nil), addr[:]...))
+	return m.KVPut(indexKey, existing)
+}
+
+// PotsoMetricsGetMeter retrieves the stored meter for the given epoch and address.
+func (m *Manager) PotsoMetricsGetMeter(epoch uint64, addr [20]byte) (*potso.EngagementMeter, bool, error) {
+	var meter potso.EngagementMeter
+	ok, err := m.KVGet(potsoMetricsMeterKey(epoch, addr[:]), &meter)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return &potso.EngagementMeter{}, false, nil
+	}
+	return &meter, true, nil
+}
+
+// PotsoMetricsListParticipants lists all addresses tracked for the epoch.
+func (m *Manager) PotsoMetricsListParticipants(epoch uint64) ([][20]byte, error) {
+	var raw [][]byte
+	if err := m.KVGetList(potsoMetricsIndexKey(epoch), &raw); err != nil {
+		return nil, err
+	}
+	result := make([][20]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 20 {
+			continue
+		}
+		var addr [20]byte
+		copy(addr[:], entry)
+		result = append(result, addr)
+	}
+	return result, nil
+}
+
+// PotsoMetricsSetSnapshot stores the computed leaderboard snapshot for an epoch.
+func (m *Manager) PotsoMetricsSetSnapshot(epoch uint64, snapshot *potso.StoredWeightSnapshot) error {
+	if snapshot == nil {
+		return fmt.Errorf("potso: weight snapshot must not be nil")
+	}
+	return m.KVPut(potsoMetricsSnapshotKey(epoch), snapshot)
+}
+
+// PotsoMetricsGetSnapshot returns the stored leaderboard snapshot for the epoch.
+func (m *Manager) PotsoMetricsGetSnapshot(epoch uint64) (*potso.StoredWeightSnapshot, bool, error) {
+	var snapshot potso.StoredWeightSnapshot
+	ok, err := m.KVGet(potsoMetricsSnapshotKey(epoch), &snapshot)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return &snapshot, true, nil
 }
 
 // PotsoAddParticipant ensures the leaderboard index for the given day tracks the participant.

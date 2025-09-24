@@ -26,3 +26,15 @@ EmissionPerEpoch = "0"
 TreasuryAddress = "nhb1exampletreasury000000000000000000000"
 MaxWinnersPerEpoch = 5000
 CarryRemainder = true
+
+[potso.weights]
+AlphaStakeBps = 7000
+TxWeightBps = 6000
+EscrowWeightBps = 3000
+UptimeWeightBps = 1000
+MaxEngagementPerEpoch = 1000
+MinStakeToWinWei = "0"
+MinEngagementToWin = 0
+DecayHalfLifeEpochs = 7
+TopKWinners = 5000
+TieBreak = "addrHash"

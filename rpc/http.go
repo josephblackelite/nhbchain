@@ -333,13 +333,17 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoHeartbeat(w, r, req)
 	case "potso_userMeters":
 		s.handlePotsoUserMeters(w, r, req)
-	case "potso_top":
-		s.handlePotsoTop(w, r, req)
-	case "potso_stake_lock":
-		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
+        case "potso_top":
+                s.handlePotsoTop(w, r, req)
+        case "potso_leaderboard":
+                s.handlePotsoLeaderboard(w, r, req)
+        case "potso_params":
+                s.handlePotsoParams(w, r, req)
+        case "potso_stake_lock":
+                if authErr := s.requireAuth(r); authErr != nil {
+                        writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+                        return
+                }
 		s.handlePotsoStakeLock(w, r, req)
 	case "potso_stake_unbond":
 		if authErr := s.requireAuth(r); authErr != nil {

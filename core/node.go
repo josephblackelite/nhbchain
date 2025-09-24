@@ -298,6 +298,18 @@ func (n *Node) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
 	return n.state.SetPotsoRewardConfig(cfg)
 }
 
+func (n *Node) PotsoWeightConfig() potso.WeightParams {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.state.PotsoWeightConfig()
+}
+
+func (n *Node) SetPotsoWeightConfig(cfg potso.WeightParams) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.state.SetPotsoWeightConfig(cfg)
+}
+
 func (n *Node) RewardEpochSettlement(epochNumber uint64) (*rewards.EpochSettlement, bool) {
 	return n.state.RewardEpochSettlement(epochNumber)
 }
@@ -379,6 +391,61 @@ func (n *Node) PotsoRewardEpochPayouts(epoch uint64, cursor *[20]byte, limit int
 		})
 	}
 	return result, nil
+}
+
+func (n *Node) PotsoLeaderboard(epoch uint64, offset, limit int) (uint64, uint64, []potso.StoredWeightEntry, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	target := epoch
+	if target == 0 {
+		last, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		if !ok {
+			return 0, 0, []potso.StoredWeightEntry{}, nil
+		}
+		target = last
+	}
+
+	snapshot, ok, err := manager.PotsoMetricsGetSnapshot(target)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if !ok || snapshot == nil {
+		return target, 0, []potso.StoredWeightEntry{}, nil
+	}
+	entries := snapshot.Entries
+	total := uint64(len(entries))
+	if offset >= len(entries) {
+		return target, total, []potso.StoredWeightEntry{}, nil
+	}
+	end := len(entries)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	subset := entries[offset:end]
+	result := make([]potso.StoredWeightEntry, len(subset))
+	for i := range subset {
+		entry := subset[i]
+		result[i] = potso.StoredWeightEntry{
+			Address:            entry.Address,
+			Stake:              new(big.Int).Set(entry.Stake),
+			Engagement:         entry.Engagement,
+			StakeShareBps:      entry.StakeShareBps,
+			EngagementShareBps: entry.EngagementShareBps,
+			WeightBps:          entry.WeightBps,
+		}
+	}
+	return target, total, result, nil
 }
 
 func (n *Node) LoyaltyManager() *nhbstate.Manager {

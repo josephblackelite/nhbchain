@@ -8,12 +8,14 @@ This document describes how the POTSO rewards module distributes epoch-based ZNH
 - **Cadence:** Rewards are processed once per POTSO epoch. Epoch length is configurable via `potso.rewards.EpochLengthBlocks` in `config.toml`.
 - **Inputs:**
   - Bonded ZNHB stake snapshots sourced from the POTSO staking subsystem.
-  - Engagement meters representing user activity (heartbeat submissions) recorded during the epoch.
+  - Engagement meters representing user activity (transactions, escrow touchpoints, uptime) recorded during the epoch. These
+    counters feed the composite weighting pipeline described in [`weights.md`](weights.md).
 - **Budget:** Rewards are paid entirely from the treasury address configured in `potso.rewards.TreasuryAddress`. No new ZNHB is minted. If the treasury balance is below the configured emission for an epoch, payouts are scaled down pro-rata.
 
 ## Weighting Model
 
-Each participant’s payout weight combines stake share and engagement share:
+Each participant’s payout weight combines stake share and the composite
+engagement share produced by the [POTSO weighting pipeline](weights.md):
 
 ```
 w_i = α * stakeShare_i + (1 − α) * engagementShare_i
@@ -23,11 +25,12 @@ Where:
 
 - `α` is configured by `AlphaStakeBps` (basis points, default `7000` → 70% stake / 30% engagement).
 - `stakeShare_i` is the participant’s bonded stake divided by the total bonded stake captured at epoch close.
-- `engagementShare_i` is the participant’s engagement score divided by the total engagement score for the epoch.
+- `engagementShare_i` is the participant’s decayed engagement score (after filters and caps) divided by the total engagement for the epoch.
 
 If either the total stake or engagement denominator is zero, that component contributes zero weight.
 
-Participants are ranked by composite weight. The highest weights receive rewards up to `MaxWinnersPerEpoch` (default `5000`) to protect block processing time.
+Participants are ranked by composite weight. The highest weights receive rewards up to the minimum of
+`MaxWinnersPerEpoch` (from `[potso.rewards]`) and `TopKWinners` (from `[potso.weights]`) to protect block processing time.
 
 ## Payout Calculation
 

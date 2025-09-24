@@ -64,6 +64,13 @@ func main() {
 	if err := node.SetPotsoRewardConfig(potsoCfg); err != nil {
 		panic(fmt.Sprintf("Failed to apply POTSO rewards config: %v", err))
 	}
+	weightCfg, err := cfg.PotsoWeightConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse POTSO weight config: %v", err))
+	}
+	if err := node.SetPotsoWeightConfig(weightCfg); err != nil {
+		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
+	}
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
 	p2pCfg := p2p.ServerConfig{

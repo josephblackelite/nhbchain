@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sort"
 )
 
 const (
@@ -23,20 +22,20 @@ type RewardConfig struct {
 	CarryRemainder     bool
 }
 
-// RewardSnapshotEntry captures the contribution inputs for a single participant within an epoch snapshot.
+// RewardSnapshotEntry captures the raw inputs for a participant when computing
+// epoch rewards.
 type RewardSnapshotEntry struct {
-	Address    [20]byte
-	Stake      *big.Int
-	Engagement *big.Int
+	Address            [20]byte
+	Stake              *big.Int
+	Meter              EngagementMeter
+	PreviousEngagement uint64
 }
 
-// RewardSnapshot aggregates the stake and engagement totals used to derive payouts for an epoch.
+// RewardSnapshot aggregates the inputs used to derive payouts for an epoch.
 type RewardSnapshot struct {
-	Epoch           uint64
-	Day             string
-	StakeTotal      *big.Int
-	EngagementTotal *big.Int
-	Entries         []RewardSnapshotEntry
+	Epoch   uint64
+	Day     string
+	Entries []RewardSnapshotEntry
 }
 
 // RewardPayout captures the computed payout for a participant.
@@ -48,11 +47,12 @@ type RewardPayout struct {
 
 // RewardOutcome summarises the distribution for a single epoch.
 type RewardOutcome struct {
-	Epoch     uint64
-	Budget    *big.Int
-	TotalPaid *big.Int
-	Remainder *big.Int
-	Winners   []RewardPayout
+	Epoch          uint64
+	Budget         *big.Int
+	TotalPaid      *big.Int
+	Remainder      *big.Int
+	Winners        []RewardPayout
+	WeightSnapshot *WeightSnapshot
 }
 
 // RewardEpochMeta stores the persisted metadata for a processed epoch distribution.
@@ -129,77 +129,57 @@ func (c RewardConfig) Enabled() bool {
 	return c.EpochLengthBlocks > 0 && (c.EmissionPerEpoch != nil && c.EmissionPerEpoch.Sign() > 0)
 }
 
-// ComputeRewards derives the payouts for a snapshot given the configured budget.
-func ComputeRewards(cfg RewardConfig, snapshot RewardSnapshot, budget *big.Int) (*RewardOutcome, error) {
+// ComputeRewards derives the payouts for a snapshot given the configured budget and weight parameters.
+func ComputeRewards(cfg RewardConfig, params WeightParams, snapshot RewardSnapshot, budget *big.Int) (*RewardOutcome, error) {
 	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := params.Validate(); err != nil {
 		return nil, err
 	}
 	if budget == nil {
 		budget = big.NewInt(0)
 	}
+	result := &RewardOutcome{
+		Epoch:          snapshot.Epoch,
+		Budget:         copyBigInt(budget),
+		TotalPaid:      big.NewInt(0),
+		Remainder:      copyBigInt(budget),
+		Winners:        []RewardPayout{},
+		WeightSnapshot: nil,
+	}
 	if budget.Sign() <= 0 {
-		return &RewardOutcome{
-			Epoch:     snapshot.Epoch,
-			Budget:    new(big.Int).Set(budget),
-			TotalPaid: big.NewInt(0),
-			Remainder: new(big.Int).Set(budget),
-			Winners:   []RewardPayout{},
-		}, nil
+		return result, nil
 	}
 
-	entries := normaliseEntries(snapshot.Entries)
-	if len(entries) == 0 {
-		return &RewardOutcome{
-			Epoch:     snapshot.Epoch,
-			Budget:    new(big.Int).Set(budget),
-			TotalPaid: big.NewInt(0),
-			Remainder: new(big.Int).Set(budget),
-			Winners:   []RewardPayout{},
-		}, nil
+	inputs := make([]WeightInput, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		inputs = append(inputs, WeightInput{
+			Address:            entry.Address,
+			Stake:              copyBigInt(entry.Stake),
+			PreviousEngagement: entry.PreviousEngagement,
+			Meter:              entry.Meter,
+		})
+	}
+	weights, err := ComputeWeightSnapshot(snapshot.Epoch, inputs, params)
+	if err != nil {
+		return nil, err
+	}
+	result.WeightSnapshot = weights
+	if weights == nil || len(weights.Entries) == 0 {
+		return result, nil
 	}
 
-	totalStake := snapshot.StakeTotal
-	if totalStake == nil {
-		totalStake = big.NewInt(0)
-		for _, entry := range entries {
-			totalStake.Add(totalStake, entry.Stake)
-		}
-	}
-	totalEngagement := snapshot.EngagementTotal
-	if totalEngagement == nil {
-		totalEngagement = big.NewInt(0)
-		for _, entry := range entries {
-			totalEngagement.Add(totalEngagement, entry.Engagement)
-		}
-	}
-	stakeWeight := new(big.Rat).SetFrac(big.NewInt(int64(cfg.AlphaStakeBps)), big.NewInt(RewardBpsDenominator))
-	engagementWeight := new(big.Rat).Sub(big.NewRat(1, 1), stakeWeight)
-
-	weighted := make([]RewardPayout, 0, len(entries))
-	for _, entry := range entries {
-		weight := computeWeight(entry, totalStake, totalEngagement, stakeWeight, engagementWeight)
-		if weight.Sign() <= 0 {
+	weighted := make([]RewardPayout, 0, len(weights.Entries))
+	for _, entry := range weights.Entries {
+		if entry.Weight == nil || entry.Weight.Sign() <= 0 {
 			continue
 		}
-		weighted = append(weighted, RewardPayout{Address: entry.Address, Amount: big.NewInt(0), Weight: weight})
+		weighted = append(weighted, RewardPayout{Address: entry.Address, Amount: big.NewInt(0), Weight: new(big.Rat).Set(entry.Weight)})
 	}
 	if len(weighted) == 0 {
-		return &RewardOutcome{
-			Epoch:     snapshot.Epoch,
-			Budget:    new(big.Int).Set(budget),
-			TotalPaid: big.NewInt(0),
-			Remainder: new(big.Int).Set(budget),
-			Winners:   []RewardPayout{},
-		}, nil
+		return result, nil
 	}
-
-	sort.Slice(weighted, func(i, j int) bool {
-		cmp := weighted[i].Weight.Cmp(weighted[j].Weight)
-		if cmp == 0 {
-			return lessAddress(weighted[i].Address, weighted[j].Address)
-		}
-		return cmp > 0
-	})
 
 	if cfg.MaxWinnersPerEpoch > 0 && uint64(len(weighted)) > cfg.MaxWinnersPerEpoch {
 		weighted = weighted[:cfg.MaxWinnersPerEpoch]
@@ -232,51 +212,11 @@ func ComputeRewards(cfg RewardConfig, snapshot RewardSnapshot, budget *big.Int) 
 		remainder = big.NewInt(0)
 	}
 
-	return &RewardOutcome{
-		Epoch:     snapshot.Epoch,
-		Budget:    new(big.Int).Set(budget),
-		TotalPaid: totalPaid,
-		Remainder: remainder,
-		Winners:   winners,
-	}, nil
-}
+	result.TotalPaid = totalPaid
+	result.Remainder = remainder
+	result.Winners = winners
 
-func normaliseEntries(entries []RewardSnapshotEntry) []RewardSnapshotEntry {
-	if len(entries) == 0 {
-		return []RewardSnapshotEntry{}
-	}
-	normalised := make([]RewardSnapshotEntry, len(entries))
-	for i := range entries {
-		entry := entries[i]
-		normalised[i] = RewardSnapshotEntry{
-			Address:    entry.Address,
-			Stake:      copyBigInt(entry.Stake),
-			Engagement: copyBigInt(entry.Engagement),
-		}
-	}
-	return normalised
-}
-
-func copyBigInt(value *big.Int) *big.Int {
-	if value == nil {
-		return big.NewInt(0)
-	}
-	return new(big.Int).Set(value)
-}
-
-func computeWeight(entry RewardSnapshotEntry, totalStake, totalEngagement *big.Int, stakeWeight, engagementWeight *big.Rat) *big.Rat {
-	weight := new(big.Rat)
-	if totalStake != nil && totalStake.Sign() > 0 && entry.Stake.Sign() > 0 {
-		component := new(big.Rat).SetFrac(entry.Stake, totalStake)
-		component.Mul(component, stakeWeight)
-		weight.Add(weight, component)
-	}
-	if totalEngagement != nil && totalEngagement.Sign() > 0 && entry.Engagement.Sign() > 0 {
-		component := new(big.Rat).SetFrac(entry.Engagement, totalEngagement)
-		component.Mul(component, engagementWeight)
-		weight.Add(weight, component)
-	}
-	return weight
+	return result, nil
 }
 
 func ratMulInt(r *big.Rat, v *big.Int) *big.Int {
@@ -292,16 +232,4 @@ func ratMulInt(r *big.Rat, v *big.Int) *big.Int {
 		quotient = big.NewInt(0)
 	}
 	return quotient
-}
-
-func lessAddress(a, b [20]byte) bool {
-	for i := 0; i < len(a); i++ {
-		if a[i] < b[i] {
-			return true
-		}
-		if a[i] > b[i] {
-			return false
-		}
-	}
-	return false
 }
