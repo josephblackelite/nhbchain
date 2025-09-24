@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -40,6 +41,8 @@ const unbondingPeriod = 72 * time.Hour
 
 // Privileged arbitrator address (replace with multisig in production).
 var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
+
+var ErrNonceMismatch = errors.New("transaction nonce mismatch")
 
 var (
 	accountMetadataPrefix = []byte("account-meta:")
@@ -651,10 +654,29 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 }
 
 func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
+	sender, senderAccount, err := sp.validateSenderAccount(tx)
+	if err != nil {
+		return err
+	}
 	if tx.Type == types.TxTypeTransfer {
 		return sp.applyEvmTransaction(tx)
 	}
-	return sp.handleNativeTransaction(tx)
+	return sp.handleNativeTransaction(tx, sender, senderAccount)
+}
+
+func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, *types.Account, error) {
+	sender, err := tx.From()
+	if err != nil {
+		return nil, nil, err
+	}
+	account, err := sp.getAccount(sender)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tx.Nonce != account.Nonce {
+		return nil, nil, fmt.Errorf("%w: account=%d tx=%d", ErrNonceMismatch, account.Nonce, tx.Nonce)
+	}
+	return sender, account, nil
 }
 
 // --- EVM path (Geth v1.16.x) ---
@@ -774,68 +796,64 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 
 // --- Native handlers (original semantics + new dispute flow) ---
 
-func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
-	sender, err := tx.From()
-	if err != nil {
-		return err
-	}
+func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	switch tx.Type {
 	case types.TxTypeRegisterIdentity:
-		if err := sp.applyRegisterIdentity(tx); err != nil {
+		if err := sp.applyRegisterIdentity(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	case types.TxTypeCreateEscrow:
-		if err := sp.applyCreateEscrow(tx); err != nil {
+		if err := sp.applyCreateEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeReleaseEscrow:
-		if err := sp.applyReleaseEscrow(tx); err != nil {
+		if err := sp.applyReleaseEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeRefundEscrow:
-		if err := sp.applyRefundEscrow(tx); err != nil {
+		if err := sp.applyRefundEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeStake:
-		if err := sp.applyStake(tx); err != nil {
+		if err := sp.applyStake(tx, sender); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeUnstake:
-		if err := sp.applyUnstake(tx); err != nil {
+		if err := sp.applyUnstake(tx, sender); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeStakeClaim:
-		if err := sp.applyStakeClaim(tx); err != nil {
+		if err := sp.applyStakeClaim(tx, sender); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeHeartbeat:
-		return sp.applyHeartbeat(tx)
+		return sp.applyHeartbeat(tx, sender, senderAccount)
 
 	// --- NEW DISPUTE RESOLUTION CASES ---
 	case types.TxTypeLockEscrow:
-		if err := sp.applyLockEscrow(tx); err != nil {
+		if err := sp.applyLockEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeDisputeEscrow:
-		if err := sp.applyDisputeEscrow(tx); err != nil {
+		if err := sp.applyDisputeEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeArbitrateRelease:
-		if err := sp.applyArbitrate(tx, true); err != nil {
+		if err := sp.applyArbitrate(tx, sender, senderAccount, true); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeArbitrateRefund:
-		if err := sp.applyArbitrate(tx, false); err != nil {
+		if err := sp.applyArbitrate(tx, sender, senderAccount, false); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
@@ -843,8 +861,7 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }
 
-func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction) error {
-	from, _ := tx.From()
+func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	username := string(tx.Data)
 	if len(username) < 3 || len(username) > 20 {
 		return fmt.Errorf("username must be 3-20 characters")
@@ -852,20 +869,20 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction) error {
 	if _, ok := sp.usernameToAddr[username]; ok {
 		return fmt.Errorf("username '%s' taken", username)
 	}
-	fromAccount, _ := sp.getAccount(from)
-	if fromAccount.Username != "" {
+	if senderAccount.Username != "" {
 		return fmt.Errorf("account already has username")
 	}
-	fromAccount.Username = username
-	fromAccount.Nonce++
-	sp.setAccount(from, fromAccount)
+	senderAccount.Username = username
+	senderAccount.Nonce++
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
 	fmt.Printf("Identity processed: Username '%s' registered to %s.\n",
-		username, crypto.NewAddress(crypto.NHBPrefix, from).String())
+		username, crypto.NewAddress(crypto.NHBPrefix, sender).String())
 	return nil
 }
 
-func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
-	from, _ := tx.From() // This is the person creating the escrow (always the seller with the asset)
+func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 
 	// The data payload can now optionally contain a pre-defined buyer
 	var escrowData struct {
@@ -880,7 +897,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 		return fmt.Errorf("escrow amount must be positive")
 	}
 
-	sellerAccount, _ := sp.getAccount(from)
+	sellerAccount := senderAccount
 	if sellerAccount.BalanceNHB.Cmp(escrowData.Amount) < 0 {
 		return fmt.Errorf("insufficient funds to create escrow")
 	}
@@ -892,7 +909,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 	escrowID, _ := tx.Hash()
 	newEscrow := escrow.LegacyEscrow{
 		ID:     escrowID,
-		Seller: from, // The creator of the tx is always the seller with the asset
+		Seller: sender, // The creator of the tx is always the seller with the asset
 		Amount: escrowData.Amount,
 	}
 
@@ -902,20 +919,20 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 		newEscrow.Buyer = escrowData.Buyer
 		newEscrow.Status = escrow.LegacyStatusInProgress
 		fmt.Printf("Symmetrical Escrow Created (In Progress): Seller %s locks funds for Buyer %s, Amount: %s, ID: %x\n",
-			crypto.NewAddress(crypto.NHBPrefix, from).String(),
+			crypto.NewAddress(crypto.NHBPrefix, sender).String(),
 			crypto.NewAddress(crypto.NHBPrefix, escrowData.Buyer).String(),
 			newEscrow.Amount.String(), newEscrow.ID)
 	} else {
 		// This is a standard "Sell Offer". The escrow starts open, and the seller is the initial "buyer".
-		newEscrow.Buyer = from
+		newEscrow.Buyer = sender
 		newEscrow.Status = escrow.LegacyStatusOpen
 		fmt.Printf("Standard Escrow Created (Open): Seller %s lists %s NHBCoin, ID: %x\n",
-			crypto.NewAddress(crypto.NHBPrefix, from).String(),
+			crypto.NewAddress(crypto.NHBPrefix, sender).String(),
 			newEscrow.Amount.String(), newEscrow.ID)
 	}
 
 	// Save the final state to the trie
-	if err := sp.setAccount(from, sellerAccount); err != nil {
+	if err := sp.setAccount(sender, sellerAccount); err != nil {
 		return err
 	}
 	if err := sp.setEscrow(escrowID, &newEscrow); err != nil {
@@ -925,8 +942,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction) error {
 	return nil
 }
 
-func (sp *StateProcessor) applyReleaseEscrow(tx *types.Transaction) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyReleaseEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	escrowID := tx.Data
 	e, err := sp.getEscrow(escrowID)
 	if err != nil {
@@ -940,19 +956,19 @@ func (sp *StateProcessor) applyReleaseEscrow(tx *types.Transaction) error {
 	}
 	e.Status = escrow.LegacyStatusReleased
 	sellerAccount, _ := sp.getAccount(e.Seller)
-	senderAccount, _ := sp.getAccount(sender)
 	sellerAccount.BalanceNHB.Add(sellerAccount.BalanceNHB, e.Amount)
 	senderAccount.Nonce++
 	sp.setAccount(e.Seller, sellerAccount)
 	sp.setEscrow(escrowID, e)
-	sp.setAccount(sender, senderAccount)
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
 	fmt.Printf("Escrow released: Funds (%s NHB) to seller %s.\n",
 		e.Amount.String(), crypto.NewAddress(crypto.NHBPrefix, e.Seller).String())
 	return nil
 }
 
-func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	escrowID := tx.Data
 	e, err := sp.getEscrow(escrowID)
 	if err != nil {
@@ -966,12 +982,13 @@ func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction) error {
 	}
 	e.Status = escrow.LegacyStatusRefunded
 	buyerAccount, _ := sp.getAccount(e.Buyer)
-	senderAccount, _ := sp.getAccount(sender)
 	buyerAccount.BalanceNHB.Add(buyerAccount.BalanceNHB, e.Amount)
 	senderAccount.Nonce++
 	sp.setAccount(e.Buyer, buyerAccount)
 	sp.setEscrow(escrowID, e)
-	sp.setAccount(sender, senderAccount)
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
 	fmt.Printf("Escrow refunded: Funds (%s NHB) to buyer %s.\n",
 		e.Amount.String(), crypto.NewAddress(crypto.NHBPrefix, e.Buyer).String())
 	return nil
@@ -979,8 +996,7 @@ func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction) error {
 
 // --- NEW: Lock -> Dispute -> Arbitrate flow ---
 
-func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction) error {
-	sender, _ := tx.From() // prospective buyer engaging the escrow
+func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	escrowID := tx.Data
 	e, err := sp.getEscrow(escrowID)
 	if err != nil {
@@ -994,7 +1010,6 @@ func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction) error {
 	e.Buyer = sender
 	e.Status = escrow.LegacyStatusInProgress
 
-	senderAccount, _ := sp.getAccount(sender)
 	senderAccount.Nonce++
 
 	if err := sp.setEscrow(escrowID, e); err != nil {
@@ -1009,8 +1024,7 @@ func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction) error {
 	return nil
 }
 
-func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	escrowID := tx.Data
 	e, err := sp.getEscrow(escrowID)
 	if err != nil {
@@ -1026,7 +1040,6 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction) error {
 
 	e.Status = escrow.LegacyStatusDisputed
 
-	senderAccount, _ := sp.getAccount(sender)
 	senderAccount.Nonce++
 
 	if err := sp.setEscrow(escrowID, e); err != nil {
@@ -1040,8 +1053,7 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction) error {
 	return nil
 }
 
-func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, releaseToBuyer bool) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, _ *types.Account, releaseToBuyer bool) error {
 
 	// Only the privileged arbitrator can execute
 	if !bytes.Equal(sender, ARBITRATOR_ADDRESS.Bytes()) {
@@ -1289,8 +1301,7 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 	return &entry, nil
 }
 
-func (sp *StateProcessor) applyStake(tx *types.Transaction) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error {
 	if tx.Value == nil || tx.Value.Sign() <= 0 {
 		return fmt.Errorf("stake must be positive")
 	}
@@ -1306,8 +1317,7 @@ func (sp *StateProcessor) applyStake(tx *types.Transaction) error {
 	return err
 }
 
-func (sp *StateProcessor) applyUnstake(tx *types.Transaction) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyUnstake(tx *types.Transaction, sender []byte) error {
 	if tx.Value == nil || tx.Value.Sign() <= 0 {
 		return fmt.Errorf("unstake must be positive")
 	}
@@ -1329,8 +1339,7 @@ func (sp *StateProcessor) applyUnstake(tx *types.Transaction) error {
 	return nil
 }
 
-func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction) error {
-	sender, _ := tx.From()
+func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction, sender []byte) error {
 	var payload struct {
 		UnbondingID uint64 `json:"unbondingId"`
 	}
@@ -1347,11 +1356,7 @@ func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction) error {
 	return err
 }
 
-func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
-	sender, err := tx.From()
-	if err != nil {
-		return err
-	}
+func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	payload := types.HeartbeatPayload{}
 	if len(tx.Data) > 0 {
 		if err := json.Unmarshal(tx.Data, &payload); err != nil {
@@ -1362,11 +1367,6 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
 		payload.Timestamp = time.Now().UTC().Unix()
 	}
 	now := time.Unix(payload.Timestamp, 0).UTC()
-
-	senderAccount, err := sp.getAccount(sender)
-	if err != nil {
-		return err
-	}
 
 	updates := sp.rolloverEngagement(senderAccount, now)
 	if senderAccount.EngagementLastHeartbeat != 0 {
