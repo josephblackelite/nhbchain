@@ -3,13 +3,14 @@ package core
 import (
 	"math/big"
 	"testing"
-	"time"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
+
+const testEpochTimestamp int64 = 1_700_000_100
 
 func newEpochStateProcessor(t *testing.T) *StateProcessor {
 	t.Helper()
@@ -60,7 +61,7 @@ func TestEpochSnapshotDeterminism(t *testing.T) {
 	b := seedValidator(t, sp, 3000, 5)
 	c := seedValidator(t, sp, 2500, 12)
 
-	if err := sp.ProcessBlockLifecycle(1, time.Now().Unix()); err != nil {
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
 		t.Fatalf("process block: %v", err)
 	}
 
@@ -125,7 +126,7 @@ func TestEpochTieBreaks(t *testing.T) {
 		a, b = b, a
 	}
 
-	if err := sp.ProcessBlockLifecycle(1, time.Now().Unix()); err != nil {
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
 		t.Fatalf("process block: %v", err)
 	}
 
@@ -154,7 +155,7 @@ func TestEpochRotationRespectsMinimumStake(t *testing.T) {
 	eligible2 := seedValidator(t, sp, 3000, 5)
 	_ = seedValidator(t, sp, 500, 100) // below minimum stake
 
-	if err := sp.ProcessBlockLifecycle(1, time.Now().Unix()); err != nil {
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
 		t.Fatalf("process block: %v", err)
 	}
 

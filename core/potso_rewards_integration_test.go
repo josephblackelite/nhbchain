@@ -62,7 +62,7 @@ func TestProcessPotsoRewardEpoch(t *testing.T) {
 		t.Fatalf("set stake B: %v", err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Unix(1_700_000_300, 0).UTC()
 	day := now.Format(potso.DayFormat)
 	if err := manager.PotsoPutMeter(participantA, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
 		t.Fatalf("put meter A: %v", err)
@@ -238,7 +238,7 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 		t.Fatalf("set stake B: %v", err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Unix(1_700_000_400, 0).UTC()
 	day := now.Format(potso.DayFormat)
 	if err := manager.PotsoPutMeter(participantA, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
 		t.Fatalf("put meter A: %v", err)
@@ -469,7 +469,7 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 		t.Fatalf("set stake other: %v", err)
 	}
 
-	base := time.Now().UTC()
+	base := time.Unix(1_700_000_500, 0).UTC()
 	height := uint64(1)
 	processEpoch := func(day string, ts time.Time) {
 		if err := manager.PotsoPutMeter(participant, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {

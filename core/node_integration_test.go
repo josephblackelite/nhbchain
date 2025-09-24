@@ -45,9 +45,10 @@ func TestCommitBlockRollsBackOnApplyError(t *testing.T) {
 		t.Fatalf("compute tx root: %v", err)
 	}
 
+	fixedTime := time.Unix(1_700_000_000, 0).UTC()
 	header := &types.BlockHeader{
 		Height:    node.chain.GetHeight() + 1,
-		Timestamp: time.Now().Unix(),
+		Timestamp: fixedTime.Unix(),
 		PrevHash:  node.chain.Tip(),
 		TxRoot:    txRoot,
 		Validator: validatorKey.PubKey().Address().Bytes(),
