@@ -50,6 +50,11 @@ var (
 	rewardHistoryKey      = ethcrypto.Keccak256([]byte("reward-history"))
 )
 
+type blockExecutionContext struct {
+	height    uint64
+	timestamp time.Time
+}
+
 type StateProcessor struct {
 	Trie               *trie.Trie
 	stateDB            *gethstate.CachingDB
@@ -62,6 +67,7 @@ type StateProcessor struct {
 	committedRoot      common.Hash
 	events             []types.Event
 	nowFunc            func() time.Time
+	execContext        *blockExecutionContext
 	engagementConfig   engagement.Config
 	epochConfig        epoch.Config
 	epochHistory       []epoch.Snapshot
@@ -88,6 +94,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		committedRoot:      tr.Root(),
 		events:             make([]types.Event, 0),
 		nowFunc:            time.Now,
+		execContext:        nil,
 		engagementConfig:   engagement.DefaultConfig(),
 		epochConfig:        epoch.DefaultConfig(),
 		epochHistory:       make([]epoch.Snapshot, 0),
@@ -109,6 +116,39 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		return nil, err
 	}
 	return sp, nil
+}
+
+// BeginBlock records the execution context for the block currently being applied.
+func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
+	if sp == nil {
+		return
+	}
+	sp.execContext = &blockExecutionContext{
+		height:    height,
+		timestamp: timestamp.UTC(),
+	}
+}
+
+// EndBlock clears any active block execution context.
+func (sp *StateProcessor) EndBlock() {
+	if sp == nil {
+		return
+	}
+	sp.execContext = nil
+}
+
+func (sp *StateProcessor) blockTimestamp() time.Time {
+	if sp != nil && sp.execContext != nil {
+		return sp.execContext.timestamp
+	}
+	return sp.now().UTC()
+}
+
+func (sp *StateProcessor) blockHeight() uint64 {
+	if sp != nil && sp.execContext != nil {
+		return sp.execContext.height
+	}
+	return 0
 }
 
 // EngagementConfig returns the configuration currently used for engagement
@@ -636,11 +676,11 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		toAddrPtr = &addr
 	}
 
-	// Build contexts + message (struct literal in v1.16)
+	blockTime := sp.blockTimestamp()
 	blockCtx := gethvm.BlockContext{
 		Coinbase:    common.Address{},
-		BlockNumber: big.NewInt(0),
-		Time:        uint64(time.Now().Unix()),
+		BlockNumber: new(big.Int).SetUint64(sp.blockHeight()),
+		Time:        uint64(blockTime.Unix()),
 		Difficulty:  big.NewInt(0),
 	}
 
@@ -708,7 +748,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 				}
 				return new(big.Int).Set(tx.Value)
 			}(),
-			Timestamp:   time.Unix(int64(blockCtx.Time), 0),
+			Timestamp:   blockTime,
 			FromAccount: fromAcc,
 			ToAccount:   toAcc,
 		}
@@ -724,7 +764,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		}
 	}
 
-	if err := sp.recordEngagementActivity(from, time.Now().UTC(), 1, 0, 0); err != nil {
+	if err := sp.recordEngagementActivity(from, sp.blockTimestamp(), 1, 0, 0); err != nil {
 		return err
 	}
 
@@ -744,37 +784,37 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 		if err := sp.applyRegisterIdentity(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	case types.TxTypeCreateEscrow:
 		if err := sp.applyCreateEscrow(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeReleaseEscrow:
 		if err := sp.applyReleaseEscrow(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeRefundEscrow:
 		if err := sp.applyRefundEscrow(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeStake:
 		if err := sp.applyStake(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 1)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeUnstake:
 		if err := sp.applyUnstake(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 1)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeStakeClaim:
 		if err := sp.applyStakeClaim(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 1)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeHeartbeat:
 		return sp.applyHeartbeat(tx)
 
@@ -783,22 +823,22 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 		if err := sp.applyLockEscrow(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeDisputeEscrow:
 		if err := sp.applyDisputeEscrow(tx); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeArbitrateRelease:
 		if err := sp.applyArbitrate(tx, true); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeArbitrateRefund:
 		if err := sp.applyArbitrate(tx, false); err != nil {
 			return err
 		}
-		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	}
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }

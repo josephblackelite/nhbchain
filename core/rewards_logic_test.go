@@ -3,13 +3,17 @@ package core
 import (
 	"math/big"
 	"testing"
-	"time"
 
 	"nhbchain/core/rewards"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
+)
+
+const (
+	rewardBlockTimestamp1 int64 = 1_700_000_200
+	rewardBlockTimestamp2 int64 = 1_700_000_201
 )
 
 func newRewardTestState(t *testing.T) *StateProcessor {
@@ -70,10 +74,10 @@ func seedEligibleValidator(t *testing.T, sp *StateProcessor, stake int64, engage
 
 func finalizeRewardEpoch(t *testing.T, sp *StateProcessor) {
 	t.Helper()
-	if err := sp.ProcessBlockLifecycle(1, time.Now().Unix()); err != nil {
+	if err := sp.ProcessBlockLifecycle(1, rewardBlockTimestamp1); err != nil {
 		t.Fatalf("process block 1: %v", err)
 	}
-	if err := sp.ProcessBlockLifecycle(2, time.Now().Unix()); err != nil {
+	if err := sp.ProcessBlockLifecycle(2, rewardBlockTimestamp2); err != nil {
 		t.Fatalf("process block 2: %v", err)
 	}
 }
@@ -184,7 +188,7 @@ func TestRewardIdempotency(t *testing.T) {
 	}
 	balance := new(big.Int).Set(account.BalanceZNHB)
 	// Re-run final block lifecycle to ensure no double payment.
-	if err := sp.ProcessBlockLifecycle(2, time.Now().Unix()); err != nil {
+	if err := sp.ProcessBlockLifecycle(2, rewardBlockTimestamp2); err != nil {
 		t.Fatalf("reprocess block: %v", err)
 	}
 	second, ok := sp.LatestRewardEpochSettlement()

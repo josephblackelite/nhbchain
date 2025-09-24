@@ -176,6 +176,9 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	if err != nil {
 		return nil, err
 	}
+	blockTime := time.Unix(header.Timestamp, 0).UTC()
+	stateCopy.BeginBlock(header.Height, blockTime)
+	defer stateCopy.EndBlock()
 	for _, tx := range txs {
 		if err := stateCopy.ApplyTransaction(tx); err != nil {
 			return nil, err
@@ -205,6 +208,10 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	if !bytes.Equal(txRoot, b.Header.TxRoot) {
 		return fmt.Errorf("tx root mismatch")
 	}
+
+	blockTime := time.Unix(b.Header.Timestamp, 0).UTC()
+	n.state.BeginBlock(b.Header.Height, blockTime)
+	defer n.state.EndBlock()
 
 	// Apply transactions; abort (and rollback) on the first failure
 	for i, tx := range b.Transactions {
