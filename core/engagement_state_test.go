@@ -72,7 +72,15 @@ func TestEngagementEMAScore(t *testing.T) {
 		if err := tx.Sign(priv.PrivateKey); err != nil {
 			t.Fatalf("sign tx: %v", err)
 		}
-		if err := sp.applyHeartbeat(tx); err != nil {
+		sender, err := tx.From()
+		if err != nil {
+			t.Fatalf("derive sender: %v", err)
+		}
+		account, err := sp.getAccount(sender)
+		if err != nil {
+			t.Fatalf("load account: %v", err)
+		}
+		if err := sp.applyHeartbeat(tx, sender, account); err != nil {
 			t.Fatalf("apply heartbeat: %v", err)
 		}
 	}
@@ -170,7 +178,15 @@ func TestEngagementDailyCap(t *testing.T) {
 		if err := tx.Sign(priv.PrivateKey); err != nil {
 			t.Fatalf("sign tx: %v", err)
 		}
-		if err := sp.applyHeartbeat(tx); err != nil {
+		sender, err := tx.From()
+		if err != nil {
+			t.Fatalf("derive sender: %v", err)
+		}
+		account, err := sp.getAccount(sender)
+		if err != nil {
+			t.Fatalf("load account: %v", err)
+		}
+		if err := sp.applyHeartbeat(tx, sender, account); err != nil {
 			t.Fatalf("apply heartbeat: %v", err)
 		}
 	}
@@ -190,7 +206,16 @@ func TestEngagementDailyCap(t *testing.T) {
 	if err := tx.Sign(priv.PrivateKey); err != nil {
 		t.Fatalf("sign tx: %v", err)
 	}
-	if err := sp.applyHeartbeat(tx); err != nil {
+	var from []byte
+	from, err = tx.From()
+	if err != nil {
+		t.Fatalf("derive sender: %v", err)
+	}
+	senderAccount, err := sp.getAccount(from)
+	if err != nil {
+		t.Fatalf("load account: %v", err)
+	}
+	if err := sp.applyHeartbeat(tx, from, senderAccount); err != nil {
 		t.Fatalf("final heartbeat: %v", err)
 	}
 
