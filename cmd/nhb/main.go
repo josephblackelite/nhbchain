@@ -57,7 +57,7 @@ func main() {
 	}
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
-	p2pServer := p2p.NewServer(cfg.ListenAddress, node, privKey, node.ChainID())
+	p2pServer := p2p.NewServer(cfg.ListenAddress, node, privKey, node.ChainID(), node.GenesisHash(), cfg.NetworkName)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
 	bftEngine := bft.NewEngine(node, privKey, p2pServer)
@@ -70,12 +70,23 @@ func main() {
 	go rpcServer.Start(cfg.RPCAddress)
 	go p2pServer.Start()
 
-	for _, peerAddr := range cfg.BootstrapPeers {
+	seenPeers := make(map[string]struct{})
+	bootstrap := append([]string{}, cfg.Bootnodes...)
+	bootstrap = append(bootstrap, cfg.PersistentPeers...)
+	for _, peerAddr := range bootstrap {
+		addr := strings.TrimSpace(peerAddr)
+		if addr == "" {
+			continue
+		}
+		if _, exists := seenPeers[addr]; exists {
+			continue
+		}
+		seenPeers[addr] = struct{}{}
 		go func(addr string) {
 			if err := p2pServer.Connect(addr); err != nil {
 				fmt.Printf("Warning: Failed to connect to bootstrap peer %s: %v\n", addr, err)
 			}
-		}(peerAddr)
+		}(addr)
 	}
 
 	fmt.Println("--- NHBCoin Node Initialized and Running ---")

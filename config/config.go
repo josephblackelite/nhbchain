@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"nhbchain/crypto"
 
@@ -18,7 +19,10 @@ type Config struct {
 	ValidatorKeystorePath string   `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI       string   `toml:"ValidatorKMSURI"`
 	ValidatorKMSEnv       string   `toml:"ValidatorKMSEnv"`
-	BootstrapPeers        []string `toml:"BootstrapPeers"`
+	NetworkName           string   `toml:"NetworkName"`
+	Bootnodes             []string `toml:"Bootnodes"`
+	PersistentPeers       []string `toml:"PersistentPeers"`
+	BootstrapPeers        []string `toml:"BootstrapPeers,omitempty"`
 }
 
 // Load loads the configuration from the given path.
@@ -44,6 +48,20 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+
+	if strings.TrimSpace(cfg.NetworkName) == "" {
+		cfg.NetworkName = "nhb-local"
+	}
+	if cfg.Bootnodes == nil {
+		cfg.Bootnodes = []string{}
+	}
+	if cfg.PersistentPeers == nil {
+		cfg.PersistentPeers = []string{}
+	}
+	if len(cfg.Bootnodes) == 0 && len(cfg.BootstrapPeers) > 0 {
+		cfg.Bootnodes = append([]string{}, cfg.BootstrapPeers...)
+	}
+	cfg.BootstrapPeers = nil
 
 	return cfg, nil
 }
@@ -87,11 +105,13 @@ func createDefault(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddress:  ":6001",
-		RPCAddress:     ":8080",
-		DataDir:        "./nhb-data",
-		GenesisFile:    "",
-		BootstrapPeers: []string{},
+		ListenAddress:   ":6001",
+		RPCAddress:      ":8080",
+		DataDir:         "./nhb-data",
+		GenesisFile:     "",
+		NetworkName:     "nhb-local",
+		Bootnodes:       []string{},
+		PersistentPeers: []string{},
 	}
 	cfg.ValidatorKeystorePath = keystorePath
 

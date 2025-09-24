@@ -29,18 +29,25 @@ const (
 	handshakeNonceSize = 32
 
 	malformedPenalty       = 2
+	validMessageReward     = 1
 	reputationBanThreshold = -6
 	banDuration            = 15 * time.Minute
+
+	invalidRateWindow        = time.Minute
+	invalidRateThresholdPerc = 50
+	invalidRateSampleSize    = 5
 )
 
 var errQueueFull = errors.New("peer outbound queue full")
 
 type handshakeMessage struct {
-	ChainID   uint64 `json:"chainId"`
-	NodeID    string `json:"nodeId"`
-	PubKey    []byte `json:"pubKey"`
-	Nonce     []byte `json:"nonce"`
-	Signature []byte `json:"signature"`
+	ChainID     uint64 `json:"chainId"`
+	NodeID      string `json:"nodeId"`
+	PubKey      []byte `json:"pubKey"`
+	GenesisHash []byte `json:"genesisHash"`
+	NetworkName string `json:"network"`
+	Nonce       []byte `json:"nonce"`
+	Signature   []byte `json:"signature"`
 }
 
 // Server coordinates peer connections and message dissemination.
@@ -50,15 +57,24 @@ type Server struct {
 	privKey    *crypto.PrivateKey
 	nodeID     string
 	chainID    uint64
+	genesis    []byte
+	network    string
 
 	mu         sync.RWMutex
 	peers      map[string]*Peer
 	reputation map[string]int
 	banned     map[string]time.Time
+	metrics    map[string]*peerMetrics
+}
+
+type peerMetrics struct {
+	windowStart time.Time
+	total       int
+	invalid     int
 }
 
 // NewServer creates a P2P server with authenticated handshakes.
-func NewServer(listenAddr string, handler MessageHandler, privKey *crypto.PrivateKey, chainID uint64) *Server {
+func NewServer(listenAddr string, handler MessageHandler, privKey *crypto.PrivateKey, chainID uint64, genesisHash []byte, networkName string) *Server {
 	nodeID := privKey.PubKey().Address().String()
 	return &Server{
 		listenAddr: listenAddr,
@@ -66,9 +82,12 @@ func NewServer(listenAddr string, handler MessageHandler, privKey *crypto.Privat
 		privKey:    privKey,
 		nodeID:     nodeID,
 		chainID:    chainID,
+		genesis:    cloneBytes(genesisHash),
+		network:    networkName,
 		peers:      make(map[string]*Peer),
 		reputation: make(map[string]int),
 		banned:     make(map[string]time.Time),
+		metrics:    make(map[string]*peerMetrics),
 	}
 }
 
@@ -159,27 +178,32 @@ func (s *Server) buildHandshake() (*handshakeMessage, error) {
 		return nil, fmt.Errorf("generate handshake nonce: %w", err)
 	}
 	pubKey := s.privKey.PubKey().PublicKey
-	digest := handshakeDigest(s.chainID, nonce)
+	digest := handshakeDigest(s.chainID, s.genesis, s.network, nonce)
 	sig, err := ethcrypto.Sign(digest, s.privKey.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("sign handshake: %w", err)
 	}
 
 	return &handshakeMessage{
-		ChainID:   s.chainID,
-		NodeID:    s.nodeID,
-		PubKey:    ethcrypto.FromECDSAPub(pubKey),
-		Nonce:     nonce,
-		Signature: sig,
+		ChainID:     s.chainID,
+		NodeID:      s.nodeID,
+		PubKey:      ethcrypto.FromECDSAPub(pubKey),
+		GenesisHash: cloneBytes(s.genesis),
+		NetworkName: s.network,
+		Nonce:       nonce,
+		Signature:   sig,
 	}, nil
 }
 
-func handshakeDigest(chainID uint64, nonce []byte) []byte {
-	buf := make([]byte, 8+len(nonce))
-	binary.BigEndian.PutUint64(buf[:8], chainID)
-	copy(buf[8:], nonce)
-	sum := sha256.Sum256(buf)
-	return sum[:]
+func handshakeDigest(chainID uint64, genesisHash []byte, networkName string, nonce []byte) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, chainID)
+	h := sha256.New()
+	h.Write(buf)
+	h.Write(genesisHash)
+	h.Write([]byte(networkName))
+	h.Write(nonce)
+	return h.Sum(nil)
 }
 
 func (s *Server) verifyHandshake(msg *handshakeMessage) (string, error) {
@@ -192,6 +216,9 @@ func (s *Server) verifyHandshake(msg *handshakeMessage) (string, error) {
 	if len(msg.PubKey) == 0 {
 		return "", fmt.Errorf("handshake missing public key")
 	}
+	if len(msg.GenesisHash) == 0 {
+		return "", fmt.Errorf("handshake missing genesis hash")
+	}
 
 	pubKey, err := ethcrypto.UnmarshalPubkey(msg.PubKey)
 	if err != nil {
@@ -199,7 +226,7 @@ func (s *Server) verifyHandshake(msg *handshakeMessage) (string, error) {
 	}
 	nodeID := crypto.NewAddress(crypto.NHBPrefix, ethcrypto.PubkeyToAddress(*pubKey).Bytes()).String()
 
-	digest := handshakeDigest(msg.ChainID, msg.Nonce)
+	digest := handshakeDigest(msg.ChainID, msg.GenesisHash, msg.NetworkName, msg.Nonce)
 	if !ethcrypto.VerifySignature(msg.PubKey, digest, msg.Signature[:64]) {
 		return nodeID, fmt.Errorf("invalid handshake signature")
 	}
@@ -209,7 +236,22 @@ func (s *Server) verifyHandshake(msg *handshakeMessage) (string, error) {
 	if msg.ChainID != s.chainID {
 		return nodeID, fmt.Errorf("chain ID mismatch: remote %d local %d", msg.ChainID, s.chainID)
 	}
+	if !bytes.Equal(msg.GenesisHash, s.genesis) {
+		return nodeID, fmt.Errorf("genesis hash mismatch: remote %x local %x", msg.GenesisHash, s.genesis)
+	}
+	if msg.NetworkName != s.network {
+		return nodeID, fmt.Errorf("network name mismatch: remote %q local %q", msg.NetworkName, s.network)
+	}
 	return nodeID, nil
+}
+
+func cloneBytes(input []byte) []byte {
+	if input == nil {
+		return nil
+	}
+	cp := make([]byte, len(input))
+	copy(cp, input)
+	return cp
 }
 
 func writeFrame(ctx context.Context, conn net.Conn, payload any) error {
@@ -302,6 +344,7 @@ func (s *Server) banPeer(id string) {
 	defer s.mu.Unlock()
 	s.banned[id] = time.Now().Add(banDuration)
 	s.reputation[id] = reputationBanThreshold
+	delete(s.metrics, id)
 }
 
 func (s *Server) adjustReputation(id string, delta int) int {
@@ -313,10 +356,54 @@ func (s *Server) adjustReputation(id string, delta int) int {
 }
 
 func (s *Server) handleProtocolViolation(peer *Peer, err error) {
+	if s.updatePeerMetrics(peer.id, false) {
+		fmt.Printf("Protocol violation from %s: %v (banned: invalid rate)\n", peer.id, err)
+		peer.terminate(true, fmt.Errorf("invalid message rate: %w", err))
+		return
+	}
+
 	rep := s.adjustReputation(peer.id, -malformedPenalty)
 	fmt.Printf("Protocol violation from %s: %v (reputation %d)\n", peer.id, err, rep)
 	ban := rep <= reputationBanThreshold
 	peer.terminate(ban, err)
+}
+
+func (s *Server) recordValidMessage(id string) {
+	s.updatePeerMetrics(id, true)
+	if validMessageReward != 0 {
+		s.adjustReputation(id, validMessageReward)
+	}
+}
+
+func (s *Server) updatePeerMetrics(id string, valid bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	metrics := s.metrics[id]
+	now := time.Now()
+	if metrics == nil {
+		metrics = &peerMetrics{windowStart: now}
+		s.metrics[id] = metrics
+	}
+
+	if now.Sub(metrics.windowStart) > invalidRateWindow {
+		metrics.windowStart = now
+		metrics.total = 0
+		metrics.invalid = 0
+	}
+
+	metrics.total++
+	if !valid {
+		metrics.invalid++
+		if metrics.total >= invalidRateSampleSize && metrics.invalid*100 >= invalidRateThresholdPerc*metrics.total {
+			metrics.windowStart = now
+			metrics.total = 0
+			metrics.invalid = 0
+			return true
+		}
+	}
+
+	return false
 }
 
 // Connect dials a remote peer and establishes a secure session.
@@ -452,6 +539,7 @@ func (p *Peer) readLoop() {
 		if err := p.server.handler.HandleMessage(&msg); err != nil {
 			fmt.Printf("Error handling message from %s: %v\n", p.id, err)
 		}
+		p.server.recordValidMessage(p.id)
 	}
 }
 

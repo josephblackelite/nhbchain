@@ -23,6 +23,7 @@ type Blockchain struct {
 	heights map[uint64][]byte
 	mu      sync.RWMutex
 	chainID uint64
+	genesis []byte
 }
 
 var (
@@ -92,6 +93,7 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 		bc.tip = cloneBytes(genesisHash)
 		bc.height = 0
 		bc.heights[0] = cloneBytes(genesisHash)
+		bc.genesis = cloneBytes(genesisHash)
 		bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
 		if spec != nil {
 			fmt.Printf("Loaded genesis from %s  hash=0x%x  chainID=%d  accounts=%d  validators=%d\n",
@@ -129,6 +131,7 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 	if len(genesisHash) < 8 {
 		return nil, fmt.Errorf("genesis hash too short: %d", len(genesisHash))
 	}
+	bc.genesis = cloneBytes(genesisHash)
 	bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
 
 	return bc, nil
@@ -241,6 +244,13 @@ func (bc *Blockchain) Tip() []byte {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.tip
+}
+
+// GenesisHash returns a copy of the canonical genesis block hash.
+func (bc *Blockchain) GenesisHash() []byte {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return cloneBytes(bc.genesis)
 }
 
 func createGenesisBlock() *types.Block {

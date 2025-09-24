@@ -766,6 +766,11 @@ func (n *Node) HasRole(role string, addr []byte) bool {
 
 // --- Both accessors are needed by different subsystems ---
 
+// GenesisHash exposes the canonical genesis hash for the local chain.
+func (n *Node) GenesisHash() []byte {
+	return n.chain.GenesisHash()
+}
+
 // ChainID exposes the chain identifier (used by P2P authenticated handshake).
 func (n *Node) ChainID() uint64 {
 	return n.chain.ChainID()

@@ -117,8 +117,12 @@ ListenAddress = "0.0.0.0:6001"
 RPCAddress    = "0.0.0.0:8080"
 DataDir       = "./nhb-data"
 ValidatorKeystorePath = ""
-BootstrapPeers = [
+NetworkName = "nhb-local"
+Bootnodes = [
   # e.g. "34.67.8.77:6001"
+]
+PersistentPeers = [
+  # validators you expect to stay connected to long-term
 ]
 ```
 
@@ -148,7 +152,7 @@ Detach with `Ctrl+B`, `D` and reattach via `tmux attach -t nhb-node`. Logs will 
 
 ## Joining the Network as a Peer or Validator
 
-1. **Discover Peers** — Populate `BootstrapPeers` with known validator endpoints or connect to NHBCoin’s bootstrap nodes published via governance notices.
+1. **Discover Peers** — Populate `Bootnodes`/`PersistentPeers` with known validator endpoints or connect to NHBCoin’s bootstrap nodes published via governance notices.
 2. **Sync the Chain** — Allow `nhb-node` to download and verify state. Monitor progress via RPC (`nhb_getLatestBlocks`).
 3. **Generate Wallet Keys** — Use `./nhb-cli generate-key` to create a wallet; secure `wallet.key` offline.
 4. **Acquire ZapNHB** — Request testnet allocations or participate in mainnet offerings to stake.

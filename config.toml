@@ -5,4 +5,6 @@ GenesisFile = ""
 ValidatorKeystorePath = ""
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
-BootstrapPeers = []
+NetworkName = "nhb-local"
+Bootnodes = []
+PersistentPeers = []
