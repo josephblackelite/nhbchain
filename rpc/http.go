@@ -112,13 +112,23 @@ func writeResult(w http.ResponseWriter, id interface{}, result interface{}) {
 }
 
 type BalanceResponse struct {
-	Address         string   `json:"address"`
-	BalanceNHB      *big.Int `json:"balanceNHB"`
-	BalanceZNHB     *big.Int `json:"balanceZNHB"`
-	Stake           *big.Int `json:"stake"`
-	Username        string   `json:"username"`
-	Nonce           uint64   `json:"nonce"`
-	EngagementScore uint64   `json:"engagementScore"`
+	Address            string                `json:"address"`
+	BalanceNHB         *big.Int              `json:"balanceNHB"`
+	BalanceZNHB        *big.Int              `json:"balanceZNHB"`
+	Stake              *big.Int              `json:"stake"`
+	LockedZNHB         *big.Int              `json:"lockedZNHB"`
+	DelegatedValidator string                `json:"delegatedValidator,omitempty"`
+	PendingUnbonds     []StakeUnbondResponse `json:"pendingUnbonds,omitempty"`
+	Username           string                `json:"username"`
+	Nonce              uint64                `json:"nonce"`
+	EngagementScore    uint64                `json:"engagementScore"`
+}
+
+type StakeUnbondResponse struct {
+	ID          uint64   `json:"id"`
+	Validator   string   `json:"validator"`
+	Amount      *big.Int `json:"amount"`
+	ReleaseTime uint64   `json:"releaseTime"`
 }
 
 type EpochSummaryResult struct {
@@ -225,6 +235,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetEpochSnapshot(w, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(w, r, req)
+	case "stake_delegate":
+		s.handleStakeDelegate(w, r, req)
+	case "stake_undelegate":
+		s.handleStakeUndelegate(w, r, req)
+	case "stake_claim":
+		s.handleStakeClaim(w, r, req)
 	case "loyalty_createBusiness":
 		s.handleLoyaltyCreateBusiness(w, r, req)
 	case "loyalty_setPaymaster":
@@ -632,6 +648,44 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	writeResult(w, req.ID, "Transaction received by node.")
 }
 
+func balanceResponseFromAccount(addr string, account *types.Account) BalanceResponse {
+	resp := BalanceResponse{
+		Address:         addr,
+		BalanceNHB:      account.BalanceNHB,
+		BalanceZNHB:     account.BalanceZNHB,
+		Stake:           account.Stake,
+		Username:        account.Username,
+		Nonce:           account.Nonce,
+		EngagementScore: account.EngagementScore,
+	}
+	if account.LockedZNHB != nil {
+		resp.LockedZNHB = account.LockedZNHB
+	}
+	if len(account.DelegatedValidator) > 0 {
+		resp.DelegatedValidator = crypto.NewAddress(crypto.NHBPrefix, account.DelegatedValidator).String()
+	}
+	if len(account.PendingUnbonds) > 0 {
+		resp.PendingUnbonds = make([]StakeUnbondResponse, len(account.PendingUnbonds))
+		for i, entry := range account.PendingUnbonds {
+			validator := ""
+			if len(entry.Validator) > 0 {
+				validator = crypto.NewAddress(crypto.NHBPrefix, entry.Validator).String()
+			}
+			amount := big.NewInt(0)
+			if entry.Amount != nil {
+				amount = new(big.Int).Set(entry.Amount)
+			}
+			resp.PendingUnbonds[i] = StakeUnbondResponse{
+				ID:          entry.ID,
+				Validator:   validator,
+				Amount:      amount,
+				ReleaseTime: entry.ReleaseTime,
+			}
+		}
+	}
+	return resp
+}
+
 func (s *Server) handleGetBalance(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "address parameter required", nil)
@@ -652,14 +706,6 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, _ *http.Request, req *R
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", err.Error())
 		return
 	}
-	resp := BalanceResponse{
-		Address:         addrStr,
-		BalanceNHB:      account.BalanceNHB,
-		BalanceZNHB:     account.BalanceZNHB,
-		Stake:           account.Stake,
-		Username:        account.Username,
-		Nonce:           account.Nonce,
-		EngagementScore: account.EngagementScore,
-	}
+	resp := balanceResponseFromAccount(addrStr, account)
 	writeResult(w, req.ID, resp)
 }

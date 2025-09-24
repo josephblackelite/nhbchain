@@ -5,6 +5,7 @@
 * [Escrow & P2P Developer Guide](./escrow.md)
 * [Codex Escrow Gateway](./codex-epic-escrow-gateway.md)
 * [Loyalty Module](./loyalty.md)
+* [Staking & Delegation](./staking.md)
 
 ## Identity & Username Directory
 
