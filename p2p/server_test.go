@@ -3,10 +3,15 @@ package p2p
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"nhbchain/crypto"
 )
@@ -24,10 +29,30 @@ func mustKey(t *testing.T) *crypto.PrivateKey {
 	return key
 }
 
+func baseConfig(genesis []byte) ServerConfig {
+	return ServerConfig{
+		ListenAddress:    "127.0.0.1:0",
+		ChainID:          1,
+		GenesisHash:      genesis,
+		ClientVersion:    "test/1.0",
+		MaxPeers:         8,
+		MaxInbound:       8,
+		MaxOutbound:      8,
+		PeerBanDuration:  time.Second,
+		ReadTimeout:      250 * time.Millisecond,
+		WriteTimeout:     250 * time.Millisecond,
+		MaxMessageBytes:  1 << 20,
+		MaxMsgsPerSecond: 2,
+	}
+}
+
 func TestHandshakeRejectsMismatchedGenesis(t *testing.T) {
 	handler := noopHandler{}
-	local := NewServer("127.0.0.1:0", handler, mustKey(t), 1, bytes.Repeat([]byte{0xAA}, 32), "alpha")
-	remote := NewServer("127.0.0.1:0", handler, mustKey(t), 1, bytes.Repeat([]byte{0xBB}, 32), "alpha")
+	localGenesis := bytes.Repeat([]byte{0xAA}, 32)
+	remoteGenesis := bytes.Repeat([]byte{0xBB}, 32)
+
+	local := NewServer(handler, mustKey(t), baseConfig(localGenesis))
+	remote := NewServer(handler, mustKey(t), baseConfig(remoteGenesis))
 
 	msg, err := remote.buildHandshake()
 	if err != nil {
@@ -38,45 +63,141 @@ func TestHandshakeRejectsMismatchedGenesis(t *testing.T) {
 	}
 }
 
-func TestHandshakeRejectsMismatchedNetwork(t *testing.T) {
+func TestHandshakeRejectsMismatchedChain(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)
-	local := NewServer("127.0.0.1:0", handler, mustKey(t), 1, genesis, "alpha")
-	remote := NewServer("127.0.0.1:0", handler, mustKey(t), 1, genesis, "beta")
+
+	localCfg := baseConfig(genesis)
+	remoteCfg := baseConfig(genesis)
+	localCfg.ChainID = 1
+	remoteCfg.ChainID = 2
+
+	local := NewServer(handler, mustKey(t), localCfg)
+	remote := NewServer(handler, mustKey(t), remoteCfg)
 
 	msg, err := remote.buildHandshake()
 	if err != nil {
 		t.Fatalf("build handshake: %v", err)
 	}
-	if _, err := local.verifyHandshake(msg); err == nil || !strings.Contains(err.Error(), "network name mismatch") {
-		t.Fatalf("expected network name mismatch error, got %v", err)
+	if _, err := local.verifyHandshake(msg); err == nil || !strings.Contains(err.Error(), "chain ID mismatch") {
+		t.Fatalf("expected chain ID mismatch error, got %v", err)
 	}
 }
 
-func TestPeerBanOnInvalidMessageRate(t *testing.T) {
+func TestPeerRateLimitDisconnect(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)
-	server := NewServer("127.0.0.1:0", handler, mustKey(t), 1, genesis, "alpha")
 
-	peerID := "peer-ban-test"
-	for i := 0; i < invalidRateSampleSize; i++ {
-		left, right := net.Pipe()
-		reader := bufio.NewReader(left)
-		peer := newPeer(peerID, left, reader, server)
-		if err := server.registerPeer(peer); err != nil {
-			t.Fatalf("register peer: %v", err)
+	cfg := baseConfig(genesis)
+	cfg.MaxMsgsPerSecond = 1
+	cfg.PeerBanDuration = 100 * time.Millisecond
+
+	server := NewServer(handler, mustKey(t), cfg)
+	remote := NewServer(handler, mustKey(t), cfg)
+
+	left, right := net.Pipe()
+	defer right.Close()
+
+	go server.handleInbound(left)
+
+	reader := bufio.NewReader(right)
+	// read local handshake
+	if _, err := reader.ReadBytes('\n'); err != nil {
+		t.Fatalf("read local handshake: %v", err)
+	}
+	// respond with remote handshake
+	payload, err := remote.buildHandshake()
+	if err != nil {
+		t.Fatalf("build handshake: %v", err)
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal handshake: %v", err)
+	}
+	if _, err := right.Write(append(data, '\n')); err != nil {
+		t.Fatalf("write handshake: %v", err)
+	}
+
+	// flood messages to trigger the rate limit
+	msgData, err := json.Marshal(&Message{Type: 1, Payload: []byte("spam")})
+	if err != nil {
+		t.Fatalf("marshal message: %v", err)
+	}
+	wait := func(cond func() bool) bool {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return true
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		server.handleProtocolViolation(peer, fmt.Errorf("invalid message"))
-		if i < invalidRateSampleSize-1 {
-			server.adjustReputation(peerID, malformedPenalty)
-		}
-		right.Close()
-		if i < invalidRateSampleSize-1 && server.isBanned(peerID) {
-			t.Fatalf("peer banned too early at iteration %d", i)
+		return cond()
+	}
+
+	if !wait(func() bool {
+		server.mu.RLock()
+		_, ok := server.peers[remote.nodeID]
+		server.mu.RUnlock()
+		return ok
+	}) {
+		t.Fatal("peer never registered after handshake")
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := right.Write(append(msgData, '\n')); err != nil {
+			if strings.Contains(err.Error(), "closed") {
+				break
+			}
+			t.Fatalf("write message: %v", err)
 		}
 	}
 
-	if !server.isBanned(peerID) {
-		t.Fatalf("expected peer to be banned after %d invalid messages", invalidRateSampleSize)
+	if !wait(func() bool {
+		server.mu.RLock()
+		_, ok := server.peers[remote.nodeID]
+		server.mu.RUnlock()
+		return !ok
+	}) {
+		t.Fatal("peer should have been dropped after rate limiting")
+	}
+}
+
+func TestServerBootnodeDialing(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.Bootnodes = []string{"1.2.3.4:6001", "5.6.7.8:7001"}
+	cfg.PersistentPeers = []string{"9.9.9.9:9001"}
+
+	server := NewServer(handler, mustKey(t), cfg)
+
+	var mu sync.Mutex
+	seen := make(map[string]int)
+	server.dialFn = func(ctx context.Context, addr string) (net.Conn, error) {
+		mu.Lock()
+		seen[addr]++
+		mu.Unlock()
+		return nil, fmt.Errorf("dial blocked")
+	}
+
+	server.startDialers()
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("expected dial attempts for bootnodes and persistent peers")
+	}
+	var addrs []string
+	for addr := range seen {
+		addrs = append(addrs, addr)
+	}
+	sort.Strings(addrs)
+	expected := []string{"1.2.3.4:6001", "5.6.7.8:7001", "9.9.9.9:9001"}
+	for _, addr := range expected {
+		if _, ok := seen[addr]; !ok {
+			t.Fatalf("expected dial attempt to %s, got %v", addr, addrs)
+		}
 	}
 }

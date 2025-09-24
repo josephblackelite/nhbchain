@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"nhbchain/crypto"
 
@@ -23,6 +24,15 @@ type Config struct {
 	Bootnodes             []string `toml:"Bootnodes"`
 	PersistentPeers       []string `toml:"PersistentPeers"`
 	BootstrapPeers        []string `toml:"BootstrapPeers,omitempty"`
+	MaxPeers              int      `toml:"MaxPeers"`
+	MaxInbound            int      `toml:"MaxInbound"`
+	MaxOutbound           int      `toml:"MaxOutbound"`
+	PeerBanSeconds        int      `toml:"PeerBanSeconds"`
+	ReadTimeout           int      `toml:"ReadTimeout"`
+	WriteTimeout          int      `toml:"WriteTimeout"`
+	MaxMsgBytes           int      `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond      float64  `toml:"MaxMsgsPerSecond"`
+	ClientVersion         string   `toml:"ClientVersion"`
 }
 
 // Load loads the configuration from the given path.
@@ -62,6 +72,34 @@ func Load(path string) (*Config, error) {
 		cfg.Bootnodes = append([]string{}, cfg.BootstrapPeers...)
 	}
 	cfg.BootstrapPeers = nil
+
+	if cfg.MaxPeers <= 0 {
+		cfg.MaxPeers = 64
+	}
+	if cfg.MaxInbound <= 0 || cfg.MaxInbound > cfg.MaxPeers {
+		cfg.MaxInbound = cfg.MaxPeers
+	}
+	if cfg.MaxOutbound <= 0 || cfg.MaxOutbound > cfg.MaxPeers {
+		cfg.MaxOutbound = cfg.MaxPeers
+	}
+	if cfg.PeerBanSeconds <= 0 {
+		cfg.PeerBanSeconds = int((15 * time.Minute).Seconds())
+	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = int((90 * time.Second).Seconds())
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = int((5 * time.Second).Seconds())
+	}
+	if cfg.MaxMsgBytes <= 0 {
+		cfg.MaxMsgBytes = 1 << 20
+	}
+	if cfg.MaxMsgsPerSecond <= 0 {
+		cfg.MaxMsgsPerSecond = 32
+	}
+	if strings.TrimSpace(cfg.ClientVersion) == "" {
+		cfg.ClientVersion = "nhbchain/node"
+	}
 
 	return cfg, nil
 }
@@ -105,13 +143,22 @@ func createDefault(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddress:   ":6001",
-		RPCAddress:      ":8080",
-		DataDir:         "./nhb-data",
-		GenesisFile:     "",
-		NetworkName:     "nhb-local",
-		Bootnodes:       []string{},
-		PersistentPeers: []string{},
+		ListenAddress:    ":6001",
+		RPCAddress:       ":8080",
+		DataDir:          "./nhb-data",
+		GenesisFile:      "",
+		NetworkName:      "nhb-local",
+		Bootnodes:        []string{},
+		PersistentPeers:  []string{},
+		MaxPeers:         64,
+		MaxInbound:       64,
+		MaxOutbound:      64,
+		PeerBanSeconds:   int((15 * time.Minute).Seconds()),
+		ReadTimeout:      int((90 * time.Second).Seconds()),
+		WriteTimeout:     int((5 * time.Second).Seconds()),
+		MaxMsgBytes:      1 << 20,
+		MaxMsgsPerSecond: 32,
+		ClientVersion:    "nhbchain/node",
 	}
 	cfg.ValidatorKeystorePath = keystorePath
 

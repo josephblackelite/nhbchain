@@ -233,36 +233,75 @@ Responses follow JSON-RPC 2.0 semantics. Any non-200 status or RPC error must be
 
 ### 14.1 Frontend Developers
 
-- Integrate `/swap/quote`, `/swap/order`, and `/orders/{orderId}` flows described above; always surface gateway error messages to the user so they can retry or contact support.
-- Validate NHB bech32 addresses client-side and provide username lookup via the identity RPC if your product supports aliases.
-- Use the `swap.minted` event (polled via RPC or indexed service) to flip UI state from `MINT_SUBMITTED` to `MINTED` and display the resulting wei balance alongside the fiat amount paid.
-- Implement exponential backoff when retrying JSON-RPC requests; duplicate submissions are safe because the node enforces `orderId` idempotency.
+**User journey**
+
+1. Collect recipient NHB address (or username → address lookup) and fiat amount. Validate format locally (`>= $1.00`, two decimals).
+2. Call `/swap/quote` and display the converted ZNHB amount plus a 60-second countdown. Cache the `rate` so subsequent requests are consistent.
+3. POST `/swap/order` with a UUID `reference`. Persist `orderId`/`payUrl` in local storage so the session survives refresh.
+4. Redirect to the payment processor using `payUrl`. Provide inline instructions covering settlement expectations.
+5. Poll `/orders/{orderId}` every 5–10 seconds. Update UI states (`PENDING`, `PAID`, `MINT_SUBMITTED`) and surface the minted wei once available.
+6. Present a receipt summarizing fiat, rate, minted wei, payment reference, and an explorer link.
+
+**State machine**
+
+| State | Trigger | UI Treatment |
+| --- | --- | --- |
+| `idle` | Landing page load | Inputs active, CTA disabled until validation succeeds. |
+| `quoting` | `/swap/quote` request | Disable inputs, show spinner. |
+| `quoteReady` | Quote response | Show rate + countdown, enable continue CTA. |
+| `ordering` | `/swap/order` request | Disable CTA, show progress indicator. |
+| `awaitingPayment` | Order created | Emphasize `payUrl`, display reference code. |
+| `pendingMint` | Webhook indicates paid | Show minted amount placeholder, highlight processing state. |
+| `complete` | RPC submission success | Render success banner, display explorer link & receipt download. |
+| `error` | Any failure | Provide actionable error messaging and retry options. |
+
+**Validation & security**
+
+- Validate NHB bech32 addresses client-side; surface precise errors when checksum fails.
+- Normalize fiat strings to `.` decimal separator before sending.
+- Enforce per-order limits aligned with compliance policies (e.g., `$1–$2,500`).
+- Implement exponential backoff on failed polling or RPC requests to avoid flooding the gateway.
+- Use HTTPS, same-site cookies, and CSRF tokens for authenticated treasury consoles. Never expose minter keys or RPC credentials to the browser.
 
 ### 14.2 Auditors
 
 - Confirm the minter key registered on-chain (`SetTokenMintAuthority`) matches the signing key configured in the gateway environment.
 - Review persisted order records and verify each `orderId` maps 1:1 with a `swap.minted` event and PSP receipt.
 - Inspect state proofs (e.g., trie snapshots) to ensure `swap/order/<orderId>` entries are created for every mint, preventing double spends.
+- Reconcile nightly mint exports against fiat settlement reports; investigate any orphan vouchers or missing webhooks.
+- Ensure voucher logs include nonce, signature, timestamp, and PSP reference for downstream audit sampling.
 
 ### 14.3 Regulators
 
 - Ensure KYC/AML checks occur before order creation when mandated; the gateway can be extended to block requests that lack verified identities.
 - Retain voucher JSON, webhook payloads, and emitted event logs for the jurisdiction’s required retention period.
 - Leverage the deterministic voucher hash and `txHash` returned by the node to trace fiat inflows to on-chain issuance for reporting.
+- Document refund and dispute processes, including timelines and communication channels with the PSP.
+- Maintain sanctions screening logs and per-customer exposure limits tied to `orderId` for supervisory review.
 
 ### 14.4 Investors
 
 - Monitor aggregate swap volume by indexing `swap.minted` events (amount, fiat, rate) to understand revenue and token distribution trends.
 - Track failure rates (invalid vouchers, unauthorized signers) as operational risk indicators for the business.
+- Observe liquidity coverage by comparing fiat receivables vs. minted supply and publish quarterly attestation reports from independent auditors.
+- Measure customer acquisition cost by correlating marketing channels with order creation volume and completion rate.
 
 ### 14.5 Consumers
 
 - The checkout displays the exact conversion rate and expected on-chain amount; funds typically arrive once the fiat payment clears (minutes for cards, longer for bank transfers).
 - Customers can verify receipt by querying the wallet address through existing NHB explorers or RPC `nhb_getBalance`.
 - Support channels should educate users on safe address handling and the irreversibility of on-chain mints once `swap_submitVoucher` succeeds.
+- Provide FAQs covering settlement timing, refund scenarios, and wallet safety tips.
+- Encourage users to enable multi-factor authentication on any custodial wallet accounts tied to swaps.
 
 ## 15. Change Log
 
 - **SWAP-1** — Introduced Swap Gateway with quoting, order creation, webhook signing, voucher submission, and documentation.
 - **SWAP-2** — Added on-chain voucher verification, replay protection, `swap.minted` events, and expanded audience-specific guidance.
 
+## 16. Incident Response & Monitoring
+
+- **Alerting** — Page operators on webhook signature failures, RPC submission errors, or mint latencies exceeding 60 seconds.
+- **Circuit breakers** — Provide operational toggles to pause new orders while honoring in-flight redemptions; surface status to clients in real time.
+- **Runbooks** — Maintain step-by-step recovery guides for PSP outages, node downtime, and signing key rotation.
+- **Post-incident reviews** — Document timelines, impacted order IDs, root cause, and mitigation steps. Share summaries with regulators, investors, and affected partners.

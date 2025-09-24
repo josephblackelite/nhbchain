@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"nhbchain/config"
 	"nhbchain/consensus/bft"
@@ -57,7 +58,23 @@ func main() {
 	}
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
-	p2pServer := p2p.NewServer(cfg.ListenAddress, node, privKey, node.ChainID(), node.GenesisHash(), cfg.NetworkName)
+	p2pCfg := p2p.ServerConfig{
+		ListenAddress:    cfg.ListenAddress,
+		ChainID:          node.ChainID(),
+		GenesisHash:      node.GenesisHash(),
+		ClientVersion:    cfg.ClientVersion,
+		MaxPeers:         cfg.MaxPeers,
+		MaxInbound:       cfg.MaxInbound,
+		MaxOutbound:      cfg.MaxOutbound,
+		Bootnodes:        append([]string{}, cfg.Bootnodes...),
+		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
+		PeerBanDuration:  time.Duration(cfg.PeerBanSeconds) * time.Second,
+		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
+		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
+		MaxMessageBytes:  cfg.MaxMsgBytes,
+		MaxMsgsPerSecond: cfg.MaxMsgsPerSecond,
+	}
+	p2pServer := p2p.NewServer(node, privKey, p2pCfg)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
 	bftEngine := bft.NewEngine(node, privKey, p2pServer)
@@ -69,25 +86,6 @@ func main() {
 	rpcServer := rpc.NewServer(node)
 	go rpcServer.Start(cfg.RPCAddress)
 	go p2pServer.Start()
-
-	seenPeers := make(map[string]struct{})
-	bootstrap := append([]string{}, cfg.Bootnodes...)
-	bootstrap = append(bootstrap, cfg.PersistentPeers...)
-	for _, peerAddr := range bootstrap {
-		addr := strings.TrimSpace(peerAddr)
-		if addr == "" {
-			continue
-		}
-		if _, exists := seenPeers[addr]; exists {
-			continue
-		}
-		seenPeers[addr] = struct{}{}
-		go func(addr string) {
-			if err := p2pServer.Connect(addr); err != nil {
-				fmt.Printf("Warning: Failed to connect to bootstrap peer %s: %v\n", addr, err)
-			}
-		}(addr)
-	}
 
 	fmt.Println("--- NHBCoin Node Initialized and Running ---")
 	go node.StartConsensus()
