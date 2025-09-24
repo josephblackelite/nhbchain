@@ -1,0 +1,33 @@
+# NHBChain Documentation Index
+
+## Core Modules
+
+* [Escrow & P2P Developer Guide](./escrow.md)
+* [Codex Escrow Gateway](./codex-epic-escrow-gateway.md)
+* [Loyalty Module](./loyalty.md)
+
+## Identity & Username Directory
+
+The identity subsystem introduces human-readable aliases, email discovery, avatars, and claimables for pay-by-username UX.
+
+* [Identity Concepts & State Model](./identity.md)
+* [JSON-RPC API Reference](./identity-api.md)
+* [Gateway REST API](./identity-gateway.md)
+* [Pay-by-Username & Email Flows](./pay-by-username.md)
+* [Avatar Specification](./avatars.md)
+* [CLI Usage (`nhb-cli id`)](./identity-cli.md)
+* [Security, Privacy & Compliance Brief](./identity-security-compliance.md)
+* [OpenAPI 3.1 Schema](./openapi/identity.yaml)
+* [HTTP Examples](./examples/identity)
+
+### 10-Minute Quickstart
+
+1. **Register an alias** using the JSON-RPC method or `nhb-cli id register`.
+2. **Link additional addresses** with `identity_addAddress` to support multi-device payouts.
+3. **Upload an avatar** via the gateway and set it on-chain with `identity_setAvatar`.
+4. **Bind a verified email** so friends can pay you even before knowing your alias.
+5. **Test pay-by-username** in a wallet by resolving your alias and sending a small transfer.
+6. **Simulate pay-by-email** by creating a claimable and claiming it with a second account.
+
+For escrow integration details, see [escrow.md](./escrow.md). Contributions and feedback are welcome via governance proposals or the
+engineering forum.
