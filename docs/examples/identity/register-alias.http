@@ -1,0 +1,14 @@
+### Register alias (JSON-RPC)
+POST {{NODE_RPC_URL}}
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "identity_registerAlias",
+  "params": [
+    "frankrocks",
+    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpxxx",
+    "0xSIG"
+  ]
+}

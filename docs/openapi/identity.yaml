@@ -1,0 +1,418 @@
+openapi: 3.1.0
+info:
+  title: NHBChain Identity Gateway API
+  version: "0.1.0"
+  description: REST interface for email verification, alias binding, avatar upload, and public identity lookups.
+  license:
+    name: CC BY 4.0
+    url: https://creativecommons.org/licenses/by/4.0/
+servers:
+  - url: https://gateway.dev.nhbchain.com
+    description: Development gateway
+  - url: https://gateway.staging.nhbchain.com
+    description: Staging gateway
+  - url: https://gateway.nhbchain.com
+    description: Production gateway
+security:
+  - ApiKeyAuth: []
+    HmacSignature: []
+paths:
+  /identity/email/register:
+    post:
+      summary: Initiate email verification
+      description: Sends a verification code to the provided email address.
+      operationId: emailRegister
+      security:
+        - ApiKeyAuth: []
+          HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRegisterRequest'
+      responses:
+        '200':
+          description: Verification initiated
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailRegisterResponse'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '429':
+          $ref: '#/components/responses/Error429'
+  /identity/email/verify:
+    post:
+      summary: Complete email verification
+      description: Confirms the one-time code and returns the salted email hash.
+      operationId: emailVerify
+      security:
+        - ApiKeyAuth: []
+          HmacSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailVerifyRequest'
+      responses:
+        '200':
+          description: Email verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailVerifyResponse'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '429':
+          $ref: '#/components/responses/Error429'
+  /identity/alias/bind-email:
+    post:
+      summary: Bind verified email to aliasId
+      description: Links a verified email hash to an alias for opt-in lookup.
+      operationId: bindEmail
+      security:
+        - ApiKeyAuth: []
+          HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BindEmailRequest'
+      responses:
+        '200':
+          description: Email linked to alias
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindEmailResponse'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '429':
+          $ref: '#/components/responses/Error429'
+  /identity/resolve:
+    get:
+      summary: Resolve alias to addresses
+      description: Public lookup that returns alias metadata and linked addresses.
+      operationId: resolveAlias
+      security: []
+      parameters:
+        - name: username
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Alias string to resolve (without leading @).
+      responses:
+        '200':
+          description: Alias resolved
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResolveResponse'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '429':
+          $ref: '#/components/responses/Error429'
+  /identity/reverse:
+    get:
+      summary: Reverse lookup alias by address
+      description: Returns alias metadata for a Bech32 address.
+      operationId: reverseResolve
+      security: []
+      parameters:
+        - name: address
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Bech32 address to reverse-resolve.
+      responses:
+        '200':
+          description: Alias found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReverseResponse'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '429':
+          $ref: '#/components/responses/Error429'
+  /identity/avatars/upload:
+    post:
+      summary: Upload avatar image
+      description: Validates avatar content and returns canonical avatar reference.
+      operationId: uploadAvatar
+      security:
+        - ApiKeyAuth: []
+          HmacSignature: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Avatar image file (PNG, JPEG, WebP, SVG)
+                aliasId:
+                  type: string
+                  pattern: '^0x[a-fA-F0-9]{6,}$'
+                  description: Optional aliasId to enforce ownership verification
+              required:
+                - file
+      responses:
+        '200':
+          description: Avatar uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvatarUploadResponse'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    HmacSignature:
+      type: apiKey
+      in: header
+      name: X-API-Signature
+      description: Hex HMAC-SHA256 signature of method, path, body hash, and timestamp
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Reuse to safely retry requests.
+  headers:
+    XRateLimitLimit:
+      schema:
+        type: integer
+      description: Rate limit ceiling for the current window.
+    XRateLimitRemaining:
+      schema:
+        type: integer
+      description: Remaining requests in the window.
+    XRateLimitReset:
+      schema:
+        type: integer
+      description: Unix timestamp when the rate limit resets.
+  responses:
+    Error400:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error401:
+      description: Authentication or signature failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error404:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error409:
+      description: Conflict or duplicate request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error422:
+      description: Unprocessable avatar (policy violation)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error429:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until next request allowed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    EmailRegisterRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+        aliasHint:
+          type: string
+          description: Optional alias hint to include in email copy
+    EmailRegisterResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending]
+        expiresIn:
+          type: integer
+          description: Seconds until verification code expires
+    EmailVerifyRequest:
+      type: object
+      required:
+        - email
+        - code
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          minLength: 6
+          maxLength: 6
+    EmailVerifyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [verified]
+        verifiedAt:
+          type: string
+          format: date-time
+        emailHash:
+          type: string
+          pattern: '^0x[a-fA-F0-9]+$'
+    BindEmailRequest:
+      type: object
+      required:
+        - aliasId
+        - email
+        - consent
+      properties:
+        aliasId:
+          type: string
+          pattern: '^0x[a-fA-F0-9]+$'
+        email:
+          type: string
+          format: email
+        consent:
+          type: boolean
+    BindEmailResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [linked]
+        aliasId:
+          type: string
+        emailHash:
+          type: string
+        publicLookup:
+          type: boolean
+    ResolveResponse:
+      type: object
+      properties:
+        alias:
+          type: string
+        aliasId:
+          type: string
+        primary:
+          type: string
+        addresses:
+          type: array
+          items:
+            type: string
+        avatarUrl:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+    ReverseResponse:
+      type: object
+      properties:
+        alias:
+          type: string
+        aliasId:
+          type: string
+    AvatarUploadResponse:
+      type: object
+      properties:
+        avatarRef:
+          type: string
+          description: Canonical avatar reference URL or blob ref
+        contentType:
+          type: string
+        size:
+          type: integer
+        etag:
+          type: string
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+          required:
+            - code
+            - message
