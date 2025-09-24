@@ -68,6 +68,7 @@ type StateProcessor struct {
 	rewardConfig       rewards.Config
 	rewardAccrual      *rewards.Accumulator
 	rewardHistory      []rewards.EpochSettlement
+	potsoRewardConfig  potso.RewardConfig
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -91,6 +92,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		epochHistory:       make([]epoch.Snapshot, 0),
 		rewardConfig:       rewards.DefaultConfig(),
 		rewardHistory:      make([]rewards.EpochSettlement, 0),
+		potsoRewardConfig:  potso.DefaultRewardConfig(),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -152,6 +154,246 @@ func (sp *StateProcessor) SetRewardConfig(cfg rewards.Config) error {
 	sp.rewardAccrual = nil
 	sp.pruneRewardHistory()
 	return sp.persistRewardHistory()
+}
+
+// PotsoRewardConfig returns the current POTSO reward configuration snapshot.
+func (sp *StateProcessor) PotsoRewardConfig() potso.RewardConfig {
+	return clonePotsoRewardConfig(sp.potsoRewardConfig)
+}
+
+// SetPotsoRewardConfig replaces the POTSO reward distribution configuration.
+func (sp *StateProcessor) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.potsoRewardConfig = clonePotsoRewardConfig(cfg)
+	return nil
+}
+
+func clonePotsoRewardConfig(cfg potso.RewardConfig) potso.RewardConfig {
+	clone := cfg
+	if cfg.MinPayoutWei != nil {
+		clone.MinPayoutWei = new(big.Int).Set(cfg.MinPayoutWei)
+	}
+	if cfg.EmissionPerEpoch != nil {
+		clone.EmissionPerEpoch = new(big.Int).Set(cfg.EmissionPerEpoch)
+	}
+	return clone
+}
+
+func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int64) error {
+	cfg := sp.potsoRewardConfig
+	if cfg.EpochLengthBlocks == 0 {
+		return nil
+	}
+	if cfg.EmissionPerEpoch == nil || cfg.EmissionPerEpoch.Sign() <= 0 {
+		return nil
+	}
+	currentEpoch := height / cfg.EpochLengthBlocks
+	if currentEpoch == 0 {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	lastProcessed, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
+		return err
+	}
+	target := currentEpoch - 1
+	start := uint64(0)
+	if ok {
+		if lastProcessed >= target {
+			return nil
+		}
+		start = lastProcessed + 1
+	}
+	if start > target {
+		return nil
+	}
+	day := time.Unix(timestamp, 0).UTC().Format(potso.DayFormat)
+	for epochNumber := start; epochNumber <= target; epochNumber++ {
+		if err := sp.processPotsoRewardEpoch(manager, cfg, epochNumber, day); err != nil {
+			return err
+		}
+		if err := manager.PotsoRewardsSetLastProcessedEpoch(epochNumber); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg potso.RewardConfig, epochNumber uint64, day string) error {
+	if manager == nil {
+		return fmt.Errorf("potso: state manager unavailable")
+	}
+	if _, exists, err := manager.PotsoRewardsGetMeta(epochNumber); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+
+	stakeOwners, err := manager.PotsoStakeOwners()
+	if err != nil {
+		return err
+	}
+	stakeTotals := make(map[[20]byte]*big.Int, len(stakeOwners))
+	stakeTotal := big.NewInt(0)
+	for _, owner := range stakeOwners {
+		amount, err := manager.PotsoStakeBondedTotal(owner)
+		if err != nil {
+			return err
+		}
+		if amount == nil || amount.Sign() <= 0 {
+			continue
+		}
+		stakeTotals[owner] = new(big.Int).Set(amount)
+		stakeTotal.Add(stakeTotal, amount)
+	}
+
+	participants, err := manager.PotsoListParticipants(day)
+	if err != nil {
+		return err
+	}
+	engagementTotals := make(map[[20]byte]*big.Int, len(participants))
+	engagementTotal := big.NewInt(0)
+	for _, addr := range participants {
+		meter, _, err := manager.PotsoGetMeter(addr, day)
+		if err != nil {
+			return err
+		}
+		score := big.NewInt(0)
+		if meter != nil {
+			score.SetUint64(meter.Score)
+		}
+		if score.Sign() <= 0 {
+			continue
+		}
+		engagementTotals[addr] = new(big.Int).Set(score)
+		engagementTotal.Add(engagementTotal, score)
+	}
+
+	entries := make([]potso.RewardSnapshotEntry, 0, len(stakeTotals)+len(engagementTotals))
+	for owner, amount := range stakeTotals {
+		engagement := big.NewInt(0)
+		if score, ok := engagementTotals[owner]; ok {
+			engagement = new(big.Int).Set(score)
+			delete(engagementTotals, owner)
+		}
+		entries = append(entries, potso.RewardSnapshotEntry{
+			Address:    owner,
+			Stake:      new(big.Int).Set(amount),
+			Engagement: engagement,
+		})
+	}
+	for addr, score := range engagementTotals {
+		entries = append(entries, potso.RewardSnapshotEntry{
+			Address:    addr,
+			Stake:      big.NewInt(0),
+			Engagement: new(big.Int).Set(score),
+		})
+	}
+
+	snapshot := potso.RewardSnapshot{
+		Epoch:           epochNumber,
+		Day:             potso.NormaliseDay(day),
+		StakeTotal:      new(big.Int).Set(stakeTotal),
+		EngagementTotal: new(big.Int).Set(engagementTotal),
+		Entries:         entries,
+	}
+
+	emission := big.NewInt(0)
+	if cfg.EmissionPerEpoch != nil {
+		emission = new(big.Int).Set(cfg.EmissionPerEpoch)
+	}
+	treasuryAcc, err := manager.GetAccount(cfg.TreasuryAddress[:])
+	if err != nil {
+		return err
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+	treasuryBalance := new(big.Int).Set(treasuryAcc.BalanceZNHB)
+	budget := new(big.Int).Set(emission)
+	if treasuryBalance.Cmp(budget) < 0 {
+		budget = new(big.Int).Set(treasuryBalance)
+	}
+
+	outcome, err := potso.ComputeRewards(cfg, snapshot, budget)
+	if err != nil {
+		return err
+	}
+
+	winnersAddrs := make([][20]byte, 0, len(outcome.Winners))
+	for _, winner := range outcome.Winners {
+		winnersAddrs = append(winnersAddrs, winner.Address)
+	}
+
+	totalPaid := new(big.Int).Set(outcome.TotalPaid)
+	if totalPaid.Sign() > 0 {
+		if treasuryBalance.Cmp(totalPaid) < 0 {
+			return fmt.Errorf("potso: treasury balance insufficient for epoch %d", epochNumber)
+		}
+		treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+		if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+			return err
+		}
+		for _, winner := range outcome.Winners {
+			account, err := manager.GetAccount(winner.Address[:])
+			if err != nil {
+				return err
+			}
+			if account.BalanceZNHB == nil {
+				account.BalanceZNHB = big.NewInt(0)
+			}
+			account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
+			if err := manager.PutAccount(winner.Address[:], account); err != nil {
+				return err
+			}
+			if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
+				return err
+			}
+			if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount)}).Event(); evt != nil {
+				sp.AppendEvent(evt)
+			}
+		}
+	} else {
+		for _, winner := range outcome.Winners {
+			if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := manager.PotsoRewardsSetWinners(epochNumber, winnersAddrs); err != nil {
+		return err
+	}
+
+	meta := &potso.RewardEpochMeta{
+		Epoch:           epochNumber,
+		Day:             snapshot.Day,
+		StakeTotal:      new(big.Int).Set(stakeTotal),
+		EngagementTotal: new(big.Int).Set(engagementTotal),
+		AlphaBps:        cfg.AlphaStakeBps,
+		Emission:        new(big.Int).Set(emission),
+		Budget:          new(big.Int).Set(outcome.Budget),
+		TotalPaid:       new(big.Int).Set(outcome.TotalPaid),
+		Remainder:       new(big.Int).Set(outcome.Remainder),
+		Winners:         uint64(len(outcome.Winners)),
+	}
+	if err := manager.PotsoRewardsSetMeta(epochNumber, meta); err != nil {
+		return err
+	}
+
+	if evt := (events.PotsoRewardEpoch{
+		Epoch:     epochNumber,
+		TotalPaid: new(big.Int).Set(outcome.TotalPaid),
+		Winners:   uint64(len(outcome.Winners)),
+		Emission:  new(big.Int).Set(emission),
+		Budget:    new(big.Int).Set(outcome.Budget),
+		Remainder: new(big.Int).Set(outcome.Remainder),
+	}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
 }
 
 // CurrentRoot returns the last committed state root.
@@ -271,6 +513,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		epochHistory:       historyCopy,
 		rewardConfig:       sp.rewardConfig.Clone(),
 		rewardHistory:      rewardHistoryCopy,
+		potsoRewardConfig:  clonePotsoRewardConfig(sp.potsoRewardConfig),
 	}, nil
 }
 

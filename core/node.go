@@ -286,12 +286,99 @@ func (n *Node) SetRewardConfig(cfg rewards.Config) error {
 	return n.state.SetRewardConfig(cfg)
 }
 
+func (n *Node) PotsoRewardConfig() potso.RewardConfig {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.state.PotsoRewardConfig()
+}
+
+func (n *Node) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.state.SetPotsoRewardConfig(cfg)
+}
+
 func (n *Node) RewardEpochSettlement(epochNumber uint64) (*rewards.EpochSettlement, bool) {
 	return n.state.RewardEpochSettlement(epochNumber)
 }
 
 func (n *Node) LatestRewardEpochSettlement() (*rewards.EpochSettlement, bool) {
 	return n.state.LatestRewardEpochSettlement()
+}
+
+func (n *Node) PotsoLatestRewardEpoch() (uint64, bool, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	value, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
+		return 0, false, err
+	}
+	if !ok {
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+func (n *Node) PotsoRewardEpochInfo(epoch uint64) (*potso.RewardEpochMeta, bool, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	meta, ok, err := manager.PotsoRewardsGetMeta(epoch)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok || meta == nil {
+		return nil, false, nil
+	}
+	cloned := meta.Clone()
+	return &cloned, true, nil
+}
+
+func (n *Node) PotsoRewardEpochPayouts(epoch uint64, cursor *[20]byte, limit int) ([]potso.RewardPayout, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	winners, err := manager.PotsoRewardsListWinners(epoch)
+	if err != nil {
+		return nil, err
+	}
+	start := 0
+	if cursor != nil {
+		for i := range winners {
+			if winners[i] == *cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if start >= len(winners) {
+		return []potso.RewardPayout{}, nil
+	}
+	end := start + limit
+	if end > len(winners) {
+		end = len(winners)
+	}
+	result := make([]potso.RewardPayout, 0, end-start)
+	for i := start; i < end; i++ {
+		amount, ok, err := manager.PotsoRewardsGetPayout(epoch, winners[i])
+		if err != nil {
+			return nil, err
+		}
+		if !ok || amount == nil {
+			amount = big.NewInt(0)
+		} else {
+			amount = new(big.Int).Set(amount)
+		}
+		result = append(result, potso.RewardPayout{
+			Address: winners[i],
+			Amount:  amount,
+		})
+	}
+	return result, nil
 }
 
 func (n *Node) LoyaltyManager() *nhbstate.Manager {

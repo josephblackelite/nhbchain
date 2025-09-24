@@ -2,37 +2,57 @@ package config
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"nhbchain/core/genesis"
 	"nhbchain/crypto"
+	"nhbchain/native/potso"
 
 	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	ListenAddress         string   `toml:"ListenAddress"`
-	RPCAddress            string   `toml:"RPCAddress"`
-	DataDir               string   `toml:"DataDir"`
-	GenesisFile           string   `toml:"GenesisFile"`
-	ValidatorKeystorePath string   `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI       string   `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv       string   `toml:"ValidatorKMSEnv"`
-	NetworkName           string   `toml:"NetworkName"`
-	Bootnodes             []string `toml:"Bootnodes"`
-	PersistentPeers       []string `toml:"PersistentPeers"`
-	BootstrapPeers        []string `toml:"BootstrapPeers,omitempty"`
-	MaxPeers              int      `toml:"MaxPeers"`
-	MaxInbound            int      `toml:"MaxInbound"`
-	MaxOutbound           int      `toml:"MaxOutbound"`
-	PeerBanSeconds        int      `toml:"PeerBanSeconds"`
-	ReadTimeout           int      `toml:"ReadTimeout"`
-	WriteTimeout          int      `toml:"WriteTimeout"`
-	MaxMsgBytes           int      `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond      float64  `toml:"MaxMsgsPerSecond"`
-	ClientVersion         string   `toml:"ClientVersion"`
+	ListenAddress         string      `toml:"ListenAddress"`
+	RPCAddress            string      `toml:"RPCAddress"`
+	DataDir               string      `toml:"DataDir"`
+	GenesisFile           string      `toml:"GenesisFile"`
+	ValidatorKeystorePath string      `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI       string      `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv       string      `toml:"ValidatorKMSEnv"`
+	NetworkName           string      `toml:"NetworkName"`
+	Bootnodes             []string    `toml:"Bootnodes"`
+	PersistentPeers       []string    `toml:"PersistentPeers"`
+	BootstrapPeers        []string    `toml:"BootstrapPeers,omitempty"`
+	MaxPeers              int         `toml:"MaxPeers"`
+	MaxInbound            int         `toml:"MaxInbound"`
+	MaxOutbound           int         `toml:"MaxOutbound"`
+	PeerBanSeconds        int         `toml:"PeerBanSeconds"`
+	ReadTimeout           int         `toml:"ReadTimeout"`
+	WriteTimeout          int         `toml:"WriteTimeout"`
+	MaxMsgBytes           int         `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond      float64     `toml:"MaxMsgsPerSecond"`
+	ClientVersion         string      `toml:"ClientVersion"`
+	Potso                 PotsoConfig `toml:"potso"`
+}
+
+// PotsoConfig groups POTSO-specific configuration segments.
+type PotsoConfig struct {
+	Rewards PotsoRewardsConfig `toml:"rewards"`
+}
+
+// PotsoRewardsConfig mirrors the TOML structure for POTSO reward distribution parameters.
+type PotsoRewardsConfig struct {
+	EpochLengthBlocks  uint64 `toml:"EpochLengthBlocks"`
+	AlphaStakeBps      uint64 `toml:"AlphaStakeBps"`
+	MinPayoutWei       string `toml:"MinPayoutWei"`
+	EmissionPerEpoch   string `toml:"EmissionPerEpoch"`
+	TreasuryAddress    string `toml:"TreasuryAddress"`
+	MaxWinnersPerEpoch uint64 `toml:"MaxWinnersPerEpoch"`
+	CarryRemainder     bool   `toml:"CarryRemainder"`
 }
 
 // Load loads the configuration from the given path.
@@ -101,7 +121,58 @@ func Load(path string) (*Config, error) {
 		cfg.ClientVersion = "nhbchain/node"
 	}
 
+	if strings.TrimSpace(cfg.Potso.Rewards.MinPayoutWei) == "" {
+		cfg.Potso.Rewards.MinPayoutWei = "0"
+	}
+	if strings.TrimSpace(cfg.Potso.Rewards.EmissionPerEpoch) == "" {
+		cfg.Potso.Rewards.EmissionPerEpoch = "0"
+	}
+
 	return cfg, nil
+}
+
+// PotsoRewardConfig converts the loaded TOML representation into the runtime configuration structure.
+func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
+	rewards := cfg.Potso.Rewards
+	result := potso.DefaultRewardConfig()
+	result.EpochLengthBlocks = rewards.EpochLengthBlocks
+	result.AlphaStakeBps = rewards.AlphaStakeBps
+	result.MaxWinnersPerEpoch = rewards.MaxWinnersPerEpoch
+	result.CarryRemainder = rewards.CarryRemainder
+
+	result.MinPayoutWei = big.NewInt(0)
+	trimmedMin := strings.TrimSpace(rewards.MinPayoutWei)
+	if trimmedMin != "" {
+		value, ok := new(big.Int).SetString(trimmedMin, 10)
+		if !ok {
+			return result, fmt.Errorf("invalid MinPayoutWei value: %s", rewards.MinPayoutWei)
+		}
+		result.MinPayoutWei = value
+	}
+
+	result.EmissionPerEpoch = big.NewInt(0)
+	trimmedEmission := strings.TrimSpace(rewards.EmissionPerEpoch)
+	if trimmedEmission != "" {
+		value, ok := new(big.Int).SetString(trimmedEmission, 10)
+		if !ok {
+			return result, fmt.Errorf("invalid EmissionPerEpoch value: %s", rewards.EmissionPerEpoch)
+		}
+		result.EmissionPerEpoch = value
+	}
+
+	trimmedTreasury := strings.TrimSpace(rewards.TreasuryAddress)
+	if trimmedTreasury != "" {
+		addr, err := genesis.ParseBech32Account(trimmedTreasury)
+		if err != nil {
+			return result, fmt.Errorf("invalid TreasuryAddress: %w", err)
+		}
+		result.TreasuryAddress = addr
+	}
+
+	if err := result.Validate(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func ensureKeystore(configPath string, cfg *Config) error {
@@ -159,6 +230,11 @@ func createDefault(path string) (*Config, error) {
 		MaxMsgBytes:      1 << 20,
 		MaxMsgsPerSecond: 32,
 		ClientVersion:    "nhbchain/node",
+	}
+	cfg.Potso.Rewards = PotsoRewardsConfig{
+		MinPayoutWei:     "0",
+		EmissionPerEpoch: "0",
+		CarryRemainder:   true,
 	}
 	cfg.ValidatorKeystorePath = keystorePath
 

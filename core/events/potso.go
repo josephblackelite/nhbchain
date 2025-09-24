@@ -17,6 +17,10 @@ const (
 	TypePotsoStakeUnbonded = "potso.stake.unbonded"
 	// TypePotsoStakeWithdrawn is emitted when previously bonded funds are withdrawn back to the owner.
 	TypePotsoStakeWithdrawn = "potso.stake.withdrawn"
+	// TypePotsoRewardEpoch summarises a processed POTSO reward epoch.
+	TypePotsoRewardEpoch = "potso.reward.epoch"
+	// TypePotsoRewardPaid captures individual reward payouts.
+	TypePotsoRewardPaid = "potso.reward.paid"
 )
 
 // PotsoHeartbeat captures a processed heartbeat submission.
@@ -100,6 +104,55 @@ func (e PotsoStakeWithdrawn) Event() *types.Event {
 		Attributes: map[string]string{
 			"owner":  addr.String(),
 			"amount": amountString(e.Amount),
+		},
+	}
+}
+
+// PotsoRewardEpoch captures the aggregated results for a processed reward epoch.
+type PotsoRewardEpoch struct {
+	Epoch     uint64
+	TotalPaid *big.Int
+	Winners   uint64
+	Emission  *big.Int
+	Budget    *big.Int
+	Remainder *big.Int
+}
+
+// Event converts the reward epoch summary into a generic event representation.
+func (e PotsoRewardEpoch) Event() *types.Event {
+	attrs := map[string]string{
+		"epoch":     fmt.Sprintf("%d", e.Epoch),
+		"totalPaid": amountString(e.TotalPaid),
+		"winners":   fmt.Sprintf("%d", e.Winners),
+	}
+	if e.Emission != nil {
+		attrs["emission"] = amountString(e.Emission)
+	}
+	if e.Budget != nil {
+		attrs["budget"] = amountString(e.Budget)
+	}
+	if e.Remainder != nil {
+		attrs["remainder"] = amountString(e.Remainder)
+	}
+	return &types.Event{Type: TypePotsoRewardEpoch, Attributes: attrs}
+}
+
+// PotsoRewardPaid captures an individual reward distribution.
+type PotsoRewardPaid struct {
+	Epoch   uint64
+	Address [20]byte
+	Amount  *big.Int
+}
+
+// Event converts the payout into a generic event representation.
+func (e PotsoRewardPaid) Event() *types.Event {
+	addr := crypto.NewAddress(crypto.NHBPrefix, e.Address[:])
+	return &types.Event{
+		Type: TypePotsoRewardPaid,
+		Attributes: map[string]string{
+			"epoch":   fmt.Sprintf("%d", e.Epoch),
+			"address": addr.String(),
+			"amount":  amountString(e.Amount),
 		},
 	}
 }

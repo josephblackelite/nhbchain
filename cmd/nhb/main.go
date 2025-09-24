@@ -57,6 +57,14 @@ func main() {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
 
+	potsoCfg, err := cfg.PotsoRewardConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse POTSO rewards config: %v", err))
+	}
+	if err := node.SetPotsoRewardConfig(potsoCfg); err != nil {
+		panic(fmt.Sprintf("Failed to apply POTSO rewards config: %v", err))
+	}
+
 	// 2. Create the P2P server, passing the node as the MessageHandler.
 	p2pCfg := p2p.ServerConfig{
 		ListenAddress:    cfg.ListenAddress,
