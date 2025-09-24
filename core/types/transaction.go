@@ -34,13 +34,14 @@ const (
 	TxTypeCreateEscrow     TxType = 0x03 // Create escrow
 	TxTypeReleaseEscrow    TxType = 0x04 // NEW: Buyer releases funds to seller
 	TxTypeRefundEscrow     TxType = 0x05 // NEW: Seller refunds funds to buyer
-	TxTypeStake            TxType = 0x06 // Implenting stake
-	TxTypeUnstake          TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
-	TxTypeHeartbeat        TxType = 0x08 // Heartbeat from users device
-	TxTypeLockEscrow       TxType = 0x09 // NEW: Buyer commits to a purchase
-	TxTypeDisputeEscrow    TxType = 0x0A // NEW: Buyer raises a dispute
-	TxTypeArbitrateRelease TxType = 0x0B // NEW: Admin-only action to release to buyer
-	TxTypeArbitrateRefund  TxType = 0x0C // NEW: Admin-only action to refund seller
+        TxTypeStake            TxType = 0x06 // Implenting stake
+        TxTypeUnstake          TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
+        TxTypeHeartbeat        TxType = 0x08 // Heartbeat from users device
+        TxTypeLockEscrow       TxType = 0x09 // NEW: Buyer commits to a purchase
+        TxTypeDisputeEscrow    TxType = 0x0A // NEW: Buyer raises a dispute
+        TxTypeArbitrateRelease TxType = 0x0B // NEW: Admin-only action to release to buyer
+        TxTypeArbitrateRefund  TxType = 0x0C // NEW: Admin-only action to refund seller
+        TxTypeStakeClaim       TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
 )
 
 // Transaction now has a Type field to distinguish its intent.

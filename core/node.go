@@ -361,6 +361,48 @@ func (n *Node) EscrowResolve(id [32]byte, caller [20]byte, outcome string) error
 	return engine.Resolve(id, caller, outcome)
 }
 
+func (n *Node) StakeDelegate(delegator [20]byte, amount *big.Int, validator *[20]byte) (*types.Account, error) {
+	if amount == nil {
+		return nil, fmt.Errorf("amount required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	var target []byte
+	if validator != nil {
+		// treat zero address as self-delegation
+		zero := [20]byte{}
+		if *validator != zero {
+			target = validator[:]
+		}
+	}
+	acct, err := n.state.StakeDelegate(delegator[:], target, amount)
+	if err != nil {
+		return nil, err
+	}
+	return acct, nil
+}
+
+func (n *Node) StakeUndelegate(delegator [20]byte, amount *big.Int) (*types.StakeUnbond, error) {
+	if amount == nil {
+		return nil, fmt.Errorf("amount required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	return n.state.StakeUndelegate(delegator[:], amount)
+}
+
+func (n *Node) StakeClaim(delegator [20]byte, unbondID uint64) (*types.StakeUnbond, error) {
+	if unbondID == 0 {
+		return nil, fmt.Errorf("unbondingId must be greater than zero")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	return n.state.StakeClaim(delegator[:], unbondID)
+}
+
 func (n *Node) EscrowGet(id [32]byte) (*escrow.Escrow, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()

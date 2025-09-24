@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -96,23 +97,23 @@ func main() {
 			os.Exit(code)
 		}
 		return
-        case "escrow":
-                code := runEscrowCommand(args[1:], os.Stdout, os.Stderr)
-                if code != 0 {
-                        os.Exit(code)
-                }
-                return
-        case "claimable":
-                code := runClaimableCommand(args[1:], os.Stdout, os.Stderr)
-                if code != 0 {
-                        os.Exit(code)
-                }
-                return
-        case "p2p":
-                code := runP2PCommand(args[1:], os.Stdout, os.Stderr)
-                if code != 0 {
-                        os.Exit(code)
-                }
+	case "escrow":
+		code := runEscrowCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
+	case "claimable":
+		code := runClaimableCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
+	case "p2p":
+		code := runP2PCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
 		return
 	case "loyalty-create-business":
 		if len(args) < 3 {
@@ -364,9 +365,23 @@ func getBalance(addr string) {
 
 	fmt.Printf("State for: %s\n", addr)
 	fmt.Printf("  Username: %s\n", account.Username)
-	fmt.Printf("  NHBCoin:  %s\n", account.BalanceNHB.String())
-	fmt.Printf("  ZapNHB:   %s\n", account.BalanceZNHB.String())
-	fmt.Printf("  Staked:   %s ZapNHB\n", account.Stake.String()) // Display the staked amount
+	fmt.Printf("  NHBCoin:  %s\n", formatBigInt(account.BalanceNHB))
+	fmt.Printf("  ZapNHB:   %s\n", formatBigInt(account.BalanceZNHB))
+	fmt.Printf("  Staked:   %s ZapNHB\n", formatBigInt(account.Stake))
+	fmt.Printf("  Locked:   %s ZapNHB\n", formatBigInt(account.LockedZNHB))
+	if strings.TrimSpace(account.DelegatedValidator) != "" {
+		fmt.Printf("  Delegated Validator: %s\n", account.DelegatedValidator)
+	}
+	if len(account.PendingUnbonds) > 0 {
+		fmt.Println("  Pending Unbonds:")
+		for _, entry := range account.PendingUnbonds {
+			fmt.Printf("    - ID %d: %s ZapNHB unlocking at %s (validator %s)\n",
+				entry.ID,
+				formatBigInt(entry.Amount),
+				time.Unix(int64(entry.ReleaseTime), 0).UTC().Format(time.RFC3339),
+				entry.Validator)
+		}
+	}
 	fmt.Printf("  Nonce:    %d\n", account.Nonce)
 }
 
@@ -407,7 +422,34 @@ func claimUsername(username string, keyFile string) {
 
 // --- RPC HELPER FUNCTIONS ---
 
-func fetchAccount(addr string) (*types.Account, error) {
+type balanceResponse struct {
+	Address            string        `json:"address"`
+	BalanceNHB         *big.Int      `json:"balanceNHB"`
+	BalanceZNHB        *big.Int      `json:"balanceZNHB"`
+	Stake              *big.Int      `json:"stake"`
+	LockedZNHB         *big.Int      `json:"lockedZNHB"`
+	DelegatedValidator string        `json:"delegatedValidator"`
+	PendingUnbonds     []unbondEntry `json:"pendingUnbonds"`
+	Username           string        `json:"username"`
+	Nonce              uint64        `json:"nonce"`
+	EngagementScore    uint64        `json:"engagementScore"`
+}
+
+type unbondEntry struct {
+	ID          uint64   `json:"id"`
+	Validator   string   `json:"validator"`
+	Amount      *big.Int `json:"amount"`
+	ReleaseTime uint64   `json:"releaseTime"`
+}
+
+func formatBigInt(v *big.Int) string {
+	if v == nil {
+		return "0"
+	}
+	return v.String()
+}
+
+func fetchAccount(addr string) (*balanceResponse, error) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"id": 1, "method": "nhb_getBalance", "params": []string{addr},
 	})
@@ -419,7 +461,7 @@ func fetchAccount(addr string) (*types.Account, error) {
 	defer resp.Body.Close()
 
 	var rpcResp struct {
-		Result types.Account `json:"result"`
+		Result balanceResponse `json:"result"`
 		Error  *struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
@@ -787,8 +829,8 @@ func printUsage() {
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
-        fmt.Println("  id                                 - Identity alias management subcommands")
-        fmt.Println("  escrow                             - Escrow management subcommands")
-        fmt.Println("  claimable                          - Hash-lock claimable subcommands")
-        fmt.Println("  p2p                                - P2P trade orchestration subcommands")
+	fmt.Println("  id                                 - Identity alias management subcommands")
+	fmt.Println("  escrow                             - Escrow management subcommands")
+	fmt.Println("  claimable                          - Hash-lock claimable subcommands")
+	fmt.Println("  p2p                                - P2P trade orchestration subcommands")
 }

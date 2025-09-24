@@ -192,15 +192,43 @@ func mustWriteAccount(t *testing.T, sp *StateProcessor, addr [20]byte, account *
 	if err := sp.writeStateAccount(addr[:], stateAcc); err != nil {
 		t.Fatalf("write state account: %v", err)
 	}
-	meta := &accountMetadata{
-		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
-		Stake:           new(big.Int).Set(account.Stake),
-		Username:        account.Username,
-		EngagementScore: account.EngagementScore,
-	}
-	if err := sp.writeAccountMetadata(addr[:], meta); err != nil {
-		t.Fatalf("write account metadata: %v", err)
-	}
+        meta := &accountMetadata{
+                BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
+                Stake:           new(big.Int).Set(account.Stake),
+                LockedZNHB:      new(big.Int).Set(account.LockedZNHB),
+                DelegatedValidator: func() []byte {
+                        if len(account.DelegatedValidator) == 0 {
+                                return nil
+                        }
+                        return append([]byte(nil), account.DelegatedValidator...)
+                }(),
+                Unbonding: func() []stakeUnbond {
+                        out := make([]stakeUnbond, len(account.PendingUnbonds))
+                        for i, entry := range account.PendingUnbonds {
+                                amount := big.NewInt(0)
+                                if entry.Amount != nil {
+                                        amount = new(big.Int).Set(entry.Amount)
+                                }
+                                var validator []byte
+                                if len(entry.Validator) > 0 {
+                                        validator = append([]byte(nil), entry.Validator...)
+                                }
+                                out[i] = stakeUnbond{
+                                        ID:          entry.ID,
+                                        Validator:   validator,
+                                        Amount:      amount,
+                                        ReleaseTime: entry.ReleaseTime,
+                                }
+                        }
+                        return out
+                }(),
+                UnbondingSeq:    account.NextUnbondingID,
+                Username:        account.Username,
+                EngagementScore: account.EngagementScore,
+        }
+        if err := sp.writeAccountMetadata(addr[:], meta); err != nil {
+                t.Fatalf("write account metadata: %v", err)
+        }
 }
 
 type testLoyaltyState struct {

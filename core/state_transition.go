@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,8 @@ import (
 
 const MINIMUM_STAKE = 1000
 
+const unbondingPeriod = 72 * time.Hour
+
 // Privileged arbitrator address (replace with multisig in production).
 var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
 
@@ -49,6 +52,7 @@ type StateProcessor struct {
 	ValidatorSet   map[string]*big.Int
 	committedRoot  common.Hash
 	events         []types.Event
+	nowFunc        func() time.Time
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -65,6 +69,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		ValidatorSet:   make(map[string]*big.Int),
 		committedRoot:  tr.Root(),
 		events:         make([]types.Event, 0),
+		nowFunc:        time.Now,
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -137,6 +142,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		ValidatorSet:   validatorCopy,
 		committedRoot:  sp.committedRoot,
 		events:         eventsCopy,
+		nowFunc:        sp.nowFunc,
 	}, nil
 }
 
@@ -287,6 +293,8 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 		return sp.applyStake(tx)
 	case types.TxTypeUnstake:
 		return sp.applyUnstake(tx)
+	case types.TxTypeStakeClaim:
+		return sp.applyStakeClaim(tx)
 	case types.TxTypeHeartbeat:
 		return sp.applyHeartbeat(tx)
 
@@ -543,52 +551,268 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, releaseToBuyer b
 	return nil
 }
 
+func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {
+	if len(delegator) == 0 {
+		return nil, fmt.Errorf("delegator address required")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("stake must be positive")
+	}
+	target := validator
+	if len(target) == 0 {
+		target = append([]byte(nil), delegator...)
+	} else {
+		target = append([]byte(nil), target...)
+	}
+	if len(target) != 20 {
+		return nil, fmt.Errorf("validator address must be 20 bytes")
+	}
+
+	delegatorAcc, err := sp.getAccount(delegator)
+	if err != nil {
+		return nil, err
+	}
+	if delegatorAcc.BalanceZNHB.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("insufficient ZapNHB")
+	}
+	if len(delegatorAcc.DelegatedValidator) > 0 && !bytes.Equal(delegatorAcc.DelegatedValidator, target) && delegatorAcc.LockedZNHB.Sign() > 0 {
+		return nil, fmt.Errorf("existing delegation must be fully undelegated before switching validators")
+	}
+
+	sameValidator := bytes.Equal(target, delegator)
+
+	delegatorAcc.BalanceZNHB.Sub(delegatorAcc.BalanceZNHB, amount)
+	delegatorAcc.LockedZNHB.Add(delegatorAcc.LockedZNHB, amount)
+	delegatorAcc.DelegatedValidator = append([]byte(nil), target...)
+	if sameValidator {
+		delegatorAcc.Stake.Add(delegatorAcc.Stake, amount)
+	}
+	delegatorAcc.Nonce++
+
+	if !sameValidator {
+		validatorAcc, err := sp.getAccount(target)
+		if err != nil {
+			return nil, err
+		}
+		validatorAcc.Stake.Add(validatorAcc.Stake, amount)
+		if err := sp.setAccount(target, validatorAcc); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
+		return nil, err
+	}
+
+	delegatorAddr := crypto.NewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.NewAddress(crypto.NHBPrefix, target)
+	sp.AppendEvent(&types.Event{
+		Type: "stake.delegated",
+		Attributes: map[string]string{
+			"delegator": delegatorAddr.String(),
+			"validator": validatorAddr.String(),
+			"amount":    amount.String(),
+			"locked":    delegatorAcc.LockedZNHB.String(),
+		},
+	})
+
+	return delegatorAcc, nil
+}
+
+func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*types.StakeUnbond, error) {
+	if len(delegator) == 0 {
+		return nil, fmt.Errorf("delegator address required")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("unstake must be positive")
+	}
+	delegatorAcc, err := sp.getAccount(delegator)
+	if err != nil {
+		return nil, err
+	}
+	if delegatorAcc.LockedZNHB.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("insufficient locked stake")
+	}
+	if len(delegatorAcc.DelegatedValidator) == 0 {
+		return nil, fmt.Errorf("no active delegation")
+	}
+
+	validator := append([]byte(nil), delegatorAcc.DelegatedValidator...)
+	sameValidator := bytes.Equal(validator, delegator)
+
+	if sameValidator {
+		if delegatorAcc.Stake.Cmp(amount) < 0 {
+			return nil, fmt.Errorf("validator stake underflow")
+		}
+		delegatorAcc.Stake.Sub(delegatorAcc.Stake, amount)
+	}
+	delegatorAcc.LockedZNHB.Sub(delegatorAcc.LockedZNHB, amount)
+
+	releaseTime := uint64(sp.now().Add(unbondingPeriod).Unix())
+	nextID := delegatorAcc.NextUnbondingID
+	if nextID == 0 {
+		nextID = 1
+	}
+	entry := types.StakeUnbond{
+		ID:          nextID,
+		Validator:   append([]byte(nil), validator...),
+		Amount:      new(big.Int).Set(amount),
+		ReleaseTime: releaseTime,
+	}
+	delegatorAcc.PendingUnbonds = append(delegatorAcc.PendingUnbonds, entry)
+	delegatorAcc.NextUnbondingID = nextID + 1
+	if delegatorAcc.LockedZNHB.Sign() == 0 {
+		delegatorAcc.DelegatedValidator = nil
+	}
+	delegatorAcc.Nonce++
+
+	if !sameValidator {
+		validatorAcc, err := sp.getAccount(validator)
+		if err != nil {
+			return nil, err
+		}
+		if validatorAcc.Stake.Cmp(amount) < 0 {
+			return nil, fmt.Errorf("validator stake underflow")
+		}
+		validatorAcc.Stake.Sub(validatorAcc.Stake, amount)
+		if err := sp.setAccount(validator, validatorAcc); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
+		return nil, err
+	}
+
+	delegatorAddr := crypto.NewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.NewAddress(crypto.NHBPrefix, validator)
+	sp.AppendEvent(&types.Event{
+		Type: "stake.undelegated",
+		Attributes: map[string]string{
+			"delegator":   delegatorAddr.String(),
+			"validator":   validatorAddr.String(),
+			"amount":      amount.String(),
+			"releaseTime": strconv.FormatUint(releaseTime, 10),
+			"unbondingId": strconv.FormatUint(entry.ID, 10),
+		},
+	})
+
+	return &entry, nil
+}
+
+func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.StakeUnbond, error) {
+	if len(delegator) == 0 {
+		return nil, fmt.Errorf("delegator address required")
+	}
+	if unbondID == 0 {
+		return nil, fmt.Errorf("unbondingId must be greater than zero")
+	}
+	delegatorAcc, err := sp.getAccount(delegator)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		index = -1
+		entry types.StakeUnbond
+	)
+	for i, candidate := range delegatorAcc.PendingUnbonds {
+		if candidate.ID == unbondID {
+			entry = types.StakeUnbond{
+				ID:          candidate.ID,
+				Validator:   append([]byte(nil), candidate.Validator...),
+				Amount:      new(big.Int).Set(candidate.Amount),
+				ReleaseTime: candidate.ReleaseTime,
+			}
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return nil, fmt.Errorf("unbonding entry %d not found", unbondID)
+	}
+	if uint64(sp.now().Unix()) < entry.ReleaseTime {
+		return nil, fmt.Errorf("unbonding entry %d is not yet claimable", unbondID)
+	}
+
+	delegatorAcc.PendingUnbonds = append(delegatorAcc.PendingUnbonds[:index], delegatorAcc.PendingUnbonds[index+1:]...)
+	delegatorAcc.BalanceZNHB.Add(delegatorAcc.BalanceZNHB, entry.Amount)
+	delegatorAcc.Nonce++
+
+	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
+		return nil, err
+	}
+
+	delegatorAddr := crypto.NewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.NewAddress(crypto.NHBPrefix, entry.Validator)
+	sp.AppendEvent(&types.Event{
+		Type: "stake.claimed",
+		Attributes: map[string]string{
+			"delegator":   delegatorAddr.String(),
+			"validator":   validatorAddr.String(),
+			"amount":      entry.Amount.String(),
+			"unbondingId": strconv.FormatUint(entry.ID, 10),
+		},
+	})
+
+	return &entry, nil
+}
+
 func (sp *StateProcessor) applyStake(tx *types.Transaction) error {
 	sender, _ := tx.From()
-	stakeAmount := tx.Value
-	if stakeAmount == nil || stakeAmount.Cmp(big.NewInt(0)) <= 0 {
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
 		return fmt.Errorf("stake must be positive")
 	}
-	wasValidator := sp.IsValidator(sender)
-	senderAccount, _ := sp.getAccount(sender)
-	if senderAccount.BalanceZNHB.Cmp(stakeAmount) < 0 {
-		return fmt.Errorf("insufficient ZapNHB")
+	var payload struct {
+		Validator []byte `json:"validator,omitempty"`
 	}
-	senderAccount.BalanceZNHB.Sub(senderAccount.BalanceZNHB, stakeAmount)
-	senderAccount.Stake.Add(senderAccount.Stake, stakeAmount)
-	senderAccount.Nonce++
-	sp.setAccount(sender, senderAccount)
-	senderAddr := crypto.NewAddress(crypto.NHBPrefix, sender)
-	if !wasValidator && senderAccount.Stake.Cmp(big.NewInt(MINIMUM_STAKE)) >= 0 {
-		fmt.Printf("Account %s is now an active validator.\n", senderAddr.String())
+	if len(tx.Data) > 0 {
+		if err := json.Unmarshal(tx.Data, &payload); err != nil {
+			return fmt.Errorf("invalid stake payload: %w", err)
+		}
 	}
-	fmt.Printf("Stake processed: Account %s staked %s ZapNHB.\n",
-		senderAddr.String(), stakeAmount.String())
-	return nil
+	_, err := sp.StakeDelegate(sender, payload.Validator, tx.Value)
+	return err
 }
 
 func (sp *StateProcessor) applyUnstake(tx *types.Transaction) error {
 	sender, _ := tx.From()
-	unStakeAmount := tx.Value
-	if unStakeAmount == nil || unStakeAmount.Cmp(big.NewInt(0)) <= 0 {
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
 		return fmt.Errorf("unstake must be positive")
 	}
-	wasValidator := sp.IsValidator(sender)
-	senderAccount, _ := sp.getAccount(sender)
-	if senderAccount.Stake.Cmp(unStakeAmount) < 0 {
-		return fmt.Errorf("insufficient staked balance")
+	unbond, err := sp.StakeUndelegate(sender, tx.Value)
+	if err != nil {
+		return err
 	}
-	senderAccount.Stake.Sub(senderAccount.Stake, unStakeAmount)
-	senderAccount.BalanceZNHB.Add(senderAccount.BalanceZNHB, unStakeAmount)
-	senderAccount.Nonce++
-	sp.setAccount(sender, senderAccount)
-	senderAddr := crypto.NewAddress(crypto.NHBPrefix, sender)
-	if wasValidator && senderAccount.Stake.Cmp(big.NewInt(MINIMUM_STAKE)) < 0 {
-		fmt.Printf("Account %s is no longer an active validator.\n", senderAddr.String())
+	if len(tx.Data) > 0 {
+		var payload struct {
+			Validator []byte `json:"validator,omitempty"`
+		}
+		if err := json.Unmarshal(tx.Data, &payload); err != nil {
+			return fmt.Errorf("invalid unstake payload: %w", err)
+		}
+		if len(payload.Validator) > 0 && !bytes.Equal(payload.Validator, unbond.Validator) {
+			return fmt.Errorf("unstake validator mismatch")
+		}
 	}
-	fmt.Printf("Un-stake processed: Account %s un-staked %s ZapNHB.\n",
-		senderAddr.String(), unStakeAmount.String())
 	return nil
+}
+
+func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction) error {
+	sender, _ := tx.From()
+	var payload struct {
+		UnbondingID uint64 `json:"unbondingId"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("claim payload required")
+	}
+	if err := json.Unmarshal(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid claim payload: %w", err)
+	}
+	if payload.UnbondingID == 0 {
+		return fmt.Errorf("unbondingId must be greater than zero")
+	}
+	_, err := sp.StakeClaim(sender, payload.UnbondingID)
+	return err
 }
 
 func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
@@ -602,10 +826,21 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
 }
 
 type accountMetadata struct {
-	BalanceZNHB     *big.Int
-	Stake           *big.Int
-	Username        string
-	EngagementScore uint64
+	BalanceZNHB        *big.Int
+	Stake              *big.Int
+	LockedZNHB         *big.Int
+	DelegatedValidator []byte
+	Unbonding          []stakeUnbond
+	UnbondingSeq       uint64
+	Username           string
+	EngagementScore    uint64
+}
+
+type stakeUnbond struct {
+	ID          uint64
+	Validator   []byte
+	Amount      *big.Int
+	ReleaseTime uint64
 }
 
 func ensureAccountDefaults(account *types.Account) {
@@ -617,6 +852,12 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 	if account.Stake == nil {
 		account.Stake = big.NewInt(0)
+	}
+	if account.LockedZNHB == nil {
+		account.LockedZNHB = big.NewInt(0)
+	}
+	if account.PendingUnbonds == nil {
+		account.PendingUnbonds = make([]types.StakeUnbond, 0)
 	}
 	if len(account.StorageRoot) == 0 {
 		account.StorageRoot = gethtypes.EmptyRootHash.Bytes()
@@ -655,8 +896,38 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		account.CodeHash = common.CopyBytes(stateAcc.CodeHash)
 	}
 	if meta != nil {
-		account.BalanceZNHB = new(big.Int).Set(meta.BalanceZNHB)
-		account.Stake = new(big.Int).Set(meta.Stake)
+		if meta.BalanceZNHB != nil {
+			account.BalanceZNHB = new(big.Int).Set(meta.BalanceZNHB)
+		}
+		if meta.Stake != nil {
+			account.Stake = new(big.Int).Set(meta.Stake)
+		}
+		if meta.LockedZNHB != nil {
+			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
+		}
+		if len(meta.DelegatedValidator) > 0 {
+			account.DelegatedValidator = append([]byte(nil), meta.DelegatedValidator...)
+		}
+		if len(meta.Unbonding) > 0 {
+			account.PendingUnbonds = make([]types.StakeUnbond, len(meta.Unbonding))
+			for i, entry := range meta.Unbonding {
+				amount := big.NewInt(0)
+				if entry.Amount != nil {
+					amount = new(big.Int).Set(entry.Amount)
+				}
+				var validator []byte
+				if len(entry.Validator) > 0 {
+					validator = append([]byte(nil), entry.Validator...)
+				}
+				account.PendingUnbonds[i] = types.StakeUnbond{
+					ID:          entry.ID,
+					Validator:   validator,
+					Amount:      amount,
+					ReleaseTime: entry.ReleaseTime,
+				}
+			}
+		}
+		account.NextUnbondingID = meta.UnbondingSeq
 		account.Username = meta.Username
 		account.EngagementScore = meta.EngagementScore
 	}
@@ -697,11 +968,36 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		return err
 	}
 
+	var delegated []byte
+	if len(account.DelegatedValidator) > 0 {
+		delegated = append([]byte(nil), account.DelegatedValidator...)
+	}
+	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
+	for i, entry := range account.PendingUnbonds {
+		amount := big.NewInt(0)
+		if entry.Amount != nil {
+			amount = new(big.Int).Set(entry.Amount)
+		}
+		var validator []byte
+		if len(entry.Validator) > 0 {
+			validator = append([]byte(nil), entry.Validator...)
+		}
+		unbonding[i] = stakeUnbond{
+			ID:          entry.ID,
+			Validator:   validator,
+			Amount:      amount,
+			ReleaseTime: entry.ReleaseTime,
+		}
+	}
 	meta := &accountMetadata{
-		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
-		Stake:           new(big.Int).Set(account.Stake),
-		Username:        account.Username,
-		EngagementScore: account.EngagementScore,
+		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
+		Stake:              new(big.Int).Set(account.Stake),
+		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
+		DelegatedValidator: delegated,
+		Unbonding:          unbonding,
+		UnbondingSeq:       account.NextUnbondingID,
+		Username:           account.Username,
+		EngagementScore:    account.EngagementScore,
 	}
 	if err := sp.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -822,6 +1118,8 @@ func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Accoun
 	meta := &accountMetadata{
 		BalanceZNHB:     new(big.Int).Set(legacy.BalanceZNHB),
 		Stake:           new(big.Int).Set(legacy.Stake),
+		LockedZNHB:      big.NewInt(0),
+		Unbonding:       make([]stakeUnbond, 0),
 		Username:        legacy.Username,
 		EngagementScore: legacy.EngagementScore,
 	}
@@ -863,6 +1161,8 @@ func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, er
 	meta := &accountMetadata{
 		BalanceZNHB: big.NewInt(0),
 		Stake:       big.NewInt(0),
+		LockedZNHB:  big.NewInt(0),
+		Unbonding:   make([]stakeUnbond, 0),
 	}
 	if len(data) == 0 {
 		return meta, nil
@@ -876,6 +1176,12 @@ func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, er
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
 	}
+	if meta.LockedZNHB == nil {
+		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.Unbonding == nil {
+		meta.Unbonding = make([]stakeUnbond, 0)
+	}
 	return meta, nil
 }
 
@@ -885,6 +1191,12 @@ func (sp *StateProcessor) writeAccountMetadata(addr []byte, meta *accountMetadat
 	}
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
+	}
+	if meta.LockedZNHB == nil {
+		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.Unbonding == nil {
+		meta.Unbonding = make([]stakeUnbond, 0)
 	}
 	encoded, err := rlp.EncodeToBytes(meta)
 	if err != nil {
@@ -898,22 +1210,23 @@ func (sp *StateProcessor) loadUsernameIndex() error {
 	if err != nil {
 		return err
 	}
-	if len(data) == 0 {
-		return nil
-	}
-	stored := make(map[string][]byte)
-	if err := rlp.DecodeBytes(data, &stored); err != nil {
+	stored, err := nhbstate.DecodeUsernameIndex(data)
+	if err != nil {
 		return err
 	}
 	sp.usernameToAddr = make(map[string][]byte, len(stored))
 	for k, v := range stored {
-		sp.usernameToAddr[k] = append([]byte(nil), v...)
+		if len(v) > 0 {
+			sp.usernameToAddr[k] = append([]byte(nil), v...)
+		} else {
+			sp.usernameToAddr[k] = nil
+		}
 	}
 	return nil
 }
 
 func (sp *StateProcessor) persistUsernameIndex() error {
-	encoded, err := rlp.EncodeToBytes(sp.usernameToAddr)
+	encoded, err := nhbstate.EncodeUsernameIndex(sp.usernameToAddr)
 	if err != nil {
 		return err
 	}
@@ -1000,6 +1313,13 @@ func (sp *StateProcessor) writeBigInt(key []byte, amount *big.Int) error {
 
 func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error {
 	return sp.setAccount(addr, account)
+}
+
+func (sp *StateProcessor) now() time.Time {
+	if sp != nil && sp.nowFunc != nil {
+		return sp.nowFunc()
+	}
+	return time.Now()
 }
 
 func (sp *StateProcessor) LoyaltyGlobalConfig() (*loyalty.GlobalConfig, error) {

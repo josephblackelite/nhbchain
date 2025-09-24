@@ -22,15 +22,31 @@ var (
 )
 
 type accountMetadata struct {
-	BalanceZNHB     *big.Int
-	Stake           *big.Int
-	Username        string
-	EngagementScore uint64
+	BalanceZNHB        *big.Int
+	Stake              *big.Int
+	LockedZNHB         *big.Int
+	DelegatedValidator []byte
+	Unbonding          []stakeUnbond
+	UnbondingSeq       uint64
+	Username           string
+	EngagementScore    uint64
 }
 
 type validatorEntry struct {
 	Address []byte
 	Power   *big.Int
+}
+
+type usernameIndexEntry struct {
+	Username string
+	Address  []byte
+}
+
+type stakeUnbond struct {
+	ID          uint64
+	Validator   []byte
+	Amount      *big.Int
+	ReleaseTime uint64
 }
 
 func accountStateKey(addr []byte) []byte {
@@ -53,6 +69,12 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 	if account.Stake == nil {
 		account.Stake = big.NewInt(0)
+	}
+	if account.LockedZNHB == nil {
+		account.LockedZNHB = big.NewInt(0)
+	}
+	if account.PendingUnbonds == nil {
+		account.PendingUnbonds = make([]types.StakeUnbond, 0)
 	}
 	if len(account.StorageRoot) == 0 {
 		account.StorageRoot = gethtypes.EmptyRootHash.Bytes()
@@ -100,6 +122,32 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		if meta.Stake != nil {
 			account.Stake = new(big.Int).Set(meta.Stake)
 		}
+		if meta.LockedZNHB != nil {
+			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
+		}
+		if len(meta.DelegatedValidator) > 0 {
+			account.DelegatedValidator = append([]byte(nil), meta.DelegatedValidator...)
+		}
+		if len(meta.Unbonding) > 0 {
+			account.PendingUnbonds = make([]types.StakeUnbond, len(meta.Unbonding))
+			for i, entry := range meta.Unbonding {
+				amount := big.NewInt(0)
+				if entry.Amount != nil {
+					amount = new(big.Int).Set(entry.Amount)
+				}
+				var validator []byte
+				if len(entry.Validator) > 0 {
+					validator = append([]byte(nil), entry.Validator...)
+				}
+				account.PendingUnbonds[i] = types.StakeUnbond{
+					ID:          entry.ID,
+					Validator:   validator,
+					Amount:      amount,
+					ReleaseTime: entry.ReleaseTime,
+				}
+			}
+		}
+		account.NextUnbondingID = meta.UnbondingSeq
 		account.Username = meta.Username
 		account.EngagementScore = meta.EngagementScore
 	}
@@ -137,11 +185,36 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		return err
 	}
 
+	var delegated []byte
+	if len(account.DelegatedValidator) > 0 {
+		delegated = append([]byte(nil), account.DelegatedValidator...)
+	}
+	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
+	for i, entry := range account.PendingUnbonds {
+		amount := big.NewInt(0)
+		if entry.Amount != nil {
+			amount = new(big.Int).Set(entry.Amount)
+		}
+		var validator []byte
+		if len(entry.Validator) > 0 {
+			validator = append([]byte(nil), entry.Validator...)
+		}
+		unbonding[i] = stakeUnbond{
+			ID:          entry.ID,
+			Validator:   validator,
+			Amount:      amount,
+			ReleaseTime: entry.ReleaseTime,
+		}
+	}
 	meta := &accountMetadata{
-		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
-		Stake:           new(big.Int).Set(account.Stake),
-		Username:        account.Username,
-		EngagementScore: account.EngagementScore,
+		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
+		Stake:              new(big.Int).Set(account.Stake),
+		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
+		DelegatedValidator: delegated,
+		Unbonding:          unbonding,
+		UnbondingSeq:       account.NextUnbondingID,
+		Username:           account.Username,
+		EngagementScore:    account.EngagementScore,
 	}
 	if err := m.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -159,11 +232,36 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		account = &types.Account{}
 	}
 	ensureAccountDefaults(account)
+	var delegated []byte
+	if len(account.DelegatedValidator) > 0 {
+		delegated = append([]byte(nil), account.DelegatedValidator...)
+	}
+	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
+	for i, entry := range account.PendingUnbonds {
+		amount := big.NewInt(0)
+		if entry.Amount != nil {
+			amount = new(big.Int).Set(entry.Amount)
+		}
+		var validator []byte
+		if len(entry.Validator) > 0 {
+			validator = append([]byte(nil), entry.Validator...)
+		}
+		unbonding[i] = stakeUnbond{
+			ID:          entry.ID,
+			Validator:   validator,
+			Amount:      amount,
+			ReleaseTime: entry.ReleaseTime,
+		}
+	}
 	meta := &accountMetadata{
-		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
-		Stake:           new(big.Int).Set(account.Stake),
-		Username:        account.Username,
-		EngagementScore: account.EngagementScore,
+		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
+		Stake:              new(big.Int).Set(account.Stake),
+		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
+		DelegatedValidator: delegated,
+		Unbonding:          unbonding,
+		UnbondingSeq:       account.NextUnbondingID,
+		Username:           account.Username,
+		EngagementScore:    account.EngagementScore,
 	}
 	return m.writeAccountMetadata(addr, meta)
 }
@@ -220,6 +318,8 @@ func (m *Manager) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
 	meta := &accountMetadata{
 		BalanceZNHB: big.NewInt(0),
 		Stake:       big.NewInt(0),
+		LockedZNHB:  big.NewInt(0),
+		Unbonding:   make([]stakeUnbond, 0),
 	}
 	if len(data) == 0 {
 		return meta, nil
@@ -233,6 +333,12 @@ func (m *Manager) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
 	}
+	if meta.LockedZNHB == nil {
+		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.Unbonding == nil {
+		meta.Unbonding = make([]stakeUnbond, 0)
+	}
 	return meta, nil
 }
 
@@ -243,6 +349,12 @@ func (m *Manager) writeAccountMetadata(addr []byte, meta *accountMetadata) error
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
 	}
+	if meta.LockedZNHB == nil {
+		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.Unbonding == nil {
+		meta.Unbonding = make([]stakeUnbond, 0)
+	}
 	encoded, err := rlp.EncodeToBytes(meta)
 	if err != nil {
 		return err
@@ -252,12 +364,64 @@ func (m *Manager) writeAccountMetadata(addr []byte, meta *accountMetadata) error
 
 // ResetUsernameIndex clears any stored username mappings.
 func (m *Manager) ResetUsernameIndex() error {
-	empty := make(map[string][]byte)
-	encoded, err := rlp.EncodeToBytes(empty)
+	encoded, err := EncodeUsernameIndex(nil)
 	if err != nil {
 		return err
 	}
 	return m.trie.Update(usernameIndexKey, encoded)
+}
+
+// EncodeUsernameIndex serializes the username->address mapping into a
+// deterministic RLP representation.
+func EncodeUsernameIndex(index map[string][]byte) ([]byte, error) {
+	if index == nil {
+		index = map[string][]byte{}
+	}
+	entries := make([]usernameIndexEntry, 0, len(index))
+	for username, addr := range index {
+		entry := usernameIndexEntry{Username: username}
+		if len(addr) > 0 {
+			entry.Address = append([]byte(nil), addr...)
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Username < entries[j].Username
+	})
+	return rlp.EncodeToBytes(entries)
+}
+
+// DecodeUsernameIndex deserializes data produced by EncodeUsernameIndex. It
+// also supports decoding legacy map encodings for backward compatibility.
+func DecodeUsernameIndex(data []byte) (map[string][]byte, error) {
+	if len(data) == 0 {
+		return map[string][]byte{}, nil
+	}
+	var entries []usernameIndexEntry
+	if err := rlp.DecodeBytes(data, &entries); err != nil {
+		legacy := make(map[string][]byte)
+		if errLegacy := rlp.DecodeBytes(data, &legacy); errLegacy == nil {
+			result := make(map[string][]byte, len(legacy))
+			for username, addr := range legacy {
+				if len(addr) > 0 {
+					result[username] = append([]byte(nil), addr...)
+				} else {
+					result[username] = nil
+				}
+			}
+			return result, nil
+		}
+		return nil, err
+	}
+	index := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if len(entry.Address) > 0 {
+			index[entry.Username] = append([]byte(nil), entry.Address...)
+		} else {
+			index[entry.Username] = nil
+		}
+	}
+	return index, nil
 }
 
 // WriteValidatorSet persists the validator powers map.
