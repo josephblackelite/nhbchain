@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/potso"
 	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
 	"nhbchain/storage"
@@ -42,6 +44,12 @@ type Node struct {
 	stateMu        sync.Mutex
 	escrowTreasury [20]byte
 	engagementMgr  *engagement.Manager
+}
+
+// PotsoLeaderboardEntry represents a participant's score for a specific day.
+type PotsoLeaderboardEntry struct {
+	Address [20]byte
+	Meter   *potso.Meter
 }
 
 func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool) (*Node, error) {
@@ -682,6 +690,140 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 	}
 	n.mempool = append(n.mempool, tx)
 	return ts, nil
+}
+
+// PotsoHeartbeat records an authenticated heartbeat for the supplied participant.
+func (n *Node) PotsoHeartbeat(addr [20]byte, blockHeight uint64, blockHash []byte, timestamp int64) (*potso.Meter, uint64, error) {
+	if !potso.WithinTolerance(timestamp, time.Now()) {
+		return nil, 0, fmt.Errorf("heartbeat timestamp outside tolerance")
+	}
+	block, err := n.chain.GetBlockByHeight(blockHeight)
+	if err != nil {
+		return nil, 0, err
+	}
+	expectedHash, err := block.Header.Hash()
+	if err != nil {
+		return nil, 0, err
+	}
+	if !bytes.Equal(expectedHash, blockHash) {
+		return nil, 0, fmt.Errorf("block hash mismatch")
+	}
+
+	day := time.Unix(timestamp, 0).UTC().Format(potso.DayFormat)
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	heartbeat, _, err := manager.PotsoGetHeartbeat(addr)
+	if err != nil {
+		return nil, 0, err
+	}
+	delta, accepted, err := heartbeat.ApplyHeartbeat(timestamp, blockHeight, blockHash)
+	if err != nil {
+		if errors.Is(err, potso.ErrHeartbeatTooSoon) {
+			meter, _, loadErr := manager.PotsoGetMeter(addr, day)
+			if loadErr != nil {
+				return nil, 0, loadErr
+			}
+			meter.Day = day
+			meter.RecomputeScore()
+			return meter, 0, nil
+		}
+		return nil, 0, err
+	}
+	if !accepted {
+		meter, _, loadErr := manager.PotsoGetMeter(addr, day)
+		if loadErr != nil {
+			return nil, 0, loadErr
+		}
+		meter.Day = day
+		meter.RecomputeScore()
+		return meter, 0, nil
+	}
+
+	if err := manager.PotsoPutHeartbeat(addr, heartbeat); err != nil {
+		return nil, 0, err
+	}
+
+	meter, _, err := manager.PotsoGetMeter(addr, day)
+	if err != nil {
+		return nil, 0, err
+	}
+	meter.Day = day
+	meter.UptimeSeconds += delta
+	meter.RecomputeScore()
+	if err := manager.PotsoPutMeter(addr, meter); err != nil {
+		return nil, 0, err
+	}
+
+	evt := events.PotsoHeartbeat{Address: addr, Timestamp: timestamp, BlockHeight: blockHeight, UptimeDelta: delta}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+
+	return meter, delta, nil
+}
+
+// PotsoUserMeters retrieves the meter for the given day and address.
+func (n *Node) PotsoUserMeters(addr [20]byte, day string) (*potso.Meter, error) {
+	if day == "" {
+		day = time.Now().UTC().Format(potso.DayFormat)
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	meter, _, err := manager.PotsoGetMeter(addr, day)
+	if err != nil {
+		return nil, err
+	}
+	meter.Day = potso.NormaliseDay(day)
+	meter.RecomputeScore()
+	return meter, nil
+}
+
+// PotsoTop returns the top scoring participants for the given day.
+func (n *Node) PotsoTop(day string, limit int) ([]PotsoLeaderboardEntry, error) {
+	if day == "" {
+		day = time.Now().UTC().Format(potso.DayFormat)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	participants, err := manager.PotsoListParticipants(day)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]PotsoLeaderboardEntry, 0, len(participants))
+	for _, addr := range participants {
+		meter, _, err := manager.PotsoGetMeter(addr, day)
+		if err != nil {
+			return nil, err
+		}
+		meter.Day = potso.NormaliseDay(day)
+		meter.RecomputeScore()
+		entries = append(entries, PotsoLeaderboardEntry{Address: addr, Meter: meter})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Meter.Score == entries[j].Meter.Score {
+			if entries[i].Meter.RawScore == entries[j].Meter.RawScore {
+				if entries[i].Meter.UptimeSeconds == entries[j].Meter.UptimeSeconds {
+					return bytes.Compare(entries[i].Address[:], entries[j].Address[:]) < 0
+				}
+				return entries[i].Meter.UptimeSeconds > entries[j].Meter.UptimeSeconds
+			}
+			return entries[i].Meter.RawScore > entries[j].Meter.RawScore
+		}
+		return entries[i].Meter.Score > entries[j].Meter.Score
+	})
+	if limit < len(entries) {
+		entries = entries[:limit]
+	}
+	return entries, nil
 }
 
 func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64) ([32]byte, error) {

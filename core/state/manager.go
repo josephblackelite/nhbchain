@@ -15,6 +15,7 @@ import (
 	"nhbchain/core/identity"
 	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/potso"
 	"nhbchain/storage/trie"
 )
 
@@ -62,6 +63,9 @@ var (
 	identityReversePrefix      = []byte("identity/reverse/")
 	mintInvoicePrefix          = []byte("mint/invoice/")
 	swapOrderPrefix            = []byte("swap/order/")
+	potsoHeartbeatPrefix       = []byte("potso/heartbeat/")
+	potsoMeterPrefix           = []byte("potso/meter/")
+	potsoDayIndexPrefix        = []byte("potso/day-index/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -202,6 +206,31 @@ func swapOrderKey(orderID string) []byte {
 	return buf
 }
 
+func potsoHeartbeatKey(addr []byte) []byte {
+	buf := make([]byte, len(potsoHeartbeatPrefix)+len(addr))
+	copy(buf, potsoHeartbeatPrefix)
+	copy(buf[len(potsoHeartbeatPrefix):], addr)
+	return kvKey(buf)
+}
+
+func potsoMeterKey(day string, addr []byte) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(potsoMeterPrefix)+len(trimmed)+1+len(addr))
+	copy(buf, potsoMeterPrefix)
+	copy(buf[len(potsoMeterPrefix):], trimmed)
+	buf[len(potsoMeterPrefix)+len(trimmed)] = ':'
+	copy(buf[len(potsoMeterPrefix)+len(trimmed)+1:], addr)
+	return kvKey(buf)
+}
+
+func potsoDayIndexKey(day string) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(potsoDayIndexPrefix)+len(trimmed))
+	copy(buf, potsoDayIndexPrefix)
+	copy(buf[len(potsoDayIndexPrefix):], trimmed)
+	return kvKey(buf)
+}
+
 // HasSeenSwapNonce reports whether the provided swap order identifier has been processed.
 func (m *Manager) HasSeenSwapNonce(orderID string) bool {
 	trimmed := strings.TrimSpace(orderID)
@@ -223,6 +252,79 @@ func (m *Manager) MarkSwapNonce(orderID string) error {
 		return fmt.Errorf("swap: order id must not be empty")
 	}
 	return m.KVPut(swapOrderKey(trimmed), true)
+}
+
+// PotsoGetHeartbeat loads the most recent heartbeat state for the supplied participant.
+func (m *Manager) PotsoGetHeartbeat(addr [20]byte) (*potso.HeartbeatState, bool, error) {
+	var state potso.HeartbeatState
+	ok, err := m.KVGet(potsoHeartbeatKey(addr[:]), &state)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return &potso.HeartbeatState{}, false, nil
+	}
+	return &state, true, nil
+}
+
+// PotsoPutHeartbeat persists the supplied heartbeat state for the participant.
+func (m *Manager) PotsoPutHeartbeat(addr [20]byte, state *potso.HeartbeatState) error {
+	if state == nil {
+		return fmt.Errorf("potso: heartbeat state must not be nil")
+	}
+	return m.KVPut(potsoHeartbeatKey(addr[:]), state)
+}
+
+// PotsoGetMeter loads the meter for the provided day and participant.
+func (m *Manager) PotsoGetMeter(addr [20]byte, day string) (*potso.Meter, bool, error) {
+	var meter potso.Meter
+	key := potsoMeterKey(day, addr[:])
+	ok, err := m.KVGet(key, &meter)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return &potso.Meter{Day: potso.NormaliseDay(day)}, false, nil
+	}
+	return &meter, true, nil
+}
+
+// PotsoPutMeter stores the supplied meter for the participant and ensures the day index
+// contains the address for leaderboard queries.
+func (m *Manager) PotsoPutMeter(addr [20]byte, meter *potso.Meter) error {
+	if meter == nil {
+		return fmt.Errorf("potso: meter must not be nil")
+	}
+	meter.Day = potso.NormaliseDay(meter.Day)
+	meter.RecomputeScore()
+	key := potsoMeterKey(meter.Day, addr[:])
+	if err := m.KVPut(key, meter); err != nil {
+		return err
+	}
+	return m.PotsoAddParticipant(meter.Day, addr)
+}
+
+// PotsoAddParticipant ensures the leaderboard index for the given day tracks the participant.
+func (m *Manager) PotsoAddParticipant(day string, addr [20]byte) error {
+	return m.KVAppend(potsoDayIndexKey(day), addr[:])
+}
+
+// PotsoListParticipants returns all addresses with recorded activity for the given day.
+func (m *Manager) PotsoListParticipants(day string) ([][20]byte, error) {
+	var raw [][]byte
+	if err := m.KVGetList(potsoDayIndexKey(day), &raw); err != nil {
+		return nil, err
+	}
+	result := make([][20]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 20 {
+			continue
+		}
+		var addr [20]byte
+		copy(addr[:], entry)
+		result = append(result, addr)
+	}
+	return result, nil
 }
 
 func escrowStorageKey(id [32]byte) []byte {

@@ -19,6 +19,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/potso"
 	"nhbchain/storage/trie"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -1446,8 +1447,32 @@ func (sp *StateProcessor) recordEngagementActivity(addr []byte, now time.Time, t
 	if err := sp.setAccount(addr, account); err != nil {
 		return err
 	}
+	if txDelta > 0 || escrowDelta > 0 {
+		if err := sp.updatePotsoActivity(addr, now, txDelta, escrowDelta); err != nil {
+			return err
+		}
+	}
 	sp.emitScoreUpdates(addr, updates)
 	return nil
+}
+
+func (sp *StateProcessor) updatePotsoActivity(addr []byte, now time.Time, txDelta, escrowDelta uint64) error {
+	if len(addr) != 20 {
+		return nil
+	}
+	day := now.UTC().Format(potso.DayFormat)
+	manager := nhbstate.NewManager(sp.Trie)
+	var address [20]byte
+	copy(address[:], addr)
+	meter, _, err := manager.PotsoGetMeter(address, day)
+	if err != nil {
+		return err
+	}
+	meter.Day = day
+	meter.TxCount += txDelta
+	meter.EscrowEvents += escrowDelta
+	meter.RecomputeScore()
+	return manager.PotsoPutMeter(address, meter)
 }
 
 func accountStateKey(addr []byte) []byte {
