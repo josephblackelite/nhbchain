@@ -60,6 +60,7 @@ var (
 	tradeEscrowIndexPrefix     = []byte("trade/index/escrow/")
 	identityAliasPrefix        = []byte("identity/alias/")
 	identityReversePrefix      = []byte("identity/reverse/")
+	mintInvoicePrefix          = []byte("mint/invoice/")
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -181,6 +182,15 @@ func roleKey(role string) []byte {
 
 func kvKey(key []byte) []byte {
 	return ethcrypto.Keccak256(key)
+}
+
+// MintInvoiceKey derives the storage key used to track processed invoice identifiers.
+func MintInvoiceKey(invoiceID string) []byte {
+	trimmed := strings.TrimSpace(invoiceID)
+	buf := make([]byte, len(mintInvoicePrefix)+len(trimmed))
+	copy(buf, mintInvoicePrefix)
+	copy(buf[len(mintInvoicePrefix):], trimmed)
+	return buf
 }
 
 func escrowStorageKey(id [32]byte) []byte {

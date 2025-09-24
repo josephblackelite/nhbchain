@@ -173,6 +173,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetLatestBlocks(w, r, req)
 	case "nhb_getLatestTransactions":
 		s.handleGetLatestTransactions(w, r, req)
+	case "mint_with_sig":
+		s.handleMintWithSig(w, r, req)
 	case "loyalty_createBusiness":
 		s.handleLoyaltyCreateBusiness(w, r, req)
 	case "loyalty_setPaymaster":
