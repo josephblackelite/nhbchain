@@ -11,7 +11,7 @@ import (
 	statetrie "nhbchain/storage/trie"
 )
 
-func newTestStateProcessor(t *testing.T) *StateProcessor {
+func newEpochStateProcessor(t *testing.T) *StateProcessor {
 	t.Helper()
 	db := storage.NewMemDB()
 	t.Cleanup(db.Close)
@@ -54,7 +54,7 @@ func seedValidator(t *testing.T, sp *StateProcessor, stake int64, engagement uin
 }
 
 func TestEpochSnapshotDeterminism(t *testing.T) {
-	sp := newTestStateProcessor(t)
+	sp := newEpochStateProcessor(t)
 
 	a := seedValidator(t, sp, 2000, 10)
 	b := seedValidator(t, sp, 3000, 5)
@@ -108,7 +108,7 @@ func TestEpochSnapshotDeterminism(t *testing.T) {
 }
 
 func TestEpochTieBreaks(t *testing.T) {
-	sp := newTestStateProcessor(t)
+	sp := newEpochStateProcessor(t)
 
 	cfg := sp.EpochConfig()
 	cfg.Length = 1
@@ -142,7 +142,7 @@ func TestEpochTieBreaks(t *testing.T) {
 }
 
 func TestEpochRotationRespectsMinimumStake(t *testing.T) {
-	sp := newTestStateProcessor(t)
+	sp := newEpochStateProcessor(t)
 	cfg := sp.EpochConfig()
 	cfg.RotationEnabled = true
 	cfg.MaxValidators = 2

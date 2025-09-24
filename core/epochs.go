@@ -117,6 +117,9 @@ func (sp *StateProcessor) pruneEpochHistory() {
 }
 
 func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) error {
+	if err := sp.accrueEpochRewards(height); err != nil {
+		return err
+	}
 	if sp.epochConfig.Length == 0 {
 		return nil
 	}
@@ -143,6 +146,9 @@ func (sp *StateProcessor) finalizeEpoch(height uint64, timestamp int64) error {
 		TotalWeight: totalWeight,
 		Weights:     weights,
 		Selected:    selected,
+	}
+	if err := sp.settleEpochRewards(snapshot); err != nil {
+		return err
 	}
 	sp.epochHistory = append(sp.epochHistory, snapshot)
 	sp.pruneEpochHistory()

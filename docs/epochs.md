@@ -174,6 +174,13 @@ Attributes:
 An empty `validators` attribute indicates that rotation was disabled for the
 epoch or that no validators satisfied the minimum stake requirement.
 
+### Reward Settlement Events
+
+The reward module emits `rewards.paid` (per account) and `rewards.epoch_closed`
+events alongside epoch finalisation. Refer to `docs/rewards.md` for a detailed
+description of the reward emission workflow, storage layout, and JSON-RPC
+surfaces.
+
 ## Audience Notes
 
 ### Auditors

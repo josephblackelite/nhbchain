@@ -13,6 +13,7 @@ import (
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
 	"nhbchain/core/events"
+	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -45,6 +46,7 @@ var (
 	validatorSetKey       = ethcrypto.Keccak256([]byte("validator-set"))
 	validatorEligibleKey  = ethcrypto.Keccak256([]byte("validator-eligible-set"))
 	epochHistoryKey       = ethcrypto.Keccak256([]byte("epoch-history"))
+	rewardHistoryKey      = ethcrypto.Keccak256([]byte("reward-history"))
 )
 
 type StateProcessor struct {
@@ -62,6 +64,9 @@ type StateProcessor struct {
 	engagementConfig   engagement.Config
 	epochConfig        epoch.Config
 	epochHistory       []epoch.Snapshot
+	rewardConfig       rewards.Config
+	rewardAccrual      *rewards.Accumulator
+	rewardHistory      []rewards.EpochSettlement
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -83,6 +88,8 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		engagementConfig:   engagement.DefaultConfig(),
 		epochConfig:        epoch.DefaultConfig(),
 		epochHistory:       make([]epoch.Snapshot, 0),
+		rewardConfig:       rewards.DefaultConfig(),
+		rewardHistory:      make([]rewards.EpochSettlement, 0),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -91,6 +98,9 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		return nil, err
 	}
 	if err := sp.loadEpochHistory(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadRewardHistory(); err != nil {
 		return nil, err
 	}
 	return sp, nil
@@ -125,6 +135,22 @@ func (sp *StateProcessor) SetEpochConfig(cfg epoch.Config) error {
 	sp.epochConfig = cfg
 	sp.pruneEpochHistory()
 	return nil
+}
+
+// RewardConfig returns the current reward emission configuration.
+func (sp *StateProcessor) RewardConfig() rewards.Config {
+	return sp.rewardConfig.Clone()
+}
+
+// SetRewardConfig updates the reward configuration after validation.
+func (sp *StateProcessor) SetRewardConfig(cfg rewards.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.rewardConfig = cfg.Clone()
+	sp.rewardAccrual = nil
+	sp.pruneRewardHistory()
+	return sp.persistRewardHistory()
 }
 
 // CurrentRoot returns the last committed state root.
@@ -222,6 +248,11 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		historyCopy[i] = copied
 	}
 
+	rewardHistoryCopy := make([]rewards.EpochSettlement, len(sp.rewardHistory))
+	for i := range sp.rewardHistory {
+		rewardHistoryCopy[i] = sp.rewardHistory[i].Clone()
+	}
+
 	return &StateProcessor{
 		Trie:               trieCopy,
 		stateDB:            sp.stateDB,
@@ -237,6 +268,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		engagementConfig:   sp.engagementConfig,
 		epochConfig:        sp.epochConfig,
 		epochHistory:       historyCopy,
+		rewardConfig:       sp.rewardConfig.Clone(),
+		rewardHistory:      rewardHistoryCopy,
 	}, nil
 }
 

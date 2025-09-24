@@ -17,6 +17,7 @@ import (
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
 	"nhbchain/core/events"
+	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -266,6 +267,22 @@ func (n *Node) EpochSummary(epochNumber uint64) (*epoch.Summary, bool) {
 	}
 	summary := snapshot.Summary()
 	return &summary, true
+}
+
+func (n *Node) RewardConfig() rewards.Config {
+	return n.state.RewardConfig()
+}
+
+func (n *Node) SetRewardConfig(cfg rewards.Config) error {
+	return n.state.SetRewardConfig(cfg)
+}
+
+func (n *Node) RewardEpochSettlement(epochNumber uint64) (*rewards.EpochSettlement, bool) {
+	return n.state.RewardEpochSettlement(epochNumber)
+}
+
+func (n *Node) LatestRewardEpochSettlement() (*rewards.EpochSettlement, bool) {
+	return n.state.LatestRewardEpochSettlement()
 }
 
 func (n *Node) LoyaltyManager() *nhbstate.Manager {

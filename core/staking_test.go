@@ -14,7 +14,7 @@ import (
 	statetrie "nhbchain/storage/trie"
 )
 
-func newTestStateProcessor(t *testing.T) *StateProcessor {
+func newStakingStateProcessor(t *testing.T) *StateProcessor {
 	t.Helper()
 	db := storage.NewMemDB()
 	t.Cleanup(func() { db.Close() })
@@ -90,7 +90,7 @@ func writeAccount(t *testing.T, sp *StateProcessor, addr [20]byte, account *type
 }
 
 func TestStakeDelegateSelf(t *testing.T) {
-	sp := newTestStateProcessor(t)
+	sp := newStakingStateProcessor(t)
 	var delegator [20]byte
 	delegator[19] = 0x01
 
@@ -123,7 +123,7 @@ func TestStakeDelegateSelf(t *testing.T) {
 }
 
 func TestStakeUndelegateAndClaim(t *testing.T) {
-	sp := newTestStateProcessor(t)
+	sp := newStakingStateProcessor(t)
 	base := time.Unix(1700000000, 0)
 	sp.nowFunc = func() time.Time { return base }
 
@@ -194,7 +194,7 @@ func TestStakeUndelegateAndClaim(t *testing.T) {
 }
 
 func TestStakeDelegateSwitchValidatorBlocked(t *testing.T) {
-	sp := newTestStateProcessor(t)
+	sp := newStakingStateProcessor(t)
 	var delegator, validatorA, validatorB [20]byte
 	delegator[19] = 0x10
 	validatorA[19] = 0x11
