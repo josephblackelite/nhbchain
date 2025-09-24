@@ -1,0 +1,221 @@
+package p2p
+
+import (
+	"math"
+	"sync"
+	"time"
+)
+
+// ReputationConfig defines the thresholds for the reputation engine.
+type ReputationConfig struct {
+	GreyScore        int
+	BanScore         int
+	BanDuration      time.Duration
+	GreylistDuration time.Duration
+	DecayHalfLife    time.Duration
+}
+
+// ReputationStatus represents the state of a peer after an adjustment.
+type ReputationStatus struct {
+	Score      int
+	Greylisted bool
+	Banned     bool
+	Until      time.Time
+}
+
+type reputationRecord struct {
+	score      float64
+	updatedAt  time.Time
+	bannedTill time.Time
+	greyTill   time.Time
+}
+
+// ReputationManager keeps per-peer scoring with decay.
+type ReputationManager struct {
+	cfg ReputationConfig
+
+	mu      sync.Mutex
+	records map[string]*reputationRecord
+}
+
+// NewReputationManager returns a new reputation tracker.
+func NewReputationManager(cfg ReputationConfig) *ReputationManager {
+	if cfg.DecayHalfLife <= 0 {
+		cfg.DecayHalfLife = 10 * time.Minute
+	}
+	if cfg.GreylistDuration <= 0 {
+		cfg.GreylistDuration = 2 * time.Minute
+	}
+	if cfg.BanDuration <= 0 {
+		cfg.BanDuration = 15 * time.Minute
+	}
+	return &ReputationManager{cfg: cfg, records: make(map[string]*reputationRecord)}
+}
+
+// Adjust updates the score for a peer, returning the latest status.
+func (m *ReputationManager) Adjust(id string, delta int, now time.Time, persistent bool) ReputationStatus {
+	if id == "" {
+		return ReputationStatus{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rec := m.records[id]
+	if rec == nil {
+		rec = &reputationRecord{updatedAt: now}
+		m.records[id] = rec
+	}
+
+	m.applyDecayLocked(rec, now)
+	rec.score += float64(delta)
+	rec.updatedAt = now
+
+	status := ReputationStatus{Score: int(math.Round(rec.score))}
+
+	if persistent {
+		// Persistent peers never enter the ban list but can recover quicker.
+		if rec.score > 0 {
+			rec.score = 0
+			status.Score = 0
+		}
+		rec.bannedTill = time.Time{}
+	} else if status.Score <= -m.cfg.BanScore && m.cfg.BanScore > 0 {
+		rec.bannedTill = now.Add(m.cfg.BanDuration)
+	}
+
+	if rec.bannedTill.After(now) {
+		status.Banned = true
+		status.Until = rec.bannedTill
+	}
+
+	if status.Score <= -m.cfg.GreyScore && m.cfg.GreyScore > 0 {
+		rec.greyTill = now.Add(m.cfg.GreylistDuration)
+	} else if status.Score > -m.cfg.GreyScore {
+		rec.greyTill = time.Time{}
+	}
+	if rec.greyTill.After(now) {
+		status.Greylisted = true
+		if status.Until.IsZero() || rec.greyTill.Before(status.Until) {
+			status.Until = rec.greyTill
+		}
+	}
+
+	return status
+}
+
+// Reward sets a positive delta without triggering ban thresholds.
+func (m *ReputationManager) Reward(id string, delta int, now time.Time) ReputationStatus {
+	return m.Adjust(id, delta, now, false)
+}
+
+// IsBanned returns true if the peer is banned at the provided time.
+func (m *ReputationManager) IsBanned(id string, now time.Time) bool {
+	banned, _ := m.BanInfo(id, now)
+	return banned
+}
+
+// IsGreylisted returns true if the peer is currently greylisted.
+func (m *ReputationManager) IsGreylisted(id string, now time.Time) bool {
+	grey, _ := m.GreyInfo(id, now)
+	return grey
+}
+
+// Score returns the integer score after decay.
+func (m *ReputationManager) Score(id string, now time.Time) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.records[id]
+	if rec == nil {
+		return 0
+	}
+	m.applyDecayLocked(rec, now)
+	return int(math.Round(rec.score))
+}
+
+func (m *ReputationManager) applyDecayLocked(rec *reputationRecord, now time.Time) {
+	if rec == nil {
+		return
+	}
+	if now.Before(rec.updatedAt) {
+		rec.updatedAt = now
+		return
+	}
+	if m.cfg.DecayHalfLife <= 0 {
+		return
+	}
+	elapsed := now.Sub(rec.updatedAt)
+	if elapsed <= 0 {
+		return
+	}
+	halfLife := m.cfg.DecayHalfLife
+	periods := float64(elapsed) / float64(halfLife)
+	if periods <= 0 {
+		rec.updatedAt = now
+		return
+	}
+	factor := math.Pow(0.5, periods)
+	rec.score *= factor
+	if math.Abs(rec.score) < 1e-6 {
+		rec.score = 0
+	}
+	rec.updatedAt = now
+}
+
+// BanInfo returns whether a peer is banned and the expiry time.
+func (m *ReputationManager) BanInfo(id string, now time.Time) (bool, time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.records[id]
+	if rec == nil {
+		return false, time.Time{}
+	}
+	if rec.bannedTill.IsZero() {
+		return false, time.Time{}
+	}
+	if now.After(rec.bannedTill) {
+		rec.bannedTill = time.Time{}
+		return false, time.Time{}
+	}
+	return true, rec.bannedTill
+}
+
+// GreyInfo returns whether a peer is greylisted and the expiry time.
+func (m *ReputationManager) GreyInfo(id string, now time.Time) (bool, time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.records[id]
+	if rec == nil {
+		return false, time.Time{}
+	}
+	if rec.greyTill.IsZero() {
+		return false, time.Time{}
+	}
+	if now.After(rec.greyTill) {
+		rec.greyTill = time.Time{}
+		return false, time.Time{}
+	}
+	return true, rec.greyTill
+}
+
+// Snapshot returns a copy of all scores with decay applied at the given time.
+func (m *ReputationManager) Snapshot(now time.Time) map[string]ReputationStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]ReputationStatus, len(m.records))
+	for id, rec := range m.records {
+		m.applyDecayLocked(rec, now)
+		status := ReputationStatus{Score: int(math.Round(rec.score))}
+		if rec.bannedTill.After(now) {
+			status.Banned = true
+			status.Until = rec.bannedTill
+		}
+		if rec.greyTill.After(now) {
+			status.Greylisted = true
+			if status.Until.IsZero() || rec.greyTill.Before(status.Until) {
+				status.Until = rec.greyTill
+			}
+		}
+		out[id] = status
+	}
+	return out
+}

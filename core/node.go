@@ -42,6 +42,7 @@ type Node struct {
 	validatorKey   *crypto.PrivateKey
 	mempool        []*types.Transaction
 	bftEngine      *bft.Engine
+	p2pSrv         *p2p.Server
 	stateMu        sync.Mutex
 	escrowTreasury [20]byte
 	engagementMgr  *engagement.Manager
@@ -92,6 +93,16 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 func (n *Node) SetBftEngine(bftEngine *bft.Engine) {
 	n.bftEngine = bftEngine
+}
+
+// SetP2PServer records the running P2P server for query purposes.
+func (n *Node) SetP2PServer(server *p2p.Server) {
+	n.p2pSrv = server
+}
+
+// P2PServer exposes the underlying P2P server if available.
+func (n *Node) P2PServer() *p2p.Server {
+	return n.p2pSrv
 }
 
 func (n *Node) StartConsensus() {

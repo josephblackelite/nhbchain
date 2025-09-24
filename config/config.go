@@ -36,7 +36,23 @@ type Config struct {
 	MaxMsgBytes           int         `toml:"MaxMsgBytes"`
 	MaxMsgsPerSecond      float64     `toml:"MaxMsgsPerSecond"`
 	ClientVersion         string      `toml:"ClientVersion"`
+	P2P                   P2PSection  `toml:"p2p"`
 	Potso                 PotsoConfig `toml:"potso"`
+}
+
+// P2PSection captures nested configuration for the peer-to-peer subsystem.
+type P2PSection struct {
+	NetworkID          uint64   `toml:"NetworkId"`
+	MaxPeers           int      `toml:"MaxPeers"`
+	MaxInbound         int      `toml:"MaxInbound"`
+	MaxOutbound        int      `toml:"MaxOutbound"`
+	Bootnodes          []string `toml:"Bootnodes"`
+	PersistentPeers    []string `toml:"PersistentPeers"`
+	BanScore           int      `toml:"BanScore"`
+	GreyScore          int      `toml:"GreyScore"`
+	RateMsgsPerSec     float64  `toml:"RateMsgsPerSec"`
+	Burst              float64  `toml:"Burst"`
+	HandshakeTimeoutMs int      `toml:"HandshakeTimeoutMs"`
 }
 
 // PotsoConfig groups POTSO-specific configuration segments.
@@ -94,6 +110,8 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+
+	cfg.mergeP2PFromTopLevel()
 
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "nhb-local"
@@ -173,6 +191,8 @@ func Load(path string) (*Config, error) {
 		cfg.Potso.Weights.TieBreak = string(weightDefaults.TieBreak)
 	}
 
+	cfg.syncTopLevelToP2P()
+
 	return cfg, nil
 }
 
@@ -229,6 +249,84 @@ func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+func (cfg *Config) mergeP2PFromTopLevel() {
+	if cfg.P2P.MaxPeers == 0 && cfg.MaxPeers > 0 {
+		cfg.P2P.MaxPeers = cfg.MaxPeers
+	}
+	if cfg.MaxPeers == 0 && cfg.P2P.MaxPeers > 0 {
+		cfg.MaxPeers = cfg.P2P.MaxPeers
+	}
+	if cfg.P2P.MaxInbound == 0 && cfg.MaxInbound > 0 {
+		cfg.P2P.MaxInbound = cfg.MaxInbound
+	}
+	if cfg.MaxInbound == 0 && cfg.P2P.MaxInbound > 0 {
+		cfg.MaxInbound = cfg.P2P.MaxInbound
+	}
+	if cfg.P2P.MaxOutbound == 0 && cfg.MaxOutbound > 0 {
+		cfg.P2P.MaxOutbound = cfg.MaxOutbound
+	}
+	if cfg.MaxOutbound == 0 && cfg.P2P.MaxOutbound > 0 {
+		cfg.MaxOutbound = cfg.P2P.MaxOutbound
+	}
+	if len(cfg.P2P.Bootnodes) == 0 && len(cfg.Bootnodes) > 0 {
+		cfg.P2P.Bootnodes = append([]string{}, cfg.Bootnodes...)
+	}
+	if len(cfg.Bootnodes) == 0 && len(cfg.P2P.Bootnodes) > 0 {
+		cfg.Bootnodes = append([]string{}, cfg.P2P.Bootnodes...)
+	}
+	if len(cfg.P2P.PersistentPeers) == 0 && len(cfg.PersistentPeers) > 0 {
+		cfg.P2P.PersistentPeers = append([]string{}, cfg.PersistentPeers...)
+	}
+	if len(cfg.PersistentPeers) == 0 && len(cfg.P2P.PersistentPeers) > 0 {
+		cfg.PersistentPeers = append([]string{}, cfg.P2P.PersistentPeers...)
+	}
+	if cfg.P2P.RateMsgsPerSec == 0 && cfg.MaxMsgsPerSecond > 0 {
+		cfg.P2P.RateMsgsPerSec = cfg.MaxMsgsPerSecond
+	}
+	if cfg.MaxMsgsPerSecond == 0 && cfg.P2P.RateMsgsPerSec > 0 {
+		cfg.MaxMsgsPerSecond = cfg.P2P.RateMsgsPerSec
+	}
+	if cfg.P2P.Bootnodes == nil {
+		cfg.P2P.Bootnodes = []string{}
+	}
+	if cfg.P2P.PersistentPeers == nil {
+		cfg.P2P.PersistentPeers = []string{}
+	}
+	if cfg.P2P.HandshakeTimeoutMs == 0 {
+		cfg.P2P.HandshakeTimeoutMs = 5000
+	}
+	if cfg.P2P.Burst == 0 {
+		cfg.P2P.Burst = 200
+	}
+	if cfg.P2P.BanScore == 0 {
+		cfg.P2P.BanScore = 100
+	}
+	if cfg.P2P.GreyScore == 0 {
+		cfg.P2P.GreyScore = 50
+	}
+}
+
+func (cfg *Config) syncTopLevelToP2P() {
+	cfg.P2P.MaxPeers = cfg.MaxPeers
+	cfg.P2P.MaxInbound = cfg.MaxInbound
+	cfg.P2P.MaxOutbound = cfg.MaxOutbound
+	cfg.P2P.Bootnodes = append([]string{}, cfg.Bootnodes...)
+	cfg.P2P.PersistentPeers = append([]string{}, cfg.PersistentPeers...)
+	cfg.P2P.RateMsgsPerSec = cfg.MaxMsgsPerSecond
+	if cfg.P2P.HandshakeTimeoutMs <= 0 {
+		cfg.P2P.HandshakeTimeoutMs = 5000
+	}
+	if cfg.P2P.Burst <= 0 {
+		cfg.P2P.Burst = 200
+	}
+	if cfg.P2P.BanScore <= 0 {
+		cfg.P2P.BanScore = 100
+	}
+	if cfg.P2P.GreyScore <= 0 {
+		cfg.P2P.GreyScore = 50
+	}
 }
 
 // PotsoWeightConfig converts the weights TOML representation into runtime parameters.
@@ -320,6 +418,19 @@ func createDefault(path string) (*Config, error) {
 		MaxMsgsPerSecond: 32,
 		ClientVersion:    "nhbchain/node",
 	}
+	cfg.P2P = P2PSection{
+		NetworkID:          187001,
+		MaxPeers:           64,
+		MaxInbound:         60,
+		MaxOutbound:        30,
+		Bootnodes:          []string{},
+		PersistentPeers:    []string{},
+		BanScore:           100,
+		GreyScore:          50,
+		RateMsgsPerSec:     50,
+		Burst:              200,
+		HandshakeTimeoutMs: 5000,
+	}
 	cfg.Potso.Rewards = PotsoRewardsConfig{
 		MinPayoutWei:     "0",
 		EmissionPerEpoch: "0",
@@ -327,6 +438,7 @@ func createDefault(path string) (*Config, error) {
 		PayoutMode:       string(potso.RewardPayoutModeAuto),
 	}
 	cfg.ValidatorKeystorePath = keystorePath
+	cfg.syncTopLevelToP2P()
 
 	if err := persist(path, cfg); err != nil {
 		return nil, err

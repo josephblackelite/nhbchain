@@ -6,14 +6,21 @@ ValidatorKeystorePath = "./validator-peer.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
 NetworkName = "nhb-local"
+[p2p]
+NetworkId = 187001
+MaxPeers = 64
+MaxInbound = 60
+MaxOutbound = 30
 Bootnodes = []
 PersistentPeers = []
-MaxPeers = 64
-MaxInbound = 32
-MaxOutbound = 32
+BanScore = 100
+GreyScore = 50
+RateMsgsPerSec = 50
+Burst = 200
+HandshakeTimeoutMs = 5000
+
 PeerBanSeconds = 900
 ReadTimeout = 90
 WriteTimeout = 5
 MaxMsgBytes = 1048576
-MaxMsgsPerSecond = 32
 ClientVersion = "nhbchain/node"

@@ -17,17 +17,25 @@ DataDir = "./data"
 GenesisFile = "genesis.json"
 ValidatorKeystorePath = "%s"
 NetworkName = "testnet"
-Bootnodes = ["1.1.1.1:6001"]
-PersistentPeers = ["2.2.2.2:6001"]
-MaxPeers = 42
-MaxInbound = 21
-MaxOutbound = 20
 PeerBanSeconds = 120
 ReadTimeout = 30
 WriteTimeout = 4
 MaxMsgBytes = 2048
 MaxMsgsPerSecond = 12.5
 ClientVersion = "nhbchain/test"
+
+[p2p]
+NetworkId = 187001
+MaxPeers = 42
+MaxInbound = 21
+MaxOutbound = 20
+Bootnodes = ["1.1.1.1:6001"]
+PersistentPeers = ["2.2.2.2:6001"]
+BanScore = 90
+GreyScore = 45
+RateMsgsPerSec = 60
+Burst = 240
+HandshakeTimeoutMs = 7000
 `, keystorePath)
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -61,5 +69,14 @@ ClientVersion = "nhbchain/test"
 	}
 	if len(cfg.PersistentPeers) != 1 || cfg.PersistentPeers[0] != "2.2.2.2:6001" {
 		t.Fatalf("persistent peers not parsed: %v", cfg.PersistentPeers)
+	}
+	if cfg.P2P.BanScore != 90 || cfg.P2P.GreyScore != 45 {
+		t.Fatalf("unexpected reputation thresholds: %+v", cfg.P2P)
+	}
+	if cfg.P2P.RateMsgsPerSec != 12.5 || cfg.P2P.Burst != 240 {
+		t.Fatalf("unexpected rate limits: %+v", cfg.P2P)
+	}
+	if cfg.P2P.HandshakeTimeoutMs != 7000 {
+		t.Fatalf("unexpected handshake timeout: %d", cfg.P2P.HandshakeTimeoutMs)
 	}
 }

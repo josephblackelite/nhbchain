@@ -42,7 +42,11 @@ func baseConfig(genesis []byte) ServerConfig {
 		ReadTimeout:      250 * time.Millisecond,
 		WriteTimeout:     250 * time.Millisecond,
 		MaxMessageBytes:  1 << 20,
-		MaxMsgsPerSecond: 2,
+		RateMsgsPerSec:   2,
+		RateBurst:        4,
+		BanScore:         20,
+		GreyScore:        10,
+		HandshakeTimeout: time.Second,
 	}
 }
 
@@ -84,12 +88,29 @@ func TestHandshakeRejectsMismatchedChain(t *testing.T) {
 	}
 }
 
+func TestHandshakeRejectsWalletSignature(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+
+	local := NewServer(handler, mustKey(t), baseConfig(genesis))
+	remote := NewServer(handler, mustKey(t), baseConfig(genesis))
+
+	msg, err := remote.buildHandshake()
+	if err != nil {
+		t.Fatalf("build handshake: %v", err)
+	}
+	msg.WalletSignature[0] ^= 0xFF
+	if _, err := local.verifyHandshake(msg); err == nil || !strings.Contains(err.Error(), "wallet") {
+		t.Fatalf("expected wallet binding error, got %v", err)
+	}
+}
+
 func TestPeerRateLimitDisconnect(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)
 
 	cfg := baseConfig(genesis)
-	cfg.MaxMsgsPerSecond = 1
+	cfg.RateMsgsPerSec = 1
 	cfg.PeerBanDuration = 100 * time.Millisecond
 
 	server := NewServer(handler, mustKey(t), cfg)
