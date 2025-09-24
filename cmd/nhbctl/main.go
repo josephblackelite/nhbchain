@@ -29,6 +29,9 @@ type fileConfig struct {
 	ValidatorKeystorePath string   `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI       string   `toml:"ValidatorKMSURI"`
 	ValidatorKMSEnv       string   `toml:"ValidatorKMSEnv"`
+	NetworkName           string   `toml:"NetworkName"`
+	Bootnodes             []string `toml:"Bootnodes"`
+	PersistentPeers       []string `toml:"PersistentPeers"`
 	BootstrapPeers        []string `toml:"BootstrapPeers"`
 }
 
@@ -117,8 +120,21 @@ func migrateKeystore(configPath, keystorePath, passEnv string, force bool) error
 	if cfg.ValidatorKMSEnv == "" {
 		cfg.ValidatorKMSEnv = ""
 	}
+	if cfg.Bootnodes == nil {
+		cfg.Bootnodes = []string{}
+	}
+	if cfg.PersistentPeers == nil {
+		cfg.PersistentPeers = []string{}
+	}
 	if cfg.BootstrapPeers == nil {
 		cfg.BootstrapPeers = []string{}
+	}
+	if len(cfg.Bootnodes) == 0 && len(cfg.BootstrapPeers) > 0 {
+		cfg.Bootnodes = append([]string{}, cfg.BootstrapPeers...)
+	}
+	cfg.BootstrapPeers = nil
+	if strings.TrimSpace(cfg.NetworkName) == "" {
+		cfg.NetworkName = "nhb-local"
 	}
 
 	if err := writeConfig(configPath, cfg); err != nil {
