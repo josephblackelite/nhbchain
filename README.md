@@ -3,11 +3,14 @@
 Welcome to the official Go implementation of the NHBCoin Layer 1 (L1) blockchain. This repository hosts the production codebase used to run validator and full nodes that power NHBCoin—a purpose-built payment rail engineered for instant settlement, mainstream usability, and institutional-grade compliance.
 
 ```
-      _   _ _____ _____ ____  ____   ___  _   _ _____
-     | \ | | ____|_   _| __ )|  _ \ / _ \| \ | |_   _|
-     |  \| |  _|   | | |  _ \| | | | | | |  \| | | |
-     | |\  | |___  | | | |_) | |_| | |_| | |\  | | |
-     |_| \_|_____| |_| |____/|____/ \___/|_| \_| |_|
+███████  █     █  █     █  ██████ 
+     ██  ██    █  █     █  █     █
+    ██   █ █   █  █     █  █     █
+   ██    █  █  █  ███████  ██████ 
+  ██     █   █ █  █     █  █     █
+ ██      █    ██  █     █  █     █
+███████  █     █  █     █  ██████ 
+
 ```
 
 NHBCoin abstracts away the traditional complexities of crypto networks. Native account abstraction, on-chain identity, fee sponsorship, and loyalty incentives are all protocol features—not afterthoughts—so that the experience of paying with NHB is as intuitive as the best consumer FinTech products.
