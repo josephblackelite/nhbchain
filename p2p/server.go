@@ -2,36 +2,36 @@ package p2p
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"nhbchain/crypto"
-
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
 	handshakeTimeout   = 5 * time.Second
-	readTimeout        = 90 * time.Second
-	writeTimeout       = 5 * time.Second
 	outboundQueueSize  = 64
-	maxMessageSize     = 1 << 20 // 1 MiB
 	handshakeNonceSize = 32
+
+	defaultMaxPeers       = 64
+	defaultPeerBan        = 15 * time.Minute
+	defaultReadTimeout    = 90 * time.Second
+	defaultWriteTimeout   = 5 * time.Second
+	defaultMaxMessageSize = 1 << 20
+	defaultMsgRate        = 32.0
+	maxDialBackoff        = time.Minute
 
 	malformedPenalty       = 2
 	validMessageReward     = 1
 	reputationBanThreshold = -6
-	banDuration            = 15 * time.Minute
+	slowPenalty            = 1
+	ratePenalty            = 3
 
 	invalidRateWindow        = time.Minute
 	invalidRateThresholdPerc = 50
@@ -40,33 +40,54 @@ const (
 
 var errQueueFull = errors.New("peer outbound queue full")
 
-type handshakeMessage struct {
-	ChainID     uint64 `json:"chainId"`
-	NodeID      string `json:"nodeId"`
-	PubKey      []byte `json:"pubKey"`
-	GenesisHash []byte `json:"genesisHash"`
-	NetworkName string `json:"network"`
-	Nonce       []byte `json:"nonce"`
-	Signature   []byte `json:"signature"`
+// ServerConfig encapsulates runtime settings for the p2p server.
+type ServerConfig struct {
+	ListenAddress    string
+	ChainID          uint64
+	GenesisHash      []byte
+	ClientVersion    string
+	MaxPeers         int
+	MaxInbound       int
+	MaxOutbound      int
+	Bootnodes        []string
+	PersistentPeers  []string
+	PeerBanDuration  time.Duration
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
+	MaxMessageBytes  int
+	MaxMsgsPerSecond float64
 }
+
+type dialFunc func(context.Context, string) (net.Conn, error)
 
 // Server coordinates peer connections and message dissemination.
 type Server struct {
-	listenAddr string
-	handler    MessageHandler
-	privKey    *crypto.PrivateKey
-	nodeID     string
-	chainID    uint64
-	genesis    []byte
-	network    string
+	cfg     ServerConfig
+	handler MessageHandler
+	privKey *crypto.PrivateKey
+	nodeID  string
+	genesis []byte
 
-	mu         sync.RWMutex
-	peers      map[string]*Peer
-	reputation map[string]int
-	banned     map[string]time.Time
-	metrics    map[string]*peerMetrics
+	mu            sync.RWMutex
+	peers         map[string]*Peer
+	inboundCount  int
+	outboundCount int
+	banned        map[string]time.Time
+	scores        map[string]int
+	metrics       map[string]*peerMetrics
+	byAddr        map[string]string
+
+	dialFn      dialFunc
+	now         func() time.Time
+	globalLimit *tokenBucket
+
+	dialMu      sync.Mutex
+	pendingDial map[string]struct{}
+	backoff     map[string]time.Duration
+	persistent  map[string]struct{}
 }
 
+// peerMetrics tracks message quality for a peer.
 type peerMetrics struct {
 	windowStart time.Time
 	total       int
@@ -74,30 +95,95 @@ type peerMetrics struct {
 }
 
 // NewServer creates a P2P server with authenticated handshakes.
-func NewServer(listenAddr string, handler MessageHandler, privKey *crypto.PrivateKey, chainID uint64, genesisHash []byte, networkName string) *Server {
-	nodeID := privKey.PubKey().Address().String()
-	return &Server{
-		listenAddr: listenAddr,
-		handler:    handler,
-		privKey:    privKey,
-		nodeID:     nodeID,
-		chainID:    chainID,
-		genesis:    cloneBytes(genesisHash),
-		network:    networkName,
-		peers:      make(map[string]*Peer),
-		reputation: make(map[string]int),
-		banned:     make(map[string]time.Time),
-		metrics:    make(map[string]*peerMetrics),
+func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerConfig) *Server {
+	if cfg.ListenAddress == "" {
+		cfg.ListenAddress = ":0"
 	}
+	if cfg.ClientVersion == "" {
+		cfg.ClientVersion = "nhbchain/node"
+	}
+	if cfg.MaxPeers <= 0 {
+		cfg.MaxPeers = defaultMaxPeers
+	}
+	if cfg.MaxInbound <= 0 || cfg.MaxInbound > cfg.MaxPeers {
+		cfg.MaxInbound = cfg.MaxPeers
+	}
+	if cfg.MaxOutbound <= 0 || cfg.MaxOutbound > cfg.MaxPeers {
+		cfg.MaxOutbound = cfg.MaxPeers
+	}
+	if cfg.PeerBanDuration <= 0 {
+		cfg.PeerBanDuration = defaultPeerBan
+	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = defaultReadTimeout
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = defaultWriteTimeout
+	}
+	if cfg.MaxMessageBytes <= 0 {
+		cfg.MaxMessageBytes = defaultMaxMessageSize
+	}
+	if cfg.MaxMsgsPerSecond <= 0 {
+		cfg.MaxMsgsPerSecond = defaultMsgRate
+	}
+
+	uniqBoot := uniqueStrings(cfg.Bootnodes)
+	uniqPersist := uniqueStrings(cfg.PersistentPeers)
+	cfg.Bootnodes = append([]string{}, uniqBoot...)
+	cfg.PersistentPeers = append([]string{}, uniqPersist...)
+
+	nodeID := privKey.PubKey().Address().String()
+
+	server := &Server{
+		cfg:         cfg,
+		handler:     handler,
+		privKey:     privKey,
+		nodeID:      nodeID,
+		genesis:     cloneBytes(cfg.GenesisHash),
+		peers:       make(map[string]*Peer),
+		banned:      make(map[string]time.Time),
+		scores:      make(map[string]int),
+		metrics:     make(map[string]*peerMetrics),
+		byAddr:      make(map[string]string),
+		dialFn:      defaultDialer,
+		now:         time.Now,
+		backoff:     make(map[string]time.Duration),
+		pendingDial: make(map[string]struct{}),
+		persistent:  make(map[string]struct{}),
+	}
+
+	for _, addr := range uniqBoot {
+		server.persistent[strings.TrimSpace(addr)] = struct{}{}
+	}
+	for _, addr := range uniqPersist {
+		server.persistent[strings.TrimSpace(addr)] = struct{}{}
+	}
+
+	burst := cfg.MaxMsgsPerSecond * float64(cfg.MaxPeers)
+	if burst < cfg.MaxMsgsPerSecond {
+		burst = cfg.MaxMsgsPerSecond
+	}
+	server.globalLimit = newTokenBucket(cfg.MaxMsgsPerSecond*float64(cfg.MaxPeers), burst)
+
+	return server
+}
+
+func defaultDialer(ctx context.Context, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: handshakeTimeout}
+	return d.DialContext(ctx, "tcp", addr)
 }
 
 // Start begins listening for inbound peers and negotiating handshakes.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.listenAddr)
+	ln, err := net.Listen("tcp", s.cfg.ListenAddress)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("P2P server listening on %s (node %s)\n", s.listenAddr, s.nodeID)
+	fmt.Printf("NHB P2P listening on %s | chain=%d | genesis=%s | node=%s | client=%s\n",
+		ln.Addr().String(), s.cfg.ChainID, summarizeHash(s.genesis), s.nodeID, s.cfg.ClientVersion)
+
+	go s.startDialers()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -110,14 +196,36 @@ func (s *Server) Start() error {
 	}
 }
 
+func (s *Server) startDialers() {
+	seen := make(map[string]struct{})
+	addresses := append([]string{}, s.cfg.Bootnodes...)
+	addresses = append(addresses, s.cfg.PersistentPeers...)
+	for _, addr := range addresses {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		go func(target string) {
+			if err := s.Connect(target); err != nil {
+				fmt.Printf("Bootstrap dial %s failed: %v\n", target, err)
+				s.scheduleReconnect(target)
+			}
+		}(addr)
+	}
+}
+
 func (s *Server) handleInbound(conn net.Conn) {
-	if err := s.initPeer(conn); err != nil {
+	if err := s.initPeer(conn, true, false, ""); err != nil {
 		fmt.Printf("Inbound connection from %s rejected: %v\n", conn.RemoteAddr(), err)
 		conn.Close()
 	}
 }
 
-func (s *Server) initPeer(conn net.Conn) error {
+func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr string) error {
 	reader := bufio.NewReader(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
 	defer cancel()
@@ -133,175 +241,48 @@ func (s *Server) initPeer(conn net.Conn) error {
 		return fmt.Errorf("peer %s is currently banned", remote.NodeID)
 	}
 
-	peer := newPeer(remote.NodeID, conn, reader, s)
+	peer := newPeer(remote.NodeID, conn, reader, s, inbound, persistent, dialAddr)
 	if err := s.registerPeer(peer); err != nil {
 		return err
 	}
-	fmt.Printf("New peer connected: %s (%s)\n", peer.id, peer.remoteAddr)
+	fmt.Printf("New peer connected: %s (%s) client=%s\n", peer.id, peer.remoteAddr, remote.ClientVersion)
 	peer.start()
 	return nil
-}
-
-func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bufio.Reader) (*handshakeMessage, error) {
-	local, err := s.buildHandshake()
-	if err != nil {
-		return nil, fmt.Errorf("prepare handshake: %w", err)
-	}
-	if err := writeFrame(ctx, conn, local); err != nil {
-		return nil, fmt.Errorf("send handshake: %w", err)
-	}
-
-	payload, err := readFrame(ctx, conn, reader)
-	if err != nil {
-		return nil, fmt.Errorf("read handshake: %w", err)
-	}
-	if len(payload) == 0 {
-		return nil, fmt.Errorf("empty handshake from peer")
-	}
-
-	var remote handshakeMessage
-	if err := json.Unmarshal(payload, &remote); err != nil {
-		return nil, fmt.Errorf("decode handshake: %w", err)
-	}
-
-	nodeID, verifyErr := s.verifyHandshake(&remote)
-	if verifyErr != nil {
-		return nil, verifyErr
-	}
-	remote.NodeID = nodeID
-	return &remote, nil
-}
-
-func (s *Server) buildHandshake() (*handshakeMessage, error) {
-	nonce := make([]byte, handshakeNonceSize)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("generate handshake nonce: %w", err)
-	}
-	pubKey := s.privKey.PubKey().PublicKey
-	digest := handshakeDigest(s.chainID, s.genesis, s.network, nonce)
-	sig, err := ethcrypto.Sign(digest, s.privKey.PrivateKey)
-	if err != nil {
-		return nil, fmt.Errorf("sign handshake: %w", err)
-	}
-
-	return &handshakeMessage{
-		ChainID:     s.chainID,
-		NodeID:      s.nodeID,
-		PubKey:      ethcrypto.FromECDSAPub(pubKey),
-		GenesisHash: cloneBytes(s.genesis),
-		NetworkName: s.network,
-		Nonce:       nonce,
-		Signature:   sig,
-	}, nil
-}
-
-func handshakeDigest(chainID uint64, genesisHash []byte, networkName string, nonce []byte) []byte {
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, chainID)
-	h := sha256.New()
-	h.Write(buf)
-	h.Write(genesisHash)
-	h.Write([]byte(networkName))
-	h.Write(nonce)
-	return h.Sum(nil)
-}
-
-func (s *Server) verifyHandshake(msg *handshakeMessage) (string, error) {
-	if len(msg.Nonce) != handshakeNonceSize {
-		return "", fmt.Errorf("invalid handshake nonce length: %d", len(msg.Nonce))
-	}
-	if len(msg.Signature) != 65 {
-		return "", fmt.Errorf("invalid handshake signature length: %d", len(msg.Signature))
-	}
-	if len(msg.PubKey) == 0 {
-		return "", fmt.Errorf("handshake missing public key")
-	}
-	if len(msg.GenesisHash) == 0 {
-		return "", fmt.Errorf("handshake missing genesis hash")
-	}
-
-	pubKey, err := ethcrypto.UnmarshalPubkey(msg.PubKey)
-	if err != nil {
-		return "", fmt.Errorf("invalid public key: %w", err)
-	}
-	nodeID := crypto.NewAddress(crypto.NHBPrefix, ethcrypto.PubkeyToAddress(*pubKey).Bytes()).String()
-
-	digest := handshakeDigest(msg.ChainID, msg.GenesisHash, msg.NetworkName, msg.Nonce)
-	if !ethcrypto.VerifySignature(msg.PubKey, digest, msg.Signature[:64]) {
-		return nodeID, fmt.Errorf("invalid handshake signature")
-	}
-	if msg.NodeID != nodeID {
-		return nodeID, fmt.Errorf("node ID mismatch: claimed %s expected %s", msg.NodeID, nodeID)
-	}
-	if msg.ChainID != s.chainID {
-		return nodeID, fmt.Errorf("chain ID mismatch: remote %d local %d", msg.ChainID, s.chainID)
-	}
-	if !bytes.Equal(msg.GenesisHash, s.genesis) {
-		return nodeID, fmt.Errorf("genesis hash mismatch: remote %x local %x", msg.GenesisHash, s.genesis)
-	}
-	if msg.NetworkName != s.network {
-		return nodeID, fmt.Errorf("network name mismatch: remote %q local %q", msg.NetworkName, s.network)
-	}
-	return nodeID, nil
-}
-
-func cloneBytes(input []byte) []byte {
-	if input == nil {
-		return nil
-	}
-	cp := make([]byte, len(input))
-	copy(cp, input)
-	return cp
-}
-
-func writeFrame(ctx context.Context, conn net.Conn, payload any) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := conn.SetWriteDeadline(deadline); err != nil {
-			return err
-		}
-		defer conn.SetWriteDeadline(time.Time{})
-	}
-	_, err = conn.Write(append(data, '\n'))
-	return err
-}
-
-func readFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader) ([]byte, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := conn.SetReadDeadline(deadline); err != nil {
-			return nil, err
-		}
-		defer conn.SetReadDeadline(time.Time{})
-	}
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-		return nil, err
-	}
-	return bytes.TrimSpace(line), nil
 }
 
 func (s *Server) registerPeer(peer *Peer) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, exists := s.peers[peer.id]; exists {
 		return fmt.Errorf("peer %s already connected", peer.id)
 	}
 	if expiry, banned := s.banned[peer.id]; banned {
-		if time.Now().After(expiry) {
+		if s.now().After(expiry) {
 			delete(s.banned, peer.id)
+			delete(s.scores, peer.id)
 		} else {
 			return fmt.Errorf("peer %s banned until %s", peer.id, expiry.Format(time.RFC3339))
 		}
 	}
+	if len(s.peers) >= s.cfg.MaxPeers {
+		return fmt.Errorf("maximum peers reached")
+	}
+	if peer.inbound {
+		if s.inboundCount >= s.cfg.MaxInbound {
+			return fmt.Errorf("maximum inbound peers reached")
+		}
+		s.inboundCount++
+	} else {
+		if s.outboundCount >= s.cfg.MaxOutbound {
+			return fmt.Errorf("maximum outbound peers reached")
+		}
+		s.outboundCount++
+	}
 	s.peers[peer.id] = peer
+	if peer.dialAddr != "" {
+		s.byAddr[peer.dialAddr] = peer.id
+	}
 	return nil
 }
 
@@ -309,50 +290,166 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 	s.mu.Lock()
 	if current, ok := s.peers[peer.id]; ok && current == peer {
 		delete(s.peers, peer.id)
+		if peer.inbound {
+			if s.inboundCount > 0 {
+				s.inboundCount--
+			}
+		} else {
+			if s.outboundCount > 0 {
+				s.outboundCount--
+			}
+		}
+		if peer.dialAddr != "" {
+			delete(s.byAddr, peer.dialAddr)
+		}
 	}
 	s.mu.Unlock()
 
 	if ban {
 		s.banPeer(peer.id)
 		fmt.Printf("Peer %s disconnected and banned: %v\n", peer.id, reason)
-		return
-	}
-	if reason != nil {
+	} else if reason != nil {
 		fmt.Printf("Peer %s disconnected: %v\n", peer.id, reason)
 	} else {
 		fmt.Printf("Peer %s disconnected\n", peer.id)
 	}
-}
 
-func (s *Server) isBanned(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	expiry, ok := s.banned[id]
-	if !ok {
-		return false
+	if peer.persistent && !peer.inbound {
+		s.scheduleReconnect(peer.dialAddr)
 	}
-	if time.Now().After(expiry) {
-		delete(s.banned, id)
-		delete(s.reputation, id)
-		return false
+}
+
+func (s *Server) scheduleReconnect(addr string) {
+	if addr == "" {
+		return
 	}
-	return true
+	if s.isConnectedToAddress(addr) {
+		return
+	}
+	s.dialMu.Lock()
+	if _, pending := s.pendingDial[addr]; pending {
+		s.dialMu.Unlock()
+		return
+	}
+	delay := s.backoff[addr]
+	if delay == 0 {
+		delay = time.Second
+	} else {
+		delay *= 2
+		if delay > maxDialBackoff {
+			delay = maxDialBackoff
+		}
+	}
+	s.pendingDial[addr] = struct{}{}
+	s.backoff[addr] = delay
+	s.dialMu.Unlock()
+
+	go func(wait time.Duration) {
+		timer := time.NewTimer(wait)
+		<-timer.C
+		s.dialMu.Lock()
+		delete(s.pendingDial, addr)
+		s.dialMu.Unlock()
+		if err := s.Connect(addr); err != nil {
+			fmt.Printf("Reconnect to %s failed: %v\n", addr, err)
+			s.scheduleReconnect(addr)
+		} else {
+			s.resetBackoff(addr)
+		}
+	}(delay)
 }
 
-func (s *Server) banPeer(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.banned[id] = time.Now().Add(banDuration)
-	s.reputation[id] = reputationBanThreshold
-	delete(s.metrics, id)
+func (s *Server) resetBackoff(addr string) {
+	s.dialMu.Lock()
+	s.backoff[addr] = 0
+	s.dialMu.Unlock()
 }
 
-func (s *Server) adjustReputation(id string, delta int) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rep := s.reputation[id] + delta
-	s.reputation[id] = rep
-	return rep
+// Connect dials a remote peer and establishes a secure session.
+func (s *Server) Connect(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("empty address")
+	}
+	if s.isConnectedToAddress(addr) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+	defer cancel()
+
+	conn, err := s.dialFn(ctx, addr)
+	if err != nil {
+		return err
+	}
+
+	persistent := s.isPersistent(addr)
+	if err := s.initPeer(conn, false, persistent, addr); err != nil {
+		conn.Close()
+		return fmt.Errorf("handshake with %s failed: %w", addr, err)
+	}
+	fmt.Printf("Connected to peer: %s\n", addr)
+	s.resetBackoff(addr)
+	return nil
+}
+
+func (s *Server) isPersistent(addr string) bool {
+	s.dialMu.Lock()
+	defer s.dialMu.Unlock()
+	_, ok := s.persistent[strings.TrimSpace(addr)]
+	return ok
+}
+
+func (s *Server) isConnectedToAddress(addr string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.byAddr[strings.TrimSpace(addr)]
+	return ok
+}
+
+// Broadcast sends a message to all connected peers with backpressure.
+func (s *Server) Broadcast(msg *Message) error {
+	s.mu.RLock()
+	peers := make([]*Peer, 0, len(s.peers))
+	for _, peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	s.mu.RUnlock()
+
+	var errs []error
+	for _, peer := range peers {
+		if err := peer.Enqueue(msg); err != nil {
+			errs = append(errs, fmt.Errorf("peer %s: %w", peer.id, err))
+			if errors.Is(err, errQueueFull) {
+				fmt.Printf("Peer %s send queue full, disconnecting\n", peer.id)
+				peer.server.adjustScore(peer.id, -slowPenalty)
+			}
+			peer.terminate(false, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Server) allowGlobal(now time.Time) bool {
+	return s.globalLimit == nil || s.globalLimit.allow(now)
+}
+
+func (s *Server) handleRateLimit(peer *Peer, global bool) {
+	if global {
+		fmt.Printf("Dropping message from %s due to global rate cap\n", peer.id)
+		peer.terminate(false, fmt.Errorf("global rate cap exceeded"))
+		return
+	}
+	rep := s.adjustScore(peer.id, -ratePenalty)
+	fmt.Printf("Peer %s exceeded rate limit (score %d)\n", peer.id, rep)
+	ban := rep <= reputationBanThreshold
+	peer.terminate(ban, fmt.Errorf("peer rate limit exceeded"))
+}
+
+func (s *Server) recordValidMessage(id string) {
+	s.updatePeerMetrics(id, true)
+	if validMessageReward != 0 {
+		s.adjustScore(id, validMessageReward)
+	}
 }
 
 func (s *Server) handleProtocolViolation(peer *Peer, err error) {
@@ -362,17 +459,18 @@ func (s *Server) handleProtocolViolation(peer *Peer, err error) {
 		return
 	}
 
-	rep := s.adjustReputation(peer.id, -malformedPenalty)
-	fmt.Printf("Protocol violation from %s: %v (reputation %d)\n", peer.id, err, rep)
+	rep := s.adjustScore(peer.id, -malformedPenalty)
+	fmt.Printf("Protocol violation from %s: %v (score %d)\n", peer.id, err, rep)
 	ban := rep <= reputationBanThreshold
 	peer.terminate(ban, err)
 }
 
-func (s *Server) recordValidMessage(id string) {
-	s.updatePeerMetrics(id, true)
-	if validMessageReward != 0 {
-		s.adjustReputation(id, validMessageReward)
-	}
+func (s *Server) adjustScore(id string, delta int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	score := s.scores[id] + delta
+	s.scores[id] = score
+	return score
 }
 
 func (s *Server) updatePeerMetrics(id string, valid bool) bool {
@@ -380,7 +478,7 @@ func (s *Server) updatePeerMetrics(id string, valid bool) bool {
 	defer s.mu.Unlock()
 
 	metrics := s.metrics[id]
-	now := time.Now()
+	now := s.now()
 	if metrics == nil {
 		metrics = &peerMetrics{windowStart: now}
 		s.metrics[id] = metrics
@@ -406,183 +504,62 @@ func (s *Server) updatePeerMetrics(id string, valid bool) bool {
 	return false
 }
 
-// Connect dials a remote peer and establishes a secure session.
-func (s *Server) Connect(addr string) error {
-	dialer := &net.Dialer{Timeout: handshakeTimeout}
-	conn, err := dialer.Dial("tcp", addr)
-	if err != nil {
-		return err
+func (s *Server) isBanned(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expiry, ok := s.banned[id]
+	if !ok {
+		return false
 	}
-	if err := s.initPeer(conn); err != nil {
-		conn.Close()
-		return fmt.Errorf("handshake with %s failed: %w", addr, err)
+	if s.now().After(expiry) {
+		delete(s.banned, id)
+		delete(s.scores, id)
+		return false
 	}
-	fmt.Printf("Connected to peer: %s\n", addr)
-	return nil
+	return true
 }
 
-// Broadcast sends a message to all connected peers with backpressure.
-func (s *Server) Broadcast(msg *Message) error {
-	s.mu.RLock()
-	peers := make([]*Peer, 0, len(s.peers))
-	for _, peer := range s.peers {
-		peers = append(peers, peer)
-	}
-	s.mu.RUnlock()
-
-	var errs []error
-	for _, peer := range peers {
-		if err := peer.Enqueue(msg); err != nil {
-			errs = append(errs, fmt.Errorf("peer %s: %w", peer.id, err))
-			if errors.Is(err, errQueueFull) {
-				fmt.Printf("Peer %s send queue full, disconnecting\n", peer.id)
-			}
-			peer.terminate(false, err)
-		}
-	}
-	return errors.Join(errs...)
+func (s *Server) banPeer(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.banned[id] = s.now().Add(s.cfg.PeerBanDuration)
+	s.scores[id] = reputationBanThreshold
+	delete(s.metrics, id)
 }
 
-// Peer represents a remote participant in the network.
-type Peer struct {
-	id         string
-	conn       net.Conn
-	reader     *bufio.Reader
-	outbound   chan *Message
-	server     *Server
-	remoteAddr string
-
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	closeOnce sync.Once
-}
-
-func newPeer(id string, conn net.Conn, reader *bufio.Reader, server *Server) *Peer {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Peer{
-		id:         id,
-		conn:       conn,
-		reader:     reader,
-		outbound:   make(chan *Message, outboundQueueSize),
-		server:     server,
-		remoteAddr: conn.RemoteAddr().String(),
-		ctx:        ctx,
-		cancel:     cancel,
-	}
-}
-
-func (p *Peer) start() {
-	go p.readLoop()
-	go p.writeLoop()
-}
-
-func (p *Peer) Enqueue(msg *Message) error {
-	select {
-	case <-p.ctx.Done():
-		return fmt.Errorf("peer shutting down")
-	default:
-	}
-
-	select {
-	case p.outbound <- msg:
-		return nil
-	case <-p.ctx.Done():
-		return fmt.Errorf("peer shutting down")
-	default:
-		return errQueueFull
-	}
-}
-
-func (p *Peer) readLoop() {
-	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		default:
-		}
-
-		if err := p.conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
-			p.terminate(false, fmt.Errorf("set read deadline: %w", err))
-			return
-		}
-
-		line, err := p.reader.ReadBytes('\n')
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				p.terminate(false, fmt.Errorf("peer %s read timeout", p.id))
-				return
-			}
-			if errors.Is(err, io.EOF) {
-				p.terminate(false, io.EOF)
-				return
-			}
-			p.terminate(false, fmt.Errorf("read error: %w", err))
-			return
-		}
-
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) == 0 {
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{})
+	for _, v := range values {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
 			continue
 		}
-		if len(trimmed) > maxMessageSize {
-			p.server.handleProtocolViolation(p, fmt.Errorf("message exceeds max size (%d bytes)", len(trimmed)))
-			return
+		if _, ok := seen[trimmed]; ok {
+			continue
 		}
-
-		var msg Message
-		if err := json.Unmarshal(trimmed, &msg); err != nil {
-			p.server.handleProtocolViolation(p, fmt.Errorf("malformed message: %w", err))
-			return
-		}
-
-		if err := p.server.handler.HandleMessage(&msg); err != nil {
-			fmt.Printf("Error handling message from %s: %v\n", p.id, err)
-		}
-		p.server.recordValidMessage(p.id)
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
 	}
+	sort.Strings(out)
+	return out
 }
 
-func (p *Peer) writeLoop() {
-	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		case msg, ok := <-p.outbound:
-			if !ok {
-				return
-			}
-			ctx, cancel := context.WithTimeout(p.ctx, writeTimeout)
-			err := p.writeMessage(ctx, msg)
-			cancel()
-			if err != nil {
-				p.terminate(false, fmt.Errorf("write error: %w", err))
-				return
-			}
-		}
+func summarizeHash(input []byte) string {
+	if len(input) == 0 {
+		return ""
 	}
+	if len(input) <= 8 {
+		return fmt.Sprintf("%x", input)
+	}
+	return fmt.Sprintf("%x…%x", input[:4], input[len(input)-4:])
 }
 
-func (p *Peer) writeMessage(ctx context.Context, msg *Message) error {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return err
+func cloneBytes(input []byte) []byte {
+	if input == nil {
+		return nil
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := p.conn.SetWriteDeadline(deadline); err != nil {
-			return err
-		}
-		defer p.conn.SetWriteDeadline(time.Time{})
-	}
-	_, err = p.conn.Write(append(data, '\n'))
-	return err
-}
-
-func (p *Peer) terminate(ban bool, reason error) {
-	p.closeOnce.Do(func() {
-		p.cancel()
-		p.conn.Close()
-		close(p.outbound)
-		p.server.removePeer(p, ban, reason)
-	})
+	cp := make([]byte, len(input))
+	copy(cp, input)
+	return cp
 }
