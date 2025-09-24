@@ -335,6 +335,30 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoUserMeters(w, r, req)
 	case "potso_top":
 		s.handlePotsoTop(w, r, req)
+	case "potso_stake_lock":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handlePotsoStakeLock(w, r, req)
+	case "potso_stake_unbond":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handlePotsoStakeUnbond(w, r, req)
+	case "potso_stake_withdraw":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handlePotsoStakeWithdraw(w, r, req)
+	case "potso_stake_info":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handlePotsoStakeInfo(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}
