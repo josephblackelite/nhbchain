@@ -117,6 +117,9 @@ func (sp *StateProcessor) pruneEpochHistory() {
 }
 
 func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) error {
+	if err := sp.maybeProcessPotsoRewards(height, timestamp); err != nil {
+		return err
+	}
 	if err := sp.accrueEpochRewards(height); err != nil {
 		return err
 	}

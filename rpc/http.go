@@ -359,6 +359,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handlePotsoStakeInfo(w, r, req)
+	case "potso_epoch_info":
+		s.handlePotsoEpochInfo(w, r, req)
+	case "potso_epoch_payouts":
+		s.handlePotsoEpochPayouts(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}

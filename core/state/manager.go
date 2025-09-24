@@ -73,6 +73,11 @@ var (
 	potsoStakeLockIndexPrefix  = []byte("potso/stake/locks/index/")
 	potsoStakeQueuePrefix      = []byte("potso/stake/unbondq/")
 	potsoStakeModuleSeedPrefix = "module/potso/stake/vault"
+	potsoStakeOwnerIndexKey    = []byte("potso/stake/owners")
+	potsoRewardLastProcessed   = []byte("potso/rewards/lastProcessed")
+	potsoRewardMetaKeyFormat   = "potso/rewards/epoch/%d/meta"
+	potsoRewardWinnersFormat   = "potso/rewards/epoch/%d/winners"
+	potsoRewardPayoutFormat    = "potso/rewards/epoch/%d/payout/%x"
 )
 
 func LoyaltyGlobalStorageKey() []byte {
@@ -277,6 +282,18 @@ func potsoStakeQueueKey(day string) []byte {
 	return kvKey(buf)
 }
 
+func potsoRewardMetaKey(epoch uint64) []byte {
+	return []byte(fmt.Sprintf(potsoRewardMetaKeyFormat, epoch))
+}
+
+func potsoRewardWinnersKey(epoch uint64) []byte {
+	return []byte(fmt.Sprintf(potsoRewardWinnersFormat, epoch))
+}
+
+func potsoRewardPayoutKey(epoch uint64, addr []byte) []byte {
+	return []byte(fmt.Sprintf(potsoRewardPayoutFormat, epoch, addr))
+}
+
 // HasSeenSwapNonce reports whether the provided swap order identifier has been processed.
 func (m *Manager) HasSeenSwapNonce(orderID string) bool {
 	trimmed := strings.TrimSpace(orderID)
@@ -380,7 +397,31 @@ func (m *Manager) PotsoStakeBondedTotal(owner [20]byte) (*big.Int, error) {
 
 // PotsoStakeSetBondedTotal updates the bonded stake total tracked for the owner.
 func (m *Manager) PotsoStakeSetBondedTotal(owner [20]byte, amount *big.Int) error {
-	return m.writeBigInt(potsoStakeTotalKey(owner[:]), amount)
+	if err := m.writeBigInt(potsoStakeTotalKey(owner[:]), amount); err != nil {
+		return err
+	}
+	if amount != nil && amount.Sign() > 0 {
+		return m.appendStakeOwner(owner)
+	}
+	return m.removeStakeOwner(owner)
+}
+
+// PotsoStakeOwners lists all accounts with a positive bonded balance.
+func (m *Manager) PotsoStakeOwners() ([][20]byte, error) {
+	var raw [][]byte
+	if err := m.KVGetList(potsoStakeOwnerIndexKey, &raw); err != nil {
+		return nil, err
+	}
+	owners := make([][20]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 20 {
+			continue
+		}
+		var addr [20]byte
+		copy(addr[:], entry[:20])
+		owners = append(owners, addr)
+	}
+	return owners, nil
 }
 
 // PotsoStakeAllocateNonce reserves and returns the next lock nonce for the owner.
@@ -529,6 +570,115 @@ func (m *Manager) PotsoStakeQueueRemove(day string, owner [20]byte, nonce uint64
 // PotsoStakeVaultAddress returns the deterministic module vault used for staking locks.
 func (m *Manager) PotsoStakeVaultAddress() [20]byte {
 	return potsoStakeModuleAddress()
+}
+
+func (m *Manager) appendStakeOwner(owner [20]byte) error {
+	return m.KVAppend(potsoStakeOwnerIndexKey, owner[:])
+}
+
+func (m *Manager) removeStakeOwner(owner [20]byte) error {
+	var raw [][]byte
+	if err := m.KVGetList(potsoStakeOwnerIndexKey, &raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	filtered := make([][]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) == len(owner) && bytes.Equal(entry, owner[:]) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if len(filtered) == 0 {
+		return m.trie.Update(kvKey(potsoStakeOwnerIndexKey), nil)
+	}
+	return m.KVPut(potsoStakeOwnerIndexKey, filtered)
+}
+
+// PotsoRewardsLastProcessedEpoch returns the last epoch marked as processed.
+func (m *Manager) PotsoRewardsLastProcessedEpoch() (uint64, bool, error) {
+	var value uint64
+	ok, err := m.KVGet(potsoRewardLastProcessed, &value)
+	if err != nil {
+		return 0, false, err
+	}
+	return value, ok, nil
+}
+
+// PotsoRewardsSetLastProcessedEpoch updates the marker indicating the last processed epoch.
+func (m *Manager) PotsoRewardsSetLastProcessedEpoch(epoch uint64) error {
+	return m.KVPut(potsoRewardLastProcessed, epoch)
+}
+
+// PotsoRewardsGetMeta retrieves the stored metadata for the provided epoch.
+func (m *Manager) PotsoRewardsGetMeta(epoch uint64) (*potso.RewardEpochMeta, bool, error) {
+	var meta potso.RewardEpochMeta
+	ok, err := m.KVGet(potsoRewardMetaKey(epoch), &meta)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return &meta, true, nil
+}
+
+// PotsoRewardsSetMeta persists the metadata for a processed epoch.
+func (m *Manager) PotsoRewardsSetMeta(epoch uint64, meta *potso.RewardEpochMeta) error {
+	if meta == nil {
+		return fmt.Errorf("potso: reward meta must not be nil")
+	}
+	return m.KVPut(potsoRewardMetaKey(epoch), meta)
+}
+
+// PotsoRewardsSetPayout stores the payout amount for a participant within an epoch.
+func (m *Manager) PotsoRewardsSetPayout(epoch uint64, addr [20]byte, amount *big.Int) error {
+	if amount == nil {
+		amount = big.NewInt(0)
+	}
+	return m.KVPut(potsoRewardPayoutKey(epoch, addr[:]), amount)
+}
+
+// PotsoRewardsGetPayout loads the stored payout for the participant within the epoch.
+func (m *Manager) PotsoRewardsGetPayout(epoch uint64, addr [20]byte) (*big.Int, bool, error) {
+	value := new(big.Int)
+	ok, err := m.KVGet(potsoRewardPayoutKey(epoch, addr[:]), value)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return value, true, nil
+}
+
+// PotsoRewardsSetWinners stores the ordered list of winners for the epoch.
+func (m *Manager) PotsoRewardsSetWinners(epoch uint64, winners [][20]byte) error {
+	encoded := make([][]byte, len(winners))
+	for i := range winners {
+		encoded[i] = append([]byte(nil), winners[i][:]...)
+	}
+	return m.KVPut(potsoRewardWinnersKey(epoch), encoded)
+}
+
+// PotsoRewardsListWinners returns the ordered winner list for the epoch.
+func (m *Manager) PotsoRewardsListWinners(epoch uint64) ([][20]byte, error) {
+	var raw [][]byte
+	if err := m.KVGetList(potsoRewardWinnersKey(epoch), &raw); err != nil {
+		return nil, err
+	}
+	winners := make([][20]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 20 {
+			continue
+		}
+		var addr [20]byte
+		copy(addr[:], entry[:20])
+		winners = append(winners, addr)
+	}
+	return winners, nil
 }
 
 func escrowStorageKey(id [32]byte) []byte {
