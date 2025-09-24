@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"nhbchain/core"
 )
 
 const (
@@ -24,6 +26,7 @@ const (
 	headerIdempotencyKey  = "Idempotency-Key"
 	headerNowPaymentsSig  = "X-Nowpayments-Signature"
 	headerNowPaymentsSig2 = "x-nowpayments-sig"
+	mintVoucherTTL        = 10 * time.Minute
 )
 
 // Server exposes HTTP endpoints for fiat-to-token flows.
@@ -425,19 +428,23 @@ func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) mintWithVoucher(ctx context.Context, invoice *InvoiceRecord, quote *QuoteRecord) (string, error) {
-	payload := strings.Join([]string{invoice.Recipient, quote.Token, quote.AmountToken, invoice.ID}, "|")
-	sig, err := s.signer.Sign(ctx, []byte(payload))
-	if err != nil {
-		return "", err
-	}
-	voucher := MintVoucher{
+	voucher := core.MintVoucher{
+		InvoiceID: invoice.ID,
 		Recipient: invoice.Recipient,
 		Token:     quote.Token,
 		Amount:    quote.AmountToken,
-		Nonce:     invoice.ID,
-		Signature: hex.EncodeToString(sig),
+		ChainID:   core.MintChainID,
+		Expiry:    s.nowFn().Add(mintVoucherTTL).Unix(),
 	}
-	return s.node.MintWithSig(ctx, voucher)
+	payload, err := voucher.CanonicalJSON()
+	if err != nil {
+		return "", err
+	}
+	sig, err := s.signer.Sign(ctx, payload)
+	if err != nil {
+		return "", err
+	}
+	return s.node.MintWithSig(ctx, voucher, hex.EncodeToString(sig))
 }
 
 func (s *Server) verifyHMAC(body []byte, signature string) bool {

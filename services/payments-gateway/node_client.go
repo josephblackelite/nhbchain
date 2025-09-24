@@ -9,20 +9,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"nhbchain/core"
 )
 
 // NodeClient exposes the minimal RPC surface required by the payments gateway.
 type NodeClient interface {
-	MintWithSig(ctx context.Context, voucher MintVoucher) (string, error)
-}
-
-// MintVoucher mirrors the payload expected by the node RPC method mint_with_sig.
-type MintVoucher struct {
-	Recipient string `json:"recipient"`
-	Token     string `json:"token"`
-	Amount    string `json:"amount"`
-	Nonce     string `json:"nonce"`
-	Signature string `json:"signature"`
+	MintWithSig(ctx context.Context, voucher core.MintVoucher, signature string) (string, error)
 }
 
 // RPCNodeClient is a lightweight JSON-RPC client.
@@ -44,14 +37,8 @@ func NewRPCNodeClient(baseURL, authToken string) *RPCNodeClient {
 	}
 }
 
-func (c *RPCNodeClient) MintWithSig(ctx context.Context, voucher MintVoucher) (string, error) {
-	params := []interface{}{map[string]interface{}{
-		"recipient": voucher.Recipient,
-		"token":     voucher.Token,
-		"amount":    voucher.Amount,
-		"nonce":     voucher.Nonce,
-		"signature": voucher.Signature,
-	}}
+func (c *RPCNodeClient) MintWithSig(ctx context.Context, voucher core.MintVoucher, signature string) (string, error) {
+	params := []interface{}{voucher, signature}
 	var result struct {
 		TxHash string `json:"txHash"`
 	}

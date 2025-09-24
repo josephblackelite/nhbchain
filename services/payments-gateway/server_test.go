@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"nhbchain/core"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -44,15 +46,17 @@ func (s *stubNowPayments) GetInvoice(ctx context.Context, id string) (*NowPaymen
 }
 
 type stubNode struct {
-	lastVoucher MintVoucher
-	txHash      string
-	callCount   int
-	err         error
+	lastVoucher   core.MintVoucher
+	lastSignature string
+	txHash        string
+	callCount     int
+	err           error
 }
 
-func (n *stubNode) MintWithSig(ctx context.Context, voucher MintVoucher) (string, error) {
+func (n *stubNode) MintWithSig(ctx context.Context, voucher core.MintVoucher, signature string) (string, error) {
 	n.callCount++
 	n.lastVoucher = voucher
+	n.lastSignature = signature
 	if n.err != nil {
 		return "", n.err
 	}
@@ -237,8 +241,17 @@ func TestWebhookReconciliationAndMint(t *testing.T) {
 	if node.lastVoucher.Recipient != "nhb1bob" || node.lastVoucher.Token != "NHB" {
 		t.Fatalf("unexpected voucher: %+v", node.lastVoucher)
 	}
-	if node.lastVoucher.Nonce != invoiceID {
-		t.Fatalf("nonce mismatch: %s", node.lastVoucher.Nonce)
+	if node.lastVoucher.InvoiceID != invoiceID {
+		t.Fatalf("invoice mismatch: %s", node.lastVoucher.InvoiceID)
+	}
+	if node.lastVoucher.Amount != quote.AmountToken {
+		t.Fatalf("amount mismatch: got %s want %s", node.lastVoucher.Amount, quote.AmountToken)
+	}
+	if node.lastVoucher.ChainID != core.MintChainID {
+		t.Fatalf("unexpected chain id: %d", node.lastVoucher.ChainID)
+	}
+	if node.lastSignature == "" {
+		t.Fatalf("expected signature to be provided")
 	}
 	inv, err := store.GetInvoice(context.Background(), invoiceID)
 	if err != nil {

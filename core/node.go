@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"nhbchain/p2p"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 // Node is the central controller, wiring all components together.
@@ -637,6 +640,120 @@ func (n *Node) ClaimableGet(id [32]byte) (*claimable.Claimable, error) {
 		return nil, claimable.ErrNotFound
 	}
 	return record, nil
+}
+
+// MintWithSignature credits funds to the recipient described in the voucher after
+// verifying the off-chain signature and replay protection fields.
+func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string, error) {
+	if voucher == nil {
+		return "", fmt.Errorf("voucher required")
+	}
+	amount, err := voucher.AmountBig()
+	if err != nil {
+		return "", err
+	}
+	if voucher.ChainID != MintChainID {
+		return "", ErrMintInvalidChainID
+	}
+	if voucher.Expiry <= time.Now().Unix() {
+		return "", ErrMintExpired
+	}
+	canonical, err := voucher.CanonicalJSON()
+	if err != nil {
+		return "", err
+	}
+	digest := ethcrypto.Keccak256(canonical)
+	if len(signature) != 65 {
+		return "", fmt.Errorf("invalid signature length")
+	}
+	pubKey, err := ethcrypto.SigToPub(digest, signature)
+	if err != nil {
+		return "", fmt.Errorf("recover signer: %w", err)
+	}
+	recovered := ethcrypto.PubkeyToAddress(*pubKey)
+	var recoveredBytes [20]byte
+	copy(recoveredBytes[:], recovered.Bytes())
+
+	token := voucher.NormalizedToken()
+	var requiredRole string
+	switch token {
+	case "NHB":
+		requiredRole = "MINTER_NHB"
+	case "ZNHB":
+		requiredRole = "MINTER_ZNHB"
+	default:
+		return "", fmt.Errorf("unsupported token %q", voucher.Token)
+	}
+
+	invoiceID := voucher.TrimmedInvoiceID()
+	if invoiceID == "" {
+		return "", fmt.Errorf("invoiceId required")
+	}
+	recipientRef := voucher.TrimmedRecipient()
+	if recipientRef == "" {
+		return "", fmt.Errorf("recipient required")
+	}
+
+	txHashBytes := ethcrypto.Keccak256(append([]byte{}, append(canonical, signature...)...))
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(txHashBytes))
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+
+	if !manager.HasRole(requiredRole, recoveredBytes[:]) {
+		return "", ErrMintInvalidSigner
+	}
+
+	key := nhbstate.MintInvoiceKey(invoiceID)
+	var used bool
+	if ok, err := manager.KVGet(key, &used); err != nil {
+		return "", err
+	} else if ok && used {
+		return "", ErrMintInvoiceUsed
+	}
+
+	var recipient [20]byte
+	if decoded, err := crypto.DecodeAddress(recipientRef); err == nil {
+		copy(recipient[:], decoded.Bytes())
+	} else {
+		resolved, ok := manager.IdentityResolve(recipientRef)
+		if !ok {
+			return "", fmt.Errorf("recipient not found: %s", recipientRef)
+		}
+		recipient = resolved
+	}
+
+	account, err := manager.GetAccount(recipient[:])
+	if err != nil {
+		return "", err
+	}
+	switch token {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+	}
+	if err := manager.PutAccount(recipient[:], account); err != nil {
+		return "", err
+	}
+	if err := manager.KVPut(key, true); err != nil {
+		return "", err
+	}
+
+	evt := events.MintSettled{
+		InvoiceID: invoiceID,
+		Recipient: recipient,
+		Token:     token,
+		Amount:    amount,
+		TxHash:    txHash,
+	}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+
+	return txHash, nil
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
