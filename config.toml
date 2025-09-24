@@ -26,6 +26,7 @@ EmissionPerEpoch = "0"
 TreasuryAddress = "nhb1exampletreasury000000000000000000000"
 MaxWinnersPerEpoch = 5000
 CarryRemainder = true
+PayoutMode = "auto"
 
 [potso.weights]
 AlphaStakeBps = 7000

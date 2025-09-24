@@ -237,7 +237,7 @@ func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int6
 	}
 	day := time.Unix(timestamp, 0).UTC().Format(potso.DayFormat)
 	for epochNumber := start; epochNumber <= target; epochNumber++ {
-		if err := sp.processPotsoRewardEpoch(manager, cfg, epochNumber, day); err != nil {
+		if err := sp.processPotsoRewardEpoch(manager, cfg, epochNumber, day, timestamp); err != nil {
 			return err
 		}
 		if err := manager.PotsoRewardsSetLastProcessedEpoch(epochNumber); err != nil {
@@ -247,7 +247,7 @@ func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int6
 	return nil
 }
 
-func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg potso.RewardConfig, epochNumber uint64, day string) error {
+func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg potso.RewardConfig, epochNumber uint64, day string, settledAt int64) error {
 	if manager == nil {
 		return fmt.Errorf("potso: state manager unavailable")
 	}
@@ -377,38 +377,71 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		winnersAddrs = append(winnersAddrs, winner.Address)
 	}
 
+	payoutMode := cfg.EffectivePayoutMode()
 	totalPaid := new(big.Int).Set(outcome.TotalPaid)
-	if totalPaid.Sign() > 0 {
-		if treasuryBalance.Cmp(totalPaid) < 0 {
-			return fmt.Errorf("potso: treasury balance insufficient for epoch %d", epochNumber)
-		}
-		treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
-		if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+	for _, winner := range outcome.Winners {
+		if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
 			return err
 		}
+	}
+	if totalPaid.Sign() > 0 && treasuryBalance.Cmp(totalPaid) < 0 {
+		return potso.ErrInsufficientTreasury
+	}
+	switch payoutMode {
+	case potso.RewardPayoutModeClaim:
 		for _, winner := range outcome.Winners {
-			account, err := manager.GetAccount(winner.Address[:])
-			if err != nil {
+			claim := &potso.RewardClaim{
+				Amount:    new(big.Int).Set(winner.Amount),
+				Claimed:   false,
+				ClaimedAt: 0,
+				Mode:      potso.RewardPayoutModeClaim,
+			}
+			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
 				return err
 			}
-			if account.BalanceZNHB == nil {
-				account.BalanceZNHB = big.NewInt(0)
-			}
-			account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
-			if err := manager.PutAccount(winner.Address[:], account); err != nil {
-				return err
-			}
-			if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
-				return err
-			}
-			if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount)}).Event(); evt != nil {
-				sp.AppendEvent(evt)
+			if winner.Amount.Sign() > 0 {
+				if evt := (events.PotsoRewardReady{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeClaim}).Event(); evt != nil {
+					sp.AppendEvent(evt)
+				}
 			}
 		}
-	} else {
-		for _, winner := range outcome.Winners {
-			if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
+	default:
+		if totalPaid.Sign() > 0 {
+			treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+			if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
 				return err
+			}
+		}
+		for _, winner := range outcome.Winners {
+			if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
+				account, err := manager.GetAccount(winner.Address[:])
+				if err != nil {
+					return err
+				}
+				if account.BalanceZNHB == nil {
+					account.BalanceZNHB = big.NewInt(0)
+				}
+				account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
+				if err := manager.PutAccount(winner.Address[:], account); err != nil {
+					return err
+				}
+			}
+			claim := &potso.RewardClaim{
+				Amount:    new(big.Int).Set(winner.Amount),
+				Claimed:   winner.Amount.Sign() <= 0 || totalPaid.Sign() > 0,
+				ClaimedAt: uint64(settledAt),
+				Mode:      potso.RewardPayoutModeAuto,
+			}
+			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+				return err
+			}
+			if winner.Amount.Sign() > 0 && totalPaid.Sign() > 0 {
+				if err := manager.PotsoRewardsAppendHistory(winner.Address, potso.RewardHistoryEntry{Epoch: epochNumber, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}); err != nil {
+					return err
+				}
+				if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}).Event(); evt != nil {
+					sp.AppendEvent(evt)
+				}
 			}
 		}
 	}

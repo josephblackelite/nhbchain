@@ -2,6 +2,7 @@ package state
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -14,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"nhbchain/core/identity"
+	"nhbchain/crypto"
 	"nhbchain/native/escrow"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
@@ -78,6 +80,8 @@ var (
 	potsoRewardMetaKeyFormat   = "potso/rewards/epoch/%d/meta"
 	potsoRewardWinnersFormat   = "potso/rewards/epoch/%d/winners"
 	potsoRewardPayoutFormat    = "potso/rewards/epoch/%d/payout/%x"
+	potsoRewardClaimFormat     = "potso/rewards/epoch/%d/claim/%x"
+	potsoRewardHistoryFormat   = "potso/rewards/history/%x"
 	potsoMetricsMeterPrefix    = []byte("potso/metrics/meter/")
 	potsoMetricsIndexPrefix    = []byte("potso/metrics/index/")
 	potsoMetricsSnapshotPrefix = []byte("potso/metrics/snapshot/")
@@ -321,6 +325,14 @@ func potsoRewardWinnersKey(epoch uint64) []byte {
 
 func potsoRewardPayoutKey(epoch uint64, addr []byte) []byte {
 	return []byte(fmt.Sprintf(potsoRewardPayoutFormat, epoch, addr))
+}
+
+func potsoRewardClaimKey(epoch uint64, addr []byte) []byte {
+	return []byte(fmt.Sprintf(potsoRewardClaimFormat, epoch, addr))
+}
+
+func potsoRewardHistoryKey(addr []byte) []byte {
+	return []byte(fmt.Sprintf(potsoRewardHistoryFormat, addr))
 }
 
 // HasSeenSwapNonce reports whether the provided swap order identifier has been processed.
@@ -783,6 +795,127 @@ func (m *Manager) PotsoRewardsListWinners(epoch uint64) ([][20]byte, error) {
 		winners = append(winners, addr)
 	}
 	return winners, nil
+}
+
+// PotsoRewardsSetClaim records or updates a claim entry for the given epoch winner.
+func (m *Manager) PotsoRewardsSetClaim(epoch uint64, addr [20]byte, claim *potso.RewardClaim) error {
+	if claim == nil {
+		return fmt.Errorf("potso: reward claim must not be nil")
+	}
+	stored := &potso.RewardClaim{
+		Claimed:   claim.Claimed,
+		ClaimedAt: claim.ClaimedAt,
+		Mode:      claim.Mode.Normalise(),
+	}
+	if claim.Amount != nil {
+		stored.Amount = new(big.Int).Set(claim.Amount)
+	} else {
+		stored.Amount = big.NewInt(0)
+	}
+	return m.KVPut(potsoRewardClaimKey(epoch, addr[:]), stored)
+}
+
+// PotsoRewardsGetClaim retrieves the claim entry for the given epoch winner.
+func (m *Manager) PotsoRewardsGetClaim(epoch uint64, addr [20]byte) (*potso.RewardClaim, bool, error) {
+	var claim potso.RewardClaim
+	ok, err := m.KVGet(potsoRewardClaimKey(epoch, addr[:]), &claim)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return claim.Clone(), true, nil
+}
+
+// PotsoRewardsAppendHistory appends a settled payout entry to the participant history ledger.
+func (m *Manager) PotsoRewardsAppendHistory(addr [20]byte, entry potso.RewardHistoryEntry) error {
+	key := potsoRewardHistoryKey(addr[:])
+	var history []potso.RewardHistoryEntry
+	ok, err := m.KVGet(key, &history)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		history = []potso.RewardHistoryEntry{}
+	}
+	clone := entry.Clone()
+	clone.Mode = clone.Mode.Normalise()
+	history = append(history, clone)
+	return m.KVPut(key, history)
+}
+
+// PotsoRewardsHistory returns the stored payout history for the participant.
+func (m *Manager) PotsoRewardsHistory(addr [20]byte) ([]potso.RewardHistoryEntry, error) {
+	key := potsoRewardHistoryKey(addr[:])
+	var history []potso.RewardHistoryEntry
+	ok, err := m.KVGet(key, &history)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []potso.RewardHistoryEntry{}, nil
+	}
+	cloned := make([]potso.RewardHistoryEntry, len(history))
+	for i := range history {
+		cloned[i] = history[i].Clone()
+	}
+	return cloned, nil
+}
+
+// PotsoRewardsBuildCSV constructs a CSV export for the epoch payout ledger.
+func (m *Manager) PotsoRewardsBuildCSV(epoch uint64) ([]byte, *big.Int, int, error) {
+	winners, err := m.PotsoRewardsListWinners(epoch)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	buf := &bytes.Buffer{}
+	writer := csv.NewWriter(buf)
+	if err := writer.Write([]string{"address", "amount", "claimed", "claimedAt", "mode"}); err != nil {
+		return nil, nil, 0, err
+	}
+	total := big.NewInt(0)
+	for _, addr := range winners {
+		payout, _, err := m.PotsoRewardsGetPayout(epoch, addr)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		amount := big.NewInt(0)
+		if payout != nil {
+			amount = new(big.Int).Set(payout)
+		}
+		total.Add(total, amount)
+
+		claim, _, err := m.PotsoRewardsGetClaim(epoch, addr)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		claimed := false
+		claimedAt := uint64(0)
+		mode := potso.RewardPayoutModeAuto
+		if claim != nil {
+			claimed = claim.Claimed
+			claimedAt = claim.ClaimedAt
+			if claim.Mode.Valid() {
+				mode = claim.Mode.Normalise()
+			}
+		}
+		record := []string{
+			crypto.NewAddress(crypto.NHBPrefix, addr[:]).String(),
+			amount.String(),
+			strconv.FormatBool(claimed),
+			strconv.FormatUint(claimedAt, 10),
+			string(mode),
+		}
+		if err := writer.Write(record); err != nil {
+			return nil, nil, 0, err
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, nil, 0, err
+	}
+	return buf.Bytes(), total, len(winners), nil
 }
 
 func escrowStorageKey(id [32]byte) []byte {

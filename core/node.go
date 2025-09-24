@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -393,6 +394,148 @@ func (n *Node) PotsoRewardEpochPayouts(epoch uint64, cursor *[20]byte, limit int
 	return result, nil
 }
 
+func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	cfg := n.state.PotsoRewardConfig()
+	if cfg.EffectivePayoutMode() != potso.RewardPayoutModeClaim {
+		return false, nil, potso.ErrClaimingDisabled
+	}
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	claim, ok, err := manager.PotsoRewardsGetClaim(epoch, addr)
+	if err != nil {
+		return false, nil, err
+	}
+	if !ok || claim == nil {
+		return false, nil, potso.ErrRewardNotFound
+	}
+	amount := big.NewInt(0)
+	if claim.Amount != nil {
+		amount = new(big.Int).Set(claim.Amount)
+	}
+	if claim.Claimed {
+		return false, amount, nil
+	}
+
+	treasury, err := manager.GetAccount(cfg.TreasuryAddress[:])
+	if err != nil {
+		return false, nil, err
+	}
+	if treasury.BalanceZNHB == nil {
+		treasury.BalanceZNHB = big.NewInt(0)
+	}
+	if treasury.BalanceZNHB.Cmp(amount) < 0 {
+		return false, nil, potso.ErrInsufficientTreasury
+	}
+
+	account, err := manager.GetAccount(addr[:])
+	if err != nil {
+		return false, nil, err
+	}
+	if account.BalanceZNHB == nil {
+		account.BalanceZNHB = big.NewInt(0)
+	}
+
+	treasury.BalanceZNHB = new(big.Int).Sub(treasury.BalanceZNHB, amount)
+	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+
+	if err := manager.PutAccount(cfg.TreasuryAddress[:], treasury); err != nil {
+		return false, nil, err
+	}
+	if err := manager.PutAccount(addr[:], account); err != nil {
+		return false, nil, err
+	}
+
+	claim.Claimed = true
+	claim.ClaimedAt = uint64(time.Now().UTC().Unix())
+	if !claim.Mode.Valid() {
+		claim.Mode = potso.RewardPayoutModeClaim
+	} else {
+		claim.Mode = claim.Mode.Normalise()
+	}
+	if err := manager.PotsoRewardsSetClaim(epoch, addr, claim); err != nil {
+		return false, nil, err
+	}
+	if amount.Sign() > 0 {
+		entry := potso.RewardHistoryEntry{Epoch: epoch, Amount: new(big.Int).Set(amount), Mode: claim.Mode}
+		if err := manager.PotsoRewardsAppendHistory(addr, entry); err != nil {
+			return false, nil, err
+		}
+		if evt := (events.PotsoRewardPaid{Epoch: epoch, Address: addr, Amount: new(big.Int).Set(amount), Mode: claim.Mode}).Event(); evt != nil {
+			n.state.AppendEvent(evt)
+		}
+	}
+	return true, amount, nil
+}
+
+func (n *Node) PotsoRewardsHistory(addr [20]byte, cursor string, limit int) ([]potso.RewardHistoryEntry, string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	offset := 0
+	if strings.TrimSpace(cursor) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(cursor))
+		if err != nil || parsed < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+		offset = parsed
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	history, err := manager.PotsoRewardsHistory(addr)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(history) == 0 || offset >= len(history) {
+		return []potso.RewardHistoryEntry{}, "", nil
+	}
+
+	// History is stored oldest to newest; serve newest-first slices.
+	endIndex := len(history) - 1 - offset
+	if endIndex < 0 {
+		return []potso.RewardHistoryEntry{}, "", nil
+	}
+	startIndex := endIndex - limit + 1
+	if startIndex < 0 {
+		startIndex = 0
+	}
+
+	result := make([]potso.RewardHistoryEntry, 0, endIndex-startIndex+1)
+	for i := endIndex; i >= startIndex; i-- {
+		clone := history[i].Clone()
+		result = append(result, clone)
+	}
+
+	nextOffset := offset + len(result)
+	nextCursor := ""
+	if nextOffset < len(history) {
+		nextCursor = strconv.Itoa(nextOffset)
+	}
+	return result, nextCursor, nil
+}
+
+func (n *Node) PotsoExportEpoch(epoch uint64) ([]byte, *big.Int, int, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	data, total, winners, err := manager.PotsoRewardsBuildCSV(epoch)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	copied := append([]byte(nil), data...)
+	if total == nil {
+		total = big.NewInt(0)
+	} else {
+		total = new(big.Int).Set(total)
+	}
+	return copied, total, winners, nil
+}
 func (n *Node) PotsoLeaderboard(epoch uint64, offset, limit int) (uint64, uint64, []potso.StoredWeightEntry, error) {
 	if offset < 0 {
 		offset = 0
