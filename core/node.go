@@ -14,6 +14,7 @@ import (
 
 	"nhbchain/consensus/bft"
 	"nhbchain/core/claimable"
+	"nhbchain/core/engagement"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -37,6 +38,7 @@ type Node struct {
 	bftEngine      *bft.Engine
 	stateMu        sync.Mutex
 	escrowTreasury [20]byte
+	engagementMgr  *engagement.Manager
 }
 
 func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool) (*Node, error) {
@@ -72,6 +74,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		validatorKey:   key,
 		mempool:        make([]*types.Transaction, 0),
 		escrowTreasury: treasury,
+		engagementMgr:  engagement.NewManager(stateProcessor.EngagementConfig()),
 	}, nil
 }
 
@@ -532,6 +535,56 @@ func (n *Node) IdentityResolve(alias string) ([20]byte, bool) {
 func (n *Node) IdentityReverse(addr [20]byte) (string, bool) {
 	manager := nhbstate.NewManager(n.state.Trie)
 	return manager.IdentityReverse(addr[:])
+}
+
+func (n *Node) EngagementRegisterDevice(addr [20]byte, deviceID string) (string, error) {
+	if n.engagementMgr == nil {
+		return "", fmt.Errorf("engagement manager unavailable")
+	}
+	validator := n.validatorKey.PubKey().Address()
+	if !bytes.Equal(addr[:], validator.Bytes()) {
+		return "", fmt.Errorf("device must register validator address %s", validator.String())
+	}
+	return n.engagementMgr.RegisterDevice(addr, deviceID)
+}
+
+func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64) (int64, error) {
+	if n.engagementMgr == nil {
+		return 0, fmt.Errorf("engagement manager unavailable")
+	}
+	ts, err := n.engagementMgr.SubmitHeartbeat(deviceID, token, timestamp)
+	if err != nil {
+		return 0, err
+	}
+
+	validator := n.validatorKey.PubKey().Address()
+	payload := types.HeartbeatPayload{DeviceID: deviceID, Timestamp: ts}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	account, err := n.state.GetAccount(validator.Bytes())
+	if err != nil {
+		return 0, err
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeHeartbeat,
+		Nonce:    account.Nonce,
+		Data:     data,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(n.validatorKey.PrivateKey); err != nil {
+		return 0, err
+	}
+	n.mempool = append(n.mempool, tx)
+	return ts, nil
 }
 
 func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64) ([32]byte, error) {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"nhbchain/core/engagement"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -29,6 +30,7 @@ import (
 )
 
 const MINIMUM_STAKE = 1000
+const engagementDayFormat = "2006-01-02"
 
 // Privileged arbitrator address (replace with multisig in production).
 var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
@@ -40,15 +42,16 @@ var (
 )
 
 type StateProcessor struct {
-	Trie           *trie.Trie
-	stateDB        *gethstate.CachingDB
-	LoyaltyEngine  *loyalty.Engine
-	EscrowEngine   *escrow.Engine
-	TradeEngine    *escrow.TradeEngine
-	usernameToAddr map[string][]byte
-	ValidatorSet   map[string]*big.Int
-	committedRoot  common.Hash
-	events         []types.Event
+	Trie             *trie.Trie
+	stateDB          *gethstate.CachingDB
+	LoyaltyEngine    *loyalty.Engine
+	EscrowEngine     *escrow.Engine
+	TradeEngine      *escrow.TradeEngine
+	usernameToAddr   map[string][]byte
+	ValidatorSet     map[string]*big.Int
+	committedRoot    common.Hash
+	events           []types.Event
+	engagementConfig engagement.Config
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -56,15 +59,16 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	escEngine := escrow.NewEngine()
 	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
-		Trie:           tr,
-		stateDB:        stateDB,
-		LoyaltyEngine:  loyalty.NewEngine(),
-		EscrowEngine:   escEngine,
-		TradeEngine:    tradeEngine,
-		usernameToAddr: make(map[string][]byte),
-		ValidatorSet:   make(map[string]*big.Int),
-		committedRoot:  tr.Root(),
-		events:         make([]types.Event, 0),
+		Trie:             tr,
+		stateDB:          stateDB,
+		LoyaltyEngine:    loyalty.NewEngine(),
+		EscrowEngine:     escEngine,
+		TradeEngine:      tradeEngine,
+		usernameToAddr:   make(map[string][]byte),
+		ValidatorSet:     make(map[string]*big.Int),
+		committedRoot:    tr.Root(),
+		events:           make([]types.Event, 0),
+		engagementConfig: engagement.DefaultConfig(),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -73,6 +77,22 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		return nil, err
 	}
 	return sp, nil
+}
+
+// EngagementConfig returns the configuration currently used for engagement
+// scoring.
+func (sp *StateProcessor) EngagementConfig() engagement.Config {
+	return sp.engagementConfig
+}
+
+// SetEngagementConfig replaces the engagement configuration. Callers must
+// ensure the new configuration is valid network wide.
+func (sp *StateProcessor) SetEngagementConfig(cfg engagement.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.engagementConfig = cfg
+	return nil
 }
 
 // CurrentRoot returns the last committed state root.
@@ -130,13 +150,16 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		eventsCopy[i] = types.Event{Type: sp.events[i].Type, Attributes: attrs}
 	}
 	return &StateProcessor{
-		Trie:           trieCopy,
-		stateDB:        sp.stateDB,
-		LoyaltyEngine:  sp.LoyaltyEngine,
-		usernameToAddr: usernameCopy,
-		ValidatorSet:   validatorCopy,
-		committedRoot:  sp.committedRoot,
-		events:         eventsCopy,
+		Trie:             trieCopy,
+		stateDB:          sp.stateDB,
+		LoyaltyEngine:    sp.LoyaltyEngine,
+		EscrowEngine:     sp.EscrowEngine,
+		TradeEngine:      sp.TradeEngine,
+		usernameToAddr:   usernameCopy,
+		ValidatorSet:     validatorCopy,
+		committedRoot:    sp.committedRoot,
+		events:           eventsCopy,
+		engagementConfig: sp.engagementConfig,
 	}, nil
 }
 
@@ -254,6 +277,10 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		}
 	}
 
+	if err := sp.recordEngagementActivity(from, time.Now().UTC(), 1, 0, 0); err != nil {
+		return err
+	}
+
 	fmt.Printf("EVM transaction processed. Gas used: %d. Output: %x\n", result.UsedGas, result.ReturnData)
 	return nil
 }
@@ -265,40 +292,61 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction) error {
 	if err != nil {
 		return err
 	}
-	senderAccount, err := sp.getAccount(sender)
-	if err != nil {
-		return err
-	}
-	senderAccount.EngagementScore++
-	if err := sp.setAccount(sender, senderAccount); err != nil {
-		return err
-	}
-
 	switch tx.Type {
 	case types.TxTypeRegisterIdentity:
-		return sp.applyRegisterIdentity(tx)
+		if err := sp.applyRegisterIdentity(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 0)
 	case types.TxTypeCreateEscrow:
-		return sp.applyCreateEscrow(tx)
+		if err := sp.applyCreateEscrow(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	case types.TxTypeReleaseEscrow:
-		return sp.applyReleaseEscrow(tx)
+		if err := sp.applyReleaseEscrow(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	case types.TxTypeRefundEscrow:
-		return sp.applyRefundEscrow(tx)
+		if err := sp.applyRefundEscrow(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	case types.TxTypeStake:
-		return sp.applyStake(tx)
+		if err := sp.applyStake(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 1)
 	case types.TxTypeUnstake:
-		return sp.applyUnstake(tx)
+		if err := sp.applyUnstake(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 0, 1)
 	case types.TxTypeHeartbeat:
 		return sp.applyHeartbeat(tx)
 
 	// --- NEW DISPUTE RESOLUTION CASES ---
 	case types.TxTypeLockEscrow:
-		return sp.applyLockEscrow(tx)
+		if err := sp.applyLockEscrow(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	case types.TxTypeDisputeEscrow:
-		return sp.applyDisputeEscrow(tx)
+		if err := sp.applyDisputeEscrow(tx); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	case types.TxTypeArbitrateRelease:
-		return sp.applyArbitrate(tx, true)
+		if err := sp.applyArbitrate(tx, true); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	case types.TxTypeArbitrateRefund:
-		return sp.applyArbitrate(tx, false)
+		if err := sp.applyArbitrate(tx, false); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, time.Now().UTC(), 1, 1, 0)
 	}
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }
@@ -592,20 +640,88 @@ func (sp *StateProcessor) applyUnstake(tx *types.Transaction) error {
 }
 
 func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction) error {
-	sender, _ := tx.From()
-	senderAccount, _ := sp.getAccount(sender)
+	sender, err := tx.From()
+	if err != nil {
+		return err
+	}
+	payload := types.HeartbeatPayload{}
+	if len(tx.Data) > 0 {
+		if err := json.Unmarshal(tx.Data, &payload); err != nil {
+			return fmt.Errorf("invalid heartbeat payload: %w", err)
+		}
+	}
+	if payload.Timestamp == 0 {
+		payload.Timestamp = time.Now().UTC().Unix()
+	}
+	now := time.Unix(payload.Timestamp, 0).UTC()
+
+	senderAccount, err := sp.getAccount(sender)
+	if err != nil {
+		return err
+	}
+
+	updates := sp.rolloverEngagement(senderAccount, now)
+	if senderAccount.EngagementLastHeartbeat != 0 {
+		minDelta := int64(sp.engagementConfig.HeartbeatInterval.Seconds())
+		last := int64(senderAccount.EngagementLastHeartbeat)
+		if payload.Timestamp <= last {
+			return fmt.Errorf("heartbeat replay detected")
+		}
+		if payload.Timestamp-last < minDelta {
+			return fmt.Errorf("heartbeat rate limited")
+		}
+	}
+
+	minutes := uint64(1)
+	if senderAccount.EngagementLastHeartbeat != 0 {
+		delta := payload.Timestamp - int64(senderAccount.EngagementLastHeartbeat)
+		if delta > 0 {
+			minutes = uint64(delta / int64(time.Minute/time.Second))
+			if minutes == 0 {
+				minutes = 1
+			}
+		}
+	}
+	if minutes > sp.engagementConfig.MaxMinutesPerHeartbeat {
+		minutes = sp.engagementConfig.MaxMinutesPerHeartbeat
+	}
+
+	senderAccount.EngagementMinutes += minutes
+	senderAccount.EngagementLastHeartbeat = uint64(payload.Timestamp)
 	senderAccount.Nonce++
-	sp.setAccount(sender, senderAccount)
-	fmt.Printf("Heartbeat processed: Engagement score for %s incremented.\n",
-		crypto.NewAddress(crypto.NHBPrefix, sender).String())
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
+	sp.emitScoreUpdates(sender, updates)
+
+	var addr [20]byte
+	copy(addr[:], sender)
+	evt := events.EngagementHeartbeat{
+		Address:   addr,
+		DeviceID:  payload.DeviceID,
+		Minutes:   minutes,
+		Timestamp: payload.Timestamp,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+
+	fmt.Printf("Heartbeat processed: %s recorded %d minute(s).\n",
+		crypto.NewAddress(crypto.NHBPrefix, sender).String(), minutes)
 	return nil
 }
 
 type accountMetadata struct {
-	BalanceZNHB     *big.Int
-	Stake           *big.Int
-	Username        string
-	EngagementScore uint64
+	BalanceZNHB             *big.Int
+	Stake                   *big.Int
+	Username                string
+	EngagementScore         uint64
+	EngagementDay           string
+	EngagementMinutes       uint64
+	EngagementTxCount       uint64
+	EngagementEscrowEvents  uint64
+	EngagementGovEvents     uint64
+	EngagementLastHeartbeat uint64
 }
 
 func ensureAccountDefaults(account *types.Account) {
@@ -639,12 +755,18 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 	}
 
 	account := &types.Account{
-		BalanceNHB:      big.NewInt(0),
-		BalanceZNHB:     big.NewInt(0),
-		Stake:           big.NewInt(0),
-		EngagementScore: 0,
-		StorageRoot:     gethtypes.EmptyRootHash.Bytes(),
-		CodeHash:        gethtypes.EmptyCodeHash.Bytes(),
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(0),
+		EngagementScore:         0,
+		EngagementDay:           "",
+		EngagementMinutes:       0,
+		EngagementTxCount:       0,
+		EngagementEscrowEvents:  0,
+		EngagementGovEvents:     0,
+		EngagementLastHeartbeat: 0,
+		StorageRoot:             gethtypes.EmptyRootHash.Bytes(),
+		CodeHash:                gethtypes.EmptyCodeHash.Bytes(),
 	}
 	if stateAcc != nil {
 		if stateAcc.Balance != nil {
@@ -659,6 +781,12 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		account.Stake = new(big.Int).Set(meta.Stake)
 		account.Username = meta.Username
 		account.EngagementScore = meta.EngagementScore
+		account.EngagementDay = meta.EngagementDay
+		account.EngagementMinutes = meta.EngagementMinutes
+		account.EngagementTxCount = meta.EngagementTxCount
+		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
+		account.EngagementGovEvents = meta.EngagementGovEvents
+		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
 	}
 	ensureAccountDefaults(account)
 	return account, nil
@@ -698,10 +826,16 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	}
 
 	meta := &accountMetadata{
-		BalanceZNHB:     new(big.Int).Set(account.BalanceZNHB),
-		Stake:           new(big.Int).Set(account.Stake),
-		Username:        account.Username,
-		EngagementScore: account.EngagementScore,
+		BalanceZNHB:             new(big.Int).Set(account.BalanceZNHB),
+		Stake:                   new(big.Int).Set(account.Stake),
+		Username:                account.Username,
+		EngagementScore:         account.EngagementScore,
+		EngagementDay:           account.EngagementDay,
+		EngagementMinutes:       account.EngagementMinutes,
+		EngagementTxCount:       account.EngagementTxCount,
+		EngagementEscrowEvents:  account.EngagementEscrowEvents,
+		EngagementGovEvents:     account.EngagementGovEvents,
+		EngagementLastHeartbeat: account.EngagementLastHeartbeat,
 	}
 	if err := sp.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -739,6 +873,160 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		return err
 	}
 
+	return nil
+}
+
+type engagementScoreUpdate struct {
+	Day string
+	Raw uint64
+	Old uint64
+	New uint64
+}
+
+func (sp *StateProcessor) computeRawEngagement(minutes, tx, escrow, gov uint64) uint64 {
+	cfg := sp.engagementConfig
+	total := new(big.Int)
+	tmp := new(big.Int)
+
+	if cfg.HeartbeatWeight > 0 && minutes > 0 {
+		tmp.SetUint64(minutes)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.HeartbeatWeight))
+		total.Add(total, tmp)
+	}
+	if cfg.TxWeight > 0 && tx > 0 {
+		tmp.SetUint64(tx)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.TxWeight))
+		total.Add(total, tmp)
+	}
+	if cfg.EscrowWeight > 0 && escrow > 0 {
+		tmp.SetUint64(escrow)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.EscrowWeight))
+		total.Add(total, tmp)
+	}
+	if cfg.GovWeight > 0 && gov > 0 {
+		tmp.SetUint64(gov)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.GovWeight))
+		total.Add(total, tmp)
+	}
+
+	if total.BitLen() > 64 {
+		return ^uint64(0)
+	}
+	return total.Uint64()
+}
+
+func (sp *StateProcessor) applyEMAScore(prev, raw uint64) uint64 {
+	cfg := sp.engagementConfig
+	if cfg.LambdaDenominator == 0 {
+		return raw
+	}
+	prevComponent := new(big.Int).SetUint64(prev)
+	prevComponent.Mul(prevComponent, new(big.Int).SetUint64(cfg.LambdaNumerator))
+
+	contribution := cfg.LambdaDenominator - cfg.LambdaNumerator
+	rawComponent := new(big.Int).SetUint64(raw)
+	rawComponent.Mul(rawComponent, new(big.Int).SetUint64(contribution))
+
+	prevComponent.Add(prevComponent, rawComponent)
+	prevComponent.Div(prevComponent, new(big.Int).SetUint64(cfg.LambdaDenominator))
+
+	if prevComponent.BitLen() > 64 {
+		return ^uint64(0)
+	}
+	return prevComponent.Uint64()
+}
+
+func (sp *StateProcessor) rolloverEngagement(account *types.Account, now time.Time) []engagementScoreUpdate {
+	currentDay := now.UTC().Format(engagementDayFormat)
+	if account.EngagementDay == "" {
+		account.EngagementDay = currentDay
+		return nil
+	}
+	if account.EngagementDay == currentDay {
+		return nil
+	}
+	startDay, err := time.Parse(engagementDayFormat, account.EngagementDay)
+	if err != nil {
+		account.EngagementDay = currentDay
+		account.EngagementMinutes = 0
+		account.EngagementTxCount = 0
+		account.EngagementEscrowEvents = 0
+		account.EngagementGovEvents = 0
+		return nil
+	}
+	targetDay, err := time.Parse(engagementDayFormat, currentDay)
+	if err != nil {
+		return nil
+	}
+
+	updates := make([]engagementScoreUpdate, 0)
+	dayCursor := startDay
+	for dayCursor.Before(targetDay) {
+		raw := sp.computeRawEngagement(account.EngagementMinutes, account.EngagementTxCount, account.EngagementEscrowEvents, account.EngagementGovEvents)
+		if raw > sp.engagementConfig.DailyCap {
+			raw = sp.engagementConfig.DailyCap
+		}
+		oldScore := account.EngagementScore
+		newScore := sp.applyEMAScore(oldScore, raw)
+		updates = append(updates, engagementScoreUpdate{
+			Day: dayCursor.Format(engagementDayFormat),
+			Raw: raw,
+			Old: oldScore,
+			New: newScore,
+		})
+		account.EngagementScore = newScore
+		account.EngagementMinutes = 0
+		account.EngagementTxCount = 0
+		account.EngagementEscrowEvents = 0
+		account.EngagementGovEvents = 0
+		dayCursor = dayCursor.AddDate(0, 0, 1)
+	}
+	account.EngagementDay = currentDay
+	return updates
+}
+
+func (sp *StateProcessor) emitScoreUpdates(addr []byte, updates []engagementScoreUpdate) {
+	if len(updates) == 0 {
+		return
+	}
+	var address [20]byte
+	copy(address[:], addr)
+	for _, upd := range updates {
+		evt := events.EngagementScoreUpdated{
+			Address:  address,
+			Day:      upd.Day,
+			RawScore: upd.Raw,
+			OldScore: upd.Old,
+			NewScore: upd.New,
+		}.Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+}
+
+func (sp *StateProcessor) recordEngagementActivity(addr []byte, now time.Time, txDelta, escrowDelta, govDelta uint64) error {
+	if txDelta == 0 && escrowDelta == 0 && govDelta == 0 {
+		return nil
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return err
+	}
+	updates := sp.rolloverEngagement(account, now)
+	if txDelta > 0 {
+		account.EngagementTxCount += txDelta
+	}
+	if escrowDelta > 0 {
+		account.EngagementEscrowEvents += escrowDelta
+	}
+	if govDelta > 0 {
+		account.EngagementGovEvents += govDelta
+	}
+	if err := sp.setAccount(addr, account); err != nil {
+		return err
+	}
+	sp.emitScoreUpdates(addr, updates)
 	return nil
 }
 
@@ -893,6 +1181,11 @@ func (sp *StateProcessor) writeAccountMetadata(addr []byte, meta *accountMetadat
 	return sp.Trie.Update(accountMetadataKey(addr), encoded)
 }
 
+type usernameIndexEntry struct {
+	Username string
+	Address  []byte
+}
+
 func (sp *StateProcessor) loadUsernameIndex() error {
 	data, err := sp.Trie.Get(usernameIndexKey)
 	if err != nil {
@@ -901,19 +1194,31 @@ func (sp *StateProcessor) loadUsernameIndex() error {
 	if len(data) == 0 {
 		return nil
 	}
-	stored := make(map[string][]byte)
-	if err := rlp.DecodeBytes(data, &stored); err != nil {
+	var entries []usernameIndexEntry
+	if err := rlp.DecodeBytes(data, &entries); err != nil {
 		return err
 	}
-	sp.usernameToAddr = make(map[string][]byte, len(stored))
-	for k, v := range stored {
-		sp.usernameToAddr[k] = append([]byte(nil), v...)
+	sp.usernameToAddr = make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.Username == "" {
+			continue
+		}
+		sp.usernameToAddr[entry.Username] = append([]byte(nil), entry.Address...)
 	}
 	return nil
 }
 
 func (sp *StateProcessor) persistUsernameIndex() error {
-	encoded, err := rlp.EncodeToBytes(sp.usernameToAddr)
+	entries := make([]usernameIndexEntry, 0, len(sp.usernameToAddr))
+	for username, addr := range sp.usernameToAddr {
+		entries = append(entries, usernameIndexEntry{
+			Username: username,
+			Address:  append([]byte(nil), addr...),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Username < entries[j].Username })
+
+	encoded, err := rlp.EncodeToBytes(entries)
 	if err != nil {
 		return err
 	}
