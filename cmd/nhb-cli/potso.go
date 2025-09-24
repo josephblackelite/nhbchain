@@ -49,6 +49,8 @@ func runPotsoCommand(args []string, stdout, stderr io.Writer) int {
 		return runPotsoTop(args[1:], stdout, stderr)
 	case "stake":
 		return runPotsoStake(args[1:], stdout, stderr)
+	case "reward":
+		return runPotsoReward(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "Unknown potso subcommand: %s\n", args[0])
 		fmt.Fprintln(stderr, potsoUsage())
@@ -64,6 +66,7 @@ func potsoUsage() string {
 	fmt.Fprintln(buf, "  user-meters   Fetch the raw meters for a user")
 	fmt.Fprintln(buf, "  top           List top participants for a day")
 	fmt.Fprintln(buf, "  stake         Manage ZapNHB staking locks")
+	fmt.Fprintln(buf, "  reward        Manage reward claims, history, and exports")
 	return buf.String()
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/potso"
 )
 
 const (
@@ -19,6 +20,8 @@ const (
 	TypePotsoStakeWithdrawn = "potso.stake.withdrawn"
 	// TypePotsoRewardEpoch summarises a processed POTSO reward epoch.
 	TypePotsoRewardEpoch = "potso.reward.epoch"
+	// TypePotsoRewardReady notifies downstream systems that a claimable reward is prepared for settlement.
+	TypePotsoRewardReady = "potso.reward.ready"
 	// TypePotsoRewardPaid captures individual reward payouts.
 	TypePotsoRewardPaid = "potso.reward.paid"
 )
@@ -137,22 +140,46 @@ func (e PotsoRewardEpoch) Event() *types.Event {
 	return &types.Event{Type: TypePotsoRewardEpoch, Attributes: attrs}
 }
 
+// PotsoRewardReady captures a claimable payout becoming available for settlement.
+type PotsoRewardReady struct {
+	Epoch   uint64
+	Address [20]byte
+	Amount  *big.Int
+	Mode    potso.RewardPayoutMode
+}
+
+// Event converts the ready notification into a generic event representation.
+func (e PotsoRewardReady) Event() *types.Event {
+	addr := crypto.NewAddress(crypto.NHBPrefix, e.Address[:])
+	attrs := map[string]string{
+		"epoch":   fmt.Sprintf("%d", e.Epoch),
+		"address": addr.String(),
+		"amount":  amountString(e.Amount),
+	}
+	if m := e.Mode.Normalise(); m != "" {
+		attrs["mode"] = string(m)
+	}
+	return &types.Event{Type: TypePotsoRewardReady, Attributes: attrs}
+}
+
 // PotsoRewardPaid captures an individual reward distribution.
 type PotsoRewardPaid struct {
 	Epoch   uint64
 	Address [20]byte
 	Amount  *big.Int
+	Mode    potso.RewardPayoutMode
 }
 
 // Event converts the payout into a generic event representation.
 func (e PotsoRewardPaid) Event() *types.Event {
 	addr := crypto.NewAddress(crypto.NHBPrefix, e.Address[:])
-	return &types.Event{
-		Type: TypePotsoRewardPaid,
-		Attributes: map[string]string{
-			"epoch":   fmt.Sprintf("%d", e.Epoch),
-			"address": addr.String(),
-			"amount":  amountString(e.Amount),
-		},
+	attrs := map[string]string{
+		"epoch":   fmt.Sprintf("%d", e.Epoch),
+		"address": addr.String(),
+		"amount":  amountString(e.Amount),
 	}
+	if m := e.Mode.Normalise(); m != "" {
+		attrs["mode"] = string(m)
+	}
+	return &types.Event{Type: TypePotsoRewardPaid, Attributes: attrs}
 }

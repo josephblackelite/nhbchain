@@ -54,6 +54,7 @@ type PotsoRewardsConfig struct {
 	TreasuryAddress    string `toml:"TreasuryAddress"`
 	MaxWinnersPerEpoch uint64 `toml:"MaxWinnersPerEpoch"`
 	CarryRemainder     bool   `toml:"CarryRemainder"`
+	PayoutMode         string `toml:"PayoutMode"`
 }
 
 // PotsoWeightsConfig mirrors the `[potso.weights]` TOML section.
@@ -217,6 +218,13 @@ func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
 		result.TreasuryAddress = addr
 	}
 
+	trimmedMode := strings.TrimSpace(rewards.PayoutMode)
+	if trimmedMode == "" {
+		result.PayoutMode = potso.RewardPayoutModeAuto
+	} else {
+		result.PayoutMode = potso.RewardPayoutMode(trimmedMode).Normalise()
+	}
+
 	if err := result.Validate(); err != nil {
 		return result, err
 	}
@@ -316,6 +324,7 @@ func createDefault(path string) (*Config, error) {
 		MinPayoutWei:     "0",
 		EmissionPerEpoch: "0",
 		CarryRemainder:   true,
+		PayoutMode:       string(potso.RewardPayoutModeAuto),
 	}
 	cfg.ValidatorKeystorePath = keystorePath
 

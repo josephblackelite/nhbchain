@@ -4,11 +4,53 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 )
 
 const (
 	// RewardBpsDenominator defines the fixed denominator used for alpha weighting.
 	RewardBpsDenominator = 10000
+)
+
+// RewardPayoutMode enumerates the settlement strategies supported by the reward module.
+type RewardPayoutMode string
+
+const (
+	// RewardPayoutModeAuto transfers rewards automatically at epoch roll-over.
+	RewardPayoutModeAuto RewardPayoutMode = "auto"
+	// RewardPayoutModeClaim records claimable rewards that must be explicitly settled by the winner.
+	RewardPayoutModeClaim RewardPayoutMode = "claim"
+)
+
+// Valid reports whether the payout mode is recognised.
+func (m RewardPayoutMode) Valid() bool {
+	switch strings.ToLower(string(m)) {
+	case string(RewardPayoutModeAuto), string(RewardPayoutModeClaim):
+		return true
+	default:
+		return false
+	}
+}
+
+// Normalise returns the canonical representation of the payout mode, defaulting to auto when unset.
+func (m RewardPayoutMode) Normalise() RewardPayoutMode {
+	switch strings.ToLower(strings.TrimSpace(string(m))) {
+	case string(RewardPayoutModeClaim):
+		return RewardPayoutModeClaim
+	default:
+		return RewardPayoutModeAuto
+	}
+}
+
+var (
+	// ErrRewardNotFound indicates that no claim exists for the requested epoch + address pair.
+	ErrRewardNotFound = errors.New("potso: reward not found")
+	// ErrRewardAlreadyClaimed signals that the reward has been previously settled.
+	ErrRewardAlreadyClaimed = errors.New("potso: reward already claimed")
+	// ErrInsufficientTreasury is raised when the treasury balance is insufficient to cover a reward.
+	ErrInsufficientTreasury = errors.New("potso: insufficient treasury balance")
+	// ErrClaimingDisabled denotes that manual claiming is not enabled for the current configuration.
+	ErrClaimingDisabled = errors.New("potso: reward claiming disabled")
 )
 
 // RewardConfig controls the epoch reward distribution behaviour for POTSO participants.
@@ -20,6 +62,7 @@ type RewardConfig struct {
 	TreasuryAddress    [20]byte
 	MaxWinnersPerEpoch uint64
 	CarryRemainder     bool
+	PayoutMode         RewardPayoutMode
 }
 
 // RewardSnapshotEntry captures the raw inputs for a participant when computing
@@ -99,6 +142,7 @@ func DefaultRewardConfig() RewardConfig {
 		TreasuryAddress:    [20]byte{},
 		MaxWinnersPerEpoch: 0,
 		CarryRemainder:     true,
+		PayoutMode:         RewardPayoutModeAuto,
 	}
 }
 
@@ -112,6 +156,10 @@ func (c RewardConfig) Validate() error {
 	}
 	if c.EmissionPerEpoch != nil && c.EmissionPerEpoch.Sign() < 0 {
 		return errors.New("emission per epoch cannot be negative")
+	}
+	mode := c.PayoutMode.Normalise()
+	if !mode.Valid() {
+		return fmt.Errorf("unsupported payout mode %q", c.PayoutMode)
 	}
 	if c.Enabled() {
 		if c.EpochLengthBlocks == 0 {
@@ -127,6 +175,55 @@ func (c RewardConfig) Validate() error {
 // Enabled reports whether the configuration results in active distributions.
 func (c RewardConfig) Enabled() bool {
 	return c.EpochLengthBlocks > 0 && (c.EmissionPerEpoch != nil && c.EmissionPerEpoch.Sign() > 0)
+}
+
+// EffectivePayoutMode returns the configured payout mode, defaulting to auto for unset values.
+func (c RewardConfig) EffectivePayoutMode() RewardPayoutMode {
+	return c.PayoutMode.Normalise()
+}
+
+// RewardClaim records the settlement status for a participant within an epoch.
+type RewardClaim struct {
+	Amount    *big.Int
+	Claimed   bool
+	ClaimedAt uint64
+	Mode      RewardPayoutMode
+}
+
+// Clone creates a deep copy of the claim structure.
+func (c *RewardClaim) Clone() *RewardClaim {
+	if c == nil {
+		return nil
+	}
+	clone := &RewardClaim{
+		Claimed:   c.Claimed,
+		ClaimedAt: c.ClaimedAt,
+		Mode:      c.Mode,
+	}
+	if c.Amount != nil {
+		clone.Amount = new(big.Int).Set(c.Amount)
+	} else {
+		clone.Amount = big.NewInt(0)
+	}
+	return clone
+}
+
+// RewardHistoryEntry captures a single payout that has been settled for an address.
+type RewardHistoryEntry struct {
+	Epoch  uint64
+	Amount *big.Int
+	Mode   RewardPayoutMode
+}
+
+// Clone returns a deep copy of the history entry.
+func (e *RewardHistoryEntry) Clone() RewardHistoryEntry {
+	out := RewardHistoryEntry{Epoch: e.Epoch, Mode: e.Mode}
+	if e.Amount != nil {
+		out.Amount = new(big.Int).Set(e.Amount)
+	} else {
+		out.Amount = big.NewInt(0)
+	}
+	return out
 }
 
 // ComputeRewards derives the payouts for a snapshot given the configured budget and weight parameters.
