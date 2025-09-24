@@ -69,6 +69,7 @@ type StateProcessor struct {
 	rewardAccrual      *rewards.Accumulator
 	rewardHistory      []rewards.EpochSettlement
 	potsoRewardConfig  potso.RewardConfig
+	potsoWeightConfig  potso.WeightParams
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -93,6 +94,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		rewardConfig:       rewards.DefaultConfig(),
 		rewardHistory:      make([]rewards.EpochSettlement, 0),
 		potsoRewardConfig:  potso.DefaultRewardConfig(),
+		potsoWeightConfig:  potso.DefaultWeightParams(),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -181,6 +183,30 @@ func clonePotsoRewardConfig(cfg potso.RewardConfig) potso.RewardConfig {
 	return clone
 }
 
+// PotsoWeightConfig returns the current POTSO weight configuration snapshot.
+func (sp *StateProcessor) PotsoWeightConfig() potso.WeightParams {
+	return clonePotsoWeightConfig(sp.potsoWeightConfig)
+}
+
+// SetPotsoWeightConfig replaces the POTSO weight configuration.
+func (sp *StateProcessor) SetPotsoWeightConfig(cfg potso.WeightParams) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.potsoWeightConfig = clonePotsoWeightConfig(cfg)
+	return nil
+}
+
+func clonePotsoWeightConfig(cfg potso.WeightParams) potso.WeightParams {
+	clone := cfg
+	if cfg.MinStakeToWinWei != nil {
+		clone.MinStakeToWinWei = new(big.Int).Set(cfg.MinStakeToWinWei)
+	} else {
+		clone.MinStakeToWinWei = big.NewInt(0)
+	}
+	return clone
+}
+
 func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int64) error {
 	cfg := sp.potsoRewardConfig
 	if cfg.EpochLengthBlocks == 0 {
@@ -236,7 +262,6 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		return err
 	}
 	stakeTotals := make(map[[20]byte]*big.Int, len(stakeOwners))
-	stakeTotal := big.NewInt(0)
 	for _, owner := range stakeOwners {
 		amount, err := manager.PotsoStakeBondedTotal(owner)
 		if err != nil {
@@ -246,58 +271,75 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 			continue
 		}
 		stakeTotals[owner] = new(big.Int).Set(amount)
-		stakeTotal.Add(stakeTotal, amount)
 	}
 
 	participants, err := manager.PotsoListParticipants(day)
 	if err != nil {
 		return err
 	}
-	engagementTotals := make(map[[20]byte]*big.Int, len(participants))
-	engagementTotal := big.NewInt(0)
+
+	prevEngagement := make(map[[20]byte]uint64)
+	if epochNumber > 0 {
+		if stored, ok, err := manager.PotsoMetricsGetSnapshot(epochNumber - 1); err != nil {
+			return err
+		} else if ok && stored != nil {
+			for _, entry := range stored.Entries {
+				prevEngagement[entry.Address] = entry.Engagement
+			}
+		}
+	}
+
+	addressSet := make(map[[20]byte]struct{})
+	for owner := range stakeTotals {
+		addressSet[owner] = struct{}{}
+	}
 	for _, addr := range participants {
+		addressSet[addr] = struct{}{}
+	}
+	for addr := range prevEngagement {
+		addressSet[addr] = struct{}{}
+	}
+
+	addresses := make([][20]byte, 0, len(addressSet))
+	for addr := range addressSet {
+		addresses = append(addresses, addr)
+	}
+	sort.Slice(addresses, func(i, j int) bool {
+		return bytes.Compare(addresses[i][:], addresses[j][:]) < 0
+	})
+
+	entries := make([]potso.RewardSnapshotEntry, 0, len(addresses))
+	for _, addr := range addresses {
 		meter, _, err := manager.PotsoGetMeter(addr, day)
 		if err != nil {
 			return err
 		}
-		score := big.NewInt(0)
+		engagementMeter := potso.EngagementMeter{}
 		if meter != nil {
-			score.SetUint64(meter.Score)
+			engagementMeter.TxCount = meter.TxCount
+			engagementMeter.EscrowCount = meter.EscrowEvents
+			engagementMeter.UptimeDevices = meter.UptimeSeconds / 60
 		}
-		if score.Sign() <= 0 {
-			continue
+		if err := manager.PotsoMetricsSetMeter(epochNumber, addr, &engagementMeter); err != nil {
+			return err
 		}
-		engagementTotals[addr] = new(big.Int).Set(score)
-		engagementTotal.Add(engagementTotal, score)
-	}
-
-	entries := make([]potso.RewardSnapshotEntry, 0, len(stakeTotals)+len(engagementTotals))
-	for owner, amount := range stakeTotals {
-		engagement := big.NewInt(0)
-		if score, ok := engagementTotals[owner]; ok {
-			engagement = new(big.Int).Set(score)
-			delete(engagementTotals, owner)
+		stake := big.NewInt(0)
+		if value, ok := stakeTotals[addr]; ok && value != nil {
+			stake = new(big.Int).Set(value)
 		}
+		prev := prevEngagement[addr]
 		entries = append(entries, potso.RewardSnapshotEntry{
-			Address:    owner,
-			Stake:      new(big.Int).Set(amount),
-			Engagement: engagement,
-		})
-	}
-	for addr, score := range engagementTotals {
-		entries = append(entries, potso.RewardSnapshotEntry{
-			Address:    addr,
-			Stake:      big.NewInt(0),
-			Engagement: new(big.Int).Set(score),
+			Address:            addr,
+			Stake:              stake,
+			Meter:              engagementMeter,
+			PreviousEngagement: prev,
 		})
 	}
 
 	snapshot := potso.RewardSnapshot{
-		Epoch:           epochNumber,
-		Day:             potso.NormaliseDay(day),
-		StakeTotal:      new(big.Int).Set(stakeTotal),
-		EngagementTotal: new(big.Int).Set(engagementTotal),
-		Entries:         entries,
+		Epoch:   epochNumber,
+		Day:     potso.NormaliseDay(day),
+		Entries: entries,
 	}
 
 	emission := big.NewInt(0)
@@ -317,9 +359,17 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		budget = new(big.Int).Set(treasuryBalance)
 	}
 
-	outcome, err := potso.ComputeRewards(cfg, snapshot, budget)
+	weightCfg := sp.potsoWeightConfig
+	weightCfg.AlphaStakeBps = cfg.AlphaStakeBps
+	outcome, err := potso.ComputeRewards(cfg, weightCfg, snapshot, budget)
 	if err != nil {
 		return err
+	}
+
+	if outcome.WeightSnapshot != nil {
+		if err := manager.PotsoMetricsSetSnapshot(epochNumber, outcome.WeightSnapshot.ToStored()); err != nil {
+			return err
+		}
 	}
 
 	winnersAddrs := make([][20]byte, 0, len(outcome.Winners))
@@ -367,11 +417,20 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		return err
 	}
 
+	stakeTotal := big.NewInt(0)
+	engagementTotal := big.NewInt(0)
+	if outcome.WeightSnapshot != nil {
+		if outcome.WeightSnapshot.TotalStake != nil {
+			stakeTotal = new(big.Int).Set(outcome.WeightSnapshot.TotalStake)
+		}
+		engagementTotal = new(big.Int).SetUint64(outcome.WeightSnapshot.TotalEngagement)
+	}
+
 	meta := &potso.RewardEpochMeta{
 		Epoch:           epochNumber,
 		Day:             snapshot.Day,
-		StakeTotal:      new(big.Int).Set(stakeTotal),
-		EngagementTotal: new(big.Int).Set(engagementTotal),
+		StakeTotal:      stakeTotal,
+		EngagementTotal: engagementTotal,
 		AlphaBps:        cfg.AlphaStakeBps,
 		Emission:        new(big.Int).Set(emission),
 		Budget:          new(big.Int).Set(outcome.Budget),
@@ -514,6 +573,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		rewardConfig:       sp.rewardConfig.Clone(),
 		rewardHistory:      rewardHistoryCopy,
 		potsoRewardConfig:  clonePotsoRewardConfig(sp.potsoRewardConfig),
+		potsoWeightConfig:  clonePotsoWeightConfig(sp.potsoWeightConfig),
 	}, nil
 }
 

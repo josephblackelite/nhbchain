@@ -42,6 +42,7 @@ type Config struct {
 // PotsoConfig groups POTSO-specific configuration segments.
 type PotsoConfig struct {
 	Rewards PotsoRewardsConfig `toml:"rewards"`
+	Weights PotsoWeightsConfig `toml:"weights"`
 }
 
 // PotsoRewardsConfig mirrors the TOML structure for POTSO reward distribution parameters.
@@ -53,6 +54,20 @@ type PotsoRewardsConfig struct {
 	TreasuryAddress    string `toml:"TreasuryAddress"`
 	MaxWinnersPerEpoch uint64 `toml:"MaxWinnersPerEpoch"`
 	CarryRemainder     bool   `toml:"CarryRemainder"`
+}
+
+// PotsoWeightsConfig mirrors the `[potso.weights]` TOML section.
+type PotsoWeightsConfig struct {
+	AlphaStakeBps         uint64 `toml:"AlphaStakeBps"`
+	TxWeightBps           uint64 `toml:"TxWeightBps"`
+	EscrowWeightBps       uint64 `toml:"EscrowWeightBps"`
+	UptimeWeightBps       uint64 `toml:"UptimeWeightBps"`
+	MaxEngagementPerEpoch uint64 `toml:"MaxEngagementPerEpoch"`
+	MinStakeToWinWei      string `toml:"MinStakeToWinWei"`
+	MinEngagementToWin    uint64 `toml:"MinEngagementToWin"`
+	DecayHalfLifeEpochs   uint64 `toml:"DecayHalfLifeEpochs"`
+	TopKWinners           uint64 `toml:"TopKWinners"`
+	TieBreak              string `toml:"TieBreak"`
 }
 
 // Load loads the configuration from the given path.
@@ -128,6 +143,35 @@ func Load(path string) (*Config, error) {
 		cfg.Potso.Rewards.EmissionPerEpoch = "0"
 	}
 
+	weightDefaults := potso.DefaultWeightParams()
+	if cfg.Potso.Weights.AlphaStakeBps == 0 {
+		cfg.Potso.Weights.AlphaStakeBps = weightDefaults.AlphaStakeBps
+	}
+	if cfg.Potso.Weights.TxWeightBps == 0 {
+		cfg.Potso.Weights.TxWeightBps = weightDefaults.TxWeightBps
+	}
+	if cfg.Potso.Weights.EscrowWeightBps == 0 {
+		cfg.Potso.Weights.EscrowWeightBps = weightDefaults.EscrowWeightBps
+	}
+	if cfg.Potso.Weights.UptimeWeightBps == 0 {
+		cfg.Potso.Weights.UptimeWeightBps = weightDefaults.UptimeWeightBps
+	}
+	if cfg.Potso.Weights.MaxEngagementPerEpoch == 0 {
+		cfg.Potso.Weights.MaxEngagementPerEpoch = weightDefaults.MaxEngagementPerEpoch
+	}
+	if strings.TrimSpace(cfg.Potso.Weights.MinStakeToWinWei) == "" {
+		cfg.Potso.Weights.MinStakeToWinWei = weightDefaults.MinStakeToWinWei.String()
+	}
+	if cfg.Potso.Weights.DecayHalfLifeEpochs == 0 {
+		cfg.Potso.Weights.DecayHalfLifeEpochs = weightDefaults.DecayHalfLifeEpochs
+	}
+	if cfg.Potso.Weights.TopKWinners == 0 {
+		cfg.Potso.Weights.TopKWinners = weightDefaults.TopKWinners
+	}
+	if strings.TrimSpace(cfg.Potso.Weights.TieBreak) == "" {
+		cfg.Potso.Weights.TieBreak = string(weightDefaults.TieBreak)
+	}
+
 	return cfg, nil
 }
 
@@ -136,7 +180,11 @@ func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
 	rewards := cfg.Potso.Rewards
 	result := potso.DefaultRewardConfig()
 	result.EpochLengthBlocks = rewards.EpochLengthBlocks
-	result.AlphaStakeBps = rewards.AlphaStakeBps
+	if cfg.Potso.Weights.AlphaStakeBps > 0 {
+		result.AlphaStakeBps = cfg.Potso.Weights.AlphaStakeBps
+	} else {
+		result.AlphaStakeBps = rewards.AlphaStakeBps
+	}
 	result.MaxWinnersPerEpoch = rewards.MaxWinnersPerEpoch
 	result.CarryRemainder = rewards.CarryRemainder
 
@@ -167,6 +215,39 @@ func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
 			return result, fmt.Errorf("invalid TreasuryAddress: %w", err)
 		}
 		result.TreasuryAddress = addr
+	}
+
+	if err := result.Validate(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// PotsoWeightConfig converts the weights TOML representation into runtime parameters.
+func (cfg *Config) PotsoWeightConfig() (potso.WeightParams, error) {
+	weights := cfg.Potso.Weights
+	result := potso.DefaultWeightParams()
+	result.AlphaStakeBps = weights.AlphaStakeBps
+	result.TxWeightBps = weights.TxWeightBps
+	result.EscrowWeightBps = weights.EscrowWeightBps
+	result.UptimeWeightBps = weights.UptimeWeightBps
+	result.MaxEngagementPerEpoch = weights.MaxEngagementPerEpoch
+	result.MinEngagementToWin = weights.MinEngagementToWin
+	result.DecayHalfLifeEpochs = weights.DecayHalfLifeEpochs
+	result.TopKWinners = weights.TopKWinners
+	if strings.TrimSpace(weights.TieBreak) != "" {
+		result.TieBreak = potso.TieBreakMode(strings.TrimSpace(weights.TieBreak))
+	}
+
+	trimmedStake := strings.TrimSpace(weights.MinStakeToWinWei)
+	if trimmedStake != "" {
+		value, ok := new(big.Int).SetString(trimmedStake, 10)
+		if !ok {
+			return result, fmt.Errorf("invalid MinStakeToWinWei value: %s", weights.MinStakeToWinWei)
+		}
+		result.MinStakeToWinWei = value
+	} else {
+		result.MinStakeToWinWei = big.NewInt(0)
 	}
 
 	if err := result.Validate(); err != nil {

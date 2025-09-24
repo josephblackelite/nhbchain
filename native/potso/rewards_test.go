@@ -21,15 +21,27 @@ func TestComputeRewardsMixedWeights(t *testing.T) {
 		MaxWinnersPerEpoch: 0,
 		CarryRemainder:     true,
 	}
+	params := WeightParams{
+		AlphaStakeBps:         7000,
+		TxWeightBps:           10000,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 1_000_000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+		TieBreak:              TieBreakAddrLex,
+	}
 	snapshot := RewardSnapshot{
 		Epoch: 1,
 		Entries: []RewardSnapshotEntry{
-			{Address: addr(2), Stake: big.NewInt(60), Engagement: big.NewInt(30)},
-			{Address: addr(3), Stake: big.NewInt(40), Engagement: big.NewInt(70)},
+			{Address: addr(2), Stake: big.NewInt(60), PreviousEngagement: 0, Meter: EngagementMeter{TxCount: 3}},
+			{Address: addr(3), Stake: big.NewInt(40), PreviousEngagement: 0, Meter: EngagementMeter{TxCount: 7}},
 		},
 	}
 	budget := big.NewInt(1000)
-	outcome, err := ComputeRewards(cfg, snapshot, budget)
+	outcome, err := ComputeRewards(cfg, params, snapshot, budget)
 	if err != nil {
 		t.Fatalf("compute rewards: %v", err)
 	}
@@ -55,14 +67,25 @@ func TestComputeRewardsStakeOnly(t *testing.T) {
 		EmissionPerEpoch:  big.NewInt(1000),
 		TreasuryAddress:   addr(1),
 	}
+	params := WeightParams{
+		AlphaStakeBps:         RewardBpsDenominator,
+		TxWeightBps:           0,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 1000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+	}
 	snapshot := RewardSnapshot{
 		Epoch: 1,
 		Entries: []RewardSnapshotEntry{
-			{Address: addr(2), Stake: big.NewInt(75), Engagement: big.NewInt(0)},
-			{Address: addr(3), Stake: big.NewInt(25), Engagement: big.NewInt(100)},
+			{Address: addr(2), Stake: big.NewInt(75)},
+			{Address: addr(3), Stake: big.NewInt(25), Meter: EngagementMeter{TxCount: 10}},
 		},
 	}
-	outcome, err := ComputeRewards(cfg, snapshot, big.NewInt(1000))
+	outcome, err := ComputeRewards(cfg, params, snapshot, big.NewInt(1000))
 	if err != nil {
 		t.Fatalf("compute rewards: %v", err)
 	}
@@ -85,14 +108,25 @@ func TestComputeRewardsEngagementOnly(t *testing.T) {
 		EmissionPerEpoch:  big.NewInt(1000),
 		TreasuryAddress:   addr(1),
 	}
+	params := WeightParams{
+		AlphaStakeBps:         0,
+		TxWeightBps:           10000,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 100000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+	}
 	snapshot := RewardSnapshot{
 		Epoch: 2,
 		Entries: []RewardSnapshotEntry{
-			{Address: addr(4), Stake: big.NewInt(500), Engagement: big.NewInt(20)},
-			{Address: addr(5), Stake: big.NewInt(100), Engagement: big.NewInt(80)},
+			{Address: addr(4), Stake: big.NewInt(500), Meter: EngagementMeter{TxCount: 2}},
+			{Address: addr(5), Stake: big.NewInt(100), Meter: EngagementMeter{TxCount: 8}},
 		},
 	}
-	outcome, err := ComputeRewards(cfg, snapshot, big.NewInt(1000))
+	outcome, err := ComputeRewards(cfg, params, snapshot, big.NewInt(1000))
 	if err != nil {
 		t.Fatalf("compute rewards: %v", err)
 	}
@@ -112,14 +146,25 @@ func TestComputeRewardsMinPayout(t *testing.T) {
 		EmissionPerEpoch:  big.NewInt(1000),
 		TreasuryAddress:   addr(1),
 	}
+	params := WeightParams{
+		AlphaStakeBps:         5000,
+		TxWeightBps:           10000,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 100000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+	}
 	snapshot := RewardSnapshot{
 		Epoch: 3,
 		Entries: []RewardSnapshotEntry{
-			{Address: addr(6), Stake: big.NewInt(60), Engagement: big.NewInt(40)},
-			{Address: addr(7), Stake: big.NewInt(40), Engagement: big.NewInt(60)},
+			{Address: addr(6), Stake: big.NewInt(60), Meter: EngagementMeter{TxCount: 4}},
+			{Address: addr(7), Stake: big.NewInt(40), Meter: EngagementMeter{TxCount: 6}},
 		},
 	}
-	outcome, err := ComputeRewards(cfg, snapshot, big.NewInt(1000))
+	outcome, err := ComputeRewards(cfg, params, snapshot, big.NewInt(1000))
 	if err != nil {
 		t.Fatalf("compute rewards: %v", err)
 	}
@@ -140,15 +185,26 @@ func TestComputeRewardsMaxWinners(t *testing.T) {
 		TreasuryAddress:    addr(1),
 		MaxWinnersPerEpoch: 2,
 	}
+	params := WeightParams{
+		AlphaStakeBps:         5000,
+		TxWeightBps:           10000,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 100000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+	}
 	snapshot := RewardSnapshot{
 		Epoch: 4,
 		Entries: []RewardSnapshotEntry{
-			{Address: addr(1), Stake: big.NewInt(10), Engagement: big.NewInt(10)},
-			{Address: addr(2), Stake: big.NewInt(20), Engagement: big.NewInt(20)},
-			{Address: addr(3), Stake: big.NewInt(30), Engagement: big.NewInt(30)},
+			{Address: addr(1), Stake: big.NewInt(10), Meter: EngagementMeter{TxCount: 1}},
+			{Address: addr(2), Stake: big.NewInt(20), Meter: EngagementMeter{TxCount: 2}},
+			{Address: addr(3), Stake: big.NewInt(30), Meter: EngagementMeter{TxCount: 3}},
 		},
 	}
-	outcome, err := ComputeRewards(cfg, snapshot, big.NewInt(600))
+	outcome, err := ComputeRewards(cfg, params, snapshot, big.NewInt(600))
 	if err != nil {
 		t.Fatalf("compute rewards: %v", err)
 	}
