@@ -115,6 +115,12 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "potso":
+		code := runPotsoCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "loyalty-create-business":
 		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-create-business <owner> <name>")
@@ -833,4 +839,5 @@ func printUsage() {
 	fmt.Println("  escrow                             - Escrow management subcommands")
 	fmt.Println("  claimable                          - Hash-lock claimable subcommands")
 	fmt.Println("  p2p                                - P2P trade orchestration subcommands")
+	fmt.Println("  potso                              - POTSO telemetry subcommands")
 }

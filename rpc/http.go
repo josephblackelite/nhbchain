@@ -329,6 +329,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleEngagementSubmitHeartbeat(w, r, req)
+	case "potso_heartbeat":
+		s.handlePotsoHeartbeat(w, r, req)
+	case "potso_userMeters":
+		s.handlePotsoUserMeters(w, r, req)
+	case "potso_top":
+		s.handlePotsoTop(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}
