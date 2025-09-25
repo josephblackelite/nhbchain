@@ -92,14 +92,15 @@ type Server struct {
 	nodeID  string
 	genesis []byte
 
-	mu            sync.RWMutex
-	peers         map[string]*Peer
-	inboundCount  int
-	outboundCount int
-	metrics       map[string]*peerMetrics
-	byAddr        map[string]string
-	persistentIDs map[string]struct{}
-	records       map[string]*PeerRecord
+	mu               sync.RWMutex
+	peers            map[string]*Peer
+	inboundCount     int
+	outboundCount    int
+	metrics          map[string]*peerMetrics
+	byAddr           map[string]string
+	persistentIDs    map[string]struct{}
+	records          map[string]*PeerRecord
+	metricsCollector *networkMetrics
 
 	listenMu    sync.RWMutex
 	listenAddrs []string
@@ -300,6 +301,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		byAddr:           make(map[string]string),
 		persistentIDs:    make(map[string]struct{}),
 		records:          make(map[string]*PeerRecord),
+		metricsCollector: newNetworkMetrics(),
 		dialFn:           defaultDialer,
 		now:              time.Now,
 		backoff:          make(map[string]time.Duration),
@@ -391,7 +393,18 @@ func (s *Server) handleInbound(conn net.Conn) {
 	}
 }
 
-func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr string) error {
+func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr string) (err error) {
+	if s.metricsCollector != nil {
+		start := s.now()
+		defer func() {
+			outcome := "success"
+			if err != nil {
+				outcome = "failure"
+			}
+			s.metricsCollector.recordHandshake(outcome)
+			_ = start
+		}()
+	}
 	reader := bufio.NewReader(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), s.handshakeTimeout)
 	defer cancel()
@@ -479,6 +492,9 @@ func (s *Server) recordPeerHandshake(remote *handshakePacket) {
 	rec.Version = remote.ClientVersion
 	rec.LastSeen = seen
 	rec.Score = score
+	if s.metricsCollector != nil {
+		s.metricsCollector.observePeerStatus(remote.nodeID, ReputationStatus{Score: score})
+	}
 }
 
 func (s *Server) touchPeer(id string) {
@@ -589,6 +605,10 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 		}
 	}
 	s.mu.Unlock()
+
+	if s.metricsCollector != nil {
+		s.metricsCollector.removePeer(peer.id)
+	}
 
 	if s.pex != nil {
 		s.pex.forgetPeer(peer.id)
@@ -1170,6 +1190,13 @@ func (s *Server) handleRateLimit(peer *Peer, global bool) {
 		peer.terminate(false, fmt.Errorf("global rate cap exceeded"))
 		return
 	}
+	if s.reputation != nil {
+		status := s.reputation.MarkMisbehavior(peer.id, s.now())
+		s.updatePeerRecordScore(peer.id, status.Score)
+		if s.metricsCollector != nil {
+			s.metricsCollector.observePeerStatus(peer.id, status)
+		}
+	}
 	status := s.adjustScore(peer.id, -ratePenalty)
 	fmt.Printf("Peer %s exceeded rate limit (score %d)\n", peer.id, status.Score)
 	peer.terminate(status.Banned, fmt.Errorf("peer rate limit exceeded"))
@@ -1178,12 +1205,44 @@ func (s *Server) handleRateLimit(peer *Peer, global bool) {
 func (s *Server) recordValidMessage(id string) {
 	s.touchPeer(id)
 	s.updatePeerMetrics(id, true)
+	if s.reputation != nil {
+		status := s.reputation.MarkUseful(id, s.now())
+		s.updatePeerRecordScore(id, status.Score)
+		if s.metricsCollector != nil {
+			s.metricsCollector.observePeerStatus(id, status)
+		}
+	}
 	if validMessageReward != 0 {
 		s.adjustScore(id, validMessageReward)
 	}
 }
 
+func (s *Server) observeLatency(id string, latency time.Duration) {
+	if s == nil || id == "" || latency <= 0 || s.reputation == nil {
+		return
+	}
+	status := s.reputation.ObserveLatency(id, latency, s.now())
+	s.updatePeerRecordScore(id, status.Score)
+	if s.metricsCollector != nil {
+		s.metricsCollector.observePeerStatus(id, status)
+	}
+}
+
+func (s *Server) recordGossip(direction string, msgType byte) {
+	if s == nil || s.metricsCollector == nil {
+		return
+	}
+	s.metricsCollector.recordGossip(direction, msgType)
+}
+
 func (s *Server) handleProtocolViolation(peer *Peer, err error) {
+	if s.reputation != nil {
+		status := s.reputation.MarkMisbehavior(peer.id, s.now())
+		s.updatePeerRecordScore(peer.id, status.Score)
+		if s.metricsCollector != nil {
+			s.metricsCollector.observePeerStatus(peer.id, status)
+		}
+	}
 	if s.updatePeerMetrics(peer.id, false) {
 		fmt.Printf("Protocol violation from %s: %v (banned: invalid rate)\n", peer.id, err)
 		peer.terminate(true, fmt.Errorf("invalid message rate: %w", err))
@@ -1203,6 +1262,9 @@ func (s *Server) adjustScore(id string, delta int) ReputationStatus {
 	status := s.reputation.Adjust(id, delta, s.now(), persistent)
 	s.updatePeerGreylist(id, status.Greylisted)
 	s.updatePeerRecordScore(id, status.Score)
+	if s.metricsCollector != nil {
+		s.metricsCollector.observePeerStatus(id, status)
+	}
 	return status
 }
 

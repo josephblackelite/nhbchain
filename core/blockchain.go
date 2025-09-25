@@ -357,3 +357,10 @@ func (bc *Blockchain) CurrentHeader() *types.BlockHeader {
 func (bc *Blockchain) ChainID() uint64 {
 	return bc.chainID
 }
+
+// Height returns the last committed block height.
+func (bc *Blockchain) Height() uint64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.height
+}

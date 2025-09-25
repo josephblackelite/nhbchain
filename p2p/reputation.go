@@ -25,17 +25,23 @@ type ReputationConfig struct {
 
 // ReputationStatus represents the state of a peer after an adjustment.
 type ReputationStatus struct {
-	Score      int
-	Greylisted bool
-	Banned     bool
-	Until      time.Time
+	Score       int
+	Greylisted  bool
+	Banned      bool
+	Until       time.Time
+	LatencyMS   float64
+	Useful      uint64
+	Misbehavior uint64
 }
 
 type reputationRecord struct {
-	score      float64
-	updatedAt  time.Time
-	bannedTill time.Time
-	greyTill   time.Time
+	score       float64
+	updatedAt   time.Time
+	bannedTill  time.Time
+	greyTill    time.Time
+	latencyEWMA float64
+	useful      uint64
+	misbehavior uint64
 }
 
 // ReputationManager keeps per-peer scoring with decay.
@@ -68,32 +74,22 @@ func (m *ReputationManager) Adjust(id string, delta int, now time.Time, persiste
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	rec := m.records[id]
-	if rec == nil {
-		rec = &reputationRecord{updatedAt: now}
-		m.records[id] = rec
-	}
+	rec := m.ensureRecordLocked(id, now)
 
 	m.applyDecayLocked(rec, now)
 	rec.score += float64(delta)
 	rec.updatedAt = now
 
-	status := ReputationStatus{Score: int(math.Round(rec.score))}
+	status := m.composeStatusLocked(rec, now)
 
 	if persistent {
 		// Persistent peers never enter the ban list but can recover quicker.
 		if rec.score > 0 {
 			rec.score = 0
-			status.Score = 0
 		}
 		rec.bannedTill = time.Time{}
 	} else if status.Score <= -m.cfg.BanScore && m.cfg.BanScore > 0 {
 		rec.bannedTill = now.Add(m.cfg.BanDuration)
-	}
-
-	if rec.bannedTill.After(now) {
-		status.Banned = true
-		status.Until = rec.bannedTill
 	}
 
 	if status.Score <= -m.cfg.GreyScore && m.cfg.GreyScore > 0 {
@@ -101,14 +97,8 @@ func (m *ReputationManager) Adjust(id string, delta int, now time.Time, persiste
 	} else if status.Score > -m.cfg.GreyScore {
 		rec.greyTill = time.Time{}
 	}
-	if rec.greyTill.After(now) {
-		status.Greylisted = true
-		if status.Until.IsZero() || rec.greyTill.Before(status.Until) {
-			status.Until = rec.greyTill
-		}
-	}
 
-	return status
+	return m.composeStatusLocked(rec, now)
 }
 
 // Reward sets a positive delta without triggering ban thresholds.
@@ -145,6 +135,54 @@ func (m *ReputationManager) PenalizeSpam(id string, now time.Time, persistent bo
 	return m.Adjust(id, spamPenaltyDelta, now, persistent)
 }
 
+// ObserveLatency records a latency measurement for a peer, updating the EWMA.
+func (m *ReputationManager) ObserveLatency(id string, latency time.Duration, now time.Time) ReputationStatus {
+	if m == nil || id == "" || latency <= 0 {
+		return ReputationStatus{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.ensureRecordLocked(id, now)
+	m.applyDecayLocked(rec, now)
+	ms := float64(latency) / float64(time.Millisecond)
+	if rec.latencyEWMA <= 0 {
+		rec.latencyEWMA = ms
+	} else {
+		const alpha = 0.2
+		rec.latencyEWMA = alpha*ms + (1-alpha)*rec.latencyEWMA
+	}
+	rec.updatedAt = now
+	return m.composeStatusLocked(rec, now)
+}
+
+// MarkUseful increases the usefulness counter for a peer.
+func (m *ReputationManager) MarkUseful(id string, now time.Time) ReputationStatus {
+	if m == nil || id == "" {
+		return ReputationStatus{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.ensureRecordLocked(id, now)
+	m.applyDecayLocked(rec, now)
+	rec.useful++
+	rec.updatedAt = now
+	return m.composeStatusLocked(rec, now)
+}
+
+// MarkMisbehavior increases the misbehavior counter for a peer without modifying the score directly.
+func (m *ReputationManager) MarkMisbehavior(id string, now time.Time) ReputationStatus {
+	if m == nil || id == "" {
+		return ReputationStatus{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.ensureRecordLocked(id, now)
+	m.applyDecayLocked(rec, now)
+	rec.misbehavior++
+	rec.updatedAt = now
+	return m.composeStatusLocked(rec, now)
+}
+
 // SetBan overrides the ban expiry for a peer.
 func (m *ReputationManager) SetBan(id string, until time.Time, now time.Time) {
 	if m == nil || id == "" {
@@ -152,11 +190,7 @@ func (m *ReputationManager) SetBan(id string, until time.Time, now time.Time) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rec := m.records[id]
-	if rec == nil {
-		rec = &reputationRecord{updatedAt: now}
-		m.records[id] = rec
-	}
+	rec := m.ensureRecordLocked(id, now)
 	if until.After(now) {
 		rec.bannedTill = until
 	} else {
@@ -261,18 +295,36 @@ func (m *ReputationManager) Snapshot(now time.Time) map[string]ReputationStatus 
 	out := make(map[string]ReputationStatus, len(m.records))
 	for id, rec := range m.records {
 		m.applyDecayLocked(rec, now)
-		status := ReputationStatus{Score: int(math.Round(rec.score))}
-		if rec.bannedTill.After(now) {
-			status.Banned = true
-			status.Until = rec.bannedTill
-		}
-		if rec.greyTill.After(now) {
-			status.Greylisted = true
-			if status.Until.IsZero() || rec.greyTill.Before(status.Until) {
-				status.Until = rec.greyTill
-			}
-		}
-		out[id] = status
+		out[id] = m.composeStatusLocked(rec, now)
 	}
 	return out
+}
+
+func (m *ReputationManager) ensureRecordLocked(id string, now time.Time) *reputationRecord {
+	rec := m.records[id]
+	if rec == nil {
+		rec = &reputationRecord{updatedAt: now}
+		m.records[id] = rec
+	}
+	return rec
+}
+
+func (m *ReputationManager) composeStatusLocked(rec *reputationRecord, now time.Time) ReputationStatus {
+	status := ReputationStatus{
+		Score:       int(math.Round(rec.score)),
+		LatencyMS:   rec.latencyEWMA,
+		Useful:      rec.useful,
+		Misbehavior: rec.misbehavior,
+	}
+	if rec.bannedTill.After(now) {
+		status.Banned = true
+		status.Until = rec.bannedTill
+	}
+	if rec.greyTill.After(now) {
+		status.Greylisted = true
+		if status.Until.IsZero() || rec.greyTill.Before(status.Until) {
+			status.Until = rec.greyTill
+		}
+	}
+	return status
 }

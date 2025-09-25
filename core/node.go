@@ -2,11 +2,13 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"nhbchain/core/events"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
+	syncmgr "nhbchain/core/sync"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
@@ -32,6 +35,7 @@ import (
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
 
+	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -40,6 +44,7 @@ type Node struct {
 	db             storage.Database
 	state          *StateProcessor
 	chain          *Blockchain
+	syncMgr        *syncmgr.Manager
 	validatorKey   *crypto.PrivateKey
 	mempool        []*types.Transaction
 	bftEngine      *bft.Engine
@@ -107,7 +112,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	var treasury [20]byte
 	copy(treasury[:], validatorAddr.Bytes())
 
-	return &Node{
+	node := &Node{
 		db:             db,
 		state:          stateProcessor,
 		chain:          chain,
@@ -117,7 +122,16 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		engagementMgr:  engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapSanctions:  swap.DefaultSanctionsChecker,
 		swapRefundSink: treasury,
-	}, nil
+	}
+
+	// Initialise fast-sync manager.
+	if trieDB := stateTrie.TrieDB(); trieDB != nil {
+		mgr := syncmgr.NewManager(chain.ChainID(), chain.Height(), trieDB)
+		mgr.SetValidatorSet(buildValidatorSet(stateProcessor.ValidatorSet))
+		node.syncMgr = mgr
+	}
+
+	return node, nil
 }
 
 // SetGovernancePolicy updates the governance proposal policy applied to RPC actions.
@@ -461,11 +475,98 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	if err := n.chain.AddBlock(b); err != nil {
 		return err
 	}
+	if n.syncMgr != nil && b != nil && b.Header != nil {
+		n.syncMgr.SetHeight(b.Header.Height)
+	}
 	return nil
 }
 
 func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorSet }
-func (n *Node) GetHeight() uint64                    { return n.chain.GetHeight() }
+func (n *Node) GetHeight() uint64                    { return n.chain.Height() }
+
+// SyncManager exposes the fast-sync subsystem for RPC handlers.
+func (n *Node) SyncManager() *syncmgr.Manager { return n.syncMgr }
+
+// SnapshotExport produces a snapshot manifest in the supplied directory.
+func (n *Node) SnapshotExport(ctx context.Context, outDir string) (*syncmgr.SnapshotManifest, error) {
+	if n == nil || n.syncMgr == nil {
+		return nil, fmt.Errorf("fast-sync manager not initialised")
+	}
+	root := n.state.CurrentRoot()
+	var checkpointHash []byte
+	height := n.chain.Height()
+	if header := n.chain.CurrentHeader(); header != nil {
+		height = header.Height
+		if len(header.StateRoot) > 0 {
+			root = common.BytesToHash(header.StateRoot)
+		}
+		if hash, err := header.Hash(); err == nil {
+			checkpointHash = hash
+		}
+	}
+	manifest, err := n.syncMgr.ExportSnapshot(ctx, height, root, outDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(checkpointHash) > 0 {
+		manifest.Checkpoint = append([]byte(nil), checkpointHash...)
+		if manifest.Metadata == nil {
+			manifest.Metadata = make(map[string]string)
+		}
+		manifest.Metadata["checkpointHeight"] = strconv.FormatUint(height, 10)
+		manifest.Metadata["checkpointHash"] = hex.EncodeToString(checkpointHash)
+	}
+	return manifest, nil
+}
+
+// SnapshotImport verifies and installs a snapshot manifest/chunk set.
+func (n *Node) SnapshotImport(ctx context.Context, manifest *syncmgr.SnapshotManifest, chunkDir string) (common.Hash, error) {
+	if n == nil || n.syncMgr == nil {
+		return common.Hash{}, fmt.Errorf("fast-sync manager not initialised")
+	}
+	if manifest.ChainID != 0 && manifest.ChainID != n.chain.ChainID() {
+		return common.Hash{}, fmt.Errorf("snapshot chain mismatch: manifest=%d local=%d", manifest.ChainID, n.chain.ChainID())
+	}
+	root, err := n.syncMgr.ImportSnapshot(ctx, manifest, chunkDir)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if err := n.state.ResetToRoot(root); err != nil {
+		return common.Hash{}, err
+	}
+	n.syncMgr.SetHeight(manifest.Height)
+	n.refreshValidatorSet()
+	return root, nil
+}
+
+func (n *Node) refreshValidatorSet() {
+	if n == nil || n.syncMgr == nil {
+		return
+	}
+	n.syncMgr.SetValidatorSet(buildValidatorSet(n.state.ValidatorSet))
+}
+
+func buildValidatorSet(source map[string]*big.Int) *syncmgr.ValidatorSet {
+	validators := make([]syncmgr.Validator, 0, len(source))
+	for key, power := range source {
+		addr := []byte(key)
+		validators = append(validators, syncmgr.Validator{
+			Address: append([]byte(nil), addr...),
+			Power:   validatorPower(power),
+		})
+	}
+	return syncmgr.NewValidatorSet(validators)
+}
+
+func validatorPower(v *big.Int) uint64 {
+	if v == nil || v.Sign() <= 0 {
+		return 0
+	}
+	if v.BitLen() > 63 {
+		return math.MaxUint64
+	}
+	return v.Uint64()
+}
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
 }

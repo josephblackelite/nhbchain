@@ -198,6 +198,9 @@ func (p *Peer) readLoop() {
 			p.server.handleProtocolViolation(p, fmt.Errorf("malformed message: %w", err))
 			return
 		}
+		if p.server != nil {
+			p.server.recordGossip("in", msg.Type)
+		}
 
 		handled, err := p.handleControlMessage(&msg)
 		if err != nil {
@@ -249,6 +252,9 @@ func (p *Peer) writeMessage(ctx context.Context, msg *Message) error {
 		defer p.conn.SetWriteDeadline(time.Time{})
 	}
 	_, err = p.conn.Write(append(data, '\n'))
+	if err == nil && p.server != nil && msg != nil {
+		p.server.recordGossip("out", msg.Type)
+	}
 	return err
 }
 
@@ -267,9 +273,21 @@ func (p *Peer) handleControlMessage(msg *Message) (bool, error) {
 			return false, fmt.Errorf("send pong: %w", err)
 		}
 		p.server.touchPeer(p.id)
+		if payload.Timestamp > 0 {
+			sent := time.Unix(0, payload.Timestamp)
+			p.server.observeLatency(p.id, time.Since(sent))
+		}
 		return true, nil
 	case MsgTypePong:
+		var payload PongPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return false, fmt.Errorf("malformed pong payload: %w", err)
+		}
 		p.server.touchPeer(p.id)
+		if payload.Timestamp > 0 {
+			sent := time.Unix(0, payload.Timestamp)
+			p.server.observeLatency(p.id, time.Since(sent))
+		}
 		return true, nil
 	case MsgTypeHandshake, MsgTypeHandshakeAck:
 		return true, nil

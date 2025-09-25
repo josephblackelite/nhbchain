@@ -26,6 +26,11 @@ func TestReputationEvents(t *testing.T) {
 		t.Fatalf("expected uptime bonus applied, got %d", status.Score)
 	}
 
+	status = rep.MarkUseful("peer", now)
+	if status.Useful != 1 {
+		t.Fatalf("expected useful counter to increment, got %d", status.Useful)
+	}
+
 	status = rep.PenalizeMalformed("peer", now, false)
 	if status.Score != heartbeatRewardDelta+uptimeRewardDelta+malformedMessagePenaltyDelta {
 		t.Fatalf("malformed penalty not applied, got %d", status.Score)
@@ -34,6 +39,16 @@ func TestReputationEvents(t *testing.T) {
 	status = rep.PenalizeSpam("peer", now, false)
 	if !status.Greylisted {
 		t.Fatalf("expected spam to trigger greylist, score=%d", status.Score)
+	}
+
+	mis := rep.MarkMisbehavior("peer", now)
+	if mis.Misbehavior == 0 {
+		t.Fatalf("expected misbehavior counter to increment")
+	}
+
+	latencyStatus := rep.ObserveLatency("peer", 50*time.Millisecond, now)
+	if latencyStatus.LatencyMS <= 0 {
+		t.Fatalf("expected latency to be recorded, got %f", latencyStatus.LatencyMS)
 	}
 
 	status = rep.PenalizeInvalidBlock("peer", now, false)
