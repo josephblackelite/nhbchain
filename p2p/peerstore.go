@@ -232,6 +232,23 @@ func (ps *Peerstore) NextDialAt(addr string, now time.Time) time.Time {
 	return next
 }
 
+// Snapshot returns a copy of all peerstore entries.
+func (ps *Peerstore) Snapshot() []PeerstoreEntry {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if len(ps.byNode) == 0 {
+		return nil
+	}
+	entries := make([]PeerstoreEntry, 0, len(ps.byNode))
+	for _, rec := range ps.byNode {
+		if rec == nil {
+			continue
+		}
+		entries = append(entries, *rec)
+	}
+	return entries
+}
+
 func (ps *Peerstore) putLocked(rec *PeerstoreEntry) error {
 	existing := ps.byNode[rec.NodeID]
 	if existing != nil {

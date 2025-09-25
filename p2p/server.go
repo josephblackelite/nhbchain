@@ -53,6 +53,8 @@ type ServerConfig struct {
 	MaxPeers         int
 	MaxInbound       int
 	MaxOutbound      int
+	MinPeers         int
+	OutboundPeers    int
 	Bootnodes        []string
 	PersistentPeers  []string
 	Seeds            []string
@@ -197,6 +199,15 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	if cfg.MaxOutbound <= 0 || cfg.MaxOutbound > cfg.MaxPeers {
 		cfg.MaxOutbound = cfg.MaxPeers
 	}
+	if cfg.MinPeers <= 0 || cfg.MinPeers > cfg.MaxPeers {
+		cfg.MinPeers = cfg.MaxPeers / 2
+		if cfg.MinPeers <= 0 {
+			cfg.MinPeers = 1
+		}
+	}
+	if cfg.OutboundPeers <= 0 || cfg.OutboundPeers > cfg.MaxOutbound {
+		cfg.OutboundPeers = cfg.MaxOutbound
+	}
 	if cfg.PeerBanDuration <= 0 {
 		cfg.PeerBanDuration = defaultPeerBan
 	}
@@ -297,10 +308,10 @@ func (s *Server) SetPeerstore(store *Peerstore) {
 
 func (s *Server) startConnManager() {
 	s.connMgrOnce.Do(func() {
-		if len(s.seeds) == 0 {
+		mgr := newConnManager(s)
+		if mgr == nil {
 			return
 		}
-		mgr := newConnManager(s)
 		s.connMgr = mgr
 		mgr.start()
 	})

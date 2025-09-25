@@ -118,6 +118,8 @@ func main() {
 		MaxPeers:         cfg.MaxPeers,
 		MaxInbound:       cfg.MaxInbound,
 		MaxOutbound:      cfg.MaxOutbound,
+		MinPeers:         cfg.MinPeers,
+		OutboundPeers:    cfg.OutboundPeers,
 		Bootnodes:        append([]string{}, cfg.Bootnodes...),
 		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
 		Seeds:            append([]string{}, cfg.P2P.Seeds...),

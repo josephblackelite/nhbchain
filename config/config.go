@@ -33,6 +33,8 @@ type Config struct {
 	MaxPeers              int         `toml:"MaxPeers"`
 	MaxInbound            int         `toml:"MaxInbound"`
 	MaxOutbound           int         `toml:"MaxOutbound"`
+	MinPeers              int         `toml:"MinPeers"`
+	OutboundPeers         int         `toml:"OutboundPeers"`
 	PeerBanSeconds        int         `toml:"PeerBanSeconds"`
 	ReadTimeout           int         `toml:"ReadTimeout"`
 	WriteTimeout          int         `toml:"WriteTimeout"`
@@ -51,6 +53,8 @@ type P2PSection struct {
 	MaxPeers            int      `toml:"MaxPeers"`
 	MaxInbound          int      `toml:"MaxInbound"`
 	MaxOutbound         int      `toml:"MaxOutbound"`
+	MinPeers            int      `toml:"MinPeers"`
+	OutboundPeers       int      `toml:"OutboundPeers"`
 	Bootnodes           []string `toml:"Bootnodes"`
 	PersistentPeers     []string `toml:"PersistentPeers"`
 	Seeds               []string `toml:"Seeds"`
@@ -157,6 +161,15 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.MaxOutbound <= 0 || cfg.MaxOutbound > cfg.MaxPeers {
 		cfg.MaxOutbound = cfg.MaxPeers
+	}
+	if cfg.MinPeers <= 0 || cfg.MinPeers > cfg.MaxPeers {
+		cfg.MinPeers = cfg.MaxPeers / 2
+		if cfg.MinPeers <= 0 {
+			cfg.MinPeers = 1
+		}
+	}
+	if cfg.OutboundPeers <= 0 || cfg.OutboundPeers > cfg.MaxOutbound {
+		cfg.OutboundPeers = cfg.MaxOutbound
 	}
 	if cfg.PeerBanSeconds <= 0 {
 		cfg.PeerBanSeconds = int((15 * time.Minute).Seconds())
@@ -316,6 +329,18 @@ func (cfg *Config) mergeP2PFromTopLevel() {
 	if cfg.MaxOutbound == 0 && cfg.P2P.MaxOutbound > 0 {
 		cfg.MaxOutbound = cfg.P2P.MaxOutbound
 	}
+	if cfg.P2P.MinPeers == 0 && cfg.MinPeers > 0 {
+		cfg.P2P.MinPeers = cfg.MinPeers
+	}
+	if cfg.MinPeers == 0 && cfg.P2P.MinPeers > 0 {
+		cfg.MinPeers = cfg.P2P.MinPeers
+	}
+	if cfg.P2P.OutboundPeers == 0 && cfg.OutboundPeers > 0 {
+		cfg.P2P.OutboundPeers = cfg.OutboundPeers
+	}
+	if cfg.OutboundPeers == 0 && cfg.P2P.OutboundPeers > 0 {
+		cfg.OutboundPeers = cfg.P2P.OutboundPeers
+	}
 	if len(cfg.P2P.Bootnodes) == 0 && len(cfg.Bootnodes) > 0 {
 		cfg.P2P.Bootnodes = append([]string{}, cfg.Bootnodes...)
 	}
@@ -358,6 +383,8 @@ func (cfg *Config) syncTopLevelToP2P() {
 	cfg.P2P.MaxPeers = cfg.MaxPeers
 	cfg.P2P.MaxInbound = cfg.MaxInbound
 	cfg.P2P.MaxOutbound = cfg.MaxOutbound
+	cfg.P2P.MinPeers = cfg.MinPeers
+	cfg.P2P.OutboundPeers = cfg.OutboundPeers
 	cfg.P2P.Bootnodes = append([]string{}, cfg.Bootnodes...)
 	cfg.P2P.PersistentPeers = append([]string{}, cfg.PersistentPeers...)
 	cfg.P2P.RateMsgsPerSec = cfg.MaxMsgsPerSecond
