@@ -15,7 +15,20 @@ part of routine state audits to ensure voting power remains tamper-evident.
 
 ## Timelock Review
 
-_TODO: Detail timelock enforcement, bypass protections, and alerting._
+Passed proposals must be explicitly queued before they can execute. Once
+queued, the governance engine enforces the configured timelock by refusing to
+apply the payload until `now >= TimelockEnd`. Operators should monitor for
+`gov.queued` events to confirm that a passed proposal has entered the timelock
+queue, and alert if an execution attempt occurs before the unlock timestamp
+(`gov.executed` will not be emitted in that case). This ensures downstream
+systems have a deterministic grace period to audit the queued change.
+
+Execution is idempotent: after a proposal is applied the engine transitions it
+to `executed` status and future calls are rejected. Auditors can therefore rely
+on `gov.executed` as a single-source-of-truth signal that the param store
+modifications were committed exactly once. Attempted replays or duplicate
+messages will fail with an explicit error, preserving change-control logs and
+reducing the risk of multi-apply bugs.
 
 ## Tally Reproducibility
 

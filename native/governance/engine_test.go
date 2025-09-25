@@ -22,6 +22,7 @@ type mockGovernanceState struct {
 	lastEpoch      uint64
 	hasLastEpoch   bool
 	nextID         uint64
+	params         map[string][]byte
 }
 
 func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernanceState {
@@ -35,6 +36,7 @@ func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernance
 		proposals:      make(map[uint64]*Proposal),
 		votes:          make(map[string]*Vote),
 		snapshots:      make(map[uint64]*potso.StoredWeightSnapshot),
+		params:         make(map[string][]byte),
 	}
 }
 
@@ -97,6 +99,7 @@ func (m *mockGovernanceState) GovernancePutProposal(p *Proposal) error {
 	if p.Deposit != nil {
 		clone.Deposit = new(big.Int).Set(p.Deposit)
 	}
+	clone.Queued = p.Queued
 	m.proposals[p.ID] = &clone
 	return nil
 }
@@ -110,6 +113,7 @@ func (m *mockGovernanceState) GovernanceGetProposal(id uint64) (*Proposal, bool,
 	if proposal.Deposit != nil {
 		clone.Deposit = new(big.Int).Set(proposal.Deposit)
 	}
+	clone.Queued = proposal.Queued
 	return &clone, true, nil
 }
 
@@ -149,6 +153,27 @@ func (m *mockGovernanceState) SnapshotPotsoWeights(epoch uint64) (*potso.StoredW
 		return nil, false, nil
 	}
 	return cloneStoredWeightSnapshot(snapshot), true, nil
+}
+
+func (m *mockGovernanceState) ParamStoreSet(name string, value []byte) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("params key must not be empty")
+	}
+	m.params[trimmed] = append([]byte(nil), value...)
+	return nil
+}
+
+func (m *mockGovernanceState) ParamStoreGet(name string) ([]byte, bool) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return nil, false
+	}
+	val, ok := m.params[trimmed]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), val...), true
 }
 
 type captureEmitter struct {
@@ -716,5 +741,157 @@ func TestFinalizeRejectsNoVotes(t *testing.T) {
 	}
 	if escrow.Cmp(deposit) != 0 {
 		t.Fatalf("deposit should remain locked: %s", escrow.String())
+	}
+}
+
+func TestQueueExecutionMarksProposal(t *testing.T) {
+	now := time.Unix(1_700_006_000, 0).UTC()
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:             7,
+		Status:         ProposalStatusPassed,
+		TimelockEnd:    now.Add(time.Hour),
+		Target:         ProposalKindParamUpdate,
+		ProposedChange: `{"fees.baseFee":5}`,
+	}
+	if err := state.GovernancePutProposal(proposal); err != nil {
+		t.Fatalf("seed proposal: %v", err)
+	}
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+	engine.SetPolicy(ProposalPolicy{AllowedParams: []string{"fees.baseFee"}})
+	emitter := &captureEmitter{}
+	engine.SetEmitter(emitter)
+
+	if err := engine.QueueExecution(7); err != nil {
+		t.Fatalf("queue execution: %v", err)
+	}
+
+	stored, ok, err := state.GovernanceGetProposal(7)
+	if err != nil {
+		t.Fatalf("reload proposal: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected proposal persisted")
+	}
+	if !stored.Queued {
+		t.Fatalf("expected proposal marked queued")
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected one event, got %d", len(emitter.events))
+	}
+	evt, ok := emitter.events[0].(governanceEvent)
+	if !ok {
+		t.Fatalf("unexpected event type %T", emitter.events[0])
+	}
+	payload := evt.Event()
+	if payload.Type != EventTypeProposalQueued {
+		t.Fatalf("unexpected event type: %s", payload.Type)
+	}
+	if payload.Attributes["id"] != "7" {
+		t.Fatalf("unexpected queued id: %s", payload.Attributes["id"])
+	}
+}
+
+func TestExecuteProposalAppliesParams(t *testing.T) {
+	now := time.Unix(1_700_007_000, 0).UTC()
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:             8,
+		Status:         ProposalStatusPassed,
+		TimelockEnd:    now.Add(-time.Second),
+		Target:         ProposalKindParamUpdate,
+		ProposedChange: `{"fees.baseFee":25,"potso.weights.AlphaStakeBps":7500}`,
+		Queued:         true,
+	}
+	if err := state.GovernancePutProposal(proposal); err != nil {
+		t.Fatalf("seed proposal: %v", err)
+	}
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+	engine.SetPolicy(ProposalPolicy{AllowedParams: []string{"fees.baseFee", "potso.weights.AlphaStakeBps"}})
+	emitter := &captureEmitter{}
+	engine.SetEmitter(emitter)
+
+	if err := engine.Execute(8); err != nil {
+		t.Fatalf("execute proposal: %v", err)
+	}
+
+	stored, ok, err := state.GovernanceGetProposal(8)
+	if err != nil {
+		t.Fatalf("reload proposal: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected proposal persisted")
+	}
+	if stored.Status != ProposalStatusExecuted {
+		t.Fatalf("expected executed status, got %s", stored.Status.StatusString())
+	}
+	value, ok := state.ParamStoreGet("fees.baseFee")
+	if !ok {
+		t.Fatalf("expected fees.baseFee updated")
+	}
+	if string(value) != "25" {
+		t.Fatalf("unexpected base fee value: %s", string(value))
+	}
+	alpha, ok := state.ParamStoreGet("potso.weights.AlphaStakeBps")
+	if !ok {
+		t.Fatalf("expected alpha stake updated")
+	}
+	if string(alpha) != "7500" {
+		t.Fatalf("unexpected alpha stake value: %s", string(alpha))
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected one event, got %d", len(emitter.events))
+	}
+	evt, ok := emitter.events[0].(governanceEvent)
+	if !ok {
+		t.Fatalf("unexpected event type %T", emitter.events[0])
+	}
+	payload := evt.Event()
+	if payload.Type != EventTypeProposalExecuted {
+		t.Fatalf("unexpected event type: %s", payload.Type)
+	}
+	if payload.Attributes["status"] != ProposalStatusExecuted.StatusString() {
+		t.Fatalf("unexpected status attribute: %s", payload.Attributes["status"])
+	}
+
+	if err := engine.Execute(8); err == nil || !strings.Contains(err.Error(), "already executed") {
+		t.Fatalf("expected idempotency error, got %v", err)
+	}
+}
+
+func TestExecuteRespectsTimelock(t *testing.T) {
+	now := time.Unix(1_700_008_000, 0).UTC()
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:             9,
+		Status:         ProposalStatusPassed,
+		TimelockEnd:    now.Add(time.Hour),
+		Target:         ProposalKindParamUpdate,
+		ProposedChange: `{"fees.baseFee":10}`,
+		Queued:         true,
+	}
+	if err := state.GovernancePutProposal(proposal); err != nil {
+		t.Fatalf("seed proposal: %v", err)
+	}
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+	engine.SetPolicy(ProposalPolicy{AllowedParams: []string{"fees.baseFee"}})
+
+	if err := engine.Execute(9); err == nil || !strings.Contains(err.Error(), "timelock") {
+		t.Fatalf("expected timelock error, got %v", err)
+	}
+
+	now = now.Add(2 * time.Hour)
+	engine.SetNowFunc(func() time.Time { return now })
+	if err := engine.Execute(9); err != nil {
+		t.Fatalf("execute after timelock: %v", err)
 	}
 }
