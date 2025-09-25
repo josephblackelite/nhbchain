@@ -65,6 +65,55 @@ func TestOracleAggregatorPriorityFallback(t *testing.T) {
 	}
 }
 
+func TestOracleAggregatorTWAP(t *testing.T) {
+	now := time.Now().Add(-3 * time.Minute).UTC()
+	quotes := []PriceQuote{
+		{Rate: big.NewRat(1, 1), Timestamp: now.Add(0)},
+		{Rate: big.NewRat(2, 1), Timestamp: now.Add(90 * time.Second)},
+		{Rate: big.NewRat(4, 1), Timestamp: now.Add(3 * time.Minute)},
+	}
+	idx := 0
+	agg := NewOracleAggregator([]string{"feed"}, 10*time.Minute)
+	agg.SetTWAPWindow(5 * time.Minute)
+	agg.SetTWAPSampleCap(16)
+	agg.Register("feed", oracleFunc(func(string, string) (PriceQuote, error) {
+		if idx >= len(quotes) {
+			return PriceQuote{}, fmt.Errorf("exhausted")
+		}
+		q := quotes[idx]
+		idx++
+		return q, nil
+	}))
+	for range quotes {
+		if _, err := agg.GetRate("USD", "ZNHB"); err != nil {
+			t.Fatalf("get rate: %v", err)
+		}
+	}
+	result, err := agg.TWAP("USD", "ZNHB", 0)
+	if err != nil {
+		t.Fatalf("twap: %v", err)
+	}
+	if result.Count != len(quotes) {
+		t.Fatalf("expected %d samples, got %d", len(quotes), result.Count)
+	}
+	if got := result.Average.FloatString(3); got != "2.333" {
+		t.Fatalf("unexpected twap: %s", got)
+	}
+	if result.Start.After(result.End) {
+		t.Fatalf("invalid window: %v -> %v", result.Start, result.End)
+	}
+	health := agg.Health()
+	if len(health.Feeds) != 1 {
+		t.Fatalf("expected single feed health, got %+v", health.Feeds)
+	}
+	if health.Feeds[0].Observations != len(quotes) {
+		t.Fatalf("unexpected observation count: %+v", health.Feeds[0])
+	}
+	if health.Feeds[0].Pair() != "USD/ZNHB" {
+		t.Fatalf("unexpected pair: %s", health.Feeds[0].Pair())
+	}
+}
+
 func TestNowPaymentsOracle(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("from"); got != "USD" {

@@ -259,6 +259,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSwapProviderStatus(w, r, req)
+	case "swap_burn_list":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleSwapBurnList(w, r, req)
 	case "swap_voucher_reverse":
 		if authErr := s.requireAuth(r); authErr != nil {
 			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)

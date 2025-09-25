@@ -40,22 +40,27 @@ const (
 // VoucherRecord captures the metadata stored for every voucher processed by the
 // mint pipeline.
 type VoucherRecord struct {
-	Provider        string
-	ProviderTxID    string
-	FiatCurrency    string
-	FiatAmount      string
-	USD             string
-	Rate            string
-	Token           string
-	MintAmountWei   *big.Int
-	Recipient       [20]byte
-	Username        string
-	Address         string
-	QuoteTimestamp  int64
-	OracleSource    string
-	MinterSignature string
-	Status          string
-	CreatedAt       int64
+	Provider          string
+	ProviderTxID      string
+	FiatCurrency      string
+	FiatAmount        string
+	USD               string
+	Rate              string
+	Token             string
+	MintAmountWei     *big.Int
+	Recipient         [20]byte
+	Username          string
+	Address           string
+	QuoteTimestamp    int64
+	OracleSource      string
+	MinterSignature   string
+	Status            string
+	CreatedAt         int64
+	TwapRate          string
+	TwapObservations  int
+	TwapWindowSeconds int64
+	TwapStart         int64
+	TwapEnd           int64
 }
 
 // Copy returns a deep copy to avoid callers mutating shared pointers.
@@ -71,22 +76,27 @@ func (v *VoucherRecord) Copy() *VoucherRecord {
 }
 
 type storedVoucherRecord struct {
-	Provider        string
-	ProviderTxID    string
-	FiatCurrency    string
-	FiatAmount      string
-	USD             string
-	Rate            string
-	Token           string
-	MintAmountWei   string
-	Recipient       [20]byte
-	Username        string
-	Address         string
-	QuoteTimestamp  uint64
-	OracleSource    string
-	MinterSignature string
-	Status          string
-	CreatedAt       uint64
+	Provider          string
+	ProviderTxID      string
+	FiatCurrency      string
+	FiatAmount        string
+	USD               string
+	Rate              string
+	Token             string
+	MintAmountWei     string
+	Recipient         [20]byte
+	Username          string
+	Address           string
+	QuoteTimestamp    uint64
+	OracleSource      string
+	MinterSignature   string
+	Status            string
+	CreatedAt         uint64
+	TwapRate          string
+	TwapObservations  uint32
+	TwapWindowSeconds uint64
+	TwapStart         uint64
+	TwapEnd           uint64
 }
 
 type voucherIndexEntry struct {
@@ -273,7 +283,7 @@ func (l *Ledger) ExportCSV(startTs, endTs int64) (string, int, *big.Int, error) 
 	}
 	buf := &bytes.Buffer{}
 	writer := csv.NewWriter(buf)
-	header := []string{"providerTxId", "provider", "fiatCurrency", "fiatAmount", "usd", "rate", "token", "mintAmountWei", "recipient", "username", "address", "quoteTs", "source", "minterSig", "status", "createdAt"}
+	header := []string{"providerTxId", "provider", "fiatCurrency", "fiatAmount", "usd", "rate", "token", "mintAmountWei", "recipient", "username", "address", "quoteTs", "source", "minterSig", "status", "createdAt", "twapRate", "twapObservations", "twapWindowSeconds", "twapStart", "twapEnd"}
 	if err := writer.Write(header); err != nil {
 		return "", 0, nil, err
 	}
@@ -299,6 +309,11 @@ func (l *Ledger) ExportCSV(startTs, endTs int64) (string, int, *big.Int, error) 
 			record.MinterSignature,
 			record.Status,
 			strconv.FormatInt(record.CreatedAt, 10),
+			record.TwapRate,
+			strconv.Itoa(max(record.TwapObservations, 0)),
+			strconv.FormatInt(max64(record.TwapWindowSeconds, 0), 10),
+			strconv.FormatInt(max64(record.TwapStart, 0), 10),
+			strconv.FormatInt(max64(record.TwapEnd, 0), 10),
 		}
 		if err := writer.Write(row); err != nil {
 			return "", 0, nil, err
@@ -417,6 +432,19 @@ func toStoredVoucher(record *VoucherRecord) storedVoucherRecord {
 	} else {
 		stored.CreatedAt = uint64(record.CreatedAt)
 	}
+	stored.TwapRate = strings.TrimSpace(record.TwapRate)
+	if record.TwapObservations > 0 {
+		stored.TwapObservations = uint32(record.TwapObservations)
+	}
+	if record.TwapWindowSeconds > 0 {
+		stored.TwapWindowSeconds = uint64(record.TwapWindowSeconds)
+	}
+	if record.TwapStart > 0 {
+		stored.TwapStart = uint64(record.TwapStart)
+	}
+	if record.TwapEnd > 0 {
+		stored.TwapEnd = uint64(record.TwapEnd)
+	}
 	return stored
 }
 
@@ -448,6 +476,7 @@ func fromStoredVoucher(stored *storedVoucherRecord) (*VoucherRecord, error) {
 		MinterSignature: stored.MinterSignature,
 		Status:          stored.Status,
 		CreatedAt:       createdAt,
+		TwapRate:        stored.TwapRate,
 	}
 	if strings.TrimSpace(stored.MintAmountWei) != "" {
 		amount, ok := new(big.Int).SetString(strings.TrimSpace(stored.MintAmountWei), 10)
@@ -457,6 +486,30 @@ func fromStoredVoucher(stored *storedVoucherRecord) (*VoucherRecord, error) {
 		record.MintAmountWei = amount
 	} else {
 		record.MintAmountWei = big.NewInt(0)
+	}
+	if stored.TwapObservations > 0 {
+		record.TwapObservations = int(stored.TwapObservations)
+	}
+	if stored.TwapWindowSeconds > 0 {
+		window, err := uint64ToInt64(stored.TwapWindowSeconds)
+		if err != nil {
+			return nil, fmt.Errorf("ledger: twap window overflow: %w", err)
+		}
+		record.TwapWindowSeconds = window
+	}
+	if stored.TwapStart > 0 {
+		start, err := uint64ToInt64(stored.TwapStart)
+		if err != nil {
+			return nil, fmt.Errorf("ledger: twap start overflow: %w", err)
+		}
+		record.TwapStart = start
+	}
+	if stored.TwapEnd > 0 {
+		end, err := uint64ToInt64(stored.TwapEnd)
+		if err != nil {
+			return nil, fmt.Errorf("ledger: twap end overflow: %w", err)
+		}
+		record.TwapEnd = end
 	}
 	return record, nil
 }
@@ -477,6 +530,20 @@ func mintAmountToString(amount *big.Int) string {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
 		return a
 	}
 	return b

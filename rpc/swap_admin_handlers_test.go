@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
@@ -102,8 +103,9 @@ func TestHandleSwapProviderStatus(t *testing.T) {
 		t.Fatalf("unexpected rpc error: %+v", rpcErr)
 	}
 	var payload struct {
-		Allow                 []string `json:"allow"`
-		LastOracleHealthCheck int64    `json:"lastOracleHealthCheck"`
+		Allow                 []string                `json:"allow"`
+		LastOracleHealthCheck int64                   `json:"lastOracleHealthCheck"`
+		OracleFeeds           []swap.OracleFeedStatus `json:"oracleFeeds"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -113,6 +115,48 @@ func TestHandleSwapProviderStatus(t *testing.T) {
 	}
 	if payload.LastOracleHealthCheck != 0 {
 		t.Fatalf("expected zero oracle health, got %d", payload.LastOracleHealthCheck)
+	}
+	if len(payload.OracleFeeds) != 0 {
+		t.Fatalf("expected no oracle feeds, got %+v", payload.OracleFeeds)
+	}
+}
+
+func TestHandleSwapBurnList(t *testing.T) {
+	env := newTestEnv(t)
+	if err := env.node.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewBurnLedger(m)
+		ledger.SetClock(func() time.Time { return time.Unix(2300000000, 0) })
+		if err := ledger.Put(&swap.BurnReceipt{ReceiptID: "burn-a", Token: "ZNHB", AmountWei: big.NewInt(10)}); err != nil {
+			return err
+		}
+		ledger.SetClock(func() time.Time { return time.Unix(2300000600, 0) })
+		if err := ledger.Put(&swap.BurnReceipt{ReceiptID: "burn-b", Token: "ZNHB", AmountWei: big.NewInt(20)}); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed burns: %v", err)
+	}
+	params := []json.RawMessage{marshalParam(t, int64(0)), marshalParam(t, int64(0)), marshalParam(t, ""), marshalParam(t, int64(10))}
+	req := &RPCRequest{ID: 3, Params: params}
+	recorder := httptest.NewRecorder()
+	env.server.handleSwapBurnList(recorder, env.newRequest(), req)
+	raw, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcErr)
+	}
+	var payload struct {
+		Receipts   []map[string]interface{} `json:"receipts"`
+		NextCursor string                   `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Receipts) != 2 {
+		t.Fatalf("expected 2 receipts, got %d", len(payload.Receipts))
+	}
+	if payload.Receipts[0]["receiptId"] != "burn-a" {
+		t.Fatalf("unexpected first receipt: %+v", payload.Receipts[0])
 	}
 }
 
