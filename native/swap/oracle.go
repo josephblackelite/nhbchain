@@ -477,6 +477,8 @@ type Config struct {
 	MaxQuoteAgeSeconds int64
 	SlippageBps        uint64
 	OraclePriority     []string
+	Risk               RiskConfig     `toml:"risk"`
+	Providers          ProviderConfig `toml:"providers"`
 }
 
 // Normalise applies defaults and canonical casing to the configuration values.
@@ -486,6 +488,8 @@ func (c Config) Normalise() Config {
 		MaxQuoteAgeSeconds: c.MaxQuoteAgeSeconds,
 		SlippageBps:        c.SlippageBps,
 		OraclePriority:     append([]string{}, c.OraclePriority...),
+		Risk:               c.Risk.Normalise(),
+		Providers:          c.Providers.Normalise(),
 	}
 	if len(cfg.AllowedFiat) == 0 {
 		cfg.AllowedFiat = []string{"USD"}

@@ -145,6 +145,87 @@ Close voting, tally results, and update status.
 }
 ```
 
+# Swap Admin RPC
+
+## swap_limits
+
+Return usage buckets, remaining room, and velocity observations for the supplied address. Requires the admin bearer token.
+
+**Request**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "swap_limits",
+  "params": ["nhb1customer000000000000000000000000000"]
+}
+```
+
+**Response**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "result": {
+    "address": "nhb1customer000000000000000000000000000",
+    "day": {"bucket": "2024-04-01", "mintedWei": "1000000000000000000"},
+    "dayRemainingWei": "9000000000000000000",
+    "month": {"bucket": "2024-04", "mintedWei": "1500000000000000000"},
+    "monthRemainingWei": "98500000000000000000",
+    "velocity": {"windowSeconds": 600, "maxMints": 5, "observed": 2, "remaining": 3}
+  }
+}
+```
+
+## swap_provider_status
+
+Report the configured provider allow list and the timestamp of the last successful oracle health check.
+
+**Request**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "swap_provider_status",
+  "params": []
+}
+```
+
+**Response**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "allow": ["nowpayments"],
+    "lastOracleHealthCheck": 0
+  }
+}
+```
+
+## swap_voucher_reverse
+
+Reverse a minted voucher and transfer funds from the custodial account to the refund sink.
+
+**Request**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "swap_voucher_reverse",
+  "params": ["order-12345"]
+}
+```
+
+**Response**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {"ok": true}
+}
+```
+
 **Response**
 ```json
 {

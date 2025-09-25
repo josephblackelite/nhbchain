@@ -66,6 +66,17 @@ func (s *Server) handleSwapSubmitVoucher(w http.ResponseWriter, _ *http.Request,
 		switch {
 		case errors.Is(err, core.ErrSwapInvalidSigner):
 			writeError(w, http.StatusUnauthorized, req.ID, codeUnauthorized, err.Error(), nil)
+		case errors.Is(err, core.ErrSwapProviderNotAllowed):
+			writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, err.Error(), nil)
+		case errors.Is(err, core.ErrSwapSanctioned):
+			writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, err.Error(), nil)
+		case errors.Is(err, core.ErrSwapAmountBelowMinimum),
+			errors.Is(err, core.ErrSwapAmountAboveMaximum),
+			errors.Is(err, core.ErrSwapDailyCapExceeded),
+			errors.Is(err, core.ErrSwapMonthlyCapExceeded):
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		case errors.Is(err, core.ErrSwapVelocityExceeded):
+			writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, err.Error(), nil)
 		case errors.Is(err, core.ErrSwapNonceUsed), errors.Is(err, core.ErrSwapDuplicateProviderTx):
 			writeError(w, http.StatusConflict, req.ID, codeDuplicateTx, err.Error(), voucher.OrderID)
 		case errors.Is(err, core.ErrSwapInvalidDomain),

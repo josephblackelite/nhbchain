@@ -53,6 +53,10 @@ type Node struct {
 	swapCfg        swap.Config
 	swapOracle     swap.PriceOracle
 	swapManual     *swap.ManualOracle
+	swapSanctions  swap.SanctionsChecker
+	swapStatusMu   sync.RWMutex
+	swapOracleLast int64
+	swapRefundSink [20]byte
 }
 
 // PotsoLeaderboardEntry represents a participant's score for a specific day.
@@ -111,6 +115,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		mempool:        make([]*types.Transaction, 0),
 		escrowTreasury: treasury,
 		engagementMgr:  engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapSanctions:  swap.DefaultSanctionsChecker,
+		swapRefundSink: treasury,
 	}, nil
 }
 
@@ -206,6 +212,29 @@ func (n *Node) SetSwapManualOracle(manual *swap.ManualOracle) {
 	n.swapCfgMu.Unlock()
 }
 
+// SetSwapRefundSink overrides the refund sink used for voucher reversals.
+func (n *Node) SetSwapRefundSink(addr [20]byte) {
+	if n == nil {
+		return
+	}
+	n.swapCfgMu.Lock()
+	n.swapRefundSink = addr
+	n.swapCfgMu.Unlock()
+}
+
+// SetSwapSanctionsChecker configures the sanctions hook invoked during swap mint processing.
+func (n *Node) SetSwapSanctionsChecker(checker swap.SanctionsChecker) {
+	if n == nil {
+		return
+	}
+	if checker == nil {
+		checker = swap.DefaultSanctionsChecker
+	}
+	n.swapCfgMu.Lock()
+	n.swapSanctions = checker
+	n.swapCfgMu.Unlock()
+}
+
 // SetSwapManualQuote publishes a manual override rate for the supplied pair. The
 // quote timestamp is truncated to seconds to match other oracle adapters.
 func (n *Node) SetSwapManualQuote(base, quote, rate string, ts time.Time) error {
@@ -216,6 +245,56 @@ func (n *Node) SetSwapManualQuote(base, quote, rate string, ts time.Time) error 
 		return fmt.Errorf("swap: manual oracle not configured")
 	}
 	return manual.SetDecimal(base, quote, rate, ts.UTC())
+}
+
+func (n *Node) swapSanctionsChecker() swap.SanctionsChecker {
+	n.swapCfgMu.RLock()
+	checker := n.swapSanctions
+	n.swapCfgMu.RUnlock()
+	if checker == nil {
+		return swap.DefaultSanctionsChecker
+	}
+	return checker
+}
+
+func (n *Node) recordSwapOracleHealth(ts time.Time) {
+	n.swapStatusMu.Lock()
+	n.swapOracleLast = ts.UTC().Unix()
+	n.swapStatusMu.Unlock()
+}
+
+func cloneBigInt(value *big.Int) *big.Int {
+	if value == nil {
+		return nil
+	}
+	return new(big.Int).Set(value)
+}
+
+func (n *Node) emitSwapLimitAlert(alert events.SwapLimitAlert) {
+	if n == nil {
+		return
+	}
+	if evt := alert.Event(); evt != nil {
+		n.state.AppendEvent(evt)
+	}
+}
+
+func (n *Node) emitSwapVelocityAlert(alert events.SwapVelocityAlert) {
+	if n == nil {
+		return
+	}
+	if evt := alert.Event(); evt != nil {
+		n.state.AppendEvent(evt)
+	}
+}
+
+func (n *Node) emitSwapSanctionAlert(alert events.SwapSanctionAlert) {
+	if n == nil {
+		return
+	}
+	if evt := alert.Event(); evt != nil {
+		n.state.AppendEvent(evt)
+	}
 }
 
 // SetP2PServer records the running P2P server for query purposes.
@@ -2027,6 +2106,10 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	recovered := ethcrypto.PubkeyToAddress(*pubKey)
 
 	cfg := n.swapConfig()
+	riskParams, err := cfg.Risk.Parameters()
+	if err != nil {
+		return "", false, err
+	}
 	if !cfg.IsFiatAllowed(voucher.Fiat) {
 		return "", false, ErrSwapUnsupportedFiat
 	}
@@ -2041,6 +2124,101 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
+	riskEngine := swap.NewRiskEngine(manager)
+	if len(cfg.Providers.Allow) > 0 && !cfg.Providers.IsAllowed(provider) {
+		n.emitSwapLimitAlert(events.SwapLimitAlert{
+			Address:      voucher.Recipient,
+			Provider:     provider,
+			ProviderTxID: providerTxID,
+			Limit:        "provider",
+			Amount:       new(big.Int).Set(voucher.Amount),
+		})
+		return "", false, ErrSwapProviderNotAllowed
+	}
+	if riskParams.SanctionsCheckEnabled {
+		checker := n.swapSanctionsChecker()
+		if checker != nil && !checker(voucher.Recipient) {
+			n.emitSwapSanctionAlert(events.SwapSanctionAlert{
+				Address:      voucher.Recipient,
+				Provider:     provider,
+				ProviderTxID: providerTxID,
+			})
+			return "", false, ErrSwapSanctioned
+		}
+	}
+	violation, err := riskEngine.CheckLimits(voucher.Recipient, voucher.Amount, riskParams)
+	if err != nil {
+		return "", false, err
+	}
+	if violation != nil {
+		switch violation.Code {
+		case swap.RiskCodeVelocity:
+			n.emitSwapVelocityAlert(events.SwapVelocityAlert{
+				Address:       voucher.Recipient,
+				Provider:      provider,
+				ProviderTxID:  providerTxID,
+				WindowSeconds: violation.WindowSeconds,
+				ObservedCount: violation.Count,
+				AllowedMints:  riskParams.VelocityMaxMints,
+			})
+			return "", false, ErrSwapVelocityExceeded
+		case swap.RiskCodePerTxMin:
+			n.emitSwapLimitAlert(events.SwapLimitAlert{
+				Address:      voucher.Recipient,
+				Provider:     provider,
+				ProviderTxID: providerTxID,
+				Limit:        string(violation.Code),
+				Amount:       new(big.Int).Set(voucher.Amount),
+				LimitValue:   cloneBigInt(violation.Limit),
+				CurrentValue: cloneBigInt(violation.Current),
+			})
+			return "", false, ErrSwapAmountBelowMinimum
+		case swap.RiskCodePerTxMax:
+			n.emitSwapLimitAlert(events.SwapLimitAlert{
+				Address:      voucher.Recipient,
+				Provider:     provider,
+				ProviderTxID: providerTxID,
+				Limit:        string(violation.Code),
+				Amount:       new(big.Int).Set(voucher.Amount),
+				LimitValue:   cloneBigInt(violation.Limit),
+				CurrentValue: cloneBigInt(violation.Current),
+			})
+			return "", false, ErrSwapAmountAboveMaximum
+		case swap.RiskCodeDailyCap:
+			n.emitSwapLimitAlert(events.SwapLimitAlert{
+				Address:      voucher.Recipient,
+				Provider:     provider,
+				ProviderTxID: providerTxID,
+				Limit:        string(violation.Code),
+				Amount:       new(big.Int).Set(voucher.Amount),
+				LimitValue:   cloneBigInt(violation.Limit),
+				CurrentValue: cloneBigInt(violation.Current),
+			})
+			return "", false, ErrSwapDailyCapExceeded
+		case swap.RiskCodeMonthlyCap:
+			n.emitSwapLimitAlert(events.SwapLimitAlert{
+				Address:      voucher.Recipient,
+				Provider:     provider,
+				ProviderTxID: providerTxID,
+				Limit:        string(violation.Code),
+				Amount:       new(big.Int).Set(voucher.Amount),
+				LimitValue:   cloneBigInt(violation.Limit),
+				CurrentValue: cloneBigInt(violation.Current),
+			})
+			return "", false, ErrSwapMonthlyCapExceeded
+		default:
+			n.emitSwapLimitAlert(events.SwapLimitAlert{
+				Address:      voucher.Recipient,
+				Provider:     provider,
+				ProviderTxID: providerTxID,
+				Limit:        string(violation.Code),
+				Amount:       new(big.Int).Set(voucher.Amount),
+				LimitValue:   cloneBigInt(violation.Limit),
+				CurrentValue: cloneBigInt(violation.Current),
+			})
+			return "", false, fmt.Errorf("swap: risk violation %s", violation.Code)
+		}
+	}
 	tokenMeta, err := manager.Token(token)
 	if err != nil {
 		return "", false, err
@@ -2064,6 +2242,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		}
 		return "", false, fmt.Errorf("swap: oracle: %w", err)
 	}
+	n.recordSwapOracleHealth(time.Now())
 	maxAge := cfg.MaxQuoteAge()
 	if maxAge > 0 {
 		cutoff := time.Now().Add(-maxAge)
@@ -2129,6 +2308,10 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		Status:          swap.VoucherStatusMinted,
 	}
 	if err := ledger.Put(record); err != nil {
+		return "", false, err
+	}
+
+	if err := riskEngine.RecordMint(voucher.Recipient, voucher.Amount); err != nil {
 		return "", false, err
 	}
 
@@ -2221,6 +2404,99 @@ func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, 
 		total = big.NewInt(0)
 	}
 	return encoded, count, total, nil
+}
+
+// SwapLimits returns the current risk counters for the provided address alongside the active parameters.
+func (n *Node) SwapLimits(addr [20]byte) (*swap.RiskUsage, swap.RiskParameters, error) {
+	cfg := n.swapConfig()
+	params, err := cfg.Risk.Parameters()
+	if err != nil {
+		return nil, swap.RiskParameters{}, err
+	}
+	var usage *swap.RiskUsage
+	err = n.WithState(func(m *nhbstate.Manager) error {
+		engine := swap.NewRiskEngine(m)
+		report, err := engine.Usage(addr)
+		if err != nil {
+			return err
+		}
+		usage = report
+		return nil
+	})
+	if err != nil {
+		return nil, swap.RiskParameters{}, err
+	}
+	if usage == nil {
+		usage = &swap.RiskUsage{Address: addr}
+	}
+	return usage.Copy(), params, nil
+}
+
+// SwapProviderStatus summarises the provider allow list and oracle health metadata.
+func (n *Node) SwapProviderStatus() swap.ProviderStatus {
+	cfg := n.swapConfig()
+	n.swapStatusMu.RLock()
+	last := n.swapOracleLast
+	n.swapStatusMu.RUnlock()
+	return swap.ProviderStatus{
+		Allow:                 cfg.Providers.AllowList(),
+		LastOracleHealthCheck: last,
+	}
+}
+
+// SwapReverseVoucher reverses a previously minted voucher and moves funds into the refund sink.
+func (n *Node) SwapReverseVoucher(providerTxID string) error {
+	trimmed := strings.TrimSpace(providerTxID)
+	if trimmed == "" {
+		return fmt.Errorf("swap: providerTxId required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	ledger := swap.NewLedger(manager)
+	record, ok, err := ledger.Get(trimmed)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("swap: voucher not found")
+	}
+	switch strings.ToLower(strings.TrimSpace(record.Status)) {
+	case swap.VoucherStatusReversed:
+		return ErrSwapVoucherAlreadyReversed
+	case swap.VoucherStatusMinted:
+		// proceed
+	default:
+		return ErrSwapVoucherNotMinted
+	}
+	if record.MintAmountWei == nil || record.MintAmountWei.Sign() <= 0 {
+		return fmt.Errorf("swap: voucher amount invalid")
+	}
+	balance, err := manager.Balance(record.Recipient[:], record.Token)
+	if err != nil {
+		return err
+	}
+	if balance.Cmp(record.MintAmountWei) < 0 {
+		return ErrSwapReversalInsufficientBalance
+	}
+	updatedRecipient := new(big.Int).Sub(balance, record.MintAmountWei)
+	if err := manager.SetBalance(record.Recipient[:], record.Token, updatedRecipient); err != nil {
+		return err
+	}
+	sink := n.swapRefundSink
+	sinkBalance, err := manager.Balance(sink[:], record.Token)
+	if err != nil {
+		return err
+	}
+	updatedSink := new(big.Int).Add(sinkBalance, record.MintAmountWei)
+	if err := manager.SetBalance(sink[:], record.Token, updatedSink); err != nil {
+		return err
+	}
+	if err := ledger.MarkReversed(trimmed); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SwapMarkReconciled marks the supplied vouchers as reconciled in the ledger.

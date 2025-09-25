@@ -247,6 +247,24 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleSwapVoucherList(w, r, req)
 	case "swap_voucher_export":
 		s.handleSwapVoucherExport(w, r, req)
+	case "swap_limits":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleSwapLimits(w, r, req)
+	case "swap_provider_status":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleSwapProviderStatus(w, r, req)
+	case "swap_voucher_reverse":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleSwapVoucherReverse(w, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(w, r, req)
 	case "stake_undelegate":

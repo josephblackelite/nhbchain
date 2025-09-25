@@ -335,6 +335,27 @@ func (l *Ledger) MarkReconciled(ids []string) error {
 	return nil
 }
 
+// MarkReversed updates the status of the specified voucher to "reversed" in an idempotent fashion.
+func (l *Ledger) MarkReversed(providerTxID string) error {
+	if l == nil {
+		return fmt.Errorf("ledger not initialised")
+	}
+	key := voucherKey(providerTxID)
+	var stored storedVoucherRecord
+	ok, err := l.store.KVGet(key, &stored)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("ledger: voucher %s not found", strings.TrimSpace(providerTxID))
+	}
+	if stored.Status == VoucherStatusReversed {
+		return nil
+	}
+	stored.Status = VoucherStatusReversed
+	return l.store.KVPut(key, stored)
+}
+
 func (l *Ledger) loadIndex() ([]voucherIndexEntry, error) {
 	var raw [][]byte
 	if err := l.store.KVGetList(voucherIndexKey, &raw); err != nil {
