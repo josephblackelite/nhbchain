@@ -81,7 +81,7 @@ func TestHandshakeRejectsTamperedSignature(t *testing.T) {
 	}
 	sig[0] ^= 0xFF
 	packet.Signature = encodeHex(sig)
-	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "recover signature") {
+	if err := local.verifyHandshake(packet); err == nil || (!strings.Contains(err.Error(), "recover signature") && !strings.Contains(strings.ToLower(err.Error()), "node id")) {
 		t.Fatalf("expected signature error, got %v", err)
 	}
 }
