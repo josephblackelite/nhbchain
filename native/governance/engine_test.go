@@ -282,7 +282,51 @@ func TestProposeParamChangeRejectsLowDeposit(t *testing.T) {
 	}
 }
 
-func TestProposeParamChangeLocksDepositAndEmitsEvent(t *testing.T) {
+func TestProposeParamChangeRejectsEmptyParamKey(t *testing.T) {
+	var proposer [20]byte
+	proposer[11] = 4
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(100),
+		VotingPeriodSeconds: 600,
+		TimelockSeconds:     120,
+		AllowedParams:       []string{"fees.baseFee"},
+	})
+
+	_, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, `{" ":5}`, big.NewInt(150))
+	if err == nil || !strings.Contains(err.Error(), "key must not be empty") {
+		t.Fatalf("expected empty key rejection, got %v", err)
+	}
+}
+
+func TestProposeParamChangeRejectsInsufficientBalance(t *testing.T) {
+	var proposer [20]byte
+	proposer[12] = 5
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(99), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 600,
+		TimelockSeconds:     120,
+		AllowedParams:       []string{"fees.baseFee"},
+	})
+
+	_, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, `{"fees.baseFee":5}`, big.NewInt(150))
+	if err == nil || !strings.Contains(err.Error(), "insufficient ZNHB balance") {
+		t.Fatalf("expected insufficient balance, got %v", err)
+	}
+}
+
+func TestProposeParamChangeHappyPath(t *testing.T) {
 	var proposer [20]byte
 	proposer[5] = 3
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
@@ -569,182 +613,205 @@ func TestFinalizeRejectsBeforeVotingEnd(t *testing.T) {
 	}
 }
 
-func TestFinalizePassesAtThresholdAndReturnsDeposit(t *testing.T) {
-	var proposer [20]byte
-	proposer[2] = 7
-	deposit := big.NewInt(1_000)
-	now := time.Unix(1_700_003_000, 0).UTC()
-	submitter := crypto.NewAddress(crypto.NHBPrefix, proposer[:])
+func TestFinalizeOutcomes(t *testing.T) {
+	type voteCase struct {
+		choice VoteChoice
+		power  uint32
+	}
+	tests := []struct {
+		name                 string
+		policy               ProposalPolicy
+		deposit              *big.Int
+		votes                []voteCase
+		expectedStatus       ProposalStatus
+		expectedTurnout      uint64
+		expectedYesRatio     uint64
+		expectedYesPower     uint64
+		expectedNoPower      uint64
+		expectedAbstainPower uint64
+		expectDepositReturn  bool
+	}{
+		{
+			name: "passes at threshold",
+			policy: ProposalPolicy{
+				QuorumBps:        3000,
+				PassThresholdBps: 5000,
+			},
+			deposit:              big.NewInt(1_000),
+			votes:                []voteCase{{VoteChoiceYes, 1500}, {VoteChoiceNo, 1500}},
+			expectedStatus:       ProposalStatusPassed,
+			expectedTurnout:      3000,
+			expectedYesRatio:     5000,
+			expectedYesPower:     1500,
+			expectedNoPower:      1500,
+			expectedAbstainPower: 0,
+			expectDepositReturn:  true,
+		},
+		{
+			name: "fails quorum despite high yes",
+			policy: ProposalPolicy{
+				QuorumBps:        4000,
+				PassThresholdBps: 5000,
+			},
+			deposit:              big.NewInt(250),
+			votes:                []voteCase{{VoteChoiceYes, 2000}},
+			expectedStatus:       ProposalStatusRejected,
+			expectedTurnout:      2000,
+			expectedYesRatio:     10_000,
+			expectedYesPower:     2000,
+			expectedNoPower:      0,
+			expectedAbstainPower: 0,
+			expectDepositReturn:  false,
+		},
+		{
+			name: "all abstain",
+			policy: ProposalPolicy{
+				QuorumBps:        3000,
+				PassThresholdBps: 6000,
+			},
+			votes:                []voteCase{{VoteChoiceAbstain, 4000}},
+			expectedStatus:       ProposalStatusRejected,
+			expectedTurnout:      4000,
+			expectedYesRatio:     0,
+			expectedYesPower:     0,
+			expectedNoPower:      0,
+			expectedAbstainPower: 4000,
+			expectDepositReturn:  false,
+		},
+		{
+			name: "no votes recorded",
+			policy: ProposalPolicy{
+				QuorumBps:        2000,
+				PassThresholdBps: 5000,
+			},
+			deposit:              big.NewInt(250),
+			expectedStatus:       ProposalStatusRejected,
+			expectedTurnout:      0,
+			expectedYesRatio:     0,
+			expectedYesPower:     0,
+			expectedNoPower:      0,
+			expectedAbstainPower: 0,
+			expectDepositReturn:  false,
+		},
+	}
 
-	state := newMockGovernanceState(map[[20]byte]*types.Account{
-		proposer: &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
-	})
-	state.proposals[3] = &Proposal{
-		ID:        3,
-		Submitter: submitter,
-		Status:    ProposalStatusVotingPeriod,
-		Deposit:   new(big.Int).Set(deposit),
-		VotingEnd: now.Add(-time.Minute),
-	}
-	state.escrowBalances[string(proposer[:])] = new(big.Int).Set(deposit)
+	for idx, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
 
-	voterYes := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 5))
-	voterNo := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 6))
-	if err := state.GovernancePutVote(&Vote{ProposalID: 3, Voter: voterYes, Choice: VoteChoiceYes, PowerBps: 1500}); err != nil {
-		t.Fatalf("store yes vote: %v", err)
-	}
-	if err := state.GovernancePutVote(&Vote{ProposalID: 3, Voter: voterNo, Choice: VoteChoiceNo, PowerBps: 1500}); err != nil {
-		t.Fatalf("store no vote: %v", err)
-	}
+			now := time.Unix(1_700_003_000+int64(idx), 0).UTC()
+			var proposer [20]byte
+			proposer[0] = byte(idx + 1)
 
-	engine := NewEngine()
-	engine.SetState(state)
-	engine.SetNowFunc(func() time.Time { return now })
-	engine.SetPolicy(ProposalPolicy{QuorumBps: 3000, PassThresholdBps: 5000})
-	emitter := &captureEmitter{}
-	engine.SetEmitter(emitter)
+			state := newMockGovernanceState(map[[20]byte]*types.Account{
+				proposer: &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+			})
+			submitter := crypto.NewAddress(crypto.NHBPrefix, proposer[:])
+			proposalID := uint64(100 + idx)
+			state.proposals[proposalID] = &Proposal{
+				ID:        proposalID,
+				Submitter: submitter,
+				Status:    ProposalStatusVotingPeriod,
+				VotingEnd: now.Add(-time.Minute),
+				Deposit: func() *big.Int {
+					if tc.deposit == nil {
+						return nil
+					}
+					return new(big.Int).Set(tc.deposit)
+				}(),
+			}
+			if tc.deposit != nil {
+				state.escrowBalances[string(proposer[:])] = new(big.Int).Set(tc.deposit)
+			}
 
-	status, tally, err := engine.Finalize(3)
-	if err != nil {
-		t.Fatalf("finalize: %v", err)
-	}
-	if status != ProposalStatusPassed {
-		t.Fatalf("expected proposal to pass, got %s", status.StatusString())
-	}
-	if tally == nil {
-		t.Fatalf("expected tally")
-	}
-	if tally.TurnoutBps != 3000 {
-		t.Fatalf("unexpected turnout: %d", tally.TurnoutBps)
-	}
-	if tally.YesRatioBps != 5000 {
-		t.Fatalf("unexpected yes ratio: %d", tally.YesRatioBps)
-	}
+			for voteIdx, vote := range tc.votes {
+				voterBytes := append(make([]byte, 19), byte(voteIdx+1))
+				voter := crypto.NewAddress(crypto.NHBPrefix, voterBytes)
+				if err := state.GovernancePutVote(&Vote{ProposalID: proposalID, Voter: voter, Choice: vote.choice, PowerBps: vote.power}); err != nil {
+					t.Fatalf("store vote: %v", err)
+				}
+			}
 
-	account, err := state.GetAccount(proposer[:])
-	if err != nil {
-		t.Fatalf("get account: %v", err)
-	}
-	if account.BalanceZNHB.Cmp(deposit) != 0 {
-		t.Fatalf("deposit not returned: %s", account.BalanceZNHB.String())
-	}
-	escrow, err := state.GovernanceEscrowBalance(proposer[:])
-	if err != nil {
-		t.Fatalf("escrow balance: %v", err)
-	}
-	if escrow.Sign() != 0 {
-		t.Fatalf("expected escrow to be zero, got %s", escrow.String())
-	}
+			engine := NewEngine()
+			engine.SetState(state)
+			engine.SetNowFunc(func() time.Time { return now })
+			engine.SetPolicy(tc.policy)
+			emitter := &captureEmitter{}
+			engine.SetEmitter(emitter)
 
-	stored, ok, err := state.GovernanceGetProposal(3)
-	if err != nil {
-		t.Fatalf("reload proposal: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected proposal persisted")
-	}
-	if stored.Status != ProposalStatusPassed {
-		t.Fatalf("unexpected stored status: %s", stored.Status.StatusString())
-	}
-	if stored.Deposit == nil || stored.Deposit.Sign() != 0 {
-		t.Fatalf("expected deposit cleared, got %v", stored.Deposit)
-	}
+			status, tally, err := engine.Finalize(proposalID)
+			if err != nil {
+				t.Fatalf("finalize: %v", err)
+			}
+			if status != tc.expectedStatus {
+				t.Fatalf("unexpected status: got %s want %s", status.StatusString(), tc.expectedStatus.StatusString())
+			}
+			if tally == nil {
+				t.Fatalf("expected tally")
+			}
+			if tally.TurnoutBps != tc.expectedTurnout {
+				t.Fatalf("unexpected turnout: got %d want %d", tally.TurnoutBps, tc.expectedTurnout)
+			}
+			if tally.YesRatioBps != tc.expectedYesRatio {
+				t.Fatalf("unexpected yes ratio: got %d want %d", tally.YesRatioBps, tc.expectedYesRatio)
+			}
+			if tally.YesPowerBps != tc.expectedYesPower {
+				t.Fatalf("unexpected yes power: got %d want %d", tally.YesPowerBps, tc.expectedYesPower)
+			}
+			if tally.NoPowerBps != tc.expectedNoPower {
+				t.Fatalf("unexpected no power: got %d want %d", tally.NoPowerBps, tc.expectedNoPower)
+			}
+			if tally.AbstainPowerBps != tc.expectedAbstainPower {
+				t.Fatalf("unexpected abstain power: got %d want %d", tally.AbstainPowerBps, tc.expectedAbstainPower)
+			}
 
-	if len(emitter.events) != 1 {
-		t.Fatalf("expected finalize event, got %d", len(emitter.events))
-	}
-	evt := emitter.events[0].(governanceEvent).Event()
-	if evt.Type != EventTypeProposalFinalized {
-		t.Fatalf("unexpected event type: %s", evt.Type)
-	}
-	if evt.Attributes["status"] != ProposalStatusPassed.StatusString() {
-		t.Fatalf("unexpected event status: %s", evt.Attributes["status"])
-	}
-	if evt.Attributes["turnoutBps"] != "3000" {
-		t.Fatalf("unexpected event turnout: %s", evt.Attributes["turnoutBps"])
+			account, err := state.GetAccount(proposer[:])
+			if err != nil {
+				t.Fatalf("get account: %v", err)
+			}
+			escrow, err := state.GovernanceEscrowBalance(proposer[:])
+			if err != nil {
+				t.Fatalf("escrow balance: %v", err)
+			}
+
+			if tc.expectDepositReturn {
+				if tc.deposit == nil {
+					t.Fatalf("expected deposit but test case missing deposit")
+				}
+				if account.BalanceZNHB.Cmp(tc.deposit) != 0 {
+					t.Fatalf("deposit not returned: got %s want %s", account.BalanceZNHB.String(), tc.deposit.String())
+				}
+				if escrow.Sign() != 0 {
+					t.Fatalf("expected escrow cleared, got %s", escrow.String())
+				}
+			} else if tc.deposit != nil {
+				if account.BalanceZNHB.Sign() != 0 {
+					t.Fatalf("expected proposer balance to remain zero, got %s", account.BalanceZNHB.String())
+				}
+				if escrow.Cmp(tc.deposit) != 0 {
+					t.Fatalf("expected escrow to retain deposit: got %s want %s", escrow.String(), tc.deposit.String())
+				}
+			}
+
+			if len(emitter.events) != 1 {
+				t.Fatalf("expected finalize event, got %d", len(emitter.events))
+			}
+			evt := emitter.events[0].(governanceEvent).Event()
+			if evt.Type != EventTypeProposalFinalized {
+				t.Fatalf("unexpected event type: %s", evt.Type)
+			}
+			if evt.Attributes["status"] != status.StatusString() {
+				t.Fatalf("unexpected event status: %s", evt.Attributes["status"])
+			}
+			if evt.Attributes["turnoutBps"] != fmt.Sprintf("%d", tc.expectedTurnout) {
+				t.Fatalf("unexpected event turnout: %s", evt.Attributes["turnoutBps"])
+			}
+		})
 	}
 }
 
-func TestFinalizeRejectsAllAbstain(t *testing.T) {
-	var proposer [20]byte
-	proposer[3] = 4
-	now := time.Unix(1_700_004_000, 0).UTC()
-	submitter := crypto.NewAddress(crypto.NHBPrefix, proposer[:])
-	state := newMockGovernanceState(map[[20]byte]*types.Account{
-		proposer: &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
-	})
-	state.proposals[4] = &Proposal{
-		ID:        4,
-		Submitter: submitter,
-		Status:    ProposalStatusVotingPeriod,
-		VotingEnd: now.Add(-time.Minute),
-	}
-	voter := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 9))
-	if err := state.GovernancePutVote(&Vote{ProposalID: 4, Voter: voter, Choice: VoteChoiceAbstain, PowerBps: 4000}); err != nil {
-		t.Fatalf("store abstain: %v", err)
-	}
-
-	engine := NewEngine()
-	engine.SetState(state)
-	engine.SetNowFunc(func() time.Time { return now })
-	engine.SetPolicy(ProposalPolicy{QuorumBps: 3000, PassThresholdBps: 6000})
-
-	status, tally, err := engine.Finalize(4)
-	if err != nil {
-		t.Fatalf("finalize: %v", err)
-	}
-	if status != ProposalStatusRejected {
-		t.Fatalf("expected rejection, got %s", status.StatusString())
-	}
-	if tally.YesRatioBps != 0 {
-		t.Fatalf("expected zero yes ratio, got %d", tally.YesRatioBps)
-	}
-	if tally.TurnoutBps != 4000 {
-		t.Fatalf("unexpected turnout: %d", tally.TurnoutBps)
-	}
-}
-
-func TestFinalizeRejectsNoVotes(t *testing.T) {
-	var proposer [20]byte
-	proposer[4] = 1
-	now := time.Unix(1_700_005_000, 0).UTC()
-	submitter := crypto.NewAddress(crypto.NHBPrefix, proposer[:])
-	deposit := big.NewInt(250)
-	state := newMockGovernanceState(map[[20]byte]*types.Account{proposer: &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)}})
-	state.proposals[5] = &Proposal{
-		ID:        5,
-		Submitter: submitter,
-		Status:    ProposalStatusVotingPeriod,
-		Deposit:   new(big.Int).Set(deposit),
-		VotingEnd: now.Add(-time.Minute),
-	}
-	state.escrowBalances[string(proposer[:])] = new(big.Int).Set(deposit)
-
-	engine := NewEngine()
-	engine.SetState(state)
-	engine.SetNowFunc(func() time.Time { return now })
-	engine.SetPolicy(ProposalPolicy{QuorumBps: 2000, PassThresholdBps: 5000})
-
-	status, tally, err := engine.Finalize(5)
-	if err != nil {
-		t.Fatalf("finalize: %v", err)
-	}
-	if status != ProposalStatusRejected {
-		t.Fatalf("expected rejection, got %s", status.StatusString())
-	}
-	if tally.TurnoutBps != 0 {
-		t.Fatalf("unexpected turnout: %d", tally.TurnoutBps)
-	}
-	escrow, err := state.GovernanceEscrowBalance(proposer[:])
-	if err != nil {
-		t.Fatalf("escrow: %v", err)
-	}
-	if escrow.Cmp(deposit) != 0 {
-		t.Fatalf("deposit should remain locked: %s", escrow.String())
-	}
-}
-
-func TestQueueExecutionMarksProposal(t *testing.T) {
+func TestQueueExecutionMarksProposalAndIsIdempotent(t *testing.T) {
 	now := time.Unix(1_700_006_000, 0).UTC()
 	state := newMockGovernanceState(nil)
 	proposal := &Proposal{
@@ -779,8 +846,22 @@ func TestQueueExecutionMarksProposal(t *testing.T) {
 	if !stored.Queued {
 		t.Fatalf("expected proposal marked queued")
 	}
+	if err := engine.QueueExecution(7); err == nil || !strings.Contains(err.Error(), "already queued") {
+		t.Fatalf("expected already queued error, got %v", err)
+	}
+
+	storedAgain, ok, err := state.GovernanceGetProposal(7)
+	if err != nil {
+		t.Fatalf("reload proposal after retry: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected proposal persisted after retry")
+	}
+	if !storedAgain.Queued {
+		t.Fatalf("expected proposal to remain queued")
+	}
 	if len(emitter.events) != 1 {
-		t.Fatalf("expected one event, got %d", len(emitter.events))
+		t.Fatalf("expected exactly one queued event, got %d", len(emitter.events))
 	}
 	evt, ok := emitter.events[0].(governanceEvent)
 	if !ok {
@@ -862,6 +943,9 @@ func TestExecuteProposalAppliesParams(t *testing.T) {
 
 	if err := engine.Execute(8); err == nil || !strings.Contains(err.Error(), "already executed") {
 		t.Fatalf("expected idempotency error, got %v", err)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected event count to remain one, got %d", len(emitter.events))
 	}
 }
 
