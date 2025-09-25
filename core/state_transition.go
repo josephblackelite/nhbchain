@@ -42,7 +42,10 @@ const unbondingPeriod = 72 * time.Hour
 // Privileged arbitrator address (replace with multisig in production).
 var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
 
-var ErrNonceMismatch = errors.New("transaction nonce mismatch")
+var (
+	ErrNonceMismatch  = errors.New("transaction nonce mismatch")
+	ErrInvalidChainID = errors.New("invalid chain id")
+)
 
 var (
 	accountMetadataPrefix = []byte("account-meta:")
@@ -654,6 +657,9 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 }
 
 func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
+	if !types.IsValidChainID(tx.ChainID) {
+		return fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
+	}
 	sender, senderAccount, err := sp.validateSenderAccount(tx)
 	if err != nil {
 		return err
