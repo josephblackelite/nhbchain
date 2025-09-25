@@ -405,6 +405,9 @@ func (m *connManager) snapshotPeers(now time.Time) []connectedPeer {
 			score:    status.Score,
 			inbound:  peer.inbound,
 			persist:  peer.persistent,
+			latency:  status.LatencyMS,
+			useful:   status.Useful,
+			badActs:  status.Misbehavior,
 		})
 	}
 	return result
@@ -422,21 +425,33 @@ func victimPeerIndex(peers []connectedPeer) int {
 			continue
 		}
 		best := peers[idx]
-		if peer.score < best.score {
+		if shouldReplaceVictim(peer, best) {
 			idx = i
-			continue
-		}
-		if peer.score == best.score {
-			if peer.lastSeen.Before(best.lastSeen) {
-				idx = i
-				continue
-			}
-			if peer.lastSeen.Equal(best.lastSeen) && peer.inbound && !best.inbound {
-				idx = i
-			}
 		}
 	}
 	return idx
+}
+
+func shouldReplaceVictim(candidate, current connectedPeer) bool {
+	if candidate.badActs != current.badActs {
+		return candidate.badActs > current.badActs
+	}
+	if candidate.score != current.score {
+		return candidate.score < current.score
+	}
+	if candidate.useful != current.useful {
+		return candidate.useful < current.useful
+	}
+	if candidate.latency != current.latency {
+		return candidate.latency > current.latency
+	}
+	if candidate.lastSeen.Before(current.lastSeen) {
+		return true
+	}
+	if candidate.lastSeen.Equal(current.lastSeen) && candidate.inbound && !current.inbound {
+		return true
+	}
+	return false
 }
 
 func (m *connManager) peerstoreEntries() []PeerstoreEntry {
@@ -494,6 +509,9 @@ type connectedPeer struct {
 	score    int
 	inbound  bool
 	persist  bool
+	latency  float64
+	useful   uint64
+	badActs  uint64
 }
 
 func (s *Server) startDialers() {

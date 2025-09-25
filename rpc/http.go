@@ -339,6 +339,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleNetDial(w, r, req)
 	case "net_ban":
 		s.handleNetBan(w, r, req)
+	case "sync_snapshot_export":
+		s.handleSyncSnapshotExport(w, r, req)
+	case "sync_snapshot_import":
+		s.handleSyncSnapshotImport(w, r, req)
+	case "sync_status":
+		s.handleSyncStatus(w, r, req)
 	case "p2p_info":
 		s.handleP2PInfo(w, r, req)
 	case "p2p_peers":
