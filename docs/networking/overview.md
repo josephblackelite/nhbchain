@@ -133,6 +133,28 @@ Reconnect   Reject/Ban      Keepalive
 Peers that violate protocol expectations during any phase are disconnected and
 optionally banned according to the configured reputation policy.
 
+## Discovery Lifecycle
+
+Peer discovery progresses through a short pipeline before settling into the
+steady gossip mesh:
+
+```
+Seed Bootstrapping --> Authenticated Handshake --> PEX Gossip --> Steady-State Mesh
+        ^                                                      |
+        |------------------------------------------------------|
+```
+
+1. **Seed Bootstrapping** – the node dials the configured seed list and any
+   persisted peers from the peerstore, establishing an initial foothold.
+2. **Authenticated Handshake** – successful handshakes elevate peers into the
+   active set and record their addresses with fresh timestamps.
+3. **PEX Gossip** – connected peers exchange `PEX_REQUEST`/`PEX_ADDRESSES`
+   messages to learn about additional endpoints while enforcing the address
+   TTL window and deduplication rules.
+4. **Steady-State Mesh** – the connection manager maintains target counts by
+   recycling aged peers, periodically requesting PEX samples to replenish the
+   dial queue as nodes churn.
+
 ## Peerstore
 
 The NET-2B release introduces a durable peerstore backed by LevelDB. Every

@@ -69,6 +69,14 @@ func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reade
 	}
 }
 
+// ID returns the peer identifier.
+func (p *Peer) ID() string {
+	if p == nil {
+		return ""
+	}
+	return p.id
+}
+
 func (p *Peer) setGreylisted(on bool) {
 	if p == nil || p.limiter == nil {
 		return
@@ -264,6 +272,22 @@ func (p *Peer) handleControlMessage(msg *Message) (bool, error) {
 		p.server.touchPeer(p.id)
 		return true, nil
 	case MsgTypeHandshake, MsgTypeHandshakeAck:
+		return true, nil
+	case MsgTypePexRequest:
+		var payload PexRequestPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return false, fmt.Errorf("malformed pex request: %w", err)
+		}
+		if err := p.server.handlePexRequest(p, payload); err != nil {
+			return false, fmt.Errorf("handle pex request: %w", err)
+		}
+		return true, nil
+	case MsgTypePexAddresses:
+		var payload PexAddressesPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return false, fmt.Errorf("malformed pex addresses: %w", err)
+		}
+		p.server.handlePexAddresses(p, payload)
 		return true, nil
 	default:
 		return false, nil

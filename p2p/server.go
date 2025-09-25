@@ -109,6 +109,8 @@ type Server struct {
 	seeds       []seedEndpoint
 	connMgr     *connManager
 	connMgrOnce sync.Once
+
+	pex *pexManager
 }
 
 // peerMetrics tracks message quality for a peer.
@@ -283,6 +285,8 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	server.globalLimit = newTokenBucket(cfg.RateMsgsPerSec*float64(cfg.MaxPeers), burst)
 	server.ipLimiter = newIPRateLimiter(cfg.RateMsgsPerSec, cfg.RateBurst)
 
+	server.pex = newPexManager(server)
+
 	return server
 }
 
@@ -359,6 +363,14 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 
 	s.recordPeerHandshake(remote)
 
+	if s.pex != nil {
+		addr := dialAddr
+		if strings.TrimSpace(addr) == "" {
+			addr = conn.RemoteAddr().String()
+		}
+		s.pex.recordPeer(remote.nodeID, addr, s.now())
+	}
+
 	if s.peerstore != nil {
 		addr := dialAddr
 		if addr == "" {
@@ -420,6 +432,26 @@ func (s *Server) touchPeer(id string) {
 		rec.LastSeen = seen
 	}
 	s.mu.Unlock()
+}
+
+func (s *Server) handlePexRequest(peer pexPeer, payload PexRequestPayload) error {
+	if s == nil || peer == nil {
+		return nil
+	}
+	if s.pex == nil {
+		return nil
+	}
+	return s.pex.handleRequest(peer, payload)
+}
+
+func (s *Server) handlePexAddresses(peer pexPeer, payload PexAddressesPayload) {
+	if s == nil || peer == nil {
+		return
+	}
+	if s.pex == nil {
+		return
+	}
+	s.pex.handleAddresses(peer, payload)
 }
 
 func (s *Server) updatePeerRecordScore(id string, score int) {
@@ -495,6 +527,10 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 		}
 	}
 	s.mu.Unlock()
+
+	if s.pex != nil {
+		s.pex.forgetPeer(peer.id)
+	}
 
 	if ban {
 		s.applyBan(peer.id, peer.persistent)
