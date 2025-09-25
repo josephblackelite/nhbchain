@@ -1408,7 +1408,7 @@ func (n *Node) GovernancePropose(proposer [20]byte, kind, payload string, deposi
 		}
 		lockAmount = new(big.Int).Set(deposit)
 	}
-	return engine.ProposeParamChange(proposer, kind, payload, lockAmount)
+	return engine.SubmitProposal(proposer, kind, payload, lockAmount)
 }
 
 func (n *Node) GovernanceVote(proposalID uint64, voter [20]byte, choice string) error {

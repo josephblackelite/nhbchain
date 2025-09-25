@@ -6,6 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"nhbchain/crypto"
+)
+
+var (
+	testTreasuryAllowAddrBytes = func() [20]byte {
+		var addr [20]byte
+		addr[0] = 0x42
+		addr[len(addr)-1] = 0x24
+		return addr
+	}()
+	testTreasuryAllowAddrString = crypto.NewAddress(crypto.NHBPrefix, testTreasuryAllowAddrBytes[:]).String()
 )
 
 func TestLoadParsesP2PSettings(t *testing.T) {
@@ -120,7 +132,9 @@ TimelockSeconds = 259200
 QuorumBps = 2500
 PassThresholdBps = 5500
 AllowedParams = ["fees.baseFee","escrow.maxOpenDisputes"]
-`, keystorePath)
+AllowedRoles = ["compliance"]
+TreasuryAllowList = ["%s"]
+`, keystorePath, testTreasuryAllowAddrString)
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -151,6 +165,12 @@ AllowedParams = ["fees.baseFee","escrow.maxOpenDisputes"]
 	if cfg.Governance.AllowedParams[1] != "escrow.maxOpenDisputes" {
 		t.Fatalf("unexpected second allowed param: %s", cfg.Governance.AllowedParams[1])
 	}
+	if len(cfg.Governance.AllowedRoles) != 1 || cfg.Governance.AllowedRoles[0] != "compliance" {
+		t.Fatalf("unexpected allowed roles: %v", cfg.Governance.AllowedRoles)
+	}
+	if len(cfg.Governance.TreasuryAllowList) != 1 || cfg.Governance.TreasuryAllowList[0] != testTreasuryAllowAddrString {
+		t.Fatalf("unexpected treasury allow list: %v", cfg.Governance.TreasuryAllowList)
+	}
 }
 
 func TestGovPolicyParsing(t *testing.T) {
@@ -161,6 +181,8 @@ func TestGovPolicyParsing(t *testing.T) {
 		QuorumBps:           1500,
 		PassThresholdBps:    5500,
 		AllowedParams:       []string{"fees.baseFee", "escrow.maxOpenDisputes"},
+		AllowedRoles:        []string{"compliance"},
+		TreasuryAllowList:   []string{testTreasuryAllowAddrString},
 	}
 	policy, err := cfg.Policy()
 	if err != nil {
@@ -172,13 +194,28 @@ func TestGovPolicyParsing(t *testing.T) {
 	if policy.QuorumBps != 1500 || policy.PassThresholdBps != 5500 {
 		t.Fatalf("unexpected thresholds: %+v", policy)
 	}
-	want := new(big.Int)
-	want.SetString("1250", 10)
-	if policy.MinDepositWei == nil || policy.MinDepositWei.Cmp(want) != 0 {
+	depositWant := new(big.Int)
+	depositWant.SetString("1250", 10)
+	if policy.MinDepositWei == nil || policy.MinDepositWei.Cmp(depositWant) != 0 {
 		t.Fatalf("unexpected deposit: %v", policy.MinDepositWei)
 	}
 	if len(policy.AllowedParams) != 2 || policy.AllowedParams[0] != "fees.baseFee" {
 		t.Fatalf("unexpected allowed params: %v", policy.AllowedParams)
+	}
+	if len(policy.AllowedRoles) != 1 || policy.AllowedRoles[0] != "compliance" {
+		t.Fatalf("unexpected allowed roles: %v", policy.AllowedRoles)
+	}
+	if len(policy.TreasuryAllowList) != 1 {
+		t.Fatalf("unexpected treasury list: %v", policy.TreasuryAllowList)
+	}
+	decoded, err := crypto.DecodeAddress(testTreasuryAllowAddrString)
+	if err != nil {
+		t.Fatalf("decode address: %v", err)
+	}
+	var wantAddr [20]byte
+	copy(wantAddr[:], decoded.Bytes())
+	if policy.TreasuryAllowList[0] != wantAddr {
+		t.Fatalf("unexpected treasury address: %v", policy.TreasuryAllowList)
 	}
 
 	if _, err := (GovConfig{MinDepositWei: "-1"}).Policy(); err == nil {

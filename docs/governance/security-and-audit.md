@@ -41,6 +41,28 @@ modifications were committed exactly once. Attempted replays or duplicate
 messages will fail with an explicit error, preserving change-control logs and
 reducing the risk of multi-apply bugs.
 
+## Emergency Overrides
+
+`param.emergency_override` proposals follow the exact same quorum, deposit, and
+timelock requirements as standard parameter updates. The only difference is
+auditing: when the override executes the runtime appends an audit record with
+`{"kind":"param.emergency_override"}` and the affected keys so regulators can
+distinguish routine adjustments from emergency responses. Operators should use
+the `memo` and proposal metadata to document the reason for the override and the
+planned rollback path.
+
+## Immutable Audit Log
+
+Every governance milestone—proposal creation, votes, finalization, queueing, and
+execution—now writes an append-only record to the on-chain audit log. Each entry
+captures the event type, proposal ID, timestamp, optional actor address, and a
+JSON detail blob summarising the effect (e.g. updated parameters, granted roles,
+treasury transfer memo). The log is keyed by a monotonically increasing
+sequence number, allowing auditors to reconstruct the full history without
+replaying RPC events. Emergency overrides and treasury directives emit detailed
+records so internal control teams can reconcile approvals against downstream
+ledger systems.
+
 ## Replay and Idempotency Controls
 
 The governance router enforces a strict proposal state machine. Each proposal ID

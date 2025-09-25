@@ -2,6 +2,7 @@ package governance
 
 import (
 	"math/big"
+	"strings"
 	"time"
 
 	"nhbchain/crypto"
@@ -133,4 +134,108 @@ func (s ProposalStatus) StatusString() string {
 	default:
 		return "unspecified"
 	}
+}
+
+// ProposalKind enumerates the canonical governance proposal targets supported by
+// the runtime. The constants are exposed to both RPC clients and on-chain
+// execution in order to provide deterministic dispatch for governance payloads.
+const (
+	ProposalKindParamUpdate       = "param.update"
+	ProposalKindParamEmergency    = "param.emergency_override"
+	ProposalKindSlashingPolicy    = "policy.slashing"
+	ProposalKindRoleAllowlist     = "role.allowlist"
+	ProposalKindTreasuryDirective = "treasury.directive"
+)
+
+// AuditEvent identifies the lifecycle milestone captured by a governance audit
+// record. Stored values are designed for long-term readability while remaining
+// compact enough for on-chain persistence.
+type AuditEvent string
+
+const (
+	AuditEventProposed  AuditEvent = "proposed"
+	AuditEventVote      AuditEvent = "vote"
+	AuditEventFinalized AuditEvent = "finalized"
+	AuditEventQueued    AuditEvent = "queued"
+	AuditEventExecuted  AuditEvent = "executed"
+	AuditEventFailed    AuditEvent = "failed"
+)
+
+// AuditRecord captures an immutable governance lifecycle entry. Records are
+// written append-only and referenced by a monotonically increasing sequence so
+// operators and auditors can reconstruct the exact ordering of governance
+// actions without relying on external event streams.
+type AuditRecord struct {
+	Sequence   uint64      `json:"sequence"`
+	Timestamp  time.Time   `json:"timestamp"`
+	Event      AuditEvent  `json:"event"`
+	ProposalID uint64      `json:"proposal_id"`
+	Actor      AddressText `json:"actor"`
+	Details    string      `json:"details"`
+}
+
+// AddressText provides a stable textual representation of an optional
+// governance actor address for JSON encoding. Empty strings are preserved when
+// no actor is associated with the record, simplifying audit log diffing.
+type AddressText string
+
+// Bytes converts the textual representation back to raw bytes if the string is
+// a valid Bech32 address. Invalid inputs return nil to keep audit log ingestion
+// resilient to historic entries that may have been produced before validation
+// tightened.
+func (a AddressText) Bytes() []byte {
+	trimmed := strings.TrimSpace(string(a))
+	if trimmed == "" {
+		return nil
+	}
+	addr, err := crypto.DecodeAddress(trimmed)
+	if err != nil {
+		return nil
+	}
+	return append([]byte(nil), addr.Bytes()...)
+}
+
+// SlashingPolicyPayload defines the expected schema for slashing policy
+// proposals. Basis point fields must be within [0, 10_000] and the window must
+// be at least one block interval to prevent nonsensical configurations.
+type SlashingPolicyPayload struct {
+	Enabled       bool   `json:"enabled"`
+	MaxPenaltyBps uint32 `json:"maxPenaltyBps"`
+	WindowSeconds uint64 `json:"windowSeconds"`
+	MaxSlashWei   string `json:"maxSlashWei"`
+	EvidenceTTL   uint64 `json:"evidenceTtlSeconds"`
+	Notes         string `json:"notes,omitempty"`
+}
+
+// RoleAddressPair captures a role membership mutation in role allowlist
+// proposals.
+type RoleAddressPair struct {
+	Role    string `json:"role"`
+	Address string `json:"address"`
+}
+
+// RoleAllowlistPayload enumerates the additions and removals to apply when
+// executing a role allowlist proposal.
+type RoleAllowlistPayload struct {
+	Grant  []RoleAddressPair `json:"grant"`
+	Revoke []RoleAddressPair `json:"revoke"`
+	Memo   string            `json:"memo,omitempty"`
+}
+
+// TreasuryTransfer describes a single debit from the treasury source to a
+// recipient address expressed in Wei.
+type TreasuryTransfer struct {
+	To        string `json:"to"`
+	AmountWei string `json:"amountWei"`
+	Memo      string `json:"memo,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+}
+
+// TreasuryDirectivePayload instructs the runtime to debit an allow-listed
+// treasury account and credit a set of recipients. Transfers execute atomically
+// as part of the governance proposal payload.
+type TreasuryDirectivePayload struct {
+	Source    string             `json:"source"`
+	Transfers []TreasuryTransfer `json:"transfers"`
+	Memo      string             `json:"memo,omitempty"`
 }

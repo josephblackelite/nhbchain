@@ -111,6 +111,8 @@ type GovConfig struct {
 	QuorumBps           uint64   `toml:"QuorumBps"`
 	PassThresholdBps    uint64   `toml:"PassThresholdBps"`
 	AllowedParams       []string `toml:"AllowedParams"`
+	AllowedRoles        []string `toml:"AllowedRoles"`
+	TreasuryAllowList   []string `toml:"TreasuryAllowList"`
 }
 
 // Load loads the configuration from the given path.
@@ -480,6 +482,7 @@ func (cfg GovConfig) Policy() (governance.ProposalPolicy, error) {
 		AllowedParams:       append([]string{}, cfg.AllowedParams...),
 		QuorumBps:           cfg.QuorumBps,
 		PassThresholdBps:    cfg.PassThresholdBps,
+		AllowedRoles:        append([]string{}, cfg.AllowedRoles...),
 	}
 	amount, err := parseUintAmount(cfg.MinDepositWei)
 	if err != nil {
@@ -487,6 +490,23 @@ func (cfg GovConfig) Policy() (governance.ProposalPolicy, error) {
 	}
 	if amount != nil {
 		policy.MinDepositWei = amount
+	}
+	for _, raw := range cfg.TreasuryAllowList {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		addr, err := crypto.DecodeAddress(trimmed)
+		if err != nil {
+			return policy, fmt.Errorf("invalid TreasuryAllowList entry %q: %w", raw, err)
+		}
+		bytes := addr.Bytes()
+		if len(bytes) != 20 {
+			return policy, fmt.Errorf("treasury address must be 20 bytes")
+		}
+		var entry [20]byte
+		copy(entry[:], bytes)
+		policy.TreasuryAllowList = append(policy.TreasuryAllowList, entry)
 	}
 	return policy, nil
 }

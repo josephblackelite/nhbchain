@@ -92,6 +92,8 @@ var (
 	governanceVotePrefix       = []byte("gov/votes/")
 	governanceVoteIndexPrefix  = []byte("gov/vote-index/")
 	governanceSequenceKey      = []byte("gov/seq")
+	governanceAuditPrefix      = []byte("gov/audit/")
+	governanceAuditSequenceKey = []byte("gov/audit-seq")
 	governanceEscrowPrefix     = []byte("gov/escrow/")
 	paramsNamespacePrefix      = []byte("params/")
 	snapshotPotsoPrefix        = []byte("snapshots/potso/")
@@ -131,6 +133,10 @@ func GovernanceEscrowKey(addr []byte) []byte {
 	return key
 }
 
+func governanceAuditKey(seq uint64) []byte {
+	return []byte(fmt.Sprintf("%s%d", governanceAuditPrefix, seq))
+}
+
 type storedGovernanceProposal struct {
 	ID             uint64
 	Title          string
@@ -154,6 +160,49 @@ type storedGovernanceVote struct {
 	Choice     string
 	PowerBps   uint32
 	Timestamp  uint64
+}
+
+type storedGovernanceAudit struct {
+	Sequence   uint64
+	Timestamp  uint64
+	Event      string
+	ProposalID uint64
+	Actor      string
+	Details    string
+}
+
+func newStoredGovernanceAudit(r *governance.AuditRecord) *storedGovernanceAudit {
+	if r == nil {
+		return nil
+	}
+	stored := &storedGovernanceAudit{
+		Sequence:   r.Sequence,
+		Event:      string(r.Event),
+		ProposalID: r.ProposalID,
+		Actor:      strings.TrimSpace(string(r.Actor)),
+		Details:    strings.TrimSpace(r.Details),
+	}
+	if !r.Timestamp.IsZero() {
+		stored.Timestamp = uint64(r.Timestamp.Unix())
+	}
+	return stored
+}
+
+func (s *storedGovernanceAudit) toAuditRecord() (*governance.AuditRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("governance: nil audit record")
+	}
+	record := &governance.AuditRecord{
+		Sequence:   s.Sequence,
+		Event:      governance.AuditEvent(strings.TrimSpace(s.Event)),
+		ProposalID: s.ProposalID,
+		Actor:      governance.AddressText(strings.TrimSpace(s.Actor)),
+		Details:    strings.TrimSpace(s.Details),
+	}
+	if s.Timestamp != 0 {
+		record.Timestamp = time.Unix(int64(s.Timestamp), 0).UTC()
+	}
+	return record, nil
 }
 
 func newStoredGovernanceProposal(p *governance.Proposal) *storedGovernanceProposal {
@@ -417,6 +466,36 @@ func (m *Manager) GovernancePutVote(v *governance.Vote) error {
 		existing = append(existing, *record)
 	}
 	return m.KVPut(indexKey, existing)
+}
+
+func (m *Manager) GovernanceAppendAudit(r *governance.AuditRecord) (*governance.AuditRecord, error) {
+	if r == nil {
+		return nil, fmt.Errorf("governance: audit record must not be nil")
+	}
+	var current uint64
+	ok, err := m.KVGet(governanceAuditSequenceKey, &current)
+	if err != nil {
+		return nil, err
+	}
+	if ok && current == math.MaxUint64 {
+		return nil, fmt.Errorf("governance: audit sequence overflow")
+	}
+	next := current + 1
+	r.Sequence = next
+	if r.Timestamp.IsZero() {
+		r.Timestamp = time.Now().UTC()
+	}
+	stored := newStoredGovernanceAudit(r)
+	if stored == nil {
+		return nil, fmt.Errorf("governance: unable to persist audit entry")
+	}
+	if err := m.KVPut(governanceAuditKey(next), stored); err != nil {
+		return nil, err
+	}
+	if err := m.KVPut(governanceAuditSequenceKey, next); err != nil {
+		return nil, err
+	}
+	return stored.toAuditRecord()
 }
 
 // GovernanceListVotes returns all stored votes for the proposal identifier.
@@ -1886,6 +1965,51 @@ func (m *Manager) SetRole(role string, addr []byte) error {
 		})
 	}
 	encoded, err := rlp.EncodeToBytes(members)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(key, encoded)
+}
+
+// RemoveRole disassociates an address from the specified role. Missing entries
+// are ignored so the operation is idempotent for governance proposals that may
+// attempt duplicate revocations.
+func (m *Manager) RemoveRole(role string, addr []byte) error {
+	trimmed := strings.TrimSpace(role)
+	if trimmed == "" {
+		return fmt.Errorf("role must not be empty")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	key := roleKey(trimmed)
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var members [][]byte
+	if err := rlp.DecodeBytes(data, &members); err != nil {
+		return err
+	}
+	filtered := make([][]byte, 0, len(members))
+	removed := false
+	for _, existing := range members {
+		if bytes.Equal(existing, addr) {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	if !removed {
+		return nil
+	}
+	if len(filtered) == 0 {
+		return m.trie.Update(key, nil)
+	}
+	encoded, err := rlp.EncodeToBytes(filtered)
 	if err != nil {
 		return err
 	}

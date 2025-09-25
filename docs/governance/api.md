@@ -4,11 +4,19 @@
 
 | Endpoint | Method | Description |
 | --- | --- | --- |
-| `gov_propose` | `POST` | Submit a parameter change proposal and lock the ZNHB deposit. |
+| `gov_propose` | `POST` | Submit a governance proposal (parameter, slashing policy, role allow-list, or treasury directive) and lock the ZNHB deposit. |
 
 ### `gov_propose`
 
-Submits a `param.update` proposal. The payload must only contain allow-listed parameter keys. The ZNHB deposit is debited from the proposer account and locked in escrow until the proposal is resolved.
+Submits a proposal for any supported `kind`. The payload schema depends on the target:
+
+| Kind | Description | Payload Schema |
+| --- | --- | --- |
+| `param.update` | Standard parameter updates. | JSON object mapping allow-listed parameter keys to new values. |
+| `param.emergency_override` | Parameter update that is flagged as an emergency override. | Same schema as `param.update`; execution emits a dedicated audit log entry. |
+| `policy.slashing` | Updates the slashing policy envelope. | `{"enabled": bool, "maxPenaltyBps": int, "windowSeconds": int, "maxSlashWei": string, "evidenceTtlSeconds": int, "notes"?: string}` |
+| `role.allowlist` | Grants or revokes governance-managed roles. | `{"grant"?: [{"role": string, "address": bech32}], "revoke"?: [...], "memo"?: string}` |
+| `treasury.directive` | Executes a treasury-funded transfer to one or more recipients. | `{"source": bech32, "transfers": [{"to": bech32, "amountWei": string, "memo"?: string, "kind"?: string}], "memo"?: string}` |
 
 **Request**
 
@@ -45,6 +53,71 @@ Submits a `param.update` proposal. The payload must only contain allow-listed pa
 ```
 
 On success, a `gov.proposed` event is emitted for downstream consumers.
+
+Additional examples:
+
+*Slashing policy update*
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "gov_propose",
+  "params": {
+    "proposer": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp8d7z2",
+    "kind": "policy.slashing",
+    "payload": {
+      "enabled": true,
+      "maxPenaltyBps": 400,
+      "windowSeconds": 600,
+      "maxSlashWei": "2500",
+      "evidenceTtlSeconds": 1200
+    },
+    "deposit": "500000000000000000000"
+  }
+}
+```
+
+*Role allow-list adjustment*
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "gov_propose",
+  "params": {
+    "proposer": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp8d7z2",
+    "kind": "role.allowlist",
+    "payload": {
+      "grant": [{"role": "compliance", "address": "nhb1examplegrantrole00000000000000000000"}],
+      "revoke": [{"role": "compliance", "address": "nhb1examplerevokerole000000000000000000"}],
+      "memo": "Rotate compliance operators"
+    }
+  }
+}
+```
+
+*Treasury directive*
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "gov_propose",
+  "params": {
+    "proposer": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp8d7z2",
+    "kind": "treasury.directive",
+    "payload": {
+      "source": "nhb1treasuryallowlisted000000000000000000",
+      "transfers": [
+        {"to": "nhb1recipient000000000000000000000000000", "amountWei": "250000000000000000000", "memo": "Q3 grants"}
+      ]
+    }
+  }
+}
+```
+
+Invalid payloads return `codeInvalidParams` along with a descriptive error. Examples include unknown parameter keys, out-of-range numeric values, unapproved roles, or treasury sources that are not allow-listed.
 
 ### Tally Schema
 

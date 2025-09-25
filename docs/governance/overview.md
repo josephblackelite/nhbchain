@@ -6,11 +6,30 @@
 
 Community members draft proposals off-chain using the published template, then
 submit them through the governance module with a deterministic payload hash and
-parameter change set. The intake endpoint records the author address, the
+targeted change set. The intake endpoint records the author address, the
 referenced POTSO snapshot epoch, and embeds the payload hash into the
 `gov.proposed` event. Intake rejects submissions that omit mandatory disclosures
 or reference an epoch newer than `E-1`, ensuring all voters share the same
 eligibility dataset.
+
+### Supported Proposal Kinds
+
+Governance now supports five deterministic proposal types:
+
+* `param.update` – Standard parameter adjustments for allow-listed runtime keys.
+* `param.emergency_override` – Emergency parameter changes that follow the
+  same quorum and timelock rules but emit dedicated audit entries so regulators
+  can trace the override justification.
+* `policy.slashing` – Updates to the slashing engine: enablement flag, penalty
+  basis points, enforcement window, and maximum slash budget.
+* `role.allowlist` – Grants or revokes addresses from governance-managed role
+  allow-lists (for example, compliance or security operators).
+* `treasury.directive` – Moves pre-approved balances from an allow-listed
+  treasury account to one or more recipients with optional memos.
+
+Each proposal kind has schema validation baked into the execution path; payloads
+that violate documented ranges or include unknown fields are rejected before
+they can be queued.
 
 ## Deposit Escrow Collection
 
@@ -52,6 +71,9 @@ intervention.
 After the timelock expires, any address may call `ExecuteProposal`. The runtime
 verifies the payload hash, applies the parameter changes atomically, and emits
 `gov.executed`. Completed proposals are archived with their final state, vote
-summary, and execution transaction hash so auditors can reconstruct the full
-timeline. Historical records remain queryable indefinitely, providing an
-immutable audit trail for regulators, investors, and the community.
+summary, execution transaction hash, and an immutable audit record that
+captures the executor, timestamp, and a JSON summary of the effect. The audit
+log is append-only and keyed by sequence number so regulators and downstream
+integrations can reconstruct the entire lifecycle without relying on external
+event streams. Historical records remain queryable indefinitely, providing an
+immutable timeline for regulators, investors, and the community.
