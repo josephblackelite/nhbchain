@@ -126,3 +126,45 @@ Reconnect   Reject/Ban      Keepalive
 
 Peers that violate protocol expectations during any phase are disconnected and
 optionally banned according to the configured reputation policy.
+
+## Peerstore
+
+The NET-2B release introduces a durable peerstore backed by LevelDB. Every
+successful handshake writes an entry that survives restarts, ensuring dial
+scheduling, bans, and scores persist across crashes or maintenance reboots.
+
+### Stored Fields
+
+| Field | Description |
+| ----- | ----------- |
+| `addr` | Last observed multiaddr/TCP endpoint for the peer. |
+| `nodeID` | Canonical NodeID derived from the identity key. |
+| `score` | Rolling health score; successes increment, failures decay. |
+| `lastSeen` | Timestamp of the most recent dial outcome (success or fail). |
+| `fails` | Consecutive failure counter driving exponential backoff. |
+| `bannedUntil` | Wall-clock time after which the peer may reconnect. |
+
+Entries are deduplicated by `nodeID`. When a peer re-announces itself with a new
+address the previous mapping is replaced, preventing stale endpoints from
+lingering. LevelDB handles on-disk compaction automatically; no proactive
+eviction policy is required, but operators can trigger `compactdb` if the store
+grows unusually large.
+
+### Dial Backoff
+
+Dial attempts follow an exponential backoff controlled by the failure counter.
+
+```text
+# Exponential dial backoff
+function nextDial(lastSeen, fails):
+    if fails <= 0:
+        return now
+    delay = baseBackoff * 2^(fails-1)
+    delay = min(delay, maxBackoff)
+    return lastSeen + delay
+```
+
+For example, with `baseBackoff = 1s` and `maxBackoff = 30m`, a peer that fails
+three consecutive dials will be retried after 4 seconds, then 8 seconds, then
+16 seconds. A successful dial resets both the failure counter and backoff delay
+to zero.
