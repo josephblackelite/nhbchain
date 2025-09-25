@@ -1,13 +1,13 @@
 package p2p
 
 import (
+	"bufio"
 	"bytes"
-	"encoding/json"
+	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
-
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestHandshakeVerifySuccess(t *testing.T) {
@@ -81,12 +81,12 @@ func TestHandshakeRejectsTamperedSignature(t *testing.T) {
 	}
 	sig[0] ^= 0xFF
 	packet.Signature = encodeHex(sig)
-	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "signature") {
+	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "recover signature") {
 		t.Fatalf("expected signature error, got %v", err)
 	}
 }
 
-func TestHandshakeRejectsTimestampSkew(t *testing.T) {
+func TestHandshakeRejectsNodeIDTamper(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)
 	local := NewServer(handler, mustKey(t), baseConfig(genesis))
@@ -96,19 +96,9 @@ func TestHandshakeRejectsTimestampSkew(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build handshake: %v", err)
 	}
-	packet.Timestamp = packet.Timestamp - int64((handshakeSkewAllowance*2)/time.Second)
-	payload, err := json.Marshal(packet.handshakeMessage)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
-	digest := handshakeDigest(payload, packet.Timestamp)
-	sig, err := ethcrypto.Sign(digest, remote.privKey.PrivateKey)
-	if err != nil {
-		t.Fatalf("resign handshake: %v", err)
-	}
-	packet.Signature = encodeHex(sig)
-	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "timestamp") {
-		t.Fatalf("expected timestamp error, got %v", err)
+	packet.NodeID = "0x010203"
+	if err := local.verifyHandshake(packet); err == nil || (!strings.Contains(err.Error(), "recover signature") && !strings.Contains(strings.ToLower(err.Error()), "node id")) {
+		t.Fatalf("expected node ID failure, got %v", err)
 	}
 }
 
@@ -127,5 +117,37 @@ func TestHandshakeNonceReplay(t *testing.T) {
 	}
 	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "nonce replay") {
 		t.Fatalf("expected nonce replay error, got %v", err)
+	}
+}
+
+func TestHandshakeTimeout(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+	cfg := baseConfig(genesis)
+	cfg.HandshakeTimeout = 50 * time.Millisecond
+
+	local := NewServer(handler, mustKey(t), cfg)
+
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(left)
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.HandshakeTimeout)
+		defer cancel()
+		_, err := local.performHandshake(ctx, left, reader)
+		errCh <- err
+	}()
+
+	reader := bufio.NewReader(right)
+	if _, err := reader.ReadBytes('\n'); err != nil {
+		t.Fatalf("read local handshake: %v", err)
+	}
+
+	err := <-errCh
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected timeout error, got %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,6 +51,12 @@ func main() {
 	privKey, err := loadValidatorKey(cfg)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
+	}
+
+	identityPath := filepath.Join(cfg.DataDir, "p2p", "node_key.json")
+	identity, err := p2p.LoadOrCreateIdentity(identityPath)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load node identity: %v", err))
 	}
 
 	// 1. Create the core node.
@@ -111,8 +118,10 @@ func main() {
 		BanScore:         cfg.P2P.BanScore,
 		GreyScore:        cfg.P2P.GreyScore,
 		HandshakeTimeout: time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
+		PingInterval:     time.Duration(cfg.P2P.PingIntervalSeconds) * time.Second,
+		PingTimeout:      time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
 	}
-	p2pServer := p2p.NewServer(node, privKey, p2pCfg)
+	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
 	node.SetP2PServer(p2pServer)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).

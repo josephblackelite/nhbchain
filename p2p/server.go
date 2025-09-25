@@ -18,7 +18,6 @@ import (
 const (
 	defaultHandshakeTimeout = 5 * time.Second
 	outboundQueueSize       = 64
-	handshakeNonceSize      = 32
 
 	defaultMaxPeers       = 64
 	defaultPeerBan        = 15 * time.Minute
@@ -27,6 +26,8 @@ const (
 	defaultMaxMessageSize = 1 << 20
 	defaultMsgRate        = 32.0
 	defaultBurstRate      = 200.0
+	defaultPingInterval   = 30 * time.Second
+	defaultPingTimeout    = 2 * time.Minute
 	maxDialBackoff        = time.Minute
 
 	malformedPenalty   = -malformedMessagePenaltyDelta
@@ -63,18 +64,19 @@ type ServerConfig struct {
 	BanScore         int
 	GreyScore        int
 	HandshakeTimeout time.Duration
+	PingInterval     time.Duration
+	PingTimeout      time.Duration
 }
 
 type dialFunc func(context.Context, string) (net.Conn, error)
 
 // Server coordinates peer connections and message dissemination.
 type Server struct {
-	cfg        ServerConfig
-	handler    MessageHandler
-	privKey    *crypto.PrivateKey
-	nodeID     string
-	walletAddr string
-	genesis    []byte
+	cfg     ServerConfig
+	handler MessageHandler
+	privKey *crypto.PrivateKey
+	nodeID  string
+	genesis []byte
 
 	mu            sync.RWMutex
 	peers         map[string]*Peer
@@ -82,7 +84,6 @@ type Server struct {
 	outboundCount int
 	metrics       map[string]*peerMetrics
 	byAddr        map[string]string
-	byWallet      map[string]string
 	persistentIDs map[string]struct{}
 	records       map[string]*PeerRecord
 
@@ -94,6 +95,7 @@ type Server struct {
 	ratePerPeer      float64
 	rateBurst        float64
 	handshakeTimeout time.Duration
+	pingTimeout      time.Duration
 	nonceGuard       *nonceGuard
 
 	dialMu      sync.Mutex
@@ -112,7 +114,6 @@ type peerMetrics struct {
 // PeerRecord tracks persistent metadata about a peer.
 type PeerRecord struct {
 	NodeID    string
-	Address   string
 	FirstSeen time.Time
 	LastSeen  time.Time
 	Version   string
@@ -122,7 +123,6 @@ type PeerRecord struct {
 // PeerInfo captures the public status of a connected peer.
 type PeerInfo struct {
 	NodeID     string    `json:"nodeId"`
-	Addr       string    `json:"addr"`
 	Direction  string    `json:"dir"`
 	Persistent bool      `json:"persistent"`
 	RemoteAddr string    `json:"remoteAddr"`
@@ -156,7 +156,6 @@ type NetworkLimits struct {
 // NetworkSelf describes the local node identity.
 type NetworkSelf struct {
 	NodeID          string `json:"nodeId"`
-	Addr            string `json:"addr"`
 	ProtocolVersion uint32 `json:"protocolVersion"`
 	ClientVersion   string `json:"clientVersion"`
 }
@@ -216,14 +215,19 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = defaultHandshakeTimeout
 	}
+	if cfg.PingInterval <= 0 {
+		cfg.PingInterval = defaultPingInterval
+	}
+	if cfg.PingTimeout <= 0 {
+		cfg.PingTimeout = defaultPingTimeout
+	}
 
 	uniqBoot := uniqueStrings(cfg.Bootnodes)
 	uniqPersist := uniqueStrings(cfg.PersistentPeers)
 	cfg.Bootnodes = append([]string{}, uniqBoot...)
 	cfg.PersistentPeers = append([]string{}, uniqPersist...)
 
-	nodeID := privKey.PubKey().Address().String()
-	walletAddr := nodeID
+	nodeID := deriveNodeID(privKey)
 
 	rep := NewReputationManager(ReputationConfig{
 		GreyScore:        cfg.GreyScore,
@@ -237,12 +241,10 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		handler:          handler,
 		privKey:          privKey,
 		nodeID:           nodeID,
-		walletAddr:       walletAddr,
 		genesis:          cloneBytes(cfg.GenesisHash),
 		peers:            make(map[string]*Peer),
 		metrics:          make(map[string]*peerMetrics),
 		byAddr:           make(map[string]string),
-		byWallet:         make(map[string]string),
 		persistentIDs:    make(map[string]struct{}),
 		records:          make(map[string]*PeerRecord),
 		dialFn:           defaultDialer,
@@ -254,7 +256,8 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		ratePerPeer:      cfg.RateMsgsPerSec,
 		rateBurst:        cfg.RateBurst,
 		handshakeTimeout: cfg.HandshakeTimeout,
-		nonceGuard:       newNonceGuard(2 * handshakeSkewAllowance),
+		pingTimeout:      cfg.PingTimeout,
+		nonceGuard:       newNonceGuard(handshakeReplayWindow),
 	}
 
 	for _, addr := range uniqBoot {
@@ -330,7 +333,7 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 
 	s.recordPeerHandshake(remote)
 
-	peer := newPeer(remote.nodeID, remote.NodeAddr, remote.ClientVersion, conn, reader, s, inbound, persistent, dialAddr)
+	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, dialAddr)
 	if err := s.registerPeer(peer); err != nil {
 		return err
 	}
@@ -359,7 +362,6 @@ func (s *Server) recordPeerHandshake(remote *handshakePacket) {
 	if rec.FirstSeen.IsZero() {
 		rec.FirstSeen = seen
 	}
-	rec.Address = remote.NodeAddr
 	rec.Version = remote.ClientVersion
 	rec.LastSeen = seen
 	rec.Score = score
@@ -401,11 +403,6 @@ func (s *Server) registerPeer(peer *Peer) error {
 	if banned, until := s.reputation.BanInfo(peer.id, s.now()); banned {
 		return fmt.Errorf("peer %s banned until %s", peer.id, until.Format(time.RFC3339))
 	}
-	if peer.wallet != "" {
-		if owner, exists := s.byWallet[peer.wallet]; exists && owner != peer.id {
-			return fmt.Errorf("wallet %s already connected as %s", peer.wallet, owner)
-		}
-	}
 	if len(s.peers) >= s.cfg.MaxPeers {
 		return fmt.Errorf("maximum peers reached")
 	}
@@ -423,9 +420,6 @@ func (s *Server) registerPeer(peer *Peer) error {
 	s.peers[peer.id] = peer
 	if peer.dialAddr != "" {
 		s.byAddr[peer.dialAddr] = peer.id
-	}
-	if peer.wallet != "" {
-		s.byWallet[peer.wallet] = peer.id
 	}
 	if peer.persistent {
 		s.persistentIDs[peer.id] = struct{}{}
@@ -449,9 +443,6 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 		}
 		if peer.dialAddr != "" {
 			delete(s.byAddr, peer.dialAddr)
-		}
-		if peer.wallet != "" {
-			delete(s.byWallet, peer.wallet)
 		}
 		if peer.persistent {
 			delete(s.persistentIDs, peer.id)
@@ -574,14 +565,10 @@ func (s *Server) SnapshotPeers() []PeerInfo {
 		status := statuses[peer.id]
 		s.updatePeerRecordScore(peer.id, status.Score)
 		rec := records[peer.id]
-		addr := peer.wallet
 		version := peer.clientVersion
 		firstSeen := now
 		lastSeen := now
 		if rec.NodeID != "" {
-			if rec.Address != "" {
-				addr = rec.Address
-			}
 			if !rec.FirstSeen.IsZero() {
 				firstSeen = rec.FirstSeen
 			}
@@ -594,7 +581,6 @@ func (s *Server) SnapshotPeers() []PeerInfo {
 		}
 		info := PeerInfo{
 			NodeID:     peer.id,
-			Addr:       addr,
 			Direction:  directionForPeer(peer),
 			Persistent: peer.persistent,
 			RemoteAddr: peer.remoteAddr,
@@ -638,7 +624,6 @@ func (s *Server) SnapshotNetwork() NetworkView {
 		},
 		Self: NetworkSelf{
 			NodeID:          s.nodeID,
-			Addr:            s.walletAddr,
 			ProtocolVersion: protocolVersion,
 			ClientVersion:   s.cfg.ClientVersion,
 		},

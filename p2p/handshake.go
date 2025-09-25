@@ -2,10 +2,10 @@ package p2p
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,30 +13,26 @@ import (
 	"strings"
 	"time"
 
-	"nhbchain/crypto"
-
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
-	protocolVersion        uint32        = 1
-	handshakeSkewAllowance time.Duration = 5 * time.Minute
+	protocolVersion       uint32 = 1
+	handshakeNonceSize           = 32
+	handshakeReplayWindow        = 10 * time.Minute
 )
 
 type handshakeMessage struct {
 	ProtocolVersion uint32 `json:"protoVersion"`
 	ChainID         uint64 `json:"chainId"`
 	GenesisHash     string `json:"genesisHash"`
-	NodePubHex      string `json:"nodeIdPub"`
-	NodeAddr        string `json:"nodeAddrBech32"`
+	NodeID          string `json:"nodeId"`
 	Nonce           string `json:"nonce"`
-	Timestamp       int64  `json:"ts"`
 	ClientVersion   string `json:"clientVersion"`
 }
 
 type handshakePacket struct {
 	handshakeMessage
-	SigAddr   string `json:"sigAddr"`
 	Signature string `json:"sig"`
 
 	nodeID string
@@ -77,25 +73,19 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		return nil, fmt.Errorf("generate handshake nonce: %w", err)
 	}
 
-	now := s.now()
-	pubKey := s.privKey.PubKey().PublicKey
-	pubBytes := ethcrypto.FromECDSAPub(pubKey)
 	payload := handshakeMessage{
 		ProtocolVersion: protocolVersion,
 		ChainID:         s.cfg.ChainID,
 		GenesisHash:     encodeHex(s.genesis),
-		NodePubHex:      encodeHex(pubBytes),
-		NodeAddr:        s.walletAddr,
+		NodeID:          s.nodeID,
 		Nonce:           encodeHex(nonce),
-		Timestamp:       now.Unix(),
 		ClientVersion:   s.cfg.ClientVersion,
 	}
 
-	body, err := json.Marshal(payload)
+	digest, err := handshakeDigest(payload.ChainID, s.genesis, nonce, payload.NodeID)
 	if err != nil {
-		return nil, fmt.Errorf("marshal handshake payload: %w", err)
+		return nil, err
 	}
-	digest := handshakeDigest(body, payload.Timestamp)
 	sig, err := ethcrypto.Sign(digest, s.privKey.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("sign handshake: %w", err)
@@ -103,13 +93,11 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 
 	packet := &handshakePacket{
 		handshakeMessage: payload,
-		SigAddr:          s.walletAddr,
 		Signature:        encodeHex(sig),
+		nodeID:           s.nodeID,
+		pubKey:           &s.privKey.PrivateKey.PublicKey,
 	}
-	packet.nodeID = s.nodeID
-	packet.pubKey = pubKey
-	if !s.nonceGuard.Remember(packet.Nonce, now) {
-		// Should never happen for a locally generated nonce, but keep defensive.
+	if !s.nonceGuard.Remember(payload.Nonce, s.now()) {
 		return nil, fmt.Errorf("nonce collision detected")
 	}
 	return packet, nil
@@ -125,14 +113,8 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	if packet.ClientVersion == "" {
 		return fmt.Errorf("handshake missing client version")
 	}
-	if strings.TrimSpace(packet.NodeAddr) == "" {
-		return fmt.Errorf("handshake missing node address")
-	}
-	if strings.TrimSpace(packet.SigAddr) == "" {
-		return fmt.Errorf("handshake missing signature address")
-	}
-	if !strings.EqualFold(packet.SigAddr, packet.NodeAddr) {
-		return fmt.Errorf("signature address mismatch")
+	if strings.TrimSpace(packet.NodeID) == "" {
+		return fmt.Errorf("handshake missing node ID")
 	}
 	if len(packet.Signature) == 0 {
 		return fmt.Errorf("handshake missing signature")
@@ -151,19 +133,11 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	if err != nil {
 		return fmt.Errorf("invalid genesis hash encoding: %w", err)
 	}
-	if !bytes.Equal(remoteGenesis, s.genesis) {
+	if len(remoteGenesis) == 0 {
+		return fmt.Errorf("handshake missing genesis hash")
+	}
+	if !bytesEqual(remoteGenesis, s.genesis) {
 		return fmt.Errorf("genesis hash mismatch: remote %x local %x", remoteGenesis, s.genesis)
-	}
-
-	ts := time.Unix(packet.Timestamp, 0)
-	now := s.now()
-	if now.Sub(ts) > handshakeSkewAllowance || ts.Sub(now) > handshakeSkewAllowance {
-		return fmt.Errorf("handshake timestamp skew too large")
-	}
-
-	payloadJSON, err := json.Marshal(packet.handshakeMessage)
-	if err != nil {
-		return fmt.Errorf("marshal handshake for verification: %w", err)
 	}
 	sigBytes, err := decodeHex(packet.Signature)
 	if err != nil {
@@ -173,74 +147,52 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 		return fmt.Errorf("invalid handshake signature length: %d", len(sigBytes))
 	}
 
-	pub, err := parseHandshakePub(packet.NodePubHex)
+	digest, err := handshakeDigest(packet.ChainID, remoteGenesis, nonceBytes, packet.NodeID)
 	if err != nil {
-		return fmt.Errorf("invalid node public key: %w", err)
+		return err
 	}
-
-	addr, err := crypto.DecodeAddress(packet.NodeAddr)
-	if err != nil {
-		return fmt.Errorf("decode node address: %w", err)
-	}
-	derivedAddr := ethcrypto.PubkeyToAddress(*pub)
-	if !bytes.Equal(addr.Bytes(), derivedAddr.Bytes()) {
-		return fmt.Errorf("node address mismatch")
-	}
-
-	digest := handshakeDigest(payloadJSON, packet.Timestamp)
 	recovered, err := ethcrypto.SigToPub(digest, sigBytes)
 	if err != nil {
 		return fmt.Errorf("recover signature: %w", err)
 	}
-	recoveredAddr := ethcrypto.PubkeyToAddress(*recovered)
-	if !bytes.Equal(recoveredAddr.Bytes(), addr.Bytes()) {
-		return fmt.Errorf("signature does not match address")
+	derived := normalizeHex(deriveNodeIDFromPub(recovered))
+	claimed := normalizeHex(packet.NodeID)
+	if derived == "" || claimed == "" {
+		return fmt.Errorf("unable to derive node identity")
+	}
+	if !strings.EqualFold(derived, claimed) {
+		return fmt.Errorf("node ID mismatch: derived %s claimed %s", derived, claimed)
 	}
 
-	if !s.nonceGuard.Remember(packet.Nonce, now) {
+	if !s.nonceGuard.Remember(packet.Nonce, s.now()) {
 		return fmt.Errorf("handshake nonce replay detected")
 	}
 
-	packet.nodeID = addr.String()
-	packet.pubKey = pub
+	packet.nodeID = derived
+	packet.pubKey = recovered
+	packet.NodeID = derived
 	return nil
 }
 
-func parseHandshakePub(value string) (*ecdsa.PublicKey, error) {
-	if strings.TrimSpace(value) == "" {
-		return nil, fmt.Errorf("missing public key")
-	}
-	bytes, err := decodeHex(value)
+func handshakeDigest(chainID uint64, genesis []byte, nonce []byte, nodeID string) ([]byte, error) {
+	nodeBytes, err := decodeHex(nodeID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode node ID: %w", err)
 	}
-	return ethcrypto.UnmarshalPubkey(bytes)
-}
-
-func encodeHex(data []byte) string {
-	if len(data) == 0 {
-		return "0x"
+	if len(nodeBytes) == 0 {
+		return nil, fmt.Errorf("empty node ID in handshake")
 	}
-	return "0x" + hex.EncodeToString(data)
-}
-
-func decodeHex(value string) ([]byte, error) {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
-		value = value[2:]
+	if len(nonce) != handshakeNonceSize {
+		return nil, fmt.Errorf("invalid handshake nonce length: %d", len(nonce))
 	}
-	if value == "" {
-		return []byte{}, nil
-	}
-	if len(value)%2 == 1 {
-		value = "0" + value
-	}
-	return hex.DecodeString(value)
-}
-
-func handshakeDigest(payload []byte, timestamp int64) []byte {
-	digestInput := fmt.Sprintf("nhb-p2p|hello|%s|%d", payload, timestamp)
-	return ethcrypto.Keccak256([]byte(digestInput))
+	var chainBuf [8]byte
+	binary.BigEndian.PutUint64(chainBuf[:], chainID)
+	data := make([]byte, 0, len(chainBuf)+len(genesis)+len(nonce)+len(nodeBytes))
+	data = append(data, chainBuf[:]...)
+	data = append(data, genesis...)
+	data = append(data, nonce...)
+	data = append(data, nodeBytes...)
+	return ethcrypto.Keccak256(data), nil
 }
 
 func writeFrame(ctx context.Context, conn net.Conn, payload any) error {
@@ -274,5 +226,49 @@ func readFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader) ([]byte
 		}
 		return nil, err
 	}
-	return bytes.TrimSpace(line), nil
+	return bytesTrimSpace(line), nil
+}
+
+func encodeHex(data []byte) string {
+	if len(data) == 0 {
+		return "0x"
+	}
+	return "0x" + hex.EncodeToString(data)
+}
+
+func decodeHex(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		value = value[2:]
+	}
+	if value == "" {
+		return []byte{}, nil
+	}
+	if len(value)%2 == 1 {
+		value = "0" + value
+	}
+	return hex.DecodeString(value)
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeHex(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "0x") && !strings.HasPrefix(value, "0X") {
+		value = "0x" + value
+	}
+	return strings.ToLower(value)
 }
