@@ -2,7 +2,7 @@
 
 > Include function-level documentation for developer integrations and technical specs; docs must be generated into /docs/governance/* for auditors, investors, regulators, and consumers.
 
-## Snapshot Integrity
+## Snapshot Integrity and Immutability
 
 Governance voting power references the POTSO composite weight snapshot from the
 previous epoch (`E-1`). The epoch module persists each snapshot under
@@ -10,8 +10,19 @@ previous epoch (`E-1`). The epoch module persists each snapshot under
 ballots reflect the exact leaderboard finalised before the voting window
 opened. Because the snapshot is taken prior to voting, sudden stake movements or
 sybil addresses created after epoch finalisation cannot influence the weight
-used for ballots. Validators should monitor snapshot retention and integrity as
-part of routine state audits to ensure voting power remains tamper-evident.
+used for ballots.
+
+Each snapshot is written once and addressed by epoch number plus the block hash
+at which the epoch closed. The governance service validates the block hash
+against the canonical chain head before accepting the snapshot ID, preventing a
+malicious proposer from supplying alternate data. Storage writes are additionally
+covered by consensus state proofs; replaying a divergent snapshot would be
+rejected as the Merkle root would not match the signed block header.
+
+Operators should monitor snapshot retention and integrity as part of routine
+state audits to ensure voting power remains tamper-evident. When reconstructing
+a vote, auditors must reference the immutable epoch archive and cross-check the
+snapshot commitment embedded in the `gov.proposed` event.
 
 ## Timelock Review
 
@@ -30,13 +41,49 @@ modifications were committed exactly once. Attempted replays or duplicate
 messages will fail with an explicit error, preserving change-control logs and
 reducing the risk of multi-apply bugs.
 
+## Replay and Idempotency Controls
+
+The governance router enforces a strict proposal state machine. Each proposal ID
+advances linearly: `draft -> voting -> finalized -> queued -> executed`.
+Requests that do not match the expected next state are rejected with a
+`StateTransitionError`. Execution payloads are protected by a content hash that
+is logged when the proposal is created; the executor re-validates the hash
+before applying the change so mutated payloads cannot be replayed.
+
+On-chain signatures are bound to a `nonce` and `chain_id` value. The `nonce`
+increments per account, preventing off-chain copied votes from being accepted,
+while the `chain_id` disallows replaying the same transaction on a forked or
+test environment. These safeguards ensure that even if a validator observes a
+vote transaction, it cannot re-submit the message without the signer's private
+key.
+
 ## Tally Reproducibility
 
 Auditors can independently recompute vote tallies by iterating the
 `gov/vote-index/<proposal>` bucket. Each entry contains the voter address,
 choice, and voting power in basis points. Summing the weights per choice and
-deriving `yes_ratio_bps = yes / (yes + no)` (abstain excluded) should reproduce
-the `gov.finalized` event attributes. Turnout is the aggregate voting power
-across yes, no, and abstain selections. Verifying the tally against the stored
-snapshot ensures the governance engine did not mis-apply quorum or threshold
-logic when finalising a proposal.
+deriving the following quantities reproduces the `gov.finalized` event
+attributes:
+
+- `total_active = yes_weight + no_weight`
+- `yes_ratio_bps = floor((yes_weight * 10_000) / total_active)`
+- `turnout_ratio_bps = floor(((yes_weight + no_weight + abstain_weight) * 10_000) / total_snapshot_power)`
+
+Where `total_snapshot_power` is the aggregate power recorded in the referenced
+snapshot. Abstentions do not affect the approval threshold but do count toward
+turnout calculations. Verifying these ratios against the stored snapshot ensures
+the governance engine did not mis-apply quorum or threshold logic when
+finalising a proposal.
+
+## Event Log Map
+
+Auditors can observe governance lifecycle milestones through the following
+events:
+
+| Event | Trigger | Key Attributes |
+| --- | --- | --- |
+| `gov.proposed` | Proposal created and deposit escrowed. | `proposal_id`, `snapshot_epoch`, `payload_hash`, `deposit_amount` |
+| `gov.vote` | Ballot accepted during voting window. | `proposal_id`, `voter`, `choice`, `weight_bps` |
+| `gov.finalized` | Voting window closed and tally computed. | `proposal_id`, `yes_ratio_bps`, `turnout_bps`, `outcome` |
+| `gov.queued` | Proposal enqueued into timelock. | `proposal_id`, `execute_after`, `payload_hash` |
+| `gov.executed` | Timelock satisfied and payload applied. | `proposal_id`, `executor`, `effect_hash` |

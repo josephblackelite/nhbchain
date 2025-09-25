@@ -4,7 +4,22 @@
 
 ## Proposal Intake
 
+Community members draft proposals off-chain using the published template, then
+submit them through the governance module with a deterministic payload hash and
+parameter change set. The intake endpoint records the author address, the
+referenced POTSO snapshot epoch, and embeds the payload hash into the
+`gov.proposed` event. Intake rejects submissions that omit mandatory disclosures
+or reference an epoch newer than `E-1`, ensuring all voters share the same
+eligibility dataset.
+
 ## Deposit Escrow Collection
+
+Each proposal must attach the configured `MinProposalDeposit`. Deposits are held
+in module escrow until the proposal concludes. Passing or vetoed proposals return
+the deposit to the proposer; proposals that fail quorum or are abandoned forfeit
+a portion to the community treasury to offset review costs. Deposits exist solely
+to deter spam— they are not interest-bearing instruments and confer no financial
+rights.
 
 ## Voting Period
 
@@ -24,4 +39,19 @@ eligible voters.
 
 ## Timelock Enforcement
 
+Once a proposal finalises with a passing outcome, the proposer (or any keeper)
+must queue it for execution. Queuing records `execute_after = finalized_at +
+TimelockDuration`. The runtime refuses to execute the payload before the
+timestamp elapses and emits `gov.queued` for monitoring systems. During the
+timelock window, stakeholders can review the payload hash, compare it against the
+original proposal, and raise alerts if downstream integrations require manual
+intervention.
+
 ## Execution and Archival
+
+After the timelock expires, any address may call `ExecuteProposal`. The runtime
+verifies the payload hash, applies the parameter changes atomically, and emits
+`gov.executed`. Completed proposals are archived with their final state, vote
+summary, and execution transaction hash so auditors can reconstruct the full
+timeline. Historical records remain queryable indefinitely, providing an
+immutable audit trail for regulators, investors, and the community.
