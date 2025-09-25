@@ -14,6 +14,7 @@ require (
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7
 	go.opentelemetry.io/otel v1.24.0
 	go.opentelemetry.io/otel/metric v1.24.0
+	lukechampine.com/blake3 v1.4.1
 	modernc.org/sqlite v1.39.0
 )
 

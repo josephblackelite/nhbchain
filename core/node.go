@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nhbchain/consensus/bft"
+	"nhbchain/consensus/potso/evidence"
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
@@ -62,6 +63,8 @@ type Node struct {
 	swapStatusMu   sync.RWMutex
 	swapOracleLast int64
 	swapRefundSink [20]byte
+	evidenceStore  *evidence.Store
+	evidenceMaxAge uint64
 }
 
 // PotsoLeaderboardEntry represents a participant's score for a specific day.
@@ -122,6 +125,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		engagementMgr:  engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapSanctions:  swap.DefaultSanctionsChecker,
 		swapRefundSink: treasury,
+		evidenceStore:  evidence.NewStore(db),
+		evidenceMaxAge: evidence.DefaultMaxAgeBlocks,
 	}
 
 	// Initialise fast-sync manager.
@@ -483,6 +488,86 @@ func (n *Node) CommitBlock(b *types.Block) error {
 
 func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorSet }
 func (n *Node) GetHeight() uint64                    { return n.chain.Height() }
+
+// PotsoSubmitEvidence validates and persists a misbehaviour report.
+func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node not initialised")
+	}
+	if n.evidenceStore == nil {
+		n.evidenceStore = evidence.NewStore(n.db)
+	}
+	hash, err := ev.CanonicalHash()
+	if err != nil {
+		return nil, err
+	}
+	currentHeight := uint64(0)
+	if n.chain != nil {
+		currentHeight = n.chain.Height()
+	}
+	maxAge := n.evidenceMaxAge
+	if maxAge == 0 {
+		maxAge = evidence.DefaultMaxAgeBlocks
+	}
+	heightLookup := func(height uint64) bool {
+		if n.chain == nil {
+			return false
+		}
+		_, err := n.chain.GetBlockByHeight(height)
+		return err == nil
+	}
+	validationErr := evidence.ValidateEvidence(&ev, hash, currentHeight, maxAge, heightLookup)
+	receipt := &evidence.Receipt{Hash: hash}
+	if validationErr != nil {
+		receipt.Status = evidence.ReceiptStatusRejected
+		receipt.Reason = validationErr
+		if evt := (events.PotsoEvidenceRejected{Reporter: ev.Reporter, Reason: string(validationErr.Reason)}).Event(); evt != nil {
+			n.state.AppendEvent(evt)
+		}
+		return receipt, nil
+	}
+	record, created, err := n.evidenceStore.Put(hash, ev, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	receipt.Record = record
+	if created {
+		receipt.Status = evidence.ReceiptStatusAccepted
+		minHeight := uint64(0)
+		if record != nil {
+			minHeight = record.MinHeight()
+		}
+		evt := events.PotsoEvidenceAccepted{
+			Hash:         hash,
+			EvidenceType: string(ev.Type),
+			Offender:     ev.Offender,
+			Height:       minHeight,
+			Reporter:     ev.Reporter,
+		}.Event()
+		if evt != nil {
+			n.state.AppendEvent(evt)
+		}
+	} else {
+		receipt.Status = evidence.ReceiptStatusIdempotent
+	}
+	return receipt, nil
+}
+
+// PotsoEvidenceByHash retrieves persisted evidence by canonical hash.
+func (n *Node) PotsoEvidenceByHash(hash [32]byte) (*evidence.Record, bool, error) {
+	if n == nil || n.evidenceStore == nil {
+		return nil, false, fmt.Errorf("evidence store not initialised")
+	}
+	return n.evidenceStore.Get(hash)
+}
+
+// PotsoEvidenceList returns stored evidence filtered by the provided constraints.
+func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, int, error) {
+	if n == nil || n.evidenceStore == nil {
+		return nil, 0, fmt.Errorf("evidence store not initialised")
+	}
+	return n.evidenceStore.List(filter)
+}
 
 // SyncManager exposes the fast-sync subsystem for RPC handlers.
 func (n *Node) SyncManager() *syncmgr.Manager { return n.syncMgr }

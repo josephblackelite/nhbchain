@@ -20,6 +20,7 @@ import (
 	"nhbchain/core/epoch"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/rpc/modules"
 )
 
 const (
@@ -49,19 +50,21 @@ type rateLimiter struct {
 type Server struct {
 	node *core.Node
 
-	mu           sync.Mutex
-	txSeen       map[string]time.Time
-	rateLimiters map[string]*rateLimiter
-	authToken    string
+	mu            sync.Mutex
+	txSeen        map[string]time.Time
+	rateLimiters  map[string]*rateLimiter
+	authToken     string
+	potsoEvidence *modules.PotsoEvidenceModule
 }
 
 func NewServer(node *core.Node) *Server {
 	token := strings.TrimSpace(os.Getenv("NHB_RPC_TOKEN"))
 	return &Server{
-		node:         node,
-		txSeen:       make(map[string]time.Time),
-		rateLimiters: make(map[string]*rateLimiter),
-		authToken:    token,
+		node:          node,
+		txSeen:        make(map[string]time.Time),
+		rateLimiters:  make(map[string]*rateLimiter),
+		authToken:     token,
+		potsoEvidence: modules.NewPotsoEvidenceModule(node),
 	}
 }
 
@@ -425,6 +428,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoRewardsHistory(w, r, req)
 	case "potso_export_epoch":
 		s.handlePotsoExportEpoch(w, r, req)
+	case "potso_submitEvidence":
+		s.handlePotsoSubmitEvidence(w, r, req)
+	case "potso_getEvidence":
+		s.handlePotsoGetEvidence(w, r, req)
+	case "potso_listEvidence":
+		s.handlePotsoListEvidence(w, r, req)
 	case "gov_propose":
 		s.handleGovernancePropose(w, r, req)
 	case "gov_vote":
