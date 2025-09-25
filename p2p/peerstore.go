@@ -14,16 +14,22 @@ import (
 const (
 	defaultBaseBackoff = time.Second
 	defaultMaxBackoff  = 30 * time.Minute
+
+	peerstoreMaxScore     = 1000.0
+	peerstoreMinScore     = -100.0
+	violationScorePenalty = 10.0
 )
 
 // PeerstoreEntry captures the dial metadata we persist for each peer.
 type PeerstoreEntry struct {
-	Addr        string    `json:"addr"`
-	NodeID      string    `json:"nodeID"`
-	Score       float64   `json:"score"`
-	LastSeen    time.Time `json:"lastSeen"`
-	Fails       int       `json:"fails"`
-	BannedUntil time.Time `json:"bannedUntil"`
+	Addr          string    `json:"addr"`
+	NodeID        string    `json:"nodeID"`
+	Score         float64   `json:"score"`
+	LastSeen      time.Time `json:"lastSeen"`
+	Fails         int       `json:"fails"`
+	BannedUntil   time.Time `json:"bannedUntil"`
+	Violations    int       `json:"violations,omitempty"`
+	LastViolation time.Time `json:"lastViolation,omitempty"`
 }
 
 // Peerstore offers a concurrency-safe persistent registry of peer metadata.
@@ -123,10 +129,7 @@ func (ps *Peerstore) RecordSuccess(nodeID string, now time.Time) (PeerstoreEntry
 	if rec == nil {
 		return PeerstoreEntry{}, fmt.Errorf("record success: %w", leveldb.ErrNotFound)
 	}
-	rec.Score += 1
-	if rec.Score > 1000 {
-		rec.Score = 1000
-	}
+	rec.Score = clampScore(rec.Score + 1)
 	rec.LastSeen = now
 	rec.Fails = 0
 	if rec.BannedUntil.After(now) {
@@ -153,6 +156,33 @@ func (ps *Peerstore) RecordFail(nodeID string, now time.Time) (PeerstoreEntry, e
 		if rec.Score < 0.001 {
 			rec.Score = 0
 		}
+	}
+	rec.Score = clampScore(rec.Score)
+	if err := ps.persistLocked(rec); err != nil {
+		return PeerstoreEntry{}, err
+	}
+	return *rec, nil
+}
+
+// RecordViolation increments the violation counter and penalizes the peer's score.
+func (ps *Peerstore) RecordViolation(nodeID string, now time.Time) (PeerstoreEntry, error) {
+	if nodeID == "" {
+		return PeerstoreEntry{}, errors.New("nodeID required")
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	rec := ps.byNode[nodeID]
+	if rec == nil {
+		rec = &PeerstoreEntry{NodeID: nodeID}
+		ps.byNode[nodeID] = rec
+	}
+	rec.Violations++
+	rec.LastViolation = now
+	rec.LastSeen = now
+	rec.Score = clampScore(rec.Score - violationScorePenalty)
+	if rec.Addr != "" {
+		ps.byAddr[rec.Addr] = rec
 	}
 	if err := ps.persistLocked(rec); err != nil {
 		return PeerstoreEntry{}, err
@@ -267,6 +297,12 @@ func (ps *Peerstore) putLocked(rec *PeerstoreEntry) error {
 		if rec.BannedUntil.IsZero() {
 			rec.BannedUntil = existing.BannedUntil
 		}
+		if rec.Violations == 0 {
+			rec.Violations = existing.Violations
+		}
+		if rec.LastViolation.IsZero() {
+			rec.LastViolation = existing.LastViolation
+		}
 		if existing.Addr != "" && existing.Addr != rec.Addr {
 			delete(ps.byAddr, existing.Addr)
 		}
@@ -288,12 +324,23 @@ func (ps *Peerstore) persistLocked(rec *PeerstoreEntry) error {
 	if ps.db == nil {
 		return errors.New("peerstore closed")
 	}
+	rec.Score = clampScore(rec.Score)
 	blob, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 	key := []byte("peer:" + rec.NodeID)
 	return ps.db.Put(key, blob, nil)
+}
+
+func clampScore(value float64) float64 {
+	if value > peerstoreMaxScore {
+		return peerstoreMaxScore
+	}
+	if value < peerstoreMinScore {
+		return peerstoreMinScore
+	}
+	return value
 }
 
 func (ps *Peerstore) load() error {

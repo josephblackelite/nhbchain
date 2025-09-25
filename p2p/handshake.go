@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -18,8 +19,14 @@ import (
 
 const (
 	protocolVersion       uint32 = 1
-	handshakeNonceSize           = 32
+	handshakeNonceSize           = 12
 	handshakeReplayWindow        = 10 * time.Minute
+)
+
+var (
+	errHandshakeChainMismatch    = errors.New("handshake chain mismatch")
+	errHandshakeGenesisMismatch  = errors.New("handshake genesis mismatch")
+	errHandshakeSignatureFailure = errors.New("handshake signature mismatch")
 )
 
 type handshakeMessage struct {
@@ -127,7 +134,8 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 		return fmt.Errorf("invalid handshake nonce length: %d", len(nonceBytes))
 	}
 	if packet.ChainID != s.cfg.ChainID {
-		return fmt.Errorf("chain ID mismatch: remote %d local %d", packet.ChainID, s.cfg.ChainID)
+		s.markHandshakeViolation(packet.NodeID)
+		return fmt.Errorf("%w: chain ID mismatch: remote %d local %d", errHandshakeChainMismatch, packet.ChainID, s.cfg.ChainID)
 	}
 	remoteGenesis, err := decodeHex(packet.GenesisHash)
 	if err != nil {
@@ -137,31 +145,32 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 		return fmt.Errorf("handshake missing genesis hash")
 	}
 	if !bytesEqual(remoteGenesis, s.genesis) {
-		return fmt.Errorf("genesis hash mismatch: remote %x local %x", remoteGenesis, s.genesis)
+		s.markHandshakeViolation(packet.NodeID)
+		return fmt.Errorf("%w: genesis hash mismatch: remote %x local %x", errHandshakeGenesisMismatch, remoteGenesis, s.genesis)
 	}
 	sigBytes, err := decodeHex(packet.Signature)
 	if err != nil {
-		return fmt.Errorf("invalid signature encoding: %w", err)
+		return s.signatureMismatch(packet, "invalid signature encoding: %v", err)
 	}
 	if len(sigBytes) != 65 {
-		return fmt.Errorf("invalid handshake signature length: %d", len(sigBytes))
+		return s.signatureMismatch(packet, "invalid handshake signature length: %d", len(sigBytes))
 	}
 
 	digest, err := handshakeDigest(packet.ChainID, remoteGenesis, nonceBytes, packet.NodeID)
 	if err != nil {
-		return err
+		return s.signatureMismatch(packet, "%v", err)
 	}
 	recovered, err := ethcrypto.SigToPub(digest, sigBytes)
 	if err != nil {
-		return fmt.Errorf("recover signature: %w", err)
+		return s.signatureMismatch(packet, "recover signature: %v", err)
 	}
 	derived := normalizeHex(deriveNodeIDFromPub(recovered))
 	claimed := normalizeHex(packet.NodeID)
 	if derived == "" || claimed == "" {
-		return fmt.Errorf("unable to derive node identity")
+		return s.signatureMismatch(packet, "unable to derive node identity")
 	}
 	if !strings.EqualFold(derived, claimed) {
-		return fmt.Errorf("node ID mismatch: derived %s claimed %s", derived, claimed)
+		return s.signatureMismatch(packet, "node ID mismatch: derived %s claimed %s", derived, claimed)
 	}
 
 	if !s.nonceGuard.Remember(packet.Nonce, s.now()) {
@@ -172,6 +181,44 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	packet.pubKey = recovered
 	packet.NodeID = derived
 	return nil
+}
+
+func (s *Server) signatureMismatch(packet *handshakePacket, format string, args ...any) error {
+	if s != nil && packet != nil {
+		s.markHandshakeViolation(packet.NodeID)
+	}
+	params := make([]any, 0, len(args)+1)
+	params = append(params, errHandshakeSignatureFailure)
+	params = append(params, args...)
+	return fmt.Errorf("%w: "+format, params...)
+}
+
+func (s *Server) markHandshakeViolation(nodeID string) {
+	if s == nil {
+		return
+	}
+	normalized := normalizeHex(nodeID)
+	if normalized == "" {
+		return
+	}
+	now := s.now()
+	duration := s.cfg.PeerBanDuration
+	if duration <= 0 {
+		duration = defaultPeerBan
+	}
+	until := now.Add(duration)
+
+	if s.reputation != nil {
+		s.reputation.SetBan(normalized, until, now)
+	}
+	if s.peerstore != nil {
+		if _, err := s.peerstore.RecordViolation(normalized, now); err != nil {
+			fmt.Printf("record handshake violation %s: %v\n", normalized, err)
+		}
+		if err := s.peerstore.SetBan(normalized, until); err != nil {
+			fmt.Printf("record handshake ban %s: %v\n", normalized, err)
+		}
+	}
 }
 
 func handshakeDigest(chainID uint64, genesis []byte, nonce []byte, nodeID string) ([]byte, error) {

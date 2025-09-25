@@ -112,3 +112,42 @@ func TestPeerstoreDedupeByNodeID(t *testing.T) {
 		t.Fatalf("expected node ID preserved, got %s", got.NodeID)
 	}
 }
+
+func TestPeerstoreRecordViolationPenalty(t *testing.T) {
+	store := newTestPeerstore(t)
+	now := time.Unix(0, 0)
+	entry, err := store.RecordViolation("node-violation", now)
+	if err != nil {
+		t.Fatalf("record violation: %v", err)
+	}
+	if entry.Violations != 1 {
+		t.Fatalf("expected 1 violation got %d", entry.Violations)
+	}
+	if entry.Score != clampScore(-violationScorePenalty) {
+		t.Fatalf("expected score penalty got %v", entry.Score)
+	}
+	if !entry.LastViolation.Equal(now) {
+		t.Fatalf("expected last violation timestamp recorded")
+	}
+}
+
+func TestPeerstoreViolationClamp(t *testing.T) {
+	store := newTestPeerstore(t)
+	now := time.Unix(0, 0)
+	id := "node-clamp"
+	var entry PeerstoreEntry
+	var err error
+	for i := 0; i < 32; i++ {
+		now = now.Add(time.Second)
+		entry, err = store.RecordViolation(id, now)
+		if err != nil {
+			t.Fatalf("record violation %d: %v", i, err)
+		}
+	}
+	if entry.Score < peerstoreMinScore {
+		t.Fatalf("expected score clamped above min got %v", entry.Score)
+	}
+	if entry.Score != peerstoreMinScore {
+		t.Fatalf("expected score to reach clamp %v got %v", peerstoreMinScore, entry.Score)
+	}
+}
