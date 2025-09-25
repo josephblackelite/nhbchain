@@ -58,14 +58,43 @@ type Proposal struct {
 	ProposedChange string         `json:"proposed_change"`
 }
 
+// VoteChoice enumerates the supported governance ballot selections.
+type VoteChoice string
+
+const (
+	// VoteChoiceUnspecified marks an unset or invalid ballot and should not
+	// be persisted.
+	VoteChoiceUnspecified VoteChoice = ""
+	// VoteChoiceYes signals support for the proposal contents.
+	VoteChoiceYes VoteChoice = "yes"
+	// VoteChoiceNo signals opposition to the proposal contents.
+	VoteChoiceNo VoteChoice = "no"
+	// VoteChoiceAbstain records participation without expressing support
+	// or opposition and typically counts towards quorum only.
+	VoteChoiceAbstain VoteChoice = "abstain"
+)
+
+// Valid reports whether the vote choice represents a supported selection.
+func (c VoteChoice) Valid() bool {
+	switch c {
+	case VoteChoiceYes, VoteChoiceNo, VoteChoiceAbstain:
+		return true
+	default:
+		return false
+	}
+}
+
+// String implements fmt.Stringer for logging and event emission.
+func (c VoteChoice) String() string { return string(c) }
+
 // Vote describes a single participant's ballot on a proposal including their
 // weighted voting power and selection. Recording the vote in a deterministic
 // struct simplifies auditing and indexer integration.
 type Vote struct {
 	ProposalID uint64         `json:"proposal_id"`
 	Voter      crypto.Address `json:"voter"`
-	Support    bool           `json:"support"`
-	Weight     *big.Int       `json:"weight"`
+	Choice     VoteChoice     `json:"choice"`
+	PowerBps   uint32         `json:"power_bps"`
 	Timestamp  time.Time      `json:"timestamp"`
 }
 

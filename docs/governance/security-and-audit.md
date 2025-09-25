@@ -4,7 +4,14 @@
 
 ## Snapshot Integrity
 
-_TODO: Document POTSO snapshot verification and retention strategy._
+Governance voting power references the POTSO composite weight snapshot from the
+previous epoch (`E-1`). The epoch module persists each snapshot under
+`snapshots/potso/<epoch>/weights`, allowing auditors to verify that governance
+ballots reflect the exact leaderboard finalised before the voting window
+opened. Because the snapshot is taken prior to voting, sudden stake movements or
+sybil addresses created after epoch finalisation cannot influence the weight
+used for ballots. Validators should monitor snapshot retention and integrity as
+part of routine state audits to ensure voting power remains tamper-evident.
 
 ## Timelock Review
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"nhbchain/core/events"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/potso"
 )
 
 const (
@@ -20,6 +22,8 @@ const (
 	ProposalKindParamUpdate = "param.update"
 	// EventTypeProposalProposed is emitted when a new proposal is accepted.
 	EventTypeProposalProposed = "gov.proposed"
+	// EventTypeVoteCast is emitted when a voter records or updates a ballot.
+	EventTypeVoteCast = "gov.vote"
 )
 
 var (
@@ -33,6 +37,10 @@ type proposalState interface {
 	GovernanceEscrowLock(addr []byte, amount *big.Int) (*big.Int, error)
 	GovernanceNextProposalID() (uint64, error)
 	GovernancePutProposal(p *Proposal) error
+	GovernanceGetProposal(id uint64) (*Proposal, bool, error)
+	GovernancePutVote(v *Vote) error
+	PotsoRewardsLastProcessedEpoch() (uint64, bool, error)
+	SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error)
 }
 
 // ProposalPolicy captures the runtime knobs that control proposal admission.
@@ -217,6 +225,88 @@ func (e *Engine) ProposeParamChange(proposer [20]byte, kind string, payloadJSON 
 	return proposalID, nil
 }
 
+// CastVote records the caller's ballot selection for an active proposal using
+// the voting power derived from the previous epoch's POTSO composite weights.
+// The latest submission overwrites any prior ballot to simplify wallet UX.
+func (e *Engine) CastVote(proposalID uint64, voter [20]byte, choice string) error {
+	if e == nil || e.state == nil {
+		return errStateNotConfigured
+	}
+	proposal, ok, err := e.state.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return err
+	}
+	if !ok || proposal == nil {
+		return fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	if proposal.Status != ProposalStatusVotingPeriod {
+		return fmt.Errorf("governance: proposal %d not accepting votes", proposalID)
+	}
+	now := e.now()
+	if !proposal.VotingStart.IsZero() && now.Before(proposal.VotingStart) {
+		return fmt.Errorf("governance: voting has not started")
+	}
+	if !proposal.VotingEnd.IsZero() && now.After(proposal.VotingEnd) {
+		return fmt.Errorf("governance: voting period closed")
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(choice))
+	var voteChoice VoteChoice
+	switch normalized {
+	case VoteChoiceYes.String():
+		voteChoice = VoteChoiceYes
+	case VoteChoiceNo.String():
+		voteChoice = VoteChoiceNo
+	case VoteChoiceAbstain.String():
+		voteChoice = VoteChoiceAbstain
+	default:
+		return fmt.Errorf("governance: invalid vote choice %q", choice)
+	}
+
+	epoch, ok, err := e.state.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("governance: potso snapshot unavailable")
+	}
+	snapshot, ok, err := e.state.SnapshotPotsoWeights(epoch)
+	if err != nil {
+		return err
+	}
+	if !ok || snapshot == nil {
+		return fmt.Errorf("governance: potso snapshot unavailable")
+	}
+
+	var power uint64
+	for _, entry := range snapshot.Entries {
+		if entry.Address == voter {
+			power = entry.WeightBps
+			break
+		}
+	}
+	if power == 0 {
+		return fmt.Errorf("governance: voter has zero voting power")
+	}
+	if power > math.MaxUint32 {
+		return fmt.Errorf("governance: voting power exceeds bounds")
+	}
+
+	vote := &Vote{
+		ProposalID: proposalID,
+		Voter:      crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), voter[:]...)),
+		Choice:     voteChoice,
+		PowerBps:   uint32(power),
+		Timestamp:  now,
+	}
+	if err := e.state.GovernancePutVote(vote); err != nil {
+		return err
+	}
+
+	e.emit(newVoteEvent(vote))
+	return nil
+}
+
 type governanceEvent struct {
 	evt *types.Event
 }
@@ -255,4 +345,23 @@ func newProposedEvent(p *Proposal) *types.Event {
 		attrs["timelockEnd"] = strconv.FormatInt(p.TimelockEnd.Unix(), 10)
 	}
 	return &types.Event{Type: EventTypeProposalProposed, Attributes: attrs}
+}
+
+func newVoteEvent(v *Vote) *types.Event {
+	attrs := make(map[string]string)
+	if v == nil {
+		return &types.Event{Type: EventTypeVoteCast, Attributes: attrs}
+	}
+	attrs["id"] = strconv.FormatUint(v.ProposalID, 10)
+	if bytes := v.Voter.Bytes(); len(bytes) == 20 {
+		attrs["voter"] = hex.EncodeToString(bytes)
+	}
+	if v.Choice.Valid() {
+		attrs["choice"] = v.Choice.String()
+	}
+	attrs["powerBps"] = strconv.FormatUint(uint64(v.PowerBps), 10)
+	if !v.Timestamp.IsZero() {
+		attrs["timestamp"] = strconv.FormatInt(v.Timestamp.Unix(), 10)
+	}
+	return &types.Event{Type: EventTypeVoteCast, Attributes: attrs}
 }
