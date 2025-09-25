@@ -61,3 +61,40 @@ go test ./p2p -run SeedDialer -count=1
 The test drives both the failure path (incrementing the peerstore counter) and a
 successful handshake, mirroring the behaviour of a live node without requiring a
 full network deployment.
+
+## NAT & Port Forwarding
+
+NET-2E instruments the connection manager with NAT awareness. On startup it logs
+whether the configured `ListenAddress` maps to a private interface, a public IP,
+or an ambiguous host string. When a private or unspecified address is detected
+the manager emits a message indicating that UPnP port mapping is being skipped
+because only a stub implementation is provided. These logs are the first line of
+defence when diagnosing connectivity issues on residential or cloud networks.
+
+### Recommended ports
+
+* **TCP** – open the port specified in `ListenAddress` (default `:30303` if not
+  overridden). Both inbound and outbound TCP are required for peer traffic.
+* **UDP** – optional today, but reserve the same port range if you plan to layer
+  discovery protocols that use UDP beacons.
+
+### UPnP stub guidance
+
+* The software never attempts real UPnP or NAT-PMP negotiations; the stub simply
+  logs what would have been requested.
+* Operators behind consumer routers should manually create a static port forward
+  from the WAN interface to the node's LAN IP using the TCP port above.
+* If your router exposes UPnP diagnostics, verify that no stale mappings exist
+  for the node's port before reconfiguring.
+
+### Cloud firewall examples
+
+| Provider | Rule | Notes |
+| -------- | ---- | ----- |
+| AWS EC2 Security Group | Inbound TCP from `0.0.0.0/0` to port `30303` | Attach to the node instance. Combine with Network ACLs for defence in depth. |
+| Google Cloud VPC Firewall | Ingress rule allowing TCP `30303` from `0.0.0.0/0` | Remember to select the correct network tags so the rule applies to the VM. |
+| Azure NSG | Inbound security rule for TCP `30303` with priority < 200 | Pair with outbound allow-all to ensure the dialer can reach peers. |
+
+Always coordinate cloud firewall rules with on-host firewalls (e.g. `ufw`,
+`firewalld`). The node must accept inbound TCP on the configured port while also
+allowing outbound ephemeral ports for handshakes.

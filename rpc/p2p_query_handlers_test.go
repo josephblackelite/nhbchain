@@ -42,6 +42,8 @@ func TestP2PInfoAndPeers(t *testing.T) {
 		MaxPeers:         4,
 		MaxInbound:       2,
 		MaxOutbound:      2,
+		MinPeers:         2,
+		OutboundPeers:    2,
 		PeerBanDuration:  time.Second,
 		ReadTimeout:      time.Second,
 		WriteTimeout:     time.Second,

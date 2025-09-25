@@ -39,6 +39,8 @@ func baseConfig(genesis []byte) ServerConfig {
 		MaxPeers:         8,
 		MaxInbound:       8,
 		MaxOutbound:      8,
+		MinPeers:         4,
+		OutboundPeers:    4,
 		PeerBanDuration:  time.Second,
 		ReadTimeout:      250 * time.Millisecond,
 		WriteTimeout:     250 * time.Millisecond,

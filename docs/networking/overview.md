@@ -196,3 +196,59 @@ For example, with `baseBackoff = 1s` and `maxBackoff = 30m`, a peer that fails
 three consecutive dials will be retried after 4 seconds, then 8 seconds, then
 16 seconds. A successful dial resets both the failure counter and backoff delay
 to zero.
+
+## Connection Manager Policy
+
+NET-2E expands the connection manager into an active curator of the peer set.
+The controller maintains separate targets for **total** connections and
+**outbound** dials while respecting the configured hard maximum.
+
+* **MinPeers** – the minimum healthy peer count the node aims to keep. When the
+  total number of connected peers drops below this floor the manager immediately
+  schedules new dials.
+* **OutboundPeers** – the desired number of outbound sessions. If churn leaves
+  the node with too few outbound links (even if `MinPeers` is satisfied) the
+  manager replenishes the shortfall.
+* **MaxPeers** – an absolute ceiling enforced during registration. The manager
+  never attempts to exceed this value.
+
+Target selection is score-aware. The dial queue is populated by taking a
+snapshot of the peerstore, discarding banned entries, and then sorting by:
+
+1. Highest reputation score (`PeerstoreEntry.Score`).
+2. Most recent `lastSeen` timestamp.
+
+Seed entries are only considered when the peerstore cannot satisfy demand.
+Before scheduling a dial the manager checks:
+
+* The peer is not already connected nor pending.
+* The peer is not banned by either the peerstore or the runtime reputation
+  engine.
+* The exponential backoff window (`NextDialAt`) has elapsed.
+
+### Pruning Rules
+
+When churn or manual overrides push the active set above `MaxPeers`, the manager
+selects a victim to disconnect. Candidates that are flagged as persistent are
+never pruned. Among the remaining peers the selection algorithm chooses:
+
+1. The lowest reputation score.
+2. If scores tie, the stalest `lastSeen` timestamp.
+3. If the tie persists, inbound peers are preferred for pruning ahead of
+   outbound peers.
+
+Pruned peers are disconnected with a log entry indicating the score and last
+contact time. Persistent peers (bootnodes, static peers) remain untouched so
+operators retain deterministic connectivity anchors.
+
+### Recommended Targets
+
+| Hardware Tier | MinPeers | OutboundPeers | MaxPeers |
+| ------------- | -------- | ------------- | -------- |
+| Light (1 vCPU / 2 GiB) | 8  | 6  | 16 |
+| Standard (2 vCPU / 4 GiB) | 16 | 12 | 32 |
+| Validator (4+ vCPU / 8+ GiB) | 24 | 18 | 48 |
+
+These values balance CPU, memory, and bandwidth trade-offs. Operators can raise
+`MaxPeers` or `MinPeers` further on high-end hardware, but the defaults ensure a
+robust gossip mesh without overwhelming smaller instances.
