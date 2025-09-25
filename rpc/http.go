@@ -381,6 +381,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoRewardsHistory(w, r, req)
 	case "potso_export_epoch":
 		s.handlePotsoExportEpoch(w, r, req)
+	case "gov_propose":
+		s.handleGovernancePropose(w, r, req)
+	case "gov_vote":
+		s.handleGovernanceVote(w, r, req)
+	case "gov_proposal":
+		s.handleGovernanceProposal(w, r, req)
+	case "gov_list":
+		s.handleGovernanceList(w, r, req)
+	case "gov_finalize":
+		s.handleGovernanceFinalize(w, r, req)
+	case "gov_queue":
+		s.handleGovernanceQueue(w, r, req)
+	case "gov_execute":
+		s.handleGovernanceExecute(w, r, req)
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}

@@ -5,11 +5,13 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"nhbchain/core/genesis"
 	"nhbchain/crypto"
+	"nhbchain/native/governance"
 	"nhbchain/native/potso"
 
 	"github.com/BurntSushi/toml"
@@ -395,6 +397,99 @@ func (cfg *Config) PotsoWeightConfig() (potso.WeightParams, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+// Policy converts the governance TOML representation into a runtime proposal policy.
+func (cfg GovConfig) Policy() (governance.ProposalPolicy, error) {
+	policy := governance.ProposalPolicy{
+		VotingPeriodSeconds: cfg.VotingPeriodSeconds,
+		TimelockSeconds:     cfg.TimelockSeconds,
+		AllowedParams:       append([]string{}, cfg.AllowedParams...),
+		QuorumBps:           cfg.QuorumBps,
+		PassThresholdBps:    cfg.PassThresholdBps,
+	}
+	amount, err := parseUintAmount(cfg.MinDepositWei)
+	if err != nil {
+		return policy, fmt.Errorf("invalid MinDepositWei value: %w", err)
+	}
+	if amount != nil {
+		policy.MinDepositWei = amount
+	}
+	return policy, nil
+}
+
+func parseUintAmount(value string) (*big.Int, error) {
+	trimmed := strings.ReplaceAll(strings.TrimSpace(value), "_", "")
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	normalized := trimmed
+	var exponent int64
+	if idx := strings.IndexAny(normalized, "eE"); idx != -1 {
+		expPart := strings.TrimSpace(normalized[idx+1:])
+		if expPart == "" {
+			return nil, fmt.Errorf("invalid scientific notation")
+		}
+		expValue, err := strconv.ParseInt(expPart, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid scientific notation")
+		}
+		exponent = expValue
+		normalized = strings.TrimSpace(normalized[:idx])
+	}
+	normalized = strings.TrimPrefix(normalized, "+")
+	if strings.HasPrefix(normalized, "-") {
+		return nil, fmt.Errorf("amount must not be negative")
+	}
+	parts := strings.Split(normalized, ".")
+	if len(parts) > 2 {
+		return nil, fmt.Errorf("invalid amount format")
+	}
+	integerPart := parts[0]
+	fractionalPart := ""
+	if len(parts) == 2 {
+		fractionalPart = parts[1]
+	}
+	digits := integerPart + fractionalPart
+	if digits == "" {
+		return big.NewInt(0), nil
+	}
+	if !isDigitString(digits) {
+		return nil, fmt.Errorf("invalid amount format")
+	}
+	fracLen := len(fractionalPart)
+	for fracLen > 0 && len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		fracLen--
+	}
+	digits = strings.TrimLeft(digits, "0")
+	totalExponent := exponent - int64(fracLen)
+	if totalExponent < 0 {
+		return nil, fmt.Errorf("amount must be an integer")
+	}
+	if digits == "" {
+		digits = "0"
+	}
+	if totalExponent > 0 {
+		digits += strings.Repeat("0", int(totalExponent))
+	}
+	amount := new(big.Int)
+	if _, ok := amount.SetString(digits, 10); !ok {
+		return nil, fmt.Errorf("invalid amount value")
+	}
+	return amount, nil
+}
+
+func isDigitString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func ensureKeystore(configPath string, cfg *Config) error {

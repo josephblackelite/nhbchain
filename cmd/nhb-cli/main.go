@@ -103,29 +103,35 @@ func main() {
 			os.Exit(code)
 		}
 		return
-	case "claimable":
-		code := runClaimableCommand(args[1:], os.Stdout, os.Stderr)
-		if code != 0 {
-			os.Exit(code)
-		}
-		return
-	case "p2p":
-		code := runP2PCommand(args[1:], os.Stdout, os.Stderr)
-		if code != 0 {
-			os.Exit(code)
-		}
-		return
-	case "potso":
-		code := runPotsoCommand(args[1:], os.Stdout, os.Stderr)
-		if code != 0 {
-			os.Exit(code)
-		}
-		return
-	case "loyalty-create-business":
-		if len(args) < 3 {
-			fmt.Println("Usage: loyalty-create-business <owner> <name>")
-			return
-		}
+        case "claimable":
+                code := runClaimableCommand(args[1:], os.Stdout, os.Stderr)
+                if code != 0 {
+                        os.Exit(code)
+                }
+                return
+        case "p2p":
+                code := runP2PCommand(args[1:], os.Stdout, os.Stderr)
+                if code != 0 {
+                        os.Exit(code)
+                }
+                return
+        case "potso":
+                code := runPotsoCommand(args[1:], os.Stdout, os.Stderr)
+                if code != 0 {
+                        os.Exit(code)
+                }
+                return
+        case "gov":
+                code := runGovCommand(args[1:], os.Stdout, os.Stderr)
+                if code != 0 {
+                        os.Exit(code)
+                }
+                return
+        case "loyalty-create-business":
+                if len(args) < 3 {
+                        fmt.Println("Usage: loyalty-create-business <owner> <name>")
+                        return
+                }
 		name := strings.Join(args[2:], " ")
 		loyaltyCreateBusiness(args[1], name)
 	case "loyalty-set-paymaster":
