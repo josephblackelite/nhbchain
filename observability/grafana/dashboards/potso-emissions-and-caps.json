@@ -1,0 +1,153 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "panel", "id": "timeseries", "name": "Time series", "version": "1.0.0"},
+    {"type": "panel", "id": "stat", "name": "Stat", "version": "1.0.0"}
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "unit": "token"},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "sum(potso_rewards_sum) by (epoch)", "legendFormat": "epoch {{epoch}}", "refId": "A"}
+      ],
+      "title": "Reward Emissions by Epoch",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "unit": "token"},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "expr": "potso_epoch_pool",
+          "legendFormat": "pool",
+          "refId": "A"
+        },
+        {
+          "expr": "potso_epoch_pool - sum(potso_rewards_sum)",
+          "legendFormat": "remaining",
+          "refId": "B"
+        }
+      ],
+      "title": "Emission Pool vs Remaining Budget",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "#1F60C4", "value": null}, {"color": "#EAB839", "value": 0.2}, {"color": "#E24D42", "value": 0.5}]}, "unit": "percent"},
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 9},
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "vertical",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "text": {"valueSize": 24},
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "expr": "clamp_min((sum(potso_rounding_dust) / ignoring(epoch) potso_epoch_pool), 0)",
+          "legendFormat": "dust",
+          "refId": "A"
+        }
+      ],
+      "title": "Rounding Dust Share",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 16, "x": 8, "y": 9},
+      "id": 4,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "expr": "sum(increase(potso_penalty_applied_total[15m])) by (type)",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Penalty Pressure (15m)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["potso", "emissions"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "Prometheus", "value": "${DS_PROMETHEUS}"},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "Datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-12h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "POTSO Emissions & Caps",
+  "uid": "potso-emissions",
+  "version": 1,
+  "weekStart": ""
+}

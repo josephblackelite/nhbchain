@@ -145,6 +145,23 @@ Additional headers:
 * When handling ready events use the supplied export URLs and checksum to
   download and verify the ledger slice.
 
+### Webhook SLOs & Alert Thresholds
+
+The node exports `potso_webhook_failures_total{destination}` to measure
+delivery health. Operations enforce the following service levels:
+
+* **Availability SLO:** Successful deliveries ≥ 99.5% over 30 minutes. Alerts
+  fire when more than five failures accumulate in five minutes.
+* **Idempotency Guard:** Any failure labelled `destination="duplicate"`
+  indicates replay protection issues and pages integrations immediately.
+* **Latency Watch:** Downstream consumers should acknowledge requests within
+  five seconds. Repeated 5xx or timeout responses will be visible as failure
+  spikes on the Grafana dashboards.
+
+During incidents reference the POTSO Rewards Pipeline dashboard for per-target
+failure rates and follow the alert playbooks outlined in
+`docs/potso/emissions.md`.
+
 ### Signature Verification Example
 
 ```go
