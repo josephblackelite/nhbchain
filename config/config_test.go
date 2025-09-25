@@ -40,6 +40,9 @@ GreyScore = 45
 RateMsgsPerSec = 60
 Burst = 240
 HandshakeTimeoutMs = 7000
+BanDurationSeconds = 1800
+DialBackoffSeconds = 45
+PEX = false
 `, keystorePath)
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -50,12 +53,12 @@ HandshakeTimeoutMs = 7000
 		t.Fatalf("load config: %v", err)
 	}
 
-        if cfg.MaxPeers != 42 || cfg.MaxInbound != 21 || cfg.MaxOutbound != 20 {
-                t.Fatalf("unexpected peer limits: %+v", cfg)
-        }
-        if cfg.MinPeers != 18 || cfg.OutboundPeers != 12 {
-                t.Fatalf("unexpected connection targets: min=%d outbound=%d", cfg.MinPeers, cfg.OutboundPeers)
-        }
+	if cfg.MaxPeers != 42 || cfg.MaxInbound != 21 || cfg.MaxOutbound != 20 {
+		t.Fatalf("unexpected peer limits: %+v", cfg)
+	}
+	if cfg.MinPeers != 18 || cfg.OutboundPeers != 12 {
+		t.Fatalf("unexpected connection targets: min=%d outbound=%d", cfg.MinPeers, cfg.OutboundPeers)
+	}
 	if cfg.PeerBanSeconds != 120 {
 		t.Fatalf("unexpected ban seconds: %d", cfg.PeerBanSeconds)
 	}
@@ -80,17 +83,26 @@ HandshakeTimeoutMs = 7000
 	if len(cfg.P2P.Seeds) != 1 || cfg.P2P.Seeds[0] != "0xabc123@seed-1.nhb.local:7000" {
 		t.Fatalf("unexpected seeds: %v", cfg.P2P.Seeds)
 	}
-        if cfg.P2P.MinPeers != 18 || cfg.P2P.OutboundPeers != 12 {
-                t.Fatalf("unexpected p2p targets: %+v", cfg.P2P)
-        }
-        if cfg.P2P.BanScore != 90 || cfg.P2P.GreyScore != 45 {
-                t.Fatalf("unexpected reputation thresholds: %+v", cfg.P2P)
-        }
+	if cfg.P2P.MinPeers != 18 || cfg.P2P.OutboundPeers != 12 {
+		t.Fatalf("unexpected p2p targets: %+v", cfg.P2P)
+	}
+	if cfg.P2P.BanScore != 90 || cfg.P2P.GreyScore != 45 {
+		t.Fatalf("unexpected reputation thresholds: %+v", cfg.P2P)
+	}
 	if cfg.P2P.RateMsgsPerSec != 12.5 || cfg.P2P.Burst != 240 {
 		t.Fatalf("unexpected rate limits: %+v", cfg.P2P)
 	}
 	if cfg.P2P.HandshakeTimeoutMs != 7000 {
 		t.Fatalf("unexpected handshake timeout: %d", cfg.P2P.HandshakeTimeoutMs)
+	}
+	if cfg.P2P.BanDurationSeconds != 1800 {
+		t.Fatalf("unexpected ban duration: %d", cfg.P2P.BanDurationSeconds)
+	}
+	if cfg.P2P.DialBackoffSeconds != 45 {
+		t.Fatalf("unexpected dial backoff: %d", cfg.P2P.DialBackoffSeconds)
+	}
+	if cfg.P2P.PEX == nil || *cfg.P2P.PEX != false {
+		t.Fatalf("unexpected pex flag: %+v", cfg.P2P.PEX)
 	}
 }
 

@@ -331,6 +331,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleEscrowDispute(w, r, req)
 	case "escrow_resolve":
 		s.handleEscrowResolve(w, r, req)
+	case "net_info":
+		s.handleNetInfo(w, r, req)
+	case "net_peers":
+		s.handleNetPeers(w, r, req)
+	case "net_dial":
+		s.handleNetDial(w, r, req)
+	case "net_ban":
+		s.handleNetBan(w, r, req)
 	case "p2p_info":
 		s.handleP2PInfo(w, r, req)
 	case "p2p_peers":

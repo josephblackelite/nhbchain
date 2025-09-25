@@ -531,12 +531,20 @@ func (s *Server) scheduleReconnect(addr string) {
 		return
 	}
 	delay := s.backoff[addr]
+	base := s.cfg.DialBackoff
+	if base <= 0 {
+		base = time.Second
+	}
+	limit := s.cfg.MaxDialBackoff
+	if limit <= 0 {
+		limit = maxDialBackoff
+	}
 	if delay == 0 {
-		delay = time.Second
+		delay = base
 	} else {
 		delay *= 2
-		if delay > maxDialBackoff {
-			delay = maxDialBackoff
+		if delay > limit {
+			delay = limit
 		}
 	}
 	s.pendingDial[addr] = struct{}{}

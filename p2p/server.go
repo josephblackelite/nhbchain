@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strings"
@@ -42,6 +43,13 @@ const (
 	invalidRateSampleSize    = 5
 )
 
+var (
+	ErrPeerUnknown     = errors.New("p2p: unknown peer")
+	ErrPeerBanned      = errors.New("p2p: peer is banned")
+	ErrDialTargetEmpty = errors.New("p2p: empty dial target")
+	ErrInvalidAddress  = errors.New("p2p: invalid dial address")
+)
+
 var errQueueFull = errors.New("peer outbound queue full")
 
 // ServerConfig encapsulates runtime settings for the p2p server.
@@ -69,6 +77,9 @@ type ServerConfig struct {
 	HandshakeTimeout time.Duration
 	PingInterval     time.Duration
 	PingTimeout      time.Duration
+	DialBackoff      time.Duration
+	MaxDialBackoff   time.Duration
+	EnablePEX        bool
 }
 
 type dialFunc func(context.Context, string) (net.Conn, error)
@@ -89,6 +100,9 @@ type Server struct {
 	byAddr        map[string]string
 	persistentIDs map[string]struct{}
 	records       map[string]*PeerRecord
+
+	listenMu    sync.RWMutex
+	listenAddrs []string
 
 	dialFn           dialFunc
 	now              func() time.Time
@@ -144,6 +158,18 @@ type PeerInfo struct {
 	Banned     bool      `json:"banned"`
 	FirstSeen  time.Time `json:"firstSeen"`
 	LastSeen   time.Time `json:"lastSeen"`
+}
+
+// PeerNetInfo captures operational state for observability RPCs.
+type PeerNetInfo struct {
+	NodeID      string    `json:"nodeId"`
+	Address     string    `json:"addr"`
+	Direction   string    `json:"direction"`
+	State       string    `json:"state"`
+	Score       int       `json:"score"`
+	LastSeen    time.Time `json:"lastSeen"`
+	Fails       int       `json:"fails"`
+	BannedUntil time.Time `json:"bannedUntil,omitempty"`
 }
 
 // NetworkCounts represents current peer counts.
@@ -241,6 +267,12 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	if cfg.PingTimeout <= 0 {
 		cfg.PingTimeout = defaultPingTimeout
 	}
+	if cfg.DialBackoff <= 0 {
+		cfg.DialBackoff = time.Second
+	}
+	if cfg.MaxDialBackoff <= 0 {
+		cfg.MaxDialBackoff = maxDialBackoff
+	}
 
 	uniqBoot := uniqueStrings(cfg.Bootnodes)
 	uniqPersist := uniqueStrings(cfg.PersistentPeers)
@@ -280,6 +312,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		pingTimeout:      cfg.PingTimeout,
 		nonceGuard:       newNonceGuard(handshakeReplayWindow),
 		seeds:            seeds,
+		listenAddrs:      []string{},
 	}
 
 	for _, addr := range uniqBoot {
@@ -296,7 +329,11 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	server.globalLimit = newTokenBucket(cfg.RateMsgsPerSec*float64(cfg.MaxPeers), burst)
 	server.ipLimiter = newIPRateLimiter(cfg.RateMsgsPerSec, cfg.RateBurst)
 
-	server.pex = newPexManager(server)
+	if cfg.EnablePEX {
+		server.pex = newPexManager(server)
+	}
+
+	server.addListenAddress(cfg.ListenAddress)
 
 	return server
 }
@@ -330,6 +367,7 @@ func (s *Server) Start() error {
 	}
 	fmt.Printf("NHB P2P listening on %s | chain=%d | genesis=%s | node=%s | client=%s\n",
 		ln.Addr().String(), s.cfg.ChainID, summarizeHash(s.genesis), s.nodeID, s.cfg.ClientVersion)
+	s.addListenAddress(ln.Addr().String())
 
 	s.startConnManager()
 	go s.startDialers()
@@ -720,6 +758,397 @@ func (s *Server) SnapshotNetwork() NetworkView {
 	view.Bootnodes = append([]string{}, s.cfg.Bootnodes...)
 	view.Persistent = append([]string{}, s.cfg.PersistentPeers...)
 	return view
+}
+
+// ListenAddresses returns the configured and discovered listen addresses.
+func (s *Server) ListenAddresses() []string {
+	if s == nil {
+		return nil
+	}
+	s.listenMu.RLock()
+	defer s.listenMu.RUnlock()
+	if len(s.listenAddrs) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.listenAddrs))
+	copy(out, s.listenAddrs)
+	return out
+}
+
+// NodeID exposes the derived node identifier.
+func (s *Server) NodeID() string {
+	if s == nil {
+		return ""
+	}
+	return s.nodeID
+}
+
+// NetPeers returns enriched peer metadata for operator diagnostics.
+func (s *Server) NetPeers() []PeerNetInfo {
+	if s == nil {
+		return nil
+	}
+	now := s.now()
+	statuses := make(map[string]ReputationStatus)
+	if s.reputation != nil {
+		statuses = s.reputation.Snapshot(now)
+	}
+
+	storeEntries := make(map[string]PeerstoreEntry)
+	if s.peerstore != nil {
+		for _, entry := range s.peerstore.Snapshot() {
+			id := normalizeHex(entry.NodeID)
+			if id == "" {
+				continue
+			}
+			storeEntries[id] = entry
+		}
+	}
+
+	s.mu.RLock()
+	peers := make([]*Peer, 0, len(s.peers))
+	for _, peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	records := make(map[string]PeerRecord, len(s.records))
+	for id, rec := range s.records {
+		records[id] = *rec
+	}
+	s.mu.RUnlock()
+
+	s.dialMu.Lock()
+	pending := make(map[string]struct{}, len(s.pendingDial))
+	for addr := range s.pendingDial {
+		pending[strings.TrimSpace(addr)] = struct{}{}
+	}
+	s.dialMu.Unlock()
+
+	results := make([]PeerNetInfo, 0, len(peers)+len(storeEntries)+len(statuses))
+	seen := make(map[string]struct{}, len(peers)+len(storeEntries)+len(statuses))
+
+	for _, peer := range peers {
+		id := normalizeHex(peer.id)
+		status := statuses[id]
+		rec := records[id]
+
+		info := PeerNetInfo{
+			NodeID:    id,
+			Direction: directionForPeer(peer),
+			State:     "connected",
+			Score:     status.Score,
+			Address:   strings.TrimSpace(peer.remoteAddr),
+			LastSeen:  rec.LastSeen,
+		}
+		if info.Address == "" {
+			info.Address = strings.TrimSpace(peer.dialAddr)
+		}
+		if info.LastSeen.IsZero() {
+			info.LastSeen = now
+		}
+		if status.Banned {
+			info.BannedUntil = status.Until
+		}
+		if rec.Score != 0 && info.Score == 0 {
+			info.Score = rec.Score
+		}
+		if entry, ok := storeEntries[id]; ok {
+			info.Fails = entry.Fails
+			if entry.Addr != "" && info.Address == "" {
+				info.Address = strings.TrimSpace(entry.Addr)
+			}
+			if entry.LastSeen.After(info.LastSeen) {
+				info.LastSeen = entry.LastSeen
+			}
+			if entry.BannedUntil.After(info.BannedUntil) {
+				info.BannedUntil = entry.BannedUntil
+			}
+			delete(storeEntries, id)
+		}
+		results = append(results, info)
+		seen[id] = struct{}{}
+	}
+
+	for id, entry := range storeEntries {
+		info := PeerNetInfo{
+			NodeID:   id,
+			Address:  strings.TrimSpace(entry.Addr),
+			Score:    int(math.Round(entry.Score)),
+			LastSeen: entry.LastSeen,
+			Fails:    entry.Fails,
+			State:    "known",
+		}
+		if status, ok := statuses[id]; ok {
+			if status.Score != 0 {
+				info.Score = status.Score
+			}
+			if status.Banned && status.Until.After(info.BannedUntil) {
+				info.BannedUntil = status.Until
+			}
+		}
+		if entry.BannedUntil.After(info.BannedUntil) {
+			info.BannedUntil = entry.BannedUntil
+		}
+		if info.BannedUntil.After(now) {
+			info.State = "banned"
+		}
+		if _, ok := pending[info.Address]; ok && info.State != "connected" {
+			info.State = "dialing"
+		}
+		results = append(results, info)
+		seen[id] = struct{}{}
+	}
+
+	for id, status := range statuses {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		info := PeerNetInfo{NodeID: id, Score: status.Score, State: "tracked"}
+		if status.Banned {
+			info.State = "banned"
+			info.BannedUntil = status.Until
+		}
+		results = append(results, info)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].NodeID < results[j].NodeID
+	})
+	return results
+}
+
+// DialPeer queues a manual dial respecting configured backoff and bans.
+func (s *Server) DialPeer(target string) error {
+	if s == nil {
+		return fmt.Errorf("%w", ErrDialTargetEmpty)
+	}
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return fmt.Errorf("%w", ErrDialTargetEmpty)
+	}
+
+	now := s.now()
+	addr := ""
+	nodeID := ""
+
+	if looksLikeNodeID(trimmed) {
+		nodeID = normalizeHex(trimmed)
+		if s.hasPeer(nodeID) {
+			return nil
+		}
+		if s.peerstore != nil {
+			if entry, ok := s.peerstore.ByNodeID(nodeID); ok {
+				addr = strings.TrimSpace(entry.Addr)
+				if entry.BannedUntil.After(now) {
+					return fmt.Errorf("%w: banned until %s", ErrPeerBanned, entry.BannedUntil.Format(time.RFC3339))
+				}
+			}
+		}
+		if addr == "" {
+			for _, seed := range s.seeds {
+				if normalizeHex(seed.NodeID) == nodeID {
+					addr = strings.TrimSpace(seed.Address)
+					break
+				}
+			}
+		}
+		if addr == "" {
+			return fmt.Errorf("%w: %s", ErrPeerUnknown, nodeID)
+		}
+	} else {
+		addr = trimmed
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidAddress, err)
+		}
+		if s.isConnectedToAddress(addr) {
+			return nil
+		}
+		if s.peerstore != nil {
+			if entry, ok := s.peerstore.Get(addr); ok {
+				nodeID = normalizeHex(entry.NodeID)
+				if entry.BannedUntil.After(now) {
+					return fmt.Errorf("%w: banned until %s", ErrPeerBanned, entry.BannedUntil.Format(time.RFC3339))
+				}
+			}
+		}
+	}
+
+	if nodeID != "" {
+		if s.isBanned(nodeID) {
+			until := now.Add(s.cfg.PeerBanDuration)
+			if s.reputation != nil {
+				if banned, expiry := s.reputation.BanInfo(nodeID, now); banned {
+					until = expiry
+				}
+			}
+			return fmt.Errorf("%w: banned until %s", ErrPeerBanned, until.Format(time.RFC3339))
+		}
+		if s.peerstore != nil && s.peerstore.IsBanned(nodeID, now) {
+			return fmt.Errorf("%w: peerstore ban active", ErrPeerBanned)
+		}
+	}
+
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("%w", ErrInvalidAddress)
+	}
+
+	if s.isConnectedToAddress(addr) {
+		return nil
+	}
+
+	wait := time.Duration(0)
+	if s.peerstore != nil {
+		next := s.peerstore.NextDialAt(addr, now)
+		if next.After(now) {
+			wait = next.Sub(now)
+		}
+	}
+
+	s.dialMu.Lock()
+	if backoff := s.backoff[addr]; backoff > wait {
+		wait = backoff
+	}
+	s.dialMu.Unlock()
+
+	return s.enqueueDial(addr, wait)
+}
+
+// BanPeer applies an operator ban and disconnects the peer immediately.
+func (s *Server) BanPeer(nodeID string, duration time.Duration) error {
+	if s == nil {
+		return fmt.Errorf("%w", ErrPeerUnknown)
+	}
+	normalized := normalizeHex(nodeID)
+	if normalized == "" {
+		return fmt.Errorf("%w", ErrPeerUnknown)
+	}
+
+	now := s.now()
+	known := s.hasPeer(normalized)
+	var storeEntry *PeerstoreEntry
+	if s.peerstore != nil {
+		if entry, ok := s.peerstore.ByNodeID(normalized); ok {
+			copy := entry
+			storeEntry = &copy
+			known = true
+		}
+	}
+	if !known {
+		for _, seed := range s.seeds {
+			if normalizeHex(seed.NodeID) == normalized {
+				known = true
+				break
+			}
+		}
+	}
+	if !known {
+		return fmt.Errorf("%w: %s", ErrPeerUnknown, normalized)
+	}
+
+	if duration <= 0 {
+		duration = s.cfg.PeerBanDuration
+	}
+	until := now.Add(duration)
+
+	persistent := s.isPersistentPeer(normalized)
+	s.applyBan(normalized, persistent)
+	if s.reputation != nil {
+		s.reputation.SetBan(normalized, until, now)
+	}
+	if storeEntry != nil && s.peerstore != nil {
+		if err := s.peerstore.SetBan(normalized, until); err != nil {
+			fmt.Printf("record ban %s: %v\n", normalized, err)
+		}
+	}
+
+	s.mu.RLock()
+	peer := s.peers[normalized]
+	s.mu.RUnlock()
+	if peer != nil {
+		peer.terminate(true, fmt.Errorf("peer banned by operator"))
+	}
+	if storeEntry != nil && storeEntry.Addr != "" {
+		s.dialMu.Lock()
+		delete(s.pendingDial, strings.TrimSpace(storeEntry.Addr))
+		s.dialMu.Unlock()
+	}
+	return nil
+}
+
+func (s *Server) enqueueDial(addr string, wait time.Duration) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("%w", ErrInvalidAddress)
+	}
+
+	s.dialMu.Lock()
+	if _, pending := s.pendingDial[addr]; pending {
+		s.dialMu.Unlock()
+		return nil
+	}
+	s.pendingDial[addr] = struct{}{}
+	s.dialMu.Unlock()
+
+	go func(delay time.Duration, target string) {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			<-timer.C
+		}
+		err := s.Connect(target)
+		s.dialMu.Lock()
+		delete(s.pendingDial, target)
+		s.dialMu.Unlock()
+		if err != nil {
+			fmt.Printf("Manual dial %s failed: %v\n", target, err)
+			s.scheduleReconnect(target)
+		} else {
+			s.resetBackoff(target)
+		}
+	}(wait, addr)
+
+	return nil
+}
+
+func (s *Server) addListenAddress(addr string) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	s.listenMu.Lock()
+	for _, existing := range s.listenAddrs {
+		if existing == addr {
+			s.listenMu.Unlock()
+			return
+		}
+	}
+	s.listenAddrs = append(s.listenAddrs, addr)
+	s.listenMu.Unlock()
+}
+
+func looksLikeNodeID(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	if strings.ContainsAny(trimmed, "@:") {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
+		trimmed = trimmed[2:]
+	}
+	if trimmed == "" {
+		return false
+	}
+	for _, ch := range trimmed {
+		switch {
+		case ch >= '0' && ch <= '9':
+		case ch >= 'a' && ch <= 'f':
+		case ch >= 'A' && ch <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleRateLimit(peer *Peer, global bool) {

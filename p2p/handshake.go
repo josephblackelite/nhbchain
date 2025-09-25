@@ -219,6 +219,14 @@ func readFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader) ([]byte
 	}
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

@@ -145,6 +145,26 @@ func (m *ReputationManager) PenalizeSpam(id string, now time.Time, persistent bo
 	return m.Adjust(id, spamPenaltyDelta, now, persistent)
 }
 
+// SetBan overrides the ban expiry for a peer.
+func (m *ReputationManager) SetBan(id string, until time.Time, now time.Time) {
+	if m == nil || id == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.records[id]
+	if rec == nil {
+		rec = &reputationRecord{updatedAt: now}
+		m.records[id] = rec
+	}
+	if until.After(now) {
+		rec.bannedTill = until
+	} else {
+		rec.bannedTill = time.Time{}
+	}
+	rec.updatedAt = now
+}
+
 // IsBanned returns true if the peer is banned at the provided time.
 func (m *ReputationManager) IsBanned(id string, now time.Time) bool {
 	banned, _ := m.BanInfo(id, now)

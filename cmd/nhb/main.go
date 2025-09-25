@@ -110,6 +110,10 @@ func main() {
 	node.SetSwapManualOracle(manualOracle)
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
+	pexEnabled := true
+	if cfg.P2P.PEX != nil {
+		pexEnabled = *cfg.P2P.PEX
+	}
 	p2pCfg := p2p.ServerConfig{
 		ListenAddress:    cfg.ListenAddress,
 		ChainID:          node.ChainID(),
@@ -123,7 +127,7 @@ func main() {
 		Bootnodes:        append([]string{}, cfg.Bootnodes...),
 		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
 		Seeds:            append([]string{}, cfg.P2P.Seeds...),
-		PeerBanDuration:  time.Duration(cfg.PeerBanSeconds) * time.Second,
+		PeerBanDuration:  time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
 		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
 		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
 		MaxMessageBytes:  cfg.MaxMsgBytes,
@@ -134,6 +138,8 @@ func main() {
 		HandshakeTimeout: time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
 		PingInterval:     time.Duration(cfg.P2P.PingIntervalSeconds) * time.Second,
 		PingTimeout:      time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
+		DialBackoff:      time.Duration(cfg.P2P.DialBackoffSeconds) * time.Second,
+		EnablePEX:        pexEnabled,
 	}
 	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
 	p2pServer.SetPeerstore(peerstore)
