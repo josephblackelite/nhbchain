@@ -1,6 +1,11 @@
 package state
 
-import "testing"
+import (
+	"testing"
+
+	"nhbchain/storage"
+	"nhbchain/storage/trie"
+)
 
 func TestGovernanceNamespaces(t *testing.T) {
 	propKey := GovernanceProposalKey(42)
@@ -32,5 +37,35 @@ func TestGovernanceNamespaces(t *testing.T) {
 	snapshotKey := SnapshotPotsoWeightsKey(99)
 	if string(snapshotKey) != "snapshots/potso/99/weights" {
 		t.Fatalf("unexpected snapshot key: %s", string(snapshotKey))
+	}
+}
+
+func TestParamStoreSetGet(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	trie, err := trie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	manager := NewManager(trie)
+
+	if err := manager.ParamStoreSet("fees.baseFee", []byte("25")); err != nil {
+		t.Fatalf("param set: %v", err)
+	}
+
+	value, ok, err := manager.ParamStoreGet("fees.baseFee")
+	if err != nil {
+		t.Fatalf("param get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected parameter present")
+	}
+	if string(value) != "25" {
+		t.Fatalf("unexpected parameter value: %s", string(value))
+	}
+
+	if _, _, err := manager.ParamStoreGet("  "); err == nil {
+		t.Fatalf("expected error for empty key")
 	}
 }

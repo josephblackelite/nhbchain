@@ -56,6 +56,7 @@ type Proposal struct {
 	TimelockEnd    time.Time      `json:"timelock_end"`
 	Target         string         `json:"target"`
 	ProposedChange string         `json:"proposed_change"`
+	Queued         bool           `json:"queued"`
 }
 
 // VoteChoice enumerates the supported governance ballot selections.

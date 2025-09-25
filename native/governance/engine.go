@@ -26,6 +26,10 @@ const (
 	EventTypeVoteCast = "gov.vote"
 	// EventTypeProposalFinalized is emitted when the proposal outcome is determined.
 	EventTypeProposalFinalized = "gov.finalized"
+	// EventTypeProposalQueued marks proposals that have been queued for execution after passing.
+	EventTypeProposalQueued = "gov.queued"
+	// EventTypeProposalExecuted marks proposals whose payload has been applied to state.
+	EventTypeProposalExecuted = "gov.executed"
 )
 
 var (
@@ -43,6 +47,7 @@ type proposalState interface {
 	GovernanceGetProposal(id uint64) (*Proposal, bool, error)
 	GovernancePutVote(v *Vote) error
 	GovernanceListVotes(id uint64) ([]*Vote, error)
+	ParamStoreSet(name string, value []byte) error
 	PotsoRewardsLastProcessedEpoch() (uint64, bool, error)
 	SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error)
 }
@@ -443,6 +448,98 @@ func (e *Engine) Finalize(proposalID uint64) (ProposalStatus, *Tally, error) {
 	return status, tally, nil
 }
 
+// QueueExecution marks a passed proposal as queued, signalling that it will be
+// eligible for execution after the configured timelock window elapses.
+func (e *Engine) QueueExecution(proposalID uint64) error {
+	if e == nil || e.state == nil {
+		return errStateNotConfigured
+	}
+	proposal, ok, err := e.state.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return err
+	}
+	if !ok || proposal == nil {
+		return fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	if proposal.Status != ProposalStatusPassed {
+		return fmt.Errorf("governance: proposal %d not passed", proposalID)
+	}
+	if proposal.Queued {
+		return fmt.Errorf("governance: proposal %d already queued", proposalID)
+	}
+	if proposal.TimelockEnd.IsZero() {
+		return fmt.Errorf("governance: proposal %d missing timelock", proposalID)
+	}
+	proposal.Queued = true
+	if err := e.state.GovernancePutProposal(proposal); err != nil {
+		return err
+	}
+	e.emit(newQueuedEvent(proposal))
+	return nil
+}
+
+// Execute applies the queued proposal payload to the parameter store once the
+// timelock delay has elapsed. The method refuses to execute proposals more than
+// once to provide idempotency guarantees.
+func (e *Engine) Execute(proposalID uint64) error {
+	if e == nil || e.state == nil {
+		return errStateNotConfigured
+	}
+	proposal, ok, err := e.state.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return err
+	}
+	if !ok || proposal == nil {
+		return fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	if proposal.Status == ProposalStatusExecuted {
+		return fmt.Errorf("governance: proposal %d already executed", proposalID)
+	}
+	if proposal.Status != ProposalStatusPassed {
+		return fmt.Errorf("governance: proposal %d not executable", proposalID)
+	}
+	if !proposal.Queued {
+		return fmt.Errorf("governance: proposal %d not queued", proposalID)
+	}
+	if !proposal.TimelockEnd.IsZero() {
+		now := e.now()
+		if now.Before(proposal.TimelockEnd) {
+			return fmt.Errorf("governance: timelock not yet elapsed")
+		}
+	}
+	if strings.TrimSpace(proposal.Target) != ProposalKindParamUpdate {
+		return fmt.Errorf("governance: proposal %d has unsupported target %q", proposalID, proposal.Target)
+	}
+
+	if strings.TrimSpace(proposal.ProposedChange) == "" {
+		return fmt.Errorf("governance: proposal %d has empty payload", proposalID)
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(proposal.ProposedChange), &payload); err != nil {
+		return fmt.Errorf("governance: invalid proposed change: %w", err)
+	}
+	for key, raw := range payload {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			return fmt.Errorf("governance: payload key must not be empty")
+		}
+		if _, allowed := e.allowedParams[trimmed]; !allowed {
+			return fmt.Errorf("governance: parameter %q not in allow-list", trimmed)
+		}
+		if err := e.state.ParamStoreSet(trimmed, append([]byte(nil), raw...)); err != nil {
+			return err
+		}
+	}
+
+	proposal.Status = ProposalStatusExecuted
+	if err := e.state.GovernancePutProposal(proposal); err != nil {
+		return err
+	}
+	e.emit(newExecutedEvent(proposal))
+	return nil
+}
+
 type governanceEvent struct {
 	evt *types.Event
 }
@@ -521,4 +618,26 @@ func newFinalizedEvent(p *Proposal, tally *Tally) *types.Event {
 		attrs["totalBallots"] = strconv.FormatUint(tally.TotalBallots, 10)
 	}
 	return &types.Event{Type: EventTypeProposalFinalized, Attributes: attrs}
+}
+
+func newQueuedEvent(p *Proposal) *types.Event {
+	attrs := make(map[string]string)
+	if p != nil {
+		attrs["id"] = strconv.FormatUint(p.ID, 10)
+		if !p.TimelockEnd.IsZero() {
+			attrs["timelockEnd"] = strconv.FormatInt(p.TimelockEnd.Unix(), 10)
+		}
+	}
+	return &types.Event{Type: EventTypeProposalQueued, Attributes: attrs}
+}
+
+func newExecutedEvent(p *Proposal) *types.Event {
+	attrs := make(map[string]string)
+	if p != nil {
+		attrs["id"] = strconv.FormatUint(p.ID, 10)
+		if status := p.Status.StatusString(); status != "" {
+			attrs["status"] = status
+		}
+	}
+	return &types.Event{Type: EventTypeProposalExecuted, Attributes: attrs}
 }

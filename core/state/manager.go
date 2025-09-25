@@ -145,6 +145,7 @@ type storedGovernanceProposal struct {
 	TimelockEnd    uint64
 	Target         string
 	ProposedChange string
+	Queued         bool
 }
 
 type storedGovernanceVote struct {
@@ -181,6 +182,7 @@ func newStoredGovernanceProposal(p *governance.Proposal) *storedGovernancePropos
 		TimelockEnd:    uint64(p.TimelockEnd.Unix()),
 		Target:         p.Target,
 		ProposedChange: p.ProposedChange,
+		Queued:         p.Queued,
 	}
 }
 
@@ -211,6 +213,7 @@ func (s *storedGovernanceProposal) toGovernanceProposal() (*governance.Proposal,
 		TimelockEnd:    time.Unix(int64(s.TimelockEnd), 0).UTC(),
 		Target:         s.Target,
 		ProposedChange: s.ProposedChange,
+		Queued:         s.Queued,
 	}
 	return proposal, nil
 }
@@ -482,6 +485,36 @@ func ParamStoreKey(name string) []byte {
 	copy(key, paramsNamespacePrefix)
 	copy(key[len(paramsNamespacePrefix):], name)
 	return key
+}
+
+// ParamStoreSet writes the provided value under the parameter namespace. Values
+// are stored verbatim (RLP byte slices) to preserve caller encoding such as
+// JSON literals used by governance proposals.
+func (m *Manager) ParamStoreSet(name string, value []byte) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("params: key must not be empty")
+	}
+	stored := append([]byte(nil), value...)
+	return m.KVPut(ParamStoreKey(trimmed), stored)
+}
+
+// ParamStoreGet retrieves the stored value for the provided parameter key. A
+// boolean return of false indicates the parameter has not been initialised.
+func (m *Manager) ParamStoreGet(name string) ([]byte, bool, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return nil, false, fmt.Errorf("params: key must not be empty")
+	}
+	var stored []byte
+	ok, err := m.KVGet(ParamStoreKey(trimmed), &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), stored...), true, nil
 }
 
 // SnapshotPotsoWeightsKey exposes the read-only snapshot handle for POTSO
