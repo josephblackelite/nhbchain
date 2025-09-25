@@ -1,0 +1,81 @@
+groups:
+  - name: potso-alerts
+    interval: 30s
+    rules:
+      - alert: POTSOEvidenceSpike
+        expr: sum(rate(potso_evidence_accepted_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: potso
+        annotations:
+          summary: "Evidence submissions surging"
+          description: |
+            Accepted evidence rate is {{ $value | printf "%.2f" }} per second averaged over 5 minutes.
+            Investigate reporters for coordinated abuse or underlying fraud detection drift.
+      - alert: POTSOEvidenceDelta
+        expr: sum(increase(potso_evidence_accepted_total[10m])) > 300
+        for: 0m
+        labels:
+          severity: critical
+          team: potso
+        annotations:
+          summary: "Evidence intake spike"
+          description: |
+            More than 300 evidence records accepted in the last 10 minutes.
+            Validate reporter lists and confirm penalty pipeline is keeping pace.
+      - alert: POTSOFailedWebhookDelivery
+        expr: sum(increase(potso_webhook_failures_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          team: potso-integrations
+        annotations:
+          summary: "Webhook delivery errors"
+          description: |
+            POTSO reward webhooks have {{ $value | printf "%.0f" }} failed deliveries in 5 minutes.
+            Check dispatcher logs and downstream webhook endpoints.
+      - alert: POTSOIdempotencyConflicts
+        expr: sum(increase(potso_webhook_failures_total{destination="duplicate"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: potso-integrations
+        annotations:
+          summary: "Idempotency conflict detected"
+          description: |
+            Duplicate webhook deliveries are being rejected by downstream services.
+            Ensure replay protection headers are honoured and queues are drained safely.
+      - alert: POTSOEmissionCapApproach
+        expr: (potso_epoch_pool - sum(potso_rewards_sum)) < 0.1 * potso_epoch_pool
+        for: 10m
+        labels:
+          severity: critical
+          team: potso
+        annotations:
+          summary: "Emission pool nearing cap"
+          description: |
+            Remaining epoch emission budget is below 10%% of the configured pool.
+            Confirm emission targets, treasury replenishment schedules, and consider slowing payouts.
+      - alert: POTSORoundingDustExceedsThreshold
+        expr: max(potso_rounding_dust) > 1
+        for: 10m
+        labels:
+          severity: warning
+          team: potso
+        annotations:
+          summary: "Reward rounding dust accumulating"
+          description: |
+            Rounding dust has exceeded 1 token on at least one epoch.
+            Check reward splits and confirm rounding mitigation is still active.
+      - alert: POTSOCapInvariantBreach
+        expr: sum(potso_rewards_sum) > potso_epoch_pool
+        for: 0m
+        labels:
+          severity: critical
+          team: potso
+        annotations:
+          summary: "Emission invariant breached"
+          description: |
+            Rewards distributed {{ $value | printf "%.2f" }} exceed the active epoch pool.
+            Broadcast potso.alert.invariant_violation, halt payouts, and page treasury operators immediately.
