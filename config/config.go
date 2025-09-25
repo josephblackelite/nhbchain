@@ -53,6 +53,7 @@ type P2PSection struct {
 	MaxOutbound         int      `toml:"MaxOutbound"`
 	Bootnodes           []string `toml:"Bootnodes"`
 	PersistentPeers     []string `toml:"PersistentPeers"`
+	Seeds               []string `toml:"Seeds"`
 	BanScore            int      `toml:"BanScore"`
 	GreyScore           int      `toml:"GreyScore"`
 	RateMsgsPerSec      float64  `toml:"RateMsgsPerSec"`
@@ -139,6 +140,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.PersistentPeers == nil {
 		cfg.PersistentPeers = []string{}
+	}
+	if cfg.P2P.Seeds == nil {
+		cfg.P2P.Seeds = []string{}
 	}
 	if len(cfg.Bootnodes) == 0 && len(cfg.BootstrapPeers) > 0 {
 		cfg.Bootnodes = append([]string{}, cfg.BootstrapPeers...)

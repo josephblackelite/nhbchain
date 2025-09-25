@@ -111,12 +111,18 @@ exposure.
 At a high level the peer lifecycle is:
 
 ```
+Outbound Dial Loop
+        |
+        v
 Dialing  -->  Handshaking  -->  Connected
    ^            |               |
    |            v               v
 Reconnect   Reject/Ban      Keepalive
 ```
 
+* **Outbound Dial Loop** – iterates through configured seeds and peerstore
+  entries, scheduling eligible outbound dials while respecting backoff and ban
+  windows.
 * **Dialing** – initiated either manually (`Connect`) or by the connection
   manager.
 * **Handshaking** – performs the authenticated handshake exchange and enforces
