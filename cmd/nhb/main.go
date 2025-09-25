@@ -57,6 +57,12 @@ func main() {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
 
+	govPolicy, err := cfg.Governance.Policy()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse governance policy: %v", err))
+	}
+	node.SetGovernancePolicy(govPolicy)
+
 	potsoCfg, err := cfg.PotsoRewardConfig()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to parse POTSO rewards config: %v", err))

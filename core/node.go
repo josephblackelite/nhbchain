@@ -24,6 +24,7 @@ import (
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
+	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
 	swap "nhbchain/native/swap"
@@ -46,12 +47,30 @@ type Node struct {
 	stateMu        sync.Mutex
 	escrowTreasury [20]byte
 	engagementMgr  *engagement.Manager
+	govPolicy      governance.ProposalPolicy
+	govPolicyMu    sync.RWMutex
 }
 
 // PotsoLeaderboardEntry represents a participant's score for a specific day.
 type PotsoLeaderboardEntry struct {
 	Address [20]byte
 	Meter   *potso.Meter
+}
+
+type governanceEventEmitter struct {
+	state *StateProcessor
+}
+
+func (e governanceEventEmitter) Emit(evt events.Event) {
+	if e.state == nil || evt == nil {
+		return
+	}
+	type payload interface{ Event() *types.Event }
+	if withPayload, ok := evt.(payload); ok {
+		if event := withPayload.Event(); event != nil {
+			e.state.AppendEvent(event)
+		}
+	}
 }
 
 func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool) (*Node, error) {
@@ -89,6 +108,50 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		escrowTreasury: treasury,
 		engagementMgr:  engagement.NewManager(stateProcessor.EngagementConfig()),
 	}, nil
+}
+
+// SetGovernancePolicy updates the governance proposal policy applied to RPC actions.
+func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
+	if n == nil {
+		return
+	}
+	copyPolicy := governance.ProposalPolicy{
+		VotingPeriodSeconds: policy.VotingPeriodSeconds,
+		TimelockSeconds:     policy.TimelockSeconds,
+		AllowedParams:       append([]string{}, policy.AllowedParams...),
+		QuorumBps:           policy.QuorumBps,
+		PassThresholdBps:    policy.PassThresholdBps,
+	}
+	if policy.MinDepositWei != nil {
+		copyPolicy.MinDepositWei = new(big.Int).Set(policy.MinDepositWei)
+	}
+	n.govPolicyMu.Lock()
+	n.govPolicy = copyPolicy
+	n.govPolicyMu.Unlock()
+}
+
+func (n *Node) governancePolicy() governance.ProposalPolicy {
+	n.govPolicyMu.RLock()
+	defer n.govPolicyMu.RUnlock()
+	policy := governance.ProposalPolicy{
+		VotingPeriodSeconds: n.govPolicy.VotingPeriodSeconds,
+		TimelockSeconds:     n.govPolicy.TimelockSeconds,
+		AllowedParams:       append([]string{}, n.govPolicy.AllowedParams...),
+		QuorumBps:           n.govPolicy.QuorumBps,
+		PassThresholdBps:    n.govPolicy.PassThresholdBps,
+	}
+	if n.govPolicy.MinDepositWei != nil {
+		policy.MinDepositWei = new(big.Int).Set(n.govPolicy.MinDepositWei)
+	}
+	return policy
+}
+
+func (n *Node) newGovernanceEngine(manager *nhbstate.Manager) *governance.Engine {
+	engine := governance.NewEngine()
+	engine.SetState(manager)
+	engine.SetEmitter(governanceEventEmitter{state: n.state})
+	engine.SetPolicy(n.governancePolicy())
+	return engine
 }
 
 func (n *Node) SetBftEngine(bftEngine *bft.Engine) {
@@ -1005,6 +1068,155 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 	}
 	n.mempool = append(n.mempool, tx)
 	return ts, nil
+}
+
+func (n *Node) GovernancePropose(proposer [20]byte, kind, payload string, deposit *big.Int) (uint64, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newGovernanceEngine(manager)
+	lockAmount := big.NewInt(0)
+	if deposit != nil {
+		if deposit.Sign() < 0 {
+			return 0, fmt.Errorf("governance: deposit must not be negative")
+		}
+		lockAmount = new(big.Int).Set(deposit)
+	}
+	return engine.ProposeParamChange(proposer, kind, payload, lockAmount)
+}
+
+func (n *Node) GovernanceVote(proposalID uint64, voter [20]byte, choice string) error {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newGovernanceEngine(manager)
+	return engine.CastVote(proposalID, voter, choice)
+}
+
+func (n *Node) GovernanceProposal(id uint64) (*governance.Proposal, bool, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	proposal, ok, err := manager.GovernanceGetProposal(id)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return proposal, true, nil
+}
+
+func (n *Node) GovernanceListProposals(cursor uint64, limit int) ([]*governance.Proposal, uint64, error) {
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	var latest uint64
+	if _, err := manager.KVGet(nhbstate.GovernanceSequenceKey(), &latest); err != nil {
+		return nil, 0, err
+	}
+
+	proposals := make([]*governance.Proposal, 0, limit)
+	if latest == 0 {
+		return proposals, 0, nil
+	}
+
+	start := latest
+	if cursor > 0 {
+		if cursor > latest {
+			start = latest
+		} else {
+			start = cursor
+		}
+	}
+	if start == 0 {
+		return proposals, 0, nil
+	}
+
+	current := start
+	for current >= 1 && len(proposals) < limit {
+		proposal, ok, err := manager.GovernanceGetProposal(current)
+		if err != nil {
+			return nil, 0, err
+		}
+		if ok && proposal != nil {
+			proposals = append(proposals, proposal)
+		}
+		current--
+	}
+	var nextCursor uint64
+	if current >= 1 {
+		nextCursor = current
+	}
+	return proposals, nextCursor, nil
+}
+
+func (n *Node) GovernanceFinalize(proposalID uint64) (*governance.Proposal, *governance.Tally, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newGovernanceEngine(manager)
+	_, tally, err := engine.Finalize(proposalID)
+	if err != nil {
+		return nil, nil, err
+	}
+	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok || proposal == nil {
+		return nil, nil, fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	return proposal, tally, nil
+}
+
+func (n *Node) GovernanceQueue(proposalID uint64) (*governance.Proposal, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newGovernanceEngine(manager)
+	if err := engine.QueueExecution(proposalID); err != nil {
+		return nil, err
+	}
+	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || proposal == nil {
+		return nil, fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	return proposal, nil
+}
+
+func (n *Node) GovernanceExecute(proposalID uint64) (*governance.Proposal, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newGovernanceEngine(manager)
+	if err := engine.Execute(proposalID); err != nil {
+		return nil, err
+	}
+	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || proposal == nil {
+		return nil, fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	return proposal, nil
 }
 
 // PotsoHeartbeat records an authenticated heartbeat for the supplied participant.

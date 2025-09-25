@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,5 +126,41 @@ AllowedParams = ["fees.baseFee","escrow.maxOpenDisputes"]
 	}
 	if cfg.Governance.AllowedParams[1] != "escrow.maxOpenDisputes" {
 		t.Fatalf("unexpected second allowed param: %s", cfg.Governance.AllowedParams[1])
+	}
+}
+
+func TestGovPolicyParsing(t *testing.T) {
+	cfg := GovConfig{
+		MinDepositWei:       "1.25e3",
+		VotingPeriodSeconds: 3600,
+		TimelockSeconds:     7200,
+		QuorumBps:           1500,
+		PassThresholdBps:    5500,
+		AllowedParams:       []string{"fees.baseFee", "escrow.maxOpenDisputes"},
+	}
+	policy, err := cfg.Policy()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if policy.VotingPeriodSeconds != 3600 || policy.TimelockSeconds != 7200 {
+		t.Fatalf("unexpected timers: %+v", policy)
+	}
+	if policy.QuorumBps != 1500 || policy.PassThresholdBps != 5500 {
+		t.Fatalf("unexpected thresholds: %+v", policy)
+	}
+	want := new(big.Int)
+	want.SetString("1250", 10)
+	if policy.MinDepositWei == nil || policy.MinDepositWei.Cmp(want) != 0 {
+		t.Fatalf("unexpected deposit: %v", policy.MinDepositWei)
+	}
+	if len(policy.AllowedParams) != 2 || policy.AllowedParams[0] != "fees.baseFee" {
+		t.Fatalf("unexpected allowed params: %v", policy.AllowedParams)
+	}
+
+	if _, err := (GovConfig{MinDepositWei: "-1"}).Policy(); err == nil {
+		t.Fatalf("expected error for negative deposit")
+	}
+	if _, err := (GovConfig{MinDepositWei: "abc"}).Policy(); err == nil {
+		t.Fatalf("expected error for invalid deposit")
 	}
 }
