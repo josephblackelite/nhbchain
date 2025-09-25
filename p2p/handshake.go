@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -18,22 +18,32 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
-const protocolVersion uint32 = 1
+const (
+	protocolVersion        uint32        = 1
+	handshakeSkewAllowance time.Duration = 5 * time.Minute
+)
 
 type handshakeMessage struct {
-	ProtocolVersion uint32 `json:"protocolVersion"`
+	ProtocolVersion uint32 `json:"protoVersion"`
 	ChainID         uint64 `json:"chainId"`
-	GenesisHash     []byte `json:"genesisHash"`
-	NodeID          string `json:"nodeId"`
+	GenesisHash     string `json:"genesisHash"`
+	NodePubHex      string `json:"nodeIdPub"`
+	NodeAddr        string `json:"nodeAddrBech32"`
+	Nonce           string `json:"nonce"`
+	Timestamp       int64  `json:"ts"`
 	ClientVersion   string `json:"clientVersion"`
-	PubKey          []byte `json:"pubKey"`
-	Nonce           []byte `json:"nonce"`
-	Signature       []byte `json:"signature"`
-	WalletAddress   string `json:"walletAddress"`
-	WalletSignature []byte `json:"walletSignature"`
 }
 
-func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bufio.Reader) (*handshakeMessage, error) {
+type handshakePacket struct {
+	handshakeMessage
+	SigAddr   string `json:"sigAddr"`
+	Signature string `json:"sig"`
+
+	nodeID string
+	pubKey *ecdsa.PublicKey
+}
+
+func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bufio.Reader) (*handshakePacket, error) {
 	local, err := s.buildHandshake()
 	if err != nil {
 		return nil, fmt.Errorf("prepare handshake: %w", err)
@@ -50,152 +60,187 @@ func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bu
 		return nil, fmt.Errorf("empty handshake from peer")
 	}
 
-	var remote handshakeMessage
+	var remote handshakePacket
 	if err := json.Unmarshal(payload, &remote); err != nil {
 		return nil, fmt.Errorf("decode handshake: %w", err)
 	}
 
-	nodeID, verifyErr := s.verifyHandshake(&remote)
-	if verifyErr != nil {
-		return nil, verifyErr
+	if err := s.verifyHandshake(&remote); err != nil {
+		return nil, err
 	}
-	remote.NodeID = nodeID
-	remote.WalletAddress = nodeID
 	return &remote, nil
 }
 
-func (s *Server) buildHandshake() (*handshakeMessage, error) {
+func (s *Server) buildHandshake() (*handshakePacket, error) {
 	nonce := make([]byte, handshakeNonceSize)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate handshake nonce: %w", err)
 	}
+
+	now := s.now()
 	pubKey := s.privKey.PubKey().PublicKey
-	digest := handshakeDigest(protocolVersion, s.cfg.ChainID, s.genesis, s.cfg.ClientVersion, nonce)
+	pubBytes := ethcrypto.FromECDSAPub(pubKey)
+	payload := handshakeMessage{
+		ProtocolVersion: protocolVersion,
+		ChainID:         s.cfg.ChainID,
+		GenesisHash:     encodeHex(s.genesis),
+		NodePubHex:      encodeHex(pubBytes),
+		NodeAddr:        s.walletAddr,
+		Nonce:           encodeHex(nonce),
+		Timestamp:       now.Unix(),
+		ClientVersion:   s.cfg.ClientVersion,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal handshake payload: %w", err)
+	}
+	digest := handshakeDigest(body, payload.Timestamp)
 	sig, err := ethcrypto.Sign(digest, s.privKey.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("sign handshake: %w", err)
 	}
 
-	walletDigest := walletBindingDigest(protocolVersion, s.cfg.ChainID, s.genesis, s.nodeID, nonce)
-	walletSig, err := ethcrypto.Sign(walletDigest, s.privKey.PrivateKey)
-	if err != nil {
-		return nil, fmt.Errorf("sign wallet binding: %w", err)
+	packet := &handshakePacket{
+		handshakeMessage: payload,
+		SigAddr:          s.walletAddr,
+		Signature:        encodeHex(sig),
 	}
-
-	return &handshakeMessage{
-		ProtocolVersion: protocolVersion,
-		ChainID:         s.cfg.ChainID,
-		GenesisHash:     cloneBytes(s.genesis),
-		NodeID:          s.nodeID,
-		ClientVersion:   s.cfg.ClientVersion,
-		PubKey:          ethcrypto.FromECDSAPub(pubKey),
-		Nonce:           nonce,
-		Signature:       sig,
-		WalletAddress:   s.walletAddr,
-		WalletSignature: walletSig,
-	}, nil
+	packet.nodeID = s.nodeID
+	packet.pubKey = pubKey
+	if !s.nonceGuard.Remember(packet.Nonce, now) {
+		// Should never happen for a locally generated nonce, but keep defensive.
+		return nil, fmt.Errorf("nonce collision detected")
+	}
+	return packet, nil
 }
 
-func handshakeDigest(proto uint32, chainID uint64, genesisHash []byte, clientVersion string, nonce []byte) []byte {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, proto)
-	chain := make([]byte, 8)
-	binary.BigEndian.PutUint64(chain, chainID)
-	h := sha256.New()
-	h.Write(buf)
-	h.Write(chain)
-	h.Write(genesisHash)
-	h.Write([]byte(clientVersion))
-	h.Write(nonce)
-	return h.Sum(nil)
-}
-
-func walletBindingDigest(proto uint32, chainID uint64, genesisHash []byte, nodeID string, nonce []byte) []byte {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, proto)
-	chain := make([]byte, 8)
-	binary.BigEndian.PutUint64(chain, chainID)
-	h := sha256.New()
-	h.Write([]byte("nhb-handshake"))
-	h.Write(buf)
-	h.Write(chain)
-	h.Write(genesisHash)
-	h.Write([]byte(strings.ToLower(nodeID)))
-	h.Write(nonce)
-	return h.Sum(nil)
-}
-
-func (s *Server) verifyHandshake(msg *handshakeMessage) (string, error) {
-	if len(msg.Nonce) != handshakeNonceSize {
-		return "", fmt.Errorf("invalid handshake nonce length: %d", len(msg.Nonce))
+func (s *Server) verifyHandshake(packet *handshakePacket) error {
+	if packet == nil {
+		return fmt.Errorf("nil handshake packet")
 	}
-	if len(msg.Signature) != 65 {
-		return "", fmt.Errorf("invalid handshake signature length: %d", len(msg.Signature))
+	if packet.ProtocolVersion != protocolVersion {
+		return fmt.Errorf("unsupported protocol version %d", packet.ProtocolVersion)
 	}
-	if len(msg.PubKey) == 0 {
-		return "", fmt.Errorf("handshake missing public key")
+	if packet.ClientVersion == "" {
+		return fmt.Errorf("handshake missing client version")
 	}
-	if len(msg.GenesisHash) == 0 {
-		return "", fmt.Errorf("handshake missing genesis hash")
+	if strings.TrimSpace(packet.NodeAddr) == "" {
+		return fmt.Errorf("handshake missing node address")
 	}
-	if msg.ClientVersion == "" {
-		return "", fmt.Errorf("handshake missing client version")
+	if strings.TrimSpace(packet.SigAddr) == "" {
+		return fmt.Errorf("handshake missing signature address")
 	}
-
-	if len(msg.WalletSignature) != 65 {
-		return "", fmt.Errorf("invalid wallet signature length: %d", len(msg.WalletSignature))
+	if !strings.EqualFold(packet.SigAddr, packet.NodeAddr) {
+		return fmt.Errorf("signature address mismatch")
 	}
-	if msg.ProtocolVersion != protocolVersion {
-		return "", fmt.Errorf("unsupported protocol version %d", msg.ProtocolVersion)
+	if len(packet.Signature) == 0 {
+		return fmt.Errorf("handshake missing signature")
 	}
-
-	pubKey, err := ethcrypto.UnmarshalPubkey(msg.PubKey)
+	nonceBytes, err := decodeHex(packet.Nonce)
 	if err != nil {
-		return "", fmt.Errorf("invalid public key: %w", err)
+		return fmt.Errorf("invalid nonce encoding: %w", err)
 	}
-	nodeID := crypto.NewAddress(crypto.NHBPrefix, ethcrypto.PubkeyToAddress(*pubKey).Bytes()).String()
-
-	digest := handshakeDigest(msg.ProtocolVersion, msg.ChainID, msg.GenesisHash, msg.ClientVersion, msg.Nonce)
-	if !ethcrypto.VerifySignature(msg.PubKey, digest, msg.Signature[:64]) {
-		return nodeID, fmt.Errorf("invalid handshake signature")
+	if len(nonceBytes) != handshakeNonceSize {
+		return fmt.Errorf("invalid handshake nonce length: %d", len(nonceBytes))
 	}
-	if msg.NodeID != "" && msg.NodeID != nodeID {
-		return nodeID, fmt.Errorf("node ID mismatch: claimed %s expected %s", msg.NodeID, nodeID)
+	if packet.ChainID != s.cfg.ChainID {
+		return fmt.Errorf("chain ID mismatch: remote %d local %d", packet.ChainID, s.cfg.ChainID)
 	}
-	walletAddr := strings.TrimSpace(msg.WalletAddress)
-	if walletAddr == "" {
-		return nodeID, fmt.Errorf("handshake missing wallet address")
-	}
-	walletDigest := walletBindingDigest(msg.ProtocolVersion, msg.ChainID, msg.GenesisHash, nodeID, msg.Nonce)
-	if err := verifyWalletSignature(walletAddr, walletDigest, msg.WalletSignature); err != nil {
-		return nodeID, fmt.Errorf("invalid wallet binding: %w", err)
-	}
-	if !strings.EqualFold(walletAddr, nodeID) {
-		return nodeID, fmt.Errorf("wallet address mismatch: claimed %s expected %s", walletAddr, nodeID)
-	}
-	if msg.ChainID != s.cfg.ChainID {
-		return nodeID, fmt.Errorf("chain ID mismatch: remote %d local %d", msg.ChainID, s.cfg.ChainID)
-	}
-	if !bytes.Equal(msg.GenesisHash, s.genesis) {
-		return nodeID, fmt.Errorf("genesis hash mismatch: remote %x local %x", msg.GenesisHash, s.genesis)
-	}
-	return nodeID, nil
-}
-
-func verifyWalletSignature(addr string, digest []byte, sig []byte) error {
-	address, err := crypto.DecodeAddress(addr)
+	remoteGenesis, err := decodeHex(packet.GenesisHash)
 	if err != nil {
-		return fmt.Errorf("decode address: %w", err)
+		return fmt.Errorf("invalid genesis hash encoding: %w", err)
 	}
-	pub, err := ethcrypto.SigToPub(digest, sig)
+	if !bytes.Equal(remoteGenesis, s.genesis) {
+		return fmt.Errorf("genesis hash mismatch: remote %x local %x", remoteGenesis, s.genesis)
+	}
+
+	ts := time.Unix(packet.Timestamp, 0)
+	now := s.now()
+	if now.Sub(ts) > handshakeSkewAllowance || ts.Sub(now) > handshakeSkewAllowance {
+		return fmt.Errorf("handshake timestamp skew too large")
+	}
+
+	payloadJSON, err := json.Marshal(packet.handshakeMessage)
 	if err != nil {
-		return fmt.Errorf("recover pubkey: %w", err)
+		return fmt.Errorf("marshal handshake for verification: %w", err)
 	}
-	derived := ethcrypto.PubkeyToAddress(*pub)
-	if !bytes.Equal(address.Bytes(), derived.Bytes()) {
+	sigBytes, err := decodeHex(packet.Signature)
+	if err != nil {
+		return fmt.Errorf("invalid signature encoding: %w", err)
+	}
+	if len(sigBytes) != 65 {
+		return fmt.Errorf("invalid handshake signature length: %d", len(sigBytes))
+	}
+
+	pub, err := parseHandshakePub(packet.NodePubHex)
+	if err != nil {
+		return fmt.Errorf("invalid node public key: %w", err)
+	}
+
+	addr, err := crypto.DecodeAddress(packet.NodeAddr)
+	if err != nil {
+		return fmt.Errorf("decode node address: %w", err)
+	}
+	derivedAddr := ethcrypto.PubkeyToAddress(*pub)
+	if !bytes.Equal(addr.Bytes(), derivedAddr.Bytes()) {
+		return fmt.Errorf("node address mismatch")
+	}
+
+	digest := handshakeDigest(payloadJSON, packet.Timestamp)
+	recovered, err := ethcrypto.SigToPub(digest, sigBytes)
+	if err != nil {
+		return fmt.Errorf("recover signature: %w", err)
+	}
+	recoveredAddr := ethcrypto.PubkeyToAddress(*recovered)
+	if !bytes.Equal(recoveredAddr.Bytes(), addr.Bytes()) {
 		return fmt.Errorf("signature does not match address")
 	}
+
+	if !s.nonceGuard.Remember(packet.Nonce, now) {
+		return fmt.Errorf("handshake nonce replay detected")
+	}
+
+	packet.nodeID = addr.String()
+	packet.pubKey = pub
 	return nil
+}
+
+func parseHandshakePub(value string) (*ecdsa.PublicKey, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, fmt.Errorf("missing public key")
+	}
+	bytes, err := decodeHex(value)
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.UnmarshalPubkey(bytes)
+}
+
+func encodeHex(data []byte) string {
+	if len(data) == 0 {
+		return "0x"
+	}
+	return "0x" + hex.EncodeToString(data)
+}
+
+func decodeHex(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		value = value[2:]
+	}
+	if value == "" {
+		return []byte{}, nil
+	}
+	if len(value)%2 == 1 {
+		value = "0" + value
+	}
+	return hex.DecodeString(value)
+}
+
+func handshakeDigest(payload []byte, timestamp int64) []byte {
+	digestInput := fmt.Sprintf("nhb-p2p|hello|%s|%d", payload, timestamp)
+	return ethcrypto.Keccak256([]byte(digestInput))
 }
 
 func writeFrame(ctx context.Context, conn net.Conn, payload any) error {

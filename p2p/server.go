@@ -29,10 +29,10 @@ const (
 	defaultBurstRate      = 200.0
 	maxDialBackoff        = time.Minute
 
-	malformedPenalty   = 20
-	validMessageReward = 1
+	malformedPenalty   = -malformedMessagePenaltyDelta
+	validMessageReward = heartbeatRewardDelta
 	slowPenalty        = 5
-	ratePenalty        = 15
+	ratePenalty        = -spamPenaltyDelta
 
 	greylistRateMultiplier = 0.25
 
@@ -84,6 +84,7 @@ type Server struct {
 	byAddr        map[string]string
 	byWallet      map[string]string
 	persistentIDs map[string]struct{}
+	records       map[string]*PeerRecord
 
 	dialFn           dialFunc
 	now              func() time.Time
@@ -93,6 +94,7 @@ type Server struct {
 	ratePerPeer      float64
 	rateBurst        float64
 	handshakeTimeout time.Duration
+	nonceGuard       *nonceGuard
 
 	dialMu      sync.Mutex
 	pendingDial map[string]struct{}
@@ -107,38 +109,67 @@ type peerMetrics struct {
 	invalid     int
 }
 
+// PeerRecord tracks persistent metadata about a peer.
+type PeerRecord struct {
+	NodeID    string
+	Address   string
+	FirstSeen time.Time
+	LastSeen  time.Time
+	Version   string
+	Score     int
+}
+
 // PeerInfo captures the public status of a connected peer.
 type PeerInfo struct {
-	ID            string `json:"id"`
-	Wallet        string `json:"wallet"`
-	Direction     string `json:"direction"`
-	Persistent    bool   `json:"persistent"`
-	RemoteAddr    string `json:"remoteAddr"`
-	DialAddr      string `json:"dialAddr,omitempty"`
-	ClientVersion string `json:"clientVersion"`
-	Score         int    `json:"score"`
-	Greylisted    bool   `json:"greylisted"`
+	NodeID     string    `json:"nodeId"`
+	Addr       string    `json:"addr"`
+	Direction  string    `json:"dir"`
+	Persistent bool      `json:"persistent"`
+	RemoteAddr string    `json:"remoteAddr"`
+	DialAddr   string    `json:"dialAddr,omitempty"`
+	Version    string    `json:"version"`
+	Score      int       `json:"score"`
+	Greylisted bool      `json:"greylisted"`
+	Banned     bool      `json:"banned"`
+	FirstSeen  time.Time `json:"firstSeen"`
+	LastSeen   time.Time `json:"lastSeen"`
+}
+
+// NetworkCounts represents current peer counts.
+type NetworkCounts struct {
+	Total    int `json:"total"`
+	Inbound  int `json:"inbound"`
+	Outbound int `json:"outbound"`
+}
+
+// NetworkLimits captures configured quotas.
+type NetworkLimits struct {
+	MaxPeers    int     `json:"maxPeers"`
+	MaxInbound  int     `json:"maxInbound"`
+	MaxOutbound int     `json:"maxOutbound"`
+	Rate        float64 `json:"rateMsgsPerSec"`
+	Burst       float64 `json:"burst"`
+	BanScore    int     `json:"banScore"`
+	GreyScore   int     `json:"greyScore"`
+}
+
+// NetworkSelf describes the local node identity.
+type NetworkSelf struct {
+	NodeID          string `json:"nodeId"`
+	Addr            string `json:"addr"`
+	ProtocolVersion uint32 `json:"protocolVersion"`
+	ClientVersion   string `json:"clientVersion"`
 }
 
 // NetworkView summarizes the current P2P server status.
 type NetworkView struct {
-	NodeID          string   `json:"nodeId"`
-	Wallet          string   `json:"wallet"`
-	ProtocolVersion uint32   `json:"protocolVersion"`
-	ChainID         uint64   `json:"chainId"`
-	GenesisHash     string   `json:"genesisHash"`
-	PeerCount       int      `json:"peerCount"`
-	InboundCount    int      `json:"inboundCount"`
-	OutboundCount   int      `json:"outboundCount"`
-	MaxPeers        int      `json:"maxPeers"`
-	MaxInbound      int      `json:"maxInbound"`
-	MaxOutbound     int      `json:"maxOutbound"`
-	RateMsgsPerSec  float64  `json:"rateMsgsPerSec"`
-	RateBurst       float64  `json:"rateBurst"`
-	BanScore        int      `json:"banScore"`
-	GreyScore       int      `json:"greyScore"`
-	Bootnodes       []string `json:"bootnodes"`
-	PersistentPeers []string `json:"persistentPeers"`
+	NetworkID  uint64        `json:"networkId"`
+	Genesis    string        `json:"genesisHash"`
+	Counts     NetworkCounts `json:"counts"`
+	Limits     NetworkLimits `json:"limits"`
+	Self       NetworkSelf   `json:"self"`
+	Bootnodes  []string      `json:"bootnodes"`
+	Persistent []string      `json:"persistentPeers"`
 }
 
 // NewServer creates a P2P server with authenticated handshakes.
@@ -213,6 +244,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		byAddr:           make(map[string]string),
 		byWallet:         make(map[string]string),
 		persistentIDs:    make(map[string]struct{}),
+		records:          make(map[string]*PeerRecord),
 		dialFn:           defaultDialer,
 		now:              time.Now,
 		backoff:          make(map[string]time.Duration),
@@ -222,6 +254,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		ratePerPeer:      cfg.RateMsgsPerSec,
 		rateBurst:        cfg.RateBurst,
 		handshakeTimeout: cfg.HandshakeTimeout,
+		nonceGuard:       newNonceGuard(2 * handshakeSkewAllowance),
 	}
 
 	for _, addr := range uniqBoot {
@@ -285,20 +318,77 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if err != nil {
 		return err
 	}
-	if remote.NodeID == s.nodeID {
+	if remote.nodeID == "" {
+		return fmt.Errorf("handshake missing node identity")
+	}
+	if remote.nodeID == s.nodeID {
 		return fmt.Errorf("self connection not allowed")
 	}
-	if s.isBanned(remote.NodeID) {
-		return fmt.Errorf("peer %s is currently banned", remote.NodeID)
+	if s.isBanned(remote.nodeID) {
+		return fmt.Errorf("peer %s is currently banned", remote.nodeID)
 	}
 
-	peer := newPeer(remote.NodeID, remote.WalletAddress, remote.ClientVersion, conn, reader, s, inbound, persistent, dialAddr)
+	s.recordPeerHandshake(remote)
+
+	peer := newPeer(remote.nodeID, remote.NodeAddr, remote.ClientVersion, conn, reader, s, inbound, persistent, dialAddr)
 	if err := s.registerPeer(peer); err != nil {
 		return err
 	}
 	fmt.Printf("New peer connected: %s (%s) client=%s\n", peer.id, peer.remoteAddr, remote.ClientVersion)
 	peer.start()
 	return nil
+}
+
+func (s *Server) recordPeerHandshake(remote *handshakePacket) {
+	if remote == nil {
+		return
+	}
+	seen := s.now()
+	score := 0
+	if s.reputation != nil {
+		score = s.reputation.Score(remote.nodeID, seen)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec := s.records[remote.nodeID]
+	if rec == nil {
+		rec = &PeerRecord{NodeID: remote.nodeID, FirstSeen: seen}
+		s.records[remote.nodeID] = rec
+	}
+	if rec.FirstSeen.IsZero() {
+		rec.FirstSeen = seen
+	}
+	rec.Address = remote.NodeAddr
+	rec.Version = remote.ClientVersion
+	rec.LastSeen = seen
+	rec.Score = score
+}
+
+func (s *Server) touchPeer(id string) {
+	if id == "" {
+		return
+	}
+	seen := s.now()
+	s.mu.Lock()
+	if rec, ok := s.records[id]; ok {
+		if rec.FirstSeen.IsZero() {
+			rec.FirstSeen = seen
+		}
+		rec.LastSeen = seen
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) updatePeerRecordScore(id string, score int) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	if rec, ok := s.records[id]; ok {
+		rec.Score = score
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) registerPeer(peer *Peer) error {
@@ -344,6 +434,7 @@ func (s *Server) registerPeer(peer *Peer) error {
 }
 
 func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
+	seen := s.now()
 	s.mu.Lock()
 	if current, ok := s.peers[peer.id]; ok && current == peer {
 		delete(s.peers, peer.id)
@@ -364,6 +455,12 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 		}
 		if peer.persistent {
 			delete(s.persistentIDs, peer.id)
+		}
+		if rec, ok := s.records[peer.id]; ok {
+			if rec.FirstSeen.IsZero() {
+				rec.FirstSeen = seen
+			}
+			rec.LastSeen = seen
 		}
 	}
 	s.mu.Unlock()
@@ -466,25 +563,52 @@ func (s *Server) SnapshotPeers() []PeerInfo {
 	for _, peer := range s.peers {
 		peers = append(peers, peer)
 	}
+	records := make(map[string]PeerRecord, len(s.records))
+	for id, rec := range s.records {
+		records[id] = *rec
+	}
 	s.mu.RUnlock()
 
 	results := make([]PeerInfo, 0, len(peers))
 	for _, peer := range peers {
 		status := statuses[peer.id]
+		s.updatePeerRecordScore(peer.id, status.Score)
+		rec := records[peer.id]
+		addr := peer.wallet
+		version := peer.clientVersion
+		firstSeen := now
+		lastSeen := now
+		if rec.NodeID != "" {
+			if rec.Address != "" {
+				addr = rec.Address
+			}
+			if !rec.FirstSeen.IsZero() {
+				firstSeen = rec.FirstSeen
+			}
+			if !rec.LastSeen.IsZero() {
+				lastSeen = rec.LastSeen
+			}
+			if rec.Version != "" {
+				version = rec.Version
+			}
+		}
 		info := PeerInfo{
-			ID:            peer.id,
-			Wallet:        peer.wallet,
-			Direction:     directionForPeer(peer),
-			Persistent:    peer.persistent,
-			RemoteAddr:    peer.remoteAddr,
-			DialAddr:      peer.dialAddr,
-			ClientVersion: peer.clientVersion,
-			Score:         status.Score,
-			Greylisted:    status.Greylisted,
+			NodeID:     peer.id,
+			Addr:       addr,
+			Direction:  directionForPeer(peer),
+			Persistent: peer.persistent,
+			RemoteAddr: peer.remoteAddr,
+			DialAddr:   peer.dialAddr,
+			Version:    version,
+			Score:      status.Score,
+			Greylisted: status.Greylisted,
+			Banned:     status.Banned,
+			FirstSeen:  firstSeen,
+			LastSeen:   lastSeen,
 		}
 		results = append(results, info)
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
+	sort.Slice(results, func(i, j int) bool { return results[i].NodeID < results[j].NodeID })
 	return results
 }
 
@@ -496,24 +620,31 @@ func (s *Server) SnapshotNetwork() NetworkView {
 	s.mu.RUnlock()
 
 	view := NetworkView{
-		NodeID:          s.nodeID,
-		Wallet:          s.walletAddr,
-		ProtocolVersion: protocolVersion,
-		ChainID:         s.cfg.ChainID,
-		GenesisHash:     hex.EncodeToString(s.genesis),
-		PeerCount:       peerCount,
-		InboundCount:    inbound,
-		OutboundCount:   outbound,
-		MaxPeers:        s.cfg.MaxPeers,
-		MaxInbound:      s.cfg.MaxInbound,
-		MaxOutbound:     s.cfg.MaxOutbound,
-		RateMsgsPerSec:  s.ratePerPeer,
-		RateBurst:       s.rateBurst,
-		BanScore:        s.cfg.BanScore,
-		GreyScore:       s.cfg.GreyScore,
+		NetworkID: s.cfg.ChainID,
+		Genesis:   hex.EncodeToString(s.genesis),
+		Counts: NetworkCounts{
+			Total:    peerCount,
+			Inbound:  inbound,
+			Outbound: outbound,
+		},
+		Limits: NetworkLimits{
+			MaxPeers:    s.cfg.MaxPeers,
+			MaxInbound:  s.cfg.MaxInbound,
+			MaxOutbound: s.cfg.MaxOutbound,
+			Rate:        s.ratePerPeer,
+			Burst:       s.rateBurst,
+			BanScore:    s.cfg.BanScore,
+			GreyScore:   s.cfg.GreyScore,
+		},
+		Self: NetworkSelf{
+			NodeID:          s.nodeID,
+			Addr:            s.walletAddr,
+			ProtocolVersion: protocolVersion,
+			ClientVersion:   s.cfg.ClientVersion,
+		},
 	}
 	view.Bootnodes = append([]string{}, s.cfg.Bootnodes...)
-	view.PersistentPeers = append([]string{}, s.cfg.PersistentPeers...)
+	view.Persistent = append([]string{}, s.cfg.PersistentPeers...)
 	return view
 }
 
@@ -529,6 +660,7 @@ func (s *Server) handleRateLimit(peer *Peer, global bool) {
 }
 
 func (s *Server) recordValidMessage(id string) {
+	s.touchPeer(id)
 	s.updatePeerMetrics(id, true)
 	if validMessageReward != 0 {
 		s.adjustScore(id, validMessageReward)
@@ -554,6 +686,7 @@ func (s *Server) adjustScore(id string, delta int) ReputationStatus {
 	persistent := s.isPersistentPeer(id)
 	status := s.reputation.Adjust(id, delta, s.now(), persistent)
 	s.updatePeerGreylist(id, status.Greylisted)
+	s.updatePeerRecordScore(id, status.Score)
 	return status
 }
 

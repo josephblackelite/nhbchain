@@ -2,14 +2,7 @@ package rpc
 
 import (
 	"net/http"
-
-	"nhbchain/p2p"
 )
-
-type p2pInfoResult struct {
-	Network p2p.NetworkView `json:"network"`
-	Peers   []p2p.PeerInfo  `json:"peers"`
-}
 
 func (s *Server) handleP2PInfo(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) != 0 {
@@ -21,8 +14,7 @@ func (s *Server) handleP2PInfo(w http.ResponseWriter, r *http.Request, req *RPCR
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", "p2p server not running")
 		return
 	}
-	result := p2pInfoResult{Network: srv.SnapshotNetwork(), Peers: srv.SnapshotPeers()}
-	writeResult(w, req.ID, result)
+	writeResult(w, req.ID, srv.SnapshotNetwork())
 }
 
 func (s *Server) handleP2PPeers(w http.ResponseWriter, r *http.Request, req *RPCRequest) {

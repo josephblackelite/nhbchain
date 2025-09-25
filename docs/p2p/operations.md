@@ -6,7 +6,8 @@ This guide summarises day-to-day tasks for operating NHB P2P nodes.
 
 * Configure canonical discovery endpoints via `[p2p].Bootnodes`. The server dials
   every entry on start-up and reattempts failed connections with exponential
-  backoff (capped at 1 minute).
+  backoff (capped at 1 minute). Ship production configurations with
+  `Bootnodes = []` and let operations teams provide approved endpoints.
 * Use `[p2p].PersistentPeers` for validators or trusted relays that should be
   kept connected. Persistent peers are retried indefinitely and never banned,
   although they may be greylisted when they misbehave.
@@ -26,9 +27,11 @@ This guide summarises day-to-day tasks for operating NHB P2P nodes.
 * The P2P server emits log lines for new connections, disconnections, rate-limit
   violations, greylist/bans, and handshake failures. Integrate these logs into
   your observability stack.
-* Query `p2p_info` periodically to confirm peer counts and configuration.
-* Query `p2p_peers` to inspect per-peer reputation, direction (inbound/outbound)
-  and remote addresses. This is useful for identifying abusive peers.
+* Query `p2p_info` periodically to confirm peer counts, limits, and the local
+  node identity (`self`).
+* Query `p2p_peers` to inspect per-peer reputation, direction (inbound/outbound),
+  first/last seen timestamps, and remote addresses. This is useful for
+  identifying abusive peers.
 
 ## Configuration refresh
 

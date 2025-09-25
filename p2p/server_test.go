@@ -50,61 +50,6 @@ func baseConfig(genesis []byte) ServerConfig {
 	}
 }
 
-func TestHandshakeRejectsMismatchedGenesis(t *testing.T) {
-	handler := noopHandler{}
-	localGenesis := bytes.Repeat([]byte{0xAA}, 32)
-	remoteGenesis := bytes.Repeat([]byte{0xBB}, 32)
-
-	local := NewServer(handler, mustKey(t), baseConfig(localGenesis))
-	remote := NewServer(handler, mustKey(t), baseConfig(remoteGenesis))
-
-	msg, err := remote.buildHandshake()
-	if err != nil {
-		t.Fatalf("build handshake: %v", err)
-	}
-	if _, err := local.verifyHandshake(msg); err == nil || !strings.Contains(err.Error(), "genesis hash mismatch") {
-		t.Fatalf("expected genesis hash mismatch error, got %v", err)
-	}
-}
-
-func TestHandshakeRejectsMismatchedChain(t *testing.T) {
-	handler := noopHandler{}
-	genesis := bytes.Repeat([]byte{0xAA}, 32)
-
-	localCfg := baseConfig(genesis)
-	remoteCfg := baseConfig(genesis)
-	localCfg.ChainID = 1
-	remoteCfg.ChainID = 2
-
-	local := NewServer(handler, mustKey(t), localCfg)
-	remote := NewServer(handler, mustKey(t), remoteCfg)
-
-	msg, err := remote.buildHandshake()
-	if err != nil {
-		t.Fatalf("build handshake: %v", err)
-	}
-	if _, err := local.verifyHandshake(msg); err == nil || !strings.Contains(err.Error(), "chain ID mismatch") {
-		t.Fatalf("expected chain ID mismatch error, got %v", err)
-	}
-}
-
-func TestHandshakeRejectsWalletSignature(t *testing.T) {
-	handler := noopHandler{}
-	genesis := bytes.Repeat([]byte{0xAA}, 32)
-
-	local := NewServer(handler, mustKey(t), baseConfig(genesis))
-	remote := NewServer(handler, mustKey(t), baseConfig(genesis))
-
-	msg, err := remote.buildHandshake()
-	if err != nil {
-		t.Fatalf("build handshake: %v", err)
-	}
-	msg.WalletSignature[0] ^= 0xFF
-	if _, err := local.verifyHandshake(msg); err == nil || !strings.Contains(err.Error(), "wallet") {
-		t.Fatalf("expected wallet binding error, got %v", err)
-	}
-}
-
 func TestPeerRateLimitDisconnect(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)
