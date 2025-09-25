@@ -38,6 +38,7 @@ type Config struct {
 	ClientVersion         string      `toml:"ClientVersion"`
 	P2P                   P2PSection  `toml:"p2p"`
 	Potso                 PotsoConfig `toml:"potso"`
+	Governance            GovConfig   `toml:"governance"`
 }
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -85,6 +86,17 @@ type PotsoWeightsConfig struct {
 	DecayHalfLifeEpochs   uint64 `toml:"DecayHalfLifeEpochs"`
 	TopKWinners           uint64 `toml:"TopKWinners"`
 	TieBreak              string `toml:"TieBreak"`
+}
+
+// GovConfig captures the governance policy knobs controlling proposal flow
+// without embedding business logic in the state machine.
+type GovConfig struct {
+	MinDepositWei       string   `toml:"MinDepositWei"`
+	VotingPeriodSeconds uint64   `toml:"VotingPeriodSeconds"`
+	TimelockSeconds     uint64   `toml:"TimelockSeconds"`
+	QuorumBps           uint64   `toml:"QuorumBps"`
+	PassThresholdBps    uint64   `toml:"PassThresholdBps"`
+	AllowedParams       []string `toml:"AllowedParams"`
 }
 
 // Load loads the configuration from the given path.
@@ -189,6 +201,29 @@ func Load(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.Potso.Weights.TieBreak) == "" {
 		cfg.Potso.Weights.TieBreak = string(weightDefaults.TieBreak)
+	}
+
+	if strings.TrimSpace(cfg.Governance.MinDepositWei) == "" {
+		cfg.Governance.MinDepositWei = "1000e18"
+	}
+	if cfg.Governance.VotingPeriodSeconds == 0 {
+		cfg.Governance.VotingPeriodSeconds = 604800
+	}
+	if cfg.Governance.TimelockSeconds == 0 {
+		cfg.Governance.TimelockSeconds = 172800
+	}
+	if cfg.Governance.QuorumBps == 0 {
+		cfg.Governance.QuorumBps = 2000
+	}
+	if cfg.Governance.PassThresholdBps == 0 {
+		cfg.Governance.PassThresholdBps = 5000
+	}
+	if len(cfg.Governance.AllowedParams) == 0 {
+		cfg.Governance.AllowedParams = []string{
+			"potso.weights.AlphaStakeBps",
+			"potso.rewards.EmissionPerEpochWei",
+			"fees.baseFee",
+		}
 	}
 
 	cfg.syncTopLevelToP2P()
@@ -436,6 +471,18 @@ func createDefault(path string) (*Config, error) {
 		EmissionPerEpoch: "0",
 		CarryRemainder:   true,
 		PayoutMode:       string(potso.RewardPayoutModeAuto),
+	}
+	cfg.Governance = GovConfig{
+		MinDepositWei:       "1000e18",
+		VotingPeriodSeconds: 604800,
+		TimelockSeconds:     172800,
+		QuorumBps:           2000,
+		PassThresholdBps:    5000,
+		AllowedParams: []string{
+			"potso.weights.AlphaStakeBps",
+			"potso.rewards.EmissionPerEpochWei",
+			"fees.baseFee",
+		},
 	}
 	cfg.ValidatorKeystorePath = keystorePath
 	cfg.syncTopLevelToP2P()
