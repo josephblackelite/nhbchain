@@ -90,6 +90,7 @@ var (
 	potsoMetricsSnapshotPrefix = []byte("potso/metrics/snapshot/")
 	governanceProposalPrefix   = []byte("gov/proposals/")
 	governanceVotePrefix       = []byte("gov/votes/")
+	governanceVoteIndexPrefix  = []byte("gov/vote-index/")
 	governanceSequenceKey      = []byte("gov/seq")
 	governanceEscrowPrefix     = []byte("gov/escrow/")
 	paramsNamespacePrefix      = []byte("params/")
@@ -109,6 +110,10 @@ func GovernanceProposalKey(id uint64) []byte {
 // ordering across clients regardless of Bech32 prefix usage.
 func GovernanceVoteKey(id uint64, voter []byte) []byte {
 	return []byte(fmt.Sprintf("%s%d/%x", governanceVotePrefix, id, voter))
+}
+
+func governanceVoteIndexKey(id uint64) []byte {
+	return []byte(fmt.Sprintf("%s%d", governanceVoteIndexPrefix, id))
 }
 
 // GovernanceSequenceKey returns the auto-increment sequence key used to mint
@@ -306,6 +311,33 @@ func (m *Manager) GovernanceEscrowLock(addr []byte, amount *big.Int) (*big.Int, 
 	return updated, nil
 }
 
+// GovernanceEscrowUnlock subtracts the provided amount from the participant's
+// escrow bucket. Unlock attempts that exceed the current balance are rejected.
+func (m *Manager) GovernanceEscrowUnlock(addr []byte, amount *big.Int) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("governance: address must not be empty")
+	}
+	unlockAmount := big.NewInt(0)
+	if amount != nil {
+		if amount.Sign() < 0 {
+			return nil, fmt.Errorf("governance: unlock amount must not be negative")
+		}
+		unlockAmount = new(big.Int).Set(amount)
+	}
+	current, err := m.GovernanceEscrowBalance(addr)
+	if err != nil {
+		return nil, err
+	}
+	if current.Cmp(unlockAmount) < 0 {
+		return nil, fmt.Errorf("governance: unlock exceeds escrow balance")
+	}
+	updated := new(big.Int).Sub(current, unlockAmount)
+	if err := m.KVPut(GovernanceEscrowKey(addr), updated); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 // GovernanceNextProposalID increments and returns the next proposal identifier.
 // The sequence is stored as a uint64 counter beneath the governance namespace.
 func (m *Manager) GovernanceNextProposalID() (uint64, error) {
@@ -357,7 +389,52 @@ func (m *Manager) GovernancePutVote(v *governance.Vote) error {
 	if len(voterBytes) != 20 {
 		return fmt.Errorf("governance: voter address must be 20 bytes")
 	}
-	return m.KVPut(GovernanceVoteKey(v.ProposalID, voterBytes), record)
+	if err := m.KVPut(GovernanceVoteKey(v.ProposalID, voterBytes), record); err != nil {
+		return err
+	}
+	indexKey := governanceVoteIndexKey(v.ProposalID)
+	var existing []storedGovernanceVote
+	ok, err := m.KVGet(indexKey, &existing)
+	if err != nil {
+		return err
+	}
+	if ok {
+		replaced := false
+		for i := range existing {
+			if existing[i].Voter == record.Voter {
+				existing[i] = *record
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			existing = append(existing, *record)
+		}
+	} else {
+		existing = append(existing, *record)
+	}
+	return m.KVPut(indexKey, existing)
+}
+
+// GovernanceListVotes returns all stored votes for the proposal identifier.
+func (m *Manager) GovernanceListVotes(id uint64) ([]*governance.Vote, error) {
+	var stored []storedGovernanceVote
+	ok, err := m.KVGet(governanceVoteIndexKey(id), &stored)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || len(stored) == 0 {
+		return nil, nil
+	}
+	votes := make([]*governance.Vote, 0, len(stored))
+	for i := range stored {
+		vote, err := stored[i].toGovernanceVote()
+		if err != nil {
+			return nil, err
+		}
+		votes = append(votes, vote)
+	}
+	return votes, nil
 }
 
 // GovernanceGetVote retrieves the stored vote for the given proposal and voter.

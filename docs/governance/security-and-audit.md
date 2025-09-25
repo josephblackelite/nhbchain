@@ -16,3 +16,14 @@ part of routine state audits to ensure voting power remains tamper-evident.
 ## Timelock Review
 
 _TODO: Detail timelock enforcement, bypass protections, and alerting._
+
+## Tally Reproducibility
+
+Auditors can independently recompute vote tallies by iterating the
+`gov/vote-index/<proposal>` bucket. Each entry contains the voter address,
+choice, and voting power in basis points. Summing the weights per choice and
+deriving `yes_ratio_bps = yes / (yes + no)` (abstain excluded) should reproduce
+the `gov.finalized` event attributes. Turnout is the aggregate voting power
+across yes, no, and abstain selections. Verifying the tally against the stored
+snapshot ensures the governance engine did not mis-apply quorum or threshold
+logic when finalising a proposal.

@@ -98,6 +98,19 @@ type Vote struct {
 	Timestamp  time.Time      `json:"timestamp"`
 }
 
+// Tally captures the aggregated voting power distribution for a proposal
+// alongside the governance parameters applied to determine the outcome.
+type Tally struct {
+	TurnoutBps       uint64 `json:"turnout_bps"`
+	QuorumBps        uint64 `json:"quorum_bps"`
+	YesPowerBps      uint64 `json:"yes_power_bps"`
+	NoPowerBps       uint64 `json:"no_power_bps"`
+	AbstainPowerBps  uint64 `json:"abstain_power_bps"`
+	YesRatioBps      uint64 `json:"yes_ratio_bps"`
+	PassThresholdBps uint64 `json:"pass_threshold_bps"`
+	TotalBallots     uint64 `json:"total_ballots"`
+}
+
 // StatusString provides a developer-friendly textual representation of the
 // proposal status suitable for logs and APIs.
 func (s ProposalStatus) StatusString() string {
