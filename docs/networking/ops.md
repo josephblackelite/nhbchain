@@ -46,7 +46,28 @@ Seeds = [
   "0x1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd@seed-1.nhb.example.org:46656",
   "0x5678ef015678ef015678ef015678ef015678ef015678ef015678ef015678ef01@seed-2.nhb.example.org:46656",
 ]
+MinPeers = 12
+OutboundPeers = 16
+BanDurationSeconds = 3600
+HandshakeTimeoutMs = 3000
+DialBackoffSeconds = 30
+PEX = true
 ```
+
+### Runtime defaults
+
+* **MinPeers / OutboundPeers** – the connection manager aims for at least 12
+  total peers with 16 outbound slots reserved for proactive dials. Operators on
+  larger hardware can raise both numbers symmetrically.
+* **BanDurationSeconds** – manual and automated bans last one hour by default,
+  aligning the reputation engine with the peerstore eviction window.
+* **HandshakeTimeoutMs** – trimmed to 3 seconds in NET-2F to surface unhealthy
+  endpoints faster while still tolerating transcontinental latency.
+* **DialBackoffSeconds** – base delay (30s) applied before retrying failed
+  connections. Retries exponential backoff to the configured cap; override this
+  to tune aggressiveness for private clusters.
+* **PEX** – enabled by default. Set to `false` on air-gapped validators that
+  must not participate in peer exchange gossip.
 
 ### Quick local verification
 

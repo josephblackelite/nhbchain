@@ -65,6 +65,9 @@ type P2PSection struct {
 	HandshakeTimeoutMs  int      `toml:"HandshakeTimeoutMs"`
 	PingIntervalSeconds int      `toml:"PingIntervalSeconds"`
 	PingTimeoutSeconds  int      `toml:"PingTimeoutSeconds"`
+	BanDurationSeconds  int      `toml:"BanDurationSeconds"`
+	DialBackoffSeconds  int      `toml:"DialBackoffSeconds"`
+	PEX                 *bool    `toml:"PEX"`
 }
 
 // PotsoConfig groups POTSO-specific configuration segments.
@@ -172,7 +175,7 @@ func Load(path string) (*Config, error) {
 		cfg.OutboundPeers = cfg.MaxOutbound
 	}
 	if cfg.PeerBanSeconds <= 0 {
-		cfg.PeerBanSeconds = int((15 * time.Minute).Seconds())
+		cfg.PeerBanSeconds = int((60 * time.Minute).Seconds())
 	}
 	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = int((90 * time.Second).Seconds())
@@ -377,6 +380,19 @@ func (cfg *Config) mergeP2PFromTopLevel() {
 	if cfg.P2P.GreyScore == 0 {
 		cfg.P2P.GreyScore = 50
 	}
+	if cfg.P2P.BanDurationSeconds == 0 && cfg.PeerBanSeconds > 0 {
+		cfg.P2P.BanDurationSeconds = cfg.PeerBanSeconds
+	}
+	if cfg.PeerBanSeconds == 0 && cfg.P2P.BanDurationSeconds > 0 {
+		cfg.PeerBanSeconds = cfg.P2P.BanDurationSeconds
+	}
+	if cfg.P2P.DialBackoffSeconds == 0 {
+		cfg.P2P.DialBackoffSeconds = 30
+	}
+	if cfg.P2P.PEX == nil {
+		enabled := true
+		cfg.P2P.PEX = &enabled
+	}
 }
 
 func (cfg *Config) syncTopLevelToP2P() {
@@ -399,6 +415,19 @@ func (cfg *Config) syncTopLevelToP2P() {
 	}
 	if cfg.P2P.GreyScore <= 0 {
 		cfg.P2P.GreyScore = 50
+	}
+	if cfg.P2P.BanDurationSeconds <= 0 {
+		cfg.P2P.BanDurationSeconds = cfg.PeerBanSeconds
+	}
+	if cfg.P2P.BanDurationSeconds <= 0 {
+		cfg.P2P.BanDurationSeconds = int((15 * time.Minute).Seconds())
+	}
+	if cfg.P2P.DialBackoffSeconds <= 0 {
+		cfg.P2P.DialBackoffSeconds = 30
+	}
+	if cfg.P2P.PEX == nil {
+		enabled := true
+		cfg.P2P.PEX = &enabled
 	}
 }
 
@@ -585,7 +614,9 @@ func createDefault(path string) (*Config, error) {
 		MaxPeers:         64,
 		MaxInbound:       64,
 		MaxOutbound:      64,
-		PeerBanSeconds:   int((15 * time.Minute).Seconds()),
+		MinPeers:         32,
+		OutboundPeers:    16,
+		PeerBanSeconds:   int((60 * time.Minute).Seconds()),
 		ReadTimeout:      int((90 * time.Second).Seconds()),
 		WriteTimeout:     int((5 * time.Second).Seconds()),
 		MaxMsgBytes:      1 << 20,
@@ -597,6 +628,8 @@ func createDefault(path string) (*Config, error) {
 		MaxPeers:           64,
 		MaxInbound:         60,
 		MaxOutbound:        30,
+		MinPeers:           32,
+		OutboundPeers:      16,
 		Bootnodes:          []string{},
 		PersistentPeers:    []string{},
 		BanScore:           100,
@@ -604,7 +637,11 @@ func createDefault(path string) (*Config, error) {
 		RateMsgsPerSec:     50,
 		Burst:              200,
 		HandshakeTimeoutMs: 5000,
+		BanDurationSeconds: int((60 * time.Minute).Seconds()),
+		DialBackoffSeconds: 30,
 	}
+	enabledPEX := true
+	cfg.P2P.PEX = &enabledPEX
 	cfg.Potso.Rewards = PotsoRewardsConfig{
 		MinPayoutWei:     "0",
 		EmissionPerEpoch: "0",
