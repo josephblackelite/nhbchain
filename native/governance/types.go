@@ -1,0 +1,93 @@
+package governance
+
+import (
+	"math/big"
+	"time"
+
+	"nhbchain/crypto"
+)
+
+// ProposalStatus enumerates the lifecycle phases a governance proposal
+// transitions through as it accrues deposits, enters voting, and executes.
+type ProposalStatus uint8
+
+const (
+	// ProposalStatusUnspecified indicates the proposal has not yet been
+	// initialised and should not appear in state.
+	ProposalStatusUnspecified ProposalStatus = iota
+	// ProposalStatusDepositPeriod indicates the proposal is awaiting the
+	// minimum deposit threshold before it can enter the voting period.
+	ProposalStatusDepositPeriod
+	// ProposalStatusVotingPeriod identifies proposals actively accepting
+	// votes from eligible participants.
+	ProposalStatusVotingPeriod
+	// ProposalStatusPassed marks proposals that met quorum and threshold
+	// requirements and are awaiting timelock completion or execution.
+	ProposalStatusPassed
+	// ProposalStatusRejected marks proposals that failed to meet quorum or
+	// threshold requirements during the voting window.
+	ProposalStatusRejected
+	// ProposalStatusFailed marks proposals that encountered an execution
+	// error after passing, requiring manual operator intervention.
+	ProposalStatusFailed
+	// ProposalStatusExpired marks proposals whose timelock window elapsed
+	// without execution.
+	ProposalStatusExpired
+	// ProposalStatusExecuted indicates the proposal actions have been
+	// successfully applied on-chain.
+	ProposalStatusExecuted
+)
+
+// Proposal captures the immutable metadata, on-chain accounting, and state
+// transitions associated with a governance proposal. It intentionally mirrors
+// the persistence contract so off-chain services can index proposals without
+// additional decoding.
+type Proposal struct {
+	ID             uint64         `json:"id"`
+	Title          string         `json:"title"`
+	Summary        string         `json:"summary"`
+	MetadataURI    string         `json:"metadata_uri"`
+	Submitter      crypto.Address `json:"submitter"`
+	Status         ProposalStatus `json:"status"`
+	Deposit        *big.Int       `json:"deposit"`
+	SubmitTime     time.Time      `json:"submit_time"`
+	VotingStart    time.Time      `json:"voting_start"`
+	VotingEnd      time.Time      `json:"voting_end"`
+	TimelockEnd    time.Time      `json:"timelock_end"`
+	Target         string         `json:"target"`
+	ProposedChange string         `json:"proposed_change"`
+}
+
+// Vote describes a single participant's ballot on a proposal including their
+// weighted voting power and selection. Recording the vote in a deterministic
+// struct simplifies auditing and indexer integration.
+type Vote struct {
+	ProposalID uint64         `json:"proposal_id"`
+	Voter      crypto.Address `json:"voter"`
+	Support    bool           `json:"support"`
+	Weight     *big.Int       `json:"weight"`
+	Timestamp  time.Time      `json:"timestamp"`
+}
+
+// StatusString provides a developer-friendly textual representation of the
+// proposal status suitable for logs and APIs.
+func (s ProposalStatus) StatusString() string {
+	switch s {
+	case ProposalStatusDepositPeriod:
+		return "deposit_period"
+	case ProposalStatusVotingPeriod:
+		return "voting_period"
+	case ProposalStatusPassed:
+		return "passed"
+	case ProposalStatusRejected:
+		return "rejected"
+	case ProposalStatusFailed:
+		return "failed"
+	case ProposalStatusExpired:
+		return "expired"
+	case ProposalStatusExecuted:
+		return "executed"
+	default:
+		return "unspecified"
+	}
+}

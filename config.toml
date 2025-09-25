@@ -46,3 +46,11 @@ MinEngagementToWin = 0
 DecayHalfLifeEpochs = 7
 TopKWinners = 5000
 TieBreak = "addrHash"
+
+[governance]
+MinDepositWei = "1000e18"
+VotingPeriodSeconds = 604800
+TimelockSeconds = 172800
+QuorumBps = 2000
+PassThresholdBps = 5000
+AllowedParams = ["potso.weights.AlphaStakeBps","potso.rewards.EmissionPerEpochWei","fees.baseFee"]

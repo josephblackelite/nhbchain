@@ -80,3 +80,50 @@ HandshakeTimeoutMs = 7000
 		t.Fatalf("unexpected handshake timeout: %d", cfg.P2P.HandshakeTimeoutMs)
 	}
 }
+
+func TestLoadParsesGovernanceSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	keystorePath := filepath.Join(dir, "validator.keystore")
+	contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = "%s"
+
+[governance]
+MinDepositWei = "5000e18"
+VotingPeriodSeconds = 777600
+TimelockSeconds = 259200
+QuorumBps = 2500
+PassThresholdBps = 5500
+AllowedParams = ["fees.baseFee","escrow.maxOpenDisputes"]
+`, keystorePath)
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.Governance.MinDepositWei != "5000e18" {
+		t.Fatalf("unexpected min deposit: %s", cfg.Governance.MinDepositWei)
+	}
+	if cfg.Governance.VotingPeriodSeconds != 777600 {
+		t.Fatalf("unexpected voting period: %d", cfg.Governance.VotingPeriodSeconds)
+	}
+	if cfg.Governance.TimelockSeconds != 259200 {
+		t.Fatalf("unexpected timelock: %d", cfg.Governance.TimelockSeconds)
+	}
+	if cfg.Governance.QuorumBps != 2500 {
+		t.Fatalf("unexpected quorum: %d", cfg.Governance.QuorumBps)
+	}
+	if cfg.Governance.PassThresholdBps != 5500 {
+		t.Fatalf("unexpected threshold: %d", cfg.Governance.PassThresholdBps)
+	}
+	if len(cfg.Governance.AllowedParams) != 2 {
+		t.Fatalf("unexpected allowed params: %v", cfg.Governance.AllowedParams)
+	}
+	if cfg.Governance.AllowedParams[1] != "escrow.maxOpenDisputes" {
+		t.Fatalf("unexpected second allowed param: %s", cfg.Governance.AllowedParams[1])
+	}
+}
