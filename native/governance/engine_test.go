@@ -23,6 +23,8 @@ type mockGovernanceState struct {
 	hasLastEpoch   bool
 	nextID         uint64
 	params         map[string][]byte
+	roles          map[string]map[string]struct{}
+	audit          []*AuditRecord
 }
 
 func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernanceState {
@@ -37,6 +39,7 @@ func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernance
 		votes:          make(map[string]*Vote),
 		snapshots:      make(map[uint64]*potso.StoredWeightSnapshot),
 		params:         make(map[string][]byte),
+		roles:          make(map[string]map[string]struct{}),
 	}
 }
 
@@ -155,6 +158,55 @@ func (m *mockGovernanceState) SnapshotPotsoWeights(epoch uint64) (*potso.StoredW
 	return cloneStoredWeightSnapshot(snapshot), true, nil
 }
 
+func (m *mockGovernanceState) SetRole(role string, addr []byte) error {
+	trimmed := strings.TrimSpace(role)
+	if trimmed == "" {
+		return fmt.Errorf("role must not be empty")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	bucket, ok := m.roles[trimmed]
+	if !ok {
+		bucket = make(map[string]struct{})
+		m.roles[trimmed] = bucket
+	}
+	bucket[string(addr)] = struct{}{}
+	return nil
+}
+
+func (m *mockGovernanceState) RemoveRole(role string, addr []byte) error {
+	trimmed := strings.TrimSpace(role)
+	if trimmed == "" {
+		return fmt.Errorf("role must not be empty")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	bucket, ok := m.roles[trimmed]
+	if !ok {
+		return nil
+	}
+	delete(bucket, string(addr))
+	if len(bucket) == 0 {
+		delete(m.roles, trimmed)
+	}
+	return nil
+}
+
+func (m *mockGovernanceState) GovernanceAppendAudit(r *AuditRecord) (*AuditRecord, error) {
+	if r == nil {
+		return nil, fmt.Errorf("audit record must not be nil")
+	}
+	clone := *r
+	clone.Sequence = uint64(len(m.audit) + 1)
+	if clone.Timestamp.IsZero() {
+		clone.Timestamp = time.Now().UTC()
+	}
+	m.audit = append(m.audit, &clone)
+	return &clone, nil
+}
+
 func (m *mockGovernanceState) ParamStoreSet(name string, value []byte) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -238,7 +290,7 @@ func cloneStoredWeightSnapshot(snapshot *potso.StoredWeightSnapshot) *potso.Stor
 	return clone
 }
 
-func TestProposeParamChangeRejectsUnknownParam(t *testing.T) {
+func TestSubmitProposalRejectsUnknownParam(t *testing.T) {
 	var proposer [20]byte
 	proposer[19] = 1
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
@@ -254,13 +306,13 @@ func TestProposeParamChangeRejectsUnknownParam(t *testing.T) {
 		AllowedParams:       []string{"fees.baseFee"},
 	})
 
-	_, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, `{"escrow.maxOpenDisputes":5}`, big.NewInt(200))
+	_, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, `{"escrow.maxOpenDisputes":5}`, big.NewInt(200))
 	if err == nil || !strings.Contains(err.Error(), "allow-list") {
 		t.Fatalf("expected allow-list rejection, got %v", err)
 	}
 }
 
-func TestProposeParamChangeRejectsLowDeposit(t *testing.T) {
+func TestSubmitProposalRejectsLowDeposit(t *testing.T) {
 	var proposer [20]byte
 	proposer[10] = 2
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
@@ -276,13 +328,13 @@ func TestProposeParamChangeRejectsLowDeposit(t *testing.T) {
 		AllowedParams:       []string{"fees.baseFee"},
 	})
 
-	_, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, `{"fees.baseFee":5}`, big.NewInt(200))
+	_, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, `{"fees.baseFee":5}`, big.NewInt(200))
 	if err == nil || !strings.Contains(err.Error(), "deposit below minimum") {
 		t.Fatalf("expected deposit rejection, got %v", err)
 	}
 }
 
-func TestProposeParamChangeRejectsEmptyParamKey(t *testing.T) {
+func TestSubmitProposalRejectsEmptyParamKey(t *testing.T) {
 	var proposer [20]byte
 	proposer[11] = 4
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
@@ -298,13 +350,13 @@ func TestProposeParamChangeRejectsEmptyParamKey(t *testing.T) {
 		AllowedParams:       []string{"fees.baseFee"},
 	})
 
-	_, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, `{" ":5}`, big.NewInt(150))
+	_, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, `{" ":5}`, big.NewInt(150))
 	if err == nil || !strings.Contains(err.Error(), "key must not be empty") {
 		t.Fatalf("expected empty key rejection, got %v", err)
 	}
 }
 
-func TestProposeParamChangeRejectsInsufficientBalance(t *testing.T) {
+func TestSubmitProposalRejectsInsufficientBalance(t *testing.T) {
 	var proposer [20]byte
 	proposer[12] = 5
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
@@ -320,13 +372,13 @@ func TestProposeParamChangeRejectsInsufficientBalance(t *testing.T) {
 		AllowedParams:       []string{"fees.baseFee"},
 	})
 
-	_, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, `{"fees.baseFee":5}`, big.NewInt(150))
+	_, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, `{"fees.baseFee":5}`, big.NewInt(150))
 	if err == nil || !strings.Contains(err.Error(), "insufficient ZNHB balance") {
 		t.Fatalf("expected insufficient balance, got %v", err)
 	}
 }
 
-func TestProposeParamChangeHappyPath(t *testing.T) {
+func TestSubmitProposalHappyPath(t *testing.T) {
 	var proposer [20]byte
 	proposer[5] = 3
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
@@ -347,7 +399,7 @@ func TestProposeParamChangeHappyPath(t *testing.T) {
 
 	payload := `{"fees.baseFee":1000}`
 	deposit := big.NewInt(300)
-	proposalID, err := engine.ProposeParamChange(proposer, ProposalKindParamUpdate, payload, deposit)
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, payload, deposit)
 	if err != nil {
 		t.Fatalf("propose: %v", err)
 	}
@@ -386,6 +438,13 @@ func TestProposeParamChangeHappyPath(t *testing.T) {
 	wantTimelock := time.Unix(1700000000+600+120, 0).UTC()
 	if !stored.TimelockEnd.Equal(wantTimelock) {
 		t.Fatalf("unexpected timelock: got %s want %s", stored.TimelockEnd, wantTimelock)
+	}
+
+	if len(state.audit) != 1 {
+		t.Fatalf("expected audit entry recorded")
+	}
+	if state.audit[0].Event != AuditEventProposed {
+		t.Fatalf("unexpected audit event: %s", state.audit[0].Event)
 	}
 
 	if len(emitter.events) != 1 {
@@ -977,5 +1036,177 @@ func TestExecuteRespectsTimelock(t *testing.T) {
 	engine.SetNowFunc(func() time.Time { return now })
 	if err := engine.Execute(9); err != nil {
 		t.Fatalf("execute after timelock: %v", err)
+	}
+}
+
+func TestExecuteSlashingPolicyProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[0] = 8
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(100),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     30,
+		AllowedParams:       []string{"fees.baseFee"},
+	})
+	created := time.Unix(1_700_100_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return created })
+
+	payload := `{"enabled":true,"maxPenaltyBps":400,"windowSeconds":600,"maxSlashWei":"2500","evidenceTtlSeconds":1200}`
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindSlashingPolicy, payload, big.NewInt(200))
+	if err != nil {
+		t.Fatalf("submit slashing policy: %v", err)
+	}
+	stored := state.proposals[proposalID]
+	stored.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue slashing policy: %v", err)
+	}
+	engine.SetNowFunc(func() time.Time { return created.Add(2 * time.Hour) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute slashing policy: %v", err)
+	}
+
+	enabled, ok := state.ParamStoreGet(paramKeySlashingEnabled)
+	if !ok || string(enabled) != "true" {
+		t.Fatalf("expected slashing enabled, got %s", string(enabled))
+	}
+	maxPenalty, _ := state.ParamStoreGet(paramKeySlashingMaxPenaltyBps)
+	if string(maxPenalty) != "400" {
+		t.Fatalf("unexpected max penalty: %s", string(maxPenalty))
+	}
+	window, _ := state.ParamStoreGet(paramKeySlashingWindow)
+	if string(window) != "600" {
+		t.Fatalf("unexpected window: %s", string(window))
+	}
+	maxSlash, _ := state.ParamStoreGet(paramKeySlashingMaxSlashWei)
+	if string(maxSlash) != "2500" {
+		t.Fatalf("unexpected max slash: %s", string(maxSlash))
+	}
+	evidence, _ := state.ParamStoreGet(paramKeySlashingEvidenceTTL)
+	if string(evidence) != "1200" {
+		t.Fatalf("unexpected evidence ttl: %s", string(evidence))
+	}
+
+	if len(state.audit) != 3 {
+		t.Fatalf("expected three audit entries, got %d", len(state.audit))
+	}
+	if state.audit[2].Event != AuditEventExecuted {
+		t.Fatalf("unexpected final audit event: %s", state.audit[2].Event)
+	}
+}
+
+func TestExecuteRoleAllowlistProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[9] = 3
+	var revoke [20]byte
+	revoke[1] = 2
+	var grant [20]byte
+	grant[2] = 4
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+	state.roles["compliance"] = map[string]struct{}{string(revoke[:]): struct{}{}}
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+		AllowedParams:       []string{"fees.baseFee"},
+		AllowedRoles:        []string{"compliance"},
+	})
+	now := time.Unix(1_700_200_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := fmt.Sprintf(`{"grant":[{"role":"compliance","address":"%s"}],"revoke":[{"role":"compliance","address":"%s"}]}`,
+		crypto.NewAddress(crypto.NHBPrefix, grant[:]).String(),
+		crypto.NewAddress(crypto.NHBPrefix, revoke[:]).String(),
+	)
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindRoleAllowlist, payload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit role allowlist: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue role allowlist: %v", err)
+	}
+	proposal = state.proposals[proposalID]
+	proposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute role allowlist: %v", err)
+	}
+
+	grantBucket := state.roles["compliance"]
+	if _, ok := grantBucket[string(grant[:])]; !ok {
+		t.Fatalf("expected grant address in role set")
+	}
+	if _, ok := grantBucket[string(revoke[:])]; ok {
+		t.Fatalf("expected revoke address removed")
+	}
+}
+
+func TestExecuteTreasuryDirective(t *testing.T) {
+	var proposer [20]byte
+	proposer[8] = 1
+	var treasury [20]byte
+	treasury[19] = 7
+	var recipient [20]byte
+	recipient[0] = 9
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(500), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+		treasury: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(0),
+		VotingPeriodSeconds: 30,
+		TimelockSeconds:     5,
+		AllowedParams:       []string{"fees.baseFee"},
+		TreasuryAllowList:   [][20]byte{treasury},
+	})
+	now := time.Unix(1_700_300_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := fmt.Sprintf(`{"source":"%s","transfers":[{"to":"%s","amountWei":"250"}]}`,
+		crypto.NewAddress(crypto.NHBPrefix, treasury[:]).String(),
+		crypto.NewAddress(crypto.NHBPrefix, recipient[:]).String(),
+	)
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindTreasuryDirective, payload, big.NewInt(10))
+	if err != nil {
+		t.Fatalf("submit treasury directive: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue treasury directive: %v", err)
+	}
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute treasury directive: %v", err)
+	}
+
+	treasuryAccount, _ := state.GetAccount(treasury[:])
+	if treasuryAccount.BalanceZNHB.String() != "750" {
+		t.Fatalf("unexpected treasury balance: %s", treasuryAccount.BalanceZNHB.String())
+	}
+	recipientAccount, _ := state.GetAccount(recipient[:])
+	if recipientAccount.BalanceZNHB.String() != "250" {
+		t.Fatalf("unexpected recipient balance: %s", recipientAccount.BalanceZNHB.String())
 	}
 }

@@ -1,12 +1,14 @@
 package governance
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,8 +20,6 @@ import (
 )
 
 const (
-	// ProposalKindParamUpdate is the only proposal kind supported in GOV-1B.
-	ProposalKindParamUpdate = "param.update"
 	// EventTypeProposalProposed is emitted when a new proposal is accepted.
 	EventTypeProposalProposed = "gov.proposed"
 	// EventTypeVoteCast is emitted when a voter records or updates a ballot.
@@ -30,6 +30,23 @@ const (
 	EventTypeProposalQueued = "gov.queued"
 	// EventTypeProposalExecuted marks proposals whose payload has been applied to state.
 	EventTypeProposalExecuted = "gov.executed"
+)
+
+const (
+	maxBasisPoints                  = 10_000
+	maxEmissionWei                  = "9223372036854775807" // conservative cap
+	maxGovernanceUint               = uint64(1<<53 - 1)
+	minSlashingWindowSeconds uint64 = 60
+	maxSlashingWindowSeconds uint64 = 30 * 24 * 60 * 60
+	maxEvidenceTTLSeconds    uint64 = 90 * 24 * 60 * 60
+)
+
+const (
+	paramKeySlashingEnabled       = "slashing.policy.enabled"
+	paramKeySlashingMaxPenaltyBps = "slashing.policy.maxPenaltyBps"
+	paramKeySlashingWindow        = "slashing.policy.windowSeconds"
+	paramKeySlashingMaxSlashWei   = "slashing.policy.maxSlashWei"
+	paramKeySlashingEvidenceTTL   = "slashing.policy.evidenceTtlSeconds"
 )
 
 var (
@@ -47,7 +64,10 @@ type proposalState interface {
 	GovernanceGetProposal(id uint64) (*Proposal, bool, error)
 	GovernancePutVote(v *Vote) error
 	GovernanceListVotes(id uint64) ([]*Vote, error)
+	GovernanceAppendAudit(entry *AuditRecord) (*AuditRecord, error)
 	ParamStoreSet(name string, value []byte) error
+	SetRole(role string, addr []byte) error
+	RemoveRole(role string, addr []byte) error
 	PotsoRewardsLastProcessedEpoch() (uint64, bool, error)
 	SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error)
 }
@@ -64,6 +84,8 @@ type ProposalPolicy struct {
 	AllowedParams       []string
 	QuorumBps           uint64
 	PassThresholdBps    uint64
+	AllowedRoles        []string
+	TreasuryAllowList   [][20]byte
 }
 
 // Engine orchestrates proposal admission and bookkeeping for governance
@@ -76,6 +98,9 @@ type Engine struct {
 	votingPeriodSeconds uint64
 	timelockSeconds     uint64
 	allowedParams       map[string]struct{}
+	paramValidators     map[string]paramValidator
+	allowedRoles        map[string]struct{}
+	treasuryAllow       map[[20]byte]struct{}
 	quorumBps           uint64
 	passThresholdBps    uint64
 }
@@ -83,12 +108,47 @@ type Engine struct {
 // NewEngine constructs a governance engine with default no-op dependencies.
 func NewEngine() *Engine {
 	return &Engine{
-		emitter:       events.NoopEmitter{},
-		nowFn:         func() time.Time { return time.Now().UTC() },
-		minDeposit:    big.NewInt(0),
-		allowedParams: map[string]struct{}{},
+		emitter:         events.NoopEmitter{},
+		nowFn:           func() time.Time { return time.Now().UTC() },
+		minDeposit:      big.NewInt(0),
+		allowedParams:   map[string]struct{}{},
+		paramValidators: map[string]paramValidator{},
+		allowedRoles:    map[string]struct{}{},
+		treasuryAllow:   map[[20]byte]struct{}{},
 	}
 }
+
+type roleMutation struct {
+	role string
+	addr [20]byte
+}
+
+type parsedRoleAllowlist struct {
+	grant  []roleMutation
+	revoke []roleMutation
+	memo   string
+}
+
+type treasuryTransferDecoded struct {
+	to     [20]byte
+	amount *big.Int
+	memo   string
+	kind   string
+}
+
+type parsedTreasuryDirective struct {
+	source    [20]byte
+	transfers []treasuryTransferDecoded
+	memo      string
+	total     *big.Int
+}
+
+type parsedSlashingPolicy struct {
+	payload  SlashingPolicyPayload
+	maxSlash *big.Int
+}
+
+type paramValidator func(raw json.RawMessage) error
 
 // SetState wires the engine to the state backend providing persistence helpers.
 func (e *Engine) SetState(state proposalState) { e.state = state }
@@ -126,15 +186,614 @@ func (e *Engine) SetPolicy(policy ProposalPolicy) {
 	e.votingPeriodSeconds = policy.VotingPeriodSeconds
 	e.timelockSeconds = policy.TimelockSeconds
 	e.allowedParams = make(map[string]struct{}, len(policy.AllowedParams))
+	e.paramValidators = make(map[string]paramValidator, len(policy.AllowedParams))
 	for _, raw := range policy.AllowedParams {
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
 		}
 		e.allowedParams[trimmed] = struct{}{}
+		if validator := validatorForParam(trimmed); validator != nil {
+			e.paramValidators[trimmed] = validator
+		}
+	}
+	e.allowedRoles = make(map[string]struct{}, len(policy.AllowedRoles))
+	for _, role := range policy.AllowedRoles {
+		trimmed := strings.TrimSpace(role)
+		if trimmed == "" {
+			continue
+		}
+		e.allowedRoles[trimmed] = struct{}{}
+	}
+	e.treasuryAllow = make(map[[20]byte]struct{}, len(policy.TreasuryAllowList))
+	for _, addr := range policy.TreasuryAllowList {
+		e.treasuryAllow[addr] = struct{}{}
 	}
 	e.quorumBps = policy.QuorumBps
 	e.passThresholdBps = policy.PassThresholdBps
+}
+
+var (
+	maxBaseFeeWei    = new(big.Int).SetUint64(1_000_000_000_000_000) // 1e15 wei
+	maxEmissionInt   = mustBigInt(maxEmissionWei)
+	maxSlashWeiLimit = mustBigInt(maxEmissionWei)
+)
+
+func mustBigInt(value string) *big.Int {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return big.NewInt(0)
+	}
+	n, ok := new(big.Int).SetString(normalized, 10)
+	if !ok {
+		panic(fmt.Sprintf("invalid big integer literal %q", value))
+	}
+	return n
+}
+
+func validatorForParam(key string) paramValidator {
+	switch key {
+	case "fees.baseFee":
+		return func(raw json.RawMessage) error {
+			amount, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("fees.baseFee: %w", err)
+			}
+			if amount.Cmp(maxBaseFeeWei) > 0 {
+				return fmt.Errorf("fees.baseFee: value exceeds %s wei", maxBaseFeeWei.String())
+			}
+			return nil
+		}
+	case "potso.weights.AlphaStakeBps":
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("potso.weights.AlphaStakeBps: %w", err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("potso.weights.AlphaStakeBps: must be <= %d", maxBasisPoints)
+			}
+			return nil
+		}
+	case "potso.rewards.EmissionPerEpochWei":
+		return func(raw json.RawMessage) error {
+			amount, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("potso.rewards.EmissionPerEpochWei: %w", err)
+			}
+			if amount.Cmp(maxEmissionInt) > 0 {
+				return fmt.Errorf("potso.rewards.EmissionPerEpochWei: value exceeds %s wei", maxEmissionInt.String())
+			}
+			return nil
+		}
+	case paramKeySlashingMaxPenaltyBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", paramKeySlashingMaxPenaltyBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", paramKeySlashingMaxPenaltyBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case paramKeySlashingWindow:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", paramKeySlashingWindow, err)
+			}
+			if value < minSlashingWindowSeconds || value > maxSlashingWindowSeconds {
+				return fmt.Errorf("%s: must be between %d and %d seconds", paramKeySlashingWindow, minSlashingWindowSeconds, maxSlashingWindowSeconds)
+			}
+			return nil
+		}
+	case paramKeySlashingEvidenceTTL:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", paramKeySlashingEvidenceTTL, err)
+			}
+			if value < minSlashingWindowSeconds || value > maxEvidenceTTLSeconds {
+				return fmt.Errorf("%s: must be between %d and %d seconds", paramKeySlashingEvidenceTTL, minSlashingWindowSeconds, maxEvidenceTTLSeconds)
+			}
+			return nil
+		}
+	case paramKeySlashingMaxSlashWei:
+		return func(raw json.RawMessage) error {
+			amount, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", paramKeySlashingMaxSlashWei, err)
+			}
+			if amount.Cmp(maxSlashWeiLimit) > 0 {
+				return fmt.Errorf("%s: value exceeds %s", paramKeySlashingMaxSlashWei, maxSlashWeiLimit.String())
+			}
+			return nil
+		}
+	case paramKeySlashingEnabled:
+		return func(raw json.RawMessage) error {
+			_, err := parseBoolRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", paramKeySlashingEnabled, err)
+			}
+			return nil
+		}
+	case "gov.deposit.MinProposalDeposit":
+		return func(raw json.RawMessage) error {
+			_, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("gov.deposit.MinProposalDeposit: %w", err)
+			}
+			return nil
+		}
+	case "gov.tally.QuorumBps":
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("gov.tally.QuorumBps: %w", err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("gov.tally.QuorumBps: must be <= %d", maxBasisPoints)
+			}
+			return nil
+		}
+	case "gov.tally.ThresholdBps":
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("gov.tally.ThresholdBps: %w", err)
+			}
+			if value < 5_000 || value > maxBasisPoints {
+				return fmt.Errorf("gov.tally.ThresholdBps: must be between 5000 and %d", maxBasisPoints)
+			}
+			return nil
+		}
+	case "gov.timelock.DurationSeconds":
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("gov.timelock.DurationSeconds: %w", err)
+			}
+			if value < 3_600 || value > 30*24*60*60 {
+				return fmt.Errorf("gov.timelock.DurationSeconds: must be between 3600 and 2592000 seconds")
+			}
+			return nil
+		}
+	default:
+		return nil
+	}
+}
+
+func parseUintRaw(raw json.RawMessage) (*big.Int, error) {
+	var value interface{}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return nil, fmt.Errorf("invalid numeric value: %w", err)
+	}
+	var text string
+	switch typed := value.(type) {
+	case json.Number:
+		text = typed.String()
+	case string:
+		text = strings.TrimSpace(typed)
+	default:
+		return nil, fmt.Errorf("value must be a number or decimal string")
+	}
+	text = strings.TrimPrefix(text, "+")
+	if text == "" {
+		return nil, fmt.Errorf("value must not be empty")
+	}
+	if strings.ContainsAny(text, ".eE") {
+		return nil, fmt.Errorf("value must be an integer")
+	}
+	if strings.HasPrefix(text, "-") {
+		return nil, fmt.Errorf("value must not be negative")
+	}
+	amount := new(big.Int)
+	if _, ok := amount.SetString(text, 10); !ok {
+		return nil, fmt.Errorf("invalid integer encoding")
+	}
+	return amount, nil
+}
+
+func parseUint64Raw(raw json.RawMessage) (uint64, error) {
+	amount, err := parseUintRaw(raw)
+	if err != nil {
+		return 0, err
+	}
+	if !amount.IsUint64() {
+		return 0, fmt.Errorf("value exceeds uint64 range")
+	}
+	value := amount.Uint64()
+	if value > maxGovernanceUint {
+		return 0, fmt.Errorf("value exceeds governance limit %d", maxGovernanceUint)
+	}
+	return value, nil
+}
+
+func parseBoolRaw(raw json.RawMessage) (bool, error) {
+	var value interface{}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, fmt.Errorf("invalid boolean value: %w", err)
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed, nil
+	case string:
+		normalized := strings.ToLower(strings.TrimSpace(typed))
+		switch normalized {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		default:
+			return false, fmt.Errorf("boolean string must be true or false")
+		}
+	default:
+		return false, fmt.Errorf("value must be boolean")
+	}
+	return false, fmt.Errorf("value must be boolean")
+}
+
+func (e *Engine) validateParamPayload(payloadJSON string) (map[string]json.RawMessage, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("governance: payload must contain at least one parameter")
+	}
+	validated := make(map[string]json.RawMessage, len(payload))
+	for key, raw := range payload {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			return nil, fmt.Errorf("governance: payload key must not be empty")
+		}
+		if _, ok := e.allowedParams[trimmed]; !ok {
+			return nil, fmt.Errorf("governance: parameter %q not in allow-list", trimmed)
+		}
+		validator, ok := e.paramValidators[trimmed]
+		if !ok {
+			return nil, fmt.Errorf("governance: parameter %q missing validation rule", trimmed)
+		}
+		if err := validator(raw); err != nil {
+			return nil, err
+		}
+		validated[trimmed] = append(json.RawMessage(nil), raw...)
+	}
+	return validated, nil
+}
+
+func parseUintString(value string) (*big.Int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	if strings.ContainsAny(trimmed, ".eE") {
+		return nil, fmt.Errorf("value must be an integer string")
+	}
+	trimmed = strings.TrimPrefix(trimmed, "+")
+	if strings.HasPrefix(trimmed, "-") {
+		return nil, fmt.Errorf("value must not be negative")
+	}
+	amount := new(big.Int)
+	if _, ok := amount.SetString(trimmed, 10); !ok {
+		return nil, fmt.Errorf("invalid integer encoding")
+	}
+	return amount, nil
+}
+
+func decodeAddress(addr string) ([20]byte, error) {
+	var out [20]byte
+	trimmed := strings.TrimSpace(addr)
+	if trimmed == "" {
+		return out, fmt.Errorf("address must not be empty")
+	}
+	decoded, err := crypto.DecodeAddress(trimmed)
+	if err != nil {
+		return out, fmt.Errorf("invalid address %q: %w", trimmed, err)
+	}
+	bytes := decoded.Bytes()
+	if len(bytes) != 20 {
+		return out, fmt.Errorf("address must be 20 bytes")
+	}
+	copy(out[:], bytes)
+	return out, nil
+}
+
+func formatAddress(addr [20]byte) string {
+	return crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), addr[:]...)).String()
+}
+
+func parseSlashingPolicyPayload(payloadJSON string) (*parsedSlashingPolicy, error) {
+	var payload SlashingPolicyPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	if payload.WindowSeconds < minSlashingWindowSeconds || payload.WindowSeconds > maxSlashingWindowSeconds {
+		return nil, fmt.Errorf("governance: slashing window must be between %d and %d seconds", minSlashingWindowSeconds, maxSlashingWindowSeconds)
+	}
+	if payload.MaxPenaltyBps > uint32(maxBasisPoints) {
+		return nil, fmt.Errorf("governance: maxPenaltyBps must be <= %d", maxBasisPoints)
+	}
+	if payload.EvidenceTTL == 0 {
+		return nil, fmt.Errorf("governance: evidenceTtlSeconds must be greater than zero")
+	}
+	if payload.EvidenceTTL < payload.WindowSeconds {
+		return nil, fmt.Errorf("governance: evidenceTtlSeconds must be >= windowSeconds")
+	}
+	if payload.EvidenceTTL > maxEvidenceTTLSeconds {
+		return nil, fmt.Errorf("governance: evidenceTtlSeconds must be <= %d", maxEvidenceTTLSeconds)
+	}
+	maxSlash, err := parseUintString(payload.MaxSlashWei)
+	if err != nil {
+		return nil, fmt.Errorf("governance: invalid maxSlashWei: %w", err)
+	}
+	if maxSlash.Cmp(maxSlashWeiLimit) > 0 {
+		return nil, fmt.Errorf("governance: maxSlashWei must be <= %s", maxSlashWeiLimit.String())
+	}
+	return &parsedSlashingPolicy{payload: payload, maxSlash: maxSlash}, nil
+}
+
+func (e *Engine) parseRoleAllowlistPayload(payloadJSON string) (*parsedRoleAllowlist, error) {
+	if len(e.allowedRoles) == 0 {
+		return nil, fmt.Errorf("governance: role allowlist proposals are disabled")
+	}
+	var payload RoleAllowlistPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	result := &parsedRoleAllowlist{memo: strings.TrimSpace(payload.Memo)}
+	for _, entry := range payload.Grant {
+		role := strings.TrimSpace(entry.Role)
+		if role == "" {
+			return nil, fmt.Errorf("governance: grant role must not be empty")
+		}
+		if _, ok := e.allowedRoles[role]; !ok {
+			return nil, fmt.Errorf("governance: role %q not in allow-list", role)
+		}
+		addr, err := decodeAddress(entry.Address)
+		if err != nil {
+			return nil, fmt.Errorf("governance: invalid grant address: %w", err)
+		}
+		result.grant = append(result.grant, roleMutation{role: role, addr: addr})
+	}
+	for _, entry := range payload.Revoke {
+		role := strings.TrimSpace(entry.Role)
+		if role == "" {
+			return nil, fmt.Errorf("governance: revoke role must not be empty")
+		}
+		if _, ok := e.allowedRoles[role]; !ok {
+			return nil, fmt.Errorf("governance: role %q not in allow-list", role)
+		}
+		addr, err := decodeAddress(entry.Address)
+		if err != nil {
+			return nil, fmt.Errorf("governance: invalid revoke address: %w", err)
+		}
+		result.revoke = append(result.revoke, roleMutation{role: role, addr: addr})
+	}
+	if len(result.grant) == 0 && len(result.revoke) == 0 {
+		return nil, fmt.Errorf("governance: role payload must include grant or revoke entries")
+	}
+	return result, nil
+}
+
+func (e *Engine) parseTreasuryDirectivePayload(payloadJSON string) (*parsedTreasuryDirective, error) {
+	if len(e.treasuryAllow) == 0 {
+		return nil, fmt.Errorf("governance: treasury directives are disabled")
+	}
+	var payload TreasuryDirectivePayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	src, err := decodeAddress(payload.Source)
+	if err != nil {
+		return nil, fmt.Errorf("governance: invalid source address: %w", err)
+	}
+	if _, ok := e.treasuryAllow[src]; !ok {
+		return nil, fmt.Errorf("governance: source %s not in treasury allow-list", crypto.NewAddress(crypto.NHBPrefix, src[:]).String())
+	}
+	if len(payload.Transfers) == 0 {
+		return nil, fmt.Errorf("governance: treasury directive must include at least one transfer")
+	}
+	result := &parsedTreasuryDirective{source: src, memo: strings.TrimSpace(payload.Memo), total: big.NewInt(0)}
+	for idx, entry := range payload.Transfers {
+		to, err := decodeAddress(entry.To)
+		if err != nil {
+			return nil, fmt.Errorf("governance: invalid transfer #%d address: %w", idx, err)
+		}
+		amount, err := parseUintString(entry.AmountWei)
+		if err != nil {
+			return nil, fmt.Errorf("governance: invalid transfer #%d amount: %w", idx, err)
+		}
+		if amount.Sign() <= 0 {
+			return nil, fmt.Errorf("governance: transfer #%d amount must be positive", idx)
+		}
+		result.total = new(big.Int).Add(result.total, amount)
+		result.transfers = append(result.transfers, treasuryTransferDecoded{
+			to:     to,
+			amount: new(big.Int).Set(amount),
+			memo:   strings.TrimSpace(entry.Memo),
+			kind:   strings.TrimSpace(entry.Kind),
+		})
+	}
+	return result, nil
+}
+
+func (e *Engine) applyParamUpdates(payloadJSON string) ([]string, error) {
+	payload, err := e.validateParamPayload(payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(payload))
+	for key, raw := range payload {
+		if err := e.state.ParamStoreSet(key, append([]byte(nil), raw...)); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+func (e *Engine) applySlashingPolicy(parsed *parsedSlashingPolicy) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil slashing policy payload")
+	}
+	policy := parsed.payload
+	if err := e.state.ParamStoreSet(paramKeySlashingEnabled, []byte(strconv.FormatBool(policy.Enabled))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(paramKeySlashingMaxPenaltyBps, []byte(strconv.FormatUint(uint64(policy.MaxPenaltyBps), 10))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(paramKeySlashingWindow, []byte(strconv.FormatUint(policy.WindowSeconds, 10))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(paramKeySlashingEvidenceTTL, []byte(strconv.FormatUint(policy.EvidenceTTL, 10))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(paramKeySlashingMaxSlashWei, []byte(parsed.maxSlash.String())); err != nil {
+		return nil, err
+	}
+	detail := map[string]interface{}{
+		"enabled":            policy.Enabled,
+		"maxPenaltyBps":      policy.MaxPenaltyBps,
+		"windowSeconds":      policy.WindowSeconds,
+		"maxSlashWei":        parsed.maxSlash.String(),
+		"evidenceTtlSeconds": policy.EvidenceTTL,
+	}
+	if strings.TrimSpace(policy.Notes) != "" {
+		detail["notes"] = strings.TrimSpace(policy.Notes)
+	}
+	return detail, nil
+}
+
+func (e *Engine) applyRoleAllowlist(parsed *parsedRoleAllowlist) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil role payload")
+	}
+	grants := make([]map[string]string, 0, len(parsed.grant))
+	for _, entry := range parsed.grant {
+		if err := e.state.SetRole(entry.role, entry.addr[:]); err != nil {
+			return nil, err
+		}
+		grants = append(grants, map[string]string{
+			"role":    entry.role,
+			"address": formatAddress(entry.addr),
+		})
+	}
+	revocations := make([]map[string]string, 0, len(parsed.revoke))
+	for _, entry := range parsed.revoke {
+		if err := e.state.RemoveRole(entry.role, entry.addr[:]); err != nil {
+			return nil, err
+		}
+		revocations = append(revocations, map[string]string{
+			"role":    entry.role,
+			"address": formatAddress(entry.addr),
+		})
+	}
+	detail := map[string]interface{}{
+		"grants":  grants,
+		"revokes": revocations,
+	}
+	if parsed.memo != "" {
+		detail["memo"] = parsed.memo
+	}
+	return detail, nil
+}
+
+func (e *Engine) applyTreasuryDirective(parsed *parsedTreasuryDirective) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil treasury directive")
+	}
+	sourceAccount, err := e.state.GetAccount(parsed.source[:])
+	if err != nil {
+		return nil, err
+	}
+	if sourceAccount == nil {
+		sourceAccount = &types.Account{}
+	}
+	if sourceAccount.BalanceZNHB == nil {
+		sourceAccount.BalanceZNHB = big.NewInt(0)
+	}
+	if sourceAccount.BalanceZNHB.Cmp(parsed.total) < 0 {
+		return nil, fmt.Errorf("governance: treasury insufficient balance")
+	}
+	sourceAccount.BalanceZNHB = new(big.Int).Sub(sourceAccount.BalanceZNHB, parsed.total)
+	if err := e.state.PutAccount(parsed.source[:], sourceAccount); err != nil {
+		return nil, err
+	}
+	transfers := make([]map[string]string, 0, len(parsed.transfers))
+	for _, transfer := range parsed.transfers {
+		account, err := e.state.GetAccount(transfer.to[:])
+		if err != nil {
+			return nil, err
+		}
+		if account == nil {
+			account = &types.Account{}
+		}
+		if account.BalanceZNHB == nil {
+			account.BalanceZNHB = big.NewInt(0)
+		}
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, transfer.amount)
+		if err := e.state.PutAccount(transfer.to[:], account); err != nil {
+			return nil, err
+		}
+		entry := map[string]string{
+			"to":     formatAddress(transfer.to),
+			"amount": transfer.amount.String(),
+		}
+		if transfer.memo != "" {
+			entry["memo"] = transfer.memo
+		}
+		if transfer.kind != "" {
+			entry["kind"] = transfer.kind
+		}
+		transfers = append(transfers, entry)
+	}
+	detail := map[string]interface{}{
+		"source":    formatAddress(parsed.source),
+		"totalWei":  parsed.total.String(),
+		"transfers": transfers,
+	}
+	if parsed.memo != "" {
+		detail["memo"] = parsed.memo
+	}
+	return detail, nil
+}
+
+func (e *Engine) appendAudit(event AuditEvent, proposalID uint64, actor []byte, details interface{}) error {
+	if e == nil || e.state == nil {
+		return errStateNotConfigured
+	}
+	record := &AuditRecord{
+		Timestamp:  e.now(),
+		Event:      event,
+		ProposalID: proposalID,
+	}
+	if len(actor) == 20 {
+		var addr [20]byte
+		copy(addr[:], actor)
+		record.Actor = AddressText(formatAddress(addr))
+	}
+	if details != nil {
+		switch v := details.(type) {
+		case string:
+			record.Details = v
+		default:
+			payload, err := json.Marshal(v)
+			if err != nil {
+				return err
+			}
+			record.Details = string(payload)
+		}
+	}
+	if _, err := e.state.GovernanceAppendAudit(record); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *Engine) emit(event *types.Event) {
@@ -151,30 +810,41 @@ func (e *Engine) now() time.Time {
 	return e.nowFn()
 }
 
-// ProposeParamChange admits a parameter change proposal after validating the
-// payload, deposit, and kind against the configured policy. The function returns
-// the allocated proposal identifier on success.
-func (e *Engine) ProposeParamChange(proposer [20]byte, kind string, payloadJSON string, deposit *big.Int) (uint64, error) {
+// SubmitProposal admits a governance proposal after validating the payload,
+// deposit, and kind against the configured policy. The function returns the
+// allocated proposal identifier on success.
+func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON string, deposit *big.Int) (uint64, error) {
 	if e == nil || e.state == nil {
 		return 0, errStateNotConfigured
 	}
 	proposalKind := strings.TrimSpace(kind)
-	if proposalKind != ProposalKindParamUpdate {
-		return 0, fmt.Errorf("governance: unsupported proposal kind %q", kind)
+	if proposalKind == "" {
+		return 0, fmt.Errorf("governance: proposal kind must not be empty")
+	}
+	payloadJSON = strings.TrimSpace(payloadJSON)
+	if payloadJSON == "" {
+		return 0, fmt.Errorf("governance: payload must not be empty")
 	}
 
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return 0, fmt.Errorf("governance: invalid payload: %w", err)
-	}
-	for key := range payload {
-		trimmed := strings.TrimSpace(key)
-		if trimmed == "" {
-			return 0, fmt.Errorf("governance: payload key must not be empty")
+	switch proposalKind {
+	case ProposalKindParamUpdate, ProposalKindParamEmergency:
+		if _, err := e.validateParamPayload(payloadJSON); err != nil {
+			return 0, err
 		}
-		if _, ok := e.allowedParams[trimmed]; !ok {
-			return 0, fmt.Errorf("governance: parameter %q not in allow-list", trimmed)
+	case ProposalKindSlashingPolicy:
+		if _, err := parseSlashingPolicyPayload(payloadJSON); err != nil {
+			return 0, err
 		}
+	case ProposalKindRoleAllowlist:
+		if _, err := e.parseRoleAllowlistPayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindTreasuryDirective:
+		if _, err := e.parseTreasuryDirectivePayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	default:
+		return 0, fmt.Errorf("governance: unsupported proposal kind %q", kind)
 	}
 
 	lockAmount := big.NewInt(0)
@@ -237,6 +907,9 @@ func (e *Engine) ProposeParamChange(proposer [20]byte, kind string, payloadJSON 
 	}
 
 	e.emit(newProposedEvent(proposal))
+	if err := e.appendAudit(AuditEventProposed, proposalID, proposer[:], map[string]string{"kind": proposalKind}); err != nil {
+		return 0, err
+	}
 	return proposalID, nil
 }
 
@@ -319,6 +992,12 @@ func (e *Engine) CastVote(proposalID uint64, voter [20]byte, choice string) erro
 	}
 
 	e.emit(newVoteEvent(vote))
+	if err := e.appendAudit(AuditEventVote, proposalID, voter[:], map[string]interface{}{
+		"choice":   voteChoice.String(),
+		"powerBps": power,
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -445,6 +1124,20 @@ func (e *Engine) Finalize(proposalID uint64) (ProposalStatus, *Tally, error) {
 	}
 
 	e.emit(newFinalizedEvent(proposal, tally))
+	detail := map[string]interface{}{
+		"status":           status.StatusString(),
+		"turnoutBps":       tally.TurnoutBps,
+		"yesPowerBps":      tally.YesPowerBps,
+		"noPowerBps":       tally.NoPowerBps,
+		"abstainPowerBps":  tally.AbstainPowerBps,
+		"yesRatioBps":      tally.YesRatioBps,
+		"totalBallots":     tally.TotalBallots,
+		"passThresholdBps": tally.PassThresholdBps,
+		"quorumBps":        tally.QuorumBps,
+	}
+	if err := e.appendAudit(AuditEventFinalized, proposalID, nil, detail); err != nil {
+		return ProposalStatusUnspecified, nil, err
+	}
 	return status, tally, nil
 }
 
@@ -475,6 +1168,13 @@ func (e *Engine) QueueExecution(proposalID uint64) error {
 		return err
 	}
 	e.emit(newQueuedEvent(proposal))
+	detail := map[string]interface{}{
+		"timelockEnd": proposal.TimelockEnd.Unix(),
+		"kind":        strings.TrimSpace(proposal.Target),
+	}
+	if err := e.appendAudit(AuditEventQueued, proposalID, nil, detail); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -507,29 +1207,61 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return fmt.Errorf("governance: timelock not yet elapsed")
 		}
 	}
-	if strings.TrimSpace(proposal.Target) != ProposalKindParamUpdate {
-		return fmt.Errorf("governance: proposal %d has unsupported target %q", proposalID, proposal.Target)
-	}
-
 	if strings.TrimSpace(proposal.ProposedChange) == "" {
 		return fmt.Errorf("governance: proposal %d has empty payload", proposalID)
 	}
 
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(proposal.ProposedChange), &payload); err != nil {
-		return fmt.Errorf("governance: invalid proposed change: %w", err)
+	target := strings.TrimSpace(proposal.Target)
+	if target == "" {
+		return fmt.Errorf("governance: proposal %d missing target", proposalID)
 	}
-	for key, raw := range payload {
-		trimmed := strings.TrimSpace(key)
-		if trimmed == "" {
-			return fmt.Errorf("governance: payload key must not be empty")
-		}
-		if _, allowed := e.allowedParams[trimmed]; !allowed {
-			return fmt.Errorf("governance: parameter %q not in allow-list", trimmed)
-		}
-		if err := e.state.ParamStoreSet(trimmed, append([]byte(nil), raw...)); err != nil {
+	detail := map[string]interface{}{"kind": target}
+
+	switch target {
+	case ProposalKindParamUpdate, ProposalKindParamEmergency:
+		keys, err := e.applyParamUpdates(proposal.ProposedChange)
+		if err != nil {
 			return err
 		}
+		detail["keys"] = keys
+	case ProposalKindSlashingPolicy:
+		parsed, err := parseSlashingPolicyPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		slashingDetail, err := e.applySlashingPolicy(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range slashingDetail {
+			detail[k] = v
+		}
+	case ProposalKindRoleAllowlist:
+		parsed, err := e.parseRoleAllowlistPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		roleDetail, err := e.applyRoleAllowlist(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range roleDetail {
+			detail[k] = v
+		}
+	case ProposalKindTreasuryDirective:
+		parsed, err := e.parseTreasuryDirectivePayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		treasuryDetail, err := e.applyTreasuryDirective(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range treasuryDetail {
+			detail[k] = v
+		}
+	default:
+		return fmt.Errorf("governance: proposal %d has unsupported target %q", proposalID, proposal.Target)
 	}
 
 	proposal.Status = ProposalStatusExecuted
@@ -537,6 +1269,9 @@ func (e *Engine) Execute(proposalID uint64) error {
 		return err
 	}
 	e.emit(newExecutedEvent(proposal))
+	if err := e.appendAudit(AuditEventExecuted, proposalID, nil, detail); err != nil {
+		return err
+	}
 	return nil
 }
 
