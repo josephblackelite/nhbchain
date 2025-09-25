@@ -24,6 +24,8 @@ const (
 	EventTypeProposalProposed = "gov.proposed"
 	// EventTypeVoteCast is emitted when a voter records or updates a ballot.
 	EventTypeVoteCast = "gov.vote"
+	// EventTypeProposalFinalized is emitted when the proposal outcome is determined.
+	EventTypeProposalFinalized = "gov.finalized"
 )
 
 var (
@@ -35,10 +37,12 @@ type proposalState interface {
 	PutAccount(addr []byte, account *types.Account) error
 	GovernanceEscrowBalance(addr []byte) (*big.Int, error)
 	GovernanceEscrowLock(addr []byte, amount *big.Int) (*big.Int, error)
+	GovernanceEscrowUnlock(addr []byte, amount *big.Int) (*big.Int, error)
 	GovernanceNextProposalID() (uint64, error)
 	GovernancePutProposal(p *Proposal) error
 	GovernanceGetProposal(id uint64) (*Proposal, bool, error)
 	GovernancePutVote(v *Vote) error
+	GovernanceListVotes(id uint64) ([]*Vote, error)
 	PotsoRewardsLastProcessedEpoch() (uint64, bool, error)
 	SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error)
 }
@@ -53,6 +57,8 @@ type ProposalPolicy struct {
 	VotingPeriodSeconds uint64
 	TimelockSeconds     uint64
 	AllowedParams       []string
+	QuorumBps           uint64
+	PassThresholdBps    uint64
 }
 
 // Engine orchestrates proposal admission and bookkeeping for governance
@@ -65,6 +71,8 @@ type Engine struct {
 	votingPeriodSeconds uint64
 	timelockSeconds     uint64
 	allowedParams       map[string]struct{}
+	quorumBps           uint64
+	passThresholdBps    uint64
 }
 
 // NewEngine constructs a governance engine with default no-op dependencies.
@@ -120,6 +128,8 @@ func (e *Engine) SetPolicy(policy ProposalPolicy) {
 		}
 		e.allowedParams[trimmed] = struct{}{}
 	}
+	e.quorumBps = policy.QuorumBps
+	e.passThresholdBps = policy.PassThresholdBps
 }
 
 func (e *Engine) emit(event *types.Event) {
@@ -307,6 +317,132 @@ func (e *Engine) CastVote(proposalID uint64, voter [20]byte, choice string) erro
 	return nil
 }
 
+// Finalize closes the voting window for the proposal, tallies the recorded
+// ballots, and transitions the proposal to a terminal status. The proposal must
+// be in the voting period and the voting end timestamp must have elapsed prior
+// to calling this method.
+func (e *Engine) Finalize(proposalID uint64) (ProposalStatus, *Tally, error) {
+	if e == nil || e.state == nil {
+		return ProposalStatusUnspecified, nil, errStateNotConfigured
+	}
+	proposal, ok, err := e.state.GovernanceGetProposal(proposalID)
+	if err != nil {
+		return ProposalStatusUnspecified, nil, err
+	}
+	if !ok || proposal == nil {
+		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: proposal %d not found", proposalID)
+	}
+	if proposal.Status != ProposalStatusVotingPeriod {
+		return proposal.Status, nil, fmt.Errorf("governance: proposal %d not in voting period", proposalID)
+	}
+	if proposal.VotingEnd.IsZero() {
+		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: proposal %d missing voting end", proposalID)
+	}
+	now := e.now()
+	if now.Before(proposal.VotingEnd) {
+		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: voting still in progress")
+	}
+
+	votes, err := e.state.GovernanceListVotes(proposalID)
+	if err != nil {
+		return ProposalStatusUnspecified, nil, err
+	}
+
+	var (
+		yesPower     uint64
+		noPower      uint64
+		abstainPower uint64
+	)
+	for _, vote := range votes {
+		if vote == nil {
+			continue
+		}
+		weight := uint64(vote.PowerBps)
+		switch vote.Choice {
+		case VoteChoiceYes:
+			if math.MaxUint64-yesPower < weight {
+				return ProposalStatusUnspecified, nil, fmt.Errorf("governance: yes tally overflow")
+			}
+			yesPower += weight
+		case VoteChoiceNo:
+			if math.MaxUint64-noPower < weight {
+				return ProposalStatusUnspecified, nil, fmt.Errorf("governance: no tally overflow")
+			}
+			noPower += weight
+		case VoteChoiceAbstain:
+			if math.MaxUint64-abstainPower < weight {
+				return ProposalStatusUnspecified, nil, fmt.Errorf("governance: abstain tally overflow")
+			}
+			abstainPower += weight
+		default:
+			return ProposalStatusUnspecified, nil, fmt.Errorf("governance: invalid vote choice %q", vote.Choice)
+		}
+	}
+
+	if math.MaxUint64-yesPower < noPower {
+		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: tally overflow")
+	}
+	running := yesPower + noPower
+	if math.MaxUint64-running < abstainPower {
+		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: tally overflow")
+	}
+	totalPower := running + abstainPower
+	yesDenom := yesPower + noPower
+	var yesRatio uint64
+	if yesDenom > 0 {
+		yesRatio = (yesPower * 10_000) / yesDenom
+	}
+	tally := &Tally{
+		TurnoutBps:       totalPower,
+		QuorumBps:        e.quorumBps,
+		YesPowerBps:      yesPower,
+		NoPowerBps:       noPower,
+		AbstainPowerBps:  abstainPower,
+		YesRatioBps:      yesRatio,
+		PassThresholdBps: e.passThresholdBps,
+		TotalBallots:     uint64(len(votes)),
+	}
+
+	status := ProposalStatusRejected
+	meetsQuorum := totalPower >= e.quorumBps
+	if meetsQuorum && yesRatio >= e.passThresholdBps {
+		status = ProposalStatusPassed
+	}
+
+	if status == ProposalStatusPassed && proposal.Deposit != nil && proposal.Deposit.Sign() > 0 {
+		submitter := append([]byte(nil), proposal.Submitter.Bytes()...)
+		if len(submitter) != 20 {
+			return ProposalStatusUnspecified, nil, fmt.Errorf("governance: invalid submitter address length")
+		}
+		account, err := e.state.GetAccount(submitter)
+		if err != nil {
+			return ProposalStatusUnspecified, nil, err
+		}
+		if account == nil {
+			account = &types.Account{}
+		}
+		if account.BalanceZNHB == nil {
+			account.BalanceZNHB = big.NewInt(0)
+		}
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, proposal.Deposit)
+		if err := e.state.PutAccount(submitter, account); err != nil {
+			return ProposalStatusUnspecified, nil, err
+		}
+		if _, err := e.state.GovernanceEscrowUnlock(submitter, proposal.Deposit); err != nil {
+			return ProposalStatusUnspecified, nil, err
+		}
+		proposal.Deposit = big.NewInt(0)
+	}
+
+	proposal.Status = status
+	if err := e.state.GovernancePutProposal(proposal); err != nil {
+		return ProposalStatusUnspecified, nil, err
+	}
+
+	e.emit(newFinalizedEvent(proposal, tally))
+	return status, tally, nil
+}
+
 type governanceEvent struct {
 	evt *types.Event
 }
@@ -364,4 +500,25 @@ func newVoteEvent(v *Vote) *types.Event {
 		attrs["timestamp"] = strconv.FormatInt(v.Timestamp.Unix(), 10)
 	}
 	return &types.Event{Type: EventTypeVoteCast, Attributes: attrs}
+}
+
+func newFinalizedEvent(p *Proposal, tally *Tally) *types.Event {
+	attrs := make(map[string]string)
+	if p != nil {
+		attrs["id"] = strconv.FormatUint(p.ID, 10)
+		if status := p.Status.StatusString(); status != "" {
+			attrs["status"] = status
+		}
+	}
+	if tally != nil {
+		attrs["turnoutBps"] = strconv.FormatUint(tally.TurnoutBps, 10)
+		attrs["quorumBps"] = strconv.FormatUint(tally.QuorumBps, 10)
+		attrs["yesPowerBps"] = strconv.FormatUint(tally.YesPowerBps, 10)
+		attrs["noPowerBps"] = strconv.FormatUint(tally.NoPowerBps, 10)
+		attrs["abstainPowerBps"] = strconv.FormatUint(tally.AbstainPowerBps, 10)
+		attrs["yesRatioBps"] = strconv.FormatUint(tally.YesRatioBps, 10)
+		attrs["passThresholdBps"] = strconv.FormatUint(tally.PassThresholdBps, 10)
+		attrs["totalBallots"] = strconv.FormatUint(tally.TotalBallots, 10)
+	}
+	return &types.Event{Type: EventTypeProposalFinalized, Attributes: attrs}
 }

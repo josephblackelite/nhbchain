@@ -41,6 +41,20 @@ func TestGovernanceEscrowAndProposalHelpers(t *testing.T) {
 		t.Fatalf("unexpected reload balance: %s", balance.String())
 	}
 
+	if updated, err := manager.GovernanceEscrowUnlock(addrBytes, big.NewInt(150)); err != nil {
+		t.Fatalf("escrow unlock: %v", err)
+	} else if updated.Cmp(big.NewInt(150)) != 0 {
+		t.Fatalf("unexpected unlock balance: %s", updated.String())
+	}
+	if _, err := manager.GovernanceEscrowUnlock(addrBytes, big.NewInt(500)); err == nil {
+		t.Fatalf("expected unlock overflow error")
+	}
+	if balance, err := manager.GovernanceEscrowBalance(addrBytes); err != nil {
+		t.Fatalf("escrow balance post-unlock: %v", err)
+	} else if balance.Cmp(big.NewInt(150)) != 0 {
+		t.Fatalf("unexpected post-unlock balance: %s", balance.String())
+	}
+
 	nextID, err := manager.GovernanceNextProposalID()
 	if err != nil {
 		t.Fatalf("next proposal id: %v", err)
@@ -94,5 +108,82 @@ func TestGovernanceEscrowAndProposalHelpers(t *testing.T) {
 	}
 	if loaded.Target != proposal.Target {
 		t.Fatalf("unexpected target: got %s want %s", loaded.Target, proposal.Target)
+	}
+}
+
+func TestGovernanceVoteIndexing(t *testing.T) {
+	manager := newTestManager(t)
+	proposalID := uint64(5)
+	voterA := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 1))
+	voterB := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 2))
+
+	voteA := &governance.Vote{
+		ProposalID: proposalID,
+		Voter:      voterA,
+		Choice:     governance.VoteChoiceYes,
+		PowerBps:   1500,
+		Timestamp:  time.Unix(1700000100, 0).UTC(),
+	}
+	if err := manager.GovernancePutVote(voteA); err != nil {
+		t.Fatalf("store vote a: %v", err)
+	}
+
+	voteB := &governance.Vote{
+		ProposalID: proposalID,
+		Voter:      voterB,
+		Choice:     governance.VoteChoiceNo,
+		PowerBps:   500,
+		Timestamp:  time.Unix(1700000200, 0).UTC(),
+	}
+	if err := manager.GovernancePutVote(voteB); err != nil {
+		t.Fatalf("store vote b: %v", err)
+	}
+
+	// Overwrite voter A to ensure updates are reflected in the index.
+	voteAUpdate := &governance.Vote{
+		ProposalID: proposalID,
+		Voter:      voterA,
+		Choice:     governance.VoteChoiceAbstain,
+		PowerBps:   2000,
+		Timestamp:  time.Unix(1700000300, 0).UTC(),
+	}
+	if err := manager.GovernancePutVote(voteAUpdate); err != nil {
+		t.Fatalf("update vote a: %v", err)
+	}
+
+	votes, err := manager.GovernanceListVotes(proposalID)
+	if err != nil {
+		t.Fatalf("list votes: %v", err)
+	}
+	if len(votes) != 2 {
+		t.Fatalf("expected 2 votes, got %d", len(votes))
+	}
+
+	foundAbstain := false
+	foundNo := false
+	for _, vote := range votes {
+		switch vote.Voter.String() {
+		case voterA.String():
+			if vote.Choice != governance.VoteChoiceAbstain {
+				t.Fatalf("unexpected choice for voter A: %s", vote.Choice)
+			}
+			if vote.PowerBps != 2000 {
+				t.Fatalf("unexpected power for voter A: %d", vote.PowerBps)
+			}
+			foundAbstain = true
+		case voterB.String():
+			if vote.Choice != governance.VoteChoiceNo {
+				t.Fatalf("unexpected choice for voter B: %s", vote.Choice)
+			}
+			if vote.PowerBps != 500 {
+				t.Fatalf("unexpected power for voter B: %d", vote.PowerBps)
+			}
+			foundNo = true
+		default:
+			t.Fatalf("unexpected voter returned: %s", vote.Voter.String())
+		}
+	}
+	if !foundAbstain || !foundNo {
+		t.Fatalf("missing expected votes")
 	}
 }

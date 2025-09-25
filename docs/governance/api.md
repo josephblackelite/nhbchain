@@ -45,3 +45,23 @@ Submits a `param.update` proposal. The payload must only contain allow-listed pa
 ```
 
 On success, a `gov.proposed` event is emitted for downstream consumers.
+
+### Tally Schema
+
+Finalized proposals expose a `tally` object summarising the recorded voting
+power. The ratios are expressed in basis points (1/10,000). `yes_ratio_bps`
+excludes abstain votes from the numerator and denominator per the governance
+rules.
+
+```json
+{
+  "turnout_bps": 4200,
+  "quorum_bps": 3000,
+  "yes_power_bps": 2100,
+  "no_power_bps": 1500,
+  "abstain_power_bps": 600,
+  "yes_ratio_bps": 5833,
+  "pass_threshold_bps": 5000,
+  "total_ballots": 12
+}
+```
