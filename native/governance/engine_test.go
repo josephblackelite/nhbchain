@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -8,12 +9,17 @@ import (
 
 	"nhbchain/core/events"
 	"nhbchain/core/types"
+	"nhbchain/native/potso"
 )
 
 type mockGovernanceState struct {
 	accounts       map[string]*types.Account
 	escrowBalances map[string]*big.Int
 	proposals      map[uint64]*Proposal
+	votes          map[string]*Vote
+	snapshots      map[uint64]*potso.StoredWeightSnapshot
+	lastEpoch      uint64
+	hasLastEpoch   bool
 	nextID         uint64
 }
 
@@ -26,6 +32,8 @@ func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernance
 		accounts:       accounts,
 		escrowBalances: make(map[string]*big.Int),
 		proposals:      make(map[uint64]*Proposal),
+		votes:          make(map[string]*Vote),
+		snapshots:      make(map[uint64]*potso.StoredWeightSnapshot),
 	}
 }
 
@@ -75,6 +83,43 @@ func (m *mockGovernanceState) GovernancePutProposal(p *Proposal) error {
 	return nil
 }
 
+func (m *mockGovernanceState) GovernanceGetProposal(id uint64) (*Proposal, bool, error) {
+	proposal, ok := m.proposals[id]
+	if !ok {
+		return nil, false, nil
+	}
+	clone := *proposal
+	if proposal.Deposit != nil {
+		clone.Deposit = new(big.Int).Set(proposal.Deposit)
+	}
+	return &clone, true, nil
+}
+
+func (m *mockGovernanceState) GovernancePutVote(v *Vote) error {
+	if v == nil {
+		return fmt.Errorf("vote must not be nil")
+	}
+	key := fmt.Sprintf("%d/%x", v.ProposalID, v.Voter.Bytes())
+	clone := *v
+	m.votes[key] = &clone
+	return nil
+}
+
+func (m *mockGovernanceState) PotsoRewardsLastProcessedEpoch() (uint64, bool, error) {
+	if !m.hasLastEpoch {
+		return 0, false, nil
+	}
+	return m.lastEpoch, true, nil
+}
+
+func (m *mockGovernanceState) SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error) {
+	snapshot, ok := m.snapshots[epoch]
+	if !ok {
+		return nil, false, nil
+	}
+	return cloneStoredWeightSnapshot(snapshot), true, nil
+}
+
 type captureEmitter struct {
 	events []events.Event
 }
@@ -107,6 +152,34 @@ func cloneAccount(acc *types.Account) *types.Account {
 		cloned.LockedZNHB = big.NewInt(0)
 	}
 	return &cloned
+}
+
+func cloneStoredWeightSnapshot(snapshot *potso.StoredWeightSnapshot) *potso.StoredWeightSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	clone := &potso.StoredWeightSnapshot{
+		Epoch:           snapshot.Epoch,
+		TotalEngagement: snapshot.TotalEngagement,
+	}
+	if snapshot.TotalStake != nil {
+		clone.TotalStake = new(big.Int).Set(snapshot.TotalStake)
+	}
+	if len(snapshot.Entries) > 0 {
+		clone.Entries = make([]potso.StoredWeightEntry, len(snapshot.Entries))
+		for i := range snapshot.Entries {
+			entry := snapshot.Entries[i]
+			clone.Entries[i] = potso.StoredWeightEntry{
+				Address:            entry.Address,
+				Stake:              new(big.Int).Set(entry.Stake),
+				Engagement:         entry.Engagement,
+				StakeShareBps:      entry.StakeShareBps,
+				EngagementShareBps: entry.EngagementShareBps,
+				WeightBps:          entry.WeightBps,
+			}
+		}
+	}
+	return clone
 }
 
 func TestProposeParamChangeRejectsUnknownParam(t *testing.T) {
@@ -231,5 +304,182 @@ func TestProposeParamChangeLocksDepositAndEmitsEvent(t *testing.T) {
 	}
 	if payloadEvent.Attributes["deposit"] != deposit.String() {
 		t.Fatalf("unexpected event deposit: %s", payloadEvent.Attributes["deposit"])
+	}
+}
+
+func voteStorageKey(proposalID uint64, voter [20]byte) string {
+	return fmt.Sprintf("%d/%x", proposalID, voter)
+}
+
+func TestCastVoteRecordsBallot(t *testing.T) {
+	var voter [20]byte
+	voter[3] = 9
+	now := time.Unix(1_700_000_500, 0).UTC()
+
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:          1,
+		Status:      ProposalStatusVotingPeriod,
+		VotingStart: now.Add(-time.Hour),
+		VotingEnd:   now.Add(time.Hour),
+	}
+	state.proposals[proposal.ID] = proposal
+	state.snapshots[4] = &potso.StoredWeightSnapshot{
+		Epoch: 4,
+		Entries: []potso.StoredWeightEntry{
+			{Address: voter, Stake: big.NewInt(10), WeightBps: 1200},
+		},
+	}
+	state.lastEpoch = 4
+	state.hasLastEpoch = true
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+	emitter := &captureEmitter{}
+	engine.SetEmitter(emitter)
+
+	if err := engine.CastVote(1, voter, "yes"); err != nil {
+		t.Fatalf("cast vote: %v", err)
+	}
+
+	stored, ok := state.votes[voteStorageKey(1, voter)]
+	if !ok {
+		t.Fatalf("expected stored vote")
+	}
+	if stored.Choice != VoteChoiceYes {
+		t.Fatalf("unexpected choice: %s", stored.Choice)
+	}
+	if stored.PowerBps != 1200 {
+		t.Fatalf("unexpected power: %d", stored.PowerBps)
+	}
+	if stored.Timestamp != now {
+		t.Fatalf("unexpected timestamp: got %s want %s", stored.Timestamp, now)
+	}
+
+	if len(emitter.events) != 1 {
+		t.Fatalf("expected event emission")
+	}
+	evt := emitter.events[0].(governanceEvent).Event()
+	if evt.Type != EventTypeVoteCast {
+		t.Fatalf("unexpected event type: %s", evt.Type)
+	}
+	if evt.Attributes["choice"] != "yes" {
+		t.Fatalf("unexpected event choice: %s", evt.Attributes["choice"])
+	}
+	if evt.Attributes["powerBps"] != "1200" {
+		t.Fatalf("unexpected event power: %s", evt.Attributes["powerBps"])
+	}
+}
+
+func TestCastVoteOverwriteUpdatesBallot(t *testing.T) {
+	var voter [20]byte
+	voter[5] = 7
+	now := time.Unix(1_700_000_700, 0).UTC()
+
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:          2,
+		Status:      ProposalStatusVotingPeriod,
+		VotingStart: now.Add(-time.Minute),
+		VotingEnd:   now.Add(time.Hour),
+	}
+	state.proposals[proposal.ID] = proposal
+	state.snapshots[8] = &potso.StoredWeightSnapshot{
+		Epoch:   8,
+		Entries: []potso.StoredWeightEntry{{Address: voter, Stake: big.NewInt(5), WeightBps: 900}},
+	}
+	state.lastEpoch = 8
+	state.hasLastEpoch = true
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+
+	if err := engine.CastVote(2, voter, "abstain"); err != nil {
+		t.Fatalf("initial vote: %v", err)
+	}
+
+	state.snapshots[8] = &potso.StoredWeightSnapshot{
+		Epoch:   8,
+		Entries: []potso.StoredWeightEntry{{Address: voter, Stake: big.NewInt(5), WeightBps: 1500}},
+	}
+
+	if err := engine.CastVote(2, voter, "no"); err != nil {
+		t.Fatalf("overwrite vote: %v", err)
+	}
+
+	stored, ok := state.votes[voteStorageKey(2, voter)]
+	if !ok {
+		t.Fatalf("expected stored vote")
+	}
+	if stored.Choice != VoteChoiceNo {
+		t.Fatalf("unexpected choice: %s", stored.Choice)
+	}
+	if stored.PowerBps != 1500 {
+		t.Fatalf("unexpected power after overwrite: %d", stored.PowerBps)
+	}
+}
+
+func TestCastVoteRejectsZeroPower(t *testing.T) {
+	var voter [20]byte
+	voter[2] = 1
+	now := time.Unix(1_700_000_900, 0).UTC()
+
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:          3,
+		Status:      ProposalStatusVotingPeriod,
+		VotingStart: now.Add(-time.Hour),
+		VotingEnd:   now.Add(time.Hour),
+	}
+	state.proposals[proposal.ID] = proposal
+	state.snapshots[10] = &potso.StoredWeightSnapshot{Epoch: 10}
+	state.lastEpoch = 10
+	state.hasLastEpoch = true
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+
+	err := engine.CastVote(3, voter, "yes")
+	if err == nil || !strings.Contains(err.Error(), "zero voting power") {
+		t.Fatalf("expected zero power rejection, got %v", err)
+	}
+	if _, ok := state.votes[voteStorageKey(3, voter)]; ok {
+		t.Fatalf("did not expect stored vote")
+	}
+}
+
+func TestCastVoteRejectsOutsideWindow(t *testing.T) {
+	var voter [20]byte
+	voter[9] = 4
+	now := time.Unix(1_700_001_100, 0).UTC()
+
+	state := newMockGovernanceState(nil)
+	proposal := &Proposal{
+		ID:          4,
+		Status:      ProposalStatusVotingPeriod,
+		VotingStart: now.Add(-2 * time.Hour),
+		VotingEnd:   now.Add(-time.Minute),
+	}
+	state.proposals[proposal.ID] = proposal
+	state.snapshots[11] = &potso.StoredWeightSnapshot{
+		Epoch:   11,
+		Entries: []potso.StoredWeightEntry{{Address: voter, Stake: big.NewInt(1), WeightBps: 100}},
+	}
+	state.lastEpoch = 11
+	state.hasLastEpoch = true
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+
+	err := engine.CastVote(4, voter, "yes")
+	if err == nil || !strings.Contains(err.Error(), "voting period closed") {
+		t.Fatalf("expected voting closed error, got %v", err)
+	}
+	if _, ok := state.votes[voteStorageKey(4, voter)]; ok {
+		t.Fatalf("did not expect stored vote")
 	}
 }
