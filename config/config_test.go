@@ -32,6 +32,7 @@ MaxInbound = 21
 MaxOutbound = 20
 Bootnodes = ["1.1.1.1:6001"]
 PersistentPeers = ["2.2.2.2:6001"]
+Seeds = ["0xabc123@seed-1.nhb.local:7000"]
 BanScore = 90
 GreyScore = 45
 RateMsgsPerSec = 60
@@ -70,6 +71,9 @@ HandshakeTimeoutMs = 7000
 	}
 	if len(cfg.PersistentPeers) != 1 || cfg.PersistentPeers[0] != "2.2.2.2:6001" {
 		t.Fatalf("persistent peers not parsed: %v", cfg.PersistentPeers)
+	}
+	if len(cfg.P2P.Seeds) != 1 || cfg.P2P.Seeds[0] != "0xabc123@seed-1.nhb.local:7000" {
+		t.Fatalf("unexpected seeds: %v", cfg.P2P.Seeds)
 	}
 	if cfg.P2P.BanScore != 90 || cfg.P2P.GreyScore != 45 {
 		t.Fatalf("unexpected reputation thresholds: %+v", cfg.P2P)

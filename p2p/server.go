@@ -55,6 +55,7 @@ type ServerConfig struct {
 	MaxOutbound      int
 	Bootnodes        []string
 	PersistentPeers  []string
+	Seeds            []string
 	PeerBanDuration  time.Duration
 	ReadTimeout      time.Duration
 	WriteTimeout     time.Duration
@@ -98,10 +99,16 @@ type Server struct {
 	pingTimeout      time.Duration
 	nonceGuard       *nonceGuard
 
+	peerstore *Peerstore
+
 	dialMu      sync.Mutex
 	pendingDial map[string]struct{}
 	backoff     map[string]time.Duration
 	persistent  map[string]struct{}
+
+	seeds       []seedEndpoint
+	connMgr     *connManager
+	connMgrOnce sync.Once
 }
 
 // peerMetrics tracks message quality for a peer.
@@ -226,6 +233,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	uniqPersist := uniqueStrings(cfg.PersistentPeers)
 	cfg.Bootnodes = append([]string{}, uniqBoot...)
 	cfg.PersistentPeers = append([]string{}, uniqPersist...)
+	seeds := parseSeedList(cfg.Seeds)
 
 	nodeID := deriveNodeID(privKey)
 
@@ -258,6 +266,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		handshakeTimeout: cfg.HandshakeTimeout,
 		pingTimeout:      cfg.PingTimeout,
 		nonceGuard:       newNonceGuard(handshakeReplayWindow),
+		seeds:            seeds,
 	}
 
 	for _, addr := range uniqBoot {
@@ -277,6 +286,22 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	return server
 }
 
+// SetPeerstore attaches a persistent peerstore to the server for dial metadata.
+func (s *Server) SetPeerstore(store *Peerstore) {
+	s.peerstore = store
+}
+
+func (s *Server) startConnManager() {
+	s.connMgrOnce.Do(func() {
+		if len(s.seeds) == 0 {
+			return
+		}
+		mgr := newConnManager(s)
+		s.connMgr = mgr
+		mgr.start()
+	})
+}
+
 func defaultDialer(ctx context.Context, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: defaultHandshakeTimeout}
 	return d.DialContext(ctx, "tcp", addr)
@@ -291,6 +316,7 @@ func (s *Server) Start() error {
 	fmt.Printf("NHB P2P listening on %s | chain=%d | genesis=%s | node=%s | client=%s\n",
 		ln.Addr().String(), s.cfg.ChainID, summarizeHash(s.genesis), s.nodeID, s.cfg.ClientVersion)
 
+	s.startConnManager()
 	go s.startDialers()
 
 	for {
@@ -332,6 +358,20 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	}
 
 	s.recordPeerHandshake(remote)
+
+	if s.peerstore != nil {
+		addr := dialAddr
+		if addr == "" {
+			addr = conn.RemoteAddr().String()
+		}
+		entry := PeerstoreEntry{Addr: addr, NodeID: remote.nodeID}
+		if err := s.peerstore.Put(entry); err != nil {
+			fmt.Printf("persist peer %s: %v\n", remote.nodeID, err)
+		}
+		if _, err := s.peerstore.RecordSuccess(remote.nodeID, s.now()); err != nil {
+			fmt.Printf("record peer success %s: %v\n", remote.nodeID, err)
+		}
+	}
 
 	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, dialAddr)
 	if err := s.registerPeer(peer); err != nil {
@@ -484,12 +524,14 @@ func (s *Server) Connect(addr string) error {
 
 	conn, err := s.dialFn(ctx, addr)
 	if err != nil {
+		s.markDialFailure(addr)
 		return err
 	}
 
 	persistent := s.isPersistent(addr)
 	if err := s.initPeer(conn, false, persistent, addr); err != nil {
 		conn.Close()
+		s.markDialFailure(addr)
 		return fmt.Errorf("handshake with %s failed: %w", addr, err)
 	}
 	fmt.Printf("Connected to peer: %s\n", addr)

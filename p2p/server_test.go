@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -166,4 +167,127 @@ func TestServerBootnodeDialing(t *testing.T) {
 			t.Fatalf("expected dial attempt to %s, got %v", addr, addrs)
 		}
 	}
+}
+
+func TestSeedDialerRecordsFailures(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xEE}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.Seeds = []string{"0xdeadbeef@127.0.0.1:4000"}
+
+	server := NewServer(handler, mustKey(t), cfg)
+
+	dir := t.TempDir()
+	store, err := NewPeerstore(filepath.Join(dir, "peers.db"), 10*time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatalf("create peerstore: %v", err)
+	}
+	defer store.Close()
+	server.SetPeerstore(store)
+
+	server.dialFn = func(ctx context.Context, addr string) (net.Conn, error) {
+		return nil, fmt.Errorf("dial blocked")
+	}
+
+	server.startConnManager()
+	defer func() {
+		if server.connMgr != nil {
+			server.connMgr.stop()
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, ok := store.ByNodeID("0xdeadbeef")
+		if ok && rec.Fails > 0 {
+			if rec.LastSeen.IsZero() {
+				t.Fatalf("lastSeen not updated: %+v", rec)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rec, ok := store.ByNodeID("0xdeadbeef")
+	if !ok {
+		t.Fatalf("seed record missing")
+	}
+	t.Fatalf("expected failure recorded, got %+v", rec)
+}
+
+func TestSeedDialerSuccessResetsFails(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAB}, 32)
+
+	cfg := baseConfig(genesis)
+	remote := NewServer(handler, mustKey(t), cfg)
+
+	cfg.Seeds = []string{fmt.Sprintf("%s@127.0.0.1:4555", remote.nodeID)}
+
+	server := NewServer(handler, mustKey(t), cfg)
+
+	dir := t.TempDir()
+	store, err := NewPeerstore(filepath.Join(dir, "peers.db"), 10*time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatalf("create peerstore: %v", err)
+	}
+	defer store.Close()
+	server.SetPeerstore(store)
+
+	var mu sync.Mutex
+	attempts := 0
+	server.dialFn = func(ctx context.Context, addr string) (net.Conn, error) {
+		mu.Lock()
+		attempts++
+		current := attempts
+		mu.Unlock()
+		if current == 1 {
+			return nil, fmt.Errorf("temporary failure")
+		}
+		local, remoteConn := net.Pipe()
+		go func() {
+			defer remoteConn.Close()
+			reader := bufio.NewReader(remoteConn)
+			if _, err := reader.ReadBytes('\n'); err != nil {
+				return
+			}
+			payload, err := remote.buildHandshake()
+			if err != nil {
+				return
+			}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				return
+			}
+			_, _ = remoteConn.Write(append(data, '\n'))
+			time.Sleep(20 * time.Millisecond)
+		}()
+		return local, nil
+	}
+
+	server.startConnManager()
+	defer func() {
+		if server.connMgr != nil {
+			server.connMgr.stop()
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, ok := store.ByNodeID(remote.nodeID)
+		if ok && rec.Fails == 0 && !rec.LastSeen.IsZero() {
+			mu.Lock()
+			done := attempts >= 2
+			mu.Unlock()
+			if done {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rec, ok := store.ByNodeID(remote.nodeID)
+	if !ok {
+		t.Fatalf("seed record missing")
+	}
+	t.Fatalf("expected success to reset fails, got %+v after %d attempts", rec, attempts)
 }

@@ -53,7 +53,18 @@ func main() {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
 	}
 
-	identityPath := filepath.Join(cfg.DataDir, "p2p", "node_key.json")
+	peerstoreDir := filepath.Join(cfg.DataDir, "p2p")
+	if err := os.MkdirAll(peerstoreDir, 0o755); err != nil {
+		panic(fmt.Sprintf("Failed to prepare p2p directory: %v", err))
+	}
+	peerstorePath := filepath.Join(peerstoreDir, "peerstore")
+	peerstore, err := p2p.NewPeerstore(peerstorePath, 0, 0)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to open peerstore: %v", err))
+	}
+	defer peerstore.Close()
+
+	identityPath := filepath.Join(peerstoreDir, "node_key.json")
 	identity, err := p2p.LoadOrCreateIdentity(identityPath)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load node identity: %v", err))
@@ -109,6 +120,7 @@ func main() {
 		MaxOutbound:      cfg.MaxOutbound,
 		Bootnodes:        append([]string{}, cfg.Bootnodes...),
 		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
+		Seeds:            append([]string{}, cfg.P2P.Seeds...),
 		PeerBanDuration:  time.Duration(cfg.PeerBanSeconds) * time.Second,
 		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
 		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
@@ -122,6 +134,7 @@ func main() {
 		PingTimeout:      time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
 	}
 	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
+	p2pServer.SetPeerstore(peerstore)
 	node.SetP2PServer(p2pServer)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
