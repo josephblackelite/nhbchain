@@ -7,6 +7,15 @@
 * [Loyalty Module](./loyalty.md)
 * [Staking & Delegation](./staking.md)
 
+## Governance & Proposals
+
+The governance module coordinates configuration changes across the network.
+
+1. **Proposal Submission** – A proposer submits a `param.update` payload listing only allow-listed parameter keys and posts the required ZNHB deposit.
+2. **Escrow Lock** – The deposit is debited from the proposer’s liquid ZNHB balance and locked under `gov/escrow/<address>` until the proposal completes.
+3. **Voting Window** – Upon acceptance, the proposal enters the voting period immediately. `VotingStart` is the submission timestamp, `VotingEnd` is computed from the configured voting period, and `TimelockEnd` extends the execution window after a successful vote.
+4. **Events & Indexing** – A `gov.proposed` event is emitted so wallets, dashboards, and indexers can track the proposal lifecycle from creation through timelock.
+
 ## Identity & Username Directory
 
 The identity subsystem introduces human-readable aliases, email discovery, avatars, and claimables for pay-by-username UX.

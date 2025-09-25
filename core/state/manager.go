@@ -5,11 +5,13 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/big"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -17,6 +19,7 @@ import (
 	"nhbchain/core/identity"
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
+	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
 	"nhbchain/storage/trie"
@@ -121,6 +124,196 @@ func GovernanceEscrowKey(addr []byte) []byte {
 	copy(key, governanceEscrowPrefix)
 	copy(key[len(governanceEscrowPrefix):], addr)
 	return key
+}
+
+type storedGovernanceProposal struct {
+	ID             uint64
+	Title          string
+	Summary        string
+	MetadataURI    string
+	Submitter      [20]byte
+	Status         uint8
+	Deposit        *big.Int
+	SubmitTime     uint64
+	VotingStart    uint64
+	VotingEnd      uint64
+	TimelockEnd    uint64
+	Target         string
+	ProposedChange string
+}
+
+func newStoredGovernanceProposal(p *governance.Proposal) *storedGovernanceProposal {
+	if p == nil {
+		return nil
+	}
+	deposit := big.NewInt(0)
+	if p.Deposit != nil {
+		deposit = new(big.Int).Set(p.Deposit)
+	}
+	var submitter [20]byte
+	if bytes := p.Submitter.Bytes(); len(bytes) == 20 {
+		copy(submitter[:], bytes)
+	}
+	return &storedGovernanceProposal{
+		ID:             p.ID,
+		Title:          p.Title,
+		Summary:        p.Summary,
+		MetadataURI:    p.MetadataURI,
+		Submitter:      submitter,
+		Status:         uint8(p.Status),
+		Deposit:        deposit,
+		SubmitTime:     uint64(p.SubmitTime.Unix()),
+		VotingStart:    uint64(p.VotingStart.Unix()),
+		VotingEnd:      uint64(p.VotingEnd.Unix()),
+		TimelockEnd:    uint64(p.TimelockEnd.Unix()),
+		Target:         p.Target,
+		ProposedChange: p.ProposedChange,
+	}
+}
+
+func (s *storedGovernanceProposal) toGovernanceProposal() (*governance.Proposal, error) {
+	if s == nil {
+		return nil, fmt.Errorf("governance: nil proposal record")
+	}
+	status := governance.ProposalStatus(s.Status)
+	if !validProposalStatus(status) {
+		return nil, fmt.Errorf("governance: invalid proposal status")
+	}
+	submitter := crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.Submitter[:]...))
+	deposit := big.NewInt(0)
+	if s.Deposit != nil {
+		deposit = new(big.Int).Set(s.Deposit)
+	}
+	proposal := &governance.Proposal{
+		ID:             s.ID,
+		Title:          s.Title,
+		Summary:        s.Summary,
+		MetadataURI:    s.MetadataURI,
+		Submitter:      submitter,
+		Status:         status,
+		Deposit:        deposit,
+		SubmitTime:     time.Unix(int64(s.SubmitTime), 0).UTC(),
+		VotingStart:    time.Unix(int64(s.VotingStart), 0).UTC(),
+		VotingEnd:      time.Unix(int64(s.VotingEnd), 0).UTC(),
+		TimelockEnd:    time.Unix(int64(s.TimelockEnd), 0).UTC(),
+		Target:         s.Target,
+		ProposedChange: s.ProposedChange,
+	}
+	return proposal, nil
+}
+
+func validProposalStatus(status governance.ProposalStatus) bool {
+	switch status {
+	case governance.ProposalStatusUnspecified,
+		governance.ProposalStatusDepositPeriod,
+		governance.ProposalStatusVotingPeriod,
+		governance.ProposalStatusPassed,
+		governance.ProposalStatusRejected,
+		governance.ProposalStatusFailed,
+		governance.ProposalStatusExpired,
+		governance.ProposalStatusExecuted:
+		return true
+	default:
+		return false
+	}
+}
+
+// GovernanceEscrowBalance returns the current escrowed deposit balance for the
+// supplied address. When no balance is present the method returns zero without
+// an error.
+func (m *Manager) GovernanceEscrowBalance(addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("governance: address must not be empty")
+	}
+	key := GovernanceEscrowKey(addr)
+	balance := new(big.Int)
+	ok, err := m.KVGet(key, balance)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return big.NewInt(0), nil
+	}
+	return balance, nil
+}
+
+// GovernanceEscrowLock adds the provided amount to the participant's escrow
+// bucket and returns the updated balance. Negative amounts are rejected to
+// protect against accidental unlock attempts.
+func (m *Manager) GovernanceEscrowLock(addr []byte, amount *big.Int) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("governance: address must not be empty")
+	}
+	lockAmount := big.NewInt(0)
+	if amount != nil {
+		if amount.Sign() < 0 {
+			return nil, fmt.Errorf("governance: lock amount must not be negative")
+		}
+		lockAmount = new(big.Int).Set(amount)
+	}
+	current, err := m.GovernanceEscrowBalance(addr)
+	if err != nil {
+		return nil, err
+	}
+	updated := new(big.Int).Add(current, lockAmount)
+	if err := m.KVPut(GovernanceEscrowKey(addr), updated); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// GovernanceNextProposalID increments and returns the next proposal identifier.
+// The sequence is stored as a uint64 counter beneath the governance namespace.
+func (m *Manager) GovernanceNextProposalID() (uint64, error) {
+	key := GovernanceSequenceKey()
+	var current uint64
+	ok, err := m.KVGet(key, &current)
+	if err != nil {
+		return 0, err
+	}
+	if ok && current == math.MaxUint64 {
+		return 0, fmt.Errorf("governance: proposal sequence overflow")
+	}
+	next := current + 1
+	if err := m.KVPut(key, next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// GovernancePutProposal stores the provided proposal metadata under the
+// canonical governance namespace.
+func (m *Manager) GovernancePutProposal(p *governance.Proposal) error {
+	if p == nil {
+		return fmt.Errorf("governance: proposal must not be nil")
+	}
+	if !validProposalStatus(p.Status) {
+		return fmt.Errorf("governance: invalid proposal status")
+	}
+	record := newStoredGovernanceProposal(p)
+	if record == nil {
+		return fmt.Errorf("governance: unable to store proposal")
+	}
+	return m.KVPut(GovernanceProposalKey(p.ID), record)
+}
+
+// GovernanceGetProposal retrieves the stored proposal metadata if present. The
+// boolean return indicates whether the proposal exists in state.
+func (m *Manager) GovernanceGetProposal(id uint64) (*governance.Proposal, bool, error) {
+	key := GovernanceProposalKey(id)
+	var stored storedGovernanceProposal
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	proposal, err := stored.toGovernanceProposal()
+	if err != nil {
+		return nil, false, err
+	}
+	return proposal, true, nil
 }
 
 // ParamStoreKey provides the canonical namespace for governable on-chain
