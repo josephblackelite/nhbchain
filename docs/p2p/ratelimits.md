@@ -3,7 +3,7 @@
 Rate limiting protects each node from floods while allowing legitimate bursts.
 Three layers are enforced:
 
-1. **Per-peer token bucket** — configured by `RateMsgsPerSec` and `RateBurst`.
+1. **Per-peer token bucket** — configured by `RateMsgsPerSec` and `Burst`.
    Every inbound message consumes one token. Tokens regenerate at
    `RateMsgsPerSec` (default `50 msg/s`) up to the burst capacity. Greylisted
    peers automatically receive a 75% reduction in both rate and burst.
@@ -31,9 +31,11 @@ Messages exceeding the limits trigger the following outcomes:
 
 | Layer | Behaviour |
 | --- | --- |
-| Per-peer | Connection terminated, reputation `-15`. |
-| Per-IP | Connection terminated, reputation `-15`. |
+| Per-peer | Connection terminated, reputation `-10`. |
+| Per-IP | Connection terminated, reputation `-10`. |
 | Global | Connection terminated without penalty. |
 
 Operators should tune the burst value to accommodate expected gossip fan-out
-without allowing a single peer to monopolise bandwidth.
+without allowing a single peer to monopolise bandwidth. Greylisted peers are
+throttled to 25% of the configured rate and burst until their reputation
+recovers above `-GreyScore`.

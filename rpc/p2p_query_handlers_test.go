@@ -62,18 +62,15 @@ func TestP2PInfoAndPeers(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatalf("info error: %+v", rpcErr)
 	}
-	var payload struct {
-		Network map[string]interface{} `json:"network"`
-		Peers   []interface{}          `json:"peers"`
-	}
-	if err := json.Unmarshal(result, &payload); err != nil {
+	var view p2p.NetworkView
+	if err := json.Unmarshal(result, &view); err != nil {
 		t.Fatalf("unmarshal info: %v", err)
 	}
-	if payload.Network["nodeId"] == "" {
+	if view.Self.NodeID == "" {
 		t.Fatalf("expected nodeId in network view")
 	}
-	if len(payload.Peers) != 0 {
-		t.Fatalf("expected no peers, got %d", len(payload.Peers))
+	if view.Counts.Total != 0 || view.Counts.Inbound != 0 || view.Counts.Outbound != 0 {
+		t.Fatalf("expected zero counts, got %+v", view.Counts)
 	}
 
 	peersReq := &RPCRequest{ID: 3}

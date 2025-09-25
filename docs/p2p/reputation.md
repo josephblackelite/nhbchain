@@ -15,14 +15,16 @@ receive greylist throttling and reputation telemetry.
 
 | Event | Delta | Notes |
 | --- | --- | --- |
-| Valid message processed | `+1` | Applied after each well-formed message. |
-| Malformed payload / protocol violation | `-20` | Also contributes to invalid-rate tracking. |
-| Per-peer or per-IP rate limit hit | `-15` | Applied once when the limiter trips. |
-| Slow outbound writer / full queue | `-5` | When a peer cannot drain its outbound buffer. |
+| Heartbeat window satisfied | `+1` | Applied after each well-formed protocol heartbeat. |
+| Uptime credit | `+2 per day` | Applied via scheduled maintenance jobs or CLI tooling. |
+| Malformed payload / protocol violation | `-5` | Also contributes to invalid-rate tracking. |
+| Per-peer or per-IP rate limit hit | `-10` | Applied once when the limiter trips. |
+| Invalid/forked block | `-20` | Heavy penalty; typically leads to a ban. |
 | Manual ban (disconnect with ban flag) | `-BanScore` | Guarantees the ban threshold is crossed. |
 
-Scores decay exponentially back toward zero with a 10 minute half-life. This
-allows previously noisy peers to recover if they behave.
+Scores decay exponentially back toward zero with the configured half-life (10
+minutes by default). This allows previously noisy peers to recover if they
+behave.
 
 ## Greylist behaviour
 
@@ -41,6 +43,6 @@ rejoin cleanly.
 ## Telemetry
 
 The RPC endpoints `p2p_info` and `p2p_peers` expose current scores, greylist
-status, and ban configuration. Operators should monitor these endpoints to
-identify chronically misbehaving peers or to confirm that positive traffic is
-maintaining a healthy score.
+status, ban configuration, and the recorded `firstSeen`/`lastSeen` timestamps.
+Operators should monitor these endpoints to identify chronically misbehaving
+peers or to confirm that positive traffic is maintaining a healthy score.

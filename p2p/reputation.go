@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+const (
+	heartbeatRewardDelta         = 1
+	uptimeRewardDelta            = 2
+	invalidBlockPenaltyDelta     = -20
+	malformedMessagePenaltyDelta = -5
+	spamPenaltyDelta             = -10
+)
+
 // ReputationConfig defines the thresholds for the reputation engine.
 type ReputationConfig struct {
 	GreyScore        int
@@ -106,6 +114,35 @@ func (m *ReputationManager) Adjust(id string, delta int, now time.Time, persiste
 // Reward sets a positive delta without triggering ban thresholds.
 func (m *ReputationManager) Reward(id string, delta int, now time.Time) ReputationStatus {
 	return m.Adjust(id, delta, now, false)
+}
+
+// MarkHeartbeat rewards a peer for responding within the heartbeat window.
+func (m *ReputationManager) MarkHeartbeat(id string, now time.Time) ReputationStatus {
+	return m.Adjust(id, heartbeatRewardDelta, now, false)
+}
+
+// MarkUptime rewards a peer for sustained uptime. Duration less than a day defaults to one period.
+func (m *ReputationManager) MarkUptime(id string, duration time.Duration, now time.Time) ReputationStatus {
+	days := int(duration / (24 * time.Hour))
+	if days <= 0 {
+		days = 1
+	}
+	return m.Adjust(id, days*uptimeRewardDelta, now, false)
+}
+
+// PenalizeInvalidBlock applies a heavy penalty for invalid or forked blocks.
+func (m *ReputationManager) PenalizeInvalidBlock(id string, now time.Time, persistent bool) ReputationStatus {
+	return m.Adjust(id, invalidBlockPenaltyDelta, now, persistent)
+}
+
+// PenalizeMalformed applies a light penalty for malformed protocol messages.
+func (m *ReputationManager) PenalizeMalformed(id string, now time.Time, persistent bool) ReputationStatus {
+	return m.Adjust(id, malformedMessagePenaltyDelta, now, persistent)
+}
+
+// PenalizeSpam throttles spamming peers without immediately banning them.
+func (m *ReputationManager) PenalizeSpam(id string, now time.Time, persistent bool) ReputationStatus {
+	return m.Adjust(id, spamPenaltyDelta, now, persistent)
 }
 
 // IsBanned returns true if the peer is banned at the provided time.
