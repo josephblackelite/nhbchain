@@ -21,6 +21,8 @@ const (
 	MsgTypePong         byte = 0x0A
 	MsgTypeHandshake    byte = 0x0B
 	MsgTypeHandshakeAck byte = 0x0C
+	MsgTypePexRequest   byte = 0x0D
+	MsgTypePexAddresses byte = 0x0E
 )
 
 // StatusPayload is the data sent in a status message.
@@ -84,4 +86,22 @@ func NewPongMessage(nonce uint64, ts time.Time) (*Message, error) {
 		return nil, err
 	}
 	return &Message{Type: MsgTypePong, Payload: payload}, nil
+}
+
+// NewPexRequestMessage builds a peer exchange request using the provided limit and token.
+func NewPexRequestMessage(limit int, token string) (*Message, error) {
+	payload, err := json.Marshal(PexRequestPayload{Limit: limit, Token: token})
+	if err != nil {
+		return nil, err
+	}
+	return &Message{Type: MsgTypePexRequest, Payload: payload}, nil
+}
+
+// NewPexAddressesMessage builds a peer exchange response message.
+func NewPexAddressesMessage(payload PexAddressesPayload) (*Message, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return &Message{Type: MsgTypePexAddresses, Payload: data}, nil
 }
