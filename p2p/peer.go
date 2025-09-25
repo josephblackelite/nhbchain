@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +26,6 @@ type Peer struct {
 	dialAddr      string
 	inbound       bool
 	persistent    bool
-	wallet        string
 	clientVersion string
 
 	limiter   *tokenBucket
@@ -39,7 +40,7 @@ type Peer struct {
 	closed    chan struct{}
 }
 
-func newPeer(id string, wallet string, clientVersion string, conn net.Conn, reader *bufio.Reader, server *Server, inbound bool, persistent bool, dialAddr string) *Peer {
+func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reader, server *Server, inbound bool, persistent bool, dialAddr string) *Peer {
 	ctx, cancel := context.WithCancel(context.Background())
 	rate := server.ratePerPeer
 	burst := server.rateBurst
@@ -50,7 +51,6 @@ func newPeer(id string, wallet string, clientVersion string, conn net.Conn, read
 	dialAddr = strings.TrimSpace(dialAddr)
 	return &Peer{
 		id:            id,
-		wallet:        wallet,
 		conn:          conn,
 		reader:        reader,
 		outbound:      make(chan *Message, outboundQueueSize),
@@ -84,6 +84,7 @@ func (p *Peer) setGreylisted(on bool) {
 func (p *Peer) start() {
 	go p.readLoop()
 	go p.writeLoop()
+	go p.keepaliveLoop()
 }
 
 func (p *Peer) Enqueue(msg *Message) error {
@@ -100,6 +101,37 @@ func (p *Peer) Enqueue(msg *Message) error {
 		return fmt.Errorf("peer shutting down")
 	default:
 		return errQueueFull
+	}
+}
+
+func (p *Peer) keepaliveLoop() {
+	interval := p.server.cfg.PingInterval
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-ticker.C:
+			nonce, err := randomUint64()
+			if err != nil {
+				fmt.Printf("keepalive nonce generation failed for %s: %v\n", p.id, err)
+				continue
+			}
+			msg, err := NewPingMessage(nonce, time.Now())
+			if err != nil {
+				fmt.Printf("build ping for %s: %v\n", p.id, err)
+				continue
+			}
+			if err := p.Enqueue(msg); err != nil {
+				fmt.Printf("enqueue ping to %s: %v\n", p.id, err)
+				return
+			}
+		}
 	}
 }
 
@@ -159,6 +191,16 @@ func (p *Peer) readLoop() {
 			return
 		}
 
+		handled, err := p.handleControlMessage(&msg)
+		if err != nil {
+			p.server.handleProtocolViolation(p, err)
+			return
+		}
+		if handled {
+			p.server.recordValidMessage(p.id)
+			continue
+		}
+
 		if err := p.server.handler.HandleMessage(&msg); err != nil {
 			fmt.Printf("Error handling message from %s: %v\n", p.id, err)
 		}
@@ -200,6 +242,40 @@ func (p *Peer) writeMessage(ctx context.Context, msg *Message) error {
 	}
 	_, err = p.conn.Write(append(data, '\n'))
 	return err
+}
+
+func (p *Peer) handleControlMessage(msg *Message) (bool, error) {
+	switch msg.Type {
+	case MsgTypePing:
+		var payload PingPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return false, fmt.Errorf("malformed ping payload: %w", err)
+		}
+		pong, err := NewPongMessage(payload.Nonce, time.Now())
+		if err != nil {
+			return false, fmt.Errorf("build pong: %w", err)
+		}
+		if err := p.Enqueue(pong); err != nil {
+			return false, fmt.Errorf("send pong: %w", err)
+		}
+		p.server.touchPeer(p.id)
+		return true, nil
+	case MsgTypePong:
+		p.server.touchPeer(p.id)
+		return true, nil
+	case MsgTypeHandshake, MsgTypeHandshakeAck:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func randomUint64() (uint64, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint64(buf[:]), nil
 }
 
 func (p *Peer) terminate(ban bool, reason error) {

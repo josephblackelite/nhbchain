@@ -18,6 +18,8 @@ GreyScore = 50
 RateMsgsPerSec = 50
 Burst = 200
 HandshakeTimeoutMs = 5000
+PingIntervalSeconds = 30
+PingTimeoutSeconds = 90
 
 PeerBanSeconds = 900
 ReadTimeout = 90

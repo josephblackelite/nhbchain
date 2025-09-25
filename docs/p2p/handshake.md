@@ -1,5 +1,11 @@
 # NHB P2P Handshake
 
+> **Note**
+>
+> The NET-2A handshake is documented in detail under
+> [`docs/networking/overview.md`](../networking/overview.md). The material below
+> captures the earlier NET-1 design and is retained for historical reference.
+
 The NHB peer handshake provides mutual authentication, network compatibility
 checks, and Sybil resistance by binding node identities to funded wallets. All
 connections MUST complete the handshake before any protocol traffic is

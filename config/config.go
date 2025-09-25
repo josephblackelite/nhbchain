@@ -47,17 +47,19 @@ type Config struct {
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
 type P2PSection struct {
-	NetworkID          uint64   `toml:"NetworkId"`
-	MaxPeers           int      `toml:"MaxPeers"`
-	MaxInbound         int      `toml:"MaxInbound"`
-	MaxOutbound        int      `toml:"MaxOutbound"`
-	Bootnodes          []string `toml:"Bootnodes"`
-	PersistentPeers    []string `toml:"PersistentPeers"`
-	BanScore           int      `toml:"BanScore"`
-	GreyScore          int      `toml:"GreyScore"`
-	RateMsgsPerSec     float64  `toml:"RateMsgsPerSec"`
-	Burst              float64  `toml:"Burst"`
-	HandshakeTimeoutMs int      `toml:"HandshakeTimeoutMs"`
+	NetworkID           uint64   `toml:"NetworkId"`
+	MaxPeers            int      `toml:"MaxPeers"`
+	MaxInbound          int      `toml:"MaxInbound"`
+	MaxOutbound         int      `toml:"MaxOutbound"`
+	Bootnodes           []string `toml:"Bootnodes"`
+	PersistentPeers     []string `toml:"PersistentPeers"`
+	BanScore            int      `toml:"BanScore"`
+	GreyScore           int      `toml:"GreyScore"`
+	RateMsgsPerSec      float64  `toml:"RateMsgsPerSec"`
+	Burst               float64  `toml:"Burst"`
+	HandshakeTimeoutMs  int      `toml:"HandshakeTimeoutMs"`
+	PingIntervalSeconds int      `toml:"PingIntervalSeconds"`
+	PingTimeoutSeconds  int      `toml:"PingTimeoutSeconds"`
 }
 
 // PotsoConfig groups POTSO-specific configuration segments.
