@@ -7,10 +7,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"nhbchain/core"
 	"nhbchain/crypto"
 	"nhbchain/native/loyalty"
+	swap "nhbchain/native/swap"
 	"nhbchain/storage"
 )
 
@@ -38,6 +40,12 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
+	node.SetSwapConfig(swap.Config{AllowedFiat: []string{"USD"}, MaxQuoteAgeSeconds: 120, SlippageBps: 50, OraclePriority: []string{"manual"}})
+	manual := swap.NewManualOracle()
+	agg := swap.NewOracleAggregator([]string{"manual"}, 5*time.Minute)
+	agg.Register("manual", manual)
+	node.SetSwapOracle(agg)
+	node.SetSwapManualOracle(manual)
 	server := NewServer(node)
 	return &testEnv{server: server, node: node, token: token}
 }

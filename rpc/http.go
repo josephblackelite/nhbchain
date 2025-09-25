@@ -241,6 +241,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleMintWithSig(w, r, req)
 	case "swap_submitVoucher":
 		s.handleSwapSubmitVoucher(w, r, req)
+	case "swap_voucher_get":
+		s.handleSwapVoucherGet(w, r, req)
+	case "swap_voucher_list":
+		s.handleSwapVoucherList(w, r, req)
+	case "swap_voucher_export":
+		s.handleSwapVoucherExport(w, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(w, r, req)
 	case "stake_undelegate":

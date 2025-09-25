@@ -49,6 +49,10 @@ type Node struct {
 	engagementMgr  *engagement.Manager
 	govPolicy      governance.ProposalPolicy
 	govPolicyMu    sync.RWMutex
+	swapCfgMu      sync.RWMutex
+	swapCfg        swap.Config
+	swapOracle     swap.PriceOracle
+	swapManual     *swap.ManualOracle
 }
 
 // PotsoLeaderboardEntry represents a participant's score for a specific day.
@@ -156,6 +160,62 @@ func (n *Node) newGovernanceEngine(manager *nhbstate.Manager) *governance.Engine
 
 func (n *Node) SetBftEngine(bftEngine *bft.Engine) {
 	n.bftEngine = bftEngine
+}
+
+// SetSwapConfig installs the swap mint configuration after applying canonical
+// defaults to avoid surprising zero values.
+func (n *Node) SetSwapConfig(cfg swap.Config) {
+	if n == nil {
+		return
+	}
+	normalised := cfg.Normalise()
+	n.swapCfgMu.Lock()
+	n.swapCfg = normalised
+	n.swapCfgMu.Unlock()
+}
+
+// swapConfig returns a copy of the currently configured swap settings.
+func (n *Node) swapConfig() swap.Config {
+	n.swapCfgMu.RLock()
+	cfg := n.swapCfg
+	n.swapCfgMu.RUnlock()
+	if len(cfg.AllowedFiat) == 0 {
+		cfg = cfg.Normalise()
+	}
+	return cfg
+}
+
+// SetSwapOracle wires the price oracle aggregator used to validate vouchers.
+func (n *Node) SetSwapOracle(oracle swap.PriceOracle) {
+	if n == nil {
+		return
+	}
+	n.swapCfgMu.Lock()
+	n.swapOracle = oracle
+	n.swapCfgMu.Unlock()
+}
+
+// SetSwapManualOracle records the manual oracle handle so tests and incident
+// tooling can seed deterministic quotes.
+func (n *Node) SetSwapManualOracle(manual *swap.ManualOracle) {
+	if n == nil {
+		return
+	}
+	n.swapCfgMu.Lock()
+	n.swapManual = manual
+	n.swapCfgMu.Unlock()
+}
+
+// SetSwapManualQuote publishes a manual override rate for the supplied pair. The
+// quote timestamp is truncated to seconds to match other oracle adapters.
+func (n *Node) SetSwapManualQuote(base, quote, rate string, ts time.Time) error {
+	n.swapCfgMu.RLock()
+	manual := n.swapManual
+	n.swapCfgMu.RUnlock()
+	if manual == nil {
+		return fmt.Errorf("swap: manual oracle not configured")
+	}
+	return manual.SetDecimal(base, quote, rate, ts.UTC())
 }
 
 // SetP2PServer records the running P2P server for query purposes.
@@ -1910,10 +1970,11 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 	return txHash, nil
 }
 
-func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (string, bool, error) {
-	if voucher == nil {
+func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bool, error) {
+	if submission == nil || submission.Voucher == nil {
 		return "", false, fmt.Errorf("swap: voucher required")
 	}
+	voucher := submission.Voucher
 	if strings.TrimSpace(voucher.Domain) != swap.VoucherDomainV1 {
 		return "", false, ErrSwapInvalidDomain
 	}
@@ -1936,8 +1997,20 @@ func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (str
 	if orderID == "" {
 		return "", false, fmt.Errorf("swap: orderId required")
 	}
+	provider := strings.TrimSpace(submission.Provider)
+	if provider == "" {
+		return "", false, fmt.Errorf("swap: provider required")
+	}
+	providerTxID := strings.TrimSpace(submission.ProviderTxID)
+	if providerTxID == "" {
+		return "", false, fmt.Errorf("swap: providerTxId required")
+	}
+	signature := append([]byte(nil), submission.Signature...)
+	if len(signature) == 0 {
+		return "", false, ErrSwapInvalidSignature
+	}
 	token := strings.ToUpper(strings.TrimSpace(voucher.Token))
-	if token != "ZNHB" {
+	if token != "ZNHB" && token != "NHB" {
 		return "", false, ErrSwapInvalidToken
 	}
 	hash := voucher.Hash()
@@ -1952,6 +2025,17 @@ func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (str
 		return "", false, fmt.Errorf("swap: recover signer: %w", err)
 	}
 	recovered := ethcrypto.PubkeyToAddress(*pubKey)
+
+	cfg := n.swapConfig()
+	if !cfg.IsFiatAllowed(voucher.Fiat) {
+		return "", false, ErrSwapUnsupportedFiat
+	}
+	n.swapCfgMu.RLock()
+	oracle := n.swapOracle
+	n.swapCfgMu.RUnlock()
+	if oracle == nil {
+		return "", false, ErrSwapOracleUnavailable
+	}
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
@@ -1973,6 +2057,46 @@ func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (str
 	if !bytes.Equal(tokenMeta.MintAuthority, recovered.Bytes()) {
 		return "", false, ErrSwapInvalidSigner
 	}
+	quote, err := oracle.GetRate("USD", token)
+	if err != nil {
+		if errors.Is(err, swap.ErrNoFreshQuote) {
+			return "", false, ErrSwapQuoteStale
+		}
+		return "", false, fmt.Errorf("swap: oracle: %w", err)
+	}
+	maxAge := cfg.MaxQuoteAge()
+	if maxAge > 0 {
+		cutoff := time.Now().Add(-maxAge)
+		if quote.Timestamp.IsZero() || quote.Timestamp.Before(cutoff) {
+			return "", false, ErrSwapQuoteStale
+		}
+	}
+	mintAmount, err := swap.ComputeMintAmount(voucher.FiatAmount, quote.Rate, tokenMeta.Decimals)
+	if err != nil {
+		return "", false, err
+	}
+	if mintAmount == nil || mintAmount.Sign() == 0 {
+		return "", false, fmt.Errorf("swap: computed mint amount zero")
+	}
+	diff := new(big.Int).Sub(mintAmount, voucher.Amount)
+	if diff.Sign() < 0 {
+		diff.Neg(diff)
+	}
+	allowance := new(big.Int).SetUint64(cfg.SlippageBps)
+	slippage := new(big.Int).Mul(diff, big.NewInt(10000))
+	slippage.Div(slippage, mintAmount)
+	if slippage.Cmp(allowance) == 1 {
+		return "", false, ErrSwapSlippageExceeded
+	}
+
+	ledger := swap.NewLedger(manager)
+	exists, err := ledger.Exists(providerTxID)
+	if err != nil {
+		return "", false, err
+	}
+	if exists {
+		return "", false, ErrSwapDuplicateProviderTx
+	}
 	if manager.HasSeenSwapNonce(orderID) {
 		return "", false, ErrSwapNonceUsed
 	}
@@ -1980,6 +2104,31 @@ func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (str
 		return "", false, err
 	}
 	if err := manager.MarkSwapNonce(orderID); err != nil {
+		return "", false, err
+	}
+
+	usdAmount := strings.TrimSpace(submission.USDAmount)
+	if usdAmount == "" && strings.EqualFold(voucher.Fiat, "USD") {
+		usdAmount = strings.TrimSpace(voucher.FiatAmount)
+	}
+	record := &swap.VoucherRecord{
+		Provider:        provider,
+		ProviderTxID:    providerTxID,
+		FiatCurrency:    strings.ToUpper(strings.TrimSpace(voucher.Fiat)),
+		FiatAmount:      strings.TrimSpace(voucher.FiatAmount),
+		USD:             usdAmount,
+		Rate:            quote.RateString(18),
+		Token:           token,
+		MintAmountWei:   new(big.Int).Set(voucher.Amount),
+		Recipient:       voucher.Recipient,
+		Username:        strings.TrimSpace(submission.Username),
+		Address:         strings.TrimSpace(submission.Address),
+		QuoteTimestamp:  quote.Timestamp.UTC().Unix(),
+		OracleSource:    quote.Source,
+		MinterSignature: "0x" + hex.EncodeToString(signature),
+		Status:          swap.VoucherStatusMinted,
+	}
+	if err := ledger.Put(record); err != nil {
 		return "", false, err
 	}
 
@@ -1999,6 +2148,87 @@ func (n *Node) SwapSubmitVoucher(voucher *swap.VoucherV1, signature []byte) (str
 	}
 
 	return txHash, true, nil
+}
+
+// SwapGetVoucher returns the ledger record for the supplied provider
+// transaction identifier.
+func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {
+	trimmed := strings.TrimSpace(providerTxID)
+	if trimmed == "" {
+		return nil, false, fmt.Errorf("swap: providerTxId required")
+	}
+	var (
+		record *swap.VoucherRecord
+		ok     bool
+	)
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewLedger(m)
+		var err error
+		record, ok, err = ledger.Get(trimmed)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return record.Copy(), true, nil
+}
+
+// SwapListVouchers paginates voucher records for the supplied time range.
+func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) ([]*swap.VoucherRecord, string, error) {
+	var (
+		results    []*swap.VoucherRecord
+		nextCursor string
+	)
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewLedger(m)
+		records, cursorOut, err := ledger.List(startTs, endTs, cursor, limit)
+		if err != nil {
+			return err
+		}
+		nextCursor = cursorOut
+		results = make([]*swap.VoucherRecord, 0, len(records))
+		for _, record := range records {
+			results = append(results, record.Copy())
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return results, nextCursor, nil
+}
+
+// SwapExportVouchers produces a base64 encoded CSV export and accompanying totals.
+func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, error) {
+	var (
+		encoded string
+		count   int
+		total   *big.Int
+	)
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewLedger(m)
+		var err error
+		encoded, count, total, err = ledger.ExportCSV(startTs, endTs)
+		return err
+	})
+	if err != nil {
+		return "", 0, nil, err
+	}
+	if total == nil {
+		total = big.NewInt(0)
+	}
+	return encoded, count, total, nil
+}
+
+// SwapMarkReconciled marks the supplied vouchers as reconciled in the ledger.
+func (n *Node) SwapMarkReconciled(ids []string) error {
+	return n.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewLedger(m)
+		return ledger.MarkReconciled(ids)
+	})
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
