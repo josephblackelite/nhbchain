@@ -412,29 +412,42 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 
 	s.recordPeerHandshake(remote)
 
-	if s.pex != nil {
-		addr := dialAddr
-		if strings.TrimSpace(addr) == "" {
-			addr = conn.RemoteAddr().String()
-		}
-		s.pex.recordPeer(remote.nodeID, addr, s.now())
+	trimmedDial := strings.TrimSpace(dialAddr)
+	addresses := append([]string{}, remote.addrs...)
+	if len(addresses) == 0 && trimmedDial != "" {
+		addresses = append(addresses, trimmedDial)
+	}
+	if len(addresses) == 0 {
+		addresses = append(addresses, conn.RemoteAddr().String())
 	}
 
-	if s.peerstore != nil {
-		addr := dialAddr
-		if addr == "" {
-			addr = conn.RemoteAddr().String()
+	now := s.now()
+	if s.pex != nil {
+		for _, addr := range addresses {
+			s.pex.recordPeer(remote.nodeID, addr, now)
 		}
-		entry := PeerstoreEntry{Addr: addr, NodeID: remote.nodeID}
+	}
+
+	primaryAddr := ""
+	if len(addresses) > 0 {
+		primaryAddr = strings.TrimSpace(addresses[0])
+	}
+
+	if s.peerstore != nil && primaryAddr != "" {
+		entry := PeerstoreEntry{Addr: primaryAddr, NodeID: remote.nodeID}
 		if err := s.peerstore.Put(entry); err != nil {
 			fmt.Printf("persist peer %s: %v\n", remote.nodeID, err)
 		}
-		if _, err := s.peerstore.RecordSuccess(remote.nodeID, s.now()); err != nil {
+		if _, err := s.peerstore.RecordSuccess(remote.nodeID, now); err != nil {
 			fmt.Printf("record peer success %s: %v\n", remote.nodeID, err)
 		}
 	}
 
-	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, dialAddr)
+	if trimmedDial == "" {
+		trimmedDial = primaryAddr
+	}
+
+	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, trimmedDial)
 	if err := s.registerPeer(peer); err != nil {
 		return err
 	}

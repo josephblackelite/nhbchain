@@ -92,6 +92,135 @@ the manager emits a message indicating that UPnP port mapping is being skipped
 because only a stub implementation is provided. These logs are the first line of
 defence when diagnosing connectivity issues on residential or cloud networks.
 
+## Mini-Mesh Runbook
+
+The NET-2H integration test suite ships with a four-node “mini mesh” that
+operators can reproduce locally to validate seed connectivity, authenticated
+handshakes, and PEX-based peer gossip. The walkthrough below mirrors the test
+topology: three healthy nodes forming a mesh plus a fourth node advertising the
+wrong chain ID that should be rejected during the handshake.
+
+### 1. Generate configs
+
+All nodes share the same genesis hash and differ only in their listen ports and
+seed lists. Adjust the ports if they clash with existing services.
+
+```
+# common genesis
+GENESIS=$(printf 'ab%.0s' {1..32})
+
+cat > n1.toml <<'CFG'
+[p2p]
+ListenAddress = "127.0.0.1:36656"
+ChainID = 777
+GenesisHash = "0x$GENESIS"
+ClientVersion = "mesh/n1"
+MinPeers = 3
+OutboundPeers = 3
+PEX = true
+CFG
+
+cat > n2.toml <<'CFG'
+[p2p]
+ListenAddress = "127.0.0.1:36657"
+ChainID = 777
+GenesisHash = "0x$GENESIS"
+ClientVersion = "mesh/n2"
+Seeds = ["REPLACE_N1@127.0.0.1:36656"]
+MinPeers = 3
+OutboundPeers = 3
+PEX = true
+CFG
+
+cat > n3.toml <<'CFG'
+[p2p]
+ListenAddress = "127.0.0.1:36658"
+ChainID = 777
+GenesisHash = "0x$GENESIS"
+ClientVersion = "mesh/n3"
+Seeds = ["REPLACE_N1@127.0.0.1:36656"]
+MinPeers = 3
+OutboundPeers = 3
+PEX = true
+CFG
+
+cat > wrong.toml <<'CFG'
+[p2p]
+ListenAddress = "127.0.0.1:36659"
+ChainID = 778   # wrong chain
+GenesisHash = "0x$GENESIS"
+ClientVersion = "mesh/wrong"
+Seeds = ["REPLACE_N1@127.0.0.1:36656"]
+PEX = true
+CFG
+```
+
+Start `n1`, capture its advertised `nodeId` from the logs, and replace the
+`REPLACE_N1` placeholder in the other files with that value.
+
+### 2. Launch the mesh
+
+```
+./build/nhbd --home ./n1 --config ./n1.toml &
+./build/nhbd --home ./n2 --config ./n2.toml &
+./build/nhbd --home ./n3 --config ./n3.toml &
+./build/nhbd --home ./wrong --config ./wrong.toml &
+```
+
+Once `n2` and `n3` report successful handshakes with `n1`, run a PEX request to
+prime peer exchange (the daemon issues periodic requests automatically, but the
+manual command accelerates local testing):
+
+```
+curl -X POST localhost:36657/net/request_pex
+curl -X POST localhost:36658/net/request_pex
+```
+
+Within a few seconds `n2` and `n3` should connect directly to each other using
+the address learned from `n1`.
+
+### 3. Inspect net_info
+
+Query the RPC endpoint to verify the peer set. Each healthy node should report
+the other two peers with `"state":"connected"` while the wrong-chain node only
+sees transient dial attempts:
+
+```
+curl -s localhost:36657/net/info | jq '.peers[] | {id: .nodeId, state: .state}'
+```
+
+Sample output once the mesh stabilises:
+
+```
+{
+  "id": "0xabc1...", "state": "connected"
+}
+{
+  "id": "0xabc2...", "state": "connected"
+}
+```
+
+The wrong-chain node’s RPC will show only its seed in `state:"dialing"` with
+`lastError` mentioning the chain mismatch, confirming the handshake rejection.
+
+### 4. Tear down
+
+Stop the processes (`pkill nhbd` or `Ctrl+C`) and remove the temporary data
+directories once you are done validating the workflow.
+
+### Troubleshooting
+
+* **Ports already in use** – change the `ListenAddress` ports in the configs or
+  shut down the conflicting service.
+* **Firewall interference** – ensure `localhost` TCP traffic is allowed. Local
+  firewalls like `pf`, `ufw`, or `firewalld` can block loopback if configured
+  aggressively.
+* **Clock skew** – large time drifts (>5s) between nodes can trip handshake
+  deadlines. Synchronise system clocks with NTP before running the test.
+* **PEX not triggering** – reissue the manual `request_pex` RPC above and verify
+  that `n1` still lists both peers in `net/info`; stale peerstore entries can be
+  flushed by deleting the `p2p/peerstore` directory under each data directory.
+
 ### Recommended ports
 
 * **TCP** – open the port specified in `ListenAddress` (default `:30303` if not

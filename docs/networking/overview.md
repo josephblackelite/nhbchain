@@ -155,6 +155,29 @@ Seed Bootstrapping --> Authenticated Handshake --> PEX Gossip --> Steady-State M
    recycling aged peers, periodically requesting PEX samples to replenish the
    dial queue as nodes churn.
 
+### Steady-State Mini Mesh (NET-2H)
+
+The NET-2H milestone validates the discovery loop by forming a three-node mesh
+anchored by a seed and exercising peer exchange. The healthy nodes maintain
+bidirectional links while a fourth node advertising the wrong chain is rejected
+during the handshake. The steady-state topology is illustrated below:
+
+```mermaid
+graph LR
+    SeedN1[Seed N1]
+    N2[Node N2]
+    N3[Node N3]
+    Wrong[Node N4\nWrong Chain]
+
+    SeedN1 <--> N2
+    SeedN1 <--> N3
+    N2 <--> N3
+    Wrong -.-> SeedN1
+```
+
+Dashed edges represent rejected handshakes. Successful connections participate
+in the authenticated mesh, enabling PEX gossip and keepalive traffic.
+
 ## Peerstore
 
 The NET-2B release introduces a durable peerstore backed by LevelDB. Every
