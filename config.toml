@@ -60,3 +60,15 @@ AllowedFiat = ["USD","EUR","GBP"]
 MaxQuoteAgeSeconds = 120
 SlippageBps = 50
 OraclePriority = ["nowpayments","coingecko","manual"]
+
+[swap.risk]
+PerAddressDailyCapWei = "10000e18"
+PerAddressMonthlyCapWei = "300000e18"
+PerTxMinWei = "1e18"
+PerTxMaxWei = "50000e18"
+VelocityWindowSeconds = 600
+VelocityMaxMints = 5
+SanctionsCheckEnabled = true
+
+[swap.providers]
+Allow = ["nowpayments"]

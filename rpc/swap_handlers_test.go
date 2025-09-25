@@ -438,6 +438,52 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	}
 }
 
+func TestSwapSubmitVoucherSanctioned(t *testing.T) {
+	env := newTestEnv(t)
+	minterKey, _ := crypto.GeneratePrivateKey()
+	var minterAddr [20]byte
+	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
+	configureSwapToken(t, env.node, minterAddr)
+
+	recipientKey, _ := crypto.GeneratePrivateKey()
+	var recipient [20]byte
+	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
+
+	cfg := swap.Config{
+		AllowedFiat:        []string{"USD"},
+		MaxQuoteAgeSeconds: 120,
+		SlippageBps:        50,
+		OraclePriority:     []string{"manual"},
+		Risk:               swap.RiskConfig{SanctionsCheckEnabled: true},
+	}
+	env.node.SetSwapConfig(cfg)
+	env.node.SetSwapSanctionsChecker(func(addr [20]byte) bool {
+		return addr != recipient
+	})
+
+	env.setManualRate(t, "0.10", time.Now())
+	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-SANCTION")
+	sig := signSwapVoucher(t, minterKey, voucher)
+
+	payload := map[string]interface{}{
+		"voucher":      voucher,
+		"sig":          "0x" + hex.EncodeToString(sig),
+		"provider":     "nowpayments",
+		"providerTxId": "ORDER-SANCTION",
+	}
+	req := &RPCRequest{ID: 11, Params: []json.RawMessage{marshalParam(t, payload)}}
+	recorder := httptest.NewRecorder()
+	env.server.handleSwapSubmitVoucher(recorder, env.newRequest(), req)
+
+	_, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr == nil {
+		t.Fatalf("expected sanction error")
+	}
+	if rpcErr.Code != codeUnauthorized {
+		t.Fatalf("expected unauthorized code, got %d", rpcErr.Code)
+	}
+}
+
 func TestSwapVoucherExportAndList(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
