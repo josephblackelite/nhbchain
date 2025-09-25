@@ -17,6 +17,8 @@ func TestHandshakeVerifySuccess(t *testing.T) {
 	local := NewServer(handler, mustKey(t), baseConfig(genesis))
 	remote := NewServer(handler, mustKey(t), baseConfig(genesis))
 
+	remote.addListenAddress("127.0.0.1:34567")
+
 	packet, err := remote.buildHandshake()
 	if err != nil {
 		t.Fatalf("build handshake: %v", err)
@@ -36,6 +38,12 @@ func TestHandshakeVerifySuccess(t *testing.T) {
 	}
 	if packet.nodeID != remote.nodeID {
 		t.Fatalf("expected nodeID %s got %s", remote.nodeID, packet.nodeID)
+	}
+	if len(packet.ListenAddrs) == 0 || packet.ListenAddrs[0] != "127.0.0.1:34567" {
+		t.Fatalf("expected listen address to be sanitized, got %v", packet.ListenAddrs)
+	}
+	if len(packet.addrs) != len(packet.ListenAddrs) {
+		t.Fatalf("expected cached listen addrs to mirror payload")
 	}
 }
 

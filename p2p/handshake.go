@@ -30,12 +30,13 @@ var (
 )
 
 type handshakeMessage struct {
-	ProtocolVersion uint32 `json:"protoVersion"`
-	ChainID         uint64 `json:"chainId"`
-	GenesisHash     string `json:"genesisHash"`
-	NodeID          string `json:"nodeId"`
-	Nonce           string `json:"nonce"`
-	ClientVersion   string `json:"clientVersion"`
+	ProtocolVersion uint32   `json:"protoVersion"`
+	ChainID         uint64   `json:"chainId"`
+	GenesisHash     string   `json:"genesisHash"`
+	NodeID          string   `json:"nodeId"`
+	Nonce           string   `json:"nonce"`
+	ClientVersion   string   `json:"clientVersion"`
+	ListenAddrs     []string `json:"listenAddrs,omitempty"`
 }
 
 type handshakePacket struct {
@@ -44,6 +45,7 @@ type handshakePacket struct {
 
 	nodeID string
 	pubKey *ecdsa.PublicKey
+	addrs  []string
 }
 
 func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bufio.Reader) (*handshakePacket, error) {
@@ -71,6 +73,7 @@ func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bu
 	if err := s.verifyHandshake(&remote); err != nil {
 		return nil, err
 	}
+	remote.addrs = sanitizeListenAddrs(remote.ListenAddrs)
 	return &remote, nil
 }
 
@@ -80,6 +83,7 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		return nil, fmt.Errorf("generate handshake nonce: %w", err)
 	}
 
+	listen := sanitizeListenAddrs(s.ListenAddresses())
 	payload := handshakeMessage{
 		ProtocolVersion: protocolVersion,
 		ChainID:         s.cfg.ChainID,
@@ -87,6 +91,7 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		NodeID:          s.nodeID,
 		Nonce:           encodeHex(nonce),
 		ClientVersion:   s.cfg.ClientVersion,
+		ListenAddrs:     listen,
 	}
 
 	digest, err := handshakeDigest(payload.ChainID, s.genesis, nonce, payload.NodeID)
@@ -103,6 +108,7 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		Signature:        encodeHex(sig),
 		nodeID:           s.nodeID,
 		pubKey:           &s.privKey.PrivateKey.PublicKey,
+		addrs:            listen,
 	}
 	if !s.nonceGuard.Remember(payload.Nonce, s.now()) {
 		return nil, fmt.Errorf("nonce collision detected")
@@ -191,6 +197,45 @@ func (s *Server) signatureMismatch(packet *handshakePacket, format string, args 
 	params = append(params, errHandshakeSignatureFailure)
 	params = append(params, args...)
 	return fmt.Errorf("%w: "+format, params...)
+}
+
+func sanitizeListenAddrs(addrs []string) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	cleaned := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, raw := range addrs {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(trimmed)
+		if err != nil {
+			continue
+		}
+		host = strings.TrimSpace(host)
+		port = strings.TrimSpace(port)
+		if host == "" || port == "" || port == "0" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsUnspecified() {
+				continue
+			}
+			host = ip.String()
+		}
+		normalized := net.JoinHostPort(host, port)
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		cleaned = append(cleaned, normalized)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 func (s *Server) markHandshakeViolation(nodeID string) {
