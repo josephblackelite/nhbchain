@@ -10,14 +10,18 @@ import (
 )
 
 const (
-	// TypeSwapMinted is emitted whenever a swap voucher mints ZNHB on-chain.
-	TypeSwapMinted = "swap.minted"
-	// TypeSwapAlertLimitHit indicates that a voucher submission triggered a configured limit.
-	TypeSwapAlertLimitHit = "swap.alert.limit_hit"
-	// TypeSwapAlertSanction indicates that a voucher recipient failed the sanctions hook.
-	TypeSwapAlertSanction = "swap.alert.sanction"
-	// TypeSwapAlertVelocity indicates that a voucher breached the mint velocity guardrail.
-	TypeSwapAlertVelocity = "swap.alert.velocity"
+        // TypeSwapMinted is emitted whenever a swap voucher mints ZNHB on-chain.
+        TypeSwapMinted = "swap.minted"
+        // TypeSwapAlertLimitHit indicates that a voucher submission triggered a configured limit.
+        TypeSwapAlertLimitHit = "swap.alert.limit_hit"
+        // TypeSwapAlertSanction indicates that a voucher recipient failed the sanctions hook.
+        TypeSwapAlertSanction = "swap.alert.sanction"
+        // TypeSwapAlertVelocity indicates that a voucher breached the mint velocity guardrail.
+        TypeSwapAlertVelocity = "swap.alert.velocity"
+        // TypeSwapBurnRecorded captures a burn receipt produced by the off-ramp.
+        TypeSwapBurnRecorded = "swap.burn.recorded"
+        // TypeSwapTreasuryReconciled is emitted when vouchers are marked as reconciled against treasury records.
+        TypeSwapTreasuryReconciled = "swap.treasury.reconciled"
 )
 
 type SwapMinted struct {
@@ -128,15 +132,84 @@ func (SwapVelocityAlert) EventType() string { return TypeSwapAlertVelocity }
 
 // Event renders the velocity alert payload.
 func (a SwapVelocityAlert) Event() *types.Event {
-	attrs := map[string]string{
-		"provider":      strings.TrimSpace(a.Provider),
-		"providerTxId":  strings.TrimSpace(a.ProviderTxID),
-		"windowSeconds": strconv.FormatUint(a.WindowSeconds, 10),
-		"allowedMints":  strconv.FormatUint(a.AllowedMints, 10),
-		"observedCount": strconv.Itoa(a.ObservedCount),
-	}
-	if a.Address != ([20]byte{}) {
-		attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, a.Address[:]).String()
-	}
-	return &types.Event{Type: TypeSwapAlertVelocity, Attributes: attrs}
+        attrs := map[string]string{
+                "provider":      strings.TrimSpace(a.Provider),
+                "providerTxId":  strings.TrimSpace(a.ProviderTxID),
+                "windowSeconds": strconv.FormatUint(a.WindowSeconds, 10),
+                "allowedMints":  strconv.FormatUint(a.AllowedMints, 10),
+                "observedCount": strconv.Itoa(a.ObservedCount),
+        }
+        if a.Address != ([20]byte{}) {
+                attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, a.Address[:]).String()
+        }
+        return &types.Event{Type: TypeSwapAlertVelocity, Attributes: attrs}
+}
+
+// SwapBurnRecorded encapsulates metadata describing an off-ramp burn receipt.
+type SwapBurnRecorded struct {
+        ReceiptID    string
+        ProviderTxID string
+        Token        string
+        Amount       *big.Int
+        BurnTx       string
+        TreasuryTx   string
+        VoucherIDs   []string
+        ObservedAt   int64
+}
+
+// EventType returns the canonical burn receipt event identifier.
+func (SwapBurnRecorded) EventType() string { return TypeSwapBurnRecorded }
+
+// Event renders the burn receipt event for downstream consumers.
+func (r SwapBurnRecorded) Event() *types.Event {
+        amount := big.NewInt(0)
+        if r.Amount != nil {
+                amount = new(big.Int).Set(r.Amount)
+        }
+        attrs := map[string]string{
+                "receiptId":   strings.TrimSpace(r.ReceiptID),
+                "providerTxId": strings.TrimSpace(r.ProviderTxID),
+                "token":       strings.TrimSpace(r.Token),
+                "amountWei":   amount.String(),
+        }
+        if strings.TrimSpace(r.BurnTx) != "" {
+                attrs["burnTx"] = strings.TrimSpace(r.BurnTx)
+        }
+        if strings.TrimSpace(r.TreasuryTx) != "" {
+                attrs["treasuryTx"] = strings.TrimSpace(r.TreasuryTx)
+        }
+        if len(r.VoucherIDs) > 0 {
+                attrs["vouchers"] = strings.Join(r.VoucherIDs, ",")
+        }
+        if r.ObservedAt > 0 {
+                attrs["observedAt"] = strconv.FormatInt(r.ObservedAt, 10)
+        }
+        return &types.Event{Type: TypeSwapBurnRecorded, Attributes: attrs}
+}
+
+// SwapTreasuryReconciled captures a treasury reconciliation marker for minted vouchers.
+type SwapTreasuryReconciled struct {
+        VoucherIDs []string
+        ReceiptID  string
+        ObservedAt int64
+}
+
+// EventType returns the canonical reconciliation event identifier.
+func (SwapTreasuryReconciled) EventType() string { return TypeSwapTreasuryReconciled }
+
+// Event renders the reconciliation event payload.
+func (r SwapTreasuryReconciled) Event() *types.Event {
+        if len(r.VoucherIDs) == 0 {
+                return nil
+        }
+        attrs := map[string]string{
+                "vouchers": strings.Join(r.VoucherIDs, ","),
+        }
+        if strings.TrimSpace(r.ReceiptID) != "" {
+                attrs["receiptId"] = strings.TrimSpace(r.ReceiptID)
+        }
+        if r.ObservedAt > 0 {
+                attrs["observedAt"] = strconv.FormatInt(r.ObservedAt, 10)
+        }
+        return &types.Event{Type: TypeSwapTreasuryReconciled, Attributes: attrs}
 }

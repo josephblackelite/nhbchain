@@ -135,8 +135,18 @@ func (pc ProviderConfig) IsAllowed(provider string) bool {
 
 // ProviderStatus summarises the provider controls for operator dashboards and tooling.
 type ProviderStatus struct {
-	Allow                 []string
-	LastOracleHealthCheck int64
+        Allow                 []string
+        LastOracleHealthCheck int64
+        OracleFeeds           []OracleFeedStatus
+}
+
+// OracleFeedStatus summarises the health of a particular oracle pair.
+type OracleFeedStatus struct {
+        Pair            string
+        Base            string
+        Quote           string
+        LastObservation int64
+        Observations    int
 }
 
 // RiskCode enumerates supported limit violation categories.

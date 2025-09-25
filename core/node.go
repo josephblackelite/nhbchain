@@ -2243,6 +2243,30 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		return "", false, fmt.Errorf("swap: oracle: %w", err)
 	}
 	n.recordSwapOracleHealth(time.Now())
+	twapWindow := cfg.TwapWindow()
+	var (
+		twapRate          string
+		twapCount         int
+		twapWindowSeconds int64
+		twapStart         int64
+		twapEnd           int64
+	)
+	if twapOracle, ok := oracle.(swap.TWAPOracle); ok {
+		snapshot, err := twapOracle.TWAP("USD", token, twapWindow)
+		if err == nil && snapshot.Average != nil {
+			twapRate = snapshot.Average.FloatString(18)
+			twapCount = snapshot.Count
+			if twapWindow > 0 {
+				twapWindowSeconds = int64(twapWindow / time.Second)
+			}
+			if !snapshot.Start.IsZero() {
+				twapStart = snapshot.Start.UTC().Unix()
+			}
+			if !snapshot.End.IsZero() {
+				twapEnd = snapshot.End.UTC().Unix()
+			}
+		}
+	}
 	maxAge := cfg.MaxQuoteAge()
 	if maxAge > 0 {
 		cutoff := time.Now().Add(-maxAge)
@@ -2291,21 +2315,26 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		usdAmount = strings.TrimSpace(voucher.FiatAmount)
 	}
 	record := &swap.VoucherRecord{
-		Provider:        provider,
-		ProviderTxID:    providerTxID,
-		FiatCurrency:    strings.ToUpper(strings.TrimSpace(voucher.Fiat)),
-		FiatAmount:      strings.TrimSpace(voucher.FiatAmount),
-		USD:             usdAmount,
-		Rate:            quote.RateString(18),
-		Token:           token,
-		MintAmountWei:   new(big.Int).Set(voucher.Amount),
-		Recipient:       voucher.Recipient,
-		Username:        strings.TrimSpace(submission.Username),
-		Address:         strings.TrimSpace(submission.Address),
-		QuoteTimestamp:  quote.Timestamp.UTC().Unix(),
-		OracleSource:    quote.Source,
-		MinterSignature: "0x" + hex.EncodeToString(signature),
-		Status:          swap.VoucherStatusMinted,
+		Provider:          provider,
+		ProviderTxID:      providerTxID,
+		FiatCurrency:      strings.ToUpper(strings.TrimSpace(voucher.Fiat)),
+		FiatAmount:        strings.TrimSpace(voucher.FiatAmount),
+		USD:               usdAmount,
+		Rate:              quote.RateString(18),
+		Token:             token,
+		MintAmountWei:     new(big.Int).Set(voucher.Amount),
+		Recipient:         voucher.Recipient,
+		Username:          strings.TrimSpace(submission.Username),
+		Address:           strings.TrimSpace(submission.Address),
+		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
+		OracleSource:      quote.Source,
+		MinterSignature:   "0x" + hex.EncodeToString(signature),
+		Status:            swap.VoucherStatusMinted,
+		TwapRate:          twapRate,
+		TwapObservations:  twapCount,
+		TwapWindowSeconds: twapWindowSeconds,
+		TwapStart:         twapStart,
+		TwapEnd:           twapEnd,
 	}
 	if err := ledger.Put(record); err != nil {
 		return "", false, err
@@ -2438,9 +2467,25 @@ func (n *Node) SwapProviderStatus() swap.ProviderStatus {
 	n.swapStatusMu.RLock()
 	last := n.swapOracleLast
 	n.swapStatusMu.RUnlock()
+	feeds := []swap.OracleFeedStatus{}
+	if healthOracle, ok := n.swapOracle.(interface{ Health() swap.OracleHealth }); ok && healthOracle != nil {
+		health := healthOracle.Health()
+		feeds = make([]swap.OracleFeedStatus, 0, len(health.Feeds))
+		for _, feed := range health.Feeds {
+			lastObs := feed.LastObserved.UTC().Unix()
+			feeds = append(feeds, swap.OracleFeedStatus{
+				Pair:            feed.Pair(),
+				Base:            feed.Base,
+				Quote:           feed.Quote,
+				LastObservation: lastObs,
+				Observations:    feed.Observations,
+			})
+		}
+	}
 	return swap.ProviderStatus{
 		Allow:                 cfg.Providers.AllowList(),
 		LastOracleHealthCheck: last,
+		OracleFeeds:           feeds,
 	}
 }
 
@@ -2501,10 +2546,105 @@ func (n *Node) SwapReverseVoucher(providerTxID string) error {
 
 // SwapMarkReconciled marks the supplied vouchers as reconciled in the ledger.
 func (n *Node) SwapMarkReconciled(ids []string) error {
+	trimmed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if t := strings.TrimSpace(id); t != "" {
+			trimmed = append(trimmed, t)
+		}
+	}
+	if len(trimmed) == 0 {
+		return nil
+	}
 	return n.WithState(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
-		return ledger.MarkReconciled(ids)
+		if err := ledger.MarkReconciled(trimmed); err != nil {
+			return err
+		}
+		evt := events.SwapTreasuryReconciled{
+			VoucherIDs: trimmed,
+			ObservedAt: time.Now().UTC().Unix(),
+		}.Event()
+		if evt != nil {
+			n.state.AppendEvent(evt)
+		}
+		return nil
 	})
+}
+
+// SwapRecordBurn persists a burn-for-redeem receipt and marks associated vouchers as reconciled.
+func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
+	if receipt == nil {
+		return fmt.Errorf("swap: burn receipt required")
+	}
+	trimmedID := strings.TrimSpace(receipt.ReceiptID)
+	if trimmedID == "" {
+		return fmt.Errorf("swap: burn receiptId required")
+	}
+	return n.WithState(func(m *nhbstate.Manager) error {
+		burnLedger := swap.NewBurnLedger(m)
+		if err := burnLedger.Put(receipt); err != nil {
+			return err
+		}
+		if len(receipt.VoucherIDs) > 0 {
+			voucherLedger := swap.NewLedger(m)
+			if err := voucherLedger.MarkReconciled(receipt.VoucherIDs); err != nil {
+				return err
+			}
+		}
+		observed := receipt.ObservedAt
+		if observed <= 0 {
+			observed = time.Now().UTC().Unix()
+		}
+		burnEvent := events.SwapBurnRecorded{
+			ReceiptID:    trimmedID,
+			ProviderTxID: strings.TrimSpace(receipt.ProviderTxID),
+			Token:        strings.TrimSpace(receipt.Token),
+			Amount:       cloneBigInt(receipt.AmountWei),
+			BurnTx:       strings.TrimSpace(receipt.BurnTxHash),
+			TreasuryTx:   strings.TrimSpace(receipt.TreasuryTxID),
+			VoucherIDs:   append([]string{}, receipt.VoucherIDs...),
+			ObservedAt:   observed,
+		}.Event()
+		if burnEvent != nil {
+			n.state.AppendEvent(burnEvent)
+		}
+		if len(receipt.VoucherIDs) > 0 {
+			recon := events.SwapTreasuryReconciled{
+				VoucherIDs: append([]string{}, receipt.VoucherIDs...),
+				ReceiptID:  trimmedID,
+				ObservedAt: observed,
+			}.Event()
+			if recon != nil {
+				n.state.AppendEvent(recon)
+			}
+		}
+		return nil
+	})
+}
+
+// SwapListBurnReceipts paginates burn receipts for audit consumption.
+func (n *Node) SwapListBurnReceipts(startTs, endTs int64, cursor string, limit int) ([]*swap.BurnReceipt, string, error) {
+	var (
+		receipts []*swap.BurnReceipt
+		next     string
+	)
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewBurnLedger(m)
+		list, cursorOut, err := ledger.List(startTs, endTs, cursor, limit)
+		if err != nil {
+			return err
+		}
+		receipts = make([]*swap.BurnReceipt, 0, len(list))
+		for _, receipt := range list {
+			receipts = append(receipts, receipt.Copy())
+		}
+		next = cursorOut
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return receipts, next, nil
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {

@@ -10,6 +10,7 @@ import (
 
 	"nhbchain/core"
 	"nhbchain/crypto"
+	swap "nhbchain/native/swap"
 )
 
 // handleSwapLimits returns the current usage counters and remaining capacity for a swap participant.
@@ -115,7 +116,55 @@ func (s *Server) handleSwapProviderStatus(w http.ResponseWriter, _ *http.Request
 		"allow":                 status.Allow,
 		"lastOracleHealthCheck": status.LastOracleHealthCheck,
 	}
+	if len(status.OracleFeeds) > 0 {
+		result["oracleFeeds"] = status.OracleFeeds
+	}
 	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleSwapBurnList(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) < 2 || len(req.Params) > 4 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected startTs, endTs, [cursor], [limit]", nil)
+		return
+	}
+	var startTs, endTs int64
+	if err := json.Unmarshal(req.Params[0], &startTs); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid startTs", err.Error())
+		return
+	}
+	if err := json.Unmarshal(req.Params[1], &endTs); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid endTs", err.Error())
+		return
+	}
+	cursor := ""
+	if len(req.Params) >= 3 {
+		if err := json.Unmarshal(req.Params[2], &cursor); err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid cursor", err.Error())
+			return
+		}
+		cursor = strings.TrimSpace(cursor)
+	}
+	limit := 50
+	if len(req.Params) == 4 {
+		var limit64 int64
+		if err := json.Unmarshal(req.Params[3], &limit64); err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid limit", err.Error())
+			return
+		}
+		if limit64 > 0 {
+			limit = int(limit64)
+		}
+	}
+	receipts, nextCursor, err := s.node.SwapListBurnReceipts(startTs, endTs, cursor, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to list burn receipts", err.Error())
+		return
+	}
+	formatted := make([]map[string]interface{}, 0, len(receipts))
+	for _, receipt := range receipts {
+		formatted = append(formatted, formatBurnReceipt(receipt))
+	}
+	writeResult(w, req.ID, map[string]interface{}{"receipts": formatted, "nextCursor": nextCursor})
 }
 
 // handleSwapVoucherReverse reverses a minted voucher and moves funds into the refund sink.
@@ -156,4 +205,36 @@ func (s *Server) handleSwapVoucherReverse(w http.ResponseWriter, _ *http.Request
 		}
 	}
 	writeResult(w, req.ID, map[string]bool{"ok": true})
+}
+
+func formatBurnReceipt(receipt *swap.BurnReceipt) map[string]interface{} {
+	if receipt == nil {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"receiptId":    receipt.ReceiptID,
+		"providerTxId": receipt.ProviderTxID,
+		"token":        receipt.Token,
+		"amountWei":    mintAmountToString(receipt.AmountWei),
+		"observedAt":   receipt.ObservedAt,
+	}
+	if receipt.Burner != ([20]byte{}) {
+		payload["burner"] = crypto.NewAddress(crypto.NHBPrefix, receipt.Burner[:]).String()
+	}
+	if strings.TrimSpace(receipt.RedeemReference) != "" {
+		payload["redeemRef"] = strings.TrimSpace(receipt.RedeemReference)
+	}
+	if strings.TrimSpace(receipt.BurnTxHash) != "" {
+		payload["burnTx"] = strings.TrimSpace(receipt.BurnTxHash)
+	}
+	if strings.TrimSpace(receipt.TreasuryTxID) != "" {
+		payload["treasuryTx"] = strings.TrimSpace(receipt.TreasuryTxID)
+	}
+	if len(receipt.VoucherIDs) > 0 {
+		payload["voucherIds"] = append([]string{}, receipt.VoucherIDs...)
+	}
+	if strings.TrimSpace(receipt.Notes) != "" {
+		payload["notes"] = strings.TrimSpace(receipt.Notes)
+	}
+	return payload
 }

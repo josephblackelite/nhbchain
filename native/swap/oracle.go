@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,46 @@ type PriceQuote struct {
 	Rate      *big.Rat
 	Timestamp time.Time
 	Source    string
+}
+
+// TWAPResult captures the summary statistics for a time-weighted average price
+// calculation. Average holds the computed rate while Start/End describe the
+// time window covered by the observation set.
+type TWAPResult struct {
+	Average *big.Rat
+	Start   time.Time
+	End     time.Time
+	Count   int
+}
+
+// FeedHealth captures metadata about individual feed observations used to drive
+// the aggregator and TWAP calculations.
+type FeedHealth struct {
+	Base         string
+	Quote        string
+	LastObserved time.Time
+	Observations int
+}
+
+// Pair renders the canonical pair string in BASE/QUOTE form.
+func (fh FeedHealth) Pair() string {
+	base := strings.TrimSpace(fh.Base)
+	quote := strings.TrimSpace(fh.Quote)
+	if base == "" && quote == "" {
+		return ""
+	}
+	if quote == "" {
+		return base
+	}
+	if base == "" {
+		return quote
+	}
+	return base + "/" + quote
+}
+
+// OracleHealth aggregates health information for all tracked pairs.
+type OracleHealth struct {
+	Feeds []FeedHealth
 }
 
 // Clone returns a deep copy of the quote to prevent accidental mutations.
@@ -48,6 +89,14 @@ type PriceOracle interface {
 	GetRate(base, quote string) (PriceQuote, error)
 }
 
+// TWAPOracle extends the PriceOracle interface with the ability to report
+// time-weighted average price information for auditing and downstream risk
+// systems.
+type TWAPOracle interface {
+	PriceOracle
+	TWAP(base, quote string, window time.Duration) (TWAPResult, error)
+}
+
 // ErrNoFreshQuote indicates that the aggregator could not retrieve a quote within
 // the configured freshness window.
 var ErrNoFreshQuote = errors.New("swap: no fresh oracle quote available")
@@ -59,6 +108,9 @@ type OracleAggregator struct {
 	priority []string
 	oracles  map[string]PriceOracle
 	maxAge   time.Duration
+	history  map[string][]PriceQuote
+	twapWin  time.Duration
+	twapCap  int
 }
 
 // NewOracleAggregator constructs a new aggregator with the provided priority and
@@ -70,6 +122,8 @@ func NewOracleAggregator(priority []string, maxAge time.Duration) *OracleAggrega
 		priority: prio,
 		oracles:  make(map[string]PriceOracle),
 		maxAge:   maxAge,
+		history:  make(map[string][]PriceQuote),
+		twapCap:  128,
 	}
 }
 
@@ -90,6 +144,35 @@ func (a *OracleAggregator) SetPriority(priority []string) {
 	}
 	a.mu.Lock()
 	a.priority = append([]string{}, priority...)
+	a.mu.Unlock()
+}
+
+// SetTWAPWindow configures the rolling observation window used when computing
+// time-weighted average prices. A zero duration disables aggregation while
+// negative durations are coerced to zero for safety.
+func (a *OracleAggregator) SetTWAPWindow(window time.Duration) {
+	if a == nil {
+		return
+	}
+	if window < 0 {
+		window = 0
+	}
+	a.mu.Lock()
+	a.twapWin = window
+	a.mu.Unlock()
+}
+
+// SetTWAPSampleCap bounds the stored sample count per market when calculating
+// TWAP values. A non-positive value resets the cap to the default.
+func (a *OracleAggregator) SetTWAPSampleCap(cap int) {
+	if a == nil {
+		return
+	}
+	if cap <= 0 {
+		cap = 128
+	}
+	a.mu.Lock()
+	a.twapCap = cap
 	a.mu.Unlock()
 }
 
@@ -144,10 +227,10 @@ func (a *OracleAggregator) GetRate(base, quote string) (PriceQuote, error) {
 		cutoff = time.Now().Add(-maxAge)
 	}
 
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 	for _, name := range priority {
+		a.mu.RLock()
 		oracle := a.oracles[strings.ToLower(name)]
+		a.mu.RUnlock()
 		if oracle == nil {
 			continue
 		}
@@ -168,6 +251,7 @@ func (a *OracleAggregator) GetRate(base, quote string) (PriceQuote, error) {
 		if strings.TrimSpace(result.Source) == "" {
 			result.Source = strings.ToLower(name)
 		}
+		a.recordSample(baseSym, quoteSym, result)
 		return result, nil
 	}
 
@@ -444,6 +528,150 @@ func normaliseSymbol(symbol string) string {
 	return strings.ToUpper(strings.TrimSpace(symbol))
 }
 
+func (a *OracleAggregator) pairKey(base, quote string) string {
+	return normaliseSymbol(base) + ":" + normaliseSymbol(quote)
+}
+
+func parsePairKey(key string) (string, string) {
+	parts := strings.SplitN(key, ":", 2)
+	base := ""
+	quote := ""
+	if len(parts) > 0 {
+		base = strings.TrimSpace(parts[0])
+	}
+	if len(parts) > 1 {
+		quote = strings.TrimSpace(parts[1])
+	}
+	return base, quote
+}
+
+func (a *OracleAggregator) recordSample(base, quote string, quoteOut PriceQuote) {
+	if a == nil {
+		return
+	}
+	key := a.pairKey(base, quote)
+	sample := quoteOut.Clone()
+	if sample.Timestamp.IsZero() {
+		sample.Timestamp = time.Now().UTC()
+	} else {
+		sample.Timestamp = sample.Timestamp.UTC()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.history == nil {
+		a.history = make(map[string][]PriceQuote)
+	}
+	bucket := append([]PriceQuote{}, a.history[key]...)
+	bucket = append(bucket, sample)
+	window := a.twapWin
+	if window > 0 {
+		cutoff := sample.Timestamp.Add(-window)
+		filtered := bucket[:0]
+		for _, entry := range bucket {
+			if entry.Timestamp.Before(cutoff) {
+				continue
+			}
+			filtered = append(filtered, entry)
+		}
+		bucket = filtered
+	}
+	if a.twapCap > 0 && len(bucket) > a.twapCap {
+		bucket = append([]PriceQuote{}, bucket[len(bucket)-a.twapCap:]...)
+	}
+	a.history[key] = bucket
+}
+
+// TWAP computes the time-weighted average price across the configured rolling
+// window. When no observations are available ErrNoFreshQuote is returned to
+// mirror the freshness semantics of GetRate.
+func (a *OracleAggregator) TWAP(base, quote string, window time.Duration) (TWAPResult, error) {
+	if a == nil {
+		return TWAPResult{}, fmt.Errorf("oracle aggregator not configured")
+	}
+	baseSym := normaliseSymbol(base)
+	quoteSym := normaliseSymbol(quote)
+	if baseSym == "" || quoteSym == "" {
+		return TWAPResult{}, fmt.Errorf("oracle: base and quote required")
+	}
+	key := a.pairKey(baseSym, quoteSym)
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	bucket := append([]PriceQuote{}, a.history[key]...)
+	if len(bucket) == 0 {
+		return TWAPResult{}, ErrNoFreshQuote
+	}
+	if window <= 0 {
+		window = a.twapWin
+	}
+	var (
+		cutoff time.Time
+		start  time.Time
+		end    time.Time
+	)
+	if window > 0 {
+		end = bucket[len(bucket)-1].Timestamp
+		if end.IsZero() {
+			end = time.Now().UTC()
+		}
+		cutoff = end.Add(-window)
+	}
+        sum := big.NewRat(0, 1)
+        used := 0
+        for i := 0; i < len(bucket); i++ {
+                entry := bucket[i]
+                if window > 0 && entry.Timestamp.Before(cutoff) {
+                        continue
+                }
+		if entry.Rate == nil {
+			continue
+		}
+		if entry.Timestamp.IsZero() {
+			entry.Timestamp = time.Now().UTC()
+		}
+		if start.IsZero() || entry.Timestamp.Before(start) {
+			start = entry.Timestamp
+		}
+                if entry.Timestamp.After(end) {
+                        end = entry.Timestamp
+                }
+                sum.Add(sum, new(big.Rat).Set(entry.Rate))
+                used++
+        }
+        if used == 0 {
+                return TWAPResult{}, ErrNoFreshQuote
+        }
+        avg := new(big.Rat).Quo(sum, big.NewRat(int64(used), 1))
+        return TWAPResult{Average: avg, Start: start, End: end, Count: used}, nil
+}
+
+// Health reports the last observation timestamp and sample counts for each
+// tracked pair. The information is safe for concurrent access.
+func (a *OracleAggregator) Health() OracleHealth {
+	if a == nil {
+		return OracleHealth{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	feeds := make([]FeedHealth, 0, len(a.history))
+	for key, samples := range a.history {
+		if len(samples) == 0 {
+			continue
+		}
+		last := samples[len(samples)-1]
+		base, quote := parsePairKey(key)
+		feeds = append(feeds, FeedHealth{
+			Base:         base,
+			Quote:        quote,
+			LastObserved: last.Timestamp,
+			Observations: len(samples),
+		})
+	}
+	sort.Slice(feeds, func(i, j int) bool {
+		return feeds[i].Pair() < feeds[j].Pair()
+	})
+	return OracleHealth{Feeds: feeds}
+}
+
 // ComputeMintAmount calculates the mint amount in wei using the provided fiat
 // amount (denominated in USD), oracle rate (USD per token) and token decimals.
 func ComputeMintAmount(fiatAmount string, rate *big.Rat, decimals uint8) (*big.Int, error) {
@@ -477,6 +705,8 @@ type Config struct {
 	MaxQuoteAgeSeconds int64
 	SlippageBps        uint64
 	OraclePriority     []string
+	TwapWindowSeconds  int64
+	TwapSampleCap      int
 	Risk               RiskConfig     `toml:"risk"`
 	Providers          ProviderConfig `toml:"providers"`
 }
@@ -488,6 +718,8 @@ func (c Config) Normalise() Config {
 		MaxQuoteAgeSeconds: c.MaxQuoteAgeSeconds,
 		SlippageBps:        c.SlippageBps,
 		OraclePriority:     append([]string{}, c.OraclePriority...),
+		TwapWindowSeconds:  c.TwapWindowSeconds,
+		TwapSampleCap:      c.TwapSampleCap,
 		Risk:               c.Risk.Normalise(),
 		Providers:          c.Providers.Normalise(),
 	}
@@ -506,6 +738,12 @@ func (c Config) Normalise() Config {
 	if len(cfg.OraclePriority) == 0 {
 		cfg.OraclePriority = []string{"manual"}
 	}
+	if cfg.TwapWindowSeconds < 0 {
+		cfg.TwapWindowSeconds = 0
+	}
+	if cfg.TwapSampleCap <= 0 {
+		cfg.TwapSampleCap = 128
+	}
 	return cfg
 }
 
@@ -523,4 +761,12 @@ func (c Config) IsFiatAllowed(fiat string) bool {
 // MaxQuoteAge returns the configured freshness window as a duration.
 func (c Config) MaxQuoteAge() time.Duration {
 	return time.Duration(c.MaxQuoteAgeSeconds) * time.Second
+}
+
+// TwapWindow converts the configured TWAP window seconds into a duration.
+func (c Config) TwapWindow() time.Duration {
+	if c.TwapWindowSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.TwapWindowSeconds) * time.Second
 }

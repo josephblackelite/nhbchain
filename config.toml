@@ -68,6 +68,8 @@ AllowedFiat = ["USD","EUR","GBP"]
 MaxQuoteAgeSeconds = 120
 SlippageBps = 50
 OraclePriority = ["nowpayments","coingecko","manual"]
+TwapWindowSeconds = 300
+TwapSampleCap = 128
 
 [swap.risk]
 PerAddressDailyCapWei = "10000e18"
