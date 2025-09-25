@@ -13,6 +13,7 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/core"
 	"nhbchain/crypto"
+	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
 	"nhbchain/rpc"
 	"nhbchain/storage"
@@ -77,6 +78,18 @@ func main() {
 	if err := node.SetPotsoWeightConfig(weightCfg); err != nil {
 		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
 	}
+
+	swapCfg := cfg.SwapSettings()
+	node.SetSwapConfig(swapCfg)
+	manualOracle := swap.NewManualOracle()
+	aggregator := swap.NewOracleAggregator(swapCfg.OraclePriority, swapCfg.MaxQuoteAge())
+	aggregator.SetPriority(swapCfg.OraclePriority)
+	aggregator.Register("manual", manualOracle)
+	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
+	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
+	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "nhb", "ZNHB": "znhb"}))
+	node.SetSwapOracle(aggregator)
+	node.SetSwapManualOracle(manualOracle)
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
 	p2pCfg := p2p.ServerConfig{

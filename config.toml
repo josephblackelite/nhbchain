@@ -54,3 +54,9 @@ TimelockSeconds = 172800
 QuorumBps = 2000
 PassThresholdBps = 5000
 AllowedParams = ["potso.weights.AlphaStakeBps","potso.rewards.EmissionPerEpochWei","fees.baseFee"]
+
+[swap]
+AllowedFiat = ["USD","EUR","GBP"]
+MaxQuoteAgeSeconds = 120
+SlippageBps = 50
+OraclePriority = ["nowpayments","coingecko","manual"]

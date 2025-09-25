@@ -13,6 +13,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/governance"
 	"nhbchain/native/potso"
+	swap "nhbchain/native/swap"
 
 	"github.com/BurntSushi/toml"
 )
@@ -41,6 +42,7 @@ type Config struct {
 	P2P                   P2PSection  `toml:"p2p"`
 	Potso                 PotsoConfig `toml:"potso"`
 	Governance            GovConfig   `toml:"governance"`
+	Swap                  swap.Config `toml:"swap"`
 }
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -228,6 +230,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	cfg.Swap = cfg.Swap.Normalise()
 	cfg.syncTopLevelToP2P()
 
 	return cfg, nil
@@ -397,6 +400,14 @@ func (cfg *Config) PotsoWeightConfig() (potso.WeightParams, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+// SwapSettings exposes the swap configuration with defaults applied.
+func (cfg *Config) SwapSettings() swap.Config {
+	if cfg == nil {
+		return swap.Config{}.Normalise()
+	}
+	return cfg.Swap.Normalise()
 }
 
 // Policy converts the governance TOML representation into a runtime proposal policy.

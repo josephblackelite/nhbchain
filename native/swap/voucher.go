@@ -30,6 +30,18 @@ type VoucherV1 struct {
 	Expiry     int64
 }
 
+// VoucherSubmission bundles the payload supplied by the fiat gateway when
+// requesting a mint alongside auxiliary metadata captured for auditing.
+type VoucherSubmission struct {
+	Voucher      *VoucherV1
+	Signature    []byte
+	Provider     string
+	ProviderTxID string
+	Username     string
+	Address      string
+	USDAmount    string
+}
+
 type voucherJSON struct {
 	Domain     string `json:"domain"`
 	ChainID    uint64 `json:"chainId"`
