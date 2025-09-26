@@ -18,6 +18,7 @@ import (
 
 	"nhbchain/core/identity"
 	"nhbchain/crypto"
+	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
@@ -63,6 +64,9 @@ var (
 	escrowModuleSeedPrefix     = "module/escrow/vault/"
 	escrowRealmPrefix          = []byte("escrow/realm/")
 	escrowFrozenPolicyPrefix   = []byte("escrow/frozen/")
+	creatorContentPrefix       = []byte("creator/content/")
+	creatorStakePrefix         = []byte("creator/stake/")
+	creatorLedgerPrefix        = []byte("creator/ledger/")
 	claimableRecordPrefix      = []byte("claimable/record/")
 	claimableNoncePrefix       = []byte("claimable/nonce/")
 	tradeRecordPrefix          = []byte("trade/record/")
@@ -2877,4 +2881,270 @@ func (m *Manager) KVGetList(key []byte, out interface{}) error {
 		return nil
 	}
 	return rlp.DecodeBytes(data, out)
+}
+
+func creatorContentKey(id string) []byte {
+	return []byte(fmt.Sprintf("%s%s", creatorContentPrefix, strings.TrimSpace(id)))
+}
+
+func creatorStakeKey(creator [20]byte, fan [20]byte) []byte {
+	return []byte(fmt.Sprintf("%s%x/%x", creatorStakePrefix, creator, fan))
+}
+
+func creatorLedgerKey(creator [20]byte) []byte {
+	return []byte(fmt.Sprintf("%s%x", creatorLedgerPrefix, creator))
+}
+
+type storedCreatorContent struct {
+	ID          string
+	Creator     [20]byte
+	URI         string
+	Metadata    string
+	PublishedAt int64
+	TotalTips   *big.Int
+	TotalStake  *big.Int
+}
+
+func newStoredCreatorContent(content *creator.Content) *storedCreatorContent {
+	if content == nil {
+		return nil
+	}
+	stored := &storedCreatorContent{
+		ID:          strings.TrimSpace(content.ID),
+		Creator:     content.Creator,
+		URI:         strings.TrimSpace(content.URI),
+		Metadata:    strings.TrimSpace(content.Metadata),
+		PublishedAt: content.PublishedAt,
+		TotalTips:   big.NewInt(0),
+		TotalStake:  big.NewInt(0),
+	}
+	if content.TotalTips != nil {
+		stored.TotalTips = new(big.Int).Set(content.TotalTips)
+	}
+	if content.TotalStake != nil {
+		stored.TotalStake = new(big.Int).Set(content.TotalStake)
+	}
+	return stored
+}
+
+func (s *storedCreatorContent) toContent() *creator.Content {
+	if s == nil {
+		return nil
+	}
+	result := &creator.Content{
+		ID:          strings.TrimSpace(s.ID),
+		Creator:     s.Creator,
+		URI:         strings.TrimSpace(s.URI),
+		Metadata:    strings.TrimSpace(s.Metadata),
+		PublishedAt: s.PublishedAt,
+		TotalTips:   big.NewInt(0),
+		TotalStake:  big.NewInt(0),
+	}
+	if s.TotalTips != nil {
+		result.TotalTips = new(big.Int).Set(s.TotalTips)
+	}
+	if s.TotalStake != nil {
+		result.TotalStake = new(big.Int).Set(s.TotalStake)
+	}
+	return result
+}
+
+type storedCreatorStake struct {
+	Creator     [20]byte
+	Fan         [20]byte
+	Amount      *big.Int
+	Shares      *big.Int
+	StakedAt    int64
+	LastAccrual int64
+}
+
+func newStoredCreatorStake(stake *creator.Stake) *storedCreatorStake {
+	if stake == nil {
+		return nil
+	}
+	stored := &storedCreatorStake{
+		Creator:     stake.Creator,
+		Fan:         stake.Fan,
+		Amount:      big.NewInt(0),
+		Shares:      big.NewInt(0),
+		StakedAt:    stake.StakedAt,
+		LastAccrual: stake.LastAccrual,
+	}
+	if stake.Amount != nil {
+		stored.Amount = new(big.Int).Set(stake.Amount)
+	}
+	if stake.Shares != nil {
+		stored.Shares = new(big.Int).Set(stake.Shares)
+	}
+	return stored
+}
+
+func (s *storedCreatorStake) toStake() *creator.Stake {
+	if s == nil {
+		return nil
+	}
+	stake := &creator.Stake{
+		Creator:     s.Creator,
+		Fan:         s.Fan,
+		Amount:      big.NewInt(0),
+		Shares:      big.NewInt(0),
+		StakedAt:    s.StakedAt,
+		LastAccrual: s.LastAccrual,
+	}
+	if s.Amount != nil {
+		stake.Amount = new(big.Int).Set(s.Amount)
+	}
+	if s.Shares != nil {
+		stake.Shares = new(big.Int).Set(s.Shares)
+	}
+	return stake
+}
+
+type storedCreatorLedger struct {
+	Creator             [20]byte
+	TotalTips           *big.Int
+	TotalStakingYield   *big.Int
+	PendingDistribution *big.Int
+	LastPayout          int64
+}
+
+func newStoredCreatorLedger(ledger *creator.PayoutLedger) *storedCreatorLedger {
+	if ledger == nil {
+		return nil
+	}
+	stored := &storedCreatorLedger{
+		Creator:             ledger.Creator,
+		TotalTips:           big.NewInt(0),
+		TotalStakingYield:   big.NewInt(0),
+		PendingDistribution: big.NewInt(0),
+		LastPayout:          ledger.LastPayout,
+	}
+	if ledger.TotalTips != nil {
+		stored.TotalTips = new(big.Int).Set(ledger.TotalTips)
+	}
+	if ledger.TotalStakingYield != nil {
+		stored.TotalStakingYield = new(big.Int).Set(ledger.TotalStakingYield)
+	}
+	if ledger.PendingDistribution != nil {
+		stored.PendingDistribution = new(big.Int).Set(ledger.PendingDistribution)
+	}
+	return stored
+}
+
+func (s *storedCreatorLedger) toLedger() *creator.PayoutLedger {
+	if s == nil {
+		return nil
+	}
+	ledger := &creator.PayoutLedger{
+		Creator:             s.Creator,
+		TotalTips:           big.NewInt(0),
+		TotalStakingYield:   big.NewInt(0),
+		PendingDistribution: big.NewInt(0),
+		LastPayout:          s.LastPayout,
+	}
+	if s.TotalTips != nil {
+		ledger.TotalTips = new(big.Int).Set(s.TotalTips)
+	}
+	if s.TotalStakingYield != nil {
+		ledger.TotalStakingYield = new(big.Int).Set(s.TotalStakingYield)
+	}
+	if s.PendingDistribution != nil {
+		ledger.PendingDistribution = new(big.Int).Set(s.PendingDistribution)
+	}
+	return ledger
+}
+
+// CreatorContentPut persists a creator content record.
+func (m *Manager) CreatorContentPut(content *creator.Content) error {
+	if content == nil {
+		return fmt.Errorf("creator: nil content")
+	}
+	stored := newStoredCreatorContent(content)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(creatorContentKey(stored.ID), encoded)
+}
+
+// CreatorContentGet loads a content record by identifier.
+func (m *Manager) CreatorContentGet(id string) (*creator.Content, bool, error) {
+	key := creatorContentKey(id)
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	stored := new(storedCreatorContent)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false, err
+	}
+	return stored.toContent(), true, nil
+}
+
+// CreatorStakePut stores or updates a fan stake behind a creator.
+func (m *Manager) CreatorStakePut(stake *creator.Stake) error {
+	if stake == nil {
+		return fmt.Errorf("creator: nil stake")
+	}
+	stored := newStoredCreatorStake(stake)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(creatorStakeKey(stake.Creator, stake.Fan), encoded)
+}
+
+// CreatorStakeGet retrieves a stake record for the given creator and fan pair.
+func (m *Manager) CreatorStakeGet(creatorAddr [20]byte, fan [20]byte) (*creator.Stake, bool, error) {
+	key := creatorStakeKey(creatorAddr, fan)
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	stored := new(storedCreatorStake)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false, err
+	}
+	return stored.toStake(), true, nil
+}
+
+// CreatorStakeDelete removes a stake record for the provided creator/fan pair.
+func (m *Manager) CreatorStakeDelete(creatorAddr [20]byte, fan [20]byte) error {
+	return m.trie.Update(creatorStakeKey(creatorAddr, fan), nil)
+}
+
+// CreatorPayoutLedgerPut stores the payout ledger for a creator.
+func (m *Manager) CreatorPayoutLedgerPut(ledger *creator.PayoutLedger) error {
+	if ledger == nil {
+		return fmt.Errorf("creator: nil ledger")
+	}
+	stored := newStoredCreatorLedger(ledger)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(creatorLedgerKey(ledger.Creator), encoded)
+}
+
+// CreatorPayoutLedgerGet fetches the payout ledger for a creator if present.
+func (m *Manager) CreatorPayoutLedgerGet(creatorAddr [20]byte) (*creator.PayoutLedger, bool, error) {
+	key := creatorLedgerKey(creatorAddr)
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	stored := new(storedCreatorLedger)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false, err
+	}
+	return stored.toLedger(), true, nil
 }

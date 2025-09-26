@@ -3,6 +3,8 @@
 /build/
 /dist/
 /out/
+.next/
+node_modules/
 *.exe
 *.test
 *.out
