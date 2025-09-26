@@ -17,21 +17,23 @@ import (
 
 // Blockchain manages the collection of blocks.
 type Blockchain struct {
-	db      storage.Database // Uses the generic Database interface
-	tip     []byte
-	height  uint64
-	heights map[uint64][]byte
-	mu      sync.RWMutex
-	chainID uint64
-	genesis []byte
+	db            storage.Database // Uses the generic Database interface
+	tip           []byte
+	height        uint64
+	heights       map[uint64][]byte
+	mu            sync.RWMutex
+	chainID       uint64
+	genesis       []byte
+	lastTimestamp int64
 }
 
 var (
-	tipKey        = []byte("tip")
-	genesisKey    = []byte("genesis")
-	heightKeyName = []byte("height")
-	heightPrefix  = []byte("height:")
-	hashPrefix    = []byte("hash:")
+	tipKey           = []byte("tip")
+	genesisKey       = []byte("genesis")
+	heightKeyName    = []byte("height")
+	heightPrefix     = []byte("height:")
+	hashPrefix       = []byte("hash:")
+	lastTimestampKey = []byte("lastTimestamp")
 )
 
 func encodeUint64(v uint64) []byte {
@@ -42,6 +44,16 @@ func encodeUint64(v uint64) []byte {
 
 func decodeUint64(b []byte) uint64 {
 	return binary.BigEndian.Uint64(b)
+}
+
+func encodeInt64(v int64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(v))
+	return buf
+}
+
+func decodeInt64(b []byte) int64 {
+	return int64(binary.BigEndian.Uint64(b))
 }
 
 func heightKey(height uint64) []byte {
@@ -99,6 +111,9 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 			fmt.Printf("Loaded genesis from %s  hash=0x%x  chainID=%d  accounts=%d  validators=%d\n",
 				trimmedPath, genesisHash, bc.chainID, len(spec.Alloc), len(spec.Validators))
 		}
+		if genesis != nil && genesis.Header != nil {
+			bc.lastTimestamp = genesis.Header.Timestamp
+		}
 		return bc, nil
 	}
 
@@ -133,6 +148,12 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 	}
 	bc.genesis = cloneBytes(genesisHash)
 	bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
+
+	if raw, err := db.Get(lastTimestampKey); err == nil {
+		bc.lastTimestamp = decodeInt64(raw)
+	} else if header := bc.CurrentHeader(); header != nil {
+		bc.lastTimestamp = header.Timestamp
+	}
 
 	return bc, nil
 }
@@ -183,11 +204,15 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 	if err := bc.db.Put(hashKey(blockHash), encodeUint64(newHeight)); err != nil {
 		return fmt.Errorf("store hash index: %w", err)
 	}
+	if err := bc.db.Put(lastTimestampKey, encodeInt64(b.Header.Timestamp)); err != nil {
+		return fmt.Errorf("store last timestamp: %w", err)
+	}
 
 	// Update in-memory pointers after successful persistence.
 	bc.tip = cloneBytes(blockHash)
 	bc.height = newHeight
 	bc.heights[newHeight] = cloneBytes(blockHash)
+	bc.lastTimestamp = b.Header.Timestamp
 
 	fmt.Printf("Added new block! Height: %d, Hash: %x\n", bc.height, blockHash)
 	return nil
@@ -244,6 +269,13 @@ func (bc *Blockchain) Tip() []byte {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.tip
+}
+
+// LastTimestamp returns the timestamp recorded for the most recently persisted block.
+func (bc *Blockchain) LastTimestamp() int64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.lastTimestamp
 }
 
 // GenesisHash returns a copy of the canonical genesis block hash.
@@ -337,6 +369,9 @@ func persistGenesisBlock(db storage.Database, genesis *types.Block) ([]byte, err
 	}
 	if err := db.Put(hashKey(genesisHash), encodeUint64(0)); err != nil {
 		return nil, fmt.Errorf("store hash index: %w", err)
+	}
+	if err := db.Put(lastTimestampKey, encodeInt64(genesis.Header.Timestamp)); err != nil {
+		return nil, fmt.Errorf("store genesis timestamp: %w", err)
 	}
 
 	return genesisHash, nil

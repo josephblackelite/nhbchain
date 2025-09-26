@@ -46,6 +46,7 @@ func TestCommitBlockRollsBackOnApplyError(t *testing.T) {
 	}
 
 	fixedTime := time.Unix(1_700_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
 	header := &types.BlockHeader{
 		Height:    node.chain.GetHeight() + 1,
 		Timestamp: fixedTime.Unix(),
@@ -164,6 +165,7 @@ func TestCommitBlockRejectsInvalidChainID(t *testing.T) {
 	}
 
 	fixedTime := time.Unix(1_800_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
 	header := &types.BlockHeader{
 		Height:    node.chain.GetHeight() + 1,
 		Timestamp: fixedTime.Unix(),
@@ -191,5 +193,89 @@ func TestCommitBlockRejectsInvalidChainID(t *testing.T) {
 	}
 	if height := node.chain.GetHeight(); height != 0 {
 		t.Fatalf("unexpected chain height after failed commit: got %d want 0", height)
+	}
+}
+
+func TestCommitBlockEnforcesTimestampWindow(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	tolerance := 3 * time.Second
+	node.SetBlockTimestampTolerance(tolerance)
+
+	genesisTimestamp := node.chain.LastTimestamp()
+	baseTime := time.Unix(genesisTimestamp+2, 0)
+	node.SetTimeSource(func() time.Time { return baseTime })
+
+	txRoot, err := ComputeTxRoot(nil)
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: baseTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, nil)
+
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit within tolerance failed: %v", err)
+	}
+	if got := node.chain.LastTimestamp(); got != baseTime.Unix() {
+		t.Fatalf("unexpected last timestamp: got %d want %d", got, baseTime.Unix())
+	}
+	if height := node.chain.GetHeight(); height != 1 {
+		t.Fatalf("unexpected height after valid commit: got %d want 1", height)
+	}
+
+	futureNow := baseTime.Add(time.Second)
+	node.SetTimeSource(func() time.Time { return futureNow })
+	futureHeader := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: futureNow.Add(5 * time.Second).Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	futureBlock := types.NewBlock(futureHeader, nil)
+	if err := node.CommitBlock(futureBlock); err == nil {
+		t.Fatalf("expected error for future timestamp beyond tolerance")
+	} else if !errors.Is(err, ErrBlockTimestampOutOfWindow) {
+		t.Fatalf("expected ErrBlockTimestampOutOfWindow, got %v", err)
+	}
+	if height := node.chain.GetHeight(); height != 1 {
+		t.Fatalf("height mutated on rejected future block: got %d want 1", height)
+	}
+
+	laterNow := futureNow.Add(2 * time.Second)
+	node.SetTimeSource(func() time.Time { return laterNow })
+	pastHeader := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: baseTime.Add(-time.Second).Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	pastBlock := types.NewBlock(pastHeader, nil)
+	if err := node.CommitBlock(pastBlock); err == nil {
+		t.Fatalf("expected error for timestamp before window")
+	} else if !errors.Is(err, ErrBlockTimestampOutOfWindow) {
+		t.Fatalf("expected ErrBlockTimestampOutOfWindow for past block, got %v", err)
+	}
+	if last := node.chain.LastTimestamp(); last != baseTime.Unix() {
+		t.Fatalf("last timestamp changed on rejection: got %d want %d", last, baseTime.Unix())
 	}
 }

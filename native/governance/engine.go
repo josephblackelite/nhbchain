@@ -79,14 +79,15 @@ type proposalState interface {
 // AllowedParams must contain the canonical parameter keys permitted for
 // parameter update proposals.
 type ProposalPolicy struct {
-	MinDepositWei       *big.Int
-	VotingPeriodSeconds uint64
-	TimelockSeconds     uint64
-	AllowedParams       []string
-	QuorumBps           uint64
-	PassThresholdBps    uint64
-	AllowedRoles        []string
-	TreasuryAllowList   [][20]byte
+        MinDepositWei       *big.Int
+        VotingPeriodSeconds uint64
+        TimelockSeconds     uint64
+        AllowedParams       []string
+        QuorumBps           uint64
+        PassThresholdBps    uint64
+        AllowedRoles        []string
+        TreasuryAllowList   [][20]byte
+        BlockTimestampToleranceSeconds uint64
 }
 
 // Engine orchestrates proposal admission and bookkeeping for governance

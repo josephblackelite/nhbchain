@@ -43,36 +43,124 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db               storage.Database
-	state            *StateProcessor
-	chain            *Blockchain
-	syncMgr          *syncmgr.Manager
-	validatorKey     *crypto.PrivateKey
-	mempool          []*types.Transaction
-	bftEngine        *bft.Engine
-	p2pSrv           *p2p.Server
-	stateMu          sync.Mutex
-	escrowTreasury   [20]byte
-	engagementMgr    *engagement.Manager
-	govPolicy        governance.ProposalPolicy
-	govPolicyMu      sync.RWMutex
-	swapCfgMu        sync.RWMutex
-	swapCfg          swap.Config
-	swapOracle       swap.PriceOracle
-	swapManual       *swap.ManualOracle
-	swapSanctions    swap.SanctionsChecker
-	swapStatusMu     sync.RWMutex
-	swapOracleLast   int64
-	swapRefundSink   [20]byte
-	evidenceStore    *evidence.Store
-	evidenceMaxAge   uint64
-	paymasterMu      sync.RWMutex
-	paymasterEnabled bool
+	db                 storage.Database
+	state              *StateProcessor
+	chain              *Blockchain
+	syncMgr            *syncmgr.Manager
+	validatorKey       *crypto.PrivateKey
+	mempool            []*types.Transaction
+	bftEngine          *bft.Engine
+	p2pSrv             *p2p.Server
+	stateMu            sync.Mutex
+	escrowTreasury     [20]byte
+	engagementMgr      *engagement.Manager
+	govPolicy          governance.ProposalPolicy
+	govPolicyMu        sync.RWMutex
+	swapCfgMu          sync.RWMutex
+	swapCfg            swap.Config
+	swapOracle         swap.PriceOracle
+	swapManual         *swap.ManualOracle
+	swapSanctions      swap.SanctionsChecker
+	swapStatusMu       sync.RWMutex
+	swapOracleLast     int64
+	swapRefundSink     [20]byte
+	evidenceStore      *evidence.Store
+	evidenceMaxAge     uint64
+	paymasterMu        sync.RWMutex
+	paymasterEnabled   bool
+	timestampTolerance time.Duration
+	timeConfigMu       sync.RWMutex
+	timeSource         func() time.Time
 }
 
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
+
+// DefaultBlockTimestampTolerance bounds how far ahead of the local clock a
+// block timestamp may drift before it is rejected.
+const DefaultBlockTimestampTolerance = 5 * time.Second
+
+// ErrBlockTimestampOutOfWindow marks blocks whose timestamps fall outside the
+// permitted window derived from the previous block and the local clock.
+var ErrBlockTimestampOutOfWindow = errors.New("block timestamp outside allowed window")
+
+func (n *Node) blockTimestampTolerance() time.Duration {
+	n.timeConfigMu.RLock()
+	defer n.timeConfigMu.RUnlock()
+	if n == nil || n.timestampTolerance <= 0 {
+		return DefaultBlockTimestampTolerance
+	}
+	return n.timestampTolerance
+}
+
+// SetBlockTimestampTolerance configures the permissible drift when validating
+// block timestamps. Zero or negative values restore the default tolerance.
+func (n *Node) SetBlockTimestampTolerance(tolerance time.Duration) {
+	if n == nil {
+		return
+	}
+	if tolerance <= 0 {
+		tolerance = DefaultBlockTimestampTolerance
+	}
+	n.timeConfigMu.Lock()
+	n.timestampTolerance = tolerance
+	n.timeConfigMu.Unlock()
+}
+
+func (n *Node) applyTimestampTolerance(seconds uint64) {
+	tolerance := DefaultBlockTimestampTolerance
+	if seconds > 0 {
+		tolerance = time.Duration(seconds) * time.Second
+	}
+	n.SetBlockTimestampTolerance(tolerance)
+}
+
+// SetTimeSource overrides the node's clock. Passing nil restores the system
+// clock. Primarily used by tests to simulate deterministic timelines.
+func (n *Node) SetTimeSource(now func() time.Time) {
+	if n == nil {
+		return
+	}
+	source := now
+	if source == nil {
+		source = func() time.Time { return time.Now().UTC() }
+	}
+	n.timeConfigMu.Lock()
+	n.timeSource = source
+	n.timeConfigMu.Unlock()
+}
+
+func (n *Node) currentTime() time.Time {
+	n.timeConfigMu.RLock()
+	source := n.timeSource
+	n.timeConfigMu.RUnlock()
+	if source == nil {
+		return time.Now().UTC()
+	}
+	return source().UTC()
+}
+
+func (n *Node) validateBlockTimestamp(ts int64) error {
+	if n == nil || n.chain == nil {
+		return fmt.Errorf("%w: chain unavailable", ErrBlockTimestampOutOfWindow)
+	}
+	prev := n.chain.LastTimestamp()
+	tolerance := n.blockTimestampTolerance()
+	now := n.currentTime()
+	min := now.Add(-tolerance).Unix()
+	if prev > min {
+		min = prev
+	}
+	if ts < min {
+		return fmt.Errorf("%w: timestamp %d precedes minimum %d", ErrBlockTimestampOutOfWindow, ts, min)
+	}
+	max := now.Add(tolerance).Unix()
+	if ts > max {
+		return fmt.Errorf("%w: timestamp %d exceeds maximum %d (now=%d tolerance=%s)", ErrBlockTimestampOutOfWindow, ts, max, now.Unix(), tolerance)
+	}
+	return nil
+}
 
 // PotsoLeaderboardEntry represents a participant's score for a specific day.
 type PotsoLeaderboardEntry struct {
@@ -124,18 +212,20 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 
 	node := &Node{
-		db:               db,
-		state:            stateProcessor,
-		chain:            chain,
-		validatorKey:     key,
-		mempool:          make([]*types.Transaction, 0),
-		escrowTreasury:   treasury,
-		engagementMgr:    engagement.NewManager(stateProcessor.EngagementConfig()),
-		swapSanctions:    swap.DefaultSanctionsChecker,
-		swapRefundSink:   treasury,
-		evidenceStore:    evidence.NewStore(db),
-		evidenceMaxAge:   evidence.DefaultMaxAgeBlocks,
-		paymasterEnabled: stateProcessor.PaymasterEnabled(),
+		db:                 db,
+		state:              stateProcessor,
+		chain:              chain,
+		validatorKey:       key,
+		mempool:            make([]*types.Transaction, 0),
+		escrowTreasury:     treasury,
+		engagementMgr:      engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapSanctions:      swap.DefaultSanctionsChecker,
+		swapRefundSink:     treasury,
+		evidenceStore:      evidence.NewStore(db),
+		evidenceMaxAge:     evidence.DefaultMaxAgeBlocks,
+		paymasterEnabled:   stateProcessor.PaymasterEnabled(),
+		timestampTolerance: DefaultBlockTimestampTolerance,
+		timeSource:         func() time.Time { return time.Now().UTC() },
 	}
 
 	// Initialise fast-sync manager.
@@ -154,11 +244,14 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 		return
 	}
 	copyPolicy := governance.ProposalPolicy{
-		VotingPeriodSeconds: policy.VotingPeriodSeconds,
-		TimelockSeconds:     policy.TimelockSeconds,
-		AllowedParams:       append([]string{}, policy.AllowedParams...),
-		QuorumBps:           policy.QuorumBps,
-		PassThresholdBps:    policy.PassThresholdBps,
+		VotingPeriodSeconds:            policy.VotingPeriodSeconds,
+		TimelockSeconds:                policy.TimelockSeconds,
+		AllowedParams:                  append([]string{}, policy.AllowedParams...),
+		QuorumBps:                      policy.QuorumBps,
+		PassThresholdBps:               policy.PassThresholdBps,
+		AllowedRoles:                   append([]string{}, policy.AllowedRoles...),
+		TreasuryAllowList:              append([][20]byte{}, policy.TreasuryAllowList...),
+		BlockTimestampToleranceSeconds: policy.BlockTimestampToleranceSeconds,
 	}
 	if policy.MinDepositWei != nil {
 		copyPolicy.MinDepositWei = new(big.Int).Set(policy.MinDepositWei)
@@ -166,17 +259,21 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 	n.govPolicyMu.Lock()
 	n.govPolicy = copyPolicy
 	n.govPolicyMu.Unlock()
+	n.applyTimestampTolerance(copyPolicy.BlockTimestampToleranceSeconds)
 }
 
 func (n *Node) governancePolicy() governance.ProposalPolicy {
 	n.govPolicyMu.RLock()
 	defer n.govPolicyMu.RUnlock()
 	policy := governance.ProposalPolicy{
-		VotingPeriodSeconds: n.govPolicy.VotingPeriodSeconds,
-		TimelockSeconds:     n.govPolicy.TimelockSeconds,
-		AllowedParams:       append([]string{}, n.govPolicy.AllowedParams...),
-		QuorumBps:           n.govPolicy.QuorumBps,
-		PassThresholdBps:    n.govPolicy.PassThresholdBps,
+		VotingPeriodSeconds:            n.govPolicy.VotingPeriodSeconds,
+		TimelockSeconds:                n.govPolicy.TimelockSeconds,
+		AllowedParams:                  append([]string{}, n.govPolicy.AllowedParams...),
+		QuorumBps:                      n.govPolicy.QuorumBps,
+		PassThresholdBps:               n.govPolicy.PassThresholdBps,
+		AllowedRoles:                   append([]string{}, n.govPolicy.AllowedRoles...),
+		TreasuryAllowList:              append([][20]byte{}, n.govPolicy.TreasuryAllowList...),
+		BlockTimestampToleranceSeconds: n.govPolicy.BlockTimestampToleranceSeconds,
 	}
 	if n.govPolicy.MinDepositWei != nil {
 		policy.MinDepositWei = new(big.Int).Set(n.govPolicy.MinDepositWei)
@@ -438,7 +535,7 @@ func (n *Node) GetMempool() []*types.Transaction {
 func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	header := &types.BlockHeader{
 		Height:    n.chain.GetHeight() + 1,
-		Timestamp: time.Now().Unix(),
+		Timestamp: n.currentTime().Unix(),
 		PrevHash:  n.chain.Tip(),
 		Validator: n.validatorKey.PubKey().Address().Bytes(),
 	}
@@ -486,6 +583,10 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	}
 	if !bytes.Equal(txRoot, b.Header.TxRoot) {
 		return fmt.Errorf("tx root mismatch")
+	}
+
+	if err := n.validateBlockTimestamp(b.Header.Timestamp); err != nil {
+		return err
 	}
 
 	blockTime := time.Unix(b.Header.Timestamp, 0).UTC()

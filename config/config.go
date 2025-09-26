@@ -48,6 +48,8 @@ type Config struct {
 	Swap                  swap.Config `toml:"swap"`
 }
 
+const defaultBlockTimestampToleranceSeconds = 5
+
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
 type P2PSection struct {
 	NetworkID           uint64   `toml:"NetworkId"`
@@ -106,14 +108,15 @@ type PotsoWeightsConfig struct {
 // GovConfig captures the governance policy knobs controlling proposal flow
 // without embedding business logic in the state machine.
 type GovConfig struct {
-	MinDepositWei       string   `toml:"MinDepositWei"`
-	VotingPeriodSeconds uint64   `toml:"VotingPeriodSeconds"`
-	TimelockSeconds     uint64   `toml:"TimelockSeconds"`
-	QuorumBps           uint64   `toml:"QuorumBps"`
-	PassThresholdBps    uint64   `toml:"PassThresholdBps"`
-	AllowedParams       []string `toml:"AllowedParams"`
-	AllowedRoles        []string `toml:"AllowedRoles"`
-	TreasuryAllowList   []string `toml:"TreasuryAllowList"`
+	MinDepositWei                  string   `toml:"MinDepositWei"`
+	VotingPeriodSeconds            uint64   `toml:"VotingPeriodSeconds"`
+	TimelockSeconds                uint64   `toml:"TimelockSeconds"`
+	QuorumBps                      uint64   `toml:"QuorumBps"`
+	PassThresholdBps               uint64   `toml:"PassThresholdBps"`
+	AllowedParams                  []string `toml:"AllowedParams"`
+	AllowedRoles                   []string `toml:"AllowedRoles"`
+	TreasuryAllowList              []string `toml:"TreasuryAllowList"`
+	BlockTimestampToleranceSeconds uint64   `toml:"BlockTimestampToleranceSeconds"`
 }
 
 // Load loads the configuration from the given path.
@@ -194,6 +197,10 @@ func Load(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.ClientVersion) == "" {
 		cfg.ClientVersion = "nhbchain/node"
+	}
+
+	if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
+		cfg.Governance.BlockTimestampToleranceSeconds = defaultBlockTimestampToleranceSeconds
 	}
 
 	if strings.TrimSpace(cfg.Potso.Rewards.MinPayoutWei) == "" {
@@ -478,12 +485,13 @@ func (cfg *Config) SwapSettings() swap.Config {
 // Policy converts the governance TOML representation into a runtime proposal policy.
 func (cfg GovConfig) Policy() (governance.ProposalPolicy, error) {
 	policy := governance.ProposalPolicy{
-		VotingPeriodSeconds: cfg.VotingPeriodSeconds,
-		TimelockSeconds:     cfg.TimelockSeconds,
-		AllowedParams:       append([]string{}, cfg.AllowedParams...),
-		QuorumBps:           cfg.QuorumBps,
-		PassThresholdBps:    cfg.PassThresholdBps,
-		AllowedRoles:        append([]string{}, cfg.AllowedRoles...),
+		VotingPeriodSeconds:            cfg.VotingPeriodSeconds,
+		TimelockSeconds:                cfg.TimelockSeconds,
+		AllowedParams:                  append([]string{}, cfg.AllowedParams...),
+		QuorumBps:                      cfg.QuorumBps,
+		PassThresholdBps:               cfg.PassThresholdBps,
+		AllowedRoles:                   append([]string{}, cfg.AllowedRoles...),
+		BlockTimestampToleranceSeconds: cfg.BlockTimestampToleranceSeconds,
 	}
 	amount, err := parseUintAmount(cfg.MinDepositWei)
 	if err != nil {
