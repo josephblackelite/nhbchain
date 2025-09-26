@@ -2,12 +2,17 @@ package escrow
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"sort"
 	"strings"
 	"testing"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"nhbchain/core/events"
 	"nhbchain/core/types"
@@ -333,6 +338,49 @@ func newTestEngine(state *mockState) *Engine {
 	engine.SetFeeTreasury(newTestAddress(0xCC))
 	engine.SetNowFunc(func() int64 { return 1_700_000_000 })
 	return engine
+}
+
+var arbitratorKeySeed byte = 1
+
+func mustGenerateArbitrator(t *testing.T) (*ecdsa.PrivateKey, [20]byte) {
+	t.Helper()
+	seed := bytes.Repeat([]byte{arbitratorKeySeed}, 32)
+	arbitratorKeySeed++
+	key, err := ethcrypto.ToECDSA(seed)
+	if err != nil {
+		t.Fatalf("derive key: %v", err)
+	}
+	addr := ethcrypto.PubkeyToAddress(key.PublicKey)
+	var out [20]byte
+	copy(out[:], addr[:])
+	return key, out
+}
+
+func buildDecisionPayload(t *testing.T, id [32]byte, nonce uint64, outcome string, meta [32]byte) []byte {
+	t.Helper()
+	payload := map[string]interface{}{
+		"escrowId":    hex.EncodeToString(id[:]),
+		"outcome":     outcome,
+		"policyNonce": nonce,
+	}
+	if meta != ([32]byte{}) {
+		payload["metadata"] = hex.EncodeToString(meta[:])
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return data
+}
+
+func signDecisionPayload(t *testing.T, payload []byte, key *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	digest := ethcrypto.Keccak256Hash(payload)
+	sig, err := ethcrypto.Sign(digest.Bytes(), key)
+	if err != nil {
+		t.Fatalf("sign payload: %v", err)
+	}
+	return sig
 }
 
 func TestCreateValidations(t *testing.T) {
@@ -786,14 +834,31 @@ func TestExpireRefundsAfterDeadline(t *testing.T) {
 	}
 }
 
-func TestDisputeAndResolveFlow(t *testing.T) {
+func TestResolveWithSignaturesRelease(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)
+	emitter := &capturingEmitter{}
+	engine.SetEmitter(emitter)
+
+	keyA, addrA := mustGenerateArbitrator(t)
+	keyB, addrB := mustGenerateArbitrator(t)
+	_, addrC := mustGenerateArbitrator(t)
+
+	realm := &EscrowRealm{
+		ID: "realm-alpha",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 2,
+			Members:   [][20]byte{addrA, addrB, addrC},
+		},
+	}
+	if _, err := engine.CreateRealm(realm); err != nil {
+		t.Fatalf("create realm: %v", err)
+	}
+
 	payer := newTestAddress(0x91)
 	payee := newTestAddress(0x92)
-	mediator := newTestAddress(0x93)
-	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 0, 1_700_001_000, &mediator, meta, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 500, 1_700_001_000, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -802,31 +867,80 @@ func TestDisputeAndResolveFlow(t *testing.T) {
 		t.Fatalf("fund: %v", err)
 	}
 	if err := engine.Dispute(esc.ID, payee); err != nil {
-		t.Fatalf("dispute by payee: %v", err)
+		t.Fatalf("dispute: %v", err)
 	}
-	if err := engine.Dispute(esc.ID, payer); err != nil {
-		t.Fatalf("dispute idempotent: %v", err)
+
+	var decisionMeta [32]byte
+	copy(decisionMeta[:], bytes.Repeat([]byte{0xAB}, 32))
+	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "release", decisionMeta)
+	sigs := [][]byte{
+		signDecisionPayload(t, payload, keyA),
+		signDecisionPayload(t, payload, keyB),
 	}
-	if err := engine.Resolve(esc.ID, mediator, "refund"); err != nil {
-		t.Fatalf("resolve refund: %v", err)
+	if err := engine.ResolveWithSignatures(esc.ID, payload, sigs); err != nil {
+		t.Fatalf("resolve with signatures: %v", err)
 	}
-	payerAcc := state.account(payer)
-	if got := payerAcc.BalanceNHB.String(); got != "1000" {
-		t.Fatalf("expected payer refunded, got %s", got)
+	digest := ethcrypto.Keccak256Hash(payload)
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowReleased {
+		t.Fatalf("expected released status, got %d", stored.Status)
 	}
-	if err := engine.Resolve(esc.ID, mediator, "refund"); err != nil {
-		t.Fatalf("resolve idempotent: %v", err)
+	if stored.ResolutionHash != digest {
+		t.Fatalf("expected resolution hash %x, got %x", digest[:], stored.ResolutionHash[:])
+	}
+	payeeAcc := state.account(payee)
+	if got := payeeAcc.BalanceNHB.String(); got != "570" {
+		t.Fatalf("expected payee 570, got %s", got)
+	}
+	treasuryAcc := state.account(engine.feeTreasury)
+	if got := treasuryAcc.BalanceNHB.String(); got != "30" {
+		t.Fatalf("expected treasury 30, got %s", got)
+	}
+	events := emitter.typesEvents()
+	if len(events) == 0 {
+		t.Fatalf("expected events emitted")
+	}
+	last := events[len(events)-1]
+	if last.Type != EventTypeEscrowResolved {
+		t.Fatalf("expected resolved event, got %s", last.Type)
+	}
+	if last.Attributes["decision"] != "release" {
+		t.Fatalf("expected decision release, got %s", last.Attributes["decision"])
+	}
+	if last.Attributes["decisionMetadata"] != hex.EncodeToString(decisionMeta[:]) {
+		t.Fatalf("metadata mismatch: %s", last.Attributes["decisionMetadata"])
+	}
+	expectedSigners := strings.Join([]string{
+		hex.EncodeToString(addrA[:]),
+		hex.EncodeToString(addrB[:]),
+	}, ",")
+	if last.Attributes["decisionSigners"] != expectedSigners {
+		t.Fatalf("unexpected signers: %s", last.Attributes["decisionSigners"])
 	}
 }
 
-func TestResolveReleaseOutcome(t *testing.T) {
+func TestResolveWithSignaturesRejectsUnderQuorum(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)
+
+	keyA, addrA := mustGenerateArbitrator(t)
+	_, addrB := mustGenerateArbitrator(t)
+
+	realm := &EscrowRealm{
+		ID: "realm-beta",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 2,
+			Members:   [][20]byte{addrA, addrB},
+		},
+	}
+	if _, err := engine.CreateRealm(realm); err != nil {
+		t.Fatalf("create realm: %v", err)
+	}
+
 	payer := newTestAddress(0xA1)
 	payee := newTestAddress(0xA2)
-	mediator := newTestAddress(0xA3)
-	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 500, 1_700_001_500, &mediator, meta, "")
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 0, 1_700_001_500, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -837,44 +951,67 @@ func TestResolveReleaseOutcome(t *testing.T) {
 	if err := engine.Dispute(esc.ID, payer); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
-	if err := engine.Resolve(esc.ID, mediator, "release"); err != nil {
-		t.Fatalf("resolve release: %v", err)
+	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "refund", [32]byte{})
+	sig := signDecisionPayload(t, payload, keyA)
+	if err := engine.ResolveWithSignatures(esc.ID, payload, [][]byte{sig}); err == nil {
+		t.Fatalf("expected quorum failure")
 	}
-	payeeAcc := state.account(payee)
-	if got := payeeAcc.BalanceZNHB.String(); got != "285" {
-		t.Fatalf("expected payee 285, got %s", got)
+	if err := engine.ResolveWithSignatures(esc.ID, payload, [][]byte{sig, sig}); err == nil {
+		t.Fatalf("expected duplicate signer failure")
 	}
-	treasuryAcc := state.account(engine.feeTreasury)
-	if got := treasuryAcc.BalanceZNHB.String(); got != "15" {
-		t.Fatalf("expected treasury 15, got %s", got)
-	}
-	if err := engine.Resolve(esc.ID, mediator, "release"); err != nil {
-		t.Fatalf("resolve idempotent: %v", err)
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowDisputed {
+		t.Fatalf("expected disputed status, got %d", stored.Status)
 	}
 }
 
-func TestResolveValidatesOutcomeAndCaller(t *testing.T) {
+func TestResolveWithSignaturesReplay(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)
+	emitter := &capturingEmitter{}
+	engine.SetEmitter(emitter)
+
+	keyA, addrA := mustGenerateArbitrator(t)
+	keyB, addrB := mustGenerateArbitrator(t)
+
+	realm := &EscrowRealm{
+		ID: "realm-gamma",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 2,
+			Members:   [][20]byte{addrA, addrB},
+		},
+	}
+	if _, err := engine.CreateRealm(realm); err != nil {
+		t.Fatalf("create realm: %v", err)
+	}
+
 	payer := newTestAddress(0xB1)
 	payee := newTestAddress(0xB2)
-	mediator := newTestAddress(0xB3)
-	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_700_002_000, &mediator, meta, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_002_000, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(200)})
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(800)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 	if err := engine.Dispute(esc.ID, payer); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
-	if err := engine.Resolve(esc.ID, payee, "refund"); err == nil {
-		t.Fatalf("expected unauthorized resolver")
+	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "refund", [32]byte{})
+	sigs := [][]byte{
+		signDecisionPayload(t, payload, keyA),
+		signDecisionPayload(t, payload, keyB),
 	}
-	if err := engine.Resolve(esc.ID, mediator, "invalid"); err == nil {
-		t.Fatalf("expected invalid outcome")
+	if err := engine.ResolveWithSignatures(esc.ID, payload, sigs); err != nil {
+		t.Fatalf("initial resolve: %v", err)
+	}
+	firstEvents := len(emitter.events)
+	if err := engine.ResolveWithSignatures(esc.ID, payload, sigs); err != nil {
+		t.Fatalf("replay should be ignored: %v", err)
+	}
+	if len(emitter.events) != firstEvents {
+		t.Fatalf("expected no additional events on replay")
 	}
 }

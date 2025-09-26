@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,9 +40,6 @@ const MINIMUM_STAKE = 1000
 const engagementDayFormat = "2006-01-02"
 
 const unbondingPeriod = 72 * time.Hour
-
-// Privileged arbitrator address (replace with multisig in production).
-var ARBITRATOR_ADDRESS = common.HexToAddress("0x00000000000000000000000000000000000000AA")
 
 var (
 	ErrNonceMismatch  = errors.New("transaction nonce mismatch")
@@ -1021,7 +1019,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 	payer := bytesToAddress(sender)
 	var payee [common.AddressLength]byte
 	copy(payee[:], payload.Payee)
-	mediatorAddr := bytesToAddress(ARBITRATOR_ADDRESS.Bytes())
+	mediatorAddr := [common.AddressLength]byte{}
 	if len(payload.Mediator) != 0 {
 		if len(payload.Mediator) != common.AddressLength {
 			return fmt.Errorf("mediator address must be %d bytes", common.AddressLength)
@@ -1105,27 +1103,55 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byt
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
-func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, _ *types.Account, releaseToBuyer bool) error {
-
-	// Only the privileged arbitrator can execute
-	if !bytes.Equal(sender, ARBITRATOR_ADDRESS.Bytes()) {
-		return fmt.Errorf("sender is not the authorized arbitrator")
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *types.Account, releaseToBuyer bool) error {
+	_ = releaseToBuyer
+	var payload struct {
+		EscrowID   string          `json:"escrowId"`
+		Decision   json.RawMessage `json:"decision"`
+		Signatures []string        `json:"signatures"`
 	}
-
-	id, err := decodeEscrowID(tx.Data)
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("arbitration payload required")
+	}
+	if err := json.Unmarshal(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid arbitration payload: %w", err)
+	}
+	trimmedID := strings.TrimSpace(payload.EscrowID)
+	if trimmedID == "" {
+		return fmt.Errorf("arbitration escrowId required")
+	}
+	rawID, err := hex.DecodeString(strings.TrimPrefix(trimmedID, "0x"))
 	if err != nil {
-		return err
+		return fmt.Errorf("arbitration escrowId must be hex: %w", err)
+	}
+	var id [32]byte
+	if len(rawID) != len(id) {
+		return fmt.Errorf("arbitration escrowId must be %d bytes", len(id))
+	}
+	copy(id[:], rawID)
+	if len(payload.Decision) == 0 {
+		return fmt.Errorf("arbitration decision payload required")
+	}
+	if len(payload.Signatures) == 0 {
+		return fmt.Errorf("arbitration signature bundle required")
+	}
+	sigs := make([][]byte, len(payload.Signatures))
+	for i, sigHex := range payload.Signatures {
+		trimmed := strings.TrimSpace(sigHex)
+		decoded, err := hex.DecodeString(strings.TrimPrefix(trimmed, "0x"))
+		if err != nil {
+			return fmt.Errorf("invalid arbitration signature %d: %w", i, err)
+		}
+		sigs[i] = decoded
 	}
 	_, manager := sp.configureTradeEngine()
 	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
 		return err
 	}
-	outcome := "refund"
-	if releaseToBuyer {
-		outcome = "release"
+	if err := sp.EscrowEngine.ResolveWithSignatures(id, []byte(payload.Decision), sigs); err != nil {
+		return err
 	}
-	caller := bytesToAddress(sender)
-	return sp.EscrowEngine.Resolve(id, caller, outcome)
+	return nil
 }
 
 func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {
@@ -2358,7 +2384,7 @@ func (sp *StateProcessor) convertLegacyEscrow(id [32]byte, legacy *escrow.Legacy
 		ID:        id,
 		Payer:     payer,
 		Payee:     payee,
-		Mediator:  ARBITRATOR_ADDRESS,
+		Mediator:  [20]byte{},
 		Token:     "NHB",
 		Amount:    amount,
 		FeeBps:    0,

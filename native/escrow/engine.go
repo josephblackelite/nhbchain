@@ -1,6 +1,7 @@
 package escrow
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,13 @@ type Engine struct {
 	emitter     events.Emitter
 	feeTreasury [20]byte
 	nowFn       func() int64
+}
+
+type decisionEnvelope struct {
+	EscrowID    string `json:"escrowId"`
+	Outcome     string `json:"outcome"`
+	Metadata    string `json:"metadata,omitempty"`
+	PolicyNonce uint64 `json:"policyNonce"`
 }
 
 // NewEngine creates an escrow engine with a no-op emitter. Callers can override
@@ -734,6 +742,167 @@ func (e *Engine) Dispute(id [32]byte, caller [20]byte) error {
 	return nil
 }
 
+func parseDecisionPayload(id [32]byte, frozen *FrozenArb, payload []byte) (DecisionOutcome, [32]byte, [32]byte, error) {
+	var zero [32]byte
+	if len(payload) == 0 {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: decision payload required")
+	}
+	if frozen == nil {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: missing frozen arbitrator policy")
+	}
+	var envelope decisionEnvelope
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: invalid decision payload: %w", err)
+	}
+	trimmedID := strings.TrimSpace(envelope.EscrowID)
+	if trimmedID == "" {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: decision escrowId required")
+	}
+	decodedID, err := decodeFixedHex(trimmedID, len(id))
+	if err != nil {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: invalid decision escrowId: %w", err)
+	}
+	var payloadID [32]byte
+	copy(payloadID[:], decodedID)
+	if payloadID != id {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: decision escrowId mismatch")
+	}
+	if envelope.PolicyNonce == 0 {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: decision policyNonce required")
+	}
+	if frozen.PolicyNonce != envelope.PolicyNonce {
+		return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: decision policyNonce mismatch")
+	}
+	outcome, err := ParseDecisionOutcome(envelope.Outcome)
+	if err != nil {
+		return DecisionOutcomeUnknown, zero, zero, err
+	}
+	var meta [32]byte
+	trimmedMeta := strings.TrimSpace(envelope.Metadata)
+	if trimmedMeta != "" {
+		decodedMeta, err := decodeFixedHex(trimmedMeta, len(meta))
+		if err != nil {
+			return DecisionOutcomeUnknown, zero, zero, fmt.Errorf("escrow: invalid decision metadata: %w", err)
+		}
+		copy(meta[:], decodedMeta)
+	}
+	hash := ethcrypto.Keccak256Hash(payload)
+	var digest [32]byte
+	copy(digest[:], hash[:])
+	return outcome, meta, digest, nil
+}
+
+func decodeFixedHex(value string, length int) ([]byte, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, fmt.Errorf("value must not be empty")
+	}
+	normalized := strings.TrimPrefix(strings.TrimPrefix(trimmed, "0x"), "0X")
+	decoded, err := hex.DecodeString(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) != length {
+		return nil, fmt.Errorf("expected %d bytes, got %d", length, len(decoded))
+	}
+	return decoded, nil
+}
+
+func verifyDecisionSignatures(frozen *FrozenArb, digest [32]byte, signatures [][]byte) ([][20]byte, error) {
+	if frozen == nil {
+		return nil, fmt.Errorf("escrow: missing frozen arbitrator policy")
+	}
+	if len(signatures) == 0 {
+		return nil, fmt.Errorf("escrow: signature bundle required")
+	}
+	allowed := make(map[[20]byte]struct{}, len(frozen.Members))
+	for _, member := range frozen.Members {
+		allowed[member] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return nil, fmt.Errorf("escrow: frozen policy has no members")
+	}
+	seen := make(map[[20]byte]struct{})
+	unique := make([][20]byte, 0, len(signatures))
+	for i, sig := range signatures {
+		if len(sig) != 65 {
+			return nil, fmt.Errorf("escrow: signature %d must be 65 bytes", i)
+		}
+		buf := make([]byte, len(sig))
+		copy(buf, sig)
+		if buf[64] >= 27 {
+			buf[64] -= 27
+		}
+		if buf[64] != 0 && buf[64] != 1 {
+			return nil, fmt.Errorf("escrow: signature %d has invalid recovery id", i)
+		}
+		pubKey, err := ethcrypto.SigToPub(digest[:], buf)
+		if err != nil {
+			return nil, fmt.Errorf("escrow: invalid signature %d: %w", i, err)
+		}
+		addr := ethcrypto.PubkeyToAddress(*pubKey)
+		var signer [20]byte
+		copy(signer[:], addr[:])
+		if _, ok := allowed[signer]; !ok {
+			return nil, fmt.Errorf("escrow: signature %d not from authorized arbitrator", i)
+		}
+		if _, dup := seen[signer]; dup {
+			continue
+		}
+		seen[signer] = struct{}{}
+		unique = append(unique, signer)
+	}
+	if len(unique) < int(frozen.Threshold) {
+		return nil, fmt.Errorf("escrow: insufficient arbitrator quorum: have %d need %d", len(unique), frozen.Threshold)
+	}
+	return unique, nil
+}
+
+func (e *Engine) arbitratedRelease(esc *Escrow) error {
+	if esc == nil {
+		return fmt.Errorf("escrow: nil escrow")
+	}
+	if esc.Status == EscrowReleased {
+		return nil
+	}
+	if esc.Status != EscrowFunded && esc.Status != EscrowDisputed {
+		return fmt.Errorf("escrow: cannot release in status %d", esc.Status)
+	}
+	if err := e.ensureTreasuryConfigured(); err != nil {
+		return err
+	}
+	vault, err := e.state.EscrowVaultAddress(esc.Token)
+	if err != nil {
+		return err
+	}
+	total := cloneBigInt(esc.Amount)
+	if total.Sign() <= 0 {
+		return fmt.Errorf("escrow: amount must be positive")
+	}
+	fee := new(big.Int).Mul(total, new(big.Int).SetUint64(uint64(esc.FeeBps)))
+	fee.Div(fee, big.NewInt(10_000))
+	payout := new(big.Int).Sub(total, fee)
+	if payout.Sign() > 0 {
+		if err := e.transferToken(vault, esc.Payee, esc.Token, payout); err != nil {
+			return err
+		}
+	}
+	if fee.Sign() > 0 {
+		if err := e.transferToken(vault, e.feeTreasury, esc.Token, fee); err != nil {
+			return err
+		}
+	}
+	if err := e.state.EscrowDebit(esc.ID, esc.Token, total); err != nil {
+		return err
+	}
+	esc.Status = EscrowReleased
+	if err := e.storeEscrow(esc); err != nil {
+		return err
+	}
+	e.emit(NewReleasedEvent(esc))
+	return nil
+}
+
 // Resolve settles a disputed escrow according to the mediator-determined
 // outcome. Valid outcomes are "release" and "refund".
 func (e *Engine) Resolve(id [32]byte, caller [20]byte, outcome string) error {
@@ -750,13 +919,16 @@ func (e *Engine) Resolve(id [32]byte, caller [20]byte, outcome string) error {
 	if esc.Mediator == ([20]byte{}) || caller != esc.Mediator {
 		return fmt.Errorf("escrow: unauthorized resolver")
 	}
-	normalized := strings.ToLower(strings.TrimSpace(outcome))
-	switch normalized {
-	case "release":
+	decision, err := ParseDecisionOutcome(outcome)
+	if err != nil {
+		return err
+	}
+	switch decision {
+	case DecisionOutcomeRelease:
 		if err := e.Release(id, caller); err != nil {
 			return err
 		}
-	case "refund":
+	case DecisionOutcomeRefund:
 		if err := e.refundEscrow(esc, esc.Payer, EscrowRefunded, NewRefundedEvent); err != nil {
 			return err
 		}
@@ -767,7 +939,55 @@ func (e *Engine) Resolve(id [32]byte, caller [20]byte, outcome string) error {
 	if err != nil {
 		return err
 	}
-	e.emit(NewResolvedEvent(esc))
+	e.emit(NewResolvedEvent(esc, decision, [32]byte{}, nil))
+	return nil
+}
+
+// ResolveWithSignatures settles a disputed escrow after verifying a quorum of
+// arbitrator signatures over the supplied decision payload.
+func (e *Engine) ResolveWithSignatures(id [32]byte, decisionPayload []byte, signatures [][]byte) error {
+	esc, err := e.loadEscrow(id)
+	if err != nil {
+		return err
+	}
+	if esc.Status == EscrowReleased || esc.Status == EscrowRefunded || esc.Status == EscrowExpired {
+		return nil
+	}
+	if esc.Status != EscrowDisputed {
+		return fmt.Errorf("escrow: cannot resolve in status %d", esc.Status)
+	}
+	outcome, metaHash, digest, err := parseDecisionPayload(id, esc.FrozenArb, decisionPayload)
+	if err != nil {
+		return err
+	}
+	if esc.ResolutionHash == digest {
+		return nil
+	}
+	if esc.ResolutionHash != ([32]byte{}) && esc.ResolutionHash != digest {
+		return fmt.Errorf("escrow: conflicting decision payload")
+	}
+	signers, err := verifyDecisionSignatures(esc.FrozenArb, digest, signatures)
+	if err != nil {
+		return err
+	}
+	prevHash := esc.ResolutionHash
+	esc.ResolutionHash = digest
+	switch outcome {
+	case DecisionOutcomeRelease:
+		if err := e.arbitratedRelease(esc); err != nil {
+			esc.ResolutionHash = prevHash
+			return err
+		}
+	case DecisionOutcomeRefund:
+		if err := e.refundEscrow(esc, esc.Payer, EscrowRefunded, NewRefundedEvent); err != nil {
+			esc.ResolutionHash = prevHash
+			return err
+		}
+	default:
+		esc.ResolutionHash = prevHash
+		return fmt.Errorf("escrow: unsupported decision outcome")
+	}
+	e.emit(NewResolvedEvent(esc, outcome, metaHash, signers))
 	return nil
 }
 
