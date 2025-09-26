@@ -1,0 +1,8 @@
+{
+  "network": "nhb-mainnet-audit",
+  "rpcEndpoint": "http://localhost:8080",
+  "mnemonicPath": "seeds-fixtures/audit-wallet.mnemonic",
+  "defaultAccount": "audit-user",
+  "gasPrice": "0.0025nhb",
+  "memo": "audit-run"
+}

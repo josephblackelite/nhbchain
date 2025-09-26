@@ -1,0 +1,14 @@
+# Minimal validator configuration for audit replay
+[validator]
+moniker = "audit-validator"
+priv_key_path = "seeds-fixtures/validator_priv.key"
+public_address = "nhbvaloper1audit0000000000000000000000000000000"
+
+[network]
+seeds = ["node1.audit.nhbchain.io:26656", "node2.audit.nhbchain.io:26656"]
+pex = false
+persistent_peers = []
+
+[consensus]
+create_empty_blocks = false
+timeout_commit = "5s"
