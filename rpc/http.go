@@ -372,10 +372,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleEscrowRefund(w, r, req)
 	case "escrow_expire":
 		s.handleEscrowExpire(w, r, req)
-	case "escrow_dispute":
-		s.handleEscrowDispute(w, r, req)
-	case "escrow_resolve":
-		s.handleEscrowResolve(w, r, req)
+        case "escrow_dispute":
+                s.handleEscrowDispute(w, r, req)
+        case "escrow_resolve":
+                s.handleEscrowResolve(w, r, req)
+        case "escrow_milestoneCreate":
+                s.handleEscrowMilestoneCreate(w, r, req)
+        case "escrow_milestoneGet":
+                s.handleEscrowMilestoneGet(w, r, req)
+        case "escrow_milestoneFund":
+                s.handleEscrowMilestoneFund(w, r, req)
+        case "escrow_milestoneRelease":
+                s.handleEscrowMilestoneRelease(w, r, req)
+        case "escrow_milestoneCancel":
+                s.handleEscrowMilestoneCancel(w, r, req)
+        case "escrow_milestoneSubscriptionUpdate":
+                s.handleEscrowMilestoneSubscriptionUpdate(w, r, req)
 	case "net_info":
 		s.handleNetInfo(w, r, req)
 	case "net_peers":
@@ -480,13 +492,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGovernanceList(w, r, req)
 	case "gov_finalize":
 		s.handleGovernanceFinalize(w, r, req)
-	case "gov_queue":
-		s.handleGovernanceQueue(w, r, req)
-	case "gov_execute":
-		s.handleGovernanceExecute(w, r, req)
-	default:
-		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
-	}
+        case "gov_queue":
+                s.handleGovernanceQueue(w, r, req)
+        case "gov_execute":
+                s.handleGovernanceExecute(w, r, req)
+        case "reputation_verifySkill":
+                s.handleReputationVerifySkill(w, r, req)
+        default:
+                writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
+        }
 }
 
 // --- NEW HANDLER: Get Latest Blocks ---
