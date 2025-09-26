@@ -1,9 +1,11 @@
 package types
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -34,14 +36,14 @@ const (
 	TxTypeCreateEscrow     TxType = 0x03 // Create escrow
 	TxTypeReleaseEscrow    TxType = 0x04 // NEW: Buyer releases funds to seller
 	TxTypeRefundEscrow     TxType = 0x05 // NEW: Seller refunds funds to buyer
-        TxTypeStake            TxType = 0x06 // Implenting stake
-        TxTypeUnstake          TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
-        TxTypeHeartbeat        TxType = 0x08 // Heartbeat from users device
-        TxTypeLockEscrow       TxType = 0x09 // NEW: Buyer commits to a purchase
-        TxTypeDisputeEscrow    TxType = 0x0A // NEW: Buyer raises a dispute
-        TxTypeArbitrateRelease TxType = 0x0B // NEW: Admin-only action to release to buyer
-        TxTypeArbitrateRefund  TxType = 0x0C // NEW: Admin-only action to refund seller
-        TxTypeStakeClaim       TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
+	TxTypeStake            TxType = 0x06 // Implenting stake
+	TxTypeUnstake          TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
+	TxTypeHeartbeat        TxType = 0x08 // Heartbeat from users device
+	TxTypeLockEscrow       TxType = 0x09 // NEW: Buyer commits to a purchase
+	TxTypeDisputeEscrow    TxType = 0x0A // NEW: Buyer raises a dispute
+	TxTypeArbitrateRelease TxType = 0x0B // NEW: Admin-only action to release to buyer
+	TxTypeArbitrateRefund  TxType = 0x0C // NEW: Admin-only action to refund seller
+	TxTypeStakeClaim       TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
 )
 
 // Transaction now has a Type field to distinguish its intent.
@@ -68,6 +70,11 @@ type Transaction struct {
 
 	from []byte
 }
+
+var (
+	ErrPaymasterSignatureMissing = errors.New("transaction missing paymaster signature")
+	ErrPaymasterSignatureInvalid = errors.New("invalid paymaster signature")
+)
 
 // Hash logic must now include the new Type field.
 func (tx *Transaction) Hash() ([]byte, error) {
@@ -130,4 +137,35 @@ func (tx *Transaction) From() ([]byte, error) {
 	}
 	tx.from = crypto.PubkeyToAddress(*pubKey).Bytes()
 	return tx.from, nil
+}
+
+// PaymasterSponsor recovers the sponsoring paymaster address from the
+// associated signature. A nil result with no error indicates the transaction
+// does not request sponsorship.
+func (tx *Transaction) PaymasterSponsor() ([]byte, error) {
+	if len(tx.Paymaster) == 0 {
+		return nil, nil
+	}
+	if tx.PaymasterR == nil || tx.PaymasterS == nil || tx.PaymasterV == nil {
+		return nil, ErrPaymasterSignatureMissing
+	}
+	hash, err := tx.Hash()
+	if err != nil {
+		return nil, err
+	}
+	sig := make([]byte, 65)
+	copy(sig[32-len(tx.PaymasterR.Bytes()):32], tx.PaymasterR.Bytes())
+	copy(sig[64-len(tx.PaymasterS.Bytes()):64], tx.PaymasterS.Bytes())
+	sig[64] = byte(tx.PaymasterV.Uint64() - 27)
+	pubKey, err := crypto.SigToPub(hash, sig)
+	if err != nil {
+		return nil, ErrPaymasterSignatureInvalid
+	}
+	recovered := crypto.PubkeyToAddress(*pubKey).Bytes()
+	if !bytes.Equal(recovered, tx.Paymaster) {
+		return nil, ErrPaymasterSignatureInvalid
+	}
+	sponsor := make([]byte, len(recovered))
+	copy(sponsor, recovered)
+	return sponsor, nil
 }

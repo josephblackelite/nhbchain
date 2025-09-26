@@ -55,6 +55,7 @@ type Server struct {
 	rateLimiters  map[string]*rateLimiter
 	authToken     string
 	potsoEvidence *modules.PotsoEvidenceModule
+	transactions  *modules.TransactionsModule
 }
 
 func NewServer(node *core.Node) *Server {
@@ -65,6 +66,7 @@ func NewServer(node *core.Node) *Server {
 		rateLimiters:  make(map[string]*rateLimiter),
 		authToken:     token,
 		potsoEvidence: modules.NewPotsoEvidenceModule(node),
+		transactions:  modules.NewTransactionsModule(node),
 	}
 }
 
@@ -226,6 +228,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSendTransaction(w, r, req)
+	case "tx_previewSponsorship":
+		s.handleTxPreviewSponsorship(w, r, req)
+	case "tx_getSponsorshipConfig":
+		s.handleTxGetSponsorshipConfig(w, r, req)
+	case "tx_setSponsorshipEnabled":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleTxSetSponsorshipEnabled(w, r, req)
 	case "nhb_getBalance":
 		s.handleGetBalance(w, r, req)
 	case "nhb_getLatestBlocks":
@@ -777,6 +789,57 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 
 	s.node.AddTransaction(&tx)
 	writeResult(w, req.ID, "Transaction received by node.")
+}
+
+func (s *Server) handleTxPreviewSponsorship(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction parameter required", nil)
+		return
+	}
+	if s.transactions == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "transactions module unavailable", nil)
+		return
+	}
+	result, modErr := s.transactions.PreviewSponsorship(req.Params[0])
+	if modErr != nil {
+		writeModuleError(w, req.ID, modErr)
+		return
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleTxSetSponsorshipEnabled(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
+		return
+	}
+	if s.transactions == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "transactions module unavailable", nil)
+		return
+	}
+	result, modErr := s.transactions.SetSponsorshipEnabled(req.Params[0])
+	if modErr != nil {
+		writeModuleError(w, req.ID, modErr)
+		return
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleTxGetSponsorshipConfig(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "no parameters expected", nil)
+		return
+	}
+	if s.transactions == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "transactions module unavailable", nil)
+		return
+	}
+	result, modErr := s.transactions.SponsorshipConfig()
+	if modErr != nil {
+		writeModuleError(w, req.ID, modErr)
+		return
+	}
+	writeResult(w, req.ID, result)
 }
 
 func balanceResponseFromAccount(addr string, account *types.Account) BalanceResponse {

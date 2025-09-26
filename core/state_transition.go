@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	gethcore "github.com/ethereum/go-ethereum/core"
 	gethstate "github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	gethvm "github.com/ethereum/go-ethereum/core/vm"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -82,6 +83,7 @@ type StateProcessor struct {
 	rewardHistory      []rewards.EpochSettlement
 	potsoRewardConfig  potso.RewardConfig
 	potsoWeightConfig  potso.WeightParams
+	paymasterEnabled   bool
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -108,6 +110,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		rewardHistory:      make([]rewards.EpochSettlement, 0),
 		potsoRewardConfig:  potso.DefaultRewardConfig(),
 		potsoWeightConfig:  potso.DefaultWeightParams(),
+		paymasterEnabled:   true,
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -653,7 +656,24 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		rewardHistory:      rewardHistoryCopy,
 		potsoRewardConfig:  clonePotsoRewardConfig(sp.potsoRewardConfig),
 		potsoWeightConfig:  clonePotsoWeightConfig(sp.potsoWeightConfig),
+		paymasterEnabled:   sp.paymasterEnabled,
 	}, nil
+}
+
+// PaymasterEnabled reports whether transaction sponsorship is currently active.
+func (sp *StateProcessor) PaymasterEnabled() bool {
+	if sp == nil {
+		return false
+	}
+	return sp.paymasterEnabled
+}
+
+// SetPaymasterEnabled toggles the transaction sponsorship module.
+func (sp *StateProcessor) SetPaymasterEnabled(enabled bool) {
+	if sp == nil {
+		return
+	}
+	sp.paymasterEnabled = enabled
 }
 
 func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
@@ -668,6 +688,14 @@ func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
 		return sp.applyEvmTransaction(tx)
 	}
 	return sp.handleNativeTransaction(tx, sender, senderAccount)
+}
+
+type sponsorshipRuntime struct {
+	sponsor  common.Address
+	sender   common.Address
+	budget   *big.Int
+	gasPrice *big.Int
+	txHash   [32]byte
 }
 
 func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, *types.Account, error) {
@@ -712,6 +740,16 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		Difficulty:  big.NewInt(0),
 	}
 
+	assessment, err := sp.EvaluateSponsorship(tx)
+	if err != nil {
+		return err
+	}
+	var sponsorshipCtx *sponsorshipRuntime
+	var txHashBytes []byte
+	if len(tx.Paymaster) > 0 {
+		txHashBytes, _ = tx.Hash()
+	}
+
 	msg := gethcore.Message{
 		From:          fromAddr,
 		To:            toAddrPtr,
@@ -719,30 +757,77 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 		Value:         tx.Value,
 		GasLimit:      tx.GasLimit,
 		GasPrice:      tx.GasPrice,
-		GasFeeCap:     tx.GasPrice, // simple: reuse
-		GasTipCap:     tx.GasPrice, // simple: reuse
+		GasFeeCap:     tx.GasPrice,
+		GasTipCap:     tx.GasPrice,
 		Data:          tx.Data,
 		AccessList:    nil,
 		BlobGasFeeCap: nil,
 		BlobHashes:    nil,
-		// NOTE: v1.16 has no SkipAccountChecks; do not set
 	}
-	txCtx := gethcore.NewEVMTxContext(&msg) // pointer expected
+	txCtx := gethcore.NewEVMTxContext(&msg)
 
-	// 3) NewEVM signature for v1.16, then set tx context
-	evm := gethvm.NewEVM(blockCtx, statedb, params.TestChainConfig, gethvm.Config{
-		NoBaseFee: true, // disable basefee in this environment
-	})
+	evm := gethvm.NewEVM(blockCtx, statedb, params.TestChainConfig, gethvm.Config{NoBaseFee: true})
 	evm.SetTxContext(txCtx)
 
-	// 4) Execute
+	if assessment != nil {
+		switch assessment.Status {
+		case SponsorshipStatusReady:
+			ctx := &sponsorshipRuntime{
+				sponsor:  assessment.Sponsor,
+				sender:   fromAddr,
+				budget:   big.NewInt(0),
+				gasPrice: big.NewInt(0),
+			}
+			if len(txHashBytes) > 0 {
+				ctx.txHash = bytesToHash32(txHashBytes)
+			}
+			if assessment.GasCost != nil {
+				ctx.budget = new(big.Int).Set(assessment.GasCost)
+			}
+			if assessment.GasPrice != nil {
+				ctx.gasPrice = new(big.Int).Set(assessment.GasPrice)
+			}
+			if ctx.budget.Sign() > 0 {
+				budget := uint256.MustFromBig(ctx.budget)
+				statedb.SubBalance(ctx.sponsor, budget, tracing.BalanceChangeTransfer)
+				statedb.AddBalance(ctx.sender, budget, tracing.BalanceChangeTransfer)
+			}
+			sponsorshipCtx = ctx
+		case SponsorshipStatusNone:
+			// no sponsorship requested
+		default:
+			if len(txHashBytes) > 0 {
+				sp.emitSponsorshipFailureEvent(fromAddr, assessment, bytesToHash32(txHashBytes))
+			}
+		}
+	}
+
 	gp := new(gethcore.GasPool).AddGas(tx.GasLimit)
-	result, err := gethcore.ApplyMessage(evm, &msg, gp) // pointer expected
+	result, err := gethcore.ApplyMessage(evm, &msg, gp)
 	if err != nil {
 		return fmt.Errorf("ApplyMessage: %w", err)
 	}
 	if result != nil && result.Err != nil {
 		return fmt.Errorf("EVM error: %w", result.Err)
+	}
+
+	if sponsorshipCtx != nil {
+		usedCost := new(big.Int).Mul(new(big.Int).SetUint64(result.UsedGas), sponsorshipCtx.gasPrice)
+		budget := new(big.Int).Set(sponsorshipCtx.budget)
+		refund := new(big.Int).Sub(budget, usedCost)
+		if refund.Sign() < 0 {
+			refund = big.NewInt(0)
+		}
+		if refund.Sign() > 0 {
+			refundUint := uint256.MustFromBig(refund)
+			statedb.SubBalance(sponsorshipCtx.sender, refundUint, tracing.BalanceChangeTransfer)
+			statedb.AddBalance(sponsorshipCtx.sponsor, refundUint, tracing.BalanceChangeTransfer)
+		}
+		charged := new(big.Int).Sub(budget, refund)
+		if charged.Sign() < 0 {
+			charged = big.NewInt(0)
+		}
+		sp.emitSponsorshipSuccessEvent(sponsorshipCtx, result.UsedGas, charged, refund)
 	}
 
 	newRoot, err := statedb.Commit(0, false, false)
@@ -788,6 +873,15 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	}
 	if tx.To != nil && toAcc != nil {
 		if err := sp.setAccount(tx.To, toAcc); err != nil {
+			return err
+		}
+	}
+	if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
+		sponsorAcc, err := sp.getAccount(tx.Paymaster)
+		if err != nil {
+			return err
+		}
+		if err := sp.setAccount(tx.Paymaster, sponsorAcc); err != nil {
 			return err
 		}
 	}
@@ -1806,6 +1900,60 @@ func (sp *StateProcessor) emitScoreUpdates(addr []byte, updates []engagementScor
 			sp.AppendEvent(evt)
 		}
 	}
+}
+
+func bytesToHash32(b []byte) [32]byte {
+	var out [32]byte
+	copy(out[:], b)
+	return out
+}
+
+func addressToArray(addr common.Address) [20]byte {
+	var out [20]byte
+	copy(out[:], addr.Bytes())
+	return out
+}
+
+func (sp *StateProcessor) emitSponsorshipFailureEvent(sender common.Address, assessment *SponsorshipAssessment, txHash [32]byte) {
+	if sp == nil || assessment == nil {
+		return
+	}
+	evt := events.TxSponsorshipFailed{
+		TxHash:  txHash,
+		Sender:  addressToArray(sender),
+		Sponsor: addressToArray(assessment.Sponsor),
+		Status:  string(assessment.Status),
+		Reason:  assessment.Reason,
+	}
+	sp.AppendEvent(evt.Event())
+}
+
+func (sp *StateProcessor) emitSponsorshipSuccessEvent(ctx *sponsorshipRuntime, gasUsed uint64, charged, refund *big.Int) {
+	if sp == nil || ctx == nil {
+		return
+	}
+	var gasPriceCopy *big.Int
+	if ctx.gasPrice != nil {
+		gasPriceCopy = new(big.Int).Set(ctx.gasPrice)
+	}
+	var chargedCopy *big.Int
+	if charged != nil {
+		chargedCopy = new(big.Int).Set(charged)
+	}
+	var refundCopy *big.Int
+	if refund != nil {
+		refundCopy = new(big.Int).Set(refund)
+	}
+	evt := events.TxSponsorshipApplied{
+		TxHash:   ctx.txHash,
+		Sender:   addressToArray(ctx.sender),
+		Sponsor:  addressToArray(ctx.sponsor),
+		GasUsed:  gasUsed,
+		GasPrice: gasPriceCopy,
+		Charged:  chargedCopy,
+		Refund:   refundCopy,
+	}
+	sp.AppendEvent(evt.Event())
 }
 
 func (sp *StateProcessor) recordEngagementActivity(addr []byte, now time.Time, txDelta, escrowDelta, govDelta uint64) error {
