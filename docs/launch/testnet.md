@@ -67,7 +67,7 @@ nhbchaind start
 
 1. Wait for synchronization and verify the latest height matches the public explorer.
 2. Create a validator key: `nhbchaind keys add <name>` and back up the mnemonic.
-3. Submit a create-validator transaction once you hold at least 1000 TZNHB.
+3. Confirm the current `staking.minimumValidatorStake` parameter before bonding—governance can adjust this threshold. The initial launch setting is 1,000 TZNHB; hold at least the active value before submitting your create-validator transaction.
 4. Monitor uptime via the explorer validator dashboard and `nhbchaind query staking validator <valoper>`.
 
 ## Developer End-to-End Validation
