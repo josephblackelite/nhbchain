@@ -36,8 +36,12 @@ Where:
   network (defaults: `100` and `1` respectively).
 
 Only accounts whose stake is **greater than or equal to** the protocol minimum
-(`1000` ZapNHB) are considered. Validators below the minimum are pruned from the
-eligibility pool and from the active validator set.
+are considered. The threshold is governed by the
+`staking.minimumValidatorStake` parameter, which defaults to `1000` ZapNHB
+(`1,000` ZNHB) when unset. Validators below the minimum are pruned from the
+eligibility pool and from the active validator set. Operators can inspect or
+change the value through the governance parameter APIs (for example,
+`governance.parameters` queries).
 
 ### Determinism and Tie-Breaking
 
