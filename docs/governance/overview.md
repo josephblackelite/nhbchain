@@ -77,3 +77,8 @@ log is append-only and keyed by sequence number so regulators and downstream
 integrations can reconstruct the entire lifecycle without relying on external
 event streams. Historical records remain queryable indefinitely, providing an
 immutable timeline for regulators, investors, and the community.
+For arbitration-specific lifecycle details—including how role allowlists are
+amended and how frozen policies are embedded in escrows—see the
+[Arbitration Governance Guide](./arbitration-governance.md). The guide outlines
+the evidence packets investors and regulators should request when reviewing
+dispute outcomes.

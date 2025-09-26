@@ -25,6 +25,9 @@
 
 ## Compliance Touchpoints
 
+- **Arbitration oversight** references the [Arbitration Governance Guide](./arbitration-governance.md)
+  for role management, frozen policy provenance, and audit artifacts regulators
+  can request when reviewing dispute outcomes.
 - **Deposit disclosures** clearly state that deposits are anti-spam escrows.
   They are returned automatically if the proposal passes or is withdrawn before
   entering voting, and may be slashed for malicious or abandoned submissions.
