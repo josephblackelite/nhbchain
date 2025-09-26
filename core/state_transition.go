@@ -20,6 +20,7 @@ import (
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
+	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
 	"nhbchain/storage/trie"
@@ -36,7 +37,6 @@ import (
 	"github.com/holiman/uint256"
 )
 
-const MINIMUM_STAKE = 1000
 const engagementDayFormat = "2006-01-02"
 
 const unbondingPeriod = 72 * time.Hour
@@ -1526,6 +1526,36 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 }
 
+func (sp *StateProcessor) minimumValidatorStake() (*big.Int, error) {
+	if sp == nil || sp.Trie == nil {
+		return governance.DefaultMinimumValidatorStake(), nil
+	}
+	key := nhbstate.ParamStoreKey(governance.ParamKeyMinimumValidatorStake)
+	raw, err := sp.Trie.Get(ethcrypto.Keccak256(key))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return governance.DefaultMinimumValidatorStake(), nil
+	}
+	var stored []byte
+	if err := rlp.DecodeBytes(raw, &stored); err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(stored))
+	if trimmed == "" {
+		return governance.DefaultMinimumValidatorStake(), nil
+	}
+	parsed, success := new(big.Int).SetString(trimmed, 10)
+	if !success {
+		return nil, fmt.Errorf("minimum validator stake must be a base-10 integer")
+	}
+	if parsed.Sign() <= 0 {
+		return nil, fmt.Errorf("minimum validator stake must be positive")
+	}
+	return parsed, nil
+}
+
 // --- Helpers ---
 
 func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
@@ -1695,7 +1725,10 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		return err
 	}
 
-	minStake := big.NewInt(MINIMUM_STAKE)
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return err
+	}
 	meetsStake := account.Stake.Cmp(minStake) >= 0
 	addrKey := string(addr)
 
@@ -2059,7 +2092,10 @@ func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Accoun
 			return nil, err
 		}
 	}
-	minStake := big.NewInt(MINIMUM_STAKE)
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return nil, err
+	}
 	if legacy.Stake.Cmp(minStake) >= 0 {
 		if sp.EligibleValidators == nil {
 			sp.EligibleValidators = make(map[string]*big.Int)

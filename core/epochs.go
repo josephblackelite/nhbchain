@@ -141,7 +141,10 @@ func (sp *StateProcessor) finalizeEpoch(height uint64, timestamp int64) error {
 		return err
 	}
 	epochNumber := height / sp.epochConfig.Length
-	selected := sp.selectValidators(weights)
+	selected, err := sp.selectValidators(weights)
+	if err != nil {
+		return err
+	}
 	snapshot := epoch.Snapshot{
 		Epoch:       epochNumber,
 		Height:      height,
@@ -168,7 +171,10 @@ func (sp *StateProcessor) computeEpochWeights() ([]epoch.Weight, *big.Int, error
 	}
 	weights := make([]epoch.Weight, 0, len(sp.EligibleValidators))
 	total := big.NewInt(0)
-	minStake := big.NewInt(MINIMUM_STAKE)
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return nil, nil, err
+	}
 	for addrKey := range sp.EligibleValidators {
 		addrBytes := []byte(addrKey)
 		account, err := sp.getAccount(addrBytes)
@@ -192,20 +198,23 @@ func (sp *StateProcessor) computeEpochWeights() ([]epoch.Weight, *big.Int, error
 	return weights, total, nil
 }
 
-func (sp *StateProcessor) selectValidators(weights []epoch.Weight) [][]byte {
+func (sp *StateProcessor) selectValidators(weights []epoch.Weight) ([][]byte, error) {
 	if !sp.epochConfig.RotationEnabled || sp.epochConfig.MaxValidators == 0 {
 		selected := make([][]byte, len(weights))
 		for i := range weights {
 			selected[i] = append([]byte(nil), weights[i].Address...)
 		}
-		return selected
+		return selected, nil
 	}
 	count := int(sp.epochConfig.MaxValidators)
 	if count <= 0 {
-		return [][]byte{}
+		return [][]byte{}, nil
 	}
 	selected := make([][]byte, 0, count)
-	minStake := big.NewInt(MINIMUM_STAKE)
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return nil, err
+	}
 	for _, w := range weights {
 		if w.Stake == nil || w.Stake.Cmp(minStake) < 0 {
 			continue
@@ -215,13 +224,16 @@ func (sp *StateProcessor) selectValidators(weights []epoch.Weight) [][]byte {
 			break
 		}
 	}
-	return selected
+	return selected, nil
 }
 
 func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot) error {
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return err
+	}
 	if sp.epochConfig.RotationEnabled {
 		newSet := make(map[string]*big.Int, len(snapshot.Selected))
-		minStake := big.NewInt(MINIMUM_STAKE)
 		for _, addr := range snapshot.Selected {
 			account, err := sp.getAccount(addr)
 			if err != nil {
@@ -245,6 +257,9 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot) error
 
 	desired := make(map[string]*big.Int, len(sp.EligibleValidators))
 	for k, v := range sp.EligibleValidators {
+		if v == nil || v.Cmp(minStake) < 0 {
+			continue
+		}
 		desired[k] = copyBigInt(v)
 	}
 	if !validatorMapsEqual(sp.ValidatorSet, desired) {

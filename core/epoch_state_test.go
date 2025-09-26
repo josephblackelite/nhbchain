@@ -4,8 +4,10 @@ import (
 	"math/big"
 	"testing"
 
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/governance"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
@@ -186,11 +188,59 @@ func TestEpochRotationRespectsMinimumStake(t *testing.T) {
 	if _, ok := sp.ValidatorSet[string(eligible2)]; !ok {
 		t.Fatalf("validator 2 not in active set")
 	}
+	threshold := governance.DefaultMinimumValidatorStake()
 	for addr := range sp.ValidatorSet {
 		stake := sp.ValidatorSet[addr]
-		if stake.Cmp(big.NewInt(MINIMUM_STAKE)) < 0 {
+		if stake.Cmp(threshold) < 0 {
 			t.Fatalf("validator with insufficient stake persisted: %s", addr)
 		}
+	}
+}
+
+func TestEpochSelectionUpdatesWithGovernedMinimumStake(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+
+	high := seedValidator(t, sp, 5000, 10)
+	mid := seedValidator(t, sp, 2800, 5)
+	low := seedValidator(t, sp, 1500, 7)
+
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
+		t.Fatalf("process block: %v", err)
+	}
+	snapshot, ok := sp.LatestEpochSnapshot()
+	if !ok {
+		t.Fatalf("expected initial snapshot")
+	}
+	if len(snapshot.Selected) != 3 {
+		t.Fatalf("expected all validators selected initially, got %d", len(snapshot.Selected))
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.SetMinimumValidatorStake(big.NewInt(3500)); err != nil {
+		t.Fatalf("set minimum stake: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(2, testEpochTimestamp+1); err != nil {
+		t.Fatalf("process block after parameter change: %v", err)
+	}
+	updated, ok := sp.LatestEpochSnapshot()
+	if !ok {
+		t.Fatalf("expected updated snapshot")
+	}
+	if len(updated.Selected) != 1 {
+		t.Fatalf("expected exactly one validator selected, got %d", len(updated.Selected))
+	}
+	if !bytesEqual(updated.Selected[0], high) {
+		t.Fatalf("expected highest stake validator selected")
+	}
+	if _, ok := sp.ValidatorSet[string(mid)]; ok {
+		t.Fatalf("mid stake validator should not remain active after threshold increase")
+	}
+	if _, ok := sp.ValidatorSet[string(low)]; ok {
+		t.Fatalf("low stake validator should not remain active after threshold increase")
+	}
+	if len(sp.ValidatorSet) != 1 {
+		t.Fatalf("expected validator set to contain only the qualifying validator")
 	}
 }
 

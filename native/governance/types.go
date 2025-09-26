@@ -147,6 +147,20 @@ const (
 	ProposalKindTreasuryDirective = "treasury.directive"
 )
 
+const (
+	// ParamKeyMinimumValidatorStake controls the minimum stake required for
+	// an account to qualify for validator eligibility and selection.
+	ParamKeyMinimumValidatorStake = "staking.minimumValidatorStake"
+	defaultMinimumValidatorStake  = 1000
+)
+
+// DefaultMinimumValidatorStake exposes the legacy minimum validator stake used
+// prior to parameter governance. It remains available as a migration fallback
+// for networks upgrading from releases that relied on the static constant.
+func DefaultMinimumValidatorStake() *big.Int {
+	return big.NewInt(defaultMinimumValidatorStake)
+}
+
 // AuditEvent identifies the lifecycle milestone captured by a governance audit
 // record. Stored values are designed for long-term readability while remaining
 // compact enough for on-chain persistence.

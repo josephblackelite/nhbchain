@@ -1,8 +1,10 @@
 package state
 
 import (
+	"math/big"
 	"testing"
 
+	"nhbchain/native/governance"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
 )
@@ -67,5 +69,40 @@ func TestParamStoreSetGet(t *testing.T) {
 
 	if _, _, err := manager.ParamStoreGet("  "); err == nil {
 		t.Fatalf("expected error for empty key")
+	}
+}
+
+func TestMinimumValidatorStakePersistence(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	trie, err := trie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	manager := NewManager(trie)
+
+	value, err := manager.MinimumValidatorStake()
+	if err != nil {
+		t.Fatalf("minimum stake default: %v", err)
+	}
+	if value.Cmp(governance.DefaultMinimumValidatorStake()) != 0 {
+		t.Fatalf("unexpected default minimum stake: %s", value.String())
+	}
+
+	if err := manager.SetMinimumValidatorStake(big.NewInt(4500)); err != nil {
+		t.Fatalf("set minimum stake: %v", err)
+	}
+
+	stored, err := manager.MinimumValidatorStake()
+	if err != nil {
+		t.Fatalf("minimum stake stored: %v", err)
+	}
+	if stored.Cmp(big.NewInt(4500)) != 0 {
+		t.Fatalf("unexpected stored minimum stake: %s", stored.String())
+	}
+
+	if err := manager.SetMinimumValidatorStake(big.NewInt(0)); err == nil {
+		t.Fatalf("expected error when setting non-positive minimum stake")
 	}
 }

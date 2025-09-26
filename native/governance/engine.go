@@ -79,15 +79,15 @@ type proposalState interface {
 // AllowedParams must contain the canonical parameter keys permitted for
 // parameter update proposals.
 type ProposalPolicy struct {
-        MinDepositWei       *big.Int
-        VotingPeriodSeconds uint64
-        TimelockSeconds     uint64
-        AllowedParams       []string
-        QuorumBps           uint64
-        PassThresholdBps    uint64
-        AllowedRoles        []string
-        TreasuryAllowList   [][20]byte
-        BlockTimestampToleranceSeconds uint64
+	MinDepositWei                  *big.Int
+	VotingPeriodSeconds            uint64
+	TimelockSeconds                uint64
+	AllowedParams                  []string
+	QuorumBps                      uint64
+	PassThresholdBps               uint64
+	AllowedRoles                   []string
+	TreasuryAllowList              [][20]byte
+	BlockTimestampToleranceSeconds uint64
 }
 
 // Engine orchestrates proposal admission and bookkeeping for governance
@@ -265,6 +265,17 @@ func validatorForParam(key string) paramValidator {
 			}
 			if amount.Cmp(maxEmissionInt) > 0 {
 				return fmt.Errorf("potso.rewards.EmissionPerEpochWei: value exceeds %s wei", maxEmissionInt.String())
+			}
+			return nil
+		}
+	case ParamKeyMinimumValidatorStake:
+		return func(raw json.RawMessage) error {
+			amount, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyMinimumValidatorStake, err)
+			}
+			if amount.Sign() <= 0 {
+				return fmt.Errorf("%s: must be positive", ParamKeyMinimumValidatorStake)
 			}
 			return nil
 		}

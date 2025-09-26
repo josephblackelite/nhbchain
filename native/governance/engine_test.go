@@ -943,7 +943,7 @@ func TestExecuteProposalAppliesParams(t *testing.T) {
 		Status:         ProposalStatusPassed,
 		TimelockEnd:    now.Add(-time.Second),
 		Target:         ProposalKindParamUpdate,
-		ProposedChange: `{"fees.baseFee":25,"potso.weights.AlphaStakeBps":7500}`,
+		ProposedChange: `{"fees.baseFee":25,"potso.weights.AlphaStakeBps":7500,"staking.minimumValidatorStake":3500}`,
 		Queued:         true,
 	}
 	if err := state.GovernancePutProposal(proposal); err != nil {
@@ -953,7 +953,7 @@ func TestExecuteProposalAppliesParams(t *testing.T) {
 	engine := NewEngine()
 	engine.SetState(state)
 	engine.SetNowFunc(func() time.Time { return now })
-	engine.SetPolicy(ProposalPolicy{AllowedParams: []string{"fees.baseFee", "potso.weights.AlphaStakeBps"}})
+	engine.SetPolicy(ProposalPolicy{AllowedParams: []string{"fees.baseFee", "potso.weights.AlphaStakeBps", ParamKeyMinimumValidatorStake}})
 	emitter := &captureEmitter{}
 	engine.SetEmitter(emitter)
 
@@ -984,6 +984,13 @@ func TestExecuteProposalAppliesParams(t *testing.T) {
 	}
 	if string(alpha) != "7500" {
 		t.Fatalf("unexpected alpha stake value: %s", string(alpha))
+	}
+	minStake, ok := state.ParamStoreGet(ParamKeyMinimumValidatorStake)
+	if !ok {
+		t.Fatalf("expected minimum validator stake updated")
+	}
+	if string(minStake) != "3500" {
+		t.Fatalf("unexpected minimum validator stake value: %s", string(minStake))
 	}
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected one event, got %d", len(emitter.events))
