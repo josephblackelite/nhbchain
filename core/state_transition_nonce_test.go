@@ -59,11 +59,22 @@ func TestApplyTransactionRejectsNativeNonceReplay(t *testing.T) {
 					t.Fatalf("seed escrow account: %v", err)
 				}
 			},
-			build: func(t *testing.T, _ *StateProcessor, priv *crypto.PrivateKey) *types.Transaction {
+			build: func(t *testing.T, sp *StateProcessor, priv *crypto.PrivateKey) *types.Transaction {
 				t.Helper()
+				payee := priv.PubKey().Address().Bytes()
 				payload := struct {
-					Amount *big.Int `json:"amount"`
-				}{Amount: big.NewInt(100)}
+					Payee    []byte   `json:"payee"`
+					Token    string   `json:"token"`
+					Amount   *big.Int `json:"amount"`
+					FeeBps   uint32   `json:"feeBps"`
+					Deadline int64    `json:"deadline"`
+				}{
+					Payee:    payee,
+					Token:    "NHB",
+					Amount:   big.NewInt(100),
+					FeeBps:   0,
+					Deadline: time.Now().Add(time.Hour).Unix(),
+				}
 				data, err := json.Marshal(payload)
 				if err != nil {
 					t.Fatalf("marshal payload: %v", err)
