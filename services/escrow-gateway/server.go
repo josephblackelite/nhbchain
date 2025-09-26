@@ -534,6 +534,9 @@ func validateEscrowCreate(req EscrowCreateRequest) error {
 	if req.Deadline == 0 {
 		return errors.New("deadline is required")
 	}
+	if trimmed := strings.TrimSpace(req.Realm); len(trimmed) > 64 {
+		return errors.New("realm must be <= 64 characters")
+	}
 	return nil
 }
 

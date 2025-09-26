@@ -1001,6 +1001,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 		Deadline int64    `json:"deadline"`
 		Mediator []byte   `json:"mediator,omitempty"`
 		Meta     []byte   `json:"meta,omitempty"`
+		Realm    string   `json:"realm,omitempty"`
 	}
 	if err := json.Unmarshal(tx.Data, &payload); err != nil {
 		return fmt.Errorf("invalid escrow payload: %w", err)
@@ -1032,7 +1033,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 		return fmt.Errorf("meta payload must be <= 32 bytes")
 	}
 	copy(meta[:], payload.Meta)
-	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, &mediatorAddr, meta); err != nil {
+	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, &mediatorAddr, meta, strings.TrimSpace(payload.Realm)); err != nil {
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)

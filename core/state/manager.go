@@ -61,6 +61,8 @@ var (
 	escrowRecordPrefix         = []byte("escrow/record/")
 	escrowVaultPrefix          = []byte("escrow/vault/")
 	escrowModuleSeedPrefix     = "module/escrow/vault/"
+	escrowRealmPrefix          = []byte("escrow/realm/")
+	escrowFrozenPolicyPrefix   = []byte("escrow/frozen/")
 	claimableRecordPrefix      = []byte("claimable/record/")
 	claimableNoncePrefix       = []byte("claimable/nonce/")
 	tradeRecordPrefix          = []byte("trade/record/")
@@ -1453,6 +1455,21 @@ func escrowStorageKey(id [32]byte) []byte {
 	return ethcrypto.Keccak256(buf)
 }
 
+func escrowRealmKey(id string) []byte {
+	trimmed := strings.TrimSpace(id)
+	buf := make([]byte, len(escrowRealmPrefix)+len(trimmed))
+	copy(buf, escrowRealmPrefix)
+	copy(buf[len(escrowRealmPrefix):], trimmed)
+	return buf
+}
+
+func escrowFrozenPolicyKey(id [32]byte) []byte {
+	buf := make([]byte, len(escrowFrozenPolicyPrefix)+len(id))
+	copy(buf, escrowFrozenPolicyPrefix)
+	copy(buf[len(escrowFrozenPolicyPrefix):], id[:])
+	return ethcrypto.Keccak256(buf)
+}
+
 func escrowVaultKey(id [32]byte, token string) []byte {
 	normalized := strings.ToUpper(strings.TrimSpace(token))
 	buf := make([]byte, len(escrowVaultPrefix)+len(normalized)+1+len(id))
@@ -1607,6 +1624,151 @@ func potsoStakeModuleAddress() [20]byte {
 	return addr
 }
 
+type storedArbitratorSet struct {
+	Scheme    uint8
+	Threshold uint32
+	Members   [][20]byte
+}
+
+func newStoredArbitratorSet(set *escrow.ArbitratorSet) *storedArbitratorSet {
+	if set == nil {
+		return nil
+	}
+	members := make([][20]byte, len(set.Members))
+	copy(members, set.Members)
+	return &storedArbitratorSet{
+		Scheme:    uint8(set.Scheme),
+		Threshold: set.Threshold,
+		Members:   members,
+	}
+}
+
+func (s *storedArbitratorSet) toArbitratorSet() (*escrow.ArbitratorSet, error) {
+	if s == nil {
+		return nil, fmt.Errorf("escrow: nil arbitrator set")
+	}
+	set := &escrow.ArbitratorSet{
+		Scheme:    escrow.ArbitrationScheme(s.Scheme),
+		Threshold: s.Threshold,
+	}
+	if len(s.Members) > 0 {
+		set.Members = make([][20]byte, len(s.Members))
+		copy(set.Members, s.Members)
+	}
+	sanitized, err := escrow.SanitizeArbitratorSet(set)
+	if err != nil {
+		return nil, err
+	}
+	return sanitized, nil
+}
+
+type storedEscrowRealm struct {
+	ID              string
+	Version         uint64
+	NextPolicyNonce uint64
+	CreatedAt       *big.Int
+	UpdatedAt       *big.Int
+	Arbitrators     *storedArbitratorSet
+}
+
+func newStoredEscrowRealm(r *escrow.EscrowRealm) *storedEscrowRealm {
+	if r == nil {
+		return nil
+	}
+	created := big.NewInt(r.CreatedAt)
+	updated := big.NewInt(r.UpdatedAt)
+	return &storedEscrowRealm{
+		ID:              strings.TrimSpace(r.ID),
+		Version:         r.Version,
+		NextPolicyNonce: r.NextPolicyNonce,
+		CreatedAt:       created,
+		UpdatedAt:       updated,
+		Arbitrators:     newStoredArbitratorSet(r.Arbitrators),
+	}
+}
+
+func (s *storedEscrowRealm) toEscrowRealm() (*escrow.EscrowRealm, error) {
+	if s == nil {
+		return nil, fmt.Errorf("escrow: nil realm record")
+	}
+	realm := &escrow.EscrowRealm{
+		ID:              strings.TrimSpace(s.ID),
+		Version:         s.Version,
+		NextPolicyNonce: s.NextPolicyNonce,
+	}
+	if s.CreatedAt != nil {
+		realm.CreatedAt = s.CreatedAt.Int64()
+	}
+	if s.UpdatedAt != nil {
+		realm.UpdatedAt = s.UpdatedAt.Int64()
+	}
+	if s.Arbitrators == nil {
+		return nil, fmt.Errorf("escrow: realm missing arbitrators")
+	}
+	set, err := s.Arbitrators.toArbitratorSet()
+	if err != nil {
+		return nil, err
+	}
+	realm.Arbitrators = set
+	sanitized, err := escrow.SanitizeEscrowRealm(realm)
+	if err != nil {
+		return nil, err
+	}
+	return sanitized, nil
+}
+
+type storedFrozenArb struct {
+	RealmID      string
+	RealmVersion uint64
+	PolicyNonce  uint64
+	Scheme       uint8
+	Threshold    uint32
+	Members      [][20]byte
+	FrozenAt     *big.Int
+}
+
+func newStoredFrozenArb(f *escrow.FrozenArb) *storedFrozenArb {
+	if f == nil {
+		return nil
+	}
+	members := make([][20]byte, len(f.Members))
+	copy(members, f.Members)
+	return &storedFrozenArb{
+		RealmID:      strings.TrimSpace(f.RealmID),
+		RealmVersion: f.RealmVersion,
+		PolicyNonce:  f.PolicyNonce,
+		Scheme:       uint8(f.Scheme),
+		Threshold:    f.Threshold,
+		Members:      members,
+		FrozenAt:     big.NewInt(f.FrozenAt),
+	}
+}
+
+func (s *storedFrozenArb) toFrozenArb() (*escrow.FrozenArb, error) {
+	if s == nil {
+		return nil, fmt.Errorf("escrow: nil frozen policy")
+	}
+	frozen := &escrow.FrozenArb{
+		RealmID:      strings.TrimSpace(s.RealmID),
+		RealmVersion: s.RealmVersion,
+		PolicyNonce:  s.PolicyNonce,
+		Scheme:       escrow.ArbitrationScheme(s.Scheme),
+		Threshold:    s.Threshold,
+	}
+	if len(s.Members) > 0 {
+		frozen.Members = make([][20]byte, len(s.Members))
+		copy(frozen.Members, s.Members)
+	}
+	if s.FrozenAt != nil {
+		frozen.FrozenAt = s.FrozenAt.Int64()
+	}
+	sanitized, err := escrow.SanitizeFrozenArb(frozen)
+	if err != nil {
+		return nil, err
+	}
+	return sanitized, nil
+}
+
 type storedEscrow struct {
 	ID        [32]byte
 	Payer     [20]byte
@@ -1619,6 +1781,78 @@ type storedEscrow struct {
 	CreatedAt *big.Int
 	MetaHash  [32]byte
 	Status    uint8
+	RealmID   string
+}
+
+// EscrowRealmPut stores the provided realm definition after sanitising it.
+func (m *Manager) EscrowRealmPut(realm *escrow.EscrowRealm) error {
+	if realm == nil {
+		return fmt.Errorf("escrow: nil realm")
+	}
+	sanitized, err := escrow.SanitizeEscrowRealm(realm)
+	if err != nil {
+		return err
+	}
+	record := newStoredEscrowRealm(sanitized)
+	return m.KVPut(escrowRealmKey(sanitized.ID), record)
+}
+
+// EscrowRealmGet retrieves a realm definition by identifier.
+func (m *Manager) EscrowRealmGet(id string) (*escrow.EscrowRealm, bool, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil, false, fmt.Errorf("escrow: realm id must not be empty")
+	}
+	var stored storedEscrowRealm
+	ok, err := m.KVGet(escrowRealmKey(trimmed), &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	realm, err := stored.toEscrowRealm()
+	if err != nil {
+		return nil, false, err
+	}
+	return realm, true, nil
+}
+
+// EscrowFrozenPolicyPut persists the frozen arbitrator policy for the escrow.
+func (m *Manager) EscrowFrozenPolicyPut(id [32]byte, policy *escrow.FrozenArb) error {
+	if policy == nil {
+		return fmt.Errorf("escrow: nil frozen policy")
+	}
+	sanitized, err := escrow.SanitizeFrozenArb(policy)
+	if err != nil {
+		return err
+	}
+	record := newStoredFrozenArb(sanitized)
+	encoded, err := rlp.EncodeToBytes(record)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(escrowFrozenPolicyKey(id), encoded)
+}
+
+// EscrowFrozenPolicyGet retrieves the frozen policy for an escrow if present.
+func (m *Manager) EscrowFrozenPolicyGet(id [32]byte) (*escrow.FrozenArb, bool, error) {
+	data, err := m.trie.Get(escrowFrozenPolicyKey(id))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	var stored storedFrozenArb
+	if err := rlp.DecodeBytes(data, &stored); err != nil {
+		return nil, false, err
+	}
+	frozen, err := stored.toFrozenArb()
+	if err != nil {
+		return nil, false, err
+	}
+	return frozen, true, nil
 }
 
 func newStoredEscrow(e *escrow.Escrow) *storedEscrow {
@@ -1643,6 +1877,7 @@ func newStoredEscrow(e *escrow.Escrow) *storedEscrow {
 		CreatedAt: created,
 		MetaHash:  e.MetaHash,
 		Status:    uint8(e.Status),
+		RealmID:   strings.TrimSpace(e.RealmID),
 	}
 }
 
@@ -1665,6 +1900,7 @@ func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
 		FeeBps:   s.FeeBps,
 		MetaHash: s.MetaHash,
 		Status:   escrow.EscrowStatus(s.Status),
+		RealmID:  strings.TrimSpace(s.RealmID),
 	}
 	if s.Deadline != nil {
 		out.Deadline = s.Deadline.Int64()
@@ -2199,6 +2435,14 @@ func (m *Manager) EscrowGet(id [32]byte) (*escrow.Escrow, bool) {
 	escrowValue, err := stored.toEscrow()
 	if err != nil {
 		return nil, false
+	}
+	trimmedRealm := strings.TrimSpace(escrowValue.RealmID)
+	if trimmedRealm != "" {
+		frozen, ok, err := m.EscrowFrozenPolicyGet(id)
+		if err != nil || !ok {
+			return nil, false
+		}
+		escrowValue.FrozenArb = frozen
 	}
 	sanitized, err := escrow.SanitizeEscrow(escrowValue)
 	if err != nil {

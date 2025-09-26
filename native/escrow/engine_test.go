@@ -2,9 +2,11 @@ package escrow
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 	"testing"
 
 	"nhbchain/core/events"
@@ -18,6 +20,9 @@ type mockState struct {
 	vaultAddrs    map[string][20]byte
 	trades        map[[32]byte]*Trade
 	tradeByEscrow map[[32]byte][32]byte
+	realms        map[string]*EscrowRealm
+	frozen        map[[32]byte]*FrozenArb
+	params        map[string][]byte
 }
 
 func newMockState() *mockState {
@@ -31,6 +36,9 @@ func newMockState() *mockState {
 			"NHB":  newTestAddress(0xAA),
 			"ZNHB": newTestAddress(0xBB),
 		},
+		realms: make(map[string]*EscrowRealm),
+		frozen: make(map[[32]byte]*FrozenArb),
+		params: make(map[string][]byte),
 	}
 }
 
@@ -84,6 +92,56 @@ func (m *mockState) EscrowGet(id [32]byte) (*Escrow, bool) {
 		return nil, false
 	}
 	return esc.Clone(), true
+}
+
+func (m *mockState) EscrowRealmPut(realm *EscrowRealm) error {
+	sanitized, err := SanitizeEscrowRealm(realm)
+	if err != nil {
+		return err
+	}
+	m.realms[strings.TrimSpace(sanitized.ID)] = sanitized.Clone()
+	return nil
+}
+
+func (m *mockState) EscrowRealmGet(id string) (*EscrowRealm, bool, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil, false, fmt.Errorf("realm id required")
+	}
+	realm, ok := m.realms[trimmed]
+	if !ok {
+		return nil, false, nil
+	}
+	return realm.Clone(), true, nil
+}
+
+func (m *mockState) EscrowFrozenPolicyPut(id [32]byte, policy *FrozenArb) error {
+	sanitized, err := SanitizeFrozenArb(policy)
+	if err != nil {
+		return err
+	}
+	m.frozen[id] = sanitized.Clone()
+	return nil
+}
+
+func (m *mockState) EscrowFrozenPolicyGet(id [32]byte) (*FrozenArb, bool, error) {
+	policy, ok := m.frozen[id]
+	if !ok {
+		return nil, false, nil
+	}
+	return policy.Clone(), true, nil
+}
+
+func (m *mockState) ParamStoreGet(name string) ([]byte, bool, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return nil, false, fmt.Errorf("params key must not be empty")
+	}
+	val, ok := m.params[trimmed]
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), val...), true, nil
 }
 
 func (m *mockState) EscrowCredit(id [32]byte, token string, amt *big.Int) error {
@@ -302,7 +360,7 @@ func TestCreateValidations(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := engine.Create(payer, payee, tc.token, tc.amount, tc.fee, tc.deadline, nil, meta)
+			_, err := engine.Create(payer, payee, tc.token, tc.amount, tc.fee, tc.deadline, nil, meta, "")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error")
@@ -324,11 +382,11 @@ func TestCreateIsIdempotent(t *testing.T) {
 	meta := [32]byte{}
 	meta[0] = 0x01
 
-	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 50, 1_700_000_500, nil, meta)
+	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 50, 1_700_000_500, nil, meta, "")
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	second, err := engine.Create(payer, payee, "nhb", big.NewInt(500), 50, 1_700_000_500, nil, meta)
+	second, err := engine.Create(payer, payee, "nhb", big.NewInt(500), 50, 1_700_000_500, nil, meta, "")
 	if err != nil {
 		t.Fatalf("second create: %v", err)
 	}
@@ -340,13 +398,172 @@ func TestCreateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCreateWithRealmFreezesPolicy(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	arbitrator := newTestAddress(0x99)
+	baseRealm := &EscrowRealm{
+		ID:              "core",
+		Version:         1,
+		NextPolicyNonce: 1,
+		CreatedAt:       1_699_999_000,
+		UpdatedAt:       1_699_999_000,
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeSingle,
+			Threshold: 1,
+			Members:   [][20]byte{arbitrator},
+		},
+	}
+	if err := state.EscrowRealmPut(baseRealm); err != nil {
+		t.Fatalf("put realm: %v", err)
+	}
+	payer := newTestAddress(0x31)
+	payee := newTestAddress(0x32)
+	meta := [32]byte{0xAB}
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 1_700_000_800, nil, meta, "core")
+	if err != nil {
+		t.Fatalf("create with realm: %v", err)
+	}
+	if esc.RealmID != "core" {
+		t.Fatalf("expected realm id preserved, got %q", esc.RealmID)
+	}
+	if esc.FrozenArb == nil {
+		t.Fatalf("expected frozen policy on escrow")
+	}
+	if esc.FrozenArb.PolicyNonce != 1 {
+		t.Fatalf("expected frozen policy nonce 1, got %d", esc.FrozenArb.PolicyNonce)
+	}
+	if esc.FrozenArb.Scheme != ArbitrationSchemeSingle {
+		t.Fatalf("unexpected scheme: %d", esc.FrozenArb.Scheme)
+	}
+	if esc.FrozenArb.Threshold != 1 {
+		t.Fatalf("unexpected threshold: %d", esc.FrozenArb.Threshold)
+	}
+	if len(esc.FrozenArb.Members) != 1 || esc.FrozenArb.Members[0] != arbitrator {
+		t.Fatalf("unexpected frozen members: %+v", esc.FrozenArb.Members)
+	}
+	storedRealm, ok, err := state.EscrowRealmGet("core")
+	if err != nil {
+		t.Fatalf("realm get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("realm not found")
+	}
+	if storedRealm.NextPolicyNonce != 2 {
+		t.Fatalf("expected nonce incremented to 2, got %d", storedRealm.NextPolicyNonce)
+	}
+	policy, ok, err := state.EscrowFrozenPolicyGet(esc.ID)
+	if err != nil {
+		t.Fatalf("frozen get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected frozen policy persisted")
+	}
+	if policy.PolicyNonce != esc.FrozenArb.PolicyNonce {
+		t.Fatalf("policy nonce mismatch: got %d want %d", policy.PolicyNonce, esc.FrozenArb.PolicyNonce)
+	}
+}
+
+func TestCreateWithUnknownRealmFails(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payer := newTestAddress(0x41)
+	payee := newTestAddress(0x42)
+	meta := [32]byte{0xCC}
+	if _, err := engine.Create(payer, payee, "NHB", big.NewInt(150), 0, 1_700_000_900, nil, meta, "missing"); err == nil || !errors.Is(err, errRealmNotFound) {
+		t.Fatalf("expected realm not found error, got %v", err)
+	}
+}
+
+func TestRealmLifecycleEvents(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	engine.SetNowFunc(func() int64 { return 1_700_000_500 })
+	emitter := &capturingEmitter{}
+	engine.SetEmitter(emitter)
+	realmInput := &EscrowRealm{
+		ID: "alpha",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 2,
+			Members:   [][20]byte{newTestAddress(0xA1), newTestAddress(0xA2), newTestAddress(0xA3)},
+		},
+	}
+	created, err := engine.CreateRealm(realmInput)
+	if err != nil {
+		t.Fatalf("CreateRealm: %v", err)
+	}
+	if created.Version != 1 {
+		t.Fatalf("expected version 1, got %d", created.Version)
+	}
+	if created.NextPolicyNonce != 1 {
+		t.Fatalf("expected nonce 1, got %d", created.NextPolicyNonce)
+	}
+	events := emitter.typesEvents()
+	if len(events) == 0 || events[len(events)-1].Type != EventTypeRealmCreated {
+		t.Fatalf("expected realm created event, events=%v", events)
+	}
+	update := &EscrowRealm{
+		ID: "alpha",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 3,
+			Members:   [][20]byte{newTestAddress(0xA1), newTestAddress(0xA2), newTestAddress(0xA3), newTestAddress(0xA4)},
+		},
+	}
+	updated, err := engine.UpdateRealm(update)
+	if err != nil {
+		t.Fatalf("UpdateRealm: %v", err)
+	}
+	if updated.Version != 2 {
+		t.Fatalf("expected version 2, got %d", updated.Version)
+	}
+	if updated.NextPolicyNonce != created.NextPolicyNonce {
+		t.Fatalf("expected nonce unchanged, got %d", updated.NextPolicyNonce)
+	}
+	events = emitter.typesEvents()
+	if len(events) == 0 || events[len(events)-1].Type != EventTypeRealmUpdated {
+		t.Fatalf("expected realm updated event, events=%v", events)
+	}
+	stored, ok, err := state.EscrowRealmGet("alpha")
+	if err != nil {
+		t.Fatalf("realm get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected realm stored")
+	}
+	if stored.Version != 2 {
+		t.Fatalf("stored version mismatch: %d", stored.Version)
+	}
+	if stored.NextPolicyNonce != updated.NextPolicyNonce {
+		t.Fatalf("stored nonce mismatch: %d", stored.NextPolicyNonce)
+	}
+}
+
+func TestCreateRealmRespectsBounds(t *testing.T) {
+	state := newMockState()
+	state.params[ParamKeyRealmMinThreshold] = []byte("2")
+	engine := newTestEngine(state)
+	_, err := engine.CreateRealm(&EscrowRealm{
+		ID: "beta",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeSingle,
+			Threshold: 1,
+			Members:   [][20]byte{newTestAddress(0xB1), newTestAddress(0xB2)},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error due to threshold below governance minimum")
+	}
+}
+
 func TestFundTransfersToVaultAndIsIdempotent(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)
 	payer := newTestAddress(0x21)
 	payee := newTestAddress(0x22)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 1_700_001_000, nil, meta)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 1_700_001_000, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -380,7 +597,7 @@ func TestFundRejectsWrongCaller(t *testing.T) {
 	payer := newTestAddress(0x31)
 	payee := newTestAddress(0x32)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 1_700_001_000, nil, meta)
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 1_700_001_000, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -398,7 +615,7 @@ func TestReleaseDistributesFees(t *testing.T) {
 	payee := newTestAddress(0x42)
 	mediator := newTestAddress(0x43)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_000), 250, 1_700_002_000, &mediator, meta)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_000), 250, 1_700_002_000, &mediator, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -458,7 +675,7 @@ func TestReleaseHandlesFeeEdgeCases(t *testing.T) {
 			payer := newTestAddress(0x51)
 			payee := newTestAddress(0x52)
 			meta := [32]byte{}
-			esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(1_000), tc.fee, 1_700_003_000, nil, meta)
+			esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(1_000), tc.fee, 1_700_003_000, nil, meta, "")
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
@@ -487,7 +704,7 @@ func TestRefundHonorsDeadlineAndCaller(t *testing.T) {
 	payer := newTestAddress(0x61)
 	payee := newTestAddress(0x62)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_000_500, nil, meta)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_000_500, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -517,12 +734,12 @@ func TestRefundAfterDeadlineFails(t *testing.T) {
 	payer := newTestAddress(0x71)
 	payee := newTestAddress(0x72)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_000, nil, meta)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_000, nil, meta, "")
 	if err == nil {
 		t.Fatalf("expected create error for deadline before now")
 	}
 	engine.SetNowFunc(func() int64 { return 1_600_000_000 })
-	esc, err = engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_500, nil, meta)
+	esc, err = engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_500, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -542,7 +759,7 @@ func TestExpireRefundsAfterDeadline(t *testing.T) {
 	payer := newTestAddress(0x81)
 	payee := newTestAddress(0x82)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(200), 0, 1_700_000_500, nil, meta)
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(200), 0, 1_700_000_500, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -576,7 +793,7 @@ func TestDisputeAndResolveFlow(t *testing.T) {
 	payee := newTestAddress(0x92)
 	mediator := newTestAddress(0x93)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 0, 1_700_001_000, &mediator, meta)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 0, 1_700_001_000, &mediator, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -609,7 +826,7 @@ func TestResolveReleaseOutcome(t *testing.T) {
 	payee := newTestAddress(0xA2)
 	mediator := newTestAddress(0xA3)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 500, 1_700_001_500, &mediator, meta)
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 500, 1_700_001_500, &mediator, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -643,7 +860,7 @@ func TestResolveValidatesOutcomeAndCaller(t *testing.T) {
 	payee := newTestAddress(0xB2)
 	mediator := newTestAddress(0xB3)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_700_002_000, &mediator, meta)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_700_002_000, &mediator, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

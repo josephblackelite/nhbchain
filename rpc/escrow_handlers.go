@@ -35,6 +35,7 @@ type escrowCreateParams struct {
 	Deadline int64  `json:"deadline"`
 	Mediator string `json:"mediator,omitempty"`
 	MetaHex  string `json:"meta,omitempty"`
+	Realm    string `json:"realm,omitempty"`
 }
 
 type escrowIDParams struct {
@@ -62,17 +63,24 @@ type escrowCreateResult struct {
 }
 
 type escrowJSON struct {
-	ID        string  `json:"id"`
-	Payer     string  `json:"payer"`
-	Payee     string  `json:"payee"`
-	Mediator  *string `json:"mediator,omitempty"`
-	Token     string  `json:"token"`
-	Amount    string  `json:"amount"`
-	FeeBps    uint32  `json:"feeBps"`
-	Deadline  int64   `json:"deadline"`
-	CreatedAt int64   `json:"createdAt"`
-	Status    string  `json:"status"`
-	Meta      string  `json:"meta"`
+	ID           string   `json:"id"`
+	Payer        string   `json:"payer"`
+	Payee        string   `json:"payee"`
+	Mediator     *string  `json:"mediator,omitempty"`
+	Token        string   `json:"token"`
+	Amount       string   `json:"amount"`
+	FeeBps       uint32   `json:"feeBps"`
+	Deadline     int64    `json:"deadline"`
+	CreatedAt    int64    `json:"createdAt"`
+	Status       string   `json:"status"`
+	Meta         string   `json:"meta"`
+	Realm        *string  `json:"realm,omitempty"`
+	RealmVersion *uint64  `json:"realmVersion,omitempty"`
+	PolicyNonce  *uint64  `json:"policyNonce,omitempty"`
+	ArbScheme    *uint8   `json:"arbScheme,omitempty"`
+	ArbThreshold *uint32  `json:"arbThreshold,omitempty"`
+	FrozenAt     *int64   `json:"frozenAt,omitempty"`
+	Arbitrators  []string `json:"arbitrators,omitempty"`
 }
 
 func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
@@ -133,7 +141,7 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req 
 		mediatorCopy := mediator
 		mediatorPtr = &mediatorCopy
 	}
-	id, err := s.node.EscrowCreate(payer, payee, token, amount, params.FeeBps, params.Deadline, mediatorPtr, meta)
+	id, err := s.node.EscrowCreate(payer, payee, token, amount, params.FeeBps, params.Deadline, mediatorPtr, meta, strings.TrimSpace(params.Realm))
 	if err != nil {
 		writeEscrowError(w, req.ID, err)
 		return
@@ -382,18 +390,56 @@ func formatEscrowJSON(esc *escrow.Escrow) escrowJSON {
 		amount = esc.Amount.String()
 	}
 	meta := "0x" + hex.EncodeToString(esc.MetaHash[:])
+	var realmPtr *string
+	var realmVersionPtr *uint64
+	var policyNoncePtr *uint64
+	var schemePtr *uint8
+	var thresholdPtr *uint32
+	var frozenAtPtr *int64
+	var arbitrators []string
+	if trimmed := strings.TrimSpace(esc.RealmID); trimmed != "" {
+		realm := trimmed
+		realmPtr = &realm
+		if esc.FrozenArb != nil {
+			realmVersion := esc.FrozenArb.RealmVersion
+			realmVersionPtr = &realmVersion
+			policyNonce := esc.FrozenArb.PolicyNonce
+			policyNoncePtr = &policyNonce
+			scheme := uint8(esc.FrozenArb.Scheme)
+			schemePtr = &scheme
+			threshold := esc.FrozenArb.Threshold
+			thresholdPtr = &threshold
+			if esc.FrozenArb.FrozenAt != 0 {
+				frozen := esc.FrozenArb.FrozenAt
+				frozenAtPtr = &frozen
+			}
+			if len(esc.FrozenArb.Members) > 0 {
+				arbitrators = make([]string, 0, len(esc.FrozenArb.Members))
+				for _, member := range esc.FrozenArb.Members {
+					arbitrators = append(arbitrators, crypto.NewAddress(crypto.NHBPrefix, member[:]).String())
+				}
+			}
+		}
+	}
 	return escrowJSON{
-		ID:        formatEscrowID(esc.ID),
-		Payer:     payer,
-		Payee:     payee,
-		Mediator:  mediatorPtr,
-		Token:     esc.Token,
-		Amount:    amount,
-		FeeBps:    esc.FeeBps,
-		Deadline:  esc.Deadline,
-		CreatedAt: esc.CreatedAt,
-		Status:    escrowStatusString(esc.Status),
-		Meta:      meta,
+		ID:           formatEscrowID(esc.ID),
+		Payer:        payer,
+		Payee:        payee,
+		Mediator:     mediatorPtr,
+		Token:        esc.Token,
+		Amount:       amount,
+		FeeBps:       esc.FeeBps,
+		Deadline:     esc.Deadline,
+		CreatedAt:    esc.CreatedAt,
+		Status:       escrowStatusString(esc.Status),
+		Meta:         meta,
+		Realm:        realmPtr,
+		RealmVersion: realmVersionPtr,
+		PolicyNonce:  policyNoncePtr,
+		ArbScheme:    schemePtr,
+		ArbThreshold: thresholdPtr,
+		FrozenAt:     frozenAtPtr,
+		Arbitrators:  arbitrators,
 	}
 }
 

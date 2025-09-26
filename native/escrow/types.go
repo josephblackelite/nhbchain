@@ -1,9 +1,164 @@
 package escrow
 
 import (
+	"bytes"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
+)
+
+// ArbitrationScheme enumerates the supported strategies for evaluating an
+// arbitrator allowlist. The scheme dictates how many signatures or votes are
+// required from the configured members to resolve a dispute.
+type ArbitrationScheme uint8
+
+const (
+	// ArbitrationSchemeUnspecified represents an unset scheme and should not
+	// be persisted in state. It exists to provide a zero value for optional
+	// fields during validation.
+	ArbitrationSchemeUnspecified ArbitrationScheme = iota
+	// ArbitrationSchemeSingle authorises a single, pre-determined arbitrator
+	// to resolve disputes.
+	ArbitrationSchemeSingle
+	// ArbitrationSchemeCommittee requires a committee of arbitrators to meet
+	// a threshold before a resolution is accepted. Thresholds are expressed
+	// as the number of required signatures.
+	ArbitrationSchemeCommittee
+)
+
+// Valid reports whether the arbitration scheme is supported by the runtime.
+func (s ArbitrationScheme) Valid() bool {
+	switch s {
+	case ArbitrationSchemeSingle, ArbitrationSchemeCommittee:
+		return true
+	default:
+		return false
+	}
+}
+
+// ArbitratorSet defines the active allowlist of addresses and voting scheme a
+// realm uses when freezing dispute policies into individual escrows.
+type ArbitratorSet struct {
+	Scheme    ArbitrationScheme
+	Threshold uint32
+	Members   [][20]byte
+}
+
+// Clone deep copies the arbitrator set allowing callers to mutate the result
+// without affecting the original value.
+func (s *ArbitratorSet) Clone() *ArbitratorSet {
+	if s == nil {
+		return nil
+	}
+	clone := &ArbitratorSet{
+		Scheme:    s.Scheme,
+		Threshold: s.Threshold,
+	}
+	if len(s.Members) > 0 {
+		clone.Members = make([][20]byte, len(s.Members))
+		copy(clone.Members, s.Members)
+	}
+	return clone
+}
+
+// SortedMembers returns a copy of the member addresses sorted lexicographically
+// to provide stable ordering for event emission and hashing.
+func (s *ArbitratorSet) SortedMembers() [][20]byte {
+	if s == nil || len(s.Members) == 0 {
+		return nil
+	}
+	out := make([][20]byte, len(s.Members))
+	copy(out, s.Members)
+	sort.Slice(out, func(i, j int) bool {
+		return bytes.Compare(out[i][:], out[j][:]) < 0
+	})
+	return out
+}
+
+// EscrowRealm captures the arbitrator governance configuration for a group of
+// escrows. Realms are versioned to allow governance to update allowlists while
+// preserving deterministic frozen policies on existing cases.
+type EscrowRealm struct {
+	ID              string
+	Version         uint64
+	NextPolicyNonce uint64
+	CreatedAt       int64
+	UpdatedAt       int64
+	Arbitrators     *ArbitratorSet
+}
+
+// Clone returns a deep copy of the realm definition.
+func (r *EscrowRealm) Clone() *EscrowRealm {
+	if r == nil {
+		return nil
+	}
+	clone := *r
+	clone.Arbitrators = r.Arbitrators.Clone()
+	return &clone
+}
+
+// FrozenArb represents the immutable arbitrator policy captured at escrow
+// creation time. It tracks the originating realm version and nonce so the policy
+// can be audited even if the realm evolves.
+type FrozenArb struct {
+	RealmID      string
+	RealmVersion uint64
+	PolicyNonce  uint64
+	Scheme       ArbitrationScheme
+	Threshold    uint32
+	Members      [][20]byte
+	FrozenAt     int64
+}
+
+// Clone returns a deep copy of the frozen arbitrator policy.
+func (f *FrozenArb) Clone() *FrozenArb {
+	if f == nil {
+		return nil
+	}
+	clone := &FrozenArb{
+		RealmID:      f.RealmID,
+		RealmVersion: f.RealmVersion,
+		PolicyNonce:  f.PolicyNonce,
+		Scheme:       f.Scheme,
+		Threshold:    f.Threshold,
+		FrozenAt:     f.FrozenAt,
+	}
+	if len(f.Members) > 0 {
+		clone.Members = make([][20]byte, len(f.Members))
+		copy(clone.Members, f.Members)
+	}
+	return clone
+}
+
+const (
+	// DefaultRealmMinThreshold defines the lower bound for committee
+	// thresholds when the governance parameter has not been initialised.
+	DefaultRealmMinThreshold uint32 = 1
+	// DefaultRealmMaxThreshold defines the upper bound for committee
+	// thresholds when governance has not configured a value.
+	DefaultRealmMaxThreshold uint32 = 10
+)
+
+var (
+	// DefaultRealmAllowedSchemes lists the arbitration schemes enabled when
+	// no governance configuration is present.
+	DefaultRealmAllowedSchemes = []ArbitrationScheme{
+		ArbitrationSchemeSingle,
+		ArbitrationSchemeCommittee,
+	}
+)
+
+const (
+	// ParamKeyRealmMinThreshold controls the minimum allowed arbitration
+	// threshold for realm policies.
+	ParamKeyRealmMinThreshold = "escrow.realm.MinThreshold"
+	// ParamKeyRealmMaxThreshold controls the maximum allowed arbitration
+	// threshold for realm policies.
+	ParamKeyRealmMaxThreshold = "escrow.realm.MaxThreshold"
+	// ParamKeyRealmAllowedSchemes controls the arbitration schemes that may
+	// be configured on a realm.
+	ParamKeyRealmAllowedSchemes = "escrow.realm.AllowedSchemes"
 )
 
 // EscrowStatus represents the lifecycle states supported by the hardened
@@ -35,6 +190,8 @@ type Escrow struct {
 	CreatedAt int64
 	MetaHash  [32]byte
 	Status    EscrowStatus
+	RealmID   string
+	FrozenArb *FrozenArb
 }
 
 // Clone returns a deep copy of the escrow object so callers can safely mutate
@@ -48,6 +205,9 @@ func (e *Escrow) Clone() *Escrow {
 		clone.Amount = new(big.Int).Set(e.Amount)
 	} else {
 		clone.Amount = big.NewInt(0)
+	}
+	if e.FrozenArb != nil {
+		clone.FrozenArb = e.FrozenArb.Clone()
 	}
 	return &clone
 }
@@ -98,6 +258,109 @@ func SanitizeEscrow(e *Escrow) (*Escrow, error) {
 	}
 	if !clone.Status.Valid() {
 		return nil, fmt.Errorf("invalid escrow status: %d", clone.Status)
+	}
+	clone.RealmID = strings.TrimSpace(clone.RealmID)
+	if clone.RealmID == "" {
+		clone.FrozenArb = nil
+	}
+	if clone.FrozenArb != nil {
+		sanitized, err := SanitizeFrozenArb(clone.FrozenArb)
+		if err != nil {
+			return nil, err
+		}
+		if sanitized.RealmID != clone.RealmID {
+			return nil, fmt.Errorf("frozen policy realm mismatch")
+		}
+		clone.FrozenArb = sanitized
+	}
+	return clone, nil
+}
+
+// SanitizeArbitratorSet validates the arbitrator allowlist definition.
+func SanitizeArbitratorSet(set *ArbitratorSet) (*ArbitratorSet, error) {
+	if set == nil {
+		return nil, fmt.Errorf("nil arbitrator set")
+	}
+	sanitized := set.Clone()
+	if !sanitized.Scheme.Valid() {
+		return nil, fmt.Errorf("unsupported arbitration scheme")
+	}
+	if sanitized.Threshold == 0 {
+		return nil, fmt.Errorf("arbitrator threshold must be positive")
+	}
+	if len(sanitized.Members) == 0 {
+		return nil, fmt.Errorf("arbitrator set requires members")
+	}
+	if int(sanitized.Threshold) > len(sanitized.Members) {
+		return nil, fmt.Errorf("arbitrator threshold exceeds member count")
+	}
+	for idx, member := range sanitized.Members {
+		if member == ([20]byte{}) {
+			return nil, fmt.Errorf("arbitrator member %d is zero address", idx)
+		}
+	}
+	return sanitized, nil
+}
+
+// SanitizeEscrowRealm validates the supplied realm definition.
+func SanitizeEscrowRealm(realm *EscrowRealm) (*EscrowRealm, error) {
+	if realm == nil {
+		return nil, fmt.Errorf("nil escrow realm")
+	}
+	clone := realm.Clone()
+	clone.ID = strings.TrimSpace(clone.ID)
+	if clone.ID == "" {
+		return nil, fmt.Errorf("realm id must not be empty")
+	}
+	if clone.NextPolicyNonce == 0 {
+		return nil, fmt.Errorf("realm policy nonce must be positive")
+	}
+	if clone.Arbitrators == nil {
+		return nil, fmt.Errorf("realm requires arbitrators")
+	}
+	sanitized, err := SanitizeArbitratorSet(clone.Arbitrators)
+	if err != nil {
+		return nil, err
+	}
+	clone.Arbitrators = sanitized
+	if clone.UpdatedAt != 0 && clone.UpdatedAt < clone.CreatedAt {
+		return nil, fmt.Errorf("realm updatedAt before createdAt")
+	}
+	return clone, nil
+}
+
+// SanitizeFrozenArb validates the frozen arbitrator policy instance.
+func SanitizeFrozenArb(frozen *FrozenArb) (*FrozenArb, error) {
+	if frozen == nil {
+		return nil, fmt.Errorf("nil frozen arbitrator policy")
+	}
+	clone := frozen.Clone()
+	clone.RealmID = strings.TrimSpace(clone.RealmID)
+	if clone.RealmID == "" {
+		return nil, fmt.Errorf("frozen policy missing realm id")
+	}
+	if clone.RealmVersion == 0 {
+		return nil, fmt.Errorf("frozen policy realm version must be positive")
+	}
+	if clone.PolicyNonce == 0 {
+		return nil, fmt.Errorf("frozen policy nonce must be positive")
+	}
+	if !clone.Scheme.Valid() {
+		return nil, fmt.Errorf("frozen policy scheme invalid")
+	}
+	if clone.Threshold == 0 {
+		return nil, fmt.Errorf("frozen policy threshold must be positive")
+	}
+	if len(clone.Members) == 0 {
+		return nil, fmt.Errorf("frozen policy requires members")
+	}
+	if int(clone.Threshold) > len(clone.Members) {
+		return nil, fmt.Errorf("frozen policy threshold exceeds members")
+	}
+	for idx, member := range clone.Members {
+		if member == ([20]byte{}) {
+			return nil, fmt.Errorf("frozen policy member %d is zero address", idx)
+		}
 	}
 	return clone, nil
 }
