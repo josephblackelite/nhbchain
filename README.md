@@ -158,9 +158,20 @@ Detach with `Ctrl+B`, `D` and reattach via `tmux attach -t nhb-node`. Logs will 
 2. **Sync the Chain** — Allow `nhb-node` to download and verify state. Monitor progress via RPC (`nhb_getLatestBlocks`).
 3. **Generate Wallet Keys** — Use `./nhb-cli generate-key` to create a wallet; secure `wallet.key` offline.
 4. **Acquire ZapNHB** — Request testnet allocations or participate in mainnet offerings to stake.
-5. **Stake to Validate** — Bond at least 5,000 ZapNHB to enter the validator candidate set:
+5. **Stake to Validate** — Bond at least the active `staking.minimumValidatorStake` governance parameter (defaults to 1,000 ZapNHB when unset). Confirm the live threshold before staking:
    ```bash
-   ./nhb-cli stake 5000 wallet.key
+   ./nhb-cli gov list --limit 50 | jq -r '
+     [.proposals[]
+      | select(.target=="param.update")
+      | {id, change: (try (.proposed_change | fromjson) catch empty)}
+      | select(.change."staking.minimumValidatorStake" != null)]
+     | sort_by(.id)
+     | last
+     | .change."staking.minimumValidatorStake"'
+   ```
+   Once you know the minimum, stake an amount that meets or exceeds it:
+   ```bash
+   ./nhb-cli stake <amount> wallet.key
    ```
 6. **Maintain Engagement** — Submit periodic heartbeat transactions to maximize POTSO weight:
    ```bash
