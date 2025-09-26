@@ -6,7 +6,8 @@
     "lib-sdk",
     "apps/*",
     "wallet-lite",
-    "merchant-loyalty-console"
+    "merchant-loyalty-console",
+    "escrow-checkout/*"
   ],
   "scripts": {
     "dev": "node ./scripts/dev.js",
