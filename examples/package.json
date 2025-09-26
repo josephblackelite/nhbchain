@@ -5,7 +5,8 @@
   "workspaces": [
     "lib-sdk",
     "apps/*",
-    "wallet-lite"
+    "wallet-lite",
+    "merchant-loyalty-console"
   ],
   "scripts": {
     "dev": "node ./scripts/dev.js",
