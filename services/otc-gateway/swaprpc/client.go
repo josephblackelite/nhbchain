@@ -3,9 +3,13 @@ package swaprpc
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -49,6 +53,34 @@ type VoucherStatus struct {
 	TxHash string
 }
 
+// VoucherExportRecord captures the decoded row returned by swap_voucher_export.
+type VoucherExportRecord struct {
+	ProviderTxID      string
+	Provider          string
+	FiatCurrency      string
+	FiatAmount        string
+	USD               string
+	Rate              string
+	Token             string
+	MintAmountWei     string
+	RecipientHex      string
+	Username          string
+	Address           string
+	QuoteTimestamp    int64
+	Source            string
+	OracleMedian      string
+	OracleFeeders     []string
+	PriceProofID      string
+	MinterSignature   string
+	Status            string
+	CreatedAt         int64
+	TwapRate          string
+	TwapObservations  int
+	TwapWindowSeconds int64
+	TwapStart         int64
+	TwapEnd           int64
+}
+
 // SubmitMintVoucher posts a mint voucher with signature to the swap gateway RPC.
 func (c *Client) SubmitMintVoucher(ctx context.Context, voucher core.MintVoucher, signatureHex, providerTxID string) (string, bool, error) {
 	payload := map[string]interface{}{
@@ -82,6 +114,123 @@ func (c *Client) GetVoucher(ctx context.Context, providerTxID string) (*VoucherS
 		txHash = strings.TrimSpace(v)
 	}
 	return &VoucherStatus{Status: status, TxHash: txHash}, nil
+}
+
+// ExportVouchers retrieves the swap voucher export rows for the provided window.
+func (c *Client) ExportVouchers(ctx context.Context, start, end time.Time) ([]VoucherExportRecord, error) {
+	if c == nil {
+		return nil, fmt.Errorf("swaprpc: client not configured")
+	}
+	params := []interface{}{start.Unix(), end.Unix()}
+	var payload struct {
+		CSVBase64 string `json:"csvBase64"`
+	}
+	if err := c.call(ctx, "swap_voucher_export", params, &payload); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(payload.CSVBase64) == "" {
+		return []VoucherExportRecord{}, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(payload.CSVBase64)
+	if err != nil {
+		return nil, fmt.Errorf("swaprpc: decode export: %w", err)
+	}
+	reader := csv.NewReader(bytes.NewReader(raw))
+	header, err := reader.Read()
+	if err != nil {
+		if err == io.EOF {
+			return []VoucherExportRecord{}, nil
+		}
+		return nil, fmt.Errorf("swaprpc: read export header: %w", err)
+	}
+	expectedColumns := len(header)
+	if expectedColumns < 24 {
+		return nil, fmt.Errorf("swaprpc: unexpected export columns %d", expectedColumns)
+	}
+	records := []VoucherExportRecord{}
+	for {
+		row, err := reader.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("swaprpc: read export row: %w", err)
+		}
+		if len(row) < expectedColumns {
+			// pad missing cells with blanks to avoid index panics
+			padded := make([]string, expectedColumns)
+			copy(padded, row)
+			row = padded
+		}
+		rec := VoucherExportRecord{
+			ProviderTxID:    strings.TrimSpace(row[0]),
+			Provider:        strings.TrimSpace(row[1]),
+			FiatCurrency:    strings.TrimSpace(row[2]),
+			FiatAmount:      strings.TrimSpace(row[3]),
+			USD:             strings.TrimSpace(row[4]),
+			Rate:            strings.TrimSpace(row[5]),
+			Token:           strings.TrimSpace(row[6]),
+			MintAmountWei:   strings.TrimSpace(row[7]),
+			RecipientHex:    strings.TrimSpace(row[8]),
+			Username:        strings.TrimSpace(row[9]),
+			Address:         strings.TrimSpace(row[10]),
+			Source:          strings.TrimSpace(row[12]),
+			OracleMedian:    strings.TrimSpace(row[13]),
+			OracleFeeders:   splitCSV(row[14]),
+			PriceProofID:    strings.TrimSpace(row[15]),
+			MinterSignature: strings.TrimSpace(row[16]),
+			Status:          strings.TrimSpace(row[17]),
+			TwapRate:        strings.TrimSpace(row[19]),
+		}
+		rec.QuoteTimestamp = parseInt64(row[11])
+		rec.CreatedAt = parseInt64(row[18])
+		rec.TwapObservations = parseInt(row[20])
+		rec.TwapWindowSeconds = parseInt64(row[21])
+		rec.TwapStart = parseInt64(row[22])
+		rec.TwapEnd = parseInt64(row[23])
+		records = append(records, rec)
+	}
+	return records, nil
+}
+
+func splitCSV(value string) []string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	parts := strings.Split(trimmed, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		p := strings.TrimSpace(part)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseInt(raw string) int {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func parseInt64(raw string) int64 {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 type rpcRequest struct {

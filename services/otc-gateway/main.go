@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"nhbchain/services/otc-gateway/config"
 	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/otc-gateway/models"
+	"nhbchain/services/otc-gateway/recon"
 	"nhbchain/services/otc-gateway/server"
 	"nhbchain/services/otc-gateway/swaprpc"
 )
@@ -60,6 +62,25 @@ func main() {
 		Provider:     cfg.SwapProvider,
 		PollInterval: cfg.MintPollInterval,
 	})
+
+	reconciler, err := recon.NewReconciler(recon.Config{
+		DB:        db,
+		TZ:        cfg.DefaultTZ,
+		Exporter:  swapClient,
+		OutputDir: cfg.ReconOutputDir,
+		DryRun:    cfg.ReconDryRun,
+	})
+	if err != nil {
+		log.Fatalf("reconciler init error: %v", err)
+	}
+	scheduler := recon.NewScheduler(recon.SchedulerConfig{
+		Reconciler: reconciler,
+		Window:     cfg.ReconWindow,
+		RunHour:    cfg.ReconRunHour,
+		RunMinute:  cfg.ReconRunMinute,
+		Location:   cfg.DefaultTZ,
+	})
+	go scheduler.Start(context.Background())
 
 	handler := srv.Handler()
 

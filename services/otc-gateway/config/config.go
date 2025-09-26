@@ -24,6 +24,11 @@ type Config struct {
 	SwapProvider     string
 	VoucherTTL       time.Duration
 	MintPollInterval time.Duration
+	ReconOutputDir   string
+	ReconRunHour     int
+	ReconRunMinute   int
+	ReconDryRun      bool
+	ReconWindow      time.Duration
 }
 
 // FromEnv loads configuration from environment variables required by the service.
@@ -89,6 +94,13 @@ func FromEnv() (*Config, error) {
 		return nil, fmt.Errorf("invalid OTC_TZ_DEFAULT %q: %w", tzName, err)
 	}
 
+	reconDir := getEnvDefault("OTC_RECON_OUTPUT_DIR", "nhb-data-local/recon")
+	reconHour := parseIntEnv("OTC_RECON_RUN_HOUR", 1)
+	reconMinute := parseIntEnv("OTC_RECON_RUN_MINUTE", 5)
+	reconDryRun := parseBoolEnv("OTC_RECON_DRY_RUN", false)
+	windowHours := parseIntEnv("OTC_RECON_WINDOW_HOURS", 24)
+	reconWindow := time.Duration(windowHours) * time.Hour
+
 	return &Config{
 		Port:             normalizePort(port),
 		DatabaseURL:      dbURL,
@@ -105,6 +117,11 @@ func FromEnv() (*Config, error) {
 		SwapProvider:     swapProvider,
 		VoucherTTL:       time.Duration(ttl) * time.Second,
 		MintPollInterval: time.Duration(poll) * time.Second,
+		ReconOutputDir:   reconDir,
+		ReconRunHour:     reconHour,
+		ReconRunMinute:   reconMinute,
+		ReconDryRun:      reconDryRun,
+		ReconWindow:      reconWindow,
 	}, nil
 }
 
@@ -127,4 +144,22 @@ func normalizePort(port string) string {
 		return port[1:]
 	}
 	return port
+}
+
+func parseIntEnv(key string, def int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return def
+}
+
+func parseBoolEnv(key string, def bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed
+		}
+	}
+	return def
 }
