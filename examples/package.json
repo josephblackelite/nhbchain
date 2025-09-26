@@ -4,7 +4,8 @@
   "packageManager": "yarn@1.22.19",
   "workspaces": [
     "lib-sdk",
-    "apps/*"
+    "apps/*",
+    "wallet-lite"
   ],
   "scripts": {
     "dev": "node ./scripts/dev.js",
