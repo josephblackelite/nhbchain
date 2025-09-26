@@ -90,11 +90,21 @@ type Decision struct {
 
 // Voucher represents chain submissions generated from invoices.
 type Voucher struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-	InvoiceID uuid.UUID `gorm:"type:uuid;uniqueIndex"`
-	ChainID   string    `gorm:"index"`
-	Payload   string
-	CreatedAt time.Time
+	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
+	InvoiceID    uuid.UUID `gorm:"type:uuid;uniqueIndex"`
+	ChainID      string    `gorm:"index"`
+	Payload      string
+	ProviderTxID string `gorm:"size:128;uniqueIndex"`
+	Hash         string `gorm:"size:130"`
+	Signature    string `gorm:"type:text"`
+	SignerDN     string `gorm:"size:255"`
+	TxHash       string `gorm:"size:130"`
+	Status       string `gorm:"size:32;index"`
+	ExpiresAt    time.Time
+	SubmittedAt  *time.Time
+	SubmittedBy  *uuid.UUID `gorm:"type:uuid"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // Event is the staff audit trail structure.

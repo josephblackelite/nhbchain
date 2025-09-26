@@ -18,7 +18,11 @@ The microservice runs as a single Go binary (`services/otc-gateway`) configured 
 - `OTC_DB_URL` – PostgreSQL DSN.
 - `OTC_S3_BUCKET` – bucket for receipt uploads.
 - `OTC_CHAIN_ID` – identifier for downstream voucher minting.
-- `NHB_RPC_BASE` – base URL for on-chain RPC operations.
+- `OTC_SWAP_RPC_BASE` – base URL for on-chain swap voucher submission (falls back to `NHB_RPC_BASE`).
 - `OTC_TZ_DEFAULT` – IANA timezone for timestamp normalization.
+- `OTC_VOUCHER_TTL_SECONDS` – lifetime applied to mint vouchers before expiry.
+- `OTC_MINT_POLL_INTERVAL_SECONDS` – cadence for polling mint confirmations.
+- `OTC_SWAP_PROVIDER` – identifier reported to `swap_submitVoucher`.
+- `OTC_HSM_BASE_URL`, `OTC_HSM_CA_CERT`, `OTC_HSM_CLIENT_CERT`, `OTC_HSM_CLIENT_KEY`, `OTC_HSM_KEY_LABEL`, `OTC_HSM_SIGNER_DN` – mTLS parameters for the signing service.
 
 Runtime dependencies are managed via GORM for data access and the Chi router for HTTP serving.

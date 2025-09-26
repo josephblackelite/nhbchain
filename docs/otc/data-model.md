@@ -72,7 +72,16 @@ Contains voucher payloads for downstream on-chain minting.
 | `invoice_id` | UUID | One-to-one with invoices |
 | `chain_id` | Text | Chain identifier |
 | `payload` | Text | Serialized voucher payload |
-| `created_at` | Timestamp | Creation time |
+| `provider_tx_id` | Text | Deterministic identifier enforced for idempotency |
+| `hash` | Text | Keccak256 hash of the canonical payload |
+| `signature` | Text | Hex-encoded secp256k1 signature returned by the HSM |
+| `signer_dn` | Text | Distinguished name reported by the signer |
+| `tx_hash` | Text | On-chain transaction hash returned by `swap_submitVoucher` |
+| `status` | Text | Signing status (`SIGNING`, `SUBMITTED`, `MINTED`, `FAILED`) |
+| `expires_at` | Timestamp | Voucher expiry derived from TTL |
+| `submitted_at` | Timestamp | When the voucher was submitted on-chain |
+| `submitted_by` | UUID | Staff member who initiated submission |
+| `created_at` / `updated_at` | Timestamp | Audit timestamps |
 
 ## `events`
 Immutable audit trail capturing all staff interactions.

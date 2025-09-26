@@ -47,7 +47,8 @@ func TestInvoiceLifecycle(t *testing.T) {
 	tellerID := uuid.New()
 	supervisorID := uuid.New()
 
-	handler := New(db, testTZ(), "chain", "bucket", "rpc")
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute})
+	handler := srv.Handler()
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/invoices", strings.NewReader(`{"branch_id":"`+branchID.String()+`","amount":1000,"currency":"USD"}`))

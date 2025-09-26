@@ -62,6 +62,25 @@ Retrieve invoice details, including receipts and decisions for auditors.
 - Roles: auditor, supervisor, compliance, superadmin
 - Response: `200 OK` with the invoice document.
 
+## `POST /ops/otc/invoices/{id}/sign-and-submit`
+Sign an approved invoice using the HSM-backed minter and submit the resulting voucher to the NHB swap RPC.
+
+```json
+{
+  "recipient": "nhb1...",
+  "amount": "1000000000000000000",
+  "token": "NHB",
+  "provider_tx_id": "optional-deterministic-id"
+}
+```
+
+- Roles: superadmin
+- Response: `200 OK` with `{ "status": "SUBMITTED" | "MINTED", "txHash": "0x...", "providerTxId": "...", "signature": "0x..." }`
+- Errors:
+  - `400 Bad Request` when maker-checker rules or branch caps are violated, or payload validation fails.
+  - `409 Conflict` when the supplied `provider_tx_id` has already been processed for another invoice.
+  - `503 Service Unavailable` when the signing service is not configured.
+
 ## Errors
 
 Errors are returned as plain text with relevant HTTP status codes. Clients should treat non-2xx responses as failures.

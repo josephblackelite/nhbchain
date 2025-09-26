@@ -9,12 +9,21 @@ import (
 
 // Config represents runtime configuration for the OTC gateway service.
 type Config struct {
-	Port        string
-	DatabaseURL string
-	S3Bucket    string
-	ChainID     string
-	RPCBase     string
-	DefaultTZ   *time.Location
+	Port             string
+	DatabaseURL      string
+	S3Bucket         string
+	ChainID          string
+	SwapRPCBase      string
+	DefaultTZ        *time.Location
+	HSMBaseURL       string
+	HSMCACert        string
+	HSMClientCert    string
+	HSMClientKey     string
+	HSMKeyLabel      string
+	HSMOverrideDN    string
+	SwapProvider     string
+	VoucherTTL       time.Duration
+	MintPollInterval time.Duration
 }
 
 // FromEnv loads configuration from environment variables required by the service.
@@ -35,9 +44,43 @@ func FromEnv() (*Config, error) {
 		return nil, fmt.Errorf("OTC_CHAIN_ID is required")
 	}
 
-	rpcBase := os.Getenv("NHB_RPC_BASE")
+	rpcBase := os.Getenv("OTC_SWAP_RPC_BASE")
 	if rpcBase == "" {
-		return nil, fmt.Errorf("NHB_RPC_BASE is required")
+		rpcBase = os.Getenv("NHB_RPC_BASE")
+	}
+	if rpcBase == "" {
+		return nil, fmt.Errorf("OTC_SWAP_RPC_BASE is required")
+	}
+
+	hsmBase := os.Getenv("OTC_HSM_BASE_URL")
+	if hsmBase == "" {
+		return nil, fmt.Errorf("OTC_HSM_BASE_URL is required")
+	}
+	hsmCACert := os.Getenv("OTC_HSM_CA_CERT")
+	if hsmCACert == "" {
+		return nil, fmt.Errorf("OTC_HSM_CA_CERT is required")
+	}
+	hsmClientCert := os.Getenv("OTC_HSM_CLIENT_CERT")
+	if hsmClientCert == "" {
+		return nil, fmt.Errorf("OTC_HSM_CLIENT_CERT is required")
+	}
+	hsmClientKey := os.Getenv("OTC_HSM_CLIENT_KEY")
+	if hsmClientKey == "" {
+		return nil, fmt.Errorf("OTC_HSM_CLIENT_KEY is required")
+	}
+	hsmKeyLabel := getEnvDefault("OTC_HSM_KEY_LABEL", "MINTER_NHB")
+	swapProvider := getEnvDefault("OTC_SWAP_PROVIDER", "otc-gateway")
+
+	ttlSeconds := getEnvDefault("OTC_VOUCHER_TTL_SECONDS", "900")
+	ttl, err := strconv.Atoi(ttlSeconds)
+	if err != nil || ttl <= 0 {
+		return nil, fmt.Errorf("invalid OTC_VOUCHER_TTL_SECONDS %q", ttlSeconds)
+	}
+
+	pollSeconds := getEnvDefault("OTC_MINT_POLL_INTERVAL_SECONDS", "10")
+	poll, err := strconv.Atoi(pollSeconds)
+	if err != nil || poll <= 0 {
+		return nil, fmt.Errorf("invalid OTC_MINT_POLL_INTERVAL_SECONDS %q", pollSeconds)
 	}
 
 	tzName := getEnvDefault("OTC_TZ_DEFAULT", "UTC")
@@ -47,12 +90,21 @@ func FromEnv() (*Config, error) {
 	}
 
 	return &Config{
-		Port:        normalizePort(port),
-		DatabaseURL: dbURL,
-		S3Bucket:    bucket,
-		ChainID:     chainID,
-		RPCBase:     rpcBase,
-		DefaultTZ:   tz,
+		Port:             normalizePort(port),
+		DatabaseURL:      dbURL,
+		S3Bucket:         bucket,
+		ChainID:          chainID,
+		SwapRPCBase:      rpcBase,
+		DefaultTZ:        tz,
+		HSMBaseURL:       hsmBase,
+		HSMCACert:        hsmCACert,
+		HSMClientCert:    hsmClientCert,
+		HSMClientKey:     hsmClientKey,
+		HSMKeyLabel:      hsmKeyLabel,
+		HSMOverrideDN:    os.Getenv("OTC_HSM_SIGNER_DN"),
+		SwapProvider:     swapProvider,
+		VoucherTTL:       time.Duration(ttl) * time.Second,
+		MintPollInterval: time.Duration(poll) * time.Second,
 	}, nil
 }
 
