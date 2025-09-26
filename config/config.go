@@ -77,6 +77,7 @@ type P2PSection struct {
 type PotsoConfig struct {
 	Rewards PotsoRewardsConfig `toml:"rewards"`
 	Weights PotsoWeightsConfig `toml:"weights"`
+	Abuse   PotsoAbuseConfig   `toml:"abuse"`
 }
 
 // PotsoRewardsConfig mirrors the TOML structure for POTSO reward distribution parameters.
@@ -103,6 +104,14 @@ type PotsoWeightsConfig struct {
 	DecayHalfLifeEpochs   uint64 `toml:"DecayHalfLifeEpochs"`
 	TopKWinners           uint64 `toml:"TopKWinners"`
 	TieBreak              string `toml:"TieBreak"`
+}
+
+// PotsoAbuseConfig captures anti-abuse controls for POTSO emissions and weights.
+type PotsoAbuseConfig struct {
+	MinStakeToEarnWei      string `toml:"MinStakeToEarnWei"`
+	QuadraticTxDampenAfter uint64 `toml:"QuadraticTxDampenAfter"`
+	QuadraticTxDampenPower uint64 `toml:"QuadraticTxDampenPower"`
+	MaxUserShareBps        uint64 `toml:"MaxUserShareBps"`
 }
 
 // GovConfig captures the governance policy knobs controlling proposal flow
@@ -229,6 +238,9 @@ func Load(path string) (*Config, error) {
 	if strings.TrimSpace(cfg.Potso.Weights.MinStakeToWinWei) == "" {
 		cfg.Potso.Weights.MinStakeToWinWei = weightDefaults.MinStakeToWinWei.String()
 	}
+	if strings.TrimSpace(cfg.Potso.Abuse.MinStakeToEarnWei) == "" {
+		cfg.Potso.Abuse.MinStakeToEarnWei = weightDefaults.MinStakeToEarnWei.String()
+	}
 	if cfg.Potso.Weights.DecayHalfLifeEpochs == 0 {
 		cfg.Potso.Weights.DecayHalfLifeEpochs = weightDefaults.DecayHalfLifeEpochs
 	}
@@ -237,6 +249,9 @@ func Load(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.Potso.Weights.TieBreak) == "" {
 		cfg.Potso.Weights.TieBreak = string(weightDefaults.TieBreak)
+	}
+	if cfg.Potso.Abuse.QuadraticTxDampenPower == 0 {
+		cfg.Potso.Abuse.QuadraticTxDampenPower = weightDefaults.QuadraticTxDampenPower
 	}
 
 	if strings.TrimSpace(cfg.Governance.MinDepositWei) == "" {
@@ -258,6 +273,10 @@ func Load(path string) (*Config, error) {
 		cfg.Governance.AllowedParams = []string{
 			"potso.weights.AlphaStakeBps",
 			"potso.rewards.EmissionPerEpochWei",
+			"potso.abuse.MaxUserShareBps",
+			"potso.abuse.MinStakeToEarnWei",
+			"potso.abuse.QuadraticTxDampenAfter",
+			"potso.abuse.QuadraticTxDampenPower",
 			"fees.baseFee",
 		}
 	}
@@ -280,6 +299,7 @@ func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
 	}
 	result.MaxWinnersPerEpoch = rewards.MaxWinnersPerEpoch
 	result.CarryRemainder = rewards.CarryRemainder
+	result.MaxUserShareBps = cfg.Potso.Abuse.MaxUserShareBps
 
 	result.MinPayoutWei = big.NewInt(0)
 	trimmedMin := strings.TrimSpace(rewards.MinPayoutWei)
@@ -467,6 +487,20 @@ func (cfg *Config) PotsoWeightConfig() (potso.WeightParams, error) {
 	} else {
 		result.MinStakeToWinWei = big.NewInt(0)
 	}
+
+	trimmedEarn := strings.TrimSpace(cfg.Potso.Abuse.MinStakeToEarnWei)
+	if trimmedEarn != "" {
+		value, ok := new(big.Int).SetString(trimmedEarn, 10)
+		if !ok {
+			return result, fmt.Errorf("invalid MinStakeToEarnWei value: %s", cfg.Potso.Abuse.MinStakeToEarnWei)
+		}
+		result.MinStakeToEarnWei = value
+	} else {
+		result.MinStakeToEarnWei = big.NewInt(0)
+	}
+
+	result.QuadraticTxDampenAfter = cfg.Potso.Abuse.QuadraticTxDampenAfter
+	result.QuadraticTxDampenPower = cfg.Potso.Abuse.QuadraticTxDampenPower
 
 	if err := result.Validate(); err != nil {
 		return result, err

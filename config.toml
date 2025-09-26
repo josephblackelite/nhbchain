@@ -58,13 +58,19 @@ DecayHalfLifeEpochs = 7
 TopKWinners = 5000
 TieBreak = "addrHash"
 
+[potso.abuse]
+MinStakeToEarnWei = "0"
+QuadraticTxDampenAfter = 0
+QuadraticTxDampenPower = 2
+MaxUserShareBps = 0
+
 [governance]
 MinDepositWei = "1000e18"
 VotingPeriodSeconds = 604800
 TimelockSeconds = 172800
 QuorumBps = 2000
 PassThresholdBps = 5000
-AllowedParams = ["potso.weights.AlphaStakeBps","potso.rewards.EmissionPerEpochWei","fees.baseFee"]
+AllowedParams = ["potso.weights.AlphaStakeBps","potso.rewards.EmissionPerEpochWei","potso.abuse.MaxUserShareBps","potso.abuse.MinStakeToEarnWei","potso.abuse.QuadraticTxDampenAfter","potso.abuse.QuadraticTxDampenPower","fees.baseFee"]
 BlockTimestampToleranceSeconds = 5
 
 [swap]

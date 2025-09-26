@@ -32,31 +32,37 @@ const (
 
 // WeightParams controls the composite engagement weighting pipeline.
 type WeightParams struct {
-	AlphaStakeBps         uint64
-	TxWeightBps           uint64
-	EscrowWeightBps       uint64
-	UptimeWeightBps       uint64
-	MaxEngagementPerEpoch uint64
-	MinStakeToWinWei      *big.Int
-	MinEngagementToWin    uint64
-	DecayHalfLifeEpochs   uint64
-	TopKWinners           uint64
-	TieBreak              TieBreakMode
+	AlphaStakeBps          uint64
+	TxWeightBps            uint64
+	EscrowWeightBps        uint64
+	UptimeWeightBps        uint64
+	MaxEngagementPerEpoch  uint64
+	MinStakeToWinWei       *big.Int
+	MinStakeToEarnWei      *big.Int
+	MinEngagementToWin     uint64
+	DecayHalfLifeEpochs    uint64
+	TopKWinners            uint64
+	TieBreak               TieBreakMode
+	QuadraticTxDampenAfter uint64
+	QuadraticTxDampenPower uint64
 }
 
 // DefaultWeightParams returns a conservative baseline configuration.
 func DefaultWeightParams() WeightParams {
 	return WeightParams{
-		AlphaStakeBps:         7000,
-		TxWeightBps:           6000,
-		EscrowWeightBps:       3000,
-		UptimeWeightBps:       1000,
-		MaxEngagementPerEpoch: 1000,
-		MinStakeToWinWei:      big.NewInt(0),
-		MinEngagementToWin:    0,
-		DecayHalfLifeEpochs:   7,
-		TopKWinners:           5000,
-		TieBreak:              TieBreakAddrHash,
+		AlphaStakeBps:          7000,
+		TxWeightBps:            6000,
+		EscrowWeightBps:        3000,
+		UptimeWeightBps:        1000,
+		MaxEngagementPerEpoch:  1000,
+		MinStakeToWinWei:       big.NewInt(0),
+		MinStakeToEarnWei:      big.NewInt(0),
+		MinEngagementToWin:     0,
+		DecayHalfLifeEpochs:    7,
+		TopKWinners:            5000,
+		TieBreak:               TieBreakAddrHash,
+		QuadraticTxDampenAfter: 0,
+		QuadraticTxDampenPower: 2,
 	}
 }
 
@@ -70,6 +76,9 @@ func (p WeightParams) Validate() error {
 	}
 	if p.MinStakeToWinWei != nil && p.MinStakeToWinWei.Sign() < 0 {
 		return errors.New("min stake to win cannot be negative")
+	}
+	if p.MinStakeToEarnWei != nil && p.MinStakeToEarnWei.Sign() < 0 {
+		return errors.New("min stake to earn cannot be negative")
 	}
 	switch p.TieBreak {
 	case TieBreakAddrHash, TieBreakAddrLex, "":
@@ -234,6 +243,10 @@ func ComputeWeightSnapshot(epoch uint64, inputs []WeightInput, params WeightPara
 	if minStake == nil {
 		minStake = big.NewInt(0)
 	}
+	minEarn := params.MinStakeToEarnWei
+	if minEarn == nil {
+		minEarn = big.NewInt(0)
+	}
 
 	// First pass – compute decayed engagement and filter participants.
 	filtered := make([]WeightEntry, 0, len(inputs))
@@ -242,8 +255,15 @@ func ComputeWeightSnapshot(epoch uint64, inputs []WeightInput, params WeightPara
 		if stake == nil {
 			stake = big.NewInt(0)
 		}
-		rawComposite := computeComposite(input.Meter, params)
+		eligibleForEarnings := stake.Cmp(minEarn) >= 0
+		rawComposite := uint64(0)
+		if eligibleForEarnings {
+			rawComposite = computeComposite(input.Meter, params)
+		}
 		decayed := applyEMA(input.PreviousEngagement, rawComposite, beta)
+		if !eligibleForEarnings {
+			decayed = 0
+		}
 		if params.MaxEngagementPerEpoch > 0 && decayed > params.MaxEngagementPerEpoch {
 			decayed = params.MaxEngagementPerEpoch
 		}
@@ -251,6 +271,9 @@ func ComputeWeightSnapshot(epoch uint64, inputs []WeightInput, params WeightPara
 			continue
 		}
 		if decayed < params.MinEngagementToWin {
+			continue
+		}
+		if stake.Sign() == 0 && decayed == 0 {
 			continue
 		}
 		entry := WeightEntry{
@@ -323,7 +346,20 @@ func ComputeWeightSnapshot(epoch uint64, inputs []WeightInput, params WeightPara
 
 func computeComposite(m EngagementMeter, params WeightParams) uint64 {
 	total := new(big.Int)
-	addWeighted(total, m.TxCount, params.TxWeightBps)
+	txCount := m.TxCount
+	if params.QuadraticTxDampenAfter > 0 && txCount > params.QuadraticTxDampenAfter && params.QuadraticTxDampenPower > 1 {
+		excess := txCount - params.QuadraticTxDampenAfter
+		dampened := uint64(math.Round(math.Pow(float64(excess), 1.0/float64(params.QuadraticTxDampenPower))))
+		if dampened == 0 {
+			dampened = 1
+		}
+		if params.QuadraticTxDampenAfter > math.MaxUint64-dampened {
+			txCount = math.MaxUint64
+		} else {
+			txCount = params.QuadraticTxDampenAfter + dampened
+		}
+	}
+	addWeighted(total, txCount, params.TxWeightBps)
 	addWeighted(total, m.EscrowCount, params.EscrowWeightBps)
 	addWeighted(total, m.UptimeDevices, params.UptimeWeightBps)
 	if total.BitLen() > 64 {

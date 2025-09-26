@@ -21,8 +21,8 @@ Audits should prioritize the consensus engine, staking and escrow modules, RPC g
 Audit findings are treated under the same embargo rules as vulnerability submissions: 45 days for critical issues and 30 days for others, unless early release is mutually agreed. Public disclosure will include auditor attribution when approved.
 
 ## Contacts & Encryption
-- **Program Lead:** `audit@nhbchain.io`
-- **Security Team:** `security@nhbchain.io`
+- **Program Lead:** `audit@nhbcoin.net`
+- **Security Team:** `security@nhbcoin.net`
 - **PGP Fingerprint:** `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`
 - **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc)
 

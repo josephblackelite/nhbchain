@@ -4,7 +4,7 @@ This document defines the security, audit, and operational procedures required b
 
 ## Audit Intake
 
-1. **Submission Channel** – All issues must arrive via `security@nhbchain.io` or the HackerOne program. Public issues are not accepted during freeze.
+1. **Submission Channel** – All issues must arrive via `security@nhbcoin.net` or the HackerOne program. Public issues are not accepted during freeze.
 2. **Acknowledgement SLA** – Respond to researchers within 24 hours with a tracking ID and severity placeholder.
 3. **Initial Assessment** – Security triage team rates severity using CVSS 3.1 and determines impacted modules.
 4. **Issue Tracking** – Log each report in the private security board with fields: severity, affected versions, exploit prerequisites, mitigation status.
@@ -62,7 +62,7 @@ If an issue risks funds or validator safety, initiate the freeze protocol immedi
 
 ## Vulnerability Disclosure
 
-* Email: `security@nhbchain.io`
+* Email: `security@nhbcoin.net`
 * PGP: `https://security.nhbchain.io/pgp.txt`
 * Expected timeline: acknowledgement in 24 hours, fix ETA shared within 5 business days.
 * Safe harbor applies for good faith testing that avoids mainnet, personal data, and denial-of-service attacks.

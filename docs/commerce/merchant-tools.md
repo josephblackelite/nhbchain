@@ -124,5 +124,5 @@ Use the sandbox to rehearse complex trade flows and validate your automation pri
 
 * **Documentation:** `/docs/escrow/escrow.md` (state machine), `/docs/escrow/gateway-api.md` (REST operations).
 * **SDKs:** TypeScript & Go SDKs include helpers for signing requests and consuming paginated endpoints.
-* **Contact:** Reach the merchant integrations team at `merchants@nhbchain.com` for sandbox access, production onboarding, or
+* **Contact:** Reach the merchant integrations team at `merchants@nhbcoin.net` for sandbox access, production onboarding, or
   escalation support.
