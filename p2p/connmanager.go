@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,7 +15,9 @@ const (
 
 type connManager struct {
 	server         *Server
+	seedMu         sync.RWMutex
 	seeds          []seedEndpoint
+	seedSet        map[string]seedEndpoint
 	store          *Peerstore
 	now            func() time.Time
 	quit           chan struct{}
@@ -28,9 +31,15 @@ func newConnManager(server *Server) *connManager {
 	if server == nil {
 		return nil
 	}
+	initialSeeds := server.seedSnapshot()
+	seedSet := make(map[string]seedEndpoint, len(initialSeeds))
+	for _, seed := range initialSeeds {
+		seedSet[seedKey(seed)] = seed
+	}
 	mgr := &connManager{
 		server:         server,
-		seeds:          append([]seedEndpoint{}, server.seeds...),
+		seeds:          append([]seedEndpoint{}, initialSeeds...),
+		seedSet:        seedSet,
 		store:          server.peerstore,
 		now:            server.now,
 		quit:           make(chan struct{}),
@@ -57,13 +66,60 @@ func newConnManager(server *Server) *connManager {
 	return mgr
 }
 
+func (m *connManager) seedSnapshot() []seedEndpoint {
+	m.seedMu.RLock()
+	defer m.seedMu.RUnlock()
+	out := make([]seedEndpoint, len(m.seeds))
+	copy(out, m.seeds)
+	return out
+}
+
+func (m *connManager) isSeedActive(seed seedEndpoint) bool {
+	m.seedMu.RLock()
+	defer m.seedMu.RUnlock()
+	if m.seedSet == nil {
+		return false
+	}
+	_, ok := m.seedSet[seedKey(seed)]
+	return ok
+}
+
+func (m *connManager) updateSeeds(seeds []seedEndpoint) {
+	if m == nil {
+		return
+	}
+	m.seedMu.Lock()
+	oldSet := m.seedSet
+	if oldSet == nil {
+		oldSet = make(map[string]seedEndpoint)
+	}
+	newSet := make(map[string]seedEndpoint, len(seeds))
+	unique := make([]seedEndpoint, 0, len(seeds))
+	for _, seed := range seeds {
+		key := seedKey(seed)
+		if _, ok := newSet[key]; ok {
+			continue
+		}
+		newSet[key] = seed
+		unique = append(unique, seed)
+	}
+	m.seedSet = newSet
+	m.seeds = unique
+	m.seedMu.Unlock()
+	for key, seed := range newSet {
+		if _, exists := oldSet[key]; !exists {
+			go m.runSeedLoop(seed)
+		}
+	}
+}
+
 func (m *connManager) start() {
 	if m == nil {
 		return
 	}
 	m.logNATStatus()
 	go m.run()
-	for _, seed := range m.seeds {
+	for _, seed := range m.seedSnapshot() {
 		seedCopy := seed
 		go m.runSeedLoop(seedCopy)
 	}
@@ -79,6 +135,9 @@ func (m *connManager) stop() {
 
 func (m *connManager) runSeedLoop(seed seedEndpoint) {
 	for {
+		if !m.isSeedActive(seed) {
+			return
+		}
 		if !m.ensureReady(seed) {
 			return
 		}
@@ -309,6 +368,7 @@ func (m *connManager) selectDialCandidates(limit int) []PeerstoreEntry {
 	if limit <= 0 {
 		return results
 	}
+
 	now := m.now()
 	entries := m.peerstoreEntries()
 	sort.Slice(entries, func(i, j int) bool {
@@ -348,7 +408,7 @@ func (m *connManager) selectDialCandidates(limit int) []PeerstoreEntry {
 	if len(results) >= limit {
 		return results[:limit]
 	}
-	for _, seed := range m.seeds {
+	for _, seed := range m.seedSnapshot() {
 		if len(results) >= limit {
 			break
 		}
@@ -368,6 +428,10 @@ func (m *connManager) selectDialCandidates(limit int) []PeerstoreEntry {
 		return results[:limit]
 	}
 	return results
+}
+
+func seedKey(seed seedEndpoint) string {
+	return normalizeHex(seed.NodeID) + "@" + strings.TrimSpace(seed.Address)
 }
 
 func (m *connManager) snapshotPeers(now time.Time) []connectedPeer {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"nhbchain/crypto"
+	"nhbchain/p2p/seeds"
 )
 
 const (
@@ -66,6 +67,10 @@ type ServerConfig struct {
 	Bootnodes        []string
 	PersistentPeers  []string
 	Seeds            []string
+	SeedOrigins      []SeedOrigin
+	SeedRegistry     *seeds.Registry
+	SeedResolver     seeds.Resolver
+	SeedRefresh      time.Duration
 	PeerBanDuration  time.Duration
 	ReadTimeout      time.Duration
 	WriteTimeout     time.Duration
@@ -80,6 +85,67 @@ type ServerConfig struct {
 	DialBackoff      time.Duration
 	MaxDialBackoff   time.Duration
 	EnablePEX        bool
+}
+
+// SeedOrigin captures the provenance metadata for a seed entry supplied via
+// configuration or the on-chain registry.
+type SeedOrigin struct {
+	NodeID    string
+	Address   string
+	Source    string
+	NotBefore int64
+	NotAfter  int64
+}
+
+func normalizeSeedOrigins(cfg ServerConfig) (static []SeedOrigin, dynamic []SeedOrigin) {
+	origins := cfg.SeedOrigins
+	if len(origins) == 0 {
+		endpoints := parseSeedList(cfg.Seeds)
+		static = make([]SeedOrigin, 0, len(endpoints))
+		for _, ep := range endpoints {
+			static = append(static, SeedOrigin{NodeID: ep.NodeID, Address: ep.Address, Source: "config"})
+		}
+		return static, nil
+	}
+	for _, origin := range origins {
+		node, addr, err := normalizeSeedComponents(origin.NodeID, origin.Address)
+		if err != nil {
+			fmt.Printf("Ignoring seed %q@%q: %v\n", strings.TrimSpace(origin.NodeID), strings.TrimSpace(origin.Address), err)
+			continue
+		}
+		source := strings.TrimSpace(origin.Source)
+		if source == "" {
+			source = "config"
+		}
+		normalized := SeedOrigin{
+			NodeID:    node,
+			Address:   addr,
+			Source:    source,
+			NotBefore: origin.NotBefore,
+			NotAfter:  origin.NotAfter,
+		}
+		if strings.HasPrefix(strings.ToLower(source), "config") {
+			static = append(static, normalized)
+		} else {
+			dynamic = append(dynamic, normalized)
+		}
+	}
+	return static, dynamic
+}
+
+func normalizeSeedComponents(nodeID, address string) (string, string, error) {
+	node := normalizeHex(nodeID)
+	if node == "" {
+		return "", "", fmt.Errorf("missing node ID")
+	}
+	addr := strings.TrimSpace(address)
+	if addr == "" {
+		return "", "", fmt.Errorf("missing address")
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return "", "", fmt.Errorf("invalid address: %w", err)
+	}
+	return node, addr, nil
 }
 
 type dialFunc func(context.Context, string) (net.Conn, error)
@@ -123,11 +189,176 @@ type Server struct {
 	backoff     map[string]time.Duration
 	persistent  map[string]struct{}
 
-	seeds       []seedEndpoint
-	connMgr     *connManager
-	connMgrOnce sync.Once
+	seedMu       sync.RWMutex
+	seeds        []seedEndpoint
+	seedInfos    []SeedInfo
+	staticSeeds  []SeedOrigin
+	dynamicSeeds []SeedOrigin
+	seedRegistry *seeds.Registry
+	seedResolver seeds.Resolver
+	seedRefresh  time.Duration
+	seedQuit     chan struct{}
+	connMgr      *connManager
+	connMgrOnce  sync.Once
 
 	pex *pexManager
+}
+
+func cloneSeedOrigins(origins []SeedOrigin) []SeedOrigin {
+	if len(origins) == 0 {
+		return nil
+	}
+	out := make([]SeedOrigin, len(origins))
+	copy(out, origins)
+	return out
+}
+
+func seedOriginActive(origin SeedOrigin, now time.Time) bool {
+	if origin.NotBefore > 0 && now.Unix() < origin.NotBefore {
+		return false
+	}
+	if origin.NotAfter > 0 && now.Unix() > origin.NotAfter {
+		return false
+	}
+	return true
+}
+
+func (s *Server) currentTime() time.Time {
+	if s == nil || s.now == nil {
+		return time.Now()
+	}
+	return s.now()
+}
+
+func (s *Server) installStaticSeeds(origins []SeedOrigin) {
+	if s == nil {
+		return
+	}
+	s.seedMu.Lock()
+	s.staticSeeds = cloneSeedOrigins(origins)
+	endpoints := s.rebuildSeedsLocked(s.currentTime())
+	s.seedMu.Unlock()
+	if s.connMgr != nil {
+		s.connMgr.updateSeeds(endpoints)
+	}
+}
+
+func (s *Server) setDynamicSeeds(origins []SeedOrigin) {
+	if s == nil {
+		return
+	}
+	s.seedMu.Lock()
+	s.dynamicSeeds = cloneSeedOrigins(origins)
+	endpoints := s.rebuildSeedsLocked(s.currentTime())
+	s.seedMu.Unlock()
+	if s.connMgr != nil {
+		s.connMgr.updateSeeds(endpoints)
+	}
+}
+
+func (s *Server) refreshSeedRegistry() error {
+	if s == nil || s.seedRegistry == nil {
+		return nil
+	}
+	resolver := s.seedResolver
+	if resolver == nil {
+		resolver = seeds.DefaultResolver()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resolved, err := s.seedRegistry.Resolve(ctx, s.currentTime(), resolver)
+	if len(resolved) > 0 {
+		origins := make([]SeedOrigin, 0, len(resolved))
+		for _, entry := range resolved {
+			origins = append(origins, SeedOrigin{
+				NodeID:    entry.NodeID,
+				Address:   entry.Address,
+				Source:    entry.Source,
+				NotBefore: entry.NotBefore,
+				NotAfter:  entry.NotAfter,
+			})
+		}
+		s.setDynamicSeeds(origins)
+	}
+	return err
+}
+
+func (s *Server) seedRotationLoop() {
+	if s == nil || s.seedRegistry == nil {
+		return
+	}
+	interval := s.seedRefresh
+	if interval <= 0 {
+		interval = s.seedRegistry.RefreshInterval()
+	}
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.refreshSeedRegistry(); err != nil {
+				fmt.Printf("Seed registry refresh failed: %v\n", err)
+			}
+		case <-s.seedQuit:
+			return
+		}
+	}
+}
+
+func (s *Server) rebuildSeedsLocked(now time.Time) []seedEndpoint {
+	combined := make([]SeedOrigin, 0, len(s.staticSeeds)+len(s.dynamicSeeds))
+	combined = append(combined, s.staticSeeds...)
+	combined = append(combined, s.dynamicSeeds...)
+	seen := make(map[string]struct{}, len(combined))
+	endpoints := make([]seedEndpoint, 0, len(combined))
+	infos := make([]SeedInfo, 0, len(combined))
+	for _, origin := range combined {
+		if !seedOriginActive(origin, now) {
+			continue
+		}
+		ep := seedEndpoint{NodeID: origin.NodeID, Address: origin.Address}
+		key := ep.NodeID + "@" + ep.Address
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		endpoints = append(endpoints, ep)
+		infos = append(infos, SeedInfo{
+			NodeID:    origin.NodeID,
+			Address:   origin.Address,
+			Source:    origin.Source,
+			NotBefore: origin.NotBefore,
+			NotAfter:  origin.NotAfter,
+		})
+	}
+	s.seeds = endpoints
+	s.seedInfos = infos
+	return append([]seedEndpoint(nil), endpoints...)
+}
+
+func (s *Server) seedSnapshot() []seedEndpoint {
+	if s == nil {
+		return nil
+	}
+	s.seedMu.RLock()
+	defer s.seedMu.RUnlock()
+	out := make([]seedEndpoint, len(s.seeds))
+	copy(out, s.seeds)
+	return out
+}
+
+func (s *Server) seedInfoSnapshot() []SeedInfo {
+	if s == nil {
+		return nil
+	}
+	s.seedMu.RLock()
+	defer s.seedMu.RUnlock()
+	out := make([]SeedInfo, len(s.seedInfos))
+	copy(out, s.seedInfos)
+	return out
 }
 
 // peerMetrics tracks message quality for a peer.
@@ -198,6 +429,15 @@ type NetworkSelf struct {
 	ClientVersion   string `json:"clientVersion"`
 }
 
+// SeedInfo summarises a configured seed endpoint exposed through RPC.
+type SeedInfo struct {
+	NodeID    string `json:"nodeId"`
+	Address   string `json:"address"`
+	Source    string `json:"source"`
+	NotBefore int64  `json:"notBefore,omitempty"`
+	NotAfter  int64  `json:"notAfter,omitempty"`
+}
+
 // NetworkView summarizes the current P2P server status.
 type NetworkView struct {
 	NetworkID  uint64        `json:"networkId"`
@@ -207,6 +447,7 @@ type NetworkView struct {
 	Self       NetworkSelf   `json:"self"`
 	Bootnodes  []string      `json:"bootnodes"`
 	Persistent []string      `json:"persistentPeers"`
+	Seeds      []SeedInfo    `json:"seeds"`
 }
 
 // NewServer creates a P2P server with authenticated handshakes.
@@ -279,8 +520,6 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	uniqPersist := uniqueStrings(cfg.PersistentPeers)
 	cfg.Bootnodes = append([]string{}, uniqBoot...)
 	cfg.PersistentPeers = append([]string{}, uniqPersist...)
-	seeds := parseSeedList(cfg.Seeds)
-
 	nodeID := deriveNodeID(privKey)
 
 	rep := NewReputationManager(ReputationConfig{
@@ -313,8 +552,29 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		handshakeTimeout: cfg.HandshakeTimeout,
 		pingTimeout:      cfg.PingTimeout,
 		nonceGuard:       newNonceGuard(handshakeReplayWindow),
-		seeds:            seeds,
 		listenAddrs:      []string{},
+		seedResolver:     cfg.SeedResolver,
+		seedRegistry:     cfg.SeedRegistry,
+		seedRefresh:      cfg.SeedRefresh,
+		seedQuit:         make(chan struct{}),
+	}
+
+	if server.seedResolver == nil {
+		server.seedResolver = seeds.DefaultResolver()
+	}
+	if server.seedRegistry != nil && server.seedRefresh <= 0 {
+		server.seedRefresh = server.seedRegistry.RefreshInterval()
+	}
+
+	staticOrigins, dynamicOrigins := normalizeSeedOrigins(cfg)
+	server.installStaticSeeds(staticOrigins)
+	if len(dynamicOrigins) > 0 {
+		server.setDynamicSeeds(dynamicOrigins)
+	}
+	if server.seedRegistry != nil && len(dynamicOrigins) == 0 {
+		if err := server.refreshSeedRegistry(); err != nil {
+			fmt.Printf("Seed registry lookup failed: %v\n", err)
+		}
 	}
 
 	for _, addr := range uniqBoot {
@@ -336,6 +596,10 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	}
 
 	server.addListenAddress(cfg.ListenAddress)
+
+	if server.seedRegistry != nil {
+		go server.seedRotationLoop()
+	}
 
 	return server
 }
@@ -790,6 +1054,7 @@ func (s *Server) SnapshotNetwork() NetworkView {
 	}
 	view.Bootnodes = append([]string{}, s.cfg.Bootnodes...)
 	view.Persistent = append([]string{}, s.cfg.PersistentPeers...)
+	view.Seeds = s.seedInfoSnapshot()
 	return view
 }
 
@@ -977,7 +1242,7 @@ func (s *Server) DialPeer(target string) error {
 			}
 		}
 		if addr == "" {
-			for _, seed := range s.seeds {
+			for _, seed := range s.seedSnapshot() {
 				if normalizeHex(seed.NodeID) == nodeID {
 					addr = strings.TrimSpace(seed.Address)
 					break
@@ -1067,7 +1332,7 @@ func (s *Server) BanPeer(nodeID string, duration time.Duration) error {
 		}
 	}
 	if !known {
-		for _, seed := range s.seeds {
+		for _, seed := range s.seedSnapshot() {
 			if normalizeHex(seed.NodeID) == normalized {
 				known = true
 				break

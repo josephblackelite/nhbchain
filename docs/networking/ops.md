@@ -83,6 +83,15 @@ The test drives both the failure path (incrementing the peerstore counter) and a
 successful handshake, mirroring the behaviour of a live node without requiring a
 full network deployment.
 
+### Governance-backed registry
+
+From NET-3A onward the preferred way to publish bootstrap peers is the
+`network.seeds` governance parameter. The runtime merges the local config with
+registry fallbacks and signed DNS records, allowing communities to rotate seeds
+without shipping new binaries. See [`docs/networking/seeds.md`](./seeds.md) for a
+complete walkthrough of the JSON payload, DNS signature format, and operator
+runbooks.
+
 ## NAT & Port Forwarding
 
 NET-2E instruments the connection manager with NAT awareness. On startup it logs

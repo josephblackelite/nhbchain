@@ -54,7 +54,7 @@ func newPexManager(server *Server) *pexManager {
 		sentTokens: make(map[string]sentToken),
 	}
 	now := mgr.now()
-	for _, seed := range server.seeds {
+	for _, seed := range server.seedSnapshot() {
 		if seed.NodeID == "" || seed.Address == "" {
 			continue
 		}
