@@ -23,9 +23,10 @@ The first run installs dependencies, generates the SDK build artifacts (if any),
 
 | Variable | Description |
 | --- | --- |
-| `NHB_RPC_URL` | JSON-RPC endpoint for the NHB gateway. |
-| `NHB_REST_URL` | REST endpoint for the NHB gateway. |
-| `NHB_CHAIN_ID` | Chain identifier used when signing transactions or queries. |
+| `NHB_RPC_URL` | JSON-RPC endpoint for the NHB gateway (HTTP). |
+| `NHB_WS_URL` | WebSocket JSON-RPC endpoint used for subscriptions and streaming. |
+| `NHB_API_URL` | REST gateway that powers escrow, swap, and loyalty flows. |
+| `NHB_CHAIN_ID` | Numeric chain identifier attached to signed requests. |
 | `NHB_API_KEY` | Gateway API key used for authenticated requests. |
 | `NHB_API_SECRET` | Secret used to compute the HMAC signature header. |
 | `NHB_WALLET_PRIVATE_KEY` | Optional wallet private key for demo transactions. |
@@ -33,7 +34,30 @@ The first run installs dependencies, generates the SDK build artifacts (if any),
 | `STATUS_DASHBOARD_PORT` | HTTP port for the status dashboard example. |
 | `NETWORK_MONITOR_PORT` | HTTP port for the network monitor example. |
 
-> **Tip:** Never commit the `.env` file to version control. The `.env.example` template intentionally uses placeholder values.
+### Default endpoints
+
+The `.env.example` template points at the public NHB infrastructure so a fresh clone works out-of-the-box:
+
+- `https://rpc.nhbcoin.net` for HTTP JSON-RPC calls
+- `wss://ws.nhbcoin.net` for WebSocket subscriptions
+- `https://api.nhbcoin.net` for REST and gateway integrations
+
+Rotate the demo API credentials before deploying to production.
+
+### Pointing to self-hosted infrastructure
+
+If you are running your own RPC or gateway stack, update the `.env` file with your endpoints and chain ID. Each app reads the shared `.env`, so no other configuration changes are required. When fronting the services with custom domains:
+
+1. Issue TLS certificates (ACM recommended on AWS) that cover your domains.
+2. Update the `NHB_RPC_URL`, `NHB_WS_URL`, and `NHB_API_URL` values to use the new hostnames.
+3. Restart `yarn dev` or reload the individual apps to pick up the changes.
+
+> **Tip:** Never commit the `.env` file to version control. The `.env.example` template intentionally uses placeholder credentials.
+
+### CORS and rate limits
+
+- Enable CORS on the REST gateway for the origins that host your demo applications. For production, prefer an API gateway or reverse proxy that enforces stricter allowlists.
+- Apply rate limits and Web Application Firewall (WAF) rules, especially on write paths such as swaps or escrow releases. The provided AWS notes in `examples/README.md` outline recommended ALB/NLB placements and Shield integration.
 
 ## Running locally
 
