@@ -30,14 +30,15 @@ func claimableNonceKey(payer [20]byte) []byte {
 }
 
 type storedClaimable struct {
-	ID        [32]byte
-	Payer     [20]byte
-	Token     string
-	Amount    *big.Int
-	HashLock  [32]byte
-	Deadline  *big.Int
-	CreatedAt *big.Int
-	Status    uint8
+	ID            [32]byte
+	Payer         [20]byte
+	Token         string
+	Amount        *big.Int
+	HashLock      [32]byte
+	RecipientHint [32]byte
+	Deadline      *big.Int
+	CreatedAt     *big.Int
+	Status        uint8
 }
 
 func newStoredClaimable(c *claimable.Claimable) *storedClaimable {
@@ -49,14 +50,15 @@ func newStoredClaimable(c *claimable.Claimable) *storedClaimable {
 		amount = new(big.Int).Set(c.Amount)
 	}
 	return &storedClaimable{
-		ID:        c.ID,
-		Payer:     c.Payer,
-		Token:     c.Token,
-		Amount:    amount,
-		HashLock:  c.HashLock,
-		Deadline:  big.NewInt(c.Deadline),
-		CreatedAt: big.NewInt(c.CreatedAt),
-		Status:    uint8(c.Status),
+		ID:            c.ID,
+		Payer:         c.Payer,
+		Token:         c.Token,
+		Amount:        amount,
+		HashLock:      c.HashLock,
+		RecipientHint: c.RecipientHint,
+		Deadline:      big.NewInt(c.Deadline),
+		CreatedAt:     big.NewInt(c.CreatedAt),
+		Status:        uint8(c.Status),
 	}
 }
 
@@ -69,12 +71,13 @@ func (s *storedClaimable) toClaimable() (*claimable.Claimable, error) {
 		return nil, claimable.ErrInvalidToken
 	}
 	out := &claimable.Claimable{
-		ID:       s.ID,
-		Payer:    s.Payer,
-		Token:    normalized,
-		Amount:   big.NewInt(0),
-		HashLock: s.HashLock,
-		Status:   claimable.ClaimStatus(s.Status),
+		ID:            s.ID,
+		Payer:         s.Payer,
+		Token:         normalized,
+		Amount:        big.NewInt(0),
+		HashLock:      s.HashLock,
+		RecipientHint: s.RecipientHint,
+		Status:        claimable.ClaimStatus(s.Status),
 	}
 	if s.Amount != nil {
 		out.Amount = new(big.Int).Set(s.Amount)
@@ -283,7 +286,7 @@ func (m *Manager) ClaimableDebit(token string, amt *big.Int, recipient [20]byte)
 	return nil
 }
 
-func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64) (*claimable.Claimable, error) {
+func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte) (*claimable.Claimable, error) {
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, claimable.ErrInvalidAmount
 	}
@@ -303,14 +306,15 @@ func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int,
 		return nil, err
 	}
 	record := &claimable.Claimable{
-		ID:        id,
-		Payer:     payer,
-		Token:     normalized,
-		Amount:    new(big.Int).Set(amount),
-		HashLock:  hashLock,
-		Deadline:  deadline,
-		CreatedAt: time.Now().Unix(),
-		Status:    claimable.ClaimStatusInit,
+		ID:            id,
+		Payer:         payer,
+		Token:         normalized,
+		Amount:        new(big.Int).Set(amount),
+		HashLock:      hashLock,
+		RecipientHint: hint,
+		Deadline:      deadline,
+		CreatedAt:     time.Now().Unix(),
+		Status:        claimable.ClaimStatusInit,
 	}
 	if err := m.ClaimablePut(record); err != nil {
 		_ = m.ClaimableDebit(normalized, amount, payer)

@@ -31,11 +31,20 @@ func TestIdentitySetAliasAndResolve(t *testing.T) {
 		t.Fatalf("set alias: %v", err)
 	}
 	resolved, ok := manager.IdentityResolve("frankrocks")
-	if !ok {
+	if !ok || resolved == nil {
 		t.Fatalf("expected alias to resolve")
 	}
-	if resolved != addr {
-		t.Fatalf("resolved address mismatch: got %x want %x", resolved, addr)
+	if resolved.Primary != addr {
+		t.Fatalf("resolved address mismatch: got %x want %x", resolved.Primary, addr)
+	}
+	if resolved.Alias != "frankrocks" {
+		t.Fatalf("unexpected alias stored: %s", resolved.Alias)
+	}
+	if resolved.CreatedAt == 0 || resolved.UpdatedAt == 0 {
+		t.Fatalf("expected timestamps to be recorded, got created=%d updated=%d", resolved.CreatedAt, resolved.UpdatedAt)
+	}
+	if len(resolved.Addresses) == 0 || resolved.Addresses[0] != addr {
+		t.Fatalf("expected primary address in addresses list")
 	}
 	alias, ok := manager.IdentityReverse(addr[:])
 	if !ok {
@@ -61,10 +70,10 @@ func TestIdentitySetAliasRename(t *testing.T) {
 		t.Fatalf("expected old alias to be removed")
 	}
 	resolved, ok := manager.IdentityResolve("bravo")
-	if !ok {
+	if !ok || resolved == nil {
 		t.Fatalf("expected new alias to resolve")
 	}
-	if resolved != addr {
+	if resolved.Primary != addr {
 		t.Fatalf("resolved address mismatch after rename")
 	}
 	alias, ok := manager.IdentityReverse(addr[:])
@@ -102,5 +111,51 @@ func TestIdentitySetAliasValidation(t *testing.T) {
 	}
 	if _, ok := manager.IdentityResolve("zz"); ok {
 		t.Fatalf("unexpected resolve success for invalid alias")
+	}
+}
+
+func TestIdentitySetAvatarUpdatesRecord(t *testing.T) {
+	manager := newTestManager(t)
+	var addr [20]byte
+	addr[19] = 6
+
+	if err := manager.IdentitySetAlias(addr[:], "avataruser"); err != nil {
+		t.Fatalf("set alias: %v", err)
+	}
+	initial, ok := manager.IdentityResolve("avataruser")
+	if !ok || initial == nil {
+		t.Fatalf("expected alias to resolve after registration")
+	}
+	if initial.AvatarRef != "" {
+		t.Fatalf("expected empty avatar, got %q", initial.AvatarRef)
+	}
+
+	future := initial.UpdatedAt + 100
+	updated, err := manager.IdentitySetAvatar("avataruser", "https://cdn.nhb/example.png", future)
+	if err != nil {
+		t.Fatalf("set avatar: %v", err)
+	}
+	if updated == nil {
+		t.Fatalf("expected updated record")
+	}
+	if updated.AvatarRef != "https://cdn.nhb/example.png" {
+		t.Fatalf("unexpected avatar stored: %q", updated.AvatarRef)
+	}
+	if updated.CreatedAt != initial.CreatedAt {
+		t.Fatalf("createdAt mutated: got %d want %d", updated.CreatedAt, initial.CreatedAt)
+	}
+	if updated.UpdatedAt != future {
+		t.Fatalf("expected UpdatedAt %d, got %d", future, updated.UpdatedAt)
+	}
+
+	resolved, ok := manager.IdentityResolve("avataruser")
+	if !ok || resolved == nil {
+		t.Fatalf("expected resolve to succeed after avatar update")
+	}
+	if resolved.AvatarRef != "https://cdn.nhb/example.png" {
+		t.Fatalf("resolved avatar mismatch: %q", resolved.AvatarRef)
+	}
+	if resolved.UpdatedAt != future {
+		t.Fatalf("expected UpdatedAt to persist, got %d", resolved.UpdatedAt)
 	}
 }

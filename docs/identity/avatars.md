@@ -29,7 +29,7 @@ strings (`avatarRef`) and retrieved via HTTPS or on-chain blob storage.
 
 1. Owner uploads media via [`POST /identity/avatars/upload`](./identity-gateway.md#post-identityavatarsupload).
 2. Gateway returns canonical `avatarRef` (HTTPS URL or `blob://` reference) after validation.
-3. Owner signs `identity_setAvatar(alias, avatarRef, sig)` to update on-chain record.
+3. Owner calls `identity_setAvatar(ownerAddr, avatarRef)` over authenticated RPC to update the on-chain record.
 4. Event `identity.alias.avatarUpdated` notifies subscribers to refresh caches.
 
 ## Recommended Client Behavior
@@ -37,6 +37,11 @@ strings (`avatarRef`) and retrieved via HTTPS or on-chain blob storage.
 * Fallback to generated identicon (e.g., BLAKE3 aliasId hashed to color palette) when no avatar set.
 * Preload avatars when scanning QR codes or directory listings.
 * Display moderation badges for avatars flagged by governance (future field `avatarFlag`).
+
+## RPC & CLI Exposure
+
+* JSON-RPC: `identity_setAvatar(addressBech32, avatarRef)` (authenticated).
+* CLI: `nhb-cli id set-avatar --addr nhb1... --avatar https://cdn/...`.
 
 ## Security Notes
 

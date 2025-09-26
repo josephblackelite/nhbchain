@@ -1484,6 +1484,103 @@ func identityReverseKey(addr []byte) []byte {
 	return kvKey(buf)
 }
 
+type storedAliasRecord struct {
+	Alias     string
+	Primary   [20]byte
+	Addresses [][]byte
+	AvatarRef string
+	CreatedAt *big.Int
+	UpdatedAt *big.Int
+}
+
+func newStoredAliasRecord(record *identity.AliasRecord) *storedAliasRecord {
+	if record == nil {
+		return nil
+	}
+	normalized := record.Clone()
+	normalized.Addresses = uniqueAliasAddresses(normalized.Primary, normalized.Addresses)
+	stored := &storedAliasRecord{
+		Alias:     normalized.Alias,
+		Primary:   normalized.Primary,
+		AvatarRef: normalized.AvatarRef,
+		CreatedAt: big.NewInt(normalized.CreatedAt),
+		UpdatedAt: big.NewInt(normalized.UpdatedAt),
+	}
+	if len(normalized.Addresses) > 0 {
+		stored.Addresses = make([][]byte, len(normalized.Addresses))
+		for i, addr := range normalized.Addresses {
+			stored.Addresses[i] = append([]byte(nil), addr[:]...)
+		}
+	}
+	return stored
+}
+
+func (s *storedAliasRecord) toAliasRecord() (*identity.AliasRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("identity: nil alias record")
+	}
+	record := &identity.AliasRecord{
+		Alias:     s.Alias,
+		Primary:   s.Primary,
+		AvatarRef: s.AvatarRef,
+		CreatedAt: 0,
+		UpdatedAt: 0,
+	}
+	if s.CreatedAt != nil {
+		record.CreatedAt = s.CreatedAt.Int64()
+	}
+	if s.UpdatedAt != nil {
+		record.UpdatedAt = s.UpdatedAt.Int64()
+	}
+	if len(s.Addresses) > 0 {
+		record.Addresses = make([][20]byte, len(s.Addresses))
+		for i, raw := range s.Addresses {
+			if len(raw) != 20 {
+				return nil, fmt.Errorf("identity: invalid address length in alias record")
+			}
+			copy(record.Addresses[i][:], raw)
+		}
+	}
+	record.Addresses = uniqueAliasAddresses(record.Primary, record.Addresses)
+	return record, nil
+}
+
+func uniqueAliasAddresses(primary [20]byte, addrs [][20]byte) [][20]byte {
+	seen := make(map[[20]byte]struct{}, len(addrs)+1)
+	out := make([][20]byte, 0, len(addrs)+1)
+	if primary != ([20]byte{}) {
+		seen[primary] = struct{}{}
+		out = append(out, primary)
+	}
+	for _, addr := range addrs {
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	return out
+}
+
+func (m *Manager) identityGetAlias(alias string) (*identity.AliasRecord, bool, error) {
+	data, err := m.trie.Get(identityAliasKey(alias))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	stored := new(storedAliasRecord)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false, err
+	}
+	record, err := stored.toAliasRecord()
+	if err != nil {
+		return nil, false, err
+	}
+	return record, true, nil
+}
+
 func tradeEscrowIndexKey(escrowID [32]byte) []byte {
 	buf := make([]byte, len(tradeEscrowIndexPrefix)+len(escrowID))
 	copy(buf, tradeEscrowIndexPrefix)
@@ -2275,33 +2372,65 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 	if err != nil {
 		return err
 	}
-	aliasKey := identityAliasKey(normalized)
-	existing, err := m.trie.Get(aliasKey)
+	var address [20]byte
+	copy(address[:], addr)
+
+	existingRecord, exists, err := m.identityGetAlias(normalized)
 	if err != nil {
 		return err
 	}
-	if len(existing) > 0 {
-		if len(existing) != 20 {
-			return fmt.Errorf("identity: corrupt alias mapping")
-		}
-		if !bytes.Equal(existing, addr) {
-			return identity.ErrAliasTaken
-		}
+	if exists && existingRecord != nil && existingRecord.Primary != address {
+		return identity.ErrAliasTaken
 	}
+
 	reverseKey := identityReverseKey(addr)
 	currentAliasBytes, err := m.trie.Get(reverseKey)
 	if err != nil {
 		return err
 	}
 	currentAlias := string(currentAliasBytes)
+
+	baseRecord := &identity.AliasRecord{Alias: normalized}
+	if exists && existingRecord != nil {
+		baseRecord = existingRecord.Clone()
+	}
+
 	if currentAlias != "" && currentAlias != normalized {
+		oldRecord, oldExists, err := m.identityGetAlias(currentAlias)
+		if err != nil {
+			return err
+		}
+		if oldExists && oldRecord != nil {
+			if baseRecord.CreatedAt == 0 {
+				baseRecord.CreatedAt = oldRecord.CreatedAt
+			}
+			if baseRecord.AvatarRef == "" {
+				baseRecord.AvatarRef = oldRecord.AvatarRef
+			}
+			if len(baseRecord.Addresses) == 0 {
+				baseRecord.Addresses = oldRecord.Addresses
+			}
+		}
 		if err := m.trie.Update(identityAliasKey(currentAlias), nil); err != nil {
 			return err
 		}
 	}
-	var storedAddr [20]byte
-	copy(storedAddr[:], addr)
-	if err := m.trie.Update(aliasKey, storedAddr[:]); err != nil {
+
+	baseRecord.Alias = normalized
+	baseRecord.Primary = address
+	baseRecord.Addresses = uniqueAliasAddresses(address, baseRecord.Addresses)
+	now := time.Now().Unix()
+	if baseRecord.CreatedAt == 0 {
+		baseRecord.CreatedAt = now
+	}
+	baseRecord.UpdatedAt = now
+
+	stored := newStoredAliasRecord(baseRecord)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	if err := m.trie.Update(identityAliasKey(normalized), encoded); err != nil {
 		return err
 	}
 	if err := m.trie.Update(reverseKey, []byte(normalized)); err != nil {
@@ -2311,18 +2440,48 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 }
 
 // IdentityResolve resolves an alias to its owning address.
-func (m *Manager) IdentityResolve(alias string) ([20]byte, bool) {
-	var zero [20]byte
+func (m *Manager) IdentityResolve(alias string) (*identity.AliasRecord, bool) {
 	normalized, err := identity.NormalizeAlias(alias)
 	if err != nil {
-		return zero, false
+		return nil, false
 	}
-	data, err := m.trie.Get(identityAliasKey(normalized))
-	if err != nil || len(data) != 20 {
-		return zero, false
+	record, ok, err := m.identityGetAlias(normalized)
+	if err != nil || !ok {
+		return nil, false
 	}
-	copy(zero[:], data)
-	return zero, true
+	return record, true
+}
+
+func (m *Manager) IdentitySetAvatar(alias string, avatarRef string, now int64) (*identity.AliasRecord, error) {
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return nil, err
+	}
+	normalizedRef, err := identity.NormalizeAvatarRef(avatarRef)
+	if err != nil {
+		return nil, err
+	}
+	record, ok, err := m.identityGetAlias(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	record.AvatarRef = normalizedRef
+	record.UpdatedAt = now
+	stored := newStoredAliasRecord(record)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.trie.Update(identityAliasKey(normalized), encoded); err != nil {
+		return nil, err
+	}
+	return record, nil
 }
 
 // IdentityReverse resolves an address to its registered alias.

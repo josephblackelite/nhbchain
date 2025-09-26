@@ -1,13 +1,40 @@
 package rpc
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"nhbchain/core"
+	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 )
+
+func fundAccountNHB(t *testing.T, node *core.Node, addr [20]byte, amount int64) {
+	t.Helper()
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		account, err := m.GetAccount(addr[:])
+		if err != nil {
+			return err
+		}
+		if account == nil {
+			account = &types.Account{}
+		}
+		if account.BalanceNHB == nil {
+			account.BalanceNHB = big.NewInt(0)
+		}
+		account.BalanceNHB = big.NewInt(amount)
+		return m.PutAccount(addr[:], account)
+	}); err != nil {
+		t.Fatalf("fund account: %v", err)
+	}
+}
 
 func TestHandleIdentitySetAliasSuccess(t *testing.T) {
 	env := newTestEnv(t)
@@ -40,7 +67,7 @@ func TestHandleIdentitySetAliasSuccess(t *testing.T) {
 		t.Fatalf("decode address: %v", err)
 	}
 	resolved, ok := env.node.IdentityResolve("frankrocks")
-	if !ok || resolved != decodedAddr {
+	if !ok || resolved == nil || resolved.Primary != decodedAddr {
 		t.Fatalf("alias not stored")
 	}
 }
@@ -75,6 +102,44 @@ func TestHandleIdentitySetAliasDuplicate(t *testing.T) {
 	}
 }
 
+func TestHandleIdentitySetAvatar(t *testing.T) {
+	env := newTestEnv(t)
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	addr := key.PubKey().Address().String()
+	setAlias := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, addr), marshalParam(t, "avataruser")}}
+	env.server.handleIdentitySetAlias(httptest.NewRecorder(), env.newRequest(), setAlias)
+
+	avatarReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, addr), marshalParam(t, "https://cdn.example/avatar.png")}}
+	avatarRec := httptest.NewRecorder()
+	env.server.handleIdentitySetAvatar(avatarRec, env.newRequest(), avatarReq)
+	if avatarRec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", avatarRec.Code)
+	}
+	result, rpcErr := decodeRPCResponse(t, avatarRec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected avatar error: %+v", rpcErr)
+	}
+	var resp struct {
+		OK        bool   `json:"ok"`
+		Alias     string `json:"alias"`
+		AliasID   string `json:"aliasId"`
+		AvatarRef string `json:"avatarRef"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("decode avatar result: %v", err)
+	}
+	if !resp.OK || resp.Alias != "avataruser" || resp.AvatarRef == "" {
+		t.Fatalf("unexpected avatar response: %+v", resp)
+	}
+	resolved, ok := env.node.IdentityResolve("avataruser")
+	if !ok || resolved == nil || resolved.AvatarRef != resp.AvatarRef {
+		t.Fatalf("avatar not stored")
+	}
+}
+
 func TestHandleIdentityResolveAndReverse(t *testing.T) {
 	env := newTestEnv(t)
 	key, err := crypto.GeneratePrivateKey()
@@ -101,8 +166,17 @@ func TestHandleIdentityResolveAndReverse(t *testing.T) {
 	if err := json.Unmarshal(result, &resolveResp); err != nil {
 		t.Fatalf("decode resolve result: %v", err)
 	}
-	if resolveResp.Address != addr {
-		t.Fatalf("expected address %s, got %s", addr, resolveResp.Address)
+	if resolveResp.Primary != addr {
+		t.Fatalf("expected primary address %s, got %s", addr, resolveResp.Primary)
+	}
+	if resolveResp.Alias != "resolver" {
+		t.Fatalf("expected alias resolver, got %s", resolveResp.Alias)
+	}
+	if resolveResp.AliasID == "" {
+		t.Fatalf("expected aliasId in response")
+	}
+	if len(resolveResp.Addresses) == 0 || resolveResp.Addresses[0] != addr {
+		t.Fatalf("expected addresses list to include primary")
 	}
 
 	reverseReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, addr)}}
@@ -121,6 +195,9 @@ func TestHandleIdentityResolveAndReverse(t *testing.T) {
 	}
 	if reverseResp.Alias != "resolver" {
 		t.Fatalf("expected alias resolver, got %s", reverseResp.Alias)
+	}
+	if reverseResp.AliasID == "" {
+		t.Fatalf("expected aliasId in reverse response")
 	}
 }
 
@@ -154,5 +231,90 @@ func TestHandleIdentityReverseNotFound(t *testing.T) {
 	_, rpcErr := decodeRPCResponse(t, recorder)
 	if rpcErr == nil || rpcErr.Message != "address has no alias" {
 		t.Fatalf("expected address has no alias error, got %+v", rpcErr)
+	}
+}
+
+func TestHandleIdentityClaimableFlow(t *testing.T) {
+	env := newTestEnv(t)
+	payerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payer: %v", err)
+	}
+	payerAddr := payerKey.PubKey().Address()
+	var payer [20]byte
+	copy(payer[:], payerAddr.Bytes())
+	fundAccountNHB(t, env.node, payer, 1_000)
+
+	deadline := time.Now().Add(time.Hour).Unix()
+	var hint [32]byte
+	hint[31] = 0xAA
+	hintHex := "0x" + hex.EncodeToString(hint[:])
+
+	createPayload := map[string]interface{}{
+		"payer":     payerAddr.String(),
+		"recipient": hintHex,
+		"token":     "NHB",
+		"amount":    "100",
+		"deadline":  deadline,
+	}
+	createReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, createPayload)}}
+	createRec := httptest.NewRecorder()
+	env.server.handleIdentityCreateClaimable(createRec, env.newRequest(), createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("unexpected create status: %d", createRec.Code)
+	}
+	createResult, createErr := decodeRPCResponse(t, createRec)
+	if createErr != nil {
+		t.Fatalf("create claimable error: %+v", createErr)
+	}
+	var createResp identityCreateClaimableResult
+	if err := json.Unmarshal(createResult, &createResp); err != nil {
+		t.Fatalf("decode create result: %v", err)
+	}
+	if createResp.ClaimID == "" || createResp.RecipientHint != hintHex {
+		t.Fatalf("unexpected create response: %+v", createResp)
+	}
+
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee: %v", err)
+	}
+	payeeAddr := payeeKey.PubKey().Address().String()
+
+	claimPayload := map[string]interface{}{
+		"claimId":  createResp.ClaimID,
+		"payee":    payeeAddr,
+		"preimage": hintHex,
+	}
+	claimReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, claimPayload)}}
+	claimRec := httptest.NewRecorder()
+	env.server.handleIdentityClaim(claimRec, env.newRequest(), claimReq)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("unexpected claim status: %d", claimRec.Code)
+	}
+	claimResult, claimErr := decodeRPCResponse(t, claimRec)
+	if claimErr != nil {
+		t.Fatalf("claim error: %+v", claimErr)
+	}
+	var claimResp identityClaimResult
+	if err := json.Unmarshal(claimResult, &claimResp); err != nil {
+		t.Fatalf("decode claim result: %v", err)
+	}
+	if !claimResp.OK || claimResp.Amount != "100" || claimResp.Token != "NHB" {
+		t.Fatalf("unexpected claim response: %+v", claimResp)
+	}
+	var payee [20]byte
+	copy(payee[:], payeeKey.PubKey().Address().Bytes())
+	if err := env.node.WithState(func(m *nhbstate.Manager) error {
+		account, err := m.GetAccount(payee[:])
+		if err != nil {
+			return err
+		}
+		if account == nil || account.BalanceNHB.Cmp(big.NewInt(100)) != 0 {
+			return fmt.Errorf("unexpected payee balance")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("verify payee balance: %v", err)
 	}
 }

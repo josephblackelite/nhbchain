@@ -16,12 +16,13 @@ const (
 )
 
 type ClaimableCreated struct {
-	ID        [32]byte
-	Payer     [20]byte
-	Token     string
-	Amount    *big.Int
-	Deadline  int64
-	CreatedAt int64
+	ID            [32]byte
+	Payer         [20]byte
+	Token         string
+	Amount        *big.Int
+	RecipientHint [32]byte
+	Deadline      int64
+	CreatedAt     int64
 }
 
 func (ClaimableCreated) EventType() string { return TypeClaimableCreated }
@@ -30,22 +31,24 @@ func (e ClaimableCreated) Event() *types.Event {
 	return &types.Event{
 		Type: TypeClaimableCreated,
 		Attributes: map[string]string{
-			"id":        hex.EncodeToString(e.ID[:]),
-			"payer":     crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
-			"token":     e.Token,
-			"amount":    formatAmount(e.Amount),
-			"deadline":  intToString(e.Deadline),
-			"createdAt": intToString(e.CreatedAt),
+			"id":            hex.EncodeToString(e.ID[:]),
+			"payer":         crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
+			"token":         e.Token,
+			"amount":        formatAmount(e.Amount),
+			"deadline":      intToString(e.Deadline),
+			"createdAt":     intToString(e.CreatedAt),
+			"recipientHint": hex.EncodeToString(e.RecipientHint[:]),
 		},
 	}
 }
 
 type ClaimableClaimed struct {
-	ID     [32]byte
-	Payer  [20]byte
-	Payee  [20]byte
-	Token  string
-	Amount *big.Int
+	ID            [32]byte
+	Payer         [20]byte
+	Payee         [20]byte
+	Token         string
+	Amount        *big.Int
+	RecipientHint [32]byte
 }
 
 func (ClaimableClaimed) EventType() string { return TypeClaimableClaimed }
@@ -54,11 +57,12 @@ func (e ClaimableClaimed) Event() *types.Event {
 	return &types.Event{
 		Type: TypeClaimableClaimed,
 		Attributes: map[string]string{
-			"id":     hex.EncodeToString(e.ID[:]),
-			"payer":  crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
-			"payee":  crypto.NewAddress(crypto.NHBPrefix, e.Payee[:]).String(),
-			"token":  e.Token,
-			"amount": formatAmount(e.Amount),
+			"id":            hex.EncodeToString(e.ID[:]),
+			"payer":         crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
+			"payee":         crypto.NewAddress(crypto.NHBPrefix, e.Payee[:]).String(),
+			"token":         e.Token,
+			"amount":        formatAmount(e.Amount),
+			"recipientHint": hex.EncodeToString(e.RecipientHint[:]),
 		},
 	}
 }

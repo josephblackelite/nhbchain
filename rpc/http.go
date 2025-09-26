@@ -312,10 +312,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLoyaltyUserQR(w, r, req)
 	case "identity_setAlias":
 		s.handleIdentitySetAlias(w, r, req)
+	case "identity_setAvatar":
+		s.handleIdentitySetAvatar(w, r, req)
 	case "identity_resolve":
 		s.handleIdentityResolve(w, r, req)
 	case "identity_reverse":
 		s.handleIdentityReverse(w, r, req)
+	case "identity_createClaimable":
+		s.handleIdentityCreateClaimable(w, r, req)
+	case "identity_claim":
+		s.handleIdentityClaim(w, r, req)
 	case "claimable_create":
 		s.handleClaimableCreate(w, r, req)
 	case "claimable_claim":

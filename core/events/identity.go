@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	TypeIdentityAliasSet     = "identity.alias.set"
-	TypeIdentityAliasRenamed = "identity.alias.renamed"
+	TypeIdentityAliasSet           = "identity.alias.set"
+	TypeIdentityAliasRenamed       = "identity.alias.renamed"
+	TypeIdentityAliasAvatarUpdated = "identity.alias.avatarUpdated"
 )
 
 // IdentityAliasSet is emitted when an address registers an alias for the first time.
@@ -48,6 +49,28 @@ func (e IdentityAliasRenamed) Event() *types.Event {
 			"old":     e.OldAlias,
 			"new":     e.NewAlias,
 			"address": crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+		},
+	}
+}
+
+// IdentityAliasAvatarUpdated is emitted when an alias updates its avatar reference.
+type IdentityAliasAvatarUpdated struct {
+	Alias     string
+	Address   [20]byte
+	AvatarRef string
+}
+
+// EventType implements the Event interface.
+func (IdentityAliasAvatarUpdated) EventType() string { return TypeIdentityAliasAvatarUpdated }
+
+// Event converts the strongly typed event to the generic representation used by subscribers.
+func (e IdentityAliasAvatarUpdated) Event() *types.Event {
+	return &types.Event{
+		Type: TypeIdentityAliasAvatarUpdated,
+		Attributes: map[string]string{
+			"alias":     e.Alias,
+			"address":   crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+			"avatarRef": e.AvatarRef,
 		},
 	}
 }

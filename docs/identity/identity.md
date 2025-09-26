@@ -9,7 +9,7 @@ association for discovery, avatar references for consistent presentation, and "p
 first-class state objects recorded on-chain, while sensitive metadata such as email verification is handled off-chain by the
 identity gateway service. Together they allow wallets, gateways, and merchants to offer:
 
-* Deterministic resolution of `@aliases` to primary settlement addresses.
+* Deterministic resolution of `@aliases` to rich metadata (primary settlement address, address set, avatar, timestamps).
 * Rich sender safety cues (avatar, created-at timestamp, address fingerprint).
 * Pay-by-email flows that bridge new users through claimable escrows.
 * A consistent UX that complements existing escrow flows (see [Escrow Guide](./escrow.md)).
@@ -20,17 +20,15 @@ identity gateway service. Together they allow wallets, gateways, and merchants t
 | --- | --- |
 | **Alias** | Human-readable username, globally unique, referenced as `@alias` in UX. |
 | **Alias ID** | Stable 32-byte identifier for an alias record; used internally and exposed in APIs as `aliasId`. |
-| **Owner** | Bech32 account that controls the alias, signs mutation requests, and receives governance actions. |
-| **Primary Address** | Address flagged as the default payout target for `pay-by-username` flows. |
+| **Primary Address** | Address flagged as the default payout target for `pay-by-username` flows (alias owner). |
 | **Linked Addresses** | Additional Bech32 addresses controlled by the owner. |
 | **AvatarRef** | HTTPS URL or on-chain blob reference representing the alias avatar. |
-| **Claimable** | Escrow-like placeholder created when paying an unresolved alias/email; funds become available once the recipient
-  claims or creates an alias. |
+| **Claimable** | Escrow-like placeholder created when paying an unresolved alias/email; funds release once the claimant proves knowledge of the recipient hint. |
 
 ## Normalization & Uniqueness Rules
 
 * Aliases are normalized to lower-case and NFC (`unicode.org/reports/tr15/`), with secondary NFKC pass for compatibility.
-* Allowed characters: ASCII letters (`a–z`), digits (`0–9`), dot (`.`), underscore (`_`), and slash (`/`).
+* Allowed characters: ASCII letters (`a–z`), digits (`0–9`), dot (`.`), underscore (`_`), and hyphen (`-`).
 * Length: minimum 3, maximum 32 Unicode code points after normalization.
 * Uniqueness is case-insensitive (`FrankRocks` and `frankrocks` resolve to the same canonical alias).
 * Reserved names: governance publishes a list (e.g., `admin`, `support`, trademarks). Reserved names throw `IDN-001`.
@@ -44,21 +42,20 @@ Alias records are stored deterministically by ID, and mutation requires an owner
 ```go
 // Pseudocode representation
 type AliasRecord struct {
-  ID           [32]byte
-  Alias        string
-  Owner        [20]byte
-  PrimaryAddr  [20]byte
-  Addresses    [[20]byte]
-  AvatarRef    string
-  CreatedAt    int64
-  UpdatedAt    int64
-  Version      uint32
+  Alias     string
+  Primary   [20]byte
+  Addresses [][20]byte
+  AvatarRef string
+  CreatedAt int64
+  UpdatedAt int64
 }
 ```
 
-* `ID`: keccak256 hash of canonical alias string.
-* `Addresses`: includes `PrimaryAddr`; duplicates are prevented by enforcement at mutation.
-* `Version`: increments with each mutating event, enabling replay protection and optimistic concurrency.
+* `Alias`: canonical, normalized alias string.
+* `Primary`: bech32 account that owns the alias and receives settlement by default.
+* `Addresses`: unique set of addresses controlled by the owner (always includes `Primary`).
+* `AvatarRef`: HTTPS or `blob://` reference; omitted when unset.
+* `CreatedAt`/`UpdatedAt`: Unix timestamps emitted on first registration and subsequent mutations.
 
 ### Lifecycle Events
 
@@ -66,11 +63,8 @@ The chain emits events for watchers and analytics:
 
 | Event | Trigger |
 | --- | --- |
-| `identity.alias.registered` | Alias first registered, includes alias, owner, primaryAddr. |
-| `identity.alias.renamed` | Alias string changed (ID persists, record version increments). |
-| `identity.alias.addressAdded` | New address linked. |
-| `identity.alias.addressRemoved` | Linked address removed. |
-| `identity.alias.primarySet` | Primary address updated. |
+| `identity.alias.set` | Alias registered for an address for the first time. |
+| `identity.alias.renamed` | Alias string changed for an existing address mapping. |
 | `identity.alias.avatarUpdated` | AvatarRef changed.
 
 Mermaid sequence for alias registration:
@@ -82,10 +76,8 @@ sequenceDiagram
   participant Node
   User->>Wallet: enter alias + owner address
   Wallet->>Wallet: normalize alias, build params
-  Wallet->>User: request signature (EIP-191 payload)
-  User-->>Wallet: signature
-  Wallet->>Node: identity_registerAlias(alias, owner, sig)
-  Node-->>Wallet: {aliasId, primaryAddr}
+  Wallet->>Node: identity_setAlias(ownerAddr, alias)
+  Node-->>Wallet: {ok: true}
   Wallet-->>User: success, show alias summary
 ```
 
@@ -106,15 +98,15 @@ type Claimable struct {
   Payer         [20]byte
   Token         string
   Amount        *big.Int
-  AliasOrHash   [32]byte // aliasId or email hash
+  RecipientHint [32]byte // aliasId or email hash preimage
   Expiry        int64
   CreatedAt     int64
 }
 ```
 
 * Claimables are created by senders when the recipient alias/email cannot yet resolve.
-* Funds are held in the identity escrow submodule. Upon `identity_claim`, the amount is released to the recipient's primary
-  address (or specified linked address when claiming).
+* Funds are held in the identity escrow submodule. Upon `identity_claim`, the amount is released to the claimant's address once
+  the provided preimage matches `RecipientHint`.
 * Events emitted: `identity.claimable.created`, `identity.claimable.claimed`, `identity.claimable.expired`.
 * Claimables integrate with the [Escrow module](./escrow.md#1-overview) for audit and settlement guarantees.
 
