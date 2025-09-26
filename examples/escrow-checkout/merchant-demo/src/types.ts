@@ -11,6 +11,21 @@ export interface MoneyAmount {
   value: string;
 }
 
+export type EscrowSessionEvent =
+  | {
+      type: 'status';
+      status: EscrowSessionStatus;
+      at: string;
+      note?: string;
+    }
+  | {
+      type: 'milestone';
+      at: string;
+      label: string;
+      amount?: MoneyAmount;
+      note?: string;
+    };
+
 export interface EscrowSession {
   sessionId: string;
   escrowId: string;
@@ -22,10 +37,15 @@ export interface EscrowSession {
   customer?: {
     walletAddress?: string;
   };
-  history?: Array<{
-    status: EscrowSessionStatus;
-    at: string;
-    note?: string;
+  milestoneMode?: boolean;
+  history?: EscrowSessionEvent[];
+  milestones?: Array<{
+    id: string;
+    title: string;
+    status: string;
+    targetAmount?: MoneyAmount;
+    releasedAmount?: MoneyAmount;
+    completedAt?: string;
   }>;
 }
 

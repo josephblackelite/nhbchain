@@ -27,6 +27,7 @@ By default the console proxies JSON-RPC calls through `app/api/rpc/route.ts`. Th
 
 - **Business bootstrap:** Create a business, add merchants, and rotate paymasters via JSON-RPC (`loyalty_*`).
 - **Program orchestration:** Generate deterministic program IDs, configure accrual rates, and pause/resume programs.
+- **Fan rewards:** Dedicated tab to inspect the creator rewards pool, tweak share splits, and monitor fan payout stats alongside loyalty programs.
 - **Stats monitor:** Pull `loyalty_programStats` and `loyalty_paymasterBalance` to verify ZNHB accrual after settlements.
 - **Auto-refresh:** Optional polling keeps paymaster balances and program stats current when payments settle in real time.
 

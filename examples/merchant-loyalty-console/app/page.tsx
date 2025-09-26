@@ -6,7 +6,7 @@ import { CreateBusinessForm } from './components/CreateBusinessForm';
 import { ProgramForm } from './components/ProgramForm';
 import { ProgramCard } from './components/ProgramCard';
 import { RpcError, formatAmount, rpcCall } from './lib/rpc';
-import type { BusinessResult, ProgramResult, ProgramStats } from './types';
+import type { BusinessResult, FanRewardsConfig, FanRewardsStats, ProgramResult, ProgramStats } from './types';
 
 interface AlertState {
   type: 'success' | 'error';
@@ -40,6 +40,16 @@ export default function MerchantLoyaltyConsole() {
   const [newMerchant, setNewMerchant] = useState('');
   const [merchantSubmitting, setMerchantSubmitting] = useState(false);
   const [polling, setPolling] = useState(false);
+  const [activeTab, setActiveTab] = useState<'loyalty' | 'fanRewards'>('loyalty');
+  const [fanConfig, setFanConfig] = useState<FanRewardsConfig | null>(null);
+  const [fanStats, setFanStats] = useState<FanRewardsStats | null>(null);
+  const [creatorPoolInput, setCreatorPoolInput] = useState('');
+  const [creatorShareBps, setCreatorShareBps] = useState(5000);
+  const [fanShareBps, setFanShareBps] = useState(4000);
+  const [treasuryShareBps, setTreasuryShareBps] = useState(1000);
+  const [fanEnabled, setFanEnabled] = useState(true);
+  const [fanAlert, setFanAlert] = useState<AlertState | null>(null);
+  const [fanLoading, setFanLoading] = useState(false);
 
   const programsRef = useRef<ProgramResult[]>([]);
   programsRef.current = programs;
@@ -84,6 +94,7 @@ export default function MerchantLoyaltyConsole() {
       setPaymasterInput(businessResult.paymaster || '');
       await refreshPrograms(parsed.data);
       await refreshPaymaster(parsed.data);
+      await refreshFanRewards(parsed.data);
       setAlert({ type: 'success', message: `Loaded business ${businessResult.name}` });
     } catch (err) {
       const message = err instanceof RpcError ? err.message : 'Failed to load business';
@@ -130,6 +141,38 @@ export default function MerchantLoyaltyConsole() {
     } catch (err) {
       const message = err instanceof RpcError ? err.message : 'Failed to fetch program stats';
       setAlert({ type: 'error', message });
+    }
+  };
+
+  const refreshFanRewards = async (id: string) => {
+    setFanLoading(true);
+    setFanAlert(null);
+    try {
+      const config = await rpcCall<FanRewardsConfig>('loyalty_getCreatorRewardsPool', [
+        { businessId: id }
+      ]);
+      setFanConfig(config);
+      setCreatorPoolInput(config.pool || '');
+      setCreatorShareBps(config.creatorShareBps ?? 0);
+      setFanShareBps(config.fanShareBps ?? 0);
+      setTreasuryShareBps(config.treasuryShareBps ?? 0);
+      setFanEnabled(config.enabled !== false);
+    } catch (err) {
+      const message = err instanceof RpcError ? err.message : 'Failed to load fan rewards config';
+      setFanAlert({ type: 'error', message });
+      setFanConfig(null);
+    } finally {
+      setFanLoading(false);
+    }
+
+    try {
+      const stats = await rpcCall<FanRewardsStats>('loyalty_creatorRewardsStats', [
+        { businessId: id }
+      ]);
+      setFanStats(stats);
+    } catch (err) {
+      const message = err instanceof RpcError ? err.message : 'Failed to load fan rewards stats';
+      setFanAlert({ type: 'error', message });
     }
   };
 
@@ -237,6 +280,47 @@ export default function MerchantLoyaltyConsole() {
     }
   };
 
+  const handleUpdateFanRewards = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!business?.id) return;
+    setFanAlert(null);
+    if (!adminAddress) {
+      setFanAlert({ type: 'error', message: 'Set an admin caller address before updating fan rewards' });
+      return;
+    }
+    const parsed = addressSchema.safeParse(creatorPoolInput.trim());
+    if (!parsed.success) {
+      setFanAlert({ type: 'error', message: parsed.error.issues[0]?.message || 'Invalid rewards pool address' });
+      return;
+    }
+    const totalBps = creatorShareBps + fanShareBps + treasuryShareBps;
+    if (totalBps !== 10000) {
+      setFanAlert({ type: 'error', message: 'Shares must sum to 10,000 bps' });
+      return;
+    }
+    setFanLoading(true);
+    try {
+      await rpcCall<string>('loyalty_setCreatorRewardsPool', [
+        {
+          caller: adminAddress.trim(),
+          businessId: business.id,
+          pool: parsed.data,
+          creatorShareBps,
+          fanShareBps,
+          treasuryShareBps,
+          enabled: fanEnabled,
+        }
+      ]);
+      setFanAlert({ type: 'success', message: 'Fan rewards configuration updated' });
+      await refreshFanRewards(business.id);
+    } catch (err) {
+      const message = err instanceof RpcError ? err.message : 'Failed to update fan rewards';
+      setFanAlert({ type: 'error', message });
+    } finally {
+      setFanLoading(false);
+    }
+  };
+
   const handleProgramLifecycle = async (programId: string, action: 'pause' | 'resume') => {
     if (!adminAddress) {
       setAlert({ type: 'error', message: 'Set an admin caller address before updating programs' });
@@ -310,7 +394,24 @@ export default function MerchantLoyaltyConsole() {
 
       <CreateBusinessForm defaultCaller={adminAddress} onCreated={(id) => setBusinessIdInput(id)} />
 
-      {business ? (
+      <nav style={{ display: 'flex', gap: '1rem', margin: '2rem 0 1rem' }}>
+        <button
+          type="button"
+          className={activeTab === 'loyalty' ? 'primary' : 'secondary'}
+          onClick={() => setActiveTab('loyalty')}
+        >
+          Loyalty programs
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'fanRewards' ? 'primary' : 'secondary'}
+          onClick={() => setActiveTab('fanRewards')}
+        >
+          Fan rewards
+        </button>
+      </nav>
+
+      {activeTab === 'loyalty' && business ? (
         <section>
           <h2>Business overview</h2>
           <div className="grid columns-2">
@@ -336,7 +437,7 @@ export default function MerchantLoyaltyConsole() {
         </section>
       ) : null}
 
-      {business ? (
+      {activeTab === 'loyalty' && business ? (
         <section>
           <h2>Rotate paymaster</h2>
           <form onSubmit={handleSetPaymaster} className="grid columns-2">
@@ -361,7 +462,7 @@ export default function MerchantLoyaltyConsole() {
         </section>
       ) : null}
 
-      {business ? (
+      {activeTab === 'loyalty' && business ? (
         <section>
           <h2>Merchants</h2>
           <form onSubmit={handleAddMerchant} className="grid columns-2">
@@ -400,7 +501,7 @@ export default function MerchantLoyaltyConsole() {
         </section>
       ) : null}
 
-      {business ? (
+      {activeTab === 'loyalty' && business ? (
         <ProgramForm
           businessId={business.id}
           caller={adminAddress.trim()}
@@ -413,7 +514,7 @@ export default function MerchantLoyaltyConsole() {
         />
       ) : null}
 
-      {business ? (
+      {activeTab === 'loyalty' && business ? (
         <section>
           <h2>Loyalty programs</h2>
           <div className="form-footer" style={{ marginBottom: '1rem' }}>
@@ -439,11 +540,11 @@ export default function MerchantLoyaltyConsole() {
           </div>
           <div className="card-list">
             {[...activePrograms, ...pausedPrograms].map((program) => (
-              <ProgramCard
-                key={`${program.id}-${program.active}-${program.accrualBps}-${program.startTime}-${program.endTime}`}
-                program={program}
-                stats={statsByProgram[program.id]}
-                caller={adminAddress.trim()}
+      <ProgramCard
+        key={`${program.id}-${program.active}-${program.accrualBps}-${program.startTime}-${program.endTime}`}
+        program={program}
+        stats={statsByProgram[program.id]}
+        caller={adminAddress.trim()}
                 businessId={business.id}
                 onPause={(id) => handleProgramLifecycle(id, 'pause')}
                 onResume={(id) => handleProgramLifecycle(id, 'resume')}
@@ -458,6 +559,129 @@ export default function MerchantLoyaltyConsole() {
             {programs.length === 0 ? <div className="tag">No programs yet — create one above.</div> : null}
           </div>
         </section>
+      ) : null}
+
+      {activeTab === 'fanRewards' ? (
+        business ? (
+          <>
+            {fanAlert ? <div className={`alert alert-${fanAlert.type}`}>{fanAlert.message}</div> : null}
+
+            <section>
+              <h2>Creator rewards pool</h2>
+              {fanConfig ? (
+                <div className="card-list">
+                  <div className="card-list-item">
+                    <strong>Rewards pool</strong>
+                    <div className="code-inline">{fanConfig.pool || 'Not set'}</div>
+                  </div>
+                  <div className="card-list-item">
+                    <strong>Shares (bps)</strong>
+                    <p>
+                      Creator {fanConfig.creatorShareBps} • Fans {fanConfig.fanShareBps} • Treasury {fanConfig.treasuryShareBps}
+                    </p>
+                  </div>
+                  <div className="card-list-item">
+                    <strong>Status</strong>
+                    <p>{fanConfig.enabled ? 'Fan rewards enabled' : 'Fan rewards disabled'}</p>
+                  </div>
+                </div>
+              ) : (
+                <p>Load a business to fetch the creator rewards pool configuration.</p>
+              )}
+            </section>
+
+            <section>
+              <h2>Update configuration</h2>
+              <form onSubmit={handleUpdateFanRewards} className="grid columns-2">
+                <div>
+                  <label htmlFor="creator-pool-input">Creator rewards pool address</label>
+                  <input
+                    id="creator-pool-input"
+                    value={creatorPoolInput}
+                    onChange={(event) => setCreatorPoolInput(event.target.value)}
+                    placeholder="nhb1..."
+                  />
+                  <label htmlFor="creator-share">Creator share (bps)</label>
+                  <input
+                    id="creator-share"
+                    type="number"
+                    min={0}
+                    max={10000}
+                    value={creatorShareBps}
+                    onChange={(event) => setCreatorShareBps(Number(event.target.value))}
+                  />
+                  <label htmlFor="fan-share">Fan share (bps)</label>
+                  <input
+                    id="fan-share"
+                    type="number"
+                    min={0}
+                    max={10000}
+                    value={fanShareBps}
+                    onChange={(event) => setFanShareBps(Number(event.target.value))}
+                  />
+                  <label htmlFor="treasury-share">Treasury share (bps)</label>
+                  <input
+                    id="treasury-share"
+                    type="number"
+                    min={0}
+                    max={10000}
+                    value={treasuryShareBps}
+                    onChange={(event) => setTreasuryShareBps(Number(event.target.value))}
+                  />
+                </div>
+                <div className="form-footer">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={fanEnabled}
+                      onChange={(event) => setFanEnabled(event.target.checked)}
+                    />
+                    Enable fan rewards distribution
+                  </label>
+                  <button type="submit" disabled={fanLoading}>
+                    {fanLoading ? 'Updating…' : 'Save configuration'}
+                  </button>
+                  <small>BPS must total 10,000. Caller: {adminAddress || 'Set admin wallet'}</small>
+                </div>
+              </form>
+            </section>
+
+            <section>
+              <h2>Fan rewards stats</h2>
+              {fanStats ? (
+                <div className="card-list">
+                  <div className="card-list-item">
+                    <strong>Total distributed (ZNHB wei)</strong>
+                    <p className="code-inline">{formatAmount(fanStats.distributed)}</p>
+                  </div>
+                  <div className="card-list-item">
+                    <strong>Pending payouts (ZNHB wei)</strong>
+                    <p className="code-inline">{formatAmount(fanStats.pending)}</p>
+                  </div>
+                  <div className="card-list-item">
+                    <strong>Active supporters</strong>
+                    <p>{fanStats.supporters}</p>
+                  </div>
+                  <div className="card-list-item">
+                    <strong>Last payout</strong>
+                    <p>
+                      {fanStats.lastPayoutAt
+                        ? new Date(fanStats.lastPayoutAt * 1000).toLocaleString()
+                        : 'No payouts yet'}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p>Fan rewards stats unavailable — refresh after the first tip.</p>
+              )}
+            </section>
+          </>
+        ) : (
+          <section>
+            <h2>Fan rewards</h2>
+            <p>Load a business to inspect the creator rewards pool configuration.</p>
+          </section>
+        )
       ) : null}
     </>
   );

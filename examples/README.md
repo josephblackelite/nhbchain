@@ -20,9 +20,9 @@ yarn dev
 
 The sample configuration defaults to the public NHB infrastructure:
 
-- `https://rpc.nhbcoin.net` for JSON-RPC (HTTP)
-- `wss://ws.nhbcoin.net` for JSON-RPC (WebSocket)
-- `https://api.nhbcoin.net` for REST, escrow, swap, and loyalty flows
+- `https://api.nhbcoin.net/rpc` for JSON-RPC (HTTP)
+- `wss://api.nhbcoin.net/ws` for JSON-RPC (WebSocket)
+- `https://gw.nhbcoin.net` for REST, creator, escrow, swap, and loyalty flows
 
 ## Environment
 
@@ -62,7 +62,6 @@ yarn test
 
 - Host the example gateway workloads on **ECS Fargate** or **EKS** for managed scaling and IAM integration.
 - Use **Route 53** records that map to your load balancers:
-  - `rpc.nhbcoin.net` → Application or Network Load Balancer for HTTP JSON-RPC traffic.
-  - `ws.nhbcoin.net` → Network Load Balancer tuned for long-lived WebSocket connections.
-  - `api.nhbcoin.net` → Application Load Balancer for REST and gateway APIs.
+- `api.nhbcoin.net` → Application or Network Load Balancer for HTTP/WS JSON-RPC traffic.
+- `gw.nhbcoin.net` → Application Load Balancer for REST and gateway APIs (escrow, loyalty, creator, swap).
 - Request ACM certificates that cover `*.nhbcoin.net` and enable AWS Shield along with WAF rules. Rate-limit or geo/IP allowlist sensitive write paths.

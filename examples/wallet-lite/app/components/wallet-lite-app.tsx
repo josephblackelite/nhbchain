@@ -36,6 +36,57 @@ interface IdentityResolveResult {
   updatedAt: number;
 }
 
+interface CreatorProfile {
+  alias: string;
+  primary: string;
+  addresses: string[];
+  avatarUrl: string | null;
+  createdAt: number;
+  updatedAt: number;
+  recentContent: Array<{
+    id?: string;
+    title?: string;
+    uri?: string;
+    publishedAt?: string;
+    tippedAt?: string;
+  }>;
+}
+
+interface CreatorTipResult {
+  contentId: string;
+  creator: string;
+  fan: string;
+  amount: string;
+  totalTips?: string;
+  totalYield?: string;
+  pending?: string;
+}
+
+interface CreatorStakeResult {
+  creator: string;
+  fan: string;
+  amount: string;
+  shares?: string;
+  pending?: string;
+  totalTips?: string;
+  totalYield?: string;
+}
+
+interface CreatorUnstakeResult {
+  creator: string;
+  fan: string;
+  amount: string;
+  remaining?: string;
+  shares?: string;
+}
+
+interface SubscriptionPreview {
+  alias: string;
+  amount: string;
+  cadence: 'weekly' | 'monthly';
+  occurrences: Array<{ dueAt: string; amount: string }>;
+}
+
 function formatNumber(value?: string) {
   if (!value) return '0';
   const trimmed = value.replace(/^0+/, '') || '0';
@@ -75,6 +126,25 @@ export default function WalletLiteApp() {
   const [claimPreimage, setClaimPreimage] = useState('');
   const [resolvingAlias, setResolvingAlias] = useState<IdentityResolveResult | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
+  const [profileAlias, setProfileAlias] = useState('');
+  const [profile, setProfile] = useState<CreatorProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [tipContentId, setTipContentId] = useState('demo-drop');
+  const [tipAmount, setTipAmount] = useState('0.1');
+  const [tipStatus, setTipStatus] = useState<CreatorTipResult | null>(null);
+  const [tipError, setTipError] = useState<string | null>(null);
+  const [subscriptionCreator, setSubscriptionCreator] = useState('');
+  const [subscriptionAmount, setSubscriptionAmount] = useState('1.0');
+  const [subscriptionCadence, setSubscriptionCadence] = useState<'weekly' | 'monthly'>('monthly');
+  const [subscriptionStart, setSubscriptionStart] = useState(() => new Date().toISOString().slice(0, 10));
+  const [subscriptionStatus, setSubscriptionStatus] = useState<CreatorStakeResult | null>(null);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
+  const [unstakeAmount, setUnstakeAmount] = useState('1.0');
+  const [unstakeStatus, setUnstakeStatus] = useState<CreatorUnstakeResult | null>(null);
+  const [unstakeError, setUnstakeError] = useState<string | null>(null);
+  const [subscriptionPreview, setSubscriptionPreview] = useState<SubscriptionPreview | null>(null);
+  const [subscriptionPreviewError, setSubscriptionPreviewError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!address) {
@@ -139,6 +209,45 @@ export default function WalletLiteApp() {
       cancelled = true;
     };
   }, [recipientAlias]);
+
+  useEffect(() => {
+    const alias = profileAlias.trim();
+    if (!alias) {
+      setProfile(null);
+      setProfileError(null);
+      setProfileLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setProfileLoading(true);
+    async function loadProfile() {
+      try {
+        const res = await fetch(`/api/identity/profile?alias=${encodeURIComponent(alias)}`);
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data?.error || 'Profile not found');
+        }
+        const payload = (await res.json()) as CreatorProfile;
+        if (!cancelled) {
+          setProfile(payload);
+          setProfileError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setProfile(null);
+          setProfileError((error as Error).message);
+        }
+      } finally {
+        if (!cancelled) {
+          setProfileLoading(false);
+        }
+      }
+    }
+    loadProfile();
+    return () => {
+      cancelled = true;
+    };
+  }, [profileAlias]);
 
   const paymentIntent = useMemo(() => {
     if (!recipientAlias.trim()) return '';
@@ -257,6 +366,120 @@ export default function WalletLiteApp() {
     }
   };
 
+  const handleSendTip = async () => {
+    if (!address) {
+      setTipError('Load a wallet before sending tips.');
+      return;
+    }
+    if (!tipContentId.trim()) {
+      setTipError('Content ID required');
+      return;
+    }
+    try {
+      setTipError(null);
+      setTipStatus(null);
+      const res = await fetch('/api/creator/tips', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ caller: address, contentId: tipContentId.trim(), amount: tipAmount.trim() })
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Tip failed');
+      }
+      setTipStatus(payload as CreatorTipResult);
+    } catch (error) {
+      setTipStatus(null);
+      setTipError((error as Error).message);
+    }
+  };
+
+  const handleStake = async () => {
+    if (!address) {
+      setSubscriptionError('Load a wallet before subscribing.');
+      return;
+    }
+    if (!subscriptionCreator.trim()) {
+      setSubscriptionError('Creator address required');
+      return;
+    }
+    try {
+      setSubscriptionError(null);
+      setSubscriptionStatus(null);
+      const res = await fetch('/api/creator/stake', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ caller: address, creator: subscriptionCreator.trim(), amount: subscriptionAmount.trim() })
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Subscription stake failed');
+      }
+      setSubscriptionStatus(payload as CreatorStakeResult);
+    } catch (error) {
+      setSubscriptionStatus(null);
+      setSubscriptionError((error as Error).message);
+    }
+  };
+
+  const handleUnstake = async () => {
+    if (!address) {
+      setUnstakeError('Load a wallet before managing subscriptions.');
+      return;
+    }
+    if (!subscriptionCreator.trim()) {
+      setUnstakeError('Creator address required');
+      return;
+    }
+    try {
+      setUnstakeError(null);
+      setUnstakeStatus(null);
+      const res = await fetch('/api/creator/unstake', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ caller: address, creator: subscriptionCreator.trim(), amount: unstakeAmount.trim() })
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Unstake failed');
+      }
+      setUnstakeStatus(payload as CreatorUnstakeResult);
+    } catch (error) {
+      setUnstakeStatus(null);
+      setUnstakeError((error as Error).message);
+    }
+  };
+
+  const handlePreviewSubscription = async () => {
+    if (!profileAlias.trim() && !recipientAlias.trim()) {
+      setSubscriptionPreview(null);
+      setSubscriptionPreviewError('Provide a creator alias to preview.');
+      return;
+    }
+    const alias = profileAlias.trim() || recipientAlias.trim();
+    try {
+      setSubscriptionPreviewError(null);
+      const res = await fetch('/api/creator/subscriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          alias,
+          amount: subscriptionAmount.trim(),
+          cadence: subscriptionCadence,
+          startDate: subscriptionStart
+        })
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Preview failed');
+      }
+      setSubscriptionPreview(payload as SubscriptionPreview);
+    } catch (error) {
+      setSubscriptionPreview(null);
+      setSubscriptionPreviewError((error as Error).message);
+    }
+  };
+
   return (
     <div className="grid columns-2">
       <section>
@@ -310,6 +533,86 @@ export default function WalletLiteApp() {
       </section>
 
       <section>
+        <h2>Creator profile</h2>
+        <p>Resolve a public alias to surface their avatar, linked addresses, and recent content from the NHB gateway.</p>
+        <label htmlFor="profileAlias">Creator alias</label>
+        <input
+          id="profileAlias"
+          placeholder="artist"
+          value={profileAlias}
+          onChange={(event) => setProfileAlias(event.target.value)}
+        />
+        {profileLoading && <p>Loading profile…</p>}
+        {profileError && <div className="alert alert-error">{profileError}</div>}
+        {profile && (
+          <div className="card-list">
+            <div className="card-list-item" style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+              {profile.avatarUrl ? (
+                <img
+                  src={profile.avatarUrl}
+                  alt={`Avatar for @${profile.alias}`}
+                  style={{ width: '64px', height: '64px', borderRadius: '50%', objectFit: 'cover' }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: '64px',
+                    height: '64px',
+                    borderRadius: '50%',
+                    background: '#1e293b',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#cbd5f5',
+                    fontWeight: 600,
+                  }}
+                >
+                  @{profile.alias.slice(0, 2)}
+                </div>
+              )}
+              <div>
+                <strong>@{profile.alias}</strong>
+                <div className="code-inline">Primary: {aliasFingerprint(profile.primary)}</div>
+                <small>Last updated {formatDate(profile.updatedAt)}</small>
+              </div>
+            </div>
+            <div className="card-list-item">
+              <strong>Linked addresses</strong>
+              <ul>
+                {profile.addresses.map((addr) => (
+                  <li key={addr} className="code-inline">
+                    {addr}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="card-list-item">
+              <strong>Recent content</strong>
+              <ul>
+                {profile.recentContent.map((item) => (
+                  <li key={`${item.id}-${item.uri}`.replace(/undefined/g, 'na')}>
+                    <div>{item.title || item.id || 'Untitled drop'}</div>
+                    {item.uri ? (
+                      <a href={item.uri} target="_blank" rel="noreferrer">
+                        {item.uri}
+                      </a>
+                    ) : null}
+                    {(item.publishedAt || item.tippedAt) && (
+                      <small>
+                        {item.publishedAt ? `Published ${new Date(item.publishedAt).toLocaleString()}` : null}
+                        {item.publishedAt && item.tippedAt ? ' • ' : null}
+                        {item.tippedAt ? `Last tipped ${new Date(item.tippedAt).toLocaleString()}` : null}
+                      </small>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section>
         <h2>Register username</h2>
         <p>Claim an alias for the session address via <code className="code-inline">identity_setAlias</code>.</p>
         <label htmlFor="alias">Alias</label>
@@ -322,6 +625,125 @@ export default function WalletLiteApp() {
         <button type="button" onClick={handleRegisterAlias}>Register alias</button>
         {aliasStatus && <div className="alert alert-success">{aliasStatus}</div>}
         {aliasError && <div className="alert alert-error">{aliasError}</div>}
+      </section>
+
+      <section>
+        <h2>Tip a creator</h2>
+        <p>Send a direct tip against published content via <code className="code-inline">creator_tip</code>.</p>
+        <label htmlFor="tipContentId">Content ID</label>
+        <input
+          id="tipContentId"
+          placeholder="demo-drop"
+          value={tipContentId}
+          onChange={(event) => setTipContentId(event.target.value)}
+        />
+        <label htmlFor="tipAmount">Amount (NHB)</label>
+        <input
+          id="tipAmount"
+          placeholder="0.1"
+          value={tipAmount}
+          onChange={(event) => setTipAmount(event.target.value)}
+        />
+        <button type="button" onClick={handleSendTip}>Send tip</button>
+        {tipStatus && (
+          <div className="alert alert-success">
+            Tipped {formatNumber(tipStatus.amount)} NHB to {tipStatus.creator || 'creator'}.
+            <br />Pending payouts: {tipStatus.pending ? formatNumber(tipStatus.pending) : '0'} NHB
+          </div>
+        )}
+        {tipError && <div className="alert alert-error">{tipError}</div>}
+      </section>
+
+      <section>
+        <h2>Subscribe to a creator</h2>
+        <p>
+          Stake behind a creator to simulate a recurring membership via <code className="code-inline">creator_stake</code>.
+          Preview the cadence and manage unstakes when the subscription ends.
+        </p>
+        <label htmlFor="subscriptionCreator">Creator address</label>
+        <input
+          id="subscriptionCreator"
+          placeholder="nhb1creator..."
+          value={subscriptionCreator}
+          onChange={(event) => setSubscriptionCreator(event.target.value)}
+        />
+        <label htmlFor="subscriptionAmount">Stake amount (NHB)</label>
+        <input
+          id="subscriptionAmount"
+          placeholder="1.0"
+          value={subscriptionAmount}
+          onChange={(event) => setSubscriptionAmount(event.target.value)}
+        />
+        <label htmlFor="subscriptionCadence">Cadence</label>
+        <select
+          id="subscriptionCadence"
+          value={subscriptionCadence}
+          onChange={(event) => setSubscriptionCadence(event.target.value as 'weekly' | 'monthly')}
+        >
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+        <label htmlFor="subscriptionStart">Start date</label>
+        <input
+          id="subscriptionStart"
+          type="date"
+          value={subscriptionStart}
+          onChange={(event) => setSubscriptionStart(event.target.value)}
+        />
+        <div className="form-footer" style={{ gap: '0.75rem', flexWrap: 'wrap' }}>
+          <button type="button" onClick={handlePreviewSubscription}>
+            Preview schedule
+          </button>
+          <button type="button" onClick={handleStake}>
+            Stake (subscribe)
+          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <label htmlFor="unstakeAmount" style={{ margin: 0 }}>
+              Unstake amount
+            </label>
+            <input
+              id="unstakeAmount"
+              value={unstakeAmount}
+              onChange={(event) => setUnstakeAmount(event.target.value)}
+              style={{ width: '8rem' }}
+            />
+            <button type="button" onClick={handleUnstake}>
+              Unstake
+            </button>
+          </div>
+        </div>
+        {subscriptionStatus && (
+          <div className="alert alert-success">
+            Staked {formatNumber(subscriptionStatus.amount)} NHB behind {subscriptionStatus.creator || 'creator'}.
+          </div>
+        )}
+        {subscriptionError && <div className="alert alert-error">{subscriptionError}</div>}
+        {unstakeStatus && (
+          <div className="alert alert-success">
+            Unstaked {formatNumber(unstakeStatus.amount)} NHB for {unstakeStatus.creator || 'creator'}.
+            {unstakeStatus.remaining ? (
+              <>
+                <br />Remaining stake: {formatNumber(unstakeStatus.remaining)} NHB
+              </>
+            ) : null}
+          </div>
+        )}
+        {unstakeError && <div className="alert alert-error">{unstakeError}</div>}
+        {subscriptionPreview && (
+          <div className="card-list" style={{ marginTop: '1rem' }}>
+            <div className="card-list-item">
+              <strong>Upcoming charges ({subscriptionPreview.cadence})</strong>
+              <ul>
+                {subscriptionPreview.occurrences.map((occurrence) => (
+                  <li key={occurrence.dueAt}>
+                    {new Date(occurrence.dueAt).toLocaleDateString()} • {occurrence.amount} NHB
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+        {subscriptionPreviewError && <div className="alert alert-error">{subscriptionPreviewError}</div>}
       </section>
 
       <section>
