@@ -7,6 +7,7 @@ The `/examples` directory contains a Yarn workspace with runnable demo applicati
 - `examples/apps/` – UI/server examples that showcase different integration patterns. Each application owns its dependencies and a `dev` script.
 - `examples/lib-sdk/` – Shared helper library that exposes RPC clients, signing helpers, and Bech32 utilities.
 - `examples/scripts/` – Tooling that keeps the workspace consistent, including the `yarn dev` orchestrator.
+- `examples/p2p-mini-market/` – Dual-lock escrow demo that accepts NHB ⇄ ZNHB trades and walks through funding, settlement, and dispute outcomes.
 
 ## Quickstart
 

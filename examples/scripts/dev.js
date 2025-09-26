@@ -5,7 +5,8 @@ const concurrently = require('concurrently');
 
 const apps = [
   { name: '@nhb/status-dashboard', label: 'dashboard', color: 'cyan' },
-  { name: '@nhb/network-monitor', label: 'monitor', color: 'magenta' }
+  { name: '@nhb/network-monitor', label: 'monitor', color: 'magenta' },
+  { name: '@nhb/p2p-mini-market', label: 'mini-market', color: 'blue' }
 ];
 
 async function run() {
