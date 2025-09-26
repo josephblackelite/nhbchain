@@ -34,6 +34,8 @@ func TestNewBlockchainRequiresGenesisWhenAutogenesisDisabled(t *testing.T) {
 
 	if _, err := NewBlockchain(db, "", false); err == nil {
 		t.Fatalf("expected error when genesis is required but unavailable")
+	} else if !strings.Contains(err.Error(), "genesis is required") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }
 

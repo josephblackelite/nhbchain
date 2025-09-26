@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolveGenesisPathPrecedence(t *testing.T) {
 	lookup := func(key string) (string, bool) {
@@ -46,6 +49,8 @@ func TestResolveGenesisPathErrorWhenRequired(t *testing.T) {
 	emptyLookup := func(string) (string, bool) { return "", false }
 	if _, err := resolveGenesisPath("", "", false, emptyLookup); err == nil {
 		t.Fatalf("expected error when no genesis sources available and autogenesis disabled")
+	} else if !strings.Contains(err.Error(), "no genesis file provided") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -65,5 +70,52 @@ func TestResolveGenesisPathTrimsValues(t *testing.T) {
 	}
 	if path != "cfg" {
 		t.Fatalf("expected trimmed config path, got %q", path)
+	}
+}
+
+func TestResolveAllowAutogenesisPrecedence(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		if key != allowAutogenesisEnv {
+			t.Fatalf("unexpected lookup key: %s", key)
+		}
+		return "true", true
+	}
+
+	t.Run("cli override takes priority", func(t *testing.T) {
+		allow, err := resolveAllowAutogenesis(false, true, false, lookup)
+		if err != nil {
+			t.Fatalf("resolveAllowAutogenesis returned error: %v", err)
+		}
+		if allow {
+			t.Fatalf("expected cli override to force disable autogenesis")
+		}
+	})
+
+	t.Run("env overrides config when cli absent", func(t *testing.T) {
+		allow, err := resolveAllowAutogenesis(false, false, false, lookup)
+		if err != nil {
+			t.Fatalf("resolveAllowAutogenesis returned error: %v", err)
+		}
+		if !allow {
+			t.Fatalf("expected env override to enable autogenesis")
+		}
+	})
+
+	t.Run("config used when nothing else set", func(t *testing.T) {
+		emptyLookup := func(string) (string, bool) { return "", false }
+		allow, err := resolveAllowAutogenesis(true, false, false, emptyLookup)
+		if err != nil {
+			t.Fatalf("resolveAllowAutogenesis returned error: %v", err)
+		}
+		if !allow {
+			t.Fatalf("expected config value to be respected")
+		}
+	})
+}
+
+func TestResolveAllowAutogenesisRejectsInvalidEnv(t *testing.T) {
+	lookup := func(string) (string, bool) { return "definitely-not-bool", true }
+	if _, err := resolveAllowAutogenesis(false, false, false, lookup); err == nil {
+		t.Fatalf("expected error for invalid %s value", allowAutogenesisEnv)
 	}
 }

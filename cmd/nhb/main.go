@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,22 +22,31 @@ import (
 )
 
 const (
-	validatorPassEnv = "NHB_VALIDATOR_PASS"
-	genesisPathEnv   = "NHB_GENESIS"
+	validatorPassEnv    = "NHB_VALIDATOR_PASS"
+	genesisPathEnv      = "NHB_GENESIS"
+	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
 )
 
 func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
-	allowAutogenesis := flag.Bool("allow-autogenesis", true, "Allow automatic genesis creation when no stored genesis exists")
+	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
 	flag.Parse()
+
+	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
 
 	cfg, err := config.Load(*configFile)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load config: %v", err))
 	}
 
-	genesisPath, err := resolveGenesisPath(*genesisFlag, cfg.GenesisFile, *allowAutogenesis, os.LookupEnv)
+	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve autogenesis setting: %v\n", err)
+		os.Exit(1)
+	}
+
+	genesisPath, err := resolveGenesisPath(*genesisFlag, cfg.GenesisFile, allowAutogenesis, os.LookupEnv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to resolve genesis path: %v\n", err)
 		os.Exit(1)
@@ -71,7 +81,7 @@ func main() {
 	}
 
 	// 1. Create the core node.
-	node, err := core.NewNode(db, privKey, genesisPath, *allowAutogenesis)
+	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
@@ -100,9 +110,9 @@ func main() {
 	swapCfg := cfg.SwapSettings()
 	node.SetSwapConfig(swapCfg)
 	manualOracle := swap.NewManualOracle()
-        aggregator := swap.NewOracleAggregator(swapCfg.OraclePriority, swapCfg.MaxQuoteAge())
-        aggregator.SetTWAPWindow(swapCfg.TwapWindow())
-        aggregator.SetTWAPSampleCap(swapCfg.TwapSampleCap)
+	aggregator := swap.NewOracleAggregator(swapCfg.OraclePriority, swapCfg.MaxQuoteAge())
+	aggregator.SetTWAPWindow(swapCfg.TwapWindow())
+	aggregator.SetTWAPSampleCap(swapCfg.TwapSampleCap)
 	aggregator.SetPriority(swapCfg.OraclePriority)
 	aggregator.Register("manual", manualOracle)
 	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
@@ -189,7 +199,40 @@ func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, l
 		return "", nil
 	}
 
-	return "", fmt.Errorf("no genesis file provided; supply one via --genesis, %s, or config, or enable --allow-autogenesis", genesisPathEnv)
+	return "", fmt.Errorf("no genesis file provided; supply one via --genesis, %s, or config, or explicitly enable autogenesis (--allow-autogenesis / %s / config)", genesisPathEnv, allowAutogenesisEnv)
+}
+
+func resolveAllowAutogenesis(cfgValue bool, cliSet bool, cliValue bool, lookup envLookupFunc) (bool, error) {
+	allow := cfgValue
+
+	if lookup != nil {
+		if value, ok := lookup(allowAutogenesisEnv); ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				parsed, err := strconv.ParseBool(trimmed)
+				if err != nil {
+					return false, fmt.Errorf("invalid %s value %q: %w", allowAutogenesisEnv, trimmed, err)
+				}
+				allow = parsed
+			}
+		}
+	}
+
+	if cliSet {
+		allow = cliValue
+	}
+
+	return allow, nil
+}
+
+func flagWasProvided(name string) bool {
+	provided := false
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
 }
 
 func loadValidatorKey(cfg *config.Config) (*crypto.PrivateKey, error) {
