@@ -43,30 +43,36 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db             storage.Database
-	state          *StateProcessor
-	chain          *Blockchain
-	syncMgr        *syncmgr.Manager
-	validatorKey   *crypto.PrivateKey
-	mempool        []*types.Transaction
-	bftEngine      *bft.Engine
-	p2pSrv         *p2p.Server
-	stateMu        sync.Mutex
-	escrowTreasury [20]byte
-	engagementMgr  *engagement.Manager
-	govPolicy      governance.ProposalPolicy
-	govPolicyMu    sync.RWMutex
-	swapCfgMu      sync.RWMutex
-	swapCfg        swap.Config
-	swapOracle     swap.PriceOracle
-	swapManual     *swap.ManualOracle
-	swapSanctions  swap.SanctionsChecker
-	swapStatusMu   sync.RWMutex
-	swapOracleLast int64
-	swapRefundSink [20]byte
-	evidenceStore  *evidence.Store
-	evidenceMaxAge uint64
+	db               storage.Database
+	state            *StateProcessor
+	chain            *Blockchain
+	syncMgr          *syncmgr.Manager
+	validatorKey     *crypto.PrivateKey
+	mempool          []*types.Transaction
+	bftEngine        *bft.Engine
+	p2pSrv           *p2p.Server
+	stateMu          sync.Mutex
+	escrowTreasury   [20]byte
+	engagementMgr    *engagement.Manager
+	govPolicy        governance.ProposalPolicy
+	govPolicyMu      sync.RWMutex
+	swapCfgMu        sync.RWMutex
+	swapCfg          swap.Config
+	swapOracle       swap.PriceOracle
+	swapManual       *swap.ManualOracle
+	swapSanctions    swap.SanctionsChecker
+	swapStatusMu     sync.RWMutex
+	swapOracleLast   int64
+	swapRefundSink   [20]byte
+	evidenceStore    *evidence.Store
+	evidenceMaxAge   uint64
+	paymasterMu      sync.RWMutex
+	paymasterEnabled bool
 }
+
+const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
+
+var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
 
 // PotsoLeaderboardEntry represents a participant's score for a specific day.
 type PotsoLeaderboardEntry struct {
@@ -117,17 +123,18 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	copy(treasury[:], validatorAddr.Bytes())
 
 	node := &Node{
-		db:             db,
-		state:          stateProcessor,
-		chain:          chain,
-		validatorKey:   key,
-		mempool:        make([]*types.Transaction, 0),
-		escrowTreasury: treasury,
-		engagementMgr:  engagement.NewManager(stateProcessor.EngagementConfig()),
-		swapSanctions:  swap.DefaultSanctionsChecker,
-		swapRefundSink: treasury,
-		evidenceStore:  evidence.NewStore(db),
-		evidenceMaxAge: evidence.DefaultMaxAgeBlocks,
+		db:               db,
+		state:            stateProcessor,
+		chain:            chain,
+		validatorKey:     key,
+		mempool:          make([]*types.Transaction, 0),
+		escrowTreasury:   treasury,
+		engagementMgr:    engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapSanctions:    swap.DefaultSanctionsChecker,
+		swapRefundSink:   treasury,
+		evidenceStore:    evidence.NewStore(db),
+		evidenceMaxAge:   evidence.DefaultMaxAgeBlocks,
+		paymasterEnabled: stateProcessor.PaymasterEnabled(),
 	}
 
 	// Initialise fast-sync manager.
@@ -209,6 +216,55 @@ func (n *Node) swapConfig() swap.Config {
 		cfg = cfg.Normalise()
 	}
 	return cfg
+}
+
+// PaymasterModuleEnabled reports whether paymaster sponsorship is active.
+func (n *Node) PaymasterModuleEnabled() bool {
+	if n == nil {
+		return false
+	}
+	n.paymasterMu.RLock()
+	defer n.paymasterMu.RUnlock()
+	return n.paymasterEnabled
+}
+
+// SetPaymasterModuleEnabled toggles the paymaster module after verifying the caller has admin privileges.
+func (n *Node) SetPaymasterModuleEnabled(caller []byte, enabled bool) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	if len(caller) == 0 {
+		return fmt.Errorf("caller address required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	if !n.state.HasRole(rolePaymasterAdmin, caller) {
+		return ErrPaymasterUnauthorized
+	}
+	n.state.SetPaymasterEnabled(enabled)
+	n.paymasterMu.Lock()
+	n.paymasterEnabled = enabled
+	n.paymasterMu.Unlock()
+	return nil
+}
+
+// EvaluateSponsorship returns the sponsorship assessment for the provided transaction without executing it.
+func (n *Node) EvaluateSponsorship(tx *types.Transaction) (*SponsorshipAssessment, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	if tx == nil {
+		return nil, fmt.Errorf("transaction required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	return n.state.EvaluateSponsorship(tx)
 }
 
 // SetSwapOracle wires the price oracle aggregator used to validate vouchers.
