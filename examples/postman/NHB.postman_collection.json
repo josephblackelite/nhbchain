@@ -1,0 +1,177 @@
+{
+  "info": {
+    "name": "NHBCoin RPC & REST Cookbook",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Reference requests for rpc.nhbcoin.net (JSON-RPC) and api.nhbcoin.net (REST escrow gateway). Update the collection variables to switch between devnet/testnet hosts or to inject credentials."
+  },
+  "item": [
+    {
+      "name": "RPC → Account balance",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"nhb_getBalance\",\n  \"params\": [\"{{wallet_address}}\"]\n}"
+        },
+        "url": {
+          "raw": "{{rpc_base}}"
+        },
+        "description": "Fetch balances, stake, and alias metadata for the configured wallet address."
+      }
+    },
+    {
+      "name": "RPC → Latest blocks",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"nhb_getLatestBlocks\",\n  \"params\": [5]\n}"
+        },
+        "url": {
+          "raw": "{{rpc_base}}"
+        },
+        "description": "Return metadata for the five most recent blocks (max 20)."
+      }
+    },
+    {
+      "name": "RPC → Latest transactions",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"nhb_getLatestTransactions\",\n  \"params\": [10]\n}"
+        },
+        "url": {
+          "raw": "{{rpc_base}}"
+        },
+        "description": "List the most recent transactions observed across the chain (max 50)."
+      }
+    },
+    {
+      "name": "RPC → Epoch summary",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"nhb_getEpochSummary\",\n  \"params\": []\n}"
+        },
+        "url": {
+          "raw": "{{rpc_base}}"
+        },
+        "description": "Return validator participation for the current epoch. Pass a number to inspect historical epochs."
+      }
+    },
+    {
+      "name": "REST → Trades by buyer",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{api_base}}/trades?buyer={{wallet_address}}&status=SETTLED&limit=5"
+        },
+        "description": "List the five most recent settled escrow trades for the configured buyer. Requires API key and HMAC signature."
+      }
+    },
+    {
+      "name": "REST → SLA metrics",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{api_base}}/metrics/sla"
+        },
+        "description": "Return rolling gateway latency and error ratios. Requires API key and HMAC signature."
+      }
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const apiBase = pm.variables.get('api_base');",
+          "if (!apiBase) { return; }",
+          "const requestUrl = pm.request.url.toString();",
+          "if (!requestUrl.startsWith(apiBase)) { return; }",
+          "const apiKey = pm.variables.get('api_key');",
+          "const apiSecret = pm.variables.get('api_secret');",
+          "if (!apiKey || !apiSecret) { return; }",
+          "const method = pm.request.method.toUpperCase();",
+          "const url = new URL(requestUrl);",
+          "const timestamp = new Date().toISOString();",
+          "let body = '';",
+          "if (method !== 'GET' && pm.request.body) {",
+          "  if (pm.request.body.mode === 'raw') {",
+          "    body = pm.request.body.raw || '';",
+          "  } else if (pm.request.body.mode === 'urlencoded') {",
+          "    body = pm.request.body.urlencoded.toString();",
+          "  }",
+          "}",
+          "const canonical = url.pathname + (url.search || '');",
+          "const stringToSign = [method, canonical, body, timestamp].join('\\n');",
+          "const signature = CryptoJS.enc.Base64.stringify(CryptoJS.HmacSHA256(stringToSign, apiSecret));",
+          "pm.request.headers.upsert({ key: 'X-API-Key', value: apiKey });",
+          "pm.request.headers.upsert({ key: 'X-Timestamp', value: timestamp });",
+          "pm.request.headers.upsert({ key: 'X-Signature', value: signature });"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "rpc_base",
+      "value": "https://rpc.nhbcoin.net"
+    },
+    {
+      "key": "api_base",
+      "value": "https://api.nhbcoin.net/escrow/v1"
+    },
+    {
+      "key": "wallet_address",
+      "value": "nhb1exampleaddress000000000000000000000000"
+    },
+    {
+      "key": "api_key",
+      "value": ""
+    },
+    {
+      "key": "api_secret",
+      "value": ""
+    }
+  ]
+}
