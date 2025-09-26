@@ -121,6 +121,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	var treasury [20]byte
 	copy(treasury[:], validatorAddr.Bytes())
+	stateProcessor.SetEscrowFeeTreasury(treasury)
 
 	node := &Node{
 		db:               db,

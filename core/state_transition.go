@@ -68,6 +68,7 @@ type StateProcessor struct {
 	LoyaltyEngine      *loyalty.Engine
 	EscrowEngine       *escrow.Engine
 	TradeEngine        *escrow.TradeEngine
+	escrowFeeTreasury  [20]byte
 	usernameToAddr     map[string][]byte
 	ValidatorSet       map[string]*big.Int
 	EligibleValidators map[string]*big.Int
@@ -125,6 +126,12 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		return nil, err
 	}
 	return sp, nil
+}
+
+// SetEscrowFeeTreasury configures the address receiving escrow fees during
+// release transitions.
+func (sp *StateProcessor) SetEscrowFeeTreasury(addr [20]byte) {
+	sp.escrowFeeTreasury = addr
 }
 
 // BeginBlock records the execution context for the block currently being applied.
@@ -983,174 +990,118 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []
 }
 
 func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	_ = tradeEngine
 
-	// The data payload can now optionally contain a pre-defined buyer
-	var escrowData struct {
-		Seller []byte   `json:"seller"`
-		Amount *big.Int `json:"amount"`
-		Buyer  []byte   `json:"buyer,omitempty"` // Optional: The buyer accepting a "Want to Buy" offer
+	var payload struct {
+		Payee    []byte   `json:"payee"`
+		Token    string   `json:"token"`
+		Amount   *big.Int `json:"amount"`
+		FeeBps   uint32   `json:"feeBps"`
+		Deadline int64    `json:"deadline"`
+		Mediator []byte   `json:"mediator,omitempty"`
+		Meta     []byte   `json:"meta,omitempty"`
 	}
-	if err := json.Unmarshal(tx.Data, &escrowData); err != nil {
-		return fmt.Errorf("invalid escrow data: %w", err)
+	if err := json.Unmarshal(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid escrow payload: %w", err)
 	}
-	if escrowData.Amount == nil || escrowData.Amount.Cmp(big.NewInt(0)) <= 0 {
+	if len(payload.Payee) != common.AddressLength {
+		return fmt.Errorf("payee address must be %d bytes", common.AddressLength)
+	}
+	if payload.Amount == nil || payload.Amount.Cmp(big.NewInt(0)) <= 0 {
 		return fmt.Errorf("escrow amount must be positive")
 	}
-
-	sellerAccount := senderAccount
-	if sellerAccount.BalanceNHB.Cmp(escrowData.Amount) < 0 {
-		return fmt.Errorf("insufficient funds to create escrow")
+	if strings.TrimSpace(payload.Token) == "" {
+		return fmt.Errorf("token required")
 	}
-
-	// Debit the seller's account and increment their nonce
-	sellerAccount.BalanceNHB.Sub(sellerAccount.BalanceNHB, escrowData.Amount)
-	sellerAccount.Nonce++
-
-	escrowID, _ := tx.Hash()
-	newEscrow := escrow.LegacyEscrow{
-		ID:     escrowID,
-		Seller: sender, // The creator of the tx is always the seller with the asset
-		Amount: escrowData.Amount,
+	if payload.Deadline <= 0 {
+		return fmt.Errorf("deadline must be positive")
 	}
-
-	// --- THE SYMMETRICAL ESCROW UPGRADE ---
-	if escrowData.Buyer != nil {
-		// This is a "Buy Offer" being accepted. The escrow starts locked.
-		newEscrow.Buyer = escrowData.Buyer
-		newEscrow.Status = escrow.LegacyStatusInProgress
-		fmt.Printf("Symmetrical Escrow Created (In Progress): Seller %s locks funds for Buyer %s, Amount: %s, ID: %x\n",
-			crypto.NewAddress(crypto.NHBPrefix, sender).String(),
-			crypto.NewAddress(crypto.NHBPrefix, escrowData.Buyer).String(),
-			newEscrow.Amount.String(), newEscrow.ID)
-	} else {
-		// This is a standard "Sell Offer". The escrow starts open, and the seller is the initial "buyer".
-		newEscrow.Buyer = sender
-		newEscrow.Status = escrow.LegacyStatusOpen
-		fmt.Printf("Standard Escrow Created (Open): Seller %s lists %s NHBCoin, ID: %x\n",
-			crypto.NewAddress(crypto.NHBPrefix, sender).String(),
-			newEscrow.Amount.String(), newEscrow.ID)
+	payer := bytesToAddress(sender)
+	var payee [common.AddressLength]byte
+	copy(payee[:], payload.Payee)
+	mediatorAddr := bytesToAddress(ARBITRATOR_ADDRESS.Bytes())
+	if len(payload.Mediator) != 0 {
+		if len(payload.Mediator) != common.AddressLength {
+			return fmt.Errorf("mediator address must be %d bytes", common.AddressLength)
+		}
+		mediatorAddr = bytesToAddress(payload.Mediator)
 	}
-
-	// Save the final state to the trie
-	if err := sp.setAccount(sender, sellerAccount); err != nil {
+	meta := [32]byte{}
+	if len(payload.Meta) > len(meta) {
+		return fmt.Errorf("meta payload must be <= 32 bytes")
+	}
+	copy(meta[:], payload.Meta)
+	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, &mediatorAddr, meta); err != nil {
 		return err
 	}
-	if err := sp.setEscrow(escrowID, &newEscrow); err != nil {
-		return err
-	}
-
-	return nil
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 func (sp *StateProcessor) applyReleaseEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
-	escrowID := tx.Data
-	e, err := sp.getEscrow(escrowID)
+	id, err := decodeEscrowID(tx.Data)
 	if err != nil {
 		return err
 	}
-	if e.Status != escrow.LegacyStatusOpen {
-		return fmt.Errorf("escrow not open")
-	}
-	if string(sender) != string(e.Buyer) {
-		return fmt.Errorf("only buyer can release")
-	}
-	e.Status = escrow.LegacyStatusReleased
-	sellerAccount, _ := sp.getAccount(e.Seller)
-	sellerAccount.BalanceNHB.Add(sellerAccount.BalanceNHB, e.Amount)
-	senderAccount.Nonce++
-	sp.setAccount(e.Seller, sellerAccount)
-	sp.setEscrow(escrowID, e)
-	if err := sp.setAccount(sender, senderAccount); err != nil {
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
 		return err
 	}
-	fmt.Printf("Escrow released: Funds (%s NHB) to seller %s.\n",
-		e.Amount.String(), crypto.NewAddress(crypto.NHBPrefix, e.Seller).String())
-	return nil
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Release(id, caller); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
-	escrowID := tx.Data
-	e, err := sp.getEscrow(escrowID)
+	id, err := decodeEscrowID(tx.Data)
 	if err != nil {
 		return err
 	}
-	if e.Status != escrow.LegacyStatusOpen {
-		return fmt.Errorf("escrow not open")
-	}
-	if string(sender) != string(e.Seller) {
-		return fmt.Errorf("only seller can refund")
-	}
-	e.Status = escrow.LegacyStatusRefunded
-	buyerAccount, _ := sp.getAccount(e.Buyer)
-	buyerAccount.BalanceNHB.Add(buyerAccount.BalanceNHB, e.Amount)
-	senderAccount.Nonce++
-	sp.setAccount(e.Buyer, buyerAccount)
-	sp.setEscrow(escrowID, e)
-	if err := sp.setAccount(sender, senderAccount); err != nil {
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
 		return err
 	}
-	fmt.Printf("Escrow refunded: Funds (%s NHB) to buyer %s.\n",
-		e.Amount.String(), crypto.NewAddress(crypto.NHBPrefix, e.Buyer).String())
-	return nil
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Refund(id, caller); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 // --- NEW: Lock -> Dispute -> Arbitrate flow ---
 
 func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
-	escrowID := tx.Data
-	e, err := sp.getEscrow(escrowID)
+	id, err := decodeEscrowID(tx.Data)
 	if err != nil {
 		return err
 	}
-
-	if e.Status != escrow.LegacyStatusOpen {
-		return fmt.Errorf("escrow is not open to be locked")
-	}
-
-	e.Buyer = sender
-	e.Status = escrow.LegacyStatusInProgress
-
-	senderAccount.Nonce++
-
-	if err := sp.setEscrow(escrowID, e); err != nil {
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
 		return err
 	}
-	if err := sp.setAccount(sender, senderAccount); err != nil {
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Fund(id, caller); err != nil {
 		return err
 	}
-
-	fmt.Printf("Escrow Locked: Escrow %x is now in progress for buyer %s.\n",
-		escrowID, crypto.NewAddress(crypto.NHBPrefix, sender).String())
-	return nil
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
-	escrowID := tx.Data
-	e, err := sp.getEscrow(escrowID)
+	id, err := decodeEscrowID(tx.Data)
 	if err != nil {
 		return err
 	}
-
-	if e.Status != escrow.LegacyStatusInProgress {
-		return fmt.Errorf("only an in-progress escrow can be disputed")
-	}
-	if !bytes.Equal(sender, e.Buyer) {
-		return fmt.Errorf("only the buyer can dispute an escrow")
-	}
-
-	e.Status = escrow.LegacyStatusDisputed
-
-	senderAccount.Nonce++
-
-	if err := sp.setEscrow(escrowID, e); err != nil {
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
 		return err
 	}
-	if err := sp.setAccount(sender, senderAccount); err != nil {
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Dispute(id, caller); err != nil {
 		return err
 	}
-
-	fmt.Printf("Escrow Disputed: Escrow %x has been flagged for arbitration.\n", escrowID)
-	return nil
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, _ *types.Account, releaseToBuyer bool) error {
@@ -1160,39 +1111,20 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, _
 		return fmt.Errorf("sender is not the authorized arbitrator")
 	}
 
-	escrowID := tx.Data
-	e, err := sp.getEscrow(escrowID)
+	id, err := decodeEscrowID(tx.Data)
 	if err != nil {
 		return err
 	}
-
-	if e.Status != escrow.LegacyStatusDisputed {
-		return fmt.Errorf("escrow is not in a disputed state")
-	}
-
-	if releaseToBuyer {
-		e.Status = escrow.LegacyStatusReleased
-		buyerAccount, _ := sp.getAccount(e.Buyer)
-		buyerAccount.BalanceNHB.Add(buyerAccount.BalanceNHB, e.Amount)
-		if err := sp.setAccount(e.Buyer, buyerAccount); err != nil {
-			return err
-		}
-		fmt.Printf("Arbitration complete: Escrow %x released to buyer.\n", escrowID)
-	} else {
-		e.Status = escrow.LegacyStatusRefunded
-		sellerAccount, _ := sp.getAccount(e.Seller)
-		sellerAccount.BalanceNHB.Add(sellerAccount.BalanceNHB, e.Amount)
-		if err := sp.setAccount(e.Seller, sellerAccount); err != nil {
-			return err
-		}
-		fmt.Printf("Arbitration complete: Escrow %x refunded to seller.\n", escrowID)
-	}
-
-	// Save final escrow state
-	if err := sp.setEscrow(escrowID, e); err != nil {
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
 		return err
 	}
-	return nil
+	outcome := "refund"
+	if releaseToBuyer {
+		outcome = "release"
+	}
+	caller := bytesToAddress(sender)
+	return sp.EscrowEngine.Resolve(id, caller, outcome)
 }
 
 func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {
@@ -2281,28 +2213,6 @@ func (sp *StateProcessor) persistEligibleValidatorSet() error {
 	return sp.Trie.Update(validatorEligibleKey, encoded)
 }
 
-func (sp *StateProcessor) setEscrow(id []byte, e *escrow.LegacyEscrow) error {
-	hashedKey := ethcrypto.Keccak256(append([]byte("escrow-"), id...))
-	encoded, err := rlp.EncodeToBytes(e)
-	if err != nil {
-		return err
-	}
-	return sp.Trie.Update(hashedKey, encoded)
-}
-
-func (sp *StateProcessor) getEscrow(id []byte) (*escrow.LegacyEscrow, error) {
-	hashedKey := ethcrypto.Keccak256(append([]byte("escrow-"), id...))
-	data, err := sp.Trie.Get(hashedKey)
-	if err != nil || data == nil {
-		return nil, fmt.Errorf("escrow with ID %x not found", id)
-	}
-	e := new(escrow.LegacyEscrow)
-	if err := rlp.DecodeBytes(data, e); err != nil {
-		return nil, err
-	}
-	return e, nil
-}
-
 func (sp *StateProcessor) loadBigInt(key []byte) (*big.Int, error) {
 	data, err := sp.Trie.Get(key)
 	if err != nil {
@@ -2334,6 +2244,153 @@ func (sp *StateProcessor) writeBigInt(key []byte, amount *big.Int) error {
 
 func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error {
 	return sp.setAccount(addr, account)
+}
+
+func bytesToAddress(b []byte) [20]byte {
+	var addr [20]byte
+	copy(addr[:], b)
+	return addr
+}
+
+func decodeEscrowID(data []byte) ([32]byte, error) {
+	var id [32]byte
+	if len(data) != len(id) {
+		return id, fmt.Errorf("escrow id must be %d bytes", len(id))
+	}
+	copy(id[:], data)
+	return id, nil
+}
+
+func (sp *StateProcessor) updateSenderNonce(sender []byte, senderAccount *types.Account, newNonce uint64) error {
+	account, err := sp.getAccount(sender)
+	if err != nil {
+		return err
+	}
+	account.Nonce = newNonce
+	if senderAccount != nil {
+		senderAccount.Nonce = newNonce
+	}
+	return sp.setAccount(sender, account)
+}
+
+func (sp *StateProcessor) ensureEscrowReady(id [32]byte, manager *nhbstate.Manager) (*escrow.Escrow, error) {
+	if manager == nil {
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	if esc, ok := manager.EscrowGet(id); ok {
+		return esc, nil
+	}
+	return sp.migrateLegacyEscrow(id, manager)
+}
+
+func (sp *StateProcessor) migrateLegacyEscrow(id [32]byte, manager *nhbstate.Manager) (*escrow.Escrow, error) {
+	if manager == nil {
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	legacyKey := ethcrypto.Keccak256(append([]byte("escrow-"), id[:]...))
+	data, err := sp.Trie.Get(legacyKey)
+	if err != nil || len(data) == 0 {
+		return nil, fmt.Errorf("escrow %x not found", id)
+	}
+	legacy := new(escrow.LegacyEscrow)
+	if err := rlp.DecodeBytes(data, legacy); err != nil {
+		return nil, err
+	}
+	converted, err := sp.convertLegacyEscrow(id, legacy)
+	if err != nil {
+		return nil, err
+	}
+	if err := manager.EscrowPut(converted); err != nil {
+		return nil, err
+	}
+	if err := sp.Trie.Update(legacyKey, nil); err != nil {
+		return nil, err
+	}
+	if converted.Status == escrow.EscrowFunded || converted.Status == escrow.EscrowDisputed {
+		if err := manager.EscrowCredit(converted.ID, converted.Token, converted.Amount); err != nil {
+			return nil, err
+		}
+		if err := sp.creditEscrowVault(manager, converted.Token, converted.Amount); err != nil {
+			return nil, err
+		}
+	}
+	migrated, ok := manager.EscrowGet(converted.ID)
+	if !ok {
+		return nil, fmt.Errorf("escrow migration failed")
+	}
+	return migrated, nil
+}
+
+func (sp *StateProcessor) convertLegacyEscrow(id [32]byte, legacy *escrow.LegacyEscrow) (*escrow.Escrow, error) {
+	if legacy == nil {
+		return nil, fmt.Errorf("legacy escrow not found")
+	}
+	amount := big.NewInt(0)
+	if legacy.Amount != nil {
+		amount = new(big.Int).Set(legacy.Amount)
+	}
+	payer := bytesToAddress(legacy.Seller)
+	payee := payer
+	if len(legacy.Buyer) > 0 {
+		payee = bytesToAddress(legacy.Buyer)
+	}
+	status := escrow.EscrowFunded
+	switch legacy.Status {
+	case escrow.LegacyStatusReleased:
+		status = escrow.EscrowReleased
+	case escrow.LegacyStatusRefunded:
+		status = escrow.EscrowRefunded
+	case escrow.LegacyStatusDisputed:
+		status = escrow.EscrowDisputed
+	case escrow.LegacyStatusOpen, escrow.LegacyStatusInProgress:
+		status = escrow.EscrowFunded
+	default:
+		status = escrow.EscrowFunded
+	}
+	now := sp.now().UTC()
+	created := now.Unix()
+	deadline := now.Add(30 * 24 * time.Hour).Unix()
+	if deadline < created {
+		deadline = created
+	}
+	return &escrow.Escrow{
+		ID:        id,
+		Payer:     payer,
+		Payee:     payee,
+		Mediator:  ARBITRATOR_ADDRESS,
+		Token:     "NHB",
+		Amount:    amount,
+		FeeBps:    0,
+		Deadline:  deadline,
+		CreatedAt: created,
+		Status:    status,
+	}, nil
+}
+
+func (sp *StateProcessor) creditEscrowVault(manager *nhbstate.Manager, token string, amount *big.Int) error {
+	if amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return err
+	}
+	vault, err := manager.EscrowVaultAddress(normalized)
+	if err != nil {
+		return err
+	}
+	account, err := manager.GetAccount(vault[:])
+	if err != nil {
+		return err
+	}
+	ensureAccountDefaults(account)
+	switch normalized {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+	}
+	return manager.PutAccount(vault[:], account)
 }
 
 func (sp *StateProcessor) now() time.Time {
@@ -2404,11 +2461,14 @@ func (sp *StateProcessor) configureTradeEngine() (*escrow.TradeEngine, *nhbstate
 	}
 	sp.EscrowEngine.SetState(manager)
 	sp.EscrowEngine.SetEmitter(stateProcessorEmitter{sp: sp})
+	sp.EscrowEngine.SetFeeTreasury(sp.escrowFeeTreasury)
+	sp.EscrowEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
 	if sp.TradeEngine == nil {
 		sp.TradeEngine = escrow.NewTradeEngine(sp.EscrowEngine)
 	}
 	sp.TradeEngine.SetState(manager)
 	sp.TradeEngine.SetEmitter(stateProcessorEmitter{sp: sp})
+	sp.TradeEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
 	return sp.TradeEngine, manager
 }
 
