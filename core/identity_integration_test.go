@@ -35,10 +35,10 @@ func TestNodeIdentityAliasLifecycle(t *testing.T) {
 		t.Fatalf("set alias: %v", err)
 	}
 	resolved, ok := node.IdentityResolve("frankrocks")
-	if !ok {
+	if !ok || resolved == nil {
 		t.Fatalf("expected alias to resolve")
 	}
-	if resolved != addr {
+	if resolved.Primary != addr {
 		t.Fatalf("resolved address mismatch")
 	}
 	alias, ok := node.IdentityReverse(addr)
@@ -53,7 +53,7 @@ func TestNodeIdentityAliasLifecycle(t *testing.T) {
 		t.Fatalf("old alias should not resolve")
 	}
 	resolved, ok = node.IdentityResolve("frankierocks")
-	if !ok || resolved != addr {
+	if !ok || resolved == nil || resolved.Primary != addr {
 		t.Fatalf("new alias resolution failed")
 	}
 	alias, ok = node.IdentityReverse(addr)

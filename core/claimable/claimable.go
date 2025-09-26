@@ -51,14 +51,15 @@ var (
 )
 
 type Claimable struct {
-	ID        [32]byte
-	Payer     [20]byte
-	Token     string
-	Amount    *big.Int
-	HashLock  [32]byte
-	Deadline  int64
-	CreatedAt int64
-	Status    ClaimStatus
+	ID            [32]byte
+	Payer         [20]byte
+	Token         string
+	Amount        *big.Int
+	HashLock      [32]byte
+	RecipientHint [32]byte
+	Deadline      int64
+	CreatedAt     int64
+	Status        ClaimStatus
 }
 
 func (c *Claimable) Clone() *Claimable {
