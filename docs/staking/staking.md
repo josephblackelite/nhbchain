@@ -24,7 +24,7 @@ Each account (`types.Account`) now contains the following staking-related fields
 | `PendingUnbonds` | `[]types.StakeUnbond` | Queue of unbonding entries awaiting maturity. Each entry carries the unbond ID, validator, amount, and UNIX release time. |
 | `NextUnbondingID` | `uint64` | Monotonic counter used to assign unique IDs to new unbond entries. |
 
-Metadata is persisted via the account metadata trie and automatically populated for existing accounts with zero values. Validator set updates occur whenever an account's `Stake` crosses the minimum threshold (1,000 ZNHB by default).
+Metadata is persisted via the account metadata trie and automatically populated for existing accounts with zero values. Validator set updates occur whenever an account's `Stake` meets or exceeds the configurable `staking.minimumValidatorStake` parameter. Networks that have not yet set this governance parameter fall back to the legacy 1,000 ZNHB threshold exposed by `DefaultMinimumValidatorStake`. Operators can inspect or propose adjustments to this threshold through the [governance parameter catalog](../governance/params.md).
 
 ### Unbonding Entries
 
@@ -77,7 +77,7 @@ Entries are appended when `StakeUndelegate` is invoked and removed upon successf
   "stake": "1000",
   "lockedZNHB": "1000",
   "delegatedValidator": "nhb1validator...",
-  "pendingUnbonds": [
+ "pendingUnbonds": [
     {
       "id": 1,
       "validator": "nhb1validator...",
