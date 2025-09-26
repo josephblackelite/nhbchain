@@ -68,9 +68,9 @@ func TestOracleAggregatorPriorityFallback(t *testing.T) {
 func TestOracleAggregatorTWAP(t *testing.T) {
 	now := time.Now().Add(-3 * time.Minute).UTC()
 	quotes := []PriceQuote{
-		{Rate: big.NewRat(1, 1), Timestamp: now.Add(0)},
-		{Rate: big.NewRat(2, 1), Timestamp: now.Add(90 * time.Second)},
-		{Rate: big.NewRat(4, 1), Timestamp: now.Add(3 * time.Minute)},
+		{Rate: big.NewRat(1, 1), Timestamp: now.Add(0), Source: "alpha"},
+		{Rate: big.NewRat(2, 1), Timestamp: now.Add(90 * time.Second), Source: "beta"},
+		{Rate: big.NewRat(4, 1), Timestamp: now.Add(3 * time.Minute), Source: "beta"},
 	}
 	idx := 0
 	agg := NewOracleAggregator([]string{"feed"}, 10*time.Minute)
@@ -98,6 +98,18 @@ func TestOracleAggregatorTWAP(t *testing.T) {
 	}
 	if got := result.Average.FloatString(3); got != "2.333" {
 		t.Fatalf("unexpected twap: %s", got)
+	}
+	if result.Median == nil || result.Median.FloatString(0) != "2" {
+		t.Fatalf("unexpected median: %v", result.Median)
+	}
+	if result.Window != 5*time.Minute {
+		t.Fatalf("expected window 5m, got %s", result.Window)
+	}
+	if len(result.Feeders) != 2 {
+		t.Fatalf("unexpected feeders: %+v", result.Feeders)
+	}
+	if result.ProofID == "" {
+		t.Fatalf("expected proof id")
 	}
 	if result.Start.After(result.End) {
 		t.Fatalf("invalid window: %v -> %v", result.Start, result.End)

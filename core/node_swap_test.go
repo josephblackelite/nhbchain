@@ -25,6 +25,8 @@ func TestSwapRecordBurnPersistsReceipt(t *testing.T) {
 			MintAmountWei:   big.NewInt(1),
 			QuoteTimestamp:  time.Now().Unix(),
 			OracleSource:    "manual",
+			PriceProofID:    "proof-1",
+			OracleFeeders:   []string{"manual"},
 			MinterSignature: "sig",
 		}
 		return ledger.Put(record)
@@ -73,12 +75,15 @@ func TestSwapRecordBurnPersistsReceipt(t *testing.T) {
 	emitted := node.Events()
 	foundBurn := false
 	foundRecon := false
+	foundProof := false
 	for _, evt := range emitted {
 		switch evt.Type {
 		case events.TypeSwapBurnRecorded:
 			foundBurn = true
 		case events.TypeSwapTreasuryReconciled:
 			foundRecon = true
+		case events.TypeSwapRedeemProof:
+			foundProof = true
 		}
 	}
 	if !foundBurn {
@@ -86,6 +91,9 @@ func TestSwapRecordBurnPersistsReceipt(t *testing.T) {
 	}
 	if !foundRecon {
 		t.Fatalf("expected treasury reconciled event")
+	}
+	if !foundProof {
+		t.Fatalf("expected redeem proof event")
 	}
 }
 

@@ -61,24 +61,27 @@ func TestLedgerPutAndGet(t *testing.T) {
 	store := newMockStorage()
 	ledger := NewLedger(store)
 	ledger.SetClock(func() time.Time { return time.Unix(1700000000, 0) })
-        record := &VoucherRecord{
-                Provider:        "nowpayments",
-                ProviderTxID:    "np-1",
-                FiatCurrency:    "USD",
-                FiatAmount:      "100.00",
-                USD:             "100.00",
-                Rate:            "0.50",
-                Token:           "ZNHB",
-                MintAmountWei:   big.NewInt(5000000000000000000),
-                QuoteTimestamp:  time.Unix(1700000000, 0).Unix(),
-                OracleSource:    "manual",
-                MinterSignature: "0xabc",
-                TwapRate:        "0.48",
-                TwapObservations: 4,
-                TwapWindowSeconds: 300,
-                TwapStart:       time.Unix(1699999700, 0).Unix(),
-                TwapEnd:         time.Unix(1700000000, 0).Unix(),
-        }
+	record := &VoucherRecord{
+		Provider:          "nowpayments",
+		ProviderTxID:      "np-1",
+		FiatCurrency:      "USD",
+		FiatAmount:        "100.00",
+		USD:               "100.00",
+		Rate:              "0.50",
+		Token:             "ZNHB",
+		MintAmountWei:     big.NewInt(5000000000000000000),
+		QuoteTimestamp:    time.Unix(1700000000, 0).Unix(),
+		OracleSource:      "manual",
+		OracleMedian:      "0.49",
+		OracleFeeders:     []string{"alpha", "beta"},
+		PriceProofID:      "proof-123",
+		MinterSignature:   "0xabc",
+		TwapRate:          "0.48",
+		TwapObservations:  4,
+		TwapWindowSeconds: 300,
+		TwapStart:         time.Unix(1699999700, 0).Unix(),
+		TwapEnd:           time.Unix(1700000000, 0).Unix(),
+	}
 	if err := ledger.Put(record); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -89,12 +92,21 @@ func TestLedgerPutAndGet(t *testing.T) {
 	if fetched.Provider != "nowpayments" {
 		t.Fatalf("unexpected provider %s", fetched.Provider)
 	}
-        if fetched.MintAmountWei.Cmp(record.MintAmountWei) != 0 {
-                t.Fatalf("unexpected amount %s", fetched.MintAmountWei)
-        }
-        if fetched.TwapRate != "0.48" || fetched.TwapObservations != 4 {
-                t.Fatalf("unexpected twap data: %+v", fetched)
-        }
+	if fetched.MintAmountWei.Cmp(record.MintAmountWei) != 0 {
+		t.Fatalf("unexpected amount %s", fetched.MintAmountWei)
+	}
+	if fetched.TwapRate != "0.48" || fetched.TwapObservations != 4 {
+		t.Fatalf("unexpected twap data: %+v", fetched)
+	}
+	if fetched.OracleMedian != "0.49" {
+		t.Fatalf("unexpected median: %s", fetched.OracleMedian)
+	}
+	if fetched.PriceProofID != "proof-123" {
+		t.Fatalf("unexpected proof id: %s", fetched.PriceProofID)
+	}
+	if len(fetched.OracleFeeders) != 2 {
+		t.Fatalf("unexpected feeders: %+v", fetched.OracleFeeders)
+	}
 }
 
 func TestLedgerListAndCursor(t *testing.T) {
@@ -156,9 +168,9 @@ func TestLedgerExportCSV(t *testing.T) {
 	store := newMockStorage()
 	ledger := NewLedger(store)
 	ledger.SetClock(func() time.Time { return time.Unix(1700000400, 0) })
-        _ = ledger.Put(&VoucherRecord{Provider: "p", ProviderTxID: "a", FiatCurrency: "USD", FiatAmount: "10", Rate: "0.1", Token: "ZNHB", MintAmountWei: big.NewInt(100), QuoteTimestamp: time.Unix(1700000400, 0).Unix(), OracleSource: "manual", MinterSignature: "0xsig", TwapRate: "0.11", TwapObservations: 3, TwapWindowSeconds: 180, TwapStart: time.Unix(1700000300, 0).Unix(), TwapEnd: time.Unix(1700000400, 0).Unix()})
-        ledger.SetClock(func() time.Time { return time.Unix(1700000500, 0) })
-        _ = ledger.Put(&VoucherRecord{Provider: "p", ProviderTxID: "b", FiatCurrency: "USD", FiatAmount: "20", Rate: "0.2", Token: "ZNHB", MintAmountWei: big.NewInt(200), QuoteTimestamp: time.Unix(1700000500, 0).Unix(), OracleSource: "manual", MinterSignature: "0xsig", TwapRate: "0.19", TwapObservations: 4, TwapWindowSeconds: 240, TwapStart: time.Unix(1700000400, 0).Unix(), TwapEnd: time.Unix(1700000500, 0).Unix()})
+	_ = ledger.Put(&VoucherRecord{Provider: "p", ProviderTxID: "a", FiatCurrency: "USD", FiatAmount: "10", Rate: "0.1", Token: "ZNHB", MintAmountWei: big.NewInt(100), QuoteTimestamp: time.Unix(1700000400, 0).Unix(), OracleSource: "manual", OracleMedian: "0.11", OracleFeeders: []string{"manual"}, PriceProofID: "proof-a", MinterSignature: "0xsig", TwapRate: "0.11", TwapObservations: 3, TwapWindowSeconds: 180, TwapStart: time.Unix(1700000300, 0).Unix(), TwapEnd: time.Unix(1700000400, 0).Unix()})
+	ledger.SetClock(func() time.Time { return time.Unix(1700000500, 0) })
+	_ = ledger.Put(&VoucherRecord{Provider: "p", ProviderTxID: "b", FiatCurrency: "USD", FiatAmount: "20", Rate: "0.2", Token: "ZNHB", MintAmountWei: big.NewInt(200), QuoteTimestamp: time.Unix(1700000500, 0).Unix(), OracleSource: "manual", OracleMedian: "0.19", OracleFeeders: []string{"manual"}, PriceProofID: "proof-b", MinterSignature: "0xsig", TwapRate: "0.19", TwapObservations: 4, TwapWindowSeconds: 240, TwapStart: time.Unix(1700000400, 0).Unix(), TwapEnd: time.Unix(1700000500, 0).Unix()})
 	encoded, count, total, err := ledger.ExportCSV(0, 0)
 	if err != nil {
 		t.Fatalf("export: %v", err)
@@ -177,12 +189,15 @@ func TestLedgerExportCSV(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(rows))
 	}
-        if !strings.Contains(rows[0], "twapRate") {
-                t.Fatalf("expected twap header, got %s", rows[0])
-        }
-        if !strings.Contains(rows[1], "0.11") || !strings.Contains(rows[2], "0.19") {
-                t.Fatalf("unexpected csv rows: %v", rows)
-        }
+	if !strings.Contains(rows[0], "oracleMedian") {
+		t.Fatalf("expected oracle metadata header, got %s", rows[0])
+	}
+	if !strings.Contains(rows[0], "twapRate") {
+		t.Fatalf("expected twap header, got %s", rows[0])
+	}
+	if !strings.Contains(rows[1], "0.11") || !strings.Contains(rows[2], "0.19") {
+		t.Fatalf("unexpected csv rows: %v", rows)
+	}
 }
 
 func TestLedgerMarkReconciled(t *testing.T) {

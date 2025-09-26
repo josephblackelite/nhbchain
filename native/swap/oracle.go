@@ -1,6 +1,8 @@
 package swap
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,9 +30,13 @@ type PriceQuote struct {
 // time window covered by the observation set.
 type TWAPResult struct {
 	Average *big.Rat
+	Median  *big.Rat
 	Start   time.Time
 	End     time.Time
 	Count   int
+	Window  time.Duration
+	Feeders []string
+	ProofID string
 }
 
 // FeedHealth captures metadata about individual feed observations used to drive
@@ -615,13 +621,15 @@ func (a *OracleAggregator) TWAP(base, quote string, window time.Duration) (TWAPR
 		}
 		cutoff = end.Add(-window)
 	}
-        sum := big.NewRat(0, 1)
-        used := 0
-        for i := 0; i < len(bucket); i++ {
-                entry := bucket[i]
-                if window > 0 && entry.Timestamp.Before(cutoff) {
-                        continue
-                }
+	sum := big.NewRat(0, 1)
+	used := 0
+	samples := make([]PriceQuote, 0, len(bucket))
+	feeders := make(map[string]struct{})
+	for i := 0; i < len(bucket); i++ {
+		entry := bucket[i]
+		if window > 0 && entry.Timestamp.Before(cutoff) {
+			continue
+		}
 		if entry.Rate == nil {
 			continue
 		}
@@ -631,17 +639,94 @@ func (a *OracleAggregator) TWAP(base, quote string, window time.Duration) (TWAPR
 		if start.IsZero() || entry.Timestamp.Before(start) {
 			start = entry.Timestamp
 		}
-                if entry.Timestamp.After(end) {
-                        end = entry.Timestamp
-                }
-                sum.Add(sum, new(big.Rat).Set(entry.Rate))
-                used++
-        }
-        if used == 0 {
-                return TWAPResult{}, ErrNoFreshQuote
-        }
-        avg := new(big.Rat).Quo(sum, big.NewRat(int64(used), 1))
-        return TWAPResult{Average: avg, Start: start, End: end, Count: used}, nil
+		if entry.Timestamp.After(end) {
+			end = entry.Timestamp
+		}
+		sum.Add(sum, new(big.Rat).Set(entry.Rate))
+		used++
+		sample := entry.Clone()
+		sample.Timestamp = sample.Timestamp.UTC()
+		samples = append(samples, sample)
+		source := strings.TrimSpace(strings.ToLower(sample.Source))
+		if source != "" {
+			feeders[source] = struct{}{}
+		}
+	}
+	if used == 0 {
+		return TWAPResult{}, ErrNoFreshQuote
+	}
+	avg := new(big.Rat).Quo(sum, big.NewRat(int64(used), 1))
+
+	median := computeMedian(samples)
+	feederList := make([]string, 0, len(feeders))
+	for name := range feeders {
+		feederList = append(feederList, name)
+	}
+	sort.Strings(feederList)
+
+	proofID := computeTWAPProofID(baseSym, quoteSym, window, samples)
+
+	return TWAPResult{
+		Average: avg,
+		Median:  median,
+		Start:   start,
+		End:     end,
+		Count:   used,
+		Window:  window,
+		Feeders: feederList,
+		ProofID: proofID,
+	}, nil
+}
+
+func computeMedian(samples []PriceQuote) *big.Rat {
+	if len(samples) == 0 {
+		return nil
+	}
+	values := make([]*big.Rat, 0, len(samples))
+	for _, sample := range samples {
+		if sample.Rate == nil {
+			continue
+		}
+		values = append(values, new(big.Rat).Set(sample.Rate))
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Slice(values, func(i, j int) bool {
+		return values[i].Cmp(values[j]) < 0
+	})
+	mid := len(values) / 2
+	if len(values)%2 == 1 {
+		return new(big.Rat).Set(values[mid])
+	}
+	sum := new(big.Rat).Add(values[mid-1], values[mid])
+	return sum.Quo(sum, big.NewRat(2, 1))
+}
+
+func computeTWAPProofID(base, quote string, window time.Duration, samples []PriceQuote) string {
+	if len(samples) == 0 {
+		return ""
+	}
+	builder := strings.Builder{}
+	builder.WriteString(strings.TrimSpace(strings.ToUpper(base)))
+	builder.WriteString(":" + strings.TrimSpace(strings.ToUpper(quote)))
+	builder.WriteString("|w=")
+	builder.WriteString(strconv.FormatInt(int64(window/time.Nanosecond), 10))
+	for _, sample := range samples {
+		builder.WriteString("|t=")
+		builder.WriteString(strconv.FormatInt(sample.Timestamp.UTC().UnixNano(), 10))
+		if sample.Rate != nil {
+			builder.WriteString("|r=")
+			builder.WriteString(sample.Rate.FloatString(18))
+		}
+		trimmed := strings.TrimSpace(strings.ToLower(sample.Source))
+		if trimmed != "" {
+			builder.WriteString("|s=")
+			builder.WriteString(trimmed)
+		}
+	}
+	sum := sha256.Sum256([]byte(builder.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 // Health reports the last observation timestamp and sample counts for each
