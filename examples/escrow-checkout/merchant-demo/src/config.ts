@@ -49,7 +49,7 @@ function validateConfig(config: Partial<EscrowDemoConfig>): asserts config is Es
 export async function resolveConfig(): Promise<EscrowDemoConfig> {
   const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
   const config: Partial<EscrowDemoConfig> = {
-    apiBase: process.env.NHB_API_BASE || 'https://api.nhbcoin.net',
+    apiBase: process.env.NHB_API_BASE || 'https://gw.nhbcoin.net',
     apiKey: process.env.NHB_API_KEY,
     apiSecret: process.env.NHB_API_SECRET,
     webhookSecret: process.env.NHB_WEBHOOK_SECRET,

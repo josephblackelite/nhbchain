@@ -8,6 +8,36 @@ interface ApiAmount {
   value: string;
 }
 
+interface ApiMilestone {
+  id: string;
+  title: string;
+  status: string;
+  target_amount?: ApiAmount;
+  released_amount?: ApiAmount;
+  completed_at?: string;
+}
+
+interface ApiHistoryBase {
+  at: string;
+  note?: string;
+  type?: string;
+}
+
+interface ApiStatusHistory extends ApiHistoryBase {
+  status: string;
+}
+
+interface ApiMilestoneHistory extends ApiHistoryBase {
+  milestone?: {
+    title?: string;
+    amount?: ApiAmount;
+  };
+  label?: string;
+  amount?: ApiAmount;
+}
+
+type ApiHistoryItem = ApiStatusHistory | ApiMilestoneHistory;
+
 interface ApiSession {
   session_id: string;
   escrow_id: string;
@@ -19,11 +49,9 @@ interface ApiSession {
   customer?: {
     wallet_address?: string;
   };
-  history?: Array<{
-    status: string;
-    at: string;
-    note?: string;
-  }>;
+  milestone_mode?: boolean;
+  history?: ApiHistoryItem[];
+  milestones?: ApiMilestone[];
 }
 
 interface ApiResponse<T> {
@@ -42,6 +70,38 @@ function normaliseAmount(amount: ApiAmount): MoneyAmount {
   };
 }
 
+function transformHistory(item: ApiHistoryItem): EscrowSession['history'][number] {
+  if ((item as ApiMilestoneHistory).milestone || item.type === 'milestone') {
+    const milestone = (item as ApiMilestoneHistory).milestone;
+    const amount = (item as ApiMilestoneHistory).amount || milestone?.amount;
+    return {
+      type: 'milestone',
+      at: item.at,
+      label: (item as ApiMilestoneHistory).label || milestone?.title || 'Milestone event',
+      amount: amount ? normalizeAmount(amount) : undefined,
+      note: item.note,
+    };
+  }
+  const statusItem = item as ApiStatusHistory;
+  return {
+    type: 'status',
+    status: normaliseStatus(statusItem.status),
+    at: statusItem.at,
+    note: item.note,
+  };
+}
+
+function transformMilestone(milestone: ApiMilestone) {
+  return {
+    id: milestone.id,
+    title: milestone.title,
+    status: milestone.status,
+    targetAmount: milestone.target_amount ? normalizeAmount(milestone.target_amount) : undefined,
+    releasedAmount: milestone.released_amount ? normalizeAmount(milestone.released_amount) : undefined,
+    completedAt: milestone.completed_at,
+  };
+}
+
 function transformSession(session: ApiSession): EscrowSession {
   return {
     sessionId: session.session_id,
@@ -52,11 +112,9 @@ function transformSession(session: ApiSession): EscrowSession {
     status: normaliseStatus(session.status),
     expiresAt: session.expires_at,
     customer: session.customer?.wallet_address ? { walletAddress: session.customer.wallet_address } : undefined,
-    history: session.history?.map((item) => ({
-      status: normaliseStatus(item.status),
-      at: item.at,
-      note: item.note
-    }))
+    milestoneMode: session.milestone_mode ?? false,
+    history: session.history?.map((item) => transformHistory(item)),
+    milestones: session.milestones?.map((milestone) => transformMilestone(milestone))
   };
 }
 
@@ -107,15 +165,21 @@ export class EscrowClient {
     return response.data.data;
   }
 
-  async createCheckoutSession(orderId: string, walletAddress?: string): Promise<EscrowSession> {
+  async createCheckoutSession(
+    orderId: string,
+    walletAddress?: string,
+    options?: { milestoneMode?: boolean }
+  ): Promise<EscrowSession> {
+    const milestoneMode = options?.milestoneMode ?? false;
     const session = await this.request<ApiSession>(
       'POST',
       '/v1/escrow/checkout/sessions',
       {
         order_id: orderId,
-        customer_wallet_address: walletAddress
+        customer_wallet_address: walletAddress,
+        milestone_mode: milestoneMode
       },
-      { idempotencyKey: orderId }
+      { idempotencyKey: milestoneMode ? `${orderId}-milestone` : orderId }
     );
     return transformSession(session);
   }

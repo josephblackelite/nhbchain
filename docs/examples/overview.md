@@ -39,9 +39,9 @@ The first run installs dependencies, generates the SDK build artifacts (if any),
 
 The `.env.example` template points at the public NHB infrastructure so a fresh clone works out-of-the-box:
 
-- `https://rpc.nhbcoin.net` for HTTP JSON-RPC calls
-- `wss://ws.nhbcoin.net` for WebSocket subscriptions
-- `https://api.nhbcoin.net` for REST and gateway integrations
+- `https://api.nhbcoin.net/rpc` for HTTP JSON-RPC calls
+- `wss://api.nhbcoin.net/ws` for WebSocket subscriptions
+- `https://gw.nhbcoin.net` for REST and gateway integrations
 
 Rotate the demo API credentials before deploying to production.
 

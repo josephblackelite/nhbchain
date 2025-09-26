@@ -4,6 +4,8 @@ export interface BusinessResult {
   name: string;
   paymaster: string;
   merchants: string[];
+  creatorRewardsPool?: string;
+  fanRewardsEnabled?: boolean;
 }
 
 export interface ProgramResult {
@@ -25,4 +27,19 @@ export interface ProgramStats {
   txCount: string;
   capUsage?: string;
   skips?: string;
+}
+
+export interface FanRewardsConfig {
+  pool: string;
+  creatorShareBps: number;
+  fanShareBps: number;
+  treasuryShareBps: number;
+  enabled: boolean;
+}
+
+export interface FanRewardsStats {
+  distributed: string;
+  pending: string;
+  supporters: number;
+  lastPayoutAt?: number;
 }

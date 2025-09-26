@@ -142,6 +142,37 @@ const STYLE_SHEET = `
   color: #4b5563;
   font-size: 14px;
 }
+
+.nhb-escrow-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 8px;
+  font-size: 14px;
+  color: #1f2937;
+}
+
+.nhb-escrow-milestones {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nhb-escrow-milestone {
+  border: 1px solid #cbd5f5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.nhb-escrow-milestone strong {
+  font-size: 14px;
+  color: #1f2937;
+}
+
+.nhb-escrow-milestone small {
+  color: #4b5563;
+}
 `;
 
 function ensureStylesInjected() {
@@ -166,6 +197,30 @@ export interface MoneyAmount {
   value: string;
 }
 
+export type EscrowSessionEvent =
+  | {
+      type: 'status';
+      status: EscrowSessionStatus;
+      at: string;
+      note?: string;
+    }
+  | {
+      type: 'milestone';
+      at: string;
+      label: string;
+      amount?: MoneyAmount;
+      note?: string;
+    };
+
+export interface EscrowMilestone {
+  id: string;
+  title: string;
+  status: string;
+  targetAmount?: MoneyAmount;
+  releasedAmount?: MoneyAmount;
+  completedAt?: string;
+}
+
 export interface EscrowSession {
   sessionId: string;
   escrowId: string;
@@ -177,11 +232,9 @@ export interface EscrowSession {
   customer?: {
     walletAddress?: string;
   };
-  history?: Array<{
-    status: EscrowSessionStatus;
-    at: string;
-    note?: string;
-  }>;
+  milestoneMode?: boolean;
+  history?: EscrowSessionEvent[];
+  milestones?: EscrowMilestone[];
   actions?: {
     deliverUrl?: string;
     releaseUrl?: string;
@@ -229,6 +282,10 @@ export interface EscrowCheckoutProps {
    * autoCreate=false and the parent wants manual control.
    */
   onController?: (controller: EscrowCheckoutController) => void;
+  /** Enable the Milestone Mode toggle within the widget (default true). */
+  enableMilestoneToggle?: boolean;
+  /** Default value for Milestone Mode before a session is created. */
+  defaultMilestoneMode?: boolean;
 }
 
 export interface EscrowCheckoutController {
@@ -270,12 +327,19 @@ async function requestJSON<T>(input: RequestInfo, init?: RequestInit): Promise<T
   return (await res.json()) as T;
 }
 
+function historyKey(entry: EscrowSessionEvent) {
+  if (entry.type === 'status') {
+    return `${entry.type}-${entry.status}-${entry.at}`;
+  }
+  return `${entry.type}-${entry.label}-${entry.at}`;
+}
+
 function mergeHistory(a?: EscrowSession['history'], b?: EscrowSession['history']) {
   if (!a) return b;
   if (!b) return a;
-  const map = new Map<string, { status: EscrowSessionStatus; at: string; note?: string }>();
+  const map = new Map<string, EscrowSessionEvent>();
   [...a, ...b].forEach((entry) => {
-    map.set(`${entry.status}-${entry.at}`, entry);
+    map.set(historyKey(entry), entry);
   });
   return Array.from(map.values()).sort((x, y) => x.at.localeCompare(y.at));
 }
@@ -285,9 +349,24 @@ function SessionHistory({ history }: { history: EscrowSession['history'] }) {
   return (
     <ol className="nhb-escrow-history">
       {history.map((entry) => (
-        <li key={`${entry.status}-${entry.at}`}>
-          <span className="nhb-escrow-history-status">{entry.status.replace('_', ' ')}</span>
-          <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time>
+        <li key={historyKey(entry)}>
+          {entry.type === 'status' ? (
+            <>
+              <span className="nhb-escrow-history-status">{entry.status.replace('_', ' ')}</span>
+              <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time>
+            </>
+          ) : (
+            <>
+              <span className="nhb-escrow-history-status">Milestone</span>
+              <strong style={{ display: 'block' }}>{entry.label}</strong>
+              <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time>
+              {entry.amount ? (
+                <small>
+                  Amount: {entry.amount.value} {entry.amount.currency}
+                </small>
+              ) : null}
+            </>
+          )}
           {entry.note && <p className="nhb-escrow-history-note">{entry.note}</p>}
         </li>
       ))}
@@ -305,7 +384,9 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
   onStatusChange,
   className,
   renderHistory,
-  onController
+  onController,
+  enableMilestoneToggle = true,
+  defaultMilestoneMode = false
 }) => {
   useEffect(() => {
     ensureStylesInjected();
@@ -316,8 +397,13 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isDelivering, setIsDelivering] = useState<boolean>(false);
   const [isReleasing, setIsReleasing] = useState<boolean>(false);
+  const [milestoneMode, setMilestoneMode] = useState<boolean>(defaultMilestoneMode);
   const statusRef = useRef<EscrowSessionStatus | null>(null);
   const pollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    setMilestoneMode(defaultMilestoneMode);
+  }, [defaultMilestoneMode]);
 
   const baseUrl = merchantBaseUrl.replace(/\/$/, '');
 
@@ -325,9 +411,13 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
     (next: EscrowSession) => {
       setSession((prev) => {
         const history = mergeHistory(prev?.history, next.history);
-        const merged = { ...(prev ?? {}), ...next, history } as EscrowSession;
+        const milestones = next.milestones ?? prev?.milestones;
+        const merged = { ...(prev ?? {}), ...next, history, milestones } as EscrowSession;
         return merged;
       });
+      if (typeof next.milestoneMode === 'boolean') {
+        setMilestoneMode(next.milestoneMode);
+      }
       if (statusRef.current !== next.status) {
         statusRef.current = next.status;
         onStatusChange?.(next.status);
@@ -353,10 +443,13 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
     try {
       const data = await requestJSON<EscrowSession>(`${baseUrl}/api/checkout/session`, {
         method: 'POST',
-        body: JSON.stringify({ orderId, customerWalletAddress })
+        body: JSON.stringify({ orderId, customerWalletAddress, milestoneMode })
       });
       statusRef.current = data.status;
       setSession(data);
+      if (typeof data.milestoneMode === 'boolean') {
+        setMilestoneMode(data.milestoneMode);
+      }
       onStatusChange?.(data.status);
     } catch (err) {
       const restErr = err as RestError;
@@ -364,7 +457,7 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
     } finally {
       setIsLoading(false);
     }
-  }, [baseUrl, customerWalletAddress, isLoading, onStatusChange, orderId]);
+  }, [baseUrl, customerWalletAddress, isLoading, milestoneMode, onStatusChange, orderId]);
 
   const markDelivered = useCallback(async () => {
     if (!session?.escrowId) return;
@@ -399,6 +492,17 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
       setIsReleasing(false);
     }
   }, [baseUrl, session?.escrowId, updateSession]);
+
+  const handleToggleMilestoneMode = (value: boolean) => {
+    setMilestoneMode(value);
+    setSession(null);
+    statusRef.current = null;
+    setError(null);
+    if (pollerRef.current) {
+      clearInterval(pollerRef.current);
+      pollerRef.current = null;
+    }
+  };
 
   useEffect(() => {
     const controller: EscrowCheckoutController = {
@@ -472,6 +576,17 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
         )}
       </header>
 
+      {enableMilestoneToggle ? (
+        <label className="nhb-escrow-toggle">
+          <input
+            type="checkbox"
+            checked={milestoneMode}
+            onChange={(event) => handleToggleMilestoneMode(event.target.checked)}
+          />
+          Milestone mode {milestoneMode ? 'enabled' : 'disabled'}
+        </label>
+      ) : null}
+
       {error && <div className="nhb-escrow-error">{error}</div>}
 
       {!session && (
@@ -497,6 +612,10 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
             <div>
               <dt>Deposit address</dt>
               <dd className="nhb-escrow-address">{session.depositAddress}</dd>
+            </div>
+            <div>
+              <dt>Mode</dt>
+              <dd>{session.milestoneMode ? 'Milestone' : 'Standard'}</dd>
             </div>
             {session.customer?.walletAddress && (
               <div>
@@ -529,6 +648,30 @@ export const EscrowCheckout: React.FC<EscrowCheckoutProps> = ({
               merchant demo server.
             </p>
           )}
+
+          {session.milestones?.length ? (
+            <div className="nhb-escrow-milestones">
+              {session.milestones.map((milestone) => (
+                <div key={`${milestone.id}-${milestone.status}`} className="nhb-escrow-milestone">
+                  <strong>{milestone.title}</strong>
+                  <small>Status: {milestone.status}</small>
+                  {milestone.targetAmount ? (
+                    <small>
+                      Target: {milestone.targetAmount.value} {milestone.targetAmount.currency}
+                    </small>
+                  ) : null}
+                  {milestone.releasedAmount ? (
+                    <small>
+                      Released: {milestone.releasedAmount.value} {milestone.releasedAmount.currency}
+                    </small>
+                  ) : null}
+                  {milestone.completedAt ? (
+                    <small>Completed: {new Date(milestone.completedAt).toLocaleString()}</small>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           {session.history && (renderHistory ? renderHistory(session.history) : <SessionHistory history={session.history} />)}
         </div>

@@ -9,12 +9,21 @@ import { createWebhookVerifier, WebhookEvent } from './webhooks.js';
 interface CreateSessionBody {
   orderId: string;
   customerWalletAddress?: string;
+  milestoneMode?: boolean;
 }
 
 interface EscrowWebhookPayload {
   escrow_id: string;
   status: string;
   note?: string;
+  event_type?: 'status' | 'milestone';
+  milestone?: {
+    title?: string;
+    amount?: {
+      currency: string;
+      value: string;
+    };
+  };
   amount?: {
     currency: string;
     value: string;
@@ -29,12 +38,18 @@ const orderIdBySession = new Map<string, string>();
 
 const normaliseStatus = (status: string) => status.toUpperCase() as EscrowSession['status'];
 
-function upsertSession(session: EscrowSession, orderId?: string) {
-  const resolvedOrderId = orderId || orderIdByEscrow.get(session.escrowId) || orderIdBySession.get(session.sessionId);
-  if (resolvedOrderId) {
-    sessionsByOrder.set(resolvedOrderId, session);
-    orderIdByEscrow.set(session.escrowId, resolvedOrderId);
-    orderIdBySession.set(session.sessionId, resolvedOrderId);
+const makeOrderKey = (orderId: string, milestoneMode?: boolean) =>
+  milestoneMode ? `${orderId}#milestone` : orderId;
+
+const mapAmount = (amount?: { currency: string; value: string }) =>
+  amount ? { currency: amount.currency, value: amount.value } : undefined;
+
+function upsertSession(session: EscrowSession, orderKey?: string) {
+  const resolvedOrderKey = orderKey || orderIdByEscrow.get(session.escrowId) || orderIdBySession.get(session.sessionId);
+  if (resolvedOrderKey) {
+    sessionsByOrder.set(resolvedOrderKey, session);
+    orderIdByEscrow.set(session.escrowId, resolvedOrderKey);
+    orderIdBySession.set(session.sessionId, resolvedOrderKey);
   }
   sessionsBySessionId.set(session.sessionId, session);
   sessionsByEscrowId.set(session.escrowId, session);
@@ -82,15 +97,53 @@ async function bootstrap() {
     const existing = getSessionByEscrowId(payload.escrow_id);
     if (existing) {
       const history = existing.history ? [...existing.history] : [];
-      const status = normaliseStatus(payload.status);
-      history.push({ status, at: event.created_at, note: payload.note });
-      const updated: EscrowSession = {
-        ...existing,
-        status,
-        history
-      };
-      upsertSession(updated);
-      console.log('Webhook updated escrow session', updated.escrowId, updated.status);
+      const statusKey = payload.status.toUpperCase();
+      const isMilestoneEvent = payload.event_type === 'milestone' || statusKey.startsWith('MILESTONE');
+
+      if (isMilestoneEvent) {
+        const amount = mapAmount(payload.milestone?.amount || payload.amount);
+        history.push({
+          type: 'milestone',
+          at: event.created_at,
+          label: payload.milestone?.title || statusKey,
+          amount,
+          note: payload.note
+        });
+        let milestones = existing.milestones ? [...existing.milestones] : [];
+        if (payload.milestone?.title) {
+          const index = milestones.findIndex((m) => m.title === payload.milestone?.title);
+          const next = {
+            id: payload.milestone?.title || `milestone-${milestones.length + 1}`,
+            title: payload.milestone?.title || statusKey,
+            status: statusKey,
+            targetAmount: amount,
+            releasedAmount: mapAmount(payload.amount),
+            completedAt: event.created_at
+          };
+          if (index >= 0) {
+            milestones[index] = { ...milestones[index], ...next };
+          } else {
+            milestones.push(next);
+          }
+        }
+        const updated: EscrowSession = {
+          ...existing,
+          history,
+          milestones
+        };
+        upsertSession(updated);
+        console.log('Webhook recorded milestone event for escrow', updated.escrowId);
+      } else {
+        const status = normaliseStatus(payload.status);
+        history.push({ type: 'status', status, at: event.created_at, note: payload.note });
+        const updated: EscrowSession = {
+          ...existing,
+          status,
+          history
+        };
+        upsertSession(updated);
+        console.log('Webhook updated escrow session', updated.escrowId, updated.status);
+      }
     } else {
       console.warn('Received webhook for unknown escrow', payload.escrow_id);
     }
@@ -101,21 +154,22 @@ async function bootstrap() {
   app.use(express.json());
 
   app.post('/api/checkout/session', async (req: Request<unknown, unknown, CreateSessionBody>, res: Response) => {
-    const { orderId, customerWalletAddress } = req.body || {};
+    const { orderId, customerWalletAddress, milestoneMode } = req.body || {};
     if (!orderId) {
       res.status(400).json({ message: 'orderId is required' });
       return;
     }
 
-    const existing = sessionsByOrder.get(orderId);
+    const orderKey = makeOrderKey(orderId, milestoneMode);
+    const existing = sessionsByOrder.get(orderKey);
     if (existing) {
       res.json(existing);
       return;
     }
 
     try {
-      const session = await client.createCheckoutSession(orderId, customerWalletAddress);
-      upsertSession(session, orderId);
+      const session = await client.createCheckoutSession(orderId, customerWalletAddress, { milestoneMode });
+      upsertSession(session, orderKey);
       res.json(session);
     } catch (err) {
       console.error('Failed to create checkout session', err);

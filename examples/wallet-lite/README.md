@@ -1,11 +1,14 @@
 # Wallet Lite
 
-Wallet Lite is a client-side demo that exercises the NHB identity flows:
+Wallet Lite is a client-side demo that exercises the NHB identity and creator flows:
 
 * Register a username against a bech32 address via `identity_setAlias`.
 * Create claimable escrows for usernames or emails with `identity_createClaimable`.
 * Claim escrowed funds using the alias preimage or a verified email hash.
 * Compose QR codes that encode `znhb://pay` intents.
+* Tip creators against published content via `creator_tip`.
+* Stake behind creators to simulate subscription-style memberships.
+* Browse creator profiles (avatar, addresses, recent drops) fetched from the public gateway.
 
 The demo targets static hosting and only stores private keys in memory. It is suitable for
 walkthroughs and automated test accounts; do not connect production keys.
@@ -30,6 +33,7 @@ The server reads RPC settings from the repository root `.env` file:
 * `IDENTITY_EMAIL_SALT`
 * `APP_PUBLIC_BASE` (used for metadata URLs)
 * `NHB_WS_URL` (optional, reserved for future realtime updates)
+* `NHB_API_URL` (defaults to `https://gw.nhbcoin.net` for creator profile lookups)
 
 For static deployments set `APP_PUBLIC_BASE=https://nhbcoin.com` so absolute links resolve correctly.
 
@@ -43,6 +47,11 @@ For static deployments set `APP_PUBLIC_BASE=https://nhbcoin.com` so absolute lin
 4. Claim the funds. Provide the claim ID and either an alias (auto-derived preimage) or an explicit
    preimage returned by the identity gateway.
 5. Generate a `znhb://pay` QR code for sharing.
+6. Tip a creator and view the pending payout ledger returned by `creator_tip`.
+7. Stake (subscribe) or unstake behind a creator with `creator_stake` / `creator_unstake`.
+8. Inspect the profile panel to verify avatars, public addresses, and recent content sourced from [`https://gw.nhbcoin.net`](https://gw.nhbcoin.net).
+
+See [`docs/examples/wallet-lite.md`](../../docs/examples/wallet-lite.md) for a deeper dive into the RPC calls and gateway integration points surfaced by the new tipping and subscription panels.
 
 ## Security considerations
 
