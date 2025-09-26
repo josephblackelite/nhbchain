@@ -6,6 +6,7 @@
     "lib-sdk",
     "apps/*",
     "wallet-lite",
+    "p2p-mini-market",
     "merchant-loyalty-console",
     "escrow-checkout/*"
   ],
