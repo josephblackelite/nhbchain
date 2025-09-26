@@ -207,38 +207,45 @@ func formatVoucherRecord(record *swap.VoucherRecord) map[string]interface{} {
 	if record == nil {
 		return nil
 	}
-        response := map[string]interface{}{
-                "provider":      record.Provider,
-                "providerTxId":  record.ProviderTxID,
-                "fiatCurrency":  record.FiatCurrency,
-                "fiatAmount":    record.FiatAmount,
-                "usd":           record.USD,
-                "rate":          record.Rate,
-                "token":         record.Token,
-                "mintAmountWei": mintAmountToString(record.MintAmountWei),
-                "username":      record.Username,
-                "address":       record.Address,
-                "quoteTs":       record.QuoteTimestamp,
-                "source":        record.OracleSource,
-                "minterSig":     record.MinterSignature,
-                "status":        record.Status,
-                "createdAt":     record.CreatedAt,
-        }
-        if strings.TrimSpace(record.TwapRate) != "" {
-                response["twapRate"] = record.TwapRate
-        }
-        if record.TwapObservations > 0 {
-                response["twapObservations"] = record.TwapObservations
-        }
-        if record.TwapWindowSeconds > 0 {
-                response["twapWindowSeconds"] = record.TwapWindowSeconds
-        }
-        if record.TwapStart > 0 {
-                response["twapStart"] = record.TwapStart
-        }
-        if record.TwapEnd > 0 {
-                response["twapEnd"] = record.TwapEnd
-        }
+	response := map[string]interface{}{
+		"provider":      record.Provider,
+		"providerTxId":  record.ProviderTxID,
+		"fiatCurrency":  record.FiatCurrency,
+		"fiatAmount":    record.FiatAmount,
+		"usd":           record.USD,
+		"rate":          record.Rate,
+		"token":         record.Token,
+		"mintAmountWei": mintAmountToString(record.MintAmountWei),
+		"username":      record.Username,
+		"address":       record.Address,
+		"quoteTs":       record.QuoteTimestamp,
+		"source":        record.OracleSource,
+		"priceProofId":  record.PriceProofID,
+		"oracleMedian":  record.OracleMedian,
+		"minterSig":     record.MinterSignature,
+		"status":        record.Status,
+		"createdAt":     record.CreatedAt,
+	}
+	if len(record.OracleFeeders) > 0 {
+		response["oracleFeeders"] = append([]string{}, record.OracleFeeders...)
+	}
+	if strings.TrimSpace(record.PriceProofID) == "" {
+		delete(response, "priceProofId")
+	}
+	if strings.TrimSpace(record.OracleMedian) == "" {
+		delete(response, "oracleMedian")
+	}
+	if strings.TrimSpace(record.TwapRate) != "" {
+		response["twapRate"] = record.TwapRate
+	}
+	response["twapObservations"] = record.TwapObservations
+	response["twapWindowSeconds"] = record.TwapWindowSeconds
+	if record.TwapStart > 0 {
+		response["twapStart"] = record.TwapStart
+	}
+	if record.TwapEnd > 0 {
+		response["twapEnd"] = record.TwapEnd
+	}
 	if record.Recipient != ([20]byte{}) {
 		response["recipient"] = crypto.NewAddress(crypto.NHBPrefix, record.Recipient[:]).String()
 	}

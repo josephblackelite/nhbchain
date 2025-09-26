@@ -53,6 +53,9 @@ type VoucherRecord struct {
 	Address           string
 	QuoteTimestamp    int64
 	OracleSource      string
+	OracleMedian      string
+	OracleFeeders     []string
+	PriceProofID      string
 	MinterSignature   string
 	Status            string
 	CreatedAt         int64
@@ -72,6 +75,7 @@ func (v *VoucherRecord) Copy() *VoucherRecord {
 	if v.MintAmountWei != nil {
 		clone.MintAmountWei = new(big.Int).Set(v.MintAmountWei)
 	}
+	clone.OracleFeeders = append([]string{}, v.OracleFeeders...)
 	return &clone
 }
 
@@ -89,6 +93,9 @@ type storedVoucherRecord struct {
 	Address           string
 	QuoteTimestamp    uint64
 	OracleSource      string
+	OracleMedian      string
+	OracleFeeders     []string
+	PriceProofID      string
 	MinterSignature   string
 	Status            string
 	CreatedAt         uint64
@@ -283,7 +290,7 @@ func (l *Ledger) ExportCSV(startTs, endTs int64) (string, int, *big.Int, error) 
 	}
 	buf := &bytes.Buffer{}
 	writer := csv.NewWriter(buf)
-	header := []string{"providerTxId", "provider", "fiatCurrency", "fiatAmount", "usd", "rate", "token", "mintAmountWei", "recipient", "username", "address", "quoteTs", "source", "minterSig", "status", "createdAt", "twapRate", "twapObservations", "twapWindowSeconds", "twapStart", "twapEnd"}
+	header := []string{"providerTxId", "provider", "fiatCurrency", "fiatAmount", "usd", "rate", "token", "mintAmountWei", "recipient", "username", "address", "quoteTs", "source", "oracleMedian", "oracleFeeders", "priceProofId", "minterSig", "status", "createdAt", "twapRate", "twapObservations", "twapWindowSeconds", "twapStart", "twapEnd"}
 	if err := writer.Write(header); err != nil {
 		return "", 0, nil, err
 	}
@@ -306,6 +313,9 @@ func (l *Ledger) ExportCSV(startTs, endTs int64) (string, int, *big.Int, error) 
 			record.Address,
 			strconv.FormatInt(record.QuoteTimestamp, 10),
 			record.OracleSource,
+			record.OracleMedian,
+			strings.Join(record.OracleFeeders, ","),
+			record.PriceProofID,
 			record.MinterSignature,
 			record.Status,
 			strconv.FormatInt(record.CreatedAt, 10),
@@ -425,6 +435,11 @@ func toStoredVoucher(record *VoucherRecord) storedVoucherRecord {
 		stored.QuoteTimestamp = uint64(record.QuoteTimestamp)
 	}
 	stored.OracleSource = strings.TrimSpace(record.OracleSource)
+	stored.OracleMedian = strings.TrimSpace(record.OracleMedian)
+	if len(record.OracleFeeders) > 0 {
+		stored.OracleFeeders = append([]string{}, record.OracleFeeders...)
+	}
+	stored.PriceProofID = strings.TrimSpace(record.PriceProofID)
 	stored.MinterSignature = strings.TrimSpace(record.MinterSignature)
 	stored.Status = strings.TrimSpace(record.Status)
 	if record.CreatedAt < 0 {
@@ -473,10 +488,15 @@ func fromStoredVoucher(stored *storedVoucherRecord) (*VoucherRecord, error) {
 		Address:         stored.Address,
 		QuoteTimestamp:  quoteTimestamp,
 		OracleSource:    stored.OracleSource,
+		OracleMedian:    stored.OracleMedian,
+		PriceProofID:    stored.PriceProofID,
 		MinterSignature: stored.MinterSignature,
 		Status:          stored.Status,
 		CreatedAt:       createdAt,
 		TwapRate:        stored.TwapRate,
+	}
+	if len(stored.OracleFeeders) > 0 {
+		record.OracleFeeders = append([]string{}, stored.OracleFeeders...)
 	}
 	if strings.TrimSpace(stored.MintAmountWei) != "" {
 		amount, ok := new(big.Int).SetString(strings.TrimSpace(stored.MintAmountWei), 10)

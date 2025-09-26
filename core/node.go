@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -2707,13 +2708,18 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		twapWindowSeconds int64
 		twapStart         int64
 		twapEnd           int64
+		oracleMedian      string
+		oracleFeeders     []string
+		priceProofID      string
 	)
 	if twapOracle, ok := oracle.(swap.TWAPOracle); ok {
 		snapshot, err := twapOracle.TWAP("USD", token, twapWindow)
 		if err == nil && snapshot.Average != nil {
 			twapRate = snapshot.Average.FloatString(18)
 			twapCount = snapshot.Count
-			if twapWindow > 0 {
+			if snapshot.Window > 0 {
+				twapWindowSeconds = int64(snapshot.Window / time.Second)
+			} else if twapWindow > 0 {
 				twapWindowSeconds = int64(twapWindow / time.Second)
 			}
 			if !snapshot.Start.IsZero() {
@@ -2721,6 +2727,15 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 			}
 			if !snapshot.End.IsZero() {
 				twapEnd = snapshot.End.UTC().Unix()
+			}
+			if snapshot.Median != nil {
+				oracleMedian = snapshot.Median.FloatString(18)
+			}
+			if len(snapshot.Feeders) > 0 {
+				oracleFeeders = append([]string{}, snapshot.Feeders...)
+			}
+			if strings.TrimSpace(snapshot.ProofID) != "" {
+				priceProofID = strings.TrimSpace(snapshot.ProofID)
 			}
 		}
 	}
@@ -2771,6 +2786,32 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if usdAmount == "" && strings.EqualFold(voucher.Fiat, "USD") {
 		usdAmount = strings.TrimSpace(voucher.FiatAmount)
 	}
+	if priceProofID == "" {
+		builder := strings.Builder{}
+		builder.WriteString(strings.TrimSpace(providerTxID))
+		builder.WriteString("|")
+		builder.WriteString(strings.TrimSpace(token))
+		builder.WriteString("|")
+		if quote.Rate != nil {
+			builder.WriteString(quote.Rate.FloatString(18))
+		}
+		builder.WriteString("|")
+		builder.WriteString(strconv.FormatInt(quote.Timestamp.UTC().UnixNano(), 10))
+		if twapRate != "" {
+			builder.WriteString("|")
+			builder.WriteString(twapRate)
+		}
+		if oracleMedian != "" {
+			builder.WriteString("|")
+			builder.WriteString(oracleMedian)
+		}
+		if len(oracleFeeders) > 0 {
+			builder.WriteString("|")
+			builder.WriteString(strings.Join(oracleFeeders, ","))
+		}
+		sum := sha256.Sum256([]byte(builder.String()))
+		priceProofID = hex.EncodeToString(sum[:])
+	}
 	record := &swap.VoucherRecord{
 		Provider:          provider,
 		ProviderTxID:      providerTxID,
@@ -2785,6 +2826,9 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		Address:           strings.TrimSpace(submission.Address),
 		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
 		OracleSource:      quote.Source,
+		OracleMedian:      oracleMedian,
+		OracleFeeders:     append([]string{}, oracleFeeders...),
+		PriceProofID:      priceProofID,
 		MinterSignature:   "0x" + hex.EncodeToString(signature),
 		Status:            swap.VoucherStatusMinted,
 		TwapRate:          twapRate,
@@ -2814,6 +2858,24 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	}.Event()
 	if evt != nil {
 		n.state.AppendEvent(evt)
+	}
+	proofEvt := events.SwapMintProof{
+		ProviderTxID:      providerTxID,
+		OrderID:           orderID,
+		Token:             token,
+		PriceProofID:      priceProofID,
+		OracleSource:      quote.Source,
+		OracleMedian:      oracleMedian,
+		OracleFeeders:     append([]string{}, oracleFeeders...),
+		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
+		TwapRate:          twapRate,
+		TwapObservations:  twapCount,
+		TwapWindowSeconds: twapWindowSeconds,
+		TwapStart:         twapStart,
+		TwapEnd:           twapEnd,
+	}.Event()
+	if proofEvt != nil {
+		n.state.AppendEvent(proofEvt)
 	}
 
 	return txHash, true, nil
@@ -3042,8 +3104,25 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 		if err := burnLedger.Put(receipt); err != nil {
 			return err
 		}
+		var proofIDs []string
 		if len(receipt.VoucherIDs) > 0 {
 			voucherLedger := swap.NewLedger(m)
+			seen := make(map[string]struct{})
+			for _, voucherID := range receipt.VoucherIDs {
+				record, ok, err := voucherLedger.Get(voucherID)
+				if err != nil {
+					return err
+				}
+				if ok && record != nil {
+					trimmed := strings.TrimSpace(record.PriceProofID)
+					if trimmed != "" {
+						if _, exists := seen[trimmed]; !exists {
+							proofIDs = append(proofIDs, trimmed)
+							seen[trimmed] = struct{}{}
+						}
+					}
+				}
+			}
 			if err := voucherLedger.MarkReconciled(receipt.VoucherIDs); err != nil {
 				return err
 			}
@@ -3073,6 +3152,18 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 			}.Event()
 			if recon != nil {
 				n.state.AppendEvent(recon)
+			}
+		}
+		if len(proofIDs) > 0 {
+			proofEvt := events.SwapRedeemProof{
+				ReceiptID:     trimmedID,
+				ProviderTxID:  strings.TrimSpace(receipt.ProviderTxID),
+				VoucherIDs:    append([]string{}, receipt.VoucherIDs...),
+				PriceProofIDs: proofIDs,
+				ObservedAt:    observed,
+			}.Event()
+			if proofEvt != nil {
+				n.state.AppendEvent(proofEvt)
 			}
 		}
 		return nil

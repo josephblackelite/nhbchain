@@ -13,6 +13,7 @@ import (
 	"nhbchain/core"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	swap "nhbchain/native/swap"
 
@@ -302,18 +303,32 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	}
 
 	evts := env.node.Events()
-	if len(evts) != 1 {
-		t.Fatalf("expected 1 event got %d", len(evts))
+	if len(evts) != 2 {
+		t.Fatalf("expected 2 events got %d", len(evts))
 	}
-	evt := evts[0]
-	if evt.Type != events.TypeSwapMinted {
-		t.Fatalf("unexpected event type %s", evt.Type)
+	var mintedEvt, proofEvt *types.Event
+	for i := range evts {
+		switch evts[i].Type {
+		case events.TypeSwapMinted:
+			mintedEvt = &evts[i]
+		case events.TypeSwapMintProof:
+			proofEvt = &evts[i]
+		}
 	}
-	if evt.Attributes["orderId"] != voucher.OrderID {
-		t.Fatalf("unexpected orderId %s", evt.Attributes["orderId"])
+	if mintedEvt == nil {
+		t.Fatalf("expected swap.minted event")
 	}
-	if evt.Attributes["amount"] != voucher.Amount.String() {
-		t.Fatalf("unexpected amount %s", evt.Attributes["amount"])
+	if proofEvt == nil {
+		t.Fatalf("expected swap.mint.proof event")
+	}
+	if mintedEvt.Attributes["orderId"] != voucher.OrderID {
+		t.Fatalf("unexpected orderId %s", mintedEvt.Attributes["orderId"])
+	}
+	if mintedEvt.Attributes["amount"] != voucher.Amount.String() {
+		t.Fatalf("unexpected amount %s", mintedEvt.Attributes["amount"])
+	}
+	if proofEvt.Attributes["priceProofId"] == "" {
+		t.Fatalf("expected priceProofId in proof event")
 	}
 
 	// Replay should be rejected
@@ -564,5 +579,9 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	}
 	if listPayload.Vouchers[0]["providerTxId"].(string) != "PROVIDER-EXP" {
 		t.Fatalf("unexpected voucher record: %+v", listPayload.Vouchers[0])
+	}
+	proofID, ok := listPayload.Vouchers[0]["priceProofId"].(string)
+	if !ok || strings.TrimSpace(proofID) == "" {
+		t.Fatalf("expected priceProofId in voucher payload: %+v", listPayload.Vouchers[0])
 	}
 }
