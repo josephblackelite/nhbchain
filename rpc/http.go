@@ -324,6 +324,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLoyaltyResolveUsername(w, r, req)
 	case "loyalty_userQR":
 		s.handleLoyaltyUserQR(w, r, req)
+	case "creator_publish":
+		s.handleCreatorPublish(w, r, req)
+	case "creator_tip":
+		s.handleCreatorTip(w, r, req)
+	case "creator_stake":
+		s.handleCreatorStake(w, r, req)
+	case "creator_unstake":
+		s.handleCreatorUnstake(w, r, req)
+	case "creator_payouts":
+		s.handleCreatorPayouts(w, r, req)
 	case "identity_setAlias":
 		s.handleIdentitySetAlias(w, r, req)
 	case "identity_setAvatar":

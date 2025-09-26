@@ -29,6 +29,7 @@ import (
 	syncmgr "nhbchain/core/sync"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
@@ -1225,6 +1226,25 @@ func (e escrowEventEmitter) Emit(evt events.Event) {
 	e.node.state.AppendEvent(event)
 }
 
+type creatorEventEmitter struct {
+	node *Node
+}
+
+func (e creatorEventEmitter) Emit(evt events.Event) {
+	if e.node == nil || evt == nil {
+		return
+	}
+	payload, ok := evt.(eventWithPayload)
+	if !ok {
+		return
+	}
+	event := payload.Event()
+	if event == nil {
+		return
+	}
+	e.node.state.AppendEvent(event)
+}
+
 func (n *Node) newEscrowEngine(manager *nhbstate.Manager) *escrow.Engine {
 	engine := escrow.NewEngine()
 	engine.SetState(manager)
@@ -1239,6 +1259,87 @@ func (n *Node) newTradeEngine(manager *nhbstate.Manager) *escrow.TradeEngine {
 	tradeEngine.SetState(manager)
 	tradeEngine.SetEmitter(escrowEventEmitter{node: n})
 	return tradeEngine
+}
+
+func (n *Node) newCreatorEngine(manager *nhbstate.Manager) *creator.Engine {
+	engine := creator.NewEngine()
+	engine.SetState(manager)
+	engine.SetEmitter(creatorEventEmitter{node: n})
+	engine.SetNowFunc(func() int64 { return n.currentTime().Unix() })
+	return engine
+}
+
+func (n *Node) CreatorPublish(creatorAddr [20]byte, id string, uri string, metadata string) (*creator.Content, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newCreatorEngine(manager)
+	return engine.PublishContent(creatorAddr, id, uri, metadata)
+}
+
+func (n *Node) CreatorTip(fan [20]byte, contentID string, amount *big.Int) (*creator.Tip, *creator.PayoutLedger, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newCreatorEngine(manager)
+	tip, err := engine.TipContent(fan, contentID, amount)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tip == nil {
+		return nil, nil, nil
+	}
+	ledger, err := engine.Payouts(tip.Creator)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tip, ledger, nil
+}
+
+func (n *Node) CreatorStake(fan [20]byte, creatorAddr [20]byte, amount *big.Int) (*creator.Stake, *big.Int, *creator.PayoutLedger, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newCreatorEngine(manager)
+	stake, reward, err := engine.StakeCreator(fan, creatorAddr, amount)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ledger, err := engine.Payouts(creatorAddr)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return stake, reward, ledger, nil
+}
+
+func (n *Node) CreatorUnstake(fan [20]byte, creatorAddr [20]byte, amount *big.Int) (*creator.Stake, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newCreatorEngine(manager)
+	return engine.UnstakeCreator(fan, creatorAddr, amount)
+}
+
+func (n *Node) CreatorClaimPayouts(creatorAddr [20]byte) (*creator.PayoutLedger, *big.Int, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newCreatorEngine(manager)
+	return engine.ClaimPayouts(creatorAddr)
+}
+
+func (n *Node) CreatorPayouts(creatorAddr [20]byte) (*creator.PayoutLedger, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	engine := n.newCreatorEngine(manager)
+	return engine.Payouts(creatorAddr)
 }
 
 func (n *Node) EscrowCreate(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediator *[20]byte, meta [32]byte, realm string) ([32]byte, error) {
