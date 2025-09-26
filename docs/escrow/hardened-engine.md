@@ -33,7 +33,8 @@ through the engine guarantees:
    - `TxTypeReleaseEscrow`→ `Engine.Release`
    - `TxTypeRefundEscrow` → `Engine.Refund`
    - `TxTypeDisputeEscrow`→ `Engine.Dispute`
-   - `TxTypeArbitrate*`   → `Engine.Resolve`
+   - `TxTypeArbitrate*`   → `Engine.Resolve` (validates the `ROLE_ARBITRATOR`
+     committee stored with the escrow)
    After the engine call succeeds the sender nonce is incremented using the
    freshly persisted account state.
 3. **Fee treasury management.** `StateProcessor.SetEscrowFeeTreasury` allows the
@@ -63,8 +64,18 @@ through the engine guarantees:
 | `TxTypeReleaseEscrow`    | `data` = escrow ID (`[32]byte`), caller must be payee or mediator. |
 | `TxTypeRefundEscrow`     | `data` = escrow ID (`[32]byte`), caller must be payer prior to deadline. |
 | `TxTypeDisputeEscrow`    | `data` = escrow ID (`[32]byte`), caller must be payer or payee. |
-| `TxTypeArbitrateRelease` | `data` = escrow ID (`[32]byte`), caller must equal the privileged arbitrator address. |
-| `TxTypeArbitrateRefund`  | Same as above; outcome instructs the engine to refund the payer. |
+| `TxTypeArbitrateRelease` | `data` = escrow ID (`[32]byte`), caller must satisfy the `ROLE_ARBITRATOR` committee threshold recorded on the escrow. |
+| `TxTypeArbitrateRefund`  | Same as above; outcome instructs the engine to refund the payer after committee approval. |
+
+The engine resolves arbitration transactions by loading the escrow's frozen
+arbitrator policy—which captures the committee membership and signing
+threshold at creation time—and verifying that the native transaction sender is
+authorised. The policy is persisted alongside the escrow record when the
+`Create` operation runs so later `TxTypeArbitrate*` submissions can enforce the
+same governance-managed committee the RPC flows rely on. See
+[`docs/rpc_escrow_module.md`](../rpc_escrow_module.md) and
+[`docs/escrow/escrow.md`](./escrow.md) for additional context on how arbitrator
+policies are registered and frozen during escrow creation.
 
 ### Example Create Payload
 
@@ -116,8 +127,8 @@ pre-compute IDs using the same rule, guaranteeing they match the stored record.
    - A historical `escrow-<id>` entry is encountered when a validator submits a
      `TxTypeArbitrateRelease` transaction.
    - Migration converts the record, rehydrates the vault balance, and
-     `Engine.Resolve` releases the funds to the buyer while recording the modern
-     escrow status.
+     `Engine.Resolve` releases the funds once the arbitrator committee
+     authorises the outcome while recording the modern escrow status.
 
 3. **Trade escrow update:**
    - When an escrow leg is funded via `TxTypeLockEscrow`, the trade engine (bound
