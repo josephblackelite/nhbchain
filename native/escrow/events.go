@@ -62,8 +62,23 @@ func NewExpiredEvent(e *Escrow) *types.Event { return newEscrowEvent(EventTypeEs
 func NewDisputedEvent(e *Escrow) *types.Event { return newEscrowEvent(EventTypeEscrowDisputed, e) }
 
 // NewResolvedEvent returns the canonical event payload emitted when a dispute is
-// resolved.
-func NewResolvedEvent(e *Escrow) *types.Event { return newEscrowEvent(EventTypeEscrowResolved, e) }
+// resolved. When supplied, the decision metadata is included for auditability.
+func NewResolvedEvent(e *Escrow, outcome DecisionOutcome, metaHash [32]byte, signers [][20]byte) *types.Event {
+	evt := newEscrowEvent(EventTypeEscrowResolved, e)
+	if evt == nil {
+		return nil
+	}
+	if outcome.Valid() {
+		evt.Attributes["decision"] = outcome.String()
+	}
+	if metaHash != ([32]byte{}) {
+		evt.Attributes["decisionMetadata"] = hex.EncodeToString(metaHash[:])
+	}
+	if len(signers) > 0 {
+		evt.Attributes["decisionSigners"] = formatArbitratorMembers(signers)
+	}
+	return evt
+}
 
 // NewTradeCreatedEvent emits the canonical payload for a newly created trade.
 func NewTradeCreatedEvent(t *Trade) *types.Event {

@@ -54,7 +54,9 @@ func TestEscrowEventsHaveDeterministicPayload(t *testing.T) {
 		{"refunded", escrowpkg.NewRefundedEvent, escrowpkg.EventTypeEscrowRefunded},
 		{"expired", escrowpkg.NewExpiredEvent, escrowpkg.EventTypeEscrowExpired},
 		{"disputed", escrowpkg.NewDisputedEvent, escrowpkg.EventTypeEscrowDisputed},
-		{"resolved", escrowpkg.NewResolvedEvent, escrowpkg.EventTypeEscrowResolved},
+		{"resolved", func(e *escrowpkg.Escrow) *types.Event {
+			return escrowpkg.NewResolvedEvent(e, escrowpkg.DecisionOutcomeUnknown, [32]byte{}, nil)
+		}, escrowpkg.EventTypeEscrowResolved},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

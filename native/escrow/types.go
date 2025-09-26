@@ -174,24 +174,71 @@ const (
 	EscrowDisputed
 )
 
+// DecisionOutcome enumerates the possible arbitration outcomes supported by the
+// escrow engine.
+type DecisionOutcome uint8
+
+const (
+	DecisionOutcomeUnknown DecisionOutcome = iota
+	DecisionOutcomeRelease
+	DecisionOutcomeRefund
+)
+
+// Valid reports whether the outcome represents a supported arbitration
+// decision.
+func (o DecisionOutcome) Valid() bool {
+	switch o {
+	case DecisionOutcomeRelease, DecisionOutcomeRefund:
+		return true
+	default:
+		return false
+	}
+}
+
+// String returns the canonical textual representation of the decision.
+func (o DecisionOutcome) String() string {
+	switch o {
+	case DecisionOutcomeRelease:
+		return "release"
+	case DecisionOutcomeRefund:
+		return "refund"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseDecisionOutcome normalises a textual decision string into the enum form.
+func ParseDecisionOutcome(outcome string) (DecisionOutcome, error) {
+	normalized := strings.ToLower(strings.TrimSpace(outcome))
+	switch normalized {
+	case "release":
+		return DecisionOutcomeRelease, nil
+	case "refund":
+		return DecisionOutcomeRefund, nil
+	default:
+		return DecisionOutcomeUnknown, fmt.Errorf("escrow: invalid resolution outcome %s", outcome)
+	}
+}
+
 // Escrow captures the immutable metadata and runtime status of a single escrow
 // agreement managed by the native engine. The identifier is the keccak256 hash
 // of the payer, payee and a caller-supplied nonce, ensuring deterministic IDs
 // without storing the nonce on-chain.
 type Escrow struct {
-	ID        [32]byte
-	Payer     [20]byte
-	Payee     [20]byte
-	Mediator  [20]byte
-	Token     string
-	Amount    *big.Int
-	FeeBps    uint32
-	Deadline  int64
-	CreatedAt int64
-	MetaHash  [32]byte
-	Status    EscrowStatus
-	RealmID   string
-	FrozenArb *FrozenArb
+	ID             [32]byte
+	Payer          [20]byte
+	Payee          [20]byte
+	Mediator       [20]byte
+	Token          string
+	Amount         *big.Int
+	FeeBps         uint32
+	Deadline       int64
+	CreatedAt      int64
+	MetaHash       [32]byte
+	Status         EscrowStatus
+	RealmID        string
+	FrozenArb      *FrozenArb
+	ResolutionHash [32]byte
 }
 
 // Clone returns a deep copy of the escrow object so callers can safely mutate
