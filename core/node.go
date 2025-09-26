@@ -959,6 +959,24 @@ func (n *Node) PotsoRewardEpochPayouts(epoch uint64, cursor *[20]byte, limit int
 	return result, nil
 }
 
+// NetworkSeedsParam retrieves the on-chain network.seeds registry payload if present.
+func (n *Node) NetworkSeedsParam() ([]byte, bool, error) {
+	if n == nil || n.state == nil {
+		return nil, false, fmt.Errorf("state unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	raw, ok, err := manager.ParamStoreGet("network.seeds")
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), raw...), true, nil
+}
+
 func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()

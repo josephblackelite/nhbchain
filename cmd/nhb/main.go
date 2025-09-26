@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"nhbchain/crypto"
 	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
+	"nhbchain/p2p/seeds"
 	"nhbchain/rpc"
 	"nhbchain/storage"
 )
@@ -122,6 +124,68 @@ func main() {
 	node.SetSwapManualOracle(manualOracle)
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
+	seedStrings := make([]string, 0, len(cfg.P2P.Seeds))
+	seedOrigins := make([]p2p.SeedOrigin, 0, len(cfg.P2P.Seeds))
+	seenSeeds := make(map[string]struct{})
+	for _, raw := range cfg.P2P.Seeds {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		nodePart, addrPart, found := strings.Cut(trimmed, "@")
+		if !found {
+			fmt.Printf("Ignoring seed %q: missing node ID\n", trimmed)
+			continue
+		}
+		node := strings.TrimSpace(nodePart)
+		addr := strings.TrimSpace(addrPart)
+		if node == "" || addr == "" {
+			fmt.Printf("Ignoring seed %q: empty components\n", trimmed)
+			continue
+		}
+		key := strings.ToLower(node) + "@" + strings.ToLower(addr)
+		if _, ok := seenSeeds[key]; ok {
+			continue
+		}
+		seenSeeds[key] = struct{}{}
+		seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", node, addr))
+		seedOrigins = append(seedOrigins, p2p.SeedOrigin{NodeID: node, Address: addr, Source: "config"})
+	}
+
+	var seedRegistry *seeds.Registry
+	if rawRegistry, ok, err := node.NetworkSeedsParam(); err != nil {
+		fmt.Printf("Failed to load network.seeds: %v\n", err)
+	} else if ok {
+		registry, parseErr := seeds.Parse(rawRegistry)
+		if parseErr != nil {
+			fmt.Printf("Failed to parse network.seeds: %v\n", parseErr)
+		} else {
+			seedRegistry = registry
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			resolved, resolveErr := registry.Resolve(ctx, time.Now(), seeds.DefaultResolver())
+			cancel()
+			if resolveErr != nil {
+				fmt.Printf("DNS seed resolution failed: %v\n", resolveErr)
+			}
+			for _, entry := range resolved {
+				addr := strings.TrimSpace(entry.Address)
+				key := strings.ToLower(entry.NodeID) + "@" + strings.ToLower(addr)
+				if _, exists := seenSeeds[key]; exists {
+					continue
+				}
+				seenSeeds[key] = struct{}{}
+				seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", entry.NodeID, addr))
+				seedOrigins = append(seedOrigins, p2p.SeedOrigin{
+					NodeID:    entry.NodeID,
+					Address:   addr,
+					Source:    entry.Source,
+					NotBefore: entry.NotBefore,
+					NotAfter:  entry.NotAfter,
+				})
+			}
+		}
+	}
+
 	pexEnabled := true
 	if cfg.P2P.PEX != nil {
 		pexEnabled = *cfg.P2P.PEX
@@ -138,7 +202,10 @@ func main() {
 		OutboundPeers:    cfg.OutboundPeers,
 		Bootnodes:        append([]string{}, cfg.Bootnodes...),
 		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
-		Seeds:            append([]string{}, cfg.P2P.Seeds...),
+		Seeds:            append([]string{}, seedStrings...),
+		SeedOrigins:      append([]p2p.SeedOrigin{}, seedOrigins...),
+		SeedRegistry:     seedRegistry,
+		SeedResolver:     seeds.DefaultResolver(),
 		PeerBanDuration:  time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
 		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
 		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,

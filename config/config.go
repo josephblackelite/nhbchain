@@ -278,6 +278,7 @@ func Load(path string) (*Config, error) {
 			"potso.abuse.QuadraticTxDampenAfter",
 			"potso.abuse.QuadraticTxDampenPower",
 			"fees.baseFee",
+			"network.seeds",
 		}
 	}
 

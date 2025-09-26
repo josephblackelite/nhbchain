@@ -18,6 +18,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
 	"nhbchain/native/potso"
+	"nhbchain/p2p/seeds"
 )
 
 const (
@@ -306,6 +307,17 @@ func validatorForParam(key string) paramValidator {
 			}
 			if value == 1 {
 				return fmt.Errorf("potso.abuse.QuadraticTxDampenPower: must be 0 to disable or >= 2 for damping")
+			}
+			return nil
+		}
+	case "network.seeds":
+		return func(raw json.RawMessage) error {
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed == "" {
+				return fmt.Errorf("network.seeds: payload must not be empty")
+			}
+			if _, err := seeds.Parse([]byte(trimmed)); err != nil {
+				return fmt.Errorf("network.seeds: %w", err)
 			}
 			return nil
 		}

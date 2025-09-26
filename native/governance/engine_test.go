@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -25,6 +26,22 @@ type mockGovernanceState struct {
 	params         map[string][]byte
 	roles          map[string]map[string]struct{}
 	audit          []*AuditRecord
+}
+
+func TestValidatorForNetworkSeeds(t *testing.T) {
+	t.Parallel()
+	validator := validatorForParam("network.seeds")
+	if validator == nil {
+		t.Fatalf("expected validator for network.seeds")
+	}
+	valid := json.RawMessage(`{"version":1,"static":[{"nodeId":"0xabc123","address":"seed.example.org:46656"}]}`)
+	if err := validator(valid); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	invalid := json.RawMessage(`{"version":1,"static":[{"nodeId":"","address":"seed.example.org:46656"}]}`)
+	if err := validator(invalid); err == nil {
+		t.Fatalf("expected validation error for empty nodeId")
+	}
 }
 
 func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernanceState {
