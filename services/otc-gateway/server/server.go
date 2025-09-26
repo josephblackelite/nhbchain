@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,30 +17,98 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"nhbchain/core"
 	"nhbchain/services/otc-gateway/auth"
+	"nhbchain/services/otc-gateway/hsm"
 	otcmw "nhbchain/services/otc-gateway/middleware"
 	"nhbchain/services/otc-gateway/models"
+	"nhbchain/services/otc-gateway/swaprpc"
 )
+
+// SwapClient abstracts the swap RPC methods used by the gateway.
+type SwapClient interface {
+	SubmitMintVoucher(ctx context.Context, voucher core.MintVoucher, signatureHex, providerTxID string) (string, bool, error)
+	GetVoucher(ctx context.Context, providerTxID string) (*swaprpc.VoucherStatus, error)
+}
+
+// Config captures the dependencies required to construct the server.
+type Config struct {
+	DB           *gorm.DB
+	TZ           *time.Location
+	ChainID      uint64
+	S3Bucket     string
+	SwapClient   SwapClient
+	Signer       hsm.Signer
+	VoucherTTL   time.Duration
+	Provider     string
+	PollInterval time.Duration
+}
 
 // Server encapsulates dependencies for the HTTP API.
 type Server struct {
-	DB       *gorm.DB
-	TZ       *time.Location
-	ChainID  string
-	S3Bucket string
-	RPCBase  string
+	DB           *gorm.DB
+	TZ           *time.Location
+	ChainID      uint64
+	S3Bucket     string
+	SwapClient   SwapClient
+	Signer       hsm.Signer
+	VoucherTTL   time.Duration
+	Provider     string
+	PollInterval time.Duration
+	Now          func() time.Time
+
+	router http.Handler
 }
 
-// New constructs a configured HTTP router with authentication and idempotency support.
-func New(db *gorm.DB, tz *time.Location, chainID, s3Bucket, rpcBase string) http.Handler {
-	s := &Server{DB: db, TZ: tz, ChainID: chainID, S3Bucket: s3Bucket, RPCBase: rpcBase}
+const (
+	voucherStatusSigning   = "SIGNING"
+	voucherStatusSubmitted = "SUBMITTED"
+	voucherStatusMinted    = "MINTED"
+	voucherStatusFailed    = "FAILED"
+)
 
+var (
+	errVoucherAlreadySubmitted = errors.New("voucher already submitted")
+)
+
+// New constructs a configured HTTP router with authentication and idempotency support.
+func New(cfg Config) *Server {
+	if cfg.VoucherTTL <= 0 {
+		cfg.VoucherTTL = 15 * time.Minute
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 10 * time.Second
+	}
+	srv := &Server{
+		DB:           cfg.DB,
+		TZ:           cfg.TZ,
+		ChainID:      cfg.ChainID,
+		S3Bucket:     cfg.S3Bucket,
+		SwapClient:   cfg.SwapClient,
+		Signer:       cfg.Signer,
+		VoucherTTL:   cfg.VoucherTTL,
+		Provider:     strings.TrimSpace(cfg.Provider),
+		PollInterval: cfg.PollInterval,
+	}
+	if srv.Now == nil {
+		srv.Now = func() time.Time { return time.Now().In(srv.TZ) }
+	}
+	srv.router = srv.buildRouter()
+	return srv
+}
+
+// Handler exposes the configured HTTP router.
+func (s *Server) Handler() http.Handler {
+	return s.router
+}
+
+func (s *Server) buildRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
-	r.Use(func(next http.Handler) http.Handler { return otcmw.WithIdempotency(db, next) })
+	r.Use(func(next http.Handler) http.Handler { return otcmw.WithIdempotency(s.DB, next) })
 	r.Use(auth.Authenticate)
 
 	r.Route("/api/v1", func(api chi.Router) {
@@ -47,6 +119,10 @@ func New(db *gorm.DB, tz *time.Location, chainID, s3Bucket, rpcBase string) http
 			protected.With(auth.RequireRole(auth.RoleSupervisor, auth.RoleCompliance, auth.RoleSuperAdmin)).Post("/invoices/{id}/approve", s.ApproveInvoice)
 			protected.With(auth.RequireRole(auth.RoleAuditor, auth.RoleSupervisor, auth.RoleSuperAdmin, auth.RoleCompliance)).Get("/invoices/{id}", s.GetInvoice)
 		})
+	})
+
+	r.Route("/ops/otc", func(ops chi.Router) {
+		ops.With(auth.RequireRole(auth.RoleSuperAdmin)).Post("/invoices/{id}/sign-and-submit", s.SignAndSubmit)
 	})
 
 	return r
