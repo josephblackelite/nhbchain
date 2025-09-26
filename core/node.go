@@ -34,6 +34,7 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
+	"nhbchain/native/reputation"
 	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
 	"nhbchain/storage"
@@ -78,6 +79,15 @@ type Node struct {
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
+
+// ErrMilestoneUnsupported is returned when milestone functionality has not been
+// wired into the node yet. The current implementation exposes the RPC surface
+// but leaves execution to follow-on upgrades.
+var ErrMilestoneUnsupported = errors.New("escrow: milestone engine not enabled")
+
+// ErrReputationVerifierUnauthorized is returned when a caller lacks the
+// required verifier role to issue skill attestations.
+var ErrReputationVerifierUnauthorized = errors.New("reputation: caller lacks verifier role")
 
 // DefaultBlockTimestampTolerance bounds how far ahead of the local clock a
 // block timestamp may drift before it is rejected.
@@ -1469,6 +1479,46 @@ func (n *Node) EscrowVaultAddress(token string) ([20]byte, error) {
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	return manager.EscrowVaultAddress(token)
+}
+
+// EscrowMilestoneCreate is a placeholder implementation used by the milestone
+// RPC surface. The engine is not yet connected to state transitions.
+func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject) (*escrow.MilestoneProject, error) {
+	return nil, ErrMilestoneUnsupported
+}
+
+// EscrowMilestoneGet returns the current milestone project state when
+// persistence is available.
+func (n *Node) EscrowMilestoneGet(id [32]byte) (*escrow.MilestoneProject, error) {
+	return nil, ErrMilestoneUnsupported
+}
+
+// EscrowMilestoneFund transitions a milestone leg into the funded state.
+func (n *Node) EscrowMilestoneFund(id [32]byte, legID uint64, caller [20]byte) error {
+	return ErrMilestoneUnsupported
+}
+
+// EscrowMilestoneRelease releases a funded milestone leg to the payee.
+func (n *Node) EscrowMilestoneRelease(id [32]byte, legID uint64, caller [20]byte) error {
+	return ErrMilestoneUnsupported
+}
+
+// EscrowMilestoneCancel cancels a milestone leg.
+func (n *Node) EscrowMilestoneCancel(id [32]byte, legID uint64, caller [20]byte) error {
+	return ErrMilestoneUnsupported
+}
+
+// EscrowMilestoneSubscriptionUpdate updates the subscription toggle for a
+// milestone project.
+func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, caller [20]byte, active bool) (*escrow.MilestoneProject, error) {
+	return nil, ErrMilestoneUnsupported
+}
+
+// ReputationVerifySkill validates the caller's verifier role and records a
+// skill verification. The placeholder returns an authorisation error until the
+// role system is wired in.
+func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, expiresAt int64) (*reputation.SkillVerification, error) {
+	return nil, ErrReputationVerifierUnauthorized
 }
 
 func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,

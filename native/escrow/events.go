@@ -25,6 +25,11 @@ const (
 	EventTypeTradeResolved      = "escrow.trade.resolved"
 	EventTypeTradeSettled       = "escrow.trade.settled"
 	EventTypeTradeExpired       = "escrow.trade.expired"
+	EventTypeMilestoneCreated   = "escrow.milestone.created"
+	EventTypeMilestoneFunded    = "escrow.milestone.funded"
+	EventTypeMilestoneReleased  = "escrow.milestone.released"
+	EventTypeMilestoneCancelled = "escrow.milestone.cancelled"
+	EventTypeMilestoneDue       = "escrow.milestone.leg_due"
 )
 
 // NewRealmCreatedEvent emits the canonical payload for a newly created realm.
@@ -115,6 +120,34 @@ func NewTradeExpiredEvent(t *Trade) *types.Event {
 	return newTradeEvent(EventTypeTradeExpired, t, "")
 }
 
+// NewMilestoneCreatedEvent emits the canonical payload for a newly created
+// milestone project.
+func NewMilestoneCreatedEvent(project *MilestoneProject) *types.Event {
+	return newMilestoneEvent(EventTypeMilestoneCreated, project, nil)
+}
+
+// NewMilestoneFundedEvent emits the payload for a funded milestone leg.
+func NewMilestoneFundedEvent(project *MilestoneProject, leg *MilestoneLeg) *types.Event {
+	return newMilestoneEvent(EventTypeMilestoneFunded, project, leg)
+}
+
+// NewMilestoneReleasedEvent emits the payload when a milestone leg is released.
+func NewMilestoneReleasedEvent(project *MilestoneProject, leg *MilestoneLeg) *types.Event {
+	return newMilestoneEvent(EventTypeMilestoneReleased, project, leg)
+}
+
+// NewMilestoneCancelledEvent emits the payload when a leg or project is
+// cancelled.
+func NewMilestoneCancelledEvent(project *MilestoneProject, leg *MilestoneLeg) *types.Event {
+	return newMilestoneEvent(EventTypeMilestoneCancelled, project, leg)
+}
+
+// NewMilestoneDueEvent emits the payload when a funded leg reaches its deadline
+// without release.
+func NewMilestoneDueEvent(project *MilestoneProject, leg *MilestoneLeg) *types.Event {
+	return newMilestoneEvent(EventTypeMilestoneDue, project, leg)
+}
+
 func newEscrowEvent(eventType string, e *Escrow) *types.Event {
 	attrs := make(map[string]string)
 	if e == nil {
@@ -197,6 +230,35 @@ func newRealmEvent(eventType string, r *EscrowRealm) *types.Event {
 		if members := formatArbitratorMembers(sanitized.Arbitrators.Members); members != "" {
 			attrs["arbitrators"] = members
 		}
+	}
+	return &types.Event{Type: eventType, Attributes: attrs}
+}
+
+func newMilestoneEvent(eventType string, project *MilestoneProject, leg *MilestoneLeg) *types.Event {
+	attrs := make(map[string]string)
+	if project == nil {
+		return &types.Event{Type: eventType, Attributes: attrs}
+	}
+	sanitized, err := SanitizeMilestoneProject(project)
+	if err != nil {
+		return &types.Event{Type: eventType, Attributes: attrs}
+	}
+	attrs["projectId"] = hex.EncodeToString(sanitized.ID[:])
+	attrs["payer"] = hex.EncodeToString(sanitized.Payer[:])
+	attrs["payee"] = hex.EncodeToString(sanitized.Payee[:])
+	attrs["realmId"] = sanitized.RealmID
+	attrs["status"] = strconv.FormatUint(uint64(sanitized.Status), 10)
+	if sanitized.Subscription != nil {
+		attrs["subscriptionInterval"] = strconv.FormatInt(sanitized.Subscription.IntervalSeconds, 10)
+		attrs["subscriptionNext"] = strconv.FormatInt(sanitized.Subscription.NextReleaseAt, 10)
+		attrs["subscriptionActive"] = strconv.FormatBool(sanitized.Subscription.Active)
+	}
+	if leg != nil {
+		attrs["legId"] = strconv.FormatUint(leg.ID, 10)
+		attrs["legType"] = strconv.FormatUint(uint64(leg.Type), 10)
+		attrs["legAmount"] = leg.Amount.String()
+		attrs["legDeadline"] = strconv.FormatInt(leg.Deadline, 10)
+		attrs["legStatus"] = strconv.FormatUint(uint64(leg.Status), 10)
 	}
 	return &types.Event{Type: eventType, Attributes: attrs}
 }
