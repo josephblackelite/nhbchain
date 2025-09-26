@@ -1,7 +1,10 @@
 ListenAddress = ":6002"
 RPCAddress = ":8081"
 DataDir = "./nhb-data-peer"
-GenesisFile = ""
+# Required: point to the genesis file distributed by the network operator.
+GenesisFile = "./config/genesis.json"
+# Never set this to true on shared networks; it is only for isolated dev clusters.
+AllowAutogenesis = false
 ValidatorKeystorePath = "./validator-peer.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

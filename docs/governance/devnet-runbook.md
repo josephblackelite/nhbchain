@@ -86,10 +86,12 @@ Start the node (keep this terminal running):
 export NHB_VALIDATOR_PASS=""
 export NHB_RPC_TOKEN="devnet-token"
 RPC_URL="http://127.0.0.1:8081"
+# Explicitly opt into autogenesis for this throwaway devnet instance.
 GOFLAGS=-buildvcs=false bin/nhb-node --config ./devnet.toml --allow-autogenesis
 ```
 
-The first boot creates `validator-devnet.keystore`, autogenerates a genesis block, and logs the validator address.
+The first boot creates `validator-devnet.keystore`, autogenerates a genesis block, and logs the validator address. You can also
+set `NHB_ALLOW_AUTOGENESIS=1` or `AllowAutogenesis = true` in `devnet.toml` if you prefer environment or config-based overrides.
 
 ## 3. Bootstrap accounts & voting power
 

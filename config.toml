@@ -1,7 +1,10 @@
 ListenAddress = ":6001"
 RPCAddress = ":8080"
 DataDir = "./nhb-data"
-GenesisFile = ""
+# Provide the absolute or relative path to the vetted genesis file for this network.
+GenesisFile = "./config/genesis.json"
+# DEV ONLY: override to true exclusively for ephemeral local testing.
+AllowAutogenesis = false
 ValidatorKeystorePath = ""
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

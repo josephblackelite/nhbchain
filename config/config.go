@@ -23,6 +23,7 @@ type Config struct {
 	RPCAddress            string      `toml:"RPCAddress"`
 	DataDir               string      `toml:"DataDir"`
 	GenesisFile           string      `toml:"GenesisFile"`
+	AllowAutogenesis      bool        `toml:"AllowAutogenesis"`
 	ValidatorKeystorePath string      `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI       string      `toml:"ValidatorKMSURI"`
 	ValidatorKMSEnv       string      `toml:"ValidatorKMSEnv"`
@@ -628,6 +629,7 @@ func createDefault(path string) (*Config, error) {
 		RPCAddress:       ":8080",
 		DataDir:          "./nhb-data",
 		GenesisFile:      "",
+		AllowAutogenesis: false,
 		NetworkName:      "nhb-local",
 		Bootnodes:        []string{},
 		PersistentPeers:  []string{},

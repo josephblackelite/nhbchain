@@ -294,10 +294,11 @@ func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) 
 	}
 
 	if !allowAutogenesis {
-		return nil, nil, fmt.Errorf("no genesis block present and autogenesis disabled")
+		fmt.Println("No genesis configuration found and autogenesis disabled; refusing to create an unsafe default genesis.")
+		return nil, nil, fmt.Errorf("genesis is required; provide a vetted genesis file or enable the autogenesis override for development use only")
 	}
 
-	fmt.Println("Auto-genesis created (dev mode)")
+	fmt.Println("Autogenesis override enabled (dev mode); creating ephemeral genesis block.")
 	return createGenesisBlock(), nil, nil
 }
 

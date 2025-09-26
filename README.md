@@ -110,12 +110,14 @@ This produces two executables:
 
 ### Initial Configuration
 
-On first launch the node creates `config.toml` alongside an encrypted validator keystore. To pre-configure or inspect settings, edit `config.toml`:
+On first launch the node creates `config.toml` alongside an encrypted validator keystore. To pre-configure or inspect settings, edit `config.toml` and point `GenesisFile` at the vetted genesis JSON supplied by network operations (autogenesis is only for isolated dev workflows):
 
 ```toml
 ListenAddress = "0.0.0.0:6001"
 RPCAddress    = "0.0.0.0:8080"
 DataDir       = "./nhb-data"
+GenesisFile   = "./config/genesis.json" # required: must match the network's published hash
+AllowAutogenesis = false                 # dev override; never enable on shared networks
 ValidatorKeystorePath = ""
 NetworkName = "nhb-local"
 Bootnodes = [

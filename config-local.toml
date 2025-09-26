@@ -1,7 +1,10 @@
 ListenAddress = "0.0.0.0:6002"
 RPCAddress = "0.0.0.0:8081"
 DataDir = "./nhb-data-local"
-GenesisFile = ""
+# Required: point to the genesis file that defines your local dev network.
+GenesisFile = "./config/local-genesis.json"
+# Set to true only if you intentionally want the node to fabricate an ephemeral genesis.
+AllowAutogenesis = false
 ValidatorKeystorePath = "./validator-local.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
