@@ -56,6 +56,7 @@ type Server struct {
 	authToken     string
 	potsoEvidence *modules.PotsoEvidenceModule
 	transactions  *modules.TransactionsModule
+	escrow        *modules.EscrowModule
 }
 
 func NewServer(node *core.Node) *Server {
@@ -67,6 +68,7 @@ func NewServer(node *core.Node) *Server {
 		authToken:     token,
 		potsoEvidence: modules.NewPotsoEvidenceModule(node),
 		transactions:  modules.NewTransactionsModule(node),
+		escrow:        modules.NewEscrowModule(node),
 	}
 }
 
@@ -346,6 +348,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleEscrowCreate(w, r, req)
 	case "escrow_get":
 		s.handleEscrowGet(w, r, req)
+	case "escrow_getRealm":
+		s.handleEscrowGetRealm(w, r, req)
+	case "escrow_getSnapshot":
+		s.handleEscrowGetSnapshot(w, r, req)
+	case "escrow_listEvents":
+		s.handleEscrowListEvents(w, r, req)
 	case "escrow_fund":
 		s.handleEscrowFund(w, r, req)
 	case "escrow_release":
@@ -789,6 +797,61 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 
 	s.node.AddTransaction(&tx)
 	writeResult(w, req.ID, "Transaction received by node.")
+}
+
+func (s *Server) handleEscrowGetRealm(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
+		return
+	}
+	if s.escrow == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "escrow module unavailable", nil)
+		return
+	}
+	result, modErr := s.escrow.GetRealm(req.Params[0])
+	if modErr != nil {
+		writeModuleError(w, req.ID, modErr)
+		return
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleEscrowGetSnapshot(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
+		return
+	}
+	if s.escrow == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "escrow module unavailable", nil)
+		return
+	}
+	result, modErr := s.escrow.GetSnapshot(req.Params[0])
+	if modErr != nil {
+		writeModuleError(w, req.ID, modErr)
+		return
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleEscrowListEvents(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) > 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "too many parameters", nil)
+		return
+	}
+	if s.escrow == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "escrow module unavailable", nil)
+		return
+	}
+	var raw json.RawMessage
+	if len(req.Params) == 1 {
+		raw = req.Params[0]
+	}
+	result, modErr := s.escrow.ListEvents(raw)
+	if modErr != nil {
+		writeModuleError(w, req.ID, modErr)
+		return
+	}
+	writeResult(w, req.ID, result)
 }
 
 func (s *Server) handleTxPreviewSponsorship(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
