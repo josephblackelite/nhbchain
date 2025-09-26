@@ -101,4 +101,4 @@ Rate limiting is enforced per IP. If you require dedicated throughput, request a
 * **Explorer not showing data** – Clear cached assets and check <https://status.testnet.nhbchain.io> for indexer updates.
 * **Governance tx fails** – Confirm minimum deposit and that your account has the governance module permissions enabled.
 
-Report critical incidents to `security@nhbchain.io` using the [disclosure policy](../security/release-process.md#vulnerability-disclosure).
+Report critical incidents to `security@nhbcoin.net` using the [disclosure policy](../security/release-process.md#vulnerability-disclosure).

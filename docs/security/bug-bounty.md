@@ -28,7 +28,7 @@ SLA targets may be adjusted when coordinated disclosure with upstream dependenci
 Researchers are expected to keep vulnerability details confidential until a coordinated disclosure date is agreed upon. We request a minimum 45-day embargo for critical issues and 30 days for other severities, unless a fix is released earlier. Premature disclosure may impact reward eligibility.
 
 ## Reporting & Contacts
-Send encrypted reports to **security@nhbchain.io** with the subject line “Bug Bounty Submission.” Include detailed reproduction steps, affected components, and suggested remediation if available. Urgent matters can also be escalated via our Signal hotline `+1-415-555-0119` (voice/text only).
+Send encrypted reports to **security@nhbcoin.net** with the subject line “Bug Bounty Submission.” Include detailed reproduction steps, affected components, and suggested remediation if available. Urgent matters can also be escalated via our Signal hotline `+1-415-555-0119` (voice/text only).
 
 ## PGP Key
 * **Fingerprint:** `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`

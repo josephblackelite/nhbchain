@@ -53,4 +53,4 @@ The faucet is a shared resource intended for development and integration testing
 3. Investigation under the vulnerability disclosure framework.
 4. Potential suspension from private beta programs.
 
-Report suspected abuse or vulnerabilities to `security@nhbchain.io` with reproduction details and request IDs.
+Report suspected abuse or vulnerabilities to `security@nhbcoin.net` with reproduction details and request IDs.

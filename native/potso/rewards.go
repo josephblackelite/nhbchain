@@ -63,6 +63,7 @@ type RewardConfig struct {
 	MaxWinnersPerEpoch uint64
 	CarryRemainder     bool
 	PayoutMode         RewardPayoutMode
+	MaxUserShareBps    uint64
 }
 
 // RewardSnapshotEntry captures the raw inputs for a participant when computing
@@ -143,6 +144,7 @@ func DefaultRewardConfig() RewardConfig {
 		MaxWinnersPerEpoch: 0,
 		CarryRemainder:     true,
 		PayoutMode:         RewardPayoutModeAuto,
+		MaxUserShareBps:    0,
 	}
 }
 
@@ -156,6 +158,9 @@ func (c RewardConfig) Validate() error {
 	}
 	if c.EmissionPerEpoch != nil && c.EmissionPerEpoch.Sign() < 0 {
 		return errors.New("emission per epoch cannot be negative")
+	}
+	if c.MaxUserShareBps > RewardBpsDenominator {
+		return fmt.Errorf("max user share must be <= %d", RewardBpsDenominator)
 	}
 	mode := c.PayoutMode.Normalise()
 	if !mode.Valid() {
@@ -282,26 +287,135 @@ func ComputeRewards(cfg RewardConfig, params WeightParams, snapshot RewardSnapsh
 		weighted = weighted[:cfg.MaxWinnersPerEpoch]
 	}
 
+	type payoutCandidate struct {
+		RewardPayout
+		cap      *big.Int
+		headroom *big.Int
+	}
+
+	candidates := make([]payoutCandidate, 0, len(weighted))
+	pool := big.NewInt(0)
+	var capWei *big.Int
+	if cfg.MaxUserShareBps > 0 {
+		capRatio := new(big.Rat).SetFrac(big.NewInt(int64(cfg.MaxUserShareBps)), big.NewInt(RewardBpsDenominator))
+		capWei = ratMulInt(capRatio, budget)
+	}
+
+	for _, candidate := range weighted {
+		if candidate.Weight == nil || candidate.Weight.Sign() <= 0 {
+			continue
+		}
+		weightCopy := new(big.Rat).Set(candidate.Weight)
+		base := ratMulInt(weightCopy, budget)
+		amount := new(big.Int).Set(base)
+		var cap *big.Int
+		var headroom *big.Int
+		if capWei != nil {
+			cap = new(big.Int).Set(capWei)
+			if amount.Cmp(cap) > 0 {
+				amount.Set(cap)
+			}
+			headroom = new(big.Int).Sub(cap, amount)
+			if headroom.Sign() < 0 {
+				headroom = big.NewInt(0)
+			}
+		}
+		clipped := new(big.Int).Sub(base, amount)
+		if clipped.Sign() > 0 {
+			pool.Add(pool, clipped)
+		}
+		candidates = append(candidates, payoutCandidate{
+			RewardPayout: RewardPayout{
+				Address: candidate.Address,
+				Amount:  amount,
+				Weight:  weightCopy,
+			},
+			cap:      cap,
+			headroom: headroom,
+		})
+	}
+
+	if cfg.MaxUserShareBps > 0 && pool.Sign() > 0 {
+		remaining := new(big.Int).Set(pool)
+		for remaining.Sign() > 0 {
+			indices := make([]int, 0, len(candidates))
+			weightSum := new(big.Rat)
+			for i := range candidates {
+				if candidates[i].headroom != nil && candidates[i].headroom.Sign() > 0 {
+					indices = append(indices, i)
+					weightSum.Add(weightSum, candidates[i].Weight)
+				}
+			}
+			if len(indices) == 0 {
+				break
+			}
+			allocated := big.NewInt(0)
+			for _, idx := range indices {
+				share := new(big.Rat).Set(candidates[idx].Weight)
+				if weightSum.Sign() > 0 {
+					share.Quo(share, weightSum)
+				} else {
+					share.SetInt64(0)
+				}
+				allocation := ratMulInt(share, remaining)
+				if candidates[idx].headroom.Cmp(allocation) < 0 {
+					allocation = new(big.Int).Set(candidates[idx].headroom)
+				}
+				if allocation.Sign() > 0 {
+					candidates[idx].Amount.Add(candidates[idx].Amount, allocation)
+					candidates[idx].headroom.Sub(candidates[idx].headroom, allocation)
+					allocated.Add(allocated, allocation)
+				}
+			}
+			if allocated.Sign() == 0 {
+				for _, idx := range indices {
+					if remaining.Sign() == 0 {
+						break
+					}
+					if candidates[idx].headroom.Sign() == 0 {
+						continue
+					}
+					step := big.NewInt(1)
+					if candidates[idx].headroom.Cmp(step) < 0 {
+						step = new(big.Int).Set(candidates[idx].headroom)
+					}
+					if remaining.Cmp(step) < 0 {
+						step = new(big.Int).Set(remaining)
+					}
+					candidates[idx].Amount.Add(candidates[idx].Amount, step)
+					candidates[idx].headroom.Sub(candidates[idx].headroom, step)
+					allocated.Add(allocated, step)
+					remaining.Sub(remaining, step)
+					if remaining.Sign() == 0 {
+						break
+					}
+				}
+			} else {
+				remaining.Sub(remaining, allocated)
+			}
+		}
+		pool = remaining
+	}
+
+	winners := make([]RewardPayout, 0, len(candidates))
 	totalPaid := big.NewInt(0)
-	winners := make([]RewardPayout, 0, len(weighted))
 	minPayout := cfg.MinPayoutWei
 	if minPayout == nil {
 		minPayout = big.NewInt(0)
 	}
-	for _, candidate := range weighted {
-		payout := ratMulInt(candidate.Weight, budget)
-		if payout.Sign() <= 0 {
+	for _, candidate := range candidates {
+		if candidate.Amount == nil || candidate.Amount.Sign() <= 0 {
 			continue
 		}
-		if minPayout.Sign() > 0 && payout.Cmp(minPayout) < 0 {
+		if minPayout.Sign() > 0 && candidate.Amount.Cmp(minPayout) < 0 {
 			continue
 		}
 		winners = append(winners, RewardPayout{
 			Address: candidate.Address,
-			Amount:  payout,
-			Weight:  candidate.Weight,
+			Amount:  new(big.Int).Set(candidate.Amount),
+			Weight:  new(big.Rat).Set(candidate.Weight),
 		})
-		totalPaid.Add(totalPaid, payout)
+		totalPaid.Add(totalPaid, candidate.Amount)
 	}
 
 	remainder := new(big.Int).Sub(budget, totalPaid)

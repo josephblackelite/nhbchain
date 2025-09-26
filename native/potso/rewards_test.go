@@ -216,6 +216,101 @@ func TestComputeRewardsMaxWinners(t *testing.T) {
 	}
 }
 
+func TestComputeRewardsMaxUserShareRedistribution(t *testing.T) {
+	cfg := RewardConfig{
+		EpochLengthBlocks: 1,
+		AlphaStakeBps:     0,
+		MinPayoutWei:      big.NewInt(0),
+		EmissionPerEpoch:  big.NewInt(1000),
+		TreasuryAddress:   addr(1),
+		MaxUserShareBps:   4000,
+	}
+	params := WeightParams{
+		AlphaStakeBps:         0,
+		TxWeightBps:           1,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 1000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinStakeToEarnWei:     big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+	}
+	snapshot := RewardSnapshot{
+		Epoch: 5,
+		Entries: []RewardSnapshotEntry{
+			{Address: addr(4), Stake: big.NewInt(500), Meter: EngagementMeter{TxCount: 100}},
+			{Address: addr(5), Stake: big.NewInt(200), Meter: EngagementMeter{TxCount: 50}},
+			{Address: addr(6), Stake: big.NewInt(100), Meter: EngagementMeter{TxCount: 10}},
+		},
+	}
+	outcome, err := ComputeRewards(cfg, params, snapshot, big.NewInt(1000))
+	if err != nil {
+		t.Fatalf("compute rewards: %v", err)
+	}
+	if len(outcome.Winners) != 3 {
+		t.Fatalf("expected 3 winners, got %d", len(outcome.Winners))
+	}
+	expected := map[[20]byte]*big.Int{
+		addr(4): big.NewInt(400),
+		addr(5): big.NewInt(400),
+		addr(6): big.NewInt(199),
+	}
+	for _, winner := range outcome.Winners {
+		want := expected[winner.Address]
+		if want == nil {
+			t.Fatalf("unexpected winner %x", winner.Address)
+		}
+		if winner.Amount.Cmp(want) != 0 {
+			t.Fatalf("unexpected payout for %x: want %s got %s", winner.Address, want, winner.Amount)
+		}
+	}
+	if outcome.Remainder.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("expected 1 wei remainder, got %s", outcome.Remainder)
+	}
+}
+
+func TestComputeRewardsMaxUserShareAllClipped(t *testing.T) {
+	cfg := RewardConfig{
+		EpochLengthBlocks: 1,
+		AlphaStakeBps:     0,
+		MinPayoutWei:      big.NewInt(0),
+		EmissionPerEpoch:  big.NewInt(500),
+		TreasuryAddress:   addr(1),
+		MaxUserShareBps:   1,
+	}
+	params := WeightParams{
+		AlphaStakeBps:         0,
+		TxWeightBps:           1,
+		EscrowWeightBps:       0,
+		UptimeWeightBps:       0,
+		MaxEngagementPerEpoch: 1000,
+		MinStakeToWinWei:      big.NewInt(0),
+		MinStakeToEarnWei:     big.NewInt(0),
+		MinEngagementToWin:    0,
+		DecayHalfLifeEpochs:   0,
+		TopKWinners:           0,
+	}
+	snapshot := RewardSnapshot{
+		Epoch:   6,
+		Entries: []RewardSnapshotEntry{{Address: addr(7), Stake: big.NewInt(100), Meter: EngagementMeter{TxCount: 10}}},
+	}
+	outcome, err := ComputeRewards(cfg, params, snapshot, big.NewInt(500))
+	if err != nil {
+		t.Fatalf("compute rewards: %v", err)
+	}
+	if len(outcome.Winners) != 0 {
+		t.Fatalf("expected no winners when cap resolves to zero, got %d", len(outcome.Winners))
+	}
+	if outcome.TotalPaid.Sign() != 0 {
+		t.Fatalf("expected zero paid, got %s", outcome.TotalPaid)
+	}
+	if outcome.Remainder.Cmp(big.NewInt(500)) != 0 {
+		t.Fatalf("expected full remainder, got %s", outcome.Remainder)
+	}
+}
+
 func TestRewardConfigValidate(t *testing.T) {
 	cfg := RewardConfig{AlphaStakeBps: RewardBpsDenominator + 1}
 	if err := cfg.Validate(); err == nil {
@@ -224,6 +319,10 @@ func TestRewardConfigValidate(t *testing.T) {
 	cfg = RewardConfig{EpochLengthBlocks: 1, EmissionPerEpoch: big.NewInt(1)}
 	if err := cfg.Validate(); err == nil {
 		t.Fatalf("expected treasury validation error")
+	}
+	cfg = RewardConfig{EpochLengthBlocks: 1, EmissionPerEpoch: big.NewInt(1), TreasuryAddress: addr(1), MaxUserShareBps: RewardBpsDenominator + 1}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected max user share validation error")
 	}
 }
 

@@ -258,6 +258,11 @@ func clonePotsoWeightConfig(cfg potso.WeightParams) potso.WeightParams {
 	} else {
 		clone.MinStakeToWinWei = big.NewInt(0)
 	}
+	if cfg.MinStakeToEarnWei != nil {
+		clone.MinStakeToEarnWei = new(big.Int).Set(cfg.MinStakeToEarnWei)
+	} else {
+		clone.MinStakeToEarnWei = big.NewInt(0)
+	}
 	return clone
 }
 

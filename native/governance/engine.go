@@ -268,6 +268,47 @@ func validatorForParam(key string) paramValidator {
 			}
 			return nil
 		}
+	case "potso.abuse.MaxUserShareBps":
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("potso.abuse.MaxUserShareBps: %w", err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("potso.abuse.MaxUserShareBps: must be <= %d", maxBasisPoints)
+			}
+			return nil
+		}
+	case "potso.abuse.MinStakeToEarnWei":
+		return func(raw json.RawMessage) error {
+			amount, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("potso.abuse.MinStakeToEarnWei: %w", err)
+			}
+			if amount.Sign() < 0 {
+				return fmt.Errorf("potso.abuse.MinStakeToEarnWei: must be >= 0")
+			}
+			return nil
+		}
+	case "potso.abuse.QuadraticTxDampenAfter":
+		return func(raw json.RawMessage) error {
+			_, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("potso.abuse.QuadraticTxDampenAfter: %w", err)
+			}
+			return nil
+		}
+	case "potso.abuse.QuadraticTxDampenPower":
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("potso.abuse.QuadraticTxDampenPower: %w", err)
+			}
+			if value == 1 {
+				return fmt.Errorf("potso.abuse.QuadraticTxDampenPower: must be 0 to disable or >= 2 for damping")
+			}
+			return nil
+		}
 	case ParamKeyMinimumValidatorStake:
 		return func(raw json.RawMessage) error {
 			amount, err := parseUintRaw(raw)

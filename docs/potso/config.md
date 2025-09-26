@@ -31,7 +31,24 @@ Composite weighting is controlled via the `[potso.weights]` section in
 
 - **Eligibility filters:** Use `MinStakeToWinWei` and `MinEngagementToWin` to
   exclude dust accounts or low-effort participants. Accounts failing either
-  threshold are removed before totals are computed.
+  threshold are removed before totals are computed. `MinStakeToEarnWei` keeps the
+  account on the leaderboard but zeroes their engagement until they post the
+  required stake.
+
+## Abuse Control Section
+
+The `[potso.abuse]` section adds coarse switches that tune anti-farming
+behaviour without disturbing the main weighting blend.
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `MinStakeToEarnWei` | Mirrors the value in `[potso.weights]` and can be managed centrally. | `"0"` |
+| `QuadraticTxDampenAfter` | Transaction count knee point before dampening applies. | `0` (disabled) |
+| `QuadraticTxDampenPower` | Exponent controlling the curvature (`2` = square-root). | `2` |
+| `MaxUserShareBps` | Maximum share of the epoch rewards budget per participant. | `0` (uncapped) |
+
+Changes to this block take effect at the next epoch once nodes reload their
+configuration or governance updates the corresponding on-chain parameters.
 
 - **Top-K:** `TopKWinners` trims the leaderboard after weights are computed.
   Combined with `MaxWinnersPerEpoch` in `[potso.rewards]` this bounds storage and
