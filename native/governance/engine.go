@@ -16,6 +16,7 @@ import (
 	"nhbchain/core/events"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/escrow"
 	"nhbchain/native/potso"
 )
 
@@ -315,6 +316,56 @@ func validatorForParam(key string) paramValidator {
 			_, err := parseBoolRaw(raw)
 			if err != nil {
 				return fmt.Errorf("%s: %w", paramKeySlashingEnabled, err)
+			}
+			return nil
+		}
+	case escrow.ParamKeyRealmMinThreshold:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", escrow.ParamKeyRealmMinThreshold, err)
+			}
+			if value == 0 || value > 100 {
+				return fmt.Errorf("%s: must be between 1 and 100", escrow.ParamKeyRealmMinThreshold)
+			}
+			return nil
+		}
+	case escrow.ParamKeyRealmMaxThreshold:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", escrow.ParamKeyRealmMaxThreshold, err)
+			}
+			if value == 0 || value > 100 {
+				return fmt.Errorf("%s: must be between 1 and 100", escrow.ParamKeyRealmMaxThreshold)
+			}
+			return nil
+		}
+	case escrow.ParamKeyRealmAllowedSchemes:
+		return func(raw json.RawMessage) error {
+			var values []string
+			if err := json.Unmarshal(raw, &values); err != nil {
+				var single string
+				if err := json.Unmarshal(raw, &single); err != nil {
+					return fmt.Errorf("%s: invalid payload", escrow.ParamKeyRealmAllowedSchemes)
+				}
+				values = []string{single}
+			}
+			if len(values) == 0 {
+				return fmt.Errorf("%s: must not be empty", escrow.ParamKeyRealmAllowedSchemes)
+			}
+			for _, entry := range values {
+				trimmed := strings.ToLower(strings.TrimSpace(entry))
+				switch trimmed {
+				case "single", "committee":
+				default:
+					if trimmed == "" {
+						return fmt.Errorf("%s: scheme must not be empty", escrow.ParamKeyRealmAllowedSchemes)
+					}
+					if _, err := strconv.ParseUint(trimmed, 10, 8); err != nil {
+						return fmt.Errorf("%s: unknown scheme %q", escrow.ParamKeyRealmAllowedSchemes, entry)
+					}
+				}
 			}
 			return nil
 		}

@@ -62,6 +62,7 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 		deadline  string
 		mediator  string
 		meta      string
+		realm     string
 	)
 	fs.StringVar(&payer, "payer", "", "payer bech32 address")
 	fs.StringVar(&payee, "payee", "", "payee bech32 address")
@@ -71,6 +72,7 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&deadline, "deadline", "", "deadline as +duration or RFC3339 timestamp")
 	fs.StringVar(&mediator, "mediator", "", "optional mediator bech32 address")
 	fs.StringVar(&meta, "meta", "", "optional 0x-prefixed metadata hash")
+	fs.StringVar(&realm, "realm", "", "optional realm identifier")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -129,6 +131,9 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	}
 	if strings.TrimSpace(meta) != "" {
 		params["meta"] = meta
+	}
+	if strings.TrimSpace(realm) != "" {
+		params["realm"] = realm
 	}
 
 	result, rpcErr, err := escrowRPCCall("escrow_create", params, true)

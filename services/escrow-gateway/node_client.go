@@ -79,6 +79,9 @@ func (c *RPCNodeClient) EscrowCreate(ctx context.Context, req EscrowCreateReques
 	if req.Meta != "" {
 		payload["meta"] = req.Meta
 	}
+	if trimmed := strings.TrimSpace(req.Realm); trimmed != "" {
+		payload["realm"] = trimmed
+	}
 	var result EscrowCreateResponse
 	if err := c.call(ctx, "escrow_create", []interface{}{payload}, &result); err != nil {
 		return nil, err
@@ -209,6 +212,7 @@ type EscrowCreateRequest struct {
 	FeeBps   uint32 `json:"feeBps"`
 	Deadline int64  `json:"deadline"`
 	Mediator string `json:"mediator,omitempty"`
+	Realm    string `json:"realm,omitempty"`
 	Meta     string `json:"meta,omitempty"`
 }
 
@@ -219,17 +223,24 @@ type EscrowCreateResponse struct {
 
 // EscrowState mirrors the JSON returned by the node for escrow_get.
 type EscrowState struct {
-	ID        string  `json:"id"`
-	Payer     string  `json:"payer"`
-	Payee     string  `json:"payee"`
-	Mediator  *string `json:"mediator,omitempty"`
-	Token     string  `json:"token"`
-	Amount    string  `json:"amount"`
-	FeeBps    uint32  `json:"feeBps"`
-	Deadline  int64   `json:"deadline"`
-	CreatedAt int64   `json:"createdAt"`
-	Status    string  `json:"status"`
-	Meta      string  `json:"meta"`
+	ID        string   `json:"id"`
+	Payer     string   `json:"payer"`
+	Payee     string   `json:"payee"`
+	Mediator  *string  `json:"mediator,omitempty"`
+	Token     string   `json:"token"`
+	Amount    string   `json:"amount"`
+	FeeBps    uint32   `json:"feeBps"`
+	Deadline  int64    `json:"deadline"`
+	CreatedAt int64    `json:"createdAt"`
+	Status    string   `json:"status"`
+	Meta      string   `json:"meta"`
+	Realm     *string  `json:"realm,omitempty"`
+	FrozenAt  *int64   `json:"frozenAt,omitempty"`
+	Scheme    *uint8   `json:"arbScheme,omitempty"`
+	Threshold *uint32  `json:"arbThreshold,omitempty"`
+	Nonce     *uint64  `json:"policyNonce,omitempty"`
+	Version   *uint64  `json:"realmVersion,omitempty"`
+	Members   []string `json:"arbitrators,omitempty"`
 }
 
 // P2PAcceptRequest captures the gateway request forwarded to the node RPC when

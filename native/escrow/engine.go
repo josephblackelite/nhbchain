@@ -1,9 +1,11 @@
 package escrow
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,8 @@ var (
 	errNilState       = errors.New("escrow engine: state not configured")
 	errNilTreasury    = errors.New("escrow engine: fee treasury not configured")
 	errEscrowNotFound = errors.New("escrow engine: escrow not found")
+	errRealmNotFound  = errors.New("escrow engine: realm not found")
+	errRealmConfig    = errors.New("escrow engine: invalid realm configuration")
 )
 
 type engineState interface {
@@ -27,6 +31,11 @@ type engineState interface {
 	EscrowVaultAddress(token string) ([20]byte, error)
 	GetAccount(addr []byte) (*types.Account, error)
 	PutAccount(addr []byte, account *types.Account) error
+	EscrowRealmPut(*EscrowRealm) error
+	EscrowRealmGet(id string) (*EscrowRealm, bool, error)
+	EscrowFrozenPolicyPut(id [32]byte, policy *FrozenArb) error
+	EscrowFrozenPolicyGet(id [32]byte) (*FrozenArb, bool, error)
+	ParamStoreGet(name string) ([]byte, bool, error)
 }
 
 type escrowEvent struct {
@@ -202,8 +211,297 @@ func (e *Engine) ensureTreasuryConfigured() error {
 	return nil
 }
 
-// Create initialises and persists a new escrow definition.
-func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediatorOpt *[20]byte, metaHash [32]byte) (*Escrow, error) {
+func defaultRealmSchemeMap() map[ArbitrationScheme]struct{} {
+	allowed := make(map[ArbitrationScheme]struct{}, len(DefaultRealmAllowedSchemes))
+	for _, scheme := range DefaultRealmAllowedSchemes {
+		allowed[scheme] = struct{}{}
+	}
+	return allowed
+}
+
+func parseUintParam(raw []byte) (uint64, error) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return 0, fmt.Errorf("value must not be empty")
+	}
+	value, err := strconv.ParseUint(text, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func parseSchemeString(value string) (ArbitrationScheme, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	switch trimmed {
+	case "single":
+		return ArbitrationSchemeSingle, nil
+	case "committee":
+		return ArbitrationSchemeCommittee, nil
+	}
+	if trimmed == "" {
+		return 0, fmt.Errorf("arbitration scheme must not be empty")
+	}
+	if num, err := strconv.ParseUint(trimmed, 10, 8); err == nil {
+		scheme := ArbitrationScheme(num)
+		if scheme.Valid() {
+			return scheme, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown arbitration scheme %q", value)
+}
+
+func parseAllowedSchemesParam(raw []byte) (map[ArbitrationScheme]struct{}, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, fmt.Errorf("allowed schemes payload empty")
+	}
+	allowed := make(map[ArbitrationScheme]struct{})
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		var single string
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, fmt.Errorf("invalid allowed schemes payload: %w", err)
+		}
+		values = []string{single}
+	}
+	for _, entry := range values {
+		scheme, err := parseSchemeString(entry)
+		if err != nil {
+			return nil, err
+		}
+		allowed[scheme] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return nil, fmt.Errorf("allowed schemes list empty")
+	}
+	return allowed, nil
+}
+
+func (e *Engine) realmBounds() (uint32, uint32, map[ArbitrationScheme]struct{}, error) {
+	min := DefaultRealmMinThreshold
+	max := DefaultRealmMaxThreshold
+	allowed := defaultRealmSchemeMap()
+	if e == nil || e.state == nil {
+		return min, max, allowed, nil
+	}
+	if raw, ok, err := e.state.ParamStoreGet(ParamKeyRealmMinThreshold); err != nil {
+		return 0, 0, nil, err
+	} else if ok {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("realm min threshold: %w", err)
+		}
+		if parsed == 0 {
+			return 0, 0, nil, fmt.Errorf("realm min threshold must be positive")
+		}
+		min = uint32(parsed)
+	}
+	if raw, ok, err := e.state.ParamStoreGet(ParamKeyRealmMaxThreshold); err != nil {
+		return 0, 0, nil, err
+	} else if ok {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("realm max threshold: %w", err)
+		}
+		if parsed == 0 {
+			return 0, 0, nil, fmt.Errorf("realm max threshold must be positive")
+		}
+		max = uint32(parsed)
+	}
+	if raw, ok, err := e.state.ParamStoreGet(ParamKeyRealmAllowedSchemes); err != nil {
+		return 0, 0, nil, err
+	} else if ok {
+		parsed, err := parseAllowedSchemesParam(raw)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		if len(parsed) > 0 {
+			allowed = parsed
+		}
+	}
+	if min > max {
+		return 0, 0, nil, fmt.Errorf("realm threshold bounds invalid: min %d > max %d", min, max)
+	}
+	return min, max, allowed, nil
+}
+
+func (e *Engine) validateArbitratorSetBounds(set *ArbitratorSet) (*ArbitratorSet, error) {
+	sanitized, err := SanitizeArbitratorSet(set)
+	if err != nil {
+		return nil, err
+	}
+	min, max, allowed, err := e.realmBounds()
+	if err != nil {
+		return nil, err
+	}
+	if len(sanitized.Members) < int(min) {
+		return nil, fmt.Errorf("escrow: arbitrator set too small for minimum threshold %d", min)
+	}
+	if sanitized.Threshold < min {
+		return nil, fmt.Errorf("escrow: arbitrator threshold below minimum %d", min)
+	}
+	if sanitized.Threshold > max {
+		return nil, fmt.Errorf("escrow: arbitrator threshold above maximum %d", max)
+	}
+	if _, ok := allowed[sanitized.Scheme]; !ok {
+		return nil, fmt.Errorf("escrow: arbitration scheme %d not permitted", sanitized.Scheme)
+	}
+	return sanitized, nil
+}
+
+func (e *Engine) prepareFrozenPolicy(realmID string, now int64) (*EscrowRealm, *FrozenArb, error) {
+	if e == nil || e.state == nil {
+		return nil, nil, errNilState
+	}
+	trimmed := strings.TrimSpace(realmID)
+	if trimmed == "" {
+		return nil, nil, nil
+	}
+	realm, ok, err := e.state.EscrowRealmGet(trimmed)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok {
+		return nil, nil, errRealmNotFound
+	}
+	sanitizedRealm, err := SanitizeEscrowRealm(realm)
+	if err != nil {
+		return nil, nil, err
+	}
+	sanitizedSet, err := e.validateArbitratorSetBounds(sanitizedRealm.Arbitrators)
+	if err != nil {
+		return nil, nil, err
+	}
+	sanitizedRealm.Arbitrators = sanitizedSet
+	if sanitizedRealm.NextPolicyNonce == 0 {
+		return nil, nil, errRealmConfig
+	}
+	frozen := &FrozenArb{
+		RealmID:      sanitizedRealm.ID,
+		RealmVersion: sanitizedRealm.Version,
+		PolicyNonce:  sanitizedRealm.NextPolicyNonce,
+		Scheme:       sanitizedSet.Scheme,
+		Threshold:    sanitizedSet.Threshold,
+		Members:      append([][20]byte(nil), sanitizedSet.Members...),
+		FrozenAt:     now,
+	}
+	sanitizedRealm.NextPolicyNonce++
+	sanitizedRealm.UpdatedAt = now
+	return sanitizedRealm, frozen, nil
+}
+
+// CreateRealm persists a new arbitration realm using the configured governance
+// bounds for validation.
+func (e *Engine) CreateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if realm == nil {
+		return nil, fmt.Errorf("escrow: nil realm definition")
+	}
+	trimmed := strings.TrimSpace(realm.ID)
+	if trimmed == "" {
+		return nil, fmt.Errorf("escrow: realm id must not be empty")
+	}
+	if existing, ok, err := e.state.EscrowRealmGet(trimmed); err != nil {
+		return nil, err
+	} else if ok && existing != nil {
+		return nil, fmt.Errorf("escrow: realm already exists")
+	}
+	sanitizedSet, err := e.validateArbitratorSetBounds(realm.Arbitrators)
+	if err != nil {
+		return nil, err
+	}
+	now := e.now()
+	candidate := &EscrowRealm{
+		ID:              trimmed,
+		Version:         1,
+		NextPolicyNonce: 1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Arbitrators:     sanitizedSet,
+	}
+	sanitizedRealm, err := SanitizeEscrowRealm(candidate)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.state.EscrowRealmPut(sanitizedRealm); err != nil {
+		return nil, err
+	}
+	e.emit(NewRealmCreatedEvent(sanitizedRealm))
+	return sanitizedRealm.Clone(), nil
+}
+
+// UpdateRealm replaces the arbitrator policy of an existing realm, bumping the
+// version while preserving the creation metadata.
+func (e *Engine) UpdateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if realm == nil {
+		return nil, fmt.Errorf("escrow: nil realm definition")
+	}
+	trimmed := strings.TrimSpace(realm.ID)
+	if trimmed == "" {
+		return nil, fmt.Errorf("escrow: realm id must not be empty")
+	}
+	current, ok, err := e.state.EscrowRealmGet(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || current == nil {
+		return nil, errRealmNotFound
+	}
+	sanitizedCurrent, err := SanitizeEscrowRealm(current)
+	if err != nil {
+		return nil, err
+	}
+	sanitizedSet, err := e.validateArbitratorSetBounds(realm.Arbitrators)
+	if err != nil {
+		return nil, err
+	}
+	sanitizedCurrent.Version++
+	sanitizedCurrent.Arbitrators = sanitizedSet
+	sanitizedCurrent.UpdatedAt = e.now()
+	sanitizedRealm, err := SanitizeEscrowRealm(sanitizedCurrent)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.state.EscrowRealmPut(sanitizedRealm); err != nil {
+		return nil, err
+	}
+	e.emit(NewRealmUpdatedEvent(sanitizedRealm))
+	return sanitizedRealm.Clone(), nil
+}
+
+// GetRealm resolves the latest definition for the provided realm identifier.
+func (e *Engine) GetRealm(id string) (*EscrowRealm, bool, error) {
+	if e == nil || e.state == nil {
+		return nil, false, errNilState
+	}
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	realm, ok, err := e.state.EscrowRealmGet(trimmed)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	sanitized, err := SanitizeEscrowRealm(realm)
+	if err != nil {
+		return nil, false, err
+	}
+	return sanitized.Clone(), true, nil
+}
+
+// Create initialises and persists a new escrow definition. When a realm is
+// provided the engine freezes the current arbitrator policy and associates it
+// with the escrow.
+func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediatorOpt *[20]byte, metaHash [32]byte, realmID string) (*Escrow, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
@@ -230,10 +528,21 @@ func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, fe
 	existing, ok := e.state.EscrowGet(id)
 	if ok {
 		// Ensure idempotent behaviour: definitions must match
-		if existing.Payer != payer || existing.Payee != payee || existing.Token != normalizedToken || existing.Amount.Cmp(amt) != 0 || existing.FeeBps != feeBps || existing.Deadline != deadline || existing.MetaHash != metaHash || existing.Mediator != mediator {
+		if existing.Payer != payer || existing.Payee != payee || existing.Token != normalizedToken || existing.Amount.Cmp(amt) != 0 || existing.FeeBps != feeBps || existing.Deadline != deadline || existing.MetaHash != metaHash || existing.Mediator != mediator || strings.TrimSpace(existing.RealmID) != strings.TrimSpace(realmID) {
 			return nil, fmt.Errorf("escrow: identifier already exists with different definition")
 		}
 		return existing, nil
+	}
+	trimmedRealm := strings.TrimSpace(realmID)
+	var (
+		realmUpdate *EscrowRealm
+		frozen      *FrozenArb
+	)
+	if trimmedRealm != "" {
+		realmUpdate, frozen, err = e.prepareFrozenPolicy(trimmedRealm, now)
+		if err != nil {
+			return nil, err
+		}
 	}
 	esc := &Escrow{
 		ID:        id,
@@ -247,9 +556,21 @@ func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, fe
 		CreatedAt: now,
 		MetaHash:  metaHash,
 		Status:    EscrowInit,
+		RealmID:   trimmedRealm,
+	}
+	if frozen != nil {
+		esc.FrozenArb = frozen.Clone()
 	}
 	if err := e.storeEscrow(esc); err != nil {
 		return nil, err
+	}
+	if frozen != nil {
+		if err := e.state.EscrowRealmPut(realmUpdate); err != nil {
+			return nil, err
+		}
+		if err := e.state.EscrowFrozenPolicyPut(esc.ID, frozen); err != nil {
+			return nil, err
+		}
 	}
 	e.emit(NewCreatedEvent(esc))
 	return esc.Clone(), nil

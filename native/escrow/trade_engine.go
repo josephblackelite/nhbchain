@@ -124,12 +124,12 @@ func (e *TradeEngine) CreateTrade(offerID string, buyer, seller [20]byte, quoteT
 	}
 	// Create both escrows.
 	metaQuote := ethcrypto.Keccak256Hash(tradeID[:], []byte("quote"))
-	escQuote, err := e.escrow.Create(buyer, seller, normalizedQuote, quoteAmount, 0, deadline, nil, metaQuote)
+	escQuote, err := e.escrow.Create(buyer, seller, normalizedQuote, quoteAmount, 0, deadline, nil, metaQuote, "")
 	if err != nil {
 		return nil, err
 	}
 	metaBase := ethcrypto.Keccak256Hash(tradeID[:], []byte("base"))
-	escBase, err := e.escrow.Create(seller, buyer, normalizedBase, baseAmount, 0, deadline, nil, metaBase)
+	escBase, err := e.escrow.Create(seller, buyer, normalizedBase, baseAmount, 0, deadline, nil, metaBase, "")
 	if err != nil {
 		return nil, err
 	}

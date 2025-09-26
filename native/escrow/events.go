@@ -16,6 +16,8 @@ const (
 	EventTypeEscrowExpired      = "escrow.expired"
 	EventTypeEscrowDisputed     = "escrow.disputed"
 	EventTypeEscrowResolved     = "escrow.resolved"
+	EventTypeRealmCreated       = "escrow.realm.created"
+	EventTypeRealmUpdated       = "escrow.realm.updated"
 	EventTypeTradeCreated       = "escrow.trade.created"
 	EventTypeTradePartialFunded = "escrow.trade.partial_funded"
 	EventTypeTradeFunded        = "escrow.trade.funded"
@@ -24,6 +26,16 @@ const (
 	EventTypeTradeSettled       = "escrow.trade.settled"
 	EventTypeTradeExpired       = "escrow.trade.expired"
 )
+
+// NewRealmCreatedEvent emits the canonical payload for a newly created realm.
+func NewRealmCreatedEvent(r *EscrowRealm) *types.Event {
+	return newRealmEvent(EventTypeRealmCreated, r)
+}
+
+// NewRealmUpdatedEvent emits the canonical payload for an updated realm.
+func NewRealmUpdatedEvent(r *EscrowRealm) *types.Event {
+	return newRealmEvent(EventTypeRealmUpdated, r)
+}
 
 // NewCreatedEvent returns the canonical event payload for a newly created
 // escrow.
@@ -107,6 +119,18 @@ func newEscrowEvent(eventType string, e *Escrow) *types.Event {
 	if sanitized.Mediator != ([20]byte{}) {
 		attrs["mediator"] = hex.EncodeToString(sanitized.Mediator[:])
 	}
+	if strings.TrimSpace(sanitized.RealmID) != "" {
+		attrs["realmId"] = sanitized.RealmID
+	}
+	if sanitized.FrozenArb != nil {
+		attrs["realmVersion"] = strconv.FormatUint(sanitized.FrozenArb.RealmVersion, 10)
+		attrs["policyNonce"] = strconv.FormatUint(sanitized.FrozenArb.PolicyNonce, 10)
+		attrs["arbScheme"] = strconv.FormatUint(uint64(sanitized.FrozenArb.Scheme), 10)
+		attrs["arbThreshold"] = strconv.FormatUint(uint64(sanitized.FrozenArb.Threshold), 10)
+		if members := formatArbitratorMembers(sanitized.FrozenArb.Members); members != "" {
+			attrs["arbitrators"] = members
+		}
+	}
 	return &types.Event{Type: eventType, Attributes: attrs}
 }
 
@@ -136,4 +160,42 @@ func newTradeEvent(eventType string, t *Trade, extra string) *types.Event {
 		attrs["outcome"] = extra
 	}
 	return &types.Event{Type: eventType, Attributes: attrs}
+}
+
+func newRealmEvent(eventType string, r *EscrowRealm) *types.Event {
+	attrs := make(map[string]string)
+	if r == nil {
+		return &types.Event{Type: eventType, Attributes: attrs}
+	}
+	sanitized, err := SanitizeEscrowRealm(r)
+	if err != nil {
+		return &types.Event{Type: eventType, Attributes: attrs}
+	}
+	attrs["realmId"] = sanitized.ID
+	attrs["version"] = strconv.FormatUint(sanitized.Version, 10)
+	attrs["nextNonce"] = strconv.FormatUint(sanitized.NextPolicyNonce, 10)
+	attrs["createdAt"] = strconv.FormatInt(sanitized.CreatedAt, 10)
+	attrs["updatedAt"] = strconv.FormatInt(sanitized.UpdatedAt, 10)
+	if sanitized.Arbitrators != nil {
+		attrs["arbScheme"] = strconv.FormatUint(uint64(sanitized.Arbitrators.Scheme), 10)
+		attrs["arbThreshold"] = strconv.FormatUint(uint64(sanitized.Arbitrators.Threshold), 10)
+		if members := formatArbitratorMembers(sanitized.Arbitrators.Members); members != "" {
+			attrs["arbitrators"] = members
+		}
+	}
+	return &types.Event{Type: eventType, Attributes: attrs}
+}
+
+func formatArbitratorMembers(members [][20]byte) string {
+	if len(members) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(members))
+	for _, member := range members {
+		if member == ([20]byte{}) {
+			continue
+		}
+		parts = append(parts, hex.EncodeToString(member[:]))
+	}
+	return strings.Join(parts, ",")
 }
