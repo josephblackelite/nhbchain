@@ -65,6 +65,7 @@ TimelockSeconds = 172800
 QuorumBps = 2000
 PassThresholdBps = 5000
 AllowedParams = ["potso.weights.AlphaStakeBps","potso.rewards.EmissionPerEpochWei","fees.baseFee"]
+BlockTimestampToleranceSeconds = 5
 
 [swap]
 AllowedFiat = ["USD","EUR","GBP"]

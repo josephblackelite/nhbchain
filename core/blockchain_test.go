@@ -141,14 +141,17 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed to add block2: %v", err)
 	}
 
-	if bc.GetHeight() != 2 {
-		t.Fatalf("expected height 2 before restart, got %d", bc.GetHeight())
-	}
+        if bc.GetHeight() != 2 {
+                t.Fatalf("expected height 2 before restart, got %d", bc.GetHeight())
+        }
+        if last := bc.LastTimestamp(); last != block2.Header.Timestamp {
+                t.Fatalf("unexpected last timestamp before restart: got %d want %d", last, block2.Header.Timestamp)
+        }
 
-	db.Close()
+        db.Close()
 
-	reopenedDB, err := storage.NewLevelDB(dbPath)
-	if err != nil {
+        reopenedDB, err := storage.NewLevelDB(dbPath)
+        if err != nil {
 		t.Fatalf("failed to reopen db: %v", err)
 	}
 	defer reopenedDB.Close()
@@ -158,9 +161,12 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed to reopen blockchain: %v", err)
 	}
 
-	if reopenedBC.GetHeight() != 2 {
-		t.Fatalf("expected height 2 after restart, got %d", reopenedBC.GetHeight())
-	}
+        if reopenedBC.GetHeight() != 2 {
+                t.Fatalf("expected height 2 after restart, got %d", reopenedBC.GetHeight())
+        }
+        if last := reopenedBC.LastTimestamp(); last != block2.Header.Timestamp {
+                t.Fatalf("unexpected last timestamp after restart: got %d want %d", last, block2.Header.Timestamp)
+        }
 
 	reopenedBlock1, err := reopenedBC.GetBlockByHeight(1)
 	if err != nil {

@@ -134,6 +134,7 @@ PassThresholdBps = 5500
 AllowedParams = ["fees.baseFee","escrow.maxOpenDisputes"]
 AllowedRoles = ["compliance"]
 TreasuryAllowList = ["%s"]
+BlockTimestampToleranceSeconds = 12
 `, keystorePath, testTreasuryAllowAddrString)
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -171,18 +172,22 @@ TreasuryAllowList = ["%s"]
 	if len(cfg.Governance.TreasuryAllowList) != 1 || cfg.Governance.TreasuryAllowList[0] != testTreasuryAllowAddrString {
 		t.Fatalf("unexpected treasury allow list: %v", cfg.Governance.TreasuryAllowList)
 	}
+	if cfg.Governance.BlockTimestampToleranceSeconds != 12 {
+		t.Fatalf("unexpected timestamp tolerance: %d", cfg.Governance.BlockTimestampToleranceSeconds)
+	}
 }
 
 func TestGovPolicyParsing(t *testing.T) {
 	cfg := GovConfig{
-		MinDepositWei:       "1.25e3",
-		VotingPeriodSeconds: 3600,
-		TimelockSeconds:     7200,
-		QuorumBps:           1500,
-		PassThresholdBps:    5500,
-		AllowedParams:       []string{"fees.baseFee", "escrow.maxOpenDisputes"},
-		AllowedRoles:        []string{"compliance"},
-		TreasuryAllowList:   []string{testTreasuryAllowAddrString},
+		MinDepositWei:                  "1.25e3",
+		VotingPeriodSeconds:            3600,
+		TimelockSeconds:                7200,
+		QuorumBps:                      1500,
+		PassThresholdBps:               5500,
+		AllowedParams:                  []string{"fees.baseFee", "escrow.maxOpenDisputes"},
+		AllowedRoles:                   []string{"compliance"},
+		TreasuryAllowList:              []string{testTreasuryAllowAddrString},
+		BlockTimestampToleranceSeconds: 9,
 	}
 	policy, err := cfg.Policy()
 	if err != nil {
@@ -193,6 +198,9 @@ func TestGovPolicyParsing(t *testing.T) {
 	}
 	if policy.QuorumBps != 1500 || policy.PassThresholdBps != 5500 {
 		t.Fatalf("unexpected thresholds: %+v", policy)
+	}
+	if policy.BlockTimestampToleranceSeconds != 9 {
+		t.Fatalf("unexpected block tolerance: %d", policy.BlockTimestampToleranceSeconds)
 	}
 	depositWant := new(big.Int)
 	depositWant.SetString("1250", 10)
