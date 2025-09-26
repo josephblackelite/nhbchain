@@ -82,10 +82,15 @@ curl -s \
 
 Response fields:
 
-* `status`: One of `ready`, `module_disabled`, `signature_missing`, `signature_invalid`, `insufficient_balance`, or `none`.
+* `status`: One of `ready`, `module_disabled`, `signature_missing`, `signature_invalid`, `insufficient_balance`, or `none`. A `status` of `none` now carries the reason "transaction does not request sponsorship," distinguishing unsponsored submissions from malformed paymaster payloads.
 * `reason`: Human-readable explanation when the status is not `ready`.
 * `requiredBudgetWei`: Gas limit × price budget expected from the sponsor.
+* `sponsor`: Address that would be charged for gas if sponsorship proceeds.
+* `gasPriceWei`: Effective gas price the sponsor is expected to cover.
+* `willRevert`: Boolean flag set to `true` when the request cannot reach `ApplyMessage`—specifically when `status` is `module_disabled`, `signature_missing`, `signature_invalid`, or `insufficient_balance`.
 * `moduleEnabled`: Echoes the current global toggle.
+
+When `willRevert` is `true`, the node aborts before `ApplyMessage`, meaning the transaction never reaches execution and no sponsor fallback occurs. Integrators must treat these cases as hard failures instead of attempting to fall back to sender-funded gas.
 
 Clients should only broadcast transactions with `status == "ready"` to avoid fallback gas charges to the sender.
 
