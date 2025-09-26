@@ -66,8 +66,9 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/metrics' && req.method === 'GET') {
     json(res, {
       status: 'ok',
-      rpcUrl: process.env.NHB_RPC_URL,
-      restUrl: process.env.NHB_REST_URL,
+      rpcHttpUrl: process.env.NHB_RPC_URL,
+      rpcWsUrl: process.env.NHB_WS_URL,
+      apiUrl: process.env.NHB_API_URL,
       chainId: process.env.NHB_CHAIN_ID,
     });
     return;

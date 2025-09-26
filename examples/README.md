@@ -18,9 +18,15 @@ yarn dev
 
 `yarn dev` starts every application in the workspace. Each app watches the shared `.env` file and exposes a health endpoint.
 
+The sample configuration defaults to the public NHB infrastructure:
+
+- `https://rpc.nhbcoin.net` for JSON-RPC (HTTP)
+- `wss://ws.nhbcoin.net` for JSON-RPC (WebSocket)
+- `https://api.nhbcoin.net` for REST, escrow, swap, and loyalty flows
+
 ## Environment
 
-The `.env` file is shared across every app in the workspace. See [docs/examples/overview.md](../docs/examples/overview.md) for an explanation of all variables.
+The `.env` file is shared across every app in the workspace. See [docs/examples/overview.md](../docs/examples/overview.md) for an explanation of all variables and how to target self-hosted endpoints.
 
 ## Workspace layout
 
@@ -51,3 +57,12 @@ yarn test
 - Ensure the `.env` file exists and contains the gateway credentials.
 - Ports are configurable through environment variables (`STATUS_DASHBOARD_PORT`, `NETWORK_MONITOR_PORT`).
 - `yarn dev` uses long-running processes; stop them with `Ctrl+C`.
+
+## AWS deployment notes
+
+- Host the example gateway workloads on **ECS Fargate** or **EKS** for managed scaling and IAM integration.
+- Use **Route 53** records that map to your load balancers:
+  - `rpc.nhbcoin.net` → Application or Network Load Balancer for HTTP JSON-RPC traffic.
+  - `ws.nhbcoin.net` → Network Load Balancer tuned for long-lived WebSocket connections.
+  - `api.nhbcoin.net` → Application Load Balancer for REST and gateway APIs.
+- Request ACM certificates that cover `*.nhbcoin.net` and enable AWS Shield along with WAF rules. Rate-limit or geo/IP allowlist sensitive write paths.
