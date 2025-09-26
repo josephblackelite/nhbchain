@@ -32,10 +32,12 @@ type Engine struct {
 	broadcaster  p2p.Broadcaster
 	node         NodeInterface
 
-	currentState    State
-	activeProposal  *SignedProposal
-	receivedVotes   map[VoteType]map[string]*SignedVote
-	committedBlocks map[uint64]bool
+	currentState     State
+	activeProposal   *SignedProposal
+	receivedVotes    map[VoteType]map[string]*SignedVote
+	receivedPower    map[VoteType]*big.Int
+	totalVotingPower *big.Int
+	committedBlocks  map[uint64]bool
 
 	proposalCh chan *SignedProposal
 	voteCh     chan *SignedVote
@@ -50,13 +52,25 @@ type Engine struct {
 }
 
 func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broadcaster) *Engine {
+	validatorSet := node.GetValidatorSet()
+	totalPower := big.NewInt(0)
+	for _, weight := range validatorSet {
+		if weight != nil {
+			totalPower.Add(totalPower, weight)
+		}
+	}
 	return &Engine{
-		node:             node,
-		privKey:          key,
-		validatorSet:     node.GetValidatorSet(),
-		broadcaster:      broadcaster,
-		currentState:     State{Height: 1, Round: 0},
-		receivedVotes:    make(map[VoteType]map[string]*SignedVote),
+		node:          node,
+		privKey:       key,
+		validatorSet:  validatorSet,
+		broadcaster:   broadcaster,
+		currentState:  State{Height: 1, Round: 0},
+		receivedVotes: make(map[VoteType]map[string]*SignedVote),
+		receivedPower: map[VoteType]*big.Int{
+			Prevote:   big.NewInt(0),
+			Precommit: big.NewInt(0),
+		},
+		totalVotingPower: totalPower,
 		committedBlocks:  make(map[uint64]bool),
 		proposalCh:       make(chan *SignedProposal, 16),
 		voteCh:           make(chan *SignedVote, 128),
@@ -299,7 +313,7 @@ func (e *Engine) precommit() {
 		e.mu.Unlock()
 		return
 	}
-	if len(e.receivedVotes[Prevote]) < e.twoThirdsMajority() {
+	if !e.hasTwoThirdsPowerLocked(Prevote) {
 		e.mu.Unlock()
 		return
 	}
@@ -346,7 +360,7 @@ func (e *Engine) commit() bool {
 	if e.committedBlocks[e.currentState.Height] {
 		return true
 	}
-	if len(e.receivedVotes[Precommit]) < e.twoThirdsMajority() {
+	if !e.hasTwoThirdsPowerLocked(Precommit) {
 		return false
 	}
 
@@ -368,6 +382,7 @@ func (e *Engine) commit() bool {
 	e.prevoteSent = false
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
+	e.recalculateVotingPowerLocked()
 	return true
 }
 
@@ -428,12 +443,24 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	}
 	key := string(v.Validator)
 	if _, exists := voteMap[key]; exists {
-		return false, len(e.receivedVotes[Prevote]) >= e.twoThirdsMajority(), len(e.receivedVotes[Precommit]) >= e.twoThirdsMajority()
+		return false, e.hasTwoThirdsPowerLocked(Prevote), e.hasTwoThirdsPowerLocked(Precommit)
 	}
 	voteMap[key] = v
 
-	reachedPrevote := len(e.receivedVotes[Prevote]) >= e.twoThirdsMajority()
-	reachedPrecommit := len(e.receivedVotes[Precommit]) >= e.twoThirdsMajority()
+	weight := e.validatorSet[key]
+	if weight == nil {
+		weight = big.NewInt(0)
+	}
+	if e.receivedPower == nil {
+		e.receivedPower = make(map[VoteType]*big.Int)
+	}
+	if _, ok := e.receivedPower[v.Vote.Type]; !ok {
+		e.receivedPower[v.Vote.Type] = big.NewInt(0)
+	}
+	e.receivedPower[v.Vote.Type] = new(big.Int).Add(e.receivedPower[v.Vote.Type], weight)
+
+	reachedPrevote := e.hasTwoThirdsPowerLocked(Prevote)
+	reachedPrecommit := e.hasTwoThirdsPowerLocked(Precommit)
 	return true, reachedPrevote, reachedPrecommit
 }
 
@@ -482,10 +509,43 @@ func (e *Engine) resetProposalStateLocked() {
 	e.activeProposal = nil
 	e.prevoteSent = false
 	e.precommitSent = false
+	e.resetVoteTrackingLocked()
+}
+
+func (e *Engine) resetVoteTrackingLocked() {
 	e.receivedVotes = map[VoteType]map[string]*SignedVote{
 		Prevote:   make(map[string]*SignedVote),
 		Precommit: make(map[string]*SignedVote),
 	}
+	e.receivedPower = map[VoteType]*big.Int{
+		Prevote:   big.NewInt(0),
+		Precommit: big.NewInt(0),
+	}
+}
+
+func (e *Engine) recalculateVotingPowerLocked() {
+	if e.totalVotingPower == nil {
+		e.totalVotingPower = big.NewInt(0)
+	}
+	e.totalVotingPower.SetInt64(0)
+	for _, weight := range e.validatorSet {
+		if weight != nil {
+			e.totalVotingPower.Add(e.totalVotingPower, weight)
+		}
+	}
+}
+
+func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
+	if e.totalVotingPower == nil || e.totalVotingPower.Sign() <= 0 {
+		return false
+	}
+	power, ok := e.receivedPower[vt]
+	if !ok || power == nil {
+		return false
+	}
+	threshold := new(big.Int).Mul(e.totalVotingPower, big.NewInt(2))
+	threshold.Div(threshold, big.NewInt(3))
+	return power.Cmp(threshold) == 1
 }
 
 func (e *Engine) startNewRound() {
@@ -501,11 +561,9 @@ func (e *Engine) startNewRound() {
 	e.activeProposal = nil
 	e.prevoteSent = false
 	e.precommitSent = false
-	e.receivedVotes = map[VoteType]map[string]*SignedVote{
-		Prevote:   make(map[string]*SignedVote),
-		Precommit: make(map[string]*SignedVote),
-	}
 	e.validatorSet = e.node.GetValidatorSet()
+	e.recalculateVotingPowerLocked()
+	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
 }
 
@@ -620,13 +678,6 @@ func verifySignature(msgHash []byte, sig *Signature, expectedAddr []byte) error 
 	default:
 		return fmt.Errorf("unsupported signature scheme %q", sig.Scheme)
 	}
-}
-
-func (e *Engine) twoThirdsMajority() int {
-	if len(e.validatorSet) == 0 {
-		return 0
-	}
-	return (2*len(e.validatorSet))/3 + 1
 }
 
 func (vt VoteType) String() string {
