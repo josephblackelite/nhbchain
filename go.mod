@@ -21,6 +21,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.24.0
 	google.golang.org/grpc v1.45.0
 	google.golang.org/protobuf v1.34.2
+	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.0
 	lukechampine.com/blake3 v1.4.1

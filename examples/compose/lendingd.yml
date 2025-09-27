@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  lendingd:
+    image: ghcr.io/nhbchain/lendingd:latest
+    command: ["/app/lendingd", "-config", "/config/config.yaml"]
+    ports:
+      - "50053:50053"
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
