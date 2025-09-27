@@ -16,4 +16,7 @@ type ConsensusAPI interface {
 	CreateBlock(txs []*types.Transaction) (*types.Block, error)
 	CommitBlock(block *types.Block) error
 	GetLastCommitHash() []byte
+	QueryState(namespace, key string) (*QueryResult, error)
+	QueryPrefix(namespace, prefix string) ([]QueryRecord, error)
+	SimulateTx(txBytes []byte) (*SimulationResult, error)
 }

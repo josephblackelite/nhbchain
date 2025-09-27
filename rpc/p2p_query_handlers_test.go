@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"nhbchain/crypto"
 	"nhbchain/p2p"
 )
 

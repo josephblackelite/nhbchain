@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"nhbchain/consensus/bft"
+	"nhbchain/consensus/codec"
 	"nhbchain/consensus/potso/evidence"
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
@@ -38,11 +39,13 @@ import (
 	"nhbchain/native/reputation"
 	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
+	consensusv1 "nhbchain/proto/consensus/v1"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"google.golang.org/protobuf/proto"
 )
 
 // Node is the central controller, wiring all components together.
@@ -746,6 +749,14 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		}
 	}
 	return nil
+}
+
+// HandleMessage satisfies the p2p.MessageHandler interface by forwarding to ProcessNetworkMessage.
+func (n *Node) HandleMessage(msg *p2p.Message) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	return n.ProcessNetworkMessage(msg)
 }
 
 func (n *Node) AddTransaction(tx *types.Transaction) error {
@@ -3655,6 +3666,185 @@ func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
 	}
 	manager := nhbstate.NewManager(n.state.Trie)
 	return fn(manager)
+}
+
+func (n *Node) QueryState(namespace, key string) (*QueryResult, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	result, err := n.state.QueryState(namespace, key)
+	if errors.Is(err, ErrQueryNotSupported) {
+		return n.queryStateFallback(namespace, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (n *Node) QueryPrefix(namespace, prefix string) ([]QueryRecord, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	records, err := n.state.QueryPrefix(namespace, prefix)
+	if errors.Is(err, ErrQueryNotSupported) {
+		return n.queryPrefixFallback(namespace, prefix)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (n *Node) SimulateTx(txBytes []byte) (*SimulationResult, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	if len(txBytes) == 0 {
+		return nil, fmt.Errorf("simulate: tx bytes required")
+	}
+	var protoTx consensusv1.Transaction
+	if err := proto.Unmarshal(txBytes, &protoTx); err != nil {
+		return nil, fmt.Errorf("simulate: decode transaction: %w", err)
+	}
+	tx, err := codec.TransactionFromProto(&protoTx)
+	if err != nil {
+		return nil, err
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	stateCopy, err := n.state.Copy()
+	if err != nil {
+		return nil, err
+	}
+	stateCopy.events = nil
+	blockHeight := n.chain.GetHeight()
+	blockTime := n.currentTime()
+	stateCopy.BeginBlock(blockHeight, blockTime)
+	defer stateCopy.EndBlock()
+	result, err := stateCopy.ExecuteTransaction(tx)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (n *Node) queryStateFallback(namespace, key string) (*QueryResult, error) {
+	ns := strings.TrimSpace(strings.ToLower(namespace))
+	path := strings.TrimSpace(key)
+	switch ns {
+	case "swap":
+		if path == "oracles" {
+			status := n.SwapProviderStatus()
+			payload, err := json.Marshal(status)
+			if err != nil {
+				return nil, err
+			}
+			return &QueryResult{Value: payload}, nil
+		}
+	case "gov", "governance":
+		if path == "params" {
+			manager := nhbstate.NewManager(n.state.Trie)
+			policy := n.governancePolicy()
+			params := make(map[string]string)
+			keys := append([]string{}, policy.AllowedParams...)
+			if !containsString(keys, governance.ParamKeyMinimumValidatorStake) {
+				keys = append(keys, governance.ParamKeyMinimumValidatorStake)
+			}
+			seen := make(map[string]struct{})
+			for _, name := range keys {
+				trimmed := strings.TrimSpace(name)
+				if trimmed == "" {
+					continue
+				}
+				if _, ok := seen[trimmed]; ok {
+					continue
+				}
+				seen[trimmed] = struct{}{}
+				raw, ok, err := manager.ParamStoreGet(trimmed)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					params[trimmed] = string(raw)
+				}
+			}
+			response := struct {
+				Policy governance.ProposalPolicy `json:"policy"`
+				Params map[string]string         `json:"params"`
+			}{
+				Policy: policy,
+				Params: params,
+			}
+			payload, err := json.Marshal(response)
+			if err != nil {
+				return nil, err
+			}
+			return &QueryResult{Value: payload}, nil
+		}
+	}
+	return nil, ErrQueryNotSupported
+}
+
+func (n *Node) queryPrefixFallback(namespace, prefix string) ([]QueryRecord, error) {
+	ns := strings.TrimSpace(strings.ToLower(namespace))
+	scope := strings.TrimSpace(prefix)
+	switch ns {
+	case "gov", "governance":
+		if scope == "params" {
+			manager := nhbstate.NewManager(n.state.Trie)
+			policy := n.governancePolicy()
+			keys := append([]string{}, policy.AllowedParams...)
+			if !containsString(keys, governance.ParamKeyMinimumValidatorStake) {
+				keys = append(keys, governance.ParamKeyMinimumValidatorStake)
+			}
+			seen := make(map[string]struct{})
+			records := make([]QueryRecord, 0, len(keys))
+			for _, name := range keys {
+				trimmed := strings.TrimSpace(name)
+				if trimmed == "" {
+					continue
+				}
+				if _, ok := seen[trimmed]; ok {
+					continue
+				}
+				seen[trimmed] = struct{}{}
+				raw, ok, err := manager.ParamStoreGet(trimmed)
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					continue
+				}
+				records = append(records, QueryRecord{Key: trimmed, Value: append([]byte(nil), raw...)})
+			}
+			return records, nil
+		}
+	}
+	return nil, ErrQueryNotSupported
+}
+
+func containsString(list []string, target string) bool {
+	trimmedTarget := strings.TrimSpace(target)
+	for _, entry := range list {
+		if strings.TrimSpace(entry) == trimmedTarget {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Both accessors are needed by different subsystems ---

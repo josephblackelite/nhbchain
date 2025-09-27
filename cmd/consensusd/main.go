@@ -186,7 +186,9 @@ func main() {
 		panic(fmt.Sprintf("Failed to listen on %s: %v", *grpcAddress, err))
 	}
 	grpcServer := grpc.NewServer()
-	consensusv1.RegisterConsensusServiceServer(grpcServer, service.NewServer(node))
+	srv := service.NewServer(node)
+	consensusv1.RegisterConsensusServiceServer(grpcServer, srv)
+	consensusv1.RegisterQueryServiceServer(grpcServer, srv)
 
 	go func() {
 		if err := grpcServer.Serve(grpcListener); err != nil {

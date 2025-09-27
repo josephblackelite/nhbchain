@@ -11,8 +11,9 @@ import (
 
 // Client wraps the generated gRPC client with typed helpers.
 type Client struct {
-	conn *grpc.ClientConn
-	raw  consensusv1.ConsensusServiceClient
+	conn  *grpc.ClientConn
+	raw   consensusv1.ConsensusServiceClient
+	query consensusv1.QueryServiceClient
 }
 
 // Dial initialises a consensus client for the provided target. If no dial options
@@ -31,8 +32,9 @@ func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client,
 // New builds a client wrapper from an existing gRPC connection.
 func New(conn *grpc.ClientConn) *Client {
 	return &Client{
-		conn: conn,
-		raw:  consensusv1.NewConsensusServiceClient(conn),
+		conn:  conn,
+		raw:   consensusv1.NewConsensusServiceClient(conn),
+		query: consensusv1.NewQueryServiceClient(conn),
 	}
 }
 
@@ -50,6 +52,14 @@ func (c *Client) Raw() consensusv1.ConsensusServiceClient {
 		return nil
 	}
 	return c.raw
+}
+
+// QueryClient exposes the generated query service client.
+func (c *Client) QueryClient() consensusv1.QueryServiceClient {
+	if c == nil {
+		return nil
+	}
+	return c.query
 }
 
 // SubmitTransaction pushes a transaction into the validator mempool.
