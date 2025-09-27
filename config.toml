@@ -9,6 +9,9 @@ ValidatorKeystorePath = ""
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
 NetworkName = "nhb-local"
+
+[mempool]
+MaxTransactions = 5000
 [p2p]
 NetworkId = 187001
 MaxPeers = 64

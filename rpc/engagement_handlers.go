@@ -2,7 +2,10 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+
+	"nhbchain/core"
 )
 
 type engagementRegisterDeviceParams struct {
@@ -68,6 +71,10 @@ func (s *Server) handleEngagementSubmitHeartbeat(w http.ResponseWriter, _ *http.
 	}
 	ts, err := s.node.EngagementSubmitHeartbeat(params.DeviceID, params.Token, params.Timestamp)
 	if err != nil {
+		if errors.Is(err, core.ErrMempoolFull) {
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeMempoolFull, "mempool full", nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
