@@ -1,6 +1,6 @@
 # Identity Gateway REST API
 
-> Base URL: `https://gateway.dev.nhbchain.com` (replace with environment) • Version: v0
+> Base URL: `https://gateway.dev.nhbcoin.net` (replace with environment) • Version: v0
 
 The identity gateway manages off-chain verification (email, avatar uploads) and provides public lookup endpoints for wallets. All
 mutating endpoints require HMAC-authenticated API keys issued to partner applications.
@@ -122,7 +122,7 @@ Public lookup that resolves an alias to addresses and avatar.
 
 ```http
 GET /identity/resolve?username=frankrocks HTTP/1.1
-Host: gateway.dev.nhbchain.com
+Host: gateway.dev.nhbcoin.net
 Accept: application/json
 ```
 

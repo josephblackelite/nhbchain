@@ -2,7 +2,7 @@
   "info": {
     "name": "NHBCoin RPC & REST Cookbook",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Reference requests for rpc.nhbcoin.net (JSON-RPC) and api.nhbcoin.net (REST escrow gateway). Update the collection variables to switch between devnet/testnet hosts or to inject credentials."
+    "description": "Reference requests for rpc.testnet.nhbcoin.net (JSON-RPC) and api.nhbcoin.net (REST escrow gateway). Update the collection variables to switch between devnet/testnet hosts or to inject credentials."
   },
   "item": [
     {
@@ -155,7 +155,7 @@
   "variable": [
     {
       "key": "rpc_base",
-      "value": "https://rpc.nhbcoin.net"
+      "value": "https://rpc.testnet.nhbcoin.net"
     },
     {
       "key": "api_base",

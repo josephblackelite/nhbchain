@@ -73,7 +73,7 @@ func main() {
 
 	rpcURL := strings.TrimSpace(os.Getenv("NHB_RPC_URL"))
 	if rpcURL == "" {
-		rpcURL = "https://rpc.nhbcoin.net"
+		rpcURL = "https://rpc.testnet.nhbcoin.net"
 	}
 
 	apiBase := strings.TrimSpace(os.Getenv("NHB_API_BASE"))

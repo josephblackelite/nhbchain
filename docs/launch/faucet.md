@@ -6,16 +6,16 @@ The public faucet provides rate-limited Test ZNHB (TZNHB) to developers onboardi
 
 | Method | URL | Description |
 | --- | --- | --- |
-| `POST` | `https://faucet.testnet.nhbchain.io/api/claim` | Request a TZNHB drip to a Bech32 address |
-| `GET` | `https://faucet.testnet.nhbchain.io/api/limits/<address>` | Inspect remaining daily quota |
-| `GET` | `https://faucet.testnet.nhbchain.io/api/health` | Health probe used by monitoring |
+| `POST` | `https://faucet.testnet.nhbcoin.net/api/claim` | Request a TZNHB drip to a Bech32 address |
+| `GET` | `https://faucet.testnet.nhbcoin.net/api/limits/<address>` | Inspect remaining daily quota |
+| `GET` | `https://faucet.testnet.nhbcoin.net/api/health` | Health probe used by monitoring |
 
 All endpoints require HTTPS. Cross-origin requests from the docs portal and explorer are allowed via CORS; other origins must use the CLI or direct HTTP clients.
 
 ## Request Workflow
 
 ```bash
-curl -X POST https://faucet.testnet.nhbchain.io/api/claim \
+curl -X POST https://faucet.testnet.nhbcoin.net/api/claim \
   -H 'Content-Type: application/json' \
   -d '{"address":"tnhb1abcd...","channel":"docs"}'
 ```
@@ -53,4 +53,4 @@ The faucet is a shared resource intended for development and integration testing
 3. Investigation under the vulnerability disclosure framework.
 4. Potential suspension from private beta programs.
 
-Report suspected abuse or vulnerabilities to `security@nhbcoin.net` with reproduction details and request IDs.
+Report suspected abuse or vulnerabilities to `security@nehborly.net` with reproduction details and request IDs.

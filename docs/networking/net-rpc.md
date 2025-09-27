@@ -3,7 +3,9 @@
 The NET-2F API exposes operator-focused JSON-RPC methods under the existing
 HTTP listener. All examples assume the daemon is reachable at
 `http://127.0.0.1:8080` and that the `NHB_RPC_TOKEN` environment variable is set
-when authentication is required.
+when authentication is required. See the [Network Hardening Playbook](../security/network-hardening.md)
+for guidance on fronting these endpoints with mutual TLS, rate limiting, and
+centralised logging.
 
 ## `net_info`
 

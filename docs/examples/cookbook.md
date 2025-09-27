@@ -1,6 +1,6 @@
 # NHBCoin RPC & REST Cookbook
 
-This cookbook shows how to move between the public JSON-RPC endpoints (`https://rpc.nhbcoin.net`) and the escrow REST gateway (`https://api.nhbcoin.net`). Each scenario can be run against devnet or testnet by flipping environment variables, and every command is safe to copy/paste.
+This cookbook shows how to move between the public JSON-RPC endpoints (`https://rpc.testnet.nhbcoin.net`) and the escrow REST gateway (`https://api.nhbcoin.net`). Each scenario can be run against devnet or testnet by flipping environment variables, and every command is safe to copy/paste.
 
 ---
 
@@ -8,14 +8,14 @@ This cookbook shows how to move between the public JSON-RPC endpoints (`https://
 
 | Network | JSON-RPC | WebSocket | REST gateway |
 |---------|----------|-----------|--------------|
-| **Testnet** | `https://rpc.nhbcoin.net` | `wss://ws.nhbcoin.net` | `https://api.nhbcoin.net/escrow/v1` |
+| **Testnet** | `https://rpc.testnet.nhbcoin.net` | `wss://rpc.testnet.nhbcoin.net/websocket` | `https://api.nhbcoin.net/escrow/v1` |
 | **Devnet** | `https://rpc.devnet.nhbcoin.net` | `wss://ws.devnet.nhbcoin.net` | `https://api.devnet.nhbcoin.net/escrow/v1` |
 
 Set the targets once per shell:
 
 ```bash
-export NHB_RPC_URL=https://rpc.nhbcoin.net
-export NHB_WS_URL=wss://ws.nhbcoin.net
+export NHB_RPC_URL=https://rpc.testnet.nhbcoin.net
+export NHB_WS_URL=wss://rpc.testnet.nhbcoin.net/websocket
 export NHB_API_BASE=https://api.nhbcoin.net/escrow/v1
 export NHB_ADDRESS=nhb1exampleaddress000000000000000000000000
 export NHB_API_KEY=your-escrow-api-key            # required for REST writes/reads
@@ -77,7 +77,7 @@ Leverage the helper scripts to combine multiple RPC calls and surface recent tra
 
 ```bash
 NHB_ADDRESS=$NHB_ADDRESS \
-NHB_RPC_URL=${NHB_RPC_URL:-https://rpc.nhbcoin.net} \
+NHB_RPC_URL=${NHB_RPC_URL:-https://rpc.testnet.nhbcoin.net} \
 NHB_API_BASE=${NHB_API_BASE:-https://api.nhbcoin.net/escrow/v1} \
 NHB_API_KEY=$NHB_API_KEY \
 NHB_API_SECRET=$NHB_API_SECRET \
@@ -93,7 +93,7 @@ What it does:
 Sample terminal output:
 
 ```
-RPC base: https://rpc.nhbcoin.net
+RPC base: https://rpc.testnet.nhbcoin.net
 REST base: https://api.nhbcoin.net/escrow/v1
 Address: nhb1example...
 

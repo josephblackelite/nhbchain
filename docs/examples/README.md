@@ -7,7 +7,7 @@ This guide shows how to run the NHB Chain example applications against the publi
 - Node.js 18+ and Go 1.21+
 - Docker and Docker Compose
 - NHB Chain API credentials with least-privilege scopes for the relevant product areas
-- Access to the testnet RPC endpoint (`https://rpc.testnet.nhbchain.xyz`)
+- Access to the testnet RPC endpoint (`https://rpc.testnet.nhbcoin.net`)
 
 ## Repository Layout
 
@@ -40,6 +40,21 @@ This guide shows how to run the NHB Chain example applications against the publi
    ```bash
    docker compose up -d
    ```
+
+## Network Alignment
+
+Before running any demo, confirm your environment variables point at the
+current testnet release:
+
+```bash
+export NHB_ENV=testnet
+export NHB_RPC_URL=https://rpc.testnet.nhbcoin.net
+export NHB_CHAIN_ID=nhb-testnet-1
+```
+
+Use `curl $NHB_RPC_URL/healthz` and `./nhb-cli status --env $NHB_ENV` to verify
+connectivity. Mismatched endpoints or chain IDs will cause idempotency checks
+and signature verification to fail.
 
 ## Running the JavaScript Apps
 
@@ -78,7 +93,7 @@ go test ./...
 
 ## Troubleshooting
 
-- Verify API credentials with `curl https://rpc.testnet.nhbchain.xyz/healthz`.
+- Verify API credentials with `curl https://rpc.testnet.nhbcoin.net/healthz`.
 - If HMAC verification fails, ensure system clocks are in sync (use `chronyd` or `ntpd`).
 - For persistent errors, capture trace IDs from logs and inspect in Grafana Tempo.
 

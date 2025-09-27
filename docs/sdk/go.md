@@ -22,7 +22,7 @@ import (
 
 func main() {
     client, err := nhb.NewClient(nhb.Config{
-        Endpoint:  "https://rpc.testnet.nhbchain.xyz",
+        Endpoint:  "https://rpc.testnet.nhbcoin.net",
         APIKey:    getenv("NHB_API_KEY"),
         APISecret: getenv("NHB_API_SECRET"),
     })

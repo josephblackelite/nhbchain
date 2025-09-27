@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-const rpcUrl = (process.env.NHB_RPC_URL || 'https://rpc.nhbcoin.net').trim();
+const rpcUrl = (process.env.NHB_RPC_URL || 'https://rpc.testnet.nhbcoin.net').trim();
 const apiBase = (process.env.NHB_API_BASE || 'https://api.nhbcoin.net/escrow/v1').trim().replace(/\/$/, '');
 const address = (process.env.NHB_ADDRESS || '').trim();
 const apiKey = (process.env.NHB_API_KEY || '').trim();

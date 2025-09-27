@@ -8,8 +8,8 @@ controls.
 
 ## 1. Base URL & Versions
 
-* **Base URL (production):** `https://api.nhbchain.com/escrow/v1`
-* **Base URL (sandbox):** `https://sandbox.api.nhbchain.com/escrow/v1`
+* **Base URL (production):** `https://api.nhbcoin.net/escrow/v1`
+* **Base URL (sandbox):** `https://sandbox.api.nhbcoin.net/escrow/v1`
 * **Versioning:** The first path segment (`/v1`) tracks major API revisions. Breaking changes increment the segment. Minor additive
   changes use standard semantic version headers (`X-NHB-API-Version`).
 

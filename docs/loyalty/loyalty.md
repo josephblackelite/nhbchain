@@ -194,7 +194,7 @@ Nodes exposing WebSocket transport support `subscribe` to loyalty events. See RP
 
 The Escrow Gateway exposes REST APIs for businesses that operate outside the on-chain settlement loop but still want to issue loyalty rewards. Requests require API keys and HMAC signatures. Idempotency is enforced via headers to guarantee at-most-once award issuance.
 
-**Base URL:** service deployment of `services/escrow-gateway` (e.g., `https://api.devnet.nhbchain.io`).
+**Base URL:** service deployment of `services/escrow-gateway` (e.g., `https://api.devnet.nhbcoin.net`).
 
 ### Authentication headers
 

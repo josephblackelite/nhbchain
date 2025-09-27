@@ -6,12 +6,12 @@ The public explorer surfaces real-time testnet state for validators, developers,
 
 | Surface | URL |
 | --- | --- |
-| Web App | <https://explorer.testnet.nhbchain.io> |
-| Validator Dashboard | <https://explorer.testnet.nhbchain.io/validators> |
-| API | `https://explorer.testnet.nhbchain.io/api` |
-| WebSocket | `wss://explorer.testnet.nhbchain.io/ws` |
+| Web App | <https://explorer.testnet.nhbcoin.net> |
+| Validator Dashboard | <https://explorer.testnet.nhbcoin.net/validators> |
+| API | `https://explorer.testnet.nhbcoin.net/api` |
+| WebSocket | `wss://explorer.testnet.nhbcoin.net/ws` |
 
-Bookmark the status page at <https://status.testnet.nhbchain.io> for maintenance alerts and indexer lag notifications.
+Bookmark the status page at <https://status.testnet.nhbcoin.net> for maintenance alerts and indexer lag notifications.
 
 ## Core Features
 

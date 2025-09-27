@@ -18,7 +18,7 @@ The SDK authenticates every RPC call with HMAC signatures.
 import { NhbClient } from "@nhbchain/sdk";
 
 const client = new NhbClient({
-  endpoint: "https://rpc.testnet.nhbchain.xyz",
+  endpoint: "https://rpc.testnet.nhbcoin.net",
   apiKey: process.env.NHB_API_KEY!,
   apiSecret: process.env.NHB_API_SECRET!,
 });
