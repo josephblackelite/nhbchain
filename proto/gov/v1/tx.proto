@@ -11,14 +11,32 @@ message MsgSubmitProposal {
   string deposit = 4;
 }
 
+message MsgSubmitProposalResponse {
+  string tx_hash = 1;
+}
+
 message MsgVote {
   string voter = 1;
   uint64 proposal_id = 2;
   string option = 3;
 }
 
+message MsgVoteResponse {
+  string tx_hash = 1;
+}
+
 message MsgDeposit {
   string depositor = 1;
   uint64 proposal_id = 2;
   string amount = 3;
+}
+
+message MsgDepositResponse {
+  string tx_hash = 1;
+}
+
+service Msg {
+  rpc SubmitProposal(MsgSubmitProposal) returns (MsgSubmitProposalResponse);
+  rpc Vote(MsgVote) returns (MsgVoteResponse);
+  rpc Deposit(MsgDeposit) returns (MsgDepositResponse);
 }

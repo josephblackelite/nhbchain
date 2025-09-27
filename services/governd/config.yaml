@@ -1,0 +1,9 @@
+listen: ":50061"
+consensus: "localhost:9090"
+chain_id: "localnet"
+signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+nonce_start: 1
+fee:
+  amount: ""
+  denom: ""
+  payer: ""

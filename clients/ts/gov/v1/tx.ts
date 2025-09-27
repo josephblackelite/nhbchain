@@ -6,6 +6,18 @@
 
 /* eslint-disable */
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
+import {
+  type CallOptions,
+  type ChannelCredentials,
+  Client,
+  type ClientOptions,
+  type ClientUnaryCall,
+  type handleUnaryCall,
+  makeGenericClientConstructor,
+  type Metadata,
+  type ServiceError,
+  type UntypedServiceImplementation,
+} from "@grpc/grpc-js";
 
 export const protobufPackage = "gov.v1";
 
@@ -16,16 +28,28 @@ export interface MsgSubmitProposal {
   deposit: string;
 }
 
+export interface MsgSubmitProposalResponse {
+  txHash: string;
+}
+
 export interface MsgVote {
   voter: string;
   proposalId: number;
   option: string;
 }
 
+export interface MsgVoteResponse {
+  txHash: string;
+}
+
 export interface MsgDeposit {
   depositor: string;
   proposalId: number;
   amount: string;
+}
+
+export interface MsgDepositResponse {
+  txHash: string;
 }
 
 function createBaseMsgSubmitProposal(): MsgSubmitProposal {
@@ -136,6 +160,64 @@ export const MsgSubmitProposal: MessageFns<MsgSubmitProposal> = {
   },
 };
 
+function createBaseMsgSubmitProposalResponse(): MsgSubmitProposalResponse {
+  return { txHash: "" };
+}
+
+export const MsgSubmitProposalResponse: MessageFns<MsgSubmitProposalResponse> = {
+  encode(message: MsgSubmitProposalResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.txHash !== "") {
+      writer.uint32(10).string(message.txHash);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgSubmitProposalResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgSubmitProposalResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.txHash = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgSubmitProposalResponse {
+    return { txHash: isSet(object.txHash) ? globalThis.String(object.txHash) : "" };
+  },
+
+  toJSON(message: MsgSubmitProposalResponse): unknown {
+    const obj: any = {};
+    if (message.txHash !== "") {
+      obj.txHash = message.txHash;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgSubmitProposalResponse>): MsgSubmitProposalResponse {
+    return MsgSubmitProposalResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgSubmitProposalResponse>): MsgSubmitProposalResponse {
+    const message = createBaseMsgSubmitProposalResponse();
+    message.txHash = object.txHash ?? "";
+    return message;
+  },
+};
+
 function createBaseMsgVote(): MsgVote {
   return { voter: "", proposalId: 0, option: "" };
 }
@@ -224,6 +306,64 @@ export const MsgVote: MessageFns<MsgVote> = {
     message.voter = object.voter ?? "";
     message.proposalId = object.proposalId ?? 0;
     message.option = object.option ?? "";
+    return message;
+  },
+};
+
+function createBaseMsgVoteResponse(): MsgVoteResponse {
+  return { txHash: "" };
+}
+
+export const MsgVoteResponse: MessageFns<MsgVoteResponse> = {
+  encode(message: MsgVoteResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.txHash !== "") {
+      writer.uint32(10).string(message.txHash);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgVoteResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgVoteResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.txHash = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgVoteResponse {
+    return { txHash: isSet(object.txHash) ? globalThis.String(object.txHash) : "" };
+  },
+
+  toJSON(message: MsgVoteResponse): unknown {
+    const obj: any = {};
+    if (message.txHash !== "") {
+      obj.txHash = message.txHash;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgVoteResponse>): MsgVoteResponse {
+    return MsgVoteResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgVoteResponse>): MsgVoteResponse {
+    const message = createBaseMsgVoteResponse();
+    message.txHash = object.txHash ?? "";
     return message;
   },
 };
@@ -318,6 +458,153 @@ export const MsgDeposit: MessageFns<MsgDeposit> = {
     message.amount = object.amount ?? "";
     return message;
   },
+};
+
+function createBaseMsgDepositResponse(): MsgDepositResponse {
+  return { txHash: "" };
+}
+
+export const MsgDepositResponse: MessageFns<MsgDepositResponse> = {
+  encode(message: MsgDepositResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.txHash !== "") {
+      writer.uint32(10).string(message.txHash);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgDepositResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgDepositResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.txHash = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgDepositResponse {
+    return { txHash: isSet(object.txHash) ? globalThis.String(object.txHash) : "" };
+  },
+
+  toJSON(message: MsgDepositResponse): unknown {
+    const obj: any = {};
+    if (message.txHash !== "") {
+      obj.txHash = message.txHash;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgDepositResponse>): MsgDepositResponse {
+    return MsgDepositResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgDepositResponse>): MsgDepositResponse {
+    const message = createBaseMsgDepositResponse();
+    message.txHash = object.txHash ?? "";
+    return message;
+  },
+};
+
+export type MsgService = typeof MsgService;
+export const MsgService = {
+  submitProposal: {
+    path: "/gov.v1.Msg/SubmitProposal",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: MsgSubmitProposal): Buffer => Buffer.from(MsgSubmitProposal.encode(value).finish()),
+    requestDeserialize: (value: Buffer): MsgSubmitProposal => MsgSubmitProposal.decode(value),
+    responseSerialize: (value: MsgSubmitProposalResponse): Buffer =>
+      Buffer.from(MsgSubmitProposalResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): MsgSubmitProposalResponse => MsgSubmitProposalResponse.decode(value),
+  },
+  vote: {
+    path: "/gov.v1.Msg/Vote",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: MsgVote): Buffer => Buffer.from(MsgVote.encode(value).finish()),
+    requestDeserialize: (value: Buffer): MsgVote => MsgVote.decode(value),
+    responseSerialize: (value: MsgVoteResponse): Buffer => Buffer.from(MsgVoteResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): MsgVoteResponse => MsgVoteResponse.decode(value),
+  },
+  deposit: {
+    path: "/gov.v1.Msg/Deposit",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: MsgDeposit): Buffer => Buffer.from(MsgDeposit.encode(value).finish()),
+    requestDeserialize: (value: Buffer): MsgDeposit => MsgDeposit.decode(value),
+    responseSerialize: (value: MsgDepositResponse): Buffer => Buffer.from(MsgDepositResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): MsgDepositResponse => MsgDepositResponse.decode(value),
+  },
+} as const;
+
+export interface MsgServer extends UntypedServiceImplementation {
+  submitProposal: handleUnaryCall<MsgSubmitProposal, MsgSubmitProposalResponse>;
+  vote: handleUnaryCall<MsgVote, MsgVoteResponse>;
+  deposit: handleUnaryCall<MsgDeposit, MsgDepositResponse>;
+}
+
+export interface MsgClient extends Client {
+  submitProposal(
+    request: MsgSubmitProposal,
+    callback: (error: ServiceError | null, response: MsgSubmitProposalResponse) => void,
+  ): ClientUnaryCall;
+  submitProposal(
+    request: MsgSubmitProposal,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: MsgSubmitProposalResponse) => void,
+  ): ClientUnaryCall;
+  submitProposal(
+    request: MsgSubmitProposal,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: MsgSubmitProposalResponse) => void,
+  ): ClientUnaryCall;
+  vote(request: MsgVote, callback: (error: ServiceError | null, response: MsgVoteResponse) => void): ClientUnaryCall;
+  vote(
+    request: MsgVote,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: MsgVoteResponse) => void,
+  ): ClientUnaryCall;
+  vote(
+    request: MsgVote,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: MsgVoteResponse) => void,
+  ): ClientUnaryCall;
+  deposit(
+    request: MsgDeposit,
+    callback: (error: ServiceError | null, response: MsgDepositResponse) => void,
+  ): ClientUnaryCall;
+  deposit(
+    request: MsgDeposit,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: MsgDepositResponse) => void,
+  ): ClientUnaryCall;
+  deposit(
+    request: MsgDeposit,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: MsgDepositResponse) => void,
+  ): ClientUnaryCall;
+}
+
+export const MsgClient = makeGenericClientConstructor(MsgService, "gov.v1.Msg") as unknown as {
+  new (address: string, credentials: ChannelCredentials, options?: Partial<ClientOptions>): MsgClient;
+  service: typeof MsgService;
+  serviceName: string;
 };
 
 type Builtin = Date | Function | Uint8Array | string | number | boolean | undefined;

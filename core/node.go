@@ -3756,8 +3756,9 @@ func (n *Node) queryStateFallback(namespace, key string) (*QueryResult, error) {
 			return &QueryResult{Value: payload}, nil
 		}
 	case "gov", "governance":
-		if path == "params" {
-			manager := nhbstate.NewManager(n.state.Trie)
+		manager := nhbstate.NewManager(n.state.Trie)
+		switch {
+		case path == "params":
 			policy := n.governancePolicy()
 			params := make(map[string]string)
 			keys := append([]string{}, policy.AllowedParams...)
@@ -3788,6 +3789,63 @@ func (n *Node) queryStateFallback(namespace, key string) (*QueryResult, error) {
 			}{
 				Policy: policy,
 				Params: params,
+			}
+			payload, err := json.Marshal(response)
+			if err != nil {
+				return nil, err
+			}
+			return &QueryResult{Value: payload}, nil
+		case path == "proposals/latest":
+			var latest uint64
+			if _, err := manager.KVGet(nhbstate.GovernanceSequenceKey(), &latest); err != nil {
+				return nil, err
+			}
+			payload, err := json.Marshal(struct {
+				Latest uint64 `json:"latest"`
+			}{Latest: latest})
+			if err != nil {
+				return nil, err
+			}
+			return &QueryResult{Value: payload}, nil
+		case strings.HasPrefix(path, "tallies/"):
+			idText := strings.TrimSpace(strings.TrimPrefix(path, "tallies/"))
+			if idText == "" {
+				return nil, fmt.Errorf("gov: proposal id required")
+			}
+			proposalID, err := strconv.ParseUint(idText, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("gov: invalid proposal id: %w", err)
+			}
+			proposal, ok, err := manager.GovernanceGetProposal(proposalID)
+			if err != nil {
+				return nil, err
+			}
+			if !ok || proposal == nil {
+				payload, marshalErr := json.Marshal(struct {
+					ProposalID uint64 `json:"proposal_id"`
+				}{ProposalID: proposalID})
+				if marshalErr != nil {
+					return nil, marshalErr
+				}
+				return &QueryResult{Value: payload}, nil
+			}
+			votes, err := manager.GovernanceListVotes(proposalID)
+			if err != nil {
+				return nil, err
+			}
+			engine := n.newGovernanceEngine(manager)
+			tally, status, err := engine.ComputeTally(proposal, votes)
+			if err != nil {
+				return nil, err
+			}
+			response := struct {
+				ProposalID uint64            `json:"proposal_id"`
+				Status     string            `json:"status"`
+				Tally      *governance.Tally `json:"tally"`
+			}{
+				ProposalID: proposalID,
+				Status:     status.StatusString(),
+				Tally:      tally,
 			}
 			payload, err := json.Marshal(response)
 			if err != nil {
