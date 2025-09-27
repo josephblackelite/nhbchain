@@ -57,6 +57,7 @@ type Server struct {
 	potsoEvidence *modules.PotsoEvidenceModule
 	transactions  *modules.TransactionsModule
 	escrow        *modules.EscrowModule
+	lending       *modules.LendingModule
 }
 
 func NewServer(node *core.Node) *Server {
@@ -69,6 +70,7 @@ func NewServer(node *core.Node) *Server {
 		potsoEvidence: modules.NewPotsoEvidenceModule(node),
 		transactions:  modules.NewTransactionsModule(node),
 		escrow:        modules.NewEscrowModule(node),
+		lending:       modules.NewLendingModule(node),
 	}
 }
 
@@ -288,6 +290,26 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSwapVoucherReverse(w, r, req)
+	case "lend_getMarket":
+		s.handleLendingGetMarket(w, r, req)
+	case "lend_getUserAccount":
+		s.handleLendingGetUserAccount(w, r, req)
+	case "lend_supplyNHB":
+		s.handleLendingSupplyNHB(w, r, req)
+	case "lend_withdrawNHB":
+		s.handleLendingWithdrawNHB(w, r, req)
+	case "lend_depositZNHB":
+		s.handleLendingDepositZNHB(w, r, req)
+	case "lend_withdrawZNHB":
+		s.handleLendingWithdrawZNHB(w, r, req)
+	case "lend_borrowNHB":
+		s.handleLendingBorrowNHB(w, r, req)
+	case "lend_borrowNHBWithFee":
+		s.handleLendingBorrowNHBWithFee(w, r, req)
+	case "lend_repayNHB":
+		s.handleLendingRepayNHB(w, r, req)
+	case "lend_liquidate":
+		s.handleLendingLiquidate(w, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(w, r, req)
 	case "stake_undelegate":
@@ -372,22 +394,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleEscrowRefund(w, r, req)
 	case "escrow_expire":
 		s.handleEscrowExpire(w, r, req)
-        case "escrow_dispute":
-                s.handleEscrowDispute(w, r, req)
-        case "escrow_resolve":
-                s.handleEscrowResolve(w, r, req)
-        case "escrow_milestoneCreate":
-                s.handleEscrowMilestoneCreate(w, r, req)
-        case "escrow_milestoneGet":
-                s.handleEscrowMilestoneGet(w, r, req)
-        case "escrow_milestoneFund":
-                s.handleEscrowMilestoneFund(w, r, req)
-        case "escrow_milestoneRelease":
-                s.handleEscrowMilestoneRelease(w, r, req)
-        case "escrow_milestoneCancel":
-                s.handleEscrowMilestoneCancel(w, r, req)
-        case "escrow_milestoneSubscriptionUpdate":
-                s.handleEscrowMilestoneSubscriptionUpdate(w, r, req)
+	case "escrow_dispute":
+		s.handleEscrowDispute(w, r, req)
+	case "escrow_resolve":
+		s.handleEscrowResolve(w, r, req)
+	case "escrow_milestoneCreate":
+		s.handleEscrowMilestoneCreate(w, r, req)
+	case "escrow_milestoneGet":
+		s.handleEscrowMilestoneGet(w, r, req)
+	case "escrow_milestoneFund":
+		s.handleEscrowMilestoneFund(w, r, req)
+	case "escrow_milestoneRelease":
+		s.handleEscrowMilestoneRelease(w, r, req)
+	case "escrow_milestoneCancel":
+		s.handleEscrowMilestoneCancel(w, r, req)
+	case "escrow_milestoneSubscriptionUpdate":
+		s.handleEscrowMilestoneSubscriptionUpdate(w, r, req)
 	case "net_info":
 		s.handleNetInfo(w, r, req)
 	case "net_peers":
@@ -492,15 +514,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGovernanceList(w, r, req)
 	case "gov_finalize":
 		s.handleGovernanceFinalize(w, r, req)
-        case "gov_queue":
-                s.handleGovernanceQueue(w, r, req)
-        case "gov_execute":
-                s.handleGovernanceExecute(w, r, req)
-        case "reputation_verifySkill":
-                s.handleReputationVerifySkill(w, r, req)
-        default:
-                writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
-        }
+	case "gov_queue":
+		s.handleGovernanceQueue(w, r, req)
+	case "gov_execute":
+		s.handleGovernanceExecute(w, r, req)
+	case "reputation_verifySkill":
+		s.handleReputationVerifySkill(w, r, req)
+	default:
+		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
+	}
 }
 
 // --- NEW HANDLER: Get Latest Blocks ---
