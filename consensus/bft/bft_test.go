@@ -69,6 +69,39 @@ func (n *trackingNode) GetAccount(addr []byte) (*types.Account, error) {
 func (n *trackingNode) GetLastCommitHash() []byte { return nil }
 func (n *trackingNode) GetHeight() uint64         { return n.height }
 
+type emptyBlockNode struct {
+	validatorSet map[string]*big.Int
+	committed    []*types.Block
+	height       uint64
+	validator    []byte
+}
+
+func (n *emptyBlockNode) GetMempool() []*types.Transaction { return nil }
+func (n *emptyBlockNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
+	header := &types.BlockHeader{
+		Height:    n.height + 1,
+		Validator: n.validator,
+	}
+	return types.NewBlock(header, txs), nil
+}
+func (n *emptyBlockNode) CommitBlock(block *types.Block) error {
+	n.committed = append(n.committed, block)
+	if block != nil && block.Header != nil {
+		n.height = block.Header.Height
+	}
+	return nil
+}
+func (n *emptyBlockNode) GetValidatorSet() map[string]*big.Int { return n.validatorSet }
+func (n *emptyBlockNode) GetAccount(addr []byte) (*types.Account, error) {
+	weight := n.validatorSet[string(addr)]
+	if weight == nil {
+		weight = big.NewInt(0)
+	}
+	return &types.Account{Stake: new(big.Int).Set(weight)}, nil
+}
+func (n *emptyBlockNode) GetLastCommitHash() []byte { return nil }
+func (n *emptyBlockNode) GetHeight() uint64         { return n.height }
+
 func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 	validatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -138,6 +171,60 @@ func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 	}
 	if engine.committedBlocks[engine.currentState.Height] {
 		t.Fatalf("block should not be marked committed on execution failure")
+	}
+}
+
+func TestProposeAllowsEmptyMempool(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+
+	node := &emptyBlockNode{
+		validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)},
+		validator:    validatorAddr,
+	}
+	broadcaster := &recordingBroadcaster{}
+
+	engine := NewEngine(node, validatorKey, broadcaster)
+
+	if err := engine.propose(); err != nil {
+		t.Fatalf("propose with empty mempool: %v", err)
+	}
+
+	engine.mu.RLock()
+	if engine.activeProposal == nil || engine.activeProposal.Proposal == nil || engine.activeProposal.Proposal.Block == nil {
+		engine.mu.RUnlock()
+		t.Fatalf("expected active proposal with block to be set")
+	}
+	block := engine.activeProposal.Proposal.Block
+	engine.mu.RUnlock()
+
+	if block.Header == nil {
+		t.Fatalf("expected proposed block to include header")
+	}
+	if len(block.Transactions) != 0 {
+		t.Fatalf("expected empty transaction set, got %d", len(block.Transactions))
+	}
+
+	engine.prevote()
+	engine.precommit()
+
+	if node.height == 0 {
+		if !engine.commit() {
+			t.Fatalf("expected commit to succeed for empty block")
+		}
+	}
+
+	if node.height != 1 {
+		t.Fatalf("expected node height to advance to 1, got %d", node.height)
+	}
+	if len(node.committed) != 1 {
+		t.Fatalf("expected exactly one committed block, got %d", len(node.committed))
+	}
+	if len(node.committed[0].Transactions) != 0 {
+		t.Fatalf("expected committed block to contain zero transactions")
 	}
 }
 
