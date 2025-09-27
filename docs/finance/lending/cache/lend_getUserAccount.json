@@ -1,0 +1,40 @@
+{
+  "address": "nhb1qdesigner000000000000000000000000000000",
+  "healthFactor": "1.68",
+  "borrowCapacityUSD": "2435.42",
+  "borrowedUSD": "1450.00",
+  "pendingRewards": "12.45",
+  "collateral": [
+    {
+      "symbol": "nhb:USDC",
+      "enabled": true,
+      "balance": "1800.000000",
+      "valueUSD": "1800.00",
+      "ltv": "0.80",
+      "liquidationThreshold": "0.85"
+    },
+    {
+      "symbol": "nhb:WBTC",
+      "enabled": true,
+      "balance": "0.25000000",
+      "valueUSD": "7500.00",
+      "ltv": "0.70",
+      "liquidationThreshold": "0.78"
+    }
+  ],
+  "borrows": [
+    {
+      "symbol": "nhb:NHB",
+      "balance": "1200.000000",
+      "valueUSD": "900.00",
+      "interestRate": "0.0625"
+    },
+    {
+      "symbol": "nhb:USDC",
+      "balance": "550.000000",
+      "valueUSD": "550.00",
+      "interestRate": "0.0320"
+    }
+  ],
+  "lastUpdated": 13245678
+}
