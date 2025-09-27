@@ -1,136 +1,79 @@
 # Lending Developer Guide
 
-This guide walks through building a third-party lending experience on NHBChain.
-It covers end-to-end integration patterns, monetization options, and UI safety
-checks.
+This guide outlines the recommended flow for building a lending experience on
+NHBChain using the JSON-RPC endpoints exposed by the node.
 
-## How to Build a Lending App on NHBChain
+## 1. Discover Risk Configuration
 
-### 1. Discover Markets
-- Call [`lend_listMarkets`](rpc-api.md#lend_listmarkets) to fetch available
-  markets and utilization metrics.
-- Cache the results and refresh every few seconds to update rate displays.
+- Call [`lending_getMarket`](rpc-api.md#lending_getmarket) during startup to
+  cache the latest pool totals and risk parameters. Surface values such as
+  `maxLTV`, `liquidationThreshold`, and `liquidationBonus` in tooltips so users
+  understand protocol limits.
+- Repeat the call periodically to refresh supply and borrow totals displayed in
+  the UI.
 
-### 2. Show Market Health
-- Use [`lend_getMarket`](rpc-api.md#lend_getmarket) to display supply and borrow
-  APRs, reserve factors, and risk parameters.
-- Highlight utilization and remaining liquidity so users understand how their
-  actions affect the pool.
+## 2. Authenticate the User
 
-### 3. Authenticate the User
 - Prompt the user to connect their NHBChain wallet.
-- Use [`lend_getUserAccount`](rpc-api.md#lend_getuseraccount) to display current
-  collateral, borrows, and the Health Factor (HF).
+- Retrieve the bearer token required by the node operator and attach it to every
+  state-changing request:
 
-### 4. Supply Assets
-- Let users choose supported assets and specify amounts.
-- Submit [`lend_supply`](rpc-api.md#lend_supply) transactions with clear signing
-  prompts.
-- Update the UI optimistically while polling for confirmation.
+  ```http
+  Authorization: Bearer <token>
+  ```
 
-### 5. Enable Collateral
-- Call [`lend_enableCollateral`](rpc-api.md#lend_enablecollateral) so the
-  deposit can back future loans.
+  Omit the header when invoking read-only methods such as
+  `lending_getMarket`.
 
-### 6. Borrow Responsibly
-- Before calling [`lend_borrow`](rpc-api.md#lend_borrow), calculate the
-  projected health factor using the formulas below.
-- Provide warnings for risky transactions and enforce protocol-defined limits.
+## 3. Load the Account Snapshot
 
-### 7. Repay or Adjust
-- Offer [`lend_repay`](rpc-api.md#lend_repay) and
-  [`lend_repayWithCollateral`](rpc-api.md#lend_repaywithcollateral) actions so
-  users can manage debt even during volatility.
+- Fetch the lending position with [`lending_getUserAccount`](rpc-api.md#lending_getuseraccount).
+  Use the returned balances to pre-fill collateral toggles and outstanding debt
+  amounts.
+- If the endpoint returns a `404`, initialise the UI with zero balances and hide
+  repayment controls until the user supplies or borrows for the first time.
 
-### 8. Monitor Health
-- Subscribe to account updates or refresh `lend_getUserAccount` periodically to
-  notify borrowers when their HF approaches 1.0.
+## 4. Supply and Manage Collateral
 
-## Monetizing Your App with Borrower Fees
+1. Send a `lending_supplyNHB` request when the user deposits NHB liquidity.
+2. Encourage the user to immediately lock funds with `lending_depositZNHB` so
+   the position can back future borrows.
+3. Allow partial withdrawals by combining `lending_withdrawZNHB` (to reduce
+   collateral) and `lending_withdrawNHB` (to redeem LP shares) while keeping the
+   projected health factor above 1.0.
 
-Third-party apps can earn revenue by routing a portion of each NHB borrow to
-their own address using [`lend_borrowNHBWithFee`](rpc-api.md#lend_borrownhbwithfee).
+## 5. Borrowing Workflow
 
-```json
-{
-  "address": "nhb1qborrower...",
-  "amount": "500.0",
-  "feeRecipient": "nhb1qmyapp...",
-  "feeBps": 100
-}
-```
+- Compute projected health factors client-side before calling
+  [`lending_borrowNHB`](rpc-api.md#lending_borrownhb). Block requests that would
+  drive HF below 1.0 and warn users when the buffer is thin.
+- If your application charges a fee, route the borrow through
+  `lending_borrowNHBWithFee` and display the fee and net amount in the
+  confirmation modal. Fees are specified in basis points.
 
-- `feeRecipient` should be your application\'s treasury wallet.
-- `feeBps` is specified in basis points (1/100 of a percent). A value of 100
-  equals a 1% fee.
-- The protocol transfers `amount * feeBps / 10_000` NHB to the fee recipient as
-  soon as the borrow is executed.
-- Always display the fee and resulting net borrow amount to maintain user trust.
+## 6. Repayment and Upkeep
 
-## UI Formulas & Best Practices
+- Offer a one-click repay option using `lending_repayNHB` with the outstanding
+  debt value. The engine automatically caps the amount to the borrower’s current
+  debt.
+- Refresh the account snapshot after each state change to keep the UI in sync.
 
-Use the following formulas to keep interface calculations aligned with the
-protocol. All USD values should be derived from the latest oracle prices.
+## 7. Liquidation Monitoring
 
-### Borrow Power
+- Background services can poll `lending_getUserAccount` and alert borrowers when
+  their collateral approaches the liquidation threshold.
+- Liquidators can automate [`lending_liquidate`](rpc-api.md#lending_liquidate)
+  calls. Ensure the liquidator wallet holds enough NHB to repay the targeted
+  debt.
 
-```
-borrowPowerUSD = Σ(collateralValueUSD_i * LTV_i)
-```
+## Best Practices
 
-### Current Health Factor
+- Treat the `txHash` returned by each action as an acknowledgement only. It is
+  not persisted on-chain but can be logged for audit purposes.
+- Clamp user-provided amounts to positive integers and validate input client
+  side before hitting the node.
+- Display the current supply and borrow indexes from `lending_getMarket` if you
+  show yield metrics so users can understand accrual trends.
+- Cache risk parameters but expose a manual refresh so advanced users can verify
+  configuration after governance updates.
 
-```
-healthFactor = Σ(collateralValueUSD_i * LiquidationThreshold_i) / totalBorrowedUSD
-```
-
-If `totalBorrowedUSD` is zero, display HF as `∞`.
-
-### Max Borrowable Amount
-
-```
-maxBorrowableUSD = max(0, borrowPowerUSD - totalBorrowedUSD)
-```
-
-Limit the user\'s requested borrow amount to this value.
-
-### Projected Health Factor
-
-When simulating a new borrow of `newBorrowUSD`:
-
-```
-projectedBorrowedUSD = totalBorrowedUSD + newBorrowUSD
-projectedHF = Σ(collateralValueUSD_i * LiquidationThreshold_i) / projectedBorrowedUSD
-```
-
-Show warnings when `projectedHF < 1.2` and block the transaction when it falls
-below 1.0.
-
-### Liquidation Price Estimate
-
-For volatile collateral, offer an indicative price at which the position would
-reach HF = 1.0:
-
-```
-criticalPrice = (totalBorrowedUSD / (collateralAmount * LiquidationThreshold))
-```
-
-### Other Best Practices
-
-- Display accrued interest separately from principal so users understand their
-  debt growth.
-- Provide explicit confirmation modals that include utilization, borrow APR, and
-  projected HF.
-- Encourage borrowers to keep at least a 20% buffer between the liquidation
-  threshold and their projected HF.
-
-## Working Offline with JSON Caches
-
-For rapid prototyping and design, use the static JSON files in
-[`cache/`](cache) to emulate live RPC responses:
-
-- `lend_getMarket.json`: Mirrors a typical `lend_getMarket` result.
-- `lend_getUserAccount.json`: Represents a borrower with mixed collateral.
-
-Import these files into your design tool or front-end mocks so that UI work can
-proceed without requiring a running node.

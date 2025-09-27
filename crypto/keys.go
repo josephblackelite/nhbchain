@@ -46,6 +46,11 @@ func (a Address) Bytes() []byte {
 	return a.bytes
 }
 
+// Prefix returns the human-readable prefix associated with the address.
+func (a Address) Prefix() AddressPrefix {
+	return a.prefix
+}
+
 func DecodeAddress(addrStr string) (Address, error) {
 	prefix, decoded, err := bech32.Decode(addrStr)
 	if err != nil {

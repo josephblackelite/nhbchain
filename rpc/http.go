@@ -290,25 +290,25 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSwapVoucherReverse(w, r, req)
-	case "lend_getMarket":
+	case "lending_getMarket":
 		s.handleLendingGetMarket(w, r, req)
-	case "lend_getUserAccount":
+	case "lending_getUserAccount":
 		s.handleLendingGetUserAccount(w, r, req)
-	case "lend_supplyNHB":
+	case "lending_supplyNHB":
 		s.handleLendingSupplyNHB(w, r, req)
-	case "lend_withdrawNHB":
+	case "lending_withdrawNHB":
 		s.handleLendingWithdrawNHB(w, r, req)
-	case "lend_depositZNHB":
+	case "lending_depositZNHB":
 		s.handleLendingDepositZNHB(w, r, req)
-	case "lend_withdrawZNHB":
+	case "lending_withdrawZNHB":
 		s.handleLendingWithdrawZNHB(w, r, req)
-	case "lend_borrowNHB":
+	case "lending_borrowNHB":
 		s.handleLendingBorrowNHB(w, r, req)
-	case "lend_borrowNHBWithFee":
+	case "lending_borrowNHBWithFee":
 		s.handleLendingBorrowNHBWithFee(w, r, req)
-	case "lend_repayNHB":
+	case "lending_repayNHB":
 		s.handleLendingRepayNHB(w, r, req)
-	case "lend_liquidate":
+	case "lending_liquidate":
 		s.handleLendingLiquidate(w, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(w, r, req)
@@ -523,6 +523,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}
+}
+
+// ServeHTTP allows the RPC server to satisfy the http.Handler interface for testing.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handle(w, r)
 }
 
 // --- NEW HANDLER: Get Latest Blocks ---

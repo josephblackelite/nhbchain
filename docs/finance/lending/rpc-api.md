@@ -1,147 +1,73 @@
 # Lending RPC API Reference
 
-All lending endpoints follow the JSON-RPC 2.0 specification. Requests must
-include an `id`, `jsonrpc: "2.0"`, the method name, and a structured `params`
-object. Responses return either a `result` object or an `error` payload.
+The NHBChain node exposes a JSON-RPC interface for interacting with the native
+lending engine. This document describes each method, the expected request
+payloads, and the shape of the responses returned by the node.
 
-## Table of Contents
+All requests **must** set `"jsonrpc": "2.0"` and provide a numeric `id`. Amount
+fields are encoded as decimal strings representing wei values.
 
-- [Market Data](#market-data)
-- [Account Management](#account-management)
-- [Position Actions](#position-actions)
-- [Risk & Maintenance](#risk--maintenance)
+## Authentication
 
----
+Mutating endpoints require a bearer token. The node reads the token from the
+`NHB_RPC_TOKEN` environment variable at startup. Clients must send the token via
+the `Authorization` header:
+
+```
+Authorization: Bearer <token>
+```
+
+If the token is missing or incorrect the node responds with HTTP `401` and a
+JSON-RPC error.
 
 ## Market Data
 
-### `lend_getMarket`
-Retrieve real-time information about a specific lending market.
+### `lending_getMarket`
 
-**Parameters**
+Return the current global market snapshot alongside the risk parameters applied
+to the native pool.
 
-```json
-{
-  "market": "nhb:USDC"
-}
-```
+**Parameters:** none
 
-**Response**
+**Response:**
 
 ```json
 {
-  "symbol": "nhb:USDC",
-  "name": "USD Coin",
-  "decimals": 6,
-  "utilization": "0.72",
-  "liquidity": "1450000.231",
-  "totalBorrowed": "1040000.123",
-  "supplyRate": "0.045",
-  "borrowRate": "0.086",
-  "reserveFactor": "0.15",
-  "ltv": "0.8",
-  "liquidationThreshold": "0.85",
-  "liquidationBonus": "0.05"
-}
-```
-
-### `lend_listMarkets`
-Return every active lending market.
-
-**Parameters**
-
-```json
-{}
-```
-
-**Response**
-
-```json
-[
-  {
-    "symbol": "nhb:USDC",
-    "utilization": "0.72"
+  "market": {
+    "totalNHBSupplied": "1250000000000000000",
+    "totalSupplyShares": "1250000000000000000",
+    "totalNHBBorrowed": "600000000000000000",
+    "supplyIndex": "1000000000000000000",
+    "borrowIndex": "1000000000000000000",
+    "lastUpdateBlock": 184,
+    "reserveFactor": 1000
   },
-  {
-    "symbol": "nhb:WBTC",
-    "utilization": "0.44"
+  "riskParameters": {
+    "maxLTV": 7500,
+    "liquidationThreshold": 8000,
+    "liquidationBonus": 500,
+    "circuitBreakerActive": false
   }
-]
-```
-
-## Account Management
-
-### `lend_getUserAccount`
-Fetch collateral, borrow, and reward balances for a wallet.
-
-**Parameters**
-
-```json
-{
-  "address": "nhb1qexample...",
-  "market": "nhb:USDC"
 }
 ```
 
-**Response**
+`market` is `null` when the pool has not been initialised yet.
+
+## Account Data
+
+### `lending_getUserAccount`
+
+Fetch the persisted lending position for an address. The parameter can be either
+the raw Bech32 string or an object containing an `address` field.
+
+**Request:**
 
 ```json
 {
-  "address": "nhb1qexample...",
-  "collateral": [
-    {
-      "symbol": "nhb:USDC",
-      "enabled": true,
-      "balance": "1500.5",
-      "valueUSD": "1500.5"
-    }
-  ],
-  "borrows": [
-    {
-      "symbol": "nhb:NHB",
-      "balance": "500.0",
-      "valueUSD": "500.0",
-      "interestIndex": "1.00045"
-    }
-  ],
-  "healthFactor": "1.43",
-  "borrowCapacityUSD": "1200.4",
-  "borrowedUSD": "500.0"
-}
-```
-
-### `lend_enableCollateral`
-Enable or disable a supplied asset as collateral.
-
-**Parameters**
-
-```json
-{
-  "address": "nhb1qexample...",
-  "symbol": "nhb:USDC",
-  "enabled": true
-}
-```
-
-**Response**
-
-```json
-{
-  "txHash": "0x1234...",
-  "status": "pending"
-}
-```
-
-## Position Actions
-
-### `lend_supply`
-Deposit an asset into the lending market.
-
-```json
-{
-  "address": "nhb1qexample...",
-  "symbol": "nhb:USDC",
-  "amount": "250.0"
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "lending_getUserAccount",
+  "params": ["nhb1qyexample..."]
 }
 ```
 
@@ -149,110 +75,135 @@ Deposit an asset into the lending market.
 
 ```json
 {
-  "txHash": "0xabc...",
-  "status": "pending"
+  "account": {
+    "collateralZNHB": "300000000000000000",
+    "supplyShares": "500000000000000000",
+    "debtNHB": "0",
+    "scaledDebt": "0"
+  }
 }
 ```
 
-### `lend_withdraw`
-Redeem supplied assets back to the user.
+The endpoint returns HTTP `404` when the address has no recorded position.
+
+## Position Actions
+
+Every state-changing method returns a pseudo transaction hash that can be used
+for client-side tracking or logging. The node applies the action immediately to
+its local state – the hash is an opaque acknowledgement rather than an on-chain
+identifier.
+
+### `lending_supplyNHB`
+
+Supply NHB liquidity into the pool and mint LP shares.
 
 ```json
 {
-  "address": "nhb1qexample...",
-  "symbol": "nhb:USDC",
-  "amount": "100.0"
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "lending_supplyNHB",
+  "params": [
+    {
+      "from": "nhb1qyexample...",
+      "amount": "1000000000000000000"
+    }
+  ]
 }
 ```
 
-**Response:** Same as above.
+**Result:** `{"txHash": "0x..."}`
 
-### `lend_borrow`
-Borrow liquidity against enabled collateral.
+### `lending_withdrawNHB`
+
+Burn LP shares and redeem the underlying NHB back to the supplier. The request
+format matches `lending_supplyNHB` (`from` and `amount`).
+
+### `lending_depositZNHB`
+
+Lock ZNHB as collateral for a borrower.
 
 ```json
 {
-  "address": "nhb1qexample...",
-  "symbol": "nhb:USDC",
-  "amount": "400.0"
+  "method": "lending_depositZNHB",
+  "params": [
+    {"from": "nhb1qyexample...", "amount": "500000000000000000"}
+  ]
 }
 ```
 
-**Response:** Standard transaction receipt.
+### `lending_withdrawZNHB`
 
-### `lend_borrowNHBWithFee`
-Borrow NHB and route a configurable fee to a third-party application.
+Unlock previously deposited collateral, subject to the position remaining
+healthy. Identical payload to `lending_depositZNHB`.
+
+### `lending_borrowNHB`
+
+Borrow NHB against enabled collateral.
 
 ```json
 {
-  "address": "nhb1qexample...",
-  "amount": "250.0",
-  "feeRecipient": "nhb1qdevapp...",
-  "feeBps": 75
+  "method": "lending_borrowNHB",
+  "params": [
+    {"borrower": "nhb1qyexample...", "amount": "400000000000000000"}
+  ]
 }
 ```
 
-- `feeRecipient` receives `amount * feeBps / 10_000` in NHB.
-- `feeBps` is capped by governance; requests above the cap return an error.
+### `lending_borrowNHBWithFee`
 
-**Response:** Transaction receipt including the fee transfer log.
-
-### `lend_repay`
-Repay outstanding debt for any supported asset.
+Borrow NHB while routing a fee (in basis points) to a third-party address.
 
 ```json
 {
-  "address": "nhb1qexample...",
-  "symbol": "nhb:USDC",
-  "amount": "150.0"
+  "method": "lending_borrowNHBWithFee",
+  "params": [
+    {
+      "borrower": "nhb1qyexample...",
+      "amount": "100000000000000000",
+      "feeRecipient": "nhb1qpartner...",
+      "feeBps": 100
+    }
+  ]
 }
 ```
 
-### `lend_repayWithCollateral`
-Atomically repay debt by seizing enabled collateral (flash close).
+The node transfers `amount * feeBps / 10_000` NHB to `feeRecipient` as part of
+the action.
+
+### `lending_repayNHB`
+
+Repay outstanding NHB debt.
 
 ```json
 {
-  "address": "nhb1qexample...",
-  "repaySymbol": "nhb:USDC",
-  "collateralSymbol": "nhb:NHB",
-  "amount": "50.0"
+  "method": "lending_repayNHB",
+  "params": [
+    {"from": "nhb1qyexample...", "amount": "400000000000000000"}
+  ]
 }
 ```
 
-## Risk & Maintenance
+### `lending_liquidate`
 
-### `lend_accrueInterest`
-Force an accrual cycle for a market.
+Repay an unhealthy borrower and seize collateral at a discount.
 
 ```json
 {
-  "symbol": "nhb:USDC"
+  "method": "lending_liquidate",
+  "params": [
+    {"liquidator": "nhb1qlqdtor...", "borrower": "nhb1qborrow..."}
+  ]
 }
 ```
 
-### `lend_liquidate`
-Repay a portion of a borrower\'s debt and claim collateral.
+The response again returns a `txHash` acknowledgement. Liquidations will fail if
+the borrower’s health factor is above 1.0 or if the liquidator lacks sufficient
+NHB to cover the debt.
 
-```json
-{
-  "liquidator": "nhb1qliquid...",
-  "borrower": "nhb1qexample...",
-  "repaySymbol": "nhb:USDC",
-  "collateralSymbol": "nhb:NHB",
-  "repayAmount": "75.0"
-}
-```
+## Error Handling
 
-**Response**
+Errors originating from the lending engine use the message prefix
+`"lending engine:"` and are reported with JSON-RPC error code `-32602`. Storage
+or infrastructure failures return code `-32000` and the HTTP status will be
+`500`.
 
-```json
-{
-  "txHash": "0xliquid...",
-  "status": "pending",
-  "seizedCollateral": "81.75"
-}
-```
-
-All transaction-style methods return a transaction hash and status. Clients
-should poll `tx_getTransaction` until the transaction is finalized.

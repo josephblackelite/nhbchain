@@ -238,6 +238,56 @@ func (e *Engine) DepositCollateral(userAddr crypto.Address, amount *big.Int) err
 	return e.state.PutUserAccount(user)
 }
 
+// WithdrawCollateral releases ZNHB collateral back to the user while ensuring
+// the resulting position remains healthy.
+func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) error {
+	if e == nil || e.state == nil {
+		return errNilState
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return errInvalidAmount
+	}
+
+	user, err := e.ensureUserAccount(userAddr)
+	if err != nil {
+		return err
+	}
+	if user.CollateralZNHB.Cmp(amount) < 0 {
+		return errInsufficientBalance
+	}
+
+	remaining := new(big.Int).Sub(user.CollateralZNHB, amount)
+	if !e.positionHealthy(remaining, user.DebtNHB) {
+		return errHealthCheckFailed
+	}
+
+	collateralAcc, err := e.loadAccount(e.collateralAddress)
+	if err != nil {
+		return err
+	}
+	if collateralAcc.BalanceZNHB.Cmp(amount) < 0 {
+		return errInsufficientLiquidity
+	}
+
+	userAcc, err := e.loadAccount(userAddr)
+	if err != nil {
+		return err
+	}
+
+	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, amount)
+	userAcc.BalanceZNHB = new(big.Int).Add(userAcc.BalanceZNHB, amount)
+
+	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
+		return err
+	}
+	if err := e.persistAccount(userAddr, userAcc); err != nil {
+		return err
+	}
+
+	user.CollateralZNHB = remaining
+	return e.state.PutUserAccount(user)
+}
+
 // Borrow transfers NHB from the module to the borrower while charging a fee to
 // the designated recipient. The method returns the fee that was paid.
 func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient crypto.Address, feeBps uint64) (*big.Int, error) {
