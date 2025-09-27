@@ -104,9 +104,10 @@ var (
 	governanceEscrowPrefix     = []byte("gov/escrow/")
 	paramsNamespacePrefix      = []byte("params/")
 	snapshotPotsoPrefix        = []byte("snapshots/potso/")
-	lendingMarketKey           = []byte("lending/market/default")
-	lendingFeeAccrualKey       = []byte("lending/fees/default")
+	lendingMarketPrefix        = []byte("lending/market/")
+	lendingFeeAccrualPrefix    = []byte("lending/fees/")
 	lendingUserPrefix          = []byte("lending/user/")
+	lendingPoolIndexKey        = []byte("lending/pools/index")
 )
 
 // GovernanceProposalKey constructs the storage key for the proposal metadata
@@ -824,21 +825,52 @@ func potsoDayIndexKey(day string) []byte {
 	return kvKey(buf)
 }
 
-func lendingUserKey(addr []byte) []byte {
-	buf := make([]byte, len(lendingUserPrefix)+len(addr))
-	copy(buf, lendingUserPrefix)
-	copy(buf[len(lendingUserPrefix):], addr)
+func lendingMarketKey(poolID string) []byte {
+	trimmed := strings.TrimSpace(poolID)
+	buf := make([]byte, len(lendingMarketPrefix)+len(trimmed))
+	copy(buf, lendingMarketPrefix)
+	copy(buf[len(lendingMarketPrefix):], trimmed)
 	return buf
 }
 
+func lendingFeeAccrualKey(poolID string) []byte {
+	trimmed := strings.TrimSpace(poolID)
+	buf := make([]byte, len(lendingFeeAccrualPrefix)+len(trimmed))
+	copy(buf, lendingFeeAccrualPrefix)
+	copy(buf[len(lendingFeeAccrualPrefix):], trimmed)
+	return buf
+}
+
+func lendingUserKey(poolID string, addr []byte) []byte {
+	trimmed := strings.TrimSpace(poolID)
+	buf := make([]byte, len(lendingUserPrefix)+len(trimmed)+1+len(addr))
+	copy(buf, lendingUserPrefix)
+	copy(buf[len(lendingUserPrefix):], trimmed)
+	buf[len(lendingUserPrefix)+len(trimmed)] = ':'
+	copy(buf[len(lendingUserPrefix)+len(trimmed)+1:], addr)
+	return buf
+}
+
+func normalizePoolID(poolID string) (string, error) {
+	trimmed := strings.TrimSpace(poolID)
+	if trimmed == "" {
+		return "", fmt.Errorf("lending: pool id required")
+	}
+	return trimmed, nil
+}
+
 type storedLendingMarket struct {
-	TotalNHBSupplied  *big.Int
-	TotalSupplyShares *big.Int
-	TotalNHBBorrowed  *big.Int
-	SupplyIndex       *big.Int
-	BorrowIndex       *big.Int
-	LastUpdateBlock   uint64
-	ReserveFactor     uint64
+	PoolID             string
+	DeveloperOwner     [20]byte
+	DeveloperCollector [20]byte
+	DeveloperFeeBps    uint64
+	TotalNHBSupplied   *big.Int
+	TotalSupplyShares  *big.Int
+	TotalNHBBorrowed   *big.Int
+	SupplyIndex        *big.Int
+	BorrowIndex        *big.Int
+	LastUpdateBlock    uint64
+	ReserveFactor      uint64
 }
 
 type storedLendingFees struct {
@@ -851,8 +883,16 @@ func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
 		return nil
 	}
 	stored := &storedLendingMarket{
+		PoolID:          strings.TrimSpace(market.PoolID),
 		LastUpdateBlock: market.LastUpdateBlock,
 		ReserveFactor:   market.ReserveFactor,
+		DeveloperFeeBps: market.DeveloperFeeBps,
+	}
+	if market.DeveloperOwner.Bytes() != nil {
+		copy(stored.DeveloperOwner[:], market.DeveloperOwner.Bytes())
+	}
+	if market.DeveloperFeeCollector.Bytes() != nil {
+		copy(stored.DeveloperCollector[:], market.DeveloperFeeCollector.Bytes())
 	}
 	if market.TotalNHBSupplied != nil {
 		stored.TotalNHBSupplied = new(big.Int).Set(market.TotalNHBSupplied)
@@ -877,8 +917,17 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 		return nil
 	}
 	market := &lending.Market{
+		PoolID:          strings.TrimSpace(s.PoolID),
 		LastUpdateBlock: s.LastUpdateBlock,
 		ReserveFactor:   s.ReserveFactor,
+		DeveloperFeeBps: s.DeveloperFeeBps,
+	}
+	var zeroAddr [20]byte
+	if !bytes.Equal(s.DeveloperOwner[:], zeroAddr[:]) {
+		market.DeveloperOwner = crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.DeveloperOwner[:]...))
+	}
+	if !bytes.Equal(s.DeveloperCollector[:], zeroAddr[:]) {
+		market.DeveloperFeeCollector = crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.DeveloperCollector[:]...))
 	}
 	if s.TotalNHBSupplied != nil {
 		market.TotalNHBSupplied = new(big.Int).Set(s.TotalNHBSupplied)
@@ -977,34 +1026,126 @@ func (s *storedLendingUser) toUserAccount() *lending.UserAccount {
 	return account
 }
 
-// LendingGetMarket loads the global lending market state if it has been initialised.
-func (m *Manager) LendingGetMarket() (*lending.Market, bool, error) {
+func (m *Manager) lendingLoadPoolIDs() ([]string, error) {
+	var ids []string
+	ok, err := m.KVGet(lendingPoolIndexKey, &ids)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []string{}, nil
+	}
+	return append([]string(nil), ids...), nil
+}
+
+func (m *Manager) lendingSavePoolIDs(ids []string) error {
+	normalized := make([]string, len(ids))
+	for i, id := range ids {
+		normalized[i] = strings.TrimSpace(id)
+	}
+	return m.KVPut(lendingPoolIndexKey, normalized)
+}
+
+func (m *Manager) lendingEnsurePoolIndexed(poolID string) error {
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	ids, err := m.lendingLoadPoolIDs()
+	if err != nil {
+		return err
+	}
+	for _, existing := range ids {
+		if existing == normalized {
+			return nil
+		}
+	}
+	ids = append(ids, normalized)
+	return m.lendingSavePoolIDs(ids)
+}
+
+// LendingListPoolIDs returns the set of pool identifiers currently persisted in
+// state.
+func (m *Manager) LendingListPoolIDs() ([]string, error) {
+	if m == nil {
+		return nil, fmt.Errorf("state manager unavailable")
+	}
+	ids, err := m.lendingLoadPoolIDs()
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// LendingListMarkets loads all configured lending markets.
+func (m *Manager) LendingListMarkets() ([]*lending.Market, error) {
+	ids, err := m.LendingListPoolIDs()
+	if err != nil {
+		return nil, err
+	}
+	markets := make([]*lending.Market, 0, len(ids))
+	for _, id := range ids {
+		market, ok, err := m.LendingGetMarket(id)
+		if err != nil {
+			return nil, err
+		}
+		if ok && market != nil {
+			markets = append(markets, market)
+		}
+	}
+	return markets, nil
+}
+
+// LendingGetMarket loads the lending market state for the provided pool if it
+// has been initialised.
+func (m *Manager) LendingGetMarket(poolID string) (*lending.Market, bool, error) {
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return nil, false, err
+	}
 	var stored storedLendingMarket
-	ok, err := m.KVGet(lendingMarketKey, &stored)
+	ok, err := m.KVGet(lendingMarketKey(normalized), &stored)
 	if err != nil {
 		return nil, false, err
 	}
 	if !ok {
 		return nil, false, nil
 	}
-	return stored.toMarket(), true, nil
+	market := stored.toMarket()
+	if market != nil {
+		market.PoolID = normalized
+	}
+	return market, true, nil
 }
 
 // LendingPutMarket persists the supplied lending market snapshot.
-func (m *Manager) LendingPutMarket(market *lending.Market) error {
+func (m *Manager) LendingPutMarket(poolID string, market *lending.Market) error {
 	if market == nil {
 		return fmt.Errorf("lending: market must not be nil")
 	}
-	return m.KVPut(lendingMarketKey, newStoredLendingMarket(market))
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	market.PoolID = normalized
+	if err := m.KVPut(lendingMarketKey(normalized), newStoredLendingMarket(market)); err != nil {
+		return err
+	}
+	return m.lendingEnsurePoolIndexed(normalized)
 }
 
-// LendingGetFeeAccrual loads the current lending fee accrual totals if present.
-func (m *Manager) LendingGetFeeAccrual() (*lending.FeeAccrual, bool, error) {
+// LendingGetFeeAccrual loads the current lending fee accrual totals if present
+// for the supplied pool identifier.
+func (m *Manager) LendingGetFeeAccrual(poolID string) (*lending.FeeAccrual, bool, error) {
 	if m == nil {
 		return nil, false, fmt.Errorf("state manager unavailable")
 	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return nil, false, err
+	}
 	var stored storedLendingFees
-	ok, err := m.KVGet(lendingFeeAccrualKey, &stored)
+	ok, err := m.KVGet(lendingFeeAccrualKey(normalized), &stored)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1014,20 +1155,30 @@ func (m *Manager) LendingGetFeeAccrual() (*lending.FeeAccrual, bool, error) {
 	return stored.toFeeAccrual(), true, nil
 }
 
-// LendingPutFeeAccrual persists the provided lending fee accrual snapshot.
-func (m *Manager) LendingPutFeeAccrual(fees *lending.FeeAccrual) error {
+// LendingPutFeeAccrual persists the provided lending fee accrual snapshot for
+// the supplied pool.
+func (m *Manager) LendingPutFeeAccrual(poolID string, fees *lending.FeeAccrual) error {
 	if m == nil {
 		return fmt.Errorf("state manager unavailable")
 	}
 	if fees == nil {
 		return fmt.Errorf("lending: fee accrual must not be nil")
 	}
-	return m.KVPut(lendingFeeAccrualKey, newStoredLendingFees(fees))
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	return m.KVPut(lendingFeeAccrualKey(normalized), newStoredLendingFees(fees))
 }
 
-// LendingGetUserAccount loads the lending position tracked for the supplied address.
-func (m *Manager) LendingGetUserAccount(addr [20]byte) (*lending.UserAccount, bool, error) {
-	key := lendingUserKey(addr[:])
+// LendingGetUserAccount loads the lending position tracked for the supplied
+// address within the provided pool.
+func (m *Manager) LendingGetUserAccount(poolID string, addr [20]byte) (*lending.UserAccount, bool, error) {
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return nil, false, err
+	}
+	key := lendingUserKey(normalized, addr[:])
 	var stored storedLendingUser
 	ok, err := m.KVGet(key, &stored)
 	if err != nil {
@@ -1039,14 +1190,21 @@ func (m *Manager) LendingGetUserAccount(addr [20]byte) (*lending.UserAccount, bo
 	return stored.toUserAccount(), true, nil
 }
 
-// LendingPutUserAccount stores the lending position for the provided address.
-func (m *Manager) LendingPutUserAccount(account *lending.UserAccount) error {
+// LendingPutUserAccount stores the lending position for the provided address
+// within the supplied pool.
+func (m *Manager) LendingPutUserAccount(poolID string, account *lending.UserAccount) error {
 	if account == nil {
 		return fmt.Errorf("lending: user account must not be nil")
 	}
-	var addr [20]byte
-	copy(addr[:], account.Address.Bytes())
-	return m.KVPut(lendingUserKey(addr[:]), newStoredLendingUser(account))
+	addr := account.Address
+	if addr.Bytes() == nil {
+		return fmt.Errorf("lending: user address must be set")
+	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	return m.KVPut(lendingUserKey(normalized, addr.Bytes()), newStoredLendingUser(account))
 }
 
 func potsoStakeTotalKey(owner []byte) []byte {

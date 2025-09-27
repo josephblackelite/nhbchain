@@ -292,6 +292,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleSwapVoucherReverse(w, r, req)
 	case "lending_getMarket":
 		s.handleLendingGetMarket(w, r, req)
+	case "lend_getPools":
+		s.handleLendGetPools(w, r, req)
+	case "lend_createPool":
+		s.handleLendCreatePool(w, r, req)
 	case "lending_getUserAccount":
 		s.handleLendingGetUserAccount(w, r, req)
 	case "lending_supplyNHB":

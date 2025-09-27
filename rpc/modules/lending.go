@@ -25,18 +25,24 @@ func NewLendingModule(node *core.Node) *LendingModule {
 	return &LendingModule{node: node}
 }
 
+const defaultLendingPoolID = "default"
+
 func (m *LendingModule) moduleUnavailable() *ModuleError {
 	return &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: "lending module not available"}
 }
 
-func (m *LendingModule) GetMarket() (*lending.Market, lending.RiskParameters, *ModuleError) {
+func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskParameters, *ModuleError) {
 	if m == nil || m.node == nil {
 		return nil, lending.RiskParameters{}, m.moduleUnavailable()
+	}
+	id := strings.TrimSpace(poolID)
+	if id == "" {
+		id = defaultLendingPoolID
 	}
 	params := m.node.LendingRiskParameters()
 	var market *lending.Market
 	err := m.node.WithState(func(manager *nhbstate.Manager) error {
-		stored, ok, err := manager.LendingGetMarket()
+		stored, ok, err := manager.LendingGetMarket(id)
 		if err != nil {
 			return err
 		}
@@ -51,13 +57,82 @@ func (m *LendingModule) GetMarket() (*lending.Market, lending.RiskParameters, *M
 	return market, params, nil
 }
 
-func (m *LendingModule) GetUserAccount(addr [20]byte) (*lending.UserAccount, *ModuleError) {
+func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *ModuleError) {
+	if m == nil || m.node == nil {
+		return nil, lending.RiskParameters{}, m.moduleUnavailable()
+	}
+	params := m.node.LendingRiskParameters()
+	var markets []*lending.Market
+	err := m.node.WithState(func(manager *nhbstate.Manager) error {
+		list, err := manager.LendingListMarkets()
+		if err != nil {
+			return err
+		}
+		markets = list
+		return nil
+	})
+	if err != nil {
+		return nil, params, m.wrapError(err)
+	}
+	if markets == nil {
+		markets = []*lending.Market{}
+	}
+	return markets, params, nil
+}
+
+func (m *LendingModule) CreatePool(poolID string, owner [20]byte) (*lending.Market, *ModuleError) {
 	if m == nil || m.node == nil {
 		return nil, m.moduleUnavailable()
 	}
+	id := strings.TrimSpace(poolID)
+	if id == "" {
+		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "poolId required"}
+	}
+	ownerAddr := toCryptoAddress(owner)
+	var created *lending.Market
+	err := m.node.WithState(func(manager *nhbstate.Manager) error {
+		existing, ok, err := manager.LendingGetMarket(id)
+		if err != nil {
+			return err
+		}
+		if ok && existing != nil {
+			return fmt.Errorf("lending: pool %s already exists", id)
+		}
+		bps, collector := m.node.LendingDeveloperFeeConfig()
+		market := &lending.Market{
+			PoolID:                id,
+			DeveloperOwner:        ownerAddr,
+			DeveloperFeeBps:       bps,
+			DeveloperFeeCollector: collector,
+			ReserveFactor:         m.node.LendingReserveFactorBps(),
+			LastUpdateBlock:       m.node.GetHeight(),
+			TotalNHBSupplied:      big.NewInt(0),
+			TotalSupplyShares:     big.NewInt(0),
+			TotalNHBBorrowed:      big.NewInt(0),
+		}
+		if err := manager.LendingPutMarket(id, market); err != nil {
+			return err
+		}
+		created = market
+		return nil
+	})
+	if err != nil {
+		return nil, m.wrapError(err)
+	}
+	return created, nil
+}
+
+func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.UserAccount, *ModuleError) {
+	if m == nil || m.node == nil {
+		return nil, m.moduleUnavailable()
+	}
+	id := strings.TrimSpace(poolID)
+	if id == "" {
+		id = defaultLendingPoolID
+	}
 	var account *lending.UserAccount
 	err := m.node.WithState(func(manager *nhbstate.Manager) error {
-		stored, ok, err := manager.LendingGetUserAccount(addr)
+		stored, ok, err := manager.LendingGetUserAccount(id, addr)
 		if err != nil {
 			return err
 		}
@@ -72,12 +147,12 @@ func (m *LendingModule) GetUserAccount(addr [20]byte) (*lending.UserAccount, *Mo
 	return account, nil
 }
 
-func (m *LendingModule) SupplyNHB(addr [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) SupplyNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
 	var minted *big.Int
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		shares, err := engine.Supply(toCryptoAddress(addr), amount)
 		if err != nil {
 			return err
@@ -91,12 +166,12 @@ func (m *LendingModule) SupplyNHB(addr [20]byte, amount *big.Int) (string, *Modu
 	return m.makeTxHash("supply", formatHexAddress(addr), amount, minted), nil
 }
 
-func (m *LendingModule) WithdrawNHB(addr [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) WithdrawNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
 	var redeemed *big.Int
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		nhb, err := engine.Withdraw(toCryptoAddress(addr), amount)
 		if err != nil {
 			return err
@@ -110,11 +185,11 @@ func (m *LendingModule) WithdrawNHB(addr [20]byte, amount *big.Int) (string, *Mo
 	return m.makeTxHash("withdraw", formatHexAddress(addr), amount, redeemed), nil
 }
 
-func (m *LendingModule) DepositZNHB(addr [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) DepositZNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		return engine.DepositCollateral(toCryptoAddress(addr), amount)
 	})
 	if err != nil {
@@ -123,11 +198,11 @@ func (m *LendingModule) DepositZNHB(addr [20]byte, amount *big.Int) (string, *Mo
 	return m.makeTxHash("deposit-collateral", formatHexAddress(addr), amount), nil
 }
 
-func (m *LendingModule) WithdrawZNHB(addr [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) WithdrawZNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		return engine.WithdrawCollateral(toCryptoAddress(addr), amount)
 	})
 	if err != nil {
@@ -136,12 +211,12 @@ func (m *LendingModule) WithdrawZNHB(addr [20]byte, amount *big.Int) (string, *M
 	return m.makeTxHash("withdraw-collateral", formatHexAddress(addr), amount), nil
 }
 
-func (m *LendingModule) BorrowNHB(addr [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) BorrowNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
 	var fee *big.Int
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		paidFee, err := engine.Borrow(toCryptoAddress(addr), amount, toCryptoAddress(addr), 0)
 		if err != nil {
 			return err
@@ -155,11 +230,19 @@ func (m *LendingModule) BorrowNHB(addr [20]byte, amount *big.Int) (string, *Modu
 	return m.makeTxHash("borrow", formatHexAddress(addr), amount, fee), nil
 }
 
-func (m *LendingModule) BorrowNHBWithFee(borrower [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) BorrowNHBWithFee(poolID string, borrower [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
-	feeBps, feeCollector := m.node.LendingDeveloperFeeConfig()
+	market, _, moduleErr := m.GetMarket(poolID)
+	if moduleErr != nil {
+		return "", moduleErr
+	}
+	if market == nil {
+		return "", &ModuleError{HTTPStatus: http.StatusNotFound, Code: codeInvalidParams, Message: "pool not initialised"}
+	}
+	feeBps := market.DeveloperFeeBps
+	feeCollector := market.DeveloperFeeCollector
 	if feeBps == 0 {
 		return "", &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "developer fee disabled"}
 	}
@@ -172,7 +255,7 @@ func (m *LendingModule) BorrowNHBWithFee(borrower [20]byte, amount *big.Int) (st
 	var feeCollectorRaw [20]byte
 	copy(feeCollectorRaw[:], feeCollector.Bytes())
 	var fee *big.Int
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		paidFee, err := engine.Borrow(toCryptoAddress(borrower), amount, feeCollector, feeBps)
 		if err != nil {
 			return err
@@ -187,12 +270,12 @@ func (m *LendingModule) BorrowNHBWithFee(borrower [20]byte, amount *big.Int) (st
 	return m.makeTxHash("borrow-with-fee", primary, amount, fee, big.NewInt(int64(feeBps))), nil
 }
 
-func (m *LendingModule) RepayNHB(addr [20]byte, amount *big.Int) (string, *ModuleError) {
+func (m *LendingModule) RepayNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
 	var repaid *big.Int
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		settled, err := engine.Repay(toCryptoAddress(addr), amount)
 		if err != nil {
 			return err
@@ -206,12 +289,12 @@ func (m *LendingModule) RepayNHB(addr [20]byte, amount *big.Int) (string, *Modul
 	return m.makeTxHash("repay", formatHexAddress(addr), amount, repaid), nil
 }
 
-func (m *LendingModule) Liquidate(liquidator [20]byte, borrower [20]byte) (string, *ModuleError) {
+func (m *LendingModule) Liquidate(poolID string, liquidator [20]byte, borrower [20]byte) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
 	var repaid, seized *big.Int
-	err := m.withEngine(func(engine *lending.Engine) error {
+	err := m.withEngine(poolID, func(engine *lending.Engine, _ *lending.Market) error {
 		debt, collateral, err := engine.Liquidate(toCryptoAddress(liquidator), toCryptoAddress(borrower))
 		if err != nil {
 			return err
@@ -227,18 +310,36 @@ func (m *LendingModule) Liquidate(liquidator [20]byte, borrower [20]byte) (strin
 	return m.makeTxHash("liquidate", primary, repaid, seized), nil
 }
 
-func (m *LendingModule) withEngine(fn func(*lending.Engine) error) error {
+func (m *LendingModule) withEngine(poolID string, fn func(*lending.Engine, *lending.Market) error) error {
 	if fn == nil {
 		return fmt.Errorf("lending: callback required")
 	}
+	id := strings.TrimSpace(poolID)
+	if id == "" {
+		id = defaultLendingPoolID
+	}
 	return m.node.WithState(func(manager *nhbstate.Manager) error {
+		adapter := &lendingStateAdapter{manager: manager, poolID: id}
 		engine := lending.NewEngine(m.node.LendingModuleAddress(), m.node.LendingCollateralAddress(), m.node.LendingRiskParameters())
-		engine.SetState(&lendingStateAdapter{manager: manager})
+		engine.SetState(adapter)
+		engine.SetPoolID(id)
 		engine.SetInterestModel(m.node.LendingInterestModel())
 		engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 		engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 		engine.SetBlockHeight(m.node.GetHeight())
-		return fn(engine)
+		var market *lending.Market
+		stored, ok, err := manager.LendingGetMarket(id)
+		if err != nil {
+			return err
+		}
+		if ok {
+			market = stored
+			engine.SetDeveloperFee(stored.DeveloperFeeBps, stored.DeveloperFeeCollector)
+		} else {
+			bps, collector := m.node.LendingDeveloperFeeConfig()
+			engine.SetDeveloperFee(bps, collector)
+		}
+		return fn(engine, market)
 	})
 }
 
@@ -283,13 +384,14 @@ func formatHexAddress(raw [20]byte) string {
 
 type lendingStateAdapter struct {
 	manager *nhbstate.Manager
+	poolID  string
 }
 
-func (a *lendingStateAdapter) GetMarket() (*lending.Market, error) {
+func (a *lendingStateAdapter) GetMarket(string) (*lending.Market, error) {
 	if a == nil || a.manager == nil {
 		return nil, fmt.Errorf("lending: state manager unavailable")
 	}
-	market, ok, err := a.manager.LendingGetMarket()
+	market, ok, err := a.manager.LendingGetMarket(a.poolID)
 	if err != nil {
 		return nil, err
 	}
@@ -299,20 +401,20 @@ func (a *lendingStateAdapter) GetMarket() (*lending.Market, error) {
 	return market, nil
 }
 
-func (a *lendingStateAdapter) PutMarket(market *lending.Market) error {
+func (a *lendingStateAdapter) PutMarket(_ string, market *lending.Market) error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("lending: state manager unavailable")
 	}
-	return a.manager.LendingPutMarket(market)
+	return a.manager.LendingPutMarket(a.poolID, market)
 }
 
-func (a *lendingStateAdapter) GetUserAccount(addr crypto.Address) (*lending.UserAccount, error) {
+func (a *lendingStateAdapter) GetUserAccount(_ string, addr crypto.Address) (*lending.UserAccount, error) {
 	if a == nil || a.manager == nil {
 		return nil, fmt.Errorf("lending: state manager unavailable")
 	}
 	var raw [20]byte
 	copy(raw[:], addr.Bytes())
-	account, ok, err := a.manager.LendingGetUserAccount(raw)
+	account, ok, err := a.manager.LendingGetUserAccount(a.poolID, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -325,21 +427,21 @@ func (a *lendingStateAdapter) GetUserAccount(addr crypto.Address) (*lending.User
 	return account, nil
 }
 
-func (a *lendingStateAdapter) PutUserAccount(account *lending.UserAccount) error {
+func (a *lendingStateAdapter) PutUserAccount(_ string, account *lending.UserAccount) error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("lending: state manager unavailable")
 	}
 	if account == nil {
 		return fmt.Errorf("lending: user account must not be nil")
 	}
-	return a.manager.LendingPutUserAccount(account)
+	return a.manager.LendingPutUserAccount(a.poolID, account)
 }
 
-func (a *lendingStateAdapter) GetFeeAccrual() (*lending.FeeAccrual, error) {
+func (a *lendingStateAdapter) GetFeeAccrual(string) (*lending.FeeAccrual, error) {
 	if a == nil || a.manager == nil {
 		return nil, fmt.Errorf("lending: state manager unavailable")
 	}
-	fees, ok, err := a.manager.LendingGetFeeAccrual()
+	fees, ok, err := a.manager.LendingGetFeeAccrual(a.poolID)
 	if err != nil {
 		return nil, err
 	}
@@ -349,14 +451,14 @@ func (a *lendingStateAdapter) GetFeeAccrual() (*lending.FeeAccrual, error) {
 	return fees, nil
 }
 
-func (a *lendingStateAdapter) PutFeeAccrual(fees *lending.FeeAccrual) error {
+func (a *lendingStateAdapter) PutFeeAccrual(_ string, fees *lending.FeeAccrual) error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("lending: state manager unavailable")
 	}
 	if fees == nil {
 		return fmt.Errorf("lending: fee accrual must not be nil")
 	}
-	return a.manager.LendingPutFeeAccrual(fees)
+	return a.manager.LendingPutFeeAccrual(a.poolID, fees)
 }
 
 func (a *lendingStateAdapter) GetAccount(addr crypto.Address) (*types.Account, error) {

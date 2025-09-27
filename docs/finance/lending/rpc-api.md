@@ -24,10 +24,11 @@ JSON-RPC error.
 
 ### `lending_getMarket`
 
-Return the current global market snapshot alongside the risk parameters applied
-to the native pool.
+Return the current market snapshot alongside the risk parameters applied to the
+requested pool.
 
-**Parameters:** none
+**Parameters:** optional `poolId` string. When omitted the default pool is
+returned.
 
 **Response:**
 
@@ -53,12 +54,38 @@ to the native pool.
 
 `market` is `null` when the pool has not been initialised yet.
 
+### `lend_getPools`
+
+List the configured lending pools and their current accounting snapshots.
+
+**Parameters:** none
+
+**Response:**
+
+```json
+{
+  "pools": [
+    {"poolID": "default", "totalNHBSupplied": "0", "totalSupplyShares": "0"}
+  ],
+  "riskParameters": {"maxLTV": 7500, "liquidationThreshold": 8000}
+}
+```
+
+### `lend_createPool`
+
+Create a new lending pool using the node’s configured developer fee settings.
+
+**Parameters:** object with `poolId` and `developerOwner` (Bech32) fields.
+
+**Response:** identical to `lending_getMarket` for the newly created pool.
+
 ## Account Data
 
 ### `lending_getUserAccount`
 
 Fetch the persisted lending position for an address. The parameter can be either
-the raw Bech32 string or an object containing an `address` field.
+the raw Bech32 string or an object containing an `address` field. Include
+`poolId` when querying non-default pools.
 
 **Request:**
 
@@ -93,6 +120,9 @@ for client-side tracking or logging. The node applies the action immediately to
 its local state – the hash is an opaque acknowledgement rather than an on-chain
 identifier.
 
+All mutating requests accept an optional `poolId` field. When omitted the
+default pool is used.
+
 ### `lending_supplyNHB`
 
 Supply NHB liquidity into the pool and mint LP shares.
@@ -105,7 +135,8 @@ Supply NHB liquidity into the pool and mint LP shares.
   "params": [
     {
       "from": "nhb1qyexample...",
-      "amount": "1000000000000000000"
+      "amount": "1000000000000000000",
+      "poolId": "default"
     }
   ]
 }
@@ -126,7 +157,7 @@ Lock ZNHB as collateral for a borrower.
 {
   "method": "lending_depositZNHB",
   "params": [
-    {"from": "nhb1qyexample...", "amount": "500000000000000000"}
+    {"from": "nhb1qyexample...", "amount": "500000000000000000", "poolId": "default"}
   ]
 }
 ```
@@ -144,7 +175,7 @@ Borrow NHB against enabled collateral.
 {
   "method": "lending_borrowNHB",
   "params": [
-    {"borrower": "nhb1qyexample...", "amount": "400000000000000000"}
+    {"borrower": "nhb1qyexample...", "amount": "400000000000000000", "poolId": "default"}
   ]
 }
 ```
@@ -160,7 +191,8 @@ configured in the node’s `lending` settings.
   "params": [
     {
       "borrower": "nhb1qyexample...",
-      "amount": "100000000000000000"
+      "amount": "100000000000000000",
+      "poolId": "default"
     }
   ]
 }
@@ -180,7 +212,7 @@ Repay outstanding NHB debt.
 {
   "method": "lending_repayNHB",
   "params": [
-    {"from": "nhb1qyexample...", "amount": "400000000000000000"}
+    {"from": "nhb1qyexample...", "amount": "400000000000000000", "poolId": "default"}
   ]
 }
 ```
@@ -193,7 +225,7 @@ Repay an unhealthy borrower and seize collateral at a discount.
 {
   "method": "lending_liquidate",
   "params": [
-    {"liquidator": "nhb1qlqdtor...", "borrower": "nhb1qborrow..."}
+    {"liquidator": "nhb1qlqdtor...", "borrower": "nhb1qborrow...", "poolId": "default"}
   ]
 }
 ```

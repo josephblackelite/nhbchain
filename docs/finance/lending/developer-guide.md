@@ -5,12 +5,17 @@ NHBChain using the JSON-RPC endpoints exposed by the node.
 
 ## 1. Discover Risk Configuration
 
-- Call [`lending_getMarket`](rpc-api.md#lending_getmarket) during startup to
-  cache the latest pool totals and risk parameters. Surface values such as
-  `maxLTV`, `liquidationThreshold`, and `liquidationBonus` in tooltips so users
-  understand protocol limits.
-- Repeat the call periodically to refresh supply and borrow totals displayed in
+- Call [`lend_getPools`](rpc-api.md#lend_getpools) during startup to discover
+  available lending pools. For each active pool invoke
+  [`lending_getMarket`](rpc-api.md#lending_getmarket) with the pool’s `poolId` to
+  cache totals and risk parameters. Surface values such as `maxLTV`,
+  `liquidationThreshold`, and `liquidationBonus` in tooltips so users understand
+  protocol limits.
+- Repeat the calls periodically to refresh supply and borrow totals displayed in
   the UI.
+- Provision new pools with [`lend_createPool`](rpc-api.md#lend_createpool) when
+  onboarding additional markets. The developer owner becomes the default
+  recipient of per-pool fee streams.
 
 ## 2. Authenticate the User
 
@@ -27,15 +32,16 @@ NHBChain using the JSON-RPC endpoints exposed by the node.
 
 ## 3. Load the Account Snapshot
 
-- Fetch the lending position with [`lending_getUserAccount`](rpc-api.md#lending_getuseraccount).
-  Use the returned balances to pre-fill collateral toggles and outstanding debt
-  amounts.
+- Fetch the lending position with [`lending_getUserAccount`](rpc-api.md#lending_getuseraccount)
+  for the selected `poolId`. Use the returned balances to pre-fill collateral
+  toggles and outstanding debt amounts.
 - If the endpoint returns a `404`, initialise the UI with zero balances and hide
   repayment controls until the user supplies or borrows for the first time.
 
 ## 4. Supply and Manage Collateral
 
 1. Send a `lending_supplyNHB` request when the user deposits NHB liquidity.
+   Include `poolId` with every transaction payload to target the correct market.
 2. Encourage the user to immediately lock funds with `lending_depositZNHB` so
    the position can back future borrows.
 3. Allow partial withdrawals by combining `lending_withdrawZNHB` (to reduce
@@ -48,11 +54,11 @@ NHBChain using the JSON-RPC endpoints exposed by the node.
   [`lending_borrowNHB`](rpc-api.md#lending_borrownhb). Block requests that would
   drive HF below 1.0 and warn users when the buffer is thin.
 - If your application charges a fee, coordinate with the node operator to set
-  `DeveloperFeeBps` and `DeveloperFeeCollector` in `config.toml`. The
-  `lending_borrowNHBWithFee` RPC automatically applies those trusted settings,
-  rejects caller-supplied fee parameters, and adds the deducted fee to the
-  borrower’s outstanding debt. Surface the configured fee rate in your UI so
-  borrowers understand the total obligation.
+  `DeveloperFeeBps` and `DeveloperFeeCollector` in `config.toml` before creating
+  pools. Each pool inherits these values at creation and `lending_borrowNHBWithFee`
+  automatically applies them while rejecting caller-supplied fee parameters.
+  Surface the configured fee rate in your UI so borrowers understand the total
+  obligation.
 
 ## 6. Repayment and Upkeep
 
