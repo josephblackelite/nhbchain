@@ -1,0 +1,44 @@
+series: Monolithic JSON-RPC compatibility decommission
+link: https://docs.nhbchain.net/migrate/deprecation-timeline
+flag:
+  cli: --compat-mode
+  env: NHB_COMPAT_MODE
+currentPhase: phase-a
+phases:
+  - key: phase-a
+    label: "Phase A – Compatibility warning window"
+    offset: T+0
+    defaultCompat: enabled
+    flagBehavior: "Flag available to opt out (disable compat in staging environments)."
+    banner: "Monolithic JSON-RPC compatibility will be sunset in 90 days. Migrate to the service APIs and monitor the deprecation timeline."
+    actions:
+      - Compatibility layer stays enabled by default across all environments.
+      - Gateway emits Warning, Link, and X-NHB-Compat-Phase headers on /rpc responses.
+      - Document the deprecation schedule and migration banner in docs and SDK templates.
+  - key: phase-b
+    label: "Phase B – Staging opt-out"
+    offset: T+30d
+    defaultCompat: enabled
+    flagBehavior: "Opt-in flag (`--compat-mode=disabled`) to turn off compat in non-production environments."
+    actions:
+      - Validate workloads against the REST surface without relying on JSON-RPC.
+      - Enforce migration for internal staging pipelines and tooling.
+      - Track support tickets and publish weekly status updates.
+  - key: phase-c
+    label: "Phase C – Compatibility disabled by default"
+    offset: T+60d
+    defaultCompat: disabled
+    flagBehavior: "Opt-in flag (`--compat-mode=enabled`) required to keep compat for straggler integrations."
+    actions:
+      - Production defaults to the REST and gRPC surfaces; JSON-RPC requires explicit override.
+      - Complete remaining SDK upgrades and notify external consumers.
+      - Schedule final readiness review and smoke tests.
+  - key: phase-d
+    label: "Phase D – Compatibility removal"
+    offset: T+90d
+    defaultCompat: removed
+    flagBehavior: "Compatibility flag removed; legacy dispatcher deleted and final release tagged."
+    actions:
+      - Remove the `/rpc` handler entirely and retire legacy runbooks.
+      - Tag the last release that still exposed the compatibility surface.
+      - Announce completion of the migration program.

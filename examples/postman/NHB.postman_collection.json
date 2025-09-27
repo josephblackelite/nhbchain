@@ -2,7 +2,7 @@
   "info": {
     "name": "NHBCoin RPC & REST Cookbook",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Reference requests for rpc.testnet.nhbcoin.net (JSON-RPC) and api.nhbcoin.net (REST escrow gateway). Trusted proxy allow-lists, per-source transaction quotas (five tx/min), and tightened RPC timeouts are now enforced on all nodes\u2014SDK consumers should handle HTTP 429 / -32020 responses with backoff and ensure their proxies are listed in RPCTrustedProxies before forwarding X-Forwarded-For headers. Update the collection variables to switch between devnet/testnet hosts or to inject credentials."
+    "description": "Reference requests for rpc.testnet.nhbcoin.net (JSON-RPC) and api.nhbcoin.net (REST escrow gateway). Trusted proxy allow-lists, per-source transaction quotas (five tx/min), and tightened RPC timeouts are now enforced on all nodes\u2014SDK consumers should handle HTTP 429 / -32020 responses with backoff and ensure their proxies are listed in RPCTrustedProxies before forwarding X-Forwarded-For headers. Update the collection variables to switch between devnet/testnet hosts or to inject credentials.\n\nJSON-RPC responses now include `Warning`, `Link`, and `X-NHB-Compat-Phase` headers describing the sunset window; surface them in tooling so integrators see the decommission timeline."
   },
   "item": [
     {

@@ -2,7 +2,10 @@ openapi: 3.1.0
 info:
   title: NHBChain Identity Gateway API
   version: "0.1.0"
-  description: REST interface for email verification, alias binding, avatar upload, and public identity lookups.
+  description: |-
+    REST interface for email verification, alias binding, avatar upload, and public identity lookups.
+
+    During the JSON-RPC compatibility sunset the gateway emits `Warning`, `Link`, and `X-NHB-Compat-Phase` headers on responses to the legacy `/rpc` endpoint. Surface these headers in tooling to highlight the decommission timeline.
   license:
     name: CC BY 4.0
     url: https://creativecommons.org/licenses/by/4.0/
@@ -247,6 +250,18 @@ components:
       schema:
         type: integer
       description: Unix timestamp when the rate limit resets.
+    CompatWarning:
+      schema:
+        type: string
+      description: Warning header emitted during the JSON-RPC compatibility sunset window (HTTP 299).
+    CompatLink:
+      schema:
+        type: string
+      description: Deprecation link header that points to the migration timeline document.
+    CompatPhase:
+      schema:
+        type: string
+      description: X-NHB-Compat-Phase header that identifies the active decommission phase.
   responses:
     Error400:
       description: Bad request
