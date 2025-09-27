@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package nhb.consensus.v1;
+
+option go_package = "nhbchain/proto/consensus;consensuspb";
+
+message BigInt {
+  string value = 1;
+}
+
+message Transaction {
+  BigInt chain_id = 1;
+  uint32 type = 2;
+  uint64 nonce = 3;
+  bytes to = 4;
+  BigInt value = 5;
+  bytes data = 6;
+  uint64 gas_limit = 7;
+  BigInt gas_price = 8;
+  bytes paymaster = 9;
+  BigInt r = 10;
+  BigInt s = 11;
+  BigInt v = 12;
+  BigInt paymaster_r = 13;
+  BigInt paymaster_s = 14;
+  BigInt paymaster_v = 15;
+}
+
+message BlockHeader {
+  uint64 height = 1;
+  int64 timestamp = 2;
+  bytes prev_hash = 3;
+  bytes state_root = 4;
+  bytes tx_root = 5;
+  bytes validator = 6;
+}
+
+message Block {
+  BlockHeader header = 1;
+  repeated Transaction transactions = 2;
+}
+
+message SubmitTransactionRequest {
+  Transaction transaction = 1;
+}
+
+message SubmitTransactionResponse {}
+
+message GetValidatorSetRequest {}
+
+message Validator {
+  bytes address = 1;
+  string power = 2;
+}
+
+message GetValidatorSetResponse {
+  repeated Validator validators = 1;
+}
+
+message GetBlockByHeightRequest {
+  uint64 height = 1;
+}
+
+message GetBlockByHeightResponse {
+  Block block = 1;
+}
+
+message GetHeightRequest {}
+
+message GetHeightResponse {
+  uint64 height = 1;
+}
+
+message GetMempoolRequest {}
+
+message GetMempoolResponse {
+  repeated Transaction transactions = 1;
+}
+
+message CreateBlockRequest {
+  repeated Transaction transactions = 1;
+}
+
+message CreateBlockResponse {
+  Block block = 1;
+}
+
+message CommitBlockRequest {
+  Block block = 1;
+}
+
+message CommitBlockResponse {}
+
+message GetLastCommitHashRequest {}
+
+message GetLastCommitHashResponse {
+  bytes hash = 1;
+}
+
+service Consensus {
+  rpc SubmitTransaction(SubmitTransactionRequest) returns (SubmitTransactionResponse);
+  rpc GetValidatorSet(GetValidatorSetRequest) returns (GetValidatorSetResponse);
+  rpc GetBlockByHeight(GetBlockByHeightRequest) returns (GetBlockByHeightResponse);
+  rpc GetHeight(GetHeightRequest) returns (GetHeightResponse);
+  rpc GetMempool(GetMempoolRequest) returns (GetMempoolResponse);
+  rpc CreateBlock(CreateBlockRequest) returns (CreateBlockResponse);
+  rpc CommitBlock(CommitBlockRequest) returns (CommitBlockResponse);
+  rpc GetLastCommitHash(GetLastCommitHashRequest) returns (GetLastCommitHashResponse);
+}

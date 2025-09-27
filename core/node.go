@@ -773,6 +773,11 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	return nil
 }
 
+// SubmitTransaction enqueues the provided transaction for inclusion in a future block.
+func (n *Node) SubmitTransaction(tx *types.Transaction) error {
+	return n.AddTransaction(tx)
+}
+
 // --- Methods for bft.NodeInterface ---
 
 func (n *Node) GetMempool() []*types.Transaction {
@@ -901,6 +906,14 @@ func (n *Node) CommitBlock(b *types.Block) error {
 
 func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorSet }
 func (n *Node) GetHeight() uint64                    { return n.chain.Height() }
+
+// GetBlockByHeight retrieves the block stored at the requested height.
+func (n *Node) GetBlockByHeight(height uint64) (*types.Block, error) {
+	if n == nil || n.chain == nil {
+		return nil, fmt.Errorf("blockchain not initialised")
+	}
+	return n.chain.GetBlockByHeight(height)
+}
 
 // PotsoSubmitEvidence validates and persists a misbehaviour report.
 func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, error) {
