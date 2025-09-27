@@ -155,6 +155,19 @@ func (s *Service) Vote(ctx context.Context, req *govv1.MsgVote) (*govv1.MsgVoteR
 	return &govv1.MsgVoteResponse{TxHash: txHash}, nil
 }
 
+// SetPauses implements gov.v1.Msg.SetPauses.
+func (s *Service) SetPauses(ctx context.Context, req *govv1.MsgSetPauses) (*govv1.MsgSetPausesResponse, error) {
+	msg, err := govsdk.NewMsgSetPauses(req.GetAuthority(), req.GetPauses())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid pause payload: %v", err)
+	}
+	txHash, err := s.broadcast(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+	return &govv1.MsgSetPausesResponse{TxHash: txHash}, nil
+}
+
 // Deposit implements gov.v1.Msg.Deposit.
 func (s *Service) Deposit(ctx context.Context, req *govv1.MsgDeposit) (*govv1.MsgDepositResponse, error) {
 	msg, err := govsdk.NewMsgDeposit(req.GetDepositor(), req.GetProposalId(), req.GetAmount())
