@@ -1,7 +1,7 @@
-# P2P Networking Hardening (CODEX NET-1)
+# P2P Networking Hardening (NHBCHAIN NET-1)
 
 The NHB node ships with an authenticated TCP transport and JSON framing. The
-CODEX NET-1 workstream tightened the peer admission flow, message safety, and
+NHBCHAIN NET-1 workstream tightened the peer admission flow, message safety, and
 operator controls. This guide documents the current behavior so operators,
 integrators, and auditors understand the guarantees exposed by the new stack.
 
