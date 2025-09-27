@@ -1,0 +1,46 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nhbchain/governd
+  tag: ""
+  pullPolicy: IfNotPresent
+
+env:
+  - name: NHB_ENV
+    value: staging
+
+service:
+  type: ClusterIP
+  port: 50061
+
+secrets:
+  signerKey: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+config:
+  enabled: true
+  path: /etc/nhb/governd.yaml
+  chainID: nhb-staging
+  consensusEndpoint: consensusd:9090
+  nonceStart: 1
+  fee:
+    amount: "0"
+    denom: ""
+    payer: ""
+  content: |
+    listen: ":50061"
+    consensus: "{{ .Values.config.consensusEndpoint }}"
+    chain_id: "{{ .Values.config.chainID }}"
+    signer_key: "{{ .Values.secrets.signerKey }}"
+    nonce_start: {{ .Values.config.nonceStart }}
+    fee:
+      amount: "{{ .Values.config.fee.amount }}"
+      denom: "{{ .Values.config.fee.denom }}"
+      payer: "{{ .Values.config.fee.payer }}"
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

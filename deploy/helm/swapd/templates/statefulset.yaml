@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "swapd.fullname" . }}
+  labels:
+    {{- include "swapd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "swapd.fullname" . }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "swapd.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "swapd.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: swapd
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "{{ .Values.config.path }}"
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+          env:
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              {{- if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- else }}
+              value: {{ default "" .value | quote }}
+              {{- end }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/nhb
+            {{- if .Values.config.enabled }}
+            - name: config
+              mountPath: {{ .Values.config.path }}
+              subPath: swapd.yaml
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.config.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "swapd.fullname" . }}
+            items:
+              - key: swapd.yaml
+                path: swapd.yaml
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

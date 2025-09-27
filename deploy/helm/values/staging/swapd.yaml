@@ -1,0 +1,33 @@
+image:
+  tag: staging
+env:
+  - name: NHB_ENV
+    value: staging
+persistence:
+  size: 10Gi
+config:
+  content: |
+    listen: ":7074"
+    database: "/var/lib/nhb/swapd.sqlite"
+    oracle:
+      interval: "30s"
+      max_age: "2m"
+      min_feeds: 2
+    sources:
+      - name: gecko
+        type: coingecko
+        endpoint: https://api.coingecko.com/api/v3/simple/price
+        assets:
+          ZNHB: znhb
+      - name: now
+        type: nowpayments
+        endpoint: https://api.nowpayments.io/v1/exchange/rates
+        api_key: ""
+    pairs:
+      - base: ZNHB
+        quote: USD
+    policy:
+      id: staging
+      mint_limit: 50
+      redeem_limit: 25
+      window: "30m"

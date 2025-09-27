@@ -1,0 +1,43 @@
+image:
+  tag: staging
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: api.staging.nhbcoin.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: api-staging-tls
+      hosts:
+        - api.staging.nhbcoin.com
+config:
+  content: |
+    listen: ":8080"
+    observability:
+      serviceName: nhb-gateway
+      metrics: true
+      tracing: true
+      logRequests: false
+      metricsPrefix: gateway
+    services:
+      - name: lendingd
+        endpoint: http://lendingd:50053
+      - name: swapd
+        endpoint: http://swapd:7074
+      - name: governd
+        endpoint: http://governd:50061
+      - name: consensusd
+        endpoint: http://consensusd:9090
+    rateLimits:
+      - id: consensus
+        requestsPerMinute: 480
+        burst: 80
+    auth:
+      enabled: true
+      hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
+      scopeClaim: scope
+      allowAnonymous: false
+secrets:
+  gatewayHMAC: ""

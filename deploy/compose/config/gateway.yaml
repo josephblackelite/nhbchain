@@ -1,0 +1,36 @@
+listen: ":8080"
+readTimeout: 30s
+writeTimeout: 30s
+idleTimeout: 120s
+observability:
+  serviceName: "nhb-gateway"
+  metrics: true
+  tracing: false
+  logRequests: true
+  metricsPrefix: "gateway"
+services:
+  - name: lendingd
+    endpoint: http://lendingd:50053
+  - name: swapd
+    endpoint: http://swapd:7074
+  - name: governd
+    endpoint: http://governd:50061
+  - name: consensusd
+    endpoint: http://consensusd:9090
+rateLimits:
+  - id: lending
+    requestsPerMinute: 120
+    burst: 20
+  - id: swap
+    requestsPerMinute: 60
+    burst: 10
+  - id: gov
+    requestsPerMinute: 60
+    burst: 10
+  - id: consensus
+    requestsPerMinute: 240
+    burst: 40
+auth:
+  enabled: false
+  scopeClaim: scope
+  allowAnonymous: true

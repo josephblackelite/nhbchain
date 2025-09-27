@@ -1,0 +1,43 @@
+image:
+  tag: prod
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: api.nhbcoin.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: api-prod-tls
+      hosts:
+        - api.nhbcoin.com
+config:
+  content: |
+    listen: ":8080"
+    observability:
+      serviceName: nhb-gateway
+      metrics: true
+      tracing: true
+      logRequests: false
+      metricsPrefix: gateway
+    services:
+      - name: lendingd
+        endpoint: http://lendingd:50053
+      - name: swapd
+        endpoint: http://swapd:7074
+      - name: governd
+        endpoint: http://governd:50061
+      - name: consensusd
+        endpoint: http://consensusd:9090
+    rateLimits:
+      - id: consensus
+        requestsPerMinute: 1200
+        burst: 200
+    auth:
+      enabled: true
+      hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
+      scopeClaim: scope
+      allowAnonymous: false
+secrets:
+  gatewayHMAC: ""

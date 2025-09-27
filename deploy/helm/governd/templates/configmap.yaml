@@ -1,0 +1,15 @@
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "governd.fullname" . }}
+  labels:
+    {{- include "governd.labels" . | nindent 4 }}
+data:
+  governd.yaml: |
+{{- if .Values.config.content }}
+{{ tpl .Values.config.content . | indent 4 }}
+{{- else }}
+    {}
+{{- end }}
+{{- end }}

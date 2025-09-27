@@ -1,0 +1,40 @@
+image:
+  tag: prod
+env:
+  - name: NHB_ENV
+    value: prod
+persistence:
+  size: 20Gi
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+config:
+  content: |
+    listen: ":7074"
+    database: "/var/lib/nhb/swapd.sqlite"
+    oracle:
+      interval: "30s"
+      max_age: "2m"
+      min_feeds: 3
+    sources:
+      - name: gecko
+        type: coingecko
+        endpoint: https://api.coingecko.com/api/v3/simple/price
+        assets:
+          ZNHB: znhb
+      - name: now
+        type: nowpayments
+        endpoint: https://api.nowpayments.io/v1/exchange/rates
+        api_key: ""
+    pairs:
+      - base: ZNHB
+        quote: USD
+    policy:
+      id: prod
+      mint_limit: 200
+      redeem_limit: 150
+      window: "1h"

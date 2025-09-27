@@ -1,0 +1,29 @@
+image:
+  tag: dev
+env:
+  - name: NHB_ENV
+    value: dev
+persistence:
+  enabled: false
+config:
+  content: |
+    listen: ":7074"
+    database: "/var/lib/nhb/swapd.sqlite"
+    oracle:
+      interval: "15s"
+      max_age: "1m"
+      min_feeds: 1
+    sources:
+      - name: gecko
+        type: coingecko
+        endpoint: https://api.coingecko.com/api/v3/simple/price
+        assets:
+          ZNHB: znhb
+    pairs:
+      - base: ZNHB
+        quote: USD
+    policy:
+      id: dev
+      mint_limit: 100
+      redeem_limit: 100
+      window: "10m"

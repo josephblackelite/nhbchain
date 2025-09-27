@@ -1,4 +1,4 @@
-.PHONY: proto sdk tidy
+.PHONY: proto sdk tidy up down
 
 proto:
 	go run ./tools/proto/gen.go
@@ -10,3 +10,9 @@ sdk: proto
 tidy:
 	go mod tidy
 	cd sdk && go mod tidy
+
+up:
+	docker compose -f deploy/compose/docker-compose.yml up -d --build
+
+down:
+	docker compose -f deploy/compose/docker-compose.yml down -v

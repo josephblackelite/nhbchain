@@ -1,0 +1,8 @@
+image:
+  tag: dev
+env:
+  - name: NHB_ENV
+    value: dev
+config:
+  content: |
+    listen: ":50053"

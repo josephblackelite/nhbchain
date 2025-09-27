@@ -1,0 +1,76 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nhbchain/consensusd
+  tag: ""
+  pullPolicy: IfNotPresent
+
+p2pEndpoint: p2pd:9091
+setAllowAutogenesisFlag: true
+
+env:
+  - name: NHB_ENV
+    value: staging
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "true"
+  - name: NHB_VALIDATOR_PASS
+    valueFrom:
+      secretKeyRef:
+        name: nhb-validator
+        key: password
+
+service:
+  type: ClusterIP
+  ports:
+    grpc: 9090
+    rpc: 8081
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+config:
+  enabled: true
+  path: /etc/nhb/consensus.toml
+  content: |
+    ListenAddress = "0.0.0.0:6002"
+    RPCAddress = "0.0.0.0:8081"
+    DataDir = "/var/lib/nhb/consensus"
+    GenesisFile = ""
+    AllowAutogenesis = true
+    NetworkName = "nhb-staging"
+
+    [mempool]
+    MaxTransactions = 5000
+
+    [p2p]
+    NetworkId = 187001
+    MaxPeers = 32
+    MaxInbound = 24
+    MaxOutbound = 16
+    MinPeers = 8
+    OutboundPeers = 8
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 50
+    Burst = 200
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
