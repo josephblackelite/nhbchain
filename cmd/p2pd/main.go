@@ -18,7 +18,7 @@ import (
 	"nhbchain/network"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
-	networkpb "nhbchain/proto/network"
+	networkv1 "nhbchain/proto/network/v1"
 	"nhbchain/storage"
 )
 
@@ -159,7 +159,7 @@ func main() {
 		panic(fmt.Sprintf("failed to listen on %s: %v", *grpcAddress, err))
 	}
 	grpcServer := grpc.NewServer()
-	networkpb.RegisterNetworkServer(grpcServer, network.NewService(relay))
+	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

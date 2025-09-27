@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package nhb.network.v1;
+package network.v1;
 
-option go_package = "nhbchain/proto/network;networkpb";
+option go_package = "nhbchain/proto/network/v1;networkv1";
 
 message GossipMessage {
   uint32 type = 1;
@@ -18,6 +18,14 @@ message NetworkEnvelope {
     GossipMessage gossip = 1;
     Heartbeat heartbeat = 2;
   }
+}
+
+message GossipRequest {
+  NetworkEnvelope envelope = 1;
+}
+
+message GossipResponse {
+  NetworkEnvelope envelope = 1;
 }
 
 message GetViewRequest {}
@@ -98,8 +106,8 @@ message BanPeerRequest {
 
 message BanPeerResponse {}
 
-service Network {
-  rpc Gossip(stream NetworkEnvelope) returns (stream NetworkEnvelope);
+service NetworkService {
+  rpc Gossip(stream GossipRequest) returns (stream GossipResponse);
   rpc GetView(GetViewRequest) returns (GetViewResponse);
   rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
   rpc DialPeer(DialPeerRequest) returns (DialPeerResponse);

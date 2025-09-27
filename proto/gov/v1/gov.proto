@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package gov.v1;
+
+option go_package = "nhbchain/proto/gov/v1;govv1";
+
+enum ProposalStatus {
+  PROPOSAL_STATUS_UNSPECIFIED = 0;
+  PROPOSAL_STATUS_VOTING = 1;
+  PROPOSAL_STATUS_ACCEPTED = 2;
+  PROPOSAL_STATUS_REJECTED = 3;
+  PROPOSAL_STATUS_EXECUTED = 4;
+}
+
+message ProposalId {
+  uint64 value = 1;
+}
+
+message Proposal {
+  ProposalId id = 1;
+  string title = 2;
+  string summary = 3;
+  string proposer = 4;
+  ProposalStatus status = 5;
+  int64 submit_time_unix = 6;
+  int64 voting_end_unix = 7;
+}
+
+message SubmitProposalRequest {
+  string proposer = 1;
+  string title = 2;
+  string summary = 3;
+}
+
+message SubmitProposalResponse {
+  Proposal proposal = 1;
+}
+
+message GetProposalRequest {
+  ProposalId id = 1;
+}
+
+message GetProposalResponse {
+  Proposal proposal = 1;
+}
+
+message ListProposalsRequest {
+  string status_filter = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListProposalsResponse {
+  repeated Proposal proposals = 1;
+  string next_page_token = 2;
+}
+
+message Vote {
+  string voter = 1;
+  ProposalId proposal_id = 2;
+  string option = 3;
+}
+
+message SubmitVoteRequest {
+  Vote vote = 1;
+}
+
+message SubmitVoteResponse {
+  Vote vote = 1;
+}
+
+service GovernanceService {
+  rpc SubmitProposal(SubmitProposalRequest) returns (SubmitProposalResponse);
+  rpc GetProposal(GetProposalRequest) returns (GetProposalResponse);
+  rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse);
+  rpc SubmitVote(SubmitVoteRequest) returns (SubmitVoteResponse);
+}
