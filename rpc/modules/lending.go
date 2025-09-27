@@ -327,6 +327,7 @@ func (m *LendingModule) withEngine(poolID string, fn func(*lending.Engine, *lend
 		engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 		engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 		engine.SetBlockHeight(m.node.GetHeight())
+		engine.SetCollateralRouting(m.node.LendingCollateralRouting())
 		var market *lending.Market
 		stored, ok, err := manager.LendingGetMarket(id)
 		if err != nil {

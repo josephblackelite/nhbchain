@@ -84,6 +84,7 @@ type Node struct {
 	lendingInterestModel         *lending.InterestModel
 	lendingReserveFactorBps      uint64
 	lendingProtocolFeeBps        uint64
+	lendingCollateralRouting     lending.CollateralRouting
 }
 
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
@@ -571,6 +572,28 @@ func (n *Node) LendingDeveloperFeeConfig() (uint64, crypto.Address) {
 	collector := cloneAddress(n.lendingDeveloperFeeCollector)
 	n.lendingMu.RUnlock()
 	return bps, collector
+}
+
+// SetLendingCollateralRouting configures the collateral routing defaults applied
+// when instantiating lending engines. The routing is cloned to avoid external
+// mutation of shared state.
+func (n *Node) SetLendingCollateralRouting(routing lending.CollateralRouting) {
+	if n == nil {
+		return
+	}
+	clone := routing.Clone()
+	n.lendingMu.Lock()
+	n.lendingCollateralRouting = clone
+	n.lendingMu.Unlock()
+}
+
+// LendingCollateralRouting returns a copy of the currently configured
+// collateral routing defaults.
+func (n *Node) LendingCollateralRouting() lending.CollateralRouting {
+	n.lendingMu.RLock()
+	routing := n.lendingCollateralRouting.Clone()
+	n.lendingMu.RUnlock()
+	return routing
 }
 
 // IsTreasuryAllowListed reports whether the supplied address is present in the

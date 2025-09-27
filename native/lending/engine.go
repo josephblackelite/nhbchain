@@ -21,6 +21,9 @@ var (
 	errDeveloperFeeRecipient = errors.New("lending engine: developer fee recipient not configured")
 	errDeveloperFeeCap       = errors.New("lending engine: developer fee exceeds cap")
 	errPoolNotConfigured     = errors.New("lending engine: pool identifier not configured")
+	errCollateralRoutingBps  = errors.New("lending engine: collateral routing exceeds 100%")
+	errDeveloperCollateral   = errors.New("lending engine: developer collateral recipient not configured")
+	errProtocolCollateral    = errors.New("lending engine: protocol collateral recipient not configured")
 )
 
 var (
@@ -54,6 +57,7 @@ type Engine struct {
 	poolID            string
 	developerFeeBps   uint64
 	developerFeeAddr  crypto.Address
+	collateralRouting CollateralRouting
 }
 
 // NewEngine constructs a lending engine configured with the module treasury
@@ -135,6 +139,15 @@ func (e *Engine) SetDeveloperFee(bps uint64, collector crypto.Address) {
 	}
 	cloned := append([]byte(nil), collector.Bytes()...)
 	e.developerFeeAddr = crypto.NewAddress(collector.Prefix(), cloned)
+}
+
+// SetCollateralRouting configures the default collateral distribution applied
+// during liquidations when per-pool overrides are not supplied.
+func (e *Engine) SetCollateralRouting(routing CollateralRouting) {
+	if e == nil {
+		return
+	}
+	e.collateralRouting = routing.Clone()
 }
 
 // Supply transfers NHB from the supplier into the lending pool and mints LP
@@ -700,6 +713,12 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		seizeAmount = new(big.Int).Set(borrowerUser.CollateralZNHB)
 	}
 
+	routing := e.collateralRouting
+	totalBps := routing.LiquidatorBps + routing.DeveloperBps + routing.ProtocolBps
+	if totalBps > 10_000 {
+		return nil, nil, errCollateralRoutingBps
+	}
+
 	collateralAcc, err := e.loadAccount(e.collateralAddress)
 	if err != nil {
 		return nil, nil, err
@@ -708,8 +727,79 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errInsufficientLiquidity
 	}
 
+	computeShare := func(amount *big.Int, bps uint64) *big.Int {
+		if amount.Sign() == 0 || bps == 0 {
+			return big.NewInt(0)
+		}
+		bpsInt := new(big.Int).SetUint64(bps)
+		share := new(big.Int).Mul(amount, bpsInt)
+		share.Quo(share, basisPoints)
+		if share.Sign() < 0 {
+			return big.NewInt(0)
+		}
+		return share
+	}
+
+	isZeroAddress := func(addr crypto.Address) bool {
+		bytes := addr.Bytes()
+		if len(bytes) == 0 {
+			return true
+		}
+		for _, b := range bytes {
+			if b != 0 {
+				return false
+			}
+		}
+		return true
+	}
+
+	developerShare := computeShare(seizeAmount, routing.DeveloperBps)
+	protocolShare := computeShare(seizeAmount, routing.ProtocolBps)
+
+	if developerShare.Sign() > 0 {
+		if isZeroAddress(routing.DeveloperTarget) {
+			return nil, nil, errDeveloperCollateral
+		}
+	}
+	if protocolShare.Sign() > 0 {
+		if isZeroAddress(routing.ProtocolTarget) {
+			return nil, nil, errProtocolCollateral
+		}
+	}
+
+	liquidatorShare := new(big.Int).Sub(seizeAmount, developerShare)
+	liquidatorShare.Sub(liquidatorShare, protocolShare)
+	if liquidatorShare.Sign() < 0 {
+		liquidatorShare = big.NewInt(0)
+	}
+
+	allocated := new(big.Int).Add(liquidatorShare, developerShare)
+	allocated.Add(allocated, protocolShare)
+	if allocated.Cmp(seizeAmount) < 0 {
+		remainder := new(big.Int).Sub(seizeAmount, allocated)
+		liquidatorShare = new(big.Int).Add(liquidatorShare, remainder)
+	}
+
 	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, seizeAmount)
-	liquidatorAcc.BalanceZNHB = new(big.Int).Add(liquidatorAcc.BalanceZNHB, seizeAmount)
+	liquidatorAcc.BalanceZNHB = new(big.Int).Add(liquidatorAcc.BalanceZNHB, liquidatorShare)
+
+	var developerAcc *types.Account
+	if developerShare.Sign() > 0 {
+		developerAcc, err = e.loadAccount(routing.DeveloperTarget)
+		if err != nil {
+			return nil, nil, err
+		}
+		developerAcc.BalanceZNHB = new(big.Int).Add(developerAcc.BalanceZNHB, developerShare)
+	}
+
+	var protocolAcc *types.Account
+	if protocolShare.Sign() > 0 {
+		protocolAcc, err = e.loadAccount(routing.ProtocolTarget)
+		if err != nil {
+			return nil, nil, err
+		}
+		protocolAcc.BalanceZNHB = new(big.Int).Add(protocolAcc.BalanceZNHB, protocolShare)
+	}
 
 	if err := e.persistAccount(liquidator, liquidatorAcc); err != nil {
 		return nil, nil, err
@@ -722,6 +812,16 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	}
 	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
 		return nil, nil, err
+	}
+	if developerAcc != nil {
+		if err := e.persistAccount(routing.DeveloperTarget, developerAcc); err != nil {
+			return nil, nil, err
+		}
+	}
+	if protocolAcc != nil {
+		if err := e.persistAccount(routing.ProtocolTarget, protocolAcc); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	borrowerUser.DebtNHB = big.NewInt(0)

@@ -68,6 +68,25 @@ reported liquidity while keeping historical accounting intact.
 4. **Close Factor:** A maximum percentage of the outstanding borrow can be
    liquidated in a single transaction to prevent full wipeouts in thin markets.
 
+### Collateral Distribution
+
+Liquidation collateral is routed to multiple parties based on the node's
+`[lending.collateralRouting]` configuration. Operators can split the seized
+collateral between the liquidator, a developer recovery wallet, and a protocol
+reserve address:
+
+- `LiquidatorBps` — basis points paid to the liquidator.
+- `DeveloperBps` / `DeveloperAddress` — optional share routed to the
+  developer-controlled treasury. An address is required when the share is
+  non-zero.
+- `ProtocolBps` / `ProtocolAddress` — optional share allocated to the
+  protocol reserve wallet.
+
+The configured basis points must sum to at most 10,000 (100%). Any remainder is
+credited to the liquidator, ensuring they always receive the incentive bonus.
+If a share is non-zero but the destination address is missing, liquidations are
+rejected to avoid burning collateral.
+
 ## Risk Parameters
 
 All risk parameters (LTV, liquidation threshold, reserve factor, close factor,

@@ -4,13 +4,24 @@ import "math/big"
 
 // Config captures the runtime configuration for the native lending module.
 type Config struct {
-	MaxLTVBps               uint64            `toml:"MaxLTVBps"`
-	LiquidationThresholdBps uint64            `toml:"LiquidationThresholdBps"`
-	ReserveFactorBps        uint64            `toml:"ReserveFactorBps"`
-	Breaker                 BreakerThresholds `toml:"breaker"`
-	ProtocolFeeBps          uint64            `toml:"ProtocolFeeBps"`
-	DeveloperFeeBps         uint64            `toml:"DeveloperFeeBps"`
-	DeveloperFeeCollector   string            `toml:"DeveloperFeeCollector"`
+	MaxLTVBps               uint64                  `toml:"MaxLTVBps"`
+	LiquidationThresholdBps uint64                  `toml:"LiquidationThresholdBps"`
+	ReserveFactorBps        uint64                  `toml:"ReserveFactorBps"`
+	Breaker                 BreakerThresholds       `toml:"breaker"`
+	ProtocolFeeBps          uint64                  `toml:"ProtocolFeeBps"`
+	DeveloperFeeBps         uint64                  `toml:"DeveloperFeeBps"`
+	DeveloperFeeCollector   string                  `toml:"DeveloperFeeCollector"`
+	CollateralRouting       CollateralRoutingConfig `toml:"collateralRouting"`
+}
+
+// CollateralRoutingConfig describes the default collateral distribution applied
+// during liquidations when a pool has not specified overrides.
+type CollateralRoutingConfig struct {
+	LiquidatorBps    uint64 `toml:"LiquidatorBps"`
+	DeveloperBps     uint64 `toml:"DeveloperBps"`
+	DeveloperAddress string `toml:"DeveloperAddress"`
+	ProtocolBps      uint64 `toml:"ProtocolBps"`
+	ProtocolAddress  string `toml:"ProtocolAddress"`
 }
 
 // BreakerThresholds describes the limit switches for disabling module flows.
