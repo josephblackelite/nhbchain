@@ -746,6 +746,41 @@ func TestReleaseHandlesFeeEdgeCases(t *testing.T) {
 	}
 }
 
+func TestReleaseZeroFeeWithoutTreasury(t *testing.T) {
+	state := newMockState()
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() int64 { return 1_700_000_000 })
+
+	payer := newTestAddress(0x5A)
+	payee := newTestAddress(0x5B)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_200), 0, 1_700_004_000, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(2_000)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if err := engine.Release(esc.ID, payee); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowReleased {
+		t.Fatalf("expected released status, got %d", stored.Status)
+	}
+	payeeAcc := state.account(payee)
+	if got := payeeAcc.BalanceNHB.String(); got != "1200" {
+		t.Fatalf("expected payee balance 1200, got %s", got)
+	}
+	var zeroTreasury [20]byte
+	treasuryAcc := state.account(zeroTreasury)
+	if got := treasuryAcc.BalanceNHB.String(); got != "0" {
+		t.Fatalf("expected zero treasury balance, got %s", got)
+	}
+}
+
 func TestRefundHonorsDeadlineAndCaller(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)
@@ -916,6 +951,64 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	}, ",")
 	if last.Attributes["decisionSigners"] != expectedSigners {
 		t.Fatalf("unexpected signers: %s", last.Attributes["decisionSigners"])
+	}
+}
+
+func TestArbitratedReleaseZeroFeeWithoutTreasury(t *testing.T) {
+	state := newMockState()
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() int64 { return 1_700_000_000 })
+
+	keyA, addrA := mustGenerateArbitrator(t)
+	keyB, addrB := mustGenerateArbitrator(t)
+	realm := &EscrowRealm{
+		ID: "realm-zero-fee",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 2,
+			Members:   [][20]byte{addrA, addrB},
+		},
+	}
+	if _, err := engine.CreateRealm(realm); err != nil {
+		t.Fatalf("create realm: %v", err)
+	}
+
+	payer := newTestAddress(0xA5)
+	payee := newTestAddress(0xA6)
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(900), 0, 1_700_005_000, nil, [32]byte{}, realm.ID)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(1_500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if err := engine.Dispute(esc.ID, payee); err != nil {
+		t.Fatalf("dispute: %v", err)
+	}
+
+	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "release", [32]byte{})
+	sigs := [][]byte{
+		signDecisionPayload(t, payload, keyA),
+		signDecisionPayload(t, payload, keyB),
+	}
+	if err := engine.ResolveWithSignatures(esc.ID, payload, sigs); err != nil {
+		t.Fatalf("resolve with signatures: %v", err)
+	}
+
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowReleased {
+		t.Fatalf("expected released status, got %d", stored.Status)
+	}
+	payeeAcc := state.account(payee)
+	if got := payeeAcc.BalanceZNHB.String(); got != "900" {
+		t.Fatalf("expected payee balance 900, got %s", got)
+	}
+	var zeroTreasury [20]byte
+	treasuryAcc := state.account(zeroTreasury)
+	if got := treasuryAcc.BalanceZNHB.String(); got != "0" {
+		t.Fatalf("expected zero treasury balance, got %s", got)
 	}
 }
 
