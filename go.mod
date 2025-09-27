@@ -19,6 +19,8 @@ require (
 	github.com/xitongsys/parquet-go-source v0.0.0-20241021075129-b732d2ac9c9b
 	go.opentelemetry.io/otel v1.24.0
 	go.opentelemetry.io/otel/metric v1.24.0
+	google.golang.org/grpc v1.45.0
+	google.golang.org/protobuf v1.34.2
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.0
 	lukechampine.com/blake3 v1.4.1
@@ -84,7 +86,7 @@ require (
 	golang.org/x/sys v0.34.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
 	golang.org/x/tools v0.34.0 // indirect
-	google.golang.org/protobuf v1.34.2 // indirect
+	google.golang.org/genproto v0.0.0-20220401170504-314d38edb7de // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
