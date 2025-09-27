@@ -4,8 +4,8 @@ This example showcases how to build a lending interface on top of the NHBChain d
 
 ## Features
 
-- **Earn**: Supply and withdraw NHB liquidity using the UI patterns from CODEx — LEND-UI-2.
-- **Borrow**: Deposit ZNHB as collateral, borrow NHB, repay loans, and experiment with developer fees using CODEx — LEND-UI-1.
+- **Earn**: Supply and withdraw NHB liquidity using the NHBChain Lending Playbook pattern LEND-02.
+- **Borrow**: Deposit ZNHB as collateral, borrow NHB, repay loans, and experiment with developer fees using the NHBChain Lending Playbook pattern LEND-01.
 - **Fee Recipient Demo**: Demonstrates how a developer can monetize their local deployment via the `lend_borrowNHBWithFee` RPC endpoint.
 - **Empowerment Narrative**: Includes messaging that connects the protocol to NHBChain's mission of expanding access to credit for unbanked communities.
 

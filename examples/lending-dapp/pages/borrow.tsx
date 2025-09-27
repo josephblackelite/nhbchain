@@ -17,8 +17,8 @@ export default function BorrowPage() {
         <span>Access Credit</span>
         <h1>Borrow NHB against your ZNHB</h1>
         <p className="section-description">
-          CODEx — LEND-UI-1 maps directly to this page. Use the developer fee recipient field to wire your monetization strategy
-          into the `lend_borrowNHBWithFee` endpoint and ship a sustainable lending product.
+          The NHBChain Lending Playbook — pattern LEND-01 — maps directly to this page. Use the developer fee recipient field
+          to wire your monetization strategy into the `lend_borrowNHBWithFee` endpoint and ship a sustainable lending product.
         </p>
       </section>
 
