@@ -1,0 +1,191 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"nhbchain/gateway/compat"
+	"nhbchain/gateway/config"
+	"nhbchain/gateway/middleware"
+	"nhbchain/gateway/routes"
+)
+
+func main() {
+	var cfgPath string
+	flag.StringVar(&cfgPath, "config", "", "path to gateway configuration")
+	flag.Parse()
+
+	logger := log.New(os.Stdout, "gateway ", log.LstdFlags|log.Lmsgprefix)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		logger.Fatalf("load config: %v", err)
+	}
+
+	serviceEndpoints := ensureServiceConfig(cfg)
+	services := make([]*compat.Service, 0, len(serviceEndpoints))
+	for name, endpoint := range serviceEndpoints {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			logger.Fatalf("parse %s endpoint: %v", name, err)
+		}
+		services = append(services, &compat.Service{Name: name, BaseURL: parsed})
+	}
+	servicesByName := servicesMap(services)
+	required := []string{"lendingd", "swapd", "governd", "consensusd"}
+	for _, name := range required {
+		if servicesByName[name] == nil {
+			logger.Fatalf("missing configuration for service %s", name)
+		}
+	}
+
+	dispatcher := compat.NewDispatcher(services, compat.DefaultMappings)
+
+	obs := middleware.NewObservability(middleware.ObservabilityConfig{
+		ServiceName:   cfg.Observability.ServiceName,
+		MetricsPrefix: cfg.Observability.MetricsPrefix,
+		LogRequests:   cfg.Observability.LogRequests,
+		Enabled:       cfg.Observability.Metrics || cfg.Observability.Tracing,
+	}, logger)
+
+	auth := middleware.NewAuthenticator(middleware.AuthConfig{
+		Enabled:        cfg.Auth.Enabled,
+		HMACSecret:     cfg.Auth.HMACSecret,
+		Issuer:         cfg.Auth.Issuer,
+		Audience:       cfg.Auth.Audience,
+		ScopeClaim:     cfg.Auth.ScopeClaim,
+		OptionalPaths:  cfg.Auth.OptionalPaths,
+		AllowAnonymous: cfg.Auth.AllowAnonymous,
+	}, logger)
+
+	rateLimits := make(map[string]middleware.RateLimit)
+	for _, entry := range cfg.RateLimits {
+		if entry.ID == "" {
+			continue
+		}
+		rateLimits[entry.ID] = middleware.RateLimit{
+			RequestsPerMinute: entry.RequestsPerMinute,
+			Burst:             entry.Burst,
+		}
+	}
+	if len(rateLimits) == 0 {
+		rateLimits["lending"] = middleware.RateLimit{RequestsPerMinute: 120, Burst: 20}
+		rateLimits["swap"] = middleware.RateLimit{RequestsPerMinute: 60, Burst: 10}
+		rateLimits["gov"] = middleware.RateLimit{RequestsPerMinute: 60, Burst: 10}
+		rateLimits["consensus"] = middleware.RateLimit{RequestsPerMinute: 240, Burst: 40}
+	}
+
+	router := routes.New(routes.Config{
+		Routes: []routes.ServiceRoute{
+			{
+				Name:           "lending",
+				Prefix:         "/v1/lending",
+				Target:         servicesByName["lendingd"].BaseURL,
+				RequireAuth:    true,
+				RequiredScopes: []string{"lending"},
+				RateLimitKey:   "lending",
+			},
+			{
+				Name:           "swap",
+				Prefix:         "/v1/swap",
+				Target:         servicesByName["swapd"].BaseURL,
+				RequireAuth:    true,
+				RequiredScopes: []string{"swap"},
+				RateLimitKey:   "swap",
+			},
+			{
+				Name:           "gov",
+				Prefix:         "/v1/gov",
+				Target:         servicesByName["governd"].BaseURL,
+				RequireAuth:    true,
+				RequiredScopes: []string{"gov"},
+				RateLimitKey:   "gov",
+			},
+			{
+				Name:         "consensus",
+				Prefix:       "/v1/consensus",
+				Target:       servicesByName["consensusd"].BaseURL,
+				RequireAuth:  false,
+				RateLimitKey: "consensus",
+			},
+		},
+		CompatHandler: dispatcher.Handler(),
+		Authenticator: auth,
+		RateLimiter:   middleware.NewRateLimiter(rateLimits, logger),
+		Observability: obs,
+		CORS: middleware.CORSConfig{
+			AllowedOrigins:   []string{"*"},
+			AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+			AllowedHeaders:   []string{"Content-Type", "Authorization"},
+			AllowCredentials: false,
+		},
+	})
+
+	server := &http.Server{
+		Addr:         cfg.ListenAddress,
+		Handler:      router,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		IdleTimeout:  cfg.IdleTimeout,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		logger.Printf("listening on %s", cfg.ListenAddress)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatalf("listen and serve: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Printf("graceful shutdown failed: %v", err)
+	}
+}
+
+func ensureServiceConfig(cfg config.Config) map[string]string {
+	endpoints := map[string]string{
+		"lendingd":   "http://127.0.0.1:7101",
+		"swapd":      "http://127.0.0.1:7102",
+		"governd":    "http://127.0.0.1:7103",
+		"consensusd": "http://127.0.0.1:7104",
+	}
+	envOverrides := map[string]string{
+		"lendingd":   os.Getenv("NHB_GATEWAY_LENDING_URL"),
+		"swapd":      os.Getenv("NHB_GATEWAY_SWAP_URL"),
+		"governd":    os.Getenv("NHB_GATEWAY_GOV_URL"),
+		"consensusd": os.Getenv("NHB_GATEWAY_CONSENSUS_URL"),
+	}
+	for name, value := range envOverrides {
+		if strings.TrimSpace(value) != "" {
+			endpoints[name] = value
+		}
+	}
+	for _, svc := range cfg.Services {
+		if strings.TrimSpace(svc.Name) == "" || strings.TrimSpace(svc.Endpoint) == "" {
+			continue
+		}
+		endpoints[svc.Name] = svc.Endpoint
+	}
+	return endpoints
+}
+
+func servicesMap(services []*compat.Service) map[string]*compat.Service {
+	out := make(map[string]*compat.Service, len(services))
+	for _, svc := range services {
+		out[svc.Name] = svc
+	}
+	return out
+}

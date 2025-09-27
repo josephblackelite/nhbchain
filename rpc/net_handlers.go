@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
@@ -140,8 +139,7 @@ func (s *Server) handleNetBan(w http.ResponseWriter, r *http.Request, req *RPCRe
 }
 
 func writeNetError(w http.ResponseWriter, id any, err error) {
-	var st *status.Status
-	if errors.As(err, &st) {
+	if st, ok := status.FromError(err); ok {
 		switch st.Code() {
 		case codes.InvalidArgument:
 			writeError(w, http.StatusBadRequest, id, codeNetInvalidParams, "invalid_params", st.Message())
