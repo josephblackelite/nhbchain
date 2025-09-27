@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +21,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
 	swap "nhbchain/native/swap"
-	"nhbchain/p2p"
-	"nhbchain/p2p/seeds"
+	"nhbchain/network"
 	consensuspb "nhbchain/proto/consensus"
 	"nhbchain/storage"
 )
@@ -39,6 +37,7 @@ func main() {
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
 	grpcAddress := flag.String("grpc", ":9090", "Address for the consensus gRPC server")
+	networkAddress := flag.String("p2p", "localhost:9091", "Address of the p2p daemon network service")
 	flag.Parse()
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
@@ -69,23 +68,6 @@ func main() {
 	privKey, err := loadValidatorKey(cfg)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
-	}
-
-	peerstoreDir := filepath.Join(cfg.DataDir, "p2p")
-	if err := os.MkdirAll(peerstoreDir, 0o755); err != nil {
-		panic(fmt.Sprintf("Failed to prepare p2p directory: %v", err))
-	}
-	peerstorePath := filepath.Join(peerstoreDir, "peerstore")
-	peerstore, err := p2p.NewPeerstore(peerstorePath, 0, 0)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to open peerstore: %v", err))
-	}
-	defer peerstore.Close()
-
-	identityPath := filepath.Join(peerstoreDir, "node_key.json")
-	identity, err := p2p.LoadOrCreateIdentity(identityPath)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to load node identity: %v", err))
 	}
 
 	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis)
@@ -188,107 +170,25 @@ func main() {
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
 
-	seedStrings := make([]string, 0, len(cfg.P2P.Seeds))
-	seedOrigins := make([]p2p.SeedOrigin, 0, len(cfg.P2P.Seeds))
-	seenSeeds := make(map[string]struct{})
-	for _, raw := range cfg.P2P.Seeds {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			continue
-		}
-		nodePart, addrPart, found := strings.Cut(trimmed, "@")
-		if !found {
-			fmt.Printf("Ignoring seed %q: missing node ID\n", trimmed)
-			continue
-		}
-		nodeID := strings.TrimSpace(nodePart)
-		addr := strings.TrimSpace(addrPart)
-		if nodeID == "" || addr == "" {
-			fmt.Printf("Ignoring seed %q: empty components\n", trimmed)
-			continue
-		}
-		key := strings.ToLower(nodeID) + "@" + strings.ToLower(addr)
-		if _, ok := seenSeeds[key]; ok {
-			continue
-		}
-		seenSeeds[key] = struct{}{}
-		seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", nodeID, addr))
-		seedOrigins = append(seedOrigins, p2p.SeedOrigin{NodeID: nodeID, Address: addr, Source: "config"})
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 10*time.Second)
+	networkClient, err := network.Dial(dialCtx, *networkAddress)
+	cancelDial()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to connect to p2pd at %s: %v", *networkAddress, err))
 	}
+	defer networkClient.Close()
 
-	var seedRegistry *seeds.Registry
-	if rawRegistry, ok, err := node.NetworkSeedsParam(); err != nil {
-		fmt.Printf("Failed to load network.seeds: %v\n", err)
-	} else if ok {
-		registry, parseErr := seeds.Parse(rawRegistry)
-		if parseErr != nil {
-			fmt.Printf("Failed to parse network.seeds: %v\n", parseErr)
-		} else {
-			seedRegistry = registry
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			resolved, resolveErr := registry.Resolve(ctx, time.Now(), seeds.DefaultResolver())
-			cancel()
-			if resolveErr != nil {
-				fmt.Printf("DNS seed resolution failed: %v\n", resolveErr)
-			}
-			for _, entry := range resolved {
-				addr := strings.TrimSpace(entry.Address)
-				key := strings.ToLower(entry.NodeID) + "@" + strings.ToLower(addr)
-				if _, exists := seenSeeds[key]; exists {
-					continue
-				}
-				seenSeeds[key] = struct{}{}
-				seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", entry.NodeID, addr))
-				seedOrigins = append(seedOrigins, p2p.SeedOrigin{
-					NodeID:    entry.NodeID,
-					Address:   addr,
-					Source:    entry.Source,
-					NotBefore: entry.NotBefore,
-					NotAfter:  entry.NotAfter,
-				})
-			}
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	defer streamCancel()
+	go func() {
+		// TODO: add reconnect/backoff handling so a transient stream failure
+		// does not crash the consensus process.
+		if err := networkClient.Run(streamCtx, node.ProcessNetworkMessage, nil); err != nil && streamCtx.Err() == nil {
+			panic(fmt.Sprintf("Network stream terminated: %v", err))
 		}
-	}
+	}()
 
-	pexEnabled := true
-	if cfg.P2P.PEX != nil {
-		pexEnabled = *cfg.P2P.PEX
-	}
-	p2pCfg := p2p.ServerConfig{
-		ListenAddress:    cfg.ListenAddress,
-		ChainID:          node.ChainID(),
-		GenesisHash:      node.GenesisHash(),
-		ClientVersion:    cfg.ClientVersion,
-		MaxPeers:         cfg.MaxPeers,
-		MaxInbound:       cfg.MaxInbound,
-		MaxOutbound:      cfg.MaxOutbound,
-		MinPeers:         cfg.MinPeers,
-		OutboundPeers:    cfg.OutboundPeers,
-		Bootnodes:        append([]string{}, cfg.Bootnodes...),
-		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
-		Seeds:            append([]string{}, seedStrings...),
-		SeedOrigins:      append([]p2p.SeedOrigin{}, seedOrigins...),
-		SeedRegistry:     seedRegistry,
-		SeedResolver:     seeds.DefaultResolver(),
-		PeerBanDuration:  time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
-		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
-		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
-		MaxMessageBytes:  cfg.MaxMsgBytes,
-		RateMsgsPerSec:   cfg.P2P.RateMsgsPerSec,
-		RateBurst:        cfg.P2P.Burst,
-		BanScore:         cfg.P2P.BanScore,
-		GreyScore:        cfg.P2P.GreyScore,
-		HandshakeTimeout: time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
-		PingInterval:     time.Duration(cfg.P2P.PingIntervalSeconds) * time.Second,
-		PingTimeout:      time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
-		DialBackoff:      time.Duration(cfg.P2P.DialBackoffSeconds) * time.Second,
-		EnablePEX:        pexEnabled,
-	}
-	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
-	p2pServer.SetPeerstore(peerstore)
-	node.SetP2PServer(p2pServer)
-
-	bftEngine := bft.NewEngine(node, privKey, p2pServer)
+	bftEngine := bft.NewEngine(node, privKey, networkClient)
 	node.SetBftEngine(bftEngine)
 
 	grpcListener, err := net.Listen("tcp", *grpcAddress)
@@ -304,7 +204,6 @@ func main() {
 		}
 	}()
 
-	go p2pServer.Start()
 	go node.StartConsensus()
 
 	fmt.Println("--- Consensus node initialised and running ---")

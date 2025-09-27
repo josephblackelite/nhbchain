@@ -9,7 +9,7 @@ import (
 )
 
 func TestClientSourceIgnoresForwardedForWhenNotTrusted(t *testing.T) {
-	server := NewServer(nil, ServerConfig{})
+	server := NewServer(nil, nil, ServerConfig{})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.5:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
@@ -20,7 +20,7 @@ func TestClientSourceIgnoresForwardedForWhenNotTrusted(t *testing.T) {
 }
 
 func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
-	server := NewServer(nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
+	server := NewServer(nil, nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")
@@ -31,7 +31,7 @@ func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
 }
 
 func TestClientSourceHonorsForwardedForWhenTrustFlagEnabled(t *testing.T) {
-	server := NewServer(nil, ServerConfig{TrustProxyHeaders: true})
+	server := NewServer(nil, nil, ServerConfig{TrustProxyHeaders: true})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "192.0.2.10:7000"
 	req.Header.Set("X-Forwarded-For", "198.51.100.8")
@@ -42,7 +42,7 @@ func TestClientSourceHonorsForwardedForWhenTrustFlagEnabled(t *testing.T) {
 }
 
 func TestRateLimitSpoofedForwardedFor(t *testing.T) {
-	server := NewServer(nil, ServerConfig{})
+	server := NewServer(nil, nil, ServerConfig{})
 	now := time.Now()
 	remoteAddr := "10.1.1.1:9000"
 
@@ -64,7 +64,7 @@ func TestRateLimitSpoofedForwardedFor(t *testing.T) {
 }
 
 func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
-	server := NewServer(nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
+	server := NewServer(nil, nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
 	now := time.Now()
 	remoteAddr := "10.0.0.1:5000"
 

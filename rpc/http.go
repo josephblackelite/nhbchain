@@ -22,6 +22,7 @@ import (
 	"nhbchain/core/epoch"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/p2p"
 	"nhbchain/rpc/modules"
 )
 
@@ -75,8 +76,18 @@ type ServerConfig struct {
 	TLSKeyFile string
 }
 
+// NetworkService abstracts the network control plane used by RPC handlers to
+// interrogate the peer-to-peer daemon.
+type NetworkService interface {
+	NetworkView(ctx context.Context) (p2p.NetworkView, []string, error)
+	NetworkPeers(ctx context.Context) ([]p2p.PeerNetInfo, error)
+	Dial(ctx context.Context, target string) error
+	Ban(ctx context.Context, nodeID string, duration time.Duration) error
+}
+
 type Server struct {
 	node *core.Node
+	net  NetworkService
 
 	mu                sync.Mutex
 	txSeen            map[string]time.Time
@@ -99,7 +110,7 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func NewServer(node *core.Node, cfg ServerConfig) *Server {
+func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Server {
 	token := strings.TrimSpace(os.Getenv("NHB_RPC_TOKEN"))
 	trusted := make(map[string]struct{}, len(cfg.TrustedProxies))
 	for _, entry := range cfg.TrustedProxies {
@@ -111,6 +122,7 @@ func NewServer(node *core.Node, cfg ServerConfig) *Server {
 	}
 	return &Server{
 		node:              node,
+		net:               netClient,
 		txSeen:            make(map[string]time.Time),
 		rateLimiters:      make(map[string]*rateLimiter),
 		authToken:         token,

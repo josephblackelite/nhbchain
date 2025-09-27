@@ -1,6 +1,8 @@
 package rpc
 
 import (
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -10,9 +12,22 @@ import (
 	"nhbchain/p2p"
 )
 
-type testP2PHandler struct{}
+type stubNetwork struct {
+	view  p2p.NetworkView
+	peers []p2p.PeerNetInfo
+}
 
-func (testP2PHandler) HandleMessage(msg *p2p.Message) error { return nil }
+func (s *stubNetwork) NetworkView(context.Context) (p2p.NetworkView, []string, error) {
+	return s.view, nil, nil
+}
+
+func (s *stubNetwork) NetworkPeers(context.Context) ([]p2p.PeerNetInfo, error) {
+	return s.peers, nil
+}
+
+func (s *stubNetwork) Dial(context.Context, string) error { return nil }
+
+func (s *stubNetwork) Ban(context.Context, string, time.Duration) error { return nil }
 
 func TestP2PInfoUnavailable(t *testing.T) {
 	env := newTestEnv(t)
@@ -30,32 +45,19 @@ func TestP2PInfoUnavailable(t *testing.T) {
 
 func TestP2PInfoAndPeers(t *testing.T) {
 	env := newTestEnv(t)
-	key, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
+	env.server.net = &stubNetwork{
+		view: p2p.NetworkView{
+			NetworkID: env.node.ChainID(),
+			Genesis:   hex.EncodeToString(env.node.GenesisHash()),
+			Counts:    p2p.NetworkCounts{},
+			Limits:    p2p.NetworkLimits{},
+			Self: p2p.NetworkSelf{
+				NodeID:        "test-node",
+				ClientVersion: "test/1.0",
+			},
+		},
+		peers: []p2p.PeerNetInfo{},
 	}
-	cfg := p2p.ServerConfig{
-		ListenAddress:    "127.0.0.1:0",
-		ChainID:          env.node.ChainID(),
-		GenesisHash:      env.node.GenesisHash(),
-		ClientVersion:    "test/1.0",
-		MaxPeers:         4,
-		MaxInbound:       2,
-		MaxOutbound:      2,
-		MinPeers:         2,
-		OutboundPeers:    2,
-		PeerBanDuration:  time.Second,
-		ReadTimeout:      time.Second,
-		WriteTimeout:     time.Second,
-		MaxMessageBytes:  1024,
-		RateMsgsPerSec:   5,
-		RateBurst:        10,
-		BanScore:         20,
-		GreyScore:        10,
-		HandshakeTimeout: time.Second,
-	}
-	srv := p2p.NewServer(testP2PHandler{}, key, cfg)
-	env.node.SetP2PServer(srv)
 
 	infoReq := &RPCRequest{ID: 2}
 	infoRec := httptest.NewRecorder()

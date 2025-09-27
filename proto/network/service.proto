@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package nhb.network.v1;
+
+option go_package = "nhbchain/proto/network;networkpb";
+
+message GossipMessage {
+  uint32 type = 1;
+  bytes payload = 2;
+}
+
+message Heartbeat {
+  int64 unix_millis = 1;
+}
+
+message NetworkEnvelope {
+  oneof event {
+    GossipMessage gossip = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+message GetViewRequest {}
+
+message NetworkCounts {
+  int32 total = 1;
+  int32 inbound = 2;
+  int32 outbound = 3;
+}
+
+message NetworkLimits {
+  int32 max_peers = 1;
+  int32 max_inbound = 2;
+  int32 max_outbound = 3;
+  double rate_msgs_per_sec = 4;
+  double burst = 5;
+  int32 ban_score = 6;
+  int32 grey_score = 7;
+}
+
+message NetworkSelf {
+  string node_id = 1;
+  uint32 protocol_version = 2;
+  string client_version = 3;
+}
+
+message SeedInfo {
+  string node_id = 1;
+  string address = 2;
+  string source = 3;
+  int64 not_before = 4;
+  int64 not_after = 5;
+}
+
+message NetworkView {
+  uint64 network_id = 1;
+  bytes genesis_hash = 2;
+  NetworkCounts counts = 3;
+  NetworkLimits limits = 4;
+  NetworkSelf self = 5;
+  repeated string bootnodes = 6;
+  repeated string persistent_peers = 7;
+  repeated SeedInfo seeds = 8;
+  repeated string listen_addrs = 9;
+}
+
+message GetViewResponse {
+  NetworkView view = 1;
+}
+
+message ListPeersRequest {}
+
+message PeerNetInfo {
+  string node_id = 1;
+  string address = 2;
+  string direction = 3;
+  string state = 4;
+  int32 score = 5;
+  int64 last_seen_unix = 6;
+  int32 fails = 7;
+  int64 banned_until_unix = 8;
+}
+
+message ListPeersResponse {
+  repeated PeerNetInfo peers = 1;
+}
+
+message DialPeerRequest {
+  string target = 1;
+}
+
+message DialPeerResponse {}
+
+message BanPeerRequest {
+  string node_id = 1;
+  int64 seconds = 2;
+}
+
+message BanPeerResponse {}
+
+service Network {
+  rpc Gossip(stream NetworkEnvelope) returns (stream NetworkEnvelope);
+  rpc GetView(GetViewRequest) returns (GetViewResponse);
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+  rpc DialPeer(DialPeerRequest) returns (DialPeerResponse);
+  rpc BanPeer(BanPeerRequest) returns (BanPeerResponse);
+}

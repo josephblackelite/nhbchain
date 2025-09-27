@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"nhbchain/p2p"
 )
 
@@ -37,18 +40,23 @@ func (s *Server) handleNetInfo(w http.ResponseWriter, r *http.Request, req *RPCR
 		writeError(w, http.StatusBadRequest, req.ID, codeNetInvalidParams, "invalid_params", "net_info takes no parameters")
 		return
 	}
-	srv := s.node.P2PServer()
-	if srv == nil {
+	if s.net == nil {
+		// TODO: return a dedicated error or disable this route when the
+		// network service is unavailable instead of generic messages.
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", "p2p server not running")
 		return
 	}
-	view := srv.SnapshotNetwork()
+	view, listen, err := s.net.NetworkView(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", err.Error())
+		return
+	}
 	result := netInfoResult{
-		NodeID:      srv.NodeID(),
+		NodeID:      view.Self.NodeID,
 		PeerCounts:  view.Counts,
 		ChainID:     view.NetworkID,
 		GenesisHash: view.Genesis,
-		ListenAddrs: srv.ListenAddresses(),
+		ListenAddrs: listen,
 	}
 	writeResult(w, req.ID, result)
 }
@@ -58,12 +66,18 @@ func (s *Server) handleNetPeers(w http.ResponseWriter, r *http.Request, req *RPC
 		writeError(w, http.StatusBadRequest, req.ID, codeNetInvalidParams, "invalid_params", "net_peers takes no parameters")
 		return
 	}
-	srv := s.node.P2PServer()
-	if srv == nil {
+	if s.net == nil {
+		// TODO: return a dedicated error or disable this route when the
+		// network service is unavailable instead of generic messages.
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", "p2p server not running")
 		return
 	}
-	writeResult(w, req.ID, srv.NetPeers())
+	peers, err := s.net.NetworkPeers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", err.Error())
+		return
+	}
+	writeResult(w, req.ID, peers)
 }
 
 func (s *Server) handleNetDial(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
@@ -80,22 +94,14 @@ func (s *Server) handleNetDial(w http.ResponseWriter, r *http.Request, req *RPCR
 		writeError(w, http.StatusBadRequest, req.ID, codeNetInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	srv := s.node.P2PServer()
-	if srv == nil {
+	if s.net == nil {
+		// TODO: return a dedicated error or disable this route when the
+		// network service is unavailable instead of generic messages.
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", "p2p server not running")
 		return
 	}
-	if err := srv.DialPeer(params.Target); err != nil {
-		switch {
-		case errors.Is(err, p2p.ErrInvalidAddress) || errors.Is(err, p2p.ErrDialTargetEmpty):
-			writeError(w, http.StatusBadRequest, req.ID, codeNetInvalidParams, "invalid_params", err.Error())
-		case errors.Is(err, p2p.ErrPeerUnknown):
-			writeError(w, http.StatusNotFound, req.ID, codeNetUnknownPeer, "unknown_peer", err.Error())
-		case errors.Is(err, p2p.ErrPeerBanned):
-			writeError(w, http.StatusConflict, req.ID, codeNetPeerBanned, "peer_banned", err.Error())
-		default:
-			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "server_error", err.Error())
-		}
+	if err := s.net.Dial(r.Context(), params.Target); err != nil {
+		writeNetError(w, req.ID, err)
 		return
 	}
 	writeResult(w, req.ID, map[string]bool{"ok": true})
@@ -119,20 +125,37 @@ func (s *Server) handleNetBan(w http.ResponseWriter, r *http.Request, req *RPCRe
 		writeError(w, http.StatusBadRequest, req.ID, codeNetInvalidParams, "invalid_params", "secs must be non-negative")
 		return
 	}
-	srv := s.node.P2PServer()
-	if srv == nil {
+	if s.net == nil {
+		// TODO: return a dedicated error or disable this route when the
+		// network service is unavailable instead of generic messages.
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "unavailable", "p2p server not running")
 		return
 	}
 	duration := time.Duration(params.Secs) * time.Second
-	if err := srv.BanPeer(params.NodeID, duration); err != nil {
-		switch {
-		case errors.Is(err, p2p.ErrPeerUnknown):
-			writeError(w, http.StatusNotFound, req.ID, codeNetUnknownPeer, "unknown_peer", err.Error())
-		default:
-			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "server_error", err.Error())
-		}
+	if err := s.net.Ban(r.Context(), params.NodeID, duration); err != nil {
+		writeNetError(w, req.ID, err)
 		return
 	}
 	writeResult(w, req.ID, map[string]bool{"ok": true})
+}
+
+func writeNetError(w http.ResponseWriter, id any, err error) {
+	var st *status.Status
+	if errors.As(err, &st) {
+		switch st.Code() {
+		case codes.InvalidArgument:
+			writeError(w, http.StatusBadRequest, id, codeNetInvalidParams, "invalid_params", st.Message())
+			return
+		case codes.NotFound:
+			writeError(w, http.StatusNotFound, id, codeNetUnknownPeer, "unknown_peer", st.Message())
+			return
+		case codes.FailedPrecondition:
+			writeError(w, http.StatusConflict, id, codeNetPeerBanned, "peer_banned", st.Message())
+			return
+		case codes.Unavailable:
+			writeError(w, http.StatusServiceUnavailable, id, codeServerError, "unavailable", st.Message())
+			return
+		}
+	}
+	writeError(w, http.StatusInternalServerError, id, codeServerError, "server_error", err.Error())
 }

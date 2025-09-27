@@ -56,7 +56,6 @@ type Node struct {
 	mempoolMu                    sync.Mutex
 	mempoolLimit                 int
 	bftEngine                    *bft.Engine
-	p2pSrv                       *p2p.Server
 	stateMu                      sync.Mutex
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
@@ -710,25 +709,14 @@ func (n *Node) emitSwapSanctionAlert(alert events.SwapSanctionAlert) {
 	}
 }
 
-// SetP2PServer records the running P2P server for query purposes.
-func (n *Node) SetP2PServer(server *p2p.Server) {
-	n.p2pSrv = server
-}
-
-// P2PServer exposes the underlying P2P server if available.
-func (n *Node) P2PServer() *p2p.Server {
-	return n.p2pSrv
-}
-
 func (n *Node) StartConsensus() {
 	if n.bftEngine != nil {
 		n.bftEngine.Start()
 	}
 }
 
-// HandleMessage is the central router for all incoming P2P messages.
-// It satisfies the p2p.MessageHandler interface.
-func (n *Node) HandleMessage(msg *p2p.Message) error {
+// ProcessNetworkMessage is the central router for all incoming P2P messages.
+func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 	switch msg.Type {
 	case p2p.MsgTypeTx:
 		tx := new(types.Transaction)
