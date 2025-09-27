@@ -1,0 +1,18 @@
+{
+  "symbol": "nhb:USDC",
+  "name": "USD Coin",
+  "decimals": 6,
+  "oraclePriceUSD": "1.000000",
+  "utilization": "0.7135",
+  "liquidity": "1523456.782",
+  "totalSupplied": "3678901.123",
+  "totalBorrowed": "2623456.782",
+  "supplyRate": "0.0412",
+  "borrowRate": "0.0785",
+  "reserveFactor": "0.15",
+  "ltv": "0.80",
+  "liquidationThreshold": "0.85",
+  "liquidationBonus": "0.05",
+  "closeFactor": "0.5",
+  "accrualBlock": 13245678
+}
