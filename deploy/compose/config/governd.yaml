@@ -1,0 +1,9 @@
+listen: ":50061"
+consensus: "consensusd:9090"
+chain_id: "nhb-local"
+signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+nonce_start: 1
+fee:
+  amount: "0"
+  denom: ""
+  payer: ""

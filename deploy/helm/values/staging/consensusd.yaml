@@ -1,0 +1,44 @@
+image:
+  tag: staging
+env:
+  - name: NHB_ENV
+    value: staging
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "true"
+  - name: NHB_VALIDATOR_PASS
+    valueFrom:
+      secretKeyRef:
+        name: nhb-validator
+        key: password
+persistence:
+  size: 20Gi
+config:
+  chainName: nhb-staging
+  content: |
+    ListenAddress = "0.0.0.0:6002"
+    RPCAddress = "0.0.0.0:8081"
+    DataDir = "/var/lib/nhb/consensus"
+    AllowAutogenesis = true
+    NetworkName = "nhb-staging"
+    [mempool]
+    MaxTransactions = 8000
+    [p2p]
+    NetworkId = 287001
+    MaxPeers = 48
+    MaxInbound = 32
+    MaxOutbound = 16
+    MinPeers = 12
+    OutboundPeers = 12
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 75
+    Burst = 200
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true

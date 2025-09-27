@@ -1,0 +1,25 @@
+image:
+  tag: staging
+env:
+  - name: NHB_ENV
+    value: staging
+secrets:
+  signerKey: "{{ required \"governd.signerKey must be set\" .Values.secrets.signerKey }}"
+config:
+  chainID: nhb-staging
+  consensusEndpoint: consensusd:9090
+  nonceStart: 100
+  fee:
+    amount: "1000"
+    denom: ZNHB
+    payer: treasury
+  content: |
+    listen: ":50061"
+    consensus: "{{ .Values.config.consensusEndpoint }}"
+    chain_id: "{{ .Values.config.chainID }}"
+    signer_key: "{{ .Values.secrets.signerKey }}"
+    nonce_start: {{ .Values.config.nonceStart }}
+    fee:
+      amount: "{{ .Values.config.fee.amount }}"
+      denom: "{{ .Values.config.fee.denom }}"
+      payer: "{{ .Values.config.fee.payer }}"

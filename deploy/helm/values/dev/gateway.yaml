@@ -1,0 +1,33 @@
+image:
+  tag: dev
+service:
+  type: ClusterIP
+  port: 8080
+ingress:
+  enabled: false
+config:
+  content: |
+    listen: ":8080"
+    observability:
+      serviceName: nhb-gateway
+      metrics: false
+      tracing: false
+      logRequests: true
+      metricsPrefix: gateway
+    services:
+      - name: lendingd
+        endpoint: http://lendingd:50053
+      - name: swapd
+        endpoint: http://swapd:7074
+      - name: governd
+        endpoint: http://governd:50061
+      - name: consensusd
+        endpoint: http://consensusd:9090
+    rateLimits: []
+    auth:
+      enabled: false
+      hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
+      scopeClaim: scope
+      allowAnonymous: true
+secrets:
+  gatewayHMAC: ""

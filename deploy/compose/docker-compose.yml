@@ -1,0 +1,152 @@
+version: "3.9"
+
+x-go-build: &go-build
+  context: ../..
+  dockerfile: deploy/compose/Dockerfile.go
+
+services:
+  p2pd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./cmd/p2pd
+    image: nhbchain/p2pd:local
+    command:
+      - "--config"
+      - "/etc/nhb/p2p.toml"
+      - "--grpc"
+      - ":9091"
+      - "--allow-autogenesis"
+    environment:
+      NHB_ENV: local
+      NHB_ALLOW_AUTOGENESIS: "true"
+    volumes:
+      - p2p-data:/var/lib/nhb
+      - ./config/p2p.toml:/etc/nhb/p2p.toml:ro
+    ports:
+      - "26656:26656"
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9091"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  consensusd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./cmd/consensusd
+    image: nhbchain/consensusd:local
+    depends_on:
+      p2pd:
+        condition: service_healthy
+    command:
+      - "--config"
+      - "/etc/nhb/consensus.toml"
+      - "--grpc"
+      - ":9090"
+      - "--p2p"
+      - "p2pd:9091"
+      - "--allow-autogenesis"
+    environment:
+      NHB_ENV: local
+      NHB_ALLOW_AUTOGENESIS: "true"
+      NHB_VALIDATOR_PASS: ""
+    volumes:
+      - consensus-data:/var/lib/nhb
+      - ./config/consensus.toml:/etc/nhb/consensus.toml:ro
+    ports:
+      - "8081:8081"
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  lendingd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/lendingd
+    image: nhbchain/lendingd:local
+    command:
+      - "--config"
+      - "/etc/nhb/lendingd.yaml"
+    environment:
+      NHB_ENV: local
+    volumes:
+      - ./config/lendingd.yaml:/etc/nhb/lendingd.yaml:ro
+    restart: unless-stopped
+
+  swapd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/swapd
+    image: nhbchain/swapd:local
+    command:
+      - "--config"
+      - "/etc/nhb/swapd.yaml"
+    environment:
+      NHB_ENV: local
+    volumes:
+      - swapd-data:/var/lib/nhb
+      - ./config/swapd.yaml:/etc/nhb/swapd.yaml:ro
+    ports:
+      - "7074:7074"
+    restart: unless-stopped
+
+  governd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/governd
+    image: nhbchain/governd:local
+    depends_on:
+      consensusd:
+        condition: service_started
+    command:
+      - "--config"
+      - "/etc/nhb/governd.yaml"
+    environment:
+      NHB_ENV: local
+    volumes:
+      - ./config/governd.yaml:/etc/nhb/governd.yaml:ro
+    ports:
+      - "50061:50061"
+    restart: unless-stopped
+
+  gateway:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./cmd/gateway
+    image: nhbchain/gateway:local
+    depends_on:
+      lendingd:
+        condition: service_started
+      swapd:
+        condition: service_started
+      governd:
+        condition: service_started
+      consensusd:
+        condition: service_started
+    command:
+      - "--config"
+      - "/etc/nhb/gateway.yaml"
+    environment:
+      NHB_ENV: local
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/gateway.yaml:/etc/nhb/gateway.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  p2p-data:
+  consensus-data:
+  swapd-data:

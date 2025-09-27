@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "governd.fullname" . }}
+  labels:
+    {{- include "governd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "governd.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "governd.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: governd
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "{{ .Values.config.path }}"
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: grpc
+          env:
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              {{- if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- else }}
+              value: {{ default "" .value | quote }}
+              {{- end }}
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.config.enabled }}
+            - name: config
+              mountPath: {{ .Values.config.path }}
+              subPath: governd.yaml
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.config.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "governd.fullname" . }}
+            items:
+              - key: governd.yaml
+                path: governd.yaml
+        {{- end }}

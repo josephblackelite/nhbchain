@@ -1,0 +1,40 @@
+image:
+  tag: dev
+env:
+  - name: NHB_ENV
+    value: dev
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "true"
+  - name: NHB_VALIDATOR_PASS
+    value: ""
+persistence:
+  enabled: false
+config:
+  content: |
+    ListenAddress = "0.0.0.0:6002"
+    RPCAddress = "0.0.0.0:8081"
+    DataDir = "/var/lib/nhb/consensus"
+    AllowAutogenesis = true
+    NetworkName = "nhb-dev"
+    [mempool]
+    MaxTransactions = 5000
+    [p2p]
+    NetworkId = 187001
+    MaxPeers = 8
+    MaxInbound = 4
+    MaxOutbound = 4
+    MinPeers = 2
+    OutboundPeers = 2
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 50
+    Burst = 200
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true

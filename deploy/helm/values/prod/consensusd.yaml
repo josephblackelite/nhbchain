@@ -1,0 +1,52 @@
+image:
+  tag: prod
+env:
+  - name: NHB_ENV
+    value: prod
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "false"
+  - name: NHB_VALIDATOR_PASS
+    valueFrom:
+      secretKeyRef:
+        name: nhb-validator
+        key: password
+persistence:
+  size: 100Gi
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 4Gi
+setAllowAutogenesisFlag: false
+config:
+  content: |
+    ListenAddress = "0.0.0.0:6002"
+    RPCAddress = "0.0.0.0:8081"
+    DataDir = "/var/lib/nhb/consensus"
+    GenesisFile = "/var/lib/nhb/genesis.json"
+    AllowAutogenesis = false
+    NetworkName = "nhb-mainnet"
+    [mempool]
+    MaxTransactions = 20000
+    [p2p]
+    NetworkId = 387001
+    MaxPeers = 96
+    MaxInbound = 64
+    MaxOutbound = 32
+    MinPeers = 48
+    OutboundPeers = 24
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 100
+    Burst = 400
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true
