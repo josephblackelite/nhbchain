@@ -64,11 +64,20 @@ func (c *Client) QueryClient() consensusv1.QueryServiceClient {
 
 // SubmitTransaction pushes a transaction into the validator mempool.
 func (c *Client) SubmitTransaction(ctx context.Context, tx *consensusv1.Transaction) error {
-	if c == nil {
-		return grpc.ErrClientConnClosing
-	}
-	_, err := c.raw.SubmitTransaction(ctx, &consensusv1.SubmitTransactionRequest{Transaction: tx})
-	return err
+        if c == nil {
+                return grpc.ErrClientConnClosing
+        }
+        _, err := c.raw.SubmitTransaction(ctx, &consensusv1.SubmitTransactionRequest{Transaction: tx})
+        return err
+}
+
+// SubmitEnvelope pushes a signed transaction envelope into the validator mempool.
+func (c *Client) SubmitEnvelope(ctx context.Context, tx *consensusv1.SignedTxEnvelope) error {
+        if c == nil {
+                return grpc.ErrClientConnClosing
+        }
+        _, err := c.raw.SubmitTxEnvelope(ctx, &consensusv1.SubmitTxEnvelopeRequest{Tx: tx})
+        return err
 }
 
 // GetHeight fetches the chain height tracked by the validator.
