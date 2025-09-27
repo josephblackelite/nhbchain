@@ -26,6 +26,11 @@ type accountMetadata struct {
 	BalanceZNHB        *big.Int
 	Stake              *big.Int
 	LockedZNHB         *big.Int
+	CollateralBalance  *big.Int
+	DebtPrincipal      *big.Int
+	SupplyShares       *big.Int
+	LendingSupplyIndex *big.Int
+	LendingBorrowIndex *big.Int
 	DelegatedValidator []byte
 	Unbonding          []stakeUnbond
 	UnbondingSeq       uint64
@@ -41,6 +46,10 @@ type accountMetadata struct {
 	EngagementEscrowEvents  uint64
 	EngagementGovEvents     uint64
 	EngagementLastHeartbeat uint64
+
+	// Lending breakers
+	LendingCollateralDisabled bool
+	LendingBorrowDisabled     bool
 }
 
 type validatorEntry struct {
@@ -83,6 +92,21 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 	if account.LockedZNHB == nil {
 		account.LockedZNHB = big.NewInt(0)
+	}
+	if account.CollateralBalance == nil {
+		account.CollateralBalance = big.NewInt(0)
+	}
+	if account.DebtPrincipal == nil {
+		account.DebtPrincipal = big.NewInt(0)
+	}
+	if account.SupplyShares == nil {
+		account.SupplyShares = big.NewInt(0)
+	}
+	if account.LendingSnapshot.SupplyIndex == nil {
+		account.LendingSnapshot.SupplyIndex = big.NewInt(0)
+	}
+	if account.LendingSnapshot.BorrowIndex == nil {
+		account.LendingSnapshot.BorrowIndex = big.NewInt(0)
 	}
 	if account.PendingUnbonds == nil {
 		account.PendingUnbonds = make([]types.StakeUnbond, 0)
@@ -142,6 +166,21 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		if meta.LockedZNHB != nil {
 			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
 		}
+		if meta.CollateralBalance != nil {
+			account.CollateralBalance = new(big.Int).Set(meta.CollateralBalance)
+		}
+		if meta.DebtPrincipal != nil {
+			account.DebtPrincipal = new(big.Int).Set(meta.DebtPrincipal)
+		}
+		if meta.SupplyShares != nil {
+			account.SupplyShares = new(big.Int).Set(meta.SupplyShares)
+		}
+		if meta.LendingSupplyIndex != nil {
+			account.LendingSnapshot.SupplyIndex = new(big.Int).Set(meta.LendingSupplyIndex)
+		}
+		if meta.LendingBorrowIndex != nil {
+			account.LendingSnapshot.BorrowIndex = new(big.Int).Set(meta.LendingBorrowIndex)
+		}
 		if len(meta.DelegatedValidator) > 0 {
 			account.DelegatedValidator = append([]byte(nil), meta.DelegatedValidator...)
 		}
@@ -175,6 +214,10 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
 		account.EngagementGovEvents = meta.EngagementGovEvents
 		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
+		account.LendingBreaker = types.LendingBreakerFlags{
+			CollateralDisabled: meta.LendingCollateralDisabled,
+			BorrowDisabled:     meta.LendingBorrowDisabled,
+		}
 	}
 	ensureAccountDefaults(account)
 	return account, nil
@@ -237,6 +280,11 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
 		Stake:              new(big.Int).Set(account.Stake),
 		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
+		CollateralBalance:  new(big.Int).Set(account.CollateralBalance),
+		DebtPrincipal:      new(big.Int).Set(account.DebtPrincipal),
+		SupplyShares:       new(big.Int).Set(account.SupplyShares),
+		LendingSupplyIndex: new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
+		LendingBorrowIndex: new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
@@ -252,6 +300,10 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		EngagementEscrowEvents:  account.EngagementEscrowEvents,
 		EngagementGovEvents:     account.EngagementGovEvents,
 		EngagementLastHeartbeat: account.EngagementLastHeartbeat,
+
+		// Lending breakers
+		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
+		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
 	}
 	if err := m.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -297,6 +349,11 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
 		Stake:              new(big.Int).Set(account.Stake),
 		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
+		CollateralBalance:  new(big.Int).Set(account.CollateralBalance),
+		DebtPrincipal:      new(big.Int).Set(account.DebtPrincipal),
+		SupplyShares:       new(big.Int).Set(account.SupplyShares),
+		LendingSupplyIndex: new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
+		LendingBorrowIndex: new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
@@ -312,6 +369,10 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		EngagementEscrowEvents:  account.EngagementEscrowEvents,
 		EngagementGovEvents:     account.EngagementGovEvents,
 		EngagementLastHeartbeat: account.EngagementLastHeartbeat,
+
+		// Lending breakers
+		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
+		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
 	}
 	return m.writeAccountMetadata(addr, meta)
 }
@@ -386,6 +447,21 @@ func (m *Manager) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
 	if meta.LockedZNHB == nil {
 		meta.LockedZNHB = big.NewInt(0)
 	}
+	if meta.CollateralBalance == nil {
+		meta.CollateralBalance = big.NewInt(0)
+	}
+	if meta.DebtPrincipal == nil {
+		meta.DebtPrincipal = big.NewInt(0)
+	}
+	if meta.SupplyShares == nil {
+		meta.SupplyShares = big.NewInt(0)
+	}
+	if meta.LendingSupplyIndex == nil {
+		meta.LendingSupplyIndex = big.NewInt(0)
+	}
+	if meta.LendingBorrowIndex == nil {
+		meta.LendingBorrowIndex = big.NewInt(0)
+	}
 	if meta.Unbonding == nil {
 		meta.Unbonding = make([]stakeUnbond, 0)
 	}
@@ -401,6 +477,21 @@ func (m *Manager) writeAccountMetadata(addr []byte, meta *accountMetadata) error
 	}
 	if meta.LockedZNHB == nil {
 		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.CollateralBalance == nil {
+		meta.CollateralBalance = big.NewInt(0)
+	}
+	if meta.DebtPrincipal == nil {
+		meta.DebtPrincipal = big.NewInt(0)
+	}
+	if meta.SupplyShares == nil {
+		meta.SupplyShares = big.NewInt(0)
+	}
+	if meta.LendingSupplyIndex == nil {
+		meta.LendingSupplyIndex = big.NewInt(0)
+	}
+	if meta.LendingBorrowIndex == nil {
+		meta.LendingBorrowIndex = big.NewInt(0)
 	}
 	if meta.Unbonding == nil {
 		meta.Unbonding = make([]stakeUnbond, 0)

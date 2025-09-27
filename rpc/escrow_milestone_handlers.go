@@ -408,8 +408,8 @@ func formatMilestoneJSON(project *escrow.MilestoneProject) milestoneProjectJSON 
 	}
 	return milestoneProjectJSON{
 		ID:           formatEscrowID(project.ID),
-		Payer:        formatAddress(project.Payer),
-		Payee:        formatAddress(project.Payee),
+		Payer:        formatEscrowAddress(project.Payer),
+		Payee:        formatEscrowAddress(project.Payee),
 		Realm:        project.RealmID,
 		Status:       formatMilestoneStatus(project.Status),
 		CreatedAt:    project.CreatedAt,
@@ -488,7 +488,7 @@ func writeMilestoneError(w http.ResponseWriter, id interface{}, err error) {
 	writeError(w, status, id, code, message, data)
 }
 
-func formatAddress(addr [20]byte) string {
+func formatEscrowAddress(addr [20]byte) string {
 	if addr == ([20]byte{}) {
 		return ""
 	}
