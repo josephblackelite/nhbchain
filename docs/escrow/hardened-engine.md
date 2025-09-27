@@ -73,7 +73,7 @@ threshold at creation time—and verifying that the native transaction sender is
 authorised. The policy is persisted alongside the escrow record when the
 `Create` operation runs so later `TxTypeArbitrate*` submissions can enforce the
 same governance-managed committee the RPC flows rely on. See
-[`docs/rpc_escrow_module.md`](../rpc_escrow_module.md) and
+[`docs/services/escrow.md`](../services/escrow.md) and
 [`docs/escrow/escrow.md`](./escrow.md) for additional context on how arbitrator
 policies are registered and frozen during escrow creation.
 

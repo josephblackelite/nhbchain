@@ -9,7 +9,7 @@ const documentationLinks = [
   },
   {
     label: 'RPC Reference',
-    href: '/docs/rpc',
+    href: '/docs/services',
     helper: 'Complete API surface for interacting with NHBChain from custom dApps.'
   },
   {

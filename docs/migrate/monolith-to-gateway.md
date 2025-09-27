@@ -1,6 +1,6 @@
-# Migrating from the Monolithic JSON-RPC Server
+# Migrating from the Legacy JSON-RPC Node
 
-The API gateway keeps the public JSON-RPC surface available under `/rpc` while
+The gateway keeps the public JSON-RPC surface available under `/rpc` while
 backfilling requests to dedicated services. New integrations should migrate to
 the service-specific REST and gRPC surfaces exposed behind the gateway.
 
@@ -38,8 +38,8 @@ the service-specific REST and gRPC surfaces exposed behind the gateway.
 | `consensus_validators` | `/v1/consensus/validators` | `GET` | `consensusd` |
 | `consensus_block` | `/v1/consensus/block` | `POST` | `consensusd` |
 
-Legacy JSON-RPC clients can continue posting to `/rpc`. The gateway converts
-the request into the corresponding REST call shown above, forwards it to the
+Legacy JSON-RPC clients can continue posting to `/rpc`. The gateway converts the
+request into the corresponding REST call shown above, forwards it to the
 appropriate service, and wraps the response back into a JSON-RPC envelope.
 
 ## Authentication and Rate Limits

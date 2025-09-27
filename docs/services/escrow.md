@@ -1,6 +1,6 @@
-# Escrow RPC Module
+# Escrow Service API
 
-The `escrow` module surfaces read-only helpers for governance tooling and arbitration dashboards. It complements the transactional `escrow_*` endpoints by exposing realm metadata, deterministic escrow snapshots (including frozen arbitrator policies), and the raw event feed used by downstream indexers.
+The Escrow service exposes read-only helpers for governance tooling and arbitration dashboards. It complements transactional `escrow_*` endpoints by exposing realm metadata, deterministic escrow snapshots (including frozen arbitrator policies), and the raw event feed consumed by downstream indexers.
 
 ## Methods
 
