@@ -155,13 +155,25 @@ func (m *LendingModule) BorrowNHB(addr [20]byte, amount *big.Int) (string, *Modu
 	return m.makeTxHash("borrow", formatHexAddress(addr), amount, fee), nil
 }
 
-func (m *LendingModule) BorrowNHBWithFee(borrower [20]byte, amount *big.Int, recipient [20]byte, feeBps uint64) (string, *ModuleError) {
+func (m *LendingModule) BorrowNHBWithFee(borrower [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
 	}
+	feeBps, feeCollector := m.node.LendingDeveloperFeeConfig()
+	if feeBps == 0 {
+		return "", &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "developer fee disabled"}
+	}
+	if len(feeCollector.Bytes()) == 0 {
+		return "", &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "developer fee collector not configured"}
+	}
+	if !m.node.IsTreasuryAllowListed(feeCollector) {
+		return "", &ModuleError{HTTPStatus: http.StatusForbidden, Code: codeInvalidParams, Message: "developer fee collector not authorised"}
+	}
+	var feeCollectorRaw [20]byte
+	copy(feeCollectorRaw[:], feeCollector.Bytes())
 	var fee *big.Int
 	err := m.withEngine(func(engine *lending.Engine) error {
-		paidFee, err := engine.Borrow(toCryptoAddress(borrower), amount, toCryptoAddress(recipient), feeBps)
+		paidFee, err := engine.Borrow(toCryptoAddress(borrower), amount, feeCollector, feeBps)
 		if err != nil {
 			return err
 		}
@@ -171,7 +183,7 @@ func (m *LendingModule) BorrowNHBWithFee(borrower [20]byte, amount *big.Int, rec
 	if err != nil {
 		return "", m.wrapError(err)
 	}
-	primary := fmt.Sprintf("%s:%s", formatHexAddress(borrower), formatHexAddress(recipient))
+	primary := fmt.Sprintf("%s:%s", formatHexAddress(borrower), formatHexAddress(feeCollectorRaw))
 	return m.makeTxHash("borrow-with-fee", primary, amount, fee, big.NewInt(int64(feeBps))), nil
 }
 

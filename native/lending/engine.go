@@ -17,6 +17,8 @@ var (
 	errHealthCheckFailed     = errors.New("lending engine: borrower health factor below 1")
 	errNoDebtToRepay         = errors.New("lending engine: no outstanding debt to repay")
 	errNotLiquidatable       = errors.New("lending engine: borrower not eligible for liquidation")
+	errDeveloperFeeRecipient = errors.New("lending engine: developer fee recipient not configured")
+	errDeveloperFeeCap       = errors.New("lending engine: developer fee exceeds cap")
 )
 
 var (
@@ -303,8 +305,27 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		return nil, err
 	}
 
+	if feeBps > 0 {
+		if len(feeRecipient.Bytes()) == 0 {
+			return nil, errDeveloperFeeRecipient
+		}
+		cap := e.params.DeveloperFeeCapBps
+		if cap == 0 || feeBps > cap {
+			return nil, errDeveloperFeeCap
+		}
+	}
+
+	feeAmount := new(big.Int)
+	if feeBps > 0 {
+		bps := new(big.Int).SetUint64(feeBps)
+		feeAmount.Mul(amount, bps)
+		feeAmount = feeAmount.Quo(feeAmount, basisPoints)
+	}
+
+	totalOut := new(big.Int).Add(amount, feeAmount)
+
 	liquidity := e.availableLiquidity(market)
-	if liquidity.Cmp(amount) < 0 {
+	if liquidity.Cmp(totalOut) < 0 {
 		return nil, errInsufficientLiquidity
 	}
 
@@ -313,11 +334,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		return nil, err
 	}
 
-	feeAmount := new(big.Int).Mul(amount, big.NewInt(int64(feeBps)))
-	feeAmount = feeAmount.Quo(feeAmount, basisPoints)
-
 	// Health factor check using the projected debt after borrowing.
-	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, amount)
+	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, totalOut)
 	if !e.positionHealthy(borrowerUser.CollateralZNHB, projectedDebt) {
 		return nil, errHealthCheckFailed
 	}
@@ -326,7 +344,6 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if err != nil {
 		return nil, err
 	}
-	totalOut := new(big.Int).Add(amount, feeAmount)
 	if moduleAcc.BalanceNHB.Cmp(totalOut) < 0 {
 		return nil, errInsufficientLiquidity
 	}
@@ -335,14 +352,19 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if err != nil {
 		return nil, err
 	}
-	feeAcc, err := e.loadAccount(feeRecipient)
-	if err != nil {
-		return nil, err
+	var feeAcc *types.Account
+	if feeAmount.Sign() > 0 {
+		feeAcc, err = e.loadAccount(feeRecipient)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, totalOut)
 	borrowerAcc.BalanceNHB = new(big.Int).Add(borrowerAcc.BalanceNHB, amount)
-	feeAcc.BalanceNHB = new(big.Int).Add(feeAcc.BalanceNHB, feeAmount)
+	if feeAcc != nil {
+		feeAcc.BalanceNHB = new(big.Int).Add(feeAcc.BalanceNHB, feeAmount)
+	}
 
 	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
 		return nil, err
@@ -350,14 +372,16 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
 		return nil, err
 	}
-	if err := e.persistAccount(feeRecipient, feeAcc); err != nil {
-		return nil, err
+	if feeAcc != nil {
+		if err := e.persistAccount(feeRecipient, feeAcc); err != nil {
+			return nil, err
+		}
 	}
 
 	borrowerUser.DebtNHB = projectedDebt
 	borrowerUser.ScaledDebt = new(big.Int).Set(projectedDebt)
 
-	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, amount)
+	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
 
 	if err := e.state.PutUserAccount(borrowerUser); err != nil {
 		return nil, err

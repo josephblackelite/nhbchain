@@ -47,38 +47,40 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db                    storage.Database
-	state                 *StateProcessor
-	chain                 *Blockchain
-	syncMgr               *syncmgr.Manager
-	validatorKey          *crypto.PrivateKey
-	mempool               []*types.Transaction
-	bftEngine             *bft.Engine
-	p2pSrv                *p2p.Server
-	stateMu               sync.Mutex
-	escrowTreasury        [20]byte
-	engagementMgr         *engagement.Manager
-	govPolicy             governance.ProposalPolicy
-	govPolicyMu           sync.RWMutex
-	swapCfgMu             sync.RWMutex
-	swapCfg               swap.Config
-	swapOracle            swap.PriceOracle
-	swapManual            *swap.ManualOracle
-	swapSanctions         swap.SanctionsChecker
-	swapStatusMu          sync.RWMutex
-	swapOracleLast        int64
-	swapRefundSink        [20]byte
-	evidenceStore         *evidence.Store
-	evidenceMaxAge        uint64
-	paymasterMu           sync.RWMutex
-	paymasterEnabled      bool
-	timestampTolerance    time.Duration
-	timeConfigMu          sync.RWMutex
-	timeSource            func() time.Time
-	lendingMu             sync.RWMutex
-	lendingParams         lending.RiskParameters
-	lendingModuleAddr     crypto.Address
-	lendingCollateralAddr crypto.Address
+	db                           storage.Database
+	state                        *StateProcessor
+	chain                        *Blockchain
+	syncMgr                      *syncmgr.Manager
+	validatorKey                 *crypto.PrivateKey
+	mempool                      []*types.Transaction
+	bftEngine                    *bft.Engine
+	p2pSrv                       *p2p.Server
+	stateMu                      sync.Mutex
+	escrowTreasury               [20]byte
+	engagementMgr                *engagement.Manager
+	govPolicy                    governance.ProposalPolicy
+	govPolicyMu                  sync.RWMutex
+	swapCfgMu                    sync.RWMutex
+	swapCfg                      swap.Config
+	swapOracle                   swap.PriceOracle
+	swapManual                   *swap.ManualOracle
+	swapSanctions                swap.SanctionsChecker
+	swapStatusMu                 sync.RWMutex
+	swapOracleLast               int64
+	swapRefundSink               [20]byte
+	evidenceStore                *evidence.Store
+	evidenceMaxAge               uint64
+	paymasterMu                  sync.RWMutex
+	paymasterEnabled             bool
+	timestampTolerance           time.Duration
+	timeConfigMu                 sync.RWMutex
+	timeSource                   func() time.Time
+	lendingMu                    sync.RWMutex
+	lendingParams                lending.RiskParameters
+	lendingModuleAddr            crypto.Address
+	lendingCollateralAddr        crypto.Address
+	lendingDeveloperFeeBps       uint64
+	lendingDeveloperFeeCollector crypto.Address
 }
 
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
@@ -479,6 +481,7 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 		LiquidationThreshold: params.LiquidationThreshold,
 		LiquidationBonus:     params.LiquidationBonus,
 		CircuitBreakerActive: params.CircuitBreakerActive,
+		DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
 	}
 	if params.OracleAddress.Bytes() != nil {
 		copyParams.OracleAddress = cloneAddress(params.OracleAddress)
@@ -497,6 +500,56 @@ func (n *Node) LendingRiskParameters() lending.RiskParameters {
 		params.OracleAddress = cloneAddress(params.OracleAddress)
 	}
 	return params
+}
+
+// SetLendingDeveloperFee configures the developer fee parameters enforced by
+// the lending module. The collector address is cloned to prevent external
+// mutation of shared state.
+func (n *Node) SetLendingDeveloperFee(bps uint64, collector crypto.Address) {
+	if n == nil {
+		return
+	}
+	cloned := cloneAddress(collector)
+	n.lendingMu.Lock()
+	n.lendingDeveloperFeeBps = bps
+	n.lendingDeveloperFeeCollector = cloned
+	n.lendingMu.Unlock()
+}
+
+// LendingDeveloperFeeConfig returns the currently configured developer fee
+// basis points and collector address.
+func (n *Node) LendingDeveloperFeeConfig() (uint64, crypto.Address) {
+	n.lendingMu.RLock()
+	bps := n.lendingDeveloperFeeBps
+	collector := cloneAddress(n.lendingDeveloperFeeCollector)
+	n.lendingMu.RUnlock()
+	return bps, collector
+}
+
+// IsTreasuryAllowListed reports whether the supplied address is present in the
+// governance-controlled treasury allow list. An empty allow list permits all
+// addresses so operators can opt-out of restrictions.
+func (n *Node) IsTreasuryAllowListed(addr crypto.Address) bool {
+	if n == nil {
+		return false
+	}
+	bytes := addr.Bytes()
+	if len(bytes) == 0 {
+		return false
+	}
+	n.govPolicyMu.RLock()
+	defer n.govPolicyMu.RUnlock()
+	if len(n.govPolicy.TreasuryAllowList) == 0 {
+		return true
+	}
+	var raw [20]byte
+	copy(raw[:], bytes)
+	for _, allowed := range n.govPolicy.TreasuryAllowList {
+		if allowed == raw {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *Node) recordSwapOracleHealth(ts time.Time) {
