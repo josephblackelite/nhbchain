@@ -38,6 +38,12 @@ MaxMsgsPerSecond = 12.5
 ClientVersion = "nhbchain/test"
 RPCTrustedProxies = ["10.0.0.1"]
 RPCTrustProxyHeaders = true
+RPCReadHeaderTimeout = 6
+RPCReadTimeout = 20
+RPCWriteTimeout = 18
+RPCIdleTimeout = 45
+RPCTLSCertFile = "/path/to/cert.pem"
+RPCTLSKeyFile = "/path/to/key.pem"
 
 [p2p]
 NetworkId = 187001
@@ -93,6 +99,18 @@ PEX = false
 	}
 	if !cfg.RPCTrustProxyHeaders {
 		t.Fatalf("expected RPCTrustProxyHeaders to be true")
+	}
+	if cfg.RPCReadHeaderTimeout != 6 {
+		t.Fatalf("unexpected RPC read header timeout: %d", cfg.RPCReadHeaderTimeout)
+	}
+	if cfg.RPCReadTimeout != 20 || cfg.RPCWriteTimeout != 18 {
+		t.Fatalf("unexpected RPC read/write timeouts: %d/%d", cfg.RPCReadTimeout, cfg.RPCWriteTimeout)
+	}
+	if cfg.RPCIdleTimeout != 45 {
+		t.Fatalf("unexpected RPC idle timeout: %d", cfg.RPCIdleTimeout)
+	}
+	if cfg.RPCTLSCertFile != "/path/to/cert.pem" || cfg.RPCTLSKeyFile != "/path/to/key.pem" {
+		t.Fatalf("unexpected RPC TLS paths: %s %s", cfg.RPCTLSCertFile, cfg.RPCTLSKeyFile)
 	}
 	if len(cfg.Bootnodes) != 1 || cfg.Bootnodes[0] != "1.1.1.1:6001" {
 		t.Fatalf("bootnodes not parsed: %v", cfg.Bootnodes)

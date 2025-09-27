@@ -24,6 +24,12 @@ type Config struct {
 	RPCAddress            string         `toml:"RPCAddress"`
 	RPCTrustedProxies     []string       `toml:"RPCTrustedProxies"`
 	RPCTrustProxyHeaders  bool           `toml:"RPCTrustProxyHeaders"`
+	RPCReadHeaderTimeout  int            `toml:"RPCReadHeaderTimeout"`
+	RPCReadTimeout        int            `toml:"RPCReadTimeout"`
+	RPCWriteTimeout       int            `toml:"RPCWriteTimeout"`
+	RPCIdleTimeout        int            `toml:"RPCIdleTimeout"`
+	RPCTLSCertFile        string         `toml:"RPCTLSCertFile"`
+	RPCTLSKeyFile         string         `toml:"RPCTLSKeyFile"`
 	DataDir               string         `toml:"DataDir"`
 	GenesisFile           string         `toml:"GenesisFile"`
 	AllowAutogenesis      bool           `toml:"AllowAutogenesis"`
@@ -686,25 +692,29 @@ func createDefault(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddress:    ":6001",
-		RPCAddress:       ":8080",
-		DataDir:          "./nhb-data",
-		GenesisFile:      "",
-		AllowAutogenesis: false,
-		NetworkName:      "nhb-local",
-		Bootnodes:        []string{},
-		PersistentPeers:  []string{},
-		MaxPeers:         64,
-		MaxInbound:       64,
-		MaxOutbound:      64,
-		MinPeers:         32,
-		OutboundPeers:    16,
-		PeerBanSeconds:   int((60 * time.Minute).Seconds()),
-		ReadTimeout:      int((90 * time.Second).Seconds()),
-		WriteTimeout:     int((5 * time.Second).Seconds()),
-		MaxMsgBytes:      1 << 20,
-		MaxMsgsPerSecond: 32,
-		ClientVersion:    "nhbchain/node",
+		ListenAddress:        ":6001",
+		RPCAddress:           ":8080",
+		DataDir:              "./nhb-data",
+		GenesisFile:          "",
+		AllowAutogenesis:     false,
+		NetworkName:          "nhb-local",
+		Bootnodes:            []string{},
+		PersistentPeers:      []string{},
+		MaxPeers:             64,
+		MaxInbound:           64,
+		MaxOutbound:          64,
+		MinPeers:             32,
+		OutboundPeers:        16,
+		PeerBanSeconds:       int((60 * time.Minute).Seconds()),
+		ReadTimeout:          int((90 * time.Second).Seconds()),
+		WriteTimeout:         int((5 * time.Second).Seconds()),
+		RPCReadHeaderTimeout: int((10 * time.Second).Seconds()),
+		RPCReadTimeout:       int((15 * time.Second).Seconds()),
+		RPCWriteTimeout:      int((15 * time.Second).Seconds()),
+		RPCIdleTimeout:       int((120 * time.Second).Seconds()),
+		MaxMsgBytes:          1 << 20,
+		MaxMsgsPerSecond:     32,
+		ClientVersion:        "nhbchain/node",
 	}
 	cfg.P2P = P2PSection{
 		NetworkID:          187001,
