@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"nhbchain/config"
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/codec"
 	"nhbchain/consensus/potso/evidence"
@@ -32,6 +33,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
+	govcfg "nhbchain/native/gov"
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
@@ -353,6 +355,34 @@ func (n *Node) newGovernanceEngine(manager *nhbstate.Manager) *governance.Engine
 	engine.SetState(manager)
 	engine.SetEmitter(governanceEventEmitter{state: n.state})
 	engine.SetPolicy(n.governancePolicy())
+	engine.SetPolicyValidator(func(cur governance.PolicyBaseline, delta governance.PolicyDelta) error {
+		baseline := config.Global{
+			Governance: config.Governance{
+				QuorumBPS:        cur.QuorumBps,
+				PassThresholdBPS: cur.PassThresholdBps,
+				VotingPeriodSecs: cur.VotingPeriodSecs,
+			},
+			Slashing: config.Slashing{
+				MinWindowSecs: 60,
+				MaxWindowSecs: 60,
+			},
+			Mempool: config.Mempool{MaxBytes: 1},
+			Blocks:  config.Blocks{MaxTxs: 1},
+		}
+		var proposal govcfg.PolicyDelta
+		if delta.QuorumBps != nil || delta.PassThresholdBps != nil {
+			proposal.Governance = &govcfg.GovernanceDelta{}
+			if delta.QuorumBps != nil {
+				quorum := *delta.QuorumBps
+				proposal.Governance.QuorumBPS = &quorum
+			}
+			if delta.PassThresholdBps != nil {
+				threshold := *delta.PassThresholdBps
+				proposal.Governance.PassThresholdBPS = &threshold
+			}
+		}
+		return govcfg.PreflightPolicyApply(baseline, proposal)
+	})
 	return engine
 }
 

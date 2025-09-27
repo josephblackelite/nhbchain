@@ -2,6 +2,7 @@ package governance
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -326,6 +327,55 @@ func TestSubmitProposalRejectsUnknownParam(t *testing.T) {
 	_, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, `{"escrow.maxOpenDisputes":5}`, big.NewInt(200))
 	if err == nil || !strings.Contains(err.Error(), "allow-list") {
 		t.Fatalf("expected allow-list rejection, got %v", err)
+	}
+}
+
+func TestSubmitProposalRejectsInvalidPolicyDelta(t *testing.T) {
+	var proposer [20]byte
+	proposer[18] = 7
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(100),
+		VotingPeriodSeconds: 3600,
+		TimelockSeconds:     600,
+		AllowedParams:       []string{"gov.tally.QuorumBps", "gov.tally.ThresholdBps"},
+		QuorumBps:           6000,
+		PassThresholdBps:    5000,
+	})
+	errPolicyInvalid := errors.New("policy invariants violated")
+	engine.SetPolicyValidator(func(cur PolicyBaseline, delta PolicyDelta) error {
+		if delta.QuorumBps != nil && *delta.QuorumBps < cur.PassThresholdBps {
+			return errPolicyInvalid
+		}
+		if delta.PassThresholdBps != nil && *delta.PassThresholdBps > cur.QuorumBps {
+			return errPolicyInvalid
+		}
+		return nil
+	})
+	emitter := &captureEmitter{}
+	engine.SetEmitter(emitter)
+
+	_, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, `{"gov.tally.QuorumBps":4000}`, big.NewInt(200))
+	if err == nil {
+		t.Fatalf("expected policy invariant rejection")
+	}
+	if !errors.Is(err, errPolicyInvalid) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(emitter.events) == 0 {
+		t.Fatalf("expected policy invalid event emission")
+	}
+	evt, ok := emitter.events[0].(governanceEvent)
+	if !ok {
+		t.Fatalf("unexpected event type: %T", emitter.events[0])
+	}
+	if event := evt.Event(); event == nil || event.Type != EventTypePolicyInvalid {
+		t.Fatalf("expected %s event, got %+v", EventTypePolicyInvalid, event)
 	}
 }
 

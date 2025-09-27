@@ -1,13 +1,15 @@
 package rpc
 
 import (
-	"encoding/json"
-	"fmt"
-	"math/big"
-	"net/http"
-	"strings"
+        "encoding/json"
+        "errors"
+        "fmt"
+        "math/big"
+        "net/http"
+        "strings"
 
-	"nhbchain/native/governance"
+        govcfg "nhbchain/native/gov"
+        "nhbchain/native/governance"
 )
 
 type govProposeParams struct {
@@ -108,11 +110,15 @@ func (s *Server) handleGovernancePropose(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
-	proposalID, err := s.node.GovernancePropose(proposer, kind, payload, deposit)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
+        proposalID, err := s.node.GovernancePropose(proposer, kind, payload, deposit)
+        if err != nil {
+                code := codeInvalidParams
+                if errors.Is(err, govcfg.ErrInvalidPolicyInvariants) {
+                        code = codeInvalidPolicyInvariants
+                }
+                writeError(w, http.StatusBadRequest, req.ID, code, err.Error(), nil)
+                return
+        }
 	writeResult(w, req.ID, govProposeResponse{ProposalID: proposalID})
 }
 

@@ -32,15 +32,18 @@ const (
 	EventTypeProposalQueued = "gov.queued"
 	// EventTypeProposalExecuted marks proposals whose payload has been applied to state.
 	EventTypeProposalExecuted = "gov.executed"
+	// EventTypePolicyInvalid marks proposals rejected during policy preflight.
+	EventTypePolicyInvalid = "gov.policy.invalid"
 )
 
 const (
-	maxBasisPoints                  = 10_000
-	maxEmissionWei                  = "9223372036854775807" // conservative cap
-	maxGovernanceUint               = uint64(1<<53 - 1)
-	minSlashingWindowSeconds uint64 = 60
-	maxSlashingWindowSeconds uint64 = 30 * 24 * 60 * 60
-	maxEvidenceTTLSeconds    uint64 = 90 * 24 * 60 * 60
+	maxBasisPoints                   = 10_000
+	maxEmissionWei                   = "9223372036854775807" // conservative cap
+	maxGovernanceUint                = uint64(1<<53 - 1)
+	minSlashingWindowSeconds  uint64 = 60
+	maxSlashingWindowSeconds  uint64 = 30 * 24 * 60 * 60
+	maxEvidenceTTLSeconds     uint64 = 90 * 24 * 60 * 60
+	minGovernanceVotingPeriod uint64 = 3600
 )
 
 const (
@@ -106,6 +109,7 @@ type Engine struct {
 	treasuryAllow       map[[20]byte]struct{}
 	quorumBps           uint64
 	passThresholdBps    uint64
+	policyValidator     PolicyValidator
 }
 
 // NewEngine constructs a governance engine with default no-op dependencies.
@@ -120,6 +124,23 @@ func NewEngine() *Engine {
 		treasuryAllow:   map[[20]byte]struct{}{},
 	}
 }
+
+// PolicyBaseline captures the governance fields relevant to policy validation.
+type PolicyBaseline struct {
+	QuorumBps        uint32
+	PassThresholdBps uint32
+	VotingPeriodSecs uint64
+}
+
+// PolicyDelta describes the subset of policy fields a proposal may mutate.
+type PolicyDelta struct {
+	QuorumBps        *uint32
+	PassThresholdBps *uint32
+}
+
+// PolicyValidator evaluates whether applying the supplied delta over the
+// baseline configuration preserves runtime invariants.
+type PolicyValidator func(PolicyBaseline, PolicyDelta) error
 
 type roleMutation struct {
 	role string
@@ -164,6 +185,15 @@ func (e *Engine) SetEmitter(emitter events.Emitter) {
 		return
 	}
 	e.emitter = emitter
+}
+
+// SetPolicyValidator registers the callback invoked when validating policy
+// proposal deltas. Passing nil disables preflight validation.
+func (e *Engine) SetPolicyValidator(validator PolicyValidator) {
+	if e == nil {
+		return
+	}
+	e.policyValidator = validator
 }
 
 // SetNowFunc overrides the time source used to stamp proposals. Nil restores the
@@ -742,6 +772,9 @@ func (e *Engine) applyParamUpdates(payloadJSON string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := e.preflightPolicyDelta(payload); err != nil {
+		return nil, err
+	}
 	keys := make([]string, 0, len(payload))
 	for key, raw := range payload {
 		if err := e.state.ParamStoreSet(key, append([]byte(nil), raw...)); err != nil {
@@ -919,6 +952,74 @@ func (e *Engine) emit(event *types.Event) {
 	e.emitter.Emit(governanceEvent{evt: event})
 }
 
+func (e *Engine) preflightPolicyDelta(payload map[string]json.RawMessage) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	delta, hasDelta, err := buildPolicyDelta(payload)
+	if err != nil {
+		return err
+	}
+	if !hasDelta {
+		return nil
+	}
+	if e.policyValidator == nil {
+		return nil
+	}
+	current := e.currentBaseline()
+	if err := e.policyValidator(current, delta); err != nil {
+		e.emit(newPolicyInvalidEvent(err))
+		return err
+	}
+	return nil
+}
+
+func buildPolicyDelta(payload map[string]json.RawMessage) (PolicyDelta, bool, error) {
+	var delta PolicyDelta
+	var hasDelta bool
+	for key, raw := range payload {
+		switch key {
+		case "gov.tally.QuorumBps":
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return PolicyDelta{}, false, err
+			}
+			if value > math.MaxUint32 {
+				return PolicyDelta{}, false, fmt.Errorf("governance: quorum exceeds uint32 bounds")
+			}
+			v := uint32(value)
+			delta.QuorumBps = &v
+			hasDelta = true
+		case "gov.tally.ThresholdBps":
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return PolicyDelta{}, false, err
+			}
+			if value > math.MaxUint32 {
+				return PolicyDelta{}, false, fmt.Errorf("governance: threshold exceeds uint32 bounds")
+			}
+			v := uint32(value)
+			delta.PassThresholdBps = &v
+			hasDelta = true
+		}
+	}
+	return delta, hasDelta, nil
+}
+
+func (e *Engine) currentBaseline() PolicyBaseline {
+	governance := PolicyBaseline{
+		QuorumBps:        uint32(e.quorumBps),
+		PassThresholdBps: uint32(e.passThresholdBps),
+		VotingPeriodSecs: e.votingPeriodSeconds,
+	}
+	if governance.VotingPeriodSecs < minVotingPeriodSeconds() {
+		governance.VotingPeriodSecs = minVotingPeriodSeconds()
+	}
+	return governance
+}
+
+func minVotingPeriodSeconds() uint64 { return minGovernanceVotingPeriod }
+
 func (e *Engine) now() time.Time {
 	if e == nil || e.nowFn == nil {
 		return time.Now().UTC()
@@ -944,7 +1045,11 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 
 	switch proposalKind {
 	case ProposalKindParamUpdate, ProposalKindParamEmergency:
-		if _, err := e.validateParamPayload(payloadJSON); err != nil {
+		payload, err := e.validateParamPayload(payloadJSON)
+		if err != nil {
+			return 0, err
+		}
+		if err := e.preflightPolicyDelta(payload); err != nil {
 			return 0, err
 		}
 	case ProposalKindSlashingPolicy:
@@ -1511,4 +1616,12 @@ func newExecutedEvent(p *Proposal) *types.Event {
 		}
 	}
 	return &types.Event{Type: EventTypeProposalExecuted, Attributes: attrs}
+}
+
+func newPolicyInvalidEvent(err error) *types.Event {
+	attrs := make(map[string]string)
+	if err != nil {
+		attrs["reason"] = err.Error()
+	}
+	return &types.Event{Type: EventTypePolicyInvalid, Attributes: attrs}
 }
