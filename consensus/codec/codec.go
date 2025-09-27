@@ -5,19 +5,19 @@ import (
 	"math/big"
 
 	"nhbchain/core/types"
-	consensuspb "nhbchain/proto/consensus"
+	consensusv1 "nhbchain/proto/consensus/v1"
 )
 
 // BigIntToProto converts a big.Int into its protobuf representation.
-func BigIntToProto(v *big.Int) *consensuspb.BigInt {
+func BigIntToProto(v *big.Int) *consensusv1.BigInt {
 	if v == nil {
 		return nil
 	}
-	return &consensuspb.BigInt{Value: v.String()}
+	return &consensusv1.BigInt{Value: v.String()}
 }
 
 // BigIntFromProto parses a protobuf big integer.
-func BigIntFromProto(v *consensuspb.BigInt) (*big.Int, error) {
+func BigIntFromProto(v *consensusv1.BigInt) (*big.Int, error) {
 	if v == nil || v.Value == "" {
 		return nil, nil
 	}
@@ -29,11 +29,11 @@ func BigIntFromProto(v *consensuspb.BigInt) (*big.Int, error) {
 }
 
 // TransactionToProto converts a core transaction into the protobuf shape.
-func TransactionToProto(tx *types.Transaction) (*consensuspb.Transaction, error) {
+func TransactionToProto(tx *types.Transaction) (*consensusv1.Transaction, error) {
 	if tx == nil {
 		return nil, nil
 	}
-	msg := &consensuspb.Transaction{
+	msg := &consensusv1.Transaction{
 		ChainId:    BigIntToProto(tx.ChainID),
 		Type:       uint32(tx.Type),
 		Nonce:      tx.Nonce,
@@ -54,7 +54,7 @@ func TransactionToProto(tx *types.Transaction) (*consensuspb.Transaction, error)
 }
 
 // TransactionFromProto converts a protobuf transaction into the core type.
-func TransactionFromProto(msg *consensuspb.Transaction) (*types.Transaction, error) {
+func TransactionFromProto(msg *consensusv1.Transaction) (*types.Transaction, error) {
 	if msg == nil {
 		return nil, nil
 	}
@@ -98,11 +98,11 @@ func TransactionFromProto(msg *consensuspb.Transaction) (*types.Transaction, err
 }
 
 // BlockHeaderToProto converts a block header.
-func BlockHeaderToProto(header *types.BlockHeader) *consensuspb.BlockHeader {
+func BlockHeaderToProto(header *types.BlockHeader) *consensusv1.BlockHeader {
 	if header == nil {
 		return nil
 	}
-	return &consensuspb.BlockHeader{
+	return &consensusv1.BlockHeader{
 		Height:    header.Height,
 		Timestamp: header.Timestamp,
 		PrevHash:  append([]byte(nil), header.PrevHash...),
@@ -113,7 +113,7 @@ func BlockHeaderToProto(header *types.BlockHeader) *consensuspb.BlockHeader {
 }
 
 // BlockHeaderFromProto converts a protobuf header to the core type.
-func BlockHeaderFromProto(msg *consensuspb.BlockHeader) *types.BlockHeader {
+func BlockHeaderFromProto(msg *consensusv1.BlockHeader) *types.BlockHeader {
 	if msg == nil {
 		return nil
 	}
@@ -128,11 +128,11 @@ func BlockHeaderFromProto(msg *consensuspb.BlockHeader) *types.BlockHeader {
 }
 
 // BlockToProto converts a block, including its transactions.
-func BlockToProto(block *types.Block) (*consensuspb.Block, error) {
+func BlockToProto(block *types.Block) (*consensusv1.Block, error) {
 	if block == nil {
 		return nil, nil
 	}
-	txs := make([]*consensuspb.Transaction, len(block.Transactions))
+	txs := make([]*consensusv1.Transaction, len(block.Transactions))
 	for i, tx := range block.Transactions {
 		converted, err := TransactionToProto(tx)
 		if err != nil {
@@ -140,14 +140,14 @@ func BlockToProto(block *types.Block) (*consensuspb.Block, error) {
 		}
 		txs[i] = converted
 	}
-	return &consensuspb.Block{
+	return &consensusv1.Block{
 		Header:       BlockHeaderToProto(block.Header),
 		Transactions: txs,
 	}, nil
 }
 
 // BlockFromProto converts the protobuf message into a core block instance.
-func BlockFromProto(msg *consensuspb.Block) (*types.Block, error) {
+func BlockFromProto(msg *consensusv1.Block) (*types.Block, error) {
 	if msg == nil {
 		return nil, nil
 	}
@@ -166,11 +166,11 @@ func BlockFromProto(msg *consensuspb.Block) (*types.Block, error) {
 }
 
 // TransactionsToProto converts a slice of transactions.
-func TransactionsToProto(txs []*types.Transaction) ([]*consensuspb.Transaction, error) {
+func TransactionsToProto(txs []*types.Transaction) ([]*consensusv1.Transaction, error) {
 	if len(txs) == 0 {
 		return nil, nil
 	}
-	out := make([]*consensuspb.Transaction, len(txs))
+	out := make([]*consensusv1.Transaction, len(txs))
 	for i, tx := range txs {
 		converted, err := TransactionToProto(tx)
 		if err != nil {
@@ -182,7 +182,7 @@ func TransactionsToProto(txs []*types.Transaction) ([]*consensuspb.Transaction, 
 }
 
 // TransactionsFromProto converts protobuf transactions into core transactions.
-func TransactionsFromProto(msgs []*consensuspb.Transaction) ([]*types.Transaction, error) {
+func TransactionsFromProto(msgs []*consensusv1.Transaction) ([]*types.Transaction, error) {
 	if len(msgs) == 0 {
 		return nil, nil
 	}

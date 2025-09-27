@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package nhb.consensus.v1;
+package consensus.v1;
 
-option go_package = "nhbchain/proto/consensus;consensuspb";
+option go_package = "nhbchain/proto/consensus/v1;consensusv1";
 
 message BigInt {
   string value = 1;
@@ -97,7 +97,7 @@ message GetLastCommitHashResponse {
   bytes hash = 1;
 }
 
-service Consensus {
+service ConsensusService {
   rpc SubmitTransaction(SubmitTransactionRequest) returns (SubmitTransactionResponse);
   rpc GetValidatorSet(GetValidatorSetRequest) returns (GetValidatorSetResponse);
   rpc GetBlockByHeight(GetBlockByHeightRequest) returns (GetBlockByHeightResponse);

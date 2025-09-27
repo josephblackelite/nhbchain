@@ -22,7 +22,7 @@ import (
 	"nhbchain/native/lending"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
-	consensuspb "nhbchain/proto/consensus"
+	consensusv1 "nhbchain/proto/consensus/v1"
 	"nhbchain/storage"
 )
 
@@ -196,7 +196,7 @@ func main() {
 		panic(fmt.Sprintf("Failed to listen on %s: %v", *grpcAddress, err))
 	}
 	grpcServer := grpc.NewServer()
-	consensuspb.RegisterConsensusServer(grpcServer, service.NewServer(node))
+	consensusv1.RegisterConsensusServiceServer(grpcServer, service.NewServer(node))
 
 	go func() {
 		if err := grpcServer.Serve(grpcListener); err != nil {

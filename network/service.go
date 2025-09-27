@@ -8,13 +8,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"nhbchain/p2p"
-	networkpb "nhbchain/proto/network"
+    "nhbchain/p2p"
+    networkv1 "nhbchain/proto/network/v1"
 )
 
 // Service exposes the gRPC server that consensusd connects to.
 type Service struct {
-	networkpb.UnimplementedNetworkServer
+	networkv1.UnimplementedNetworkServiceServer
 	relay *Relay
 }
 
@@ -23,31 +23,31 @@ func NewService(relay *Relay) *Service {
 	return &Service{relay: relay}
 }
 
-func (s *Service) Gossip(stream networkpb.Network_GossipServer) error {
+func (s *Service) Gossip(stream networkv1.NetworkService_GossipServer) error {
 	return s.relay.GossipStream(stream)
 }
 
-func (s *Service) GetView(ctx context.Context, _ *networkpb.GetViewRequest) (*networkpb.GetViewResponse, error) {
+func (s *Service) GetView(ctx context.Context, _ *networkv1.GetViewRequest) (*networkv1.GetViewResponse, error) {
 	view, listen, err := s.relay.View()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
-	return &networkpb.GetViewResponse{View: encodeView(view, listen)}, nil
+	return &networkv1.GetViewResponse{View: encodeView(view, listen)}, nil
 }
 
-func (s *Service) ListPeers(ctx context.Context, _ *networkpb.ListPeersRequest) (*networkpb.ListPeersResponse, error) {
+func (s *Service) ListPeers(ctx context.Context, _ *networkv1.ListPeersRequest) (*networkv1.ListPeersResponse, error) {
 	peers, err := s.relay.Peers()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
-	encoded := make([]*networkpb.PeerNetInfo, 0, len(peers))
+	encoded := make([]*networkv1.PeerNetInfo, 0, len(peers))
 	for i := range peers {
 		encoded = append(encoded, encodePeerNetInfo(&peers[i]))
 	}
-	return &networkpb.ListPeersResponse{Peers: encoded}, nil
+	return &networkv1.ListPeersResponse{Peers: encoded}, nil
 }
 
-func (s *Service) DialPeer(ctx context.Context, req *networkpb.DialPeerRequest) (*networkpb.DialPeerResponse, error) {
+func (s *Service) DialPeer(ctx context.Context, req *networkv1.DialPeerRequest) (*networkv1.DialPeerResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "missing request")
 	}
@@ -63,10 +63,10 @@ func (s *Service) DialPeer(ctx context.Context, req *networkpb.DialPeerRequest) 
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 	}
-	return &networkpb.DialPeerResponse{}, nil
+	return &networkv1.DialPeerResponse{}, nil
 }
 
-func (s *Service) BanPeer(ctx context.Context, req *networkpb.BanPeerRequest) (*networkpb.BanPeerResponse, error) {
+func (s *Service) BanPeer(ctx context.Context, req *networkv1.BanPeerRequest) (*networkv1.BanPeerResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "missing request")
 	}
@@ -82,16 +82,16 @@ func (s *Service) BanPeer(ctx context.Context, req *networkpb.BanPeerRequest) (*
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 	}
-	return &networkpb.BanPeerResponse{}, nil
+	return &networkv1.BanPeerResponse{}, nil
 }
 
-func encodeView(view p2p.NetworkView, listen []string) *networkpb.NetworkView {
+func encodeView(view p2p.NetworkView, listen []string) *networkv1.NetworkView {
 	boot := append([]string{}, view.Bootnodes...)
 	persistent := append([]string{}, view.Persistent...)
-	seeds := make([]*networkpb.SeedInfo, 0, len(view.Seeds))
+	seeds := make([]*networkv1.SeedInfo, 0, len(view.Seeds))
 	for i := range view.Seeds {
 		seed := view.Seeds[i]
-		seeds = append(seeds, &networkpb.SeedInfo{
+		seeds = append(seeds, &networkv1.SeedInfo{
 			NodeId:    seed.NodeID,
 			Address:   seed.Address,
 			Source:    seed.Source,
@@ -99,15 +99,15 @@ func encodeView(view p2p.NetworkView, listen []string) *networkpb.NetworkView {
 			NotAfter:  seed.NotAfter,
 		})
 	}
-	return &networkpb.NetworkView{
+	return &networkv1.NetworkView{
 		NetworkId:   view.NetworkID,
 		GenesisHash: append([]byte(nil), []byte(view.Genesis)...),
-		Counts: &networkpb.NetworkCounts{
+		Counts: &networkv1.NetworkCounts{
 			Total:    int32(view.Counts.Total),
 			Inbound:  int32(view.Counts.Inbound),
 			Outbound: int32(view.Counts.Outbound),
 		},
-		Limits: &networkpb.NetworkLimits{
+		Limits: &networkv1.NetworkLimits{
 			MaxPeers:       int32(view.Limits.MaxPeers),
 			MaxInbound:     int32(view.Limits.MaxInbound),
 			MaxOutbound:    int32(view.Limits.MaxOutbound),
@@ -116,7 +116,7 @@ func encodeView(view p2p.NetworkView, listen []string) *networkpb.NetworkView {
 			BanScore:       int32(view.Limits.BanScore),
 			GreyScore:      int32(view.Limits.GreyScore),
 		},
-		Self: &networkpb.NetworkSelf{
+		Self: &networkv1.NetworkSelf{
 			NodeId:          view.Self.NodeID,
 			ProtocolVersion: view.Self.ProtocolVersion,
 			ClientVersion:   view.Self.ClientVersion,
@@ -128,11 +128,11 @@ func encodeView(view p2p.NetworkView, listen []string) *networkpb.NetworkView {
 	}
 }
 
-func encodePeerNetInfo(info *p2p.PeerNetInfo) *networkpb.PeerNetInfo {
+func encodePeerNetInfo(info *p2p.PeerNetInfo) *networkv1.PeerNetInfo {
 	if info == nil {
 		return nil
 	}
-	response := &networkpb.PeerNetInfo{
+	response := &networkv1.PeerNetInfo{
 		NodeId:       info.NodeID,
 		Address:      info.Address,
 		Direction:    info.Direction,

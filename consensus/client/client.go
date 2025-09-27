@@ -10,13 +10,13 @@ import (
 
 	"nhbchain/consensus/codec"
 	"nhbchain/core/types"
-	consensuspb "nhbchain/proto/consensus"
+	consensusv1 "nhbchain/proto/consensus/v1"
 )
 
 // Client is a convenience wrapper around the generated gRPC client.
 type Client struct {
 	conn *grpc.ClientConn
-	svc  consensuspb.ConsensusClient
+	svc  consensusv1.ConsensusServiceClient
 }
 
 // Dial initialises a consensus client against the provided target.
@@ -28,7 +28,7 @@ func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client,
 	if err != nil {
 		return nil, err
 	}
-	return &Client{conn: conn, svc: consensuspb.NewConsensusClient(conn)}, nil
+	return &Client{conn: conn, svc: consensusv1.NewConsensusServiceClient(conn)}, nil
 }
 
 // Close tears down the client connection.
@@ -48,7 +48,7 @@ func (c *Client) SubmitTransaction(ctx context.Context, tx *types.Transaction) e
 	if err != nil {
 		return err
 	}
-	_, err = c.svc.SubmitTransaction(ctx, &consensuspb.SubmitTransactionRequest{Transaction: msg})
+	_, err = c.svc.SubmitTransaction(ctx, &consensusv1.SubmitTransactionRequest{Transaction: msg})
 	return err
 }
 
@@ -57,7 +57,7 @@ func (c *Client) GetValidatorSet(ctx context.Context) (map[string]*big.Int, erro
 	if c == nil {
 		return nil, fmt.Errorf("consensus client not initialised")
 	}
-	resp, err := c.svc.GetValidatorSet(ctx, &consensuspb.GetValidatorSetRequest{})
+	resp, err := c.svc.GetValidatorSet(ctx, &consensusv1.GetValidatorSetRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (c *Client) GetBlockByHeight(ctx context.Context, height uint64) (*types.Bl
 	if c == nil {
 		return nil, fmt.Errorf("consensus client not initialised")
 	}
-	resp, err := c.svc.GetBlockByHeight(ctx, &consensuspb.GetBlockByHeightRequest{Height: height})
+	resp, err := c.svc.GetBlockByHeight(ctx, &consensusv1.GetBlockByHeightRequest{Height: height})
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (c *Client) GetHeight(ctx context.Context) (uint64, error) {
 	if c == nil {
 		return 0, fmt.Errorf("consensus client not initialised")
 	}
-	resp, err := c.svc.GetHeight(ctx, &consensuspb.GetHeightRequest{})
+	resp, err := c.svc.GetHeight(ctx, &consensusv1.GetHeightRequest{})
 	if err != nil {
 		return 0, err
 	}
@@ -105,7 +105,7 @@ func (c *Client) GetMempool(ctx context.Context) ([]*types.Transaction, error) {
 	if c == nil {
 		return nil, fmt.Errorf("consensus client not initialised")
 	}
-	resp, err := c.svc.GetMempool(ctx, &consensuspb.GetMempoolRequest{})
+	resp, err := c.svc.GetMempool(ctx, &consensusv1.GetMempoolRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (c *Client) CreateBlock(ctx context.Context, txs []*types.Transaction) (*ty
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.svc.CreateBlock(ctx, &consensuspb.CreateBlockRequest{Transactions: protoTxs})
+	resp, err := c.svc.CreateBlock(ctx, &consensusv1.CreateBlockRequest{Transactions: protoTxs})
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (c *Client) CommitBlock(ctx context.Context, block *types.Block) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.svc.CommitBlock(ctx, &consensuspb.CommitBlockRequest{Block: msg})
+	_, err = c.svc.CommitBlock(ctx, &consensusv1.CommitBlockRequest{Block: msg})
 	return err
 }
 
@@ -146,7 +146,7 @@ func (c *Client) GetLastCommitHash(ctx context.Context) ([]byte, error) {
 	if c == nil {
 		return nil, fmt.Errorf("consensus client not initialised")
 	}
-	resp, err := c.svc.GetLastCommitHash(ctx, &consensuspb.GetLastCommitHashRequest{})
+	resp, err := c.svc.GetLastCommitHash(ctx, &consensusv1.GetLastCommitHashRequest{})
 	if err != nil {
 		return nil, err
 	}

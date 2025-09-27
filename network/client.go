@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"nhbchain/p2p"
-	networkpb "nhbchain/proto/network"
+	networkv1 "nhbchain/proto/network"
 )
 
 var (
@@ -24,10 +24,10 @@ var (
 // p2p.Broadcaster for consensus components.
 type Client struct {
 	conn   *grpc.ClientConn
-	client networkpb.NetworkClient
+	client networkv1.NetworkServiceClient
 
 	mu     sync.RWMutex
-	sendCh chan *networkpb.NetworkEnvelope
+	sendCh chan *networkv1.GossipRequest
 }
 
 // Dial initialises a network client against the provided address using an
@@ -47,7 +47,7 @@ func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client,
 func NewClient(conn *grpc.ClientConn) *Client {
 	return &Client{
 		conn:   conn,
-		client: networkpb.NewNetworkClient(conn),
+		client: networkv1.NewNetworkServiceClient(conn),
 	}
 }
 
@@ -65,9 +65,9 @@ func (c *Client) Broadcast(msg *p2p.Message) error {
 	if msg == nil {
 		return nil
 	}
-	envelope := &networkpb.NetworkEnvelope{
-		Event: &networkpb.NetworkEnvelope_Gossip{
-			Gossip: &networkpb.GossipMessage{
+	envelope := &networkv1.NetworkEnvelope{
+		Event: &networkv1.NetworkEnvelope_Gossip{
+			Gossip: &networkv1.GossipMessage{
 				Type:    uint32(msg.Type),
 				Payload: append([]byte(nil), msg.Payload...),
 			},
@@ -80,7 +80,7 @@ func (c *Client) Broadcast(msg *p2p.Message) error {
 		return errNotConnected
 	}
 	select {
-	case ch <- envelope:
+	case ch <- &networkv1.GossipRequest{Envelope: envelope}:
 		return nil
 	default:
 		return errQueueSaturated
@@ -100,7 +100,7 @@ func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error
 		return err
 	}
 
-	sendCh := make(chan *networkpb.NetworkEnvelope, streamQueueSize)
+	sendCh := make(chan *networkv1.GossipRequest, streamQueueSize)
 	c.mu.Lock()
 	c.sendCh = sendCh
 	c.mu.Unlock()
@@ -134,15 +134,19 @@ func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error
 	}()
 
 	for {
-		envelope, err := stream.Recv()
+		response, err := stream.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return err
 		}
+		envelope := response.GetEnvelope()
+		if envelope == nil {
+			continue
+		}
 		switch event := envelope.Event.(type) {
-		case *networkpb.NetworkEnvelope_Gossip:
+		case *networkv1.NetworkEnvelope_Gossip:
 			if event.Gossip == nil || handleMessage == nil {
 				continue
 			}
@@ -155,7 +159,7 @@ func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error
 				// peer backoff or stream termination instead of continuing.
 				fmt.Printf("network client handler error: %v\n", err)
 			}
-		case *networkpb.NetworkEnvelope_Heartbeat:
+		case *networkv1.NetworkEnvelope_Heartbeat:
 			if handleHeartbeat == nil || event.Heartbeat == nil {
 				continue
 			}
@@ -173,7 +177,7 @@ func (c *Client) NetworkView(ctx context.Context) (p2p.NetworkView, []string, er
 	if c == nil {
 		return p2p.NetworkView{}, nil, fmt.Errorf("nil network client")
 	}
-	resp, err := c.client.GetView(ctx, &networkpb.GetViewRequest{})
+	resp, err := c.client.GetView(ctx, &networkv1.GetViewRequest{})
 	if err != nil {
 		return p2p.NetworkView{}, nil, err
 	}
@@ -185,7 +189,7 @@ func (c *Client) NetworkPeers(ctx context.Context) ([]p2p.PeerNetInfo, error) {
 	if c == nil {
 		return nil, fmt.Errorf("nil network client")
 	}
-	resp, err := c.client.ListPeers(ctx, &networkpb.ListPeersRequest{})
+	resp, err := c.client.ListPeers(ctx, &networkv1.ListPeersRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +206,7 @@ func (c *Client) Dial(ctx context.Context, target string) error {
 	if c == nil {
 		return fmt.Errorf("nil network client")
 	}
-	_, err := c.client.DialPeer(ctx, &networkpb.DialPeerRequest{Target: target})
+	_, err := c.client.DialPeer(ctx, &networkv1.DialPeerRequest{Target: target})
 	return err
 }
 
@@ -215,11 +219,11 @@ func (c *Client) Ban(ctx context.Context, nodeID string, duration time.Duration)
 	if seconds < 0 {
 		seconds = 0
 	}
-	_, err := c.client.BanPeer(ctx, &networkpb.BanPeerRequest{NodeId: nodeID, Seconds: seconds})
+	_, err := c.client.BanPeer(ctx, &networkv1.BanPeerRequest{NodeId: nodeID, Seconds: seconds})
 	return err
 }
 
-func decodeView(view *networkpb.NetworkView) (p2p.NetworkView, []string, error) {
+func decodeView(view *networkv1.NetworkView) (p2p.NetworkView, []string, error) {
 	if view == nil {
 		return p2p.NetworkView{}, nil, fmt.Errorf("network view missing")
 	}
@@ -272,7 +276,7 @@ func decodeView(view *networkpb.NetworkView) (p2p.NetworkView, []string, error) 
 	return result, listen, nil
 }
 
-func decodePeerNetInfo(info *networkpb.PeerNetInfo) p2p.PeerNetInfo {
+func decodePeerNetInfo(info *networkv1.PeerNetInfo) p2p.PeerNetInfo {
 	if info == nil {
 		return p2p.PeerNetInfo{}
 	}

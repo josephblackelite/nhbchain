@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"nhbchain/p2p"
-	networkpb "nhbchain/proto/network"
+	networkv1 "nhbchain/proto/network/v1"
 )
 
 const (
@@ -17,14 +17,14 @@ const (
 )
 
 type streamState struct {
-	queue chan *networkpb.NetworkEnvelope
+	queue chan *networkv1.GossipResponse
 	done  chan struct{}
 	once  sync.Once
 }
 
 func newStreamState() *streamState {
 	return &streamState{
-		queue: make(chan *networkpb.NetworkEnvelope, streamQueueSize),
+		queue: make(chan *networkv1.GossipResponse, streamQueueSize),
 		done:  make(chan struct{}),
 	}
 }
@@ -62,22 +62,22 @@ func (r *Relay) HandleMessage(msg *p2p.Message) error {
 	if msg == nil {
 		return nil
 	}
-	envelope := &networkpb.NetworkEnvelope{
-		Event: &networkpb.NetworkEnvelope_Gossip{
-			Gossip: &networkpb.GossipMessage{
+	envelope := &networkv1.NetworkEnvelope{
+		Event: &networkv1.NetworkEnvelope_Gossip{
+			Gossip: &networkv1.GossipMessage{
 				Type:    uint32(msg.Type),
 				Payload: append([]byte(nil), msg.Payload...),
 			},
 		},
 	}
-	if r.enqueue(envelope) {
+	if r.enqueue(&networkv1.GossipResponse{Envelope: envelope}) {
 		return nil
 	}
 	return errors.New("network relay: consensus stream unavailable")
 }
 
 // enqueue attempts to deliver the provided envelope to the active stream.
-func (r *Relay) enqueue(envelope *networkpb.NetworkEnvelope) bool {
+func (r *Relay) enqueue(envelope *networkv1.GossipResponse) bool {
 	r.mu.RLock()
 	stream := r.stream
 	r.mu.RUnlock()
@@ -107,19 +107,19 @@ func (r *Relay) StartHeartbeats(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case t := <-ticker.C:
-			envelope := &networkpb.NetworkEnvelope{
-				Event: &networkpb.NetworkEnvelope_Heartbeat{
-					Heartbeat: &networkpb.Heartbeat{UnixMillis: t.UnixMilli()},
+			envelope := &networkv1.NetworkEnvelope{
+				Event: &networkv1.NetworkEnvelope_Heartbeat{
+					Heartbeat: &networkv1.Heartbeat{UnixMillis: t.UnixMilli()},
 				},
 			}
-			_ = r.enqueue(envelope)
+			_ = r.enqueue(&networkv1.GossipResponse{Envelope: envelope})
 		}
 	}
 }
 
 // GossipStream binds the supplied gRPC stream to the relay, multiplexing gossip
 // and control messages between the P2P server and consensus service.
-func (r *Relay) GossipStream(stream networkpb.Network_GossipServer) error {
+func (r *Relay) GossipStream(stream networkv1.NetworkService_GossipServer) error {
 	if stream == nil {
 		return fmt.Errorf("nil gossip stream")
 	}
@@ -151,8 +151,12 @@ func (r *Relay) GossipStream(stream networkpb.Network_GossipServer) error {
 			r.clearStream(state)
 			return err
 		}
-		switch event := incoming.Event.(type) {
-		case *networkpb.NetworkEnvelope_Gossip:
+		envelope := incoming.GetEnvelope()
+		if envelope == nil {
+			continue
+		}
+		switch event := envelope.Event.(type) {
+		case *networkv1.NetworkEnvelope_Gossip:
 			if event.Gossip == nil {
 				continue
 			}
@@ -163,7 +167,7 @@ func (r *Relay) GossipStream(stream networkpb.Network_GossipServer) error {
 			if err := r.broadcast(msg); err != nil {
 				fmt.Printf("network relay broadcast failed: %v\n", err)
 			}
-		case *networkpb.NetworkEnvelope_Heartbeat:
+		case *networkv1.NetworkEnvelope_Heartbeat:
 			// Heartbeats flowing from consensus are ignored for now.
 		default:
 			fmt.Printf("network relay received unknown envelope: %T\n", event)
