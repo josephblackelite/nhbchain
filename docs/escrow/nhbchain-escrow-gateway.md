@@ -1,4 +1,4 @@
-# CODEx EPIC — Escrow Gateway (REST) + Disputes/Arbitration + P2P Market Hooks
+# NHBCHAIN EPIC — Escrow Gateway (REST) + Disputes/Arbitration + P2P Market Hooks
 
 ## Goals
 
@@ -200,7 +200,7 @@ await client.release({ escrowId }, { signer: buyerWallet });
 
 ---
 
-# CODEx Addendum — P2P Dual-Lock Escrow (Reverse Escrow for “Buy NHB”)
+# NHBCHAIN Addendum — P2P Dual-Lock Escrow (Reverse Escrow for “Buy NHB”)
 
 ## Intent
 
@@ -323,7 +323,7 @@ Body: { "offerId":"OFF_123", "buyer":"nhb1...", "reference":"P2P-123" }
 
 ---
 
-## Paste to CODEx (Delta)
+## Paste to NHBCHAIN (Delta)
 
 ```
 Title: Add P2P dual-lock escrow (reverse escrow) with atomic settlement
