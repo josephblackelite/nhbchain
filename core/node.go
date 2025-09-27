@@ -32,6 +32,7 @@ import (
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
 	"nhbchain/native/governance"
+	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
 	"nhbchain/native/reputation"
@@ -46,34 +47,38 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db                 storage.Database
-	state              *StateProcessor
-	chain              *Blockchain
-	syncMgr            *syncmgr.Manager
-	validatorKey       *crypto.PrivateKey
-	mempool            []*types.Transaction
-	bftEngine          *bft.Engine
-	p2pSrv             *p2p.Server
-	stateMu            sync.Mutex
-	escrowTreasury     [20]byte
-	engagementMgr      *engagement.Manager
-	govPolicy          governance.ProposalPolicy
-	govPolicyMu        sync.RWMutex
-	swapCfgMu          sync.RWMutex
-	swapCfg            swap.Config
-	swapOracle         swap.PriceOracle
-	swapManual         *swap.ManualOracle
-	swapSanctions      swap.SanctionsChecker
-	swapStatusMu       sync.RWMutex
-	swapOracleLast     int64
-	swapRefundSink     [20]byte
-	evidenceStore      *evidence.Store
-	evidenceMaxAge     uint64
-	paymasterMu        sync.RWMutex
-	paymasterEnabled   bool
-	timestampTolerance time.Duration
-	timeConfigMu       sync.RWMutex
-	timeSource         func() time.Time
+	db                    storage.Database
+	state                 *StateProcessor
+	chain                 *Blockchain
+	syncMgr               *syncmgr.Manager
+	validatorKey          *crypto.PrivateKey
+	mempool               []*types.Transaction
+	bftEngine             *bft.Engine
+	p2pSrv                *p2p.Server
+	stateMu               sync.Mutex
+	escrowTreasury        [20]byte
+	engagementMgr         *engagement.Manager
+	govPolicy             governance.ProposalPolicy
+	govPolicyMu           sync.RWMutex
+	swapCfgMu             sync.RWMutex
+	swapCfg               swap.Config
+	swapOracle            swap.PriceOracle
+	swapManual            *swap.ManualOracle
+	swapSanctions         swap.SanctionsChecker
+	swapStatusMu          sync.RWMutex
+	swapOracleLast        int64
+	swapRefundSink        [20]byte
+	evidenceStore         *evidence.Store
+	evidenceMaxAge        uint64
+	paymasterMu           sync.RWMutex
+	paymasterEnabled      bool
+	timestampTolerance    time.Duration
+	timeConfigMu          sync.RWMutex
+	timeSource            func() time.Time
+	lendingMu             sync.RWMutex
+	lendingParams         lending.RiskParameters
+	lendingModuleAddr     crypto.Address
+	lendingCollateralAddr crypto.Address
 }
 
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
@@ -223,22 +228,29 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	copy(treasury[:], validatorAddr.Bytes())
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 
+	moduleAddr := deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix)
+	collateralAddr := deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix)
+
 	node := &Node{
-		db:                 db,
-		state:              stateProcessor,
-		chain:              chain,
-		validatorKey:       key,
-		mempool:            make([]*types.Transaction, 0),
-		escrowTreasury:     treasury,
-		engagementMgr:      engagement.NewManager(stateProcessor.EngagementConfig()),
-		swapSanctions:      swap.DefaultSanctionsChecker,
-		swapRefundSink:     treasury,
-		evidenceStore:      evidence.NewStore(db),
-		evidenceMaxAge:     evidence.DefaultMaxAgeBlocks,
-		paymasterEnabled:   stateProcessor.PaymasterEnabled(),
-		timestampTolerance: DefaultBlockTimestampTolerance,
-		timeSource:         func() time.Time { return time.Now().UTC() },
+		db:                    db,
+		state:                 stateProcessor,
+		chain:                 chain,
+		validatorKey:          key,
+		mempool:               make([]*types.Transaction, 0),
+		escrowTreasury:        treasury,
+		engagementMgr:         engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapSanctions:         swap.DefaultSanctionsChecker,
+		swapRefundSink:        treasury,
+		evidenceStore:         evidence.NewStore(db),
+		evidenceMaxAge:        evidence.DefaultMaxAgeBlocks,
+		paymasterEnabled:      stateProcessor.PaymasterEnabled(),
+		timestampTolerance:    DefaultBlockTimestampTolerance,
+		timeSource:            func() time.Time { return time.Now().UTC() },
+		lendingModuleAddr:     moduleAddr,
+		lendingCollateralAddr: collateralAddr,
 	}
+
+	node.SetLendingRiskParameters(lending.RiskParameters{})
 
 	// Initialise fast-sync manager.
 	if trieDB := stateTrie.TrieDB(); trieDB != nil {
@@ -443,6 +455,50 @@ func (n *Node) swapSanctionsChecker() swap.SanctionsChecker {
 	return checker
 }
 
+// LendingModuleAddress returns the deterministic NHB treasury address used by the lending engine.
+func (n *Node) LendingModuleAddress() crypto.Address {
+	n.lendingMu.RLock()
+	defer n.lendingMu.RUnlock()
+	return cloneAddress(n.lendingModuleAddr)
+}
+
+// LendingCollateralAddress returns the deterministic ZNHB collateral vault for the lending engine.
+func (n *Node) LendingCollateralAddress() crypto.Address {
+	n.lendingMu.RLock()
+	defer n.lendingMu.RUnlock()
+	return cloneAddress(n.lendingCollateralAddr)
+}
+
+// SetLendingRiskParameters updates the risk configuration exposed to RPC clients.
+func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
+	if n == nil {
+		return
+	}
+	copyParams := lending.RiskParameters{
+		MaxLTV:               params.MaxLTV,
+		LiquidationThreshold: params.LiquidationThreshold,
+		LiquidationBonus:     params.LiquidationBonus,
+		CircuitBreakerActive: params.CircuitBreakerActive,
+	}
+	if params.OracleAddress.Bytes() != nil {
+		copyParams.OracleAddress = cloneAddress(params.OracleAddress)
+	}
+	n.lendingMu.Lock()
+	n.lendingParams = copyParams
+	n.lendingMu.Unlock()
+}
+
+// LendingRiskParameters returns the currently configured lending risk limits.
+func (n *Node) LendingRiskParameters() lending.RiskParameters {
+	n.lendingMu.RLock()
+	params := n.lendingParams
+	n.lendingMu.RUnlock()
+	if params.OracleAddress.Bytes() != nil {
+		params.OracleAddress = cloneAddress(params.OracleAddress)
+	}
+	return params
+}
+
 func (n *Node) recordSwapOracleHealth(ts time.Time) {
 	n.swapStatusMu.Lock()
 	n.swapOracleLast = ts.UTC().Unix()
@@ -454,6 +510,20 @@ func cloneBigInt(value *big.Int) *big.Int {
 		return nil
 	}
 	return new(big.Int).Set(value)
+}
+
+func cloneAddress(addr crypto.Address) crypto.Address {
+	bytes := addr.Bytes()
+	if len(bytes) == 0 {
+		return crypto.Address{}
+	}
+	return crypto.NewAddress(addr.Prefix(), append([]byte(nil), bytes...))
+}
+
+func deriveModuleAddress(seed string, prefix crypto.AddressPrefix) crypto.Address {
+	hash := ethcrypto.Keccak256([]byte(seed))
+	raw := append([]byte(nil), hash[len(hash)-20:]...)
+	return crypto.NewAddress(prefix, raw)
 }
 
 func (n *Node) emitSwapLimitAlert(alert events.SwapLimitAlert) {

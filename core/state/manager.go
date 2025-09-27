@@ -21,6 +21,7 @@ import (
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
 	"nhbchain/native/governance"
+	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
 	"nhbchain/storage/trie"
@@ -103,6 +104,8 @@ var (
 	governanceEscrowPrefix     = []byte("gov/escrow/")
 	paramsNamespacePrefix      = []byte("params/")
 	snapshotPotsoPrefix        = []byte("snapshots/potso/")
+	lendingMarketKey           = []byte("lending/market/default")
+	lendingUserPrefix          = []byte("lending/user/")
 )
 
 // GovernanceProposalKey constructs the storage key for the proposal metadata
@@ -818,6 +821,171 @@ func potsoDayIndexKey(day string) []byte {
 	copy(buf, potsoDayIndexPrefix)
 	copy(buf[len(potsoDayIndexPrefix):], trimmed)
 	return kvKey(buf)
+}
+
+func lendingUserKey(addr []byte) []byte {
+	buf := make([]byte, len(lendingUserPrefix)+len(addr))
+	copy(buf, lendingUserPrefix)
+	copy(buf[len(lendingUserPrefix):], addr)
+	return buf
+}
+
+type storedLendingMarket struct {
+	TotalNHBSupplied  *big.Int
+	TotalSupplyShares *big.Int
+	TotalNHBBorrowed  *big.Int
+	SupplyIndex       *big.Int
+	BorrowIndex       *big.Int
+	LastUpdateBlock   uint64
+	ReserveFactor     uint64
+}
+
+func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
+	if market == nil {
+		return nil
+	}
+	stored := &storedLendingMarket{
+		LastUpdateBlock: market.LastUpdateBlock,
+		ReserveFactor:   market.ReserveFactor,
+	}
+	if market.TotalNHBSupplied != nil {
+		stored.TotalNHBSupplied = new(big.Int).Set(market.TotalNHBSupplied)
+	}
+	if market.TotalSupplyShares != nil {
+		stored.TotalSupplyShares = new(big.Int).Set(market.TotalSupplyShares)
+	}
+	if market.TotalNHBBorrowed != nil {
+		stored.TotalNHBBorrowed = new(big.Int).Set(market.TotalNHBBorrowed)
+	}
+	if market.SupplyIndex != nil {
+		stored.SupplyIndex = new(big.Int).Set(market.SupplyIndex)
+	}
+	if market.BorrowIndex != nil {
+		stored.BorrowIndex = new(big.Int).Set(market.BorrowIndex)
+	}
+	return stored
+}
+
+func (s *storedLendingMarket) toMarket() *lending.Market {
+	if s == nil {
+		return nil
+	}
+	market := &lending.Market{
+		LastUpdateBlock: s.LastUpdateBlock,
+		ReserveFactor:   s.ReserveFactor,
+	}
+	if s.TotalNHBSupplied != nil {
+		market.TotalNHBSupplied = new(big.Int).Set(s.TotalNHBSupplied)
+	}
+	if s.TotalSupplyShares != nil {
+		market.TotalSupplyShares = new(big.Int).Set(s.TotalSupplyShares)
+	}
+	if s.TotalNHBBorrowed != nil {
+		market.TotalNHBBorrowed = new(big.Int).Set(s.TotalNHBBorrowed)
+	}
+	if s.SupplyIndex != nil {
+		market.SupplyIndex = new(big.Int).Set(s.SupplyIndex)
+	}
+	if s.BorrowIndex != nil {
+		market.BorrowIndex = new(big.Int).Set(s.BorrowIndex)
+	}
+	return market
+}
+
+type storedLendingUser struct {
+	Address        [20]byte
+	CollateralZNHB *big.Int
+	SupplyShares   *big.Int
+	DebtNHB        *big.Int
+	ScaledDebt     *big.Int
+}
+
+func newStoredLendingUser(account *lending.UserAccount) *storedLendingUser {
+	if account == nil {
+		return nil
+	}
+	stored := &storedLendingUser{}
+	copy(stored.Address[:], account.Address.Bytes())
+	if account.CollateralZNHB != nil {
+		stored.CollateralZNHB = new(big.Int).Set(account.CollateralZNHB)
+	}
+	if account.SupplyShares != nil {
+		stored.SupplyShares = new(big.Int).Set(account.SupplyShares)
+	}
+	if account.DebtNHB != nil {
+		stored.DebtNHB = new(big.Int).Set(account.DebtNHB)
+	}
+	if account.ScaledDebt != nil {
+		stored.ScaledDebt = new(big.Int).Set(account.ScaledDebt)
+	}
+	return stored
+}
+
+func (s *storedLendingUser) toUserAccount() *lending.UserAccount {
+	if s == nil {
+		return nil
+	}
+	account := &lending.UserAccount{
+		Address: crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.Address[:]...)),
+	}
+	if s.CollateralZNHB != nil {
+		account.CollateralZNHB = new(big.Int).Set(s.CollateralZNHB)
+	}
+	if s.SupplyShares != nil {
+		account.SupplyShares = new(big.Int).Set(s.SupplyShares)
+	}
+	if s.DebtNHB != nil {
+		account.DebtNHB = new(big.Int).Set(s.DebtNHB)
+	}
+	if s.ScaledDebt != nil {
+		account.ScaledDebt = new(big.Int).Set(s.ScaledDebt)
+	}
+	return account
+}
+
+// LendingGetMarket loads the global lending market state if it has been initialised.
+func (m *Manager) LendingGetMarket() (*lending.Market, bool, error) {
+	var stored storedLendingMarket
+	ok, err := m.KVGet(lendingMarketKey, &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return stored.toMarket(), true, nil
+}
+
+// LendingPutMarket persists the supplied lending market snapshot.
+func (m *Manager) LendingPutMarket(market *lending.Market) error {
+	if market == nil {
+		return fmt.Errorf("lending: market must not be nil")
+	}
+	return m.KVPut(lendingMarketKey, newStoredLendingMarket(market))
+}
+
+// LendingGetUserAccount loads the lending position tracked for the supplied address.
+func (m *Manager) LendingGetUserAccount(addr [20]byte) (*lending.UserAccount, bool, error) {
+	key := lendingUserKey(addr[:])
+	var stored storedLendingUser
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return stored.toUserAccount(), true, nil
+}
+
+// LendingPutUserAccount stores the lending position for the provided address.
+func (m *Manager) LendingPutUserAccount(account *lending.UserAccount) error {
+	if account == nil {
+		return fmt.Errorf("lending: user account must not be nil")
+	}
+	var addr [20]byte
+	copy(addr[:], account.Address.Bytes())
+	return m.KVPut(lendingUserKey(addr[:]), newStoredLendingUser(account))
 }
 
 func potsoStakeTotalKey(owner []byte) []byte {

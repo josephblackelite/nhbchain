@@ -16,6 +16,7 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/core"
 	"nhbchain/crypto"
+	"nhbchain/native/lending"
 	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
@@ -108,6 +109,11 @@ func main() {
 	if err := node.SetPotsoWeightConfig(weightCfg); err != nil {
 		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
 	}
+
+	node.SetLendingRiskParameters(lending.RiskParameters{
+		MaxLTV:               cfg.Lending.MaxLTVBps,
+		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
+	})
 
 	swapCfg := cfg.SwapSettings()
 	node.SetSwapConfig(swapCfg)
