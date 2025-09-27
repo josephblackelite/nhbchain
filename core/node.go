@@ -85,6 +85,8 @@ type Node struct {
 	lendingReserveFactorBps      uint64
 	lendingProtocolFeeBps        uint64
 	lendingCollateralRouting     lending.CollateralRouting
+	creatorPayoutVaultAddr       crypto.Address
+	creatorRewardsTreasuryAddr   crypto.Address
 }
 
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
@@ -236,24 +238,28 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	moduleAddr := deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix)
 	collateralAddr := deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix)
+	creatorVaultAddr := deriveModuleAddress("module/creator/payout", crypto.NHBPrefix)
+	creatorRewardsAddr := deriveModuleAddress("module/creator/rewards", crypto.NHBPrefix)
 
 	node := &Node{
-		db:                    db,
-		state:                 stateProcessor,
-		chain:                 chain,
-		validatorKey:          key,
-		mempool:               make([]*types.Transaction, 0),
-		escrowTreasury:        treasury,
-		engagementMgr:         engagement.NewManager(stateProcessor.EngagementConfig()),
-		swapSanctions:         swap.DefaultSanctionsChecker,
-		swapRefundSink:        treasury,
-		evidenceStore:         evidence.NewStore(db),
-		evidenceMaxAge:        evidence.DefaultMaxAgeBlocks,
-		paymasterEnabled:      stateProcessor.PaymasterEnabled(),
-		timestampTolerance:    DefaultBlockTimestampTolerance,
-		timeSource:            func() time.Time { return time.Now().UTC() },
-		lendingModuleAddr:     moduleAddr,
-		lendingCollateralAddr: collateralAddr,
+		db:                         db,
+		state:                      stateProcessor,
+		chain:                      chain,
+		validatorKey:               key,
+		mempool:                    make([]*types.Transaction, 0),
+		escrowTreasury:             treasury,
+		engagementMgr:              engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapSanctions:              swap.DefaultSanctionsChecker,
+		swapRefundSink:             treasury,
+		evidenceStore:              evidence.NewStore(db),
+		evidenceMaxAge:             evidence.DefaultMaxAgeBlocks,
+		paymasterEnabled:           stateProcessor.PaymasterEnabled(),
+		timestampTolerance:         DefaultBlockTimestampTolerance,
+		timeSource:                 func() time.Time { return time.Now().UTC() },
+		lendingModuleAddr:          moduleAddr,
+		lendingCollateralAddr:      collateralAddr,
+		creatorPayoutVaultAddr:     creatorVaultAddr,
+		creatorRewardsTreasuryAddr: creatorRewardsAddr,
 	}
 
 	node.SetLendingRiskParameters(lending.RiskParameters{})
@@ -1469,6 +1475,12 @@ func (n *Node) newCreatorEngine(manager *nhbstate.Manager) *creator.Engine {
 	engine.SetState(manager)
 	engine.SetEmitter(creatorEventEmitter{node: n})
 	engine.SetNowFunc(func() int64 { return n.currentTime().Unix() })
+	var payoutVault [20]byte
+	copy(payoutVault[:], n.creatorPayoutVaultAddr.Bytes())
+	engine.SetPayoutVault(payoutVault)
+	var rewardsTreasury [20]byte
+	copy(rewardsTreasury[:], n.creatorRewardsTreasuryAddr.Bytes())
+	engine.SetRewardsTreasury(rewardsTreasury)
 	return engine
 }
 
