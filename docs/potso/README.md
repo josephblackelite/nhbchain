@@ -43,4 +43,6 @@ These records are deterministic and do not alter consensus semantics beyond addi
 - `potso_userMeters` – returns the meter for a given user and optional day (defaults to current UTC day).
 - `potso_top` – returns the highest scoring participants for a day, sorted by score, raw score, uptime, and address.
 
-Refer to the companion documents for payload shapes and integration guidance.
+Refer to the companion documents for payload shapes, integration guidance, and
+the [consensus integration](consensus-integration.md) notes explaining how
+POTSO-derived weights influence validator selection and quorum thresholds.
