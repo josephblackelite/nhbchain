@@ -203,7 +203,7 @@ For the full identity management toolkit, refer to [`docs/identity-cli.md`](./do
 All protocol modules ship with reference documentation under [`docs/`](./docs):
 
 - **Identity & Username Directory** — Concepts, RPC specs, and gateway flows (`docs/identity.md`, `docs/identity-api.md`, `docs/identity-gateway.md`).
-- **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow.md`, `docs/codex-epic-escrow-gateway.md`).
+- **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow.md`, `docs/escrow/nhbchain-escrow-gateway.md`).
 - **Loyalty & Rewards** — Network-wide loyalty engine overview (`docs/loyalty.md`).
 - **Pay-by-Username** — UX flows and examples (`docs/pay-by-username.md`, `docs/examples/identity`).
 - **OpenAPI Specification** — Machine-readable schema for REST integrations (`docs/openapi/identity.yaml`).

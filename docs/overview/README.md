@@ -3,7 +3,7 @@
 ## Core Modules
 
 * [Escrow & P2P Developer Guide](./escrow.md)
-* [Codex Escrow Gateway](./codex-epic-escrow-gateway.md)
+* [NHBCHAIN Escrow Gateway](../escrow/nhbchain-escrow-gateway.md)
 * [Loyalty Module](./loyalty.md)
 * [Staking & Delegation](./staking.md)
 
