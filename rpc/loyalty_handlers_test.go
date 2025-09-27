@@ -46,7 +46,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	agg.Register("manual", manual)
 	node.SetSwapOracle(agg)
 	node.SetSwapManualOracle(manual)
-	server := NewServer(node)
+	server := NewServer(node, ServerConfig{})
 	return &testEnv{server: server, node: node, token: token}
 }
 

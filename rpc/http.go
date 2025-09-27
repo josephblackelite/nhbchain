@@ -47,30 +47,55 @@ type rateLimiter struct {
 	windowStart time.Time
 }
 
+// ServerConfig controls optional behaviours of the RPC server.
+type ServerConfig struct {
+	// TrustProxyHeaders, when set, will cause the server to honour proxy
+	// forwarding headers such as X-Forwarded-For regardless of the caller's
+	// remote address. Use with caution when the server is guaranteed to be
+	// behind a trusted reverse proxy.
+	TrustProxyHeaders bool
+	// TrustedProxies enumerates remote addresses that are authorised to relay
+	// client requests. When a request originates from one of these proxies the
+	// server will honour X-Forwarded-For headers.
+	TrustedProxies []string
+}
+
 type Server struct {
 	node *core.Node
 
-	mu            sync.Mutex
-	txSeen        map[string]time.Time
-	rateLimiters  map[string]*rateLimiter
-	authToken     string
-	potsoEvidence *modules.PotsoEvidenceModule
-	transactions  *modules.TransactionsModule
-	escrow        *modules.EscrowModule
-	lending       *modules.LendingModule
+	mu                sync.Mutex
+	txSeen            map[string]time.Time
+	rateLimiters      map[string]*rateLimiter
+	authToken         string
+	potsoEvidence     *modules.PotsoEvidenceModule
+	transactions      *modules.TransactionsModule
+	escrow            *modules.EscrowModule
+	lending           *modules.LendingModule
+	trustProxyHeaders bool
+	trustedProxies    map[string]struct{}
 }
 
-func NewServer(node *core.Node) *Server {
+func NewServer(node *core.Node, cfg ServerConfig) *Server {
 	token := strings.TrimSpace(os.Getenv("NHB_RPC_TOKEN"))
+	trusted := make(map[string]struct{}, len(cfg.TrustedProxies))
+	for _, entry := range cfg.TrustedProxies {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		trusted[trimmed] = struct{}{}
+	}
 	return &Server{
-		node:          node,
-		txSeen:        make(map[string]time.Time),
-		rateLimiters:  make(map[string]*rateLimiter),
-		authToken:     token,
-		potsoEvidence: modules.NewPotsoEvidenceModule(node),
-		transactions:  modules.NewTransactionsModule(node),
-		escrow:        modules.NewEscrowModule(node),
-		lending:       modules.NewLendingModule(node),
+		node:              node,
+		txSeen:            make(map[string]time.Time),
+		rateLimiters:      make(map[string]*rateLimiter),
+		authToken:         token,
+		potsoEvidence:     modules.NewPotsoEvidenceModule(node),
+		transactions:      modules.NewTransactionsModule(node),
+		escrow:            modules.NewEscrowModule(node),
+		lending:           modules.NewLendingModule(node),
+		trustProxyHeaders: cfg.TrustProxyHeaders,
+		trustedProxies:    trusted,
 	}
 }
 
@@ -774,21 +799,31 @@ func (s *Server) rememberTx(hash string, now time.Time) bool {
 	return true
 }
 
-func clientSource(r *http.Request) string {
+func (s *Server) clientSource(r *http.Request) string {
+	host := r.RemoteAddr
+	if splitHost, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = splitHost
+	}
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		if len(parts) > 0 {
-			candidate := strings.TrimSpace(parts[0])
-			if candidate != "" {
-				return candidate
+		if s.trustProxyHeaders || s.isTrustedProxy(host) {
+			parts := strings.Split(forwarded, ",")
+			for _, part := range parts {
+				candidate := strings.TrimSpace(part)
+				if candidate != "" {
+					return candidate
+				}
 			}
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
 	return host
+}
+
+func (s *Server) isTrustedProxy(host string) bool {
+	if len(s.trustedProxies) == 0 {
+		return false
+	}
+	_, ok := s.trustedProxies[host]
+	return ok
 }
 
 // --- Existing Handlers ---
@@ -833,7 +868,7 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	}
 
 	now := time.Now()
-	source := clientSource(r)
+	source := s.clientSource(r)
 	if !s.allowSource(source, now) {
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "transaction rate limit exceeded", source)
 		return
