@@ -283,7 +283,6 @@ func main() {
 	}
 	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
 	p2pServer.SetPeerstore(peerstore)
-	node.SetP2PServer(p2pServer)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
 	bftEngine := bft.NewEngine(node, privKey, p2pServer)
@@ -292,7 +291,8 @@ func main() {
 	node.SetBftEngine(bftEngine)
 
 	// --- Server Startup ---
-	rpcServer := rpc.NewServer(node, rpc.ServerConfig{
+	networkAdapter := &p2pNetworkAdapter{server: p2pServer}
+	rpcServer := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
 		ReadHeaderTimeout: time.Duration(cfg.RPCReadHeaderTimeout) * time.Second,
@@ -391,6 +391,38 @@ func loadValidatorKey(cfg *config.Config) (*crypto.PrivateKey, error) {
 		return nil, fmt.Errorf("unable to decrypt keystore %s: %w", cfg.ValidatorKeystorePath, err)
 	}
 	return key, nil
+}
+
+type p2pNetworkAdapter struct {
+	server *p2p.Server
+}
+
+func (a *p2pNetworkAdapter) NetworkView(ctx context.Context) (p2p.NetworkView, []string, error) {
+	if a == nil || a.server == nil {
+		return p2p.NetworkView{}, nil, fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.SnapshotNetwork(), a.server.ListenAddresses(), nil
+}
+
+func (a *p2pNetworkAdapter) NetworkPeers(ctx context.Context) ([]p2p.PeerNetInfo, error) {
+	if a == nil || a.server == nil {
+		return nil, fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.NetPeers(), nil
+}
+
+func (a *p2pNetworkAdapter) Dial(ctx context.Context, target string) error {
+	if a == nil || a.server == nil {
+		return fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.DialPeer(target)
+}
+
+func (a *p2pNetworkAdapter) Ban(ctx context.Context, nodeID string, duration time.Duration) error {
+	if a == nil || a.server == nil {
+		return fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.BanPeer(nodeID, duration)
 }
 
 func loadFromKMS(cfg *config.Config) (*crypto.PrivateKey, error) {
