@@ -36,6 +36,8 @@ WriteTimeout = 4
 MaxMsgBytes = 2048
 MaxMsgsPerSecond = 12.5
 ClientVersion = "nhbchain/test"
+RPCTrustedProxies = ["10.0.0.1"]
+RPCTrustProxyHeaders = true
 
 [p2p]
 NetworkId = 187001
@@ -85,6 +87,12 @@ PEX = false
 	}
 	if cfg.ClientVersion != "nhbchain/test" {
 		t.Fatalf("unexpected client version: %s", cfg.ClientVersion)
+	}
+	if len(cfg.RPCTrustedProxies) != 1 || cfg.RPCTrustedProxies[0] != "10.0.0.1" {
+		t.Fatalf("unexpected RPC trusted proxies: %v", cfg.RPCTrustedProxies)
+	}
+	if !cfg.RPCTrustProxyHeaders {
+		t.Fatalf("expected RPCTrustProxyHeaders to be true")
 	}
 	if len(cfg.Bootnodes) != 1 || cfg.Bootnodes[0] != "1.1.1.1:6001" {
 		t.Fatalf("bootnodes not parsed: %v", cfg.Bootnodes)

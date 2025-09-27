@@ -290,7 +290,10 @@ func main() {
 	node.SetBftEngine(bftEngine)
 
 	// --- Server Startup ---
-	rpcServer := rpc.NewServer(node)
+	rpcServer := rpc.NewServer(node, rpc.ServerConfig{
+		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
+		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
+	})
 	go rpcServer.Start(cfg.RPCAddress)
 	go p2pServer.Start()
 

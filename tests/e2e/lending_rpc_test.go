@@ -79,7 +79,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("seed lending state: %v", err)
 	}
 
-	server := rpc.NewServer(node)
+	server := rpc.NewServer(node, rpc.ServerConfig{})
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

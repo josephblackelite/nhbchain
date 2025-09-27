@@ -22,6 +22,8 @@ import (
 type Config struct {
 	ListenAddress         string         `toml:"ListenAddress"`
 	RPCAddress            string         `toml:"RPCAddress"`
+	RPCTrustedProxies     []string       `toml:"RPCTrustedProxies"`
+	RPCTrustProxyHeaders  bool           `toml:"RPCTrustProxyHeaders"`
 	DataDir               string         `toml:"DataDir"`
 	GenesisFile           string         `toml:"GenesisFile"`
 	AllowAutogenesis      bool           `toml:"AllowAutogenesis"`
