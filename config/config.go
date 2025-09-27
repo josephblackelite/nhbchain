@@ -57,6 +57,23 @@ type Config struct {
 	Swap                  swap.Config    `toml:"swap"`
 	Lending               lending.Config `toml:"lending"`
 	Mempool               MempoolConfig  `toml:"mempool"`
+	Global                Global         `toml:"global"`
+}
+
+func defaultGlobalConfig() Global {
+	return Global{
+		Governance: Governance{
+			QuorumBPS:        6000,
+			PassThresholdBPS: 5000,
+			VotingPeriodSecs: 604800,
+		},
+		Slashing: Slashing{
+			MinWindowSecs: 60,
+			MaxWindowSecs: 600,
+		},
+		Mempool: Mempool{MaxBytes: 16 << 20},
+		Blocks:  Blocks{MaxTxs: 5000},
+	}
 }
 
 const defaultBlockTimestampToleranceSeconds = 5
@@ -171,6 +188,7 @@ func Load(path string) (*Config, error) {
 	cfg.mergeP2PFromTopLevel()
 	cfg.Lending.EnsureDefaults()
 	cfg.ensureMempoolDefaults()
+	cfg.ensureGlobalDefaults(meta)
 
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "nhb-local"
@@ -309,6 +327,37 @@ func Load(path string) (*Config, error) {
 func (cfg *Config) ensureMempoolDefaults() {
 	if cfg.Mempool.MaxTransactions < 0 {
 		cfg.Mempool.MaxTransactions = 0
+	}
+}
+
+func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
+	defaults := defaultGlobalConfig()
+
+	if !meta.IsDefined("global", "governance", "QuorumBPS") {
+		cfg.Global.Governance.QuorumBPS = defaults.Governance.QuorumBPS
+	}
+	if !meta.IsDefined("global", "governance", "PassThresholdBPS") {
+		cfg.Global.Governance.PassThresholdBPS = defaults.Governance.PassThresholdBPS
+	}
+	if !meta.IsDefined("global", "governance", "VotingPeriodSecs") {
+		cfg.Global.Governance.VotingPeriodSecs = defaults.Governance.VotingPeriodSecs
+	}
+
+	if !meta.IsDefined("global", "slashing", "MinWindowSecs") {
+		cfg.Global.Slashing.MinWindowSecs = defaults.Slashing.MinWindowSecs
+	}
+	if !meta.IsDefined("global", "slashing", "MaxWindowSecs") {
+		cfg.Global.Slashing.MaxWindowSecs = defaults.Slashing.MaxWindowSecs
+	}
+	if cfg.Global.Slashing.MaxWindowSecs < cfg.Global.Slashing.MinWindowSecs {
+		cfg.Global.Slashing.MaxWindowSecs = cfg.Global.Slashing.MinWindowSecs
+	}
+
+	if !meta.IsDefined("global", "mempool", "MaxBytes") {
+		cfg.Global.Mempool.MaxBytes = defaults.Mempool.MaxBytes
+	}
+	if !meta.IsDefined("global", "blocks", "MaxTxs") {
+		cfg.Global.Blocks.MaxTxs = defaults.Blocks.MaxTxs
 	}
 }
 
@@ -753,6 +802,7 @@ func createDefault(path string) (*Config, error) {
 			"fees.baseFee",
 		},
 	}
+	cfg.Global = defaultGlobalConfig()
 	cfg.ValidatorKeystorePath = keystorePath
 	cfg.syncTopLevelToP2P()
 
