@@ -1,0 +1,261 @@
+package storage
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+
+	_ "github.com/glebarez/sqlite"
+
+	swap "nhbchain/native/swap"
+)
+
+// Storage wraps the swapd persistence layer.
+type Storage struct {
+	db *sql.DB
+}
+
+// Open initialises the backing store using sqlite-compatible DSN.
+func Open(path string) (*Storage, error) {
+	if strings.TrimSpace(path) == "" {
+		path = "file:swapd?mode=memory&cache=shared"
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	return &Storage{db: db}, nil
+}
+
+// Close releases database resources.
+func (s *Storage) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+// RecordSample persists a raw oracle quote.
+func (s *Storage) RecordSample(ctx context.Context, base, quote, source string, data swap.PriceQuote, recorded time.Time) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	if data.Rate == nil {
+		return fmt.Errorf("quote missing rate")
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO oracle_samples(pair, source, rate, observed_at, recorded_at)
+        VALUES(?, ?, ?, ?, ?)
+    `, pairKey(base, quote), strings.ToLower(source), data.Rate.FloatString(18), data.Timestamp.UTC().Unix(), recorded.UTC())
+	if err != nil {
+		return fmt.Errorf("insert sample: %w", err)
+	}
+	return nil
+}
+
+// RecordSnapshot stores the aggregated median snapshot.
+func (s *Storage) RecordSnapshot(ctx context.Context, base, quote, median string, feeders []string, proofID string, ts time.Time) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO oracle_snapshots(pair, median_rate, feeders, proof_id, observed_at, recorded_at)
+        VALUES(?, ?, ?, ?, ?, ?)
+    `, pairKey(base, quote), strings.TrimSpace(median), strings.Join(feeders, ","), proofID, ts.UTC().Unix(), time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("insert snapshot: %w", err)
+	}
+	return nil
+}
+
+// LatestSnapshot returns the most recent aggregated median for the pair.
+func (s *Storage) LatestSnapshot(ctx context.Context, base, quote string) (Snapshot, error) {
+	result := Snapshot{}
+	if s == nil {
+		return result, fmt.Errorf("storage not configured")
+	}
+	row := s.db.QueryRowContext(ctx, `
+        SELECT median_rate, feeders, proof_id, observed_at, recorded_at
+        FROM oracle_snapshots
+        WHERE pair = ?
+        ORDER BY id DESC
+        LIMIT 1
+    `, pairKey(base, quote))
+	var feeders string
+	if err := row.Scan(&result.MedianRate, &feeders, &result.ProofID, &result.ObservedAtUnix, &result.RecordedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return result, fmt.Errorf("snapshot not found")
+		}
+		return result, fmt.Errorf("query snapshot: %w", err)
+	}
+	if feeders != "" {
+		result.Feeders = strings.Split(feeders, ",")
+	}
+	return result, nil
+}
+
+// Snapshot captures the latest oracle aggregate.
+type Snapshot struct {
+	MedianRate     string
+	Feeders        []string
+	ProofID        string
+	ObservedAtUnix int64
+	RecordedAt     time.Time
+}
+
+const schema = `
+CREATE TABLE IF NOT EXISTS oracle_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair TEXT NOT NULL,
+    source TEXT NOT NULL,
+    rate TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    recorded_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oracle_samples_pair_ts ON oracle_samples(pair, observed_at);
+
+CREATE TABLE IF NOT EXISTS oracle_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair TEXT NOT NULL,
+    median_rate TEXT NOT NULL,
+    feeders TEXT NOT NULL,
+    proof_id TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    recorded_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oracle_snapshots_pair_ts ON oracle_snapshots(pair, observed_at);
+
+CREATE TABLE IF NOT EXISTS throttle_policy (
+    id TEXT PRIMARY KEY,
+    mint_limit INTEGER NOT NULL,
+    redeem_limit INTEGER NOT NULL,
+    window_seconds INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS throttle_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    amount TEXT,
+    occurred_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_throttle_events ON throttle_events(policy_id, action, occurred_at);
+`
+
+func pairKey(base, quote string) string {
+	b := strings.ToUpper(strings.TrimSpace(base))
+	q := strings.ToUpper(strings.TrimSpace(quote))
+	if b == "" && q == "" {
+		return ""
+	}
+	return b + "/" + q
+}
+
+// Policy captures mint and redeem throttles.
+type Policy struct {
+	ID          string
+	MintLimit   int
+	RedeemLimit int
+	Window      time.Duration
+}
+
+// SavePolicy upserts the throttle configuration.
+func (s *Storage) SavePolicy(ctx context.Context, policy Policy) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	if strings.TrimSpace(policy.ID) == "" {
+		return fmt.Errorf("policy id required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO throttle_policy(id, mint_limit, redeem_limit, window_seconds, updated_at)
+        VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+            mint_limit=excluded.mint_limit,
+            redeem_limit=excluded.redeem_limit,
+            window_seconds=excluded.window_seconds,
+            updated_at=CURRENT_TIMESTAMP
+    `, policy.ID, policy.MintLimit, policy.RedeemLimit, int(policy.Window.Seconds()))
+	if err != nil {
+		return fmt.Errorf("save policy: %w", err)
+	}
+	return nil
+}
+
+// GetPolicy loads the throttle policy for the supplied identifier.
+func (s *Storage) GetPolicy(ctx context.Context, id string) (Policy, error) {
+	policy := Policy{ID: id}
+	if s == nil {
+		return policy, fmt.Errorf("storage not configured")
+	}
+	row := s.db.QueryRowContext(ctx, `
+        SELECT mint_limit, redeem_limit, window_seconds
+        FROM throttle_policy
+        WHERE id = ?
+    `, id)
+	var windowSeconds int
+	if err := row.Scan(&policy.MintLimit, &policy.RedeemLimit, &windowSeconds); err != nil {
+		if err == sql.ErrNoRows {
+			return policy, fmt.Errorf("policy not found")
+		}
+		return policy, fmt.Errorf("query policy: %w", err)
+	}
+	if windowSeconds > 0 {
+		policy.Window = time.Duration(windowSeconds) * time.Second
+	}
+	return policy, nil
+}
+
+// ThrottleAction enumerates rate-limited flows.
+type ThrottleAction string
+
+const (
+	// ActionMint identifies mint requests.
+	ActionMint ThrottleAction = "mint"
+	// ActionRedeem identifies redemption requests.
+	ActionRedeem ThrottleAction = "redeem"
+)
+
+// CheckThrottle records the event if it does not exceed the configured limit.
+func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action ThrottleAction, limit int, window time.Duration, when time.Time) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("storage not configured")
+	}
+	if limit <= 0 {
+		return true, nil
+	}
+	cutoff := when.Add(-window).Unix()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+        SELECT COUNT(1)
+        FROM throttle_events
+        WHERE policy_id = ? AND action = ? AND occurred_at >= ?
+    `, policyID, string(action), cutoff).Scan(&count); err != nil {
+		return false, fmt.Errorf("count events: %w", err)
+	}
+	if count >= limit {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+        INSERT INTO throttle_events(policy_id, action, amount, occurred_at)
+        VALUES(?, ?, '', ?)
+    `, policyID, string(action), when.Unix()); err != nil {
+		return false, fmt.Errorf("record event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit throttle: %w", err)
+	}
+	return true, nil
+}

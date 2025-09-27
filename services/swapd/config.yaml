@@ -1,0 +1,24 @@
+listen: ":7074"
+database: "/var/data/swapd.sqlite"
+oracle:
+  interval: "30s"
+  max_age: "2m"
+  min_feeds: 2
+sources:
+  - name: now
+    type: nowpayments
+    endpoint: https://api.nowpayments.io/v1/exchange/rates
+    api_key: ""
+  - name: gecko
+    type: coingecko
+    endpoint: https://api.coingecko.com/api/v3/simple/price
+    assets:
+      ZNHB: znhb
+pairs:
+  - base: ZNHB
+    quote: USD
+policy:
+  id: default
+  mint_limit: 10
+  redeem_limit: 5
+  window: "1h"
