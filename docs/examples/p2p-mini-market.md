@@ -88,7 +88,7 @@ All endpoints require the standard API key + HMAC headers. Mutating calls also
 include the wallet signature of the buyer, seller, or arbitrator so the gateway
 can assert on-chain authority.
 
-The mini-market demo talks to the public RPC (`https://rpc.nhbcoin.net`) to keep
+The mini-market demo talks to the public RPC (`https://rpc.testnet.nhbcoin.net`) to keep
 credentials client-side for self-hosted QA, but production operators integrate
 with `api.nhbcoin.net` to leverage persistent offer storage, idempotency, and
 webhook delivery of trade events.

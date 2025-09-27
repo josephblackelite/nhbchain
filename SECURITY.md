@@ -7,5 +7,5 @@ We operate a coordinated vulnerability disclosure program to keep NHBChain parti
 - **Audit readiness:** External assessors can access frozen commits, build steps, and fixtures via [`docs/security/audit-readiness.md`](docs/security/audit-readiness.md).
 - **PGP key:** Our repository key and fingerprint live in [`docs/security/repository-pgp-key.asc`](docs/security/repository-pgp-key.asc).
 
-To report a vulnerability, encrypt your findings with the repository PGP key and email `security@nhbcoin.net`. For urgent issues, escalate via Signal at `+1-415-555-0119`.
+To report a vulnerability, encrypt your findings with the repository PGP key and email `security@nehborly.net`. For urgent issues, escalate via Signal at `+13234559568`.
 

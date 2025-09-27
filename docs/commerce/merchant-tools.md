@@ -107,8 +107,8 @@ Use the sandbox to rehearse complex trade flows and validate your automation pri
 
 1. Obtain sandbox API key and wallet test keys from the merchant console.
 2. Run sample script: `npm run simulate:settlement -- --buyer <addr> --seller <addr>`.
-3. Monitor emitted events via WebSocket (`wss://sandbox.api.nhbchain.com/escrow/events`).
-4. Review sandbox dashboard metrics (`https://sandbox.console.nhbchain.com/commerce`) to ensure exports and SLA graphs render as
+3. Monitor emitted events via WebSocket (`wss://sandbox.api.nhbcoin.net/escrow/events`).
+4. Review sandbox dashboard metrics (`https://sandbox.console.nhbcoin.net/commerce`) to ensure exports and SLA graphs render as
    expected.
 
 ### 3.4 Graduation checklist
@@ -124,5 +124,5 @@ Use the sandbox to rehearse complex trade flows and validate your automation pri
 
 * **Documentation:** `/docs/escrow/escrow.md` (state machine), `/docs/escrow/gateway-api.md` (REST operations).
 * **SDKs:** TypeScript & Go SDKs include helpers for signing requests and consuming paginated endpoints.
-* **Contact:** Reach the merchant integrations team at `merchants@nhbcoin.net` for sandbox access, production onboarding, or
+* **Contact:** Reach the merchant integrations team at `merchants@nehborly.net` for sandbox access, production onboarding, or
   escalation support.

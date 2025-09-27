@@ -7,11 +7,11 @@ info:
     name: CC BY 4.0
     url: https://creativecommons.org/licenses/by/4.0/
 servers:
-  - url: https://gateway.dev.nhbchain.com
+  - url: https://gateway.dev.nhbcoin.net
     description: Development gateway
-  - url: https://gateway.staging.nhbchain.com
+  - url: https://gateway.staging.nhbcoin.net
     description: Staging gateway
-  - url: https://gateway.nhbchain.com
+  - url: https://gateway.nhbcoin.net
     description: Production gateway
 security:
   - ApiKeyAuth: []

@@ -212,17 +212,17 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 
 ## Security, Compliance, and Operations
 
-- **Authentication** — RPC bearer tokens protect privileged calls; rotate secrets regularly.
+- **Authentication** — RPC bearer tokens protect privileged calls; rotate secrets regularly and enforce mutual TLS or HMAC as described in the [Network Hardening Playbook](docs/security/network-hardening.md).
 - **Key Management** — Validator keys default to encrypted Ethereum-compatible keystores. Integrate with external KMS via `ValidatorKMSURI` and `ValidatorKMSEnv`.
-- **Observability** — Monitor validator uptime, engagement scores, and staking state using CLI commands or forthcoming telemetry dashboards.
+- **Observability** — Monitor validator uptime, engagement scores, and staking state using CLI commands or forthcoming telemetry dashboards. Forward RPC/WAF logs to your SIEM so abuse attempts can be correlated with P2P events.
 - **Compliance Alignment** — Native identity modules provide audit trails, verified contact points, and consent-driven discovery suitable for regulatory review.
 - **Audits & Bug Bounty** — We run an ongoing [bug bounty program](docs/security/bug-bounty.md) and maintain an [audit readiness guide](docs/security/audit-readiness.md) with frozen commits, reproducible builds, and fixtures for third-party assessors.
 
 ### Reporting Vulnerabilities
 
 1. Encrypt your findings with the [repository PGP key](docs/security/repository-pgp-key.asc) (fingerprint `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`).
-2. Email the encrypted report to `security@nhbcoin.net` or use the [security issue template](.github/ISSUE_TEMPLATE/security.yml) to create a private triage ticket.
-3. For time-sensitive issues, escalate via Signal at `+1-415-555-0119` after sending your report.
+2. Email the encrypted report to `security@nehborly.net` or use the [security issue template](.github/ISSUE_TEMPLATE/security.yml) to create a private triage ticket.
+3. For time-sensitive issues, escalate via Signal at `+13234559568` after sending your report.
 
 Full policy details, SLAs, and embargo expectations live in [`docs/security/disclosure.md`](docs/security/disclosure.md). A machine-readable summary is published at [`.well-known/security.txt`](.well-known/security.txt) for automated scanners.
 
