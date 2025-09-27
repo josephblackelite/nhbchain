@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -78,6 +79,10 @@ func main() {
 	cfg, err := config.Load(*configFile)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load config: %v", err))
+	}
+
+	if err := config.ValidateConfig(cfg.Global); err != nil {
+		log.Fatal("invalid configuration", "err", err)
 	}
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
