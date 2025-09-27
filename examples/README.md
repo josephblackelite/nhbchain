@@ -28,6 +28,22 @@ The sample configuration defaults to the public NHB infrastructure:
 
 The `.env` file is shared across every app in the workspace. See [docs/examples/overview.md](../docs/examples/overview.md) for an explanation of all variables and how to target self-hosted endpoints.
 
+### Local node configuration knobs
+
+If you are pointing the workspace at a validator that you operate locally:
+
+- Set `NHB_RPC_TRUSTED_PROXIES` to the IPs of any reverse proxies (for example,
+  `127.0.0.1` when running Caddy or nginx on the same host). The node only
+  honours forwarded client IPs from this list when `RPCTrustProxyHeaders` is
+  enabled in `config.toml`.
+- Leave `NHB_RPC_TRUST_PROXY_HEADERS=false` until you have verified the proxy
+  chain strips inbound `X-Forwarded-For` headers from clients.
+- Mirror your desired mempool ceiling in `NHB_MEMPOOL_MAX_TX` and update the
+  node’s `[mempool] MaxTransactions` accordingly so tooling and documentation
+  stay in sync.
+- Provide `NHB_RPC_TLS_CERT` and `NHB_RPC_TLS_KEY` when testing HTTPS locally.
+  The node loads these paths via `RPCTLSCertFile` / `RPCTLSKeyFile`.
+
 ## Workspace layout
 
 ```

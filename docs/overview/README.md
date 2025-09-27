@@ -16,6 +16,20 @@ The governance module coordinates configuration changes across the network.
 3. **Voting Window** – Upon acceptance, the proposal enters the voting period immediately. `VotingStart` is the submission timestamp, `VotingEnd` is computed from the configured voting period, and `TimelockEnd` extends the execution window after a successful vote.
 4. **Events & Indexing** – A `gov.proposed` event is emitted so wallets, dashboards, and indexers can track the proposal lifecycle from creation through timelock.
 
+### RPC & transaction safeguards
+
+- **Trusted proxies:** The HTTP RPC server only honours `X-Forwarded-For` when the
+  remote IP is declared in `RPCTrustedProxies` and `RPCTrustProxyHeaders=true`.
+  Leave the toggle off until a hardened proxy tier is in place.
+- **Client quotas:** Each unique client source may submit five transactions per
+  minute. Exceeding the quota yields HTTP 429 / `-32020`. Wallets and SDKs
+  should treat this as a backoff signal and avoid retry storms.
+- **Timeout/TLS posture:** `RPCReadHeaderTimeout`, `RPCReadTimeout`,
+  `RPCWriteTimeout`, `RPCIdleTimeout`, `RPCTLSCertFile`, and `RPCTLSKeyFile`
+  expose node-level controls that must mirror load-balancer settings. Operators
+  running behind mutual TLS proxies should still set certificate paths so that
+  probe tooling can exercise end-to-end TLS in lower environments.
+
 ## Identity & Username Directory
 
 The identity subsystem introduces human-readable aliases, email discovery, avatars, and claimables for pay-by-username UX.
