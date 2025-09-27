@@ -1,5 +1,8 @@
 # Gateway Overview
 
+> [!WARNING]
+> The legacy `/rpc` compatibility endpoint is scheduled for removal. Review the [JSON-RPC decommission timeline](../migrate/deprecation-timeline.md) and migrate to the scoped service APIs before Phase D completes.
+
 The API gateway acts as the single public edge for NHBChain traffic. Requests
 arriving at `https://app.nhbcoin.com` are served by the gateway and are routed
 internally to dedicated services:

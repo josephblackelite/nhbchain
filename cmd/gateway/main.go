@@ -25,7 +25,9 @@ import (
 
 func main() {
 	var cfgPath string
+	var compatModeFlag string
 	flag.StringVar(&cfgPath, "config", "", "path to gateway configuration")
+	flag.StringVar(&compatModeFlag, "compat-mode", "", "override JSON-RPC compatibility mode (enabled|disabled|auto)")
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
@@ -64,6 +66,30 @@ func main() {
 		logger.Fatalf("load config: %v", err)
 	}
 
+	configuredMode := compat.ModeAuto
+	if compatModeFlag != "" {
+		parsed, err := compat.ParseMode(compatModeFlag)
+		if err != nil {
+			logger.Fatalf("parse compat-mode flag: %v", err)
+		}
+		configuredMode = parsed
+	} else if envMode := strings.TrimSpace(os.Getenv("NHB_COMPAT_MODE")); envMode != "" {
+		parsed, err := compat.ParseMode(envMode)
+		if err != nil {
+			logger.Fatalf("parse NHB_COMPAT_MODE: %v", err)
+		}
+		configuredMode = parsed
+	}
+	effectiveMode := compat.DefaultMode()
+	if configuredMode != compat.ModeAuto {
+		effectiveMode = configuredMode
+	}
+	enableCompat := compat.ShouldEnable(configuredMode)
+	logger.Printf("compatibility mode: requested=%s effective=%s enabled=%t", configuredMode, effectiveMode, enableCompat)
+	if _, err := compat.Plan(); err != nil {
+		logger.Printf("compat deprecation plan not loaded: %v", err)
+	}
+
 	serviceEndpoints := ensureServiceConfig(cfg)
 	services := make([]*compat.Service, 0, len(serviceEndpoints))
 	for name, endpoint := range serviceEndpoints {
@@ -81,7 +107,13 @@ func main() {
 		}
 	}
 
-	dispatcher := compat.NewDispatcher(services, compat.DefaultMappings)
+	var compatHandler http.Handler
+	if enableCompat {
+		dispatcher := compat.NewDispatcher(services, compat.DefaultMappings)
+		compatHandler = dispatcher.Handler()
+	} else {
+		logger.Println("JSON-RPC compatibility dispatcher disabled")
+	}
 
 	obs := middleware.NewObservability(middleware.ObservabilityConfig{
 		ServiceName:   cfg.Observability.ServiceName,
@@ -151,7 +183,7 @@ func main() {
 				RateLimitKey: "consensus",
 			},
 		},
-		CompatHandler: dispatcher.Handler(),
+		CompatHandler: compatHandler,
 		Authenticator: auth,
 		RateLimiter:   middleware.NewRateLimiter(rateLimits, logger),
 		Observability: obs,

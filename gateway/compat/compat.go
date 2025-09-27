@@ -163,6 +163,17 @@ func writeError(w http.ResponseWriter, id any, code int, msg string) {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	notice := DefaultNotice()
+	warning := strings.ReplaceAll(notice.Warning, "\"", "'")
+	if warning != "" {
+		w.Header().Add("Warning", fmt.Sprintf("299 - \"%s\"", warning))
+	}
+	if notice.Link != "" {
+		w.Header().Add("Link", fmt.Sprintf("<%s>; rel=\"deprecation\"; type=\"text/html\"", notice.Link))
+	}
+	if notice.Phase != "" {
+		w.Header().Set("X-NHB-Compat-Phase", notice.Phase)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(v)
