@@ -1,6 +1,6 @@
-# CODEX NET-1 Delivery Notes
+# NHBCHAIN NET-1 Delivery Notes
 
-These notes document the CODEX NET-1 hardening work so protocol engineers,
+These notes document the NHBCHAIN NET-1 hardening work so protocol engineers,
 operations, and partner teams have a canonical reference for the shipped
 changes.
 
