@@ -220,9 +220,6 @@ func (l *Ledger) List(startTs, endTs int64, cursor string, limit int) ([]*Vouche
 	if l == nil {
 		return nil, "", fmt.Errorf("ledger not initialised")
 	}
-	if limit <= 0 {
-		limit = 50
-	}
 	entries, err := l.loadIndex()
 	if err != nil {
 		return nil, "", err
@@ -258,8 +255,12 @@ func (l *Ledger) List(startTs, endTs int64, cursor string, limit int) ([]*Vouche
 		}
 	}
 	nextCursor := ""
-	records := make([]*VoucherRecord, 0, min(limit, len(filtered)-startIdx))
-	for i := startIdx; i < len(filtered) && len(records) < limit; i++ {
+	pageSize := limit
+	if pageSize <= 0 {
+		pageSize = len(filtered) - startIdx
+	}
+	records := make([]*VoucherRecord, 0, min(pageSize, len(filtered)-startIdx))
+	for i := startIdx; i < len(filtered) && len(records) < pageSize; i++ {
 		entry := filtered[i]
 		record, ok, err := l.Get(entry.ProviderTxID)
 		if err != nil {
