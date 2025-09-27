@@ -33,6 +33,23 @@ type Pauses struct {
 	POTSO   bool
 }
 
+// Quota defines rate limits for module interactions on a per-address basis.
+type Quota struct {
+	MaxRequestsPerMin uint32
+	MaxNHBPerEpoch    uint64 // in gwei or base units
+	EpochSeconds      uint32 // e.g., 3600
+}
+
+// Quotas groups quotas for each module.
+type Quotas struct {
+	Lending Quota
+	Swap    Quota
+	Escrow  Quota
+	Trade   Quota
+	Loyalty Quota
+	POTSO   Quota
+}
+
 // Global bundles the runtime configuration values enforced by ValidateConfig.
 type Global struct {
 	Governance Governance
@@ -40,4 +57,5 @@ type Global struct {
 	Mempool    Mempool
 	Blocks     Blocks
 	Pauses     Pauses
+	Quotas     Quotas
 }
