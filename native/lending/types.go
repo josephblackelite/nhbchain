@@ -13,6 +13,10 @@ type Market struct {
 	// TotalNHBSupplied is the aggregate NHB liquidity currently deposited by
 	// lenders.
 	TotalNHBSupplied *big.Int
+	// TotalSupplyShares represents the aggregate LP token supply used to
+	// apportion interest to suppliers. Shares are scaled by 1e18 to match
+	// the supply index precision.
+	TotalSupplyShares *big.Int
 	// TotalNHBBorrowed tracks the outstanding NHB borrowed across all
 	// accounts.
 	TotalNHBBorrowed *big.Int
@@ -36,6 +40,9 @@ type UserAccount struct {
 	// CollateralZNHB records the ZNHB amount pledged as collateral for
 	// borrowing.
 	CollateralZNHB *big.Int
+	// SupplyShares stores the LP token amount minted when supplying
+	// liquidity. Shares are scaled by 1e18 to align with the supply index.
+	SupplyShares *big.Int
 	// DebtNHB stores the principal NHB borrowed before interest accrual.
 	DebtNHB *big.Int
 	// ScaledDebt reflects the debt adjusted by the borrow index to capture
