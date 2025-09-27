@@ -200,6 +200,62 @@ func TestLedgerExportCSV(t *testing.T) {
 	}
 }
 
+func TestLedgerExportCSVNoPagination(t *testing.T) {
+	store := newMockStorage()
+	ledger := NewLedger(store)
+	base := time.Unix(1800000000, 0)
+	idx := 0
+	ledger.SetClock(func() time.Time {
+		current := base.Add(time.Duration(idx) * time.Second)
+		idx++
+		return current
+	})
+	expectedTotal := big.NewInt(0)
+	for i := 0; i < 60; i++ {
+		amount := big.NewInt(int64(i + 1))
+		expectedTotal = new(big.Int).Add(expectedTotal, amount)
+		record := &VoucherRecord{
+			Provider:        "p",
+			ProviderTxID:    fmt.Sprintf("bulk-%d", i),
+			FiatCurrency:    "USD",
+			FiatAmount:      "1",
+			Rate:            "1",
+			Token:           "ZNHB",
+			MintAmountWei:   amount,
+			QuoteTimestamp:  base.Add(time.Duration(i) * time.Second).Unix(),
+			OracleSource:    "manual",
+			OracleMedian:    "1",
+			OracleFeeders:   []string{"manual"},
+			PriceProofID:    fmt.Sprintf("proof-%d", i),
+			MinterSignature: "0xsig",
+		}
+		if err := ledger.Put(record); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	encoded, count, total, err := ledger.ExportCSV(0, 0)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if count != 60 {
+		t.Fatalf("expected 60 entries, got %d", count)
+	}
+	if total.Cmp(expectedTotal) != 0 {
+		t.Fatalf("unexpected total %s", total)
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rows := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(rows) != 61 {
+		t.Fatalf("expected 61 rows, got %d", len(rows))
+	}
+	if !strings.Contains(rows[len(rows)-1], "bulk-59") {
+		t.Fatalf("expected last row to include bulk-59, got %s", rows[len(rows)-1])
+	}
+}
+
 func TestLedgerMarkReconciled(t *testing.T) {
 	store := newMockStorage()
 	ledger := NewLedger(store)
