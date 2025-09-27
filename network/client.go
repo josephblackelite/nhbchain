@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"nhbchain/p2p"
-	networkv1 "nhbchain/proto/network"
+	networkv1 "nhbchain/proto/network/v1"
 )
 
 var (
