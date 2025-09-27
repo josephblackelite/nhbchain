@@ -1,5 +1,7 @@
 package loyalty
 
+import nativecommon "nhbchain/native/common"
+
 var (
 	programPrefix             = []byte("loyalty/program/")
 	programOwnerIndexPref     = []byte("loyalty/merchant/")
@@ -69,6 +71,9 @@ func ownerPaymasterKey(owner [20]byte) []byte {
 // PauseProgram transitions the specified program into an inactive state. The
 // caller must be either the program owner or hold the loyalty admin role.
 func (r *Registry) PauseProgram(caller [20]byte, id ProgramID) error {
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
+	}
 	program := new(Program)
 	found, err := r.st.KVGet(programKey(id), program)
 	if err != nil {
@@ -94,6 +99,9 @@ func (r *Registry) PauseProgram(caller [20]byte, id ProgramID) error {
 // ResumeProgram reactivates the specified program. The caller must be either
 // the program owner or hold the loyalty admin role.
 func (r *Registry) ResumeProgram(caller [20]byte, id ProgramID) error {
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
+	}
 	program := new(Program)
 	found, err := r.st.KVGet(programKey(id), program)
 	if err != nil {

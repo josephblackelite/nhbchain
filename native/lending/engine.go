@@ -7,6 +7,7 @@ import (
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 )
 
 var (
@@ -33,6 +34,8 @@ var (
 
 const blocksPerYear = 31_536_000
 
+const moduleName = "lending"
+
 type engineState interface {
 	GetMarket(poolID string) (*Market, error)
 	PutMarket(poolID string, market *Market) error
@@ -58,6 +61,7 @@ type Engine struct {
 	developerFeeBps   uint64
 	developerFeeAddr  crypto.Address
 	collateralRouting CollateralRouting
+	pauses            nativecommon.PauseView
 }
 
 // NewEngine constructs a lending engine configured with the module treasury
@@ -72,6 +76,13 @@ func NewEngine(moduleAddr, collateralAddr crypto.Address, params RiskParameters)
 
 // SetState wires the engine to the external persistence layer.
 func (e *Engine) SetState(state engineState) { e.state = state }
+
+func (e *Engine) SetPauses(p nativecommon.PauseView) {
+	if e == nil {
+		return
+	}
+	e.pauses = p
+}
 
 // SetInterestModel configures the interest rate model used by the engine.
 func (e *Engine) SetInterestModel(model *InterestModel) {
@@ -157,6 +168,9 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
@@ -239,6 +253,9 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
 	if amountLP == nil || amountLP.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
@@ -320,6 +337,9 @@ func (e *Engine) DepositCollateral(userAddr crypto.Address, amount *big.Int) err
 	if e == nil || e.state == nil {
 		return errNilState
 	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	if amount == nil || amount.Sign() <= 0 {
 		return errInvalidAmount
 	}
@@ -360,6 +380,9 @@ func (e *Engine) DepositCollateral(userAddr crypto.Address, amount *big.Int) err
 func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) error {
 	if e == nil || e.state == nil {
 		return errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return errInvalidAmount
@@ -431,6 +454,9 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient crypto.Address, feeBps uint64) (*big.Int, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
@@ -572,6 +598,9 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
@@ -659,6 +688,10 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.Int, error) {
 	if e == nil || e.state == nil {
 		return nil, nil, errNilState
+	}
+
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, nil, err
 	}
 
 	market, err := e.ensureMarket()
@@ -964,6 +997,9 @@ func (e *Engine) WithdrawDeveloperFees(recipient crypto.Address, amount *big.Int
 func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protocol bool) (*big.Int, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount

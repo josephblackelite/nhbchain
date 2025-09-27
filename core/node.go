@@ -31,6 +31,7 @@ import (
 	syncmgr "nhbchain/core/sync"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
 	govcfg "nhbchain/native/gov"
@@ -93,11 +94,19 @@ type Node struct {
 	lendingCollateralRouting     lending.CollateralRouting
 	creatorPayoutVaultAddr       crypto.Address
 	creatorRewardsTreasuryAddr   crypto.Address
+	modulePauseMu                sync.RWMutex
+	modulePauses                 map[string]bool
 }
 
 const (
 	rolePaymasterAdmin     = "ROLE_PAYMASTER_ADMIN"
 	roleReputationVerifier = "ROLE_REPUTATION_VERIFIER"
+	moduleLending          = "lending"
+	moduleSwap             = "swap"
+	moduleEscrow           = "escrow"
+	moduleTrade            = "trade"
+	moduleLoyalty          = "loyalty"
+	modulePotso            = "potso"
 )
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
@@ -272,7 +281,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		lendingCollateralAddr:      collateralAddr,
 		creatorPayoutVaultAddr:     creatorVaultAddr,
 		creatorRewardsTreasuryAddr: creatorRewardsAddr,
+		modulePauses:               make(map[string]bool),
 	}
+
+	node.SetModulePauses(config.Pauses{})
 
 	node.SetLendingRiskParameters(lending.RiskParameters{})
 	node.SetLendingAccrualConfig(0, 0, lending.DefaultInterestModel)
@@ -285,6 +297,60 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	}
 
 	return node, nil
+}
+
+func normalizeModuleName(module string) string {
+	return strings.ToLower(strings.TrimSpace(module))
+}
+
+func (n *Node) SetModulePauses(pauses config.Pauses) {
+	if n == nil {
+		return
+	}
+	n.modulePauseMu.Lock()
+	if n.modulePauses == nil {
+		n.modulePauses = make(map[string]bool)
+	}
+	n.modulePauses[moduleLending] = pauses.Lending
+	n.modulePauses[moduleSwap] = pauses.Swap
+	n.modulePauses[moduleEscrow] = pauses.Escrow
+	n.modulePauses[moduleTrade] = pauses.Trade
+	n.modulePauses[moduleLoyalty] = pauses.Loyalty
+	n.modulePauses[modulePotso] = pauses.POTSO
+	n.modulePauseMu.Unlock()
+	if n.state != nil {
+		n.state.SetPauseView(n)
+	}
+}
+
+func (n *Node) SetModulePaused(module string, paused bool) {
+	if n == nil {
+		return
+	}
+	name := normalizeModuleName(module)
+	if name == "" {
+		return
+	}
+	n.modulePauseMu.Lock()
+	if n.modulePauses == nil {
+		n.modulePauses = make(map[string]bool)
+	}
+	n.modulePauses[name] = paused
+	n.modulePauseMu.Unlock()
+}
+
+func (n *Node) IsPaused(module string) bool {
+	if n == nil {
+		return false
+	}
+	name := normalizeModuleName(module)
+	if name == "" {
+		return false
+	}
+	n.modulePauseMu.RLock()
+	paused := n.modulePauses[name]
+	n.modulePauseMu.RUnlock()
+	return paused
 }
 
 // SetMempoolLimit configures the maximum number of transactions retained in the mempool.
@@ -949,6 +1015,9 @@ func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, err
 	if n == nil {
 		return nil, fmt.Errorf("node not initialised")
 	}
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return nil, err
+	}
 	if n.evidenceStore == nil {
 		n.evidenceStore = evidence.NewStore(n.db)
 	}
@@ -1155,6 +1224,9 @@ func (n *Node) PotsoRewardConfig() potso.RewardConfig {
 }
 
 func (n *Node) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return err
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	return n.state.SetPotsoRewardConfig(cfg)
@@ -1167,6 +1239,9 @@ func (n *Node) PotsoWeightConfig() potso.WeightParams {
 }
 
 func (n *Node) SetPotsoWeightConfig(cfg potso.WeightParams) error {
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return err
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	return n.state.SetPotsoWeightConfig(cfg)
@@ -1274,6 +1349,9 @@ func (n *Node) NetworkSeedsParam() ([]byte, bool, error) {
 }
 
 func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, error) {
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return false, nil, err
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
@@ -1475,7 +1553,9 @@ func (n *Node) LoyaltyManager() *nhbstate.Manager {
 }
 
 func (n *Node) LoyaltyRegistry() *loyalty.Registry {
-	return loyalty.NewRegistry(n.LoyaltyManager())
+	registry := loyalty.NewRegistry(n.LoyaltyManager())
+	registry.SetPauses(n)
+	return registry
 }
 
 func (n *Node) LoyaltyBusinessByID(id loyalty.BusinessID) (*loyalty.Business, bool, error) {
@@ -1544,6 +1624,7 @@ func (n *Node) newEscrowEngine(manager *nhbstate.Manager) *escrow.Engine {
 	engine.SetState(manager)
 	engine.SetEmitter(escrowEventEmitter{node: n})
 	engine.SetFeeTreasury(n.escrowTreasury)
+	engine.SetPauses(n)
 	return engine
 }
 
@@ -1552,6 +1633,7 @@ func (n *Node) newTradeEngine(manager *nhbstate.Manager) *escrow.TradeEngine {
 	tradeEngine := escrow.NewTradeEngine(escrowEngine)
 	tradeEngine.SetState(manager)
 	tradeEngine.SetEmitter(escrowEventEmitter{node: n})
+	tradeEngine.SetPauses(n)
 	return tradeEngine
 }
 
@@ -2222,6 +2304,9 @@ func (n *Node) PotsoHeartbeat(addr [20]byte, blockHeight uint64, blockHash []byt
 	if !potso.WithinTolerance(timestamp, time.Now()) {
 		return nil, 0, fmt.Errorf("heartbeat timestamp outside tolerance")
 	}
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return nil, 0, err
+	}
 	block, err := n.chain.GetBlockByHeight(blockHeight)
 	if err != nil {
 		return nil, 0, err
@@ -2357,6 +2442,10 @@ func (n *Node) PotsoStakeLock(owner [20]byte, amount *big.Int) (uint64, *potso.S
 		return 0, nil, fmt.Errorf("amount must be positive")
 	}
 
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return 0, nil, err
+	}
+
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
@@ -2428,6 +2517,10 @@ func (n *Node) PotsoStakeLock(owner [20]byte, amount *big.Int) (uint64, *potso.S
 func (n *Node) PotsoStakeUnbond(owner [20]byte, amount *big.Int) (*big.Int, uint64, error) {
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, 0, fmt.Errorf("amount must be positive")
+	}
+
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return nil, 0, err
 	}
 
 	n.stateMu.Lock()
@@ -2540,6 +2633,9 @@ func (n *Node) PotsoStakeUnbond(owner [20]byte, amount *big.Int) (*big.Int, uint
 
 // PotsoStakeWithdraw releases any matured stake locks back to the owner account.
 func (n *Node) PotsoStakeWithdraw(owner [20]byte) ([]potso.WithdrawResult, error) {
+	if err := nativecommon.Guard(n, modulePotso); err != nil {
+		return nil, err
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
@@ -2985,6 +3081,9 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bool, error) {
 	if submission == nil || submission.Voucher == nil {
 		return "", false, fmt.Errorf("swap: voucher required")
+	}
+	if err := nativecommon.Guard(n, moduleSwap); err != nil {
+		return "", false, err
 	}
 	voucher := submission.Voucher
 	if strings.TrimSpace(voucher.Domain) != swap.VoucherDomainV1 {
@@ -3485,6 +3584,9 @@ func (n *Node) SwapProviderStatus() swap.ProviderStatus {
 
 // SwapReverseVoucher reverses a previously minted voucher and moves funds into the refund sink.
 func (n *Node) SwapReverseVoucher(providerTxID string) error {
+	if err := nativecommon.Guard(n, moduleSwap); err != nil {
+		return err
+	}
 	trimmed := strings.TrimSpace(providerTxID)
 	if trimmed == "" {
 		return fmt.Errorf("swap: providerTxId required")
@@ -3549,6 +3651,9 @@ func (n *Node) SwapMarkReconciled(ids []string) error {
 	if len(trimmed) == 0 {
 		return nil
 	}
+	if err := nativecommon.Guard(n, moduleSwap); err != nil {
+		return err
+	}
 	return n.WithState(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		if err := ledger.MarkReconciled(trimmed); err != nil {
@@ -3569,6 +3674,9 @@ func (n *Node) SwapMarkReconciled(ids []string) error {
 func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 	if receipt == nil {
 		return fmt.Errorf("swap: burn receipt required")
+	}
+	if err := nativecommon.Guard(n, moduleSwap); err != nil {
+		return err
 	}
 	trimmedID := strings.TrimSpace(receipt.ReceiptID)
 	if trimmedID == "" {
