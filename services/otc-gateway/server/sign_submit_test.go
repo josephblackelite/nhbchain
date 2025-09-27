@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,7 +76,7 @@ func (c *stubSwapClient) GetVoucher(ctx context.Context, providerTxID string) (*
 
 func TestSignAndSubmit_Minted(t *testing.T) {
 	db := setupTestDB(t)
-	branch := models.Branch{ID: uuid.New(), Name: "Branch", Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
+	branch := models.Branch{ID: uuid.New(), Name: fmt.Sprintf("Branch-%s", uuid.NewString()), Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
 	if err := db.Create(&branch).Error; err != nil {
 		t.Fatalf("create branch: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 
 func TestSignAndSubmit_MakerChecker(t *testing.T) {
 	db := setupTestDB(t)
-	branch := models.Branch{ID: uuid.New(), Name: "Branch", Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
+	branch := models.Branch{ID: uuid.New(), Name: fmt.Sprintf("Branch-%s", uuid.NewString()), Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
 	if err := db.Create(&branch).Error; err != nil {
 		t.Fatalf("create branch: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestSignAndSubmit_MakerChecker(t *testing.T) {
 
 func TestSignAndSubmit_IdempotentReplay(t *testing.T) {
 	db := setupTestDB(t)
-	branch := models.Branch{ID: uuid.New(), Name: "Branch", Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
+	branch := models.Branch{ID: uuid.New(), Name: fmt.Sprintf("Branch-%s", uuid.NewString()), Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
 	if err := db.Create(&branch).Error; err != nil {
 		t.Fatalf("create branch: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestSignAndSubmit_IdempotentReplay(t *testing.T) {
 
 func TestSignAndSubmit_AwaitMinted(t *testing.T) {
 	db := setupTestDB(t)
-	branch := models.Branch{ID: uuid.New(), Name: "Branch", Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
+	branch := models.Branch{ID: uuid.New(), Name: fmt.Sprintf("Branch-%s", uuid.NewString()), Region: "US", RegionCap: 1_000_000, InvoiceLimit: 100_000}
 	if err := db.Create(&branch).Error; err != nil {
 		t.Fatalf("create branch: %v", err)
 	}

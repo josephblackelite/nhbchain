@@ -2,6 +2,7 @@ package recon
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ func setupReconDB(t *testing.T) *gorm.DB {
 func TestReconcilerDryRunNoAnomalies(t *testing.T) {
 	db := setupReconDB(t)
 	tz := time.FixedZone("UTC", 0)
-	branch := models.Branch{ID: uuid.New(), Name: "HQ", Region: "US", RegionCap: 250000, InvoiceLimit: 50000}
+	branch := models.Branch{ID: uuid.New(), Name: fmt.Sprintf("HQ-%s", uuid.NewString()), Region: "US", RegionCap: 250000, InvoiceLimit: 50000}
 	if err := db.Create(&branch).Error; err != nil {
 		t.Fatalf("create branch: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestReconcilerDryRunNoAnomalies(t *testing.T) {
 func TestReconcilerDetectsAmountMismatch(t *testing.T) {
 	db := setupReconDB(t)
 	tz := time.UTC
-	branch := models.Branch{ID: uuid.New(), Name: "HQ", Region: "US", RegionCap: 50000, InvoiceLimit: 20000}
+	branch := models.Branch{ID: uuid.New(), Name: fmt.Sprintf("HQ-%s", uuid.NewString()), Region: "US", RegionCap: 50000, InvoiceLimit: 20000}
 	if err := db.Create(&branch).Error; err != nil {
 		t.Fatalf("branch: %v", err)
 	}

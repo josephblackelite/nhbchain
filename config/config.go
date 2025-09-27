@@ -12,6 +12,7 @@ import (
 	"nhbchain/core/genesis"
 	"nhbchain/crypto"
 	"nhbchain/native/governance"
+	"nhbchain/native/lending"
 	"nhbchain/native/potso"
 	swap "nhbchain/native/swap"
 
@@ -19,33 +20,34 @@ import (
 )
 
 type Config struct {
-	ListenAddress         string      `toml:"ListenAddress"`
-	RPCAddress            string      `toml:"RPCAddress"`
-	DataDir               string      `toml:"DataDir"`
-	GenesisFile           string      `toml:"GenesisFile"`
-	AllowAutogenesis      bool        `toml:"AllowAutogenesis"`
-	ValidatorKeystorePath string      `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI       string      `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv       string      `toml:"ValidatorKMSEnv"`
-	NetworkName           string      `toml:"NetworkName"`
-	Bootnodes             []string    `toml:"Bootnodes"`
-	PersistentPeers       []string    `toml:"PersistentPeers"`
-	BootstrapPeers        []string    `toml:"BootstrapPeers,omitempty"`
-	MaxPeers              int         `toml:"MaxPeers"`
-	MaxInbound            int         `toml:"MaxInbound"`
-	MaxOutbound           int         `toml:"MaxOutbound"`
-	MinPeers              int         `toml:"MinPeers"`
-	OutboundPeers         int         `toml:"OutboundPeers"`
-	PeerBanSeconds        int         `toml:"PeerBanSeconds"`
-	ReadTimeout           int         `toml:"ReadTimeout"`
-	WriteTimeout          int         `toml:"WriteTimeout"`
-	MaxMsgBytes           int         `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond      float64     `toml:"MaxMsgsPerSecond"`
-	ClientVersion         string      `toml:"ClientVersion"`
-	P2P                   P2PSection  `toml:"p2p"`
-	Potso                 PotsoConfig `toml:"potso"`
-	Governance            GovConfig   `toml:"governance"`
-	Swap                  swap.Config `toml:"swap"`
+	ListenAddress         string         `toml:"ListenAddress"`
+	RPCAddress            string         `toml:"RPCAddress"`
+	DataDir               string         `toml:"DataDir"`
+	GenesisFile           string         `toml:"GenesisFile"`
+	AllowAutogenesis      bool           `toml:"AllowAutogenesis"`
+	ValidatorKeystorePath string         `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI       string         `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv       string         `toml:"ValidatorKMSEnv"`
+	NetworkName           string         `toml:"NetworkName"`
+	Bootnodes             []string       `toml:"Bootnodes"`
+	PersistentPeers       []string       `toml:"PersistentPeers"`
+	BootstrapPeers        []string       `toml:"BootstrapPeers,omitempty"`
+	MaxPeers              int            `toml:"MaxPeers"`
+	MaxInbound            int            `toml:"MaxInbound"`
+	MaxOutbound           int            `toml:"MaxOutbound"`
+	MinPeers              int            `toml:"MinPeers"`
+	OutboundPeers         int            `toml:"OutboundPeers"`
+	PeerBanSeconds        int            `toml:"PeerBanSeconds"`
+	ReadTimeout           int            `toml:"ReadTimeout"`
+	WriteTimeout          int            `toml:"WriteTimeout"`
+	MaxMsgBytes           int            `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond      float64        `toml:"MaxMsgsPerSecond"`
+	ClientVersion         string         `toml:"ClientVersion"`
+	P2P                   P2PSection     `toml:"p2p"`
+	Potso                 PotsoConfig    `toml:"potso"`
+	Governance            GovConfig      `toml:"governance"`
+	Swap                  swap.Config    `toml:"swap"`
+	Lending               lending.Config `toml:"lending"`
 }
 
 const defaultBlockTimestampToleranceSeconds = 5
@@ -153,6 +155,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.mergeP2PFromTopLevel()
+	cfg.Lending.EnsureDefaults()
 
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "nhb-local"

@@ -75,14 +75,21 @@ func writeAccount(t *testing.T, sp *StateProcessor, addr [20]byte, account *type
 		}
 	}
 	meta := &accountMetadata{
-		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
-		Stake:              new(big.Int).Set(account.Stake),
-		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
-		DelegatedValidator: delegated,
-		Unbonding:          unbonding,
-		UnbondingSeq:       account.NextUnbondingID,
-		Username:           account.Username,
-		EngagementScore:    account.EngagementScore,
+		BalanceZNHB:               new(big.Int).Set(account.BalanceZNHB),
+		Stake:                     new(big.Int).Set(account.Stake),
+		LockedZNHB:                new(big.Int).Set(account.LockedZNHB),
+		CollateralBalance:         new(big.Int).Set(account.CollateralBalance),
+		DebtPrincipal:             new(big.Int).Set(account.DebtPrincipal),
+		SupplyShares:              new(big.Int).Set(account.SupplyShares),
+		LendingSupplyIndex:        new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
+		LendingBorrowIndex:        new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
+		DelegatedValidator:        delegated,
+		Unbonding:                 unbonding,
+		UnbondingSeq:              account.NextUnbondingID,
+		Username:                  account.Username,
+		EngagementScore:           account.EngagementScore,
+		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
+		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
 	}
 	if err := sp.writeAccountMetadata(addr[:], meta); err != nil {
 		t.Fatalf("write account metadata: %v", err)
