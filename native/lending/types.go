@@ -10,6 +10,19 @@ import (
 // values are denominated in wei and expressed as big integers to match on-chain
 // precision.
 type Market struct {
+	// PoolID is the unique identifier for the market instance allowing the
+	// engine to differentiate state for independently operated pools.
+	PoolID string
+	// DeveloperOwner identifies the on-chain account that controls pool
+	// level configuration and is entitled to the developer fee stream.
+	DeveloperOwner crypto.Address
+	// DeveloperFeeCollector receives the developer fee portion of accrued
+	// interest routed through this market. When unset, developer fees are
+	// disabled for the pool.
+	DeveloperFeeCollector crypto.Address
+	// DeveloperFeeBps captures the developer fee share expressed in basis
+	// points. A zero value disables developer fee accruals.
+	DeveloperFeeBps uint64
 	// TotalNHBSupplied is the aggregate NHB liquidity currently deposited by
 	// lenders.
 	TotalNHBSupplied *big.Int

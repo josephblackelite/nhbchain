@@ -98,6 +98,40 @@ func TestLendingRPCEndpoints(t *testing.T) {
 
 	userAddrStr := userAddr.String()
 
+	poolsResp := callRPC(t, client, ts.URL, token, "lend_getPools", nil)
+	var poolsResult struct {
+		Pools []struct {
+			PoolID string `json:"poolID"`
+		} `json:"pools"`
+	}
+	if err := json.Unmarshal(poolsResp.Result, &poolsResult); err != nil {
+		t.Fatalf("decode pools: %v", err)
+	}
+	if len(poolsResult.Pools) != 1 || poolsResult.Pools[0].PoolID != "default" {
+		t.Fatalf("expected default pool, got %+v", poolsResult.Pools)
+	}
+
+	createResp := callRPC(t, client, ts.URL, token, "lend_createPool", map[string]string{"poolId": "secondary", "developerOwner": userAddrStr})
+	var createdResult struct {
+		Market struct {
+			PoolID string `json:"poolID"`
+		} `json:"market"`
+	}
+	if err := json.Unmarshal(createResp.Result, &createdResult); err != nil {
+		t.Fatalf("decode create pool: %v", err)
+	}
+	if createdResult.Market.PoolID != "secondary" {
+		t.Fatalf("unexpected pool id in create response: %+v", createdResult.Market)
+	}
+
+	poolsResp = callRPC(t, client, ts.URL, token, "lend_getPools", nil)
+	if err := json.Unmarshal(poolsResp.Result, &poolsResult); err != nil {
+		t.Fatalf("decode pools after create: %v", err)
+	}
+	if len(poolsResult.Pools) != 2 {
+		t.Fatalf("expected two pools, got %+v", poolsResult.Pools)
+	}
+
 	callRPC(t, client, ts.URL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": "1000"})
 	callRPC(t, client, ts.URL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": "600"})
 	callRPC(t, client, ts.URL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": "400"})
@@ -191,8 +225,10 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 			return err
 		}
 
-		market := &lending.Market{}
-		if err := manager.LendingPutMarket(market); err != nil {
+		poolID := "default"
+		feeBps, feeCollector := node.LendingDeveloperFeeConfig()
+		market := &lending.Market{DeveloperOwner: userAddr, DeveloperFeeBps: feeBps, DeveloperFeeCollector: feeCollector}
+		if err := manager.LendingPutMarket(poolID, market); err != nil {
 			return err
 		}
 
@@ -202,11 +238,11 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 			DebtNHB:        big.NewInt(120),
 			ScaledDebt:     big.NewInt(120),
 		}
-		if err := manager.LendingPutUserAccount(unhealthy); err != nil {
+		if err := manager.LendingPutUserAccount(poolID, unhealthy); err != nil {
 			return err
 		}
 
-		updatedMarket, ok, err := manager.LendingGetMarket()
+		updatedMarket, ok, err := manager.LendingGetMarket(poolID)
 		if err != nil {
 			return err
 		}
@@ -215,7 +251,7 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 		}
 		updatedMarket.TotalNHBBorrowed = big.NewInt(120)
 		updatedMarket.TotalNHBSupplied = big.NewInt(500)
-		if err := manager.LendingPutMarket(updatedMarket); err != nil {
+		if err := manager.LendingPutMarket(poolID, updatedMarket); err != nil {
 			return err
 		}
 		collateralAccount.BalanceZNHB = new(big.Int).Add(collateralAccount.BalanceZNHB, big.NewInt(100))

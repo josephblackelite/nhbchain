@@ -26,23 +26,23 @@ func (m *mockEngineState) key(addr crypto.Address) string {
 	return string(addr.Bytes())
 }
 
-func (m *mockEngineState) GetMarket() (*Market, error) {
+func (m *mockEngineState) GetMarket(string) (*Market, error) {
 	return m.market, nil
 }
 
-func (m *mockEngineState) PutMarket(market *Market) error {
+func (m *mockEngineState) PutMarket(_ string, market *Market) error {
 	m.market = market
 	return nil
 }
 
-func (m *mockEngineState) GetUserAccount(addr crypto.Address) (*UserAccount, error) {
+func (m *mockEngineState) GetUserAccount(_ string, addr crypto.Address) (*UserAccount, error) {
 	if acc, ok := m.users[m.key(addr)]; ok {
 		return acc, nil
 	}
 	return nil, nil
 }
 
-func (m *mockEngineState) PutUserAccount(account *UserAccount) error {
+func (m *mockEngineState) PutUserAccount(_ string, account *UserAccount) error {
 	if account == nil {
 		return nil
 	}
@@ -68,11 +68,11 @@ func (m *mockEngineState) PutAccount(addr crypto.Address, account *types.Account
 	return nil
 }
 
-func (m *mockEngineState) GetFeeAccrual() (*FeeAccrual, error) {
+func (m *mockEngineState) GetFeeAccrual(string) (*FeeAccrual, error) {
 	return m.fees, nil
 }
 
-func (m *mockEngineState) PutFeeAccrual(fees *FeeAccrual) error {
+func (m *mockEngineState) PutFeeAccrual(_ string, fees *FeeAccrual) error {
 	m.fees = fees
 	return nil
 }
@@ -103,6 +103,7 @@ func TestAccrueInterestUpdatesIndexesAndFees(t *testing.T) {
 	}
 	state.market = market
 	engine.SetState(state)
+	engine.SetPoolID("default")
 
 	fees, changed, err := engine.accrueInterest(market)
 	if err != nil {
@@ -148,6 +149,7 @@ func TestWithdrawProtocolFees(t *testing.T) {
 	state.accounts[state.key(recipient)] = &types.Account{BalanceNHB: big.NewInt(0)}
 	state.fees = &FeeAccrual{ProtocolFeesWei: big.NewInt(150), DeveloperFeesWei: big.NewInt(10)}
 	engine.SetState(state)
+	engine.SetPoolID("default")
 
 	withdrawn, err := engine.WithdrawProtocolFees(recipient, big.NewInt(100))
 	if err != nil {

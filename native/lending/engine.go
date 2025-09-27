@@ -3,6 +3,7 @@ package lending
 import (
 	"errors"
 	"math/big"
+	"strings"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -19,6 +20,7 @@ var (
 	errNotLiquidatable       = errors.New("lending engine: borrower not eligible for liquidation")
 	errDeveloperFeeRecipient = errors.New("lending engine: developer fee recipient not configured")
 	errDeveloperFeeCap       = errors.New("lending engine: developer fee exceeds cap")
+	errPoolNotConfigured     = errors.New("lending engine: pool identifier not configured")
 )
 
 var (
@@ -29,14 +31,14 @@ var (
 const blocksPerYear = 31_536_000
 
 type engineState interface {
-	GetMarket() (*Market, error)
-	PutMarket(*Market) error
-	GetUserAccount(addr crypto.Address) (*UserAccount, error)
-	PutUserAccount(*UserAccount) error
+	GetMarket(poolID string) (*Market, error)
+	PutMarket(poolID string, market *Market) error
+	GetUserAccount(poolID string, addr crypto.Address) (*UserAccount, error)
+	PutUserAccount(poolID string, account *UserAccount) error
 	GetAccount(addr crypto.Address) (*types.Account, error)
 	PutAccount(addr crypto.Address, account *types.Account) error
-	GetFeeAccrual() (*FeeAccrual, error)
-	PutFeeAccrual(*FeeAccrual) error
+	GetFeeAccrual(poolID string) (*FeeAccrual, error)
+	PutFeeAccrual(poolID string, fees *FeeAccrual) error
 }
 
 // Engine orchestrates the primary state transitions for the lending module.
@@ -49,6 +51,9 @@ type Engine struct {
 	reserveFactorBps  uint64
 	protocolFeeBps    uint64
 	blockHeight       uint64
+	poolID            string
+	developerFeeBps   uint64
+	developerFeeAddr  crypto.Address
 }
 
 // NewEngine constructs a lending engine configured with the module treasury
@@ -98,6 +103,38 @@ func (e *Engine) SetBlockHeight(height uint64) {
 		return
 	}
 	e.blockHeight = height
+}
+
+// SetPoolID assigns the lending pool identifier that subsequent operations will
+// operate against.
+func (e *Engine) SetPoolID(poolID string) {
+	if e == nil {
+		return
+	}
+	e.poolID = strings.TrimSpace(poolID)
+}
+
+// PoolID returns the currently configured pool identifier for the engine.
+func (e *Engine) PoolID() string {
+	if e == nil {
+		return ""
+	}
+	return e.poolID
+}
+
+// SetDeveloperFee configures the developer fee defaults applied when the
+// caller does not provide explicit overrides.
+func (e *Engine) SetDeveloperFee(bps uint64, collector crypto.Address) {
+	if e == nil {
+		return
+	}
+	e.developerFeeBps = bps
+	if collector.Bytes() == nil {
+		e.developerFeeAddr = crypto.Address{}
+		return
+	}
+	cloned := append([]byte(nil), collector.Bytes()...)
+	e.developerFeeAddr = crypto.NewAddress(collector.Prefix(), cloned)
 }
 
 // Supply transfers NHB from the supplier into the lending pool and mints LP
@@ -168,15 +205,15 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 	market.TotalSupplyShares = new(big.Int).Add(market.TotalSupplyShares, mintedShares)
 
 	if feesChanged {
-		if err := e.state.PutFeeAccrual(fees); err != nil {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := e.state.PutUserAccount(user); err != nil {
+	if err := e.state.PutUserAccount(e.poolID, user); err != nil {
 		return nil, err
 	}
-	if err := e.state.PutMarket(market); err != nil {
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
 	}
 
@@ -249,15 +286,15 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, redeemAmount)
 
 	if feesChanged {
-		if err := e.state.PutFeeAccrual(fees); err != nil {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := e.state.PutUserAccount(user); err != nil {
+	if err := e.state.PutUserAccount(e.poolID, user); err != nil {
 		return nil, err
 	}
-	if err := e.state.PutMarket(market); err != nil {
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
 	}
 
@@ -302,7 +339,7 @@ func (e *Engine) DepositCollateral(userAddr crypto.Address, amount *big.Int) err
 	}
 	user.CollateralZNHB = new(big.Int).Add(user.CollateralZNHB, amount)
 
-	return e.state.PutUserAccount(user)
+	return e.state.PutUserAccount(e.poolID, user)
 }
 
 // WithdrawCollateral releases ZNHB collateral back to the user while ensuring
@@ -366,14 +403,14 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 	user.CollateralZNHB = remaining
 
 	if feesChanged {
-		if err := e.state.PutFeeAccrual(fees); err != nil {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return err
 		}
 	}
-	if err := e.state.PutUserAccount(user); err != nil {
+	if err := e.state.PutUserAccount(e.poolID, user); err != nil {
 		return err
 	}
-	return e.state.PutMarket(market)
+	return e.state.PutMarket(e.poolID, market)
 }
 
 // Borrow transfers NHB from the module to the borrower while charging a fee to
@@ -394,6 +431,15 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	fees, feesChanged, err := e.accrueInterest(market)
 	if err != nil {
 		return nil, err
+	}
+
+	if feeBps == 0 && len(feeRecipient.Bytes()) == 0 && e.developerFeeBps > 0 {
+		if e.developerFeeAddr.Bytes() == nil {
+			return nil, errDeveloperFeeRecipient
+		}
+		feeBps = e.developerFeeBps
+		cloned := append([]byte(nil), e.developerFeeAddr.Bytes()...)
+		feeRecipient = crypto.NewAddress(e.developerFeeAddr.Prefix(), cloned)
 	}
 
 	if feeBps > 0 {
@@ -491,15 +537,15 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		feesChanged = true
 	}
 
-	if err := e.state.PutUserAccount(borrowerUser); err != nil {
+	if err := e.state.PutUserAccount(e.poolID, borrowerUser); err != nil {
 		return nil, err
 	}
-	if err := e.state.PutMarket(market); err != nil {
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
 	}
 
 	if feesChanged {
-		if err := e.state.PutFeeAccrual(fees); err != nil {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return nil, err
 		}
 	}
@@ -578,15 +624,15 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 
 	market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
 
-	if err := e.state.PutUserAccount(borrowerUser); err != nil {
+	if err := e.state.PutUserAccount(e.poolID, borrowerUser); err != nil {
 		return nil, err
 	}
-	if err := e.state.PutMarket(market); err != nil {
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
 	}
 
 	if feesChanged {
-		if err := e.state.PutFeeAccrual(fees); err != nil {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return nil, err
 		}
 	}
@@ -684,15 +730,15 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 
 	market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
 
-	if err := e.state.PutUserAccount(borrowerUser); err != nil {
+	if err := e.state.PutUserAccount(e.poolID, borrowerUser); err != nil {
 		return nil, nil, err
 	}
-	if err := e.state.PutMarket(market); err != nil {
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, nil, err
 	}
 
 	if feesChanged {
-		if err := e.state.PutFeeAccrual(fees); err != nil {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -704,7 +750,10 @@ func (e *Engine) ensureMarket() (*Market, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
-	market, err := e.state.GetMarket()
+	if strings.TrimSpace(e.poolID) == "" {
+		return nil, errPoolNotConfigured
+	}
+	market, err := e.state.GetMarket(e.poolID)
 	if err != nil {
 		return nil, err
 	}
@@ -730,7 +779,13 @@ func (e *Engine) ensureMarket() (*Market, error) {
 }
 
 func (e *Engine) ensureUserAccount(addr crypto.Address) (*UserAccount, error) {
-	user, err := e.state.GetUserAccount(addr)
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if strings.TrimSpace(e.poolID) == "" {
+		return nil, errPoolNotConfigured
+	}
+	user, err := e.state.GetUserAccount(e.poolID, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -865,10 +920,10 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 
 	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, amount)
 
-	if err := e.state.PutFeeAccrual(fees); err != nil {
+	if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 		return nil, err
 	}
-	if err := e.state.PutMarket(market); err != nil {
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
 	}
 
@@ -879,7 +934,10 @@ func (e *Engine) ensureFeeAccrual() (*FeeAccrual, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
-	fees, err := e.state.GetFeeAccrual()
+	if strings.TrimSpace(e.poolID) == "" {
+		return nil, errPoolNotConfigured
+	}
+	fees, err := e.state.GetFeeAccrual(e.poolID)
 	if err != nil {
 		return nil, err
 	}
