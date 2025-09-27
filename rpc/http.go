@@ -2,7 +2,9 @@ package rpc
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -58,6 +60,18 @@ type ServerConfig struct {
 	// client requests. When a request originates from one of these proxies the
 	// server will honour X-Forwarded-For headers.
 	TrustedProxies []string
+	// ReadHeaderTimeout specifies how long the server waits for headers.
+	ReadHeaderTimeout time.Duration
+	// ReadTimeout bounds the duration permitted to read the full request.
+	ReadTimeout time.Duration
+	// WriteTimeout bounds how long a handler may take to write a response.
+	WriteTimeout time.Duration
+	// IdleTimeout defines how long to keep idle connections open.
+	IdleTimeout time.Duration
+	// TLSCertFile is the path to a PEM-encoded certificate chain.
+	TLSCertFile string
+	// TLSKeyFile is the path to the PEM-encoded private key for TLSCertFile.
+	TLSKeyFile string
 }
 
 type Server struct {
@@ -73,6 +87,15 @@ type Server struct {
 	lending           *modules.LendingModule
 	trustProxyHeaders bool
 	trustedProxies    map[string]struct{}
+	readHeaderTimeout time.Duration
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	idleTimeout       time.Duration
+	tlsCertFile       string
+	tlsKeyFile        string
+
+	serverMu   sync.Mutex
+	httpServer *http.Server
 }
 
 func NewServer(node *core.Node, cfg ServerConfig) *Server {
@@ -96,13 +119,79 @@ func NewServer(node *core.Node, cfg ServerConfig) *Server {
 		lending:           modules.NewLendingModule(node),
 		trustProxyHeaders: cfg.TrustProxyHeaders,
 		trustedProxies:    trusted,
+		readHeaderTimeout: cfg.ReadHeaderTimeout,
+		readTimeout:       cfg.ReadTimeout,
+		writeTimeout:      cfg.WriteTimeout,
+		idleTimeout:       cfg.IdleTimeout,
+		tlsCertFile:       strings.TrimSpace(cfg.TLSCertFile),
+		tlsKeyFile:        strings.TrimSpace(cfg.TLSKeyFile),
 	}
 }
 
 func (s *Server) Start(addr string) error {
-	fmt.Printf("Starting JSON-RPC server on %s\n", addr)
-	http.HandleFunc("/", s.handle)
-	return http.ListenAndServe(addr, nil)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Starting JSON-RPC server on %s\n", listener.Addr())
+	return s.Serve(listener)
+}
+
+// Serve runs the RPC server using the provided listener. The listener is
+// closed when Serve returns.
+func (s *Server) Serve(listener net.Listener) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handle)
+
+	srv := &http.Server{
+		Addr:              listener.Addr().String(),
+		Handler:           mux,
+		ReadHeaderTimeout: s.readHeaderTimeout,
+		ReadTimeout:       s.readTimeout,
+		WriteTimeout:      s.writeTimeout,
+		IdleTimeout:       s.idleTimeout,
+	}
+
+	var tlsConfig *tls.Config
+	if s.tlsCertFile != "" || s.tlsKeyFile != "" {
+		if s.tlsCertFile == "" || s.tlsKeyFile == "" {
+			_ = listener.Close()
+			return fmt.Errorf("both TLS certificate and key paths must be provided")
+		}
+		cert, err := tls.LoadX509KeyPair(s.tlsCertFile, s.tlsKeyFile)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("load TLS key pair: %w", err)
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+		srv.TLSConfig = tlsConfig
+	}
+
+	s.serverMu.Lock()
+	s.httpServer = srv
+	s.serverMu.Unlock()
+
+	defer func() {
+		s.serverMu.Lock()
+		s.httpServer = nil
+		s.serverMu.Unlock()
+	}()
+
+	if tlsConfig != nil {
+		return srv.Serve(tls.NewListener(listener, tlsConfig))
+	}
+	return srv.Serve(listener)
+}
+
+// Shutdown gracefully terminates the RPC server if it is running.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.serverMu.Lock()
+	srv := s.httpServer
+	s.serverMu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
 
 type RPCRequest struct {

@@ -2,12 +2,15 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"testing"
+	"time"
 
 	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
@@ -80,12 +83,34 @@ func TestLendingRPCEndpoints(t *testing.T) {
 	}
 
 	server := rpc.NewServer(node, rpc.ServerConfig{})
-	ts := httptest.NewServer(server)
-	defer ts.Close()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
 
-	client := ts.Client()
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
 
-	marketResp := callRPC(t, client, ts.URL, token, "lending_getMarket", nil)
+	waitForServer(t, addr)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + addr
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := server.Shutdown(ctx); shutdownErr != nil {
+			t.Fatalf("shutdown RPC server: %v", shutdownErr)
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("serve RPC: %v", err)
+		}
+	})
+
+	marketResp := callRPC(t, client, baseURL, token, "lending_getMarket", nil)
 	var marketResult struct {
 		RiskParameters lending.RiskParameters `json:"riskParameters"`
 	}
@@ -98,7 +123,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 
 	userAddrStr := userAddr.String()
 
-	poolsResp := callRPC(t, client, ts.URL, token, "lend_getPools", nil)
+	poolsResp := callRPC(t, client, baseURL, token, "lend_getPools", nil)
 	var poolsResult struct {
 		Pools []struct {
 			PoolID string `json:"poolID"`
@@ -111,7 +136,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected default pool, got %+v", poolsResult.Pools)
 	}
 
-	createResp := callRPC(t, client, ts.URL, token, "lend_createPool", map[string]string{"poolId": "secondary", "developerOwner": userAddrStr})
+	createResp := callRPC(t, client, baseURL, token, "lend_createPool", map[string]string{"poolId": "secondary", "developerOwner": userAddrStr})
 	var createdResult struct {
 		Market struct {
 			PoolID string `json:"poolID"`
@@ -124,7 +149,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("unexpected pool id in create response: %+v", createdResult.Market)
 	}
 
-	poolsResp = callRPC(t, client, ts.URL, token, "lend_getPools", nil)
+	poolsResp = callRPC(t, client, baseURL, token, "lend_getPools", nil)
 	if err := json.Unmarshal(poolsResp.Result, &poolsResult); err != nil {
 		t.Fatalf("decode pools after create: %v", err)
 	}
@@ -132,16 +157,16 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected two pools, got %+v", poolsResult.Pools)
 	}
 
-	callRPC(t, client, ts.URL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": "1000"})
-	callRPC(t, client, ts.URL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": "600"})
-	callRPC(t, client, ts.URL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": "400"})
-	callRPC(t, client, ts.URL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "400"})
-	callRPC(t, client, ts.URL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": "100"})
-	callRPC(t, client, ts.URL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "101"})
-	callRPC(t, client, ts.URL, token, "lending_withdrawNHB", map[string]string{"from": userAddrStr, "amount": "500"})
-	callRPC(t, client, ts.URL, token, "lending_withdrawZNHB", map[string]string{"from": userAddrStr, "amount": "300"})
+	callRPC(t, client, baseURL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": "1000"})
+	callRPC(t, client, baseURL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": "600"})
+	callRPC(t, client, baseURL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": "400"})
+	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "400"})
+	callRPC(t, client, baseURL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": "100"})
+	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "101"})
+	callRPC(t, client, baseURL, token, "lending_withdrawNHB", map[string]string{"from": userAddrStr, "amount": "500"})
+	callRPC(t, client, baseURL, token, "lending_withdrawZNHB", map[string]string{"from": userAddrStr, "amount": "300"})
 
-	accountResp := callRPC(t, client, ts.URL, token, "lending_getUserAccount", userAddrStr)
+	accountResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", userAddrStr)
 	var accountResult struct {
 		Account struct {
 			CollateralZNHB *big.Int `json:"collateralZNHB"`
@@ -162,9 +187,9 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected zero debt, got %v", accountResult.Account.DebtNHB)
 	}
 
-	callRPC(t, client, ts.URL, token, "lending_liquidate", map[string]string{"liquidator": liquidatorAddr.String(), "borrower": borrowerAddr.String()})
+	callRPC(t, client, baseURL, token, "lending_liquidate", map[string]string{"liquidator": liquidatorAddr.String(), "borrower": borrowerAddr.String()})
 
-	borrowerResp := callRPC(t, client, ts.URL, token, "lending_getUserAccount", borrowerAddr.String())
+	borrowerResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", borrowerAddr.String())
 	var borrowerResult struct {
 		Account struct {
 			CollateralZNHB *big.Int `json:"collateralZNHB"`
@@ -310,4 +335,20 @@ func callRPC(t *testing.T, client *http.Client, url, token, method string, param
 		t.Fatalf("rpc error for %s: %+v", method, parsed.Error)
 	}
 	return parsed
+}
+
+func waitForServer(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("rpc server did not start on %s: %v", addr, lastErr)
 }

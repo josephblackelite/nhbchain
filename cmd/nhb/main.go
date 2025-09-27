@@ -293,6 +293,12 @@ func main() {
 	rpcServer := rpc.NewServer(node, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
+		ReadHeaderTimeout: time.Duration(cfg.RPCReadHeaderTimeout) * time.Second,
+		ReadTimeout:       time.Duration(cfg.RPCReadTimeout) * time.Second,
+		WriteTimeout:      time.Duration(cfg.RPCWriteTimeout) * time.Second,
+		IdleTimeout:       time.Duration(cfg.RPCIdleTimeout) * time.Second,
+		TLSCertFile:       cfg.RPCTLSCertFile,
+		TLSKeyFile:        cfg.RPCTLSKeyFile,
 	})
 	go rpcServer.Start(cfg.RPCAddress)
 	go p2pServer.Start()
