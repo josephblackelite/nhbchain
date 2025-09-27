@@ -8,8 +8,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -170,25 +172,13 @@ func main() {
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
 
-	dialCtx, cancelDial := context.WithTimeout(context.Background(), 10*time.Second)
-	networkClient, err := network.Dial(dialCtx, *networkAddress)
-	cancelDial()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to connect to p2pd at %s: %v", *networkAddress, err))
-	}
-	defer networkClient.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	streamCtx, streamCancel := context.WithCancel(context.Background())
-	defer streamCancel()
-	go func() {
-		// TODO: add reconnect/backoff handling so a transient stream failure
-		// does not crash the consensus process.
-		if err := networkClient.Run(streamCtx, node.ProcessNetworkMessage, nil); err != nil && streamCtx.Err() == nil {
-			panic(fmt.Sprintf("Network stream terminated: %v", err))
-		}
-	}()
+	broadcaster := newResilientBroadcaster(ctx)
+	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node)
 
-	bftEngine := bft.NewEngine(node, privKey, networkClient)
+	bftEngine := bft.NewEngine(node, privKey, broadcaster)
 	node.SetBftEngine(bftEngine)
 
 	grpcListener, err := net.Listen("tcp", *grpcAddress)
@@ -204,10 +194,71 @@ func main() {
 		}
 	}()
 
+	go func() {
+		<-ctx.Done()
+		grpcServer.GracefulStop()
+	}()
+
 	go node.StartConsensus()
 
 	fmt.Println("--- Consensus node initialised and running ---")
-	select {}
+	<-ctx.Done()
+	fmt.Println("--- Consensus node shutting down ---")
+}
+
+const (
+	networkReconnectBaseDelay = 500 * time.Millisecond
+	networkReconnectMaxDelay  = 30 * time.Second
+)
+
+func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node) {
+	if broadcaster == nil || node == nil {
+		return
+	}
+
+	backoff := networkReconnectBaseDelay
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		client, err := network.Dial(dialCtx, target)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to connect to p2pd at %s: %v\n", target, err)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			backoff *= 2
+			if backoff > networkReconnectMaxDelay {
+				backoff = networkReconnectMaxDelay
+			}
+			continue
+		}
+
+		broadcaster.SetClient(client)
+		backoff = networkReconnectBaseDelay
+
+		streamErr := client.Run(ctx, node.ProcessNetworkMessage, nil)
+		broadcaster.SetClient(nil)
+		client.Close()
+		if streamErr != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "Network stream terminated: %v\n", streamErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > networkReconnectMaxDelay {
+			backoff = networkReconnectMaxDelay
+		}
+	}
 }
 
 type envLookupFunc func(string) (string, bool)

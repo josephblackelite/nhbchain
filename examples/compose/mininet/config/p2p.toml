@@ -1,0 +1,26 @@
+ListenAddress = ":26656"
+DataDir = "/var/lib/nhb/p2p"
+GenesisFile = ""
+AllowAutogenesis = true
+NetworkName = "nhb-mininet"
+
+[p2p]
+NetworkId = 187001
+MaxPeers = 64
+MaxInbound = 40
+MaxOutbound = 24
+MinPeers = 16
+OutboundPeers = 12
+Bootnodes = []
+PersistentPeers = []
+Seeds = []
+BanScore = 100
+GreyScore = 50
+RateMsgsPerSec = 50
+Burst = 200
+HandshakeTimeoutMs = 3000
+PingIntervalSeconds = 30
+PingTimeoutSeconds = 90
+BanDurationSeconds = 3600
+DialBackoffSeconds = 30
+PEX = true
