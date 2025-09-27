@@ -18,6 +18,32 @@ type InterestModel struct {
 	Kink *big.Rat
 }
 
+// Clone returns a deep copy of the interest model.
+func (m *InterestModel) Clone() *InterestModel {
+	if m == nil {
+		return nil
+	}
+	clone := &InterestModel{
+		BaseRate: new(big.Rat),
+		Slope1:   new(big.Rat),
+		Slope2:   new(big.Rat),
+		Kink:     new(big.Rat),
+	}
+	if m.BaseRate != nil {
+		clone.BaseRate.Set(m.BaseRate)
+	}
+	if m.Slope1 != nil {
+		clone.Slope1.Set(m.Slope1)
+	}
+	if m.Slope2 != nil {
+		clone.Slope2.Set(m.Slope2)
+	}
+	if m.Kink != nil {
+		clone.Kink.Set(m.Kink)
+	}
+	return clone
+}
+
 // NewInterestModel constructs an interest model from floating point inputs.
 //
 // The parameters should be provided as decimals, e.g. a 2% base rate is

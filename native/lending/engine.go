@@ -26,6 +26,8 @@ var (
 	ray         = big.NewInt(1_000_000_000_000_000_000)
 )
 
+const blocksPerYear = 31_536_000
+
 type engineState interface {
 	GetMarket() (*Market, error)
 	PutMarket(*Market) error
@@ -33,6 +35,8 @@ type engineState interface {
 	PutUserAccount(*UserAccount) error
 	GetAccount(addr crypto.Address) (*types.Account, error)
 	PutAccount(addr crypto.Address, account *types.Account) error
+	GetFeeAccrual() (*FeeAccrual, error)
+	PutFeeAccrual(*FeeAccrual) error
 }
 
 // Engine orchestrates the primary state transitions for the lending module.
@@ -41,6 +45,10 @@ type Engine struct {
 	moduleAddress     crypto.Address
 	collateralAddress crypto.Address
 	params            RiskParameters
+	interestModel     *InterestModel
+	reserveFactorBps  uint64
+	protocolFeeBps    uint64
+	blockHeight       uint64
 }
 
 // NewEngine constructs a lending engine configured with the module treasury
@@ -56,6 +64,42 @@ func NewEngine(moduleAddr, collateralAddr crypto.Address, params RiskParameters)
 // SetState wires the engine to the external persistence layer.
 func (e *Engine) SetState(state engineState) { e.state = state }
 
+// SetInterestModel configures the interest rate model used by the engine.
+func (e *Engine) SetInterestModel(model *InterestModel) {
+	if e == nil {
+		return
+	}
+	if model != nil {
+		e.interestModel = model.Clone()
+	} else {
+		e.interestModel = nil
+	}
+}
+
+// SetReserveFactor wires the reserve factor basis points used when accruing interest.
+func (e *Engine) SetReserveFactor(bps uint64) {
+	if e == nil {
+		return
+	}
+	e.reserveFactorBps = bps
+}
+
+// SetProtocolFeeBps configures the protocol fee basis points applied during accrual.
+func (e *Engine) SetProtocolFeeBps(bps uint64) {
+	if e == nil {
+		return
+	}
+	e.protocolFeeBps = bps
+}
+
+// SetBlockHeight records the block height used when computing accrual deltas.
+func (e *Engine) SetBlockHeight(height uint64) {
+	if e == nil {
+		return
+	}
+	e.blockHeight = height
+}
+
 // Supply transfers NHB from the supplier into the lending pool and mints LP
 // shares based on the current supply index. The minted share amount is returned
 // to the caller for downstream accounting.
@@ -68,6 +112,11 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 	}
 
 	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
 	if err != nil {
 		return nil, err
 	}
@@ -93,9 +142,9 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 	} else {
 		mintedShares.Mul(amount, ray)
 		mintedShares = mintedShares.Quo(mintedShares, market.SupplyIndex)
-	}
-	if mintedShares.Sign() == 0 {
-		mintedShares = new(big.Int).Set(amount)
+		if mintedShares.Sign() == 0 {
+			mintedShares = new(big.Int).Set(amount)
+		}
 	}
 
 	// Adjust balances.
@@ -118,6 +167,12 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 	market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, amount)
 	market.TotalSupplyShares = new(big.Int).Add(market.TotalSupplyShares, mintedShares)
 
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(fees); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := e.state.PutUserAccount(user); err != nil {
 		return nil, err
 	}
@@ -139,6 +194,10 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	}
 
 	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+	fees, feesChanged, err := e.accrueInterest(market)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +247,12 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	user.SupplyShares = new(big.Int).Sub(user.SupplyShares, amountLP)
 	market.TotalSupplyShares = new(big.Int).Sub(market.TotalSupplyShares, amountLP)
 	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, redeemAmount)
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(fees); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := e.state.PutUserAccount(user); err != nil {
 		return nil, err
@@ -258,6 +323,18 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 		return errInsufficientBalance
 	}
 
+	market, err := e.ensureMarket()
+	if err != nil {
+		return err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return err
+	}
+
+	e.syncDebt(user, market)
+
 	remaining := new(big.Int).Sub(user.CollateralZNHB, amount)
 	if !e.positionHealthy(remaining, user.DebtNHB) {
 		return errHealthCheckFailed
@@ -287,7 +364,16 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 	}
 
 	user.CollateralZNHB = remaining
-	return e.state.PutUserAccount(user)
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(fees); err != nil {
+			return err
+		}
+	}
+	if err := e.state.PutUserAccount(user); err != nil {
+		return err
+	}
+	return e.state.PutMarket(market)
 }
 
 // Borrow transfers NHB from the module to the borrower while charging a fee to
@@ -301,6 +387,11 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	}
 
 	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
 	if err != nil {
 		return nil, err
 	}
@@ -333,6 +424,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if err != nil {
 		return nil, err
 	}
+
+	e.syncDebt(borrowerUser, market)
 
 	// Health factor check using the projected debt after borrowing.
 	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, totalOut)
@@ -379,15 +472,36 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	}
 
 	borrowerUser.DebtNHB = projectedDebt
-	borrowerUser.ScaledDebt = new(big.Int).Set(projectedDebt)
+	if borrowerUser.ScaledDebt == nil {
+		borrowerUser.ScaledDebt = big.NewInt(0)
+	}
+	scaledIncrement := new(big.Int).Mul(totalOut, ray)
+	scaledIncrement = scaledIncrement.Quo(scaledIncrement, market.BorrowIndex)
+	if scaledIncrement.Sign() == 0 && totalOut.Sign() > 0 {
+		scaledIncrement = big.NewInt(1)
+	}
+	borrowerUser.ScaledDebt = new(big.Int).Add(borrowerUser.ScaledDebt, scaledIncrement)
+	borrowerUser.DebtNHB = new(big.Int).Mul(borrowerUser.ScaledDebt, market.BorrowIndex)
+	borrowerUser.DebtNHB = borrowerUser.DebtNHB.Quo(borrowerUser.DebtNHB, ray)
 
 	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
+
+	if feeAmount.Sign() > 0 {
+		fees.DeveloperFeesWei = new(big.Int).Add(fees.DeveloperFeesWei, feeAmount)
+		feesChanged = true
+	}
 
 	if err := e.state.PutUserAccount(borrowerUser); err != nil {
 		return nil, err
 	}
 	if err := e.state.PutMarket(market); err != nil {
 		return nil, err
+	}
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(fees); err != nil {
+			return nil, err
+		}
 	}
 
 	return feeAmount, nil
@@ -403,10 +517,21 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 		return nil, errInvalidAmount
 	}
 
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, err
+	}
+
 	borrowerUser, err := e.ensureUserAccount(borrower)
 	if err != nil {
 		return nil, err
 	}
+	e.syncDebt(borrowerUser, market)
 	if borrowerUser.DebtNHB.Sign() == 0 {
 		return nil, errNoDebtToRepay
 	}
@@ -439,13 +564,18 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 		return nil, err
 	}
 
-	borrowerUser.DebtNHB = new(big.Int).Sub(borrowerUser.DebtNHB, repayAmount)
-	borrowerUser.ScaledDebt = new(big.Int).Set(borrowerUser.DebtNHB)
-
-	market, err := e.ensureMarket()
-	if err != nil {
-		return nil, err
+	if borrowerUser.ScaledDebt == nil {
+		borrowerUser.ScaledDebt = big.NewInt(0)
 	}
+	scaledRepay := new(big.Int).Mul(repayAmount, ray)
+	scaledRepay = scaledRepay.Quo(scaledRepay, market.BorrowIndex)
+	if scaledRepay.Cmp(borrowerUser.ScaledDebt) > 0 {
+		scaledRepay = new(big.Int).Set(borrowerUser.ScaledDebt)
+	}
+	borrowerUser.ScaledDebt = new(big.Int).Sub(borrowerUser.ScaledDebt, scaledRepay)
+	borrowerUser.DebtNHB = new(big.Int).Mul(borrowerUser.ScaledDebt, market.BorrowIndex)
+	borrowerUser.DebtNHB = borrowerUser.DebtNHB.Quo(borrowerUser.DebtNHB, ray)
+
 	market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
 
 	if err := e.state.PutUserAccount(borrowerUser); err != nil {
@@ -453,6 +583,12 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 	}
 	if err := e.state.PutMarket(market); err != nil {
 		return nil, err
+	}
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(fees); err != nil {
+			return nil, err
+		}
 	}
 
 	return repayAmount, nil
@@ -470,12 +606,17 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	if err != nil {
 		return nil, nil, err
 	}
-	_ = market // ensure market loaded for consistency although not directly used.
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	borrowerUser, err := e.ensureUserAccount(borrower)
 	if err != nil {
 		return nil, nil, err
 	}
+	e.syncDebt(borrowerUser, market)
 	if borrowerUser.DebtNHB.Sign() == 0 {
 		return nil, nil, errNoDebtToRepay
 	}
@@ -548,6 +689,12 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	}
 	if err := e.state.PutMarket(market); err != nil {
 		return nil, nil, err
+	}
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(fees); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return repayAmount, seizeAmount, nil
@@ -647,4 +794,250 @@ func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
 	num := new(big.Int).Mul(collateral, big.NewInt(int64(e.params.LiquidationThreshold)))
 	den := new(big.Int).Mul(debt, basisPoints)
 	return num.Cmp(den) >= 0
+}
+
+// WithdrawProtocolFees transfers accrued protocol fees to the provided recipient.
+func (e *Engine) WithdrawProtocolFees(recipient crypto.Address, amount *big.Int) (*big.Int, error) {
+	return e.withdrawFees(recipient, amount, true)
+}
+
+// WithdrawDeveloperFees transfers accrued developer fees to the provided recipient.
+func (e *Engine) WithdrawDeveloperFees(recipient crypto.Address, amount *big.Int) (*big.Int, error) {
+	return e.withdrawFees(recipient, amount, false)
+}
+
+func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protocol bool) (*big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, err := e.ensureFeeAccrual()
+	if err != nil {
+		return nil, err
+	}
+
+	var available *big.Int
+	if protocol {
+		available = fees.ProtocolFeesWei
+	} else {
+		available = fees.DeveloperFeesWei
+	}
+	if available == nil || available.Cmp(amount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, err
+	}
+	if moduleAcc.BalanceNHB.Cmp(amount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	recipientAcc, err := e.loadAccount(recipient)
+	if err != nil {
+		return nil, err
+	}
+
+	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, amount)
+	recipientAcc.BalanceNHB = new(big.Int).Add(recipientAcc.BalanceNHB, amount)
+
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, err
+	}
+	if err := e.persistAccount(recipient, recipientAcc); err != nil {
+		return nil, err
+	}
+
+	if protocol {
+		fees.ProtocolFeesWei = new(big.Int).Sub(fees.ProtocolFeesWei, amount)
+	} else {
+		fees.DeveloperFeesWei = new(big.Int).Sub(fees.DeveloperFeesWei, amount)
+	}
+
+	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, amount)
+
+	if err := e.state.PutFeeAccrual(fees); err != nil {
+		return nil, err
+	}
+	if err := e.state.PutMarket(market); err != nil {
+		return nil, err
+	}
+
+	return new(big.Int).Set(amount), nil
+}
+
+func (e *Engine) ensureFeeAccrual() (*FeeAccrual, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	fees, err := e.state.GetFeeAccrual()
+	if err != nil {
+		return nil, err
+	}
+	if fees == nil {
+		fees = &FeeAccrual{}
+	}
+	if fees.ProtocolFeesWei == nil {
+		fees.ProtocolFeesWei = big.NewInt(0)
+	}
+	if fees.DeveloperFeesWei == nil {
+		fees.DeveloperFeesWei = big.NewInt(0)
+	}
+	return fees, nil
+}
+
+func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
+	if e == nil || e.state == nil {
+		return nil, false, errNilState
+	}
+	if market == nil {
+		return nil, false, errNilMarket
+	}
+
+	if market.SupplyIndex == nil || market.SupplyIndex.Sign() == 0 {
+		market.SupplyIndex = new(big.Int).Set(ray)
+	}
+	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
+		market.BorrowIndex = new(big.Int).Set(ray)
+	}
+	market.ReserveFactor = e.reserveFactorBps
+
+	fees, err := e.ensureFeeAccrual()
+	if err != nil {
+		return nil, false, err
+	}
+
+	if e.interestModel == nil {
+		if e.blockHeight > market.LastUpdateBlock {
+			market.LastUpdateBlock = e.blockHeight
+		}
+		return fees, false, nil
+	}
+
+	var delta uint64
+	if e.blockHeight > market.LastUpdateBlock {
+		delta = e.blockHeight - market.LastUpdateBlock
+	}
+	if delta == 0 || market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Sign() == 0 {
+		if e.blockHeight > market.LastUpdateBlock {
+			market.LastUpdateBlock = e.blockHeight
+		}
+		return fees, false, nil
+	}
+
+	borrowAPR := e.interestModel.BorrowAPR(market.TotalNHBBorrowed, market.TotalNHBSupplied)
+	if borrowAPR.Sign() == 0 {
+		market.LastUpdateBlock = e.blockHeight
+		return fees, false, nil
+	}
+
+	utilisation := e.interestModel.Utilisation(market.TotalNHBBorrowed, market.TotalNHBSupplied)
+	reserveBps := e.reserveFactorBps
+	protocolBps := e.protocolFeeBps
+	combinedBps := reserveBps + protocolBps
+	if combinedBps > 10_000 {
+		combinedBps = 10_000
+	}
+	combined := new(big.Rat).SetFrac(big.NewInt(int64(combinedBps)), big.NewInt(10_000))
+	oneMinus := new(big.Rat).Sub(big.NewRat(1, 1), combined)
+	if oneMinus.Sign() < 0 {
+		oneMinus.SetInt64(0)
+	}
+	supplyRate := new(big.Rat).Mul(borrowAPR, utilisation)
+	supplyRate.Mul(supplyRate, oneMinus)
+
+	borrowFactor := rateFactor(borrowAPR, delta)
+	supplyFactor := rateFactor(supplyRate, delta)
+
+	market.BorrowIndex = rayMul(market.BorrowIndex, borrowFactor)
+	market.SupplyIndex = rayMul(market.SupplyIndex, supplyFactor)
+
+	interestAmount := computeInterest(market.TotalNHBBorrowed, borrowAPR, delta)
+	interestApplied := interestAmount.Sign() > 0
+	if interestApplied {
+		reserveShare := new(big.Int).Mul(interestAmount, new(big.Int).SetUint64(reserveBps))
+		reserveShare = reserveShare.Quo(reserveShare, basisPoints)
+		protocolShare := new(big.Int).Mul(interestAmount, new(big.Int).SetUint64(protocolBps))
+		protocolShare = protocolShare.Quo(protocolShare, basisPoints)
+		if reserveShare.Sign() > 0 {
+			fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, reserveShare)
+		}
+		if protocolShare.Sign() > 0 {
+			fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, protocolShare)
+		}
+		market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, interestAmount)
+		market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, interestAmount)
+	}
+
+	market.LastUpdateBlock = e.blockHeight
+	return fees, interestApplied, nil
+}
+
+func rateFactor(rate *big.Rat, delta uint64) *big.Int {
+	if rate == nil || rate.Sign() == 0 || delta == 0 {
+		return new(big.Int).Set(ray)
+	}
+	perBlock := new(big.Rat).Set(rate)
+	perBlock.Quo(perBlock, new(big.Rat).SetUint64(blocksPerYear))
+	perBlock.Mul(perBlock, new(big.Rat).SetUint64(delta))
+	factor := new(big.Rat).Add(big.NewRat(1, 1), perBlock)
+	return ratToRay(factor)
+}
+
+func rayMul(a, b *big.Int) *big.Int {
+	if a == nil || b == nil {
+		return big.NewInt(0)
+	}
+	result := new(big.Int).Mul(a, b)
+	result = result.Quo(result, ray)
+	return result
+}
+
+func ratToRay(r *big.Rat) *big.Int {
+	if r == nil {
+		return new(big.Int).Set(ray)
+	}
+	scaled := new(big.Rat).Mul(r, new(big.Rat).SetInt(ray))
+	out := new(big.Int).Quo(scaled.Num(), scaled.Denom())
+	if out.Sign() == 0 {
+		return new(big.Int).Set(ray)
+	}
+	return out
+}
+
+func computeInterest(totalBorrowed *big.Int, rate *big.Rat, delta uint64) *big.Int {
+	if totalBorrowed == nil || totalBorrowed.Sign() == 0 || rate == nil || rate.Sign() == 0 || delta == 0 {
+		return big.NewInt(0)
+	}
+	perBlock := new(big.Rat).Set(rate)
+	perBlock.Quo(perBlock, new(big.Rat).SetUint64(blocksPerYear))
+	perBlock.Mul(perBlock, new(big.Rat).SetUint64(delta))
+	interest := new(big.Rat).Mul(perBlock, new(big.Rat).SetInt(totalBorrowed))
+	return new(big.Int).Quo(interest.Num(), interest.Denom())
+}
+
+func (e *Engine) syncDebt(user *UserAccount, market *Market) {
+	if user == nil || market == nil {
+		return
+	}
+	if user.ScaledDebt == nil || user.ScaledDebt.Sign() == 0 {
+		user.DebtNHB = big.NewInt(0)
+		return
+	}
+	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
+		user.DebtNHB = big.NewInt(0)
+		return
+	}
+	actual := new(big.Int).Mul(user.ScaledDebt, market.BorrowIndex)
+	actual = actual.Quo(actual, ray)
+	user.DebtNHB = actual
 }

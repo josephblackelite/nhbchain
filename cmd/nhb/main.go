@@ -116,6 +116,8 @@ func main() {
 		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
 	})
 
+	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)
+
 	devCollectorStr := strings.TrimSpace(cfg.Lending.DeveloperFeeCollector)
 	var devCollector crypto.Address
 	if devCollectorStr != "" {

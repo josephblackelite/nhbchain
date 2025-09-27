@@ -105,6 +105,7 @@ var (
 	paramsNamespacePrefix      = []byte("params/")
 	snapshotPotsoPrefix        = []byte("snapshots/potso/")
 	lendingMarketKey           = []byte("lending/market/default")
+	lendingFeeAccrualKey       = []byte("lending/fees/default")
 	lendingUserPrefix          = []byte("lending/user/")
 )
 
@@ -840,6 +841,11 @@ type storedLendingMarket struct {
 	ReserveFactor     uint64
 }
 
+type storedLendingFees struct {
+	ProtocolFeesWei  *big.Int
+	DeveloperFeesWei *big.Int
+}
+
 func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
 	if market == nil {
 		return nil
@@ -890,6 +896,34 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 		market.BorrowIndex = new(big.Int).Set(s.BorrowIndex)
 	}
 	return market
+}
+
+func newStoredLendingFees(fees *lending.FeeAccrual) *storedLendingFees {
+	if fees == nil {
+		return nil
+	}
+	stored := &storedLendingFees{}
+	if fees.ProtocolFeesWei != nil {
+		stored.ProtocolFeesWei = new(big.Int).Set(fees.ProtocolFeesWei)
+	}
+	if fees.DeveloperFeesWei != nil {
+		stored.DeveloperFeesWei = new(big.Int).Set(fees.DeveloperFeesWei)
+	}
+	return stored
+}
+
+func (s *storedLendingFees) toFeeAccrual() *lending.FeeAccrual {
+	if s == nil {
+		return nil
+	}
+	fees := &lending.FeeAccrual{}
+	if s.ProtocolFeesWei != nil {
+		fees.ProtocolFeesWei = new(big.Int).Set(s.ProtocolFeesWei)
+	}
+	if s.DeveloperFeesWei != nil {
+		fees.DeveloperFeesWei = new(big.Int).Set(s.DeveloperFeesWei)
+	}
+	return fees
 }
 
 type storedLendingUser struct {
@@ -962,6 +996,33 @@ func (m *Manager) LendingPutMarket(market *lending.Market) error {
 		return fmt.Errorf("lending: market must not be nil")
 	}
 	return m.KVPut(lendingMarketKey, newStoredLendingMarket(market))
+}
+
+// LendingGetFeeAccrual loads the current lending fee accrual totals if present.
+func (m *Manager) LendingGetFeeAccrual() (*lending.FeeAccrual, bool, error) {
+	if m == nil {
+		return nil, false, fmt.Errorf("state manager unavailable")
+	}
+	var stored storedLendingFees
+	ok, err := m.KVGet(lendingFeeAccrualKey, &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return stored.toFeeAccrual(), true, nil
+}
+
+// LendingPutFeeAccrual persists the provided lending fee accrual snapshot.
+func (m *Manager) LendingPutFeeAccrual(fees *lending.FeeAccrual) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	if fees == nil {
+		return fmt.Errorf("lending: fee accrual must not be nil")
+	}
+	return m.KVPut(lendingFeeAccrualKey, newStoredLendingFees(fees))
 }
 
 // LendingGetUserAccount loads the lending position tracked for the supplied address.
