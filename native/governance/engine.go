@@ -1117,6 +1117,82 @@ func (e *Engine) CastVote(proposalID uint64, voter [20]byte, choice string) erro
 	return nil
 }
 
+// ComputeTally aggregates the voting power distribution for the supplied
+// proposal. The method is side-effect free and can be used by read models to
+// surface intermediate tallies without mutating state. The returned status
+// reflects whether the proposal meets the quorum and threshold requirements.
+func (e *Engine) ComputeTally(proposal *Proposal, votes []*Vote) (*Tally, ProposalStatus, error) {
+	if e == nil {
+		return nil, ProposalStatusUnspecified, fmt.Errorf("governance: engine not configured")
+	}
+	if proposal == nil {
+		return nil, ProposalStatusUnspecified, fmt.Errorf("governance: proposal must not be nil")
+	}
+
+	var (
+		yesPower     uint64
+		noPower      uint64
+		abstainPower uint64
+	)
+	for _, vote := range votes {
+		if vote == nil {
+			continue
+		}
+		weight := uint64(vote.PowerBps)
+		switch vote.Choice {
+		case VoteChoiceYes:
+			if math.MaxUint64-yesPower < weight {
+				return nil, ProposalStatusUnspecified, fmt.Errorf("governance: yes tally overflow")
+			}
+			yesPower += weight
+		case VoteChoiceNo:
+			if math.MaxUint64-noPower < weight {
+				return nil, ProposalStatusUnspecified, fmt.Errorf("governance: no tally overflow")
+			}
+			noPower += weight
+		case VoteChoiceAbstain:
+			if math.MaxUint64-abstainPower < weight {
+				return nil, ProposalStatusUnspecified, fmt.Errorf("governance: abstain tally overflow")
+			}
+			abstainPower += weight
+		default:
+			return nil, ProposalStatusUnspecified, fmt.Errorf("governance: invalid vote choice %q", vote.Choice)
+		}
+	}
+
+	if math.MaxUint64-yesPower < noPower {
+		return nil, ProposalStatusUnspecified, fmt.Errorf("governance: tally overflow")
+	}
+	running := yesPower + noPower
+	if math.MaxUint64-running < abstainPower {
+		return nil, ProposalStatusUnspecified, fmt.Errorf("governance: tally overflow")
+	}
+	totalPower := running + abstainPower
+	yesDenom := yesPower + noPower
+	var yesRatio uint64
+	if yesDenom > 0 {
+		yesRatio = (yesPower * 10_000) / yesDenom
+	}
+	tally := &Tally{
+		TurnoutBps:       totalPower,
+		QuorumBps:        e.quorumBps,
+		YesPowerBps:      yesPower,
+		NoPowerBps:       noPower,
+		AbstainPowerBps:  abstainPower,
+		YesRatioBps:      yesRatio,
+		PassThresholdBps: e.passThresholdBps,
+		TotalBallots:     uint64(len(votes)),
+	}
+
+	status := ProposalStatusRejected
+	meetsQuorum := totalPower >= e.quorumBps
+	if meetsQuorum && yesRatio >= e.passThresholdBps {
+		status = ProposalStatusPassed
+	}
+
+	return tally, status, nil
+}
+
 // Finalize closes the voting window for the proposal, tallies the recorded
 // ballots, and transitions the proposal to a terminal status. The proposal must
 // be in the voting period and the voting end timestamp must have elapsed prior
@@ -1148,65 +1224,9 @@ func (e *Engine) Finalize(proposalID uint64) (ProposalStatus, *Tally, error) {
 		return ProposalStatusUnspecified, nil, err
 	}
 
-	var (
-		yesPower     uint64
-		noPower      uint64
-		abstainPower uint64
-	)
-	for _, vote := range votes {
-		if vote == nil {
-			continue
-		}
-		weight := uint64(vote.PowerBps)
-		switch vote.Choice {
-		case VoteChoiceYes:
-			if math.MaxUint64-yesPower < weight {
-				return ProposalStatusUnspecified, nil, fmt.Errorf("governance: yes tally overflow")
-			}
-			yesPower += weight
-		case VoteChoiceNo:
-			if math.MaxUint64-noPower < weight {
-				return ProposalStatusUnspecified, nil, fmt.Errorf("governance: no tally overflow")
-			}
-			noPower += weight
-		case VoteChoiceAbstain:
-			if math.MaxUint64-abstainPower < weight {
-				return ProposalStatusUnspecified, nil, fmt.Errorf("governance: abstain tally overflow")
-			}
-			abstainPower += weight
-		default:
-			return ProposalStatusUnspecified, nil, fmt.Errorf("governance: invalid vote choice %q", vote.Choice)
-		}
-	}
-
-	if math.MaxUint64-yesPower < noPower {
-		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: tally overflow")
-	}
-	running := yesPower + noPower
-	if math.MaxUint64-running < abstainPower {
-		return ProposalStatusUnspecified, nil, fmt.Errorf("governance: tally overflow")
-	}
-	totalPower := running + abstainPower
-	yesDenom := yesPower + noPower
-	var yesRatio uint64
-	if yesDenom > 0 {
-		yesRatio = (yesPower * 10_000) / yesDenom
-	}
-	tally := &Tally{
-		TurnoutBps:       totalPower,
-		QuorumBps:        e.quorumBps,
-		YesPowerBps:      yesPower,
-		NoPowerBps:       noPower,
-		AbstainPowerBps:  abstainPower,
-		YesRatioBps:      yesRatio,
-		PassThresholdBps: e.passThresholdBps,
-		TotalBallots:     uint64(len(votes)),
-	}
-
-	status := ProposalStatusRejected
-	meetsQuorum := totalPower >= e.quorumBps
-	if meetsQuorum && yesRatio >= e.passThresholdBps {
-		status = ProposalStatusPassed
+	tally, status, err := e.ComputeTally(proposal, votes)
+	if err != nil {
+		return ProposalStatusUnspecified, nil, err
 	}
 
 	if status == ProposalStatusPassed && proposal.Deposit != nil && proposal.Deposit.Sign() > 0 {
