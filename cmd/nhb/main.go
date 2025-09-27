@@ -131,6 +131,43 @@ func main() {
 	}
 	node.SetLendingDeveloperFee(cfg.Lending.DeveloperFeeBps, devCollector)
 
+	routingCfg := cfg.Lending.CollateralRouting
+	var developerCollateral crypto.Address
+	if routingCfg.DeveloperBps > 0 {
+		addr := strings.TrimSpace(routingCfg.DeveloperAddress)
+		if addr == "" {
+			panic("Lending collateral routing requires DeveloperAddress when DeveloperBps is non-zero")
+		}
+		decoded, err := crypto.DecodeAddress(addr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode lending developer collateral address: %v", err))
+		}
+		developerCollateral = decoded
+	}
+	var protocolCollateral crypto.Address
+	if routingCfg.ProtocolBps > 0 {
+		addr := strings.TrimSpace(routingCfg.ProtocolAddress)
+		if addr == "" {
+			panic("Lending collateral routing requires ProtocolAddress when ProtocolBps is non-zero")
+		}
+		decoded, err := crypto.DecodeAddress(addr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode lending protocol collateral address: %v", err))
+		}
+		protocolCollateral = decoded
+	}
+	totalRoutingBps := routingCfg.LiquidatorBps + routingCfg.DeveloperBps + routingCfg.ProtocolBps
+	if totalRoutingBps > 10_000 {
+		panic("Lending collateral routing shares must not exceed 10000 basis points")
+	}
+	node.SetLendingCollateralRouting(lending.CollateralRouting{
+		LiquidatorBps:   routingCfg.LiquidatorBps,
+		DeveloperBps:    routingCfg.DeveloperBps,
+		DeveloperTarget: developerCollateral,
+		ProtocolBps:     routingCfg.ProtocolBps,
+		ProtocolTarget:  protocolCollateral,
+	})
+
 	swapCfg := cfg.SwapSettings()
 	node.SetSwapConfig(swapCfg)
 	manualOracle := swap.NewManualOracle()

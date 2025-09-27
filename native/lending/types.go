@@ -46,6 +46,33 @@ type Market struct {
 	ReserveFactor uint64
 }
 
+// CollateralRouting captures the liquidation collateral distribution between
+// the liquidator, developer, and protocol reserve accounts.
+type CollateralRouting struct {
+	LiquidatorBps   uint64
+	DeveloperBps    uint64
+	DeveloperTarget crypto.Address
+	ProtocolBps     uint64
+	ProtocolTarget  crypto.Address
+}
+
+// Clone produces a deep copy of the collateral routing configuration to ensure
+// callers do not mutate shared address slices.
+func (r CollateralRouting) Clone() CollateralRouting {
+	clone := CollateralRouting{
+		LiquidatorBps: r.LiquidatorBps,
+		DeveloperBps:  r.DeveloperBps,
+		ProtocolBps:   r.ProtocolBps,
+	}
+	if bytes := r.DeveloperTarget.Bytes(); len(bytes) != 0 {
+		clone.DeveloperTarget = crypto.NewAddress(r.DeveloperTarget.Prefix(), append([]byte(nil), bytes...))
+	}
+	if bytes := r.ProtocolTarget.Bytes(); len(bytes) != 0 {
+		clone.ProtocolTarget = crypto.NewAddress(r.ProtocolTarget.Prefix(), append([]byte(nil), bytes...))
+	}
+	return clone
+}
+
 // UserAccount maintains the lending position for an individual participant.
 type UserAccount struct {
 	// Address is the unique account identifier within the NHB network.
