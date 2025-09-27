@@ -18,10 +18,11 @@ protocol applies a piecewise-linear interest rate curve:
   discourage further borrowing and incentivize more supply.
 
 Borrow interest is compounded each block by updating the borrow index. The
-supply rate is derived from the borrow rate using the reserve factor `r`:
+supply rate is derived from the borrow rate using the reserve factor `r` and the
+protocol fee share `p`:
 
 ```
-supplyRate = borrowRate * U * (1 - r)
+supplyRate = borrowRate * U * (1 - r - p)
 ```
 
 All rates are quoted per-second but can be accumulated to APRs for user-facing
@@ -30,16 +31,21 @@ interfaces.
 ## Interest Accrual Mechanics
 
 1. **Accrual Trigger:** Every market accrues interest during state-changing
-   operations (supply, redeem, borrow, repay, liquidation) or through explicit
-   `lend_accrueInterest` RPC calls.
+   operations (supply, withdraw, borrow, repay, liquidation, and collateral
+   withdrawals).
 2. **Borrow Index Update:** The protocol calculates the time delta since the
    last accrual and multiplies it by the current borrow rate to update the
    borrow index.
 3. **Reserve Growth:** A portion of the interest (based on the reserve factor)
-   is redirected to the protocol treasury account.
+   and the configured protocol fee share is redirected to the protocol fee
+   accrual.
 4. **Supplier Yield:** The remaining interest is distributed proportionally to
    suppliers by increasing the exchange rate between deposit receipts and the
    underlying asset.
+
+The protocol tracks protocol and developer fees in a `FeeAccrual` structure.
+Those balances can be withdrawn to external accounts, reducing the pool's
+reported liquidity while keeping historical accounting intact.
 
 ## Collateral Evaluation
 

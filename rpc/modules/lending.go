@@ -234,6 +234,10 @@ func (m *LendingModule) withEngine(fn func(*lending.Engine) error) error {
 	return m.node.WithState(func(manager *nhbstate.Manager) error {
 		engine := lending.NewEngine(m.node.LendingModuleAddress(), m.node.LendingCollateralAddress(), m.node.LendingRiskParameters())
 		engine.SetState(&lendingStateAdapter{manager: manager})
+		engine.SetInterestModel(m.node.LendingInterestModel())
+		engine.SetReserveFactor(m.node.LendingReserveFactorBps())
+		engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
+		engine.SetBlockHeight(m.node.GetHeight())
 		return fn(engine)
 	})
 }
@@ -329,6 +333,30 @@ func (a *lendingStateAdapter) PutUserAccount(account *lending.UserAccount) error
 		return fmt.Errorf("lending: user account must not be nil")
 	}
 	return a.manager.LendingPutUserAccount(account)
+}
+
+func (a *lendingStateAdapter) GetFeeAccrual() (*lending.FeeAccrual, error) {
+	if a == nil || a.manager == nil {
+		return nil, fmt.Errorf("lending: state manager unavailable")
+	}
+	fees, ok, err := a.manager.LendingGetFeeAccrual()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return fees, nil
+}
+
+func (a *lendingStateAdapter) PutFeeAccrual(fees *lending.FeeAccrual) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	if fees == nil {
+		return fmt.Errorf("lending: fee accrual must not be nil")
+	}
+	return a.manager.LendingPutFeeAccrual(fees)
 }
 
 func (a *lendingStateAdapter) GetAccount(addr crypto.Address) (*types.Account, error) {

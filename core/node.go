@@ -81,6 +81,9 @@ type Node struct {
 	lendingCollateralAddr        crypto.Address
 	lendingDeveloperFeeBps       uint64
 	lendingDeveloperFeeCollector crypto.Address
+	lendingInterestModel         *lending.InterestModel
+	lendingReserveFactorBps      uint64
+	lendingProtocolFeeBps        uint64
 }
 
 const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
@@ -253,6 +256,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	}
 
 	node.SetLendingRiskParameters(lending.RiskParameters{})
+	node.SetLendingAccrualConfig(0, 0, lending.DefaultInterestModel)
 
 	// Initialise fast-sync manager.
 	if trieDB := stateTrie.TrieDB(); trieDB != nil {
@@ -500,6 +504,49 @@ func (n *Node) LendingRiskParameters() lending.RiskParameters {
 		params.OracleAddress = cloneAddress(params.OracleAddress)
 	}
 	return params
+}
+
+// SetLendingAccrualConfig configures the interest model and fee splits used by the lending engine.
+func (n *Node) SetLendingAccrualConfig(reserveBps, protocolFeeBps uint64, model *lending.InterestModel) {
+	if n == nil {
+		return
+	}
+	n.lendingMu.Lock()
+	n.lendingReserveFactorBps = reserveBps
+	n.lendingProtocolFeeBps = protocolFeeBps
+	if model != nil {
+		n.lendingInterestModel = model.Clone()
+	} else {
+		n.lendingInterestModel = nil
+	}
+	n.lendingMu.Unlock()
+}
+
+// LendingReserveFactorBps exposes the configured reserve factor basis points.
+func (n *Node) LendingReserveFactorBps() uint64 {
+	n.lendingMu.RLock()
+	bps := n.lendingReserveFactorBps
+	n.lendingMu.RUnlock()
+	return bps
+}
+
+// LendingProtocolFeeBps exposes the configured protocol fee basis points.
+func (n *Node) LendingProtocolFeeBps() uint64 {
+	n.lendingMu.RLock()
+	bps := n.lendingProtocolFeeBps
+	n.lendingMu.RUnlock()
+	return bps
+}
+
+// LendingInterestModel returns a cloned copy of the lending interest model.
+func (n *Node) LendingInterestModel() *lending.InterestModel {
+	n.lendingMu.RLock()
+	model := n.lendingInterestModel
+	n.lendingMu.RUnlock()
+	if model != nil {
+		return model.Clone()
+	}
+	return nil
 }
 
 // SetLendingDeveloperFee configures the developer fee parameters enforced by
