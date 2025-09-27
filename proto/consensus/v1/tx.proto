@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package consensus.v1;
+
+import "google/protobuf/any.proto";
+
+option go_package = "nhbchain/proto/consensus/v1;consensusv1";
+
+message Fee {
+  string amount = 1;
+  string denom = 2;
+  string payer = 3;
+}
+
+message TxEnvelope {
+  google.protobuf.Any payload = 1;
+  uint64 nonce = 2;
+  string chain_id = 3;
+  Fee fee = 4;
+  string memo = 5;
+}
+
+message TxSignature {
+  bytes public_key = 1;
+  bytes signature = 2;
+}
+
+message SignedTxEnvelope {
+  TxEnvelope envelope = 1;
+  TxSignature signature = 2;
+}
+
+message SubmitTxEnvelopeRequest {
+  SignedTxEnvelope tx = 1;
+}
+
+message SubmitTxEnvelopeResponse {}

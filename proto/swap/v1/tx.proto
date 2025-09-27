@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package swap.v1;
+
+option go_package = "nhbchain/proto/swap/v1;swapv1";
+
+message MsgSwapExactIn {
+  string trader = 1;
+  string pool_id = 2;
+  string token_in = 3;
+  string amount_in = 4;
+  string min_amount_out = 5;
+  string recipient = 6;
+}
+
+message MsgSwapExactOut {
+  string trader = 1;
+  string pool_id = 2;
+  string token_out = 3;
+  string amount_out = 4;
+  string max_amount_in = 5;
+  string recipient = 6;
+}

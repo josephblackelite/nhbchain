@@ -18,6 +18,7 @@ import {
   type ServiceError,
   type UntypedServiceImplementation,
 } from "@grpc/grpc-js";
+import { SubmitTxEnvelopeRequest, SubmitTxEnvelopeResponse } from "./tx";
 
 export const protobufPackage = "consensus.v1";
 
@@ -1647,6 +1648,17 @@ export const GetLastCommitHashResponse: MessageFns<GetLastCommitHashResponse> = 
 
 export type ConsensusServiceService = typeof ConsensusServiceService;
 export const ConsensusServiceService = {
+  submitTxEnvelope: {
+    path: "/consensus.v1.ConsensusService/SubmitTxEnvelope",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: SubmitTxEnvelopeRequest): Buffer =>
+      Buffer.from(SubmitTxEnvelopeRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): SubmitTxEnvelopeRequest => SubmitTxEnvelopeRequest.decode(value),
+    responseSerialize: (value: SubmitTxEnvelopeResponse): Buffer =>
+      Buffer.from(SubmitTxEnvelopeResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): SubmitTxEnvelopeResponse => SubmitTxEnvelopeResponse.decode(value),
+  },
   submitTransaction: {
     path: "/consensus.v1.ConsensusService/SubmitTransaction",
     requestStream: false,
@@ -1730,6 +1742,7 @@ export const ConsensusServiceService = {
 } as const;
 
 export interface ConsensusServiceServer extends UntypedServiceImplementation {
+  submitTxEnvelope: handleUnaryCall<SubmitTxEnvelopeRequest, SubmitTxEnvelopeResponse>;
   submitTransaction: handleUnaryCall<SubmitTransactionRequest, SubmitTransactionResponse>;
   getValidatorSet: handleUnaryCall<GetValidatorSetRequest, GetValidatorSetResponse>;
   getBlockByHeight: handleUnaryCall<GetBlockByHeightRequest, GetBlockByHeightResponse>;
@@ -1741,6 +1754,21 @@ export interface ConsensusServiceServer extends UntypedServiceImplementation {
 }
 
 export interface ConsensusServiceClient extends Client {
+  submitTxEnvelope(
+    request: SubmitTxEnvelopeRequest,
+    callback: (error: ServiceError | null, response: SubmitTxEnvelopeResponse) => void,
+  ): ClientUnaryCall;
+  submitTxEnvelope(
+    request: SubmitTxEnvelopeRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: SubmitTxEnvelopeResponse) => void,
+  ): ClientUnaryCall;
+  submitTxEnvelope(
+    request: SubmitTxEnvelopeRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: SubmitTxEnvelopeResponse) => void,
+  ): ClientUnaryCall;
   submitTransaction(
     request: SubmitTransactionRequest,
     callback: (error: ServiceError | null, response: SubmitTransactionResponse) => void,

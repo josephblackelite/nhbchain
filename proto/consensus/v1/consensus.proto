@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package consensus.v1;
 
+import "consensus/v1/tx.proto";
+
 option go_package = "nhbchain/proto/consensus/v1;consensusv1";
 
 message BigInt {
@@ -98,6 +100,7 @@ message GetLastCommitHashResponse {
 }
 
 service ConsensusService {
+  rpc SubmitTxEnvelope(SubmitTxEnvelopeRequest) returns (SubmitTxEnvelopeResponse);
   rpc SubmitTransaction(SubmitTransactionRequest) returns (SubmitTransactionResponse);
   rpc GetValidatorSet(GetValidatorSetRequest) returns (GetValidatorSetResponse);
   rpc GetBlockByHeight(GetBlockByHeightRequest) returns (GetBlockByHeightResponse);
