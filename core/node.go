@@ -53,6 +53,8 @@ type Node struct {
 	syncMgr                      *syncmgr.Manager
 	validatorKey                 *crypto.PrivateKey
 	mempool                      []*types.Transaction
+	mempoolMu                    sync.Mutex
+	mempoolLimit                 int
 	bftEngine                    *bft.Engine
 	p2pSrv                       *p2p.Server
 	stateMu                      sync.Mutex
@@ -104,6 +106,9 @@ var ErrMilestoneUnsupported = errors.New("escrow: milestone engine not enabled")
 // ErrReputationVerifierUnauthorized is returned when a caller lacks the
 // required verifier role to issue skill attestations.
 var ErrReputationVerifierUnauthorized = errors.New("reputation: caller lacks verifier role")
+
+// ErrMempoolFull is returned when the node's mempool has reached its configured capacity.
+var ErrMempoolFull = errors.New("mempool: transaction limit reached")
 
 // DefaultBlockTimestampTolerance bounds how far ahead of the local clock a
 // block timestamp may drift before it is rejected.
@@ -276,6 +281,26 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	}
 
 	return node, nil
+}
+
+// SetMempoolLimit configures the maximum number of transactions retained in the mempool.
+// A zero limit disables enforcement and allows unbounded growth.
+func (n *Node) SetMempoolLimit(limit int) {
+	if n == nil {
+		return
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	n.mempoolMu.Lock()
+	n.mempoolLimit = limit
+	if limit > 0 && len(n.mempool) > limit {
+		start := len(n.mempool) - limit
+		trimmed := make([]*types.Transaction, limit)
+		copy(trimmed, n.mempool[start:])
+		n.mempool = trimmed
+	}
+	n.mempoolMu.Unlock()
 }
 
 // SetGovernancePolicy updates the governance proposal policy applied to RPC actions.
@@ -710,7 +735,9 @@ func (n *Node) HandleMessage(msg *p2p.Message) error {
 		if err := json.Unmarshal(msg.Payload, tx); err != nil {
 			return err
 		}
-		n.AddTransaction(tx)
+		if err := n.AddTransaction(tx); err != nil {
+			return err
+		}
 
 	case p2p.MsgTypeProposal:
 		proposal := new(bft.SignedProposal)
@@ -733,16 +760,29 @@ func (n *Node) HandleMessage(msg *p2p.Message) error {
 	return nil
 }
 
-func (n *Node) AddTransaction(tx *types.Transaction) {
+func (n *Node) AddTransaction(tx *types.Transaction) error {
+	if n == nil || tx == nil {
+		return fmt.Errorf("add transaction: invalid arguments")
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
+		return ErrMempoolFull
+	}
 	n.mempool = append(n.mempool, tx)
+	return nil
 }
 
 // --- Methods for bft.NodeInterface ---
 
 func (n *Node) GetMempool() []*types.Transaction {
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
 	txs := make([]*types.Transaction, len(n.mempool))
 	copy(txs, n.mempool)
-	n.mempool = []*types.Transaction{} // drain after read
+	if len(n.mempool) > 0 {
+		n.mempool = n.mempool[:0]
+	}
 	return txs
 }
 
@@ -1980,7 +2020,9 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 	if err := tx.Sign(n.validatorKey.PrivateKey); err != nil {
 		return 0, err
 	}
-	n.mempool = append(n.mempool, tx)
+	if err := n.AddTransaction(tx); err != nil {
+		return 0, err
+	}
 	return ts, nil
 }
 

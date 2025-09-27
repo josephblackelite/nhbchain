@@ -40,6 +40,7 @@ const (
 	codeServerError    = -32000
 	codeDuplicateTx    = -32010
 	codeRateLimited    = -32020
+	codeMempoolFull    = -32030
 )
 
 type rateLimiter struct {
@@ -885,7 +886,14 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 
-	s.node.AddTransaction(&tx)
+	if err := s.node.AddTransaction(&tx); err != nil {
+		if errors.Is(err, core.ErrMempoolFull) {
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeMempoolFull, "mempool full", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to add transaction", err.Error())
+		return
+	}
 	writeResult(w, req.ID, "Transaction received by node.")
 }
 

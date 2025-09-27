@@ -50,6 +50,7 @@ type Config struct {
 	Governance            GovConfig      `toml:"governance"`
 	Swap                  swap.Config    `toml:"swap"`
 	Lending               lending.Config `toml:"lending"`
+	Mempool               MempoolConfig  `toml:"mempool"`
 }
 
 const defaultBlockTimestampToleranceSeconds = 5
@@ -118,6 +119,11 @@ type PotsoAbuseConfig struct {
 	MaxUserShareBps        uint64 `toml:"MaxUserShareBps"`
 }
 
+// MempoolConfig allows operators to tune the size of the transaction pool.
+type MempoolConfig struct {
+	MaxTransactions int `toml:"MaxTransactions"`
+}
+
 // GovConfig captures the governance policy knobs controlling proposal flow
 // without embedding business logic in the state machine.
 type GovConfig struct {
@@ -158,6 +164,7 @@ func Load(path string) (*Config, error) {
 
 	cfg.mergeP2PFromTopLevel()
 	cfg.Lending.EnsureDefaults()
+	cfg.ensureMempoolDefaults()
 
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "nhb-local"
@@ -291,6 +298,12 @@ func Load(path string) (*Config, error) {
 	cfg.syncTopLevelToP2P()
 
 	return cfg, nil
+}
+
+func (cfg *Config) ensureMempoolDefaults() {
+	if cfg.Mempool.MaxTransactions < 0 {
+		cfg.Mempool.MaxTransactions = 0
+	}
 }
 
 // PotsoRewardConfig converts the loaded TOML representation into the runtime configuration structure.

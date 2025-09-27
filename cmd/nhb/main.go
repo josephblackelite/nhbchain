@@ -89,6 +89,8 @@ func main() {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
 
+	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
+
 	govPolicy, err := cfg.Governance.Policy()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to parse governance policy: %v", err))
