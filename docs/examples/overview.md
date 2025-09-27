@@ -32,6 +32,10 @@ The first run installs dependencies, generates the SDK build artifacts (if any),
 | `NHB_API_SECRET` | Secret used to compute the HMAC signature header. |
 | `NHB_WALLET_PRIVATE_KEY` | Optional wallet private key for demo transactions. |
 | `NHB_WALLET_ADDRESS` | Wallet Bech32 address that corresponds to the private key. |
+| `NHB_RPC_TRUSTED_PROXIES` | Comma-separated list of proxy IPs allowed to forward client IPs to the RPC node. |
+| `NHB_RPC_TRUST_PROXY_HEADERS` | Enable (`true`/`false`) once the trusted proxy list is accurate. |
+| `NHB_MEMPOOL_MAX_TX` | Suggested mempool ceiling mirrored into `config.toml` `[mempool] MaxTransactions`. |
+| `NHB_RPC_TLS_CERT` / `NHB_RPC_TLS_KEY` | Optional TLS certificate/key paths when testing HTTPS RPC locally. |
 | `STATUS_DASHBOARD_PORT` | HTTP port for the status dashboard example. |
 | `NETWORK_MONITOR_PORT` | HTTP port for the network monitor example. |
 
@@ -51,7 +55,14 @@ If you are running your own RPC or gateway stack, update the `.env` file with yo
 
 1. Issue TLS certificates (ACM recommended on AWS) that cover your domains.
 2. Update the `NHB_RPC_URL`, `NHB_WS_URL`, and `NHB_API_URL` values to use the new hostnames.
-3. Restart `yarn dev` or reload the individual apps to pick up the changes.
+3. Populate `NHB_RPC_TRUSTED_PROXIES` with the IPs of any ingress/load-balancer
+   hops that should be allowed to forward client addresses and only set
+   `NHB_RPC_TRUST_PROXY_HEADERS=true` after verifying the proxy removes
+   user-supplied forwarding headers.
+4. Mirror your desired mempool ceiling in `NHB_MEMPOOL_MAX_TX` and update the
+   validator’s `[mempool] MaxTransactions` value so rate-limit documentation and
+   automation remain aligned.
+5. Restart `yarn dev` or reload the individual apps to pick up the changes.
 
 > **Tip:** Never commit the `.env` file to version control. The `.env.example` template intentionally uses placeholder credentials.
 

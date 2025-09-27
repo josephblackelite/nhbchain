@@ -77,6 +77,26 @@ log is append-only and keyed by sequence number so regulators and downstream
 integrations can reconstruct the entire lifecycle without relying on external
 event streams. Historical records remain queryable indefinitely, providing an
 immutable timeline for regulators, investors, and the community.
+
+## Transaction quota stewardship
+
+Governance proposals now control the RPC-facing transaction safeguards:
+
+- `mempool.MaxTransactions` bounds the number of pending user transactions in
+  memory. Raising the limit allows additional burst capacity but increases the
+  memory footprint across all validators.
+- The per-source submission quota (five transactions per minute) is enforced by
+  the RPC service. Policy changes that relax this limit must include downstream
+  tooling updates so wallets and SDKs still honour backoff semantics.
+- Any proposal that toggles `RPCTrustProxyHeaders` or edits
+  `RPCTrustedProxies`/timeout values must include a migration plan for operators
+  to update edge proxies and TLS certificates; without coordinated rollout the
+  RPC layer will reject forwarded identities or close long-running requests.
+
+Document these considerations in the proposal rationale so node operators,
+integrators, and auditors can validate that the new quotas continue to align
+with the security posture approved by the community.
+
 For arbitration-specific lifecycle details—including how role allowlists are
 amended and how frozen policies are embedded in escrows—see the
 [Arbitration Governance Guide](./arbitration-governance.md). The guide outlines

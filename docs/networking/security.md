@@ -66,6 +66,22 @@ In addition to nonce tracking, peers that fail handshake validation accrue
 reputation penalties and may be temporarily banned depending on the configured
 policy.
 
+## RPC perimeter expectations
+
+RPC services inherit the same perimeter assumptions as the P2P layer. Operators
+must either terminate TLS directly on the node via `RPCTLSCertFile` /
+`RPCTLSKeyFile` or place a mutually authenticated proxy in front of the HTTP
+listener. When a proxy is used, declare its addresses in `RPCTrustedProxies`
+before enabling `RPCTrustProxyHeaders`; all other callers will have their
+`X-Forwarded-For` headers ignored, preventing spoofed client identities. The
+server enforces a five-transaction-per-minute quota per resolved client source
+and will return HTTP 429 with code `-32020` when exceeded, so tooling should
+surface retry-after guidance alongside the existing P2P rate-limit telemetry.
+Timeouts configured through `RPCReadHeaderTimeout`, `RPCReadTimeout`,
+`RPCWriteTimeout`, and `RPCIdleTimeout` now gate the full request lifecycle, and
+should be aligned with upstream load-balancer settings to avoid premature
+disconnects.
+
 ## Ban reasons & operator guidance
 
 | Event | Trigger | Default action | Operator notes |

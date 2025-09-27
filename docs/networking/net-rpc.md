@@ -3,9 +3,35 @@
 The NET-2F API exposes operator-focused JSON-RPC methods under the existing
 HTTP listener. All examples assume the daemon is reachable at
 `http://127.0.0.1:8080` and that the `NHB_RPC_TOKEN` environment variable is set
-when authentication is required. See the [Network Hardening Playbook](../security/network-hardening.md)
-for guidance on fronting these endpoints with mutual TLS, rate limiting, and
-centralised logging.
+when authentication is required. Starting with this release the RPC server only
+trusts proxy forwarding headers from addresses explicitly allow-listed via
+`RPCTrustedProxies`, applies a five-transaction-per-minute quota per resolved
+client IP, and honours the tightened read/write/idle timeout values exposed in
+`config.toml`. Enable TLS by setting `RPCTLSCertFile`/`RPCTLSKeyFile` and
+propagate client IPs through a trusted reverse proxy before toggling
+`RPCTrustProxyHeaders`.
+
+> See the [Network Hardening Playbook](../security/network-hardening.md) for
+> guidance on fronting these endpoints with mutual TLS, logging, and proxy
+> topologies that satisfy the new safeguards.
+
+### Deployment safeguards
+
+Operators migrating existing infrastructure should:
+
+1. Populate `RPCTrustedProxies` with the static addresses of load balancers or
+   ingress controllers that terminate TLS. Requests originating from other
+   sources will ignore `X-Forwarded-For` headers.
+2. Leave `RPCTrustProxyHeaders` disabled until the trusted proxy list is in
+   place; once enabled, ensure the proxy strips untrusted forwarding headers.
+3. Review the enforced quota (five transactions per minute and client) and
+   build exponential backoff into tooling to gracefully handle HTTP 429 /
+   `-32020` responses.
+4. Set `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
+   `RPCIdleTimeout` to align with organisational SLAs. These defaults are
+   intentionally conservative and should mirror the perimeter’s timeout budget.
+5. Supply `RPCTLSCertFile`/`RPCTLSKeyFile` for end-to-end TLS or terminate TLS
+   at the proxy and use mTLS between the proxy and node.
 
 ## `net_info`
 
