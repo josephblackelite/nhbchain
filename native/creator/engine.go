@@ -13,12 +13,15 @@ import (
 )
 
 var (
-	errNilState          = errors.New("creator engine: state not configured")
-	errContentExists     = errors.New("creator engine: content already exists")
-	errContentNotFound   = errors.New("creator engine: content not found")
-	errInvalidAmount     = errors.New("creator engine: amount must be positive")
-	errInsufficientFunds = errors.New("creator engine: insufficient balance")
-	errStakeNotFound     = errors.New("creator engine: stake not found")
+	errNilState               = errors.New("creator engine: state not configured")
+	errContentExists          = errors.New("creator engine: content already exists")
+	errContentNotFound        = errors.New("creator engine: content not found")
+	errInvalidAmount          = errors.New("creator engine: amount must be positive")
+	errInsufficientFunds      = errors.New("creator engine: insufficient balance")
+	errStakeNotFound          = errors.New("creator engine: stake not found")
+	errPayoutVaultNotSet      = errors.New("creator engine: payout vault not configured")
+	errRewardsTreasuryNotSet  = errors.New("creator engine: rewards treasury not configured")
+	errPayoutVaultUnderfunded = errors.New("creator engine: payout vault underfunded")
 )
 
 const stakingAccrualBps = 250 // 2.5% accrual when staking behind a creator.
@@ -37,9 +40,11 @@ type engineState interface {
 
 // Engine wires creator economy business logic with persistence and event emission.
 type Engine struct {
-	state   engineState
-	emitter events.Emitter
-	nowFn   func() int64
+	state           engineState
+	emitter         events.Emitter
+	nowFn           func() int64
+	payoutVault     [20]byte
+	rewardsTreasury [20]byte
 }
 
 // NewEngine constructs a creator engine with default dependencies.
@@ -72,6 +77,12 @@ func (e *Engine) SetNowFunc(now func() int64) {
 	}
 	e.nowFn = now
 }
+
+// SetPayoutVault configures the holding account for pending distributions.
+func (e *Engine) SetPayoutVault(addr [20]byte) { e.payoutVault = addr }
+
+// SetRewardsTreasury configures the treasury that funds staking rewards.
+func (e *Engine) SetRewardsTreasury(addr [20]byte) { e.rewardsTreasury = addr }
 
 func (e *Engine) emit(evt *types.Event) {
 	if e == nil || evt == nil || e.emitter == nil {
@@ -122,6 +133,11 @@ func newBigInt(v *big.Int) *big.Int {
 	return new(big.Int).Set(v)
 }
 
+func isZeroAddress(addr [20]byte) bool {
+	var zero [20]byte
+	return addr == zero
+}
+
 func newLedger(creator [20]byte) *PayoutLedger {
 	return &PayoutLedger{
 		Creator:             creator,
@@ -170,6 +186,9 @@ func (e *Engine) TipContent(fan [20]byte, contentID string, amount *big.Int) (*T
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
+	if isZeroAddress(e.payoutVault) {
+		return nil, errPayoutVaultNotSet
+	}
 	sanitized, err := sanitizeContentID(contentID)
 	if err != nil {
 		return nil, err
@@ -190,16 +209,16 @@ func (e *Engine) TipContent(fan [20]byte, contentID string, amount *big.Int) (*T
 		return nil, errInsufficientFunds
 	}
 	fanAccount.BalanceNHB = new(big.Int).Sub(fanAccount.BalanceNHB, amount)
-	creatorAccount, err := e.state.GetAccount(content.Creator[:])
+	vaultAccount, err := e.state.GetAccount(e.payoutVault[:])
 	if err != nil {
 		return nil, err
 	}
-	creatorAccount = ensureAccount(creatorAccount)
-	creatorAccount.BalanceNHB = new(big.Int).Add(creatorAccount.BalanceNHB, amount)
+	vaultAccount = ensureAccount(vaultAccount)
+	vaultAccount.BalanceNHB = new(big.Int).Add(vaultAccount.BalanceNHB, amount)
 	if err := e.state.PutAccount(fan[:], fanAccount); err != nil {
 		return nil, err
 	}
-	if err := e.state.PutAccount(content.Creator[:], creatorAccount); err != nil {
+	if err := e.state.PutAccount(e.payoutVault[:], vaultAccount); err != nil {
 		return nil, err
 	}
 	content.TotalTips = new(big.Int).Add(content.TotalTips, amount)
@@ -237,6 +256,9 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, nil, errInvalidAmount
+	}
+	if isZeroAddress(e.payoutVault) {
+		return nil, nil, errPayoutVaultNotSet
 	}
 	fanAccount, err := e.state.GetAccount(fan[:])
 	if err != nil {
@@ -277,11 +299,38 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	if !ok || ledger == nil {
 		ledger = newLedger(creator)
 	}
-	reward := new(big.Int).Mul(amount, big.NewInt(stakingAccrualBps))
-	reward = reward.Div(reward, big.NewInt(10_000))
-	if reward.Sign() > 0 {
-		ledger.TotalStakingYield = new(big.Int).Add(ledger.TotalStakingYield, reward)
-		ledger.PendingDistribution = new(big.Int).Add(ledger.PendingDistribution, reward)
+	reward := big.NewInt(0)
+	if amount.Sign() > 0 {
+		candidate := new(big.Int).Mul(amount, big.NewInt(stakingAccrualBps))
+		candidate = candidate.Div(candidate, big.NewInt(10_000))
+		if candidate.Sign() > 0 {
+			if isZeroAddress(e.rewardsTreasury) {
+				return nil, nil, errRewardsTreasuryNotSet
+			}
+			treasuryAcc, err := e.state.GetAccount(e.rewardsTreasury[:])
+			if err != nil {
+				return nil, nil, err
+			}
+			treasuryAcc = ensureAccount(treasuryAcc)
+			if treasuryAcc.BalanceNHB.Cmp(candidate) >= 0 {
+				treasuryAcc.BalanceNHB = new(big.Int).Sub(treasuryAcc.BalanceNHB, candidate)
+				if err := e.state.PutAccount(e.rewardsTreasury[:], treasuryAcc); err != nil {
+					return nil, nil, err
+				}
+				vaultAccount, err := e.state.GetAccount(e.payoutVault[:])
+				if err != nil {
+					return nil, nil, err
+				}
+				vaultAccount = ensureAccount(vaultAccount)
+				vaultAccount.BalanceNHB = new(big.Int).Add(vaultAccount.BalanceNHB, candidate)
+				if err := e.state.PutAccount(e.payoutVault[:], vaultAccount); err != nil {
+					return nil, nil, err
+				}
+				ledger.TotalStakingYield = new(big.Int).Add(ledger.TotalStakingYield, candidate)
+				ledger.PendingDistribution = new(big.Int).Add(ledger.PendingDistribution, candidate)
+				reward = candidate
+			}
+		}
 	}
 	if err := e.state.CreatorPayoutLedgerPut(ledger); err != nil {
 		return nil, nil, err
@@ -290,7 +339,7 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	if reward.Sign() > 0 {
 		e.emit(CreatorPayoutAccruedEvent(hexAddr(creator), ledger.PendingDistribution.String(), ledger.TotalTips.String(), ledger.TotalStakingYield.String()))
 	}
-	return stake, reward, nil
+	return stake, newBigInt(reward), nil
 }
 
 // UnstakeCreator unlocks a fan stake and returns the funds back to the fan balance.
@@ -355,12 +404,27 @@ func (e *Engine) ClaimPayouts(creator [20]byte) (*PayoutLedger, *big.Int, error)
 	if pending.Sign() == 0 {
 		return ledger.Clone(), big.NewInt(0), nil
 	}
+	if isZeroAddress(e.payoutVault) {
+		return nil, nil, errPayoutVaultNotSet
+	}
 	creatorAccount, err := e.state.GetAccount(creator[:])
 	if err != nil {
 		return nil, nil, err
 	}
 	creatorAccount = ensureAccount(creatorAccount)
+	vaultAccount, err := e.state.GetAccount(e.payoutVault[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	vaultAccount = ensureAccount(vaultAccount)
+	if vaultAccount.BalanceNHB.Cmp(pending) < 0 {
+		return nil, nil, errPayoutVaultUnderfunded
+	}
 	creatorAccount.BalanceNHB = new(big.Int).Add(creatorAccount.BalanceNHB, pending)
+	vaultAccount.BalanceNHB = new(big.Int).Sub(vaultAccount.BalanceNHB, pending)
+	if err := e.state.PutAccount(e.payoutVault[:], vaultAccount); err != nil {
+		return nil, nil, err
+	}
 	if err := e.state.PutAccount(creator[:], creatorAccount); err != nil {
 		return nil, nil, err
 	}
