@@ -1,0 +1,88 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  prometheus:
+    config:
+      global:
+        scrape_interval: 15s
+      scrape_configs:
+        - job_name: nhb-services
+          metrics_path: /metrics
+          relabel_configs:
+            - source_labels: [__address__]
+              target_label: instance
+          static_configs:
+            - targets:
+                - gateway:9464
+                - consensusd:9464
+                - p2pd:9464
+                - governd:9464
+                - lendingd:9464
+                - swapd:9464
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 120
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+  attributes/redact:
+    actions:
+      - key: account_number
+        action: delete
+      - key: auth_token
+        action: delete
+exporters:
+  logging:
+    loglevel: warn
+  otlp/tempo:
+    endpoint: tempo:4318
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:9464
+    namespace: nhb
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    tls:
+      insecure: true
+connectors:
+  spanmetrics:
+    metrics_flush_interval: 15s
+    dimensions:
+      - name: service.name
+      - name: rpc.system
+      - name: rpc.service
+      - name: http.method
+      - name: http.route
+    histogram:
+      explicit:
+        buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
+service:
+  extensions: [health_check, pprof]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, batch]
+      exporters: [otlp/tempo, spanmetrics, logging]
+    metrics:
+      receivers: [otlp, prometheus, spanmetrics]
+      processors: [batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [loki]
+  telemetry:
+    logs:
+      level: warn
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777

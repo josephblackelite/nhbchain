@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
 	"nhbchain/config"
@@ -24,6 +25,8 @@ import (
 	"nhbchain/native/lending"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 	consensusv1 "nhbchain/proto/consensus/v1"
 	"nhbchain/storage"
 )
@@ -41,6 +44,34 @@ func main() {
 	grpcAddress := flag.String("grpc", ":9090", "Address for the consensus gRPC server")
 	networkAddress := flag.String("p2p", "localhost:9091", "Address of the p2p daemon network service")
 	flag.Parse()
+
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("consensusd", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "consensusd",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialise telemetry: %v", err))
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
 
@@ -185,7 +216,10 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to listen on %s: %v", *grpcAddress, err))
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+	)
 	srv := service.NewServer(node)
 	consensusv1.RegisterConsensusServiceServer(grpcServer, srv)
 	consensusv1.RegisterQueryServiceServer(grpcServer, srv)

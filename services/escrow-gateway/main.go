@@ -7,11 +7,46 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 )
 
 func main() {
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("escrow-gateway", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "escrow-gateway",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		log.Fatalf("init telemetry: %v", err)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
+
 	cfg, err := LoadConfigFromEnv()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
@@ -30,7 +65,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    cfg.ListenAddress,
-		Handler: server,
+		Handler: otelhttp.NewHandler(server, "escrow-gateway"),
 	}
 
 	go func() {

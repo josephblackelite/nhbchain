@@ -1,0 +1,34 @@
+groups:
+  - name: nhb-service-slos
+    rules:
+      - record: slo:service_error_ratio:5m
+        expr: |
+          sum(rate(spanmetrics_error_count[5m])) by (service_name)
+            /
+          sum(rate(spanmetrics_calls_total[5m])) by (service_name)
+      - record: slo:service_latency_p95:5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(spanmetrics_latency_bucket[5m])) by (service_name, le)
+          )
+      - alert: ServiceErrorBudgetBurn
+        expr: slo:service_error_ratio:5m > 0.02
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.service_name }} is above the 2% error budget"
+          description: |
+            Error ratio {{ printf "%.2f" $value }} exceeds SLO for {{ $labels.service_name }}.
+            Investigate recent deployments or upstream dependencies.
+      - alert: ServiceLatencyRegression
+        expr: slo:service_latency_p95:5m > 0.75
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.service_name }} p95 latency is above 750ms"
+          description: |
+            The 5 minute 95th percentile latency for {{ $labels.service_name }} is {{ printf "%.2fs" $value }}.
+            Check recent traces in Tempo for slow spans.

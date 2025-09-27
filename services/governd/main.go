@@ -6,14 +6,19 @@ import (
 	"flag"
 	"log"
 	"net"
+	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
 	"nhbchain/crypto"
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 	govv1 "nhbchain/proto/gov/v1"
 	cons "nhbchain/sdk/consensus"
 	"nhbchain/services/governd/config"
@@ -24,6 +29,34 @@ func main() {
 	var cfgPath string
 	flag.StringVar(&cfgPath, "config", "services/governd/config.yaml", "path to governd config")
 	flag.Parse()
+
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("governd", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "governd",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		log.Fatalf("init telemetry: %v", err)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -52,7 +85,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.ListenAddress, err)
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+	)
 	govv1.RegisterQueryServer(grpcServer, service)
 	govv1.RegisterMsgServer(grpcServer, service)
 

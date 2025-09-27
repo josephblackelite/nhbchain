@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -22,6 +23,10 @@ func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client,
 	if len(opts) == 0 {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
+	opts = append(opts,
+		grpc.WithChainUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
+		grpc.WithChainStreamInterceptor(otelgrpc.StreamClientInterceptor()),
+	)
 	conn, err := grpc.DialContext(ctx, target, opts...)
 	if err != nil {
 		return nil, err
@@ -64,20 +69,20 @@ func (c *Client) QueryClient() consensusv1.QueryServiceClient {
 
 // SubmitTransaction pushes a transaction into the validator mempool.
 func (c *Client) SubmitTransaction(ctx context.Context, tx *consensusv1.Transaction) error {
-        if c == nil {
-                return grpc.ErrClientConnClosing
-        }
-        _, err := c.raw.SubmitTransaction(ctx, &consensusv1.SubmitTransactionRequest{Transaction: tx})
-        return err
+	if c == nil {
+		return grpc.ErrClientConnClosing
+	}
+	_, err := c.raw.SubmitTransaction(ctx, &consensusv1.SubmitTransactionRequest{Transaction: tx})
+	return err
 }
 
 // SubmitEnvelope pushes a signed transaction envelope into the validator mempool.
 func (c *Client) SubmitEnvelope(ctx context.Context, tx *consensusv1.SignedTxEnvelope) error {
-        if c == nil {
-                return grpc.ErrClientConnClosing
-        }
-        _, err := c.raw.SubmitTxEnvelope(ctx, &consensusv1.SubmitTxEnvelopeRequest{Tx: tx})
-        return err
+	if c == nil {
+		return grpc.ErrClientConnClosing
+	}
+	_, err := c.raw.SubmitTxEnvelope(ctx, &consensusv1.SubmitTxEnvelopeRequest{Tx: tx})
+	return err
 }
 
 // GetHeight fetches the chain height tracked by the validator.

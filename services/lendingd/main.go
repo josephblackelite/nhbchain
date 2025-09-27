@@ -8,12 +8,17 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 	lendingv1 "nhbchain/proto/lending/v1"
 	lendingserver "nhbchain/services/lending/server"
 )
@@ -47,6 +52,34 @@ func main() {
 	flag.StringVar(&cfgPath, "config", "services/lending/config.yaml", "path to lendingd config")
 	flag.Parse()
 
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("lendingd", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "lendingd",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		log.Fatalf("init telemetry: %v", err)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
+
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
@@ -56,7 +89,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.ListenAddress, err)
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+	)
 	service := lendingserver.New()
 	lendingv1.RegisterLendingServiceServer(grpcServer, service)
 
