@@ -16,8 +16,8 @@ export default function EarnPage() {
         <span>Provide Liquidity</span>
         <h1>Earn sustainable NHB yield</h1>
         <p className="section-description">
-          CODEx — LEND-UI-2 demonstrates how lenders supply and withdraw liquidity. Swap the mock state in this component for
-          real RPC calls to connect with NHBChain pool contracts.
+          The NHBChain Lending Playbook — pattern LEND-02 — walks through this supply and withdrawal journey. Swap the mock
+          state in this component for real RPC calls to connect with NHBChain pool contracts.
         </p>
       </section>
 
