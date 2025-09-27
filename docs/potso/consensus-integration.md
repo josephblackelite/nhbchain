@@ -11,7 +11,9 @@ Each consensus node implements `NodeInterface.GetValidatorSet()` which returns a
 map keyed by validator address. The value is the validator's deterministic
 weight derived from the sum of bonded stake and the current POTSO engagement
 score. The engine caches this map at the beginning of every round and
-recomputes the **total voting power** by summing all entries.
+recomputes the **total voting power** by summing all entries. Nodes must also
+expose `NodeInterface.GetHeight()` so the engine can synchronise its internal
+height with the committed chain height during restarts or catch-up scenarios.
 
 If a validator appears in the set with a nil weight the engine treats its power
 as zero. Validators missing from the set are ignored entirely.

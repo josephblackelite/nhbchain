@@ -59,12 +59,13 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 			totalPower.Add(totalPower, weight)
 		}
 	}
+	nodeHeight := node.GetHeight()
 	return &Engine{
 		node:          node,
 		privKey:       key,
 		validatorSet:  validatorSet,
 		broadcaster:   broadcaster,
-		currentState:  State{Height: 1, Round: 0},
+		currentState:  State{Height: nodeHeight + 1, Round: 0},
 		receivedVotes: make(map[VoteType]map[string]*SignedVote),
 		receivedPower: map[VoteType]*big.Int{
 			Prevote:   big.NewInt(0),
@@ -383,6 +384,7 @@ func (e *Engine) commit() bool {
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
+	e.syncHeightWithNodeLocked()
 	return true
 }
 
@@ -552,11 +554,15 @@ func (e *Engine) startNewRound() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.committedBlocks[e.currentState.Height] {
-		e.currentState.Height++
-		e.currentState.Round = 0
-	} else {
-		e.currentState.Round++
+	if !e.syncHeightWithNodeLocked() {
+		if e.committedBlocks[e.currentState.Height] {
+			delete(e.committedBlocks, e.currentState.Height)
+			e.currentState.Height++
+			e.currentState.Round = 0
+			e.syncHeightWithNodeLocked()
+		} else {
+			e.currentState.Round++
+		}
 	}
 	e.activeProposal = nil
 	e.prevoteSent = false
@@ -565,6 +571,24 @@ func (e *Engine) startNewRound() {
 	e.recalculateVotingPowerLocked()
 	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
+}
+
+func (e *Engine) syncHeightWithNodeLocked() bool {
+	if e.node == nil {
+		return false
+	}
+	nodeHeight := e.node.GetHeight()
+	for height := range e.committedBlocks {
+		if height <= nodeHeight {
+			delete(e.committedBlocks, height)
+		}
+	}
+	if e.currentState.Height <= nodeHeight {
+		e.currentState.Height = nodeHeight + 1
+		e.currentState.Round = 0
+		return true
+	}
+	return false
 }
 
 func (e *Engine) selectProposer(round int) []byte {
