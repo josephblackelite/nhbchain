@@ -89,7 +89,10 @@ type Node struct {
 	creatorRewardsTreasuryAddr   crypto.Address
 }
 
-const rolePaymasterAdmin = "ROLE_PAYMASTER_ADMIN"
+const (
+	rolePaymasterAdmin     = "ROLE_PAYMASTER_ADMIN"
+	roleReputationVerifier = "ROLE_REPUTATION_VERIFIER"
+)
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
 
@@ -1720,10 +1723,42 @@ func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, caller [20]byte, a
 }
 
 // ReputationVerifySkill validates the caller's verifier role and records a
-// skill verification. The placeholder returns an authorisation error until the
-// role system is wired in.
+// skill verification.
 func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, expiresAt int64) (*reputation.SkillVerification, error) {
-	return nil, ErrReputationVerifierUnauthorized
+	if n == nil {
+		return nil, fmt.Errorf("reputation: node unavailable")
+	}
+	trimmedSkill := strings.TrimSpace(skill)
+	if trimmedSkill == "" {
+		return nil, fmt.Errorf("reputation: skill required")
+	}
+	issuedAt := n.currentTime().Unix()
+	verification := &reputation.SkillVerification{
+		Subject:   subject,
+		Skill:     trimmedSkill,
+		Verifier:  verifier,
+		IssuedAt:  issuedAt,
+		ExpiresAt: expiresAt,
+	}
+	if err := verification.Validate(); err != nil {
+		return nil, err
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("reputation: state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	if !manager.HasRole(roleReputationVerifier, verifier[:]) {
+		return nil, ErrReputationVerifierUnauthorized
+	}
+	ledger := reputation.NewLedger(manager)
+	if err := ledger.Put(verification); err != nil {
+		return nil, err
+	}
+	n.state.AppendEvent(reputation.NewSkillVerifiedEvent(verification))
+	return verification, nil
 }
 
 func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
