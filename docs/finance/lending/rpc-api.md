@@ -1,5 +1,10 @@
 # Lending RPC API Reference
 
+> **Note:** A dedicated `lendingd` service is now available and documents its
+> gRPC API separately in [/docs/lending/service.md](../../lending/service.md).
+> The legacy JSON-RPC interface described below remains supported for existing
+> deployments but will be phased out in favour of the standalone service.
+
 The NHBChain node exposes a JSON-RPC interface for interacting with the native
 lending engine. This document describes each method, the expected request
 payloads, and the shape of the responses returned by the node.
