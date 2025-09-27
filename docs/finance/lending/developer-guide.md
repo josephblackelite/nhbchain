@@ -47,9 +47,12 @@ NHBChain using the JSON-RPC endpoints exposed by the node.
 - Compute projected health factors client-side before calling
   [`lending_borrowNHB`](rpc-api.md#lending_borrownhb). Block requests that would
   drive HF below 1.0 and warn users when the buffer is thin.
-- If your application charges a fee, route the borrow through
-  `lending_borrowNHBWithFee` and display the fee and net amount in the
-  confirmation modal. Fees are specified in basis points.
+- If your application charges a fee, coordinate with the node operator to set
+  `DeveloperFeeBps` and `DeveloperFeeCollector` in `config.toml`. The
+  `lending_borrowNHBWithFee` RPC automatically applies those trusted settings,
+  rejects caller-supplied fee parameters, and adds the deducted fee to the
+  borrower’s outstanding debt. Surface the configured fee rate in your UI so
+  borrowers understand the total obligation.
 
 ## 6. Repayment and Upkeep
 

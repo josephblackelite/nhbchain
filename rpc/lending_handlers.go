@@ -25,10 +25,8 @@ type lendingBorrowParams struct {
 }
 
 type lendingBorrowWithFeeParams struct {
-	Borrower     string `json:"borrower"`
-	Amount       string `json:"amount"`
-	FeeRecipient string `json:"feeRecipient"`
-	FeeBps       uint64 `json:"feeBps"`
+	Borrower string `json:"borrower"`
+	Amount   string `json:"amount"`
 }
 
 type lendingLiquidateParams struct {
@@ -144,6 +142,19 @@ func (s *Server) handleLendingBorrowNHBWithFee(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected parameter object", nil)
 		return
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(req.Params[0], &raw); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
+		return
+	}
+	if _, ok := raw["feeRecipient"]; ok {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "feeRecipient is not configurable", nil)
+		return
+	}
+	if _, ok := raw["feeBps"]; ok {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "feeBps is not configurable", nil)
+		return
+	}
 	var params lendingBorrowWithFeeParams
 	if err := json.Unmarshal(req.Params[0], &params); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
@@ -159,12 +170,7 @@ func (s *Server) handleLendingBorrowNHBWithFee(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
-	recipient, err := decodeBech32(params.FeeRecipient)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid feeRecipient", err.Error())
-		return
-	}
-	txHash, moduleErr := s.lending.BorrowNHBWithFee(borrower, amount, recipient, params.FeeBps)
+	txHash, moduleErr := s.lending.BorrowNHBWithFee(borrower, amount)
 	if moduleErr != nil {
 		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
 		return

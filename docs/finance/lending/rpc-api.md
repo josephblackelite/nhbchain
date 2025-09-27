@@ -151,7 +151,8 @@ Borrow NHB against enabled collateral.
 
 ### `lending_borrowNHBWithFee`
 
-Borrow NHB while routing a fee (in basis points) to a third-party address.
+Borrow NHB while routing a governance-approved developer fee to the collector
+configured in the node’s `lending` settings.
 
 ```json
 {
@@ -159,16 +160,17 @@ Borrow NHB while routing a fee (in basis points) to a third-party address.
   "params": [
     {
       "borrower": "nhb1qyexample...",
-      "amount": "100000000000000000",
-      "feeRecipient": "nhb1qpartner...",
-      "feeBps": 100
+      "amount": "100000000000000000"
     }
   ]
 }
 ```
 
-The node transfers `amount * feeBps / 10_000` NHB to `feeRecipient` as part of
-the action.
+The endpoint rejects caller-supplied fee configuration. Instead, the node reads
+`DeveloperFeeBps` and `DeveloperFeeCollector` from `config.toml` and validates
+the collector against the governance treasury allow list. The fee amount is
+computed as `amount * DeveloperFeeBps / 10_000`, forwarded to the configured
+collector, and added to the borrower’s outstanding debt.
 
 ### `lending_repayNHB`
 

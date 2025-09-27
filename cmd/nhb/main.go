@@ -113,7 +113,21 @@ func main() {
 	node.SetLendingRiskParameters(lending.RiskParameters{
 		MaxLTV:               cfg.Lending.MaxLTVBps,
 		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
+		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
 	})
+
+	devCollectorStr := strings.TrimSpace(cfg.Lending.DeveloperFeeCollector)
+	var devCollector crypto.Address
+	if devCollectorStr != "" {
+		decoded, err := crypto.DecodeAddress(devCollectorStr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode lending developer fee collector: %v", err))
+		}
+		devCollector = decoded
+	} else if cfg.Lending.DeveloperFeeBps > 0 {
+		panic("Lending DeveloperFeeCollector must be configured when DeveloperFeeBps is non-zero")
+	}
+	node.SetLendingDeveloperFee(cfg.Lending.DeveloperFeeBps, devCollector)
 
 	swapCfg := cfg.SwapSettings()
 	node.SetSwapConfig(swapCfg)

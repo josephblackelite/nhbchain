@@ -67,4 +67,7 @@ type RiskParameters struct {
 	// CircuitBreakerActive signals whether new borrowing should be halted due
 	// to oracle issues or governance intervention.
 	CircuitBreakerActive bool
+	// DeveloperFeeCapBps bounds the developer fee that may be charged on
+	// `BorrowNHBWithFee` operations. A zero value disables developer fees.
+	DeveloperFeeCapBps uint64
 }

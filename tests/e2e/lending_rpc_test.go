@@ -48,7 +48,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("new node: %v", err)
 	}
 
-	risk := lending.RiskParameters{MaxLTV: 7500, LiquidationThreshold: 8000, LiquidationBonus: 500}
+	risk := lending.RiskParameters{MaxLTV: 7500, LiquidationThreshold: 8000, LiquidationBonus: 500, DeveloperFeeCapBps: 100}
 	node.SetLendingRiskParameters(risk)
 
 	userKey, err := crypto.GeneratePrivateKey()
@@ -61,6 +61,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("fee key: %v", err)
 	}
 	feeAddr := feeKey.PubKey().Address()
+	node.SetLendingDeveloperFee(100, feeAddr)
 
 	liquidatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -96,14 +97,13 @@ func TestLendingRPCEndpoints(t *testing.T) {
 	}
 
 	userAddrStr := userAddr.String()
-	feeAddrStr := feeAddr.String()
 
 	callRPC(t, client, ts.URL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": "1000"})
 	callRPC(t, client, ts.URL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": "600"})
 	callRPC(t, client, ts.URL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": "400"})
 	callRPC(t, client, ts.URL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "400"})
-	callRPC(t, client, ts.URL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": "100", "feeRecipient": feeAddrStr, "feeBps": 100})
-	callRPC(t, client, ts.URL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "100"})
+	callRPC(t, client, ts.URL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": "100"})
+	callRPC(t, client, ts.URL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "101"})
 	callRPC(t, client, ts.URL, token, "lending_withdrawNHB", map[string]string{"from": userAddrStr, "amount": "500"})
 	callRPC(t, client, ts.URL, token, "lending_withdrawZNHB", map[string]string{"from": userAddrStr, "amount": "300"})
 
