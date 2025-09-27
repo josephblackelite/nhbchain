@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/p2p"
 
@@ -229,12 +230,21 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 func (e *Engine) propose() error {
 	txs := e.node.GetMempool()
 	if len(txs) == 0 {
-		return fmt.Errorf("no transactions available for proposal")
+		fmt.Println("PROPOSE: Mempool empty, creating empty block proposal.")
 	}
 
-	block, err := e.node.CreateBlock(txs)
+	var block *types.Block
+	var err error
+	if len(txs) == 0 {
+		block, err = e.node.CreateBlock(nil)
+	} else {
+		block, err = e.node.CreateBlock(txs)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to build block: %w", err)
+	}
+	if block == nil || block.Header == nil {
+		return fmt.Errorf("proposed block missing header")
 	}
 
 	e.mu.RLock()
@@ -268,7 +278,7 @@ func (e *Engine) propose() error {
 
 func (e *Engine) prevote() {
 	e.mu.Lock()
-	if e.prevoteSent || e.activeProposal == nil {
+	if e.prevoteSent || e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil {
 		e.mu.Unlock()
 		return
 	}
@@ -310,7 +320,7 @@ func (e *Engine) prevote() {
 
 func (e *Engine) precommit() {
 	e.mu.Lock()
-	if e.precommitSent || e.activeProposal == nil {
+	if e.precommitSent || e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil {
 		e.mu.Unlock()
 		return
 	}
@@ -355,7 +365,7 @@ func (e *Engine) commit() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.activeProposal == nil {
+	if e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil {
 		return false
 	}
 	if e.committedBlocks[e.currentState.Height] {
@@ -425,7 +435,7 @@ func (e *Engine) acceptProposal(p *SignedProposal) bool {
 func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.activeProposal == nil || v == nil || v.Vote == nil {
+	if e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil || v == nil || v.Vote == nil {
 		return false, false, false
 	}
 
