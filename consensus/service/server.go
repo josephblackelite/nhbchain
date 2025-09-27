@@ -12,6 +12,7 @@ import (
 // Server exposes consensus functionality over gRPC.
 type Server struct {
 	consensusv1.UnimplementedConsensusServiceServer
+	consensusv1.UnimplementedQueryServiceServer
 	node core.ConsensusAPI
 }
 

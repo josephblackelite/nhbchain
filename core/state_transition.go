@@ -687,17 +687,56 @@ func (sp *StateProcessor) SetPaymasterEnabled(enabled bool) {
 }
 
 func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
+	_, err := sp.executeTransaction(tx)
+	return err
+}
+
+// ExecuteTransaction applies the transaction and returns execution metadata.
+func (sp *StateProcessor) ExecuteTransaction(tx *types.Transaction) (*SimulationResult, error) {
+	return sp.executeTransaction(tx)
+}
+
+func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*SimulationResult, error) {
 	if !types.IsValidChainID(tx.ChainID) {
-		return fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
 	}
 	sender, senderAccount, err := sp.validateSenderAccount(tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if tx.Type == types.TxTypeTransfer {
-		return sp.applyEvmTransaction(tx)
+	start := len(sp.events)
+	var result *SimulationResult
+	switch tx.Type {
+	case types.TxTypeTransfer:
+		result, err = sp.applyEvmTransaction(tx)
+	default:
+		err = sp.handleNativeTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
 	}
-	return sp.handleNativeTransaction(tx, sender, senderAccount)
+	if err != nil {
+		if len(sp.events) > start {
+			sp.events = sp.events[:start]
+		}
+		return nil, err
+	}
+	if result == nil {
+		result = &SimulationResult{}
+	}
+	newEvents := sp.events[start:]
+	if len(newEvents) > 0 {
+		copied := make([]types.Event, len(newEvents))
+		for i := range newEvents {
+			attrs := make(map[string]string, len(newEvents[i].Attributes))
+			for k, v := range newEvents[i].Attributes {
+				attrs[k] = v
+			}
+			copied[i] = types.Event{Type: newEvents[i].Type, Attributes: attrs}
+		}
+		result.Events = copied
+	} else {
+		result.Events = nil
+	}
+	return result, nil
 }
 
 type sponsorshipRuntime struct {
@@ -724,15 +763,16 @@ func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, 
 }
 
 // --- EVM path (Geth v1.16.x) ---
-func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
+func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*SimulationResult, error) {
+	exec := &SimulationResult{}
 	from, err := tx.From()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	parentRoot := sp.Trie.Hash()
 	statedb, err := gethstate.New(parentRoot, sp.stateDB)
 	if err != nil {
-		return fmt.Errorf("statedb init: %w", err)
+		return nil, fmt.Errorf("statedb init: %w", err)
 	}
 
 	fromAddr := common.BytesToAddress(from)
@@ -752,7 +792,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 
 	assessment, err := sp.EvaluateSponsorship(tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var sponsorshipCtx *sponsorshipRuntime
 	var txHashBytes []byte
@@ -815,12 +855,13 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	gp := new(gethcore.GasPool).AddGas(tx.GasLimit)
 	result, err := gethcore.ApplyMessage(evm, &msg, gp)
 	if err != nil {
-		return fmt.Errorf("ApplyMessage: %w", err)
+		return nil, fmt.Errorf("ApplyMessage: %w", err)
 	}
 	if result != nil && result.Err != nil {
-		return fmt.Errorf("EVM error: %w", result.Err)
+		return nil, fmt.Errorf("EVM error: %w", result.Err)
 	}
 
+	gasPriceUsed := tx.GasPrice
 	if sponsorshipCtx != nil {
 		usedCost := new(big.Int).Mul(new(big.Int).SetUint64(result.UsedGas), sponsorshipCtx.gasPrice)
 		budget := new(big.Int).Set(sponsorshipCtx.budget)
@@ -838,25 +879,33 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 			charged = big.NewInt(0)
 		}
 		sp.emitSponsorshipSuccessEvent(sponsorshipCtx, result.UsedGas, charged, refund)
+		if sponsorshipCtx.gasPrice != nil && sponsorshipCtx.gasPrice.Sign() > 0 {
+			gasPriceUsed = sponsorshipCtx.gasPrice
+		}
+	}
+
+	exec.GasUsed = result.UsedGas
+	if gasPriceUsed != nil {
+		exec.GasCost = new(big.Int).Mul(new(big.Int).SetUint64(result.UsedGas), new(big.Int).Set(gasPriceUsed))
 	}
 
 	newRoot, err := statedb.Commit(0, false, false)
 	if err != nil {
-		return fmt.Errorf("statedb commit: %w", err)
+		return nil, fmt.Errorf("statedb commit: %w", err)
 	}
 	if err := sp.Trie.Reset(newRoot); err != nil {
-		return fmt.Errorf("trie reset: %w", err)
+		return nil, fmt.Errorf("trie reset: %w", err)
 	}
 
 	fromAcc, err := sp.getAccount(from)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var toAcc *types.Account
 	if tx.To != nil {
 		toAcc, err = sp.getAccount(tx.To)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -879,29 +928,29 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) error {
 	}
 
 	if err := sp.setAccount(from, fromAcc); err != nil {
-		return err
+		return nil, err
 	}
 	if tx.To != nil && toAcc != nil {
 		if err := sp.setAccount(tx.To, toAcc); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
 		sponsorAcc, err := sp.getAccount(tx.Paymaster)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := sp.setAccount(tx.Paymaster, sponsorAcc); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if err := sp.recordEngagementActivity(from, sp.blockTimestamp(), 1, 0, 0); err != nil {
-		return err
+		return nil, err
 	}
 
 	fmt.Printf("EVM transaction processed. Gas used: %d. Output: %x\n", result.UsedGas, result.ReturnData)
-	return nil
+	return exec, nil
 }
 
 // --- Native handlers (original semantics + new dispute flow) ---
