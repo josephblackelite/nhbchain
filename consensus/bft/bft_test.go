@@ -1,10 +1,13 @@
 package bft
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -14,6 +17,7 @@ import (
 type failingNode struct {
 	validatorSet map[string]*big.Int
 	commitErr    error
+	height       uint64
 }
 
 func (n *failingNode) GetMempool() []*types.Transaction { return nil }
@@ -26,6 +30,7 @@ func (n *failingNode) GetAccount(addr []byte) (*types.Account, error) {
 	return &types.Account{Stake: big.NewInt(1)}, nil
 }
 func (n *failingNode) GetLastCommitHash() []byte { return nil }
+func (n *failingNode) GetHeight() uint64         { return n.height }
 
 type recordingBroadcaster struct {
 	messages []*p2p.Message
@@ -39,6 +44,7 @@ func (r *recordingBroadcaster) Broadcast(msg *p2p.Message) error {
 type trackingNode struct {
 	validatorSet map[string]*big.Int
 	committed    []*types.Block
+	height       uint64
 }
 
 func (n *trackingNode) GetMempool() []*types.Transaction { return nil }
@@ -47,6 +53,9 @@ func (n *trackingNode) CreateBlock(txs []*types.Transaction) (*types.Block, erro
 }
 func (n *trackingNode) CommitBlock(block *types.Block) error {
 	n.committed = append(n.committed, block)
+	if block != nil && block.Header != nil {
+		n.height = block.Header.Height
+	}
 	return nil
 }
 func (n *trackingNode) GetValidatorSet() map[string]*big.Int { return n.validatorSet }
@@ -58,6 +67,7 @@ func (n *trackingNode) GetAccount(addr []byte) (*types.Account, error) {
 	return &types.Account{Stake: new(big.Int).Set(weight)}, nil
 }
 func (n *trackingNode) GetLastCommitHash() []byte { return nil }
+func (n *trackingNode) GetHeight() uint64         { return n.height }
 
 func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 	validatorKey, err := crypto.GeneratePrivateKey()
@@ -371,5 +381,73 @@ func TestCommitSucceedsWithWeightedQuorum(t *testing.T) {
 	}
 	if engine.activeProposal != nil {
 		t.Fatalf("expected active proposal to be cleared after commit")
+	}
+}
+
+func TestEngineFastForwardsHeightOnRestart(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+
+	initialHeight := uint64(5)
+	node := &trackingNode{
+		validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)},
+		height:       initialHeight,
+	}
+	engine := NewEngine(node, validatorKey, &recordingBroadcaster{})
+
+	engine.mu.Lock()
+	engine.currentState = State{Height: 2, Round: 3}
+	engine.committedBlocks[1] = true
+	engine.mu.Unlock()
+
+	engine.startNewRound()
+
+	engine.mu.RLock()
+	syncedHeight := engine.currentState.Height
+	syncedRound := engine.currentState.Round
+	_, stalePresent := engine.committedBlocks[1]
+	engine.mu.RUnlock()
+
+	expectedHeight := initialHeight + 1
+	if syncedHeight != expectedHeight {
+		t.Fatalf("expected engine height %d after sync, got %d", expectedHeight, syncedHeight)
+	}
+	if syncedRound != 0 {
+		t.Fatalf("expected engine round 0 after height sync, got %d", syncedRound)
+	}
+	if stalePresent {
+		t.Fatalf("expected committedBlocks to be pruned for stale heights")
+	}
+
+	block := types.NewBlock(&types.BlockHeader{Height: syncedHeight, Validator: validatorAddr}, nil)
+	proposal := &Proposal{Block: block, Round: syncedRound}
+	hash := sha256.Sum256(proposal.bytes())
+	sig, err := ethcrypto.Sign(hash[:], validatorKey.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign proposal: %v", err)
+	}
+	signedProposal := &SignedProposal{
+		Proposal: proposal,
+		Proposer: validatorAddr,
+		Signature: &Signature{
+			Scheme:    SignatureSchemeSecp256k1,
+			Signature: sig,
+		},
+	}
+
+	if err := engine.HandleProposal(signedProposal); err != nil {
+		t.Fatalf("handle proposal: %v", err)
+	}
+
+	select {
+	case got := <-engine.proposalCh:
+		if got != signedProposal {
+			t.Fatalf("expected proposal to be enqueued unchanged")
+		}
+	default:
+		t.Fatalf("expected proposal to be queued after height sync")
 	}
 }

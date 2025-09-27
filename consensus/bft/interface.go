@@ -13,4 +13,5 @@ type NodeInterface interface {
 	GetValidatorSet() map[string]*big.Int
 	GetAccount(addr []byte) (*types.Account, error)
 	GetLastCommitHash() []byte
+	GetHeight() uint64
 }
