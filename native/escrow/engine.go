@@ -14,6 +14,7 @@ import (
 
 	"nhbchain/core/events"
 	"nhbchain/core/types"
+	nativecommon "nhbchain/native/common"
 )
 
 var (
@@ -23,6 +24,8 @@ var (
 	errRealmNotFound  = errors.New("escrow engine: realm not found")
 	errRealmConfig    = errors.New("escrow engine: invalid realm configuration")
 )
+
+const moduleName = "escrow"
 
 type engineState interface {
 	EscrowPut(*Escrow) error
@@ -61,6 +64,7 @@ type Engine struct {
 	emitter     events.Emitter
 	feeTreasury [20]byte
 	nowFn       func() int64
+	pauses      nativecommon.PauseView
 }
 
 type decisionEnvelope struct {
@@ -84,6 +88,14 @@ func (e *Engine) SetState(state engineState) { e.state = state }
 
 // SetFeeTreasury configures the address that should receive escrow fees.
 func (e *Engine) SetFeeTreasury(addr [20]byte) { e.feeTreasury = addr }
+
+// SetPauses wires the pause view used to gate state transitions.
+func (e *Engine) SetPauses(p nativecommon.PauseView) {
+	if e == nil {
+		return
+	}
+	e.pauses = p
+}
 
 // SetNowFunc overrides the time source used by the engine. Primarily intended
 // for tests to provide deterministic timestamps.
@@ -406,6 +418,9 @@ func (e *Engine) CreateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
 	if realm == nil {
 		return nil, fmt.Errorf("escrow: nil realm definition")
 	}
@@ -447,6 +462,9 @@ func (e *Engine) CreateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 func (e *Engine) UpdateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
 	}
 	if realm == nil {
 		return nil, fmt.Errorf("escrow: nil realm definition")
@@ -513,6 +531,9 @@ func (e *Engine) GetRealm(id string) (*EscrowRealm, bool, error) {
 func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediatorOpt *[20]byte, metaHash [32]byte, realmID string) (*Escrow, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
 	}
 	normalizedToken, err := NormalizeToken(token)
 	if err != nil {
@@ -588,6 +609,9 @@ func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, fe
 // Fund moves the escrow amount from the payer to the module vault and marks the
 // escrow as funded. The operation is idempotent.
 func (e *Engine) Fund(id [32]byte, from [20]byte) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err
@@ -625,6 +649,9 @@ func (e *Engine) Fund(id [32]byte, from [20]byte) error {
 // Release settles the escrow in favour of the payee, distributing any fees to
 // the configured treasury. The operation is idempotent.
 func (e *Engine) Release(id [32]byte, caller [20]byte) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err
@@ -681,6 +708,9 @@ func (e *Engine) Release(id [32]byte, caller [20]byte) error {
 // Refund returns escrowed funds to the payer when invoked by the payer before
 // the deadline. The operation is idempotent.
 func (e *Engine) Refund(id [32]byte, caller [20]byte) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err
@@ -703,6 +733,9 @@ func (e *Engine) Refund(id [32]byte, caller [20]byte) error {
 // Expire refunds the escrow to the payer once the deadline has elapsed. Anyone
 // may invoke the expiry transition. The operation is idempotent.
 func (e *Engine) Expire(id [32]byte, now int64) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err
@@ -722,6 +755,9 @@ func (e *Engine) Expire(id [32]byte, now int64) error {
 // Dispute flags the escrow as disputed. Only the payer or payee may invoke the
 // transition. The operation is idempotent.
 func (e *Engine) Dispute(id [32]byte, caller [20]byte) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err
@@ -907,6 +943,9 @@ func (e *Engine) arbitratedRelease(esc *Escrow) error {
 // Resolve settles a disputed escrow according to the mediator-determined
 // outcome. Valid outcomes are "release" and "refund".
 func (e *Engine) Resolve(id [32]byte, caller [20]byte, outcome string) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err
@@ -947,6 +986,9 @@ func (e *Engine) Resolve(id [32]byte, caller [20]byte, outcome string) error {
 // ResolveWithSignatures settles a disputed escrow after verifying a quorum of
 // arbitrator signatures over the supplied decision payload.
 func (e *Engine) ResolveWithSignatures(id [32]byte, decisionPayload []byte, signatures [][]byte) error {
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
 	esc, err := e.loadEscrow(id)
 	if err != nil {
 		return err

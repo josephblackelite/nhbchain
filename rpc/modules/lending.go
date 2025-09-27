@@ -321,6 +321,7 @@ func (m *LendingModule) withEngine(poolID string, fn func(*lending.Engine, *lend
 	return m.node.WithState(func(manager *nhbstate.Manager) error {
 		adapter := &lendingStateAdapter{manager: manager, poolID: id}
 		engine := lending.NewEngine(m.node.LendingModuleAddress(), m.node.LendingCollateralAddress(), m.node.LendingRiskParameters())
+		engine.SetPauses(m.node)
 		engine.SetState(adapter)
 		engine.SetPoolID(id)
 		engine.SetInterestModel(m.node.LendingInterestModel())

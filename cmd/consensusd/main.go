@@ -208,6 +208,8 @@ func main() {
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
 
+	node.SetModulePauses(cfg.Global.Pauses)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

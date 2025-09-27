@@ -19,6 +19,7 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/escrow"
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
@@ -66,6 +67,7 @@ type StateProcessor struct {
 	LoyaltyEngine      *loyalty.Engine
 	EscrowEngine       *escrow.Engine
 	TradeEngine        *escrow.TradeEngine
+	pauses             nativecommon.PauseView
 	escrowFeeTreasury  [20]byte
 	usernameToAddr     map[string][]byte
 	ValidatorSet       map[string]*big.Int
@@ -124,6 +126,22 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		return nil, err
 	}
 	return sp, nil
+}
+
+func (sp *StateProcessor) SetPauseView(p nativecommon.PauseView) {
+	if sp == nil {
+		return
+	}
+	sp.pauses = p
+	if sp.EscrowEngine != nil {
+		sp.EscrowEngine.SetPauses(p)
+	}
+	if sp.TradeEngine != nil {
+		sp.TradeEngine.SetPauses(p)
+	}
+	if sp.LoyaltyEngine != nil {
+		sp.LoyaltyEngine.SetPauses(p)
+	}
 }
 
 // SetEscrowFeeTreasury configures the address receiving escrow fees during

@@ -73,6 +73,7 @@ func defaultGlobalConfig() Global {
 		},
 		Mempool: Mempool{MaxBytes: 16 << 20},
 		Blocks:  Blocks{MaxTxs: 5000},
+		Pauses:  Pauses{},
 	}
 }
 

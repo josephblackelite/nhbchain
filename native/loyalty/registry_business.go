@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	nativecommon "nhbchain/native/common"
 )
 
 var zeroBusinessID BusinessID
@@ -14,6 +16,9 @@ func (r *Registry) RegisterBusiness(owner [20]byte, name string) (BusinessID, er
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
 		return zeroBusinessID, fmt.Errorf("%w: name required", ErrInvalidBusiness)
+	}
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return zeroBusinessID, err
 	}
 	id, err := r.nextBusinessID()
 	if err != nil {
@@ -35,6 +40,9 @@ func (r *Registry) RegisterBusiness(owner [20]byte, name string) (BusinessID, er
 }
 
 func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20]byte) error {
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
+	}
 	business, ok := r.getBusiness(id)
 	if !ok {
 		return ErrBusinessNotFound
@@ -78,6 +86,9 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 }
 
 func (r *Registry) AddMerchantAddress(id BusinessID, addr [20]byte) error {
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
+	}
 	business, ok := r.getBusiness(id)
 	if !ok {
 		return ErrBusinessNotFound
@@ -106,6 +117,9 @@ func (r *Registry) AddMerchantAddress(id BusinessID, addr [20]byte) error {
 }
 
 func (r *Registry) RemoveMerchantAddress(id BusinessID, addr [20]byte) error {
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
+	}
 	business, ok := r.getBusiness(id)
 	if !ok {
 		return ErrBusinessNotFound

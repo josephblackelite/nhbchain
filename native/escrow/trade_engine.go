@@ -11,6 +11,7 @@ import (
 
 	"nhbchain/core/events"
 	"nhbchain/core/types"
+	nativecommon "nhbchain/native/common"
 )
 
 var (
@@ -19,6 +20,8 @@ var (
 	errTradeNotFound      = errors.New("trade engine: trade not found")
 	errTradeInvalidStatus = errors.New("trade engine: status transition not allowed")
 )
+
+const tradeModuleName = "trade"
 
 type tradeEngineState interface {
 	engineState
@@ -36,6 +39,7 @@ type TradeEngine struct {
 	escrow  *Engine
 	emitter events.Emitter
 	nowFn   func() int64
+	pauses  nativecommon.PauseView
 }
 
 // NewTradeEngine constructs a trade engine bound to the supplied escrow engine.
@@ -57,6 +61,16 @@ func (e *TradeEngine) SetEmitter(emitter events.Emitter) {
 		return
 	}
 	e.emitter = emitter
+}
+
+func (e *TradeEngine) SetPauses(p nativecommon.PauseView) {
+	if e == nil {
+		return
+	}
+	e.pauses = p
+	if e.escrow != nil {
+		e.escrow.SetPauses(p)
+	}
 }
 
 // SetNowFunc overrides the time source, primarily used in tests.
@@ -92,6 +106,9 @@ func (e *TradeEngine) CreateTrade(offerID string, buyer, seller [20]byte, quoteT
 	}
 	if e.escrow == nil {
 		return nil, errTradeNilEscrow
+	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
+		return nil, err
 	}
 	normalizedQuote, err := NormalizeToken(quoteToken)
 	if err != nil {
@@ -167,6 +184,9 @@ func (e *TradeEngine) HandleEscrowFunded(escrowID [32]byte) error {
 	if e == nil || e.state == nil {
 		return errTradeNilState
 	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
+		return err
+	}
 	tradeID, ok, err := e.state.TradeLookupByEscrow(escrowID)
 	if err != nil {
 		return err
@@ -182,6 +202,9 @@ func (e *TradeEngine) HandleEscrowFunded(escrowID [32]byte) error {
 func (e *TradeEngine) OnFundingProgress(tradeID [32]byte) error {
 	trade, err := e.loadTrade(tradeID)
 	if err != nil {
+		return err
+	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
 		return err
 	}
 	if trade.Status == TradeSettled || trade.Status == TradeExpired || trade.Status == TradeCancelled {
@@ -228,6 +251,9 @@ func (e *TradeEngine) TradeDispute(tradeID [32]byte, caller [20]byte) error {
 	if err != nil {
 		return err
 	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
+		return err
+	}
 	if caller != trade.Buyer && caller != trade.Seller {
 		return fmt.Errorf("trade: unauthorized dispute caller")
 	}
@@ -249,6 +275,9 @@ func (e *TradeEngine) TradeDispute(tradeID [32]byte, caller [20]byte) error {
 func (e *TradeEngine) TradeResolve(tradeID [32]byte, outcome string) error {
 	trade, err := e.loadTrade(tradeID)
 	if err != nil {
+		return err
+	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
 		return err
 	}
 	if trade.Status == TradeSettled {
@@ -304,6 +333,9 @@ func (e *TradeEngine) SettleAtomic(tradeID [32]byte) error {
 	if err != nil {
 		return err
 	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
+		return err
+	}
 	if trade.Status == TradeSettled {
 		return nil
 	}
@@ -339,6 +371,9 @@ func (e *TradeEngine) SettleAtomic(tradeID [32]byte) error {
 func (e *TradeEngine) TradeTryExpire(tradeID [32]byte, now int64) error {
 	trade, err := e.loadTrade(tradeID)
 	if err != nil {
+		return err
+	}
+	if err := nativecommon.Guard(e.pauses, tradeModuleName); err != nil {
 		return err
 	}
 	if trade.Status == TradeSettled || trade.Status == TradeExpired || trade.Status == TradeCancelled {

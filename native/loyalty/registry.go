@@ -8,9 +8,13 @@ import (
 	"strings"
 
 	"nhbchain/core/events"
+	nativecommon "nhbchain/native/common"
 )
 
-const roleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
+const (
+	roleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
+	moduleName       = "loyalty"
+)
 
 type registryState interface {
 	TokenExists(symbol string) bool
@@ -25,6 +29,7 @@ type registryState interface {
 type Registry struct {
 	st      registryState
 	emitter events.Emitter
+	pauses  nativecommon.PauseView
 }
 
 // NewRegistry creates a registry backed by the provided state manager.
@@ -42,11 +47,21 @@ func (r *Registry) SetEmitter(emitter events.Emitter) {
 	r.emitter = emitter
 }
 
+func (r *Registry) SetPauses(p nativecommon.PauseView) {
+	if r == nil {
+		return
+	}
+	r.pauses = p
+}
+
 // CreateProgram persists a new loyalty program. Only the owner or a caller with
 // the ROLE_LOYALTY_ADMIN role may create a program on behalf of the owner.
 func (r *Registry) CreateProgram(caller [20]byte, p *Program) error {
 	if p == nil {
 		return ErrNilProgram
+	}
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
 	}
 	sanitized, err := sanitizeProgram(p)
 	if err != nil {
@@ -89,6 +104,9 @@ func (r *Registry) CreateProgram(caller [20]byte, p *Program) error {
 func (r *Registry) UpdateProgram(caller [20]byte, p *Program) error {
 	if p == nil {
 		return ErrNilProgram
+	}
+	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
+		return err
 	}
 	existing := new(Program)
 	found, err := r.st.KVGet(programKey(p.ID), existing)

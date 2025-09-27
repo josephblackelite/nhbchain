@@ -24,10 +24,20 @@ type Blocks struct {
 	MaxTxs int64
 }
 
+type Pauses struct {
+	Lending bool
+	Swap    bool
+	Escrow  bool
+	Trade   bool
+	Loyalty bool
+	POTSO   bool
+}
+
 // Global bundles the runtime configuration values enforced by ValidateConfig.
 type Global struct {
 	Governance Governance
 	Slashing   Slashing
 	Mempool    Mempool
 	Blocks     Blocks
+	Pauses     Pauses
 }
