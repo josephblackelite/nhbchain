@@ -35,15 +35,16 @@ const (
 )
 
 const (
-	codeParseError     = -32700
-	codeInvalidRequest = -32600
-	codeMethodNotFound = -32601
-	codeInvalidParams  = -32602
-	codeUnauthorized   = -32001
-	codeServerError    = -32000
-	codeDuplicateTx    = -32010
-	codeRateLimited    = -32020
-	codeMempoolFull    = -32030
+        codeParseError     = -32700
+        codeInvalidRequest = -32600
+        codeMethodNotFound = -32601
+        codeInvalidParams  = -32602
+        codeUnauthorized   = -32001
+        codeServerError    = -32000
+        codeDuplicateTx    = -32010
+        codeRateLimited    = -32020
+        codeMempoolFull    = -32030
+        codeInvalidPolicyInvariants = -32040
 )
 
 type rateLimiter struct {
