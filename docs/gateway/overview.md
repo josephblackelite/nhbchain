@@ -11,7 +11,7 @@ internally to dedicated services:
 | `api.nhbcoin.net` | Historical JSON-RPC host (deprecated) | Gateway `/rpc` endpoint |
 | `nhbcoin.net` | On-chain service endpoints (`/v1/...`) | Gateway reverse proxy |
 
-The gateway replaces the previous monolithic JSON-RPC server. Traffic is routed
+The gateway supersedes the legacy JSON-RPC node in the service-oriented topology. Traffic is routed
 according to the following prefixes:
 
 - `/v1/lending/*` → `lendingd`

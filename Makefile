@@ -16,3 +16,11 @@ up:
 
 down:
 	docker compose -f deploy/compose/docker-compose.yml down -v
+
+.PHONY: docs
+docs\:%:
+	@if [ "$*" = "verify" ]; then \
+	go run ./tools/docs/verify.go; \
+	else \
+	echo "unknown docs task $*"; exit 1; \
+	fi

@@ -9,13 +9,13 @@ This document describes how the POTSO rewards module distributes epoch-based ZNH
 - **Inputs:**
   - Bonded ZNHB stake snapshots sourced from the POTSO staking subsystem.
   - Engagement meters representing user activity (transactions, escrow touchpoints, uptime) recorded during the epoch. These
-    counters feed the composite weighting pipeline described in [`weights.md`](weights.md).
+    counters feed the composite weighting pipeline described in [`weights.md`](potso/weights.md).
 - **Budget:** Rewards are paid entirely from the treasury address configured in `potso.rewards.TreasuryAddress`. No new ZNHB is minted. If the treasury balance is below the configured emission for an epoch, payouts are scaled down pro-rata.
 
 ## Weighting Model
 
 Each participant’s payout weight combines stake share and the composite
-engagement share produced by the [POTSO weighting pipeline](weights.md):
+engagement share produced by the [POTSO weighting pipeline](potso/weights.md):
 
 ```
 w_i = α * stakeShare_i + (1 − α) * engagementShare_i

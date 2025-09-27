@@ -62,7 +62,7 @@ introduced in this work.
 
 ## Swap documentation expansion
 
-The swap gateway guide at [docs/swap/README.md](./swap/README.md) now includes:
+The swap gateway guide at [docs/swap/README.md](../swap/README.md) now includes:
 
 - **JSON-RPC integration** details for `swap_submitVoucher`, request/response
 examples, and operational error handling guidance.

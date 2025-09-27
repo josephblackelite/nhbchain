@@ -227,7 +227,7 @@ curl -X POST "$GATEWAY/identity/avatars/upload" \
 
 ## OpenAPI Specification
 
-A machine-readable schema for these endpoints is provided at [`./openapi/identity.yaml`](./openapi/identity.yaml). Use it with
+A machine-readable schema for these endpoints is provided at [`../openapi/identity.yaml`](../openapi/identity.yaml). Use it with
 `redocly lint` or `swagger-cli validate` to ensure compatibility.
 
 ## Related Docs

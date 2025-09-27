@@ -12,7 +12,7 @@ identity gateway service. Together they allow wallets, gateways, and merchants t
 * Deterministic resolution of `@aliases` to rich metadata (primary settlement address, address set, avatar, timestamps).
 * Rich sender safety cues (avatar, created-at timestamp, address fingerprint).
 * Pay-by-email flows that bridge new users through claimable escrows.
-* A consistent UX that complements existing escrow flows (see [Escrow Guide](./escrow.md)).
+* A consistent UX that complements existing escrow flows (see [Escrow Guide](../escrow/escrow.md)).
 
 ## Terminology
 
@@ -108,7 +108,7 @@ type Claimable struct {
 * Funds are held in the identity escrow submodule. Upon `identity_claim`, the amount is released to the claimant's address once
   the provided preimage matches `RecipientHint`.
 * Events emitted: `identity.claimable.created`, `identity.claimable.claimed`, `identity.claimable.expired`.
-* Claimables integrate with the [Escrow module](./escrow.md#1-overview) for audit and settlement guarantees.
+* Claimables integrate with the [Escrow module](../escrow/escrow.md#1-overview) for audit and settlement guarantees.
 
 ### Pay-by-Username Flow
 

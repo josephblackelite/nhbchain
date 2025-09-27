@@ -107,7 +107,7 @@ znhb://pay?to=@frankrocks&amount=25.75&token=NHB&memo=Lunch
 * **Fingerprint**: Render a short checksum of the primary address (e.g., BLAKE3 6 chars) to catch last-minute swaps.
 * **Version watch**: If `identity_get` shows `updatedAt` within the last minute, display warning banner.
 * **Claimable context**: When paying by email, indicate "Funds held until frank@example.com claims by Jun 18".
-* **Escrow link**: Provide "View escrow" CTA linking to [Escrow module docs](./escrow.md) for transparency.
+* **Escrow link**: Provide "View escrow" CTA linking to [Escrow module docs](../escrow/escrow.md) for transparency.
 
 ## 5. Developer Checklist
 
