@@ -643,9 +643,6 @@ func (e *Engine) Release(id [32]byte, caller [20]byte) error {
 	if esc.Status == EscrowDisputed && caller != esc.Mediator {
 		return fmt.Errorf("escrow: dispute requires mediator release")
 	}
-	if err := e.ensureTreasuryConfigured(); err != nil {
-		return err
-	}
 	vault, err := e.state.EscrowVaultAddress(esc.Token)
 	if err != nil {
 		return err
@@ -663,6 +660,9 @@ func (e *Engine) Release(id [32]byte, caller [20]byte) error {
 		}
 	}
 	if fee.Sign() > 0 {
+		if err := e.ensureTreasuryConfigured(); err != nil {
+			return err
+		}
 		if err := e.transferToken(vault, e.feeTreasury, esc.Token, fee); err != nil {
 			return err
 		}
@@ -869,9 +869,6 @@ func (e *Engine) arbitratedRelease(esc *Escrow) error {
 	if esc.Status != EscrowFunded && esc.Status != EscrowDisputed {
 		return fmt.Errorf("escrow: cannot release in status %d", esc.Status)
 	}
-	if err := e.ensureTreasuryConfigured(); err != nil {
-		return err
-	}
 	vault, err := e.state.EscrowVaultAddress(esc.Token)
 	if err != nil {
 		return err
@@ -889,6 +886,9 @@ func (e *Engine) arbitratedRelease(esc *Escrow) error {
 		}
 	}
 	if fee.Sign() > 0 {
+		if err := e.ensureTreasuryConfigured(); err != nil {
+			return err
+		}
 		if err := e.transferToken(vault, e.feeTreasury, esc.Token, fee); err != nil {
 			return err
 		}
