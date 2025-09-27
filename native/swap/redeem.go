@@ -152,9 +152,6 @@ func (l *BurnLedger) List(startTs, endTs int64, cursor string, limit int) ([]*Bu
 	if l == nil {
 		return nil, "", fmt.Errorf("burn ledger not initialised")
 	}
-	if limit <= 0 {
-		limit = 50
-	}
 	entries, err := l.loadIndex()
 	if err != nil {
 		return nil, "", err
@@ -189,7 +186,14 @@ func (l *BurnLedger) List(startTs, endTs int64, cursor string, limit int) ([]*Bu
 			}
 		}
 	}
-	receipts := make([]*BurnReceipt, 0, minInt(limit, len(filtered)-startIdx))
+	remaining := len(filtered) - startIdx
+	if remaining < 0 {
+		remaining = 0
+	}
+	if limit <= 0 || limit > remaining {
+		limit = remaining
+	}
+	receipts := make([]*BurnReceipt, 0, minInt(limit, remaining))
 	nextCursor := ""
 	for i := startIdx; i < len(filtered) && len(receipts) < limit; i++ {
 		entry := filtered[i]
