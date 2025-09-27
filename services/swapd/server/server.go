@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"nhbchain/services/swapd/storage"
 )
 
@@ -52,9 +54,9 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("server not configured")
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/admin/policy", s.handlePolicy)
-	mux.HandleFunc("/admin/throttle/check", s.handleThrottleCheck)
+	mux.Handle("/healthz", otelhttp.NewHandler(http.HandlerFunc(s.handleHealth), "swapd.health"))
+	mux.Handle("/admin/policy", otelhttp.NewHandler(http.HandlerFunc(s.handlePolicy), "swapd.policy"))
+	mux.Handle("/admin/throttle/check", otelhttp.NewHandler(http.HandlerFunc(s.handleThrottleCheck), "swapd.throttle"))
 
 	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux}
 

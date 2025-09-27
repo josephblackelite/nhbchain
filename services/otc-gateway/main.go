@@ -4,11 +4,17 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 	"nhbchain/services/otc-gateway/config"
 	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/otc-gateway/models"
@@ -18,6 +24,34 @@ import (
 )
 
 func main() {
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("otc-gateway", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "otc-gateway",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		log.Fatalf("init telemetry: %v", err)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
+
 	cfg, err := config.FromEnv()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
@@ -82,7 +116,7 @@ func main() {
 	})
 	go scheduler.Start(context.Background())
 
-	handler := srv.Handler()
+	handler := otelhttp.NewHandler(srv.Handler(), "otc-gateway")
 
 	addr := ":" + cfg.Port
 	log.Printf("starting otc-gateway on %s", addr)

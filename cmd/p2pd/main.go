@@ -11,11 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
 	"nhbchain/config"
 	"nhbchain/core"
 	"nhbchain/network"
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
 	networkv1 "nhbchain/proto/network/v1"
@@ -33,6 +36,34 @@ func main() {
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "Allow automatic genesis creation when no stored genesis exists")
 	grpcAddress := flag.String("grpc", ":9091", "Address for the internal network gRPC server")
 	flag.Parse()
+
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("p2pd", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "p2pd",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialise telemetry: %v", err))
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
 
@@ -158,7 +189,10 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to listen on %s: %v", *grpcAddress, err))
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+	)
 	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay))
 
 	ctx, cancel := context.WithCancel(context.Background())

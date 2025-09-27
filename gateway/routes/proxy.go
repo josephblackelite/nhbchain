@@ -6,6 +6,10 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 func NewProxy(target *url.URL, stripPrefix string) http.Handler {
@@ -25,11 +29,13 @@ func NewProxy(target *url.URL, stripPrefix string) http.Handler {
 		}
 		req.URL.Path = singleJoiningSlash(target.Path, path)
 		req.URL.RawPath = req.URL.EscapedPath()
+		otel.GetTextMapPropagator().Inject(req.Context(), propagation.HeaderCarrier(req.Header))
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		logger.Printf("proxy error: %v", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
 	}
+	proxy.Transport = otelhttp.NewTransport(http.DefaultTransport)
 	return proxy
 }
 

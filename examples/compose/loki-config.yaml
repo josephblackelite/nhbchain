@@ -1,0 +1,28 @@
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 0
+
+schema_config:
+  configs:
+    - from: 2023-01-01
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+storage_config:
+  boltdb_shipper:
+    active_index_directory: /tmp/loki/index
+    cache_location: /tmp/loki/cache
+    shared_store: filesystem
+  filesystem:
+    directory: /tmp/loki/chunks
+limits_config:
+  allow_structured_metadata: true
+  ingestion_rate_mb: 8
+  ingestion_burst_mb: 16
+chunk_store_config:
+  max_look_back_period: 48h
+ruler:
+  alertmanager_url: http://alertmanager:9093

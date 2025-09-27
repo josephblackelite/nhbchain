@@ -3,6 +3,7 @@ package lending
 import (
 	"context"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -20,6 +21,10 @@ func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client,
 	if len(opts) == 0 {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
+	opts = append(opts,
+		grpc.WithChainUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
+		grpc.WithChainStreamInterceptor(otelgrpc.StreamClientInterceptor()),
+	)
 	conn, err := grpc.DialContext(ctx, target, opts...)
 	if err != nil {
 		return nil, err

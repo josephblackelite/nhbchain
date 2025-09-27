@@ -15,6 +15,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 )
 
 type orderStatus string
@@ -91,6 +96,34 @@ func (s *orderStore) update(id string, fn func(*order) error) (*order, error) {
 }
 
 func main() {
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("swap-gateway", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "swap-gateway",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		log.Fatalf("init telemetry: %v", err)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
+
 	if err := run(); err != nil {
 		log.Fatalf("swap gateway failed: %v", err)
 	}
@@ -157,9 +190,10 @@ func run() error {
 		handleGetOrder(w, r, store, orderID)
 	})
 
+	handler := otelhttp.NewHandler(loggingMiddleware(mux), "swap-gateway")
 	srv := &http.Server{
 		Addr:    ":" + port,
-		Handler: loggingMiddleware(mux),
+		Handler: handler,
 	}
 
 	log.Printf("swap gateway listening on %s", srv.Addr)

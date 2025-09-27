@@ -7,9 +7,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 	"nhbchain/services/swapd/adapters"
 	"nhbchain/services/swapd/config"
 	"nhbchain/services/swapd/oracle"
@@ -21,6 +25,34 @@ func main() {
 	var cfgPath string
 	flag.StringVar(&cfgPath, "config", "services/swapd/config.yaml", "path to swapd configuration file")
 	flag.Parse()
+
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logging.Setup("swapd", env)
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "swapd",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		log.Fatalf("init telemetry: %v", err)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

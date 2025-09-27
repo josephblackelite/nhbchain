@@ -6,8 +6,9 @@ This document describes how the NHB Chain observability stack is deployed, how d
 
 ### Collection
 - **Prometheus** scrapes the `/metrics` endpoint on every validator, RPC node, and oracle service.
-- Exporters: `prometheus-node-exporter` for host-level stats, custom NHB Chain exporters for consensus and RPC metrics.
+- Exporters: `prometheus-node-exporter` for host-level stats, custom NHB Chain exporters for consensus and RPC metrics, and the OpenTelemetry collector's Prometheus exporter for application metrics.
 - Metrics are labeled with `cluster`, `role`, `shard`, and `env` to enable granular dashboards.
+- The Prometheus configuration is versioned at [`ops/prometheus/prometheus.yml`](../../ops/prometheus/prometheus.yml) with SLO recording and alerting rules in [`ops/prometheus/rules/slo.rules.yml`](../../ops/prometheus/rules/slo.rules.yml).
 
 ### Key Metrics & Thresholds
 - **Consensus health**: `nhb_consensus_finality_lag_seconds` should remain < 15s; alert at 30s.
@@ -20,22 +21,27 @@ This document describes how the NHB Chain observability stack is deployed, how d
 - **Validator Drill-down**: CPU, memory, disk I/O, and consensus participation for each validator.
 - **RPC Performance**: request throughput, error rates, cache hit ratio, HMAC auth failures.
 - **Oracle Health**: feed latency, signer distribution, on-chain submission success.
+- **Services Overview**: error budget burn, p95 latency, and throughput per service sourced from the spanmetrics connector (see [`ops/grafana/dashboards/services-overview.json`](../../ops/grafana/dashboards/services-overview.json)).
 
 ## Tracing
 
 ### Instrumentation
 - Services emit OpenTelemetry traces with span attributes for `request_id`, `client_id`, and `txn_hash`.
-- RPC nodes propagate distributed trace context across internal microservices via W3C Trace Context headers.
-- Sample rate defaults to 10% for production, 100% for staging to aid debugging.
+- All gRPC servers register the `otelgrpc` unary and stream interceptors so that trace IDs, baggage, and relevant RPC attributes are captured automatically.
+- gRPC and HTTP clients use `otelgrpc`/`otelhttp` instrumentation so trace context flows through downstream calls with no manual propagation.
+- RPC nodes and the HTTP gateway forward W3C Trace Context (`traceparent`, `tracestate`) headers on every proxied request to keep cross-service traces stitched together.
+- Sample rate defaults to 10% for production, 100% for staging to aid debugging and is controlled via the collector configuration.
 
 ### Export & Storage
 - **OTLP/HTTP** exporter ships traces to Tempo, retained for 72 hours.
 - Derived metrics for trace errors feed into Prometheus via the spanmetrics connector.
-- Sensitive values (`account_number`, `auth_token`) must be redacted before spans are exported.
+- Sensitive values (`account_number`, `auth_token`) must be redacted before spans are exported; the collector removes these attributes before export.
+- The canonical configuration lives in [`ops/otel/collector.yaml`](../../ops/otel/collector.yaml); update it when adding receivers, exporters, or attribute processors.
 
 ### Dashboards & Usage
 - Use Grafana Explore with the Tempo data source to follow requests across RPC, consensus, and storage services.
-- Trace exemplars are linked from latency panels in the RPC dashboard.
+- Trace exemplars are linked from latency panels in the RPC dashboard and the Services Overview latency panel.
+- The [`examples/compose/observability.yml`](../../examples/compose/observability.yml) stack provisions Prometheus, Tempo, Loki, and Grafana locally with the NHB dashboards and data sources for quick validation.
 
 ## Structured Logging
 

@@ -8,14 +8,19 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"nhbchain/gateway/compat"
 	"nhbchain/gateway/config"
 	"nhbchain/gateway/middleware"
 	"nhbchain/gateway/routes"
+	"nhbchain/observability/logging"
+	telemetry "nhbchain/observability/otel"
 )
 
 func main() {
@@ -23,7 +28,36 @@ func main() {
 	flag.StringVar(&cfgPath, "config", "", "path to gateway configuration")
 	flag.Parse()
 
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	slogger := logging.Setup("gateway", env)
 	logger := log.New(os.Stdout, "gateway ", log.LstdFlags|log.Lmsgprefix)
+
+	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := true
+	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			insecure = parsed
+		}
+	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "gateway",
+		Environment: env,
+		Endpoint:    otlpEndpoint,
+		Insecure:    insecure,
+		Headers:     otlpHeaders,
+		Metrics:     true,
+		Traces:      true,
+	})
+	if err != nil {
+		slogger.Error("failed to initialise telemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if shutdownTelemetry != nil {
+			_ = shutdownTelemetry(context.Background())
+		}
+	}()
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -129,9 +163,14 @@ func main() {
 		},
 	})
 
+	handler := http.Handler(router)
+	if cfg.Observability.Tracing {
+		handler = otelhttp.NewHandler(router, "gateway")
+	}
+
 	server := &http.Server{
 		Addr:         cfg.ListenAddress,
-		Handler:      router,
+		Handler:      handler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
