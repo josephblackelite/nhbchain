@@ -120,3 +120,44 @@ func TestBurnLedgerExportCSV(t *testing.T) {
 		t.Fatalf("unexpected csv rows: %v", rows)
 	}
 }
+
+func TestBurnLedgerExportCSVAllRecords(t *testing.T) {
+	store := newMockStorage()
+	ledger := NewBurnLedger(store)
+	base := time.Unix(2100000000, 0)
+	ledger.SetClock(func() time.Time { return base })
+	for i := 0; i < 60; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		ledger.SetClock(func() time.Time { return ts })
+		receipt := &BurnReceipt{
+			ReceiptID:    fmt.Sprintf("burn-%02d", i),
+			ProviderTxID: fmt.Sprintf("provider-%02d", i),
+			Token:        "ZNHB",
+			AmountWei:    big.NewInt(int64(i + 1)),
+		}
+		if err := ledger.Put(receipt); err != nil {
+			t.Fatalf("put burn-%d: %v", i, err)
+		}
+	}
+	encoded, count, err := ledger.ExportCSV(0, 0)
+	if err != nil {
+		t.Fatalf("export csv: %v", err)
+	}
+	if count != 60 {
+		t.Fatalf("expected 60 receipts, got %d", count)
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rows := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(rows) != 61 {
+		t.Fatalf("expected 61 rows, got %d", len(rows))
+	}
+	if rows[0] != strings.Join(BurnReceiptCSVHeader, ",") {
+		t.Fatalf("unexpected header: %s", rows[0])
+	}
+	if !strings.Contains(rows[len(rows)-1], "burn-59") {
+		t.Fatalf("expected final row for burn-59, got %s", rows[len(rows)-1])
+	}
+}
