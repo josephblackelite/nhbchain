@@ -42,6 +42,24 @@ export interface MsgVoteResponse {
   txHash: string;
 }
 
+export interface Pauses {
+  lending: boolean;
+  swap: boolean;
+  escrow: boolean;
+  trade: boolean;
+  loyalty: boolean;
+  potso: boolean;
+}
+
+export interface MsgSetPauses {
+  authority: string;
+  pauses: Pauses | undefined;
+}
+
+export interface MsgSetPausesResponse {
+  txHash: string;
+}
+
 export interface MsgDeposit {
   depositor: string;
   proposalId: number;
@@ -368,6 +386,282 @@ export const MsgVoteResponse: MessageFns<MsgVoteResponse> = {
   },
 };
 
+function createBasePauses(): Pauses {
+  return { lending: false, swap: false, escrow: false, trade: false, loyalty: false, potso: false };
+}
+
+export const Pauses: MessageFns<Pauses> = {
+  encode(message: Pauses, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.lending !== false) {
+      writer.uint32(8).bool(message.lending);
+    }
+    if (message.swap !== false) {
+      writer.uint32(16).bool(message.swap);
+    }
+    if (message.escrow !== false) {
+      writer.uint32(24).bool(message.escrow);
+    }
+    if (message.trade !== false) {
+      writer.uint32(32).bool(message.trade);
+    }
+    if (message.loyalty !== false) {
+      writer.uint32(40).bool(message.loyalty);
+    }
+    if (message.potso !== false) {
+      writer.uint32(48).bool(message.potso);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): Pauses {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePauses();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.lending = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.swap = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.escrow = reader.bool();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.trade = reader.bool();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.loyalty = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.potso = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): Pauses {
+    return {
+      lending: isSet(object.lending) ? globalThis.Boolean(object.lending) : false,
+      swap: isSet(object.swap) ? globalThis.Boolean(object.swap) : false,
+      escrow: isSet(object.escrow) ? globalThis.Boolean(object.escrow) : false,
+      trade: isSet(object.trade) ? globalThis.Boolean(object.trade) : false,
+      loyalty: isSet(object.loyalty) ? globalThis.Boolean(object.loyalty) : false,
+      potso: isSet(object.potso) ? globalThis.Boolean(object.potso) : false,
+    };
+  },
+
+  toJSON(message: Pauses): unknown {
+    const obj: any = {};
+    if (message.lending !== false) {
+      obj.lending = message.lending;
+    }
+    if (message.swap !== false) {
+      obj.swap = message.swap;
+    }
+    if (message.escrow !== false) {
+      obj.escrow = message.escrow;
+    }
+    if (message.trade !== false) {
+      obj.trade = message.trade;
+    }
+    if (message.loyalty !== false) {
+      obj.loyalty = message.loyalty;
+    }
+    if (message.potso !== false) {
+      obj.potso = message.potso;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<Pauses>): Pauses {
+    return Pauses.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<Pauses>): Pauses {
+    const message = createBasePauses();
+    message.lending = object.lending ?? false;
+    message.swap = object.swap ?? false;
+    message.escrow = object.escrow ?? false;
+    message.trade = object.trade ?? false;
+    message.loyalty = object.loyalty ?? false;
+    message.potso = object.potso ?? false;
+    return message;
+  },
+};
+
+function createBaseMsgSetPauses(): MsgSetPauses {
+  return { authority: "", pauses: undefined };
+}
+
+export const MsgSetPauses: MessageFns<MsgSetPauses> = {
+  encode(message: MsgSetPauses, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.authority !== "") {
+      writer.uint32(10).string(message.authority);
+    }
+    if (message.pauses !== undefined) {
+      Pauses.encode(message.pauses, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgSetPauses {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgSetPauses();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.authority = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.pauses = Pauses.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgSetPauses {
+    return {
+      authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
+      pauses: isSet(object.pauses) ? Pauses.fromJSON(object.pauses) : undefined,
+    };
+  },
+
+  toJSON(message: MsgSetPauses): unknown {
+    const obj: any = {};
+    if (message.authority !== "") {
+      obj.authority = message.authority;
+    }
+    if (message.pauses !== undefined) {
+      obj.pauses = Pauses.toJSON(message.pauses);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgSetPauses>): MsgSetPauses {
+    return MsgSetPauses.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgSetPauses>): MsgSetPauses {
+    const message = createBaseMsgSetPauses();
+    message.authority = object.authority ?? "";
+    message.pauses = (object.pauses !== undefined && object.pauses !== null)
+      ? Pauses.fromPartial(object.pauses)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMsgSetPausesResponse(): MsgSetPausesResponse {
+  return { txHash: "" };
+}
+
+export const MsgSetPausesResponse: MessageFns<MsgSetPausesResponse> = {
+  encode(message: MsgSetPausesResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.txHash !== "") {
+      writer.uint32(10).string(message.txHash);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgSetPausesResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgSetPausesResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.txHash = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgSetPausesResponse {
+    return { txHash: isSet(object.txHash) ? globalThis.String(object.txHash) : "" };
+  },
+
+  toJSON(message: MsgSetPausesResponse): unknown {
+    const obj: any = {};
+    if (message.txHash !== "") {
+      obj.txHash = message.txHash;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgSetPausesResponse>): MsgSetPausesResponse {
+    return MsgSetPausesResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgSetPausesResponse>): MsgSetPausesResponse {
+    const message = createBaseMsgSetPausesResponse();
+    message.txHash = object.txHash ?? "";
+    return message;
+  },
+};
+
 function createBaseMsgDeposit(): MsgDeposit {
   return { depositor: "", proposalId: 0, amount: "" };
 }
@@ -539,6 +833,16 @@ export const MsgService = {
     responseSerialize: (value: MsgVoteResponse): Buffer => Buffer.from(MsgVoteResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): MsgVoteResponse => MsgVoteResponse.decode(value),
   },
+  setPauses: {
+    path: "/gov.v1.Msg/SetPauses",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: MsgSetPauses): Buffer => Buffer.from(MsgSetPauses.encode(value).finish()),
+    requestDeserialize: (value: Buffer): MsgSetPauses => MsgSetPauses.decode(value),
+    responseSerialize: (value: MsgSetPausesResponse): Buffer =>
+      Buffer.from(MsgSetPausesResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): MsgSetPausesResponse => MsgSetPausesResponse.decode(value),
+  },
   deposit: {
     path: "/gov.v1.Msg/Deposit",
     requestStream: false,
@@ -553,6 +857,7 @@ export const MsgService = {
 export interface MsgServer extends UntypedServiceImplementation {
   submitProposal: handleUnaryCall<MsgSubmitProposal, MsgSubmitProposalResponse>;
   vote: handleUnaryCall<MsgVote, MsgVoteResponse>;
+  setPauses: handleUnaryCall<MsgSetPauses, MsgSetPausesResponse>;
   deposit: handleUnaryCall<MsgDeposit, MsgDepositResponse>;
 }
 
@@ -583,6 +888,21 @@ export interface MsgClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MsgVoteResponse) => void,
+  ): ClientUnaryCall;
+  setPauses(
+    request: MsgSetPauses,
+    callback: (error: ServiceError | null, response: MsgSetPausesResponse) => void,
+  ): ClientUnaryCall;
+  setPauses(
+    request: MsgSetPauses,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: MsgSetPausesResponse) => void,
+  ): ClientUnaryCall;
+  setPauses(
+    request: MsgSetPauses,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: MsgSetPausesResponse) => void,
   ): ClientUnaryCall;
   deposit(
     request: MsgDeposit,

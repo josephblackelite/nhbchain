@@ -145,3 +145,15 @@ func (c *Client) Deposit(ctx context.Context, msg *govv1.MsgDeposit) (string, er
 	}
 	return resp.GetTxHash(), nil
 }
+
+// SetPauses broadcasts a pause toggle transaction.
+func (c *Client) SetPauses(ctx context.Context, msg *govv1.MsgSetPauses) (string, error) {
+	if c == nil {
+		return "", grpc.ErrClientConnClosing
+	}
+	resp, err := c.msg.SetPauses(ctx, msg)
+	if err != nil {
+		return "", err
+	}
+	return resp.GetTxHash(), nil
+}

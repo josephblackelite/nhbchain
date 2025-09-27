@@ -86,3 +86,18 @@ func NewMsgDeposit(depositor string, proposalID uint64, amount string) (*govv1.M
 		Amount:     normalizedAmount,
 	}, nil
 }
+
+// NewMsgSetPauses validates a pause toggle request. The pauses payload must be supplied.
+func NewMsgSetPauses(authority string, pauses *govv1.Pauses) (*govv1.MsgSetPauses, error) {
+	trimmedAuthority := strings.TrimSpace(authority)
+	if trimmedAuthority == "" {
+		return nil, fmt.Errorf("authority address required")
+	}
+	if pauses == nil {
+		return nil, fmt.Errorf("pauses configuration required")
+	}
+	return &govv1.MsgSetPauses{
+		Authority: trimmedAuthority,
+		Pauses:    pauses,
+	}, nil
+}

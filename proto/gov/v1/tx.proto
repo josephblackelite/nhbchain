@@ -25,6 +25,24 @@ message MsgVoteResponse {
   string tx_hash = 1;
 }
 
+message Pauses {
+  bool lending = 1;
+  bool swap = 2;
+  bool escrow = 3;
+  bool trade = 4;
+  bool loyalty = 5;
+  bool potso = 6;
+}
+
+message MsgSetPauses {
+  string authority = 1;
+  Pauses pauses = 2;
+}
+
+message MsgSetPausesResponse {
+  string tx_hash = 1;
+}
+
 message MsgDeposit {
   string depositor = 1;
   uint64 proposal_id = 2;
@@ -38,5 +56,6 @@ message MsgDepositResponse {
 service Msg {
   rpc SubmitProposal(MsgSubmitProposal) returns (MsgSubmitProposalResponse);
   rpc Vote(MsgVote) returns (MsgVoteResponse);
+  rpc SetPauses(MsgSetPauses) returns (MsgSetPausesResponse);
   rpc Deposit(MsgDeposit) returns (MsgDepositResponse);
 }

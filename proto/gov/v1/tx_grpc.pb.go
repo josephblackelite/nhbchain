@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion7
 const (
 	Msg_SubmitProposal_FullMethodName = "/gov.v1.Msg/SubmitProposal"
 	Msg_Vote_FullMethodName           = "/gov.v1.Msg/Vote"
+	Msg_SetPauses_FullMethodName      = "/gov.v1.Msg/SetPauses"
 	Msg_Deposit_FullMethodName        = "/gov.v1.Msg/Deposit"
 )
 
@@ -30,6 +31,7 @@ const (
 type MsgClient interface {
 	SubmitProposal(ctx context.Context, in *MsgSubmitProposal, opts ...grpc.CallOption) (*MsgSubmitProposalResponse, error)
 	Vote(ctx context.Context, in *MsgVote, opts ...grpc.CallOption) (*MsgVoteResponse, error)
+	SetPauses(ctx context.Context, in *MsgSetPauses, opts ...grpc.CallOption) (*MsgSetPausesResponse, error)
 	Deposit(ctx context.Context, in *MsgDeposit, opts ...grpc.CallOption) (*MsgDepositResponse, error)
 }
 
@@ -59,6 +61,15 @@ func (c *msgClient) Vote(ctx context.Context, in *MsgVote, opts ...grpc.CallOpti
 	return out, nil
 }
 
+func (c *msgClient) SetPauses(ctx context.Context, in *MsgSetPauses, opts ...grpc.CallOption) (*MsgSetPausesResponse, error) {
+	out := new(MsgSetPausesResponse)
+	err := c.cc.Invoke(ctx, Msg_SetPauses_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *msgClient) Deposit(ctx context.Context, in *MsgDeposit, opts ...grpc.CallOption) (*MsgDepositResponse, error) {
 	out := new(MsgDepositResponse)
 	err := c.cc.Invoke(ctx, Msg_Deposit_FullMethodName, in, out, opts...)
@@ -74,6 +85,7 @@ func (c *msgClient) Deposit(ctx context.Context, in *MsgDeposit, opts ...grpc.Ca
 type MsgServer interface {
 	SubmitProposal(context.Context, *MsgSubmitProposal) (*MsgSubmitProposalResponse, error)
 	Vote(context.Context, *MsgVote) (*MsgVoteResponse, error)
+	SetPauses(context.Context, *MsgSetPauses) (*MsgSetPausesResponse, error)
 	Deposit(context.Context, *MsgDeposit) (*MsgDepositResponse, error)
 	mustEmbedUnimplementedMsgServer()
 }
@@ -87,6 +99,9 @@ func (UnimplementedMsgServer) SubmitProposal(context.Context, *MsgSubmitProposal
 }
 func (UnimplementedMsgServer) Vote(context.Context, *MsgVote) (*MsgVoteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Vote not implemented")
+}
+func (UnimplementedMsgServer) SetPauses(context.Context, *MsgSetPauses) (*MsgSetPausesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetPauses not implemented")
 }
 func (UnimplementedMsgServer) Deposit(context.Context, *MsgDeposit) (*MsgDepositResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Deposit not implemented")
@@ -140,6 +155,24 @@ func _Msg_Vote_Handler(srv interface{}, ctx context.Context, dec func(interface{
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Msg_SetPauses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MsgSetPauses)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MsgServer).SetPauses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Msg_SetPauses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MsgServer).SetPauses(ctx, req.(*MsgSetPauses))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Msg_Deposit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MsgDeposit)
 	if err := dec(in); err != nil {
@@ -172,6 +205,10 @@ var Msg_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Vote",
 			Handler:    _Msg_Vote_Handler,
+		},
+		{
+			MethodName: "SetPauses",
+			Handler:    _Msg_SetPauses_Handler,
 		},
 		{
 			MethodName: "Deposit",

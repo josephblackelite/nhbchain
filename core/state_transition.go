@@ -671,6 +671,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		LoyaltyEngine:      sp.LoyaltyEngine,
 		EscrowEngine:       sp.EscrowEngine,
 		TradeEngine:        sp.TradeEngine,
+		pauses:             sp.pauses,
 		usernameToAddr:     usernameCopy,
 		ValidatorSet:       validatorCopy,
 		EligibleValidators: eligibleCopy,

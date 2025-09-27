@@ -38,6 +38,7 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
+	nativeparams "nhbchain/native/params"
 	"nhbchain/native/potso"
 	"nhbchain/native/reputation"
 	swap "nhbchain/native/swap"
@@ -285,6 +286,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	}
 
 	node.SetModulePauses(config.Pauses{})
+	if err := node.refreshModulePauses(); err != nil {
+		return nil, err
+	}
 
 	node.SetLendingRiskParameters(lending.RiskParameters{})
 	node.SetLendingAccrualConfig(0, 0, lending.DefaultInterestModel)
@@ -301,6 +305,19 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 func normalizeModuleName(module string) string {
 	return strings.ToLower(strings.TrimSpace(module))
+}
+
+func (n *Node) refreshModulePauses() error {
+	if n == nil || n.state == nil || n.state.Trie == nil {
+		return nil
+	}
+	store := nativeparams.NewStore(nhbstate.NewManager(n.state.Trie))
+	pauses, err := store.Pauses()
+	if err != nil {
+		return err
+	}
+	n.SetModulePauses(pauses)
+	return nil
 }
 
 func (n *Node) SetModulePauses(pauses config.Pauses) {
@@ -902,10 +919,14 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	header.TxRoot = txRoot
 
 	// Execute against a copy of StateDB to derive StateRoot
+	if err := n.refreshModulePauses(); err != nil {
+		return nil, err
+	}
 	stateCopy, err := n.state.Copy()
 	if err != nil {
 		return nil, err
 	}
+	stateCopy.SetPauseView(n)
 	blockTime := time.Unix(header.Timestamp, 0).UTC()
 	stateCopy.BeginBlock(header.Height, blockTime)
 	defer stateCopy.EndBlock()
@@ -943,6 +964,10 @@ func (n *Node) CommitBlock(b *types.Block) error {
 		return err
 	}
 
+	if err := n.refreshModulePauses(); err != nil {
+		return err
+	}
+
 	blockTime := time.Unix(b.Header.Timestamp, 0).UTC()
 	n.state.BeginBlock(b.Header.Height, blockTime)
 	defer n.state.EndBlock()
@@ -963,6 +988,13 @@ func (n *Node) CommitBlock(b *types.Block) error {
 			return fmt.Errorf("block lifecycle: %v (rollback failed: %w)", err, rbErr)
 		}
 		return fmt.Errorf("block lifecycle: %w", err)
+	}
+
+	if err := n.refreshModulePauses(); err != nil {
+		if rbErr := rollback(); rbErr != nil {
+			return fmt.Errorf("refresh module pauses: %v (rollback failed: %w)", err, rbErr)
+		}
+		return fmt.Errorf("refresh module pauses: %w", err)
 	}
 
 	pendingRoot := n.state.PendingRoot()
@@ -1141,6 +1173,9 @@ func (n *Node) SnapshotImport(ctx context.Context, manifest *syncmgr.SnapshotMan
 		return common.Hash{}, err
 	}
 	if err := n.state.ResetToRoot(root); err != nil {
+		return common.Hash{}, err
+	}
+	if err := n.refreshModulePauses(); err != nil {
 		return common.Hash{}, err
 	}
 	n.syncMgr.SetHeight(manifest.Height)
