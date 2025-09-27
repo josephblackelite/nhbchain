@@ -17,8 +17,9 @@ const (
 )
 
 // LegacyEscrow holds the state of a single P2P escrow transaction from the
-// initial chain prototype. The hardened escrow engine introduced in CODEx 1.1
-// uses the Escrow struct defined in types.go. This legacy type remains to keep
+// initial chain prototype. The hardened escrow engine introduced in the
+// NHBCHAIN NET-1 milestone uses the Escrow struct defined in types.go. This
+// legacy type remains to keep
 // the historical state transition logic compiling until that implementation is
 // replaced by the new engine.
 type LegacyEscrow struct {

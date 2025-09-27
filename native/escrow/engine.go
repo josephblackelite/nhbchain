@@ -53,8 +53,9 @@ func (e escrowEvent) EventType() string {
 func (e escrowEvent) Event() *types.Event { return e.evt }
 
 // Engine wires the escrow business logic with external state and event
-// emitters. The full transition logic will arrive in CODEx 1.2; for now the
-// engine provides deterministic event emission helpers.
+// emitters. The full transition logic will arrive in the NHBCHAIN NET-2
+// milestone; for now the engine provides deterministic event emission
+// helpers.
 type Engine struct {
 	state       engineState
 	emitter     events.Emitter
