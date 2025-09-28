@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -15,20 +16,24 @@ import (
 // Service exposes the gRPC server that consensusd connects to.
 type Service struct {
 	networkv1.UnimplementedNetworkServiceServer
-	relay     *Relay
-	writeAuth Authenticator
-	readAuth  Authenticator
+	relay               *Relay
+	writeAuth           Authenticator
+	readAuth            Authenticator
+	allowAnonymousReads bool
 }
 
 // NewService wraps the provided relay for gRPC registration.
-func NewService(relay *Relay, auth Authenticator, opts ...ServiceOption) *Service {
+func NewService(relay *Relay, auth Authenticator, opts ...ServiceOption) (*Service, error) {
 	svc := &Service{relay: relay, writeAuth: auth, readAuth: auth}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(svc)
 		}
 	}
-	return svc
+	if svc.readAuth == nil && !svc.allowAnonymousReads {
+		return nil, fmt.Errorf("network: read authenticator required unless anonymous reads are explicitly allowed")
+	}
+	return svc, nil
 }
 
 // ServiceOption mutates service construction defaults.
@@ -39,6 +44,15 @@ func WithReadAuthenticator(auth Authenticator) ServiceOption {
 	return func(s *Service) {
 		if s != nil {
 			s.readAuth = auth
+		}
+	}
+}
+
+// WithAllowUnauthenticatedReads toggles acceptance of anonymous read RPCs.
+func WithAllowUnauthenticatedReads(allow bool) ServiceOption {
+	return func(s *Service) {
+		if s != nil {
+			s.allowAnonymousReads = allow
 		}
 	}
 }

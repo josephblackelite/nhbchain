@@ -2,6 +2,8 @@ package network
 
 import (
 	"context"
+	"crypto/subtle"
+	"crypto/x509"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -69,11 +71,11 @@ func NewTokenAuthenticator(header, secret string) Authenticator {
 		values := md.Get(cleanedHeader)
 		for _, value := range values {
 			token := strings.TrimSpace(value)
-			if token == trimmedSecret {
+			if constantTimeEqual(token, trimmedSecret) {
 				return nil
 			}
-			if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-				if strings.TrimSpace(token[len("bearer "):]) == trimmedSecret {
+			if len(token) >= len("bearer ") && strings.EqualFold(token[:len("bearer ")], "bearer ") {
+				if constantTimeEqual(strings.TrimSpace(token[len("bearer "):]), trimmedSecret) {
 					return nil
 				}
 			}
@@ -88,11 +90,11 @@ func NewTokenAuthenticator(header, secret string) Authenticator {
 func NewTLSAuthorizer(allowed []string) Authenticator {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, cn := range allowed {
-		trimmed := strings.TrimSpace(cn)
-		if trimmed == "" {
+		normalized := normalizeIdentity(cn)
+		if normalized == "" {
 			continue
 		}
-		allowedSet[strings.ToLower(trimmed)] = struct{}{}
+		allowedSet[normalized] = struct{}{}
 	}
 	return authenticatorFunc(func(ctx context.Context) error {
 		p, ok := peer.FromContext(ctx)
@@ -110,11 +112,46 @@ func NewTLSAuthorizer(allowed []string) Authenticator {
 			return nil
 		}
 		for _, cert := range info.State.PeerCertificates {
-			cn := strings.ToLower(strings.TrimSpace(cert.Subject.CommonName))
-			if _, ok := allowedSet[cn]; ok {
+			if certificateMatchesAllowlist(cert, allowedSet) {
 				return nil
 			}
 		}
 		return status.Error(codes.PermissionDenied, "network: client certificate not authorised")
 	})
+}
+
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func normalizeIdentity(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ToLower(trimmed)
+}
+
+func certificateMatchesAllowlist(cert *x509.Certificate, allowed map[string]struct{}) bool {
+	if cert == nil {
+		return false
+	}
+	for _, dns := range cert.DNSNames {
+		if _, ok := allowed[normalizeIdentity(dns)]; ok {
+			return true
+		}
+	}
+	for _, uri := range cert.URIs {
+		if uri == nil {
+			continue
+		}
+		if _, ok := allowed[normalizeIdentity(uri.String())]; ok {
+			return true
+		}
+	}
+	cn := normalizeIdentity(cert.Subject.CommonName)
+	if _, ok := allowed[cn]; ok {
+		return true
+	}
+	return false
 }

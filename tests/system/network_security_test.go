@@ -21,7 +21,11 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	header := "x-nhb-network-token"
 
 	server := grpc.NewServer(grpc.Creds(insecure.NewCredentials()))
-	networkv1.RegisterNetworkServiceServer(server, network.NewService(relay, network.NewTokenAuthenticator(header, secret)))
+	svc, err := network.NewService(relay, network.NewTokenAuthenticator(header, secret))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	networkv1.RegisterNetworkServiceServer(server, svc)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -110,7 +114,14 @@ func TestNetworkServiceAnonymousReadsOptIn(t *testing.T) {
 	secret := "shared-secret"
 
 	server := grpc.NewServer(grpc.Creds(insecure.NewCredentials()))
-	networkv1.RegisterNetworkServiceServer(server, network.NewService(relay, network.NewTokenAuthenticator(header, secret), network.WithReadAuthenticator(nil)))
+	svc, err := network.NewService(relay, network.NewTokenAuthenticator(header, secret),
+		network.WithReadAuthenticator(nil),
+		network.WithAllowUnauthenticatedReads(true),
+	)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	networkv1.RegisterNetworkServiceServer(server, svc)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
