@@ -6,6 +6,7 @@
 
 /* eslint-disable */
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
+import { CashOutIntent, DepositVoucher, PayoutReceipt } from "./stable";
 
 export const protobufPackage = "swap.v1";
 
@@ -25,6 +26,39 @@ export interface MsgSwapExactOut {
   amountOut: string;
   maxAmountIn: string;
   recipient: string;
+}
+
+export interface MsgMintDepositVoucher {
+  authority: string;
+  voucher: DepositVoucher | undefined;
+}
+
+export interface MsgMintDepositVoucherResponse {
+}
+
+export interface MsgCreateCashOutIntent {
+  account: string;
+  intent: CashOutIntent | undefined;
+}
+
+export interface MsgCreateCashOutIntentResponse {
+}
+
+export interface MsgPayoutReceipt {
+  authority: string;
+  receipt: PayoutReceipt | undefined;
+}
+
+export interface MsgPayoutReceiptResponse {
+}
+
+export interface MsgAbortCashOutIntent {
+  authority: string;
+  intentId: string;
+  reason: string;
+}
+
+export interface MsgAbortCashOutIntentResponse {
 }
 
 function createBaseMsgSwapExactIn(): MsgSwapExactIn {
@@ -303,6 +337,504 @@ export const MsgSwapExactOut: MessageFns<MsgSwapExactOut> = {
     message.amountOut = object.amountOut ?? "";
     message.maxAmountIn = object.maxAmountIn ?? "";
     message.recipient = object.recipient ?? "";
+    return message;
+  },
+};
+
+function createBaseMsgMintDepositVoucher(): MsgMintDepositVoucher {
+  return { authority: "", voucher: undefined };
+}
+
+export const MsgMintDepositVoucher: MessageFns<MsgMintDepositVoucher> = {
+  encode(message: MsgMintDepositVoucher, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.authority !== "") {
+      writer.uint32(10).string(message.authority);
+    }
+    if (message.voucher !== undefined) {
+      DepositVoucher.encode(message.voucher, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgMintDepositVoucher {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgMintDepositVoucher();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.authority = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.voucher = DepositVoucher.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgMintDepositVoucher {
+    return {
+      authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
+      voucher: isSet(object.voucher) ? DepositVoucher.fromJSON(object.voucher) : undefined,
+    };
+  },
+
+  toJSON(message: MsgMintDepositVoucher): unknown {
+    const obj: any = {};
+    if (message.authority !== "") {
+      obj.authority = message.authority;
+    }
+    if (message.voucher !== undefined) {
+      obj.voucher = DepositVoucher.toJSON(message.voucher);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgMintDepositVoucher>): MsgMintDepositVoucher {
+    return MsgMintDepositVoucher.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgMintDepositVoucher>): MsgMintDepositVoucher {
+    const message = createBaseMsgMintDepositVoucher();
+    message.authority = object.authority ?? "";
+    message.voucher = (object.voucher !== undefined && object.voucher !== null)
+      ? DepositVoucher.fromPartial(object.voucher)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMsgMintDepositVoucherResponse(): MsgMintDepositVoucherResponse {
+  return {};
+}
+
+export const MsgMintDepositVoucherResponse: MessageFns<MsgMintDepositVoucherResponse> = {
+  encode(_: MsgMintDepositVoucherResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgMintDepositVoucherResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgMintDepositVoucherResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): MsgMintDepositVoucherResponse {
+    return {};
+  },
+
+  toJSON(_: MsgMintDepositVoucherResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgMintDepositVoucherResponse>): MsgMintDepositVoucherResponse {
+    return MsgMintDepositVoucherResponse.fromPartial(base ?? {});
+  },
+  fromPartial(_: DeepPartial<MsgMintDepositVoucherResponse>): MsgMintDepositVoucherResponse {
+    const message = createBaseMsgMintDepositVoucherResponse();
+    return message;
+  },
+};
+
+function createBaseMsgCreateCashOutIntent(): MsgCreateCashOutIntent {
+  return { account: "", intent: undefined };
+}
+
+export const MsgCreateCashOutIntent: MessageFns<MsgCreateCashOutIntent> = {
+  encode(message: MsgCreateCashOutIntent, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.account !== "") {
+      writer.uint32(10).string(message.account);
+    }
+    if (message.intent !== undefined) {
+      CashOutIntent.encode(message.intent, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgCreateCashOutIntent {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgCreateCashOutIntent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.account = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.intent = CashOutIntent.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgCreateCashOutIntent {
+    return {
+      account: isSet(object.account) ? globalThis.String(object.account) : "",
+      intent: isSet(object.intent) ? CashOutIntent.fromJSON(object.intent) : undefined,
+    };
+  },
+
+  toJSON(message: MsgCreateCashOutIntent): unknown {
+    const obj: any = {};
+    if (message.account !== "") {
+      obj.account = message.account;
+    }
+    if (message.intent !== undefined) {
+      obj.intent = CashOutIntent.toJSON(message.intent);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgCreateCashOutIntent>): MsgCreateCashOutIntent {
+    return MsgCreateCashOutIntent.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgCreateCashOutIntent>): MsgCreateCashOutIntent {
+    const message = createBaseMsgCreateCashOutIntent();
+    message.account = object.account ?? "";
+    message.intent = (object.intent !== undefined && object.intent !== null)
+      ? CashOutIntent.fromPartial(object.intent)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMsgCreateCashOutIntentResponse(): MsgCreateCashOutIntentResponse {
+  return {};
+}
+
+export const MsgCreateCashOutIntentResponse: MessageFns<MsgCreateCashOutIntentResponse> = {
+  encode(_: MsgCreateCashOutIntentResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgCreateCashOutIntentResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgCreateCashOutIntentResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): MsgCreateCashOutIntentResponse {
+    return {};
+  },
+
+  toJSON(_: MsgCreateCashOutIntentResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgCreateCashOutIntentResponse>): MsgCreateCashOutIntentResponse {
+    return MsgCreateCashOutIntentResponse.fromPartial(base ?? {});
+  },
+  fromPartial(_: DeepPartial<MsgCreateCashOutIntentResponse>): MsgCreateCashOutIntentResponse {
+    const message = createBaseMsgCreateCashOutIntentResponse();
+    return message;
+  },
+};
+
+function createBaseMsgPayoutReceipt(): MsgPayoutReceipt {
+  return { authority: "", receipt: undefined };
+}
+
+export const MsgPayoutReceipt: MessageFns<MsgPayoutReceipt> = {
+  encode(message: MsgPayoutReceipt, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.authority !== "") {
+      writer.uint32(10).string(message.authority);
+    }
+    if (message.receipt !== undefined) {
+      PayoutReceipt.encode(message.receipt, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgPayoutReceipt {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgPayoutReceipt();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.authority = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.receipt = PayoutReceipt.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgPayoutReceipt {
+    return {
+      authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
+      receipt: isSet(object.receipt) ? PayoutReceipt.fromJSON(object.receipt) : undefined,
+    };
+  },
+
+  toJSON(message: MsgPayoutReceipt): unknown {
+    const obj: any = {};
+    if (message.authority !== "") {
+      obj.authority = message.authority;
+    }
+    if (message.receipt !== undefined) {
+      obj.receipt = PayoutReceipt.toJSON(message.receipt);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgPayoutReceipt>): MsgPayoutReceipt {
+    return MsgPayoutReceipt.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgPayoutReceipt>): MsgPayoutReceipt {
+    const message = createBaseMsgPayoutReceipt();
+    message.authority = object.authority ?? "";
+    message.receipt = (object.receipt !== undefined && object.receipt !== null)
+      ? PayoutReceipt.fromPartial(object.receipt)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseMsgPayoutReceiptResponse(): MsgPayoutReceiptResponse {
+  return {};
+}
+
+export const MsgPayoutReceiptResponse: MessageFns<MsgPayoutReceiptResponse> = {
+  encode(_: MsgPayoutReceiptResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgPayoutReceiptResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgPayoutReceiptResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): MsgPayoutReceiptResponse {
+    return {};
+  },
+
+  toJSON(_: MsgPayoutReceiptResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgPayoutReceiptResponse>): MsgPayoutReceiptResponse {
+    return MsgPayoutReceiptResponse.fromPartial(base ?? {});
+  },
+  fromPartial(_: DeepPartial<MsgPayoutReceiptResponse>): MsgPayoutReceiptResponse {
+    const message = createBaseMsgPayoutReceiptResponse();
+    return message;
+  },
+};
+
+function createBaseMsgAbortCashOutIntent(): MsgAbortCashOutIntent {
+  return { authority: "", intentId: "", reason: "" };
+}
+
+export const MsgAbortCashOutIntent: MessageFns<MsgAbortCashOutIntent> = {
+  encode(message: MsgAbortCashOutIntent, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.authority !== "") {
+      writer.uint32(10).string(message.authority);
+    }
+    if (message.intentId !== "") {
+      writer.uint32(18).string(message.intentId);
+    }
+    if (message.reason !== "") {
+      writer.uint32(26).string(message.reason);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgAbortCashOutIntent {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgAbortCashOutIntent();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.authority = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.intentId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.reason = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MsgAbortCashOutIntent {
+    return {
+      authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
+      intentId: isSet(object.intentId) ? globalThis.String(object.intentId) : "",
+      reason: isSet(object.reason) ? globalThis.String(object.reason) : "",
+    };
+  },
+
+  toJSON(message: MsgAbortCashOutIntent): unknown {
+    const obj: any = {};
+    if (message.authority !== "") {
+      obj.authority = message.authority;
+    }
+    if (message.intentId !== "") {
+      obj.intentId = message.intentId;
+    }
+    if (message.reason !== "") {
+      obj.reason = message.reason;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgAbortCashOutIntent>): MsgAbortCashOutIntent {
+    return MsgAbortCashOutIntent.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<MsgAbortCashOutIntent>): MsgAbortCashOutIntent {
+    const message = createBaseMsgAbortCashOutIntent();
+    message.authority = object.authority ?? "";
+    message.intentId = object.intentId ?? "";
+    message.reason = object.reason ?? "";
+    return message;
+  },
+};
+
+function createBaseMsgAbortCashOutIntentResponse(): MsgAbortCashOutIntentResponse {
+  return {};
+}
+
+export const MsgAbortCashOutIntentResponse: MessageFns<MsgAbortCashOutIntentResponse> = {
+  encode(_: MsgAbortCashOutIntentResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MsgAbortCashOutIntentResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMsgAbortCashOutIntentResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): MsgAbortCashOutIntentResponse {
+    return {};
+  },
+
+  toJSON(_: MsgAbortCashOutIntentResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create(base?: DeepPartial<MsgAbortCashOutIntentResponse>): MsgAbortCashOutIntentResponse {
+    return MsgAbortCashOutIntentResponse.fromPartial(base ?? {});
+  },
+  fromPartial(_: DeepPartial<MsgAbortCashOutIntentResponse>): MsgAbortCashOutIntentResponse {
+    const message = createBaseMsgAbortCashOutIntentResponse();
     return message;
   },
 };

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package swap.v1;
 
+import "swap/v1/stable.proto";
+
 option go_package = "nhbchain/proto/swap/v1;swapv1";
 
 message MsgSwapExactIn {
@@ -21,3 +23,32 @@ message MsgSwapExactOut {
   string max_amount_in = 5;
   string recipient = 6;
 }
+
+message MsgMintDepositVoucher {
+  string authority = 1;
+  DepositVoucher voucher = 2;
+}
+
+message MsgMintDepositVoucherResponse {}
+
+message MsgCreateCashOutIntent {
+  string account = 1;
+  CashOutIntent intent = 2;
+}
+
+message MsgCreateCashOutIntentResponse {}
+
+message MsgPayoutReceipt {
+  string authority = 1;
+  PayoutReceipt receipt = 2;
+}
+
+message MsgPayoutReceiptResponse {}
+
+message MsgAbortCashOutIntent {
+  string authority = 1;
+  string intent_id = 2;
+  string reason = 3;
+}
+
+message MsgAbortCashOutIntentResponse {}
