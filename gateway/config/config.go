@@ -19,6 +19,7 @@ type ServiceConfig struct {
 type RateLimitConfig struct {
 	ID                string   `yaml:"id"`
 	RequestsPerMinute float64  `yaml:"requestsPerMinute"`
+	RatePerSecond     float64  `yaml:"ratePerSecond"`
 	Burst             int      `yaml:"burst"`
 	Paths             []string `yaml:"paths"`
 }

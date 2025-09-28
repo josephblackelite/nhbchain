@@ -1,0 +1,22 @@
+listen: ":8080"
+rateLimits:
+  - id: lending
+    ratePerSecond: 2
+    burst: 20
+    paths:
+      - /v1/lending
+  - id: swap
+    ratePerSecond: 1
+    burst: 10
+    paths:
+      - /v1/swap
+  - id: gov
+    ratePerSecond: 1
+    burst: 10
+    paths:
+      - /v1/gov
+  - id: consensus
+    ratePerSecond: 4
+    burst: 40
+    paths:
+      - /v1/consensus
