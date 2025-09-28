@@ -8,6 +8,7 @@ type Content struct {
 	Creator     [20]byte `json:"creator"`
 	URI         string   `json:"uri"`
 	Metadata    string   `json:"metadata"`
+	Hash        string   `json:"hash"`
 	PublishedAt int64    `json:"publishedAt"`
 	TotalTips   *big.Int `json:"totalTips"`
 	TotalStake  *big.Int `json:"totalStake"`
@@ -39,6 +40,9 @@ type PayoutLedger struct {
 	TotalStakingYield   *big.Int `json:"totalStakingYield"`
 	PendingDistribution *big.Int `json:"pendingDistribution"`
 	LastPayout          int64    `json:"lastPayout"`
+	TotalAssets         *big.Int `json:"totalAssets"`
+	TotalShares         *big.Int `json:"totalShares"`
+	IndexRay            *big.Int `json:"indexRay"`
 }
 
 // Clone returns a deep copy of the payout ledger.
@@ -55,6 +59,15 @@ func (p *PayoutLedger) Clone() *PayoutLedger {
 	}
 	if p.PendingDistribution != nil {
 		clone.PendingDistribution = new(big.Int).Set(p.PendingDistribution)
+	}
+	if p.TotalAssets != nil {
+		clone.TotalAssets = new(big.Int).Set(p.TotalAssets)
+	}
+	if p.TotalShares != nil {
+		clone.TotalShares = new(big.Int).Set(p.TotalShares)
+	}
+	if p.IndexRay != nil {
+		clone.IndexRay = new(big.Int).Set(p.IndexRay)
 	}
 	return &clone
 }
