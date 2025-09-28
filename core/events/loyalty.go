@@ -35,16 +35,20 @@ func (LoyaltyProgramCreated) EventType() string { return TypeLoyaltyProgramCreat
 // LoyaltyProgramUpdated captures the mutable configuration of an existing
 // loyalty program after an update operation.
 type LoyaltyProgramUpdated struct {
-	ID           [32]byte
-	Active       bool
-	AccrualBps   uint32
-	MinSpendWei  *big.Int
-	CapPerTx     *big.Int
-	DailyCapUser *big.Int
-	StartTime    uint64
-	EndTime      uint64
-	Pool         [20]byte
-	TokenSymbol  string
+	ID                 [32]byte
+	Active             bool
+	AccrualBps         uint32
+	MinSpendWei        *big.Int
+	CapPerTx           *big.Int
+	DailyCapUser       *big.Int
+	DailyCapProgram    *big.Int
+	EpochCapProgram    *big.Int
+	EpochLengthSeconds uint64
+	IssuanceCapUser    *big.Int
+	StartTime          uint64
+	EndTime            uint64
+	Pool               [20]byte
+	TokenSymbol        string
 }
 
 // EventType implements the Event interface.

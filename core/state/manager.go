@@ -47,67 +47,70 @@ type TokenMetadata struct {
 }
 
 var (
-	tokenPrefix                = []byte("token:")
-	tokenListKey               = ethcrypto.Keccak256([]byte("token-list"))
-	balancePrefix              = []byte("balance:")
-	rolePrefix                 = []byte("role:")
-	loyaltyGlobalKeyBytes      = ethcrypto.Keccak256([]byte("loyalty:global"))
-	loyaltyDailyPrefix         = []byte("loyalty-meter:base-daily:")
-	loyaltyTotalPrefix         = []byte("loyalty-meter:base-total:")
-	loyaltyProgramDailyPrefix  = []byte("loyalty-meter:program-daily:")
-	loyaltyBusinessPrefix      = []byte("loyalty/business/")
-	loyaltyBusinessOwnerPrefix = []byte("loyalty/business-owner/")
-	loyaltyMerchantIndexPrefix = []byte("loyalty/merchant-index/")
-	loyaltyBusinessCounterKey  = []byte("loyalty/business/counter")
-	loyaltyOwnerPaymasterPref  = []byte("loyalty/owner-paymaster/")
-	escrowRecordPrefix         = []byte("escrow/record/")
-	escrowVaultPrefix          = []byte("escrow/vault/")
-	escrowModuleSeedPrefix     = "module/escrow/vault/"
-	escrowRealmPrefix          = []byte("escrow/realm/")
-	escrowFrozenPolicyPrefix   = []byte("escrow/frozen/")
-	creatorContentPrefix       = []byte("creator/content/")
-	creatorStakePrefix         = []byte("creator/stake/")
-	creatorLedgerPrefix        = []byte("creator/ledger/")
-	claimableRecordPrefix      = []byte("claimable/record/")
-	claimableNoncePrefix       = []byte("claimable/nonce/")
-	tradeRecordPrefix          = []byte("trade/record/")
-	tradeEscrowIndexPrefix     = []byte("trade/index/escrow/")
-	identityAliasPrefix        = []byte("identity/alias/")
-	identityReversePrefix      = []byte("identity/reverse/")
-	mintInvoicePrefix          = []byte("mint/invoice/")
-	swapOrderPrefix            = []byte("swap/order/")
-	potsoHeartbeatPrefix       = []byte("potso/heartbeat/")
-	potsoMeterPrefix           = []byte("potso/meter/")
-	potsoDayIndexPrefix        = []byte("potso/day-index/")
-	potsoStakeTotalPrefix      = []byte("potso/stake/")
-	potsoStakeNoncePrefix      = []byte("potso/stake/nonce/")
-	potsoStakeLocksPrefix      = []byte("potso/stake/locks/")
-	potsoStakeLockIndexPrefix  = []byte("potso/stake/locks/index/")
-	potsoStakeQueuePrefix      = []byte("potso/stake/unbondq/")
-	potsoStakeModuleSeedPrefix = "module/potso/stake/vault"
-	potsoStakeOwnerIndexKey    = []byte("potso/stake/owners")
-	potsoRewardLastProcessed   = []byte("potso/rewards/lastProcessed")
-	potsoRewardMetaKeyFormat   = "potso/rewards/epoch/%d/meta"
-	potsoRewardWinnersFormat   = "potso/rewards/epoch/%d/winners"
-	potsoRewardPayoutFormat    = "potso/rewards/epoch/%d/payout/%x"
-	potsoRewardClaimFormat     = "potso/rewards/epoch/%d/claim/%x"
-	potsoRewardHistoryFormat   = "potso/rewards/history/%x"
-	potsoMetricsMeterPrefix    = []byte("potso/metrics/meter/")
-	potsoMetricsIndexPrefix    = []byte("potso/metrics/index/")
-	potsoMetricsSnapshotPrefix = []byte("potso/metrics/snapshot/")
-	governanceProposalPrefix   = []byte("gov/proposals/")
-	governanceVotePrefix       = []byte("gov/votes/")
-	governanceVoteIndexPrefix  = []byte("gov/vote-index/")
-	governanceSequenceKey      = []byte("gov/seq")
-	governanceAuditPrefix      = []byte("gov/audit/")
-	governanceAuditSequenceKey = []byte("gov/audit-seq")
-	governanceEscrowPrefix     = []byte("gov/escrow/")
-	paramsNamespacePrefix      = []byte("params/")
-	snapshotPotsoPrefix        = []byte("snapshots/potso/")
-	lendingMarketPrefix        = []byte("lending/market/")
-	lendingFeeAccrualPrefix    = []byte("lending/fees/")
-	lendingUserPrefix          = []byte("lending/user/")
-	lendingPoolIndexKey        = []byte("lending/pools/index")
+	tokenPrefix                    = []byte("token:")
+	tokenListKey                   = ethcrypto.Keccak256([]byte("token-list"))
+	balancePrefix                  = []byte("balance:")
+	rolePrefix                     = []byte("role:")
+	loyaltyGlobalKeyBytes          = ethcrypto.Keccak256([]byte("loyalty:global"))
+	loyaltyDailyPrefix             = []byte("loyalty-meter:base-daily:")
+	loyaltyTotalPrefix             = []byte("loyalty-meter:base-total:")
+	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
+	loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
+	loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
+	loyaltyProgramIssuancePrefix   = []byte("loyalty-meter:program-issuance:")
+	loyaltyBusinessPrefix          = []byte("loyalty/business/")
+	loyaltyBusinessOwnerPrefix     = []byte("loyalty/business-owner/")
+	loyaltyMerchantIndexPrefix     = []byte("loyalty/merchant-index/")
+	loyaltyBusinessCounterKey      = []byte("loyalty/business/counter")
+	loyaltyOwnerPaymasterPref      = []byte("loyalty/owner-paymaster/")
+	escrowRecordPrefix             = []byte("escrow/record/")
+	escrowVaultPrefix              = []byte("escrow/vault/")
+	escrowModuleSeedPrefix         = "module/escrow/vault/"
+	escrowRealmPrefix              = []byte("escrow/realm/")
+	escrowFrozenPolicyPrefix       = []byte("escrow/frozen/")
+	creatorContentPrefix           = []byte("creator/content/")
+	creatorStakePrefix             = []byte("creator/stake/")
+	creatorLedgerPrefix            = []byte("creator/ledger/")
+	claimableRecordPrefix          = []byte("claimable/record/")
+	claimableNoncePrefix           = []byte("claimable/nonce/")
+	tradeRecordPrefix              = []byte("trade/record/")
+	tradeEscrowIndexPrefix         = []byte("trade/index/escrow/")
+	identityAliasPrefix            = []byte("identity/alias/")
+	identityReversePrefix          = []byte("identity/reverse/")
+	mintInvoicePrefix              = []byte("mint/invoice/")
+	swapOrderPrefix                = []byte("swap/order/")
+	potsoHeartbeatPrefix           = []byte("potso/heartbeat/")
+	potsoMeterPrefix               = []byte("potso/meter/")
+	potsoDayIndexPrefix            = []byte("potso/day-index/")
+	potsoStakeTotalPrefix          = []byte("potso/stake/")
+	potsoStakeNoncePrefix          = []byte("potso/stake/nonce/")
+	potsoStakeLocksPrefix          = []byte("potso/stake/locks/")
+	potsoStakeLockIndexPrefix      = []byte("potso/stake/locks/index/")
+	potsoStakeQueuePrefix          = []byte("potso/stake/unbondq/")
+	potsoStakeModuleSeedPrefix     = "module/potso/stake/vault"
+	potsoStakeOwnerIndexKey        = []byte("potso/stake/owners")
+	potsoRewardLastProcessed       = []byte("potso/rewards/lastProcessed")
+	potsoRewardMetaKeyFormat       = "potso/rewards/epoch/%d/meta"
+	potsoRewardWinnersFormat       = "potso/rewards/epoch/%d/winners"
+	potsoRewardPayoutFormat        = "potso/rewards/epoch/%d/payout/%x"
+	potsoRewardClaimFormat         = "potso/rewards/epoch/%d/claim/%x"
+	potsoRewardHistoryFormat       = "potso/rewards/history/%x"
+	potsoMetricsMeterPrefix        = []byte("potso/metrics/meter/")
+	potsoMetricsIndexPrefix        = []byte("potso/metrics/index/")
+	potsoMetricsSnapshotPrefix     = []byte("potso/metrics/snapshot/")
+	governanceProposalPrefix       = []byte("gov/proposals/")
+	governanceVotePrefix           = []byte("gov/votes/")
+	governanceVoteIndexPrefix      = []byte("gov/vote-index/")
+	governanceSequenceKey          = []byte("gov/seq")
+	governanceAuditPrefix          = []byte("gov/audit/")
+	governanceAuditSequenceKey     = []byte("gov/audit-seq")
+	governanceEscrowPrefix         = []byte("gov/escrow/")
+	paramsNamespacePrefix          = []byte("params/")
+	snapshotPotsoPrefix            = []byte("snapshots/potso/")
+	lendingMarketPrefix            = []byte("lending/market/")
+	lendingFeeAccrualPrefix        = []byte("lending/fees/")
+	lendingUserPrefix              = []byte("lending/user/")
+	lendingPoolIndexKey            = []byte("lending/pools/index")
 )
 
 // GovernanceProposalKey constructs the storage key for the proposal metadata
@@ -692,6 +695,35 @@ func LoyaltyProgramDailyMeterKey(id loyalty.ProgramID, addr []byte, day string) 
 	copy(buf[len(loyaltyProgramDailyPrefix)+len(id)+1:], trimmed)
 	buf[len(loyaltyProgramDailyPrefix)+len(id)+1+len(trimmed)] = ':'
 	copy(buf[len(loyaltyProgramDailyPrefix)+len(id)+1+len(trimmed)+1:], addr)
+	return ethcrypto.Keccak256(buf)
+}
+
+func LoyaltyProgramDailyTotalKey(id loyalty.ProgramID, day string) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(loyaltyProgramDailyTotalPrefix)+len(id)+1+len(trimmed))
+	copy(buf, loyaltyProgramDailyTotalPrefix)
+	copy(buf[len(loyaltyProgramDailyTotalPrefix):], id[:])
+	buf[len(loyaltyProgramDailyTotalPrefix)+len(id)] = ':'
+	copy(buf[len(loyaltyProgramDailyTotalPrefix)+len(id)+1:], trimmed)
+	return ethcrypto.Keccak256(buf)
+}
+
+func LoyaltyProgramEpochKey(id loyalty.ProgramID, epoch uint64) []byte {
+	epochStr := strconv.FormatUint(epoch, 10)
+	buf := make([]byte, len(loyaltyProgramEpochPrefix)+len(id)+1+len(epochStr))
+	copy(buf, loyaltyProgramEpochPrefix)
+	copy(buf[len(loyaltyProgramEpochPrefix):], id[:])
+	buf[len(loyaltyProgramEpochPrefix)+len(id)] = ':'
+	copy(buf[len(loyaltyProgramEpochPrefix)+len(id)+1:], epochStr)
+	return ethcrypto.Keccak256(buf)
+}
+
+func LoyaltyProgramIssuanceKey(id loyalty.ProgramID, addr []byte) []byte {
+	buf := make([]byte, len(loyaltyProgramIssuancePrefix)+len(id)+1+len(addr))
+	copy(buf, loyaltyProgramIssuancePrefix)
+	copy(buf[len(loyaltyProgramIssuancePrefix):], id[:])
+	buf[len(loyaltyProgramIssuancePrefix)+len(id)] = ':'
+	copy(buf[len(loyaltyProgramIssuancePrefix)+len(id)+1:], addr)
 	return ethcrypto.Keccak256(buf)
 }
 
@@ -2345,21 +2377,21 @@ func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
 }
 
 type storedTrade struct {
-        ID          [32]byte
-        OfferID     string
-        Buyer       [20]byte
-        Seller      [20]byte
-        QuoteToken  string
-        QuoteAmount *big.Int
-        EscrowQuote [32]byte
-        BaseToken   string
-        BaseAmount  *big.Int
-        EscrowBase  [32]byte
-        Deadline    *big.Int
-        CreatedAt   *big.Int
-        FundedAt    *big.Int
-        SlippageBps uint32
-        Status      uint8
+	ID          [32]byte
+	OfferID     string
+	Buyer       [20]byte
+	Seller      [20]byte
+	QuoteToken  string
+	QuoteAmount *big.Int
+	EscrowQuote [32]byte
+	BaseToken   string
+	BaseAmount  *big.Int
+	EscrowBase  [32]byte
+	Deadline    *big.Int
+	CreatedAt   *big.Int
+	FundedAt    *big.Int
+	SlippageBps uint32
+	Status      uint8
 }
 
 func newStoredTrade(t *escrow.Trade) *storedTrade {
@@ -2374,39 +2406,39 @@ func newStoredTrade(t *escrow.Trade) *storedTrade {
 	if t.BaseAmount != nil {
 		base = new(big.Int).Set(t.BaseAmount)
 	}
-        return &storedTrade{
-                ID:          t.ID,
-                OfferID:     t.OfferID,
-                Buyer:       t.Buyer,
-                Seller:      t.Seller,
-                QuoteToken:  t.QuoteToken,
-                QuoteAmount: quote,
-                EscrowQuote: t.EscrowQuote,
-                BaseToken:   t.BaseToken,
-                BaseAmount:  base,
-                EscrowBase:  t.EscrowBase,
-                Deadline:    big.NewInt(t.Deadline),
-                CreatedAt:   big.NewInt(t.CreatedAt),
-                FundedAt: func() *big.Int {
-                        if t.FundedAt == 0 {
-                                return nil
-                        }
-                        return big.NewInt(t.FundedAt)
-                }(),
-                SlippageBps: t.SlippageBps,
-                Status:      uint8(t.Status),
-        }
+	return &storedTrade{
+		ID:          t.ID,
+		OfferID:     t.OfferID,
+		Buyer:       t.Buyer,
+		Seller:      t.Seller,
+		QuoteToken:  t.QuoteToken,
+		QuoteAmount: quote,
+		EscrowQuote: t.EscrowQuote,
+		BaseToken:   t.BaseToken,
+		BaseAmount:  base,
+		EscrowBase:  t.EscrowBase,
+		Deadline:    big.NewInt(t.Deadline),
+		CreatedAt:   big.NewInt(t.CreatedAt),
+		FundedAt: func() *big.Int {
+			if t.FundedAt == 0 {
+				return nil
+			}
+			return big.NewInt(t.FundedAt)
+		}(),
+		SlippageBps: t.SlippageBps,
+		Status:      uint8(t.Status),
+	}
 }
 
 func (s *storedTrade) toTrade() (*escrow.Trade, error) {
 	if s == nil {
 		return nil, fmt.Errorf("trade: nil storage record")
 	}
-        out := &escrow.Trade{
-                ID:         s.ID,
-                OfferID:    s.OfferID,
-                Buyer:      s.Buyer,
-                Seller:     s.Seller,
+	out := &escrow.Trade{
+		ID:         s.ID,
+		OfferID:    s.OfferID,
+		Buyer:      s.Buyer,
+		Seller:     s.Seller,
 		QuoteToken: s.QuoteToken,
 		QuoteAmount: func() *big.Int {
 			if s.QuoteAmount == nil {
@@ -2422,19 +2454,19 @@ func (s *storedTrade) toTrade() (*escrow.Trade, error) {
 			}
 			return new(big.Int).Set(s.BaseAmount)
 		}(),
-                EscrowBase: s.EscrowBase,
-                SlippageBps: s.SlippageBps,
-                Status:     escrow.TradeStatus(s.Status),
-        }
-        if s.Deadline != nil {
-                out.Deadline = s.Deadline.Int64()
-        }
-        if s.CreatedAt != nil {
-                out.CreatedAt = s.CreatedAt.Int64()
-        }
-        if s.FundedAt != nil {
-                out.FundedAt = s.FundedAt.Int64()
-        }
+		EscrowBase:  s.EscrowBase,
+		SlippageBps: s.SlippageBps,
+		Status:      escrow.TradeStatus(s.Status),
+	}
+	if s.Deadline != nil {
+		out.Deadline = s.Deadline.Int64()
+	}
+	if s.CreatedAt != nil {
+		out.CreatedAt = s.CreatedAt.Int64()
+	}
+	if s.FundedAt != nil {
+		out.FundedAt = s.FundedAt.Int64()
+	}
 	if !out.Status.Valid() {
 		return nil, fmt.Errorf("trade: invalid status in storage")
 	}
@@ -2706,6 +2738,48 @@ func (m *Manager) LoyaltyProgramDailyAccrued(id loyalty.ProgramID, addr []byte, 
 	return m.loadBigInt(LoyaltyProgramDailyMeterKey(id, addr, day))
 }
 
+// SetLoyaltyProgramDailyTotalAccrued stores the accrued rewards for the provided program and day across all users.
+func (m *Manager) SetLoyaltyProgramDailyTotalAccrued(id loyalty.ProgramID, day string, amount *big.Int) error {
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	return m.writeBigInt(LoyaltyProgramDailyTotalKey(id, day), amount)
+}
+
+// LoyaltyProgramDailyTotalAccrued returns the daily accrued rewards for the provided program across all users.
+func (m *Manager) LoyaltyProgramDailyTotalAccrued(id loyalty.ProgramID, day string) (*big.Int, error) {
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	return m.loadBigInt(LoyaltyProgramDailyTotalKey(id, day))
+}
+
+// SetLoyaltyProgramEpochAccrued stores the accrued rewards for the provided program and epoch.
+func (m *Manager) SetLoyaltyProgramEpochAccrued(id loyalty.ProgramID, epoch uint64, amount *big.Int) error {
+	return m.writeBigInt(LoyaltyProgramEpochKey(id, epoch), amount)
+}
+
+// LoyaltyProgramEpochAccrued returns the accrued rewards for the provided program and epoch.
+func (m *Manager) LoyaltyProgramEpochAccrued(id loyalty.ProgramID, epoch uint64) (*big.Int, error) {
+	return m.loadBigInt(LoyaltyProgramEpochKey(id, epoch))
+}
+
+// SetLoyaltyProgramIssuanceAccrued stores the lifetime accrued rewards for the provided program and address.
+func (m *Manager) SetLoyaltyProgramIssuanceAccrued(id loyalty.ProgramID, addr []byte, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	return m.writeBigInt(LoyaltyProgramIssuanceKey(id, addr), amount)
+}
+
+// LoyaltyProgramIssuanceAccrued returns the lifetime accrued rewards for the provided program and address.
+func (m *Manager) LoyaltyProgramIssuanceAccrued(id loyalty.ProgramID, addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	return m.loadBigInt(LoyaltyProgramIssuanceKey(id, addr))
+}
+
 // SetRole associates an address with the specified role. Duplicate assignments
 // are ignored while the stored list remains sorted for determinism.
 func (m *Manager) SetRole(role string, addr []byte) error {
@@ -2935,44 +3009,44 @@ func (m *Manager) EscrowCredit(id [32]byte, token string, amt *big.Int) error {
 
 // EscrowDebit decreases the tracked escrow balance for the supplied token.
 func (m *Manager) EscrowDebit(id [32]byte, token string, amt *big.Int) error {
-        if amt == nil {
-                amt = big.NewInt(0)
-        }
-        if amt.Sign() < 0 {
-                return fmt.Errorf("escrow: negative debit")
-        }
-        normalized, err := escrow.NormalizeToken(token)
-        if err != nil {
-                return err
-        }
-        key := escrowVaultKey(id, normalized)
-        balance, err := m.loadBigInt(key)
-        if err != nil {
-                return err
-        }
-        if balance.Cmp(amt) < 0 {
-                return fmt.Errorf("escrow: insufficient balance")
-        }
-        if amt.Sign() == 0 {
-                return nil
-        }
-        updated := new(big.Int).Sub(balance, amt)
-        return m.writeBigInt(key, updated)
+	if amt == nil {
+		amt = big.NewInt(0)
+	}
+	if amt.Sign() < 0 {
+		return fmt.Errorf("escrow: negative debit")
+	}
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return err
+	}
+	key := escrowVaultKey(id, normalized)
+	balance, err := m.loadBigInt(key)
+	if err != nil {
+		return err
+	}
+	if balance.Cmp(amt) < 0 {
+		return fmt.Errorf("escrow: insufficient balance")
+	}
+	if amt.Sign() == 0 {
+		return nil
+	}
+	updated := new(big.Int).Sub(balance, amt)
+	return m.writeBigInt(key, updated)
 }
 
 // EscrowBalance returns the tracked vault balance for the specified escrow
 // identifier and token symbol.
 func (m *Manager) EscrowBalance(id [32]byte, token string) (*big.Int, error) {
-        normalized, err := escrow.NormalizeToken(token)
-        if err != nil {
-                return nil, err
-        }
-        key := escrowVaultKey(id, normalized)
-        balance, err := m.loadBigInt(key)
-        if err != nil {
-                return nil, err
-        }
-        return balance, nil
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return nil, err
+	}
+	key := escrowVaultKey(id, normalized)
+	balance, err := m.loadBigInt(key)
+	if err != nil {
+		return nil, err
+	}
+	return balance, nil
 }
 
 // TradePut persists the provided trade definition after validation.
