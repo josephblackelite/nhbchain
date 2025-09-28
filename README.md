@@ -228,6 +228,27 @@ Run the bundled audit harness before scheduled compliance reviews or release sig
 
 The script prepares `logs/` and `artifacts/` directories, then emits Markdown and JSON summaries (for example, `audit/report-<timestamp>.md` and `audit/report-<timestamp>.json`) that can be attached to change-management tickets.
 
+### Static Analysis & Security Checks
+
+For day-to-day development, run the static analysis bundle before opening a pull request:
+
+```bash
+make audit:static
+```
+
+The target enables `set -o pipefail` so any failing tool stops the sequence and bubbles a non-zero exit code back to the orchestrator. Each tool's console output is tee'd into `logs/` for later review:
+
+| Tool | Log file | How to interpret |
+| --- | --- | --- |
+| `go mod tidy` | `logs/go-mod-tidy.log` | Confirms module metadata is canonical. Non-empty output typically means dependencies were added/removed and should be committed. |
+| `golangci-lint run ./...` | `logs/golangci-lint.log` | Surfaces lint violations from `govet`, `errcheck`, `staticcheck`, `ineffassign`, `gosec`, `revive`, `misspell`, `unparam`, `gocyclo` (excluding `_test.go`), and `prealloc`. Address findings in source or add justified suppressions. |
+| `govulncheck ./...` | `logs/govulncheck.log` | Flags known vulnerabilities in Go dependencies. Either upgrade the dependency or document why the finding is a false positive. |
+| `staticcheck ./...` | `logs/staticcheck.log` | Provides additional static diagnostics beyond `golangci-lint`. Review reported code smells or correctness issues. |
+| `buf lint` | `logs/buf-lint.log` | Ensures protobuf APIs conform to style and best practices. Resolve comments or naming issues before merging. |
+| `buf breaking --against ".git#branch=main"` | `logs/buf-breaking.log` | Detects backward-incompatible protobuf changes relative to `main`. Update the API consciously or coordinate a versioned release if a breaking change is intentional. |
+
+Archive the `logs/` directory with release artifacts so compliance reviewers can validate that the checks passed for a given build.
+
 ### Reporting Vulnerabilities
 
 1. Encrypt your findings with the [repository PGP key](docs/security/repository-pgp-key.asc) (fingerprint `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`).
