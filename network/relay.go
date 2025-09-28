@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhbchain/p2p"
@@ -12,8 +14,13 @@ import (
 )
 
 const (
-	streamQueueSize   = 128
-	heartbeatInterval = 5 * time.Second
+	// DefaultStreamQueueSize controls the buffered size for relay queues when no
+	// override is supplied via configuration.
+	DefaultStreamQueueSize = 128
+	heartbeatInterval      = 5 * time.Second
+
+	defaultDropAlertRatio = 0.1
+	dropLogCooldown       = 30 * time.Second
 )
 
 type streamState struct {
@@ -22,9 +29,12 @@ type streamState struct {
 	once  sync.Once
 }
 
-func newStreamState() *streamState {
+func newStreamState(size int) *streamState {
+	if size <= 0 {
+		size = DefaultStreamQueueSize
+	}
 	return &streamState{
-		queue: make(chan *networkv1.GossipResponse, streamQueueSize),
+		queue: make(chan *networkv1.GossipResponse, size),
 		done:  make(chan struct{}),
 	}
 }
@@ -41,11 +51,81 @@ type Relay struct {
 	mu     sync.RWMutex
 	server *p2p.Server
 	stream *streamState
+
+	metrics         *relayMetrics
+	queueSize       int
+	dropAlertRatio  float64
+	dropLogCooldown time.Duration
+	logger          *slog.Logger
+
+	enqueued atomic.Uint64
+	dropped  atomic.Uint64
+	lastLog  atomic.Int64
 }
 
 // NewRelay constructs a Relay without any attached stream or server.
-func NewRelay() *Relay {
-	return &Relay{}
+func NewRelay(opts ...RelayOption) *Relay {
+	relay := &Relay{
+		metrics:         defaultRelayMetrics(),
+		queueSize:       DefaultStreamQueueSize,
+		dropAlertRatio:  defaultDropAlertRatio,
+		dropLogCooldown: dropLogCooldown,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(relay)
+		}
+	}
+	if relay.queueSize <= 0 {
+		relay.queueSize = DefaultStreamQueueSize
+	}
+	if relay.dropLogCooldown <= 0 {
+		relay.dropLogCooldown = dropLogCooldown
+	}
+	if relay.dropAlertRatio < 0 {
+		relay.dropAlertRatio = 0
+	}
+	return relay
+}
+
+// RelayOption customises relay construction.
+type RelayOption func(*Relay)
+
+// WithRelayQueueSize overrides the default queue size used for new gossip streams.
+func WithRelayQueueSize(size int) RelayOption {
+	return func(r *Relay) {
+		if r != nil {
+			r.queueSize = size
+		}
+	}
+}
+
+// WithRelayLogger attaches a structured logger for relay diagnostics.
+func WithRelayLogger(logger *slog.Logger) RelayOption {
+	return func(r *Relay) {
+		if r != nil {
+			r.logger = logger
+		}
+	}
+}
+
+// WithRelayDropAlertRatio sets the drop-rate threshold that triggers structured logging.
+// Ratios at or below zero disable the alert.
+func WithRelayDropAlertRatio(ratio float64) RelayOption {
+	return func(r *Relay) {
+		if r != nil {
+			r.dropAlertRatio = ratio
+		}
+	}
+}
+
+// WithRelayDropLogCooldown sets the minimum duration between drop alert log entries.
+func WithRelayDropLogCooldown(cooldown time.Duration) RelayOption {
+	return func(r *Relay) {
+		if r != nil {
+			r.dropLogCooldown = cooldown
+		}
+	}
 }
 
 // SetServer attaches the backing P2P server. Unary RPCs and outbound broadcasts
@@ -84,10 +164,23 @@ func (r *Relay) enqueue(envelope *networkv1.GossipResponse) bool {
 	if stream == nil {
 		return false
 	}
+	occupancy := len(stream.queue)
+	if m := r.metrics; m != nil {
+		m.occupancy.Set(float64(occupancy))
+	}
 	select {
 	case stream.queue <- envelope:
+		if m := r.metrics; m != nil {
+			m.enqueued.Inc()
+		}
+		r.enqueued.Add(1)
 		return true
 	default:
+		if m := r.metrics; m != nil {
+			m.dropped.Inc()
+		}
+		totalDropped := r.dropped.Add(1)
+		r.maybeLogDrop(totalDropped, occupancy)
 		// Stream is saturated; drop message to avoid blocking P2P read loop.
 		return false
 	}
@@ -123,7 +216,7 @@ func (r *Relay) GossipStream(stream networkv1.NetworkService_GossipServer) error
 	if stream == nil {
 		return fmt.Errorf("nil gossip stream")
 	}
-	state := newStreamState()
+	state := newStreamState(r.queueSize)
 	r.swapStream(state)
 
 	sendErr := make(chan error, 1)
@@ -182,6 +275,9 @@ func (r *Relay) swapStream(state *streamState) {
 	}
 	r.stream = state
 	r.mu.Unlock()
+	if m := r.metrics; m != nil {
+		m.occupancy.Set(0)
+	}
 }
 
 func (r *Relay) clearStream(state *streamState) {
@@ -191,6 +287,41 @@ func (r *Relay) clearStream(state *streamState) {
 	}
 	r.mu.Unlock()
 	state.close()
+	if m := r.metrics; m != nil {
+		m.occupancy.Set(0)
+	}
+}
+
+func (r *Relay) maybeLogDrop(dropped uint64, occupancy int) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	if r.dropAlertRatio <= 0 {
+		return
+	}
+	enqueued := r.enqueued.Load()
+	total := dropped + enqueued
+	if total == 0 {
+		return
+	}
+	ratio := float64(dropped) / float64(total)
+	if ratio < r.dropAlertRatio {
+		return
+	}
+	now := time.Now()
+	last := time.Unix(0, r.lastLog.Load())
+	if now.Sub(last) < r.dropLogCooldown {
+		return
+	}
+	r.lastLog.Store(now.UnixNano())
+	r.logger.Warn("relay queue saturated; dropping envelopes",
+		slog.Float64("drop_ratio", ratio),
+		slog.Float64("threshold", r.dropAlertRatio),
+		slog.Int("queue_size", r.queueSize),
+		slog.Int("queue_occupancy", occupancy),
+		slog.Uint64("dropped_total", dropped),
+		slog.Uint64("enqueued_total", enqueued),
+	)
 }
 
 func (r *Relay) broadcast(msg *p2p.Message) error {

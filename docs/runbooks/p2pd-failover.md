@@ -7,6 +7,7 @@ consensus connectivity.
 
 * Alert triggers for missing heartbeats or gRPC health failures.
 * Logs from `consensusd` showing repeated reconnect attempts.
+* Prometheus alerts on sustained `nhb_network_relay_queue_dropped_total` increases or elevated queue occupancy.
 
 ## 2. Validate Environment
 
@@ -36,6 +37,11 @@ If a warm standby is available:
   material to verify active peers. Use `-plaintext` only when the deployment has
   explicitly set `AllowInsecure = true` for a lab environment.
 * Ensure rate limits and scoring metrics reset as expected.
+* Inspect relay queue health:
+  - `nhb_network_relay_queue_enqueued_total` vs `nhb_network_relay_queue_dropped_total` to confirm drop ratio is below the configured threshold.
+  - `nhb_network_relay_queue_occupancy` should trend well under the configured queue size except during brief spikes.
+  - Structured logs tagged `component=network_relay` emit warnings once the drop ratio breaches `network_security.RelayDropLogRatio` (default 0.1).
+* Tune `network_security.StreamQueueSize` when sustained occupancy nears capacity. Increase the buffer gradually (e.g., +64) and redeploy both `p2pd` and `consensusd` so the client send queue stays aligned with the relay size.
 
 ## 6. Root Cause Analysis
 

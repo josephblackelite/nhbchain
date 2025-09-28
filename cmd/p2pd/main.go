@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -44,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
-	logging.Setup("p2pd", env)
+	logger := logging.Setup("p2pd", env)
 	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
 	insecure := true
@@ -195,7 +196,11 @@ func main() {
 		pexEnabled = *cfg.P2P.PEX
 	}
 
-	relay := network.NewRelay()
+	relay := network.NewRelay(
+		network.WithRelayQueueSize(cfg.NetworkSecurity.StreamQueueSize),
+		network.WithRelayDropAlertRatio(cfg.NetworkSecurity.RelayDropLogRatio),
+		network.WithRelayLogger(logger.With(slog.String("component", "network_relay"))),
+	)
 
 	serverCfg := p2p.ServerConfig{
 		ListenAddress:    cfg.ListenAddress,
