@@ -1,0 +1,14 @@
+phase: perf
+description: >-
+  Captures latency and throughput targets for ledger write paths under synthetic load.
+checks:
+  - name: Voucher ingestion throughput
+    target: tests/perf
+    expect: Ledger insertions remain below 5ms median latency under benchmark load.
+artifacts:
+  - name: Benchmark output
+    path: artifacts/perf/bench.txt
+    format: text
+metadata:
+  owner: perf-eng
+  cadence: nightly
