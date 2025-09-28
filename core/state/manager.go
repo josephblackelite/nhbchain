@@ -3295,6 +3295,7 @@ type storedCreatorContent struct {
 	Creator     [20]byte
 	URI         string
 	Metadata    string
+	Hash        string
 	PublishedAt int64
 	TotalTips   *big.Int
 	TotalStake  *big.Int
@@ -3309,6 +3310,7 @@ func newStoredCreatorContent(content *creator.Content) *storedCreatorContent {
 		Creator:     content.Creator,
 		URI:         strings.TrimSpace(content.URI),
 		Metadata:    strings.TrimSpace(content.Metadata),
+		Hash:        strings.TrimSpace(content.Hash),
 		PublishedAt: content.PublishedAt,
 		TotalTips:   big.NewInt(0),
 		TotalStake:  big.NewInt(0),
@@ -3331,6 +3333,7 @@ func (s *storedCreatorContent) toContent() *creator.Content {
 		Creator:     s.Creator,
 		URI:         strings.TrimSpace(s.URI),
 		Metadata:    strings.TrimSpace(s.Metadata),
+		Hash:        strings.TrimSpace(s.Hash),
 		PublishedAt: s.PublishedAt,
 		TotalTips:   big.NewInt(0),
 		TotalStake:  big.NewInt(0),
@@ -3401,6 +3404,9 @@ type storedCreatorLedger struct {
 	TotalStakingYield   *big.Int
 	PendingDistribution *big.Int
 	LastPayout          int64
+	TotalAssets         *big.Int
+	TotalShares         *big.Int
+	IndexRay            *big.Int
 }
 
 func newStoredCreatorLedger(ledger *creator.PayoutLedger) *storedCreatorLedger {
@@ -3413,6 +3419,9 @@ func newStoredCreatorLedger(ledger *creator.PayoutLedger) *storedCreatorLedger {
 		TotalStakingYield:   big.NewInt(0),
 		PendingDistribution: big.NewInt(0),
 		LastPayout:          ledger.LastPayout,
+		TotalAssets:         big.NewInt(0),
+		TotalShares:         big.NewInt(0),
+		IndexRay:            big.NewInt(0),
 	}
 	if ledger.TotalTips != nil {
 		stored.TotalTips = new(big.Int).Set(ledger.TotalTips)
@@ -3422,6 +3431,15 @@ func newStoredCreatorLedger(ledger *creator.PayoutLedger) *storedCreatorLedger {
 	}
 	if ledger.PendingDistribution != nil {
 		stored.PendingDistribution = new(big.Int).Set(ledger.PendingDistribution)
+	}
+	if ledger.TotalAssets != nil {
+		stored.TotalAssets = new(big.Int).Set(ledger.TotalAssets)
+	}
+	if ledger.TotalShares != nil {
+		stored.TotalShares = new(big.Int).Set(ledger.TotalShares)
+	}
+	if ledger.IndexRay != nil {
+		stored.IndexRay = new(big.Int).Set(ledger.IndexRay)
 	}
 	return stored
 }
@@ -3436,6 +3454,9 @@ func (s *storedCreatorLedger) toLedger() *creator.PayoutLedger {
 		TotalStakingYield:   big.NewInt(0),
 		PendingDistribution: big.NewInt(0),
 		LastPayout:          s.LastPayout,
+		TotalAssets:         big.NewInt(0),
+		TotalShares:         big.NewInt(0),
+		IndexRay:            big.NewInt(0),
 	}
 	if s.TotalTips != nil {
 		ledger.TotalTips = new(big.Int).Set(s.TotalTips)
@@ -3445,6 +3466,15 @@ func (s *storedCreatorLedger) toLedger() *creator.PayoutLedger {
 	}
 	if s.PendingDistribution != nil {
 		ledger.PendingDistribution = new(big.Int).Set(s.PendingDistribution)
+	}
+	if s.TotalAssets != nil {
+		ledger.TotalAssets = new(big.Int).Set(s.TotalAssets)
+	}
+	if s.TotalShares != nil {
+		ledger.TotalShares = new(big.Int).Set(s.TotalShares)
+	}
+	if s.IndexRay != nil {
+		ledger.IndexRay = new(big.Int).Set(s.IndexRay)
 	}
 	return ledger
 }

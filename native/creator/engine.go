@@ -5,9 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
+	"lukechampine.com/blake3"
 	"nhbchain/core/events"
 	"nhbchain/core/types"
 )
@@ -17,14 +21,35 @@ var (
 	errContentExists          = errors.New("creator engine: content already exists")
 	errContentNotFound        = errors.New("creator engine: content not found")
 	errInvalidAmount          = errors.New("creator engine: amount must be positive")
+	errDepositTooSmall        = errors.New("creator engine: deposit below minimum")
+	errZeroShareMint          = errors.New("creator engine: deposit too small for share precision")
 	errInsufficientFunds      = errors.New("creator engine: insufficient balance")
 	errStakeNotFound          = errors.New("creator engine: stake not found")
 	errPayoutVaultNotSet      = errors.New("creator engine: payout vault not configured")
 	errRewardsTreasuryNotSet  = errors.New("creator engine: rewards treasury not configured")
 	errPayoutVaultUnderfunded = errors.New("creator engine: payout vault underfunded")
+	errSharesDepleted         = errors.New("creator engine: share supply depleted")
+	errInsufficientShares     = errors.New("creator engine: insufficient shares")
+	errRedeemTooSmall         = errors.New("creator engine: redeem value below precision")
+	errStakeEpochCap          = errors.New("creator engine: per-epoch stake cap exceeded")
+	errTipRateLimited         = errors.New("creator engine: tip rate limit exceeded")
+	errInvalidURI             = errors.New("creator engine: invalid content uri")
+	errInvalidMetadata        = errors.New("creator engine: invalid content metadata")
 )
 
 const stakingAccrualBps = 250 // 2.5% accrual when staking behind a creator.
+
+const (
+	stakeEpochSeconds    = int64(3600) // 1h fan staking window
+	tipRateWindowSeconds = int64(1)
+	tipRateBurst         = 5
+	maxURILength         = 512
+	maxMetadataLength    = 4096
+)
+
+var (
+	fanStakeEpochCap = big.NewInt(1_000_000_000_000)
+)
 
 type engineState interface {
 	CreatorContentGet(id string) (*Content, bool, error)
@@ -45,6 +70,18 @@ type Engine struct {
 	nowFn           func() int64
 	payoutVault     [20]byte
 	rewardsTreasury [20]byte
+	mu              sync.Mutex
+	stakeWindows    map[[20]byte]*stakeWindow
+	tipWindows      map[[20]byte]*tipWindow
+}
+
+type stakeWindow struct {
+	windowStart int64
+	amount      *big.Int
+}
+
+type tipWindow struct {
+	timestamps []int64
 }
 
 // NewEngine constructs a creator engine with default dependencies.
@@ -54,6 +91,8 @@ func NewEngine() *Engine {
 		nowFn: func() int64 {
 			return time.Now().Unix()
 		},
+		stakeWindows: make(map[[20]byte]*stakeWindow),
+		tipWindows:   make(map[[20]byte]*tipWindow),
 	}
 }
 
@@ -114,12 +153,87 @@ func ensureAccount(acc *types.Account) *types.Account {
 	return acc
 }
 
+func ensureStake(stake *Stake) *Stake {
+	if stake == nil {
+		return nil
+	}
+	if stake.Amount == nil {
+		stake.Amount = big.NewInt(0)
+	}
+	if stake.Shares == nil {
+		stake.Shares = big.NewInt(0)
+	}
+	return stake
+}
+
+func ensureLedgerFields(ledger *PayoutLedger) *PayoutLedger {
+	if ledger == nil {
+		return nil
+	}
+	if ledger.TotalTips == nil {
+		ledger.TotalTips = big.NewInt(0)
+	}
+	if ledger.TotalStakingYield == nil {
+		ledger.TotalStakingYield = big.NewInt(0)
+	}
+	if ledger.PendingDistribution == nil {
+		ledger.PendingDistribution = big.NewInt(0)
+	}
+	if ledger.TotalAssets == nil {
+		ledger.TotalAssets = big.NewInt(0)
+	}
+	if ledger.TotalShares == nil {
+		ledger.TotalShares = big.NewInt(0)
+	}
+	if ledger.IndexRay == nil {
+		ledger.IndexRay = new(big.Int).Set(oneRay)
+	}
+	return ledger
+}
+
 func sanitizeContentID(id string) (string, error) {
 	trimmed := strings.TrimSpace(id)
 	if trimmed == "" {
 		return "", errors.New("content id required")
 	}
 	return trimmed, nil
+}
+
+var allowedURISchemes = map[string]struct{}{
+	"https": {},
+	"ipfs":  {},
+	"ar":    {},
+	"nhb":   {},
+}
+
+func sanitizeURI(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errInvalidURI
+	}
+	if len(trimmed) > maxURILength {
+		return "", errInvalidURI
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed == nil || parsed.Scheme == "" {
+		return "", errInvalidURI
+	}
+	if _, ok := allowedURISchemes[strings.ToLower(parsed.Scheme)]; !ok {
+		return "", errInvalidURI
+	}
+	return trimmed, nil
+}
+
+func sanitizeMetadata(raw string) (string, string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) > maxMetadataLength {
+		return "", "", errInvalidMetadata
+	}
+	if !utf8.ValidString(trimmed) {
+		return "", "", errInvalidMetadata
+	}
+	sum := blake3.Sum256([]byte(trimmed))
+	return trimmed, hex.EncodeToString(sum[:]), nil
 }
 
 func hexAddr(addr [20]byte) string {
@@ -145,7 +259,63 @@ func newLedger(creator [20]byte) *PayoutLedger {
 		TotalStakingYield:   big.NewInt(0),
 		PendingDistribution: big.NewInt(0),
 		LastPayout:          0,
+		TotalAssets:         big.NewInt(0),
+		TotalShares:         big.NewInt(0),
+		IndexRay:            new(big.Int).Set(oneRay),
 	}
+}
+
+func (e *Engine) enforceStakeLimit(fan [20]byte, amount *big.Int) error {
+	if e == nil || amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	window, ok := e.stakeWindows[fan]
+	now := e.now()
+	if !ok || window == nil {
+		window = &stakeWindow{windowStart: now, amount: big.NewInt(0)}
+		e.stakeWindows[fan] = window
+	}
+	if now-window.windowStart >= stakeEpochSeconds {
+		window.windowStart = now
+		window.amount = big.NewInt(0)
+	}
+	if window.amount == nil {
+		window.amount = big.NewInt(0)
+	}
+	candidate := new(big.Int).Add(window.amount, amount)
+	if candidate.Cmp(fanStakeEpochCap) > 0 {
+		return errStakeEpochCap
+	}
+	window.amount = candidate
+	return nil
+}
+
+func (e *Engine) enforceTipLimit(creator [20]byte, now int64) error {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	window, ok := e.tipWindows[creator]
+	if !ok || window == nil {
+		window = &tipWindow{timestamps: make([]int64, 0, tipRateBurst)}
+		e.tipWindows[creator] = window
+	}
+	cutoff := now - tipRateWindowSeconds
+	kept := window.timestamps[:0]
+	for _, ts := range window.timestamps {
+		if ts >= cutoff {
+			kept = append(kept, ts)
+		}
+	}
+	window.timestamps = kept
+	if len(window.timestamps) >= tipRateBurst {
+		return errTipRateLimited
+	}
+	window.timestamps = append(window.timestamps, now)
+	return nil
 }
 
 // PublishContent registers a new piece of content and emits the corresponding event.
@@ -162,11 +332,20 @@ func (e *Engine) PublishContent(creator [20]byte, id string, uri string, metadat
 	} else if ok && existing != nil {
 		return nil, errContentExists
 	}
+	sanitizedURI, err := sanitizeURI(uri)
+	if err != nil {
+		return nil, err
+	}
+	sanitizedMetadata, hash, err := sanitizeMetadata(metadata)
+	if err != nil {
+		return nil, err
+	}
 	content := &Content{
 		ID:          sanitized,
 		Creator:     creator,
-		URI:         strings.TrimSpace(uri),
-		Metadata:    strings.TrimSpace(metadata),
+		URI:         sanitizedURI,
+		Metadata:    sanitizedMetadata,
+		Hash:        hash,
 		PublishedAt: e.now(),
 		TotalTips:   big.NewInt(0),
 		TotalStake:  big.NewInt(0),
@@ -200,6 +379,10 @@ func (e *Engine) TipContent(fan [20]byte, contentID string, amount *big.Int) (*T
 	if !ok || content == nil {
 		return nil, errContentNotFound
 	}
+	now := e.now()
+	if err := e.enforceTipLimit(content.Creator, now); err != nil {
+		return nil, err
+	}
 	fanAccount, err := e.state.GetAccount(fan[:])
 	if err != nil {
 		return nil, err
@@ -232,6 +415,7 @@ func (e *Engine) TipContent(fan [20]byte, contentID string, amount *big.Int) (*T
 	if !ok || ledger == nil {
 		ledger = newLedger(content.Creator)
 	}
+	ledger = ensureLedgerFields(ledger)
 	ledger.TotalTips = new(big.Int).Add(ledger.TotalTips, amount)
 	ledger.PendingDistribution = new(big.Int).Add(ledger.PendingDistribution, amount)
 	if err := e.state.CreatorPayoutLedgerPut(ledger); err != nil {
@@ -244,7 +428,7 @@ func (e *Engine) TipContent(fan [20]byte, contentID string, amount *big.Int) (*T
 		Creator:   content.Creator,
 		Fan:       fan,
 		Amount:    newBigInt(amount),
-		TippedAt:  e.now(),
+		TippedAt:  now,
 	}
 	return tip, nil
 }
@@ -260,18 +444,19 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	if isZeroAddress(e.payoutVault) {
 		return nil, nil, errPayoutVaultNotSet
 	}
+	deposit := new(big.Int).Set(amount)
+	if err := e.enforceStakeLimit(fan, deposit); err != nil {
+		return nil, nil, err
+	}
 	fanAccount, err := e.state.GetAccount(fan[:])
 	if err != nil {
 		return nil, nil, err
 	}
 	fanAccount = ensureAccount(fanAccount)
-	if fanAccount.BalanceNHB.Cmp(amount) < 0 {
+	if fanAccount.BalanceNHB.Cmp(deposit) < 0 {
 		return nil, nil, errInsufficientFunds
 	}
-	fanAccount.BalanceNHB = new(big.Int).Sub(fanAccount.BalanceNHB, amount)
-	if err := e.state.PutAccount(fan[:], fanAccount); err != nil {
-		return nil, nil, err
-	}
+	now := e.now()
 	stake, ok, err := e.state.CreatorStakeGet(creator, fan)
 	if err != nil {
 		return nil, nil, err
@@ -282,15 +467,11 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 			Fan:         fan,
 			Amount:      big.NewInt(0),
 			Shares:      big.NewInt(0),
-			StakedAt:    e.now(),
-			LastAccrual: e.now(),
+			StakedAt:    now,
+			LastAccrual: now,
 		}
-	}
-	stake.Amount = new(big.Int).Add(stake.Amount, amount)
-	stake.Shares = new(big.Int).Add(stake.Shares, amount)
-	stake.LastAccrual = e.now()
-	if err := e.state.CreatorStakePut(stake); err != nil {
-		return nil, nil, err
+	} else {
+		stake = ensureStake(stake)
 	}
 	ledger, ok, err := e.state.CreatorPayoutLedgerGet(creator)
 	if err != nil {
@@ -298,10 +479,26 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	}
 	if !ok || ledger == nil {
 		ledger = newLedger(creator)
+	} else {
+		ledger = ensureLedgerFields(ledger)
 	}
+	mintedShares, bootstrapShares, err := calculateMintShares(deposit, ledger.TotalShares, ledger.TotalAssets)
+	if err != nil {
+		return nil, nil, err
+	}
+	fanAccount.BalanceNHB = new(big.Int).Sub(fanAccount.BalanceNHB, deposit)
+	if err := e.state.PutAccount(fan[:], fanAccount); err != nil {
+		return nil, nil, err
+	}
+	stake.Amount = new(big.Int).Add(stake.Amount, deposit)
+	stake.Shares = new(big.Int).Add(stake.Shares, mintedShares)
+	if stake.StakedAt == 0 {
+		stake.StakedAt = now
+	}
+	stake.LastAccrual = now
 	reward := big.NewInt(0)
-	if amount.Sign() > 0 {
-		candidate := new(big.Int).Mul(amount, big.NewInt(stakingAccrualBps))
+	if deposit.Sign() > 0 {
+		candidate := new(big.Int).Mul(deposit, big.NewInt(stakingAccrualBps))
 		candidate = candidate.Div(candidate, big.NewInt(10_000))
 		if candidate.Sign() > 0 {
 			if isZeroAddress(e.rewardsTreasury) {
@@ -332,6 +529,15 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 			}
 		}
 	}
+	ledger.TotalAssets = new(big.Int).Add(ledger.TotalAssets, deposit)
+	ledger.TotalShares = new(big.Int).Add(ledger.TotalShares, mintedShares)
+	if bootstrapShares != nil && bootstrapShares.Sign() > 0 {
+		ledger.TotalShares = new(big.Int).Add(ledger.TotalShares, bootstrapShares)
+	}
+	ledger.IndexRay = computeIndex(ledger.TotalAssets, ledger.TotalShares)
+	if err := e.state.CreatorStakePut(stake); err != nil {
+		return nil, nil, err
+	}
 	if err := e.state.CreatorPayoutLedgerPut(ledger); err != nil {
 		return nil, nil, err
 	}
@@ -354,19 +560,51 @@ func (e *Engine) UnstakeCreator(fan [20]byte, creator [20]byte, amount *big.Int)
 	if err != nil {
 		return nil, err
 	}
-	if !ok || stake == nil || stake.Amount.Cmp(amount) < 0 {
+	if !ok || stake == nil {
 		return nil, errStakeNotFound
 	}
-	stake.Amount = new(big.Int).Sub(stake.Amount, amount)
-	if stake.Shares == nil {
-		stake.Shares = big.NewInt(0)
+	stake = ensureStake(stake)
+	ledger, ok, err := e.state.CreatorPayoutLedgerGet(creator)
+	if err != nil {
+		return nil, err
 	}
-	if stake.Shares.Cmp(amount) >= 0 {
-		stake.Shares = new(big.Int).Sub(stake.Shares, amount)
+	if !ok || ledger == nil {
+		ledger = newLedger(creator)
 	} else {
-		stake.Shares = big.NewInt(0)
+		ledger = ensureLedgerFields(ledger)
 	}
-	if stake.Amount.Sign() == 0 {
+	if stake.Shares.Cmp(amount) < 0 {
+		return nil, errInsufficientShares
+	}
+	assetsOut, err := calculateRedeemAssets(amount, ledger.TotalShares, ledger.TotalAssets)
+	if err != nil {
+		return nil, err
+	}
+	remainingShares := new(big.Int).Sub(ledger.TotalShares, amount)
+	remainingAssets := new(big.Int).Sub(ledger.TotalAssets, assetsOut)
+	if remainingShares.Cmp(minLiquidity) <= 0 || remainingAssets.Sign() <= 0 {
+		if remainingAssets.Sign() > 0 {
+			assetsOut = new(big.Int).Add(assetsOut, remainingAssets)
+		}
+		remainingShares = big.NewInt(0)
+		remainingAssets = big.NewInt(0)
+	}
+	stake.Shares = new(big.Int).Sub(stake.Shares, amount)
+	if stake.Amount.Cmp(assetsOut) >= 0 {
+		stake.Amount = new(big.Int).Sub(stake.Amount, assetsOut)
+	} else {
+		stake.Amount = big.NewInt(0)
+	}
+	ledger.TotalShares = remainingShares
+	ledger.TotalAssets = remainingAssets
+	if ledger.TotalAssets.Sign() <= 0 || ledger.TotalShares.Sign() == 0 {
+		ledger.TotalAssets = big.NewInt(0)
+		ledger.TotalShares = big.NewInt(0)
+		ledger.IndexRay = new(big.Int).Set(oneRay)
+	} else {
+		ledger.IndexRay = computeIndex(ledger.TotalAssets, ledger.TotalShares)
+	}
+	if stake.Amount.Sign() == 0 || stake.Shares.Sign() == 0 {
 		if err := e.state.CreatorStakeDelete(creator, fan); err != nil {
 			return nil, err
 		}
@@ -375,16 +613,19 @@ func (e *Engine) UnstakeCreator(fan [20]byte, creator [20]byte, amount *big.Int)
 			return nil, err
 		}
 	}
+	if err := e.state.CreatorPayoutLedgerPut(ledger); err != nil {
+		return nil, err
+	}
 	fanAccount, err := e.state.GetAccount(fan[:])
 	if err != nil {
 		return nil, err
 	}
 	fanAccount = ensureAccount(fanAccount)
-	fanAccount.BalanceNHB = new(big.Int).Add(fanAccount.BalanceNHB, amount)
+	fanAccount.BalanceNHB = new(big.Int).Add(fanAccount.BalanceNHB, assetsOut)
 	if err := e.state.PutAccount(fan[:], fanAccount); err != nil {
 		return nil, err
 	}
-	e.emit(CreatorUnstakedEvent(hexAddr(creator), hexAddr(fan), amount.String()))
+	e.emit(CreatorUnstakedEvent(hexAddr(creator), hexAddr(fan), assetsOut.String()))
 	return stake, nil
 }
 
@@ -399,6 +640,8 @@ func (e *Engine) ClaimPayouts(creator [20]byte) (*PayoutLedger, *big.Int, error)
 	}
 	if !ok || ledger == nil {
 		ledger = newLedger(creator)
+	} else {
+		ledger = ensureLedgerFields(ledger)
 	}
 	pending := newBigInt(ledger.PendingDistribution)
 	if pending.Sign() == 0 {
@@ -448,6 +691,8 @@ func (e *Engine) Payouts(creator [20]byte) (*PayoutLedger, error) {
 	}
 	if !ok || ledger == nil {
 		ledger = newLedger(creator)
+	} else {
+		ledger = ensureLedgerFields(ledger)
 	}
 	return ledger.Clone(), nil
 }

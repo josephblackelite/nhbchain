@@ -29,6 +29,7 @@ func (m *mockState) CreatorContentGet(id string) (*Content, bool, error) {
 		return nil, false, nil
 	}
 	clone := *content
+	clone.Hash = content.Hash
 	if content.TotalTips != nil {
 		clone.TotalTips = new(big.Int).Set(content.TotalTips)
 	}
@@ -43,6 +44,7 @@ func (m *mockState) CreatorContentPut(content *Content) error {
 		return nil
 	}
 	clone := *content
+	clone.Hash = content.Hash
 	if content.TotalTips != nil {
 		clone.TotalTips = new(big.Int).Set(content.TotalTips)
 	}
@@ -178,7 +180,7 @@ func TestTipAndClaimPreservesTotalSupply(t *testing.T) {
 
 	fan := addr(0x01)
 	creator := addr(0x02)
-	state.setAccount(fan, 1_000)
+	state.setAccount(fan, 10_000)
 	state.setAccount(creator, 0)
 	state.setAccount(payoutVault, 0)
 	state.setAccount(rewards, 0)
@@ -227,10 +229,10 @@ func TestStakeClaimUnstakeKeepsBalancesConserved(t *testing.T) {
 
 	fan := addr(0x10)
 	creator := addr(0x11)
-	state.setAccount(fan, 1_000)
+	state.setAccount(fan, 10_000)
 	state.setAccount(creator, 0)
 	state.setAccount(payoutVault, 0)
-	state.setAccount(rewards, 50)
+	state.setAccount(rewards, 500)
 
 	ledger := newLedger(creator)
 	if err := state.CreatorPayoutLedgerPut(ledger); err != nil {
@@ -239,32 +241,37 @@ func TestStakeClaimUnstakeKeepsBalancesConserved(t *testing.T) {
 
 	initialTotal := sumBalances(state, fan, creator, payoutVault, rewards)
 
-	stake, reward, err := engine.StakeCreator(fan, creator, big.NewInt(100))
+	deposit := big.NewInt(5_000)
+	stake, reward, err := engine.StakeCreator(fan, creator, deposit)
 	if err != nil {
 		t.Fatalf("stake failed: %v", err)
 	}
-	if reward.Cmp(big.NewInt(2)) != 0 {
+	if reward.Cmp(big.NewInt(125)) != 0 {
 		t.Fatalf("unexpected reward minted: %s", reward)
 	}
-	if stake.Amount.Cmp(big.NewInt(100)) != 0 {
+	if stake.Amount.Cmp(deposit) != 0 {
 		t.Fatalf("unexpected stake amount: %s", stake.Amount)
 	}
 	vaultBalance := state.account(payoutVault).BalanceNHB
-	if vaultBalance.Cmp(big.NewInt(2)) != 0 {
+	if vaultBalance.Cmp(big.NewInt(125)) != 0 {
 		t.Fatalf("reward not deposited to vault, got %s", vaultBalance)
 	}
 	treasuryBalance := state.account(rewards).BalanceNHB
-	if treasuryBalance.Cmp(big.NewInt(48)) != 0 {
-		t.Fatalf("treasury not debited, got %s", treasuryBalance)
+	if treasuryBalance.Cmp(big.NewInt(375)) != 0 {
+		t.Fatalf("treasury not debited correctly, got %s", treasuryBalance)
 	}
 
 	if _, amt, err := engine.ClaimPayouts(creator); err != nil {
 		t.Fatalf("claim failed: %v", err)
-	} else if amt.Cmp(big.NewInt(2)) != 0 {
+	} else if amt.Cmp(big.NewInt(125)) != 0 {
 		t.Fatalf("unexpected claim amount: %s", amt)
 	}
 
-	if _, err := engine.UnstakeCreator(fan, creator, big.NewInt(100)); err != nil {
+	redeemedShares := new(big.Int).Set(stake.Shares)
+	if redeemedShares.Sign() == 0 {
+		t.Fatalf("expected stake shares to be minted")
+	}
+	if _, err := engine.UnstakeCreator(fan, creator, redeemedShares); err != nil {
 		t.Fatalf("unstake failed: %v", err)
 	}
 
