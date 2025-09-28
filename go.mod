@@ -28,7 +28,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.38.0
 	go.opentelemetry.io/otel/trace v1.38.0
 	golang.org/x/time v0.9.0
-	google.golang.org/grpc v1.75.0
+	google.golang.org/grpc v1.65.0
 	google.golang.org/protobuf v1.36.8
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.6.0
@@ -39,7 +39,7 @@ require (
 
 replace github.com/apache/thrift => github.com/apache/thrift v0.0.0-20181112125854-24918abba929
 
-replace google.golang.org/grpc => google.golang.org/grpc v1.58.3
+replace google.golang.org/grpc => google.golang.org/grpc v1.65.0
 
 replace google.golang.org/genproto/googleapis/api => google.golang.org/genproto/googleapis/api v0.0.0-20230711160842-782d3b101e98
 
@@ -98,6 +98,7 @@ require (
 	github.com/supranational/blst v0.3.14 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
+	go.etcd.io/bbolt v1.3.7
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.38.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.7.1 // indirect
