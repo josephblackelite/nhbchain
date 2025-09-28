@@ -165,3 +165,50 @@ func TestBootstrapRequiresMinimumLiquidity(t *testing.T) {
 		t.Fatalf("unexpected total shares: %s", state.market.TotalSupplyShares)
 	}
 }
+
+func TestSupplyHalfUpRoundingAllowsDustyDeposits(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x21)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x22)
+	supplier := makeAddress(crypto.NHBPrefix, 0x23)
+
+	engine := lending.NewEngine(moduleAddr, collateralAddr, lending.RiskParameters{})
+	engine.SetPoolID("default")
+
+	state := newMockEngineState()
+	ray := mustBig("1000000000000000000000000000")
+	supplyIndex := mustBig("1500000000000000000000000000")
+	totalShares := mustBig("3000000000000000000000")
+	totalSupplied := new(big.Int).Mul(totalShares, supplyIndex)
+	totalSupplied.Quo(totalSupplied, ray)
+
+	state.market = &lending.Market{
+		PoolID:            "default",
+		TotalNHBSupplied:  totalSupplied,
+		TotalSupplyShares: new(big.Int).Set(totalShares),
+		TotalNHBBorrowed:  big.NewInt(0),
+		SupplyIndex:       new(big.Int).Set(supplyIndex),
+		BorrowIndex:       new(big.Int).Set(ray),
+	}
+	state.accounts[state.key(moduleAddr)] = &types.Account{BalanceNHB: new(big.Int).Set(totalSupplied), BalanceZNHB: big.NewInt(0)}
+	state.accounts[state.key(supplier)] = &types.Account{BalanceNHB: big.NewInt(10), BalanceZNHB: big.NewInt(0)}
+
+	engine.SetState(state)
+
+	minted, err := engine.Supply(supplier, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("expected dusty deposit to succeed, got %v", err)
+	}
+	if minted.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("expected a single share minted, got %s", minted)
+	}
+
+	expectedSupply := new(big.Int).Add(totalSupplied, big.NewInt(1))
+	if state.market.TotalNHBSupplied.Cmp(expectedSupply) != 0 {
+		t.Fatalf("unexpected total supplied: got %s want %s", state.market.TotalNHBSupplied, expectedSupply)
+	}
+
+	expectedShares := new(big.Int).Add(totalShares, minted)
+	if state.market.TotalSupplyShares.Cmp(expectedShares) != 0 {
+		t.Fatalf("unexpected total shares: got %s want %s", state.market.TotalSupplyShares, expectedShares)
+	}
+}
