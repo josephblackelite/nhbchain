@@ -218,6 +218,16 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 - **Compliance Alignment** — Native identity modules provide audit trails, verified contact points, and consent-driven discovery suitable for regulatory review.
 - **Audits & Bug Bounty** — We run an ongoing [bug bounty program](docs/security/bug-bounty.md) and maintain an [audit readiness guide](docs/security/audit-readiness.md) with frozen commits, reproducible builds, and fixtures for third-party assessors.
 
+### Operational Audit Harness
+
+Run the bundled audit harness before scheduled compliance reviews or release sign-offs. It executes the repository's critical `make` targets, captures logs, and writes timestamped reports under `audit/`.
+
+```bash
+./scripts/audit.sh
+```
+
+The script prepares `logs/` and `artifacts/` directories, then emits Markdown and JSON summaries (for example, `audit/report-<timestamp>.md` and `audit/report-<timestamp>.json`) that can be attached to change-management tickets.
+
 ### Reporting Vulnerabilities
 
 1. Encrypt your findings with the [repository PGP key](docs/security/repository-pgp-key.asc) (fingerprint `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`).
