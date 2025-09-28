@@ -1,0 +1,17 @@
+phase: netsec
+description: >-
+  Documents RPC authentication and mutual TLS requirements enforced by the gateway.
+checks:
+  - name: Shared secret enforcement
+    target: network/auth
+    expect: Metadata tokens must match configured secrets or requests are rejected.
+  - name: Mutual TLS allow list
+    target: network/auth
+    expect: Client certificates must match approved common names for privileged RPCs.
+artifacts:
+  - name: Netsec plan
+    path: ops/audit/netsec.yaml
+    format: yaml
+metadata:
+  owner: security
+  cadence: nightly

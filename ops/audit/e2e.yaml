@@ -1,0 +1,21 @@
+phase: e2e
+description: >-
+  Executes the wallet onboarding and treasury reconciliation flows against the
+  local compliance stack.
+checks:
+  - name: Wallet funding
+    target: services/gateway
+    expect: Faucet-funded account receives attestations and mint receipt events.
+  - name: Treasury reconciliation
+    target: services/otc-gateway
+    expect: Voucher lifecycle transitions through minted and reconciled states.
+  - name: Governance snapshot
+    target: rpc
+    expect: Governance API returns quorum and proposal metadata required for audits.
+artifacts:
+  - name: Scenario definition
+    path: ops/audit/e2e.yaml
+    format: yaml
+metadata:
+  environment: localnet
+  compose: deploy/compose/docker-compose.audit-e2e.yaml
