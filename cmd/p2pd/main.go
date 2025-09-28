@@ -252,7 +252,14 @@ func main() {
 		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
 	)
-	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay, auth, network.WithReadAuthenticator(readAuth)))
+	svc, err := network.NewService(relay, auth,
+		network.WithReadAuthenticator(readAuth),
+		network.WithAllowUnauthenticatedReads(cfg.NetworkSecurity.AllowUnauthenticatedReads),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialise network service: %v", err))
+	}
+	networkv1.RegisterNetworkServiceServer(grpcServer, svc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
