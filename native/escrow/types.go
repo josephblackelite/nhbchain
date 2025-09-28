@@ -1,11 +1,12 @@
 package escrow
 
 import (
-	"bytes"
-	"fmt"
-	"math/big"
-	"sort"
-	"strings"
+        "bytes"
+        "fmt"
+        "math/big"
+        "sort"
+        "strings"
+        "sync"
 )
 
 // ArbitrationScheme enumerates the supported strategies for evaluating an
@@ -269,16 +270,46 @@ func (s EscrowStatus) Valid() bool {
 	}
 }
 
+type tokenRegistry struct {
+        mu      sync.RWMutex
+        allowed map[string]struct{}
+}
+
+func newTokenRegistry(tokens ...string) *tokenRegistry {
+        allowed := make(map[string]struct{}, len(tokens))
+        for _, token := range tokens {
+                trimmed := strings.ToUpper(strings.TrimSpace(token))
+                if trimmed == "" {
+                        continue
+                }
+                allowed[trimmed] = struct{}{}
+        }
+        return &tokenRegistry{allowed: allowed}
+}
+
+func (r *tokenRegistry) normalize(symbol string) (string, error) {
+        if r == nil {
+                return "", fmt.Errorf("unsupported escrow token: %s", symbol)
+        }
+        trimmed := strings.ToUpper(strings.TrimSpace(symbol))
+        if trimmed == "" {
+                return "", fmt.Errorf("unsupported escrow token: %s", symbol)
+        }
+        r.mu.RLock()
+        _, ok := r.allowed[trimmed]
+        r.mu.RUnlock()
+        if !ok {
+                return "", fmt.Errorf("unsupported escrow token: %s", symbol)
+        }
+        return trimmed, nil
+}
+
+var defaultTokenRegistry = newTokenRegistry("NHB", "ZNHB")
+
 // NormalizeToken ensures the provided token symbol matches a supported value
 // ("NHB" or "ZNHB") and returns the canonical uppercase form.
 func NormalizeToken(symbol string) (string, error) {
-	trimmed := strings.ToUpper(strings.TrimSpace(symbol))
-	switch trimmed {
-	case "NHB", "ZNHB":
-		return trimmed, nil
-	default:
-		return "", fmt.Errorf("unsupported escrow token: %s", symbol)
-	}
+        return defaultTokenRegistry.normalize(symbol)
 }
 
 // SanitizeEscrow validates and normalises the supplied escrow definition,

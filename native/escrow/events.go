@@ -199,15 +199,19 @@ func newTradeEvent(eventType string, t *Trade, extra string) *types.Event {
 	attrs["baseAmount"] = sanitized.BaseAmount.String()
 	attrs["quoteToken"] = sanitized.QuoteToken
 	attrs["quoteAmount"] = sanitized.QuoteAmount.String()
-	attrs["escrowBaseId"] = hex.EncodeToString(sanitized.EscrowBase[:])
-	attrs["escrowQuoteId"] = hex.EncodeToString(sanitized.EscrowQuote[:])
-	attrs["deadline"] = strconv.FormatInt(sanitized.Deadline, 10)
-	attrs["createdAt"] = strconv.FormatInt(sanitized.CreatedAt, 10)
-	attrs["status"] = strconv.FormatUint(uint64(sanitized.Status), 10)
-	if strings.TrimSpace(extra) != "" {
-		attrs["outcome"] = extra
-	}
-	return &types.Event{Type: eventType, Attributes: attrs}
+        attrs["escrowBaseId"] = hex.EncodeToString(sanitized.EscrowBase[:])
+        attrs["escrowQuoteId"] = hex.EncodeToString(sanitized.EscrowQuote[:])
+        attrs["deadline"] = strconv.FormatInt(sanitized.Deadline, 10)
+        attrs["createdAt"] = strconv.FormatInt(sanitized.CreatedAt, 10)
+        if sanitized.FundedAt > 0 {
+                attrs["fundedAt"] = strconv.FormatInt(sanitized.FundedAt, 10)
+        }
+        attrs["slippageBps"] = strconv.FormatUint(uint64(sanitized.SlippageBps), 10)
+        attrs["status"] = strconv.FormatUint(uint64(sanitized.Status), 10)
+        if strings.TrimSpace(extra) != "" {
+                attrs["outcome"] = extra
+        }
+        return &types.Event{Type: eventType, Attributes: attrs}
 }
 
 func newRealmEvent(eventType string, r *EscrowRealm) *types.Event {

@@ -150,10 +150,10 @@ func (m *mockState) ParamStoreGet(name string) ([]byte, bool, error) {
 }
 
 func (m *mockState) EscrowCredit(id [32]byte, token string, amt *big.Int) error {
-	normalized, err := NormalizeToken(token)
-	if err != nil {
-		return err
-	}
+        normalized, err := NormalizeToken(token)
+        if err != nil {
+                return err
+        }
 	if amt == nil {
 		amt = big.NewInt(0)
 	}
@@ -174,15 +174,28 @@ func (m *mockState) EscrowCredit(id [32]byte, token string, amt *big.Int) error 
 		current = new(big.Int).Set(existing)
 	}
 	current.Add(current, amt)
-	m.vaultBalances[normalized][id] = current
-	return nil
+        m.vaultBalances[normalized][id] = current
+        return nil
+}
+
+func (m *mockState) EscrowBalance(id [32]byte, token string) (*big.Int, error) {
+        normalized, err := NormalizeToken(token)
+        if err != nil {
+                return nil, err
+        }
+        if balances, ok := m.vaultBalances[normalized]; ok {
+                if existing, exists := balances[id]; exists && existing != nil {
+                        return new(big.Int).Set(existing), nil
+                }
+        }
+        return big.NewInt(0), nil
 }
 
 func (m *mockState) EscrowDebit(id [32]byte, token string, amt *big.Int) error {
-	normalized, err := NormalizeToken(token)
-	if err != nil {
-		return err
-	}
+        normalized, err := NormalizeToken(token)
+        if err != nil {
+                return err
+        }
 	if amt == nil {
 		amt = big.NewInt(0)
 	}

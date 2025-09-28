@@ -46,7 +46,7 @@ func TestTradeCreateAndFundingProgress(t *testing.T) {
 	seller := newTestAddress(0x02)
 	ensureBalances(state, buyer, seller)
 	nonce := [32]byte{0xAA}
-	trade, err := tradeEngine.CreateTrade("offer-1", buyer, seller, "ZNHB", big.NewInt(200), "NHB", big.NewInt(300), 2000, nonce)
+        trade, err := tradeEngine.CreateTrade("offer-1", buyer, seller, "ZNHB", big.NewInt(200), "NHB", big.NewInt(300), 2000, 0, nonce)
 	if err != nil {
 		t.Fatalf("CreateTrade error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestTradeAtomicSettlement(t *testing.T) {
 	seller := newTestAddress(0x22)
 	ensureBalances(state, buyer, seller)
 	nonce := [32]byte{0xBB}
-	trade, err := tradeEngine.CreateTrade("offer-2", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 5000, nonce)
+        trade, err := tradeEngine.CreateTrade("offer-2", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 5000, 0, nonce)
 	if err != nil {
 		t.Fatalf("CreateTrade error: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestTradeDisputeAndResolve(t *testing.T) {
 			buyer := newTestAddress(0x31)
 			seller := newTestAddress(0x41)
 			ensureBalances(state, buyer, seller)
-			trade, err := tradeEngine.CreateTrade("offer-dispute", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 4000, [32]byte{0xCC})
+                        trade, err := tradeEngine.CreateTrade("offer-dispute", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 4000, 0, [32]byte{0xCC})
 			if err != nil {
 				t.Fatalf("CreateTrade error: %v", err)
 			}
@@ -224,7 +224,7 @@ func TestTradeTryExpire(t *testing.T) {
 		buyer := newTestAddress(0x51)
 		seller := newTestAddress(0x61)
 		ensureBalances(state, buyer, seller)
-		trade, err := tradeEngine.CreateTrade("offer-expire-base", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 1200, [32]byte{0xDD})
+            trade, err := tradeEngine.CreateTrade("offer-expire-base", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 1200, 0, [32]byte{0xDD})
 		if err != nil {
 			t.Fatalf("CreateTrade error: %v", err)
 		}
@@ -266,7 +266,7 @@ func TestTradeTryExpire(t *testing.T) {
 		buyer := newTestAddress(0x52)
 		seller := newTestAddress(0x62)
 		ensureBalances(state, buyer, seller)
-		trade, err := tradeEngine.CreateTrade("offer-expire-quote", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 1100, [32]byte{0xDE})
+            trade, err := tradeEngine.CreateTrade("offer-expire-quote", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 1100, 0, [32]byte{0xDE})
 		if err != nil {
 			t.Fatalf("CreateTrade error: %v", err)
 		}
@@ -298,7 +298,7 @@ func TestTradeTryExpire(t *testing.T) {
 		buyer := newTestAddress(0x53)
 		seller := newTestAddress(0x63)
 		ensureBalances(state, buyer, seller)
-		trade, err := tradeEngine.CreateTrade("offer-expire-none", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 1000, [32]byte{0xDF})
+            trade, err := tradeEngine.CreateTrade("offer-expire-none", buyer, seller, "ZNHB", big.NewInt(100), "NHB", big.NewInt(150), 1000, 0, [32]byte{0xDF})
 		if err != nil {
 			t.Fatalf("CreateTrade error: %v", err)
 		}

@@ -1998,9 +1998,9 @@ func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, e
 }
 
 func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
-	baseToken string, baseAmt *big.Int,
-	quoteToken string, quoteAmt *big.Int,
-	deadline int64) (tradeID [32]byte, escrowBaseID, escrowQuoteID [32]byte, err error) {
+        baseToken string, baseAmt *big.Int,
+        quoteToken string, quoteAmt *big.Int,
+        deadline int64, slippageBps uint32) (tradeID [32]byte, escrowBaseID, escrowQuoteID [32]byte, err error) {
 
 	trimmedOffer := strings.TrimSpace(offerID)
 	if trimmedOffer == "" {
@@ -2036,7 +2036,7 @@ func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
 	manager := nhbstate.NewManager(n.state.Trie)
 	tradeEngine := n.newTradeEngine(manager)
 
-	trade, err := tradeEngine.CreateTrade(trimmedOffer, buyer, seller, normalizedQuote, quoteAmt, normalizedBase, baseAmt, deadline, nonce)
+        trade, err := tradeEngine.CreateTrade(trimmedOffer, buyer, seller, normalizedQuote, quoteAmt, normalizedBase, baseAmt, deadline, slippageBps, nonce)
 	if err != nil {
 		return [32]byte{}, [32]byte{}, [32]byte{}, err
 	}

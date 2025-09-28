@@ -2345,19 +2345,21 @@ func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
 }
 
 type storedTrade struct {
-	ID          [32]byte
-	OfferID     string
-	Buyer       [20]byte
-	Seller      [20]byte
-	QuoteToken  string
-	QuoteAmount *big.Int
-	EscrowQuote [32]byte
-	BaseToken   string
-	BaseAmount  *big.Int
-	EscrowBase  [32]byte
-	Deadline    *big.Int
-	CreatedAt   *big.Int
-	Status      uint8
+        ID          [32]byte
+        OfferID     string
+        Buyer       [20]byte
+        Seller      [20]byte
+        QuoteToken  string
+        QuoteAmount *big.Int
+        EscrowQuote [32]byte
+        BaseToken   string
+        BaseAmount  *big.Int
+        EscrowBase  [32]byte
+        Deadline    *big.Int
+        CreatedAt   *big.Int
+        FundedAt    *big.Int
+        SlippageBps uint32
+        Status      uint8
 }
 
 func newStoredTrade(t *escrow.Trade) *storedTrade {
@@ -2372,32 +2374,39 @@ func newStoredTrade(t *escrow.Trade) *storedTrade {
 	if t.BaseAmount != nil {
 		base = new(big.Int).Set(t.BaseAmount)
 	}
-	return &storedTrade{
-		ID:          t.ID,
-		OfferID:     t.OfferID,
-		Buyer:       t.Buyer,
-		Seller:      t.Seller,
-		QuoteToken:  t.QuoteToken,
-		QuoteAmount: quote,
-		EscrowQuote: t.EscrowQuote,
-		BaseToken:   t.BaseToken,
-		BaseAmount:  base,
-		EscrowBase:  t.EscrowBase,
-		Deadline:    big.NewInt(t.Deadline),
-		CreatedAt:   big.NewInt(t.CreatedAt),
-		Status:      uint8(t.Status),
-	}
+        return &storedTrade{
+                ID:          t.ID,
+                OfferID:     t.OfferID,
+                Buyer:       t.Buyer,
+                Seller:      t.Seller,
+                QuoteToken:  t.QuoteToken,
+                QuoteAmount: quote,
+                EscrowQuote: t.EscrowQuote,
+                BaseToken:   t.BaseToken,
+                BaseAmount:  base,
+                EscrowBase:  t.EscrowBase,
+                Deadline:    big.NewInt(t.Deadline),
+                CreatedAt:   big.NewInt(t.CreatedAt),
+                FundedAt: func() *big.Int {
+                        if t.FundedAt == 0 {
+                                return nil
+                        }
+                        return big.NewInt(t.FundedAt)
+                }(),
+                SlippageBps: t.SlippageBps,
+                Status:      uint8(t.Status),
+        }
 }
 
 func (s *storedTrade) toTrade() (*escrow.Trade, error) {
 	if s == nil {
 		return nil, fmt.Errorf("trade: nil storage record")
 	}
-	out := &escrow.Trade{
-		ID:         s.ID,
-		OfferID:    s.OfferID,
-		Buyer:      s.Buyer,
-		Seller:     s.Seller,
+        out := &escrow.Trade{
+                ID:         s.ID,
+                OfferID:    s.OfferID,
+                Buyer:      s.Buyer,
+                Seller:     s.Seller,
 		QuoteToken: s.QuoteToken,
 		QuoteAmount: func() *big.Int {
 			if s.QuoteAmount == nil {
@@ -2413,15 +2422,19 @@ func (s *storedTrade) toTrade() (*escrow.Trade, error) {
 			}
 			return new(big.Int).Set(s.BaseAmount)
 		}(),
-		EscrowBase: s.EscrowBase,
-		Status:     escrow.TradeStatus(s.Status),
-	}
-	if s.Deadline != nil {
-		out.Deadline = s.Deadline.Int64()
-	}
-	if s.CreatedAt != nil {
-		out.CreatedAt = s.CreatedAt.Int64()
-	}
+                EscrowBase: s.EscrowBase,
+                SlippageBps: s.SlippageBps,
+                Status:     escrow.TradeStatus(s.Status),
+        }
+        if s.Deadline != nil {
+                out.Deadline = s.Deadline.Int64()
+        }
+        if s.CreatedAt != nil {
+                out.CreatedAt = s.CreatedAt.Int64()
+        }
+        if s.FundedAt != nil {
+                out.FundedAt = s.FundedAt.Int64()
+        }
 	if !out.Status.Valid() {
 		return nil, fmt.Errorf("trade: invalid status in storage")
 	}
@@ -2922,29 +2935,44 @@ func (m *Manager) EscrowCredit(id [32]byte, token string, amt *big.Int) error {
 
 // EscrowDebit decreases the tracked escrow balance for the supplied token.
 func (m *Manager) EscrowDebit(id [32]byte, token string, amt *big.Int) error {
-	if amt == nil {
-		amt = big.NewInt(0)
-	}
-	if amt.Sign() < 0 {
-		return fmt.Errorf("escrow: negative debit")
-	}
-	normalized, err := escrow.NormalizeToken(token)
-	if err != nil {
-		return err
-	}
-	key := escrowVaultKey(id, normalized)
-	balance, err := m.loadBigInt(key)
-	if err != nil {
-		return err
-	}
-	if balance.Cmp(amt) < 0 {
-		return fmt.Errorf("escrow: insufficient balance")
-	}
-	if amt.Sign() == 0 {
-		return nil
-	}
-	updated := new(big.Int).Sub(balance, amt)
-	return m.writeBigInt(key, updated)
+        if amt == nil {
+                amt = big.NewInt(0)
+        }
+        if amt.Sign() < 0 {
+                return fmt.Errorf("escrow: negative debit")
+        }
+        normalized, err := escrow.NormalizeToken(token)
+        if err != nil {
+                return err
+        }
+        key := escrowVaultKey(id, normalized)
+        balance, err := m.loadBigInt(key)
+        if err != nil {
+                return err
+        }
+        if balance.Cmp(amt) < 0 {
+                return fmt.Errorf("escrow: insufficient balance")
+        }
+        if amt.Sign() == 0 {
+                return nil
+        }
+        updated := new(big.Int).Sub(balance, amt)
+        return m.writeBigInt(key, updated)
+}
+
+// EscrowBalance returns the tracked vault balance for the specified escrow
+// identifier and token symbol.
+func (m *Manager) EscrowBalance(id [32]byte, token string) (*big.Int, error) {
+        normalized, err := escrow.NormalizeToken(token)
+        if err != nil {
+                return nil, err
+        }
+        key := escrowVaultKey(id, normalized)
+        balance, err := m.loadBigInt(key)
+        if err != nil {
+                return nil, err
+        }
+        return balance, nil
 }
 
 // TradePut persists the provided trade definition after validation.
