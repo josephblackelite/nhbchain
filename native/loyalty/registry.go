@@ -140,6 +140,10 @@ func (r *Registry) UpdateProgram(caller [20]byte, p *Program) error {
 	existing.MinSpendWei = sanitized.MinSpendWei
 	existing.CapPerTx = sanitized.CapPerTx
 	existing.DailyCapUser = sanitized.DailyCapUser
+	existing.DailyCapProgram = sanitized.DailyCapProgram
+	existing.EpochCapProgram = sanitized.EpochCapProgram
+	existing.EpochLengthSeconds = sanitized.EpochLengthSeconds
+	existing.IssuanceCapUser = sanitized.IssuanceCapUser
 	existing.StartTime = sanitized.StartTime
 	existing.EndTime = sanitized.EndTime
 	existing.Active = sanitized.Active
@@ -150,16 +154,20 @@ func (r *Registry) UpdateProgram(caller [20]byte, p *Program) error {
 		return err
 	}
 	r.emit(events.LoyaltyProgramUpdated{
-		ID:           existing.ID,
-		Active:       existing.Active,
-		AccrualBps:   existing.AccrualBps,
-		MinSpendWei:  cloneBigInt(existing.MinSpendWei),
-		CapPerTx:     cloneBigInt(existing.CapPerTx),
-		DailyCapUser: cloneBigInt(existing.DailyCapUser),
-		StartTime:    existing.StartTime,
-		EndTime:      existing.EndTime,
-		Pool:         existing.Pool,
-		TokenSymbol:  existing.TokenSymbol,
+		ID:                 existing.ID,
+		Active:             existing.Active,
+		AccrualBps:         existing.AccrualBps,
+		MinSpendWei:        cloneBigInt(existing.MinSpendWei),
+		CapPerTx:           cloneBigInt(existing.CapPerTx),
+		DailyCapUser:       cloneBigInt(existing.DailyCapUser),
+		DailyCapProgram:    cloneBigInt(existing.DailyCapProgram),
+		EpochCapProgram:    cloneBigInt(existing.EpochCapProgram),
+		EpochLengthSeconds: existing.EpochLengthSeconds,
+		IssuanceCapUser:    cloneBigInt(existing.IssuanceCapUser),
+		StartTime:          existing.StartTime,
+		EndTime:            existing.EndTime,
+		Pool:               existing.Pool,
+		TokenSymbol:        existing.TokenSymbol,
 	})
 	return nil
 }
@@ -220,12 +228,27 @@ func sanitizeProgram(p *Program) (*Program, error) {
 	if copyProgram.DailyCapUser != nil && copyProgram.DailyCapUser.Sign() < 0 {
 		return nil, fmt.Errorf("%w: daily cap must be non-negative", ErrInvalidProgram)
 	}
+	if copyProgram.DailyCapProgram != nil && copyProgram.DailyCapProgram.Sign() < 0 {
+		return nil, fmt.Errorf("%w: daily program cap must be non-negative", ErrInvalidProgram)
+	}
+	if copyProgram.EpochCapProgram != nil && copyProgram.EpochCapProgram.Sign() < 0 {
+		return nil, fmt.Errorf("%w: epoch cap must be non-negative", ErrInvalidProgram)
+	}
+	if copyProgram.IssuanceCapUser != nil && copyProgram.IssuanceCapUser.Sign() < 0 {
+		return nil, fmt.Errorf("%w: issuance cap must be non-negative", ErrInvalidProgram)
+	}
+	if copyProgram.EpochCapProgram != nil && copyProgram.EpochCapProgram.Sign() > 0 && copyProgram.EpochLengthSeconds == 0 {
+		return nil, fmt.Errorf("%w: epoch length required when epoch cap enabled", ErrInvalidProgram)
+	}
 	if copyProgram.EndTime != 0 && copyProgram.EndTime < copyProgram.StartTime {
 		return nil, fmt.Errorf("%w: end time before start time", ErrInvalidProgram)
 	}
 	copyProgram.MinSpendWei = cloneBigInt(copyProgram.MinSpendWei)
 	copyProgram.CapPerTx = cloneBigInt(copyProgram.CapPerTx)
 	copyProgram.DailyCapUser = cloneBigInt(copyProgram.DailyCapUser)
+	copyProgram.DailyCapProgram = cloneBigInt(copyProgram.DailyCapProgram)
+	copyProgram.EpochCapProgram = cloneBigInt(copyProgram.EpochCapProgram)
+	copyProgram.IssuanceCapUser = cloneBigInt(copyProgram.IssuanceCapUser)
 	return &copyProgram, nil
 }
 

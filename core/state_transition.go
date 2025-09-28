@@ -3049,6 +3049,36 @@ func (sp *StateProcessor) SetLoyaltyProgramDailyAccrued(programID loyalty.Progra
 	return manager.SetLoyaltyProgramDailyAccrued(programID, addr, day, amount)
 }
 
+func (sp *StateProcessor) LoyaltyProgramDailyTotalAccrued(programID loyalty.ProgramID, day string) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyTotalAccrued(programID, day)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramDailyTotalAccrued(programID loyalty.ProgramID, day string, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramDailyTotalAccrued(programID, day, amount)
+}
+
+func (sp *StateProcessor) LoyaltyProgramEpochAccrued(programID loyalty.ProgramID, epoch uint64) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramEpochAccrued(programID, epoch)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramEpochAccrued(programID loyalty.ProgramID, epoch uint64, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramEpochAccrued(programID, epoch, amount)
+}
+
+func (sp *StateProcessor) LoyaltyProgramIssuanceAccrued(programID loyalty.ProgramID, addr []byte) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramIssuanceAccrued(programID, addr)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramIssuanceAccrued(programID loyalty.ProgramID, addr []byte, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramIssuanceAccrued(programID, addr, amount)
+}
+
 func (sp *StateProcessor) MintToken(symbol string, addr []byte, amount *big.Int) error {
 	if len(addr) != 20 {
 		return fmt.Errorf("mint: address must be 20 bytes")

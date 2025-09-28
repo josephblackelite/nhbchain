@@ -32,6 +32,6 @@ func (e *Engine) OnTransactionSuccess(st BaseRewardState, ctx *BaseRewardContext
 
 	if programState, ok := st.(ProgramRewardState); ok {
 		programCtx := &ProgramRewardContext{BaseRewardContext: ctx}
-		e.ApplyProgramReward(programState, programCtx)
+		_ = e.ApplyProgramReward(programState, programCtx)
 	}
 }
