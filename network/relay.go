@@ -214,20 +214,42 @@ func (r *Relay) StartHeartbeats(ctx context.Context, interval time.Duration) {
 // and control messages between the P2P server and consensus service.
 func (r *Relay) GossipStream(stream networkv1.NetworkService_GossipServer) error {
 	if stream == nil {
-		return fmt.Errorf("nil gossip stream")
+		return errors.New("nil gossip stream")
 	}
 	state := newStreamState(r.queueSize)
 	r.swapStream(state)
 
+	senderCtx, senderCancel := context.WithCancel(stream.Context())
+	defer senderCancel()
+
 	sendErr := make(chan error, 1)
+	notify := func(err error) {
+		select {
+		case sendErr <- err:
+		default:
+		}
+	}
+
 	go func() {
-		for envelope := range state.queue {
-			if err := stream.Send(envelope); err != nil {
-				sendErr <- err
+		defer notify(nil)
+		for {
+			select {
+			case <-senderCtx.Done():
 				return
+			case <-state.done:
+				return
+			case envelope, ok := <-state.queue:
+				if !ok {
+					return
+				}
+				if err := stream.Send(envelope); err != nil {
+					notify(err)
+					senderCancel()
+					state.close()
+					return
+				}
 			}
 		}
-		sendErr <- nil
 	}()
 
 	defer func() {
@@ -238,8 +260,10 @@ func (r *Relay) GossipStream(stream networkv1.NetworkService_GossipServer) error
 	for {
 		incoming, err := stream.Recv()
 		if err != nil {
+			senderCancel()
+			state.close()
 			if !errors.Is(err, context.Canceled) {
-				sendErr <- err
+				notify(err)
 			}
 			r.clearStream(state)
 			return err
@@ -258,12 +282,16 @@ func (r *Relay) GossipStream(stream networkv1.NetworkService_GossipServer) error
 				Payload: append([]byte(nil), event.Gossip.Payload...),
 			}
 			if err := r.broadcast(msg); err != nil {
-				fmt.Printf("network relay broadcast failed: %v\n", err)
+				if logger := r.logger; logger != nil {
+					logger.Error("network relay broadcast failed", slog.Any("error", err))
+				}
 			}
 		case *networkv1.NetworkEnvelope_Heartbeat:
 			// Heartbeats flowing from consensus are ignored for now.
 		default:
-			fmt.Printf("network relay received unknown envelope: %T\n", event)
+			if logger := r.logger; logger != nil {
+				logger.Warn("network relay received unknown envelope", slog.String("type", fmt.Sprintf("%T", event)))
+			}
 		}
 	}
 }

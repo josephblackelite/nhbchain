@@ -33,7 +33,11 @@ allowing scoring decisions to survive restarts.
 * **Retry/backoff** – outbound dials honour the configured `DialBackoffSeconds`.
 
 `p2pd` also exposes a gRPC relay used by consensus components to publish gossip
-and read heartbeats.
+and read heartbeats. The relay now cancels its send loop as soon as a terminal
+error occurs, closing the stream and preventing consensus-side deadlocks. When
+this happens `p2pd` emits structured error logs for failed broadcasts and a
+warning when an unknown envelope is received, helping operators correlate
+disconnects with upstream causes.
 
 ## Health & Operations
 
