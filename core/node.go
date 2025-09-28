@@ -3675,7 +3675,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		return "", false, err
 	}
 
-	if err := riskEngine.RecordMint(voucher.Recipient, voucher.Amount); err != nil {
+	if err := riskEngine.RecordMint(voucher.Recipient, voucher.Amount, riskParams.VelocityWindowSeconds); err != nil {
 		return "", false, err
 	}
 

@@ -139,7 +139,7 @@ func TestRiskEngineDailyMonthlyLimits(t *testing.T) {
 		PerAddressDailyCapWei:   big.NewInt(100),
 		PerAddressMonthlyCapWei: big.NewInt(150),
 	}
-	if err := engine.RecordMint(addr, big.NewInt(90)); err != nil {
+	if err := engine.RecordMint(addr, big.NewInt(90), 0); err != nil {
 		t.Fatalf("record mint: %v", err)
 	}
 	violation, err := engine.CheckLimits(addr, big.NewInt(11), params)
@@ -150,7 +150,7 @@ func TestRiskEngineDailyMonthlyLimits(t *testing.T) {
 		t.Fatalf("expected daily cap violation")
 	}
 	engine.SetClock(func() time.Time { return now.Add(24 * time.Hour) })
-	if err := engine.RecordMint(addr, big.NewInt(60)); err != nil {
+	if err := engine.RecordMint(addr, big.NewInt(60), 0); err != nil {
 		t.Fatalf("record second mint: %v", err)
 	}
 	engine.SetClock(func() time.Time { return now.Add(36 * time.Hour) })
@@ -169,13 +169,31 @@ func TestRiskEngineVelocityLimit(t *testing.T) {
 	addr := [20]byte{2}
 	params := RiskParameters{VelocityWindowSeconds: 600, VelocityMaxMints: 2}
 	base := time.Unix(2_000_000, 0)
+	engine.SetClock(func() time.Time { return base.Add(-time.Minute * 15) })
+	if err := engine.RecordMint(addr, big.NewInt(1), params.VelocityWindowSeconds); err != nil {
+		t.Fatalf("record mint outside window: %v", err)
+	}
 	engine.SetClock(func() time.Time { return base.Add(-time.Minute * 5) })
-	if err := engine.RecordMint(addr, big.NewInt(1)); err != nil {
-		t.Fatalf("record mint: %v", err)
+	if err := engine.RecordMint(addr, big.NewInt(1), params.VelocityWindowSeconds); err != nil {
+		t.Fatalf("record mint inside window: %v", err)
 	}
 	engine.SetClock(func() time.Time { return base.Add(-time.Minute * 2) })
-	if err := engine.RecordMint(addr, big.NewInt(1)); err != nil {
-		t.Fatalf("record mint: %v", err)
+	if err := engine.RecordMint(addr, big.NewInt(1), params.VelocityWindowSeconds); err != nil {
+		t.Fatalf("record mint inside window: %v", err)
+	}
+	var record velocityRecord
+	ok, err := store.KVGet(riskVelocityKey(addr), &record)
+	if err != nil {
+		t.Fatalf("load velocity record: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected velocity record persisted")
+	}
+	if record.WindowSeconds != params.VelocityWindowSeconds {
+		t.Fatalf("expected stored window %d, got %d", params.VelocityWindowSeconds, record.WindowSeconds)
+	}
+	if len(record.Samples) != 2 {
+		t.Fatalf("expected two samples within window, got %d", len(record.Samples))
 	}
 	engine.SetClock(func() time.Time { return base })
 	violation, err := engine.CheckLimits(addr, big.NewInt(1), params)
@@ -185,6 +203,14 @@ func TestRiskEngineVelocityLimit(t *testing.T) {
 	if violation == nil || violation.Code != RiskCodeVelocity {
 		t.Fatalf("expected velocity violation")
 	}
+	engine.SetClock(func() time.Time { return base.Add(time.Minute * 15) })
+	violation, err = engine.CheckLimits(addr, big.NewInt(1), params)
+	if err != nil {
+		t.Fatalf("check limits after window: %v", err)
+	}
+	if violation != nil {
+		t.Fatalf("expected velocity limit to clear after window, got %v", violation)
+	}
 }
 
 func TestRiskEngineUsage(t *testing.T) {
@@ -193,7 +219,7 @@ func TestRiskEngineUsage(t *testing.T) {
 	addr := [20]byte{3}
 	now := time.Unix(3_000_000, 0)
 	engine.SetClock(func() time.Time { return now })
-	if err := engine.RecordMint(addr, big.NewInt(50)); err != nil {
+	if err := engine.RecordMint(addr, big.NewInt(50), 0); err != nil {
 		t.Fatalf("record mint: %v", err)
 	}
 	usage, err := engine.Usage(addr)
@@ -217,7 +243,7 @@ func TestRiskEnginePrunesStaleBuckets(t *testing.T) {
 	addr := [20]byte{4}
 	first := time.Date(2024, time.January, 31, 12, 0, 0, 0, time.UTC)
 	engine.SetClock(func() time.Time { return first })
-	if err := engine.RecordMint(addr, big.NewInt(20)); err != nil {
+	if err := engine.RecordMint(addr, big.NewInt(20), 0); err != nil {
 		t.Fatalf("record initial mint: %v", err)
 	}
 	dayKey := string(riskDailyKey(first, addr))
@@ -227,7 +253,7 @@ func TestRiskEnginePrunesStaleBuckets(t *testing.T) {
 	}
 	second := time.Date(2024, time.February, 2, 0, 0, 0, 0, time.UTC)
 	engine.SetClock(func() time.Time { return second })
-	if err := engine.RecordMint(addr, big.NewInt(5)); err != nil {
+	if err := engine.RecordMint(addr, big.NewInt(5), 0); err != nil {
 		t.Fatalf("record second mint: %v", err)
 	}
 	if _, ok := store.data[dayKey]; ok {
