@@ -150,10 +150,10 @@ func (m *mockState) ParamStoreGet(name string) ([]byte, bool, error) {
 }
 
 func (m *mockState) EscrowCredit(id [32]byte, token string, amt *big.Int) error {
-        normalized, err := NormalizeToken(token)
-        if err != nil {
-                return err
-        }
+	normalized, err := NormalizeToken(token)
+	if err != nil {
+		return err
+	}
 	if amt == nil {
 		amt = big.NewInt(0)
 	}
@@ -174,28 +174,28 @@ func (m *mockState) EscrowCredit(id [32]byte, token string, amt *big.Int) error 
 		current = new(big.Int).Set(existing)
 	}
 	current.Add(current, amt)
-        m.vaultBalances[normalized][id] = current
-        return nil
+	m.vaultBalances[normalized][id] = current
+	return nil
 }
 
 func (m *mockState) EscrowBalance(id [32]byte, token string) (*big.Int, error) {
-        normalized, err := NormalizeToken(token)
-        if err != nil {
-                return nil, err
-        }
-        if balances, ok := m.vaultBalances[normalized]; ok {
-                if existing, exists := balances[id]; exists && existing != nil {
-                        return new(big.Int).Set(existing), nil
-                }
-        }
-        return big.NewInt(0), nil
+	normalized, err := NormalizeToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if balances, ok := m.vaultBalances[normalized]; ok {
+		if existing, exists := balances[id]; exists && existing != nil {
+			return new(big.Int).Set(existing), nil
+		}
+	}
+	return big.NewInt(0), nil
 }
 
 func (m *mockState) EscrowDebit(id [32]byte, token string, amt *big.Int) error {
-        normalized, err := NormalizeToken(token)
-        if err != nil {
-                return err
-        }
+	normalized, err := NormalizeToken(token)
+	if err != nil {
+		return err
+	}
 	if amt == nil {
 		amt = big.NewInt(0)
 	}
@@ -410,18 +410,20 @@ func TestCreateValidations(t *testing.T) {
 		amount   *big.Int
 		fee      uint32
 		deadline int64
+		nonce    uint64
 		wantErr  bool
 	}{
-		{"ok", "NHB", big.NewInt(100), 100, 1_700_000_500, false},
-		{"invalid token", "DOGE", big.NewInt(100), 0, 1_700_000_500, true},
-		{"zero amount", "NHB", big.NewInt(0), 0, 1_700_000_500, true},
-		{"fee too high", "ZNHB", big.NewInt(100), 10_001, 1_700_000_500, true},
-		{"deadline before now", "NHB", big.NewInt(100), 0, 1_600_000_000, true},
+		{"ok", "NHB", big.NewInt(100), 100, 1_700_000_500, 1, false},
+		{"invalid token", "DOGE", big.NewInt(100), 0, 1_700_000_500, 2, true},
+		{"zero amount", "NHB", big.NewInt(0), 0, 1_700_000_500, 3, true},
+		{"fee too high", "ZNHB", big.NewInt(100), 10_001, 1_700_000_500, 4, true},
+		{"deadline before now", "NHB", big.NewInt(100), 0, 1_600_000_000, 5, true},
+		{"zero nonce", "NHB", big.NewInt(100), 0, 1_700_000_500, 0, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := engine.Create(payer, payee, tc.token, tc.amount, tc.fee, tc.deadline, nil, meta, "")
+			_, err := engine.Create(payer, payee, tc.token, tc.amount, tc.fee, tc.deadline, tc.nonce, nil, meta, "")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error")
@@ -443,11 +445,12 @@ func TestCreateIsIdempotent(t *testing.T) {
 	meta := [32]byte{}
 	meta[0] = 0x01
 
-	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 50, 1_700_000_500, nil, meta, "")
+	nonce := uint64(10)
+	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 50, 1_700_000_500, nonce, nil, meta, "")
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	second, err := engine.Create(payer, payee, "nhb", big.NewInt(500), 50, 1_700_000_500, nil, meta, "")
+	second, err := engine.Create(payer, payee, "nhb", big.NewInt(500), 50, 1_700_000_500, nonce, nil, meta, "")
 	if err != nil {
 		t.Fatalf("second create: %v", err)
 	}
@@ -456,6 +459,30 @@ func TestCreateIsIdempotent(t *testing.T) {
 	}
 	if second.Token != "NHB" {
 		t.Fatalf("expected token normalized")
+	}
+}
+
+func TestCreateWithDifferentNonceYieldsDistinctIDs(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payer := newTestAddress(0x20)
+	payee := newTestAddress(0x21)
+	meta := [32]byte{}
+	meta[0] = 0xAB
+
+	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 0, 1_700_001_000, 11, nil, meta, "")
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	second, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 0, 1_700_001_000, 12, nil, meta, "")
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("expected differing ids when nonce changes")
+	}
+	if first.Nonce == second.Nonce {
+		t.Fatalf("expected nonce values to differ")
 	}
 }
 
@@ -481,7 +508,7 @@ func TestCreateWithRealmFreezesPolicy(t *testing.T) {
 	payer := newTestAddress(0x31)
 	payee := newTestAddress(0x32)
 	meta := [32]byte{0xAB}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 1_700_000_800, nil, meta, "core")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 1_700_000_800, 21, nil, meta, "core")
 	if err != nil {
 		t.Fatalf("create with realm: %v", err)
 	}
@@ -531,7 +558,7 @@ func TestCreateWithUnknownRealmFails(t *testing.T) {
 	payer := newTestAddress(0x41)
 	payee := newTestAddress(0x42)
 	meta := [32]byte{0xCC}
-	if _, err := engine.Create(payer, payee, "NHB", big.NewInt(150), 0, 1_700_000_900, nil, meta, "missing"); err == nil || !errors.Is(err, errRealmNotFound) {
+	if _, err := engine.Create(payer, payee, "NHB", big.NewInt(150), 0, 1_700_000_900, 22, nil, meta, "missing"); err == nil || !errors.Is(err, errRealmNotFound) {
 		t.Fatalf("expected realm not found error, got %v", err)
 	}
 }
@@ -624,7 +651,7 @@ func TestFundTransfersToVaultAndIsIdempotent(t *testing.T) {
 	payer := newTestAddress(0x21)
 	payee := newTestAddress(0x22)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 1_700_001_000, nil, meta, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 1_700_001_000, 30, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -658,7 +685,7 @@ func TestFundRejectsWrongCaller(t *testing.T) {
 	payer := newTestAddress(0x31)
 	payee := newTestAddress(0x32)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 1_700_001_000, nil, meta, "")
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 1_700_001_000, 31, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -676,7 +703,7 @@ func TestReleaseDistributesFees(t *testing.T) {
 	payee := newTestAddress(0x42)
 	mediator := newTestAddress(0x43)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_000), 250, 1_700_002_000, &mediator, meta, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_000), 250, 1_700_002_000, 32, &mediator, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -736,7 +763,7 @@ func TestReleaseHandlesFeeEdgeCases(t *testing.T) {
 			payer := newTestAddress(0x51)
 			payee := newTestAddress(0x52)
 			meta := [32]byte{}
-			esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(1_000), tc.fee, 1_700_003_000, nil, meta, "")
+			esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(1_000), tc.fee, 1_700_003_000, 40, nil, meta, "")
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
@@ -767,7 +794,7 @@ func TestReleaseZeroFeeWithoutTreasury(t *testing.T) {
 
 	payer := newTestAddress(0x5A)
 	payee := newTestAddress(0x5B)
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_200), 0, 1_700_004_000, nil, [32]byte{}, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_200), 0, 1_700_004_000, 41, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -800,7 +827,7 @@ func TestRefundHonorsDeadlineAndCaller(t *testing.T) {
 	payer := newTestAddress(0x61)
 	payee := newTestAddress(0x62)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_000_500, nil, meta, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_000_500, 42, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -830,12 +857,12 @@ func TestRefundAfterDeadlineFails(t *testing.T) {
 	payer := newTestAddress(0x71)
 	payee := newTestAddress(0x72)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_000, nil, meta, "")
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_000, 43, nil, meta, "")
 	if err == nil {
 		t.Fatalf("expected create error for deadline before now")
 	}
 	engine.SetNowFunc(func() int64 { return 1_600_000_000 })
-	esc, err = engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_500, nil, meta, "")
+	esc, err = engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_500, 44, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -855,7 +882,7 @@ func TestExpireRefundsAfterDeadline(t *testing.T) {
 	payer := newTestAddress(0x81)
 	payee := newTestAddress(0x82)
 	meta := [32]byte{}
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(200), 0, 1_700_000_500, nil, meta, "")
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(200), 0, 1_700_000_500, 45, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -906,7 +933,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 
 	payer := newTestAddress(0x91)
 	payee := newTestAddress(0x92)
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 500, 1_700_001_000, nil, [32]byte{}, realm.ID)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 500, 1_700_001_000, 46, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -989,7 +1016,7 @@ func TestArbitratedReleaseZeroFeeWithoutTreasury(t *testing.T) {
 
 	payer := newTestAddress(0xA5)
 	payee := newTestAddress(0xA6)
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(900), 0, 1_700_005_000, nil, [32]byte{}, realm.ID)
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(900), 0, 1_700_005_000, 47, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1046,7 +1073,7 @@ func TestResolveWithSignaturesRejectsUnderQuorum(t *testing.T) {
 
 	payer := newTestAddress(0xA1)
 	payee := newTestAddress(0xA2)
-	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 0, 1_700_001_500, nil, [32]byte{}, realm.ID)
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 0, 1_700_001_500, 48, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1094,7 +1121,7 @@ func TestResolveWithSignaturesReplay(t *testing.T) {
 
 	payer := newTestAddress(0xB1)
 	payee := newTestAddress(0xB2)
-	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_002_000, nil, [32]byte{}, realm.ID)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_002_000, 49, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

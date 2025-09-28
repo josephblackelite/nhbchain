@@ -1,6 +1,7 @@
 package escrow
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,14 +29,14 @@ var (
 const moduleName = "escrow"
 
 type engineState interface {
-        EscrowPut(*Escrow) error
-        EscrowGet(id [32]byte) (*Escrow, bool)
-        EscrowCredit(id [32]byte, token string, amt *big.Int) error
-        EscrowDebit(id [32]byte, token string, amt *big.Int) error
-        EscrowBalance(id [32]byte, token string) (*big.Int, error)
-        EscrowVaultAddress(token string) ([20]byte, error)
-        GetAccount(addr []byte) (*types.Account, error)
-        PutAccount(addr []byte, account *types.Account) error
+	EscrowPut(*Escrow) error
+	EscrowGet(id [32]byte) (*Escrow, bool)
+	EscrowCredit(id [32]byte, token string, amt *big.Int) error
+	EscrowDebit(id [32]byte, token string, amt *big.Int) error
+	EscrowBalance(id [32]byte, token string) (*big.Int, error)
+	EscrowVaultAddress(token string) ([20]byte, error)
+	GetAccount(addr []byte) (*types.Account, error)
+	PutAccount(addr []byte, account *types.Account) error
 	EscrowRealmPut(*EscrowRealm) error
 	EscrowRealmGet(id string) (*EscrowRealm, bool, error)
 	EscrowFrozenPolicyPut(id [32]byte, policy *FrozenArb) error
@@ -529,12 +530,15 @@ func (e *Engine) GetRealm(id string) (*EscrowRealm, bool, error) {
 // Create initialises and persists a new escrow definition. When a realm is
 // provided the engine freezes the current arbitrator policy and associates it
 // with the escrow.
-func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediatorOpt *[20]byte, metaHash [32]byte, realmID string) (*Escrow, error) {
+func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, nonce uint64, mediatorOpt *[20]byte, metaHash [32]byte, realmID string) (*Escrow, error) {
 	if e == nil || e.state == nil {
 		return nil, errNilState
 	}
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, err
+	}
+	if nonce == 0 {
+		return nil, fmt.Errorf("escrow: nonce must be positive")
 	}
 	normalizedToken, err := NormalizeToken(token)
 	if err != nil {
@@ -555,11 +559,13 @@ func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, fe
 	if mediatorOpt != nil {
 		mediator = *mediatorOpt
 	}
-	id := ethcrypto.Keccak256Hash(payer[:], payee[:], metaHash[:])
+	var nonceBuf [8]byte
+	binary.BigEndian.PutUint64(nonceBuf[:], nonce)
+	id := ethcrypto.Keccak256Hash(payer[:], payee[:], metaHash[:], nonceBuf[:])
 	existing, ok := e.state.EscrowGet(id)
 	if ok {
 		// Ensure idempotent behaviour: definitions must match
-		if existing.Payer != payer || existing.Payee != payee || existing.Token != normalizedToken || existing.Amount.Cmp(amt) != 0 || existing.FeeBps != feeBps || existing.Deadline != deadline || existing.MetaHash != metaHash || existing.Mediator != mediator || strings.TrimSpace(existing.RealmID) != strings.TrimSpace(realmID) {
+		if existing.Payer != payer || existing.Payee != payee || existing.Token != normalizedToken || existing.Amount.Cmp(amt) != 0 || existing.FeeBps != feeBps || existing.Deadline != deadline || existing.MetaHash != metaHash || existing.Mediator != mediator || existing.Nonce != nonce || strings.TrimSpace(existing.RealmID) != strings.TrimSpace(realmID) {
 			return nil, fmt.Errorf("escrow: identifier already exists with different definition")
 		}
 		return existing, nil
@@ -585,6 +591,7 @@ func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, fe
 		FeeBps:    feeBps,
 		Deadline:  deadline,
 		CreatedAt: now,
+		Nonce:     nonce,
 		MetaHash:  metaHash,
 		Status:    EscrowInit,
 		RealmID:   trimmedRealm,

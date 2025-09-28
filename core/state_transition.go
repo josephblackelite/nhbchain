@@ -1257,6 +1257,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 		Amount   *big.Int `json:"amount"`
 		FeeBps   uint32   `json:"feeBps"`
 		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
 		Mediator []byte   `json:"mediator,omitempty"`
 		Meta     []byte   `json:"meta,omitempty"`
 		Realm    string   `json:"realm,omitempty"`
@@ -1276,6 +1277,9 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 	if payload.Deadline <= 0 {
 		return fmt.Errorf("deadline must be positive")
 	}
+	if payload.Nonce == 0 {
+		return fmt.Errorf("escrow nonce must be positive")
+	}
 	payer := bytesToAddress(sender)
 	var payee [common.AddressLength]byte
 	copy(payee[:], payload.Payee)
@@ -1291,7 +1295,7 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 		return fmt.Errorf("meta payload must be <= 32 bytes")
 	}
 	copy(meta[:], payload.Meta)
-	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, &mediatorAddr, meta, strings.TrimSpace(payload.Realm)); err != nil {
+	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, payload.Nonce, &mediatorAddr, meta, strings.TrimSpace(payload.Realm)); err != nil {
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
@@ -2770,6 +2774,7 @@ func (sp *StateProcessor) convertLegacyEscrow(id [32]byte, legacy *escrow.Legacy
 		FeeBps:    0,
 		Deadline:  deadline,
 		CreatedAt: created,
+		Nonce:     1,
 		Status:    status,
 	}, nil
 }

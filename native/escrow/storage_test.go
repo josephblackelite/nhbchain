@@ -45,6 +45,7 @@ func TestManagerEscrowPutGet(t *testing.T) {
 		FeeBps:    250,
 		Deadline:  1_700_000_000,
 		CreatedAt: created,
+		Nonce:     1,
 		Status:    escrowpkg.EscrowFunded,
 	}
 
@@ -78,6 +79,9 @@ func TestManagerEscrowPutGet(t *testing.T) {
 	if stored.Status != escrowpkg.EscrowFunded {
 		t.Fatalf("unexpected status: %d", stored.Status)
 	}
+	if stored.Nonce != escrowDef.Nonce {
+		t.Fatalf("unexpected nonce: %d", stored.Nonce)
+	}
 	if stored.Payer != payer || stored.Payee != payee || stored.Mediator != mediator {
 		t.Fatalf("addresses mutated during round trip")
 	}
@@ -98,6 +102,7 @@ func TestManagerEscrowCreditDebit(t *testing.T) {
 		Payee:  payee,
 		Token:  "znHB",
 		Amount: big.NewInt(5000),
+		Nonce:  2,
 		Status: escrowpkg.EscrowInit,
 	}
 	if err := mgr.EscrowPut(escrowDef); err != nil {

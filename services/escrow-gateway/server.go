@@ -534,6 +534,9 @@ func validateEscrowCreate(req EscrowCreateRequest) error {
 	if req.Deadline == 0 {
 		return errors.New("deadline is required")
 	}
+	if req.Nonce == 0 {
+		return errors.New("nonce is required")
+	}
 	if trimmed := strings.TrimSpace(req.Realm); len(trimmed) > 64 {
 		return errors.New("realm must be <= 64 characters")
 	}
@@ -735,17 +738,17 @@ func (s *Server) handleAcceptOffer(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-        nodeReq := P2PAcceptRequest{
-                OfferID:     offer.ID,
-                Buyer:       req.Buyer,
-                Seller:      offer.Seller,
-                BaseToken:   offer.BaseToken,
-                BaseAmount:  offer.BaseAmount,
-                QuoteToken:  offer.QuoteToken,
-                QuoteAmount: quoteAmount,
-                Deadline:    req.Deadline,
-                SlippageBps: req.SlippageBps,
-        }
+	nodeReq := P2PAcceptRequest{
+		OfferID:     offer.ID,
+		Buyer:       req.Buyer,
+		Seller:      offer.Seller,
+		BaseToken:   offer.BaseToken,
+		BaseAmount:  offer.BaseAmount,
+		QuoteToken:  offer.QuoteToken,
+		QuoteAmount: quoteAmount,
+		Deadline:    req.Deadline,
+		SlippageBps: req.SlippageBps,
+	}
 	nodeResp, err := s.node.P2PCreateTrade(ctx, nodeReq)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err)
@@ -871,15 +874,15 @@ func validateAcceptRequest(req P2PAcceptRequestBody, now time.Time) error {
 	if req.Deadline <= now.Unix() {
 		return errors.New("deadline must be in the future")
 	}
-        if strings.TrimSpace(req.QuoteAmount) != "" {
-                if err := requirePositiveBigInt(req.QuoteAmount); err != nil {
-                        return fmt.Errorf("quoteAmount %w", err)
-                }
-        }
-        if req.SlippageBps > 10_000 {
-                return errors.New("slippageBps must be <= 10000")
-        }
-        return nil
+	if strings.TrimSpace(req.QuoteAmount) != "" {
+		if err := requirePositiveBigInt(req.QuoteAmount); err != nil {
+			return fmt.Errorf("quoteAmount %w", err)
+		}
+	}
+	if req.SlippageBps > 10_000 {
+		return errors.New("slippageBps must be <= 10000")
+	}
+	return nil
 }
 
 func requirePositiveBigInt(v string) error {
@@ -936,9 +939,9 @@ type P2POfferRequest struct {
 }
 
 type P2PAcceptRequestBody struct {
-        OfferID     string `json:"offerId"`
-        Buyer       string `json:"buyer"`
-        QuoteAmount string `json:"quoteAmount,omitempty"`
-        Deadline    int64  `json:"deadline"`
-        SlippageBps uint32 `json:"slippageBps,omitempty"`
+	OfferID     string `json:"offerId"`
+	Buyer       string `json:"buyer"`
+	QuoteAmount string `json:"quoteAmount,omitempty"`
+	Deadline    int64  `json:"deadline"`
+	SlippageBps uint32 `json:"slippageBps,omitempty"`
 }

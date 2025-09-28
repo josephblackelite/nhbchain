@@ -21,6 +21,7 @@ func TestEscrowCreateInvalidBech32(t *testing.T) {
 		"amount":   "1",
 		"feeBps":   0,
 		"deadline": deadline,
+		"nonce":    1,
 	}
 	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -49,6 +50,7 @@ func TestEscrowCreateBadToken(t *testing.T) {
 		"amount":   "1",
 		"feeBps":   0,
 		"deadline": deadline,
+		"nonce":    1,
 	}
 	req := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -74,6 +76,7 @@ func TestEscrowCreateZeroAmount(t *testing.T) {
 		"amount":   "0",
 		"feeBps":   0,
 		"deadline": deadline,
+		"nonce":    1,
 	}
 	req := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -99,6 +102,7 @@ func TestEscrowCreateFeeTooHigh(t *testing.T) {
 		"amount":   "10",
 		"feeBps":   10001,
 		"deadline": deadline,
+		"nonce":    1,
 	}
 	req := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -143,6 +147,7 @@ func TestEscrowFundWrongCaller(t *testing.T) {
 		"amount":   "5",
 		"feeBps":   0,
 		"deadline": deadline,
+		"nonce":    1,
 	}
 	createReq := &RPCRequest{ID: 6, Params: []json.RawMessage{marshalParam(t, createPayload)}}
 	createRec := httptest.NewRecorder()
@@ -190,6 +195,7 @@ func TestEscrowCreateAndGet(t *testing.T) {
 		"deadline": deadline,
 		"mediator": mediatorKey.PubKey().Address().String(),
 		"meta":     "0x1234",
+		"nonce":    1,
 	}
 	createReq := &RPCRequest{ID: 8, Params: []json.RawMessage{marshalParam(t, createPayload)}}
 	createRec := httptest.NewRecorder()
@@ -234,6 +240,9 @@ func TestEscrowCreateAndGet(t *testing.T) {
 	}
 	if esc.Deadline != deadline {
 		t.Fatalf("expected deadline %d got %d", deadline, esc.Deadline)
+	}
+	if esc.Nonce != 1 {
+		t.Fatalf("expected nonce 1 got %d", esc.Nonce)
 	}
 	if esc.Status != "init" {
 		t.Fatalf("expected status init got %s", esc.Status)

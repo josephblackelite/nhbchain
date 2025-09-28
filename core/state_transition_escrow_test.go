@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"math/big"
 	"testing"
@@ -44,7 +45,10 @@ func TestEscrowNativeLifecycle(t *testing.T) {
 	writeAccount(t, sp, treasury, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 
 	meta := [32]byte{}
-	escrowID := ethcrypto.Keccak256Hash(payerAddr.Bytes(), payeeAddr.Bytes(), meta[:])
+	escrowNonce := uint64(1)
+	var nonceBytes [8]byte
+	binary.BigEndian.PutUint64(nonceBytes[:], escrowNonce)
+	escrowID := ethcrypto.Keccak256Hash(payerAddr.Bytes(), payeeAddr.Bytes(), meta[:], nonceBytes[:])
 
 	createPayload := struct {
 		Payee    []byte   `json:"payee"`
@@ -52,12 +56,14 @@ func TestEscrowNativeLifecycle(t *testing.T) {
 		Amount   *big.Int `json:"amount"`
 		FeeBps   uint32   `json:"feeBps"`
 		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
 	}{
 		Payee:    payeeAddr.Bytes(),
 		Token:    "NHB",
 		Amount:   big.NewInt(100),
 		FeeBps:   100,
 		Deadline: time.Now().Add(2 * time.Hour).Unix(),
+		Nonce:    escrowNonce,
 	}
 	createData, err := jsonMarshal(createPayload)
 	if err != nil {
@@ -85,6 +91,9 @@ func TestEscrowNativeLifecycle(t *testing.T) {
 	}
 	if esc.Status != escrow.EscrowInit {
 		t.Fatalf("unexpected escrow status after create: %v", esc.Status)
+	}
+	if esc.Nonce != escrowNonce {
+		t.Fatalf("unexpected escrow nonce: %d", esc.Nonce)
 	}
 
 	fundTx := &types.Transaction{

@@ -63,6 +63,7 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 		mediator  string
 		meta      string
 		realm     string
+		nonceStr  string
 	)
 	fs.StringVar(&payer, "payer", "", "payer bech32 address")
 	fs.StringVar(&payee, "payee", "", "payee bech32 address")
@@ -73,6 +74,7 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&mediator, "mediator", "", "optional mediator bech32 address")
 	fs.StringVar(&meta, "meta", "", "optional 0x-prefixed metadata hash")
 	fs.StringVar(&realm, "realm", "", "optional realm identifier")
+	fs.StringVar(&nonceStr, "nonce", "", "unique nonce for this escrow")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -117,6 +119,13 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return printEscrowError(stderr, err.Error())
 	}
+	if nonceStr == "" {
+		return printEscrowError(stderr, "--nonce is required")
+	}
+	nonceValue, err := strconv.ParseUint(nonceStr, 10, 64)
+	if err != nil || nonceValue == 0 {
+		return printEscrowError(stderr, "--nonce must be a positive integer")
+	}
 
 	params := map[string]interface{}{
 		"payer":    payer,
@@ -125,6 +134,7 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 		"amount":   normalizedAmount,
 		"feeBps":   feeBpsValue,
 		"deadline": deadlineUnix,
+		"nonce":    nonceValue,
 	}
 	if strings.TrimSpace(mediator) != "" {
 		params["mediator"] = mediator

@@ -240,6 +240,7 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 		Amount:   "10",
 		FeeBps:   0,
 		Deadline: 1700000500,
+		Nonce:    1,
 	}
 	body, _ := json.Marshal(payload)
 	ts := time.Unix(1700000000, 0).UTC()

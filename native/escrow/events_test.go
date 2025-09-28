@@ -31,6 +31,7 @@ func TestEscrowEventsHaveDeterministicPayload(t *testing.T) {
 		Amount:    big.NewInt(42_000),
 		FeeBps:    125,
 		CreatedAt: 1_700_000_123,
+		Nonce:     1,
 		Status:    escrowpkg.EscrowFunded,
 	}
 	expected := map[string]string{
@@ -42,6 +43,7 @@ func TestEscrowEventsHaveDeterministicPayload(t *testing.T) {
 		"amount":    escrowDef.Amount.String(),
 		"feeBps":    strconv.FormatUint(uint64(escrowDef.FeeBps), 10),
 		"createdAt": strconv.FormatInt(escrowDef.CreatedAt, 10),
+		"nonce":     strconv.FormatUint(escrowDef.Nonce, 10),
 	}
 	cases := []struct {
 		name string
@@ -90,6 +92,7 @@ func TestEscrowEventOmitsMediatorWhenZero(t *testing.T) {
 		Amount:    big.NewInt(1),
 		FeeBps:    0,
 		CreatedAt: 12345,
+		Nonce:     5,
 		Status:    escrowpkg.EscrowInit,
 	}
 	evt := escrowpkg.NewCreatedEvent(escrowDef)

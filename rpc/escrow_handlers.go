@@ -33,6 +33,7 @@ type escrowCreateParams struct {
 	Amount   string `json:"amount"`
 	FeeBps   uint32 `json:"feeBps"`
 	Deadline int64  `json:"deadline"`
+	Nonce    uint64 `json:"nonce"`
 	Mediator string `json:"mediator,omitempty"`
 	MetaHex  string `json:"meta,omitempty"`
 	Realm    string `json:"realm,omitempty"`
@@ -72,6 +73,7 @@ type escrowJSON struct {
 	FeeBps       uint32   `json:"feeBps"`
 	Deadline     int64    `json:"deadline"`
 	CreatedAt    int64    `json:"createdAt"`
+	Nonce        uint64   `json:"nonce"`
 	Status       string   `json:"status"`
 	Meta         string   `json:"meta"`
 	Realm        *string  `json:"realm,omitempty"`
@@ -126,6 +128,10 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req 
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "deadline must be in the future")
 		return
 	}
+	if params.Nonce == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "nonce must be > 0")
+		return
+	}
 	meta, err := parseMetaHex(params.MetaHex)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
@@ -141,7 +147,7 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req 
 		mediatorCopy := mediator
 		mediatorPtr = &mediatorCopy
 	}
-	id, err := s.node.EscrowCreate(payer, payee, token, amount, params.FeeBps, params.Deadline, mediatorPtr, meta, strings.TrimSpace(params.Realm))
+	id, err := s.node.EscrowCreate(payer, payee, token, amount, params.FeeBps, params.Deadline, params.Nonce, mediatorPtr, meta, strings.TrimSpace(params.Realm))
 	if err != nil {
 		writeEscrowError(w, req.ID, err)
 		return
@@ -431,6 +437,7 @@ func formatEscrowJSON(esc *escrow.Escrow) escrowJSON {
 		FeeBps:       esc.FeeBps,
 		Deadline:     esc.Deadline,
 		CreatedAt:    esc.CreatedAt,
+		Nonce:        esc.Nonce,
 		Status:       escrowStatusString(esc.Status),
 		Meta:         meta,
 		Realm:        realmPtr,
