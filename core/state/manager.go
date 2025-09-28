@@ -24,6 +24,7 @@ import (
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
+	swap "nhbchain/native/swap"
 	"nhbchain/storage/trie"
 )
 
@@ -79,6 +80,8 @@ var (
 	identityReversePrefix          = []byte("identity/reverse/")
 	mintInvoicePrefix              = []byte("mint/invoice/")
 	swapOrderPrefix                = []byte("swap/order/")
+	swapPriceSignerPrefix          = []byte("swap/oracle/signer/")
+	swapPriceProofPrefix           = []byte("swap/oracle/last/")
 	potsoHeartbeatPrefix           = []byte("potso/heartbeat/")
 	potsoMeterPrefix               = []byte("potso/meter/")
 	potsoDayIndexPrefix            = []byte("potso/day-index/")
@@ -832,6 +835,22 @@ func swapOrderKey(orderID string) []byte {
 	return buf
 }
 
+func swapPriceSignerKey(provider string) []byte {
+	trimmed := strings.ToLower(strings.TrimSpace(provider))
+	buf := make([]byte, len(swapPriceSignerPrefix)+len(trimmed))
+	copy(buf, swapPriceSignerPrefix)
+	copy(buf[len(swapPriceSignerPrefix):], trimmed)
+	return buf
+}
+
+func swapPriceProofKey(base string) []byte {
+	trimmed := strings.ToUpper(strings.TrimSpace(base))
+	buf := make([]byte, len(swapPriceProofPrefix)+len(trimmed))
+	copy(buf, swapPriceProofPrefix)
+	copy(buf[len(swapPriceProofPrefix):], trimmed)
+	return buf
+}
+
 func potsoHeartbeatKey(addr []byte) []byte {
 	buf := make([]byte, len(potsoHeartbeatPrefix)+len(addr))
 	copy(buf, potsoHeartbeatPrefix)
@@ -1345,6 +1364,90 @@ func (m *Manager) MarkSwapNonce(orderID string) error {
 		return fmt.Errorf("swap: order id must not be empty")
 	}
 	return m.KVPut(swapOrderKey(trimmed), true)
+}
+
+// SwapSetPriceSigner registers the trusted signer address for the provider price proofs.
+func (m *Manager) SwapSetPriceSigner(provider string, addr [20]byte) error {
+	trimmed := strings.TrimSpace(provider)
+	if trimmed == "" {
+		return fmt.Errorf("swap: provider id must not be empty")
+	}
+	return m.KVPut(swapPriceSignerKey(trimmed), addr[:])
+}
+
+// SwapPriceSigner retrieves the configured signer address for the provider price proofs.
+func (m *Manager) SwapPriceSigner(provider string) ([20]byte, bool, error) {
+	var signer [20]byte
+	trimmed := strings.TrimSpace(provider)
+	if trimmed == "" {
+		return signer, false, nil
+	}
+	var raw []byte
+	ok, err := m.KVGet(swapPriceSignerKey(trimmed), &raw)
+	if err != nil {
+		return signer, false, err
+	}
+	if !ok {
+		return signer, false, nil
+	}
+	if len(raw) != 20 {
+		return signer, false, fmt.Errorf("swap: price signer length invalid")
+	}
+	copy(signer[:], raw)
+	return signer, true, nil
+}
+
+// SwapPutPriceProof stores the last accepted price proof for the provided base token.
+func (m *Manager) SwapPutPriceProof(base string, record *swap.PriceProofRecord) error {
+	trimmed := strings.TrimSpace(base)
+	if trimmed == "" {
+		return fmt.Errorf("swap: price proof base required")
+	}
+	stored := struct {
+		Rate      string
+		Timestamp int64
+	}{}
+	if record != nil {
+		if record.Rate != nil {
+			stored.Rate = strings.TrimSpace(record.Rate.FloatString(18))
+		}
+		if !record.Timestamp.IsZero() {
+			stored.Timestamp = record.Timestamp.UTC().Unix()
+		}
+	}
+	return m.KVPut(swapPriceProofKey(trimmed), stored)
+}
+
+// SwapLastPriceProof returns the stored proof record for the supplied base token.
+func (m *Manager) SwapLastPriceProof(base string) (*swap.PriceProofRecord, bool, error) {
+	trimmed := strings.TrimSpace(base)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	var stored struct {
+		Rate      string
+		Timestamp int64
+	}
+	ok, err := m.KVGet(swapPriceProofKey(trimmed), &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	record := &swap.PriceProofRecord{}
+	trimmedRate := strings.TrimSpace(stored.Rate)
+	if trimmedRate != "" {
+		rat, ok := new(big.Rat).SetString(trimmedRate)
+		if !ok {
+			return nil, false, fmt.Errorf("swap: invalid stored price proof rate")
+		}
+		record.Rate = rat
+	}
+	if stored.Timestamp != 0 {
+		record.Timestamp = time.Unix(stored.Timestamp, 0).UTC()
+	}
+	return record, true, nil
 }
 
 // PotsoGetHeartbeat loads the most recent heartbeat state for the supplied participant.

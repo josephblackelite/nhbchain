@@ -3324,6 +3324,10 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if len(signature) == 0 {
 		return "", false, ErrSwapInvalidSignature
 	}
+	priceProof := submission.PriceProof
+	if priceProof == nil {
+		return "", false, ErrSwapPriceProofRequired
+	}
 	token := strings.ToUpper(strings.TrimSpace(voucher.Token))
 	if token != "ZNHB" && token != "NHB" {
 		return "", false, ErrSwapInvalidToken
@@ -3361,6 +3365,30 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	riskEngine := swap.NewRiskEngine(manager)
+	priceEngine := swap.NewPriceProofEngine(manager, cfg.MaxQuoteAge(), cfg.PriceProofMaxDeviationBps)
+	if err := priceEngine.Verify(priceProof, provider, token); err != nil {
+		switch {
+		case errors.Is(err, swap.ErrPriceProofNil):
+			return "", false, ErrSwapPriceProofRequired
+		case errors.Is(err, swap.ErrPriceProofDomain),
+			errors.Is(err, swap.ErrPriceProofPair),
+			errors.Is(err, swap.ErrPriceProofProviderMismatch),
+			errors.Is(err, swap.ErrPriceProofSignatureInvalid):
+			return "", false, ErrSwapPriceProofInvalid
+		case errors.Is(err, swap.ErrPriceProofSignerUnknown):
+			return "", false, ErrSwapPriceProofSignerUnknown
+		case errors.Is(err, swap.ErrPriceProofStale):
+			return "", false, ErrSwapPriceProofStale
+		case errors.Is(err, swap.ErrPriceProofDeviation):
+			return "", false, ErrSwapPriceProofDeviation
+		default:
+			return "", false, fmt.Errorf("swap: price proof verify: %w", err)
+		}
+	}
+	proofID, err := priceProof.ID()
+	if err != nil {
+		return "", false, fmt.Errorf("swap: price proof id: %w", err)
+	}
 	if len(cfg.Providers.Allow) > 0 && !cfg.Providers.IsAllowed(provider) {
 		n.emitSwapLimitAlert(events.SwapLimitAlert{
 			Address:      voucher.Recipient,
@@ -3478,8 +3506,30 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		}
 		return "", false, fmt.Errorf("swap: oracle: %w", err)
 	}
+	if quote.Rate == nil {
+		return "", false, fmt.Errorf("swap: oracle rate unavailable")
+	}
+	if priceProof.Rate == nil {
+		return "", false, ErrSwapPriceProofInvalid
+	}
+	diff := new(big.Rat).Sub(quote.Rate, priceProof.Rate)
+	if diff.Sign() < 0 {
+		diff.Neg(diff)
+	}
+	if priceProof.Rate.Sign() == 0 {
+		return "", false, ErrSwapPriceProofInvalid
+	}
+	ratio := new(big.Rat).Quo(diff, priceProof.Rate)
+	ratio.Mul(ratio, big.NewRat(10000, 1))
+	threshold := new(big.Rat).SetInt64(int64(cfg.PriceProofMaxDeviationBps))
+	if cfg.PriceProofMaxDeviationBps > 0 && ratio.Cmp(threshold) == 1 {
+		return "", false, ErrSwapPriceProofDeviation
+	}
+	quote.Timestamp = priceProof.Timestamp
+	quote.Source = strings.ToLower(strings.TrimSpace(priceProof.Provider))
 	n.recordSwapOracleHealth(time.Now())
 	twapWindow := cfg.TwapWindow()
+	priceProofID := proofID
 	var (
 		twapRate          string
 		twapCount         int
@@ -3488,7 +3538,6 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		twapEnd           int64
 		oracleMedian      string
 		oracleFeeders     []string
-		priceProofID      string
 	)
 	if twapOracle, ok := oracle.(swap.TWAPOracle); ok {
 		snapshot, err := twapOracle.TWAP("USD", token, twapWindow)
@@ -3552,6 +3601,9 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	}
 	if manager.HasSeenSwapNonce(orderID) {
 		return "", false, ErrSwapNonceUsed
+	}
+	if err := priceEngine.Record(priceProof); err != nil {
+		return "", false, fmt.Errorf("swap: record price proof: %w", err)
 	}
 	if err := n.state.MintToken(token, voucher.Recipient[:], voucher.Amount); err != nil {
 		return "", false, err

@@ -27,6 +27,14 @@ func (s *Server) handleSwapSubmitVoucher(w http.ResponseWriter, _ *http.Request,
 		Username     string          `json:"username,omitempty"`
 		Address      string          `json:"address,omitempty"`
 		USDAmount    string          `json:"usdAmount,omitempty"`
+		PriceProof   struct {
+			Domain    string `json:"domain"`
+			Provider  string `json:"provider"`
+			Pair      string `json:"pair"`
+			Rate      string `json:"rate"`
+			Timestamp int64  `json:"timestamp"`
+			Signature string `json:"signature"`
+		} `json:"priceProof"`
 	}
 	if err := json.Unmarshal(req.Params[0], &payload); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid payload", err.Error())
@@ -61,6 +69,30 @@ func (s *Server) handleSwapSubmitVoucher(w http.ResponseWriter, _ *http.Request,
 		Address:      strings.TrimSpace(payload.Address),
 		USDAmount:    strings.TrimSpace(payload.USDAmount),
 	}
+	proofSig := strings.TrimSpace(payload.PriceProof.Signature)
+	if proofSig == "" {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "priceProof.signature required", nil)
+		return
+	}
+	proofSig = strings.TrimPrefix(proofSig, "0x")
+	priceProofSig, err := hex.DecodeString(proofSig)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid priceProof.signature", err.Error())
+		return
+	}
+	proof, err := swap.NewPriceProof(
+		payload.PriceProof.Domain,
+		payload.PriceProof.Provider,
+		payload.PriceProof.Pair,
+		payload.PriceProof.Rate,
+		payload.PriceProof.Timestamp,
+		priceProofSig,
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid priceProof", err.Error())
+		return
+	}
+	submission.PriceProof = proof
 	txHash, minted, err := s.node.SwapSubmitVoucher(submission)
 	if err != nil {
 		switch {
@@ -84,6 +116,11 @@ func (s *Server) handleSwapSubmitVoucher(w http.ResponseWriter, _ *http.Request,
 			errors.Is(err, core.ErrSwapExpired),
 			errors.Is(err, core.ErrSwapInvalidToken),
 			errors.Is(err, core.ErrSwapInvalidSignature),
+			errors.Is(err, core.ErrSwapPriceProofRequired),
+			errors.Is(err, core.ErrSwapPriceProofInvalid),
+			errors.Is(err, core.ErrSwapPriceProofSignerUnknown),
+			errors.Is(err, core.ErrSwapPriceProofStale),
+			errors.Is(err, core.ErrSwapPriceProofDeviation),
 			errors.Is(err, core.ErrSwapMintPaused),
 			errors.Is(err, core.ErrSwapUnsupportedFiat),
 			errors.Is(err, core.ErrSwapOracleUnavailable),
