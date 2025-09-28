@@ -59,6 +59,8 @@ type engineState interface {
 	CreatorStakeDelete(creator [20]byte, fan [20]byte) error
 	CreatorPayoutLedgerGet(creator [20]byte) (*PayoutLedger, bool, error)
 	CreatorPayoutLedgerPut(ledger *PayoutLedger) error
+	CreatorRateLimitGet() (*RateLimitSnapshot, bool, error)
+	CreatorRateLimitPut(snapshot *RateLimitSnapshot) error
 	GetAccount(addr []byte) (*types.Account, error)
 	PutAccount(addr []byte, account *types.Account) error
 }
@@ -73,6 +75,7 @@ type Engine struct {
 	mu              sync.Mutex
 	stakeWindows    map[[20]byte]*stakeWindow
 	tipWindows      map[[20]byte]*tipWindow
+	rateLoaded      bool
 }
 
 type stakeWindow struct {
@@ -82,6 +85,40 @@ type stakeWindow struct {
 
 type tipWindow struct {
 	timestamps []int64
+}
+
+func newStakeWindowFromSnapshot(snapshot *StakeRateLimitWindow) *stakeWindow {
+	if snapshot == nil {
+		return nil
+	}
+	return &stakeWindow{
+		windowStart: snapshot.WindowStart,
+		amount:      newBigInt(snapshot.Amount),
+	}
+}
+
+func (w *stakeWindow) snapshot() *StakeRateLimitWindow {
+	if w == nil {
+		return nil
+	}
+	return &StakeRateLimitWindow{
+		WindowStart: w.windowStart,
+		Amount:      newBigInt(w.amount),
+	}
+}
+
+func newTipWindowFromSnapshot(snapshot *TipRateLimitWindow) *tipWindow {
+	if snapshot == nil {
+		return nil
+	}
+	return &tipWindow{timestamps: append([]int64(nil), snapshot.Timestamps...)}
+}
+
+func (w *tipWindow) snapshot() *TipRateLimitWindow {
+	if w == nil {
+		return nil
+	}
+	return &TipRateLimitWindow{Timestamps: append([]int64(nil), w.timestamps...)}
 }
 
 // NewEngine constructs a creator engine with default dependencies.
@@ -97,7 +134,17 @@ func NewEngine() *Engine {
 }
 
 // SetState configures the state backend used by the engine.
-func (e *Engine) SetState(state engineState) { e.state = state }
+func (e *Engine) SetState(state engineState) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.state = state
+	e.rateLoaded = false
+	e.stakeWindows = make(map[[20]byte]*stakeWindow)
+	e.tipWindows = make(map[[20]byte]*tipWindow)
+}
 
 // SetEmitter configures the event emitter used by the engine.
 func (e *Engine) SetEmitter(emitter events.Emitter) {
@@ -265,12 +312,86 @@ func newLedger(creator [20]byte) *PayoutLedger {
 	}
 }
 
+func (e *Engine) loadRateLimitsLocked() error {
+	if e == nil {
+		return nil
+	}
+	if e.rateLoaded {
+		return nil
+	}
+	e.rateLoaded = true
+	if e.stakeWindows == nil {
+		e.stakeWindows = make(map[[20]byte]*stakeWindow)
+	} else {
+		for key := range e.stakeWindows {
+			delete(e.stakeWindows, key)
+		}
+	}
+	if e.tipWindows == nil {
+		e.tipWindows = make(map[[20]byte]*tipWindow)
+	} else {
+		for key := range e.tipWindows {
+			delete(e.tipWindows, key)
+		}
+	}
+	if e.state == nil {
+		return nil
+	}
+	snapshot, ok, err := e.state.CreatorRateLimitGet()
+	if err != nil {
+		return err
+	}
+	if !ok || snapshot == nil {
+		return nil
+	}
+	for fan, window := range snapshot.StakeWindows {
+		if w := newStakeWindowFromSnapshot(window); w != nil {
+			e.stakeWindows[fan] = w
+		}
+	}
+	for creator, window := range snapshot.TipWindows {
+		if w := newTipWindowFromSnapshot(window); w != nil {
+			e.tipWindows[creator] = w
+		}
+	}
+	return nil
+}
+
+func (e *Engine) persistRateLimitsLocked() error {
+	if e == nil || e.state == nil {
+		return nil
+	}
+	snapshot := &RateLimitSnapshot{
+		StakeWindows: make(map[[20]byte]*StakeRateLimitWindow, len(e.stakeWindows)),
+		TipWindows:   make(map[[20]byte]*TipRateLimitWindow, len(e.tipWindows)),
+	}
+	for fan, window := range e.stakeWindows {
+		if window == nil {
+			continue
+		}
+		snapshot.StakeWindows[fan] = window.snapshot()
+	}
+	for creator, window := range e.tipWindows {
+		if window == nil {
+			continue
+		}
+		snapshot.TipWindows[creator] = window.snapshot()
+	}
+	if len(snapshot.StakeWindows) == 0 && len(snapshot.TipWindows) == 0 {
+		return e.state.CreatorRateLimitPut(nil)
+	}
+	return e.state.CreatorRateLimitPut(snapshot)
+}
+
 func (e *Engine) enforceStakeLimit(fan [20]byte, amount *big.Int) error {
 	if e == nil || amount == nil || amount.Sign() <= 0 {
 		return nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if err := e.loadRateLimitsLocked(); err != nil {
+		return err
+	}
 	window, ok := e.stakeWindows[fan]
 	now := e.now()
 	if !ok || window == nil {
@@ -284,11 +405,18 @@ func (e *Engine) enforceStakeLimit(fan [20]byte, amount *big.Int) error {
 	if window.amount == nil {
 		window.amount = big.NewInt(0)
 	}
+	previousStart := window.windowStart
+	previousAmount := new(big.Int).Set(window.amount)
 	candidate := new(big.Int).Add(window.amount, amount)
 	if candidate.Cmp(fanStakeEpochCap) > 0 {
 		return errStakeEpochCap
 	}
 	window.amount = candidate
+	if err := e.persistRateLimitsLocked(); err != nil {
+		window.windowStart = previousStart
+		window.amount = previousAmount
+		return err
+	}
 	return nil
 }
 
@@ -298,6 +426,9 @@ func (e *Engine) enforceTipLimit(creator [20]byte, now int64) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if err := e.loadRateLimitsLocked(); err != nil {
+		return err
+	}
 	window, ok := e.tipWindows[creator]
 	if !ok || window == nil {
 		window = &tipWindow{timestamps: make([]int64, 0, tipRateBurst)}
@@ -314,7 +445,12 @@ func (e *Engine) enforceTipLimit(creator [20]byte, now int64) error {
 	if len(window.timestamps) >= tipRateBurst {
 		return errTipRateLimited
 	}
+	previous := append([]int64(nil), window.timestamps...)
 	window.timestamps = append(window.timestamps, now)
+	if err := e.persistRateLimitsLocked(); err != nil {
+		window.timestamps = previous
+		return err
+	}
 	return nil
 }
 

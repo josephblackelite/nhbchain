@@ -12,6 +12,7 @@ type testState struct {
 	stakes   map[string]*creator.Stake
 	ledgers  map[string]*creator.PayoutLedger
 	accounts map[string]*types.Account
+	rate     *creator.RateLimitSnapshot
 }
 
 func newTestState() *testState {
@@ -107,6 +108,22 @@ func (s *testState) CreatorPayoutLedgerPut(ledger *creator.PayoutLedger) error {
 		return nil
 	}
 	s.ledgers[string(ledger.Creator[:])] = ledger.Clone()
+	return nil
+}
+
+func (s *testState) CreatorRateLimitGet() (*creator.RateLimitSnapshot, bool, error) {
+	if s.rate == nil {
+		return nil, false, nil
+	}
+	return s.rate.Clone(), true, nil
+}
+
+func (s *testState) CreatorRateLimitPut(snapshot *creator.RateLimitSnapshot) error {
+	if snapshot == nil {
+		s.rate = nil
+		return nil
+	}
+	s.rate = snapshot.Clone()
 	return nil
 }
 

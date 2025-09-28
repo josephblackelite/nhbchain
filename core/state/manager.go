@@ -72,6 +72,7 @@ var (
 	creatorContentPrefix           = []byte("creator/content/")
 	creatorStakePrefix             = []byte("creator/stake/")
 	creatorLedgerPrefix            = []byte("creator/ledger/")
+	creatorRateLimitPrefix         = []byte("creator/rate-limit")
 	claimableRecordPrefix          = []byte("claimable/record/")
 	claimableNoncePrefix           = []byte("claimable/nonce/")
 	tradeRecordPrefix              = []byte("trade/record/")
@@ -3495,6 +3496,10 @@ func creatorLedgerKey(creator [20]byte) []byte {
 	return []byte(fmt.Sprintf("%s%x", creatorLedgerPrefix, creator))
 }
 
+func creatorRateLimitKey() []byte {
+	return append([]byte(nil), creatorRateLimitPrefix...)
+}
+
 type storedCreatorContent struct {
 	ID          string
 	Creator     [20]byte
@@ -3684,6 +3689,96 @@ func (s *storedCreatorLedger) toLedger() *creator.PayoutLedger {
 	return ledger
 }
 
+type storedStakeRateLimit struct {
+	Fan         [20]byte
+	WindowStart int64
+	Amount      *big.Int
+}
+
+type storedTipRateLimit struct {
+	Creator    [20]byte
+	Timestamps []int64
+}
+
+type storedCreatorRateLimits struct {
+	Stake []*storedStakeRateLimit
+	Tip   []*storedTipRateLimit
+}
+
+func newStoredCreatorRateLimits(snapshot *creator.RateLimitSnapshot) *storedCreatorRateLimits {
+	stored := &storedCreatorRateLimits{}
+	if snapshot == nil {
+		return stored
+	}
+	for fan, window := range snapshot.StakeWindows {
+		if window == nil {
+			continue
+		}
+		copyWindow := &storedStakeRateLimit{
+			Fan:         fan,
+			WindowStart: window.WindowStart,
+		}
+		if window.Amount != nil {
+			copyWindow.Amount = new(big.Int).Set(window.Amount)
+		} else {
+			copyWindow.Amount = big.NewInt(0)
+		}
+		stored.Stake = append(stored.Stake, copyWindow)
+	}
+	for creatorAddr, window := range snapshot.TipWindows {
+		if window == nil {
+			continue
+		}
+		copyWindow := &storedTipRateLimit{
+			Creator:    creatorAddr,
+			Timestamps: append([]int64(nil), window.Timestamps...),
+		}
+		stored.Tip = append(stored.Tip, copyWindow)
+	}
+	sort.Slice(stored.Stake, func(i, j int) bool {
+		return bytes.Compare(stored.Stake[i].Fan[:], stored.Stake[j].Fan[:]) < 0
+	})
+	sort.Slice(stored.Tip, func(i, j int) bool {
+		return bytes.Compare(stored.Tip[i].Creator[:], stored.Tip[j].Creator[:]) < 0
+	})
+	return stored
+}
+
+func (s *storedCreatorRateLimits) toSnapshot() *creator.RateLimitSnapshot {
+	if s == nil {
+		return &creator.RateLimitSnapshot{
+			StakeWindows: make(map[[20]byte]*creator.StakeRateLimitWindow),
+			TipWindows:   make(map[[20]byte]*creator.TipRateLimitWindow),
+		}
+	}
+	snapshot := &creator.RateLimitSnapshot{
+		StakeWindows: make(map[[20]byte]*creator.StakeRateLimitWindow, len(s.Stake)),
+		TipWindows:   make(map[[20]byte]*creator.TipRateLimitWindow, len(s.Tip)),
+	}
+	for _, window := range s.Stake {
+		if window == nil {
+			continue
+		}
+		amount := big.NewInt(0)
+		if window.Amount != nil {
+			amount = new(big.Int).Set(window.Amount)
+		}
+		snapshot.StakeWindows[window.Fan] = &creator.StakeRateLimitWindow{
+			WindowStart: window.WindowStart,
+			Amount:      amount,
+		}
+	}
+	for _, window := range s.Tip {
+		if window == nil {
+			continue
+		}
+		snapshot.TipWindows[window.Creator] = &creator.TipRateLimitWindow{
+			Timestamps: append([]int64(nil), window.Timestamps...),
+		}
+	}
+	return snapshot
+}
+
 // CreatorContentPut persists a creator content record.
 func (m *Manager) CreatorContentPut(content *creator.Content) error {
 	if content == nil {
@@ -3777,4 +3872,36 @@ func (m *Manager) CreatorPayoutLedgerGet(creatorAddr [20]byte) (*creator.PayoutL
 		return nil, false, err
 	}
 	return stored.toLedger(), true, nil
+}
+
+// CreatorRateLimitPut persists the in-flight rate limit snapshot for the
+// creator engine.
+func (m *Manager) CreatorRateLimitPut(snapshot *creator.RateLimitSnapshot) error {
+	if snapshot == nil || (len(snapshot.StakeWindows) == 0 && len(snapshot.TipWindows) == 0) {
+		return m.trie.Update(creatorRateLimitKey(), nil)
+	}
+	stored := newStoredCreatorRateLimits(snapshot)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(creatorRateLimitKey(), encoded)
+}
+
+// CreatorRateLimitGet retrieves the rate limit snapshot for the creator
+// engine, if one has been persisted.
+func (m *Manager) CreatorRateLimitGet() (*creator.RateLimitSnapshot, bool, error) {
+	key := creatorRateLimitKey()
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	stored := new(storedCreatorRateLimits)
+	if err := rlp.DecodeBytes(data, stored); err != nil {
+		return nil, false, err
+	}
+	return stored.toSnapshot(), true, nil
 }

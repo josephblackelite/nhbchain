@@ -71,3 +71,52 @@ func (p *PayoutLedger) Clone() *PayoutLedger {
 	}
 	return &clone
 }
+
+// StakeRateLimitWindow captures the staking activity tracked for a fan within a
+// rolling window.
+type StakeRateLimitWindow struct {
+	WindowStart int64    `json:"windowStart"`
+	Amount      *big.Int `json:"amount"`
+}
+
+// TipRateLimitWindow records the timestamps of tips applied to a creator
+// within the configured burst window.
+type TipRateLimitWindow struct {
+	Timestamps []int64 `json:"timestamps"`
+}
+
+// RateLimitSnapshot preserves the in-flight rate limit state for the creator
+// engine so it can be restored across restarts.
+type RateLimitSnapshot struct {
+	StakeWindows map[[20]byte]*StakeRateLimitWindow `json:"stakeWindows"`
+	TipWindows   map[[20]byte]*TipRateLimitWindow   `json:"tipWindows"`
+}
+
+// Clone produces a deep copy of the rate limit snapshot.
+func (r *RateLimitSnapshot) Clone() *RateLimitSnapshot {
+	if r == nil {
+		return nil
+	}
+	clone := &RateLimitSnapshot{
+		StakeWindows: make(map[[20]byte]*StakeRateLimitWindow, len(r.StakeWindows)),
+		TipWindows:   make(map[[20]byte]*TipRateLimitWindow, len(r.TipWindows)),
+	}
+	for fan, window := range r.StakeWindows {
+		if window == nil {
+			continue
+		}
+		w := &StakeRateLimitWindow{WindowStart: window.WindowStart}
+		if window.Amount != nil {
+			w.Amount = new(big.Int).Set(window.Amount)
+		}
+		clone.StakeWindows[fan] = w
+	}
+	for creator, window := range r.TipWindows {
+		if window == nil {
+			continue
+		}
+		w := &TipRateLimitWindow{Timestamps: append([]int64(nil), window.Timestamps...)}
+		clone.TipWindows[creator] = w
+	}
+	return clone
+}

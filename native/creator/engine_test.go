@@ -1,6 +1,7 @@
 package creator
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 
@@ -12,6 +13,7 @@ type mockState struct {
 	stakes   map[string]*Stake
 	ledgers  map[string]*PayoutLedger
 	accounts map[string]*types.Account
+	rate     *RateLimitSnapshot
 }
 
 func newMockState() *mockState {
@@ -110,6 +112,22 @@ func (m *mockState) CreatorPayoutLedgerPut(ledger *PayoutLedger) error {
 	return nil
 }
 
+func (m *mockState) CreatorRateLimitGet() (*RateLimitSnapshot, bool, error) {
+	if m.rate == nil {
+		return nil, false, nil
+	}
+	return m.rate.Clone(), true, nil
+}
+
+func (m *mockState) CreatorRateLimitPut(snapshot *RateLimitSnapshot) error {
+	if snapshot == nil {
+		m.rate = nil
+		return nil
+	}
+	m.rate = snapshot.Clone()
+	return nil
+}
+
 func (m *mockState) GetAccount(addr []byte) (*types.Account, error) {
 	if acc, ok := m.accounts[string(addr)]; ok && acc != nil {
 		return cloneAccount(acc), nil
@@ -167,6 +185,59 @@ func addr(last byte) [20]byte {
 	var out [20]byte
 	out[19] = last
 	return out
+}
+
+func TestStakeRateLimitPersistsAcrossRestart(t *testing.T) {
+	state := newMockState()
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() int64 { return 100 })
+
+	fan := addr(0x01)
+	nearCap := new(big.Int).Sub(fanStakeEpochCap, big.NewInt(5))
+	if err := engine.enforceStakeLimit(fan, nearCap); err != nil {
+		t.Fatalf("initial stake limit application failed: %v", err)
+	}
+	if err := engine.enforceStakeLimit(fan, big.NewInt(4)); err != nil {
+		t.Fatalf("additional stake within window failed: %v", err)
+	}
+	if err := engine.enforceStakeLimit(fan, big.NewInt(2)); !errors.Is(err, errStakeEpochCap) {
+		t.Fatalf("expected stake limit breach before restart: %v", err)
+	}
+
+	restarted := NewEngine()
+	restarted.SetState(state)
+	restarted.SetNowFunc(func() int64 { return 100 })
+
+	if err := restarted.enforceStakeLimit(fan, big.NewInt(2)); !errors.Is(err, errStakeEpochCap) {
+		t.Fatalf("stake limit did not persist across restart: %v", err)
+	}
+}
+
+func TestTipRateLimitPersistsAcrossRestart(t *testing.T) {
+	state := newMockState()
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() int64 { return 200 })
+
+	creator := addr(0x02)
+	now := int64(200)
+	for i := 0; i < tipRateBurst; i++ {
+		if err := engine.enforceTipLimit(creator, now); err != nil {
+			t.Fatalf("tip limit warmup failed at %d: %v", i, err)
+		}
+	}
+	if err := engine.enforceTipLimit(creator, now); !errors.Is(err, errTipRateLimited) {
+		t.Fatalf("expected tip limit breach before restart: %v", err)
+	}
+
+	restarted := NewEngine()
+	restarted.SetState(state)
+	restarted.SetNowFunc(func() int64 { return 200 })
+
+	if err := restarted.enforceTipLimit(creator, now); !errors.Is(err, errTipRateLimited) {
+		t.Fatalf("tip limit did not persist across restart: %v", err)
+	}
 }
 
 func TestTipAndClaimPreservesTotalSupply(t *testing.T) {
