@@ -8,8 +8,9 @@ import (
 )
 
 type staticTokenCredentials struct {
-	header string
-	token  string
+	header        string
+	token         string
+	allowInsecure bool
 }
 
 // NewStaticTokenCredentials returns a grpc.PerRPCCredentials implementation
@@ -25,6 +26,23 @@ func NewStaticTokenCredentials(header, token string) credentials.PerRPCCredentia
 	}
 }
 
+// NewStaticTokenCredentialsAllowInsecure returns the same credentials as
+// NewStaticTokenCredentials but allows plaintext transports even when a token is
+// configured. This helper exists strictly for test harnesses that rely on the
+// insecure gRPC transport; production code should prefer
+// NewStaticTokenCredentials so that TLS is always required when a token is set.
+func NewStaticTokenCredentialsAllowInsecure(header, token string) credentials.PerRPCCredentials {
+	normalizedHeader := strings.ToLower(strings.TrimSpace(header))
+	if normalizedHeader == "" {
+		normalizedHeader = "authorization"
+	}
+	return staticTokenCredentials{
+		header:        normalizedHeader,
+		token:         strings.TrimSpace(token),
+		allowInsecure: true,
+	}
+}
+
 func (c staticTokenCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
 	if c.token == "" {
 		return map[string]string{}, nil
@@ -33,5 +51,8 @@ func (c staticTokenCredentials) GetRequestMetadata(context.Context, ...string) (
 }
 
 func (c staticTokenCredentials) RequireTransportSecurity() bool {
-	return false
+	if c.allowInsecure {
+		return false
+	}
+	return c.token != ""
 }
