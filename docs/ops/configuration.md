@@ -94,3 +94,22 @@ block events when a client breaches either ceiling.【F:native/system/quotas/sto
 See [Pause and quota runbook](../runbooks/pause-and-quotas.md) for operational
 recipes, including copy-paste commands that dump the live pause state, submit a
 pause transaction, inspect quota usage, and stage a safe cap increase.
+
+## Change management
+
+- Stage configuration changes in staging using the same templates as production.
+- Submit configuration diffs through version control; avoid editing files directly on servers.
+- Require dual approval for parameter changes impacting governance, slashing, or block production.
+
+## Drift detection
+
+- Export effective runtime configuration weekly using `nhbchain config dump` and store in the configuration repository.
+- Compare dumps against the committed templates using `git diff` or `terraform plan` (for infrastructure-managed configs).
+- Alert when critical fields (pauses, quotas, peer limits) diverge from approved values.
+
+## Emergency procedures
+
+1. Document the triggering event and the configuration change requested.
+2. Take a snapshot or backup of the current configuration files.
+3. Apply the minimal necessary change and record the command history.
+4. Notify governance and security within 24 hours, and file a post-incident review.

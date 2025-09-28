@@ -31,6 +31,7 @@ NHBCoin abstracts away the traditional complexities of crypto networks. Native a
 - [Command-Line Interface](#command-line-interface)
 - [APIs, SDKs, and Documentation](#apis-sdks-and-documentation)
 - [Security, Compliance, and Operations](#security-compliance-and-operations)
+  - [Audit & Operations Reference Library](#audit--operations-reference-library)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Legal Notice & License](#legal-notice--license)
@@ -217,6 +218,14 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 - **Observability** — Monitor validator uptime, engagement scores, and staking state using CLI commands or forthcoming telemetry dashboards. Forward RPC/WAF logs to your SIEM so abuse attempts can be correlated with P2P events.
 - **Compliance Alignment** — Native identity modules provide audit trails, verified contact points, and consent-driven discovery suitable for regulatory review.
 - **Audits & Bug Bounty** — We run an ongoing [bug bounty program](docs/security/bug-bounty.md) and maintain an [audit readiness guide](docs/security/audit-readiness.md) with frozen commits, reproducible builds, and fixtures for third-party assessors.
+
+### Audit & Operations Reference Library
+
+- **Audit phases:** [Overview](docs/audit/overview.md), [Static analysis](docs/audit/static-analysis.md), [Fuzzing](docs/audit/fuzzing.md), [End-to-end flows](docs/audit/e2e-flows.md), [Documentation quality](docs/audit/docs-quality.md), and [Reconnaissance](docs/audit/recon.md).
+- **Consensus:** [BFT height sync](docs/consensus/bft-height-sync.md), [Consensus invariants](docs/consensus/invariants.md).
+- **Performance:** [Baselines](docs/perf/baselines.md), [Tuning guide](docs/perf/tuning.md).
+- **Security:** [Network security](docs/security/networking.md), [Supply chain security](docs/security/supply-chain.md).
+- **Operations:** [Configuration guardrails](docs/ops/configuration.md), [Snapshot operations](docs/ops/snapshots.md), [Validator runbook](docs/ops/validator-runbook.md).
 
 ### Operational Audit Harness
 
