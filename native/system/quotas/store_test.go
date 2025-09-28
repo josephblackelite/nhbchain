@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"bytes"
+
 	"github.com/ethereum/go-ethereum/rlp"
 
 	nativecommon "nhbchain/native/common"
@@ -45,16 +47,6 @@ func (m *memoryState) KVAppend(key []byte, value []byte) error {
 	if raw, ok := m.data[string(key)]; ok && len(raw) > 0 {
 		if err := rlp.DecodeBytes(raw, &existing); err != nil {
 			return err
-		}
-	}
-	for _, entry := range existing {
-		if string(entry) == string(value) {
-			encoded, err := rlp.EncodeToBytes(existing)
-			if err != nil {
-				return err
-			}
-			m.data[string(key)] = encoded
-			return nil
 		}
 	}
 	existing = append(existing, append([]byte(nil), value...))
@@ -128,5 +120,35 @@ func TestQuotaStoreCountersAndPrune(t *testing.T) {
 		t.Fatalf("load after prune: %v", err)
 	} else if ok {
 		t.Fatalf("expected epoch 0 counters pruned")
+	}
+}
+
+func TestQuotaStoreSaveIdempotentIndex(t *testing.T) {
+	state := newMemoryState()
+	store := NewStore(state)
+
+	addr := make([]byte, 20)
+	addr[0] = 0x01
+
+	counters := nativecommon.QuotaNow{EpochID: 0, ReqCount: 1, NHBUsed: 2}
+	if err := store.Save("escrow", 0, addr, counters); err != nil {
+		t.Fatalf("save quota: %v", err)
+	}
+
+	counters.ReqCount = 2
+	counters.NHBUsed = 3
+	if err := store.Save("escrow", 0, addr, counters); err != nil {
+		t.Fatalf("save quota again: %v", err)
+	}
+
+	var indexed [][]byte
+	if err := state.KVGetList(epochIndexKey("escrow", 0), &indexed); err != nil {
+		t.Fatalf("load epoch index: %v", err)
+	}
+	if len(indexed) != 1 {
+		t.Fatalf("expected 1 indexed address, got %d", len(indexed))
+	}
+	if !bytes.Equal(indexed[0], addr) {
+		t.Fatalf("unexpected address stored: %x", indexed[0])
 	}
 }

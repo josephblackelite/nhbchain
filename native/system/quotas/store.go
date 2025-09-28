@@ -1,6 +1,7 @@
 package quotas
 
 import (
+	"bytes"
 	"fmt"
 
 	nativecommon "nhbchain/native/common"
@@ -67,7 +68,17 @@ func (s *Store) Save(module string, epoch uint64, addr []byte, counters nativeco
 	if err := state.KVPut(counterKey(module, epoch, addr), record); err != nil {
 		return fmt.Errorf("quota: persist counters: %w", err)
 	}
-	if err := state.KVAppend(epochIndexKey(module, epoch), append([]byte(nil), addr...)); err != nil {
+	indexKey := epochIndexKey(module, epoch)
+	var indexedAddrs [][]byte
+	if err := state.KVGetList(indexKey, &indexedAddrs); err != nil {
+		return fmt.Errorf("quota: load epoch index: %w", err)
+	}
+	for _, existing := range indexedAddrs {
+		if bytes.Equal(existing, addr) {
+			return nil
+		}
+	}
+	if err := state.KVAppend(indexKey, append([]byte(nil), addr...)); err != nil {
 		return fmt.Errorf("quota: update epoch index: %w", err)
 	}
 	return nil
