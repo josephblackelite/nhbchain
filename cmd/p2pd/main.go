@@ -20,6 +20,7 @@ import (
 
 	"nhbchain/config"
 	"nhbchain/core"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/network"
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
@@ -27,6 +28,7 @@ import (
 	"nhbchain/p2p/seeds"
 	networkv1 "nhbchain/proto/network/v1"
 	"nhbchain/storage"
+	"nhbchain/storage/trie"
 )
 
 const (
@@ -145,8 +147,48 @@ func main() {
 		seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", nodeID, addr))
 		seedOrigins = append(seedOrigins, p2p.SeedOrigin{NodeID: nodeID, Address: addr, Source: "config"})
 	}
-	// TODO: supplement static seeds with dynamic entries from the consensus
-	// registry once the discovery flow is plumbed through this daemon.
+	var seedRegistry *seeds.Registry
+	header := chain.CurrentHeader()
+	if header != nil {
+		stateTrie, err := trie.NewTrie(db, header.StateRoot)
+		if err != nil {
+			fmt.Printf("Failed to open state trie: %v\n", err)
+		} else {
+			manager := nhbstate.NewManager(stateTrie)
+			if rawRegistry, ok, err := manager.ParamStoreGet("network.seeds"); err != nil {
+				fmt.Printf("Failed to load network.seeds: %v\n", err)
+			} else if ok {
+				registry, parseErr := seeds.Parse(rawRegistry)
+				if parseErr != nil {
+					fmt.Printf("Failed to parse network.seeds: %v\n", parseErr)
+				} else {
+					seedRegistry = registry
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					resolved, resolveErr := registry.Resolve(ctx, time.Now(), seeds.DefaultResolver())
+					cancel()
+					if resolveErr != nil {
+						fmt.Printf("DNS seed resolution failed: %v\n", resolveErr)
+					}
+					for _, entry := range resolved {
+						addr := strings.TrimSpace(entry.Address)
+						key := strings.ToLower(entry.NodeID) + "@" + strings.ToLower(addr)
+						if _, exists := seenSeeds[key]; exists {
+							continue
+						}
+						seenSeeds[key] = struct{}{}
+						seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", entry.NodeID, addr))
+						seedOrigins = append(seedOrigins, p2p.SeedOrigin{
+							NodeID:    entry.NodeID,
+							Address:   addr,
+							Source:    entry.Source,
+							NotBefore: entry.NotBefore,
+							NotAfter:  entry.NotAfter,
+						})
+					}
+				}
+			}
+		}
+	}
 
 	pexEnabled := true
 	if cfg.P2P.PEX != nil {
@@ -169,6 +211,7 @@ func main() {
 		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
 		Seeds:            append([]string{}, seedStrings...),
 		SeedOrigins:      append([]p2p.SeedOrigin{}, seedOrigins...),
+		SeedRegistry:     seedRegistry,
 		SeedResolver:     seeds.DefaultResolver(),
 		PeerBanDuration:  time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
 		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
