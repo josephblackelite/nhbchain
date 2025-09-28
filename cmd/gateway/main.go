@@ -137,16 +137,20 @@ func main() {
 		if entry.ID == "" {
 			continue
 		}
+		rate := entry.RatePerSecond
+		if rate <= 0 && entry.RequestsPerMinute > 0 {
+			rate = entry.RequestsPerMinute / 60.0
+		}
 		rateLimits[entry.ID] = middleware.RateLimit{
-			RequestsPerMinute: entry.RequestsPerMinute,
-			Burst:             entry.Burst,
+			RatePerSecond: rate,
+			Burst:         entry.Burst,
 		}
 	}
 	if len(rateLimits) == 0 {
-		rateLimits["lending"] = middleware.RateLimit{RequestsPerMinute: 120, Burst: 20}
-		rateLimits["swap"] = middleware.RateLimit{RequestsPerMinute: 60, Burst: 10}
-		rateLimits["gov"] = middleware.RateLimit{RequestsPerMinute: 60, Burst: 10}
-		rateLimits["consensus"] = middleware.RateLimit{RequestsPerMinute: 240, Burst: 40}
+		rateLimits["lending"] = middleware.RateLimit{RatePerSecond: 2, Burst: 20}
+		rateLimits["swap"] = middleware.RateLimit{RatePerSecond: 1, Burst: 10}
+		rateLimits["gov"] = middleware.RateLimit{RatePerSecond: 1, Burst: 10}
+		rateLimits["consensus"] = middleware.RateLimit{RatePerSecond: 4, Burst: 40}
 	}
 
 	router := routes.New(routes.Config{
