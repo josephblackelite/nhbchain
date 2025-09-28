@@ -32,8 +32,9 @@ If a warm standby is available:
 ## 5. Post-Recovery Checks
 
 * Confirm `consensusd` reports height progression.
-* Run `grpcurl -plaintext <p2pd>:9091 network.v1.NetworkService/ListPeers` to verify
-  active peers.
+* Run `grpcurl <p2pd>:9091 network.v1.NetworkService/ListPeers` with the issued TLS
+  material to verify active peers. Use `-plaintext` only when the deployment has
+  explicitly set `AllowInsecure = true` for a lab environment.
 * Ensure rate limits and scoring metrics reset as expected.
 
 ## 6. Root Cause Analysis

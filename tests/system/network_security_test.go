@@ -41,7 +41,7 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	// Unauthenticated gossip stream should fail.
 	unauthCtx, cancelUnauth := context.WithTimeout(context.Background(), 2*time.Second)
 	t.Cleanup(cancelUnauth)
-	unauthClient, err := network.Dial(unauthCtx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	unauthClient, err := network.Dial(unauthCtx, addr, true, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial unauth: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	// Authenticated stream should remain connected until the context is cancelled.
 	authCtx, cancelAuth := context.WithCancel(context.Background())
 	defer cancelAuth()
-	authClient, err := network.Dial(authCtx, addr,
+	authClient, err := network.Dial(authCtx, addr, true,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(network.NewStaticTokenCredentials(header, secret)),
 	)

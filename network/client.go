@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"nhbchain/p2p"
@@ -31,11 +33,21 @@ type Client struct {
 	sendCh chan *networkv1.GossipRequest
 }
 
-// Dial initialises a network client against the provided address using an
-// insecure transport. The returned client must be closed by the caller.
-func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client, error) {
+// Dial initialises a network client against the provided address. TLS is used
+// by default unless the caller explicitly allows plaintext connections.
+func Dial(ctx context.Context, target string, allowInsecure bool, opts ...grpc.DialOption) (*Client, error) {
 	if len(opts) == 0 {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if allowInsecure {
+			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		} else {
+			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})))
+		}
+	} else {
+		if allowInsecure {
+			opts = append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, opts...)
+		} else {
+			opts = append([]grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))}, opts...)
+		}
 	}
 	opts = append(opts,
 		grpc.WithChainUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),

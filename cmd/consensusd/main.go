@@ -238,12 +238,12 @@ func main() {
 
 	broadcaster := newResilientBroadcaster(ctx)
 	baseDir := filepath.Dir(*configFile)
-	networkDialOpts, err := buildNetworkDialOptions(cfg, baseDir)
+	allowInsecureNetwork, networkDialOpts, err := buildNetworkDialOptions(cfg, baseDir)
 	if err != nil {
 		panic(fmt.Sprintf("failed to initialise network client security: %v", err))
 	}
 
-	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node, networkDialOpts)
+	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node, allowInsecureNetwork, networkDialOpts)
 
 	bftEngine := bft.NewEngine(node, privKey, broadcaster)
 	node.SetBftEngine(bftEngine)
@@ -283,7 +283,7 @@ const (
 	networkReconnectMaxDelay  = 30 * time.Second
 )
 
-func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node, dialOpts []grpc.DialOption) {
+func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node, allowInsecure bool, dialOpts []grpc.DialOption) {
 	if broadcaster == nil || node == nil {
 		return
 	}
@@ -295,7 +295,7 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 		}
 
 		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		client, err := network.Dial(dialCtx, target, dialOpts...)
+		client, err := network.Dial(dialCtx, target, allowInsecure, dialOpts...)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to connect to p2pd at %s: %v\n", target, err)
@@ -335,15 +335,15 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 
 type envLookupFunc func(string) (string, bool)
 
-func buildNetworkDialOptions(cfg *config.Config, baseDir string) ([]grpc.DialOption, error) {
+func buildNetworkDialOptions(cfg *config.Config, baseDir string) (bool, []grpc.DialOption, error) {
 	if cfg == nil {
-		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
+		return true, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
 	}
 	sec := cfg.NetworkSecurity
 
 	secret, err := sec.ResolveSharedSecret(baseDir, os.LookupEnv)
 	if err != nil {
-		return nil, fmt.Errorf("resolve shared secret: %w", err)
+		return false, nil, fmt.Errorf("resolve shared secret: %w", err)
 	}
 
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -352,11 +352,11 @@ func buildNetworkDialOptions(cfg *config.Config, baseDir string) ([]grpc.DialOpt
 	if caPath := resolvePath(baseDir, sec.ServerCAFile); caPath != "" {
 		pem, err := os.ReadFile(caPath)
 		if err != nil {
-			return nil, fmt.Errorf("read server CA file: %w", err)
+			return false, nil, fmt.Errorf("read server CA file: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("failed to parse server CA certificates from %s", caPath)
+			return false, nil, fmt.Errorf("failed to parse server CA certificates from %s", caPath)
 		}
 		tlsConfig.RootCAs = pool
 		useTLS = true
@@ -366,11 +366,11 @@ func buildNetworkDialOptions(cfg *config.Config, baseDir string) ([]grpc.DialOpt
 	keyPath := resolvePath(baseDir, sec.ClientTLSKeyFile)
 	if certPath != "" || keyPath != "" {
 		if certPath == "" || keyPath == "" {
-			return nil, fmt.Errorf("ClientTLSCertFile and ClientTLSKeyFile must both be configured when using client certificates")
+			return false, nil, fmt.Errorf("ClientTLSCertFile and ClientTLSKeyFile must both be configured when using client certificates")
 		}
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 		if err != nil {
-			return nil, fmt.Errorf("load client TLS keypair: %w", err)
+			return false, nil, fmt.Errorf("load client TLS keypair: %w", err)
 		}
 		tlsConfig.Certificates = []tls.Certificate{cert}
 		useTLS = true
@@ -385,18 +385,21 @@ func buildNetworkDialOptions(cfg *config.Config, baseDir string) ([]grpc.DialOpt
 		useTLS = true
 	}
 
+	allowInsecure := sec.AllowInsecure
 	var opts []grpc.DialOption
 	if useTLS {
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-	} else {
+	} else if allowInsecure {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		return false, nil, fmt.Errorf("network security configuration is missing TLS material; set AllowInsecure=true only for development")
 	}
 
 	if secret != "" {
 		opts = append(opts, grpc.WithPerRPCCredentials(network.NewStaticTokenCredentials(sec.AuthorizationHeaderName(), secret)))
 	}
 
-	return opts, nil
+	return allowInsecure, opts, nil
 }
 
 func resolvePath(baseDir, path string) string {
