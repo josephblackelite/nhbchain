@@ -286,7 +286,7 @@ func (re *RiskEngine) CheckLimits(addr [20]byte, amount *big.Int, params RiskPar
 }
 
 // RecordMint persists the mint against the relevant counters following a successful mint.
-func (re *RiskEngine) RecordMint(addr [20]byte, amount *big.Int) error {
+func (re *RiskEngine) RecordMint(addr [20]byte, amount *big.Int, velocityWindowSeconds uint64) error {
 	if re == nil {
 		return fmt.Errorf("risk engine not initialised")
 	}
@@ -305,7 +305,7 @@ func (re *RiskEngine) RecordMint(addr [20]byte, amount *big.Int) error {
 	if err := re.addToBucket(monthKey, amount); err != nil {
 		return err
 	}
-	if err := re.appendVelocity(addr, now); err != nil {
+	if err := re.appendVelocity(addr, now, velocityWindowSeconds); err != nil {
 		return err
 	}
 	return nil
@@ -402,15 +402,34 @@ func (re *RiskEngine) addToBucket(key []byte, amount *big.Int) error {
 	return re.store.KVPut(key, record)
 }
 
-func (re *RiskEngine) appendVelocity(addr [20]byte, now time.Time) error {
-	samples, err := re.loadVelocity(addr)
+func (re *RiskEngine) appendVelocity(addr [20]byte, now time.Time, windowSeconds uint64) error {
+	key := riskVelocityKey(addr)
+	var existing velocityRecord
+	_, err := re.store.KVGet(key, &existing)
 	if err != nil {
 		return err
 	}
-	cleaned := filterSamples(samples, now.Add(-24*time.Hour))
+	effectiveWindow := windowSeconds
+	if effectiveWindow == 0 {
+		effectiveWindow = existing.WindowSeconds
+	}
+	cleaned := append([]uint64{}, existing.Samples...)
+	if effectiveWindow > 0 {
+		cutoff := now.Add(-time.Duration(effectiveWindow) * time.Second)
+		cleaned = filterSamples(cleaned, cutoff)
+	} else {
+		sort.Slice(cleaned, func(i, j int) bool { return cleaned[i] < cleaned[j] })
+	}
 	cleaned = append(cleaned, uint64(now.UTC().Unix()))
-	record := velocityRecord{Samples: cleaned}
-	return re.store.KVPut(riskVelocityKey(addr), record)
+	sort.Slice(cleaned, func(i, j int) bool { return cleaned[i] < cleaned[j] })
+	record := velocityRecord{
+		Samples:       cleaned,
+		WindowSeconds: effectiveWindow,
+	}
+	if windowSeconds > 0 {
+		record.WindowSeconds = windowSeconds
+	}
+	return re.store.KVPut(key, record)
 }
 
 func (re *RiskEngine) loadVelocity(addr [20]byte) ([]uint64, error) {
@@ -559,7 +578,8 @@ type amountRecord struct {
 }
 
 type velocityRecord struct {
-	Samples []uint64
+	Samples       []uint64
+	WindowSeconds uint64
 }
 
 type riskIndexRecord struct {
