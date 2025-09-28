@@ -31,6 +31,7 @@ type Client struct {
 
 	mu     sync.RWMutex
 	sendCh chan *networkv1.GossipRequest
+	size   int
 }
 
 // Dial initialises a network client against the provided address. TLS is used
@@ -65,6 +66,7 @@ func NewClient(conn *grpc.ClientConn) *Client {
 	return &Client{
 		conn:   conn,
 		client: networkv1.NewNetworkServiceClient(conn),
+		size:   DefaultStreamQueueSize,
 	}
 }
 
@@ -117,7 +119,14 @@ func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error
 		return err
 	}
 
-	sendCh := make(chan *networkv1.GossipRequest, streamQueueSize)
+	c.mu.Lock()
+	queueSize := c.size
+	c.mu.Unlock()
+	if queueSize <= 0 {
+		queueSize = DefaultStreamQueueSize
+	}
+
+	sendCh := make(chan *networkv1.GossipRequest, queueSize)
 	c.mu.Lock()
 	c.sendCh = sendCh
 	c.mu.Unlock()
@@ -186,6 +195,19 @@ func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error
 			// Unknown events are ignored.
 		}
 	}
+}
+
+// SetSendQueueSize adjusts the buffered size for outbound gossip requests.
+func (c *Client) SetSendQueueSize(size int) {
+	if c == nil {
+		return
+	}
+	if size <= 0 {
+		size = DefaultStreamQueueSize
+	}
+	c.mu.Lock()
+	c.size = size
+	c.mu.Unlock()
 }
 
 // NetworkView queries the p2p daemon for network statistics and listen

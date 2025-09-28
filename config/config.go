@@ -78,6 +78,8 @@ type NetworkSecurity struct {
 	AuthorizationHeader       string   `toml:"AuthorizationHeader"`
 	AllowedClientCommonNames  []string `toml:"AllowedClientCommonNames"`
 	ServerName                string   `toml:"ServerName"`
+	StreamQueueSize           int      `toml:"StreamQueueSize"`
+	RelayDropLogRatio         float64  `toml:"RelayDropLogRatio"`
 }
 
 // AuthorizationHeaderName returns the metadata header that carries the
@@ -135,7 +137,11 @@ func defaultGlobalConfig() Global {
 	}
 }
 
-const defaultBlockTimestampToleranceSeconds = 5
+const (
+	defaultBlockTimestampToleranceSeconds = 5
+	defaultStreamQueueSize                = 128
+	defaultRelayDropLogRatio              = 0.1
+)
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
 type P2PSection struct {
@@ -301,6 +307,14 @@ func Load(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.ClientVersion) == "" {
 		cfg.ClientVersion = "nhbchain/node"
+	}
+	if cfg.NetworkSecurity.StreamQueueSize <= 0 {
+		cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize
+	}
+	if cfg.NetworkSecurity.RelayDropLogRatio <= 0 {
+		cfg.NetworkSecurity.RelayDropLogRatio = defaultRelayDropLogRatio
+	} else if cfg.NetworkSecurity.RelayDropLogRatio > 1 {
+		cfg.NetworkSecurity.RelayDropLogRatio = 1
 	}
 
 	if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
@@ -824,6 +838,8 @@ func createDefault(path string) (*Config, error) {
 		MaxMsgsPerSecond:     32,
 		ClientVersion:        "nhbchain/node",
 	}
+	cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize
+	cfg.NetworkSecurity.RelayDropLogRatio = defaultRelayDropLogRatio
 	cfg.P2P = P2PSection{
 		NetworkID:          187001,
 		MaxPeers:           64,

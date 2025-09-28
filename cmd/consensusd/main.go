@@ -243,7 +243,7 @@ func main() {
 		panic(fmt.Sprintf("failed to initialise network client security: %v", err))
 	}
 
-	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node, allowInsecureNetwork, networkDialOpts)
+	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node, allowInsecureNetwork, networkDialOpts, cfg.NetworkSecurity.StreamQueueSize)
 
 	bftEngine := bft.NewEngine(node, privKey, broadcaster)
 	node.SetBftEngine(bftEngine)
@@ -283,7 +283,7 @@ const (
 	networkReconnectMaxDelay  = 30 * time.Second
 )
 
-func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node, allowInsecure bool, dialOpts []grpc.DialOption) {
+func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node, allowInsecure bool, dialOpts []grpc.DialOption, queueSize int) {
 	if broadcaster == nil || node == nil {
 		return
 	}
@@ -311,6 +311,7 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 			continue
 		}
 
+		client.SetSendQueueSize(queueSize)
 		broadcaster.SetClient(client)
 		backoff = networkReconnectBaseDelay
 

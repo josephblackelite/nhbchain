@@ -162,6 +162,12 @@ PEX = false
 	if len(cfg.NetworkSecurity.AllowedClientCommonNames) != 1 || cfg.NetworkSecurity.AllowedClientCommonNames[0] != "consensusd" {
 		t.Fatalf("unexpected allowed common names: %v", cfg.NetworkSecurity.AllowedClientCommonNames)
 	}
+	if cfg.NetworkSecurity.StreamQueueSize != defaultStreamQueueSize {
+		t.Fatalf("unexpected stream queue size: %d", cfg.NetworkSecurity.StreamQueueSize)
+	}
+	if cfg.NetworkSecurity.RelayDropLogRatio != defaultRelayDropLogRatio {
+		t.Fatalf("unexpected relay drop log ratio: %f", cfg.NetworkSecurity.RelayDropLogRatio)
+	}
 	if len(cfg.Bootnodes) != 1 || cfg.Bootnodes[0] != "1.1.1.1:6001" {
 		t.Fatalf("bootnodes not parsed: %v", cfg.Bootnodes)
 	}
