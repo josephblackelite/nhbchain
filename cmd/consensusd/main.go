@@ -23,6 +23,7 @@ import (
 	"nhbchain/consensus/service"
 	"nhbchain/core"
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/lending"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
@@ -37,6 +38,14 @@ const (
 	genesisPathEnv      = "NHB_GENESIS"
 	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
 )
+
+func convertQuota(q config.Quota) nativecommon.Quota {
+	return nativecommon.Quota{
+		MaxRequestsPerMin: q.MaxRequestsPerMin,
+		MaxNHBPerEpoch:    q.MaxNHBPerEpoch,
+		EpochSeconds:      q.EpochSeconds,
+	}
+}
 
 func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
@@ -209,6 +218,14 @@ func main() {
 	node.SetSwapManualOracle(manualOracle)
 
 	node.SetModulePauses(cfg.Global.Pauses)
+	node.SetModuleQuotas(map[string]nativecommon.Quota{
+		"lending": convertQuota(cfg.Global.Quotas.Lending),
+		"swap":    convertQuota(cfg.Global.Quotas.Swap),
+		"escrow":  convertQuota(cfg.Global.Quotas.Escrow),
+		"trade":   convertQuota(cfg.Global.Quotas.Trade),
+		"loyalty": convertQuota(cfg.Global.Quotas.Loyalty),
+		"potso":   convertQuota(cfg.Global.Quotas.POTSO),
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

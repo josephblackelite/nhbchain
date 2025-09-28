@@ -2,6 +2,7 @@ package core
 
 import (
 	"math/big"
+	"time"
 
 	"nhbchain/core/epoch"
 	"nhbchain/core/events"
@@ -117,6 +118,9 @@ func (sp *StateProcessor) pruneEpochHistory() {
 }
 
 func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) error {
+	if err := sp.pruneQuotaCounters(time.Unix(timestamp, 0).UTC()); err != nil {
+		return err
+	}
 	if err := sp.maybeProcessPotsoRewards(height, timestamp); err != nil {
 		return err
 	}
