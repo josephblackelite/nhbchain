@@ -29,6 +29,11 @@ func (m *mockStorage) KVPut(key []byte, value interface{}) error {
 	return nil
 }
 
+func (m *mockStorage) KVDelete(key []byte) error {
+	delete(m.kv, string(key))
+	return nil
+}
+
 func (m *mockStorage) KVGet(key []byte, out interface{}) (bool, error) {
 	encoded, ok := m.kv[string(key)]
 	if !ok {

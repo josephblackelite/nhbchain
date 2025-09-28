@@ -21,6 +21,7 @@ import (
 type Storage interface {
 	KVGet(key []byte, out interface{}) (bool, error)
 	KVPut(key []byte, value interface{}) error
+	KVDelete(key []byte) error
 	KVAppend(key []byte, value []byte) error
 	KVGetList(key []byte, out interface{}) error
 }

@@ -21,6 +21,9 @@ type auditReport struct {
 		SanctionsCheckEnabled   bool   `json:"sanctionsCheckEnabled"`
 	} `json:"risk"`
 	Providers []string `json:"providers"`
+	Sanctions struct {
+		DenyList []string `json:"denyList"`
+	} `json:"sanctions"`
 }
 
 func main() {
@@ -48,6 +51,7 @@ func main() {
 	report.Risk.VelocityWindowSeconds = params.VelocityWindowSeconds
 	report.Risk.VelocityMaxMints = params.VelocityMaxMints
 	report.Risk.SanctionsCheckEnabled = params.SanctionsCheckEnabled
+	report.Sanctions.DenyList = append([]string{}, swapCfg.Sanctions.DenyList...)
 
 	output, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

@@ -3365,6 +3365,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	riskEngine := swap.NewRiskEngine(manager)
+	sanctionsLog := swap.NewSanctionsLog(manager)
 	priceEngine := swap.NewPriceProofEngine(manager, cfg.MaxQuoteAge(), cfg.PriceProofMaxDeviationBps)
 	if err := priceEngine.Verify(priceProof, provider, token); err != nil {
 		switch {
@@ -3402,6 +3403,9 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if riskParams.SanctionsCheckEnabled {
 		checker := n.swapSanctionsChecker()
 		if checker != nil && !checker(voucher.Recipient) {
+			if err := sanctionsLog.RecordFailure(voucher.Recipient, provider, providerTxID); err != nil {
+				return "", false, fmt.Errorf("swap: record sanctions failure: %w", err)
+			}
 			n.emitSwapSanctionAlert(events.SwapSanctionAlert{
 				Address:      voucher.Recipient,
 				Provider:     provider,

@@ -1,17 +1,22 @@
 package swap
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 	"time"
 )
 
 type memoryStore struct {
-	data map[string]interface{}
+	data  map[string]interface{}
+	lists map[string][][]byte
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{data: make(map[string]interface{})}
+	return &memoryStore{
+		data:  make(map[string]interface{}),
+		lists: make(map[string][][]byte),
+	}
 }
 
 func (m *memoryStore) KVGet(key []byte, out interface{}) (bool, error) {
@@ -30,6 +35,11 @@ func (m *memoryStore) KVGet(key []byte, out interface{}) (bool, error) {
 			*dst = src
 			return true, nil
 		}
+	case *riskIndexRecord:
+		if src, ok := value.(riskIndexRecord); ok {
+			*dst = src
+			return true, nil
+		}
 	default:
 		return false, nil
 	}
@@ -41,11 +51,36 @@ func (m *memoryStore) KVPut(key []byte, value interface{}) error {
 	return nil
 }
 
+func (m *memoryStore) KVDelete(key []byte) error {
+	delete(m.data, string(key))
+	return nil
+}
+
 func (m *memoryStore) KVAppend(key []byte, value []byte) error {
+	skey := string(key)
+	list := m.lists[skey]
+	for _, existing := range list {
+		if bytes.Equal(existing, value) {
+			return nil
+		}
+	}
+	cloned := append([]byte(nil), value...)
+	m.lists[skey] = append(list, cloned)
 	return nil
 }
 
 func (m *memoryStore) KVGetList(key []byte, out interface{}) error {
+	switch dst := out.(type) {
+	case *[][]byte:
+		list := m.lists[string(key)]
+		copied := make([][]byte, len(list))
+		for i, entry := range list {
+			copied[i] = append([]byte(nil), entry...)
+		}
+		*dst = copied
+	default:
+		// unsupported type for test helpers
+	}
 	return nil
 }
 
@@ -173,5 +208,36 @@ func TestRiskEngineUsage(t *testing.T) {
 	}
 	if len(usage.VelocityTimestamps) != 1 {
 		t.Fatalf("expected velocity sample recorded")
+	}
+}
+
+func TestRiskEnginePrunesStaleBuckets(t *testing.T) {
+	store := newMemoryStore()
+	engine := NewRiskEngine(store)
+	addr := [20]byte{4}
+	first := time.Date(2024, time.January, 31, 12, 0, 0, 0, time.UTC)
+	engine.SetClock(func() time.Time { return first })
+	if err := engine.RecordMint(addr, big.NewInt(20)); err != nil {
+		t.Fatalf("record initial mint: %v", err)
+	}
+	dayKey := string(riskDailyKey(first, addr))
+	monthKey := string(riskMonthlyKey(first, addr))
+	if _, ok := store.data[dayKey]; !ok {
+		t.Fatalf("expected day bucket recorded")
+	}
+	second := time.Date(2024, time.February, 2, 0, 0, 0, 0, time.UTC)
+	engine.SetClock(func() time.Time { return second })
+	if err := engine.RecordMint(addr, big.NewInt(5)); err != nil {
+		t.Fatalf("record second mint: %v", err)
+	}
+	if _, ok := store.data[dayKey]; ok {
+		t.Fatalf("expected previous day bucket pruned")
+	}
+	if _, ok := store.data[monthKey]; ok {
+		t.Fatalf("expected previous month bucket pruned")
+	}
+	currentDayKey := string(riskDailyKey(second, addr))
+	if _, ok := store.data[currentDayKey]; !ok {
+		t.Fatalf("expected new day bucket persisted")
 	}
 }
