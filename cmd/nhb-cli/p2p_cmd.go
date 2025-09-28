@@ -40,24 +40,26 @@ func runP2PCommand(args []string, stdout, stderr io.Writer) int {
 
 func runP2PCreateTrade(args []string, stdout, stderr io.Writer) int {
 	fs := newP2PFlagSet("p2p create-trade", stderr)
-	var (
-		offerID     string
-		buyer       string
-		seller      string
-		baseToken   string
-		baseAmount  string
-		quoteToken  string
-		quoteAmount string
-		deadline    string
-	)
+        var (
+                offerID     string
+                buyer       string
+                seller      string
+                baseToken   string
+                baseAmount  string
+                quoteToken  string
+                quoteAmount string
+                deadline    string
+                slippage    uint
+        )
 	fs.StringVar(&offerID, "offer", "", "offer identifier")
 	fs.StringVar(&buyer, "buyer", "", "buyer bech32 address")
 	fs.StringVar(&seller, "seller", "", "seller bech32 address")
 	fs.StringVar(&baseToken, "base", "", "base token symbol (NHB or ZNHB)")
 	fs.StringVar(&baseAmount, "base-amount", "", "base amount (supports 100e18 shorthand)")
 	fs.StringVar(&quoteToken, "quote", "", "quote token symbol (NHB or ZNHB)")
-	fs.StringVar(&quoteAmount, "quote-amount", "", "quote amount (supports 100e18 shorthand)")
-	fs.StringVar(&deadline, "deadline", "", "deadline as +duration or RFC3339 timestamp")
+        fs.StringVar(&quoteAmount, "quote-amount", "", "quote amount (supports 100e18 shorthand)")
+        fs.StringVar(&deadline, "deadline", "", "deadline as +duration or RFC3339 timestamp")
+        fs.UintVar(&slippage, "slippage", 0, "maximum slippage in basis points")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -102,23 +104,27 @@ func runP2PCreateTrade(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return printP2PError(stderr, err.Error())
 	}
-	if deadline == "" {
-		return printP2PError(stderr, "--deadline is required")
-	}
-	deadlineUnix, err := parseEscrowDeadline(deadline, p2pNow())
-	if err != nil {
-		return printP2PError(stderr, err.Error())
-	}
-	params := map[string]interface{}{
-		"offerId":     offerID,
-		"buyer":       buyer,
-		"seller":      seller,
-		"baseToken":   normalizedBase,
-		"baseAmount":  normalizedBaseAmount,
-		"quoteToken":  normalizedQuote,
-		"quoteAmount": normalizedQuoteAmount,
-		"deadline":    deadlineUnix,
-	}
+        if deadline == "" {
+                return printP2PError(stderr, "--deadline is required")
+        }
+        deadlineUnix, err := parseEscrowDeadline(deadline, p2pNow())
+        if err != nil {
+                return printP2PError(stderr, err.Error())
+        }
+        if slippage > 10_000 {
+                return printP2PError(stderr, "--slippage must be between 0 and 10000")
+        }
+        params := map[string]interface{}{
+                "offerId":     offerID,
+                "buyer":       buyer,
+                "seller":      seller,
+                "baseToken":   normalizedBase,
+                "baseAmount":  normalizedBaseAmount,
+                "quoteToken":  normalizedQuote,
+                "quoteAmount": normalizedQuoteAmount,
+                "deadline":    deadlineUnix,
+                "slippageBps": slippage,
+        }
 	result, rpcErr, err := p2pRPCCall("p2p_createTrade", params, true)
 	if err != nil {
 		return handleRPCCallError(stderr, err)

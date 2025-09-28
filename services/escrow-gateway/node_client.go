@@ -119,16 +119,17 @@ func (c *RPCNodeClient) EscrowResolve(ctx context.Context, escrowID, caller, out
 }
 
 func (c *RPCNodeClient) P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error) {
-	payload := map[string]interface{}{
-		"offerId":     req.OfferID,
-		"buyer":       req.Buyer,
-		"seller":      req.Seller,
-		"baseToken":   req.BaseToken,
-		"baseAmount":  req.BaseAmount,
-		"quoteToken":  req.QuoteToken,
-		"quoteAmount": req.QuoteAmount,
-		"deadline":    req.Deadline,
-	}
+        payload := map[string]interface{}{
+                "offerId":     req.OfferID,
+                "buyer":       req.Buyer,
+                "seller":      req.Seller,
+                "baseToken":   req.BaseToken,
+                "baseAmount":  req.BaseAmount,
+                "quoteToken":  req.QuoteToken,
+                "quoteAmount": req.QuoteAmount,
+                "deadline":    req.Deadline,
+                "slippageBps": req.SlippageBps,
+        }
 	var result P2PAcceptResponse
 	if err := c.call(ctx, "p2p_createTrade", []interface{}{payload}, &result); err != nil {
 		return nil, err
@@ -246,14 +247,15 @@ type EscrowState struct {
 // P2PAcceptRequest captures the gateway request forwarded to the node RPC when
 // creating a dual-escrow trade.
 type P2PAcceptRequest struct {
-	OfferID     string `json:"offerId"`
-	Buyer       string `json:"buyer"`
-	Seller      string `json:"seller"`
-	BaseToken   string `json:"baseToken"`
-	BaseAmount  string `json:"baseAmount"`
-	QuoteToken  string `json:"quoteToken"`
-	QuoteAmount string `json:"quoteAmount"`
-	Deadline    int64  `json:"deadline"`
+        OfferID     string `json:"offerId"`
+        Buyer       string `json:"buyer"`
+        Seller      string `json:"seller"`
+        BaseToken   string `json:"baseToken"`
+        BaseAmount  string `json:"baseAmount"`
+        QuoteToken  string `json:"quoteToken"`
+        QuoteAmount string `json:"quoteAmount"`
+        Deadline    int64  `json:"deadline"`
+        SlippageBps uint32 `json:"slippageBps"`
 }
 
 // P2PAcceptResponse mirrors the node RPC response for trade creation.

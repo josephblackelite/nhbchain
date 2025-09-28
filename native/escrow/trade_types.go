@@ -22,19 +22,21 @@ const (
 // Trade encapsulates the immutable metadata and runtime status for a two-leg
 // escrow trade.
 type Trade struct {
-	ID          [32]byte
-	OfferID     string
-	Buyer       [20]byte
-	Seller      [20]byte
-	QuoteToken  string
-	QuoteAmount *big.Int
-	EscrowQuote [32]byte
-	BaseToken   string
-	BaseAmount  *big.Int
-	EscrowBase  [32]byte
-	Deadline    int64
-	CreatedAt   int64
-	Status      TradeStatus
+        ID          [32]byte
+        OfferID     string
+        Buyer       [20]byte
+        Seller      [20]byte
+        QuoteToken  string
+        QuoteAmount *big.Int
+        EscrowQuote [32]byte
+        BaseToken   string
+        BaseAmount  *big.Int
+        EscrowBase  [32]byte
+        Deadline    int64
+        CreatedAt   int64
+        FundedAt    int64
+        SlippageBps uint32
+        Status      TradeStatus
 }
 
 // Clone returns a deep copy of the trade allowing callers to mutate the result
@@ -49,12 +51,12 @@ func (t *Trade) Clone() *Trade {
 	} else {
 		clone.QuoteAmount = big.NewInt(0)
 	}
-	if t.BaseAmount != nil {
-		clone.BaseAmount = new(big.Int).Set(t.BaseAmount)
-	} else {
-		clone.BaseAmount = big.NewInt(0)
-	}
-	return &clone
+        if t.BaseAmount != nil {
+                clone.BaseAmount = new(big.Int).Set(t.BaseAmount)
+        } else {
+                clone.BaseAmount = big.NewInt(0)
+        }
+        return &clone
 }
 
 // Valid reports whether the trade status value is supported.
@@ -94,11 +96,14 @@ func SanitizeTrade(t *Trade) (*Trade, error) {
 	if clone.BaseAmount == nil {
 		clone.BaseAmount = big.NewInt(0)
 	}
-	if clone.BaseAmount.Sign() < 0 {
-		return nil, fmt.Errorf("trade: base amount must be non-negative")
-	}
-	if !clone.Status.Valid() {
-		return nil, fmt.Errorf("trade: invalid status %d", clone.Status)
-	}
-	return clone, nil
+        if clone.BaseAmount.Sign() < 0 {
+                return nil, fmt.Errorf("trade: base amount must be non-negative")
+        }
+        if clone.SlippageBps > 10_000 {
+                return nil, fmt.Errorf("trade: slippage bps out of range")
+        }
+        if !clone.Status.Valid() {
+                return nil, fmt.Errorf("trade: invalid status %d", clone.Status)
+        }
+        return clone, nil
 }

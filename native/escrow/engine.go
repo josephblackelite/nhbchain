@@ -28,13 +28,14 @@ var (
 const moduleName = "escrow"
 
 type engineState interface {
-	EscrowPut(*Escrow) error
-	EscrowGet(id [32]byte) (*Escrow, bool)
-	EscrowCredit(id [32]byte, token string, amt *big.Int) error
-	EscrowDebit(id [32]byte, token string, amt *big.Int) error
-	EscrowVaultAddress(token string) ([20]byte, error)
-	GetAccount(addr []byte) (*types.Account, error)
-	PutAccount(addr []byte, account *types.Account) error
+        EscrowPut(*Escrow) error
+        EscrowGet(id [32]byte) (*Escrow, bool)
+        EscrowCredit(id [32]byte, token string, amt *big.Int) error
+        EscrowDebit(id [32]byte, token string, amt *big.Int) error
+        EscrowBalance(id [32]byte, token string) (*big.Int, error)
+        EscrowVaultAddress(token string) ([20]byte, error)
+        GetAccount(addr []byte) (*types.Account, error)
+        PutAccount(addr []byte, account *types.Account) error
 	EscrowRealmPut(*EscrowRealm) error
 	EscrowRealmGet(id string) (*EscrowRealm, bool, error)
 	EscrowFrozenPolicyPut(id [32]byte, policy *FrozenArb) error

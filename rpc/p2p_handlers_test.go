@@ -142,16 +142,17 @@ func TestP2PCreateAndGetTrade(t *testing.T) {
 	sellerKey, _ := crypto.GeneratePrivateKey()
 	offerID := "OFF_SUCCESS"
 	deadline := time.Now().Add(2 * time.Minute).Unix()
-	payload := map[string]interface{}{
-		"offerId":     offerID,
-		"buyer":       buyerKey.PubKey().Address().String(),
-		"seller":      sellerKey.PubKey().Address().String(),
-		"baseToken":   "NHB",
-		"baseAmount":  "5",
-		"quoteToken":  "ZNHB",
-		"quoteAmount": "7",
-		"deadline":    deadline,
-	}
+        payload := map[string]interface{}{
+                "offerId":     offerID,
+                "buyer":       buyerKey.PubKey().Address().String(),
+                "seller":      sellerKey.PubKey().Address().String(),
+                "baseToken":   "NHB",
+                "baseAmount":  "5",
+                "quoteToken":  "ZNHB",
+                "quoteAmount": "7",
+                "deadline":    deadline,
+                "slippageBps": 75,
+        }
 	req := &RPCRequest{ID: 6, Params: []json.RawMessage{marshalParam(t, payload)}}
 	rec := httptest.NewRecorder()
 	env.server.handleP2PCreateTrade(rec, env.newRequest(), req)
@@ -221,12 +222,15 @@ func TestP2PCreateAndGetTrade(t *testing.T) {
 	if tradeRes.OfferID != offerID {
 		t.Fatalf("unexpected offer id: %s", tradeRes.OfferID)
 	}
-	if tradeRes.Status != "init" {
-		t.Fatalf("unexpected status: %s", tradeRes.Status)
-	}
-	if tradeRes.QuoteAmount != "7" || tradeRes.BaseAmount != "5" {
-		t.Fatalf("unexpected amounts: %+v", tradeRes)
-	}
+        if tradeRes.Status != "init" {
+                t.Fatalf("unexpected status: %s", tradeRes.Status)
+        }
+        if tradeRes.QuoteAmount != "7" || tradeRes.BaseAmount != "5" {
+                t.Fatalf("unexpected amounts: %+v", tradeRes)
+        }
+        if tradeRes.SlippageBps != 75 {
+                t.Fatalf("unexpected slippage: %d", tradeRes.SlippageBps)
+        }
 }
 
 func TestP2PSettleForbiddenCaller(t *testing.T) {
