@@ -14,6 +14,8 @@ import (
 type RateLimit struct {
 	RatePerSecond float64
 	Burst         int
+	Tokens        map[string]int
+	DefaultTokens int
 }
 
 type rateEntry struct {
@@ -51,7 +53,8 @@ func (r *RateLimiter) Middleware(key string) func(http.Handler) http.Handler {
 			identifier := clientID(req)
 			bucketKey := key + "|" + identifier
 			limiter := r.obtainLimiter(bucketKey, limit)
-			if !limiter.Allow() {
+			tokens := r.tokensFor(limit, req)
+			if !limiter.AllowN(r.clockNow(), tokens) {
 				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 				return
 			}
@@ -79,6 +82,23 @@ func (r *RateLimiter) obtainLimiter(id string, cfg RateLimit) *rate.Limiter {
 	r.visitors[id] = &rateEntry{limiter: limiter}
 	go r.cleanup(id)
 	return limiter
+}
+
+func (r *RateLimiter) tokensFor(limit RateLimit, req *http.Request) int {
+	if len(limit.Tokens) == 0 {
+		if limit.DefaultTokens > 0 {
+			return limit.DefaultTokens
+		}
+		return 1
+	}
+	lookup := strings.ToUpper(req.Method) + " " + req.URL.Path
+	if tokens, ok := limit.Tokens[lookup]; ok && tokens > 0 {
+		return tokens
+	}
+	if limit.DefaultTokens > 0 {
+		return limit.DefaultTokens
+	}
+	return 1
 }
 
 func (r *RateLimiter) cleanup(id string) {

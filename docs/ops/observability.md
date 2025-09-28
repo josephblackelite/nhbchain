@@ -9,10 +9,13 @@ This document describes how the NHB Chain observability stack is deployed, how d
 - Exporters: `prometheus-node-exporter` for host-level stats, custom NHB Chain exporters for consensus and RPC metrics, and the OpenTelemetry collector's Prometheus exporter for application metrics.
 - Metrics are labeled with `cluster`, `role`, `shard`, and `env` to enable granular dashboards.
 - The Prometheus configuration is versioned at [`ops/prometheus/prometheus.yml`](../../ops/prometheus/prometheus.yml) with SLO recording and alerting rules in [`ops/prometheus/rules/slo.rules.yml`](../../ops/prometheus/rules/slo.rules.yml).
+- Module-level request instrumentation is exposed via the `nhb_module_*` Prometheus series to track per-method QPS, latency, and throttle pressure.
 
 ### Key Metrics & Thresholds
 - **Consensus health**: `nhb_consensus_finality_lag_seconds` should remain < 15s; alert at 30s.
 - **RPC latency**: `nhb_rpc_request_duration_seconds` 95th percentile < 500ms; alert at 1s.
+- **Module health**: `nhb_module_requests_total` error outcome < 5% and `nhb_module_request_duration_seconds` p95 < 1s per module.
+- **Throttle pressure**: `nhb_module_throttles_total` increases > 25/5m per module or any `reason="quota"` increment.
 - **Block production**: `nhb_validator_blocks_signed_total` should increase every epoch; alert if flat for > 2 epochs.
 - **Oracle freshness**: `nhb_oracle_update_age_seconds` < 60s; alert at 120s.
 
@@ -66,6 +69,9 @@ This document describes how the NHB Chain observability stack is deployed, how d
 ### Policy Highlights
 - **Finality lag**: triggered when lag > 30s for 3 consecutive intervals.
 - **RPC failure rate**: triggered at > 2% error rate over 10 minutes.
+- **Module high error rate**: `ModuleHighErrorRate` fires after 10 minutes above the 5% budget per module.
+- **Module latency regression**: `ModuleLatencyP95Degraded` warns when the p95 exceeds 1s for 15 minutes.
+- **Module throttles**: `ModuleThrottleSaturation`, `ModulePauseEngaged`, and `ModuleQuotaExhausted` surface rate-limit backpressure, pause guards, and quota exhaustion.
 - **Oracle stale data**: triggered when data age > 2 minutes.
 - **Validator downtime**: triggered when heartbeat missing for 3 epochs.
 

@@ -1,0 +1,86 @@
+groups:
+  - name: module-runtime
+    interval: 30s
+    rules:
+      - alert: ModuleHighErrorRate
+        expr: |
+          sum(rate(nhb_module_requests_total{outcome="error"}[5m])) by (module)
+            /
+          clamp_min(sum(rate(nhb_module_requests_total[5m])) by (module), 1e-9)
+            > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "High module error rate"
+          description: |
+            Module {{ $labels.module }} is returning errors for more than 5% of
+            requests over the last 10 minutes (current error rate: {{ $value | printf "%.2f" }}).
+            Inspect nhb_module_errors_total for offending methods and review the RPC logs.
+
+      - alert: ModuleLatencyP95Degraded
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(nhb_module_request_duration_seconds_bucket[5m])) by (module, method, le)
+          ) > 1
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Module latency regression"
+          description: |
+            The p95 latency for module {{ $labels.module }} method {{ $labels.method }}
+            exceeded 1s for the past 15 minutes. Review downstream dependencies and
+            recent deployments.
+
+      - alert: ModuleThrottleSaturation
+        expr: sum(increase(nhb_module_throttles_total[5m])) by (module, reason) > 25
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Module throttles saturating"
+          description: |
+            Module {{ $labels.module }} is rejecting requests due to {{ $labels.reason }}
+            more than 25 times in 5 minutes. Validate quota configuration and client behaviour.
+
+      - alert: ModulePauseEngaged
+        expr: |
+          max_over_time(nhb_module_throttles_total{reason="pause"}[1h])
+            - min_over_time(nhb_module_throttles_total{reason="pause"}[1h]) > 0
+        for: 30m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Module pause engaged"
+          description: |
+            A pause guard for module {{ $labels.module }} engaged within the last hour.
+            Confirm the pause was intentional and follow the incident response runbook.
+
+      - alert: OracleFeedStale
+        expr: max(nhb_oracle_update_age_seconds) > 120
+        for: 5m
+        labels:
+          severity: critical
+          team: data
+        annotations:
+          summary: "Oracle feed stale"
+          description: |
+            The latest oracle update age exceeded two minutes. Verify upstream feeds
+            and restart the swap oracle pipeline if required.
+
+      - alert: ModuleQuotaExhausted
+        expr: sum(increase(nhb_module_throttles_total{reason="quota"}[10m])) by (module) > 0
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Module quota exhaustion"
+          description: |
+            Module {{ $labels.module }} exhausted its address quota in the last ten minutes.
+            Coordinate with consumers on request backoff or increase the configured limits.

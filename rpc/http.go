@@ -22,6 +22,7 @@ import (
 	"nhbchain/core/epoch"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/observability"
 	"nhbchain/p2p"
 	"nhbchain/rpc/modules"
 )
@@ -35,16 +36,16 @@ const (
 )
 
 const (
-        codeParseError     = -32700
-        codeInvalidRequest = -32600
-        codeMethodNotFound = -32601
-        codeInvalidParams  = -32602
-        codeUnauthorized   = -32001
-        codeServerError    = -32000
-        codeDuplicateTx    = -32010
-        codeRateLimited    = -32020
-        codeMempoolFull    = -32030
-        codeInvalidPolicyInvariants = -32040
+	codeParseError              = -32700
+	codeInvalidRequest          = -32600
+	codeMethodNotFound          = -32601
+	codeInvalidParams           = -32602
+	codeUnauthorized            = -32001
+	codeServerError             = -32000
+	codeDuplicateTx             = -32010
+	codeRateLimited             = -32020
+	codeMempoolFull             = -32030
+	codeInvalidPolicyInvariants = -32040
 )
 
 type rateLimiter struct {
@@ -222,6 +223,16 @@ type RPCResponse struct {
 	Error   *RPCError   `json:"error,omitempty"`
 }
 
+type rpcResponseRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *rpcResponseRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
 type RPCError struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
@@ -246,6 +257,22 @@ func writeError(w http.ResponseWriter, status int, id interface{}, code int, mes
 func writeResult(w http.ResponseWriter, id interface{}, result interface{}) {
 	resp := RPCResponse{JSONRPC: jsonRPCVersion, ID: id, Result: result}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func moduleAndMethod(method string) (string, string) {
+	trimmed := strings.TrimSpace(method)
+	if trimmed == "" {
+		return "", ""
+	}
+	if idx := strings.Index(trimmed, "_"); idx > 0 {
+		module := trimmed[:idx]
+		action := trimmed[idx+1:]
+		if action == "" {
+			action = "call"
+		}
+		return module, action
+	}
+	return trimmed, "call"
 }
 
 type BalanceResponse struct {
@@ -353,307 +380,321 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	moduleName, methodName := moduleAndMethod(req.Method)
+	recorder := &rpcResponseRecorder{ResponseWriter: w, status: http.StatusOK}
+	start := time.Now()
+	defer func() {
+		if moduleName == "" {
+			return
+		}
+		metrics := observability.ModuleMetrics()
+		metrics.Observe(moduleName, methodName, recorder.status, time.Since(start))
+		if recorder.status == http.StatusTooManyRequests {
+			metrics.RecordThrottle(moduleName, "rate_limit")
+		}
+	}()
+
 	switch req.Method {
 	case "nhb_sendTransaction":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleSendTransaction(w, r, req)
+		s.handleSendTransaction(recorder, r, req)
 	case "tx_previewSponsorship":
-		s.handleTxPreviewSponsorship(w, r, req)
+		s.handleTxPreviewSponsorship(recorder, r, req)
 	case "tx_getSponsorshipConfig":
-		s.handleTxGetSponsorshipConfig(w, r, req)
+		s.handleTxGetSponsorshipConfig(recorder, r, req)
 	case "tx_setSponsorshipEnabled":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleTxSetSponsorshipEnabled(w, r, req)
+		s.handleTxSetSponsorshipEnabled(recorder, r, req)
 	case "nhb_getBalance":
-		s.handleGetBalance(w, r, req)
+		s.handleGetBalance(recorder, r, req)
 	case "nhb_getLatestBlocks":
-		s.handleGetLatestBlocks(w, r, req)
+		s.handleGetLatestBlocks(recorder, r, req)
 	case "nhb_getLatestTransactions":
-		s.handleGetLatestTransactions(w, r, req)
+		s.handleGetLatestTransactions(recorder, r, req)
 	case "nhb_getEpochSummary":
-		s.handleGetEpochSummary(w, r, req)
+		s.handleGetEpochSummary(recorder, r, req)
 	case "nhb_getEpochSnapshot":
-		s.handleGetEpochSnapshot(w, r, req)
+		s.handleGetEpochSnapshot(recorder, r, req)
 	case "nhb_getRewardEpoch":
-		s.handleGetRewardEpoch(w, r, req)
+		s.handleGetRewardEpoch(recorder, r, req)
 	case "nhb_getRewardPayout":
-		s.handleGetRewardPayout(w, r, req)
+		s.handleGetRewardPayout(recorder, r, req)
 	case "mint_with_sig":
-		s.handleMintWithSig(w, r, req)
+		s.handleMintWithSig(recorder, r, req)
 	case "swap_submitVoucher":
-		s.handleSwapSubmitVoucher(w, r, req)
+		s.handleSwapSubmitVoucher(recorder, r, req)
 	case "swap_voucher_get":
-		s.handleSwapVoucherGet(w, r, req)
+		s.handleSwapVoucherGet(recorder, r, req)
 	case "swap_voucher_list":
-		s.handleSwapVoucherList(w, r, req)
+		s.handleSwapVoucherList(recorder, r, req)
 	case "swap_voucher_export":
-		s.handleSwapVoucherExport(w, r, req)
+		s.handleSwapVoucherExport(recorder, r, req)
 	case "swap_limits":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleSwapLimits(w, r, req)
+		s.handleSwapLimits(recorder, r, req)
 	case "swap_provider_status":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleSwapProviderStatus(w, r, req)
+		s.handleSwapProviderStatus(recorder, r, req)
 	case "swap_burn_list":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleSwapBurnList(w, r, req)
+		s.handleSwapBurnList(recorder, r, req)
 	case "swap_voucher_reverse":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleSwapVoucherReverse(w, r, req)
+		s.handleSwapVoucherReverse(recorder, r, req)
 	case "lending_getMarket":
-		s.handleLendingGetMarket(w, r, req)
+		s.handleLendingGetMarket(recorder, r, req)
 	case "lend_getPools":
-		s.handleLendGetPools(w, r, req)
+		s.handleLendGetPools(recorder, r, req)
 	case "lend_createPool":
-		s.handleLendCreatePool(w, r, req)
+		s.handleLendCreatePool(recorder, r, req)
 	case "lending_getUserAccount":
-		s.handleLendingGetUserAccount(w, r, req)
+		s.handleLendingGetUserAccount(recorder, r, req)
 	case "lending_supplyNHB":
-		s.handleLendingSupplyNHB(w, r, req)
+		s.handleLendingSupplyNHB(recorder, r, req)
 	case "lending_withdrawNHB":
-		s.handleLendingWithdrawNHB(w, r, req)
+		s.handleLendingWithdrawNHB(recorder, r, req)
 	case "lending_depositZNHB":
-		s.handleLendingDepositZNHB(w, r, req)
+		s.handleLendingDepositZNHB(recorder, r, req)
 	case "lending_withdrawZNHB":
-		s.handleLendingWithdrawZNHB(w, r, req)
+		s.handleLendingWithdrawZNHB(recorder, r, req)
 	case "lending_borrowNHB":
-		s.handleLendingBorrowNHB(w, r, req)
+		s.handleLendingBorrowNHB(recorder, r, req)
 	case "lending_borrowNHBWithFee":
-		s.handleLendingBorrowNHBWithFee(w, r, req)
+		s.handleLendingBorrowNHBWithFee(recorder, r, req)
 	case "lending_repayNHB":
-		s.handleLendingRepayNHB(w, r, req)
+		s.handleLendingRepayNHB(recorder, r, req)
 	case "lending_liquidate":
-		s.handleLendingLiquidate(w, r, req)
+		s.handleLendingLiquidate(recorder, r, req)
 	case "stake_delegate":
-		s.handleStakeDelegate(w, r, req)
+		s.handleStakeDelegate(recorder, r, req)
 	case "stake_undelegate":
-		s.handleStakeUndelegate(w, r, req)
+		s.handleStakeUndelegate(recorder, r, req)
 	case "stake_claim":
-		s.handleStakeClaim(w, r, req)
+		s.handleStakeClaim(recorder, r, req)
 	case "loyalty_createBusiness":
-		s.handleLoyaltyCreateBusiness(w, r, req)
+		s.handleLoyaltyCreateBusiness(recorder, r, req)
 	case "loyalty_setPaymaster":
-		s.handleLoyaltySetPaymaster(w, r, req)
+		s.handleLoyaltySetPaymaster(recorder, r, req)
 	case "loyalty_addMerchant":
-		s.handleLoyaltyAddMerchant(w, r, req)
+		s.handleLoyaltyAddMerchant(recorder, r, req)
 	case "loyalty_removeMerchant":
-		s.handleLoyaltyRemoveMerchant(w, r, req)
+		s.handleLoyaltyRemoveMerchant(recorder, r, req)
 	case "loyalty_createProgram":
-		s.handleLoyaltyCreateProgram(w, r, req)
+		s.handleLoyaltyCreateProgram(recorder, r, req)
 	case "loyalty_updateProgram":
-		s.handleLoyaltyUpdateProgram(w, r, req)
+		s.handleLoyaltyUpdateProgram(recorder, r, req)
 	case "loyalty_pauseProgram":
-		s.handleLoyaltyPauseProgram(w, r, req)
+		s.handleLoyaltyPauseProgram(recorder, r, req)
 	case "loyalty_resumeProgram":
-		s.handleLoyaltyResumeProgram(w, r, req)
+		s.handleLoyaltyResumeProgram(recorder, r, req)
 	case "loyalty_getBusiness":
-		s.handleLoyaltyGetBusiness(w, r, req)
+		s.handleLoyaltyGetBusiness(recorder, r, req)
 	case "loyalty_listPrograms":
-		s.handleLoyaltyListPrograms(w, r, req)
+		s.handleLoyaltyListPrograms(recorder, r, req)
 	case "loyalty_programStats":
-		s.handleLoyaltyProgramStats(w, r, req)
+		s.handleLoyaltyProgramStats(recorder, r, req)
 	case "loyalty_userDaily":
-		s.handleLoyaltyUserDaily(w, r, req)
+		s.handleLoyaltyUserDaily(recorder, r, req)
 	case "loyalty_paymasterBalance":
-		s.handleLoyaltyPaymasterBalance(w, r, req)
+		s.handleLoyaltyPaymasterBalance(recorder, r, req)
 	case "loyalty_resolveUsername":
-		s.handleLoyaltyResolveUsername(w, r, req)
+		s.handleLoyaltyResolveUsername(recorder, r, req)
 	case "loyalty_userQR":
-		s.handleLoyaltyUserQR(w, r, req)
+		s.handleLoyaltyUserQR(recorder, r, req)
 	case "creator_publish":
-		s.handleCreatorPublish(w, r, req)
+		s.handleCreatorPublish(recorder, r, req)
 	case "creator_tip":
-		s.handleCreatorTip(w, r, req)
+		s.handleCreatorTip(recorder, r, req)
 	case "creator_stake":
-		s.handleCreatorStake(w, r, req)
+		s.handleCreatorStake(recorder, r, req)
 	case "creator_unstake":
-		s.handleCreatorUnstake(w, r, req)
+		s.handleCreatorUnstake(recorder, r, req)
 	case "creator_payouts":
-		s.handleCreatorPayouts(w, r, req)
+		s.handleCreatorPayouts(recorder, r, req)
 	case "identity_setAlias":
-		s.handleIdentitySetAlias(w, r, req)
+		s.handleIdentitySetAlias(recorder, r, req)
 	case "identity_setAvatar":
-		s.handleIdentitySetAvatar(w, r, req)
+		s.handleIdentitySetAvatar(recorder, r, req)
 	case "identity_resolve":
-		s.handleIdentityResolve(w, r, req)
+		s.handleIdentityResolve(recorder, r, req)
 	case "identity_reverse":
-		s.handleIdentityReverse(w, r, req)
+		s.handleIdentityReverse(recorder, r, req)
 	case "identity_createClaimable":
-		s.handleIdentityCreateClaimable(w, r, req)
+		s.handleIdentityCreateClaimable(recorder, r, req)
 	case "identity_claim":
-		s.handleIdentityClaim(w, r, req)
+		s.handleIdentityClaim(recorder, r, req)
 	case "claimable_create":
-		s.handleClaimableCreate(w, r, req)
+		s.handleClaimableCreate(recorder, r, req)
 	case "claimable_claim":
-		s.handleClaimableClaim(w, r, req)
+		s.handleClaimableClaim(recorder, r, req)
 	case "claimable_cancel":
-		s.handleClaimableCancel(w, r, req)
+		s.handleClaimableCancel(recorder, r, req)
 	case "claimable_get":
-		s.handleClaimableGet(w, r, req)
+		s.handleClaimableGet(recorder, r, req)
 	case "escrow_create":
-		s.handleEscrowCreate(w, r, req)
+		s.handleEscrowCreate(recorder, r, req)
 	case "escrow_get":
-		s.handleEscrowGet(w, r, req)
+		s.handleEscrowGet(recorder, r, req)
 	case "escrow_getRealm":
-		s.handleEscrowGetRealm(w, r, req)
+		s.handleEscrowGetRealm(recorder, r, req)
 	case "escrow_getSnapshot":
-		s.handleEscrowGetSnapshot(w, r, req)
+		s.handleEscrowGetSnapshot(recorder, r, req)
 	case "escrow_listEvents":
-		s.handleEscrowListEvents(w, r, req)
+		s.handleEscrowListEvents(recorder, r, req)
 	case "escrow_fund":
-		s.handleEscrowFund(w, r, req)
+		s.handleEscrowFund(recorder, r, req)
 	case "escrow_release":
-		s.handleEscrowRelease(w, r, req)
+		s.handleEscrowRelease(recorder, r, req)
 	case "escrow_refund":
-		s.handleEscrowRefund(w, r, req)
+		s.handleEscrowRefund(recorder, r, req)
 	case "escrow_expire":
-		s.handleEscrowExpire(w, r, req)
+		s.handleEscrowExpire(recorder, r, req)
 	case "escrow_dispute":
-		s.handleEscrowDispute(w, r, req)
+		s.handleEscrowDispute(recorder, r, req)
 	case "escrow_resolve":
-		s.handleEscrowResolve(w, r, req)
+		s.handleEscrowResolve(recorder, r, req)
 	case "escrow_milestoneCreate":
-		s.handleEscrowMilestoneCreate(w, r, req)
+		s.handleEscrowMilestoneCreate(recorder, r, req)
 	case "escrow_milestoneGet":
-		s.handleEscrowMilestoneGet(w, r, req)
+		s.handleEscrowMilestoneGet(recorder, r, req)
 	case "escrow_milestoneFund":
-		s.handleEscrowMilestoneFund(w, r, req)
+		s.handleEscrowMilestoneFund(recorder, r, req)
 	case "escrow_milestoneRelease":
-		s.handleEscrowMilestoneRelease(w, r, req)
+		s.handleEscrowMilestoneRelease(recorder, r, req)
 	case "escrow_milestoneCancel":
-		s.handleEscrowMilestoneCancel(w, r, req)
+		s.handleEscrowMilestoneCancel(recorder, r, req)
 	case "escrow_milestoneSubscriptionUpdate":
-		s.handleEscrowMilestoneSubscriptionUpdate(w, r, req)
+		s.handleEscrowMilestoneSubscriptionUpdate(recorder, r, req)
 	case "net_info":
-		s.handleNetInfo(w, r, req)
+		s.handleNetInfo(recorder, r, req)
 	case "net_peers":
-		s.handleNetPeers(w, r, req)
+		s.handleNetPeers(recorder, r, req)
 	case "net_dial":
-		s.handleNetDial(w, r, req)
+		s.handleNetDial(recorder, r, req)
 	case "net_ban":
-		s.handleNetBan(w, r, req)
+		s.handleNetBan(recorder, r, req)
 	case "sync_snapshot_export":
-		s.handleSyncSnapshotExport(w, r, req)
+		s.handleSyncSnapshotExport(recorder, r, req)
 	case "sync_snapshot_import":
-		s.handleSyncSnapshotImport(w, r, req)
+		s.handleSyncSnapshotImport(recorder, r, req)
 	case "sync_status":
-		s.handleSyncStatus(w, r, req)
+		s.handleSyncStatus(recorder, r, req)
 	case "p2p_info":
-		s.handleP2PInfo(w, r, req)
+		s.handleP2PInfo(recorder, r, req)
 	case "p2p_peers":
-		s.handleP2PPeers(w, r, req)
+		s.handleP2PPeers(recorder, r, req)
 	case "p2p_createTrade":
-		s.handleP2PCreateTrade(w, r, req)
+		s.handleP2PCreateTrade(recorder, r, req)
 	case "p2p_getTrade":
-		s.handleP2PGetTrade(w, r, req)
+		s.handleP2PGetTrade(recorder, r, req)
 	case "p2p_settle":
-		s.handleP2PSettle(w, r, req)
+		s.handleP2PSettle(recorder, r, req)
 	case "p2p_dispute":
-		s.handleP2PDispute(w, r, req)
+		s.handleP2PDispute(recorder, r, req)
 	case "p2p_resolve":
-		s.handleP2PResolve(w, r, req)
+		s.handleP2PResolve(recorder, r, req)
 	case "engagement_register_device":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleEngagementRegisterDevice(w, r, req)
+		s.handleEngagementRegisterDevice(recorder, r, req)
 	case "engagement_submit_heartbeat":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handleEngagementSubmitHeartbeat(w, r, req)
+		s.handleEngagementSubmitHeartbeat(recorder, r, req)
 	case "potso_heartbeat":
-		s.handlePotsoHeartbeat(w, r, req)
+		s.handlePotsoHeartbeat(recorder, r, req)
 	case "potso_userMeters":
-		s.handlePotsoUserMeters(w, r, req)
+		s.handlePotsoUserMeters(recorder, r, req)
 	case "potso_top":
-		s.handlePotsoTop(w, r, req)
+		s.handlePotsoTop(recorder, r, req)
 	case "potso_leaderboard":
-		s.handlePotsoLeaderboard(w, r, req)
+		s.handlePotsoLeaderboard(recorder, r, req)
 	case "potso_params":
-		s.handlePotsoParams(w, r, req)
+		s.handlePotsoParams(recorder, r, req)
 	case "potso_stake_lock":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handlePotsoStakeLock(w, r, req)
+		s.handlePotsoStakeLock(recorder, r, req)
 	case "potso_stake_unbond":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handlePotsoStakeUnbond(w, r, req)
+		s.handlePotsoStakeUnbond(recorder, r, req)
 	case "potso_stake_withdraw":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handlePotsoStakeWithdraw(w, r, req)
+		s.handlePotsoStakeWithdraw(recorder, r, req)
 	case "potso_stake_info":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handlePotsoStakeInfo(w, r, req)
+		s.handlePotsoStakeInfo(recorder, r, req)
 	case "potso_epoch_info":
-		s.handlePotsoEpochInfo(w, r, req)
+		s.handlePotsoEpochInfo(recorder, r, req)
 	case "potso_epoch_payouts":
-		s.handlePotsoEpochPayouts(w, r, req)
+		s.handlePotsoEpochPayouts(recorder, r, req)
 	case "potso_reward_claim":
 		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
-		s.handlePotsoRewardClaim(w, r, req)
+		s.handlePotsoRewardClaim(recorder, r, req)
 	case "potso_rewards_history":
-		s.handlePotsoRewardsHistory(w, r, req)
+		s.handlePotsoRewardsHistory(recorder, r, req)
 	case "potso_export_epoch":
-		s.handlePotsoExportEpoch(w, r, req)
+		s.handlePotsoExportEpoch(recorder, r, req)
 	case "potso_submitEvidence":
-		s.handlePotsoSubmitEvidence(w, r, req)
+		s.handlePotsoSubmitEvidence(recorder, r, req)
 	case "potso_getEvidence":
-		s.handlePotsoGetEvidence(w, r, req)
+		s.handlePotsoGetEvidence(recorder, r, req)
 	case "potso_listEvidence":
-		s.handlePotsoListEvidence(w, r, req)
+		s.handlePotsoListEvidence(recorder, r, req)
 	case "gov_propose":
-		s.handleGovernancePropose(w, r, req)
+		s.handleGovernancePropose(recorder, r, req)
 	case "gov_vote":
-		s.handleGovernanceVote(w, r, req)
+		s.handleGovernanceVote(recorder, r, req)
 	case "gov_proposal":
-		s.handleGovernanceProposal(w, r, req)
+		s.handleGovernanceProposal(recorder, r, req)
 	case "gov_list":
-		s.handleGovernanceList(w, r, req)
+		s.handleGovernanceList(recorder, r, req)
 	case "gov_finalize":
-		s.handleGovernanceFinalize(w, r, req)
+		s.handleGovernanceFinalize(recorder, r, req)
 	case "gov_queue":
-		s.handleGovernanceQueue(w, r, req)
+		s.handleGovernanceQueue(recorder, r, req)
 	case "gov_execute":
-		s.handleGovernanceExecute(w, r, req)
+		s.handleGovernanceExecute(recorder, r, req)
 	case "reputation_verifySkill":
-		s.handleReputationVerifySkill(w, r, req)
+		s.handleReputationVerifySkill(recorder, r, req)
 	default:
-		writeError(w, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
+		writeError(recorder, http.StatusNotFound, req.ID, codeMethodNotFound, fmt.Sprintf("unknown method %s", req.Method), nil)
 	}
 }
 

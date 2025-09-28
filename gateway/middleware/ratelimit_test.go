@@ -65,6 +65,45 @@ func TestRateLimiterSeparatesRoutes(t *testing.T) {
 	}
 }
 
+func TestRateLimiterAppliesRouteTokens(t *testing.T) {
+	limiter := NewRateLimiter(map[string]RateLimit{
+		"lending": {
+			RatePerSecond: 5,
+			Burst:         5,
+			DefaultTokens: 1,
+			Tokens: map[string]int{
+				"POST /v1/lending/supply": 3,
+			},
+		},
+	}, nil)
+
+	handler := limiter.Middleware("lending")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/lending/supply", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected first supply request to succeed, got %d", res.Code)
+	}
+
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected second supply request to consume burst and be rate limited, got %d", res.Code)
+	}
+
+	// A different route should still be able to proceed because it only
+	// consumes the default token cost of 1.
+	statusReq := httptest.NewRequest(http.MethodGet, "/v1/lending/status", nil)
+	statusRes := httptest.NewRecorder()
+	handler.ServeHTTP(statusRes, statusReq)
+	if statusRes.Code != http.StatusOK {
+		t.Fatalf("expected status route to succeed with default token cost, got %d", statusRes.Code)
+	}
+}
+
 func TestRateLimiterPrefersAPIKeyOverIP(t *testing.T) {
 	limiter := NewRateLimiter(map[string]RateLimit{
 		"lending": {RatePerSecond: 1, Burst: 1},
