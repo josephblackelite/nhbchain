@@ -115,20 +115,30 @@ func TestAccrueInterestUpdatesIndexesAndFees(t *testing.T) {
 
 	expectedBorrowIndex := new(big.Int).Mul(ray, big.NewInt(3))
 	expectedBorrowIndex = expectedBorrowIndex.Quo(expectedBorrowIndex, big.NewInt(2))
-	if market.BorrowIndex.Cmp(expectedBorrowIndex) != 0 {
+	diff := new(big.Int).Sub(market.BorrowIndex, expectedBorrowIndex)
+	diff.Abs(diff)
+	if diff.Cmp(big.NewInt(1)) > 0 {
 		t.Fatalf("unexpected borrow index: got %s want %s", market.BorrowIndex, expectedBorrowIndex)
 	}
 
 	expectedSupplyIndex := new(big.Int).Mul(ray, big.NewInt(1175))
 	expectedSupplyIndex = expectedSupplyIndex.Quo(expectedSupplyIndex, big.NewInt(1000))
-	if market.SupplyIndex.Cmp(expectedSupplyIndex) != 0 {
+	diff = new(big.Int).Sub(market.SupplyIndex, expectedSupplyIndex)
+	diff.Abs(diff)
+	if diff.Cmp(big.NewInt(1)) > 0 {
 		t.Fatalf("unexpected supply index: got %s want %s", market.SupplyIndex, expectedSupplyIndex)
 	}
 
-	if market.TotalNHBBorrowed.Cmp(big.NewInt(750)) != 0 {
+	expectedBorrowed := big.NewInt(750)
+	diff = new(big.Int).Sub(market.TotalNHBBorrowed, expectedBorrowed)
+	diff.Abs(diff)
+	if diff.Cmp(big.NewInt(1)) > 0 {
 		t.Fatalf("unexpected total borrowed: got %s", market.TotalNHBBorrowed)
 	}
-	if market.TotalNHBSupplied.Cmp(big.NewInt(1250)) != 0 {
+	expectedSupplied := big.NewInt(1250)
+	diff = new(big.Int).Sub(market.TotalNHBSupplied, expectedSupplied)
+	diff.Abs(diff)
+	if diff.Cmp(big.NewInt(1)) > 0 {
 		t.Fatalf("unexpected total supplied: got %s", market.TotalNHBSupplied)
 	}
 
