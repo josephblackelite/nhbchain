@@ -43,7 +43,9 @@ connection:
 ```toml
 [network_security]
 # Shared-secret token transmitted with every RPC. The value is resolved in the
-# following order: environment variable, external file, inline string.
+# following order: environment variable, external file, inline string. When a
+# shared secret is configured the client now requires TLS unless
+# `AllowInsecure = true` is explicitly set for a throwaway lab environment.
 SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
 SharedSecretFile = "/etc/nhb/network.token"
 SharedSecret = ""

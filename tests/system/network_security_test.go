@@ -66,7 +66,7 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	defer cancelAuth()
 	authClient, err := network.Dial(authCtx, addr, true,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(network.NewStaticTokenCredentials(header, secret)),
+		grpc.WithPerRPCCredentials(network.NewStaticTokenCredentialsAllowInsecure(header, secret)),
 	)
 	if err != nil {
 		t.Fatalf("dial auth: %v", err)
@@ -85,7 +85,7 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	// Authenticated unary calls should reach the service (even if the relay has no backing server).
 	authConn, err := grpc.DialContext(context.Background(), addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(network.NewStaticTokenCredentials(header, secret)),
+		grpc.WithPerRPCCredentials(network.NewStaticTokenCredentialsAllowInsecure(header, secret)),
 	)
 	if err != nil {
 		t.Fatalf("dial auth conn: %v", err)
