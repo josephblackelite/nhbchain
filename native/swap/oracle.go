@@ -793,8 +793,9 @@ type Config struct {
 	TwapWindowSeconds         int64
 	TwapSampleCap             int
 	PriceProofMaxDeviationBps uint64
-	Risk                      RiskConfig     `toml:"risk"`
-	Providers                 ProviderConfig `toml:"providers"`
+	Risk                      RiskConfig      `toml:"risk"`
+	Providers                 ProviderConfig  `toml:"providers"`
+	Sanctions                 SanctionsConfig `toml:"sanctions"`
 }
 
 // Normalise applies defaults and canonical casing to the configuration values.
@@ -809,6 +810,7 @@ func (c Config) Normalise() Config {
 		PriceProofMaxDeviationBps: c.PriceProofMaxDeviationBps,
 		Risk:                      c.Risk.Normalise(),
 		Providers:                 c.Providers.Normalise(),
+		Sanctions:                 c.Sanctions.Normalise(),
 	}
 	if len(cfg.AllowedFiat) == 0 {
 		cfg.AllowedFiat = []string{"USD"}

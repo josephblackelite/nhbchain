@@ -184,6 +184,11 @@ func main() {
 	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "nhb", "ZNHB": "znhb"}))
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
+	sanctionsParams, err := swapCfg.Sanctions.Parameters()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse swap sanctions config: %v", err))
+	}
+	node.SetSwapSanctionsChecker(sanctionsParams.Checker())
 
 	// 2. Create the P2P server, passing the node as the MessageHandler.
 	seedStrings := make([]string, 0, len(cfg.P2P.Seeds))

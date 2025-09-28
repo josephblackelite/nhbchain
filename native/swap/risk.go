@@ -135,18 +135,18 @@ func (pc ProviderConfig) IsAllowed(provider string) bool {
 
 // ProviderStatus summarises the provider controls for operator dashboards and tooling.
 type ProviderStatus struct {
-        Allow                 []string
-        LastOracleHealthCheck int64
-        OracleFeeds           []OracleFeedStatus
+	Allow                 []string
+	LastOracleHealthCheck int64
+	OracleFeeds           []OracleFeedStatus
 }
 
 // OracleFeedStatus summarises the health of a particular oracle pair.
 type OracleFeedStatus struct {
-        Pair            string
-        Base            string
-        Quote           string
-        LastObservation int64
-        Observations    int
+	Pair            string
+	Base            string
+	Quote           string
+	LastObservation int64
+	Observations    int
 }
 
 // RiskCode enumerates supported limit violation categories.
@@ -294,6 +294,9 @@ func (re *RiskEngine) RecordMint(addr [20]byte, amount *big.Int) error {
 		return fmt.Errorf("risk: amount must be positive")
 	}
 	now := re.clock().UTC()
+	if err := re.pruneBuckets(addr, now); err != nil {
+		return err
+	}
 	dayKey := riskDailyKey(now, addr)
 	if err := re.addToBucket(dayKey, amount); err != nil {
 		return err
@@ -559,10 +562,16 @@ type velocityRecord struct {
 	Samples []uint64
 }
 
+type riskIndexRecord struct {
+	CurrentDay   string
+	CurrentMonth string
+}
+
 var (
 	riskDailyPrefix    = []byte("swap/risk/daily/")
 	riskMonthlyPrefix  = []byte("swap/risk/monthly/")
 	riskVelocityPrefix = []byte("swap/risk/velocity/")
+	riskIndexPrefix    = []byte("swap/risk/index/")
 )
 
 // SanctionsChecker evaluates whether an address is eligible for mints.
@@ -570,3 +579,58 @@ type SanctionsChecker func([20]byte) bool
 
 // DefaultSanctionsChecker allows all addresses, providing a safe default when operators do not wire external services.
 func DefaultSanctionsChecker([20]byte) bool { return true }
+
+func (re *RiskEngine) pruneBuckets(addr [20]byte, now time.Time) error {
+	if re == nil {
+		return fmt.Errorf("risk engine not initialised")
+	}
+	key := riskIndexKey(addr)
+	var index riskIndexRecord
+	_, err := re.store.KVGet(key, &index)
+	if err != nil {
+		return err
+	}
+	currentDay := formatDay(now)
+	currentMonth := formatMonth(now)
+	if strings.TrimSpace(index.CurrentDay) != "" && index.CurrentDay != currentDay {
+		if err := re.store.KVDelete(riskDailyKeyForDay(index.CurrentDay, addr)); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(index.CurrentMonth) != "" && index.CurrentMonth != currentMonth {
+		if err := re.store.KVDelete(riskMonthlyKeyForMonth(index.CurrentMonth, addr)); err != nil {
+			return err
+		}
+	}
+	index.CurrentDay = currentDay
+	index.CurrentMonth = currentMonth
+	return re.store.KVPut(key, index)
+}
+
+func riskIndexKey(addr [20]byte) []byte {
+	suffix := hex.EncodeToString(addr[:])
+	key := make([]byte, len(riskIndexPrefix)+len(suffix))
+	copy(key, riskIndexPrefix)
+	copy(key[len(riskIndexPrefix):], suffix)
+	return key
+}
+
+func riskDailyKeyForDay(day string, addr [20]byte) []byte {
+	suffix := hex.EncodeToString(addr[:])
+	key := make([]byte, len(riskDailyPrefix)+len(day)+1+len(suffix))
+	copy(key, riskDailyPrefix)
+	copy(key[len(riskDailyPrefix):], day)
+	key[len(riskDailyPrefix)+len(day)] = '/'
+	copy(key[len(riskDailyPrefix)+len(day)+1:], suffix)
+	return key
+}
+
+func riskMonthlyKeyForMonth(month string, addr [20]byte) []byte {
+	suffix := hex.EncodeToString(addr[:])
+	key := make([]byte, len(riskMonthlyPrefix)+len(month)+1+len(suffix))
+	copy(key, riskMonthlyPrefix)
+	copy(key[len(riskMonthlyPrefix):], month)
+	key[len(riskMonthlyPrefix)+len(month)] = '/'
+	copy(key[len(riskMonthlyPrefix)+len(month)+1:], suffix)
+	return key
+}
