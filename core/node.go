@@ -99,6 +99,8 @@ type Node struct {
 	modulePauses                 map[string]bool
 	moduleQuotaMu                sync.RWMutex
 	moduleQuotas                 map[string]nativecommon.Quota
+	globalCfgMu                  sync.RWMutex
+	globalCfg                    config.Global
 }
 
 const (
@@ -286,6 +288,19 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		creatorRewardsTreasuryAddr: creatorRewardsAddr,
 		modulePauses:               make(map[string]bool),
 		moduleQuotas:               make(map[string]nativecommon.Quota),
+		globalCfg: config.Global{
+			Governance: config.Governance{
+				QuorumBPS:        6000,
+				PassThresholdBPS: 5000,
+				VotingPeriodSecs: config.MinVotingPeriodSeconds,
+			},
+			Slashing: config.Slashing{
+				MinWindowSecs: 60,
+				MaxWindowSecs: 60,
+			},
+			Mempool: config.Mempool{MaxBytes: 1},
+			Blocks:  config.Blocks{MaxTxs: 1},
+		},
 	}
 
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
@@ -450,6 +465,53 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 	n.applyTimestampTolerance(copyPolicy.BlockTimestampToleranceSeconds)
 }
 
+// SetGlobalConfig records the last validated global configuration to use when
+// preflighting governance policy proposals. Callers must ensure the
+// configuration has been validated before invoking this method.
+func (n *Node) SetGlobalConfig(cfg config.Global) {
+	if n == nil {
+		return
+	}
+	n.globalCfgMu.Lock()
+	n.globalCfg = cfg
+	n.globalCfgMu.Unlock()
+}
+
+func (n *Node) globalConfigSnapshot() config.Global {
+	n.globalCfgMu.RLock()
+	defer n.globalCfgMu.RUnlock()
+	snapshot := config.Global{
+		Governance: config.Governance{
+			QuorumBPS:        n.globalCfg.Governance.QuorumBPS,
+			PassThresholdBPS: n.globalCfg.Governance.PassThresholdBPS,
+			VotingPeriodSecs: n.globalCfg.Governance.VotingPeriodSecs,
+		},
+		Slashing: config.Slashing{
+			MinWindowSecs: n.globalCfg.Slashing.MinWindowSecs,
+			MaxWindowSecs: n.globalCfg.Slashing.MaxWindowSecs,
+		},
+		Mempool: config.Mempool{MaxBytes: n.globalCfg.Mempool.MaxBytes},
+		Blocks:  config.Blocks{MaxTxs: n.globalCfg.Blocks.MaxTxs},
+		Pauses: config.Pauses{
+			Lending: n.globalCfg.Pauses.Lending,
+			Swap:    n.globalCfg.Pauses.Swap,
+			Escrow:  n.globalCfg.Pauses.Escrow,
+			Trade:   n.globalCfg.Pauses.Trade,
+			Loyalty: n.globalCfg.Pauses.Loyalty,
+			POTSO:   n.globalCfg.Pauses.POTSO,
+		},
+		Quotas: config.Quotas{
+			Lending: n.globalCfg.Quotas.Lending,
+			Swap:    n.globalCfg.Quotas.Swap,
+			Escrow:  n.globalCfg.Quotas.Escrow,
+			Trade:   n.globalCfg.Quotas.Trade,
+			Loyalty: n.globalCfg.Quotas.Loyalty,
+			POTSO:   n.globalCfg.Quotas.POTSO,
+		},
+	}
+	return snapshot
+}
+
 func (n *Node) governancePolicy() governance.ProposalPolicy {
 	n.govPolicyMu.RLock()
 	defer n.govPolicyMu.RUnlock()
@@ -475,19 +537,10 @@ func (n *Node) newGovernanceEngine(manager *nhbstate.Manager) *governance.Engine
 	engine.SetEmitter(governanceEventEmitter{state: n.state})
 	engine.SetPolicy(n.governancePolicy())
 	engine.SetPolicyValidator(func(cur governance.PolicyBaseline, delta governance.PolicyDelta) error {
-		baseline := config.Global{
-			Governance: config.Governance{
-				QuorumBPS:        cur.QuorumBps,
-				PassThresholdBPS: cur.PassThresholdBps,
-				VotingPeriodSecs: cur.VotingPeriodSecs,
-			},
-			Slashing: config.Slashing{
-				MinWindowSecs: 60,
-				MaxWindowSecs: 60,
-			},
-			Mempool: config.Mempool{MaxBytes: 1},
-			Blocks:  config.Blocks{MaxTxs: 1},
-		}
+		baseline := n.globalConfigSnapshot()
+		baseline.Governance.QuorumBPS = cur.QuorumBps
+		baseline.Governance.PassThresholdBPS = cur.PassThresholdBps
+		baseline.Governance.VotingPeriodSecs = cur.VotingPeriodSecs
 		var proposal govcfg.PolicyDelta
 		if delta.QuorumBps != nil || delta.PassThresholdBps != nil {
 			proposal.Governance = &govcfg.GovernanceDelta{}
@@ -1998,9 +2051,9 @@ func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, e
 }
 
 func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
-        baseToken string, baseAmt *big.Int,
-        quoteToken string, quoteAmt *big.Int,
-        deadline int64, slippageBps uint32) (tradeID [32]byte, escrowBaseID, escrowQuoteID [32]byte, err error) {
+	baseToken string, baseAmt *big.Int,
+	quoteToken string, quoteAmt *big.Int,
+	deadline int64, slippageBps uint32) (tradeID [32]byte, escrowBaseID, escrowQuoteID [32]byte, err error) {
 
 	trimmedOffer := strings.TrimSpace(offerID)
 	if trimmedOffer == "" {
@@ -2036,7 +2089,7 @@ func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
 	manager := nhbstate.NewManager(n.state.Trie)
 	tradeEngine := n.newTradeEngine(manager)
 
-        trade, err := tradeEngine.CreateTrade(trimmedOffer, buyer, seller, normalizedQuote, quoteAmt, normalizedBase, baseAmt, deadline, slippageBps, nonce)
+	trade, err := tradeEngine.CreateTrade(trimmedOffer, buyer, seller, normalizedQuote, quoteAmt, normalizedBase, baseAmt, deadline, slippageBps, nonce)
 	if err != nil {
 		return [32]byte{}, [32]byte{}, [32]byte{}, err
 	}
