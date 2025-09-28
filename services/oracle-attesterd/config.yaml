@@ -1,0 +1,26 @@
+listen: ":8095"
+consensus: "localhost:9090"
+chain_id: "localnet"
+signer_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+nonce_start: 1
+authority: "swap-module-authority"
+treasury_account: "nhb1treasuryaccount"
+collector: "0x0000000000000000000000000000000000000001"
+confirmations: 6
+nowpayments_secret: "change-me"
+database: "/var/lib/nhb/oracle-attestations.db"
+provider: "NOWPAYMENTS"
+request_timeout_seconds: 15
+fee:
+  amount: ""
+  denom: ""
+  payer: ""
+assets:
+  - symbol: "USDC"
+    address: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    decimals: 6
+  - symbol: "USDT"
+    address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    decimals: 6
+evm:
+  rpc_url: "http://127.0.0.1:8545"
