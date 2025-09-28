@@ -1883,13 +1883,13 @@ func (n *Node) CreatorPayouts(creatorAddr [20]byte) (*creator.PayoutLedger, erro
 	return engine.Payouts(creatorAddr)
 }
 
-func (n *Node) EscrowCreate(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, mediator *[20]byte, meta [32]byte, realm string) ([32]byte, error) {
+func (n *Node) EscrowCreate(payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, nonce uint64, mediator *[20]byte, meta [32]byte, realm string) ([32]byte, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	engine := n.newEscrowEngine(manager)
-	esc, err := engine.Create(payer, payee, token, amount, feeBps, deadline, mediator, meta, realm)
+	esc, err := engine.Create(payer, payee, token, amount, feeBps, deadline, nonce, mediator, meta, realm)
 	if err != nil {
 		return [32]byte{}, err
 	}

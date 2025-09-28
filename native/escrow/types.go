@@ -1,12 +1,12 @@
 package escrow
 
 import (
-        "bytes"
-        "fmt"
-        "math/big"
-        "sort"
-        "strings"
-        "sync"
+	"bytes"
+	"fmt"
+	"math/big"
+	"sort"
+	"strings"
+	"sync"
 )
 
 // ArbitrationScheme enumerates the supported strategies for evaluating an
@@ -235,6 +235,7 @@ type Escrow struct {
 	FeeBps         uint32
 	Deadline       int64
 	CreatedAt      int64
+	Nonce          uint64
 	MetaHash       [32]byte
 	Status         EscrowStatus
 	RealmID        string
@@ -271,37 +272,37 @@ func (s EscrowStatus) Valid() bool {
 }
 
 type tokenRegistry struct {
-        mu      sync.RWMutex
-        allowed map[string]struct{}
+	mu      sync.RWMutex
+	allowed map[string]struct{}
 }
 
 func newTokenRegistry(tokens ...string) *tokenRegistry {
-        allowed := make(map[string]struct{}, len(tokens))
-        for _, token := range tokens {
-                trimmed := strings.ToUpper(strings.TrimSpace(token))
-                if trimmed == "" {
-                        continue
-                }
-                allowed[trimmed] = struct{}{}
-        }
-        return &tokenRegistry{allowed: allowed}
+	allowed := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		trimmed := strings.ToUpper(strings.TrimSpace(token))
+		if trimmed == "" {
+			continue
+		}
+		allowed[trimmed] = struct{}{}
+	}
+	return &tokenRegistry{allowed: allowed}
 }
 
 func (r *tokenRegistry) normalize(symbol string) (string, error) {
-        if r == nil {
-                return "", fmt.Errorf("unsupported escrow token: %s", symbol)
-        }
-        trimmed := strings.ToUpper(strings.TrimSpace(symbol))
-        if trimmed == "" {
-                return "", fmt.Errorf("unsupported escrow token: %s", symbol)
-        }
-        r.mu.RLock()
-        _, ok := r.allowed[trimmed]
-        r.mu.RUnlock()
-        if !ok {
-                return "", fmt.Errorf("unsupported escrow token: %s", symbol)
-        }
-        return trimmed, nil
+	if r == nil {
+		return "", fmt.Errorf("unsupported escrow token: %s", symbol)
+	}
+	trimmed := strings.ToUpper(strings.TrimSpace(symbol))
+	if trimmed == "" {
+		return "", fmt.Errorf("unsupported escrow token: %s", symbol)
+	}
+	r.mu.RLock()
+	_, ok := r.allowed[trimmed]
+	r.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("unsupported escrow token: %s", symbol)
+	}
+	return trimmed, nil
 }
 
 var defaultTokenRegistry = newTokenRegistry("NHB", "ZNHB")
@@ -309,7 +310,7 @@ var defaultTokenRegistry = newTokenRegistry("NHB", "ZNHB")
 // NormalizeToken ensures the provided token symbol matches a supported value
 // ("NHB" or "ZNHB") and returns the canonical uppercase form.
 func NormalizeToken(symbol string) (string, error) {
-        return defaultTokenRegistry.normalize(symbol)
+	return defaultTokenRegistry.normalize(symbol)
 }
 
 // SanitizeEscrow validates and normalises the supplied escrow definition,
@@ -330,6 +331,9 @@ func SanitizeEscrow(e *Escrow) (*Escrow, error) {
 	}
 	if clone.Amount.Sign() < 0 {
 		return nil, fmt.Errorf("escrow amount must be non-negative")
+	}
+	if clone.Nonce == 0 {
+		return nil, fmt.Errorf("escrow nonce must be > 0")
 	}
 	if clone.FeeBps > 10_000 {
 		return nil, fmt.Errorf("escrow fee bps out of range: %d", clone.FeeBps)

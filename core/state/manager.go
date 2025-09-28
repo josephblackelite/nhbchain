@@ -2342,6 +2342,7 @@ type storedEscrow struct {
 	FeeBps       uint32
 	Deadline     *big.Int
 	CreatedAt    *big.Int
+	Nonce        *big.Int
 	MetaHash     [32]byte
 	Status       uint8
 	RealmID      string
@@ -2429,6 +2430,7 @@ func newStoredEscrow(e *escrow.Escrow) *storedEscrow {
 	}
 	deadline := big.NewInt(e.Deadline)
 	created := big.NewInt(e.CreatedAt)
+	nonce := new(big.Int).SetUint64(e.Nonce)
 	return &storedEscrow{
 		ID:           e.ID,
 		Payer:        e.Payer,
@@ -2439,6 +2441,7 @@ func newStoredEscrow(e *escrow.Escrow) *storedEscrow {
 		FeeBps:       e.FeeBps,
 		Deadline:     deadline,
 		CreatedAt:    created,
+		Nonce:        nonce,
 		MetaHash:     e.MetaHash,
 		Status:       uint8(e.Status),
 		RealmID:      strings.TrimSpace(e.RealmID),
@@ -2473,6 +2476,9 @@ func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
 	}
 	if s.CreatedAt != nil {
 		out.CreatedAt = s.CreatedAt.Int64()
+	}
+	if s.Nonce != nil {
+		out.Nonce = s.Nonce.Uint64()
 	}
 	if !out.Status.Valid() {
 		return nil, fmt.Errorf("escrow: invalid status in storage")

@@ -72,6 +72,7 @@ func (c *RPCNodeClient) EscrowCreate(ctx context.Context, req EscrowCreateReques
 		"amount":   req.Amount,
 		"feeBps":   req.FeeBps,
 		"deadline": req.Deadline,
+		"nonce":    req.Nonce,
 	}
 	if req.Mediator != "" {
 		payload["mediator"] = req.Mediator
@@ -119,17 +120,17 @@ func (c *RPCNodeClient) EscrowResolve(ctx context.Context, escrowID, caller, out
 }
 
 func (c *RPCNodeClient) P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error) {
-        payload := map[string]interface{}{
-                "offerId":     req.OfferID,
-                "buyer":       req.Buyer,
-                "seller":      req.Seller,
-                "baseToken":   req.BaseToken,
-                "baseAmount":  req.BaseAmount,
-                "quoteToken":  req.QuoteToken,
-                "quoteAmount": req.QuoteAmount,
-                "deadline":    req.Deadline,
-                "slippageBps": req.SlippageBps,
-        }
+	payload := map[string]interface{}{
+		"offerId":     req.OfferID,
+		"buyer":       req.Buyer,
+		"seller":      req.Seller,
+		"baseToken":   req.BaseToken,
+		"baseAmount":  req.BaseAmount,
+		"quoteToken":  req.QuoteToken,
+		"quoteAmount": req.QuoteAmount,
+		"deadline":    req.Deadline,
+		"slippageBps": req.SlippageBps,
+	}
 	var result P2PAcceptResponse
 	if err := c.call(ctx, "p2p_createTrade", []interface{}{payload}, &result); err != nil {
 		return nil, err
@@ -212,6 +213,7 @@ type EscrowCreateRequest struct {
 	Amount   string `json:"amount"`
 	FeeBps   uint32 `json:"feeBps"`
 	Deadline int64  `json:"deadline"`
+	Nonce    uint64 `json:"nonce"`
 	Mediator string `json:"mediator,omitempty"`
 	Realm    string `json:"realm,omitempty"`
 	Meta     string `json:"meta,omitempty"`
@@ -224,38 +226,39 @@ type EscrowCreateResponse struct {
 
 // EscrowState mirrors the JSON returned by the node for escrow_get.
 type EscrowState struct {
-	ID        string   `json:"id"`
-	Payer     string   `json:"payer"`
-	Payee     string   `json:"payee"`
-	Mediator  *string  `json:"mediator,omitempty"`
-	Token     string   `json:"token"`
-	Amount    string   `json:"amount"`
-	FeeBps    uint32   `json:"feeBps"`
-	Deadline  int64    `json:"deadline"`
-	CreatedAt int64    `json:"createdAt"`
-	Status    string   `json:"status"`
-	Meta      string   `json:"meta"`
-	Realm     *string  `json:"realm,omitempty"`
-	FrozenAt  *int64   `json:"frozenAt,omitempty"`
-	Scheme    *uint8   `json:"arbScheme,omitempty"`
-	Threshold *uint32  `json:"arbThreshold,omitempty"`
-	Nonce     *uint64  `json:"policyNonce,omitempty"`
-	Version   *uint64  `json:"realmVersion,omitempty"`
-	Members   []string `json:"arbitrators,omitempty"`
+	ID          string   `json:"id"`
+	Payer       string   `json:"payer"`
+	Payee       string   `json:"payee"`
+	Mediator    *string  `json:"mediator,omitempty"`
+	Token       string   `json:"token"`
+	Amount      string   `json:"amount"`
+	FeeBps      uint32   `json:"feeBps"`
+	Deadline    int64    `json:"deadline"`
+	CreatedAt   int64    `json:"createdAt"`
+	Nonce       uint64   `json:"nonce"`
+	Status      string   `json:"status"`
+	Meta        string   `json:"meta"`
+	Realm       *string  `json:"realm,omitempty"`
+	FrozenAt    *int64   `json:"frozenAt,omitempty"`
+	Scheme      *uint8   `json:"arbScheme,omitempty"`
+	Threshold   *uint32  `json:"arbThreshold,omitempty"`
+	PolicyNonce *uint64  `json:"policyNonce,omitempty"`
+	Version     *uint64  `json:"realmVersion,omitempty"`
+	Members     []string `json:"arbitrators,omitempty"`
 }
 
 // P2PAcceptRequest captures the gateway request forwarded to the node RPC when
 // creating a dual-escrow trade.
 type P2PAcceptRequest struct {
-        OfferID     string `json:"offerId"`
-        Buyer       string `json:"buyer"`
-        Seller      string `json:"seller"`
-        BaseToken   string `json:"baseToken"`
-        BaseAmount  string `json:"baseAmount"`
-        QuoteToken  string `json:"quoteToken"`
-        QuoteAmount string `json:"quoteAmount"`
-        Deadline    int64  `json:"deadline"`
-        SlippageBps uint32 `json:"slippageBps"`
+	OfferID     string `json:"offerId"`
+	Buyer       string `json:"buyer"`
+	Seller      string `json:"seller"`
+	BaseToken   string `json:"baseToken"`
+	BaseAmount  string `json:"baseAmount"`
+	QuoteToken  string `json:"quoteToken"`
+	QuoteAmount string `json:"quoteAmount"`
+	Deadline    int64  `json:"deadline"`
+	SlippageBps uint32 `json:"slippageBps"`
 }
 
 // P2PAcceptResponse mirrors the node RPC response for trade creation.

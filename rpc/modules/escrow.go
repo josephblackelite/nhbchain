@@ -66,6 +66,7 @@ type EscrowSnapshotResult struct {
 	FeeBps         uint32              `json:"feeBps"`
 	Deadline       int64               `json:"deadline"`
 	CreatedAt      int64               `json:"createdAt"`
+	Nonce          uint64              `json:"nonce"`
 	Status         string              `json:"status"`
 	Meta           string              `json:"meta"`
 	Realm          *string             `json:"realm,omitempty"`
@@ -239,6 +240,7 @@ func formatSnapshotResult(esc *escrow.Escrow) *EscrowSnapshotResult {
 		FeeBps:    esc.FeeBps,
 		Deadline:  esc.Deadline,
 		CreatedAt: esc.CreatedAt,
+		Nonce:     esc.Nonce,
 		Status:    escrowStatusString(esc.Status),
 		Meta:      "0x" + hex.EncodeToString(esc.MetaHash[:]),
 	}
