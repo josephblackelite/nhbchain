@@ -64,19 +64,20 @@ type Config struct {
 // NetworkSecurity captures TLS and shared-secret settings for the internal gRPC
 // bridge between consensusd and p2pd.
 type NetworkSecurity struct {
-	ServerTLSCertFile        string   `toml:"ServerTLSCertFile"`
-	ServerTLSKeyFile         string   `toml:"ServerTLSKeyFile"`
-	ServerCAFile             string   `toml:"ServerCAFile"`
-	ClientCAFile             string   `toml:"ClientCAFile"`
-	ClientTLSCertFile        string   `toml:"ClientTLSCertFile"`
-	ClientTLSKeyFile         string   `toml:"ClientTLSKeyFile"`
-	AllowInsecure            bool     `toml:"AllowInsecure"`
-	SharedSecret             string   `toml:"SharedSecret"`
-	SharedSecretFile         string   `toml:"SharedSecretFile"`
-	SharedSecretEnv          string   `toml:"SharedSecretEnv"`
-	AuthorizationHeader      string   `toml:"AuthorizationHeader"`
-	AllowedClientCommonNames []string `toml:"AllowedClientCommonNames"`
-	ServerName               string   `toml:"ServerName"`
+	ServerTLSCertFile         string   `toml:"ServerTLSCertFile"`
+	ServerTLSKeyFile          string   `toml:"ServerTLSKeyFile"`
+	ServerCAFile              string   `toml:"ServerCAFile"`
+	ClientCAFile              string   `toml:"ClientCAFile"`
+	ClientTLSCertFile         string   `toml:"ClientTLSCertFile"`
+	ClientTLSKeyFile          string   `toml:"ClientTLSKeyFile"`
+	AllowInsecure             bool     `toml:"AllowInsecure"`
+	AllowUnauthenticatedReads bool     `toml:"AllowUnauthenticatedReads"`
+	SharedSecret              string   `toml:"SharedSecret"`
+	SharedSecretFile          string   `toml:"SharedSecretFile"`
+	SharedSecretEnv           string   `toml:"SharedSecretEnv"`
+	AuthorizationHeader       string   `toml:"AuthorizationHeader"`
+	AllowedClientCommonNames  []string `toml:"AllowedClientCommonNames"`
+	ServerName                string   `toml:"ServerName"`
 }
 
 // AuthorizationHeaderName returns the metadata header that carries the

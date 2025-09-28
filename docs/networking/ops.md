@@ -51,6 +51,8 @@ SharedSecretFile = "/etc/nhb/network.token"
 SharedSecret = ""
 # Explicit opt-in is required for plaintext connections.
 AllowInsecure = false
+# Read-only RPCs (GetView/ListPeers) remain protected unless explicitly opened.
+AllowUnauthenticatedReads = false
 # Metadata header that carries the token (default: "authorization").
 AuthorizationHeader = "x-nhb-network-token"
 
@@ -71,14 +73,21 @@ ServerName         = "p2pd.internal"
 
 `p2pd` loads the server certificate (and optional client CA) to present TLS or
 mTLS credentials via `grpc.Creds(...)`. When a shared secret is configured, the
-service enforces it on `Gossip`, `DialPeer`, and `BanPeer` requests; client
-certificates are validated against the `AllowedClientCommonNames` allowlist when
-provided. `consensusd` consumes the same block to dial with
-`grpc.WithTransportCredentials` and per-RPC metadata so authenticated traffic
-continues to flow while unauthenticated requests are rejected. Beginning with
-this release, `consensusd` refuses to fall back to plaintext; operators must
-ship valid TLS material or explicitly set `AllowInsecure = true` for short-lived
-lab environments.
+service enforces it on `Gossip`, `DialPeer`, `BanPeer`, `GetView`, and
+`ListPeers`; client certificates are validated against the
+`AllowedClientCommonNames` allowlist when provided. `consensusd` consumes the
+same block to dial with `grpc.WithTransportCredentials` and per-RPC metadata so
+authenticated traffic continues to flow while unauthenticated requests are
+rejected. Beginning with this release, `consensusd` refuses to fall back to
+plaintext; operators must ship valid TLS material or explicitly set
+`AllowInsecure = true` for short-lived lab environments.
+
+Setting `AllowUnauthenticatedReads = true` re-opens `GetView` and `ListPeers` to
+anonymous callers for debugging or observability tooling. This opt-in bypasses
+token checks for those two RPCs only; writes (`Gossip`, `DialPeer`, `BanPeer`)
+remain gated by the configured authenticators. Because unauthenticated reads
+expose topology and scoring metadata, restrict the listener address or rely on
+network-level ACLs when enabling the toggle.
 
 ## Seeds
 

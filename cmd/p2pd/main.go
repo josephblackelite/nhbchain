@@ -237,7 +237,7 @@ func main() {
 		panic(fmt.Sprintf("failed to listen on %s: %v", *grpcAddress, err))
 	}
 	baseDir := filepath.Dir(*configFile)
-	serverCreds, auth, err := buildNetworkServerSecurity(cfg, baseDir)
+	serverCreds, auth, readAuth, err := buildNetworkServerSecurity(cfg, baseDir)
 	if err != nil {
 		panic(fmt.Sprintf("failed to initialise network security: %v", err))
 	}
@@ -247,7 +247,7 @@ func main() {
 		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
 	)
-	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay, auth))
+	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay, auth, network.WithReadAuthenticator(readAuth)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -267,15 +267,16 @@ func main() {
 
 type envLookupFunc func(string) (string, bool)
 
-func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials.TransportCredentials, network.Authenticator, error) {
+func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials.TransportCredentials, network.Authenticator, network.Authenticator, error) {
 	if cfg == nil {
-		return insecure.NewCredentials(), network.ChainAuthenticators(), nil
+		auth := network.ChainAuthenticators()
+		return insecure.NewCredentials(), auth, auth, nil
 	}
 	sec := cfg.NetworkSecurity
 
 	secret, err := sec.ResolveSharedSecret(baseDir, os.LookupEnv)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve shared secret: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve shared secret: %w", err)
 	}
 
 	var auths []network.Authenticator
@@ -289,11 +290,11 @@ func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials
 	var tlsConfig *tls.Config
 	if certPath != "" || keyPath != "" {
 		if certPath == "" || keyPath == "" {
-			return nil, nil, fmt.Errorf("network security requires both ServerTLSCertFile and ServerTLSKeyFile when one is set")
+			return nil, nil, nil, fmt.Errorf("network security requires both ServerTLSCertFile and ServerTLSKeyFile when one is set")
 		}
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("load network TLS keypair: %w", err)
+			return nil, nil, nil, fmt.Errorf("load network TLS keypair: %w", err)
 		}
 		tlsConfig = &tls.Config{
 			MinVersion:   tls.VersionTLS12,
@@ -303,15 +304,15 @@ func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials
 
 	if caPath := resolvePath(baseDir, sec.ClientCAFile); caPath != "" {
 		if tlsConfig == nil {
-			return nil, nil, fmt.Errorf("ClientCAFile requires ServerTLSCertFile and ServerTLSKeyFile to be configured")
+			return nil, nil, nil, fmt.Errorf("ClientCAFile requires ServerTLSCertFile and ServerTLSKeyFile to be configured")
 		}
 		pem, err := os.ReadFile(caPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read client CA file: %w", err)
+			return nil, nil, nil, fmt.Errorf("read client CA file: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, nil, fmt.Errorf("failed to parse client CA certificates from %s", caPath)
+			return nil, nil, nil, fmt.Errorf("failed to parse client CA certificates from %s", caPath)
 		}
 		tlsConfig.ClientCAs = pool
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
@@ -323,7 +324,12 @@ func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials
 		creds = credentials.NewTLS(tlsConfig)
 	}
 
-	return creds, network.ChainAuthenticators(auths...), nil
+	writeAuth := network.ChainAuthenticators(auths...)
+	readAuth := writeAuth
+	if sec.AllowUnauthenticatedReads {
+		readAuth = nil
+	}
+	return creds, writeAuth, readAuth, nil
 }
 
 func resolvePath(baseDir, path string) string {
