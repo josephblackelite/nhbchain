@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package swap.v1;
+
+option go_package = "nhbchain/proto/swap/v1;swapv1";
+
+message DepositVoucher {
+  string invoice_id = 1;
+  string provider = 2;
+  string stable_asset = 3;
+  string stable_amount = 4;
+  string nhb_amount = 5;
+  string account = 6;
+  string memo = 7;
+  int64 created_at = 8;
+}
+
+message CashOutIntent {
+  string intent_id = 1;
+  string invoice_id = 2;
+  string account = 3;
+  string stable_asset = 4;
+  string stable_amount = 5;
+  string nhb_amount = 6;
+  string status = 7;
+  int64 created_at = 8;
+  int64 settled_at = 9;
+}
+
+message EscrowLock {
+  string lock_id = 1;
+  string intent_id = 2;
+  string account = 3;
+  string nhb_amount = 4;
+  bool burned = 5;
+  int64 locked_at = 6;
+  int64 burned_at = 7;
+}
+
+message PayoutReceipt {
+  string receipt_id = 1;
+  string intent_id = 2;
+  string stable_asset = 3;
+  string stable_amount = 4;
+  string nhb_amount = 5;
+  string tx_hash = 6;
+  string evidence_uri = 7;
+  int64 settled_at = 8;
+}
+
+message TreasurySoftInventory {
+  string stable_asset = 1;
+  string deposits = 2;
+  string payouts = 3;
+  string balance = 4;
+  int64 updated_at = 5;
+}
+
+message QueryDepositVoucherRequest {
+  string invoice_id = 1;
+}
+
+message QueryDepositVoucherResponse {
+  DepositVoucher voucher = 1;
+}
+
+message QueryCashOutIntentRequest {
+  string intent_id = 1;
+}
+
+message QueryCashOutIntentResponse {
+  CashOutIntent intent = 1;
+  EscrowLock lock = 2;
+  PayoutReceipt receipt = 3;
+}
+
+message QuerySoftInventoryRequest {
+  string stable_asset = 1;
+}
+
+message QuerySoftInventoryResponse {
+  TreasurySoftInventory inventory = 1;
+}
