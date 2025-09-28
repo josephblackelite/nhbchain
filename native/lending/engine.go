@@ -2,6 +2,7 @@ package lending
 
 import (
 	"errors"
+	"math"
 	"math/big"
 	"strings"
 
@@ -25,11 +26,16 @@ var (
 	errCollateralRoutingBps  = errors.New("lending engine: collateral routing exceeds 100%")
 	errDeveloperCollateral   = errors.New("lending engine: developer collateral recipient not configured")
 	errProtocolCollateral    = errors.New("lending engine: protocol collateral recipient not configured")
-)
-
-var (
-	basisPoints = big.NewInt(10_000)
-	ray         = big.NewInt(1_000_000_000_000_000_000)
+	errSupplyPaused          = errors.New("lending engine: supply operations paused")
+	errBorrowPaused          = errors.New("lending engine: borrow operations paused")
+	errRepayPaused           = errors.New("lending engine: repay operations paused")
+	errLiquidationsPaused    = errors.New("lending engine: liquidation operations paused")
+	errDepositTooSmall       = errors.New("lending engine: deposit below minimum liquidity")
+	errBorrowCapPerBlock     = errors.New("lending engine: borrow exceeds per-block cap")
+	errBorrowCapGlobal       = errors.New("lending engine: borrow exceeds global cap")
+	errBorrowCapUtilisation  = errors.New("lending engine: borrow exceeds utilisation cap")
+	errOracleStale           = errors.New("lending engine: oracle quote stale")
+	errOracleDeviation       = errors.New("lending engine: oracle deviation too large")
 )
 
 const blocksPerYear = 31_536_000
@@ -171,6 +177,9 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, err
 	}
+	if e.params.Pauses.Supply {
+		return nil, errSupplyPaused
+	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
@@ -198,17 +207,13 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 		return nil, err
 	}
 
-	// Compute LP shares using the supply index, defaulting to 1e18 when no
-	// liquidity exists yet.
-	mintedShares := new(big.Int)
-	if market.TotalSupplyShares.Sign() == 0 {
-		mintedShares.Set(amount)
-	} else {
-		mintedShares.Mul(amount, ray)
-		mintedShares = mintedShares.Quo(mintedShares, market.SupplyIndex)
-		if mintedShares.Sign() == 0 {
-			mintedShares = new(big.Int).Set(amount)
-		}
+	if market.TotalSupplyShares.Sign() == 0 && amount.Cmp(minLiquidity) < 0 {
+		return nil, errDepositTooSmall
+	}
+
+	mintedShares := sharesFromLiquidity(amount, market.SupplyIndex)
+	if mintedShares.Sign() == 0 {
+		return nil, errDepositTooSmall
 	}
 
 	// Adjust balances.
@@ -281,8 +286,7 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	}
 
 	// Determine the underlying NHB using the current supply index.
-	redeemAmount := new(big.Int).Mul(amountLP, market.SupplyIndex)
-	redeemAmount = redeemAmount.Quo(redeemAmount, ray)
+	redeemAmount := liquidityFromShares(amountLP, market.SupplyIndex)
 
 	liquidity := e.availableLiquidity(market)
 	if liquidity.Cmp(redeemAmount) < 0 {
@@ -458,12 +462,19 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, err
 	}
+	if e.params.Pauses.Borrow || e.params.CircuitBreakerActive {
+		return nil, errBorrowPaused
+	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
 
 	market, err := e.ensureMarket()
 	if err != nil {
+		return nil, err
+	}
+
+	if err := e.guardOracle(market); err != nil {
 		return nil, err
 	}
 
@@ -499,6 +510,30 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	}
 
 	totalOut := new(big.Int).Add(amount, feeAmount)
+
+	if cap := e.params.BorrowCaps.PerBlock; cap != nil && cap.Sign() > 0 {
+		if market.LastBorrowBlock != e.blockHeight {
+			market.LastBorrowBlock = e.blockHeight
+			market.BorrowedThisBlock = big.NewInt(0)
+		}
+		projected := new(big.Int).Add(market.BorrowedThisBlock, totalOut)
+		if projected.Cmp(cap) > 0 {
+			return nil, errBorrowCapPerBlock
+		}
+	}
+
+	projectedTotalBorrowed := new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
+	if cap := e.params.BorrowCaps.Total; cap != nil && cap.Sign() > 0 {
+		if projectedTotalBorrowed.Cmp(cap) > 0 {
+			return nil, errBorrowCapGlobal
+		}
+	}
+	if utilCap := e.params.BorrowCaps.UtilisationBps; utilCap > 0 {
+		util := utilisation(projectedTotalBorrowed, market.TotalNHBSupplied)
+		if util > utilCap {
+			return nil, errBorrowCapUtilisation
+		}
+	}
 
 	liquidity := e.availableLiquidity(market)
 	if liquidity.Cmp(totalOut) < 0 {
@@ -560,16 +595,14 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if borrowerUser.ScaledDebt == nil {
 		borrowerUser.ScaledDebt = big.NewInt(0)
 	}
-	scaledIncrement := new(big.Int).Mul(totalOut, ray)
-	scaledIncrement = scaledIncrement.Quo(scaledIncrement, market.BorrowIndex)
-	if scaledIncrement.Sign() == 0 && totalOut.Sign() > 0 {
-		scaledIncrement = big.NewInt(1)
-	}
+	scaledIncrement := scaledDebtFromAmount(totalOut, market.BorrowIndex)
 	borrowerUser.ScaledDebt = new(big.Int).Add(borrowerUser.ScaledDebt, scaledIncrement)
-	borrowerUser.DebtNHB = new(big.Int).Mul(borrowerUser.ScaledDebt, market.BorrowIndex)
-	borrowerUser.DebtNHB = borrowerUser.DebtNHB.Quo(borrowerUser.DebtNHB, ray)
+	borrowerUser.DebtNHB = debtFromScaled(borrowerUser.ScaledDebt, market.BorrowIndex)
 
 	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
+	if e.params.BorrowCaps.PerBlock != nil && e.params.BorrowCaps.PerBlock.Sign() > 0 {
+		market.BorrowedThisBlock = new(big.Int).Add(market.BorrowedThisBlock, totalOut)
+	}
 
 	if feeAmount.Sign() > 0 {
 		fees.DeveloperFeesWei = new(big.Int).Add(fees.DeveloperFeesWei, feeAmount)
@@ -600,6 +633,9 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 	}
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, err
+	}
+	if e.params.Pauses.Repay {
+		return nil, errRepayPaused
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
@@ -655,14 +691,12 @@ func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, erro
 	if borrowerUser.ScaledDebt == nil {
 		borrowerUser.ScaledDebt = big.NewInt(0)
 	}
-	scaledRepay := new(big.Int).Mul(repayAmount, ray)
-	scaledRepay = scaledRepay.Quo(scaledRepay, market.BorrowIndex)
+	scaledRepay := scaledDebtFromAmount(repayAmount, market.BorrowIndex)
 	if scaledRepay.Cmp(borrowerUser.ScaledDebt) > 0 {
 		scaledRepay = new(big.Int).Set(borrowerUser.ScaledDebt)
 	}
 	borrowerUser.ScaledDebt = new(big.Int).Sub(borrowerUser.ScaledDebt, scaledRepay)
-	borrowerUser.DebtNHB = new(big.Int).Mul(borrowerUser.ScaledDebt, market.BorrowIndex)
-	borrowerUser.DebtNHB = borrowerUser.DebtNHB.Quo(borrowerUser.DebtNHB, ray)
+	borrowerUser.DebtNHB = debtFromScaled(borrowerUser.ScaledDebt, market.BorrowIndex)
 
 	market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
 
@@ -692,6 +726,9 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, nil, err
+	}
+	if e.params.Pauses.Liquidate {
+		return nil, nil, errLiquidationsPaused
 	}
 
 	market, err := e.ensureMarket()
@@ -908,6 +945,15 @@ func (e *Engine) ensureMarket() (*Market, error) {
 	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
 		market.BorrowIndex = new(big.Int).Set(ray)
 	}
+	if market.BorrowedThisBlock == nil {
+		market.BorrowedThisBlock = big.NewInt(0)
+	}
+	if market.OracleMedianWei == nil {
+		market.OracleMedianWei = big.NewInt(0)
+	}
+	if market.OraclePrevMedianWei == nil {
+		market.OraclePrevMedianWei = big.NewInt(0)
+	}
 	return market, nil
 }
 
@@ -972,6 +1018,35 @@ func (e *Engine) availableLiquidity(market *Market) *big.Int {
 	return liquidity
 }
 
+func (e *Engine) guardOracle(market *Market) error {
+	if market == nil {
+		return errNilMarket
+	}
+	cfg := e.params.Oracle
+	if cfg.MaxAgeBlocks > 0 {
+		if market.OracleUpdatedBlock == 0 {
+			return errOracleStale
+		}
+		if e.blockHeight > market.OracleUpdatedBlock {
+			if e.blockHeight-market.OracleUpdatedBlock > cfg.MaxAgeBlocks {
+				return errOracleStale
+			}
+		}
+	}
+	if cfg.MaxDeviationBps > 0 && market.OraclePrevMedianWei.Sign() > 0 && market.OracleMedianWei.Sign() > 0 {
+		diff := new(big.Int).Sub(market.OracleMedianWei, market.OraclePrevMedianWei)
+		if diff.Sign() < 0 {
+			diff.Neg(diff)
+		}
+		threshold := new(big.Int).Mul(market.OraclePrevMedianWei, big.NewInt(int64(cfg.MaxDeviationBps)))
+		threshold.Quo(threshold, basisPoints)
+		if diff.Cmp(threshold) > 0 {
+			return errOracleDeviation
+		}
+	}
+	return nil
+}
+
 func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
 	if debt == nil || debt.Sign() == 0 {
 		return true
@@ -982,6 +1057,24 @@ func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
 	num := new(big.Int).Mul(collateral, big.NewInt(int64(e.params.LiquidationThreshold)))
 	den := new(big.Int).Mul(debt, basisPoints)
 	return num.Cmp(den) >= 0
+}
+
+func utilisation(borrowed, supplied *big.Int) uint64 {
+	if borrowed == nil || borrowed.Sign() <= 0 {
+		return 0
+	}
+	if supplied == nil || supplied.Sign() <= 0 {
+		return 0
+	}
+	ratio := new(big.Int).Mul(borrowed, basisPoints)
+	ratio.Quo(ratio, supplied)
+	if ratio.Sign() < 0 {
+		return 0
+	}
+	if !ratio.IsUint64() {
+		return math.MaxUint64
+	}
+	return ratio.Uint64()
 }
 
 // WithdrawProtocolFees transfers accrued protocol fees to the provided recipient.
@@ -1176,49 +1269,6 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 	return fees, interestApplied, nil
 }
 
-func rateFactor(rate *big.Rat, delta uint64) *big.Int {
-	if rate == nil || rate.Sign() == 0 || delta == 0 {
-		return new(big.Int).Set(ray)
-	}
-	perBlock := new(big.Rat).Set(rate)
-	perBlock.Quo(perBlock, new(big.Rat).SetUint64(blocksPerYear))
-	perBlock.Mul(perBlock, new(big.Rat).SetUint64(delta))
-	factor := new(big.Rat).Add(big.NewRat(1, 1), perBlock)
-	return ratToRay(factor)
-}
-
-func rayMul(a, b *big.Int) *big.Int {
-	if a == nil || b == nil {
-		return big.NewInt(0)
-	}
-	result := new(big.Int).Mul(a, b)
-	result = result.Quo(result, ray)
-	return result
-}
-
-func ratToRay(r *big.Rat) *big.Int {
-	if r == nil {
-		return new(big.Int).Set(ray)
-	}
-	scaled := new(big.Rat).Mul(r, new(big.Rat).SetInt(ray))
-	out := new(big.Int).Quo(scaled.Num(), scaled.Denom())
-	if out.Sign() == 0 {
-		return new(big.Int).Set(ray)
-	}
-	return out
-}
-
-func computeInterest(totalBorrowed *big.Int, rate *big.Rat, delta uint64) *big.Int {
-	if totalBorrowed == nil || totalBorrowed.Sign() == 0 || rate == nil || rate.Sign() == 0 || delta == 0 {
-		return big.NewInt(0)
-	}
-	perBlock := new(big.Rat).Set(rate)
-	perBlock.Quo(perBlock, new(big.Rat).SetUint64(blocksPerYear))
-	perBlock.Mul(perBlock, new(big.Rat).SetUint64(delta))
-	interest := new(big.Rat).Mul(perBlock, new(big.Rat).SetInt(totalBorrowed))
-	return new(big.Int).Quo(interest.Num(), interest.Denom())
-}
-
 func (e *Engine) syncDebt(user *UserAccount, market *Market) {
 	if user == nil || market == nil {
 		return
@@ -1231,7 +1281,5 @@ func (e *Engine) syncDebt(user *UserAccount, market *Market) {
 		user.DebtNHB = big.NewInt(0)
 		return
 	}
-	actual := new(big.Int).Mul(user.ScaledDebt, market.BorrowIndex)
-	actual = actual.Quo(actual, ray)
-	user.DebtNHB = actual
+	user.DebtNHB = debtFromScaled(user.ScaledDebt, market.BorrowIndex)
 }

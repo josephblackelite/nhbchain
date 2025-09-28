@@ -27,7 +27,7 @@ type Market struct {
 	// lenders.
 	TotalNHBSupplied *big.Int
 	// TotalSupplyShares represents the aggregate LP token supply used to
-	// apportion interest to suppliers. Shares are scaled by 1e18 to match
+	// apportion interest to suppliers. Shares are scaled by 1e27 to match
 	// the supply index precision.
 	TotalSupplyShares *big.Int
 	// TotalNHBBorrowed tracks the outstanding NHB borrowed across all
@@ -44,6 +44,20 @@ type Market struct {
 	// ReserveFactor defines the share of interest routed to protocol reserves
 	// expressed in basis points for deterministic accounting.
 	ReserveFactor uint64
+	// BorrowedThisBlock tracks the borrow volume issued in the current block
+	// for enforcing per-block caps.
+	BorrowedThisBlock *big.Int
+	// LastBorrowBlock records the block height when the per-block borrow
+	// counter was last reset.
+	LastBorrowBlock uint64
+	// OracleMedianWei stores the latest oracle median quote for the market.
+	OracleMedianWei *big.Int
+	// OraclePrevMedianWei tracks the previous oracle median quote enabling
+	// deviation checks between sequential updates.
+	OraclePrevMedianWei *big.Int
+	// OracleUpdatedBlock captures the block height when the median quote was
+	// last refreshed.
+	OracleUpdatedBlock uint64
 }
 
 // CollateralRouting captures the liquidation collateral distribution between
@@ -110,4 +124,11 @@ type RiskParameters struct {
 	// DeveloperFeeCapBps bounds the developer fee that may be charged on
 	// `BorrowNHBWithFee` operations. A zero value disables developer fees.
 	DeveloperFeeCapBps uint64
+	// BorrowCaps aggregates the various borrow throttles applied to the market.
+	BorrowCaps BorrowCaps
+	// Oracle describes the acceptable freshness and volatility windows for
+	// oracle data used to determine market health.
+	Oracle OracleConfig
+	// Pauses exposes fine-grained switches for halting market operations.
+	Pauses ActionPauses
 }

@@ -719,13 +719,16 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 	if n == nil {
 		return
 	}
-	copyParams := lending.RiskParameters{
-		MaxLTV:               params.MaxLTV,
-		LiquidationThreshold: params.LiquidationThreshold,
-		LiquidationBonus:     params.LiquidationBonus,
-		CircuitBreakerActive: params.CircuitBreakerActive,
-		DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
-	}
+        copyParams := lending.RiskParameters{
+                MaxLTV:               params.MaxLTV,
+                LiquidationThreshold: params.LiquidationThreshold,
+                LiquidationBonus:     params.LiquidationBonus,
+                CircuitBreakerActive: params.CircuitBreakerActive,
+                DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
+                BorrowCaps:           params.BorrowCaps.Clone(),
+                Oracle:               params.Oracle,
+                Pauses:               params.Pauses,
+        }
 	if params.OracleAddress.Bytes() != nil {
 		copyParams.OracleAddress = cloneAddress(params.OracleAddress)
 	}
@@ -736,13 +739,14 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 
 // LendingRiskParameters returns the currently configured lending risk limits.
 func (n *Node) LendingRiskParameters() lending.RiskParameters {
-	n.lendingMu.RLock()
-	params := n.lendingParams
-	n.lendingMu.RUnlock()
-	if params.OracleAddress.Bytes() != nil {
-		params.OracleAddress = cloneAddress(params.OracleAddress)
-	}
-	return params
+        n.lendingMu.RLock()
+        params := n.lendingParams
+        n.lendingMu.RUnlock()
+        if params.OracleAddress.Bytes() != nil {
+                params.OracleAddress = cloneAddress(params.OracleAddress)
+        }
+        params.BorrowCaps = params.BorrowCaps.Clone()
+        return params
 }
 
 // SetLendingAccrualConfig configures the interest model and fee splits used by the lending engine.
