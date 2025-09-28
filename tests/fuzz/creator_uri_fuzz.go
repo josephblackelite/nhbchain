@@ -66,6 +66,12 @@ func (s *fuzzCreatorState) GetAccount([]byte) (*types.Account, error) { return n
 
 func (s *fuzzCreatorState) PutAccount([]byte, *types.Account) error { return nil }
 
+func (s *fuzzCreatorState) CreatorRateLimitGet() (*creator.RateLimitSnapshot, bool, error) {
+	return nil, false, nil
+}
+
+func (s *fuzzCreatorState) CreatorRateLimitPut(*creator.RateLimitSnapshot) error { return nil }
+
 func FuzzCreatorURISanitization(f *testing.F) {
 	seeds := []string{
 		"https://example.com/content",
