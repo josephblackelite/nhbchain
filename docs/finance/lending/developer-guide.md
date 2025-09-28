@@ -75,6 +75,22 @@ NHBChain using the JSON-RPC endpoints exposed by the node.
   calls. Ensure the liquidator wallet holds enough NHB to repay the targeted
   debt.
 
+## Operational Readiness
+
+- Confirm with your operator that the lending entry in `system/pauses` remains
+  `false`. The helper scripts under `examples/docs/ops` provide ready-made
+  commands for on-call rotations:
+
+  ```bash
+  go run ./examples/docs/ops/read_pauses
+  go run ./examples/docs/ops/pause_toggle --module lending --state pause
+  ```
+
+- Track `riskParameters.BorrowCaps` to understand the live throughput limits.
+  Spikes in utilisation that approach the cap will cause the engine to return
+  `lending engine: borrow exceeds ... cap` errors until utilisation falls back
+  under the threshold.
+
 ## Best Practices
 
 - Treat the `txHash` returned by each action as an acknowledgement only. It is

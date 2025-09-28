@@ -7,7 +7,9 @@
 
 The NHBChain node exposes a JSON-RPC interface for interacting with the native
 lending engine. This document describes each method, the expected request
-payloads, and the shape of the responses returned by the node.
+payloads, and the shape of the responses returned by the node. Hardened builds
+only admit the native NHB asset and its wrapped collateral form (ZNHB); requests
+referencing third-party tokens are rejected at validation time.
 
 All requests **must** set `"jsonrpc": "2.0"` and provide a numeric `id`. Amount
 fields are encoded as decimal strings representing wei values.
@@ -40,19 +42,36 @@ returned.
 ```json
 {
   "market": {
-    "totalNHBSupplied": "1250000000000000000",
-    "totalSupplyShares": "1250000000000000000",
-    "totalNHBBorrowed": "600000000000000000",
-    "supplyIndex": "1000000000000000000",
-    "borrowIndex": "1000000000000000000",
-    "lastUpdateBlock": 184,
-    "reserveFactor": 1000
+    "PoolID": "default",
+    "TotalNHBSupplied": "3678901123000000000000000",
+    "TotalSupplyShares": "3123456789000000000000000",
+    "TotalNHBBorrowed": "2623456789000000000000000",
+    "SupplyIndex": "1001234567890000000",
+    "BorrowIndex": "1004567891230000000",
+    "ReserveFactor": 1500,
+    "LastUpdateBlock": 13245678
   },
   "riskParameters": {
-    "maxLTV": 7500,
-    "liquidationThreshold": 8000,
-    "liquidationBonus": 500,
-    "circuitBreakerActive": false
+    "MaxLTV": 8000,
+    "LiquidationThreshold": 8500,
+    "LiquidationBonus": 500,
+    "DeveloperFeeCapBps": 500,
+    "BorrowCaps": {
+      "PerBlock": "50000000000000000000",
+      "Total": "12500000000000000000000000",
+      "UtilisationBps": 9000
+    },
+    "Oracle": {
+      "MaxAgeBlocks": 30,
+      "MaxDeviationBps": 500
+    },
+    "Pauses": {
+      "Supply": false,
+      "Borrow": false,
+      "Repay": false,
+      "Liquidate": false
+    },
+    "CircuitBreakerActive": false
   }
 }
 ```
@@ -108,10 +127,10 @@ the raw Bech32 string or an object containing an `address` field. Include
 ```json
 {
   "account": {
-    "collateralZNHB": "300000000000000000",
-    "supplyShares": "500000000000000000",
-    "debtNHB": "0",
-    "scaledDebt": "0"
+    "CollateralZNHB": "300000000000000000",
+    "SupplyShares": "500000000000000000",
+    "DebtNHB": "900000000000000000",
+    "ScaledDebt": "903375000000000000"
   }
 }
 ```
@@ -241,8 +260,57 @@ NHB to cover the debt.
 
 ## Error Handling
 
-Errors originating from the lending engine use the message prefix
-`"lending engine:"` and are reported with JSON-RPC error code `-32602`. Storage
-or infrastructure failures return code `-32000` and the HTTP status will be
-`500`.
+Validation failures surface as `codeInvalidParams` (`-32602`) with descriptive
+messages such as `"invalid parameter object"`, `"invalid borrower"`, or amount
+parser errors (`"amount is required"`, `"invalid amount"`,
+`"amount must be positive"`). When the engine rejects a call the message retains
+the prefix (for example `"lending engine: borrow exceeds per-block cap"`) and
+the same text is echoed in the `data` field for display or telemetry.
+
+Authentication issues return HTTP `401` / `codeUnauthorized` while unexpected
+infrastructure failures fall back to `codeServerError` (`-32000`). Module errors
+preserve their own HTTP status – hitting a borrow cap or circuit breaker returns
+HTTP `400`, whereas trying to access a pool before it is initialised yields
+HTTP `404`.
+
+Example error response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "error": {
+    "code": -32602,
+    "message": "lending engine: borrow exceeds per-block cap",
+    "data": "lending engine: borrow exceeds per-block cap"
+  }
+}
+```
+
+## Operational Controls
+
+Two hardened levers gate the money market:
+
+- **Kill switch.** `riskParameters.Pauses` mirrors the on-chain `system/pauses`
+  map. Use the helper scripts to inspect or toggle the state during incident
+  response:
+
+  ```bash
+  go run ./examples/docs/ops/read_pauses
+  go run ./examples/docs/ops/pause_toggle --module lending --state pause
+  ```
+
+- **Borrow caps.** `riskParameters.BorrowCaps` enforces per-block, utilisation,
+  and global ceilings. Stage overrides by editing the node configuration overlay
+  and reloading:
+
+  ```toml
+  [lending.borrowCaps]
+  perBlock = "75000000000000000000"
+  total    = "15000000000000000000000000"
+  utilisationBps = 8800
+  ```
+
+  Track utilisation in dashboards and revert to the baseline once the incident
+  is resolved.
 

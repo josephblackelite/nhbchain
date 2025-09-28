@@ -49,4 +49,7 @@ In addition to module-wide pauses, governance can disable individual flows via
 - liquidate
 
 Each switch blocks the associated action while allowing unaffected paths to
-continue operating.
+continue operating. Inspect the live pause map with
+`go run ./examples/docs/ops/read_pauses` and stage emergency toggles via
+`go run ./examples/docs/ops/pause_toggle --module lending --state pause` so the
+incident response playbook has copy-paste commands.

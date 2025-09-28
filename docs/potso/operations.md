@@ -46,6 +46,21 @@ Rate-limited submissions return a descriptive error to clients and increment
 `potso_heartbeat_rate_limited_total`. Accepted heartbeats continue to enforce
 the existing 60-second interval gate to guard against short-term replay spam.
 
+## Kill switch & reward caps
+
+The POTSO module participates in the global `system/pauses` map. Operators can
+verify the live state and stage a governance toggle with the doc helpers:
+
+```bash
+go run ./examples/docs/ops/read_pauses
+go run ./examples/docs/ops/pause_toggle --module potso --state pause
+```
+
+Reward concentration is governed by `MaxUserShareBps`. When a participant hits
+the configured cap the engine emits `potso.reward.capped` and returns
+`codeInvalidParams` to clients. Monitor `capUsage` via `potso_rewards` metrics
+and reset the cap only after auditing the incident.
+
 ## Dashboards
 
 Ensure the new metrics are scraped by your Prometheus deployment. Suggested
