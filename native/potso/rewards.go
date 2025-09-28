@@ -159,6 +159,11 @@ func (c RewardConfig) Validate() error {
 	if c.EmissionPerEpoch != nil && c.EmissionPerEpoch.Sign() < 0 {
 		return errors.New("emission per epoch cannot be negative")
 	}
+	if c.EpochLengthBlocks > 0 {
+		if c.EmissionPerEpoch == nil || c.EmissionPerEpoch.Sign() <= 0 {
+			return errors.New("emission per epoch must be positive when epoch length is set")
+		}
+	}
 	if c.MaxUserShareBps > RewardBpsDenominator {
 		return fmt.Errorf("max user share must be <= %d", RewardBpsDenominator)
 	}

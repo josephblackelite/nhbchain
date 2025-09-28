@@ -99,6 +99,8 @@ type Node struct {
 	modulePauses                 map[string]bool
 	moduleQuotaMu                sync.RWMutex
 	moduleQuotas                 map[string]nativecommon.Quota
+	potsoEngineMu                sync.Mutex
+	potsoEngine                  *potso.Engine
 	globalCfgMu                  sync.RWMutex
 	globalCfg                    config.Global
 }
@@ -267,6 +269,11 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	creatorVaultAddr := deriveModuleAddress("module/creator/payout", crypto.NHBPrefix)
 	creatorRewardsAddr := deriveModuleAddress("module/creator/rewards", crypto.NHBPrefix)
 
+	potsoEngine, err := potso.NewEngine(potso.DefaultEngineParams())
+	if err != nil {
+		return nil, err
+	}
+
 	node := &Node{
 		db:                         db,
 		state:                      stateProcessor,
@@ -288,6 +295,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		creatorRewardsTreasuryAddr: creatorRewardsAddr,
 		modulePauses:               make(map[string]bool),
 		moduleQuotas:               make(map[string]nativecommon.Quota),
+		potsoEngine:                potsoEngine,
 		globalCfg: config.Global{
 			Governance: config.Governance{
 				QuorumBPS:        6000,
@@ -719,16 +727,16 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 	if n == nil {
 		return
 	}
-        copyParams := lending.RiskParameters{
-                MaxLTV:               params.MaxLTV,
-                LiquidationThreshold: params.LiquidationThreshold,
-                LiquidationBonus:     params.LiquidationBonus,
-                CircuitBreakerActive: params.CircuitBreakerActive,
-                DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
-                BorrowCaps:           params.BorrowCaps.Clone(),
-                Oracle:               params.Oracle,
-                Pauses:               params.Pauses,
-        }
+	copyParams := lending.RiskParameters{
+		MaxLTV:               params.MaxLTV,
+		LiquidationThreshold: params.LiquidationThreshold,
+		LiquidationBonus:     params.LiquidationBonus,
+		CircuitBreakerActive: params.CircuitBreakerActive,
+		DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
+		BorrowCaps:           params.BorrowCaps.Clone(),
+		Oracle:               params.Oracle,
+		Pauses:               params.Pauses,
+	}
 	if params.OracleAddress.Bytes() != nil {
 		copyParams.OracleAddress = cloneAddress(params.OracleAddress)
 	}
@@ -739,14 +747,14 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 
 // LendingRiskParameters returns the currently configured lending risk limits.
 func (n *Node) LendingRiskParameters() lending.RiskParameters {
-        n.lendingMu.RLock()
-        params := n.lendingParams
-        n.lendingMu.RUnlock()
-        if params.OracleAddress.Bytes() != nil {
-                params.OracleAddress = cloneAddress(params.OracleAddress)
-        }
-        params.BorrowCaps = params.BorrowCaps.Clone()
-        return params
+	n.lendingMu.RLock()
+	params := n.lendingParams
+	n.lendingMu.RUnlock()
+	if params.OracleAddress.Bytes() != nil {
+		params.OracleAddress = cloneAddress(params.OracleAddress)
+	}
+	params.BorrowCaps = params.BorrowCaps.Clone()
+	return params
 }
 
 // SetLendingAccrualConfig configures the interest model and fee splits used by the lending engine.
@@ -1358,7 +1366,15 @@ func (n *Node) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
 	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
-	return n.state.SetPotsoRewardConfig(cfg)
+	if err := n.state.SetPotsoRewardConfig(cfg); err != nil {
+		return err
+	}
+	n.potsoEngineMu.Lock()
+	if n.potsoEngine != nil {
+		n.potsoEngine.Reset()
+	}
+	n.potsoEngineMu.Unlock()
+	return nil
 }
 
 func (n *Node) PotsoWeightConfig() potso.WeightParams {
@@ -1374,6 +1390,20 @@ func (n *Node) SetPotsoWeightConfig(cfg potso.WeightParams) error {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	return n.state.SetPotsoWeightConfig(cfg)
+}
+
+// SetPotsoEngineParams overrides the runtime heartbeat engine parameters.
+func (n *Node) SetPotsoEngineParams(params potso.EngineParams) error {
+	n.potsoEngineMu.Lock()
+	defer n.potsoEngineMu.Unlock()
+	if n.potsoEngine == nil {
+		engine, err := potso.NewEngine(potso.DefaultEngineParams())
+		if err != nil {
+			return err
+		}
+		n.potsoEngine = engine
+	}
+	return n.potsoEngine.SetParams(params)
 }
 
 func (n *Node) RewardEpochSettlement(epochNumber uint64) (*rewards.EpochSettlement, bool) {
@@ -2454,6 +2484,19 @@ func (n *Node) PotsoHeartbeat(addr [20]byte, blockHeight uint64, blockHash []byt
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
+	cfg := n.state.PotsoRewardConfig()
+	epoch := uint64(0)
+	if cfg.EpochLengthBlocks > 0 {
+		epoch = blockHeight / cfg.EpochLengthBlocks
+	}
+	n.potsoEngineMu.Lock()
+	engine := n.potsoEngine
+	n.potsoEngineMu.Unlock()
+	if engine != nil {
+		if err := engine.Precheck(addr, epoch); err != nil {
+			return nil, 0, err
+		}
+	}
 	heartbeat, _, err := manager.PotsoGetHeartbeat(addr)
 	if err != nil {
 		return nil, 0, err
@@ -2494,6 +2537,12 @@ func (n *Node) PotsoHeartbeat(addr [20]byte, blockHeight uint64, blockHash []byt
 	meter.RecomputeScore()
 	if err := manager.PotsoPutMeter(addr, meter); err != nil {
 		return nil, 0, err
+	}
+	if engine != nil {
+		engine.Commit(addr, epoch, delta)
+		if cfg.EmissionPerEpoch == nil || cfg.EmissionPerEpoch.Sign() <= 0 {
+			engine.ObserveWashEngagement(addr, epoch)
+		}
 	}
 
 	evt := events.PotsoHeartbeat{Address: addr, Timestamp: timestamp, BlockHeight: blockHeight, UptimeDelta: delta}.Event()
