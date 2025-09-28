@@ -3184,6 +3184,14 @@ func (m *Manager) KVPut(key []byte, value interface{}) error {
 	return m.trie.Update(kvKey(key), encoded)
 }
 
+// KVDelete removes the value stored under the supplied key.
+func (m *Manager) KVDelete(key []byte) error {
+	if len(key) == 0 {
+		return fmt.Errorf("kv: key must not be empty")
+	}
+	return m.trie.Update(kvKey(key), nil)
+}
+
 // KVGet retrieves the value stored under the supplied key and decodes it into
 // the provided destination. The boolean return value indicates whether the key
 // existed in state.

@@ -97,6 +97,8 @@ type Node struct {
 	creatorRewardsTreasuryAddr   crypto.Address
 	modulePauseMu                sync.RWMutex
 	modulePauses                 map[string]bool
+	moduleQuotaMu                sync.RWMutex
+	moduleQuotas                 map[string]nativecommon.Quota
 }
 
 const (
@@ -283,7 +285,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		creatorPayoutVaultAddr:     creatorVaultAddr,
 		creatorRewardsTreasuryAddr: creatorRewardsAddr,
 		modulePauses:               make(map[string]bool),
+		moduleQuotas:               make(map[string]nativecommon.Quota),
 	}
+
+	stateProcessor.SetQuotaConfig(node.moduleQuotas)
 
 	node.SetModulePauses(config.Pauses{})
 	if err := node.refreshModulePauses(); err != nil {
@@ -340,6 +345,27 @@ func (n *Node) SetModulePauses(pauses config.Pauses) {
 	}
 }
 
+// SetModuleQuotas updates the configured per-module quotas.
+func (n *Node) SetModuleQuotas(quotas map[string]nativecommon.Quota) {
+	if n == nil {
+		return
+	}
+	snapshot := make(map[string]nativecommon.Quota, len(quotas))
+	for module, quota := range quotas {
+		name := normalizeModuleName(module)
+		if name == "" {
+			continue
+		}
+		snapshot[name] = quota
+	}
+	n.moduleQuotaMu.Lock()
+	n.moduleQuotas = snapshot
+	n.moduleQuotaMu.Unlock()
+	if n.state != nil {
+		n.state.SetQuotaConfig(snapshot)
+	}
+}
+
 func (n *Node) SetModulePaused(module string, paused bool) {
 	if n == nil {
 		return
@@ -354,6 +380,16 @@ func (n *Node) SetModulePaused(module string, paused bool) {
 	}
 	n.modulePauses[name] = paused
 	n.modulePauseMu.Unlock()
+}
+
+func (n *Node) moduleQuotaSnapshot() map[string]nativecommon.Quota {
+	n.moduleQuotaMu.RLock()
+	defer n.moduleQuotaMu.RUnlock()
+	snapshot := make(map[string]nativecommon.Quota, len(n.moduleQuotas))
+	for module, quota := range n.moduleQuotas {
+		snapshot[module] = quota
+	}
+	return snapshot
 }
 
 func (n *Node) IsPaused(module string) bool {
@@ -927,6 +963,7 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 		return nil, err
 	}
 	stateCopy.SetPauseView(n)
+	stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
 	blockTime := time.Unix(header.Timestamp, 0).UTC()
 	stateCopy.BeginBlock(header.Height, blockTime)
 	defer stateCopy.EndBlock()
@@ -3904,6 +3941,7 @@ func (n *Node) SimulateTx(txBytes []byte) (*SimulationResult, error) {
 		return nil, err
 	}
 	stateCopy.events = nil
+	stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
 	blockHeight := n.chain.GetHeight()
 	blockTime := n.currentTime()
 	stateCopy.BeginBlock(blockHeight, blockTime)

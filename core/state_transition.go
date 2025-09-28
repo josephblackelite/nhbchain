@@ -24,6 +24,7 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
+	systemquotas "nhbchain/native/system/quotas"
 	"nhbchain/storage/trie"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -85,6 +86,8 @@ type StateProcessor struct {
 	potsoRewardConfig  potso.RewardConfig
 	potsoWeightConfig  potso.WeightParams
 	paymasterEnabled   bool
+	quotaConfig        map[string]nativecommon.Quota
+	quotaStore         *systemquotas.Store
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -112,6 +115,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		potsoRewardConfig:  potso.DefaultRewardConfig(),
 		potsoWeightConfig:  potso.DefaultWeightParams(),
 		paymasterEnabled:   true,
+		quotaConfig:        make(map[string]nativecommon.Quota),
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -142,6 +146,147 @@ func (sp *StateProcessor) SetPauseView(p nativecommon.PauseView) {
 	if sp.LoyaltyEngine != nil {
 		sp.LoyaltyEngine.SetPauses(p)
 	}
+}
+
+// SetQuotaConfig installs the per-module quota configuration for the state processor.
+func (sp *StateProcessor) SetQuotaConfig(cfg map[string]nativecommon.Quota) {
+	if sp == nil {
+		return
+	}
+	if len(cfg) == 0 {
+		sp.quotaConfig = make(map[string]nativecommon.Quota)
+		sp.quotaStore = nil
+		return
+	}
+	cloned := make(map[string]nativecommon.Quota, len(cfg))
+	for module, quota := range cfg {
+		name := normalizeModuleName(module)
+		if name == "" {
+			continue
+		}
+		cloned[name] = quota
+	}
+	sp.quotaConfig = cloned
+	sp.quotaStore = nil
+}
+
+func (sp *StateProcessor) quotaStoreHandle() (*systemquotas.Store, error) {
+	if sp == nil || sp.Trie == nil {
+		return nil, fmt.Errorf("quota: state unavailable")
+	}
+	if sp.quotaStore != nil {
+		return sp.quotaStore, nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	store := systemquotas.NewStore(manager)
+	sp.quotaStore = store
+	return store, nil
+}
+
+func quotaEpochFor(q nativecommon.Quota, ts time.Time) uint64 {
+	seconds := q.EpochSeconds
+	if seconds == 0 {
+		seconds = 60
+	}
+	if seconds == 0 {
+		return 0
+	}
+	unix := ts.Unix()
+	if unix < 0 {
+		unix = 0
+	}
+	return uint64(unix) / uint64(seconds)
+}
+
+func (sp *StateProcessor) applyQuota(module string, addr []byte, addReq uint32, addNHB uint64) error {
+	if sp == nil {
+		return fmt.Errorf("quota: state processor unavailable")
+	}
+	moduleName := normalizeModuleName(module)
+	if moduleName == "" {
+		return nil
+	}
+	quota, ok := sp.quotaConfig[moduleName]
+	if !ok || (quota.MaxRequestsPerMin == 0 && quota.MaxNHBPerEpoch == 0) {
+		return nil
+	}
+	if addReq == 0 && addNHB == 0 {
+		return nil
+	}
+	store, err := sp.quotaStoreHandle()
+	if err != nil {
+		return err
+	}
+	nowEpoch := quotaEpochFor(quota, sp.blockTimestamp())
+	_, err = nativecommon.Apply(store, moduleName, nowEpoch, addr, quota, addReq, addNHB)
+	if err != nil {
+		sp.emitQuotaExceeded(moduleName, addr, nowEpoch, err)
+		return fmt.Errorf("quota: %s: %w", moduleName, err)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) emitQuotaExceeded(module string, addr []byte, epoch uint64, cause error) {
+	if sp == nil || cause == nil {
+		return
+	}
+	reason := "unknown"
+	switch {
+	case errors.Is(cause, nativecommon.ErrQuotaRequestsExceeded):
+		reason = "requests"
+	case errors.Is(cause, nativecommon.ErrQuotaNHBCapExceeded):
+		reason = "nhb"
+	case errors.Is(cause, nativecommon.ErrQuotaCounterOverflow):
+		reason = "overflow"
+	}
+	attrs := map[string]string{
+		"module": module,
+		"epoch":  strconv.FormatUint(epoch, 10),
+		"reason": reason,
+	}
+	if len(addr) > 0 {
+		if len(addr) == common.AddressLength {
+			attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, addr).String()
+		} else {
+			attrs["address"] = hex.EncodeToString(addr)
+		}
+	}
+	sp.AppendEvent(&types.Event{Type: "QuotaExceeded", Attributes: attrs})
+}
+
+func (sp *StateProcessor) pruneQuotaCounters(ts time.Time) error {
+	if sp == nil {
+		return nil
+	}
+	if len(sp.quotaConfig) == 0 {
+		return nil
+	}
+	store, err := sp.quotaStoreHandle()
+	if err != nil {
+		return err
+	}
+	for module, quota := range sp.quotaConfig {
+		seconds := quota.EpochSeconds
+		if seconds == 0 {
+			seconds = 60
+		}
+		if seconds == 0 {
+			continue
+		}
+		unix := ts.Unix()
+		if unix < 0 {
+			continue
+		}
+		current := uint64(unix) / uint64(seconds)
+		if current < 2 {
+			continue
+		}
+		pruneEpoch := current - 2
+		if err := store.PruneEpoch(module, pruneEpoch); err != nil {
+			return fmt.Errorf("quota: prune %s epoch %d: %w", module, pruneEpoch, err)
+		}
+	}
+	return nil
 }
 
 // SetEscrowFeeTreasury configures the address receiving escrow fees during
@@ -665,6 +810,14 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		rewardHistoryCopy[i] = sp.rewardHistory[i].Clone()
 	}
 
+	var quotaCopy map[string]nativecommon.Quota
+	if len(sp.quotaConfig) > 0 {
+		quotaCopy = make(map[string]nativecommon.Quota, len(sp.quotaConfig))
+		for module, quota := range sp.quotaConfig {
+			quotaCopy[module] = quota
+		}
+	}
+
 	return &StateProcessor{
 		Trie:               trieCopy,
 		stateDB:            sp.stateDB,
@@ -686,6 +839,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		potsoRewardConfig:  clonePotsoRewardConfig(sp.potsoRewardConfig),
 		potsoWeightConfig:  clonePotsoWeightConfig(sp.potsoWeightConfig),
 		paymasterEnabled:   sp.paymasterEnabled,
+		quotaConfig:        quotaCopy,
 	}, nil
 }
 
@@ -982,55 +1136,88 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	case types.TxTypeCreateEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyCreateEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeReleaseEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyReleaseEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeRefundEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyRefundEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeStake:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyStake(tx, sender); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeUnstake:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyUnstake(tx, sender); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeStakeClaim:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyStakeClaim(tx, sender); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeHeartbeat:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
 		return sp.applyHeartbeat(tx, sender, senderAccount)
 
 	// --- NEW DISPUTE RESOLUTION CASES ---
 	case types.TxTypeLockEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyLockEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeDisputeEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyDisputeEscrow(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeArbitrateRelease:
+		if err := sp.applyQuota(moduleTrade, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyArbitrate(tx, sender, senderAccount, true); err != nil {
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeArbitrateRefund:
+		if err := sp.applyQuota(moduleTrade, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyArbitrate(tx, sender, senderAccount, false); err != nil {
 			return err
 		}
