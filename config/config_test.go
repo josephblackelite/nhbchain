@@ -150,6 +150,9 @@ PEX = false
 	if cfg.NetworkSecurity.ClientTLSCertFile != "./tls/client.crt" || cfg.NetworkSecurity.ClientTLSKeyFile != "./tls/client.key" {
 		t.Fatalf("unexpected client tls paths: %+v", cfg.NetworkSecurity)
 	}
+	if cfg.NetworkSecurity.AllowInsecure {
+		t.Fatalf("expected AllowInsecure to default to false")
+	}
 	if cfg.NetworkSecurity.ServerName != "p2pd.internal" {
 		t.Fatalf("unexpected server name: %s", cfg.NetworkSecurity.ServerName)
 	}

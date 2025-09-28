@@ -70,6 +70,7 @@ type NetworkSecurity struct {
 	ClientCAFile             string   `toml:"ClientCAFile"`
 	ClientTLSCertFile        string   `toml:"ClientTLSCertFile"`
 	ClientTLSKeyFile         string   `toml:"ClientTLSKeyFile"`
+	AllowInsecure            bool     `toml:"AllowInsecure"`
 	SharedSecret             string   `toml:"SharedSecret"`
 	SharedSecretFile         string   `toml:"SharedSecretFile"`
 	SharedSecretEnv          string   `toml:"SharedSecretEnv"`
