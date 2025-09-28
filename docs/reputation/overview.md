@@ -10,6 +10,10 @@ The reputation module introduces a minimal skill verification primitive. Verifie
 
 The RPC returns the canonical payload comprising the subject, verifier, skill, issuance timestamp and optional expiry.
 
+### Error semantics
+
+Validation failures return `codeInvalidParams` (`-32602`) with the specific guard encoded in the `message`/`data` pair (for example `"invalid_params"` + `"invalid bech32 string"` or `"skill required"`). Calls from wallets that lack the verifier role surface `codeUnauthorized` with HTTP `403`, while infrastructure failures fall back to `codeServerError` (`-32000`).
+
 ## Responsibilities of verifiers
 
 * Maintain an auditable log of evidence backing each verification.

@@ -486,6 +486,8 @@ nhb-cli loyalty stats --program 0x... --day $(date -u +%Y-%m-%d)
 * **Delayed settlement:** check worker queue health; use gateway status endpoint for updates.
 * **High skip rate:** monitor `loyalty.skipped` events; inspect `reason` field for patterns (caps, balance, inactive program).
 * **Program not applying to merchant:** verify merchant is registered to the business and program `StartTime/EndTime` encompasses settlement timestamp.
+* **Module paused:** run `go run ./examples/docs/ops/read_pauses` to confirm the loyalty flag is `false`; resume with `go run ./examples/docs/ops/pause_toggle --module loyalty --state resume` when cleared by governance.
+* **Cap rejections:** inspect the program meters via `loyalty.programStats` to see `capUsage` and compare against configured per-transaction / daily caps before retrying.
 
 ---
 

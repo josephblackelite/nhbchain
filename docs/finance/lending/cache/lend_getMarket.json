@@ -1,7 +1,7 @@
 {
-  "symbol": "nhb:USDC",
-  "name": "USD Coin",
-  "decimals": 6,
+  "symbol": "nhb:NHB",
+  "name": "NHB Liquidity",
+  "decimals": 18,
   "oraclePriceUSD": "1.000000",
   "utilization": "0.7135",
   "liquidity": "1523456.782",

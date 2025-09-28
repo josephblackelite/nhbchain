@@ -80,6 +80,10 @@ The response includes day/month totals, remaining capacity, and velocity observa
 
 ## Operational Tips
 
+* Use `go run ./examples/docs/ops/read_pauses` to double-check that the swap
+  module remains active before investigating PSP escalations. Engage governance
+  with `go run ./examples/docs/ops/pause_toggle --module swap --state pause`
+  when you need to halt minting.
 * Set `VelocityWindowSeconds` high enough to account for expected PSP bursts but low enough to prevent scripted abuse.
 * Use the optional `cmd/swap-audit` tool to print the currently loaded configuration: `go run ./cmd/swap-audit --config ./config.toml`.
 * When raising limits for incident response, document the change in the compliance log and ensure alerts are reviewed for potential abuse attempts.

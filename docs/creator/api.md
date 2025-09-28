@@ -87,7 +87,37 @@ Response example:
 
 ## Error Semantics
 
-All creator endpoints return `-32602` (`codeInvalidParams`) for validation failures such as malformed addresses, empty content IDs, or non-positive amounts. Runtime issues (e.g. insufficient balance) are also surfaced as `codeInvalidParams` with a descriptive message to keep client logic simple.
+All creator endpoints return `-32602` (`codeInvalidParams`) when payload validation fails. The `message` field mirrors the precise guard that rejected the request – for example `"invalid caller address"`, `"contentId is required"`, or the amount parser errors (`"amount is required"`, `"invalid amount"`, `"amount must be positive"`). Engine failures propagate as `creator engine:` prefixed strings and keep the same error code so clients can branch on `message` while presenting the human readable details from `data`.
+
+Example error body:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32602,
+    "message": "invalid caller address",
+    "data": "invalid bech32 string: checksum failed"
+  }
+}
+```
+
+Authentication failures return `codeUnauthorized` with HTTP `401`, and unexpected infrastructure errors surface as `codeServerError` (`-32000`).
+
+## Operational Controls
+
+Creator flows respect the network kill switch and module caps configured under `system/pauses` and the native engine. Operators can inspect and toggle the kill switch with the Go helpers in `examples/docs/ops`:
+
+```bash
+# Dump the live pause map and verify creator stays active
+go run ./examples/docs/ops/read_pauses
+
+# Stage a gov.v1 MsgSetPauses proposal when you need to freeze a module
+go run ./examples/docs/ops/pause_toggle --module trade --state pause
+```
+
+When the module is active, the engine enforces the one-hour `fanStakeEpochCap` (1e12 wei) and one-per-second tip burst limit. Rejections surface the `creator engine: per-epoch stake cap exceeded` and `creator engine: tip rate limit exceeded` messages respectively so operators can correlate client reports with node logs. Adjust these caps via the configuration overlay when staging a governance proposal or by editing the helper to target the creator flag once it lands in `config.Pauses`.
 
 ## Event Consumption
 

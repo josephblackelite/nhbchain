@@ -53,6 +53,19 @@ examples/
   scripts/              # tooling shared by the workspace
 ```
 
+## Operator tooling
+
+The `examples/docs/ops` helpers provide copy-pasteable incident levers:
+
+- `go run ./examples/docs/ops/read_pauses` – dump the live `system/pauses` map
+  to verify whether modules such as lending, loyalty, swap, trade, and POTSO are
+  paused.
+- `go run ./examples/docs/ops/pause_toggle --module <name> --state pause` –
+  stage a `gov.v1 MsgSetPauses` transaction to freeze a module; replace `pause`
+  with `resume` to re-enable it once cleared.
+- `go run ./examples/docs/ops/quota_dump --module swap --address nhb1...` –
+  inspect quota/cap usage for a specific client when diagnosing rate limiting.
+
 ## Developing new examples
 
 1. Create a new directory inside `apps/` with its own `package.json`.

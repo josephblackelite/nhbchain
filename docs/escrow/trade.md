@@ -64,3 +64,18 @@ idle auto-refund flow:
 
 These behaviours guarantee that funds never remain trapped indefinitely—even
 when both sides funded but failed to settle.
+
+## Operational toggles
+
+Trade settlement respects the global `system/pauses` kill switch. Operations can
+verify the live flag and stage a governance toggle with the helper scripts:
+
+```bash
+go run ./examples/docs/ops/read_pauses
+go run ./examples/docs/ops/pause_toggle --module trade --state pause
+```
+
+Per-offer controls such as `deadline` and `slippageBps` act as on-chain caps and
+surface descriptive `codeInvalidParams` errors when breached (for example
+`"escrow engine: price slippage exceeded"`). Clients should present the error
+messages directly so counterparties understand which guard triggered.

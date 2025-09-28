@@ -14,7 +14,7 @@ We offer tiered rewards based on the severity and impact of the vulnerability:
 | Low | Denial-of-service, information disclosure | $250 – $1,000 |
 | Informational | Hardening opportunities | Swag & public recognition |
 
-Rewards are paid in USDC or BTC at the researcher’s discretion within 10 business days of triage confirmation. Bonus multipliers may be applied for high-quality reports with working proofs-of-concept.
+Rewards are paid in NHB or ZNHB at the researcher’s discretion within 10 business days of triage confirmation. Bonus multipliers may be applied for high-quality reports with working proofs-of-concept.
 
 ## Service Level Agreements
 * **Acknowledgement:** We confirm receipt of submissions within **24 hours**.
