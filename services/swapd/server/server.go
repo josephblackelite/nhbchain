@@ -57,6 +57,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.Handle("/healthz", otelhttp.NewHandler(http.HandlerFunc(s.handleHealth), "swapd.health"))
 	mux.Handle("/admin/policy", otelhttp.NewHandler(http.HandlerFunc(s.handlePolicy), "swapd.policy"))
 	mux.Handle("/admin/throttle/check", otelhttp.NewHandler(http.HandlerFunc(s.handleThrottleCheck), "swapd.throttle"))
+	s.registerStableHandlers(mux)
 
 	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux}
 

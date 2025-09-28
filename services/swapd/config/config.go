@@ -42,6 +42,7 @@ type Config struct {
 	Sources       []Source     `yaml:"sources"`
 	Pairs         []Pair       `yaml:"pairs"`
 	Policy        PolicyConfig `yaml:"policy"`
+	Stable        StableConfig `yaml:"stable"`
 }
 
 // OracleConfig tunes the aggregation loop.
@@ -72,6 +73,25 @@ type PolicyConfig struct {
 	MintLimit   int      `yaml:"mint_limit"`
 	RedeemLimit int      `yaml:"redeem_limit"`
 	Window      Duration `yaml:"window"`
+}
+
+// StableConfig captures configuration for the experimental stable engine.
+type StableConfig struct {
+	Assets        []StableAsset `yaml:"assets"`
+	QuoteTTL      Duration      `yaml:"quote_ttl"`
+	MaxSlippage   int           `yaml:"max_slippage_bps"`
+	SoftInventory int64         `yaml:"soft_inventory"`
+	Paused        bool          `yaml:"paused"`
+}
+
+// StableAsset allows per-asset overrides for the stable engine.
+type StableAsset struct {
+	Symbol        string   `yaml:"symbol"`
+	BasePair      string   `yaml:"base"`
+	QuotePair     string   `yaml:"quote"`
+	QuoteTTL      Duration `yaml:"quote_ttl"`
+	MaxSlippage   int      `yaml:"max_slippage_bps"`
+	SoftInventory int64    `yaml:"soft_inventory"`
 }
 
 // Load reads configuration from the supplied path.
@@ -115,6 +135,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Policy.ID == "" {
 		cfg.Policy.ID = "default"
 	}
+	if cfg.Stable.QuoteTTL.Duration == 0 {
+		cfg.Stable.QuoteTTL.Duration = time.Minute
+	}
+	if cfg.Stable.MaxSlippage == 0 {
+		cfg.Stable.MaxSlippage = 50
+	}
+	if cfg.Stable.SoftInventory == 0 {
+		cfg.Stable.SoftInventory = 1_000_000
+	}
 }
 
 func validate(cfg Config) error {
@@ -123,6 +152,12 @@ func validate(cfg Config) error {
 	}
 	if len(cfg.Sources) == 0 {
 		return fmt.Errorf("at least one oracle source must be configured")
+	}
+	if cfg.Stable.Paused {
+		return nil
+	}
+	if len(cfg.Stable.Assets) == 0 {
+		return fmt.Errorf("stable assets must be configured when stable engine is enabled")
 	}
 	return nil
 }

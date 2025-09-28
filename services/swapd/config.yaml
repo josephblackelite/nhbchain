@@ -22,3 +22,12 @@ policy:
   mint_limit: 10
   redeem_limit: 5
   window: "1h"
+stable:
+  paused: true
+  quote_ttl: "1m"
+  max_slippage_bps: 50
+  soft_inventory: 1000000
+  assets:
+    - symbol: ZNHB
+      base: ZNHB
+      quote: USD
