@@ -50,6 +50,7 @@ func TestNodeReputationVerifySkillAuthorized(t *testing.T) {
 
 	if err := node.WithState(func(m *nhbstate.Manager) error {
 		ledger := reputation.NewLedger(m)
+		ledger.SetNowFunc(func() int64 { return fixed.Unix() })
 		stored, ok, err := ledger.Get(subjectAddr, "Solidity", verifierAddr)
 		if err != nil {
 			return err
@@ -115,6 +116,7 @@ func TestNodeReputationVerifySkillUnauthorized(t *testing.T) {
 	}
 	if err := node.WithState(func(m *nhbstate.Manager) error {
 		ledger := reputation.NewLedger(m)
+		ledger.SetNowFunc(func() int64 { return time.Unix(1_700_000_100, 0).Unix() })
 		_, ok, err := ledger.Get(subjectAddr, "Design", verifierAddr)
 		if err != nil {
 			return err
@@ -154,6 +156,7 @@ func TestNodeReputationVerifySkillInvalidSkill(t *testing.T) {
 	}
 	if err := node.WithState(func(m *nhbstate.Manager) error {
 		ledger := reputation.NewLedger(m)
+		ledger.SetNowFunc(func() int64 { return time.Unix(1_700_000_200, 0).Unix() })
 		_, ok, err := ledger.Get(subjectAddr, "", verifierAddr)
 		if err == nil && ok {
 			return fmt.Errorf("unexpected verification persisted")
@@ -161,5 +164,81 @@ func TestNodeReputationVerifySkillInvalidSkill(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("ledger check: %v", err)
+	}
+}
+
+func TestNodeReputationRevokeSkill(t *testing.T) {
+	node := newTestNode(t)
+	fixed := time.Unix(1_700_100_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixed })
+
+	verifierKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("verifier key: %v", err)
+	}
+	subjectKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("subject key: %v", err)
+	}
+	otherVerifierKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("other verifier key: %v", err)
+	}
+
+	verifierAddr := toAddress(verifierKey)
+	subjectAddr := toAddress(subjectKey)
+	otherVerifierAddr := toAddress(otherVerifierKey)
+	assignRole(t, node, roleReputationVerifier, verifierAddr)
+
+	expires := fixed.Add(2 * time.Hour).Unix()
+	verification, err := node.ReputationVerifySkill(verifierAddr, subjectAddr, "Rust", expires)
+	if err != nil {
+		t.Fatalf("verify skill: %v", err)
+	}
+	attID, err := reputation.AttestationID(verification)
+	if err != nil {
+		t.Fatalf("attestation id: %v", err)
+	}
+
+	if _, err := node.ReputationRevokeSkill(otherVerifierAddr, attID, "not mine"); !errors.Is(err, ErrReputationVerifierUnauthorized) {
+		t.Fatalf("expected ErrReputationVerifierUnauthorized, got %v", err)
+	}
+
+	revocation, err := node.ReputationRevokeSkill(verifierAddr, attID, "updated assessment")
+	if err != nil {
+		t.Fatalf("revoke skill: %v", err)
+	}
+	if revocation == nil {
+		t.Fatalf("expected revocation result")
+	}
+	if revocation.Reason != "updated assessment" {
+		t.Fatalf("expected reason 'updated assessment', got %q", revocation.Reason)
+	}
+
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		ledger := reputation.NewLedger(m)
+		ledger.SetNowFunc(func() int64 { return fixed.Unix() })
+		_, ok, err := ledger.Get(subjectAddr, "Rust", verifierAddr)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return fmt.Errorf("expected revoked verification filtered")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ledger check: %v", err)
+	}
+
+	events := node.Events()
+	if len(events) == 0 {
+		t.Fatalf("expected events to be emitted")
+	}
+	last := events[len(events)-1]
+	if last.Type != reputation.EventTypeSkillRevoked {
+		t.Fatalf("expected event type %q, got %q", reputation.EventTypeSkillRevoked, last.Type)
+	}
+	if last.Attributes["reason"] != "updated assessment" {
+		t.Fatalf("expected reason attribute, got %q", last.Attributes["reason"])
 	}
 }

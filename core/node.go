@@ -2077,11 +2077,37 @@ func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, e
 		return nil, ErrReputationVerifierUnauthorized
 	}
 	ledger := reputation.NewLedger(manager)
+	ledger.SetNowFunc(func() int64 { return n.currentTime().Unix() })
 	if err := ledger.Put(verification); err != nil {
 		return nil, err
 	}
 	n.state.AppendEvent(reputation.NewSkillVerifiedEvent(verification))
 	return verification, nil
+}
+
+// ReputationRevokeSkill validates the caller's verifier role and revokes a
+// previously issued attestation.
+func (n *Node) ReputationRevokeSkill(verifier [20]byte, attestationID [32]byte, reason string) (*reputation.Revocation, error) {
+	if n == nil {
+		return nil, fmt.Errorf("reputation: node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("reputation: state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	if !manager.HasRole(roleReputationVerifier, verifier[:]) {
+		return nil, ErrReputationVerifierUnauthorized
+	}
+	ledger := reputation.NewLedger(manager)
+	ledger.SetNowFunc(func() int64 { return n.currentTime().Unix() })
+	revocation, err := ledger.Revoke(attestationID, verifier, reason)
+	if err != nil {
+		return nil, err
+	}
+	n.state.AppendEvent(reputation.NewSkillRevokedEvent(revocation))
+	return revocation, nil
 }
 
 func (n *Node) P2PCreateTrade(offerID string, buyer, seller [20]byte,
