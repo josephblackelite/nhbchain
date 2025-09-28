@@ -89,6 +89,7 @@ func main() {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
 
+	node.SetGlobalConfig(cfg.Global)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	govPolicy, err := cfg.Governance.Policy()
