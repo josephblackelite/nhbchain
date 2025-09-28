@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"net"
@@ -13,6 +15,8 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"nhbchain/config"
 	"nhbchain/core"
@@ -34,7 +38,7 @@ func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file")
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "Allow automatic genesis creation when no stored genesis exists")
-	grpcAddress := flag.String("grpc", ":9091", "Address for the internal network gRPC server")
+	grpcAddress := flag.String("grpc", "127.0.0.1:9091", "Address for the internal network gRPC server")
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
@@ -189,11 +193,18 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to listen on %s: %v", *grpcAddress, err))
 	}
+	baseDir := filepath.Dir(*configFile)
+	serverCreds, auth, err := buildNetworkServerSecurity(cfg, baseDir)
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialise network security: %v", err))
+	}
+
 	grpcServer := grpc.NewServer(
+		grpc.Creds(serverCreds),
 		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
 	)
-	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay))
+	networkv1.RegisterNetworkServiceServer(grpcServer, network.NewService(relay, auth))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -212,6 +223,76 @@ func main() {
 }
 
 type envLookupFunc func(string) (string, bool)
+
+func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials.TransportCredentials, network.Authenticator, error) {
+	if cfg == nil {
+		return insecure.NewCredentials(), network.ChainAuthenticators(), nil
+	}
+	sec := cfg.NetworkSecurity
+
+	secret, err := sec.ResolveSharedSecret(baseDir, os.LookupEnv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve shared secret: %w", err)
+	}
+
+	var auths []network.Authenticator
+	if secret != "" {
+		auths = append(auths, network.NewTokenAuthenticator(sec.AuthorizationHeaderName(), secret))
+	}
+
+	certPath := resolvePath(baseDir, sec.ServerTLSCertFile)
+	keyPath := resolvePath(baseDir, sec.ServerTLSKeyFile)
+
+	var tlsConfig *tls.Config
+	if certPath != "" || keyPath != "" {
+		if certPath == "" || keyPath == "" {
+			return nil, nil, fmt.Errorf("network security requires both ServerTLSCertFile and ServerTLSKeyFile when one is set")
+		}
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load network TLS keypair: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+		}
+	}
+
+	if caPath := resolvePath(baseDir, sec.ClientCAFile); caPath != "" {
+		if tlsConfig == nil {
+			return nil, nil, fmt.Errorf("ClientCAFile requires ServerTLSCertFile and ServerTLSKeyFile to be configured")
+		}
+		pem, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read client CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, nil, fmt.Errorf("failed to parse client CA certificates from %s", caPath)
+		}
+		tlsConfig.ClientCAs = pool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		auths = append(auths, network.NewTLSAuthorizer(sec.AllowedClientCommonNames))
+	}
+
+	creds := credentials.TransportCredentials(insecure.NewCredentials())
+	if tlsConfig != nil {
+		creds = credentials.NewTLS(tlsConfig)
+	}
+
+	return creds, network.ChainAuthenticators(auths...), nil
+}
+
+func resolvePath(baseDir, path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	if baseDir != "" && !filepath.IsAbs(trimmed) {
+		return filepath.Join(baseDir, trimmed)
+	}
+	return trimmed
+}
 
 func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, lookup envLookupFunc) (string, error) {
 	trimmedCLI := strings.TrimSpace(cliPath)

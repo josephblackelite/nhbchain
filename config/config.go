@@ -20,44 +20,100 @@ import (
 )
 
 type Config struct {
-	ListenAddress         string         `toml:"ListenAddress"`
-	RPCAddress            string         `toml:"RPCAddress"`
-	RPCTrustedProxies     []string       `toml:"RPCTrustedProxies"`
-	RPCTrustProxyHeaders  bool           `toml:"RPCTrustProxyHeaders"`
-	RPCReadHeaderTimeout  int            `toml:"RPCReadHeaderTimeout"`
-	RPCReadTimeout        int            `toml:"RPCReadTimeout"`
-	RPCWriteTimeout       int            `toml:"RPCWriteTimeout"`
-	RPCIdleTimeout        int            `toml:"RPCIdleTimeout"`
-	RPCTLSCertFile        string         `toml:"RPCTLSCertFile"`
-	RPCTLSKeyFile         string         `toml:"RPCTLSKeyFile"`
-	DataDir               string         `toml:"DataDir"`
-	GenesisFile           string         `toml:"GenesisFile"`
-	AllowAutogenesis      bool           `toml:"AllowAutogenesis"`
-	ValidatorKeystorePath string         `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI       string         `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv       string         `toml:"ValidatorKMSEnv"`
-	NetworkName           string         `toml:"NetworkName"`
-	Bootnodes             []string       `toml:"Bootnodes"`
-	PersistentPeers       []string       `toml:"PersistentPeers"`
-	BootstrapPeers        []string       `toml:"BootstrapPeers,omitempty"`
-	MaxPeers              int            `toml:"MaxPeers"`
-	MaxInbound            int            `toml:"MaxInbound"`
-	MaxOutbound           int            `toml:"MaxOutbound"`
-	MinPeers              int            `toml:"MinPeers"`
-	OutboundPeers         int            `toml:"OutboundPeers"`
-	PeerBanSeconds        int            `toml:"PeerBanSeconds"`
-	ReadTimeout           int            `toml:"ReadTimeout"`
-	WriteTimeout          int            `toml:"WriteTimeout"`
-	MaxMsgBytes           int            `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond      float64        `toml:"MaxMsgsPerSecond"`
-	ClientVersion         string         `toml:"ClientVersion"`
-	P2P                   P2PSection     `toml:"p2p"`
-	Potso                 PotsoConfig    `toml:"potso"`
-	Governance            GovConfig      `toml:"governance"`
-	Swap                  swap.Config    `toml:"swap"`
-	Lending               lending.Config `toml:"lending"`
-	Mempool               MempoolConfig  `toml:"mempool"`
-	Global                Global         `toml:"global"`
+	ListenAddress         string          `toml:"ListenAddress"`
+	RPCAddress            string          `toml:"RPCAddress"`
+	RPCTrustedProxies     []string        `toml:"RPCTrustedProxies"`
+	RPCTrustProxyHeaders  bool            `toml:"RPCTrustProxyHeaders"`
+	RPCReadHeaderTimeout  int             `toml:"RPCReadHeaderTimeout"`
+	RPCReadTimeout        int             `toml:"RPCReadTimeout"`
+	RPCWriteTimeout       int             `toml:"RPCWriteTimeout"`
+	RPCIdleTimeout        int             `toml:"RPCIdleTimeout"`
+	RPCTLSCertFile        string          `toml:"RPCTLSCertFile"`
+	RPCTLSKeyFile         string          `toml:"RPCTLSKeyFile"`
+	DataDir               string          `toml:"DataDir"`
+	GenesisFile           string          `toml:"GenesisFile"`
+	AllowAutogenesis      bool            `toml:"AllowAutogenesis"`
+	ValidatorKeystorePath string          `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI       string          `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv       string          `toml:"ValidatorKMSEnv"`
+	NetworkName           string          `toml:"NetworkName"`
+	Bootnodes             []string        `toml:"Bootnodes"`
+	PersistentPeers       []string        `toml:"PersistentPeers"`
+	BootstrapPeers        []string        `toml:"BootstrapPeers,omitempty"`
+	MaxPeers              int             `toml:"MaxPeers"`
+	MaxInbound            int             `toml:"MaxInbound"`
+	MaxOutbound           int             `toml:"MaxOutbound"`
+	MinPeers              int             `toml:"MinPeers"`
+	OutboundPeers         int             `toml:"OutboundPeers"`
+	PeerBanSeconds        int             `toml:"PeerBanSeconds"`
+	ReadTimeout           int             `toml:"ReadTimeout"`
+	WriteTimeout          int             `toml:"WriteTimeout"`
+	MaxMsgBytes           int             `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond      float64         `toml:"MaxMsgsPerSecond"`
+	ClientVersion         string          `toml:"ClientVersion"`
+	P2P                   P2PSection      `toml:"p2p"`
+	Potso                 PotsoConfig     `toml:"potso"`
+	Governance            GovConfig       `toml:"governance"`
+	Swap                  swap.Config     `toml:"swap"`
+	Lending               lending.Config  `toml:"lending"`
+	Mempool               MempoolConfig   `toml:"mempool"`
+	Global                Global          `toml:"global"`
+	NetworkSecurity       NetworkSecurity `toml:"network_security"`
+}
+
+// NetworkSecurity captures TLS and shared-secret settings for the internal gRPC
+// bridge between consensusd and p2pd.
+type NetworkSecurity struct {
+	ServerTLSCertFile        string   `toml:"ServerTLSCertFile"`
+	ServerTLSKeyFile         string   `toml:"ServerTLSKeyFile"`
+	ServerCAFile             string   `toml:"ServerCAFile"`
+	ClientCAFile             string   `toml:"ClientCAFile"`
+	ClientTLSCertFile        string   `toml:"ClientTLSCertFile"`
+	ClientTLSKeyFile         string   `toml:"ClientTLSKeyFile"`
+	SharedSecret             string   `toml:"SharedSecret"`
+	SharedSecretFile         string   `toml:"SharedSecretFile"`
+	SharedSecretEnv          string   `toml:"SharedSecretEnv"`
+	AuthorizationHeader      string   `toml:"AuthorizationHeader"`
+	AllowedClientCommonNames []string `toml:"AllowedClientCommonNames"`
+	ServerName               string   `toml:"ServerName"`
+}
+
+// AuthorizationHeaderName returns the metadata header that carries the
+// shared-secret token. Defaults to "authorization" when unspecified.
+func (ns NetworkSecurity) AuthorizationHeaderName() string {
+	header := strings.TrimSpace(ns.AuthorizationHeader)
+	if header == "" {
+		return "authorization"
+	}
+	return strings.ToLower(header)
+}
+
+// ResolveSharedSecret locates the shared-secret token following the precedence
+// order of environment variable, external file, and inline configuration.
+// Relative file paths are resolved against baseDir when provided.
+func (ns NetworkSecurity) ResolveSharedSecret(baseDir string, lookup func(string) (string, bool)) (string, error) {
+	if key := strings.TrimSpace(ns.SharedSecretEnv); key != "" && lookup != nil {
+		if value, ok := lookup(key); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed, nil
+			}
+		}
+	}
+
+	if path := strings.TrimSpace(ns.SharedSecretFile); path != "" {
+		if baseDir != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		if secret := strings.TrimSpace(string(data)); secret != "" {
+			return secret, nil
+		}
+	}
+
+	return strings.TrimSpace(ns.SharedSecret), nil
 }
 
 func defaultGlobalConfig() Global {

@@ -38,3 +38,12 @@ ReadTimeout = 90
 WriteTimeout = 5
 MaxMsgBytes = 1048576
 ClientVersion = "nhbchain/node"
+
+[network_security]
+# Leave the shared secret empty for single-host development. Set SharedSecret or
+# SharedSecretEnv when deploying consensusd and p2pd on separate machines.
+SharedSecret = ""
+# ServerTLSCertFile = "./tls/p2pd.crt"
+# ServerTLSKeyFile = "./tls/p2pd.key"
+# ClientTLSCertFile = "./tls/consensus.crt"
+# ClientTLSKeyFile = "./tls/consensus.key"

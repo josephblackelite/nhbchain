@@ -29,6 +29,50 @@ custom Badger deployment back to the stock LevelDB instance, wipe the
 `peerstore` directory before restarting so the server can initialise a fresh
 store.
 
+## Securing the gRPC bridge
+
+The `p2pd` daemon exposes a gRPC endpoint that consensusd connects to for
+gossip. The listener now defaults to `127.0.0.1:9091` so fresh deployments are
+never internet-facing accidentally. Operators should explicitly bind to a public
+interface when deploying across hosts and configure authentication before doing
+so.
+
+The `[network_security]` section in `config.toml` drives both ends of the
+connection:
+
+```toml
+[network_security]
+# Shared-secret token transmitted with every RPC. The value is resolved in the
+# following order: environment variable, external file, inline string.
+SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
+SharedSecretFile = "/etc/nhb/network.token"
+SharedSecret = ""
+# Metadata header that carries the token (default: "authorization").
+AuthorizationHeader = "x-nhb-network-token"
+
+# TLS material for the p2pd server.
+ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
+ServerTLSKeyFile  = "/etc/nhb/tls/p2pd.key"
+# Optional client CA bundle enables mutual TLS and the AllowedClientCommonNames
+# allowlist below.
+ClientCAFile = "/etc/nhb/tls/consensus-ca.pem"
+AllowedClientCommonNames = ["consensusd"]
+
+# TLS material for the consensusd client.
+ServerCAFile       = "/etc/nhb/tls/p2pd-ca.pem"
+ClientTLSCertFile  = "/etc/nhb/tls/consensus.crt"
+ClientTLSKeyFile   = "/etc/nhb/tls/consensus.key"
+ServerName         = "p2pd.internal"
+```
+
+`p2pd` loads the server certificate (and optional client CA) to present TLS or
+mTLS credentials via `grpc.Creds(...)`. When a shared secret is configured, the
+service enforces it on `Gossip`, `DialPeer`, and `BanPeer` requests; client
+certificates are validated against the `AllowedClientCommonNames` allowlist when
+provided. `consensusd` consumes the same block to dial with
+`grpc.WithTransportCredentials` and per-RPC metadata so authenticated traffic
+continues to flow while unauthenticated requests are rejected.
+
 ## Seeds
 
 Seeds are static peers that a freshly booted node will dial to discover the

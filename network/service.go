@@ -8,22 +8,26 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-    "nhbchain/p2p"
-    networkv1 "nhbchain/proto/network/v1"
+	"nhbchain/p2p"
+	networkv1 "nhbchain/proto/network/v1"
 )
 
 // Service exposes the gRPC server that consensusd connects to.
 type Service struct {
 	networkv1.UnimplementedNetworkServiceServer
 	relay *Relay
+	auth  Authenticator
 }
 
 // NewService wraps the provided relay for gRPC registration.
-func NewService(relay *Relay) *Service {
-	return &Service{relay: relay}
+func NewService(relay *Relay, auth Authenticator) *Service {
+	return &Service{relay: relay, auth: auth}
 }
 
 func (s *Service) Gossip(stream networkv1.NetworkService_GossipServer) error {
+	if err := s.authorize(stream.Context()); err != nil {
+		return err
+	}
 	return s.relay.GossipStream(stream)
 }
 
@@ -48,6 +52,9 @@ func (s *Service) ListPeers(ctx context.Context, _ *networkv1.ListPeersRequest) 
 }
 
 func (s *Service) DialPeer(ctx context.Context, req *networkv1.DialPeerRequest) (*networkv1.DialPeerResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "missing request")
 	}
@@ -67,6 +74,9 @@ func (s *Service) DialPeer(ctx context.Context, req *networkv1.DialPeerRequest) 
 }
 
 func (s *Service) BanPeer(ctx context.Context, req *networkv1.BanPeerRequest) (*networkv1.BanPeerResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "missing request")
 	}
@@ -83,6 +93,13 @@ func (s *Service) BanPeer(ctx context.Context, req *networkv1.BanPeerRequest) (*
 		}
 	}
 	return &networkv1.BanPeerResponse{}, nil
+}
+
+func (s *Service) authorize(ctx context.Context) error {
+	if s == nil || s.auth == nil {
+		return nil
+	}
+	return s.auth.Authorize(ctx)
 }
 
 func encodeView(view p2p.NetworkView, listen []string) *networkv1.NetworkView {

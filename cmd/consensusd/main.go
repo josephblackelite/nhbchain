@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,6 +20,8 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"nhbchain/config"
 	"nhbchain/consensus/bft"
@@ -231,7 +236,13 @@ func main() {
 	defer stop()
 
 	broadcaster := newResilientBroadcaster(ctx)
-	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node)
+	baseDir := filepath.Dir(*configFile)
+	networkDialOpts, err := buildNetworkDialOptions(cfg, baseDir)
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialise network client security: %v", err))
+	}
+
+	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node, networkDialOpts)
 
 	bftEngine := bft.NewEngine(node, privKey, broadcaster)
 	node.SetBftEngine(bftEngine)
@@ -271,7 +282,7 @@ const (
 	networkReconnectMaxDelay  = 30 * time.Second
 )
 
-func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node) {
+func maintainNetworkStream(ctx context.Context, target string, broadcaster *resilientBroadcaster, node *core.Node, dialOpts []grpc.DialOption) {
 	if broadcaster == nil || node == nil {
 		return
 	}
@@ -283,7 +294,7 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 		}
 
 		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		client, err := network.Dial(dialCtx, target)
+		client, err := network.Dial(dialCtx, target, dialOpts...)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to connect to p2pd at %s: %v\n", target, err)
@@ -322,6 +333,81 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 }
 
 type envLookupFunc func(string) (string, bool)
+
+func buildNetworkDialOptions(cfg *config.Config, baseDir string) ([]grpc.DialOption, error) {
+	if cfg == nil {
+		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
+	}
+	sec := cfg.NetworkSecurity
+
+	secret, err := sec.ResolveSharedSecret(baseDir, os.LookupEnv)
+	if err != nil {
+		return nil, fmt.Errorf("resolve shared secret: %w", err)
+	}
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	useTLS := false
+
+	if caPath := resolvePath(baseDir, sec.ServerCAFile); caPath != "" {
+		pem, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read server CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("failed to parse server CA certificates from %s", caPath)
+		}
+		tlsConfig.RootCAs = pool
+		useTLS = true
+	}
+
+	certPath := resolvePath(baseDir, sec.ClientTLSCertFile)
+	keyPath := resolvePath(baseDir, sec.ClientTLSKeyFile)
+	if certPath != "" || keyPath != "" {
+		if certPath == "" || keyPath == "" {
+			return nil, fmt.Errorf("ClientTLSCertFile and ClientTLSKeyFile must both be configured when using client certificates")
+		}
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load client TLS keypair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+		useTLS = true
+	}
+
+	if serverName := strings.TrimSpace(sec.ServerName); serverName != "" {
+		tlsConfig.ServerName = serverName
+		useTLS = true
+	}
+
+	if !useTLS && strings.TrimSpace(sec.ServerTLSCertFile) != "" {
+		useTLS = true
+	}
+
+	var opts []grpc.DialOption
+	if useTLS {
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	if secret != "" {
+		opts = append(opts, grpc.WithPerRPCCredentials(network.NewStaticTokenCredentials(sec.AuthorizationHeaderName(), secret)))
+	}
+
+	return opts, nil
+}
+
+func resolvePath(baseDir, path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	if baseDir != "" && !filepath.IsAbs(trimmed) {
+		return filepath.Join(baseDir, trimmed)
+	}
+	return trimmed
+}
 
 func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, lookup envLookupFunc) (string, error) {
 	trimmedCLI := strings.TrimSpace(cliPath)

@@ -45,6 +45,20 @@ RPCIdleTimeout = 45
 RPCTLSCertFile = "/path/to/cert.pem"
 RPCTLSKeyFile = "/path/to/key.pem"
 
+[network_security]
+SharedSecret = "topsecret"
+SharedSecretFile = "./secret.txt"
+SharedSecretEnv = "NHB_TEST_SECRET"
+AuthorizationHeader = "x-test-token"
+ServerTLSCertFile = "./tls/server.crt"
+ServerTLSKeyFile = "./tls/server.key"
+ServerCAFile = "./tls/ca.pem"
+ClientCAFile = "./tls/client-ca.pem"
+ClientTLSCertFile = "./tls/client.crt"
+ClientTLSKeyFile = "./tls/client.key"
+AllowedClientCommonNames = ["consensusd"]
+ServerName = "p2pd.internal"
+
 [p2p]
 NetworkId = 187001
 MaxPeers = 42
@@ -111,6 +125,36 @@ PEX = false
 	}
 	if cfg.RPCTLSCertFile != "/path/to/cert.pem" || cfg.RPCTLSKeyFile != "/path/to/key.pem" {
 		t.Fatalf("unexpected RPC TLS paths: %s %s", cfg.RPCTLSCertFile, cfg.RPCTLSKeyFile)
+	}
+	if header := cfg.NetworkSecurity.AuthorizationHeaderName(); header != "x-test-token" {
+		t.Fatalf("unexpected auth header: %s", header)
+	}
+	if cfg.NetworkSecurity.SharedSecret != "topsecret" {
+		t.Fatalf("unexpected inline shared secret: %s", cfg.NetworkSecurity.SharedSecret)
+	}
+	if cfg.NetworkSecurity.SharedSecretFile != "./secret.txt" {
+		t.Fatalf("unexpected shared secret file: %s", cfg.NetworkSecurity.SharedSecretFile)
+	}
+	if cfg.NetworkSecurity.SharedSecretEnv != "NHB_TEST_SECRET" {
+		t.Fatalf("unexpected shared secret env: %s", cfg.NetworkSecurity.SharedSecretEnv)
+	}
+	if cfg.NetworkSecurity.ServerTLSCertFile != "./tls/server.crt" || cfg.NetworkSecurity.ServerTLSKeyFile != "./tls/server.key" {
+		t.Fatalf("unexpected server tls paths: %+v", cfg.NetworkSecurity)
+	}
+	if cfg.NetworkSecurity.ServerCAFile != "./tls/ca.pem" {
+		t.Fatalf("unexpected server CA file: %s", cfg.NetworkSecurity.ServerCAFile)
+	}
+	if cfg.NetworkSecurity.ClientCAFile != "./tls/client-ca.pem" {
+		t.Fatalf("unexpected client CA file: %s", cfg.NetworkSecurity.ClientCAFile)
+	}
+	if cfg.NetworkSecurity.ClientTLSCertFile != "./tls/client.crt" || cfg.NetworkSecurity.ClientTLSKeyFile != "./tls/client.key" {
+		t.Fatalf("unexpected client tls paths: %+v", cfg.NetworkSecurity)
+	}
+	if cfg.NetworkSecurity.ServerName != "p2pd.internal" {
+		t.Fatalf("unexpected server name: %s", cfg.NetworkSecurity.ServerName)
+	}
+	if len(cfg.NetworkSecurity.AllowedClientCommonNames) != 1 || cfg.NetworkSecurity.AllowedClientCommonNames[0] != "consensusd" {
+		t.Fatalf("unexpected allowed common names: %v", cfg.NetworkSecurity.AllowedClientCommonNames)
 	}
 	if len(cfg.Bootnodes) != 1 || cfg.Bootnodes[0] != "1.1.1.1:6001" {
 		t.Fatalf("bootnodes not parsed: %v", cfg.Bootnodes)
