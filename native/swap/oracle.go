@@ -786,27 +786,29 @@ func ComputeMintAmount(fiatAmount string, rate *big.Rat, decimals uint8) (*big.I
 
 // Config controls swap oracle behaviour and mint validation thresholds.
 type Config struct {
-	AllowedFiat        []string
-	MaxQuoteAgeSeconds int64
-	SlippageBps        uint64
-	OraclePriority     []string
-	TwapWindowSeconds  int64
-	TwapSampleCap      int
-	Risk               RiskConfig     `toml:"risk"`
-	Providers          ProviderConfig `toml:"providers"`
+	AllowedFiat               []string
+	MaxQuoteAgeSeconds        int64
+	SlippageBps               uint64
+	OraclePriority            []string
+	TwapWindowSeconds         int64
+	TwapSampleCap             int
+	PriceProofMaxDeviationBps uint64
+	Risk                      RiskConfig     `toml:"risk"`
+	Providers                 ProviderConfig `toml:"providers"`
 }
 
 // Normalise applies defaults and canonical casing to the configuration values.
 func (c Config) Normalise() Config {
 	cfg := Config{
-		AllowedFiat:        append([]string{}, c.AllowedFiat...),
-		MaxQuoteAgeSeconds: c.MaxQuoteAgeSeconds,
-		SlippageBps:        c.SlippageBps,
-		OraclePriority:     append([]string{}, c.OraclePriority...),
-		TwapWindowSeconds:  c.TwapWindowSeconds,
-		TwapSampleCap:      c.TwapSampleCap,
-		Risk:               c.Risk.Normalise(),
-		Providers:          c.Providers.Normalise(),
+		AllowedFiat:               append([]string{}, c.AllowedFiat...),
+		MaxQuoteAgeSeconds:        c.MaxQuoteAgeSeconds,
+		SlippageBps:               c.SlippageBps,
+		OraclePriority:            append([]string{}, c.OraclePriority...),
+		TwapWindowSeconds:         c.TwapWindowSeconds,
+		TwapSampleCap:             c.TwapSampleCap,
+		PriceProofMaxDeviationBps: c.PriceProofMaxDeviationBps,
+		Risk:                      c.Risk.Normalise(),
+		Providers:                 c.Providers.Normalise(),
 	}
 	if len(cfg.AllowedFiat) == 0 {
 		cfg.AllowedFiat = []string{"USD"}
@@ -828,6 +830,9 @@ func (c Config) Normalise() Config {
 	}
 	if cfg.TwapSampleCap <= 0 {
 		cfg.TwapSampleCap = 128
+	}
+	if cfg.PriceProofMaxDeviationBps == 0 {
+		cfg.PriceProofMaxDeviationBps = 100
 	}
 	return cfg
 }

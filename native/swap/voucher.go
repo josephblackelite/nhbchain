@@ -40,6 +40,7 @@ type VoucherSubmission struct {
 	Username     string
 	Address      string
 	USDAmount    string
+	PriceProof   *PriceProof
 }
 
 type voucherJSON struct {
