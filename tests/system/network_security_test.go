@@ -55,9 +55,16 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial unauth conn: %v", err)
 	}
-	_, err = networkv1.NewNetworkServiceClient(conn).DialPeer(unauthCtx, &networkv1.DialPeerRequest{Target: "example"})
+	client := networkv1.NewNetworkServiceClient(conn)
+	_, err = client.DialPeer(unauthCtx, &networkv1.DialPeerRequest{Target: "example"})
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("expected unauthenticated dial, got %v", err)
+	}
+	if _, err = client.GetView(unauthCtx, &networkv1.GetViewRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated view, got %v", err)
+	}
+	if _, err = client.ListPeers(unauthCtx, &networkv1.ListPeersRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated peer list, got %v", err)
 	}
 	_ = conn.Close()
 
@@ -94,5 +101,50 @@ func TestNetworkServiceSharedSecretAuth(t *testing.T) {
 	_, err = networkv1.NewNetworkServiceClient(authConn).BanPeer(context.Background(), &networkv1.BanPeerRequest{NodeId: "peer"})
 	if status.Code(err) == codes.Unauthenticated {
 		t.Fatalf("authenticated request should not be rejected: %v", err)
+	}
+}
+
+func TestNetworkServiceAnonymousReadsOptIn(t *testing.T) {
+	relay := network.NewRelay()
+	header := "x-nhb-network-token"
+	secret := "shared-secret"
+
+	server := grpc.NewServer(grpc.Creds(insecure.NewCredentials()))
+	networkv1.RegisterNetworkServiceServer(server, network.NewService(relay, network.NewTokenAuthenticator(header, secret), network.WithReadAuthenticator(nil)))
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		server.Stop()
+		_ = lis.Close()
+	})
+
+	go func() {
+		_ = server.Serve(lis)
+	}()
+
+	addr := lis.Addr().String()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial unauth conn: %v", err)
+	}
+	defer conn.Close()
+
+	client := networkv1.NewNetworkServiceClient(conn)
+
+	if _, err := client.GetView(ctx, &networkv1.GetViewRequest{}); err != nil {
+		t.Fatalf("anonymous read should succeed: %v", err)
+	}
+	if _, err := client.ListPeers(ctx, &networkv1.ListPeersRequest{}); err != nil {
+		t.Fatalf("anonymous read should succeed: %v", err)
+	}
+	if _, err := client.BanPeer(ctx, &networkv1.BanPeerRequest{NodeId: "peer"}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated ban, got %v", err)
 	}
 }

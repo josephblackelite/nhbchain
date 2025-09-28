@@ -15,13 +15,32 @@ import (
 // Service exposes the gRPC server that consensusd connects to.
 type Service struct {
 	networkv1.UnimplementedNetworkServiceServer
-	relay *Relay
-	auth  Authenticator
+	relay     *Relay
+	writeAuth Authenticator
+	readAuth  Authenticator
 }
 
 // NewService wraps the provided relay for gRPC registration.
-func NewService(relay *Relay, auth Authenticator) *Service {
-	return &Service{relay: relay, auth: auth}
+func NewService(relay *Relay, auth Authenticator, opts ...ServiceOption) *Service {
+	svc := &Service{relay: relay, writeAuth: auth, readAuth: auth}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	return svc
+}
+
+// ServiceOption mutates service construction defaults.
+type ServiceOption func(*Service)
+
+// WithReadAuthenticator overrides the authenticator used for read-only RPCs.
+func WithReadAuthenticator(auth Authenticator) ServiceOption {
+	return func(s *Service) {
+		if s != nil {
+			s.readAuth = auth
+		}
+	}
 }
 
 func (s *Service) Gossip(stream networkv1.NetworkService_GossipServer) error {
@@ -32,6 +51,9 @@ func (s *Service) Gossip(stream networkv1.NetworkService_GossipServer) error {
 }
 
 func (s *Service) GetView(ctx context.Context, _ *networkv1.GetViewRequest) (*networkv1.GetViewResponse, error) {
+	if err := s.authorizeRead(ctx); err != nil {
+		return nil, err
+	}
 	view, listen, err := s.relay.View()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
@@ -40,6 +62,9 @@ func (s *Service) GetView(ctx context.Context, _ *networkv1.GetViewRequest) (*ne
 }
 
 func (s *Service) ListPeers(ctx context.Context, _ *networkv1.ListPeersRequest) (*networkv1.ListPeersResponse, error) {
+	if err := s.authorizeRead(ctx); err != nil {
+		return nil, err
+	}
 	peers, err := s.relay.Peers()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
@@ -96,10 +121,17 @@ func (s *Service) BanPeer(ctx context.Context, req *networkv1.BanPeerRequest) (*
 }
 
 func (s *Service) authorize(ctx context.Context) error {
-	if s == nil || s.auth == nil {
+	if s == nil || s.writeAuth == nil {
 		return nil
 	}
-	return s.auth.Authorize(ctx)
+	return s.writeAuth.Authorize(ctx)
+}
+
+func (s *Service) authorizeRead(ctx context.Context) error {
+	if s == nil || s.readAuth == nil {
+		return nil
+	}
+	return s.readAuth.Authorize(ctx)
 }
 
 func encodeView(view p2p.NetworkView, listen []string) *networkv1.NetworkView {
