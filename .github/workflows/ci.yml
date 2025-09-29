@@ -25,3 +25,38 @@ jobs:
         run: go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/nhb ./cmd/nhb
       - name: Test
         run: go test ./...
+
+  audit-endpoints:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Start swapd
+        run: docker compose -f deploy/compose/docker-compose.yml up -d swapd
+      - name: Wait for swapd
+        run: |
+          for i in {1..30}; do
+            if curl -sSf http://localhost:7074/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "swapd did not become healthy" >&2
+          docker compose -f deploy/compose/docker-compose.yml logs swapd
+          exit 1
+      - name: Run stable endpoint regression
+        run: make audit:endpoints
+      - name: Upload stable endpoint artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-endpoints
+          path: |
+            artifacts/endpoints/newman-report.json
+            logs/audit-endpoints.log
+      - name: Teardown swapd
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml down -v

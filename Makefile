@@ -1,4 +1,6 @@
-.PHONY: proto sdk tidy up down audit:static audit:tests audit:determinism audit:e2e audit:chaos audit:perf audit:netsec audit:ledger audit:supply audit:config audit:docs
+.PHONY: proto sdk tidy up down audit:static audit:tests audit:determinism audit:e2e audit:chaos audit:perf audit:netsec audit:ledger audit:supply audit:config audit:docs audit:endpoints
+
+STABLE_BASE ?= http://localhost:7074
 
 proto:
 	go run ./tools/proto/gen.go
@@ -126,6 +128,15 @@ audit:config:
 
 .PHONY: audit:docs
 audit:docs:
-	@mkdir -p logs artifacts/docs
-	@bash -o errexit -o nounset -o pipefail -c 'go run ./tools/docs/verify.go 2>&1 | tee logs/docs-verify.log'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs --hash docs/security/audit-readiness.md --hash ops/audit-pack/BUILD_STEPS.md 2>&1 | tee logs/audit-docs.log'
+        @mkdir -p logs artifacts/docs
+        @bash -o errexit -o nounset -o pipefail -c 'go run ./tools/docs/verify.go 2>&1 | tee logs/docs-verify.log'
+        @bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs --hash docs/security/audit-readiness.md --hash ops/audit-pack/BUILD_STEPS.md 2>&1 | tee logs/audit-docs.log'
+
+.PHONY: audit:endpoints
+audit:endpoints:
+	@mkdir -p logs artifacts/endpoints
+	@bash -o errexit -o nounset -o pipefail -c ' \
+		npx --yes newman run examples/postman/Funding.postman_collection.json \
+		--env-var stable_base=$(STABLE_BASE) \
+		--reporters cli,json \
+		--reporter-json-export artifacts/endpoints/newman-report.json 2>&1 | tee logs/audit-endpoints.log'
