@@ -63,6 +63,8 @@ type Node struct {
 	mempoolMu                    sync.Mutex
 	mempoolLimit                 int
 	allowUnlimitedMempool        bool
+	txValidationMu               sync.RWMutex
+	txSimulationEnabled          bool
 	bftEngine                    *bft.Engine
 	stateMu                      sync.Mutex
 	escrowTreasury               [20]byte
@@ -130,6 +132,9 @@ var ErrReputationVerifierUnauthorized = errors.New("reputation: caller lacks ver
 
 // ErrMempoolFull is returned when the node's mempool has reached its configured capacity.
 var ErrMempoolFull = errors.New("mempool: transaction limit reached")
+
+// ErrInvalidTransaction marks transactions that fail basic validation or cannot be executed.
+var ErrInvalidTransaction = errors.New("mempool: invalid transaction")
 
 // DefaultBlockTimestampTolerance bounds how far ahead of the local clock a
 // block timestamp may drift before it is rejected.
@@ -297,6 +302,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		modulePauses:               make(map[string]bool),
 		moduleQuotas:               make(map[string]nativecommon.Quota),
 		potsoEngine:                potsoEngine,
+		txSimulationEnabled:        true,
 		globalCfg: config.Global{
 			Governance: config.Governance{
 				QuorumBPS:        6000,
@@ -463,6 +469,27 @@ func (n *Node) SetMempoolLimit(limit int) {
 		n.mempool = trimmed
 	}
 	n.mempoolMu.Unlock()
+}
+
+// SetTransactionSimulationEnabled toggles execution pre-checks during transaction validation.
+// Primarily used by tests to bypass the expensive state copy when stressing the mempool.
+func (n *Node) SetTransactionSimulationEnabled(enabled bool) {
+	if n == nil {
+		return
+	}
+	n.txValidationMu.Lock()
+	n.txSimulationEnabled = enabled
+	n.txValidationMu.Unlock()
+}
+
+func (n *Node) transactionSimulationEnabled() bool {
+	if n == nil {
+		return false
+	}
+	n.txValidationMu.RLock()
+	enabled := n.txSimulationEnabled
+	n.txValidationMu.RUnlock()
+	return enabled
 }
 
 // SetGovernancePolicy updates the governance proposal policy applied to RPC actions.
@@ -957,6 +984,9 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 			return err
 		}
 		if err := n.AddTransaction(tx); err != nil {
+			if errors.Is(err, ErrInvalidTransaction) {
+				return fmt.Errorf("%w: %v", p2p.ErrInvalidPayload, err)
+			}
 			return err
 		}
 
@@ -993,12 +1023,58 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	if n == nil || tx == nil {
 		return fmt.Errorf("add transaction: invalid arguments")
 	}
+	if err := n.validateTransaction(tx); err != nil {
+		return err
+	}
 	n.mempoolMu.Lock()
 	defer n.mempoolMu.Unlock()
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
 	n.mempool = append(n.mempool, tx)
+	return nil
+}
+
+func (n *Node) validateTransaction(tx *types.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("add transaction: nil transaction")
+	}
+	if tx.ChainID == nil {
+		return fmt.Errorf("%w: missing chain id", ErrInvalidTransaction)
+	}
+	if !types.IsValidChainID(tx.ChainID) {
+		return fmt.Errorf("%w: unexpected chain id %s", ErrInvalidTransaction, tx.ChainID.String())
+	}
+	if _, err := tx.From(); err != nil {
+		return fmt.Errorf("%w: recover sender: %w", ErrInvalidTransaction, err)
+	}
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	if !n.transactionSimulationEnabled() {
+		return nil
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	stateCopy, err := n.state.Copy()
+	if err != nil {
+		return err
+	}
+	stateCopy.events = nil
+	stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
+	var blockHeight uint64
+	if n.chain != nil {
+		blockHeight = n.chain.GetHeight()
+	}
+	blockTime := n.currentTime()
+	stateCopy.BeginBlock(blockHeight, blockTime)
+	defer stateCopy.EndBlock()
+	if _, err := stateCopy.ExecuteTransaction(tx); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidTransaction, err)
+	}
 	return nil
 }
 

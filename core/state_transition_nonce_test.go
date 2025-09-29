@@ -68,12 +68,14 @@ func TestApplyTransactionRejectsNativeNonceReplay(t *testing.T) {
 					Amount   *big.Int `json:"amount"`
 					FeeBps   uint32   `json:"feeBps"`
 					Deadline int64    `json:"deadline"`
+					Nonce    uint64   `json:"nonce"`
 				}{
 					Payee:    payee,
 					Token:    "NHB",
 					Amount:   big.NewInt(100),
 					FeeBps:   0,
 					Deadline: time.Now().Add(time.Hour).Unix(),
+					Nonce:    1,
 				}
 				data, err := json.Marshal(payload)
 				if err != nil {

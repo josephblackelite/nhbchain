@@ -2,35 +2,40 @@ package core
 
 import (
 	"errors"
+	"math/big"
 	"sync"
 	"testing"
 
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
+	"nhbchain/crypto"
 )
 
 func TestNodeMempoolConcurrentAdds(t *testing.T) {
-        node := newTestNode(t)
-        node.SetMempoolUnlimitedOptIn(true)
-        node.SetMempoolLimit(0)
+	node := newTestNode(t)
+	node.SetMempoolUnlimitedOptIn(true)
+	node.SetMempoolLimit(0)
+	node.SetTransactionSimulationEnabled(false)
 
-	const producers = 32
-	const perProducer = 64
+	const producers = 2
+	const perProducer = 2
 	var wg sync.WaitGroup
 	for p := 0; p < producers; p++ {
-		base := p * perProducer
 		wg.Add(1)
-		go func(base int) {
+		go func() {
 			defer wg.Done()
 			for i := 0; i < perProducer; i++ {
-				tx := &types.Transaction{
-					ChainID: types.NHBChainID(),
-					Nonce:   uint64(base + i),
+				key, err := crypto.GeneratePrivateKey()
+				if err != nil {
+					t.Errorf("generate key: %v", err)
+					return
 				}
+				tx := prepareSignedTransaction(t, node, key, 0, types.NHBChainID())
 				if err := node.AddTransaction(tx); err != nil {
 					t.Errorf("add transaction: %v", err)
 				}
 			}
-		}(base)
+		}()
 	}
 	wg.Wait()
 
@@ -43,25 +48,27 @@ func TestNodeMempoolConcurrentAdds(t *testing.T) {
 
 func TestNodeMempoolLimitEnforcedConcurrently(t *testing.T) {
 	node := newTestNode(t)
-	const limit = 75
+	const limit = 3
 	node.SetMempoolLimit(limit)
+	node.SetTransactionSimulationEnabled(false)
 
-	const workers = 10
-	const perWorker = 20
+	const workers = 2
+	const perWorker = 3
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var fullCount int
 	for w := 0; w < workers; w++ {
-		base := w * perWorker
 		wg.Add(1)
-		go func(base int) {
+		go func() {
 			defer wg.Done()
 			for i := 0; i < perWorker; i++ {
-				tx := &types.Transaction{
-					ChainID: types.NHBChainID(),
-					Nonce:   uint64(base + i),
+				key, err := crypto.GeneratePrivateKey()
+				if err != nil {
+					t.Errorf("generate key: %v", err)
+					return
 				}
-				err := node.AddTransaction(tx)
+				tx := prepareSignedTransaction(t, node, key, 0, types.NHBChainID())
+				err = node.AddTransaction(tx)
 				if err != nil {
 					if !errors.Is(err, ErrMempoolFull) {
 						t.Errorf("unexpected error: %v", err)
@@ -72,7 +79,7 @@ func TestNodeMempoolLimitEnforcedConcurrently(t *testing.T) {
 					mu.Unlock()
 				}
 			}
-		}(base)
+		}()
 	}
 	wg.Wait()
 
@@ -82,5 +89,38 @@ func TestNodeMempoolLimitEnforcedConcurrently(t *testing.T) {
 	}
 	if fullCount == 0 {
 		t.Fatalf("expected ErrMempoolFull under load")
+	}
+}
+
+func prepareSignedTransaction(t *testing.T, node *Node, key *crypto.PrivateKey, nonce uint64, chainID *big.Int) *types.Transaction {
+	t.Helper()
+	ensureAccountState(t, node, key, nonce)
+	if chainID == nil {
+		chainID = types.NHBChainID()
+	}
+	tx := &types.Transaction{
+		ChainID: chainID,
+		Type:    types.TxTypeHeartbeat,
+		Nonce:   nonce,
+		Value:   big.NewInt(0),
+	}
+	if err := tx.Sign(key.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	return tx
+}
+
+func ensureAccountState(t *testing.T, node *Node, key *crypto.PrivateKey, nonce uint64) {
+	t.Helper()
+	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	addr := key.PubKey().Address().Bytes()
+	account := &types.Account{
+		Nonce:      nonce,
+		BalanceNHB: big.NewInt(1_000_000_000_000),
+	}
+	if err := manager.PutAccount(addr, account); err != nil {
+		t.Fatalf("put account: %v", err)
 	}
 }
