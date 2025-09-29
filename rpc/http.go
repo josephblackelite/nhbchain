@@ -28,11 +28,16 @@ import (
 )
 
 const (
-	jsonRPCVersion  = "2.0"
-	maxRequestBytes = 1 << 20 // 1 MiB
-	rateLimitWindow = time.Minute
-	maxTxPerWindow  = 5
-	txSeenTTL       = 15 * time.Minute
+	jsonRPCVersion          = "2.0"
+	maxRequestBytes         = 1 << 20 // 1 MiB
+	rateLimitWindow         = time.Minute
+	maxTxPerWindow          = 5
+	txSeenTTL               = 15 * time.Minute
+	rateLimiterMaxEntries   = 512
+	rateLimiterStaleAfter   = 10 * rateLimitWindow
+	rateLimiterSweepBackoff = rateLimitWindow
+	maxForwardedForAddrs    = 5
+	maxTrustedProxyEntries  = 32
 )
 
 const (
@@ -51,6 +56,7 @@ const (
 type rateLimiter struct {
 	count       int
 	windowStart time.Time
+	lastSeen    time.Time
 }
 
 // ServerConfig controls optional behaviours of the RPC server.
@@ -94,6 +100,7 @@ type Server struct {
 	mu                sync.Mutex
 	txSeen            map[string]time.Time
 	rateLimiters      map[string]*rateLimiter
+	rateLimiterSweep  time.Time
 	authToken         string
 	potsoEvidence     *modules.PotsoEvidenceModule
 	transactions      *modules.TransactionsModule
@@ -115,12 +122,17 @@ type Server struct {
 func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Server {
 	token := strings.TrimSpace(os.Getenv("NHB_RPC_TOKEN"))
 	trusted := make(map[string]struct{}, len(cfg.TrustedProxies))
+	count := 0
 	for _, entry := range cfg.TrustedProxies {
-		trimmed := strings.TrimSpace(entry)
+		if count >= maxTrustedProxyEntries {
+			break
+		}
+		trimmed := canonicalHost(entry)
 		if trimmed == "" {
 			continue
 		}
 		trusted[trimmed] = struct{}{}
+		count++
 	}
 	return &Server{
 		node:              node,
@@ -905,26 +917,80 @@ func (s *Server) requireAuth(r *http.Request) *RPCError {
 }
 
 func (s *Server) allowSource(source string, now time.Time) bool {
-	if source == "" {
-		source = "unknown"
+	normalized := canonicalHost(source)
+	if normalized == "" {
+		normalized = "unknown"
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	limiter, ok := s.rateLimiters[source]
+	s.evictRateLimitersLocked(now)
+
+	limiter, ok := s.rateLimiters[normalized]
 	if !ok {
-		limiter = &rateLimiter{windowStart: now}
-		s.rateLimiters[source] = limiter
+		if len(s.rateLimiters) >= rateLimiterMaxEntries {
+			s.evictOldestLimiterLocked()
+		}
+		limiter = &rateLimiter{windowStart: now, lastSeen: now}
+		s.rateLimiters[normalized] = limiter
 	}
+
 	if now.Sub(limiter.windowStart) >= rateLimitWindow {
 		limiter.windowStart = now
 		limiter.count = 0
 	}
 	if limiter.count >= maxTxPerWindow {
+		limiter.lastSeen = now
 		return false
 	}
 	limiter.count++
+	limiter.lastSeen = now
 	return true
+}
+
+func (s *Server) evictRateLimitersLocked(now time.Time) {
+	if len(s.rateLimiters) == 0 {
+		return
+	}
+	if !s.rateLimiterSweep.IsZero() && now.Sub(s.rateLimiterSweep) < rateLimiterSweepBackoff && len(s.rateLimiters) < rateLimiterMaxEntries {
+		return
+	}
+	for key, limiter := range s.rateLimiters {
+		if limiter.lastSeen.IsZero() {
+			continue
+		}
+		if now.Sub(limiter.lastSeen) > rateLimiterStaleAfter {
+			delete(s.rateLimiters, key)
+		}
+	}
+	s.rateLimiterSweep = now
+}
+
+func (s *Server) evictOldestLimiterLocked() {
+	if len(s.rateLimiters) == 0 {
+		return
+	}
+	var oldestKey string
+	var oldestTime time.Time
+	hasOldest := false
+	for key, limiter := range s.rateLimiters {
+		switch {
+		case !hasOldest:
+			oldestKey = key
+			oldestTime = limiter.lastSeen
+			hasOldest = true
+		case limiter.lastSeen.IsZero() && !oldestTime.IsZero():
+			oldestKey = key
+			oldestTime = limiter.lastSeen
+		case limiter.lastSeen.Before(oldestTime):
+			oldestKey = key
+			oldestTime = limiter.lastSeen
+		}
+	}
+	if hasOldest {
+		delete(s.rateLimiters, oldestKey)
+	}
 }
 
 func (s *Server) rememberTx(hash string, now time.Time) bool {
@@ -948,11 +1014,15 @@ func (s *Server) clientSource(r *http.Request) string {
 	if splitHost, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		host = splitHost
 	}
+	host = canonicalHost(host)
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 		if s.trustProxyHeaders || s.isTrustedProxy(host) {
 			parts := strings.Split(forwarded, ",")
-			for _, part := range parts {
-				candidate := strings.TrimSpace(part)
+			for i, part := range parts {
+				if i >= maxForwardedForAddrs {
+					break
+				}
+				candidate := canonicalHost(part)
 				if candidate != "" {
 					return candidate
 				}
@@ -966,8 +1036,26 @@ func (s *Server) isTrustedProxy(host string) bool {
 	if len(s.trustedProxies) == 0 {
 		return false
 	}
-	_, ok := s.trustedProxies[host]
+	normalized := canonicalHost(host)
+	if normalized == "" {
+		return false
+	}
+	_, ok := s.trustedProxies[normalized]
 	return ok
+}
+
+func canonicalHost(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		trimmed = host
+	}
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return ip.String()
+	}
+	return strings.ToLower(trimmed)
 }
 
 // --- Existing Handlers ---
