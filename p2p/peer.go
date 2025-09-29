@@ -213,6 +213,10 @@ func (p *Peer) readLoop() {
 		}
 
 		if err := p.server.handler.HandleMessage(&msg); err != nil {
+			if p.server != nil && IsInvalidPayload(err) {
+				p.server.handleProtocolViolation(p, err)
+				return
+			}
 			fmt.Printf("Error handling message from %s: %v\n", p.id, err)
 		}
 		p.server.recordValidMessage(p.id)
