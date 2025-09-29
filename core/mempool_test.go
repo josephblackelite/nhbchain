@@ -9,8 +9,9 @@ import (
 )
 
 func TestNodeMempoolConcurrentAdds(t *testing.T) {
-	node := newTestNode(t)
-	node.SetMempoolLimit(0)
+        node := newTestNode(t)
+        node.SetMempoolUnlimitedOptIn(true)
+        node.SetMempoolLimit(0)
 
 	const producers = 32
 	const perProducer = 64

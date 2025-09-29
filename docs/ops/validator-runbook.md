@@ -36,9 +36,10 @@ half of the tolerance.
   `RPCIdleTimeout` with upstream load-balancer/ingress settings to avoid idle
   disconnects. Document the final values in the deployment checklist.
 - Set `[mempool] MaxTransactions` to a value that meets throughput expectations
-  without exhausting memory. The sample configs ship with 5,000; smaller devnet
-  clusters can lower this and update `NHB_MEMPOOL_MAX_TX` in the examples
-  workspace for parity.
+  without exhausting memory. Nodes default to 4,000 pending transactions unless
+  you opt into an unbounded queue by pairing `AllowUnlimited = true` with
+  `MaxTransactions = 0`. Smaller devnet clusters can lower the ceiling and
+  update `NHB_MEMPOOL_MAX_TX` in the examples workspace for parity.
 - Store TLS material in `RPCTLSCertFile` / `RPCTLSKeyFile` or enforce mutual TLS
   between the proxy and node. Rotate certificates on the same cadence as the
   proxy tier and track expirations in monitoring.

@@ -141,6 +141,8 @@ const (
 	defaultBlockTimestampToleranceSeconds = 5
 	defaultStreamQueueSize                = 128
 	defaultRelayDropLogRatio              = 0.1
+	// DefaultMempoolMaxTransactions bounds pending transactions when no explicit limit is provided.
+	DefaultMempoolMaxTransactions = 4000
 )
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -209,7 +211,8 @@ type PotsoAbuseConfig struct {
 
 // MempoolConfig allows operators to tune the size of the transaction pool.
 type MempoolConfig struct {
-	MaxTransactions int `toml:"MaxTransactions"`
+	MaxTransactions int  `toml:"MaxTransactions"`
+	AllowUnlimited  bool `toml:"AllowUnlimited"`
 }
 
 // GovConfig captures the governance policy knobs controlling proposal flow
@@ -398,8 +401,14 @@ func Load(path string) (*Config, error) {
 }
 
 func (cfg *Config) ensureMempoolDefaults() {
-	if cfg.Mempool.MaxTransactions < 0 {
-		cfg.Mempool.MaxTransactions = 0
+	if cfg.Mempool.AllowUnlimited {
+		if cfg.Mempool.MaxTransactions < 0 {
+			cfg.Mempool.MaxTransactions = 0
+		}
+		return
+	}
+	if cfg.Mempool.MaxTransactions <= 0 {
+		cfg.Mempool.MaxTransactions = DefaultMempoolMaxTransactions
 	}
 }
 
@@ -838,6 +847,7 @@ func createDefault(path string) (*Config, error) {
 		MaxMsgsPerSecond:     32,
 		ClientVersion:        "nhbchain/node",
 	}
+	cfg.Mempool.MaxTransactions = DefaultMempoolMaxTransactions
 	cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize
 	cfg.NetworkSecurity.RelayDropLogRatio = defaultRelayDropLogRatio
 	cfg.P2P = P2PSection{

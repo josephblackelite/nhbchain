@@ -62,6 +62,7 @@ type Node struct {
 	mempool                      []*types.Transaction
 	mempoolMu                    sync.Mutex
 	mempoolLimit                 int
+	allowUnlimitedMempool        bool
 	bftEngine                    *bft.Engine
 	stateMu                      sync.Mutex
 	escrowTreasury               [20]byte
@@ -429,16 +430,31 @@ func (n *Node) IsPaused(module string) bool {
 	return paused
 }
 
+// SetMempoolUnlimitedOptIn toggles acceptance of an unbounded mempool.
+func (n *Node) SetMempoolUnlimitedOptIn(allow bool) {
+	if n == nil {
+		return
+	}
+	n.mempoolMu.Lock()
+	n.allowUnlimitedMempool = allow
+	n.mempoolMu.Unlock()
+}
+
 // SetMempoolLimit configures the maximum number of transactions retained in the mempool.
-// A zero limit disables enforcement and allows unbounded growth.
+// A zero limit disables enforcement only when unlimited operation has been explicitly enabled.
 func (n *Node) SetMempoolLimit(limit int) {
 	if n == nil {
 		return
 	}
-	if limit < 0 {
-		limit = 0
-	}
 	n.mempoolMu.Lock()
+	allowUnlimited := n.allowUnlimitedMempool
+	if limit <= 0 {
+		if allowUnlimited {
+			limit = 0
+		} else {
+			limit = config.DefaultMempoolMaxTransactions
+		}
+	}
 	n.mempoolLimit = limit
 	if limit > 0 && len(n.mempool) > limit {
 		start := len(n.mempool) - limit

@@ -90,6 +90,7 @@ func main() {
 	}
 
 	node.SetGlobalConfig(cfg.Global)
+	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	govPolicy, err := cfg.Governance.Policy()
