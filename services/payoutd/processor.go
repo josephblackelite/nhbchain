@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"nhbchain/native/swap"
 	"nhbchain/services/payoutd/wallet"
@@ -42,6 +48,7 @@ type Processor struct {
 	metrics      *Metrics
 	waitInterval time.Duration
 	now          func() time.Time
+	tracer       trace.Tracer
 
 	mu        sync.Mutex
 	paused    bool
@@ -84,6 +91,7 @@ func NewProcessor(policies *PolicyEnforcer, opts ...ProcessorOption) *Processor 
 		processed:    make(map[string]processState),
 		waitInterval: 5 * time.Second,
 		now:          time.Now,
+		tracer:       otel.Tracer("payoutd/processor"),
 	}
 	for _, opt := range opts {
 		opt(proc)
@@ -153,13 +161,24 @@ func (p *Processor) Process(ctx context.Context, req CashOutRequest) error {
 	p.processed[intentID] = processState{inFlight: true, updatedAt: p.now()}
 	p.mu.Unlock()
 
+	ctx, span := p.tracer.Start(ctx, "payout.process_intent",
+		trace.WithAttributes(
+			attribute.String("intent.id", intentID),
+			attribute.String("asset", asset),
+		))
+	defer span.End()
+
 	start := p.now()
 	if p.wallet == nil {
 		p.finishFailure(intentID)
 		return fmt.Errorf("payoutd: wallet not configured")
 	}
-	txHash, err := p.wallet.Transfer(ctx, asset, strings.TrimSpace(req.Destination), amount)
+	transferCtx, transferSpan := p.tracer.Start(ctx, "payout.wallet_transfer")
+	txHash, err := p.wallet.Transfer(transferCtx, asset, strings.TrimSpace(req.Destination), amount)
+	transferSpan.End()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "wallet transfer failed")
 		p.finishFailure(intentID)
 		p.metrics.RecordError(asset, "transfer")
 		return err
@@ -169,11 +188,17 @@ func (p *Processor) Process(ctx context.Context, req CashOutRequest) error {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	if err := p.wallet.WaitForConfirmations(ctx, txHash, confirmations, interval); err != nil {
+	confirmCtx, confirmSpan := p.tracer.Start(ctx, "payout.wait_confirmations",
+		trace.WithAttributes(attribute.Int("confirmations", confirmations)))
+	if err := p.wallet.WaitForConfirmations(confirmCtx, txHash, confirmations, interval); err != nil {
+		confirmSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "confirmation wait failed")
 		p.finishFailure(intentID)
 		p.metrics.RecordError(asset, "confirmations")
 		return err
 	}
+	confirmSpan.End()
 	if p.attestor == nil {
 		p.finishFailure(intentID)
 		return fmt.Errorf("payoutd: attestor not configured")
@@ -188,16 +213,22 @@ func (p *Processor) Process(ctx context.Context, req CashOutRequest) error {
 		EvidenceURI:  strings.TrimSpace(req.EvidenceURI),
 		SettledAt:    p.now(),
 	}
-	if err := p.attestor.SubmitReceipt(ctx, receipt); err != nil {
+	attestCtx, attestSpan := p.tracer.Start(ctx, "payout.submit_receipt")
+	if err := p.attestor.SubmitReceipt(attestCtx, receipt); err != nil {
+		attestSpan.End()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "attestation failed")
 		p.finishFailure(intentID)
 		p.metrics.RecordError(asset, "attest")
 		return err
 	}
+	attestSpan.End()
 
 	p.mu.Lock()
 	p.policies.Record(asset, amount, p.now())
 	remaining := p.policies.RemainingCap(asset, p.now())
-	p.metrics.RecordCap(asset, remaining)
+	total := p.policies.DailyCap(asset)
+	p.metrics.RecordCap(asset, remaining, total)
 	p.processed[intentID] = processState{
 		completed: true,
 		txHash:    txHash,
@@ -206,6 +237,13 @@ func (p *Processor) Process(ctx context.Context, req CashOutRequest) error {
 	p.mu.Unlock()
 
 	p.metrics.ObserveLatency(asset, p.now().Sub(start))
+	span.SetStatus(codes.Ok, "payout settled")
+	span.SetAttributes(attribute.String("tx.hash", txHash))
+	slog.InfoContext(ctx, "payout settled",
+		slog.String("intent_id", intentID),
+		slog.String("asset", asset),
+		slog.String("tx_hash", txHash),
+	)
 	return nil
 }
 
@@ -257,6 +295,9 @@ func (p *Processor) Pause() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.paused = true
+	if p.metrics != nil {
+		p.metrics.SetPause(true)
+	}
 }
 
 // Resume re-enables payout processing.
@@ -264,6 +305,9 @@ func (p *Processor) Resume() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.paused = false
+	if p.metrics != nil {
+		p.metrics.SetPause(false)
+	}
 }
 
 // UpdateInventory sets the available soft balance for the provided asset.
@@ -272,7 +316,9 @@ func (p *Processor) UpdateInventory(asset string, balance *big.Int) {
 		return
 	}
 	p.policies.SetInventory(asset, balance)
-	p.metrics.RecordCap(strings.ToUpper(strings.TrimSpace(asset)), p.policies.RemainingCap(asset, p.now()))
+	remaining := p.policies.RemainingCap(asset, p.now())
+	total := p.policies.DailyCap(asset)
+	p.metrics.RecordCap(strings.ToUpper(strings.TrimSpace(asset)), remaining, total)
 }
 
 // Status summarises processor state for administrative endpoints.

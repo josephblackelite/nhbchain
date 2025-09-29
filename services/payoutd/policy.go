@@ -248,6 +248,18 @@ func (p *PolicyEnforcer) RemainingCap(asset string, now time.Time) *big.Int {
 	return remaining
 }
 
+// DailyCap returns the configured total cap for the asset.
+func (p *PolicyEnforcer) DailyCap(asset string) *big.Int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := strings.ToUpper(strings.TrimSpace(asset))
+	policy, ok := p.policies[key]
+	if !ok || policy.DailyCap == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(policy.DailyCap)
+}
+
 // RemainingInventory returns the current tracked soft inventory for an asset.
 func (p *PolicyEnforcer) RemainingInventory(asset string) *big.Int {
 	p.mu.Lock()

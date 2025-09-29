@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	nhbcrypto "nhbchain/crypto"
+	"nhbchain/observability"
 	swapv1 "nhbchain/proto/swap/v1"
 	cons "nhbchain/sdk/consensus"
 )
@@ -176,6 +178,7 @@ type Server struct {
 	submitter     VoucherSubmitter
 	fee           FeeConfig
 	clock         func() time.Time
+	metrics       *observability.OracleAttesterdMetrics
 }
 
 // NewServer wires the HTTP handler with its dependencies.
@@ -223,6 +226,7 @@ func NewServer(cfg Config, store *InvoiceStore, verifier SettlementVerifier, sub
 		submitter:     submitter,
 		fee:           cfg.Fee,
 		clock:         time.Now,
+		metrics:       observability.OracleAttesterd(),
 	}
 	if server.timeout <= 0 {
 		server.timeout = 15 * time.Second
@@ -350,6 +354,19 @@ func (s *Server) handleNowPayments(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, fmt.Errorf("mark minted: %w", err))
 		return
 	}
+	if s.metrics != nil {
+		s.metrics.RecordVoucherMint(assetCfg.Symbol)
+		age := s.clock().Sub(event.CreatedAt)
+		if age < 0 {
+			age = 0
+		}
+		s.metrics.RecordFreshness(assetCfg.Symbol, age)
+	}
+	slog.InfoContext(r.Context(), "voucher minted",
+		slog.String("invoice_id", event.InvoiceID),
+		slog.String("asset", assetCfg.Symbol),
+		slog.String("tx_hash", event.TxHash.Hex()),
+	)
 	processErr = nil
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "minted", "invoiceId": event.InvoiceID})
 }
