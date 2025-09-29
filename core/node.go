@@ -3516,14 +3516,14 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if priceProof.Rate == nil {
 		return "", false, ErrSwapPriceProofInvalid
 	}
-	diff := new(big.Rat).Sub(quote.Rate, priceProof.Rate)
-	if diff.Sign() < 0 {
-		diff.Neg(diff)
+	rateDiff := new(big.Rat).Sub(quote.Rate, priceProof.Rate)
+	if rateDiff.Sign() < 0 {
+		rateDiff.Neg(rateDiff)
 	}
 	if priceProof.Rate.Sign() == 0 {
 		return "", false, ErrSwapPriceProofInvalid
 	}
-	ratio := new(big.Rat).Quo(diff, priceProof.Rate)
+	ratio := new(big.Rat).Quo(rateDiff, priceProof.Rate)
 	ratio.Mul(ratio, big.NewRat(10000, 1))
 	threshold := new(big.Rat).SetInt64(int64(cfg.PriceProofMaxDeviationBps))
 	if cfg.PriceProofMaxDeviationBps > 0 && ratio.Cmp(threshold) == 1 {

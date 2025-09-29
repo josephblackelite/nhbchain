@@ -64,7 +64,7 @@ command in the Makefile before stopping the services.
   different parameters.
 - Set additional environment variables for telemetry or debugging by editing
   `deploy/compose/docker-compose.yml`.
-- The build context uses `deploy/compose/Dockerfile.go`. Adjust the Go version
+- The build context uses `deploy/compose/Dockerfile`. Adjust the Go version
   or add tooling (e.g. `grpcurl`) there as needed.
 
 ## Troubleshooting

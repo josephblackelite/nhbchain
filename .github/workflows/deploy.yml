@@ -62,7 +62,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: deploy/compose/Dockerfile.go
+          file: deploy/compose/Dockerfile
           build-args: |
             TARGET=${{ matrix.service.target }}
           push: true
