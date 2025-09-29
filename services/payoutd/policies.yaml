@@ -1,0 +1,8 @@
+- asset: USDC
+  daily_cap: "100000000000"
+  soft_inventory: "500000000000"
+  confirmations: 3
+- asset: USDT
+  daily_cap: "100000000000"
+  soft_inventory: "500000000000"
+  confirmations: 3
