@@ -84,3 +84,66 @@ groups:
           description: |
             Module {{ $labels.module }} exhausted its address quota in the last ten minutes.
             Coordinate with consumers on request backoff or increase the configured limits.
+
+      - alert: OracleAttestationFreshness
+        expr: max(nhb_oracle_attesterd_oracle_freshness_seconds) > 120
+        for: 5m
+        labels:
+          severity: critical
+          team: data
+        annotations:
+          summary: "Oracle attestation freshness degraded"
+          description: |
+            The latest attested voucher is more than two minutes old. Check oracle-attesterd
+            logs for stalled webhooks or consensus submission failures.
+
+      - alert: PayoutdErrorSpike
+        expr: sum(increase(nhb_payoutd_errors_total[5m])) by (asset) > 3
+        for: 10m
+        labels:
+          severity: warning
+          team: treasury
+        annotations:
+          summary: "Payoutd error spike"
+          description: |
+            More than three payout failures occurred within five minutes for asset {{ $labels.asset }}.
+            Inspect payoutd logs to identify transfer, confirmation, or attestation failures.
+
+      - alert: PayoutdLatencyP95Breached
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(nhb_payoutd_payout_latency_seconds_bucket[5m])) by (asset, le)
+          ) > 30
+        for: 15m
+        labels:
+          severity: critical
+          team: treasury
+        annotations:
+          summary: "Payout latency regression"
+          description: |
+            The p95 settlement latency exceeded 30s for asset {{ $labels.asset }} over the last 15 minutes.
+            Review wallet health, blockchain congestion, and attestor availability.
+
+      - alert: PayoutdCapUtilizationHigh
+        expr: max_over_time(nhb_payoutd_cap_utilization[10m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          team: treasury
+        annotations:
+          summary: "Payout cap utilisation above 80%"
+          description: |
+            Cap utilisation for asset {{ $labels.asset }} exceeded 80% in the past 10 minutes.
+            Consider replenishing treasury inventory or raising the configured daily cap.
+
+      - alert: PayoutdPauseEngaged
+        expr: max_over_time(nhb_payoutd_pause_engaged[5m]) >= 1
+        for: 5m
+        labels:
+          severity: critical
+          team: treasury
+        annotations:
+          summary: "Payoutd pause engaged"
+          description: |
+            The payout processor pause toggle has been active within the last five minutes.
+            Confirm the pause is intentional and execute the payout incident runbook if required.

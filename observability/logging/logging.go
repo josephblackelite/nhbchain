@@ -41,6 +41,7 @@ func Setup(service, env string) *slog.Logger {
 	}
 
 	base := slog.New(handler).With(withArgs...)
+	slog.SetDefault(base)
 
 	// Bridge the standard library logger so existing packages continue to work.
 	stdBridge := slog.NewLogLogger(handler.WithAttrs(attrs), slog.LevelInfo)
