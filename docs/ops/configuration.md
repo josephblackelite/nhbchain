@@ -18,6 +18,12 @@ the voting period must be at least one hour.【F:config/validate.go†L9-L13】
 - **Mempool:** the global byte cap must be positive.【F:config/validate.go†L17-L18】
 - **Blocks:** each block must allow at least one transaction.【F:config/validate.go†L19-L20】
 
+Nodes clamp the per-validator mempool to 4,000 transactions when the `[mempool]`
+section omits `MaxTransactions` or sets it to a non-positive value. Operators
+who truly need an unbounded queue must opt in explicitly by setting
+`AllowUnlimited = true` and `MaxTransactions = 0`; all other configurations fall
+back to the default ceiling.【F:config/config.go†L107-L109】【F:config/config.go†L399-L408】
+
 ### Reproducing and fixing a validation error
 
 1. Copy the shipping config and append invalid overrides that violate the

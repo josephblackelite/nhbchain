@@ -200,6 +200,32 @@ PEX = false
 	}
 }
 
+func TestLoadAppliesDefaultMempoolLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	keystorePath := filepath.Join(dir, "validator.keystore")
+	contents := fmt.Sprintf(`ListenAddress = ":6001"
+RPCAddress = ":8080"
+DataDir = "%s"
+ValidatorKeystorePath = "%s"
+`, dir, keystorePath)
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.Mempool.MaxTransactions != DefaultMempoolMaxTransactions {
+		t.Fatalf("expected default mempool limit %d, got %d", DefaultMempoolMaxTransactions, cfg.Mempool.MaxTransactions)
+	}
+	if cfg.Mempool.AllowUnlimited {
+		t.Fatalf("expected unlimited opt-in to remain disabled")
+	}
+}
+
 func TestLoadParsesGovernanceSection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
