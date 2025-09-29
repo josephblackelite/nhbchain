@@ -12,13 +12,14 @@ import (
 
 // RiskConfig captures operator-defined mint guardrails parsed from configuration.
 type RiskConfig struct {
-	PerAddressDailyCapWei   string `toml:"PerAddressDailyCapWei"`
-	PerAddressMonthlyCapWei string `toml:"PerAddressMonthlyCapWei"`
-	PerTxMinWei             string `toml:"PerTxMinWei"`
-	PerTxMaxWei             string `toml:"PerTxMaxWei"`
-	VelocityWindowSeconds   int64  `toml:"VelocityWindowSeconds"`
-	VelocityMaxMints        uint64 `toml:"VelocityMaxMints"`
-	SanctionsCheckEnabled   bool   `toml:"SanctionsCheckEnabled"`
+	PerAddressDailyCapWei   string        `toml:"PerAddressDailyCapWei"`
+	PerAddressMonthlyCapWei string        `toml:"PerAddressMonthlyCapWei"`
+	PerTxMinWei             string        `toml:"PerTxMinWei"`
+	PerTxMaxWei             string        `toml:"PerTxMaxWei"`
+	VelocityWindowSeconds   int64         `toml:"VelocityWindowSeconds"`
+	VelocityMaxMints        uint64        `toml:"VelocityMaxMints"`
+	SanctionsCheckEnabled   bool          `toml:"SanctionsCheckEnabled"`
+	CashOut                 CashOutConfig `toml:"cashOut"`
 }
 
 // RiskParameters represents canonical, runtime-ready interpretations of the risk settings.
@@ -30,6 +31,7 @@ type RiskParameters struct {
 	VelocityWindowSeconds   uint64
 	VelocityMaxMints        uint64
 	SanctionsCheckEnabled   bool
+	CashOut                 CashOutParameters
 }
 
 // Normalise trims whitespace and applies canonical defaults to defensive copies.
@@ -42,6 +44,7 @@ func (rc RiskConfig) Normalise() RiskConfig {
 		VelocityWindowSeconds:   rc.VelocityWindowSeconds,
 		VelocityMaxMints:        rc.VelocityMaxMints,
 		SanctionsCheckEnabled:   rc.SanctionsCheckEnabled,
+		CashOut:                 rc.CashOut.Normalise(),
 	}
 	if cfg.VelocityWindowSeconds < 0 {
 		cfg.VelocityWindowSeconds = 0
@@ -87,6 +90,11 @@ func (rc RiskConfig) Parameters() (RiskParameters, error) {
 	if normalized.VelocityMaxMints > 0 {
 		params.VelocityMaxMints = normalized.VelocityMaxMints
 	}
+	cashOut, err := normalized.CashOut.Parameters()
+	if err != nil {
+		return params, err
+	}
+	params.CashOut = cashOut
 	return params, nil
 }
 
@@ -163,6 +171,18 @@ const (
 	RiskCodeMonthlyCap RiskCode = "monthly_cap"
 	// RiskCodeVelocity indicates the mint frequency exceeded the allowed burst.
 	RiskCodeVelocity RiskCode = "velocity"
+	// RiskCodeOracleStale indicates the oracle sample exceeded the freshness window.
+	RiskCodeOracleStale RiskCode = "oracle_stale"
+	// RiskCodeOracleDeviation indicates the oracle observation deviated beyond tolerance.
+	RiskCodeOracleDeviation RiskCode = "oracle_deviation"
+	// RiskCodeSlippage indicates the mint amount breached the slippage tolerance.
+	RiskCodeSlippage RiskCode = "slippage"
+	// RiskCodeCashOutAssetCap indicates the requested cash-out exceeds the asset cap.
+	RiskCodeCashOutAssetCap RiskCode = "cashout_asset_cap"
+	// RiskCodeCashOutTierCap indicates the requested cash-out exceeds the submitter's tier cap.
+	RiskCodeCashOutTierCap RiskCode = "cashout_tier_cap"
+	// RiskCodeModulePaused indicates the module has been paused by governance.
+	RiskCodeModulePaused RiskCode = "module_paused"
 )
 
 // RiskViolation conveys a violated guardrail alongside diagnostic context for alerts.
