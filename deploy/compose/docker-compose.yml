@@ -2,7 +2,7 @@ version: "3.9"
 
 x-go-build: &go-build
   context: ../..
-  dockerfile: deploy/compose/Dockerfile.go
+  dockerfile: deploy/compose/Dockerfile
 
 services:
   p2pd:

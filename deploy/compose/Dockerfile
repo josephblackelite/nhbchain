@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1.6
+# NOTE: This Dockerfile lives in deploy/compose so docker-compose can reference
+# it without interfering with Go tooling that scans *.go sources.
 ARG GO_VERSION=1.22
 FROM golang:${GO_VERSION}-bookworm AS builder
 WORKDIR /src
