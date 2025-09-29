@@ -231,3 +231,50 @@ func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 		t.Fatalf("expected churned source to remain rate limited within same window")
 	}
 }
+
+func TestServerRememberTxRejectsDuplicateWithinTTL(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+	now := time.Now()
+
+	if !server.rememberTx("tx-1", now) {
+		t.Fatalf("expected first occurrence to be accepted")
+	}
+	if server.rememberTx("tx-1", now.Add(time.Second)) {
+		t.Fatalf("expected duplicate within TTL to be rejected")
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.txSeen) != 1 {
+		t.Fatalf("expected a single entry to remain, got %d", len(server.txSeen))
+	}
+	if len(server.txSeenQueue) != 1 {
+		t.Fatalf("expected a single queue entry to remain, got %d", len(server.txSeenQueue))
+	}
+}
+
+func TestServerRememberTxEvictsExpired(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+	base := time.Now().Add(-2 * txSeenTTL)
+
+	if !server.rememberTx("tx-old", base) {
+		t.Fatalf("expected initial transaction to be accepted")
+	}
+
+	advanced := base.Add(txSeenTTL + time.Minute)
+	if !server.rememberTx("tx-new", advanced) {
+		t.Fatalf("expected transaction after TTL to be accepted")
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if _, exists := server.txSeen["tx-old"]; exists {
+		t.Fatalf("expected expired transaction to be evicted")
+	}
+	if _, exists := server.txSeen["tx-new"]; !exists {
+		t.Fatalf("expected new transaction to be recorded")
+	}
+	if len(server.txSeenQueue) != 1 {
+		t.Fatalf("expected queue to contain only the fresh transaction, got %d entries", len(server.txSeenQueue))
+	}
+}

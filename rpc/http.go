@@ -59,6 +59,11 @@ type rateLimiter struct {
 	lastSeen    time.Time
 }
 
+type txSeenEntry struct {
+	hash   string
+	seenAt time.Time
+}
+
 // ServerConfig controls optional behaviours of the RPC server.
 type ServerConfig struct {
 	// TrustProxyHeaders, when set, will cause the server to honour proxy
@@ -99,6 +104,7 @@ type Server struct {
 
 	mu                sync.Mutex
 	txSeen            map[string]time.Time
+	txSeenQueue       []txSeenEntry
 	rateLimiters      map[string]*rateLimiter
 	rateLimiterSweep  time.Time
 	authToken         string
@@ -997,16 +1003,43 @@ func (s *Server) rememberTx(hash string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for h, seenAt := range s.txSeen {
-		if now.Sub(seenAt) > txSeenTTL {
-			delete(s.txSeen, h)
-		}
-	}
+	s.evictExpiredTxLocked(now)
+
 	if _, exists := s.txSeen[hash]; exists {
 		return false
 	}
 	s.txSeen[hash] = now
+	s.txSeenQueue = append(s.txSeenQueue, txSeenEntry{hash: hash, seenAt: now})
 	return true
+}
+
+func (s *Server) evictExpiredTxLocked(now time.Time) {
+	if len(s.txSeenQueue) == 0 {
+		return
+	}
+
+	cutoff := now.Add(-txSeenTTL)
+	idx := 0
+	for idx < len(s.txSeenQueue) {
+		entry := s.txSeenQueue[idx]
+		if !entry.seenAt.Before(cutoff) {
+			break
+		}
+		delete(s.txSeen, entry.hash)
+		idx++
+	}
+
+	if idx == 0 {
+		return
+	}
+
+	for i := 0; i < idx; i++ {
+		s.txSeenQueue[i] = txSeenEntry{}
+	}
+	s.txSeenQueue = s.txSeenQueue[idx:]
+	if len(s.txSeenQueue) == 0 {
+		s.txSeenQueue = nil
+	}
 }
 
 func (s *Server) clientSource(r *http.Request) string {
