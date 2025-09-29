@@ -538,3 +538,50 @@ func TestEngineFastForwardsHeightOnRestart(t *testing.T) {
 		t.Fatalf("expected proposal to be queued after height sync")
 	}
 }
+
+func TestHasTwoThirdsPowerLockedThresholds(t *testing.T) {
+	tests := []struct {
+		name      string
+		total     int64
+		power     int64
+		expectMet bool
+	}{
+		{
+			name:      "exactTwoThirds",
+			total:     6,
+			power:     4,
+			expectMet: true,
+		},
+		{
+			name:      "justBelow",
+			total:     5,
+			power:     3,
+			expectMet: false,
+		},
+		{
+			name:      "justAbove",
+			total:     5,
+			power:     4,
+			expectMet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			engine := &Engine{
+				totalVotingPower: big.NewInt(tt.total),
+				receivedPower: map[VoteType]*big.Int{
+					Prevote: big.NewInt(tt.power),
+				},
+			}
+
+			got := engine.hasTwoThirdsPowerLocked(Prevote)
+			if got != tt.expectMet {
+				t.Fatalf("expected quorum=%t for total %d and power %d, got %t", tt.expectMet, tt.total, tt.power, got)
+			}
+		})
+	}
+}

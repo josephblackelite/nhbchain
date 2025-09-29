@@ -556,8 +556,9 @@ func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
 		return false
 	}
 	threshold := new(big.Int).Mul(e.totalVotingPower, big.NewInt(2))
+	threshold.Add(threshold, big.NewInt(2))
 	threshold.Div(threshold, big.NewInt(3))
-	return power.Cmp(threshold) == 1
+	return power.Cmp(threshold) >= 0
 }
 
 func (e *Engine) startNewRound() {
