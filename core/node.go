@@ -1197,6 +1197,18 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
+	// Clamp the proposal to the configured transaction cap to avoid building
+	// blocks that exceed the active limit. The slice header is adjusted
+	// locally so callers (for example, the mempool) retain their full view of
+	// pending transactions.
+	maxTxs := n.globalConfigSnapshot().Blocks.MaxTxs
+	if maxTxs > 0 && int64(len(txs)) > maxTxs {
+		if maxTxs > int64(math.MaxInt) {
+			maxTxs = int64(math.MaxInt)
+		}
+		txs = txs[:int(maxTxs)]
+	}
+
 	header := &types.BlockHeader{
 		Height:    n.chain.GetHeight() + 1,
 		Timestamp: n.currentTime().Unix(),

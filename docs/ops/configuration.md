@@ -18,6 +18,10 @@ the voting period must be at least one hour.【F:config/validate.go†L9-L13】
 - **Mempool:** the global byte cap must be positive.【F:config/validate.go†L17-L18】
 - **Blocks:** each block must allow at least one transaction.【F:config/validate.go†L19-L20】
 
+Block production enforces the `MaxTxs` ceiling during proposal assembly. The
+node truncates any transaction list that exceeds the configured cap so excess
+entries remain in the mempool for the next block.【F:core/node.go†L1199-L1208】
+
 Nodes clamp the per-validator mempool to 4,000 transactions when the `[mempool]`
 section omits `MaxTransactions` or sets it to a non-positive value. Operators
 who truly need an unbounded queue must opt in explicitly by setting
