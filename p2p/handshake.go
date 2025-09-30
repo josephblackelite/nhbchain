@@ -27,6 +27,7 @@ var (
 	errHandshakeChainMismatch    = errors.New("handshake chain mismatch")
 	errHandshakeGenesisMismatch  = errors.New("handshake genesis mismatch")
 	errHandshakeSignatureFailure = errors.New("handshake signature mismatch")
+	errHandshakeFrameTooLarge    = errors.New("handshake frame exceeds maximum size")
 )
 
 type handshakeMessage struct {
@@ -57,7 +58,7 @@ func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bu
 		return nil, fmt.Errorf("send handshake: %w", err)
 	}
 
-	payload, err := readFrame(ctx, conn, reader)
+	payload, err := readFrame(ctx, conn, reader, s.cfg.MaxMessageBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read handshake: %w", err)
 	}
@@ -302,31 +303,47 @@ func writeFrame(ctx context.Context, conn net.Conn, payload any) error {
 	return err
 }
 
-func readFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader) ([]byte, error) {
+func readFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader, limit int) ([]byte, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return nil, err
 		}
 		defer conn.SetReadDeadline(time.Time{})
 	}
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+	if limit <= 0 {
+		limit = defaultMaxMessageSize
+	}
+	initialCap := limit
+	if initialCap > 1024 {
+		initialCap = 1024
+	}
+	buf := make([]byte, 0, initialCap)
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			return nil, err
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		if b == '\n' {
+			return bytesTrimSpace(buf), nil
 		}
-		return nil, err
+		if len(buf)+1 > limit {
+			return nil, errHandshakeFrameTooLarge
+		}
+		buf = append(buf, b)
 	}
-	return bytesTrimSpace(line), nil
 }
 
 func encodeHex(data []byte) string {
