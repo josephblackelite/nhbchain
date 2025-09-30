@@ -61,6 +61,7 @@ type Node struct {
 	validatorKey                 *crypto.PrivateKey
 	mempool                      []*types.Transaction
 	mempoolMu                    sync.Mutex
+	proposedTxs                  map[string]struct{}
 	mempoolLimit                 int
 	allowUnlimitedMempool        bool
 	txValidationMu               sync.RWMutex
@@ -286,6 +287,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		chain:                      chain,
 		validatorKey:               key,
 		mempool:                    make([]*types.Transaction, 0),
+		proposedTxs:                make(map[string]struct{}),
 		escrowTreasury:             treasury,
 		engagementMgr:              engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapSanctions:              swap.DefaultSanctionsChecker,
@@ -469,6 +471,14 @@ func (n *Node) SetMempoolLimit(limit int) {
 	n.mempoolLimit = limit
 	if limit > 0 && len(n.mempool) > limit {
 		start := len(n.mempool) - limit
+		removed := n.mempool[:start]
+		if len(removed) > 0 && len(n.proposedTxs) > 0 {
+			for _, tx := range removed {
+				if key, err := transactionKey(tx); err == nil {
+					delete(n.proposedTxs, key)
+				}
+			}
+		}
 		trimmed := make([]*types.Transaction, limit)
 		copy(trimmed, n.mempool[start:])
 		n.mempool = trimmed
@@ -1091,14 +1101,99 @@ func (n *Node) SubmitTransaction(tx *types.Transaction) error {
 // --- Methods for bft.NodeInterface ---
 
 func (n *Node) GetMempool() []*types.Transaction {
+	if n == nil {
+		return nil
+	}
 	n.mempoolMu.Lock()
 	defer n.mempoolMu.Unlock()
-	txs := make([]*types.Transaction, len(n.mempool))
-	copy(txs, n.mempool)
-	if len(n.mempool) > 0 {
-		n.mempool = n.mempool[:0]
+
+	if n.proposedTxs == nil {
+		n.proposedTxs = make(map[string]struct{})
+	}
+
+	txs := make([]*types.Transaction, 0, len(n.mempool))
+	for _, tx := range n.mempool {
+		key, err := transactionKey(tx)
+		if err != nil {
+			continue
+		}
+		if _, alreadyProposed := n.proposedTxs[key]; alreadyProposed {
+			continue
+		}
+		n.proposedTxs[key] = struct{}{}
+		txs = append(txs, tx)
 	}
 	return txs
+}
+
+func transactionKey(tx *types.Transaction) (string, error) {
+	if tx == nil {
+		return "", fmt.Errorf("nil transaction")
+	}
+	hash, err := tx.Hash()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash), nil
+}
+
+func (n *Node) requeueTransactions(txs []*types.Transaction) {
+	if n == nil || len(txs) == 0 {
+		return
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	if len(n.proposedTxs) == 0 {
+		return
+	}
+	for _, tx := range txs {
+		key, err := transactionKey(tx)
+		if err != nil {
+			continue
+		}
+		delete(n.proposedTxs, key)
+	}
+}
+
+func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
+	if n == nil || len(txs) == 0 {
+		return
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	if len(n.mempool) == 0 && len(n.proposedTxs) == 0 {
+		return
+	}
+
+	committed := make(map[string]struct{}, len(txs))
+	for _, tx := range txs {
+		key, err := transactionKey(tx)
+		if err != nil {
+			continue
+		}
+		committed[key] = struct{}{}
+		delete(n.proposedTxs, key)
+	}
+	if len(committed) == 0 || len(n.mempool) == 0 {
+		return
+	}
+
+	filtered := n.mempool[:0]
+	for _, tx := range n.mempool {
+		key, err := transactionKey(tx)
+		if err != nil {
+			filtered = append(filtered, tx)
+			continue
+		}
+		if _, ok := committed[key]; ok {
+			continue
+		}
+		filtered = append(filtered, tx)
+	}
+	for i := len(filtered); i < len(n.mempool); i++ {
+		n.mempool[i] = nil
+	}
+	n.mempool = filtered
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
@@ -1143,7 +1238,22 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	return types.NewBlock(header, txs), nil
 }
 
-func (n *Node) CommitBlock(b *types.Block) error {
+func (n *Node) CommitBlock(b *types.Block) (err error) {
+	var proposedTxs []*types.Transaction
+	if b != nil {
+		proposedTxs = b.Transactions
+	}
+	defer func() {
+		if len(proposedTxs) == 0 {
+			return
+		}
+		if err != nil {
+			n.requeueTransactions(proposedTxs)
+		} else {
+			n.markTransactionsCommitted(proposedTxs)
+		}
+	}()
+
 	// Verify TxRoot before executing
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {
