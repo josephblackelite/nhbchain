@@ -7,6 +7,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
 )
@@ -160,6 +161,76 @@ func TestMintWithSignatureWrongChain(t *testing.T) {
 	sig := signVoucher(t, minterKey, voucher)
 	if _, err := node.MintWithSignature(&voucher, sig); err == nil || err != ErrMintInvalidChainID {
 		t.Fatalf("expected ErrMintInvalidChainID, got %v", err)
+	}
+}
+
+func TestMintWithSignatureExecutesInBlock(t *testing.T) {
+	node := newTestNode(t)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_NHB", toAddress(minterKey))
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	voucher := MintVoucher{
+		InvoiceID: "inv-block",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "125",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	sig := signVoucher(t, minterKey, voucher)
+
+	txHash, err := node.MintWithSignature(&voucher, sig)
+	if err != nil {
+		t.Fatalf("mint failed: %v", err)
+	}
+	if txHash == "" {
+		t.Fatalf("expected tx hash")
+	}
+	if got := len(node.mempool); got != 1 {
+		t.Fatalf("expected 1 transaction in mempool, got %d", got)
+	}
+
+	block, err := node.CreateBlock(append([]*types.Transaction(nil), node.mempool...))
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected mempool to be empty after commit, got %d", got)
+	}
+
+	account, err := node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	amount, _ := voucher.AmountBig()
+	if account.BalanceNHB.Cmp(amount) != 0 {
+		t.Fatalf("expected NHB balance %s, got %s", amount, account.BalanceNHB)
+	}
+
+	node.stateMu.Lock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	var used bool
+	key := nhbstate.MintInvoiceKey(voucher.TrimmedInvoiceID())
+	ok, kvErr := manager.KVGet(key, &used)
+	node.stateMu.Unlock()
+	if kvErr != nil {
+		t.Fatalf("kv get: %v", kvErr)
+	}
+	if !ok || !used {
+		t.Fatalf("expected invoice %s marked used", voucher.InvoiceID)
 	}
 }
 

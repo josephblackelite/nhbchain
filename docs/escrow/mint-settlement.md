@@ -3,8 +3,8 @@
 ## Overview
 The `mint_with_sig` JSON-RPC method finalises invoice-backed mints for both **NHB** and **ZNHB** tokens. The payments gateway
 obtains a signed voucher from an authorised minter (e.g. the NowPayments workflow) and submits it to the node. The node
-verifies the signature, enforces replay protection via the on-chain invoice ledger, and credits the recipient's balance while
-emitting an auditable `mint.settled` event.
+verifies the signature, packages the payload into a dedicated `TxTypeMint` transaction, and queues it in the mempool so block
+execution credits the recipient while emitting an auditable `mint.settled` event.
 
 This flow keeps mint authority centralised to wallets with the `MINTER_NHB` or `MINTER_ZNHB` roles and provides a deterministic
 bridge between fiat settlements and on-chain supply adjustments.
@@ -34,9 +34,10 @@ payload auditors will verify.
 
 ## Replay protection and persistence
 * Every successful mint records the `invoiceId` inside the state trie via `state.MintInvoiceKey`.
-* Subsequent submissions with the same invoice are rejected with `ErrMintInvoiceUsed` and a `codeDuplicateTx` RPC error.
-* Replays or attempts with expired vouchers (`ErrMintExpired`) and wrong chain IDs (`ErrMintInvalidChainID`) are surfaced as
-  `codeInvalidParams` errors.
+* Subsequent submissions with the same invoice are rejected with `ErrMintInvoiceUsed` and a `codeDuplicateTx` RPC error. The
+  mempool also rejects pending duplicates to avoid block construction failures.
+* Replays or attempts with expired vouchers (`ErrMintExpired`), wrong chain IDs (`ErrMintInvalidChainID`), or malformed payloads
+  (`ErrMintInvalidPayload`) are surfaced as `codeInvalidParams` errors.
 
 ## Event emission
 A successful mint appends a `mint.settled` event:
@@ -65,9 +66,12 @@ identifier for reconciliation.
    * Token amount sourced from the locked quote.
 3. The gateway signs the canonical JSON using the configured KMS key (holding the appropriate minter role).
 4. The RPC client submits `mint_with_sig(voucherJSON, signatureHex)` to the node.
-5. The node verifies state constraints, credits the recipient (address or resolved username), records the invoice usage and
-   emits `mint.settled`.
-6. The gateway records the returned `txHash` against the invoice, marking it as `minted` for downstream reporting.
+5. The node validates the voucher, enqueues a `TxTypeMint` transaction, and returns a deterministic `txHash` derived from the
+   voucher payload and signature.
+6. When a block including that transaction executes, validators credit the recipient (address or resolved username), record the
+   invoice usage, and emit `mint.settled`.
+7. The gateway records the returned `txHash` against the invoice, marking it as `minted` for downstream reporting once the block
+   is confirmed.
 
 This alignment provides auditors and partners with a full trail from fiat settlement through to on-chain emission.
 
@@ -115,4 +119,5 @@ This alignment provides auditors and partners with a full trail from fiat settle
 {"jsonrpc":"2.0","id":7,"result":{"txHash":"0xdeadbeef..."}}
 ```
 
-* On failure the node returns an `error` object with the mappings described above.
+* On failure the node returns an `error` object with the mappings described above. If the node's mempool is full the RPC
+  responds with `codeMempoolFull`; clients should retry once capacity is available.

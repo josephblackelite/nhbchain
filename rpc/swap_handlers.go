@@ -70,29 +70,30 @@ func (s *Server) handleSwapSubmitVoucher(w http.ResponseWriter, _ *http.Request,
 		USDAmount:    strings.TrimSpace(payload.USDAmount),
 	}
 	proofSig := strings.TrimSpace(payload.PriceProof.Signature)
-	if proofSig == "" {
+	if proofSig != "" {
+		proofSig = strings.TrimPrefix(proofSig, "0x")
+		priceProofSig, err := hex.DecodeString(proofSig)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid priceProof.signature", err.Error())
+			return
+		}
+		proof, err := swap.NewPriceProof(
+			payload.PriceProof.Domain,
+			payload.PriceProof.Provider,
+			payload.PriceProof.Pair,
+			payload.PriceProof.Rate,
+			payload.PriceProof.Timestamp,
+			priceProofSig,
+		)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid priceProof", err.Error())
+			return
+		}
+		submission.PriceProof = proof
+	} else if strings.TrimSpace(payload.PriceProof.Domain) != "" || strings.TrimSpace(payload.PriceProof.Provider) != "" || strings.TrimSpace(payload.PriceProof.Pair) != "" || strings.TrimSpace(payload.PriceProof.Rate) != "" || payload.PriceProof.Timestamp != 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "priceProof.signature required", nil)
 		return
 	}
-	proofSig = strings.TrimPrefix(proofSig, "0x")
-	priceProofSig, err := hex.DecodeString(proofSig)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid priceProof.signature", err.Error())
-		return
-	}
-	proof, err := swap.NewPriceProof(
-		payload.PriceProof.Domain,
-		payload.PriceProof.Provider,
-		payload.PriceProof.Pair,
-		payload.PriceProof.Rate,
-		payload.PriceProof.Timestamp,
-		priceProofSig,
-	)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid priceProof", err.Error())
-		return
-	}
-	submission.PriceProof = proof
 	txHash, minted, err := s.node.SwapSubmitVoucher(submission)
 	if err != nil {
 		switch {
