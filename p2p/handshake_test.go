@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -220,4 +222,58 @@ func TestHandshakeTimeout(t *testing.T) {
 	if !strings.Contains(msg, "context deadline exceeded") && !strings.Contains(msg, "i/o timeout") {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
+}
+
+func TestHandshakeRejectsOversizedFrame(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+	cfg := baseConfig(genesis)
+	cfg.MaxMessageBytes = 64
+
+	local := NewServer(handler, mustKey(t), cfg)
+
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	counting := &countingConn{Conn: left}
+
+	errCh := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReaderSize(counting, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := local.performHandshake(ctx, counting, reader)
+		errCh <- err
+	}()
+
+	remoteReader := bufio.NewReader(right)
+	if _, err := remoteReader.ReadBytes('\n'); err != nil {
+		t.Fatalf("read local handshake: %v", err)
+	}
+
+	oversized := bytes.Repeat([]byte("a"), cfg.MaxMessageBytes+1)
+	if _, err := right.Write(oversized); err != nil {
+		t.Fatalf("write oversized handshake: %v", err)
+	}
+
+	err := <-errCh
+	if err == nil || !errors.Is(err, errHandshakeFrameTooLarge) {
+		t.Fatalf("expected oversized frame error, got %v", err)
+	}
+
+	if got := counting.read.Load(); got > int64(cfg.MaxMessageBytes+1) {
+		t.Fatalf("expected to read at most %d bytes, got %d", cfg.MaxMessageBytes+1, got)
+	}
+}
+
+type countingConn struct {
+	net.Conn
+	read atomic.Int64
+}
+
+func (c *countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.read.Add(int64(n))
+	return n, err
 }
