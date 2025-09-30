@@ -58,7 +58,7 @@ MaxTxs = 0
 	}
 
 	cmd := exec.Command(os.Args[0], "-test.run", "^TestConsensusdFailsOnInvalidGlobalConfig$")
-	cmd.Env = append(os.Environ(), subprocessEnv+"=1", configPathEnv+"="+cfgPath)
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", configPathEnv+"="+cfgPath, "NHB_VALIDATOR_PASS=test-passphrase")
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output

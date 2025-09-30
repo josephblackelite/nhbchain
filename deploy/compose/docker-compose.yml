@@ -53,7 +53,7 @@ services:
     environment:
       NHB_ENV: local
       NHB_ALLOW_AUTOGENESIS: "true"
-      NHB_VALIDATOR_PASS: ""
+      NHB_VALIDATOR_PASS: "change-me"
     volumes:
       - consensus-data:/var/lib/nhb
       - ./config/consensus.toml:/etc/nhb/consensus.toml:ro

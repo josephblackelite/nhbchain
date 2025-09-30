@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"nhbchain/cmd/internal/passphrase"
 	"nhbchain/config"
 	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
@@ -33,6 +34,7 @@ import (
 )
 
 const (
+	validatorPassEnv    = "NHB_VALIDATOR_PASS"
 	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
 	genesisPathEnv      = "NHB_GENESIS"
 )
@@ -74,7 +76,9 @@ func main() {
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
 
-	cfg, err := config.Load(*configFile)
+	passSource := passphrase.NewSource(validatorPassEnv)
+
+	cfg, err := config.Load(*configFile, config.WithKeystorePassphraseSource(passSource.Get))
 	if err != nil {
 		panic(fmt.Sprintf("failed to load config: %v", err))
 	}

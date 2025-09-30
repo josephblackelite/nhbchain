@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"nhbchain/cmd/internal/passphrase"
 	"nhbchain/config"
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/service"
@@ -90,7 +91,9 @@ func main() {
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
 
-	cfg, err := config.Load(*configFile)
+	passSource := passphrase.NewSource(validatorPassEnv)
+
+	cfg, err := config.Load(*configFile, config.WithKeystorePassphraseSource(passSource.Get))
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load config: %v", err))
 	}
@@ -117,7 +120,7 @@ func main() {
 	}
 	defer db.Close()
 
-	privKey, err := loadValidatorKey(cfg)
+	privKey, err := loadValidatorKey(cfg, passSource.Get)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
 	}
@@ -475,7 +478,7 @@ func flagWasProvided(name string) bool {
 	return provided
 }
 
-func loadValidatorKey(cfg *config.Config) (*crypto.PrivateKey, error) {
+func loadValidatorKey(cfg *config.Config, resolvePassphrase func() (string, error)) (*crypto.PrivateKey, error) {
 	if cfg.ValidatorKMSURI != "" || cfg.ValidatorKMSEnv != "" {
 		return loadFromKMS(cfg)
 	}
@@ -484,9 +487,16 @@ func loadValidatorKey(cfg *config.Config) (*crypto.PrivateKey, error) {
 		return nil, fmt.Errorf("validator keystore path not configured")
 	}
 
-	passphrase, ok := os.LookupEnv(validatorPassEnv)
-	if !ok {
-		return nil, fmt.Errorf("%s environment variable not set", validatorPassEnv)
+	if resolvePassphrase == nil {
+		return nil, fmt.Errorf("validator keystore passphrase required; set %s or run interactively", validatorPassEnv)
+	}
+
+	passphrase, err := resolvePassphrase()
+	if err != nil {
+		return nil, fmt.Errorf("failed to obtain validator keystore passphrase: %w", err)
+	}
+	if strings.TrimSpace(passphrase) == "" {
+		return nil, fmt.Errorf("validator keystore passphrase cannot be empty")
 	}
 
 	key, err := crypto.LoadFromKeystore(cfg.ValidatorKeystorePath, passphrase)

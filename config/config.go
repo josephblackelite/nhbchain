@@ -229,11 +229,65 @@ type GovConfig struct {
 	BlockTimestampToleranceSeconds uint64   `toml:"BlockTimestampToleranceSeconds"`
 }
 
+type LoadOption func(*loadOptions)
+
+type loadOptions struct {
+	keystorePassphrase       string
+	keystorePassphraseSource func() (string, error)
+}
+
+// WithKeystorePassphrase provides an explicit passphrase to use when the loader
+// needs to create or update the validator keystore.
+func WithKeystorePassphrase(passphrase string) LoadOption {
+	return func(opts *loadOptions) {
+		opts.keystorePassphrase = passphrase
+	}
+}
+
+// WithKeystorePassphraseSource registers a lazy resolver that is invoked only
+// when a passphrase is required (for example, on first-run when no keystore
+// exists). The resolved value is cached so subsequent calls return the same
+// passphrase.
+func WithKeystorePassphraseSource(source func() (string, error)) LoadOption {
+	return func(opts *loadOptions) {
+		opts.keystorePassphraseSource = source
+	}
+}
+
 // Load loads the configuration from the given path.
-func Load(path string) (*Config, error) {
+func Load(path string, opts ...LoadOption) (*Config, error) {
+	options := loadOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+
+	passphrase := options.keystorePassphrase
+	havePassphrase := passphrase != ""
+	resolvePassphrase := func() (string, error) {
+		if havePassphrase {
+			return passphrase, nil
+		}
+		if options.keystorePassphraseSource == nil {
+			return "", nil
+		}
+		value, err := options.keystorePassphraseSource()
+		if err != nil {
+			return "", err
+		}
+		passphrase = value
+		havePassphrase = true
+		return passphrase, nil
+	}
+
 	cfg := &Config{}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return createDefault(path)
+		resolved, err := resolvePassphrase()
+		if err != nil {
+			return nil, err
+		}
+		return createDefault(path, resolved)
 	}
 
 	meta, err := toml.DecodeFile(path, cfg)
@@ -248,7 +302,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	if cfg.ValidatorKMSURI == "" && cfg.ValidatorKMSEnv == "" {
-		if err := ensureKeystore(path, cfg); err != nil {
+		if err := ensureKeystore(path, cfg, resolvePassphrase); err != nil {
 			return nil, err
 		}
 	}
@@ -784,18 +838,28 @@ func isDigitString(value string) bool {
 	return true
 }
 
-func ensureKeystore(configPath string, cfg *Config) error {
+func ensureKeystore(configPath string, cfg *Config, resolvePassphrase func() (string, error)) error {
 	keystorePath := cfg.ValidatorKeystorePath
 	if keystorePath == "" {
 		keystorePath = defaultKeystorePath(configPath)
 	}
 
 	if _, err := os.Stat(keystorePath); os.IsNotExist(err) {
+		if resolvePassphrase == nil {
+			return fmt.Errorf("validator keystore %s does not exist and no passphrase was provided", keystorePath)
+		}
+		passphrase, perr := resolvePassphrase()
+		if perr != nil {
+			return perr
+		}
+		if strings.TrimSpace(passphrase) == "" {
+			return fmt.Errorf("validator keystore passphrase is required to create %s", keystorePath)
+		}
 		key, genErr := crypto.GeneratePrivateKey()
 		if genErr != nil {
 			return genErr
 		}
-		if err := crypto.SaveToKeystore(keystorePath, key, ""); err != nil {
+		if err := crypto.SaveToKeystore(keystorePath, key, passphrase); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -811,14 +875,17 @@ func ensureKeystore(configPath string, cfg *Config) error {
 }
 
 // createDefault creates and saves a default configuration file.
-func createDefault(path string) (*Config, error) {
+func createDefault(path string, passphrase string) (*Config, error) {
+	if strings.TrimSpace(passphrase) == "" {
+		return nil, fmt.Errorf("validator keystore passphrase is required to initialise %s", path)
+	}
 	key, err := crypto.GeneratePrivateKey()
 	if err != nil {
 		return nil, err
 	}
 
 	keystorePath := defaultKeystorePath(path)
-	if err := crypto.SaveToKeystore(keystorePath, key, ""); err != nil {
+	if err := crypto.SaveToKeystore(keystorePath, key, passphrase); err != nil {
 		return nil, err
 	}
 
