@@ -156,8 +156,56 @@ func (p *Peer) readLoop() {
 			return
 		}
 
-		line, err := p.reader.ReadBytes('\n')
-		if err != nil {
+		maxBytes := p.server.cfg.MaxMessageBytes
+		var (
+			line  []byte
+			total int
+		)
+
+		for {
+			segment, err := p.reader.ReadSlice('\n')
+			total += len(segment)
+
+			overLimit := false
+			exceededLen := total
+			switch {
+			case err == nil:
+				payloadLen := total - 1
+				if payloadLen > maxBytes {
+					overLimit = true
+					exceededLen = payloadLen
+				}
+			case errors.Is(err, bufio.ErrBufferFull):
+				if total > maxBytes {
+					overLimit = true
+				}
+			case err != nil:
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					p.terminate(false, fmt.Errorf("peer %s read timeout", p.id))
+					return
+				}
+				if errors.Is(err, io.EOF) {
+					p.terminate(false, io.EOF)
+					return
+				}
+				p.terminate(false, fmt.Errorf("read error: %w", err))
+				return
+			}
+
+			if overLimit {
+				p.server.handleProtocolViolation(p, fmt.Errorf("message exceeds max size (%d bytes)", exceededLen))
+				return
+			}
+
+			line = append(line, segment...)
+
+			if err == nil {
+				break
+			}
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
+
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				p.terminate(false, fmt.Errorf("peer %s read timeout", p.id))
 				return
@@ -174,7 +222,7 @@ func (p *Peer) readLoop() {
 		if len(trimmed) == 0 {
 			continue
 		}
-		if len(trimmed) > p.server.cfg.MaxMessageBytes {
+		if len(trimmed) > maxBytes {
 			p.server.handleProtocolViolation(p, fmt.Errorf("message exceeds max size (%d bytes)", len(trimmed)))
 			return
 		}
