@@ -321,7 +321,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
 
 	node.SetModulePauses(config.Pauses{})
-	if err := node.refreshModulePauses(); err != nil {
+	node.stateMu.Lock()
+	err = node.refreshModulePauses()
+	node.stateMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 
@@ -342,6 +345,8 @@ func normalizeModuleName(module string) string {
 	return strings.ToLower(strings.TrimSpace(module))
 }
 
+// refreshModulePauses loads pause configuration from state. Callers must hold
+// stateMu while invoking this helper.
 func (n *Node) refreshModulePauses() error {
 	if n == nil || n.state == nil || n.state.Trie == nil {
 		return nil
@@ -1112,10 +1117,13 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	header.TxRoot = txRoot
 
 	// Execute against a copy of StateDB to derive StateRoot
+	n.stateMu.Lock()
 	if err := n.refreshModulePauses(); err != nil {
+		n.stateMu.Unlock()
 		return nil, err
 	}
 	stateCopy, err := n.state.Copy()
+	n.stateMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -1136,15 +1144,6 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 }
 
 func (n *Node) CommitBlock(b *types.Block) error {
-	// Remember parent root for rollback on any failure
-	parentRoot := n.state.CurrentRoot()
-	rollback := func() error {
-		if err := n.state.ResetToRoot(parentRoot); err != nil {
-			return fmt.Errorf("rollback to parent root: %w", err)
-		}
-		return nil
-	}
-
 	// Verify TxRoot before executing
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {
@@ -1156,6 +1155,18 @@ func (n *Node) CommitBlock(b *types.Block) error {
 
 	if err := n.validateBlockTimestamp(b.Header.Timestamp); err != nil {
 		return err
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	// Remember parent root for rollback on any failure
+	parentRoot := n.state.CurrentRoot()
+	rollback := func() error {
+		if err := n.state.ResetToRoot(parentRoot); err != nil {
+			return fmt.Errorf("rollback to parent root: %w", err)
+		}
+		return nil
 	}
 
 	if err := n.refreshModulePauses(); err != nil {
@@ -1366,12 +1377,16 @@ func (n *Node) SnapshotImport(ctx context.Context, manifest *syncmgr.SnapshotMan
 	if err != nil {
 		return common.Hash{}, err
 	}
+	n.stateMu.Lock()
 	if err := n.state.ResetToRoot(root); err != nil {
+		n.stateMu.Unlock()
 		return common.Hash{}, err
 	}
 	if err := n.refreshModulePauses(); err != nil {
+		n.stateMu.Unlock()
 		return common.Hash{}, err
 	}
+	n.stateMu.Unlock()
 	n.syncMgr.SetHeight(manifest.Height)
 	n.refreshValidatorSet()
 	return root, nil
