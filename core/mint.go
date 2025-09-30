@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ var (
 	ErrMintExpired = errors.New("mint: voucher expired")
 	// ErrMintInvalidChainID indicates the voucher targets a different chain identifier.
 	ErrMintInvalidChainID = errors.New("mint: invalid chain id")
+	// ErrMintInvalidPayload indicates the mint transaction payload could not be decoded.
+	ErrMintInvalidPayload = errors.New("mint: invalid payload")
 )
 
 // MintVoucher represents the canonical payload that is signed off-chain by a mint authority.
@@ -111,4 +114,59 @@ func (v MintVoucher) TrimmedInvoiceID() string {
 // TrimmedRecipient returns the trimmed recipient reference.
 func (v MintVoucher) TrimmedRecipient() string {
 	return strings.TrimSpace(v.Recipient)
+}
+
+type mintTransactionPayload struct {
+	Voucher   MintVoucher `json:"voucher"`
+	Signature string      `json:"signature"`
+}
+
+func encodeMintTransaction(voucher *MintVoucher, signature []byte) ([]byte, error) {
+	if voucher == nil {
+		return nil, fmt.Errorf("voucher required")
+	}
+	if len(signature) == 0 {
+		return nil, fmt.Errorf("signature required")
+	}
+	payload := mintTransactionPayload{
+		Voucher:   *voucher,
+		Signature: "0x" + strings.ToLower(hex.EncodeToString(signature)),
+	}
+	return json.Marshal(payload)
+}
+
+func decodeMintTransaction(data []byte) (*MintVoucher, []byte, error) {
+	if len(data) == 0 {
+		return nil, nil, fmt.Errorf("%w: payload required", ErrMintInvalidPayload)
+	}
+	var payload mintTransactionPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
+	}
+	voucher := payload.Voucher
+	sig := strings.TrimSpace(payload.Signature)
+	if sig == "" {
+		return nil, nil, fmt.Errorf("%w: signature required", ErrMintInvalidPayload)
+	}
+	sig = strings.TrimPrefix(strings.ToLower(sig), "0x")
+	signature, err := hex.DecodeString(sig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
+	}
+	if len(signature) == 0 {
+		return nil, nil, fmt.Errorf("%w: signature required", ErrMintInvalidPayload)
+	}
+	return &voucher, append([]byte(nil), signature...), nil
+}
+
+func mintTransactionHash(voucher *MintVoucher, signature []byte) (string, error) {
+	if voucher == nil {
+		return "", fmt.Errorf("voucher required")
+	}
+	canonical, err := voucher.CanonicalJSON()
+	if err != nil {
+		return "", err
+	}
+	digest := ethcrypto.Keccak256(append([]byte{}, append(canonical, signature...)...))
+	return "0x" + strings.ToLower(hex.EncodeToString(digest)), nil
 }

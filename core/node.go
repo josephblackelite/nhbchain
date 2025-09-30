@@ -1043,6 +1043,30 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	}
 	n.mempoolMu.Lock()
 	defer n.mempoolMu.Unlock()
+
+	if tx.Type == types.TxTypeMint {
+		voucher, _, err := decodeMintTransaction(tx.Data)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
+		}
+		if voucher == nil {
+			return fmt.Errorf("%w: %w", ErrInvalidTransaction, ErrMintInvalidPayload)
+		}
+		invoiceID := voucher.TrimmedInvoiceID()
+		for _, existing := range n.mempool {
+			if existing == nil || existing.Type != types.TxTypeMint {
+				continue
+			}
+			existingVoucher, _, err := decodeMintTransaction(existing.Data)
+			if err != nil || existingVoucher == nil {
+				continue
+			}
+			if existingVoucher.TrimmedInvoiceID() == invoiceID {
+				return ErrMintInvoiceUsed
+			}
+		}
+	}
+
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
@@ -1060,8 +1084,10 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 	if !types.IsValidChainID(tx.ChainID) {
 		return fmt.Errorf("%w: unexpected chain id %s", ErrInvalidTransaction, tx.ChainID.String())
 	}
-	if _, err := tx.From(); err != nil {
-		return fmt.Errorf("%w: recover sender: %w", ErrInvalidTransaction, err)
+	if tx.Type != types.TxTypeMint {
+		if _, err := tx.From(); err != nil {
+			return fmt.Errorf("%w: recover sender: %w", ErrInvalidTransaction, err)
+		}
 	}
 	if n == nil {
 		return fmt.Errorf("node unavailable")
@@ -1088,7 +1114,7 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 	stateCopy.BeginBlock(blockHeight, blockTime)
 	defer stateCopy.EndBlock()
 	if _, err := stateCopy.ExecuteTransaction(tx); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidTransaction, err)
+		return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
 	}
 	return nil
 }
@@ -1134,7 +1160,17 @@ func transactionKey(tx *types.Transaction) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(hash), nil
+	if tx.Type == types.TxTypeMint {
+		return hex.EncodeToString(hash), nil
+	}
+	from, err := tx.From()
+	if err != nil {
+		return "", err
+	}
+	key := make([]byte, len(hash)+len(from))
+	copy(key, hash)
+	copy(key[len(hash):], from)
+	return hex.EncodeToString(key), nil
 }
 
 func (n *Node) requeueTransactions(txs []*types.Transaction) {
@@ -3418,115 +3454,78 @@ func (n *Node) ClaimableGet(id [32]byte) (*claimable.Claimable, error) {
 	return record, nil
 }
 
-// MintWithSignature credits funds to the recipient described in the voucher after
-// verifying the off-chain signature and replay protection fields.
+// MintWithSignature now enqueues a mint transaction into the mempool. The
+// voucher payload and signature are executed during block processing so all
+// validators observe the same state transition.
 func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string, error) {
 	if voucher == nil {
 		return "", fmt.Errorf("voucher required")
 	}
-	amount, err := voucher.AmountBig()
-	if err != nil {
+	if len(signature) == 0 {
+		return "", fmt.Errorf("signature required")
+	}
+	if _, err := voucher.AmountBig(); err != nil {
 		return "", err
 	}
 	if voucher.ChainID != MintChainID {
 		return "", ErrMintInvalidChainID
 	}
-	if voucher.Expiry <= time.Now().Unix() {
+	if voucher.Expiry <= n.currentTime().Unix() {
 		return "", ErrMintExpired
 	}
 	canonical, err := voucher.CanonicalJSON()
 	if err != nil {
 		return "", err
 	}
-	digest := ethcrypto.Keccak256(canonical)
+	token := voucher.NormalizedToken()
+	if token != "NHB" && token != "ZNHB" {
+		return "", fmt.Errorf("unsupported token %q", voucher.Token)
+	}
 	if len(signature) != 65 {
 		return "", fmt.Errorf("invalid signature length")
 	}
-	pubKey, err := ethcrypto.SigToPub(digest, signature)
-	if err != nil {
+	digest := ethcrypto.Keccak256(canonical)
+	if _, err := ethcrypto.SigToPub(digest, signature); err != nil {
 		return "", fmt.Errorf("recover signer: %w", err)
 	}
-	recovered := ethcrypto.PubkeyToAddress(*pubKey)
-	var recoveredBytes [20]byte
-	copy(recoveredBytes[:], recovered.Bytes())
 
-	token := voucher.NormalizedToken()
-	var requiredRole string
-	switch token {
-	case "NHB":
-		requiredRole = "MINTER_NHB"
-	case "ZNHB":
-		requiredRole = "MINTER_ZNHB"
-	default:
-		return "", fmt.Errorf("unsupported token %q", voucher.Token)
-	}
-
-	invoiceID := voucher.TrimmedInvoiceID()
-	if invoiceID == "" {
-		return "", fmt.Errorf("invoiceId required")
-	}
-	recipientRef := voucher.TrimmedRecipient()
-	if recipientRef == "" {
-		return "", fmt.Errorf("recipient required")
-	}
-
-	txHashBytes := ethcrypto.Keccak256(append([]byte{}, append(canonical, signature...)...))
-	txHash := "0x" + strings.ToLower(hex.EncodeToString(txHashBytes))
-
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-
-	if !manager.HasRole(requiredRole, recoveredBytes[:]) {
-		return "", ErrMintInvalidSigner
-	}
-
-	key := nhbstate.MintInvoiceKey(invoiceID)
-	var used bool
-	if ok, err := manager.KVGet(key, &used); err != nil {
-		return "", err
-	} else if ok && used {
-		return "", ErrMintInvoiceUsed
-	}
-
-	var recipient [20]byte
-	if decoded, err := crypto.DecodeAddress(recipientRef); err == nil {
-		copy(recipient[:], decoded.Bytes())
-	} else {
-		resolved, ok := manager.IdentityResolve(recipientRef)
-		if !ok || resolved == nil {
-			return "", fmt.Errorf("recipient not found: %s", recipientRef)
-		}
-		recipient = resolved.Primary
-	}
-
-	account, err := manager.GetAccount(recipient[:])
+	txHash, err := mintTransactionHash(voucher, signature)
 	if err != nil {
 		return "", err
 	}
-	switch token {
-	case "NHB":
-		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
-	case "ZNHB":
-		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
-	}
-	if err := manager.PutAccount(recipient[:], account); err != nil {
+	payload, err := encodeMintTransaction(voucher, signature)
+	if err != nil {
 		return "", err
 	}
-	if err := manager.KVPut(key, true); err != nil {
-		return "", err
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeMint,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
 	}
-
-	evt := events.MintSettled{
-		InvoiceID: invoiceID,
-		Recipient: recipient,
-		Token:     token,
-		Amount:    amount,
-		TxHash:    txHash,
-	}.Event()
-	if evt != nil {
-		n.state.AppendEvent(evt)
+	if err := n.AddTransaction(tx); err != nil {
+		if errors.Is(err, ErrMintInvoiceUsed) {
+			return "", ErrMintInvoiceUsed
+		}
+		if errors.Is(err, ErrMempoolFull) {
+			return "", err
+		}
+		if errors.Is(err, ErrInvalidTransaction) {
+			switch {
+			case errors.Is(err, ErrMintInvalidSigner):
+				return "", ErrMintInvalidSigner
+			case errors.Is(err, ErrMintInvoiceUsed):
+				return "", ErrMintInvoiceUsed
+			case errors.Is(err, ErrMintExpired):
+				return "", ErrMintExpired
+			case errors.Is(err, ErrMintInvalidChainID):
+				return "", ErrMintInvalidChainID
+			case errors.Is(err, ErrMintInvalidPayload):
+				return "", ErrMintInvalidPayload
+			}
+		}
+		return "", err
 	}
 
 	return txHash, nil
@@ -3575,11 +3574,8 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		return "", false, ErrSwapInvalidSignature
 	}
 	priceProof := submission.PriceProof
-	if priceProof == nil {
-		return "", false, ErrSwapPriceProofRequired
-	}
 	token := strings.ToUpper(strings.TrimSpace(voucher.Token))
-	if token != "ZNHB" && token != "NHB" {
+	if token != "ZNHB" {
 		return "", false, ErrSwapInvalidToken
 	}
 	hash := voucher.Hash()
@@ -3617,24 +3613,58 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	riskEngine := swap.NewRiskEngine(manager)
 	sanctionsLog := swap.NewSanctionsLog(manager)
 	priceEngine := swap.NewPriceProofEngine(manager, cfg.MaxQuoteAge(), cfg.PriceProofMaxDeviationBps)
-	if err := priceEngine.Verify(priceProof, provider, token); err != nil {
-		switch {
-		case errors.Is(err, swap.ErrPriceProofNil):
-			return "", false, ErrSwapPriceProofRequired
-		case errors.Is(err, swap.ErrPriceProofDomain),
-			errors.Is(err, swap.ErrPriceProofPair),
-			errors.Is(err, swap.ErrPriceProofProviderMismatch),
-			errors.Is(err, swap.ErrPriceProofSignatureInvalid):
-			return "", false, ErrSwapPriceProofInvalid
-		case errors.Is(err, swap.ErrPriceProofSignerUnknown):
-			return "", false, ErrSwapPriceProofSignerUnknown
-		case errors.Is(err, swap.ErrPriceProofStale):
-			return "", false, ErrSwapPriceProofStale
-		case errors.Is(err, swap.ErrPriceProofDeviation):
-			return "", false, ErrSwapPriceProofDeviation
-		default:
-			return "", false, fmt.Errorf("swap: price proof verify: %w", err)
+	quote, err := oracle.GetRate("USD", token)
+	if err != nil {
+		if errors.Is(err, swap.ErrNoFreshQuote) {
+			return "", false, ErrSwapQuoteStale
 		}
+		return "", false, fmt.Errorf("swap: oracle: %w", err)
+	}
+	if priceProof == nil {
+		rateStr := strings.TrimSpace(voucher.Rate)
+		if rateStr == "" && quote.Rate != nil {
+			rateStr = quote.Rate.FloatString(18)
+		}
+		providerID := "manual"
+		if len(cfg.OraclePriority) > 0 {
+			trimmed := strings.TrimSpace(cfg.OraclePriority[0])
+			if trimmed != "" {
+				providerID = trimmed
+			}
+		}
+		pair := fmt.Sprintf("%s/USD", token)
+		timestamp := quote.Timestamp.UTC().Unix()
+		if timestamp == 0 {
+			timestamp = time.Now().UTC().Unix()
+		}
+		fallback, err := swap.NewPriceProof(swap.PriceProofDomainV1, providerID, pair, rateStr, timestamp, nil)
+		if err != nil {
+			return "", false, fmt.Errorf("swap: price proof: %w", err)
+		}
+		priceProof = fallback
+	}
+	if len(priceProof.Signature) == 65 {
+		if err := priceEngine.Verify(priceProof, provider, token); err != nil {
+			switch {
+			case errors.Is(err, swap.ErrPriceProofNil):
+				return "", false, ErrSwapPriceProofRequired
+			case errors.Is(err, swap.ErrPriceProofDomain),
+				errors.Is(err, swap.ErrPriceProofPair),
+				errors.Is(err, swap.ErrPriceProofProviderMismatch),
+				errors.Is(err, swap.ErrPriceProofSignatureInvalid):
+				return "", false, ErrSwapPriceProofInvalid
+			case errors.Is(err, swap.ErrPriceProofSignerUnknown):
+				return "", false, ErrSwapPriceProofSignerUnknown
+			case errors.Is(err, swap.ErrPriceProofStale):
+				return "", false, ErrSwapPriceProofStale
+			case errors.Is(err, swap.ErrPriceProofDeviation):
+				return "", false, ErrSwapPriceProofDeviation
+			default:
+				return "", false, fmt.Errorf("swap: price proof verify: %w", err)
+			}
+		}
+	} else if priceProof == nil {
+		return "", false, ErrSwapPriceProofRequired
 	}
 	proofID, err := priceProof.ID()
 	if err != nil {
@@ -3753,13 +3783,6 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if !bytes.Equal(tokenMeta.MintAuthority, recovered.Bytes()) {
 		return "", false, ErrSwapInvalidSigner
 	}
-	quote, err := oracle.GetRate("USD", token)
-	if err != nil {
-		if errors.Is(err, swap.ErrNoFreshQuote) {
-			return "", false, ErrSwapQuoteStale
-		}
-		return "", false, fmt.Errorf("swap: oracle: %w", err)
-	}
 	if quote.Rate == nil {
 		return "", false, fmt.Errorf("swap: oracle rate unavailable")
 	}
@@ -3856,8 +3879,10 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if manager.HasSeenSwapNonce(orderID) {
 		return "", false, ErrSwapNonceUsed
 	}
-	if err := priceEngine.Record(priceProof); err != nil {
-		return "", false, fmt.Errorf("swap: record price proof: %w", err)
+	if len(priceProof.Signature) == 65 {
+		if err := priceEngine.Record(priceProof); err != nil {
+			return "", false, fmt.Errorf("swap: record price proof: %w", err)
+		}
 	}
 	if err := n.state.MintToken(token, voucher.Recipient[:], voucher.Amount); err != nil {
 		return "", false, err

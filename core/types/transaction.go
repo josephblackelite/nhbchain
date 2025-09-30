@@ -44,6 +44,7 @@ const (
 	TxTypeArbitrateRelease TxType = 0x0B // NEW: Admin-only action to release to buyer
 	TxTypeArbitrateRefund  TxType = 0x0C // NEW: Admin-only action to refund seller
 	TxTypeStakeClaim       TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
+	TxTypeMint             TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
 )
 
 // Transaction now has a Type field to distinguish its intent.

@@ -873,13 +873,23 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	if !types.IsValidChainID(tx.ChainID) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
 	}
-	sender, senderAccount, err := sp.validateSenderAccount(tx)
-	if err != nil {
-		return nil, err
+	var (
+		sender        []byte
+		senderAccount *types.Account
+		err           error
+	)
+	if tx.Type != types.TxTypeMint {
+		sender, senderAccount, err = sp.validateSenderAccount(tx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	start := len(sp.events)
 	var result *SimulationResult
 	switch tx.Type {
+	case types.TxTypeMint:
+		err = sp.applyMintTransaction(tx)
+		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)
 	default:
@@ -1127,6 +1137,118 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 }
 
 // --- Native handlers (original semantics + new dispute flow) ---
+
+func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
+	voucher, signature, err := decodeMintTransaction(tx.Data)
+	if err != nil {
+		return err
+	}
+	if voucher == nil {
+		return fmt.Errorf("%w: voucher required", ErrMintInvalidPayload)
+	}
+	amount, err := voucher.AmountBig()
+	if err != nil {
+		return err
+	}
+	if voucher.ChainID != MintChainID {
+		return ErrMintInvalidChainID
+	}
+	blockTime := sp.blockTimestamp()
+	if voucher.Expiry <= blockTime.Unix() {
+		return ErrMintExpired
+	}
+	canonical, err := voucher.CanonicalJSON()
+	if err != nil {
+		return err
+	}
+	if len(signature) != 65 {
+		return fmt.Errorf("invalid signature length")
+	}
+	digest := ethcrypto.Keccak256(canonical)
+	pubKey, err := ethcrypto.SigToPub(digest, signature)
+	if err != nil {
+		return fmt.Errorf("recover signer: %w", err)
+	}
+	recovered := ethcrypto.PubkeyToAddress(*pubKey)
+	var recoveredBytes [20]byte
+	copy(recoveredBytes[:], recovered.Bytes())
+
+	token := voucher.NormalizedToken()
+	var requiredRole string
+	switch token {
+	case "NHB":
+		requiredRole = "MINTER_NHB"
+	case "ZNHB":
+		requiredRole = "MINTER_ZNHB"
+	default:
+		return fmt.Errorf("unsupported token %q", voucher.Token)
+	}
+
+	invoiceID := voucher.TrimmedInvoiceID()
+	if invoiceID == "" {
+		return fmt.Errorf("invoiceId required")
+	}
+	recipientRef := voucher.TrimmedRecipient()
+	if recipientRef == "" {
+		return fmt.Errorf("recipient required")
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(requiredRole, recoveredBytes[:]) {
+		return ErrMintInvalidSigner
+	}
+	key := nhbstate.MintInvoiceKey(invoiceID)
+	var used bool
+	if ok, err := manager.KVGet(key, &used); err != nil {
+		return err
+	} else if ok && used {
+		return ErrMintInvoiceUsed
+	}
+
+	var recipient [20]byte
+	if decoded, err := crypto.DecodeAddress(recipientRef); err == nil {
+		copy(recipient[:], decoded.Bytes())
+	} else {
+		resolved, ok := manager.IdentityResolve(recipientRef)
+		if !ok || resolved == nil {
+			return fmt.Errorf("recipient not found: %s", recipientRef)
+		}
+		recipient = resolved.Primary
+	}
+
+	account, err := manager.GetAccount(recipient[:])
+	if err != nil {
+		return err
+	}
+	switch token {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+	}
+	if err := manager.PutAccount(recipient[:], account); err != nil {
+		return err
+	}
+	if err := manager.KVPut(key, true); err != nil {
+		return err
+	}
+
+	txHash, err := mintTransactionHash(voucher, signature)
+	if err != nil {
+		return err
+	}
+	evt := events.MintSettled{
+		InvoiceID: invoiceID,
+		Recipient: recipient,
+		Token:     token,
+		Amount:    amount,
+		TxHash:    txHash,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
 
 func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	switch tx.Type {
