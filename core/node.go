@@ -1236,8 +1236,29 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	return nil
 }
 
-func (n *Node) GetValidatorSet() map[string]*big.Int { return n.state.ValidatorSet }
-func (n *Node) GetHeight() uint64                    { return n.chain.Height() }
+func (n *Node) GetValidatorSet() map[string]*big.Int {
+	if n == nil || n.state == nil {
+		return nil
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	if n.state.ValidatorSet == nil {
+		return make(map[string]*big.Int)
+	}
+
+	snapshot := make(map[string]*big.Int, len(n.state.ValidatorSet))
+	for addr, power := range n.state.ValidatorSet {
+		if power != nil {
+			snapshot[addr] = new(big.Int).Set(power)
+		} else {
+			snapshot[addr] = nil
+		}
+	}
+	return snapshot
+}
+func (n *Node) GetHeight() uint64 { return n.chain.Height() }
 
 // GetBlockByHeight retrieves the block stored at the requested height.
 func (n *Node) GetBlockByHeight(height uint64) (*types.Block, error) {
