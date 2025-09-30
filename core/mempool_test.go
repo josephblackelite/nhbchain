@@ -92,6 +92,81 @@ func TestNodeMempoolLimitEnforcedConcurrently(t *testing.T) {
 	}
 }
 
+func TestCommitBlockFailureRetainsMempool(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tx := prepareSignedTransaction(t, node, key, 0, types.NHBChainID())
+	if err := node.AddTransaction(tx); err != nil {
+		t.Fatalf("add transaction: %v", err)
+	}
+
+	proposed := node.GetMempool()
+	if len(proposed) != 1 {
+		t.Fatalf("expected 1 transaction from initial proposal, got %d", len(proposed))
+	}
+
+	// Subsequent proposal attempts before the commit result should yield no new transactions.
+	if again := node.GetMempool(); len(again) != 0 {
+		t.Fatalf("expected no additional transactions while proposal in-flight, got %d", len(again))
+	}
+
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: node.currentTime().Unix(),
+		PrevHash:  node.chain.Tip(),
+		Validator: node.validatorKey.PubKey().Address().Bytes(),
+		TxRoot:    []byte("mismatch"),
+	}
+	block := types.NewBlock(header, proposed)
+	if err := node.CommitBlock(block); err == nil {
+		t.Fatalf("expected commit failure due to tx root mismatch")
+	}
+
+	reproposed := node.GetMempool()
+	if len(reproposed) != 1 {
+		t.Fatalf("expected transaction to remain after failed commit, got %d", len(reproposed))
+	}
+	if reproposed[0] != tx {
+		t.Fatalf("expected same transaction pointer after failure")
+	}
+}
+
+func TestCommitBlockSuccessPrunesMempool(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tx := prepareSignedTransaction(t, node, key, 0, types.NHBChainID())
+	if err := node.AddTransaction(tx); err != nil {
+		t.Fatalf("add transaction: %v", err)
+	}
+
+	proposed := node.GetMempool()
+	if len(proposed) != 1 {
+		t.Fatalf("expected 1 transaction to propose, got %d", len(proposed))
+	}
+
+	block, err := node.CreateBlock(proposed)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	if remaining := node.GetMempool(); len(remaining) != 0 {
+		t.Fatalf("expected mempool to be empty after successful commit, got %d", len(remaining))
+	}
+}
+
 func prepareSignedTransaction(t *testing.T, node *Node, key *crypto.PrivateKey, nonce uint64, chainID *big.Int) *types.Transaction {
 	t.Helper()
 	ensureAccountState(t, node, key, nonce)

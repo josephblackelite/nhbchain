@@ -79,7 +79,7 @@ func (s *Server) GetHeight(ctx context.Context, _ *consensusv1.GetHeightRequest)
 	return &consensusv1.GetHeightResponse{Height: s.node.GetHeight()}, nil
 }
 
-// GetMempool drains the current mempool contents.
+// GetMempool retrieves queued transactions that have not yet been committed.
 func (s *Server) GetMempool(ctx context.Context, _ *consensusv1.GetMempoolRequest) (*consensusv1.GetMempoolResponse, error) {
 	if s == nil || s.node == nil {
 		return nil, fmt.Errorf("consensus service not initialised")
