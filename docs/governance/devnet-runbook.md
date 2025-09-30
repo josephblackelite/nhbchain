@@ -83,7 +83,7 @@ TOML
 Start the node (keep this terminal running):
 
 ```bash
-export NHB_VALIDATOR_PASS=""
+export NHB_VALIDATOR_PASS="devnet-passphrase"
 export NHB_RPC_TOKEN="devnet-token"
 RPC_URL="http://127.0.0.1:8081"
 # Explicitly opt into autogenesis for this throwaway devnet instance.

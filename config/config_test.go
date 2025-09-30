@@ -10,6 +10,8 @@ import (
 	"nhbchain/crypto"
 )
 
+const testKeystorePassphrase = "test-passphrase"
+
 var (
 	testTreasuryAllowAddrBytes = func() [20]byte {
 		var addr [20]byte
@@ -82,7 +84,7 @@ PEX = false
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -213,7 +215,7 @@ ValidatorKeystorePath = "%s"
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -248,7 +250,7 @@ BlockTimestampToleranceSeconds = 12
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -353,7 +355,7 @@ ValidatorKeystorePath = "%s"
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -361,5 +363,40 @@ ValidatorKeystorePath = "%s"
 	want := defaultGlobalConfig()
 	if cfg.Global != want {
 		t.Fatalf("unexpected global defaults: %+v", cfg.Global)
+	}
+}
+
+func TestLoadWithoutPassphraseFailsToCreateDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	if _, err := Load(path); err == nil {
+		t.Fatalf("expected error when no keystore passphrase is provided")
+	}
+}
+
+func TestLoadCreatesKeystoreWithPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	passphrase := "strong-passphrase"
+
+	cfg, err := Load(path, WithKeystorePassphrase(passphrase))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.ValidatorKeystorePath == "" {
+		t.Fatalf("expected validator keystore path to be set")
+	}
+	if _, err := os.Stat(cfg.ValidatorKeystorePath); err != nil {
+		t.Fatalf("expected keystore file to exist: %v", err)
+	}
+
+	key, err := crypto.LoadFromKeystore(cfg.ValidatorKeystorePath, passphrase)
+	if err != nil {
+		t.Fatalf("failed to decrypt keystore: %v", err)
+	}
+	if key == nil {
+		t.Fatalf("expected decrypted key")
 	}
 }

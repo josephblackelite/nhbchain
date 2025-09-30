@@ -29,7 +29,7 @@ services:
       p2pd:
         condition: service_healthy
     environment:
-      - NHB_VALIDATOR_PASS=
+      - NHB_VALIDATOR_PASS=change-me
       - NHB_ALLOW_AUTOGENESIS=true
     volumes:
       - consensus-data:/var/lib/nhb

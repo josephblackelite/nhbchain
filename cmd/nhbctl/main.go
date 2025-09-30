@@ -100,7 +100,13 @@ func migrateKeystore(configPath, keystorePath, passEnv string, force bool) error
 		if !ok {
 			return fmt.Errorf("environment variable %s is not set", passEnv)
 		}
+		if strings.TrimSpace(val) == "" {
+			return fmt.Errorf("environment variable %s must not be empty", passEnv)
+		}
 		passphrase = val
+	}
+	if strings.TrimSpace(passphrase) == "" {
+		return fmt.Errorf("validator keystore passphrase must be provided via %s", passEnv)
 	}
 
 	key, err := parseLegacyKey(cfg.ValidatorKey)
@@ -141,7 +147,7 @@ func migrateKeystore(configPath, keystorePath, passEnv string, force bool) error
 		return err
 	}
 
-	if _, err := config.Load(configPath); err != nil {
+	if _, err := config.Load(configPath, config.WithKeystorePassphrase(passphrase)); err != nil {
 		return fmt.Errorf("verification failed after migration: %w", err)
 	}
 

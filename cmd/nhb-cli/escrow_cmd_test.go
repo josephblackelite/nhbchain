@@ -144,6 +144,7 @@ func TestEscrowRPCErrorsAndSuccess(t *testing.T) {
 				"amount":   "100000000000000000000",
 				"feeBps":   uint64(10),
 				"deadline": int64(1_700_000_000 + 3600),
+				"nonce":    uint64(42),
 			}
 			if diff := diffParams(params, expected); diff != "" {
 				t.Fatalf("unexpected params diff: %s", diff)
@@ -162,6 +163,7 @@ func TestEscrowRPCErrorsAndSuccess(t *testing.T) {
 			"--amount", "100e18",
 			"--fee-bps", "10",
 			"--deadline", "+1h",
+			"--nonce", "42",
 		}
 		exitCode := runEscrowCommand(args, stdout, stderr)
 		if exitCode != 0 {

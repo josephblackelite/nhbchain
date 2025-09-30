@@ -111,7 +111,7 @@ This produces two executables:
 
 ### Initial Configuration
 
-On first launch the node creates `config.toml` alongside an encrypted validator keystore. To pre-configure or inspect settings, edit `config.toml` and point `GenesisFile` at the vetted genesis JSON supplied by network operations (autogenesis is only for isolated dev workflows):
+On first launch the node prompts for a validator keystore passphrase (or uses the `NHB_VALIDATOR_PASS` environment variable) before creating `config.toml` alongside the encrypted validator keystore. The passphrase must be non-empty and should be reused by every binary that reads the validator key (`nhb`, `consensusd`, `p2pd`, etc.). To pre-configure or inspect settings, edit `config.toml` and point `GenesisFile` at the vetted genesis JSON supplied by network operations (autogenesis is only for isolated dev workflows):
 
 ```toml
 ListenAddress = "0.0.0.0:6001"
@@ -129,7 +129,7 @@ PersistentPeers = [
 ]
 ```
 
-Set required secrets as environment variables before bootstrapping:
+Set required secrets as environment variables before bootstrapping (the node will refuse to start without a validator keystore passphrase):
 
 ```bash
 export NHB_VALIDATOR_PASS="choose-a-strong-passphrase"
@@ -214,7 +214,7 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 ## Security, Compliance, and Operations
 
 - **Authentication** — RPC bearer tokens protect privileged calls; rotate secrets regularly and enforce mutual TLS or HMAC as described in the [Network Hardening Playbook](docs/security/network-hardening.md).
-- **Key Management** — Validator keys default to encrypted Ethereum-compatible keystores. Integrate with external KMS via `ValidatorKMSURI` and `ValidatorKMSEnv`.
+- **Key Management** — Validator keys default to encrypted Ethereum-compatible keystores protected by a non-empty passphrase (`NHB_VALIDATOR_PASS` or interactive prompt). Integrate with external KMS via `ValidatorKMSURI` and `ValidatorKMSEnv`.
 - **Observability** — Monitor validator uptime, engagement scores, and staking state using CLI commands or forthcoming telemetry dashboards. Forward RPC/WAF logs to your SIEM so abuse attempts can be correlated with P2P events.
 - **Compliance Alignment** — Native identity modules provide audit trails, verified contact points, and consent-driven discovery suitable for regulatory review.
 - **Audits & Bug Bounty** — We run an ongoing [bug bounty program](docs/security/bug-bounty.md) and maintain an [audit readiness guide](docs/security/audit-readiness.md) with frozen commits, reproducible builds, and fixtures for third-party assessors.
