@@ -10,6 +10,8 @@ for deployments where the validator stack is isolated from external clients.
   directory for build instructions).
 * A populated `config.toml` and keystore compatible with the validator account.
 * Access to a running `p2pd` instance reachable over the network.
+* Shared-secret or mutual TLS credentials so that only trusted peers can reach
+  the consensus gRPC API.
 
 ## Command Flags
 
@@ -18,7 +20,7 @@ for deployments where the validator stack is isolated from external clients.
 | `--config` | `./config.toml` | Path to the TOML configuration file. |
 | `--genesis` | _unset_ | Override path to a genesis JSON file. Takes precedence over the config file and `NHB_GENESIS`. |
 | `--allow-autogenesis` | `false` | Development flag enabling automatic genesis creation when no data exists. |
-| `--grpc` | `:9090` | Listen address for the consensus gRPC API. |
+| `--grpc` | `127.0.0.1:9090` | Listen address for the consensus gRPC API. |
 | `--p2p` | `localhost:9091` | Target address of the `p2pd` gRPC service. |
 
 Environment helpers:
@@ -26,10 +28,13 @@ Environment helpers:
 * `NHB_GENESIS` – provides a genesis path when `--genesis` is not supplied.
 * `NHB_ALLOW_AUTOGENESIS` – mirrors the `--allow-autogenesis` flag.
 * `NHB_VALIDATOR_PASS` – required to decrypt the validator keystore unless KMS is configured.
+* `NHB_NETWORK_SHARED_SECRET` (or the value of `network_security.SharedSecretEnv`)
+  – supplies the shared-secret token used to authorize gRPC requests.
 
 ## Ports and Connectivity
 
-* Consensus gRPC service: defaults to `:9090`.
+* Consensus gRPC service: defaults to `127.0.0.1:9090` and refuses
+  unauthenticated connections.
 * P2P backhaul (p2pd gRPC): defaults to `localhost:9091` and is maintained with
   exponential backoff and backlog replay on reconnect.
 
@@ -47,10 +52,14 @@ following gRPC level checks:
 * Inspect logs for reconnect notices emitted when the P2P link drops.
 
 For liveness probes in container environments, use a lightweight gRPC probe such
-as [`grpcurl`](https://github.com/fullstorydev/grpcurl):
+as [`grpcurl`](https://github.com/fullstorydev/grpcurl) and include the shared
+secret or present a client certificate:
 
 ```bash
-grpcurl -plaintext localhost:9090 consensus.v1.ConsensusService/GetHeight
+grpcurl \
+  -plaintext \
+  -H 'authorization: Bearer ${NHB_NETWORK_SHARED_SECRET}' \
+  localhost:9090 consensus.v1.ConsensusService/GetHeight
 ```
 
 ## Example Startup
@@ -58,9 +67,9 @@ grpcurl -plaintext localhost:9090 consensus.v1.ConsensusService/GetHeight
 ```bash
 consensusd \
   --config /etc/nhb/validator.toml \
-  --grpc 0.0.0.0:9090 \
   --p2p p2pd.internal:9091
 ```
 
-Run `consensusd` alongside `p2pd` (see `/examples/compose/mininet`) to provide the
-full networking stack.
+The gRPC server enforces the shared secret (and mutual TLS when configured)
+before executing any RPC, so expose the port outside of localhost only after
+provisioning the required credentials.

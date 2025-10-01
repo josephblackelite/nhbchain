@@ -40,9 +40,10 @@ MaxMsgBytes = 1048576
 ClientVersion = "nhbchain/node"
 
 [network_security]
-# Leave the shared secret empty for single-host development. Set SharedSecret or
-# SharedSecretEnv when deploying consensusd and p2pd on separate machines.
-SharedSecret = ""
+# Configure a shared secret for local development so consensusd only accepts
+# authenticated requests. Production deployments should supply the secret via
+# SharedSecretFile or SharedSecretEnv and/or enable mutual TLS.
+SharedSecret = "local-dev-shared-secret"
 # Local development defaults to plaintext; production operators must provision TLS
 # and set AllowInsecure = false.
 AllowInsecure = true

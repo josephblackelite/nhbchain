@@ -4,17 +4,27 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"net"
 	"sync"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
+	"nhbchain/consensus/codec"
 	"nhbchain/core"
 	"nhbchain/core/types"
+	"nhbchain/network"
 	consensusv1 "nhbchain/proto/consensus/v1"
 )
 
 type fakeConsensusNode struct {
 	mu         sync.Mutex
 	validators map[string]*big.Int
+	commits    int
 }
 
 func newFakeConsensusNode() *fakeConsensusNode {
@@ -43,8 +53,13 @@ func (f *fakeConsensusNode) GetMempool() []*types.Transaction                   
 func (f *fakeConsensusNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	return nil, nil
 }
-func (f *fakeConsensusNode) CommitBlock(block *types.Block) error { return nil }
-func (f *fakeConsensusNode) GetLastCommitHash() []byte            { return nil }
+func (f *fakeConsensusNode) CommitBlock(block *types.Block) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commits++
+	return nil
+}
+func (f *fakeConsensusNode) GetLastCommitHash() []byte { return nil }
 func (f *fakeConsensusNode) QueryState(namespace, key string) (*core.QueryResult, error) {
 	return nil, nil
 }
@@ -104,5 +119,70 @@ func TestServerGetValidatorSetConcurrentMutation(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("GetValidatorSet encountered error: %v", err)
 	default:
+	}
+}
+
+func TestServerAuthorization(t *testing.T) {
+	node := newFakeConsensusNode()
+	secret := "shared-secret"
+	header := "x-nhb-consensus-token"
+	authorizer := network.NewTokenAuthenticator(header, secret)
+
+	server := grpc.NewServer(
+		grpc.Creds(insecure.NewCredentials()),
+		grpc.ChainUnaryInterceptor(UnaryAuthInterceptor(authorizer)),
+	)
+	consensusv1.RegisterConsensusServiceServer(server, NewServer(node, WithAuthorizer(authorizer)))
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer lis.Close()
+
+	go server.Serve(lis)
+	defer server.Stop()
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	unauthConn, err := grpc.DialContext(dialCtx, lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial unauthenticated: %v", err)
+	}
+	defer unauthConn.Close()
+
+	block := &types.Block{Header: &types.BlockHeader{Height: 1}}
+	pbBlock, err := codec.BlockToProto(block)
+	if err != nil {
+		t.Fatalf("block to proto: %v", err)
+	}
+
+	_, err = consensusv1.NewConsensusServiceClient(unauthConn).CommitBlock(dialCtx, &consensusv1.CommitBlockRequest{Block: pbBlock})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated error, got %v", err)
+	}
+
+	authConn, err := grpc.DialContext(
+		dialCtx,
+		lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithPerRPCCredentials(network.NewStaticTokenCredentialsAllowInsecure(header, secret)),
+	)
+	if err != nil {
+		t.Fatalf("dial authenticated: %v", err)
+	}
+	defer authConn.Close()
+
+	_, err = consensusv1.NewConsensusServiceClient(authConn).CommitBlock(context.Background(), &consensusv1.CommitBlockRequest{Block: pbBlock})
+	if err != nil {
+		t.Fatalf("authenticated commit failed: %v", err)
+	}
+
+	node.mu.Lock()
+	commits := node.commits
+	node.mu.Unlock()
+	if commits != 1 {
+		t.Fatalf("expected exactly one committed block, got %d", commits)
 	}
 }
