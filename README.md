@@ -78,7 +78,7 @@ The L1 is organized into modular layers that together deliver the payment networ
 ### Prerequisites
 
 - **Operating System** — Ubuntu 22.04 LTS (recommended) or any modern Linux distribution.
-- **Go Toolchain** — Version 1.22.6.
+- **Go Toolchain** — Version 1.23.0 (or newer).
 - **Git** — For cloning the repository.
 
 Update your server and install dependencies:
@@ -86,13 +86,19 @@ Update your server and install dependencies:
 ```bash
 sudo apt update
 sudo apt install git build-essential tmux -y
-wget https://go.dev/dl/go1.22.6.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.22.6.linux-amd64.tar.gz
+wget https://go.dev/dl/go1.23.0.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz
 echo 'export PATH="/usr/local/go/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-> The helper scripts in [`scripts/`](./scripts) default to Go 1.22.6 and set `GOFLAGS=-buildvcs=false`. Override `GO_VERSION`, `GO_CMD`, or `GOFLAGS` if you manage the toolchain manually.
+Confirm the toolchain version matches expectations:
+
+```bash
+go env GOVERSION  # prints go1.23.0 when the correct toolchain is active
+```
+
+> The helper scripts in [`scripts/`](./scripts) default to Go 1.23.0 and set `GOFLAGS=-buildvcs=false`. Override `GO_VERSION`, `GO_CMD`, or `GOFLAGS` if you manage the toolchain manually.
 
 ### Clone and Build
 

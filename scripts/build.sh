@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-GO_VERSION="${GO_VERSION:-1.22.6}"
+GO_VERSION="${GO_VERSION:-1.23.0}"
 
 if [[ -z "${GO_CMD:-}" ]]; then
   if command -v "go${GO_VERSION}" >/dev/null 2>&1; then
