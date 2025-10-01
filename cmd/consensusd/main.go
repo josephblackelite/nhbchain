@@ -57,7 +57,7 @@ func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
-	grpcAddress := flag.String("grpc", ":9090", "Address for the consensus gRPC server")
+	grpcAddress := flag.String("grpc", "127.0.0.1:9090", "Address for the consensus gRPC server")
 	networkAddress := flag.String("p2p", "localhost:9091", "Address of the p2p daemon network service")
 	flag.Parse()
 
@@ -256,11 +256,23 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to listen on %s: %v", *grpcAddress, err))
 	}
+	serverCreds, serverAuth, err := buildConsensusServerSecurity(cfg, baseDir)
+	if err != nil {
+		panic(fmt.Sprintf("failed to configure consensus server security: %v", err))
+	}
+
 	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+		grpc.Creds(serverCreds),
+		grpc.ChainUnaryInterceptor(
+			service.UnaryAuthInterceptor(serverAuth),
+			otelgrpc.UnaryServerInterceptor(),
+		),
+		grpc.ChainStreamInterceptor(
+			service.StreamAuthInterceptor(serverAuth),
+			otelgrpc.StreamServerInterceptor(),
+		),
 	)
-	srv := service.NewServer(node)
+	srv := service.NewServer(node, service.WithAuthorizer(serverAuth))
 	consensusv1.RegisterConsensusServiceServer(grpcServer, srv)
 	consensusv1.RegisterQueryServiceServer(grpcServer, srv)
 
@@ -405,6 +417,74 @@ func buildNetworkDialOptions(cfg *config.Config, baseDir string) (bool, []grpc.D
 	}
 
 	return allowInsecure, opts, nil
+}
+
+func buildConsensusServerSecurity(cfg *config.Config, baseDir string) (credentials.TransportCredentials, service.Authorizer, error) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("missing configuration for consensus security")
+	}
+	sec := cfg.NetworkSecurity
+
+	secret, err := sec.ResolveSharedSecret(baseDir, os.LookupEnv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve shared secret: %w", err)
+	}
+
+	var auths []network.Authenticator
+	if secret != "" {
+		auths = append(auths, network.NewTokenAuthenticator(sec.AuthorizationHeaderName(), secret))
+	}
+
+	certPath := resolvePath(baseDir, sec.ServerTLSCertFile)
+	keyPath := resolvePath(baseDir, sec.ServerTLSKeyFile)
+
+	var tlsConfig *tls.Config
+	if certPath != "" || keyPath != "" {
+		if certPath == "" || keyPath == "" {
+			return nil, nil, fmt.Errorf("consensus security requires both ServerTLSCertFile and ServerTLSKeyFile when enabling TLS")
+		}
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load consensus TLS keypair: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+		}
+	}
+
+	if caPath := resolvePath(baseDir, sec.ClientCAFile); caPath != "" {
+		if tlsConfig == nil {
+			return nil, nil, fmt.Errorf("ClientCAFile requires ServerTLSCertFile and ServerTLSKeyFile to be configured")
+		}
+		pem, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read client CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, nil, fmt.Errorf("failed to parse client CA certificates from %s", caPath)
+		}
+		tlsConfig.ClientCAs = pool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		auths = append(auths, network.NewTLSAuthorizer(sec.AllowedClientCommonNames))
+	}
+
+	if len(auths) == 0 {
+		return nil, nil, fmt.Errorf("consensus security requires a shared secret or client certificate authentication")
+	}
+
+	var creds credentials.TransportCredentials
+	if tlsConfig != nil {
+		creds = credentials.NewTLS(tlsConfig)
+	} else {
+		if !sec.AllowInsecure {
+			return nil, nil, fmt.Errorf("consensus security requires TLS unless AllowInsecure is explicitly enabled")
+		}
+		creds = insecure.NewCredentials()
+	}
+
+	return creds, network.ChainAuthenticators(auths...), nil
 }
 
 func resolvePath(baseDir, path string) string {
