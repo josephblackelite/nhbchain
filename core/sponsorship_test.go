@@ -81,7 +81,6 @@ func TestEvaluateSponsorship(t *testing.T) {
 			GasPrice: big.NewInt(1_000_000_000),
 			Value:    big.NewInt(1),
 		}
-		signTransaction(t, tx, senderKey)
 		return tx
 	}
 
@@ -165,6 +164,7 @@ func TestEvaluateSponsorship(t *testing.T) {
 			if tc.prepare != nil {
 				tc.prepare(tx)
 			}
+			signTransaction(t, tx, senderKey)
 			if tc.mutateSP != nil {
 				tc.mutateSP()
 				t.Cleanup(func() { sp.SetPaymasterEnabled(true) })
