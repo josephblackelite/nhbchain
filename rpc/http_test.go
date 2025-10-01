@@ -1,12 +1,17 @@
 package rpc
 
 import (
+	"encoding/hex"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"nhbchain/core/types"
+	"nhbchain/crypto"
 )
 
 func TestClientSourceIgnoresForwardedForWhenNotTrusted(t *testing.T) {
@@ -276,5 +281,77 @@ func TestServerRememberTxEvictsExpired(t *testing.T) {
 	}
 	if len(server.txSeenQueue) != 1 {
 		t.Fatalf("expected queue to contain only the fresh transaction, got %d entries", len(server.txSeenQueue))
+	}
+}
+
+func TestServerRememberTxIncludesPaymasterInHash(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+
+	paymasterA, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate paymaster A: %v", err)
+	}
+
+	paymasterB, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate paymaster B: %v", err)
+	}
+
+	newTx := func(paymaster []byte) *types.Transaction {
+		to := make([]byte, 20)
+		copy(to, []byte{0x02})
+		tx := &types.Transaction{
+			ChainID:  types.NHBChainID(),
+			Type:     types.TxTypeTransfer,
+			Nonce:    5,
+			To:       to,
+			GasLimit: 25_000,
+			GasPrice: big.NewInt(2_000_000_000),
+			Value:    big.NewInt(42),
+		}
+		if len(paymaster) > 0 {
+			tx.Paymaster = append([]byte(nil), paymaster...)
+		}
+		if err := tx.Sign(senderKey.PrivateKey); err != nil {
+			t.Fatalf("sign tx: %v", err)
+		}
+		return tx
+	}
+
+	now := time.Now()
+
+	txA := newTx(paymasterA.PubKey().Address().Bytes())
+	hashABytes, err := txA.Hash()
+	if err != nil {
+		t.Fatalf("hash tx A: %v", err)
+	}
+	hashA := hex.EncodeToString(hashABytes)
+	if !server.rememberTx(hashA, now) {
+		t.Fatalf("expected first paymaster submission to be accepted")
+	}
+
+	txB := newTx(paymasterB.PubKey().Address().Bytes())
+	hashBBytes, err := txB.Hash()
+	if err != nil {
+		t.Fatalf("hash tx B: %v", err)
+	}
+	hashB := hex.EncodeToString(hashBBytes)
+	if !server.rememberTx(hashB, now) {
+		t.Fatalf("expected different paymaster submission to be accepted")
+	}
+
+	txAResub := newTx(paymasterA.PubKey().Address().Bytes())
+	hashAResubBytes, err := txAResub.Hash()
+	if err != nil {
+		t.Fatalf("hash tx A resub: %v", err)
+	}
+	hashAResub := hex.EncodeToString(hashAResubBytes)
+	if server.rememberTx(hashAResub, now) {
+		t.Fatalf("expected identical paymaster submission to be rejected")
 	}
 }

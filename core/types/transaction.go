@@ -80,15 +80,20 @@ var (
 // Hash logic must now include the new Type field.
 func (tx *Transaction) Hash() ([]byte, error) {
 	txData := struct {
-		ChainID  *big.Int
-		Type     TxType
-		Nonce    uint64
-		To       []byte
-		Value    *big.Int
-		Data     []byte
-		GasLimit uint64
-		GasPrice *big.Int
-	}{tx.ChainID, tx.Type, tx.Nonce, tx.To, tx.Value, tx.Data, tx.GasLimit, tx.GasPrice}
+		ChainID   *big.Int
+		Type      TxType
+		Nonce     uint64
+		To        []byte
+		Value     *big.Int
+		Data      []byte
+		GasLimit  uint64
+		GasPrice  *big.Int
+		Paymaster []byte `json:"paymaster,omitempty"`
+	}{ChainID: tx.ChainID, Type: tx.Type, Nonce: tx.Nonce, To: tx.To, Value: tx.Value, Data: tx.Data, GasLimit: tx.GasLimit, GasPrice: tx.GasPrice}
+
+	if len(tx.Paymaster) > 0 {
+		txData.Paymaster = append([]byte(nil), tx.Paymaster...)
+	}
 
 	b, err := json.Marshal(txData)
 	if err != nil {
@@ -114,6 +119,7 @@ func (tx *Transaction) Sign(privKey *ecdsa.PrivateKey) error {
 	tx.R = new(big.Int).SetBytes(sig[:32])
 	tx.S = new(big.Int).SetBytes(sig[32:64])
 	tx.V = new(big.Int).SetBytes([]byte{sig[64] + 27})
+	tx.from = nil
 	return nil
 }
 
