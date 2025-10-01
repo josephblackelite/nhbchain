@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$goVersion = if ($env:GO_VERSION) { $env:GO_VERSION } else { "1.22.6" }
+$goVersion = if ($env:GO_VERSION) { $env:GO_VERSION } else { "1.23.0" }
 $goCmd = if ($env:GO_CMD) { $env:GO_CMD } else { $null }
 
 if (-not $goCmd) {
