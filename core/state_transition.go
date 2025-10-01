@@ -1233,16 +1233,22 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 		return err
 	}
 
-	txHash, err := mintTransactionHash(voucher, signature)
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return err
+	}
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	voucherHash, err := MintVoucherHash(voucher, signature)
 	if err != nil {
 		return err
 	}
 	evt := events.MintSettled{
-		InvoiceID: invoiceID,
-		Recipient: recipient,
-		Token:     token,
-		Amount:    amount,
-		TxHash:    txHash,
+		InvoiceID:   invoiceID,
+		Recipient:   recipient,
+		Token:       token,
+		Amount:      amount,
+		TxHash:      txHash,
+		VoucherHash: voucherHash,
 	}.Event()
 	if evt != nil {
 		sp.AppendEvent(evt)

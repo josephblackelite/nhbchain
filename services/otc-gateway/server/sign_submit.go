@@ -205,6 +205,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			"status":       invoice.State,
 			"providerTxId": existingVoucher.ProviderTxID,
 			"txHash":       existingVoucher.TxHash,
+			"voucherHash":  existingVoucher.VoucherHash,
 			"signature":    existingVoucher.Signature,
 		})
 		return
@@ -220,6 +221,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			"status":       invoice.State,
 			"providerTxId": existingVoucher.ProviderTxID,
 			"txHash":       existingVoucher.TxHash,
+			"voucherHash":  existingVoucher.VoucherHash,
 			"signature":    existingVoucher.Signature,
 		})
 		return
@@ -229,6 +231,12 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
 		http.Error(w, fmt.Sprintf("sign voucher: %v", err), http.StatusBadGateway)
+		return
+	}
+	voucherHash, err := core.MintVoucherHash(&voucher, sigBytes)
+	if err != nil {
+		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
+		http.Error(w, fmt.Sprintf("voucher hash: %v", err), http.StatusInternalServerError)
 		return
 	}
 	sigHex := hex.EncodeToString(sigBytes)
@@ -261,6 +269,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		existingVoucher.Signature = "0x" + sigHex
 		existingVoucher.SignerDN = signerDN
 		existingVoucher.TxHash = txHash
+		existingVoucher.VoucherHash = voucherHash
 		existingVoucher.Status = status
 		existingVoucher.SubmittedAt = &submittedAt
 		existingVoucher.SubmittedBy = &actorID
@@ -297,6 +306,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":       nextState,
 		"txHash":       txHash,
+		"voucherHash":  voucherHash,
 		"providerTxId": existingVoucher.ProviderTxID,
 		"signature":    "0x" + sigHex,
 	})

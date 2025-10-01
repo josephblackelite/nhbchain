@@ -3590,10 +3590,6 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 		return "", fmt.Errorf("recover signer: %w", err)
 	}
 
-	txHash, err := mintTransactionHash(voucher, signature)
-	if err != nil {
-		return "", err
-	}
 	payload, err := encodeMintTransaction(voucher, signature)
 	if err != nil {
 		return "", err
@@ -3605,6 +3601,11 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 		GasLimit: 0,
 		GasPrice: big.NewInt(0),
 	}
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return "", err
+	}
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
 	if err := n.AddTransaction(tx); err != nil {
 		if errors.Is(err, ErrMintInvoiceUsed) {
 			return "", ErrMintInvoiceUsed

@@ -50,13 +50,16 @@ A successful mint appends a `mint.settled` event:
     "recipient": "nhb1...",
     "token": "NHB",
     "amount": "2500000000000000000",
-    "txHash": "0xabc123..."
+    "txHash": "0xabc123...",
+    "voucherHash": "0xdef456..."
   }
 }
 ```
 
-The `txHash` is derived from the canonical voucher payload and signature, providing downstream systems with a deterministic
-identifier for reconciliation.
+The `txHash` now reflects the canonical transaction hash computed by `types.Transaction.Hash()` (SHA-256 over the transaction
+fields). It uniquely identifies the mint transaction included on-chain. The legacy digest derived from the voucher payload and
+signature is still exposed as `voucherHash` to help downstream systems migrate without losing deterministic reconciliation
+anchors.
 
 ## Settlement flow with NowPayments
 1. A fiat invoice is created through NowPayments and stored in the payments gateway database.
@@ -66,12 +69,13 @@ identifier for reconciliation.
    * Token amount sourced from the locked quote.
 3. The gateway signs the canonical JSON using the configured KMS key (holding the appropriate minter role).
 4. The RPC client submits `mint_with_sig(voucherJSON, signatureHex)` to the node.
-5. The node validates the voucher, enqueues a `TxTypeMint` transaction, and returns a deterministic `txHash` derived from the
-   voucher payload and signature.
+5. The node validates the voucher, enqueues a `TxTypeMint` transaction, and returns the transaction hash computed from the
+   enqueued payload.
 6. When a block including that transaction executes, validators credit the recipient (address or resolved username), record the
-   invoice usage, and emit `mint.settled`.
+   invoice usage, and emit `mint.settled` with both the transaction hash and `voucherHash` digest.
 7. The gateway records the returned `txHash` against the invoice, marking it as `minted` for downstream reporting once the block
-   is confirmed.
+   is confirmed. Existing tooling that still expects the voucher digest can reference the accompanying `voucherHash` field during
+   their migration window.
 
 This alignment provides auditors and partners with a full trail from fiat settlement through to on-chain emission.
 
@@ -116,7 +120,7 @@ This alignment provides auditors and partners with a full trail from fiat settle
 * Response:
 
 ```
-{"jsonrpc":"2.0","id":7,"result":{"txHash":"0xdeadbeef..."}}
+{"jsonrpc":"2.0","id":7,"result":{"txHash":"0xdeadbeef...","voucherHash":"0xfeedface..."}}
 ```
 
 * On failure the node returns an `error` object with the mappings described above. If the node's mempool is full the RPC

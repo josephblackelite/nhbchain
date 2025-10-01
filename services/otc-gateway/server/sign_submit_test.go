@@ -115,6 +115,13 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("expected 200 got %d body=%s", resp.Code, resp.Body.String())
 	}
+	var bodyResp map[string]interface{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &bodyResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := bodyResp["voucherHash"].(string); !ok {
+		t.Fatalf("expected voucherHash in response")
+	}
 
 	if signer.calls != 1 {
 		t.Fatalf("expected signer to be called once, got %d", signer.calls)
@@ -142,6 +149,9 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 	}
 	if voucher.TxHash != "0xabc" {
 		t.Fatalf("unexpected tx hash %s", voucher.TxHash)
+	}
+	if voucher.VoucherHash == "" {
+		t.Fatalf("expected voucher hash to be stored")
 	}
 	if voucher.SignerDN != "CN=HSM,O=NHB" {
 		t.Fatalf("unexpected signer dn %s", voucher.SignerDN)

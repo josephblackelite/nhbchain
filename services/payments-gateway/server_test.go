@@ -235,6 +235,13 @@ func TestWebhookReconciliationAndMint(t *testing.T) {
 	if whRes.Code != http.StatusOK {
 		t.Fatalf("webhook failed: %s", whRes.Body.String())
 	}
+	var mintResp map[string]string
+	if err := json.Unmarshal(whRes.Body.Bytes(), &mintResp); err != nil {
+		t.Fatalf("decode webhook resp: %v", err)
+	}
+	if mintResp["voucherHash"] == "" {
+		t.Fatalf("expected voucherHash in response")
+	}
 	if node.callCount != 1 {
 		t.Fatalf("expected node mint call")
 	}

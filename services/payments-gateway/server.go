@@ -417,17 +417,17 @@ func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("quote %s missing", invoice.QuoteID), body, nil)
 		return
 	}
-	txHash, err := s.mintWithVoucher(ctx, invoice, quote)
+	txHash, voucherHash, err := s.mintWithVoucher(ctx, invoice, quote)
 	if err != nil {
 		_ = s.store.UpdateInvoiceStatus(r.Context(), invoice.ID, "error", nil)
 		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
 		return
 	}
 	_ = s.store.UpdateInvoiceStatus(r.Context(), invoice.ID, "minted", &txHash)
-	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "minted", "txHash": txHash}, body)
+	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "minted", "txHash": txHash, "voucherHash": voucherHash}, body)
 }
 
-func (s *Server) mintWithVoucher(ctx context.Context, invoice *InvoiceRecord, quote *QuoteRecord) (string, error) {
+func (s *Server) mintWithVoucher(ctx context.Context, invoice *InvoiceRecord, quote *QuoteRecord) (string, string, error) {
 	voucher := core.MintVoucher{
 		InvoiceID: invoice.ID,
 		Recipient: invoice.Recipient,
@@ -438,13 +438,21 @@ func (s *Server) mintWithVoucher(ctx context.Context, invoice *InvoiceRecord, qu
 	}
 	payload, err := voucher.CanonicalJSON()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	sig, err := s.signer.Sign(ctx, payload)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return s.node.MintWithSig(ctx, voucher, hex.EncodeToString(sig))
+	txHash, err := s.node.MintWithSig(ctx, voucher, hex.EncodeToString(sig))
+	if err != nil {
+		return "", "", err
+	}
+	voucherHash, hashErr := core.MintVoucherHash(&voucher, sig)
+	if hashErr != nil {
+		return "", "", hashErr
+	}
+	return txHash, voucherHash, nil
 }
 
 func (s *Server) verifyHMAC(body []byte, signature string) bool {

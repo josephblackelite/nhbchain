@@ -75,7 +75,7 @@ Sign an approved invoice using the HSM-backed minter and submit the resulting vo
 ```
 
 - Roles: superadmin
-- Response: `200 OK` with `{ "status": "SUBMITTED" | "MINTED", "txHash": "0x...", "providerTxId": "...", "signature": "0x..." }`
+- Response: `200 OK` with `{ "status": "SUBMITTED" | "MINTED", "txHash": "0x...", "voucherHash": "0x...", "providerTxId": "...", "signature": "0x..." }`
 - Errors:
   - `400 Bad Request` when maker-checker rules or branch caps are violated, or payload validation fails.
   - `409 Conflict` when the supplied `provider_tx_id` has already been processed for another invoice.
