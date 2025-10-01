@@ -1,7 +1,9 @@
 package core
 
 import (
+	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +200,14 @@ func TestMintWithSignatureExecutesInBlock(t *testing.T) {
 	}
 	if got := len(node.mempool); got != 1 {
 		t.Fatalf("expected 1 transaction in mempool, got %d", got)
+	}
+	hashBytes, err := node.mempool[0].Hash()
+	if err != nil {
+		t.Fatalf("hash transaction: %v", err)
+	}
+	expectedHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if txHash != expectedHash {
+		t.Fatalf("expected tx hash %s, got %s", expectedHash, txHash)
 	}
 
 	block, err := node.CreateBlock(append([]*types.Transaction(nil), node.mempool...))

@@ -159,7 +159,10 @@ func decodeMintTransaction(data []byte) (*MintVoucher, []byte, error) {
 	return &voucher, append([]byte(nil), signature...), nil
 }
 
-func mintTransactionHash(voucher *MintVoucher, signature []byte) (string, error) {
+// MintVoucherHash returns the keccak256 hash of the canonical voucher payload
+// concatenated with the provided signature. This digest was historically used
+// for reconciliation and remains available for downstream tooling.
+func MintVoucherHash(voucher *MintVoucher, signature []byte) (string, error) {
 	if voucher == nil {
 		return "", fmt.Errorf("voucher required")
 	}

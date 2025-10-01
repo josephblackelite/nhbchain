@@ -77,6 +77,11 @@ func (s *Server) handleMintWithSig(w http.ResponseWriter, _ *http.Request, req *
 		}
 		return
 	}
+	voucherHash, hashErr := core.MintVoucherHash(&voucher, signature)
+	if hashErr != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "voucher hash", hashErr.Error())
+		return
+	}
 
-	writeResult(w, req.ID, map[string]string{"txHash": txHash})
+	writeResult(w, req.ID, map[string]string{"txHash": txHash, "voucherHash": voucherHash})
 }

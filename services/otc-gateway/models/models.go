@@ -99,6 +99,7 @@ type Voucher struct {
 	Signature    string `gorm:"type:text"`
 	SignerDN     string `gorm:"size:255"`
 	TxHash       string `gorm:"size:130"`
+	VoucherHash  string `gorm:"size:130"`
 	Status       string `gorm:"size:32;index"`
 	ExpiresAt    time.Time
 	SubmittedAt  *time.Time
