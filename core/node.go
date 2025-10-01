@@ -1137,6 +1137,30 @@ func (n *Node) GetMempool() []*types.Transaction {
 		n.proposedTxs = make(map[string]struct{})
 	}
 
+	if len(n.mempool) > 0 {
+		now := n.currentTime().Unix()
+		filtered := n.mempool[:0]
+		for _, tx := range n.mempool {
+			if tx == nil {
+				continue
+			}
+			if tx.Type == types.TxTypeMint {
+				voucher, _, err := decodeMintTransaction(tx.Data)
+				if err != nil || voucher == nil || voucher.Expiry <= now {
+					if key, keyErr := transactionKey(tx); keyErr == nil {
+						delete(n.proposedTxs, key)
+					}
+					continue
+				}
+			}
+			filtered = append(filtered, tx)
+		}
+		for i := len(filtered); i < len(n.mempool); i++ {
+			n.mempool[i] = nil
+		}
+		n.mempool = filtered
+	}
+
 	txs := make([]*types.Transaction, 0, len(n.mempool))
 	for _, tx := range n.mempool {
 		key, err := transactionKey(tx)
@@ -1233,6 +1257,32 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
+	blockTime := n.currentTime()
+	timestamp := blockTime.Unix()
+
+	var pruned []*types.Transaction
+	if len(txs) > 0 {
+		filtered := make([]*types.Transaction, 0, len(txs))
+		for _, tx := range txs {
+			if tx == nil {
+				continue
+			}
+			if tx.Type == types.TxTypeMint {
+				voucher, _, err := decodeMintTransaction(tx.Data)
+				if err != nil || voucher == nil || voucher.Expiry <= timestamp {
+					pruned = append(pruned, tx)
+					continue
+				}
+			}
+			filtered = append(filtered, tx)
+		}
+		txs = filtered
+	}
+
+	if len(pruned) > 0 {
+		n.markTransactionsCommitted(pruned)
+	}
+
 	// Clamp the proposal to the configured transaction cap to avoid building
 	// blocks that exceed the active limit. The slice header is adjusted
 	// locally so callers (for example, the mempool) retain their full view of
@@ -1247,7 +1297,7 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 
 	header := &types.BlockHeader{
 		Height:    n.chain.GetHeight() + 1,
-		Timestamp: n.currentTime().Unix(),
+		Timestamp: timestamp,
 		PrevHash:  n.chain.Tip(),
 		Validator: n.validatorKey.PubKey().Address().Bytes(),
 	}
@@ -1272,7 +1322,7 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	}
 	stateCopy.SetPauseView(n)
 	stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
-	blockTime := time.Unix(header.Timestamp, 0).UTC()
+	blockTime = time.Unix(header.Timestamp, 0).UTC()
 	stateCopy.BeginBlock(header.Height, blockTime)
 	defer stateCopy.EndBlock()
 	for _, tx := range txs {
@@ -1291,12 +1341,41 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 	if b != nil {
 		proposedTxs = b.Transactions
 	}
+	var prunedTxs []*types.Transaction
 	defer func() {
 		if len(proposedTxs) == 0 {
 			return
 		}
 		if err != nil {
-			n.requeueTransactions(proposedTxs)
+			if len(prunedTxs) == 0 {
+				n.requeueTransactions(proposedTxs)
+				return
+			}
+			dropped := make(map[string]struct{}, len(prunedTxs))
+			for _, tx := range prunedTxs {
+				key, keyErr := transactionKey(tx)
+				if keyErr != nil {
+					continue
+				}
+				dropped[key] = struct{}{}
+			}
+			if len(dropped) == 0 {
+				n.requeueTransactions(proposedTxs)
+				return
+			}
+			requeue := make([]*types.Transaction, 0, len(proposedTxs))
+			for _, tx := range proposedTxs {
+				key, keyErr := transactionKey(tx)
+				if keyErr != nil {
+					requeue = append(requeue, tx)
+					continue
+				}
+				if _, skip := dropped[key]; skip {
+					continue
+				}
+				requeue = append(requeue, tx)
+			}
+			n.requeueTransactions(requeue)
 		} else {
 			n.markTransactionsCommitted(proposedTxs)
 		}
@@ -1338,8 +1417,13 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 	// Apply transactions; abort (and rollback) on the first failure
 	for i, tx := range b.Transactions {
 		if err := n.state.ApplyTransaction(tx); err != nil {
+			fatalMint := isFatalMintError(err)
 			if rbErr := rollback(); rbErr != nil {
 				return fmt.Errorf("apply transaction %d: %v (rollback failed: %w)", i, err, rbErr)
+			}
+			if fatalMint {
+				prunedTxs = append(prunedTxs, tx)
+				n.markTransactionsCommitted([]*types.Transaction{tx})
 			}
 			return fmt.Errorf("apply transaction %d: %w", i, err)
 		}
@@ -1392,6 +1476,23 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 		n.syncMgr.SetHeight(b.Header.Height)
 	}
 	return nil
+}
+
+func isFatalMintError(err error) bool {
+	switch {
+	case errors.Is(err, ErrMintExpired):
+		return true
+	case errors.Is(err, ErrMintInvalidChainID):
+		return true
+	case errors.Is(err, ErrMintInvalidPayload):
+		return true
+	case errors.Is(err, ErrMintInvalidSigner):
+		return true
+	case errors.Is(err, ErrMintInvoiceUsed):
+		return true
+	default:
+		return false
+	}
 }
 
 func (n *Node) GetValidatorSet() map[string]*big.Int {

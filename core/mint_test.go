@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -231,6 +232,120 @@ func TestMintWithSignatureExecutesInBlock(t *testing.T) {
 	}
 	if !ok || !used {
 		t.Fatalf("expected invoice %s marked used", voucher.InvoiceID)
+	}
+}
+
+func TestMintVoucherExpiresBeforeCommit(t *testing.T) {
+	node := newTestNode(t)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_NHB", toAddress(minterKey))
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	current := time.Now().UTC().Truncate(time.Second)
+	node.SetTimeSource(func() time.Time { return current })
+	defer node.SetTimeSource(nil)
+
+	// Expire while waiting to be proposed.
+	voucher := MintVoucher{
+		InvoiceID: "inv-expire-mempool",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "50",
+		ChainID:   MintChainID,
+		Expiry:    current.Add(2 * time.Second).Unix(),
+	}
+	sig := signVoucher(t, minterKey, voucher)
+	if _, err := node.MintWithSignature(&voucher, sig); err != nil {
+		t.Fatalf("mint submission: %v", err)
+	}
+	if got := len(node.mempool); got != 1 {
+		t.Fatalf("expected 1 transaction in mempool, got %d", got)
+	}
+
+	current = current.Add(5 * time.Second)
+	proposed := node.GetMempool()
+	if len(proposed) != 0 {
+		t.Fatalf("expected expired mint to be dropped from proposal, got %d", len(proposed))
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected mempool to prune expired mint, got %d", got)
+	}
+
+	// Now include a mint in a block that expires before commit.
+	second := MintVoucher{
+		InvoiceID: "inv-expire-commit",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "75",
+		ChainID:   MintChainID,
+		Expiry:    current.Add(20 * time.Second).Unix(),
+	}
+	sig2 := signVoucher(t, minterKey, second)
+	if _, err := node.MintWithSignature(&second, sig2); err != nil {
+		t.Fatalf("mint submission (second): %v", err)
+	}
+
+	proposed = node.GetMempool()
+	if len(proposed) != 1 {
+		t.Fatalf("expected 1 mint proposal, got %d", len(proposed))
+	}
+
+	block, err := node.CreateBlock(append([]*types.Transaction(nil), proposed...))
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	block.Header.Timestamp = second.Expiry + 1
+	current = time.Unix(block.Header.Timestamp, 0)
+
+	err = node.CommitBlock(block)
+	if err == nil || !errors.Is(err, ErrMintExpired) {
+		t.Fatalf("expected commit error ErrMintExpired, got %v", err)
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected mempool to drop expired mint after failed commit, got %d", got)
+	}
+
+	// Node should still be able to produce blocks after pruning the stale mint.
+	// The rollback in CommitBlock resets the ephemeral test state to the
+	// parent root, so reapply the minter role to mirror a persisted
+	// configuration.
+	assignRole(t, node, "MINTER_NHB", toAddress(minterKey))
+	current = current.Add(5 * time.Second)
+	third := MintVoucher{
+		InvoiceID: "inv-success",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "90",
+		ChainID:   MintChainID,
+		Expiry:    current.Add(time.Hour).Unix(),
+	}
+	sig3 := signVoucher(t, minterKey, third)
+	if _, err := node.MintWithSignature(&third, sig3); err != nil {
+		t.Fatalf("mint submission (third): %v", err)
+	}
+
+	proposed = node.GetMempool()
+	if len(proposed) != 1 {
+		t.Fatalf("expected 1 mint proposal after recovery, got %d", len(proposed))
+	}
+
+	block2, err := node.CreateBlock(append([]*types.Transaction(nil), proposed...))
+	if err != nil {
+		t.Fatalf("create block (second attempt): %v", err)
+	}
+	if err := node.CommitBlock(block2); err != nil {
+		t.Fatalf("commit block (second attempt): %v", err)
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected mempool to be empty after successful commit, got %d", got)
 	}
 }
 
