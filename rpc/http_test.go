@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -10,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"nhbchain/core"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/storage"
 )
 
 func TestClientSourceIgnoresForwardedForWhenNotTrusted(t *testing.T) {
@@ -353,5 +356,139 @@ func TestServerRememberTxIncludesPaymasterInHash(t *testing.T) {
 	hashAResub := hex.EncodeToString(hashAResubBytes)
 	if server.rememberTx(hashAResub, now) {
 		t.Fatalf("expected identical paymaster submission to be rejected")
+	}
+}
+
+func TestHandleSendTransactionInvalidSignature(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       make([]byte, 20),
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(10),
+	}
+
+	param, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatalf("marshal transaction: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{param}}
+	recorder := httptest.NewRecorder()
+
+	server.handleSendTransaction(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected rpc error in response")
+	}
+	if resp.Error.Code != codeInvalidParams {
+		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
+	}
+}
+
+func TestHandleSendTransactionInvalidChainID(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+
+	tx := &types.Transaction{
+		ChainID:  big.NewInt(12345),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       make([]byte, 20),
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(10),
+	}
+
+	param, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatalf("marshal transaction: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{param}}
+	recorder := httptest.NewRecorder()
+
+	server.handleSendTransaction(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected rpc error in response")
+	}
+	if resp.Error.Code != codeInvalidParams {
+		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
+	}
+}
+
+func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
+	db := storage.NewMemDB()
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	server := NewServer(node, nil, ServerConfig{})
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeMint,
+		Nonce:    0,
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+		Data:     []byte("invalid-mint-payload"),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+
+	param, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatalf("marshal transaction: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{param}}
+	recorder := httptest.NewRecorder()
+
+	server.handleSendTransaction(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected rpc error in response")
+	}
+	if resp.Error.Code != codeInvalidParams {
+		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
 	}
 }

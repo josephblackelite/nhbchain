@@ -1151,12 +1151,17 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	}
 
 	if err := s.node.AddTransaction(&tx); err != nil {
-		if errors.Is(err, core.ErrMempoolFull) {
+		switch {
+		case errors.Is(err, core.ErrInvalidTransaction):
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid transaction", err.Error())
+			return
+		case errors.Is(err, core.ErrMempoolFull):
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeMempoolFull, "mempool full", nil)
 			return
+		default:
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to add transaction", err.Error())
+			return
 		}
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to add transaction", err.Error())
-		return
 	}
 	writeResult(w, req.ID, "Transaction received by node.")
 }
