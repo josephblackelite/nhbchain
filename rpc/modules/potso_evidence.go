@@ -264,5 +264,5 @@ func formatHash(hash [32]byte) string {
 }
 
 func formatAddress(addr [20]byte) string {
-	return crypto.NewAddress(crypto.NHBPrefix, addr[:]).String()
+	return crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String()
 }

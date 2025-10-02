@@ -114,7 +114,7 @@ func (s *Server) handleStakeUndelegate(w http.ResponseWriter, r *http.Request, r
 	}
 	validator := ""
 	if len(unbond.Validator) > 0 {
-		validator = crypto.NewAddress(crypto.NHBPrefix, unbond.Validator).String()
+		validator = crypto.MustNewAddress(crypto.NHBPrefix, unbond.Validator).String()
 	}
 	amountCopy := big.NewInt(0)
 	if unbond.Amount != nil {
@@ -155,7 +155,7 @@ func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *R
 	}
 	validator := ""
 	if len(claimed.Validator) > 0 {
-		validator = crypto.NewAddress(crypto.NHBPrefix, claimed.Validator).String()
+		validator = crypto.MustNewAddress(crypto.NHBPrefix, claimed.Validator).String()
 	}
 	amountCopy := big.NewInt(0)
 	if claimed.Amount != nil {

@@ -261,7 +261,7 @@ func (s *storedGovernanceProposal) toGovernanceProposal() (*governance.Proposal,
 	if !validProposalStatus(status) {
 		return nil, fmt.Errorf("governance: invalid proposal status")
 	}
-	submitter := crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.Submitter[:]...))
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Submitter[:]...))
 	deposit := big.NewInt(0)
 	if s.Deposit != nil {
 		deposit = new(big.Int).Set(s.Deposit)
@@ -310,7 +310,7 @@ func (s *storedGovernanceVote) toGovernanceVote() (*governance.Vote, error) {
 	if !choice.Valid() {
 		return nil, fmt.Errorf("governance: invalid vote choice %q", s.Choice)
 	}
-	voter := crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.Voter[:]...))
+	voter := crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Voter[:]...))
 	vote := &governance.Vote{
 		ProposalID: s.ProposalID,
 		Voter:      voter,
@@ -976,10 +976,10 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 	}
 	var zeroAddr [20]byte
 	if !bytes.Equal(s.DeveloperOwner[:], zeroAddr[:]) {
-		market.DeveloperOwner = crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.DeveloperOwner[:]...))
+		market.DeveloperOwner = crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.DeveloperOwner[:]...))
 	}
 	if !bytes.Equal(s.DeveloperCollector[:], zeroAddr[:]) {
-		market.DeveloperFeeCollector = crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.DeveloperCollector[:]...))
+		market.DeveloperFeeCollector = crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.DeveloperCollector[:]...))
 	}
 	if s.TotalNHBSupplied != nil {
 		market.TotalNHBSupplied = new(big.Int).Set(s.TotalNHBSupplied)
@@ -1061,7 +1061,7 @@ func (s *storedLendingUser) toUserAccount() *lending.UserAccount {
 		return nil
 	}
 	account := &lending.UserAccount{
-		Address: crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), s.Address[:]...)),
+		Address: crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Address[:]...)),
 	}
 	if s.CollateralZNHB != nil {
 		account.CollateralZNHB = new(big.Int).Set(s.CollateralZNHB)
@@ -1994,7 +1994,7 @@ func (m *Manager) PotsoRewardsBuildCSV(epoch uint64) ([]byte, *big.Int, int, err
 			}
 		}
 		record := []string{
-			crypto.NewAddress(crypto.NHBPrefix, addr[:]).String(),
+			crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String(),
 			amount.String(),
 			strconv.FormatBool(claimed),
 			strconv.FormatUint(claimedAt, 10),

@@ -10,7 +10,7 @@ import (
 func TestSanctionsCheckerDenyList(t *testing.T) {
 	var denied [20]byte
 	denied[0] = 1
-	addr := crypto.NewAddress(crypto.NHBPrefix, denied[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, denied[:])
 	cfg := SanctionsConfig{DenyList: []string{addr.String()}}
 	params, err := cfg.Parameters()
 	if err != nil {

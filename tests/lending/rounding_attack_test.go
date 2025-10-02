@@ -82,7 +82,7 @@ func (m *mockEngineState) PutFeeAccrual(_ string, fees *lending.FeeAccrual) erro
 func makeAddress(prefix crypto.AddressPrefix, suffix byte) crypto.Address {
 	raw := make([]byte, 20)
 	raw[len(raw)-1] = suffix
-	return crypto.NewAddress(prefix, raw)
+	return crypto.MustNewAddress(prefix, raw)
 }
 
 func mustBig(value string) *big.Int {

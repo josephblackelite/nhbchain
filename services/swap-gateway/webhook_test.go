@@ -38,10 +38,10 @@ func TestHandlePaymentWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hex to ecdsa: %v", err)
 	}
-	minterAddr := repoCrypto.NewAddress(repoCrypto.NHBPrefix, ethcrypto.PubkeyToAddress(key.PublicKey).Bytes()).String()
+	minterAddr := repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, ethcrypto.PubkeyToAddress(key.PublicKey).Bytes()).String()
 
 	recipientBytes := bytes.Repeat([]byte{0x33}, 20)
-	recipient := repoCrypto.NewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
+	recipient := repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
 
 	ord := &order{
 		OrderID:    "SWP_1",

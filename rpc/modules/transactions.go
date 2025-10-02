@@ -66,7 +66,7 @@ func (m *TransactionsModule) PreviewSponsorship(raw json.RawMessage) (*Sponsorsh
 		result.Status = string(assessment.Status)
 		result.Reason = assessment.Reason
 		if assessment.Sponsor != (common.Address{}) {
-			result.Sponsor = crypto.NewAddress(crypto.NHBPrefix, assessment.Sponsor.Bytes()).String()
+			result.Sponsor = crypto.MustNewAddress(crypto.NHBPrefix, assessment.Sponsor.Bytes()).String()
 		}
 		if assessment.GasPrice != nil {
 			result.GasPriceWei = new(big.Int).Set(assessment.GasPrice).String()

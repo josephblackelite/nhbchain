@@ -79,10 +79,10 @@ func (r CollateralRouting) Clone() CollateralRouting {
 		ProtocolBps:   r.ProtocolBps,
 	}
 	if bytes := r.DeveloperTarget.Bytes(); len(bytes) != 0 {
-		clone.DeveloperTarget = crypto.NewAddress(r.DeveloperTarget.Prefix(), append([]byte(nil), bytes...))
+		clone.DeveloperTarget = crypto.MustNewAddress(r.DeveloperTarget.Prefix(), append([]byte(nil), bytes...))
 	}
 	if bytes := r.ProtocolTarget.Bytes(); len(bytes) != 0 {
-		clone.ProtocolTarget = crypto.NewAddress(r.ProtocolTarget.Prefix(), append([]byte(nil), bytes...))
+		clone.ProtocolTarget = crypto.MustNewAddress(r.ProtocolTarget.Prefix(), append([]byte(nil), bytes...))
 	}
 	return clone
 }

@@ -23,11 +23,21 @@ type Address struct {
 	bytes  []byte
 }
 
-func NewAddress(prefix AddressPrefix, b []byte) Address {
+func NewAddress(prefix AddressPrefix, b []byte) (Address, error) {
 	if len(b) != 20 {
-		panic("address must be 20 bytes long")
+		return Address{}, fmt.Errorf("address must be 20 bytes long, got %d", len(b))
 	}
-	return Address{prefix: prefix, bytes: b}
+	cloned := append([]byte(nil), b...)
+	return Address{prefix: prefix, bytes: cloned}, nil
+}
+
+// MustNewAddress constructs an address and panics if the input is invalid.
+func MustNewAddress(prefix AddressPrefix, b []byte) Address {
+	addr, err := NewAddress(prefix, b)
+	if err != nil {
+		panic(err)
+	}
+	return addr
 }
 
 func (a Address) String() string {
@@ -43,7 +53,7 @@ func (a Address) String() string {
 }
 
 func (a Address) Bytes() []byte {
-	return a.bytes
+	return append([]byte(nil), a.bytes...)
 }
 
 // Prefix returns the human-readable prefix associated with the address.
@@ -60,7 +70,11 @@ func DecodeAddress(addrStr string) (Address, error) {
 	if err != nil {
 		return Address{}, fmt.Errorf("error converting bits: %w", err)
 	}
-	return NewAddress(AddressPrefix(prefix), conv), nil
+	addr, err := NewAddress(AddressPrefix(prefix), conv)
+	if err != nil {
+		return Address{}, err
+	}
+	return addr, nil
 }
 
 // --- Key Management ---
@@ -92,7 +106,7 @@ func (k *PrivateKey) PubKey() *PublicKey {
 
 func (k *PublicKey) Address() Address {
 	addrBytes := crypto.PubkeyToAddress(*k.PublicKey).Bytes()
-	return NewAddress(NHBPrefix, addrBytes)
+	return MustNewAddress(NHBPrefix, addrBytes)
 }
 
 func PrivateKeyFromBytes(b []byte) (*PrivateKey, error) {

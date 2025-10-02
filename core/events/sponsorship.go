@@ -37,10 +37,10 @@ func (e TxSponsorshipApplied) Event() *types.Event {
 		"gasUsed": new(big.Int).SetUint64(e.GasUsed).String(),
 	}
 	if e.Sender != ([20]byte{}) {
-		attrs["sender"] = crypto.NewAddress(crypto.NHBPrefix, e.Sender[:]).String()
+		attrs["sender"] = crypto.MustNewAddress(crypto.NHBPrefix, e.Sender[:]).String()
 	}
 	if e.Sponsor != ([20]byte{}) {
-		attrs["sponsor"] = crypto.NewAddress(crypto.NHBPrefix, e.Sponsor[:]).String()
+		attrs["sponsor"] = crypto.MustNewAddress(crypto.NHBPrefix, e.Sponsor[:]).String()
 	}
 	if e.GasPrice != nil {
 		attrs["gasPriceWei"] = new(big.Int).Set(e.GasPrice).String()
@@ -76,10 +76,10 @@ func (e TxSponsorshipFailed) Event() *types.Event {
 		attrs["reason"] = strings.TrimSpace(e.Reason)
 	}
 	if e.Sender != ([20]byte{}) {
-		attrs["sender"] = crypto.NewAddress(crypto.NHBPrefix, e.Sender[:]).String()
+		attrs["sender"] = crypto.MustNewAddress(crypto.NHBPrefix, e.Sender[:]).String()
 	}
 	if e.Sponsor != ([20]byte{}) {
-		attrs["sponsor"] = crypto.NewAddress(crypto.NHBPrefix, e.Sponsor[:]).String()
+		attrs["sponsor"] = crypto.MustNewAddress(crypto.NHBPrefix, e.Sponsor[:]).String()
 	}
 	return &types.Event{Type: TypeTxSponsorshipFailed, Attributes: attrs}
 }

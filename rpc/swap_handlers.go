@@ -285,7 +285,7 @@ func formatVoucherRecord(record *swap.VoucherRecord) map[string]interface{} {
 		response["twapEnd"] = record.TwapEnd
 	}
 	if record.Recipient != ([20]byte{}) {
-		response["recipient"] = crypto.NewAddress(crypto.NHBPrefix, record.Recipient[:]).String()
+		response["recipient"] = crypto.MustNewAddress(crypto.NHBPrefix, record.Recipient[:]).String()
 	}
 	return response
 }

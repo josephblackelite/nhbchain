@@ -377,8 +377,8 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 	if len(records) != 3 { // header + 2 rows
 		t.Fatalf("expected 3 CSV rows, got %d", len(records))
 	}
-	addrA := crypto.NewAddress(crypto.NHBPrefix, participantA[:]).String()
-	addrB := crypto.NewAddress(crypto.NHBPrefix, participantB[:]).String()
+	addrA := crypto.MustNewAddress(crypto.NHBPrefix, participantA[:]).String()
+	addrB := crypto.MustNewAddress(crypto.NHBPrefix, participantB[:]).String()
 	seenA := false
 	seenB := false
 	for _, row := range records[1:] {

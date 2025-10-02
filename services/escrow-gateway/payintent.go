@@ -55,7 +55,7 @@ func computeVaultAddress(token string) (string, error) {
 	hash := ethcrypto.Keccak256([]byte(seed))
 	var addrBytes [20]byte
 	copy(addrBytes[:], hash[len(hash)-20:])
-	return crypto.NewAddress(crypto.NHBPrefix, addrBytes[:]).String(), nil
+	return crypto.MustNewAddress(crypto.NHBPrefix, addrBytes[:]).String(), nil
 }
 
 func buildQRString(vaultAddr, token, amount, memo string) string {

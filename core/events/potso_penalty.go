@@ -28,7 +28,7 @@ func (e PotsoPenaltyApplied) Event() *types.Event {
 	attrs := map[string]string{
 		"hash":       "0x" + hex.EncodeToString(e.Hash[:]),
 		"type":       e.Type,
-		"offender":   crypto.NewAddress(crypto.NHBPrefix, e.Offender[:]).String(),
+		"offender":   crypto.MustNewAddress(crypto.NHBPrefix, e.Offender[:]).String(),
 		"decayPct":   formatBps(e.DecayBps),
 		"slashAmt":   amountString(e.SlashAmt),
 		"newWeight":  amountString(e.NewWeight),

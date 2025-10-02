@@ -377,7 +377,7 @@ func (m *LendingModule) wrapError(err error) *ModuleError {
 }
 
 func toCryptoAddress(raw [20]byte) crypto.Address {
-	return crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), raw[:]...))
+	return crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), raw[:]...))
 }
 
 func formatHexAddress(raw [20]byte) string {

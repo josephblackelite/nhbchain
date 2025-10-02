@@ -116,7 +116,7 @@ func TestHandlePotsoLeaderboard(t *testing.T) {
 	if len(resp.Items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(resp.Items))
 	}
-	expectedAddr := crypto.NewAddress(crypto.NHBPrefix, snapshot.Entries[1].Address[:]).String()
+	expectedAddr := crypto.MustNewAddress(crypto.NHBPrefix, snapshot.Entries[1].Address[:]).String()
 	if resp.Items[0].Address != expectedAddr {
 		t.Fatalf("unexpected address %s", resp.Items[0].Address)
 	}

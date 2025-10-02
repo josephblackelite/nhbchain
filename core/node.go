@@ -948,13 +948,13 @@ func cloneAddress(addr crypto.Address) crypto.Address {
 	if len(bytes) == 0 {
 		return crypto.Address{}
 	}
-	return crypto.NewAddress(addr.Prefix(), append([]byte(nil), bytes...))
+	return crypto.MustNewAddress(addr.Prefix(), append([]byte(nil), bytes...))
 }
 
 func deriveModuleAddress(seed string, prefix crypto.AddressPrefix) crypto.Address {
 	hash := ethcrypto.Keccak256([]byte(seed))
 	raw := append([]byte(nil), hash[len(hash)-20:]...)
-	return crypto.NewAddress(prefix, raw)
+	return crypto.MustNewAddress(prefix, raw)
 }
 
 func (n *Node) emitSwapLimitAlert(alert events.SwapLimitAlert) {

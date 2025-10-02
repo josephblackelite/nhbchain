@@ -650,7 +650,7 @@ func (s *Server) handleLoyaltyResolveUsername(w http.ResponseWriter, _ *http.Req
 		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "username not found", params.Username)
 		return
 	}
-	writeResult(w, req.ID, crypto.NewAddress(crypto.NHBPrefix, addr).String())
+	writeResult(w, req.ID, crypto.MustNewAddress(crypto.NHBPrefix, addr).String())
 }
 
 func (s *Server) handleLoyaltyUserQR(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
@@ -676,7 +676,7 @@ func (s *Server) handleLoyaltyUserQR(w http.ResponseWriter, _ *http.Request, req
 			writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "username not found", params.Username)
 			return
 		}
-		address = crypto.NewAddress(crypto.NHBPrefix, addr).String()
+		address = crypto.MustNewAddress(crypto.NHBPrefix, addr).String()
 	} else {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "username or address required", nil)
 		return
@@ -752,16 +752,16 @@ func formatProgramID(id loyalty.ProgramID) string {
 func formatBusiness(business *loyalty.Business) businessResult {
 	merchants := make([]string, 0, len(business.Merchants))
 	for _, merchant := range business.Merchants {
-		merchants = append(merchants, crypto.NewAddress(crypto.NHBPrefix, merchant[:]).String())
+		merchants = append(merchants, crypto.MustNewAddress(crypto.NHBPrefix, merchant[:]).String())
 	}
 	sort.Strings(merchants)
 	paymaster := ""
 	if !isZeroAddress(business.Paymaster) {
-		paymaster = crypto.NewAddress(crypto.NHBPrefix, business.Paymaster[:]).String()
+		paymaster = crypto.MustNewAddress(crypto.NHBPrefix, business.Paymaster[:]).String()
 	}
 	return businessResult{
 		ID:        formatBusinessID(business.ID),
-		Owner:     crypto.NewAddress(crypto.NHBPrefix, business.Owner[:]).String(),
+		Owner:     crypto.MustNewAddress(crypto.NHBPrefix, business.Owner[:]).String(),
 		Name:      business.Name,
 		Paymaster: paymaster,
 		Merchants: merchants,
@@ -771,8 +771,8 @@ func formatBusiness(business *loyalty.Business) businessResult {
 func formatProgram(program *loyalty.Program) programResult {
 	return programResult{
 		ID:           formatProgramID(program.ID),
-		Owner:        crypto.NewAddress(crypto.NHBPrefix, program.Owner[:]).String(),
-		Pool:         crypto.NewAddress(crypto.NHBPrefix, program.Pool[:]).String(),
+		Owner:        crypto.MustNewAddress(crypto.NHBPrefix, program.Owner[:]).String(),
+		Pool:         crypto.MustNewAddress(crypto.NHBPrefix, program.Pool[:]).String(),
 		TokenSymbol:  program.TokenSymbol,
 		AccrualBps:   program.AccrualBps,
 		MinSpendWei:  bigIntToString(program.MinSpendWei),

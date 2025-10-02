@@ -128,7 +128,7 @@ func TestHandleLoyaltyCreateBusinessSuccess(t *testing.T) {
 	if business.Name != "Acme Corp" {
 		t.Fatalf("unexpected business name: %s", business.Name)
 	}
-	if crypto.NewAddress(crypto.NHBPrefix, business.Owner[:]).String() != ownerAddr {
+	if crypto.MustNewAddress(crypto.NHBPrefix, business.Owner[:]).String() != ownerAddr {
 		t.Fatalf("owner mismatch")
 	}
 }

@@ -155,7 +155,7 @@ func (e *Engine) SetDeveloperFee(bps uint64, collector crypto.Address) {
 		return
 	}
 	cloned := append([]byte(nil), collector.Bytes()...)
-	e.developerFeeAddr = crypto.NewAddress(collector.Prefix(), cloned)
+	e.developerFeeAddr = crypto.MustNewAddress(collector.Prefix(), cloned)
 }
 
 // SetCollateralRouting configures the default collateral distribution applied
@@ -489,7 +489,7 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		}
 		feeBps = e.developerFeeBps
 		cloned := append([]byte(nil), e.developerFeeAddr.Bytes()...)
-		feeRecipient = crypto.NewAddress(e.developerFeeAddr.Prefix(), cloned)
+		feeRecipient = crypto.MustNewAddress(e.developerFeeAddr.Prefix(), cloned)
 	}
 
 	if feeBps > 0 {

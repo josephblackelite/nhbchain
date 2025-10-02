@@ -157,7 +157,7 @@ func (s *Server) handlePotsoTop(w http.ResponseWriter, _ *http.Request, req *RPC
 	}
 	result := make([]potsoTopEntry, len(entries))
 	for i, entry := range entries {
-		user := crypto.NewAddress(crypto.NHBPrefix, entry.Address[:]).String()
+		user := crypto.MustNewAddress(crypto.NHBPrefix, entry.Address[:]).String()
 		result[i] = potsoTopEntry{User: user, Meter: entry.Meter}
 	}
 	writeResult(w, req.ID, result)

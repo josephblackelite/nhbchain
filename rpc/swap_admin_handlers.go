@@ -219,7 +219,7 @@ func formatBurnReceipt(receipt *swap.BurnReceipt) map[string]interface{} {
 		"observedAt":   receipt.ObservedAt,
 	}
 	if receipt.Burner != ([20]byte{}) {
-		payload["burner"] = crypto.NewAddress(crypto.NHBPrefix, receipt.Burner[:]).String()
+		payload["burner"] = crypto.MustNewAddress(crypto.NHBPrefix, receipt.Burner[:]).String()
 	}
 	if strings.TrimSpace(receipt.RedeemReference) != "" {
 		payload["redeemRef"] = strings.TrimSpace(receipt.RedeemReference)

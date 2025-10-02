@@ -233,8 +233,8 @@ func formatSnapshotResult(esc *escrow.Escrow) *EscrowSnapshotResult {
 	}
 	result := &EscrowSnapshotResult{
 		ID:        formatEscrowID(esc.ID),
-		Payer:     crypto.NewAddress(crypto.NHBPrefix, esc.Payer[:]).String(),
-		Payee:     crypto.NewAddress(crypto.NHBPrefix, esc.Payee[:]).String(),
+		Payer:     crypto.MustNewAddress(crypto.NHBPrefix, esc.Payer[:]).String(),
+		Payee:     crypto.MustNewAddress(crypto.NHBPrefix, esc.Payee[:]).String(),
 		Token:     esc.Token,
 		Amount:    amount,
 		FeeBps:    esc.FeeBps,
@@ -245,7 +245,7 @@ func formatSnapshotResult(esc *escrow.Escrow) *EscrowSnapshotResult {
 		Meta:      "0x" + hex.EncodeToString(esc.MetaHash[:]),
 	}
 	if esc.Mediator != ([20]byte{}) {
-		mediator := crypto.NewAddress(crypto.NHBPrefix, esc.Mediator[:]).String()
+		mediator := crypto.MustNewAddress(crypto.NHBPrefix, esc.Mediator[:]).String()
 		result.Mediator = &mediator
 	}
 	if trimmed := strings.TrimSpace(esc.RealmID); trimmed != "" {
@@ -290,7 +290,7 @@ func formatAddressList(members [][20]byte) []string {
 		if member == ([20]byte{}) {
 			continue
 		}
-		out = append(out, crypto.NewAddress(crypto.NHBPrefix, member[:]).String())
+		out = append(out, crypto.MustNewAddress(crypto.NHBPrefix, member[:]).String())
 	}
 	return out
 }
