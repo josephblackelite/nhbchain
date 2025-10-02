@@ -181,7 +181,7 @@ func (s *Server) handlePotsoEpochPayouts(w http.ResponseWriter, _ *http.Request,
 		Payouts: make([]potsoEpochPayoutEntry, len(payouts)),
 	}
 	for i, payout := range payouts {
-		user := crypto.NewAddress(crypto.NHBPrefix, payout.Address[:]).String()
+		user := crypto.MustNewAddress(crypto.NHBPrefix, payout.Address[:]).String()
 		result.Payouts[i] = potsoEpochPayoutEntry{
 			User:   user,
 			Amount: bigIntString(payout.Amount),

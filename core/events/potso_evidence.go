@@ -22,8 +22,8 @@ type PotsoEvidenceAccepted struct {
 }
 
 func (e PotsoEvidenceAccepted) Event() *types.Event {
-	offender := crypto.NewAddress(crypto.NHBPrefix, e.Offender[:])
-	reporter := crypto.NewAddress(crypto.NHBPrefix, e.Reporter[:])
+	offender := crypto.MustNewAddress(crypto.NHBPrefix, e.Offender[:])
+	reporter := crypto.MustNewAddress(crypto.NHBPrefix, e.Reporter[:])
 	attrs := map[string]string{
 		"hash":     "0x" + hex.EncodeToString(e.Hash[:]),
 		"type":     e.EvidenceType,
@@ -40,7 +40,7 @@ type PotsoEvidenceRejected struct {
 }
 
 func (e PotsoEvidenceRejected) Event() *types.Event {
-	reporter := crypto.NewAddress(crypto.NHBPrefix, e.Reporter[:])
+	reporter := crypto.MustNewAddress(crypto.NHBPrefix, e.Reporter[:])
 	attrs := map[string]string{
 		"reporter": reporter.String(),
 	}

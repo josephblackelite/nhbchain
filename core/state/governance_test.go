@@ -11,7 +11,7 @@ import (
 
 func TestGovernanceEscrowAndProposalHelpers(t *testing.T) {
 	manager := newTestManager(t)
-	proposer := crypto.NewAddress(crypto.NHBPrefix, make([]byte, 20))
+	proposer := crypto.MustNewAddress(crypto.NHBPrefix, make([]byte, 20))
 	addrBytes := proposer.Bytes()
 	if balance, err := manager.GovernanceEscrowBalance(addrBytes); err != nil {
 		t.Fatalf("escrow balance: %v", err)
@@ -114,8 +114,8 @@ func TestGovernanceEscrowAndProposalHelpers(t *testing.T) {
 func TestGovernanceVoteIndexing(t *testing.T) {
 	manager := newTestManager(t)
 	proposalID := uint64(5)
-	voterA := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 1))
-	voterB := crypto.NewAddress(crypto.NHBPrefix, append(make([]byte, 19), 2))
+	voterA := crypto.MustNewAddress(crypto.NHBPrefix, append(make([]byte, 19), 1))
+	voterB := crypto.MustNewAddress(crypto.NHBPrefix, append(make([]byte, 19), 2))
 
 	voteA := &governance.Vote{
 		ProposalID: proposalID,

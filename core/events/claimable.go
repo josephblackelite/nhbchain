@@ -32,7 +32,7 @@ func (e ClaimableCreated) Event() *types.Event {
 		Type: TypeClaimableCreated,
 		Attributes: map[string]string{
 			"id":            hex.EncodeToString(e.ID[:]),
-			"payer":         crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
+			"payer":         crypto.MustNewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
 			"token":         e.Token,
 			"amount":        formatAmount(e.Amount),
 			"deadline":      intToString(e.Deadline),
@@ -58,8 +58,8 @@ func (e ClaimableClaimed) Event() *types.Event {
 		Type: TypeClaimableClaimed,
 		Attributes: map[string]string{
 			"id":            hex.EncodeToString(e.ID[:]),
-			"payer":         crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
-			"payee":         crypto.NewAddress(crypto.NHBPrefix, e.Payee[:]).String(),
+			"payer":         crypto.MustNewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
+			"payee":         crypto.MustNewAddress(crypto.NHBPrefix, e.Payee[:]).String(),
 			"token":         e.Token,
 			"amount":        formatAmount(e.Amount),
 			"recipientHint": hex.EncodeToString(e.RecipientHint[:]),
@@ -81,7 +81,7 @@ func (e ClaimableCancelled) Event() *types.Event {
 		Type: TypeClaimableCancelled,
 		Attributes: map[string]string{
 			"id":     hex.EncodeToString(e.ID[:]),
-			"payer":  crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
+			"payer":  crypto.MustNewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
 			"token":  e.Token,
 			"amount": formatAmount(e.Amount),
 		},
@@ -102,7 +102,7 @@ func (e ClaimableExpired) Event() *types.Event {
 		Type: TypeClaimableExpired,
 		Attributes: map[string]string{
 			"id":     hex.EncodeToString(e.ID[:]),
-			"payer":  crypto.NewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
+			"payer":  crypto.MustNewAddress(crypto.NHBPrefix, e.Payer[:]).String(),
 			"token":  e.Token,
 			"amount": formatAmount(e.Amount),
 		},

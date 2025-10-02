@@ -43,7 +43,7 @@ func TestNewBlockchainLoadsGenesisFromFile(t *testing.T) {
 	db := storage.NewMemDB()
 	defer db.Close()
 
-	addr := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
 	spec := genesis.GenesisSpec{
 		GenesisTime: "2024-01-01T00:00:00Z",
 		NativeTokens: []genesis.NativeTokenSpec{
@@ -237,7 +237,7 @@ func TestNewBlockchainChainIDMismatchDoesNotPersistState(t *testing.T) {
 	db := storage.NewMemDB()
 	defer db.Close()
 
-	addr := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
 
 	spec := genesis.GenesisSpec{
 		GenesisTime: "2024-01-01T00:00:00Z",

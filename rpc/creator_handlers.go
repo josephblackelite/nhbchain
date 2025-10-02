@@ -125,7 +125,7 @@ func formatLedger(ledger *creator.PayoutLedger) (pending, totalTips, totalYield 
 }
 
 func formatAddress(addr [20]byte) string {
-	return crypto.NewAddress(crypto.NHBPrefix, addr[:]).String()
+	return crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String()
 }
 
 func (s *Server) handleCreatorPublish(w http.ResponseWriter, r *http.Request, req *RPCRequest) {

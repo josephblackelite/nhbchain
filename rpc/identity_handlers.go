@@ -176,10 +176,10 @@ func (s *Server) handleIdentityResolve(w http.ResponseWriter, _ *http.Request, r
 		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "alias not found", normalized)
 		return
 	}
-	primary := crypto.NewAddress(crypto.NHBPrefix, record.Primary[:]).String()
+	primary := crypto.MustNewAddress(crypto.NHBPrefix, record.Primary[:]).String()
 	addresses := make([]string, 0, len(record.Addresses))
 	for _, addr := range record.Addresses {
-		addresses = append(addresses, crypto.NewAddress(crypto.NHBPrefix, addr[:]).String())
+		addresses = append(addresses, crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String())
 	}
 	aliasID := record.AliasID()
 	result := identityResolveResult{

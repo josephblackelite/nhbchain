@@ -384,11 +384,11 @@ func formatEscrowID(id [32]byte) string {
 }
 
 func formatEscrowJSON(esc *escrow.Escrow) escrowJSON {
-	payer := crypto.NewAddress(crypto.NHBPrefix, esc.Payer[:]).String()
-	payee := crypto.NewAddress(crypto.NHBPrefix, esc.Payee[:]).String()
+	payer := crypto.MustNewAddress(crypto.NHBPrefix, esc.Payer[:]).String()
+	payee := crypto.MustNewAddress(crypto.NHBPrefix, esc.Payee[:]).String()
 	var mediatorPtr *string
 	if esc.Mediator != ([20]byte{}) {
-		mediator := crypto.NewAddress(crypto.NHBPrefix, esc.Mediator[:]).String()
+		mediator := crypto.MustNewAddress(crypto.NHBPrefix, esc.Mediator[:]).String()
 		mediatorPtr = &mediator
 	}
 	amount := "0"
@@ -422,7 +422,7 @@ func formatEscrowJSON(esc *escrow.Escrow) escrowJSON {
 			if len(esc.FrozenArb.Members) > 0 {
 				arbitrators = make([]string, 0, len(esc.FrozenArb.Members))
 				for _, member := range esc.FrozenArb.Members {
-					arbitrators = append(arbitrators, crypto.NewAddress(crypto.NHBPrefix, member[:]).String())
+					arbitrators = append(arbitrators, crypto.MustNewAddress(crypto.NHBPrefix, member[:]).String())
 				}
 			}
 		}

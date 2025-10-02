@@ -65,7 +65,7 @@ func TestNodeIdentityAliasLifecycle(t *testing.T) {
 	if len(eventsList) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(eventsList))
 	}
-	expectedAddr := crypto.NewAddress(crypto.NHBPrefix, addr[:]).String()
+	expectedAddr := crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String()
 	if eventsList[0].Type != events.TypeIdentityAliasSet {
 		t.Fatalf("unexpected first event type: %s", eventsList[0].Type)
 	}

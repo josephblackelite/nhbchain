@@ -704,7 +704,7 @@ func (e *Engine) selectProposer(round int) []byte {
 	for i, addrBytes := range validators {
 		weight := weights[i]
 		if pick.Cmp(weight) < 0 {
-			fmt.Printf("Deterministic proposer selection: %s (Power: %s)\n", crypto.NewAddress(crypto.NHBPrefix, addrBytes).String(), weight.String())
+			fmt.Printf("Deterministic proposer selection: %s (Power: %s)\n", crypto.MustNewAddress(crypto.NHBPrefix, addrBytes).String(), weight.String())
 			return addrBytes
 		}
 		pick.Sub(pick, weight)

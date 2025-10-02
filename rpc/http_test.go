@@ -492,3 +492,30 @@ func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
 		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
 	}
 }
+
+func TestHandleGetBalanceRejectsMalformedAddress(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+	recorder := httptest.NewRecorder()
+	req := &RPCRequest{ID: 7}
+	req.Params = []json.RawMessage{json.RawMessage(`"not-a-valid-address"`)}
+
+	server.handleGetBalance(recorder, nil, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request status, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected error in response")
+	}
+	if resp.Error.Code != codeInvalidParams {
+		t.Fatalf("expected code %d, got %d", codeInvalidParams, resp.Error.Code)
+	}
+	if resp.Error.Message == "" {
+		t.Fatalf("expected error message to be present")
+	}
+}

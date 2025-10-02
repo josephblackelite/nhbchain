@@ -62,7 +62,7 @@ func (s *Server) handlePotsoLeaderboard(w http.ResponseWriter, _ *http.Request, 
 		Items: make([]potsoLeaderboardItem, len(entries)),
 	}
 	for i, entry := range entries {
-		addr := crypto.NewAddress(crypto.NHBPrefix, entry.Address[:]).String()
+		addr := crypto.MustNewAddress(crypto.NHBPrefix, entry.Address[:]).String()
 		result.Items[i] = potsoLeaderboardItem{
 			Address:            addr,
 			WeightBps:          entry.WeightBps,

@@ -1286,14 +1286,14 @@ func balanceResponseFromAccount(addr string, account *types.Account) BalanceResp
 		resp.LockedZNHB = account.LockedZNHB
 	}
 	if len(account.DelegatedValidator) > 0 {
-		resp.DelegatedValidator = crypto.NewAddress(crypto.NHBPrefix, account.DelegatedValidator).String()
+		resp.DelegatedValidator = crypto.MustNewAddress(crypto.NHBPrefix, account.DelegatedValidator).String()
 	}
 	if len(account.PendingUnbonds) > 0 {
 		resp.PendingUnbonds = make([]StakeUnbondResponse, len(account.PendingUnbonds))
 		for i, entry := range account.PendingUnbonds {
 			validator := ""
 			if len(entry.Validator) > 0 {
-				validator = crypto.NewAddress(crypto.NHBPrefix, entry.Validator).String()
+				validator = crypto.MustNewAddress(crypto.NHBPrefix, entry.Validator).String()
 			}
 			amount := big.NewInt(0)
 			if entry.Amount != nil {

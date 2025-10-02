@@ -66,7 +66,7 @@ func (v VoucherV1) MarshalJSON() ([]byte, error) {
 	nonceHex := hex.EncodeToString(v.Nonce)
 	recipient := ""
 	if v.Recipient != ([20]byte{}) {
-		recipient = repoCrypto.NewAddress(repoCrypto.NHBPrefix, v.Recipient[:]).String()
+		recipient = repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, v.Recipient[:]).String()
 	}
 	payload := voucherJSON{
 		Domain:     strings.TrimSpace(v.Domain),

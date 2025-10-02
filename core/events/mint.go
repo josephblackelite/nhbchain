@@ -40,7 +40,7 @@ func (e MintSettled) Event() *types.Event {
 		Type: TypeMintSettled,
 		Attributes: map[string]string{
 			"invoiceId":   e.InvoiceID,
-			"recipient":   crypto.NewAddress(crypto.NHBPrefix, e.Recipient[:]).String(),
+			"recipient":   crypto.MustNewAddress(crypto.NHBPrefix, e.Recipient[:]).String(),
 			"token":       e.Token,
 			"amount":      e.Amount.String(),
 			"txHash":      txHash,

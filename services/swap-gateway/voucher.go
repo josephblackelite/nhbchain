@@ -83,7 +83,11 @@ func RecoverVoucherSignerAddress(v VoucherV1, sig []byte) (string, error) {
 		return "", fmt.Errorf("recover pubkey: %w", err)
 	}
 	addrBytes := ethcrypto.PubkeyToAddress(*pub).Bytes()
-	return repoCrypto.NewAddress(repoCrypto.NHBPrefix, addrBytes).String(), nil
+	addr, err := repoCrypto.NewAddress(repoCrypto.NHBPrefix, addrBytes)
+	if err != nil {
+		return "", err
+	}
+	return addr.String(), nil
 }
 
 func decodeBech32Address(addr string) ([]byte, error) {

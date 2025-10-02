@@ -186,14 +186,14 @@ func TestP2PCreateAndGetTrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vault address: %v", err)
 	}
-	expectedBuyerTo := crypto.NewAddress(crypto.NHBPrefix, buyerVault[:]).String()
+	expectedBuyerTo := crypto.MustNewAddress(crypto.NHBPrefix, buyerVault[:]).String()
 	if buyerIntent.To != expectedBuyerTo {
 		t.Fatalf("unexpected buyer intent to: got %s want %s", buyerIntent.To, expectedBuyerTo)
 	}
 	if buyerIntent.Token != "ZNHB" || buyerIntent.Amount != "7" {
 		t.Fatalf("unexpected buyer intent payload: %+v", buyerIntent)
 	}
-	expectedSellerTo := crypto.NewAddress(crypto.NHBPrefix, sellerVault[:]).String()
+	expectedSellerTo := crypto.MustNewAddress(crypto.NHBPrefix, sellerVault[:]).String()
 	if sellerIntent.To != expectedSellerTo {
 		t.Fatalf("unexpected seller intent to: got %s want %s", sellerIntent.To, expectedSellerTo)
 	}

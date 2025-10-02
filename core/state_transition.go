@@ -246,7 +246,7 @@ func (sp *StateProcessor) emitQuotaExceeded(module string, addr []byte, epoch ui
 	}
 	if len(addr) > 0 {
 		if len(addr) == common.AddressLength {
-			attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, addr).String()
+			attrs["address"] = crypto.MustNewAddress(crypto.NHBPrefix, addr).String()
 		} else {
 			attrs["address"] = hex.EncodeToString(addr)
 		}
@@ -1371,7 +1371,7 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []
 		return err
 	}
 	fmt.Printf("Identity processed: Username '%s' registered to %s.\n",
-		username, crypto.NewAddress(crypto.NHBPrefix, sender).String())
+		username, crypto.MustNewAddress(crypto.NHBPrefix, sender).String())
 	return nil
 }
 
@@ -1599,8 +1599,8 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 		return nil, err
 	}
 
-	delegatorAddr := crypto.NewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.NewAddress(crypto.NHBPrefix, target)
+	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, target)
 	sp.AppendEvent(&types.Event{
 		Type: "stake.delegated",
 		Attributes: map[string]string{
@@ -1679,8 +1679,8 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 		return nil, err
 	}
 
-	delegatorAddr := crypto.NewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.NewAddress(crypto.NHBPrefix, validator)
+	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, validator)
 	sp.AppendEvent(&types.Event{
 		Type: "stake.undelegated",
 		Attributes: map[string]string{
@@ -1737,8 +1737,8 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 		return nil, err
 	}
 
-	delegatorAddr := crypto.NewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.NewAddress(crypto.NHBPrefix, entry.Validator)
+	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, entry.Validator)
 	sp.AppendEvent(&types.Event{
 		Type: "stake.claimed",
 		Attributes: map[string]string{
@@ -1866,7 +1866,7 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, s
 	}
 
 	fmt.Printf("Heartbeat processed: %s recorded %d minute(s).\n",
-		crypto.NewAddress(crypto.NHBPrefix, sender).String(), minutes)
+		crypto.MustNewAddress(crypto.NHBPrefix, sender).String(), minutes)
 	return nil
 }
 

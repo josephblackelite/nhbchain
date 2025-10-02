@@ -46,7 +46,7 @@ func (e SwapMinted) Event() *types.Event {
 	}
 	recipient := ""
 	if e.Recipient != ([20]byte{}) {
-		recipient = crypto.NewAddress(crypto.NHBPrefix, e.Recipient[:]).String()
+		recipient = crypto.MustNewAddress(crypto.NHBPrefix, e.Recipient[:]).String()
 	}
 	return &types.Event{
 		Type: TypeSwapMinted,
@@ -144,7 +144,7 @@ func (a SwapLimitAlert) Event() *types.Event {
 		"limit":        strings.TrimSpace(a.Limit),
 	}
 	if a.Address != ([20]byte{}) {
-		attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, a.Address[:]).String()
+		attrs["address"] = crypto.MustNewAddress(crypto.NHBPrefix, a.Address[:]).String()
 	}
 	amount := big.NewInt(0)
 	if a.Amount != nil {
@@ -177,7 +177,7 @@ func (a SwapSanctionAlert) Event() *types.Event {
 		"providerTxId": strings.TrimSpace(a.ProviderTxID),
 	}
 	if a.Address != ([20]byte{}) {
-		attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, a.Address[:]).String()
+		attrs["address"] = crypto.MustNewAddress(crypto.NHBPrefix, a.Address[:]).String()
 	}
 	return &types.Event{Type: TypeSwapAlertSanction, Attributes: attrs}
 }
@@ -205,7 +205,7 @@ func (a SwapVelocityAlert) Event() *types.Event {
 		"observedCount": strconv.Itoa(a.ObservedCount),
 	}
 	if a.Address != ([20]byte{}) {
-		attrs["address"] = crypto.NewAddress(crypto.NHBPrefix, a.Address[:]).String()
+		attrs["address"] = crypto.MustNewAddress(crypto.NHBPrefix, a.Address[:]).String()
 	}
 	return &types.Event{Type: TypeSwapAlertVelocity, Attributes: attrs}
 }

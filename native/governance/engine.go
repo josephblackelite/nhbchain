@@ -649,7 +649,7 @@ func decodeAddress(addr string) ([20]byte, error) {
 }
 
 func formatAddress(addr [20]byte) string {
-	return crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), addr[:]...)).String()
+	return crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), addr[:]...)).String()
 }
 
 func parseSlashingPolicyPayload(payloadJSON string) (*parsedSlashingPolicy, error) {
@@ -738,7 +738,7 @@ func (e *Engine) parseTreasuryDirectivePayload(payloadJSON string) (*parsedTreas
 		return nil, fmt.Errorf("governance: invalid source address: %w", err)
 	}
 	if _, ok := e.treasuryAllow[src]; !ok {
-		return nil, fmt.Errorf("governance: source %s not in treasury allow-list", crypto.NewAddress(crypto.NHBPrefix, src[:]).String())
+		return nil, fmt.Errorf("governance: source %s not in treasury allow-list", crypto.MustNewAddress(crypto.NHBPrefix, src[:]).String())
 	}
 	if len(payload.Transfers) == 0 {
 		return nil, fmt.Errorf("governance: treasury directive must include at least one transfer")
@@ -1109,7 +1109,7 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 	votingEnd := now.Add(time.Duration(e.votingPeriodSeconds) * time.Second)
 	timelockEnd := votingEnd.Add(time.Duration(e.timelockSeconds) * time.Second)
 
-	submitter := crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), proposer[:]...))
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), proposer[:]...))
 	depositCopy := new(big.Int).Set(lockAmount)
 	proposal := &Proposal{
 		ID:             proposalID,
@@ -1203,7 +1203,7 @@ func (e *Engine) CastVote(proposalID uint64, voter [20]byte, choice string) erro
 
 	vote := &Vote{
 		ProposalID: proposalID,
-		Voter:      crypto.NewAddress(crypto.NHBPrefix, append([]byte(nil), voter[:]...)),
+		Voter:      crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), voter[:]...)),
 		Choice:     voteChoice,
 		PowerBps:   uint32(power),
 		Timestamp:  now,

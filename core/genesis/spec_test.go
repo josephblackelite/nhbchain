@@ -21,8 +21,8 @@ import (
 )
 
 func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
-	addr1 := crypto.NewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
-	addr2 := crypto.NewAddress(crypto.ZNHBPrefix, bytes.Repeat([]byte{0x02}, 20)).String()
+	addr1 := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
+	addr2 := crypto.MustNewAddress(crypto.ZNHBPrefix, bytes.Repeat([]byte{0x02}, 20)).String()
 
 	chainID := uint64(42)
 	paused := true

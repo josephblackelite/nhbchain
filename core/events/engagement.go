@@ -28,7 +28,7 @@ func (e EngagementHeartbeat) Event() *types.Event {
 	return &types.Event{
 		Type: TypeEngagementHeartbeat,
 		Attributes: map[string]string{
-			"address":   crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+			"address":   crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 			"device_id": e.DeviceID,
 			"minutes":   fmt.Sprintf("%d", e.Minutes),
 			"timestamp": fmt.Sprintf("%d", e.Timestamp),
@@ -53,7 +53,7 @@ func (e EngagementScoreUpdated) Event() *types.Event {
 	return &types.Event{
 		Type: TypeEngagementScoreUpdated,
 		Attributes: map[string]string{
-			"address":   crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+			"address":   crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 			"day":       e.Day,
 			"raw":       fmt.Sprintf("%d", e.RawScore),
 			"old_score": fmt.Sprintf("%d", e.OldScore),

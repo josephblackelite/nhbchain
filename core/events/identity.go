@@ -26,7 +26,7 @@ func (e IdentityAliasSet) Event() *types.Event {
 		Type: TypeIdentityAliasSet,
 		Attributes: map[string]string{
 			"alias":   e.Alias,
-			"address": crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+			"address": crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 		},
 	}
 }
@@ -48,7 +48,7 @@ func (e IdentityAliasRenamed) Event() *types.Event {
 		Attributes: map[string]string{
 			"old":     e.OldAlias,
 			"new":     e.NewAlias,
-			"address": crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+			"address": crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 		},
 	}
 }
@@ -69,7 +69,7 @@ func (e IdentityAliasAvatarUpdated) Event() *types.Event {
 		Type: TypeIdentityAliasAvatarUpdated,
 		Attributes: map[string]string{
 			"alias":     e.Alias,
-			"address":   crypto.NewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+			"address":   crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 			"avatarRef": e.AvatarRef,
 		},
 	}

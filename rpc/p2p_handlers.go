@@ -171,13 +171,13 @@ func (s *Server) handleP2PCreateTrade(w http.ResponseWriter, r *http.Request, re
 		EscrowQuoteID: formatEscrowID(escrowQuoteID),
 		PayIntents: map[string]p2pPayIntentResult{
 			"buyer": {
-				To:     crypto.NewAddress(crypto.NHBPrefix, buyerVault[:]).String(),
+				To:     crypto.MustNewAddress(crypto.NHBPrefix, buyerVault[:]).String(),
 				Token:  normalizedQuote,
 				Amount: quoteAmount.String(),
 				Memo:   "ESCROW:" + formatEscrowID(escrowQuoteID),
 			},
 			"seller": {
-				To:     crypto.NewAddress(crypto.NHBPrefix, sellerVault[:]).String(),
+				To:     crypto.MustNewAddress(crypto.NHBPrefix, sellerVault[:]).String(),
 				Token:  normalizedBase,
 				Amount: baseAmount.String(),
 				Memo:   "ESCROW:" + formatEscrowID(escrowBaseID),
@@ -342,8 +342,8 @@ func writeP2PError(w http.ResponseWriter, id interface{}, err error) {
 }
 
 func formatTradeJSON(trade *escrow.Trade) tradeJSON {
-	buyer := crypto.NewAddress(crypto.NHBPrefix, trade.Buyer[:]).String()
-	seller := crypto.NewAddress(crypto.NHBPrefix, trade.Seller[:]).String()
+	buyer := crypto.MustNewAddress(crypto.NHBPrefix, trade.Buyer[:]).String()
+	seller := crypto.MustNewAddress(crypto.NHBPrefix, trade.Seller[:]).String()
 	quoteAmt := "0"
 	if trade.QuoteAmount != nil {
 		quoteAmt = trade.QuoteAmount.String()

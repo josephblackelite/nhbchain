@@ -36,7 +36,7 @@ type PotsoHeartbeat struct {
 
 // Event converts the heartbeat into the generic event representation.
 func (h PotsoHeartbeat) Event() *types.Event {
-	addr := crypto.NewAddress(crypto.NHBPrefix, h.Address[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, h.Address[:])
 	return &types.Event{
 		Type: TypePotsoHeartbeat,
 		Attributes: map[string]string{
@@ -63,7 +63,7 @@ type PotsoStakeLocked struct {
 
 // Event converts the stake lock notification into a generic event.
 func (e PotsoStakeLocked) Event() *types.Event {
-	addr := crypto.NewAddress(crypto.NHBPrefix, e.Owner[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Owner[:])
 	return &types.Event{
 		Type: TypePotsoStakeLocked,
 		Attributes: map[string]string{
@@ -82,7 +82,7 @@ type PotsoStakeUnbonded struct {
 
 // Event converts the unbond notification into the generic event representation.
 func (e PotsoStakeUnbonded) Event() *types.Event {
-	addr := crypto.NewAddress(crypto.NHBPrefix, e.Owner[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Owner[:])
 	return &types.Event{
 		Type: TypePotsoStakeUnbonded,
 		Attributes: map[string]string{
@@ -101,7 +101,7 @@ type PotsoStakeWithdrawn struct {
 
 // Event converts the withdrawal notification into the generic event representation.
 func (e PotsoStakeWithdrawn) Event() *types.Event {
-	addr := crypto.NewAddress(crypto.NHBPrefix, e.Owner[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Owner[:])
 	return &types.Event{
 		Type: TypePotsoStakeWithdrawn,
 		Attributes: map[string]string{
@@ -150,7 +150,7 @@ type PotsoRewardReady struct {
 
 // Event converts the ready notification into a generic event representation.
 func (e PotsoRewardReady) Event() *types.Event {
-	addr := crypto.NewAddress(crypto.NHBPrefix, e.Address[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:])
 	attrs := map[string]string{
 		"epoch":   fmt.Sprintf("%d", e.Epoch),
 		"address": addr.String(),
@@ -172,7 +172,7 @@ type PotsoRewardPaid struct {
 
 // Event converts the payout into a generic event representation.
 func (e PotsoRewardPaid) Event() *types.Event {
-	addr := crypto.NewAddress(crypto.NHBPrefix, e.Address[:])
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:])
 	attrs := map[string]string{
 		"epoch":   fmt.Sprintf("%d", e.Epoch),
 		"address": addr.String(),

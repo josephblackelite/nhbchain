@@ -189,7 +189,7 @@ func newWallet(t *testing.T) (*ecdsa.PrivateKey, string) {
 		t.Fatalf("generate key: %v", err)
 	}
 	addr := ethcrypto.PubkeyToAddress(priv.PublicKey).Bytes()
-	bech := nhbcrypto.NewAddress(nhbcrypto.NHBPrefix, addr).String()
+	bech := nhbcrypto.MustNewAddress(nhbcrypto.NHBPrefix, addr).String()
 	return priv, bech
 }
 

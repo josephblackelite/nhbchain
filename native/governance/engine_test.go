@@ -719,7 +719,7 @@ func TestFinalizeRejectsBeforeVotingEnd(t *testing.T) {
 	state := newMockGovernanceState(map[[20]byte]*types.Account{
 		proposer: &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
 	})
-	submitter := crypto.NewAddress(crypto.NHBPrefix, proposer[:])
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, proposer[:])
 	state.proposals[1] = &Proposal{
 		ID:        1,
 		Submitter: submitter,
@@ -833,7 +833,7 @@ func TestFinalizeOutcomes(t *testing.T) {
 			state := newMockGovernanceState(map[[20]byte]*types.Account{
 				proposer: &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
 			})
-			submitter := crypto.NewAddress(crypto.NHBPrefix, proposer[:])
+			submitter := crypto.MustNewAddress(crypto.NHBPrefix, proposer[:])
 			proposalID := uint64(100 + idx)
 			state.proposals[proposalID] = &Proposal{
 				ID:        proposalID,
@@ -853,7 +853,7 @@ func TestFinalizeOutcomes(t *testing.T) {
 
 			for voteIdx, vote := range tc.votes {
 				voterBytes := append(make([]byte, 19), byte(voteIdx+1))
-				voter := crypto.NewAddress(crypto.NHBPrefix, voterBytes)
+				voter := crypto.MustNewAddress(crypto.NHBPrefix, voterBytes)
 				if err := state.GovernancePutVote(&Vote{ProposalID: proposalID, Voter: voter, Choice: vote.choice, PowerBps: vote.power}); err != nil {
 					t.Fatalf("store vote: %v", err)
 				}
@@ -1202,8 +1202,8 @@ func TestExecuteRoleAllowlistProposal(t *testing.T) {
 	engine.SetNowFunc(func() time.Time { return now })
 
 	payload := fmt.Sprintf(`{"grant":[{"role":"compliance","address":"%s"}],"revoke":[{"role":"compliance","address":"%s"}]}`,
-		crypto.NewAddress(crypto.NHBPrefix, grant[:]).String(),
-		crypto.NewAddress(crypto.NHBPrefix, revoke[:]).String(),
+		crypto.MustNewAddress(crypto.NHBPrefix, grant[:]).String(),
+		crypto.MustNewAddress(crypto.NHBPrefix, revoke[:]).String(),
 	)
 	proposalID, err := engine.SubmitProposal(proposer, ProposalKindRoleAllowlist, payload, big.NewInt(75))
 	if err != nil {
@@ -1257,8 +1257,8 @@ func TestExecuteTreasuryDirective(t *testing.T) {
 	engine.SetNowFunc(func() time.Time { return now })
 
 	payload := fmt.Sprintf(`{"source":"%s","transfers":[{"to":"%s","amountWei":"250"}]}`,
-		crypto.NewAddress(crypto.NHBPrefix, treasury[:]).String(),
-		crypto.NewAddress(crypto.NHBPrefix, recipient[:]).String(),
+		crypto.MustNewAddress(crypto.NHBPrefix, treasury[:]).String(),
+		crypto.MustNewAddress(crypto.NHBPrefix, recipient[:]).String(),
 	)
 	proposalID, err := engine.SubmitProposal(proposer, ProposalKindTreasuryDirective, payload, big.NewInt(10))
 	if err != nil {

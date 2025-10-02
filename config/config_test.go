@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nhbchain/crypto"
@@ -19,7 +20,7 @@ var (
 		addr[len(addr)-1] = 0x24
 		return addr
 	}()
-	testTreasuryAllowAddrString = crypto.NewAddress(crypto.NHBPrefix, testTreasuryAllowAddrBytes[:]).String()
+	testTreasuryAllowAddrString = crypto.MustNewAddress(crypto.NHBPrefix, testTreasuryAllowAddrBytes[:]).String()
 )
 
 func TestLoadParsesP2PSettings(t *testing.T) {
@@ -341,6 +342,18 @@ func TestGovPolicyParsing(t *testing.T) {
 	}
 	if _, err := (GovConfig{MinDepositWei: "abc"}).Policy(); err == nil {
 		t.Fatalf("expected error for invalid deposit")
+	}
+}
+
+func TestGovPolicyParsingInvalidTreasuryAddress(t *testing.T) {
+	cfg := GovConfig{TreasuryAllowList: []string{"nhb1invalid"}}
+
+	_, err := cfg.Policy()
+	if err == nil {
+		t.Fatalf("expected error for malformed treasury address")
+	}
+	if !strings.Contains(err.Error(), "invalid TreasuryAllowList entry") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

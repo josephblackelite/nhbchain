@@ -242,7 +242,7 @@ func formatClaimableJSON(record *claimable.Claimable) claimableJSON {
 	}
 	return claimableJSON{
 		ID:        formatClaimableID(record.ID),
-		Payer:     crypto.NewAddress(crypto.NHBPrefix, record.Payer[:]).String(),
+		Payer:     crypto.MustNewAddress(crypto.NHBPrefix, record.Payer[:]).String(),
 		Token:     record.Token,
 		Amount:    amount,
 		HashLock:  "0x" + hex.EncodeToString(record.HashLock[:]),

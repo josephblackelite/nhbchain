@@ -11,7 +11,7 @@ import (
 
 func TestVoucherHashDeterministic(t *testing.T) {
 	recipientBytes := bytes.Repeat([]byte{0x11}, 20)
-	recipient := repoCrypto.NewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
+	recipient := repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
 	voucher := VoucherV1{
 		Domain:     "NHB_SWAP_VOUCHER_V1",
 		ChainID:    187001,
@@ -45,10 +45,10 @@ func TestSignVoucherRecoverAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hex to ecdsa: %v", err)
 	}
-	minterAddr := repoCrypto.NewAddress(repoCrypto.NHBPrefix, ethcrypto.PubkeyToAddress(key.PublicKey).Bytes()).String()
+	minterAddr := repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, ethcrypto.PubkeyToAddress(key.PublicKey).Bytes()).String()
 
 	recipientBytes := bytes.Repeat([]byte{0x22}, 20)
-	recipient := repoCrypto.NewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
+	recipient := repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
 
 	voucher := VoucherV1{
 		Domain:     "NHB_SWAP_VOUCHER_V1",

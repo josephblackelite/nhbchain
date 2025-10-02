@@ -172,7 +172,7 @@ func (sp *StateProcessor) applyAccountRewards(epochNumber uint64, rewardMap map[
 		}
 		payouts = append(payouts, payout)
 
-		bech := crypto.NewAddress(crypto.NHBPrefix, reward.addr)
+		bech := crypto.MustNewAddress(crypto.NHBPrefix, reward.addr)
 		attrs := map[string]string{
 			"epoch":   strconv.FormatUint(epochNumber, 10),
 			"account": bech.String(),
