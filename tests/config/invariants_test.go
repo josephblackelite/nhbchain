@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"testing"
+	"time"
 
 	"nhbchain/config"
 )
@@ -138,6 +139,74 @@ func TestValidateConfig(t *testing.T) {
 			err := config.ValidateConfig(tc.cfg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateConfig() error = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateConsensus(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.Consensus
+		wantErr bool
+	}{
+		{
+			name: "valid timeouts",
+			cfg: config.Consensus{
+				ProposalTimeout:  time.Second,
+				PrevoteTimeout:   time.Second,
+				PrecommitTimeout: time.Second,
+				CommitTimeout:    2 * time.Second,
+			},
+		},
+		{
+			name: "proposal timeout non-positive",
+			cfg: config.Consensus{
+				ProposalTimeout:  0,
+				PrevoteTimeout:   time.Second,
+				PrecommitTimeout: time.Second,
+				CommitTimeout:    2 * time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "prevote timeout non-positive",
+			cfg: config.Consensus{
+				ProposalTimeout:  time.Second,
+				PrevoteTimeout:   -time.Second,
+				PrecommitTimeout: time.Second,
+				CommitTimeout:    2 * time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "precommit timeout non-positive",
+			cfg: config.Consensus{
+				ProposalTimeout:  time.Second,
+				PrevoteTimeout:   time.Second,
+				PrecommitTimeout: 0,
+				CommitTimeout:    2 * time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "commit timeout non-positive",
+			cfg: config.Consensus{
+				ProposalTimeout:  time.Second,
+				PrevoteTimeout:   time.Second,
+				PrecommitTimeout: time.Second,
+				CommitTimeout:    -time.Second,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			err := config.ValidateConsensus(tc.cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateConsensus() error = %v, wantErr %t", err, tc.wantErr)
 			}
 		})
 	}

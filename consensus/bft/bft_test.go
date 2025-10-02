@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
@@ -101,6 +102,61 @@ func (n *emptyBlockNode) GetAccount(addr []byte) (*types.Account, error) {
 }
 func (n *emptyBlockNode) GetLastCommitHash() []byte { return nil }
 func (n *emptyBlockNode) GetHeight() uint64         { return n.height }
+
+func TestNewEngineAppliesCustomTimeouts(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	node := &trackingNode{validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)}}
+
+	overrides := TimeoutConfig{
+		Proposal:  5 * time.Second,
+		Prevote:   7 * time.Second,
+		Precommit: 11 * time.Second,
+		Commit:    13 * time.Second,
+	}
+
+	engine := NewEngine(node, validatorKey, &recordingBroadcaster{}, WithTimeouts(overrides))
+
+	if engine.proposalTimeout != overrides.Proposal {
+		t.Fatalf("unexpected proposal timeout: got %s want %s", engine.proposalTimeout, overrides.Proposal)
+	}
+	if engine.prevoteTimeout != overrides.Prevote {
+		t.Fatalf("unexpected prevote timeout: got %s want %s", engine.prevoteTimeout, overrides.Prevote)
+	}
+	if engine.precommitTimeout != overrides.Precommit {
+		t.Fatalf("unexpected precommit timeout: got %s want %s", engine.precommitTimeout, overrides.Precommit)
+	}
+	if engine.commitTimeout != overrides.Commit {
+		t.Fatalf("unexpected commit timeout: got %s want %s", engine.commitTimeout, overrides.Commit)
+	}
+}
+
+func TestNewEngineWithTimeoutsFallsBackToDefaults(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	node := &trackingNode{validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)}}
+
+	engine := NewEngine(node, validatorKey, &recordingBroadcaster{}, WithTimeouts(TimeoutConfig{}))
+
+	if engine.proposalTimeout != defaultProposalTimeout {
+		t.Fatalf("expected default proposal timeout, got %s", engine.proposalTimeout)
+	}
+	if engine.prevoteTimeout != defaultPrevoteTimeout {
+		t.Fatalf("expected default prevote timeout, got %s", engine.prevoteTimeout)
+	}
+	if engine.precommitTimeout != defaultPrecommitTimeout {
+		t.Fatalf("expected default precommit timeout, got %s", engine.precommitTimeout)
+	}
+	if engine.commitTimeout != defaultCommitTimeout {
+		t.Fatalf("expected default commit timeout, got %s", engine.commitTimeout)
+	}
+}
 
 func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 	validatorKey, err := crypto.GeneratePrivateKey()

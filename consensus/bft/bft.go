@@ -52,7 +52,55 @@ type Engine struct {
 	precommitSent bool
 }
 
-func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broadcaster) *Engine {
+// TimeoutConfig captures the per-phase round timers used by the engine.
+type TimeoutConfig struct {
+	Proposal  time.Duration
+	Prevote   time.Duration
+	Precommit time.Duration
+	Commit    time.Duration
+}
+
+// Option mutates the engine during construction.
+type Option func(*Engine)
+
+var (
+	defaultProposalTimeout  = 2 * time.Second
+	defaultPrevoteTimeout   = 2 * time.Second
+	defaultPrecommitTimeout = 2 * time.Second
+	defaultCommitTimeout    = 4 * time.Second
+)
+
+func defaultTimeoutConfig() TimeoutConfig {
+	return TimeoutConfig{
+		Proposal:  defaultProposalTimeout,
+		Prevote:   defaultPrevoteTimeout,
+		Precommit: defaultPrecommitTimeout,
+		Commit:    defaultCommitTimeout,
+	}
+}
+
+// WithTimeouts overrides the engine round timers when provided durations are positive.
+func WithTimeouts(cfg TimeoutConfig) Option {
+	return func(e *Engine) {
+		if e == nil {
+			return
+		}
+		if cfg.Proposal > 0 {
+			e.proposalTimeout = cfg.Proposal
+		}
+		if cfg.Prevote > 0 {
+			e.prevoteTimeout = cfg.Prevote
+		}
+		if cfg.Precommit > 0 {
+			e.precommitTimeout = cfg.Precommit
+		}
+		if cfg.Commit > 0 {
+			e.commitTimeout = cfg.Commit
+		}
+	}
+}
+
+func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broadcaster, opts ...Option) *Engine {
 	validatorSet := node.GetValidatorSet()
 	totalPower := big.NewInt(0)
 	for _, weight := range validatorSet {
@@ -61,7 +109,7 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		}
 	}
 	nodeHeight := node.GetHeight()
-	return &Engine{
+	engine := &Engine{
 		node:          node,
 		privKey:       key,
 		validatorSet:  validatorSet,
@@ -76,11 +124,19 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		committedBlocks:  make(map[uint64]bool),
 		proposalCh:       make(chan *SignedProposal, 16),
 		voteCh:           make(chan *SignedVote, 128),
-		proposalTimeout:  2 * time.Second,
-		prevoteTimeout:   2 * time.Second,
-		precommitTimeout: 2 * time.Second,
-		commitTimeout:    4 * time.Second,
+		proposalTimeout:  defaultProposalTimeout,
+		prevoteTimeout:   defaultPrevoteTimeout,
+		precommitTimeout: defaultPrecommitTimeout,
+		commitTimeout:    defaultCommitTimeout,
 	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(engine)
+		}
+	}
+
+	return engine
 }
 
 func (e *Engine) Start() {

@@ -295,7 +295,12 @@ func main() {
 	p2pServer.SetPeerstore(peerstore)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
-	bftEngine := bft.NewEngine(node, privKey, p2pServer)
+	bftEngine := bft.NewEngine(node, privKey, p2pServer, bft.WithTimeouts(bft.TimeoutConfig{
+		Proposal:  cfg.Consensus.ProposalTimeout,
+		Prevote:   cfg.Consensus.PrevoteTimeout,
+		Precommit: cfg.Consensus.PrecommitTimeout,
+		Commit:    cfg.Consensus.CommitTimeout,
+	}))
 
 	// 4. Set the fully configured BFT engine on the node.
 	node.SetBftEngine(bftEngine)
