@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"sync"
@@ -131,8 +132,17 @@ func TestServerAuthorization(t *testing.T) {
 	server := grpc.NewServer(
 		grpc.Creds(insecure.NewCredentials()),
 		grpc.ChainUnaryInterceptor(UnaryAuthInterceptor(authorizer)),
+		grpc.ChainStreamInterceptor(StreamAuthInterceptor(authorizer)),
 	)
-	consensusv1.RegisterConsensusServiceServer(server, NewServer(node, WithAuthorizer(authorizer)))
+	srv := NewServer(node, WithAuthorizer(authorizer))
+	if srv.auth == nil {
+		t.Fatalf("expected server authorizer to be configured")
+	}
+	if err := srv.authorize(context.Background()); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected authorizer to reject missing metadata, got %v", err)
+	}
+	consensusv1.RegisterConsensusServiceServer(server, srv)
+	consensusv1.RegisterQueryServiceServer(server, srv)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -163,6 +173,26 @@ func TestServerAuthorization(t *testing.T) {
 		t.Fatalf("expected unauthenticated error, got %v", err)
 	}
 
+	queryUnauth := consensusv1.NewQueryServiceClient(unauthConn)
+
+	if _, err := queryUnauth.QueryState(context.Background(), &consensusv1.QueryStateRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated query state error, got %v", err)
+	}
+
+	if _, err := queryUnauth.SimulateTx(context.Background(), &consensusv1.SimulateTxRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated simulate tx error, got %v", err)
+	}
+
+	unauthStreamCtx, cancelUnauthStream := context.WithTimeout(context.Background(), time.Second)
+	defer cancelUnauthStream()
+	unauthStream, err := queryUnauth.QueryPrefix(unauthStreamCtx, &consensusv1.QueryPrefixRequest{})
+	if err == nil {
+		_, err = unauthStream.Recv()
+	}
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected unauthenticated query prefix error, got %v", err)
+	}
+
 	authConn, err := grpc.DialContext(
 		dialCtx,
 		lis.Addr().String(),
@@ -177,6 +207,26 @@ func TestServerAuthorization(t *testing.T) {
 	_, err = consensusv1.NewConsensusServiceClient(authConn).CommitBlock(context.Background(), &consensusv1.CommitBlockRequest{Block: pbBlock})
 	if err != nil {
 		t.Fatalf("authenticated commit failed: %v", err)
+	}
+
+	queryAuth := consensusv1.NewQueryServiceClient(authConn)
+
+	if _, err := queryAuth.QueryState(context.Background(), &consensusv1.QueryStateRequest{}); err != nil {
+		t.Fatalf("authenticated query state failed: %v", err)
+	}
+
+	if _, err := queryAuth.SimulateTx(context.Background(), &consensusv1.SimulateTxRequest{}); err != nil {
+		t.Fatalf("authenticated simulate tx failed: %v", err)
+	}
+
+	authStreamCtx, cancelAuthStream := context.WithTimeout(context.Background(), time.Second)
+	defer cancelAuthStream()
+	authStream, err := queryAuth.QueryPrefix(authStreamCtx, &consensusv1.QueryPrefixRequest{})
+	if err != nil {
+		t.Fatalf("authenticated query prefix failed to open: %v", err)
+	}
+	if _, err := authStream.Recv(); err != io.EOF {
+		t.Fatalf("expected EOF from authorized query prefix, got %v", err)
 	}
 
 	node.mu.Lock()
