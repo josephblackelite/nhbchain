@@ -2,9 +2,11 @@ package bft
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -639,5 +641,79 @@ func TestHasTwoThirdsPowerLockedThresholds(t *testing.T) {
 				t.Fatalf("expected quorum=%t for total %d and power %d, got %t", tt.expectMet, tt.total, tt.power, got)
 			}
 		})
+	}
+}
+
+func TestEngineHandlesLargeValidatorSets(t *testing.T) {
+	const validatorCount = 150
+
+	keys := make([]*crypto.PrivateKey, validatorCount)
+	validatorSet := make(map[string]*big.Int, validatorCount)
+	for i := 0; i < validatorCount; i++ {
+		privBytes := make([]byte, 32)
+		binary.BigEndian.PutUint32(privBytes[28:], uint32(i+1))
+		key, err := crypto.PrivateKeyFromBytes(privBytes)
+		if err != nil {
+			t.Fatalf("derive validator key %d: %v", i, err)
+		}
+		keys[i] = key
+		validatorSet[string(key.PubKey().Address().Bytes())] = big.NewInt(1)
+	}
+
+	node := &trackingNode{validatorSet: validatorSet}
+	engine := NewEngine(node, keys[0], &recordingBroadcaster{})
+
+	if cap(engine.voteCh) < validatorCount {
+		t.Fatalf("expected vote queue capacity >= %d, got %d", validatorCount, cap(engine.voteCh))
+	}
+
+	block := types.NewBlock(&types.BlockHeader{Height: 1, Validator: keys[0].PubKey().Address().Bytes()}, nil)
+	blockHash, err := block.Header.Hash()
+	if err != nil {
+		t.Fatalf("hash block: %v", err)
+	}
+
+	engine.mu.Lock()
+	engine.currentState = State{Height: 1, Round: 0}
+	engine.activeProposal = &SignedProposal{Proposal: &Proposal{Block: block, Round: 0}}
+	engine.resetVoteTrackingLocked()
+	engine.mu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(validatorCount)
+
+	go func() {
+		for i := 0; i < validatorCount; i++ {
+			vote := <-engine.voteCh
+			engine.addVoteIfRelevant(vote)
+			wg.Done()
+		}
+	}()
+
+	for i := 0; i < validatorCount; i++ {
+		vote := &Vote{BlockHash: blockHash, Round: 0, Type: Precommit, Height: 1}
+		hash := sha256.Sum256(vote.bytes())
+		sig, err := ethcrypto.Sign(hash[:], keys[i].PrivateKey)
+		if err != nil {
+			t.Fatalf("sign vote %d: %v", i, err)
+		}
+		signedVote := &SignedVote{
+			Vote:      vote,
+			Validator: keys[i].PubKey().Address().Bytes(),
+			Signature: &Signature{Scheme: SignatureSchemeSecp256k1, Signature: sig},
+		}
+
+		if err := engine.HandleVote(signedVote); err != nil {
+			t.Fatalf("handle vote %d: %v", i, err)
+		}
+	}
+
+	wg.Wait()
+
+	if !engine.commit() {
+		t.Fatal("expected engine to commit block with supermajority of votes")
+	}
+	if node.height != 1 {
+		t.Fatalf("expected committed block to advance node height to 1, got %d", node.height)
 	}
 }
