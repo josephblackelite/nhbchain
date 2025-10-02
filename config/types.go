@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Governance captures global governance policy knobs that must be validated
 // before applying runtime configuration updates.
 type Governance struct {
@@ -22,6 +24,14 @@ type Mempool struct {
 // Blocks captures block production limits for transaction counts.
 type Blocks struct {
 	MaxTxs int64
+}
+
+// Consensus controls the BFT round timeouts.
+type Consensus struct {
+	ProposalTimeout  time.Duration `toml:"ProposalTimeout"`
+	PrevoteTimeout   time.Duration `toml:"PrevoteTimeout"`
+	PrecommitTimeout time.Duration `toml:"PrecommitTimeout"`
+	CommitTimeout    time.Duration `toml:"CommitTimeout"`
 }
 
 type Pauses struct {

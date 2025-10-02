@@ -43,7 +43,33 @@ const (
 	validatorPassEnv    = "NHB_VALIDATOR_PASS"
 	genesisPathEnv      = "NHB_GENESIS"
 	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
+	proposalTimeoutEnv  = "NHB_CONSENSUS_TIMEOUT_PROPOSAL"
+	prevoteTimeoutEnv   = "NHB_CONSENSUS_TIMEOUT_PREVOTE"
+	precommitTimeoutEnv = "NHB_CONSENSUS_TIMEOUT_PRECOMMIT"
+	commitTimeoutEnv    = "NHB_CONSENSUS_TIMEOUT_COMMIT"
 )
+
+type durationFlag struct {
+	value time.Duration
+	set   bool
+}
+
+func (d *durationFlag) String() string {
+	if d == nil {
+		return ""
+	}
+	return d.value.String()
+}
+
+func (d *durationFlag) Set(raw string) error {
+	parsed, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	d.value = parsed
+	d.set = true
+	return nil
+}
 
 func convertQuota(q config.Quota) nativecommon.Quota {
 	return nativecommon.Quota{
@@ -59,6 +85,14 @@ func main() {
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
 	grpcAddress := flag.String("grpc", "127.0.0.1:9090", "Address for the consensus gRPC server")
 	networkAddress := flag.String("p2p", "localhost:9091", "Address of the p2p daemon network service")
+	var proposalTimeoutFlag durationFlag
+	var prevoteTimeoutFlag durationFlag
+	var precommitTimeoutFlag durationFlag
+	var commitTimeoutFlag durationFlag
+	flag.Var(&proposalTimeoutFlag, "consensus-timeout-proposal", "Time to wait for a proposal before prevoting (e.g. 2s)")
+	flag.Var(&prevoteTimeoutFlag, "consensus-timeout-prevote", "Time to wait after prevote before moving to precommit (e.g. 2s)")
+	flag.Var(&precommitTimeoutFlag, "consensus-timeout-precommit", "Time to wait after precommit before attempting commit (e.g. 2s)")
+	flag.Var(&commitTimeoutFlag, "consensus-timeout-commit", "Total time to wait for commit before starting a new round (e.g. 4s)")
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
@@ -100,6 +134,15 @@ func main() {
 
 	if err := config.ValidateConfig(cfg.Global); err != nil {
 		log.Fatal("invalid configuration", "err", err)
+	}
+
+	consensusTimeouts, err := applyConsensusTimeoutOverrides(cfg.Consensus, proposalTimeoutFlag, prevoteTimeoutFlag, precommitTimeoutFlag, commitTimeoutFlag, os.LookupEnv)
+	if err != nil {
+		log.Fatal("invalid consensus timeout override", "err", err)
+	}
+	cfg.Consensus = consensusTimeouts
+	if err := config.ValidateConsensus(cfg.Consensus); err != nil {
+		log.Fatal("invalid consensus timeouts", "err", err)
 	}
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
@@ -249,7 +292,12 @@ func main() {
 
 	go maintainNetworkStream(ctx, *networkAddress, broadcaster, node, allowInsecureNetwork, networkDialOpts, cfg.NetworkSecurity.StreamQueueSize)
 
-	bftEngine := bft.NewEngine(node, privKey, broadcaster)
+	bftEngine := bft.NewEngine(node, privKey, broadcaster, bft.WithTimeouts(bft.TimeoutConfig{
+		Proposal:  cfg.Consensus.ProposalTimeout,
+		Prevote:   cfg.Consensus.PrevoteTimeout,
+		Precommit: cfg.Consensus.PrecommitTimeout,
+		Commit:    cfg.Consensus.CommitTimeout,
+	}))
 	node.SetBftEngine(bftEngine)
 
 	grpcListener, err := net.Listen("tcp", *grpcAddress)
@@ -292,6 +340,53 @@ func main() {
 	fmt.Println("--- Consensus node initialised and running ---")
 	<-ctx.Done()
 	fmt.Println("--- Consensus node shutting down ---")
+}
+
+func applyConsensusTimeoutOverrides(base config.Consensus, proposal, prevote, precommit, commit durationFlag, lookup envLookupFunc) (config.Consensus, error) {
+	result := base
+	var err error
+	result.ProposalTimeout, err = resolveDurationOverride(base.ProposalTimeout, proposal, "--consensus-timeout-proposal", proposalTimeoutEnv, lookup)
+	if err != nil {
+		return config.Consensus{}, err
+	}
+	result.PrevoteTimeout, err = resolveDurationOverride(base.PrevoteTimeout, prevote, "--consensus-timeout-prevote", prevoteTimeoutEnv, lookup)
+	if err != nil {
+		return config.Consensus{}, err
+	}
+	result.PrecommitTimeout, err = resolveDurationOverride(base.PrecommitTimeout, precommit, "--consensus-timeout-precommit", precommitTimeoutEnv, lookup)
+	if err != nil {
+		return config.Consensus{}, err
+	}
+	result.CommitTimeout, err = resolveDurationOverride(base.CommitTimeout, commit, "--consensus-timeout-commit", commitTimeoutEnv, lookup)
+	if err != nil {
+		return config.Consensus{}, err
+	}
+	return result, nil
+}
+
+func resolveDurationOverride(current time.Duration, flag durationFlag, flagName, envKey string, lookup envLookupFunc) (time.Duration, error) {
+	if flag.set {
+		if flag.value <= 0 {
+			return 0, fmt.Errorf("%s must be positive", flagName)
+		}
+		return flag.value, nil
+	}
+	if lookup != nil {
+		if raw, ok := lookup(envKey); ok {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed != "" {
+				parsed, err := time.ParseDuration(trimmed)
+				if err != nil {
+					return 0, fmt.Errorf("parse %s: %w", envKey, err)
+				}
+				if parsed <= 0 {
+					return 0, fmt.Errorf("%s must be positive", envKey)
+				}
+				return parsed, nil
+			}
+		}
+	}
+	return current, nil
 }
 
 const (

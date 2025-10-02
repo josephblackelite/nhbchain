@@ -22,6 +22,10 @@ for deployments where the validator stack is isolated from external clients.
 | `--allow-autogenesis` | `false` | Development flag enabling automatic genesis creation when no data exists. |
 | `--grpc` | `127.0.0.1:9090` | Listen address for the consensus gRPC API. |
 | `--p2p` | `localhost:9091` | Target address of the `p2pd` gRPC service. |
+| `--consensus-timeout-proposal` | Config (default `2s`) | Wait for a proposal before prevoting. |
+| `--consensus-timeout-prevote` | Config (default `2s`) | Wait after prevoting before moving to precommit. |
+| `--consensus-timeout-precommit` | Config (default `2s`) | Wait after precommitting before attempting commit. |
+| `--consensus-timeout-commit` | Config (default `4s`) | Maximum time allotted for committing a block before starting a new round. |
 
 Environment helpers:
 
@@ -30,6 +34,25 @@ Environment helpers:
 * `NHB_VALIDATOR_PASS` – required to decrypt the validator keystore unless KMS is configured.
 * `NHB_NETWORK_SHARED_SECRET` (or the value of `network_security.SharedSecretEnv`)
   – supplies the shared-secret token used to authorize gRPC requests.
+* `NHB_CONSENSUS_TIMEOUT_PROPOSAL`, `NHB_CONSENSUS_TIMEOUT_PREVOTE`, `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`, and `NHB_CONSENSUS_TIMEOUT_COMMIT`
+  – override the matching CLI flags with duration strings such as `500ms` or `3s`.
+
+## Consensus Timeouts
+
+`consensusd` reads the round timers from the `[consensus]` section of `config.toml`
+and falls back to the built-in defaults when the values are omitted. All duration
+values accept the Go duration format (`750ms`, `2s`, `1m30s`, etc.).
+
+```toml
+[consensus]
+ProposalTimeout = "2s"
+PrevoteTimeout = "2s"
+PrecommitTimeout = "2s"
+CommitTimeout = "4s"
+```
+
+Operators can adjust the timers at runtime with CLI flags or the environment
+variables listed above to better match their network latency profile.
 
 ## Ports and Connectivity
 

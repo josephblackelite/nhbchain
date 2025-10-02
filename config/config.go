@@ -58,6 +58,7 @@ type Config struct {
 	Lending               lending.Config  `toml:"lending"`
 	Mempool               MempoolConfig   `toml:"mempool"`
 	Global                Global          `toml:"global"`
+	Consensus             Consensus       `toml:"consensus"`
 	NetworkSecurity       NetworkSecurity `toml:"network_security"`
 }
 
@@ -134,6 +135,15 @@ func defaultGlobalConfig() Global {
 		Mempool: Mempool{MaxBytes: 16 << 20},
 		Blocks:  Blocks{MaxTxs: 5000},
 		Pauses:  Pauses{},
+	}
+}
+
+func defaultConsensusConfig() Consensus {
+	return Consensus{
+		ProposalTimeout:  2 * time.Second,
+		PrevoteTimeout:   2 * time.Second,
+		PrecommitTimeout: 2 * time.Second,
+		CommitTimeout:    4 * time.Second,
 	}
 }
 
@@ -311,6 +321,7 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 	cfg.Lending.EnsureDefaults()
 	cfg.ensureMempoolDefaults()
 	cfg.ensureGlobalDefaults(meta)
+	cfg.ensureConsensusDefaults(meta)
 
 	if strings.TrimSpace(cfg.NetworkName) == "" {
 		cfg.NetworkName = "nhb-local"
@@ -494,6 +505,23 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "blocks", "MaxTxs") {
 		cfg.Global.Blocks.MaxTxs = defaults.Blocks.MaxTxs
+	}
+}
+
+func (cfg *Config) ensureConsensusDefaults(meta toml.MetaData) {
+	defaults := defaultConsensusConfig()
+
+	if !meta.IsDefined("consensus", "ProposalTimeout") {
+		cfg.Consensus.ProposalTimeout = defaults.ProposalTimeout
+	}
+	if !meta.IsDefined("consensus", "PrevoteTimeout") {
+		cfg.Consensus.PrevoteTimeout = defaults.PrevoteTimeout
+	}
+	if !meta.IsDefined("consensus", "PrecommitTimeout") {
+		cfg.Consensus.PrecommitTimeout = defaults.PrecommitTimeout
+	}
+	if !meta.IsDefined("consensus", "CommitTimeout") {
+		cfg.Consensus.CommitTimeout = defaults.CommitTimeout
 	}
 }
 
@@ -955,6 +983,7 @@ func createDefault(path string, passphrase string) (*Config, error) {
 		},
 	}
 	cfg.Global = defaultGlobalConfig()
+	cfg.Consensus = defaultConsensusConfig()
 	cfg.ValidatorKeystorePath = keystorePath
 	cfg.syncTopLevelToP2P()
 

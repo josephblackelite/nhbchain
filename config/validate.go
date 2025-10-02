@@ -24,3 +24,20 @@ func ValidateConfig(g Global) error {
 	}
 	return nil
 }
+
+// ValidateConsensus ensures consensus timeouts are positive durations.
+func ValidateConsensus(c Consensus) error {
+	if c.ProposalTimeout <= 0 {
+		return fmt.Errorf("consensus: proposal timeout must be positive")
+	}
+	if c.PrevoteTimeout <= 0 {
+		return fmt.Errorf("consensus: prevote timeout must be positive")
+	}
+	if c.PrecommitTimeout <= 0 {
+		return fmt.Errorf("consensus: precommit timeout must be positive")
+	}
+	if c.CommitTimeout <= 0 {
+		return fmt.Errorf("consensus: commit timeout must be positive")
+	}
+	return nil
+}

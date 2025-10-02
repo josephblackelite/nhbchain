@@ -366,6 +366,28 @@ ValidatorKeystorePath = "%s"
 	}
 }
 
+func TestLoadSetsConsensusDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	keystorePath := filepath.Join(dir, "validator.keystore")
+	contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = "%s"
+`, keystorePath)
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	want := defaultConsensusConfig()
+	if cfg.Consensus != want {
+		t.Fatalf("unexpected consensus defaults: %+v", cfg.Consensus)
+	}
+}
+
 func TestLoadWithoutPassphraseFailsToCreateDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
