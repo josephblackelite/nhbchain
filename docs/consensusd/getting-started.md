@@ -13,6 +13,14 @@ for deployments where the validator stack is isolated from external clients.
 * Shared-secret or mutual TLS credentials so that only trusted peers can reach
   the consensus gRPC API.
 
+> **Important:** `consensusd` refuses to start when the `[network_security]`
+> block is missing or resolves to an empty shared secret. For quick local
+> experiments, copy the inline example from `config-local.toml` (set
+> `AllowInsecure = true` and provide a short `SharedSecret`). Production
+> deployments must supply the token via `SharedSecretEnv` or `SharedSecretFile`,
+> leave `AllowInsecure = false`, and provision TLS material so both `consensusd`
+> and `p2pd` authenticate each other.
+
 ## Command Flags
 
 | Flag | Default | Description |
@@ -33,7 +41,8 @@ Environment helpers:
 * `NHB_ALLOW_AUTOGENESIS` – mirrors the `--allow-autogenesis` flag.
 * `NHB_VALIDATOR_PASS` – required to decrypt the validator keystore unless KMS is configured.
 * `NHB_NETWORK_SHARED_SECRET` (or the value of `network_security.SharedSecretEnv`)
-  – supplies the shared-secret token used to authorize gRPC requests.
+  – supplies the shared-secret token used to authorize gRPC requests. The daemon
+  exits during startup if the resolved secret is blank.
 * `NHB_CONSENSUS_TIMEOUT_PROPOSAL`, `NHB_CONSENSUS_TIMEOUT_PREVOTE`, `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`, and `NHB_CONSENSUS_TIMEOUT_COMMIT`
   – override the matching CLI flags with duration strings such as `500ms` or `3s`.
 

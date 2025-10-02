@@ -41,7 +41,8 @@ ClientVersion = "nhbchain/node"
 
 [network_security]
 # Configure a shared secret for local development so consensusd only accepts
-# authenticated requests. Production deployments should supply the secret via
+# authenticated requests. The daemon refuses to start when this block resolves
+# to an empty secret. Production deployments should supply the secret via
 # SharedSecretFile or SharedSecretEnv and/or enable mutual TLS.
 SharedSecret = "local-dev-shared-secret"
 # Local development defaults to plaintext; production operators must provision TLS

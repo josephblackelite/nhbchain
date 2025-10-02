@@ -33,6 +33,28 @@ BanDurationSeconds = 3600
 DialBackoffSeconds = 30
 PEX = true
 
+[network_security]
+# Shared-secret token distributed out-of-band. Configure one of the following
+# sources so consensusd and p2pd can authenticate each other. The daemon will
+# refuse to start if none resolve to a non-empty value.
+SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
+SharedSecretFile = "/etc/nhb/network.token"
+SharedSecret = ""
+# Production deployments must disable plaintext by leaving AllowInsecure=false
+# and provisioning TLS certificates. Local lab setups can flip this to true
+# temporarily when TLS is not available.
+AllowInsecure = false
+AuthorizationHeader = "x-nhb-network-token"
+AllowUnauthenticatedReads = false
+ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
+ServerTLSKeyFile = "/etc/nhb/tls/p2pd.key"
+ClientTLSCertFile = "/etc/nhb/tls/consensus.crt"
+ClientTLSKeyFile = "/etc/nhb/tls/consensus.key"
+ClientCAFile = "/etc/nhb/tls/consensus-ca.pem"
+ServerCAFile = "/etc/nhb/tls/p2pd-ca.pem"
+AllowedClientCommonNames = ["consensusd"]
+ServerName = "p2pd.internal"
+
 PeerBanSeconds = 3600
 ReadTimeout = 90
 WriteTimeout = 5
