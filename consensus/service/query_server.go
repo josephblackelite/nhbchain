@@ -11,6 +11,9 @@ func (s *Server) QueryState(ctx context.Context, req *consensusv1.QueryStateRequ
 	if s == nil || s.node == nil {
 		return nil, fmt.Errorf("consensus service not initialised")
 	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
 	result, err := s.node.QueryState(req.GetNamespace(), req.GetKey())
 	if err != nil {
 		return nil, err
@@ -30,6 +33,9 @@ func (s *Server) QueryState(ctx context.Context, req *consensusv1.QueryStateRequ
 func (s *Server) QueryPrefix(req *consensusv1.QueryPrefixRequest, stream consensusv1.QueryService_QueryPrefixServer) error {
 	if s == nil || s.node == nil {
 		return fmt.Errorf("consensus service not initialised")
+	}
+	if err := s.authorize(stream.Context()); err != nil {
+		return err
 	}
 	records, err := s.node.QueryPrefix(req.GetNamespace(), req.GetPrefix())
 	if err != nil {
@@ -53,6 +59,9 @@ func (s *Server) QueryPrefix(req *consensusv1.QueryPrefixRequest, stream consens
 func (s *Server) SimulateTx(ctx context.Context, req *consensusv1.SimulateTxRequest) (*consensusv1.SimulateTxResponse, error) {
 	if s == nil || s.node == nil {
 		return nil, fmt.Errorf("consensus service not initialised")
+	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
 	}
 	result, err := s.node.SimulateTx(req.GetTxBytes())
 	if err != nil {
