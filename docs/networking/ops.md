@@ -38,7 +38,12 @@ interface when deploying across hosts and configure authentication before doing
 so.
 
 The `[network_security]` section in `config.toml` drives both ends of the
-connection:
+connection. `consensusd` validates this block on startup and will refuse to run
+when the shared secret resolves to an empty string. Use the inline example from
+`config-local.toml` for lab environments (`AllowInsecure = true` with a short
+`SharedSecret`) and promote to the production pattern below—external token via
+`SharedSecretEnv`/`SharedSecretFile` plus TLS—before exposing the services
+outside of localhost:
 
 ```toml
 [network_security]

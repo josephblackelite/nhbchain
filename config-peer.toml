@@ -33,6 +33,22 @@ BanDurationSeconds = 3600
 DialBackoffSeconds = 30
 PEX = true
 
+[network_security]
+# Remote validators must configure a shared secret (via env, file, or inline)
+# so consensusd can authenticate to p2pd. Populate SharedSecretEnv/SharedSecretFile
+# for production deployments; consensusd will refuse to start if this block
+# resolves to an empty token.
+SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
+SharedSecretFile = "/etc/nhb/network.token"
+SharedSecret = ""
+AllowInsecure = false
+# Leave the TLS paths commented until certificates are provisioned. Production
+# clusters should enable mutual TLS and keep AllowInsecure = false.
+# ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
+# ServerTLSKeyFile = "/etc/nhb/tls/p2pd.key"
+# ClientTLSCertFile = "/etc/nhb/tls/consensus.crt"
+# ClientTLSKeyFile = "/etc/nhb/tls/consensus.key"
+
 PeerBanSeconds = 3600
 ReadTimeout = 90
 WriteTimeout = 5
