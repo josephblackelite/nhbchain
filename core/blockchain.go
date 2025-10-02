@@ -268,7 +268,7 @@ func (bc *Blockchain) GetHeight() uint64 {
 func (bc *Blockchain) Tip() []byte {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	return bc.tip
+	return cloneBytes(bc.tip)
 }
 
 // LastTimestamp returns the timestamp recorded for the most recently persisted block.

@@ -141,17 +141,17 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed to add block2: %v", err)
 	}
 
-        if bc.GetHeight() != 2 {
-                t.Fatalf("expected height 2 before restart, got %d", bc.GetHeight())
-        }
-        if last := bc.LastTimestamp(); last != block2.Header.Timestamp {
-                t.Fatalf("unexpected last timestamp before restart: got %d want %d", last, block2.Header.Timestamp)
-        }
+	if bc.GetHeight() != 2 {
+		t.Fatalf("expected height 2 before restart, got %d", bc.GetHeight())
+	}
+	if last := bc.LastTimestamp(); last != block2.Header.Timestamp {
+		t.Fatalf("unexpected last timestamp before restart: got %d want %d", last, block2.Header.Timestamp)
+	}
 
-        db.Close()
+	db.Close()
 
-        reopenedDB, err := storage.NewLevelDB(dbPath)
-        if err != nil {
+	reopenedDB, err := storage.NewLevelDB(dbPath)
+	if err != nil {
 		t.Fatalf("failed to reopen db: %v", err)
 	}
 	defer reopenedDB.Close()
@@ -161,12 +161,12 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("failed to reopen blockchain: %v", err)
 	}
 
-        if reopenedBC.GetHeight() != 2 {
-                t.Fatalf("expected height 2 after restart, got %d", reopenedBC.GetHeight())
-        }
-        if last := reopenedBC.LastTimestamp(); last != block2.Header.Timestamp {
-                t.Fatalf("unexpected last timestamp after restart: got %d want %d", last, block2.Header.Timestamp)
-        }
+	if reopenedBC.GetHeight() != 2 {
+		t.Fatalf("expected height 2 after restart, got %d", reopenedBC.GetHeight())
+	}
+	if last := reopenedBC.LastTimestamp(); last != block2.Header.Timestamp {
+		t.Fatalf("unexpected last timestamp after restart: got %d want %d", last, block2.Header.Timestamp)
+	}
 
 	reopenedBlock1, err := reopenedBC.GetBlockByHeight(1)
 	if err != nil {
@@ -204,6 +204,33 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("expected genesis prev hash to be empty")
 	}
 
+}
+
+func TestTipReturnsCopy(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { _ = db.Close() })
+
+	bc, err := NewBlockchain(db, "", true)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+
+	tip := bc.Tip()
+	if len(tip) == 0 {
+		t.Fatalf("expected non-empty tip hash")
+	}
+
+	original := append([]byte(nil), tip...)
+
+	tip[0] ^= 0xFF
+
+	if bytes.Equal(tip, bc.Tip()) {
+		t.Fatalf("mutating returned tip should not affect blockchain state")
+	}
+
+	if got := bc.Tip(); !bytes.Equal(got, original) {
+		t.Fatalf("blockchain tip mutated: got %x want %x", got, original)
+	}
 }
 
 func TestNewBlockchainChainIDMismatchDoesNotPersistState(t *testing.T) {
