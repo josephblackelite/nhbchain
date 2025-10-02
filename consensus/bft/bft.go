@@ -70,6 +70,25 @@ var (
 	defaultCommitTimeout    = 4 * time.Second
 )
 
+const (
+	defaultProposalQueueSize = 16
+	defaultVoteQueueSize     = 128
+	voteQueueMultiplier      = 2
+)
+
+func calculateVoteQueueCapacity(validatorSet map[string]*big.Int) int {
+	validatorCount := len(validatorSet)
+	if validatorCount == 0 {
+		return defaultVoteQueueSize
+	}
+
+	scaled := validatorCount * voteQueueMultiplier
+	if scaled < defaultVoteQueueSize {
+		return defaultVoteQueueSize
+	}
+	return scaled
+}
+
 func defaultTimeoutConfig() TimeoutConfig {
 	return TimeoutConfig{
 		Proposal:  defaultProposalTimeout,
@@ -122,8 +141,8 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		},
 		totalVotingPower: totalPower,
 		committedBlocks:  make(map[uint64]bool),
-		proposalCh:       make(chan *SignedProposal, 16),
-		voteCh:           make(chan *SignedVote, 128),
+		proposalCh:       make(chan *SignedProposal, defaultProposalQueueSize),
+		voteCh:           make(chan *SignedVote, calculateVoteQueueCapacity(validatorSet)),
 		proposalTimeout:  defaultProposalTimeout,
 		prevoteTimeout:   defaultPrevoteTimeout,
 		precommitTimeout: defaultPrecommitTimeout,
@@ -275,12 +294,8 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 		return nil
 	}
 
-	select {
-	case e.voteCh <- v:
-		return nil
-	default:
-		return fmt.Errorf("vote queue full")
-	}
+	e.voteCh <- v
+	return nil
 }
 
 func (e *Engine) propose() error {
