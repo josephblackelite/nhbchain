@@ -65,6 +65,23 @@ func (s *Server) SubmitTransaction(ctx context.Context, req *consensusv1.SubmitT
 	return &consensusv1.SubmitTransactionResponse{}, nil
 }
 
+// SubmitTxEnvelope injects a signed transaction envelope into the node's mempool.
+func (s *Server) SubmitTxEnvelope(ctx context.Context, req *consensusv1.SubmitTxEnvelopeRequest) (*consensusv1.SubmitTxEnvelopeResponse, error) {
+	if s == nil || s.node == nil {
+		return nil, fmt.Errorf("consensus service not initialised")
+	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := codec.TransactionFromEnvelope(req.GetTx()); err != nil {
+		return nil, err
+	}
+	if err := s.node.SubmitTxEnvelope(req.GetTx()); err != nil {
+		return nil, err
+	}
+	return &consensusv1.SubmitTxEnvelopeResponse{}, nil
+}
+
 // GetValidatorSet returns the validator set tracked by the node.
 func (s *Server) GetValidatorSet(ctx context.Context, _ *consensusv1.GetValidatorSetRequest) (*consensusv1.GetValidatorSetResponse, error) {
 	if s == nil || s.node == nil {

@@ -1,8 +1,12 @@
 package codec
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math/big"
+
+	"github.com/ethereum/go-ethereum/crypto"
+	"google.golang.org/protobuf/proto"
 
 	"nhbchain/core/types"
 	consensusv1 "nhbchain/proto/consensus/v1"
@@ -93,6 +97,59 @@ func TransactionFromProto(msg *consensusv1.Transaction) (*types.Transaction, err
 	}
 	if tx.PaymasterV, err = BigIntFromProto(msg.PaymasterV); err != nil {
 		return nil, err
+	}
+	return tx, nil
+}
+
+// TransactionFromEnvelope converts a signed envelope into a core transaction after verifying the signature.
+func TransactionFromEnvelope(envelope *consensusv1.SignedTxEnvelope) (*types.Transaction, error) {
+	if envelope == nil {
+		return nil, fmt.Errorf("envelope: transaction required")
+	}
+	body := envelope.GetEnvelope()
+	if body == nil {
+		return nil, fmt.Errorf("envelope: missing body")
+	}
+	signature := envelope.GetSignature()
+	if signature == nil {
+		return nil, fmt.Errorf("envelope: missing signature")
+	}
+	sigBytes := signature.GetSignature()
+	if len(sigBytes) < 64 {
+		return nil, fmt.Errorf("envelope: invalid signature length")
+	}
+	pubKey := signature.GetPublicKey()
+	if len(pubKey) == 0 {
+		return nil, fmt.Errorf("envelope: public key required")
+	}
+	rawBody, err := proto.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("envelope: marshal body: %w", err)
+	}
+	digest := sha256.Sum256(rawBody)
+	if !crypto.VerifySignature(pubKey, digest[:], sigBytes[:64]) {
+		return nil, fmt.Errorf("envelope: signature verification failed")
+	}
+	payload := body.GetPayload()
+	if payload == nil {
+		return nil, fmt.Errorf("envelope: payload required")
+	}
+	var protoTx consensusv1.Transaction
+	if err := payload.UnmarshalTo(&protoTx); err != nil {
+		return nil, fmt.Errorf("envelope: decode payload: %w", err)
+	}
+	tx, err := TransactionFromProto(&protoTx)
+	if err != nil {
+		return nil, err
+	}
+	if tx == nil {
+		return nil, fmt.Errorf("envelope: decoded transaction nil")
+	}
+	if nonce := body.GetNonce(); nonce != 0 {
+		if tx.Nonce != 0 && tx.Nonce != nonce {
+			return nil, fmt.Errorf("envelope: nonce mismatch")
+		}
+		tx.Nonce = nonce
 	}
 	return tx, nil
 }

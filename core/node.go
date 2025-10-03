@@ -1124,6 +1124,18 @@ func (n *Node) SubmitTransaction(tx *types.Transaction) error {
 	return n.AddTransaction(tx)
 }
 
+// SubmitTxEnvelope enqueues a transaction derived from the provided signed envelope.
+func (n *Node) SubmitTxEnvelope(envelope *consensusv1.SignedTxEnvelope) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	tx, err := codec.TransactionFromEnvelope(envelope)
+	if err != nil {
+		return err
+	}
+	return n.AddTransaction(tx)
+}
+
 // --- Methods for bft.NodeInterface ---
 
 func (n *Node) GetMempool() []*types.Transaction {
