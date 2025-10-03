@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,5 +278,132 @@ func TestCommitBlockEnforcesTimestampWindow(t *testing.T) {
 	}
 	if last := node.chain.LastTimestamp(); last != baseTime.Unix() {
 		t.Fatalf("last timestamp changed on rejection: got %d want %d", last, baseTime.Unix())
+	}
+}
+
+func TestCommitBlockRejectsHeightMismatch(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	parentRoot := node.state.CurrentRoot()
+
+	fixedTime := time.Unix(1_900_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
+
+	txRoot, err := ComputeTxRoot(nil)
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 2,
+		Timestamp: fixedTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, nil)
+
+	if err := node.CommitBlock(block); err == nil {
+		t.Fatalf("expected error for mismatched block height")
+	} else if !strings.Contains(err.Error(), "height mismatch") {
+		t.Fatalf("expected height mismatch error, got %v", err)
+	}
+
+	if got := node.chain.GetHeight(); got != 0 {
+		t.Fatalf("chain height mutated on mismatch: got %d want 0", got)
+	}
+	if got := node.state.CurrentRoot(); got != parentRoot {
+		t.Fatalf("state root changed on mismatch: got %x want %x", got.Bytes(), parentRoot.Bytes())
+	}
+}
+
+func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	cfg := node.state.EpochConfig()
+	cfg.Length = 1
+	cfg.StakeWeight = 1
+	cfg.EngagementWeight = 1
+	cfg.RotationEnabled = true
+	cfg.MaxValidators = 1
+	cfg.SnapshotHistory = 8
+	if err := node.SetEpochConfig(cfg); err != nil {
+		t.Fatalf("set epoch config: %v", err)
+	}
+
+	validatorAddr := seedEligibleValidator(t, node.state, 5000, 0)
+
+	txRoot, err := ComputeTxRoot(nil)
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	currentTime := time.Unix(1_900_000_100, 0).UTC()
+	node.SetTimeSource(func() time.Time { return currentTime })
+
+	for i := 0; i < 2; i++ {
+		currentTime = currentTime.Add(time.Second)
+		nextHeight := node.chain.GetHeight() + 1
+		header := &types.BlockHeader{
+			Height:    nextHeight,
+			Timestamp: currentTime.Unix(),
+			PrevHash:  node.chain.Tip(),
+			TxRoot:    txRoot,
+			Validator: validatorKey.PubKey().Address().Bytes(),
+		}
+		block := types.NewBlock(header, nil)
+		if err := node.CommitBlock(block); err != nil {
+			t.Fatalf("commit block %d: %v", nextHeight, err)
+		}
+	}
+
+	if got := node.chain.GetHeight(); got != 2 {
+		t.Fatalf("unexpected chain height: got %d want 2", got)
+	}
+
+	history := node.state.EpochHistory()
+	if len(history) != 2 {
+		t.Fatalf("expected two epoch snapshots, got %d", len(history))
+	}
+	for i, snapshot := range history {
+		expected := uint64(i + 1)
+		if snapshot.Height != expected {
+			t.Fatalf("snapshot %d height mismatch: got %d want %d", i, snapshot.Height, expected)
+		}
+		if snapshot.Epoch != expected {
+			t.Fatalf("snapshot %d epoch mismatch: got %d want %d", i, snapshot.Epoch, expected)
+		}
+		if len(snapshot.Selected) != 1 {
+			t.Fatalf("snapshot %d selected count mismatch: got %d want 1", i, len(snapshot.Selected))
+		}
+		if string(snapshot.Selected[0]) != string(validatorAddr) {
+			t.Fatalf("snapshot %d selected validator mismatch", i)
+		}
+	}
+
+	if _, ok := node.state.ValidatorSet[string(validatorAddr)]; !ok {
+		t.Fatalf("validator not in active set after commits")
 	}
 }
