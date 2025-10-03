@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"math/big"
@@ -10,14 +11,18 @@ import (
 	"testing"
 	"time"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	"nhbchain/consensus/codec"
 	"nhbchain/core"
 	"nhbchain/core/types"
+	nhbcrypto "nhbchain/crypto"
 	"nhbchain/network"
 	consensusv1 "nhbchain/proto/consensus/v1"
 )
@@ -26,6 +31,8 @@ type fakeConsensusNode struct {
 	mu         sync.Mutex
 	validators map[string]*big.Int
 	commits    int
+	envelopes  int
+	lastEnv    *consensusv1.SignedTxEnvelope
 }
 
 func newFakeConsensusNode() *fakeConsensusNode {
@@ -33,6 +40,63 @@ func newFakeConsensusNode() *fakeConsensusNode {
 }
 
 func (f *fakeConsensusNode) SubmitTransaction(tx *types.Transaction) error { return nil }
+
+func buildSignedEnvelope(t testing.TB) *consensusv1.SignedTxEnvelope {
+	t.Helper()
+	key, err := nhbcrypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeRegisterIdentity,
+		Nonce:    1,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(0),
+		Data:     []byte("alice"),
+	}
+	if err := tx.Sign(key.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+	protoTx, err := codec.TransactionToProto(tx)
+	if err != nil {
+		t.Fatalf("transaction to proto: %v", err)
+	}
+	payload, err := anypb.New(protoTx)
+	if err != nil {
+		t.Fatalf("pack payload: %v", err)
+	}
+	envelope := &consensusv1.TxEnvelope{
+		Payload: payload,
+		Nonce:   tx.Nonce,
+	}
+	if tx.ChainID != nil {
+		envelope.ChainId = tx.ChainID.String()
+	}
+	raw, err := proto.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	digest := sha256.Sum256(raw)
+	sig, err := ethcrypto.Sign(digest[:], key.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign envelope: %v", err)
+	}
+	signature := &consensusv1.TxSignature{
+		PublicKey: ethcrypto.FromECDSAPub(&key.PrivateKey.PublicKey),
+		Signature: sig,
+	}
+	return &consensusv1.SignedTxEnvelope{Envelope: envelope, Signature: signature}
+}
+
+func (f *fakeConsensusNode) SubmitTxEnvelope(tx *consensusv1.SignedTxEnvelope) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.envelopes++
+	f.lastEnv = tx
+	return nil
+}
 
 func (f *fakeConsensusNode) GetValidatorSet() map[string]*big.Int {
 	f.mu.Lock()
@@ -120,6 +184,48 @@ func TestServerGetValidatorSetConcurrentMutation(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("GetValidatorSet encountered error: %v", err)
 	default:
+	}
+}
+
+func TestServerSubmitTxEnvelope(t *testing.T) {
+	node := newFakeConsensusNode()
+	srv := NewServer(node)
+
+	envelope := buildSignedEnvelope(t)
+	resp, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: envelope})
+	if err != nil {
+		t.Fatalf("submit envelope: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("expected response")
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.envelopes != 1 {
+		t.Fatalf("expected envelope submission recorded")
+	}
+	if node.lastEnv != envelope {
+		t.Fatalf("unexpected envelope pointer stored")
+	}
+}
+
+func TestServerSubmitTxEnvelopeInvalidSignature(t *testing.T) {
+	node := newFakeConsensusNode()
+	srv := NewServer(node)
+
+	envelope := buildSignedEnvelope(t)
+	tampered := proto.Clone(envelope).(*consensusv1.SignedTxEnvelope)
+	sig := append([]byte(nil), tampered.GetSignature().GetSignature()...)
+	sig[0] ^= 0xFF
+	tampered.Signature.Signature = sig
+
+	if _, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: tampered}); err == nil {
+		t.Fatalf("expected signature validation error")
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.envelopes != 0 {
+		t.Fatalf("unexpected envelope submission on failure")
 	}
 }
 
