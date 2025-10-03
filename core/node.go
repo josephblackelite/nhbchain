@@ -67,7 +67,7 @@ type Node struct {
 	txValidationMu               sync.RWMutex
 	txSimulationEnabled          bool
 	bftEngine                    *bft.Engine
-	stateMu                      sync.Mutex
+	stateMu                      sync.RWMutex
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
 	govPolicy                    governance.ProposalPolicy
@@ -1715,31 +1715,79 @@ func validatorPower(v *big.Int) uint64 {
 	return v.Uint64()
 }
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
 	return n.state.GetAccount(addr)
 }
 
 func (n *Node) EpochConfig() epoch.Config {
+	if n == nil {
+		return epoch.Config{}
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return epoch.Config{}
+	}
 	return n.state.EpochConfig()
 }
 
 func (n *Node) SetEpochConfig(cfg epoch.Config) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
 	return n.state.SetEpochConfig(cfg)
 }
 
 func (n *Node) EpochSnapshot(epochNumber uint64) (*epoch.Snapshot, bool) {
+	if n == nil {
+		return nil, false
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, false
+	}
 	return n.state.EpochSnapshot(epochNumber)
 }
 
 func (n *Node) LatestEpochSnapshot() (*epoch.Snapshot, bool) {
+	if n == nil {
+		return nil, false
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, false
+	}
 	return n.state.LatestEpochSnapshot()
 }
 
 func (n *Node) LatestEpochSummary() (*epoch.Summary, bool) {
+	if n == nil {
+		return nil, false
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, false
+	}
 	return n.state.LatestEpochSummary()
 }
 
 func (n *Node) EpochSummary(epochNumber uint64) (*epoch.Summary, bool) {
-	snapshot, ok := n.state.EpochSnapshot(epochNumber)
+	snapshot, ok := n.EpochSnapshot(epochNumber)
 	if !ok {
 		return nil, false
 	}
@@ -1748,16 +1796,38 @@ func (n *Node) EpochSummary(epochNumber uint64) (*epoch.Summary, bool) {
 }
 
 func (n *Node) RewardConfig() rewards.Config {
+	if n == nil {
+		return rewards.Config{}
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return rewards.Config{}
+	}
 	return n.state.RewardConfig()
 }
 
 func (n *Node) SetRewardConfig(cfg rewards.Config) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
 	return n.state.SetRewardConfig(cfg)
 }
 
 func (n *Node) PotsoRewardConfig() potso.RewardConfig {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
+	if n == nil {
+		return potso.RewardConfig{}
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return potso.RewardConfig{}
+	}
 	return n.state.PotsoRewardConfig()
 }
 
@@ -1779,8 +1849,14 @@ func (n *Node) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
 }
 
 func (n *Node) PotsoWeightConfig() potso.WeightParams {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
+	if n == nil {
+		return potso.WeightParams{}
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return potso.WeightParams{}
+	}
 	return n.state.PotsoWeightConfig()
 }
 
@@ -1808,10 +1884,26 @@ func (n *Node) SetPotsoEngineParams(params potso.EngineParams) error {
 }
 
 func (n *Node) RewardEpochSettlement(epochNumber uint64) (*rewards.EpochSettlement, bool) {
+	if n == nil {
+		return nil, false
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, false
+	}
 	return n.state.RewardEpochSettlement(epochNumber)
 }
 
 func (n *Node) LatestRewardEpochSettlement() (*rewards.EpochSettlement, bool) {
+	if n == nil {
+		return nil, false
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, false
+	}
 	return n.state.LatestRewardEpochSettlement()
 }
 
