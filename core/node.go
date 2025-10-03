@@ -1381,6 +1381,20 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 		}
 	}()
 
+	if b == nil {
+		return fmt.Errorf("block cannot be nil")
+	}
+	if b.Header == nil {
+		return fmt.Errorf("block header missing")
+	}
+	if n == nil || n.chain == nil {
+		return fmt.Errorf("blockchain not initialised")
+	}
+	expectedHeight := n.chain.Height() + 1
+	if b.Header.Height != expectedHeight {
+		return fmt.Errorf("block height mismatch: got %d want %d", b.Header.Height, expectedHeight)
+	}
+
 	// Verify TxRoot before executing
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {

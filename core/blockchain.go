@@ -163,6 +163,20 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
+	if b == nil {
+		return fmt.Errorf("block cannot be nil")
+	}
+	if b.Header == nil {
+		return fmt.Errorf("block header missing")
+	}
+	if b.Header.Height == 0 {
+		return fmt.Errorf("block height must be greater than zero")
+	}
+	expectedHeight := bc.height + 1
+	if b.Header.Height != expectedHeight {
+		return fmt.Errorf("block height mismatch: got %d want %d", b.Header.Height, expectedHeight)
+	}
+
 	// Basic linkage check: parent hash must match current tip.
 	if !bytes.Equal(b.Header.PrevHash, bc.tip) {
 		return fmt.Errorf("block prevhash mismatch")
