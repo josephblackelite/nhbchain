@@ -42,8 +42,10 @@ SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
 SharedSecretFile = "/etc/nhb/network.token"
 SharedSecret = ""
 AllowInsecure = false
-# Leave the TLS paths commented until certificates are provisioned. Production
-# clusters should enable mutual TLS and keep AllowInsecure = false.
+# Leave the TLS paths commented until certificates are provisioned. The daemon
+# now fails fast when TLS material is missing unless AllowInsecure is explicitly
+# set to true, so production clusters should enable mutual TLS and keep
+# AllowInsecure = false.
 # ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
 # ServerTLSKeyFile = "/etc/nhb/tls/p2pd.key"
 # ClientTLSCertFile = "/etc/nhb/tls/consensus.crt"

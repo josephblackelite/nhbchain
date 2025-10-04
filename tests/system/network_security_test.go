@@ -3,6 +3,7 @@ package system
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"nhbchain/config"
 	"nhbchain/network"
 	networkv1 "nhbchain/proto/network/v1"
 )
@@ -149,13 +151,36 @@ func TestNetworkServiceAnonymousReadsOptIn(t *testing.T) {
 
 	client := networkv1.NewNetworkServiceClient(conn)
 
-	if _, err := client.GetView(ctx, &networkv1.GetViewRequest{}); err != nil {
-		t.Fatalf("anonymous read should succeed: %v", err)
+	if _, err := client.GetView(ctx, &networkv1.GetViewRequest{}); status.Code(err) == codes.Unauthenticated {
+		t.Fatalf("anonymous view should bypass auth, got %v", err)
 	}
-	if _, err := client.ListPeers(ctx, &networkv1.ListPeersRequest{}); err != nil {
-		t.Fatalf("anonymous read should succeed: %v", err)
+	if _, err := client.ListPeers(ctx, &networkv1.ListPeersRequest{}); status.Code(err) == codes.Unauthenticated {
+		t.Fatalf("anonymous peer list should bypass auth, got %v", err)
 	}
 	if _, err := client.BanPeer(ctx, &networkv1.BanPeerRequest{NodeId: "peer"}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("expected unauthenticated ban, got %v", err)
+	}
+}
+
+func TestNetworkServerSecurityRequiresAuthenticator(t *testing.T) {
+	cfg := &config.Config{
+		NetworkSecurity: config.NetworkSecurity{
+			AllowInsecure: true,
+		},
+	}
+	if _, _, _, err := network.BuildServerSecurity(&cfg.NetworkSecurity, "", nil); err == nil || !strings.Contains(err.Error(), "shared secret or client certificate authentication") {
+		t.Fatalf("expected missing authenticator error, got %v", err)
+	}
+}
+
+func TestNetworkServerSecurityRequiresTLSUnlessExplicitlyInsecure(t *testing.T) {
+	cfg := &config.Config{
+		NetworkSecurity: config.NetworkSecurity{
+			AllowInsecure: false,
+			SharedSecret:  "token",
+		},
+	}
+	if _, _, _, err := network.BuildServerSecurity(&cfg.NetworkSecurity, "", nil); err == nil || !strings.Contains(err.Error(), "missing TLS material") {
+		t.Fatalf("expected missing TLS error, got %v", err)
 	}
 }

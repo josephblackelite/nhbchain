@@ -41,8 +41,10 @@ SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
 SharedSecretFile = "/etc/nhb/network.token"
 SharedSecret = ""
 # Production deployments must disable plaintext by leaving AllowInsecure=false
-# and provisioning TLS certificates. Local lab setups can flip this to true
-# temporarily when TLS is not available.
+# and provisioning TLS certificates. The daemon will now fail fast when TLS is
+# missing unless this flag is explicitly set to true. Local lab setups can flip
+# it temporarily when TLS is not available, but must still provide a shared
+# secret or client certificates.
 AllowInsecure = false
 AuthorizationHeader = "x-nhb-network-token"
 AllowUnauthenticatedReads = false

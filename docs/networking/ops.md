@@ -83,9 +83,11 @@ service enforces it on `Gossip`, `DialPeer`, `BanPeer`, `GetView`, and
 `AllowedClientCommonNames` allowlist when provided. `consensusd` consumes the
 same block to dial with `grpc.WithTransportCredentials` and per-RPC metadata so
 authenticated traffic continues to flow while unauthenticated requests are
-rejected. Beginning with this release, `consensusd` refuses to fall back to
-plaintext; operators must ship valid TLS material or explicitly set
-`AllowInsecure = true` for short-lived lab environments.
+rejected. Beginning with this release, both `consensusd` and `p2pd` refuse to
+fall back to plaintext; the server now fails fast when TLS material is missing
+unless `AllowInsecure = true` is explicitly set for a short-lived lab
+environment, and at least one authenticator (shared secret or client
+certificate) must be configured before either service will start.
 
 Setting `AllowUnauthenticatedReads = true` re-opens `GetView` and `ListPeers` to
 anonymous callers for debugging or observability tooling. This opt-in bypasses
