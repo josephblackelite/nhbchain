@@ -1084,7 +1084,7 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 	if !types.IsValidChainID(tx.ChainID) {
 		return fmt.Errorf("%w: unexpected chain id %s", ErrInvalidTransaction, tx.ChainID.String())
 	}
-	if tx.Type != types.TxTypeMint {
+	if types.RequiresSignature(tx.Type) {
 		if _, err := tx.From(); err != nil {
 			return fmt.Errorf("%w: recover sender: %w", ErrInvalidTransaction, err)
 		}
@@ -1131,7 +1131,7 @@ func (n *Node) SubmitTxEnvelope(envelope *consensusv1.SignedTxEnvelope) error {
 	}
 	tx, err := codec.TransactionFromEnvelope(envelope)
 	if err != nil {
-		return err
+		return fmt.Errorf("submit envelope: %w", err)
 	}
 	return n.AddTransaction(tx)
 }

@@ -31,21 +31,34 @@ func IsValidChainID(chainID *big.Int) bool {
 type TxType byte
 
 const (
-	TxTypeTransfer         TxType = 0x01 // A standard transfer of NHB
-	TxTypeRegisterIdentity TxType = 0x02 // A transaction to claim a username
-	TxTypeCreateEscrow     TxType = 0x03 // Create escrow
-	TxTypeReleaseEscrow    TxType = 0x04 // NEW: Buyer releases funds to seller
-	TxTypeRefundEscrow     TxType = 0x05 // NEW: Seller refunds funds to buyer
-	TxTypeStake            TxType = 0x06 // Implenting stake
-	TxTypeUnstake          TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
-	TxTypeHeartbeat        TxType = 0x08 // Heartbeat from users device
-	TxTypeLockEscrow       TxType = 0x09 // NEW: Buyer commits to a purchase
-	TxTypeDisputeEscrow    TxType = 0x0A // NEW: Buyer raises a dispute
-	TxTypeArbitrateRelease TxType = 0x0B // NEW: Admin-only action to release to buyer
-	TxTypeArbitrateRefund  TxType = 0x0C // NEW: Admin-only action to refund seller
-	TxTypeStakeClaim       TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
-	TxTypeMint             TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
+	TxTypeTransfer          TxType = 0x01 // A standard transfer of NHB
+	TxTypeRegisterIdentity  TxType = 0x02 // A transaction to claim a username
+	TxTypeCreateEscrow      TxType = 0x03 // Create escrow
+	TxTypeReleaseEscrow     TxType = 0x04 // NEW: Buyer releases funds to seller
+	TxTypeRefundEscrow      TxType = 0x05 // NEW: Seller refunds funds to buyer
+	TxTypeStake             TxType = 0x06 // Implenting stake
+	TxTypeUnstake           TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
+	TxTypeHeartbeat         TxType = 0x08 // Heartbeat from users device
+	TxTypeLockEscrow        TxType = 0x09 // NEW: Buyer commits to a purchase
+	TxTypeDisputeEscrow     TxType = 0x0A // NEW: Buyer raises a dispute
+	TxTypeArbitrateRelease  TxType = 0x0B // NEW: Admin-only action to release to buyer
+	TxTypeArbitrateRefund   TxType = 0x0C // NEW: Admin-only action to refund seller
+	TxTypeStakeClaim        TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
+	TxTypeMint              TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
+	TxTypeSwapPayoutReceipt TxType = 0x0F // NEW: Record a swap payout receipt attested by the treasury
 )
+
+// RequiresSignature reports whether the transaction type must carry an
+// originator signature that can be recovered via From(). Types that originate
+// from module attestations rely on their envelope signatures instead.
+func RequiresSignature(t TxType) bool {
+	switch t {
+	case TxTypeMint, TxTypeSwapPayoutReceipt:
+		return false
+	default:
+		return true
+	}
+}
 
 // Transaction now has a Type field to distinguish its intent.
 // Transaction now supports gas fees and a paymaster.

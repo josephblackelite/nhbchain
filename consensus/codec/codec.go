@@ -4,12 +4,15 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	"nhbchain/core/types"
 	consensusv1 "nhbchain/proto/consensus/v1"
+	swapv1 "nhbchain/proto/swap/v1"
 )
 
 // BigIntToProto converts a big.Int into its protobuf representation.
@@ -134,22 +137,81 @@ func TransactionFromEnvelope(envelope *consensusv1.SignedTxEnvelope) (*types.Tra
 	if payload == nil {
 		return nil, fmt.Errorf("envelope: payload required")
 	}
-	var protoTx consensusv1.Transaction
-	if err := payload.UnmarshalTo(&protoTx); err != nil {
-		return nil, fmt.Errorf("envelope: decode payload: %w", err)
-	}
-	tx, err := TransactionFromProto(&protoTx)
-	if err != nil {
-		return nil, err
-	}
-	if tx == nil {
-		return nil, fmt.Errorf("envelope: decoded transaction nil")
-	}
-	if nonce := body.GetNonce(); nonce != 0 {
-		if tx.Nonce != 0 && tx.Nonce != nonce {
-			return nil, fmt.Errorf("envelope: nonce mismatch")
+	typeURL := payload.GetTypeUrl()
+	switch typeURL {
+	case "type.googleapis.com/consensus.v1.Transaction":
+		var protoTx consensusv1.Transaction
+		if err := payload.UnmarshalTo(&protoTx); err != nil {
+			return nil, fmt.Errorf("envelope: decode payload: %w", err)
 		}
-		tx.Nonce = nonce
+		tx, err := TransactionFromProto(&protoTx)
+		if err != nil {
+			return nil, err
+		}
+		if tx == nil {
+			return nil, fmt.Errorf("envelope: decoded transaction nil")
+		}
+		if nonce := body.GetNonce(); nonce != 0 {
+			if tx.Nonce != 0 && tx.Nonce != nonce {
+				return nil, fmt.Errorf("envelope: nonce mismatch")
+			}
+			tx.Nonce = nonce
+		}
+		return tx, nil
+	default:
+		tx, err := transactionFromModulePayload(body, payload)
+		if err != nil {
+			return nil, err
+		}
+		if tx == nil {
+			return nil, fmt.Errorf("envelope: decoded transaction nil")
+		}
+		return tx, nil
+	}
+}
+
+func transactionFromModulePayload(body *consensusv1.TxEnvelope, payload *anypb.Any) (*types.Transaction, error) {
+	if payload == nil {
+		return nil, fmt.Errorf("envelope: payload required")
+	}
+	msg, err := payload.UnmarshalNew()
+	if err != nil {
+		return nil, fmt.Errorf("envelope: decode module payload: %w", err)
+	}
+	switch typed := msg.(type) {
+	case *swapv1.MsgPayoutReceipt:
+		return moduleSwapPayoutReceiptTx(body, payload, typed)
+	default:
+		return nil, fmt.Errorf("envelope: unsupported module payload type %q", payload.GetTypeUrl())
+	}
+}
+
+func moduleSwapPayoutReceiptTx(body *consensusv1.TxEnvelope, packed *anypb.Any, msg *swapv1.MsgPayoutReceipt) (*types.Transaction, error) {
+	if body == nil {
+		return nil, fmt.Errorf("envelope: body required")
+	}
+	if msg == nil {
+		return nil, fmt.Errorf("swap: payout receipt message required")
+	}
+	chainIDStr := strings.TrimSpace(body.GetChainId())
+	if chainIDStr == "" {
+		return nil, fmt.Errorf("envelope: chain id required")
+	}
+	chainID, ok := new(big.Int).SetString(chainIDStr, 10)
+	if !ok {
+		return nil, fmt.Errorf("envelope: invalid chain id %q", chainIDStr)
+	}
+	data, err := proto.Marshal(packed)
+	if err != nil {
+		return nil, fmt.Errorf("swap: marshal payout receipt: %w", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  chainID,
+		Type:     types.TxTypeSwapPayoutReceipt,
+		Nonce:    body.GetNonce(),
+		Data:     data,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
 	}
 	return tx, nil
 }
