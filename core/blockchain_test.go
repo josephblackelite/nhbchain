@@ -208,7 +208,7 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 
 func TestTipReturnsCopy(t *testing.T) {
 	db := storage.NewMemDB()
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { db.Close() })
 
 	bc, err := NewBlockchain(db, "", true)
 	if err != nil {

@@ -24,7 +24,9 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
+	swap "nhbchain/native/swap"
 	systemquotas "nhbchain/native/system/quotas"
+	swapv1 "nhbchain/proto/swap/v1"
 	"nhbchain/storage/trie"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -37,6 +39,8 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 const engagementDayFormat = "2006-01-02"
@@ -1350,6 +1354,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeSwapPayoutReceipt:
+		if err := sp.applySwapPayoutReceipt(tx); err != nil {
+			return err
+		}
+		return nil
 	}
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }
@@ -1493,6 +1502,69 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byt
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("swap: transaction required")
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("swap: payout receipt payload required")
+	}
+	var packed anypb.Any
+	if err := proto.Unmarshal(tx.Data, &packed); err != nil {
+		return fmt.Errorf("swap: decode payload: %w", err)
+	}
+	if url := packed.GetTypeUrl(); url != "type.googleapis.com/swap.v1.MsgPayoutReceipt" {
+		return fmt.Errorf("swap: unsupported payload %s", url)
+	}
+	var msg swapv1.MsgPayoutReceipt
+	if err := packed.UnmarshalTo(&msg); err != nil {
+		return fmt.Errorf("swap: decode payout receipt: %w", err)
+	}
+	protoReceipt := msg.GetReceipt()
+	if protoReceipt == nil {
+		return fmt.Errorf("swap: receipt required")
+	}
+	receipt, err := swapPayoutReceiptFromProto(protoReceipt)
+	if err != nil {
+		return err
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	store := swap.NewStableStore(manager)
+	if err := store.RecordPayoutReceipt(receipt); err != nil {
+		return fmt.Errorf("swap: record payout receipt: %w", err)
+	}
+	return nil
+}
+
+func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt, error) {
+	if msg == nil {
+		return nil, fmt.Errorf("swap: receipt required")
+	}
+	trimmedID := strings.TrimSpace(msg.GetIntentId())
+	if trimmedID == "" {
+		return nil, fmt.Errorf("swap: intent id required")
+	}
+	stableAmount, ok := new(big.Int).SetString(strings.TrimSpace(msg.GetStableAmount()), 10)
+	if !ok {
+		return nil, fmt.Errorf("swap: invalid stable amount %q", msg.GetStableAmount())
+	}
+	nhbAmount, ok := new(big.Int).SetString(strings.TrimSpace(msg.GetNhbAmount()), 10)
+	if !ok {
+		return nil, fmt.Errorf("swap: invalid nhb amount %q", msg.GetNhbAmount())
+	}
+	receipt := &swap.PayoutReceipt{
+		ReceiptID:    strings.TrimSpace(msg.GetReceiptId()),
+		IntentID:     trimmedID,
+		StableAsset:  swap.StableAsset(strings.ToUpper(strings.TrimSpace(msg.GetStableAsset()))),
+		StableAmount: stableAmount,
+		NhbAmount:    nhbAmount,
+		TxHash:       strings.TrimSpace(msg.GetTxHash()),
+		EvidenceURI:  strings.TrimSpace(msg.GetEvidenceUri()),
+		SettledAt:    msg.GetSettledAt(),
+	}
+	return receipt, nil
 }
 
 func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *types.Account, releaseToBuyer bool) error {

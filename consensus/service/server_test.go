@@ -25,6 +25,8 @@ import (
 	nhbcrypto "nhbchain/crypto"
 	"nhbchain/network"
 	consensusv1 "nhbchain/proto/consensus/v1"
+	swapv1 "nhbchain/proto/swap/v1"
+	sdkconsensus "nhbchain/sdk/consensus"
 )
 
 type fakeConsensusNode struct {
@@ -88,6 +90,23 @@ func buildSignedEnvelope(t testing.TB) *consensusv1.SignedTxEnvelope {
 		Signature: sig,
 	}
 	return &consensusv1.SignedTxEnvelope{Envelope: envelope, Signature: signature}
+}
+
+func buildModuleEnvelope(t testing.TB, msg proto.Message) (*consensusv1.SignedTxEnvelope, *nhbcrypto.PrivateKey) {
+	t.Helper()
+	key, err := nhbcrypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	envelope, err := sdkconsensus.NewTx(msg, 1, types.NHBChainID().String(), "", "", "", "")
+	if err != nil {
+		t.Fatalf("build module envelope: %v", err)
+	}
+	signed, err := sdkconsensus.Sign(envelope, key)
+	if err != nil {
+		t.Fatalf("sign module envelope: %v", err)
+	}
+	return signed, key
 }
 
 func (f *fakeConsensusNode) SubmitTxEnvelope(tx *consensusv1.SignedTxEnvelope) error {
@@ -226,6 +245,40 @@ func TestServerSubmitTxEnvelopeInvalidSignature(t *testing.T) {
 	defer node.mu.Unlock()
 	if node.envelopes != 0 {
 		t.Fatalf("unexpected envelope submission on failure")
+	}
+}
+
+func TestServerSubmitTxEnvelopeModulePayload(t *testing.T) {
+	node := newFakeConsensusNode()
+	srv := NewServer(node)
+
+	receipt := &swapv1.PayoutReceipt{
+		ReceiptId:    "rcpt-1",
+		IntentId:     "intent-1",
+		StableAsset:  "USDC",
+		StableAmount: "1000",
+		NhbAmount:    "1000",
+		TxHash:       "0xabc",
+		EvidenceUri:  "https://example.com/receipt",
+		SettledAt:    time.Now().UTC().Unix(),
+	}
+	msg := &swapv1.MsgPayoutReceipt{Authority: "treasury", Receipt: receipt}
+	envelope, _ := buildModuleEnvelope(t, msg)
+
+	if _, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: envelope}); err != nil {
+		t.Fatalf("submit module envelope: %v", err)
+	}
+}
+
+func TestServerSubmitTxEnvelopeUnsupportedModulePayload(t *testing.T) {
+	node := newFakeConsensusNode()
+	srv := NewServer(node)
+
+	msg := &swapv1.MsgAbortCashOutIntent{Authority: "treasury", IntentId: "intent-1"}
+	envelope, _ := buildModuleEnvelope(t, msg)
+
+	if _, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: envelope}); err == nil {
+		t.Fatalf("expected unsupported module payload error")
 	}
 }
 
