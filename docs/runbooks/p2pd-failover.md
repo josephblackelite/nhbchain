@@ -35,7 +35,8 @@ If a warm standby is available:
 * Confirm `consensusd` reports height progression.
 * Run `grpcurl <p2pd>:9091 network.v1.NetworkService/ListPeers` with the issued TLS
   material to verify active peers. Use `-plaintext` only when the deployment has
-  explicitly set `AllowInsecure = true` for a lab environment.
+  explicitly set `AllowInsecure = true` for a lab environment and paired it with
+  a shared secret or mutual TLS.
 * Ensure rate limits and scoring metrics reset as expected.
 * Inspect relay queue health:
   - `nhb_network_relay_queue_enqueued_total` vs `nhb_network_relay_queue_dropped_total` to confirm drop ratio is below the configured threshold.

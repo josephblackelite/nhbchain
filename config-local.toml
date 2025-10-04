@@ -45,8 +45,10 @@ ClientVersion = "nhbchain/node"
 # to an empty secret. Production deployments should supply the secret via
 # SharedSecretFile or SharedSecretEnv and/or enable mutual TLS.
 SharedSecret = "local-dev-shared-secret"
-# Local development defaults to plaintext; production operators must provision TLS
-# and set AllowInsecure = false.
+# Local development defaults to plaintext. Keep this at true only for throwaway
+# labs and always pair it with a shared secret. Production operators must
+# provision TLS and set AllowInsecure = false; the daemon now fails fast when TLS
+# material is absent.
 AllowInsecure = true
 # ServerTLSCertFile = "./tls/p2pd.crt"
 # ServerTLSKeyFile = "./tls/p2pd.key"

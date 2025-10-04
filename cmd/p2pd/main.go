@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -288,64 +286,7 @@ func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials
 		auth := network.ChainAuthenticators()
 		return insecure.NewCredentials(), auth, auth, nil
 	}
-	sec := cfg.NetworkSecurity
-
-	secret, err := sec.ResolveSharedSecret(baseDir, os.LookupEnv)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("resolve shared secret: %w", err)
-	}
-
-	var auths []network.Authenticator
-	if secret != "" {
-		auths = append(auths, network.NewTokenAuthenticator(sec.AuthorizationHeaderName(), secret))
-	}
-
-	certPath := resolvePath(baseDir, sec.ServerTLSCertFile)
-	keyPath := resolvePath(baseDir, sec.ServerTLSKeyFile)
-
-	var tlsConfig *tls.Config
-	if certPath != "" || keyPath != "" {
-		if certPath == "" || keyPath == "" {
-			return nil, nil, nil, fmt.Errorf("network security requires both ServerTLSCertFile and ServerTLSKeyFile when one is set")
-		}
-		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("load network TLS keypair: %w", err)
-		}
-		tlsConfig = &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-		}
-	}
-
-	if caPath := resolvePath(baseDir, sec.ClientCAFile); caPath != "" {
-		if tlsConfig == nil {
-			return nil, nil, nil, fmt.Errorf("ClientCAFile requires ServerTLSCertFile and ServerTLSKeyFile to be configured")
-		}
-		pem, err := os.ReadFile(caPath)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("read client CA file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, nil, nil, fmt.Errorf("failed to parse client CA certificates from %s", caPath)
-		}
-		tlsConfig.ClientCAs = pool
-		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-		auths = append(auths, network.NewTLSAuthorizer(sec.AllowedClientCommonNames))
-	}
-
-	creds := credentials.TransportCredentials(insecure.NewCredentials())
-	if tlsConfig != nil {
-		creds = credentials.NewTLS(tlsConfig)
-	}
-
-	writeAuth := network.ChainAuthenticators(auths...)
-	readAuth := writeAuth
-	if sec.AllowUnauthenticatedReads {
-		readAuth = nil
-	}
-	return creds, writeAuth, readAuth, nil
+	return network.BuildServerSecurity(&cfg.NetworkSecurity, baseDir, os.LookupEnv)
 }
 
 func resolvePath(baseDir, path string) string {
