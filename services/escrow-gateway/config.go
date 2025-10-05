@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,9 @@ type Config struct {
 	DatabasePath         string
 	AllowedTimestampSkew time.Duration
 	APIKeys              []APIKeyConfig
+	WebhookQueueCapacity int
+	WebhookHistorySize   int
+	WebhookQueueTTL      time.Duration
 }
 
 // LoadConfigFromEnv builds a configuration using environment variables.
@@ -33,6 +37,9 @@ func LoadConfigFromEnv() (Config, error) {
 		NodeAuthToken:        os.Getenv("ESCROW_GATEWAY_NODE_TOKEN"),
 		DatabasePath:         getenvDefault("ESCROW_GATEWAY_DB_PATH", "escrow-gateway.db"),
 		AllowedTimestampSkew: 5 * time.Minute,
+		WebhookQueueCapacity: defaultTaskCapacity,
+		WebhookHistorySize:   defaultHistoryCapacity,
+		WebhookQueueTTL:      defaultQueueTTL,
 	}
 
 	if skew := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_TIMESTAMP_SKEW")); skew != "" {
@@ -45,6 +52,39 @@ func LoadConfigFromEnv() (Config, error) {
 
 	if cfg.NodeURL == "" {
 		return Config{}, errors.New("ESCROW_GATEWAY_NODE_URL is required")
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_QUEUE_CAP")); raw != "" {
+		val, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse ESCROW_GATEWAY_QUEUE_CAP: %w", err)
+		}
+		if val <= 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_QUEUE_CAP must be positive")
+		}
+		cfg.WebhookQueueCapacity = val
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_QUEUE_HISTORY")); raw != "" {
+		val, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse ESCROW_GATEWAY_QUEUE_HISTORY: %w", err)
+		}
+		if val <= 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_QUEUE_HISTORY must be positive")
+		}
+		cfg.WebhookHistorySize = val
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_QUEUE_TTL")); raw != "" {
+		dur, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse ESCROW_GATEWAY_QUEUE_TTL: %w", err)
+		}
+		if dur <= 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_QUEUE_TTL must be positive")
+		}
+		cfg.WebhookQueueTTL = dur
 	}
 
 	// Parse API keys from JSON array: [{"key":"...","secret":"..."}, ...]

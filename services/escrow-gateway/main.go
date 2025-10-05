@@ -59,7 +59,11 @@ func main() {
 
 	auth := NewAuthenticator(cfg.APIKeys, cfg.AllowedTimestampSkew, nil)
 	node := NewRPCNodeClient(cfg.NodeURL, cfg.NodeAuthToken)
-	queue := NewWebhookQueue()
+	queue := NewWebhookQueue(
+		WithWebhookTaskCapacity(cfg.WebhookQueueCapacity),
+		WithWebhookHistoryCapacity(cfg.WebhookHistorySize),
+		WithWebhookTTL(cfg.WebhookQueueTTL),
+	)
 	intents := NewPayIntentBuilder()
 	server := NewServer(auth, node, store, queue, intents)
 
