@@ -8,8 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"sync"
 	"time"
+
+	"nhbchain/services/webhook"
 )
 
 const maxWebhookAttempts = 5
@@ -21,22 +22,16 @@ type WebhookWorker struct {
 	client *http.Client
 	nowFn  func() time.Time
 
-	rateMu sync.Mutex
-	rate   map[int64]rateWindow
-}
-
-type rateWindow struct {
-	windowStart time.Time
-	count       int
+	limiter *webhook.RateLimiter
 }
 
 func NewWebhookWorker(store *SQLiteStore, queue *WebhookQueue) *WebhookWorker {
 	return &WebhookWorker{
-		store:  store,
-		queue:  queue,
-		client: &http.Client{Timeout: 10 * time.Second},
-		nowFn:  time.Now,
-		rate:   make(map[int64]rateWindow),
+		store:   store,
+		queue:   queue,
+		client:  &http.Client{Timeout: 10 * time.Second},
+		nowFn:   time.Now,
+		limiter: webhook.NewRateLimiter(),
 	}
 }
 
@@ -80,8 +75,8 @@ func (w *WebhookWorker) handleDelivery(ctx context.Context, task WebhookTask) {
 		return
 	}
 	now := w.nowFn()
-	if !w.allow(sub.ID, sub.RateLimit, now) {
-		task.NotBefore = w.rateReset(sub.ID)
+	if !w.limiter.Allow(sub.ID, sub.RateLimit, now) {
+		task.NotBefore = w.limiter.ResetAt(sub.ID, now)
 		w.queue.enqueueTask(task)
 		return
 	}
@@ -154,38 +149,6 @@ func (w *WebhookWorker) recordAttempt(ctx context.Context, task WebhookTask, sta
 		CreatedAt:     now,
 	}
 	_ = w.store.InsertWebhookAttempt(ctx, attempt)
-}
-
-func (w *WebhookWorker) allow(id int64, limit int, now time.Time) bool {
-	if limit <= 0 {
-		limit = 60
-	}
-	w.rateMu.Lock()
-	defer w.rateMu.Unlock()
-	state := w.rate[id]
-	if now.Sub(state.windowStart) >= time.Minute {
-		state.windowStart = now
-		state.count = 0
-	}
-	if state.count >= limit {
-		w.rate[id] = state
-		return false
-	}
-	state.count++
-	w.rate[id] = state
-	return true
-}
-
-func (w *WebhookWorker) rateReset(id int64) time.Time {
-	w.rateMu.Lock()
-	defer w.rateMu.Unlock()
-	state := w.rate[id]
-	if state.windowStart.IsZero() {
-		state.windowStart = w.nowFn()
-	}
-	reset := state.windowStart.Add(time.Minute)
-	w.rate[id] = state
-	return reset
 }
 
 func signPayload(secret string, payload []byte) string {
