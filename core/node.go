@@ -42,6 +42,7 @@ import (
 	"nhbchain/native/potso"
 	"nhbchain/native/reputation"
 	swap "nhbchain/native/swap"
+	"nhbchain/observability"
 	"nhbchain/p2p"
 	consensusv1 "nhbchain/proto/consensus/v1"
 	"nhbchain/storage"
@@ -1495,8 +1496,17 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 	}
 
 	// Persist block to the chain
+	var prevTimestamp int64
+	if n.chain != nil {
+		prevTimestamp = n.chain.LastTimestamp()
+	}
 	if err := n.chain.AddBlock(b); err != nil {
 		return err
+	}
+	if metrics := observability.Consensus(); metrics != nil {
+		prevTime := time.Unix(prevTimestamp, 0).UTC()
+		currentTime := time.Unix(b.Header.Timestamp, 0).UTC()
+		metrics.RecordBlockInterval(currentTime.Sub(prevTime))
 	}
 	if n.syncMgr != nil && b != nil && b.Header != nil {
 		n.syncMgr.SetHeight(b.Header.Height)
