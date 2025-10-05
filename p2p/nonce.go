@@ -100,15 +100,36 @@ func (g *nonceGuard) pruneLocked(now time.Time) {
 }
 
 func (g *nonceGuard) fingerprint(nodeID, nonce string) string {
-	trimmedNonce := strings.TrimSpace(nonce)
-	if trimmedNonce == "" {
+	canonicalNonce, ok := canonicalizeNonce(nonce)
+	if !ok {
 		return ""
 	}
 	normalized := normalizeHex(nodeID)
 	if normalized == "" {
 		normalized = strings.ToLower(strings.TrimSpace(nodeID))
 	}
-	payload := normalized + ":" + trimmedNonce
+	if normalized == "" {
+		return ""
+	}
+	payload := normalized + ":" + canonicalNonce
 	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
+}
+
+func canonicalizeNonce(nonce string) (string, bool) {
+	trimmed := strings.TrimSpace(nonce)
+	if trimmed == "" {
+		return "", false
+	}
+	if decoded, err := decodeHex(trimmed); err == nil {
+		if len(decoded) == 0 {
+			return "", false
+		}
+		return hex.EncodeToString(decoded), true
+	}
+	lowered := strings.ToLower(trimmed)
+	if lowered == "" {
+		return "", false
+	}
+	return lowered, true
 }
