@@ -24,7 +24,7 @@ bugcheck-race:
 	@go test -race ./...
 
 bugcheck-fuzz:
-	@go test -run ^$$ -fuzz=Fuzz -fuzztime=60s ./tests/...
+        @go test -run ^$$ -fuzz=Fuzz -fuzztime=60s ./tests/... ./p2p
 
 bugcheck-determinism:
 	@$(MAKE) audit:determinism
