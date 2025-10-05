@@ -6,22 +6,23 @@ import (
 	"time"
 )
 
-func TestNonceGuardRemembersPerNode(t *testing.T) {
+func TestNonceGuardRejectsReplaysAcrossTTL(t *testing.T) {
 	guard := newNonceGuard(5 * time.Millisecond)
-	now := time.Now()
+	defer guard.Close()
 
+	now := time.Now()
 	if !guard.Remember("nodeA", "0xdeadbeef", now) {
 		t.Fatalf("expected first nonce to be accepted")
 	}
 
 	withinWindow := now.Add(2 * time.Millisecond)
 	if guard.Remember("nodeA", "0xdeadbeef", withinWindow) {
-		t.Fatalf("expected replay within window for same node to be rejected")
+		t.Fatalf("expected replay within ttl for same node to be rejected")
 	}
 
 	later := now.Add(10 * time.Millisecond)
-	if !guard.Remember("nodeA", "0xdeadbeef", later) {
-		t.Fatalf("expected nonce to be accepted again after window expiry")
+	if guard.Remember("nodeA", "0xdeadbeef", later) {
+		t.Fatalf("expected replay after ttl to remain rejected until eviction")
 	}
 
 	if !guard.Remember("nodeB", "0xdeadbeef", later) {
@@ -29,32 +30,33 @@ func TestNonceGuardRemembersPerNode(t *testing.T) {
 	}
 }
 
-func TestNonceGuardPruneRemovesSeen(t *testing.T) {
+func TestNonceGuardSweepRemovesExpired(t *testing.T) {
 	guard := newNonceGuard(2 * time.Millisecond)
-	now := time.Now()
+	defer guard.Close()
 
+	now := time.Now()
 	if !guard.Remember("nodeA", "0x1", now) {
 		t.Fatalf("expected nonce to be accepted initially")
 	}
 
-	// Advance past the window to trigger pruning.
-	later := now.Add(5 * time.Millisecond)
-	if !guard.Remember("nodeA", "0x2", later) {
-		t.Fatalf("expected new nonce after pruning to be accepted")
+	cutoff := now.Add(5 * time.Millisecond)
+	guard.RunJanitorSweep(cutoff)
+
+	if guard.Size() != 0 {
+		t.Fatalf("expected guard to remove expired entries, size=%d", guard.Size())
 	}
 
-	guard.mu.Lock()
-	defer guard.mu.Unlock()
-	if _, exists := guard.seen[guard.fingerprint("nodeA", "0x1")]; exists {
-		t.Fatalf("expected expired nonce fingerprint to be pruned from seen map")
+	if !guard.Remember("nodeA", "0x2", cutoff) {
+		t.Fatalf("expected new nonce after sweep to be accepted")
 	}
 }
 
 func TestNonceGuardEvictsWhenOverCapacity(t *testing.T) {
 	guard := newNonceGuard(time.Minute)
-	guard.maxEntries = 3
-	now := time.Now()
+	defer guard.Close()
+	guard.SetMaxEntries(3)
 
+	now := time.Now()
 	for i := 0; i < 3; i++ {
 		nonce := fmt.Sprintf("0x%02x", i)
 		if !guard.Remember("nodeA", nonce, now.Add(time.Duration(i))) {
@@ -62,19 +64,14 @@ func TestNonceGuardEvictsWhenOverCapacity(t *testing.T) {
 		}
 	}
 
-	// Adding a fourth should evict the oldest entry.
 	if !guard.Remember("nodeA", "0x03", now.Add(3)) {
 		t.Fatalf("expected nonce 3 to be accepted")
 	}
 
-	guard.mu.Lock()
-	if len(guard.seen) != guard.maxEntries {
-		guard.mu.Unlock()
-		t.Fatalf("expected seen map to be capped at %d, got %d", guard.maxEntries, len(guard.seen))
+	if guard.Size() != 3 {
+		t.Fatalf("expected guard size to remain capped at 3, got %d", guard.Size())
 	}
-	guard.mu.Unlock()
 
-	// Oldest entry should have been evicted and allowed again.
 	if !guard.Remember("nodeA", "0x00", now.Add(4)) {
 		t.Fatalf("expected oldest nonce to be accepted after eviction")
 	}
@@ -82,20 +79,18 @@ func TestNonceGuardEvictsWhenOverCapacity(t *testing.T) {
 
 func TestNonceGuardBoundedWithManyNonces(t *testing.T) {
 	guard := newNonceGuard(time.Minute)
-	guard.maxEntries = 5
-	now := time.Now()
+	defer guard.Close()
+	guard.SetMaxEntries(5)
 
+	now := time.Now()
 	for i := 0; i < 1000; i++ {
 		nonce := fmt.Sprintf("0x%03x", i)
 		if !guard.Remember("nodeA", nonce, now.Add(time.Duration(i))) {
 			t.Fatalf("expected nonce %d to be accepted", i)
 		}
 
-		guard.mu.Lock()
-		if len(guard.seen) > guard.maxEntries {
-			guard.mu.Unlock()
-			t.Fatalf("expected seen map to remain bounded by %d, got %d", guard.maxEntries, len(guard.seen))
+		if size := guard.Size(); size > 5 {
+			t.Fatalf("expected guard size to remain bounded by 5, got %d", size)
 		}
-		guard.mu.Unlock()
 	}
 }

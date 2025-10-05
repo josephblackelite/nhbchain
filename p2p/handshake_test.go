@@ -193,8 +193,12 @@ func TestHandshakeNonceReplayVariantEncodings(t *testing.T) {
 				t.Fatalf("variant %s produced empty nonce", name)
 			}
 
-			if err := local.verifyHandshake(&replay); err == nil || !strings.Contains(err.Error(), "nonce replay") {
-				t.Fatalf("expected nonce replay for variant %s, got %v", name, err)
+			err = local.verifyHandshake(&replay)
+			if err == nil {
+				t.Fatalf("expected handshake rejection for variant %s", name)
+			}
+			if !strings.Contains(err.Error(), "nonce replay") && !strings.Contains(err.Error(), "canonical encoding") {
+				t.Fatalf("expected nonce replay or canonical rejection for variant %s, got %v", name, err)
 			}
 		})
 	}
@@ -220,11 +224,11 @@ func TestHandshakeNonceReplayAfterWindow(t *testing.T) {
 
 	fakeNow = fakeNow.Add(time.Second)
 
-	if err := local.verifyHandshake(packet); err != nil {
-		t.Fatalf("expected nonce to be accepted after window expiry, got %v", err)
+	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "nonce replay") {
+		t.Fatalf("expected nonce replay after ttl eviction, got %v", err)
 	}
-	if local.isBanned(normalizeHex(packet.NodeID)) {
-		t.Fatalf("expected peer not to be banned after nonce reuse beyond window")
+	if !local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("expected peer to be banned after nonce replay beyond ttl")
 	}
 }
 
