@@ -44,7 +44,10 @@ func handshakeDigest(chainID uint64, genesis, nonce []byte, nodeID string) ([]by
 `Server` maintains an in-memory nonce guard that rejects any nonce observed in
 the last ten minutes (`handshakeReplayWindow`). This guard applies to both
 locally generated and remote nonces, providing a coarse replay window until the
-full anti-replay design (NET-2G) lands.
+full anti-replay design (NET-2G) lands. In addition to the moving window, the
+guard now stores a cryptographic fingerprint of every `(nodeID, nonce)` pair it
+has seen, so a captured handshake cannot be replayed even after the original
+window has expired.
 
 ### Nonce guard internals
 
@@ -53,8 +56,11 @@ in an LRU list keyed by the raw hex string. When `Remember` is invoked:
 
 1. Entries older than the configured window are pruned from the tail of the list
    (default: 10 minutes).
-2. If the nonce already exists it is treated as a replay and rejected.
-3. Otherwise a new record `{nonce, seenAt}` is inserted at the head of the list.
+2. A fingerprint keyed by `nodeID||nonce` is checked against the persistent set.
+   If it already exists the handshake is rejected and logged for operator
+   visibility.
+3. Otherwise a new record `{nonce, seenAt}` is inserted at the head of the list
+   and the fingerprint is stored for future comparisons.
 
 The structure is effectively bounded by the number of handshakes observed within
 the ten minute window. Even at 1,000 handshakes per minute this amounts to ~10k
@@ -103,7 +109,8 @@ table below summarises the high-signal log messages emitted by the P2P layer:
 
 | Log snippet | Source | Meaning |
 | ----------- | ------ | ------- |
-| `Inbound connection from <addr> rejected: <err>` | `server.handleInbound` | Handshake failed. `err` contains specifics (chain mismatch, signature, timeout). |
+| `Inbound connection from <addr> rejected: <err>` | `server.handleInbound` | Handshake failed. `err` contains specifics (chain mismatch, signature, timeout, nonce replay). |
+| `Handshake nonce replay from <id> rejected` | `verifyHandshake` | A peer attempted to reuse a signed handshake and was banned. Monitor to detect replay probes. |
 | `Protocol violation from <id>: <err> (score X)` | `handleProtocolViolation` | Peer sent malformed or unauthorized messages. Reputation adjusted accordingly. |
 | `Peer <id> exceeded rate limit (score X)` | `handleRateLimit` | Per-peer message rate exceeded allowance; connection dropped and potentially banned. |
 | `Dropping message from <id> due to global rate cap` | `handleRateLimit` (global) | The server hit its aggregate throughput budget and disconnected the peer without banning. |
