@@ -22,12 +22,12 @@ type Principal = gatewayauth.Principal
 // Authenticator verifies API key + HMAC signatures on incoming requests.
 type Authenticator = gatewayauth.Authenticator
 
-func NewAuthenticator(keys []APIKeyConfig, skew, nonceTTL time.Duration, nowFn func() time.Time) *Authenticator {
+func NewAuthenticator(keys []APIKeyConfig, skew, nonceTTL time.Duration, nonceCap int, nowFn func() time.Time) *Authenticator {
 	secrets := make(map[string]string, len(keys))
 	for _, key := range keys {
 		secrets[key.Key] = key.Secret
 	}
-	auth := gatewayauth.NewAuthenticator(secrets, skew, nonceTTL, nowFn)
+	auth := gatewayauth.NewAuthenticator(secrets, skew, nonceTTL, nonceCap, nowFn)
 	return auth
 }
 

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"container/list"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -37,6 +38,7 @@ type Authenticator struct {
 	secrets              map[string]string
 	allowedTimestampSkew time.Duration
 	nonceTTL             time.Duration
+	nonceCapacity        int
 	nowFn                func() time.Time
 
 	nonceMu sync.Mutex
@@ -48,7 +50,7 @@ type Authenticator struct {
 
 // NewAuthenticator builds an Authenticator keyed by the provided secrets. The map
 // should contain API key identifiers mapped to their shared secret.
-func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL time.Duration, nowFn func() time.Time) *Authenticator {
+func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL time.Duration, nonceCapacity int, nowFn func() time.Time) *Authenticator {
 	cloned := make(map[string]string, len(secrets))
 	for k, v := range secrets {
 		cloned[strings.TrimSpace(k)] = strings.TrimSpace(v)
@@ -67,10 +69,14 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 			nonceTTL = 2 * time.Minute
 		}
 	}
+	if nonceCapacity <= 0 {
+		nonceCapacity = 1024
+	}
 	return &Authenticator{
 		secrets:              cloned,
 		allowedTimestampSkew: skew,
 		nonceTTL:             nonceTTL,
+		nonceCapacity:        nonceCapacity,
 		nowFn:                nowFn,
 		nonces:               make(map[string]*nonceStore),
 		lastSeen:             make(map[string]int64),
@@ -172,7 +178,7 @@ func (a *Authenticator) nonceStore(apiKey string) *nonceStore {
 	if ok {
 		return cache
 	}
-	cache = newNonceStore(a.nonceTTL)
+	cache = newNonceStore(a.nonceTTL, a.nonceCapacity)
 	a.nonces[apiKey] = cache
 	return cache
 }
@@ -216,19 +222,31 @@ func parseUnixTimestamp(v string) (time.Time, error) {
 }
 
 type nonceStore struct {
-	ttl time.Duration
+	ttl      time.Duration
+	capacity int
 
 	mu      sync.Mutex
-	entries map[string]time.Time
+	entries map[string]*list.Element
+	order   *list.List
 }
 
-func newNonceStore(ttl time.Duration) *nonceStore {
+type nonceEntry struct {
+	key string
+	ts  time.Time
+}
+
+func newNonceStore(ttl time.Duration, capacity int) *nonceStore {
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
 	}
+	if capacity < 0 {
+		capacity = 0
+	}
 	return &nonceStore{
-		ttl:     ttl,
-		entries: make(map[string]time.Time),
+		ttl:      ttl,
+		capacity: capacity,
+		entries:  make(map[string]*list.Element),
+		order:    list.New(),
 	}
 }
 
@@ -237,14 +255,41 @@ func (n *nonceStore) Seen(key string, now time.Time) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	cutoff := now.Add(-n.ttl)
-	for k, ts := range n.entries {
-		if ts.Before(cutoff) {
-			delete(n.entries, k)
-		}
-	}
+	n.evictExpired(cutoff)
 	if _, exists := n.entries[key]; exists {
 		return true
 	}
-	n.entries[key] = now
+	if n.capacity > 0 {
+		for n.order.Len() >= n.capacity {
+			n.evictFront()
+		}
+	}
+	elem := n.order.PushBack(nonceEntry{key: key, ts: now})
+	n.entries[key] = elem
 	return false
+}
+
+func (n *nonceStore) evictExpired(cutoff time.Time) {
+	for {
+		front := n.order.Front()
+		if front == nil {
+			return
+		}
+		entry := front.Value.(nonceEntry)
+		if !entry.ts.Before(cutoff) {
+			return
+		}
+		n.order.Remove(front)
+		delete(n.entries, entry.key)
+	}
+}
+
+func (n *nonceStore) evictFront() {
+	front := n.order.Front()
+	if front == nil {
+		return
+	}
+	entry := front.Value.(nonceEntry)
+	n.order.Remove(front)
+	delete(n.entries, entry.key)
 }

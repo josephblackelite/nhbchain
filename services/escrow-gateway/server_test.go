@@ -168,7 +168,7 @@ func newTestServer(t *testing.T, node NodeClient) (*Server, *SQLiteStore, *Webho
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	auth := NewAuthenticator([]APIKeyConfig{{Key: "test", Secret: "secret"}}, time.Minute, 2*time.Minute, func() time.Time {
+	auth := NewAuthenticator([]APIKeyConfig{{Key: "test", Secret: "secret"}}, time.Minute, 2*time.Minute, 4, func() time.Time {
 		return time.Unix(1700000000, 0).UTC()
 	})
 	queue := NewWebhookQueue()
