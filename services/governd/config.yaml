@@ -15,3 +15,12 @@ auth:
   api_tokens: []
   mtls:
     allowed_common_names: []
+consensus_client:
+  allow_insecure: true
+  tls:
+    cert: ""
+    key: ""
+    ca: ""
+  shared_secret:
+    header: "authorization"
+    token: ""

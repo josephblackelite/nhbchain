@@ -75,8 +75,12 @@ func main() {
 		log.Fatalf("load signer key: %v", err)
 	}
 
+	dialOpts, err := consensusDialOptions(cfg.ConsensusClient)
+	if err != nil {
+		log.Fatalf("configure consensus client: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	client, err := cons.Dial(ctx, cfg.ConsensusEndpoint)
+	client, err := cons.Dial(ctx, cfg.ConsensusEndpoint, dialOpts...)
 	cancel()
 	if err != nil {
 		log.Fatalf("dial consensus: %v", err)
