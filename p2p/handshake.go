@@ -21,6 +21,7 @@ const (
 	protocolVersion       uint32 = 1
 	handshakeNonceSize           = 12
 	handshakeReplayWindow        = 10 * time.Minute
+	handshakeDomain              = "nhb-handshake-v1"
 )
 
 var (
@@ -84,12 +85,17 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		return nil, fmt.Errorf("generate handshake nonce: %w", err)
 	}
 
+	nodeID := normalizeHex(s.nodeID)
+	if nodeID == "" {
+		return nil, fmt.Errorf("invalid local node ID")
+	}
+
 	listen := sanitizeListenAddrs(s.ListenAddresses())
 	payload := handshakeMessage{
 		ProtocolVersion: protocolVersion,
 		ChainID:         s.cfg.ChainID,
 		GenesisHash:     encodeHex(s.genesis),
-		NodeID:          s.nodeID,
+		NodeID:          nodeID,
 		Nonce:           encodeHex(nonce),
 		ClientVersion:   s.cfg.ClientVersion,
 		ListenAddrs:     listen,
@@ -107,12 +113,12 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 	packet := &handshakePacket{
 		handshakeMessage: payload,
 		Signature:        encodeHex(sig),
-		nodeID:           s.nodeID,
+		nodeID:           nodeID,
 		pubKey:           &s.privKey.PrivateKey.PublicKey,
 		addrs:            listen,
 	}
 	nonceKey := hex.EncodeToString(nonce)
-	if !s.nonceGuard.Remember(s.nodeID, nonceKey, s.now()) {
+	if !s.nonceGuard.Remember(nodeID, nonceKey, s.now()) {
 		return nil, fmt.Errorf("nonce collision detected")
 	}
 	return packet, nil
@@ -134,12 +140,26 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	if len(packet.Signature) == 0 {
 		return fmt.Errorf("handshake missing signature")
 	}
-	nonceBytes, err := decodeHex(packet.Nonce)
+	canonicalNodeID := normalizeHex(packet.NodeID)
+	if canonicalNodeID == "" {
+		return fmt.Errorf("handshake missing node ID")
+	}
+	if packet.NodeID != canonicalNodeID {
+		return fmt.Errorf("handshake node ID must be canonical hex")
+	}
+	canonicalNonce, ok := canonicalizeNonce(packet.Nonce)
+	if !ok {
+		return fmt.Errorf("invalid nonce encoding")
+	}
+	nonceBytes, err := hex.DecodeString(canonicalNonce)
 	if err != nil {
 		return fmt.Errorf("invalid nonce encoding: %w", err)
 	}
 	if len(nonceBytes) != handshakeNonceSize {
 		return fmt.Errorf("invalid handshake nonce length: %d", len(nonceBytes))
+	}
+	if packet.Nonce != encodeHex(nonceBytes) {
+		return fmt.Errorf("handshake nonce must use canonical encoding")
 	}
 	if packet.ChainID != s.cfg.ChainID {
 		s.markHandshakeViolation(packet.NodeID)
@@ -272,7 +292,11 @@ func (s *Server) markHandshakeViolation(nodeID string) {
 }
 
 func handshakeDigest(chainID uint64, genesis []byte, nonce []byte, nodeID string) ([]byte, error) {
-	nodeBytes, err := decodeHex(nodeID)
+	canonicalNodeID := normalizeHex(nodeID)
+	if canonicalNodeID == "" {
+		return nil, fmt.Errorf("empty node ID in handshake")
+	}
+	nodeBytes, err := decodeHex(canonicalNodeID)
 	if err != nil {
 		return nil, fmt.Errorf("decode node ID: %w", err)
 	}
@@ -284,11 +308,13 @@ func handshakeDigest(chainID uint64, genesis []byte, nonce []byte, nodeID string
 	}
 	var chainBuf [8]byte
 	binary.BigEndian.PutUint64(chainBuf[:], chainID)
-	data := make([]byte, 0, len(chainBuf)+len(genesis)+len(nonce)+len(nodeBytes))
+	domain := []byte(handshakeDomain)
+	data := make([]byte, 0, len(domain)+len(chainBuf)+len(genesis)+len(nonce)+len(canonicalNodeID))
+	data = append(data, domain...)
 	data = append(data, chainBuf[:]...)
 	data = append(data, genesis...)
 	data = append(data, nonce...)
-	data = append(data, nodeBytes...)
+	data = append(data, []byte(canonicalNodeID)...)
 	return ethcrypto.Keccak256(data), nil
 }
 
