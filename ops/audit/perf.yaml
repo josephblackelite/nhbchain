@@ -1,14 +1,31 @@
 phase: perf
 description: >-
-  Captures latency and throughput targets for ledger write paths under synthetic load.
+  Captures latency and throughput targets for ledger write paths under synthetic load, and
+  measures consensus finality latency while replaying governance apply transactions.
 checks:
   - name: Voucher ingestion throughput
     target: tests/perf
     expect: Ledger insertions remain below 5ms median latency under benchmark load.
+  - name: Consensus finality latency
+    target: tests/perf
+    expect: Governance apply commits maintain p95 finality latency within the configured SLA
+      at approximately 1,000 tx/min synthetic load.
 artifacts:
   - name: Benchmark output
     path: artifacts/perf/bench.txt
     format: text
+  - name: Consensus finality metrics
+    path: artifacts/perf/consensus_latency_report.json
+    format: json
+    description: >-
+      Inspect the p95_ms and p99_ms fields to confirm governance finality latency remains
+      within the production SLA once the environment enables the full consensus stack.
+  - name: Consensus finality summary
+    path: artifacts/perf/consensus_latency_report.txt
+    format: text
+    description: >-
+      Human-readable snapshot of the benchmark run including achieved throughput and
+      latency percentiles for quick triage.
 metadata:
   owner: perf-eng
   cadence: nightly
