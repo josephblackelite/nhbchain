@@ -28,6 +28,15 @@ auth:
   api_tokens: []               # list of accepted bearer tokens for Msg RPCs
   mtls:
     allowed_common_names: []   # optional set of authorised client certificate common names
+consensus_client:              # security settings for the outbound consensus client
+  allow_insecure: true         # development override for plaintext consensus connections
+  tls:
+    cert: ""                   # optional client certificate for mutual TLS
+    key: ""
+    ca: ""                    # optional PEM bundle of trusted consensus server roots
+  shared_secret:
+    header: "authorization"   # metadata key for the shared-secret token
+    token: ""                 # optional static shared secret sent to consensus
 ```
 
 * **`signer_key`** is required and must be the lowercase hexadecimal encoding of
@@ -47,6 +56,11 @@ auth:
 * **`auth.mtls.allowed_common_names`** lists the client certificate subjects
   permitted to call the `gov.v1.Msg` RPCs when mTLS is enabled. Leave the list
   empty to disable subject filtering.
+* **`consensus_client`** controls how the service authenticates to the
+  consensus endpoint. Production deployments should provision TLS material and
+  optionally set a shared-secret token enforced by the validator. Leave
+  `allow_insecure` disabled outside of throwaway lab environments; the process
+  now fails fast if neither TLS nor a shared secret are configured.
 
 ## Running the service
 
