@@ -30,6 +30,9 @@ var (
 
 	oracleMetricsOnce sync.Once
 	oracleRegistry    *OracleAttesterdMetrics
+
+	consensusMetricsOnce sync.Once
+	consensusRegistry    *consensusMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -288,6 +291,38 @@ func (m *PayoutdMetrics) SetPause(engaged bool) {
 type OracleAttesterdMetrics struct {
 	voucherRate *prometheus.CounterVec
 	freshness   *prometheus.GaugeVec
+}
+
+type consensusMetrics struct {
+	blockInterval prometheus.Gauge
+}
+
+// Consensus exposes the metrics registry for consensus level instrumentation.
+func Consensus() *consensusMetrics {
+	consensusMetricsOnce.Do(func() {
+		consensusRegistry = &consensusMetrics{
+			blockInterval: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "block_interval_seconds",
+				Help:      "Interval in seconds between the timestamps of consecutive committed blocks.",
+			}),
+		}
+		prometheus.MustRegister(consensusRegistry.blockInterval)
+	})
+	return consensusRegistry
+}
+
+// RecordBlockInterval updates the block interval gauge with the supplied duration.
+func (m *consensusMetrics) RecordBlockInterval(interval time.Duration) {
+	if m == nil {
+		return
+	}
+	seconds := interval.Seconds()
+	if seconds < 0 {
+		seconds = 0
+	}
+	m.blockInterval.Set(seconds)
 }
 
 // OracleAttesterd returns the metrics registry for oracle-attesterd.
