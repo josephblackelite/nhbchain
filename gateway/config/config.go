@@ -44,13 +44,14 @@ type Config struct {
 }
 
 type AuthConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	HMACSecret     string   `yaml:"hmacSecret"`
-	Issuer         string   `yaml:"issuer"`
-	Audience       string   `yaml:"audience"`
-	ScopeClaim     string   `yaml:"scopeClaim"`
-	OptionalPaths  []string `yaml:"optionalPaths"`
-	AllowAnonymous bool     `yaml:"allowAnonymous"`
+	Enabled        bool          `yaml:"enabled"`
+	HMACSecret     string        `yaml:"hmacSecret"`
+	Issuer         string        `yaml:"issuer"`
+	Audience       string        `yaml:"audience"`
+	ScopeClaim     string        `yaml:"scopeClaim"`
+	OptionalPaths  []string      `yaml:"optionalPaths"`
+	AllowAnonymous bool          `yaml:"allowAnonymous"`
+	ClockSkew      time.Duration `yaml:"clockSkew"`
 }
 
 func Load(path string) (Config, error) {
@@ -70,9 +71,13 @@ func Load(path string) (Config, error) {
 			Enabled:        false,
 			ScopeClaim:     "scope",
 			AllowAnonymous: true,
+			ClockSkew:      2 * time.Minute,
 		},
 	}
 	if path == "" {
+		if cfg.Auth.ClockSkew <= 0 {
+			cfg.Auth.ClockSkew = 2 * time.Minute
+		}
 		return cfg, nil
 	}
 	file, err := os.Open(path)
@@ -84,6 +89,9 @@ func Load(path string) (Config, error) {
 	decoder := yaml.NewDecoder(file)
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if cfg.Auth.ClockSkew <= 0 {
+		cfg.Auth.ClockSkew = 2 * time.Minute
 	}
 	return cfg, nil
 }
