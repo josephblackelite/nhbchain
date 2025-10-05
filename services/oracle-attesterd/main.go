@@ -71,7 +71,7 @@ func Main() error {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	consensusClient, err := cons.Dial(ctx, cfg.ConsensusEndpoint)
+	consensusClient, err := cons.Dial(ctx, cfg.ConsensusEndpoint, cons.WithInsecure())
 	cancel()
 	if err != nil {
 		return fmt.Errorf("dial consensus: %w", err)

@@ -110,6 +110,7 @@ NHB_API_KEY=... NHB_API_SECRET=... go test ./...
 
 - Use the provided `httptest` mocks under `sdk/testutil` for offline tests.
 - Capture coverage reports and ship metrics to Prometheus using the `sdk/metrics` helper.
+- gRPC clients in `nhbchain/sdk` now require explicit dial options. Connections default to TLS using the host certificate pool; pass `consensus.WithInsecure()` (or the equivalent helper in other SDK packages) when developing against local plaintext endpoints.
 
 ## Security Practices
 

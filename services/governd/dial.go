@@ -7,15 +7,14 @@ import (
 	"os"
 	"strings"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"nhbchain/network"
+	cons "nhbchain/sdk/consensus"
 	"nhbchain/services/governd/config"
 )
 
-func consensusDialOptions(cfg config.ClientConfig) ([]grpc.DialOption, error) {
+func consensusDialOptions(cfg config.ClientConfig) ([]cons.DialOption, error) {
 	creds, hasTLS, err := loadConsensusCredentials(cfg.TLS)
 	if err != nil {
 		return nil, err
@@ -25,20 +24,20 @@ func consensusDialOptions(cfg config.ClientConfig) ([]grpc.DialOption, error) {
 		return nil, fmt.Errorf("consensus client security requires tls material or shared-secret authentication; set allow_insecure=true for development")
 	}
 
-	var opts []grpc.DialOption
+	var opts []cons.DialOption
 	if hasTLS {
-		opts = append(opts, grpc.WithTransportCredentials(creds))
+		opts = append(opts, cons.WithTransportCredentials(creds))
 	} else {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		opts = append(opts, cons.WithInsecure())
 	}
 
 	if hasSharedSecret {
 		header := cfg.SharedSecret.Header
 		token := cfg.SharedSecret.Token
 		if hasTLS {
-			opts = append(opts, grpc.WithPerRPCCredentials(network.NewStaticTokenCredentials(header, token)))
+			opts = append(opts, cons.WithPerRPCCredentials(network.NewStaticTokenCredentials(header, token)))
 		} else {
-			opts = append(opts, grpc.WithPerRPCCredentials(network.NewStaticTokenCredentialsAllowInsecure(header, token)))
+			opts = append(opts, cons.WithPerRPCCredentials(network.NewStaticTokenCredentialsAllowInsecure(header, token)))
 		}
 	}
 	return opts, nil

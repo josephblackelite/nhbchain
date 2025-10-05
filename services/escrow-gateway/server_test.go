@@ -269,7 +269,7 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 		t.Fatalf("expected webhook event to be enqueued")
 	}
 
-	timestamp2, nonce2, sig2 := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-create-2")
+	timestamp2, nonce2, sig2 := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts.Add(time.Second), "nonce-create-2")
 	req2 := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
 	req2.Header.Set(headerAPIKey, "test")
 	req2.Header.Set(headerTimestamp, timestamp2)
