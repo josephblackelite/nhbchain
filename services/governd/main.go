@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -15,6 +18,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"nhbchain/crypto"
 	"nhbchain/observability/logging"
@@ -85,9 +89,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.ListenAddress, err)
 	}
+	creds, err := loadServerCredentials(cfg.TLS)
+	if err != nil {
+		log.Fatalf("load tls credentials: %v", err)
+	}
+	unaryAuth, streamAuth := server.NewAuthInterceptors(cfg.Auth)
 	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+		grpc.Creds(creds),
+		grpc.ChainUnaryInterceptor(
+			otelgrpc.UnaryServerInterceptor(),
+			unaryAuth,
+		),
+		grpc.ChainStreamInterceptor(
+			otelgrpc.StreamServerInterceptor(),
+			streamAuth,
+		),
 	)
 	govv1.RegisterQueryServer(grpcServer, service)
 	govv1.RegisterMsgServer(grpcServer, service)
@@ -122,4 +138,29 @@ func main() {
 			log.Fatalf("serve gRPC: %v", err)
 		}
 	}
+}
+
+func loadServerCredentials(cfg config.TLSConfig) (credentials.TransportCredentials, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load server key pair: %w", err)
+	}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	if cfg.ClientCAPath != "" {
+		pem, err := os.ReadFile(cfg.ClientCAPath)
+		if err != nil {
+			return nil, fmt.Errorf("read client ca: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if ok := pool.AppendCertsFromPEM(pem); !ok {
+			return nil, fmt.Errorf("parse client ca: invalid pem data")
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	} else {
+		tlsCfg.ClientAuth = tls.NoClientCert
+	}
+	return credentials.NewTLS(tlsCfg), nil
 }

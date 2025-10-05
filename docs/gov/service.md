@@ -20,6 +20,14 @@ fee:                           # optional transaction fee metadata
   amount: ""
   denom: ""
   payer: ""
+tls:                           # TLS assets for the gRPC listener
+  cert: "services/governd/config/server.crt"
+  key: "services/governd/config/server.key"
+  client_ca: ""               # optional PEM bundle of allowed client certificate authorities
+auth:
+  api_tokens: []               # list of accepted bearer tokens for Msg RPCs
+  mtls:
+    allowed_common_names: []   # optional set of authorised client certificate common names
 ```
 
 * **`signer_key`** is required and must be the lowercase hexadecimal encoding of
@@ -29,6 +37,16 @@ fee:                           # optional transaction fee metadata
   constructed envelope. When rotating signers or restarting the process make
   sure the nonce is resynchronised with on-chain state to avoid replay
   protection errors.
+* **`tls`** must point at the PEM encoded certificate and private key the
+  service should present. Supplying `client_ca` enables mTLS and requires
+  clients to authenticate with a certificate issued by the supplied authority.
+* **`auth.api_tokens`** accepts static bearer tokens. Requests should send the
+  token using the `authorization: bearer <token>` metadata entry. The
+  `x-api-token` metadata key is also supported for backwards compatibility with
+  HTTP gateways.
+* **`auth.mtls.allowed_common_names`** lists the client certificate subjects
+  permitted to call the `gov.v1.Msg` RPCs when mTLS is enabled. Leave the list
+  empty to disable subject filtering.
 
 ## Running the service
 
@@ -63,6 +81,9 @@ The `gov.v1.Msg` surface converts module messages into signed consensus
 transactions before forwarding them to the validator. Responses contain the
 transaction hash so callers can correlate with block explorers or observability
 pipelines.
+
+All `gov.v1.Msg` RPCs require authentication. Clients must present a configured
+API token or connect using mTLS with an authorised client certificate.
 
 | RPC | Description |
 | --- | ----------- |
