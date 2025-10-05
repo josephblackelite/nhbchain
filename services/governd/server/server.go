@@ -48,6 +48,13 @@ func New(client *cons.Client, signer *crypto.PrivateKey, cfg config.Config) *Ser
 	}
 }
 
+func (s *Service) ensureAuthenticated(ctx context.Context) error {
+	if isAuthenticated(ctx) {
+		return nil
+	}
+	return status.Error(codes.Unauthenticated, "authentication required")
+}
+
 // GetProposal implements gov.v1.Query.GetProposal.
 func (s *Service) GetProposal(ctx context.Context, req *govv1.GetProposalRequest) (*govv1.GetProposalResponse, error) {
 	if req == nil || req.GetId() == 0 {
@@ -131,6 +138,9 @@ func (s *Service) GetTally(ctx context.Context, req *govv1.GetTallyRequest) (*go
 
 // SubmitProposal implements gov.v1.Msg.SubmitProposal.
 func (s *Service) SubmitProposal(ctx context.Context, req *govv1.MsgSubmitProposal) (*govv1.MsgSubmitProposalResponse, error) {
+	if err := s.ensureAuthenticated(ctx); err != nil {
+		return nil, err
+	}
 	msg, err := govsdk.NewMsgSubmitProposal(req.GetProposer(), req.GetTitle(), req.GetDescription(), req.GetDeposit())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid proposal: %v", err)
@@ -144,6 +154,9 @@ func (s *Service) SubmitProposal(ctx context.Context, req *govv1.MsgSubmitPropos
 
 // Vote implements gov.v1.Msg.Vote.
 func (s *Service) Vote(ctx context.Context, req *govv1.MsgVote) (*govv1.MsgVoteResponse, error) {
+	if err := s.ensureAuthenticated(ctx); err != nil {
+		return nil, err
+	}
 	msg, err := govsdk.NewMsgVote(req.GetVoter(), req.GetProposalId(), req.GetOption())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid vote: %v", err)
@@ -157,6 +170,9 @@ func (s *Service) Vote(ctx context.Context, req *govv1.MsgVote) (*govv1.MsgVoteR
 
 // SetPauses implements gov.v1.Msg.SetPauses.
 func (s *Service) SetPauses(ctx context.Context, req *govv1.MsgSetPauses) (*govv1.MsgSetPausesResponse, error) {
+	if err := s.ensureAuthenticated(ctx); err != nil {
+		return nil, err
+	}
 	msg, err := govsdk.NewMsgSetPauses(req.GetAuthority(), req.GetPauses())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid pause payload: %v", err)
@@ -170,6 +186,9 @@ func (s *Service) SetPauses(ctx context.Context, req *govv1.MsgSetPauses) (*govv
 
 // Deposit implements gov.v1.Msg.Deposit.
 func (s *Service) Deposit(ctx context.Context, req *govv1.MsgDeposit) (*govv1.MsgDepositResponse, error) {
+	if err := s.ensureAuthenticated(ctx); err != nil {
+		return nil, err
+	}
 	msg, err := govsdk.NewMsgDeposit(req.GetDepositor(), req.GetProposalId(), req.GetAmount())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid deposit: %v", err)

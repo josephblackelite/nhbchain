@@ -9,12 +9,14 @@ import (
 
 // Config captures the runtime settings for the governance service.
 type Config struct {
-	ListenAddress     string    `yaml:"listen"`
-	ConsensusEndpoint string    `yaml:"consensus"`
-	ChainID           string    `yaml:"chain_id"`
-	SignerKey         string    `yaml:"signer_key"`
-	NonceStart        uint64    `yaml:"nonce_start"`
-	Fee               FeeConfig `yaml:"fee"`
+	ListenAddress     string     `yaml:"listen"`
+	ConsensusEndpoint string     `yaml:"consensus"`
+	ChainID           string     `yaml:"chain_id"`
+	SignerKey         string     `yaml:"signer_key"`
+	NonceStart        uint64     `yaml:"nonce_start"`
+	Fee               FeeConfig  `yaml:"fee"`
+	TLS               TLSConfig  `yaml:"tls"`
+	Auth              AuthConfig `yaml:"auth"`
 }
 
 // FeeConfig describes the optional transaction fee metadata attached to
@@ -23,6 +25,24 @@ type FeeConfig struct {
 	Amount string `yaml:"amount"`
 	Denom  string `yaml:"denom"`
 	Payer  string `yaml:"payer"`
+}
+
+// TLSConfig captures the TLS assets required to run the gRPC server.
+type TLSConfig struct {
+	CertPath     string `yaml:"cert"`
+	KeyPath      string `yaml:"key"`
+	ClientCAPath string `yaml:"client_ca"`
+}
+
+// AuthConfig describes the authentication mechanisms accepted by the service.
+type AuthConfig struct {
+	APITokens []string       `yaml:"api_tokens"`
+	MTLS      MTLSAuthConfig `yaml:"mtls"`
+}
+
+// MTLSAuthConfig lists the allowed client certificate identities.
+type MTLSAuthConfig struct {
+	AllowedCommonNames []string `yaml:"allowed_common_names"`
 }
 
 // Load reads the YAML configuration from disk.
@@ -59,6 +79,12 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.SignerKey == "" {
 		return cfg, fmt.Errorf("signer_key is required")
+	}
+	if cfg.TLS.CertPath == "" {
+		return cfg, fmt.Errorf("tls.cert is required")
+	}
+	if cfg.TLS.KeyPath == "" {
+		return cfg, fmt.Errorf("tls.key is required")
 	}
 	return cfg, nil
 }

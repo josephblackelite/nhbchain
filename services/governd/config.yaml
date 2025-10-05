@@ -7,3 +7,11 @@ fee:
   amount: ""
   denom: ""
   payer: ""
+tls:
+  cert: "services/governd/config/server.crt"
+  key: "services/governd/config/server.key"
+  client_ca: ""
+auth:
+  api_tokens: []
+  mtls:
+    allowed_common_names: []
