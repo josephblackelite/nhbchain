@@ -26,14 +26,15 @@ func writeTempConfig(t *testing.T, contents string) string {
 }
 
 func baseConfig(prefix string) string {
-	return "listen: \"" + prefix + "\"\n" +
-		"consensus: \"localhost:9090\"\n" +
-		"chain_id: \"localnet\"\n" +
-		"signer_key: \"" + sampleSignerKey + "\"\n" +
-		"nonce_start: 1\n" +
-		"fee:\n" +
-		"  amount: \"\"\n" +
-		"  denom: \"\"\n" +
+        return "listen: \"" + prefix + "\"\n" +
+                "consensus: \"localhost:9090\"\n" +
+                "chain_id: \"localnet\"\n" +
+                "signer_key: \"" + sampleSignerKey + "\"\n" +
+                "nonce_start: 1\n" +
+                "nonce_store_path: \"" + filepath.ToSlash(filepath.Join("var", "lib", "nhb", "governd-nonce")) + "\"\n" +
+                "fee:\n" +
+                "  amount: \"\"\n" +
+                "  denom: \"\"\n" +
 		"  payer: \"\"\n" +
 		"tls:\n" +
 		"  cert: \"" + filepath.ToSlash(filepath.Join("services", "governd", "config", "server.crt")) + "\"\n" +

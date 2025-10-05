@@ -22,6 +22,7 @@ config:
   chainID: nhb-staging
   consensusEndpoint: consensusd:9090
   nonceStart: 1
+  nonceStorePath: /var/lib/nhb/governd/nonce
   fee:
     amount: "0"
     denom: ""
@@ -32,6 +33,7 @@ config:
     chain_id: "{{ .Values.config.chainID }}"
     signer_key: "{{ .Values.secrets.signerKey }}"
     nonce_start: {{ .Values.config.nonceStart }}
+    nonce_store_path: "{{ .Values.config.nonceStorePath }}"
     fee:
       amount: "{{ .Values.config.fee.amount }}"
       denom: "{{ .Values.config.fee.denom }}"
