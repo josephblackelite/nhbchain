@@ -34,7 +34,7 @@ func main() {
                 endpoint = "localhost:9090"
         }
 
-        client, err := cons.Dial(ctx, endpoint)
+        client, err := cons.Dial(ctx, endpoint, cons.WithInsecure())
         if err != nil {
                 log.Fatalf("dial consensus: %v", err)
         }
@@ -157,7 +157,7 @@ func main() {
 		log.Fatal("set LENDING_ADDRESS (bech32 or 0x hex) to query positions")
 	}
 
-	client, err := consensus.Dial(ctx, endpoint)
+        client, err := consensus.Dial(ctx, endpoint, consensus.WithInsecure())
 	if err != nil {
 		log.Fatalf("dial consensus service: %v", err)
 	}

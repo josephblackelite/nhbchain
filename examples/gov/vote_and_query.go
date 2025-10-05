@@ -13,7 +13,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := govsdk.Dial(ctx, "localhost:50061")
+	client, err := govsdk.Dial(ctx, "localhost:50061", govsdk.WithInsecure())
 	if err != nil {
 		log.Fatalf("dial governd: %v", err)
 	}

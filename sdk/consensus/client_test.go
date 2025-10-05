@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
@@ -45,10 +44,10 @@ func TestClientSubmitEnvelope(t *testing.T) {
 	defer cancel()
 
 	client, err := consensusclient.Dial(ctx, "bufconn",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		consensusclient.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return listener.DialContext(ctx)
 		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		consensusclient.WithInsecure(),
 	)
 	if err != nil {
 		t.Fatalf("dial consensus: %v", err)

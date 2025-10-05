@@ -24,7 +24,7 @@ func main() {
 		log.Fatal("set LENDING_ADDRESS (bech32 or 0x hex) to query positions")
 	}
 
-	client, err := consensus.Dial(ctx, endpoint)
+	client, err := consensus.Dial(ctx, endpoint, consensus.WithInsecure())
 	if err != nil {
 		log.Fatalf("dial consensus service: %v", err)
 	}

@@ -95,7 +95,7 @@ func Main() error {
 		return fmt.Errorf("load signer key: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	consensusClient, err := consclient.Dial(ctx, cfg.Consensus.Endpoint)
+	consensusClient, err := consclient.Dial(ctx, cfg.Consensus.Endpoint, consclient.WithInsecure())
 	cancel()
 	if err != nil {
 		return fmt.Errorf("dial consensus: %w", err)

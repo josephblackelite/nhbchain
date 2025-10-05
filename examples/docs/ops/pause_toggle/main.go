@@ -64,7 +64,7 @@ func main() {
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	client, err := govsdk.Dial(dialCtx, *govEndpoint)
+	client, err := govsdk.Dial(dialCtx, *govEndpoint, govsdk.WithInsecure())
 	dialCancel()
 	if err != nil {
 		log.Fatalf("dial governance service: %v", err)

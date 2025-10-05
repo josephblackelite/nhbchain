@@ -18,7 +18,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := cons.Dial(ctx, "localhost:9090")
+	client, err := cons.Dial(ctx, "localhost:9090", cons.WithInsecure())
 	if err != nil {
 		log.Fatalf("dial consensus: %v", err)
 	}
