@@ -463,7 +463,11 @@ func (s *Server) verifyWalletSignature(r *http.Request, body []byte, resourceID 
 	if timestamp == "" {
 		return "", errors.New("missing X-Timestamp header")
 	}
-	payload := strings.Join([]string{strings.ToUpper(r.Method), canonicalRequestPath(r), string(body), timestamp, strings.ToLower(strings.TrimSpace(resourceID))}, "|")
+	nonce := strings.TrimSpace(r.Header.Get(headerNonce))
+	if nonce == "" {
+		return "", errors.New("missing X-Nonce header")
+	}
+	payload := strings.Join([]string{strings.ToUpper(r.Method), canonicalRequestPath(r), string(body), timestamp, nonce, strings.ToLower(strings.TrimSpace(resourceID))}, "|")
 	msgHash := ethcrypto.Keccak256([]byte(payload))
 	digest := accounts.TextHash(msgHash)
 
