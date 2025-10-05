@@ -17,7 +17,8 @@ Locks are tracked entirely inside the POTSO namespace. All keys are Keccak-256 h
 | Key | Value |
 | --- | --- |
 | `potso/stake/<owner>` | `*big.Int` bonded total |
-| `potso/stake/nonce/<owner>` | `uint64` next nonce |
+| `potso/stake/nonce/<owner>` | `uint64` next lock nonce |
+| `potso/stake/authnonce/<owner>` | `uint64` latest staking authorisation nonce |
 | `potso/stake/locks/index/<owner>` | `[]uint64` lock nonce ordering |
 | `potso/stake/locks/<owner>/<nonce>` | `StakeLock` payload |
 | `potso/stake/unbondq/<day>` | `[]WithdrawalRef` queue bucket |
@@ -60,12 +61,12 @@ All staking RPC methods require bearer authentication (`NHB_RPC_TOKEN`) and an E
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `potso_stake_lock` | `{owner, amount, signature}` | `{ok, nonce}` |
-| `potso_stake_unbond` | `{owner, amount, signature}` | `{ok, amount, withdrawAt}` |
-| `potso_stake_withdraw` | `{owner, signature}` | `{withdrawn: [{nonce, amount}]}` |
+| `potso_stake_lock` | `{owner, amount, nonce, signature}` | `{ok, nonce}` |
+| `potso_stake_unbond` | `{owner, amount, nonce, signature}` | `{ok, amount, withdrawAt}` |
+| `potso_stake_withdraw` | `{owner, nonce, signature}` | `{withdrawn: [{nonce, amount}]}` |
 | `potso_stake_info` | `{owner}` | `{bonded, pendingUnbond, withdrawable, locks}` |
 
-Signatures cover `sha256("potso_stake_<action>|<owner>|<amount>")`. The amount segment is omitted for withdrawals. Any mismatch between the recovered address and the provided owner yields a `signature does not match owner` error.
+Signatures cover `sha256("potso_stake_<action>|<owner>|<amount>|<nonce>")`. The amount segment is omitted for withdrawals but the nonce is always present. The nonce must increase monotonically per account across all staking actions; replays with previously used nonces are rejected. Any mismatch between the recovered address and the provided owner yields a `signature does not match owner` error.
 
 Withdrawals return a list of processed lock fragments and are safe to call repeatedly—subsequent calls simply return an empty list.
 
@@ -74,13 +75,13 @@ Withdrawals return a list of processed lock fragments and are safe to call repea
 `nhb-cli` bundles convenience wrappers under `potso stake`:
 
 ```bash
-nhb-cli potso stake lock --owner nhb1... --amount 100e18 --key wallet.key
-nhb-cli potso stake unbond --owner nhb1... --amount 40e18 --key wallet.key
-nhb-cli potso stake withdraw --owner nhb1... --key wallet.key
+nhb-cli potso stake lock --owner nhb1... --amount 100e18 --nonce 1 --key wallet.key
+nhb-cli potso stake unbond --owner nhb1... --amount 40e18 --nonce 2 --key wallet.key
+nhb-cli potso stake withdraw --owner nhb1... --nonce 3 --key wallet.key
 nhb-cli potso stake info --owner nhb1...
 ```
 
-Amounts accept decimal or scientific notation (`100e18`, `1.5e18`, etc.). The CLI automatically signs the payload using the provided private key and forwards the bearer token when available.
+Amounts accept decimal or scientific notation (`100e18`, `1.5e18`, etc.). Callers must advance the staking nonce for every lock, unbond, or withdraw request; reusing a nonce causes the RPC to return `staking nonce <n> has already been used`. The CLI automatically signs the payload using the provided private key and forwards the bearer token when available.
 
 ## Compliance & Operational Notes
 

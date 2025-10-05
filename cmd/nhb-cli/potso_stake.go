@@ -16,34 +16,38 @@ import (
 )
 
 type potsoStakeLockParams struct {
-	Owner     string `json:"owner"`
-	Amount    string `json:"amount"`
-	Signature string `json:"signature"`
+        Owner     string `json:"owner"`
+        Amount    string `json:"amount"`
+        Nonce     uint64 `json:"nonce"`
+        Signature string `json:"signature"`
 }
 
 type potsoStakeUnbondParams struct {
-	Owner     string `json:"owner"`
-	Amount    string `json:"amount"`
-	Signature string `json:"signature"`
+        Owner     string `json:"owner"`
+        Amount    string `json:"amount"`
+        Nonce     uint64 `json:"nonce"`
+        Signature string `json:"signature"`
 }
 
 type potsoStakeWithdrawParams struct {
-	Owner     string `json:"owner"`
-	Signature string `json:"signature"`
+        Owner     string `json:"owner"`
+        Nonce     uint64 `json:"nonce"`
+        Signature string `json:"signature"`
 }
 
 type potsoStakeInfoParams struct {
 	Owner string `json:"owner"`
 }
 
-func potsoStakeDigest(action, owner string, amount *big.Int) []byte {
-	normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
-	payload := "potso_stake_" + action + "|" + normalizedOwner
-	if amount != nil {
-		payload += "|" + amount.String()
-	}
-	digest := sha256.Sum256([]byte(payload))
-	return digest[:]
+func potsoStakeDigest(action, owner string, amount *big.Int, nonce uint64) []byte {
+        normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
+        payload := "potso_stake_" + action + "|" + normalizedOwner
+        if amount != nil {
+                payload += "|" + amount.String()
+        }
+        payload += "|" + strconv.FormatUint(nonce, 10)
+        digest := sha256.Sum256([]byte(payload))
+        return digest[:]
 }
 
 func runPotsoStake(args []string, stdout, stderr io.Writer) int {
@@ -119,33 +123,35 @@ func parseStakeAmount(value string) (*big.Int, error) {
 	return amt, nil
 }
 
-func signStakeAction(action, owner string, amount *big.Int, key *crypto.PrivateKey) (string, error) {
-	payload := potsoStakeDigest(action, owner, amount)
-	sig, err := ethcrypto.Sign(payload, key.PrivateKey)
-	if err != nil {
-		return "", err
-	}
-	return "0x" + hex.EncodeToString(sig), nil
+func signStakeAction(action, owner string, amount *big.Int, nonce uint64, key *crypto.PrivateKey) (string, error) {
+        payload := potsoStakeDigest(action, owner, amount, nonce)
+        sig, err := ethcrypto.Sign(payload, key.PrivateKey)
+        if err != nil {
+                return "", err
+        }
+        return "0x" + hex.EncodeToString(sig), nil
 }
 
 func runPotsoStakeLock(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("potso stake lock", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		owner  string
-		amount string
-		key    string
-	)
-	fs.StringVar(&owner, "owner", "", "bech32 address of the owner")
-	fs.StringVar(&amount, "amount", "", "amount of ZNHB to lock (supports scientific notation)")
-	fs.StringVar(&key, "key", "wallet.key", "path to the signing key")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if owner == "" || amount == "" {
-		fmt.Fprintln(stderr, "Error: --owner and --amount are required")
-		return 1
-	}
+                owner  string
+                amount string
+                nonce  uint64
+                key    string
+        )
+        fs.StringVar(&owner, "owner", "", "bech32 address of the owner")
+        fs.StringVar(&amount, "amount", "", "amount of ZNHB to lock (supports scientific notation)")
+        fs.Uint64Var(&nonce, "nonce", 0, "monotonic staking nonce authorising the request")
+        fs.StringVar(&key, "key", "wallet.key", "path to the signing key")
+        if err := fs.Parse(args); err != nil {
+                return 1
+        }
+        if owner == "" || amount == "" || nonce == 0 {
+                fmt.Fprintln(stderr, "Error: --owner, --amount, and --nonce are required")
+                return 1
+        }
 	amt, err := parseStakeAmount(amount)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error parsing amount: %v\n", err)
@@ -161,17 +167,17 @@ func runPotsoStakeLock(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Error: signing key belongs to %s but --owner was %s\n", signer, owner)
 		return 1
 	}
-	signature, err := signStakeAction("lock", owner, amt, privKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error signing request: %v\n", err)
-		return 1
-	}
-	params := potsoStakeLockParams{Owner: owner, Amount: amt.String(), Signature: signature}
-	result, err := callPotsoRPCWithAuth("potso_stake_lock", params, true)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error locking stake: %v\n", err)
-		return 1
-	}
+        signature, err := signStakeAction("lock", owner, amt, nonce, privKey)
+        if err != nil {
+                fmt.Fprintf(stderr, "Error signing request: %v\n", err)
+                return 1
+        }
+        params := potsoStakeLockParams{Owner: owner, Amount: amt.String(), Nonce: nonce, Signature: signature}
+        result, err := callPotsoRPCWithAuth("potso_stake_lock", params, true)
+        if err != nil {
+                fmt.Fprintf(stderr, "Error locking stake: %v\n", err)
+                return 1
+        }
 	printJSONResult(result)
 	return 0
 }
@@ -180,20 +186,22 @@ func runPotsoStakeUnbond(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("potso stake unbond", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		owner  string
-		amount string
-		key    string
-	)
-	fs.StringVar(&owner, "owner", "", "bech32 address of the owner")
-	fs.StringVar(&amount, "amount", "", "amount of ZNHB to unbond")
-	fs.StringVar(&key, "key", "wallet.key", "path to the signing key")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if owner == "" || amount == "" {
-		fmt.Fprintln(stderr, "Error: --owner and --amount are required")
-		return 1
-	}
+                owner  string
+                amount string
+                nonce  uint64
+                key    string
+        )
+        fs.StringVar(&owner, "owner", "", "bech32 address of the owner")
+        fs.StringVar(&amount, "amount", "", "amount of ZNHB to unbond")
+        fs.Uint64Var(&nonce, "nonce", 0, "monotonic staking nonce authorising the request")
+        fs.StringVar(&key, "key", "wallet.key", "path to the signing key")
+        if err := fs.Parse(args); err != nil {
+                return 1
+        }
+        if owner == "" || amount == "" || nonce == 0 {
+                fmt.Fprintln(stderr, "Error: --owner, --amount, and --nonce are required")
+                return 1
+        }
 	amt, err := parseStakeAmount(amount)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error parsing amount: %v\n", err)
@@ -209,17 +217,17 @@ func runPotsoStakeUnbond(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Error: signing key belongs to %s but --owner was %s\n", signer, owner)
 		return 1
 	}
-	signature, err := signStakeAction("unbond", owner, amt, privKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error signing request: %v\n", err)
-		return 1
-	}
-	params := potsoStakeUnbondParams{Owner: owner, Amount: amt.String(), Signature: signature}
-	result, err := callPotsoRPCWithAuth("potso_stake_unbond", params, true)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error unbonding stake: %v\n", err)
-		return 1
-	}
+        signature, err := signStakeAction("unbond", owner, amt, nonce, privKey)
+        if err != nil {
+                fmt.Fprintf(stderr, "Error signing request: %v\n", err)
+                return 1
+        }
+        params := potsoStakeUnbondParams{Owner: owner, Amount: amt.String(), Nonce: nonce, Signature: signature}
+        result, err := callPotsoRPCWithAuth("potso_stake_unbond", params, true)
+        if err != nil {
+                fmt.Fprintf(stderr, "Error unbonding stake: %v\n", err)
+                return 1
+        }
 	printJSONResult(result)
 	return 0
 }
@@ -228,18 +236,20 @@ func runPotsoStakeWithdraw(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("potso stake withdraw", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		owner string
-		key   string
-	)
-	fs.StringVar(&owner, "owner", "", "bech32 address of the owner")
-	fs.StringVar(&key, "key", "wallet.key", "path to the signing key")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if owner == "" {
-		fmt.Fprintln(stderr, "Error: --owner is required")
-		return 1
-	}
+                owner string
+                nonce uint64
+                key   string
+        )
+        fs.StringVar(&owner, "owner", "", "bech32 address of the owner")
+        fs.Uint64Var(&nonce, "nonce", 0, "monotonic staking nonce authorising the request")
+        fs.StringVar(&key, "key", "wallet.key", "path to the signing key")
+        if err := fs.Parse(args); err != nil {
+                return 1
+        }
+        if owner == "" || nonce == 0 {
+                fmt.Fprintln(stderr, "Error: --owner and --nonce are required")
+                return 1
+        }
 	privKey, err := loadPrivateKey(key)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error loading key: %v\n", err)
@@ -250,13 +260,13 @@ func runPotsoStakeWithdraw(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Error: signing key belongs to %s but --owner was %s\n", signer, owner)
 		return 1
 	}
-	signature, err := signStakeAction("withdraw", owner, nil, privKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error signing request: %v\n", err)
-		return 1
-	}
-	params := potsoStakeWithdrawParams{Owner: owner, Signature: signature}
-	result, err := callPotsoRPCWithAuth("potso_stake_withdraw", params, true)
+        signature, err := signStakeAction("withdraw", owner, nil, nonce, privKey)
+        if err != nil {
+                fmt.Fprintf(stderr, "Error signing request: %v\n", err)
+                return 1
+        }
+        params := potsoStakeWithdrawParams{Owner: owner, Nonce: nonce, Signature: signature}
+        result, err := callPotsoRPCWithAuth("potso_stake_withdraw", params, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error withdrawing stake: %v\n", err)
 		return 1
