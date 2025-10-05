@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,7 @@ type Config struct {
 	RateLimits    []RateLimitConfig   `yaml:"rateLimits"`
 	Observability ObservabilityConfig `yaml:"observability"`
 	Auth          AuthConfig          `yaml:"auth"`
+	Security      SecurityConfig      `yaml:"security"`
 }
 
 type AuthConfig struct {
@@ -52,6 +54,10 @@ type AuthConfig struct {
 	OptionalPaths  []string      `yaml:"optionalPaths"`
 	AllowAnonymous bool          `yaml:"allowAnonymous"`
 	ClockSkew      time.Duration `yaml:"clockSkew"`
+}
+
+type SecurityConfig struct {
+	AutoUpgradeHTTP bool `yaml:"autoUpgradeHTTP"`
 }
 
 func Load(path string) (Config, error) {
@@ -114,4 +120,39 @@ func (cfg Config) ServiceByName(name string) (*ServiceConfig, error) {
 		}
 	}
 	return nil, fmt.Errorf("service %s not configured", name)
+}
+
+// EnforceSecureScheme ensures the supplied URL uses HTTPS outside of the dev environment.
+// If autoUpgrade is enabled, insecure HTTP URLs are transparently upgraded to HTTPS.
+// The returned boolean indicates whether an upgrade occurred.
+func EnforceSecureScheme(env string, target *url.URL, autoUpgrade bool) (*url.URL, bool, error) {
+	if target == nil {
+		return nil, false, fmt.Errorf("target URL is nil")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(target.Scheme))
+	switch scheme {
+	case "https":
+		return target, false, nil
+	case "http":
+		if isDevEnv(env) {
+			return target, false, nil
+		}
+		if autoUpgrade {
+			upgraded := *target
+			upgraded.Scheme = "https"
+			return &upgraded, true, nil
+		}
+		if strings.TrimSpace(env) == "" {
+			env = "(unset)"
+		}
+		return nil, false, fmt.Errorf("plaintext HTTP endpoints are not permitted for environment %s", env)
+	case "":
+		return nil, false, fmt.Errorf("URL scheme is required")
+	default:
+		return nil, false, fmt.Errorf("unsupported URL scheme %q", target.Scheme)
+	}
+}
+
+func isDevEnv(env string) bool {
+	return strings.EqualFold(strings.TrimSpace(env), "dev")
 }

@@ -91,13 +91,28 @@ func main() {
 	}
 
 	serviceEndpoints := ensureServiceConfig(cfg)
+	autoUpgrade := cfg.Security.AutoUpgradeHTTP
+	if override := strings.TrimSpace(os.Getenv("NHB_GATEWAY_AUTO_HTTPS")); override != "" {
+		parsed, err := strconv.ParseBool(override)
+		if err != nil {
+			logger.Fatalf("parse NHB_GATEWAY_AUTO_HTTPS: %v", err)
+		}
+		autoUpgrade = parsed
+	}
 	services := make([]*compat.Service, 0, len(serviceEndpoints))
 	for name, endpoint := range serviceEndpoints {
 		parsed, err := url.Parse(endpoint)
 		if err != nil {
 			logger.Fatalf("parse %s endpoint: %v", name, err)
 		}
-		services = append(services, &compat.Service{Name: name, BaseURL: parsed})
+		secured, upgraded, err := config.EnforceSecureScheme(env, parsed, autoUpgrade)
+		if err != nil {
+			logger.Fatalf("enforce HTTPS for %s endpoint: %v", name, err)
+		}
+		if upgraded {
+			logger.Printf("auto-upgraded %s endpoint to HTTPS", name)
+		}
+		services = append(services, &compat.Service{Name: name, BaseURL: secured})
 	}
 	servicesByName := servicesMap(services)
 	required := []string{"lendingd", "swapd", "governd", "consensusd"}
