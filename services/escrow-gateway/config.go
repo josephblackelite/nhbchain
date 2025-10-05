@@ -23,6 +23,7 @@ type Config struct {
 	NodeAuthToken        string
 	DatabasePath         string
 	AllowedTimestampSkew time.Duration
+	NonceTTL             time.Duration
 	APIKeys              []APIKeyConfig
 	WebhookQueueCapacity int
 	WebhookHistorySize   int
@@ -36,7 +37,7 @@ func LoadConfigFromEnv() (Config, error) {
 		NodeURL:              os.Getenv("ESCROW_GATEWAY_NODE_URL"),
 		NodeAuthToken:        os.Getenv("ESCROW_GATEWAY_NODE_TOKEN"),
 		DatabasePath:         getenvDefault("ESCROW_GATEWAY_DB_PATH", "escrow-gateway.db"),
-		AllowedTimestampSkew: 5 * time.Minute,
+		AllowedTimestampSkew: 2 * time.Minute,
 		WebhookQueueCapacity: defaultTaskCapacity,
 		WebhookHistorySize:   defaultHistoryCapacity,
 		WebhookQueueTTL:      defaultQueueTTL,
@@ -48,6 +49,21 @@ func LoadConfigFromEnv() (Config, error) {
 		} else {
 			return Config{}, err
 		}
+	}
+
+	cfg.NonceTTL = 2 * cfg.AllowedTimestampSkew
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_NONCE_TTL")); raw != "" {
+		dur, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse ESCROW_GATEWAY_NONCE_TTL: %w", err)
+		}
+		if dur <= 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_NONCE_TTL must be positive")
+		}
+		cfg.NonceTTL = dur
+	}
+	if cfg.NonceTTL < cfg.AllowedTimestampSkew {
+		cfg.NonceTTL = cfg.AllowedTimestampSkew
 	}
 
 	if cfg.NodeURL == "" {

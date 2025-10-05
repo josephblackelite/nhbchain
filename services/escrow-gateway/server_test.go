@@ -168,7 +168,7 @@ func newTestServer(t *testing.T, node NodeClient) (*Server, *SQLiteStore, *Webho
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	auth := NewAuthenticator([]APIKeyConfig{{Key: "test", Secret: "secret"}}, time.Minute, func() time.Time {
+	auth := NewAuthenticator([]APIKeyConfig{{Key: "test", Secret: "secret"}}, time.Minute, 2*time.Minute, func() time.Time {
 		return time.Unix(1700000000, 0).UTC()
 	})
 	queue := NewWebhookQueue()
@@ -176,10 +176,13 @@ func newTestServer(t *testing.T, node NodeClient) (*Server, *SQLiteStore, *Webho
 	return server, store, queue
 }
 
-func signHeaders(secret, method, path string, body []byte, ts time.Time) (timestamp, signature string) {
+func signHeaders(secret, method, path string, body []byte, ts time.Time, nonce string) (timestamp, nonceOut, signature string) {
 	timestamp = fmt.Sprintf("%d", ts.Unix())
-	signature = computeSignature(secret, timestamp, method, path, body)
-	return
+	if nonce == "" {
+		nonce = fmt.Sprintf("nonce-%d", ts.UnixNano())
+	}
+	signature = computeSignature(secret, timestamp, nonce, method, path, body)
+	return timestamp, nonce, signature
 }
 
 func newWallet(t *testing.T) (*ecdsa.PrivateKey, string) {
@@ -193,9 +196,9 @@ func newWallet(t *testing.T) (*ecdsa.PrivateKey, string) {
 	return priv, bech
 }
 
-func signWalletRequest(t *testing.T, priv *ecdsa.PrivateKey, method, path string, body []byte, timestamp, resource string) string {
+func signWalletRequest(t *testing.T, priv *ecdsa.PrivateKey, method, path string, body []byte, timestamp, nonce, resource string) string {
 	t.Helper()
-	payload := strings.Join([]string{strings.ToUpper(method), path, string(body), timestamp, strings.ToLower(strings.TrimSpace(resource))}, "|")
+	payload := strings.Join([]string{strings.ToUpper(method), path, string(body), timestamp, nonce, strings.ToLower(strings.TrimSpace(resource))}, "|")
 	hash := ethcrypto.Keccak256([]byte(payload))
 	digest := accounts.TextHash(hash)
 	sig, err := ethcrypto.Sign(digest, priv)
@@ -214,6 +217,7 @@ func TestAuthenticateRejectsInvalidSignature(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
 	req.Header.Set(headerAPIKey, "test")
 	req.Header.Set(headerTimestamp, "1700000000")
+	req.Header.Set(headerNonce, "nonce-invalid")
 	req.Header.Set(headerSignature, "deadbeef")
 	req.Header.Set(headerIdempotencyKey, "abc")
 
@@ -244,11 +248,12 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 	ts := time.Unix(1700000000, 0).UTC()
-	timestamp, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts)
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-create-1")
 
 	req1 := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
 	req1.Header.Set(headerAPIKey, "test")
 	req1.Header.Set(headerTimestamp, timestamp)
+	req1.Header.Set(headerNonce, nonce)
 	req1.Header.Set(headerSignature, sig)
 	req1.Header.Set(headerIdempotencyKey, "idem123")
 
@@ -264,10 +269,12 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 		t.Fatalf("expected webhook event to be enqueued")
 	}
 
+	timestamp2, nonce2, sig2 := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-create-2")
 	req2 := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
 	req2.Header.Set(headerAPIKey, "test")
-	req2.Header.Set(headerTimestamp, timestamp)
-	req2.Header.Set(headerSignature, sig)
+	req2.Header.Set(headerTimestamp, timestamp2)
+	req2.Header.Set(headerNonce, nonce2)
+	req2.Header.Set(headerSignature, sig2)
 	req2.Header.Set(headerIdempotencyKey, "idem123")
 
 	rec2 := httptest.NewRecorder()
@@ -290,11 +297,12 @@ func TestCreateValidationMissingFields(t *testing.T) {
 
 	body := []byte(`{"payee":"payee"}`)
 	ts := time.Unix(1700000000, 0).UTC()
-	timestamp, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts)
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-validation")
 
 	req := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
 	req.Header.Set(headerAPIKey, "test")
 	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
 	req.Header.Set(headerSignature, sig)
 	req.Header.Set(headerIdempotencyKey, "validation")
 
@@ -324,12 +332,13 @@ func TestEscrowReleaseWithValidSignature(t *testing.T) {
 
 	body := []byte(`{"escrowId":"0xdeadbeef"}`)
 	ts := time.Unix(1700000000, 0).UTC()
-	timestamp, sig := signHeaders("secret", http.MethodPost, "/escrow/release", body, ts)
-	walletSig := signWalletRequest(t, priv, http.MethodPost, "/escrow/release", body, timestamp, "0xdeadbeef")
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/release", body, ts, "nonce-release")
+	walletSig := signWalletRequest(t, priv, http.MethodPost, "/escrow/release", body, timestamp, nonce, "0xdeadbeef")
 
 	req := httptest.NewRequest(http.MethodPost, "/escrow/release", bytes.NewReader(body))
 	req.Header.Set(headerAPIKey, "test")
 	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
 	req.Header.Set(headerSignature, sig)
 	req.Header.Set(headerIdempotencyKey, "rel123")
 	req.Header.Set(headerWalletAddress, addr)
@@ -361,12 +370,13 @@ func TestEscrowResolveAuthorisedSignature(t *testing.T) {
 
 	body := []byte(`{"escrowId":"0xabc","outcome":"release"}`)
 	ts := time.Unix(1700000000, 0).UTC()
-	timestamp, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts)
-	walletSig := signWalletRequest(t, priv, http.MethodPost, "/escrow/resolve", body, timestamp, "0xabc")
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts, "nonce-resolve")
+	walletSig := signWalletRequest(t, priv, http.MethodPost, "/escrow/resolve", body, timestamp, nonce, "0xabc")
 
 	req := httptest.NewRequest(http.MethodPost, "/escrow/resolve", bytes.NewReader(body))
 	req.Header.Set(headerAPIKey, "test")
 	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
 	req.Header.Set(headerSignature, sig)
 	req.Header.Set(headerIdempotencyKey, "res123")
 	req.Header.Set(headerWalletAddress, addr)
@@ -406,12 +416,13 @@ func TestP2POfferLifecycle(t *testing.T) {
 
 	offerBody := []byte(fmt.Sprintf(`{"seller":"%s","baseToken":"NHB","baseAmount":"5","quoteToken":"ZNHB","quoteAmount":"10"}`, sellerAddr))
 	ts := time.Unix(1700000000, 0).UTC()
-	timestamp, sig := signHeaders("secret", http.MethodPost, "/p2p/offers", offerBody, ts)
-	walletSig := signWalletRequest(t, sellerPriv, http.MethodPost, "/p2p/offers", offerBody, timestamp, "")
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/p2p/offers", offerBody, ts, "nonce-offer")
+	walletSig := signWalletRequest(t, sellerPriv, http.MethodPost, "/p2p/offers", offerBody, timestamp, nonce, "")
 
 	offerReq := httptest.NewRequest(http.MethodPost, "/p2p/offers", bytes.NewReader(offerBody))
 	offerReq.Header.Set(headerAPIKey, "test")
 	offerReq.Header.Set(headerTimestamp, timestamp)
+	offerReq.Header.Set(headerNonce, nonce)
 	offerReq.Header.Set(headerSignature, sig)
 	offerReq.Header.Set(headerIdempotencyKey, "offer1")
 	offerReq.Header.Set(headerWalletAddress, sellerAddr)
@@ -439,12 +450,13 @@ func TestP2POfferLifecycle(t *testing.T) {
 
 	acceptBody := []byte(fmt.Sprintf(`{"offerId":"%s","buyer":"%s","deadline":1700000600}`, created.ID, buyerAddr))
 	ts2 := time.Unix(1700000010, 0).UTC()
-	timestamp2, sig2 := signHeaders("secret", http.MethodPost, "/p2p/accept", acceptBody, ts2)
-	walletSig2 := signWalletRequest(t, buyerPriv, http.MethodPost, "/p2p/accept", acceptBody, timestamp2, created.ID)
+	timestamp2, nonce2, sig2 := signHeaders("secret", http.MethodPost, "/p2p/accept", acceptBody, ts2, "nonce-accept")
+	walletSig2 := signWalletRequest(t, buyerPriv, http.MethodPost, "/p2p/accept", acceptBody, timestamp2, nonce2, created.ID)
 
 	acceptReq := httptest.NewRequest(http.MethodPost, "/p2p/accept", bytes.NewReader(acceptBody))
 	acceptReq.Header.Set(headerAPIKey, "test")
 	acceptReq.Header.Set(headerTimestamp, timestamp2)
+	acceptReq.Header.Set(headerNonce, nonce2)
 	acceptReq.Header.Set(headerSignature, sig2)
 	acceptReq.Header.Set(headerIdempotencyKey, "accept1")
 	acceptReq.Header.Set(headerWalletAddress, buyerAddr)
