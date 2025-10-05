@@ -130,6 +130,7 @@ func main() {
 		ScopeClaim:     cfg.Auth.ScopeClaim,
 		OptionalPaths:  cfg.Auth.OptionalPaths,
 		AllowAnonymous: cfg.Auth.AllowAnonymous,
+		ClockSkew:      cfg.Auth.ClockSkew,
 	}, logger)
 
 	rateLimits := make(map[string]middleware.RateLimit)

@@ -52,7 +52,7 @@ func TestHMACReplayRejected(t *testing.T) {
 	retry.Header.Set(gatewayauth.HeaderNonce, newNonce)
 	retry.Header.Set(gatewayauth.HeaderSignature, sig2)
 
-	if _, err := auth.Authenticate(retry, body); err != nil {
-		t.Fatalf("authenticate retried request: %v", err)
+	if _, err := auth.Authenticate(retry, body); err == nil || !strings.Contains(err.Error(), "timestamp") {
+		t.Fatalf("expected timestamp replay rejection, got %v", err)
 	}
 }

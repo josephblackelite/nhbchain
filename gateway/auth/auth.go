@@ -41,6 +41,9 @@ type Authenticator struct {
 
 	nonceMu sync.Mutex
 	nonces  map[string]*nonceStore
+
+	lastSeenMu sync.Mutex
+	lastSeen   map[string]int64
 }
 
 // NewAuthenticator builds an Authenticator keyed by the provided secrets. The map
@@ -52,6 +55,9 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 	}
 	if nowFn == nil {
 		nowFn = time.Now
+	}
+	if skew <= 0 {
+		skew = 2 * time.Minute
 	}
 	if nonceTTL <= 0 {
 		// Default to twice the skew window, falling back to two minutes if skew is unset.
@@ -67,6 +73,7 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 		nonceTTL:             nonceTTL,
 		nowFn:                nowFn,
 		nonces:               make(map[string]*nonceStore),
+		lastSeen:             make(map[string]int64),
 	}
 }
 
@@ -118,6 +125,9 @@ func (a *Authenticator) Authenticate(r *http.Request, body []byte) (*Principal, 
 	if a.isReplay(apiKey, timestampHeader, nonce, now) {
 		return nil, errors.New("nonce already used")
 	}
+	if a.isTimestampReplay(apiKey, ts, now) {
+		return nil, errors.New("timestamp not increasing")
+	}
 	return &Principal{APIKey: apiKey}, nil
 }
 
@@ -125,6 +135,34 @@ func (a *Authenticator) isReplay(apiKey, timestamp, nonce string, now time.Time)
 	cache := a.nonceStore(apiKey)
 	composite := timestamp + "|" + nonce
 	return cache.Seen(composite, now)
+}
+
+func (a *Authenticator) isTimestampReplay(apiKey string, ts time.Time, now time.Time) bool {
+	if a.allowedTimestampSkew <= 0 {
+		return false
+	}
+	cutoff := now.Add(-a.allowedTimestampSkew)
+	current := ts.Unix()
+
+	a.lastSeenMu.Lock()
+	defer a.lastSeenMu.Unlock()
+
+	last, ok := a.lastSeen[apiKey]
+	if ok {
+		lastTime := time.Unix(last, 0).UTC()
+		if lastTime.After(cutoff) {
+			if current <= last {
+				return true
+			}
+		} else {
+			delete(a.lastSeen, apiKey)
+			ok = false
+		}
+	}
+	if !ok || current > last {
+		a.lastSeen[apiKey] = current
+	}
+	return false
 }
 
 func (a *Authenticator) nonceStore(apiKey string) *nonceStore {

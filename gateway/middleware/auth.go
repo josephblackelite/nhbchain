@@ -20,6 +20,7 @@ type AuthConfig struct {
 	ScopeClaim     string
 	OptionalPaths  []string
 	AllowAnonymous bool
+	ClockSkew      time.Duration
 }
 
 type contextKey string
@@ -46,6 +47,9 @@ func NewAuthenticator(cfg AuthConfig, logger *log.Logger) *Authenticator {
 		auth.secret = []byte(strings.TrimSpace(cfg.HMACSecret))
 		if auth.cfg.ScopeClaim == "" {
 			auth.cfg.ScopeClaim = "scope"
+		}
+		if auth.cfg.ClockSkew <= 0 {
+			auth.cfg.ClockSkew = 2 * time.Minute
 		}
 	})
 	return auth
@@ -108,7 +112,7 @@ func (a *Authenticator) parseToken(tokenString string) (jwt.MapClaims, error) {
 			return nil, errors.New("unexpected signing method")
 		}
 		return a.secret, nil
-	}, jwt.WithLeeway(30*time.Second))
+	}, jwt.WithLeeway(a.cfg.ClockSkew))
 	if err != nil {
 		return nil, err
 	}
