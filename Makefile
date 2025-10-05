@@ -126,8 +126,10 @@ audit:perf:
 	@mkdir -p logs artifacts/perf
 	@bash -o errexit -o nounset -o pipefail -c ' \
 		go test -run ^$$ -bench=. -benchtime=100x -benchmem ./tests/perf/... 2>&1 | tee artifacts/perf/bench.txt && \
-		cp artifacts/perf/bench.txt logs/perf-bench.txt'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh perf ops/audit/perf.yaml artifacts/perf --hash artifacts/perf/bench.txt 2>&1 | tee logs/audit-perf.log'
+		cp artifacts/perf/bench.txt logs/perf-bench.txt && \
+		mv tests/perf/consensus_latency_report.json artifacts/perf/consensus_latency_report.json && \
+		mv tests/perf/consensus_latency_report.txt artifacts/perf/consensus_latency_report.txt'
+	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh perf ops/audit/perf.yaml artifacts/perf --hash artifacts/perf/bench.txt --hash artifacts/perf/consensus_latency_report.json 2>&1 | tee logs/audit-perf.log'
 
 .PHONY: audit:netsec
 audit:netsec:
