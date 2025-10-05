@@ -79,7 +79,7 @@ func runPotsoHeartbeat(args []string, stdout, stderr io.Writer) int {
 		dayTime string
 	)
 	fs.StringVar(&user, "user", "", "bech32 address of the participant")
-	fs.StringVar(&keyFile, "key", "wallet.key", "path to the signing key")
+	fs.StringVar(&keyFile, "key", "wallet.key", "path to the signing key (generate with ./nhb-cli generate-key)")
 	fs.StringVar(&dayTime, "timestamp", "", "optional explicit UNIX timestamp")
 	if err := fs.Parse(args); err != nil {
 		return 1

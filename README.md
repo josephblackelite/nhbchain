@@ -163,7 +163,7 @@ Detach with `Ctrl+B`, `D` and reattach via `tmux attach -t nhb-node`. Logs will 
 
 1. **Discover Peers** — Populate `Bootnodes`/`PersistentPeers` with known validator endpoints or connect to NHBCoin’s bootstrap nodes published via governance notices.
 2. **Sync the Chain** — Allow `nhb-node` to download and verify state. Monitor progress via RPC (`nhb_getLatestBlocks`).
-3. **Generate Wallet Keys** — Use `./nhb-cli generate-key` to create a wallet; secure `wallet.key` offline.
+3. **Generate Wallet Keys** — Run `./nhb-cli generate-key` before any signing operation. The CLI refuses to use missing or placeholder key material, so safeguard the newly created `wallet.key` offline.
 4. **Acquire ZapNHB** — Request testnet allocations or participate in mainnet offerings to stake.
 5. **Stake to Validate** — Bond at least the active `staking.minimumValidatorStake` governance parameter (defaults to 1,000 ZapNHB when unset). Confirm the live threshold before staking:
    ```bash
@@ -178,15 +178,15 @@ Detach with `Ctrl+B`, `D` and reattach via `tmux attach -t nhb-node`. Logs will 
    ```
    Once you know the minimum, stake an amount that meets or exceeds it:
    ```bash
-   ./nhb-cli stake <amount> wallet.key
+   ./nhb-cli stake <amount> wallet.key    # requires a locally generated wallet.key
    ```
 6. **Maintain Engagement** — Submit periodic heartbeat transactions to maximize POTSO weight:
    ```bash
-   ./nhb-cli heartbeat wallet.key
+   ./nhb-cli heartbeat wallet.key         # aborts if wallet.key is missing or stale
    ```
 7. **Unstake When Needed** — Withdraw bonded ZapNHB while respecting unbonding schedules:
    ```bash
-   ./nhb-cli un-stake 1000 wallet.key
+   ./nhb-cli un-stake 1000 wallet.key     # ensure you rotated any legacy placeholder key first
    ```
 
 Non-validating peers may omit staking but should still configure RPC authentication to protect privileged endpoints. Read-only integrations are limited to allow-listed methods (`nhb_getBalance`, `nhb_getLatestBlocks`, `nhb_getLatestTransactions`) unless presenting the bearer token.
@@ -196,14 +196,14 @@ Non-validating peers may omit staking but should still configure RPC authenticat
 `nhb-cli` streamlines wallet management and operational tasks:
 
 ```bash
-./nhb-cli generate-key              # Creates a new NHB wallet (saves to wallet.key)
+./nhb-cli generate-key              # Creates a new NHB wallet (saves to wallet.key; required before other commands)
 ./nhb-cli balance nhb1...            # Queries balances and staking state
 ./nhb-cli send <to> <amount> wallet.key
 ./nhb-cli deploy <contract.hex> wallet.key
 ./nhb-cli id register <alias> wallet.key
 ```
 
-For the full identity management toolkit, refer to [`docs/identity-cli.md`](./docs/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control.
+For the full identity management toolkit, refer to [`docs/identity-cli.md`](./docs/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control—`wallet.key` is now ignored by Git to prevent accidental publication.
 
 ## APIs, SDKs, and Documentation
 
@@ -220,7 +220,7 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 ## Security, Compliance, and Operations
 
 - **Authentication** — RPC bearer tokens protect privileged calls; rotate secrets regularly and enforce mutual TLS or HMAC as described in the [Network Hardening Playbook](docs/security/network-hardening.md).
-- **Key Management** — Validator keys default to encrypted Ethereum-compatible keystores protected by a non-empty passphrase (`NHB_VALIDATOR_PASS` or interactive prompt). Integrate with external KMS via `ValidatorKMSURI` and `ValidatorKMSEnv`.
+- **Key Management** — Validator keys default to encrypted Ethereum-compatible keystores protected by a non-empty passphrase (`NHB_VALIDATOR_PASS` or interactive prompt). Integrate with external KMS via `ValidatorKMSURI` and `ValidatorKMSEnv`. Wallet operators **must** generate fresh CLI keys locally (`./nhb-cli generate-key`)—any environment that previously relied on the repository placeholder must rotate by deleting the old file, minting a new key, and migrating funds/allowances to the new address immediately.
 - **Observability** — Monitor validator uptime, engagement scores, and staking state using CLI commands or forthcoming telemetry dashboards. Forward RPC/WAF logs to your SIEM so abuse attempts can be correlated with P2P events.
 - **Compliance Alignment** — Native identity modules provide audit trails, verified contact points, and consent-driven discovery suitable for regulatory review.
 - **Audits & Bug Bounty** — We run an ongoing [bug bounty program](docs/security/bug-bounty.md) and maintain an [audit readiness guide](docs/security/audit-readiness.md) with frozen commits, reproducible builds, and fixtures for third-party assessors.

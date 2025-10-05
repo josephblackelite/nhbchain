@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/big"
 	"net/http"
 	"os"
@@ -19,6 +18,16 @@ import (
 
 var rpcEndpoint = defaultRPCEndpoint() // Defaults to localhost, can be overridden via RPC_URL or --rpc flag
 var rpcAuthToken = os.Getenv("NHB_RPC_TOKEN")
+
+// legacyWalletKeyMaterial represents the placeholder wallet key that previously
+// lived in the repository. If we ever encounter it on disk we refuse to use it
+// and instruct the operator to rotate immediately.
+var legacyWalletKeyMaterial = []byte{
+	0x19, 0x7e, 0xe8, 0x50, 0x90, 0xe7, 0xcd, 0x05,
+	0xd7, 0xd6, 0xa7, 0xc2, 0x59, 0xff, 0x91, 0xf5,
+	0x1e, 0x1c, 0x49, 0xe1, 0xe4, 0x74, 0xb8, 0x0e,
+	0x8c, 0xf6, 0x5f, 0xf8, 0xa6, 0x3d, 0xb8, 0xf6,
+}
 
 func main() {
 	args := os.Args[1:]
@@ -372,6 +381,7 @@ func generateKey() {
 
 	fmt.Printf("Generated new key and saved to %s\n", fileName)
 	fmt.Printf("Your public address is: %s\n", key.PubKey().Address().String())
+	fmt.Println("Store this file securely. Commands will refuse to run without a unique local key.")
 }
 
 func getBalance(addr string) {
@@ -545,11 +555,24 @@ func doRPCRequest(payload []byte, requireAuth bool) (*http.Response, error) {
 }
 
 func loadPrivateKey(path string) (*crypto.PrivateKey, error) {
-	keyBytes, err := ioutil.ReadFile(path)
+	keyBytes, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("private key file %s not found. run ./nhb-cli generate-key first", path)
+		}
+		return nil, fmt.Errorf("failed to read private key file %s: %w", path, err)
 	}
-	return crypto.PrivateKeyFromBytes(keyBytes)
+	if len(keyBytes) == 0 {
+		return nil, fmt.Errorf("private key file %s is empty. run ./nhb-cli generate-key first", path)
+	}
+	if bytes.Equal(keyBytes, legacyWalletKeyMaterial) {
+		return nil, fmt.Errorf("private key file %s contains deprecated placeholder material. delete it and run ./nhb-cli generate-key to rotate", path)
+	}
+	privKey, err := crypto.PrivateKeyFromBytes(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key in %s: %w", path, err)
+	}
+	return privKey, nil
 }
 
 func callLoyaltyRPC(method string, param interface{}, requireAuth bool) (json.RawMessage, error) {
@@ -792,7 +815,7 @@ func loyaltyUserQR(mode, value string) {
 
 // NEW: deploy reads contract bytecode and sends a creation transaction.
 func deploy(bytecodeFile string, keyFile string) {
-	bytecodeHex, err := ioutil.ReadFile(bytecodeFile)
+	bytecodeHex, err := os.ReadFile(bytecodeFile)
 	if err != nil {
 		fmt.Printf("Error reading bytecode file: %v\n", err)
 		return
@@ -839,6 +862,9 @@ func deploy(bytecodeFile string, keyFile string) {
 
 func printUsage() {
 	fmt.Println("Usage: nhb-cli <command> [arguments]")
+	fmt.Println()
+	fmt.Println("Most commands require a locally generated signing key. Run ./nhb-cli generate-key first;")
+	fmt.Println("the CLI aborts if wallet.key is missing or contains placeholder material.")
 	fmt.Println("Commands:")
 	fmt.Println("  generate-key                      - Generates a new key and saves to wallet.key")
 	fmt.Println("  balance <address>                 - Checks the balance and stake of an address")

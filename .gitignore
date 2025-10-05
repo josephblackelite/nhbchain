@@ -24,6 +24,12 @@ nhb-data-mainnet/
 **/*.sst
 **/*.ldb
 
+# Wallet / CLI secrets
+wallet.key
+wallet-*.key
+*.wallet.key
+*.wallet
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

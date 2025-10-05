@@ -82,7 +82,7 @@ func runPotsoRewardClaim(args []string, stdout, stderr io.Writer) int {
 	)
 	fs.Uint64Var(&epoch, "epoch", 0, "reward epoch number")
 	fs.StringVar(&addr, "addr", "", "bech32 address to claim for")
-	fs.StringVar(&key, "key", "wallet.key", "path to signing key")
+	fs.StringVar(&key, "key", "wallet.key", "path to signing key (generate with ./nhb-cli generate-key)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
