@@ -147,6 +147,37 @@ func TestHandshakeNonceReplay(t *testing.T) {
 	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "nonce replay") {
 		t.Fatalf("expected nonce replay error, got %v", err)
 	}
+	if !local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("expected peer to be banned after nonce replay")
+	}
+}
+
+func TestHandshakeNonceReplayAfterWindow(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+	local := NewServer(handler, mustKey(t), baseConfig(genesis))
+	remote := NewServer(handler, mustKey(t), baseConfig(genesis))
+
+	local.nonceGuard = newNonceGuard(5 * time.Millisecond)
+	fakeNow := time.Unix(1000, 0)
+	local.now = func() time.Time { return fakeNow }
+
+	packet, err := remote.buildHandshake()
+	if err != nil {
+		t.Fatalf("build handshake: %v", err)
+	}
+	if err := local.verifyHandshake(packet); err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+
+	fakeNow = fakeNow.Add(time.Second)
+
+	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "nonce replay") {
+		t.Fatalf("expected nonce replay after window, got %v", err)
+	}
+	if !local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("expected peer to be banned after nonce replay beyond window")
+	}
 }
 
 func TestHandshakeViolationPersistsToPeerstore(t *testing.T) {
