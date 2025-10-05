@@ -5,9 +5,31 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	networkv1 "nhbchain/proto/network/v1"
+	"nhbchain/sdk/internal/dial"
+)
+
+// DialOption configures the underlying gRPC dial behaviour.
+type DialOption = dial.DialOption
+
+var (
+	// WithTransportCredentials configures the client to use the provided gRPC transport credentials.
+	WithTransportCredentials = dial.WithTransportCredentials
+	// WithTLSConfig configures the client to use the provided TLS configuration.
+	WithTLSConfig = dial.WithTLSConfig
+	// WithTLSFromFiles loads TLS credentials from certificate files.
+	WithTLSFromFiles = dial.WithTLSFromFiles
+	// WithSystemCertPool trusts the system certificate pool for TLS connections.
+	WithSystemCertPool = dial.WithSystemCertPool
+	// WithInsecure enables plaintext gRPC connections and should only be used for development.
+	WithInsecure = dial.WithInsecure
+	// WithContextDialer attaches a custom context-based dialer.
+	WithContextDialer = dial.WithContextDialer
+	// WithPerRPCCredentials attaches per-RPC credential authenticators.
+	WithPerRPCCredentials = dial.WithPerRPCCredentials
+	// WithDialOptions forwards arbitrary gRPC dial options to the connector.
+	WithDialOptions = dial.WithDialOptions
 )
 
 // Client is a thin wrapper around the generated Network gRPC client.
@@ -16,16 +38,19 @@ type Client struct {
 	raw  networkv1.NetworkServiceClient
 }
 
-// Dial initialises a client connection to the network daemon.
-func Dial(ctx context.Context, target string, opts ...grpc.DialOption) (*Client, error) {
-	if len(opts) == 0 {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// Dial initialises a client connection to the network daemon. When no dial
+// options are provided the connector defaults to TLS credentials using the host
+// certificate pool.
+func Dial(ctx context.Context, target string, opts ...DialOption) (*Client, error) {
+	dialOpts, err := dial.Resolve(opts...)
+	if err != nil {
+		return nil, err
 	}
-	opts = append(opts,
+	dialOpts = append(dialOpts,
 		grpc.WithChainUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(otelgrpc.StreamClientInterceptor()),
 	)
-	conn, err := grpc.DialContext(ctx, target, opts...)
+	conn, err := grpc.DialContext(ctx, target, dialOpts...)
 	if err != nil {
 		return nil, err
 	}
