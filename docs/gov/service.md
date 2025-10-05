@@ -15,7 +15,8 @@ listen: ":50061"              # gRPC listen address
 consensus: "localhost:9090"   # consensus service endpoint
 chain_id: "localnet"          # consensus chain identifier
 signer_key: "<hex private key>" # 32 byte hex encoded secp256k1 key material
-nonce_start: 1                 # next account nonce to use when building envelopes
+nonce_start: 1                 # baseline account nonce used when no persisted state exists
+nonce_store_path: "/var/lib/nhb/governd/nonce" # file used to persist the next nonce across restarts
 fee:                           # optional transaction fee metadata
   amount: ""
   denom: ""
@@ -42,10 +43,11 @@ consensus_client:              # security settings for the outbound consensus cl
 * **`signer_key`** is required and must be the lowercase hexadecimal encoding of
   the 32 byte secp256k1 private key used to sign governance transactions.
 * **`nonce_start`** should be set to the next available account nonce for the
-  configured signer. The service increments this value for each successfully
-  constructed envelope. When rotating signers or restarting the process make
-  sure the nonce is resynchronised with on-chain state to avoid replay
-  protection errors.
+  configured signer. The service treats this as a baseline when no persisted
+  nonce information is available on disk.
+* **`nonce_store_path`** identifies a writable file used to persist the next
+  nonce after each successful transaction broadcast. The value is reloaded
+  during startup so restarts continue from the last used nonce.
 * **`tls`** must point at the PEM encoded certificate and private key the
   service should present. Supplying `client_ca` enables mTLS and requires
   clients to authenticate with a certificate issued by the supplied authority.
@@ -111,10 +113,11 @@ constructing the consensus envelope. Validation errors are surfaced as
 
 ### Nonce management
 
-`governd` tracks the next nonce in memory. If the consensus submission fails the
-nonce is still considered consumed to avoid double-use. Operators should bump
-`nonce_start` manually when resynchronising with state or when rotating the
-signing account.
+`governd` tracks the next nonce in memory and persists the counter to the
+configured `nonce_store_path` after every successful broadcast. If the consensus
+submission fails the nonce is still considered consumed to avoid double-use.
+Operators should update the persisted value (or adjust `nonce_start` for fresh
+deployments) when resynchronising with state or rotating the signing account.
 
 ## Error handling
 

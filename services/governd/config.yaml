@@ -3,6 +3,7 @@ consensus: "localhost:9090"
 chain_id: "localnet"
 signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 nonce_start: 1
+nonce_store_path: "services/governd/data/nonce"
 fee:
   amount: ""
   denom: ""

@@ -87,7 +87,20 @@ func main() {
 	}
 	defer func() { _ = client.Close() }()
 
-	service := server.New(client, signer, cfg)
+	nonceStore, err := server.NewFileNonceStore(cfg.NonceStorePath)
+	if err != nil {
+		log.Fatalf("initialise nonce store: %v", err)
+	}
+	restoredNonce, err := server.RestoreNonce(nonceStore, cfg.NonceStart)
+	if err != nil {
+		log.Fatalf("load persisted nonce: %v", err)
+	}
+	cfg.NonceStart = restoredNonce
+
+	service, err := server.New(client, signer, cfg, nonceStore)
+	if err != nil {
+		log.Fatalf("initialise service: %v", err)
+	}
 
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	if err != nil {

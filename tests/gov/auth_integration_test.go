@@ -2,6 +2,7 @@ package gov_test
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -39,7 +40,19 @@ func TestMsgInterceptorsRejectUnauthenticatedRequests(t *testing.T) {
 func TestServiceRejectsUnauthenticatedCalls(t *testing.T) {
 	t.Parallel()
 
-	svc := server.New(nil, nil, config.Config{ChainID: "localnet", NonceStart: 1})
+	storePath := filepath.Join(t.TempDir(), "nonce")
+	nonceStore, err := server.NewFileNonceStore(storePath)
+	if err != nil {
+		t.Fatalf("create nonce store: %v", err)
+	}
+	initialNonce, err := server.RestoreNonce(nonceStore, 1)
+	if err != nil {
+		t.Fatalf("restore nonce: %v", err)
+	}
+	svc, err := server.New(nil, nil, config.Config{ChainID: "localnet", NonceStart: initialNonce, NonceStorePath: storePath}, nonceStore)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
 	if _, err := svc.SubmitProposal(context.Background(), &govv1.MsgSubmitProposal{}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("expected unauthenticated error, got %v", err)
 	}

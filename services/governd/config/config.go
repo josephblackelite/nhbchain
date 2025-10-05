@@ -15,6 +15,7 @@ type Config struct {
 	ChainID           string       `yaml:"chain_id"`
 	SignerKey         string       `yaml:"signer_key"`
 	NonceStart        uint64       `yaml:"nonce_start"`
+	NonceStorePath    string       `yaml:"nonce_store_path"`
 	Fee               FeeConfig    `yaml:"fee"`
 	TLS               TLSConfig    `yaml:"tls"`
 	Auth              AuthConfig   `yaml:"auth"`
@@ -74,6 +75,7 @@ func Load(path string) (Config, error) {
 		ConsensusEndpoint: "localhost:9090",
 		ChainID:           "localnet",
 		NonceStart:        1,
+		NonceStorePath:    "/var/lib/nhb/governd-nonce",
 	}
 	if path == "" {
 		return cfg, fmt.Errorf("config path required")
@@ -98,6 +100,10 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.NonceStart == 0 {
 		cfg.NonceStart = 1
+	}
+	cfg.NonceStorePath = strings.TrimSpace(cfg.NonceStorePath)
+	if cfg.NonceStorePath == "" {
+		return cfg, fmt.Errorf("nonce_store_path is required")
 	}
 	if cfg.SignerKey == "" {
 		return cfg, fmt.Errorf("signer_key is required")

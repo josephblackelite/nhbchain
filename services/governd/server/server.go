@@ -17,6 +17,7 @@ import (
 
 	"nhbchain/crypto"
 	"nhbchain/native/governance"
+	consensusv1 "nhbchain/proto/consensus/v1"
 	govv1 "nhbchain/proto/gov/v1"
 	cons "nhbchain/sdk/consensus"
 	govsdk "nhbchain/sdk/gov"
@@ -24,28 +25,40 @@ import (
 )
 
 // Service implements the governance query and message APIs.
+type consensusClient interface {
+	QueryState(ctx context.Context, namespace, key string) ([]byte, []byte, error)
+	SubmitEnvelope(ctx context.Context, tx *consensusv1.SignedTxEnvelope) error
+}
+
 type Service struct {
 	govv1.UnimplementedQueryServer
 	govv1.UnimplementedMsgServer
 
-	consensus *cons.Client
+	consensus consensusClient
 	signer    *crypto.PrivateKey
 	chainID   string
 	fee       config.FeeConfig
 
-	nonceMu sync.Mutex
-	nonce   uint64
+	nonceMu        sync.Mutex
+	nonce          uint64
+	nonceStore     NonceStore
+	persistedNonce uint64
 }
 
 // New constructs a governance service using the supplied dependencies.
-func New(client *cons.Client, signer *crypto.PrivateKey, cfg config.Config) *Service {
-	return &Service{
-		consensus: client,
-		signer:    signer,
-		chainID:   cfg.ChainID,
-		fee:       cfg.Fee,
-		nonce:     cfg.NonceStart,
+func New(client consensusClient, signer *crypto.PrivateKey, cfg config.Config, store NonceStore) (*Service, error) {
+	if store == nil {
+		return nil, fmt.Errorf("nonce store required")
 	}
+	return &Service{
+		consensus:      client,
+		signer:         signer,
+		chainID:        cfg.ChainID,
+		fee:            cfg.Fee,
+		nonce:          cfg.NonceStart,
+		nonceStore:     store,
+		persistedNonce: cfg.NonceStart,
+	}, nil
 }
 
 func (s *Service) ensureAuthenticated(ctx context.Context) error {
@@ -283,6 +296,9 @@ func (s *Service) broadcast(ctx context.Context, payload proto.Message) (string,
 	if err := s.consensus.SubmitEnvelope(ctx, signed); err != nil {
 		return "", status.Errorf(codes.Internal, "submit envelope: %v", err)
 	}
+	if err := s.persistNonce(); err != nil {
+		return "", status.Errorf(codes.Internal, "persist nonce: %v", err)
+	}
 	raw, err := proto.Marshal(signed)
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "marshal signed envelope: %v", err)
@@ -297,6 +313,31 @@ func (s *Service) reserveNonce() uint64 {
 	nonce := s.nonce
 	s.nonce++
 	return nonce
+}
+
+func (s *Service) persistNonce() error {
+	if s == nil || s.nonceStore == nil {
+		return nil
+	}
+	s.nonceMu.Lock()
+	current := s.nonce
+	previous := s.persistedNonce
+	s.nonceMu.Unlock()
+	if current < previous {
+		return fmt.Errorf("nonce regression: current=%d persisted=%d", current, previous)
+	}
+	if current == previous {
+		return nil
+	}
+	if err := s.nonceStore.Save(current); err != nil {
+		return err
+	}
+	s.nonceMu.Lock()
+	if current > s.persistedNonce {
+		s.persistedNonce = current
+	}
+	s.nonceMu.Unlock()
+	return nil
 }
 
 func convertProposal(proposal *governance.Proposal) *govv1.Proposal {

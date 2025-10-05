@@ -3,6 +3,7 @@ consensus: "consensusd:9090"
 chain_id: "nhb-local"
 signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 nonce_start: 1
+nonce_store_path: "/var/lib/nhb/governd/nonce"
 fee:
   amount: "0"
   denom: ""
