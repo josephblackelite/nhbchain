@@ -152,6 +152,54 @@ func TestHandshakeNonceReplay(t *testing.T) {
 	}
 }
 
+func TestHandshakeNonceReplayVariantEncodings(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+	variants := map[string]func(string) string{
+		"upperPrefix": func(nonce string) string {
+			return strings.ToUpper(nonce)
+		},
+		"upperNoPrefix": func(nonce string) string {
+			trimmed := strings.TrimPrefix(strings.ToUpper(nonce), "0X")
+			return strings.ToUpper(trimmed)
+		},
+		"mixedCasePrefix": func(nonce string) string {
+			trimmed := strings.TrimPrefix(nonce, "0x")
+			trimmed = strings.TrimPrefix(trimmed, "0X")
+			return "0X" + strings.ToUpper(trimmed)
+		},
+		"noPrefixLower": func(nonce string) string {
+			trimmed := strings.TrimPrefix(strings.ToLower(nonce), "0x")
+			return trimmed
+		},
+	}
+
+	for name, mutate := range variants {
+		t.Run(name, func(t *testing.T) {
+			local := NewServer(handler, mustKey(t), baseConfig(genesis))
+			remote := NewServer(handler, mustKey(t), baseConfig(genesis))
+
+			packet, err := remote.buildHandshake()
+			if err != nil {
+				t.Fatalf("build handshake: %v", err)
+			}
+			if err := local.verifyHandshake(packet); err != nil {
+				t.Fatalf("first verify: %v", err)
+			}
+
+			replay := *packet
+			replay.Nonce = mutate(packet.Nonce)
+			if replay.Nonce == "" {
+				t.Fatalf("variant %s produced empty nonce", name)
+			}
+
+			if err := local.verifyHandshake(&replay); err == nil || !strings.Contains(err.Error(), "nonce replay") {
+				t.Fatalf("expected nonce replay for variant %s, got %v", name, err)
+			}
+		})
+	}
+}
+
 func TestHandshakeNonceReplayAfterWindow(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)

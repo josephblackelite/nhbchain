@@ -111,7 +111,8 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		pubKey:           &s.privKey.PrivateKey.PublicKey,
 		addrs:            listen,
 	}
-	if !s.nonceGuard.Remember(s.nodeID, payload.Nonce, s.now()) {
+	nonceKey := hex.EncodeToString(nonce)
+	if !s.nonceGuard.Remember(s.nodeID, nonceKey, s.now()) {
 		return nil, fmt.Errorf("nonce collision detected")
 	}
 	return packet, nil
@@ -180,7 +181,8 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 		return s.signatureMismatch(packet, "node ID mismatch: derived %s claimed %s", derived, claimed)
 	}
 
-	if !s.nonceGuard.Remember(derived, packet.Nonce, s.now()) {
+	nonceKey := hex.EncodeToString(nonceBytes)
+	if !s.nonceGuard.Remember(derived, nonceKey, s.now()) {
 		fmt.Printf("Handshake nonce replay from %s rejected\n", derived)
 		s.markHandshakeViolation(derived)
 		return fmt.Errorf("handshake nonce replay detected")
