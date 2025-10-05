@@ -57,7 +57,7 @@ func main() {
 	}
 	defer store.Close()
 
-	auth := NewAuthenticator(cfg.APIKeys, cfg.AllowedTimestampSkew, cfg.NonceTTL, nil)
+	auth := NewAuthenticator(cfg.APIKeys, cfg.AllowedTimestampSkew, cfg.NonceTTL, cfg.NonceCapacity, nil)
 	node := NewRPCNodeClient(cfg.NodeURL, cfg.NodeAuthToken)
 	queue := NewWebhookQueue(
 		WithWebhookTaskCapacity(cfg.WebhookQueueCapacity),

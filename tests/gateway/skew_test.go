@@ -15,7 +15,7 @@ import (
 func TestAuthenticatorRejectsOlderTimestamp(t *testing.T) {
 	base := time.Unix(1700000000, 0).UTC()
 	current := base
-	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 0, 0, func() time.Time {
+	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 0, 0, 0, func() time.Time {
 		return current
 	})
 
@@ -51,7 +51,7 @@ func TestAuthenticatorRejectsOlderTimestamp(t *testing.T) {
 func TestAuthenticatorAcceptsNewerTimestamp(t *testing.T) {
 	base := time.Unix(1700000000, 0).UTC()
 	current := base
-	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 0, 0, func() time.Time {
+	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 0, 0, 0, func() time.Time {
 		return current
 	})
 
