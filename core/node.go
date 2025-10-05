@@ -3146,24 +3146,35 @@ func (n *Node) PotsoTop(day string, limit int) ([]PotsoLeaderboardEntry, error) 
 }
 
 // PotsoStakeLock moves the requested amount of ZNHB into the staking vault and records a new lock.
-func (n *Node) PotsoStakeLock(owner [20]byte, amount *big.Int) (uint64, *potso.StakeLock, error) {
-	if amount == nil || amount.Sign() <= 0 {
-		return 0, nil, fmt.Errorf("amount must be positive")
-	}
+func (n *Node) PotsoStakeLock(owner [20]byte, amount *big.Int, authNonce uint64) (uint64, *potso.StakeLock, error) {
+        if amount == nil || amount.Sign() <= 0 {
+                return 0, nil, fmt.Errorf("amount must be positive")
+        }
+        if authNonce == 0 {
+                return 0, nil, fmt.Errorf("staking nonce must be greater than zero")
+        }
 
-	if err := nativecommon.Guard(n, modulePotso); err != nil {
-		return 0, nil, err
-	}
+        if err := nativecommon.Guard(n, modulePotso); err != nil {
+                return 0, nil, err
+        }
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
-	manager := nhbstate.NewManager(n.state.Trie)
+        manager := nhbstate.NewManager(n.state.Trie)
 
-	ownerAcc, err := manager.GetAccount(owner[:])
-	if err != nil {
-		return 0, nil, err
-	}
+        lastNonce, err := manager.PotsoStakeLatestAuthNonce(owner)
+        if err != nil {
+                return 0, nil, err
+        }
+        if authNonce <= lastNonce {
+                return 0, nil, fmt.Errorf("staking nonce %d has already been used", authNonce)
+        }
+
+        ownerAcc, err := manager.GetAccount(owner[:])
+        if err != nil {
+                return 0, nil, err
+        }
 	if ownerAcc.BalanceZNHB.Cmp(amount) < 0 {
 		return 0, nil, fmt.Errorf("insufficient ZNHB balance")
 	}
@@ -3209,38 +3220,52 @@ func (n *Node) PotsoStakeLock(owner [20]byte, amount *big.Int) (uint64, *potso.S
 	if err != nil {
 		return 0, nil, err
 	}
-	bonded = new(big.Int).Add(bonded, amount)
-	if err := manager.PotsoStakeSetBondedTotal(owner, bonded); err != nil {
-		return 0, nil, err
-	}
+        bonded = new(big.Int).Add(bonded, amount)
+        if err := manager.PotsoStakeSetBondedTotal(owner, bonded); err != nil {
+                return 0, nil, err
+        }
 
-	evt := events.PotsoStakeLocked{Owner: owner, Amount: amount}.Event()
-	if evt != nil {
-		n.state.AppendEvent(evt)
-	}
+        if err := manager.PotsoStakeSetAuthNonce(owner, authNonce); err != nil {
+                return 0, nil, err
+        }
+
+        evt := events.PotsoStakeLocked{Owner: owner, Amount: amount}.Event()
+        if evt != nil {
+                n.state.AppendEvent(evt)
+        }
 
 	return nonce, lock, nil
 }
 
 // PotsoStakeUnbond starts the unbonding cooldown for the requested amount.
-func (n *Node) PotsoStakeUnbond(owner [20]byte, amount *big.Int) (*big.Int, uint64, error) {
-	if amount == nil || amount.Sign() <= 0 {
-		return nil, 0, fmt.Errorf("amount must be positive")
-	}
+func (n *Node) PotsoStakeUnbond(owner [20]byte, amount *big.Int, authNonce uint64) (*big.Int, uint64, error) {
+        if amount == nil || amount.Sign() <= 0 {
+                return nil, 0, fmt.Errorf("amount must be positive")
+        }
+        if authNonce == 0 {
+                return nil, 0, fmt.Errorf("staking nonce must be greater than zero")
+        }
 
-	if err := nativecommon.Guard(n, modulePotso); err != nil {
-		return nil, 0, err
-	}
+        if err := nativecommon.Guard(n, modulePotso); err != nil {
+                return nil, 0, err
+        }
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
-	manager := nhbstate.NewManager(n.state.Trie)
-	bonded, err := manager.PotsoStakeBondedTotal(owner)
-	if err != nil {
-		return nil, 0, err
-	}
-	if bonded.Cmp(amount) < 0 {
+        manager := nhbstate.NewManager(n.state.Trie)
+        lastNonce, err := manager.PotsoStakeLatestAuthNonce(owner)
+        if err != nil {
+                return nil, 0, err
+        }
+        if authNonce <= lastNonce {
+                return nil, 0, fmt.Errorf("staking nonce %d has already been used", authNonce)
+        }
+        bonded, err := manager.PotsoStakeBondedTotal(owner)
+        if err != nil {
+                return nil, 0, err
+        }
+        if bonded.Cmp(amount) < 0 {
 		return nil, 0, fmt.Errorf("insufficient bonded stake")
 	}
 
@@ -3326,40 +3351,57 @@ func (n *Node) PotsoStakeUnbond(owner [20]byte, amount *big.Int) (*big.Int, uint
 
 	if err := manager.PotsoStakePutLockNonces(owner, newNonces); err != nil {
 		return nil, 0, err
-	}
-	bonded.Sub(bonded, unbonded)
-	if err := manager.PotsoStakeSetBondedTotal(owner, bonded); err != nil {
-		return nil, 0, err
-	}
+        }
+        bonded.Sub(bonded, unbonded)
+        if err := manager.PotsoStakeSetBondedTotal(owner, bonded); err != nil {
+                return nil, 0, err
+        }
 
-	evt := events.PotsoStakeUnbonded{Owner: owner, Amount: unbonded, WithdrawAt: withdrawAt}.Event()
-	if evt != nil {
-		n.state.AppendEvent(evt)
-	}
+        if err := manager.PotsoStakeSetAuthNonce(owner, authNonce); err != nil {
+                return nil, 0, err
+        }
+
+        evt := events.PotsoStakeUnbonded{Owner: owner, Amount: unbonded, WithdrawAt: withdrawAt}.Event()
+        if evt != nil {
+                n.state.AppendEvent(evt)
+        }
 
 	return unbonded, withdrawAt, nil
 }
 
 // PotsoStakeWithdraw releases any matured stake locks back to the owner account.
-func (n *Node) PotsoStakeWithdraw(owner [20]byte) ([]potso.WithdrawResult, error) {
-	if err := nativecommon.Guard(n, modulePotso); err != nil {
-		return nil, err
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
+func (n *Node) PotsoStakeWithdraw(owner [20]byte, authNonce uint64) ([]potso.WithdrawResult, error) {
+        if authNonce == 0 {
+                return nil, fmt.Errorf("staking nonce must be greater than zero")
+        }
+        if err := nativecommon.Guard(n, modulePotso); err != nil {
+                return nil, err
+        }
+        n.stateMu.Lock()
+        defer n.stateMu.Unlock()
 
-	manager := nhbstate.NewManager(n.state.Trie)
-	nonces, err := manager.PotsoStakeLockNonces(owner)
-	if err != nil {
-		return nil, err
-	}
-	if len(nonces) == 0 {
-		return []potso.WithdrawResult{}, nil
-	}
+        manager := nhbstate.NewManager(n.state.Trie)
+        lastNonce, err := manager.PotsoStakeLatestAuthNonce(owner)
+        if err != nil {
+                return nil, err
+        }
+        if authNonce <= lastNonce {
+                return nil, fmt.Errorf("staking nonce %d has already been used", authNonce)
+        }
+        nonces, err := manager.PotsoStakeLockNonces(owner)
+        if err != nil {
+                return nil, err
+        }
+        if len(nonces) == 0 {
+                if err := manager.PotsoStakeSetAuthNonce(owner, authNonce); err != nil {
+                        return nil, err
+                }
+                return []potso.WithdrawResult{}, nil
+        }
 
-	now := uint64(time.Now().Unix())
-	keepNonces := make([]uint64, 0, len(nonces))
-	withdrawn := make([]potso.WithdrawResult, 0)
+        now := uint64(time.Now().Unix())
+        keepNonces := make([]uint64, 0, len(nonces))
+        withdrawn := make([]potso.WithdrawResult, 0)
 	total := big.NewInt(0)
 	pending := false
 
@@ -3398,20 +3440,23 @@ func (n *Node) PotsoStakeWithdraw(owner [20]byte) ([]potso.WithdrawResult, error
 		}
 	}
 
-	if err := manager.PotsoStakePutLockNonces(owner, keepNonces); err != nil {
-		return nil, err
-	}
+        if err := manager.PotsoStakePutLockNonces(owner, keepNonces); err != nil {
+                return nil, err
+        }
 
-	if total.Sign() == 0 {
-		if pending {
-			return nil, fmt.Errorf("no withdrawable locks yet")
-		}
-		return []potso.WithdrawResult{}, nil
-	}
+        if total.Sign() == 0 {
+                if pending {
+                        return nil, fmt.Errorf("no withdrawable locks yet")
+                }
+                if err := manager.PotsoStakeSetAuthNonce(owner, authNonce); err != nil {
+                        return nil, err
+                }
+                return []potso.WithdrawResult{}, nil
+        }
 
-	ownerAcc, err := manager.GetAccount(owner[:])
-	if err != nil {
-		return nil, err
+        ownerAcc, err := manager.GetAccount(owner[:])
+        if err != nil {
+                return nil, err
 	}
 	vaultAddr := manager.PotsoStakeVaultAddress()
 	vaultAcc, err := manager.GetAccount(vaultAddr[:])
@@ -3426,14 +3471,18 @@ func (n *Node) PotsoStakeWithdraw(owner [20]byte) ([]potso.WithdrawResult, error
 	if err := manager.PutAccount(owner[:], ownerAcc); err != nil {
 		return nil, err
 	}
-	if err := manager.PutAccount(vaultAddr[:], vaultAcc); err != nil {
-		return nil, err
-	}
+        if err := manager.PutAccount(vaultAddr[:], vaultAcc); err != nil {
+                return nil, err
+        }
 
-	evt := events.PotsoStakeWithdrawn{Owner: owner, Amount: total}.Event()
-	if evt != nil {
-		n.state.AppendEvent(evt)
-	}
+        if err := manager.PotsoStakeSetAuthNonce(owner, authNonce); err != nil {
+                return nil, err
+        }
+
+        evt := events.PotsoStakeWithdrawn{Owner: owner, Amount: total}.Event()
+        if evt != nil {
+                n.state.AppendEvent(evt)
+        }
 
 	return withdrawn, nil
 }

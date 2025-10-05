@@ -87,7 +87,8 @@ var (
 	potsoMeterPrefix               = []byte("potso/meter/")
 	potsoDayIndexPrefix            = []byte("potso/day-index/")
 	potsoStakeTotalPrefix          = []byte("potso/stake/")
-	potsoStakeNoncePrefix          = []byte("potso/stake/nonce/")
+        potsoStakeNoncePrefix          = []byte("potso/stake/nonce/")
+        potsoStakeAuthNoncePrefix      = []byte("potso/stake/authnonce/")
 	potsoStakeLocksPrefix          = []byte("potso/stake/locks/")
 	potsoStakeLockIndexPrefix      = []byte("potso/stake/locks/index/")
 	potsoStakeQueuePrefix          = []byte("potso/stake/unbondq/")
@@ -1267,10 +1268,17 @@ func potsoStakeTotalKey(owner []byte) []byte {
 }
 
 func potsoStakeNonceKey(owner []byte) []byte {
-	buf := make([]byte, len(potsoStakeNoncePrefix)+len(owner))
-	copy(buf, potsoStakeNoncePrefix)
-	copy(buf[len(potsoStakeNoncePrefix):], owner)
-	return kvKey(buf)
+        buf := make([]byte, len(potsoStakeNoncePrefix)+len(owner))
+        copy(buf, potsoStakeNoncePrefix)
+        copy(buf[len(potsoStakeNoncePrefix):], owner)
+        return kvKey(buf)
+}
+
+func potsoStakeAuthNonceKey(owner []byte) []byte {
+        buf := make([]byte, len(potsoStakeAuthNoncePrefix)+len(owner))
+        copy(buf, potsoStakeAuthNoncePrefix)
+        copy(buf[len(potsoStakeAuthNoncePrefix):], owner)
+        return kvKey(buf)
 }
 
 func potsoStakeLockIndexKey(owner []byte) []byte {
@@ -1635,19 +1643,41 @@ func (m *Manager) PotsoStakeOwners() ([][20]byte, error) {
 
 // PotsoStakeAllocateNonce reserves and returns the next lock nonce for the owner.
 func (m *Manager) PotsoStakeAllocateNonce(owner [20]byte) (uint64, error) {
-	key := potsoStakeNonceKey(owner[:])
-	var next uint64
-	ok, err := m.KVGet(key, &next)
-	if err != nil {
+        key := potsoStakeNonceKey(owner[:])
+        var next uint64
+        ok, err := m.KVGet(key, &next)
+        if err != nil {
 		return 0, err
 	}
 	if !ok || next == 0 {
 		next = 1
 	}
-	if err := m.KVPut(key, next+1); err != nil {
-		return 0, err
-	}
-	return next, nil
+        if err := m.KVPut(key, next+1); err != nil {
+                return 0, err
+        }
+        return next, nil
+}
+
+// PotsoStakeLatestAuthNonce returns the latest consumed staking nonce for the owner.
+func (m *Manager) PotsoStakeLatestAuthNonce(owner [20]byte) (uint64, error) {
+        key := potsoStakeAuthNonceKey(owner[:])
+        var nonce uint64
+        ok, err := m.KVGet(key, &nonce)
+        if err != nil {
+                return 0, err
+        }
+        if !ok {
+                return 0, nil
+        }
+        return nonce, nil
+}
+
+// PotsoStakeSetAuthNonce records the latest consumed staking nonce for the owner.
+func (m *Manager) PotsoStakeSetAuthNonce(owner [20]byte, nonce uint64) error {
+        if nonce == 0 {
+                return fmt.Errorf("potso: auth nonce must be greater than zero")
+        }
+        return m.KVPut(potsoStakeAuthNonceKey(owner[:]), nonce)
 }
 
 // PotsoStakeLockNonces lists all lock nonces tracked for the owner in creation order.
