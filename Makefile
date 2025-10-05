@@ -1,4 +1,48 @@
 .PHONY: proto sdk tidy up down audit:static audit:tests audit:determinism audit:e2e audit:chaos audit:perf audit:netsec audit:ledger audit:supply audit:config audit:docs audit:endpoints
+.PHONY: bugcheck bugcheck-tools bugcheck-static bugcheck-race bugcheck-fuzz bugcheck-determinism bugcheck-gateway bugcheck-network bugcheck-perf bugcheck-proto bugcheck-docs
+
+bugcheck:
+	@bash scripts/bugcheck.sh
+
+bugcheck-tools:
+	@bash -o errexit -o nounset -o pipefail -c ' \
+command -v golangci-lint >/dev/null 2>&1 || GO111MODULE=on go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+command -v staticcheck >/dev/null 2>&1 || GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@latest; \
+command -v gosec >/dev/null 2>&1 || GO111MODULE=on go install github.com/securego/gosec/v2/cmd/gosec@latest; \
+command -v govulncheck >/dev/null 2>&1 || GO111MODULE=on go install golang.org/x/vuln/cmd/govulncheck@latest; \
+command -v buf >/dev/null 2>&1 || GO111MODULE=on go install github.com/bufbuild/buf/cmd/buf@latest'
+
+bugcheck-static:
+	@bash -o errexit -o nounset -o pipefail -c ' \
+golangci-lint run ./... && \
+go vet ./... && \
+staticcheck ./... && \
+gosec ./... && \
+govulncheck ./...'
+
+bugcheck-race:
+	@go test -race ./...
+
+bugcheck-fuzz:
+	@go test -run ^$$ -fuzz=Fuzz -fuzztime=60s ./tests/...
+
+bugcheck-determinism:
+	@$(MAKE) audit:determinism
+
+bugcheck-gateway:
+	@go test -run TestEndToEndFinancialFlows ./tests/e2e
+
+bugcheck-network:
+	@$(MAKE) audit:netsec
+
+bugcheck-perf:
+	@$(MAKE) audit:perf
+
+bugcheck-proto:
+	@bash -o errexit -o nounset -o pipefail -c 'buf lint && buf breaking --against ".git#branch=main"'
+
+bugcheck-docs:
+	@$(MAKE) audit:docs
 
 STABLE_BASE ?= http://localhost:7074
 
