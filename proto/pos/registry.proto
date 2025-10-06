@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package pos.v1;
+
+option go_package = "nhbchain/proto/pos;posv1";
+
+message Merchant {
+  string address = 1;
+  bool paused = 2;
+}
+
+message Device {
+  string device_id = 1;
+  string merchant_addr = 2;
+  bool revoked = 3;
+}
+
+message MsgRegisterMerchant {
+  string authority = 1;
+  string merchant_addr = 2;
+}
+
+message MsgRegisterMerchantResponse {
+  string tx_hash = 1;
+}
+
+message MsgRegisterDevice {
+  string authority = 1;
+  string merchant_addr = 2;
+  string device_id = 3;
+}
+
+message MsgRegisterDeviceResponse {
+  string tx_hash = 1;
+}
+
+message MsgPauseMerchant {
+  string authority = 1;
+  string merchant_addr = 2;
+}
+
+message MsgPauseMerchantResponse {
+  string tx_hash = 1;
+}
+
+message MsgResumeMerchant {
+  string authority = 1;
+  string merchant_addr = 2;
+}
+
+message MsgResumeMerchantResponse {
+  string tx_hash = 1;
+}
+
+message MsgRevokeDevice {
+  string authority = 1;
+  string merchant_addr = 2;
+  string device_id = 3;
+}
+
+message MsgRevokeDeviceResponse {
+  string tx_hash = 1;
+}
+
+message MsgRestoreDevice {
+  string authority = 1;
+  string merchant_addr = 2;
+  string device_id = 3;
+}
+
+message MsgRestoreDeviceResponse {
+  string tx_hash = 1;
+}
+
+service Registry {
+  rpc RegisterMerchant(MsgRegisterMerchant) returns (MsgRegisterMerchantResponse);
+  rpc RegisterDevice(MsgRegisterDevice) returns (MsgRegisterDeviceResponse);
+  rpc PauseMerchant(MsgPauseMerchant) returns (MsgPauseMerchantResponse);
+  rpc ResumeMerchant(MsgResumeMerchant) returns (MsgResumeMerchantResponse);
+  rpc RevokeDevice(MsgRevokeDevice) returns (MsgRevokeDeviceResponse);
+  rpc RestoreDevice(MsgRestoreDevice) returns (MsgRestoreDeviceResponse);
+}

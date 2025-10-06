@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	nhbstate "nhbchain/core/state"
+	coretx "nhbchain/core/tx"
 	"nhbchain/core/types"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -230,6 +231,17 @@ func (sp *StateProcessor) EvaluateSponsorship(tx *types.Transaction) (*Sponsorsh
 	assessment.merchant = nhbstate.NormalizePaymasterMerchant(tx.MerchantAddress)
 	assessment.deviceID = nhbstate.NormalizePaymasterDevice(tx.DeviceID)
 	assessment.day = sp.currentPaymasterDay()
+
+	manager := nhbstate.NewManager(sp.Trie)
+	reason, err := coretx.CheckPOSRegistry(manager, assessment.merchant, assessment.deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if reason != "" {
+		assessment.Status = SponsorshipStatusThrottled
+		assessment.Reason = reason
+		return assessment, nil
+	}
 
 	if err := sp.checkPaymasterCaps(assessment); err != nil {
 		return nil, err
