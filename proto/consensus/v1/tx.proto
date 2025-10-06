@@ -22,6 +22,7 @@ message TxEnvelope {
   uint64 intent_expiry = 7;
   string merchant_addr = 8;
   string device_id = 9;
+  string refund_of = 10;
 }
 
 message TxSignature {

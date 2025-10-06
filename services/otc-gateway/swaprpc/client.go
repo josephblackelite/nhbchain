@@ -56,6 +56,8 @@ type Config struct {
 	Nonce             func() (string, error)
 }
 
+const jsonRPCVersion = "2.0"
+
 // NewClient constructs a JSON-RPC client targeting the supplied URL.
 func NewClient(cfg Config) (*Client, error) {
 	timeout := cfg.Timeout
@@ -106,7 +108,7 @@ func NewClient(cfg Config) (*Client, error) {
 		rateWindow: window,
 		nowFn:      nowFn,
 		nonceFn:    nonceFn,
-	}
+	}, nil
 }
 
 // VoucherStatus reflects the current state of a voucher recorded on the node.
@@ -338,7 +340,7 @@ func (c *Client) call(ctx context.Context, method string, params []interface{}, 
 		return err
 	}
 	id := c.nextID.Add(1)
-	reqBody := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
+	reqBody := rpcRequest{JSONRPC: jsonRPCVersion, ID: id, Method: method, Params: params}
 	buf, err := json.Marshal(reqBody)
 	if err != nil {
 		return err

@@ -26,6 +26,7 @@ export interface TxEnvelope {
   intentExpiry: number;
   merchantAddr: string;
   deviceId: string;
+  refundOf: string;
 }
 
 export interface TxSignature {
@@ -148,6 +149,7 @@ function createBaseTxEnvelope(): TxEnvelope {
     intentExpiry: 0,
     merchantAddr: "",
     deviceId: "",
+    refundOf: "",
   };
 }
 
@@ -179,6 +181,9 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
     }
     if (message.deviceId !== "") {
       writer.uint32(74).string(message.deviceId);
+    }
+    if (message.refundOf !== "") {
+      writer.uint32(82).string(message.refundOf);
     }
     return writer;
   },
@@ -262,6 +267,14 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
           message.deviceId = reader.string();
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.refundOf = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -282,6 +295,7 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
       intentExpiry: isSet(object.intentExpiry) ? globalThis.Number(object.intentExpiry) : 0,
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
       deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
+      refundOf: isSet(object.refundOf) ? globalThis.String(object.refundOf) : "",
     };
   },
 
@@ -314,6 +328,9 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
     if (message.deviceId !== "") {
       obj.deviceId = message.deviceId;
     }
+    if (message.refundOf !== "") {
+      obj.refundOf = message.refundOf;
+    }
     return obj;
   },
 
@@ -333,6 +350,7 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
     message.intentExpiry = object.intentExpiry ?? 0;
     message.merchantAddr = object.merchantAddr ?? "";
     message.deviceId = object.deviceId ?? "";
+    message.refundOf = object.refundOf ?? "";
     return message;
   },
 };

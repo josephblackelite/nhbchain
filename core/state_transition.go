@@ -19,6 +19,7 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/bank"
 	nativecommon "nhbchain/native/common"
 	"nhbchain/native/escrow"
 	"nhbchain/native/governance"
@@ -1002,6 +1003,35 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	if err != nil {
 		return nil, err
 	}
+	isTransfer := tx.Type == types.TxTypeTransfer && tx.Value != nil && tx.Value.Sign() > 0
+	var txHash [32]byte
+	var txHashReady bool
+	var refundOrigin [32]byte
+	var hasRefundOrigin bool
+	if isTransfer {
+		hashBytes, err := tx.Hash()
+		if err != nil {
+			return nil, fmt.Errorf("refund ledger: compute hash: %w", err)
+		}
+		if len(hashBytes) != len(txHash) {
+			return nil, fmt.Errorf("refund ledger: expected 32-byte tx hash, got %d", len(hashBytes))
+		}
+		copy(txHash[:], hashBytes)
+		txHashReady = true
+		trimmedRefund := strings.TrimSpace(tx.RefundOf)
+		if trimmedRefund != "" {
+			originHash, err := bank.ParseTxHash(trimmedRefund)
+			if err != nil {
+				return nil, err
+			}
+			manager := nhbstate.NewManager(sp.Trie)
+			if err := bank.ValidateRefund(manager, originHash, tx.Value); err != nil {
+				return nil, err
+			}
+			refundOrigin = originHash
+			hasRefundOrigin = true
+		}
+	}
 	parentRoot := sp.Trie.Hash()
 	statedb, err := gethstate.New(parentRoot, sp.stateDB)
 	if err != nil {
@@ -1133,6 +1163,20 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 	if err := sp.Trie.Reset(newRoot); err != nil {
 		return nil, fmt.Errorf("trie reset: %w", err)
+	}
+	if isTransfer && txHashReady {
+		amount := new(big.Int).Set(tx.Value)
+		timestamp := uint64(blockTime.Unix())
+		manager := nhbstate.NewManager(sp.Trie)
+		if hasRefundOrigin {
+			if err := bank.RecordRefund(manager, refundOrigin, txHash, amount, timestamp); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := bank.RecordOrigin(manager, txHash, amount, timestamp); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if sponsorshipCtx != nil {

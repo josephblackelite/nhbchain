@@ -15,13 +15,6 @@ import (
 	gatewayauth "nhbchain/gateway/auth"
 )
 
-type rpcResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int64           `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *rpcError       `json:"error"`
-}
-
 func TestClientSignsRequests(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
 	nonce := "nonce-1"

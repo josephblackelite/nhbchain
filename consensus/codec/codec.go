@@ -60,6 +60,7 @@ func TransactionToProto(tx *types.Transaction) (*consensusv1.Transaction, error)
 		IntentExpiry: tx.IntentExpiry,
 		MerchantAddr: tx.MerchantAddress,
 		DeviceId:     tx.DeviceID,
+		RefundOf:     strings.TrimSpace(tx.RefundOf),
 	}
 	return msg, nil
 }
@@ -111,6 +112,7 @@ func TransactionFromProto(msg *consensusv1.Transaction) (*types.Transaction, err
 	tx.IntentExpiry = msg.IntentExpiry
 	tx.MerchantAddress = strings.TrimSpace(msg.MerchantAddr)
 	tx.DeviceID = strings.TrimSpace(msg.DeviceId)
+	tx.RefundOf = strings.TrimSpace(msg.GetRefundOf())
 	return tx, nil
 }
 
@@ -238,6 +240,7 @@ func hydrateIntentMetadata(tx *types.Transaction, body *consensusv1.TxEnvelope) 
 	tx.IntentExpiry = body.GetIntentExpiry()
 	tx.MerchantAddress = strings.TrimSpace(body.GetMerchantAddr())
 	tx.DeviceID = strings.TrimSpace(body.GetDeviceId())
+	tx.RefundOf = strings.TrimSpace(body.GetRefundOf())
 }
 
 // BlockHeaderToProto converts a block header.

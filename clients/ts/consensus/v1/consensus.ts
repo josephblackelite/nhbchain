@@ -46,6 +46,7 @@ export interface Transaction {
   intentExpiry: number;
   merchantAddr: string;
   deviceId: string;
+  refundOf: string;
 }
 
 export interface BlockHeader {
@@ -204,6 +205,7 @@ function createBaseTransaction(): Transaction {
     intentExpiry: 0,
     merchantAddr: "",
     deviceId: "",
+    refundOf: "",
   };
 }
 
@@ -265,6 +267,9 @@ export const Transaction: MessageFns<Transaction> = {
     }
     if (message.deviceId !== "") {
       writer.uint32(154).string(message.deviceId);
+    }
+    if (message.refundOf !== "") {
+      writer.uint32(162).string(message.refundOf);
     }
     return writer;
   },
@@ -428,6 +433,14 @@ export const Transaction: MessageFns<Transaction> = {
           message.deviceId = reader.string();
           continue;
         }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.refundOf = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -458,6 +471,7 @@ export const Transaction: MessageFns<Transaction> = {
       intentExpiry: isSet(object.intentExpiry) ? globalThis.Number(object.intentExpiry) : 0,
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
       deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
+      refundOf: isSet(object.refundOf) ? globalThis.String(object.refundOf) : "",
     };
   },
 
@@ -520,6 +534,9 @@ export const Transaction: MessageFns<Transaction> = {
     if (message.deviceId !== "") {
       obj.deviceId = message.deviceId;
     }
+    if (message.refundOf !== "") {
+      obj.refundOf = message.refundOf;
+    }
     return obj;
   },
 
@@ -559,6 +576,7 @@ export const Transaction: MessageFns<Transaction> = {
     message.intentExpiry = object.intentExpiry ?? 0;
     message.merchantAddr = object.merchantAddr ?? "";
     message.deviceId = object.deviceId ?? "";
+    message.refundOf = object.refundOf ?? "";
     return message;
   },
 };
