@@ -74,6 +74,11 @@ type Transaction struct {
 
 	Paymaster []byte `json:"paymaster,omitempty"` // NEW: Address of the gas fee sponsor
 
+	IntentRef       []byte `json:"intentRef,omitempty"`
+	IntentExpiry    uint64 `json:"intentExpiry,omitempty"`
+	MerchantAddress string `json:"merchantAddr,omitempty"`
+	DeviceID        string `json:"deviceId,omitempty"`
+
 	// Signatures
 	R          *big.Int `json:"r"` // Sender's signature
 	S          *big.Int `json:"s"`
@@ -93,19 +98,26 @@ var (
 // Hash logic must now include the new Type field.
 func (tx *Transaction) Hash() ([]byte, error) {
 	txData := struct {
-		ChainID   *big.Int
-		Type      TxType
-		Nonce     uint64
-		To        []byte
-		Value     *big.Int
-		Data      []byte
-		GasLimit  uint64
-		GasPrice  *big.Int
-		Paymaster []byte `json:"paymaster,omitempty"`
-	}{ChainID: tx.ChainID, Type: tx.Type, Nonce: tx.Nonce, To: tx.To, Value: tx.Value, Data: tx.Data, GasLimit: tx.GasLimit, GasPrice: tx.GasPrice}
+		ChainID      *big.Int
+		Type         TxType
+		Nonce        uint64
+		To           []byte
+		Value        *big.Int
+		Data         []byte
+		GasLimit     uint64
+		GasPrice     *big.Int
+		Paymaster    []byte `json:"paymaster,omitempty"`
+		IntentRef    []byte `json:"intentRef,omitempty"`
+		IntentExpiry uint64 `json:"intentExpiry,omitempty"`
+		MerchantAddr string `json:"merchantAddr,omitempty"`
+		DeviceID     string `json:"deviceId,omitempty"`
+	}{ChainID: tx.ChainID, Type: tx.Type, Nonce: tx.Nonce, To: tx.To, Value: tx.Value, Data: tx.Data, GasLimit: tx.GasLimit, GasPrice: tx.GasPrice, IntentExpiry: tx.IntentExpiry, MerchantAddr: tx.MerchantAddress, DeviceID: tx.DeviceID}
 
 	if len(tx.Paymaster) > 0 {
 		txData.Paymaster = append([]byte(nil), tx.Paymaster...)
+	}
+	if len(tx.IntentRef) > 0 {
+		txData.IntentRef = append([]byte(nil), tx.IntentRef...)
 	}
 
 	b, err := json.Marshal(txData)

@@ -41,21 +41,25 @@ func TransactionToProto(tx *types.Transaction) (*consensusv1.Transaction, error)
 		return nil, nil
 	}
 	msg := &consensusv1.Transaction{
-		ChainId:    BigIntToProto(tx.ChainID),
-		Type:       uint32(tx.Type),
-		Nonce:      tx.Nonce,
-		To:         append([]byte(nil), tx.To...),
-		Value:      BigIntToProto(tx.Value),
-		Data:       append([]byte(nil), tx.Data...),
-		GasLimit:   tx.GasLimit,
-		GasPrice:   BigIntToProto(tx.GasPrice),
-		Paymaster:  append([]byte(nil), tx.Paymaster...),
-		R:          BigIntToProto(tx.R),
-		S:          BigIntToProto(tx.S),
-		V:          BigIntToProto(tx.V),
-		PaymasterR: BigIntToProto(tx.PaymasterR),
-		PaymasterS: BigIntToProto(tx.PaymasterS),
-		PaymasterV: BigIntToProto(tx.PaymasterV),
+		ChainId:      BigIntToProto(tx.ChainID),
+		Type:         uint32(tx.Type),
+		Nonce:        tx.Nonce,
+		To:           append([]byte(nil), tx.To...),
+		Value:        BigIntToProto(tx.Value),
+		Data:         append([]byte(nil), tx.Data...),
+		GasLimit:     tx.GasLimit,
+		GasPrice:     BigIntToProto(tx.GasPrice),
+		Paymaster:    append([]byte(nil), tx.Paymaster...),
+		R:            BigIntToProto(tx.R),
+		S:            BigIntToProto(tx.S),
+		V:            BigIntToProto(tx.V),
+		PaymasterR:   BigIntToProto(tx.PaymasterR),
+		PaymasterS:   BigIntToProto(tx.PaymasterS),
+		PaymasterV:   BigIntToProto(tx.PaymasterV),
+		IntentRef:    append([]byte(nil), tx.IntentRef...),
+		IntentExpiry: tx.IntentExpiry,
+		MerchantAddr: tx.MerchantAddress,
+		DeviceId:     tx.DeviceID,
 	}
 	return msg, nil
 }
@@ -101,6 +105,12 @@ func TransactionFromProto(msg *consensusv1.Transaction) (*types.Transaction, err
 	if tx.PaymasterV, err = BigIntFromProto(msg.PaymasterV); err != nil {
 		return nil, err
 	}
+	if len(msg.IntentRef) > 0 {
+		tx.IntentRef = append([]byte(nil), msg.IntentRef...)
+	}
+	tx.IntentExpiry = msg.IntentExpiry
+	tx.MerchantAddress = strings.TrimSpace(msg.MerchantAddr)
+	tx.DeviceID = strings.TrimSpace(msg.DeviceId)
 	return tx, nil
 }
 
@@ -157,6 +167,7 @@ func TransactionFromEnvelope(envelope *consensusv1.SignedTxEnvelope) (*types.Tra
 			}
 			tx.Nonce = nonce
 		}
+		hydrateIntentMetadata(tx, body)
 		return tx, nil
 	default:
 		tx, err := transactionFromModulePayload(body, payload)
@@ -166,6 +177,7 @@ func TransactionFromEnvelope(envelope *consensusv1.SignedTxEnvelope) (*types.Tra
 		if tx == nil {
 			return nil, fmt.Errorf("envelope: decoded transaction nil")
 		}
+		hydrateIntentMetadata(tx, body)
 		return tx, nil
 	}
 }
@@ -214,6 +226,18 @@ func moduleSwapPayoutReceiptTx(body *consensusv1.TxEnvelope, packed *anypb.Any, 
 		GasPrice: big.NewInt(0),
 	}
 	return tx, nil
+}
+
+func hydrateIntentMetadata(tx *types.Transaction, body *consensusv1.TxEnvelope) {
+	if tx == nil || body == nil {
+		return
+	}
+	if ref := body.GetIntentRef(); len(ref) > 0 {
+		tx.IntentRef = append([]byte(nil), ref...)
+	}
+	tx.IntentExpiry = body.GetIntentExpiry()
+	tx.MerchantAddress = strings.TrimSpace(body.GetMerchantAddr())
+	tx.DeviceID = strings.TrimSpace(body.GetDeviceId())
 }
 
 // BlockHeaderToProto converts a block header.

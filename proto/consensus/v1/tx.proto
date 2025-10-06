@@ -18,6 +18,10 @@ message TxEnvelope {
   string chain_id = 3;
   Fee fee = 4;
   string memo = 5;
+  bytes intent_ref = 6;
+  uint64 intent_expiry = 7;
+  string merchant_addr = 8;
+  string device_id = 9;
 }
 
 message TxSignature {

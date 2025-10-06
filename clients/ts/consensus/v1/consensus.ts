@@ -42,6 +42,10 @@ export interface Transaction {
   paymasterR: BigInt | undefined;
   paymasterS: BigInt | undefined;
   paymasterV: BigInt | undefined;
+  intentRef: Buffer;
+  intentExpiry: number;
+  merchantAddr: string;
+  deviceId: string;
 }
 
 export interface BlockHeader {
@@ -196,6 +200,10 @@ function createBaseTransaction(): Transaction {
     paymasterR: undefined,
     paymasterS: undefined,
     paymasterV: undefined,
+    intentRef: Buffer.alloc(0),
+    intentExpiry: 0,
+    merchantAddr: "",
+    deviceId: "",
   };
 }
 
@@ -245,6 +253,18 @@ export const Transaction: MessageFns<Transaction> = {
     }
     if (message.paymasterV !== undefined) {
       BigInt.encode(message.paymasterV, writer.uint32(122).fork()).join();
+    }
+    if (message.intentRef.length !== 0) {
+      writer.uint32(130).bytes(message.intentRef);
+    }
+    if (message.intentExpiry !== 0) {
+      writer.uint32(136).uint64(message.intentExpiry);
+    }
+    if (message.merchantAddr !== "") {
+      writer.uint32(146).string(message.merchantAddr);
+    }
+    if (message.deviceId !== "") {
+      writer.uint32(154).string(message.deviceId);
     }
     return writer;
   },
@@ -376,6 +396,38 @@ export const Transaction: MessageFns<Transaction> = {
           message.paymasterV = BigInt.decode(reader, reader.uint32());
           continue;
         }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.intentRef = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 17: {
+          if (tag !== 136) {
+            break;
+          }
+
+          message.intentExpiry = longToNumber(reader.uint64());
+          continue;
+        }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.merchantAddr = reader.string();
+          continue;
+        }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.deviceId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -402,6 +454,10 @@ export const Transaction: MessageFns<Transaction> = {
       paymasterR: isSet(object.paymasterR) ? BigInt.fromJSON(object.paymasterR) : undefined,
       paymasterS: isSet(object.paymasterS) ? BigInt.fromJSON(object.paymasterS) : undefined,
       paymasterV: isSet(object.paymasterV) ? BigInt.fromJSON(object.paymasterV) : undefined,
+      intentRef: isSet(object.intentRef) ? Buffer.from(bytesFromBase64(object.intentRef)) : Buffer.alloc(0),
+      intentExpiry: isSet(object.intentExpiry) ? globalThis.Number(object.intentExpiry) : 0,
+      merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
+      deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
     };
   },
 
@@ -452,6 +508,18 @@ export const Transaction: MessageFns<Transaction> = {
     if (message.paymasterV !== undefined) {
       obj.paymasterV = BigInt.toJSON(message.paymasterV);
     }
+    if (message.intentRef.length !== 0) {
+      obj.intentRef = base64FromBytes(message.intentRef);
+    }
+    if (message.intentExpiry !== 0) {
+      obj.intentExpiry = Math.round(message.intentExpiry);
+    }
+    if (message.merchantAddr !== "") {
+      obj.merchantAddr = message.merchantAddr;
+    }
+    if (message.deviceId !== "") {
+      obj.deviceId = message.deviceId;
+    }
     return obj;
   },
 
@@ -487,6 +555,10 @@ export const Transaction: MessageFns<Transaction> = {
     message.paymasterV = (object.paymasterV !== undefined && object.paymasterV !== null)
       ? BigInt.fromPartial(object.paymasterV)
       : undefined;
+    message.intentRef = object.intentRef ?? Buffer.alloc(0);
+    message.intentExpiry = object.intentExpiry ?? 0;
+    message.merchantAddr = object.merchantAddr ?? "";
+    message.deviceId = object.deviceId ?? "";
     return message;
   },
 };
