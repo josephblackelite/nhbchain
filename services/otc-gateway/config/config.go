@@ -15,6 +15,10 @@ type Config struct {
 	S3Bucket          string
 	ChainID           string
 	SwapRPCBase       string
+	SwapAPIKey        string
+	SwapAPISecret     string
+	SwapMethodAllow   []string
+	SwapRateLimit     int
 	IdentityBaseURL   string
 	IdentityAPIKey    string
 	IdentityTimeout   time.Duration
@@ -60,6 +64,23 @@ func FromEnv() (*Config, error) {
 	}
 	if rpcBase == "" {
 		return nil, fmt.Errorf("OTC_SWAP_RPC_BASE is required")
+	}
+
+	swapAPIKey := strings.TrimSpace(os.Getenv("OTC_SWAP_API_KEY"))
+	if swapAPIKey == "" {
+		return nil, fmt.Errorf("OTC_SWAP_API_KEY is required")
+	}
+	swapAPISecret := strings.TrimSpace(os.Getenv("OTC_SWAP_API_SECRET"))
+	if swapAPISecret == "" {
+		return nil, fmt.Errorf("OTC_SWAP_API_SECRET is required")
+	}
+	swapMethods := parseCSVEnv("OTC_SWAP_METHOD_ALLOWLIST")
+	if len(swapMethods) == 0 {
+		swapMethods = []string{"swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export"}
+	}
+	rateLimit := parseIntEnv("OTC_SWAP_RATE_LIMIT_PER_MINUTE", 60)
+	if rateLimit < 0 {
+		rateLimit = 0
 	}
 
 	identityBase := os.Getenv("OTC_IDENTITY_BASE_URL")
@@ -125,6 +146,10 @@ func FromEnv() (*Config, error) {
 		S3Bucket:          bucket,
 		ChainID:           chainID,
 		SwapRPCBase:       rpcBase,
+		SwapAPIKey:        swapAPIKey,
+		SwapAPISecret:     swapAPISecret,
+		SwapMethodAllow:   swapMethods,
+		SwapRateLimit:     rateLimit,
 		IdentityBaseURL:   identityBase,
 		IdentityAPIKey:    identityAPIKey,
 		IdentityTimeout:   time.Duration(identityTimeoutValue) * time.Second,

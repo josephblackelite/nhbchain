@@ -22,6 +22,7 @@ import (
 	"nhbchain/core/epoch"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	gatewayauth "nhbchain/gateway/auth"
 	"nhbchain/observability"
 	"nhbchain/p2p"
 	"nhbchain/rpc/modules"
@@ -64,6 +65,17 @@ type txSeenEntry struct {
 	seenAt time.Time
 }
 
+// SwapAuthConfig configures API key authentication and per-partner quotas for swap requests.
+type SwapAuthConfig struct {
+	Secrets              map[string]string
+	AllowedTimestampSkew time.Duration
+	NonceTTL             time.Duration
+	NonceCapacity        int
+	RateLimitWindow      time.Duration
+	PartnerRateLimits    map[string]int
+	Now                  func() time.Time
+}
+
 // ServerConfig controls optional behaviours of the RPC server.
 type ServerConfig struct {
 	// TrustProxyHeaders, when set, will cause the server to honour proxy
@@ -87,6 +99,8 @@ type ServerConfig struct {
 	TLSCertFile string
 	// TLSKeyFile is the path to the PEM-encoded private key for TLSCertFile.
 	TLSKeyFile string
+	// SwapAuth configures API authentication and rate limiting for swap RPC methods.
+	SwapAuth SwapAuthConfig
 }
 
 // NetworkService abstracts the network control plane used by RPC handlers to
@@ -121,6 +135,13 @@ type Server struct {
 	tlsCertFile       string
 	tlsKeyFile        string
 
+	swapAuth          *gatewayauth.Authenticator
+	swapPartnerLimits map[string]int
+	swapRateWindow    time.Duration
+	swapRateCounters  map[string]*rateLimiter
+	swapRateMu        sync.Mutex
+	swapNowFn         func() time.Time
+
 	serverMu   sync.Mutex
 	httpServer *http.Server
 }
@@ -140,6 +161,39 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		trusted[trimmed] = struct{}{}
 		count++
 	}
+	var swapAuth *gatewayauth.Authenticator
+	swapLimits := make(map[string]int)
+	swapWindow := cfg.SwapAuth.RateLimitWindow
+	swapNow := cfg.SwapAuth.Now
+	if swapNow == nil {
+		swapNow = time.Now
+	}
+	if swapWindow <= 0 {
+		swapWindow = time.Minute
+	}
+	if len(cfg.SwapAuth.Secrets) > 0 {
+		secrets := make(map[string]string, len(cfg.SwapAuth.Secrets))
+		for key, secret := range cfg.SwapAuth.Secrets {
+			trimmedKey := strings.TrimSpace(key)
+			trimmedSecret := strings.TrimSpace(secret)
+			if trimmedKey == "" || trimmedSecret == "" {
+				continue
+			}
+			secrets[trimmedKey] = trimmedSecret
+		}
+		if len(secrets) > 0 {
+			swapAuth = gatewayauth.NewAuthenticator(secrets, cfg.SwapAuth.AllowedTimestampSkew, cfg.SwapAuth.NonceTTL, cfg.SwapAuth.NonceCapacity, swapNow)
+		}
+	}
+	if len(cfg.SwapAuth.PartnerRateLimits) > 0 {
+		for key, limit := range cfg.SwapAuth.PartnerRateLimits {
+			trimmedKey := strings.TrimSpace(key)
+			if trimmedKey == "" || limit <= 0 {
+				continue
+			}
+			swapLimits[trimmedKey] = limit
+		}
+	}
 	return &Server{
 		node:              node,
 		net:               netClient,
@@ -158,6 +212,11 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		idleTimeout:       cfg.IdleTimeout,
 		tlsCertFile:       strings.TrimSpace(cfg.TLSCertFile),
 		tlsKeyFile:        strings.TrimSpace(cfg.TLSKeyFile),
+		swapAuth:          swapAuth,
+		swapPartnerLimits: swapLimits,
+		swapRateWindow:    swapWindow,
+		swapRateCounters:  make(map[string]*rateLimiter),
+		swapNowFn:         swapNow,
 	}
 }
 
@@ -293,6 +352,15 @@ func moduleAndMethod(method string) (string, string) {
 	return trimmed, "call"
 }
 
+func isPublicSwapMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export":
+		return true
+	default:
+		return false
+	}
+}
+
 type BalanceResponse struct {
 	Address            string                `json:"address"`
 	BalanceNHB         *big.Int              `json:"balanceNHB"`
@@ -411,6 +479,18 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			metrics.RecordThrottle(moduleName, "rate_limit")
 		}
 	}()
+
+	if s.swapAuth != nil && isPublicSwapMethod(req.Method) {
+		principal, err := s.authenticateSwapRequest(r, body)
+		if err != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, codeUnauthorized, err.Error(), nil)
+			return
+		}
+		if !s.allowSwapPrincipal(principal.APIKey, s.swapNow()) {
+			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "swap partner rate limit exceeded", nil)
+			return
+		}
+	}
 
 	switch req.Method {
 	case "nhb_sendTransaction":
@@ -920,6 +1000,52 @@ func (s *Server) requireAuth(r *http.Request) *RPCError {
 		return &RPCError{Code: codeUnauthorized, Message: "invalid RPC credentials"}
 	}
 	return nil
+}
+
+func (s *Server) authenticateSwapRequest(r *http.Request, body []byte) (*gatewayauth.Principal, error) {
+	if s.swapAuth == nil {
+		return nil, errors.New("swap authentication not configured")
+	}
+	return s.swapAuth.Authenticate(r, body)
+}
+
+func (s *Server) allowSwapPrincipal(apiKey string, now time.Time) bool {
+	if len(s.swapPartnerLimits) == 0 {
+		return true
+	}
+	normalized := strings.TrimSpace(apiKey)
+	if normalized == "" {
+		return true
+	}
+	limit, ok := s.swapPartnerLimits[normalized]
+	if !ok || limit <= 0 {
+		return true
+	}
+	s.swapRateMu.Lock()
+	defer s.swapRateMu.Unlock()
+	limiter, ok := s.swapRateCounters[normalized]
+	if !ok {
+		limiter = &rateLimiter{windowStart: now, lastSeen: now}
+		s.swapRateCounters[normalized] = limiter
+	}
+	if now.Sub(limiter.windowStart) >= s.swapRateWindow {
+		limiter.windowStart = now
+		limiter.count = 0
+	}
+	if limiter.count >= limit {
+		limiter.lastSeen = now
+		return false
+	}
+	limiter.count++
+	limiter.lastSeen = now
+	return true
+}
+
+func (s *Server) swapNow() time.Time {
+	if s.swapNowFn != nil {
+		return s.swapNowFn()
+	}
+	return time.Now()
 }
 
 func (s *Server) allowSource(source string, now time.Time) bool {

@@ -93,7 +93,17 @@ func main() {
 		log.Fatalf("identity client error: %v", err)
 	}
 
-	swapClient := swaprpc.NewClient(swaprpc.Config{URL: cfg.SwapRPCBase, Provider: cfg.SwapProvider})
+	swapClient, err := swaprpc.NewClient(swaprpc.Config{
+		URL:               cfg.SwapRPCBase,
+		Provider:          cfg.SwapProvider,
+		APIKey:            cfg.SwapAPIKey,
+		APISecret:         cfg.SwapAPISecret,
+		AllowedMethods:    cfg.SwapMethodAllow,
+		RequestsPerMinute: cfg.SwapRateLimit,
+	})
+	if err != nil {
+		log.Fatalf("swap client error: %v", err)
+	}
 
 	srv := server.New(server.Config{
 		DB:                db,
