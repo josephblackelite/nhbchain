@@ -9,6 +9,9 @@ const sampleInvoices: Invoice[] = [
     counterparty: "Atlas Macro Fund",
     amount: 2500000,
     currency: "USDC",
+    fiatAmount: 0,
+    fiatCurrency: "USD",
+    fundingStatus: "pending",
     status: "receipt_pending",
     stage: "receipt",
     rate: 1.004,
@@ -41,6 +44,9 @@ const sampleInvoices: Invoice[] = [
     counterparty: "Sierra Digital",
     amount: 750000,
     currency: "USDT",
+    fiatAmount: 0,
+    fiatCurrency: "USD",
+    fundingStatus: "pending",
     status: "under_review",
     stage: "review",
     rate: 0.998,
@@ -79,12 +85,16 @@ const sampleInvoices: Invoice[] = [
     counterparty: "Helios Partners",
     amount: 1200000,
     currency: "USDC",
-    status: "awaiting_approval",
-    stage: "approval",
+    status: "funding_confirmed",
+    stage: "funding",
     rate: 1.001,
     twapReference: 1.0005,
     voucherId: "VCHR-1003",
     txHash: null,
+    fiatAmount: 1200000,
+    fiatCurrency: "USD",
+    fundingStatus: "confirmed",
+    fundingReference: "BANK-2024-0003",
     receiptEvidence: [
       {
         url: "https://example.com/evidence/inv-2024-0003.pdf",
@@ -110,6 +120,12 @@ const sampleInvoices: Invoice[] = [
         note: "Ready for approval",
         actor: "treasury-duty",
         timestamp: dayjs().subtract(1, "day").toISOString()
+      },
+      {
+        status: "funding_confirmed",
+        note: "Wire received by custodian",
+        actor: "treasury-duty",
+        timestamp: dayjs().subtract(8, "hour").toISOString()
       }
     ],
     createdAt: dayjs().subtract(6, "day").toISOString(),

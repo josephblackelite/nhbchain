@@ -28,11 +28,22 @@ const (
 	StateReceiptUploaded InvoiceState = "RECEIPT_UPLOADED"
 	StatePendingReview   InvoiceState = "PENDING_REVIEW"
 	StateApproved        InvoiceState = "APPROVED"
+	StateFiatConfirmed   InvoiceState = "FIAT_CONFIRMED"
 	StateSigned          InvoiceState = "SIGNED"
 	StateSubmitted       InvoiceState = "SUBMITTED"
 	StateMinted          InvoiceState = "MINTED"
 	StateRejected        InvoiceState = "REJECTED"
 	StateExpired         InvoiceState = "EXPIRED"
+)
+
+// FundingStatus captures the lifecycle of fiat settlement for an invoice.
+type FundingStatus string
+
+// Enumerated funding statuses.
+const (
+	FundingStatusPending   FundingStatus = "PENDING"
+	FundingStatusConfirmed FundingStatus = "CONFIRMED"
+	FundingStatusRejected  FundingStatus = "REJECTED"
 )
 
 // Branch defines staff branch metadata and risk caps.
@@ -98,18 +109,22 @@ type PartnerApproval struct {
 
 // Invoice describes OTC orders across their lifecycle.
 type Invoice struct {
-	ID               uuid.UUID    `gorm:"type:uuid;primaryKey"`
-	BranchID         uuid.UUID    `gorm:"type:uuid;index"`
-	CreatedByID      uuid.UUID    `gorm:"type:uuid;index"`
-	Amount           float64      `gorm:"not null"`
-	Currency         string       `gorm:"size:16"`
-	State            InvoiceState `gorm:"size:32;index"`
-	Region           string       `gorm:"index"`
-	Reference        string       `gorm:"size:128"`
-	PartnerDID       string       `gorm:"size:255"`
-	ComplianceTags   []byte       `gorm:"type:jsonb"`
-	TravelRulePacket []byte       `gorm:"type:jsonb"`
-	SanctionsStatus  string       `gorm:"size:64"`
+	ID               uuid.UUID     `gorm:"type:uuid;primaryKey"`
+	BranchID         uuid.UUID     `gorm:"type:uuid;index"`
+	CreatedByID      uuid.UUID     `gorm:"type:uuid;index"`
+	Amount           float64       `gorm:"not null"`
+	Currency         string        `gorm:"size:16"`
+	FiatAmount       float64       `gorm:"not null;default:0"`
+	FiatCurrency     string        `gorm:"size:16"`
+	FundingStatus    FundingStatus `gorm:"size:32;index"`
+	FundingReference string        `gorm:"size:128"`
+	State            InvoiceState  `gorm:"size:32;index"`
+	Region           string        `gorm:"index"`
+	Reference        string        `gorm:"size:128"`
+	PartnerDID       string        `gorm:"size:255"`
+	ComplianceTags   []byte        `gorm:"type:jsonb"`
+	TravelRulePacket []byte        `gorm:"type:jsonb"`
+	SanctionsStatus  string        `gorm:"size:64"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	Receipts         []Receipt
@@ -141,13 +156,17 @@ type Voucher struct {
 	InvoiceID        uuid.UUID `gorm:"type:uuid;uniqueIndex"`
 	ChainID          string    `gorm:"index"`
 	Payload          string
-	ProviderTxID     string `gorm:"size:128;uniqueIndex"`
-	Hash             string `gorm:"size:130"`
-	Signature        string `gorm:"type:text"`
-	SignerDN         string `gorm:"size:255"`
-	TxHash           string `gorm:"size:130"`
-	VoucherHash      string `gorm:"size:130"`
-	Status           string `gorm:"size:32;index"`
+	ProviderTxID     string        `gorm:"size:128;uniqueIndex"`
+	Hash             string        `gorm:"size:130"`
+	Signature        string        `gorm:"type:text"`
+	SignerDN         string        `gorm:"size:255"`
+	TxHash           string        `gorm:"size:130"`
+	VoucherHash      string        `gorm:"size:130"`
+	FiatAmount       float64       `gorm:"not null;default:0"`
+	FiatCurrency     string        `gorm:"size:16"`
+	FundingStatus    FundingStatus `gorm:"size:32;index"`
+	FundingReference string        `gorm:"size:128"`
+	Status           string        `gorm:"size:32;index"`
 	ExpiresAt        time.Time
 	SubmittedAt      *time.Time
 	SubmittedBy      *uuid.UUID `gorm:"type:uuid"`

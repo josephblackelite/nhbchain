@@ -180,8 +180,8 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 	if err := db.Where("invoice_id = ? AND action = ?", invoice.ID, "invoice.signed").First(&event).Error; err != nil {
 		t.Fatalf("load signed event: %v", err)
 	}
-	if !strings.Contains(event.Details, "hash=") || !strings.Contains(event.Details, "signer_dn=") {
-		t.Fatalf("expected hash and signer dn in event: %s", event.Details)
+	if !strings.Contains(event.Details, "hash=") || !strings.Contains(event.Details, "signer_dn=") || !strings.Contains(event.Details, "funding_ref=") {
+		t.Fatalf("expected hash, signer dn, and funding ref in event: %s", event.Details)
 	}
 }
 
@@ -500,15 +500,19 @@ func createApprovedInvoice(t *testing.T, db *gorm.DB, branch models.Branch, crea
 	t.Helper()
 	now := time.Now().UTC()
 	invoice := models.Invoice{
-		ID:          uuid.New(),
-		BranchID:    branch.ID,
-		CreatedByID: creator,
-		Amount:      amount,
-		Currency:    "USD",
-		State:       models.StateApproved,
-		Region:      branch.Region,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:               uuid.New(),
+		BranchID:         branch.ID,
+		CreatedByID:      creator,
+		Amount:           amount,
+		Currency:         "USD",
+		FiatAmount:       amount,
+		FiatCurrency:     "USD",
+		FundingStatus:    models.FundingStatusConfirmed,
+		FundingReference: fmt.Sprintf("FUND-%s", uuid.NewString()[:8]),
+		State:            models.StateFiatConfirmed,
+		Region:           branch.Region,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if err := db.Create(&invoice).Error; err != nil {
 		t.Fatalf("create invoice: %v", err)

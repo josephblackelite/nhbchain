@@ -8,6 +8,7 @@ The OTC gateway is a standalone Go microservice that orchestrates partner-facing
 - Lifecycle management of OTC invoices from creation through minting, rejection, or expiry.
 - Configurable branch and regional caps with per-invoice limits enforced during approval.
 - KYB dossier intake, partner approvals, and dossier refresh tracking with immutable audit trails.
+- Fiat funding verification through custodial webhooks, FIAT_CONFIRMED gating, and compliance dashboards.
 - Structured audit trail capturing every state transition and privileged action.
 - Idempotent API semantics for safe client retries.
 

@@ -116,6 +116,47 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	switch preflight.State {
+	case models.StateFiatConfirmed, models.StateSigned, models.StateSubmitted, models.StateMinted:
+		// permitted
+	default:
+		http.Error(w, "invoice must be FIAT_CONFIRMED", http.StatusForbidden)
+		return
+	}
+	if (preflight.State == models.StateFiatConfirmed || preflight.State == models.StateSigned) && preflight.FundingStatus != models.FundingStatusConfirmed {
+		http.Error(w, "invoice funding not confirmed", http.StatusForbidden)
+		return
+	}
+
+	fundingReference := strings.TrimSpace(preflight.FundingReference)
+	if submissionRef := strings.TrimSpace(req.SubmissionRef); submissionRef != "" {
+		fundingReference = submissionRef
+	}
+	if fundingReference == "" {
+		http.Error(w, "funding reference required", http.StatusBadRequest)
+		return
+	}
+	fiatAmount := preflight.FiatAmount
+	if amtStr := strings.TrimSpace(req.FiatAmount); amtStr != "" {
+		parsed, err := strconv.ParseFloat(amtStr, 64)
+		if err != nil || parsed <= 0 {
+			http.Error(w, "invalid fiat amount", http.StatusBadRequest)
+			return
+		}
+		fiatAmount = parsed
+	}
+	if fiatAmount <= 0 {
+		http.Error(w, "fiat amount required", http.StatusBadRequest)
+		return
+	}
+	fiatCurrency := strings.ToUpper(strings.TrimSpace(preflight.FiatCurrency))
+	if currency := strings.TrimSpace(req.FiatCurrency); currency != "" {
+		fiatCurrency = strings.ToUpper(currency)
+	}
+	if fiatCurrency == "" {
+		fiatCurrency = "USD"
+	}
+
 	partner, err := s.ensureInvoicePartnerApproved(nil, preflight.CreatedByID)
 	if err != nil {
 		if errors.Is(err, errPartnerPending) {
@@ -126,7 +167,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requiresIdentity := partner != nil && (preflight.State == models.StateApproved || preflight.State == models.StateSigned)
+	requiresIdentity := partner != nil && (preflight.State == models.StateFiatConfirmed || preflight.State == models.StateSigned)
 	if requiresIdentity {
 		if s.Identity == nil {
 			http.Error(w, "identity service unavailable", http.StatusServiceUnavailable)
@@ -194,8 +235,11 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			}
 			return fmt.Errorf("invoice already %s", invoice.State)
 		}
-		if invoice.State != models.StateApproved && invoice.State != models.StateSigned {
-			return fmt.Errorf("invoice must be APPROVED")
+		if invoice.State != models.StateFiatConfirmed && invoice.State != models.StateSigned {
+			return fmt.Errorf("invoice must be FIAT_CONFIRMED")
+		}
+		if invoice.FundingStatus != models.FundingStatusConfirmed {
+			return fmt.Errorf("invoice funding incomplete")
 		}
 		if invoice.CreatedByID == actorID {
 			return fmt.Errorf("maker-checker violation")
@@ -212,7 +256,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		var outstanding float64
 		if err := tx.Model(&models.Invoice{}).
-			Where("branch_id = ? AND state IN ?", invoice.BranchID, []models.InvoiceState{models.StateSigned, models.StateSubmitted, models.StateMinted}).
+			Where("branch_id = ? AND state IN ?", invoice.BranchID, []models.InvoiceState{models.StateFiatConfirmed, models.StateSigned, models.StateSubmitted, models.StateMinted}).
 			Select("COALESCE(SUM(amount),0)").
 			Scan(&outstanding).Error; err != nil {
 			return err
@@ -235,6 +279,10 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
+		invoice.FiatAmount = fiatAmount
+		invoice.FiatCurrency = fiatCurrency
+		invoice.FundingReference = fundingReference
+		invoice.FundingStatus = models.FundingStatusConfirmed
 		invoice.State = models.StateSigned
 		if identityResolution != nil {
 			invoice.PartnerDID = strings.TrimSpace(identityResolution.PartnerDID)
@@ -255,6 +303,10 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			existingVoucher.Status = voucherStatusSigning
 			existingVoucher.ExpiresAt = expiryAt
 			existingVoucher.UpdatedAt = now
+			existingVoucher.FiatAmount = fiatAmount
+			existingVoucher.FiatCurrency = fiatCurrency
+			existingVoucher.FundingReference = fundingReference
+			existingVoucher.FundingStatus = models.FundingStatusConfirmed
 			if identityResolution != nil {
 				existingVoucher.PartnerDID = strings.TrimSpace(identityResolution.PartnerDID)
 				existingVoucher.SanctionsStatus = sanctionsStatus
@@ -266,16 +318,20 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			record := models.Voucher{
-				ID:           uuid.New(),
-				InvoiceID:    invoice.ID,
-				ChainID:      strconv.FormatUint(s.ChainID, 10),
-				Payload:      string(payload),
-				ProviderTxID: providerTxID,
-				Hash:         hex.EncodeToString(digest),
-				Status:       voucherStatusSigning,
-				ExpiresAt:    expiryAt,
-				CreatedAt:    now,
-				UpdatedAt:    now,
+				ID:               uuid.New(),
+				InvoiceID:        invoice.ID,
+				ChainID:          strconv.FormatUint(s.ChainID, 10),
+				Payload:          string(payload),
+				ProviderTxID:     providerTxID,
+				Hash:             hex.EncodeToString(digest),
+				Status:           voucherStatusSigning,
+				ExpiresAt:        expiryAt,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+				FiatAmount:       fiatAmount,
+				FiatCurrency:     fiatCurrency,
+				FundingStatus:    models.FundingStatusConfirmed,
+				FundingReference: fundingReference,
 			}
 			if identityResolution != nil {
 				record.PartnerDID = strings.TrimSpace(identityResolution.PartnerDID)
@@ -393,10 +449,11 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Save(&existingVoucher).Error; err != nil {
 			return err
 		}
-		if err := s.appendEvent(tx, invoice.ID, claims.Subject, "invoice.signed", fmt.Sprintf("hash=%s signer_dn=%s", existingVoucher.Hash, signerDN)); err != nil {
+		signedDetails := fmt.Sprintf("hash=%s signer_dn=%s funding_ref=%s", existingVoucher.Hash, signerDN, fundingReference)
+		if err := s.appendEvent(tx, invoice.ID, claims.Subject, "invoice.signed", signedDetails); err != nil {
 			return err
 		}
-		details := fmt.Sprintf("provider_tx_id=%s tx_hash=%s", existingVoucher.ProviderTxID, txHash)
+		details := fmt.Sprintf("provider_tx_id=%s tx_hash=%s funding_ref=%s", existingVoucher.ProviderTxID, txHash, fundingReference)
 		if minted {
 			details += " minted=true"
 		}

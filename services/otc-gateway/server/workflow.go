@@ -10,7 +10,8 @@ var allowedTransitions = map[models.InvoiceState][]models.InvoiceState{
 	models.StateCreated:         {models.StateReceiptUploaded},
 	models.StateReceiptUploaded: {models.StatePendingReview},
 	models.StatePendingReview:   {models.StateApproved, models.StateRejected},
-	models.StateApproved:        {models.StateSigned, models.StateRejected},
+	models.StateApproved:        {models.StateFiatConfirmed, models.StateRejected},
+	models.StateFiatConfirmed:   {models.StateSigned, models.StateRejected},
 	models.StateSigned:          {models.StateSubmitted, models.StateRejected},
 	models.StateSubmitted:       {models.StateMinted},
 }

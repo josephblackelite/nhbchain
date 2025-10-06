@@ -4,6 +4,7 @@ import dayjs from "dayjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActionPayload, Invoice, InvoiceFilters, InvoiceStage } from "../lib/types";
 import { InvoiceFiltersForm } from "./filters";
+import { ComplianceDashboard } from "./complianceDashboard";
 import { InvoiceTable } from "./table";
 import { InvoiceViewer } from "./viewer";
 import { PartnerBoard } from "./partnerBoard";
@@ -13,6 +14,7 @@ const stages: { key: InvoiceStage; label: string }[] = [
   { key: "receipt", label: "Receipt" },
   { key: "review", label: "Review" },
   { key: "approval", label: "Approval" },
+  { key: "funding", label: "Funding" },
   { key: "completed", label: "Completed" },
   { key: "rejected", label: "Rejected" }
 ];
@@ -133,6 +135,8 @@ export function OperationsConsole() {
       </header>
 
       <PartnerBoard partners={partnerReadiness} />
+
+      <ComplianceDashboard invoices={invoices} />
 
       <section className="stage-tabs">
         {stages.map((stage) => (

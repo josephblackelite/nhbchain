@@ -29,6 +29,7 @@ export function InvoiceTable({ invoices, loading, selectedId, onSelect }: Props)
             <th>Branch</th>
             <th>Amount</th>
             <th>Status</th>
+            <th>Funding</th>
             <th>Updated</th>
           </tr>
         </thead>
@@ -49,6 +50,9 @@ export function InvoiceTable({ invoices, loading, selectedId, onSelect }: Props)
                 })}
               </td>
               <td>{invoice.status.replace(/_/g, " ")}</td>
+              <td className={`funding ${invoice.fundingStatus}`}>
+                {invoice.fundingStatus}
+              </td>
               <td>{dayjs(invoice.updatedAt).format("MMM D, HH:mm")}</td>
             </tr>
           ))}

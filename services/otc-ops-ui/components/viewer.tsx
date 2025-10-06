@@ -40,12 +40,14 @@ export function InvoiceViewer({ invoice, onAction }: Props) {
     {
       key: "sign",
       label: "Sign",
-      visible: role === "superadmin" && invoice.stage === "approval"
+      visible: role === "superadmin" && (invoice.stage === "approval" || invoice.stage === "funding")
     },
     {
       key: "submit",
       label: "Sign & Submit",
-      visible: role === "superadmin" && (invoice.status === "signed" || invoice.stage === "approval")
+      visible:
+        role === "superadmin" &&
+        (invoice.status === "signed" || invoice.stage === "approval" || invoice.stage === "funding")
     }
   ] as const;
 
@@ -97,6 +99,23 @@ export function InvoiceViewer({ invoice, onAction }: Props) {
           <div>
             <dt>TWAP</dt>
             <dd>{invoice.twapReference.toFixed(4)}</dd>
+          </div>
+          <div>
+            <dt>Fiat Amount</dt>
+            <dd>
+              {invoice.fiatAmount.toLocaleString(undefined, {
+                style: "currency",
+                currency: invoice.fiatCurrency || "USD"
+              })}
+            </dd>
+          </div>
+          <div>
+            <dt>Funding Status</dt>
+            <dd className={`funding ${invoice.fundingStatus}`}>{invoice.fundingStatus}</dd>
+          </div>
+          <div>
+            <dt>Funding Reference</dt>
+            <dd>{invoice.fundingReference ?? "Pending"}</dd>
           </div>
           <div>
             <dt>Voucher</dt>
