@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"nhbchain/services/otc-gateway/auth"
+	"nhbchain/services/otc-gateway/funding"
 	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/otc-gateway/identity"
 	otcmw "nhbchain/services/otc-gateway/middleware"
@@ -47,6 +48,7 @@ type Config struct {
 	Provider          string
 	PollInterval      time.Duration
 	RootAdminSubjects []string
+	FundingProcessor  *funding.Processor
 }
 
 // Server encapsulates dependencies for the HTTP API.
@@ -62,6 +64,7 @@ type Server struct {
 	Provider     string
 	PollInterval time.Duration
 	Now          func() time.Time
+	Funding      *funding.Processor
 
 	router http.Handler
 }
@@ -96,9 +99,13 @@ func New(cfg Config) *Server {
 		VoucherTTL:   cfg.VoucherTTL,
 		Provider:     strings.TrimSpace(cfg.Provider),
 		PollInterval: cfg.PollInterval,
+		Funding:      cfg.FundingProcessor,
 	}
 	if srv.Now == nil {
 		srv.Now = func() time.Time { return time.Now().In(srv.TZ) }
+	}
+	if srv.Funding == nil {
+		srv.Funding = funding.NewProcessor(cfg.DB, srv.Now)
 	}
 	auth.SetRootAdmins(cfg.RootAdminSubjects)
 	srv.router = srv.buildRouter()
@@ -137,6 +144,10 @@ func (s *Server) buildRouter() http.Handler {
 
 	r.Route("/ops/otc", func(ops chi.Router) {
 		ops.With(auth.RequireRole(auth.RoleSuperAdmin)).Post("/invoices/{id}/sign-and-submit", s.SignAndSubmit)
+	})
+
+	r.Route("/integrations/otc", func(integrations chi.Router) {
+		integrations.With(auth.RequireRole(auth.RoleSuperAdmin, auth.RoleRootAdmin)).Post("/funding/webhook", s.HandleFundingWebhook)
 	})
 
 	return r
@@ -188,20 +199,26 @@ func (s *Server) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().In(s.TZ)
 
 	invoice := models.Invoice{
-		ID:          uuid.New(),
-		BranchID:    branch.ID,
-		CreatedByID: creatorID,
-		Amount:      req.Amount,
-		Currency:    req.Currency,
-		Reference:   req.Reference,
-		State:       models.StateCreated,
-		Region:      branch.Region,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:            uuid.New(),
+		BranchID:      branch.ID,
+		CreatedByID:   creatorID,
+		Amount:        req.Amount,
+		Currency:      req.Currency,
+		FiatAmount:    0,
+		FiatCurrency:  "",
+		FundingStatus: models.FundingStatusPending,
+		Reference:     req.Reference,
+		State:         models.StateCreated,
+		Region:        branch.Region,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	if invoice.Currency == "" {
 		invoice.Currency = "USD"
+	}
+	if strings.TrimSpace(invoice.FiatCurrency) == "" {
+		invoice.FiatCurrency = "USD"
 	}
 
 	if err := s.DB.Transaction(func(tx *gorm.DB) error {
@@ -334,7 +351,7 @@ func (s *Server) ApproveInvoice(w http.ResponseWriter, r *http.Request) {
 		var regionalTotal float64
 		if err := tx.Model(&models.Invoice{}).
 			Where("region = ? AND state IN ?", invoice.Region, []models.InvoiceState{
-				models.StateApproved, models.StateSigned, models.StateSubmitted, models.StateMinted,
+				models.StateApproved, models.StateFiatConfirmed, models.StateSigned, models.StateSubmitted, models.StateMinted,
 			}).
 			Select("COALESCE(SUM(amount),0)").
 			Scan(&regionalTotal).Error; err != nil {

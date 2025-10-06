@@ -176,6 +176,135 @@ main {
   background: rgba(99, 102, 241, 0.15);
 }
 
+.funding {
+  text-transform: capitalize;
+  font-weight: 600;
+}
+
+.funding.confirmed {
+  color: #4ade80;
+}
+
+.funding.pending {
+  color: #fbbf24;
+}
+
+.funding.rejected {
+  color: #f87171;
+}
+
+.compliance-dashboard {
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 1rem;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.compliance-dashboard h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.compliance-dashboard p {
+  margin: 0.5rem 0 0;
+  color: #94a3b8;
+  max-width: 60ch;
+}
+
+.compliance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.compliance-card {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.compliance-card .label {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.compliance-card .value {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.compliance-card .detail {
+  font-size: 0.85rem;
+  color: #cbd5f5;
+}
+
+.compliance-queue {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+}
+
+.compliance-queue .queue-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.compliance-queue h3 {
+  margin: 0;
+}
+
+.compliance-queue span {
+  color: #94a3b8;
+}
+
+.compliance-queue ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.compliance-queue li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(30, 41, 59, 0.6);
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.compliance-queue li.empty {
+  justify-content: center;
+  color: #94a3b8;
+}
+
+.compliance-queue li div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.compliance-queue .timestamp {
+  color: #cbd5f5;
+  font-size: 0.8rem;
+}
+
 .viewer {
   background: rgba(15, 23, 42, 0.7);
   border: 1px solid rgba(148, 163, 184, 0.2);

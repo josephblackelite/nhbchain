@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -111,6 +112,81 @@ func TestInvoiceLifecycle(t *testing.T) {
 	}
 	if count < 4 {
 		t.Fatalf("expected at least 4 events got %d", count)
+	}
+}
+
+func TestHandleFundingWebhook(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	branch := models.Branch{ID: uuid.New(), Name: "Global", Region: "US", RegionCap: 5_000_000, InvoiceLimit: 1_000_000, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&branch).Error; err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+
+	partner := models.Partner{ID: uuid.New(), Name: "Atlas", LegalName: "Atlas LLC", KYBDossierKey: "s3://kyb/atlas.json", Approved: true, SubmittedBy: uuid.New(), CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&partner).Error; err != nil {
+		t.Fatalf("create partner: %v", err)
+	}
+
+	operator := uuid.New()
+	contact := models.PartnerContact{ID: uuid.New(), PartnerID: partner.ID, Subject: strings.ToLower(operator.String()), CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&contact).Error; err != nil {
+		t.Fatalf("create contact: %v", err)
+	}
+
+	invoice := models.Invoice{
+		ID:            uuid.New(),
+		BranchID:      branch.ID,
+		CreatedByID:   operator,
+		Amount:        500000,
+		Currency:      "USDC",
+		FiatCurrency:  "USD",
+		FundingStatus: models.FundingStatusPending,
+		State:         models.StateApproved,
+		Region:        branch.Region,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := db.Create(&invoice).Error; err != nil {
+		t.Fatalf("create invoice: %v", err)
+	}
+
+	rootAdmin := uuid.New()
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, RootAdminSubjects: []string{rootAdmin.String()}})
+	srv.Now = func() time.Time { return now }
+
+	payload := map[string]interface{}{
+		"invoice_id":        invoice.ID,
+		"fiat_amount":       500000,
+		"fiat_currency":     "usd",
+		"funding_reference": "BNK-REF-9000",
+		"dossier_key":       partner.KYBDossierKey,
+		"custodian":         "First National",
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/integrations/otc/funding/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range newAuthHeader(rootAdmin, auth.RoleRootAdmin) {
+		req.Header.Set(k, v)
+	}
+
+	resp := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var stored models.Invoice
+	if err := db.First(&stored, "id = ?", invoice.ID).Error; err != nil {
+		t.Fatalf("load invoice: %v", err)
+	}
+	if stored.State != models.StateFiatConfirmed {
+		t.Fatalf("expected FIAT_CONFIRMED got %s", stored.State)
+	}
+	if stored.FundingReference != "BNK-REF-9000" {
+		t.Fatalf("expected funding reference to persist")
 	}
 }
 

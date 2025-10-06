@@ -1,4 +1,4 @@
-export type InvoiceStage = "receipt" | "review" | "approval" | "completed" | "rejected";
+export type InvoiceStage = "receipt" | "review" | "approval" | "funding" | "completed" | "rejected";
 
 export type InvoiceStatus =
   | "receipt_pending"
@@ -6,10 +6,14 @@ export type InvoiceStatus =
   | "under_review"
   | "awaiting_approval"
   | "approved"
+  | "funding_pending"
+  | "funding_confirmed"
   | "rejected"
   | "escalated"
   | "signed"
   | "submitted";
+
+export type FundingStatus = "pending" | "confirmed" | "rejected";
 
 export interface EvidenceItem {
   url: string;
@@ -30,6 +34,10 @@ export interface Invoice {
   counterparty: string;
   amount: number;
   currency: string;
+  fiatAmount: number;
+  fiatCurrency: string;
+  fundingStatus: FundingStatus;
+  fundingReference?: string;
   status: InvoiceStatus;
   stage: InvoiceStage;
   rate: number;
@@ -47,6 +55,7 @@ export interface Invoice {
 export interface InvoiceFilters {
   branch?: string;
   status?: InvoiceStatus;
+  fundingStatus?: FundingStatus;
   minDate?: string;
   maxDate?: string;
   minAmount?: number;

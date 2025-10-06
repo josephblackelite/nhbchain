@@ -10,6 +10,8 @@ function parseFilters(url: URL): InvoiceFilters {
   if (branch) filters.branch = branch;
   const status = url.searchParams.get("status");
   if (status) filters.status = status as InvoiceFilters["status"];
+  const fundingStatus = url.searchParams.get("fundingStatus");
+  if (fundingStatus) filters.fundingStatus = fundingStatus as InvoiceFilters["fundingStatus"];
   const minDate = url.searchParams.get("minDate");
   if (minDate) filters.minDate = minDate;
   const maxDate = url.searchParams.get("maxDate");

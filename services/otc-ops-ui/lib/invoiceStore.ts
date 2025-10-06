@@ -34,6 +34,7 @@ export class InvoiceStore {
       if (filters.stage && invoice.stage !== filters.stage) return false;
       if (filters.branch && invoice.branch !== filters.branch) return false;
       if (filters.status && invoice.status !== filters.status) return false;
+      if (filters.fundingStatus && invoice.fundingStatus !== filters.fundingStatus) return false;
       if (filters.minDate && dayjs(invoice.createdAt).isBefore(dayjs(filters.minDate))) return false;
       if (filters.maxDate && dayjs(invoice.createdAt).isAfter(dayjs(filters.maxDate))) return false;
       if (filters.minAmount && invoice.amount < filters.minAmount) return false;
@@ -105,8 +106,10 @@ function actionNote(status: InvoiceStatus, role: string) {
   switch (status) {
     case "approved":
       return `${role} approval completed`;
+    case "funding_confirmed":
+      return "Fiat funding confirmed";
     case "rejected":
-      return `${role} rejection`; 
+      return `${role} rejection`;
     case "escalated":
       return `${role} escalation`;
     case "signed":

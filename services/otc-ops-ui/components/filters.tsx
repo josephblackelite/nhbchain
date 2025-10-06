@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent } from "react";
-import { InvoiceFilters, InvoiceStatus } from "../lib/types";
+import { FundingStatus, InvoiceFilters, InvoiceStatus } from "../lib/types";
 
 const statuses: InvoiceStatus[] = [
   "receipt_pending",
@@ -9,11 +9,15 @@ const statuses: InvoiceStatus[] = [
   "under_review",
   "awaiting_approval",
   "approved",
+  "funding_pending",
+  "funding_confirmed",
   "rejected",
   "escalated",
   "signed",
   "submitted"
 ];
+
+const fundingStatuses: FundingStatus[] = ["pending", "confirmed", "rejected"];
 
 interface Props {
   filters: InvoiceFilters;
@@ -50,6 +54,21 @@ export function InvoiceFiltersForm({ filters, onChange }: Props) {
           {statuses.map((status) => (
             <option key={status} value={status}>
               {status.replace(/_/g, " ")}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Funding Status
+        <select
+          name="fundingStatus"
+          value={filters.fundingStatus ?? ""}
+          onChange={handleChange}
+        >
+          <option value="">All</option>
+          {fundingStatuses.map((status) => (
+            <option key={status} value={status}>
+              {status}
             </option>
           ))}
         </select>
