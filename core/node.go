@@ -112,6 +112,12 @@ type Node struct {
 	potsoEngine                  *potso.Engine
 	globalCfgMu                  sync.RWMutex
 	globalCfg                    config.Global
+
+	posStreamMu      sync.RWMutex
+	posStreamSeq     uint64
+	posStreamNextID  uint64
+	posStreamSubs    map[uint64]chan POSFinalityUpdate
+	posStreamHistory []POSFinalityUpdate
 }
 
 const (
@@ -325,6 +331,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			Mempool: config.Mempool{MaxBytes: 1, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 			Blocks:  config.Blocks{MaxTxs: 1},
 		},
+		posStreamSubs:    make(map[uint64]chan POSFinalityUpdate),
+		posStreamHistory: make([]POSFinalityUpdate, 0, posFinalityHistoryLimit),
 	}
 
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
@@ -1140,6 +1148,16 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 		}
 	}
 	n.mempool = append(n.mempool, tx)
+	if len(tx.IntentRef) > 0 {
+		if hash, err := tx.Hash(); err == nil {
+			n.publishPOSFinality(POSFinalityUpdate{
+				IntentRef: append([]byte(nil), tx.IntentRef...),
+				TxHash:    append([]byte(nil), hash...),
+				Status:    POSFinalityStatusPending,
+				Timestamp: n.currentTime().Unix(),
+			})
+		}
+	}
 	return nil
 }
 
@@ -1620,6 +1638,7 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 	if n.syncMgr != nil && b != nil && b.Header != nil {
 		n.syncMgr.SetHeight(b.Header.Height)
 	}
+	n.publishPOSFinalityFinalized(b)
 	return nil
 }
 

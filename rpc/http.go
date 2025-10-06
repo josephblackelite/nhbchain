@@ -25,8 +25,13 @@ import (
 	gatewayauth "nhbchain/gateway/auth"
 	"nhbchain/observability"
 	"nhbchain/p2p"
+	posv1 "nhbchain/proto/pos"
 	"nhbchain/rpc/modules"
 	"nhbchain/services/swapd/stable"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -151,8 +156,10 @@ type Server struct {
 		now    func() time.Time
 	}
 
-	serverMu   sync.Mutex
-	httpServer *http.Server
+	serverMu    sync.Mutex
+	httpServer  *http.Server
+	grpcServer  *grpc.Server
+	posRealtime *FinalityStream
 }
 
 func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Server {
@@ -229,6 +236,9 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 	}
 	srv.swapStable.assets = make(map[string]stable.Asset)
 	srv.swapStable.now = time.Now
+	if node != nil {
+		srv.posRealtime = NewFinalityStream(node)
+	}
 	return srv
 }
 
@@ -276,10 +286,17 @@ func (s *Server) Start(addr string) error {
 func (s *Server) Serve(listener net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
+	mux.HandleFunc("/ws/pos/finality", s.handlePOSFinalityWS)
 
+	grpcServer := grpc.NewServer()
+	if s.posRealtime != nil {
+		posv1.RegisterRealtimeServer(grpcServer, s.posRealtime)
+	}
+
+	baseHandler := grpcHandler(grpcServer, mux)
 	srv := &http.Server{
 		Addr:              listener.Addr().String(),
-		Handler:           mux,
+		Handler:           baseHandler,
 		ReadHeaderTimeout: s.readHeaderTimeout,
 		ReadTimeout:       s.readTimeout,
 		WriteTimeout:      s.writeTimeout,
@@ -299,15 +316,24 @@ func (s *Server) Serve(listener net.Listener) error {
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 		srv.TLSConfig = tlsConfig
+		if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("configure http2: %w", err)
+		}
+	} else {
+		srv.Handler = h2c.NewHandler(baseHandler, &http2.Server{})
 	}
 
 	s.serverMu.Lock()
 	s.httpServer = srv
+	s.grpcServer = grpcServer
 	s.serverMu.Unlock()
 
 	defer func() {
+		grpcServer.GracefulStop()
 		s.serverMu.Lock()
 		s.httpServer = nil
+		s.grpcServer = nil
 		s.serverMu.Unlock()
 	}()
 
@@ -321,11 +347,36 @@ func (s *Server) Serve(listener net.Listener) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.serverMu.Lock()
 	srv := s.httpServer
+	grpcSrv := s.grpcServer
 	s.serverMu.Unlock()
+
+	if grpcSrv != nil {
+		done := make(chan struct{})
+		go func() {
+			grpcSrv.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-ctx.Done():
+			grpcSrv.Stop()
+		case <-done:
+		}
+	}
+
 	if srv == nil {
 		return nil
 	}
 	return srv.Shutdown(ctx)
+}
+
+func grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
+			grpcServer.ServeHTTP(w, r)
+			return
+		}
+		other.ServeHTTP(w, r)
+	})
 }
 
 type RPCRequest struct {
