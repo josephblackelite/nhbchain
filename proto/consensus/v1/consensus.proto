@@ -30,6 +30,7 @@ message Transaction {
   uint64 intent_expiry = 17;
   string merchant_addr = 18;
   string device_id = 19;
+  string refund_of = 20;
 }
 
 message BlockHeader {

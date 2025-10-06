@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -78,6 +79,7 @@ type Transaction struct {
 	IntentExpiry    uint64 `json:"intentExpiry,omitempty"`
 	MerchantAddress string `json:"merchantAddr,omitempty"`
 	DeviceID        string `json:"deviceId,omitempty"`
+	RefundOf        string `json:"refundOf,omitempty"`
 
 	// Signatures
 	R          *big.Int `json:"r"` // Sender's signature
@@ -111,7 +113,8 @@ func (tx *Transaction) Hash() ([]byte, error) {
 		IntentExpiry uint64 `json:"intentExpiry,omitempty"`
 		MerchantAddr string `json:"merchantAddr,omitempty"`
 		DeviceID     string `json:"deviceId,omitempty"`
-	}{ChainID: tx.ChainID, Type: tx.Type, Nonce: tx.Nonce, To: tx.To, Value: tx.Value, Data: tx.Data, GasLimit: tx.GasLimit, GasPrice: tx.GasPrice, IntentExpiry: tx.IntentExpiry, MerchantAddr: tx.MerchantAddress, DeviceID: tx.DeviceID}
+		RefundOf     string `json:"refundOf,omitempty"`
+	}{ChainID: tx.ChainID, Type: tx.Type, Nonce: tx.Nonce, To: tx.To, Value: tx.Value, Data: tx.Data, GasLimit: tx.GasLimit, GasPrice: tx.GasPrice, IntentExpiry: tx.IntentExpiry, MerchantAddr: tx.MerchantAddress, DeviceID: tx.DeviceID, RefundOf: strings.TrimSpace(tx.RefundOf)}
 
 	if len(tx.Paymaster) > 0 {
 		txData.Paymaster = append([]byte(nil), tx.Paymaster...)
