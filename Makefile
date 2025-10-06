@@ -1,5 +1,5 @@
 .PHONY: proto sdk tidy up down audit:static audit:tests audit:determinism audit:e2e audit:chaos audit:perf audit:netsec audit:ledger audit:supply audit:config audit:docs audit:endpoints
-.PHONY: bugcheck bugcheck-tools bugcheck-static bugcheck-race bugcheck-fuzz bugcheck-determinism bugcheck-gateway bugcheck-network bugcheck-perf bugcheck-proto bugcheck-docs
+.PHONY: bugcheck bugcheck-tools bugcheck-static bugcheck-race bugcheck-fuzz bugcheck-determinism bugcheck-chaos bugcheck-gateway bugcheck-network bugcheck-perf bugcheck-proto bugcheck-docs
 
 bugcheck:
 	@bash scripts/bugcheck.sh
@@ -28,6 +28,9 @@ bugcheck-fuzz:
 
 bugcheck-determinism:
 	@$(MAKE) audit:determinism
+
+bugcheck-chaos:
+	@$(MAKE) audit:chaos
 
 bugcheck-gateway:
 	@go test -run TestEndToEndFinancialFlows ./tests/e2e
