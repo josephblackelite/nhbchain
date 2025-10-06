@@ -1,0 +1,15 @@
+{
+  "overview": "Audit program overview",
+  "docs-quality": "Documentation quality checks",
+  "e2e-flows": "End-to-end flows",
+  "fuzzing": "Fuzzing coverage",
+  "recon": "Ledger reconciliation",
+  "static-analysis": "Static analysis",
+  "latest": "Latest bugcheck report",
+  "index": "Bugcheck history",
+  "history": {
+    "title": "Historical reports",
+    "type": "folder",
+    "items": {}
+  }
+}
