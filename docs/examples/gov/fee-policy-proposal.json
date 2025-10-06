@@ -1,0 +1,19 @@
+{
+  "module": "feepolicy",
+  "changes": {
+    "pos_mdr_bps": 175,
+    "min_fee": 50,
+    "exemptions": [
+      {
+        "domain": "POS",
+        "address": "nhb1publicgoodscampaign00000000000000000000",
+        "tag": "public_goods_q4",
+        "expires_at": "2025-12-31T23:59:59Z"
+      }
+    ]
+  },
+  "metadata": {
+    "reason": "Seasonal MDR uplift and subsidy carve-out",
+    "effective_epoch": 482
+  }
+}

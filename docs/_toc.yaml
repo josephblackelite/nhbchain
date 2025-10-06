@@ -33,3 +33,12 @@ toc:
             path: runbooks/paymaster-budgets.md
           - name: SLA monitoring
             path: runbooks/pos-slas.md
+
+  - name: Fees
+    toc:
+      - name: Policy
+        path: fees/policy.md
+      - name: Routing
+        path: fees/routing.md
+      - name: Governance parameters
+        path: governance/fee-params.md
