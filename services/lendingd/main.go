@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
@@ -15,37 +17,14 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
-	"gopkg.in/yaml.v3"
+	"google.golang.org/grpc/credentials"
 
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
 	lendingv1 "nhbchain/proto/lending/v1"
 	lendingserver "nhbchain/services/lending/server"
+	"nhbchain/services/lendingd/config"
 )
-
-type Config struct {
-	ListenAddress string `yaml:"listen"`
-}
-
-func loadConfig(path string) (Config, error) {
-	cfg := Config{ListenAddress: ":50053"}
-	if path == "" {
-		return cfg, fmt.Errorf("config path required")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("open config: %w", err)
-	}
-	defer file.Close()
-	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	if cfg.ListenAddress == "" {
-		cfg.ListenAddress = ":50053"
-	}
-	return cfg, nil
-}
 
 func main() {
 	var cfgPath string
@@ -80,7 +59,7 @@ func main() {
 		}
 	}()
 
-	cfg, err := loadConfig(cfgPath)
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -89,10 +68,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.ListenAddress, err)
 	}
-	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
+	creds, err := loadServerCredentials(cfg.TLS)
+	if err != nil {
+		log.Fatalf("configure tls: %v", err)
+	}
+	unaryAuth, streamAuth := lendingserver.NewAuthInterceptors(cfg.Auth)
+
+	unaryChain := grpc.ChainUnaryInterceptor(
+		otelgrpc.UnaryServerInterceptor(),
+		unaryAuth,
 	)
+	streamChain := grpc.ChainStreamInterceptor(
+		otelgrpc.StreamServerInterceptor(),
+		streamAuth,
+	)
+	options := []grpc.ServerOption{unaryChain, streamChain}
+	if creds != nil {
+		options = append(options, grpc.Creds(creds))
+	}
+	grpcServer := grpc.NewServer(options...)
+
 	service := lendingserver.New()
 	lendingv1.RegisterLendingServiceServer(grpcServer, service)
 
@@ -126,4 +121,36 @@ func main() {
 			log.Fatalf("serve gRPC: %v", err)
 		}
 	}
+}
+
+func loadServerCredentials(cfg config.TLSConfig) (credentials.TransportCredentials, error) {
+	if cfg.CertPath == "" || cfg.KeyPath == "" {
+		if cfg.AllowInsecure {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("tls credentials are required")
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load tls keypair: %w", err)
+	}
+	tlsCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}
+	if cfg.ClientCAPath != "" {
+		pem, err := os.ReadFile(cfg.ClientCAPath)
+		if err != nil {
+			return nil, fmt.Errorf("read client ca: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("parse client ca: invalid pem data")
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	} else {
+		tlsCfg.ClientAuth = tls.NoClientCert
+	}
+	return credentials.NewTLS(tlsCfg), nil
 }
