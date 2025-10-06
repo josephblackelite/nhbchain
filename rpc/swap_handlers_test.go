@@ -641,6 +641,8 @@ func TestSwapHandlersRateLimitPerPartner(t *testing.T) {
 		t.Fatalf("expected first request to succeed, got %d", firstRec.Code)
 	}
 
+	env.now = env.now.Add(time.Second)
+
 	secondReq := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	env.signSwapRequest(t, secondReq, body, "nonce-2")
 	secondRec := httptest.NewRecorder()
@@ -653,7 +655,7 @@ func TestSwapHandlersRateLimitPerPartner(t *testing.T) {
 	}
 }
 
-func buildRPCRequestBody(t *testing.T, id interface{}, method string, params []json.RawMessage) []byte {
+func buildRPCRequestBody(t *testing.T, id int, method string, params []json.RawMessage) []byte {
 	t.Helper()
 	req := RPCRequest{JSONRPC: jsonRPCVersion, ID: id, Method: method, Params: params}
 	body, err := json.Marshal(req)

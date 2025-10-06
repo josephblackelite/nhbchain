@@ -1,22 +1,24 @@
 # Stable Funding API
 
-The stable swap engine powers voucher liquidity, reserves cash-out intents, and records receipts for downstream treasury teams. Although the engine currently runs in "preview" mode (all endpoints return `501 Not Implemented` until operations unpause the feature flag), auditors need end-to-end visibility into the contracts that will gate production traffic.
+The stable swap engine powers voucher liquidity, reserves cash-out intents, and records receipts for downstream treasury teams. The engine now runs in production for OTC desks whenever `swapd` is started with `stable.paused = false`. A small number of guard rails remain (soft quotas and throttles are described below), but the HTTP surface is live and wired directly to the in-memory `stable.Engine`.
 
-This document captures the HTTP surface for `/v1/stable/*`, expected request/response shapes, rate limits, and the transparency hooks that bind quotes to reservations, cash-out intents, and banking receipts.
+This document captures the HTTP surface for `/v1/stable/*`, expected request/response shapes, rate limits, and the transparency hooks that bind quotes to reservations, cash-out intents, and banking receipts. Where applicable we also call out the behaviour when the engine is disabled so that playbooks remain accurate for dry runs.
 
 ## Endpoints at a Glance
 
-| Method | Path                  | Description                                            | Preview behaviour | Rate limits* |
-| ------ | --------------------- | ------------------------------------------------------ | ----------------- | ------------ |
-| POST   | `/v1/stable/quote`    | Calculate an indicative redemption price for vouchers | Returns 501 with `stable engine not enabled` error | 30 requests/min per account |
-| POST   | `/v1/stable/reserve`  | Reserve a previously issued quote for settlement      | Returns 501 with `stable engine not enabled` error | 15 reservations/min per account |
-| POST   | `/v1/stable/cashout`  | Create a cash-out intent and receipt stub              | Returns 501 with `stable engine not enabled` error | 10 intents/min per account |
-| GET    | `/v1/stable/status`   | Provide in-memory counters for quotes and reservations | Returns 501 with `stable engine not enabled` error | 60 requests/min |
-| GET    | `/v1/stable/limits`   | Advertise soft mint/redeem policies                    | Returns 501 with `stable engine not enabled` error | 60 requests/min |
+| Method | Path                  | Description                                            | Response when enabled | Response when paused | Rate limits* |
+| ------ | --------------------- | ------------------------------------------------------ | --------------------- | -------------------- | ------------ |
+| POST   | `/v1/stable/quote`    | Calculate an indicative redemption price for vouchers | `200` with quote payload | `501` + `stable engine not enabled` | 30 requests/min per account |
+| POST   | `/v1/stable/reserve`  | Reserve a previously issued quote for settlement      | `200` with reservation payload | `501` + `stable engine not enabled` | 15 reservations/min per account |
+| POST   | `/v1/stable/cashout`  | Create a cash-out intent and receipt stub              | `200` with intent payload | `501` + `stable engine not enabled` | 10 intents/min per account |
+| GET    | `/v1/stable/status`   | Provide in-memory counters for quotes and reservations | `200` with status snapshot | `501` + `stable engine not enabled` | 60 requests/min |
+| GET    | `/v1/stable/limits`   | Advertise soft mint/redeem policies                    | `200` with limits payload | `501` + `stable engine not enabled` | 60 requests/min |
 
 \*Soft limits are enforced through swapd's throttle registry; see the [operations runbook](../ops/stable-runbook.md) for override procedures.
 
 Even when the engine is paused the collection described below asserts that responses stay consistent—any drift in status codes or error contracts will fail regression.
+
+> **Note:** All responses include `trace_id` when the request carries OpenTelemetry span context. Treasury processors rely on this field to correlate API calls with downstream settlements.
 
 ## POST `/v1/stable/quote`
 
@@ -34,11 +36,11 @@ Successful response (engine enabled):
 
 ```json
 {
-  "quote_id": "q-1717706117123456000",
+  "quote_id": "q-1717787718000000000",
   "asset": "ZNHB",
-  "price": 100.12,
-  "expires_at": "2024-06-07T19:15:17Z",
-  "trace_id": "1bde14ab-9f23-497d-a60c-018f4231a630"
+  "price": 100,
+  "expires_at": "2024-06-07T19:16:18Z",
+  "trace_id": "102030405060708090a0b0c0d0e0f001"
 }
 ```
 
@@ -58,7 +60,7 @@ Request body:
 
 ```json
 {
-  "quote_id": "q-1717706117123456000",
+  "quote_id": "q-1717787718000000000",
   "amount_in": 100.0,
   "account": "merchant-123"
 }
@@ -68,12 +70,12 @@ Successful response:
 
 ```json
 {
-  "reservation_id": "q-1717706117123456000",
-  "quote_id": "q-1717706117123456000",
-  "amount_in": 100.0,
-  "amount_out": 100.0,
-  "expires_at": "2024-06-07T19:15:17Z",
-  "trace_id": "a7d085b0-bdf9-4cc6-aa17-02dc28b09b9b"
+  "reservation_id": "q-1717787718000000000",
+  "quote_id": "q-1717787718000000000",
+  "amount_in": 100,
+  "amount_out": 100,
+  "expires_at": "2024-06-07T19:16:18Z",
+  "trace_id": "102030405060708090a0b0c0d0e0f001"
 }
 ```
 
@@ -87,7 +89,7 @@ Request body:
 
 ```json
 {
-  "reservation_id": "q-1717706117123456000"
+  "reservation_id": "q-1717787718000000000"
 }
 ```
 
@@ -95,17 +97,17 @@ Successful response:
 
 ```json
 {
-  "intent_id": "i-1717706120456000",
-  "reservation_id": "q-1717706117123456000",
-  "amount": 100.0,
-  "trace_id": "497e13ba-4b31-44ad-87d9-3ca0d0aa2a94",
-  "receipt_hint": "ACH:T+1"
+  "intent_id": "i-1717787724000000000",
+  "reservation_id": "q-1717787718000000000",
+  "amount": 100,
+  "created_at": "2024-06-07T19:15:24Z",
+  "trace_id": "102030405060708090a0b0c0d0e0f001"
 }
 ```
 
 Preview response returns the same `501` payload as other endpoints.
 
-The cash-out intent closes the audit trail by linking reservation IDs to treasury receipts. Intent creation logs `stable.create_cashout_intent` spans, persists the intent in the swapd database, and emits structured logs (`cashout intent created`) that the audit pipeline ingests.
+The cash-out intent closes the audit trail by linking reservation IDs to treasury receipts. Intent creation logs `stable.create_cashout_intent` spans, persists the intent in the swapd database, and emits structured logs (`cashout intent created`) that the audit pipeline ingests. Treasury operators attach an ACH/SWIFT hint to the intent when the downstream payment rail is confirmed; until then the API exposes the creation timestamp only.
 
 ## GET `/v1/stable/status`
 
@@ -116,7 +118,7 @@ Response (engine enabled):
   "quotes": 1,
   "reservations": 1,
   "assets": 1,
-  "updated_at": "2024-06-07T19:15:17Z"
+  "updated_at": "2024-06-07T19:15:27Z"
 }
 ```
 
@@ -159,6 +161,25 @@ In preview the endpoint returns the `stable engine not enabled` error. Operation
 | 422    | `reservation not found`       | Cashout on consumed reservation     | Inspect `/v1/stable/status` counters |
 | 429    | `throttled`                   | Breach of per-account policy        | Contact operations or wait for rolling window |
 | 501    | `stable engine not enabled`   | Preview mode guardrail              | Flip `stable.paused=false` and run regression suite |
+
+## Quotas and Telemetry
+
+The soft limits surfaced by `/v1/stable/limits` come directly from the running `swapd` configuration:
+
+- `daily_cap` mirrors `policy.mint_limit` and governs the total amount OTC desks may settle during the rolling throttle window.
+- `asset_caps` entries reflect each configured asset's `quote_ttl`, `max_slippage_bps`, and `soft_inventory` values. Operations can update these knobs in `services/swapd/config.yaml` and hot-reload `swapd` to publish new limits.
+
+Stable counters (`/v1/stable/status`) increment as quotes, reservations, and intents are processed. They feed Grafana dashboards via OTLP metrics (`swapd_stable_quote_latency`, `swapd_stable_reserve_latency`, and `swapd_stable_cashout_intent_latency`) and structured logs (`cashout intent created`).
+
+## OTC Partner Onboarding
+
+To onboard a new OTC desk to the stable API:
+
+1. **Submit desk profile:** Treasury reviews the desk's legal entity, settlement accounts, and compliance artefacts. Once approved, operations set `stable.paused = false` in the deployment environment and ensure the desk's account identifier matches the `account` field used in `quote`/`reserve` payloads.
+2. **Configure limits:** Operations tune `policy.mint_limit`/`policy.redeem_limit` and, if necessary, add a dedicated entry under `stable.assets` with bespoke `quote_ttl`, `max_slippage_bps`, or `soft_inventory`. The resulting limits propagate automatically to `/v1/stable/limits`.
+3. **Exchange connectivity details:** OTC desks provide network allow-list information and preferred telemetry endpoints. Operations update the gateway ACLs and share the OpenTelemetry trace requirements so partners can forward `traceparent` headers, enabling `trace_id` propagation end-to-end.
+
+Partners should verify integration by calling `/v1/stable/status` and `/v1/stable/limits` after onboarding to confirm the live quotas before sending production traffic.
 
 ## Transparency Appendix
 
