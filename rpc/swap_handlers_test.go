@@ -1,10 +1,12 @@
 package rpc
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -584,4 +586,79 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	if !ok || strings.TrimSpace(proofID) == "" {
 		t.Fatalf("expected priceProofId in voucher payload: %+v", listPayload.Vouchers[0])
 	}
+}
+
+func TestSwapHandlersRequireHMAC(t *testing.T) {
+	env := newTestEnv(t)
+	env.now = time.Unix(1700000000, 0).UTC()
+	params := []json.RawMessage{marshalParam(t, env.now.Add(-time.Hour).Unix()), marshalParam(t, env.now.Add(time.Hour).Unix())}
+	body := buildRPCRequestBody(t, 1, "swap_voucher_list", params)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	env.server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized status, got %d", rec.Code)
+	}
+	if _, rpcErr := decodeRPCResponse(t, rec); rpcErr == nil || rpcErr.Code != codeUnauthorized {
+		t.Fatalf("expected unauthorized error, got %+v", rpcErr)
+	}
+}
+
+func TestSwapHandlersAcceptSignedRequest(t *testing.T) {
+	env := newTestEnv(t)
+	env.now = time.Unix(1700000000, 0).UTC()
+	params := []json.RawMessage{marshalParam(t, env.now.Add(-time.Hour).Unix()), marshalParam(t, env.now.Add(time.Hour).Unix())}
+	body := buildRPCRequestBody(t, 1, "swap_voucher_list", params)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	env.signSwapRequest(t, req, body, "nonce-accept")
+
+	rec := httptest.NewRecorder()
+	env.server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected OK status, got %d", rec.Code)
+	}
+	if _, rpcErr := decodeRPCResponse(t, rec); rpcErr != nil {
+		t.Fatalf("unexpected error: %+v", rpcErr)
+	}
+}
+
+func TestSwapHandlersRateLimitPerPartner(t *testing.T) {
+	env := newTestEnv(t)
+	env.now = time.Unix(1700000000, 0).UTC()
+	env.server.swapPartnerLimits[env.swapKey] = 1
+	env.server.swapRateCounters = make(map[string]*rateLimiter)
+
+	params := []json.RawMessage{marshalParam(t, env.now.Add(-time.Hour).Unix()), marshalParam(t, env.now.Add(time.Hour).Unix())}
+	body := buildRPCRequestBody(t, 1, "swap_voucher_list", params)
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	env.signSwapRequest(t, firstReq, body, "nonce-1")
+	firstRec := httptest.NewRecorder()
+	env.server.ServeHTTP(firstRec, firstReq)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("expected first request to succeed, got %d", firstRec.Code)
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	env.signSwapRequest(t, secondReq, body, "nonce-2")
+	secondRec := httptest.NewRecorder()
+	env.server.ServeHTTP(secondRec, secondReq)
+	if secondRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected rate limit status, got %d", secondRec.Code)
+	}
+	if _, rpcErr := decodeRPCResponse(t, secondRec); rpcErr == nil || rpcErr.Code != codeRateLimited {
+		t.Fatalf("expected rate limited error, got %+v", rpcErr)
+	}
+}
+
+func buildRPCRequestBody(t *testing.T, id interface{}, method string, params []json.RawMessage) []byte {
+	t.Helper()
+	req := RPCRequest{JSONRPC: jsonRPCVersion, ID: id, Method: method, Params: params}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	return body
 }

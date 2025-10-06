@@ -6,20 +6,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
 	"nhbchain/core"
 	"nhbchain/crypto"
+	gatewayauth "nhbchain/gateway/auth"
 	"nhbchain/native/loyalty"
 	swap "nhbchain/native/swap"
 	"nhbchain/storage"
 )
 
 type testEnv struct {
-	server *Server
-	node   *core.Node
-	token  string
+	server     *Server
+	node       *core.Node
+	token      string
+	swapKey    string
+	swapSecret string
+	now        time.Time
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -46,14 +51,43 @@ func newTestEnv(t *testing.T) *testEnv {
 	agg.Register("manual", manual)
 	node.SetSwapOracle(agg)
 	node.SetSwapManualOracle(manual)
-	server := NewServer(node, nil, ServerConfig{})
-	return &testEnv{server: server, node: node, token: token}
+
+	env := &testEnv{token: token, now: time.Unix(1700000000, 0).UTC(), swapKey: "partner", swapSecret: "secret"}
+	server := NewServer(node, nil, ServerConfig{
+		SwapAuth: SwapAuthConfig{
+			Secrets:              map[string]string{env.swapKey: env.swapSecret},
+			AllowedTimestampSkew: time.Minute,
+			NonceTTL:             2 * time.Minute,
+			NonceCapacity:        1024,
+			RateLimitWindow:      time.Minute,
+			PartnerRateLimits:    map[string]int{env.swapKey: 100},
+			Now: func() time.Time {
+				return env.now
+			},
+		},
+	})
+	env.server = server
+	env.node = node
+	return env
 }
 
 func (env *testEnv) newRequest() *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+env.token)
 	return req
+}
+
+func (env *testEnv) signSwapRequest(t *testing.T, req *http.Request, body []byte, nonce string) {
+	t.Helper()
+	if req == nil {
+		t.Fatalf("request is nil")
+	}
+	timestamp := strconv.FormatInt(env.now.Unix(), 10)
+	sig := gatewayauth.ComputeSignature(env.swapSecret, timestamp, nonce, req.Method, gatewayauth.CanonicalRequestPath(req), body)
+	req.Header.Set(gatewayauth.HeaderAPIKey, env.swapKey)
+	req.Header.Set(gatewayauth.HeaderTimestamp, timestamp)
+	req.Header.Set(gatewayauth.HeaderNonce, nonce)
+	req.Header.Set(gatewayauth.HeaderSignature, hex.EncodeToString(sig))
 }
 
 func marshalParam(t *testing.T, v interface{}) json.RawMessage {

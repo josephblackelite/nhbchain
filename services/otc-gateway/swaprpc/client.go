@@ -3,18 +3,22 @@ package swaprpc
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"nhbchain/core"
+	gatewayauth "nhbchain/gateway/auth"
 )
 
 // Client provides a thin JSON-RPC wrapper for swap voucher submission.
@@ -23,20 +27,71 @@ type Client struct {
 	provider   string
 	httpClient *http.Client
 	nextID     atomic.Int64
+
+	apiKey    string
+	apiSecret string
+	allowed   map[string]struct{}
+
+	rateMu     sync.Mutex
+	rateLimit  int
+	rateWindow time.Duration
+	rateStart  time.Time
+	rateCount  int
+
+	nowFn   func() time.Time
+	nonceFn func() (string, error)
 }
 
 // Config represents the client configuration.
 type Config struct {
-	URL      string
-	Provider string
-	Timeout  time.Duration
+	URL               string
+	Provider          string
+	Timeout           time.Duration
+	APIKey            string
+	APISecret         string
+	AllowedMethods    []string
+	RequestsPerMinute int
+	RateWindow        time.Duration
+	Now               func() time.Time
+	Nonce             func() (string, error)
 }
 
 // NewClient constructs a JSON-RPC client targeting the supplied URL.
-func NewClient(cfg Config) *Client {
+func NewClient(cfg Config) (*Client, error) {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
+	}
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	if apiKey == "" {
+		return nil, fmt.Errorf("swaprpc: API key is required")
+	}
+	apiSecret := strings.TrimSpace(cfg.APISecret)
+	if apiSecret == "" {
+		return nil, fmt.Errorf("swaprpc: API secret is required")
+	}
+	allowed := make(map[string]struct{})
+	for _, method := range cfg.AllowedMethods {
+		trimmed := strings.TrimSpace(method)
+		if trimmed == "" {
+			continue
+		}
+		allowed[trimmed] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return nil, fmt.Errorf("swaprpc: allowed method list cannot be empty")
+	}
+	window := cfg.RateWindow
+	if window <= 0 {
+		window = time.Minute
+	}
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	nonceFn := cfg.Nonce
+	if nonceFn == nil {
+		nonceFn = randomNonce
 	}
 	return &Client{
 		url:      strings.TrimSpace(cfg.URL),
@@ -44,6 +99,13 @@ func NewClient(cfg Config) *Client {
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
+		apiKey:     apiKey,
+		apiSecret:  apiSecret,
+		allowed:    allowed,
+		rateLimit:  cfg.RequestsPerMinute,
+		rateWindow: window,
+		nowFn:      nowFn,
+		nonceFn:    nonceFn,
 	}
 }
 
@@ -269,6 +331,12 @@ func (c *Client) call(ctx context.Context, method string, params []interface{}, 
 	if c == nil || c.httpClient == nil {
 		return fmt.Errorf("swaprpc: client not configured")
 	}
+	if _, ok := c.allowed[strings.TrimSpace(method)]; !ok {
+		return fmt.Errorf("swaprpc: method %q not allowed", method)
+	}
+	if err := c.consumeRateSlot(); err != nil {
+		return err
+	}
 	id := c.nextID.Add(1)
 	reqBody := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	buf, err := json.Marshal(reqBody)
@@ -280,6 +348,16 @@ func (c *Client) call(ctx context.Context, method string, params []interface{}, 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	timestamp := strconv.FormatInt(c.nowFn().UTC().Unix(), 10)
+	nonce, err := c.nonceFn()
+	if err != nil {
+		return fmt.Errorf("swaprpc: generate nonce: %w", err)
+	}
+	signature := gatewayauth.ComputeSignature(c.apiSecret, timestamp, nonce, http.MethodPost, gatewayauth.CanonicalRequestPath(req), buf)
+	req.Header.Set(gatewayauth.HeaderAPIKey, c.apiKey)
+	req.Header.Set(gatewayauth.HeaderTimestamp, timestamp)
+	req.Header.Set(gatewayauth.HeaderNonce, nonce)
+	req.Header.Set(gatewayauth.HeaderSignature, hex.EncodeToString(signature))
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -302,6 +380,32 @@ func (c *Client) call(ctx context.Context, method string, params []interface{}, 
 		return fmt.Errorf("swaprpc: empty result")
 	}
 	return json.Unmarshal(rpcResp.Result, out)
+}
+
+func (c *Client) consumeRateSlot() error {
+	if c.rateLimit <= 0 {
+		return nil
+	}
+	now := c.nowFn()
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	if c.rateStart.IsZero() || now.Sub(c.rateStart) >= c.rateWindow {
+		c.rateStart = now
+		c.rateCount = 0
+	}
+	if c.rateCount >= c.rateLimit {
+		return fmt.Errorf("swaprpc: rate limit exceeded")
+	}
+	c.rateCount++
+	return nil
+}
+
+func randomNonce() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 var _ interface {

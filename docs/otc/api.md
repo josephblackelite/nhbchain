@@ -10,6 +10,27 @@ Supported roles are `teller`, `supervisor`, `compliance`, `superadmin`, and `aud
 
 Base path: `/api/v1`
 
+## Swap RPC authentication
+
+The OTC gateway authenticates to the swap RPC using partner-specific API keys. Operations teams provision credentials via the swap governance process and distribute them to OTC operators out-of-band. Each credential pair consists of:
+
+- `OTC_SWAP_API_KEY` – the public identifier reported in the `X-Api-Key` header.
+- `OTC_SWAP_API_SECRET` – the shared secret used to sign requests.
+
+Partners must also configure an explicit method allowlist so the gateway cannot accidentally invoke privileged RPCs:
+
+- `OTC_SWAP_METHOD_ALLOWLIST` – comma/space-separated list of permitted JSON-RPC methods (defaults to `swap_submitVoucher`, `swap_voucher_get`, `swap_voucher_list`, `swap_voucher_export`).
+- `OTC_SWAP_RATE_LIMIT_PER_MINUTE` – optional throttle applied client-side before issuing requests.
+
+Every JSON-RPC request sent to the swap gateway includes the HMAC headers enforced by `gateway/auth`:
+
+- `X-Api-Key`
+- `X-Timestamp`
+- `X-Nonce`
+- `X-Signature`
+
+The timestamp and nonce pair must be unique per request within the replay window. Operators should monitor for 401/429 responses indicating invalid signatures or quota violations and rotate credentials when staff changes occur.
+
 ## `POST /invoices`
 Create a new OTC invoice.
 
