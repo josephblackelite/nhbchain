@@ -189,3 +189,50 @@ audit:endpoints:
 		--env-var stable_base=$(STABLE_BASE) \
 		--reporters cli,json \
 		--reporter-json-export artifacts/endpoints/newman-report.json 2>&1 | tee logs/audit-endpoints.log'
+
+POS_TEST_TAGS := posreadiness
+POS_TEST_PKG := ./tests/posreadiness
+POS_TEST_BIN := artifacts/pos/posreadiness.test
+POS_LOG_DIR := logs/pos
+.PHONY:
+
+pos:build-tests:
+	@mkdir -p $(dir $(POS_TEST_BIN))
+	go test -c -tags $(POS_TEST_TAGS) -o $(POS_TEST_BIN) $(POS_TEST_PKG)
+
+pos:run-intent:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestIntentReadiness 2>&1 | tee $(POS_LOG_DIR)/intent.log"
+
+pos:run-paymaster:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestPaymasterReadiness 2>&1 | tee $(POS_LOG_DIR)/paymaster.log"
+
+pos:run-registry:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestRegistryReadiness 2>&1 | tee $(POS_LOG_DIR)/registry.log"
+
+pos:run-realtime:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestRealtimeReadiness 2>&1 | tee $(POS_LOG_DIR)/realtime.log"
+
+pos:run-security:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestSecurityReadiness 2>&1 | tee $(POS_LOG_DIR)/security.log"
+
+pos:run-fees:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestFeesReadiness 2>&1 | tee $(POS_LOG_DIR)/fees.log"
+
+pos:bench-qos:
+	@mkdir -p $(POS_LOG_DIR)
+	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.run '^$' -test.bench BenchmarkPOSQOS -test.benchmem 2>&1 | tee $(POS_LOG_DIR)/bench-qos.log"
+
+pos:all: pos:build-tests pos:run-intent pos:run-paymaster pos:run-registry pos:run-realtime pos:run-security pos:run-fees pos:bench-qos
