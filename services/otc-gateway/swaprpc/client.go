@@ -53,6 +53,23 @@ type VoucherStatus struct {
 	TxHash string
 }
 
+// MintCompliance bundles the partner identity metadata that accompanies voucher submissions.
+type MintCompliance struct {
+	PartnerDID       string          `json:"partnerDid,omitempty"`
+	ComplianceTags   []string        `json:"complianceTags,omitempty"`
+	TravelRulePacket json.RawMessage `json:"travelRulePacket,omitempty"`
+	SanctionsStatus  string          `json:"sanctionsStatus,omitempty"`
+}
+
+// MintSubmission wraps the voucher payload, signature, and compliance metadata.
+type MintSubmission struct {
+	Voucher      core.MintVoucher `json:"voucher"`
+	SignatureHex string           `json:"sig"`
+	Provider     string           `json:"provider"`
+	ProviderTxID string           `json:"providerTxId"`
+	Compliance   *MintCompliance  `json:"compliance,omitempty"`
+}
+
 // VoucherExportRecord captures the decoded row returned by swap_voucher_export.
 type VoucherExportRecord struct {
 	ProviderTxID      string
@@ -82,13 +99,9 @@ type VoucherExportRecord struct {
 }
 
 // SubmitMintVoucher posts a mint voucher with signature to the swap gateway RPC.
-func (c *Client) SubmitMintVoucher(ctx context.Context, voucher core.MintVoucher, signatureHex, providerTxID string) (string, bool, error) {
-	payload := map[string]interface{}{
-		"voucher":      voucher,
-		"sig":          signatureHex,
-		"provider":     c.provider,
-		"providerTxId": providerTxID,
-	}
+func (c *Client) SubmitMintVoucher(ctx context.Context, submission MintSubmission) (string, bool, error) {
+	payload := submission
+	payload.Provider = c.provider
 	var result struct {
 		TxHash string `json:"txHash"`
 		Minted bool   `json:"minted"`
@@ -292,6 +305,6 @@ func (c *Client) call(ctx context.Context, method string, params []interface{}, 
 }
 
 var _ interface {
-	SubmitMintVoucher(context.Context, core.MintVoucher, string, string) (string, bool, error)
+	SubmitMintVoucher(context.Context, MintSubmission) (string, bool, error)
 	GetVoucher(context.Context, string) (*VoucherStatus, error)
 } = (*Client)(nil)

@@ -15,6 +15,9 @@ type Config struct {
 	S3Bucket          string
 	ChainID           string
 	SwapRPCBase       string
+	IdentityBaseURL   string
+	IdentityAPIKey    string
+	IdentityTimeout   time.Duration
 	DefaultTZ         *time.Location
 	HSMBaseURL        string
 	HSMCACert         string
@@ -57,6 +60,17 @@ func FromEnv() (*Config, error) {
 	}
 	if rpcBase == "" {
 		return nil, fmt.Errorf("OTC_SWAP_RPC_BASE is required")
+	}
+
+	identityBase := os.Getenv("OTC_IDENTITY_BASE_URL")
+	if identityBase == "" {
+		return nil, fmt.Errorf("OTC_IDENTITY_BASE_URL is required")
+	}
+	identityAPIKey := os.Getenv("OTC_IDENTITY_API_KEY")
+	identityTimeoutSeconds := getEnvDefault("OTC_IDENTITY_TIMEOUT_SECONDS", "10")
+	identityTimeoutValue, err := strconv.Atoi(identityTimeoutSeconds)
+	if err != nil || identityTimeoutValue <= 0 {
+		return nil, fmt.Errorf("invalid OTC_IDENTITY_TIMEOUT_SECONDS %q", identityTimeoutSeconds)
 	}
 
 	hsmBase := os.Getenv("OTC_HSM_BASE_URL")
@@ -111,6 +125,9 @@ func FromEnv() (*Config, error) {
 		S3Bucket:          bucket,
 		ChainID:           chainID,
 		SwapRPCBase:       rpcBase,
+		IdentityBaseURL:   identityBase,
+		IdentityAPIKey:    identityAPIKey,
+		IdentityTimeout:   time.Duration(identityTimeoutValue) * time.Second,
 		DefaultTZ:         tz,
 		HSMBaseURL:        hsmBase,
 		HSMCACert:         hsmCACert,

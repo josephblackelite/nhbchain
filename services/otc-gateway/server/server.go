@@ -15,9 +15,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"nhbchain/core"
 	"nhbchain/services/otc-gateway/auth"
 	"nhbchain/services/otc-gateway/hsm"
+	"nhbchain/services/otc-gateway/identity"
 	otcmw "nhbchain/services/otc-gateway/middleware"
 	"nhbchain/services/otc-gateway/models"
 	"nhbchain/services/otc-gateway/swaprpc"
@@ -25,8 +25,13 @@ import (
 
 // SwapClient abstracts the swap RPC methods used by the gateway.
 type SwapClient interface {
-	SubmitMintVoucher(ctx context.Context, voucher core.MintVoucher, signatureHex, providerTxID string) (string, bool, error)
+	SubmitMintVoucher(ctx context.Context, submission swaprpc.MintSubmission) (string, bool, error)
 	GetVoucher(ctx context.Context, providerTxID string) (*swaprpc.VoucherStatus, error)
+}
+
+// IdentityClient resolves partner identity metadata required for minting.
+type IdentityClient interface {
+	ResolvePartner(ctx context.Context, partnerID uuid.UUID) (*identity.Resolution, error)
 }
 
 // Config captures the dependencies required to construct the server.
@@ -36,6 +41,7 @@ type Config struct {
 	ChainID           uint64
 	S3Bucket          string
 	SwapClient        SwapClient
+	Identity          IdentityClient
 	Signer            hsm.Signer
 	VoucherTTL        time.Duration
 	Provider          string
@@ -50,6 +56,7 @@ type Server struct {
 	ChainID      uint64
 	S3Bucket     string
 	SwapClient   SwapClient
+	Identity     IdentityClient
 	Signer       hsm.Signer
 	VoucherTTL   time.Duration
 	Provider     string
@@ -84,6 +91,7 @@ func New(cfg Config) *Server {
 		ChainID:      cfg.ChainID,
 		S3Bucket:     cfg.S3Bucket,
 		SwapClient:   cfg.SwapClient,
+		Identity:     cfg.Identity,
 		Signer:       cfg.Signer,
 		VoucherTTL:   cfg.VoucherTTL,
 		Provider:     strings.TrimSpace(cfg.Provider),

@@ -18,7 +18,9 @@ import (
 
 	"nhbchain/core"
 	"nhbchain/services/otc-gateway/auth"
+	"nhbchain/services/otc-gateway/identity"
 	"nhbchain/services/otc-gateway/models"
+	"nhbchain/services/otc-gateway/swaprpc"
 )
 
 // SignAndSubmit constructs a mint voucher, signs it via the HSM, and submits it to the swap RPC.
@@ -98,6 +100,75 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
+		identityResolution *identity.Resolution
+		complianceJSON     []byte
+		travelRuleJSON     []byte
+		sanctionsStatus    string
+	)
+
+	var preflight models.Invoice
+	if err := s.DB.First(&preflight, "id = ?", invoiceID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "invoice not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load invoice", http.StatusInternalServerError)
+		return
+	}
+
+	partner, err := s.ensureInvoicePartnerApproved(nil, preflight.CreatedByID)
+	if err != nil {
+		if errors.Is(err, errPartnerPending) {
+			http.Error(w, "partner pending review - minting disabled", http.StatusForbidden)
+		} else {
+			http.Error(w, "failed to verify partner", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	requiresIdentity := partner != nil && (preflight.State == models.StateApproved || preflight.State == models.StateSigned)
+	if requiresIdentity {
+		if s.Identity == nil {
+			http.Error(w, "identity service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		resolution, err := s.Identity.ResolvePartner(r.Context(), partner.ID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("resolve partner identity: %v", err), http.StatusBadGateway)
+			return
+		}
+		if resolution == nil || strings.TrimSpace(resolution.PartnerDID) == "" {
+			http.Error(w, "partner missing DID", http.StatusForbidden)
+			return
+		}
+		if !resolution.Verified {
+			http.Error(w, "partner DID not verified", http.StatusForbidden)
+			return
+		}
+		if sanctionsBlocked(resolution.SanctionsStatus) {
+			http.Error(w, "partner blocked by sanctions", http.StatusForbidden)
+			return
+		}
+		if !hasTravelRuleTag(resolution.ComplianceTags) {
+			http.Error(w, "partner missing travel rule attestation", http.StatusForbidden)
+			return
+		}
+		identityResolution = resolution
+		sanctionsStatus = strings.TrimSpace(resolution.SanctionsStatus)
+		if len(resolution.ComplianceTags) > 0 {
+			data, err := json.Marshal(resolution.ComplianceTags)
+			if err != nil {
+				http.Error(w, "failed to encode compliance tags", http.StatusInternalServerError)
+				return
+			}
+			complianceJSON = data
+		}
+		if len(resolution.TravelRulePacket) > 0 {
+			travelRuleJSON = append([]byte(nil), resolution.TravelRulePacket...)
+		}
+	}
+
+	var (
 		existingVoucher   models.Voucher
 		existing          bool
 		invoice           models.Invoice
@@ -109,7 +180,7 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("Decisions").First(&invoice, "id = ?", invoiceID).Error; err != nil {
 			return err
 		}
-		if err := s.ensureInvoicePartnerApproved(tx, invoice.CreatedByID); err != nil {
+		if _, err := s.ensureInvoicePartnerApproved(tx, invoice.CreatedByID); err != nil {
 			if errors.Is(err, errPartnerPending) {
 				submissionBlocked = true
 			}
@@ -165,6 +236,12 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 
 		invoice.State = models.StateSigned
+		if identityResolution != nil {
+			invoice.PartnerDID = strings.TrimSpace(identityResolution.PartnerDID)
+			invoice.SanctionsStatus = sanctionsStatus
+			invoice.ComplianceTags = append([]byte(nil), complianceJSON...)
+			invoice.TravelRulePacket = append([]byte(nil), travelRuleJSON...)
+		}
 		invoice.UpdatedAt = now
 		if err := tx.Save(&invoice).Error; err != nil {
 			return err
@@ -178,6 +255,12 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			existingVoucher.Status = voucherStatusSigning
 			existingVoucher.ExpiresAt = expiryAt
 			existingVoucher.UpdatedAt = now
+			if identityResolution != nil {
+				existingVoucher.PartnerDID = strings.TrimSpace(identityResolution.PartnerDID)
+				existingVoucher.SanctionsStatus = sanctionsStatus
+				existingVoucher.ComplianceTags = append([]byte(nil), complianceJSON...)
+				existingVoucher.TravelRulePacket = append([]byte(nil), travelRuleJSON...)
+			}
 			if err := tx.Save(&existingVoucher).Error; err != nil {
 				return err
 			}
@@ -193,6 +276,12 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 				ExpiresAt:    expiryAt,
 				CreatedAt:    now,
 				UpdatedAt:    now,
+			}
+			if identityResolution != nil {
+				record.PartnerDID = strings.TrimSpace(identityResolution.PartnerDID)
+				record.SanctionsStatus = sanctionsStatus
+				record.ComplianceTags = append([]byte(nil), complianceJSON...)
+				record.TravelRulePacket = append([]byte(nil), travelRuleJSON...)
 			}
 			if err := tx.Create(&record).Error; err != nil {
 				return err
@@ -236,6 +325,18 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var compliancePayload *swaprpc.MintCompliance
+	if identityResolution != nil {
+		compliancePayload = &swaprpc.MintCompliance{
+			PartnerDID:      strings.TrimSpace(identityResolution.PartnerDID),
+			ComplianceTags:  append([]string(nil), identityResolution.ComplianceTags...),
+			SanctionsStatus: sanctionsStatus,
+		}
+		if len(identityResolution.TravelRulePacket) > 0 {
+			compliancePayload.TravelRulePacket = append([]byte(nil), identityResolution.TravelRulePacket...)
+		}
+	}
+
 	sigBytes, signerDN, err := s.Signer.Sign(r.Context(), digest)
 	if err != nil {
 		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
@@ -249,7 +350,13 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sigHex := hex.EncodeToString(sigBytes)
-	txHash, minted, err := s.SwapClient.SubmitMintVoucher(r.Context(), voucher, "0x"+sigHex, existingVoucher.ProviderTxID)
+	submission := swaprpc.MintSubmission{
+		Voucher:      voucher,
+		SignatureHex: "0x" + sigHex,
+		ProviderTxID: existingVoucher.ProviderTxID,
+		Compliance:   compliancePayload,
+	}
+	txHash, minted, err := s.SwapClient.SubmitMintVoucher(r.Context(), submission)
 	if err != nil {
 		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
 		http.Error(w, fmt.Sprintf("submit voucher: %v", err), http.StatusBadGateway)
@@ -396,4 +503,32 @@ func (s *Server) lookupVoucher(ctx context.Context, providerTxID string) (string
 	}
 	txHash := strings.TrimSpace(status.TxHash)
 	return strings.TrimSpace(status.Status), txHash, true
+}
+
+func hasTravelRuleTag(tags []string) bool {
+	for _, tag := range tags {
+		normalized := strings.ToLower(strings.TrimSpace(tag))
+		if normalized == "" {
+			continue
+		}
+		if strings.HasPrefix(normalized, "travel-rule") || strings.Contains(normalized, "travel_rule") {
+			return true
+		}
+	}
+	return false
+}
+
+func sanctionsBlocked(status string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	if normalized == "" {
+		return false
+	}
+	switch normalized {
+	case "clear", "cleared", "none", "pass", "approved", "not_listed":
+		return false
+	}
+	if strings.Contains(normalized, "block") || strings.Contains(normalized, "deny") || strings.Contains(normalized, "reject") || strings.Contains(normalized, "sanction") {
+		return true
+	}
+	return false
 }
