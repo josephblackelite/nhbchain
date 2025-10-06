@@ -364,16 +364,16 @@ func (s *Server) ensureApprovedPartner(w http.ResponseWriter, claims *auth.Claim
 	return partner, false
 }
 
-func (s *Server) ensureInvoicePartnerApproved(tx *gorm.DB, creator uuid.UUID) error {
+func (s *Server) ensureInvoicePartnerApproved(tx *gorm.DB, creator uuid.UUID) (*models.Partner, error) {
 	partner, err := s.partnerForSubject(tx, creator.String())
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	if !partner.Approved {
-		return errPartnerPending
+		return partner, errPartnerPending
 	}
-	return nil
+	return partner, nil
 }

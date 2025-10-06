@@ -17,6 +17,7 @@ import (
 	telemetry "nhbchain/observability/otel"
 	"nhbchain/services/otc-gateway/config"
 	"nhbchain/services/otc-gateway/hsm"
+	"nhbchain/services/otc-gateway/identity"
 	"nhbchain/services/otc-gateway/models"
 	"nhbchain/services/otc-gateway/recon"
 	"nhbchain/services/otc-gateway/server"
@@ -83,6 +84,15 @@ func main() {
 		log.Fatalf("hsm client error: %v", err)
 	}
 
+	identityClient, err := identity.NewClient(identity.Config{
+		BaseURL: cfg.IdentityBaseURL,
+		APIKey:  cfg.IdentityAPIKey,
+		Timeout: cfg.IdentityTimeout,
+	})
+	if err != nil {
+		log.Fatalf("identity client error: %v", err)
+	}
+
 	swapClient := swaprpc.NewClient(swaprpc.Config{URL: cfg.SwapRPCBase, Provider: cfg.SwapProvider})
 
 	srv := server.New(server.Config{
@@ -91,6 +101,7 @@ func main() {
 		ChainID:           chainID,
 		S3Bucket:          cfg.S3Bucket,
 		SwapClient:        swapClient,
+		Identity:          identityClient,
 		Signer:            signer,
 		VoucherTTL:        cfg.VoucherTTL,
 		Provider:          cfg.SwapProvider,

@@ -17,6 +17,17 @@ The gateway constructs a `core.MintVoucher` object with the following fields:
 
 The canonical JSON is hashed with keccak256, signed by the HSM, and submitted to `swap_submitVoucher` alongside a deterministic `providerTxId`.
 
+The RPC payload is wrapped in a `swaprpc.MintSubmission` object that also carries compliance metadata when a partner generated the invoice. The `compliance` envelope includes:
+
+| Field | Description |
+| --- | --- |
+| `partnerDid` | Decentralized identifier resolved via the identity service. |
+| `complianceTags` | Attestations returned by the identity service. The gateway requires at least one Travel Rule tag before signing. |
+| `travelRulePacket` | Raw JSON payload recorded for validator desks or travel-rule side channels. |
+| `sanctionsStatus` | Normalized sanctions decision (e.g. `clear`, `blocked`). |
+
+The voucher, signature, provider metadata, and compliance envelope are forwarded to the swap RPC and persisted on both the invoice and voucher records for auditability.
+
 ## Workflow
 
 1. **Validation** – The invoice must be in `APPROVED`. Maker-checker rules ensure the signer differs from both the creator and the approving supervisor. Branch exposure is recalculated to enforce per-branch caps in addition to the regional checks performed during approval.
@@ -24,6 +35,8 @@ The canonical JSON is hashed with keccak256, signed by the HSM, and submitted to
 3. **Submission** – The voucher and signature are sent to `https://api.nhbcoin.net` (configurable via `OTC_SWAP_RPC_BASE`). The RPC response returns a transaction hash and an immediate `minted` flag.
 4. **State transitions** – Invoices move to `SUBMITTED` when the RPC accepts the voucher. If `minted=true`, the invoice immediately transitions to `MINTED`. Otherwise a background poller queries `swap_voucher_get` until the mint finalizes.
 5. **Audit trail** – The service appends `invoice.signed`, `invoice.submitted`, and `invoice.minted` events containing the voucher hash, signer DN, provider transaction ID, and transaction hash.
+
+When the invoice was created by a partner contact, the gateway performs an identity lookup before the signing transaction executes. The DID must be verified, the sanctions status must not be blocked, and at least one Travel Rule attestation must be present. The resolved DID, sanctions decision, compliance tags, and Travel Rule packet are persisted on `models.Invoice` and `models.Voucher` and echoed to the validator desks via the RPC metadata.
 
 ## Idempotency
 

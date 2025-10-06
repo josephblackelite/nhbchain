@@ -98,18 +98,22 @@ type PartnerApproval struct {
 
 // Invoice describes OTC orders across their lifecycle.
 type Invoice struct {
-	ID          uuid.UUID    `gorm:"type:uuid;primaryKey"`
-	BranchID    uuid.UUID    `gorm:"type:uuid;index"`
-	CreatedByID uuid.UUID    `gorm:"type:uuid;index"`
-	Amount      float64      `gorm:"not null"`
-	Currency    string       `gorm:"size:16"`
-	State       InvoiceState `gorm:"size:32;index"`
-	Region      string       `gorm:"index"`
-	Reference   string       `gorm:"size:128"`
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	Receipts    []Receipt
-	Decisions   []Decision
+	ID               uuid.UUID    `gorm:"type:uuid;primaryKey"`
+	BranchID         uuid.UUID    `gorm:"type:uuid;index"`
+	CreatedByID      uuid.UUID    `gorm:"type:uuid;index"`
+	Amount           float64      `gorm:"not null"`
+	Currency         string       `gorm:"size:16"`
+	State            InvoiceState `gorm:"size:32;index"`
+	Region           string       `gorm:"index"`
+	Reference        string       `gorm:"size:128"`
+	PartnerDID       string       `gorm:"size:255"`
+	ComplianceTags   []byte       `gorm:"type:jsonb"`
+	TravelRulePacket []byte       `gorm:"type:jsonb"`
+	SanctionsStatus  string       `gorm:"size:64"`
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	Receipts         []Receipt
+	Decisions        []Decision
 }
 
 // Receipt captures receipt uploads stored in S3.
@@ -133,22 +137,26 @@ type Decision struct {
 
 // Voucher represents chain submissions generated from invoices.
 type Voucher struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
-	InvoiceID    uuid.UUID `gorm:"type:uuid;uniqueIndex"`
-	ChainID      string    `gorm:"index"`
-	Payload      string
-	ProviderTxID string `gorm:"size:128;uniqueIndex"`
-	Hash         string `gorm:"size:130"`
-	Signature    string `gorm:"type:text"`
-	SignerDN     string `gorm:"size:255"`
-	TxHash       string `gorm:"size:130"`
-	VoucherHash  string `gorm:"size:130"`
-	Status       string `gorm:"size:32;index"`
-	ExpiresAt    time.Time
-	SubmittedAt  *time.Time
-	SubmittedBy  *uuid.UUID `gorm:"type:uuid"`
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
+	InvoiceID        uuid.UUID `gorm:"type:uuid;uniqueIndex"`
+	ChainID          string    `gorm:"index"`
+	Payload          string
+	ProviderTxID     string `gorm:"size:128;uniqueIndex"`
+	Hash             string `gorm:"size:130"`
+	Signature        string `gorm:"type:text"`
+	SignerDN         string `gorm:"size:255"`
+	TxHash           string `gorm:"size:130"`
+	VoucherHash      string `gorm:"size:130"`
+	Status           string `gorm:"size:32;index"`
+	ExpiresAt        time.Time
+	SubmittedAt      *time.Time
+	SubmittedBy      *uuid.UUID `gorm:"type:uuid"`
+	PartnerDID       string     `gorm:"size:255"`
+	ComplianceTags   []byte     `gorm:"type:jsonb"`
+	TravelRulePacket []byte     `gorm:"type:jsonb"`
+	SanctionsStatus  string     `gorm:"size:64"`
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // Event is the staff audit trail structure.
