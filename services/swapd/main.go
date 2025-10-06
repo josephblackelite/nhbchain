@@ -18,6 +18,7 @@ import (
 	"nhbchain/services/swapd/config"
 	"nhbchain/services/swapd/oracle"
 	"nhbchain/services/swapd/server"
+	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
 )
 
@@ -99,7 +100,57 @@ func main() {
 		log.Fatalf("swapd: oracle manager: %v", err)
 	}
 
-	srv, err := server.New(server.Config{ListenAddress: cfg.ListenAddress, PolicyID: policy.ID}, store, log.Default())
+	stableRuntime := server.StableRuntime{}
+	if !cfg.Stable.Paused {
+		defaultTTL := cfg.Stable.QuoteTTL.Duration
+		if defaultTTL <= 0 {
+			defaultTTL = time.Minute
+		}
+		defaultSlippage := cfg.Stable.MaxSlippage
+		if defaultSlippage <= 0 {
+			defaultSlippage = 50
+		}
+		defaultInventory := cfg.Stable.SoftInventory
+		if defaultInventory <= 0 {
+			defaultInventory = 1_000_000
+		}
+		assets := make([]stable.Asset, 0, len(cfg.Stable.Assets))
+		for _, asset := range cfg.Stable.Assets {
+			ttl := asset.QuoteTTL.Duration
+			if ttl <= 0 {
+				ttl = defaultTTL
+			}
+			slippage := asset.MaxSlippage
+			if slippage <= 0 {
+				slippage = defaultSlippage
+			}
+			inventory := asset.SoftInventory
+			if inventory <= 0 {
+				inventory = defaultInventory
+			}
+			assets = append(assets, stable.Asset{
+				Symbol:         strings.ToUpper(strings.TrimSpace(asset.Symbol)),
+				BasePair:       strings.TrimSpace(asset.BasePair),
+				QuotePair:      strings.TrimSpace(asset.QuotePair),
+				QuoteTTL:       ttl,
+				MaxSlippageBps: slippage,
+				SoftInventory:  inventory,
+			})
+		}
+		limits := stable.Limits{DailyCap: int64(cfg.Policy.MintLimit)}
+		engine, err := stable.NewEngine(assets, limits)
+		if err != nil {
+			log.Fatalf("swapd: stable engine: %v", err)
+		}
+		stableRuntime = server.StableRuntime{
+			Enabled: true,
+			Engine:  engine,
+			Limits:  limits,
+			Assets:  assets,
+		}
+	}
+
+	srv, err := server.New(server.Config{ListenAddress: cfg.ListenAddress, PolicyID: policy.ID}, store, log.Default(), stableRuntime)
 	if err != nil {
 		log.Fatalf("swapd: server: %v", err)
 	}

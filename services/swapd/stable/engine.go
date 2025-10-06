@@ -62,7 +62,12 @@ type Reservation struct {
 }
 
 // ErrNotSupported is returned when an asset or action is unavailable.
-var ErrNotSupported = errors.New("asset not supported")
+var (
+	ErrNotSupported        = errors.New("asset not supported")
+	ErrQuoteNotFound       = errors.New("quote not found")
+	ErrQuoteExpired        = errors.New("quote expired")
+	ErrReservationNotFound = errors.New("reservation not found")
+)
 
 // NewEngine constructs an Engine from assets and limits.
 func NewEngine(assets []Asset, limits Limits) (*Engine, error) {
@@ -137,16 +142,16 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 	defer e.mu.Unlock()
 	quote, ok := e.quotes[id]
 	if !ok {
-		err := fmt.Errorf("quote not found")
+		err := ErrQuoteNotFound
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		e.metrics.Observe("reserve", e.clock().Sub(start), err)
-		return Reservation{}, fmt.Errorf("quote not found")
+		return Reservation{}, ErrQuoteNotFound
 	}
 	now := e.clock()
 	if !quote.ExpiresAt.IsZero() && now.After(quote.ExpiresAt) {
 		delete(e.quotes, id)
-		err := fmt.Errorf("quote expired")
+		err := ErrQuoteExpired
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		e.metrics.Observe("reserve", e.clock().Sub(start), err)
@@ -168,6 +173,7 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 
 // CashOutIntent is a placeholder for intent creation.
 type CashOutIntent struct {
+	ID            string
 	ReservationID string
 	Amount        float64
 	CreatedAt     time.Time
@@ -183,16 +189,18 @@ func (e *Engine) CreateCashOutIntent(ctx context.Context, reservationID string) 
 	defer e.mu.RUnlock()
 	res, ok := e.reserve[reservationID]
 	if !ok {
-		err := fmt.Errorf("reservation not found")
+		err := ErrReservationNotFound
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		e.metrics.Observe("cashout_intent", e.clock().Sub(start), err)
 		return CashOutIntent{}, err
 	}
+	now := e.clock()
 	intent := CashOutIntent{
+		ID:            fmt.Sprintf("i-%d", now.UnixNano()),
 		ReservationID: reservationID,
 		Amount:        res.AmountOut,
-		CreatedAt:     e.clock(),
+		CreatedAt:     now,
 	}
 	span.SetAttributes(
 		attribute.Float64("amount", intent.Amount),

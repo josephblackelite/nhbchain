@@ -12,6 +12,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
 )
 
@@ -21,6 +22,15 @@ type Config struct {
 	PolicyID      string
 }
 
+// StableRuntime configures the optional stable engine wiring.
+type StableRuntime struct {
+	Enabled bool
+	Engine  *stable.Engine
+	Limits  stable.Limits
+	Assets  []stable.Asset
+	Now     func() time.Time
+}
+
 // Server hosts admin and health endpoints for swapd.
 type Server struct {
 	cfg      Config
@@ -28,10 +38,18 @@ type Server struct {
 	policyMu sync.RWMutex
 	policy   storage.Policy
 	logger   *log.Logger
+
+	stable struct {
+		enabled bool
+		engine  *stable.Engine
+		limits  stable.Limits
+		assets  map[string]stable.Asset
+	}
+	stableNow func() time.Time
 }
 
 // New constructs a new HTTP server.
-func New(cfg Config, store *storage.Storage, logger *log.Logger) (*Server, error) {
+func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime StableRuntime) (*Server, error) {
 	if store == nil {
 		return nil, fmt.Errorf("storage required")
 	}
@@ -42,6 +60,23 @@ func New(cfg Config, store *storage.Storage, logger *log.Logger) (*Server, error
 		cfg.PolicyID = "default"
 	}
 	srv := &Server{cfg: cfg, storage: store, logger: logger}
+	srv.stableNow = stableRuntime.Now
+	if srv.stableNow == nil {
+		srv.stableNow = time.Now
+	}
+	srv.stable.assets = make(map[string]stable.Asset)
+	if stableRuntime.Engine != nil && stableRuntime.Enabled {
+		srv.stable.enabled = true
+		srv.stable.engine = stableRuntime.Engine
+		srv.stable.limits = stableRuntime.Limits
+		for _, asset := range stableRuntime.Assets {
+			symbol := strings.ToUpper(strings.TrimSpace(asset.Symbol))
+			if symbol == "" {
+				continue
+			}
+			srv.stable.assets[symbol] = asset
+		}
+	}
 	if policy, err := store.GetPolicy(context.Background(), cfg.PolicyID); err == nil {
 		srv.setPolicy(policy)
 	}

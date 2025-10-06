@@ -26,6 +26,7 @@ import (
 	"nhbchain/observability"
 	"nhbchain/p2p"
 	"nhbchain/rpc/modules"
+	"nhbchain/services/swapd/stable"
 )
 
 const (
@@ -142,6 +143,14 @@ type Server struct {
 	swapRateMu        sync.Mutex
 	swapNowFn         func() time.Time
 
+	swapStableMu sync.RWMutex
+	swapStable   struct {
+		engine *stable.Engine
+		limits stable.Limits
+		assets map[string]stable.Asset
+		now    func() time.Time
+	}
+
 	serverMu   sync.Mutex
 	httpServer *http.Server
 }
@@ -194,7 +203,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 			swapLimits[trimmedKey] = limit
 		}
 	}
-	return &Server{
+	srv := &Server{
 		node:              node,
 		net:               netClient,
 		txSeen:            make(map[string]time.Time),
@@ -217,6 +226,39 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		swapRateWindow:    swapWindow,
 		swapRateCounters:  make(map[string]*rateLimiter),
 		swapNowFn:         swapNow,
+	}
+	srv.swapStable.assets = make(map[string]stable.Asset)
+	srv.swapStable.now = time.Now
+	return srv
+}
+
+// ConfigureStableEngine wires the experimental stable engine into the RPC surface.
+func (s *Server) ConfigureStableEngine(engine *stable.Engine, limits stable.Limits, assets []stable.Asset, now func() time.Time) {
+	if s == nil {
+		return
+	}
+	s.swapStableMu.Lock()
+	defer s.swapStableMu.Unlock()
+	s.swapStable.engine = engine
+	s.swapStable.limits = limits
+	if s.swapStable.assets == nil {
+		s.swapStable.assets = make(map[string]stable.Asset)
+	} else {
+		for k := range s.swapStable.assets {
+			delete(s.swapStable.assets, k)
+		}
+	}
+	for _, asset := range assets {
+		symbol := strings.ToUpper(strings.TrimSpace(asset.Symbol))
+		if symbol == "" {
+			continue
+		}
+		s.swapStable.assets[symbol] = asset
+	}
+	if now != nil {
+		s.swapStable.now = now
+	} else {
+		s.swapStable.now = time.Now
 	}
 }
 
@@ -354,7 +396,8 @@ func moduleAndMethod(method string) (string, string) {
 
 func isPublicSwapMethod(method string) bool {
 	switch strings.TrimSpace(method) {
-	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export":
+	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export",
+		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus":
 		return true
 	default:
 		return false
@@ -533,6 +576,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleSwapVoucherList(recorder, r, req)
 	case "swap_voucher_export":
 		s.handleSwapVoucherExport(recorder, r, req)
+	case "nhb_requestSwapApproval":
+		s.handleStableRequestSwapApproval(recorder, r, req)
+	case "nhb_swapMint":
+		s.handleStableSwapMint(recorder, r, req)
+	case "nhb_swapBurn":
+		s.handleStableSwapBurn(recorder, r, req)
+	case "nhb_getSwapStatus":
+		s.handleStableGetSwapStatus(recorder, r, req)
 	case "swap_limits":
 		if authErr := s.requireAuth(r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
