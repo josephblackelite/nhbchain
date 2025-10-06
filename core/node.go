@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"nhbchain/config"
+	"nhbchain/consensus"
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/codec"
 	"nhbchain/consensus/potso/evidence"
@@ -31,6 +32,7 @@ import (
 	syncmgr "nhbchain/core/sync"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/mempool"
 	nativecommon "nhbchain/native/common"
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
@@ -65,6 +67,7 @@ type Node struct {
 	proposedTxs                  map[string]struct{}
 	mempoolLimit                 int
 	allowUnlimitedMempool        bool
+	posArrival                   map[string]time.Time
 	txValidationMu               sync.RWMutex
 	txSimulationEnabled          bool
 	bftEngine                    *bft.Engine
@@ -290,6 +293,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		validatorKey:               key,
 		mempool:                    make([]*types.Transaction, 0),
 		proposedTxs:                make(map[string]struct{}),
+		posArrival:                 make(map[string]time.Time),
 		escrowTreasury:             treasury,
 		engagementMgr:              engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapSanctions:              swap.DefaultSanctionsChecker,
@@ -318,7 +322,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				MinWindowSecs: 60,
 				MaxWindowSecs: 60,
 			},
-			Mempool: config.Mempool{MaxBytes: 1},
+			Mempool: config.Mempool{MaxBytes: 1, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 			Blocks:  config.Blocks{MaxTxs: 1},
 		},
 	}
@@ -476,10 +480,15 @@ func (n *Node) SetMempoolLimit(limit int) {
 	if limit > 0 && len(n.mempool) > limit {
 		start := len(n.mempool) - limit
 		removed := n.mempool[:start]
-		if len(removed) > 0 && len(n.proposedTxs) > 0 {
+		if len(removed) > 0 {
 			for _, tx := range removed {
 				if key, err := transactionKey(tx); err == nil {
-					delete(n.proposedTxs, key)
+					if len(n.proposedTxs) > 0 {
+						delete(n.proposedTxs, key)
+					}
+					if n.posArrival != nil {
+						delete(n.posArrival, key)
+					}
 				}
 			}
 		}
@@ -560,7 +569,7 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			MinWindowSecs: n.globalCfg.Slashing.MinWindowSecs,
 			MaxWindowSecs: n.globalCfg.Slashing.MaxWindowSecs,
 		},
-		Mempool: config.Mempool{MaxBytes: n.globalCfg.Mempool.MaxBytes},
+		Mempool: config.Mempool{MaxBytes: n.globalCfg.Mempool.MaxBytes, POSReservationBPS: n.globalCfg.Mempool.POSReservationBPS},
 		Blocks:  config.Blocks{MaxTxs: n.globalCfg.Blocks.MaxTxs},
 		Pauses: config.Pauses{
 			Lending: n.globalCfg.Pauses.Lending,
@@ -1117,6 +1126,19 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
+	if len(tx.IntentRef) > 0 {
+		if key, err := transactionKey(tx); err == nil {
+			if n.posArrival == nil {
+				n.posArrival = make(map[string]time.Time)
+			}
+			if _, exists := n.posArrival[key]; !exists {
+				n.posArrival[key] = n.currentTime()
+				if metrics := observability.Mempool(); metrics != nil {
+					metrics.RecordPOSEnqueued()
+				}
+			}
+		}
+	}
 	n.mempool = append(n.mempool, tx)
 	return nil
 }
@@ -1196,10 +1218,16 @@ func (n *Node) GetMempool() []*types.Transaction {
 		n.proposedTxs = make(map[string]struct{})
 	}
 
+	var (
+		lanes   mempool.Lanes
+		ordered []*types.Transaction
+	)
 	if len(n.mempool) > 0 {
 		now := n.currentTime().Unix()
-		filtered := n.mempool[:0]
-		for _, tx := range n.mempool {
+		original := n.mempool
+		filtered := original[:0]
+		lanes = mempool.Lanes{POS: make([]*types.Transaction, 0, len(original)), Normal: make([]*types.Transaction, 0, len(original))}
+		for _, tx := range original {
 			if tx == nil {
 				continue
 			}
@@ -1208,20 +1236,46 @@ func (n *Node) GetMempool() []*types.Transaction {
 				if err != nil || voucher == nil || voucher.Expiry <= now {
 					if key, keyErr := transactionKey(tx); keyErr == nil {
 						delete(n.proposedTxs, key)
+						if n.posArrival != nil {
+							delete(n.posArrival, key)
+						}
 					}
 					continue
 				}
 			}
 			filtered = append(filtered, tx)
+			if len(tx.IntentRef) > 0 {
+				lanes.POS = append(lanes.POS, tx)
+			} else {
+				lanes.Normal = append(lanes.Normal, tx)
+			}
 		}
-		for i := len(filtered); i < len(n.mempool); i++ {
-			n.mempool[i] = nil
+		for i := len(filtered); i < len(original); i++ {
+			original[i] = nil
 		}
 		n.mempool = filtered
 	}
 
-	txs := make([]*types.Transaction, 0, len(n.mempool))
-	for _, tx := range n.mempool {
+	if len(n.mempool) == 0 {
+		if metrics := observability.Mempool(); metrics != nil {
+			metrics.RecordPOSLaneFill(mempool.Usage{})
+		}
+		return nil
+	}
+
+	snapshot := n.globalConfigSnapshot()
+	maxTxs := snapshot.Blocks.MaxTxs
+	if maxTxs <= 0 || maxTxs > int64(math.MaxInt) {
+		maxTxs = int64(len(n.mempool))
+	}
+	planner := consensus.POSQuota{ReservationBPS: snapshot.Mempool.POSReservationBPS}
+	ordered, usage := mempool.Schedule(lanes, int(maxTxs), planner)
+	if metrics := observability.Mempool(); metrics != nil {
+		metrics.RecordPOSLaneFill(usage)
+	}
+
+	txs := make([]*types.Transaction, 0, len(ordered))
+	for _, tx := range ordered {
 		key, err := transactionKey(tx)
 		if err != nil {
 			continue
@@ -1292,6 +1346,15 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		}
 		committed[key] = struct{}{}
 		delete(n.proposedTxs, key)
+		if len(tx.IntentRef) > 0 && n.posArrival != nil {
+			if enqueuedAt, ok := n.posArrival[key]; ok {
+				latency := n.currentTime().Sub(enqueuedAt)
+				if metrics := observability.Mempool(); metrics != nil {
+					metrics.ObservePOSFinality(latency)
+				}
+				delete(n.posArrival, key)
+			}
+		}
 	}
 	if len(committed) == 0 || len(n.mempool) == 0 {
 		return

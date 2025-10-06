@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+
+	"nhbchain/consensus"
+)
 
 var (
 	MinVotingPeriodSeconds = uint64(3600)
@@ -18,6 +22,9 @@ func ValidateConfig(g Global) error {
 	}
 	if g.Mempool.MaxBytes <= 0 {
 		return fmt.Errorf("mempool: max_bytes <= 0")
+	}
+	if g.Mempool.POSReservationBPS > consensus.BPSDenominator {
+		return fmt.Errorf("mempool: pos_reservation_bps > %d", consensus.BPSDenominator)
 	}
 	if g.Blocks.MaxTxs <= 0 {
 		return fmt.Errorf("blocks: max_txs <= 0")
