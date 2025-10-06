@@ -1,0 +1,35 @@
+toc:
+  - name: Overview
+    path: index.md
+  - name: Point of Sale
+    toc:
+      - name: Specifications
+        toc:
+          - name: NHB Pay intents
+            path: specs/nhb-pay.md
+          - name: NFC NDEF payloads
+            path: specs/nfc-ndef.md
+          - name: Intent field reference
+            path: specs/pos-intent-fields.md
+          - name: Quality of service
+            path: specs/pos-qos.md
+          - name: Lifecycle events
+            path: specs/pos-lifecycle.md
+          - name: Refund flows
+            path: specs/refunds.md
+      - name: APIs
+        toc:
+          - name: POS realtime
+            path: api/pos-realtime.md
+          - name: Gateway POS proxy
+            path: api/gateway-pos.md
+      - name: Operations runbooks
+        toc:
+          - name: Device onboarding
+            path: runbooks/pos-onboarding.md
+          - name: Device attestation
+            path: runbooks/device-attestation.md
+          - name: Paymaster budgets
+            path: runbooks/paymaster-budgets.md
+          - name: SLA monitoring
+            path: runbooks/pos-slas.md
