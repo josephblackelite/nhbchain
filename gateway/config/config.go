@@ -57,7 +57,11 @@ type AuthConfig struct {
 }
 
 type SecurityConfig struct {
-	AutoUpgradeHTTP bool `yaml:"autoUpgradeHTTP"`
+        AutoUpgradeHTTP bool   `yaml:"autoUpgradeHTTP"`
+        AllowInsecure   bool   `yaml:"allowInsecure"`
+        TLSCertFile     string `yaml:"tlsCertFile"`
+        TLSKeyFile      string `yaml:"tlsKeyFile"`
+        TLSClientCAFile string `yaml:"tlsClientCAFile"`
 }
 
 func Load(path string) (Config, error) {

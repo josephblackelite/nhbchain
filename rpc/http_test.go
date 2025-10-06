@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,60 @@ func TestClientSourceIgnoresForwardedForWhenNotTrusted(t *testing.T) {
 
 	if source := server.clientSource(req); source != "10.0.0.5" {
 		t.Fatalf("expected remote address, got %q", source)
+	}
+}
+
+func TestServerServeRejectsPlaintextWithoutAllowInsecure(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := server.Serve(listener); err == nil || !strings.Contains(err.Error(), "TLS is required") {
+		t.Fatalf("expected TLS requirement error, got %v", err)
+	}
+}
+
+func TestServerServeAllowsPlaintextOnLoopbackWhenExplicit(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.serverMu.Lock()
+		ready := server.httpServer != nil
+		server.serverMu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not start listening before timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	if err := <-serveErr; err != nil && err != http.ErrServerClosed && !strings.Contains(err.Error(), "use of closed") {
+		t.Fatalf("serve returned unexpected error: %v", err)
+	}
+}
+
+func TestServerServeRejectsPlaintextOnNonLoopback(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := server.Serve(listener); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected loopback restriction error, got %v", err)
 	}
 }
 

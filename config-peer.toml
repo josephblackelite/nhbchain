@@ -56,3 +56,7 @@ ReadTimeout = 90
 WriteTimeout = 5
 MaxMsgBytes = 1048576
 ClientVersion = "nhbchain/node"
+RPCAllowInsecure = false
+RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
+RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
+RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"

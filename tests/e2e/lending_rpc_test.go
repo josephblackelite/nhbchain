@@ -82,7 +82,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("seed lending state: %v", err)
 	}
 
-	server := rpc.NewServer(node, nil, rpc.ServerConfig{})
+        server := rpc.NewServer(node, nil, rpc.ServerConfig{AllowInsecure: true})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

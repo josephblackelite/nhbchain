@@ -5,8 +5,8 @@ The escrow and OTC gateways accept requests that are authenticated via an HMAC-S
 | Header | Description |
 | --- | --- |
 | `X-Api-Key` | Identifies the client credential used to sign the request. |
-| `X-Timestamp` | Unix timestamp (seconds) at the time of signing. The gateway rejects requests older than ±2 minutes by default (configurable via `ESCROW_GATEWAY_TIMESTAMP_SKEW`). |
-| `X-Nonce` | Unique, client-chosen string used once per timestamp. Nonces are tracked per API key for twice the skew window (configurable via `ESCROW_GATEWAY_NONCE_TTL`). Reusing a nonce causes the request to be rejected. |
+| `X-Timestamp` | Unix timestamp (seconds) at the time of signing. The gateway rejects requests older than ±120 seconds. |
+| `X-Nonce` | Unique, client-chosen string used once per timestamp. Nonces are tracked per API key for 10 minutes, rejecting any replay within that window. |
 | `X-Signature` | Hex-encoded HMAC-SHA256 signature computed with the shared secret. |
 
 The canonical payload used for signing is the newline-delimited concatenation of:
@@ -37,4 +37,4 @@ payload = strings.Join([]string{
 }, "|")
 ```
 
-Requests missing any header, using stale timestamps, reusing a nonce, or providing malformed signatures now fail with `401 Unauthorized` before hitting business logic.
+Requests missing any header, using stale timestamps, reusing a nonce, or providing malformed signatures now fail with `401 Unauthorized` before hitting business logic. Replay caches are bounded per credential to prevent untrusted clients from exhausting memory.

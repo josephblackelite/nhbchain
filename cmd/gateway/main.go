@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,8 +31,10 @@ import (
 func main() {
 	var cfgPath string
 	var compatModeFlag string
+	var allowInsecureFlag bool
 	flag.StringVar(&cfgPath, "config", "", "path to gateway configuration")
 	flag.StringVar(&compatModeFlag, "compat-mode", "", "override JSON-RPC compatibility mode (enabled|disabled|auto)")
+	flag.BoolVar(&allowInsecureFlag, "allow-insecure", false, "DEV ONLY: permit plaintext listeners on loopback interfaces")
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
@@ -64,6 +71,11 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		logger.Fatalf("load config: %v", err)
+	}
+
+	configDir := ""
+	if strings.TrimSpace(cfgPath) != "" {
+		configDir = filepath.Dir(cfgPath)
 	}
 
 	configuredMode := compat.ModeAuto
@@ -220,6 +232,21 @@ func main() {
 		handler = otelhttp.NewHandler(router, "gateway")
 	}
 
+	tlsConfig, err := buildTLSConfig(configDir, cfg.Security)
+	if err != nil {
+		logger.Fatalf("configure TLS: %v", err)
+	}
+
+	allowInsecure := cfg.Security.AllowInsecure || allowInsecureFlag
+	if tlsConfig == nil {
+		if !allowInsecure {
+			logger.Fatal("gateway TLS certificate and key are required; provide security.tlsCertFile/tlsKeyFile or start with --allow-insecure in dev")
+		}
+		if !strings.EqualFold(env, "dev") && !isLoopbackAddress(cfg.ListenAddress) {
+			logger.Fatal("plaintext gateway mode is restricted to loopback listeners or dev environment")
+		}
+	}
+
 	server := &http.Server{
 		Addr:         cfg.ListenAddress,
 		Handler:      handler,
@@ -227,14 +254,31 @@ func main() {
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
 	}
+	if tlsConfig != nil {
+		server.TLSConfig = tlsConfig
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	listener, err := net.Listen("tcp", cfg.ListenAddress)
+	if err != nil {
+		logger.Fatalf("listen: %v", err)
+	}
 	go func() {
-		logger.Printf("listening on %s", cfg.ListenAddress)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("listen and serve: %v", err)
+		scheme := "http"
+		if tlsConfig != nil {
+			scheme = "https"
+		}
+		logger.Printf("listening on %s://%s", scheme, listener.Addr())
+		var serveErr error
+		if tlsConfig != nil {
+			serveErr = server.Serve(tls.NewListener(listener, tlsConfig))
+		} else {
+			serveErr = server.Serve(listener)
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			logger.Fatalf("listen and serve: %v", serveErr)
 		}
 	}()
 
@@ -279,4 +323,64 @@ func servicesMap(services []*compat.Service) map[string]*compat.Service {
 		out[svc.Name] = svc
 	}
 	return out
+}
+
+func buildTLSConfig(baseDir string, sec config.SecurityConfig) (*tls.Config, error) {
+	certPath := resolveTLSPath(baseDir, sec.TLSCertFile)
+	keyPath := resolveTLSPath(baseDir, sec.TLSKeyFile)
+	caPath := resolveTLSPath(baseDir, sec.TLSClientCAFile)
+	if strings.TrimSpace(certPath) == "" && strings.TrimSpace(keyPath) == "" && strings.TrimSpace(caPath) == "" {
+		return nil, nil
+	}
+	if strings.TrimSpace(certPath) == "" || strings.TrimSpace(keyPath) == "" {
+		return nil, fmt.Errorf("security.tlsCertFile and security.tlsKeyFile must both be provided when enabling TLS")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS key pair: %w", err)
+	}
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if strings.TrimSpace(caPath) != "" {
+		data, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read client CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("parse client CA file %s", caPath)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tlsCfg, nil
+}
+
+func resolveTLSPath(baseDir, path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	if baseDir == "" || filepath.IsAbs(trimmed) {
+		return trimmed
+	}
+	return filepath.Join(baseDir, trimmed)
+}
+
+func isLoopbackAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }

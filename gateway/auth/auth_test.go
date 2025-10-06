@@ -41,6 +41,19 @@ func TestNonceStoreCapacityEviction(t *testing.T) {
 	}
 }
 
+func TestNewAuthenticatorClampsSecurityParameters(t *testing.T) {
+	auth := NewAuthenticator(map[string]string{"a": "secret"}, 15*time.Minute, 30*time.Minute, 1_000_000, time.Now)
+	if auth.allowedTimestampSkew != maxAllowedTimestampSkew {
+		t.Fatalf("expected timestamp skew to clamp to %s, got %s", maxAllowedTimestampSkew, auth.allowedTimestampSkew)
+	}
+	if auth.nonceTTL != maxNonceWindow {
+		t.Fatalf("expected nonce TTL to clamp to %s, got %s", maxNonceWindow, auth.nonceTTL)
+	}
+	if auth.nonceCapacity != maxNonceCapacity {
+		t.Fatalf("expected nonce capacity to clamp to %d, got %d", maxNonceCapacity, auth.nonceCapacity)
+	}
+}
+
 func TestNonceStoreExpiresOldEntries(t *testing.T) {
 	store := newNonceStore(30*time.Second, 5)
 	base := time.Unix(1700000000, 0).UTC()
