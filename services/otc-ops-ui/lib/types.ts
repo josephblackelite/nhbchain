@@ -61,3 +61,28 @@ export interface ActionPayload {
   txHash?: string;
   note?: string;
 }
+
+export type PartnerStage = "application" | "kyb_review" | "ready" | "suspended";
+
+export type PartnerStatus = "pending_documents" | "pending_review" | "approved" | "rejected";
+
+export interface PartnerContact {
+  name: string;
+  email: string;
+  role: string;
+  phone?: string;
+}
+
+export interface PartnerReadinessRecord {
+  id: string;
+  name: string;
+  legalName: string;
+  status: PartnerStatus;
+  stage: PartnerStage;
+  kybUpdatedAt: string;
+  approvalUpdatedAt?: string;
+  dossierKey: string;
+  licensingKey: string;
+  contacts: PartnerContact[];
+  notes?: string;
+}

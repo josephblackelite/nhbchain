@@ -109,6 +109,12 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("Decisions").First(&invoice, "id = ?", invoiceID).Error; err != nil {
 			return err
 		}
+		if err := s.ensureInvoicePartnerApproved(tx, invoice.CreatedByID); err != nil {
+			if errors.Is(err, errPartnerPending) {
+				submissionBlocked = true
+			}
+			return err
+		}
 		if invoice.State == models.StateSubmitted || invoice.State == models.StateMinted {
 			if err := tx.First(&existingVoucher, "invoice_id = ?", invoice.ID).Error; err == nil {
 				existing = true
@@ -208,6 +214,9 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 			"voucherHash":  existingVoucher.VoucherHash,
 			"signature":    existingVoucher.Signature,
 		})
+		return
+	case errors.Is(err, errPartnerPending):
+		http.Error(w, "partner pending review - minting disabled", http.StatusForbidden)
 		return
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		http.Error(w, "invoice not found", http.StatusNotFound)

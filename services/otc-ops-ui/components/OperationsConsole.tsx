@@ -6,6 +6,8 @@ import { ActionPayload, Invoice, InvoiceFilters, InvoiceStage } from "../lib/typ
 import { InvoiceFiltersForm } from "./filters";
 import { InvoiceTable } from "./table";
 import { InvoiceViewer } from "./viewer";
+import { PartnerBoard } from "./partnerBoard";
+import { partners as partnerData } from "../data/partners";
 
 const stages: { key: InvoiceStage; label: string }[] = [
   { key: "receipt", label: "Receipt" },
@@ -16,6 +18,8 @@ const stages: { key: InvoiceStage; label: string }[] = [
 ];
 
 export function OperationsConsole() {
+  const partnerReadiness = partnerData;
+
   const [filters, setFilters] = useState<InvoiceFilters>({ stage: "receipt" });
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [selected, setSelected] = useState<Invoice | null>(null);
@@ -127,6 +131,8 @@ export function OperationsConsole() {
           </div>
         </div>
       </header>
+
+      <PartnerBoard partners={partnerReadiness} />
 
       <section className="stage-tabs">
         {stages.map((stage) => (

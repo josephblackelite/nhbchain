@@ -4,31 +4,33 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Config represents runtime configuration for the OTC gateway service.
 type Config struct {
-	Port             string
-	DatabaseURL      string
-	S3Bucket         string
-	ChainID          string
-	SwapRPCBase      string
-	DefaultTZ        *time.Location
-	HSMBaseURL       string
-	HSMCACert        string
-	HSMClientCert    string
-	HSMClientKey     string
-	HSMKeyLabel      string
-	HSMOverrideDN    string
-	SwapProvider     string
-	VoucherTTL       time.Duration
-	MintPollInterval time.Duration
-	ReconOutputDir   string
-	ReconRunHour     int
-	ReconRunMinute   int
-	ReconDryRun      bool
-	ReconWindow      time.Duration
+	Port              string
+	DatabaseURL       string
+	S3Bucket          string
+	ChainID           string
+	SwapRPCBase       string
+	DefaultTZ         *time.Location
+	HSMBaseURL        string
+	HSMCACert         string
+	HSMClientCert     string
+	HSMClientKey      string
+	HSMKeyLabel       string
+	HSMOverrideDN     string
+	SwapProvider      string
+	VoucherTTL        time.Duration
+	MintPollInterval  time.Duration
+	ReconOutputDir    string
+	ReconRunHour      int
+	ReconRunMinute    int
+	ReconDryRun       bool
+	ReconWindow       time.Duration
+	RootAdminSubjects []string
 }
 
 // FromEnv loads configuration from environment variables required by the service.
@@ -101,27 +103,30 @@ func FromEnv() (*Config, error) {
 	windowHours := parseIntEnv("OTC_RECON_WINDOW_HOURS", 24)
 	reconWindow := time.Duration(windowHours) * time.Hour
 
+	rootAdmins := parseCSVEnv("OTC_ROOT_ADMIN_SUBJECTS")
+
 	return &Config{
-		Port:             normalizePort(port),
-		DatabaseURL:      dbURL,
-		S3Bucket:         bucket,
-		ChainID:          chainID,
-		SwapRPCBase:      rpcBase,
-		DefaultTZ:        tz,
-		HSMBaseURL:       hsmBase,
-		HSMCACert:        hsmCACert,
-		HSMClientCert:    hsmClientCert,
-		HSMClientKey:     hsmClientKey,
-		HSMKeyLabel:      hsmKeyLabel,
-		HSMOverrideDN:    os.Getenv("OTC_HSM_SIGNER_DN"),
-		SwapProvider:     swapProvider,
-		VoucherTTL:       time.Duration(ttl) * time.Second,
-		MintPollInterval: time.Duration(poll) * time.Second,
-		ReconOutputDir:   reconDir,
-		ReconRunHour:     reconHour,
-		ReconRunMinute:   reconMinute,
-		ReconDryRun:      reconDryRun,
-		ReconWindow:      reconWindow,
+		Port:              normalizePort(port),
+		DatabaseURL:       dbURL,
+		S3Bucket:          bucket,
+		ChainID:           chainID,
+		SwapRPCBase:       rpcBase,
+		DefaultTZ:         tz,
+		HSMBaseURL:        hsmBase,
+		HSMCACert:         hsmCACert,
+		HSMClientCert:     hsmClientCert,
+		HSMClientKey:      hsmClientKey,
+		HSMKeyLabel:       hsmKeyLabel,
+		HSMOverrideDN:     os.Getenv("OTC_HSM_SIGNER_DN"),
+		SwapProvider:      swapProvider,
+		VoucherTTL:        time.Duration(ttl) * time.Second,
+		MintPollInterval:  time.Duration(poll) * time.Second,
+		ReconOutputDir:    reconDir,
+		ReconRunHour:      reconHour,
+		ReconRunMinute:    reconMinute,
+		ReconDryRun:       reconDryRun,
+		ReconWindow:       reconWindow,
+		RootAdminSubjects: rootAdmins,
 	}, nil
 }
 
@@ -162,4 +167,15 @@ func parseBoolEnv(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+func parseCSVEnv(key string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' '
+	})
+	return fields
 }
