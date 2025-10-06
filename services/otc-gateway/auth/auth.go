@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // Context keys for storing authenticated user information.
@@ -21,19 +22,52 @@ type Role string
 
 // Supported roles for the OTC service.
 const (
-	RoleTeller     Role = "teller"
-	RoleSupervisor Role = "supervisor"
-	RoleCompliance Role = "compliance"
-	RoleSuperAdmin Role = "superadmin"
-	RoleAuditor    Role = "auditor"
+	RoleTeller       Role = "teller"
+	RoleSupervisor   Role = "supervisor"
+	RoleCompliance   Role = "compliance"
+	RoleSuperAdmin   Role = "superadmin"
+	RoleAuditor      Role = "auditor"
+	RolePartner      Role = "partner"
+	RolePartnerAdmin Role = "partneradmin"
+	RoleRootAdmin    Role = "rootadmin"
 )
 
 var allowedRoles = map[Role]struct{}{
-	RoleTeller:     {},
-	RoleSupervisor: {},
-	RoleCompliance: {},
-	RoleSuperAdmin: {},
-	RoleAuditor:    {},
+	RoleTeller:       {},
+	RoleSupervisor:   {},
+	RoleCompliance:   {},
+	RoleSuperAdmin:   {},
+	RoleAuditor:      {},
+	RolePartner:      {},
+	RolePartnerAdmin: {},
+	RoleRootAdmin:    {},
+}
+
+var (
+	rootAdminSubjects = map[string]struct{}{}
+	rootAdminMu       sync.RWMutex
+)
+
+// SetRootAdmins configures the allowlist of identities permitted to assume the root admin role.
+func SetRootAdmins(subjects []string) {
+	rootAdminMu.Lock()
+	defer rootAdminMu.Unlock()
+	rootAdminSubjects = make(map[string]struct{}, len(subjects))
+	for _, subject := range subjects {
+		trimmed := strings.TrimSpace(subject)
+		if trimmed == "" {
+			continue
+		}
+		rootAdminSubjects[trimmed] = struct{}{}
+	}
+}
+
+// IsRootAdmin reports whether the provided subject is in the root admin allowlist.
+func IsRootAdmin(subject string) bool {
+	rootAdminMu.RLock()
+	defer rootAdminMu.RUnlock()
+	_, ok := rootAdminSubjects[strings.TrimSpace(subject)]
+	return ok
 }
 
 // Claims represents identity data extracted from the inbound request.
@@ -89,6 +123,11 @@ func Authenticate(next http.Handler) http.Handler {
 		role := Role(strings.ToLower(tokenParts[1]))
 		if _, ok := allowedRoles[role]; !ok {
 			http.Error(w, fmt.Sprintf("unauthorized role %s", role), http.StatusForbidden)
+			return
+		}
+
+		if role == RoleRootAdmin && !IsRootAdmin(subject) {
+			http.Error(w, "root admin not allowlisted", http.StatusForbidden)
 			return
 		}
 

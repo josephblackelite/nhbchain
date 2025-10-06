@@ -9,11 +9,14 @@ import (
 
 // Role enumerations for persistence.
 const (
-	RoleTeller     = "teller"
-	RoleSupervisor = "supervisor"
-	RoleCompliance = "compliance"
-	RoleSuperAdmin = "superadmin"
-	RoleAuditor    = "auditor"
+	RoleTeller       = "teller"
+	RoleSupervisor   = "supervisor"
+	RoleCompliance   = "compliance"
+	RoleSuperAdmin   = "superadmin"
+	RoleAuditor      = "auditor"
+	RolePartner      = "partner"
+	RolePartnerAdmin = "partneradmin"
+	RoleRootAdmin    = "rootadmin"
 )
 
 // InvoiceState represents a state in the OTC order workflow.
@@ -51,6 +54,46 @@ type User struct {
 	BranchID  uuid.UUID `gorm:"type:uuid;index"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// Partner represents an external counterparty participating in OTC flows.
+type Partner struct {
+	ID               uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Name             string    `gorm:"size:255"`
+	LegalName        string    `gorm:"size:255"`
+	KYBDossierKey    string    `gorm:"size:512"`
+	LicensingDocsKey string    `gorm:"size:512"`
+	Approved         bool      `gorm:"index"`
+	ApprovedAt       *time.Time
+	ApprovedBy       *uuid.UUID `gorm:"type:uuid"`
+	SubmittedBy      uuid.UUID  `gorm:"type:uuid;index"`
+	Contacts         []PartnerContact
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+// PartnerContact captures the operational roster for a partner organisation.
+type PartnerContact struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	PartnerID uuid.UUID `gorm:"type:uuid;index"`
+	Name      string    `gorm:"size:128"`
+	Email     string    `gorm:"size:255"`
+	Role      string    `gorm:"size:64"`
+	Subject   string    `gorm:"size:128;uniqueIndex"`
+	Phone     string    `gorm:"size:64"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Partner   *Partner `gorm:"constraint:OnDelete:CASCADE"`
+}
+
+// PartnerApproval keeps an immutable log of partner approval decisions.
+type PartnerApproval struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	PartnerID uuid.UUID `gorm:"type:uuid;index"`
+	Approved  bool
+	Notes     string    `gorm:"size:1024"`
+	ActorID   uuid.UUID `gorm:"type:uuid;index"`
+	CreatedAt time.Time
 }
 
 // Invoice describes OTC orders across their lifecycle.
@@ -134,6 +177,9 @@ func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&Branch{},
 		&User{},
+		&Partner{},
+		&PartnerContact{},
+		&PartnerApproval{},
 		&Invoice{},
 		&Receipt{},
 		&Decision{},

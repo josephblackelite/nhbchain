@@ -31,15 +31,16 @@ type SwapClient interface {
 
 // Config captures the dependencies required to construct the server.
 type Config struct {
-	DB           *gorm.DB
-	TZ           *time.Location
-	ChainID      uint64
-	S3Bucket     string
-	SwapClient   SwapClient
-	Signer       hsm.Signer
-	VoucherTTL   time.Duration
-	Provider     string
-	PollInterval time.Duration
+	DB                *gorm.DB
+	TZ                *time.Location
+	ChainID           uint64
+	S3Bucket          string
+	SwapClient        SwapClient
+	Signer            hsm.Signer
+	VoucherTTL        time.Duration
+	Provider          string
+	PollInterval      time.Duration
+	RootAdminSubjects []string
 }
 
 // Server encapsulates dependencies for the HTTP API.
@@ -91,6 +92,7 @@ func New(cfg Config) *Server {
 	if srv.Now == nil {
 		srv.Now = func() time.Time { return time.Now().In(srv.TZ) }
 	}
+	auth.SetRootAdmins(cfg.RootAdminSubjects)
 	srv.router = srv.buildRouter()
 	return srv
 }
@@ -110,9 +112,15 @@ func (s *Server) buildRouter() http.Handler {
 	r.Use(auth.Authenticate)
 
 	r.Route("/api/v1", func(api chi.Router) {
+		api.Route("/partners", func(partners chi.Router) {
+			partners.With(auth.RequireRole(auth.RolePartner, auth.RolePartnerAdmin)).Post("/", s.SubmitPartnerApplication)
+			partners.With(auth.RequireRole(auth.RolePartner, auth.RolePartnerAdmin, auth.RoleRootAdmin)).Post("/{id}/dossier", s.UploadPartnerDossier)
+			partners.With(auth.RequireRole(auth.RoleRootAdmin)).Post("/{id}/approve", s.ApprovePartner)
+			partners.With(auth.RequireRole(auth.RoleRootAdmin)).Post("/{id}/reject", s.RejectPartner)
+		})
 		api.Group(func(protected chi.Router) {
-			protected.With(auth.RequireRole(auth.RoleTeller, auth.RoleSupervisor, auth.RoleSuperAdmin)).Post("/invoices", s.CreateInvoice)
-			protected.With(auth.RequireRole(auth.RoleTeller, auth.RoleSupervisor, auth.RoleSuperAdmin)).Post("/invoices/{id}/receipt", s.UploadReceipt)
+			protected.With(auth.RequireRole(auth.RoleTeller, auth.RoleSupervisor, auth.RoleSuperAdmin, auth.RolePartner, auth.RolePartnerAdmin)).Post("/invoices", s.CreateInvoice)
+			protected.With(auth.RequireRole(auth.RoleTeller, auth.RoleSupervisor, auth.RoleSuperAdmin, auth.RolePartner, auth.RolePartnerAdmin)).Post("/invoices/{id}/receipt", s.UploadReceipt)
 			protected.With(auth.RequireRole(auth.RoleSupervisor, auth.RoleCompliance, auth.RoleSuperAdmin)).Post("/invoices/{id}/pending-review", s.MarkPendingReview)
 			protected.With(auth.RequireRole(auth.RoleSupervisor, auth.RoleCompliance, auth.RoleSuperAdmin)).Post("/invoices/{id}/approve", s.ApproveInvoice)
 			protected.With(auth.RequireRole(auth.RoleAuditor, auth.RoleSupervisor, auth.RoleSuperAdmin, auth.RoleCompliance)).Get("/invoices/{id}", s.GetInvoice)
@@ -131,6 +139,9 @@ func (s *Server) CreateInvoice(w http.ResponseWriter, r *http.Request) {
 	claims, err := auth.FromContext(r.Context())
 	if err != nil {
 		http.Error(w, "missing identity", http.StatusUnauthorized)
+		return
+	}
+	if _, handled := s.ensureApprovedPartner(w, claims); handled {
 		return
 	}
 
@@ -203,6 +214,9 @@ func (s *Server) UploadReceipt(w http.ResponseWriter, r *http.Request) {
 	claims, err := auth.FromContext(r.Context())
 	if err != nil {
 		http.Error(w, "missing identity", http.StatusUnauthorized)
+		return
+	}
+	if _, handled := s.ensureApprovedPartner(w, claims); handled {
 		return
 	}
 
@@ -394,9 +408,13 @@ func (s *Server) appendEvent(tx *gorm.DB, invoiceID uuid.UUID, actor string, act
 	if err != nil {
 		return fmt.Errorf("invalid actor id: %w", err)
 	}
+	var invoiceRef *uuid.UUID
+	if invoiceID != uuid.Nil {
+		invoiceRef = &invoiceID
+	}
 	event := models.Event{
 		ID:        uuid.New(),
-		InvoiceID: &invoiceID,
+		InvoiceID: invoiceRef,
 		UserID:    actorID,
 		Action:    action,
 		Details:   details,

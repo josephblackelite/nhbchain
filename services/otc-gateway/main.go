@@ -86,15 +86,16 @@ func main() {
 	swapClient := swaprpc.NewClient(swaprpc.Config{URL: cfg.SwapRPCBase, Provider: cfg.SwapProvider})
 
 	srv := server.New(server.Config{
-		DB:           db,
-		TZ:           cfg.DefaultTZ,
-		ChainID:      chainID,
-		S3Bucket:     cfg.S3Bucket,
-		SwapClient:   swapClient,
-		Signer:       signer,
-		VoucherTTL:   cfg.VoucherTTL,
-		Provider:     cfg.SwapProvider,
-		PollInterval: cfg.MintPollInterval,
+		DB:                db,
+		TZ:                cfg.DefaultTZ,
+		ChainID:           chainID,
+		S3Bucket:          cfg.S3Bucket,
+		SwapClient:        swapClient,
+		Signer:            signer,
+		VoucherTTL:        cfg.VoucherTTL,
+		Provider:          cfg.SwapProvider,
+		PollInterval:      cfg.MintPollInterval,
+		RootAdminSubjects: cfg.RootAdminSubjects,
 	})
 
 	reconciler, err := recon.NewReconciler(recon.Config{
