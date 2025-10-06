@@ -18,7 +18,8 @@ type Slashing struct {
 
 // Mempool controls global transaction admission limits.
 type Mempool struct {
-	MaxBytes int64
+	MaxBytes          int64
+	POSReservationBPS uint32
 }
 
 // Blocks captures block production limits for transaction counts.

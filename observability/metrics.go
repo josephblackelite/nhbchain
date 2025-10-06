@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"nhbchain/mempool"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -16,6 +18,13 @@ type moduleMetrics struct {
 	errors    *prometheus.CounterVec
 	latency   *prometheus.HistogramVec
 	throttles *prometheus.CounterVec
+}
+
+// MempoolMetrics surfaces instrumentation for POS QoS accounting.
+type MempoolMetrics struct {
+	posLaneFill prometheus.Gauge
+	posEnqueued prometheus.Counter
+	posFinality prometheus.Histogram
 }
 
 var (
@@ -33,6 +42,9 @@ var (
 
 	consensusMetricsOnce sync.Once
 	consensusRegistry    *consensusMetrics
+
+	mempoolMetricsOnce sync.Once
+	mempoolRegistry    *MempoolMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -155,6 +167,39 @@ func SwapStable() *SwapStableMetrics {
 	return swapStableReg
 }
 
+// Mempool returns the singleton registry tracking POS QoS health.
+func Mempool() *MempoolMetrics {
+	mempoolMetricsOnce.Do(func() {
+		mempoolRegistry = &MempoolMetrics{
+			posLaneFill: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "pos_lane_fill",
+				Help:      "Fill ratio for the POS-reserved transaction lane.",
+			}),
+			posEnqueued: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "pos_tx_enqueued_total",
+				Help:      "Count of POS-tagged transactions admitted to the mempool.",
+			}),
+			posFinality: prometheus.NewHistogram(prometheus.HistogramOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "pos_p95_finality_ms",
+				Help:      "Latency for POS-tagged transactions from enqueue to finality in milliseconds.",
+				Buckets:   []float64{50, 100, 200, 400, 800, 1_600, 3_200, 6_400, 12_800},
+			}),
+		}
+		prometheus.MustRegister(
+			mempoolRegistry.posLaneFill,
+			mempoolRegistry.posEnqueued,
+			mempoolRegistry.posFinality,
+		)
+	})
+	return mempoolRegistry
+}
+
 // Observe records the execution metrics for a stable swap operation.
 func (m *SwapStableMetrics) Observe(operation string, duration time.Duration, err error) {
 	if m == nil {
@@ -175,6 +220,47 @@ func (m *SwapStableMetrics) Observe(operation string, duration time.Duration, er
 	}
 	m.requests.WithLabelValues(op, outcome).Inc()
 	m.latency.WithLabelValues(op).Observe(duration.Seconds())
+}
+
+// RecordPOSLaneFill updates the gauge describing how saturated the POS lane is
+// relative to its reserved capacity. When the reservation is disabled, the
+// gauge reports the absolute POS backlog size.
+func (m *MempoolMetrics) RecordPOSLaneFill(usage mempool.Usage) {
+	if m == nil {
+		return
+	}
+	if usage.Target <= 0 {
+		if usage.TotalPOS == 0 {
+			m.posLaneFill.Set(0)
+		} else {
+			m.posLaneFill.Set(float64(usage.TotalPOS))
+		}
+		return
+	}
+	ratio := float64(usage.TotalPOS) / float64(usage.Target)
+	m.posLaneFill.Set(ratio)
+}
+
+// RecordPOSEnqueued increments the counter tracking how many POS transactions
+// have been accepted.
+func (m *MempoolMetrics) RecordPOSEnqueued() {
+	if m == nil {
+		return
+	}
+	m.posEnqueued.Inc()
+}
+
+// ObservePOSFinality records the enqueue-to-commit latency in milliseconds for
+// a POS-tagged transaction.
+func (m *MempoolMetrics) ObservePOSFinality(latency time.Duration) {
+	if m == nil {
+		return
+	}
+	if latency <= 0 {
+		m.posFinality.Observe(0)
+		return
+	}
+	m.posFinality.Observe(float64(latency.Milliseconds()))
 }
 
 // PayoutdMetrics wraps collectors tracking payout engine health.

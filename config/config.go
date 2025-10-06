@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"nhbchain/consensus"
 	"nhbchain/core/genesis"
 	"nhbchain/crypto"
 	"nhbchain/native/governance"
@@ -132,7 +133,7 @@ func defaultGlobalConfig() Global {
 			MinWindowSecs: 60,
 			MaxWindowSecs: 600,
 		},
-		Mempool: Mempool{MaxBytes: 16 << 20},
+		Mempool: Mempool{MaxBytes: 16 << 20, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 		Blocks:  Blocks{MaxTxs: 5000},
 		Pauses:  Pauses{},
 		Paymaster: Paymaster{
@@ -506,6 +507,9 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 
 	if !meta.IsDefined("global", "mempool", "MaxBytes") {
 		cfg.Global.Mempool.MaxBytes = defaults.Mempool.MaxBytes
+	}
+	if !meta.IsDefined("global", "mempool", "POSReservationBPS") {
+		cfg.Global.Mempool.POSReservationBPS = defaults.Mempool.POSReservationBPS
 	}
 	if !meta.IsDefined("global", "blocks", "MaxTxs") {
 		cfg.Global.Blocks.MaxTxs = defaults.Blocks.MaxTxs
