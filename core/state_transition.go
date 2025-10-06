@@ -92,6 +92,7 @@ type StateProcessor struct {
 	potsoRewardConfig  potso.RewardConfig
 	potsoWeightConfig  potso.WeightParams
 	paymasterEnabled   bool
+	paymasterLimits    PaymasterLimits
 	quotaConfig        map[string]nativecommon.Quota
 	quotaStore         *systemquotas.Store
 	intentTTL          time.Duration
@@ -122,6 +123,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		potsoRewardConfig:  potso.DefaultRewardConfig(),
 		potsoWeightConfig:  potso.DefaultWeightParams(),
 		paymasterEnabled:   true,
+		paymasterLimits:    PaymasterLimits{},
 		quotaConfig:        make(map[string]nativecommon.Quota),
 		intentTTL:          defaultIntentTTL,
 	}
@@ -847,6 +849,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		potsoRewardConfig:  clonePotsoRewardConfig(sp.potsoRewardConfig),
 		potsoWeightConfig:  clonePotsoWeightConfig(sp.potsoWeightConfig),
 		paymasterEnabled:   sp.paymasterEnabled,
+		paymasterLimits:    sp.paymasterLimits.Clone(),
 		quotaConfig:        quotaCopy,
 		intentTTL:          sp.intentTTL,
 	}, nil
@@ -972,6 +975,9 @@ type sponsorshipRuntime struct {
 	budget   *big.Int
 	gasPrice *big.Int
 	txHash   [32]byte
+	merchant string
+	device   string
+	day      string
 }
 
 func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, *types.Account, error) {
@@ -1054,6 +1060,9 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 				sender:   fromAddr,
 				budget:   big.NewInt(0),
 				gasPrice: big.NewInt(0),
+				merchant: assessment.merchant,
+				device:   assessment.deviceID,
+				day:      assessment.day,
 			}
 			if len(txHashBytes) > 0 {
 				ctx.txHash = bytesToHash32(txHashBytes)
@@ -1089,6 +1098,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 
 	gasPriceUsed := tx.GasPrice
+	var paymasterCharged *big.Int
 	if sponsorshipCtx != nil {
 		usedCost := new(big.Int).Mul(new(big.Int).SetUint64(result.UsedGas), sponsorshipCtx.gasPrice)
 		budget := new(big.Int).Set(sponsorshipCtx.budget)
@@ -1105,6 +1115,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		if charged.Sign() < 0 {
 			charged = big.NewInt(0)
 		}
+		paymasterCharged = new(big.Int).Set(charged)
 		sp.emitSponsorshipSuccessEvent(sponsorshipCtx, result.UsedGas, charged, refund)
 		if sponsorshipCtx.gasPrice != nil && sponsorshipCtx.gasPrice.Sign() > 0 {
 			gasPriceUsed = sponsorshipCtx.gasPrice
@@ -1122,6 +1133,12 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 	if err := sp.Trie.Reset(newRoot); err != nil {
 		return nil, fmt.Errorf("trie reset: %w", err)
+	}
+
+	if sponsorshipCtx != nil {
+		if err := sp.recordPaymasterUsage(sponsorshipCtx, paymasterCharged); err != nil {
+			return nil, err
+		}
 	}
 
 	fromAcc, err := sp.getAccount(from)
@@ -2471,6 +2488,9 @@ func (sp *StateProcessor) emitSponsorshipFailureEvent(sender common.Address, ass
 		Reason:  assessment.Reason,
 	}
 	sp.AppendEvent(evt.Event())
+	if assessment.Throttle != nil {
+		sp.emitPaymasterThrottledEvent(txHash, assessment.Throttle)
+	}
 }
 
 func (sp *StateProcessor) emitSponsorshipSuccessEvent(ctx *sponsorshipRuntime, gasUsed uint64, charged, refund *big.Int) {
@@ -2499,6 +2519,99 @@ func (sp *StateProcessor) emitSponsorshipSuccessEvent(ctx *sponsorshipRuntime, g
 		Refund:   refundCopy,
 	}
 	sp.AppendEvent(evt.Event())
+}
+
+func (sp *StateProcessor) emitPaymasterThrottledEvent(txHash [32]byte, throttle *PaymasterThrottle) {
+	if sp == nil || throttle == nil {
+		return
+	}
+	evt := events.PaymasterThrottled{
+		TxHash:       txHash,
+		Scope:        string(throttle.Scope),
+		Merchant:     strings.TrimSpace(throttle.Merchant),
+		DeviceID:     strings.TrimSpace(throttle.DeviceID),
+		Day:          strings.TrimSpace(throttle.Day),
+		TxCount:      throttle.TxCount,
+		LimitTxCount: throttle.LimitTxCount,
+	}
+	if throttle.LimitWei != nil {
+		evt.LimitWei = new(big.Int).Set(throttle.LimitWei)
+	}
+	if throttle.UsedBudgetWei != nil {
+		evt.UsedBudgetWei = new(big.Int).Set(throttle.UsedBudgetWei)
+	}
+	if throttle.AttemptBudgetWei != nil {
+		evt.AttemptWei = new(big.Int).Set(throttle.AttemptBudgetWei)
+	}
+	sp.AppendEvent(evt.Event())
+}
+
+func (sp *StateProcessor) recordPaymasterUsage(ctx *sponsorshipRuntime, charged *big.Int) error {
+	if sp == nil || ctx == nil {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	day := nhbstate.NormalizePaymasterDay(ctx.day)
+	if day == "" {
+		day = sp.currentPaymasterDay()
+	}
+	budget := big.NewInt(0)
+	if ctx.budget != nil {
+		budget = new(big.Int).Set(ctx.budget)
+	}
+	chargedTotal := big.NewInt(0)
+	if charged != nil {
+		chargedTotal = new(big.Int).Set(charged)
+	}
+
+	global, _, err := manager.PaymasterGetGlobalDay(day)
+	if err != nil {
+		return err
+	}
+	if global == nil {
+		global = &nhbstate.PaymasterGlobalDay{Day: day, BudgetWei: big.NewInt(0), ChargedWei: big.NewInt(0)}
+	}
+	global.TxCount++
+	global.BudgetWei = new(big.Int).Add(global.BudgetWei, budget)
+	global.ChargedWei = new(big.Int).Add(global.ChargedWei, chargedTotal)
+	if err := manager.PaymasterPutGlobalDay(global); err != nil {
+		return err
+	}
+
+	merchant := nhbstate.NormalizePaymasterMerchant(ctx.merchant)
+	if merchant != "" {
+		merchantRecord, _, err := manager.PaymasterGetMerchantDay(merchant, day)
+		if err != nil {
+			return err
+		}
+		if merchantRecord == nil {
+			merchantRecord = &nhbstate.PaymasterMerchantDay{Merchant: merchant, Day: day, BudgetWei: big.NewInt(0), ChargedWei: big.NewInt(0)}
+		}
+		merchantRecord.TxCount++
+		merchantRecord.BudgetWei = new(big.Int).Add(merchantRecord.BudgetWei, budget)
+		merchantRecord.ChargedWei = new(big.Int).Add(merchantRecord.ChargedWei, chargedTotal)
+		if err := manager.PaymasterPutMerchantDay(merchantRecord); err != nil {
+			return err
+		}
+	}
+
+	device := nhbstate.NormalizePaymasterDevice(ctx.device)
+	if merchant != "" && device != "" {
+		deviceRecord, _, err := manager.PaymasterGetDeviceDay(merchant, device, day)
+		if err != nil {
+			return err
+		}
+		if deviceRecord == nil {
+			deviceRecord = &nhbstate.PaymasterDeviceDay{Merchant: merchant, DeviceID: device, Day: day, BudgetWei: big.NewInt(0), ChargedWei: big.NewInt(0)}
+		}
+		deviceRecord.TxCount++
+		deviceRecord.BudgetWei = new(big.Int).Add(deviceRecord.BudgetWei, budget)
+		deviceRecord.ChargedWei = new(big.Int).Add(deviceRecord.ChargedWei, chargedTotal)
+		if err := manager.PaymasterPutDeviceDay(deviceRecord); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (sp *StateProcessor) recordEngagementActivity(addr []byte, now time.Time, txDelta, escrowDelta, govDelta uint64) error {

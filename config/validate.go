@@ -22,6 +22,9 @@ func ValidateConfig(g Global) error {
 	if g.Blocks.MaxTxs <= 0 {
 		return fmt.Errorf("blocks: max_txs <= 0")
 	}
+	if _, err := g.PaymasterLimits(); err != nil {
+		return fmt.Errorf("paymaster: %w", err)
+	}
 	return nil
 }
 

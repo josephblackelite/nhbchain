@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"strings"
 
@@ -14,6 +15,8 @@ const (
 	TypeTxSponsorshipApplied = "tx.sponsorship.applied"
 	// TypeTxSponsorshipFailed indicates the sponsorship request was rejected and gas fell back to the sender.
 	TypeTxSponsorshipFailed = "tx.sponsorship.failed"
+	// TypePaymasterThrottled indicates a sponsorship request was throttled due to configured caps.
+	TypePaymasterThrottled = "paymaster.throttled"
 )
 
 // TxSponsorshipApplied captures a successful paymaster sponsorship outcome.
@@ -82,4 +85,56 @@ func (e TxSponsorshipFailed) Event() *types.Event {
 		attrs["sponsor"] = crypto.MustNewAddress(crypto.NHBPrefix, e.Sponsor[:]).String()
 	}
 	return &types.Event{Type: TypeTxSponsorshipFailed, Attributes: attrs}
+}
+
+// PaymasterThrottled captures the throttle context for a rejected sponsorship attempt.
+type PaymasterThrottled struct {
+	TxHash        [32]byte
+	Scope         string
+	Merchant      string
+	DeviceID      string
+	Day           string
+	LimitWei      *big.Int
+	UsedBudgetWei *big.Int
+	AttemptWei    *big.Int
+	TxCount       uint64
+	LimitTxCount  uint64
+}
+
+// EventType satisfies the events.Event interface.
+func (PaymasterThrottled) EventType() string { return TypePaymasterThrottled }
+
+// Event renders the throttled payload.
+func (e PaymasterThrottled) Event() *types.Event {
+	attrs := map[string]string{
+		"scope": strings.TrimSpace(e.Scope),
+	}
+	if e.TxHash != ([32]byte{}) {
+		attrs["txHash"] = "0x" + hex.EncodeToString(e.TxHash[:])
+	}
+	if strings.TrimSpace(e.Merchant) != "" {
+		attrs["merchant"] = strings.TrimSpace(e.Merchant)
+	}
+	if strings.TrimSpace(e.DeviceID) != "" {
+		attrs["deviceId"] = strings.TrimSpace(e.DeviceID)
+	}
+	if strings.TrimSpace(e.Day) != "" {
+		attrs["day"] = strings.TrimSpace(e.Day)
+	}
+	if e.LimitWei != nil {
+		attrs["limitWei"] = new(big.Int).Set(e.LimitWei).String()
+	}
+	if e.UsedBudgetWei != nil {
+		attrs["usedBudgetWei"] = new(big.Int).Set(e.UsedBudgetWei).String()
+	}
+	if e.AttemptWei != nil {
+		attrs["attemptBudgetWei"] = new(big.Int).Set(e.AttemptWei).String()
+	}
+	if e.TxCount > 0 {
+		attrs["txCount"] = fmt.Sprintf("%d", e.TxCount)
+	}
+	if e.LimitTxCount > 0 {
+		attrs["limitTxCount"] = fmt.Sprintf("%d", e.LimitTxCount)
+	}
+	return &types.Event{Type: TypePaymasterThrottled, Attributes: attrs}
 }

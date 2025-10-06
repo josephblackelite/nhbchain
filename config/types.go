@@ -26,6 +26,13 @@ type Blocks struct {
 	MaxTxs int64
 }
 
+// Paymaster captures sponsorship throttling configuration knobs.
+type Paymaster struct {
+	MerchantDailyCapWei string
+	DeviceDailyTxCap    uint64
+	GlobalDailyCapWei   string
+}
+
 // Consensus controls the BFT round timeouts.
 type Consensus struct {
 	ProposalTimeout  time.Duration `toml:"ProposalTimeout"`
@@ -68,4 +75,5 @@ type Global struct {
 	Blocks     Blocks
 	Pauses     Pauses
 	Quotas     Quotas
+	Paymaster  Paymaster
 }
