@@ -38,6 +38,10 @@ ReadTimeout = 90
 WriteTimeout = 5
 MaxMsgBytes = 1048576
 ClientVersion = "nhbchain/node"
+RPCAllowInsecure = true
+RPCTLSCertFile = ""
+RPCTLSKeyFile = ""
+RPCTLSClientCAFile = ""
 
 [network_security]
 # Configure a shared secret for local development so consensusd only accepts

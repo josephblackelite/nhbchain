@@ -26,6 +26,13 @@ const (
 	HeaderSignature = "X-Signature"
 	// MaxBodyForSignature is the maximum body size we will hash when authenticating.
 	MaxBodyForSignature int = 1 << 20 // 1 MiB
+
+	maxAllowedTimestampSkew = 2 * time.Minute
+	defaultTimestampSkew    = maxAllowedTimestampSkew
+	maxNonceWindow          = 10 * time.Minute
+	defaultNonceWindow      = maxNonceWindow
+	defaultNonceCapacity    = 4096
+	maxNonceCapacity        = 65536
 )
 
 // Principal represents an authenticated API client.
@@ -59,18 +66,22 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 		nowFn = time.Now
 	}
 	if skew <= 0 {
-		skew = 2 * time.Minute
+		skew = defaultTimestampSkew
+	}
+	if skew > maxAllowedTimestampSkew {
+		skew = maxAllowedTimestampSkew
 	}
 	if nonceTTL <= 0 {
-		// Default to twice the skew window, falling back to two minutes if skew is unset.
-		if skew > 0 {
-			nonceTTL = 2 * skew
-		} else {
-			nonceTTL = 2 * time.Minute
-		}
+		nonceTTL = defaultNonceWindow
+	}
+	if nonceTTL > maxNonceWindow {
+		nonceTTL = maxNonceWindow
 	}
 	if nonceCapacity <= 0 {
-		nonceCapacity = 1024
+		nonceCapacity = defaultNonceCapacity
+	}
+	if nonceCapacity > maxNonceCapacity {
+		nonceCapacity = maxNonceCapacity
 	}
 	return &Authenticator{
 		secrets:              cloned,
@@ -237,10 +248,16 @@ type nonceEntry struct {
 
 func newNonceStore(ttl time.Duration, capacity int) *nonceStore {
 	if ttl <= 0 {
-		ttl = 2 * time.Minute
+		ttl = defaultNonceWindow
 	}
-	if capacity < 0 {
-		capacity = 0
+	if ttl > maxNonceWindow {
+		ttl = maxNonceWindow
+	}
+	if capacity <= 0 {
+		capacity = defaultNonceCapacity
+	}
+	if capacity > maxNonceCapacity {
+		capacity = maxNonceCapacity
 	}
 	return &nonceStore{
 		ttl:      ttl,

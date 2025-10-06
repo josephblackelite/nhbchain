@@ -51,6 +51,9 @@ func NewAuthenticator(cfg AuthConfig, logger *log.Logger) *Authenticator {
 		if auth.cfg.ClockSkew <= 0 {
 			auth.cfg.ClockSkew = 2 * time.Minute
 		}
+		if auth.cfg.ClockSkew > 2*time.Minute {
+			auth.cfg.ClockSkew = 2 * time.Minute
+		}
 	})
 	return auth
 }

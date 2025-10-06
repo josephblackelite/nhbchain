@@ -1,4 +1,8 @@
 listen: ":8080"
+security:
+  allowInsecure: false
+  tlsCertFile: "/etc/nhb/gateway/tls.crt"
+  tlsKeyFile: "/etc/nhb/gateway/tls.key"
 rateLimits:
   - id: lending
     ratePerSecond: 2

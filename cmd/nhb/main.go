@@ -326,6 +326,8 @@ func main() {
 		IdleTimeout:       time.Duration(cfg.RPCIdleTimeout) * time.Second,
 		TLSCertFile:       cfg.RPCTLSCertFile,
 		TLSKeyFile:        cfg.RPCTLSKeyFile,
+		TLSClientCAFile:   cfg.RPCTLSClientCAFile,
+		AllowInsecure:     cfg.RPCAllowInsecure,
 	})
 	go rpcServer.Start(cfg.RPCAddress)
 	go p2pServer.Start()

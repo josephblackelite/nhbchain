@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,13 @@ const (
 	rateLimiterSweepBackoff = rateLimitWindow
 	maxForwardedForAddrs    = 5
 	maxTrustedProxyEntries  = 32
+
+	swapMaxTimestampSkew  = 2 * time.Minute
+	swapDefaultTimestamp  = swapMaxTimestampSkew
+	swapMaxNonceTTL       = 10 * time.Minute
+	swapDefaultNonceTTL   = swapMaxNonceTTL
+	swapDefaultNonceCache = 4096
+	swapMaxNonceCache     = 65536
 )
 
 const (
@@ -105,6 +113,12 @@ type ServerConfig struct {
 	TLSCertFile string
 	// TLSKeyFile is the path to the PEM-encoded private key for TLSCertFile.
 	TLSKeyFile string
+	// TLSClientCAFile enables mutual TLS by providing the path to a PEM-encoded
+	// certificate authority bundle used to verify client certificates.
+	TLSClientCAFile string
+	// AllowInsecure permits plaintext HTTP when running on loopback interfaces.
+	// This should only be enabled for local development.
+	AllowInsecure bool
 	// SwapAuth configures API authentication and rate limiting for swap RPC methods.
 	SwapAuth SwapAuthConfig
 }
@@ -140,6 +154,8 @@ type Server struct {
 	idleTimeout       time.Duration
 	tlsCertFile       string
 	tlsKeyFile        string
+	clientCAFile      string
+	allowInsecure     bool
 
 	swapAuth          *gatewayauth.Authenticator
 	swapPartnerLimits map[string]int
@@ -198,7 +214,28 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 			secrets[trimmedKey] = trimmedSecret
 		}
 		if len(secrets) > 0 {
-			swapAuth = gatewayauth.NewAuthenticator(secrets, cfg.SwapAuth.AllowedTimestampSkew, cfg.SwapAuth.NonceTTL, cfg.SwapAuth.NonceCapacity, swapNow)
+			allowedSkew := cfg.SwapAuth.AllowedTimestampSkew
+			if allowedSkew <= 0 {
+				allowedSkew = swapDefaultTimestamp
+			}
+			if allowedSkew > swapMaxTimestampSkew {
+				allowedSkew = swapMaxTimestampSkew
+			}
+			nonceTTL := cfg.SwapAuth.NonceTTL
+			if nonceTTL <= 0 {
+				nonceTTL = swapDefaultNonceTTL
+			}
+			if nonceTTL > swapMaxNonceTTL {
+				nonceTTL = swapMaxNonceTTL
+			}
+			nonceCapacity := cfg.SwapAuth.NonceCapacity
+			if nonceCapacity <= 0 {
+				nonceCapacity = swapDefaultNonceCache
+			}
+			if nonceCapacity > swapMaxNonceCache {
+				nonceCapacity = swapMaxNonceCache
+			}
+			swapAuth = gatewayauth.NewAuthenticator(secrets, allowedSkew, nonceTTL, nonceCapacity, swapNow)
 		}
 	}
 	if len(cfg.SwapAuth.PartnerRateLimits) > 0 {
@@ -228,6 +265,8 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		idleTimeout:       cfg.IdleTimeout,
 		tlsCertFile:       strings.TrimSpace(cfg.TLSCertFile),
 		tlsKeyFile:        strings.TrimSpace(cfg.TLSKeyFile),
+		clientCAFile:      strings.TrimSpace(cfg.TLSClientCAFile),
+		allowInsecure:     cfg.AllowInsecure,
 		swapAuth:          swapAuth,
 		swapPartnerLimits: swapLimits,
 		swapRateWindow:    swapWindow,
@@ -303,24 +342,26 @@ func (s *Server) Serve(listener net.Listener) error {
 		IdleTimeout:       s.idleTimeout,
 	}
 
-	var tlsConfig *tls.Config
-	if s.tlsCertFile != "" || s.tlsKeyFile != "" {
-		if s.tlsCertFile == "" || s.tlsKeyFile == "" {
-			_ = listener.Close()
-			return fmt.Errorf("both TLS certificate and key paths must be provided")
-		}
-		cert, err := tls.LoadX509KeyPair(s.tlsCertFile, s.tlsKeyFile)
-		if err != nil {
-			_ = listener.Close()
-			return fmt.Errorf("load TLS key pair: %w", err)
-		}
-		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	tlsConfig, err := s.buildTLSConfig()
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	if tlsConfig != nil {
 		srv.TLSConfig = tlsConfig
 		if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
 			_ = listener.Close()
 			return fmt.Errorf("configure http2: %w", err)
 		}
 	} else {
+		if !s.allowInsecure {
+			_ = listener.Close()
+			return errors.New("TLS is required for RPC server; configure certificates or enable AllowInsecure")
+		}
+		if !isLoopback(listener.Addr()) {
+			_ = listener.Close()
+			return errors.New("plaintext RPC is only permitted on loopback interfaces")
+		}
 		srv.Handler = h2c.NewHandler(baseHandler, &http2.Server{})
 	}
 
@@ -377,6 +418,50 @@ func grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
 		}
 		other.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) buildTLSConfig() (*tls.Config, error) {
+	certPath := strings.TrimSpace(s.tlsCertFile)
+	keyPath := strings.TrimSpace(s.tlsKeyFile)
+	if certPath == "" && keyPath == "" {
+		return nil, nil
+	}
+	if certPath == "" || keyPath == "" {
+		return nil, fmt.Errorf("both TLS certificate and key paths must be provided")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS key pair: %w", err)
+	}
+	config := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if s.clientCAFile != "" {
+		caPEM, err := os.ReadFile(s.clientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS client CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("failed to parse TLS client CA file")
+		}
+		config.ClientCAs = pool
+		config.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return config, nil
+}
+
+func isLoopback(addr net.Addr) bool {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	ip := tcpAddr.IP
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
 type RPCRequest struct {
