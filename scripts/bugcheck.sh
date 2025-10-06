@@ -114,19 +114,22 @@ run_check "fuzz-critical" "60s fuzzing on critical state transition tests" "crit
 # 3. Determinism and BFT safety on 3-node localnet
 run_check "determinism" "Determinism and BFT safety audit" "critical" make bugcheck-determinism || true
 
-# 4. Gateway end-to-end flows
+# 4. Chaos fault-injection resilience
+run_check "chaos" "Chaos fault-injection audit" "critical" make bugcheck-chaos || true
+
+# 5. Gateway end-to-end flows
 run_check "gateway-e2e" "Gateway swap, lending, governance, escrow flows" "critical" make bugcheck-gateway || true
 
-# 5. Network hardening checks
+# 6. Network hardening checks
 run_check "network-hardening" "Rate limits, TLS, mTLS, and auth smoke" "critical" make bugcheck-network || true
 
-# 6. Performance benchmarks and SLA validation
+# 7. Performance benchmarks and SLA validation
 run_check "performance" "Benchmark finality and proposer commit latency" "critical" make bugcheck-perf || true
 
-# 7. Protobuf compatibility
+# 8. Protobuf compatibility
 run_check "protobuf" "buf lint and breaking checks" "critical" make bugcheck-proto || true
 
-# 8. Documentation and examples validation
+# 9. Documentation and examples validation
 run_check "docs" "Docs/examples validation" "critical" make bugcheck-docs || true
 
 # Emit JSON summary
