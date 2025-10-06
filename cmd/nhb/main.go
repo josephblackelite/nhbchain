@@ -96,6 +96,16 @@ func main() {
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
+	paymasterLimits, err := cfg.Global.PaymasterLimits()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse paymaster limits: %v", err))
+	}
+	node.SetPaymasterLimits(core.PaymasterLimits{
+		MerchantDailyCapWei: paymasterLimits.MerchantDailyCapWei,
+		DeviceDailyTxCap:    paymasterLimits.DeviceDailyTxCap,
+		GlobalDailyCapWei:   paymasterLimits.GlobalDailyCapWei,
+	})
+
 	govPolicy, err := cfg.Governance.Policy()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to parse governance policy: %v", err))

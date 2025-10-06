@@ -135,6 +135,10 @@ func defaultGlobalConfig() Global {
 		Mempool: Mempool{MaxBytes: 16 << 20},
 		Blocks:  Blocks{MaxTxs: 5000},
 		Pauses:  Pauses{},
+		Paymaster: Paymaster{
+			MerchantDailyCapWei: "0",
+			GlobalDailyCapWei:   "0",
+		},
 	}
 }
 
@@ -505,6 +509,16 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "blocks", "MaxTxs") {
 		cfg.Global.Blocks.MaxTxs = defaults.Blocks.MaxTxs
+	}
+
+	if strings.TrimSpace(cfg.Global.Paymaster.MerchantDailyCapWei) == "" {
+		cfg.Global.Paymaster.MerchantDailyCapWei = defaults.Paymaster.MerchantDailyCapWei
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.GlobalDailyCapWei) == "" {
+		cfg.Global.Paymaster.GlobalDailyCapWei = defaults.Paymaster.GlobalDailyCapWei
+	}
+	if !meta.IsDefined("global", "paymaster", "DeviceDailyTxCap") {
+		cfg.Global.Paymaster.DeviceDailyTxCap = defaults.Paymaster.DeviceDailyTxCap
 	}
 }
 
