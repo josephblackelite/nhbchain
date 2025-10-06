@@ -6,6 +6,8 @@ pages should appear in the rendered sidebar. Group related content under the
 Point of Sale sections so that operators can discover the specifications,
 reference APIs, and runbooks in a single place.
 
+For fee policy specifics, see the new [fee policy](./fees/policy.md) and [fee routing](./fees/routing.md) guides.
+
 ## Verification workflow
 
 Two automated checks keep the docs healthy:

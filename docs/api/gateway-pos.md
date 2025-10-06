@@ -6,6 +6,9 @@ status. The gateway accepts the canonical NHB Pay URI payload described in
 [the POS intent spec](../specs/nhb-pay.md) and proxies submissions to the node's
 gRPC transaction service.
 
+For MDR, free-tier, and routing expectations that apply to these endpoints, see
+[fee policy](../fees/policy.md) and [fee routing](../fees/routing.md).
+
 All endpoints live under the `/api/pos` prefix and require TLS in production.
 Unless stated otherwise the gateway returns JSON responses and the standard
 `Content-Type: application/json` header.
