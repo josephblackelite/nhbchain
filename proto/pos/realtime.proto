@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package pos.v1;
+
+option go_package = "nhbchain/proto/pos;posv1";
+
+message FinalityUpdate {
+  string cursor = 1;
+  bytes intent_ref = 2;
+  bytes tx_hash = 3;
+  FinalityStatus status = 4;
+  bytes block_hash = 5;
+  uint64 height = 6;
+  int64 timestamp = 7;
+}
+
+enum FinalityStatus {
+  FINALITY_STATUS_UNSPECIFIED = 0;
+  FINALITY_STATUS_PENDING = 1;
+  FINALITY_STATUS_FINALIZED = 2;
+}
+
+message SubscribeFinalityRequest {
+  string cursor = 1;
+}
+
+message SubscribeFinalityResponse {
+  FinalityUpdate update = 1;
+}
+
+service Realtime {
+  rpc SubscribeFinality(SubscribeFinalityRequest) returns (stream SubscribeFinalityResponse);
+}
