@@ -47,6 +47,8 @@ const engagementDayFormat = "2006-01-02"
 
 const unbondingPeriod = 72 * time.Hour
 
+const defaultIntentTTL = 24 * time.Hour
+
 var (
 	ErrNonceMismatch  = errors.New("transaction nonce mismatch")
 	ErrInvalidChainID = errors.New("invalid chain id")
@@ -92,6 +94,7 @@ type StateProcessor struct {
 	paymasterEnabled   bool
 	quotaConfig        map[string]nativecommon.Quota
 	quotaStore         *systemquotas.Store
+	intentTTL          time.Duration
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -120,6 +123,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		potsoWeightConfig:  potso.DefaultWeightParams(),
 		paymasterEnabled:   true,
 		quotaConfig:        make(map[string]nativecommon.Quota),
+		intentTTL:          defaultIntentTTL,
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -844,6 +848,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		potsoWeightConfig:  clonePotsoWeightConfig(sp.potsoWeightConfig),
 		paymasterEnabled:   sp.paymasterEnabled,
 		quotaConfig:        quotaCopy,
+		intentTTL:          sp.intentTTL,
 	}, nil
 }
 
@@ -878,6 +883,24 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
 	}
 	var (
+		intentManager *nhbstate.Manager
+		intentExpiry  uint64
+		recordIntent  bool
+	)
+	if len(tx.IntentRef) > 0 {
+		intentManager = nhbstate.NewManager(sp.Trie)
+		ttl := sp.intentTTL
+		if ttl <= 0 {
+			ttl = defaultIntentTTL
+		}
+		expiry, err := intentManager.IntentRegistryValidate(tx.IntentRef, tx.IntentExpiry, sp.blockTimestamp(), ttl)
+		if err != nil {
+			return nil, err
+		}
+		intentExpiry = expiry
+		recordIntent = true
+	}
+	var (
 		sender        []byte
 		senderAccount *types.Account
 		err           error
@@ -905,6 +928,23 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 			sp.events = sp.events[:start]
 		}
 		return nil, err
+	}
+	if recordIntent {
+		if intentManager == nil {
+			intentManager = nhbstate.NewManager(sp.Trie)
+		}
+		if err := intentManager.IntentRegistryConsume(tx.IntentRef, intentExpiry); err != nil {
+			if len(sp.events) > start {
+				sp.events = sp.events[:start]
+			}
+			return nil, err
+		}
+		if err := sp.emitPaymentIntentConsumed(tx); err != nil {
+			if len(sp.events) > start {
+				sp.events = sp.events[:start]
+			}
+			return nil, err
+		}
 	}
 	if result == nil {
 		result = &SimulationResult{}
@@ -3119,6 +3159,26 @@ func (sp *StateProcessor) OnTradeFundingProgress(tradeID [32]byte) error {
 func (sp *StateProcessor) OnEscrowFunded(escrowID [32]byte) error {
 	tradeEngine, _ := sp.configureTradeEngine()
 	return tradeEngine.HandleEscrowFunded(escrowID)
+}
+
+func (sp *StateProcessor) emitPaymentIntentConsumed(tx *types.Transaction) error {
+	if tx == nil || len(tx.IntentRef) == 0 {
+		return nil
+	}
+	hash, err := tx.Hash()
+	if err != nil {
+		return err
+	}
+	evt := events.PaymentIntentConsumed{
+		IntentRef: append([]byte(nil), tx.IntentRef...),
+		TxHash:    hash,
+		Merchant:  tx.MerchantAddress,
+		DeviceID:  tx.DeviceID,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
 }
 
 func (sp *StateProcessor) AppendEvent(evt *types.Event) {

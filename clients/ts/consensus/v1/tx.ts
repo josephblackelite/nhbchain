@@ -22,6 +22,10 @@ export interface TxEnvelope {
   chainId: string;
   fee: Fee | undefined;
   memo: string;
+  intentRef: Buffer;
+  intentExpiry: number;
+  merchantAddr: string;
+  deviceId: string;
 }
 
 export interface TxSignature {
@@ -134,7 +138,17 @@ export const Fee: MessageFns<Fee> = {
 };
 
 function createBaseTxEnvelope(): TxEnvelope {
-  return { payload: undefined, nonce: 0, chainId: "", fee: undefined, memo: "" };
+  return {
+    payload: undefined,
+    nonce: 0,
+    chainId: "",
+    fee: undefined,
+    memo: "",
+    intentRef: Buffer.alloc(0),
+    intentExpiry: 0,
+    merchantAddr: "",
+    deviceId: "",
+  };
 }
 
 export const TxEnvelope: MessageFns<TxEnvelope> = {
@@ -153,6 +167,18 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
     }
     if (message.memo !== "") {
       writer.uint32(42).string(message.memo);
+    }
+    if (message.intentRef.length !== 0) {
+      writer.uint32(50).bytes(message.intentRef);
+    }
+    if (message.intentExpiry !== 0) {
+      writer.uint32(56).uint64(message.intentExpiry);
+    }
+    if (message.merchantAddr !== "") {
+      writer.uint32(66).string(message.merchantAddr);
+    }
+    if (message.deviceId !== "") {
+      writer.uint32(74).string(message.deviceId);
     }
     return writer;
   },
@@ -204,6 +230,38 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
           message.memo = reader.string();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.intentRef = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.intentExpiry = longToNumber(reader.uint64());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.merchantAddr = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.deviceId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -220,6 +278,10 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
       chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
       fee: isSet(object.fee) ? Fee.fromJSON(object.fee) : undefined,
       memo: isSet(object.memo) ? globalThis.String(object.memo) : "",
+      intentRef: isSet(object.intentRef) ? Buffer.from(bytesFromBase64(object.intentRef)) : Buffer.alloc(0),
+      intentExpiry: isSet(object.intentExpiry) ? globalThis.Number(object.intentExpiry) : 0,
+      merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
+      deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
     };
   },
 
@@ -240,6 +302,18 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
     if (message.memo !== "") {
       obj.memo = message.memo;
     }
+    if (message.intentRef.length !== 0) {
+      obj.intentRef = base64FromBytes(message.intentRef);
+    }
+    if (message.intentExpiry !== 0) {
+      obj.intentExpiry = Math.round(message.intentExpiry);
+    }
+    if (message.merchantAddr !== "") {
+      obj.merchantAddr = message.merchantAddr;
+    }
+    if (message.deviceId !== "") {
+      obj.deviceId = message.deviceId;
+    }
     return obj;
   },
 
@@ -255,6 +329,10 @@ export const TxEnvelope: MessageFns<TxEnvelope> = {
     message.chainId = object.chainId ?? "";
     message.fee = (object.fee !== undefined && object.fee !== null) ? Fee.fromPartial(object.fee) : undefined;
     message.memo = object.memo ?? "";
+    message.intentRef = object.intentRef ?? Buffer.alloc(0);
+    message.intentExpiry = object.intentExpiry ?? 0;
+    message.merchantAddr = object.merchantAddr ?? "";
+    message.deviceId = object.deviceId ?? "";
     return message;
   },
 };

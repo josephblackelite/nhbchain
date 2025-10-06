@@ -26,6 +26,10 @@ message Transaction {
   BigInt paymaster_r = 13;
   BigInt paymaster_s = 14;
   BigInt paymaster_v = 15;
+  bytes intent_ref = 16;
+  uint64 intent_expiry = 17;
+  string merchant_addr = 18;
+  string device_id = 19;
 }
 
 message BlockHeader {
