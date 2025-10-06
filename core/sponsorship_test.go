@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/pos"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
@@ -196,6 +198,136 @@ func TestEvaluateSponsorship(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEvaluateSponsorshipPOSRegistry(t *testing.T) {
+	t.Run("pause blocks sponsored tx only", func(t *testing.T) {
+		sp := newSponsorshipState(t)
+
+		senderKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate sender key: %v", err)
+		}
+		senderAddr := senderKey.PubKey().Address().Bytes()
+		paymasterKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate paymaster key: %v", err)
+		}
+		paymasterAddr := paymasterKey.PubKey().Address().Bytes()
+
+		merchant := "merchant-pos-1"
+		device := "terminal-pos-1"
+
+		baseTx := func() *types.Transaction {
+			return &types.Transaction{
+				ChainID:         types.NHBChainID(),
+				Type:            types.TxTypeTransfer,
+				Nonce:           0,
+				To:              make([]byte, 20),
+				GasLimit:        21000,
+				GasPrice:        big.NewInt(1),
+				MerchantAddress: merchant,
+				DeviceID:        device,
+			}
+		}
+
+		if err := sp.setAccount(paymasterAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+			t.Fatalf("seed paymaster: %v", err)
+		}
+		if err := sp.setAccount(senderAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+			t.Fatalf("seed sender: %v", err)
+		}
+
+		manager := nhbstate.NewManager(sp.Trie)
+		if err := manager.POSPutMerchant(&pos.Merchant{Address: merchant, Paused: true}); err != nil {
+			t.Fatalf("seed merchant pause: %v", err)
+		}
+
+		raw := baseTx()
+		signTransaction(t, raw, senderKey)
+		assessment, err := sp.EvaluateSponsorship(raw)
+		if err != nil {
+			t.Fatalf("evaluate raw: %v", err)
+		}
+		if assessment == nil || assessment.Status != SponsorshipStatusNone {
+			t.Fatalf("expected no sponsorship status, got %+v", assessment)
+		}
+
+		sponsored := baseTx()
+		sponsored.Paymaster = append([]byte(nil), paymasterAddr...)
+		signPaymaster(t, sponsored, paymasterKey)
+		signTransaction(t, sponsored, senderKey)
+
+		assessment, err = sp.EvaluateSponsorship(sponsored)
+		if err != nil {
+			t.Fatalf("evaluate sponsored: %v", err)
+		}
+		if assessment == nil || assessment.Status != SponsorshipStatusThrottled {
+			t.Fatalf("expected throttled assessment, got %+v", assessment)
+		}
+		if !strings.Contains(assessment.Reason, "merchant") {
+			t.Fatalf("expected merchant pause reason, got %q", assessment.Reason)
+		}
+	})
+
+	t.Run("revoked device blocked", func(t *testing.T) {
+		sp := newSponsorshipState(t)
+
+		senderKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate sender key: %v", err)
+		}
+		senderAddr := senderKey.PubKey().Address().Bytes()
+		paymasterKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate paymaster key: %v", err)
+		}
+		paymasterAddr := paymasterKey.PubKey().Address().Bytes()
+
+		merchant := "merchant-pos-2"
+		device := "terminal-pos-2"
+
+		tx := &types.Transaction{
+			ChainID:         types.NHBChainID(),
+			Type:            types.TxTypeTransfer,
+			Nonce:           0,
+			To:              make([]byte, 20),
+			GasLimit:        21000,
+			GasPrice:        big.NewInt(1),
+			MerchantAddress: merchant,
+			DeviceID:        device,
+		}
+
+		tx.Paymaster = append([]byte(nil), paymasterAddr...)
+		signPaymaster(t, tx, paymasterKey)
+		signTransaction(t, tx, senderKey)
+
+		if err := sp.setAccount(paymasterAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+			t.Fatalf("seed paymaster: %v", err)
+		}
+		if err := sp.setAccount(senderAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+			t.Fatalf("seed sender: %v", err)
+		}
+
+		manager := nhbstate.NewManager(sp.Trie)
+		if err := manager.POSPutMerchant(&pos.Merchant{Address: merchant}); err != nil {
+			t.Fatalf("seed merchant: %v", err)
+		}
+		if err := manager.POSPutDevice(&pos.Device{DeviceID: device, Merchant: merchant, Revoked: true}); err != nil {
+			t.Fatalf("seed device: %v", err)
+		}
+
+		assessment, err := sp.EvaluateSponsorship(tx)
+		if err != nil {
+			t.Fatalf("evaluate: %v", err)
+		}
+		if assessment == nil || assessment.Status != SponsorshipStatusThrottled {
+			t.Fatalf("expected throttled assessment, got %+v", assessment)
+		}
+		if !strings.Contains(assessment.Reason, "device") {
+			t.Fatalf("expected device revocation reason, got %q", assessment.Reason)
+		}
+	})
 }
 
 func TestEvaluateSponsorshipThrottling(t *testing.T) {
