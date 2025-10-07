@@ -1,0 +1,34 @@
+{
+  "genesisTime": "2024-09-01T00:00:00Z",
+  "chainId": 17381991232128513634,
+  "nativeTokens": [
+    {
+      "symbol": "NHB",
+      "name": "NHBCoin",
+      "decimals": 18,
+      "mintAuthority": "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"
+    },
+    {
+      "symbol": "ZNHB",
+      "name": "ZapNHB",
+      "decimals": 18,
+      "initialMintPaused": false
+    }
+  ],
+  "validators": [
+    {
+      "address": "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
+      "power": 10,
+      "moniker": "local-validator"
+    }
+  ],
+  "alloc": {
+    "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka": {
+      "NHB": "1000000"
+    },
+    "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w": {
+      "ZNHB": "10000000"
+    }
+  },
+  "roles": {}
+}
