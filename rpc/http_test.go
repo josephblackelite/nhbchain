@@ -74,13 +74,55 @@ func TestServerServeAllowsPlaintextOnLoopbackWhenExplicit(t *testing.T) {
 
 func TestServerServeRejectsPlaintextOnNonLoopback(t *testing.T) {
 	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	listener := &addrOverrideListener{Listener: base, addr: &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: base.Addr().(*net.TCPAddr).Port}}
+	if err := server.Serve(listener); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected loopback restriction error, got %v", err)
+	}
+}
+
+func TestServerServeAllowsPlaintextOnUnspecified(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	if err := server.Serve(listener); err == nil || !strings.Contains(err.Error(), "loopback") {
-		t.Fatalf("expected loopback restriction error, got %v", err)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.serverMu.Lock()
+		ready := server.httpServer != nil
+		server.serverMu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not start listening before timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	if err := <-serveErr; err != nil && err != http.ErrServerClosed && !strings.Contains(err.Error(), "use of closed") {
+		t.Fatalf("serve returned unexpected error: %v", err)
+	}
+}
+
+type addrOverrideListener struct {
+	net.Listener
+	addr net.Addr
+}
+
+func (l *addrOverrideListener) Addr() net.Addr {
+	return l.addr
 }
 
 func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
