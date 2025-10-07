@@ -79,8 +79,10 @@ func TestRPCStartupFailurePreventsConsensus(t *testing.T) {
 	}
 
 	out := string(output)
-	if !strings.Contains(out, "RPC server failed to start: TLS is required for RPC server") {
-		t.Fatalf("expected TLS startup error, output: %s", out)
+	expectedErr := "TLS is required for RPC server; configure certificates or enable AllowInsecure"
+	expectedLog := fmt.Sprintf("RPC server failed to start: %s", expectedErr)
+	if !strings.Contains(out, expectedLog) {
+		t.Fatalf("expected TLS startup error %q, output: %s", expectedLog, out)
 	}
 	if strings.Contains(out, "--- NHBCoin Node Initialized and Running ---") {
 		t.Fatalf("consensus appears to have started despite RPC failure:\n%s", out)
