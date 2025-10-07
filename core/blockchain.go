@@ -348,6 +348,41 @@ func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) 
 	return createGenesisBlock(), nil, nil
 }
 
+func rebuildGenesisState(db storage.Database, genesisPath string) error {
+	trimmed := strings.TrimSpace(genesisPath)
+	if trimmed == "" {
+		return fmt.Errorf("cannot rebuild genesis state without a genesis file path")
+	}
+
+	spec, err := genesis.LoadGenesisSpec(trimmed)
+	if err != nil {
+		return fmt.Errorf("load genesis spec: %w", err)
+	}
+
+	block, finalize, err := genesis.BuildGenesisFromSpec(spec, db)
+	if err != nil {
+		return fmt.Errorf("rebuild genesis block: %w", err)
+	}
+	if finalize != nil {
+		if err := finalize(); err != nil {
+			return fmt.Errorf("commit rebuilt genesis state: %w", err)
+		}
+	}
+
+	storedHash, err := db.Get(genesisKey)
+	if err != nil {
+		return fmt.Errorf("load stored genesis hash: %w", err)
+	}
+	rebuiltHash, err := block.Header.Hash()
+	if err != nil {
+		return fmt.Errorf("hash rebuilt genesis block: %w", err)
+	}
+	if !bytes.Equal(storedHash, rebuiltHash) {
+		return fmt.Errorf("rebuilt genesis hash mismatch: stored=%x rebuilt=%x", storedHash, rebuiltHash)
+	}
+	return nil
+}
+
 func persistGenesisBlock(db storage.Database, genesis *types.Block) ([]byte, error) {
 	if genesis == nil {
 		return nil, fmt.Errorf("genesis block is nil")
