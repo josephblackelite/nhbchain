@@ -22,7 +22,7 @@ The target builds fresh images for:
 
 - `p2pd`
 - `consensusd`
-- `lendingd`
+- `lendingd` (preview – disabled by default in Helm)
 - `swapd`
 - `governd`
 - `gateway`
@@ -38,7 +38,7 @@ without losing state.
 | gateway      | 8080 | REST gateway |
 | swapd        | 7074 | HTTP oracle |
 | governd      | 50061 | gRPC |
-| lendingd     | 50053 | gRPC |
+| lendingd     | 50053 | gRPC (preview – returns UNIMPLEMENTED) |
 | consensusd   | 9090 | gRPC (public) |
 | consensusd   | 8081 | HTTP RPC |
 | p2pd         | 26656 | Tendermint-style P2P |

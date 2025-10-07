@@ -10,3 +10,4 @@ resources:
   limits:
     cpu: 1
     memory: 1Gi
+# lendingd preview – override replicaCount to 1+ to enable once stable
