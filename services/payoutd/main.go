@@ -2,6 +2,8 @@ package payoutd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -123,13 +125,39 @@ func Main() error {
 		},
 	}
 
-	adminServer := NewAdminServer(processor)
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: cfg.Admin.BearerToken, AllowMTLS: cfg.Admin.MTLS.Enabled})
+	if err != nil {
+		return fmt.Errorf("configure admin auth: %w", err)
+	}
+
+	var tlsConfig *tls.Config
+	if !cfg.Admin.TLS.Disable {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		if cfg.Admin.MTLS.Enabled {
+			tlsConfig.ClientAuth = tls.RequireAnyClientCert
+			if caPath := strings.TrimSpace(cfg.Admin.MTLS.ClientCAPath); caPath != "" {
+				caData, err := os.ReadFile(caPath)
+				if err != nil {
+					return fmt.Errorf("load admin client CA: %w", err)
+				}
+				pool := x509.NewCertPool()
+				if !pool.AppendCertsFromPEM(caData) {
+					return fmt.Errorf("parse admin client CA: %s", caPath)
+				}
+				tlsConfig.ClientCAs = pool
+				tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			}
+		}
+	}
+
+	adminServer := NewAdminServer(processor, auth)
 	httpServer := &http.Server{
 		Addr:         cfg.ListenAddress,
 		Handler:      adminServer,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
+		TLSConfig:    tlsConfig,
 	}
 
 	stopCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -138,7 +166,11 @@ func Main() error {
 	errs := make(chan error, 1)
 	go func() {
 		log.Printf("payoutd listening on %s", cfg.ListenAddress)
-		errs <- httpServer.ListenAndServe()
+		if cfg.Admin.TLS.Disable {
+			errs <- httpServer.ListenAndServe()
+			return
+		}
+		errs <- httpServer.ListenAndServeTLS(cfg.Admin.TLS.CertPath, cfg.Admin.TLS.KeyPath)
 	}()
 
 	select {

@@ -45,6 +45,28 @@ type Config struct {
 	Consensus     ConsensusConfig   `yaml:"consensus"`
 	Wallet        WalletConfig      `yaml:"wallet"`
 	Inventory     map[string]string `yaml:"inventory"`
+	Admin         AdminConfig       `yaml:"admin"`
+}
+
+// AdminConfig captures security settings for the admin API.
+type AdminConfig struct {
+	BearerToken     string         `yaml:"bearer_token"`
+	BearerTokenFile string         `yaml:"bearer_token_file"`
+	MTLS            MTLSConfig     `yaml:"mtls"`
+	TLS             AdminTLSConfig `yaml:"tls"`
+}
+
+// MTLSConfig controls mutual TLS verification.
+type MTLSConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	ClientCAPath string `yaml:"client_ca"`
+}
+
+// AdminTLSConfig configures TLS certificates for the admin API.
+type AdminTLSConfig struct {
+	Disable  bool   `yaml:"disable"`
+	CertPath string `yaml:"cert"`
+	KeyPath  string `yaml:"key"`
 }
 
 // ConsensusConfig configures the consensus client used to emit receipts.
@@ -77,6 +99,9 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("decode config: %w", err)
 	}
 	applyDefaults(&cfg)
+	if err := cfg.Admin.normalise(); err != nil {
+		return cfg, fmt.Errorf("admin security: %w", err)
+	}
 	if err := validateConfig(cfg); err != nil {
 		return cfg, err
 	}
@@ -99,6 +124,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Wallet.Confirmations <= 0 {
 		cfg.Wallet.Confirmations = 3
 	}
+	if cfg.Inventory == nil {
+		cfg.Inventory = map[string]string{}
+	}
 }
 
 func validateConfig(cfg Config) error {
@@ -114,8 +142,41 @@ func validateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Consensus.SignerKey) == "" {
 		return fmt.Errorf("signer key must be configured")
 	}
-	if cfg.Inventory == nil {
-		cfg.Inventory = map[string]string{}
+	if cfg.Admin.BearerToken == "" && !cfg.Admin.MTLS.Enabled {
+		return fmt.Errorf("configure either bearer_token or mTLS for admin authentication")
+	}
+	return nil
+}
+
+func (a *AdminConfig) normalise() error {
+	if a == nil {
+		return fmt.Errorf("admin configuration missing")
+	}
+	token := strings.TrimSpace(a.BearerToken)
+	if path := strings.TrimSpace(a.BearerTokenFile); path != "" {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read bearer_token_file: %w", err)
+		}
+		token = strings.TrimSpace(string(contents))
+	}
+	a.BearerToken = token
+	a.MTLS.ClientCAPath = strings.TrimSpace(a.MTLS.ClientCAPath)
+	a.TLS.CertPath = strings.TrimSpace(a.TLS.CertPath)
+	a.TLS.KeyPath = strings.TrimSpace(a.TLS.KeyPath)
+	if a.TLS.CertPath == "" && a.TLS.KeyPath == "" {
+		a.TLS.Disable = true
+	}
+	if !a.TLS.Disable {
+		if a.TLS.CertPath == "" {
+			return fmt.Errorf("tls.cert must be configured when TLS is enabled")
+		}
+		if a.TLS.KeyPath == "" {
+			return fmt.Errorf("tls.key must be configured when TLS is enabled")
+		}
+	}
+	if a.MTLS.Enabled && a.TLS.Disable {
+		return fmt.Errorf("mTLS requires TLS to be enabled")
 	}
 	return nil
 }
