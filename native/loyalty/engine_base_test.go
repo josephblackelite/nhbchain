@@ -120,7 +120,7 @@ func newConfig(baseBps uint32, minSpend, capPerTx, dailyCap int64, treasury []by
 func TestApplyBaseRewardHappyPath(t *testing.T) {
 	treasury := []byte("treasury")
 	from := []byte("from")
-	cfg := newConfig(500, 100, 500, 1000, treasury)
+	cfg := newConfig(50, 100, 500, 1000, treasury)
 	state := newMockState(cfg)
 	state.addAccount(treasury, &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
@@ -136,26 +136,26 @@ func TestApplyBaseRewardHappyPath(t *testing.T) {
 	engine := NewEngine()
 	engine.ApplyBaseReward(state, ctx)
 
-	if got := ctx.FromAccount.BalanceZNHB.String(); got != "50" {
-		t.Fatalf("expected reward 50, got %s", got)
+	if got := ctx.FromAccount.BalanceZNHB.String(); got != "5" {
+		t.Fatalf("expected reward 5, got %s", got)
 	}
 	treasuryAcc, _ := state.GetAccount(treasury)
-	if got := treasuryAcc.BalanceZNHB.String(); got != "950" {
-		t.Fatalf("expected treasury balance 950, got %s", got)
+	if got := treasuryAcc.BalanceZNHB.String(); got != "995" {
+		t.Fatalf("expected treasury balance 995, got %s", got)
 	}
 	daily, _ := state.LoyaltyBaseDailyAccrued(from, "2024-01-02")
-	if daily.String() != "50" {
-		t.Fatalf("expected daily accrued 50, got %s", daily.String())
+	if daily.String() != "5" {
+		t.Fatalf("expected daily accrued 5, got %s", daily.String())
 	}
 	total, _ := state.LoyaltyBaseTotalAccrued(from)
-	if total.String() != "50" {
-		t.Fatalf("expected total accrued 50, got %s", total.String())
+	if total.String() != "5" {
+		t.Fatalf("expected total accrued 5, got %s", total.String())
 	}
 	if len(state.events) != 1 || state.events[0].Type != eventBaseAccrued {
 		t.Fatalf("expected accrued event, got %#v", state.events)
 	}
-	if state.events[0].Attributes["reward"] != "50" {
-		t.Fatalf("expected reward attribute 50, got %s", state.events[0].Attributes["reward"])
+	if state.events[0].Attributes["reward"] != "5" {
+		t.Fatalf("expected reward attribute 5, got %s", state.events[0].Attributes["reward"])
 	}
 }
 
@@ -282,5 +282,47 @@ func TestApplyBaseRewardDeterminism(t *testing.T) {
 	}
 	if stateA.events[0].Attributes["day"] == "" {
 		t.Fatalf("expected day attribute to be set")
+	}
+}
+
+func TestApplyBaseRewardDefaultRatePrecision(t *testing.T) {
+	treasury := []byte("precision-treasury")
+	cfg := (&GlobalConfig{
+		Active:       true,
+		Treasury:     append([]byte(nil), treasury...),
+		BaseBps:      50,
+		MinSpend:     big.NewInt(0),
+		CapPerTx:     big.NewInt(0),
+		DailyCapUser: big.NewInt(0),
+	}).Normalize()
+	state := newMockState(cfg)
+
+	unit := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	treasuryBalance := new(big.Int).Mul(big.NewInt(1_000), unit)
+	state.addAccount(treasury, &types.Account{BalanceZNHB: treasuryBalance, BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	amount := new(big.Int).Mul(big.NewInt(100), unit)
+	from := []byte("spender")
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        append([]byte(nil), from...),
+		To:          []byte("merchant"),
+		Token:       "NHB",
+		Amount:      amount,
+		Timestamp:   time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	engine.ApplyBaseReward(state, ctx)
+
+	want := new(big.Int).Quo(new(big.Int).Mul(new(big.Int).Set(amount), big.NewInt(50)), big.NewInt(10_000))
+	if ctx.FromAccount.BalanceZNHB.Cmp(want) != 0 {
+		t.Fatalf("expected reward %s, got %s", want.String(), ctx.FromAccount.BalanceZNHB.String())
+	}
+	treasuryAcc, _ := state.GetAccount(treasury)
+	expectedTreasury := new(big.Int).Sub(treasuryBalance, want)
+	if treasuryAcc.BalanceZNHB.Cmp(expectedTreasury) != 0 {
+		t.Fatalf("expected treasury balance %s, got %s", expectedTreasury.String(), treasuryAcc.BalanceZNHB.String())
 	}
 }

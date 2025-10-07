@@ -43,6 +43,12 @@ the latest block root, decodes `system/pauses`, and prints the module map.【F:e
 3. Re-run the inspection command to verify the pause state propagated. To resume
    a module replace `--state pause` with `--state resume`.
 
+> **ZNHB redemption tip:** Disabling cash-outs cleanly requires pausing both the on-chain
+> swap module (`global.pauses.swap`) and the `swapd` stable engine (`stable.paused` in
+> the YAML). Pause the service first to drain in-flight requests, then toggle the
+> on-chain flag. When restoring service, unpause `swapd` only after the governance
+> update clears the module pause so submitted redemptions will execute successfully.
+
 ## Inspect quota usage for an address
 
 1. Determine the module, target address, and quota epoch window. The helper
