@@ -5,7 +5,7 @@ DataDir = "./nhb-data-local"
 GenesisFile = "./config/genesis.local.json"
 # Set to true only if you intentionally want the node to fabricate an ephemeral genesis.
 AllowAutogenesis = false
-ValidatorKeystorePath = "./validator-local.keystore"
+ValidatorKeystorePath = "./nhb-data-local/validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
 NetworkName = "nhb-local"

@@ -29,6 +29,8 @@ wallet.key
 wallet-*.key
 *.wallet.key
 *.wallet
+validator-local.keystore
+*.keystore
 
 # OS/editor noise
 .DS_Store
