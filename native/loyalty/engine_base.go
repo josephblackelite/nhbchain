@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,12 +87,13 @@ func emitSkip(st BaseRewardState, ctx *BaseRewardContext, reason string, extra m
 	st.AppendEvent(&types.Event{Type: eventBaseSkipped, Attributes: attrs})
 }
 
-func emitAccrued(st BaseRewardState, ctx *BaseRewardContext, reward *big.Int) {
+func emitAccrued(st BaseRewardState, ctx *BaseRewardContext, basisPoints uint32, reward *big.Int) {
 	if st == nil || ctx == nil {
 		return
 	}
 	attrs := ctx.baseEventAttributes()
 	attrs["reward"] = reward.String()
+	attrs["baseBps"] = strconv.FormatUint(uint64(basisPoints), 10)
 	st.AppendEvent(&types.Event{Type: eventBaseAccrued, Attributes: attrs})
 }
 
@@ -142,7 +144,7 @@ func (e *Engine) ApplyBaseReward(st BaseRewardState, ctx *BaseRewardContext) {
 	}
 
 	reward := new(big.Int).Mul(amount, new(big.Int).SetUint64(uint64(cfg.BaseBps)))
-	reward = reward.Quo(reward, big.NewInt(10_000))
+	reward = reward.Quo(reward, big.NewInt(int64(BaseRewardBpsDenominator)))
 	if reward.Sign() <= 0 {
 		emitSkip(st, ctx, "reward_zero", nil)
 		return
@@ -219,7 +221,7 @@ func (e *Engine) ApplyBaseReward(st BaseRewardState, ctx *BaseRewardContext) {
 		return
 	}
 
-	emitAccrued(st, ctx, reward)
+	emitAccrued(st, ctx, cfg.BaseBps, reward)
 }
 
 // MustBaseReward returns the reward amount that would be paid out for the given
@@ -234,7 +236,7 @@ func (c *GlobalConfig) MustBaseReward(amount *big.Int) *big.Int {
 		return big.NewInt(0)
 	}
 	reward := new(big.Int).Mul(amount, new(big.Int).SetUint64(uint64(normalized.BaseBps)))
-	return reward.Quo(reward, big.NewInt(10_000))
+	return reward.Quo(reward, big.NewInt(int64(BaseRewardBpsDenominator)))
 }
 
 // ValidateBaseRewardContext performs sanity checks that are useful for testing.
