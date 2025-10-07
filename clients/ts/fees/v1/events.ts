@@ -17,7 +17,13 @@ export interface FeeApplied {
   feeWei: string;
   netWei: string;
   policyVersion: number;
-  routeWallet: Buffer;
+  ownerWallet: Buffer;
+  freeTierApplied: boolean;
+  freeTierLimit: number;
+  freeTierRemaining: number;
+  usageCount: number;
+  windowStartUnix: number;
+  feeBps: number;
 }
 
 function createBaseFeeApplied(): FeeApplied {
@@ -28,7 +34,13 @@ function createBaseFeeApplied(): FeeApplied {
     feeWei: "",
     netWei: "",
     policyVersion: 0,
-    routeWallet: Buffer.alloc(0),
+    ownerWallet: Buffer.alloc(0),
+    freeTierApplied: false,
+    freeTierLimit: 0,
+    freeTierRemaining: 0,
+    usageCount: 0,
+    windowStartUnix: 0,
+    feeBps: 0,
   };
 }
 
@@ -52,8 +64,26 @@ export const FeeApplied: MessageFns<FeeApplied> = {
     if (message.policyVersion !== 0) {
       writer.uint32(48).uint64(message.policyVersion);
     }
-    if (message.routeWallet.length !== 0) {
-      writer.uint32(58).bytes(message.routeWallet);
+    if (message.ownerWallet.length !== 0) {
+      writer.uint32(58).bytes(message.ownerWallet);
+    }
+    if (message.freeTierApplied === true) {
+      writer.uint32(64).bool(message.freeTierApplied);
+    }
+    if (message.freeTierLimit !== 0) {
+      writer.uint32(72).uint64(message.freeTierLimit);
+    }
+    if (message.freeTierRemaining !== 0) {
+      writer.uint32(80).uint64(message.freeTierRemaining);
+    }
+    if (message.usageCount !== 0) {
+      writer.uint32(88).uint64(message.usageCount);
+    }
+    if (message.windowStartUnix !== 0) {
+      writer.uint32(96).int64(message.windowStartUnix);
+    }
+    if (message.feeBps !== 0) {
+      writer.uint32(104).uint32(message.feeBps);
     }
     return writer;
   },
@@ -118,7 +148,55 @@ export const FeeApplied: MessageFns<FeeApplied> = {
             break;
           }
 
-          message.routeWallet = Buffer.from(reader.bytes());
+          message.ownerWallet = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.freeTierApplied = reader.bool();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.freeTierLimit = longToNumber(reader.uint64());
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.freeTierRemaining = longToNumber(reader.uint64());
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.usageCount = longToNumber(reader.uint64());
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.windowStartUnix = longToNumber(reader.int64());
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.feeBps = reader.uint32();
           continue;
         }
       }
@@ -138,7 +216,13 @@ export const FeeApplied: MessageFns<FeeApplied> = {
       feeWei: isSet(object.feeWei) ? globalThis.String(object.feeWei) : "",
       netWei: isSet(object.netWei) ? globalThis.String(object.netWei) : "",
       policyVersion: isSet(object.policyVersion) ? globalThis.Number(object.policyVersion) : 0,
-      routeWallet: isSet(object.routeWallet) ? Buffer.from(bytesFromBase64(object.routeWallet)) : Buffer.alloc(0),
+      ownerWallet: isSet(object.ownerWallet) ? Buffer.from(bytesFromBase64(object.ownerWallet)) : Buffer.alloc(0),
+      freeTierApplied: isSet(object.freeTierApplied) ? globalThis.Boolean(object.freeTierApplied) : false,
+      freeTierLimit: isSet(object.freeTierLimit) ? globalThis.Number(object.freeTierLimit) : 0,
+      freeTierRemaining: isSet(object.freeTierRemaining) ? globalThis.Number(object.freeTierRemaining) : 0,
+      usageCount: isSet(object.usageCount) ? globalThis.Number(object.usageCount) : 0,
+      windowStartUnix: isSet(object.windowStartUnix) ? globalThis.Number(object.windowStartUnix) : 0,
+      feeBps: isSet(object.feeBps) ? globalThis.Number(object.feeBps) : 0,
     };
   },
 
@@ -162,8 +246,26 @@ export const FeeApplied: MessageFns<FeeApplied> = {
     if (message.policyVersion !== 0) {
       obj.policyVersion = Math.round(message.policyVersion);
     }
-    if (message.routeWallet.length !== 0) {
-      obj.routeWallet = base64FromBytes(message.routeWallet);
+    if (message.ownerWallet.length !== 0) {
+      obj.ownerWallet = base64FromBytes(message.ownerWallet);
+    }
+    if (message.freeTierApplied === true) {
+      obj.freeTierApplied = message.freeTierApplied;
+    }
+    if (message.freeTierLimit !== 0) {
+      obj.freeTierLimit = Math.round(message.freeTierLimit);
+    }
+    if (message.freeTierRemaining !== 0) {
+      obj.freeTierRemaining = Math.round(message.freeTierRemaining);
+    }
+    if (message.usageCount !== 0) {
+      obj.usageCount = Math.round(message.usageCount);
+    }
+    if (message.windowStartUnix !== 0) {
+      obj.windowStartUnix = Math.round(message.windowStartUnix);
+    }
+    if (message.feeBps !== 0) {
+      obj.feeBps = Math.round(message.feeBps);
     }
     return obj;
   },
@@ -179,7 +281,13 @@ export const FeeApplied: MessageFns<FeeApplied> = {
     message.feeWei = object.feeWei ?? "";
     message.netWei = object.netWei ?? "";
     message.policyVersion = object.policyVersion ?? 0;
-    message.routeWallet = object.routeWallet ?? Buffer.alloc(0);
+    message.ownerWallet = object.ownerWallet ?? Buffer.alloc(0);
+    message.freeTierApplied = object.freeTierApplied ?? false;
+    message.freeTierLimit = object.freeTierLimit ?? 0;
+    message.freeTierRemaining = object.freeTierRemaining ?? 0;
+    message.usageCount = object.usageCount ?? 0;
+    message.windowStartUnix = object.windowStartUnix ?? 0;
+    message.feeBps = object.feeBps ?? 0;
     return message;
   },
 };

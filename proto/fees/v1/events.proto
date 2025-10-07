@@ -12,6 +12,12 @@ message FeeApplied {
   string fee_wei = 4;
   string net_wei = 5;
   uint64 policy_version = 6;
-  bytes route_wallet = 7;
+  bytes owner_wallet = 7;
+  bool free_tier_applied = 8;
+  uint64 free_tier_limit = 9;
+  uint64 free_tier_remaining = 10;
+  uint64 usage_count = 11;
+  int64 window_start_unix = 12;
+  uint32 fee_bps = 13;
 }
 

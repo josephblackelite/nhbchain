@@ -21,20 +21,20 @@ import (
 )
 
 type Config struct {
-        ListenAddress         string          `toml:"ListenAddress"`
-        RPCAddress            string          `toml:"RPCAddress"`
-        RPCTrustedProxies     []string        `toml:"RPCTrustedProxies"`
-        RPCTrustProxyHeaders  bool            `toml:"RPCTrustProxyHeaders"`
-        RPCReadHeaderTimeout  int             `toml:"RPCReadHeaderTimeout"`
-        RPCReadTimeout        int             `toml:"RPCReadTimeout"`
-        RPCWriteTimeout       int             `toml:"RPCWriteTimeout"`
-        RPCIdleTimeout        int             `toml:"RPCIdleTimeout"`
-        RPCAllowInsecure      bool            `toml:"RPCAllowInsecure"`
-        RPCTLSCertFile        string          `toml:"RPCTLSCertFile"`
-        RPCTLSKeyFile         string          `toml:"RPCTLSKeyFile"`
-        RPCTLSClientCAFile    string          `toml:"RPCTLSClientCAFile"`
-        DataDir               string          `toml:"DataDir"`
-        GenesisFile           string          `toml:"GenesisFile"`
+	ListenAddress         string          `toml:"ListenAddress"`
+	RPCAddress            string          `toml:"RPCAddress"`
+	RPCTrustedProxies     []string        `toml:"RPCTrustedProxies"`
+	RPCTrustProxyHeaders  bool            `toml:"RPCTrustProxyHeaders"`
+	RPCReadHeaderTimeout  int             `toml:"RPCReadHeaderTimeout"`
+	RPCReadTimeout        int             `toml:"RPCReadTimeout"`
+	RPCWriteTimeout       int             `toml:"RPCWriteTimeout"`
+	RPCIdleTimeout        int             `toml:"RPCIdleTimeout"`
+	RPCAllowInsecure      bool            `toml:"RPCAllowInsecure"`
+	RPCTLSCertFile        string          `toml:"RPCTLSCertFile"`
+	RPCTLSKeyFile         string          `toml:"RPCTLSKeyFile"`
+	RPCTLSClientCAFile    string          `toml:"RPCTLSClientCAFile"`
+	DataDir               string          `toml:"DataDir"`
+	GenesisFile           string          `toml:"GenesisFile"`
 	AllowAutogenesis      bool            `toml:"AllowAutogenesis"`
 	ValidatorKeystorePath string          `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI       string          `toml:"ValidatorKMSURI"`
@@ -141,6 +141,10 @@ func defaultGlobalConfig() Global {
 		Paymaster: Paymaster{
 			MerchantDailyCapWei: "0",
 			GlobalDailyCapWei:   "0",
+		},
+		Fees: Fees{
+			FreeTierTxPerMonth: DefaultFreeTierTxPerMonth,
+			MDRBasisPoints:     DefaultMDRBasisPoints,
 		},
 	}
 }
@@ -525,6 +529,15 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "paymaster", "DeviceDailyTxCap") {
 		cfg.Global.Paymaster.DeviceDailyTxCap = defaults.Paymaster.DeviceDailyTxCap
+	}
+	if !meta.IsDefined("global", "fees", "FreeTierTxPerMonth") {
+		cfg.Global.Fees.FreeTierTxPerMonth = defaults.Fees.FreeTierTxPerMonth
+	}
+	if !meta.IsDefined("global", "fees", "MDRBasisPoints") {
+		cfg.Global.Fees.MDRBasisPoints = defaults.Fees.MDRBasisPoints
+	}
+	if !meta.IsDefined("global", "fees", "OwnerWallet") {
+		cfg.Global.Fees.OwnerWallet = defaults.Fees.OwnerWallet
 	}
 }
 

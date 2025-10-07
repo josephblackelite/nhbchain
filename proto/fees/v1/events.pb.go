@@ -23,16 +23,22 @@ const (
 
 // FeeApplied captures telemetry for a fee assessment.
 type FeeApplied struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Payer         []byte                 `protobuf:"bytes,1,opt,name=payer,proto3" json:"payer,omitempty"`
-	Domain        string                 `protobuf:"bytes,2,opt,name=domain,proto3" json:"domain,omitempty"`
-	GrossWei      string                 `protobuf:"bytes,3,opt,name=gross_wei,json=grossWei,proto3" json:"gross_wei,omitempty"`
-	FeeWei        string                 `protobuf:"bytes,4,opt,name=fee_wei,json=feeWei,proto3" json:"fee_wei,omitempty"`
-	NetWei        string                 `protobuf:"bytes,5,opt,name=net_wei,json=netWei,proto3" json:"net_wei,omitempty"`
-	PolicyVersion uint64                 `protobuf:"varint,6,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
-	RouteWallet   []byte                 `protobuf:"bytes,7,opt,name=route_wallet,json=routeWallet,proto3" json:"route_wallet,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Payer             []byte                 `protobuf:"bytes,1,opt,name=payer,proto3" json:"payer,omitempty"`
+	Domain            string                 `protobuf:"bytes,2,opt,name=domain,proto3" json:"domain,omitempty"`
+	GrossWei          string                 `protobuf:"bytes,3,opt,name=gross_wei,json=grossWei,proto3" json:"gross_wei,omitempty"`
+	FeeWei            string                 `protobuf:"bytes,4,opt,name=fee_wei,json=feeWei,proto3" json:"fee_wei,omitempty"`
+	NetWei            string                 `protobuf:"bytes,5,opt,name=net_wei,json=netWei,proto3" json:"net_wei,omitempty"`
+	PolicyVersion     uint64                 `protobuf:"varint,6,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
+	OwnerWallet       []byte                 `protobuf:"bytes,7,opt,name=owner_wallet,json=ownerWallet,proto3" json:"owner_wallet,omitempty"`
+	FreeTierApplied   bool                   `protobuf:"varint,8,opt,name=free_tier_applied,json=freeTierApplied,proto3" json:"free_tier_applied,omitempty"`
+	FreeTierLimit     uint64                 `protobuf:"varint,9,opt,name=free_tier_limit,json=freeTierLimit,proto3" json:"free_tier_limit,omitempty"`
+	FreeTierRemaining uint64                 `protobuf:"varint,10,opt,name=free_tier_remaining,json=freeTierRemaining,proto3" json:"free_tier_remaining,omitempty"`
+	UsageCount        uint64                 `protobuf:"varint,11,opt,name=usage_count,json=usageCount,proto3" json:"usage_count,omitempty"`
+	WindowStartUnix   int64                  `protobuf:"varint,12,opt,name=window_start_unix,json=windowStartUnix,proto3" json:"window_start_unix,omitempty"`
+	FeeBps            uint32                 `protobuf:"varint,13,opt,name=fee_bps,json=feeBps,proto3" json:"fee_bps,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *FeeApplied) Reset() {
@@ -107,27 +113,58 @@ func (x *FeeApplied) GetPolicyVersion() uint64 {
 	return 0
 }
 
-func (x *FeeApplied) GetRouteWallet() []byte {
+func (x *FeeApplied) GetOwnerWallet() []byte {
 	if x != nil {
-		return x.RouteWallet
+		return x.OwnerWallet
 	}
 	return nil
 }
 
+func (x *FeeApplied) GetFreeTierApplied() bool {
+	if x != nil {
+		return x.FreeTierApplied
+	}
+	return false
+}
+
+func (x *FeeApplied) GetFreeTierLimit() uint64 {
+	if x != nil {
+		return x.FreeTierLimit
+	}
+	return 0
+}
+
+func (x *FeeApplied) GetFreeTierRemaining() uint64 {
+	if x != nil {
+		return x.FreeTierRemaining
+	}
+	return 0
+}
+
+func (x *FeeApplied) GetUsageCount() uint64 {
+	if x != nil {
+		return x.UsageCount
+	}
+	return 0
+}
+
+func (x *FeeApplied) GetWindowStartUnix() int64 {
+	if x != nil {
+		return x.WindowStartUnix
+	}
+	return 0
+}
+
+func (x *FeeApplied) GetFeeBps() uint32 {
+	if x != nil {
+		return x.FeeBps
+	}
+	return 0
+}
+
 var File_fees_v1_events_proto protoreflect.FileDescriptor
 
-const file_fees_v1_events_proto_rawDesc = "" +
-	"\n" +
-	"\x14fees/v1/events.proto\x12\vnhb.fees.v1\"\xd3\x01\n" +
-	"\n" +
-	"FeeApplied\x12\x14\n" +
-	"\x05payer\x18\x01 \x01(\fR\x05payer\x12\x16\n" +
-	"\x06domain\x18\x02 \x01(\tR\x06domain\x12\x1b\n" +
-	"\tgross_wei\x18\x03 \x01(\tR\bgrossWei\x12\x17\n" +
-	"\afee_wei\x18\x04 \x01(\tR\x06feeWei\x12\x17\n" +
-	"\anet_wei\x18\x05 \x01(\tR\x06netWei\x12%\n" +
-	"\x0epolicy_version\x18\x06 \x01(\x04R\rpolicyVersion\x12!\n" +
-	"\froute_wallet\x18\a \x01(\fR\vrouteWalletB\x1fZ\x1dnhbchain/proto/fees/v1;feesv1b\x06proto3"
+const file_fees_v1_events_proto_rawDesc = "\n\x92\x04\n\x1aproto/fees/v1/events.proto\x12\vnhb.fees.v1\"\xbd\x03\n\nFeeApplied\x12\x14\n\x05payer\x18\x01 \x01(\fR\x05payer\x12\x16\n\x06domain\x18\x02 \x01(\tR\x06domain\x12\x1b\n\tgross_wei\x18\x03 \x01(\tR\bgrossWei\x12\x17\n\afee_wei\x18\x04 \x01(\tR\x06feeWei\x12\x17\n\anet_wei\x18\x05 \x01(\tR\x06netWei\x12%\n\x0epolicy_version\x18\x06 \x01(\x04R\rpolicyVersion\x12!\n\fowner_wallet\x18\a \x01(\fR\vownerWallet\x12*\n\x11free_tier_applied\x18\b \x01(\bR\x0ffreeTierApplied\x12&\n\x0ffree_tier_limit\x18\t \x01(\x04R\rfreeTierLimit\x12.\n\x13free_tier_remaining\x18\n \x01(\x04R\x11freeTierRemaining\x12\x1f\n\vusage_count\x18\v \x01(\x04R\nusageCount\x12*\n\x11window_start_unix\x18\f \x01(\x03R\x0fwindowStartUnix\x12\x17\n\afee_bps\x18\r \x01(\rR\x06feeBpsB\x1fZ\x1dnhbchain/proto/fees/v1;feesv1b\x06proto3"
 
 var (
 	file_fees_v1_events_proto_rawDescOnce sync.Once

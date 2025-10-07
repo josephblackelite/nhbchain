@@ -239,9 +239,15 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		gross = new(big.Int).Set(tx.Value)
 	}
 	manager := nhbstate.NewManager(sp.Trie)
-	counter, _, err := manager.FeesGetCounter(domain, payer)
+	counter, windowStart, _, err := manager.FeesGetCounter(domain, payer)
 	if err != nil {
 		return err
+	}
+	now := sp.blockTimestamp()
+	currentWindow := feeWindowStart(now)
+	if windowStart.IsZero() || !sameFeeWindow(windowStart, currentWindow) {
+		windowStart = currentWindow
+		counter = 0
 	}
 	result := fees.Apply(fees.ApplyInput{
 		Domain:        domain,
@@ -249,14 +255,18 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		UsageCount:    counter,
 		PolicyVersion: sp.feePolicy.Version,
 		Config:        cfg,
+		WindowStart:   windowStart,
 	})
-	if err := manager.FeesPutCounter(domain, payer, result.Counter); err != nil {
+	if result.WindowStart.IsZero() {
+		result.WindowStart = windowStart
+	}
+	if err := manager.FeesPutCounter(domain, payer, result.Counter, result.WindowStart); err != nil {
 		return err
 	}
-	if err := manager.FeesAccumulateTotals(domain, result.RouteWallet, gross, result.Fee, result.Net); err != nil {
+	if err := manager.FeesAccumulateTotals(domain, result.OwnerWallet, gross, result.Fee, result.Net); err != nil {
 		return err
 	}
-	if result.Fee != nil && result.Fee.Sign() > 0 && !isZeroAddress(result.RouteWallet) {
+	if result.Fee != nil && result.Fee.Sign() > 0 && !isZeroAddress(result.OwnerWallet) {
 		routed := new(big.Int).Set(result.Fee)
 		deducted := false
 		if toAcc != nil && toAcc.BalanceNHB != nil && toAcc.BalanceNHB.Cmp(routed) >= 0 {
@@ -270,7 +280,7 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		if !deducted {
 			return fmt.Errorf("fees: insufficient balance to route fee")
 		}
-		routeAcc, err := sp.getAccount(result.RouteWallet[:])
+		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
 		if err != nil {
 			return err
 		}
@@ -278,18 +288,24 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 			routeAcc.BalanceNHB = big.NewInt(0)
 		}
 		routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, routed)
-		if err := sp.setAccount(result.RouteWallet[:], routeAcc); err != nil {
+		if err := sp.setAccount(result.OwnerWallet[:], routeAcc); err != nil {
 			return err
 		}
 	}
 	sp.AppendEvent(events.FeeApplied{
-		Payer:         payer,
-		Domain:        fees.NormalizeDomain(domain),
-		Gross:         new(big.Int).Set(gross),
-		Fee:           cloneBigInt(result.Fee),
-		Net:           cloneBigInt(result.Net),
-		PolicyVersion: result.PolicyVersion,
-		RouteWallet:   result.RouteWallet,
+		Payer:             payer,
+		Domain:            fees.NormalizeDomain(domain),
+		Gross:             new(big.Int).Set(gross),
+		Fee:               cloneBigInt(result.Fee),
+		Net:               cloneBigInt(result.Net),
+		PolicyVersion:     result.PolicyVersion,
+		OwnerWallet:       result.OwnerWallet,
+		FreeTierApplied:   result.FreeTierApplied,
+		FreeTierLimit:     result.FreeTierLimit,
+		FreeTierRemaining: result.FreeTierRemaining,
+		UsageCount:        result.Counter,
+		WindowStart:       result.WindowStart,
+		FeeBasisPoints:    result.FeeBasisPoints,
 	}.Event())
 	return nil
 }
@@ -301,6 +317,23 @@ func isZeroAddress(addr [20]byte) bool {
 		}
 	}
 	return true
+}
+
+func feeWindowStart(ts time.Time) time.Time {
+	if ts.IsZero() {
+		return time.Time{}
+	}
+	utc := ts.UTC()
+	return time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+func sameFeeWindow(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	ua := a.UTC()
+	ub := b.UTC()
+	return ua.Year() == ub.Year() && ua.Month() == ub.Month()
 }
 
 func quotaEpochFor(q nativecommon.Quota, ts time.Time) uint64 {

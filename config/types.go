@@ -2,6 +2,11 @@ package config
 
 import "time"
 
+const (
+	DefaultFreeTierTxPerMonth = uint64(100)
+	DefaultMDRBasisPoints     = uint32(150)
+)
+
 // Governance captures global governance policy knobs that must be validated
 // before applying runtime configuration updates.
 type Governance struct {
@@ -32,6 +37,13 @@ type Paymaster struct {
 	MerchantDailyCapWei string
 	DeviceDailyTxCap    uint64
 	GlobalDailyCapWei   string
+}
+
+// Fees captures default fee policy settings applied across domains.
+type Fees struct {
+	FreeTierTxPerMonth uint64
+	MDRBasisPoints     uint32
+	OwnerWallet        string
 }
 
 // Consensus controls the BFT round timeouts.
@@ -77,4 +89,5 @@ type Global struct {
 	Pauses     Pauses
 	Quotas     Quotas
 	Paymaster  Paymaster
+	Fees       Fees
 }

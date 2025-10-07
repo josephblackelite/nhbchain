@@ -31,6 +31,23 @@ curl -s -X POST https://rpc.nhbchain.dev \
 Each event includes the transaction hash, domain, merchant identifier, and both native and USD fee
 components. Persist the response to object storage before loading it into your analytics database.
 
+### Event attribute reference
+
+The `fees.applied` payload now exposes additional fields to help downstream systems
+reason about the free-tier window and revenue routing:
+
+| Attribute | Description |
+| --- | --- |
+| `ownerWallet` | Hex-encoded 20-byte address that accrued the fee. |
+| `freeTierApplied` | `true` when the transaction consumed the free tier rather than paying MDR. |
+| `freeTierLimit` | Monthly allowance in transactions for the payer's domain. |
+| `freeTierRemaining` | Transactions remaining in the current UTC month after processing the event. |
+| `usageCount` | Post-increment counter for the payer within the active month. |
+| `windowStartUnix` | Unix timestamp (seconds) for the start of the billing month applied to the event. |
+| `feeBps` | Effective MDR basis points applied when a fee was charged. |
+
+Older attributes (`payer`, `grossWei`, `feeWei`, `netWei`, etc.) remain unchanged.
+
 ## Streaming with gRPC
 
 ```bash

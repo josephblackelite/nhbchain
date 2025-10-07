@@ -29,6 +29,7 @@ type Baseline struct {
 	Slashing   SlashingBaseline
 	Mempool    MempoolBaseline
 	Blocks     BlocksBaseline
+	Fees       FeesBaseline
 }
 
 // GovernanceBaseline mirrors config.Governance using primitive types.
@@ -52,6 +53,13 @@ type MempoolBaseline struct {
 // BlocksBaseline mirrors config.Blocks using primitive types.
 type BlocksBaseline struct {
 	MaxTxs int64
+}
+
+// FeesBaseline mirrors config.Fees using primitive types.
+type FeesBaseline struct {
+	FreeTierTxPerMonth uint64
+	MDRBasisPoints     uint32
+	OwnerWallet        string
 }
 
 // GovernanceDelta represents proposed changes to governance thresholds and
@@ -105,6 +113,11 @@ func PreflightBaselineApply(cur Baseline, delta PolicyDelta) error {
 		},
 		Mempool: config.Mempool{MaxBytes: cur.Mempool.MaxBytes},
 		Blocks:  config.Blocks{MaxTxs: cur.Blocks.MaxTxs},
+		Fees: config.Fees{
+			FreeTierTxPerMonth: cur.Fees.FreeTierTxPerMonth,
+			MDRBasisPoints:     cur.Fees.MDRBasisPoints,
+			OwnerWallet:        cur.Fees.OwnerWallet,
+		},
 	}, delta)
 }
 
