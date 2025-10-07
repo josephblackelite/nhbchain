@@ -115,7 +115,10 @@ var (
 	lendingMarketPrefix            = []byte("lending/market/")
 	lendingFeeAccrualPrefix        = []byte("lending/fees/")
 	lendingUserPrefix              = []byte("lending/user/")
-	lendingPoolIndexKey            = []byte("lending/pools/index")
+        lendingPoolIndexKey            = []byte("lending/pools/index")
+        feesCounterPrefix              = []byte("fees/counter/")
+        feesTotalsPrefix               = []byte("fees/totals/")
+        feesTotalsIndexPrefix          = []byte("fees/totals/index/")
 )
 
 // GovernanceProposalKey constructs the storage key for the proposal metadata

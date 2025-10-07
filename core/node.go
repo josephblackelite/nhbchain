@@ -36,6 +36,7 @@ import (
 	nativecommon "nhbchain/native/common"
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
+	"nhbchain/native/fees"
 	govcfg "nhbchain/native/gov"
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
@@ -108,6 +109,8 @@ type Node struct {
 	modulePauses                 map[string]bool
 	moduleQuotaMu                sync.RWMutex
 	moduleQuotas                 map[string]nativecommon.Quota
+	feesMu                       sync.RWMutex
+	feesPolicy                   fees.Policy
 	potsoEngineMu                sync.Mutex
 	potsoEngine                  *potso.Engine
 	globalCfgMu                  sync.RWMutex
@@ -316,6 +319,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		creatorRewardsTreasuryAddr: creatorRewardsAddr,
 		modulePauses:               make(map[string]bool),
 		moduleQuotas:               make(map[string]nativecommon.Quota),
+		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		potsoEngine:                potsoEngine,
 		txSimulationEnabled:        true,
 		globalCfg: config.Global{
@@ -337,6 +341,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
 	stateProcessor.SetPaymasterLimits(node.paymasterLimits)
+	stateProcessor.SetFeePolicy(node.feesPolicy)
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -417,6 +422,59 @@ func (n *Node) SetModuleQuotas(quotas map[string]nativecommon.Quota) {
 	if n.state != nil {
 		n.state.SetQuotaConfig(snapshot)
 	}
+}
+
+// SetFeePolicy updates the configured fee policy and synchronises it with the state processor.
+func (n *Node) SetFeePolicy(policy fees.Policy) {
+	if n == nil {
+		return
+	}
+	clone := policy.Clone()
+	if clone.Domains == nil {
+		clone.Domains = make(map[string]fees.DomainPolicy)
+	}
+	n.feesMu.Lock()
+	n.feesPolicy = clone
+	n.feesMu.Unlock()
+	n.stateMu.Lock()
+	if n.state != nil {
+		n.state.SetFeePolicy(clone)
+	}
+	n.stateMu.Unlock()
+}
+
+// FeePolicy returns a copy of the active fee policy snapshot.
+func (n *Node) FeePolicy() fees.Policy {
+	if n == nil {
+		return fees.Policy{}
+	}
+	n.feesMu.RLock()
+	snapshot := n.feesPolicy.Clone()
+	n.feesMu.RUnlock()
+	return snapshot
+}
+
+// FeesTotals lists the aggregated fee totals for the supplied domain grouped by wallet.
+func (n *Node) FeesTotals(domain string) ([]fees.Totals, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	var totals []fees.Totals
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		records, err := m.FeesListTotals(domain)
+		if err != nil {
+			return err
+		}
+		totals = make([]fees.Totals, len(records))
+		for i := range records {
+			totals[i] = records[i]
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return totals, nil
 }
 
 func (n *Node) SetModulePaused(module string, paused bool) {
