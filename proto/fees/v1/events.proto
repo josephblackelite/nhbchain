@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package nhb.fees.v1;
+
+option go_package = "nhbchain/proto/fees/v1;feesv1";
+
+// FeeApplied captures telemetry for a fee assessment.
+message FeeApplied {
+  bytes payer = 1;
+  string domain = 2;
+  string gross_wei = 3;
+  string fee_wei = 4;
+  string net_wei = 5;
+  uint64 policy_version = 6;
+  bytes route_wallet = 7;
+}
+

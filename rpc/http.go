@@ -716,15 +716,17 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleStableRequestSwapApproval(recorder, r, req)
 	case "nhb_swapMint":
 		s.handleStableSwapMint(recorder, r, req)
-	case "nhb_swapBurn":
-		s.handleStableSwapBurn(recorder, r, req)
-	case "nhb_getSwapStatus":
-		s.handleStableGetSwapStatus(recorder, r, req)
-	case "swap_limits":
-		if authErr := s.requireAuth(r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
+        case "nhb_swapBurn":
+                s.handleStableSwapBurn(recorder, r, req)
+        case "nhb_getSwapStatus":
+                s.handleStableGetSwapStatus(recorder, r, req)
+        case "fees_listTotals":
+                s.handleFeesListTotals(recorder, r, req)
+        case "swap_limits":
+                if authErr := s.requireAuth(r); authErr != nil {
+                        writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+                        return
+                }
 		s.handleSwapLimits(recorder, r, req)
 	case "swap_provider_status":
 		if authErr := s.requireAuth(r); authErr != nil {

@@ -22,6 +22,7 @@ import (
 	"nhbchain/native/bank"
 	nativecommon "nhbchain/native/common"
 	"nhbchain/native/escrow"
+	"nhbchain/native/fees"
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/potso"
@@ -97,6 +98,7 @@ type StateProcessor struct {
 	quotaConfig        map[string]nativecommon.Quota
 	quotaStore         *systemquotas.Store
 	intentTTL          time.Duration
+	feePolicy          fees.Policy
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -127,6 +129,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		paymasterLimits:    PaymasterLimits{},
 		quotaConfig:        make(map[string]nativecommon.Quota),
 		intentTTL:          defaultIntentTTL,
+		feePolicy:          fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -181,6 +184,26 @@ func (sp *StateProcessor) SetQuotaConfig(cfg map[string]nativecommon.Quota) {
 	sp.quotaStore = nil
 }
 
+// SetFeePolicy updates the fee policy applied to eligible transactions.
+func (sp *StateProcessor) SetFeePolicy(policy fees.Policy) {
+	if sp == nil {
+		return
+	}
+	clone := policy.Clone()
+	if clone.Domains == nil {
+		clone.Domains = make(map[string]fees.DomainPolicy)
+	}
+	sp.feePolicy = clone
+}
+
+// FeePolicy returns a copy of the currently configured fee policy.
+func (sp *StateProcessor) FeePolicy() fees.Policy {
+	if sp == nil {
+		return fees.Policy{}
+	}
+	return sp.feePolicy.Clone()
+}
+
 func (sp *StateProcessor) quotaStoreHandle() (*systemquotas.Store, error) {
 	if sp == nil || sp.Trie == nil {
 		return nil, fmt.Errorf("quota: state unavailable")
@@ -192,6 +215,92 @@ func (sp *StateProcessor) quotaStoreHandle() (*systemquotas.Store, error) {
 	store := systemquotas.NewStore(manager)
 	sp.quotaStore = store
 	return store, nil
+}
+
+func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []byte, fromAcc, toAcc *types.Account) error {
+	if sp == nil || tx == nil {
+		return nil
+	}
+	domain := strings.TrimSpace(tx.MerchantAddress)
+	if domain == "" {
+		return nil
+	}
+	cfg, ok := sp.feePolicy.DomainConfig(domain)
+	if !ok {
+		return nil
+	}
+	if len(sender) != 20 {
+		return nil
+	}
+	var payer [20]byte
+	copy(payer[:], sender)
+	gross := big.NewInt(0)
+	if tx.Value != nil {
+		gross = new(big.Int).Set(tx.Value)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	counter, _, err := manager.FeesGetCounter(domain, payer)
+	if err != nil {
+		return err
+	}
+	result := fees.Apply(fees.ApplyInput{
+		Domain:        domain,
+		Gross:         gross,
+		UsageCount:    counter,
+		PolicyVersion: sp.feePolicy.Version,
+		Config:        cfg,
+	})
+	if err := manager.FeesPutCounter(domain, payer, result.Counter); err != nil {
+		return err
+	}
+	if err := manager.FeesAccumulateTotals(domain, result.RouteWallet, gross, result.Fee, result.Net); err != nil {
+		return err
+	}
+	if result.Fee != nil && result.Fee.Sign() > 0 && !isZeroAddress(result.RouteWallet) {
+		routed := new(big.Int).Set(result.Fee)
+		deducted := false
+		if toAcc != nil && toAcc.BalanceNHB != nil && toAcc.BalanceNHB.Cmp(routed) >= 0 {
+			toAcc.BalanceNHB.Sub(toAcc.BalanceNHB, routed)
+			deducted = true
+		}
+		if !deducted && fromAcc != nil && fromAcc.BalanceNHB != nil && fromAcc.BalanceNHB.Cmp(routed) >= 0 {
+			fromAcc.BalanceNHB.Sub(fromAcc.BalanceNHB, routed)
+			deducted = true
+		}
+		if !deducted {
+			return fmt.Errorf("fees: insufficient balance to route fee")
+		}
+		routeAcc, err := sp.getAccount(result.RouteWallet[:])
+		if err != nil {
+			return err
+		}
+		if routeAcc.BalanceNHB == nil {
+			routeAcc.BalanceNHB = big.NewInt(0)
+		}
+		routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, routed)
+		if err := sp.setAccount(result.RouteWallet[:], routeAcc); err != nil {
+			return err
+		}
+	}
+	sp.AppendEvent(events.FeeApplied{
+		Payer:         payer,
+		Domain:        fees.NormalizeDomain(domain),
+		Gross:         new(big.Int).Set(gross),
+		Fee:           cloneBigInt(result.Fee),
+		Net:           cloneBigInt(result.Net),
+		PolicyVersion: result.PolicyVersion,
+		RouteWallet:   result.RouteWallet,
+	}.Event())
+	return nil
+}
+
+func isZeroAddress(addr [20]byte) bool {
+	for _, b := range addr {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func quotaEpochFor(q nativecommon.Quota, ts time.Time) uint64 {
@@ -853,6 +962,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		paymasterLimits:    sp.paymasterLimits.Clone(),
 		quotaConfig:        quotaCopy,
 		intentTTL:          sp.intentTTL,
+		feePolicy:          sp.feePolicy.Clone(),
 	}, nil
 }
 
@@ -1047,10 +1157,16 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 
 	blockTime := sp.blockTimestamp()
 	blockCtx := gethvm.BlockContext{
+		CanTransfer: gethcore.CanTransfer,
+		Transfer:    gethcore.Transfer,
+		GetHash: func(uint64) common.Hash {
+			return common.Hash{}
+		},
 		Coinbase:    common.Address{},
 		BlockNumber: new(big.Int).SetUint64(sp.blockHeight()),
 		Time:        uint64(blockTime.Unix()),
 		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
 	}
 
 	assessment, err := sp.EvaluateSponsorship(tx)
@@ -1195,6 +1311,10 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if err := sp.applyTransactionFee(tx, from, fromAcc, toAcc); err != nil {
+		return nil, err
 	}
 
 	if tx.To != nil {
