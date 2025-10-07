@@ -3,6 +3,7 @@
 package posreadiness
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -107,7 +108,45 @@ func TestRegistryReadiness(t *testing.T) {
 
 func TestRealtimeReadiness(t *testing.T) {
 	chain := newMiniChain(t)
-	updates, cancel, backlog, err := chain.Node().POSFinalitySubscribe(context.Background(), "")
+	node := chain.Node()
+	node.SetTransactionSimulationEnabled(false)
+
+	sender, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender: %v", err)
+	}
+	recipient, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient: %v", err)
+	}
+	if err := seedAccount(node, sender, big.NewInt(1_000_000)); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if _, err := chain.FinalizeTxs(); err != nil {
+		t.Fatalf("commit funding block: %v", err)
+	}
+
+	intentRef := []byte("intent-readiness-1")
+	tx := &types.Transaction{
+		ChainID:      types.NHBChainID(),
+		Type:         types.TxTypeTransfer,
+		Nonce:        0,
+		To:           recipient.PubKey().Address().Bytes(),
+		Value:        big.NewInt(1),
+		GasLimit:     21_000,
+		GasPrice:     big.NewInt(1),
+		IntentExpiry: uint64(time.Now().Add(time.Hour).Unix()),
+		IntentRef:    append([]byte(nil), intentRef...),
+	}
+	if err := tx.Sign(sender.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+	txHash, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash tx: %v", err)
+	}
+
+	updates, cancel, backlog, err := node.POSFinalitySubscribe(context.Background(), "")
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
@@ -115,16 +154,66 @@ func TestRealtimeReadiness(t *testing.T) {
 	if len(backlog) != 0 {
 		t.Fatalf("expected empty backlog, got %d", len(backlog))
 	}
-	if _, err := chain.FinalizeTxs(); err != nil {
+
+	if err := node.SubmitTransaction(tx); err != nil {
+		t.Fatalf("submit tx: %v", err)
+	}
+
+	pending := waitForFinalityUpdate(t, updates)
+	if pending.Status != core.POSFinalityStatusPending {
+		t.Fatalf("unexpected pending status: %s", pending.Status)
+	}
+	if !bytes.Equal(pending.IntentRef, intentRef) {
+		t.Fatalf("unexpected pending intent ref: %x", pending.IntentRef)
+	}
+	if !bytes.Equal(pending.TxHash, txHash) {
+		t.Fatalf("unexpected pending tx hash: %x", pending.TxHash)
+	}
+
+	block, err := chain.FinalizeTxs(tx)
+	if err != nil {
 		t.Fatalf("finalize block: %v", err)
 	}
+	if block == nil || block.Header == nil {
+		t.Fatalf("expected finalized block")
+	}
+	blockHash, err := block.Header.Hash()
+	if err != nil {
+		t.Fatalf("hash block: %v", err)
+	}
+
+	finalized := waitForFinalityUpdate(t, updates)
+	if finalized.Status != core.POSFinalityStatusFinalized {
+		t.Fatalf("unexpected finalized status: %s", finalized.Status)
+	}
+	if !bytes.Equal(finalized.IntentRef, intentRef) {
+		t.Fatalf("unexpected finalized intent ref: %x", finalized.IntentRef)
+	}
+	if !bytes.Equal(finalized.TxHash, txHash) {
+		t.Fatalf("unexpected finalized tx hash: %x", finalized.TxHash)
+	}
+	if !bytes.Equal(finalized.BlockHash, blockHash) {
+		t.Fatalf("unexpected block hash: %x", finalized.BlockHash)
+	}
+	if finalized.Height != block.Header.Height {
+		t.Fatalf("unexpected block height: %d", finalized.Height)
+	}
+	if finalized.Timestamp != block.Header.Timestamp {
+		t.Fatalf("unexpected timestamp: %d", finalized.Timestamp)
+	}
+}
+
+func waitForFinalityUpdate(t *testing.T, updates <-chan core.POSFinalityUpdate) core.POSFinalityUpdate {
+	t.Helper()
 	select {
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("expected finality update")
-	case update := <-updates:
-		if update.Status != core.POSFinalityStatusFinalized {
-			t.Fatalf("unexpected status: %s", update.Status)
+		return core.POSFinalityUpdate{}
+	case update, ok := <-updates:
+		if !ok {
+			t.Fatalf("updates channel closed")
 		}
+		return update
 	}
 }
 

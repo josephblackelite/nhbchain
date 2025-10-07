@@ -225,7 +225,7 @@ go test -tags $(POS_TEST_TAGS) -v ./tests/posreadiness/registry \
 pos\:run-realtime:
 	@mkdir -p $(POS_LOG_DIR)
 	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
-	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestRealtimeReadiness 2>&1 | tee $(POS_LOG_DIR)/realtime.log"
+	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestRealtimeReadiness && go test -tags $(POS_TEST_TAGS) -v ./tests/posreadiness/realtime" 2>&1 | tee $(POS_LOG_DIR)/realtime.log
 
 pos\:run-security:
 	@mkdir -p $(POS_LOG_DIR)
