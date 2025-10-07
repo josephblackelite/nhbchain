@@ -6,15 +6,16 @@ program-specific payouts.
 
 ## Default Accrual Rate
 
-* The chain-wide default accrual rate is **50 basis points (0.5%)** as defined by
-  `loyalty.DefaultBaseRewardBps`.
+* The chain-wide default accrual rate is **5,000 basis points (50%)** as defined by
+  `loyalty.DefaultBaseRewardBps`, minting 0.5 ZNHB for every 1 NHB of qualifying
+  spend.
 * All basis-point math uses the `loyalty.BaseRewardBpsDenominator` constant of
   10,000.
 * Operators can toggle the engine with the `Active` flag, but when enabled an
   explicit reward rate is no longer required—the default is applied whenever the
   stored config omits `BaseBps`.
 
-For example, a 20,000 wei NHB payment mints 100 wei ZNHB: `20_000 * 50 / 10_000`.
+For example, a 20,000 wei NHB payment mints 10,000 wei ZNHB: `20_000 * 5_000 / 10_000`.
 Caps (per-transaction or daily) clamp the computed reward after the rate is
 applied.
 
@@ -27,7 +28,7 @@ via `state.Manager.SetLoyaltyGlobalConfig`. Relevant fields:
 |-------|-------------|
 | `Active` | Enables/disables base reward accrual. |
 | `Treasury` | 20-byte address that funds rewards. |
-| `BaseBps` | Optional basis-point override; defaults to 50 when zero. |
+| `BaseBps` | Optional basis-point override; defaults to 5,000 when zero. |
 | `MinSpend` | Minimum NHB spend required to earn the reward. |
 | `CapPerTx` | Hard cap (in ZNHB) per transaction. |
 | `DailyCapUser` | Daily cap (in ZNHB) per shopper. |
