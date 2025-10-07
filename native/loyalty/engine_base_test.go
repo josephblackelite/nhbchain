@@ -120,7 +120,7 @@ func newConfig(baseBps uint32, minSpend, capPerTx, dailyCap int64, treasury []by
 func TestApplyBaseRewardHappyPath(t *testing.T) {
 	treasury := []byte("treasury")
 	from := []byte("from")
-	cfg := newConfig(50, 100, 500, 1000, treasury)
+	cfg := newConfig(5_000, 100, 500, 1000, treasury)
 	state := newMockState(cfg)
 	state.addAccount(treasury, &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
@@ -136,29 +136,29 @@ func TestApplyBaseRewardHappyPath(t *testing.T) {
 	engine := NewEngine()
 	engine.ApplyBaseReward(state, ctx)
 
-	if got := ctx.FromAccount.BalanceZNHB.String(); got != "5" {
-		t.Fatalf("expected reward 5, got %s", got)
+	if got := ctx.FromAccount.BalanceZNHB.String(); got != "500" {
+		t.Fatalf("expected reward 500, got %s", got)
 	}
 	treasuryAcc, _ := state.GetAccount(treasury)
-	if got := treasuryAcc.BalanceZNHB.String(); got != "995" {
-		t.Fatalf("expected treasury balance 995, got %s", got)
+	if got := treasuryAcc.BalanceZNHB.String(); got != "500" {
+		t.Fatalf("expected treasury balance 500, got %s", got)
 	}
 	daily, _ := state.LoyaltyBaseDailyAccrued(from, "2024-01-02")
-	if daily.String() != "5" {
-		t.Fatalf("expected daily accrued 5, got %s", daily.String())
+	if daily.String() != "500" {
+		t.Fatalf("expected daily accrued 500, got %s", daily.String())
 	}
 	total, _ := state.LoyaltyBaseTotalAccrued(from)
-	if total.String() != "5" {
-		t.Fatalf("expected total accrued 5, got %s", total.String())
+	if total.String() != "500" {
+		t.Fatalf("expected total accrued 500, got %s", total.String())
 	}
 	if len(state.events) != 1 || state.events[0].Type != eventBaseAccrued {
 		t.Fatalf("expected accrued event, got %#v", state.events)
 	}
-	if state.events[0].Attributes["reward"] != "5" {
-		t.Fatalf("expected reward attribute 5, got %s", state.events[0].Attributes["reward"])
+	if state.events[0].Attributes["reward"] != "500" {
+		t.Fatalf("expected reward attribute 500, got %s", state.events[0].Attributes["reward"])
 	}
-	if got := state.events[0].Attributes["baseBps"]; got != "50" {
-		t.Fatalf("expected baseBps attribute 50, got %s", got)
+	if got := state.events[0].Attributes["baseBps"]; got != "5000" {
+		t.Fatalf("expected baseBps attribute 5000, got %s", got)
 	}
 }
 

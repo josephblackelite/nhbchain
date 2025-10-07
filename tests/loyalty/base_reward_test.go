@@ -79,7 +79,7 @@ func TestBaseRewardAccruesAtDefaultRate(t *testing.T) {
 		t.Fatalf("set global config: %v", err)
 	}
 
-	mustPutAccount(t, manager, treasury, &types.Account{BalanceZNHB: big.NewInt(1_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	mustPutAccount(t, manager, treasury, &types.Account{BalanceZNHB: big.NewInt(20_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
 
 	var spender [20]byte
 	spender[19] = 0xBB
@@ -106,7 +106,7 @@ func TestBaseRewardAccruesAtDefaultRate(t *testing.T) {
 	}
 
 	treasuryAcc := mustAccount(t, manager, treasury)
-	wantTreasury := big.NewInt(1_000)
+	wantTreasury := big.NewInt(20_000)
 	wantTreasury.Sub(wantTreasury, expected)
 	if treasuryAcc.BalanceZNHB.Cmp(wantTreasury) != 0 {
 		t.Fatalf("expected treasury balance %s, got %s", wantTreasury.String(), treasuryAcc.BalanceZNHB.String())
@@ -129,8 +129,8 @@ func TestBaseRewardAccruesAtDefaultRate(t *testing.T) {
 	if evt.Attributes["reward"] != expected.String() {
 		t.Fatalf("expected reward attribute %s, got %s", expected.String(), evt.Attributes["reward"])
 	}
-	if evt.Attributes["baseBps"] != "50" {
-		t.Fatalf("expected baseBps attribute 50, got %s", evt.Attributes["baseBps"])
+	if evt.Attributes["baseBps"] != "5000" {
+		t.Fatalf("expected baseBps attribute 5000, got %s", evt.Attributes["baseBps"])
 	}
 }
 
@@ -223,7 +223,7 @@ func TestBaseRewardHonorsCapPerTx(t *testing.T) {
 	if evt.Attributes["reward"] != "50" {
 		t.Fatalf("expected reward attribute 50, got %s", evt.Attributes["reward"])
 	}
-	if evt.Attributes["baseBps"] != "50" {
-		t.Fatalf("expected baseBps attribute 50, got %s", evt.Attributes["baseBps"])
+	if evt.Attributes["baseBps"] != "5000" {
+		t.Fatalf("expected baseBps attribute 5000, got %s", evt.Attributes["baseBps"])
 	}
 }

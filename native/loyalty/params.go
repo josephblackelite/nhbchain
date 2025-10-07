@@ -5,8 +5,8 @@ const (
 	// when computing base spend rewards.
 	BaseRewardBpsDenominator = 10_000
 	// DefaultBaseRewardBps configures the default base accrual rate expressed in
-	// basis points (0.5%).
-	DefaultBaseRewardBps = 50
+	// basis points (50%).
+	DefaultBaseRewardBps = 5_000
 )
 
 // ApplyDefaults ensures unset fields fall back to module defaults.
