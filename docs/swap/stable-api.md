@@ -1,6 +1,6 @@
 # Stable Funding API
 
-The stable swap engine powers voucher liquidity, reserves cash-out intents, and records receipts for downstream treasury teams. The engine now runs in production for OTC desks whenever `swapd` is started with `stable.paused = false`. A small number of guard rails remain (soft quotas and throttles are described below), but the HTTP surface is live and wired directly to the in-memory `stable.Engine`.
+The stable swap engine powers voucher liquidity, reserves cash-out intents, and records receipts for downstream treasury teams. The engine now runs in production for OTC desks whenever `swapd` is started with `stable.paused = false`. Keep the flag at `true` during readiness phases so cash-out requests fail fast with `501 stable engine not enabled` while governance finalises launch approvals. A small number of guard rails remain (soft quotas and throttles are described below), but the HTTP surface is live and wired directly to the in-memory `stable.Engine`.
 
 This document captures the HTTP surface for `/v1/stable/*`, expected request/response shapes, rate limits, and the transparency hooks that bind quotes to reservations, cash-out intents, and banking receipts. Where applicable we also call out the behaviour when the engine is disabled so that playbooks remain accurate for dry runs.
 

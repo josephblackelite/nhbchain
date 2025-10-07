@@ -49,6 +49,33 @@ the latest block root, decodes `system/pauses`, and prints the module map.【F:e
 > on-chain flag. When restoring service, unpause `swapd` only after the governance
 > update clears the module pause so submitted redemptions will execute successfully.
 
+### Pause playbooks (mints vs. redemptions)
+
+* **Pause minting:** run the helper above with `--module swap --state pause` and
+  capture the transaction hash for the incident log.
+* **Pause redemptions:** flip `stable.paused=true` in the active swapd overlay
+  while leaving the mint flag untouched. For example:
+
+  ```bash
+  yq -i '.stable.paused = true' deploy/environments/prod/swapd.yaml
+  kubectl rollout restart deployment swapd -n treasury
+  ```
+
+  The restart ensures the new flag propagates. Reverting to `stable.paused=false`
+  re-opens redemptions once the on-chain pause clears.
+* **Observe toggles:** combine the consensus snapshot with the swapd status
+  endpoint to confirm the desired state landed:
+
+  ```bash
+  go run ./examples/docs/ops/swap_pause_inspect \
+    --db ./nhb-data \
+    --consensus localhost:9090 \
+    --swapd https://swapd.internal.nhb
+  ```
+
+  The helper prints `global.pauses.swap` and whether `/v1/stable/status` is
+  returning `501 stable engine not enabled` (paused) or live counters (active).
+
 ## Inspect quota usage for an address
 
 1. Determine the module, target address, and quota epoch window. The helper
