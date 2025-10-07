@@ -52,9 +52,9 @@ func TestSponsorshipCapsAndRouting(t *testing.T) {
 		Version: 1,
 		Domains: map[string]fees.DomainPolicy{
 			fees.DomainPOS: {
-				FreeTierAllowance: 2,
-				MDRBps:            150,
-				RouteWallet:       routeWallet,
+				FreeTierTxPerMonth: 2,
+				MDRBasisPoints:     150,
+				OwnerWallet:        routeWallet,
 			},
 		},
 	}

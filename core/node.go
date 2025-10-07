@@ -334,6 +334,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			},
 			Mempool: config.Mempool{MaxBytes: 1, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 			Blocks:  config.Blocks{MaxTxs: 1},
+			Fees: config.Fees{
+				FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
+				MDRBasisPoints:     config.DefaultMDRBasisPoints,
+			},
 		},
 		posStreamSubs:    make(map[uint64]chan POSFinalityUpdate),
 		posStreamHistory: make([]POSFinalityUpdate, 0, posFinalityHistoryLimit),
@@ -652,6 +656,11 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			Trade:   n.globalCfg.Quotas.Trade,
 			Loyalty: n.globalCfg.Quotas.Loyalty,
 			POTSO:   n.globalCfg.Quotas.POTSO,
+		},
+		Fees: config.Fees{
+			FreeTierTxPerMonth: n.globalCfg.Fees.FreeTierTxPerMonth,
+			MDRBasisPoints:     n.globalCfg.Fees.MDRBasisPoints,
+			OwnerWallet:        n.globalCfg.Fees.OwnerWallet,
 		},
 	}
 	return snapshot

@@ -22,6 +22,7 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 			Slashing: govcfg.SlashingBaseline{MinWindowSecs: 60, MaxWindowSecs: 600},
 			Mempool:  govcfg.MempoolBaseline{MaxBytes: 16 << 20},
 			Blocks:   govcfg.BlocksBaseline{MaxTxs: 5000},
+			Fees:     govcfg.FeesBaseline{FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth, MDRBasisPoints: config.DefaultMDRBasisPoints},
 		}
 
 		delta := govcfg.PolicyDelta{}
@@ -106,6 +107,11 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 			},
 			Mempool: config.Mempool{MaxBytes: baseline.Mempool.MaxBytes},
 			Blocks:  config.Blocks{MaxTxs: baseline.Blocks.MaxTxs},
+			Fees: config.Fees{
+				FreeTierTxPerMonth: baseline.Fees.FreeTierTxPerMonth,
+				MDRBasisPoints:     baseline.Fees.MDRBasisPoints,
+				OwnerWallet:        baseline.Fees.OwnerWallet,
+			},
 		}
 
 		if govDelta != nil {

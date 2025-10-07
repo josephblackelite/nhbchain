@@ -7,9 +7,10 @@ be tuned through parameter proposals.
 
 ## Free tier
 
-Wallets receive a **monthly allowance of 1,000 NHB-sponsored transactions**.
+Wallets receive a **monthly allowance of 100 NHB-sponsored transactions**.
 Transactions that qualify for the free tier are debited against the sender's
-rolling 30-day count. Once the allowance is exhausted the standard fee schedule
+usage for the current UTC calendar month. Balances reset automatically at the
+start of each month. Once the allowance is exhausted the standard fee schedule
 applies. The allowance can be reconfigured via governance (see
 [fee parameters](../governance/fee-params.md)).
 

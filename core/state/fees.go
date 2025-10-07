@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"time"
 
 	"nhbchain/native/fees"
 )
 
 type storedFeeCounter struct {
-	Count uint64
+	Count           uint64
+	WindowStartUnix uint64
 }
 
 type storedFeeTotals struct {
@@ -57,28 +59,36 @@ func feeTotalsIndexKey(domain string) []byte {
 	return buf
 }
 
-func (m *Manager) FeesGetCounter(domain string, payer [20]byte) (uint64, bool, error) {
+func (m *Manager) FeesGetCounter(domain string, payer [20]byte) (uint64, time.Time, bool, error) {
 	if m == nil {
-		return 0, false, fmt.Errorf("fees: state manager not initialised")
+		return 0, time.Time{}, false, fmt.Errorf("fees: state manager not initialised")
 	}
 	key := feeCounterKey(domain, payer)
 	var stored storedFeeCounter
 	ok, err := m.KVGet(key, &stored)
 	if err != nil {
-		return 0, false, fmt.Errorf("fees: load counter: %w", err)
+		return 0, time.Time{}, false, fmt.Errorf("fees: load counter: %w", err)
 	}
 	if !ok {
-		return 0, false, nil
+		return 0, time.Time{}, false, nil
 	}
-	return stored.Count, true, nil
+	var windowStart time.Time
+	if stored.WindowStartUnix != 0 {
+		windowStart = time.Unix(int64(stored.WindowStartUnix), 0).UTC()
+	}
+	return stored.Count, windowStart, true, nil
 }
 
-func (m *Manager) FeesPutCounter(domain string, payer [20]byte, count uint64) error {
+func (m *Manager) FeesPutCounter(domain string, payer [20]byte, count uint64, windowStart time.Time) error {
 	if m == nil {
 		return fmt.Errorf("fees: state manager not initialised")
 	}
 	key := feeCounterKey(domain, payer)
-	return m.KVPut(key, storedFeeCounter{Count: count})
+	stored := storedFeeCounter{Count: count}
+	if !windowStart.IsZero() {
+		stored.WindowStartUnix = uint64(windowStart.UTC().Unix())
+	}
+	return m.KVPut(key, stored)
 }
 
 func ensureFeeTotalsDefaults(stored *storedFeeTotals) {

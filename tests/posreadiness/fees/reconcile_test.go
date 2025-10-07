@@ -72,9 +72,9 @@ func TestFeeEventReconciliation(t *testing.T) {
 		Version: 1,
 		Domains: map[string]fees.DomainPolicy{
 			fees.DomainPOS: {
-				FreeTierAllowance: 0,
-				MDRBps:            200,
-				RouteWallet:       routeWallet,
+				FreeTierTxPerMonth: 0,
+				MDRBasisPoints:     200,
+				OwnerWallet:        routeWallet,
 			},
 		},
 	}
@@ -100,7 +100,7 @@ func TestFeeEventReconciliation(t *testing.T) {
 			if evt.Attributes == nil {
 				continue
 			}
-			if evt.Attributes["routeWallet"] != expectedRouteHex {
+			if evt.Attributes["ownerWallet"] != expectedRouteHex {
 				continue
 			}
 			feeStr, ok := evt.Attributes["feeWei"]

@@ -42,3 +42,5 @@ toc:
         path: fees/routing.md
       - name: Governance parameters
         path: governance/fee-params.md
+      - name: Operations runbook
+        path: ops/fees.md

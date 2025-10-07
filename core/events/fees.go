@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"nhbchain/core/types"
 )
@@ -16,13 +17,19 @@ const (
 
 // FeeApplied records the outcome of a fee evaluation for analytics pipelines.
 type FeeApplied struct {
-	Payer         [20]byte
-	Domain        string
-	Gross         *big.Int
-	Fee           *big.Int
-	Net           *big.Int
-	PolicyVersion uint64
-	RouteWallet   [20]byte
+	Payer             [20]byte
+	Domain            string
+	Gross             *big.Int
+	Fee               *big.Int
+	Net               *big.Int
+	PolicyVersion     uint64
+	OwnerWallet       [20]byte
+	FreeTierApplied   bool
+	FreeTierLimit     uint64
+	FreeTierRemaining uint64
+	UsageCount        uint64
+	WindowStart       time.Time
+	FeeBasisPoints    uint32
 }
 
 // EventType satisfies the events.Event interface.
@@ -49,8 +56,22 @@ func (e FeeApplied) Event() *types.Event {
 	if e.PolicyVersion > 0 {
 		attrs["policyVersion"] = strconv.FormatUint(e.PolicyVersion, 10)
 	}
-	if !zeroBytes(e.RouteWallet[:]) {
-		attrs["routeWallet"] = hex.EncodeToString(e.RouteWallet[:])
+	if !zeroBytes(e.OwnerWallet[:]) {
+		attrs["ownerWallet"] = hex.EncodeToString(e.OwnerWallet[:])
+	}
+	attrs["freeTierApplied"] = strconv.FormatBool(e.FreeTierApplied)
+	if e.FreeTierLimit > 0 {
+		attrs["freeTierLimit"] = strconv.FormatUint(e.FreeTierLimit, 10)
+	}
+	attrs["freeTierRemaining"] = strconv.FormatUint(e.FreeTierRemaining, 10)
+	if e.UsageCount > 0 {
+		attrs["usageCount"] = strconv.FormatUint(e.UsageCount, 10)
+	}
+	if !e.WindowStart.IsZero() {
+		attrs["windowStartUnix"] = strconv.FormatInt(e.WindowStart.UTC().Unix(), 10)
+	}
+	if e.FeeBasisPoints > 0 {
+		attrs["feeBps"] = strconv.FormatUint(uint64(e.FeeBasisPoints), 10)
 	}
 	return &types.Event{Type: TypeFeeApplied, Attributes: attrs}
 }

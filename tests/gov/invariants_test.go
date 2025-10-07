@@ -21,6 +21,10 @@ func testBaseline() govcfg.Baseline {
 		},
 		Mempool: govcfg.MempoolBaseline{MaxBytes: 1},
 		Blocks:  govcfg.BlocksBaseline{MaxTxs: 1},
+		Fees: govcfg.FeesBaseline{
+			FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
+			MDRBasisPoints:     config.DefaultMDRBasisPoints,
+		},
 	}
 }
 
