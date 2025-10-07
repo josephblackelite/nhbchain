@@ -5,6 +5,10 @@ recognized, and ultimately settle into the Network Hub Bank (NHB) treasury accou
 on-chain event data with custodied wallet balances to deliver a reconciled view of fee revenue and
 free-tier consumption.
 
+The authoritative Grafana configuration is versioned at
+[`ops/grafana/dashboards/fees.json`](../../ops/grafana/dashboards/fees.json) and is validated by the
+POS readiness test suite to ensure the JSON schema remains loadable.
+
 ## Methodology
 
 The dashboard is composed of two data lenses that are reconciled on a daily basis:

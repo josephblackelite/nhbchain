@@ -235,7 +235,10 @@ pos\:run-security:
 pos\:run-fees:
 	@mkdir -p $(POS_LOG_DIR)
 	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
-	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestFeesReadiness 2>&1 | tee $(POS_LOG_DIR)/fees.log"
+	@bash -o errexit -o nounset -o pipefail -c "( \
+$(POS_TEST_BIN) -test.v -test.run TestFeesReadiness && \
+go test -tags $(POS_TEST_TAGS) -v ./tests/posreadiness/fees \
+) 2>&1 | tee $(POS_LOG_DIR)/fees.log"
 
 pos\:bench-qos:
 	@mkdir -p $(POS_LOG_DIR)
