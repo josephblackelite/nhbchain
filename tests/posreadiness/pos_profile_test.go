@@ -16,6 +16,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/pos"
 	"nhbchain/tests/posreadiness/harness"
+	security "nhbchain/tests/posreadiness/security"
 )
 
 func newMiniChain(t *testing.T) *harness.MiniChain {
@@ -44,7 +45,8 @@ func buildTransferTx(key *crypto.PrivateKey, nonce uint64) (*types.Transaction, 
 		ChainID:  types.NHBChainID(),
 		Type:     types.TxTypeTransfer,
 		Nonce:    nonce,
-		GasLimit: 1,
+		To:       append([]byte(nil), key.PubKey().Address().Bytes()...),
+		GasLimit: 21_000,
 		GasPrice: big.NewInt(1),
 		Value:    big.NewInt(0),
 	}
@@ -218,26 +220,31 @@ func waitForFinalityUpdate(t *testing.T, updates <-chan core.POSFinalityUpdate) 
 }
 
 func TestSecurityReadiness(t *testing.T) {
-	chain := newMiniChain(t)
-	node := chain.Node()
-	key, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	if err := seedAccount(node, key, big.NewInt(1_000_000)); err != nil {
-		t.Fatalf("seed account: %v", err)
-	}
-	tx, err := buildTransferTx(key, 0)
-	if err != nil {
-		t.Fatalf("build tx: %v", err)
-	}
-	if err := node.SubmitTransaction(tx); err != nil {
-		t.Fatalf("submit tx: %v", err)
-	}
-	mempool := node.GetMempool()
-	if len(mempool) == 0 {
-		t.Fatalf("expected mempool entry")
-	}
+	t.Run("MempoolAdmission", func(t *testing.T) {
+		chain := newMiniChain(t)
+		node := chain.Node()
+		node.SetTransactionSimulationEnabled(false)
+		if _, err := chain.FinalizeTxs(); err != nil {
+			t.Fatalf("finalize genesis block: %v", err)
+		}
+		key, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		tx, err := buildTransferTx(key, 0)
+		if err != nil {
+			t.Fatalf("build tx: %v", err)
+		}
+		if err := node.SubmitTransaction(tx); err != nil {
+			t.Fatalf("submit tx: %v", err)
+		}
+		mempool := node.GetMempool()
+		if len(mempool) == 0 {
+			t.Fatalf("expected mempool entry")
+		}
+	})
+
+	t.Run("Transport", security.RunTransportSuite)
 }
 
 func TestFeesReadiness(t *testing.T) {
