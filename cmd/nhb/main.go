@@ -355,9 +355,9 @@ func main() {
 	})
 	rpcErrCh := make(chan error, 1)
 	go func() {
-		if err := rpcServer.Start(cfg.RPCAddress); err != nil {
-			rpcErrCh <- err
-		}
+		err := rpcServer.Start(cfg.RPCAddress)
+		rpcErrCh <- err
+		close(rpcErrCh)
 	}()
 
 	if err := waitForRPCStartup(cfg.RPCAddress, rpcErrCh, 5*time.Second); err != nil {
@@ -366,7 +366,7 @@ func main() {
 	}
 
 	go func() {
-		if err := <-rpcErrCh; err != nil {
+		if err, ok := <-rpcErrCh; ok && err != nil {
 			fmt.Fprintf(os.Stderr, "RPC server terminated: %v\n", err)
 		}
 	}()
@@ -450,11 +450,14 @@ func waitForRPCStartup(addr string, errCh <-chan error, timeout time.Duration) e
 
 	for {
 		select {
-		case err := <-errCh:
+		case err, ok := <-errCh:
+			if !ok {
+				return fmt.Errorf("RPC server terminated before startup confirmation")
+			}
 			if err != nil {
 				return err
 			}
-			return nil
+			return fmt.Errorf("RPC server exited before startup confirmation")
 		default:
 		}
 
@@ -465,11 +468,14 @@ func waitForRPCStartup(addr string, errCh <-chan error, timeout time.Duration) e
 		}
 
 		select {
-		case err := <-errCh:
+		case err, ok := <-errCh:
+			if !ok {
+				return fmt.Errorf("RPC server terminated before startup confirmation")
+			}
 			if err != nil {
 				return err
 			}
-			return nil
+			return fmt.Errorf("RPC server exited before startup confirmation")
 		case <-ticker.C:
 		case <-deadline.C:
 			return fmt.Errorf("timed out waiting for RPC server to start on %s", addr)
