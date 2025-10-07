@@ -5,7 +5,7 @@ runtime service required in a production NHB stack:
 
 - `p2pd`
 - `consensusd`
-- `lendingd`
+- `lendingd` (preview – disabled by default)
 - `swapd`
 - `governd`
 - `gateway`
@@ -16,6 +16,10 @@ Each chart packages:
 - a Service definition
 - optional Ingress (gateway) and ConfigMaps for application configuration
 - knobs for persistence, resources, and environment variables
+
+> **Preview:** `lendingd` is included for completeness but the default values
+> scale it to zero replicas. Override `replicaCount` only if you are testing the
+> preview service and accept that all RPCs return `UNIMPLEMENTED`.
 
 ## Pre-requisites
 
@@ -35,7 +39,9 @@ Example (staging):
 ```sh
 helm upgrade --install p2pd deploy/helm/p2pd -f deploy/helm/values/staging/p2pd.yaml
 helm upgrade --install consensusd deploy/helm/consensusd -f deploy/helm/values/staging/consensusd.yaml
-helm upgrade --install lendingd deploy/helm/lendingd -f deploy/helm/values/staging/lendingd.yaml
+# (Optional once RPCs are implemented)
+# helm upgrade --install lendingd deploy/helm/lendingd -f deploy/helm/values/staging/lendingd.yaml \
+#   --set replicaCount=1
 helm upgrade --install swapd deploy/helm/swapd -f deploy/helm/values/staging/swapd.yaml
 helm upgrade --install governd deploy/helm/governd -f deploy/helm/values/staging/governd.yaml \
   --set secrets.signerKey="$(kubectl get secret nhb-governance -o jsonpath='{.data.signer-key}' | base64 -d)"
