@@ -9,8 +9,10 @@ transitions.
 
 ## Issuance
 
-Verifiers call `Node.ReputationVerifySkill` to issue an attestation. The module
-normalizes the skill label, validates the payload and persists the record using
+Verifiers call `Node.ReputationVerifySkill` to issue an attestation. The node first
+confirms the caller holds `roleReputationVerifier`, returning
+`ErrReputationVerifierUnauthorized` if the membership check fails. Once authorized,
+the module normalizes the skill label, validates the payload and persists the record using
 an index keyed by `(subject, skill_hash, issuer)` for constant-time lookups.
 Optional expirations must be strictly after the issue time; attestations with an
 `expiresAt` in the past are rejected during validation.
