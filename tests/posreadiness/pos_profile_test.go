@@ -70,10 +70,10 @@ func TestIntentReadiness(t *testing.T) {
 func TestPaymasterReadiness(t *testing.T) {
 	chain := newMiniChain(t)
 	node := chain.Node()
-	limits := core.PaymasterLimits{Global: big.NewInt(1)}
+	limits := core.PaymasterLimits{GlobalDailyCapWei: big.NewInt(1)}
 	node.SetPaymasterLimits(limits)
 	snapshot := node.PaymasterLimits()
-	if snapshot.Global == nil || snapshot.Global.Cmp(limits.Global) != 0 {
+	if snapshot.GlobalDailyCapWei == nil || snapshot.GlobalDailyCapWei.Cmp(limits.GlobalDailyCapWei) != 0 {
 		t.Fatalf("unexpected limits snapshot: %+v", snapshot)
 	}
 }
