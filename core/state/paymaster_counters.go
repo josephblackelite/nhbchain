@@ -14,6 +14,8 @@ var (
 	paymasterDeviceDayPrefix   = []byte("paymaster/counter/device/")
 	paymasterMerchantDayPrefix = []byte("paymaster/counter/merchant/")
 	paymasterGlobalDayPrefix   = []byte("paymaster/counter/global/")
+	paymasterTopUpDayPrefix    = []byte("paymaster/topup/day/")
+	paymasterTopUpLastPrefix   = []byte("paymaster/topup/last/")
 )
 
 // PaymasterDeviceDay captures the per-device sponsorship usage metrics for a single UTC day.
@@ -103,7 +105,55 @@ func (p *PaymasterGlobalDay) Clone() *PaymasterGlobalDay {
 	return clone
 }
 
+// PaymasterTopUpDay captures the automatic top-up usage for a paymaster on a single day.
+type PaymasterTopUpDay struct {
+	Paymaster string
+	Day       string
+	MintedWei *big.Int
+}
+
+// Clone returns a deep copy of the top-up record.
+func (p *PaymasterTopUpDay) Clone() *PaymasterTopUpDay {
+	if p == nil {
+		return nil
+	}
+	clone := &PaymasterTopUpDay{
+		Paymaster: NormalizePaymasterAddress(p.Paymaster),
+		Day:       NormalizePaymasterDay(p.Day),
+	}
+	if p.MintedWei != nil {
+		clone.MintedWei = new(big.Int).Set(p.MintedWei)
+	}
+	ensurePaymasterTopUpDayDefaults(clone)
+	return clone
+}
+
+// PaymasterTopUpStatus records the most recent automatic top-up execution for a paymaster.
+type PaymasterTopUpStatus struct {
+	Paymaster string
+	LastUnix  uint64
+}
+
+// Clone returns a deep copy of the status record.
+func (p *PaymasterTopUpStatus) Clone() *PaymasterTopUpStatus {
+	if p == nil {
+		return nil
+	}
+	return &PaymasterTopUpStatus{
+		Paymaster: NormalizePaymasterAddress(p.Paymaster),
+		LastUnix:  p.LastUnix,
+	}
+}
+
 // NormalizePaymasterMerchant returns the canonical representation for the merchant identifier.
+func NormalizePaymasterAddress(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ToLower(trimmed)
+}
+
 func NormalizePaymasterMerchant(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -171,6 +221,17 @@ func ensurePaymasterGlobalDefaults(record *PaymasterGlobalDay) {
 	record.Day = NormalizePaymasterDay(record.Day)
 }
 
+func ensurePaymasterTopUpDayDefaults(record *PaymasterTopUpDay) {
+	if record == nil {
+		return
+	}
+	if record.MintedWei == nil {
+		record.MintedWei = big.NewInt(0)
+	}
+	record.Paymaster = NormalizePaymasterAddress(record.Paymaster)
+	record.Day = NormalizePaymasterDay(record.Day)
+}
+
 func paymasterDeviceDayKey(merchant, device, day string) []byte {
 	merchantKey := NormalizePaymasterMerchant(merchant)
 	deviceKey := NormalizePaymasterDevice(device)
@@ -209,6 +270,28 @@ func paymasterGlobalDayKey(day string) []byte {
 	buf := make([]byte, len(paymasterGlobalDayPrefix)+len(dayKey))
 	copy(buf, paymasterGlobalDayPrefix)
 	copy(buf[len(paymasterGlobalDayPrefix):], dayKey)
+	return buf
+}
+
+func paymasterTopUpDayKey(paymaster, day string) []byte {
+	pmKey := NormalizePaymasterAddress(paymaster)
+	dayKey := NormalizePaymasterDay(day)
+	buf := make([]byte, len(paymasterTopUpDayPrefix)+len(dayKey)+1+len(pmKey))
+	copy(buf, paymasterTopUpDayPrefix)
+	offset := len(paymasterTopUpDayPrefix)
+	copy(buf[offset:], dayKey)
+	offset += len(dayKey)
+	buf[offset] = '/'
+	offset++
+	copy(buf[offset:], pmKey)
+	return buf
+}
+
+func paymasterTopUpLastKey(paymaster string) []byte {
+	pmKey := NormalizePaymasterAddress(paymaster)
+	buf := make([]byte, len(paymasterTopUpLastPrefix)+len(pmKey))
+	copy(buf, paymasterTopUpLastPrefix)
+	copy(buf[len(paymasterTopUpLastPrefix):], pmKey)
 	return buf
 }
 
@@ -300,4 +383,63 @@ func (m *Manager) PaymasterPutGlobalDay(record *PaymasterGlobalDay) error {
 	}
 	ensurePaymasterGlobalDefaults(record)
 	return m.KVPut(paymasterGlobalDayKey(record.Day), record)
+}
+
+// PaymasterGetTopUpDay retrieves the automatic top-up usage for the provided paymaster and day.
+func (m *Manager) PaymasterGetTopUpDay(paymaster, day string) (*PaymasterTopUpDay, bool, error) {
+	if m == nil {
+		return nil, false, fmt.Errorf("state manager not initialised")
+	}
+	key := paymasterTopUpDayKey(paymaster, day)
+	var stored PaymasterTopUpDay
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	ensurePaymasterTopUpDayDefaults(&stored)
+	return stored.Clone(), true, nil
+}
+
+// PaymasterPutTopUpDay stores the automatic top-up usage for the provided paymaster and day.
+func (m *Manager) PaymasterPutTopUpDay(record *PaymasterTopUpDay) error {
+	if m == nil {
+		return fmt.Errorf("state manager not initialised")
+	}
+	if record == nil {
+		return fmt.Errorf("paymaster top-up record must not be nil")
+	}
+	ensurePaymasterTopUpDayDefaults(record)
+	return m.KVPut(paymasterTopUpDayKey(record.Paymaster, record.Day), record)
+}
+
+// PaymasterGetTopUpStatus retrieves the most recent automatic top-up status for the provided paymaster.
+func (m *Manager) PaymasterGetTopUpStatus(paymaster string) (*PaymasterTopUpStatus, bool, error) {
+	if m == nil {
+		return nil, false, fmt.Errorf("state manager not initialised")
+	}
+	key := paymasterTopUpLastKey(paymaster)
+	var stored PaymasterTopUpStatus
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return stored.Clone(), true, nil
+}
+
+// PaymasterPutTopUpStatus records the most recent automatic top-up execution for the provided paymaster.
+func (m *Manager) PaymasterPutTopUpStatus(status *PaymasterTopUpStatus) error {
+	if m == nil {
+		return fmt.Errorf("state manager not initialised")
+	}
+	if status == nil {
+		return fmt.Errorf("paymaster top-up status must not be nil")
+	}
+	normalized := status.Clone()
+	return m.KVPut(paymasterTopUpLastKey(normalized.Paymaster), normalized)
 }

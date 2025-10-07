@@ -95,6 +95,7 @@ type StateProcessor struct {
 	potsoWeightConfig  potso.WeightParams
 	paymasterEnabled   bool
 	paymasterLimits    PaymasterLimits
+	paymasterTopUp     PaymasterAutoTopUpPolicy
 	quotaConfig        map[string]nativecommon.Quota
 	quotaStore         *systemquotas.Store
 	intentTTL          time.Duration
@@ -127,6 +128,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		potsoWeightConfig:  potso.DefaultWeightParams(),
 		paymasterEnabled:   true,
 		paymasterLimits:    PaymasterLimits{},
+		paymasterTopUp:     PaymasterAutoTopUpPolicy{Token: "ZNHB"},
 		quotaConfig:        make(map[string]nativecommon.Quota),
 		intentTTL:          defaultIntentTTL,
 		feePolicy:          fees.Policy{Domains: map[string]fees.DomainPolicy{}},

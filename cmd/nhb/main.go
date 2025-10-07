@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -105,6 +106,28 @@ func main() {
 		DeviceDailyTxCap:    paymasterLimits.DeviceDailyTxCap,
 		GlobalDailyCapWei:   paymasterLimits.GlobalDailyCapWei,
 	})
+	autoTopUpCfg, err := cfg.Global.PaymasterAutoTopUpConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse paymaster auto top-up policy: %v", err))
+	}
+	autoPolicy := core.PaymasterAutoTopUpPolicy{
+		Enabled:      autoTopUpCfg.Enabled,
+		Token:        autoTopUpCfg.Token,
+		Cooldown:     autoTopUpCfg.Cooldown,
+		Operator:     autoTopUpCfg.Operator,
+		ApproverRole: autoTopUpCfg.ApproverRole,
+		MinterRole:   autoTopUpCfg.MinterRole,
+	}
+	if autoTopUpCfg.MinBalanceWei != nil {
+		autoPolicy.MinBalanceWei = new(big.Int).Set(autoTopUpCfg.MinBalanceWei)
+	}
+	if autoTopUpCfg.TopUpAmountWei != nil {
+		autoPolicy.TopUpAmountWei = new(big.Int).Set(autoTopUpCfg.TopUpAmountWei)
+	}
+	if autoTopUpCfg.DailyCapWei != nil {
+		autoPolicy.DailyCapWei = new(big.Int).Set(autoTopUpCfg.DailyCapWei)
+	}
+	node.SetPaymasterAutoTopUpPolicy(autoPolicy)
 
 	govPolicy, err := cfg.Governance.Policy()
 	if err != nil {

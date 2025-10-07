@@ -40,7 +40,26 @@ The values are supplied through the `Global.Paymaster` section of the cluster co
    * Set up alerting on `pos_paymaster_device_rejects` spikes to catch runaway devices.
    * Include a playbook link back to this runbook and the device attestation procedure.
 
-## 5. Troubleshooting
+## 5. Automatic top-ups
+
+Automatic top-ups ensure the paymaster never runs dry during busy settlement windows. The feature is disabled by default and is only active when the `auto_top_up` block is configured under `Global.Paymaster` with a `ZNHB` token, operator address, mint/approve roles, and rate limits.【F:config/types.go†L142-L186】【F:config/global.go†L101-L165】
+
+1. **Configuration**
+   * `min_balance_wei` – threshold that triggers a top-up when the on-chain balance drops below the value.
+   * `top_up_amount_wei` – amount of ZNHB minted on each execution.
+   * `daily_cap_wei` and `cooldown` – guardrails that limit aggregate minting and cadence.【F:core/state/paymaster_counters.go†L388-L444】【F:core/sponsorship.go†L571-L668】
+   * `operator`, `approver_role`, and `minter_role` – governance controls that must be satisfied before minting occurs.【F:core/sponsorship.go†L604-L647】
+2. **Execution flow**
+   * During sponsorship evaluation, the state processor checks the current ZNHB balance and enforces the policy, aborting with explicit failure reasons if guardrails or roles are not satisfied.【F:core/sponsorship.go†L552-L647】
+   * Successful executions persist the daily mint counter and last-run timestamp to prevent duplicate minting within the cooldown window.【F:core/state/paymaster_counters.go†L388-L444】【F:core/sponsorship.go†L642-L668】
+3. **Observability**
+   * Events: monitor `paymaster.autotopup` for both success and failure outcomes. The payload includes status, reason, amounts, and the observed balance.【F:core/events/sponsorship.go†L144-L187】
+   * Metrics: Grafana dashboards should scrape `nhb_paymaster_autotopups_total{outcome="success"|"failure"}` and `nhb_paymaster_autotopup_amount_wei_total` to alert on unexpected minting or repeated failures.【F:observability/metrics.go†L205-L233】
+4. **Operational procedures**
+   * Rotate operators or update governance roles by amending the configuration and pushing a governed change; nodes reload the policy at block boundaries.【F:core/node.go†L214-L271】【F:core/state_transition.go†L140-L207】
+   * When pausing the engine, set `enabled: false` in the config and redeploy; the scheduler stops minting immediately after the new policy is active.【F:config/global.go†L101-L165】【F:core/sponsorship.go†L556-L575】
+
+## 6. Troubleshooting
 
 * If new limits are not visible, confirm the configuration map rollout finished and the consensus node picked up the change (check `kubectl logs deploy/consensus | grep PaymasterLimits`).
 * If Prometheus metrics are missing, ensure the scrape job `consensus` is healthy and the node exports the paymaster collector.

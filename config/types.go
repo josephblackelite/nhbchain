@@ -37,6 +37,26 @@ type Paymaster struct {
 	MerchantDailyCapWei string
 	DeviceDailyTxCap    uint64
 	GlobalDailyCapWei   string
+	AutoTopUp           PaymasterAutoTopUp
+}
+
+// PaymasterAutoTopUp configures the automatic paymaster replenishment policy.
+type PaymasterAutoTopUp struct {
+	Enabled         bool
+	Token           string
+	MinBalanceWei   string
+	TopUpAmountWei  string
+	DailyCapWei     string
+	CooldownSeconds uint64
+	Governance      PaymasterAutoTopUpGovernance
+}
+
+// PaymasterAutoTopUpGovernance captures the role based guardrails required to
+// execute automatic top-ups.
+type PaymasterAutoTopUpGovernance struct {
+	Operator     string
+	MinterRole   string
+	ApproverRole string
 }
 
 // Fees captures default fee policy settings applied across domains.

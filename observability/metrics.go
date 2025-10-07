@@ -27,6 +27,12 @@ type MempoolMetrics struct {
 	posFinality prometheus.Histogram
 }
 
+// PaymasterMetrics captures observability counters for automatic paymaster top-ups.
+type PaymasterMetrics struct {
+	topups *prometheus.CounterVec
+	minted *prometheus.CounterVec
+}
+
 var (
 	moduleMetricsOnce sync.Once
 	moduleRegistry    *moduleMetrics
@@ -45,6 +51,9 @@ var (
 
 	mempoolMetricsOnce sync.Once
 	mempoolRegistry    *MempoolMetrics
+
+	paymasterMetricsOnce sync.Once
+	paymasterRegistry    *PaymasterMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -200,6 +209,31 @@ func Mempool() *MempoolMetrics {
 	return mempoolRegistry
 }
 
+// Paymaster returns the singleton metrics registry tracking automatic paymaster top-ups.
+func Paymaster() *PaymasterMetrics {
+	paymasterMetricsOnce.Do(func() {
+		paymasterRegistry = &PaymasterMetrics{
+			topups: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "paymaster",
+				Name:      "autotopups_total",
+				Help:      "Count of automatic paymaster top-ups segmented by outcome.",
+			}, []string{"outcome"}),
+			minted: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "paymaster",
+				Name:      "autotopup_amount_wei_total",
+				Help:      "Total wei minted through automatic paymaster top-ups segmented by outcome.",
+			}, []string{"outcome"}),
+		}
+		prometheus.MustRegister(
+			paymasterRegistry.topups,
+			paymasterRegistry.minted,
+		)
+	})
+	return paymasterRegistry
+}
+
 // Observe records the execution metrics for a stable swap operation.
 func (m *SwapStableMetrics) Observe(operation string, duration time.Duration, err error) {
 	if m == nil {
@@ -261,6 +295,24 @@ func (m *MempoolMetrics) ObservePOSFinality(latency time.Duration) {
 		return
 	}
 	m.posFinality.Observe(float64(latency.Milliseconds()))
+}
+
+// RecordAutoTopUp tracks the outcome of an automatic paymaster top-up and the minted amount in wei.
+func (m *PaymasterMetrics) RecordAutoTopUp(outcome string, amount *big.Int) {
+	if m == nil {
+		return
+	}
+	label := strings.TrimSpace(outcome)
+	if label == "" {
+		label = "unknown"
+	}
+	m.topups.WithLabelValues(label).Inc()
+	if amount != nil && amount.Sign() > 0 {
+		mintedFloat, _ := new(big.Float).SetInt(amount).Float64()
+		if mintedFloat > 0 {
+			m.minted.WithLabelValues(label).Add(mintedFloat)
+		}
+	}
 }
 
 // PayoutdMetrics wraps collectors tracking payout engine health.
