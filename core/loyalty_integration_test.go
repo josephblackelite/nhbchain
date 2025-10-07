@@ -43,7 +43,7 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 	cfg := (&loyalty.GlobalConfig{
 		Active:       true,
 		Treasury:     treasury[:],
-		BaseBps:      500,
+		BaseBps:      50,
 		MinSpend:     big.NewInt(100),
 		CapPerTx:     big.NewInt(500),
 		DailyCapUser: big.NewInt(1_000),
@@ -117,7 +117,7 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 	testState := &testLoyaltyState{StateProcessor: sp}
 	sp.LoyaltyEngine.OnTransactionSuccess(testState, ctx)
 
-	expectedBase := big.NewInt(100)    // 2000 * 500 / 10000
+	expectedBase := big.NewInt(10)     // 2000 * 50 / 10000
 	expectedProgram := big.NewInt(240) // 2000 * 1200 / 10000 capped by 400 -> 240
 	totalExpected := new(big.Int).Add(expectedBase, expectedProgram)
 	if ctx.FromAccount.BalanceZNHB.Cmp(totalExpected) != 0 {
@@ -128,8 +128,8 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load treasury: %v", err)
 	}
-	if treasuryAcc.BalanceZNHB.String() != "900" {
-		t.Fatalf("expected treasury balance 900, got %s", treasuryAcc.BalanceZNHB.String())
+	if treasuryAcc.BalanceZNHB.String() != "990" {
+		t.Fatalf("expected treasury balance 990, got %s", treasuryAcc.BalanceZNHB.String())
 	}
 
 	paymasterAcc, err := sp.getAccount(paymaster[:])

@@ -82,6 +82,20 @@ Programs are stored as structured data within the chain’s state. Typical field
 * `includeP2P` (`bool`): include P2P escrow releases; default `false`.
 * `metadata` (`map[string]string`): optional key/value data surfaced via analytics.
 
+### Global base reward
+
+The chain stores a single `loyalty.GlobalConfig` record that governs the optional
+network-wide base reward. Operators can toggle or tune it through governance:
+
+* `Active` (`bool`): when `false`, base rewards are skipped entirely.
+* `Treasury` (`[20]byte`): address that funds base payouts.
+* `BaseBps` (`uint32`): network default is **50 bps (0.5%)**, minting 0.5 ZNHB for every 100 NHB of qualifying spend.
+* `MinSpend`, `CapPerTx`, `DailyCapUser` (`*big.Int`): caps expressed in wei (18 decimal places).
+
+With the default 50 bps rate, a settlement of `100 NHB` (`100 * 10^18` wei) accrues
+`0.5 ZNHB` (`5 * 10^17` wei) so long as the treasury holds enough balance and the
+per-transaction and daily caps permit it.
+
 ### Deterministic meters
 
 Meters are ledger entries that enforce daily caps and provide fast analytics queries:

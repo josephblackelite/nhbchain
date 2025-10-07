@@ -90,6 +90,18 @@ The `/v1/stable/*` endpoints are published alongside the admin API and are curre
 `{"error": "stable engine not enabled"}`. The [Stable Funding API reference](stable-api.md) documents the success-path
 contracts that will activate once the engine is unpaused.
 
+### Pausing ZNHB redemption
+
+Two independent switches must be considered when enabling or disabling redemptions:
+
+* **On-chain:** `global.pauses.swap` (set via governance) halts swap module execution. When paused, any redemption transactions
+  submitted by `swapd` will fail even if the HTTP API is reachable.
+* **Service-side:** `swapd.stable.paused` (YAML `stable.paused`) keeps the `/v1/stable/*` endpoints disabled with a `501` response
+  to prevent new intents from being created.
+
+Production operations typically flip the service flag first to drain live traffic, then pause the on-chain module. Restoring
+redemptions requires clearing both toggles so `swapd` can submit transactions and consensus will execute them.
+
 ### Rate limits
 
 The following soft limits apply per account in preview and production mode:
