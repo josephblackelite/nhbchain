@@ -295,14 +295,14 @@ func (l *LoyaltyGlobalSpec) Config() (*loyalty.GlobalConfig, *big.Int, error) {
 	if l.treasuryAddr == nil {
 		return nil, nil, fmt.Errorf("loyalty global spec not validated")
 	}
-	cfg := &loyalty.GlobalConfig{
+	cfg := (&loyalty.GlobalConfig{
 		Active:       l.Active,
 		Treasury:     append([]byte(nil), l.treasuryAddr...),
 		BaseBps:      l.BaseBps,
 		MinSpend:     new(big.Int).Set(l.minSpendAmt),
 		CapPerTx:     new(big.Int).Set(l.capPerTxAmt),
 		DailyCapUser: new(big.Int).Set(l.dailyCapAmt),
-	}
+	}).Normalize()
 	return cfg, new(big.Int).Set(l.seedZNHB), nil
 }
 

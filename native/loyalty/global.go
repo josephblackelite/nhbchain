@@ -48,6 +48,7 @@ func (c *GlobalConfig) Normalize() *GlobalConfig {
 	if c == nil {
 		return nil
 	}
+	c.ApplyDefaults()
 	if c.MinSpend == nil {
 		c.MinSpend = big.NewInt(0)
 	}

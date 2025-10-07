@@ -157,6 +157,9 @@ func TestApplyBaseRewardHappyPath(t *testing.T) {
 	if state.events[0].Attributes["reward"] != "5" {
 		t.Fatalf("expected reward attribute 5, got %s", state.events[0].Attributes["reward"])
 	}
+	if got := state.events[0].Attributes["baseBps"]; got != "50" {
+		t.Fatalf("expected baseBps attribute 50, got %s", got)
+	}
 }
 
 func TestApplyBaseRewardPerTxCap(t *testing.T) {
@@ -183,6 +186,9 @@ func TestApplyBaseRewardPerTxCap(t *testing.T) {
 	}
 	if state.events[0].Attributes["reward"] != "30" {
 		t.Fatalf("expected reward attribute 30, got %s", state.events[0].Attributes["reward"])
+	}
+	if got := state.events[0].Attributes["baseBps"]; got != "2000" {
+		t.Fatalf("expected baseBps attribute 2000, got %s", got)
 	}
 }
 
@@ -316,7 +322,7 @@ func TestApplyBaseRewardDefaultRatePrecision(t *testing.T) {
 	engine := NewEngine()
 	engine.ApplyBaseReward(state, ctx)
 
-	want := new(big.Int).Quo(new(big.Int).Mul(new(big.Int).Set(amount), big.NewInt(50)), big.NewInt(10_000))
+	want := new(big.Int).Quo(new(big.Int).Mul(new(big.Int).Set(amount), big.NewInt(50)), big.NewInt(int64(BaseRewardBpsDenominator)))
 	if ctx.FromAccount.BalanceZNHB.Cmp(want) != 0 {
 		t.Fatalf("expected reward %s, got %s", want.String(), ctx.FromAccount.BalanceZNHB.String())
 	}
