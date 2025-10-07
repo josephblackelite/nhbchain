@@ -263,7 +263,7 @@ func TestNewBlockchainChainIDMismatchDoesNotPersistState(t *testing.T) {
 
 	tempDB := storage.NewMemDB()
 	defer tempDB.Close()
-	block, finalize, err := genesis.BuildGenesisFromSpec(&spec, tempDB)
+	block, finalize, err := genesis.BuildGenesisFromSpec(&spec, tempDB, nil)
 	if err != nil {
 		t.Fatalf("build genesis for derived chain id: %v", err)
 	}

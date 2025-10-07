@@ -316,7 +316,7 @@ func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) 
 		if err != nil {
 			return nil, nil, err
 		}
-		block, finalize, err := genesis.BuildGenesisFromSpec(spec, db)
+		block, finalize, err := genesis.BuildGenesisFromSpec(spec, db, nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -359,7 +359,7 @@ func rebuildGenesisState(db storage.Database, genesisPath string) error {
 		return fmt.Errorf("load genesis spec: %w", err)
 	}
 
-	block, finalize, err := genesis.BuildGenesisFromSpec(spec, db)
+	block, finalize, err := genesis.BuildGenesisFromSpec(spec, db, nil)
 	if err != nil {
 		return fmt.Errorf("rebuild genesis block: %w", err)
 	}

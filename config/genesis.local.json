@@ -17,9 +17,9 @@
   ],
   "validators": [
     {
-      "address": "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
       "power": 10,
-      "moniker": "local-validator"
+      "moniker": "local-validator",
+      "autoPopulateLocal": true
     }
   ],
   "alloc": {
