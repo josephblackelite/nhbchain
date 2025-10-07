@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"log"
@@ -150,7 +152,45 @@ func main() {
 		}
 	}
 
-	srv, err := server.New(server.Config{ListenAddress: cfg.ListenAddress, PolicyID: policy.ID}, store, log.Default(), stableRuntime)
+	authConfig := server.AuthConfig{
+		BearerToken: cfg.Admin.BearerToken,
+		AllowMTLS:   cfg.Admin.MTLS.Enabled,
+	}
+	authenticator, err := server.NewAuthenticator(authConfig)
+	if err != nil {
+		log.Fatalf("swapd: configure admin auth: %v", err)
+	}
+
+	var tlsConfig *tls.Config
+	if !cfg.Admin.TLS.Disable {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		if cfg.Admin.MTLS.Enabled {
+			tlsConfig.ClientAuth = tls.RequireAnyClientCert
+			if caPath := strings.TrimSpace(cfg.Admin.MTLS.ClientCAPath); caPath != "" {
+				caData, err := os.ReadFile(caPath)
+				if err != nil {
+					log.Fatalf("swapd: load admin client CA: %v", err)
+				}
+				pool := x509.NewCertPool()
+				if !pool.AppendCertsFromPEM(caData) {
+					log.Fatalf("swapd: parse admin client CA: %s", caPath)
+				}
+				tlsConfig.ClientCAs = pool
+				tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			}
+		}
+	}
+
+	srv, err := server.New(server.Config{
+		ListenAddress: cfg.ListenAddress,
+		PolicyID:      policy.ID,
+		TLS: server.TLSConfig{
+			Disabled: cfg.Admin.TLS.Disable,
+			CertFile: cfg.Admin.TLS.CertPath,
+			KeyFile:  cfg.Admin.TLS.KeyPath,
+			Config:   tlsConfig,
+		},
+	}, store, log.Default(), stableRuntime, authenticator)
 	if err != nil {
 		log.Fatalf("swapd: server: %v", err)
 	}

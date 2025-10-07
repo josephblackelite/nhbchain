@@ -40,13 +40,17 @@ func TestStableHandlersFlow(t *testing.T) {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
 	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{
 		Enabled: true,
 		Engine:  engine,
 		Limits:  limits,
 		Assets:  []stable.Asset{asset},
 		Now:     func() time.Time { return base.Add(10 * time.Second) },
-	})
+	}, auth)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -95,7 +99,11 @@ func TestStableHandlersDisabled(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{})
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{}, auth)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}

@@ -21,6 +21,7 @@ The daemon loads configuration from a YAML file (default `services/swapd/config.
 - `sources`: list of upstream oracle adapters and their credentials.
 - `pairs`: currency pairs that should be published.
 - `policy`: mint/redeem throttle settings.
+- `admin`: security block configuring bearer tokens, TLS certificates, and optional mutual-TLS client validation for the admin API.
 
 A sample configuration is available at `services/swapd/config.yaml`.
 
@@ -45,8 +46,42 @@ Operational tooling can query these tables directly or export them to CSV for re
 | PUT    | `/admin/policy`         | Replace the throttle policy.             |
 | POST   | `/admin/throttle/check` | Reserve capacity for mint/redeem events. |
 
-All admin endpoints accept/return JSON and should be protected by upstream ingress controls. The throttle check endpoint
-returns `{ "allowed": true }` when the request is within policy limits.
+All admin endpoints require either a valid bearer token or a mutually-authenticated TLS connection. Requests without
+credentials receive `401 Unauthorized` before reaching the business logic. Configure the security block in `services/swapd/config.yaml`:
+
+```yaml
+admin:
+  bearer_token_file: /var/run/secrets/swapd-admin-token
+  tls:
+    cert: /etc/swapd/tls/tls.crt
+    key: /etc/swapd/tls/tls.key
+  mtls:
+    enabled: true
+    client_ca: /etc/swapd/tls/client-ca.crt
+```
+
+TLS is enabled by default whenever certificate and key paths are present. Disable it only for local development by setting
+`admin.tls.disable: true`. When `mtls.enabled` is true and a client CA bundle is supplied, the server requires verified client
+certificates signed by that authority.
+
+Example authenticated requests:
+
+```bash
+curl https://swapd.example.com/admin/policy \
+  --cert client.pem --key client.key \
+  --cacert ca.pem
+```
+
+```bash
+curl https://swapd.example.com/admin/throttle/check \
+  -H 'Authorization: Bearer ${SWAPD_ADMIN_TOKEN}' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"mint"}' \
+  --cacert ca.pem
+```
+
+All admin endpoints accept/return JSON. The throttle check endpoint returns `{ "allowed": true }` when the request is within
+policy limits.
 
 ## Stable Engine Preview
 

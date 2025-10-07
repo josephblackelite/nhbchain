@@ -9,16 +9,17 @@ import (
 type AdminServer struct {
 	processor *Processor
 	mux       *http.ServeMux
+	auth      *Authenticator
 }
 
 // NewAdminServer constructs a server wrapping the provided processor.
-func NewAdminServer(processor *Processor) *AdminServer {
+func NewAdminServer(processor *Processor, auth *Authenticator) *AdminServer {
 	mux := http.NewServeMux()
-	server := &AdminServer{processor: processor, mux: mux}
-	mux.HandleFunc("/pause", server.handlePause)
-	mux.HandleFunc("/resume", server.handleResume)
-	mux.HandleFunc("/abort", server.handleAbort)
-	mux.HandleFunc("/status", server.handleStatus)
+	server := &AdminServer{processor: processor, mux: mux, auth: auth}
+	mux.Handle("/pause", server.requireAuth(http.HandlerFunc(server.handlePause)))
+	mux.Handle("/resume", server.requireAuth(http.HandlerFunc(server.handleResume)))
+	mux.Handle("/abort", server.requireAuth(http.HandlerFunc(server.handleAbort)))
+	mux.Handle("/status", server.requireAuth(http.HandlerFunc(server.handleStatus)))
 	return server
 }
 
@@ -75,4 +76,13 @@ func (s *AdminServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := s.processor.Status()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (s *AdminServer) requireAuth(next http.Handler) http.Handler {
+	if s.auth == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "authentication unavailable", http.StatusInternalServerError)
+		})
+	}
+	return s.auth.Middleware(next)
 }

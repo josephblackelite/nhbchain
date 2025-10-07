@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +21,15 @@ import (
 type Config struct {
 	ListenAddress string
 	PolicyID      string
+	TLS           TLSConfig
+}
+
+// TLSConfig describes TLS settings for the admin server.
+type TLSConfig struct {
+	Disabled bool
+	CertFile string
+	KeyFile  string
+	Config   *tls.Config
 }
 
 // StableRuntime configures the optional stable engine wiring.
@@ -33,11 +43,19 @@ type StableRuntime struct {
 
 // Server hosts admin and health endpoints for swapd.
 type Server struct {
-	cfg      Config
-	storage  *storage.Storage
-	policyMu sync.RWMutex
-	policy   storage.Policy
-	logger   *log.Logger
+	cfg       Config
+	storage   *storage.Storage
+	policyMu  sync.RWMutex
+	policy    storage.Policy
+	logger    *log.Logger
+	adminAuth *Authenticator
+
+	tls struct {
+		disabled bool
+		certFile string
+		keyFile  string
+		config   *tls.Config
+	}
 
 	stable struct {
 		enabled bool
@@ -49,9 +67,12 @@ type Server struct {
 }
 
 // New constructs a new HTTP server.
-func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime StableRuntime) (*Server, error) {
+func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime StableRuntime, auth *Authenticator) (*Server, error) {
 	if store == nil {
 		return nil, fmt.Errorf("storage required")
+	}
+	if auth == nil {
+		return nil, fmt.Errorf("admin authenticator required")
 	}
 	if logger == nil {
 		logger = log.Default()
@@ -59,7 +80,11 @@ func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime S
 	if strings.TrimSpace(cfg.PolicyID) == "" {
 		cfg.PolicyID = "default"
 	}
-	srv := &Server{cfg: cfg, storage: store, logger: logger}
+	srv := &Server{cfg: cfg, storage: store, logger: logger, adminAuth: auth}
+	srv.tls.disabled = cfg.TLS.Disabled
+	srv.tls.certFile = strings.TrimSpace(cfg.TLS.CertFile)
+	srv.tls.keyFile = strings.TrimSpace(cfg.TLS.KeyFile)
+	srv.tls.config = cfg.TLS.Config
 	srv.stableNow = stableRuntime.Now
 	if srv.stableNow == nil {
 		srv.stableNow = time.Now
@@ -90,11 +115,11 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", otelhttp.NewHandler(http.HandlerFunc(s.handleHealth), "swapd.health"))
-	mux.Handle("/admin/policy", otelhttp.NewHandler(http.HandlerFunc(s.handlePolicy), "swapd.policy"))
-	mux.Handle("/admin/throttle/check", otelhttp.NewHandler(http.HandlerFunc(s.handleThrottleCheck), "swapd.throttle"))
+	mux.Handle("/admin/policy", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handlePolicy)), "swapd.policy"))
+	mux.Handle("/admin/throttle/check", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleThrottleCheck)), "swapd.throttle"))
 	s.registerStableHandlers(mux)
 
-	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux}
+	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux, TLSConfig: s.tls.config}
 
 	go func() {
 		<-ctx.Done()
@@ -104,10 +129,25 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 
 	s.logger.Printf("swapd: http server listening on %s", s.cfg.ListenAddress)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	var err error
+	if s.tls.disabled {
+		err = srv.ListenAndServe()
+	} else {
+		err = srv.ListenAndServeTLS(s.tls.certFile, s.tls.keyFile)
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("listen and serve: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	if s.adminAuth == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "authentication unavailable", http.StatusInternalServerError)
+		})
+	}
+	return s.adminAuth.Middleware(next)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

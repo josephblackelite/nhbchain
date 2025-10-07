@@ -53,14 +53,51 @@ configuration management. Each entry specifies:
 Reload policies by updating the configuration and restarting payoutd. The admin API's
 `/status` endpoint surfaces current remaining caps for verification.
 
+## Admin API security
+
+Operators must authenticate every admin request with either a shared bearer token or a mutually-authenticated TLS
+certificate. Configure the security block in `services/payoutd/config.yaml` (or the equivalent deployment manifest):
+
+```yaml
+admin:
+  bearer_token: "${PAYOUTD_ADMIN_TOKEN}"
+  tls:
+    cert: /etc/payoutd/tls/tls.crt
+    key: /etc/payoutd/tls/tls.key
+  mtls:
+    enabled: true
+    client_ca: /etc/payoutd/tls/client-ca.crt
+```
+
+TLS is enabled automatically when certificate and key paths are supplied. Only disable TLS for ephemeral local testing by
+setting `admin.tls.disable: true`. When mTLS is enabled, clients must present a certificate issued by the configured
+`client_ca` bundle. Requests that fail authentication return `401 Unauthorized` before hitting the processor.
+
+Example commands:
+
+```bash
+curl https://payoutd.example.com/status \
+  -H 'Authorization: Bearer ${PAYOUTD_ADMIN_TOKEN}' \
+  --cacert ca.pem
+```
+
+```bash
+curl https://payoutd.example.com/pause \
+  --cert ops-client.pem --key ops-client.key \
+  --cacert ca.pem \
+  -X POST
+```
+
 ## Aborting a payout
 
 Abort an intent when fiat settlement fails or the customer requests cancellation.
 
 ```bash
-curl -X POST http://payoutd-admin/abort \
+curl -X POST https://payoutd.example.com/abort \
+  -H 'Authorization: Bearer ${PAYOUTD_ADMIN_TOKEN}' \
   -H 'Content-Type: application/json' \
-  -d '{"intent_id":"intent-123","reason":"compliance_hold"}'
+  -d '{"intent_id":"intent-123","reason":"compliance_hold"}' \
+  --cacert ca.pem
 ```
 
 The daemon submits `MsgAbortCashOutIntent`, unlocking the escrowed NHB. The operator
