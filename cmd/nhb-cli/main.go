@@ -545,11 +545,7 @@ func doRPCRequest(payload []byte, requireAuth bool) (*http.Response, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		target := "the node"
-		if requireAuth {
-			target = "the authenticated node"
-		}
-		return nil, fmt.Errorf("failed to connect to %s", target)
+		return nil, fmt.Errorf("POST %s: %w", rpcEndpoint, err)
 	}
 	return resp, nil
 }
