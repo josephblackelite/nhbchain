@@ -97,10 +97,21 @@ Two independent switches must be considered when enabling or disabling redemptio
 * **On-chain:** `global.pauses.swap` (set via governance) halts swap module execution. When paused, any redemption transactions
   submitted by `swapd` will fail even if the HTTP API is reachable.
 * **Service-side:** `swapd.stable.paused` (YAML `stable.paused`) keeps the `/v1/stable/*` endpoints disabled with a `501` response
-  to prevent new intents from being created.
+  to prevent new intents from being created. Keep this flag set to `true` during readiness phases so OTC desks cannot cash out until go-live.
 
 Production operations typically flip the service flag first to drain live traffic, then pause the on-chain module. Restoring
-redemptions requires clearing both toggles so `swapd` can submit transactions and consensus will execute them.
+redemptions requires clearing both toggles so `swapd` can submit transactions and consensus will execute them. Use the helper to
+inspect both switches in one command:
+
+```bash
+go run ./examples/docs/ops/swap_pause_inspect \
+  --db ./nhb-data \
+  --consensus localhost:9090 \
+  --swapd https://swapd.internal.nhb
+```
+
+The CLI prints the current `global.pauses.swap` value and whether `/v1/stable/status` is returning a `501 stable engine not enabled`
+payload (paused) or live counters (active).
 
 ### Rate limits
 

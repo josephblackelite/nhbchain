@@ -198,6 +198,45 @@ Responses follow JSON-RPC 2.0 semantics. Any non-200 status or RPC error must be
 - **Observability** — Enable structured logging for order events, webhook processing, and RPC interactions. Consider Prometheus metrics for monitoring latency and errors.
 - **Idempotency** — Duplicate webhooks must be safe. The store transition guard rejects already-processed orders.
 
+### 9.1 Pause controls (mints vs. redemptions)
+
+Operators have two independent switches when triaging incidents:
+
+1. **Mint kill switch** (`global.pauses.swap`) stops new voucher submissions on-chain. Pause it via governance using the helper CLI:
+
+   ```bash
+   go run ./examples/docs/ops/pause_toggle \
+     --db ./nhb-data \
+     --consensus localhost:9090 \
+     --governance localhost:50061 \
+     --authority nhb1operatorauthority0000000000000000000000 \
+     --module swap \
+     --state pause
+   ```
+
+   Swap minting resumes by rerunning the command with `--state resume` once the incident is resolved.
+
+2. **Redemption gate** (`swapd.stable.paused`) disables `/v1/stable/*` cash-out endpoints while keeping quoting available for smoke tests. Update the active swapd overlay and roll the deployment:
+
+   ```bash
+   # Flip the readiness overlay so redemptions stay off until go-live
+   yq -i '.stable.paused = true' deploy/environments/prod/swapd.yaml
+   kubectl rollout restart deployment swapd -n treasury
+   ```
+
+   To re-enable redemptions after readiness drills, set `.stable.paused = false` and rerun the restart.
+
+Inspect both toggles with the combined helper:
+
+```bash
+go run ./examples/docs/ops/swap_pause_inspect \
+  --db ./nhb-data \
+  --consensus localhost:9090 \
+  --swapd https://swapd.internal.nhb
+```
+
+The script prints `global.pauses.swap` alongside the live response from `GET /v1/stable/status`, making it clear whether swapd is still blocking redemptions.
+
 ## 10. Compliance & Transparency (Auditors, Regulators, Investors, Consumers)
 
 - **Traceability** — Each voucher includes fiat amount, rate, and PSP reference (`orderId`, `txRef`). Logs should correlate voucher submissions with fiat receipts.

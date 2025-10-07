@@ -23,7 +23,7 @@ policy:
   redeem_limit: 5
   window: "1h"
 stable:
-  paused: true
+  paused: true # keep redemptions disabled in readiness phases; flip to false once governance approves go-live
   quote_ttl: "1m"
   max_slippage_bps: 50
   soft_inventory: 1000000

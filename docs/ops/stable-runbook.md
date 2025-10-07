@@ -5,7 +5,7 @@ This runbook explains how to exercise the `/v1/stable/*` suite on localnet, publ
 ## Pre-flight Checklist
 
 - [ ] Confirm the governance proposal that authorises enabling the stable engine has passed.
-- [ ] Validate swapd configuration (`services/swapd/config.yaml`) contains the target asset(s) and `stable.paused=false` in staging before rolling to production.
+- [ ] Validate swapd configuration (`services/swapd/config.yaml`) contains the target asset(s). Keep `stable.paused=true` in readiness phases so ZNHB redemption stays off until the governance go-live window.
 - [ ] Ensure OTEL exporters and log sinks are reachable; the regression suite relies on span IDs for traceability.
 
 ## Starting localnet
@@ -45,10 +45,21 @@ After the run completes export the artifacts to long-term storage alongside vali
 
 ## Operational changes
 
-1. Toggle `stable.paused=false` and redeploy swapd.
+1. Toggle `stable.paused=false` and redeploy swapd once the change ticket is authorised.
 2. Re-run `make audit:endpoints` to capture the now-200 responses and confirm quote→reserve→cashout flows populate the audit trail.
 3. Monitor Grafana (`Stable ▸ Engine overview`) and alerting rules for anomalies.
 4. File a signed change ticket attaching the Newman JSON, OTEL trace IDs, and governance approval references.
+
+When drills require keeping redemptions disabled, revert the overlay to `stable.paused=true` and use the combined helper to verify both toggles:
+
+```bash
+go run ./examples/docs/ops/swap_pause_inspect \
+  --db ./nhb-data \
+  --consensus localhost:9090 \
+  --swapd https://swapd.internal.nhb
+```
+
+The CLI prints `global.pauses.swap` plus the live `/v1/stable/status` response so responders can confirm swapd is still rejecting redemptions with `501 stable engine not enabled` during readiness windows.
 
 ## Troubleshooting
 
