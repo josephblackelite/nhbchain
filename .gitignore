@@ -40,3 +40,4 @@ config/local-genesis.json
 nhb-data-local/p2p/node_key.json
 nhb-data-local/000001.log
 nhb-data-local/p2p/peerstore/000001.log
+go.work.sum
