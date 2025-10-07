@@ -217,7 +217,10 @@ pos\:run-paymaster:
 pos\:run-registry:
 	@mkdir -p $(POS_LOG_DIR)
 	@test -f $(POS_TEST_BIN) || $(MAKE) pos:build-tests
-	@bash -o errexit -o nounset -o pipefail -c "$(POS_TEST_BIN) -test.v -test.run TestRegistryReadiness 2>&1 | tee $(POS_LOG_DIR)/registry.log"
+	@bash -o errexit -o nounset -o pipefail -c "( \
+$(POS_TEST_BIN) -test.v -test.run TestRegistryReadiness && \
+go test -tags $(POS_TEST_TAGS) -v ./tests/posreadiness/registry \
+) 2>&1 | tee $(POS_LOG_DIR)/registry.log"
 
 pos\:run-realtime:
 	@mkdir -p $(POS_LOG_DIR)
