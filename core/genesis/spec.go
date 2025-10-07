@@ -38,10 +38,16 @@ type NativeTokenSpec struct {
 }
 
 type ValidatorSpec struct {
-	Address string `json:"address"`
-	Power   uint64 `json:"power"`
-	PubKey  string `json:"pubKey,omitempty"`
-	Moniker string `json:"moniker,omitempty"`
+	Address           string `json:"address"`
+	Power             uint64 `json:"power"`
+	PubKey            string `json:"pubKey,omitempty"`
+	Moniker           string `json:"moniker,omitempty"`
+	AutoPopulateLocal bool   `json:"autoPopulateLocal,omitempty"`
+}
+
+type ValidatorAutoPopulateInfo struct {
+	Address string
+	PubKey  string
 }
 
 type LoyaltyGlobalSpec struct {
@@ -123,17 +129,34 @@ func (s *GenesisSpec) validate() error {
 
 	// validators
 	validatorAddresses := make(map[string]struct{}, len(s.Validators))
+	autoPopulateCount := 0
 	for i := range s.Validators {
 		v := &s.Validators[i]
+		if v.Power == 0 {
+			return fmt.Errorf("validator[%d]: power must be greater than zero", i)
+		}
+
+		if v.AutoPopulateLocal {
+			autoPopulateCount++
+			if strings.TrimSpace(v.Address) != "" {
+				return fmt.Errorf("validator[%d]: address must be omitted when autoPopulateLocal is set", i)
+			}
+			if strings.TrimSpace(v.PubKey) != "" {
+				pk := strings.TrimSpace(v.PubKey)
+				pk = strings.TrimPrefix(pk, "0x")
+				if _, err := hex.DecodeString(pk); err != nil {
+					return fmt.Errorf("validator[%d]: invalid pubKey: %w", i, err)
+				}
+			}
+			continue
+		}
+
 		if strings.TrimSpace(v.Address) == "" {
 			return fmt.Errorf("validator[%d]: address must be provided", i)
 		}
 		addr, err := ParseBech32Account(v.Address)
 		if err != nil {
 			return fmt.Errorf("validator[%d]: %w", i, err)
-		}
-		if v.Power == 0 {
-			return fmt.Errorf("validator[%d]: power must be greater than zero", i)
 		}
 		if strings.TrimSpace(v.PubKey) != "" {
 			pk := strings.TrimSpace(v.PubKey)
@@ -147,6 +170,9 @@ func (s *GenesisSpec) validate() error {
 			return fmt.Errorf("validator[%d]: duplicate address %q", i, v.Address)
 		}
 		validatorAddresses[addrKey] = struct{}{}
+	}
+	if autoPopulateCount > 1 {
+		return fmt.Errorf("validators: multiple entries marked for local auto-population")
 	}
 
 	// alloc
@@ -208,6 +234,70 @@ func (s *GenesisSpec) validate() error {
 		}
 	}
 	return nil
+}
+
+// ResolveValidatorAutoPopulate inspects the validator list and, if a validator
+// is marked for local auto-population, fills it using the provided information.
+// The spec is revalidated after mutation so downstream consumers observe a
+// fully-resolved configuration.
+func (s *GenesisSpec) ResolveValidatorAutoPopulate(info *ValidatorAutoPopulateInfo) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("genesis spec must not be nil")
+	}
+
+	if err := s.validate(); err != nil {
+		return false, err
+	}
+
+	var target *ValidatorSpec
+	for i := range s.Validators {
+		if s.Validators[i].AutoPopulateLocal {
+			target = &s.Validators[i]
+			break
+		}
+	}
+	if target == nil {
+		return false, nil
+	}
+
+	if info == nil {
+		return false, fmt.Errorf("validator auto-populate info required")
+	}
+
+	addr := strings.TrimSpace(info.Address)
+	if addr == "" {
+		return false, fmt.Errorf("validator auto-populate address must be provided")
+	}
+	if _, err := ParseBech32Account(addr); err != nil {
+		return false, fmt.Errorf("validator auto-populate address invalid: %w", err)
+	}
+
+	originalAddress := target.Address
+	originalPubKey := target.PubKey
+	originalFlag := target.AutoPopulateLocal
+
+	target.Address = addr
+
+	if strings.TrimSpace(target.PubKey) == "" && strings.TrimSpace(info.PubKey) != "" {
+		normalized := strings.TrimSpace(info.PubKey)
+		normalized = strings.TrimPrefix(normalized, "0x")
+		if _, err := hex.DecodeString(normalized); err != nil {
+			target.Address = originalAddress
+			return false, fmt.Errorf("validator auto-populate pubKey invalid: %w", err)
+		}
+		target.PubKey = strings.ToLower(normalized)
+	}
+
+	target.AutoPopulateLocal = false
+
+	if err := s.validate(); err != nil {
+		target.Address = originalAddress
+		target.PubKey = originalPubKey
+		target.AutoPopulateLocal = originalFlag
+		return false, fmt.Errorf("validate resolved spec: %w", err)
+	}
+
+	return true, nil
 }
 
 func (t *NativeTokenSpec) validate() error {

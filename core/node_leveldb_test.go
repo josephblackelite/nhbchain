@@ -107,7 +107,7 @@ func TestNewNodeRebuildsMissingGenesisState(t *testing.T) {
 		t.Fatalf("create leveldb: %v", err)
 	}
 
-	block, _, err := genesis.BuildGenesisFromSpec(&spec, db)
+	block, _, err := genesis.BuildGenesisFromSpec(&spec, db, nil)
 	if err != nil {
 		t.Fatalf("build genesis from spec: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,104 @@ import (
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
 )
+
+func TestResolveValidatorAutoPopulate(t *testing.T) {
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x0a}, 20)).String()
+	spec := GenesisSpec{
+		GenesisTime: "2024-01-01T00:00:00Z",
+		Validators: []ValidatorSpec{
+			{
+				Power:             5,
+				Moniker:           "auto",
+				AutoPopulateLocal: true,
+			},
+		},
+	}
+
+	info := ValidatorAutoPopulateInfo{
+		Address: addr,
+		PubKey:  "AABBCC",
+	}
+
+	changed, err := spec.ResolveValidatorAutoPopulate(&info)
+	if err != nil {
+		t.Fatalf("ResolveValidatorAutoPopulate failed: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected spec mutation for auto-populate")
+	}
+	if spec.Validators[0].Address != addr {
+		t.Fatalf("validator address not populated: got %q want %q", spec.Validators[0].Address, addr)
+	}
+	if spec.Validators[0].AutoPopulateLocal {
+		t.Fatalf("autoPopulateLocal flag should be cleared after resolution")
+	}
+	if spec.Validators[0].PubKey != strings.ToLower(info.PubKey) {
+		t.Fatalf("validator pubkey not normalized: got %q want %q", spec.Validators[0].PubKey, strings.ToLower(info.PubKey))
+	}
+
+	changed, err = spec.ResolveValidatorAutoPopulate(&info)
+	if err != nil {
+		t.Fatalf("ResolveValidatorAutoPopulate second call: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected no changes after validator resolved")
+	}
+}
+
+func TestBuildGenesisFromSpecAutoPopulate(t *testing.T) {
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x0b}, 20)).String()
+	spec := GenesisSpec{
+		GenesisTime: "2024-01-01T00:00:00Z",
+		Validators: []ValidatorSpec{
+			{
+				Power:             3,
+				Moniker:           "auto",
+				AutoPopulateLocal: true,
+			},
+		},
+	}
+
+	info := ValidatorAutoPopulateInfo{Address: addr}
+
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	block, finalize, err := BuildGenesisFromSpec(&spec, db, &info)
+	if err != nil {
+		t.Fatalf("BuildGenesisFromSpec: %v", err)
+	}
+	if finalize == nil {
+		t.Fatalf("expected finalize callback")
+	}
+	if err := finalize(); err != nil {
+		t.Fatalf("finalize genesis: %v", err)
+	}
+
+	if spec.Validators[0].Address != addr {
+		t.Fatalf("validator address not resolved: got %q want %q", spec.Validators[0].Address, addr)
+	}
+	if spec.Validators[0].AutoPopulateLocal {
+		t.Fatalf("autoPopulateLocal flag should be cleared after BuildGenesisFromSpec")
+	}
+
+	stateTrie, err := trie.NewTrie(db, block.Header.StateRoot)
+	if err != nil {
+		t.Fatalf("open state trie: %v", err)
+	}
+	manager := state.NewManager(stateTrie)
+	validators, err := manager.LoadValidatorSet()
+	if err != nil {
+		t.Fatalf("load validator set: %v", err)
+	}
+	parsedAddr, err := ParseBech32Account(addr)
+	if err != nil {
+		t.Fatalf("parse validator address: %v", err)
+	}
+	if _, ok := validators[string(parsedAddr[:])]; !ok {
+		t.Fatalf("validator set missing populated address")
+	}
+}
 
 func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	addr1 := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x01}, 20)).String()
@@ -106,7 +205,7 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 	db := storage.NewMemDB()
 	defer db.Close()
 
-	block, finalize, err := BuildGenesisFromSpec(loaded, db)
+	block, finalize, err := BuildGenesisFromSpec(loaded, db, nil)
 	if err != nil {
 		t.Fatalf("BuildGenesisFromSpec: %v", err)
 	}
@@ -213,7 +312,7 @@ func TestLoadGenesisSpecAndBuildGenesis(t *testing.T) {
 		t.Fatalf("unexpected persisted validator count: %d", len(validators))
 	}
 
-	block2, finalize2, err := BuildGenesisFromSpec(loaded, db)
+	block2, finalize2, err := BuildGenesisFromSpec(loaded, db, nil)
 	if err != nil {
 		t.Fatalf("BuildGenesisFromSpec second call: %v", err)
 	}

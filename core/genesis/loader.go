@@ -19,12 +19,22 @@ import (
 	"nhbchain/storage/trie"
 )
 
-func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database) (*types.Block, func() error, error) {
+func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database, info *ValidatorAutoPopulateInfo) (*types.Block, func() error, error) {
 	if spec == nil {
 		return nil, nil, fmt.Errorf("genesis spec must not be nil")
 	}
 	if db == nil {
 		return nil, nil, fmt.Errorf("database must not be nil")
+	}
+
+	if _, err := spec.ResolveValidatorAutoPopulate(info); err != nil {
+		return nil, nil, fmt.Errorf("resolve validator auto-populate: %w", err)
+	}
+
+	for i := range spec.Validators {
+		if spec.Validators[i].AutoPopulateLocal {
+			return nil, nil, fmt.Errorf("validator[%d]: autoPopulateLocal unresolved", i)
+		}
 	}
 
 	ts := spec.GenesisTimestamp()

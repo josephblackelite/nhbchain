@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
@@ -18,6 +19,7 @@ import (
 	"nhbchain/config"
 	"nhbchain/consensus/bft"
 	"nhbchain/core"
+	"nhbchain/core/genesis"
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
 	swap "nhbchain/native/swap"
@@ -25,6 +27,8 @@ import (
 	"nhbchain/p2p/seeds"
 	"nhbchain/rpc"
 	"nhbchain/storage"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -69,6 +73,39 @@ func main() {
 	privKey, err := loadValidatorKey(cfg, passSource.Get)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
+	}
+
+	validatorAddr := privKey.PubKey().Address()
+	pubKeyBytes := ethcrypto.FromECDSAPub(privKey.PubKey().PublicKey)
+	pubKeyHex := hex.EncodeToString(pubKeyBytes)
+
+	trimmedGenesis := strings.TrimSpace(genesisPath)
+	if trimmedGenesis != "" {
+		spec, err := genesis.LoadGenesisSpec(trimmedGenesis)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to load genesis spec: %v", err))
+		}
+		info := genesis.ValidatorAutoPopulateInfo{
+			Address: validatorAddr.String(),
+			PubKey:  pubKeyHex,
+		}
+		if _, err := spec.ResolveValidatorAutoPopulate(&info); err != nil {
+			panic(fmt.Sprintf("Failed to resolve genesis validator entry: %v", err))
+		}
+		if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+			panic(fmt.Sprintf("Failed to prepare data directory for genesis spec: %v", err))
+		}
+		resolvedPath := filepath.Join(cfg.DataDir, "genesis.resolved.json")
+		data, err := json.MarshalIndent(spec, "", "  ")
+		if err != nil {
+			panic(fmt.Sprintf("Failed to encode resolved genesis spec: %v", err))
+		}
+		if err := os.WriteFile(resolvedPath, data, 0o644); err != nil {
+			panic(fmt.Sprintf("Failed to write resolved genesis spec: %v", err))
+		}
+		genesisPath = resolvedPath
+	} else {
+		genesisPath = ""
 	}
 
 	peerstoreDir := filepath.Join(cfg.DataDir, "p2p")
