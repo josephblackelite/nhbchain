@@ -106,6 +106,9 @@ func (t *Trie) Commit(parent common.Hash, blockNumber uint64) (common.Hash, erro
 		if err := t.trieDB.Update(newRoot, parent, blockNumber, merged, nil); err != nil {
 			return common.Hash{}, err
 		}
+		if err := t.trieDB.Commit(newRoot, false); err != nil {
+			return common.Hash{}, err
+		}
 	}
 	underlying, err := gethtrie.New(gethtrie.TrieID(newRoot), t.trieDB)
 	if err != nil {
