@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -352,7 +353,24 @@ func main() {
 		TLSClientCAFile:   cfg.RPCTLSClientCAFile,
 		AllowInsecure:     cfg.RPCAllowInsecure,
 	})
-	go rpcServer.Start(cfg.RPCAddress)
+	rpcErrCh := make(chan error, 1)
+	go func() {
+		if err := rpcServer.Start(cfg.RPCAddress); err != nil {
+			rpcErrCh <- err
+		}
+	}()
+
+	if err := waitForRPCStartup(cfg.RPCAddress, rpcErrCh, 5*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "RPC server failed to start: %v\n", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		if err := <-rpcErrCh; err != nil {
+			fmt.Fprintf(os.Stderr, "RPC server terminated: %v\n", err)
+		}
+	}()
+
 	go p2pServer.Start()
 
 	fmt.Println("--- NHBCoin Node Initialized and Running ---")
@@ -420,6 +438,54 @@ func flagWasProvided(name string) bool {
 		}
 	})
 	return provided
+}
+
+func waitForRPCStartup(addr string, errCh <-chan error, timeout time.Duration) error {
+	dialAddr := dialAddressFor(addr)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				return err
+			}
+			return nil
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", dialAddr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				return err
+			}
+			return nil
+		case <-ticker.C:
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for RPC server to start on %s", addr)
+		}
+	}
+}
+
+func dialAddressFor(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func loadValidatorKey(cfg *config.Config, resolvePassphrase func() (string, error)) (*crypto.PrivateKey, error) {
