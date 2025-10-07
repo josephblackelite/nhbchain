@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	// TypeTxSponsorshipApplied indicates a transaction's gas was paid by a sponsor.
-	TypeTxSponsorshipApplied = "tx.sponsorship.applied"
-	// TypeTxSponsorshipFailed indicates the sponsorship request was rejected and gas fell back to the sender.
-	TypeTxSponsorshipFailed = "tx.sponsorship.failed"
-	// TypePaymasterThrottled indicates a sponsorship request was throttled due to configured caps.
-	TypePaymasterThrottled = "paymaster.throttled"
+        // TypeTxSponsorshipApplied indicates a transaction's gas was paid by a sponsor.
+        TypeTxSponsorshipApplied = "tx.sponsorship.applied"
+        // TypeTxSponsorshipFailed indicates the sponsorship request was rejected and gas fell back to the sender.
+        TypeTxSponsorshipFailed = "tx.sponsorship.failed"
+        // TypePaymasterThrottled indicates a sponsorship request was throttled due to configured caps.
+        TypePaymasterThrottled = "paymaster.throttled"
+        // TypePaymasterAutoTopUp indicates the automatic top-up engine executed for a paymaster account.
+        TypePaymasterAutoTopUp = "paymaster.autotopup"
 )
 
 // TxSponsorshipApplied captures a successful paymaster sponsorship outcome.
@@ -106,10 +108,10 @@ func (PaymasterThrottled) EventType() string { return TypePaymasterThrottled }
 
 // Event renders the throttled payload.
 func (e PaymasterThrottled) Event() *types.Event {
-	attrs := map[string]string{
-		"scope": strings.TrimSpace(e.Scope),
-	}
-	if e.TxHash != ([32]byte{}) {
+        attrs := map[string]string{
+                "scope": strings.TrimSpace(e.Scope),
+        }
+        if e.TxHash != ([32]byte{}) {
 		attrs["txHash"] = "0x" + hex.EncodeToString(e.TxHash[:])
 	}
 	if strings.TrimSpace(e.Merchant) != "" {
@@ -135,6 +137,50 @@ func (e PaymasterThrottled) Event() *types.Event {
 	}
 	if e.LimitTxCount > 0 {
 		attrs["limitTxCount"] = fmt.Sprintf("%d", e.LimitTxCount)
-	}
-	return &types.Event{Type: TypePaymasterThrottled, Attributes: attrs}
+        }
+        return &types.Event{Type: TypePaymasterThrottled, Attributes: attrs}
+}
+
+// PaymasterAutoTopUp captures the automatic top-up activity for a paymaster account.
+type PaymasterAutoTopUp struct {
+        Paymaster [20]byte
+        Token     string
+        AmountWei *big.Int
+        BalanceWei *big.Int
+        Day       string
+        Status    string
+        Reason    string
+}
+
+// EventType satisfies the events.Event interface.
+func (PaymasterAutoTopUp) EventType() string { return TypePaymasterAutoTopUp }
+
+// Event renders the automatic top-up payload.
+func (e PaymasterAutoTopUp) Event() *types.Event {
+        attrs := map[string]string{}
+        if e.Paymaster != ([20]byte{}) {
+                attrs["paymaster"] = crypto.MustNewAddress(crypto.ZNHBPrefix, e.Paymaster[:]).String()
+        }
+        token := strings.TrimSpace(e.Token)
+        if token != "" {
+                attrs["token"] = token
+        }
+        status := strings.TrimSpace(e.Status)
+        if status != "" {
+                attrs["status"] = status
+        }
+        reason := strings.TrimSpace(e.Reason)
+        if reason != "" {
+                attrs["reason"] = reason
+        }
+        if e.AmountWei != nil {
+                attrs["amountWei"] = new(big.Int).Set(e.AmountWei).String()
+        }
+        if e.BalanceWei != nil {
+                attrs["balanceWei"] = new(big.Int).Set(e.BalanceWei).String()
+        }
+        if strings.TrimSpace(e.Day) != "" {
+                attrs["day"] = strings.TrimSpace(e.Day)
+        }
+        return &types.Event{Type: TypePaymasterAutoTopUp, Attributes: attrs}
 }

@@ -88,8 +88,9 @@ type Node struct {
 	evidenceStore                *evidence.Store
 	evidenceMaxAge               uint64
 	paymasterMu                  sync.RWMutex
-	paymasterEnabled             bool
-	paymasterLimits              PaymasterLimits
+        paymasterEnabled             bool
+        paymasterLimits              PaymasterLimits
+        paymasterTopUpPolicy         PaymasterAutoTopUpPolicy
 	timestampTolerance           time.Duration
 	timeConfigMu                 sync.RWMutex
 	timeSource                   func() time.Time
@@ -309,8 +310,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		swapRefundSink:             treasury,
 		evidenceStore:              evidence.NewStore(db),
 		evidenceMaxAge:             evidence.DefaultMaxAgeBlocks,
-		paymasterEnabled:           stateProcessor.PaymasterEnabled(),
-		paymasterLimits:            PaymasterLimits{},
+                paymasterEnabled:           stateProcessor.PaymasterEnabled(),
+                paymasterLimits:            PaymasterLimits{},
+                paymasterTopUpPolicy:       PaymasterAutoTopUpPolicy{Token: "ZNHB"},
 		timestampTolerance:         DefaultBlockTimestampTolerance,
 		timeSource:                 func() time.Time { return time.Now().UTC() },
 		lendingModuleAddr:          moduleAddr,
@@ -344,7 +346,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	}
 
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
-	stateProcessor.SetPaymasterLimits(node.paymasterLimits)
+        stateProcessor.SetPaymasterLimits(node.paymasterLimits)
+        stateProcessor.SetPaymasterAutoTopUpPolicy(node.paymasterTopUpPolicy)
 	stateProcessor.SetFeePolicy(node.feesPolicy)
 
 	node.SetModulePauses(config.Pauses{})
@@ -751,18 +754,28 @@ func (n *Node) PaymasterModuleEnabled() bool {
 
 // PaymasterLimits returns the currently configured sponsorship caps.
 func (n *Node) PaymasterLimits() PaymasterLimits {
-	if n == nil {
-		return PaymasterLimits{}
-	}
-	n.paymasterMu.RLock()
-	defer n.paymasterMu.RUnlock()
-	return n.paymasterLimits.Clone()
+        if n == nil {
+                return PaymasterLimits{}
+        }
+        n.paymasterMu.RLock()
+        defer n.paymasterMu.RUnlock()
+        return n.paymasterLimits.Clone()
+}
+
+// PaymasterAutoTopUpPolicy returns the configured automatic top-up policy.
+func (n *Node) PaymasterAutoTopUpPolicy() PaymasterAutoTopUpPolicy {
+        if n == nil {
+                return PaymasterAutoTopUpPolicy{}
+        }
+        n.paymasterMu.RLock()
+        defer n.paymasterMu.RUnlock()
+        return n.paymasterTopUpPolicy.Clone()
 }
 
 // SetPaymasterModuleEnabled toggles the paymaster module after verifying the caller has admin privileges.
 func (n *Node) SetPaymasterModuleEnabled(caller []byte, enabled bool) error {
-	if n == nil {
-		return fmt.Errorf("node unavailable")
+        if n == nil {
+                return fmt.Errorf("node unavailable")
 	}
 	if len(caller) == 0 {
 		return fmt.Errorf("caller address required")
@@ -800,18 +813,34 @@ func (n *Node) EvaluateSponsorship(tx *types.Transaction) (*SponsorshipAssessmen
 
 // SetPaymasterLimits updates the sponsorship caps enforced for sponsored transactions.
 func (n *Node) SetPaymasterLimits(limits PaymasterLimits) {
-	if n == nil {
-		return
-	}
-	clone := limits.Clone()
-	n.stateMu.Lock()
-	if n.state != nil {
-		n.state.SetPaymasterLimits(clone)
-	}
-	n.stateMu.Unlock()
-	n.paymasterMu.Lock()
-	n.paymasterLimits = clone
-	n.paymasterMu.Unlock()
+        if n == nil {
+                return
+        }
+        clone := limits.Clone()
+        n.stateMu.Lock()
+        if n.state != nil {
+                n.state.SetPaymasterLimits(clone)
+        }
+        n.stateMu.Unlock()
+        n.paymasterMu.Lock()
+        n.paymasterLimits = clone
+        n.paymasterMu.Unlock()
+}
+
+// SetPaymasterAutoTopUpPolicy installs the automatic top-up policy applied to paymaster accounts.
+func (n *Node) SetPaymasterAutoTopUpPolicy(policy PaymasterAutoTopUpPolicy) {
+        if n == nil {
+                return
+        }
+        clone := policy.Clone()
+        n.stateMu.Lock()
+        if n.state != nil {
+                n.state.SetPaymasterAutoTopUpPolicy(clone)
+        }
+        n.stateMu.Unlock()
+        n.paymasterMu.Lock()
+        n.paymasterTopUpPolicy = clone
+        n.paymasterMu.Unlock()
 }
 
 // PaymasterCounters returns the current sponsorship usage metrics for the provided scopes.

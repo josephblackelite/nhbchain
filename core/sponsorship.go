@@ -3,10 +3,14 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"strings"
+	"time"
 
+	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	coretx "nhbchain/core/tx"
 	"nhbchain/core/types"
+	"nhbchain/observability"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -104,6 +108,41 @@ func (l PaymasterLimits) Clone() PaymasterLimits {
 	}
 	if l.GlobalDailyCapWei != nil {
 		clone.GlobalDailyCapWei = new(big.Int).Set(l.GlobalDailyCapWei)
+	}
+	return clone
+}
+
+// PaymasterAutoTopUpPolicy captures the automatic top-up policy applied to paymaster accounts.
+type PaymasterAutoTopUpPolicy struct {
+	Enabled        bool
+	Token          string
+	MinBalanceWei  *big.Int
+	TopUpAmountWei *big.Int
+	DailyCapWei    *big.Int
+	Cooldown       time.Duration
+	Operator       [20]byte
+	ApproverRole   string
+	MinterRole     string
+}
+
+// Clone returns a deep copy of the policy structure.
+func (p PaymasterAutoTopUpPolicy) Clone() PaymasterAutoTopUpPolicy {
+	clone := PaymasterAutoTopUpPolicy{
+		Enabled:      p.Enabled,
+		Token:        p.Token,
+		Cooldown:     p.Cooldown,
+		Operator:     p.Operator,
+		ApproverRole: p.ApproverRole,
+		MinterRole:   p.MinterRole,
+	}
+	if p.MinBalanceWei != nil {
+		clone.MinBalanceWei = new(big.Int).Set(p.MinBalanceWei)
+	}
+	if p.TopUpAmountWei != nil {
+		clone.TopUpAmountWei = new(big.Int).Set(p.TopUpAmountWei)
+	}
+	if p.DailyCapWei != nil {
+		clone.DailyCapWei = new(big.Int).Set(p.DailyCapWei)
 	}
 	return clone
 }
@@ -220,6 +259,9 @@ func (sp *StateProcessor) EvaluateSponsorship(tx *types.Transaction) (*Sponsorsh
 
 	account, err := sp.getAccount(tx.Paymaster)
 	if err != nil {
+		return nil, err
+	}
+	if err := sp.maybeAutoTopUpPaymaster(sponsorAddr, tx.Paymaster, account); err != nil {
 		return nil, err
 	}
 	if account == nil || account.BalanceNHB == nil || account.BalanceNHB.Cmp(gasCost) < 0 {
@@ -403,6 +445,22 @@ func (sp *StateProcessor) SetPaymasterLimits(limits PaymasterLimits) {
 	sp.paymasterLimits = limits.Clone()
 }
 
+// PaymasterAutoTopUpPolicy returns the current automatic top-up policy snapshot.
+func (sp *StateProcessor) PaymasterAutoTopUpPolicy() PaymasterAutoTopUpPolicy {
+	if sp == nil {
+		return PaymasterAutoTopUpPolicy{}
+	}
+	return sp.paymasterTopUp.Clone()
+}
+
+// SetPaymasterAutoTopUpPolicy configures the automatic top-up policy enforced for paymaster accounts.
+func (sp *StateProcessor) SetPaymasterAutoTopUpPolicy(policy PaymasterAutoTopUpPolicy) {
+	if sp == nil {
+		return
+	}
+	sp.paymasterTopUp = policy.Clone()
+}
+
 // PaymasterCounters aggregates the current usage metrics for the provided scope and day.
 func (sp *StateProcessor) PaymasterCounters(merchant, device, day string) (*PaymasterCounters, error) {
 	if sp == nil {
@@ -468,4 +526,145 @@ func (sp *StateProcessor) PaymasterCounters(merchant, device, day string) (*Paym
 	}
 
 	return snapshot, nil
+}
+
+func (sp *StateProcessor) emitPaymasterAutoTopUpEvent(paymaster [20]byte, token string, amount, balance *big.Int, day, status, reason string) {
+	if sp == nil {
+		return
+	}
+	evt := events.PaymasterAutoTopUp{
+		Paymaster: paymaster,
+		Token:     strings.TrimSpace(token),
+		Day:       strings.TrimSpace(day),
+		Status:    strings.TrimSpace(status),
+		Reason:    strings.TrimSpace(reason),
+	}
+	if amount != nil {
+		evt.AmountWei = new(big.Int).Set(amount)
+	}
+	if balance != nil {
+		evt.BalanceWei = new(big.Int).Set(balance)
+	}
+	sp.AppendEvent(evt.Event())
+}
+
+func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byte, account *types.Account) error {
+	if sp == nil || sp.execContext == nil {
+		return nil
+	}
+	policy := sp.paymasterTopUp.Clone()
+	if !policy.Enabled {
+		return nil
+	}
+	token := strings.ToUpper(strings.TrimSpace(policy.Token))
+	if token == "" {
+		token = "ZNHB"
+	}
+	if token != "ZNHB" {
+		return nil
+	}
+	if account == nil {
+		return nil
+	}
+	if policy.MinBalanceWei == nil || policy.MinBalanceWei.Sign() <= 0 {
+		return nil
+	}
+	if account.BalanceZNHB == nil {
+		account.BalanceZNHB = big.NewInt(0)
+	}
+	currentBalance := new(big.Int).Set(account.BalanceZNHB)
+	if account.BalanceZNHB.Cmp(policy.MinBalanceWei) >= 0 {
+		return nil
+	}
+	amount := policy.TopUpAmountWei
+	if amount == nil || amount.Sign() <= 0 {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, sp.currentPaymasterDay(), "failure", "amount_not_configured")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil
+	}
+	if addr == (common.Address{}) {
+		var paymasterBytes [20]byte
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, sp.currentPaymasterDay(), "failure", "paymaster_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil
+	}
+	paymasterKey := strings.ToLower(addr.Hex())
+	manager := nhbstate.NewManager(sp.Trie)
+	day := sp.currentPaymasterDay()
+	dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterKey, day)
+	if err != nil {
+		return err
+	}
+	mintedSoFar := big.NewInt(0)
+	if dayRecord != nil && dayRecord.MintedWei != nil {
+		mintedSoFar = new(big.Int).Set(dayRecord.MintedWei)
+	}
+	projected := new(big.Int).Add(mintedSoFar, amount)
+	if policy.DailyCapWei != nil && policy.DailyCapWei.Sign() > 0 && projected.Cmp(policy.DailyCapWei) > 0 {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "daily_cap_exceeded")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil
+	}
+	statusRecord, _, err := manager.PaymasterGetTopUpStatus(paymasterKey)
+	if err != nil {
+		return err
+	}
+	if policy.Cooldown > 0 && statusRecord != nil && statusRecord.LastUnix > 0 {
+		last := time.Unix(int64(statusRecord.LastUnix), 0)
+		if sp.blockTimestamp().Before(last.Add(policy.Cooldown)) {
+			var paymasterBytes [20]byte
+			copy(paymasterBytes[:], addr.Bytes())
+			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "cooldown_active")
+			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+			return nil
+		}
+	}
+	if policy.Operator == ([20]byte{}) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "operator_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil
+	}
+	operator := policy.Operator
+	operatorBytes := operator[:]
+	if strings.TrimSpace(policy.MinterRole) != "" && !manager.HasRole(policy.MinterRole, operatorBytes) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "minter_role_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil
+	}
+	if strings.TrimSpace(policy.ApproverRole) != "" && !manager.HasRole(policy.ApproverRole, operatorBytes) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_role_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil
+	}
+	// Apply the top-up.
+	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+	if err := sp.setAccount(raw, account); err != nil {
+		return err
+	}
+	if dayRecord == nil {
+		dayRecord = &nhbstate.PaymasterTopUpDay{Paymaster: paymasterKey, Day: day, MintedWei: big.NewInt(0)}
+	}
+	dayRecord.MintedWei = projected
+	if err := manager.PaymasterPutTopUpDay(dayRecord); err != nil {
+		return err
+	}
+	if err := manager.PaymasterPutTopUpStatus(&nhbstate.PaymasterTopUpStatus{Paymaster: paymasterKey, LastUnix: uint64(sp.blockTimestamp().Unix())}); err != nil {
+		return err
+	}
+	var paymasterBytes [20]byte
+	copy(paymasterBytes[:], addr.Bytes())
+	newBalance := new(big.Int).Set(account.BalanceZNHB)
+	sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, amount, newBalance, day, "success", "")
+	observability.Paymaster().RecordAutoTopUp("success", amount)
+	return nil
 }

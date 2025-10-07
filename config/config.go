@@ -141,6 +141,16 @@ func defaultGlobalConfig() Global {
 		Paymaster: Paymaster{
 			MerchantDailyCapWei: "0",
 			GlobalDailyCapWei:   "0",
+			AutoTopUp: PaymasterAutoTopUp{
+				Token:          "ZNHB",
+				MinBalanceWei:  "0",
+				TopUpAmountWei: "0",
+				DailyCapWei:    "0",
+				Governance: PaymasterAutoTopUpGovernance{
+					MinterRole:   "MINTER_ZNHB",
+					ApproverRole: "ROLE_PAYMASTER_ADMIN",
+				},
+			},
 		},
 		Fees: Fees{
 			FreeTierTxPerMonth: DefaultFreeTierTxPerMonth,
@@ -529,6 +539,27 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "paymaster", "DeviceDailyTxCap") {
 		cfg.Global.Paymaster.DeviceDailyTxCap = defaults.Paymaster.DeviceDailyTxCap
+	}
+	if !meta.IsDefined("global", "paymaster", "AutoTopUp", "Token") {
+		cfg.Global.Paymaster.AutoTopUp.Token = defaults.Paymaster.AutoTopUp.Token
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.MinBalanceWei) == "" {
+		cfg.Global.Paymaster.AutoTopUp.MinBalanceWei = defaults.Paymaster.AutoTopUp.MinBalanceWei
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.TopUpAmountWei) == "" {
+		cfg.Global.Paymaster.AutoTopUp.TopUpAmountWei = defaults.Paymaster.AutoTopUp.TopUpAmountWei
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.DailyCapWei) == "" {
+		cfg.Global.Paymaster.AutoTopUp.DailyCapWei = defaults.Paymaster.AutoTopUp.DailyCapWei
+	}
+	if !meta.IsDefined("global", "paymaster", "AutoTopUp", "CooldownSeconds") {
+		cfg.Global.Paymaster.AutoTopUp.CooldownSeconds = defaults.Paymaster.AutoTopUp.CooldownSeconds
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.MinterRole) == "" {
+		cfg.Global.Paymaster.AutoTopUp.Governance.MinterRole = defaults.Paymaster.AutoTopUp.Governance.MinterRole
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.ApproverRole) == "" {
+		cfg.Global.Paymaster.AutoTopUp.Governance.ApproverRole = defaults.Paymaster.AutoTopUp.Governance.ApproverRole
 	}
 	if !meta.IsDefined("global", "fees", "FreeTierTxPerMonth") {
 		cfg.Global.Fees.FreeTierTxPerMonth = defaults.Fees.FreeTierTxPerMonth

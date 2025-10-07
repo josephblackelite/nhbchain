@@ -44,3 +44,8 @@ toc:
         path: governance/fee-params.md
       - name: Operations runbook
         path: ops/fees.md
+
+  - name: Security
+    toc:
+      - name: Mint controls
+        path: security/mint-controls.md
