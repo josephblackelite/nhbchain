@@ -22,9 +22,10 @@ type moduleMetrics struct {
 
 // MempoolMetrics surfaces instrumentation for POS QoS accounting.
 type MempoolMetrics struct {
-	posLaneFill prometheus.Gauge
-	posEnqueued prometheus.Counter
-	posFinality prometheus.Histogram
+	posLaneFill    prometheus.Gauge
+	posLaneBacklog *prometheus.GaugeVec
+	posEnqueued    prometheus.Counter
+	posFinality    prometheus.Histogram
 }
 
 // PaymasterMetrics captures observability counters for automatic paymaster top-ups.
@@ -186,6 +187,12 @@ func Mempool() *MempoolMetrics {
 				Name:      "pos_lane_fill",
 				Help:      "Fill ratio for the POS-reserved transaction lane.",
 			}),
+			posLaneBacklog: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "pos_lane_backlog",
+				Help:      "Count of POS-tagged transfers segmented by asset.",
+			}, []string{"asset"}),
 			posEnqueued: prometheus.NewCounter(prometheus.CounterOpts{
 				Namespace: "nhb",
 				Subsystem: "mempool",
@@ -202,6 +209,7 @@ func Mempool() *MempoolMetrics {
 		}
 		prometheus.MustRegister(
 			mempoolRegistry.posLaneFill,
+			mempoolRegistry.posLaneBacklog,
 			mempoolRegistry.posEnqueued,
 			mempoolRegistry.posFinality,
 		)
@@ -269,10 +277,32 @@ func (m *MempoolMetrics) RecordPOSLaneFill(usage mempool.Usage) {
 		} else {
 			m.posLaneFill.Set(float64(usage.TotalPOS))
 		}
+		m.recordPOSBacklog(usage.POSByAsset)
 		return
 	}
 	ratio := float64(usage.TotalPOS) / float64(usage.Target)
 	m.posLaneFill.Set(ratio)
+	m.recordPOSBacklog(usage.POSByAsset)
+}
+
+func (m *MempoolMetrics) recordPOSBacklog(byAsset map[string]int) {
+	if m == nil || m.posLaneBacklog == nil {
+		return
+	}
+	counts := byAsset
+	if counts == nil {
+		counts = map[string]int{}
+	}
+	// Always emit gauges for NHB and ZNHB so dashboards can chart both
+	// assets even when empty.
+	m.posLaneBacklog.WithLabelValues("nhb").Set(float64(counts["nhb"]))
+	m.posLaneBacklog.WithLabelValues("znhb").Set(float64(counts["znhb"]))
+	for asset, count := range counts {
+		if asset == "nhb" || asset == "znhb" {
+			continue
+		}
+		m.posLaneBacklog.WithLabelValues(asset).Set(float64(count))
+	}
 }
 
 // RecordPOSEnqueued increments the counter tracking how many POS transactions

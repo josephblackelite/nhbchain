@@ -1246,7 +1246,7 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
-	if len(tx.IntentRef) > 0 {
+	if mempool.IsPOSLaneEligible(tx) {
 		if key, err := transactionKey(tx); err == nil {
 			if n.posArrival == nil {
 				n.posArrival = make(map[string]time.Time)
@@ -1260,7 +1260,7 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 		}
 	}
 	n.mempool = append(n.mempool, tx)
-	if len(tx.IntentRef) > 0 {
+	if mempool.IsPOSLaneEligible(tx) {
 		if hash, err := tx.Hash(); err == nil {
 			n.publishPOSFinality(POSFinalityUpdate{
 				IntentRef: append([]byte(nil), tx.IntentRef...),
@@ -1374,7 +1374,7 @@ func (n *Node) GetMempool() []*types.Transaction {
 				}
 			}
 			filtered = append(filtered, tx)
-			if len(tx.IntentRef) > 0 {
+			if mempool.IsPOSLaneEligible(tx) {
 				lanes.POS = append(lanes.POS, tx)
 			} else {
 				lanes.Normal = append(lanes.Normal, tx)
@@ -1476,7 +1476,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		}
 		committed[key] = struct{}{}
 		delete(n.proposedTxs, key)
-		if len(tx.IntentRef) > 0 && n.posArrival != nil {
+		if mempool.IsPOSLaneEligible(tx) && n.posArrival != nil {
 			if enqueuedAt, ok := n.posArrival[key]; ok {
 				latency := n.currentTime().Sub(enqueuedAt)
 				if metrics := observability.Mempool(); metrics != nil {
