@@ -208,6 +208,13 @@ func main() {
 				RateLimitKey:   "gov",
 			},
 			{
+				Name:         "transactions",
+				Prefix:       "/v1/transactions",
+				Target:       servicesByName["consensusd"].BaseURL,
+				RequireAuth:  true,
+				RateLimitKey: "consensus",
+			},
+			{
 				Name:         "consensus",
 				Prefix:       "/v1/consensus",
 				Target:       servicesByName["consensusd"].BaseURL,
