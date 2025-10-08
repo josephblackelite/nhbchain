@@ -12,6 +12,7 @@
       "symbol": "ZNHB",
       "name": "ZapNHB",
       "decimals": 18,
+      "mintAuthority": "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w",
       "initialMintPaused": false
     }
   ],
@@ -30,5 +31,12 @@
       "ZNHB": "10000000"
     }
   },
-  "roles": {}
+  "roles": {
+    "MINTER_NHB": [
+      "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"
+    ],
+    "MINTER_ZNHB": [
+      "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"
+    ]
+  }
 }
