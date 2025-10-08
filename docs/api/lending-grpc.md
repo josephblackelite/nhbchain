@@ -1,214 +1,266 @@
-# Lending gRPC Gateway
+# Lending gRPC API
 
-The gateway exposes a JSON-over-HTTP surface for the [`lending.v1.LendingService`](../../proto/lending/v1/lending.proto).
-Each endpoint maps directly to a gRPC method and forwards requests to `lendingd` using the same authentication and
-rate-limiting middleware as the legacy REST endpoints.
+The `lending.v1.LendingService` exposes the canonical lending functionality over gRPC.  This
+surface is consumed by the gateway and SDKs, and is the recommended integration point for
+back-end services that need real-time interactions with the lending protocol.
 
-All requests and responses use JSON encodings of the underlying protobuf messages. Examples below illustrate the wire
-format and reference the relevant message types.
+> The protobuf definitions referenced throughout this document live in
+> [`proto/lending/v1/lending.proto`](../../proto/lending/v1/lending.proto).  Field names below use the
+> canonical snake_case protobuf casing while the generated clients expose idiomatic naming for each
+> language.
 
-## List markets
+## Connecting to the service
 
-- **Method**: `GET /v1/lending/markets`
-- **gRPC method**: `ListMarkets(ListMarketsRequest) returns (ListMarketsResponse)`
-- **Description**: Retrieves the catalog of supported lending markets.
+| Property | Value |
+| --- | --- |
+| Package | `lending.v1` |
+| Service | `LendingService` |
+| Default port (lendingd) | `9090` |
 
-**Response example (`ListMarketsResponse`)**
+The service requires TLS in production deployments.  Development clusters may enable plaintext
+transport; when using `grpcurl` the `-plaintext` flag can be supplied to skip TLS.
 
-```json
-{
-  "markets": [
-    {
-      "key": {"symbol": "nhb"},
-      "baseAsset": "unhb",
-      "collateralFactor": "0.5",
-      "reserveFactor": "0.1",
-      "liquidityIndex": "1.000000000000000000",
-      "borrowIndex": "1.000000000000000000"
-    }
-  ]
-}
+```bash
+grpcurl -plaintext localhost:9090 list lending.v1.LendingService
 ```
 
-## Get market
+Every method follows the standard gRPC error model.  In addition to transport-level errors the
+service returns the following codes:
 
-- **Method**: `POST /v1/lending/markets/get`
-- **gRPC method**: `GetMarket(GetMarketRequest) returns (GetMarketResponse)`
-- **Description**: Fetches a single market by its symbol.
+- `INVALID_ARGUMENT` – malformed symbols, empty amounts, or failing validation.
+- `NOT_FOUND` – unknown market symbols or accounts with no position data.
+- `FAILED_PRECONDITION` – actions that would violate collateral requirements.
+- `UNAUTHENTICATED` / `PERMISSION_DENIED` – the caller lacks the required credentials.
+- `UNAVAILABLE` – the lending module is temporarily unable to service the request.
 
-**Request example (`GetMarketRequest`)**
+## Shared message types
 
-```json
+### `Market`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `key.symbol` | `string` | Market identifier, e.g. `"nhb"`. |
+| `base_asset` | `string` | Denom that is supplied and borrowed. |
+| `collateral_factor` | `string` | Decimal fraction of supplied value that counts as collateral. |
+| `reserve_factor` | `string` | Portion of interest captured by protocol reserves. |
+| `liquidity_index` | `string` | Accumulated index for supplied balances. |
+| `borrow_index` | `string` | Accumulated index for borrowed balances. |
+
+### `AccountPosition`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `account` | `string` | Bech32 account address. |
+| `supplied` | `string` | Total supplied principal in base units. |
+| `borrowed` | `string` | Outstanding borrowed balance in base units. |
+| `collateral` | `string` | Value of collateral measured in base units. |
+| `health_factor` | `string` | Ratio of collateral value to borrowed value. |
+
+## RPC reference
+
+### `ListMarkets`
+
+`rpc ListMarkets(ListMarketsRequest) returns (ListMarketsResponse);`
+
+**Request fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| _(none)_ | – | The request message has no fields. |
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `markets[]` | `Market` | Configured markets that accept supply and borrow operations. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/ListMarkets <<'JSON'
+{}
+JSON
+```
+
+### `GetMarket`
+
+`rpc GetMarket(GetMarketRequest) returns (GetMarketResponse);`
+
+**Request fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `key.symbol` | `string` | Market symbol to fetch (case-sensitive). |
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `market` | `Market` | Full market definition for the requested symbol. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/GetMarket <<'JSON'
 {
   "key": {"symbol": "nhb"}
 }
+JSON
 ```
 
-**Response example (`GetMarketResponse`)**
+### `GetPosition`
 
-```json
-{
-  "market": {
-    "key": {"symbol": "nhb"},
-    "baseAsset": "unhb",
-    "collateralFactor": "0.5",
-    "reserveFactor": "0.1",
-    "liquidityIndex": "1.000000000000000000",
-    "borrowIndex": "1.000000000000000000"
-  }
-}
-```
+`rpc GetPosition(GetPositionRequest) returns (GetPositionResponse);`
 
-## Get position
+**Request fields**
 
-- **Method**: `POST /v1/lending/positions/get`
-- **gRPC method**: `GetPosition(GetPositionRequest) returns (GetPositionResponse)`
-- **Description**: Returns the current lending position for a borrower account.
+| Field | Type | Description |
+| --- | --- | --- |
+| `account` | `string` | Borrower account address. |
 
-**Request example (`GetPositionRequest`)**
+**Response fields**
 
-```json
+| Field | Type | Description |
+| --- | --- | --- |
+| `position` | `AccountPosition` | Summary of the borrower's current state. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/GetPosition <<'JSON'
 {
   "account": "nhb1exampleaccount"
 }
+JSON
 ```
 
-**Response example (`GetPositionResponse`)**
+### `SupplyAsset`
 
-```json
-{
-  "position": {
-    "account": "nhb1exampleaccount",
-    "supplied": "1000",
-    "borrowed": "250",
-    "collateral": "400",
-    "healthFactor": "1.8"
-  }
-}
-```
+`rpc SupplyAsset(SupplyAssetRequest) returns (SupplyAssetResponse);`
 
-## Supply asset
+**Request fields**
 
-- **Method**: `POST /v1/lending/supply`
-- **gRPC method**: `SupplyAsset(SupplyAssetRequest) returns (SupplyAssetResponse)`
-- **Description**: Supplies liquidity to a market.
+| Field | Type | Description |
+| --- | --- | --- |
+| `account` | `string` | Address supplying liquidity. |
+| `market.symbol` | `string` | Target market symbol. |
+| `amount` | `string` | Amount to supply in base units. |
 
-**Request example (`SupplyAssetRequest`)**
+**Response fields**
 
-```json
+| Field | Type | Description |
+| --- | --- | --- |
+| `position` | `AccountPosition` | Updated account position after the supply transaction. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/SupplyAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
   "amount": "500"
 }
+JSON
 ```
 
-**Response example (`SupplyAssetResponse`)**
+### `WithdrawAsset`
 
-```json
-{
-  "position": {
-    "account": "nhb1exampleaccount",
-    "supplied": "1500",
-    "borrowed": "250",
-    "collateral": "400",
-    "healthFactor": "2.1"
-  }
-}
-```
+`rpc WithdrawAsset(WithdrawAssetRequest) returns (WithdrawAssetResponse);`
 
-## Withdraw asset
+**Request fields**
 
-- **Method**: `POST /v1/lending/withdraw`
-- **gRPC method**: `WithdrawAsset(WithdrawAssetRequest) returns (WithdrawAssetResponse)`
-- **Description**: Withdraws previously supplied liquidity.
+| Field | Type | Description |
+| --- | --- | --- |
+| `account` | `string` | Address withdrawing liquidity. |
+| `market.symbol` | `string` | Market symbol to withdraw from. |
+| `amount` | `string` | Amount to withdraw in base units. |
 
-**Request example (`WithdrawAssetRequest`)**
+**Response fields**
 
-```json
+| Field | Type | Description |
+| --- | --- | --- |
+| `position` | `AccountPosition` | Updated position reflecting the withdrawal. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/WithdrawAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
   "amount": "200"
 }
+JSON
 ```
 
-**Response example (`WithdrawAssetResponse`)**
+### `BorrowAsset`
 
-```json
-{
-  "position": {
-    "account": "nhb1exampleaccount",
-    "supplied": "1300",
-    "borrowed": "250",
-    "collateral": "400",
-    "healthFactor": "1.9"
-  }
-}
-```
+`rpc BorrowAsset(BorrowAssetRequest) returns (BorrowAssetResponse);`
 
-## Borrow asset
+**Request fields**
 
-- **Method**: `POST /v1/lending/borrow`
-- **gRPC method**: `BorrowAsset(BorrowAssetRequest) returns (BorrowAssetResponse)`
-- **Description**: Borrows from a market using the caller's collateral.
+| Field | Type | Description |
+| --- | --- | --- |
+| `account` | `string` | Borrower address. |
+| `market.symbol` | `string` | Market symbol to borrow from. |
+| `amount` | `string` | Amount to borrow in base units. |
 
-**Request example (`BorrowAssetRequest`)**
+**Response fields**
 
-```json
+| Field | Type | Description |
+| --- | --- | --- |
+| `position` | `AccountPosition` | Updated position reflecting the borrowed balance. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/BorrowAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
   "amount": "100"
 }
+JSON
 ```
 
-**Response example (`BorrowAssetResponse`)**
+### `RepayAsset`
 
-```json
-{
-  "position": {
-    "account": "nhb1exampleaccount",
-    "supplied": "1300",
-    "borrowed": "350",
-    "collateral": "400",
-    "healthFactor": "1.6"
-  }
-}
-```
+`rpc RepayAsset(RepayAssetRequest) returns (RepayAssetResponse);`
 
-## Repay asset
+**Request fields**
 
-- **Method**: `POST /v1/lending/repay`
-- **gRPC method**: `RepayAsset(RepayAssetRequest) returns (RepayAssetResponse)`
-- **Description**: Repays an outstanding borrowed amount.
+| Field | Type | Description |
+| --- | --- | --- |
+| `account` | `string` | Borrower address repaying the debt. |
+| `market.symbol` | `string` | Market symbol to repay. |
+| `amount` | `string` | Amount to repay in base units. |
 
-**Request example (`RepayAssetRequest`)**
+**Response fields**
 
-```json
+| Field | Type | Description |
+| --- | --- | --- |
+| `position` | `AccountPosition` | Updated position after the repayment. |
+
+**Sample invocation**
+
+```bash
+grpcurl -plaintext localhost:9090 lending.v1.LendingService/RepayAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
   "amount": "75"
 }
+JSON
 ```
 
-**Response example (`RepayAssetResponse`)**
+## Error handling tips
 
-```json
-{
-  "position": {
-    "account": "nhb1exampleaccount",
-    "supplied": "1300",
-    "borrowed": "275",
-    "collateral": "400",
-    "healthFactor": "1.8"
-  }
-}
-```
+- For `INVALID_ARGUMENT` responses, re-check symbol casing and ensure numeric values are encoded as
+  strings containing base units (no decimals).
+- `FAILED_PRECONDITION` errors usually indicate that the requested borrow or withdrawal would push
+  the account below the allowed health factor.  Fetch the latest position using `GetPosition` to
+  calculate a safe amount.
+- When using mutual TLS or per-RPC credentials, ensure metadata headers are forwarded by your client
+  library—missing authentication details typically surface as `UNAUTHENTICATED`.
 
-> **Note**
->
-> The gateway validates JSON bodies against the protobuf schemas and surfaces gRPC errors using HTTP status codes.
-> Refer to [`proto/lending/v1/lending.proto`](../../proto/lending/v1/lending.proto) for the authoritative
-> message definitions.
