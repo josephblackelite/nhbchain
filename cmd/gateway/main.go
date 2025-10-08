@@ -181,7 +181,7 @@ func main() {
 		rateLimits["consensus"] = middleware.RateLimit{RatePerSecond: 4, Burst: 40}
 	}
 
-	router := routes.New(routes.Config{
+	router, err := routes.New(routes.Config{
 		Routes: []routes.ServiceRoute{
 			{
 				Name:           "lending",
@@ -226,6 +226,10 @@ func main() {
 			AllowCredentials: false,
 		},
 	})
+
+	if err != nil {
+		logger.Fatalf("configure routes: %v", err)
+	}
 
 	handler := http.Handler(router)
 	if cfg.Observability.Tracing {
