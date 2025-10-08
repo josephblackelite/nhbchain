@@ -94,11 +94,10 @@ func main() {
 		}
 		heartbeat(args[1])
 	case "send-znhb":
-		if len(args) < 4 {
-			fmt.Println("Usage: send-znhb <recipient> <amount> <key_file>")
-			return
+		if code := runSendZNHBCommand(args[1:]); code != 0 {
+			os.Exit(code)
 		}
-		sendZNHB(args[1], args[2], args[3])
+		return
 	case "deploy": // NEW: Handle the deploy command
 		if len(args) < 3 {
 			fmt.Println("Error: Please provide a bytecode file and a key file.")
@@ -299,7 +298,7 @@ func stake(amount int64, keyFile string) {
 	}
 	tx.Sign(privKey.PrivateKey)
 
-	if err := sendTransaction(&tx); err != nil {
+	if _, err := sendTransaction(&tx); err != nil {
 		fmt.Printf("Error sending stake transaction: %v\n", err)
 		return
 	}
@@ -333,7 +332,7 @@ func unStake(amount int64, keyFile string) {
 	}
 	tx.Sign(privKey.PrivateKey)
 
-	if err := sendTransaction(&tx); err != nil {
+	if _, err := sendTransaction(&tx); err != nil {
 		fmt.Printf("Error sending un-stake transaction: %v\n", err)
 		return
 	}
@@ -367,7 +366,7 @@ func heartbeat(keyFile string) {
 	}
 	tx.Sign(privKey.PrivateKey)
 
-	if err := sendTransaction(&tx); err != nil {
+	if _, err := sendTransaction(&tx); err != nil {
 		fmt.Printf("Error sending heartbeat transaction: %v\n", err)
 		return
 	}
@@ -375,51 +374,6 @@ func heartbeat(keyFile string) {
 	fmt.Println("Successfully sent heartbeat transaction.")
 }
 
-func sendZNHB(recipient, amountStr, keyFile string) {
-	privKey, err := loadPrivateKey(keyFile)
-	if err != nil {
-		fmt.Printf("Error loading private key: %v\n", err)
-		return
-	}
-	dest, err := crypto.DecodeAddress(recipient)
-	if err != nil {
-		fmt.Printf("Error parsing recipient address: %v\n", err)
-		return
-	}
-	amount, ok := new(big.Int).SetString(strings.TrimSpace(amountStr), 10)
-	if !ok || amount.Sign() <= 0 {
-		fmt.Println("Error: Amount must be a positive integer.")
-		return
-	}
-
-	account, err := fetchAccount(privKey.PubKey().Address().String())
-	if err != nil {
-		fmt.Printf("Error fetching account details: %v\n", err)
-		return
-	}
-
-	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
-		Type:     types.TxTypeTransferZNHB,
-		Nonce:    account.Nonce,
-		To:       dest.Bytes(),
-		Value:    amount,
-		GasLimit: 25000,
-		GasPrice: big.NewInt(1),
-	}
-	if err := tx.Sign(privKey.PrivateKey); err != nil {
-		fmt.Printf("Error signing transaction: %v\n", err)
-		return
-	}
-
-	if err := sendTransaction(&tx); err != nil {
-		fmt.Printf("Error sending ZNHB transfer: %v\n", err)
-		return
-	}
-
-	fmt.Printf("Successfully sent %s ZNHB to %s.\n", amount.String(), recipient)
-	fmt.Println("The transfer consumes NHB gas; monitor the node for finalization.")
-}
 func generateKey() {
 	key, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -491,7 +445,7 @@ func claimUsername(username string, keyFile string) {
 	}
 	tx.Sign(privKey.PrivateKey)
 
-	if err := sendTransaction(&tx); err != nil {
+	if _, err := sendTransaction(&tx); err != nil {
 		fmt.Printf("Error sending claim-username transaction: %v\n", err)
 		return
 	}
@@ -556,29 +510,30 @@ func fetchAccount(addr string) (*balanceResponse, error) {
 	return &rpcResp.Result, nil
 }
 
-func sendTransaction(tx *types.Transaction) error {
+func sendTransaction(tx *types.Transaction) (string, error) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"id": 1, "method": "nhb_sendTransaction", "params": []interface{}{tx},
 	})
 	resp, err := doRPCRequest(payload, true)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	var rpcResp struct {
-		Error *struct {
+		Result string `json:"result"`
+		Error  *struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return fmt.Errorf("failed to decode response from node")
+		return "", fmt.Errorf("failed to decode response from node")
 	}
 	if rpcResp.Error != nil {
-		return fmt.Errorf("error from node: %s", rpcResp.Error.Message)
+		return "", fmt.Errorf("error from node: %s", rpcResp.Error.Message)
 	}
-	return nil
+	return strings.TrimSpace(rpcResp.Result), nil
 }
 
 func doRPCRequest(payload []byte, requireAuth bool) (*http.Response, error) {
@@ -899,7 +854,7 @@ func deploy(bytecodeFile string, keyFile string) {
 	}
 	tx.Sign(privKey.PrivateKey)
 
-	if err := sendTransaction(&tx); err != nil {
+	if _, err := sendTransaction(&tx); err != nil {
 		fmt.Printf("Error sending deploy transaction: %v\n", err)
 		return
 	}
@@ -920,7 +875,7 @@ func printUsage() {
 	fmt.Println("  stake <amount> <path_to_key_file> - Stakes a specified amount of ZapNHB")
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
-	fmt.Println("  send-znhb <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
+	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
 	fmt.Println("  id                                 - Identity alias management subcommands")
 	fmt.Println("  escrow                             - Escrow management subcommands")
