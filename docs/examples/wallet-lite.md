@@ -45,6 +45,9 @@ not yet consumed by the UI.
 * Claimable payloads are validated and normalised before hitting the RPC to avoid malformed requests.
 * The default production base URL is `https://nhbcoin.com`. Set `APP_PUBLIC_BASE` accordingly when
   hosting behind CloudFront or S3.
+* Follow the [authenticated transaction submission guide](../transactions/znhb-transfer.md#authenticated-submission)
+  when wiring send flows so `nhb_sendTransaction` continues to proxy through the server and the RPC
+  bearer token never leaves trusted infrastructure.
 
 ## Claimables Walkthrough
 
