@@ -206,23 +206,11 @@ func (s *Service) translateEngineError(action string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return status.FromContextError(err).Err()
 	}
-	switch {
-	case errors.Is(err, engine.ErrNotFound):
-		return status.Error(codes.NotFound, "resource not found")
-	case errors.Is(err, engine.ErrInvalidAmount):
-		return status.Error(codes.InvalidArgument, "invalid amount")
-	case errors.Is(err, engine.ErrPaused):
-		return status.Error(codes.FailedPrecondition, "operation paused")
-	case errors.Is(err, engine.ErrInsufficientCollateral):
-		return status.Error(codes.FailedPrecondition, "insufficient collateral")
-	case errors.Is(err, engine.ErrUnauthorized):
-		return status.Error(codes.PermissionDenied, "unauthorized")
-	case errors.Is(err, engine.ErrInternal):
-		fallthrough
-	default:
+	stErr := toStatus(err)
+	if status.Code(stErr) == codes.Internal {
 		s.log().Error("lending engine error", "action", action, "error", err)
-		return status.Error(codes.Internal, "internal error")
 	}
+	return stErr
 }
 
 func (s *Service) log() *slog.Logger {
