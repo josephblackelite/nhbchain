@@ -1192,7 +1192,22 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	if err != nil {
 		return nil, err
 	}
-	isTransfer := tx.Type == types.TxTypeTransfer && tx.Value != nil && tx.Value.Sign() > 0
+	if tx.Type == types.TxTypeTransfer {
+		if tx.To == nil {
+			return nil, fmt.Errorf("%w: transfer: recipient address required", ErrInvalidTransaction)
+		}
+		if len(tx.To) != common.AddressLength {
+			return nil, fmt.Errorf("%w: transfer: recipient address invalid", ErrInvalidTransaction)
+		}
+		var zeroAddress [common.AddressLength]byte
+		if bytes.Equal(tx.To, zeroAddress[:]) {
+			return nil, fmt.Errorf("%w: transfer: recipient address invalid", ErrInvalidTransaction)
+		}
+		if tx.Value == nil || tx.Value.Sign() <= 0 {
+			return nil, fmt.Errorf("%w: transfer: amount must be positive", ErrInvalidTransaction)
+		}
+	}
+	isTransfer := tx.Type == types.TxTypeTransfer
 	var txHash [32]byte
 	var txHashReady bool
 	var refundOrigin [32]byte
