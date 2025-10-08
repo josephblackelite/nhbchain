@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -28,7 +29,7 @@ type Config struct {
 	CORS          middleware.CORSConfig
 }
 
-func New(cfg Config) http.Handler {
+func New(cfg Config) (http.Handler, error) {
 	r := chi.NewRouter()
 	if cfg.CORS.AllowedOrigins != nil || cfg.CORS.AllowedMethods != nil {
 		r.Use(middleware.CORS(cfg.CORS))
@@ -52,6 +53,14 @@ func New(cfg Config) http.Handler {
 
 	for _, route := range cfg.Routes {
 		proxy := NewProxy(route.Target, route.Prefix)
+		var lendingBridge *lendingRoutes
+		if route.Name == "lending" {
+			lr, err := newLendingRoutes(route.Target)
+			if err != nil {
+				return nil, fmt.Errorf("configure lending routes: %w", err)
+			}
+			lendingBridge = lr
+		}
 		r.Route(route.Prefix, func(sr chi.Router) {
 			if cfg.RateLimiter != nil && route.RateLimitKey != "" {
 				sr.Use(cfg.RateLimiter.Middleware(route.RateLimitKey))
@@ -62,6 +71,9 @@ func New(cfg Config) http.Handler {
 			if obs != nil {
 				sr.Use(obs.Middleware(route.Name))
 			}
+			if lendingBridge != nil {
+				lendingBridge.mount(sr)
+			}
 			sr.Handle("/*", proxy)
 			sr.Handle("/", proxy)
 		})
@@ -71,5 +83,5 @@ func New(cfg Config) http.Handler {
 		r.Handle("/metrics", obs.MetricsHandler())
 	}
 
-	return r
+	return r, nil
 }
