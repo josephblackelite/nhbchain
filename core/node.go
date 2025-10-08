@@ -134,6 +134,7 @@ const (
 	moduleTrade            = "trade"
 	moduleLoyalty          = "loyalty"
 	modulePotso            = "potso"
+	moduleTransferNHB      = "transfer_nhb"
 	moduleTransferZNHB     = "transfer_znhb"
 )
 
@@ -420,6 +421,7 @@ func (n *Node) SetModulePauses(pauses config.Pauses) {
 	n.modulePauses[moduleTrade] = pauses.Trade
 	n.modulePauses[moduleLoyalty] = pauses.Loyalty
 	n.modulePauses[modulePotso] = pauses.POTSO
+	n.modulePauses[moduleTransferNHB] = pauses.TransferNHB
 	n.modulePauses[moduleTransferZNHB] = pauses.TransferZNHB
 	n.modulePauseMu.Unlock()
 	if n.state != nil {
@@ -668,6 +670,7 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			Trade:        n.globalCfg.Pauses.Trade,
 			Loyalty:      n.globalCfg.Pauses.Loyalty,
 			POTSO:        n.globalCfg.Pauses.POTSO,
+			TransferNHB:  n.globalCfg.Pauses.TransferNHB,
 			TransferZNHB: n.globalCfg.Pauses.TransferZNHB,
 		},
 		Quotas: config.Quotas{

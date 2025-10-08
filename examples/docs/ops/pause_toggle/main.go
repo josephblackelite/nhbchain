@@ -21,7 +21,7 @@ func main() {
 	consensusEndpoint := flag.String("consensus", "localhost:9090", "consensus gRPC endpoint")
 	govEndpoint := flag.String("governance", "localhost:50061", "governd gRPC endpoint")
 	authority := flag.String("authority", "", "governance authority address")
-	module := flag.String("module", "", "module to toggle (lending|swap|escrow|trade|loyalty|potso)")
+	module := flag.String("module", "", "module to toggle (lending|swap|escrow|trade|loyalty|potso|transfer_nhb|transfer_znhb)")
 	state := flag.String("state", "pause", "target state: pause or resume")
 	flag.Parse()
 
@@ -129,6 +129,10 @@ func setModulePause(pauses *config.Pauses, module string, paused bool) error {
 		pauses.Loyalty = paused
 	case "potso":
 		pauses.POTSO = paused
+	case "transfer_nhb":
+		pauses.TransferNHB = paused
+	case "transfer_znhb":
+		pauses.TransferZNHB = paused
 	default:
 		return fmt.Errorf("unknown module %q", module)
 	}

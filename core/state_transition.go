@@ -56,6 +56,7 @@ const defaultIntentTTL = 24 * time.Hour
 var (
 	ErrNonceMismatch      = errors.New("transaction nonce mismatch")
 	ErrInvalidChainID     = errors.New("invalid chain id")
+	ErrTransferNHBPaused  = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused = errors.New("znhb transfer: paused")
 )
 
@@ -1117,7 +1118,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	}
 	if err != nil {
-		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) {
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -1193,6 +1194,10 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		return nil, err
 	}
 	if tx.Type == types.TxTypeTransfer {
+		if sp.pauses != nil && sp.pauses.IsPaused(moduleTransferNHB) {
+			sp.emitTransferNHBBlocked(tx, from, "paused by governance")
+			return nil, ErrTransferNHBPaused
+		}
 		if tx.To == nil {
 			return nil, fmt.Errorf("%w: transfer: recipient address required", ErrInvalidTransaction)
 		}
@@ -1564,6 +1569,28 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 		metrics.RecordTransfer("ZNHB")
 	}
 	return &SimulationResult{}, nil
+}
+
+func (sp *StateProcessor) emitTransferNHBBlocked(tx *types.Transaction, sender []byte, reason string) {
+	if sp == nil || tx == nil {
+		return
+	}
+	evt := events.TransferNHBBlocked{
+		Asset:  "NHB",
+		Reason: strings.TrimSpace(reason),
+	}
+	if len(sender) == len(evt.From) {
+		copy(evt.From[:], sender)
+	}
+	if len(tx.To) == len(evt.To) {
+		copy(evt.To[:], tx.To)
+	}
+	if hash, err := tx.Hash(); err == nil && len(hash) == len(evt.TxHash) {
+		copy(evt.TxHash[:], hash)
+	}
+	if payload := evt.Event(); payload != nil {
+		sp.AppendEvent(payload)
+	}
 }
 
 func (sp *StateProcessor) emitTransferZNHBBlocked(tx *types.Transaction, sender []byte, reason string) {

@@ -298,6 +298,68 @@ func TestApplyTransferZNHB_Paused(t *testing.T) {
 	}
 }
 
+func TestApplyTransferNHB_Paused(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetPauseView(pauseViewStub{modules: map[string]bool{moduleTransferNHB: true}})
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	senderAccount := &types.Account{BalanceNHB: big.NewInt(50_000_000_000_000)}
+	if err := sp.setAccount(senderAddr, senderAccount); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceNHB: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+
+	if _, err := sp.Commit(0); err != nil {
+		t.Fatalf("commit state: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(1_000),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1_000_000_000),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+
+	err = sp.ApplyTransaction(tx)
+	if !errors.Is(err, ErrTransferNHBPaused) {
+		t.Fatalf("expected ErrTransferNHBPaused, got %v", err)
+	}
+
+	events := sp.Events()
+	if len(events) == 0 {
+		t.Fatalf("expected transfer pause event, got none")
+	}
+	evt := events[len(events)-1]
+	if evt.Type != coreevents.TypeTransferNHBBlocked {
+		t.Fatalf("expected %s event, got %s", coreevents.TypeTransferNHBBlocked, evt.Type)
+	}
+	if asset := evt.Attributes["asset"]; asset != "NHB" {
+		t.Fatalf("expected asset NHB, got %s", asset)
+	}
+	if reason := evt.Attributes["reason"]; !strings.Contains(reason, "paused") {
+		t.Fatalf("expected pause reason, got %s", reason)
+	}
+}
+
 func TestTransferNHBNotAffectedByZNHBPause(t *testing.T) {
 	t.Run("SucceedsWhenZNHBPaused", func(t *testing.T) {
 		sp := newStakingStateProcessor(t)

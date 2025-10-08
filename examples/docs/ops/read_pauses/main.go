@@ -44,10 +44,12 @@ func main() {
 	}
 
 	fmt.Println("module pause status:")
-	fmt.Printf("- lending: %t\n", pauses.Lending)
-	fmt.Printf("- swap:    %t\n", pauses.Swap)
-	fmt.Printf("- escrow:  %t\n", pauses.Escrow)
-	fmt.Printf("- trade:   %t\n", pauses.Trade)
-	fmt.Printf("- loyalty: %t\n", pauses.Loyalty)
-	fmt.Printf("- potso:   %t\n", pauses.POTSO)
+	fmt.Printf("- lending:       %t\n", pauses.Lending)
+	fmt.Printf("- swap:          %t\n", pauses.Swap)
+	fmt.Printf("- escrow:        %t\n", pauses.Escrow)
+	fmt.Printf("- trade:         %t\n", pauses.Trade)
+	fmt.Printf("- loyalty:       %t\n", pauses.Loyalty)
+	fmt.Printf("- potso:         %t\n", pauses.POTSO)
+	fmt.Printf("- transfer_nhb:  %t\n", pauses.TransferNHB)
+	fmt.Printf("- transfer_znhb: %t\n", pauses.TransferZNHB)
 }
