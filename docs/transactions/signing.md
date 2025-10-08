@@ -21,3 +21,9 @@ TypeScript clients should mirror this process, ensuring they serialise the
 in [`examples/txs/ts/supply.ts`](../../examples/txs/ts/supply.ts) computes the
 transaction digest and highlights the placeholder where wallet integrations
 should inject the signature.
+
+For concrete JSON-RPC payloads that cover both NHB (`TxTypeTransfer`) and the
+new ZNHB (`TxTypeTransferZNHB`) transfers, see
+[`znhb-transfer.md`](./znhb-transfer.md). It walks through nonce discovery,
+request construction, and expected settlement semantics so wallet developers can
+mirror the node's behaviour.

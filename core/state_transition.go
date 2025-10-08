@@ -1068,6 +1068,8 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)
+	case types.TxTypeTransferZNHB:
+		result, err = sp.applyTransferZNHB(tx, sender, senderAccount)
 	default:
 		err = sp.handleNativeTransaction(tx, sender, senderAccount)
 		result = &SimulationResult{}
@@ -1397,6 +1399,60 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 }
 
 // --- Native handlers (original semantics + new dispute flow) ---
+
+func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) (*SimulationResult, error) {
+	if sp == nil || tx == nil {
+		return nil, fmt.Errorf("znhb transfer: state unavailable")
+	}
+	if len(tx.To) != common.AddressLength {
+		return nil, fmt.Errorf("znhb transfer: recipient address required")
+	}
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return nil, fmt.Errorf("znhb transfer: amount must be positive")
+	}
+	if senderAccount == nil {
+		return nil, fmt.Errorf("znhb transfer: sender account unavailable")
+	}
+	amount := new(big.Int).Set(tx.Value)
+	if senderAccount.BalanceZNHB == nil {
+		senderAccount.BalanceZNHB = big.NewInt(0)
+	}
+	if senderAccount.BalanceZNHB.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("znhb transfer: insufficient balance")
+	}
+	senderAccount.BalanceZNHB = new(big.Int).Sub(senderAccount.BalanceZNHB, amount)
+	selfTransfer := bytes.Equal(sender, tx.To)
+	recipientAccount := senderAccount
+	if !selfTransfer {
+		var err error
+		recipientAccount, err = sp.getAccount(tx.To)
+		if err != nil {
+			return nil, err
+		}
+		if recipientAccount.BalanceZNHB == nil {
+			recipientAccount.BalanceZNHB = big.NewInt(0)
+		}
+	}
+	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, amount)
+	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
+		return nil, err
+	}
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return nil, err
+	}
+	if !selfTransfer {
+		if err := sp.setAccount(tx.To, recipientAccount); err != nil {
+			return nil, err
+		}
+	}
+	if err := sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1); err != nil {
+		return nil, err
+	}
+	if err := sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0); err != nil {
+		return nil, err
+	}
+	return &SimulationResult{}, nil
+}
 
 func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	voucher, signature, err := decodeMintTransaction(tx.Data)

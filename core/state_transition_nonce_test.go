@@ -12,11 +12,51 @@ import (
 )
 
 func TestApplyTransactionRejectsNativeNonceReplay(t *testing.T) {
+	recipientAddr := make([]byte, 20)
+	recipientAddr[len(recipientAddr)-1] = 1
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, sp *StateProcessor, addr []byte)
 		build func(t *testing.T, sp *StateProcessor, priv *crypto.PrivateKey) *types.Transaction
 	}{
+		{
+			name: "transfer znhb",
+			setup: func(t *testing.T, sp *StateProcessor, addr []byte) {
+				t.Helper()
+				sender := &types.Account{
+					BalanceNHB:  big.NewInt(1_000),
+					BalanceZNHB: big.NewInt(750),
+					Stake:       big.NewInt(0),
+				}
+				if err := sp.setAccount(addr, sender); err != nil {
+					t.Fatalf("seed sender: %v", err)
+				}
+				recipient := &types.Account{
+					BalanceNHB:  big.NewInt(0),
+					BalanceZNHB: big.NewInt(0),
+					Stake:       big.NewInt(0),
+				}
+				if err := sp.setAccount(recipientAddr, recipient); err != nil {
+					t.Fatalf("seed recipient: %v", err)
+				}
+			},
+			build: func(t *testing.T, _ *StateProcessor, priv *crypto.PrivateKey) *types.Transaction {
+				t.Helper()
+				tx := &types.Transaction{
+					ChainID:  types.NHBChainID(),
+					Type:     types.TxTypeTransferZNHB,
+					Nonce:    0,
+					To:       append([]byte(nil), recipientAddr...),
+					Value:    big.NewInt(200),
+					GasLimit: 25_000,
+					GasPrice: big.NewInt(1),
+				}
+				if err := tx.Sign(priv.PrivateKey); err != nil {
+					t.Fatalf("sign tx: %v", err)
+				}
+				return tx
+			},
+		},
 		{
 			name: "register identity",
 			setup: func(t *testing.T, sp *StateProcessor, addr []byte) {
