@@ -108,6 +108,20 @@ ZapNHB uses the new `TxTypeTransferZNHB (0x10)` constant. Only the asset changes
 }
 ```
 
+### Authenticated submission
+
+`nhb_sendTransaction` is a privileged RPC. Every request must present
+`Authorization: Bearer <NHB_RPC_TOKEN>` so only trusted infrastructure can push
+transactions into the network. The HTTP layer enforces this via the
+[`requireAuth`](../../rpc/http.go#L1180-L1211) guard that runs before
+[`handleSendTransaction`](../../rpc/http.go#L1417-L1478), rejecting any call
+that lacks the bearer token. When the header is accepted the handler forwards
+the payload to `node.AddTransaction`, queuing it for consensus alongside other
+pending transfers. Wallets **must not** ship the bearer token to browsers or
+mobile clients—proxy the submission through a server endpoint (for example the
+`rpcRequest(..., withAuth=true)` helper used elsewhere in these docs) so the
+token is only attached on trusted backends.
+
 ### Fee model
 
 The `gasLimit`/`gasPrice` fields describe the NHB gas that is burned for
