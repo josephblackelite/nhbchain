@@ -83,12 +83,13 @@ type Consensus struct {
 }
 
 type Pauses struct {
-	Lending bool
-	Swap    bool
-	Escrow  bool
-	Trade   bool
-	Loyalty bool
-	POTSO   bool
+	Lending      bool
+	Swap         bool
+	Escrow       bool
+	Trade        bool
+	Loyalty      bool
+	POTSO        bool
+	TransferZNHB bool
 }
 
 // Quota defines rate limits for module interactions on a per-address basis.
