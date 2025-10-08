@@ -1467,6 +1467,10 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	if len(tx.To) != common.AddressLength {
 		return nil, fmt.Errorf("znhb transfer: recipient address required")
 	}
+	var zeroAddress [common.AddressLength]byte
+	if bytes.Equal(tx.To, zeroAddress[:]) {
+		return nil, fmt.Errorf("znhb transfer: recipient address invalid")
+	}
 	if tx.Value == nil || tx.Value.Sign() <= 0 {
 		return nil, fmt.Errorf("znhb transfer: amount must be positive")
 	}
