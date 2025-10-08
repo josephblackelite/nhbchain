@@ -19,6 +19,7 @@ const (
 type FeeApplied struct {
 	Payer             [20]byte
 	Domain            string
+	Asset             string
 	Gross             *big.Int
 	Fee               *big.Int
 	Net               *big.Int
@@ -43,6 +44,9 @@ func (e FeeApplied) Event() *types.Event {
 	}
 	if domain := strings.TrimSpace(e.Domain); domain != "" {
 		attrs["domain"] = domain
+	}
+	if asset := strings.TrimSpace(e.Asset); asset != "" {
+		attrs["asset"] = strings.ToUpper(asset)
 	}
 	if e.Gross != nil {
 		attrs["grossWei"] = e.Gross.String()

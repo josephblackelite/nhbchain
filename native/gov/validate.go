@@ -60,6 +60,14 @@ type FeesBaseline struct {
 	FreeTierTxPerMonth uint64
 	MDRBasisPoints     uint32
 	OwnerWallet        string
+	Assets             []FeeAssetBaseline
+}
+
+// FeeAssetBaseline mirrors config.FeeAsset using primitive types.
+type FeeAssetBaseline struct {
+	Asset          string
+	MDRBasisPoints uint32
+	OwnerWallet    string
 }
 
 // GovernanceDelta represents proposed changes to governance thresholds and
@@ -117,6 +125,7 @@ func PreflightBaselineApply(cur Baseline, delta PolicyDelta) error {
 			FreeTierTxPerMonth: cur.Fees.FreeTierTxPerMonth,
 			MDRBasisPoints:     cur.Fees.MDRBasisPoints,
 			OwnerWallet:        cur.Fees.OwnerWallet,
+			Assets:             feeAssetsFromBaseline(cur.Fees.Assets),
 		},
 	}, delta)
 }
@@ -153,4 +162,19 @@ func applyDelta(cur config.Global, delta PolicyDelta) config.Global {
 		}
 	}
 	return candidate
+}
+
+func feeAssetsFromBaseline(list []FeeAssetBaseline) []config.FeeAsset {
+	if len(list) == 0 {
+		return nil
+	}
+	assets := make([]config.FeeAsset, len(list))
+	for i := range list {
+		assets[i] = config.FeeAsset{
+			Asset:          list[i].Asset,
+			MDRBasisPoints: list[i].MDRBasisPoints,
+			OwnerWallet:    list[i].OwnerWallet,
+		}
+	}
+	return assets
 }

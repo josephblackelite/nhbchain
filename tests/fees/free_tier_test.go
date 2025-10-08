@@ -21,6 +21,9 @@ func TestApplyFreeTierThreshold(t *testing.T) {
 		FreeTierTxPerMonth: 100,
 		MDRBasisPoints:     150,
 		OwnerWallet:        owner,
+		Assets: map[string]fees.AssetPolicy{
+			fees.AssetNHB: {MDRBasisPoints: 150, OwnerWallet: owner},
+		},
 	}
 	monthStart := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
 
@@ -100,6 +103,9 @@ func TestMonthlyCounterReset(t *testing.T) {
 	policy := fees.DomainPolicy{
 		FreeTierTxPerMonth: 100,
 		MDRBasisPoints:     150,
+		Assets: map[string]fees.AssetPolicy{
+			fees.AssetNHB: {MDRBasisPoints: 150},
+		},
 	}
 	result := fees.Apply(fees.ApplyInput{
 		Domain:        fees.DomainPOS,
@@ -146,4 +152,39 @@ func sameMonth(a, b time.Time) bool {
 	ua := a.UTC()
 	ub := b.UTC()
 	return ua.Year() == ub.Year() && ua.Month() == ub.Month()
+}
+
+func TestApplySelectsAssetPolicy(t *testing.T) {
+	var nhbWallet, znhbWallet [20]byte
+	for i := range nhbWallet {
+		nhbWallet[i] = byte(i + 1)
+		znhbWallet[i] = byte(0xF0 + i)
+	}
+	gross := big.NewInt(10_000)
+	policy := fees.DomainPolicy{
+		FreeTierTxPerMonth: 0,
+		MDRBasisPoints:     150,
+		OwnerWallet:        nhbWallet,
+		Assets: map[string]fees.AssetPolicy{
+			fees.AssetNHB:  {MDRBasisPoints: 180, OwnerWallet: nhbWallet},
+			fees.AssetZNHB: {MDRBasisPoints: 220, OwnerWallet: znhbWallet},
+		},
+	}
+	nhb := fees.Apply(fees.ApplyInput{Domain: fees.DomainPOS, Gross: gross, PolicyVersion: 1, Config: policy, Asset: fees.AssetNHB})
+	if nhb.FeeBasisPoints != 180 {
+		t.Fatalf("unexpected NHB basis points: %d", nhb.FeeBasisPoints)
+	}
+	if nhb.OwnerWallet != nhbWallet {
+		t.Fatalf("unexpected NHB wallet: %x", nhb.OwnerWallet)
+	}
+	znhb := fees.Apply(fees.ApplyInput{Domain: fees.DomainPOS, Gross: gross, PolicyVersion: 1, Config: policy, Asset: fees.AssetZNHB})
+	if znhb.FeeBasisPoints != 220 {
+		t.Fatalf("unexpected ZNHB basis points: %d", znhb.FeeBasisPoints)
+	}
+	if znhb.OwnerWallet != znhbWallet {
+		t.Fatalf("unexpected ZNHB wallet: %x", znhb.OwnerWallet)
+	}
+	if znhb.Asset != fees.AssetZNHB {
+		t.Fatalf("unexpected asset tag: %s", znhb.Asset)
+	}
 }

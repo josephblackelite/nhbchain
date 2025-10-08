@@ -42,6 +42,11 @@ the merchant leg before settlement. The withheld amount is routed according to
 the [fee routing policy](./routing.md).
 * **Pass-through sponsorship:** If a merchant funds the transaction directly,
 the MDR still applies unless the merchant wallet is on the *exemptions* list.
+* **Asset-specific overrides:** Each fee domain advertises the assets it
+  accepts (e.g. NHB, ZNHB) and maps them to bespoke MDR basis points and routing
+  wallets. Governance can, for example, charge 150 bps on NHB while routing
+  ZNHB through a different wallet at 200 bps. Omitted asset entries fall back to
+  the domain default.
 
 ## Minimum and maximum fee guards
 

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"nhbchain/config"
+	"nhbchain/native/fees"
 	govcfg "nhbchain/native/gov"
 )
 
@@ -24,6 +25,10 @@ func testBaseline() govcfg.Baseline {
 		Fees: govcfg.FeesBaseline{
 			FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
 			MDRBasisPoints:     config.DefaultMDRBasisPoints,
+			Assets: []govcfg.FeeAssetBaseline{
+				{Asset: fees.AssetNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
+				{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
+			},
 		},
 	}
 }

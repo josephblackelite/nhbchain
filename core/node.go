@@ -679,6 +679,7 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			FreeTierTxPerMonth: n.globalCfg.Fees.FreeTierTxPerMonth,
 			MDRBasisPoints:     n.globalCfg.Fees.MDRBasisPoints,
 			OwnerWallet:        n.globalCfg.Fees.OwnerWallet,
+			Assets:             append([]config.FeeAsset{}, n.globalCfg.Fees.Assets...),
 		},
 	}
 	return snapshot
