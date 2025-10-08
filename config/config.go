@@ -12,6 +12,7 @@ import (
 	"nhbchain/consensus"
 	"nhbchain/core/genesis"
 	"nhbchain/crypto"
+	"nhbchain/native/fees"
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
 	"nhbchain/native/potso"
@@ -155,6 +156,10 @@ func defaultGlobalConfig() Global {
 		Fees: Fees{
 			FreeTierTxPerMonth: DefaultFreeTierTxPerMonth,
 			MDRBasisPoints:     DefaultMDRBasisPoints,
+			Assets: []FeeAsset{
+				{Asset: fees.AssetNHB, MDRBasisPoints: DefaultMDRBasisPoints},
+				{Asset: fees.AssetZNHB, MDRBasisPoints: DefaultMDRBasisPoints},
+			},
 		},
 	}
 }
@@ -569,6 +574,9 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "fees", "OwnerWallet") {
 		cfg.Global.Fees.OwnerWallet = defaults.Fees.OwnerWallet
+	}
+	if len(cfg.Global.Fees.Assets) == 0 {
+		cfg.Global.Fees.Assets = append([]FeeAsset{}, defaults.Fees.Assets...)
 	}
 }
 

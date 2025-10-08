@@ -223,6 +223,15 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 	if sp == nil || tx == nil {
 		return nil
 	}
+	var asset string
+	switch tx.Type {
+	case types.TxTypeTransfer:
+		asset = fees.AssetNHB
+	case types.TxTypeTransferZNHB:
+		asset = fees.AssetZNHB
+	default:
+		return nil
+	}
 	domain := strings.TrimSpace(tx.MerchantAddress)
 	if domain == "" {
 		return nil
@@ -258,6 +267,7 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		PolicyVersion: sp.feePolicy.Version,
 		Config:        cfg,
 		WindowStart:   windowStart,
+		Asset:         asset,
 	})
 	if result.WindowStart.IsZero() {
 		result.WindowStart = windowStart
@@ -265,19 +275,36 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 	if err := manager.FeesPutCounter(domain, payer, result.Counter, result.WindowStart); err != nil {
 		return err
 	}
-	if err := manager.FeesAccumulateTotals(domain, result.OwnerWallet, gross, result.Fee, result.Net); err != nil {
+	if err := manager.FeesAccumulateTotals(domain, result.Asset, result.OwnerWallet, gross, result.Fee, result.Net); err != nil {
 		return err
 	}
-	if result.Fee != nil && result.Fee.Sign() > 0 && !isZeroAddress(result.OwnerWallet) {
+	if result.Fee != nil && result.Fee.Sign() > 0 {
+		if isZeroAddress(result.OwnerWallet) {
+			return fmt.Errorf("fees: missing route wallet for asset %s", result.Asset)
+		}
 		routed := new(big.Int).Set(result.Fee)
 		deducted := false
-		if toAcc != nil && toAcc.BalanceNHB != nil && toAcc.BalanceNHB.Cmp(routed) >= 0 {
-			toAcc.BalanceNHB.Sub(toAcc.BalanceNHB, routed)
-			deducted = true
-		}
-		if !deducted && fromAcc != nil && fromAcc.BalanceNHB != nil && fromAcc.BalanceNHB.Cmp(routed) >= 0 {
-			fromAcc.BalanceNHB.Sub(fromAcc.BalanceNHB, routed)
-			deducted = true
+		switch result.Asset {
+		case fees.AssetNHB:
+			if toAcc != nil && toAcc.BalanceNHB != nil && toAcc.BalanceNHB.Cmp(routed) >= 0 {
+				toAcc.BalanceNHB.Sub(toAcc.BalanceNHB, routed)
+				deducted = true
+			}
+			if !deducted && fromAcc != nil && fromAcc.BalanceNHB != nil && fromAcc.BalanceNHB.Cmp(routed) >= 0 {
+				fromAcc.BalanceNHB.Sub(fromAcc.BalanceNHB, routed)
+				deducted = true
+			}
+		case fees.AssetZNHB:
+			if toAcc != nil && toAcc.BalanceZNHB != nil && toAcc.BalanceZNHB.Cmp(routed) >= 0 {
+				toAcc.BalanceZNHB.Sub(toAcc.BalanceZNHB, routed)
+				deducted = true
+			}
+			if !deducted && fromAcc != nil && fromAcc.BalanceZNHB != nil && fromAcc.BalanceZNHB.Cmp(routed) >= 0 {
+				fromAcc.BalanceZNHB.Sub(fromAcc.BalanceZNHB, routed)
+				deducted = true
+			}
+		default:
+			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
 		}
 		if !deducted {
 			return fmt.Errorf("fees: insufficient balance to route fee")
@@ -286,10 +313,20 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		if err != nil {
 			return err
 		}
-		if routeAcc.BalanceNHB == nil {
-			routeAcc.BalanceNHB = big.NewInt(0)
+		switch result.Asset {
+		case fees.AssetNHB:
+			if routeAcc.BalanceNHB == nil {
+				routeAcc.BalanceNHB = big.NewInt(0)
+			}
+			routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, routed)
+		case fees.AssetZNHB:
+			if routeAcc.BalanceZNHB == nil {
+				routeAcc.BalanceZNHB = big.NewInt(0)
+			}
+			routeAcc.BalanceZNHB.Add(routeAcc.BalanceZNHB, routed)
+		default:
+			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
 		}
-		routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, routed)
 		if err := sp.setAccount(result.OwnerWallet[:], routeAcc); err != nil {
 			return err
 		}
@@ -297,6 +334,7 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 	sp.AppendEvent(events.FeeApplied{
 		Payer:             payer,
 		Domain:            fees.NormalizeDomain(domain),
+		Asset:             result.Asset,
 		Gross:             new(big.Int).Set(gross),
 		Fee:               cloneBigInt(result.Fee),
 		Net:               cloneBigInt(result.Net),

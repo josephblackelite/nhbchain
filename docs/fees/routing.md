@@ -14,7 +14,9 @@ on-chain accounts that receive the proceeds.
 
 Each wallet address is stored in the `FeePolicy` module parameters. Governance
 proposals can rotate the addresses or adjust the split ratios when treasury
-requirements change.
+requirements change. Domains now expose an asset map that binds every accepted
+currency (NHB, ZNHB, and future additions) to a specific MDR basis-point value
+and routing wallet, making fee distribution explicit on a per-asset basis.
 
 ## Routing flow
 

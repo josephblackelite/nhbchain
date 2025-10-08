@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"nhbchain/config"
+	"nhbchain/native/fees"
 	govcfg "nhbchain/native/gov"
 )
 
@@ -22,7 +23,14 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 			Slashing: govcfg.SlashingBaseline{MinWindowSecs: 60, MaxWindowSecs: 600},
 			Mempool:  govcfg.MempoolBaseline{MaxBytes: 16 << 20},
 			Blocks:   govcfg.BlocksBaseline{MaxTxs: 5000},
-			Fees:     govcfg.FeesBaseline{FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth, MDRBasisPoints: config.DefaultMDRBasisPoints},
+			Fees: govcfg.FeesBaseline{
+				FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
+				MDRBasisPoints:     config.DefaultMDRBasisPoints,
+				Assets: []govcfg.FeeAssetBaseline{
+					{Asset: fees.AssetNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
+					{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
+				},
+			},
 		}
 
 		delta := govcfg.PolicyDelta{}
@@ -111,6 +119,7 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 				FreeTierTxPerMonth: baseline.Fees.FreeTierTxPerMonth,
 				MDRBasisPoints:     baseline.Fees.MDRBasisPoints,
 				OwnerWallet:        baseline.Fees.OwnerWallet,
+				Assets:             feeAssetsFromBaseline(baseline.Fees.Assets),
 			},
 		}
 
@@ -144,6 +153,21 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 			t.Fatalf("preflight succeeded but config invalid: %v", err)
 		}
 	})
+}
+
+func feeAssetsFromBaseline(list []govcfg.FeeAssetBaseline) []config.FeeAsset {
+	if len(list) == 0 {
+		return nil
+	}
+	assets := make([]config.FeeAsset, len(list))
+	for i := range list {
+		assets[i] = config.FeeAsset{
+			Asset:          list[i].Asset,
+			MDRBasisPoints: list[i].MDRBasisPoints,
+			OwnerWallet:    list[i].OwnerWallet,
+		}
+	}
+	return assets
 }
 
 func normalizePositive(v uint64) uint64 {

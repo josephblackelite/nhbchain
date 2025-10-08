@@ -19,11 +19,38 @@ const (
 
 var freeTierDefaultWarned sync.Map
 
+// Asset identifiers supported by the fee engine.
+const (
+	AssetNHB  = "NHB"
+	AssetZNHB = "ZNHB"
+)
+
+// AssetPolicy captures the routing configuration for a specific asset within a domain.
+type AssetPolicy struct {
+	MDRBasisPoints uint32
+	OwnerWallet    [20]byte
+}
+
 // DomainPolicy captures the configuration applied to a specific fee domain.
 type DomainPolicy struct {
 	FreeTierTxPerMonth uint64
 	MDRBasisPoints     uint32
 	OwnerWallet        [20]byte
+	Assets             map[string]AssetPolicy
+}
+
+// NormalizeAsset canonicalises asset identifiers for consistent lookups.
+func NormalizeAsset(asset string) string {
+	return strings.ToUpper(strings.TrimSpace(asset))
+}
+
+func isZeroWallet(addr [20]byte) bool {
+	for _, b := range addr {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (p DomainPolicy) normalized(domain string) DomainPolicy {
@@ -43,7 +70,49 @@ func (p DomainPolicy) normalized(domain string) DomainPolicy {
 	if normalized.MDRBasisPoints == 0 {
 		normalized.MDRBasisPoints = DefaultMDRBasisPoints
 	}
+	var assets map[string]AssetPolicy
+	if len(normalized.Assets) > 0 {
+		assets = make(map[string]AssetPolicy, len(normalized.Assets))
+		for name, cfg := range normalized.Assets {
+			asset := NormalizeAsset(name)
+			if asset == "" {
+				continue
+			}
+			if cfg.MDRBasisPoints == 0 {
+				cfg.MDRBasisPoints = normalized.MDRBasisPoints
+			}
+			if cfg.MDRBasisPoints == 0 {
+				cfg.MDRBasisPoints = DefaultMDRBasisPoints
+			}
+			if isZeroWallet(cfg.OwnerWallet) && !isZeroWallet(normalized.OwnerWallet) {
+				cfg.OwnerWallet = normalized.OwnerWallet
+			}
+			assets[asset] = cfg
+		}
+	}
+	if len(assets) == 0 {
+		assets = map[string]AssetPolicy{
+			AssetNHB: {
+				MDRBasisPoints: normalized.MDRBasisPoints,
+				OwnerWallet:    normalized.OwnerWallet,
+			},
+		}
+	}
+	normalized.Assets = assets
 	return normalized
+}
+
+// AssetConfig resolves the routing policy for the supplied asset.
+func (p DomainPolicy) AssetConfig(asset string) (AssetPolicy, bool) {
+	if len(p.Assets) == 0 {
+		return AssetPolicy{}, false
+	}
+	normalized := NormalizeAsset(asset)
+	if normalized == "" {
+		return AssetPolicy{}, false
+	}
+	cfg, ok := p.Assets[normalized]
+	return cfg, ok
 }
 
 // Policy enumerates the configured fee domains and the policy version.
@@ -75,7 +144,10 @@ func (p Policy) DomainConfig(domain string) (DomainPolicy, bool) {
 	}
 	normalized := NormalizeDomain(domain)
 	cfg, ok := p.Domains[normalized]
-	return cfg, ok
+	if !ok {
+		return DomainPolicy{}, false
+	}
+	return cfg.normalized(normalized), true
 }
 
 // NormalizeDomain canonicalises domain identifiers for consistent lookups.
@@ -92,6 +164,7 @@ type ApplyInput struct {
 	PolicyVersion uint64
 	Config        DomainPolicy
 	WindowStart   time.Time
+	Asset         string
 }
 
 // ApplyResult summarises the computed fee, resulting net amount, and updated
@@ -107,6 +180,7 @@ type ApplyResult struct {
 	FreeTierRemaining uint64
 	FeeBasisPoints    uint32
 	WindowStart       time.Time
+	Asset             string
 }
 
 // Apply evaluates the policy for the supplied domain and returns the resulting
@@ -115,12 +189,11 @@ type ApplyResult struct {
 func Apply(input ApplyInput) ApplyResult {
 	policy := input.Config.normalized(input.Domain)
 	result := ApplyResult{
-		Counter:        input.UsageCount + 1,
-		PolicyVersion:  input.PolicyVersion,
-		OwnerWallet:    policy.OwnerWallet,
-		FreeTierLimit:  policy.FreeTierTxPerMonth,
-		FeeBasisPoints: policy.MDRBasisPoints,
-		WindowStart:    input.WindowStart,
+		Counter:       input.UsageCount + 1,
+		PolicyVersion: input.PolicyVersion,
+		FreeTierLimit: policy.FreeTierTxPerMonth,
+		WindowStart:   input.WindowStart,
+		Asset:         NormalizeAsset(input.Asset),
 	}
 	result.Fee = big.NewInt(0)
 	if input.Gross != nil {
@@ -130,6 +203,10 @@ func Apply(input ApplyInput) ApplyResult {
 	}
 	if result.Net.Sign() <= 0 {
 		return result
+	}
+	if assetCfg, ok := policy.AssetConfig(result.Asset); ok {
+		result.OwnerWallet = assetCfg.OwnerWallet
+		result.FeeBasisPoints = assetCfg.MDRBasisPoints
 	}
 	limit := policy.FreeTierTxPerMonth
 	if limit > 0 && input.UsageCount < limit {
@@ -141,10 +218,10 @@ func Apply(input ApplyInput) ApplyResult {
 		}
 		return result
 	}
-	if policy.MDRBasisPoints == 0 {
+	if result.FeeBasisPoints == 0 {
 		return result
 	}
-	fee := new(big.Int).Mul(result.Net, big.NewInt(int64(policy.MDRBasisPoints)))
+	fee := new(big.Int).Mul(result.Net, big.NewInt(int64(result.FeeBasisPoints)))
 	fee = fee.Div(fee, big.NewInt(10_000))
 	if fee.Sign() <= 0 {
 		return result
@@ -162,9 +239,10 @@ func Apply(input ApplyInput) ApplyResult {
 	return result
 }
 
-// Totals aggregates fee accounting metrics per domain and wallet.
+// Totals aggregates fee accounting metrics per domain, asset, and wallet.
 type Totals struct {
 	Domain string
+	Asset  string
 	Wallet [20]byte
 	Gross  *big.Int
 	Fee    *big.Int
@@ -173,7 +251,7 @@ type Totals struct {
 
 // Clone returns a copy of the totals structure with duplicated big.Int values.
 func (t Totals) Clone() Totals {
-	clone := Totals{Domain: t.Domain, Wallet: t.Wallet}
+	clone := Totals{Domain: t.Domain, Asset: t.Asset, Wallet: t.Wallet}
 	if t.Gross != nil {
 		clone.Gross = new(big.Int).Set(t.Gross)
 	}

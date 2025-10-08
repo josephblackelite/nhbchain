@@ -75,6 +75,9 @@ func TestFeeEventReconciliation(t *testing.T) {
 				FreeTierTxPerMonth: 0,
 				MDRBasisPoints:     200,
 				OwnerWallet:        routeWallet,
+				Assets: map[string]fees.AssetPolicy{
+					fees.AssetNHB: {MDRBasisPoints: 200, OwnerWallet: routeWallet},
+				},
 			},
 		},
 	}
@@ -103,6 +106,9 @@ func TestFeeEventReconciliation(t *testing.T) {
 			if evt.Attributes["ownerWallet"] != expectedRouteHex {
 				continue
 			}
+			if asset := evt.Attributes["asset"]; asset != "NHB" {
+				continue
+			}
 			feeStr, ok := evt.Attributes["feeWei"]
 			if !ok {
 				continue
@@ -120,7 +126,7 @@ func TestFeeEventReconciliation(t *testing.T) {
 		t.Fatalf("expected positive fee total from events")
 	}
 
-	routeBalance := accountBalance(t, node, routeKey.PubKey().Address().Bytes())
+	routeBalance := accountBalance(t, node, routeKey.PubKey().Address().Bytes(), fees.AssetNHB)
 	if routeBalance.Sign() == 0 {
 		t.Fatalf("route balance should be positive")
 	}

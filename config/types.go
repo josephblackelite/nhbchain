@@ -59,11 +59,19 @@ type PaymasterAutoTopUpGovernance struct {
 	ApproverRole string
 }
 
+// FeeAsset captures per-asset MDR and routing configuration.
+type FeeAsset struct {
+	Asset          string
+	MDRBasisPoints uint32
+	OwnerWallet    string
+}
+
 // Fees captures default fee policy settings applied across domains.
 type Fees struct {
 	FreeTierTxPerMonth uint64
 	MDRBasisPoints     uint32
 	OwnerWallet        string
+	Assets             []FeeAsset
 }
 
 // Consensus controls the BFT round timeouts.
