@@ -252,12 +252,13 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		gross = new(big.Int).Set(tx.Value)
 	}
 	manager := nhbstate.NewManager(sp.Trie)
-	counter, windowStart, _, err := manager.FeesGetCounter(domain, payer)
+	now := sp.blockTimestamp()
+	currentWindow := feeWindowStart(now)
+	scope := cfg.FreeTierScope(asset)
+	counter, windowStart, _, err := manager.FeesGetCounter(domain, payer, currentWindow, scope)
 	if err != nil {
 		return err
 	}
-	now := sp.blockTimestamp()
-	currentWindow := feeWindowStart(now)
 	if windowStart.IsZero() || !sameFeeWindow(windowStart, currentWindow) {
 		windowStart = currentWindow
 		counter = 0
@@ -274,7 +275,7 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 	if result.WindowStart.IsZero() {
 		result.WindowStart = windowStart
 	}
-	if err := manager.FeesPutCounter(domain, payer, result.Counter, result.WindowStart); err != nil {
+	if err := manager.FeesPutCounter(domain, payer, result.WindowStart, scope, result.Counter); err != nil {
 		return err
 	}
 	if err := manager.FeesAccumulateTotals(domain, result.Asset, result.OwnerWallet, gross, result.Fee, result.Net); err != nil {

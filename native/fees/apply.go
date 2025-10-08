@@ -17,6 +17,11 @@ const (
 	DefaultMDRBasisPoints     = uint32(150)
 )
 
+// Free tier counter scopes.
+const (
+	FreeTierScopeAggregate = "__AGGREGATE__"
+)
+
 var freeTierDefaultWarned sync.Map
 
 // Asset identifiers supported by the fee engine.
@@ -37,6 +42,7 @@ type DomainPolicy struct {
 	MDRBasisPoints     uint32
 	OwnerWallet        [20]byte
 	Assets             map[string]AssetPolicy
+	FreeTierPerAsset   bool
 }
 
 // NormalizeAsset canonicalises asset identifiers for consistent lookups.
@@ -100,6 +106,37 @@ func (p DomainPolicy) normalized(domain string) DomainPolicy {
 	}
 	normalized.Assets = assets
 	return normalized
+}
+
+// FreeTierScope resolves the counter scope applied when tracking free-tier usage.
+// Domains aggregate usage across all assets by default. When FreeTierPerAsset is
+// set the scope narrows to the supplied asset.
+func (p DomainPolicy) FreeTierScope(asset string) string {
+	if !p.FreeTierPerAsset {
+		return FreeTierScopeAggregate
+	}
+	normalized := NormalizeAsset(asset)
+	if normalized == "" {
+		return FreeTierScopeAggregate
+	}
+	return normalized
+}
+
+// NormalizeFreeTierScope canonicalises counter scope identifiers for storage.
+func NormalizeFreeTierScope(scope string) string {
+	trimmed := strings.TrimSpace(scope)
+	if trimmed == "" {
+		return FreeTierScopeAggregate
+	}
+	upper := strings.ToUpper(trimmed)
+	if upper == FreeTierScopeAggregate {
+		return FreeTierScopeAggregate
+	}
+	asset := NormalizeAsset(trimmed)
+	if asset == "" {
+		return FreeTierScopeAggregate
+	}
+	return asset
 }
 
 // AssetConfig resolves the routing policy for the supplied asset.

@@ -8,7 +8,7 @@ reference when drafting parameter-change or fee-routing proposals.
 
 | Key | Description |
 | --- | --- |
-| `free_tier_tx_count` | Monthly allowance of NHB-sponsored transactions per wallet (default `1000`). |
+| `free_tier_tx_count` | Monthly allowance of NHB-sponsored transactions per wallet (default `100`). The allowance counts NHB and ZNHB transfers together unless a domain enables per-asset counters. |
 | `nhb_payment_fee_bps` | Basis points applied to non-POS payments once a wallet exhausts the free tier. |
 | `pos_mdr_bps` | Merchant discount rate for POS payments, expressed in basis points (default `150`). |
 | `min_fee` | Absolute minimum fee (in NHB) charged when ad valorem calculations fall below the threshold. |
