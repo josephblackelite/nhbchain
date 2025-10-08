@@ -15,3 +15,12 @@ calling `network.Dial`.
 
 Explicitly specifying TLS material via `WithTLSConfig`, `WithTLSFromFiles`, or
 `WithSystemCertPool` continues to be supported.
+
+## JSON-RPC transfer helpers
+
+The `sdk/go/client` package now exposes a `Client.SendNHBTransfer` helper for
+submitting native NHB transfers over JSON-RPC. The method mirrors the existing
+ZapNHB helper by fetching the sender nonce, applying the client's default gas
+limit and gas price (or per-transaction overrides), signing the payload, and
+forwarding it to `nhb_sendTransaction`. This allows integrators to move the
+chain's base asset without manually constructing transaction envelopes.

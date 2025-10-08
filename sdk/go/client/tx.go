@@ -140,43 +140,9 @@ func (c *Client) SendZNHBTransfer(ctx context.Context, key *crypto.PrivateKey, r
 	if c == nil {
 		return nil, "", fmt.Errorf("client: instance required")
 	}
-	if key == nil || key.PrivateKey == nil {
-		return nil, "", fmt.Errorf("client: signing key required")
-	}
-	if amount == nil || amount.Sign() <= 0 {
-		return nil, "", fmt.Errorf("client: amount must be greater than zero")
-	}
-	dest, err := crypto.DecodeAddress(recipient)
-	if err != nil {
-		return nil, "", fmt.Errorf("client: decode recipient: %w", err)
-	}
-	sender := key.PubKey()
-	if sender == nil || sender.PublicKey == nil {
-		return nil, "", fmt.Errorf("client: derive sender address: public key unavailable")
-	}
-	nonce, err := c.fetchNonce(ctx, sender.Address().String())
+	tx, err := c.prepareTransferTx(ctx, key, recipient, amount, types.TxTypeTransferZNHB, opts...)
 	if err != nil {
 		return nil, "", err
-	}
-	tx := &types.Transaction{
-		ChainID:  new(big.Int).Set(c.chainID),
-		Type:     types.TxTypeTransferZNHB,
-		Nonce:    nonce,
-		To:       dest.Bytes(),
-		Value:    new(big.Int).Set(amount),
-		GasLimit: c.gasLimit,
-		GasPrice: new(big.Int).Set(c.gasPrice),
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(tx)
-		}
-	}
-	if tx.GasLimit == 0 {
-		return nil, "", fmt.Errorf("client: gas limit must be greater than zero")
-	}
-	if tx.GasPrice == nil || tx.GasPrice.Sign() <= 0 {
-		return nil, "", fmt.Errorf("client: gas price must be greater than zero")
 	}
 	if err := tx.Sign(key.PrivateKey); err != nil {
 		return nil, "", fmt.Errorf("client: sign transaction: %w", err)
@@ -186,6 +152,77 @@ func (c *Client) SendZNHBTransfer(ctx context.Context, key *crypto.PrivateKey, r
 		return nil, "", err
 	}
 	return tx, result, nil
+}
+
+// SendNHBTransfer builds, signs, and submits a native NHB transfer derived from the provided
+// private key and recipient address. It mirrors the ZapNHB helper but emits a TypeTransfer
+// transaction for the native asset.
+func (c *Client) SendNHBTransfer(ctx context.Context, key *crypto.PrivateKey, recipient string, amount *big.Int, opts ...TxOption) (*types.Transaction, string, error) {
+	if c == nil {
+		return nil, "", fmt.Errorf("client: instance required")
+	}
+	tx, err := c.prepareTransferTx(ctx, key, recipient, amount, types.TxTypeTransfer, opts...)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := tx.Sign(key.PrivateKey); err != nil {
+		return nil, "", fmt.Errorf("client: sign transaction: %w", err)
+	}
+	result, err := c.submit(ctx, tx)
+	if err != nil {
+		return nil, "", err
+	}
+	return tx, result, nil
+}
+
+func (c *Client) prepareTransferTx(ctx context.Context, key *crypto.PrivateKey, recipient string, amount *big.Int, txType types.TxType, opts ...TxOption) (*types.Transaction, error) {
+	if key == nil || key.PrivateKey == nil {
+		return nil, fmt.Errorf("client: signing key required")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("client: amount must be greater than zero")
+	}
+	dest, err := crypto.DecodeAddress(recipient)
+	if err != nil {
+		return nil, fmt.Errorf("client: decode recipient: %w", err)
+	}
+	sender := key.PubKey()
+	if sender == nil || sender.PublicKey == nil {
+		return nil, fmt.Errorf("client: derive sender address: public key unavailable")
+	}
+	nonce, err := c.fetchNonce(ctx, sender.Address().String())
+	if err != nil {
+		return nil, err
+	}
+	chainID := c.chainID
+	if chainID == nil {
+		chainID = types.NHBChainID()
+	}
+	gasPrice := c.gasPrice
+	if gasPrice == nil {
+		gasPrice = defaultGasPrice
+	}
+	tx := &types.Transaction{
+		ChainID:  new(big.Int).Set(chainID),
+		Type:     txType,
+		Nonce:    nonce,
+		To:       dest.Bytes(),
+		Value:    new(big.Int).Set(amount),
+		GasLimit: c.gasLimit,
+		GasPrice: new(big.Int).Set(gasPrice),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(tx)
+		}
+	}
+	if tx.GasLimit == 0 {
+		return nil, fmt.Errorf("client: gas limit must be greater than zero")
+	}
+	if tx.GasPrice == nil || tx.GasPrice.Sign() <= 0 {
+		return nil, fmt.Errorf("client: gas price must be greater than zero")
+	}
+	return tx, nil
 }
 
 func (c *Client) fetchNonce(ctx context.Context, address string) (uint64, error) {
