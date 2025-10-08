@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"nhbchain/consensus"
+	"nhbchain/native/fees"
 )
 
 var (
@@ -31,6 +33,19 @@ func ValidateConfig(g Global) error {
 	}
 	if _, err := g.PaymasterLimits(); err != nil {
 		return fmt.Errorf("paymaster: %w", err)
+	}
+	znhbEnabled := false
+	for _, asset := range g.Fees.Assets {
+		if strings.EqualFold(strings.TrimSpace(asset.Asset), fees.AssetZNHB) {
+			znhbEnabled = true
+			break
+		}
+	}
+	if znhbEnabled {
+		wallets := g.Fees.RouteWalletByAsset()
+		if strings.TrimSpace(wallets[fees.AssetZNHB]) == "" {
+			return fmt.Errorf("fees: route_wallet_by_asset.%s must be configured when %s fees are enabled", fees.AssetZNHB, fees.AssetZNHB)
+		}
 	}
 	return nil
 }

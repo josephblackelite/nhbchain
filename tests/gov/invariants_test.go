@@ -26,8 +26,8 @@ func testBaseline() govcfg.Baseline {
 			FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
 			MDRBasisPoints:     config.DefaultMDRBasisPoints,
 			Assets: []govcfg.FeeAssetBaseline{
-				{Asset: fees.AssetNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
-				{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
+				{Asset: fees.AssetNHB, MDRBasisPoints: config.DefaultMDRBasisPoints, OwnerWallet: "nhb1ownerwalletbaseline"},
+				{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints, OwnerWallet: "znhb1proceedswalletbaseline"},
 			},
 		},
 	}

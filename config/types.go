@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	DefaultFreeTierTxPerMonth = uint64(100)
@@ -72,6 +75,27 @@ type Fees struct {
 	MDRBasisPoints     uint32
 	OwnerWallet        string
 	Assets             []FeeAsset
+}
+
+// RouteWalletByAsset returns a normalised map of asset identifiers to the
+// configured route wallet. Empty wallet entries are omitted.
+func (f Fees) RouteWalletByAsset() map[string]string {
+	if len(f.Assets) == 0 {
+		return map[string]string{}
+	}
+	wallets := make(map[string]string, len(f.Assets))
+	for _, asset := range f.Assets {
+		name := strings.ToUpper(strings.TrimSpace(asset.Asset))
+		if name == "" {
+			continue
+		}
+		wallet := strings.TrimSpace(asset.OwnerWallet)
+		if wallet == "" {
+			continue
+		}
+		wallets[name] = wallet
+	}
+	return wallets
 }
 
 // Consensus controls the BFT round timeouts.
