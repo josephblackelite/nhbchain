@@ -19,8 +19,10 @@ import (
 	"sync"
 	"time"
 
+	"nhbchain/consensus/codec"
 	"nhbchain/core"
 	"nhbchain/core/epoch"
+	"nhbchain/core/events"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	gatewayauth "nhbchain/gateway/auth"
@@ -33,6 +35,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -701,6 +704,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetLatestBlocks(recorder, r, req)
 	case "nhb_getLatestTransactions":
 		s.handleGetLatestTransactions(recorder, r, req)
+	case "nhb_getTransaction":
+		s.handleGetTransaction(recorder, r, req)
+	case "nhb_getTransactionReceipt":
+		s.handleGetTransactionReceipt(recorder, r, req)
 	case "nhb_getEpochSummary":
 		s.handleGetEpochSummary(recorder, r, req)
 	case "nhb_getEpochSnapshot":
@@ -1059,6 +1066,279 @@ func (s *Server) handleGetLatestTransactions(w http.ResponseWriter, _ *http.Requ
 		txs = txs[:count]
 	}
 	writeResult(w, req.ID, txs)
+}
+
+func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if s == nil || s.node == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	if len(req.Params) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction hash required", nil)
+		return
+	}
+	var hash string
+	if err := json.Unmarshal(req.Params[0], &hash); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction hash must be a string", err.Error())
+		return
+	}
+	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(hash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to resolve transaction", err.Error())
+		return
+	}
+	if tx == nil {
+		writeResult(w, req.ID, nil)
+		return
+	}
+	result, err := buildTransactionResult(tx, canonicalHash, blockHash, blockNumber)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to encode transaction", err.Error())
+		return
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if s == nil || s.node == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	if len(req.Params) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction hash required", nil)
+		return
+	}
+	var hash string
+	if err := json.Unmarshal(req.Params[0], &hash); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction hash must be a string", err.Error())
+		return
+	}
+	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(hash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to resolve transaction", err.Error())
+		return
+	}
+	if tx == nil {
+		writeResult(w, req.ID, nil)
+		return
+	}
+	receipt, err := s.buildReceiptResult(tx, canonicalHash, blockHash, blockNumber)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to encode receipt", err.Error())
+		return
+	}
+	writeResult(w, req.ID, receipt)
+}
+
+func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byte, uint64, error) {
+	if s == nil || s.node == nil {
+		return nil, "", nil, 0, fmt.Errorf("node unavailable")
+	}
+	normalized := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "0x"))
+	if normalized == "" {
+		return nil, "", nil, 0, nil
+	}
+	chain := s.node.Chain()
+	if chain == nil {
+		return nil, "", nil, 0, fmt.Errorf("chain unavailable")
+	}
+	latest := chain.GetHeight()
+	for height := uint64(0); height <= latest; height++ {
+		block, err := chain.GetBlockByHeight(height)
+		if err != nil || block == nil {
+			continue
+		}
+		blockHash, err := block.Header.Hash()
+		if err != nil {
+			continue
+		}
+		for _, tx := range block.Transactions {
+			if tx == nil {
+				continue
+			}
+			hashBytes, err := tx.Hash()
+			if err != nil {
+				continue
+			}
+			canonical := hex.EncodeToString(hashBytes)
+			if strings.EqualFold(canonical, normalized) {
+				return tx, ensureHexPrefix(canonical), blockHash, height, nil
+			}
+		}
+	}
+	return nil, "", nil, 0, nil
+}
+
+func buildTransactionResult(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64) (*TransactionResult, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("transaction nil")
+	}
+	result := &TransactionResult{
+		Hash:        txHash,
+		Type:        formatTxType(tx.Type),
+		Asset:       assetLabel(tx.Type),
+		BlockNumber: hexString(blockNumber),
+		Nonce:       hexString(tx.Nonce),
+		GasLimit:    hexString(tx.GasLimit),
+		GasPrice:    hexBig(tx.GasPrice),
+		Value:       hexBig(tx.Value),
+	}
+	if len(blockHash) > 0 {
+		result.BlockHash = ensureHexPrefix(hex.EncodeToString(blockHash))
+	}
+	if from, err := tx.From(); err == nil {
+		result.From = crypto.MustNewAddress(crypto.NHBPrefix, from).String()
+	}
+	if len(tx.To) == 20 {
+		result.To = crypto.MustNewAddress(crypto.NHBPrefix, tx.To).String()
+	}
+	if len(tx.Data) > 0 {
+		result.Input = "0x" + strings.ToLower(hex.EncodeToString(tx.Data))
+	} else {
+		result.Input = "0x"
+	}
+	return result, nil
+}
+
+func (s *Server) buildReceiptResult(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64) (*ReceiptResult, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("transaction nil")
+	}
+	receipt := &ReceiptResult{
+		TransactionHash: txHash,
+		BlockNumber:     hexString(blockNumber),
+		Status:          "0x1",
+		GasUsed:         hexString(0),
+		Logs:            []ReceiptLog{},
+	}
+	if len(blockHash) > 0 {
+		receipt.BlockHash = ensureHexPrefix(hex.EncodeToString(blockHash))
+	}
+	if sim, err := s.simulateTransaction(tx); err == nil && sim != nil {
+		if sim.GasUsed > 0 {
+			receipt.GasUsed = hexString(sim.GasUsed)
+		}
+		receipt.Logs = convertEventsToLogs(sim.Events)
+	} else if tx.GasLimit > 0 {
+		receipt.GasUsed = hexString(tx.GasLimit)
+	}
+	if len(receipt.Logs) == 0 {
+		if fallback := buildFallbackTransferLog(tx); fallback != nil {
+			receipt.Logs = append(receipt.Logs, fallback)
+		}
+	}
+	return receipt, nil
+}
+
+func (s *Server) simulateTransaction(tx *types.Transaction) (*core.SimulationResult, error) {
+	if s == nil || s.node == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	protoTx, err := codec.TransactionToProto(tx)
+	if err != nil {
+		return nil, err
+	}
+	if protoTx == nil {
+		return nil, fmt.Errorf("transaction payload unavailable")
+	}
+	payload, err := proto.Marshal(protoTx)
+	if err != nil {
+		return nil, err
+	}
+	return s.node.SimulateTx(payload)
+}
+
+func convertEventsToLogs(eventsList []types.Event) []ReceiptLog {
+	if len(eventsList) == 0 {
+		return nil
+	}
+	logs := make([]ReceiptLog, 0, len(eventsList))
+	for _, evt := range eventsList {
+		log := ReceiptLog{"event": eventDisplayName(evt.Type)}
+		for key, value := range evt.Attributes {
+			switch evt.Type {
+			case events.TypeTransfer:
+				switch key {
+				case "asset":
+					log["asset"] = strings.ToUpper(strings.TrimSpace(value))
+					continue
+				case "amount":
+					log["value"] = decimalToHex(value)
+					continue
+				}
+			case events.TypeFeeApplied:
+				switch key {
+				case "asset":
+					log["asset"] = strings.ToUpper(strings.TrimSpace(value))
+					continue
+				case "payer":
+					log["payer"] = ensureHexPrefix(value)
+					continue
+				case "ownerWallet":
+					log["ownerWallet"] = ensureHexPrefix(value)
+					continue
+				case "grossWei":
+					log["gross"] = decimalToHex(value)
+					continue
+				case "feeWei":
+					log["fee"] = decimalToHex(value)
+					continue
+				case "netWei":
+					log["net"] = decimalToHex(value)
+					continue
+				}
+			}
+			log[key] = value
+		}
+		if _, ok := log["asset"]; !ok {
+			if asset := strings.TrimSpace(evt.Attributes["asset"]); asset != "" {
+				log["asset"] = strings.ToUpper(asset)
+			}
+		}
+		logs = append(logs, log)
+	}
+	return logs
+}
+
+func buildFallbackTransferLog(tx *types.Transaction) ReceiptLog {
+	asset := assetLabel(tx.Type)
+	if asset == "" {
+		return nil
+	}
+	log := ReceiptLog{"event": "Transfer", "asset": asset}
+	if from, err := tx.From(); err == nil {
+		log["from"] = crypto.MustNewAddress(crypto.NHBPrefix, from).String()
+	}
+	if len(tx.To) == 20 {
+		log["to"] = crypto.MustNewAddress(crypto.NHBPrefix, tx.To).String()
+	}
+	log["value"] = hexBig(tx.Value)
+	return log
+}
+
+func decimalToHex(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "0x0"
+	}
+	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
+		return trimmed
+	}
+	if parsed, ok := new(big.Int).SetString(trimmed, 10); ok {
+		return fmt.Sprintf("0x%x", parsed)
+	}
+	return trimmed
+}
+
+func eventDisplayName(eventType string) string {
+	switch eventType {
+	case events.TypeTransfer:
+		return "Transfer"
+	case events.TypeFeeApplied:
+		return "FeeApplied"
+	default:
+		return eventType
+	}
 }
 
 func (s *Server) handleGetEpochSummary(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
