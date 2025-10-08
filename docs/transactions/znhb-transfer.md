@@ -5,6 +5,19 @@ NHB coin payments. Both payloads share the same ECDSA signing flow: construct a
 `types.Transaction`, recover the sender nonce from the latest account state, and
 sign the SHA-256 hash before submitting the JSON-RPC request.
 
+## Authenticated submission
+
+`nhb_sendTransaction` is a privileged RPC on validator nodes. Every request is
+wrapped by `requireAuth`, which rejects calls that omit the `Authorization`
+header or fail bearer-token verification before `handleSendTransaction` even
+parses the payload.【F:rpc/http.go†L660-L704】【F:rpc/http.go†L1180-L1198】 Wallets
+MUST proxy signed transactions through trusted server infrastructure so the
+token never ships to the browser. Reuse helpers such as `rpcRequest(...,
+withAuth=true)` on your server routes, then forward the fully signed JSON body
+with the chain ID header and `Authorization: Bearer <NHB_RPC_TOKEN>` already
+attached. Both NHB (`TxTypeTransfer`) and ZNHB (`TxTypeTransferZNHB`) sends rely
+on the same authenticated flow.
+
 ## 1. Fetch the current nonce and balances
 
 Before building either transaction, query the account with `nhb_getBalance` to
@@ -150,10 +163,20 @@ recorded in the `Transfer` log.
 ```
 
 After signing, submit the payload through `nhb_sendTransaction`. Successful
-settlement debits the sender's `balanceZNHB`, credits the recipient (creating the
-account metadata if necessary), and increments the sender nonce. Gas charges are
-still paid in NHB, so wallets should confirm sufficient NHB balance alongside
-ZNHB holdings.
+settlement debits the sender, credits the recipient, and increments the sender
+nonce:
+
+* **NHB transfers** – `applyEvmTransaction` executes the envelope on the EVM,
+  then reloads sender and recipient accounts to apply gas, loyalty, and fee
+  bookkeeping before persisting the debited `from`/credited `to` balances back
+  into the trie.【F:core/state_transition.go†L1187-L1439】
+* **ZNHB transfers** – `applyTransferZNHB` performs the debit/credit entirely in
+  the native state processor, subtracting from `BalanceZNHB`, adding to the
+  recipient (creating the account if needed), handling fees, and recording the
+  transfer event.【F:core/state_transition.go†L1463-L1532】
+
+Gas charges are still paid in NHB, so wallets should confirm sufficient NHB
+balance alongside ZNHB holdings before attempting either transfer type.
 
 For an end-to-end example that automates signing for either token, refer to the
 `send-znhb` command in `cmd/nhb-cli`, which reuses the same signing primitives

@@ -37,6 +37,10 @@ The application does not call the identity gateway directly; email hashing happe
 `IDENTITY_EMAIL_SALT`. `NHB_WS_URL` is read from the root environment for future live updates but is
 not yet consumed by the UI.
 
+For future send capabilities, follow the [authenticated submission flow for
+`nhb_sendTransaction`](../transactions/znhb-transfer.md#authenticated-submission)
+so the RPC bearer token remains confined to server-side routes.
+
 ## Security Posture
 
 * Private keys live only in client state. Refreshing the page clears them.
