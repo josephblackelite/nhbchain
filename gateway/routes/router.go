@@ -61,6 +61,14 @@ func New(cfg Config) (http.Handler, error) {
 			}
 			lendingBridge = lr
 		}
+		var txBridge *transactionsRoutes
+		if route.Name == "transactions" {
+			tr, err := newTransactionsRoutes(route.Target)
+			if err != nil {
+				return nil, fmt.Errorf("configure transaction routes: %w", err)
+			}
+			txBridge = tr
+		}
 		r.Route(route.Prefix, func(sr chi.Router) {
 			if cfg.RateLimiter != nil && route.RateLimitKey != "" {
 				sr.Use(cfg.RateLimiter.Middleware(route.RateLimitKey))
@@ -73,6 +81,9 @@ func New(cfg Config) (http.Handler, error) {
 			}
 			if lendingBridge != nil {
 				lendingBridge.mount(sr)
+			}
+			if txBridge != nil {
+				txBridge.mount(sr)
 			}
 			sr.Handle("/*", proxy)
 			sr.Handle("/", proxy)
