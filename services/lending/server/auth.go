@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -12,15 +13,24 @@ import (
 	"google.golang.org/grpc/status"
 
 	lendingv1 "nhbchain/proto/lending/v1"
-	"nhbchain/services/lendingd/config"
 )
+
+const envAPIToken = "LEND_API_TOKEN"
+
+// AuthConfig describes the authentication requirements enforced by the gRPC
+// interceptors.
+type AuthConfig struct {
+	APITokens        []string
+	AllowedClientCNs []string
+	MTLSRequired     bool
+}
 
 type authContextKey struct{}
 
 // NewAuthInterceptors constructs unary and stream interceptors that enforce
 // authentication on Msg RPCs. Requests must present either a configured API
-// token or an mTLS client certificate with an allowed common name.
-func NewAuthInterceptors(cfg config.AuthConfig) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
+// token or an mTLS client certificate.
+func NewAuthInterceptors(cfg AuthConfig) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
 	authenticator := newAuthenticator(cfg)
 	return authenticator.unaryInterceptor(), authenticator.streamInterceptor()
 }
@@ -42,9 +52,11 @@ type authenticator struct {
 	commonNames  map[string]struct{}
 	allowByToken bool
 	allowByMTLS  bool
+	requireMTLS  bool
+	requireToken bool
 }
 
-func newAuthenticator(cfg config.AuthConfig) *authenticator {
+func newAuthenticator(cfg AuthConfig) *authenticator {
 	tokens := make(map[string]struct{})
 	for _, token := range cfg.APITokens {
 		trimmed := strings.TrimSpace(token)
@@ -53,19 +65,29 @@ func newAuthenticator(cfg config.AuthConfig) *authenticator {
 		}
 		tokens[trimmed] = struct{}{}
 	}
+	if envToken := strings.TrimSpace(os.Getenv(envAPIToken)); envToken != "" {
+		tokens[envToken] = struct{}{}
+	}
+
 	commonNames := make(map[string]struct{})
-	for _, name := range cfg.MTLS.AllowedCommonNames {
+	for _, name := range cfg.AllowedClientCNs {
 		trimmed := strings.TrimSpace(name)
 		if trimmed == "" {
 			continue
 		}
 		commonNames[trimmed] = struct{}{}
 	}
+
+	_, requireToken := os.LookupEnv(envAPIToken)
+	allowByMTLS := cfg.MTLSRequired || len(commonNames) > 0
+
 	return &authenticator{
 		tokens:       tokens,
 		commonNames:  commonNames,
 		allowByToken: len(tokens) > 0,
-		allowByMTLS:  len(commonNames) > 0,
+		allowByMTLS:  allowByMTLS,
+		requireMTLS:  cfg.MTLSRequired,
+		requireToken: requireToken,
 	}
 }
 
@@ -100,13 +122,22 @@ func (a *authenticator) authenticate(ctx context.Context) (context.Context, erro
 	if a == nil {
 		return ctx, status.Error(codes.Internal, "authenticator unavailable")
 	}
-	if !a.allowByToken && !a.allowByMTLS {
-		return ctx, status.Error(codes.PermissionDenied, "authentication is not configured")
+	if a.requireToken {
+		if a.authenticateByToken(ctx) {
+			return markAuthenticated(ctx), nil
+		}
+		return ctx, status.Error(codes.Unauthenticated, "bearer token required")
 	}
 	if a.allowByToken && a.authenticateByToken(ctx) {
 		return markAuthenticated(ctx), nil
 	}
 	if a.allowByMTLS && a.authenticateByMTLS(ctx) {
+		return markAuthenticated(ctx), nil
+	}
+	if a.requireMTLS {
+		return ctx, status.Error(codes.Unauthenticated, "mtls client certificate required")
+	}
+	if !a.allowByToken && !a.allowByMTLS {
 		return markAuthenticated(ctx), nil
 	}
 	return ctx, status.Error(codes.Unauthenticated, "authentication required")
@@ -140,7 +171,7 @@ func (a *authenticator) authenticateByToken(ctx context.Context) bool {
 }
 
 func (a *authenticator) authenticateByMTLS(ctx context.Context) bool {
-	if ctx == nil || len(a.commonNames) == 0 {
+	if ctx == nil {
 		return false
 	}
 	pr, ok := peer.FromContext(ctx)
@@ -152,6 +183,12 @@ func (a *authenticator) authenticateByMTLS(ctx context.Context) bool {
 		return false
 	}
 	state := info.State
+	if len(state.VerifiedChains) == 0 && len(state.PeerCertificates) == 0 {
+		return false
+	}
+	if len(a.commonNames) == 0 {
+		return true
+	}
 	for _, chain := range state.VerifiedChains {
 		if len(chain) == 0 {
 			continue
@@ -169,6 +206,9 @@ func (a *authenticator) authenticateByMTLS(ctx context.Context) bool {
 }
 
 func (a *authenticator) commonNameAllowed(name string) bool {
+	if len(a.commonNames) == 0 {
+		return true
+	}
 	_, ok := a.commonNames[strings.TrimSpace(name)]
 	return ok
 }
