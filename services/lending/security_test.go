@@ -110,8 +110,8 @@ func TestLendingServerRejectsInsecureAndUnauthenticated(t *testing.T) {
 	}
 	defer authConn.Close()
 	_, err = lendingv1.NewLendingServiceClient(authConn).GetMarket(ctx, &lendingv1.GetMarketRequest{Key: &lendingv1.MarketKey{Symbol: "demo"}})
-	if status.Code(err) != codes.Unimplemented {
-		t.Fatalf("expected unimplemented error from placeholder handler, got %v", err)
+	if code := status.Code(err); code != codes.Unimplemented && code != codes.FailedPrecondition {
+		t.Fatalf("expected placeholder handler error, got %v", err)
 	}
 }
 

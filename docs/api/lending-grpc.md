@@ -15,13 +15,39 @@ back-end services that need real-time interactions with the lending protocol.
 | --- | --- |
 | Package | `lending.v1` |
 | Service | `LendingService` |
-| Default port (lendingd) | `9090` |
+| Default port (lendingd) | `9444` |
 
 The service requires TLS in production deployments.  Development clusters may enable plaintext
 transport; when using `grpcurl` the `-plaintext` flag can be supplied to skip TLS.
 
+### Development quickstart
+
+The `lendingd` binary can run locally without TLS by opting into insecure mode
+and supplying an API token. The example below configures a plaintext listener
+bound to localhost and reuses the same shared secret for both the environment
+variable and command-line flag.
+
 ```bash
-grpcurl -plaintext localhost:9090 list lending.v1.LendingService
+export LEND_ALLOW_INSECURE=true
+export LEND_SHARED_SECRET=devtoken
+export LEND_NODE_RPC_URL=http://127.0.0.1:8081
+export LEND_LISTEN=127.0.0.1:9444
+
+go run ./services/lending \
+  --allow-insecure \
+  --shared-secret "$LEND_SHARED_SECRET" \
+  --listen "$LEND_LISTEN"
+```
+
+With lendingd running locally, gRPC reflection remains disabled. Use the
+compiled protobufs when invoking `grpcurl` and include the API token metadata.
+
+```bash
+grpcurl -plaintext \
+  -import-path proto \
+  -proto lending/v1/lending.proto \
+  -H "x-api-token: $LEND_SHARED_SECRET" \
+  127.0.0.1:9444 list lending.v1.LendingService
 ```
 
 Every method follows the standard gRPC error model.  In addition to transport-level errors the
