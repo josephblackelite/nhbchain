@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"nhbchain/config"
+	"nhbchain/native/fees"
 )
 
 func TestValidateConfig(t *testing.T) {
@@ -130,6 +131,53 @@ func TestValidateConfig(t *testing.T) {
 				Blocks:  config.Blocks{MaxTxs: 0},
 			},
 			wantErr: true,
+		},
+		{
+			name: "znhb wallet missing",
+			cfg: config.Global{
+				Governance: config.Governance{
+					QuorumBPS:        6000,
+					PassThresholdBPS: 5000,
+					VotingPeriodSecs: config.MinVotingPeriodSeconds,
+				},
+				Slashing: config.Slashing{
+					MinWindowSecs: 1,
+					MaxWindowSecs: 10,
+				},
+				Mempool: config.Mempool{MaxBytes: 1},
+				Blocks:  config.Blocks{MaxTxs: 1},
+				Fees: config.Fees{
+					Assets: []config.FeeAsset{
+						{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "znhb wallet configured",
+			cfg: config.Global{
+				Governance: config.Governance{
+					QuorumBPS:        6000,
+					PassThresholdBPS: 5000,
+					VotingPeriodSecs: config.MinVotingPeriodSeconds,
+				},
+				Slashing: config.Slashing{
+					MinWindowSecs: 1,
+					MaxWindowSecs: 10,
+				},
+				Mempool: config.Mempool{MaxBytes: 1},
+				Blocks:  config.Blocks{MaxTxs: 1},
+				Fees: config.Fees{
+					Assets: []config.FeeAsset{
+						{
+							Asset:          fees.AssetZNHB,
+							MDRBasisPoints: config.DefaultMDRBasisPoints,
+							OwnerWallet:    "znhb1configuredwallet",
+						},
+					},
+				},
+			},
 		},
 	}
 

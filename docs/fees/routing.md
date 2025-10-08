@@ -18,6 +18,30 @@ requirements change. Domains now expose an asset map that binds every accepted
 currency (NHB, ZNHB, and future additions) to a specific MDR basis-point value
 and routing wallet, making fee distribution explicit on a per-asset basis.
 
+### Minimal configuration snippet
+
+Production validators must configure explicit route wallets for both NHB and ZNHB
+assets. The snippet below can be dropped into `config.toml` and edited with the
+correct bech32 addresses.
+
+```toml
+[global.fees]
+free_tier_tx_per_month = 100
+mdr_basis_points = 150
+
+[[global.fees.assets]]
+asset = "NHB"
+owner_wallet = "nhb1exampleownerwalletxxxxxxxxxxxxxxxxxxxx"
+
+[[global.fees.assets]]
+asset = "ZNHB"
+owner_wallet = "znhb1exampleproceedswalletxxxxxxxxxxxxxxxx"
+```
+
+The second entry satisfies the `fees.route_wallet_by_asset.ZNHB` requirement. If
+it is omitted while ZNHB fees remain enabled, the node refuses to start so that
+fees never route to an empty account.
+
 ## Routing flow
 
 The runtime enforces deterministic routing whenever a transaction includes a fee

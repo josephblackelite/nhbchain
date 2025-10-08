@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -27,7 +28,7 @@ func TestLoadParsesP2PSettings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	keystorePath := filepath.Join(dir, "validator.keystore")
-        contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:7000"
+	contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:7000"
 RPCAddress = "0.0.0.0:9000"
 DataDir = "./data"
 GenesisFile = "genesis.json"
@@ -125,18 +126,18 @@ PEX = false
 	if cfg.RPCReadTimeout != 20 || cfg.RPCWriteTimeout != 18 {
 		t.Fatalf("unexpected RPC read/write timeouts: %d/%d", cfg.RPCReadTimeout, cfg.RPCWriteTimeout)
 	}
-        if cfg.RPCIdleTimeout != 45 {
-                t.Fatalf("unexpected RPC idle timeout: %d", cfg.RPCIdleTimeout)
-        }
-        if !cfg.RPCAllowInsecure {
-                t.Fatalf("expected RPCAllowInsecure to be true")
-        }
-        if cfg.RPCTLSCertFile != "/path/to/cert.pem" || cfg.RPCTLSKeyFile != "/path/to/key.pem" {
-                t.Fatalf("unexpected RPC TLS paths: %s %s", cfg.RPCTLSCertFile, cfg.RPCTLSKeyFile)
-        }
-        if cfg.RPCTLSClientCAFile != "/path/to/clients.pem" {
-                t.Fatalf("unexpected RPC client CA file: %s", cfg.RPCTLSClientCAFile)
-        }
+	if cfg.RPCIdleTimeout != 45 {
+		t.Fatalf("unexpected RPC idle timeout: %d", cfg.RPCIdleTimeout)
+	}
+	if !cfg.RPCAllowInsecure {
+		t.Fatalf("expected RPCAllowInsecure to be true")
+	}
+	if cfg.RPCTLSCertFile != "/path/to/cert.pem" || cfg.RPCTLSKeyFile != "/path/to/key.pem" {
+		t.Fatalf("unexpected RPC TLS paths: %s %s", cfg.RPCTLSCertFile, cfg.RPCTLSKeyFile)
+	}
+	if cfg.RPCTLSClientCAFile != "/path/to/clients.pem" {
+		t.Fatalf("unexpected RPC client CA file: %s", cfg.RPCTLSClientCAFile)
+	}
 	if header := cfg.NetworkSecurity.AuthorizationHeaderName(); header != "x-test-token" {
 		t.Fatalf("unexpected auth header: %s", header)
 	}
@@ -382,7 +383,7 @@ ValidatorKeystorePath = "%s"
 	}
 
 	want := defaultGlobalConfig()
-	if cfg.Global != want {
+	if !reflect.DeepEqual(cfg.Global, want) {
 		t.Fatalf("unexpected global defaults: %+v", cfg.Global)
 	}
 }
