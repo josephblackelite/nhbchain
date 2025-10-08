@@ -95,6 +95,20 @@ ZapNHB uses the new `TxTypeTransferZNHB (0x10)` constant. Only the asset changes
 }
 ```
 
+### Authenticated submission
+
+`nhb_sendTransaction` is a privileged RPC. Every request must present
+`Authorization: Bearer <NHB_RPC_TOKEN>` so only trusted infrastructure can push
+transactions into the network. The HTTP layer enforces this via the
+[`requireAuth`](../../rpc/http.go#L1180-L1211) guard that runs before
+[`handleSendTransaction`](../../rpc/http.go#L1417-L1478), rejecting any call
+that lacks the bearer token. When the header is accepted the handler forwards
+the payload to `node.AddTransaction`, queuing it for consensus alongside other
+pending transfers. Wallets **must not** ship the bearer token to browsers or
+mobile clients—proxy the submission through a server endpoint (for example the
+`rpcRequest(..., withAuth=true)` helper used elsewhere in these docs) so the
+token is only attached on trusted backends.
+
 ### Fee model
 
 The `gasLimit`/`gasPrice` fields describe the NHB gas that is burned for
@@ -151,9 +165,14 @@ recorded in the `Transfer` log.
 
 After signing, submit the payload through `nhb_sendTransaction`. Successful
 settlement debits the sender's `balanceZNHB`, credits the recipient (creating the
-account metadata if necessary), and increments the sender nonce. Gas charges are
-still paid in NHB, so wallets should confirm sufficient NHB balance alongside
-ZNHB holdings.
+account metadata if necessary), and increments the sender nonce. The consensus
+processor handles this explicitly in
+[`applyTransferZNHB`](../../core/state_transition.go#L1463-L1534), while NHB
+transfers follow the EVM path executed by
+[`applyEvmTransaction`](../../core/state_transition.go#L1112-L1393), which
+deducts value, charges gas, and bumps the nonce during block execution. Gas
+charges are still paid in NHB, so wallets should confirm sufficient NHB balance
+alongside ZNHB holdings.
 
 For an end-to-end example that automates signing for either token, refer to the
 `send-znhb` command in `cmd/nhb-cli`, which reuses the same signing primitives
