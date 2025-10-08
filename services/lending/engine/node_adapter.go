@@ -2,228 +2,161 @@ package engine
 
 import (
 	"context"
-	"fmt"
-	"math/big"
-	"net/http"
+	"errors"
 	"strings"
 
-	"nhbchain/core"
-	"nhbchain/crypto"
-	"nhbchain/rpc/modules"
+	"nhbchain/services/lending/engine/rpcclient"
 )
 
-type nodeAdapter struct {
-	module *modules.LendingModule
+// NodeAdapter implements Engine by proxying requests to a JSON-RPC endpoint.
+//
+// It is a thin wrapper around rpcclient.Client that provides error translation
+// from the remote node into the sentinel values exposed by this package.
+type NodeAdapter struct {
+	cli *rpcclient.Client
 }
 
-// NewNodeAdapter wires a core node into the Engine abstraction expected by the service.
-func NewNodeAdapter(node *core.Node) Engine {
-	return &nodeAdapter{module: modules.NewLendingModule(node)}
+// NewNodeAdapter constructs an Engine backed by the provided JSON-RPC client.
+func NewNodeAdapter(cli *rpcclient.Client) *NodeAdapter {
+	return &NodeAdapter{cli: cli}
 }
 
-func (a *nodeAdapter) Supply(ctx context.Context, addr, market, amount string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (a *NodeAdapter) Supply(ctx context.Context, addr, market, amount string) error {
+	params := map[string]string{
+		"account": addr,
+		"market":  market,
+		"amount":  amount,
 	}
-	parsedAddr, err := parseAddress(addr)
-	if err != nil {
-		return err
-	}
-	value, err := parseAmount(amount)
-	if err != nil {
-		return err
-	}
-	if _, moduleErr := a.module.SupplyNHB(market, parsedAddr, value); moduleErr != nil {
-		return translateModuleError(moduleErr)
-	}
-	return nil
+	return a.invoke(ctx, "lending_supply", params, nil)
 }
 
-func (a *nodeAdapter) Borrow(ctx context.Context, addr, market, amount string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (a *NodeAdapter) Borrow(ctx context.Context, addr, market, amount string) error {
+	params := map[string]string{
+		"account": addr,
+		"market":  market,
+		"amount":  amount,
 	}
-	parsedAddr, err := parseAddress(addr)
-	if err != nil {
-		return err
-	}
-	value, err := parseAmount(amount)
-	if err != nil {
-		return err
-	}
-	if _, moduleErr := a.module.BorrowNHB(market, parsedAddr, value); moduleErr != nil {
-		return translateModuleError(moduleErr)
-	}
-	return nil
+	return a.invoke(ctx, "lending_borrow", params, nil)
 }
 
-func (a *nodeAdapter) Repay(ctx context.Context, addr, market, amount string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (a *NodeAdapter) Repay(ctx context.Context, addr, market, amount string) error {
+	params := map[string]string{
+		"account": addr,
+		"market":  market,
+		"amount":  amount,
 	}
-	parsedAddr, err := parseAddress(addr)
-	if err != nil {
-		return err
-	}
-	value, err := parseAmount(amount)
-	if err != nil {
-		return err
-	}
-	if _, moduleErr := a.module.RepayNHB(market, parsedAddr, value); moduleErr != nil {
-		return translateModuleError(moduleErr)
-	}
-	return nil
+	return a.invoke(ctx, "lending_repay", params, nil)
 }
 
-func (a *nodeAdapter) Withdraw(ctx context.Context, addr, market, amount string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (a *NodeAdapter) Withdraw(ctx context.Context, addr, market, amount string) error {
+	params := map[string]string{
+		"account": addr,
+		"market":  market,
+		"amount":  amount,
 	}
-	parsedAddr, err := parseAddress(addr)
-	if err != nil {
-		return err
-	}
-	value, err := parseAmount(amount)
-	if err != nil {
-		return err
-	}
-	if _, moduleErr := a.module.WithdrawNHB(market, parsedAddr, value); moduleErr != nil {
-		return translateModuleError(moduleErr)
-	}
-	return nil
+	return a.invoke(ctx, "lending_withdraw", params, nil)
 }
 
-func (a *nodeAdapter) Liquidate(ctx context.Context, liquidator, borrower, market, _ string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (a *NodeAdapter) Liquidate(ctx context.Context, liquidator, borrower, market, amount string) error {
+	params := map[string]string{
+		"liquidator": liquidator,
+		"borrower":   borrower,
+		"market":     market,
 	}
-	liquidatorAddr, err := parseAddress(liquidator)
-	if err != nil {
-		return err
+	if strings.TrimSpace(amount) != "" {
+		params["amount"] = amount
 	}
-	borrowerAddr, err := parseAddress(borrower)
-	if err != nil {
-		return err
-	}
-	if _, moduleErr := a.module.Liquidate(market, liquidatorAddr, borrowerAddr); moduleErr != nil {
-		return translateModuleError(moduleErr)
-	}
-	return nil
+	return a.invoke(ctx, "lending_liquidate", params, nil)
 }
 
-func (a *nodeAdapter) GetMarket(ctx context.Context, market string) (Market, error) {
-	if err := ctx.Err(); err != nil {
+func (a *NodeAdapter) GetMarket(ctx context.Context, market string) (Market, error) {
+	var params any
+	if trimmed := strings.TrimSpace(market); trimmed != "" {
+		params = map[string]string{"market": trimmed}
+	}
+	var resp Market
+	if err := a.invoke(ctx, "lending_getMarket", params, &resp); err != nil {
 		return Market{}, err
 	}
-	snapshot, params, moduleErr := a.module.GetMarket(market)
-	if moduleErr != nil {
-		return Market{}, translateModuleError(moduleErr)
-	}
-	return Market{Market: snapshot, RiskParameters: params}, nil
+	return resp, nil
 }
 
-func (a *nodeAdapter) ListMarkets(ctx context.Context) ([]Market, error) {
-	if err := ctx.Err(); err != nil {
+func (a *NodeAdapter) ListMarkets(ctx context.Context) ([]Market, error) {
+	var resp []Market
+	if err := a.invoke(ctx, "lending_listMarkets", nil, &resp); err != nil {
 		return nil, err
 	}
-	pools, params, moduleErr := a.module.GetPools()
-	if moduleErr != nil {
-		return nil, translateModuleError(moduleErr)
-	}
-	results := make([]Market, 0, len(pools))
-	for _, pool := range pools {
-		results = append(results, Market{Market: pool, RiskParameters: params})
-	}
-	return results, nil
+	return resp, nil
 }
 
-func (a *nodeAdapter) GetPosition(ctx context.Context, addr, market string) (Position, error) {
-	if err := ctx.Err(); err != nil {
+func (a *NodeAdapter) GetPosition(ctx context.Context, addr, market string) (Position, error) {
+	params := map[string]string{
+		"account": addr,
+		"market":  market,
+	}
+	var resp Position
+	if err := a.invoke(ctx, "lending_getPosition", params, &resp); err != nil {
 		return Position{}, err
 	}
-	parsedAddr, err := parseAddress(addr)
-	if err != nil {
-		return Position{}, err
-	}
-	account, moduleErr := a.module.GetUserAccount(market, parsedAddr)
-	if moduleErr != nil {
-		return Position{}, translateModuleError(moduleErr)
-	}
-	if account == nil {
+	if resp.Account == nil {
 		return Position{}, ErrNotFound
 	}
-	return Position{Account: account}, nil
+	return resp, nil
 }
 
-func (a *nodeAdapter) GetHealth(ctx context.Context, addr string) (Health, error) {
-	if err := ctx.Err(); err != nil {
+func (a *NodeAdapter) GetHealth(ctx context.Context, addr string) (Health, error) {
+	params := map[string]string{"account": addr}
+	var resp Health
+	if err := a.invoke(ctx, "lending_getHealth", params, &resp); err != nil {
 		return Health{}, err
 	}
-	parsedAddr, err := parseAddress(addr)
-	if err != nil {
-		return Health{}, err
-	}
-	marketSnapshot, params, moduleErr := a.module.GetMarket("")
-	if moduleErr != nil {
-		return Health{}, translateModuleError(moduleErr)
-	}
-	account, moduleErr := a.module.GetUserAccount("", parsedAddr)
-	if moduleErr != nil {
-		return Health{}, translateModuleError(moduleErr)
-	}
-	if account == nil {
+	if resp.Account == nil {
 		return Health{}, ErrNotFound
 	}
-	return Health{Market: marketSnapshot, RiskParameters: params, Account: account}, nil
+	return resp, nil
 }
 
-func parseAddress(addr string) ([20]byte, error) {
-	trimmed := strings.TrimSpace(addr)
-	if trimmed == "" {
-		return [20]byte{}, fmt.Errorf("address required: %w", ErrInvalidAmount)
+func (a *NodeAdapter) invoke(ctx context.Context, method string, params any, result any) error {
+	if a == nil || a.cli == nil {
+		return ErrInternal
 	}
-	decoded, err := crypto.DecodeAddress(trimmed)
-	if err != nil {
-		return [20]byte{}, fmt.Errorf("invalid address: %w", ErrInvalidAmount)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	var out [20]byte
-	copy(out[:], decoded.Bytes())
-	return out, nil
+	var callParams any
+	switch p := params.(type) {
+	case nil:
+		callParams = []any{}
+	case []any:
+		callParams = p
+	default:
+		callParams = []any{p}
+	}
+	if err := a.cli.Call(ctx, method, callParams, result); err != nil {
+		return translateError(err)
+	}
+	return nil
 }
 
-func parseAmount(amount string) (*big.Int, error) {
-	trimmed := strings.TrimSpace(amount)
-	if trimmed == "" {
-		return nil, fmt.Errorf("amount required: %w", ErrInvalidAmount)
-	}
-	value, ok := new(big.Int).SetString(trimmed, 10)
-	if !ok {
-		return nil, fmt.Errorf("invalid amount: %w", ErrInvalidAmount)
-	}
-	if value.Sign() <= 0 {
-		return nil, fmt.Errorf("amount must be positive: %w", ErrInvalidAmount)
-	}
-	return value, nil
-}
-
-func translateModuleError(err *modules.ModuleError) error {
+func translateError(err error) error {
 	if err == nil {
 		return nil
 	}
-	switch err.HTTPStatus {
-	case http.StatusNotFound:
-		return ErrNotFound
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return ErrUnauthorized
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
-	lower := strings.ToLower(err.Message)
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	switch {
-	case strings.Contains(lower, "paused"):
-		return ErrPaused
-	case strings.Contains(lower, "amount") || strings.Contains(lower, "invalid") || strings.Contains(lower, "positive"):
-		return ErrInvalidAmount
-	case strings.Contains(lower, "health") || strings.Contains(lower, "insufficient") || strings.Contains(lower, "no outstanding debt") || strings.Contains(lower, "not eligible") || strings.Contains(lower, "borrow exceeds"):
+	case strings.Contains(msg, "not found"):
+		return ErrNotFound
+	case strings.Contains(msg, "insufficient") || strings.Contains(msg, "health"):
 		return ErrInsufficientCollateral
+	case strings.Contains(msg, "paused"):
+		return ErrPaused
+	case strings.Contains(msg, "amount") || strings.Contains(msg, "invalid") || strings.Contains(msg, "positive"):
+		return ErrInvalidAmount
+	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "forbidden"):
+		return ErrUnauthorized
 	default:
 		return ErrInternal
 	}

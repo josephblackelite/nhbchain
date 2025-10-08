@@ -248,9 +248,9 @@ func toProtoMarket(snapshot engine.Market) *lendingv1.Market {
 		Key:              &lendingv1.MarketKey{Symbol: symbol},
 		BaseAsset:        defaultBaseAsset,
 		CollateralFactor: formatUint(snapshot.RiskParameters.MaxLTV),
-		ReserveFactor:    formatUint(uint64(snapshot.Market.ReserveFactor)),
-		LiquidityIndex:   bigToString(snapshot.Market.SupplyIndex),
-		BorrowIndex:      bigToString(snapshot.Market.BorrowIndex),
+		ReserveFactor:    formatUint(snapshot.Market.ReserveFactor),
+		LiquidityIndex:   normalizeAmount(snapshot.Market.SupplyIndex),
+		BorrowIndex:      normalizeAmount(snapshot.Market.BorrowIndex),
 	}
 	return market
 }
@@ -261,54 +261,54 @@ func toProtoPosition(pos engine.Position) *lendingv1.AccountPosition {
 	}
 	account := pos.Account
 	return &lendingv1.AccountPosition{
-		Account:      formatAddress(account.Address),
-		Supplied:     bigToString(account.SupplyShares),
-		Borrowed:     bigToString(account.DebtNHB),
-		Collateral:   bigToString(account.CollateralZNHB),
+		Account:      strings.TrimSpace(account.Address),
+		Supplied:     normalizeAmount(account.SupplyShares),
+		Borrowed:     normalizeAmount(account.DebtNHB),
+		Collateral:   normalizeAmount(account.CollateralZNHB),
 		HealthFactor: computeHealthFactor(account.CollateralZNHB, account.DebtNHB),
 	}
-}
-
-func bigToString(value *big.Int) string {
-	if value == nil {
-		return "0"
-	}
-	return value.String()
 }
 
 func formatUint(value uint64) string {
 	return strconv.FormatUint(value, 10)
 }
 
-type addressFormatter interface {
-	Bytes() []byte
-	String() string
-}
-
-func formatAddress(addr addressFormatter) string {
-	if addr == nil {
-		return ""
-	}
-	if len(addr.Bytes()) != 20 {
-		return ""
-	}
-	return strings.TrimSpace(addr.String())
-}
-
-func computeHealthFactor(collateral, debt *big.Int) string {
-	if debt == nil || debt.Sign() <= 0 {
+func normalizeAmount(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
 		return "0"
 	}
-	if collateral == nil || collateral.Sign() < 0 {
+	return trimmed
+}
+
+func computeHealthFactor(collateral, debt string) string {
+	collateralValue := parseAmount(collateral)
+	debtValue := parseAmount(debt)
+	if debtValue.Sign() <= 0 {
 		return "0"
 	}
-	rat := new(big.Rat).SetFrac(new(big.Int).Set(collateral), new(big.Int).Set(debt))
+	if collateralValue.Sign() < 0 {
+		return "0"
+	}
+	rat := new(big.Rat).SetFrac(collateralValue, debtValue)
 	decimal := rat.FloatString(18)
 	decimal = strings.TrimRight(strings.TrimRight(decimal, "0"), ".")
 	if decimal == "" {
 		return "0"
 	}
 	return decimal
+}
+
+func parseAmount(value string) *big.Int {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return big.NewInt(0)
+	}
+	parsed, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return big.NewInt(0)
+	}
+	return parsed
 }
 
 const defaultBaseAsset = "NHB"
