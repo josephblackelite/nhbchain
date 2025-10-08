@@ -31,6 +31,8 @@ import (
 	swapv1 "nhbchain/proto/swap/v1"
 	"nhbchain/storage/trie"
 
+	"nhbchain/observability"
+
 	"github.com/ethereum/go-ethereum/common"
 	gethcore "github.com/ethereum/go-ethereum/core"
 	gethstate "github.com/ethereum/go-ethereum/core/state"
@@ -1376,6 +1378,26 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		}
 	}
 
+	if isTransfer && txHashReady && tx.To != nil {
+		var fromAddr [20]byte
+		copy(fromAddr[:], from)
+		var toAddr [20]byte
+		copy(toAddr[:], tx.To)
+		evt := events.Transfer{
+			Asset:  "NHB",
+			From:   fromAddr,
+			To:     toAddr,
+			Amount: new(big.Int).Set(tx.Value),
+			TxHash: txHash,
+		}.Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+		if metrics := observability.Events(); metrics != nil {
+			metrics.RecordTransfer("NHB")
+		}
+	}
+
 	fromAcc, err := sp.getAccount(from)
 	if err != nil {
 		return nil, err
@@ -1488,6 +1510,33 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	}
 	if err := sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0); err != nil {
 		return nil, err
+	}
+
+	var txHash [32]byte
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return nil, fmt.Errorf("znhb transfer: compute hash: %w", err)
+	}
+	if len(hashBytes) != len(txHash) {
+		return nil, fmt.Errorf("znhb transfer: expected 32-byte tx hash, got %d", len(hashBytes))
+	}
+	copy(txHash[:], hashBytes)
+	var senderAddr [20]byte
+	copy(senderAddr[:], sender)
+	var recipientAddr [20]byte
+	copy(recipientAddr[:], tx.To)
+	evt := events.Transfer{
+		Asset:  "ZNHB",
+		From:   senderAddr,
+		To:     recipientAddr,
+		Amount: new(big.Int).Set(amount),
+		TxHash: txHash,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	if metrics := observability.Events(); metrics != nil {
+		metrics.RecordTransfer("ZNHB")
 	}
 	return &SimulationResult{}, nil
 }

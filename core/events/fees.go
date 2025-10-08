@@ -45,8 +45,8 @@ func (e FeeApplied) Event() *types.Event {
 	if domain := strings.TrimSpace(e.Domain); domain != "" {
 		attrs["domain"] = domain
 	}
-	if asset := strings.TrimSpace(e.Asset); asset != "" {
-		attrs["asset"] = strings.ToUpper(asset)
+	if asset := normalizeAsset(e.Asset); asset != "" {
+		attrs["asset"] = asset
 	}
 	if e.Gross != nil {
 		attrs["grossWei"] = e.Gross.String()
