@@ -30,6 +30,21 @@ type Authorizer interface {
 	Authorize(context.Context) error
 }
 
+type interceptorAuthorizer struct{}
+
+// NewInterceptorAuthorizer constructs an Authorizer that trusts the
+// authentication context installed by the gRPC interceptors.
+func NewInterceptorAuthorizer() Authorizer {
+	return interceptorAuthorizer{}
+}
+
+func (interceptorAuthorizer) Authorize(ctx context.Context) error {
+	if isAuthenticated(ctx) {
+		return nil
+	}
+	return status.Error(codes.Unauthenticated, "authentication required")
+}
+
 // New constructs a new lending service instance.
 func New(engine engine.Engine, logger *slog.Logger, auth Authorizer) *Service {
 	if logger == nil {

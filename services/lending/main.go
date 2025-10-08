@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
+	"errors"
 	"flag"
-	"fmt"
 	"log"
+	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,13 +17,12 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
-	"nhbchain/network"
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
 	lendingv1 "nhbchain/proto/lending/v1"
+	"nhbchain/services/lending/engine"
+	"nhbchain/services/lending/engine/rpcclient"
 	lendingserver "nhbchain/services/lending/server"
 )
 
@@ -95,7 +94,7 @@ func main() {
 	}
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
-	logging.Setup("lendingd", env)
+	logger := logging.Setup("lendingd", env)
 	otlpEndpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	otlpHeaders := telemetry.ParseHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
 	insecure := true
@@ -122,58 +121,83 @@ func main() {
 		}
 	}()
 
-	log.Printf("effective config: %+v", cfg.Sanitized())
+	logger.Info("effective config", slog.Any("config", cfg.Sanitized()))
+
+	rpcClient, err := rpcclient.NewClient(rpcclient.Config{
+		BaseURL:            cfg.NodeRPCURL,
+		BearerToken:        cfg.NodeRPCToken,
+		SharedSecretHeader: cfg.SharedSecretHeader,
+		SharedSecretValue:  cfg.SharedSecretValue,
+		TLSClientCAFile:    cfg.TLSClientCAFile,
+		AllowInsecure:      cfg.AllowInsecure,
+	})
+	if err != nil {
+		log.Fatalf("create rpc client: %v", err)
+	}
+	eng := engine.NewNodeAdapter(rpcClient)
+
+	srvCfg := lendingserver.Config{
+		TLSCertFile:      cfg.TLSCertFile,
+		TLSKeyFile:       cfg.TLSKeyFile,
+		TLSClientCAFile:  cfg.TLSClientCAFile,
+		AllowInsecure:    cfg.AllowInsecure,
+		MTLSRequired:     cfg.MTLSRequired,
+		AllowedClientCNs: cfg.AllowedClientCNs,
+		RateLimitPerMin:  cfg.RateLimitPerMin,
+		Logger:           logger,
+	}
+	if token := strings.TrimSpace(cfg.SharedSecretValue); token != "" {
+		srvCfg.APITokens = append(srvCfg.APITokens, token)
+	}
+	if os.Getenv("LEND_API_TOKEN") == "" && len(srvCfg.APITokens) == 0 && !srvCfg.MTLSRequired && len(srvCfg.AllowedClientCNs) == 0 {
+		log.Fatalf("lendingd requires an API token or mTLS configuration for authentication")
+	}
 
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.Listen, err)
 	}
-	creds, mtlsEnabled, err := buildServerCredentials(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSClientCAFile, cfg.AllowInsecure)
+
+	options, err := lendingserver.Interceptors(srvCfg)
 	if err != nil {
-		log.Fatalf("configure tls: %v", err)
+		log.Fatalf("build grpc interceptors: %v", err)
+	}
+	if cfg.AllowInsecure {
+		logger.Warn("DEV ONLY: starting without TLS credentials")
+	} else {
+		credsOpt, err := lendingserver.GrpcServerCreds(srvCfg)
+		if err != nil {
+			log.Fatalf("configure tls: %v", err)
+		}
+		if credsOpt != nil {
+			options = append(options, credsOpt)
+		}
 	}
 
-	allowedCommonNames := cfg.AllowedClientCNs
-	if len(allowedCommonNames) > 0 && !mtlsEnabled {
-		log.Fatalf("mTLS allowed common names require a client CA bundle")
-	}
-	if cfg.MTLSRequired && !mtlsEnabled {
-		log.Fatalf("mTLS is required but no client CA was provided")
-	}
-
-	var authenticators []network.Authenticator
-	if auth := network.NewTokenAuthenticator(cfg.SharedSecretHeader, cfg.SharedSecretValue); auth != nil {
-		authenticators = append(authenticators, auth)
-	}
-	if mtlsEnabled {
-		authenticators = append(authenticators, network.NewTLSAuthorizer(allowedCommonNames))
-	}
-	if len(authenticators) == 0 {
-		log.Fatalf("lendingd requires a shared secret or mTLS configuration for authentication")
-	}
-	authChain := network.ChainAuthenticators(authenticators...)
-	unaryAuth, streamAuth := newAuthInterceptors(authChain)
-
-	grpcServer := grpc.NewServer(
-		grpc.Creds(creds),
-		grpc.ChainUnaryInterceptor(
-			unaryAuth,
-			otelgrpc.UnaryServerInterceptor(),
-		),
-		grpc.ChainStreamInterceptor(
-			streamAuth,
-			otelgrpc.StreamServerInterceptor(),
-		),
+	options = append(options,
+		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()),
 	)
-	service := lendingserver.New(nil, nil, authChain)
+
+	grpcServer := grpc.NewServer(options...)
+	service := lendingserver.New(eng, logger, lendingserver.NewInterceptorAuthorizer())
 	lendingv1.RegisterLendingServiceServer(grpcServer, service)
+
+	healthServer, _ := startHealthServer(logger, rpcClient)
+	defer func() {
+		if healthServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = healthServer.Shutdown(shutdownCtx)
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("lendingd listening on %s", cfg.Listen)
+		logger.Info("lendingd listening", slog.String("listen", cfg.Listen), slog.Bool("tls_enabled", !cfg.AllowInsecure), slog.Bool("mtls_required", cfg.MTLSRequired))
 		serverErr <- grpcServer.Serve(listener)
 	}()
 
@@ -189,57 +213,62 @@ func main() {
 		}()
 		select {
 		case <-done:
+			if healthServer != nil {
+				_ = healthServer.Shutdown(shutdownCtx)
+			}
 		case <-shutdownCtx.Done():
 			log.Println("forcing server stop")
 			grpcServer.Stop()
+			if healthServer != nil {
+				_ = healthServer.Shutdown(context.Background())
+			}
 		}
 	case err := <-serverErr:
 		if err != nil {
+			if healthServer != nil {
+				_ = healthServer.Shutdown(context.Background())
+			}
 			log.Fatalf("serve gRPC: %v", err)
 		}
 	}
 }
 
-func buildServerCredentials(certPath, keyPath, clientCAPath string, allowInsecure bool) (credentials.TransportCredentials, bool, error) {
-	certPath = strings.TrimSpace(certPath)
-	keyPath = strings.TrimSpace(keyPath)
-	clientCAPath = strings.TrimSpace(clientCAPath)
+func startHealthServer(logger *slog.Logger, cli *rpcclient.Client) (*http.Server, net.Listener) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if cli == nil {
+		return nil, nil
+	}
 
-	hasCert := certPath != ""
-	hasKey := keyPath != ""
-	if hasCert != hasKey {
-		return nil, false, fmt.Errorf("tls requires both certificate and key")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		logger.Warn("failed to start health listener", "error", err)
+		return nil, nil
 	}
-	switch {
-	case hasCert && hasKey:
-		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-		if err != nil {
-			return nil, false, fmt.Errorf("load tls keypair: %w", err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		var height any
+		if err := cli.Call(ctx, "nhb_getHeight", []any{}, &height); err != nil {
+			logger.Error("health check failed", "error", err)
+			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
+			return
 		}
-		tlsCfg := &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() {
+		logger.Info("health check server listening", slog.String("addr", listener.Addr().String()))
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("health server stopped unexpectedly", "error", err)
 		}
-		mtlsEnabled := false
-		if clientCAPath != "" {
-			pem, err := os.ReadFile(clientCAPath)
-			if err != nil {
-				return nil, false, fmt.Errorf("read client ca: %w", err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pem) {
-				return nil, false, fmt.Errorf("parse client ca: invalid pem data")
-			}
-			tlsCfg.ClientCAs = pool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-			mtlsEnabled = true
-		} else {
-			tlsCfg.ClientAuth = tls.NoClientCert
-		}
-		return credentials.NewTLS(tlsCfg), mtlsEnabled, nil
-	case allowInsecure:
-		return insecure.NewCredentials(), false, nil
-	default:
-		return nil, false, fmt.Errorf("tls certificate and key are required unless --allow-insecure is set")
-	}
+	}()
+
+	return srv, listener
 }
