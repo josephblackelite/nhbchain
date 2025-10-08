@@ -24,7 +24,47 @@ type storedFeeTotals struct {
 	Net    *big.Int
 }
 
-func feeCounterKey(domain string, payer [20]byte) []byte {
+func monthStartUTC(ts time.Time) time.Time {
+	if ts.IsZero() {
+		return time.Time{}
+	}
+	utc := ts.UTC()
+	return time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+func monthKey(ts time.Time) string {
+	start := monthStartUTC(ts)
+	if start.IsZero() {
+		return "000000"
+	}
+	return fmt.Sprintf("%04d%02d", start.Year(), int(start.Month()))
+}
+
+func feeCounterKey(domain string, window time.Time, scope string, payer [20]byte) []byte {
+	normalized := fees.NormalizeDomain(domain)
+	month := monthKey(window)
+	normalizedScope := fees.NormalizeFreeTierScope(scope)
+	hexAddr := hex.EncodeToString(payer[:])
+	buf := make([]byte, len(feesCounterPrefix)+len(normalized)+1+len(month)+1+len(normalizedScope)+1+len(hexAddr))
+	copy(buf, feesCounterPrefix)
+	offset := len(feesCounterPrefix)
+	copy(buf[offset:], normalized)
+	offset += len(normalized)
+	buf[offset] = '/'
+	offset++
+	copy(buf[offset:], month)
+	offset += len(month)
+	buf[offset] = '/'
+	offset++
+	copy(buf[offset:], normalizedScope)
+	offset += len(normalizedScope)
+	buf[offset] = '/'
+	offset++
+	copy(buf[offset:], hexAddr)
+	return buf
+}
+
+func feeCounterLegacyKey(domain string, payer [20]byte) []byte {
 	normalized := fees.NormalizeDomain(domain)
 	hexAddr := hex.EncodeToString(payer[:])
 	buf := make([]byte, len(feesCounterPrefix)+len(normalized)+1+len(hexAddr))
@@ -36,6 +76,15 @@ func feeCounterKey(domain string, payer [20]byte) []byte {
 	offset++
 	copy(buf[offset:], hexAddr)
 	return buf
+}
+
+func sameCounterMonth(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	ua := a.UTC()
+	ub := b.UTC()
+	return ua.Year() == ub.Year() && ua.Month() == ub.Month()
 }
 
 func feeTotalsKey(domain, asset string, wallet [20]byte) []byte {
@@ -89,36 +138,64 @@ func parseFeeTotalsIndexEntry(raw []byte) (string, [20]byte, bool) {
 	return string(parts[0]), wallet, true
 }
 
-func (m *Manager) FeesGetCounter(domain string, payer [20]byte) (uint64, time.Time, bool, error) {
+func (m *Manager) FeesGetCounter(domain string, payer [20]byte, window time.Time, scope string) (uint64, time.Time, bool, error) {
 	if m == nil {
 		return 0, time.Time{}, false, fmt.Errorf("fees: state manager not initialised")
 	}
-	key := feeCounterKey(domain, payer)
+	normalizedWindow := monthStartUTC(window)
+	if normalizedWindow.IsZero() {
+		return 0, time.Time{}, false, fmt.Errorf("fees: window start required")
+	}
+	normalizedScope := fees.NormalizeFreeTierScope(scope)
+	key := feeCounterKey(domain, normalizedWindow, normalizedScope, payer)
 	var stored storedFeeCounter
 	ok, err := m.KVGet(key, &stored)
 	if err != nil {
 		return 0, time.Time{}, false, fmt.Errorf("fees: load counter: %w", err)
 	}
-	if !ok {
-		return 0, time.Time{}, false, nil
+	if ok {
+		windowStart := normalizedWindow
+		if stored.WindowStartUnix != 0 {
+			windowStart = time.Unix(int64(stored.WindowStartUnix), 0).UTC()
+		}
+		return stored.Count, windowStart, true, nil
 	}
-	var windowStart time.Time
-	if stored.WindowStartUnix != 0 {
-		windowStart = time.Unix(int64(stored.WindowStartUnix), 0).UTC()
+	if normalizedScope == fees.FreeTierScopeAggregate {
+		legacyKey := feeCounterLegacyKey(domain, payer)
+		var legacy storedFeeCounter
+		legacyOK, legacyErr := m.KVGet(legacyKey, &legacy)
+		if legacyErr != nil {
+			return 0, time.Time{}, false, fmt.Errorf("fees: load legacy counter: %w", legacyErr)
+		}
+		if legacyOK {
+			var legacyWindow time.Time
+			if legacy.WindowStartUnix != 0 {
+				legacyWindow = time.Unix(int64(legacy.WindowStartUnix), 0).UTC()
+			}
+			if sameCounterMonth(legacyWindow, normalizedWindow) {
+				return legacy.Count, legacyWindow, true, nil
+			}
+		}
 	}
-	return stored.Count, windowStart, true, nil
+	return 0, normalizedWindow, false, nil
 }
 
-func (m *Manager) FeesPutCounter(domain string, payer [20]byte, count uint64, windowStart time.Time) error {
+func (m *Manager) FeesPutCounter(domain string, payer [20]byte, windowStart time.Time, scope string, count uint64) error {
 	if m == nil {
 		return fmt.Errorf("fees: state manager not initialised")
 	}
-	key := feeCounterKey(domain, payer)
-	stored := storedFeeCounter{Count: count}
-	if !windowStart.IsZero() {
-		stored.WindowStartUnix = uint64(windowStart.UTC().Unix())
+	normalizedWindow := monthStartUTC(windowStart)
+	if normalizedWindow.IsZero() {
+		return fmt.Errorf("fees: window start required")
 	}
-	return m.KVPut(key, stored)
+	normalizedScope := fees.NormalizeFreeTierScope(scope)
+	key := feeCounterKey(domain, normalizedWindow, normalizedScope, payer)
+	stored := storedFeeCounter{Count: count}
+	stored.WindowStartUnix = uint64(normalizedWindow.UTC().Unix())
+	if err := m.KVPut(key, stored); err != nil {
+		return fmt.Errorf("fees: persist counter: %w", err)
+	}
+	return nil
 }
 
 func ensureFeeTotalsDefaults(stored *storedFeeTotals) {

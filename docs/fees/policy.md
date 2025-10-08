@@ -7,12 +7,14 @@ be tuned through parameter proposals.
 
 ## Free tier
 
-Wallets receive a **monthly allowance of 100 NHB-sponsored transactions**.
-Transactions that qualify for the free tier are debited against the sender's
-usage for the current UTC calendar month. Balances reset automatically at the
-start of each month. Once the allowance is exhausted the standard fee schedule
-applies. The allowance can be reconfigured via governance (see
-[fee parameters](../governance/fee-params.md)).
+Wallets receive a **monthly allowance of 100 NHB-sponsored transactions** that
+is shared across NHB and ZNHB transfers. Transactions that qualify for the free
+tier are debited against the sender's usage for the current UTC calendar month.
+Balances reset automatically at the start of each month. Once the allowance is
+exhausted the standard fee schedule applies. The allowance can be reconfigured
+via governance (see [fee parameters](../governance/fee-params.md)). Domains can
+opt into per-asset tracking, but the default aggregates both assets so the 100
+free transactions cover any combination of NHB and ZNHB activity.
 
 ### Eligibility
 
