@@ -113,6 +113,7 @@ type Pauses struct {
 	Trade        bool
 	Loyalty      bool
 	POTSO        bool
+	TransferNHB  bool
 	TransferZNHB bool
 }
 

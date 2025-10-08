@@ -12,6 +12,8 @@ import (
 const (
 	// TypeTransfer is emitted for native NHB and ZNHB balance movements.
 	TypeTransfer = "transfer.native"
+	// TypeTransferNHBBlocked is emitted when NHB transfers are rejected due to a governance pause.
+	TypeTransferNHBBlocked = "transfer.nhb.paused"
 	// TypeTransferZNHBBlocked is emitted when ZNHB transfers are rejected due to a governance pause.
 	TypeTransferZNHBBlocked = "transfer.znhb.paused"
 )
@@ -38,6 +40,42 @@ func (e Transfer) Event() *types.Event {
 		attrs["txHash"] = "0x" + strings.ToLower(hex.EncodeToString(e.TxHash[:]))
 	}
 	return &types.Event{Type: TypeTransfer, Attributes: attrs}
+}
+
+// TransferNHBBlocked captures rejected NHB transfers when the pause toggle is active.
+type TransferNHBBlocked struct {
+	Asset  string
+	From   [20]byte
+	To     [20]byte
+	Reason string
+	TxHash [32]byte
+}
+
+// EventType satisfies the Event interface.
+func (TransferNHBBlocked) EventType() string { return TypeTransferNHBBlocked }
+
+// Event converts the structured payload into a broadcastable event.
+func (e TransferNHBBlocked) Event() *types.Event {
+	attrs := map[string]string{}
+	if asset := normalizeAsset(e.Asset); asset != "" {
+		attrs["asset"] = asset
+	}
+	if !zeroAddress(e.From) {
+		attrs["from"] = crypto.MustNewAddress(crypto.NHBPrefix, e.From[:]).String()
+	}
+	if !zeroAddress(e.To) {
+		attrs["to"] = crypto.MustNewAddress(crypto.NHBPrefix, e.To[:]).String()
+	}
+	if reason := strings.TrimSpace(e.Reason); reason != "" {
+		attrs["reason"] = reason
+	}
+	if !zeroBytes(e.TxHash[:]) {
+		attrs["txHash"] = "0x" + strings.ToLower(hex.EncodeToString(e.TxHash[:]))
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	return &types.Event{Type: TypeTransferNHBBlocked, Attributes: attrs}
 }
 
 // TransferZNHBBlocked captures rejected ZNHB transfers when the pause toggle is active.
