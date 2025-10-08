@@ -14,8 +14,8 @@ unchanged.
 
 * Incoming transactions are classified at enqueue time by inspecting
   `transaction.IntentRef`.
-* POS-tagged transactions populate the priority lane; all others remain in the
-  normal lane.
+* POS-tagged NHB and ZNHB transfers populate the priority lane; all others
+  remain in the normal lane.
 * When a transaction with an `intent_ref` is admitted, the node records an
   enqueue timestamp so that finality latency can be measured when the
   transaction is committed.
@@ -44,6 +44,7 @@ New Prometheus metrics are exported under the `nhb_mempool` subsystem:
 | Metric | Type | Description |
 | --- | --- | --- |
 | `pos_lane_fill` | Gauge | POS backlog divided by reserved capacity (>1 = saturation; 0 reservation -> backlog). |
+| `pos_lane_backlog{asset="…"}` | Gauge | Count of POS-tagged transfers segmented by asset (e.g. `nhb`, `znhb`). |
 | `pos_tx_enqueued_total` | Counter | Number of POS-tagged transactions accepted into the mempool. |
 | `pos_p95_finality_ms` | Histogram | POS enqueue-to-finality latency samples in milliseconds (dashboards compute p95). |
 

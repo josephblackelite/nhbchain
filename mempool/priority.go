@@ -13,6 +13,41 @@ type Lanes struct {
 	Normal []*types.Transaction
 }
 
+const (
+	assetLabelNHB   = "nhb"
+	assetLabelZNHB  = "znhb"
+	assetLabelOther = "other"
+)
+
+// IsPOSLaneEligible reports whether the transaction should be routed through
+// the POS-priority lane. Only NHB and ZNHB transfers carrying a POS intent
+// qualify for the reserved scheduling window.
+func IsPOSLaneEligible(tx *types.Transaction) bool {
+	if tx == nil || len(tx.IntentRef) == 0 {
+		return false
+	}
+	switch tx.Type {
+	case types.TxTypeTransfer, types.TxTypeTransferZNHB:
+		return true
+	default:
+		return false
+	}
+}
+
+func assetLabel(tx *types.Transaction) string {
+	if tx == nil {
+		return assetLabelOther
+	}
+	switch tx.Type {
+	case types.TxTypeTransfer:
+		return assetLabelNHB
+	case types.TxTypeTransferZNHB:
+		return assetLabelZNHB
+	default:
+		return assetLabelOther
+	}
+}
+
 // Classify separates transactions into POS-priority and normal lanes based on
 // whether they carry an intent reference.
 func Classify(txs []*types.Transaction) Lanes {
@@ -21,7 +56,7 @@ func Classify(txs []*types.Transaction) Lanes {
 		if tx == nil {
 			continue
 		}
-		if len(tx.IntentRef) > 0 {
+		if IsPOSLaneEligible(tx) {
 			lanes.POS = append(lanes.POS, tx)
 			continue
 		}
@@ -41,6 +76,9 @@ type Usage struct {
 	Used int
 	// TotalPOS is the total number of POS transactions currently pending.
 	TotalPOS int
+	// POSByAsset captures the pending POS lane backlog segmented by asset
+	// label (e.g. nhb, znhb).
+	POSByAsset map[string]int
 }
 
 // Schedule interleaves the classified transactions so that the first maxTxs
@@ -97,10 +135,16 @@ func Schedule(lanes Lanes, maxTxs int, quota consensus.POSQuota) ([]*types.Trans
 	ordered = append(ordered, lanes.POS[posTake:]...)
 	ordered = append(ordered, lanes.Normal[normalTake:]...)
 
+	breakdown := make(map[string]int, len(lanes.POS))
+	for _, tx := range lanes.POS {
+		breakdown[assetLabel(tx)]++
+	}
+
 	usage := Usage{
-		Target:   target,
-		Used:     posTake,
-		TotalPOS: len(lanes.POS),
+		Target:     target,
+		Used:       posTake,
+		TotalPOS:   len(lanes.POS),
+		POSByAsset: breakdown,
 	}
 	return ordered, usage
 }
