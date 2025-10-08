@@ -93,6 +93,12 @@ func main() {
 			return
 		}
 		heartbeat(args[1])
+	case "send-znhb":
+		if len(args) < 4 {
+			fmt.Println("Usage: send-znhb <recipient> <amount> <key_file>")
+			return
+		}
+		sendZNHB(args[1], args[2], args[3])
 	case "deploy": // NEW: Handle the deploy command
 		if len(args) < 3 {
 			fmt.Println("Error: Please provide a bytecode file and a key file.")
@@ -367,6 +373,52 @@ func heartbeat(keyFile string) {
 	}
 
 	fmt.Println("Successfully sent heartbeat transaction.")
+}
+
+func sendZNHB(recipient, amountStr, keyFile string) {
+	privKey, err := loadPrivateKey(keyFile)
+	if err != nil {
+		fmt.Printf("Error loading private key: %v\n", err)
+		return
+	}
+	dest, err := crypto.DecodeAddress(recipient)
+	if err != nil {
+		fmt.Printf("Error parsing recipient address: %v\n", err)
+		return
+	}
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(amountStr), 10)
+	if !ok || amount.Sign() <= 0 {
+		fmt.Println("Error: Amount must be a positive integer.")
+		return
+	}
+
+	account, err := fetchAccount(privKey.PubKey().Address().String())
+	if err != nil {
+		fmt.Printf("Error fetching account details: %v\n", err)
+		return
+	}
+
+	tx := types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransferZNHB,
+		Nonce:    account.Nonce,
+		To:       dest.Bytes(),
+		Value:    amount,
+		GasLimit: 25000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(privKey.PrivateKey); err != nil {
+		fmt.Printf("Error signing transaction: %v\n", err)
+		return
+	}
+
+	if err := sendTransaction(&tx); err != nil {
+		fmt.Printf("Error sending ZNHB transfer: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Successfully sent %s ZNHB to %s.\n", amount.String(), recipient)
+	fmt.Println("The transfer consumes NHB gas; monitor the node for finalization.")
 }
 func generateKey() {
 	key, err := crypto.GeneratePrivateKey()
@@ -868,6 +920,7 @@ func printUsage() {
 	fmt.Println("  stake <amount> <path_to_key_file> - Stakes a specified amount of ZapNHB")
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
+	fmt.Println("  send-znhb <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
 	fmt.Println("  id                                 - Identity alias management subcommands")
 	fmt.Println("  escrow                             - Escrow management subcommands")

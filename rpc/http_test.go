@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"nhbchain/core"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
@@ -531,6 +532,101 @@ func TestHandleSendTransactionInvalidChainID(t *testing.T) {
 	}
 	if resp.Error.Code != codeInvalidParams {
 		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
+	}
+}
+
+func TestHandleSendTransactionAcceptsZNHBTransfer(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := core.NewNode(db, validatorKey, "", true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		if _, err := m.Token("ZNHB"); err != nil {
+			if regErr := m.RegisterToken("ZNHB", "ZapNHB", 18); regErr != nil && !strings.Contains(regErr.Error(), "already registered") {
+				return regErr
+			}
+		}
+		senderAccount := &types.Account{
+			BalanceNHB:  big.NewInt(1_000_000),
+			BalanceZNHB: big.NewInt(900),
+			Stake:       big.NewInt(0),
+		}
+		if err := m.PutAccount(senderAddr, senderAccount); err != nil {
+			return err
+		}
+		recipientAccount := &types.Account{
+			BalanceNHB:  big.NewInt(0),
+			BalanceZNHB: big.NewInt(0),
+			Stake:       big.NewInt(0),
+		}
+		return m.PutAccount(recipientAddr, recipientAccount)
+	}); err != nil {
+		t.Fatalf("seed accounts: %v", err)
+	}
+
+	server := NewServer(node, nil, ServerConfig{})
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransferZNHB,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(250),
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+
+	param, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatalf("marshal transaction: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{param}}
+	recorder := httptest.NewRecorder()
+
+	server.handleSendTransaction(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	msg, ok := resp.Result.(string)
+	if !ok {
+		t.Fatalf("expected string result, got %T", resp.Result)
+	}
+	if msg != "Transaction received by node." {
+		t.Fatalf("unexpected result message: %s", msg)
 	}
 }
 

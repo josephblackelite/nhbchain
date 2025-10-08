@@ -33,6 +33,7 @@ type TxType byte
 
 const (
 	TxTypeTransfer          TxType = 0x01 // A standard transfer of NHB
+	TxTypeTransferZNHB      TxType = 0x10 // A standard transfer of ZapNHB (ZNHB)
 	TxTypeRegisterIdentity  TxType = 0x02 // A transaction to claim a username
 	TxTypeCreateEscrow      TxType = 0x03 // Create escrow
 	TxTypeReleaseEscrow     TxType = 0x04 // NEW: Buyer releases funds to seller
