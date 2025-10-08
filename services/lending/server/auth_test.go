@@ -13,18 +13,25 @@ import (
 	"google.golang.org/grpc/status"
 
 	lendingv1 "nhbchain/proto/lending/v1"
-	"nhbchain/services/lendingd/config"
 )
 
+type testService struct {
+	lendingv1.UnimplementedLendingServiceServer
+}
+
+func (testService) GetMarket(context.Context, *lendingv1.GetMarketRequest) (*lendingv1.GetMarketResponse, error) {
+	return &lendingv1.GetMarketResponse{}, nil
+}
+
 func TestMsgRPCAuthentication(t *testing.T) {
-	cfg := config.AuthConfig{APITokens: []string{"secret-token"}}
+	cfg := AuthConfig{APITokens: []string{"secret-token"}}
 	unaryAuth, streamAuth := NewAuthInterceptors(cfg)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(unaryAuth),
 		grpc.ChainStreamInterceptor(streamAuth),
 	)
-	lendingv1.RegisterLendingServiceServer(grpcServer, New())
+	lendingv1.RegisterLendingServiceServer(grpcServer, testService{})
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -56,7 +63,7 @@ func TestMsgRPCAuthentication(t *testing.T) {
 
 	// Query-style RPCs remain accessible.
 	_, err = client.GetMarket(ctx, &lendingv1.GetMarketRequest{})
-	if status.Code(err) != codes.Unimplemented {
+	if status.Code(err) != codes.OK {
 		t.Fatalf("expected query RPC to reach handler, got %v", err)
 	}
 

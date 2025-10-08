@@ -72,7 +72,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure tls: %v", err)
 	}
-	unaryAuth, streamAuth := lendingserver.NewAuthInterceptors(cfg.Auth)
+	authCfg := lendingserver.AuthConfig{
+		APITokens:        cfg.Auth.APITokens,
+		AllowedClientCNs: cfg.Auth.MTLS.AllowedCommonNames,
+		MTLSRequired:     cfg.TLS.MTLSEnabled(),
+	}
+	unaryAuth, streamAuth := lendingserver.NewAuthInterceptors(authCfg)
 
 	unaryChain := grpc.ChainUnaryInterceptor(
 		otelgrpc.UnaryServerInterceptor(),
@@ -88,7 +93,7 @@ func main() {
 	}
 	grpcServer := grpc.NewServer(options...)
 
-	service := lendingserver.New()
+	service := lendingserver.New(nil, nil, nil)
 	lendingv1.RegisterLendingServiceServer(grpcServer, service)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
