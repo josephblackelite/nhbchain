@@ -19,7 +19,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"gopkg.in/yaml.v3"
 
 	"nhbchain/network"
 	"nhbchain/observability/logging"
@@ -27,20 +26,6 @@ import (
 	lendingv1 "nhbchain/proto/lending/v1"
 	lendingserver "nhbchain/services/lending/server"
 )
-
-const (
-	tlsCertEnv       = "LENDINGD_TLS_CERT"
-	tlsKeyEnv        = "LENDINGD_TLS_KEY"
-	tlsClientCAEnv   = "LENDINGD_TLS_CLIENT_CA"
-	tlsAllowInsecure = "LENDINGD_TLS_ALLOW_INSECURE"
-	authSecretEnv    = "LENDINGD_AUTH_SHARED_SECRET"
-	authHeaderEnv    = "LENDINGD_AUTH_HEADER"
-	authAllowedCNEnv = "LENDINGD_AUTH_ALLOWED_CNS"
-)
-
-type Config struct {
-	ListenAddress string `yaml:"listen"`
-}
 
 type stringListFlag struct {
 	values []string
@@ -83,54 +68,31 @@ func (f *stringListFlag) Values() []string {
 	return out
 }
 
-func loadConfig(path string) (Config, error) {
-	cfg := Config{ListenAddress: ":50053"}
-	if path == "" {
-		return cfg, fmt.Errorf("config path required")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("open config: %w", err)
-	}
-	defer file.Close()
-	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	if cfg.ListenAddress == "" {
-		cfg.ListenAddress = ":50053"
-	}
-	return cfg, nil
-}
-
 func main() {
-	var cfgPath string
-	flag.StringVar(&cfgPath, "config", "services/lending/config.yaml", "path to lendingd config")
+	cfg := LoadConfigFromEnv()
 
-	certDefault := stringFromEnv(tlsCertEnv, "")
-	keyDefault := stringFromEnv(tlsKeyEnv, "")
-	clientCADefault := stringFromEnv(tlsClientCAEnv, "")
-	allowInsecureDefault := boolFromEnv(tlsAllowInsecure, false)
-	sharedSecretDefault := stringFromEnv(authSecretEnv, "")
-	headerDefault := stringFromEnv(authHeaderEnv, "authorization")
-	allowedCNDefault := strings.Split(stringFromEnv(authAllowedCNEnv, ""), ",")
+	flag.StringVar(&cfg.NodeRPCURL, "node-rpc-url", cfg.NodeRPCURL, "URL for the node RPC endpoint")
+	flag.StringVar(&cfg.NodeRPCToken, "node-rpc-token", cfg.NodeRPCToken, "bearer token for node RPC requests")
+	flag.StringVar(&cfg.SharedSecretHeader, "shared-secret-header", cfg.SharedSecretHeader, "metadata header carrying the shared secret")
+	flag.StringVar(&cfg.SharedSecretValue, "shared-secret", cfg.SharedSecretValue, "shared secret required for token authentication")
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "path to the TLS certificate for lendingd")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "path to the TLS private key for lendingd")
+	flag.StringVar(&cfg.TLSClientCAFile, "tls-client-ca", cfg.TLSClientCAFile, "path to the client CA bundle for mTLS")
+	flag.BoolVar(&cfg.AllowInsecure, "allow-insecure", cfg.AllowInsecure, "allow lendingd to listen without TLS (development only)")
+	flag.StringVar(&cfg.Listen, "listen", cfg.Listen, "address for lendingd to listen on")
+	flag.IntVar(&cfg.RateLimitPerMin, "rate-limit-per-min", cfg.RateLimitPerMin, "maximum number of requests per minute")
+	flag.BoolVar(&cfg.MTLSRequired, "mtls-required", cfg.MTLSRequired, "require mutual TLS for authentication")
 
-	var tlsCertPath, tlsKeyPath, tlsClientCAPath string
-	flag.StringVar(&tlsCertPath, "tls-cert", certDefault, "path to the TLS certificate for lendingd")
-	flag.StringVar(&tlsKeyPath, "tls-key", keyDefault, "path to the TLS private key for lendingd")
-	flag.StringVar(&tlsClientCAPath, "tls-client-ca", clientCADefault, "path to the client CA bundle for mTLS")
-
-	var allowInsecure bool
-	flag.BoolVar(&allowInsecure, "tls-allow-insecure", allowInsecureDefault, "allow lendingd to listen without TLS (development only)")
-
-	var sharedSecret, authHeader string
-	flag.StringVar(&sharedSecret, "auth-shared-secret", sharedSecretDefault, "shared secret required for token authentication")
-	flag.StringVar(&authHeader, "auth-header", headerDefault, "metadata header carrying the shared secret token")
-
-	allowedCNFlag := newStringListFlag(allowedCNDefault)
+	allowedCNFlag := newStringListFlag(cfg.AllowedClientCNs)
 	flag.Var(allowedCNFlag, "mtls-allowed-cn", "allowed client certificate common name (repeatable)")
 
 	flag.Parse()
+
+	cfg.AllowedClientCNs = allowedCNFlag.Values()
+
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
 	logging.Setup("lendingd", env)
@@ -160,27 +122,27 @@ func main() {
 		}
 	}()
 
-	cfg, err := loadConfig(cfgPath)
-	if err != nil {
-		log.Fatalf("load config: %v", err)
-	}
+	log.Printf("effective config: %+v", cfg.Sanitized())
 
-	listener, err := net.Listen("tcp", cfg.ListenAddress)
+	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
-		log.Fatalf("listen on %s: %v", cfg.ListenAddress, err)
+		log.Fatalf("listen on %s: %v", cfg.Listen, err)
 	}
-	creds, mtlsEnabled, err := buildServerCredentials(tlsCertPath, tlsKeyPath, tlsClientCAPath, allowInsecure)
+	creds, mtlsEnabled, err := buildServerCredentials(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSClientCAFile, cfg.AllowInsecure)
 	if err != nil {
 		log.Fatalf("configure tls: %v", err)
 	}
 
-	allowedCommonNames := allowedCNFlag.Values()
+	allowedCommonNames := cfg.AllowedClientCNs
 	if len(allowedCommonNames) > 0 && !mtlsEnabled {
 		log.Fatalf("mTLS allowed common names require a client CA bundle")
 	}
+	if cfg.MTLSRequired && !mtlsEnabled {
+		log.Fatalf("mTLS is required but no client CA was provided")
+	}
 
 	var authenticators []network.Authenticator
-	if auth := network.NewTokenAuthenticator(authHeader, sharedSecret); auth != nil {
+	if auth := network.NewTokenAuthenticator(cfg.SharedSecretHeader, cfg.SharedSecretValue); auth != nil {
 		authenticators = append(authenticators, auth)
 	}
 	if mtlsEnabled {
@@ -203,7 +165,7 @@ func main() {
 			otelgrpc.StreamServerInterceptor(),
 		),
 	)
-	service := lendingserver.New()
+	service := lendingserver.New(nil, nil, authChain)
 	lendingv1.RegisterLendingServiceServer(grpcServer, service)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -211,7 +173,7 @@ func main() {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("lendingd listening on %s", cfg.ListenAddress)
+		log.Printf("lendingd listening on %s", cfg.Listen)
 		serverErr <- grpcServer.Serve(listener)
 	}()
 
@@ -278,27 +240,6 @@ func buildServerCredentials(certPath, keyPath, clientCAPath string, allowInsecur
 	case allowInsecure:
 		return insecure.NewCredentials(), false, nil
 	default:
-		return nil, false, fmt.Errorf("tls certificate and key are required unless --tls-allow-insecure is set")
+		return nil, false, fmt.Errorf("tls certificate and key are required unless --allow-insecure is set")
 	}
-}
-
-func stringFromEnv(key, fallback string) string {
-	trimmed := strings.TrimSpace(os.Getenv(key))
-	if trimmed == "" {
-		return fallback
-	}
-	return trimmed
-}
-
-func boolFromEnv(key string, fallback bool) bool {
-	trimmed := strings.TrimSpace(os.Getenv(key))
-	if trimmed == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(trimmed)
-	if err != nil {
-		log.Printf("invalid boolean value for %s: %q, using default %v", key, trimmed, fallback)
-		return fallback
-	}
-	return parsed
 }

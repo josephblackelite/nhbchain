@@ -52,7 +52,7 @@ func TestLendingServerRejectsInsecureAndUnauthenticated(t *testing.T) {
 		grpc.ChainUnaryInterceptor(unaryAuth),
 		grpc.ChainStreamInterceptor(streamAuth),
 	)
-	lendingv1.RegisterLendingServiceServer(server, lendingserver.New())
+	lendingv1.RegisterLendingServiceServer(server, lendingserver.New(nil, nil, auth))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
