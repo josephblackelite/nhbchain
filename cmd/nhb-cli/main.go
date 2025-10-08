@@ -93,6 +93,11 @@ func main() {
 			return
 		}
 		heartbeat(args[1])
+	case "send-nhb":
+		if code := runSendNHBCommand(args[1:]); code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "send-znhb":
 		if code := runSendZNHBCommand(args[1:]); code != 0 {
 			os.Exit(code)
