@@ -54,8 +54,9 @@ const unbondingPeriod = 72 * time.Hour
 const defaultIntentTTL = 24 * time.Hour
 
 var (
-	ErrNonceMismatch  = errors.New("transaction nonce mismatch")
-	ErrInvalidChainID = errors.New("invalid chain id")
+	ErrNonceMismatch      = errors.New("transaction nonce mismatch")
+	ErrInvalidChainID     = errors.New("invalid chain id")
+	ErrTransferZNHBPaused = errors.New("znhb transfer: paused")
 )
 
 var (
@@ -1116,7 +1117,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	}
 	if err != nil {
-		if len(sp.events) > start {
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -1465,6 +1466,10 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	if sp == nil || tx == nil {
 		return nil, fmt.Errorf("znhb transfer: state unavailable")
 	}
+	if sp.pauses != nil && sp.pauses.IsPaused(moduleTransferZNHB) {
+		sp.emitTransferZNHBBlocked(tx, sender, "paused by governance")
+		return nil, ErrTransferZNHBPaused
+	}
 	if len(tx.To) != common.AddressLength {
 		return nil, fmt.Errorf("znhb transfer: recipient address required")
 	}
@@ -1544,6 +1549,28 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 		metrics.RecordTransfer("ZNHB")
 	}
 	return &SimulationResult{}, nil
+}
+
+func (sp *StateProcessor) emitTransferZNHBBlocked(tx *types.Transaction, sender []byte, reason string) {
+	if sp == nil || tx == nil {
+		return
+	}
+	evt := events.TransferZNHBBlocked{
+		Asset:  "ZNHB",
+		Reason: strings.TrimSpace(reason),
+	}
+	if len(sender) == len(evt.From) {
+		copy(evt.From[:], sender)
+	}
+	if len(tx.To) == len(evt.To) {
+		copy(evt.To[:], tx.To)
+	}
+	if hash, err := tx.Hash(); err == nil && len(hash) == len(evt.TxHash) {
+		copy(evt.TxHash[:], hash)
+	}
+	if payload := evt.Event(); payload != nil {
+		sp.AppendEvent(payload)
+	}
 }
 
 func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {

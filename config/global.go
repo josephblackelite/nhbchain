@@ -93,3 +93,8 @@ func (g Global) PaymasterAutoTopUpConfig() (PaymasterAutoTopUpConfig, error) {
 
 	return cfg, nil
 }
+
+// TransferZNHBPaused reports whether direct ZNHB transfers are currently disabled via governance.
+func (g Global) TransferZNHBPaused() bool {
+	return g.Pauses.TransferZNHB
+}

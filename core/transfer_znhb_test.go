@@ -1,15 +1,29 @@
 package core
 
 import (
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 
+	coreevents "nhbchain/core/events"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 )
+
+type pauseViewStub struct {
+	modules map[string]bool
+}
+
+func (s pauseViewStub) IsPaused(module string) bool {
+	if len(s.modules) == 0 {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(module))
+	return s.modules[normalized]
+}
 
 func TestApplyTransferZNHB(t *testing.T) {
 	sp := newStakingStateProcessor(t)
@@ -227,6 +241,117 @@ func TestApplyTransferZNHB_ZeroValueRejected(t *testing.T) {
 
 	if err := sp.ApplyTransaction(tx); err == nil || !strings.Contains(err.Error(), "amount must be positive") {
 		t.Fatalf("expected positive amount error, got %v", err)
+	}
+}
+
+func TestApplyTransferZNHB_Paused(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetPauseView(pauseViewStub{modules: map[string]bool{moduleTransferZNHB: true}})
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	if err := sp.setAccount(senderAddr, &types.Account{BalanceZNHB: big.NewInt(1_000)}); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceZNHB: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID: types.NHBChainID(),
+		Type:    types.TxTypeTransferZNHB,
+		To:      append([]byte(nil), recipientAddr...),
+		Value:   big.NewInt(100),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+
+	err = sp.ApplyTransaction(tx)
+	if !errors.Is(err, ErrTransferZNHBPaused) {
+		t.Fatalf("expected ErrTransferZNHBPaused, got %v", err)
+	}
+
+	gotEvents := sp.Events()
+	if len(gotEvents) == 0 {
+		t.Fatalf("expected transfer pause event, got none")
+	}
+	evt := gotEvents[len(gotEvents)-1]
+	if evt.Type != coreevents.TypeTransferZNHBBlocked {
+		t.Fatalf("expected %s event, got %s", coreevents.TypeTransferZNHBBlocked, evt.Type)
+	}
+	if asset := evt.Attributes["asset"]; asset != "ZNHB" {
+		t.Fatalf("expected asset ZNHB, got %s", asset)
+	}
+	if reason := evt.Attributes["reason"]; !strings.Contains(reason, "paused") {
+		t.Fatalf("expected pause reason, got %s", reason)
+	}
+}
+
+func TestTransferNHBNotAffectedByZNHBPause(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetPauseView(pauseViewStub{modules: map[string]bool{moduleTransferZNHB: true}})
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	senderAccount := &types.Account{BalanceNHB: big.NewInt(1_000_000_000_000)}
+	if err := sp.setAccount(senderAddr, senderAccount); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceNHB: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(1_000),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1_000_000_000),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply NHB transfer: %v", err)
+	}
+
+	recipientAccount, err := sp.getAccount(recipientAddr)
+	if err != nil {
+		t.Fatalf("load recipient: %v", err)
+	}
+	if recipientAccount.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected recipient to receive 1000 NHB, got %s", recipientAccount.BalanceNHB)
+	}
+	updatedSender, err := sp.getAccount(senderAddr)
+	if err != nil {
+		t.Fatalf("load sender: %v", err)
+	}
+	if updatedSender.Nonce != 1 {
+		t.Fatalf("expected sender nonce incremented, got %d", updatedSender.Nonce)
 	}
 }
 

@@ -134,6 +134,7 @@ const (
 	moduleTrade            = "trade"
 	moduleLoyalty          = "loyalty"
 	modulePotso            = "potso"
+	moduleTransferZNHB     = "transfer_znhb"
 )
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
@@ -419,6 +420,7 @@ func (n *Node) SetModulePauses(pauses config.Pauses) {
 	n.modulePauses[moduleTrade] = pauses.Trade
 	n.modulePauses[moduleLoyalty] = pauses.Loyalty
 	n.modulePauses[modulePotso] = pauses.POTSO
+	n.modulePauses[moduleTransferZNHB] = pauses.TransferZNHB
 	n.modulePauseMu.Unlock()
 	if n.state != nil {
 		n.state.SetPauseView(n)
@@ -660,12 +662,13 @@ func (n *Node) globalConfigSnapshot() config.Global {
 		Mempool: config.Mempool{MaxBytes: n.globalCfg.Mempool.MaxBytes, POSReservationBPS: n.globalCfg.Mempool.POSReservationBPS},
 		Blocks:  config.Blocks{MaxTxs: n.globalCfg.Blocks.MaxTxs},
 		Pauses: config.Pauses{
-			Lending: n.globalCfg.Pauses.Lending,
-			Swap:    n.globalCfg.Pauses.Swap,
-			Escrow:  n.globalCfg.Pauses.Escrow,
-			Trade:   n.globalCfg.Pauses.Trade,
-			Loyalty: n.globalCfg.Pauses.Loyalty,
-			POTSO:   n.globalCfg.Pauses.POTSO,
+			Lending:      n.globalCfg.Pauses.Lending,
+			Swap:         n.globalCfg.Pauses.Swap,
+			Escrow:       n.globalCfg.Pauses.Escrow,
+			Trade:        n.globalCfg.Pauses.Trade,
+			Loyalty:      n.globalCfg.Pauses.Loyalty,
+			POTSO:        n.globalCfg.Pauses.POTSO,
+			TransferZNHB: n.globalCfg.Pauses.TransferZNHB,
 		},
 		Quotas: config.Quotas{
 			Lending: n.globalCfg.Quotas.Lending,
