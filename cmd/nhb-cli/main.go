@@ -62,18 +62,12 @@ func main() {
 			return
 		}
 		claimUsername(args[1], args[2])
-	case "stake": // NEW: Handle the stake command
-		if len(args) < 3 {
-			fmt.Println("Error: Please provide an amount and a key file.")
-			printUsage()
-			return
+	case "stake":
+		code := runStakeCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
 		}
-		amount, err := strconv.ParseInt(args[1], 10, 64)
-		if err != nil {
-			fmt.Println("Error: Invalid amount.")
-			return
-		}
-		stake(amount, args[2])
+		return
 	case "un-stake": // NEW: Handle the un-stake command
 		if len(args) < 3 {
 			fmt.Println("Error: Please provide an amount and a key file.")
@@ -877,8 +871,11 @@ func printUsage() {
 	fmt.Println("  generate-key                      - Generates a new key and saves to wallet.key")
 	fmt.Println("  balance <address>                 - Checks the balance and stake of an address")
 	fmt.Println("  claim-username <username> <key_file>     - Claims a unique username for your wallet") // NEW LINE
-	fmt.Println("  stake <amount> <path_to_key_file> - Stakes a specified amount of ZapNHB")
-	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stakes a specified amount of ZapNHB")
+	fmt.Println("  stake position <address>          - Show staking share metadata for an address")
+	fmt.Println("  stake preview <address>           - Preview claimable staking rewards and timing")
+	fmt.Println("  stake claim [--compound] <key_file> - Claim staking rewards and optionally restake")
+	fmt.Println("  stake <amount> <path_to_key_file> - (legacy) stake a specified amount of ZapNHB")
+	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stake a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
 	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
