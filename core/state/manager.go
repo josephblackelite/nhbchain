@@ -122,6 +122,37 @@ var (
 	feesTotalsIndexPrefix          = []byte("fees/totals/index/")
 )
 
+// StakingGlobalIndexKey returns the deterministic storage key for the global
+// staking index accumulator. The value stored at this key represents the
+// protocol-wide reward index used to calculate user shares.
+func StakingGlobalIndexKey() []byte {
+	return append([]byte(nil), stakingGlobalIndexKeyBytes...)
+}
+
+// StakingLastIndexUpdateTsKey resolves the key storing the block timestamp
+// (uint64 seconds) when the global staking index was most recently updated.
+func StakingLastIndexUpdateTsKey() []byte {
+	return append([]byte(nil), stakingLastIndexUpdateTsKeyByte...)
+}
+
+// StakingEmissionYTDKey constructs the year-scoped key for tracking staking
+// emissions produced within a calendar year. The year is encoded in
+// zero-padded decimal form to keep lexicographic ordering stable across
+// clients.
+func StakingEmissionYTDKey(year uint32) []byte {
+	return []byte(fmt.Sprintf(stakingEmissionYTDKeyFormat, year))
+}
+
+// StakingAcctKey composes the storage key holding a snapshot of a delegator's
+// staking metadata. Account addresses are appended verbatim to avoid encoding
+// ambiguity across clients.
+func StakingAcctKey(addr []byte) []byte {
+	key := make([]byte, len(stakingAccountPrefix)+len(addr))
+	copy(key, stakingAccountPrefix)
+	copy(key[len(stakingAccountPrefix):], addr)
+	return key
+}
+
 // GovernanceProposalKey constructs the storage key for the proposal metadata
 // record under the governance namespace. Proposal identifiers are formatted in
 // decimal to align with human-facing tooling and avoid accidental prefix
