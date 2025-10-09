@@ -2,11 +2,11 @@
 
 This document describes the ZapNHB staking pipeline, on-chain state layout, JSON-RPC surface, and emitted events following the introduction of delegation, unbonding, and claim flows. It is intended for auditors, investors, developers, end users, and regulators who require a comprehensive view of the staking module.
 
-> ⚠️ **Preview / Disabled:** ZapNHB staking has not yet been activated on any public network. All RPC workflows documented below will return `codeFeatureDisabled` until governance ratifies the staking program and executes the enabling proposal. Monitor the [Governance Lifecycle overview](../governance/overview.md#proposal-intake) for the ratification proposal and activation announcement.
+> ℹ️ **Activation and pause control:** Staking is now live on supported networks. Governance manages availability via the `staking.pause.enabled` toggle described in the [governance parameter catalog](../governance/params.md#staking-pause-enabled). When the corresponding `system/pauses` entry reports `staking = false`, delegation, undelegation, and claims are accepted. Operators can unpause the module by executing `gov.v1/MsgSetPauses` with `pauses.staking = false` and can temporarily halt flows by flipping the same flag back to `true`.
 
 ## Overview
 
-Once governance activates the program, stakeholders will be able to lock ZapNHB (ZNHB) balances, optionally delegate voting power to validators, and later queue withdrawals through an unbonding period before claiming their tokens. Rewards accrue at a **fixed 12.5% annual percentage rate (APR)** that is **non-compounding**—each reward period mints a linear share of the annual budget using a global reward index instead of rolling previous interest into the next cycle. Payouts settle on a **30-day interval** (2,592,000 seconds) aligned to the first reward minted after activation. The staking module supports:
+Stakeholders can lock ZapNHB (ZNHB) balances, optionally delegate voting power to validators, and later queue withdrawals through an unbonding period before claiming their tokens. Rewards accrue at a **fixed 12.5% annual percentage rate (APR)** that is **non-compounding**—each reward period mints a linear share of the annual budget using a global reward index instead of rolling previous interest into the next cycle. Payouts settle on a **30-day interval** (2,592,000 seconds) aligned to the first reward minted after activation. The staking module supports:
 
 - Self-staking and third-party delegation with validator power tracking.
 - Deterministic unbonding queues per delegator with a 72-hour release window.
@@ -103,11 +103,11 @@ Entries are appended when `StakeUndelegate` is invoked and removed upon successf
 }
 ```
 
-While staking is disabled, balances for accounts without historical delegations continue to show zeroed staking fields and no pending unbonds. The RPC surface preserves the schema so integrators can build against the final shape without conditional parsing.
+When a caller has never delegated the staking fields remain zeroed, but the schema is always present so integrators can rely on a consistent payload. If governance pauses staking, read-only calls such as `nhb_getBalance` continue to succeed while mutations return `codeModulePaused`.
 
 ### `stake_delegate`
 
-Delegates ZNHB and optionally selects a validator. While staking remains disabled, the RPC endpoint immediately rejects submissions with `codeFeatureDisabled`.
+Delegates ZNHB and optionally selects a validator. When governance pauses the module the RPC endpoint returns `codeModulePaused`; otherwise it responds with the caller's updated balances.
 
 - **Method**: `stake_delegate`
 - **Auth**: Required (same token as `nhb_sendTransaction`).
@@ -121,18 +121,20 @@ Delegates ZNHB and optionally selects a validator. While staking remains disable
 }
 ```
 
-- **Result (disabled preview)**:
+- **Result**:
 
 ```json
 {
-  "error": {
-    "code": "codeFeatureDisabled",
-    "message": "staking delegation is unavailable until governance activates the module"
-  }
+  "address": "nhb1delegator...",
+  "balanceZNHB": "9500",
+  "stake": "500",
+  "lockedZNHB": "500",
+  "delegatedValidator": "nhb1validator...",
+  "pendingUnbonds": []
 }
 ```
 
-Companion CLI example (available once staking launches):
+Companion CLI example:
 
 ```bash
 nhbctl stake delegate \
@@ -143,7 +145,7 @@ nhbctl stake delegate \
 
 ### `stake_undelegate`
 
-Queues an unbonding entry for the caller. During the preview phase the method returns the same disabled error code shown above.
+Queues an unbonding entry for the caller. Responses include the generated unbond ID and its release timestamp. When staking is paused the RPC responds with `codeModulePaused`.
 
 - **Method**: `stake_undelegate`
 - **Params**:
@@ -155,9 +157,18 @@ Queues an unbonding entry for the caller. During the preview phase the method re
 }
 ```
 
-- **Result (disabled preview)**: Identical to the delegation error payload until the module is enabled.
+- **Result**:
 
-CLI preview (returns an error until activation):
+```json
+{
+  "id": 12,
+  "validator": "nhb1validator...",
+  "amount": "500",
+  "releaseTime": 1700003600
+}
+```
+
+CLI example:
 
 ```bash
 nhbctl stake undelegate \
@@ -167,7 +178,7 @@ nhbctl stake undelegate \
 
 ### `stake_claim`
 
-Claims a matured unbond entry and returns both the claimed metadata and updated balances. As with the other endpoints, the disabled preview currently rejects requests with `codeFeatureDisabled`.
+Claims a matured unbond entry and returns both the claimed metadata and updated balances. Claims made before the release timestamp are rejected, and paused networks return `codeModulePaused`.
 
 - **Method**: `stake_claim`
 - **Params**:
@@ -179,7 +190,24 @@ Claims a matured unbond entry and returns both the claimed metadata and updated 
 }
 ```
 
-- **Result (disabled preview)**: Identical to the delegation error payload until activation.
+- **Result**:
+
+```json
+{
+  "claimed": {
+    "id": 12,
+    "validator": "nhb1validator...",
+    "amount": "500",
+    "releaseTime": 1700003600
+  },
+  "balance": {
+    "address": "nhb1delegator...",
+    "balanceZNHB": "10000",
+    "stake": "500",
+    "lockedZNHB": "500"
+  }
+}
+```
 
 CLI counterpart:
 
@@ -189,9 +217,9 @@ nhbctl stake claim \
   --unbonding-id 2
 ```
 
-### `stake_getRewardPreview`
+### `stake_previewClaim`
 
-The read-only method `stake_getRewardPreview` reveals the current monthly payout window for a delegator. Responses include the global reward index, the delegator index, the next payout timestamp (every 30 days from activation), and the projected emission based on the non-compounding model. The request follows the same authentication rules as `nhb_getBalance`.
+The read-only method `stake_previewClaim` reveals the current monthly payout window for a delegator. Responses include the projected emission for the next period, the reward indexes, and the timestamp when rewards become claimable. The request follows the same authentication rules as `nhb_getBalance`.
 
 ```json
 {
@@ -207,7 +235,7 @@ nhbctl stake rewards --from nhb1delegator...
 
 ### Error Semantics
 
-- Calls made before activation return `codeFeatureDisabled` with contextual messaging so integrators can surface the blocked state to users.
+- Calls made while governance has toggled `staking.pause.enabled = true` return `codeModulePaused` with contextual messaging so integrators can surface the blocked state to users.
 - Invalid amounts (`<= 0`) trigger `codeInvalidParams`.
 - Switching validators without fully removing existing delegation returns a descriptive error.
 - Claims before maturity return `unbonding entry is not yet claimable` messages.
@@ -220,7 +248,7 @@ nhbctl stake rewards --from nhb1delegator...
 | `stake.undelegated` | `delegator`, `validator`, `amount`, `releaseTime`, `unbondingId` | Signals the start of an unbonding period. |
 | `stake.claimed` | `delegator`, `validator`, `amount`, `unbondingId` | Indicates matured stake reclaimed by the delegator. |
 
-These events are added to the existing node event stream so external observers and webhook infrastructure receive timely updates. They remain dormant until governance activates the staking module.
+These events stream through the existing node event feed so external observers and webhook infrastructure receive timely updates. When governance pauses staking, `stake.paused` events accompany rejected mutations to document the reason.
 
 ## Operational Considerations (Regulators & Investors)
 
@@ -231,9 +259,9 @@ These events are added to the existing node event stream so external observers a
 
 ## User Experience Notes (End Users)
 
-1. Use `stake_delegate` (or the CLI `stake` command) to lock ZNHB and optionally support a validator once enabled. During the preview period the command returns `codeFeatureDisabled`.
-2. Monitor `nhb_getBalance` or the CLI `balance` command to view locked stake, delegation target, and pending unbonds after launch; until activation the response omits staking data for accounts without historical delegations.
-3. Initiate withdrawals with `stake_undelegate`. Tokens become claimable after ~72 hours. In the disabled state, the CLI mirrors the RPC error payload described above.
-4. Complete the process with `stake_claim` to restore ZNHB to the liquid balance when claims are supported. Prior to activation the command returns `codeFeatureDisabled`.
+1. Use `stake_delegate` (or the CLI `stake` command) to lock ZNHB and optionally support a validator. If the network is paused you will receive `codeModulePaused` until governance resumes the module.
+2. Monitor `nhb_getBalance` or the CLI `balance` command to view locked stake, delegation target, and pending unbonds. Accounts without historical delegations still return zeroed staking fields.
+3. Initiate withdrawals with `stake_undelegate`. Tokens become claimable after ~72 hours; attempts before then are rejected.
+4. Complete the process with `stake_claim` to restore ZNHB to the liquid balance once the release time has elapsed.
 
 This flow ensures a predictable staking lifecycle with observable state transitions for all stakeholders.

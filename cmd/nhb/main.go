@@ -20,8 +20,10 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/core"
 	"nhbchain/core/genesis"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
+	nativeparams "nhbchain/native/params"
 	swap "nhbchain/native/swap"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
@@ -135,6 +137,12 @@ func main() {
 	node.SetGlobalConfig(cfg.Global)
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
+	node.SetModulePauses(cfg.Global.Pauses)
+	if !cfg.Global.Pauses.Staking {
+		if err := ensureStakingPauseCleared(node); err != nil {
+			panic(fmt.Sprintf("Failed to clear staking pause: %v", err))
+		}
+	}
 
 	if err := node.SyncStakingParams(); err != nil {
 		panic(fmt.Sprintf("Failed to apply staking params: %v", err))
@@ -594,6 +602,27 @@ func (a *p2pNetworkAdapter) Ban(ctx context.Context, nodeID string, duration tim
 		return fmt.Errorf("p2p server unavailable")
 	}
 	return a.server.BanPeer(nodeID, duration)
+}
+
+func ensureStakingPauseCleared(node *core.Node) error {
+	if node == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	return node.WithState(func(manager *nhbstate.Manager) error {
+		store := nativeparams.NewStore(manager)
+		pauses, err := store.Pauses()
+		if err != nil {
+			return fmt.Errorf("load staking pause state: %w", err)
+		}
+		if !pauses.Staking {
+			return nil
+		}
+		pauses.Staking = false
+		if err := store.SetPauses(pauses); err != nil {
+			return fmt.Errorf("persist staking pause state: %w", err)
+		}
+		return nil
+	})
 }
 
 func loadFromKMS(cfg *config.Config) (*crypto.PrivateKey, error) {
