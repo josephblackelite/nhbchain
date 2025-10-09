@@ -64,7 +64,11 @@ var (
 	ErrInvalidChainID     = errors.New("invalid chain id")
 	ErrTransferNHBPaused  = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused = errors.New("znhb transfer: paused")
+	// ErrStakePaused indicates governance has paused staking mutations.
+	ErrStakePaused = errors.New("staking: module paused")
 )
+
+const stakePauseReasonGovernance = "paused by governance"
 
 var (
 	accountMetadataPrefix = []byte("account-meta:")
@@ -2112,6 +2116,13 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("stake must be positive")
 	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(delegator, events.StakeOperationDelegate, 0)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
+	}
 	target := validator
 	if len(target) == 0 {
 		target = append([]byte(nil), delegator...)
@@ -2209,6 +2220,13 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("unstake must be positive")
+	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(delegator, events.StakeOperationUndelegate, 0)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
 	}
 	index, err := sp.advanceStakeRewards()
 	if err != nil {
@@ -2320,6 +2338,13 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 	if unbondID == 0 {
 		return nil, fmt.Errorf("unbondingId must be greater than zero")
 	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(delegator, events.StakeOperationClaim, unbondID)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
+	}
 	currentIndex, err := sp.advanceStakeRewards()
 	if err != nil {
 		return nil, err
@@ -2378,6 +2403,13 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	if len(addr) == 0 {
 		return nil, fmt.Errorf("staking rewards: address required")
+	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(addr, events.StakeOperationClaimRewards, 0)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
 	}
 	account, err := sp.getAccount(addr)
 	if err != nil {
@@ -4094,6 +4126,21 @@ func (sp *StateProcessor) AppendEvent(evt *types.Event) {
 		attrs[k] = v
 	}
 	sp.events = append(sp.events, types.Event{Type: evt.Type, Attributes: attrs})
+}
+
+func (sp *StateProcessor) emitStakePaused(addr []byte, operation string, unbondID uint64) {
+	if sp == nil {
+		return
+	}
+	payload := events.StakePaused{
+		Operation:   operation,
+		Reason:      stakePauseReasonGovernance,
+		UnbondingID: unbondID,
+	}
+	if len(addr) > 0 {
+		payload.Account = bytesToAddress(addr)
+	}
+	sp.AppendEvent(payload.Event())
 }
 
 func (sp *StateProcessor) Events() []types.Event {

@@ -2,14 +2,18 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
 	"time"
 
+	"nhbchain/core"
 	"nhbchain/crypto"
 )
+
+const stakingModulePausedMessage = "staking module paused"
 
 type stakeDelegateParams struct {
 	Caller    string `json:"caller"`
@@ -94,6 +98,10 @@ func (s *Server) handleStakeDelegate(w http.ResponseWriter, r *http.Request, req
 	}
 	account, err := s.node.StakeDelegate(callerAddr, amount, validatorPtr)
 	if err != nil {
+		if errors.Is(err, core.ErrStakePaused) {
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to delegate stake", err.Error())
 		return
 	}
@@ -127,6 +135,10 @@ func (s *Server) handleStakeUndelegate(w http.ResponseWriter, r *http.Request, r
 	}
 	unbond, err := s.node.StakeUndelegate(callerAddr, amount)
 	if err != nil {
+		if errors.Is(err, core.ErrStakePaused) {
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to undelegate", err.Error())
 		return
 	}
@@ -163,6 +175,10 @@ func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *R
 	}
 	claimed, err := s.node.StakeClaim(callerAddr, params.UnbondingID)
 	if err != nil {
+		if errors.Is(err, core.ErrStakePaused) {
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim stake", err.Error())
 		return
 	}
@@ -201,6 +217,10 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 	}
 	minted, err := s.node.StakeClaimRewards(addr)
 	if err != nil {
+		if errors.Is(err, core.ErrStakePaused) {
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim staking rewards", err.Error())
 		return
 	}
@@ -312,7 +332,7 @@ func (s *Server) guardStakeRequest(w http.ResponseWriter, r *http.Request, req *
 		return time.Time{}, false
 	}
 	if s.node.IsPaused("staking") {
-		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "staking module paused", nil)
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
 		return time.Time{}, false
 	}
 	source := s.clientSource(r)

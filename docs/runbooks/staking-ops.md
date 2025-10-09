@@ -16,6 +16,13 @@ This runbook covers the operational tooling for tracking staking reward emission
 * The event attributes show the calendar year, the amount minted, and the remaining headroom (typically `0`). Set up alerts on this event so the on-call operator is notified immediately.
 * Delegators can continue to claim once the calendar year rolls over or governance raises the cap; unminted residual rewards remain accrued on-chain.
 
+## Pause behaviour
+
+* Governance can halt staking mutations by toggling `Pauses.Staking=true`. The node rejects delegate, undelegate, unbond-claim, and reward-claim flows with JSON-RPC error code `-32050` and the `staking module paused` message.
+* Every rejected request appends a `stake.paused` event that captures the delegator address, operation (`delegate`, `undelegate`, `claim`, `claimRewards`), and the reason (`paused by governance`). Unbond claims also include the `unbondingId` for observability.
+* Existing delegations continue accruing index updates and unbonding timers keep progressing, but the assets remain locked until the pause is lifted. Operators should communicate to delegators that matured unbonds and rewards will become claimable again once governance resumes the module.
+* Read-only staking helpers (`stake_previewClaim`, `stake_getPosition`) also return HTTP `503` while the pause is active. Downstream tooling should treat this as a temporary outage rather than a permanent failure.
+
 ## Respond to cap saturation
 
 1. Confirm the current year-to-date total and the recent `stake.emissionCapHit` events.
