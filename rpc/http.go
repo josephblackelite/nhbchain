@@ -834,6 +834,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleIdentitySetAlias(recorder, r, req)
 	case "identity_setAvatar":
 		s.handleIdentitySetAvatar(recorder, r, req)
+	case "identity_addAddress":
+		s.handleIdentityAddAddress(recorder, r, req)
+	case "identity_removeAddress":
+		s.handleIdentityRemoveAddress(recorder, r, req)
+	case "identity_setPrimary":
+		s.handleIdentitySetPrimary(recorder, r, req)
+	case "identity_rename":
+		s.handleIdentityRename(recorder, r, req)
 	case "identity_resolve":
 		s.handleIdentityResolve(recorder, r, req)
 	case "identity_reverse":

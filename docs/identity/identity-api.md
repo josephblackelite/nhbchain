@@ -95,6 +95,91 @@ URLs or `blob://` references that have been provisioned by the identity gateway.
 }
 ```
 
+### `identity_addAddress`
+
+Associates an additional address with an existing alias. The caller must supply
+the primary alias owner address.
+
+**Request Object**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `owner` | string | ✓ | Primary address that controls the alias. |
+| `alias` | string | ✓ | Alias being updated. |
+| `address` | string | ✓ | Bech32 address to link to the alias. |
+
+**Returns**
+
+Same schema as `identity_resolve` with the updated address list.
+
+**Example Request**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "identity_addAddress",
+  "params": [
+    {
+      "owner": "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgp9p6hd",
+      "alias": "frankrocks",
+      "address": "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y"
+    }
+  ]
+}
+```
+
+### `identity_removeAddress`
+
+Detaches an address from an alias. The primary address cannot be removed.
+
+**Request Object**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `owner` | string | ✓ | Primary alias owner address. |
+| `alias` | string | ✓ | Alias being updated. |
+| `address` | string | ✓ | Bech32 address to unlink. |
+
+**Returns**
+
+Updated alias record as per `identity_resolve`.
+
+### `identity_setPrimary`
+
+Promotes the supplied address to become the primary address for the alias. If
+the address was not previously linked it will be added automatically after
+validation.
+
+**Request Object**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `owner` | string | ✓ | Primary alias owner address. |
+| `alias` | string | ✓ | Alias being updated. |
+| `address` | string | ✓ | Bech32 address to promote. |
+
+**Returns**
+
+Updated alias record as per `identity_resolve`.
+
+### `identity_rename`
+
+Renames an alias while keeping the existing metadata and address bindings. The
+new alias must not already be registered.
+
+**Request Object**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `owner` | string | ✓ | Primary alias owner address. |
+| `alias` | string | ✓ | Current alias value. |
+| `newAlias` | string | ✓ | Desired new alias. |
+
+**Returns**
+
+Updated alias record as per `identity_resolve`.
+
 ### `identity_resolve`
 
 Fetches the latest metadata for an alias. Public and cache-friendly.
@@ -207,6 +292,10 @@ The `nhb-cli` binary wraps the RPCs above:
 | --- | --- |
 | `nhb-cli id set-alias --addr <bech32> --alias <name>` | Calls `identity_setAlias`. |
 | `nhb-cli id set-avatar --addr <bech32> --avatar <ref>` | Calls `identity_setAvatar`. |
+| `nhb-cli id add-address --owner <bech32> --alias <name> --addr <bech32>` | Calls `identity_addAddress`. |
+| `nhb-cli id remove-address --owner <bech32> --alias <name> --addr <bech32>` | Calls `identity_removeAddress`. |
+| `nhb-cli id set-primary --owner <bech32> --alias <name> --addr <bech32>` | Calls `identity_setPrimary`. |
+| `nhb-cli id rename --owner <bech32> --alias <name> --new-alias <name>` | Calls `identity_rename`. |
 | `nhb-cli id resolve --alias <name>` | Calls `identity_resolve`. |
 | `nhb-cli id reverse --addr <bech32>` | Calls `identity_reverse`. |
 | `nhb-cli id create-claimable ...` | Calls `identity_createClaimable`. |

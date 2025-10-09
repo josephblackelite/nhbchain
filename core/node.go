@@ -3034,6 +3034,124 @@ func (n *Node) IdentitySetAvatar(addr [20]byte, avatarRef string) (*identity.Ali
 	return record, nil
 }
 
+func aliasRecordHasAddress(record *identity.AliasRecord, addr [20]byte) bool {
+	if record == nil {
+		return false
+	}
+	for _, existing := range record.Addresses {
+		if existing == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func (n *Node) IdentityAddAddress(owner [20]byte, alias string, addr [20]byte) (*identity.AliasRecord, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, ok := manager.IdentityResolve(alias)
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if record.Primary != owner {
+		return nil, identity.ErrNotAliasOwner
+	}
+	alreadyLinked := aliasRecordHasAddress(record, addr)
+	updated, err := manager.IdentityAddAddress(record.Alias, addr[:], time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	if alreadyLinked {
+		return updated, nil
+	}
+	evt := events.IdentityAliasAddressLinked{Alias: updated.Alias, Address: addr}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return updated, nil
+}
+
+func (n *Node) IdentityRemoveAddress(owner [20]byte, alias string, addr [20]byte) (*identity.AliasRecord, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, ok := manager.IdentityResolve(alias)
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if record.Primary != owner {
+		return nil, identity.ErrNotAliasOwner
+	}
+	updated, err := manager.IdentityRemoveAddress(record.Alias, addr[:], time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	evt := events.IdentityAliasAddressRemoved{Alias: updated.Alias, Address: addr}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return updated, nil
+}
+
+func (n *Node) IdentitySetPrimary(owner [20]byte, alias string, addr [20]byte) (*identity.AliasRecord, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, ok := manager.IdentityResolve(alias)
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if record.Primary != owner {
+		return nil, identity.ErrNotAliasOwner
+	}
+	if record.Primary == addr {
+		return record, nil
+	}
+	updated, err := manager.IdentitySetPrimary(record.Alias, addr[:], time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	if updated.Primary != addr {
+		return updated, nil
+	}
+	evt := events.IdentityAliasPrimaryUpdated{Alias: updated.Alias, Address: addr}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return updated, nil
+}
+
+func (n *Node) IdentityRename(owner [20]byte, alias string, newAlias string) (*identity.AliasRecord, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	record, ok := manager.IdentityResolve(alias)
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if record.Primary != owner {
+		return nil, identity.ErrNotAliasOwner
+	}
+	previousAlias := record.Alias
+	updated, err := manager.IdentityRename(record.Alias, newAlias, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	if previousAlias == updated.Alias {
+		return updated, nil
+	}
+	evt := events.IdentityAliasRenamed{OldAlias: previousAlias, NewAlias: updated.Alias, Address: owner}.Event()
+	if evt != nil {
+		n.state.AppendEvent(evt)
+	}
+	return updated, nil
+}
+
 func (n *Node) IdentityResolve(alias string) (*identity.AliasRecord, bool) {
 	manager := nhbstate.NewManager(n.state.Trie)
 	return manager.IdentityResolve(alias)

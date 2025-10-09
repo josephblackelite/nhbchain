@@ -119,3 +119,93 @@ func TestNodeIdentityDuplicateAlias(t *testing.T) {
 		t.Fatalf("expected ErrAliasTaken, got %v", err)
 	}
 }
+
+func TestNodeIdentityAddressManagement(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := NewNode(db, validatorKey, "", true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	ownerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate owner key: %v", err)
+	}
+	secondaryKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate secondary key: %v", err)
+	}
+	tertiaryKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate tertiary key: %v", err)
+	}
+
+	var ownerAddr, secondaryAddr, tertiaryAddr [20]byte
+	copy(ownerAddr[:], ownerKey.PubKey().Address().Bytes())
+	copy(secondaryAddr[:], secondaryKey.PubKey().Address().Bytes())
+	copy(tertiaryAddr[:], tertiaryKey.PubKey().Address().Bytes())
+
+	if err := node.IdentitySetAlias(ownerAddr, "delta"); err != nil {
+		t.Fatalf("set alias: %v", err)
+	}
+	record, err := node.IdentityAddAddress(ownerAddr, "delta", secondaryAddr)
+	if err != nil {
+		t.Fatalf("add address: %v", err)
+	}
+	if len(record.Addresses) != 2 {
+		t.Fatalf("expected two addresses, got %d", len(record.Addresses))
+	}
+	eventsList := node.state.Events()
+	if len(eventsList) != 2 {
+		t.Fatalf("expected two events after add, got %d", len(eventsList))
+	}
+	if eventsList[1].Type != events.TypeIdentityAliasAddressLinked {
+		t.Fatalf("expected address linked event, got %s", eventsList[1].Type)
+	}
+
+	record, err = node.IdentitySetPrimary(ownerAddr, "delta", tertiaryAddr)
+	if err != nil {
+		t.Fatalf("set primary with implicit add: %v", err)
+	}
+	if record.Primary != tertiaryAddr {
+		t.Fatalf("expected tertiary to become primary")
+	}
+	eventsList = node.state.Events()
+	if len(eventsList) != 3 {
+		t.Fatalf("expected three events after primary change, got %d", len(eventsList))
+	}
+	if eventsList[2].Type != events.TypeIdentityAliasPrimaryUpdated {
+		t.Fatalf("expected primary updated event, got %s", eventsList[2].Type)
+	}
+
+	record, err = node.IdentityRemoveAddress(ownerAddr, "delta", secondaryAddr)
+	if err != nil {
+		t.Fatalf("remove address: %v", err)
+	}
+	if alias, ok := node.IdentityReverse(secondaryAddr); ok || alias != "" {
+		t.Fatalf("expected secondary address reverse mapping cleared")
+	}
+	eventsList = node.state.Events()
+	if len(eventsList) != 4 {
+		t.Fatalf("expected four events after removal, got %d", len(eventsList))
+	}
+	if eventsList[3].Type != events.TypeIdentityAliasAddressRemoved {
+		t.Fatalf("expected address removed event, got %s", eventsList[3].Type)
+	}
+
+	otherKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate outsider key: %v", err)
+	}
+	var outsider [20]byte
+	copy(outsider[:], otherKey.PubKey().Address().Bytes())
+	if _, err := node.IdentityAddAddress(outsider, "delta", outsider); !errors.Is(err, identity.ErrNotAliasOwner) {
+		t.Fatalf("expected ErrNotAliasOwner, got %v", err)
+	}
+}

@@ -236,6 +236,120 @@ func TestHandleIdentityReverseNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleIdentityAddressManagement(t *testing.T) {
+	env := newTestEnv(t)
+	ownerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate owner: %v", err)
+	}
+	owner := ownerKey.PubKey().Address().String()
+	setReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, owner), marshalParam(t, "builder")}}
+	env.server.handleIdentitySetAlias(httptest.NewRecorder(), env.newRequest(), setReq)
+
+	secondaryKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate secondary: %v", err)
+	}
+	secondary := secondaryKey.PubKey().Address().String()
+	tertiaryKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate tertiary: %v", err)
+	}
+	tertiary := tertiaryKey.PubKey().Address().String()
+
+	addPayload := map[string]string{"owner": owner, "alias": "builder", "address": secondary}
+	addReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, addPayload)}}
+	addRec := httptest.NewRecorder()
+	env.server.handleIdentityAddAddress(addRec, env.newRequest(), addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("unexpected add status: %d", addRec.Code)
+	}
+	addResult, rpcErr := decodeRPCResponse(t, addRec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected add error: %+v", rpcErr)
+	}
+	var addResp identityResolveResult
+	if err := json.Unmarshal(addResult, &addResp); err != nil {
+		t.Fatalf("decode add result: %v", err)
+	}
+	if len(addResp.Addresses) != 2 || addResp.Addresses[1] != secondary {
+		t.Fatalf("expected secondary address to be linked, got %+v", addResp.Addresses)
+	}
+
+	promotePayload := map[string]string{"owner": owner, "alias": "builder", "address": tertiary}
+	promoteReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, promotePayload)}}
+	promoteRec := httptest.NewRecorder()
+	env.server.handleIdentitySetPrimary(promoteRec, env.newRequest(), promoteReq)
+	if promoteRec.Code != http.StatusOK {
+		t.Fatalf("unexpected promote status: %d", promoteRec.Code)
+	}
+	promoteResult, rpcErr := decodeRPCResponse(t, promoteRec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected promote error: %+v", rpcErr)
+	}
+	var promoteResp identityResolveResult
+	if err := json.Unmarshal(promoteResult, &promoteResp); err != nil {
+		t.Fatalf("decode promote result: %v", err)
+	}
+	if promoteResp.Primary != tertiary {
+		t.Fatalf("expected tertiary to be primary, got %s", promoteResp.Primary)
+	}
+
+	removePayload := map[string]string{"owner": owner, "alias": "builder", "address": secondary}
+	removeReq := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, removePayload)}}
+	removeRec := httptest.NewRecorder()
+	env.server.handleIdentityRemoveAddress(removeRec, env.newRequest(), removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("unexpected remove status: %d", removeRec.Code)
+	}
+	removeResult, rpcErr := decodeRPCResponse(t, removeRec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected remove error: %+v", rpcErr)
+	}
+	var removeResp identityResolveResult
+	if err := json.Unmarshal(removeResult, &removeResp); err != nil {
+		t.Fatalf("decode remove result: %v", err)
+	}
+	if len(removeResp.Addresses) != 2 || removeResp.Addresses[0] != tertiary {
+		t.Fatalf("expected secondary to be removed, got %+v", removeResp.Addresses)
+	}
+
+	renamePayload := map[string]string{"owner": owner, "alias": "builder", "newAlias": "artisan"}
+	renameReq := &RPCRequest{ID: 5, Params: []json.RawMessage{marshalParam(t, renamePayload)}}
+	renameRec := httptest.NewRecorder()
+	env.server.handleIdentityRename(renameRec, env.newRequest(), renameReq)
+	if renameRec.Code != http.StatusOK {
+		t.Fatalf("unexpected rename status: %d", renameRec.Code)
+	}
+	renameResult, rpcErr := decodeRPCResponse(t, renameRec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rename error: %+v", rpcErr)
+	}
+	var renameResp identityResolveResult
+	if err := json.Unmarshal(renameResult, &renameResp); err != nil {
+		t.Fatalf("decode rename result: %v", err)
+	}
+	if renameResp.Alias != "artisan" {
+		t.Fatalf("expected alias artisan, got %s", renameResp.Alias)
+	}
+
+	outsiderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate outsider: %v", err)
+	}
+	outsider := outsiderKey.PubKey().Address().String()
+	unauthorizedPayload := map[string]string{"owner": outsider, "alias": "artisan", "address": outsider}
+	unauthorizedReq := &RPCRequest{ID: 6, Params: []json.RawMessage{marshalParam(t, unauthorizedPayload)}}
+	unauthorizedRec := httptest.NewRecorder()
+	env.server.handleIdentityAddAddress(unauthorizedRec, env.newRequest(), unauthorizedReq)
+	if unauthorizedRec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden status, got %d", unauthorizedRec.Code)
+	}
+	if _, rpcErr := decodeRPCResponse(t, unauthorizedRec); rpcErr == nil {
+		t.Fatalf("expected rpc error for unauthorized request")
+	}
+}
+
 func TestHandleIdentityClaimableFlow(t *testing.T) {
 	env := newTestEnv(t)
 	payerKey, err := crypto.GeneratePrivateKey()
