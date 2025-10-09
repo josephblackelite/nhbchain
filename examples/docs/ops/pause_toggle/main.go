@@ -133,6 +133,8 @@ func setModulePause(pauses *config.Pauses, module string, paused bool) error {
 		pauses.TransferNHB = paused
 	case "transfer_znhb":
 		pauses.TransferZNHB = paused
+	case "staking":
+		pauses.Staking = paused
 	default:
 		return fmt.Errorf("unknown module %q", module)
 	}

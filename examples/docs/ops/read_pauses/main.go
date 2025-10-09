@@ -52,4 +52,5 @@ func main() {
 	fmt.Printf("- potso:         %t\n", pauses.POTSO)
 	fmt.Printf("- transfer_nhb:  %t\n", pauses.TransferNHB)
 	fmt.Printf("- transfer_znhb: %t\n", pauses.TransferZNHB)
+	fmt.Printf("- staking:       %t\n", pauses.Staking)
 }

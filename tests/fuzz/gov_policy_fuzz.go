@@ -31,6 +31,14 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 					{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
 				},
 			},
+			Staking: govcfg.StakingBaseline{
+				AprBps:                1250,
+				PayoutPeriodDays:      30,
+				UnbondingDays:         7,
+				MinStakeWei:           "0",
+				MaxEmissionPerYearWei: "0",
+				RewardAsset:           "ZNHB",
+			},
 		}
 
 		delta := govcfg.PolicyDelta{}
@@ -115,6 +123,15 @@ func FuzzGovernancePolicyDeltas(f *testing.F) {
 			},
 			Mempool: config.Mempool{MaxBytes: baseline.Mempool.MaxBytes},
 			Blocks:  config.Blocks{MaxTxs: baseline.Blocks.MaxTxs},
+			Staking: config.Staking{
+				AprBps:                baseline.Staking.AprBps,
+				PayoutPeriodDays:      baseline.Staking.PayoutPeriodDays,
+				UnbondingDays:         baseline.Staking.UnbondingDays,
+				MinStakeWei:           baseline.Staking.MinStakeWei,
+				MaxEmissionPerYearWei: baseline.Staking.MaxEmissionPerYearWei,
+				RewardAsset:           baseline.Staking.RewardAsset,
+				CompoundDefault:       baseline.Staking.CompoundDefault,
+			},
 			Fees: config.Fees{
 				FreeTierTxPerMonth: baseline.Fees.FreeTierTxPerMonth,
 				MDRBasisPoints:     baseline.Fees.MDRBasisPoints,

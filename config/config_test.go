@@ -388,6 +388,56 @@ ValidatorKeystorePath = "%s"
 	}
 }
 
+func TestLoadOverridesStakingAndPauses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	keystorePath := filepath.Join(dir, "validator.keystore")
+	contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = "%s"
+
+[global.staking]
+AprBps = 2400
+PayoutPeriodDays = 14
+UnbondingDays = 21
+MinStakeWei = "1000000000000000000"
+MaxEmissionPerYearWei = "2000000000000000000"
+RewardAsset = "TNHB"
+CompoundDefault = true
+
+[global.pauses]
+Staking = true
+TransferZNHB = true
+`, keystorePath)
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	staking := cfg.Global.Staking
+	if staking.AprBps != 2400 || staking.PayoutPeriodDays != 14 || staking.UnbondingDays != 21 {
+		t.Fatalf("unexpected staking periods: %+v", staking)
+	}
+	if staking.MinStakeWei != "1000000000000000000" {
+		t.Fatalf("unexpected min stake: %s", staking.MinStakeWei)
+	}
+	if staking.MaxEmissionPerYearWei != "2000000000000000000" {
+		t.Fatalf("unexpected max emission: %s", staking.MaxEmissionPerYearWei)
+	}
+	if staking.RewardAsset != "TNHB" {
+		t.Fatalf("unexpected reward asset: %s", staking.RewardAsset)
+	}
+	if !staking.CompoundDefault {
+		t.Fatalf("expected compound default to be true")
+	}
+	if !cfg.Global.Pauses.Staking || !cfg.Global.Pauses.TransferZNHB {
+		t.Fatalf("unexpected pauses: %+v", cfg.Global.Pauses)
+	}
+}
+
 func TestLoadSetsConsensusDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

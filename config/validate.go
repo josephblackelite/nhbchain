@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"nhbchain/consensus"
@@ -30,6 +31,36 @@ func ValidateConfig(g Global) error {
 	}
 	if g.Blocks.MaxTxs <= 0 {
 		return fmt.Errorf("blocks: max_txs <= 0")
+	}
+	if g.Staking.AprBps > consensus.BPSDenominator {
+		return fmt.Errorf("staking: apr_bps must be <= %d", consensus.BPSDenominator)
+	}
+	if g.Staking.PayoutPeriodDays == 0 {
+		return fmt.Errorf("staking: payout_period_days must be >= 1")
+	}
+	if g.Staking.UnbondingDays == 0 {
+		return fmt.Errorf("staking: unbonding_days must be >= 1")
+	}
+	if trimmed := strings.TrimSpace(g.Staking.MinStakeWei); trimmed != "" {
+		amount, ok := new(big.Int).SetString(trimmed, 10)
+		if !ok {
+			return fmt.Errorf("staking: min_stake_wei must be a base-10 integer")
+		}
+		if amount.Sign() < 0 {
+			return fmt.Errorf("staking: min_stake_wei must be >= 0")
+		}
+	}
+	if trimmed := strings.TrimSpace(g.Staking.MaxEmissionPerYearWei); trimmed != "" {
+		amount, ok := new(big.Int).SetString(trimmed, 10)
+		if !ok {
+			return fmt.Errorf("staking: max_emission_per_year_wei must be a base-10 integer")
+		}
+		if amount.Sign() < 0 {
+			return fmt.Errorf("staking: max_emission_per_year_wei must be >= 0")
+		}
+	}
+	if strings.TrimSpace(g.Staking.RewardAsset) == "" {
+		return fmt.Errorf("staking: reward_asset must not be empty")
 	}
 	if _, err := g.PaymasterLimits(); err != nil {
 		return fmt.Errorf("paymaster: %w", err)

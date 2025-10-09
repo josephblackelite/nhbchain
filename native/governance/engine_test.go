@@ -45,6 +45,45 @@ func TestValidatorForNetworkSeeds(t *testing.T) {
 	}
 }
 
+func TestValidatorForParamStaking(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		key     string
+		payload json.RawMessage
+		wantErr bool
+	}{
+		{name: "apr valid", key: ParamKeyStakingAprBps, payload: json.RawMessage("1250")},
+		{name: "apr invalid", key: ParamKeyStakingAprBps, payload: json.RawMessage("20000"), wantErr: true},
+		{name: "payout valid", key: ParamKeyStakingPayoutPeriodDays, payload: json.RawMessage("30")},
+		{name: "payout zero", key: ParamKeyStakingPayoutPeriodDays, payload: json.RawMessage("0"), wantErr: true},
+		{name: "unbonding valid", key: ParamKeyStakingUnbondingDays, payload: json.RawMessage("7")},
+		{name: "unbonding zero", key: ParamKeyStakingUnbondingDays, payload: json.RawMessage("0"), wantErr: true},
+		{name: "min stake valid", key: ParamKeyStakingMinStakeWei, payload: json.RawMessage("\"1000000000000000000\"")},
+		{name: "min stake negative", key: ParamKeyStakingMinStakeWei, payload: json.RawMessage("-1"), wantErr: true},
+		{name: "max emission valid", key: ParamKeyStakingMaxEmissionPerYearWei, payload: json.RawMessage("0")},
+		{name: "max emission negative", key: ParamKeyStakingMaxEmissionPerYearWei, payload: json.RawMessage("-5"), wantErr: true},
+		{name: "reward asset valid", key: ParamKeyStakingRewardAsset, payload: json.RawMessage("\"ZNHB\"")},
+		{name: "reward asset empty", key: ParamKeyStakingRewardAsset, payload: json.RawMessage("\"   \""), wantErr: true},
+		{name: "compound valid", key: ParamKeyStakingCompoundDefault, payload: json.RawMessage("true")},
+                {name: "compound invalid", key: ParamKeyStakingCompoundDefault, payload: json.RawMessage("\"maybe\""), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			validator := validatorForParam(tc.key)
+			if validator == nil {
+				t.Fatalf("expected validator for %s", tc.key)
+			}
+			err := validator(tc.payload)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validator error = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernanceState {
 	accounts := make(map[string]*types.Account)
 	for addr, acc := range initial {
