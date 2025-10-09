@@ -25,6 +25,9 @@ type accountMetadata struct {
 	// Staking / balances
 	BalanceZNHB        *big.Int
 	Stake              *big.Int
+	StakeShares        *big.Int
+	StakeLastIndex     *big.Int
+	StakeLastPayoutTs  uint64
 	LockedZNHB         *big.Int
 	CollateralBalance  *big.Int
 	DebtPrincipal      *big.Int
@@ -298,6 +301,9 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		// Staking / balances
 		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
 		Stake:              new(big.Int).Set(account.Stake),
+		StakeShares:        new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:     new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:  account.StakeLastPayoutTs,
 		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
 		CollateralBalance:  new(big.Int).Set(account.CollateralBalance),
 		DebtPrincipal:      new(big.Int).Set(account.DebtPrincipal),
@@ -370,6 +376,9 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		// Staking / balances
 		BalanceZNHB:        new(big.Int).Set(account.BalanceZNHB),
 		Stake:              new(big.Int).Set(account.Stake),
+		StakeShares:        new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:     new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:  account.StakeLastPayoutTs,
 		LockedZNHB:         new(big.Int).Set(account.LockedZNHB),
 		CollateralBalance:  new(big.Int).Set(account.CollateralBalance),
 		DebtPrincipal:      new(big.Int).Set(account.DebtPrincipal),
@@ -452,10 +461,12 @@ func (m *Manager) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
 		return nil, err
 	}
 	meta := &accountMetadata{
-		BalanceZNHB: big.NewInt(0),
-		Stake:       big.NewInt(0),
-		LockedZNHB:  big.NewInt(0),
-		Unbonding:   make([]stakeUnbond, 0),
+		BalanceZNHB:    big.NewInt(0),
+		Stake:          big.NewInt(0),
+		StakeShares:    big.NewInt(0),
+		StakeLastIndex: big.NewInt(0),
+		LockedZNHB:     big.NewInt(0),
+		Unbonding:      make([]stakeUnbond, 0),
 	}
 	if len(data) == 0 {
 		return meta, nil
@@ -468,6 +479,12 @@ func (m *Manager) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
 	}
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
 	}
 	if meta.LockedZNHB == nil {
 		meta.LockedZNHB = big.NewInt(0)

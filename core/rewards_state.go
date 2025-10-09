@@ -34,6 +34,59 @@ type rewardEpochRecord struct {
 	Payouts []rewardPayoutRecord
 }
 
+type stakeRewardRecord struct {
+	Index      *big.Int
+	LastUpdate uint64
+	APRBps     uint64
+}
+
+func (sp *StateProcessor) loadStakeRewardState() error {
+	if sp == nil || sp.Trie == nil {
+		return nil
+	}
+	data, err := sp.Trie.Get(stakeRewardStateKey)
+	if err != nil {
+		return err
+	}
+	if sp.stakeRewardEngine == nil {
+		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var record stakeRewardRecord
+	if err := rlp.DecodeBytes(data, &record); err != nil {
+		return err
+	}
+	if record.Index != nil {
+		sp.stakeRewardEngine.SetIndex(record.Index)
+	}
+	if record.LastUpdate != 0 {
+		sp.stakeRewardEngine.SetLastUpdateTs(record.LastUpdate)
+	}
+	sp.stakeRewardAPR = record.APRBps
+	return nil
+}
+
+func (sp *StateProcessor) persistStakeRewardState() error {
+	if sp == nil || sp.Trie == nil {
+		return nil
+	}
+	if sp.stakeRewardEngine == nil {
+		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	record := stakeRewardRecord{
+		Index:      sp.stakeRewardEngine.Index(),
+		LastUpdate: sp.stakeRewardEngine.LastUpdateTs(),
+		APRBps:     sp.stakeRewardAPR,
+	}
+	encoded, err := rlp.EncodeToBytes(record)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(stakeRewardStateKey, encoded)
+}
+
 func (sp *StateProcessor) loadRewardHistory() error {
 	data, err := sp.Trie.Get(rewardHistoryKey)
 	if err != nil {
