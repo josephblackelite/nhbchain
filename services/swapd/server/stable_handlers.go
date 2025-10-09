@@ -250,6 +250,20 @@ func stableErrorStatus(err error) (int, string) {
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, stable.ErrReservationNotFound):
 		return http.StatusUnprocessableEntity, err.Error()
+	case errors.Is(err, stable.ErrPriceUnavailable):
+		return http.StatusServiceUnavailable, err.Error()
+	case errors.Is(err, stable.ErrSlippageExceeded):
+		return http.StatusConflict, err.Error()
+	case errors.Is(err, stable.ErrInsufficientReserve):
+		return http.StatusConflict, err.Error()
+	case errors.Is(err, stable.ErrDailyCapExceeded):
+		return http.StatusTooManyRequests, err.Error()
+	case errors.Is(err, stable.ErrQuoteAmountMismatch):
+		return http.StatusUnprocessableEntity, err.Error()
+	case errors.Is(err, stable.ErrReservationExpired):
+		return http.StatusConflict, err.Error()
+	case errors.Is(err, stable.ErrReservationConsumed):
+		return http.StatusConflict, err.Error()
 	default:
 		return http.StatusInternalServerError, err.Error()
 	}

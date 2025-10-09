@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"math"
+
 	"go.opentelemetry.io/otel/trace"
 
 	"nhbchain/services/swapd/stable"
@@ -65,6 +67,8 @@ func TestStableHandlersFlow(t *testing.T) {
 	}))
 
 	quoteBody := `{"asset":"ZNHB","amount":100,"account":"merchant-123"}`
+	engine.RecordPrice("ZNHB", "USD", 1.02, base)
+
 	quoteResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", quoteBody)
 	assertStatus(t, quoteResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_quote.json", quoteResp.Body.Bytes())
@@ -76,12 +80,50 @@ func TestStableHandlersFlow(t *testing.T) {
 	assertStatus(t, reserveResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_reserve.json", reserveResp.Body.Bytes())
 
+	available, reserved, payouts, ok := engine.LedgerBalance("ZNHB")
+	if !ok {
+		t.Fatalf("ledger balance missing")
+	}
+	if got, want := available, 1_000_000-102.0; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("available balance mismatch: got %.2f want %.2f", got, want)
+	}
+	if got, want := reserved, 102.0; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("reserved balance mismatch: got %.2f want %.2f", got, want)
+	}
+	if payouts != 0 {
+		t.Fatalf("expected payouts 0, got %.2f", payouts)
+	}
+
 	reservationID := extractField(t, reserveResp.Body.Bytes(), "reservation_id")
 
 	cashOutBody := `{"reservation_id":"` + reservationID + `"}`
 	cashOutResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody)
 	assertStatus(t, cashOutResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_cashout.json", cashOutResp.Body.Bytes())
+
+	available, reserved, payouts, _ = engine.LedgerBalance("ZNHB")
+	if got, want := available, 1_000_000-102.0; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("available after cashout mismatch: got %.2f want %.2f", got, want)
+	}
+	if reserved != 0 {
+		t.Fatalf("reserved after cashout mismatch: got %.2f want 0", reserved)
+	}
+	if got, want := payouts, 102.0; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("payouts mismatch: got %.2f want %.2f", got, want)
+	}
+
+	cashOutAgain := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody)
+	assertStatus(t, cashOutAgain.Code, http.StatusConflict)
+
+	slippageBody := `{"asset":"ZNHB","amount":50,"account":"merchant-123"}`
+	quoteSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", slippageBody)
+	assertStatus(t, quoteSlippage.Code, http.StatusOK)
+	newQuoteID := extractField(t, quoteSlippage.Body.Bytes(), "quote_id")
+
+	// Move the oracle by 5% to trigger slippage guard (limit is 0.5%).
+	engine.RecordPrice("ZNHB", "USD", 1.07, base.Add(30*time.Second))
+	reserveSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", `{"quote_id":"`+newQuoteID+`","amount_in":50,"account":"merchant-123"}`)
+	assertStatus(t, reserveSlippage.Code, http.StatusConflict)
 
 	statusResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/status", "")
 	assertStatus(t, statusResp.Code, http.StatusOK)
@@ -138,6 +180,8 @@ func newTestStableEngine(t *testing.T, base time.Time) *stable.Engine {
 		counter++
 		return ts
 	})
+	engine.SetPriceMaxAge(24 * time.Hour)
+	engine.RecordPrice("ZNHB", "USD", 1.02, base)
 	return engine
 }
 
