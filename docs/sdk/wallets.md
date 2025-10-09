@@ -11,7 +11,7 @@ Key implementation notes:
 
 - Always read the nonce and balances via `nhb_getBalance` before crafting the
   transfer to ensure both NHB gas and ZNHB settlement funds are available.
-- Respect the fee policy described in the [fees documentation](../fees/README.md),
+- Respect the fee policy described in the [fees documentation](../fees/policy.md),
   which currently sponsors NHB gas for eligible merchants but still requires the
   sender to hold the ZNHB principal.
 - Surface the `Transfer{asset: 'ZNHB'}` receipt log in activity feeds so users
