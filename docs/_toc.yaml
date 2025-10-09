@@ -49,3 +49,8 @@ toc:
     toc:
       - name: Mint controls
         path: security/mint-controls.md
+
+  - name: Wallets
+    toc:
+      - name: Key management UX patterns
+        path: wallet/key-management.md

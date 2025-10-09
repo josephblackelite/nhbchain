@@ -48,6 +48,9 @@ so the RPC bearer token remains confined to server-side routes.
 * Sensitive credentials (`NHB_RPC_TOKEN`, `IDENTITY_EMAIL_SALT`) stay on the Next.js server runtime
   and are never injected into the browser bundle.
 * Claimable payloads are validated and normalised before hitting the RPC to avoid malformed requests.
+* Follow the [wallet key management UX patterns](../wallet/key-management.md) when implementing
+  reveal, export, or recovery surfaces so production builds enforce MFA and off-chain custody
+  requirements.
 * The default production base URL is `https://nhbcoin.com`. Set `APP_PUBLIC_BASE` accordingly when
   hosting behind CloudFront or S3.
 * Follow the [authenticated transaction submission guide](../transactions/znhb-transfer.md#authenticated-submission)
