@@ -136,6 +136,7 @@ const (
 	modulePotso            = "potso"
 	moduleTransferNHB      = "transfer_nhb"
 	moduleTransferZNHB     = "transfer_znhb"
+	moduleStaking          = "staking"
 )
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
@@ -348,6 +349,14 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			},
 			Mempool: config.Mempool{MaxBytes: 1, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 			Blocks:  config.Blocks{MaxTxs: 1},
+			Staking: config.Staking{
+				AprBps:                1250,
+				PayoutPeriodDays:      30,
+				UnbondingDays:         7,
+				MinStakeWei:           "0",
+				MaxEmissionPerYearWei: "0",
+				RewardAsset:           "ZNHB",
+			},
 			Fees: config.Fees{
 				FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
 				MDRBasisPoints:     config.DefaultMDRBasisPoints,
@@ -423,6 +432,7 @@ func (n *Node) SetModulePauses(pauses config.Pauses) {
 	n.modulePauses[modulePotso] = pauses.POTSO
 	n.modulePauses[moduleTransferNHB] = pauses.TransferNHB
 	n.modulePauses[moduleTransferZNHB] = pauses.TransferZNHB
+	n.modulePauses[moduleStaking] = pauses.Staking
 	n.modulePauseMu.Unlock()
 	if n.state != nil {
 		n.state.SetPauseView(n)
@@ -663,6 +673,15 @@ func (n *Node) globalConfigSnapshot() config.Global {
 		},
 		Mempool: config.Mempool{MaxBytes: n.globalCfg.Mempool.MaxBytes, POSReservationBPS: n.globalCfg.Mempool.POSReservationBPS},
 		Blocks:  config.Blocks{MaxTxs: n.globalCfg.Blocks.MaxTxs},
+		Staking: config.Staking{
+			AprBps:                n.globalCfg.Staking.AprBps,
+			PayoutPeriodDays:      n.globalCfg.Staking.PayoutPeriodDays,
+			UnbondingDays:         n.globalCfg.Staking.UnbondingDays,
+			MinStakeWei:           n.globalCfg.Staking.MinStakeWei,
+			MaxEmissionPerYearWei: n.globalCfg.Staking.MaxEmissionPerYearWei,
+			RewardAsset:           n.globalCfg.Staking.RewardAsset,
+			CompoundDefault:       n.globalCfg.Staking.CompoundDefault,
+		},
 		Pauses: config.Pauses{
 			Lending:      n.globalCfg.Pauses.Lending,
 			Swap:         n.globalCfg.Pauses.Swap,
@@ -672,6 +691,7 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			POTSO:        n.globalCfg.Pauses.POTSO,
 			TransferNHB:  n.globalCfg.Pauses.TransferNHB,
 			TransferZNHB: n.globalCfg.Pauses.TransferZNHB,
+			Staking:      n.globalCfg.Pauses.Staking,
 		},
 		Quotas: config.Quotas{
 			Lending: n.globalCfg.Quotas.Lending,

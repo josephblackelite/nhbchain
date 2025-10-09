@@ -8,6 +8,17 @@ import (
 	"nhbchain/native/fees"
 )
 
+func validStaking() config.Staking {
+	return config.Staking{
+		AprBps:                1250,
+		PayoutPeriodDays:      30,
+		UnbondingDays:         7,
+		MinStakeWei:           "0",
+		MaxEmissionPerYearWei: "0",
+		RewardAsset:           "ZNHB",
+	}
+}
+
 func TestValidateConfig(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -28,6 +39,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 			},
 		},
 		{
@@ -44,6 +56,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 			},
 			wantErr: true,
 		},
@@ -61,6 +74,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 			},
 			wantErr: true,
 		},
@@ -78,6 +92,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 			},
 			wantErr: true,
 		},
@@ -95,6 +110,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 			},
 			wantErr: true,
 		},
@@ -112,6 +128,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 0},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 			},
 			wantErr: true,
 		},
@@ -129,6 +146,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 0},
+				Staking: validStaking(),
 			},
 			wantErr: true,
 		},
@@ -146,6 +164,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 				Fees: config.Fees{
 					Assets: []config.FeeAsset{
 						{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints},
@@ -168,6 +187,7 @@ func TestValidateConfig(t *testing.T) {
 				},
 				Mempool: config.Mempool{MaxBytes: 1},
 				Blocks:  config.Blocks{MaxTxs: 1},
+				Staking: validStaking(),
 				Fees: config.Fees{
 					Assets: []config.FeeAsset{
 						{

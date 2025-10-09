@@ -351,6 +351,77 @@ func validatorForParam(key string) paramValidator {
 			}
 			return nil
 		}
+	case ParamKeyStakingAprBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingAprBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyStakingAprBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case ParamKeyStakingPayoutPeriodDays:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingPayoutPeriodDays, err)
+			}
+			if value < 1 {
+				return fmt.Errorf("%s: must be >= 1", ParamKeyStakingPayoutPeriodDays)
+			}
+			return nil
+		}
+	case ParamKeyStakingUnbondingDays:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingUnbondingDays, err)
+			}
+			if value < 1 {
+				return fmt.Errorf("%s: must be >= 1", ParamKeyStakingUnbondingDays)
+			}
+			return nil
+		}
+	case ParamKeyStakingMinStakeWei:
+		return func(raw json.RawMessage) error {
+			_, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingMinStakeWei, err)
+			}
+			return nil
+		}
+	case ParamKeyStakingMaxEmissionPerYearWei:
+		return func(raw json.RawMessage) error {
+			amount, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingMaxEmissionPerYearWei, err)
+			}
+			if amount.Sign() < 0 {
+				return fmt.Errorf("%s: must be >= 0", ParamKeyStakingMaxEmissionPerYearWei)
+			}
+			return nil
+		}
+	case ParamKeyStakingRewardAsset:
+		return func(raw json.RawMessage) error {
+			var asset string
+			if err := json.Unmarshal(raw, &asset); err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingRewardAsset, err)
+			}
+			if strings.TrimSpace(asset) == "" {
+				return fmt.Errorf("%s: must not be empty", ParamKeyStakingRewardAsset)
+			}
+			return nil
+		}
+	case ParamKeyStakingCompoundDefault:
+		return func(raw json.RawMessage) error {
+			_, err := parseBoolRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyStakingCompoundDefault, err)
+			}
+			return nil
+		}
 	case ParamKeyMinimumValidatorStake:
 		return func(raw json.RawMessage) error {
 			amount, err := parseUintRaw(raw)

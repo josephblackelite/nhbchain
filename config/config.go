@@ -138,7 +138,16 @@ func defaultGlobalConfig() Global {
 		},
 		Mempool: Mempool{MaxBytes: 16 << 20, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 		Blocks:  Blocks{MaxTxs: 5000},
-		Pauses:  Pauses{},
+		Staking: Staking{
+			AprBps:                1250,
+			PayoutPeriodDays:      30,
+			UnbondingDays:         7,
+			MinStakeWei:           "0",
+			MaxEmissionPerYearWei: "0",
+			RewardAsset:           "ZNHB",
+			CompoundDefault:       false,
+		},
+		Pauses: Pauses{},
 		Paymaster: Paymaster{
 			MerchantDailyCapWei: "0",
 			GlobalDailyCapWei:   "0",
@@ -534,6 +543,28 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "blocks", "MaxTxs") {
 		cfg.Global.Blocks.MaxTxs = defaults.Blocks.MaxTxs
+	}
+
+	if !meta.IsDefined("global", "staking", "AprBps") {
+		cfg.Global.Staking.AprBps = defaults.Staking.AprBps
+	}
+	if !meta.IsDefined("global", "staking", "PayoutPeriodDays") {
+		cfg.Global.Staking.PayoutPeriodDays = defaults.Staking.PayoutPeriodDays
+	}
+	if !meta.IsDefined("global", "staking", "UnbondingDays") {
+		cfg.Global.Staking.UnbondingDays = defaults.Staking.UnbondingDays
+	}
+	if strings.TrimSpace(cfg.Global.Staking.MinStakeWei) == "" {
+		cfg.Global.Staking.MinStakeWei = defaults.Staking.MinStakeWei
+	}
+	if strings.TrimSpace(cfg.Global.Staking.MaxEmissionPerYearWei) == "" {
+		cfg.Global.Staking.MaxEmissionPerYearWei = defaults.Staking.MaxEmissionPerYearWei
+	}
+	if strings.TrimSpace(cfg.Global.Staking.RewardAsset) == "" {
+		cfg.Global.Staking.RewardAsset = defaults.Staking.RewardAsset
+	}
+	if !meta.IsDefined("global", "staking", "CompoundDefault") {
+		cfg.Global.Staking.CompoundDefault = defaults.Staking.CompoundDefault
 	}
 
 	if strings.TrimSpace(cfg.Global.Paymaster.MerchantDailyCapWei) == "" {

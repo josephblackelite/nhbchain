@@ -30,6 +30,7 @@ type Baseline struct {
 	Mempool    MempoolBaseline
 	Blocks     BlocksBaseline
 	Fees       FeesBaseline
+	Staking    StakingBaseline
 }
 
 // GovernanceBaseline mirrors config.Governance using primitive types.
@@ -68,6 +69,17 @@ type FeeAssetBaseline struct {
 	Asset          string
 	MDRBasisPoints uint32
 	OwnerWallet    string
+}
+
+// StakingBaseline mirrors config.Staking using primitive types.
+type StakingBaseline struct {
+	AprBps                uint32
+	PayoutPeriodDays      uint32
+	UnbondingDays         uint32
+	MinStakeWei           string
+	MaxEmissionPerYearWei string
+	RewardAsset           string
+	CompoundDefault       bool
 }
 
 // GovernanceDelta represents proposed changes to governance thresholds and
@@ -121,6 +133,15 @@ func PreflightBaselineApply(cur Baseline, delta PolicyDelta) error {
 		},
 		Mempool: config.Mempool{MaxBytes: cur.Mempool.MaxBytes},
 		Blocks:  config.Blocks{MaxTxs: cur.Blocks.MaxTxs},
+		Staking: config.Staking{
+			AprBps:                cur.Staking.AprBps,
+			PayoutPeriodDays:      cur.Staking.PayoutPeriodDays,
+			UnbondingDays:         cur.Staking.UnbondingDays,
+			MinStakeWei:           cur.Staking.MinStakeWei,
+			MaxEmissionPerYearWei: cur.Staking.MaxEmissionPerYearWei,
+			RewardAsset:           cur.Staking.RewardAsset,
+			CompoundDefault:       cur.Staking.CompoundDefault,
+		},
 		Fees: config.Fees{
 			FreeTierTxPerMonth: cur.Fees.FreeTierTxPerMonth,
 			MDRBasisPoints:     cur.Fees.MDRBasisPoints,

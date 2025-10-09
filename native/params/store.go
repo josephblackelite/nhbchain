@@ -68,3 +68,36 @@ func (s *Store) Pauses() (config.Pauses, error) {
 	}
 	return pauses, nil
 }
+
+// SetStaking persists the staking configuration under the canonical parameter store key.
+func (s *Store) SetStaking(staking config.Staking) error {
+	state, err := s.withState()
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(staking)
+	if err != nil {
+		return fmt.Errorf("params: encode staking: %w", err)
+	}
+	return state.ParamStoreSet(ParamsKeyStaking, encoded)
+}
+
+// Staking loads the persisted staking configuration if present.
+func (s *Store) Staking() (config.Staking, error) {
+	state, err := s.withState()
+	if err != nil {
+		return config.Staking{}, err
+	}
+	raw, ok, err := state.ParamStoreGet(ParamsKeyStaking)
+	if err != nil {
+		return config.Staking{}, err
+	}
+	if !ok || len(bytes.TrimSpace(raw)) == 0 {
+		return config.Staking{}, nil
+	}
+	var staking config.Staking
+	if err := json.Unmarshal(raw, &staking); err != nil {
+		return config.Staking{}, fmt.Errorf("params: decode staking: %w", err)
+	}
+	return staking, nil
+}

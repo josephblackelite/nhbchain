@@ -106,6 +106,17 @@ type Consensus struct {
 	CommitTimeout    time.Duration `toml:"CommitTimeout"`
 }
 
+// Staking captures the runtime configuration for validator and delegator rewards.
+type Staking struct {
+	AprBps                uint32
+	PayoutPeriodDays      uint32
+	UnbondingDays         uint32
+	MinStakeWei           string
+	MaxEmissionPerYearWei string
+	RewardAsset           string
+	CompoundDefault       bool
+}
+
 type Pauses struct {
 	Lending      bool
 	Swap         bool
@@ -115,6 +126,7 @@ type Pauses struct {
 	POTSO        bool
 	TransferNHB  bool
 	TransferZNHB bool
+	Staking      bool
 }
 
 // Quota defines rate limits for module interactions on a per-address basis.
@@ -140,6 +152,7 @@ type Global struct {
 	Slashing   Slashing
 	Mempool    Mempool
 	Blocks     Blocks
+	Staking    Staking
 	Pauses     Pauses
 	Quotas     Quotas
 	Paymaster  Paymaster

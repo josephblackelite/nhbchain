@@ -151,7 +151,21 @@ const (
 	// ParamKeyMinimumValidatorStake controls the minimum stake required for
 	// an account to qualify for validator eligibility and selection.
 	ParamKeyMinimumValidatorStake = "staking.minimumValidatorStake"
-	defaultMinimumValidatorStake  = 1000
+	// ParamKeyStakingAprBps controls the APR applied to staking positions.
+	ParamKeyStakingAprBps = "staking.aprBps"
+	// ParamKeyStakingPayoutPeriodDays controls the reward payout cadence in days.
+	ParamKeyStakingPayoutPeriodDays = "staking.payoutPeriodDays"
+	// ParamKeyStakingUnbondingDays controls the unbonding window in days.
+	ParamKeyStakingUnbondingDays = "staking.unbondingDays"
+	// ParamKeyStakingMinStakeWei controls the minimum delegable stake in Wei.
+	ParamKeyStakingMinStakeWei = "staking.minStakeWei"
+	// ParamKeyStakingMaxEmissionPerYearWei caps the annual reward emission in Wei.
+	ParamKeyStakingMaxEmissionPerYearWei = "staking.maxEmissionPerYearWei"
+	// ParamKeyStakingRewardAsset selects the asset used for staking rewards.
+	ParamKeyStakingRewardAsset = "staking.rewardAsset"
+	// ParamKeyStakingCompoundDefault toggles auto-compounding by default for new delegations.
+	ParamKeyStakingCompoundDefault = "staking.compoundDefault"
+	defaultMinimumValidatorStake   = 1000
 )
 
 // DefaultMinimumValidatorStake exposes the legacy minimum validator stake used
