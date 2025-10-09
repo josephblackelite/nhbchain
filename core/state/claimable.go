@@ -160,14 +160,15 @@ func (m *Manager) ClaimablePut(c *claimable.Claimable) error {
 		return claimable.ErrInvalidToken
 	}
 	record := newStoredClaimable(&claimable.Claimable{
-		ID:        c.ID,
-		Payer:     c.Payer,
-		Token:     normalized,
-		Amount:    c.Amount,
-		HashLock:  c.HashLock,
-		Deadline:  c.Deadline,
-		CreatedAt: c.CreatedAt,
-		Status:    c.Status,
+		ID:            c.ID,
+		Payer:         c.Payer,
+		Token:         normalized,
+		Amount:        c.Amount,
+		HashLock:      c.HashLock,
+		RecipientHint: c.RecipientHint,
+		Deadline:      c.Deadline,
+		CreatedAt:     c.CreatedAt,
+		Status:        c.Status,
 	})
 	encoded, err := rlp.EncodeToBytes(record)
 	if err != nil {

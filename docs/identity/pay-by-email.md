@@ -63,7 +63,7 @@ nhb-cli id create-claimable \
 * A salted email hash returned by the gateway (32-byte hex string), or
 * An alias string – the node derives the aliasId and uses it as the hint. This is useful when paying aliases that are registered but unresolved for a linked address.
 
-Internally the node stores the 32-byte hint alongside the keccak hash used for the claim lock. The preimage supplied during claim must match this hint exactly.
+Internally the node stores the 32-byte hint alongside the keccak hash used for the claim lock. The preimage supplied during claim must match this hint exactly. If the hint corresponds to an alias identifier, the node also requires the payee address to be currently bound to that alias—attempts from unrelated accounts are rejected—while email-hash claimables continue to rely solely on the shared preimage.
 
 ## Claiming Funds
 

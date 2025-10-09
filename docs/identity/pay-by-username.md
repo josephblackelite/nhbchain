@@ -76,6 +76,11 @@ sequenceDiagram
   Node-->>Recipient: transfer executed
 ```
 
+Alias-backed claimables only release funds to the addresses bound to the
+referenced alias. Attempts from unrelated accounts are rejected, while email
+hash claimables continue to rely on the shared preimage distributed by the
+gateway.
+
 ### Claimable Expiry & Recovery
 
 * `expiry` recommended minimum: 7 days. Wallets should display countdown.

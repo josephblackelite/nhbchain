@@ -3890,6 +3890,26 @@ func (n *Node) IdentityClaim(id [32]byte, preimage []byte, payee [20]byte) (*cla
 	}
 	hint := record.RecipientHint
 	if hint != ([32]byte{}) {
+		if alias, ok := manager.IdentityAliasByID(hint); ok {
+			resolved, ok := manager.IdentityResolve(alias)
+			if !ok || resolved == nil {
+				return nil, claimable.ErrUnauthorized
+			}
+			authorized := false
+			if resolved.Primary == payee {
+				authorized = true
+			} else {
+				for _, addr := range resolved.Addresses {
+					if addr == payee {
+						authorized = true
+						break
+					}
+				}
+			}
+			if !authorized {
+				return nil, claimable.ErrUnauthorized
+			}
+		}
 		if len(preimage) != len(hint) {
 			return nil, claimable.ErrInvalidPreimage
 		}

@@ -179,6 +179,11 @@ by the identity gateway or derived from the alias ID.
 | `payee` | string | ✓ | Bech32 address receiving the funds. |
 | `preimage` | string | ✓ | 32-byte hex string matching the stored `recipientHint`. |
 
+> **Alias recipients:** When the `recipientHint` encodes an alias ID, the
+> `payee` must be one of the addresses currently bound to that alias. The node
+> rejects claims from unrelated accounts, while the preimage requirement
+> continues to protect email-hash claimables.
+
 **Returns**
 
 ```json
