@@ -78,6 +78,7 @@ var (
 	tradeRecordPrefix              = []byte("trade/record/")
 	tradeEscrowIndexPrefix         = []byte("trade/index/escrow/")
 	identityAliasPrefix            = []byte("identity/alias/")
+	identityAliasIDPrefix          = []byte("identity/alias-id/")
 	identityReversePrefix          = []byte("identity/reverse/")
 	mintInvoicePrefix              = []byte("mint/invoice/")
 	swapOrderPrefix                = []byte("swap/order/")
@@ -87,8 +88,8 @@ var (
 	potsoMeterPrefix               = []byte("potso/meter/")
 	potsoDayIndexPrefix            = []byte("potso/day-index/")
 	potsoStakeTotalPrefix          = []byte("potso/stake/")
-        potsoStakeNoncePrefix          = []byte("potso/stake/nonce/")
-        potsoStakeAuthNoncePrefix      = []byte("potso/stake/authnonce/")
+	potsoStakeNoncePrefix          = []byte("potso/stake/nonce/")
+	potsoStakeAuthNoncePrefix      = []byte("potso/stake/authnonce/")
 	potsoStakeLocksPrefix          = []byte("potso/stake/locks/")
 	potsoStakeLockIndexPrefix      = []byte("potso/stake/locks/index/")
 	potsoStakeQueuePrefix          = []byte("potso/stake/unbondq/")
@@ -115,10 +116,10 @@ var (
 	lendingMarketPrefix            = []byte("lending/market/")
 	lendingFeeAccrualPrefix        = []byte("lending/fees/")
 	lendingUserPrefix              = []byte("lending/user/")
-        lendingPoolIndexKey            = []byte("lending/pools/index")
-        feesCounterPrefix              = []byte("fees/counter/")
-        feesTotalsPrefix               = []byte("fees/totals/")
-        feesTotalsIndexPrefix          = []byte("fees/totals/index/")
+	lendingPoolIndexKey            = []byte("lending/pools/index")
+	feesCounterPrefix              = []byte("fees/counter/")
+	feesTotalsPrefix               = []byte("fees/totals/")
+	feesTotalsIndexPrefix          = []byte("fees/totals/index/")
 )
 
 // GovernanceProposalKey constructs the storage key for the proposal metadata
@@ -1271,17 +1272,17 @@ func potsoStakeTotalKey(owner []byte) []byte {
 }
 
 func potsoStakeNonceKey(owner []byte) []byte {
-        buf := make([]byte, len(potsoStakeNoncePrefix)+len(owner))
-        copy(buf, potsoStakeNoncePrefix)
-        copy(buf[len(potsoStakeNoncePrefix):], owner)
-        return kvKey(buf)
+	buf := make([]byte, len(potsoStakeNoncePrefix)+len(owner))
+	copy(buf, potsoStakeNoncePrefix)
+	copy(buf[len(potsoStakeNoncePrefix):], owner)
+	return kvKey(buf)
 }
 
 func potsoStakeAuthNonceKey(owner []byte) []byte {
-        buf := make([]byte, len(potsoStakeAuthNoncePrefix)+len(owner))
-        copy(buf, potsoStakeAuthNoncePrefix)
-        copy(buf[len(potsoStakeAuthNoncePrefix):], owner)
-        return kvKey(buf)
+	buf := make([]byte, len(potsoStakeAuthNoncePrefix)+len(owner))
+	copy(buf, potsoStakeAuthNoncePrefix)
+	copy(buf[len(potsoStakeAuthNoncePrefix):], owner)
+	return kvKey(buf)
 }
 
 func potsoStakeLockIndexKey(owner []byte) []byte {
@@ -1646,41 +1647,41 @@ func (m *Manager) PotsoStakeOwners() ([][20]byte, error) {
 
 // PotsoStakeAllocateNonce reserves and returns the next lock nonce for the owner.
 func (m *Manager) PotsoStakeAllocateNonce(owner [20]byte) (uint64, error) {
-        key := potsoStakeNonceKey(owner[:])
-        var next uint64
-        ok, err := m.KVGet(key, &next)
-        if err != nil {
+	key := potsoStakeNonceKey(owner[:])
+	var next uint64
+	ok, err := m.KVGet(key, &next)
+	if err != nil {
 		return 0, err
 	}
 	if !ok || next == 0 {
 		next = 1
 	}
-        if err := m.KVPut(key, next+1); err != nil {
-                return 0, err
-        }
-        return next, nil
+	if err := m.KVPut(key, next+1); err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 // PotsoStakeLatestAuthNonce returns the latest consumed staking nonce for the owner.
 func (m *Manager) PotsoStakeLatestAuthNonce(owner [20]byte) (uint64, error) {
-        key := potsoStakeAuthNonceKey(owner[:])
-        var nonce uint64
-        ok, err := m.KVGet(key, &nonce)
-        if err != nil {
-                return 0, err
-        }
-        if !ok {
-                return 0, nil
-        }
-        return nonce, nil
+	key := potsoStakeAuthNonceKey(owner[:])
+	var nonce uint64
+	ok, err := m.KVGet(key, &nonce)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	return nonce, nil
 }
 
 // PotsoStakeSetAuthNonce records the latest consumed staking nonce for the owner.
 func (m *Manager) PotsoStakeSetAuthNonce(owner [20]byte, nonce uint64) error {
-        if nonce == 0 {
-                return fmt.Errorf("potso: auth nonce must be greater than zero")
-        }
-        return m.KVPut(potsoStakeAuthNonceKey(owner[:]), nonce)
+	if nonce == 0 {
+		return fmt.Errorf("potso: auth nonce must be greater than zero")
+	}
+	return m.KVPut(potsoStakeAuthNonceKey(owner[:]), nonce)
 }
 
 // PotsoStakeLockNonces lists all lock nonces tracked for the owner in creation order.
@@ -2087,6 +2088,13 @@ func identityAliasKey(alias string) []byte {
 	buf := make([]byte, len(identityAliasPrefix)+len(alias))
 	copy(buf, identityAliasPrefix)
 	copy(buf[len(identityAliasPrefix):], alias)
+	return kvKey(buf)
+}
+
+func identityAliasIDKey(id [32]byte) []byte {
+	buf := make([]byte, len(identityAliasIDPrefix)+len(id))
+	copy(buf, identityAliasIDPrefix)
+	copy(buf[len(identityAliasIDPrefix):], id[:])
 	return kvKey(buf)
 }
 
@@ -3330,7 +3338,11 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 				baseRecord.Addresses = oldRecord.Addresses
 			}
 		}
+		oldID := identity.DeriveAliasID(currentAlias)
 		if err := m.trie.Update(identityAliasKey(currentAlias), nil); err != nil {
+			return err
+		}
+		if err := m.trie.Update(identityAliasIDKey(oldID), nil); err != nil {
 			return err
 		}
 	}
@@ -3349,13 +3361,26 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 	if err != nil {
 		return err
 	}
+	aliasID := identity.DeriveAliasID(normalized)
 	if err := m.trie.Update(identityAliasKey(normalized), encoded); err != nil {
+		return err
+	}
+	if err := m.trie.Update(identityAliasIDKey(aliasID), []byte(normalized)); err != nil {
 		return err
 	}
 	if err := m.trie.Update(reverseKey, []byte(normalized)); err != nil {
 		return err
 	}
 	return nil
+}
+
+// IdentityAliasByID resolves an alias identifier to its canonical alias string.
+func (m *Manager) IdentityAliasByID(id [32]byte) (string, bool) {
+	data, err := m.trie.Get(identityAliasIDKey(id))
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	return string(data), true
 }
 
 // IdentityResolve resolves an alias to its owning address.
