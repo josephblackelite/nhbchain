@@ -23,7 +23,7 @@ func TestLendingSupplyFailsWhenPaused(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := core.NewNode(db, validatorKey, "", true)
+	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}

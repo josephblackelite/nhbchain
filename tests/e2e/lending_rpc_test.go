@@ -46,7 +46,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := core.NewNode(db, validatorKey, "", true)
+	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("seed lending state: %v", err)
 	}
 
-        server := rpc.NewServer(node, nil, rpc.ServerConfig{AllowInsecure: true})
+	server := rpc.NewServer(node, nil, rpc.ServerConfig{AllowInsecure: true})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

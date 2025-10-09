@@ -41,6 +41,7 @@ func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
+	allowMigrateFlag := flag.Bool("allow-migrate", false, "Allow starting with a mismatched state schema (manual migrations only)")
 	flag.Parse()
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
@@ -126,7 +127,7 @@ func main() {
 	}
 
 	// 1. Create the core node.
-	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis)
+	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis, *allowMigrateFlag)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}

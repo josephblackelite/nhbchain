@@ -23,7 +23,7 @@ func TestPotsoRewardConfigRejectsZeroEmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	node, err := core.NewNode(db, key, "", true)
+	node, err := core.NewNode(db, key, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestPotsoHeartbeatRateLimitAndMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	node, err := core.NewNode(db, key, "", true)
+	node, err := core.NewNode(db, key, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}

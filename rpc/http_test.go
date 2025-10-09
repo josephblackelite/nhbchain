@@ -544,7 +544,7 @@ func TestHandleSendTransactionAcceptsZNHBTransfer(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := core.NewNode(db, validatorKey, "", true)
+	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate validator key: %v", err)
 	}
-	node, err := core.NewNode(db, validatorKey, "", true)
+	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}

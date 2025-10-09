@@ -60,6 +60,9 @@ func BuildGenesisFromSpec(spec *GenesisSpec, db storage.Database, info *Validato
 		return nil, nil, fmt.Errorf("init state trie: %w", err)
 	}
 	manager := state.NewManager(stateTrie)
+	if err := manager.SetStateVersion(state.StateVersion); err != nil {
+		return nil, nil, fmt.Errorf("set state version: %w", err)
+	}
 	parentRoot := stateTrie.Root()
 
 	var loyaltyCfg *loyalty.GlobalConfig

@@ -263,7 +263,7 @@ func (e governanceEventEmitter) Emit(evt events.Event) {
 	}
 }
 
-func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool) (*Node, error) {
+func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, allowAutogenesis bool, allowMigrate bool) (*Node, error) {
 	validatorAddr := key.PubKey().Address()
 	fmt.Printf("Starting node with validator address: %s\n", validatorAddr.String())
 
@@ -290,6 +290,13 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			return nil, err
 		}
 	}
+	if err := nhbstate.EnsureStateVersion(stateTrie, allowMigrate); err != nil {
+		if errors.Is(err, nhbstate.ErrStateVersionMismatch) {
+			return nil, fmt.Errorf("%w; pass --allow-migrate to bypass the guard", err)
+		}
+		return nil, err
+	}
+
 	stateProcessor, err := NewStateProcessor(stateTrie)
 	if err != nil {
 		return nil, err

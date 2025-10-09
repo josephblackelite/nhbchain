@@ -199,7 +199,7 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate validator key: %v", err)
 	}
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate validator key: %v", err)
 	}
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
