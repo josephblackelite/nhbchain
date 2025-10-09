@@ -53,6 +53,12 @@ const unbondingPeriod = 72 * time.Hour
 
 const defaultIntentTTL = 24 * time.Hour
 
+const (
+	stakePayoutPeriodDays    = 30
+	secondsPerDay            = 86400
+	stakePayoutPeriodSeconds = stakePayoutPeriodDays * secondsPerDay
+)
+
 var (
 	ErrNonceMismatch      = errors.New("transaction nonce mismatch")
 	ErrInvalidChainID     = errors.New("invalid chain id")
@@ -2297,6 +2303,92 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 	return &entry, nil
 }
 
+func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("staking rewards: address required")
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return nil, err
+	}
+	nowTs := uint64(sp.now().Unix())
+	periodSeconds := uint64(stakePayoutPeriodSeconds)
+	if periodSeconds == 0 {
+		return nil, fmt.Errorf("staking rewards: invalid payout period")
+	}
+	if nowTs <= account.StakeLastPayoutTs {
+		return nil, fmt.Errorf("staking rewards: payout window not yet elapsed")
+	}
+	elapsed := nowTs - account.StakeLastPayoutTs
+	if elapsed < periodSeconds {
+		return nil, fmt.Errorf("staking rewards: payout window not yet elapsed")
+	}
+	periods := elapsed / periodSeconds
+	if periods == 0 {
+		return nil, fmt.Errorf("staking rewards: payout window not yet elapsed")
+	}
+
+	globalIndex, err := sp.loadBigInt(nhbstate.StakingGlobalIndexKey())
+	if err != nil {
+		return nil, fmt.Errorf("staking rewards: load global index: %w", err)
+	}
+	if globalIndex == nil {
+		globalIndex = big.NewInt(0)
+	}
+
+	ensureAccountDefaults(account)
+
+	deltaIndex := new(big.Int).Sub(globalIndex, account.StakeLastIndex)
+	if deltaIndex.Sign() <= 0 || account.StakeShares.Sign() <= 0 {
+		account.StakeLastPayoutTs = nowTs
+		if deltaIndex.Sign() < 0 {
+			account.StakeLastIndex = new(big.Int).Set(globalIndex)
+		}
+		if err := sp.setAccount(addr, account); err != nil {
+			return nil, err
+		}
+		return big.NewInt(0), nil
+	}
+
+	eligibleSeconds := periods * periodSeconds
+	if eligibleSeconds == 0 {
+		return nil, fmt.Errorf("staking rewards: no eligible periods")
+	}
+	elapsedSeconds := elapsed
+	eligibleIndexDelta := new(big.Int).Mul(deltaIndex, new(big.Int).SetUint64(eligibleSeconds))
+	eligibleIndexDelta.Quo(eligibleIndexDelta, new(big.Int).SetUint64(elapsedSeconds))
+	if eligibleIndexDelta.Sign() <= 0 {
+		account.StakeLastPayoutTs = nowTs
+		if err := sp.setAccount(addr, account); err != nil {
+			return nil, err
+		}
+		return big.NewInt(0), nil
+	}
+
+	minted := new(big.Int).Mul(eligibleIndexDelta, account.StakeShares)
+	account.BalanceZNHB.Add(account.BalanceZNHB, minted)
+	account.StakeLastIndex.Add(account.StakeLastIndex, eligibleIndexDelta)
+	account.StakeLastPayoutTs = nowTs
+
+	if err := sp.setAccount(addr, account); err != nil {
+		return nil, err
+	}
+
+	var claimedAddr [20]byte
+	copy(claimedAddr[:], addr)
+	evtPayload := events.StakeRewardsClaimed{
+		Account: claimedAddr,
+		Amount:  new(big.Int).Set(minted),
+		Periods: periods,
+		Shares:  new(big.Int).Set(account.StakeShares),
+	}
+	if evt := evtPayload.Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+
+	return minted, nil
+}
+
 func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error {
 	if tx.Value == nil || tx.Value.Sign() <= 0 {
 		return fmt.Errorf("stake must be positive")
@@ -2445,6 +2537,10 @@ type accountMetadata struct {
 
 	LendingCollateralDisabled bool
 	LendingBorrowDisabled     bool
+
+	StakeShares       *big.Int
+	StakeLastIndex    *big.Int
+	StakeLastPayoutTs uint64
 }
 
 func ensureAccountDefaults(account *types.Account) {
@@ -2456,6 +2552,12 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 	if account.Stake == nil {
 		account.Stake = big.NewInt(0)
+	}
+	if account.StakeShares == nil {
+		account.StakeShares = big.NewInt(0)
+	}
+	if account.StakeLastIndex == nil {
+		account.StakeLastIndex = big.NewInt(0)
 	}
 	if account.LockedZNHB == nil {
 		account.LockedZNHB = big.NewInt(0)
@@ -2532,6 +2634,8 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		BalanceNHB:              big.NewInt(0),
 		BalanceZNHB:             big.NewInt(0),
 		Stake:                   big.NewInt(0),
+		StakeShares:             big.NewInt(0),
+		StakeLastIndex:          big.NewInt(0),
 		EngagementScore:         0,
 		EngagementDay:           "",
 		EngagementMinutes:       0,
@@ -2556,6 +2660,12 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		}
 		if meta.Stake != nil {
 			account.Stake = new(big.Int).Set(meta.Stake)
+		}
+		if meta.StakeShares != nil {
+			account.StakeShares = new(big.Int).Set(meta.StakeShares)
+		}
+		if meta.StakeLastIndex != nil {
+			account.StakeLastIndex = new(big.Int).Set(meta.StakeLastIndex)
 		}
 		if meta.LockedZNHB != nil {
 			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
@@ -2606,6 +2716,7 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
 		account.EngagementGovEvents = meta.EngagementGovEvents
 		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
+		account.StakeLastPayoutTs = meta.StakeLastPayoutTs
 		account.LendingBreaker = types.LendingBreakerFlags{
 			CollateralDisabled: meta.LendingCollateralDisabled,
 			BorrowDisabled:     meta.LendingBorrowDisabled,
@@ -2691,6 +2802,9 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		EngagementLastHeartbeat:   account.EngagementLastHeartbeat,
 		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
+		StakeShares:               new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:            new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:         account.StakeLastPayoutTs,
 	}
 	if err := sp.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -3254,6 +3368,12 @@ func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, er
 	if meta.Unbonding == nil {
 		meta.Unbonding = make([]stakeUnbond, 0)
 	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
+	}
 	return meta, nil
 }
 
@@ -3284,6 +3404,12 @@ func (sp *StateProcessor) writeAccountMetadata(addr []byte, meta *accountMetadat
 	}
 	if meta.Unbonding == nil {
 		meta.Unbonding = make([]stakeUnbond, 0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
 	}
 	encoded, err := rlp.EncodeToBytes(meta)
 	if err != nil {
