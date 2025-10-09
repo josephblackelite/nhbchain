@@ -2437,19 +2437,56 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 		return big.NewInt(0), nil
 	}
 
-	minted := new(big.Int).Mul(eligibleIndexDelta, account.StakeShares)
-	account.BalanceZNHB.Add(account.BalanceZNHB, minted)
-	account.StakeLastIndex.Add(account.StakeLastIndex, eligibleIndexDelta)
-	account.StakeLastPayoutTs = nowTs
+	manager := nhbstate.NewManager(sp.Trie)
 
 	emissionYear := uint32(time.Unix(int64(nowTs), 0).UTC().Year())
-	emissionKey := nhbstate.StakingEmissionYTDKey(emissionYear)
-	emissionTotal, err := sp.loadBigInt(emissionKey)
+	emissionTotal, err := manager.StakingEmissionYTD(emissionYear)
 	if err != nil {
 		return nil, fmt.Errorf("staking rewards: load emission total: %w", err)
 	}
+	maxEmission, err := sp.stakingMaxEmissionPerYear(manager)
+	if err != nil {
+		return nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
+	}
+
+	appliedDelta := new(big.Int).Set(eligibleIndexDelta)
+	minted := new(big.Int).Mul(appliedDelta, account.StakeShares)
+	capHit := false
+
+	if maxEmission.Sign() > 0 {
+		headroom := new(big.Int).Sub(maxEmission, emissionTotal)
+		if headroom.Sign() <= 0 {
+			appliedDelta.SetInt64(0)
+			minted.SetInt64(0)
+			if eligibleIndexDelta.Sign() > 0 {
+				capHit = true
+			}
+		} else {
+			deltaCap := new(big.Int).Quo(headroom, account.StakeShares)
+			if deltaCap.Sign() == 0 {
+				appliedDelta.SetInt64(0)
+				minted.SetInt64(0)
+				if eligibleIndexDelta.Sign() > 0 {
+					capHit = true
+				}
+			} else if deltaCap.Cmp(appliedDelta) < 0 {
+				appliedDelta.Set(deltaCap)
+				minted = new(big.Int).Mul(appliedDelta, account.StakeShares)
+				capHit = true
+			}
+		}
+	}
+
+	if minted.Sign() > 0 {
+		account.BalanceZNHB.Add(account.BalanceZNHB, minted)
+	}
+	if appliedDelta.Sign() > 0 {
+		account.StakeLastIndex.Add(account.StakeLastIndex, appliedDelta)
+	}
+	account.StakeLastPayoutTs = nowTs
+
 	updatedEmission := new(big.Int).Add(emissionTotal, minted)
-	if err := sp.writeBigInt(emissionKey, updatedEmission); err != nil {
+	if err := manager.SetStakingEmissionYTD(emissionYear, updatedEmission); err != nil {
 		return nil, fmt.Errorf("staking rewards: write emission total: %w", err)
 	}
 
@@ -2459,6 +2496,22 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 
 	var claimedAddr [20]byte
 	copy(claimedAddr[:], addr)
+
+	if capHit {
+		remaining := new(big.Int).Sub(new(big.Int).Set(maxEmission), updatedEmission)
+		if remaining.Sign() < 0 {
+			remaining.SetInt64(0)
+		}
+		capEvt := events.StakeEmissionCapHit{
+			Year:      emissionYear,
+			Minted:    new(big.Int).Set(minted),
+			Remaining: remaining,
+		}
+		if evt := capEvt.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
 	evtPayload := events.StakeRewardsClaimed{
 		Account:     claimedAddr,
 		Minted:      new(big.Int).Set(minted),
@@ -3870,6 +3923,37 @@ func (sp *StateProcessor) now() time.Time {
 		return sp.nowFunc()
 	}
 	return time.Now()
+}
+
+func (sp *StateProcessor) stakingMaxEmissionPerYear(manager *nhbstate.Manager) (*big.Int, error) {
+	if sp == nil {
+		return big.NewInt(0), nil
+	}
+	if manager == nil {
+		if sp.Trie == nil {
+			return big.NewInt(0), nil
+		}
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingMaxEmissionPerYearWei)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return big.NewInt(0), nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid max emission value %q", trimmed)
+	}
+	if value.Sign() < 0 {
+		return nil, fmt.Errorf("max emission must be non-negative")
+	}
+	return value, nil
 }
 
 func (sp *StateProcessor) LoyaltyGlobalConfig() (*loyalty.GlobalConfig, error) {

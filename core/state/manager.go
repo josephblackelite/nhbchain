@@ -177,6 +177,47 @@ func (m *Manager) SetStakingGlobalIndex(value *big.Int) error {
 	return m.writeBigInt(StakingGlobalIndexKey(), value)
 }
 
+// StakingEmissionYTD fetches the cumulative staking rewards minted within the
+// provided calendar year. When no record is present the function returns zero.
+func (m *Manager) StakingEmissionYTD(year uint32) (*big.Int, error) {
+	if m == nil {
+		return big.NewInt(0), nil
+	}
+	return m.loadBigInt(StakingEmissionYTDKey(year))
+}
+
+// SetStakingEmissionYTD overwrites the recorded year-to-date staking emission
+// total for the supplied calendar year.
+func (m *Manager) SetStakingEmissionYTD(year uint32, total *big.Int) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	return m.writeBigInt(StakingEmissionYTDKey(year), total)
+}
+
+// IncrementStakingEmissionYTD adds the provided delta to the stored
+// year-to-date staking emission counter and returns the updated total.
+func (m *Manager) IncrementStakingEmissionYTD(year uint32, delta *big.Int) (*big.Int, error) {
+	if m == nil {
+		return big.NewInt(0), fmt.Errorf("state manager unavailable")
+	}
+	if delta == nil {
+		delta = big.NewInt(0)
+	}
+	if delta.Sign() < 0 {
+		return nil, fmt.Errorf("emission delta must be non-negative")
+	}
+	current, err := m.StakingEmissionYTD(year)
+	if err != nil {
+		return nil, err
+	}
+	updated := new(big.Int).Add(current, delta)
+	if err := m.SetStakingEmissionYTD(year, updated); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 // GovernanceProposalKey constructs the storage key for the proposal metadata
 // record under the governance namespace. Proposal identifiers are formatted in
 // decimal to align with human-facing tooling and avoid accidental prefix
