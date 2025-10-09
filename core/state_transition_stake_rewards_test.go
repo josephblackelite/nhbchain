@@ -2,11 +2,15 @@ package core
 
 import (
 	"math/big"
+	"strconv"
 	"testing"
 	"time"
 
+	"nhbchain/core/events"
 	"nhbchain/core/rewards"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
+	"nhbchain/native/governance"
 )
 
 func Test_AccrualOnStakeTopUpAndUnstake(t *testing.T) {
@@ -117,5 +121,193 @@ func Test_ParamChangeRollsIndexFirst(t *testing.T) {
 	expectedIndex.Quo(expectedIndex, big.NewInt(10)) // 1.3 * index unit
 	if account.StakeLastIndex.Cmp(expectedIndex) != 0 {
 		t.Fatalf("unexpected last index after apr change: got %s want %s", account.StakeLastIndex, expectedIndex)
+	}
+}
+
+func Test_EmissionCap_PartialMintAndEvent(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	current := time.Unix(1_700_000_000, 0).UTC()
+	sp.nowFunc = func() time.Time { return current }
+
+	var delegator [20]byte
+	delegator[19] = 0x55
+
+	account := &types.Account{
+		BalanceZNHB:       big.NewInt(0),
+		StakeShares:       big.NewInt(5),
+		StakeLastIndex:    rewards.IndexUnit(),
+		StakeLastPayoutTs: uint64(current.Add(-time.Duration(stakePayoutPeriodSeconds) * time.Second).Unix()),
+	}
+	writeAccount(t, sp, delegator, account)
+	if err := sp.setAccount(delegator[:], account); err != nil {
+		t.Fatalf("set account: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	delta := big.NewInt(400)
+	globalIndex := new(big.Int).Add(rewards.IndexUnit(), delta)
+	if err := manager.SetStakingGlobalIndex(globalIndex); err != nil {
+		t.Fatalf("set global index: %v", err)
+	}
+	if err := manager.ParamStoreSet(governance.ParamKeyStakingMaxEmissionPerYearWei, []byte("750")); err != nil {
+		t.Fatalf("set emission cap: %v", err)
+	}
+
+	minted, err := sp.StakeClaimRewards(delegator[:])
+	if err != nil {
+		t.Fatalf("claim rewards: %v", err)
+	}
+
+	if got, want := minted.String(), "750"; got != want {
+		t.Fatalf("unexpected minted amount: got %s want %s", got, want)
+	}
+
+	updated, err := sp.getAccount(delegator[:])
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	expectedIndex := new(big.Int).Add(rewards.IndexUnit(), big.NewInt(150))
+	if updated.StakeLastIndex.Cmp(expectedIndex) != 0 {
+		t.Fatalf("stake index mismatch: got %s want %s", updated.StakeLastIndex, expectedIndex)
+	}
+	if updated.BalanceZNHB.Cmp(big.NewInt(750)) != 0 {
+		t.Fatalf("balance mismatch: got %s", updated.BalanceZNHB)
+	}
+
+	emissionTotal, err := manager.StakingEmissionYTD(uint32(current.Year()))
+	if err != nil {
+		t.Fatalf("emission total: %v", err)
+	}
+	if emissionTotal.Cmp(big.NewInt(750)) != 0 {
+		t.Fatalf("unexpected emission total: got %s", emissionTotal)
+	}
+
+	evts := sp.Events()
+	if len(evts) != 3 {
+		t.Fatalf("unexpected event count: %d", len(evts))
+	}
+	capEvt := evts[0]
+	if capEvt.Type != events.TypeStakeEmissionCapHit {
+		t.Fatalf("expected emission cap event, got %s", capEvt.Type)
+	}
+	if got := capEvt.Attributes["minted"]; got != "750" {
+		t.Fatalf("cap minted mismatch: got %s", got)
+	}
+	if got := capEvt.Attributes["year"]; got != strconv.Itoa(current.Year()) {
+		t.Fatalf("cap year mismatch: got %s", got)
+	}
+	if got := capEvt.Attributes["remaining"]; got != "0" {
+		t.Fatalf("cap remaining mismatch: got %s", got)
+	}
+
+	rewardsEvt := evts[1]
+	if rewardsEvt.Type != events.TypeStakeRewardsClaimed {
+		t.Fatalf("expected rewards event, got %s", rewardsEvt.Type)
+	}
+	if got := rewardsEvt.Attributes["minted"]; got != "750" {
+		t.Fatalf("rewards minted mismatch: got %s", got)
+	}
+	if got := rewardsEvt.Attributes["emissionYTD"]; got != "750" {
+		t.Fatalf("rewards emission mismatch: got %s", got)
+	}
+}
+
+func Test_YTD_RolloverNewYear(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	current := time.Date(2023, time.December, 31, 12, 0, 0, 0, time.UTC)
+	now := current
+	sp.nowFunc = func() time.Time { return now }
+
+	var delegator [20]byte
+	delegator[19] = 0x56
+
+	account := &types.Account{
+		BalanceZNHB:       big.NewInt(0),
+		StakeShares:       big.NewInt(2),
+		StakeLastIndex:    rewards.IndexUnit(),
+		StakeLastPayoutTs: uint64(current.Add(-time.Duration(stakePayoutPeriodSeconds) * time.Second).Unix()),
+	}
+	writeAccount(t, sp, delegator, account)
+	if err := sp.setAccount(delegator[:], account); err != nil {
+		t.Fatalf("set account: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	deltaOne := big.NewInt(200)
+	if err := manager.SetStakingGlobalIndex(new(big.Int).Add(rewards.IndexUnit(), deltaOne)); err != nil {
+		t.Fatalf("set global index: %v", err)
+	}
+
+	mintedFirst, err := sp.StakeClaimRewards(delegator[:])
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if mintedFirst.Cmp(big.NewInt(400)) != 0 {
+		t.Fatalf("unexpected first mint: %s", mintedFirst)
+	}
+
+	afterFirst, err := sp.getAccount(delegator[:])
+	if err != nil {
+		t.Fatalf("get account after first claim: %v", err)
+	}
+
+	emission2023, err := manager.StakingEmissionYTD(2023)
+	if err != nil {
+		t.Fatalf("emission 2023: %v", err)
+	}
+	if emission2023.Cmp(big.NewInt(400)) != 0 {
+		t.Fatalf("unexpected 2023 emission: %s", emission2023)
+	}
+
+	now = time.Date(2024, time.February, 1, 12, 0, 0, 0, time.UTC)
+	deltaTwo := big.NewInt(300)
+	totalDelta := new(big.Int).Add(new(big.Int).Set(deltaOne), deltaTwo)
+	globalIndex := new(big.Int).Add(rewards.IndexUnit(), totalDelta)
+	if err := manager.SetStakingGlobalIndex(globalIndex); err != nil {
+		t.Fatalf("update global index: %v", err)
+	}
+
+	elapsed := uint64(now.Unix()) - afterFirst.StakeLastPayoutTs
+	eligibleSeconds := uint64(stakePayoutPeriodSeconds)
+	deltaIndex := new(big.Int).Sub(globalIndex, afterFirst.StakeLastIndex)
+	eligibleIndexDelta := new(big.Int).Mul(deltaIndex, new(big.Int).SetUint64(eligibleSeconds))
+	eligibleIndexDelta.Quo(eligibleIndexDelta, new(big.Int).SetUint64(elapsed))
+	expectedSecond := new(big.Int).Mul(eligibleIndexDelta, afterFirst.StakeShares)
+
+	mintedSecond, err := sp.StakeClaimRewards(delegator[:])
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if mintedSecond.Cmp(expectedSecond) != 0 {
+		t.Fatalf("unexpected second mint: got %s want %s", mintedSecond, expectedSecond)
+	}
+
+	emission2024, err := manager.StakingEmissionYTD(2024)
+	if err != nil {
+		t.Fatalf("emission 2024: %v", err)
+	}
+	if emission2024.Cmp(expectedSecond) != 0 {
+		t.Fatalf("unexpected 2024 emission: %s", emission2024)
+	}
+	emission2023, err = manager.StakingEmissionYTD(2023)
+	if err != nil {
+		t.Fatalf("emission 2023 reload: %v", err)
+	}
+	if emission2023.Cmp(big.NewInt(400)) != 0 {
+		t.Fatalf("2023 emission changed: %s", emission2023)
+	}
+
+	evts := sp.Events()
+	if len(evts) != 4 {
+		t.Fatalf("unexpected event count: %d", len(evts))
+	}
+	last := evts[len(evts)-1]
+	if last.Type != events.TypeStakeRewardsClaimedLegacy {
+		t.Fatalf("unexpected last event: %s", last.Type)
+	}
+	if got := last.Attributes["emissionYTD"]; got != expectedSecond.String() {
+		t.Fatalf("legacy emission mismatch: got %s", got)
 	}
 }

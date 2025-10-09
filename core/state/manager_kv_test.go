@@ -87,3 +87,41 @@ func TestStakingKVReadWrite(t *testing.T) {
 		t.Fatalf("unexpected account payload: %x", fetched)
 	}
 }
+
+func TestStakingEmissionHelpers(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	tr, err := trie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	mgr := NewManager(tr)
+
+	if err := mgr.SetStakingEmissionYTD(2025, big.NewInt(100)); err != nil {
+		t.Fatalf("set emission: %v", err)
+	}
+	total, err := mgr.StakingEmissionYTD(2025)
+	if err != nil {
+		t.Fatalf("get emission: %v", err)
+	}
+	if total.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("unexpected emission total: %s", total)
+	}
+
+	updated, err := mgr.IncrementStakingEmissionYTD(2025, big.NewInt(25))
+	if err != nil {
+		t.Fatalf("increment emission: %v", err)
+	}
+	if updated.Cmp(big.NewInt(125)) != 0 {
+		t.Fatalf("unexpected updated emission: %s", updated)
+	}
+
+	stored, err := mgr.StakingEmissionYTD(2025)
+	if err != nil {
+		t.Fatalf("reload emission: %v", err)
+	}
+	if stored.Cmp(big.NewInt(125)) != 0 {
+		t.Fatalf("unexpected stored emission: %s", stored)
+	}
+}

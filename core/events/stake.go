@@ -17,6 +17,8 @@ const (
 	TypeStakeRewardsClaimed = "stake.rewardsClaimed"
 	// TypeStakeRewardsClaimedLegacy aliases the rewards claim event for existing indexers.
 	TypeStakeRewardsClaimedLegacy = "stake.claimed"
+	// TypeStakeEmissionCapHit signals that the annual emission cap prevented a full payout.
+	TypeStakeEmissionCapHit = "stake.emissionCapHit"
 )
 
 // StakeDelegated captures the share delta realised when delegating stake.
@@ -140,4 +142,24 @@ func (e StakeRewardsClaimed) LegacyEvent() *types.Event {
 		attrs["shares"] = e.Shares.String()
 	}
 	return &types.Event{Type: TypeStakeRewardsClaimedLegacy, Attributes: attrs}
+}
+
+// StakeEmissionCapHit indicates that the annual emission cap limited a reward claim.
+type StakeEmissionCapHit struct {
+	Year      uint32
+	Minted    *big.Int
+	Remaining *big.Int
+}
+
+// EventType satisfies the Event interface.
+func (StakeEmissionCapHit) EventType() string { return TypeStakeEmissionCapHit }
+
+// Event converts the structured payload into a broadcastable event.
+func (e StakeEmissionCapHit) Event() *types.Event {
+	attrs := map[string]string{
+		"year":      strconv.FormatUint(uint64(e.Year), 10),
+		"minted":    formatAmount(e.Minted),
+		"remaining": formatAmount(e.Remaining),
+	}
+	return &types.Event{Type: TypeStakeEmissionCapHit, Attributes: attrs}
 }
