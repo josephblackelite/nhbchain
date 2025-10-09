@@ -52,3 +52,120 @@ systems can render them unambiguously.
   }
 }
 ```
+
+## Staking helpers
+
+The staking surface now exposes read-only previews and a reward claim helper.
+All three methods require the standard bearer token in the `Authorization`
+header. Calls are rate limited using the same per-source window that guards
+transaction submission and will reject requests with HTTP `429` and the
+`staking rate limit exceeded` message once the limit is hit. If governance
+pauses the staking module the methods return HTTP `503` with the
+`staking module paused` error payload.
+
+### `stake_previewClaim`
+
+Returns the rewards currently payable for the supplied delegator alongside the
+timestamp of the next eligible payout window.
+
+```json
+{
+  "id": 3,
+  "jsonrpc": "2.0",
+  "method": "stake_previewClaim",
+  "params": ["nhb1exampledelegator…"]
+}
+```
+
+```json
+{
+  "id": 3,
+  "jsonrpc": "2.0",
+  "result": {
+    "payable": "7425000000000000000000",
+    "nextPayoutTs": 1719969600
+  }
+}
+```
+
+If the payout window has not elapsed the method returns a zero `payable` value
+and the timestamp of the next payout window. When the module is paused the
+response mirrors the claim helper below.
+
+### `stake_getPosition`
+
+Exposes the delegator’s current staking ledger snapshot so operators can check
+shares, reward index, and payout timing without inspecting raw account state.
+
+```json
+{
+  "id": 4,
+  "jsonrpc": "2.0",
+  "method": "stake_getPosition",
+  "params": ["nhb1exampledelegator…"]
+}
+```
+
+```json
+{
+  "id": 4,
+  "jsonrpc": "2.0",
+  "result": {
+    "shares": "5000000000000000000",
+    "lastIndex": "1500",
+    "lastPayoutTs": 1717387200
+  }
+}
+```
+
+### `stake_claimRewards`
+
+Claims accrued staking rewards, returns the amount minted, the updated balance
+summary, and the timestamp when the next payout becomes available.
+
+```json
+{
+  "id": 5,
+  "jsonrpc": "2.0",
+  "method": "stake_claimRewards",
+  "params": ["nhb1exampledelegator…"]
+}
+```
+
+```json
+{
+  "id": 5,
+  "jsonrpc": "2.0",
+  "result": {
+    "minted": "7425000000000000000000",
+    "balance": {
+      "address": "nhb1exampledelegator…",
+      "balanceNHB": "0",
+      "balanceZNHB": "17425000000000000000000",
+      "stake": "10000000000000000000",
+      "nonce": 7,
+      "engagementScore": 0
+    },
+    "nextPayoutTs": 1722561600
+  }
+}
+```
+
+Attempting to claim before the payout window elapses yields a `400` response
+with the `failed to claim staking rewards` message and a detailed rejection in
+the error `data` field. For example:
+
+```json
+{
+  "id": 5,
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32602,
+    "message": "failed to claim staking rewards",
+    "data": "payout window has not elapsed"
+  }
+}
+```
+
+When the module is paused the helper returns HTTP `503` with the `staking
+module paused` message.
