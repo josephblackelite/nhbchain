@@ -69,6 +69,7 @@ const (
 	codeRateLimited             = -32020
 	codeMempoolFull             = -32030
 	codeInvalidPolicyInvariants = -32040
+	codeModulePaused            = -32050
 )
 
 type rateLimiter struct {

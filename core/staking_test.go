@@ -1,7 +1,9 @@
 package core
 
 import (
+	"errors"
 	"math/big"
+	"strconv"
 	"testing"
 	"time"
 
@@ -9,7 +11,9 @@ import (
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 
+	"nhbchain/core/events"
 	"nhbchain/core/types"
+	"nhbchain/crypto"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
@@ -214,5 +218,66 @@ func TestStakeDelegateSwitchValidatorBlocked(t *testing.T) {
 	}
 	if _, err := sp.StakeDelegate(delegator[:], validatorB[:], big.NewInt(100)); err == nil {
 		t.Fatalf("expected error when switching validator without undelegating")
+	}
+}
+
+type staticPauseView map[string]bool
+
+func (p staticPauseView) IsPaused(module string) bool { return p[module] }
+
+func Test_PauseBlocksMutations_All(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetPauseView(staticPauseView{moduleStaking: true})
+
+	var delegator [20]byte
+	delegator[19] = 0x21
+
+	account := &types.Account{BalanceZNHB: big.NewInt(5_000), LockedZNHB: big.NewInt(1_000), Stake: big.NewInt(1_000)}
+	writeAccount(t, sp, delegator, account)
+
+	if _, err := sp.StakeDelegate(delegator[:], nil, big.NewInt(100)); !errors.Is(err, ErrStakePaused) {
+		t.Fatalf("expected ErrStakePaused for delegate, got %v", err)
+	}
+	checkStakePausedEvent(t, sp, events.StakeOperationDelegate, 0, delegator)
+
+	if _, err := sp.StakeUndelegate(delegator[:], big.NewInt(100)); !errors.Is(err, ErrStakePaused) {
+		t.Fatalf("expected ErrStakePaused for undelegate, got %v", err)
+	}
+	checkStakePausedEvent(t, sp, events.StakeOperationUndelegate, 0, delegator)
+
+	if _, err := sp.StakeClaim(delegator[:], 42); !errors.Is(err, ErrStakePaused) {
+		t.Fatalf("expected ErrStakePaused for claim, got %v", err)
+	}
+	checkStakePausedEvent(t, sp, events.StakeOperationClaim, 42, delegator)
+
+	if _, err := sp.StakeClaimRewards(delegator[:]); !errors.Is(err, ErrStakePaused) {
+		t.Fatalf("expected ErrStakePaused for claim rewards, got %v", err)
+	}
+	checkStakePausedEvent(t, sp, events.StakeOperationClaimRewards, 0, delegator)
+}
+
+func checkStakePausedEvent(t *testing.T, sp *StateProcessor, operation string, unbondID uint64, delegator [20]byte) {
+	t.Helper()
+	eventsLog := sp.Events()
+	if len(eventsLog) == 0 {
+		t.Fatalf("expected stake.paused event for %s", operation)
+	}
+	evt := eventsLog[len(eventsLog)-1]
+	if evt.Type != events.TypeStakePaused {
+		t.Fatalf("expected %s event, got %s", events.TypeStakePaused, evt.Type)
+	}
+	if op := evt.Attributes["operation"]; op != operation {
+		t.Fatalf("unexpected operation attribute: got %s want %s", op, operation)
+	}
+	if addr := evt.Attributes["addr"]; addr != crypto.MustNewAddress(crypto.NHBPrefix, delegator[:]).String() {
+		t.Fatalf("unexpected addr attribute: got %s", addr)
+	}
+	if evt.Attributes["reason"] == "" {
+		t.Fatalf("expected reason attribute")
+	}
+	if unbondID > 0 {
+		if evt.Attributes["unbondingId"] != strconv.FormatUint(unbondID, 10) {
+			t.Fatalf("unexpected unbondingId attribute: got %s want %d", evt.Attributes["unbondingId"], unbondID)
+		}
 	}
 }

@@ -201,11 +201,14 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 	claimReq := &RPCRequest{ID: 3, Params: []json.RawMessage{addrParam}}
 	claimRec := httptest.NewRecorder()
 	env.server.handleStakeClaimRewards(claimRec, env.newRequest(), claimReq)
-	_, rpcErr := decodeRPCResponse(t, claimRec)
-	if rpcErr == nil {
-		t.Fatalf("expected pause rejection")
-	}
-	if rpcErr.Message != "staking module paused" {
-		t.Fatalf("unexpected pause error: %+v", rpcErr)
-	}
+        _, rpcErr := decodeRPCResponse(t, claimRec)
+        if rpcErr == nil {
+                t.Fatalf("expected pause rejection")
+        }
+        if rpcErr.Message != "staking module paused" {
+                t.Fatalf("unexpected pause error: %+v", rpcErr)
+        }
+        if rpcErr.Code != codeModulePaused {
+                t.Fatalf("unexpected pause error code: got %d want %d", rpcErr.Code, codeModulePaused)
+        }
 }

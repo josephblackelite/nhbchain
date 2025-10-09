@@ -3,6 +3,7 @@ package events
 import (
 	"math/big"
 	"strconv"
+	"strings"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -19,6 +20,17 @@ const (
 	TypeStakeRewardsClaimedLegacy = "stake.claimed"
 	// TypeStakeEmissionCapHit signals that the annual emission cap prevented a full payout.
 	TypeStakeEmissionCapHit = "stake.emissionCapHit"
+	// TypeStakePaused is emitted when staking mutations are rejected due to a pause toggle.
+	TypeStakePaused = "stake.paused"
+
+	// StakeOperationDelegate identifies the delegation flow.
+	StakeOperationDelegate = "delegate"
+	// StakeOperationUndelegate identifies the undelegation flow.
+	StakeOperationUndelegate = "undelegate"
+	// StakeOperationClaim identifies unbond claims.
+	StakeOperationClaim = "claim"
+	// StakeOperationClaimRewards identifies reward claims.
+	StakeOperationClaimRewards = "claimRewards"
 )
 
 // StakeDelegated captures the share delta realised when delegating stake.
@@ -162,4 +174,36 @@ func (e StakeEmissionCapHit) Event() *types.Event {
 		"remaining": formatAmount(e.Remaining),
 	}
 	return &types.Event{Type: TypeStakeEmissionCapHit, Attributes: attrs}
+}
+
+// StakePaused captures a staking request rejected due to a governance pause.
+type StakePaused struct {
+	Account     [20]byte
+	Operation   string
+	Reason      string
+	UnbondingID uint64
+}
+
+// EventType satisfies the Event interface.
+func (StakePaused) EventType() string { return TypeStakePaused }
+
+// Event converts the structured payload into a broadcastable event.
+func (e StakePaused) Event() *types.Event {
+	attrs := make(map[string]string)
+	if !zeroAddress(e.Account) {
+		attrs["addr"] = crypto.MustNewAddress(crypto.NHBPrefix, e.Account[:]).String()
+	}
+	if op := strings.TrimSpace(e.Operation); op != "" {
+		attrs["operation"] = op
+	}
+	if reason := strings.TrimSpace(e.Reason); reason != "" {
+		attrs["reason"] = reason
+	}
+	if e.UnbondingID > 0 {
+		attrs["unbondingId"] = strconv.FormatUint(e.UnbondingID, 10)
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	return &types.Event{Type: TypeStakePaused, Attributes: attrs}
 }
