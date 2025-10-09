@@ -29,6 +29,38 @@ mutating endpoints require HMAC-authenticated API keys issued to partner applica
 
 `IDN-400` (bad request), `IDN-401` (auth), `IDN-404` (not found), `IDN-409` (conflict/idempotent replay), `IDN-429` (rate limit).
 
+## Deployment & Configuration
+
+The production service lives under [`services/identity-gateway`](../../services/identity-gateway). It is a
+small Go HTTP binary backed by BoltDB for verification state, idempotency caches, and alias bindings. The
+process reads configuration exclusively from environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `IDENTITY_GATEWAY_LISTEN` | `:8095` | Address to bind the HTTP listener. |
+| `IDENTITY_GATEWAY_PORT` | _empty_ | Optional override for the listener port when running behind Compose/Helm. |
+| `IDENTITY_GATEWAY_DB` | `identity-gateway.db` | Path to the BoltDB file storing verification sessions and bindings. |
+| `IDENTITY_GATEWAY_API_KEYS` | _required_ | Comma-delimited list of `key:secret` pairs used for HMAC auth. |
+| `IDENTITY_EMAIL_SALT` | _required_ | Salt used for HMAC(email) derivation. Rotate per environment. |
+| `IDENTITY_GATEWAY_CODE_TTL` | `10m` | Validity window for verification codes. |
+| `IDENTITY_GATEWAY_REGISTER_WINDOW` | `1h` | Sliding window used for the 5-attempts-per-email rate limit. |
+| `IDENTITY_GATEWAY_REGISTER_ATTEMPTS` | `5` | Max register calls permitted per window for an email hash. |
+| `IDENTITY_GATEWAY_TIMESTAMP_SKEW` | `5m` | Allowed difference between request timestamp and server clock. |
+| `IDENTITY_GATEWAY_IDEMPOTENCY_TTL` | `24h` | Retention for cached responses keyed by `Idempotency-Key`. |
+
+Telemetry (`OTEL_EXPORTER_*`) and logging (`NHB_ENV`) follow the same conventions as the other services. A
+local instance can be launched via:
+
+```bash
+IDENTITY_GATEWAY_API_KEYS=demo:demo-secret \
+IDENTITY_EMAIL_SALT=demo-salt \
+go run ./services/identity-gateway/cmd/identity-gateway
+```
+
+The Docker Compose bundle now includes an `identity-gateway` service that exposes port `8095` and stores
+state under the `identity-gateway-data` volume. Update the API key secret before exposing the gateway outside
+trusted environments.
+
 ---
 
 ## Endpoints

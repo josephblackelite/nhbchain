@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { readServerConfig } from './config';
 
 export function computeEmailHash(email: string): string {
-  const normalized = email.trim().toLowerCase();
+  const normalized = email.trim().toLowerCase().normalize('NFKC');
   if (!normalized) {
     throw new Error('Email required');
   }
