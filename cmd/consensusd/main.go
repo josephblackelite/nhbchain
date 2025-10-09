@@ -84,6 +84,7 @@ func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
+	allowMigrateFlag := flag.Bool("allow-migrate", false, "Allow starting with a mismatched state schema (manual migrations only)")
 	grpcAddress := flag.String("grpc", "127.0.0.1:9090", "Address for the consensus gRPC server")
 	networkAddress := flag.String("p2p", "localhost:9091", "Address of the p2p daemon network service")
 	var proposalTimeoutFlag durationFlag
@@ -169,7 +170,7 @@ func main() {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
 	}
 
-	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis)
+	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis, *allowMigrateFlag)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}

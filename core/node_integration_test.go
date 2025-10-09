@@ -21,7 +21,7 @@ func TestCommitBlockRollsBackOnApplyError(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestCreateBlockRejectsInvalidChainID(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestCommitBlockRejectsInvalidChainID(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestCommitBlockEnforcesTimestampWindow(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestCommitBlockRejectsHeightMismatch(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
-	node, err := NewNode(db, validatorKey, "", true)
+	node, err := NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}

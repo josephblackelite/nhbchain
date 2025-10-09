@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"nhbchain/core/genesis"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
+
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 )
 
 func writeTestGenesis(t *testing.T, dir string) (genesis.GenesisSpec, string) {
@@ -75,7 +80,7 @@ func TestNewNodeWithLevelDBGenesisReload(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 
-	if _, err := NewNode(db, key, genesisPath, false); err != nil {
+	if _, err := NewNode(db, key, genesisPath, false, false); err != nil {
 		t.Fatalf("create node: %v", err)
 	}
 
@@ -92,7 +97,7 @@ func TestNewNodeWithLevelDBGenesisReload(t *testing.T) {
 		t.Fatalf("generate second key: %v", err)
 	}
 
-	if _, err := NewNode(db2, key2, genesisPath, false); err != nil {
+	if _, err := NewNode(db2, key2, genesisPath, false, false); err != nil {
 		t.Fatalf("create node after restart: %v", err)
 	}
 }
@@ -127,7 +132,39 @@ func TestNewNodeRebuildsMissingGenesisState(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 
-	if _, err := NewNode(reopened, key, genesisPath, false); err != nil {
+	if _, err := NewNode(reopened, key, genesisPath, false, false); err != nil {
 		t.Fatalf("create node after rebuilding genesis state: %v", err)
+	}
+}
+
+func Test_StateVersion_RefusesOldSchemaWithoutFlag(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	header := &types.BlockHeader{
+		Height:    0,
+		Timestamp: time.Now().UTC().Unix(),
+		PrevHash:  []byte{},
+		StateRoot: gethtypes.EmptyRootHash.Bytes(),
+		TxRoot:    gethtypes.EmptyRootHash.Bytes(),
+	}
+	block := types.NewBlock(header, nil)
+	if _, err := persistGenesisBlock(db, block); err != nil {
+		t.Fatalf("persist genesis block: %v", err)
+	}
+
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	if _, err := NewNode(db, key, "", false, false); err == nil {
+		t.Fatalf("expected state version guard to reject mismatched schema")
+	} else if !strings.Contains(err.Error(), "schema version mismatch") {
+		t.Fatalf("expected schema version mismatch error, got %v", err)
+	}
+
+	if _, err := NewNode(db, key, "", false, true); err != nil {
+		t.Fatalf("allow-migrate should bypass state version guard: %v", err)
 	}
 }

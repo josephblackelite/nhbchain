@@ -239,7 +239,7 @@ func newRPCTestServer(t *testing.T, cfg rpc.ServerConfig) *rpcTestServer {
 		db.Close()
 		t.Fatalf("generate validator key: %v", err)
 	}
-	node, err := core.NewNode(db, validatorKey, "", true)
+	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		db.Close()
 		t.Fatalf("new node: %v", err)

@@ -35,7 +35,7 @@ func NewMiniChain() (*MiniChain, error) {
 		return nil, fmt.Errorf("generate validator key: %w", err)
 	}
 
-	node, err := core.NewNode(db, validatorKey, "", true)
+	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create node: %w", err)
