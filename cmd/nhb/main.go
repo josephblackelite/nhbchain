@@ -135,6 +135,10 @@ func main() {
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
+	if err := node.SyncStakingParams(); err != nil {
+		panic(fmt.Sprintf("Failed to apply staking params: %v", err))
+	}
+
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to parse paymaster limits: %v", err))
