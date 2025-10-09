@@ -153,6 +153,30 @@ func StakingAcctKey(addr []byte) []byte {
 	return key
 }
 
+// StakingGlobalIndex returns the protocol-wide staking reward index accumulator.
+// Callers should treat the returned value as read-only.
+func (m *Manager) StakingGlobalIndex() (*big.Int, error) {
+	if m == nil {
+		return big.NewInt(0), nil
+	}
+	value, err := m.loadBigInt(StakingGlobalIndexKey())
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return big.NewInt(0), nil
+	}
+	return value, nil
+}
+
+// SetStakingGlobalIndex overwrites the global staking reward index accumulator.
+func (m *Manager) SetStakingGlobalIndex(value *big.Int) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	return m.writeBigInt(StakingGlobalIndexKey(), value)
+}
+
 // GovernanceProposalKey constructs the storage key for the proposal metadata
 // record under the governance namespace. Proposal identifiers are formatted in
 // decimal to align with human-facing tooling and avoid accidental prefix

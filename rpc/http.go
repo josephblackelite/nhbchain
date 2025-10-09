@@ -790,6 +790,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleStakeUndelegate(recorder, r, req)
 	case "stake_claim":
 		s.handleStakeClaim(recorder, r, req)
+	case "stake_claimRewards":
+		s.handleStakeClaimRewards(recorder, r, req)
+	case "stake_getPosition":
+		s.handleStakeGetPosition(recorder, r, req)
+	case "stake_previewClaim":
+		s.handleStakePreviewClaim(recorder, r, req)
 	case "loyalty_createBusiness":
 		s.handleLoyaltyCreateBusiness(recorder, r, req)
 	case "loyalty_setPaymaster":

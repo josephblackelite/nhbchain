@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"nhbchain/crypto"
 )
@@ -24,6 +25,23 @@ type stakeUndelegateParams struct {
 type stakeClaimParams struct {
 	Caller      string `json:"caller"`
 	UnbondingID uint64 `json:"unbondingId"`
+}
+
+type stakeClaimRewardsResult struct {
+	Minted       string          `json:"minted"`
+	Balance      BalanceResponse `json:"balance"`
+	NextPayoutTs uint64          `json:"nextPayoutTs"`
+}
+
+type stakePositionResult struct {
+	Shares       string `json:"shares"`
+	LastIndex    string `json:"lastIndex"`
+	LastPayoutTs uint64 `json:"lastPayoutTs"`
+}
+
+type stakePreviewClaimResult struct {
+	Payable      string `json:"payable"`
+	NextPayoutTs uint64 `json:"nextPayoutTs"`
 }
 
 func parseAmount(amount string) (*big.Int, error) {
@@ -166,4 +184,141 @@ func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *R
 		"balance": balanceResponseFromAccount(params.Caller, account),
 	}
 	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	if authErr := s.requireAuth(r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return
+	}
+	if _, ok := s.guardStakeRequest(w, r, req); !ok {
+		return
+	}
+	addrStr, addr, err := parseStakeAddressParam(req.Params)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	minted, err := s.node.StakeClaimRewards(addr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim staking rewards", err.Error())
+		return
+	}
+	account, err := s.node.GetAccount(addr[:])
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", err.Error())
+		return
+	}
+	_, nextPayout, err := s.node.StakePreviewClaim(addr, time.Time{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to preview staking rewards", err.Error())
+		return
+	}
+	mintedStr := "0"
+	if minted != nil {
+		mintedStr = minted.String()
+	}
+	result := stakeClaimRewardsResult{
+		Minted:       mintedStr,
+		Balance:      balanceResponseFromAccount(addrStr, account),
+		NextPayoutTs: nextPayout,
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleStakeGetPosition(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	if authErr := s.requireAuth(r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return
+	}
+	if _, ok := s.guardStakeRequest(w, r, req); !ok {
+		return
+	}
+	_, addr, err := parseStakeAddressParam(req.Params)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	account, err := s.node.GetAccount(addr[:])
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", err.Error())
+		return
+	}
+	shares := "0"
+	lastIndex := "0"
+	if account.StakeShares != nil {
+		shares = account.StakeShares.String()
+	}
+	if account.StakeLastIndex != nil {
+		lastIndex = account.StakeLastIndex.String()
+	}
+	result := stakePositionResult{
+		Shares:       shares,
+		LastIndex:    lastIndex,
+		LastPayoutTs: account.StakeLastPayoutTs,
+	}
+	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handleStakePreviewClaim(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	if authErr := s.requireAuth(r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return
+	}
+	now, ok := s.guardStakeRequest(w, r, req)
+	if !ok {
+		return
+	}
+	_, addr, err := parseStakeAddressParam(req.Params)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	payable, nextPayout, err := s.node.StakePreviewClaim(addr, now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to preview staking rewards", err.Error())
+		return
+	}
+	payableStr := "0"
+	if payable != nil {
+		payableStr = payable.String()
+	}
+	result := stakePreviewClaimResult{
+		Payable:      payableStr,
+		NextPayoutTs: nextPayout,
+	}
+	writeResult(w, req.ID, result)
+}
+
+func parseStakeAddressParam(params []json.RawMessage) (string, [20]byte, error) {
+	if len(params) != 1 {
+		return "", [20]byte{}, fmt.Errorf("address parameter required")
+	}
+	var addrStr string
+	if err := json.Unmarshal(params[0], &addrStr); err != nil {
+		return "", [20]byte{}, fmt.Errorf("invalid address parameter")
+	}
+	addr, err := decodeBech32(addrStr)
+	if err != nil {
+		return "", [20]byte{}, fmt.Errorf("invalid address: %w", err)
+	}
+	return addrStr, addr, nil
+}
+
+func (s *Server) guardStakeRequest(w http.ResponseWriter, r *http.Request, req *RPCRequest) (time.Time, bool) {
+	now := time.Now().UTC()
+	if s.node == nil {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
+		return time.Time{}, false
+	}
+	if s.node.IsPaused("staking") {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "staking module paused", nil)
+		return time.Time{}, false
+	}
+	source := s.clientSource(r)
+	if !s.allowSource(source, now) {
+		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "staking rate limit exceeded", source)
+		return time.Time{}, false
+	}
+	return now, true
 }

@@ -2905,6 +2905,87 @@ func (n *Node) StakeClaimRewards(addr [20]byte) (*big.Int, error) {
 	return n.state.StakeClaimRewards(addr[:])
 }
 
+// StakePreviewClaim estimates the staking reward that would be minted if the
+// caller claimed rewards at the provided timestamp. The state is not mutated.
+func (n *Node) StakePreviewClaim(addr [20]byte, at time.Time) (*big.Int, uint64, error) {
+	if n == nil {
+		return nil, 0, fmt.Errorf("node unavailable")
+	}
+
+	snapshotTime := at
+	if snapshotTime.IsZero() {
+		snapshotTime = n.currentTime()
+	}
+	snapshotTime = snapshotTime.UTC()
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	if n.state == nil || n.state.Trie == nil {
+		return nil, 0, fmt.Errorf("state unavailable")
+	}
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	account, err := manager.GetAccount(addr[:])
+	if err != nil {
+		return nil, 0, err
+	}
+
+	globalIndex, err := manager.StakingGlobalIndex()
+	if err != nil {
+		return nil, 0, err
+	}
+	if globalIndex == nil {
+		globalIndex = big.NewInt(0)
+	}
+
+	payoutDays := uint64(30)
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays); err == nil && ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			if value, parseErr := strconv.ParseUint(trimmed, 10, 64); parseErr == nil && value > 0 {
+				payoutDays = value
+			}
+		}
+	}
+
+	const secondsPerDay = uint64(86400)
+	periodSeconds := payoutDays * secondsPerDay
+
+	lastPayout := account.StakeLastPayoutTs
+	nextPayout := lastPayout
+	if periodSeconds > 0 {
+		nextPayout = lastPayout + periodSeconds
+	}
+
+	payable := big.NewInt(0)
+	if periodSeconds > 0 && account.StakeShares != nil && account.StakeShares.Sign() > 0 {
+		nowTs := uint64(snapshotTime.Unix())
+		if nowTs > lastPayout {
+			elapsed := nowTs - lastPayout
+			if elapsed >= periodSeconds {
+				periods := elapsed / periodSeconds
+				if periods > 0 {
+					deltaIndex := new(big.Int).Sub(globalIndex, account.StakeLastIndex)
+					if deltaIndex.Sign() > 0 {
+						eligibleSeconds := periods * periodSeconds
+						if eligibleSeconds > 0 {
+							eligibleIndexDelta := new(big.Int).Mul(deltaIndex, new(big.Int).SetUint64(eligibleSeconds))
+							eligibleIndexDelta.Quo(eligibleIndexDelta, new(big.Int).SetUint64(elapsed))
+							if eligibleIndexDelta.Sign() > 0 {
+								payable = new(big.Int).Mul(eligibleIndexDelta, account.StakeShares)
+								nextPayout = nowTs + periodSeconds
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return payable, nextPayout, nil
+}
+
 func (n *Node) EscrowGet(id [32]byte) (*escrow.Escrow, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
