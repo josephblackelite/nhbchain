@@ -67,6 +67,9 @@ RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
 RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
 RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
 
+[global.pauses]
+Staking = false
+
 [potso.rewards]
 EpochLengthBlocks = 120
 AlphaStakeBps = 7000

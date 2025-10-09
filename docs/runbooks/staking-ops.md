@@ -32,6 +32,13 @@ This runbook covers the operational tooling for tracking staking reward emission
 3. Disable automation that retries failed staking transactions to avoid log noise.
 4. Track pending unbonds approaching maturity; once the pause lifts, proactively message the impacted delegators to claim.
 
+### Toggle staking availability
+
+1. Inspect the current `system/pauses` map to confirm the live setting. Operators can run `go run ./examples/docs/ops/read_pauses` or query the consensus node directly (`nhbctl state get --key system/pauses`). The entry must read `staking = false` for the module to accept new requests.
+2. To **resume staking**, stage a governance `gov.v1/MsgSetPauses` transaction with `pauses.staking = false`. Use the `native/params.Store.SetPauses` helper in automation to persist the change and capture the transaction hash for audit logs.
+3. To **pause staking**, repeat the flow with `pauses.staking = true`. Communicate the pause reason and expected duration to delegators before executing the transaction.
+4. After the transaction executes, confirm both the `system/pauses` state and the RPC behaviour (mutating calls should either succeed or return `codeModulePaused` depending on the chosen state).
+
 ## Respond to cap saturation
 
 1. Confirm the current year-to-date total and the recent `stake.emissionCapHit` events.

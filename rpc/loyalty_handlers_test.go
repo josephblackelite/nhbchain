@@ -41,7 +41,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	node, err := core.NewNode(db, key, "", true, false)
+	node, err := core.NewNode(db, key, "", true, true)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
 	}

@@ -29,9 +29,11 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/service"
 	"nhbchain/core"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 	nativecommon "nhbchain/native/common"
 	"nhbchain/native/lending"
+	nativeparams "nhbchain/native/params"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
 	"nhbchain/observability/logging"
@@ -305,6 +307,11 @@ func main() {
 	node.SetSwapManualOracle(manualOracle)
 
 	node.SetModulePauses(cfg.Global.Pauses)
+	if !cfg.Global.Pauses.Staking {
+		if err := ensureStakingPauseCleared(node); err != nil {
+			panic(fmt.Sprintf("failed to clear staking pause: %v", err))
+		}
+	}
 	node.SetModuleQuotas(map[string]nativecommon.Quota{
 		"lending": convertQuota(cfg.Global.Quotas.Lending),
 		"swap":    convertQuota(cfg.Global.Quotas.Swap),
@@ -374,6 +381,27 @@ func main() {
 	fmt.Println("--- Consensus node initialised and running ---")
 	<-ctx.Done()
 	fmt.Println("--- Consensus node shutting down ---")
+}
+
+func ensureStakingPauseCleared(node *core.Node) error {
+	if node == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	return node.WithState(func(manager *nhbstate.Manager) error {
+		store := nativeparams.NewStore(manager)
+		pauses, err := store.Pauses()
+		if err != nil {
+			return fmt.Errorf("load staking pause state: %w", err)
+		}
+		if !pauses.Staking {
+			return nil
+		}
+		pauses.Staking = false
+		if err := store.SetPauses(pauses); err != nil {
+			return fmt.Errorf("persist staking pause state: %w", err)
+		}
+		return nil
+	})
 }
 
 func applyConsensusTimeoutOverrides(base config.Consensus, proposal, prevote, precommit, commit durationFlag, lookup envLookupFunc) (config.Consensus, error) {
