@@ -29,6 +29,9 @@ type Account struct {
 	BalanceNHB              *big.Int             `json:"balanceNHB"`
 	BalanceZNHB             *big.Int             `json:"balanceZNHB"`
 	Stake                   *big.Int             `json:"stake"`
+	StakeShares             *big.Int             `json:"stakeShares"`
+	StakeLastIndex          *big.Int             `json:"stakeLastIndex"`
+	StakeLastPayoutTs       uint64               `json:"stakeLastPayoutTs"`
 	LockedZNHB              *big.Int             `json:"lockedZNHB"`
 	DelegatedValidator      []byte               `json:"delegatedValidator,omitempty"`
 	PendingUnbonds          []StakeUnbond        `json:"pendingUnbonds,omitempty"`
