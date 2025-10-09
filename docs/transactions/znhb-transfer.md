@@ -127,9 +127,9 @@ token is only attached on trusted backends.
 The `gasLimit`/`gasPrice` fields describe the NHB gas that is burned for
 execution. ZNHB transfers **do not** carry an additional MDR-style fee; instead
 they follow the per-asset merchant discount rate described in the [fees
-reference](../fees/README.md) where ZNHB promotions are currently fully
+reference](../fees/policy.md) where ZNHB promotions are currently fully
 sponsored. Any NHB required for gas is withdrawn from the sender (or from the
-configured sponsor account if [gas sponsorship](../fees/gas-sponsorship.md) is
+configured sponsor account if [pass-through sponsorship](../fees/policy.md#pass-through-sponsorship) is
 enabled for the merchant), while the ZNHB face value routes to the recipient.
 
 ### Expected responses

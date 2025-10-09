@@ -6,13 +6,20 @@ This document describes the ZapNHB staking pipeline, on-chain state layout, JSON
 
 ## Overview
 
-Once governance activates the program, stakeholders will be able to lock ZapNHB (ZNHB) balances, optionally delegate voting power to validators, and later queue withdrawals through an unbonding period before claiming their tokens. The staking module supports:
+Once governance activates the program, stakeholders will be able to lock ZapNHB (ZNHB) balances, optionally delegate voting power to validators, and later queue withdrawals through an unbonding period before claiming their tokens. Rewards accrue at a **fixed 12.5% annual percentage rate (APR)** that is **non-compounding**—each reward period mints a linear share of the annual budget using a global reward index instead of rolling previous interest into the next cycle. Payouts settle on a **30-day interval** (2,592,000 seconds) aligned to the first reward minted after activation. The staking module supports:
 
 - Self-staking and third-party delegation with validator power tracking.
 - Deterministic unbonding queues per delegator with a 72-hour release window.
-- JSON-RPC endpoints to delegate, undelegate, and claim matured stake.
-- Event emission for delegated, undelegated, and claimed stake transitions.
-- Expanded balance queries that expose locked amounts, delegation targets, and unbond queues.
+- A global reward index model that updates proportionally to stake and time, avoiding compounding interest.
+- JSON-RPC endpoints and CLI commands to delegate, undelegate, claim matured stake, and inspect reward indexes.
+- Event emission for delegated, undelegated, claimed stake, reward index updates, and emission-cap events.
+- Expanded balance queries that expose locked amounts, delegation targets, reward indexes, pending unbond queues, and unclaimed rewards.
+
+### Reward Index Model (Auditors & Developers)
+
+Rewards accrue through a pair of monotonically increasing indexes: a global reward index that advances every 30-day interval and per-delegator cursors stored in account metadata. When the network mints rewards, it increments the global index by `(targetAPR / 12) * indexScale` to reflect the monthly share of the 12.5% APR. Individual delegators earn `lockedZNHB * (globalIndex - delegatorIndex)` and then advance their personal index cursor. Because the calculation references the difference between indexes, rewards do **not** compound—the principal stays constant across periods while unclaimed rewards accumulate separately.
+
+Delegators can safely miss one or more 30-day payouts: their index cursor advances when they eventually claim, minting the entire accrued balance in a single transaction.
 
 ## State Model (Auditors & Developers)
 
@@ -69,7 +76,7 @@ Entries are appended when `StakeUndelegate` is invoked and removed upon successf
 
 ### Updated Balance Query
 
-`nhb_getBalance` now returns the extended `BalanceResponse` payload:
+`nhb_getBalance` now returns the extended `BalanceResponse` payload, including the delegator-specific reward index cursor and unclaimed reward amount:
 
 ```json
 {
@@ -79,6 +86,9 @@ Entries are appended when `StakeUndelegate` is invoked and removed upon successf
   "stake": "1000",
   "lockedZNHB": "1000",
   "delegatedValidator": "nhb1validator...",
+  "rewardIndex": "285000000000000000000", // scaled global index snapshot
+  "delegatorIndex": "280000000000000000000", // delegator's personal cursor
+  "accruedRewards": "520", // total rewards yet to claim
  "pendingUnbonds": [
     {
       "id": 1,
@@ -122,6 +132,15 @@ Delegates ZNHB and optionally selects a validator. While staking remains disable
 }
 ```
 
+Companion CLI example (available once staking launches):
+
+```bash
+nhbctl stake delegate \
+  --from nhb1delegator... \
+  --amount 1000 \
+  --validator nhb1validator...
+```
+
 ### `stake_undelegate`
 
 Queues an unbonding entry for the caller. During the preview phase the method returns the same disabled error code shown above.
@@ -138,6 +157,14 @@ Queues an unbonding entry for the caller. During the preview phase the method re
 
 - **Result (disabled preview)**: Identical to the delegation error payload until the module is enabled.
 
+CLI preview (returns an error until activation):
+
+```bash
+nhbctl stake undelegate \
+  --from nhb1delegator... \
+  --amount 500
+```
+
 ### `stake_claim`
 
 Claims a matured unbond entry and returns both the claimed metadata and updated balances. As with the other endpoints, the disabled preview currently rejects requests with `codeFeatureDisabled`.
@@ -153,6 +180,30 @@ Claims a matured unbond entry and returns both the claimed metadata and updated 
 ```
 
 - **Result (disabled preview)**: Identical to the delegation error payload until activation.
+
+CLI counterpart:
+
+```bash
+nhbctl stake claim \
+  --from nhb1delegator... \
+  --unbonding-id 2
+```
+
+### `stake_getRewardPreview`
+
+The read-only method `stake_getRewardPreview` reveals the current monthly payout window for a delegator. Responses include the global reward index, the delegator index, the next payout timestamp (every 30 days from activation), and the projected emission based on the non-compounding model. The request follows the same authentication rules as `nhb_getBalance`.
+
+```json
+{
+  "caller": "nhb1delegator..."
+}
+```
+
+CLI equivalent:
+
+```bash
+nhbctl stake rewards --from nhb1delegator...
+```
 
 ### Error Semantics
 
