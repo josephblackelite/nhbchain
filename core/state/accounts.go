@@ -53,10 +53,6 @@ type accountMetadata struct {
 	// Lending breakers
 	LendingCollateralDisabled bool
 	LendingBorrowDisabled     bool
-
-	StakeShares       *big.Int
-	StakeLastIndex    *big.Int
-	StakeLastPayoutTs uint64
 }
 
 type validatorEntry struct {
@@ -313,9 +309,6 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
-		StakeShares:        new(big.Int).Set(account.StakeShares),
-		StakeLastIndex:     new(big.Int).Set(account.StakeLastIndex),
-		StakeLastPayoutTs:  account.StakeLastPayoutTs,
 
 		// Identity
 		Username: account.Username,
@@ -388,9 +381,6 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
-		StakeShares:        new(big.Int).Set(account.StakeShares),
-		StakeLastIndex:     new(big.Int).Set(account.StakeLastIndex),
-		StakeLastPayoutTs:  account.StakeLastPayoutTs,
 
 		// Identity
 		Username: account.Username,
