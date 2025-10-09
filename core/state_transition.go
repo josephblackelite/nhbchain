@@ -2140,7 +2140,12 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 
 	sameValidator := bytes.Equal(target, delegator)
 
+	delegatorPrevShares := new(big.Int).Set(delegatorAcc.StakeShares)
 	sp.accrueStakeAccount(delegatorAcc, index)
+	delegatorAdded := new(big.Int).Sub(new(big.Int).Set(delegatorAcc.StakeShares), delegatorPrevShares)
+	if delegatorAdded.Sign() < 0 {
+		delegatorAdded = big.NewInt(0)
+	}
 
 	delegatorAcc.BalanceZNHB.Sub(delegatorAcc.BalanceZNHB, amount)
 	delegatorAcc.LockedZNHB.Add(delegatorAcc.LockedZNHB, amount)
@@ -2155,10 +2160,26 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 		if err != nil {
 			return nil, err
 		}
+		validatorPrevShares := new(big.Int).Set(validatorAcc.StakeShares)
 		sp.accrueStakeAccount(validatorAcc, index)
+		validatorAdded := new(big.Int).Sub(new(big.Int).Set(validatorAcc.StakeShares), validatorPrevShares)
+		if validatorAdded.Sign() < 0 {
+			validatorAdded = big.NewInt(0)
+		}
 		validatorAcc.Stake.Add(validatorAcc.Stake, amount)
 		if err := sp.setAccount(target, validatorAcc); err != nil {
 			return nil, err
+		}
+		validatorEvent := events.StakeDelegated{
+			Account:     bytesToAddress(target),
+			SharesAdded: validatorAdded,
+			NewShares:   new(big.Int).Set(validatorAcc.StakeShares),
+			LastIndex:   new(big.Int).Set(validatorAcc.StakeLastIndex),
+			Validator:   bytesToAddress(target),
+			Amount:      new(big.Int).Set(amount),
+		}
+		if evt := validatorEvent.Event(); evt != nil {
+			sp.AppendEvent(evt)
 		}
 	}
 
@@ -2166,17 +2187,18 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 		return nil, err
 	}
 
-	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, target)
-	sp.AppendEvent(&types.Event{
-		Type: "stake.delegated",
-		Attributes: map[string]string{
-			"delegator": delegatorAddr.String(),
-			"validator": validatorAddr.String(),
-			"amount":    amount.String(),
-			"locked":    delegatorAcc.LockedZNHB.String(),
-		},
-	})
+	delegatorEvent := events.StakeDelegated{
+		Account:     bytesToAddress(delegator),
+		SharesAdded: delegatorAdded,
+		NewShares:   new(big.Int).Set(delegatorAcc.StakeShares),
+		LastIndex:   new(big.Int).Set(delegatorAcc.StakeLastIndex),
+		Validator:   bytesToAddress(target),
+		Amount:      new(big.Int).Set(amount),
+		Locked:      new(big.Int).Set(delegatorAcc.LockedZNHB),
+	}
+	if evt := delegatorEvent.Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
 
 	return delegatorAcc, nil
 }
@@ -2206,7 +2228,12 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	validator := append([]byte(nil), delegatorAcc.DelegatedValidator...)
 	sameValidator := bytes.Equal(validator, delegator)
 
+	delegatorPrevShares := new(big.Int).Set(delegatorAcc.StakeShares)
 	sp.accrueStakeAccount(delegatorAcc, index)
+	delegatorRemoved := new(big.Int).Sub(delegatorPrevShares, new(big.Int).Set(delegatorAcc.StakeShares))
+	if delegatorRemoved.Sign() < 0 {
+		delegatorRemoved = big.NewInt(0)
+	}
 
 	if sameValidator {
 		if delegatorAcc.Stake.Cmp(amount) < 0 {
@@ -2239,7 +2266,12 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 		if err != nil {
 			return nil, err
 		}
+		validatorPrevShares := new(big.Int).Set(validatorAcc.StakeShares)
 		sp.accrueStakeAccount(validatorAcc, index)
+		validatorRemoved := new(big.Int).Sub(validatorPrevShares, new(big.Int).Set(validatorAcc.StakeShares))
+		if validatorRemoved.Sign() < 0 {
+			validatorRemoved = big.NewInt(0)
+		}
 		if validatorAcc.Stake.Cmp(amount) < 0 {
 			return nil, fmt.Errorf("validator stake underflow")
 		}
@@ -2247,24 +2279,36 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 		if err := sp.setAccount(validator, validatorAcc); err != nil {
 			return nil, err
 		}
+		validatorEvent := events.StakeUndelegated{
+			Account:       bytesToAddress(validator),
+			SharesRemoved: validatorRemoved,
+			NewShares:     new(big.Int).Set(validatorAcc.StakeShares),
+			LastIndex:     new(big.Int).Set(validatorAcc.StakeLastIndex),
+			Validator:     bytesToAddress(validator),
+			Amount:        new(big.Int).Set(amount),
+		}
+		if evt := validatorEvent.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
 	}
 
 	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
 		return nil, err
 	}
 
-	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, validator)
-	sp.AppendEvent(&types.Event{
-		Type: "stake.undelegated",
-		Attributes: map[string]string{
-			"delegator":   delegatorAddr.String(),
-			"validator":   validatorAddr.String(),
-			"amount":      amount.String(),
-			"releaseTime": strconv.FormatUint(releaseTime, 10),
-			"unbondingId": strconv.FormatUint(entry.ID, 10),
-		},
-	})
+	delegatorEvent := events.StakeUndelegated{
+		Account:       bytesToAddress(delegator),
+		SharesRemoved: delegatorRemoved,
+		NewShares:     new(big.Int).Set(delegatorAcc.StakeShares),
+		LastIndex:     new(big.Int).Set(delegatorAcc.StakeLastIndex),
+		Validator:     bytesToAddress(validator),
+		Amount:        new(big.Int).Set(amount),
+		ReleaseTime:   releaseTime,
+		UnbondingID:   entry.ID,
+	}
+	if evt := delegatorEvent.Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
 
 	return &entry, nil
 }
@@ -2398,6 +2442,17 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	account.StakeLastIndex.Add(account.StakeLastIndex, eligibleIndexDelta)
 	account.StakeLastPayoutTs = nowTs
 
+	emissionYear := uint32(time.Unix(int64(nowTs), 0).UTC().Year())
+	emissionKey := nhbstate.StakingEmissionYTDKey(emissionYear)
+	emissionTotal, err := sp.loadBigInt(emissionKey)
+	if err != nil {
+		return nil, fmt.Errorf("staking rewards: load emission total: %w", err)
+	}
+	updatedEmission := new(big.Int).Add(emissionTotal, minted)
+	if err := sp.writeBigInt(emissionKey, updatedEmission); err != nil {
+		return nil, fmt.Errorf("staking rewards: write emission total: %w", err)
+	}
+
 	if err := sp.setAccount(addr, account); err != nil {
 		return nil, err
 	}
@@ -2405,13 +2460,18 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	var claimedAddr [20]byte
 	copy(claimedAddr[:], addr)
 	evtPayload := events.StakeRewardsClaimed{
-		Account: claimedAddr,
-		Amount:  new(big.Int).Set(minted),
-		Periods: periods,
-		Shares:  new(big.Int).Set(account.StakeShares),
+		Account:     claimedAddr,
+		Minted:      new(big.Int).Set(minted),
+		Periods:     periods,
+		LastIndex:   new(big.Int).Set(account.StakeLastIndex),
+		Shares:      new(big.Int).Set(account.StakeShares),
+		EmissionYTD: new(big.Int).Set(updatedEmission),
 	}
 	if evt := evtPayload.Event(); evt != nil {
 		sp.AppendEvent(evt)
+	}
+	if legacy := evtPayload.LegacyEvent(); legacy != nil {
+		sp.AppendEvent(legacy)
 	}
 
 	return minted, nil
@@ -2629,10 +2689,6 @@ type accountMetadata struct {
 
 	LendingCollateralDisabled bool
 	LendingBorrowDisabled     bool
-
-	StakeShares       *big.Int
-	StakeLastIndex    *big.Int
-	StakeLastPayoutTs uint64
 }
 
 func ensureAccountDefaults(account *types.Account) {
@@ -2897,9 +2953,6 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		EngagementLastHeartbeat:   account.EngagementLastHeartbeat,
 		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
-		StakeShares:               new(big.Int).Set(account.StakeShares),
-		StakeLastIndex:            new(big.Int).Set(account.StakeLastIndex),
-		StakeLastPayoutTs:         account.StakeLastPayoutTs,
 	}
 	if err := sp.writeAccountMetadata(addr, meta); err != nil {
 		return err
