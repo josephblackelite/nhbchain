@@ -46,6 +46,8 @@ var (
 	// ErrInvalidAlias is returned when the supplied alias does not satisfy
 	// the naming constraints.
 	ErrInvalidAlias = errors.New("identity: invalid alias")
+	// ErrInvalidAddress is returned when the supplied address is malformed.
+	ErrInvalidAddress = errors.New("identity: invalid address")
 	// ErrAliasTaken is returned when the alias is already owned by another
 	// address.
 	ErrAliasTaken = errors.New("identity: alias already registered")
@@ -54,6 +56,17 @@ var (
 	// ErrInvalidAvatarRef indicates the avatar reference is malformed or
 	// violates policy.
 	ErrInvalidAvatarRef = errors.New("identity: invalid avatar reference")
+	// ErrAddressLinked is returned when an address is already associated with
+	// a different alias.
+	ErrAddressLinked = errors.New("identity: address already linked to alias")
+	// ErrAddressNotLinked is returned when attempting to remove or promote an
+	// address that is not associated with the alias.
+	ErrAddressNotLinked = errors.New("identity: address not linked to alias")
+	// ErrPrimaryAddressRequired is returned when attempting to remove the
+	// primary address from an alias.
+	ErrPrimaryAddressRequired = errors.New("identity: cannot remove primary address")
+	// ErrNotAliasOwner indicates the caller does not control the alias.
+	ErrNotAliasOwner = errors.New("identity: caller is not alias owner")
 )
 
 // NormalizeAlias lowercases and validates the supplied alias.

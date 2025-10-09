@@ -2183,6 +2183,90 @@ func uniqueAliasAddresses(primary [20]byte, addrs [][20]byte) [][20]byte {
 	return out
 }
 
+func copyAliasAddresses(addrs [][20]byte) [][20]byte {
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([][20]byte, len(addrs))
+	copy(out, addrs)
+	return out
+}
+
+func containsAliasAddress(addrs [][20]byte, target [20]byte) bool {
+	for _, addr := range addrs {
+		if addr == target {
+			return true
+		}
+	}
+	return false
+}
+
+func parseAliasAddress(addr []byte) ([20]byte, error) {
+	var out [20]byte
+	if len(addr) != 20 {
+		return out, fmt.Errorf("%w: must be 20 bytes", identity.ErrInvalidAddress)
+	}
+	copy(out[:], addr)
+	if out == ([20]byte{}) {
+		return out, fmt.Errorf("%w: must not be zero", identity.ErrInvalidAddress)
+	}
+	return out, nil
+}
+
+func (m *Manager) identityPersistRecord(record *identity.AliasRecord, previousAlias string, previousAddresses [][20]byte) error {
+	if record == nil {
+		return fmt.Errorf("identity: nil record")
+	}
+	if record.Alias == "" {
+		return fmt.Errorf("identity: alias must not be empty")
+	}
+	record.Addresses = uniqueAliasAddresses(record.Primary, record.Addresses)
+	stored := newStoredAliasRecord(record)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	aliasKey := identityAliasKey(record.Alias)
+	aliasID := identity.DeriveAliasID(record.Alias)
+	if err := m.trie.Update(aliasKey, encoded); err != nil {
+		return err
+	}
+	if err := m.trie.Update(identityAliasIDKey(aliasID), []byte(record.Alias)); err != nil {
+		return err
+	}
+
+	prevSet := make(map[[20]byte]struct{}, len(previousAddresses))
+	for _, addr := range previousAddresses {
+		prevSet[addr] = struct{}{}
+	}
+	newSet := make(map[[20]byte]struct{}, len(record.Addresses))
+	for _, addr := range record.Addresses {
+		newSet[addr] = struct{}{}
+		if err := m.trie.Update(identityReverseKey(addr[:]), []byte(record.Alias)); err != nil {
+			return err
+		}
+	}
+	for addr := range prevSet {
+		if _, ok := newSet[addr]; ok {
+			continue
+		}
+		if err := m.trie.Update(identityReverseKey(addr[:]), nil); err != nil {
+			return err
+		}
+	}
+
+	if previousAlias != "" && previousAlias != record.Alias {
+		oldID := identity.DeriveAliasID(previousAlias)
+		if err := m.trie.Update(identityAliasKey(previousAlias), nil); err != nil {
+			return err
+		}
+		if err := m.trie.Update(identityAliasIDKey(oldID), nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *Manager) identityGetAlias(alias string) (*identity.AliasRecord, bool, error) {
 	data, err := m.trie.Get(identityAliasKey(alias))
 	if err != nil {
@@ -3423,6 +3507,179 @@ func (m *Manager) IdentitySetAvatar(alias string, avatarRef string, now int64) (
 		return nil, err
 	}
 	if err := m.trie.Update(identityAliasKey(normalized), encoded); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// IdentityAddAddress associates an additional address with an existing alias.
+func (m *Manager) IdentityAddAddress(alias string, addr []byte, now int64) (*identity.AliasRecord, error) {
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return nil, err
+	}
+	address, err := parseAliasAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	record, ok, err := m.identityGetAlias(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if containsAliasAddress(record.Addresses, address) {
+		return record, nil
+	}
+	existingAliasBytes, err := m.trie.Get(identityReverseKey(address[:]))
+	if err != nil {
+		return nil, err
+	}
+	if len(existingAliasBytes) > 0 {
+		existingAlias := string(existingAliasBytes)
+		if existingAlias != normalized {
+			return nil, identity.ErrAddressLinked
+		}
+	}
+	previousAddresses := copyAliasAddresses(record.Addresses)
+	record.Addresses = append(record.Addresses, address)
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	record.UpdatedAt = now
+	if err := m.identityPersistRecord(record, normalized, previousAddresses); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// IdentityRemoveAddress disassociates an address from an alias.
+func (m *Manager) IdentityRemoveAddress(alias string, addr []byte, now int64) (*identity.AliasRecord, error) {
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return nil, err
+	}
+	address, err := parseAliasAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	record, ok, err := m.identityGetAlias(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if address == record.Primary {
+		return nil, identity.ErrPrimaryAddressRequired
+	}
+	previousAddresses := copyAliasAddresses(record.Addresses)
+	filtered := make([][20]byte, 0, len(record.Addresses))
+	removed := false
+	for _, existing := range record.Addresses {
+		if existing == address {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	if !removed {
+		return nil, identity.ErrAddressNotLinked
+	}
+	record.Addresses = filtered
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	record.UpdatedAt = now
+	if err := m.identityPersistRecord(record, normalized, previousAddresses); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// IdentitySetPrimary promotes the supplied address to the primary alias address.
+func (m *Manager) IdentitySetPrimary(alias string, addr []byte, now int64) (*identity.AliasRecord, error) {
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return nil, err
+	}
+	address, err := parseAliasAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	record, ok, err := m.identityGetAlias(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	if record.Primary == address {
+		return record, nil
+	}
+	if !containsAliasAddress(record.Addresses, address) {
+		existingAliasBytes, err := m.trie.Get(identityReverseKey(address[:]))
+		if err != nil {
+			return nil, err
+		}
+		if len(existingAliasBytes) > 0 {
+			existingAlias := string(existingAliasBytes)
+			if existingAlias != normalized {
+				return nil, identity.ErrAddressLinked
+			}
+		}
+		record.Addresses = append(record.Addresses, address)
+	}
+	previousAddresses := copyAliasAddresses(record.Addresses)
+	previousPrimary := record.Primary
+	record.Primary = address
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	record.UpdatedAt = now
+	if err := m.identityPersistRecord(record, normalized, previousAddresses); err != nil {
+		// Restore previous primary in case of retry callers reusing the record reference.
+		record.Primary = previousPrimary
+		return nil, err
+	}
+	return record, nil
+}
+
+// IdentityRename renames an alias while preserving its metadata and addresses.
+func (m *Manager) IdentityRename(alias string, newAlias string, now int64) (*identity.AliasRecord, error) {
+	normalized, err := identity.NormalizeAlias(alias)
+	if err != nil {
+		return nil, err
+	}
+	record, ok, err := m.identityGetAlias(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || record == nil {
+		return nil, identity.ErrAliasNotFound
+	}
+	target, err := identity.NormalizeAlias(newAlias)
+	if err != nil {
+		return nil, err
+	}
+	if target == normalized {
+		return record, nil
+	}
+	if _, exists, err := m.identityGetAlias(target); err != nil {
+		return nil, err
+	} else if exists {
+		return nil, identity.ErrAliasTaken
+	}
+	previousAddresses := copyAliasAddresses(record.Addresses)
+	previousAlias := record.Alias
+	record.Alias = target
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	record.UpdatedAt = now
+	if err := m.identityPersistRecord(record, previousAlias, previousAddresses); err != nil {
+		record.Alias = previousAlias
 		return nil, err
 	}
 	return record, nil

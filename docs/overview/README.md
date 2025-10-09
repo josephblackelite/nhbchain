@@ -48,7 +48,7 @@ The identity subsystem introduces human-readable aliases, email discovery, avata
 
 ### 10-Minute Quickstart
 
-1. **Register an alias** using the JSON-RPC method or `nhb-cli id register`.
+1. **Register an alias** using the JSON-RPC method or `nhb-cli id set-alias`.
 2. **Link additional addresses** with `identity_addAddress` to support multi-device payouts.
 3. **Upload an avatar** via the gateway and set it on-chain with `identity_setAvatar`.
 4. **Bind a verified email** so friends can pay you even before knowing your alias.

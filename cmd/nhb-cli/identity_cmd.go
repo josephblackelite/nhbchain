@@ -20,6 +20,14 @@ func runIdentityCommand(args []string, stdout, stderr io.Writer) int {
 		return runIdentitySetAlias(args[1:], stdout, stderr)
 	case "set-avatar":
 		return runIdentitySetAvatar(args[1:], stdout, stderr)
+	case "add-address":
+		return runIdentityAddAddress(args[1:], stdout, stderr)
+	case "remove-address":
+		return runIdentityRemoveAddress(args[1:], stdout, stderr)
+	case "set-primary":
+		return runIdentitySetPrimary(args[1:], stdout, stderr)
+	case "rename":
+		return runIdentityRename(args[1:], stdout, stderr)
 	case "resolve":
 		return runIdentityResolve(args[1:], stdout, stderr)
 	case "reverse":
@@ -95,6 +103,154 @@ func runIdentitySetAvatar(args []string, stdout, stderr io.Writer) int {
 	}
 	params := []interface{}{trimmedAddr, trimmedAvatar}
 	result, rpcErr, err := identityRPCCall("identity_setAvatar", params, true)
+	if err != nil {
+		return handleRPCCallError(stderr, err)
+	}
+	if rpcErr != nil {
+		return handleRPCError(stderr, rpcErr)
+	}
+	writeRPCResult(stdout, result)
+	return 0
+}
+
+func runIdentityAddAddress(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("id add-address", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var owner, alias, addr string
+	fs.StringVar(&owner, "owner", "", "bech32 primary address controlling the alias")
+	fs.StringVar(&alias, "alias", "", "alias to update")
+	fs.StringVar(&addr, "addr", "", "bech32 address to link")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
+		return 1
+	}
+	trimmedOwner := strings.TrimSpace(owner)
+	trimmedAlias := strings.TrimSpace(alias)
+	trimmedAddr := strings.TrimSpace(addr)
+	if trimmedOwner == "" || trimmedAlias == "" || trimmedAddr == "" {
+		fmt.Fprintln(stderr, "Error: --owner, --alias, and --addr are required")
+		return 1
+	}
+	payload := map[string]interface{}{
+		"owner":   trimmedOwner,
+		"alias":   trimmedAlias,
+		"address": trimmedAddr,
+	}
+	result, rpcErr, err := identityRPCCall("identity_addAddress", []interface{}{payload}, true)
+	if err != nil {
+		return handleRPCCallError(stderr, err)
+	}
+	if rpcErr != nil {
+		return handleRPCError(stderr, rpcErr)
+	}
+	writeRPCResult(stdout, result)
+	return 0
+}
+
+func runIdentityRemoveAddress(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("id remove-address", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var owner, alias, addr string
+	fs.StringVar(&owner, "owner", "", "bech32 primary address controlling the alias")
+	fs.StringVar(&alias, "alias", "", "alias to update")
+	fs.StringVar(&addr, "addr", "", "bech32 address to unlink")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
+		return 1
+	}
+	trimmedOwner := strings.TrimSpace(owner)
+	trimmedAlias := strings.TrimSpace(alias)
+	trimmedAddr := strings.TrimSpace(addr)
+	if trimmedOwner == "" || trimmedAlias == "" || trimmedAddr == "" {
+		fmt.Fprintln(stderr, "Error: --owner, --alias, and --addr are required")
+		return 1
+	}
+	payload := map[string]interface{}{
+		"owner":   trimmedOwner,
+		"alias":   trimmedAlias,
+		"address": trimmedAddr,
+	}
+	result, rpcErr, err := identityRPCCall("identity_removeAddress", []interface{}{payload}, true)
+	if err != nil {
+		return handleRPCCallError(stderr, err)
+	}
+	if rpcErr != nil {
+		return handleRPCError(stderr, rpcErr)
+	}
+	writeRPCResult(stdout, result)
+	return 0
+}
+
+func runIdentitySetPrimary(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("id set-primary", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var owner, alias, addr string
+	fs.StringVar(&owner, "owner", "", "bech32 primary address controlling the alias")
+	fs.StringVar(&alias, "alias", "", "alias to update")
+	fs.StringVar(&addr, "addr", "", "bech32 address to promote")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
+		return 1
+	}
+	trimmedOwner := strings.TrimSpace(owner)
+	trimmedAlias := strings.TrimSpace(alias)
+	trimmedAddr := strings.TrimSpace(addr)
+	if trimmedOwner == "" || trimmedAlias == "" || trimmedAddr == "" {
+		fmt.Fprintln(stderr, "Error: --owner, --alias, and --addr are required")
+		return 1
+	}
+	payload := map[string]interface{}{
+		"owner":   trimmedOwner,
+		"alias":   trimmedAlias,
+		"address": trimmedAddr,
+	}
+	result, rpcErr, err := identityRPCCall("identity_setPrimary", []interface{}{payload}, true)
+	if err != nil {
+		return handleRPCCallError(stderr, err)
+	}
+	if rpcErr != nil {
+		return handleRPCError(stderr, rpcErr)
+	}
+	writeRPCResult(stdout, result)
+	return 0
+}
+
+func runIdentityRename(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("id rename", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var owner, alias, newAlias string
+	fs.StringVar(&owner, "owner", "", "bech32 primary address controlling the alias")
+	fs.StringVar(&alias, "alias", "", "current alias")
+	fs.StringVar(&newAlias, "new-alias", "", "new alias name")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
+		return 1
+	}
+	trimmedOwner := strings.TrimSpace(owner)
+	trimmedAlias := strings.TrimSpace(alias)
+	trimmedNew := strings.TrimSpace(newAlias)
+	if trimmedOwner == "" || trimmedAlias == "" || trimmedNew == "" {
+		fmt.Fprintln(stderr, "Error: --owner, --alias, and --new-alias are required")
+		return 1
+	}
+	payload := map[string]interface{}{
+		"owner":    trimmedOwner,
+		"alias":    trimmedAlias,
+		"newAlias": trimmedNew,
+	}
+	result, rpcErr, err := identityRPCCall("identity_rename", []interface{}{payload}, true)
 	if err != nil {
 		return handleRPCCallError(stderr, err)
 	}
@@ -250,6 +406,10 @@ func identityUsage() string {
 Commands:
   set-alias          Register or update the alias for an address
   set-avatar         Update the avatar reference for an alias owner
+  add-address        Link an additional address to an alias
+  remove-address     Unlink an address from an alias
+  set-primary        Promote an address to become the alias primary
+  rename             Rename an existing alias
   resolve            Resolve an alias to metadata and addresses
   reverse            Look up the alias associated with an address
   create-claimable   Create a pay-by-email claimable escrow

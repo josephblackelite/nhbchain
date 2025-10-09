@@ -15,108 +15,106 @@ All mutating commands prompt for confirmation before broadcasting unless `--yes`
 ## Register Alias
 
 ```bash
-nhb-cli id register \
-  --alias frankrocks \
-  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpxxx \
-  --primary nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
-  --sig 0xSIG
+nhb-cli id set-alias \
+  --addr nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
+  --alias frankrocks
 ```
 
-**Response**
+**Response (JSON)**
 
-```
-✔ Alias registered
-Alias ID    : 0x5e2c4fd5...
-Primary     : nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm
-Created At  : 2024-06-12T18:20:00Z
+```json
+{"ok":true}
 ```
 
 ## Add Address
 
 ```bash
 nhb-cli id add-address \
+  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
   --alias frankrocks \
-  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y \
-  --sig 0xSIG
+  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
 ```
 
-**Response**
+**Response (JSON)**
 
-```
-✔ Address linked
-Addresses: nhb1qyqszqgp..., nhb1alt4vrc6...
+```json
+{
+  "alias": "frankrocks",
+  "aliasId": "0x5e2c4fd5...",
+  "primary": "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm",
+  "addresses": [
+    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm",
+    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y"
+  ],
+  "createdAt": 1718216400,
+  "updatedAt": 1718217000
+}
 ```
 
 ## Remove Address
 
 ```bash
 nhb-cli id remove-address \
+  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
   --alias frankrocks \
-  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y \
-  --sig 0xSIG
+  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
 ```
 
 ## Set Primary Address
 
 ```bash
 nhb-cli id set-primary \
+  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
   --alias frankrocks \
-  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y \
-  --sig 0xSIG
+  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
 ```
 
-**Output**
+**Response (JSON)**
 
-```
-✔ Primary address updated: nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
+```json
+{
+  "alias": "frankrocks",
+  "aliasId": "0x5e2c4fd5...",
+  "primary": "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
+  "addresses": [
+    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
+    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm"
+  ],
+  "createdAt": 1718216400,
+  "updatedAt": 1718217600
+}
 ```
 
 ## Rename Alias
 
 ```bash
 nhb-cli id rename \
-  --id 0x5e2c4fd5... \
-  --new frankr0cks \
-  --sig 0xSIG
-```
-
-## Fetch Alias Record
-
-```bash
-nhb-cli id get --alias frankrocks
-```
-
-**Sample Output**
-
-```
-Alias       : frankrocks
-Alias ID    : 0x5e2c4fd5...
-Owner       : nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpxxx
-Primary     : nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm
-Addresses   :
-  - nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm (primary)
-  - nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
-Avatar      : https://cdn.nhb/id/frankrocks.png
-Created At  : 2024-06-12T18:20:00Z
-Updated At  : 2024-06-12T18:45:10Z
-Version     : 4
+  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
+  --alias frankrocks \
+  --new-alias frankr0cks
 ```
 
 ## Resolve Alias
 
 ```bash
-nhb-cli id resolve --alias frankrocks
+nhb-cli id resolve --alias frankr0cks
 ```
 
-**Output**
+**Sample Output**
 
-```
-Alias   : frankrocks
-Primary : nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm
-Addresses:
-  - nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm
-  - nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
-Avatar  : https://cdn.nhb/id/frankrocks.png
+```json
+{
+  "alias": "frankr0cks",
+  "aliasId": "0x7be9a4c1...",
+  "primary": "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
+  "addresses": [
+    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
+    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm"
+  ],
+  "avatarRef": "https://cdn.nhb/id/frankr0cks.png",
+  "createdAt": 1718216400,
+  "updatedAt": 1718218200
+}
 ```
 
 ## Create Claimable (Pay by Email)

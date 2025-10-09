@@ -6,9 +6,12 @@ import (
 )
 
 const (
-	TypeIdentityAliasSet           = "identity.alias.set"
-	TypeIdentityAliasRenamed       = "identity.alias.renamed"
-	TypeIdentityAliasAvatarUpdated = "identity.alias.avatarUpdated"
+	TypeIdentityAliasSet            = "identity.alias.set"
+	TypeIdentityAliasRenamed        = "identity.alias.renamed"
+	TypeIdentityAliasAvatarUpdated  = "identity.alias.avatarUpdated"
+	TypeIdentityAliasAddressLinked  = "identity.alias.addressLinked"
+	TypeIdentityAliasAddressRemoved = "identity.alias.addressRemoved"
+	TypeIdentityAliasPrimaryUpdated = "identity.alias.primaryUpdated"
 )
 
 // IdentityAliasSet is emitted when an address registers an alias for the first time.
@@ -71,6 +74,66 @@ func (e IdentityAliasAvatarUpdated) Event() *types.Event {
 			"alias":     e.Alias,
 			"address":   crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 			"avatarRef": e.AvatarRef,
+		},
+	}
+}
+
+// IdentityAliasAddressLinked is emitted when an alias links a new secondary address.
+type IdentityAliasAddressLinked struct {
+	Alias   string
+	Address [20]byte
+}
+
+// EventType implements the Event interface.
+func (IdentityAliasAddressLinked) EventType() string { return TypeIdentityAliasAddressLinked }
+
+// Event converts the strongly typed event to the generic representation used by subscribers.
+func (e IdentityAliasAddressLinked) Event() *types.Event {
+	return &types.Event{
+		Type: TypeIdentityAliasAddressLinked,
+		Attributes: map[string]string{
+			"alias":   e.Alias,
+			"address": crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+		},
+	}
+}
+
+// IdentityAliasAddressRemoved is emitted when an alias unlinks an address.
+type IdentityAliasAddressRemoved struct {
+	Alias   string
+	Address [20]byte
+}
+
+// EventType implements the Event interface.
+func (IdentityAliasAddressRemoved) EventType() string { return TypeIdentityAliasAddressRemoved }
+
+// Event converts the strongly typed event to the generic representation used by subscribers.
+func (e IdentityAliasAddressRemoved) Event() *types.Event {
+	return &types.Event{
+		Type: TypeIdentityAliasAddressRemoved,
+		Attributes: map[string]string{
+			"alias":   e.Alias,
+			"address": crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
+		},
+	}
+}
+
+// IdentityAliasPrimaryUpdated is emitted when the primary address for an alias changes.
+type IdentityAliasPrimaryUpdated struct {
+	Alias   string
+	Address [20]byte
+}
+
+// EventType implements the Event interface.
+func (IdentityAliasPrimaryUpdated) EventType() string { return TypeIdentityAliasPrimaryUpdated }
+
+// Event converts the strongly typed event to the generic representation used by subscribers.
+func (e IdentityAliasPrimaryUpdated) Event() *types.Event {
+	return &types.Event{
+		Type: TypeIdentityAliasPrimaryUpdated,
+		Attributes: map[string]string{
+			"alias":   e.Alias,
+			"address": crypto.MustNewAddress(crypto.NHBPrefix, e.Address[:]).String(),
 		},
 	}
 }
