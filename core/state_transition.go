@@ -67,6 +67,7 @@ var (
 	validatorEligibleKey  = ethcrypto.Keccak256([]byte("validator-eligible-set"))
 	epochHistoryKey       = ethcrypto.Keccak256([]byte("epoch-history"))
 	rewardHistoryKey      = ethcrypto.Keccak256([]byte("reward-history"))
+	stakeRewardStateKey   = ethcrypto.Keccak256([]byte("stake-reward-state"))
 )
 
 type blockExecutionContext struct {
@@ -95,6 +96,8 @@ type StateProcessor struct {
 	rewardConfig       rewards.Config
 	rewardAccrual      *rewards.Accumulator
 	rewardHistory      []rewards.EpochSettlement
+	stakeRewardEngine  *rewards.Engine
+	stakeRewardAPR     uint64
 	potsoRewardConfig  potso.RewardConfig
 	potsoWeightConfig  potso.WeightParams
 	paymasterEnabled   bool
@@ -128,6 +131,8 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		epochHistory:       make([]epoch.Snapshot, 0),
 		rewardConfig:       rewards.DefaultConfig(),
 		rewardHistory:      make([]rewards.EpochSettlement, 0),
+		stakeRewardEngine:  rewards.NewEngine(),
+		stakeRewardAPR:     0,
 		potsoRewardConfig:  potso.DefaultRewardConfig(),
 		potsoWeightConfig:  potso.DefaultWeightParams(),
 		paymasterEnabled:   true,
@@ -147,6 +152,9 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		return nil, err
 	}
 	if err := sp.loadRewardHistory(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadStakeRewardState(); err != nil {
 		return nil, err
 	}
 	return sp, nil
@@ -2108,6 +2116,11 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 		return nil, fmt.Errorf("validator address must be 20 bytes")
 	}
 
+	index, err := sp.advanceStakeRewards()
+	if err != nil {
+		return nil, err
+	}
+
 	delegatorAcc, err := sp.getAccount(delegator)
 	if err != nil {
 		return nil, err
@@ -2120,6 +2133,8 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 	}
 
 	sameValidator := bytes.Equal(target, delegator)
+
+	sp.accrueStakeAccount(delegatorAcc, index)
 
 	delegatorAcc.BalanceZNHB.Sub(delegatorAcc.BalanceZNHB, amount)
 	delegatorAcc.LockedZNHB.Add(delegatorAcc.LockedZNHB, amount)
@@ -2134,6 +2149,7 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 		if err != nil {
 			return nil, err
 		}
+		sp.accrueStakeAccount(validatorAcc, index)
 		validatorAcc.Stake.Add(validatorAcc.Stake, amount)
 		if err := sp.setAccount(target, validatorAcc); err != nil {
 			return nil, err
@@ -2166,6 +2182,10 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("unstake must be positive")
 	}
+	index, err := sp.advanceStakeRewards()
+	if err != nil {
+		return nil, err
+	}
 	delegatorAcc, err := sp.getAccount(delegator)
 	if err != nil {
 		return nil, err
@@ -2179,6 +2199,8 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 
 	validator := append([]byte(nil), delegatorAcc.DelegatedValidator...)
 	sameValidator := bytes.Equal(validator, delegator)
+
+	sp.accrueStakeAccount(delegatorAcc, index)
 
 	if sameValidator {
 		if delegatorAcc.Stake.Cmp(amount) < 0 {
@@ -2211,6 +2233,7 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 		if err != nil {
 			return nil, err
 		}
+		sp.accrueStakeAccount(validatorAcc, index)
 		if validatorAcc.Stake.Cmp(amount) < 0 {
 			return nil, fmt.Errorf("validator stake underflow")
 		}
@@ -2247,10 +2270,15 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 	if unbondID == 0 {
 		return nil, fmt.Errorf("unbondingId must be greater than zero")
 	}
+	currentIndex, err := sp.advanceStakeRewards()
+	if err != nil {
+		return nil, err
+	}
 	delegatorAcc, err := sp.getAccount(delegator)
 	if err != nil {
 		return nil, err
 	}
+	sp.accrueStakeAccount(delegatorAcc, currentIndex)
 	var (
 		index = -1
 		entry types.StakeUnbond
@@ -2352,6 +2380,67 @@ func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction, sender []byte) 
 	return err
 }
 
+func (sp *StateProcessor) StakeRewardAPR() uint64 {
+	if sp == nil {
+		return 0
+	}
+	return sp.stakeRewardAPR
+}
+
+func (sp *StateProcessor) SetStakeRewardAPR(apr uint64) error {
+	if sp == nil {
+		return nil
+	}
+	if sp.stakeRewardEngine == nil {
+		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
+	sp.stakeRewardAPR = apr
+	return sp.persistStakeRewardState()
+}
+
+func (sp *StateProcessor) advanceStakeRewards() (*big.Int, error) {
+	if sp == nil {
+		return rewards.IndexUnit(), nil
+	}
+	if sp.stakeRewardEngine == nil {
+		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	index, changed := sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
+	if changed {
+		if err := sp.persistStakeRewardState(); err != nil {
+			return nil, err
+		}
+	}
+	return index, nil
+}
+
+func (sp *StateProcessor) accrueStakeAccount(account *types.Account, index *big.Int) {
+	if account == nil || index == nil {
+		return
+	}
+	ensureAccountDefaults(account)
+	if account.Stake.Sign() == 0 {
+		account.StakeLastIndex = new(big.Int).Set(index)
+		return
+	}
+	if account.StakeLastIndex == nil || account.StakeLastIndex.Sign() == 0 {
+		account.StakeLastIndex = new(big.Int).Set(index)
+		return
+	}
+	delta := new(big.Int).Sub(index, account.StakeLastIndex)
+	if delta.Sign() <= 0 {
+		account.StakeLastIndex = new(big.Int).Set(index)
+		return
+	}
+	reward := new(big.Int).Mul(account.Stake, delta)
+	reward.Quo(reward, rewards.IndexUnit())
+	if reward.Sign() > 0 {
+		account.StakeShares.Add(account.StakeShares, reward)
+	}
+	account.StakeLastIndex = new(big.Int).Set(index)
+}
+
 func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	payload := types.HeartbeatPayload{}
 	if len(tx.Data) > 0 {
@@ -2425,6 +2514,9 @@ type stakeUnbond struct {
 type accountMetadata struct {
 	BalanceZNHB             *big.Int
 	Stake                   *big.Int
+	StakeShares             *big.Int
+	StakeLastIndex          *big.Int
+	StakeLastPayoutTs       uint64
 	LockedZNHB              *big.Int
 	CollateralBalance       *big.Int
 	DebtPrincipal           *big.Int
@@ -2456,6 +2548,12 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 	if account.Stake == nil {
 		account.Stake = big.NewInt(0)
+	}
+	if account.StakeShares == nil {
+		account.StakeShares = big.NewInt(0)
+	}
+	if account.StakeLastIndex == nil {
+		account.StakeLastIndex = big.NewInt(0)
 	}
 	if account.LockedZNHB == nil {
 		account.LockedZNHB = big.NewInt(0)
@@ -2556,6 +2654,15 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		}
 		if meta.Stake != nil {
 			account.Stake = new(big.Int).Set(meta.Stake)
+		}
+		if meta.StakeShares != nil {
+			account.StakeShares = new(big.Int).Set(meta.StakeShares)
+		}
+		if meta.StakeLastIndex != nil {
+			account.StakeLastIndex = new(big.Int).Set(meta.StakeLastIndex)
+		}
+		if meta.StakeLastPayoutTs != 0 {
+			account.StakeLastPayoutTs = meta.StakeLastPayoutTs
 		}
 		if meta.LockedZNHB != nil {
 			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
@@ -2672,6 +2779,9 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	meta := &accountMetadata{
 		BalanceZNHB:               new(big.Int).Set(account.BalanceZNHB),
 		Stake:                     new(big.Int).Set(account.Stake),
+		StakeShares:               new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:            new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:         account.StakeLastPayoutTs,
 		LockedZNHB:                new(big.Int).Set(account.LockedZNHB),
 		CollateralBalance:         new(big.Int).Set(account.CollateralBalance),
 		DebtPrincipal:             new(big.Int).Set(account.DebtPrincipal),
@@ -3159,6 +3269,9 @@ func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Accoun
 	meta := &accountMetadata{
 		BalanceZNHB:        new(big.Int).Set(legacy.BalanceZNHB),
 		Stake:              new(big.Int).Set(legacy.Stake),
+		StakeShares:        new(big.Int).Set(legacy.StakeShares),
+		StakeLastIndex:     new(big.Int).Set(legacy.StakeLastIndex),
+		StakeLastPayoutTs:  legacy.StakeLastPayoutTs,
 		LockedZNHB:         big.NewInt(0),
 		CollateralBalance:  big.NewInt(0),
 		DebtPrincipal:      big.NewInt(0),
@@ -3216,10 +3329,12 @@ func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, er
 		return nil, err
 	}
 	meta := &accountMetadata{
-		BalanceZNHB: big.NewInt(0),
-		Stake:       big.NewInt(0),
-		LockedZNHB:  big.NewInt(0),
-		Unbonding:   make([]stakeUnbond, 0),
+		BalanceZNHB:    big.NewInt(0),
+		Stake:          big.NewInt(0),
+		StakeShares:    big.NewInt(0),
+		StakeLastIndex: big.NewInt(0),
+		LockedZNHB:     big.NewInt(0),
+		Unbonding:      make([]stakeUnbond, 0),
 	}
 	if len(data) == 0 {
 		return meta, nil
@@ -3232,6 +3347,12 @@ func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, er
 	}
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
 	}
 	if meta.LockedZNHB == nil {
 		meta.LockedZNHB = big.NewInt(0)
@@ -3263,6 +3384,12 @@ func (sp *StateProcessor) writeAccountMetadata(addr []byte, meta *accountMetadat
 	}
 	if meta.Stake == nil {
 		meta.Stake = big.NewInt(0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
 	}
 	if meta.LockedZNHB == nil {
 		meta.LockedZNHB = big.NewInt(0)
