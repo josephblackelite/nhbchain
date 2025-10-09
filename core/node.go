@@ -658,6 +658,131 @@ func (n *Node) SetGlobalConfig(cfg config.Global) {
 	n.globalCfgMu.Unlock()
 }
 
+// SyncStakingParams refreshes the staking configuration by loading any
+// governance-managed overrides from the parameter store and applying the result
+// to the staking reward engine. Callers should ensure the global configuration
+// baseline has already been populated via SetGlobalConfig so defaults are
+// available when no overrides exist.
+func (n *Node) SyncStakingParams() error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+
+	base := n.globalConfigSnapshot().Staking
+
+	n.stateMu.Lock()
+	if n.state == nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("state unavailable")
+	}
+
+	manager := nhbstate.NewManager(n.state.Trie)
+
+	merged := base
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingAprBps); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingAprBps, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
+			if parseErr != nil {
+				n.stateMu.Unlock()
+				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingAprBps, parseErr)
+			}
+			merged.AprBps = uint32(value)
+		}
+	}
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingPayoutPeriodDays, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
+			if parseErr != nil {
+				n.stateMu.Unlock()
+				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingPayoutPeriodDays, parseErr)
+			}
+			merged.PayoutPeriodDays = uint32(value)
+		}
+	}
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingUnbondingDays); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingUnbondingDays, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
+			if parseErr != nil {
+				n.stateMu.Unlock()
+				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingUnbondingDays, parseErr)
+			}
+			merged.UnbondingDays = uint32(value)
+		}
+	}
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingMinStakeWei); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingMinStakeWei, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			merged.MinStakeWei = trimmed
+		}
+	}
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingMaxEmissionPerYearWei); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingMaxEmissionPerYearWei, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			merged.MaxEmissionPerYearWei = trimmed
+		}
+	}
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingRewardAsset); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingRewardAsset, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			merged.RewardAsset = trimmed
+		}
+	}
+
+	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingCompoundDefault); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingCompoundDefault, err)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			value, parseErr := strconv.ParseBool(strings.ToLower(trimmed))
+			if parseErr != nil {
+				n.stateMu.Unlock()
+				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingCompoundDefault, parseErr)
+			}
+			merged.CompoundDefault = value
+		}
+	}
+
+	if err := n.state.SetStakeRewardAPR(uint64(merged.AprBps)); err != nil {
+		n.stateMu.Unlock()
+		return fmt.Errorf("apply staking APR: %w", err)
+	}
+	n.stateMu.Unlock()
+
+	n.globalCfgMu.Lock()
+	n.globalCfg.Staking = merged
+	n.globalCfgMu.Unlock()
+
+	return nil
+}
+
 func (n *Node) globalConfigSnapshot() config.Global {
 	n.globalCfgMu.RLock()
 	defer n.globalCfgMu.RUnlock()
