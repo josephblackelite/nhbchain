@@ -53,6 +53,10 @@ type accountMetadata struct {
 	// Lending breakers
 	LendingCollateralDisabled bool
 	LendingBorrowDisabled     bool
+
+	StakeShares       *big.Int
+	StakeLastIndex    *big.Int
+	StakeLastPayoutTs uint64
 }
 
 type validatorEntry struct {
@@ -147,6 +151,8 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		BalanceNHB:              big.NewInt(0),
 		BalanceZNHB:             big.NewInt(0),
 		Stake:                   big.NewInt(0),
+		StakeShares:             big.NewInt(0),
+		StakeLastIndex:          big.NewInt(0),
 		EngagementScore:         0,
 		EngagementDay:           "",
 		EngagementMinutes:       0,
@@ -177,9 +183,6 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		}
 		if meta.StakeLastIndex != nil {
 			account.StakeLastIndex = new(big.Int).Set(meta.StakeLastIndex)
-		}
-		if meta.StakeLastPayoutTs != 0 {
-			account.StakeLastPayoutTs = meta.StakeLastPayoutTs
 		}
 		if meta.LockedZNHB != nil {
 			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
@@ -232,6 +235,7 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
 		account.EngagementGovEvents = meta.EngagementGovEvents
 		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
+		account.StakeLastPayoutTs = meta.StakeLastPayoutTs
 		account.LendingBreaker = types.LendingBreakerFlags{
 			CollateralDisabled: meta.LendingCollateralDisabled,
 			BorrowDisabled:     meta.LendingBorrowDisabled,
@@ -309,6 +313,9 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
+		StakeShares:        new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:     new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:  account.StakeLastPayoutTs,
 
 		// Identity
 		Username: account.Username,
@@ -381,6 +388,9 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		DelegatedValidator: delegated,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
+		StakeShares:        new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:     new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:  account.StakeLastPayoutTs,
 
 		// Identity
 		Username: account.Username,
@@ -497,6 +507,12 @@ func (m *Manager) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
 	if meta.Unbonding == nil {
 		meta.Unbonding = make([]stakeUnbond, 0)
 	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
+	}
 	return meta, nil
 }
 
@@ -527,6 +543,12 @@ func (m *Manager) writeAccountMetadata(addr []byte, meta *accountMetadata) error
 	}
 	if meta.Unbonding == nil {
 		meta.Unbonding = make([]stakeUnbond, 0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
 	}
 	encoded, err := rlp.EncodeToBytes(meta)
 	if err != nil {

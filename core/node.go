@@ -2753,6 +2753,13 @@ func (n *Node) StakeClaim(delegator [20]byte, unbondID uint64) (*types.StakeUnbo
 	return n.state.StakeClaim(delegator[:], unbondID)
 }
 
+func (n *Node) StakeClaimRewards(addr [20]byte) (*big.Int, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	return n.state.StakeClaimRewards(addr[:])
+}
+
 func (n *Node) EscrowGet(id [32]byte) (*escrow.Escrow, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
