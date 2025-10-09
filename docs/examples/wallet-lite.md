@@ -33,9 +33,10 @@ Wallet Lite interacts with the following endpoints:
 | Claim redemption | `identity_claim` | Invoked when the recipient has the alias/email preimage. |
 | Alias discovery | `identity_resolve` | Used to surface avatars, created-at timestamps, and primary addresses. |
 
-The application does not call the identity gateway directly; email hashing happens server-side via
-`IDENTITY_EMAIL_SALT`. `NHB_WS_URL` is read from the root environment for future live updates but is
-not yet consumed by the UI.
+Server-side routes proxy the identity gateway using `IDENTITY_GATEWAY_URL`, `IDENTITY_GATEWAY_KEY`,
+and `IDENTITY_GATEWAY_SECRET`. Email hashing still happens on the server via `IDENTITY_EMAIL_SALT`
+before invoking `identity_createClaimable`. `NHB_WS_URL` is read from the root environment for future
+live updates but is not yet consumed by the UI.
 
 For future send capabilities, follow the [authenticated submission flow for
 `nhb_sendTransaction`](../transactions/znhb-transfer.md#authenticated-submission)

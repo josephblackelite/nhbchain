@@ -6,7 +6,10 @@ const serverConfigSchema = z.object({
   chainId: z.string().min(1),
   wsUrl: z.string().url().optional(),
   appBaseUrl: z.string().url().optional(),
-  emailSalt: z.string().min(1)
+  emailSalt: z.string().min(1),
+  identityGatewayUrl: z.string().url(),
+  identityGatewayKey: z.string().min(1),
+  identityGatewaySecret: z.string().min(1)
 });
 
 const clientConfigSchema = z.object({
@@ -24,7 +27,10 @@ export function readServerConfig(): ServerConfig {
     chainId: process.env.NHB_CHAIN_ID,
     wsUrl: process.env.NHB_WS_URL,
     appBaseUrl: process.env.APP_PUBLIC_BASE,
-    emailSalt: process.env.IDENTITY_EMAIL_SALT
+    emailSalt: process.env.IDENTITY_EMAIL_SALT,
+    identityGatewayUrl: process.env.IDENTITY_GATEWAY_URL,
+    identityGatewayKey: process.env.IDENTITY_GATEWAY_KEY,
+    identityGatewaySecret: process.env.IDENTITY_GATEWAY_SECRET
   });
   if (!parsed.success) {
     const issues = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'unknown'}: ${issue.message}`).join(', ');

@@ -31,6 +31,9 @@ The server reads RPC settings from the repository root `.env` file:
 * `NHB_RPC_TOKEN`
 * `NHB_CHAIN_ID`
 * `IDENTITY_EMAIL_SALT`
+* `IDENTITY_GATEWAY_URL`
+* `IDENTITY_GATEWAY_KEY`
+* `IDENTITY_GATEWAY_SECRET`
 * `APP_PUBLIC_BASE` (used for metadata URLs)
 * `NHB_WS_URL` (optional, reserved for future realtime updates)
 * `NHB_API_URL` (defaults to `https://gw.nhbcoin.net` for creator profile lookups)
@@ -43,7 +46,9 @@ For static deployments set `APP_PUBLIC_BASE=https://nhbcoin.com` so absolute lin
 2. Register a username. The API route adds the bearer token and calls `identity_setAlias` on
    `NHB_RPC_URL`.
 3. Create a claimable payment. Choose between alias, email, or raw preimage recipient types. The
-   API computes the salted email hash before invoking `identity_createClaimable`.
+   API computes the salted email hash before invoking `identity_createClaimable` and exposes
+   `/api/identity/email/*` routes that proxy the identity gateway for registration, verification,
+   and alias binding.
 4. Claim the funds. Provide the claim ID and either an alias (auto-derived preimage) or an explicit
    preimage returned by the identity gateway.
 5. Generate a `znhb://pay` QR code for sharing.

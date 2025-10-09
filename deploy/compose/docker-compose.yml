@@ -100,6 +100,24 @@ services:
       - "7074:7074"
     restart: unless-stopped
 
+  identity-gateway:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/identity-gateway/cmd/identity-gateway
+    image: nhbchain/identity-gateway:local
+    environment:
+      NHB_ENV: local
+      IDENTITY_GATEWAY_PORT: "8095"
+      IDENTITY_GATEWAY_DB: /var/lib/nhb/identity-gateway.db
+      IDENTITY_EMAIL_SALT: local-development-salt
+      IDENTITY_GATEWAY_API_KEYS: local:local-secret
+    volumes:
+      - identity-gateway-data:/var/lib/nhb
+    ports:
+      - "8095:8095"
+    restart: unless-stopped
+
   governd:
     build:
       <<: *go-build
@@ -150,3 +168,4 @@ volumes:
   p2p-data:
   consensus-data:
   swapd-data:
+  identity-gateway-data:
