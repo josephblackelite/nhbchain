@@ -146,6 +146,29 @@ type Quotas struct {
 	POTSO   Quota
 }
 
+// Loyalty controls the automatic adjustments applied to the base loyalty reward rate.
+type Loyalty struct {
+	Dynamic LoyaltyDynamic
+}
+
+// LoyaltyDynamic captures the guardrails enforced by the adaptive loyalty controller.
+type LoyaltyDynamic struct {
+	TargetBPS          uint32
+	MinBPS             uint32
+	MaxBPS             uint32
+	SmoothingStepBPS   uint32
+	CoverageWindowDays uint32
+	DailyCapWei        string
+	YearlyCapWei       string
+	PriceGuard         LoyaltyPriceGuard
+}
+
+// LoyaltyPriceGuard defines the deviation limits applied when consuming external price data.
+type LoyaltyPriceGuard struct {
+	Enabled         bool
+	MaxDeviationBPS uint32
+}
+
 // Global bundles the runtime configuration values enforced by ValidateConfig.
 type Global struct {
 	Governance Governance
@@ -157,4 +180,5 @@ type Global struct {
 	Quotas     Quotas
 	Paymaster  Paymaster
 	Fees       Fees
+	Loyalty    Loyalty
 }

@@ -170,6 +170,20 @@ func defaultGlobalConfig() Global {
 				{Asset: fees.AssetZNHB, MDRBasisPoints: DefaultMDRBasisPoints},
 			},
 		},
+		Loyalty: Loyalty{
+			Dynamic: LoyaltyDynamic{
+				TargetBPS:          defaultLoyaltyTargetBPS,
+				MinBPS:             defaultLoyaltyMinBPS,
+				MaxBPS:             defaultLoyaltyMaxBPS,
+				SmoothingStepBPS:   defaultLoyaltySmoothingStepBPS,
+				CoverageWindowDays: defaultLoyaltyCoverageWindowDays,
+				DailyCapWei:        defaultLoyaltyDynamicDailyCapWei,
+				YearlyCapWei:       defaultLoyaltyDynamicYearlyCapWei,
+				PriceGuard: LoyaltyPriceGuard{
+					MaxDeviationBPS: defaultLoyaltyPriceGuardMaxDeviation,
+				},
+			},
+		},
 	}
 }
 
@@ -187,7 +201,15 @@ const (
 	defaultStreamQueueSize                = 128
 	defaultRelayDropLogRatio              = 0.1
 	// DefaultMempoolMaxTransactions bounds pending transactions when no explicit limit is provided.
-	DefaultMempoolMaxTransactions = 4000
+	DefaultMempoolMaxTransactions        = 4000
+	defaultLoyaltyTargetBPS              = 5_000
+	defaultLoyaltyMinBPS                 = 3_000
+	defaultLoyaltyMaxBPS                 = 7_000
+	defaultLoyaltySmoothingStepBPS       = 50
+	defaultLoyaltyCoverageWindowDays     = 7
+	defaultLoyaltyDynamicDailyCapWei     = "0"
+	defaultLoyaltyDynamicYearlyCapWei    = "0"
+	defaultLoyaltyPriceGuardMaxDeviation = 500
 )
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -608,6 +630,34 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if len(cfg.Global.Fees.Assets) == 0 {
 		cfg.Global.Fees.Assets = append([]FeeAsset{}, defaults.Fees.Assets...)
+	}
+
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "TargetBPS") {
+		cfg.Global.Loyalty.Dynamic.TargetBPS = defaults.Loyalty.Dynamic.TargetBPS
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "MinBPS") {
+		cfg.Global.Loyalty.Dynamic.MinBPS = defaults.Loyalty.Dynamic.MinBPS
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "MaxBPS") {
+		cfg.Global.Loyalty.Dynamic.MaxBPS = defaults.Loyalty.Dynamic.MaxBPS
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "SmoothingStepBPS") {
+		cfg.Global.Loyalty.Dynamic.SmoothingStepBPS = defaults.Loyalty.Dynamic.SmoothingStepBPS
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "CoverageWindowDays") {
+		cfg.Global.Loyalty.Dynamic.CoverageWindowDays = defaults.Loyalty.Dynamic.CoverageWindowDays
+	}
+	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.DailyCapWei) == "" {
+		cfg.Global.Loyalty.Dynamic.DailyCapWei = defaults.Loyalty.Dynamic.DailyCapWei
+	}
+	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.YearlyCapWei) == "" {
+		cfg.Global.Loyalty.Dynamic.YearlyCapWei = defaults.Loyalty.Dynamic.YearlyCapWei
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "Enabled") {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.Enabled = defaults.Loyalty.Dynamic.PriceGuard.Enabled
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "MaxDeviationBPS") {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS = defaults.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS
 	}
 }
 
