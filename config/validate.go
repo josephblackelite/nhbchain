@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 
@@ -74,23 +75,44 @@ func ValidateConfig(g Global) error {
 	if g.Loyalty.Dynamic.TargetBPS < g.Loyalty.Dynamic.MinBPS || g.Loyalty.Dynamic.TargetBPS > g.Loyalty.Dynamic.MaxBPS {
 		return fmt.Errorf("loyalty.dynamic: target_bps must lie within the configured band")
 	}
-	if trimmed := strings.TrimSpace(g.Loyalty.Dynamic.DailyCapWei); trimmed != "" {
-		amount, ok := new(big.Int).SetString(trimmed, 10)
-		if !ok {
-			return fmt.Errorf("loyalty.dynamic: daily_cap_wei must be a base-10 integer")
-		}
-		if amount.Sign() < 0 {
-			return fmt.Errorf("loyalty.dynamic: daily_cap_wei must be >= 0")
-		}
+	if g.Loyalty.Dynamic.SmoothingStepBPS == 0 {
+		return fmt.Errorf("loyalty.dynamic: smoothing_step_bps must be >= 1")
 	}
-	if trimmed := strings.TrimSpace(g.Loyalty.Dynamic.YearlyCapWei); trimmed != "" {
-		amount, ok := new(big.Int).SetString(trimmed, 10)
-		if !ok {
-			return fmt.Errorf("loyalty.dynamic: yearly_cap_wei must be a base-10 integer")
-		}
-		if amount.Sign() < 0 {
-			return fmt.Errorf("loyalty.dynamic: yearly_cap_wei must be >= 0")
-		}
+	if g.Loyalty.Dynamic.CoverageLookbackDays == 0 {
+		return fmt.Errorf("loyalty.dynamic: coverage_lookback_days must be >= 1")
+	}
+	if math.IsNaN(g.Loyalty.Dynamic.CoverageMax) || math.IsInf(g.Loyalty.Dynamic.CoverageMax, 0) {
+		return fmt.Errorf("loyalty.dynamic: coverage_max must be a finite number")
+	}
+	if g.Loyalty.Dynamic.CoverageMax < 0 || g.Loyalty.Dynamic.CoverageMax > 1 {
+		return fmt.Errorf("loyalty.dynamic: coverage_max must be between 0 and 1")
+	}
+	if math.IsNaN(g.Loyalty.Dynamic.DailyCapPctOf7dFees) || math.IsInf(g.Loyalty.Dynamic.DailyCapPctOf7dFees, 0) {
+		return fmt.Errorf("loyalty.dynamic: daily_cap_pct_of_7d_fees must be a finite number")
+	}
+	if g.Loyalty.Dynamic.DailyCapPctOf7dFees < 0 || g.Loyalty.Dynamic.DailyCapPctOf7dFees > 1 {
+		return fmt.Errorf("loyalty.dynamic: daily_cap_pct_of_7d_fees must be between 0 and 1")
+	}
+	if math.IsNaN(g.Loyalty.Dynamic.DailyCapUSD) || math.IsInf(g.Loyalty.Dynamic.DailyCapUSD, 0) {
+		return fmt.Errorf("loyalty.dynamic: daily_cap_usd must be a finite number")
+	}
+	if g.Loyalty.Dynamic.DailyCapUSD < 0 {
+		return fmt.Errorf("loyalty.dynamic: daily_cap_usd must be >= 0")
+	}
+	if math.IsNaN(g.Loyalty.Dynamic.YearlyCapPctOfInitialSupply) || math.IsInf(g.Loyalty.Dynamic.YearlyCapPctOfInitialSupply, 0) {
+		return fmt.Errorf("loyalty.dynamic: yearly_cap_pct_of_initial_supply must be a finite number")
+	}
+	if g.Loyalty.Dynamic.YearlyCapPctOfInitialSupply < 0 || g.Loyalty.Dynamic.YearlyCapPctOfInitialSupply > 100 {
+		return fmt.Errorf("loyalty.dynamic: yearly_cap_pct_of_initial_supply must be between 0 and 100")
+	}
+	if strings.TrimSpace(g.Loyalty.Dynamic.PriceGuard.PricePair) == "" {
+		return fmt.Errorf("loyalty.dynamic.price_guard: price_pair must not be empty")
+	}
+	if g.Loyalty.Dynamic.PriceGuard.TwapWindowSeconds == 0 {
+		return fmt.Errorf("loyalty.dynamic.price_guard: twap_window_seconds must be >= 1")
+	}
+	if g.Loyalty.Dynamic.PriceGuard.PriceMaxAgeSeconds == 0 {
+		return fmt.Errorf("loyalty.dynamic.price_guard: price_max_age_seconds must be >= 1")
 	}
 	if g.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS > consensus.BPSDenominator {
 		return fmt.Errorf("loyalty.dynamic.price_guard: max_deviation_bps must be <= %d", consensus.BPSDenominator)

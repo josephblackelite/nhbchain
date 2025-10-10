@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"sort"
@@ -68,41 +69,66 @@ type LoyaltyGlobalSpec struct {
 }
 
 type LoyaltyDynamicSpec struct {
-	TargetBps          uint32                `json:"targetBps"`
-	MinBps             uint32                `json:"minBps"`
-	MaxBps             uint32                `json:"maxBps"`
-	SmoothingStepBps   uint32                `json:"smoothingStepBps"`
-	CoverageWindowDays uint32                `json:"coverageWindowDays"`
-	DailyCapWei        string                `json:"dailyCapWei"`
-	YearlyCapWei       string                `json:"yearlyCapWei"`
-	PriceGuard         LoyaltyPriceGuardSpec `json:"priceGuard"`
+	TargetBps                   uint32                `json:"targetBps"`
+	MinBps                      uint32                `json:"minBps"`
+	MaxBps                      uint32                `json:"maxBps"`
+	SmoothingStepBps            uint32                `json:"smoothingStepBps"`
+	CoverageMax                 float64               `json:"coverageMax"`
+	CoverageLookbackDays        uint32                `json:"coverageLookbackDays"`
+	DailyCapPctOf7dFees         float64               `json:"dailyCapPctOf7dFees"`
+	DailyCapUSD                 float64               `json:"dailyCapUsd"`
+	YearlyCapPctOfInitialSupply float64               `json:"yearlyCapPctOfInitialSupply"`
+	PriceGuard                  LoyaltyPriceGuardSpec `json:"priceGuard"`
 
-	dailyCapAmt  *big.Int
-	yearlyCapAmt *big.Int
+	coverageMaxBps       uint32
+	dailyCapPctBps       uint32
+	dailyCapUsd          uint64
+	yearlyCapPctOfSupply uint32
 }
 
 type LoyaltyPriceGuardSpec struct {
-	Enabled         bool   `json:"enabled"`
-	MaxDeviationBps uint32 `json:"maxDeviationBps"`
+	Enabled            bool   `json:"enabled"`
+	PricePair          string `json:"pricePair"`
+	TwapWindowSeconds  uint32 `json:"twapWindowSeconds"`
+	MaxDeviationBps    uint32 `json:"maxDeviationBps"`
+	PriceMaxAgeSeconds uint32 `json:"priceMaxAgeSeconds"`
 }
 
 func (d *LoyaltyDynamicSpec) validate() error {
 	if d == nil {
 		return nil
 	}
-	dailyCap, err := parseAmountString(d.DailyCapWei)
-	if err != nil {
-		return fmt.Errorf("dailyCapWei: %w", err)
+	if d.CoverageLookbackDays == 0 {
+		return fmt.Errorf("coverageLookbackDays must be >= 1")
 	}
-	yearlyCap, err := parseAmountString(d.YearlyCapWei)
-	if err != nil {
-		return fmt.Errorf("yearlyCapWei: %w", err)
+	if d.CoverageMax < 0 || d.CoverageMax > 1 {
+		return fmt.Errorf("coverageMax must be between 0 and 1")
+	}
+	d.coverageMaxBps = uint32(math.Round(d.CoverageMax * loyalty.BaseRewardBpsDenominator))
+	if d.DailyCapPctOf7dFees < 0 || d.DailyCapPctOf7dFees > 1 {
+		return fmt.Errorf("dailyCapPctOf7dFees must be between 0 and 1")
+	}
+	d.dailyCapPctBps = uint32(math.Round(d.DailyCapPctOf7dFees * loyalty.BaseRewardBpsDenominator))
+	if d.DailyCapUSD < 0 {
+		return fmt.Errorf("dailyCapUsd must be >= 0")
+	}
+	d.dailyCapUsd = uint64(math.Round(d.DailyCapUSD))
+	if d.YearlyCapPctOfInitialSupply < 0 || d.YearlyCapPctOfInitialSupply > 100 {
+		return fmt.Errorf("yearlyCapPctOfInitialSupply must be between 0 and 100")
+	}
+	d.yearlyCapPctOfSupply = uint32(math.Round(d.YearlyCapPctOfInitialSupply * 100))
+	if strings.TrimSpace(d.PriceGuard.PricePair) == "" {
+		return fmt.Errorf("priceGuard.pricePair must be provided")
+	}
+	if d.PriceGuard.TwapWindowSeconds == 0 {
+		return fmt.Errorf("priceGuard.twapWindowSeconds must be >= 1")
+	}
+	if d.PriceGuard.PriceMaxAgeSeconds == 0 {
+		return fmt.Errorf("priceGuard.priceMaxAgeSeconds must be >= 1")
 	}
 	if d.PriceGuard.MaxDeviationBps > loyalty.BaseRewardBpsDenominator {
 		return fmt.Errorf("priceGuard.maxDeviationBps must be <= %d", loyalty.BaseRewardBpsDenominator)
 	}
-	d.dailyCapAmt = dailyCap
-	d.yearlyCapAmt = yearlyCap
 	return nil
 }
 
@@ -436,22 +462,23 @@ func (l *LoyaltyGlobalSpec) Config() (*loyalty.GlobalConfig, *big.Int, error) {
 		CapPerTx:     new(big.Int).Set(l.capPerTxAmt),
 		DailyCapUser: new(big.Int).Set(l.dailyCapAmt),
 		Dynamic: loyalty.DynamicConfig{
-			TargetBps:          l.Dynamic.TargetBps,
-			MinBps:             l.Dynamic.MinBps,
-			MaxBps:             l.Dynamic.MaxBps,
-			SmoothingStepBps:   l.Dynamic.SmoothingStepBps,
-			CoverageWindowDays: l.Dynamic.CoverageWindowDays,
+			TargetBps:                      l.Dynamic.TargetBps,
+			MinBps:                         l.Dynamic.MinBps,
+			MaxBps:                         l.Dynamic.MaxBps,
+			SmoothingStepBps:               l.Dynamic.SmoothingStepBps,
+			CoverageMaxBps:                 l.Dynamic.coverageMaxBps,
+			CoverageLookbackDays:           l.Dynamic.CoverageLookbackDays,
+			DailyCapPctOf7dFeesBps:         l.Dynamic.dailyCapPctBps,
+			DailyCapUsd:                    l.Dynamic.dailyCapUsd,
+			YearlyCapPctOfInitialSupplyBps: l.Dynamic.yearlyCapPctOfSupply,
 			PriceGuard: loyalty.PriceGuardConfig{
-				Enabled:         l.Dynamic.PriceGuard.Enabled,
-				MaxDeviationBps: l.Dynamic.PriceGuard.MaxDeviationBps,
+				Enabled:            l.Dynamic.PriceGuard.Enabled,
+				PricePair:          strings.TrimSpace(l.Dynamic.PriceGuard.PricePair),
+				TwapWindowSeconds:  l.Dynamic.PriceGuard.TwapWindowSeconds,
+				MaxDeviationBps:    l.Dynamic.PriceGuard.MaxDeviationBps,
+				PriceMaxAgeSeconds: l.Dynamic.PriceGuard.PriceMaxAgeSeconds,
 			},
 		},
-	}
-	if l.Dynamic.dailyCapAmt != nil {
-		cfg.Dynamic.DailyCap = new(big.Int).Set(l.Dynamic.dailyCapAmt)
-	}
-	if l.Dynamic.yearlyCapAmt != nil {
-		cfg.Dynamic.YearlyCap = new(big.Int).Set(l.Dynamic.yearlyCapAmt)
 	}
 	cfg = cfg.Normalize()
 	return cfg, new(big.Int).Set(l.seedZNHB), nil

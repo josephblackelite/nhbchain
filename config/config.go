@@ -172,15 +172,20 @@ func defaultGlobalConfig() Global {
 		},
 		Loyalty: Loyalty{
 			Dynamic: LoyaltyDynamic{
-				TargetBPS:          defaultLoyaltyTargetBPS,
-				MinBPS:             defaultLoyaltyMinBPS,
-				MaxBPS:             defaultLoyaltyMaxBPS,
-				SmoothingStepBPS:   defaultLoyaltySmoothingStepBPS,
-				CoverageWindowDays: defaultLoyaltyCoverageWindowDays,
-				DailyCapWei:        defaultLoyaltyDynamicDailyCapWei,
-				YearlyCapWei:       defaultLoyaltyDynamicYearlyCapWei,
+				TargetBPS:                   defaultLoyaltyTargetBPS,
+				MinBPS:                      defaultLoyaltyMinBPS,
+				MaxBPS:                      defaultLoyaltyMaxBPS,
+				SmoothingStepBPS:            defaultLoyaltySmoothingStepBPS,
+				CoverageMax:                 defaultLoyaltyCoverageMax,
+				CoverageLookbackDays:        defaultLoyaltyCoverageLookbackDays,
+				DailyCapPctOf7dFees:         defaultLoyaltyDailyCapPctOf7dFees,
+				DailyCapUSD:                 defaultLoyaltyDailyCapUSD,
+				YearlyCapPctOfInitialSupply: defaultLoyaltyYearlyCapPctOfInitialSupply,
 				PriceGuard: LoyaltyPriceGuard{
-					MaxDeviationBPS: defaultLoyaltyPriceGuardMaxDeviation,
+					PricePair:          defaultLoyaltyPricePair,
+					TwapWindowSeconds:  defaultLoyaltyPriceGuardTwapWindowSeconds,
+					MaxDeviationBPS:    defaultLoyaltyPriceGuardMaxDeviation,
+					PriceMaxAgeSeconds: defaultLoyaltyPriceGuardMaxAgeSeconds,
 				},
 			},
 		},
@@ -201,15 +206,20 @@ const (
 	defaultStreamQueueSize                = 128
 	defaultRelayDropLogRatio              = 0.1
 	// DefaultMempoolMaxTransactions bounds pending transactions when no explicit limit is provided.
-	DefaultMempoolMaxTransactions        = 4000
-	defaultLoyaltyTargetBPS              = 5_000
-	defaultLoyaltyMinBPS                 = 3_000
-	defaultLoyaltyMaxBPS                 = 7_000
-	defaultLoyaltySmoothingStepBPS       = 50
-	defaultLoyaltyCoverageWindowDays     = 7
-	defaultLoyaltyDynamicDailyCapWei     = "0"
-	defaultLoyaltyDynamicYearlyCapWei    = "0"
-	defaultLoyaltyPriceGuardMaxDeviation = 500
+	DefaultMempoolMaxTransactions             = 4000
+	defaultLoyaltyTargetBPS                   = 50
+	defaultLoyaltyMinBPS                      = 25
+	defaultLoyaltyMaxBPS                      = 100
+	defaultLoyaltySmoothingStepBPS            = 5
+	defaultLoyaltyCoverageMax                 = 0.50
+	defaultLoyaltyCoverageLookbackDays        = 7
+	defaultLoyaltyDailyCapPctOf7dFees         = 0.60
+	defaultLoyaltyDailyCapUSD                 = 5_000.0
+	defaultLoyaltyYearlyCapPctOfInitialSupply = 10.0
+	defaultLoyaltyPricePair                   = "ZNHB/USD"
+	defaultLoyaltyPriceGuardTwapWindowSeconds = uint32(3_600)
+	defaultLoyaltyPriceGuardMaxDeviation      = 500
+	defaultLoyaltyPriceGuardMaxAgeSeconds     = uint32(900)
 )
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -644,14 +654,29 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	if !meta.IsDefined("global", "loyalty", "Dynamic", "SmoothingStepBPS") {
 		cfg.Global.Loyalty.Dynamic.SmoothingStepBPS = defaults.Loyalty.Dynamic.SmoothingStepBPS
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "CoverageWindowDays") {
-		cfg.Global.Loyalty.Dynamic.CoverageWindowDays = defaults.Loyalty.Dynamic.CoverageWindowDays
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "CoverageMax") {
+		cfg.Global.Loyalty.Dynamic.CoverageMax = defaults.Loyalty.Dynamic.CoverageMax
 	}
-	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.DailyCapWei) == "" {
-		cfg.Global.Loyalty.Dynamic.DailyCapWei = defaults.Loyalty.Dynamic.DailyCapWei
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "CoverageLookbackDays") {
+		cfg.Global.Loyalty.Dynamic.CoverageLookbackDays = defaults.Loyalty.Dynamic.CoverageLookbackDays
 	}
-	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.YearlyCapWei) == "" {
-		cfg.Global.Loyalty.Dynamic.YearlyCapWei = defaults.Loyalty.Dynamic.YearlyCapWei
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "DailyCapPctOf7dFees") {
+		cfg.Global.Loyalty.Dynamic.DailyCapPctOf7dFees = defaults.Loyalty.Dynamic.DailyCapPctOf7dFees
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "DailyCapUSD") {
+		cfg.Global.Loyalty.Dynamic.DailyCapUSD = defaults.Loyalty.Dynamic.DailyCapUSD
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "YearlyCapPctOfInitialSupply") {
+		cfg.Global.Loyalty.Dynamic.YearlyCapPctOfInitialSupply = defaults.Loyalty.Dynamic.YearlyCapPctOfInitialSupply
+	}
+	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.PriceGuard.PricePair) == "" {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.PricePair = defaults.Loyalty.Dynamic.PriceGuard.PricePair
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "TwapWindowSeconds") {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.TwapWindowSeconds = defaults.Loyalty.Dynamic.PriceGuard.TwapWindowSeconds
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "PriceMaxAgeSeconds") {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.PriceMaxAgeSeconds = defaults.Loyalty.Dynamic.PriceGuard.PriceMaxAgeSeconds
 	}
 	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "Enabled") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.Enabled = defaults.Loyalty.Dynamic.PriceGuard.Enabled

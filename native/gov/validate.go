@@ -148,6 +148,25 @@ func PreflightBaselineApply(cur Baseline, delta PolicyDelta) error {
 			OwnerWallet:        cur.Fees.OwnerWallet,
 			Assets:             feeAssetsFromBaseline(cur.Fees.Assets),
 		},
+		Loyalty: config.Loyalty{
+			Dynamic: config.LoyaltyDynamic{
+				TargetBPS:                   50,
+				MinBPS:                      25,
+				MaxBPS:                      100,
+				SmoothingStepBPS:            5,
+				CoverageMax:                 0.5,
+				CoverageLookbackDays:        7,
+				DailyCapPctOf7dFees:         0.60,
+				DailyCapUSD:                 5000,
+				YearlyCapPctOfInitialSupply: 10,
+				PriceGuard: config.LoyaltyPriceGuard{
+					PricePair:          "ZNHB/USD",
+					TwapWindowSeconds:  3600,
+					MaxDeviationBPS:    500,
+					PriceMaxAgeSeconds: 900,
+				},
+			},
+		},
 	}, delta)
 }
 

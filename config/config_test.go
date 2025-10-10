@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"nhbchain/crypto"
+
+	"github.com/BurntSushi/toml"
 )
 
 const testKeystorePassphrase = "test-passphrase"
@@ -209,6 +211,107 @@ PEX = false
 	}
 	if cfg.P2P.PEX == nil || *cfg.P2P.PEX != false {
 		t.Fatalf("unexpected pex flag: %+v", cfg.P2P.PEX)
+	}
+}
+
+func TestEnsureGlobalDefaultsLoyaltyDynamic(t *testing.T) {
+	var cfg Config
+	cfg.ensureGlobalDefaults(toml.MetaData{})
+
+	dyn := cfg.Global.Loyalty.Dynamic
+	if dyn.TargetBPS != defaultLoyaltyTargetBPS {
+		t.Fatalf("unexpected target bps: %d", dyn.TargetBPS)
+	}
+	if dyn.MinBPS != defaultLoyaltyMinBPS || dyn.MaxBPS != defaultLoyaltyMaxBPS {
+		t.Fatalf("unexpected min/max bps: %d/%d", dyn.MinBPS, dyn.MaxBPS)
+	}
+	if dyn.SmoothingStepBPS != defaultLoyaltySmoothingStepBPS {
+		t.Fatalf("unexpected smoothing step: %d", dyn.SmoothingStepBPS)
+	}
+	if dyn.CoverageMax != defaultLoyaltyCoverageMax {
+		t.Fatalf("unexpected coverage max: %f", dyn.CoverageMax)
+	}
+	if dyn.CoverageLookbackDays != defaultLoyaltyCoverageLookbackDays {
+		t.Fatalf("unexpected coverage lookback: %d", dyn.CoverageLookbackDays)
+	}
+	if dyn.DailyCapPctOf7dFees != defaultLoyaltyDailyCapPctOf7dFees {
+		t.Fatalf("unexpected daily cap pct: %f", dyn.DailyCapPctOf7dFees)
+	}
+	if dyn.DailyCapUSD != defaultLoyaltyDailyCapUSD {
+		t.Fatalf("unexpected daily cap USD: %f", dyn.DailyCapUSD)
+	}
+	if dyn.YearlyCapPctOfInitialSupply != defaultLoyaltyYearlyCapPctOfInitialSupply {
+		t.Fatalf("unexpected yearly cap pct: %f", dyn.YearlyCapPctOfInitialSupply)
+	}
+	guard := dyn.PriceGuard
+	if guard.PricePair != defaultLoyaltyPricePair {
+		t.Fatalf("unexpected price pair: %s", guard.PricePair)
+	}
+	if guard.TwapWindowSeconds != defaultLoyaltyPriceGuardTwapWindowSeconds {
+		t.Fatalf("unexpected twap window: %d", guard.TwapWindowSeconds)
+	}
+	if guard.MaxDeviationBPS != defaultLoyaltyPriceGuardMaxDeviation {
+		t.Fatalf("unexpected max deviation: %d", guard.MaxDeviationBPS)
+	}
+	if guard.PriceMaxAgeSeconds != defaultLoyaltyPriceGuardMaxAgeSeconds {
+		t.Fatalf("unexpected price max age: %d", guard.PriceMaxAgeSeconds)
+	}
+}
+
+func TestEnsureGlobalDefaultsLoyaltyDynamicOverride(t *testing.T) {
+	const raw = `
+[global.loyalty.Dynamic]
+TargetBPS = 75
+MinBPS = 15
+MaxBPS = 250
+SmoothingStepBPS = 12
+CoverageMax = 0.42
+CoverageLookbackDays = 21
+DailyCapPctOf7dFees = 0.37
+DailyCapUSD = 3210.5
+YearlyCapPctOfInitialSupply = 12.5
+
+  [global.loyalty.Dynamic.PriceGuard]
+  Enabled = true
+  PricePair = "ZNHB/EUR"
+  TwapWindowSeconds = 7200
+  MaxDeviationBPS = 275
+  PriceMaxAgeSeconds = 450
+`
+
+	var cfg Config
+	meta, err := toml.Decode(raw, &cfg)
+	if err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	cfg.ensureGlobalDefaults(meta)
+
+	dyn := cfg.Global.Loyalty.Dynamic
+	if dyn.TargetBPS != 75 || dyn.MinBPS != 15 || dyn.MaxBPS != 250 {
+		t.Fatalf("unexpected bps band: %+v", dyn)
+	}
+	if dyn.SmoothingStepBPS != 12 {
+		t.Fatalf("unexpected smoothing step: %d", dyn.SmoothingStepBPS)
+	}
+	if dyn.CoverageMax != 0.42 || dyn.CoverageLookbackDays != 21 {
+		t.Fatalf("unexpected coverage values: %f/%d", dyn.CoverageMax, dyn.CoverageLookbackDays)
+	}
+	if dyn.DailyCapPctOf7dFees != 0.37 || dyn.DailyCapUSD != 3210.5 {
+		t.Fatalf("unexpected daily caps: %f/%f", dyn.DailyCapPctOf7dFees, dyn.DailyCapUSD)
+	}
+	if dyn.YearlyCapPctOfInitialSupply != 12.5 {
+		t.Fatalf("unexpected yearly cap: %f", dyn.YearlyCapPctOfInitialSupply)
+	}
+	guard := dyn.PriceGuard
+	if !guard.Enabled {
+		t.Fatalf("expected price guard enabled override")
+	}
+	if guard.PricePair != "ZNHB/EUR" {
+		t.Fatalf("unexpected price pair: %s", guard.PricePair)
+	}
+	if guard.TwapWindowSeconds != 7200 || guard.MaxDeviationBPS != 275 || guard.PriceMaxAgeSeconds != 450 {
+		t.Fatalf("unexpected price guard values: %+v", guard)
 	}
 }
 

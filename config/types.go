@@ -153,20 +153,25 @@ type Loyalty struct {
 
 // LoyaltyDynamic captures the guardrails enforced by the adaptive loyalty controller.
 type LoyaltyDynamic struct {
-	TargetBPS          uint32
-	MinBPS             uint32
-	MaxBPS             uint32
-	SmoothingStepBPS   uint32
-	CoverageWindowDays uint32
-	DailyCapWei        string
-	YearlyCapWei       string
-	PriceGuard         LoyaltyPriceGuard
+	TargetBPS                   uint32
+	MinBPS                      uint32
+	MaxBPS                      uint32
+	SmoothingStepBPS            uint32
+	CoverageMax                 float64
+	CoverageLookbackDays        uint32
+	DailyCapPctOf7dFees         float64
+	DailyCapUSD                 float64
+	YearlyCapPctOfInitialSupply float64
+	PriceGuard                  LoyaltyPriceGuard
 }
 
 // LoyaltyPriceGuard defines the deviation limits applied when consuming external price data.
 type LoyaltyPriceGuard struct {
-	Enabled         bool
-	MaxDeviationBPS uint32
+	Enabled            bool
+	PricePair          string
+	TwapWindowSeconds  uint32
+	MaxDeviationBPS    uint32
+	PriceMaxAgeSeconds uint32
 }
 
 // Global bundles the runtime configuration values enforced by ValidateConfig.

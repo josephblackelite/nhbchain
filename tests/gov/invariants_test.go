@@ -30,6 +30,15 @@ func testBaseline() govcfg.Baseline {
 				{Asset: fees.AssetZNHB, MDRBasisPoints: config.DefaultMDRBasisPoints, OwnerWallet: "znhb1proceedswalletbaseline"},
 			},
 		},
+		Staking: govcfg.StakingBaseline{
+			AprBps:                1250,
+			PayoutPeriodDays:      30,
+			UnbondingDays:         7,
+			MinStakeWei:           "0",
+			MaxEmissionPerYearWei: "0",
+			RewardAsset:           "ZNHB",
+			CompoundDefault:       false,
+		},
 	}
 }
 
