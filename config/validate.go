@@ -65,6 +65,36 @@ func ValidateConfig(g Global) error {
 	if _, err := g.PaymasterLimits(); err != nil {
 		return fmt.Errorf("paymaster: %w", err)
 	}
+	if g.Loyalty.Dynamic.MinBPS > g.Loyalty.Dynamic.MaxBPS {
+		return fmt.Errorf("loyalty.dynamic: min_bps must be <= max_bps")
+	}
+	if g.Loyalty.Dynamic.MaxBPS > consensus.BPSDenominator {
+		return fmt.Errorf("loyalty.dynamic: max_bps must be <= %d", consensus.BPSDenominator)
+	}
+	if g.Loyalty.Dynamic.TargetBPS < g.Loyalty.Dynamic.MinBPS || g.Loyalty.Dynamic.TargetBPS > g.Loyalty.Dynamic.MaxBPS {
+		return fmt.Errorf("loyalty.dynamic: target_bps must lie within the configured band")
+	}
+	if trimmed := strings.TrimSpace(g.Loyalty.Dynamic.DailyCapWei); trimmed != "" {
+		amount, ok := new(big.Int).SetString(trimmed, 10)
+		if !ok {
+			return fmt.Errorf("loyalty.dynamic: daily_cap_wei must be a base-10 integer")
+		}
+		if amount.Sign() < 0 {
+			return fmt.Errorf("loyalty.dynamic: daily_cap_wei must be >= 0")
+		}
+	}
+	if trimmed := strings.TrimSpace(g.Loyalty.Dynamic.YearlyCapWei); trimmed != "" {
+		amount, ok := new(big.Int).SetString(trimmed, 10)
+		if !ok {
+			return fmt.Errorf("loyalty.dynamic: yearly_cap_wei must be a base-10 integer")
+		}
+		if amount.Sign() < 0 {
+			return fmt.Errorf("loyalty.dynamic: yearly_cap_wei must be >= 0")
+		}
+	}
+	if g.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS > consensus.BPSDenominator {
+		return fmt.Errorf("loyalty.dynamic.price_guard: max_deviation_bps must be <= %d", consensus.BPSDenominator)
+	}
 	znhbEnabled := false
 	for _, asset := range g.Fees.Assets {
 		if strings.EqualFold(strings.TrimSpace(asset.Asset), fees.AssetZNHB) {

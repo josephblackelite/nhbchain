@@ -51,19 +51,59 @@ type ValidatorAutoPopulateInfo struct {
 }
 
 type LoyaltyGlobalSpec struct {
-	Active       bool   `json:"active"`
-	Treasury     string `json:"treasury"`
-	BaseBps      uint32 `json:"baseBps"`
-	MinSpend     string `json:"minSpend"`
-	CapPerTx     string `json:"capPerTx"`
-	DailyCapUser string `json:"dailyCapUser"`
-	SeedZNHB     string `json:"seedZNHB"`
+	Active       bool               `json:"active"`
+	Treasury     string             `json:"treasury"`
+	BaseBps      uint32             `json:"baseBps"`
+	MinSpend     string             `json:"minSpend"`
+	CapPerTx     string             `json:"capPerTx"`
+	DailyCapUser string             `json:"dailyCapUser"`
+	SeedZNHB     string             `json:"seedZNHB"`
+	Dynamic      LoyaltyDynamicSpec `json:"dynamic"`
 
 	treasuryAddr []byte
 	minSpendAmt  *big.Int
 	capPerTxAmt  *big.Int
 	dailyCapAmt  *big.Int
 	seedZNHB     *big.Int
+}
+
+type LoyaltyDynamicSpec struct {
+	TargetBps          uint32                `json:"targetBps"`
+	MinBps             uint32                `json:"minBps"`
+	MaxBps             uint32                `json:"maxBps"`
+	SmoothingStepBps   uint32                `json:"smoothingStepBps"`
+	CoverageWindowDays uint32                `json:"coverageWindowDays"`
+	DailyCapWei        string                `json:"dailyCapWei"`
+	YearlyCapWei       string                `json:"yearlyCapWei"`
+	PriceGuard         LoyaltyPriceGuardSpec `json:"priceGuard"`
+
+	dailyCapAmt  *big.Int
+	yearlyCapAmt *big.Int
+}
+
+type LoyaltyPriceGuardSpec struct {
+	Enabled         bool   `json:"enabled"`
+	MaxDeviationBps uint32 `json:"maxDeviationBps"`
+}
+
+func (d *LoyaltyDynamicSpec) validate() error {
+	if d == nil {
+		return nil
+	}
+	dailyCap, err := parseAmountString(d.DailyCapWei)
+	if err != nil {
+		return fmt.Errorf("dailyCapWei: %w", err)
+	}
+	yearlyCap, err := parseAmountString(d.YearlyCapWei)
+	if err != nil {
+		return fmt.Errorf("yearlyCapWei: %w", err)
+	}
+	if d.PriceGuard.MaxDeviationBps > loyalty.BaseRewardBpsDenominator {
+		return fmt.Errorf("priceGuard.maxDeviationBps must be <= %d", loyalty.BaseRewardBpsDenominator)
+	}
+	d.dailyCapAmt = dailyCap
+	d.yearlyCapAmt = yearlyCap
+	return nil
 }
 
 func LoadGenesisSpec(path string) (*GenesisSpec, error) {
@@ -371,6 +411,9 @@ func (l *LoyaltyGlobalSpec) validate(tokenSymbols map[string]struct{}) error {
 			return fmt.Errorf("seedZNHB provided but token ZNHB not registered")
 		}
 	}
+	if err := l.Dynamic.validate(); err != nil {
+		return fmt.Errorf("dynamic: %w", err)
+	}
 	l.minSpendAmt = minSpend
 	l.capPerTxAmt = capPerTx
 	l.dailyCapAmt = dailyCap
@@ -385,14 +428,32 @@ func (l *LoyaltyGlobalSpec) Config() (*loyalty.GlobalConfig, *big.Int, error) {
 	if l.treasuryAddr == nil {
 		return nil, nil, fmt.Errorf("loyalty global spec not validated")
 	}
-	cfg := (&loyalty.GlobalConfig{
+	cfg := &loyalty.GlobalConfig{
 		Active:       l.Active,
 		Treasury:     append([]byte(nil), l.treasuryAddr...),
 		BaseBps:      l.BaseBps,
 		MinSpend:     new(big.Int).Set(l.minSpendAmt),
 		CapPerTx:     new(big.Int).Set(l.capPerTxAmt),
 		DailyCapUser: new(big.Int).Set(l.dailyCapAmt),
-	}).Normalize()
+		Dynamic: loyalty.DynamicConfig{
+			TargetBps:          l.Dynamic.TargetBps,
+			MinBps:             l.Dynamic.MinBps,
+			MaxBps:             l.Dynamic.MaxBps,
+			SmoothingStepBps:   l.Dynamic.SmoothingStepBps,
+			CoverageWindowDays: l.Dynamic.CoverageWindowDays,
+			PriceGuard: loyalty.PriceGuardConfig{
+				Enabled:         l.Dynamic.PriceGuard.Enabled,
+				MaxDeviationBps: l.Dynamic.PriceGuard.MaxDeviationBps,
+			},
+		},
+	}
+	if l.Dynamic.dailyCapAmt != nil {
+		cfg.Dynamic.DailyCap = new(big.Int).Set(l.Dynamic.dailyCapAmt)
+	}
+	if l.Dynamic.yearlyCapAmt != nil {
+		cfg.Dynamic.YearlyCap = new(big.Int).Set(l.Dynamic.yearlyCapAmt)
+	}
+	cfg = cfg.Normalize()
 	return cfg, new(big.Int).Set(l.seedZNHB), nil
 }
 
