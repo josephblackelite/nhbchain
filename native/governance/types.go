@@ -165,7 +165,35 @@ const (
 	ParamKeyStakingRewardAsset = "staking.rewardAsset"
 	// ParamKeyStakingCompoundDefault toggles auto-compounding by default for new delegations.
 	ParamKeyStakingCompoundDefault = "staking.compoundDefault"
-	defaultMinimumValidatorStake   = 1000
+	// ParamKeyLoyaltyDynamicTargetBps controls the adaptive loyalty target basis points.
+	ParamKeyLoyaltyDynamicTargetBps = "loyalty.dynamic.targetBps"
+	// ParamKeyLoyaltyDynamicMinBps controls the adaptive loyalty lower bound basis points.
+	ParamKeyLoyaltyDynamicMinBps = "loyalty.dynamic.minBps"
+	// ParamKeyLoyaltyDynamicMaxBps controls the adaptive loyalty upper bound basis points.
+	ParamKeyLoyaltyDynamicMaxBps = "loyalty.dynamic.maxBps"
+	// ParamKeyLoyaltyDynamicSmoothingStepBps controls the maximum adjustment per epoch.
+	ParamKeyLoyaltyDynamicSmoothingStepBps = "loyalty.dynamic.smoothingStepBps"
+	// ParamKeyLoyaltyDynamicCoverageMax configures the maximum healthy coverage ratio.
+	ParamKeyLoyaltyDynamicCoverageMax = "loyalty.dynamic.coverageMax"
+	// ParamKeyLoyaltyDynamicCoverageLookbackDays controls the trailing activity window length.
+	ParamKeyLoyaltyDynamicCoverageLookbackDays = "loyalty.dynamic.coverageLookbackDays"
+	// ParamKeyLoyaltyDynamicDailyCapPctOf7dFees limits daily issuance to a share of recent fees.
+	ParamKeyLoyaltyDynamicDailyCapPctOf7dFees = "loyalty.dynamic.dailyCapPctOf7dFees"
+	// ParamKeyLoyaltyDynamicDailyCapUSD caps daily issuance in USD terms.
+	ParamKeyLoyaltyDynamicDailyCapUSD = "loyalty.dynamic.dailyCapUsd"
+	// ParamKeyLoyaltyDynamicYearlyCapPctOfInitialSupply caps annual issuance relative to initial supply.
+	ParamKeyLoyaltyDynamicYearlyCapPctOfInitialSupply = "loyalty.dynamic.yearlyCapPctOfInitialSupply"
+	// ParamKeyLoyaltyDynamicPricePair selects the oracle pair for coverage calculations.
+	ParamKeyLoyaltyDynamicPricePair = "loyalty.dynamic.priceGuard.pricePair"
+	// ParamKeyLoyaltyDynamicPriceTwapWindowSeconds controls the oracle TWAP window.
+	ParamKeyLoyaltyDynamicPriceTwapWindowSeconds = "loyalty.dynamic.priceGuard.twapWindowSeconds"
+	// ParamKeyLoyaltyDynamicPriceMaxAgeSeconds caps oracle staleness.
+	ParamKeyLoyaltyDynamicPriceMaxAgeSeconds = "loyalty.dynamic.priceGuard.priceMaxAgeSeconds"
+	// ParamKeyLoyaltyDynamicPriceMaxDeviationBps constrains acceptable oracle deviation.
+	ParamKeyLoyaltyDynamicPriceMaxDeviationBps = "loyalty.dynamic.priceGuard.maxDeviationBps"
+	// ParamKeyLoyaltyDynamicPriceGuardEnabled toggles oracle guardrails.
+	ParamKeyLoyaltyDynamicPriceGuardEnabled = "loyalty.dynamic.priceGuard.enabled"
+	defaultMinimumValidatorStake            = 1000
 )
 
 // DefaultMinimumValidatorStake exposes the legacy minimum validator stake used

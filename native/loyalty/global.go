@@ -3,6 +3,7 @@ package loyalty
 import (
 	"fmt"
 	"math/big"
+	"strings"
 )
 
 // GlobalConfig controls the behaviour of the loyalty reward engine.
@@ -101,37 +102,40 @@ func (c *GlobalConfig) Validate() error {
 
 // DynamicConfig captures the adaptive loyalty controller parameters.
 type DynamicConfig struct {
-	TargetBps          uint32
-	MinBps             uint32
-	MaxBps             uint32
-	SmoothingStepBps   uint32
-	CoverageWindowDays uint32
-	DailyCap           *big.Int
-	YearlyCap          *big.Int
-	PriceGuard         PriceGuardConfig
+	TargetBps                      uint32
+	MinBps                         uint32
+	MaxBps                         uint32
+	SmoothingStepBps               uint32
+	CoverageMaxBps                 uint32
+	CoverageLookbackDays           uint32
+	DailyCapPctOf7dFeesBps         uint32
+	DailyCapUsd                    uint64
+	YearlyCapPctOfInitialSupplyBps uint32
+	PriceGuard                     PriceGuardConfig
 }
 
 // PriceGuardConfig enforces sanity bounds when consuming reference prices.
 type PriceGuardConfig struct {
-	Enabled         bool
-	MaxDeviationBps uint32
+	Enabled            bool
+	PricePair          string
+	TwapWindowSeconds  uint32
+	MaxDeviationBps    uint32
+	PriceMaxAgeSeconds uint32
 }
 
 // Clone produces a deep copy of the dynamic configuration.
 func (d DynamicConfig) Clone() DynamicConfig {
 	clone := DynamicConfig{
-		TargetBps:          d.TargetBps,
-		MinBps:             d.MinBps,
-		MaxBps:             d.MaxBps,
-		SmoothingStepBps:   d.SmoothingStepBps,
-		CoverageWindowDays: d.CoverageWindowDays,
-		PriceGuard:         d.PriceGuard,
-	}
-	if d.DailyCap != nil {
-		clone.DailyCap = new(big.Int).Set(d.DailyCap)
-	}
-	if d.YearlyCap != nil {
-		clone.YearlyCap = new(big.Int).Set(d.YearlyCap)
+		TargetBps:                      d.TargetBps,
+		MinBps:                         d.MinBps,
+		MaxBps:                         d.MaxBps,
+		SmoothingStepBps:               d.SmoothingStepBps,
+		CoverageMaxBps:                 d.CoverageMaxBps,
+		CoverageLookbackDays:           d.CoverageLookbackDays,
+		DailyCapPctOf7dFeesBps:         d.DailyCapPctOf7dFeesBps,
+		DailyCapUsd:                    d.DailyCapUsd,
+		YearlyCapPctOfInitialSupplyBps: d.YearlyCapPctOfInitialSupplyBps,
+		PriceGuard:                     d.PriceGuard,
 	}
 	return clone
 }
@@ -142,18 +146,6 @@ func (d *DynamicConfig) Normalize() *DynamicConfig {
 		return nil
 	}
 	d.ApplyDefaults()
-	if d.DailyCap == nil {
-		d.DailyCap = big.NewInt(0)
-	}
-	if d.YearlyCap == nil {
-		d.YearlyCap = big.NewInt(0)
-	}
-	if d.DailyCap.Sign() < 0 {
-		d.DailyCap = big.NewInt(0)
-	}
-	if d.YearlyCap.Sign() < 0 {
-		d.YearlyCap = big.NewInt(0)
-	}
 	d.PriceGuard.Normalize()
 	return d
 }
@@ -164,6 +156,7 @@ func (p *PriceGuardConfig) Normalize() *PriceGuardConfig {
 		return nil
 	}
 	p.ApplyDefaults()
+	p.PricePair = strings.TrimSpace(p.PricePair)
 	return p
 }
 
@@ -184,14 +177,17 @@ func (d *DynamicConfig) Validate() error {
 	if d.SmoothingStepBps == 0 {
 		return fmt.Errorf("smoothingStepBps must be >= 1")
 	}
-	if d.CoverageWindowDays == 0 {
-		return fmt.Errorf("coverageWindowDays must be >= 1")
+	if d.CoverageMaxBps > BaseRewardBpsDenominator {
+		return fmt.Errorf("coverageMaxBps must be <= %d", BaseRewardBpsDenominator)
 	}
-	if d.DailyCap != nil && d.DailyCap.Sign() < 0 {
-		return fmt.Errorf("dailyCap must not be negative")
+	if d.CoverageLookbackDays == 0 {
+		return fmt.Errorf("coverageLookbackDays must be >= 1")
 	}
-	if d.YearlyCap != nil && d.YearlyCap.Sign() < 0 {
-		return fmt.Errorf("yearlyCap must not be negative")
+	if d.DailyCapPctOf7dFeesBps > BaseRewardBpsDenominator {
+		return fmt.Errorf("dailyCapPctOf7dFeesBps must be <= %d", BaseRewardBpsDenominator)
+	}
+	if d.YearlyCapPctOfInitialSupplyBps > BaseRewardBpsDenominator {
+		return fmt.Errorf("yearlyCapPctOfInitialSupplyBps must be <= %d", BaseRewardBpsDenominator)
 	}
 	if err := d.PriceGuard.Validate(); err != nil {
 		return fmt.Errorf("priceGuard: %w", err)
@@ -203,6 +199,15 @@ func (d *DynamicConfig) Validate() error {
 func (p *PriceGuardConfig) Validate() error {
 	if p == nil {
 		return nil
+	}
+	if strings.TrimSpace(p.PricePair) == "" {
+		return fmt.Errorf("pricePair must not be empty")
+	}
+	if p.TwapWindowSeconds == 0 {
+		return fmt.Errorf("twapWindowSeconds must be >= 1")
+	}
+	if p.PriceMaxAgeSeconds == 0 {
+		return fmt.Errorf("priceMaxAgeSeconds must be >= 1")
 	}
 	if p.MaxDeviationBps > BaseRewardBpsDenominator {
 		return fmt.Errorf("maxDeviationBps must be <= %d", BaseRewardBpsDenominator)

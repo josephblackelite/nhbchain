@@ -14,6 +14,7 @@ func TestPreflightPolicyApplyRejectsInvalidQuorum(t *testing.T) {
 		Mempool:    config.Mempool{MaxBytes: 1024},
 		Blocks:     config.Blocks{MaxTxs: 64},
 		Staking:    validStakingConfig(),
+		Loyalty:    validLoyaltyConfig(),
 	}
 	newQuorum := uint32(4000)
 	err := PreflightPolicyApply(cfg, PolicyDelta{Governance: &GovernanceDelta{QuorumBPS: &newQuorum}})
@@ -32,6 +33,7 @@ func TestPreflightPolicyApplyAllowsValidChange(t *testing.T) {
 		Mempool:    config.Mempool{MaxBytes: 1024},
 		Blocks:     config.Blocks{MaxTxs: 64},
 		Staking:    validStakingConfig(),
+		Loyalty:    validLoyaltyConfig(),
 	}
 	newQuorum := uint32(6000)
 	newThreshold := uint32(5500)
@@ -49,5 +51,27 @@ func validStakingConfig() config.Staking {
 		MinStakeWei:           "0",
 		MaxEmissionPerYearWei: "0",
 		RewardAsset:           "ZNHB",
+	}
+}
+
+func validLoyaltyConfig() config.Loyalty {
+	return config.Loyalty{
+		Dynamic: config.LoyaltyDynamic{
+			TargetBPS:                   50,
+			MinBPS:                      25,
+			MaxBPS:                      100,
+			SmoothingStepBPS:            5,
+			CoverageMax:                 0.5,
+			CoverageLookbackDays:        7,
+			DailyCapPctOf7dFees:         0.60,
+			DailyCapUSD:                 5000,
+			YearlyCapPctOfInitialSupply: 10,
+			PriceGuard: config.LoyaltyPriceGuard{
+				PricePair:          "ZNHB/USD",
+				TwapWindowSeconds:  3600,
+				MaxDeviationBPS:    500,
+				PriceMaxAgeSeconds: 900,
+			},
+		},
 	}
 }

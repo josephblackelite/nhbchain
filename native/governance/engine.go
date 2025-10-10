@@ -422,6 +422,160 @@ func validatorForParam(key string) paramValidator {
 			}
 			return nil
 		}
+	case ParamKeyLoyaltyDynamicTargetBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicTargetBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyLoyaltyDynamicTargetBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicMinBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicMinBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyLoyaltyDynamicMinBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicMaxBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicMaxBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyLoyaltyDynamicMaxBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicSmoothingStepBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicSmoothingStepBps, err)
+			}
+			if value == 0 {
+				return fmt.Errorf("%s: must be >= 1", ParamKeyLoyaltyDynamicSmoothingStepBps)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyLoyaltyDynamicSmoothingStepBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicCoverageMax:
+		return func(raw json.RawMessage) error {
+			value, err := parseFloatRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicCoverageMax, err)
+			}
+			if value < 0 || value > 1 {
+				return fmt.Errorf("%s: must be between 0 and 1", ParamKeyLoyaltyDynamicCoverageMax)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicCoverageLookbackDays:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicCoverageLookbackDays, err)
+			}
+			if value == 0 {
+				return fmt.Errorf("%s: must be >= 1", ParamKeyLoyaltyDynamicCoverageLookbackDays)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicDailyCapPctOf7dFees:
+		return func(raw json.RawMessage) error {
+			value, err := parseFloatRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicDailyCapPctOf7dFees, err)
+			}
+			if value < 0 || value > 1 {
+				return fmt.Errorf("%s: must be between 0 and 1", ParamKeyLoyaltyDynamicDailyCapPctOf7dFees)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicDailyCapUSD:
+		return func(raw json.RawMessage) error {
+			value, err := parseFloatRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicDailyCapUSD, err)
+			}
+			if value < 0 {
+				return fmt.Errorf("%s: must be >= 0", ParamKeyLoyaltyDynamicDailyCapUSD)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicYearlyCapPctOfInitialSupply:
+		return func(raw json.RawMessage) error {
+			value, err := parseFloatRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicYearlyCapPctOfInitialSupply, err)
+			}
+			if value < 0 || value > 100 {
+				return fmt.Errorf("%s: must be between 0 and 100", ParamKeyLoyaltyDynamicYearlyCapPctOfInitialSupply)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicPricePair:
+		return func(raw json.RawMessage) error {
+			var pair string
+			if err := json.Unmarshal(raw, &pair); err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicPricePair, err)
+			}
+			if strings.TrimSpace(pair) == "" {
+				return fmt.Errorf("%s: must not be empty", ParamKeyLoyaltyDynamicPricePair)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicPriceTwapWindowSeconds:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicPriceTwapWindowSeconds, err)
+			}
+			if value == 0 {
+				return fmt.Errorf("%s: must be >= 1", ParamKeyLoyaltyDynamicPriceTwapWindowSeconds)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicPriceMaxAgeSeconds:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicPriceMaxAgeSeconds, err)
+			}
+			if value == 0 {
+				return fmt.Errorf("%s: must be >= 1", ParamKeyLoyaltyDynamicPriceMaxAgeSeconds)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicPriceMaxDeviationBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicPriceMaxDeviationBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyLoyaltyDynamicPriceMaxDeviationBps, maxBasisPoints)
+			}
+			return nil
+		}
+	case ParamKeyLoyaltyDynamicPriceGuardEnabled:
+		return func(raw json.RawMessage) error {
+			_, err := parseBoolRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyLoyaltyDynamicPriceGuardEnabled, err)
+			}
+			return nil
+		}
 	case ParamKeyMinimumValidatorStake:
 		return func(raw json.RawMessage) error {
 			amount, err := parseUintRaw(raw)
@@ -627,6 +781,35 @@ func parseUint64Raw(raw json.RawMessage) (uint64, error) {
 		return 0, fmt.Errorf("value exceeds governance limit %d", maxGovernanceUint)
 	}
 	return value, nil
+}
+
+func parseFloatRaw(raw json.RawMessage) (float64, error) {
+	var value interface{}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return 0, fmt.Errorf("invalid numeric value: %w", err)
+	}
+	var text string
+	switch typed := value.(type) {
+	case json.Number:
+		text = typed.String()
+	case string:
+		text = strings.TrimSpace(typed)
+	default:
+		return 0, fmt.Errorf("value must be a number or decimal string")
+	}
+	if text == "" {
+		return 0, fmt.Errorf("value must not be empty")
+	}
+	num, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid float encoding")
+	}
+	if math.IsNaN(num) || math.IsInf(num, 0) {
+		return 0, fmt.Errorf("value must be finite")
+	}
+	return num, nil
 }
 
 func parseBoolRaw(raw json.RawMessage) (bool, error) {
