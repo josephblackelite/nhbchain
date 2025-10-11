@@ -53,6 +53,7 @@ var (
 	balancePrefix                  = []byte("balance:")
 	rolePrefix                     = []byte("role:")
 	loyaltyGlobalKeyBytes          = ethcrypto.Keccak256([]byte("loyalty:global"))
+	loyaltyDynamicStateKeyBytes    = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
 	loyaltyDailyPrefix             = []byte("loyalty-meter:base-daily:")
 	loyaltyTotalPrefix             = []byte("loyalty-meter:base-total:")
 	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
@@ -772,6 +773,10 @@ func (m *Manager) SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapsho
 
 func LoyaltyGlobalStorageKey() []byte {
 	return append([]byte(nil), loyaltyGlobalKeyBytes...)
+}
+
+func LoyaltyDynamicStateKey() []byte {
+	return append([]byte(nil), loyaltyDynamicStateKeyBytes...)
 }
 
 func LoyaltyBaseDailyMeterKey(addr []byte, day string) []byte {
@@ -2980,11 +2985,52 @@ func (m *Manager) SetLoyaltyGlobalConfig(cfg *loyalty.GlobalConfig) error {
 	if err := normalized.Validate(); err != nil {
 		return err
 	}
+	state, err := m.LoyaltyDynamicState()
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		state = NewLoyaltyEngineStateFromDynamic(normalized.Dynamic)
+	} else {
+		state = state.Clone().ApplyDynamicConfig(normalized.Dynamic)
+	}
+	if err := m.SetLoyaltyDynamicState(state); err != nil {
+		return err
+	}
 	encoded, err := rlp.EncodeToBytes(normalized)
 	if err != nil {
 		return err
 	}
 	return m.trie.Update(loyaltyGlobalKeyBytes, encoded)
+}
+
+// SetLoyaltyDynamicState stores the runtime state for the loyalty controller.
+func (m *Manager) SetLoyaltyDynamicState(state *LoyaltyEngineState) error {
+	if state == nil {
+		return fmt.Errorf("nil loyalty dynamic state")
+	}
+	normalized := state.Clone().Normalize()
+	encoded, err := rlp.EncodeToBytes(normalized)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(loyaltyDynamicStateKeyBytes, encoded)
+}
+
+// LoyaltyDynamicState retrieves the stored loyalty controller runtime state.
+func (m *Manager) LoyaltyDynamicState() (*LoyaltyEngineState, error) {
+	data, err := m.trie.Get(loyaltyDynamicStateKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	state := new(LoyaltyEngineState)
+	if err := rlp.DecodeBytes(data, state); err != nil {
+		return nil, err
+	}
+	return state.Normalize(), nil
 }
 
 // LoyaltyGlobalConfig retrieves the stored global configuration, if any.

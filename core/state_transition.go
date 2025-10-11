@@ -3988,6 +3988,37 @@ func (sp *StateProcessor) stakingMaxEmissionPerYear(manager *nhbstate.Manager) (
 	return value, nil
 }
 
+func (sp *StateProcessor) tickLoyaltySmoothing() error {
+	if sp == nil {
+		return nil
+	}
+	cfg, err := sp.LoyaltyGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	state, err := manager.LoyaltyDynamicState()
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		state = nhbstate.NewLoyaltyEngineStateFromDynamic(cfg.Dynamic)
+	} else {
+		state = state.Clone().ApplyDynamicConfig(cfg.Dynamic)
+	}
+	state.StepTowardsTarget()
+	if err := manager.SetLoyaltyDynamicState(state); err != nil {
+		return err
+	}
+	if evt := (events.LoyaltySmoothingTick{EffectiveBps: state.EffectiveBps, TargetBps: state.TargetBps}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
 func (sp *StateProcessor) LoyaltyGlobalConfig() (*loyalty.GlobalConfig, error) {
 	key := nhbstate.LoyaltyGlobalStorageKey()
 	data, err := sp.Trie.Get(key)
