@@ -1,6 +1,7 @@
 package state
 
 import (
+	"math/big"
 	"testing"
 
 	"nhbchain/native/loyalty"
@@ -74,5 +75,43 @@ func TestNewLoyaltyEngineStateFromDynamicUsesDefaults(t *testing.T) {
 	}
 	if state.SmoothingStepBps != loyalty.DefaultDynamicSmoothingStepBps {
 		t.Fatalf("expected smoothing step %d, got %d", loyalty.DefaultDynamicSmoothingStepBps, state.SmoothingStepBps)
+	}
+}
+
+func TestLoyaltyEngineStateCanEmitHonoursCap(t *testing.T) {
+	cap := big.NewInt(1_000)
+	state := (&LoyaltyEngineState{
+		YearlyCapZNHB: cap,
+	}).Normalize()
+
+	if ok, hit := state.CanEmit(big.NewInt(400)); !ok || hit {
+		t.Fatalf("expected first emission to succeed without hitting cap: ok=%v hit=%v", ok, hit)
+	}
+	if want := big.NewInt(400); state.YtdEmissionsZNHB.Cmp(want) != 0 {
+		t.Fatalf("unexpected ytd after first emission: got %s want %s", state.YtdEmissionsZNHB, want)
+	}
+
+	if ok, hit := state.CanEmit(big.NewInt(600)); !ok || !hit {
+		t.Fatalf("expected second emission to reach cap: ok=%v hit=%v", ok, hit)
+	}
+	if want := big.NewInt(1_000); state.YtdEmissionsZNHB.Cmp(want) != 0 {
+		t.Fatalf("unexpected ytd after hitting cap: got %s want %s", state.YtdEmissionsZNHB, want)
+	}
+
+	if ok, hit := state.CanEmit(big.NewInt(1)); ok || !hit {
+		t.Fatalf("expected cap overrun to be rejected and mark cap hit: ok=%v hit=%v", ok, hit)
+	}
+	if want := big.NewInt(1_000); state.YtdEmissionsZNHB.Cmp(want) != 0 {
+		t.Fatalf("expected ytd unchanged after rejection: got %s want %s", state.YtdEmissionsZNHB, want)
+	}
+}
+
+func TestLoyaltyEngineStateCanEmitUnlimitedWhenCapUnset(t *testing.T) {
+	state := (&LoyaltyEngineState{}).Normalize()
+	if ok, hit := state.CanEmit(big.NewInt(500)); !ok || hit {
+		t.Fatalf("expected emission to succeed with no cap: ok=%v hit=%v", ok, hit)
+	}
+	if want := big.NewInt(500); state.YtdEmissionsZNHB.Cmp(want) != 0 {
+		t.Fatalf("unexpected ytd after emission: got %s want %s", state.YtdEmissionsZNHB, want)
 	}
 }

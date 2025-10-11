@@ -1,6 +1,10 @@
 package state
 
-import "nhbchain/native/loyalty"
+import (
+	"math/big"
+
+	"nhbchain/native/loyalty"
+)
 
 // LoyaltyEngineState captures the dynamic loyalty controller runtime state.
 //
@@ -12,6 +16,8 @@ type LoyaltyEngineState struct {
 	MinBps           uint32
 	MaxBps           uint32
 	SmoothingStepBps uint32
+	YtdEmissionsZNHB *big.Int
+	YearlyCapZNHB    *big.Int
 }
 
 // Clone returns a deep copy of the dynamic state.
@@ -20,6 +26,12 @@ func (s *LoyaltyEngineState) Clone() *LoyaltyEngineState {
 		return nil
 	}
 	clone := *s
+	if s.YtdEmissionsZNHB != nil {
+		clone.YtdEmissionsZNHB = new(big.Int).Set(s.YtdEmissionsZNHB)
+	}
+	if s.YearlyCapZNHB != nil {
+		clone.YearlyCapZNHB = new(big.Int).Set(s.YearlyCapZNHB)
+	}
 	return &clone
 }
 
@@ -47,7 +59,49 @@ func (s *LoyaltyEngineState) Normalize() *LoyaltyEngineState {
 	if s.EffectiveBps > s.MaxBps {
 		s.EffectiveBps = s.MaxBps
 	}
+	if s.YtdEmissionsZNHB == nil {
+		s.YtdEmissionsZNHB = big.NewInt(0)
+	}
+	if s.YearlyCapZNHB == nil {
+		s.YearlyCapZNHB = big.NewInt(0)
+	}
+	if s.YtdEmissionsZNHB.Sign() < 0 {
+		s.YtdEmissionsZNHB = big.NewInt(0)
+	}
+	if s.YearlyCapZNHB.Sign() < 0 {
+		s.YearlyCapZNHB = big.NewInt(0)
+	}
+	if s.YearlyCapZNHB.Sign() > 0 && s.YtdEmissionsZNHB.Cmp(s.YearlyCapZNHB) > 0 {
+		s.YtdEmissionsZNHB = new(big.Int).Set(s.YearlyCapZNHB)
+	}
 	return s
+}
+
+// CanEmit determines whether an additional emission can be produced without
+// breaching the configured yearly cap. When the emission is permitted the YTD
+// tally is incremented. The returned boolean indicates whether the emission is
+// allowed, while the second boolean reports whether the cap has been hit (i.e.
+// the YTD total equals the cap after processing). Callers should treat negative
+// or nil amounts as no-ops that always succeed.
+func (s *LoyaltyEngineState) CanEmit(amount *big.Int) (bool, bool) {
+	if s == nil {
+		return false, false
+	}
+	s.Normalize()
+	if amount == nil || amount.Sign() <= 0 {
+		return true, s.YearlyCapZNHB.Sign() > 0 && s.YtdEmissionsZNHB.Cmp(s.YearlyCapZNHB) == 0
+	}
+	if s.YearlyCapZNHB.Sign() <= 0 {
+		s.YtdEmissionsZNHB = new(big.Int).Add(s.YtdEmissionsZNHB, amount)
+		return true, false
+	}
+	projected := new(big.Int).Add(s.YtdEmissionsZNHB, amount)
+	cmp := projected.Cmp(s.YearlyCapZNHB)
+	if cmp > 0 {
+		return false, true
+	}
+	s.YtdEmissionsZNHB = projected
+	return true, cmp == 0
 }
 
 // ApplyDynamicConfig updates the runtime state guardrails using the supplied
@@ -114,6 +168,8 @@ func NewLoyaltyEngineStateFromDynamic(cfg loyalty.DynamicConfig) *LoyaltyEngineS
 		MinBps:           normalized.MinBps,
 		MaxBps:           normalized.MaxBps,
 		SmoothingStepBps: normalized.SmoothingStepBps,
+		YtdEmissionsZNHB: big.NewInt(0),
+		YearlyCapZNHB:    big.NewInt(0),
 	}
 	return state.Normalize()
 }
