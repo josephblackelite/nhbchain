@@ -1,6 +1,11 @@
 package events
 
-import "math/big"
+import (
+	"math/big"
+	"strconv"
+
+	"nhbchain/core/types"
+)
 
 const (
 	// TypeLoyaltyProgramCreated is emitted when a loyalty program is first
@@ -17,6 +22,9 @@ const (
 	// TypeLoyaltyPaymasterRotated is emitted when a business rotates its
 	// paymaster configuration.
 	TypeLoyaltyPaymasterRotated = "loyalty.paymaster.rotated"
+	// TypeLoyaltySmoothingTick is emitted when the dynamic loyalty controller
+	// advances the effective basis points towards the target.
+	TypeLoyaltySmoothingTick = "loyalty.smoothing.tick"
 )
 
 // LoyaltyProgramCreated captures the key metadata of a newly created loyalty
@@ -85,3 +93,24 @@ type LoyaltyPaymasterRotated struct {
 
 // EventType implements the Event interface.
 func (LoyaltyPaymasterRotated) EventType() string { return TypeLoyaltyPaymasterRotated }
+
+// LoyaltySmoothingTick captures the runtime adjustment of the effective basis
+// points applied by the loyalty controller.
+type LoyaltySmoothingTick struct {
+	EffectiveBps uint32
+	TargetBps    uint32
+}
+
+// EventType implements the Event interface.
+func (LoyaltySmoothingTick) EventType() string { return TypeLoyaltySmoothingTick }
+
+// Event converts the smoothing tick to the generic event payload.
+func (t LoyaltySmoothingTick) Event() *types.Event {
+	return &types.Event{
+		Type: TypeLoyaltySmoothingTick,
+		Attributes: map[string]string{
+			"effective_bps": strconv.FormatUint(uint64(t.EffectiveBps), 10),
+			"target_bps":    strconv.FormatUint(uint64(t.TargetBps), 10),
+		},
+	}
+}

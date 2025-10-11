@@ -136,6 +136,9 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if height%sp.epochConfig.Length != 0 {
 		return nil
 	}
+	if err := sp.tickLoyaltySmoothing(); err != nil {
+		return err
+	}
 	return sp.finalizeEpoch(height, timestamp)
 }
 
