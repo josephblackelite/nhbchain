@@ -25,6 +25,9 @@ const (
 	// TypeLoyaltySmoothingTick is emitted when the dynamic loyalty controller
 	// advances the effective basis points towards the target.
 	TypeLoyaltySmoothingTick = "loyalty.smoothing.tick"
+	// TypeLoyaltyCapHit is emitted when a yearly emission cap prevents further
+	// payouts.
+	TypeLoyaltyCapHit = "loyalty.cap.hit"
 )
 
 // LoyaltyProgramCreated captures the key metadata of a newly created loyalty
@@ -111,6 +114,46 @@ func (t LoyaltySmoothingTick) Event() *types.Event {
 		Attributes: map[string]string{
 			"effective_bps": strconv.FormatUint(uint64(t.EffectiveBps), 10),
 			"target_bps":    strconv.FormatUint(uint64(t.TargetBps), 10),
+		},
+	}
+}
+
+// LoyaltyCapHit captures the attempted emission and the configured annual cap
+// when the protocol refuses to mint additional rewards.
+type LoyaltyCapHit struct {
+	Attempted *big.Int
+	Cap       *big.Int
+	Emitted   *big.Int
+}
+
+// EventType implements the Event interface.
+func (LoyaltyCapHit) EventType() string { return TypeLoyaltyCapHit }
+
+// Event converts the cap hit details to the generic event payload.
+func (e LoyaltyCapHit) Event() *types.Event {
+	attempted := big.NewInt(0)
+	if e.Attempted != nil {
+		attempted = new(big.Int).Set(e.Attempted)
+	}
+	cap := big.NewInt(0)
+	if e.Cap != nil {
+		cap = new(big.Int).Set(e.Cap)
+	}
+	emitted := big.NewInt(0)
+	if e.Emitted != nil {
+		emitted = new(big.Int).Set(e.Emitted)
+	}
+	remaining := big.NewInt(0).Sub(cap, emitted)
+	if remaining.Sign() < 0 {
+		remaining = big.NewInt(0)
+	}
+	return &types.Event{
+		Type: TypeLoyaltyCapHit,
+		Attributes: map[string]string{
+			"attempted": attempted.String(),
+			"cap":       cap.String(),
+			"emitted":   emitted.String(),
+			"remaining": remaining.String(),
 		},
 	}
 }

@@ -20,3 +20,7 @@ The loyalty engine ships with an adaptive controller that gently adjusts the bas
 | `PriceGuard.PriceMaxAgeSeconds` | Maximum age of oracle data before the controller halts adjustments. | `900` seconds |
 
 Operators can override these settings in `config.toml` under the `[global.loyalty.Dynamic]` section. Leave any field unset (or zero) to continue using the compiled defaults above.
+
+## Yearly emission cap
+
+The yearly cap limits how much ZNHB the loyalty engine may emit across base and program rewards within a calendar year. The cap is derived from the configured `YearlyCapPctOfInitialSupply` percentage and the initial ZNHB supply. Each time a reward is applied the engine increments the year-to-date counter. When an emission would exceed the yearly cap the payout is rejected, the counter remains unchanged, and a `loyalty.cap.hit` event is emitted with the attempted amount, configured cap, cumulative emissions, and the remaining headroom (`0` once saturated). Exact matches to the cap are permitted and flagged with the same event so operators can prepare replenishment or governance actions.

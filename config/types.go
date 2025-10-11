@@ -1,6 +1,8 @@
 package config
 
 import (
+	"math"
+	"math/big"
 	"strings"
 	"time"
 )
@@ -163,6 +165,27 @@ type LoyaltyDynamic struct {
 	DailyCapUSD                 float64
 	YearlyCapPctOfInitialSupply float64
 	PriceGuard                  LoyaltyPriceGuard
+}
+
+// YearlyCapZNHBWei converts the configured annual issuance percentage into an
+// absolute ZNHB amount expressed in wei based on the supplied initial supply.
+// When the percentage or the initial supply are unset (zero or negative) the
+// function returns zero.
+func (d LoyaltyDynamic) YearlyCapZNHBWei(initialSupply *big.Int) *big.Int {
+	if initialSupply == nil || initialSupply.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	pctBps := int64(math.Round(d.YearlyCapPctOfInitialSupply * 100))
+	if pctBps <= 0 {
+		return big.NewInt(0)
+	}
+	numerator := new(big.Int).Mul(initialSupply, big.NewInt(pctBps))
+	denominator := big.NewInt(10_000)
+	numerator.Quo(numerator, denominator)
+	if numerator.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	return numerator
 }
 
 // LoyaltyPriceGuard defines the deviation limits applied when consuming external price data.
