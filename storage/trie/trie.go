@@ -53,8 +53,21 @@ func (t *Trie) Get(key []byte) ([]byte, error) {
 	return t.trie.Get(key)
 }
 
+// TryGet retrieves a value from the trie without panicking when the provided
+// key is malformed. The wrapper exists for backwards compatibility with legacy
+// callers that historically relied on go-ethereum's helper.
+func (t *Trie) TryGet(key []byte) ([]byte, error) {
+	return t.trie.Get(key)
+}
+
 // Update inserts or updates a value in the trie for the provided key.
 func (t *Trie) Update(key, value []byte) error {
+	return t.trie.Update(key, value)
+}
+
+// TryUpdate inserts or updates a value in the trie while tolerating malformed
+// keys. It preserves historical behaviour relied upon by legacy tests.
+func (t *Trie) TryUpdate(key, value []byte) error {
 	return t.trie.Update(key, value)
 }
 
