@@ -25,6 +25,18 @@ This document describes how the NHB Chain observability stack is deployed, how d
 - **RPC Performance**: request throughput, error rates, cache hit ratio, HMAC auth failures.
 - **Oracle Health**: feed latency, signer distribution, on-chain submission success.
 - **Services Overview**: error budget burn, p95 latency, and throughput per service sourced from the spanmetrics connector (see [`ops/grafana/dashboards/services-overview.json`](../../ops/grafana/dashboards/services-overview.json)).
+- **Staking Health**: emissions cadence, bonded supply, pause state, and emission-cap pressure for the staking module (see [`observability/grafana/staking.json`](../../observability/grafana/staking.json)).
+
+#### Staking Health Dashboard
+
+The staking dashboard focuses on the four telemetry signals operations teams need to keep validator incentives healthy:
+
+- **Rewards Paid per Day** visualises `nhb_staking_rewards_paid_zn_total` converted to ZNHB with a daily window. The panel should jump on payout days—flat lines indicate missed payouts, while spikes beyond expectations suggest runaway emissions.
+- **Total Staked ZNHB** aggregates the `nhb_staking_total_staked{account="…"}` gauges into a single timeseries. Track this for sudden drawdowns that could precede churn or validator instability.
+- **Staking Pause Status** reflects `nhb_staking_paused`. `0` (green) means delegation, undelegation, and reward claims are accepted; `1` (red) means the module is administratively frozen and all mutations will return `codeModulePaused` until governance clears the pause.
+- **Emission Cap Hits** counts `nhb_staking_cap_hit_total`. The stat remains green at zero, turns yellow on the first cap exhaustion, and red once multiple hits accumulate—those events require treasury coordination before the next payout.
+
+Pair these panels with alerting on the `Emission Cap Hits` and pause flag so operators are paged when the module halts or emissions saturate.
 
 ## Tracing
 
