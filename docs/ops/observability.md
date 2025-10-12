@@ -26,6 +26,7 @@ This document describes how the NHB Chain observability stack is deployed, how d
 - **Oracle Health**: feed latency, signer distribution, on-chain submission success.
 - **Services Overview**: error budget burn, p95 latency, and throughput per service sourced from the spanmetrics connector (see [`ops/grafana/dashboards/services-overview.json`](../../ops/grafana/dashboards/services-overview.json)).
 - **Staking Health**: emissions cadence, bonded supply, pause state, and emission-cap pressure for the staking module (see [`observability/grafana/staking.json`](../../observability/grafana/staking.json)).
+- **Loyalty Budget**: proration posture, queued demand, and daily payout trend so operators can correlate emission throttling with the configured caps.
 
 #### Staking Health Dashboard
 
@@ -37,6 +38,17 @@ The staking dashboard focuses on the four telemetry signals operations teams nee
 - **Emission Cap Hits** counts `nhb_staking_cap_hit_total`. The stat remains green at zero, turns yellow on the first cap exhaustion, and red once multiple hits accumulate—those events require treasury coordination before the next payout.
 
 Pair these panels with alerting on the `Emission Cap Hits` and pause flag so operators are paged when the module halts or emissions saturate.
+
+#### Loyalty Budget Dashboard
+
+Use the loyalty dashboard to understand when the pro-rate guardrail is active and how quickly the treasury budget is being consumed:
+
+- **Budget Remaining (`loyalty_budget_zn`)** tracks the ZNHB still available to issue for the current UTC day. Sudden drops without matching payouts may indicate configuration drift or a stale fee window.
+- **Queued Demand (`loyalty_demand_zn`)** mirrors the pending payout total collected at `EndBlockRewards`. Rising demand with a flat budget hints that future blocks will be prorated.
+- **Prorate Ratio (`loyalty_prorate_ratio`)** exposes the applied multiplier (1.0 means 100% payout). Values below `1` confirm that pro-rate mode has engaged and the ratio reflected in the `LoyaltyBudgetProRated` event was emitted.
+- **Paid Today (`loyalty_paid_today_zn`)** increments as payouts land. The series resets on the UTC day boundary; if it fails to reset, inspect the day-rollover cron or block timestamps.
+
+When `loyalty_prorate_ratio` drops under `1`, correlate the timestamp with `LoyaltyBudgetProRated` events and treasury balances to validate that proration is expected and not the result of price-guard failures.
 
 ## Tracing
 

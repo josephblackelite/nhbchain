@@ -24,3 +24,20 @@ Operators can override these settings in `config.toml` under the `[global.loyalt
 ## Yearly emission cap
 
 The yearly cap limits how much ZNHB the loyalty engine may emit across base and program rewards within a calendar year. The cap is derived from the configured `YearlyCapPctOfInitialSupply` percentage and the initial ZNHB supply. Each time a reward is applied the engine increments the year-to-date counter. When an emission would exceed the yearly cap the payout is rejected, the counter remains unchanged, and a `loyalty.cap.hit` event is emitted with the attempted amount, configured cap, cumulative emissions, and the remaining headroom (`0` once saturated). Exact matches to the cap are permitted and flagged with the same event so operators can prepare replenishment or governance actions.
+
+## Pro-rate mode
+
+When `Dynamic.EnableProRate` is enabled (the default is `true`) the loyalty engine queues all computed base rewards as pending throughout block execution. Each call to `QueuePendingBaseReward` records the intended recipient, amount, and originating transaction hash without immediately moving funds.
+
+The pending queue is settled during `EndBlockRewards`. The engine totals the queued demand for the current UTC day and compares it to the remaining daily budget resolved from the rolling fee tracker. If the budget is sufficient, every reward pays out in full. When demand exceeds the available budget, the engine applies a uniform proration ratio to every payout, deducts that amount from the treasury account, and persists the partial payments. The prorate ratio and the running daily counters are also exported to telemetry so operators can see when the safety rails are engaged.
+
+Whenever a partial payout occurs the block emits a `LoyaltyBudgetProRated` event with the following fields:
+
+| Attribute | Description |
+| --- | --- |
+| `day` | UTC date (`YYYY-MM-DD`) of the settlement window. |
+| `budget_zn` | Remaining ZNHB budget before settlement. |
+| `demand_zn` | Total queued ZNHB demand for the day. |
+| `ratio_fp` | Fixed-point ratio (`1e18` scale) applied to rewards. |
+
+Set `Global.Loyalty.Dynamic.EnableProRate = false` in `config.toml` to disable the queue-and-settle flow. In that mode rewards settle immediately and skip the pro-rate safeguards entirely.

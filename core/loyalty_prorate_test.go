@@ -209,6 +209,110 @@ func TestLoyaltyProrateScaling(t *testing.T) {
 	}
 }
 
+func TestLoyaltyProrateDayRollover(t *testing.T) {
+	sp, manager := newTestStateProcessor(t)
+
+	var treasury [20]byte
+	treasury[19] = 0x04
+	configureLoyalty(t, manager, treasury, true, 10_000)
+	setAccountBalance(t, sp, treasury, big.NewInt(2_000))
+
+	tracker := nhbstate.NewRollingFees(manager)
+	dayOne := time.Date(2024, 3, 5, 21, 0, 0, 0, time.UTC)
+	if err := tracker.AddDay(dayOne, big.NewInt(0), big.NewInt(500)); err != nil {
+		t.Fatalf("add day one fees: %v", err)
+	}
+
+	var merchantA, merchantB [20]byte
+	merchantA[19] = 0x41
+	merchantB[19] = 0x42
+
+	sp.blockCtx.PendingRewards.AddPendingReward(nhbstate.PendingReward{Recipient: merchantA, AmountZNHB: big.NewInt(400)})
+	sp.blockCtx.PendingRewards.AddPendingReward(nhbstate.PendingReward{Recipient: merchantB, AmountZNHB: big.NewInt(600)})
+
+	sp.EndBlockRewards(dayOne)
+
+	var dayOneEvents []*types.Event
+	for i := range sp.Events() {
+		evt := sp.Events()[i]
+		if evt.Type == events.TypeLoyaltyBudgetProRated {
+			dayOneEvents = append(dayOneEvents, &evt)
+		}
+	}
+	if len(dayOneEvents) != 1 {
+		t.Fatalf("expected one pro-rate event on day one, got %d", len(dayOneEvents))
+	}
+	if dayOneEvents[0].Attributes["ratio_fp"] != "500000000000000000" {
+		t.Fatalf("unexpected day one ratio: %s", dayOneEvents[0].Attributes["ratio_fp"])
+	}
+
+	balanceADayOne, err := sp.getAccount(merchantA[:])
+	if err != nil {
+		t.Fatalf("load merchant A day one: %v", err)
+	}
+	balanceBDayOne, err := sp.getAccount(merchantB[:])
+	if err != nil {
+		t.Fatalf("load merchant B day one: %v", err)
+	}
+
+	nextDay := dayOne.Add(24 * time.Hour)
+	if err := tracker.AddDay(nextDay, big.NewInt(0), big.NewInt(1_000)); err != nil {
+		t.Fatalf("add day two fees: %v", err)
+	}
+
+	paidNextDay, err := manager.AddPaidTodayZNHB(nextDay, nil)
+	if err != nil {
+		t.Fatalf("load paid total next day: %v", err)
+	}
+	if paidNextDay.Sign() != 0 {
+		t.Fatalf("expected paid total reset to zero, got %s", paidNextDay)
+	}
+
+	sp.blockCtx.PendingRewards.AddPendingReward(nhbstate.PendingReward{Recipient: merchantA, AmountZNHB: big.NewInt(400)})
+	sp.blockCtx.PendingRewards.AddPendingReward(nhbstate.PendingReward{Recipient: merchantB, AmountZNHB: big.NewInt(600)})
+
+	sp.EndBlockRewards(nextDay)
+
+	paidTotalDayTwo, err := manager.AddPaidTodayZNHB(nextDay, nil)
+	if err != nil {
+		t.Fatalf("load paid total day two: %v", err)
+	}
+	if paidTotalDayTwo.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("unexpected paid total day two: got %s want %s", paidTotalDayTwo, big.NewInt(1_000))
+	}
+
+	var proRateEvents int
+	for i := range sp.Events() {
+		if sp.Events()[i].Type == events.TypeLoyaltyBudgetProRated {
+			if sp.Events()[i].Attributes["day"] == nextDay.UTC().Format("2006-01-02") {
+				t.Fatalf("unexpected pro-rate event on replenished day")
+			}
+			proRateEvents++
+		}
+	}
+	if proRateEvents != 1 {
+		t.Fatalf("expected only one pro-rate event overall, got %d", proRateEvents)
+	}
+
+	balanceADayTwo, err := sp.getAccount(merchantA[:])
+	if err != nil {
+		t.Fatalf("load merchant A day two: %v", err)
+	}
+	deltaA := new(big.Int).Sub(balanceADayTwo.BalanceZNHB, balanceADayOne.BalanceZNHB)
+	if deltaA.Cmp(big.NewInt(400)) != 0 {
+		t.Fatalf("merchant A day two payout mismatch: got %s want %s", deltaA, big.NewInt(400))
+	}
+
+	balanceBDayTwo, err := sp.getAccount(merchantB[:])
+	if err != nil {
+		t.Fatalf("load merchant B day two: %v", err)
+	}
+	deltaB := new(big.Int).Sub(balanceBDayTwo.BalanceZNHB, balanceBDayOne.BalanceZNHB)
+	if deltaB.Cmp(big.NewInt(600)) != 0 {
+		t.Fatalf("merchant B day two payout mismatch: got %s want %s", deltaB, big.NewInt(600))
+	}
+}
+
 func TestLoyaltyProrateZeroBudget(t *testing.T) {
 	sp, manager := newTestStateProcessor(t)
 
