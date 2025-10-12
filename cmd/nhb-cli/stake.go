@@ -140,17 +140,17 @@ func runStakeClaim(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	minted := claim.Minted
+	minted := strings.TrimSpace(claim.Minted)
 	if mintedInt, ok := new(big.Int).SetString(claim.Minted, 10); ok {
 		minted = formatBigInt(mintedInt)
 	}
 	periods := claim.Periods
-	if periods == 0 {
-		periods = claim.ClaimedPeriods
+	fmt.Fprintf(stdout, "Minted %s ZNHB across %d period(s).\n", minted, periods)
+	if claim.NextEligible > 0 {
+		fmt.Fprintf(stdout, "Next eligible at %s (%d).\n", formatTimestamp(claim.NextEligible), claim.NextEligible)
+	} else {
+		fmt.Fprintln(stdout, "Next eligible time is not yet available.")
 	}
-	fmt.Fprintf(stdout, "Minted %s ZNHB for %d period(s). Next claim after %s.\n", minted, periods, formatTimestamp(claim.NextPayoutTs))
-
-	printStakeAccountSnapshot(stdout, &claim.Balance)
 
 	return 0
 }
@@ -180,20 +180,20 @@ type stakePreviewResponse struct {
 }
 
 type stakeClaimRewardsResponse struct {
-	Minted         string          `json:"minted"`
-	Periods        int             `json:"periods"`
-	ClaimedPeriods int             `json:"claimedPeriods"`
-	Balance        balanceResponse `json:"balance"`
-	NextPayoutTs   uint64          `json:"nextPayoutTs"`
+	Minted       string `json:"minted"`
+	Periods      int    `json:"periods"`
+	AprBps       uint64 `json:"aprBps"`
+	NextEligible uint64 `json:"nextEligibleTs"`
 }
 
 type stakeClaimErrorDetail struct {
-	NextEligible uint64 `json:"nextEligible"`
-	NextPayoutTs uint64 `json:"nextPayoutTs"`
-	NextClaimTs  uint64 `json:"nextClaimTs"`
-	Timestamp    uint64 `json:"timestamp"`
-	Message      string `json:"message"`
-	Error        string `json:"error"`
+	NextEligible   uint64 `json:"nextEligible"`
+	NextEligibleTs uint64 `json:"nextEligibleTs"`
+	NextPayoutTs   uint64 `json:"nextPayoutTs"`
+	NextClaimTs    uint64 `json:"nextClaimTs"`
+	Timestamp      uint64 `json:"timestamp"`
+	Message        string `json:"message"`
+	Error          string `json:"error"`
 }
 
 func printStakeAccountSnapshot(w io.Writer, account *balanceResponse) {
@@ -298,6 +298,9 @@ func decodeNextEligible(raw json.RawMessage) (uint64, bool) {
 	var detail stakeClaimErrorDetail
 	if err := json.Unmarshal(raw, &detail); err == nil {
 		next := detail.NextPayoutTs
+		if next == 0 {
+			next = detail.NextEligibleTs
+		}
 		if next == 0 {
 			next = detail.NextEligible
 		}

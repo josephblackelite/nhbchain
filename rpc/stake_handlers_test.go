@@ -46,7 +46,7 @@ func TestStakeClaim_NotReady(t *testing.T) {
 func TestStakeClaimRPC_Success(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
@@ -102,8 +102,8 @@ func TestStakeClaimRPC_Success(t *testing.T) {
 	if err := json.Unmarshal(claimResult, &claimResp); err != nil {
 		t.Fatalf("decode claim: %v", err)
 	}
-	if claimResp.Paid != accrued.String() {
-		t.Fatalf("unexpected paid amount: got %s want %s", claimResp.Paid, accrued.String())
+	if claimResp.Minted != accrued.String() {
+		t.Fatalf("unexpected paid amount: got %s want %s", claimResp.Minted, accrued.String())
 	}
 	if claimResp.Periods != 2 {
 		t.Fatalf("unexpected period count: got %d want %d", claimResp.Periods, 2)
@@ -112,12 +112,15 @@ func TestStakeClaimRPC_Success(t *testing.T) {
 	if claimResp.NextEligible != expectedNext {
 		t.Fatalf("unexpected next eligibility: got %d want %d", claimResp.NextEligible, expectedNext)
 	}
+	if claimResp.AprBps == 0 {
+		t.Fatalf("expected apr basis points in response")
+	}
 }
 
 func TestStakeClaimRPC_NotDue(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
@@ -176,7 +179,7 @@ func TestStakeClaimRPC_NotDue(t *testing.T) {
 	if !ok || data == nil {
 		t.Fatalf("expected rejection details in error data")
 	}
-	nextEligible, exists := data["next_eligible"]
+	nextEligible, exists := data["nextEligibleTs"]
 	if !exists {
 		t.Fatalf("expected next_eligible hint in error data")
 	}
@@ -189,7 +192,7 @@ func TestStakeClaimRPC_NotDue(t *testing.T) {
 func TestStakeClaimRewardsPaused(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
@@ -256,7 +259,7 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 	if err := json.Unmarshal(claimResult, &claimResp); err != nil {
 		t.Fatalf("decode claim response: %v", err)
 	}
-	if claimResp.Paid == "0" {
+	if claimResp.Minted == "0" {
 		t.Fatalf("expected positive minted rewards after unpause")
 	}
 }
@@ -264,7 +267,7 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 

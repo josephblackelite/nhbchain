@@ -311,7 +311,8 @@ nhb-cli stake preview nhb1delegator...
     "result": {
       "minted": "742500000000000000000",
       "periods": 1,
-      "nextPayoutTs": 1719792000
+      "aprBps": 1250,
+      "nextEligibleTs": 1719792000
     }
   }
   ```
@@ -325,6 +326,7 @@ These commands complement the staking dashboard so operations teams can verify h
 | `stake.delegated` | `delegator`, `validator`, `amount`, `locked` | Tracks delegation adjustments and validator power changes. |
 | `stake.undelegated` | `delegator`, `validator`, `amount`, `releaseTime`, `unbondingId` | Signals the start of an unbonding period. |
 | `stake.claimed` | `delegator`, `validator`, `amount`, `unbondingId` | Indicates matured stake reclaimed by the delegator. |
+| `stake.rewardsClaimed` | `addr`, `paidZNHB`, `periods`, `aprBps`, `nextEligibleUnix` | Records reward mints when delegators claim accrued payouts. |
 
 These events stream through the existing node event feed so external observers and webhook infrastructure receive timely updates. When governance pauses staking, `stake.paused` events accompany rejected mutations to document the reason.
 

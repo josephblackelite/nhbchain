@@ -281,20 +281,20 @@ func (e *RewardEngine) settleOnUndelegate(addr []byte, amount *big.Int) error {
 }
 
 // Claim finalizes rewards for the specified account at the provided timestamp.
-func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int, periods int, next int64, err error) {
+func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int, periods int, next int64, apr uint64, err error) {
 	if e == nil || e.mgr == nil {
-		return nil, 0, 0, fmt.Errorf("reward engine unavailable")
+		return nil, 0, 0, 0, fmt.Errorf("reward engine unavailable")
 	}
 
 	metrics := observability.Staking()
 
 	paused, err := isStakingPaused(e.mgr)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	if paused {
 		metrics.SetPaused(true)
-		return nil, 0, 0, stakeerrors.ErrStakingPaused
+		return nil, 0, 0, 0, stakeerrors.ErrStakingPaused
 	}
 	metrics.SetPaused(false)
 
@@ -305,12 +305,12 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	}
 
 	if err := e.accrue(addrBytes); err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 
 	snap, err := e.mgr.GetAccountStakingRewards(addrBytes)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	if snap == nil {
 		snap = &types.StakingRewards{AccruedZNHB: big.NewInt(0)}
@@ -318,7 +318,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 
 	global, err := e.mgr.GetGlobalIndex()
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	if global == nil {
 		global = &GlobalIndex{}
@@ -326,7 +326,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 
 	emissionCap, err := e.stakingEmissionCap()
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 
 	ytdBefore := big.NewInt(0)
@@ -336,14 +336,14 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 
 	aprBps, payoutDays, err := e.stakingParams()
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 
 	if payoutDays == 0 {
-		return nil, 0, 0, fmt.Errorf("staking rewards: payout period not configured")
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: payout period not configured")
 	}
 	if payoutDays > math.MaxInt64/secondsPerDay {
-		return nil, 0, 0, fmt.Errorf("staking rewards: payout period too large")
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: payout period too large")
 	}
 
 	periodSeconds := int64(payoutDays) * secondsPerDay
@@ -352,25 +352,25 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	nextEligible := lastPayout + periodSeconds
 
 	if nowUnix <= lastPayout {
-		return big.NewInt(0), 0, nextEligible, stakeerrors.ErrNotDue
+		return big.NewInt(0), 0, nextEligible, aprBps, stakeerrors.ErrNotDue
 	}
 
 	elapsed := nowUnix - lastPayout
 	if elapsed < periodSeconds {
-		return big.NewInt(0), 0, nextEligible, stakeerrors.ErrNotDue
+		return big.NewInt(0), 0, nextEligible, aprBps, stakeerrors.ErrNotDue
 	}
 
 	periods64 := elapsed / periodSeconds
 	if periods64 <= 0 {
-		return big.NewInt(0), 0, nextEligible, stakeerrors.ErrNotDue
+		return big.NewInt(0), 0, nextEligible, aprBps, stakeerrors.ErrNotDue
 	}
 	if periods64 > int64(math.MaxInt) {
-		return nil, 0, 0, fmt.Errorf("staking rewards: eligible period overflow")
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: eligible period overflow")
 	}
 
 	account, err := e.mgr.GetAccount(addrBytes)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 
 	stakeBalance := big.NewInt(0)
@@ -404,7 +404,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	attempted := new(big.Int).Set(payout)
 	capValue, ytd, err := e.emissionCapForYear(snapshotTime.Year())
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	if capValue.Sign() > 0 && payout.Sign() > 0 {
 		projected := new(big.Int).Add(ytd, payout)
@@ -416,7 +416,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 			payout.Set(remaining)
 			if payout.Sign() <= 0 {
 				capErr := newEmissionCapHitError(attempted, ytd, capValue)
-				return big.NewInt(0), 0, nextEligible, capErr
+				return big.NewInt(0), 0, nextEligible, aprBps, capErr
 			}
 		}
 	}
@@ -433,14 +433,14 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	snap.LastPayoutUnix = newLastPayout
 
 	if err := e.mgr.PutAccountStakingRewards(addrBytes, snap); err != nil {
-		return nil, 0, 0, fmt.Errorf("staking rewards: update snapshot: %w", err)
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: update snapshot: %w", err)
 	}
 
 	if payout.Sign() > 0 {
 		account.BalanceZNHB.Add(account.BalanceZNHB, payout)
 		metrics.RecordRewardsPaid(payout)
 		if err := e.mgr.PutAccountMetadata(addrBytes, account); err != nil {
-			return nil, 0, 0, fmt.Errorf("staking rewards: credit account: %w", err)
+			return nil, 0, 0, 0, fmt.Errorf("staking rewards: credit account: %w", err)
 		}
 	}
 
@@ -461,12 +461,12 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	}
 	global.YTDEmissions.Add(global.YTDEmissions, payout)
 	if err := e.mgr.PutGlobalIndex(global); err != nil {
-		return nil, 0, 0, fmt.Errorf("staking rewards: update global index: %w", err)
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: update global index: %w", err)
 	}
 
 	if payout.Sign() > 0 {
 		if _, err := e.mgr.IncrementStakingEmissionYTD(uint32(snapshotTime.Year()), payout); err != nil {
-			return nil, 0, 0, fmt.Errorf("staking rewards: update ytd: %w", err)
+			return nil, 0, 0, 0, fmt.Errorf("staking rewards: update ytd: %w", err)
 		}
 	}
 
@@ -474,7 +474,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		metrics.RecordCapHit()
 	}
 
-	return new(big.Int).Set(payout), int(periods64), nextEligible, nil
+	return new(big.Int).Set(payout), int(periods64), nextEligible, aprBps, nil
 }
 
 func isStakingPaused(mgr *Manager) (bool, error) {
