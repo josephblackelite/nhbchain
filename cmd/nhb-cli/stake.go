@@ -131,13 +131,13 @@ func runStakeClaim(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Claimed rewards for %s\n", addr)
-	fmt.Fprintf(stdout, "  Minted:       %s ZapNHB\n", claim.Minted)
-	if claim.NextPayoutTs > 0 {
-		fmt.Fprintf(stdout, "  Next payout:  %s (%d)\n", formatTimestamp(claim.NextPayoutTs), claim.NextPayoutTs)
+	fmt.Fprintf(stdout, "  Paid:         %s ZapNHB\n", claim.Paid)
+	fmt.Fprintf(stdout, "  Periods:      %d\n", claim.Periods)
+	if claim.NextEligible > 0 {
+		fmt.Fprintf(stdout, "  Next eligible: %s (%d)\n", formatTimestamp(claim.NextEligible), claim.NextEligible)
 	} else {
-		fmt.Fprintln(stdout, "  Next payout:  unavailable")
+		fmt.Fprintln(stdout, "  Next eligible: unavailable")
 	}
-	printStakeAccountSnapshot(stdout, &claim.Balance)
 
 	return 0
 }
@@ -167,9 +167,9 @@ type stakePreviewResponse struct {
 }
 
 type stakeClaimRewardsResponse struct {
-	Minted       string          `json:"minted"`
-	Balance      balanceResponse `json:"balance"`
-	NextPayoutTs uint64          `json:"nextPayoutTs"`
+	Paid         string `json:"paid"`
+	Periods      int    `json:"periods"`
+	NextEligible uint64 `json:"next_eligible"`
 }
 
 func printStakeAccountSnapshot(w io.Writer, account *balanceResponse) {

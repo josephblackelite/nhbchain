@@ -2921,14 +2921,14 @@ func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods in
 	now := n.currentTime()
 	err = n.WithState(func(manager *nhbstate.Manager) error {
 		engine := nhbstate.NewRewardEngine(manager)
-		paid, periods, next, err = engine.Claim(addr.Bytes(), now)
+		paid, periods, next, err = engine.Claim(addr, now)
 		return err
 	})
 	if errors.Is(err, nhbstate.ErrNotReady) {
 		return nil, 0, 0, ErrStakingNotReady
 	}
 	if err != nil {
-		return nil, 0, 0, err
+		return paid, periods, next, err
 	}
 	if paid == nil {
 		paid = big.NewInt(0)

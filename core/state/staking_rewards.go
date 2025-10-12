@@ -397,21 +397,6 @@ func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err er
 	return aprBps, payoutDays, nil
 }
 
-// Claim exposes the staking reward claim flow to external callers. The
-// exported wrapper maintains backwards compatibility while allowing higher
-// layers to interact with the reward engine using the eventual return values
-// of the internal implementation once it is wired up.
-func (e *RewardEngine) Claim(addr []byte, now time.Time) (*big.Int, int, int64, error) {
-	paid, err := e.claim(addr, now)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	if paid == nil {
-		paid = big.NewInt(0)
-	}
-	return paid, 0, 0, nil
-}
-
 // AccrueAccount exposes the account accrual helper for external callers.
 func (e *RewardEngine) AccrueAccount(addr []byte) error {
 	return e.accrue(addr)
