@@ -34,6 +34,14 @@ type PaymasterMetrics struct {
 	minted *prometheus.CounterVec
 }
 
+// StakingMetrics captures staking module health and activity counters.
+type StakingMetrics struct {
+	rewardsPaid prometheus.Counter
+	paused      prometheus.Gauge
+	totalStaked *prometheus.GaugeVec
+	capHit      prometheus.Counter
+}
+
 var (
 	moduleMetricsOnce sync.Once
 	moduleRegistry    *moduleMetrics
@@ -55,6 +63,9 @@ var (
 
 	paymasterMetricsOnce sync.Once
 	paymasterRegistry    *PaymasterMetrics
+
+	stakingMetricsOnce sync.Once
+	stakingRegistry    *StakingMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -343,6 +354,96 @@ func (m *PaymasterMetrics) RecordAutoTopUp(outcome string, amount *big.Int) {
 			m.minted.WithLabelValues(label).Add(mintedFloat)
 		}
 	}
+}
+
+// Staking exposes the metrics registry tracking staking activity.
+func Staking() *StakingMetrics {
+	stakingMetricsOnce.Do(func() {
+		stakingRegistry = &StakingMetrics{
+			rewardsPaid: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "staking",
+				Name:      "rewards_paid_zn",
+				Help:      "Total ZapNHB rewards paid out by staking claims.",
+			}),
+			paused: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "staking",
+				Name:      "paused",
+				Help:      "Whether staking mutations are currently paused (1) or active (0).",
+			}),
+			totalStaked: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "staking",
+				Name:      "total_staked",
+				Help:      "Current ZapNHB stake locked per account in wei.",
+			}, []string{"account"}),
+			capHit: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "staking",
+				Name:      "cap_hit",
+				Help:      "Count of staking claims that exhausted the configured emission cap.",
+			}),
+		}
+		prometheus.MustRegister(
+			stakingRegistry.rewardsPaid,
+			stakingRegistry.paused,
+			stakingRegistry.totalStaked,
+			stakingRegistry.capHit,
+		)
+	})
+	return stakingRegistry
+}
+
+// RecordRewardsPaid tracks the cumulative staking rewards distributed.
+func (m *StakingMetrics) RecordRewardsPaid(amount *big.Int) {
+	if m == nil {
+		return
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return
+	}
+	value := bigToFloat(amount)
+	if value <= 0 {
+		return
+	}
+	m.rewardsPaid.Add(value)
+}
+
+// SetPaused toggles the staking pause indicator gauge.
+func (m *StakingMetrics) SetPaused(paused bool) {
+	if m == nil {
+		return
+	}
+	if paused {
+		m.paused.Set(1)
+		return
+	}
+	m.paused.Set(0)
+}
+
+// RecordTotalStaked updates the gauge tracking staked ZapNHB per account.
+func (m *StakingMetrics) RecordTotalStaked(account string, amount *big.Int) {
+	if m == nil {
+		return
+	}
+	label := strings.TrimSpace(strings.ToLower(account))
+	if label == "" {
+		label = "unknown"
+	}
+	value := bigToFloat(amount)
+	if value < 0 {
+		value = 0
+	}
+	m.totalStaked.WithLabelValues(label).Set(value)
+}
+
+// RecordCapHit increments the counter tracking emission cap saturations.
+func (m *StakingMetrics) RecordCapHit() {
+	if m == nil {
+		return
+	}
+	m.capHit.Inc()
 }
 
 // PayoutdMetrics wraps collectors tracking payout engine health.
