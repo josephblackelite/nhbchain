@@ -2,7 +2,7 @@
 
 This document describes the ZapNHB staking pipeline, on-chain state layout, JSON-RPC surface, and emitted events following the introduction of delegation, unbonding, and claim flows. It is intended for auditors, investors, developers, end users, and regulators who require a comprehensive view of the staking module.
 
-> ℹ️ **Activation and pause control:** Staking is now live on supported networks. Governance manages availability via the `staking.pause.enabled` toggle described in the [governance parameter catalog](../governance/params.md#staking-pause-enabled). When the corresponding `system/pauses` entry reports `staking = false`, delegation, undelegation, and claims are accepted. Operators can unpause the module by executing `gov.v1/MsgSetPauses` with `pauses.staking = false` and can temporarily halt flows by flipping the same flag back to `true`.
+> ✅ **General availability and pause control:** Staking is GA on supported networks. Governance manages availability via the `staking.pause.enabled` toggle described in the [governance parameter catalog](../governance/params.md#staking-pause-enabled). When the corresponding `system/pauses` entry reports `staking = false`, delegation, undelegation, and claims are accepted. Operators can unpause the module by executing `gov.v1/MsgSetPauses` with `pauses.staking = false` and can temporarily halt flows by flipping the same flag back to `true`.
 
 ## Overview
 
@@ -230,7 +230,7 @@ The read-only method `stake_previewClaim` reveals the current monthly payout win
 CLI equivalent:
 
 ```bash
-nhbctl stake rewards --from nhb1delegator...
+nhb-cli stake preview nhb1delegator...
 ```
 
 ### Error Semantics
@@ -239,6 +239,84 @@ nhbctl stake rewards --from nhb1delegator...
 - Invalid amounts (`<= 0`) trigger `codeInvalidParams`.
 - Switching validators without fully removing existing delegation returns a descriptive error.
 - Claims before maturity return `unbonding entry is not yet claimable` messages.
+
+## Monitoring & Tooling (Operators)
+
+- **Grafana**: Import [`observability/grafana/staking.json`](../../observability/grafana/staking.json) to visualise daily rewards, bonded supply, pause status, and emission-cap hits. Pair the pause and cap panels with alerts so on-call engineers are paged when staking halts or emissions saturate.
+- **CLI quick checks**: Use `nhb-cli` for authenticated spot checks when dashboards are unavailable:
+
+  ```bash
+  nhb-cli stake position nhb1delegator...
+  ```
+
+  ```
+  Stake position for nhb1delegator...
+    Shares:       5000000000000000000
+    Last index:   285000000000000000000
+    Last payout:  2024-06-01T00:00:00Z (1717209600)
+  ```
+
+  ```bash
+  nhb-cli stake preview nhb1delegator...
+  ```
+
+  ```
+  Stake rewards preview for nhb1delegator...
+    Claimable now: 742.5 ZapNHB
+    Next payout:   2024-07-01T00:00:00Z (1719792000)
+  ```
+
+- **RPC quick checks**: Issue authenticated JSON-RPC calls directly when automating runbooks or integrating with other systems:
+
+  ```bash
+  curl -sS -X POST http://127.0.0.1:8545 \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${RPC_TOKEN}" \
+    -d '{
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "stake_getPosition",
+      "params": ["nhb1delegator..."]
+    }'
+  ```
+
+  ```json
+  {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "shares": "5000000000000000000",
+      "lastIndex": "285000000000000000000",
+      "lastPayoutTs": 1717209600
+    }
+  }
+  ```
+
+  ```bash
+  curl -sS -X POST http://127.0.0.1:8545 \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${RPC_TOKEN}" \
+    -d '{
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "stake_claimRewards",
+      "params": ["nhb1delegator..."]
+    }'
+  ```
+
+  ```json
+  {
+    "id": 2,
+    "jsonrpc": "2.0",
+    "result": {
+      "minted": "742500000000000000000",
+      "periods": 1,
+      "nextPayoutTs": 1719792000
+    }
+  }
+  ```
+
+These commands complement the staking dashboard so operations teams can verify health from shell environments, CI pipelines, or incident response playbooks.
 
 ## Event Catalogue (Auditors, Integrators)
 
