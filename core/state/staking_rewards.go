@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	stakeerrors "nhbchain/core/errors"
+	"nhbchain/core/events"
 	"nhbchain/native/governance"
 )
 
@@ -31,27 +32,60 @@ var (
 	accrualDenominator = new(big.Int).Mul(big.NewInt(secondsPerYear), big.NewInt(basisPointsDenom))
 )
 
-type pauseSnapshot struct {
-	Staking       bool `json:"Staking"`
-	LegacyStaking bool `json:"staking"`
+// EmissionCapHitError augments the standard cap hit sentinel with event context.
+type EmissionCapHitError struct {
+	attempted *big.Int
+	ytd       *big.Int
+	cap       *big.Int
 }
 
-func isStakingPaused(mgr *Manager) (bool, error) {
-	if mgr == nil {
-		return false, fmt.Errorf("staking rewards: state manager unavailable")
+func newEmissionCapHitError(attempted, ytd, cap *big.Int) *EmissionCapHitError {
+	return &EmissionCapHitError{
+		attempted: cloneBigInt(attempted),
+		ytd:       cloneBigInt(ytd),
+		cap:       cloneBigInt(cap),
 	}
-	raw, ok, err := mgr.ParamStoreGet(paramKeyPauses)
-	if err != nil {
-		return false, fmt.Errorf("staking rewards: load pauses: %w", err)
+}
+
+// Error satisfies the error interface and reports the sentinel string.
+func (e *EmissionCapHitError) Error() string {
+	return stakeerrors.ErrCapHit.Error()
+}
+
+// Unwrap enables errors.Is/As comparisons with the sentinel.
+func (e *EmissionCapHitError) Unwrap() error {
+	return stakeerrors.ErrCapHit
+}
+
+// Attempted returns the attempted payout amount in Wei.
+func (e *EmissionCapHitError) Attempted() *big.Int {
+	return cloneBigInt(e.attempted)
+}
+
+// YTD returns the recorded year-to-date emission amount in Wei.
+func (e *EmissionCapHitError) YTD() *big.Int {
+	return cloneBigInt(e.ytd)
+}
+
+// Cap returns the configured annual emission cap in Wei.
+func (e *EmissionCapHitError) Cap() *big.Int {
+	return cloneBigInt(e.cap)
+}
+
+// Event yields the structured StakeCapHit payload describing the cap overflow.
+func (e *EmissionCapHitError) Event() events.StakeCapHit {
+	return events.StakeCapHit{
+		AttemptedZNHB: e.Attempted(),
+		YTD:           e.YTD(),
+		Cap:           e.Cap(),
 	}
-	if !ok || len(bytes.TrimSpace(raw)) == 0 {
-		return false, nil
+}
+
+func cloneBigInt(value *big.Int) *big.Int {
+	if value == nil {
+		return big.NewInt(0)
 	}
-	var snapshot pauseSnapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return false, fmt.Errorf("staking rewards: decode pauses: %w", err)
-	}
-	return snapshot.Staking || snapshot.LegacyStaking, nil
+	return new(big.Int).Set(value)
 }
 
 // RewardEngine manages staking reward state transitions backed by the state manager.
@@ -352,6 +386,30 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		payout.Set(accrued)
 	}
 
+	attempted := new(big.Int).Set(payout)
+	capValue, ytd, err := e.emissionCapForYear(snapshotTime.Year())
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if capValue.Sign() > 0 && payout.Sign() > 0 {
+		projected := new(big.Int).Add(ytd, payout)
+		if projected.Cmp(capValue) > 0 {
+			remaining := new(big.Int).Sub(capValue, ytd)
+			if remaining.Sign() < 0 {
+				remaining.SetInt64(0)
+			}
+			payout.Set(remaining)
+			if payout.Sign() <= 0 {
+				capErr := newEmissionCapHitError(attempted, ytd, capValue)
+				return big.NewInt(0), 0, nextEligible, capErr
+			}
+		}
+	}
+
+	advance := periods64 * periodSeconds
+	newLastPayout := snap.LastPayoutUnix + advance
+	nextEligible = newLastPayout + periodSeconds
+
 	if snap.AccruedZNHB == nil {
 		snap.AccruedZNHB = big.NewInt(0)
 	}
@@ -360,9 +418,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		snap.AccruedZNHB.SetInt64(0)
 	}
 
-	advance := periods64 * periodSeconds
-	snap.LastPayoutUnix += advance
-	nextEligible = snap.LastPayoutUnix + periodSeconds
+	snap.LastPayoutUnix = newLastPayout
 
 	if err := e.mgr.PutStakingSnap(addrBytes, snap); err != nil {
 		return nil, 0, 0, fmt.Errorf("staking rewards: update snapshot: %w", err)
@@ -390,6 +446,50 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	}
 
 	return new(big.Int).Set(payout), int(periods64), nextEligible, nil
+}
+
+func (e *RewardEngine) emissionCapForYear(year int) (*big.Int, *big.Int, error) {
+	capValue := big.NewInt(0)
+	ytd := big.NewInt(0)
+
+	if e == nil || e.mgr == nil {
+		return capValue, ytd, fmt.Errorf("reward engine unavailable")
+	}
+
+	raw, ok, err := e.mgr.ParamStoreGet(governance.ParamKeyStakingMaxEmissionPerYearWei)
+	if err != nil {
+		return nil, nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
+	}
+	if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			parsed, parseOK := new(big.Int).SetString(trimmed, 10)
+			if !parseOK {
+				return nil, nil, fmt.Errorf("staking rewards: parse emission cap: %s", trimmed)
+			}
+			if parsed.Sign() < 0 {
+				return nil, nil, fmt.Errorf("staking rewards: emission cap must be non-negative")
+			}
+			capValue = parsed
+		}
+	}
+	if capValue.Sign() <= 0 {
+		return capValue, ytd, nil
+	}
+
+	if year <= 0 {
+		return capValue, ytd, nil
+	}
+
+	ytd, err = e.mgr.StakingEmissionYTD(uint32(year))
+	if err != nil {
+		return nil, nil, fmt.Errorf("staking rewards: load ytd: %w", err)
+	}
+	if ytd == nil {
+		ytd = big.NewInt(0)
+	}
+
+	return capValue, ytd, nil
 }
 
 func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err error) {
