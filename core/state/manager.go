@@ -154,6 +154,74 @@ func StakingAcctKey(addr []byte) []byte {
 	return key
 }
 
+// GetGlobalIndex retrieves the persisted protocol-wide staking index metadata.
+// When no snapshot has been recorded yet the function returns a zeroed
+// structure with default big.Int instances to avoid shared references.
+func (m *Manager) GetGlobalIndex() (*GlobalIndex, error) {
+	if m == nil {
+		return (&storedGlobalIndex{}).toGlobalIndex(), nil
+	}
+	data, err := m.trie.Get(StakingGlobalIndexKey())
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return (&storedGlobalIndex{}).toGlobalIndex(), nil
+	}
+	var stored storedGlobalIndex
+	if err := rlp.DecodeBytes(data, &stored); err != nil {
+		return nil, err
+	}
+	return stored.toGlobalIndex(), nil
+}
+
+// PutGlobalIndex persists the supplied staking index snapshot.
+func (m *Manager) PutGlobalIndex(idx *GlobalIndex) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	stored := newStoredGlobalIndex(idx)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(StakingGlobalIndexKey(), encoded)
+}
+
+// GetStakingSnap loads the staking snapshot for the supplied address. Missing
+// records return zeroed structures with default big.Int fields.
+func (m *Manager) GetStakingSnap(addr []byte) (*AccountSnap, error) {
+	if m == nil {
+		return (&storedAccountSnap{}).toAccountSnap(), nil
+	}
+	key := StakingAcctKey(addr)
+	data, err := m.trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return (&storedAccountSnap{}).toAccountSnap(), nil
+	}
+	var stored storedAccountSnap
+	if err := rlp.DecodeBytes(data, &stored); err != nil {
+		return nil, err
+	}
+	return stored.toAccountSnap(), nil
+}
+
+// PutStakingSnap writes the staking account snapshot for the provided address.
+func (m *Manager) PutStakingSnap(addr []byte, snap *AccountSnap) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	stored := newStoredAccountSnap(snap)
+	encoded, err := rlp.EncodeToBytes(stored)
+	if err != nil {
+		return err
+	}
+	return m.trie.Update(StakingAcctKey(addr), encoded)
+}
+
 // StakingGlobalIndex returns the protocol-wide staking reward index accumulator.
 // Callers should treat the returned value as read-only.
 func (m *Manager) StakingGlobalIndex() (*big.Int, error) {
