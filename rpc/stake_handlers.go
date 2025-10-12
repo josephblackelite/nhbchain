@@ -101,7 +101,7 @@ func (s *Server) handleStakeDelegate(w http.ResponseWriter, r *http.Request, req
 	}
 	account, err := s.node.StakeDelegate(callerAddr, amount, validatorPtr)
 	if err != nil {
-		if errors.Is(err, core.ErrStakePaused) {
+		if errors.Is(err, core.ErrStakePaused) || errors.Is(err, stakeerrors.ErrStakingPaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
 			return
 		}
@@ -138,7 +138,7 @@ func (s *Server) handleStakeUndelegate(w http.ResponseWriter, r *http.Request, r
 	}
 	unbond, err := s.node.StakeUndelegate(callerAddr, amount)
 	if err != nil {
-		if errors.Is(err, core.ErrStakePaused) {
+		if errors.Is(err, core.ErrStakePaused) || errors.Is(err, stakeerrors.ErrStakingPaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
 			return
 		}
@@ -178,7 +178,7 @@ func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *R
 	}
 	claimed, err := s.node.StakeClaim(callerAddr, params.UnbondingID)
 	if err != nil {
-		if errors.Is(err, core.ErrStakePaused) {
+		if errors.Is(err, core.ErrStakePaused) || errors.Is(err, stakeerrors.ErrStakingPaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
 			return
 		}
@@ -221,7 +221,7 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 	addr := common.BytesToAddress(addrBytes[:])
 	paid, periods, nextEligible, err := s.node.StakeClaimRewards(addr)
 	if err != nil {
-		if errors.Is(err, core.ErrStakePaused) {
+		if errors.Is(err, core.ErrStakePaused) || errors.Is(err, stakeerrors.ErrStakingPaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
 			return
 		}

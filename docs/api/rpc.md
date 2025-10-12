@@ -165,3 +165,17 @@ error `data` field. For example:
 
 When the module is paused the helper returns HTTP `503` with the `staking
 module paused` message.
+
+Error responses include:
+
+* `503 Service Unavailable` with JSON-RPC code `-32050` (`codeModulePaused`) and
+  the `staking module paused` message when governance pauses staking.
+* `409 Conflict` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
+  `stake: claim not yet due` message when the payout window has not elapsed. The
+  response includes a `next_eligible` hint in the error `data` field.
+* `501 Not Implemented` with JSON-RPC code `-32000` (`codeServerError`) and the
+  `staking not ready` message while rewards are still being enabled on the
+  network.
+* `400 Bad Request` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
+  `failed to claim staking rewards` message for malformed parameters or other
+  validation failures.
