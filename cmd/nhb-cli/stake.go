@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -40,7 +42,7 @@ func runStakePosition(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	result, rpcErr, err := stakeRPCCall("stake_getPosition", []interface{}{addr}, true)
+	result, _, rpcErr, err := stakeRPCCall("stake_getPosition", []interface{}{addr}, true)
 	if err != nil {
 		return handleRPCCallError(stderr, err)
 	}
@@ -77,7 +79,7 @@ func runStakePreview(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	result, rpcErr, err := stakeRPCCall("stake_previewClaim", []interface{}{addr}, true)
+	result, _, rpcErr, err := stakeRPCCall("stake_previewClaim", []interface{}{addr}, true)
 	if err != nil {
 		return handleRPCCallError(stderr, err)
 	}
@@ -112,13 +114,21 @@ func runStakeClaim(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	result, rpcErr, err := stakeRPCCall("stake_claimRewards", []interface{}{addr}, true)
+	result, status, rpcErr, err := stakeRPCCall("stake_claimRewards", []interface{}{addr}, true)
 	if err != nil {
 		return handleRPCCallError(stderr, err)
 	}
 	if rpcErr != nil {
 		if strings.EqualFold(rpcErr.Message, "staking not ready") {
 			fmt.Fprintln(stdout, "Staking rewards are not available yet. Please try again later.")
+			return 0
+		}
+		if nextTs, ok := parseStakeNotDue(status, rpcErr); ok {
+			if nextTs > 0 {
+				fmt.Fprintf(stdout, "Not yet eligible. Next at %s (%d).\n", formatTimestamp(nextTs), nextTs)
+			} else {
+				fmt.Fprintln(stdout, "Not yet eligible.")
+			}
 			return 0
 		}
 		return handleRPCError(stderr, rpcErr)
@@ -130,13 +140,16 @@ func runStakeClaim(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Claimed rewards for %s\n", addr)
-	fmt.Fprintf(stdout, "  Minted:       %s ZapNHB\n", claim.Minted)
-	if claim.NextPayoutTs > 0 {
-		fmt.Fprintf(stdout, "  Next payout:  %s (%d)\n", formatTimestamp(claim.NextPayoutTs), claim.NextPayoutTs)
-	} else {
-		fmt.Fprintln(stdout, "  Next payout:  unavailable")
+	minted := claim.Minted
+	if mintedInt, ok := new(big.Int).SetString(claim.Minted, 10); ok {
+		minted = formatBigInt(mintedInt)
 	}
+	periods := claim.Periods
+	if periods == 0 {
+		periods = claim.ClaimedPeriods
+	}
+	fmt.Fprintf(stdout, "Minted %s ZNHB for %d period(s). Next claim after %s.\n", minted, periods, formatTimestamp(claim.NextPayoutTs))
+
 	printStakeAccountSnapshot(stdout, &claim.Balance)
 
 	return 0
@@ -167,9 +180,20 @@ type stakePreviewResponse struct {
 }
 
 type stakeClaimRewardsResponse struct {
-	Minted       string          `json:"minted"`
-	Balance      balanceResponse `json:"balance"`
-	NextPayoutTs uint64          `json:"nextPayoutTs"`
+	Minted         string          `json:"minted"`
+	Periods        int             `json:"periods"`
+	ClaimedPeriods int             `json:"claimedPeriods"`
+	Balance        balanceResponse `json:"balance"`
+	NextPayoutTs   uint64          `json:"nextPayoutTs"`
+}
+
+type stakeClaimErrorDetail struct {
+	NextEligible uint64 `json:"nextEligible"`
+	NextPayoutTs uint64 `json:"nextPayoutTs"`
+	NextClaimTs  uint64 `json:"nextClaimTs"`
+	Timestamp    uint64 `json:"timestamp"`
+	Message      string `json:"message"`
+	Error        string `json:"error"`
 }
 
 func printStakeAccountSnapshot(w io.Writer, account *balanceResponse) {
@@ -214,7 +238,7 @@ Commands:
 `)
 }
 
-func callStakeRPC(method string, params []interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
+func callStakeRPC(method string, params []interface{}, requireAuth bool) (json.RawMessage, int, *rpcError, error) {
 	payload := map[string]interface{}{"id": 1, "method": method}
 	if params != nil {
 		payload["params"] = params
@@ -223,11 +247,11 @@ func callStakeRPC(method string, params []interface{}, requireAuth bool) (json.R
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
 	}
 	resp, err := doRPCRequest(body, requireAuth)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 	var rpcResp struct {
@@ -235,7 +259,85 @@ func callStakeRPC(method string, params []interface{}, requireAuth bool) (json.R
 		Error  *rpcError       `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode RPC response: %w", err)
+		return nil, resp.StatusCode, nil, fmt.Errorf("failed to decode RPC response: %w", err)
 	}
-	return rpcResp.Result, rpcResp.Error, nil
+	return rpcResp.Result, resp.StatusCode, rpcResp.Error, nil
+}
+
+func parseStakeNotDue(status int, rpcErr *rpcError) (uint64, bool) {
+	if rpcErr == nil {
+		return 0, false
+	}
+
+	recognized := status == http.StatusConflict || containsNotDue(rpcErr.Message)
+	if len(rpcErr.Data) > 0 {
+		if ts, ok := decodeNextEligible(rpcErr.Data); ok {
+			return ts, true
+		}
+		if msg, ok := decodeErrorString(rpcErr.Data); ok {
+			if containsNotDue(msg) {
+				return 0, true
+			}
+			if ts, err := strconv.ParseUint(strings.TrimSpace(msg), 10, 64); err == nil {
+				return ts, true
+			}
+		}
+	}
+
+	if recognized {
+		return 0, true
+	}
+	return 0, false
+}
+
+func decodeNextEligible(raw json.RawMessage) (uint64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+
+	var detail stakeClaimErrorDetail
+	if err := json.Unmarshal(raw, &detail); err == nil {
+		next := detail.NextPayoutTs
+		if next == 0 {
+			next = detail.NextEligible
+		}
+		if next == 0 {
+			next = detail.NextClaimTs
+		}
+		if next == 0 {
+			next = detail.Timestamp
+		}
+		if next > 0 {
+			return next, true
+		}
+		if containsNotDue(detail.Message) || containsNotDue(detail.Error) {
+			return 0, true
+		}
+	}
+
+	var tsNumeric uint64
+	if err := json.Unmarshal(raw, &tsNumeric); err == nil {
+		return tsNumeric, true
+	}
+
+	return 0, false
+}
+
+func decodeErrorString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var msg string
+	if err := json.Unmarshal(raw, &msg); err == nil {
+		return msg, true
+	}
+	return "", false
+}
+
+func containsNotDue(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "not due") || strings.Contains(lower, "not eligible") || strings.Contains(lower, "payout window")
 }
