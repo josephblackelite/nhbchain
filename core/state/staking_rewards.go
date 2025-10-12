@@ -3,14 +3,24 @@ package state
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	stakeerrors "nhbchain/core/errors"
+	"nhbchain/native/governance"
 )
 
 const (
-	basisPointsDenom = 10_000
-	secondsPerDay    = 24 * 60 * 60
-	secondsPerYear   = 365 * secondsPerDay
+	basisPointsDenom        = 10_000
+	secondsPerDay           = 24 * 60 * 60
+	secondsPerYear          = 365 * secondsPerDay
+	defaultStakingAprBps    = 1_250
+	defaultPayoutPeriodDays = 30
 )
 
 var (
@@ -211,10 +221,180 @@ func (e *RewardEngine) settleOnUndelegate(addr []byte, amount *big.Int) error {
 	return e.mgr.PutAccountMetadata(addr, account)
 }
 
-// claim finalizes rewards for the specified account at the provided timestamp.
-func (e *RewardEngine) claim(addr []byte, now time.Time) (*big.Int, error) {
-	// TODO: implement claim processing.
-	return big.NewInt(0), ErrNotReady
+// Claim finalizes rewards for the specified account at the provided timestamp.
+func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int, periods int, next int64, err error) {
+	if e == nil || e.mgr == nil {
+		return nil, 0, 0, fmt.Errorf("reward engine unavailable")
+	}
+
+	addrBytes := addr.Bytes()
+	snapshotTime := now.UTC()
+	if snapshotTime.IsZero() {
+		snapshotTime = time.Now().UTC()
+	}
+
+	if err := e.accrue(addrBytes); err != nil {
+		return nil, 0, 0, err
+	}
+
+	snap, err := e.mgr.GetStakingSnap(addrBytes)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if snap == nil {
+		snap = &AccountSnap{AccruedZNHB: big.NewInt(0)}
+	}
+
+	global, err := e.mgr.GetGlobalIndex()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if global == nil {
+		global = &GlobalIndex{}
+	}
+
+	aprBps, payoutDays, err := e.stakingParams()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	if payoutDays == 0 {
+		return nil, 0, 0, fmt.Errorf("staking rewards: payout period not configured")
+	}
+	if payoutDays > math.MaxInt64/secondsPerDay {
+		return nil, 0, 0, fmt.Errorf("staking rewards: payout period too large")
+	}
+
+	periodSeconds := int64(payoutDays) * secondsPerDay
+	nowUnix := snapshotTime.Unix()
+	lastPayout := snap.LastPayoutUnix
+	nextEligible := lastPayout + periodSeconds
+
+	if nowUnix <= lastPayout {
+		return big.NewInt(0), 0, nextEligible, stakeerrors.ErrNotDue
+	}
+
+	elapsed := nowUnix - lastPayout
+	if elapsed < periodSeconds {
+		return big.NewInt(0), 0, nextEligible, stakeerrors.ErrNotDue
+	}
+
+	periods64 := elapsed / periodSeconds
+	if periods64 <= 0 {
+		return big.NewInt(0), 0, nextEligible, stakeerrors.ErrNotDue
+	}
+	if periods64 > int64(math.MaxInt) {
+		return nil, 0, 0, fmt.Errorf("staking rewards: eligible period overflow")
+	}
+
+	account, err := e.mgr.GetAccount(addrBytes)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	stakeBalance := big.NewInt(0)
+	if account != nil && account.LockedZNHB != nil {
+		stakeBalance = new(big.Int).Set(account.LockedZNHB)
+	}
+
+	expected := big.NewInt(0)
+	if stakeBalance.Sign() > 0 && aprBps > 0 {
+		expected = new(big.Int).Set(stakeBalance)
+		expected.Mul(expected, new(big.Int).SetUint64(aprBps))
+		expected.Mul(expected, big.NewInt(periods64))
+		denom := big.NewInt(basisPointsDenom * 12)
+		expected.Quo(expected, denom)
+	}
+
+	accrued := big.NewInt(0)
+	if snap.AccruedZNHB != nil {
+		accrued = new(big.Int).Set(snap.AccruedZNHB)
+	}
+
+	payout := big.NewInt(0)
+	if accrued.Cmp(expected) > 0 {
+		payout.Set(expected)
+	} else {
+		payout.Set(accrued)
+	}
+
+	if snap.AccruedZNHB == nil {
+		snap.AccruedZNHB = big.NewInt(0)
+	}
+	snap.AccruedZNHB.Sub(snap.AccruedZNHB, payout)
+	if snap.AccruedZNHB.Sign() < 0 {
+		snap.AccruedZNHB.SetInt64(0)
+	}
+
+	advance := periods64 * periodSeconds
+	snap.LastPayoutUnix += advance
+	nextEligible = snap.LastPayoutUnix + periodSeconds
+
+	if err := e.mgr.PutStakingSnap(addrBytes, snap); err != nil {
+		return nil, 0, 0, fmt.Errorf("staking rewards: update snapshot: %w", err)
+	}
+
+	if payout.Sign() > 0 {
+		account.BalanceZNHB.Add(account.BalanceZNHB, payout)
+		if err := e.mgr.PutAccountMetadata(addrBytes, account); err != nil {
+			return nil, 0, 0, fmt.Errorf("staking rewards: credit account: %w", err)
+		}
+	}
+
+	if global.YTDEmissions == nil {
+		global.YTDEmissions = big.NewInt(0)
+	}
+	global.YTDEmissions.Add(global.YTDEmissions, payout)
+	if err := e.mgr.PutGlobalIndex(global); err != nil {
+		return nil, 0, 0, fmt.Errorf("staking rewards: update global index: %w", err)
+	}
+
+	if payout.Sign() > 0 {
+		if _, err := e.mgr.IncrementStakingEmissionYTD(uint32(snapshotTime.Year()), payout); err != nil {
+			return nil, 0, 0, fmt.Errorf("staking rewards: update ytd: %w", err)
+		}
+	}
+
+	return new(big.Int).Set(payout), int(periods64), nextEligible, nil
+}
+
+func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err error) {
+	aprBps = defaultStakingAprBps
+	payoutDays = defaultPayoutPeriodDays
+
+	if e == nil || e.mgr == nil {
+		return aprBps, payoutDays, fmt.Errorf("reward engine unavailable")
+	}
+
+	if raw, ok, getErr := e.mgr.ParamStoreGet(governance.ParamKeyStakingAprBps); getErr != nil {
+		return 0, 0, fmt.Errorf("load staking apr: %w", getErr)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			value, parseErr := strconv.ParseUint(trimmed, 10, 64)
+			if parseErr != nil {
+				return 0, 0, fmt.Errorf("parse staking apr: %w", parseErr)
+			}
+			aprBps = value
+		}
+	}
+
+	if raw, ok, getErr := e.mgr.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays); getErr != nil {
+		return 0, 0, fmt.Errorf("load staking payout period: %w", getErr)
+	} else if ok {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			value, parseErr := strconv.ParseUint(trimmed, 10, 64)
+			if parseErr != nil {
+				return 0, 0, fmt.Errorf("parse staking payout period: %w", parseErr)
+			}
+			if value > 0 {
+				payoutDays = value
+			}
+		}
+	}
+
+	return aprBps, payoutDays, nil
 }
 
 // AccrueAccount exposes the account accrual helper for external callers.
