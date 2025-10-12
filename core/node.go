@@ -25,6 +25,7 @@ import (
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
+	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
 	"nhbchain/core/identity"
 	"nhbchain/core/rewards"
@@ -2926,6 +2927,9 @@ func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods in
 	})
 	if errors.Is(err, nhbstate.ErrNotReady) {
 		return nil, 0, 0, ErrStakingNotReady
+	}
+	if errors.Is(err, stakeerrors.ErrStakingPaused) {
+		return nil, 0, 0, stakeerrors.ErrStakingPaused
 	}
 	if err != nil {
 		var capHitErr *nhbstate.EmissionCapHitError
