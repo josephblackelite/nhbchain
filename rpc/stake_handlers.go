@@ -11,6 +11,8 @@ import (
 
 	"nhbchain/core"
 	"nhbchain/crypto"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 const stakingModulePausedMessage = "staking module paused"
@@ -210,12 +212,13 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 	if _, ok := s.guardStakeRequest(w, r, req); !ok {
 		return
 	}
-	addrStr, addr, err := parseStakeAddressParam(req.Params)
+	addrStr, addrBytes, err := parseStakeAddressParam(req.Params)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
-	minted, err := s.node.StakeClaimRewards(addr)
+	addr := common.BytesToAddress(addrBytes[:])
+	minted, _, nextEligible, err := s.node.StakeClaimRewards(addr)
 	if err != nil {
 		if errors.Is(err, core.ErrStakePaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
@@ -228,19 +231,18 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim staking rewards", err.Error())
 		return
 	}
-	account, err := s.node.GetAccount(addr[:])
+	account, err := s.node.GetAccount(addrBytes[:])
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", err.Error())
-		return
-	}
-	_, nextPayout, err := s.node.StakePreviewClaim(addr, time.Time{})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to preview staking rewards", err.Error())
 		return
 	}
 	mintedStr := "0"
 	if minted != nil {
 		mintedStr = minted.String()
+	}
+	nextPayout := uint64(0)
+	if nextEligible > 0 {
+		nextPayout = uint64(nextEligible)
 	}
 	result := stakeClaimRewardsResult{
 		Minted:       mintedStr,
