@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nhbchain/core"
+	stakeerrors "nhbchain/core/errors"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 
@@ -42,7 +43,7 @@ func TestStakeClaim_NotReady(t *testing.T) {
 	}
 }
 
-func TestStakeClaimRewardsFlow(t *testing.T) {
+func TestStakeClaimRPC_Success(t *testing.T) {
 	env := newTestEnv(t)
 
 	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
@@ -57,10 +58,13 @@ func TestStakeClaimRewardsFlow(t *testing.T) {
 	var delegatorBytes [20]byte
 	copy(delegatorBytes[:], delegator.Bytes())
 
-	shares := big.NewInt(5_000)
-	globalIndex := big.NewInt(1_500)
-	now := time.Now().UTC()
 	payoutPeriod := 30 * 24 * time.Hour
+	now := time.Unix(1_700_000_000, 0).UTC()
+	env.node.SetTimeSource(func() time.Time { return now })
+	t.Cleanup(func() { env.node.SetTimeSource(nil) })
+
+	accrued := big.NewInt(1_000)
+	stakeBalance := big.NewInt(1_000_000_000_000_000_000)
 	lastPayout := now.Add(-2 * payoutPeriod)
 
 	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
@@ -68,99 +72,49 @@ func TestStakeClaimRewardsFlow(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		account.StakeShares = new(big.Int).Set(shares)
-		account.StakeLastIndex = big.NewInt(0)
-		account.StakeLastPayoutTs = uint64(lastPayout.Unix())
+		account.LockedZNHB = new(big.Int).Set(stakeBalance)
 		account.BalanceZNHB = big.NewInt(0)
+		account.StakeShares = new(big.Int).Set(stakeBalance)
 		if err := manager.PutAccount(delegatorBytes[:], account); err != nil {
 			return err
 		}
-		return manager.SetStakingGlobalIndex(globalIndex)
+		snap := &nhbstate.AccountSnap{
+			AccruedZNHB:    new(big.Int).Set(accrued),
+			LastPayoutUnix: lastPayout.Unix(),
+		}
+		if err := manager.PutStakingSnap(delegatorBytes[:], snap); err != nil {
+			return err
+		}
+		return manager.PutGlobalIndex(&nhbstate.GlobalIndex{LastUpdateUnix: now.Unix()})
 	}); err != nil {
 		t.Fatalf("prepare account: %v", err)
 	}
 
 	addrParam := marshalParam(t, delegator.String())
-
-	previewReq := &RPCRequest{ID: 1, Params: []json.RawMessage{addrParam}}
-	previewRec := httptest.NewRecorder()
-	env.server.handleStakePreviewClaim(previewRec, env.newRequest(), previewReq)
-	previewResult, rpcErr := decodeRPCResponse(t, previewRec)
-	if rpcErr != nil {
-		t.Fatalf("preview error: %+v", rpcErr)
-	}
-	var previewResp stakePreviewClaimResult
-	if err := json.Unmarshal(previewResult, &previewResp); err != nil {
-		t.Fatalf("decode preview: %v", err)
-	}
-	payable := new(big.Int)
-	if _, ok := payable.SetString(previewResp.Payable, 10); !ok {
-		t.Fatalf("invalid payable amount: %s", previewResp.Payable)
-	}
-	if payable.Sign() <= 0 {
-		t.Fatalf("expected positive payable reward, got %s", payable)
-	}
-
-	positionRec := httptest.NewRecorder()
-	env.server.handleStakeGetPosition(positionRec, env.newRequest(), previewReq)
-	positionResult, rpcErr := decodeRPCResponse(t, positionRec)
-	if rpcErr != nil {
-		t.Fatalf("position error: %+v", rpcErr)
-	}
-	var positionResp stakePositionResult
-	if err := json.Unmarshal(positionResult, &positionResp); err != nil {
-		t.Fatalf("decode position: %v", err)
-	}
-	if positionResp.Shares != shares.String() {
-		t.Fatalf("unexpected shares: got %s want %s", positionResp.Shares, shares)
-	}
-	if positionResp.LastPayoutTs != uint64(lastPayout.Unix()) {
-		t.Fatalf("unexpected last payout ts: got %d want %d", positionResp.LastPayoutTs, uint64(lastPayout.Unix()))
-	}
-
+	claimReq := &RPCRequest{ID: 1, Params: []json.RawMessage{addrParam}}
 	claimRec := httptest.NewRecorder()
-	env.server.handleStakeClaimRewards(claimRec, env.newRequest(), previewReq)
+	env.server.handleStakeClaimRewards(claimRec, env.newRequest(), claimReq)
 	claimResult, rpcErr := decodeRPCResponse(t, claimRec)
 	if rpcErr != nil {
 		t.Fatalf("claim error: %+v", rpcErr)
 	}
-	var claimResp stakeClaimRewardsResult
+	var claimResp stakeClaimRewardsResponse
 	if err := json.Unmarshal(claimResult, &claimResp); err != nil {
 		t.Fatalf("decode claim: %v", err)
 	}
-	minted := new(big.Int)
-	if _, ok := minted.SetString(claimResp.Minted, 10); !ok {
-		t.Fatalf("invalid minted amount: %s", claimResp.Minted)
+	if claimResp.Paid != accrued.String() {
+		t.Fatalf("unexpected paid amount: got %s want %s", claimResp.Paid, accrued.String())
 	}
-	if minted.Cmp(payable) != 0 {
-		t.Fatalf("minted mismatch: got %s want %s", minted, payable)
+	if claimResp.Periods != 2 {
+		t.Fatalf("unexpected period count: got %d want %d", claimResp.Periods, 2)
 	}
-	if claimResp.Balance.BalanceZNHB == nil {
-		t.Fatalf("expected balance payload")
-	}
-	if claimResp.Balance.BalanceZNHB.String() == "0" {
-		t.Fatalf("expected ZNHB balance to increase")
-	}
-	if claimResp.NextPayoutTs <= uint64(time.Now().Unix()) {
-		t.Fatalf("expected next payout to be in the future, got %d", claimResp.NextPayoutTs)
-	}
-
-	postPreviewRec := httptest.NewRecorder()
-	env.server.handleStakePreviewClaim(postPreviewRec, env.newRequest(), previewReq)
-	postPreviewResult, rpcErr := decodeRPCResponse(t, postPreviewRec)
-	if rpcErr != nil {
-		t.Fatalf("post-claim preview error: %+v", rpcErr)
-	}
-	var postPreview stakePreviewClaimResult
-	if err := json.Unmarshal(postPreviewResult, &postPreview); err != nil {
-		t.Fatalf("decode post preview: %v", err)
-	}
-	if postPreview.Payable != "0" {
-		t.Fatalf("expected zero payable after claim, got %s", postPreview.Payable)
+	expectedNext := uint64(now.Add(payoutPeriod).Unix())
+	if claimResp.NextEligible != expectedNext {
+		t.Fatalf("unexpected next eligibility: got %d want %d", claimResp.NextEligible, expectedNext)
 	}
 }
 
-func TestStakeClaimRewardsEarly(t *testing.T) {
+func TestStakeClaimRPC_NotDue(t *testing.T) {
 	env := newTestEnv(t)
 
 	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
@@ -175,18 +129,31 @@ func TestStakeClaimRewardsEarly(t *testing.T) {
 	var delegatorBytes [20]byte
 	copy(delegatorBytes[:], delegator.Bytes())
 
+	payoutPeriod := 30 * 24 * time.Hour
+	now := time.Unix(1_700_050_000, 0).UTC()
+	env.node.SetTimeSource(func() time.Time { return now })
+	t.Cleanup(func() { env.node.SetTimeSource(nil) })
+
+	stakeBalance := big.NewInt(500_000_000_000_000_000)
+
 	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
 		account, err := manager.GetAccount(delegatorBytes[:])
 		if err != nil {
 			return err
 		}
-		account.StakeShares = big.NewInt(1_000)
-		account.StakeLastIndex = big.NewInt(0)
-		account.StakeLastPayoutTs = uint64(time.Now().UTC().Unix())
+		account.LockedZNHB = new(big.Int).Set(stakeBalance)
+		account.StakeShares = new(big.Int).Set(stakeBalance)
 		if err := manager.PutAccount(delegatorBytes[:], account); err != nil {
 			return err
 		}
-		return manager.SetStakingGlobalIndex(big.NewInt(2_000))
+		snap := &nhbstate.AccountSnap{
+			AccruedZNHB:    big.NewInt(2_000),
+			LastPayoutUnix: now.Unix(),
+		}
+		if err := manager.PutStakingSnap(delegatorBytes[:], snap); err != nil {
+			return err
+		}
+		return manager.PutGlobalIndex(&nhbstate.GlobalIndex{LastUpdateUnix: now.Unix()})
 	}); err != nil {
 		t.Fatalf("prepare account: %v", err)
 	}
@@ -195,15 +162,27 @@ func TestStakeClaimRewardsEarly(t *testing.T) {
 	claimReq := &RPCRequest{ID: 2, Params: []json.RawMessage{addrParam}}
 	claimRec := httptest.NewRecorder()
 	env.server.handleStakeClaimRewards(claimRec, env.newRequest(), claimReq)
+	if claimRec.Code != http.StatusConflict {
+		t.Fatalf("unexpected HTTP status: got %d want %d", claimRec.Code, http.StatusConflict)
+	}
 	_, rpcErr := decodeRPCResponse(t, claimRec)
 	if rpcErr == nil {
 		t.Fatalf("expected error for early claim")
 	}
-	if rpcErr.Message != "failed to claim staking rewards" {
+	if rpcErr.Message != stakeerrors.ErrNotDue.Error() {
 		t.Fatalf("unexpected error message: %+v", rpcErr)
 	}
-	if rpcErr.Data == nil {
+	data, ok := rpcErr.Data.(map[string]interface{})
+	if !ok || data == nil {
 		t.Fatalf("expected rejection details in error data")
+	}
+	nextEligible, exists := data["next_eligible"]
+	if !exists {
+		t.Fatalf("expected next_eligible hint in error data")
+	}
+	expectedNext := float64(now.Add(payoutPeriod).Unix())
+	if value, ok := nextEligible.(float64); !ok || value != expectedNext {
+		t.Fatalf("unexpected next_eligible hint: got %v want %v", nextEligible, expectedNext)
 	}
 }
 
@@ -222,18 +201,29 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 	var delegatorBytes [20]byte
 	copy(delegatorBytes[:], delegator.Bytes())
 
+	payoutPeriod := 30 * 24 * time.Hour
+	now := time.Unix(1_700_200_000, 0).UTC()
+	env.node.SetTimeSource(func() time.Time { return now })
+	t.Cleanup(func() { env.node.SetTimeSource(nil) })
+
 	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
 		account, err := manager.GetAccount(delegatorBytes[:])
 		if err != nil {
 			return err
 		}
-		account.StakeShares = big.NewInt(2_000)
-		account.StakeLastIndex = big.NewInt(0)
-		account.StakeLastPayoutTs = uint64(time.Now().Add(-60 * 24 * time.Hour).Unix())
+		account.LockedZNHB = big.NewInt(3_000_000_000_000_000_000)
+		account.StakeShares = new(big.Int).Set(account.LockedZNHB)
 		if err := manager.PutAccount(delegatorBytes[:], account); err != nil {
 			return err
 		}
-		return manager.SetStakingGlobalIndex(big.NewInt(3_000))
+		snap := &nhbstate.AccountSnap{
+			AccruedZNHB:    big.NewInt(5_000),
+			LastPayoutUnix: now.Add(-2 * payoutPeriod).Unix(),
+		}
+		if err := manager.PutStakingSnap(delegatorBytes[:], snap); err != nil {
+			return err
+		}
+		return manager.PutGlobalIndex(&nhbstate.GlobalIndex{LastUpdateUnix: now.Unix()})
 	}); err != nil {
 		t.Fatalf("prepare account: %v", err)
 	}
@@ -262,11 +252,11 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatalf("claim error after unpause: %+v", rpcErr)
 	}
-	var claimResp stakeClaimRewardsResult
+	var claimResp stakeClaimRewardsResponse
 	if err := json.Unmarshal(claimResult, &claimResp); err != nil {
 		t.Fatalf("decode claim response: %v", err)
 	}
-	if claimResp.Minted == "0" {
+	if claimResp.Paid == "0" {
 		t.Fatalf("expected positive minted rewards after unpause")
 	}
 }
