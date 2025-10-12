@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"nhbchain/core"
+	stakeerrors "nhbchain/core/errors"
 	"nhbchain/crypto"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -33,10 +34,10 @@ type stakeClaimParams struct {
 	UnbondingID uint64 `json:"unbondingId"`
 }
 
-type stakeClaimRewardsResult struct {
-	Minted       string          `json:"minted"`
-	Balance      BalanceResponse `json:"balance"`
-	NextPayoutTs uint64          `json:"nextPayoutTs"`
+type stakeClaimRewardsResponse struct {
+	Paid         string `json:"paid"`
+	Periods      int    `json:"periods"`
+	NextEligible uint64 `json:"next_eligible"`
 }
 
 type stakePositionResult struct {
@@ -212,13 +213,13 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 	if _, ok := s.guardStakeRequest(w, r, req); !ok {
 		return
 	}
-	addrStr, addrBytes, err := parseStakeAddressParam(req.Params)
+	_, addrBytes, err := parseStakeAddressParam(req.Params)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
 	addr := common.BytesToAddress(addrBytes[:])
-	minted, _, nextEligible, err := s.node.StakeClaimRewards(addr)
+	paid, periods, nextEligible, err := s.node.StakeClaimRewards(addr)
 	if err != nil {
 		if errors.Is(err, core.ErrStakePaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
@@ -228,26 +229,29 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusNotImplemented, req.ID, codeServerError, "staking not ready", nil)
 			return
 		}
+		if errors.Is(err, stakeerrors.ErrNotDue) {
+			data := map[string]interface{}{}
+			if nextEligible > 0 {
+				data["next_eligible"] = uint64(nextEligible)
+			}
+			writeError(w, http.StatusConflict, req.ID, codeInvalidParams, err.Error(), data)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim staking rewards", err.Error())
 		return
 	}
-	account, err := s.node.GetAccount(addrBytes[:])
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", err.Error())
-		return
-	}
-	mintedStr := "0"
-	if minted != nil {
-		mintedStr = minted.String()
+	paidStr := "0"
+	if paid != nil {
+		paidStr = paid.String()
 	}
 	nextPayout := uint64(0)
 	if nextEligible > 0 {
 		nextPayout = uint64(nextEligible)
 	}
-	result := stakeClaimRewardsResult{
-		Minted:       mintedStr,
-		Balance:      balanceResponseFromAccount(addrStr, account),
-		NextPayoutTs: nextPayout,
+	result := stakeClaimRewardsResponse{
+		Paid:         paidStr,
+		Periods:      periods,
+		NextEligible: nextPayout,
 	}
 	writeResult(w, req.ID, result)
 }

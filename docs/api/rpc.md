@@ -120,8 +120,9 @@ shares, reward index, and payout timing without inspecting raw account state.
 
 ### `stake_claimRewards`
 
-Claims accrued staking rewards, returns the amount minted, the updated balance
-summary, and the timestamp when the next payout becomes available.
+Claims accrued staking rewards and returns the total paid amount, the number of
+reward periods settled, and the timestamp when the next payout becomes
+available.
 
 ```json
 {
@@ -137,23 +138,16 @@ summary, and the timestamp when the next payout becomes available.
   "id": 5,
   "jsonrpc": "2.0",
   "result": {
-    "minted": "7425000000000000000000",
-    "balance": {
-      "address": "nhb1exampledelegator…",
-      "balanceNHB": "0",
-      "balanceZNHB": "17425000000000000000000",
-      "stake": "10000000000000000000",
-      "nonce": 7,
-      "engagementScore": 0
-    },
-    "nextPayoutTs": 1722561600
+    "paid": "7425000000000000000000",
+    "periods": 2,
+    "next_eligible": 1722561600
   }
 }
 ```
 
-Attempting to claim before the payout window elapses yields a `400` response
-with the `failed to claim staking rewards` message and a detailed rejection in
-the error `data` field. For example:
+Attempting to claim before the payout window elapses yields a `409` response
+with the `stake: claim not yet due` message and a `next_eligible` hint in the
+error `data` field. For example:
 
 ```json
 {
@@ -161,8 +155,10 @@ the error `data` field. For example:
   "jsonrpc": "2.0",
   "error": {
     "code": -32602,
-    "message": "failed to claim staking rewards",
-    "data": "payout window has not elapsed"
+    "message": "stake: claim not yet due",
+    "data": {
+      "next_eligible": 1719979200
+    }
   }
 }
 ```

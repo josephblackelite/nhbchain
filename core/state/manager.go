@@ -170,7 +170,12 @@ func (m *Manager) GetGlobalIndex() (*GlobalIndex, error) {
 	}
 	var stored storedGlobalIndex
 	if err := rlp.DecodeBytes(data, &stored); err != nil {
-		return nil, err
+		legacy := new(big.Int).SetBytes(data)
+		if legacy == nil {
+			return (&storedGlobalIndex{}).toGlobalIndex(), nil
+		}
+		stored.UQ128x128 = encodeUQ128x128(legacy)
+		return stored.toGlobalIndex(), nil
 	}
 	return stored.toGlobalIndex(), nil
 }
