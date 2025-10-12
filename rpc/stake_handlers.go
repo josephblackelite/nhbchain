@@ -35,9 +35,10 @@ type stakeClaimParams struct {
 }
 
 type stakeClaimRewardsResponse struct {
-	Paid         string `json:"paid"`
+	Minted       string `json:"minted"`
 	Periods      int    `json:"periods"`
-	NextEligible uint64 `json:"next_eligible"`
+	AprBps       uint64 `json:"aprBps"`
+	NextEligible uint64 `json:"nextEligibleTs"`
 }
 
 type stakePositionResult struct {
@@ -219,7 +220,7 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	addr := common.BytesToAddress(addrBytes[:])
-	paid, periods, nextEligible, err := s.node.StakeClaimRewards(addr)
+	paid, periods, nextEligible, aprBps, err := s.node.StakeClaimRewards(addr)
 	if err != nil {
 		if errors.Is(err, core.ErrStakePaused) || errors.Is(err, stakeerrors.ErrStakingPaused) {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
@@ -232,7 +233,7 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 		if errors.Is(err, stakeerrors.ErrNotDue) {
 			data := map[string]interface{}{}
 			if nextEligible > 0 {
-				data["next_eligible"] = uint64(nextEligible)
+				data["nextEligibleTs"] = uint64(nextEligible)
 			}
 			writeError(w, http.StatusConflict, req.ID, codeInvalidParams, err.Error(), data)
 			return
@@ -249,8 +250,9 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 		nextPayout = uint64(nextEligible)
 	}
 	result := stakeClaimRewardsResponse{
-		Paid:         paidStr,
+		Minted:       paidStr,
 		Periods:      periods,
+		AprBps:       aprBps,
 		NextEligible: nextPayout,
 	}
 	writeResult(w, req.ID, result)

@@ -2911,25 +2911,26 @@ func (n *Node) StakeClaim(delegator [20]byte, unbondID uint64) (*types.StakeUnbo
 	return n.state.StakeClaim(delegator[:], unbondID)
 }
 
-func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods int, next int64, err error) {
+func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods int, next int64, apr uint64, err error) {
 	if n == nil {
-		return nil, 0, 0, fmt.Errorf("staking rewards: node unavailable")
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: node unavailable")
 	}
 	if addr == (common.Address{}) {
-		return nil, 0, 0, fmt.Errorf("staking rewards: address required")
+		return nil, 0, 0, 0, fmt.Errorf("staking rewards: address required")
 	}
 
 	now := n.currentTime()
+	var aprBps uint64
 	err = n.WithState(func(manager *nhbstate.Manager) error {
 		engine := nhbstate.NewRewardEngine(manager)
-		paid, periods, next, err = engine.Claim(addr, now)
+		paid, periods, next, aprBps, err = engine.Claim(addr, now)
 		return err
 	})
 	if errors.Is(err, nhbstate.ErrNotReady) {
-		return nil, 0, 0, ErrStakingNotReady
+		return nil, 0, 0, 0, ErrStakingNotReady
 	}
 	if errors.Is(err, stakeerrors.ErrStakingPaused) {
-		return nil, 0, 0, stakeerrors.ErrStakingPaused
+		return nil, 0, 0, 0, stakeerrors.ErrStakingPaused
 	}
 	if err != nil {
 		var capHitErr *nhbstate.EmissionCapHitError
@@ -2941,12 +2942,37 @@ func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods in
 		}
 	}
 	if err != nil {
-		return paid, periods, next, err
+		return paid, periods, next, aprBps, err
 	}
 	if paid == nil {
 		paid = big.NewInt(0)
 	}
-	return paid, periods, next, nil
+
+	if n.state != nil {
+		var account [20]byte
+		copy(account[:], addr.Bytes())
+		payload := events.StakeRewardsClaimed{
+			Addr:             account,
+			PaidZNHB:         new(big.Int).Set(paid),
+			Periods:          uint64(0),
+			AprBps:           aprBps,
+			NextEligibleUnix: uint64(0),
+		}
+		if periods > 0 {
+			payload.Periods = uint64(periods)
+		}
+		if next > 0 {
+			payload.NextEligibleUnix = uint64(next)
+		}
+		if event := payload.Event(); event != nil {
+			n.state.AppendEvent(event)
+		}
+		if legacy := payload.LegacyEvent(); legacy != nil {
+			n.state.AppendEvent(legacy)
+		}
+	}
+
+	return paid, periods, next, aprBps, nil
 }
 
 // StakePreviewClaim estimates the staking reward that would be minted if the
