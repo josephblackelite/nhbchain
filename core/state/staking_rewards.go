@@ -1,6 +1,8 @@
 package state
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -21,12 +23,36 @@ const (
 	secondsPerYear          = 365 * secondsPerDay
 	defaultStakingAprBps    = 1_250
 	defaultPayoutPeriodDays = 30
+	paramKeyPauses          = "system/pauses"
 )
 
 var (
 	uq128Unit          = new(big.Int).Lsh(big.NewInt(1), 128)
 	accrualDenominator = new(big.Int).Mul(big.NewInt(secondsPerYear), big.NewInt(basisPointsDenom))
 )
+
+type pauseSnapshot struct {
+	Staking       bool `json:"Staking"`
+	LegacyStaking bool `json:"staking"`
+}
+
+func isStakingPaused(mgr *Manager) (bool, error) {
+	if mgr == nil {
+		return false, fmt.Errorf("staking rewards: state manager unavailable")
+	}
+	raw, ok, err := mgr.ParamStoreGet(paramKeyPauses)
+	if err != nil {
+		return false, fmt.Errorf("staking rewards: load pauses: %w", err)
+	}
+	if !ok || len(bytes.TrimSpace(raw)) == 0 {
+		return false, nil
+	}
+	var snapshot pauseSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return false, fmt.Errorf("staking rewards: decode pauses: %w", err)
+	}
+	return snapshot.Staking || snapshot.LegacyStaking, nil
+}
 
 // RewardEngine manages staking reward state transitions backed by the state manager.
 type RewardEngine struct {
@@ -225,6 +251,14 @@ func (e *RewardEngine) settleOnUndelegate(addr []byte, amount *big.Int) error {
 func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int, periods int, next int64, err error) {
 	if e == nil || e.mgr == nil {
 		return nil, 0, 0, fmt.Errorf("reward engine unavailable")
+	}
+
+	paused, err := isStakingPaused(e.mgr)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if paused {
+		return nil, 0, 0, stakeerrors.ErrStakingPaused
 	}
 
 	addrBytes := addr.Bytes()
