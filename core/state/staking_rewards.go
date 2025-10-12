@@ -1,6 +1,8 @@
 package state
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -22,6 +24,7 @@ const (
 	secondsPerYear          = 365 * secondsPerDay
 	defaultStakingAprBps    = 1_250
 	defaultPayoutPeriodDays = 30
+	paramKeyPauses          = "system/pauses"
 )
 
 var (
@@ -282,6 +285,14 @@ func (e *RewardEngine) settleOnUndelegate(addr []byte, amount *big.Int) error {
 func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int, periods int, next int64, err error) {
 	if e == nil || e.mgr == nil {
 		return nil, 0, 0, fmt.Errorf("reward engine unavailable")
+	}
+
+	paused, err := isStakingPaused(e.mgr)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if paused {
+		return nil, 0, 0, stakeerrors.ErrStakingPaused
 	}
 
 	addrBytes := addr.Bytes()
