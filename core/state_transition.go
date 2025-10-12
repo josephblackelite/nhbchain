@@ -2502,6 +2502,7 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 		return nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
 	}
 
+	attemptedMint := new(big.Int).Mul(new(big.Int).Set(eligibleIndexDelta), account.StakeShares)
 	appliedDelta := new(big.Int).Set(eligibleIndexDelta)
 	minted := new(big.Int).Mul(appliedDelta, account.StakeShares)
 	capHit := false
@@ -2551,27 +2552,23 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	copy(claimedAddr[:], addr)
 
 	if capHit {
-		remaining := new(big.Int).Sub(new(big.Int).Set(maxEmission), updatedEmission)
-		if remaining.Sign() < 0 {
-			remaining.SetInt64(0)
-		}
-		capEvt := events.StakeEmissionCapHit{
-			Year:      emissionYear,
-			Minted:    new(big.Int).Set(minted),
-			Remaining: remaining,
+		capEvt := events.StakeCapHit{
+			AttemptedZNHB: attemptedMint,
+			YTD:           new(big.Int).Set(updatedEmission),
+			Cap:           new(big.Int).Set(maxEmission),
 		}
 		if evt := capEvt.Event(); evt != nil {
 			sp.AppendEvent(evt)
 		}
 	}
 
+	nextEligible := nowTs + periodSeconds
 	evtPayload := events.StakeRewardsClaimed{
-		Account:     claimedAddr,
-		Minted:      new(big.Int).Set(minted),
-		Periods:     periods,
-		LastIndex:   new(big.Int).Set(account.StakeLastIndex),
-		Shares:      new(big.Int).Set(account.StakeShares),
-		EmissionYTD: new(big.Int).Set(updatedEmission),
+		Addr:             claimedAddr,
+		PaidZNHB:         new(big.Int).Set(minted),
+		Periods:          periods,
+		AprBps:           sp.StakeRewardAPR(),
+		NextEligibleUnix: nextEligible,
 	}
 	if evt := evtPayload.Event(); evt != nil {
 		sp.AppendEvent(evt)

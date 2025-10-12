@@ -191,25 +191,27 @@ func Test_EmissionCap_PartialMintAndEvent(t *testing.T) {
 	if capEvt.Type != events.TypeStakeEmissionCapHit {
 		t.Fatalf("expected emission cap event, got %s", capEvt.Type)
 	}
-	if got := capEvt.Attributes["minted"]; got != "750" {
-		t.Fatalf("cap minted mismatch: got %s", got)
+	attempted := new(big.Int).Mul(delta, account.StakeShares)
+	if got := capEvt.Attributes["attemptedZNHB"]; got != attempted.String() {
+		t.Fatalf("cap attempted mismatch: got %s want %s", got, attempted.String())
 	}
-	if got := capEvt.Attributes["year"]; got != strconv.Itoa(current.Year()) {
-		t.Fatalf("cap year mismatch: got %s", got)
+	if got := capEvt.Attributes["ytd"]; got != "750" {
+		t.Fatalf("cap ytd mismatch: got %s", got)
 	}
-	if got := capEvt.Attributes["remaining"]; got != "0" {
-		t.Fatalf("cap remaining mismatch: got %s", got)
+	if got := capEvt.Attributes["cap"]; got != "750" {
+		t.Fatalf("cap limit mismatch: got %s", got)
 	}
 
 	rewardsEvt := evts[1]
 	if rewardsEvt.Type != events.TypeStakeRewardsClaimed {
 		t.Fatalf("expected rewards event, got %s", rewardsEvt.Type)
 	}
-	if got := rewardsEvt.Attributes["minted"]; got != "750" {
-		t.Fatalf("rewards minted mismatch: got %s", got)
+	if got := rewardsEvt.Attributes["paidZNHB"]; got != "750" {
+		t.Fatalf("rewards paid mismatch: got %s", got)
 	}
-	if got := rewardsEvt.Attributes["emissionYTD"]; got != "750" {
-		t.Fatalf("rewards emission mismatch: got %s", got)
+	expectedNext := strconv.FormatUint(updated.StakeLastPayoutTs+stakePayoutPeriodSeconds, 10)
+	if got := rewardsEvt.Attributes["nextEligibleUnix"]; got != expectedNext {
+		t.Fatalf("rewards nextEligible mismatch: got %s want %s", got, expectedNext)
 	}
 }
 
@@ -307,7 +309,7 @@ func Test_YTD_RolloverNewYear(t *testing.T) {
 	if last.Type != events.TypeStakeRewardsClaimedLegacy {
 		t.Fatalf("unexpected last event: %s", last.Type)
 	}
-	if got := last.Attributes["emissionYTD"]; got != expectedSecond.String() {
-		t.Fatalf("legacy emission mismatch: got %s", got)
+	if got := last.Attributes["minted"]; got != expectedSecond.String() {
+		t.Fatalf("legacy minted mismatch: got %s want %s", got, expectedSecond)
 	}
 }

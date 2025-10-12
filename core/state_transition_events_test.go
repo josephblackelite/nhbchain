@@ -283,34 +283,31 @@ func Test_StakeEvents_EmitOnTransitions(t *testing.T) {
 	if got := rewardsEvt.Attributes["addr"]; got != crypto.MustNewAddress(crypto.NHBPrefix, delegator[:]).String() {
 		t.Fatalf("rewards addr mismatch: got %s", rewardsEvt.Attributes["addr"])
 	}
-	if got := rewardsEvt.Attributes["minted"]; got != minted.String() {
-		t.Fatalf("minted mismatch: got %s want %s", got, minted.String())
+	if got := rewardsEvt.Attributes["paidZNHB"]; got != minted.String() {
+		t.Fatalf("paidZNHB mismatch: got %s want %s", got, minted.String())
 	}
 	if got := rewardsEvt.Attributes["periods"]; got != strconv.FormatUint(expectedPeriods, 10) {
 		t.Fatalf("periods mismatch: got %s want %d", got, expectedPeriods)
 	}
-	if got := rewardsEvt.Attributes["lastIndex"]; got != afterDelegator.StakeLastIndex.String() {
-		t.Fatalf("lastIndex mismatch: got %s want %s", got, afterDelegator.StakeLastIndex.String())
+	aprBps := strconv.FormatUint(sp.StakeRewardAPR(), 10)
+	if got := rewardsEvt.Attributes["aprBps"]; got != aprBps {
+		t.Fatalf("aprBps mismatch: got %s want %s", got, aprBps)
 	}
-
-	emissionKey := nhbstate.StakingEmissionYTDKey(uint32(current.UTC().Year()))
-	emissionTotal, err := sp.loadBigInt(emissionKey)
-	if err != nil {
-		t.Fatalf("load emission total: %v", err)
-	}
-	if got := rewardsEvt.Attributes["emissionYTD"]; got != emissionTotal.String() {
-		t.Fatalf("emissionYTD mismatch: got %s want %s", got, emissionTotal.String())
+	nextEligible := strconv.FormatUint(afterDelegator.StakeLastPayoutTs+stakePayoutPeriodSeconds, 10)
+	if got := rewardsEvt.Attributes["nextEligibleUnix"]; got != nextEligible {
+		t.Fatalf("nextEligible mismatch: got %s want %s", got, nextEligible)
 	}
 
 	if legacyEvt.Type != events.TypeStakeRewardsClaimedLegacy {
 		t.Fatalf("expected legacy alias, got %s", legacyEvt.Type)
 	}
-	if len(legacyEvt.Attributes) != len(rewardsEvt.Attributes) {
-		t.Fatalf("legacy attributes mismatch: got %d want %d", len(legacyEvt.Attributes), len(rewardsEvt.Attributes))
+	if got := legacyEvt.Attributes["minted"]; got != minted.String() {
+		t.Fatalf("legacy minted mismatch: got %s want %s", got, minted.String())
 	}
-	for key, value := range rewardsEvt.Attributes {
-		if got := legacyEvt.Attributes[key]; got != value {
-			t.Fatalf("legacy attribute %s mismatch: got %s want %s", key, got, value)
-		}
+	if got := legacyEvt.Attributes["aprBps"]; got != aprBps {
+		t.Fatalf("legacy apr mismatch: got %s want %s", got, aprBps)
+	}
+	if got := legacyEvt.Attributes["nextEligibleUnix"]; got != nextEligible {
+		t.Fatalf("legacy nextEligible mismatch: got %s want %s", got, nextEligible)
 	}
 }
