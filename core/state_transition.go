@@ -85,6 +85,12 @@ type blockExecutionContext struct {
 	timestamp time.Time
 }
 
+// BlockCtx captures per-block runtime state used while processing
+// transactions.
+type BlockCtx struct {
+	PendingRewards []nhbstate.PendingReward
+}
+
 type StateProcessor struct {
 	Trie               *trie.Trie
 	stateDB            *gethstate.CachingDB
@@ -117,6 +123,7 @@ type StateProcessor struct {
 	quotaStore         *systemquotas.Store
 	intentTTL          time.Duration
 	feePolicy          fees.Policy
+	blockCtx           BlockCtx
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -151,6 +158,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		quotaConfig:        make(map[string]nativecommon.Quota),
 		intentTTL:          defaultIntentTTL,
 		feePolicy:          fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		blockCtx:           BlockCtx{},
 	}
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
@@ -520,6 +528,7 @@ func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
 		height:    height,
 		timestamp: timestamp.UTC(),
 	}
+	sp.blockCtx.PendingRewards = sp.blockCtx.PendingRewards[:0]
 }
 
 // EndBlock clears any active block execution context.
@@ -542,6 +551,15 @@ func (sp *StateProcessor) blockHeight() uint64 {
 		return sp.execContext.height
 	}
 	return 0
+}
+
+// BlockContext returns the mutable per-block context, primarily intended for
+// testing.
+func (sp *StateProcessor) BlockContext() *BlockCtx {
+	if sp == nil {
+		return nil
+	}
+	return &sp.blockCtx
 }
 
 // EngagementConfig returns the configuration currently used for engagement
@@ -1468,6 +1486,9 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			Timestamp:   blockTime,
 			FromAccount: fromAcc,
 			ToAccount:   toAcc,
+		}
+		if txHashReady {
+			ctx.TxHash = txHash
 		}
 		sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
 	}
@@ -4071,6 +4092,30 @@ func (sp *StateProcessor) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.In
 	}
 	key := nhbstate.LoyaltyBaseTotalMeterKey(addr)
 	return sp.writeBigInt(key, amount)
+}
+
+// QueuePendingBaseReward records a computed base reward for later settlement at
+// the end of the block.
+func (sp *StateProcessor) QueuePendingBaseReward(ctx *loyalty.BaseRewardContext, reward *big.Int) {
+	if sp == nil || reward == nil || reward.Sign() <= 0 {
+		return
+	}
+	pending := nhbstate.PendingReward{
+		AmountZNHB: new(big.Int).Set(reward),
+	}
+	if ctx != nil {
+		pending.TxHash = ctx.TxHash
+		if len(ctx.From) == len(pending.Payer) {
+			copy(pending.Payer[:], ctx.From)
+		}
+		if len(ctx.To) == len(pending.Recipient) {
+			copy(pending.Recipient[:], ctx.To)
+		}
+	}
+	sp.blockCtx.PendingRewards = append(sp.blockCtx.PendingRewards, pending)
+	if evt := (events.LoyaltyRewardProposed{TxHash: pending.TxHash, Amount: pending.AmountZNHB}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
 }
 
 func (sp *StateProcessor) configureTradeEngine() (*escrow.TradeEngine, *nhbstate.Manager) {

@@ -10,6 +10,7 @@ import (
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 
+	events "nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/native/loyalty"
@@ -119,17 +120,16 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 
 	expectedBase := big.NewInt(10)     // 2000 * 50 / 10000
 	expectedProgram := big.NewInt(240) // 2000 * 1200 / 10000 capped by 400 -> 240
-	totalExpected := new(big.Int).Add(expectedBase, expectedProgram)
-	if ctx.FromAccount.BalanceZNHB.Cmp(totalExpected) != 0 {
-		t.Fatalf("expected user reward %s, got %s", totalExpected.String(), ctx.FromAccount.BalanceZNHB.String())
+	if ctx.FromAccount.BalanceZNHB.Cmp(expectedProgram) != 0 {
+		t.Fatalf("expected user reward %s, got %s", expectedProgram.String(), ctx.FromAccount.BalanceZNHB.String())
 	}
 
 	treasuryAcc, err := sp.getAccount(treasury[:])
 	if err != nil {
 		t.Fatalf("load treasury: %v", err)
 	}
-	if treasuryAcc.BalanceZNHB.String() != "990" {
-		t.Fatalf("expected treasury balance 990, got %s", treasuryAcc.BalanceZNHB.String())
+	if treasuryAcc.BalanceZNHB.String() != "1000" {
+		t.Fatalf("expected treasury balance 1000, got %s", treasuryAcc.BalanceZNHB.String())
 	}
 
 	paymasterAcc, err := sp.getAccount(paymaster[:])
@@ -156,15 +156,32 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 		t.Fatalf("expected program daily %s, got %s", expectedProgram.String(), programAccrued.String())
 	}
 
-	events := sp.Events()
-	if len(events) != 2 {
-		t.Fatalf("expected two events, got %d", len(events))
+	pending := sp.BlockContext().PendingRewards
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending reward, got %d", len(pending))
 	}
-	if events[0].Type != "loyalty.base.accrued" {
-		t.Fatalf("expected base accrued event first, got %s", events[0].Type)
+	if pending[0].AmountZNHB.Cmp(expectedBase) != 0 {
+		t.Fatalf("expected pending reward %s, got %s", expectedBase.String(), pending[0].AmountZNHB.String())
 	}
-	if events[1].Type != "loyalty.program.accrued" {
-		t.Fatalf("expected program accrued event, got %s", events[1].Type)
+	if pending[0].Payer != from {
+		t.Fatalf("expected pending payer %x, got %x", from, pending[0].Payer)
+	}
+	if pending[0].Recipient != merchant {
+		t.Fatalf("expected pending recipient %x, got %x", merchant, pending[0].Recipient)
+	}
+
+	evts := sp.Events()
+	if len(evts) != 3 {
+		t.Fatalf("expected three events, got %d", len(evts))
+	}
+	if evts[0].Type != events.TypeLoyaltyRewardProposed {
+		t.Fatalf("expected reward proposed event first, got %s", evts[0].Type)
+	}
+	if evts[1].Type != "loyalty.base.accrued" {
+		t.Fatalf("expected base accrued event second, got %s", evts[1].Type)
+	}
+	if evts[2].Type != "loyalty.program.accrued" {
+		t.Fatalf("expected program accrued event third, got %s", evts[2].Type)
 	}
 }
 
@@ -283,4 +300,11 @@ func (t *testLoyaltyState) PutAccount(addr []byte, account *types.Account) error
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
 	}
 	return t.writeAccountMetadata(addr, meta)
+}
+
+func (t *testLoyaltyState) QueuePendingBaseReward(ctx *loyalty.BaseRewardContext, reward *big.Int) {
+	if t.StateProcessor == nil {
+		return
+	}
+	t.StateProcessor.QueuePendingBaseReward(ctx, reward)
 }

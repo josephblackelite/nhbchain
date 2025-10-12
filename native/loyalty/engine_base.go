@@ -27,11 +27,13 @@ type BaseRewardState interface {
 	LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error)
 	SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.Int) error
 	AppendEvent(evt *types.Event)
+	QueuePendingBaseReward(ctx *BaseRewardContext, reward *big.Int)
 }
 
 // BaseRewardContext captures the transaction metadata needed to evaluate the
 // base spend reward.
 type BaseRewardContext struct {
+	TxHash      [32]byte
 	From        []byte
 	To          []byte
 	Token       string
@@ -187,16 +189,7 @@ func (e *Engine) ApplyBaseReward(st BaseRewardState, ctx *BaseRewardContext) {
 		return
 	}
 
-	treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, reward)
-	if err := st.PutAccount(cfg.Treasury, treasuryAcc); err != nil {
-		emitSkip(st, ctx, "treasury_persist_error", map[string]string{"error": err.Error()})
-		return
-	}
-
-	if ctx.FromAccount.BalanceZNHB == nil {
-		ctx.FromAccount.BalanceZNHB = big.NewInt(0)
-	}
-	ctx.FromAccount.BalanceZNHB = new(big.Int).Add(ctx.FromAccount.BalanceZNHB, reward)
+	st.QueuePendingBaseReward(ctx, reward)
 
 	if dayKey != "" {
 		accruedToday, err := st.LoyaltyBaseDailyAccrued(ctx.From, dayKey)
