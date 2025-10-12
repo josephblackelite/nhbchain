@@ -15,6 +15,7 @@ import (
 
 	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
+	"nhbchain/core/types"
 	"nhbchain/native/governance"
 	"nhbchain/observability"
 )
@@ -182,12 +183,12 @@ func (e *RewardEngine) accrue(addr []byte) error {
 		return fmt.Errorf("address required")
 	}
 
-	snap, err := e.mgr.GetStakingSnap(addr)
+	snap, err := e.mgr.GetAccountStakingRewards(addr)
 	if err != nil {
 		return err
 	}
 	if snap == nil {
-		snap = &AccountSnap{}
+		snap = &types.StakingRewards{AccruedZNHB: big.NewInt(0)}
 	}
 
 	global, err := e.mgr.GetGlobalIndex()
@@ -199,7 +200,7 @@ func (e *RewardEngine) accrue(addr []byte) error {
 	}
 
 	currentIndex := decodeUQ128x128(global.UQ128x128)
-	lastIndex := decodeUQ128x128(snap.LastIndexUQ128x128)
+	lastIndex := decodeUQ128x128(snap.LastIndexUQ128x128.Bytes())
 	delta := new(big.Int).Sub(currentIndex, lastIndex)
 
 	if delta.Sign() > 0 {
@@ -210,15 +211,12 @@ func (e *RewardEngine) accrue(addr []byte) error {
 		if account != nil && account.LockedZNHB != nil && account.LockedZNHB.Sign() > 0 {
 			reward := new(big.Int).Mul(delta, account.LockedZNHB)
 			reward.Quo(reward, uq128Unit)
-			if snap.AccruedZNHB == nil {
-				snap.AccruedZNHB = big.NewInt(0)
-			}
 			snap.AccruedZNHB.Add(snap.AccruedZNHB, reward)
 		}
 	}
 
-	snap.LastIndexUQ128x128 = encodeUQ128x128(currentIndex)
-	return e.mgr.PutStakingSnap(addr, snap)
+	snap.LastIndexUQ128x128 = types.Uint128x128FromBytes(encodeUQ128x128(currentIndex))
+	return e.mgr.PutAccountStakingRewards(addr, snap)
 }
 
 // settleOnDelegate records a delegation event for the given account address.
@@ -310,12 +308,12 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		return nil, 0, 0, err
 	}
 
-	snap, err := e.mgr.GetStakingSnap(addrBytes)
+	snap, err := e.mgr.GetAccountStakingRewards(addrBytes)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	if snap == nil {
-		snap = &AccountSnap{AccruedZNHB: big.NewInt(0)}
+		snap = &types.StakingRewards{AccruedZNHB: big.NewInt(0)}
 	}
 
 	global, err := e.mgr.GetGlobalIndex()
@@ -427,9 +425,6 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	newLastPayout := snap.LastPayoutUnix + advance
 	nextEligible = newLastPayout + periodSeconds
 
-	if snap.AccruedZNHB == nil {
-		snap.AccruedZNHB = big.NewInt(0)
-	}
 	snap.AccruedZNHB.Sub(snap.AccruedZNHB, payout)
 	if snap.AccruedZNHB.Sign() < 0 {
 		snap.AccruedZNHB.SetInt64(0)
@@ -437,7 +432,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 
 	snap.LastPayoutUnix = newLastPayout
 
-	if err := e.mgr.PutStakingSnap(addrBytes, snap); err != nil {
+	if err := e.mgr.PutAccountStakingRewards(addrBytes, snap); err != nil {
 		return nil, 0, 0, fmt.Errorf("staking rewards: update snapshot: %w", err)
 	}
 
@@ -482,6 +477,26 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	return new(big.Int).Set(payout), int(periods64), nextEligible, nil
 }
 
+func isStakingPaused(mgr *Manager) (bool, error) {
+	if mgr == nil {
+		return false, nil
+	}
+	raw, ok, err := mgr.ParamStoreGet(paramKeyPauses)
+	if err != nil {
+		return false, fmt.Errorf("staking rewards: load pause configuration: %w", err)
+	}
+	if !ok || len(bytes.TrimSpace(raw)) == 0 {
+		return false, nil
+	}
+	var pauses struct {
+		Staking bool `json:"staking"`
+	}
+	if err := json.Unmarshal(raw, &pauses); err != nil {
+		return false, fmt.Errorf("staking rewards: decode pause configuration: %w", err)
+	}
+	return pauses.Staking, nil
+}
+
 func (e *RewardEngine) stakingEmissionCap() (*big.Int, error) {
 	if e == nil || e.mgr == nil {
 		return big.NewInt(0), nil
@@ -505,6 +520,33 @@ func (e *RewardEngine) stakingEmissionCap() (*big.Int, error) {
 		return nil, fmt.Errorf("staking rewards: emission cap must be non-negative")
 	}
 	return value, nil
+}
+
+func (e *RewardEngine) emissionCapForYear(year int) (*big.Int, *big.Int, error) {
+	if e == nil || e.mgr == nil {
+		return big.NewInt(0), big.NewInt(0), fmt.Errorf("reward engine unavailable")
+	}
+	if year < 0 {
+		return big.NewInt(0), big.NewInt(0), fmt.Errorf("staking rewards: invalid year")
+	}
+	capValue, err := e.stakingEmissionCap()
+	if err != nil {
+		return nil, nil, err
+	}
+	ytd, err := e.mgr.StakingEmissionYTD(uint32(year))
+	if err != nil {
+		return nil, nil, fmt.Errorf("staking rewards: load ytd: %w", err)
+	}
+	capClone := big.NewInt(0)
+	if capValue != nil {
+		capClone = new(big.Int).Set(capValue)
+	}
+	if ytd == nil {
+		ytd = big.NewInt(0)
+	} else {
+		ytd = new(big.Int).Set(ytd)
+	}
+	return capClone, ytd, nil
 }
 
 func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err error) {

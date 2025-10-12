@@ -117,6 +117,9 @@ func ensureAccountDefaults(account *types.Account) {
 	if account.LendingSnapshot.BorrowIndex == nil {
 		account.LendingSnapshot.BorrowIndex = big.NewInt(0)
 	}
+	if account.StakingRewards.AccruedZNHB == nil {
+		account.StakingRewards.AccruedZNHB = big.NewInt(0)
+	}
 	if account.PendingUnbonds == nil {
 		account.PendingUnbonds = make([]types.StakeUnbond, 0)
 	}
@@ -237,6 +240,15 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 			BorrowDisabled:     meta.LendingBorrowDisabled,
 		}
 	}
+
+	rewards, err := m.GetAccountStakingRewards(addr)
+	if err != nil {
+		return nil, err
+	}
+	if rewards != nil {
+		account.StakingRewards = *rewards
+	}
+
 	ensureAccountDefaults(account)
 	return account, nil
 }

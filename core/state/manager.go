@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"nhbchain/core/identity"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/creator"
 	"nhbchain/native/escrow"
@@ -56,16 +57,16 @@ var (
 	loyaltyDynamicStateKeyBytes    = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
 	loyaltyDailyPrefix             = []byte("loyalty-meter:base-daily:")
 	loyaltyTotalPrefix             = []byte("loyalty-meter:base-total:")
-        loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
-        loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
-        loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
-        loyaltyProgramIssuancePrefix   = []byte("loyalty-meter:program-issuance:")
-        loyaltyBusinessPrefix          = []byte("loyalty/business/")
-        loyaltyBusinessOwnerPrefix     = []byte("loyalty/business-owner/")
-        loyaltyMerchantIndexPrefix     = []byte("loyalty/merchant-index/")
-        loyaltyBusinessCounterKey      = []byte("loyalty/business/counter")
-        loyaltyOwnerPaymasterPref      = []byte("loyalty/owner-paymaster/")
-        loyaltyDayPrefix               = []byte("loyalty/day/")
+	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
+	loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
+	loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
+	loyaltyProgramIssuancePrefix   = []byte("loyalty-meter:program-issuance:")
+	loyaltyBusinessPrefix          = []byte("loyalty/business/")
+	loyaltyBusinessOwnerPrefix     = []byte("loyalty/business-owner/")
+	loyaltyMerchantIndexPrefix     = []byte("loyalty/merchant-index/")
+	loyaltyBusinessCounterKey      = []byte("loyalty/business/counter")
+	loyaltyOwnerPaymasterPref      = []byte("loyalty/owner-paymaster/")
+	loyaltyDayPrefix               = []byte("loyalty/day/")
 	escrowRecordPrefix             = []byte("escrow/record/")
 	escrowVaultPrefix              = []byte("escrow/vault/")
 	escrowModuleSeedPrefix         = "module/escrow/vault/"
@@ -226,6 +227,47 @@ func (m *Manager) PutStakingSnap(addr []byte, snap *AccountSnap) error {
 		return err
 	}
 	return m.trie.Update(StakingAcctKey(addr), encoded)
+}
+
+// GetAccountStakingRewards returns the staking reward snapshot hydrated into the
+// high-level account representation. Missing records resolve to zeroed
+// structures with independent big.Int instances to avoid shared references.
+func (m *Manager) GetAccountStakingRewards(addr []byte) (*types.StakingRewards, error) {
+	snap, err := m.GetStakingSnap(addr)
+	if err != nil {
+		return nil, err
+	}
+	rewards := &types.StakingRewards{
+		AccruedZNHB: big.NewInt(0),
+	}
+	if snap == nil {
+		return rewards, nil
+	}
+	rewards.LastPayoutUnix = snap.LastPayoutUnix
+	if snap.AccruedZNHB != nil {
+		rewards.AccruedZNHB = new(big.Int).Set(snap.AccruedZNHB)
+	}
+	if len(snap.LastIndexUQ128x128) > 0 {
+		rewards.LastIndexUQ128x128 = types.Uint128x128FromBytes(snap.LastIndexUQ128x128)
+	}
+	return rewards, nil
+}
+
+// PutAccountStakingRewards persists the supplied staking reward snapshot back
+// into the staking/account namespace while preserving nil semantics used by the
+// deterministic encoding.
+func (m *Manager) PutAccountStakingRewards(addr []byte, rewards *types.StakingRewards) error {
+	if rewards == nil {
+		rewards = &types.StakingRewards{}
+	}
+	snap := &AccountSnap{LastPayoutUnix: rewards.LastPayoutUnix}
+	if rewards.AccruedZNHB != nil {
+		snap.AccruedZNHB = new(big.Int).Set(rewards.AccruedZNHB)
+	}
+	if !rewards.LastIndexUQ128x128.IsZero() {
+		snap.LastIndexUQ128x128 = rewards.LastIndexUQ128x128.Bytes()
+	}
+	return m.PutStakingSnap(addr, snap)
 }
 
 // StakingGlobalIndex returns the protocol-wide staking reward index accumulator.
