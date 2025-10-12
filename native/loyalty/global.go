@@ -112,6 +112,7 @@ type DynamicConfig struct {
 	DailyCapUsd                    uint64
 	YearlyCapPctOfInitialSupplyBps uint32
 	PriceGuard                     PriceGuardConfig
+	EnableProRate                  bool
 }
 
 // PriceGuardConfig enforces sanity bounds when consuming reference prices.
@@ -136,6 +137,7 @@ func (d DynamicConfig) Clone() DynamicConfig {
 		DailyCapUsd:                    d.DailyCapUsd,
 		YearlyCapPctOfInitialSupplyBps: d.YearlyCapPctOfInitialSupplyBps,
 		PriceGuard:                     d.PriceGuard,
+		EnableProRate:                  d.EnableProRate,
 	}
 	return clone
 }

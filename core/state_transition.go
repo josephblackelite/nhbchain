@@ -88,7 +88,7 @@ type blockExecutionContext struct {
 // BlockCtx captures per-block runtime state used while processing
 // transactions.
 type BlockCtx struct {
-	PendingRewards []nhbstate.PendingReward
+	PendingRewards nhbstate.PendingRewards
 }
 
 type StateProcessor struct {
@@ -528,7 +528,7 @@ func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
 		height:    height,
 		timestamp: timestamp.UTC(),
 	}
-	sp.blockCtx.PendingRewards = sp.blockCtx.PendingRewards[:0]
+	sp.blockCtx.PendingRewards.ClearPendingRewards()
 }
 
 // EndBlock clears any active block execution context.
@@ -536,7 +536,197 @@ func (sp *StateProcessor) EndBlock() {
 	if sp == nil {
 		return
 	}
+	now := sp.blockTimestamp()
+	sp.EndBlockRewards(now)
 	sp.execContext = nil
+}
+
+// EndBlockRewards settles any base loyalty rewards that were queued during the
+// block execution. When the daily budget is exceeded payouts are pro-rated to
+// preserve the configured cap.
+func (sp *StateProcessor) EndBlockRewards(now time.Time) {
+	if sp == nil {
+		return
+	}
+	pending := sp.blockCtx.PendingRewards
+	if len(pending) == 0 {
+		return
+	}
+	if now.IsZero() {
+		now = sp.blockTimestamp()
+	}
+
+	demand := pending.SumPending()
+	if demand == nil || demand.Sign() <= 0 {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if _, err := manager.AddProposedTodayZNHB(now, demand); err != nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	budget, err := manager.GetRemainingDailyBudgetZNHB(now)
+	if err != nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	ratioNum := big.NewInt(1)
+	ratioDen := big.NewInt(1)
+	if demand.Sign() > 0 && budget.Cmp(demand) < 0 {
+		if budget.Sign() <= 0 {
+			ratioNum = big.NewInt(0)
+			ratioDen = big.NewInt(1)
+		} else {
+			ratioNum = new(big.Int).Set(budget)
+			ratioDen = new(big.Int).Set(demand)
+		}
+	}
+
+	cfg, err := manager.LoyaltyGlobalConfig()
+	if err != nil || cfg == nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+	normalized := cfg.Clone().Normalize()
+	if len(normalized.Treasury) != 20 {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	treasuryAcc, err := sp.getAccount(normalized.Treasury)
+	if err != nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+	var treasuryAddr [20]byte
+	copy(treasuryAddr[:], normalized.Treasury)
+
+	updates := make(map[[20]byte]*types.Account)
+	budgetRemaining := new(big.Int).Set(budget)
+	paidTotal := big.NewInt(0)
+
+	for _, reward := range pending {
+		if reward.AmountZNHB == nil || reward.AmountZNHB.Sign() <= 0 {
+			continue
+		}
+		if ratioNum.Sign() == 0 {
+			break
+		}
+		amount := new(big.Int).Set(reward.AmountZNHB)
+		payout := new(big.Int).Mul(amount, ratioNum)
+		payout.Quo(payout, ratioDen)
+		if payout.Sign() <= 0 {
+			continue
+		}
+		if budgetRemaining.Sign() > 0 && budgetRemaining.Cmp(payout) < 0 {
+			payout = new(big.Int).Set(budgetRemaining)
+		}
+		if payout.Sign() <= 0 {
+			continue
+		}
+		if treasuryAcc.BalanceZNHB.Cmp(payout) < 0 {
+			payout = new(big.Int).Set(treasuryAcc.BalanceZNHB)
+		}
+		if payout.Sign() <= 0 {
+			continue
+		}
+
+		var recipient [20]byte
+		copy(recipient[:], reward.Recipient[:])
+		account, ok := updates[recipient]
+		if !ok {
+			acct, err := sp.getAccount(recipient[:])
+			if err != nil {
+				continue
+			}
+			if acct.BalanceZNHB == nil {
+				acct.BalanceZNHB = big.NewInt(0)
+			}
+			account = acct
+			updates[recipient] = account
+		}
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, payout)
+		treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, payout)
+		budgetRemaining.Sub(budgetRemaining, payout)
+		paidTotal.Add(paidTotal, payout)
+		if budgetRemaining.Sign() <= 0 {
+			break
+		}
+	}
+
+	var paidTodayTotal *big.Int
+	if paidTotal.Sign() > 0 {
+		if err := sp.setAccount(treasuryAddr[:], treasuryAcc); err != nil {
+			sp.blockCtx.PendingRewards.ClearPendingRewards()
+			return
+		}
+		for addr, account := range updates {
+			if err := sp.setAccount(addr[:], account); err != nil {
+				sp.blockCtx.PendingRewards.ClearPendingRewards()
+				return
+			}
+		}
+		paidTodayTotal, err = manager.AddPaidTodayZNHB(now, paidTotal)
+		if err != nil {
+			sp.blockCtx.PendingRewards.ClearPendingRewards()
+			return
+		}
+	} else {
+		paidTodayTotal, _ = manager.AddPaidTodayZNHB(now, big.NewInt(0))
+	}
+
+	ratioEvent := ratioNum.Cmp(ratioDen) < 0
+	ratioFP := big.NewInt(0)
+	if ratioDen.Sign() > 0 {
+		ratioFP = new(big.Int).Mul(new(big.Int).Set(ratioNum), big.NewInt(events.LoyaltyProrationScale))
+		ratioFP.Quo(ratioFP, ratioDen)
+	}
+
+	if metrics := observability.Loyalty(); metrics != nil {
+		metrics.RecordBudget(
+			ratioToFloat(budget),
+			ratioToFloat(demand),
+			ratioToFloatFromFrac(ratioNum, ratioDen),
+			ratioToFloat(paidTodayTotal),
+		)
+	}
+
+	if ratioEvent {
+		evt := (events.LoyaltyBudgetProRated{
+			Day:        now.UTC().Format("2006-01-02"),
+			BudgetZNHB: budget,
+			DemandZNHB: demand,
+			RatioFP:    ratioFP,
+		}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
+	sp.blockCtx.PendingRewards.ClearPendingRewards()
+}
+
+func ratioToFloat(value *big.Int) float64 {
+	if value == nil {
+		return 0
+	}
+	f, _ := new(big.Rat).SetInt(value).Float64()
+	return f
+}
+
+func ratioToFloatFromFrac(num, den *big.Int) float64 {
+	if num == nil || den == nil || den.Sign() == 0 {
+		return 0
+	}
+	f, _ := new(big.Rat).SetFrac(num, den).Float64()
+	return f
 }
 
 func (sp *StateProcessor) blockTimestamp() time.Time {
@@ -4097,6 +4287,15 @@ func (sp *StateProcessor) QueuePendingBaseReward(ctx *loyalty.BaseRewardContext,
 	if sp == nil || reward == nil || reward.Sign() <= 0 {
 		return
 	}
+	manager := nhbstate.NewManager(sp.Trie)
+	cfg, err := manager.LoyaltyGlobalConfig()
+	enableProRate := true
+	var normalized *loyalty.GlobalConfig
+	if err == nil && cfg != nil {
+		normalized = cfg.Clone().Normalize()
+		enableProRate = normalized.Dynamic.EnableProRate
+	}
+
 	pending := nhbstate.PendingReward{
 		AmountZNHB: new(big.Int).Set(reward),
 	}
@@ -4109,9 +4308,87 @@ func (sp *StateProcessor) QueuePendingBaseReward(ctx *loyalty.BaseRewardContext,
 			copy(pending.Recipient[:], ctx.To)
 		}
 	}
-	sp.blockCtx.PendingRewards = append(sp.blockCtx.PendingRewards, pending)
+
+	if enableProRate {
+		sp.blockCtx.PendingRewards.AddPendingReward(pending)
+	} else if normalized != nil {
+		sp.settleBaseRewardImmediate(ctx, pending, reward, normalized, manager)
+	}
+
 	if evt := (events.LoyaltyRewardProposed{TxHash: pending.TxHash, Amount: pending.AmountZNHB}).Event(); evt != nil {
 		sp.AppendEvent(evt)
+	}
+}
+
+func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardContext, pending nhbstate.PendingReward, amount *big.Int, cfg *loyalty.GlobalConfig, manager *nhbstate.Manager) {
+	if sp == nil || amount == nil || amount.Sign() <= 0 || cfg == nil || len(cfg.Treasury) != 20 {
+		return
+	}
+	now := sp.blockTimestamp()
+	totalProposed, err := manager.AddProposedTodayZNHB(now, amount)
+	if err != nil {
+		return
+	}
+
+	treasuryAcc, err := sp.getAccount(cfg.Treasury)
+	if err != nil {
+		return
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+	payout := new(big.Int).Set(amount)
+	if treasuryAcc.BalanceZNHB.Cmp(payout) < 0 {
+		payout = new(big.Int).Set(treasuryAcc.BalanceZNHB)
+	}
+	if payout.Sign() <= 0 {
+		return
+	}
+	treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, payout)
+	if err := sp.setAccount(cfg.Treasury, treasuryAcc); err != nil {
+		return
+	}
+
+	paidTotal, err := manager.AddPaidTodayZNHB(now, payout)
+	if err != nil {
+		return
+	}
+
+	var recipient [20]byte
+	copy(recipient[:], pending.Recipient[:])
+	persist := true
+	var account *types.Account
+	if ctx != nil && ctx.ToAccount != nil && len(ctx.To) == len(recipient) && bytes.Equal(ctx.To, recipient[:]) {
+		account = ctx.ToAccount
+		persist = false
+	} else {
+		acct, err := sp.getAccount(recipient[:])
+		if err != nil {
+			return
+		}
+		account = acct
+	}
+	if account.BalanceZNHB == nil {
+		account.BalanceZNHB = big.NewInt(0)
+	}
+	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, payout)
+	if persist {
+		if err := sp.setAccount(recipient[:], account); err != nil {
+			return
+		}
+	}
+
+	budget, err := manager.GetRemainingDailyBudgetZNHB(now)
+	if err != nil {
+		budget = big.NewInt(0)
+	}
+	if metrics := observability.Loyalty(); metrics != nil {
+		metrics.RecordBudget(
+			ratioToFloat(budget),
+			ratioToFloat(totalProposed),
+			1.0,
+			ratioToFloat(paidTotal),
+		)
 	}
 }
 
