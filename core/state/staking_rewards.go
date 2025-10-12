@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 )
@@ -103,26 +104,132 @@ func (e *RewardEngine) UpdateGlobalIndex(aprBps, payoutDays uint64, now time.Tim
 
 // accrue processes pending rewards for the provided account address.
 func (e *RewardEngine) accrue(addr []byte) error {
-	// TODO: implement account accrual logic.
-	return nil
+	if e == nil || e.mgr == nil {
+		return fmt.Errorf("reward engine unavailable")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address required")
+	}
+
+	snap, err := e.mgr.GetStakingSnap(addr)
+	if err != nil {
+		return err
+	}
+	if snap == nil {
+		snap = &AccountSnap{}
+	}
+
+	global, err := e.mgr.GetGlobalIndex()
+	if err != nil {
+		return err
+	}
+	if global == nil {
+		global = &GlobalIndex{}
+	}
+
+	currentIndex := decodeUQ128x128(global.UQ128x128)
+	lastIndex := decodeUQ128x128(snap.LastIndexUQ128x128)
+	delta := new(big.Int).Sub(currentIndex, lastIndex)
+
+	if delta.Sign() > 0 {
+		account, err := e.mgr.GetAccount(addr)
+		if err != nil {
+			return err
+		}
+		if account != nil && account.LockedZNHB != nil && account.LockedZNHB.Sign() > 0 {
+			reward := new(big.Int).Mul(delta, account.LockedZNHB)
+			reward.Quo(reward, uq128Unit)
+			if snap.AccruedZNHB == nil {
+				snap.AccruedZNHB = big.NewInt(0)
+			}
+			snap.AccruedZNHB.Add(snap.AccruedZNHB, reward)
+		}
+	}
+
+	snap.LastIndexUQ128x128 = encodeUQ128x128(currentIndex)
+	return e.mgr.PutStakingSnap(addr, snap)
 }
 
 // settleOnDelegate records a delegation event for the given account address.
 func (e *RewardEngine) settleOnDelegate(addr []byte, amount *big.Int) error {
-	// TODO: implement delegation settlement logic.
-	return nil
+	if e == nil || e.mgr == nil {
+		return fmt.Errorf("reward engine unavailable")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address required")
+	}
+	if err := e.accrue(addr); err != nil {
+		return err
+	}
+	if amount == nil || amount.Sign() == 0 {
+		return nil
+	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("amount must be non-negative")
+	}
+	account, err := e.mgr.GetAccount(addr)
+	if err != nil {
+		return err
+	}
+	if account.LockedZNHB == nil {
+		account.LockedZNHB = big.NewInt(0)
+	}
+	delta := new(big.Int).Set(amount)
+	account.LockedZNHB.Add(account.LockedZNHB, delta)
+	return e.mgr.PutAccountMetadata(addr, account)
 }
 
 // settleOnUndelegate records an undelegation event for the given account address.
 func (e *RewardEngine) settleOnUndelegate(addr []byte, amount *big.Int) error {
-	// TODO: implement undelegation settlement logic.
-	return nil
+	if e == nil || e.mgr == nil {
+		return fmt.Errorf("reward engine unavailable")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address required")
+	}
+	if err := e.accrue(addr); err != nil {
+		return err
+	}
+	if amount == nil || amount.Sign() == 0 {
+		return nil
+	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("amount must be non-negative")
+	}
+	account, err := e.mgr.GetAccount(addr)
+	if err != nil {
+		return err
+	}
+	if account.LockedZNHB == nil || account.LockedZNHB.Sign() == 0 {
+		return fmt.Errorf("insufficient stake")
+	}
+	if account.LockedZNHB.Cmp(amount) < 0 {
+		return fmt.Errorf("insufficient stake")
+	}
+	delta := new(big.Int).Set(amount)
+	account.LockedZNHB.Sub(account.LockedZNHB, delta)
+	return e.mgr.PutAccountMetadata(addr, account)
 }
 
 // claim finalizes rewards for the specified account at the provided timestamp.
 func (e *RewardEngine) claim(addr []byte, now time.Time) (*big.Int, error) {
 	// TODO: implement claim processing.
 	return big.NewInt(0), ErrNotReady
+}
+
+// AccrueAccount exposes the account accrual helper for external callers.
+func (e *RewardEngine) AccrueAccount(addr []byte) error {
+	return e.accrue(addr)
+}
+
+// SettleDelegate applies delegation changes to the staking ledger while updating reward snapshots.
+func (e *RewardEngine) SettleDelegate(addr []byte, amount *big.Int) error {
+	return e.settleOnDelegate(addr, amount)
+}
+
+// SettleUndelegate applies undelegation changes to the staking ledger while updating reward snapshots.
+func (e *RewardEngine) SettleUndelegate(addr []byte, amount *big.Int) error {
+	return e.settleOnUndelegate(addr, amount)
 }
 
 // encodeUQ128x128 encodes a big integer into a UQ128x128 fixed-point representation.
