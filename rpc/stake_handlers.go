@@ -221,6 +221,10 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
 			return
 		}
+		if errors.Is(err, core.ErrStakingNotReady) {
+			writeError(w, http.StatusNotImplemented, req.ID, codeServerError, "staking not ready", nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim staking rewards", err.Error())
 		return
 	}

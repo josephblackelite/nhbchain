@@ -141,6 +141,11 @@ const (
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
 
+// ErrStakingNotReady indicates staking reward claims are not yet enabled on the
+// node. The RPC surface is exposed ahead of the underlying minting logic being
+// wired up so that clients can integrate against a stable method name.
+var ErrStakingNotReady = errors.New("staking not ready")
+
 // ErrMilestoneUnsupported is returned when milestone functionality has not been
 // wired into the node yet. The current implementation exposes the RPC surface
 // but leaves execution to follow-on upgrades.
@@ -2906,10 +2911,7 @@ func (n *Node) StakeClaim(delegator [20]byte, unbondID uint64) (*types.StakeUnbo
 }
 
 func (n *Node) StakeClaimRewards(addr [20]byte) (*big.Int, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	return n.state.StakeClaimRewards(addr[:])
+	return big.NewInt(0), ErrStakingNotReady
 }
 
 // StakePreviewClaim estimates the staking reward that would be minted if the
