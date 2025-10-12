@@ -16,6 +16,7 @@ import (
 	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
 	"nhbchain/native/governance"
+	"nhbchain/observability"
 )
 
 const (
@@ -287,13 +288,17 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		return nil, 0, 0, fmt.Errorf("reward engine unavailable")
 	}
 
+	metrics := observability.Staking()
+
 	paused, err := isStakingPaused(e.mgr)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	if paused {
+		metrics.SetPaused(true)
 		return nil, 0, 0, stakeerrors.ErrStakingPaused
 	}
+	metrics.SetPaused(false)
 
 	addrBytes := addr.Bytes()
 	snapshotTime := now.UTC()
@@ -319,6 +324,16 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	}
 	if global == nil {
 		global = &GlobalIndex{}
+	}
+
+	emissionCap, err := e.stakingEmissionCap()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	ytdBefore := big.NewInt(0)
+	if global.YTDEmissions != nil {
+		ytdBefore.Set(global.YTDEmissions)
 	}
 
 	aprBps, payoutDays, err := e.stakingParams()
@@ -364,6 +379,8 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	if account != nil && account.LockedZNHB != nil {
 		stakeBalance = new(big.Int).Set(account.LockedZNHB)
 	}
+
+	metrics.RecordTotalStaked(addr.Hex(), stakeBalance)
 
 	expected := big.NewInt(0)
 	if stakeBalance.Sign() > 0 && aprBps > 0 {
@@ -426,8 +443,21 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 
 	if payout.Sign() > 0 {
 		account.BalanceZNHB.Add(account.BalanceZNHB, payout)
+		metrics.RecordRewardsPaid(payout)
 		if err := e.mgr.PutAccountMetadata(addrBytes, account); err != nil {
 			return nil, 0, 0, fmt.Errorf("staking rewards: credit account: %w", err)
+		}
+	}
+
+	capTriggered := false
+	if emissionCap.Sign() > 0 {
+		headroom := new(big.Int).Sub(emissionCap, ytdBefore)
+		if headroom.Sign() <= 0 {
+			if payout.Sign() > 0 || accrued.Sign() > 0 {
+				capTriggered = true
+			}
+		} else if payout.Sign() > 0 && payout.Cmp(headroom) >= 0 {
+			capTriggered = true
 		}
 	}
 
@@ -445,51 +475,36 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		}
 	}
 
+	if capTriggered {
+		metrics.RecordCapHit()
+	}
+
 	return new(big.Int).Set(payout), int(periods64), nextEligible, nil
 }
 
-func (e *RewardEngine) emissionCapForYear(year int) (*big.Int, *big.Int, error) {
-	capValue := big.NewInt(0)
-	ytd := big.NewInt(0)
-
+func (e *RewardEngine) stakingEmissionCap() (*big.Int, error) {
 	if e == nil || e.mgr == nil {
-		return capValue, ytd, fmt.Errorf("reward engine unavailable")
+		return big.NewInt(0), nil
 	}
-
 	raw, ok, err := e.mgr.ParamStoreGet(governance.ParamKeyStakingMaxEmissionPerYearWei)
 	if err != nil {
-		return nil, nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
+		return nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
 	}
-	if ok {
-		trimmed := strings.TrimSpace(string(raw))
-		if trimmed != "" {
-			parsed, parseOK := new(big.Int).SetString(trimmed, 10)
-			if !parseOK {
-				return nil, nil, fmt.Errorf("staking rewards: parse emission cap: %s", trimmed)
-			}
-			if parsed.Sign() < 0 {
-				return nil, nil, fmt.Errorf("staking rewards: emission cap must be non-negative")
-			}
-			capValue = parsed
-		}
+	if !ok {
+		return big.NewInt(0), nil
 	}
-	if capValue.Sign() <= 0 {
-		return capValue, ytd, nil
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return big.NewInt(0), nil
 	}
-
-	if year <= 0 {
-		return capValue, ytd, nil
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("staking rewards: parse emission cap: invalid value %q", trimmed)
 	}
-
-	ytd, err = e.mgr.StakingEmissionYTD(uint32(year))
-	if err != nil {
-		return nil, nil, fmt.Errorf("staking rewards: load ytd: %w", err)
+	if value.Sign() < 0 {
+		return nil, fmt.Errorf("staking rewards: emission cap must be non-negative")
 	}
-	if ytd == nil {
-		ytd = big.NewInt(0)
-	}
-
-	return capValue, ytd, nil
+	return value, nil
 }
 
 func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err error) {
