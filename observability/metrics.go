@@ -42,6 +42,64 @@ type StakingMetrics struct {
 	capHit      prometheus.Counter
 }
 
+// Loyalty returns the singleton registry tracking loyalty reward budget usage.
+func Loyalty() *LoyaltyMetrics {
+	loyaltyMetricsOnce.Do(func() {
+		loyaltyRegistry = &LoyaltyMetrics{
+			budget: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "loyalty",
+				Name:      "budget_zn",
+				Help:      "Remaining daily loyalty budget expressed in ZNHB.",
+			}),
+			demand: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "loyalty",
+				Name:      "demand_zn",
+				Help:      "Total base rewards demanded during the block expressed in ZNHB.",
+			}),
+			ratio: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "loyalty",
+				Name:      "prorate_ratio",
+				Help:      "Applied pro-rate ratio for base rewards (0-1).",
+			}),
+			paidToday: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "loyalty",
+				Name:      "paid_today_zn",
+				Help:      "Total base rewards paid out today expressed in ZNHB.",
+			}),
+		}
+		prometheus.MustRegister(
+			loyaltyRegistry.budget,
+			loyaltyRegistry.demand,
+			loyaltyRegistry.ratio,
+			loyaltyRegistry.paidToday,
+		)
+	})
+	return loyaltyRegistry
+}
+
+// RecordBudget updates the loyalty budget gauges.
+func (m *LoyaltyMetrics) RecordBudget(budget, demand, ratio, paid float64) {
+	if m == nil {
+		return
+	}
+	m.budget.Set(budget)
+	m.demand.Set(demand)
+	m.ratio.Set(ratio)
+	m.paidToday.Set(paid)
+}
+
+// LoyaltyMetrics captures the daily loyalty budget utilisation telemetry.
+type LoyaltyMetrics struct {
+	budget    prometheus.Gauge
+	demand    prometheus.Gauge
+	ratio     prometheus.Gauge
+	paidToday prometheus.Gauge
+}
+
 var (
 	moduleMetricsOnce sync.Once
 	moduleRegistry    *moduleMetrics
@@ -66,6 +124,9 @@ var (
 
 	stakingMetricsOnce sync.Once
 	stakingRegistry    *StakingMetrics
+
+	loyaltyMetricsOnce sync.Once
+	loyaltyRegistry    *LoyaltyMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to

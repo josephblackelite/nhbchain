@@ -33,6 +33,15 @@ const (
 	// TypeLoyaltyRewardProposed is emitted when a base reward is queued for
 	// settlement later in the block.
 	TypeLoyaltyRewardProposed = "loyalty.reward.proposed"
+	// TypeLoyaltyBudgetProRated is emitted when the base reward payouts are
+	// scaled down due to insufficient daily budget.
+	TypeLoyaltyBudgetProRated = "loyalty.budget.prorated"
+)
+
+const (
+	// LoyaltyProrationScale encodes the fixed-point precision used when reporting
+	// pro-rated payout ratios.
+	LoyaltyProrationScale = 1_000_000_000_000_000_000
 )
 
 // LoyaltyProgramCreated captures the key metadata of a newly created loyalty
@@ -184,6 +193,43 @@ func (e LoyaltyRewardProposed) Event() *types.Event {
 		Attributes: map[string]string{
 			"tx_hash": "0x" + common.Bytes2Hex(e.TxHash[:]),
 			"amount":  amount.String(),
+		},
+	}
+}
+
+// LoyaltyBudgetProRated captures the aggregate demand and available budget when
+// base rewards are scaled down to honour the configured cap.
+type LoyaltyBudgetProRated struct {
+	Day        string
+	BudgetZNHB *big.Int
+	DemandZNHB *big.Int
+	RatioFP    *big.Int
+}
+
+// EventType implements the Event interface.
+func (LoyaltyBudgetProRated) EventType() string { return TypeLoyaltyBudgetProRated }
+
+// Event converts the pro-ration details into the generic event payload.
+func (e LoyaltyBudgetProRated) Event() *types.Event {
+	budget := big.NewInt(0)
+	if e.BudgetZNHB != nil {
+		budget = new(big.Int).Set(e.BudgetZNHB)
+	}
+	demand := big.NewInt(0)
+	if e.DemandZNHB != nil {
+		demand = new(big.Int).Set(e.DemandZNHB)
+	}
+	ratio := big.NewInt(0)
+	if e.RatioFP != nil {
+		ratio = new(big.Int).Set(e.RatioFP)
+	}
+	return &types.Event{
+		Type: TypeLoyaltyBudgetProRated,
+		Attributes: map[string]string{
+			"day":       e.Day,
+			"budget_zn": budget.String(),
+			"demand_zn": demand.String(),
+			"ratio_fp":  ratio.String(),
 		},
 	}
 }

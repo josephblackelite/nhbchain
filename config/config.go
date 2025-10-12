@@ -187,6 +187,7 @@ func defaultGlobalConfig() Global {
 					MaxDeviationBPS:    defaultLoyaltyPriceGuardMaxDeviation,
 					PriceMaxAgeSeconds: defaultLoyaltyPriceGuardMaxAgeSeconds,
 				},
+				EnableProRate: true,
 			},
 		},
 	}
