@@ -2928,6 +2928,15 @@ func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods in
 		return nil, 0, 0, ErrStakingNotReady
 	}
 	if err != nil {
+		var capHitErr *nhbstate.EmissionCapHitError
+		if errors.As(err, &capHitErr) && n.state != nil {
+			payload := capHitErr.Event()
+			if evt := payload.Event(); evt != nil {
+				n.state.AppendEvent(evt)
+			}
+		}
+	}
+	if err != nil {
 		return paid, periods, next, err
 	}
 	if paid == nil {
