@@ -142,7 +142,7 @@ func defaultGlobalConfig() Global {
 			AprBps:                1250,
 			PayoutPeriodDays:      30,
 			UnbondingDays:         7,
-			MinStakeWei:           "0",
+			MinStakeWei:           "1",
 			MaxEmissionPerYearWei: "0",
 			RewardAsset:           "ZNHB",
 			CompoundDefault:       false,
