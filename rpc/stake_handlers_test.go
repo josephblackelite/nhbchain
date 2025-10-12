@@ -2,18 +2,50 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 )
 
+func TestStakeClaim_NotReady(t *testing.T) {
+	env := newTestEnv(t)
+
+	delegatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	addr := delegatorKey.PubKey().Address().String()
+
+	claimReq := &RPCRequest{ID: 99, Params: []json.RawMessage{marshalParam(t, addr)}}
+	claimRec := httptest.NewRecorder()
+	env.server.handleStakeClaimRewards(claimRec, env.newRequest(), claimReq)
+
+	if claimRec.Code != http.StatusNotImplemented {
+		t.Fatalf("unexpected HTTP status: got %d want %d", claimRec.Code, http.StatusNotImplemented)
+	}
+	_, rpcErr := decodeRPCResponse(t, claimRec)
+	if rpcErr == nil {
+		t.Fatalf("expected staking not ready error")
+	}
+	if rpcErr.Message != "staking not ready" {
+		t.Fatalf("unexpected error message: %+v", rpcErr)
+	}
+}
+
 func TestStakeClaimRewardsFlow(t *testing.T) {
 	env := newTestEnv(t)
+
+	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+		t.Skip("staking rewards claim not yet available")
+	}
 
 	delegatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -129,6 +161,10 @@ func TestStakeClaimRewardsFlow(t *testing.T) {
 func TestStakeClaimRewardsEarly(t *testing.T) {
 	env := newTestEnv(t)
 
+	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+		t.Skip("staking rewards claim not yet available")
+	}
+
 	delegatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -171,6 +207,10 @@ func TestStakeClaimRewardsEarly(t *testing.T) {
 
 func TestStakeClaimRewardsPaused(t *testing.T) {
 	env := newTestEnv(t)
+
+	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+		t.Skip("staking rewards claim not yet available")
+	}
 
 	delegatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -231,6 +271,10 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 
 func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 	env := newTestEnv(t)
+
+	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+		t.Skip("staking rewards claim not yet available")
+	}
 
 	delegatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {

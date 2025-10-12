@@ -29,19 +29,16 @@ ZapNHB that would be minted by a claim right now as well as the timestamp when
 the next payout window opens. Use this before sending a claim to double check
 that the window has actually elapsed.
 
-## Claim rewards (and optionally restake them)
+## Claim rewards
 
 ```bash
-nhb-cli stake claim wallet.key
-# or automatically delegate anything that was minted
-nhb-cli stake claim --compound wallet.key
+nhb-cli stake claim nhb1exampleaddress
 ```
 
-`stake claim` loads the signing key, calls `stake_claimRewards`, and prints a
-snapshot of the updated account metadata including balances, validator
-selection, and any pending unbonds. When the `--compound` flag is present the
-CLI automatically submits a `stake_delegate` transaction for the minted amount
-(so long as it is non-zero). The existing delegation is reused when one is set.
+The RPC surface for `stake_claimRewards` is exposed ahead of the staking engine
+shipping reward minting. Running the command today returns a friendly "staking
+not ready" message; once the rewards module is activated it will mint ZapNHB
+and print the updated account snapshot.
 
 ## Legacy staking shortcut
 

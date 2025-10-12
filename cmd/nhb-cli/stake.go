@@ -2,10 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
-	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -104,31 +102,25 @@ func runStakePreview(args []string, stdout, stderr io.Writer) int {
 }
 
 func runStakeClaim(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("stake claim", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var compound bool
-	fs.BoolVar(&compound, "compound", false, "delegate newly minted rewards back to stake")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(stderr, err)
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "Usage: nhb-cli stake claim <address>")
 		return 1
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "Usage: nhb-cli stake claim [--compound] <key_file>")
+	addr := strings.TrimSpace(args[0])
+	if addr == "" {
+		fmt.Fprintln(stderr, "Error: address is required")
 		return 1
 	}
-	keyFile := fs.Arg(0)
-	privKey, err := loadPrivateKey(keyFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error loading private key: %v\n", err)
-		return 1
-	}
-	addr := privKey.PubKey().Address().String()
 
 	result, rpcErr, err := stakeRPCCall("stake_claimRewards", []interface{}{addr}, true)
 	if err != nil {
 		return handleRPCCallError(stderr, err)
 	}
 	if rpcErr != nil {
+		if strings.EqualFold(rpcErr.Message, "staking not ready") {
+			fmt.Fprintln(stdout, "Staking rewards are not available yet. Please try again later.")
+			return 0
+		}
 		return handleRPCError(stderr, rpcErr)
 	}
 
@@ -146,43 +138,6 @@ func runStakeClaim(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "  Next payout:  unavailable")
 	}
 	printStakeAccountSnapshot(stdout, &claim.Balance)
-
-	if compound {
-		minted := strings.TrimSpace(claim.Minted)
-		mintedInt, ok := new(big.Int).SetString(minted, 10)
-		if !ok {
-			fmt.Fprintf(stderr, "Invalid minted amount %q\n", claim.Minted)
-			return 1
-		}
-		if mintedInt.Sign() <= 0 {
-			fmt.Fprintln(stdout, "No rewards minted; skipping compound delegation.")
-			return 0
-		}
-
-		fmt.Fprintf(stdout, "Compounding %s ZapNHB back into stake...\n", mintedInt.String())
-		delegateParams := map[string]interface{}{
-			"caller": addr,
-			"amount": mintedInt.String(),
-		}
-		validator := strings.TrimSpace(claim.Balance.DelegatedValidator)
-		if validator != "" {
-			delegateParams["validator"] = validator
-		}
-		if _, rpcErr, err := stakeRPCCall("stake_delegate", []interface{}{delegateParams}, true); err != nil {
-			return handleRPCCallError(stderr, err)
-		} else if rpcErr != nil {
-			return handleRPCError(stderr, rpcErr)
-		}
-		fmt.Fprintln(stdout, "Compound delegation submitted.")
-
-		if posRaw, rpcErr, err := stakeRPCCall("stake_getPosition", []interface{}{addr}, true); err == nil && rpcErr == nil {
-			var pos stakePositionResponse
-			if json.Unmarshal(posRaw, &pos) == nil {
-				fmt.Fprintf(stdout, "  Updated shares: %s\n", pos.Shares)
-				fmt.Fprintf(stdout, "  Last index:    %s\n", pos.LastIndex)
-			}
-		}
-	}
 
 	return 0
 }
@@ -254,7 +209,7 @@ func stakeUsage() string {
 Commands:
   position <address>             Show staking share metadata for an address
   preview <address>              Preview claimable staking rewards and next payout
-  claim [--compound] <key_file>  Claim staking rewards and optionally restake them
+  claim <address>                Claim staking rewards for an address
   <amount> <key_file>            (legacy) delegate ZapNHB using the original flow
 `)
 }
