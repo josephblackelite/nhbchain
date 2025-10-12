@@ -4,6 +4,8 @@ import (
 	"math/big"
 	"strconv"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"nhbchain/core/types"
 )
 
@@ -28,6 +30,9 @@ const (
 	// TypeLoyaltyCapHit is emitted when a yearly emission cap prevents further
 	// payouts.
 	TypeLoyaltyCapHit = "loyalty.cap.hit"
+	// TypeLoyaltyRewardProposed is emitted when a base reward is queued for
+	// settlement later in the block.
+	TypeLoyaltyRewardProposed = "loyalty.reward.proposed"
 )
 
 // LoyaltyProgramCreated captures the key metadata of a newly created loyalty
@@ -154,6 +159,31 @@ func (e LoyaltyCapHit) Event() *types.Event {
 			"cap":       cap.String(),
 			"emitted":   emitted.String(),
 			"remaining": remaining.String(),
+		},
+	}
+}
+
+// LoyaltyRewardProposed records a base loyalty reward that has been queued for
+// settlement but not yet minted.
+type LoyaltyRewardProposed struct {
+	TxHash [32]byte
+	Amount *big.Int
+}
+
+// EventType implements the Event interface.
+func (LoyaltyRewardProposed) EventType() string { return TypeLoyaltyRewardProposed }
+
+// Event converts the proposed reward into the generic event payload.
+func (e LoyaltyRewardProposed) Event() *types.Event {
+	amount := big.NewInt(0)
+	if e.Amount != nil {
+		amount = new(big.Int).Set(e.Amount)
+	}
+	return &types.Event{
+		Type: TypeLoyaltyRewardProposed,
+		Attributes: map[string]string{
+			"tx_hash": "0x" + common.Bytes2Hex(e.TxHash[:]),
+			"amount":  amount.String(),
 		},
 	}
 }

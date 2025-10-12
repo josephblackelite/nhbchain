@@ -6,6 +6,16 @@ import (
 	"nhbchain/native/loyalty"
 )
 
+// PendingReward captures a loyalty reward that has been computed during the
+// block but not yet minted. Rewards are accumulated and settled once the block
+// successfully completes.
+type PendingReward struct {
+	TxHash     [32]byte
+	Payer      [20]byte
+	Recipient  [20]byte
+	AmountZNHB *big.Int
+}
+
 // LoyaltyEngineState captures the dynamic loyalty controller runtime state.
 //
 // All values are expressed in basis points and operate within the guardrails

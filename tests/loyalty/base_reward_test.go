@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"nhbchain/core"
+	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/native/loyalty"
@@ -101,13 +102,20 @@ func TestBaseRewardAccruesAtDefaultRate(t *testing.T) {
 
 	expected := big.NewInt(0).Mul(big.NewInt(20_000), big.NewInt(int64(loyalty.DefaultBaseRewardBps)))
 	expected = expected.Quo(expected, big.NewInt(int64(loyalty.BaseRewardBpsDenominator)))
-	if ctx.FromAccount.BalanceZNHB.Cmp(expected) != 0 {
-		t.Fatalf("expected reward %s, got %s", expected.String(), ctx.FromAccount.BalanceZNHB.String())
+	if ctx.FromAccount.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected no immediate balance change, got %s", ctx.FromAccount.BalanceZNHB.String())
+	}
+
+	pending := sp.BlockContext().PendingRewards
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending reward, got %d", len(pending))
+	}
+	if pending[0].AmountZNHB.Cmp(expected) != 0 {
+		t.Fatalf("expected pending reward %s, got %s", expected.String(), pending[0].AmountZNHB.String())
 	}
 
 	treasuryAcc := mustAccount(t, manager, treasury)
 	wantTreasury := big.NewInt(20_000)
-	wantTreasury.Sub(wantTreasury, expected)
 	if treasuryAcc.BalanceZNHB.Cmp(wantTreasury) != 0 {
 		t.Fatalf("expected treasury balance %s, got %s", wantTreasury.String(), treasuryAcc.BalanceZNHB.String())
 	}
@@ -121,16 +129,29 @@ func TestBaseRewardAccruesAtDefaultRate(t *testing.T) {
 		t.Fatalf("expected daily accrued %s, got %s", expected.String(), accrued.String())
 	}
 
-	events := sp.Events()
-	evt := findEvent(events, "loyalty.base.accrued")
+	evts := sp.Events()
+	eventTypes := make([]string, len(evts))
+	for i, evt := range evts {
+		eventTypes[i] = evt.Type
+	}
+	if len(evts) != 3 {
+		t.Fatalf("expected three events, got %d (%v)", len(evts), eventTypes)
+	}
+	if evts[0].Type != events.TypeLoyaltyRewardProposed {
+		t.Fatalf("expected reward proposed event first, got %s", evts[0].Type)
+	}
+	evt := findEvent(evts, "loyalty.base.accrued")
 	if evt == nil {
-		t.Fatalf("expected base accrued event, got %#v", events)
+		t.Fatalf("expected base accrued event, got %#v", evts)
 	}
 	if evt.Attributes["reward"] != expected.String() {
 		t.Fatalf("expected reward attribute %s, got %s", expected.String(), evt.Attributes["reward"])
 	}
 	if evt.Attributes["baseBps"] != "5000" {
 		t.Fatalf("expected baseBps attribute 5000, got %s", evt.Attributes["baseBps"])
+	}
+	if evts[2].Type != "loyalty.program.skipped" {
+		t.Fatalf("expected program skipped event third, got %s", evts[2].Type)
 	}
 }
 
@@ -212,18 +233,38 @@ func TestBaseRewardHonorsCapPerTx(t *testing.T) {
 
 	sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
 
-	if ctx.FromAccount.BalanceZNHB.Cmp(big.NewInt(50)) != 0 {
-		t.Fatalf("expected reward capped at 50, got %s", ctx.FromAccount.BalanceZNHB.String())
+	if ctx.FromAccount.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected no immediate balance change, got %s", ctx.FromAccount.BalanceZNHB.String())
 	}
-	events := sp.Events()
-	evt := findEvent(events, "loyalty.base.accrued")
+	pending := sp.BlockContext().PendingRewards
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending reward, got %d", len(pending))
+	}
+	if pending[0].AmountZNHB.Cmp(big.NewInt(50)) != 0 {
+		t.Fatalf("expected pending reward 50, got %s", pending[0].AmountZNHB.String())
+	}
+	evts := sp.Events()
+	eventTypes := make([]string, len(evts))
+	for i, evt := range evts {
+		eventTypes[i] = evt.Type
+	}
+	if len(evts) != 3 {
+		t.Fatalf("expected three events, got %d (%v)", len(evts), eventTypes)
+	}
+	if evts[0].Type != events.TypeLoyaltyRewardProposed {
+		t.Fatalf("expected reward proposed event first, got %s", evts[0].Type)
+	}
+	evt := findEvent(evts, "loyalty.base.accrued")
 	if evt == nil {
-		t.Fatalf("expected base accrued event, got %#v", events)
+		t.Fatalf("expected base accrued event, got %#v", evts)
 	}
 	if evt.Attributes["reward"] != "50" {
 		t.Fatalf("expected reward attribute 50, got %s", evt.Attributes["reward"])
 	}
 	if evt.Attributes["baseBps"] != "5000" {
 		t.Fatalf("expected baseBps attribute 5000, got %s", evt.Attributes["baseBps"])
+	}
+	if evts[2].Type != "loyalty.program.skipped" {
+		t.Fatalf("expected program skipped event third, got %s", evts[2].Type)
 	}
 }
