@@ -2910,8 +2910,30 @@ func (n *Node) StakeClaim(delegator [20]byte, unbondID uint64) (*types.StakeUnbo
 	return n.state.StakeClaim(delegator[:], unbondID)
 }
 
-func (n *Node) StakeClaimRewards(addr [20]byte) (*big.Int, error) {
-	return big.NewInt(0), ErrStakingNotReady
+func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods int, next int64, err error) {
+	if n == nil {
+		return nil, 0, 0, fmt.Errorf("staking rewards: node unavailable")
+	}
+	if addr == (common.Address{}) {
+		return nil, 0, 0, fmt.Errorf("staking rewards: address required")
+	}
+
+	now := n.currentTime()
+	err = n.WithState(func(manager *nhbstate.Manager) error {
+		engine := nhbstate.NewRewardEngine(manager)
+		paid, periods, next, err = engine.Claim(addr.Bytes(), now)
+		return err
+	})
+	if errors.Is(err, nhbstate.ErrNotReady) {
+		return nil, 0, 0, ErrStakingNotReady
+	}
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if paid == nil {
+		paid = big.NewInt(0)
+	}
+	return paid, periods, next, nil
 }
 
 // StakePreviewClaim estimates the staking reward that would be minted if the

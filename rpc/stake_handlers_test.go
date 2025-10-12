@@ -13,6 +13,8 @@ import (
 	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestStakeClaim_NotReady(t *testing.T) {
@@ -43,7 +45,7 @@ func TestStakeClaim_NotReady(t *testing.T) {
 func TestStakeClaimRewardsFlow(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
@@ -161,7 +163,7 @@ func TestStakeClaimRewardsFlow(t *testing.T) {
 func TestStakeClaimRewardsEarly(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
@@ -208,7 +210,7 @@ func TestStakeClaimRewardsEarly(t *testing.T) {
 func TestStakeClaimRewardsPaused(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
@@ -272,7 +274,7 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 	env := newTestEnv(t)
 
-	if _, err := env.node.StakeClaimRewards([20]byte{}); errors.Is(err, core.ErrStakingNotReady) {
+	if _, _, _, err := env.node.StakeClaimRewards(common.Address{}); errors.Is(err, core.ErrStakingNotReady) {
 		t.Skip("staking rewards claim not yet available")
 	}
 
