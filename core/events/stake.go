@@ -18,8 +18,10 @@ const (
 	TypeStakeRewardsClaimed = "stake.rewardsClaimed"
 	// TypeStakeRewardsClaimedLegacy aliases the rewards claim event for existing indexers.
 	TypeStakeRewardsClaimedLegacy = "stake.claimed"
-	// TypeStakeEmissionCapHit signals that the annual emission cap prevented a full payout.
-	TypeStakeEmissionCapHit = "stake.emissionCapHit"
+	// TypeStakeCapHit signals that the annual emission cap prevented a full payout.
+	TypeStakeCapHit = "stake.emissionCapHit"
+	// TypeStakeEmissionCapHit aliases the cap hit type for backwards compatibility.
+	TypeStakeEmissionCapHit = TypeStakeCapHit
 	// TypeStakePaused is emitted when staking mutations are rejected due to a pause toggle.
 	TypeStakePaused = "stake.paused"
 
@@ -111,12 +113,11 @@ func (e StakeUndelegated) Event() *types.Event {
 
 // StakeRewardsClaimed captures the staking reward payout for an account.
 type StakeRewardsClaimed struct {
-	Account     [20]byte
-	Minted      *big.Int
-	Periods     uint64
-	LastIndex   *big.Int
-	Shares      *big.Int
-	EmissionYTD *big.Int
+	Addr             [20]byte
+	PaidZNHB         *big.Int
+	Periods          uint64
+	AprBps           uint64
+	NextEligibleUnix uint64
 }
 
 // EventType satisfies the Event interface.
@@ -124,56 +125,60 @@ func (StakeRewardsClaimed) EventType() string { return TypeStakeRewardsClaimed }
 
 // Event converts the structured payload into a broadcastable event.
 func (e StakeRewardsClaimed) Event() *types.Event {
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Addr[:]).String()
 	attrs := map[string]string{
-		"addr":        crypto.MustNewAddress(crypto.NHBPrefix, e.Account[:]).String(),
-		"minted":      formatAmount(e.Minted),
-		"lastIndex":   formatAmount(e.LastIndex),
-		"emissionYTD": formatAmount(e.EmissionYTD),
+		"addr":     addr,
+		"paidZNHB": formatAmount(e.PaidZNHB),
 	}
 	if e.Periods > 0 {
 		attrs["periods"] = strconv.FormatUint(e.Periods, 10)
 	}
-	if e.Shares != nil && e.Shares.Sign() > 0 {
-		attrs["shares"] = e.Shares.String()
+	if e.AprBps > 0 {
+		attrs["aprBps"] = strconv.FormatUint(e.AprBps, 10)
+	}
+	if e.NextEligibleUnix > 0 {
+		attrs["nextEligibleUnix"] = strconv.FormatUint(e.NextEligibleUnix, 10)
 	}
 	return &types.Event{Type: TypeStakeRewardsClaimed, Attributes: attrs}
 }
 
 // LegacyEvent renders the backwards compatible alias for reward claims.
 func (e StakeRewardsClaimed) LegacyEvent() *types.Event {
+	addr := crypto.MustNewAddress(crypto.NHBPrefix, e.Addr[:]).String()
 	attrs := map[string]string{
-		"addr":        crypto.MustNewAddress(crypto.NHBPrefix, e.Account[:]).String(),
-		"minted":      formatAmount(e.Minted),
-		"lastIndex":   formatAmount(e.LastIndex),
-		"emissionYTD": formatAmount(e.EmissionYTD),
+		"addr":   addr,
+		"minted": formatAmount(e.PaidZNHB),
 	}
 	if e.Periods > 0 {
 		attrs["periods"] = strconv.FormatUint(e.Periods, 10)
 	}
-	if e.Shares != nil && e.Shares.Sign() > 0 {
-		attrs["shares"] = e.Shares.String()
+	if e.AprBps > 0 {
+		attrs["aprBps"] = strconv.FormatUint(e.AprBps, 10)
+	}
+	if e.NextEligibleUnix > 0 {
+		attrs["nextEligibleUnix"] = strconv.FormatUint(e.NextEligibleUnix, 10)
 	}
 	return &types.Event{Type: TypeStakeRewardsClaimedLegacy, Attributes: attrs}
 }
 
-// StakeEmissionCapHit indicates that the annual emission cap limited a reward claim.
-type StakeEmissionCapHit struct {
-	Year      uint32
-	Minted    *big.Int
-	Remaining *big.Int
+// StakeCapHit indicates that the annual emission cap limited a reward claim.
+type StakeCapHit struct {
+	AttemptedZNHB *big.Int
+	YTD           *big.Int
+	Cap           *big.Int
 }
 
 // EventType satisfies the Event interface.
-func (StakeEmissionCapHit) EventType() string { return TypeStakeEmissionCapHit }
+func (StakeCapHit) EventType() string { return TypeStakeCapHit }
 
 // Event converts the structured payload into a broadcastable event.
-func (e StakeEmissionCapHit) Event() *types.Event {
+func (e StakeCapHit) Event() *types.Event {
 	attrs := map[string]string{
-		"year":      strconv.FormatUint(uint64(e.Year), 10),
-		"minted":    formatAmount(e.Minted),
-		"remaining": formatAmount(e.Remaining),
+		"attemptedZNHB": formatAmount(e.AttemptedZNHB),
+		"ytd":           formatAmount(e.YTD),
+		"cap":           formatAmount(e.Cap),
 	}
-	return &types.Event{Type: TypeStakeEmissionCapHit, Attributes: attrs}
+	return &types.Event{Type: TypeStakeCapHit, Attributes: attrs}
 }
 
 // StakePaused captures a staking request rejected due to a governance pause.
