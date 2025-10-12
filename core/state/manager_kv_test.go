@@ -11,17 +11,17 @@ import (
 
 func TestStakingKeyFormats(t *testing.T) {
 	globalKey := StakingGlobalIndexKey()
-	if string(globalKey) != "staking/index/global" {
+	if string(globalKey) != "staking/globalIndex" {
 		t.Fatalf("unexpected global index key: %s", string(globalKey))
 	}
 
 	lastTsKey := StakingLastIndexUpdateTsKey()
-	if string(lastTsKey) != "staking/index/last-ts" {
+	if string(lastTsKey) != "staking/lastUpdate" {
 		t.Fatalf("unexpected last index timestamp key: %s", string(lastTsKey))
 	}
 
 	emissionKey := StakingEmissionYTDKey(2024)
-	if string(emissionKey) != "staking/emissions/2024" {
+	if string(emissionKey) != "staking/ytdEmissions/2024" {
 		t.Fatalf("unexpected emission key: %s", string(emissionKey))
 	}
 

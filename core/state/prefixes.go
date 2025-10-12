@@ -1,8 +1,8 @@
 package state
 
 var (
-	stakingGlobalIndexKeyBytes      = []byte("staking/index/global")
-	stakingLastIndexUpdateTsKeyByte = []byte("staking/index/last-ts")
-	stakingEmissionYTDKeyFormat     = "staking/emissions/%04d"
+	stakingGlobalIndexKeyBytes      = []byte("staking/globalIndex")
+	stakingLastIndexUpdateTsKeyByte = []byte("staking/lastUpdate")
+	stakingEmissionYTDKeyFormat     = "staking/ytdEmissions/%04d"
 	stakingAccountPrefix            = []byte("staking/account/")
 )
