@@ -163,7 +163,8 @@ func (e StakeRewardsClaimed) LegacyEvent() *types.Event {
 
 // StakeCapHit indicates that the annual emission cap limited a reward claim.
 type StakeCapHit struct {
-	AttemptedZNHB *big.Int
+	RequestedZNHB *big.Int
+	AllowedZNHB   *big.Int
 	YTD           *big.Int
 	Cap           *big.Int
 }
@@ -174,7 +175,8 @@ func (StakeCapHit) EventType() string { return TypeStakeCapHit }
 // Event converts the structured payload into a broadcastable event.
 func (e StakeCapHit) Event() *types.Event {
 	attrs := map[string]string{
-		"attemptedZNHB": formatAmount(e.AttemptedZNHB),
+		"requestedZNHB": formatAmount(e.RequestedZNHB),
+		"allowedZNHB":   formatAmount(e.AllowedZNHB),
 		"ytd":           formatAmount(e.YTD),
 		"cap":           formatAmount(e.Cap),
 	}

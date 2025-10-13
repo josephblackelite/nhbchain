@@ -2743,7 +2743,8 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 
 	if capHit {
 		capEvt := events.StakeCapHit{
-			AttemptedZNHB: attemptedMint,
+			RequestedZNHB: attemptedMint,
+			AllowedZNHB:   new(big.Int).Set(minted),
 			YTD:           new(big.Int).Set(updatedEmission),
 			Cap:           new(big.Int).Set(maxEmission),
 		}

@@ -1,8 +1,6 @@
 package state
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -17,6 +15,7 @@ import (
 	"nhbchain/core/events"
 	"nhbchain/core/types"
 	"nhbchain/native/governance"
+	paramsstate "nhbchain/native/params/state"
 	"nhbchain/observability"
 )
 
@@ -36,14 +35,16 @@ var (
 
 // EmissionCapHitError augments the standard cap hit sentinel with event context.
 type EmissionCapHitError struct {
-	attempted *big.Int
+	requested *big.Int
+	allowed   *big.Int
 	ytd       *big.Int
 	cap       *big.Int
 }
 
-func newEmissionCapHitError(attempted, ytd, cap *big.Int) *EmissionCapHitError {
+func newEmissionCapHitError(requested, allowed, ytd, cap *big.Int) *EmissionCapHitError {
 	return &EmissionCapHitError{
-		attempted: cloneBigInt(attempted),
+		requested: cloneBigInt(requested),
+		allowed:   cloneBigInt(allowed),
 		ytd:       cloneBigInt(ytd),
 		cap:       cloneBigInt(cap),
 	}
@@ -59,9 +60,14 @@ func (e *EmissionCapHitError) Unwrap() error {
 	return stakeerrors.ErrCapHit
 }
 
-// Attempted returns the attempted payout amount in Wei.
-func (e *EmissionCapHitError) Attempted() *big.Int {
-	return cloneBigInt(e.attempted)
+// Requested returns the requested payout amount in Wei prior to clamping.
+func (e *EmissionCapHitError) Requested() *big.Int {
+	return cloneBigInt(e.requested)
+}
+
+// Allowed returns the payout amount permitted after applying the cap in Wei.
+func (e *EmissionCapHitError) Allowed() *big.Int {
+	return cloneBigInt(e.allowed)
 }
 
 // YTD returns the recorded year-to-date emission amount in Wei.
@@ -77,7 +83,8 @@ func (e *EmissionCapHitError) Cap() *big.Int {
 // Event yields the structured StakeCapHit payload describing the cap overflow.
 func (e *EmissionCapHitError) Event() events.StakeCapHit {
 	return events.StakeCapHit{
-		AttemptedZNHB: e.Attempted(),
+		RequestedZNHB: e.Requested(),
+		AllowedZNHB:   e.Allowed(),
 		YTD:           e.YTD(),
 		Cap:           e.Cap(),
 	}
@@ -227,6 +234,13 @@ func (e *RewardEngine) settleOnDelegate(addr []byte, amount *big.Int) error {
 	if len(addr) == 0 {
 		return fmt.Errorf("address required")
 	}
+	paused, err := isStakingPaused(e.mgr)
+	if err != nil {
+		return err
+	}
+	if paused {
+		return stakeerrors.ErrStakingPaused
+	}
 	if err := e.accrue(addr); err != nil {
 		return err
 	}
@@ -255,6 +269,13 @@ func (e *RewardEngine) settleOnUndelegate(addr []byte, amount *big.Int) error {
 	}
 	if len(addr) == 0 {
 		return fmt.Errorf("address required")
+	}
+	paused, err := isStakingPaused(e.mgr)
+	if err != nil {
+		return err
+	}
+	if paused {
+		return stakeerrors.ErrStakingPaused
 	}
 	if err := e.accrue(addr); err != nil {
 		return err
@@ -406,6 +427,7 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
+	var capErr *EmissionCapHitError
 	if capValue.Sign() > 0 && payout.Sign() > 0 {
 		projected := new(big.Int).Add(ytd, payout)
 		if projected.Cmp(capValue) > 0 {
@@ -415,8 +437,11 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 			}
 			payout.Set(remaining)
 			if payout.Sign() <= 0 {
-				capErr := newEmissionCapHitError(attempted, ytd, capValue)
+				capErr = newEmissionCapHitError(attempted, payout, ytd, capValue)
 				return big.NewInt(0), 0, nextEligible, aprBps, capErr
+			}
+			if attempted.Cmp(payout) != 0 {
+				capErr = newEmissionCapHitError(attempted, payout, ytd, capValue)
 			}
 		}
 	}
@@ -474,27 +499,22 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 		metrics.RecordCapHit()
 	}
 
-	return new(big.Int).Set(payout), int(periods64), nextEligible, aprBps, nil
+	result := new(big.Int).Set(payout)
+	if capErr != nil {
+		return result, int(periods64), nextEligible, aprBps, capErr
+	}
+	return result, int(periods64), nextEligible, aprBps, nil
 }
 
 func isStakingPaused(mgr *Manager) (bool, error) {
 	if mgr == nil {
 		return false, nil
 	}
-	raw, ok, err := mgr.ParamStoreGet(paramKeyPauses)
+	paused, err := paramsstate.StakingPaused(mgr)
 	if err != nil {
 		return false, fmt.Errorf("staking rewards: load pause configuration: %w", err)
 	}
-	if !ok || len(bytes.TrimSpace(raw)) == 0 {
-		return false, nil
-	}
-	var pauses struct {
-		Staking bool `json:"staking"`
-	}
-	if err := json.Unmarshal(raw, &pauses); err != nil {
-		return false, fmt.Errorf("staking rewards: decode pause configuration: %w", err)
-	}
-	return pauses.Staking, nil
+	return paused, nil
 }
 
 func (e *RewardEngine) stakingEmissionCap() (*big.Int, error) {
