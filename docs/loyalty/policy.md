@@ -18,6 +18,8 @@ The loyalty engine ships with an adaptive controller that gently adjusts the bas
 | `PriceGuard.TwapWindowSeconds` | TWAP smoothing window applied to the oracle pair before computing deviations. | `7,200` seconds |
 | `PriceGuard.MaxDeviationBps` | Maximum tolerated oracle variance relative to the rolling average before adjustments are frozen. | `300` bps |
 | `PriceGuard.PriceMaxAgeSeconds` | Maximum age of oracle data before the controller halts adjustments. | `600` seconds |
+| `EnableProRate` | Toggles queue-and-settle behaviour for base rewards; disabling settles immediately. | `true` |
+| `EnforceProRate` | Prevents disabling pro-rate mode in production environments unless explicitly overridden. | `true` |
 
 Operators can override these settings in `config.toml` under the `[global.loyalty.Dynamic]` section. Leave any field unset (or zero) to continue using the compiled defaults above.
 
@@ -41,6 +43,12 @@ Whenever a partial payout occurs the block emits a `LoyaltyBudgetProRated` event
 | `ratio_fp` | Fixed-point ratio (`1e18` scale) applied to rewards. |
 
 Set `Global.Loyalty.Dynamic.EnableProRate = false` in `config.toml` to disable the queue-and-settle flow. In that mode rewards settle immediately and skip the pro-rate safeguards entirely.
+
+### Production enforcement guard
+
+Production deployments (`NHB_ENV=prod`) refuse to start when `EnableProRate = false` while `EnforceProRate = true`. The daemon exits with a fatal error containing `loyalty.prorate.locked` and guidance to set `global.loyalty.Dynamic.EnforceProRate=false` before retrying. Operators can only make that override in non-production environments; leaving enforcement enabled ensures mainnet runs always settle through the prorating queue.
+
+When the guard fires, operations dashboards will show the fatal startup message and the service health check will remain `DOWN`. Clearing the condition (either by re-enabling pro-rating or by disabling the enforcement flag outside production) allows the node to boot normally, after which the standard pro-rate telemetry (`loyalty_prorate_ratio`, `LoyaltyBudgetProRated` events) resumes.
 
 ### End-of-block pro-rate
 

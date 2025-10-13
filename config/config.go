@@ -225,7 +225,8 @@ func defaultGlobalConfig() Global {
 					MaxDeviationBPS:    defaultLoyaltyPriceGuardMaxDeviation,
 					PriceMaxAgeSeconds: defaultLoyaltyPriceGuardMaxAgeSeconds,
 				},
-				EnableProRate: true,
+				EnableProRate:  true,
+				EnforceProRate: defaultLoyaltyEnforceProRate,
 			},
 		},
 	}
@@ -259,6 +260,7 @@ const (
 	defaultLoyaltyPriceGuardTwapWindowSeconds = uint32(7_200)
 	defaultLoyaltyPriceGuardMaxDeviation      = 300
 	defaultLoyaltyPriceGuardMaxAgeSeconds     = uint32(600)
+	defaultLoyaltyEnforceProRate              = true
 )
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -716,6 +718,9 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "loyalty", "Dynamic", "EnableProRate") {
 		cfg.Global.Loyalty.Dynamic.EnableProRate = defaults.Loyalty.Dynamic.EnableProRate
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "EnforceProRate") {
+		cfg.Global.Loyalty.Dynamic.EnforceProRate = defaults.Loyalty.Dynamic.EnforceProRate
 	}
 }
 

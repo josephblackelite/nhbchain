@@ -14,7 +14,9 @@ func TestCreateBlockRespectsConfiguredTransactionCap(t *testing.T) {
 
 	cfg := node.globalConfigSnapshot()
 	cfg.Blocks.MaxTxs = 2
-	node.SetGlobalConfig(cfg)
+	if err := node.SetGlobalConfig(cfg); err != nil {
+		t.Fatalf("set global config: %v", err)
+	}
 
 	txs := []*types.Transaction{
 		buildIdentityRegistrationTx(t, node, "user-0"),
@@ -58,7 +60,9 @@ func TestCreateBlockUsesAllTransactionsWhenCapUnchanged(t *testing.T) {
 	snapshot := node.globalConfigSnapshot()
 	// Bump the cap so all transactions in this test fit into a single block.
 	snapshot.Blocks.MaxTxs = 5
-	node.SetGlobalConfig(snapshot)
+	if err := node.SetGlobalConfig(snapshot); err != nil {
+		t.Fatalf("set global config: %v", err)
+	}
 
 	txs := []*types.Transaction{
 		buildIdentityRegistrationTx(t, node, "under-cap-0"),

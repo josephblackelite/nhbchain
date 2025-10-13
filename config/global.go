@@ -2,11 +2,13 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"time"
 
 	"nhbchain/crypto"
+	"nhbchain/native/loyalty"
 )
 
 // PaymasterLimits represents the parsed paymaster throttling limits.
@@ -102,4 +104,59 @@ func (g Global) TransferNHBPaused() bool {
 // TransferZNHBPaused reports whether direct ZNHB transfers are currently disabled via governance.
 func (g Global) TransferZNHBPaused() bool {
 	return g.Pauses.TransferZNHB
+}
+
+// LoyaltyDynamicConfig converts the loaded TOML dynamic policy into the runtime representation.
+func (g Global) LoyaltyDynamicConfig() loyalty.DynamicConfig {
+	dyn := g.Loyalty.Dynamic
+	coverageBps := math.Round(dyn.CoverageMax * loyalty.BaseRewardBpsDenominator)
+	if coverageBps < 0 {
+		coverageBps = 0
+	}
+	if coverageBps > loyalty.BaseRewardBpsDenominator {
+		coverageBps = loyalty.BaseRewardBpsDenominator
+	}
+
+	dailyCapBps := math.Round(dyn.DailyCapPctOf7dFees * loyalty.BaseRewardBpsDenominator)
+	if dailyCapBps < 0 {
+		dailyCapBps = 0
+	}
+	if dailyCapBps > loyalty.BaseRewardBpsDenominator {
+		dailyCapBps = loyalty.BaseRewardBpsDenominator
+	}
+
+	yearlyCapBps := math.Round(dyn.YearlyCapPctOfInitialSupply * 100)
+	if yearlyCapBps < 0 {
+		yearlyCapBps = 0
+	}
+	if yearlyCapBps > loyalty.BaseRewardBpsDenominator {
+		yearlyCapBps = loyalty.BaseRewardBpsDenominator
+	}
+
+	dailyCapUsd := math.Round(dyn.DailyCapUSD)
+	if dailyCapUsd < 0 {
+		dailyCapUsd = 0
+	}
+
+	cfg := loyalty.DynamicConfig{
+		TargetBps:                      dyn.TargetBPS,
+		MinBps:                         dyn.MinBPS,
+		MaxBps:                         dyn.MaxBPS,
+		SmoothingStepBps:               dyn.SmoothingStepBPS,
+		CoverageMaxBps:                 uint32(coverageBps),
+		CoverageLookbackDays:           dyn.CoverageLookbackDays,
+		DailyCapPctOf7dFeesBps:         uint32(dailyCapBps),
+		DailyCapUsd:                    uint64(dailyCapUsd),
+		YearlyCapPctOfInitialSupplyBps: uint32(yearlyCapBps),
+		PriceGuard: loyalty.PriceGuardConfig{
+			Enabled:            dyn.PriceGuard.Enabled,
+			PricePair:          dyn.PriceGuard.PricePair,
+			TwapWindowSeconds:  dyn.PriceGuard.TwapWindowSeconds,
+			MaxDeviationBps:    dyn.PriceGuard.MaxDeviationBPS,
+			PriceMaxAgeSeconds: dyn.PriceGuard.PriceMaxAgeSeconds,
+		},
+		EnableProRate:  dyn.EnableProRate,
+		EnforceProRate: dyn.EnforceProRate,
+	}
+	return cfg
 }

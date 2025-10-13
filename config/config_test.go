@@ -284,6 +284,9 @@ func TestEnsureGlobalDefaultsLoyaltyDynamic(t *testing.T) {
 	if guard.PriceMaxAgeSeconds != defaultLoyaltyPriceGuardMaxAgeSeconds {
 		t.Fatalf("unexpected price max age: %d", guard.PriceMaxAgeSeconds)
 	}
+	if !dyn.EnforceProRate {
+		t.Fatalf("expected pro-rate enforcement default enabled")
+	}
 }
 
 func TestEnsureGlobalDefaultsLoyaltyDynamicOverride(t *testing.T) {
@@ -298,6 +301,8 @@ CoverageLookbackDays = 21
 DailyCapPctOf7dFees = 0.37
 DailyCapUSD = 3210.5
 YearlyCapPctOfInitialSupply = 12.5
+EnableProRate = false
+EnforceProRate = false
 
   [global.loyalty.Dynamic.PriceGuard]
   Enabled = true
@@ -340,6 +345,12 @@ YearlyCapPctOfInitialSupply = 12.5
 	}
 	if guard.TwapWindowSeconds != 7200 || guard.MaxDeviationBPS != 275 || guard.PriceMaxAgeSeconds != 450 {
 		t.Fatalf("unexpected price guard values: %+v", guard)
+	}
+	if dyn.EnableProRate {
+		t.Fatalf("expected pro-rate toggle override to disable queueing")
+	}
+	if dyn.EnforceProRate {
+		t.Fatalf("expected enforcement override to disable guard")
 	}
 }
 

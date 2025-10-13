@@ -177,7 +177,9 @@ func main() {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
 
-	node.SetGlobalConfig(cfg.Global)
+	if err := node.SetGlobalConfig(cfg.Global); err != nil {
+		log.Fatal("invalid global configuration", "err", err)
+	}
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
