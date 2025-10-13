@@ -21,6 +21,39 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+var defaultAllowedGovernanceParams = []string{
+	"fees.baseFee",
+	governance.ParamKeyMinimumValidatorStake,
+	governance.ParamKeyStakingAprBps,
+	governance.ParamKeyStakingPayoutPeriodDays,
+	governance.ParamKeyStakingUnbondingDays,
+	governance.ParamKeyStakingMinStakeWei,
+	governance.ParamKeyStakingMaxEmissionPerYearWei,
+	governance.ParamKeyStakingRewardAsset,
+	governance.ParamKeyStakingCompoundDefault,
+	governance.ParamKeyLoyaltyDynamicTargetBps,
+	governance.ParamKeyLoyaltyDynamicMinBps,
+	governance.ParamKeyLoyaltyDynamicMaxBps,
+	governance.ParamKeyLoyaltyDynamicSmoothingStepBps,
+	governance.ParamKeyLoyaltyDynamicCoverageMax,
+	governance.ParamKeyLoyaltyDynamicCoverageLookbackDays,
+	governance.ParamKeyLoyaltyDynamicDailyCapPctOf7dFees,
+	governance.ParamKeyLoyaltyDynamicDailyCapUSD,
+	governance.ParamKeyLoyaltyDynamicYearlyCapPctOfInitialSupply,
+	governance.ParamKeyLoyaltyDynamicPricePair,
+	governance.ParamKeyLoyaltyDynamicPriceTwapWindowSeconds,
+	governance.ParamKeyLoyaltyDynamicPriceMaxAgeSeconds,
+	governance.ParamKeyLoyaltyDynamicPriceMaxDeviationBps,
+	governance.ParamKeyLoyaltyDynamicPriceGuardEnabled,
+	"network.seeds",
+	"potso.abuse.MaxUserShareBps",
+	"potso.abuse.MinStakeToEarnWei",
+	"potso.abuse.QuadraticTxDampenAfter",
+	"potso.abuse.QuadraticTxDampenPower",
+	"potso.rewards.EmissionPerEpochWei",
+	"potso.weights.AlphaStakeBps",
+}
+
 type Config struct {
 	ListenAddress         string          `toml:"ListenAddress"`
 	RPCAddress            string          `toml:"RPCAddress"`
@@ -517,16 +550,7 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		cfg.Governance.PassThresholdBps = 5000
 	}
 	if len(cfg.Governance.AllowedParams) == 0 {
-		cfg.Governance.AllowedParams = []string{
-			"potso.weights.AlphaStakeBps",
-			"potso.rewards.EmissionPerEpochWei",
-			"potso.abuse.MaxUserShareBps",
-			"potso.abuse.MinStakeToEarnWei",
-			"potso.abuse.QuadraticTxDampenAfter",
-			"potso.abuse.QuadraticTxDampenPower",
-			"fees.baseFee",
-			"network.seeds",
-		}
+		cfg.Governance.AllowedParams = append([]string(nil), defaultAllowedGovernanceParams...)
 	}
 
 	cfg.Swap = cfg.Swap.Normalise()
@@ -1160,11 +1184,7 @@ func createDefault(path string, passphrase string) (*Config, error) {
 		TimelockSeconds:     172800,
 		QuorumBps:           2000,
 		PassThresholdBps:    5000,
-		AllowedParams: []string{
-			"potso.weights.AlphaStakeBps",
-			"potso.rewards.EmissionPerEpochWei",
-			"fees.baseFee",
-		},
+		AllowedParams:       append([]string(nil), defaultAllowedGovernanceParams...),
 	}
 	cfg.Global = defaultGlobalConfig()
 	cfg.Consensus = defaultConsensusConfig()
