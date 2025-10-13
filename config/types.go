@@ -183,6 +183,7 @@ type LoyaltyDynamic struct {
 	YearlyCapPctOfInitialSupply float64
 	PriceGuard                  LoyaltyPriceGuard
 	EnableProRate               bool
+	EnforceProRate              bool
 }
 
 // YearlyCapZNHBWei converts the configured annual issuance percentage into an

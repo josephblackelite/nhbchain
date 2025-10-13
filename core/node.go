@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -118,6 +119,7 @@ type Node struct {
 	potsoEngine                  *potso.Engine
 	globalCfgMu                  sync.RWMutex
 	globalCfg                    config.Global
+	networkMode                  string
 
 	posStreamMu      sync.RWMutex
 	posStreamSeq     uint64
@@ -375,6 +377,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				MDRBasisPoints:     config.DefaultMDRBasisPoints,
 			},
 		},
+		networkMode:      strings.TrimSpace(os.Getenv("NHB_ENV")),
 		posStreamSubs:    make(map[uint64]chan POSFinalityUpdate),
 		posStreamHistory: make([]POSFinalityUpdate, 0, posFinalityHistoryLimit),
 	}
@@ -662,13 +665,20 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 // SetGlobalConfig records the last validated global configuration to use when
 // preflighting governance policy proposals. Callers must ensure the
 // configuration has been validated before invoking this method.
-func (n *Node) SetGlobalConfig(cfg config.Global) {
+func (n *Node) SetGlobalConfig(cfg config.Global) error {
 	if n == nil {
-		return
+		return fmt.Errorf("node unavailable")
 	}
+
+	if strings.EqualFold(strings.TrimSpace(n.networkMode), "prod") &&
+		cfg.Loyalty.Dynamic.EnforceProRate && !cfg.Loyalty.Dynamic.EnableProRate {
+		return fmt.Errorf("loyalty: pro-rate mode is enforced in production (loyalty.prorate.locked); set global.loyalty.Dynamic.EnforceProRate=false to override in non-production environments")
+	}
+
 	n.globalCfgMu.Lock()
 	n.globalCfg = cfg
 	n.globalCfgMu.Unlock()
+	return nil
 }
 
 // SyncStakingParams refreshes the staking configuration by loading any

@@ -134,7 +134,9 @@ func main() {
 		panic(fmt.Sprintf("Failed to create node: %v", err))
 	}
 
-	node.SetGlobalConfig(cfg.Global)
+	if err := node.SetGlobalConfig(cfg.Global); err != nil {
+		panic(fmt.Sprintf("Failed to apply global config: %v", err))
+	}
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
