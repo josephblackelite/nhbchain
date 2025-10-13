@@ -14,3 +14,28 @@ values to HTTPS:
 When auto-upgrade is enabled the gateway will transparently rewrite the scheme
 before proxying requests. This keeps production safe by enforcing TLS while
 avoiding downtime during transition periods.
+
+## RPC Authentication Hardening
+
+Nodes now support multiple layers of RPC hardening beyond TLS:
+
+* **Client allowlists.** Populate `RPCAllowlistCIDRs` in `config.toml` to restrict
+  inbound connections to trusted subnets. Requests originating outside the list
+  are rejected before handler execution.
+* **Reverse proxy headers.** Only set `RPCProxyHeaders.XForwardedFor` or
+  `RPCProxyHeaders.XRealIP` when the node sits behind a trusted proxy whose IP is
+  listed in `RPCTrustedProxies`. The default (`ignore`) causes spoofed headers to
+  fail the request.
+* **JWT bearer tokens.** Configure `RPCJWT` with either an environment-derived
+  HMAC secret (`HSSecretEnv`) or an RSA public key (`RSAPublicKeyFile`). Issued
+  tokens must present matching `iss`/`aud` claims and remain within the
+  configured skew window. Rotate secrets regularly and avoid distributing static
+  `NHB_RPC_TOKEN` strings to untrusted infrastructure.
+* **Mutual TLS.** Set `RPCTLSClientCAFile` to require client certificates from
+  wallets, custodians, or gateways. When mTLS is enabled the node accepts either
+  a valid client certificate or a JWT that satisfies the configured policy.
+
+Swap HMAC authentication retains the existing defaults (±120 seconds skew,
+10-minute nonce TTL) but can be tuned via the `swapAuth` block in `config.toml`
+to match partner integration requirements. Keep nonce caches large enough to
+handle burst traffic while preventing replay amplification.

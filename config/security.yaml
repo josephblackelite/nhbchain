@@ -14,5 +14,19 @@ node:
   RPCTLSCertFile: /etc/nhb/rpc/rpc.crt
   RPCTLSKeyFile: /etc/nhb/rpc/rpc.key
   RPCTLSClientCAFile: /etc/nhb/rpc/clients-ca.pem
+  RPCAllowlistCIDRs:
+    - 10.0.0.0/24
+    - 192.168.10.0/24
+  RPCProxyHeaders:
+    XForwardedFor: single
+    XRealIP: ignore
+  RPCJWT:
+    Enable: true
+    Alg: HS256
+    HSSecretEnv: NHB_RPC_JWT_SECRET
+    Issuer: nhb-rpc
+    Audience:
+      - wallets
+    MaxSkewSeconds: 120
   # DEV ONLY: gate plaintext RPC to loopback when running locally.
   RPCAllowInsecure: false

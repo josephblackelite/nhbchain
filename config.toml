@@ -70,6 +70,19 @@ RPCAllowInsecure = false
 RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
 RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
 RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
+RPCAllowlistCIDRs = ["10.10.0.0/16", "192.168.0.0/24"]
+
+[RPCProxyHeaders]
+XForwardedFor = "ignore"
+XRealIP = "ignore"
+
+[RPCJWT]
+Enable = true
+Alg = "HS256"
+HSSecretEnv = "NHB_RPC_JWT_SECRET"
+Issuer = "nhb-rpc"
+Audience = ["wallets"]
+MaxSkewSeconds = 120
 
 [global.pauses]
 Staking = false

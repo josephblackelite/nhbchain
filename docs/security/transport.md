@@ -62,6 +62,19 @@ RPCAllowInsecure = false
 RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
 RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
 RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
+RPCAllowlistCIDRs = ["10.0.0.0/24", "192.168.10.0/24"]
+
+[RPCProxyHeaders]
+XForwardedFor = "single"
+XRealIP = "ignore"
+
+[RPCJWT]
+Enable = true
+Alg = "HS256"
+HSSecretEnv = "NHB_RPC_JWT_SECRET"
+Issuer = "nhb-rpc"
+Audience = ["wallets", "custody"]
+MaxSkewSeconds = 120
 ```
 
 * Leaving `RPCAllowInsecure = false` forces TLS. The process exits if the key or
@@ -70,6 +83,16 @@ RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
   server still verifies the listener is loopback and refuses to bind otherwise.
 * Populate `RPCTLSClientCAFile` to require mutual TLS from wallets, custodians,
   or proxies connecting to the RPC port.
+* `RPCAllowlistCIDRs` restricts clients to specific subnets. Requests originating
+  from outside these ranges are rejected before handler execution.
+* `RPCProxyHeaders` opts into reverse-proxy header handling. Set
+  `XForwardedFor = "single"` when terminating TLS behind a trusted proxy and list
+  its address in `RPCTrustedProxies`. Leave both values as `ignore` to reject
+  spoofed headers.
+* `RPCJWT` enables signed bearer tokens. Operators should rotate the secret
+  referenced by `HSSecretEnv` (or provide a PEM file via `RSAPublicKeyFile` when
+  using RS256), and issue tokens with matching `Issuer`/`Audience` claims. Expiry
+  and not-before checks apply with the configured skew window.
 
 After restarting the node, validate the transport:
 
@@ -90,8 +113,9 @@ grpcurl -cacert clients-ca.pem \
 
 HMAC protected routes enforce tighter bounds:
 
-* Maximum timestamp skew: 120 seconds.
-* Nonce TTL: 10 minutes.
+* Maximum timestamp skew defaults to 120 seconds and is tunable via
+  `swapAuth.allowedTimestampSkew` in the node configuration.
+* Nonce TTL defaults to 10 minutes and is tunable via `swapAuth.nonceTTL`.
 * Nonce caches: bounded LRU per API key to 65,536 entries.
 
 These limits stop replay amplification while keeping retry budgets predictable.
