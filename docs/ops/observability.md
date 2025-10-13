@@ -47,6 +47,8 @@ Use the loyalty dashboard to understand when the pro-rate guardrail is active an
 - **Queued Demand (`loyalty_demand_zn`)** mirrors the pending payout total collected at `EndBlockRewards`. Rising demand with a flat budget hints that future blocks will be prorated.
 - **Prorate Ratio (`loyalty_prorate_ratio`)** exposes the applied multiplier (1.0 means 100% payout). Values below `1` confirm that pro-rate mode has engaged and the ratio reflected in the `LoyaltyBudgetProRated` event was emitted.
 - **Paid Today (`loyalty_paid_today_zn`)** increments as payouts land. The series resets on the UTC day boundary; if it fails to reset, inspect the day-rollover cron or block timestamps.
+- **Prorate Hits (`loyalty_budget_events_total`)** counts the number of blocks that emitted `LoyaltyBudgetProRated`. Alert when the counter grows faster than normal fee inflows.
+- **Price Guard (`loyalty_price_guard_deviation_bps`, `loyalty_price_guard_fallback_total`)** surfaces TWAP deviation and fallback activations. Pair this with `nhb_oracle_update_age_seconds` on the Oracle Health dashboard to distinguish stale-data pauses from legitimate demand spikes.
 
 When `loyalty_prorate_ratio` drops under `1`, correlate the timestamp with `LoyaltyBudgetProRated` events and treasury balances to validate that proration is expected and not the result of price-guard failures.
 
