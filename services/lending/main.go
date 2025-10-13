@@ -71,7 +71,7 @@ func main() {
 	cfg := LoadConfigFromEnv()
 
 	flag.StringVar(&cfg.NodeRPCURL, "node-rpc-url", cfg.NodeRPCURL, "URL for the node RPC endpoint")
-	flag.StringVar(&cfg.NodeRPCToken, "node-rpc-token", cfg.NodeRPCToken, "bearer token for node RPC requests")
+	flag.StringVar(&cfg.NodeRPCToken, "node-rpc-token", cfg.NodeRPCToken, "JWT or bearer token for node RPC requests")
 	flag.StringVar(&cfg.SharedSecretHeader, "shared-secret-header", cfg.SharedSecretHeader, "metadata header carrying the shared secret")
 	flag.StringVar(&cfg.SharedSecretValue, "shared-secret", cfg.SharedSecretValue, "shared secret required for token authentication")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "path to the TLS certificate for lendingd")

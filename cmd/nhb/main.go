@@ -394,6 +394,20 @@ func main() {
 	rpcServer := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
+		AllowlistCIDRs:    append([]string{}, cfg.RPCAllowlistCIDRs...),
+		ProxyHeaders: rpc.ProxyHeadersConfig{
+			XForwardedFor: rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XForwardedFor)),
+			XRealIP:       rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XRealIP)),
+		},
+		JWT: rpc.JWTConfig{
+			Enable:           cfg.RPCJWT.Enable,
+			Alg:              cfg.RPCJWT.Alg,
+			HSSecretEnv:      cfg.RPCJWT.HSSecretEnv,
+			RSAPublicKeyFile: cfg.RPCJWT.RSAPublicKeyFile,
+			Issuer:           cfg.RPCJWT.Issuer,
+			Audience:         append([]string{}, cfg.RPCJWT.Audience...),
+			MaxSkewSeconds:   cfg.RPCJWT.MaxSkewSeconds,
+		},
 		ReadHeaderTimeout: time.Duration(cfg.RPCReadHeaderTimeout) * time.Second,
 		ReadTimeout:       time.Duration(cfg.RPCReadTimeout) * time.Second,
 		WriteTimeout:      time.Duration(cfg.RPCWriteTimeout) * time.Second,

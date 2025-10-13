@@ -3,11 +3,13 @@ package rpc
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +38,8 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -94,6 +98,37 @@ type SwapAuthConfig struct {
 	Now                  func() time.Time
 }
 
+// ProxyHeaderMode defines how the server treats reverse proxy headers that can
+// influence client IP resolution.
+type ProxyHeaderMode string
+
+const (
+	// ProxyHeaderModeIgnore instructs the server to reject requests that
+	// attempt to supply the corresponding header.
+	ProxyHeaderModeIgnore ProxyHeaderMode = "ignore"
+	// ProxyHeaderModeSingle trusts the header only when a single client
+	// address is provided.
+	ProxyHeaderModeSingle ProxyHeaderMode = "single"
+)
+
+// ProxyHeadersConfig captures header handling policies for reverse proxy
+// metadata that can influence client attribution.
+type ProxyHeadersConfig struct {
+	XForwardedFor ProxyHeaderMode
+	XRealIP       ProxyHeaderMode
+}
+
+// JWTConfig configures bearer token validation for RPC requests.
+type JWTConfig struct {
+	Enable           bool
+	Alg              string
+	HSSecretEnv      string
+	RSAPublicKeyFile string
+	Issuer           string
+	Audience         []string
+	MaxSkewSeconds   int64
+}
+
 // ServerConfig controls optional behaviours of the RPC server.
 type ServerConfig struct {
 	// TrustProxyHeaders, when set, will cause the server to honour proxy
@@ -105,6 +140,14 @@ type ServerConfig struct {
 	// client requests. When a request originates from one of these proxies the
 	// server will honour X-Forwarded-For headers.
 	TrustedProxies []string
+	// AllowlistCIDRs enumerates client IP ranges permitted to access the RPC
+	// server. When empty, all clients are allowed.
+	AllowlistCIDRs []string
+	// ProxyHeaders configures handling of reverse proxy headers such as
+	// X-Forwarded-For and X-Real-IP.
+	ProxyHeaders ProxyHeadersConfig
+	// JWT configures bearer token authentication for RPC requests.
+	JWT JWTConfig
 	// ReadHeaderTimeout specifies how long the server waits for headers.
 	ReadHeaderTimeout time.Duration
 	// ReadTimeout bounds the duration permitted to read the full request.
@@ -159,7 +202,12 @@ type Server struct {
 	tlsCertFile       string
 	tlsKeyFile        string
 	clientCAFile      string
+	requireClientCert bool
 	allowInsecure     bool
+	proxyPolicy       proxyPolicy
+	allowlist         []*net.IPNet
+	jwtVerifier       *jwtVerifier
+	jwtVerifierErr    error
 
 	swapAuth          *gatewayauth.Authenticator
 	swapPartnerLimits map[string]int
@@ -182,6 +230,35 @@ type Server struct {
 	posRealtime *FinalityStream
 }
 
+type proxyPolicy struct {
+	xForwardedFor ProxyHeaderMode
+	xRealIP       ProxyHeaderMode
+}
+
+type jwtVerifier struct {
+	method   jwt.SigningMethod
+	key      interface{}
+	issuer   string
+	audience []string
+	leeway   time.Duration
+	now      func() time.Time
+}
+
+type contextKey string
+
+const clientIPContextKey contextKey = "rpc_client_ip"
+
+func normalizeProxyMode(mode ProxyHeaderMode) ProxyHeaderMode {
+	switch strings.ToLower(string(mode)) {
+	case "", string(ProxyHeaderModeIgnore):
+		return ProxyHeaderModeIgnore
+	case string(ProxyHeaderModeSingle):
+		return ProxyHeaderModeSingle
+	default:
+		return ProxyHeaderModeIgnore
+	}
+}
+
 func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Server {
 	token := strings.TrimSpace(os.Getenv("NHB_RPC_TOKEN"))
 	trusted := make(map[string]struct{}, len(cfg.TrustedProxies))
@@ -197,6 +274,39 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		trusted[trimmed] = struct{}{}
 		count++
 	}
+	policy := proxyPolicy{
+		xForwardedFor: normalizeProxyMode(cfg.ProxyHeaders.XForwardedFor),
+		xRealIP:       normalizeProxyMode(cfg.ProxyHeaders.XRealIP),
+	}
+	allowlist := make([]*net.IPNet, 0, len(cfg.AllowlistCIDRs))
+	for _, entry := range cfg.AllowlistCIDRs {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "/") {
+			if _, network, err := net.ParseCIDR(trimmed); err == nil {
+				allowlist = append(allowlist, network)
+			}
+			continue
+		}
+		ip := net.ParseIP(trimmed)
+		if ip == nil {
+			continue
+		}
+		bits := 128
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+			bits = 32
+		}
+		allowlist = append(allowlist, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	var jwtVerifier *jwtVerifier
+	var jwtErr error
+	if cfg.JWT.Enable {
+		jwtVerifier, jwtErr = newJWTVerifier(cfg.JWT)
+	}
+	clientCAPath := strings.TrimSpace(cfg.TLSClientCAFile)
 	var swapAuth *gatewayauth.Authenticator
 	swapLimits := make(map[string]int)
 	swapWindow := cfg.SwapAuth.RateLimitWindow
@@ -269,8 +379,13 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		idleTimeout:       cfg.IdleTimeout,
 		tlsCertFile:       strings.TrimSpace(cfg.TLSCertFile),
 		tlsKeyFile:        strings.TrimSpace(cfg.TLSKeyFile),
-		clientCAFile:      strings.TrimSpace(cfg.TLSClientCAFile),
+		clientCAFile:      clientCAPath,
+		requireClientCert: clientCAPath != "",
 		allowInsecure:     cfg.AllowInsecure,
+		proxyPolicy:       policy,
+		allowlist:         allowlist,
+		jwtVerifier:       jwtVerifier,
+		jwtVerifierErr:    jwtErr,
 		swapAuth:          swapAuth,
 		swapPartnerLimits: swapLimits,
 		swapRateWindow:    swapWindow,
@@ -283,6 +398,150 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		srv.posRealtime = NewFinalityStream(node)
 	}
 	return srv
+}
+
+func newJWTVerifier(cfg JWTConfig) (*jwtVerifier, error) {
+	method := strings.ToUpper(strings.TrimSpace(cfg.Alg))
+	if method == "" {
+		method = jwt.SigningMethodHS256.Alg()
+	}
+
+	issuer := strings.TrimSpace(cfg.Issuer)
+	if issuer == "" {
+		return nil, errors.New("JWT issuer is required")
+	}
+	audiences := make([]string, 0, len(cfg.Audience))
+	for _, aud := range cfg.Audience {
+		trimmed := strings.TrimSpace(aud)
+		if trimmed != "" {
+			audiences = append(audiences, trimmed)
+		}
+	}
+	if len(audiences) == 0 {
+		return nil, errors.New("at least one JWT audience is required")
+	}
+
+	var signingMethod jwt.SigningMethod
+	var key interface{}
+	switch method {
+	case jwt.SigningMethodHS256.Alg():
+		envKey := strings.TrimSpace(cfg.HSSecretEnv)
+		if envKey == "" {
+			return nil, errors.New("HS256 requires HSSecretEnv to be set")
+		}
+		secret := strings.TrimSpace(os.Getenv(envKey))
+		if secret == "" {
+			return nil, fmt.Errorf("JWT secret environment variable %s is empty", envKey)
+		}
+		signingMethod = jwt.SigningMethodHS256
+		key = []byte(secret)
+	case jwt.SigningMethodRS256.Alg():
+		path := strings.TrimSpace(cfg.RSAPublicKeyFile)
+		if path == "" {
+			return nil, errors.New("RS256 requires RSAPublicKeyFile to be set")
+		}
+		pemData, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read RSA public key: %w", err)
+		}
+		rsaKey, err := parseRSAPublicKey(pemData)
+		if err != nil {
+			return nil, err
+		}
+		signingMethod = jwt.SigningMethodRS256
+		key = rsaKey
+	default:
+		return nil, fmt.Errorf("unsupported JWT algorithm %q", method)
+	}
+
+	leeway := time.Duration(cfg.MaxSkewSeconds) * time.Second
+	if cfg.MaxSkewSeconds <= 0 {
+		leeway = 30 * time.Second
+	}
+	verifier := &jwtVerifier{
+		method:   signingMethod,
+		key:      key,
+		issuer:   issuer,
+		audience: audiences,
+		leeway:   leeway,
+		now:      time.Now,
+	}
+	return verifier, nil
+}
+
+func parseRSAPublicKey(data []byte) (*rsa.PublicKey, error) {
+	for {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			break
+		}
+		data = rest
+		switch block.Type {
+		case "PUBLIC KEY":
+			pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+			if err != nil {
+				return nil, fmt.Errorf("parse RSA public key: %w", err)
+			}
+			rsaKey, ok := pub.(*rsa.PublicKey)
+			if !ok {
+				return nil, errors.New("parsed public key is not RSA")
+			}
+			return rsaKey, nil
+		case "RSA PUBLIC KEY":
+			rsaKey, err := x509.ParsePKCS1PublicKey(block.Bytes)
+			if err != nil {
+				return nil, fmt.Errorf("parse PKCS1 RSA public key: %w", err)
+			}
+			return rsaKey, nil
+		}
+	}
+	return nil, errors.New("no RSA public key found in PEM data")
+}
+
+func (v *jwtVerifier) Verify(token string) error {
+	if v == nil {
+		return errors.New("JWT verifier not configured")
+	}
+	opts := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{v.method.Alg()}),
+		jwt.WithIssuer(v.issuer),
+	}
+	if v.leeway > 0 {
+		opts = append(opts, jwt.WithLeeway(v.leeway))
+	}
+	if v.now != nil {
+		opts = append(opts, jwt.WithTimeFunc(func() time.Time { return v.now() }))
+	}
+	claims := &jwt.RegisteredClaims{}
+	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
+		return v.key, nil
+	}, opts...)
+	if err != nil {
+		return err
+	}
+	if !parsed.Valid {
+		return errors.New("token validation failed")
+	}
+	if len(v.audience) > 0 {
+		if claims, ok := parsed.Claims.(*jwt.RegisteredClaims); ok {
+			matched := false
+			for _, aud := range v.audience {
+				for _, claimAud := range claims.Audience {
+					if strings.EqualFold(claimAud, aud) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				return errors.New("token audience mismatch")
+			}
+		}
+	}
+	return nil
 }
 
 // ConfigureStableEngine wires the experimental stable engine into the RPC surface.
@@ -624,6 +883,18 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
+
+	clientIP, err := s.resolveClientIP(r)
+	if err != nil {
+		writeError(w, http.StatusForbidden, nil, codeUnauthorized, "invalid client address", err.Error())
+		return
+	}
+	if !s.isClientAllowed(clientIP) {
+		writeError(w, http.StatusForbidden, nil, codeUnauthorized, "client address not allowed", nil)
+		return
+	}
+	ctx := context.WithValue(r.Context(), clientIPContextKey, clientIP)
+	r = r.WithContext(ctx)
 
 	body, err := io.ReadAll(reader)
 	if err != nil {
@@ -1473,24 +1744,70 @@ func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) requireAuth(r *http.Request) *RPCError {
+	if s.requireClientCert && hasVerifiedClientCert(r) {
+		return nil
+	}
+	if s.jwtVerifierErr != nil {
+		return &RPCError{Code: codeUnauthorized, Message: "JWT authentication misconfigured", Data: s.jwtVerifierErr.Error()}
+	}
+	if s.jwtVerifier != nil {
+		token, err := extractBearerToken(r.Header.Get("Authorization"))
+		if err != nil {
+			return &RPCError{Code: codeUnauthorized, Message: err.Error()}
+		}
+		if err := s.jwtVerifier.Verify(token); err != nil {
+			return &RPCError{Code: codeUnauthorized, Message: "invalid JWT", Data: err.Error()}
+		}
+		return nil
+	}
 	if s.authToken == "" {
 		return &RPCError{Code: codeUnauthorized, Message: "RPC authentication token not configured"}
 	}
-	header := r.Header.Get("Authorization")
-	if header == "" {
-		return &RPCError{Code: codeUnauthorized, Message: "missing Authorization header"}
-	}
-	if !strings.HasPrefix(header, "Bearer ") {
-		return &RPCError{Code: codeUnauthorized, Message: "Authorization header must use Bearer scheme"}
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-	if token == "" {
-		return &RPCError{Code: codeUnauthorized, Message: "missing bearer token"}
+	token, err := extractBearerToken(r.Header.Get("Authorization"))
+	if err != nil {
+		return &RPCError{Code: codeUnauthorized, Message: err.Error()}
 	}
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) != 1 {
 		return &RPCError{Code: codeUnauthorized, Message: "invalid RPC credentials"}
 	}
 	return nil
+}
+
+func extractBearerToken(header string) (string, error) {
+	if header == "" {
+		return "", errors.New("missing Authorization header")
+	}
+	if !strings.HasPrefix(header, "Bearer ") {
+		return "", errors.New("Authorization header must use Bearer scheme")
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	if token == "" {
+		return "", errors.New("missing bearer token")
+	}
+	return token, nil
+}
+
+func hasVerifiedClientCert(r *http.Request) bool {
+	if r == nil || r.TLS == nil {
+		return false
+	}
+	if len(r.TLS.VerifiedChains) > 0 {
+		return true
+	}
+	if len(r.TLS.PeerCertificates) > 0 && r.TLS.HandshakeComplete {
+		return true
+	}
+	return false
+}
+
+// TestRequireAuth exposes the internal authentication helper for integration tests.
+func (s *Server) TestRequireAuth(r *http.Request) *RPCError {
+	return s.requireAuth(r)
+}
+
+// TestAuthenticateSwap exposes the swap authenticator for integration tests.
+func (s *Server) TestAuthenticateSwap(r *http.Request, body []byte) (*gatewayauth.Principal, error) {
+	return s.authenticateSwapRequest(r, body)
 }
 
 func (s *Server) authenticateSwapRequest(r *http.Request, body []byte) (*gatewayauth.Principal, error) {
@@ -1659,27 +1976,105 @@ func (s *Server) evictExpiredTxLocked(now time.Time) {
 	}
 }
 
-func (s *Server) clientSource(r *http.Request) string {
+func (s *Server) resolveClientIP(r *http.Request) (string, error) {
 	host := r.RemoteAddr
 	if splitHost, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		host = splitHost
 	}
 	host = canonicalHost(host)
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if s.trustProxyHeaders || s.isTrustedProxy(host) {
-			parts := strings.Split(forwarded, ",")
-			for i, part := range parts {
-				if i >= maxForwardedForAddrs {
-					break
-				}
-				candidate := canonicalHost(part)
-				if candidate != "" {
-					return candidate
-				}
+	if host == "" {
+		return "", errors.New("unable to determine remote address")
+	}
+
+	trusted := s.trustProxyHeaders || s.isTrustedProxy(host)
+	forwardedValues := r.Header.Values("X-Forwarded-For")
+	if len(forwardedValues) > 0 {
+		if s.proxyPolicy.xForwardedFor == ProxyHeaderModeIgnore {
+			return "", errors.New("X-Forwarded-For header is not permitted")
+		}
+		if !trusted {
+			return "", fmt.Errorf("X-Forwarded-For header received from untrusted peer %s", host)
+		}
+		parts := parseForwardedFor(forwardedValues)
+		if len(parts) == 0 {
+			return "", errors.New("X-Forwarded-For header did not contain any addresses")
+		}
+		if s.proxyPolicy.xForwardedFor == ProxyHeaderModeSingle && len(parts) != 1 {
+			return "", errors.New("X-Forwarded-For must contain exactly one address")
+		}
+		if len(parts) > maxForwardedForAddrs {
+			return "", fmt.Errorf("X-Forwarded-For contains more than %d addresses", maxForwardedForAddrs)
+		}
+		candidate := canonicalHost(parts[0])
+		if candidate == "" {
+			return "", errors.New("X-Forwarded-For contained an invalid address")
+		}
+		return candidate, nil
+	}
+
+	realIP := strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	if realIP != "" {
+		if s.proxyPolicy.xRealIP == ProxyHeaderModeIgnore {
+			return "", errors.New("X-Real-IP header is not permitted")
+		}
+		if !trusted {
+			return "", fmt.Errorf("X-Real-IP header received from untrusted peer %s", host)
+		}
+		if strings.Contains(realIP, ",") {
+			return "", errors.New("X-Real-IP header must not contain multiple addresses")
+		}
+		candidate := canonicalHost(realIP)
+		if candidate == "" {
+			return "", errors.New("X-Real-IP contained an invalid address")
+		}
+		return candidate, nil
+	}
+
+	return host, nil
+}
+
+func parseForwardedFor(values []string) []string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		segments := strings.Split(value, ",")
+		for _, segment := range segments {
+			trimmed := strings.TrimSpace(segment)
+			if trimmed != "" {
+				parts = append(parts, trimmed)
 			}
 		}
 	}
-	return host
+	return parts
+}
+
+func (s *Server) clientSource(r *http.Request) string {
+	if value, ok := r.Context().Value(clientIPContextKey).(string); ok && value != "" {
+		return value
+	}
+	source, err := s.resolveClientIP(r)
+	if err != nil {
+		return ""
+	}
+	return source
+}
+
+func (s *Server) isClientAllowed(ip string) bool {
+	if len(s.allowlist) == 0 {
+		return true
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, network := range s.allowlist {
+		if network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) isTrustedProxy(host string) bool {

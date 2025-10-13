@@ -59,6 +59,9 @@ type Config struct {
 	RPCAddress            string          `toml:"RPCAddress"`
 	RPCTrustedProxies     []string        `toml:"RPCTrustedProxies"`
 	RPCTrustProxyHeaders  bool            `toml:"RPCTrustProxyHeaders"`
+	RPCAllowlistCIDRs     []string        `toml:"RPCAllowlistCIDRs"`
+	RPCProxyHeaders       RPCProxyHeaders `toml:"RPCProxyHeaders"`
+	RPCJWT                RPCJWT          `toml:"RPCJWT"`
 	RPCReadHeaderTimeout  int             `toml:"RPCReadHeaderTimeout"`
 	RPCReadTimeout        int             `toml:"RPCReadTimeout"`
 	RPCWriteTimeout       int             `toml:"RPCWriteTimeout"`

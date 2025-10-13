@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,14 +20,23 @@ import (
 	"nhbchain/storage"
 )
 
-func TestClientSourceIgnoresForwardedForWhenNotTrusted(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+func injectClientIP(t *testing.T, srv *Server, req *http.Request) *http.Request {
+	t.Helper()
+	ip, err := srv.resolveClientIP(req)
+	if err != nil {
+		t.Fatalf("resolve client ip: %v", err)
+	}
+	ctx := context.WithValue(req.Context(), clientIPContextKey, ip)
+	return req.WithContext(ctx)
+}
+
+func TestResolveClientIPRejectsUntrustedForwardedFor(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{ProxyHeaders: ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle}})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.5:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
-
-	if source := server.clientSource(req); source != "10.0.0.5" {
-		t.Fatalf("expected remote address, got %q", source)
+	if _, err := server.resolveClientIP(req); err == nil || !strings.Contains(err.Error(), "untrusted") {
+		t.Fatalf("expected untrusted proxy error, got %v", err)
 	}
 }
 
@@ -127,51 +137,38 @@ func (l *addrOverrideListener) Addr() net.Addr {
 }
 
 func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
+	server := NewServer(nil, nil, ServerConfig{
+		TrustedProxies: []string{"10.0.0.1"},
+		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
+	})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")
-
+	req = injectClientIP(t, server, req)
 	if source := server.clientSource(req); source != "198.51.100.7" {
 		t.Fatalf("expected forwarded client, got %q", source)
 	}
 }
 
 func TestClientSourceHonorsForwardedForWhenTrustFlagEnabled(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{TrustProxyHeaders: true})
+	server := NewServer(nil, nil, ServerConfig{
+		TrustProxyHeaders: true,
+		ProxyHeaders:      ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
+	})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "192.0.2.10:7000"
 	req.Header.Set("X-Forwarded-For", "198.51.100.8")
-
+	req = injectClientIP(t, server, req)
 	if source := server.clientSource(req); source != "198.51.100.8" {
 		t.Fatalf("expected forwarded client, got %q", source)
 	}
 }
 
-func TestRateLimitSpoofedForwardedFor(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
-	now := time.Now()
-	remoteAddr := "10.1.1.1:9000"
-
-	for i := 0; i < maxTxPerWindow; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/", nil)
-		req.RemoteAddr = remoteAddr
-		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
-		if !server.allowSource(server.clientSource(req), now) {
-			t.Fatalf("request %d should not be rate limited", i)
-		}
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/", nil)
-	req.RemoteAddr = remoteAddr
-	req.Header.Set("X-Forwarded-For", "198.51.100.250")
-	if server.allowSource(server.clientSource(req), now) {
-		t.Fatalf("spoofed forwarded-for should not bypass rate limiting")
-	}
-}
-
 func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
+	server := NewServer(nil, nil, ServerConfig{
+		TrustedProxies: []string{"10.0.0.1"},
+		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
+	})
 	now := time.Now()
 	remoteAddr := "10.0.0.1:5000"
 
@@ -180,6 +177,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("X-Forwarded-For", forwarded)
+		req = injectClientIP(t, server, req)
 		if !server.allowSource(server.clientSource(req), now) {
 			t.Fatalf("trusted proxy request %d should be allowed", i)
 		}
@@ -188,6 +186,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = remoteAddr
 	req.Header.Set("X-Forwarded-For", forwarded)
+	req = injectClientIP(t, server, req)
 	if server.allowSource(server.clientSource(req), now) {
 		t.Fatalf("expected rate limit when exceeding window for same client")
 	}
@@ -195,35 +194,40 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = remoteAddr
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
+	req = injectClientIP(t, server, req)
 	if !server.allowSource(server.clientSource(req), now) {
 		t.Fatalf("distinct client behind trusted proxy should be allowed")
 	}
 }
 
 func TestClientSourceCanonicalizesForwardedFor(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
+	server := NewServer(nil, nil, ServerConfig{
+		TrustedProxies: []string{"10.0.0.1"},
+		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
+	})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.1:8000"
 	req.Header.Set("X-Forwarded-For", " 198.51.100.9:443 ")
-
+	req = injectClientIP(t, server, req)
 	if source := server.clientSource(req); source != "198.51.100.9" {
 		t.Fatalf("expected canonical forwarded client, got %q", source)
 	}
 }
 
 func TestClientSourceCapsForwardedForChain(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{TrustedProxies: []string{"10.0.0.1"}})
+	server := NewServer(nil, nil, ServerConfig{
+		TrustedProxies: []string{"10.0.0.1"},
+		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
+	})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.1:8000"
 	parts := make([]string, maxForwardedForAddrs+1)
 	for i := range parts {
-		parts[i] = " "
+		parts[i] = " 198.51.100.9 "
 	}
-	parts[len(parts)-1] = "198.51.100.10"
 	req.Header.Set("X-Forwarded-For", strings.Join(parts, ","))
-
-	if source := server.clientSource(req); source != "10.0.0.1" {
-		t.Fatalf("expected proxy address fallback when forwarded chain exceeds limit, got %q", source)
+	if _, err := server.resolveClientIP(req); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("expected forwarded chain rejection, got %v", err)
 	}
 }
 

@@ -21,6 +21,17 @@ func (s *Server) handlePOSFinalityWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	clientIP, err := s.resolveClientIP(r)
+	if err != nil {
+		http.Error(w, "invalid client address", http.StatusForbidden)
+		return
+	}
+	if !s.isClientAllowed(clientIP) {
+		http.Error(w, "client address not allowed", http.StatusForbidden)
+		return
+	}
+	ctx := context.WithValue(r.Context(), clientIPContextKey, clientIP)
+	r = r.WithContext(ctx)
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
 	if err != nil {

@@ -12,6 +12,23 @@ const (
 	DefaultMDRBasisPoints     = uint32(150)
 )
 
+// RPCProxyHeaders configures reverse proxy header handling for the public RPC endpoint.
+type RPCProxyHeaders struct {
+	XForwardedFor string `toml:"XForwardedFor"`
+	XRealIP       string `toml:"XRealIP"`
+}
+
+// RPCJWT captures JWT validation settings enforced by the RPC server.
+type RPCJWT struct {
+	Enable           bool     `toml:"Enable"`
+	Alg              string   `toml:"Alg"`
+	HSSecretEnv      string   `toml:"HSSecretEnv"`
+	RSAPublicKeyFile string   `toml:"RSAPublicKeyFile"`
+	Issuer           string   `toml:"Issuer"`
+	Audience         []string `toml:"Audience"`
+	MaxSkewSeconds   int64    `toml:"MaxSkewSeconds"`
+}
+
 // Governance captures global governance policy knobs that must be validated
 // before applying runtime configuration updates.
 type Governance struct {

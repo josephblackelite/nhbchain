@@ -44,6 +44,7 @@ MaxMsgsPerSecond = 12.5
 ClientVersion = "nhbchain/test"
 RPCTrustedProxies = ["10.0.0.1"]
 RPCTrustProxyHeaders = true
+RPCAllowlistCIDRs = ["203.0.113.0/24"]
 RPCReadHeaderTimeout = 6
 RPCReadTimeout = 20
 RPCWriteTimeout = 18
@@ -52,6 +53,18 @@ RPCAllowInsecure = true
 RPCTLSCertFile = "/path/to/cert.pem"
 RPCTLSKeyFile = "/path/to/key.pem"
 RPCTLSClientCAFile = "/path/to/clients.pem"
+
+[RPCProxyHeaders]
+XForwardedFor = "single"
+XRealIP = "ignore"
+
+[RPCJWT]
+Enable = true
+Alg = "RS256"
+RSAPublicKeyFile = "/path/to/jwt.pub"
+Issuer = "rpc-service"
+Audience = ["wallets", "partners"]
+MaxSkewSeconds = 90
 
 [network_security]
 SharedSecret = "topsecret"
@@ -121,6 +134,21 @@ PEX = false
 	}
 	if !cfg.RPCTrustProxyHeaders {
 		t.Fatalf("expected RPCTrustProxyHeaders to be true")
+	}
+	if len(cfg.RPCAllowlistCIDRs) != 1 || cfg.RPCAllowlistCIDRs[0] != "203.0.113.0/24" {
+		t.Fatalf("unexpected RPC allowlist: %v", cfg.RPCAllowlistCIDRs)
+	}
+	if cfg.RPCProxyHeaders.XForwardedFor != "single" || cfg.RPCProxyHeaders.XRealIP != "ignore" {
+		t.Fatalf("unexpected proxy header policy: %+v", cfg.RPCProxyHeaders)
+	}
+	if !cfg.RPCJWT.Enable || cfg.RPCJWT.Alg != "RS256" || cfg.RPCJWT.RSAPublicKeyFile != "/path/to/jwt.pub" {
+		t.Fatalf("unexpected RPC JWT config: %+v", cfg.RPCJWT)
+	}
+	if cfg.RPCJWT.Issuer != "rpc-service" || len(cfg.RPCJWT.Audience) != 2 {
+		t.Fatalf("unexpected RPC JWT issuer/audience: %+v", cfg.RPCJWT)
+	}
+	if cfg.RPCJWT.MaxSkewSeconds != 90 {
+		t.Fatalf("unexpected RPC JWT skew: %d", cfg.RPCJWT.MaxSkewSeconds)
 	}
 	if cfg.RPCReadHeaderTimeout != 6 {
 		t.Fatalf("unexpected RPC read header timeout: %d", cfg.RPCReadHeaderTimeout)
