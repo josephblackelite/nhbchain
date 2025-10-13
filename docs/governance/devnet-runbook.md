@@ -54,7 +54,38 @@ VotingPeriodSeconds = 120
 TimelockSeconds = 60
 QuorumBps = 3000
 PassThresholdBps = 5000
-AllowedParams = ["fees.baseFee"]
+AllowedParams = [
+  "fees.baseFee",
+  "staking.minimumValidatorStake",
+  "staking.aprBps",
+  "staking.payoutPeriodDays",
+  "staking.unbondingDays",
+  "staking.minStakeWei",
+  "staking.maxEmissionPerYearWei",
+  "staking.rewardAsset",
+  "staking.compoundDefault",
+  "loyalty.dynamic.targetBps",
+  "loyalty.dynamic.minBps",
+  "loyalty.dynamic.maxBps",
+  "loyalty.dynamic.smoothingStepBps",
+  "loyalty.dynamic.coverageMax",
+  "loyalty.dynamic.coverageLookbackDays",
+  "loyalty.dynamic.dailyCapPctOf7dFees",
+  "loyalty.dynamic.dailyCapUsd",
+  "loyalty.dynamic.yearlyCapPctOfInitialSupply",
+  "loyalty.dynamic.priceGuard.pricePair",
+  "loyalty.dynamic.priceGuard.twapWindowSeconds",
+  "loyalty.dynamic.priceGuard.priceMaxAgeSeconds",
+  "loyalty.dynamic.priceGuard.maxDeviationBps",
+  "loyalty.dynamic.priceGuard.enabled",
+  "network.seeds",
+  "potso.abuse.MaxUserShareBps",
+  "potso.abuse.MinStakeToEarnWei",
+  "potso.abuse.QuadraticTxDampenAfter",
+  "potso.abuse.QuadraticTxDampenPower",
+  "potso.rewards.EmissionPerEpochWei",
+  "potso.weights.AlphaStakeBps",
+]
 
 [potso.rewards]
 EpochLengthBlocks = 1
