@@ -1,0 +1,127 @@
+ListenAddress = ":6001"
+RPCAddress = ":8080"
+DataDir = "/var/lib/nhb"
+GenesisFile = "/etc/nhb/genesis.json"
+AllowAutogenesis = false
+ValidatorKeystorePath = "/etc/nhb/validator.keys"
+ValidatorKMSURI = "kms://validator"
+ValidatorKMSEnv = "prod"
+NetworkName = "nhb-mainnet"
+
+[mempool]
+MaxTransactions = 5000
+
+[p2p]
+NetworkId = 187001
+MaxPeers = 64
+MaxInbound = 60
+MaxOutbound = 30
+MinPeers = 12
+OutboundPeers = 16
+Bootnodes = []
+PersistentPeers = []
+Seeds = []
+BanScore = 100
+GreyScore = 50
+RateMsgsPerSec = 50
+Burst = 200
+HandshakeTimeoutMs = 3000
+PingIntervalSeconds = 30
+PingTimeoutSeconds = 90
+BanDurationSeconds = 3600
+DialBackoffSeconds = 30
+PEX = true
+
+[network_security]
+SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
+SharedSecretFile = "/etc/nhb/network.token"
+SharedSecret = ""
+AllowInsecure = false
+AuthorizationHeader = "x-nhb-network-token"
+AllowUnauthenticatedReads = false
+ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
+ServerTLSKeyFile = "/etc/nhb/tls/p2pd.key"
+ClientTLSCertFile = "/etc/nhb/tls/consensus.crt"
+ClientTLSKeyFile = "/etc/nhb/tls/consensus.key"
+ClientCAFile = "/etc/nhb/tls/consensus-ca.pem"
+ServerCAFile = "/etc/nhb/tls/p2pd-ca.pem"
+AllowedClientCommonNames = ["consensusd"]
+ServerName = "p2pd.internal"
+
+RPCAllowInsecure = false
+RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
+RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
+RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
+
+[global.staking]
+MaxEmissionPerYearWei = "5000000000000000000"
+
+[global.pauses]
+Consensus = false
+Mempool = false
+Staking = false
+
+[global.fees]
+free_tier_tx_per_month = 100
+mdr_basis_points = 150
+owner_wallet = "nhb1ownerwallet000000000000000000000000000000"
+
+[[global.fees.assets]]
+asset = "NHB"
+mdr_basis_points = 150
+owner_wallet = "nhb1ownerwallet000000000000000000000000000000"
+
+[[global.fees.assets]]
+asset = "ZNHB"
+mdr_basis_points = 150
+owner_wallet = "znhb1ownerwallet000000000000000000000000000"
+
+[global.loyalty.Dynamic]
+targetbps = 50
+minbps = 25
+maxbps = 100
+smoothingstepbps = 5
+coveragemax = 0.50
+coveragelookbackdays = 7
+dailycappctof7dfees = 0.60
+dailycapusd = 5000
+yearlycappctofinitialsupply = 10
+enableprorate = true
+EnforceProRate = true
+
+  [global.loyalty.Dynamic.PriceGuard]
+  enabled = true
+  pricepair = "ZNHB/USD"
+  twapwindowseconds = 7200
+  maxdeviationbps = 300
+  pricemaxageseconds = 600
+
+[potso.rewards]
+EpochLengthBlocks = 120
+AlphaStakeBps = 7000
+MinPayoutWei = "1000000000000000"
+EmissionPerEpoch = "1000000000000000000"
+TreasuryAddress = "nhb1treasury0000000000000000000000000000000"
+MaxWinnersPerEpoch = 5000
+CarryRemainder = true
+PayoutMode = "auto"
+
+[potso.weights]
+AlphaStakeBps = 7000
+TxWeightBps = 6000
+EscrowWeightBps = 3000
+UptimeWeightBps = 1000
+MaxEngagementPerEpoch = 1000
+MinStakeToWinWei = "0"
+MinEngagementToWin = 0
+DecayHalfLifeEpochs = 7
+TopKWinners = 5000
+TieBreak = "addrHash"
+
+[governance]
+MinDepositWei = "1000e18"
+VotingPeriodSeconds = 604800
+TimelockSeconds = 172800
+QuorumBps = 2000
+PassThresholdBps = 5000
+AllowedParams = ["fees.baseFee"]

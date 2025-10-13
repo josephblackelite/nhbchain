@@ -1,0 +1,37 @@
+ListenAddress = ":6001"
+RPCAddress = ":8080"
+DataDir = "/var/lib/nhb"
+GenesisFile = "/etc/nhb/genesis.json"
+AllowAutogenesis = false
+NetworkName = "nhb-mainnet"
+
+[network_security]
+AllowInsecure = true
+ServerTLSCertFile = ""
+ServerTLSKeyFile = ""
+ClientTLSCertFile = ""
+ClientTLSKeyFile = ""
+ClientCAFile = ""
+ServerCAFile = ""
+
+RPCAllowInsecure = true
+
+[global.staking]
+MaxEmissionPerYearWei = "0"
+
+[global.pauses]
+Staking = true
+
+[global.fees]
+free_tier_tx_per_month = 100
+mdr_basis_points = 150
+owner_wallet = ""
+
+[[global.fees.assets]]
+asset = "NHB"
+mdr_basis_points = 150
+owner_wallet = ""
+
+[global.loyalty.Dynamic]
+enableprorate = false
+EnforceProRate = false
