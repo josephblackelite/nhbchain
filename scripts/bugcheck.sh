@@ -120,16 +120,19 @@ run_check "chaos" "Chaos fault-injection audit" "critical" make bugcheck-chaos |
 # 5. Gateway end-to-end flows
 run_check "gateway-e2e" "Gateway swap, lending, governance, escrow flows" "critical" make bugcheck-gateway || true
 
-# 6. Network hardening checks
+# 6. Production configuration guardrails
+run_check "prod-config" "Verify production config safety rails" "critical" "${SCRIPT_DIR}/verify_prod_config.sh" -c "${REPO_ROOT}/config/prod.toml" || true
+
+# 7. Network hardening checks
 run_check "network-hardening" "Rate limits, TLS, mTLS, and auth smoke" "critical" make bugcheck-network || true
 
-# 7. Performance benchmarks and SLA validation
+# 8. Performance benchmarks and SLA validation
 run_check "performance" "Benchmark finality and proposer commit latency" "critical" make bugcheck-perf || true
 
-# 8. Protobuf compatibility
+# 9. Protobuf compatibility
 run_check "protobuf" "buf lint and breaking checks" "critical" make bugcheck-proto || true
 
-# 9. Documentation and examples validation
+# 10. Documentation and examples validation
 run_check "docs" "Docs/examples validation" "critical" make bugcheck-docs || true
 
 # Emit JSON summary
