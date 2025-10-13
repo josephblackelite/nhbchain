@@ -13,11 +13,11 @@ The loyalty engine ships with an adaptive controller that gently adjusts the bas
 | `DailyCapPctOf7dFees` | Maximum share of the trailing seven-day fee pool that can be emitted each day. | `0.60` (60%) |
 | `DailyCapUSD` | Network-wide soft cap on ZNHB minted through dynamic boosts each day, expressed in whole USD. | `5,000` USD |
 | `YearlyCapPctOfInitialSupply` | Network-wide soft cap on annual dynamic issuance relative to the initial ZNHB supply. | `10` % |
-| `PriceGuard.Enabled` | Toggles price sanity checks when consuming oracle data to estimate coverage ratios. | `false` |
+| `PriceGuard.Enabled` | Toggles price sanity checks when consuming oracle data to estimate coverage ratios. | `true` |
 | `PriceGuard.PricePair` | Oracle trading pair queried when evaluating coverage. | `ZNHB/USD` |
-| `PriceGuard.TwapWindowSeconds` | TWAP smoothing window applied to the oracle pair before computing deviations. | `3,600` seconds |
-| `PriceGuard.MaxDeviationBps` | Maximum tolerated oracle variance relative to the rolling average before adjustments are frozen. | `500` bps |
-| `PriceGuard.PriceMaxAgeSeconds` | Maximum age of oracle data before the controller halts adjustments. | `900` seconds |
+| `PriceGuard.TwapWindowSeconds` | TWAP smoothing window applied to the oracle pair before computing deviations. | `7,200` seconds |
+| `PriceGuard.MaxDeviationBps` | Maximum tolerated oracle variance relative to the rolling average before adjustments are frozen. | `300` bps |
+| `PriceGuard.PriceMaxAgeSeconds` | Maximum age of oracle data before the controller halts adjustments. | `600` seconds |
 
 Operators can override these settings in `config.toml` under the `[global.loyalty.Dynamic]` section. Leave any field unset (or zero) to continue using the compiled defaults above.
 
@@ -79,5 +79,5 @@ When `PriceGuard.Enabled = true` the policy protects against stale or manipulate
 
 In the stale-price case the controller still processes pending rewards, but does so using the frozen `MinBps` coverage ratio so rewards remain predictable:
 
-- **Scenario**: `PriceGuard.TwapWindowSeconds = 3600`, `PriceGuard.MaxDeviationBps = 500`. The incoming quote is 8% above the TWAP and 20 minutes old.
+- **Scenario**: `PriceGuard.TwapWindowSeconds = 7200`, `PriceGuard.MaxDeviationBps = 300`. The incoming quote is 8% above the TWAP and 12 minutes old.
 - **Outcome**: The deviation counter jumps to `800` bps, `nhb_oracle_update_age_seconds` plateaus above the freshness threshold, and the controller logs a price-guard violation. Subsequent coverage calculations revert to `MinBps = 25` bps until a fresh quote resets the guard. Operators can confirm the fallback by correlating `loyalty_price_guard_deviation_bps`, `loyalty_price_guard_fallback_total`, and the dashboard panel tracking `loyalty_prorate_ratio`.

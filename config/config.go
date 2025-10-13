@@ -183,6 +183,7 @@ func defaultGlobalConfig() Global {
 				DailyCapUSD:                 defaultLoyaltyDailyCapUSD,
 				YearlyCapPctOfInitialSupply: defaultLoyaltyYearlyCapPctOfInitialSupply,
 				PriceGuard: LoyaltyPriceGuard{
+					Enabled:            true,
 					PricePair:          defaultLoyaltyPricePair,
 					TwapWindowSeconds:  defaultLoyaltyPriceGuardTwapWindowSeconds,
 					MaxDeviationBPS:    defaultLoyaltyPriceGuardMaxDeviation,
@@ -219,9 +220,9 @@ const (
 	defaultLoyaltyDailyCapUSD                 = 5_000.0
 	defaultLoyaltyYearlyCapPctOfInitialSupply = 10.0
 	defaultLoyaltyPricePair                   = "ZNHB/USD"
-	defaultLoyaltyPriceGuardTwapWindowSeconds = uint32(3_600)
-	defaultLoyaltyPriceGuardMaxDeviation      = 500
-	defaultLoyaltyPriceGuardMaxAgeSeconds     = uint32(900)
+	defaultLoyaltyPriceGuardTwapWindowSeconds = uint32(7_200)
+	defaultLoyaltyPriceGuardMaxDeviation      = 300
+	defaultLoyaltyPriceGuardMaxAgeSeconds     = uint32(600)
 )
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
