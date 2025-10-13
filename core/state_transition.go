@@ -25,6 +25,7 @@ import (
 	"nhbchain/native/fees"
 	"nhbchain/native/governance"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/pos"
 	"nhbchain/native/potso"
 	swap "nhbchain/native/swap"
 	systemquotas "nhbchain/native/system/quotas"
@@ -537,6 +538,7 @@ func (sp *StateProcessor) EndBlock() {
 		return
 	}
 	now := sp.blockTimestamp()
+	_, _ = sp.SweepExpiredPOSAuthorizations(now)
 	sp.EndBlockRewards(now)
 	sp.execContext = nil
 }
@@ -711,6 +713,38 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 	}
 
 	sp.blockCtx.PendingRewards.ClearPendingRewards()
+}
+
+// SweepExpiredPOSAuthorizations voids pending POS authorizations that have
+// crossed their expiry timestamp and returns the number of records affected.
+func (sp *StateProcessor) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
+	if sp == nil {
+		return 0, fmt.Errorf("state processor unavailable")
+	}
+	if sp.Trie == nil {
+		return 0, fmt.Errorf("state trie unavailable")
+	}
+	if now.IsZero() {
+		now = sp.blockTimestamp()
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	lifecycle := pos.NewLifecycle(manager)
+	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
+	lifecycle.SetNowFunc(func() time.Time { return now.UTC() })
+	expired, err := lifecycle.SweepExpired(now)
+	if err != nil {
+		return 0, err
+	}
+	count := len(expired)
+	if count == 0 {
+		return 0, nil
+	}
+	if metrics := observability.POSLifecycle(); metrics != nil {
+		for range expired {
+			metrics.RecordAuthExpired()
+		}
+	}
+	return count, nil
 }
 
 func ratioToFloat(value *big.Int) float64 {

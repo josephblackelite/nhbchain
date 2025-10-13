@@ -134,6 +134,12 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "pos":
+		code := runPOSCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "swap":
 		code := runSwapCommand(args[1:], os.Stdout, os.Stderr)
 		if code != 0 {

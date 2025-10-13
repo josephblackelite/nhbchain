@@ -830,6 +830,10 @@ type StakeUnbondResponse struct {
 	ReleaseTime uint64   `json:"releaseTime"`
 }
 
+type posSweepParams struct {
+	Timestamp *int64 `json:"timestamp,omitempty"`
+}
+
 type EpochSummaryResult struct {
 	Epoch                  uint64   `json:"epoch"`
 	Height                 uint64   `json:"height"`
@@ -1032,6 +1036,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSwapVoucherReverse(recorder, r, req)
+	case "pos_sweepVoids":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handlePOSSweepVoids(recorder, r, req)
 	case "lending_getMarket":
 		s.handleLendingGetMarket(recorder, r, req)
 	case "lend_getPools":
@@ -1741,6 +1751,38 @@ func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, r *http.Request, 
 		Selected:    selected,
 	}
 	writeResult(w, req.ID, result)
+}
+
+func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	if s.node == nil {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	if len(req.Params) > 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "at most one parameter object expected", nil)
+		return
+	}
+	var params posSweepParams
+	if len(req.Params) == 1 && len(req.Params[0]) > 0 {
+		if err := json.Unmarshal(req.Params[0], &params); err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
+			return
+		}
+	}
+	now := time.Now().UTC()
+	if params.Timestamp != nil {
+		if *params.Timestamp < 0 {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "timestamp must be non-negative", nil)
+			return
+		}
+		now = time.Unix(*params.Timestamp, 0).UTC()
+	}
+	count, err := s.node.SweepExpiredPOSAuthorizations(now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, err.Error(), nil)
+		return
+	}
+	writeResult(w, req.ID, map[string]int{"voided": count})
 }
 
 func (s *Server) requireAuth(r *http.Request) *RPCError {
