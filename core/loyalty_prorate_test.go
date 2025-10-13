@@ -16,7 +16,7 @@ import (
 func newTestStateProcessor(t *testing.T) (*StateProcessor, *nhbstate.Manager) {
 	t.Helper()
 	db := storage.NewMemDB()
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { db.Close() })
 	trie, err := statetrie.NewTrie(db, nil)
 	if err != nil {
 		t.Fatalf("create trie: %v", err)
