@@ -24,6 +24,8 @@ should inject the signature.
 
 For concrete JSON-RPC payloads that cover both NHB (`TxTypeTransfer`) and the
 new ZNHB (`TxTypeTransferZNHB`) transfers, see
-[`znhb-transfer.md`](./znhb-transfer.md). It includes copy-paste ready requests
-with populated `r`/`s`/`v` signature components, nonce discovery, and the
-expected receipt payload so wallet developers can mirror the node's behaviour.
+[`znhb-transfer.md`](./znhb-transfer.md) and the
+[Sending ZNHB via `nhb_sendTransaction`](../api/rpc.md#sending-znhb-via-nhb_sendtransaction)
+example. They include copy-paste ready requests with populated `r`/`s`/`v`
+signature components, nonce discovery, and the expected receipt payload so
+wallet developers can mirror the node's behaviour.
