@@ -5,6 +5,10 @@ NHB coin payments. Both payloads share the same ECDSA signing flow: construct a
 `types.Transaction`, recover the sender nonce from the latest account state, and
 sign the SHA-256 hash before submitting the JSON-RPC request.
 
+For a copy/paste JSON-RPC payload that showcases the ZNHB transfer format, see
+the [Sending ZNHB via `nhb_sendTransaction`](../api/rpc.md#sending-znhb-via-nhb_sendtransaction)
+example in the RPC reference.
+
 ## Authenticated submission
 
 `nhb_sendTransaction` is a privileged RPC on validator nodes. Every request is
