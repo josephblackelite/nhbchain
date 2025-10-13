@@ -146,6 +146,12 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "fees":
+		code := runFeesCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "gov":
 		code := runGovCommand(args[1:], os.Stdout, os.Stderr)
 		if code != 0 {

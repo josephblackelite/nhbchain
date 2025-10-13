@@ -1012,6 +1012,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleStableGetSwapStatus(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
+	case "fees_getMonthlyStatus":
+		s.handleFeesGetMonthlyStatus(recorder, r, req)
 	case "swap_limits":
 		if authErr := s.requireAuth(r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)

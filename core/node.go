@@ -529,6 +529,26 @@ func (n *Node) FeesTotals(domain string) ([]fees.Totals, error) {
 	return totals, nil
 }
 
+// FeesMonthlyStatus exposes the aggregate free-tier usage snapshot for the active month.
+func (n *Node) FeesMonthlyStatus() (nhbstate.FeeMonthlyStatus, error) {
+	if n == nil {
+		return nhbstate.FeeMonthlyStatus{}, fmt.Errorf("node unavailable")
+	}
+	var status nhbstate.FeeMonthlyStatus
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		snapshot, err := m.FeesMonthlyStatus()
+		if err != nil {
+			return err
+		}
+		status = snapshot
+		return nil
+	})
+	if err != nil {
+		return nhbstate.FeeMonthlyStatus{}, err
+	}
+	return status, nil
+}
+
 func (n *Node) SetModulePaused(module string, paused bool) {
 	if n == nil {
 		return

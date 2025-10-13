@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"strconv"
@@ -307,6 +308,9 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 	if err := manager.FeesPutCounter(domain, payer, result.WindowStart, scope, result.Counter); err != nil {
 		return err
 	}
+	if err := manager.FeesRecordUsage(result.WindowStart, cfg.FreeTierTxPerMonth, result.Counter, result.FreeTierApplied); err != nil {
+		return err
+	}
 	if err := manager.FeesAccumulateTotals(domain, result.Asset, result.OwnerWallet, gross, result.Fee, result.Net); err != nil {
 		return err
 	}
@@ -528,6 +532,12 @@ func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
 	sp.execContext = &blockExecutionContext{
 		height:    height,
 		timestamp: timestamp.UTC(),
+	}
+	if !timestamp.IsZero() && sp.Trie != nil {
+		manager := nhbstate.NewManager(sp.Trie)
+		if _, err := manager.FeesEnsureMonthlyRollover(timestamp); err != nil {
+			log.Printf("fees: monthly rollover check failed: %v", err)
+		}
 	}
 	sp.blockCtx.PendingRewards.ClearPendingRewards()
 }

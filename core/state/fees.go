@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"nhbchain/native/fees"
@@ -13,6 +14,22 @@ import (
 type storedFeeCounter struct {
 	Count           uint64
 	WindowStartUnix uint64
+}
+
+type storedFeeMonthlyStatus struct {
+	Window       string
+	LastRollover string
+	Used         uint64
+	Limit        uint64
+	Wallets      uint64
+}
+
+type storedFeeMonthlySnapshot struct {
+	Window          string
+	Used            uint64
+	Limit           uint64
+	Wallets         uint64
+	CompletedAtUnix uint64
 }
 
 type storedFeeTotals struct {
@@ -85,6 +102,86 @@ func sameCounterMonth(a, b time.Time) bool {
 	ua := a.UTC()
 	ub := b.UTC()
 	return ua.Year() == ub.Year() && ua.Month() == ub.Month()
+}
+
+func feesMonthlyStatusKey() []byte {
+	return []byte("fees/monthly/status")
+}
+
+func feesMonthlySnapshotKey(window string) []byte {
+	trimmed := strings.TrimSpace(window)
+	buf := make([]byte, len("fees/monthly/snapshot/")+len(trimmed))
+	copy(buf, "fees/monthly/snapshot/")
+	copy(buf[len("fees/monthly/snapshot/"):], trimmed)
+	return buf
+}
+
+// FeeMonthlyStatus captures the aggregate free-tier usage snapshot for the active UTC month.
+type FeeMonthlyStatus struct {
+	Window       string
+	Used         uint64
+	Remaining    uint64
+	Limit        uint64
+	Wallets      uint64
+	LastRollover string
+}
+
+// FeeMonthlySnapshot stores a historical record of monthly usage captured during rollover.
+type FeeMonthlySnapshot struct {
+	Window      string
+	Used        uint64
+	Remaining   uint64
+	Limit       uint64
+	Wallets     uint64
+	CompletedAt time.Time
+}
+
+func (stored *storedFeeMonthlyStatus) clone() *storedFeeMonthlyStatus {
+	if stored == nil {
+		return &storedFeeMonthlyStatus{}
+	}
+	copy := *stored
+	return &copy
+}
+
+func (stored *storedFeeMonthlyStatus) toStatus() FeeMonthlyStatus {
+	if stored == nil {
+		return FeeMonthlyStatus{}
+	}
+	remaining := uint64(0)
+	if stored.Limit > stored.Used {
+		remaining = stored.Limit - stored.Used
+	}
+	return FeeMonthlyStatus{
+		Window:       stored.Window,
+		Used:         stored.Used,
+		Remaining:    remaining,
+		Limit:        stored.Limit,
+		Wallets:      stored.Wallets,
+		LastRollover: stored.LastRollover,
+	}
+}
+
+func (snapshot *storedFeeMonthlySnapshot) toSnapshot() (FeeMonthlySnapshot, bool) {
+	if snapshot == nil {
+		return FeeMonthlySnapshot{}, false
+	}
+	remaining := uint64(0)
+	if snapshot.Limit > snapshot.Used {
+		remaining = snapshot.Limit - snapshot.Used
+	}
+	completed := time.Time{}
+	if snapshot.CompletedAtUnix != 0 {
+		completed = time.Unix(int64(snapshot.CompletedAtUnix), 0).UTC()
+	}
+	return FeeMonthlySnapshot{
+		Window:      snapshot.Window,
+		Used:        snapshot.Used,
+		Remaining:   remaining,
+		Limit:       snapshot.Limit,
+		Wallets:     snapshot.Wallets,
+		CompletedAt: completed,
+	}, true
 }
 
 func feeTotalsKey(domain, asset string, wallet [20]byte) []byte {
@@ -194,6 +291,170 @@ func (m *Manager) FeesPutCounter(domain string, payer [20]byte, windowStart time
 	stored.WindowStartUnix = uint64(normalizedWindow.UTC().Unix())
 	if err := m.KVPut(key, stored); err != nil {
 		return fmt.Errorf("fees: persist counter: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) feesLoadMonthlyStatus() (*storedFeeMonthlyStatus, error) {
+	if m == nil {
+		return &storedFeeMonthlyStatus{}, nil
+	}
+	key := feesMonthlyStatusKey()
+	var stored storedFeeMonthlyStatus
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return nil, fmt.Errorf("fees: load monthly status: %w", err)
+	}
+	if !ok {
+		return &storedFeeMonthlyStatus{}, nil
+	}
+	return stored.clone(), nil
+}
+
+func (m *Manager) feesStoreMonthlyStatus(status *storedFeeMonthlyStatus) error {
+	if m == nil {
+		return fmt.Errorf("fees: state manager not initialised")
+	}
+	if status == nil {
+		status = &storedFeeMonthlyStatus{}
+	}
+	trimmedWindow := strings.TrimSpace(status.Window)
+	trimmedLast := strings.TrimSpace(status.LastRollover)
+	stored := &storedFeeMonthlyStatus{
+		Window:       trimmedWindow,
+		LastRollover: trimmedLast,
+		Used:         status.Used,
+		Limit:        status.Limit,
+		Wallets:      status.Wallets,
+	}
+	return m.KVPut(feesMonthlyStatusKey(), stored)
+}
+
+// FeesEnsureMonthlyRollover snapshots the previous month and resets the
+// aggregate counters when the supplied timestamp enters a new UTC month.
+func (m *Manager) FeesEnsureMonthlyRollover(now time.Time) (FeeMonthlyStatus, error) {
+	if m == nil {
+		return FeeMonthlyStatus{}, fmt.Errorf("fees: state manager not initialised")
+	}
+	if now.IsZero() {
+		return FeeMonthlyStatus{}, fmt.Errorf("fees: rollover timestamp required")
+	}
+	current := monthKey(now)
+	if current == "000000" {
+		return FeeMonthlyStatus{}, fmt.Errorf("fees: invalid rollover window")
+	}
+	stored, err := m.feesLoadMonthlyStatus()
+	if err != nil {
+		return FeeMonthlyStatus{}, err
+	}
+	if strings.TrimSpace(stored.Window) == "" {
+		stored.Window = current
+		if err := m.feesStoreMonthlyStatus(stored); err != nil {
+			return FeeMonthlyStatus{}, err
+		}
+		return stored.toStatus(), nil
+	}
+	if stored.Window == current {
+		return stored.toStatus(), nil
+	}
+	previous := strings.TrimSpace(stored.Window)
+	if previous != "" {
+		snapshot := &storedFeeMonthlySnapshot{
+			Window:          previous,
+			Used:            stored.Used,
+			Limit:           stored.Limit,
+			Wallets:         stored.Wallets,
+			CompletedAtUnix: uint64(now.UTC().Unix()),
+		}
+		if err := m.KVPut(feesMonthlySnapshotKey(previous), snapshot); err != nil {
+			return FeeMonthlyStatus{}, fmt.Errorf("fees: persist monthly snapshot: %w", err)
+		}
+		stored.LastRollover = previous
+	}
+	stored.Window = current
+	stored.Used = 0
+	stored.Limit = 0
+	stored.Wallets = 0
+	if err := m.feesStoreMonthlyStatus(stored); err != nil {
+		return FeeMonthlyStatus{}, err
+	}
+	return stored.toStatus(), nil
+}
+
+// FeesMonthlyStatus returns the aggregate monthly free-tier usage snapshot.
+func (m *Manager) FeesMonthlyStatus() (FeeMonthlyStatus, error) {
+	if m == nil {
+		return FeeMonthlyStatus{}, fmt.Errorf("fees: state manager not initialised")
+	}
+	stored, err := m.feesLoadMonthlyStatus()
+	if err != nil {
+		return FeeMonthlyStatus{}, err
+	}
+	return stored.toStatus(), nil
+}
+
+// FeesMonthlySnapshot loads the stored snapshot for the supplied window, if present.
+func (m *Manager) FeesMonthlySnapshot(window string) (FeeMonthlySnapshot, bool, error) {
+	if m == nil {
+		return FeeMonthlySnapshot{}, false, fmt.Errorf("fees: state manager not initialised")
+	}
+	trimmed := strings.TrimSpace(window)
+	if trimmed == "" {
+		return FeeMonthlySnapshot{}, false, fmt.Errorf("fees: snapshot window required")
+	}
+	key := feesMonthlySnapshotKey(trimmed)
+	var stored storedFeeMonthlySnapshot
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return FeeMonthlySnapshot{}, false, fmt.Errorf("fees: load monthly snapshot: %w", err)
+	}
+	if !ok {
+		return FeeMonthlySnapshot{}, false, nil
+	}
+	snapshot, present := stored.toSnapshot()
+	return snapshot, present, nil
+}
+
+// FeesRecordUsage updates the aggregate monthly usage counters following a
+// transaction that evaluated the free-tier policy.
+func (m *Manager) FeesRecordUsage(window time.Time, freeTierLimit uint64, counter uint64, freeTierApplied bool) error {
+	if m == nil {
+		return fmt.Errorf("fees: state manager not initialised")
+	}
+	normalized := monthStartUTC(window)
+	if normalized.IsZero() {
+		return fmt.Errorf("fees: usage window required")
+	}
+	month := monthKey(normalized)
+	if month == "000000" {
+		return fmt.Errorf("fees: invalid usage window")
+	}
+	stored, err := m.feesLoadMonthlyStatus()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(stored.Window) != month {
+		if _, err := m.FeesEnsureMonthlyRollover(normalized); err != nil {
+			return err
+		}
+		stored, err = m.feesLoadMonthlyStatus()
+		if err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(stored.Window) != month {
+		return fmt.Errorf("fees: monthly status mismatch")
+	}
+	updated := stored.clone()
+	if freeTierApplied {
+		updated.Used++
+	}
+	if counter == 1 && freeTierLimit > 0 {
+		updated.Limit += freeTierLimit
+		updated.Wallets++
+	}
+	if err := m.feesStoreMonthlyStatus(updated); err != nil {
+		return err
 	}
 	return nil
 }
