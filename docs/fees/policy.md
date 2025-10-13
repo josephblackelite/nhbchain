@@ -16,6 +16,11 @@ via governance (see [fee parameters](../governance/fee-params.md)). Domains can
 opt into per-asset tracking, but the default aggregates both assets so the 100
 free transactions cover any combination of NHB and ZNHB activity.
 
+Operators can monitor network-wide utilisation with the JSON-RPC method
+`fees_getMonthlyStatus`, which surfaces the active window, free-tier
+transactions consumed, and the most recent rollover month. The CLI mirrors the
+endpoint as `nhb-cli fees status` for quick checks during incident response.
+
 ### Eligibility
 
 * **Retail wallets:** always accrue against the free tier for POS and P2P flows.
