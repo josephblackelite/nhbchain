@@ -1,6 +1,7 @@
 package pos
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,8 +27,9 @@ type lifecycleState interface {
 }
 
 var (
-	authorizationPrefix    = []byte("pos/auth/")
-	authorizationNoncePref = []byte("pos/auth/nonce/")
+	authorizationPrefix       = []byte("pos/auth/")
+	authorizationNoncePref    = []byte("pos/auth/nonce/")
+	authorizationPendingIndex = []byte("pos/auth/pending")
 )
 
 // AuthorizationStatus captures the lifecycle state for a payment authorization.
@@ -201,6 +203,11 @@ func (l *Lifecycle) Authorize(payer, merchant [20]byte, amount *big.Int, expiry 
 		rollback()
 		return nil, err
 	}
+	if err := l.addPendingAuthorization(record.ID); err != nil {
+		_ = l.state.KVDelete(authorizationKey(record.ID))
+		rollback()
+		return nil, err
+	}
 	l.emitter.Emit(events.PaymentAuthorized{
 		AuthorizationID: authID,
 		Payer:           payer,
@@ -226,6 +233,7 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int) (*Authorization, error
 	if err != nil {
 		return nil, err
 	}
+	originalAuth := auth.Clone()
 	if auth.Status == AuthorizationStatusCaptured {
 		return nil, errAuthorizationConsumed
 	}
@@ -256,6 +264,8 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int) (*Authorization, error
 	}
 	payerAcc = cloneAccount(payerAcc)
 	merchantAcc = cloneAccount(merchantAcc)
+	originalPayer := cloneAccount(payerAcc)
+	originalMerchant := cloneAccount(merchantAcc)
 	if payerAcc.LockedZNHB.Cmp(auth.Amount) < 0 {
 		return nil, fmt.Errorf("pos: locked balance inconsistent")
 	}
@@ -285,6 +295,15 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int) (*Authorization, error
 		_ = l.state.PutAccount(auth.Payer[:], payerAcc)
 		merchantAcc.BalanceZNHB = new(big.Int).Sub(merchantAcc.BalanceZNHB, amount)
 		_ = l.state.PutAccount(auth.Merchant[:], merchantAcc)
+		return nil, err
+	}
+	if err := l.removePendingAuthorization(auth.ID); err != nil {
+		_ = l.state.PutAccount(auth.Payer[:], originalPayer)
+		_ = l.state.PutAccount(auth.Merchant[:], originalMerchant)
+		if originalAuth != nil {
+			_ = l.persistAuthorization(originalAuth)
+			_ = l.addPendingAuthorization(originalAuth.ID)
+		}
 		return nil, err
 	}
 	l.emitter.Emit(events.PaymentCaptured{
@@ -333,11 +352,13 @@ func (l *Lifecycle) autoVoid(auth *Authorization, status AuthorizationStatus, re
 	if auth == nil {
 		return nil, errAuthorizationNotFound
 	}
+	originalAuth := auth.Clone()
 	payerAcc, err := l.state.GetAccount(auth.Payer[:])
 	if err != nil {
 		return nil, err
 	}
 	payerAcc = cloneAccount(payerAcc)
+	originalPayer := cloneAccount(payerAcc)
 	if payerAcc.LockedZNHB.Cmp(auth.Amount) < 0 {
 		return nil, fmt.Errorf("pos: locked balance inconsistent")
 	}
@@ -356,6 +377,14 @@ func (l *Lifecycle) autoVoid(auth *Authorization, status AuthorizationStatus, re
 		payerAcc.LockedZNHB = new(big.Int).Add(payerAcc.LockedZNHB, auth.Amount)
 		payerAcc.BalanceZNHB = new(big.Int).Sub(payerAcc.BalanceZNHB, auth.Amount)
 		_ = l.state.PutAccount(auth.Payer[:], payerAcc)
+		return nil, err
+	}
+	if err := l.removePendingAuthorization(auth.ID); err != nil {
+		_ = l.state.PutAccount(auth.Payer[:], originalPayer)
+		if originalAuth != nil {
+			_ = l.persistAuthorization(originalAuth)
+			_ = l.addPendingAuthorization(originalAuth.ID)
+		}
 		return nil, err
 	}
 	l.emitter.Emit(events.PaymentVoided{
@@ -391,6 +420,138 @@ func (l *Lifecycle) persistAuthorization(auth *Authorization) error {
 	}
 	stored := newStoredAuthorization(auth)
 	return l.state.KVPut(authorizationKey(auth.ID), stored)
+}
+
+func (l *Lifecycle) pendingAuthorizationIDs() ([][]byte, error) {
+	if l == nil || l.state == nil {
+		return nil, errLifecycleUninitialised
+	}
+	var raw [][]byte
+	ok, err := l.state.KVGet(authorizationPendingIndex, &raw)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || len(raw) == 0 {
+		return [][]byte{}, nil
+	}
+	ids := make([][]byte, len(raw))
+	for i := range raw {
+		ids[i] = append([]byte(nil), raw[i]...)
+	}
+	return ids, nil
+}
+
+func (l *Lifecycle) addPendingAuthorization(id [32]byte) error {
+	if l == nil || l.state == nil {
+		return errLifecycleUninitialised
+	}
+	ids, err := l.pendingAuthorizationIDs()
+	if err != nil {
+		return err
+	}
+	entry := append([]byte(nil), id[:]...)
+	for _, existing := range ids {
+		if bytes.Equal(existing, entry) {
+			return nil
+		}
+	}
+	ids = append(ids, entry)
+	return l.state.KVPut(authorizationPendingIndex, ids)
+}
+
+func (l *Lifecycle) removePendingAuthorization(id [32]byte) error {
+	if l == nil || l.state == nil {
+		return errLifecycleUninitialised
+	}
+	ids, err := l.pendingAuthorizationIDs()
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	trimmed := make([][]byte, 0, len(ids))
+	removed := false
+	for _, existing := range ids {
+		if bytes.Equal(existing, id[:]) {
+			removed = true
+			continue
+		}
+		trimmed = append(trimmed, append([]byte(nil), existing...))
+	}
+	if !removed {
+		return nil
+	}
+	if len(trimmed) == 0 {
+		return l.state.KVDelete(authorizationPendingIndex)
+	}
+	return l.state.KVPut(authorizationPendingIndex, trimmed)
+}
+
+// SweepExpired scans the pending authorization index and voids any records past
+// their expiry timestamp. The returned slice contains the updated authorization
+// records for each auto-voided lock.
+func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
+	if l == nil || l.state == nil {
+		return nil, errLifecycleUninitialised
+	}
+	ids, err := l.pendingAuthorizationIDs()
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if now.IsZero() {
+		if l.nowFn != nil {
+			now = l.nowFn().UTC()
+		} else {
+			now = time.Now().UTC()
+		}
+	} else {
+		now = now.UTC()
+	}
+	previousNow := l.nowFn
+	l.nowFn = func() time.Time { return now }
+	defer func() { l.nowFn = previousNow }()
+	cutoff := uint64(now.Unix())
+	expired := make([]*Authorization, 0)
+	for _, entry := range ids {
+		if len(entry) != 32 {
+			continue
+		}
+		var id [32]byte
+		copy(id[:], entry)
+		auth, err := l.loadAuthorization(id)
+		if err != nil {
+			if errors.Is(err, errAuthorizationNotFound) {
+				_ = l.removePendingAuthorization(id)
+				continue
+			}
+			return nil, err
+		}
+		if auth.Status != AuthorizationStatusPending {
+			_ = l.removePendingAuthorization(id)
+			continue
+		}
+		if auth.Expiry == 0 || auth.Expiry > cutoff {
+			continue
+		}
+		updated, err := l.autoVoid(auth, AuthorizationStatusExpired, "expired")
+		if err != nil {
+			return nil, err
+		}
+		expired = append(expired, updated.Clone())
+		amount := big.NewInt(0)
+		if updated.Amount != nil {
+			amount = new(big.Int).Set(updated.Amount)
+		}
+		l.emitter.Emit(events.PosAuthAutoVoided{
+			AuthorizationID: updated.ID,
+			Amount:          amount,
+		})
+	}
+	return expired, nil
 }
 
 func (l *Lifecycle) nextAuthorizationID(payer [20]byte) ([32]byte, uint64, error) {

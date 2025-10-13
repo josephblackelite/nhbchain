@@ -2162,6 +2162,19 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	return n.state.GetAccount(addr)
 }
 
+// SweepExpiredPOSAuthorizations triggers an on-demand sweep of expired POS authorizations.
+func (n *Node) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
+	if n == nil {
+		return 0, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return 0, fmt.Errorf("state unavailable")
+	}
+	return n.state.SweepExpiredPOSAuthorizations(now)
+}
+
 func (n *Node) EpochConfig() epoch.Config {
 	if n == nil {
 		return epoch.Config{}

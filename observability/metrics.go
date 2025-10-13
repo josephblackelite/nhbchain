@@ -42,6 +42,11 @@ type StakingMetrics struct {
 	capHit      prometheus.Counter
 }
 
+// POSLifecycleMetrics captures automatic expiry sweep counters for POS authorizations.
+type POSLifecycleMetrics struct {
+	authExpired prometheus.Counter
+}
+
 // Loyalty returns the singleton registry tracking loyalty reward budget usage.
 func Loyalty() *LoyaltyMetrics {
 	loyaltyMetricsOnce.Do(func() {
@@ -127,6 +132,9 @@ var (
 
 	loyaltyMetricsOnce sync.Once
 	loyaltyRegistry    *LoyaltyMetrics
+
+	posLifecycleOnce     sync.Once
+	posLifecycleRegistry *POSLifecycleMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -314,6 +322,22 @@ func Paymaster() *PaymasterMetrics {
 	return paymasterRegistry
 }
 
+// POSLifecycle returns the singleton metrics registry tracking authorization expiry sweeps.
+func POSLifecycle() *POSLifecycleMetrics {
+	posLifecycleOnce.Do(func() {
+		posLifecycleRegistry = &POSLifecycleMetrics{
+			authExpired: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "pos",
+				Name:      "auth_expired_total",
+				Help:      "Count of POS authorizations automatically voided after expiry.",
+			}),
+		}
+		prometheus.MustRegister(posLifecycleRegistry.authExpired)
+	})
+	return posLifecycleRegistry
+}
+
 // Observe records the execution metrics for a stable swap operation.
 func (m *SwapStableMetrics) Observe(operation string, duration time.Duration, err error) {
 	if m == nil {
@@ -397,6 +421,22 @@ func (m *MempoolMetrics) ObservePOSFinality(latency time.Duration) {
 		return
 	}
 	m.posFinality.Observe(float64(latency.Milliseconds()))
+}
+
+// RecordAuthExpired increments the automatic expiry counter.
+func (m *POSLifecycleMetrics) RecordAuthExpired() {
+	if m == nil {
+		return
+	}
+	m.authExpired.Inc()
+}
+
+// AuthExpiredCounter exposes the underlying counter for testing.
+func (m *POSLifecycleMetrics) AuthExpiredCounter() prometheus.Counter {
+	if m == nil {
+		return nil
+	}
+	return m.authExpired
 }
 
 // RecordAutoTopUp tracks the outcome of an automatic paymaster top-up and the minted amount in wei.

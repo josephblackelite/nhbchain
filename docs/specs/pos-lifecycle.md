@@ -74,8 +74,18 @@ state before the error is returned.
   timestamp that executes the authorize message.
 * Captures after the expiry automatically void the authorization, emitting a
   `payments.voided` event with `expired=true` and returning the funds.
+* Each block end sweeps pending authorizations and voids those past their
+  expiry, refunding balances, emitting `payments.voided` and
+  `pos.auth_auto_voided` events, and incrementing the
+  `nhb_pos_auth_expired_total` metric.
 * Manual voids leave the authorization record in `voided` status so idempotent
   retries do not fail.
+
+## Operations
+
+* Operators can trigger an immediate expiry sweep with
+  `nhb-cli pos sweep-voids`. Passing `--timestamp` overrides the evaluation
+  time, allowing historical replays or future-dated dry runs.
 
 ## Errors
 

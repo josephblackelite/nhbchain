@@ -22,6 +22,9 @@ const (
 	// TypePaymentVoided marks authorizations that returned funds to the
 	// payer either manually or due to expiry.
 	TypePaymentVoided = "payments.voided"
+	// TypePosAuthAutoVoided records automatic expiry sweeps performed by the
+	// consensus engine at end block.
+	TypePosAuthAutoVoided = "pos.auth_auto_voided"
 )
 
 // PaymentIntentConsumed represents a point-of-sale payment intent that has been
@@ -167,6 +170,29 @@ func (e PaymentVoided) Event() *types.Event {
 		attrs["reason"] = reason
 	}
 	return &types.Event{Type: TypePaymentVoided, Attributes: attrs}
+}
+
+// PosAuthAutoVoided tracks the automatic expiry sweep for a POS authorization.
+type PosAuthAutoVoided struct {
+	AuthorizationID [32]byte
+	Amount          *big.Int
+}
+
+// EventType satisfies the events.Event interface.
+func (PosAuthAutoVoided) EventType() string { return TypePosAuthAutoVoided }
+
+// Event converts the sweep payload into a broadcastable event.
+func (e PosAuthAutoVoided) Event() *types.Event {
+	if zeroBytes(e.AuthorizationID[:]) {
+		return nil
+	}
+	attrs := map[string]string{
+		"authorizationId": hex.EncodeToString(e.AuthorizationID[:]),
+	}
+	if e.Amount != nil {
+		attrs["amount"] = e.Amount.String()
+	}
+	return &types.Event{Type: TypePosAuthAutoVoided, Attributes: attrs}
 }
 
 func withHexPrefix(raw []byte) string {
