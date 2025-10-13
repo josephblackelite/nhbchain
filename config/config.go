@@ -143,7 +143,7 @@ func defaultGlobalConfig() Global {
 			PayoutPeriodDays:      30,
 			UnbondingDays:         7,
 			MinStakeWei:           "1",
-			MaxEmissionPerYearWei: "0",
+			MaxEmissionPerYearWei: "5000000000000000000",
 			RewardAsset:           "ZNHB",
 			CompoundDefault:       false,
 		},

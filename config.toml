@@ -57,6 +57,10 @@ ServerCAFile = "/etc/nhb/tls/p2pd-ca.pem"
 AllowedClientCommonNames = ["consensusd"]
 ServerName = "p2pd.internal"
 
+
+[global.staking]
+MaxEmissionPerYearWei = "5000000000000000000"
+
 PeerBanSeconds = 3600
 ReadTimeout = 90
 WriteTimeout = 5

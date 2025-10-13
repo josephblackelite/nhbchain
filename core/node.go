@@ -367,7 +367,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				PayoutPeriodDays:      30,
 				UnbondingDays:         7,
 				MinStakeWei:           "0",
-				MaxEmissionPerYearWei: "0",
+				MaxEmissionPerYearWei: "5000000000000000000",
 				RewardAsset:           "ZNHB",
 			},
 			Fees: config.Fees{
