@@ -165,9 +165,10 @@ func defaultGlobalConfig() Global {
 		Fees: Fees{
 			FreeTierTxPerMonth: DefaultFreeTierTxPerMonth,
 			MDRBasisPoints:     DefaultMDRBasisPoints,
+			OwnerWallet:        "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
 			Assets: []FeeAsset{
-				{Asset: fees.AssetNHB, MDRBasisPoints: DefaultMDRBasisPoints},
-				{Asset: fees.AssetZNHB, MDRBasisPoints: DefaultMDRBasisPoints},
+				{Asset: fees.AssetNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"},
+				{Asset: fees.AssetZNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"},
 			},
 		},
 		Loyalty: Loyalty{
@@ -684,6 +685,9 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "MaxDeviationBPS") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS = defaults.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "EnableProRate") {
+		cfg.Global.Loyalty.Dynamic.EnableProRate = defaults.Loyalty.Dynamic.EnableProRate
 	}
 }
 
