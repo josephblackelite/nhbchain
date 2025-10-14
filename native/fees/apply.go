@@ -44,6 +44,7 @@ type DomainPolicy struct {
 	OwnerWallet           [20]byte
 	Assets                map[string]AssetPolicy
 	FreeTierPerAsset      bool
+	freeTierExplicit      bool
 }
 
 // NormalizeAsset canonicalises asset identifiers for consistent lookups.
@@ -62,6 +63,9 @@ func isZeroWallet(addr [20]byte) bool {
 
 func (p DomainPolicy) normalized(domain string) DomainPolicy {
 	normalized := p
+	if !normalized.FreeTierTxPerMonthSet && normalized.freeTierExplicit {
+		normalized.FreeTierTxPerMonthSet = true
+	}
 	if !normalized.FreeTierTxPerMonthSet {
 		if normalized.FreeTierTxPerMonth == 0 {
 			normalized.FreeTierTxPerMonth = DefaultFreeTierTxPerMonth
@@ -109,6 +113,7 @@ func (p DomainPolicy) normalized(domain string) DomainPolicy {
 		}
 	}
 	normalized.Assets = assets
+	normalized.freeTierExplicit = false
 	return normalized
 }
 
