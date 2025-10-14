@@ -50,6 +50,7 @@ from pathlib import Path
 
 test_status = int(test_status_raw)
 docs_status = int(docs_status_raw)
+repo_path = Path(repo_root).resolve()
 
 def extract_test_data(path: str, limit: int = 3) -> dict[str, list[str]]:
     test_path = Path(path)
@@ -100,28 +101,95 @@ def extract_test_data(path: str, limit: int = 3) -> dict[str, list[str]]:
         "passes": passes[:limit],
     }
 
-def load_docs_keywords(repo: str, limit: int = 3) -> list[str]:
-    candidates = [
-        "func Verify(docRoot string) error {",
-        "if !strings.HasPrefix(line, \"<!-- embed:\") || !strings.HasSuffix(line, \"-->\") {",
-        "return fmt.Errorf(\"broken relative link %q\", target)",
-        "snippets = append(snippets, snippet{lang: lang, file: embedPath})",
+def load_docs_keywords(repo: Path, limit: int = 3) -> list[str]:
+    raw_candidates = [
+        ("func Verify", "(docRoot string) error {"),
+        ("return fmt.Errorf(", "\"broken relative link %q\", target)"),
+        ("snippets = append(snippets, snippet{", "lang: lang, file: embedPath})"),
+        ("scanner := bufio.NewScanner", "(file)"),
     ]
     keywords: list[str] = []
-    source = Path(repo) / "tools" / "docs" / "snippets" / "snippets.go"
+    source = repo / "tools" / "docs" / "snippets" / "snippets.go"
     text = source.read_text(encoding="utf-8") if source.exists() else ""
-    for candidate in candidates:
+    for fragments in raw_candidates:
+        candidate = "".join(fragments)
         if candidate in text:
             keywords.append(candidate)
         if len(keywords) >= limit:
             break
     return keywords
 
-def fallback_proofs(repo: str, keywords: list[str], limit: int = 3) -> list[str]:
+def to_relative(path: str, repo: Path) -> str:
+    candidate = Path(path)
+    try:
+        return candidate.resolve().relative_to(repo).as_posix()
+    except Exception:
+        return candidate.as_posix()
+
+
+def parse_entry_path(entry: str) -> str | None:
+    parts = entry.split("`")
+    if len(parts) < 4:
+        return None
+    fragment = parts[3]
+    if not fragment:
+        return None
+    return fragment.split(":", 1)[0].strip()
+
+
+def filter_proof_entries(
+    entries: list[str],
+    allowed_prefixes: list[str] | None = None,
+    blocked_prefixes: list[str] | None = None,
+) -> list[str]:
+    if not entries:
+        return []
+
+    allowed = tuple(prefix.rstrip("/") for prefix in (allowed_prefixes or []))
+    blocked = tuple(prefix.rstrip("/") for prefix in (blocked_prefixes or []))
+
+    filtered: list[str] = []
+    for entry in entries:
+        path = parse_entry_path(entry)
+        if path is None:
+            filtered.append(entry)
+            continue
+        normalized = path.rstrip("/")
+        if allowed and not any(normalized.startswith(prefix) for prefix in allowed):
+            continue
+        if blocked and any(normalized.startswith(prefix) for prefix in blocked):
+            continue
+        filtered.append(entry)
+    return filtered
+
+
+def fallback_proofs(
+    repo: Path,
+    keywords: list[str],
+    limit: int = 3,
+    include_paths: list[str] | None = None,
+    allowed_prefixes: list[str] | None = None,
+    blocked_prefixes: list[str] | None = None,
+) -> list[str]:
     if not keywords:
         return []
     results: list[str] = []
     seen: set[str] = set()
+
+    repo_abs = repo.resolve()
+    if include_paths:
+        targets = []
+        for raw in include_paths:
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = repo_abs / candidate
+            targets.append(str(candidate))
+    else:
+        targets = [str(repo_abs)]
+
+    allowed = tuple(prefix.rstrip("/") for prefix in (allowed_prefixes or []))
+    blocked = tuple(prefix.rstrip("/") for prefix in (blocked_prefixes or []))
+
     for keyword in keywords:
         if len(results) >= limit:
             break
@@ -133,9 +201,10 @@ def fallback_proofs(repo: str, keywords: list[str], limit: int = 3) -> list[str]
                     "-m",
                     "1",
                     "--no-heading",
+                    "--with-filename",
                     "-F",
                     keyword,
-                    repo,
+                    *targets,
                 ],
                 check=True,
                 capture_output=True,
@@ -143,16 +212,21 @@ def fallback_proofs(repo: str, keywords: list[str], limit: int = 3) -> list[str]
             )
         except subprocess.CalledProcessError:
             continue
-        line = proc.stdout.strip().splitlines()
-        if not line:
+        lines = proc.stdout.strip().splitlines()
+        if not lines:
             continue
-        first = line[0]
+        first = lines[0]
         parts = first.split(":", 2)
         if len(parts) < 3:
             continue
         path, lineno, snippet = parts
+        rel_path = to_relative(path, repo_abs)
+        if allowed and not any(rel_path.startswith(prefix) for prefix in allowed):
+            continue
+        if blocked and any(rel_path.startswith(prefix) for prefix in blocked):
+            continue
         snippet = snippet.strip()
-        entry = f"- `{keyword}` · `{path}:{lineno}` — {snippet}"
+        entry = f"- `{keyword}` · `{rel_path}:{lineno}` — {snippet}"
         if entry in seen:
             continue
         seen.add(entry)
@@ -171,7 +245,7 @@ def build_checklist(items: list[dict], output: Path) -> None:
         lines.append("")
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-def run_audit_proofs(repo: str, checklist: Path, proofs: Path) -> None:
+def run_audit_proofs(repo: Path, checklist: Path, proofs: Path) -> None:
     cmd = [
         "go",
         "run",
@@ -179,11 +253,11 @@ def run_audit_proofs(repo: str, checklist: Path, proofs: Path) -> None:
         "-checklist",
         str(checklist),
         "-root",
-        repo,
+        str(repo),
         "-out",
         str(proofs),
     ]
-    subprocess.run(cmd, cwd=repo, check=True)
+    subprocess.run(cmd, cwd=str(repo), check=True)
 
 def parse_proofs(path: Path) -> dict[str, list[str]]:
     proofs: dict[str, list[str]] = {}
@@ -205,10 +279,16 @@ def parse_proofs(path: Path) -> dict[str, list[str]]:
                 proofs[current].append(line)
     return proofs
 
-def append_report(repo: str, timestamp: str, items: list[dict], proofs: dict[str, list[str]]) -> None:
-    doc_path = Path(repo) / "docs" / "audit" / "latest.md"
-    existing = doc_path.read_text(encoding="utf-8")
-    if not existing.endswith("\n"):
+def append_report(repo: Path, timestamp: str, items: list[dict], proofs: dict[str, list[str]]) -> None:
+    doc_path = repo / "docs" / "audit" / "latest.md"
+    if doc_path.exists():
+        existing = doc_path.read_text(encoding="utf-8")
+    else:
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    if existing:
         existing += "\n"
     summary_lines: list[str] = [
         f"## English status report — {timestamp}",
@@ -231,11 +311,11 @@ def append_report(repo: str, timestamp: str, items: list[dict], proofs: dict[str
                 summary_lines.append(f"    - {note}")
         summary_lines.append("")
     summary_text = "\n".join(summary_lines).rstrip() + "\n"
-    doc_path.write_text(existing + "\n" + summary_text, encoding="utf-8")
+    doc_path.write_text(existing + summary_text, encoding="utf-8")
     print("\n".join(summary_lines))
 
 test_data = extract_test_data(test_json_path)
-doc_keywords = load_docs_keywords(repo_root)
+doc_keywords = load_docs_keywords(repo_path)
 
 test_notes: list[str] = []
 if test_data["failures"]:
@@ -257,6 +337,7 @@ items = [
         "status": test_status == 0,
         "keywords": test_data["keywords"],
         "notes": test_notes,
+        "proof_blocklist": ["docs/audit"],
     },
     {
         "id": "docs-verification",
@@ -264,6 +345,9 @@ items = [
         "command": "go run ./scripts/verify-docs-snippets --root docs",
         "status": docs_status == 0,
         "keywords": doc_keywords,
+        "proof_paths": ["tools/docs/snippets/snippets.go"],
+        "proof_prefixes": ["tools/docs/snippets"],
+        "proof_blocklist": ["docs/audit", "scripts/english_audit.sh"],
     },
 ]
 
@@ -271,15 +355,35 @@ checklist_path = Path(tmpdir) / "english_checklist.md"
 proofs_path = Path(tmpdir) / "english_proofs.md"
 
 build_checklist(items, checklist_path)
-run_audit_proofs(repo_root, checklist_path, proofs_path)
+run_audit_proofs(repo_path, checklist_path, proofs_path)
 proof_map = parse_proofs(proofs_path)
 for item in items:
     title = item["title"]
-    if not proof_map.get(title):
-        fallback = fallback_proofs(repo_root, item.get("keywords", []))
-        if fallback:
-            proof_map[title] = fallback
-append_report(repo_root, timestamp, items, proof_map)
+    limit = max(2, min(6, item.get("limit", len(item.get("keywords", [])) or 3)))
+    allowed_prefixes = item.get("proof_prefixes")
+    blocked_prefixes = item.get("proof_blocklist")
+    include_paths = item.get("proof_paths")
+    entries = proof_map.get(title, [])
+    filtered = filter_proof_entries(entries, allowed_prefixes, blocked_prefixes)
+    results = list(filtered)
+    if len(results) < limit:
+        fallback = fallback_proofs(
+            repo_path,
+            item.get("keywords", []),
+            limit=limit,
+            include_paths=include_paths,
+            allowed_prefixes=allowed_prefixes,
+            blocked_prefixes=blocked_prefixes,
+        )
+        filtered_fallback = filter_proof_entries(fallback, allowed_prefixes, blocked_prefixes)
+        for entry in filtered_fallback:
+            if entry not in results:
+                results.append(entry)
+            if len(results) >= limit:
+                break
+    if results:
+        proof_map[title] = results[:limit]
+append_report(repo_path, timestamp, items, proof_map)
 PY
 
 popd >/dev/null
