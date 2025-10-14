@@ -76,6 +76,9 @@ func (g Global) PaymasterAutoTopUpConfig() (PaymasterAutoTopUpConfig, error) {
 		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.DailyCapWei: %w", err)
 	}
 	cfg.DailyCapWei = dailyCap
+	if cfg.Enabled && (cfg.DailyCapWei == nil || cfg.DailyCapWei.Sign() <= 0) {
+		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.DailyCapWei: must be greater than zero when auto-top-up is enabled")
+	}
 
 	if g.Paymaster.AutoTopUp.CooldownSeconds > 0 {
 		cfg.Cooldown = time.Duration(g.Paymaster.AutoTopUp.CooldownSeconds) * time.Second

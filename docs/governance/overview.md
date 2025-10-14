@@ -102,3 +102,22 @@ amended and how frozen policies are embedded in escrows—see the
 [Arbitration Governance Guide](./arbitration-governance.md). The guide outlines
 the evidence packets investors and regulators should request when reviewing
 dispute outcomes.
+
+## Paymaster auto top-up migration checklist
+
+Before governance enables automatic paymaster top-ups, operators should stage a
+two-step rollout so the runtime enforces sensible caps from the first block:
+
+1. Propose a parameter update that sets
+   `global.paymaster.AutoTopUp.DailyCapWei` to a non-zero value aligned with the
+   treasury's daily risk tolerance. Treat the cap as a hard limit on newly
+   minted ZNHB per paymaster per day and document the expected consumption model
+   in the proposal rationale.
+2. In a subsequent proposal, enable the feature by setting
+   `global.paymaster.AutoTopUp.Enabled = true`. Confirm monitoring and alerting
+   are in place to track utilisation against the configured daily cap before the
+   change executes.
+
+Proposals that flip the enable flag without first establishing a positive cap
+will now be rejected during validation. Sequencing the governance actions keeps
+minting limits predictable for operators, auditors, and downstream integrators.
