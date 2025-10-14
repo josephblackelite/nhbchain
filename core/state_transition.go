@@ -4386,6 +4386,7 @@ func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardConte
 	if treasuryAcc.BalanceZNHB == nil {
 		treasuryAcc.BalanceZNHB = big.NewInt(0)
 	}
+	requested := new(big.Int).Set(amount)
 	payout := new(big.Int).Set(amount)
 	if treasuryAcc.BalanceZNHB.Cmp(payout) < 0 {
 		payout = new(big.Int).Set(treasuryAcc.BalanceZNHB)
@@ -4431,11 +4432,18 @@ func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardConte
 	if err != nil {
 		budget = big.NewInt(0)
 	}
+	ratio := ratioToFloatFromFrac(payout, requested)
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
 	if metrics := observability.Loyalty(); metrics != nil {
 		metrics.RecordBudget(
 			ratioToFloat(budget),
 			ratioToFloat(totalProposed),
-			1.0,
+			ratio,
 			ratioToFloat(paidTotal),
 		)
 	}
