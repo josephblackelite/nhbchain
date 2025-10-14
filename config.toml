@@ -197,6 +197,7 @@ SlippageBps = 50
 OraclePriority = ["nowpayments","coingecko","manual"]
 TwapWindowSeconds = 300
 TwapSampleCap = 128
+PayoutAuthorities = ["treasury"]
 
 [swap.risk]
 PerAddressDailyCapWei = "10000e18"

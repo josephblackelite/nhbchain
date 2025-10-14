@@ -793,6 +793,7 @@ type Config struct {
 	TwapWindowSeconds         int64
 	TwapSampleCap             int
 	PriceProofMaxDeviationBps uint64
+	PayoutAuthorities         []string
 	Risk                      RiskConfig      `toml:"risk"`
 	Providers                 ProviderConfig  `toml:"providers"`
 	Sanctions                 SanctionsConfig `toml:"sanctions"`
@@ -808,6 +809,7 @@ func (c Config) Normalise() Config {
 		TwapWindowSeconds:         c.TwapWindowSeconds,
 		TwapSampleCap:             c.TwapSampleCap,
 		PriceProofMaxDeviationBps: c.PriceProofMaxDeviationBps,
+		PayoutAuthorities:         append([]string{}, c.PayoutAuthorities...),
 		Risk:                      c.Risk.Normalise(),
 		Providers:                 c.Providers.Normalise(),
 		Sanctions:                 c.Sanctions.Normalise(),
@@ -836,6 +838,23 @@ func (c Config) Normalise() Config {
 	if cfg.PriceProofMaxDeviationBps == 0 {
 		cfg.PriceProofMaxDeviationBps = 100
 	}
+	if len(cfg.PayoutAuthorities) == 0 {
+		cfg.PayoutAuthorities = []string{"treasury"}
+	}
+	trimmed := make([]string, 0, len(cfg.PayoutAuthorities))
+	seen := make(map[string]struct{}, len(cfg.PayoutAuthorities))
+	for _, authority := range cfg.PayoutAuthorities {
+		canonical := strings.ToLower(strings.TrimSpace(authority))
+		if canonical == "" {
+			continue
+		}
+		if _, ok := seen[canonical]; ok {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		trimmed = append(trimmed, canonical)
+	}
+	cfg.PayoutAuthorities = trimmed
 	return cfg
 }
 

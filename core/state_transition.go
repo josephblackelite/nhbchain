@@ -95,38 +95,39 @@ type BlockCtx struct {
 }
 
 type StateProcessor struct {
-	Trie               *trie.Trie
-	stateDB            *gethstate.CachingDB
-	LoyaltyEngine      *loyalty.Engine
-	EscrowEngine       *escrow.Engine
-	TradeEngine        *escrow.TradeEngine
-	pauses             nativecommon.PauseView
-	escrowFeeTreasury  [20]byte
-	usernameToAddr     map[string][]byte
-	ValidatorSet       map[string]*big.Int
-	EligibleValidators map[string]*big.Int
-	committedRoot      common.Hash
-	events             []types.Event
-	nowFunc            func() time.Time
-	execContext        *blockExecutionContext
-	engagementConfig   engagement.Config
-	epochConfig        epoch.Config
-	epochHistory       []epoch.Snapshot
-	rewardConfig       rewards.Config
-	rewardAccrual      *rewards.Accumulator
-	rewardHistory      []rewards.EpochSettlement
-	stakeRewardEngine  *rewards.Engine
-	stakeRewardAPR     uint64
-	potsoRewardConfig  potso.RewardConfig
-	potsoWeightConfig  potso.WeightParams
-	paymasterEnabled   bool
-	paymasterLimits    PaymasterLimits
-	paymasterTopUp     PaymasterAutoTopUpPolicy
-	quotaConfig        map[string]nativecommon.Quota
-	quotaStore         *systemquotas.Store
-	intentTTL          time.Duration
-	feePolicy          fees.Policy
-	blockCtx           BlockCtx
+	Trie                  *trie.Trie
+	stateDB               *gethstate.CachingDB
+	LoyaltyEngine         *loyalty.Engine
+	EscrowEngine          *escrow.Engine
+	TradeEngine           *escrow.TradeEngine
+	pauses                nativecommon.PauseView
+	escrowFeeTreasury     [20]byte
+	usernameToAddr        map[string][]byte
+	ValidatorSet          map[string]*big.Int
+	EligibleValidators    map[string]*big.Int
+	committedRoot         common.Hash
+	events                []types.Event
+	nowFunc               func() time.Time
+	execContext           *blockExecutionContext
+	engagementConfig      engagement.Config
+	epochConfig           epoch.Config
+	epochHistory          []epoch.Snapshot
+	rewardConfig          rewards.Config
+	rewardAccrual         *rewards.Accumulator
+	rewardHistory         []rewards.EpochSettlement
+	stakeRewardEngine     *rewards.Engine
+	stakeRewardAPR        uint64
+	potsoRewardConfig     potso.RewardConfig
+	potsoWeightConfig     potso.WeightParams
+	paymasterEnabled      bool
+	paymasterLimits       PaymasterLimits
+	paymasterTopUp        PaymasterAutoTopUpPolicy
+	quotaConfig           map[string]nativecommon.Quota
+	quotaStore            *systemquotas.Store
+	intentTTL             time.Duration
+	feePolicy             fees.Policy
+	blockCtx              BlockCtx
+	swapPayoutAuthorities map[string]struct{}
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -134,35 +135,37 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	escEngine := escrow.NewEngine()
 	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
-		Trie:               tr,
-		stateDB:            stateDB,
-		LoyaltyEngine:      loyalty.NewEngine(),
-		EscrowEngine:       escEngine,
-		TradeEngine:        tradeEngine,
-		usernameToAddr:     make(map[string][]byte),
-		ValidatorSet:       make(map[string]*big.Int),
-		EligibleValidators: make(map[string]*big.Int),
-		committedRoot:      tr.Root(),
-		events:             make([]types.Event, 0),
-		nowFunc:            time.Now,
-		execContext:        nil,
-		engagementConfig:   engagement.DefaultConfig(),
-		epochConfig:        epoch.DefaultConfig(),
-		epochHistory:       make([]epoch.Snapshot, 0),
-		rewardConfig:       rewards.DefaultConfig(),
-		rewardHistory:      make([]rewards.EpochSettlement, 0),
-		stakeRewardEngine:  rewards.NewEngine(),
-		stakeRewardAPR:     0,
-		potsoRewardConfig:  potso.DefaultRewardConfig(),
-		potsoWeightConfig:  potso.DefaultWeightParams(),
-		paymasterEnabled:   true,
-		paymasterLimits:    PaymasterLimits{},
-		paymasterTopUp:     PaymasterAutoTopUpPolicy{Token: "ZNHB"},
-		quotaConfig:        make(map[string]nativecommon.Quota),
-		intentTTL:          defaultIntentTTL,
-		feePolicy:          fees.Policy{Domains: map[string]fees.DomainPolicy{}},
-		blockCtx:           BlockCtx{},
+		Trie:                  tr,
+		stateDB:               stateDB,
+		LoyaltyEngine:         loyalty.NewEngine(),
+		EscrowEngine:          escEngine,
+		TradeEngine:           tradeEngine,
+		usernameToAddr:        make(map[string][]byte),
+		ValidatorSet:          make(map[string]*big.Int),
+		EligibleValidators:    make(map[string]*big.Int),
+		committedRoot:         tr.Root(),
+		events:                make([]types.Event, 0),
+		nowFunc:               time.Now,
+		execContext:           nil,
+		engagementConfig:      engagement.DefaultConfig(),
+		epochConfig:           epoch.DefaultConfig(),
+		epochHistory:          make([]epoch.Snapshot, 0),
+		rewardConfig:          rewards.DefaultConfig(),
+		rewardHistory:         make([]rewards.EpochSettlement, 0),
+		stakeRewardEngine:     rewards.NewEngine(),
+		stakeRewardAPR:        0,
+		potsoRewardConfig:     potso.DefaultRewardConfig(),
+		potsoWeightConfig:     potso.DefaultWeightParams(),
+		paymasterEnabled:      true,
+		paymasterLimits:       PaymasterLimits{},
+		paymasterTopUp:        PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		quotaConfig:           make(map[string]nativecommon.Quota),
+		intentTTL:             defaultIntentTTL,
+		feePolicy:             fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		blockCtx:              BlockCtx{},
+		swapPayoutAuthorities: make(map[string]struct{}),
 	}
+	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
 		return nil, err
 	}
@@ -217,6 +220,45 @@ func (sp *StateProcessor) SetQuotaConfig(cfg map[string]nativecommon.Quota) {
 	}
 	sp.quotaConfig = cloned
 	sp.quotaStore = nil
+}
+
+// SetSwapPayoutAuthorities updates the allow-list of attestors permitted to record swap payouts.
+func (sp *StateProcessor) SetSwapPayoutAuthorities(authorities []string) {
+	if sp == nil {
+		return
+	}
+	if sp.swapPayoutAuthorities == nil {
+		sp.swapPayoutAuthorities = make(map[string]struct{})
+	}
+	for k := range sp.swapPayoutAuthorities {
+		delete(sp.swapPayoutAuthorities, k)
+	}
+	if len(authorities) == 0 {
+		sp.swapPayoutAuthorities[strings.ToLower("treasury")] = struct{}{}
+		return
+	}
+	for _, authority := range authorities {
+		canonical := strings.ToLower(strings.TrimSpace(authority))
+		if canonical == "" {
+			continue
+		}
+		sp.swapPayoutAuthorities[canonical] = struct{}{}
+	}
+	if len(sp.swapPayoutAuthorities) == 0 {
+		sp.swapPayoutAuthorities[strings.ToLower("treasury")] = struct{}{}
+	}
+}
+
+func (sp *StateProcessor) isSwapPayoutAuthority(authority string) bool {
+	if sp == nil {
+		return false
+	}
+	canonical := strings.ToLower(strings.TrimSpace(authority))
+	if canonical == "" {
+		return false
+	}
+	_, ok := sp.swapPayoutAuthorities[canonical]
+	return ok
 }
 
 // SetFeePolicy updates the fee policy applied to eligible transactions.
@@ -1287,31 +1329,41 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		}
 	}
 
+	var payoutAuthCopy map[string]struct{}
+	if len(sp.swapPayoutAuthorities) > 0 {
+		payoutAuthCopy = make(map[string]struct{}, len(sp.swapPayoutAuthorities))
+		for authority := range sp.swapPayoutAuthorities {
+			payoutAuthCopy[authority] = struct{}{}
+		}
+	}
+
 	return &StateProcessor{
-		Trie:               trieCopy,
-		stateDB:            sp.stateDB,
-		LoyaltyEngine:      sp.LoyaltyEngine,
-		EscrowEngine:       sp.EscrowEngine,
-		TradeEngine:        sp.TradeEngine,
-		pauses:             sp.pauses,
-		usernameToAddr:     usernameCopy,
-		ValidatorSet:       validatorCopy,
-		EligibleValidators: eligibleCopy,
-		committedRoot:      sp.committedRoot,
-		events:             eventsCopy,
-		nowFunc:            sp.nowFunc,
-		engagementConfig:   sp.engagementConfig,
-		epochConfig:        sp.epochConfig,
-		epochHistory:       historyCopy,
-		rewardConfig:       sp.rewardConfig.Clone(),
-		rewardHistory:      rewardHistoryCopy,
-		potsoRewardConfig:  clonePotsoRewardConfig(sp.potsoRewardConfig),
-		potsoWeightConfig:  clonePotsoWeightConfig(sp.potsoWeightConfig),
-		paymasterEnabled:   sp.paymasterEnabled,
-		paymasterLimits:    sp.paymasterLimits.Clone(),
-		quotaConfig:        quotaCopy,
-		intentTTL:          sp.intentTTL,
-		feePolicy:          sp.feePolicy.Clone(),
+		Trie:                  trieCopy,
+		stateDB:               sp.stateDB,
+		LoyaltyEngine:         sp.LoyaltyEngine,
+		EscrowEngine:          sp.EscrowEngine,
+		TradeEngine:           sp.TradeEngine,
+		pauses:                sp.pauses,
+		usernameToAddr:        usernameCopy,
+		ValidatorSet:          validatorCopy,
+		EligibleValidators:    eligibleCopy,
+		committedRoot:         sp.committedRoot,
+		events:                eventsCopy,
+		nowFunc:               sp.nowFunc,
+		engagementConfig:      sp.engagementConfig,
+		epochConfig:           sp.epochConfig,
+		epochHistory:          historyCopy,
+		rewardConfig:          sp.rewardConfig.Clone(),
+		rewardHistory:         rewardHistoryCopy,
+		potsoRewardConfig:     clonePotsoRewardConfig(sp.potsoRewardConfig),
+		potsoWeightConfig:     clonePotsoWeightConfig(sp.potsoWeightConfig),
+		paymasterEnabled:      sp.paymasterEnabled,
+		paymasterLimits:       sp.paymasterLimits.Clone(),
+		quotaConfig:           quotaCopy,
+		intentTTL:             sp.intentTTL,
+		feePolicy:             sp.feePolicy.Clone(),
+		blockCtx:              sp.blockCtx,
+		swapPayoutAuthorities: payoutAuthCopy,
 	}, nil
 }
 
@@ -2271,6 +2323,13 @@ func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 	var msg swapv1.MsgPayoutReceipt
 	if err := packed.UnmarshalTo(&msg); err != nil {
 		return fmt.Errorf("swap: decode payout receipt: %w", err)
+	}
+	authority := strings.TrimSpace(msg.GetAuthority())
+	if authority == "" {
+		return fmt.Errorf("swap: authority required")
+	}
+	if !sp.isSwapPayoutAuthority(authority) {
+		return fmt.Errorf("swap: unauthorized payout authority %q", authority)
 	}
 	protoReceipt := msg.GetReceipt()
 	if protoReceipt == nil {
