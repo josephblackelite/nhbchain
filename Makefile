@@ -1,4 +1,4 @@
-.PHONY: proto sdk tidy up down audit\:static audit\:tests audit\:determinism audit\:e2e audit\:chaos audit\:perf audit\:netsec audit\:ledger audit\:supply audit\:config audit\:docs audit\:endpoints
+.PHONY: proto sdk tidy up down audit\:static audit\:tests audit\:determinism audit\:e2e audit\:chaos audit\:perf audit\:netsec audit\:ledger audit\:supply audit\:config audit\:docs audit\:endpoints audit\:english
 .PHONY: bugcheck bugcheck-tools bugcheck-static bugcheck-race bugcheck-fuzz bugcheck-determinism bugcheck-chaos bugcheck-gateway bugcheck-network bugcheck-perf bugcheck-proto bugcheck-docs
 
 bugcheck:
@@ -84,6 +84,10 @@ audit\:static:
 	staticcheck ./... 2>&1 | tee logs/staticcheck.log && \
 	buf lint 2>&1 | tee logs/buf-lint.log && \
 	buf breaking --against ".git#branch=main" 2>&1 | tee logs/buf-breaking.log'
+
+.PHONY: audit\:english
+audit\:english:
+	bash scripts/run_english_audit.sh
 
 .PHONY: audit\:tests
 audit\:tests:
