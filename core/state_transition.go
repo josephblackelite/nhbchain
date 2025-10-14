@@ -4426,39 +4426,45 @@ func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardConte
 	if treasuryAcc.BalanceZNHB.Cmp(payout) < 0 {
 		payout = new(big.Int).Set(treasuryAcc.BalanceZNHB)
 	}
-	if payout.Sign() <= 0 {
-		return
-	}
-	treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, payout)
-	if err := sp.setAccount(cfg.Treasury, treasuryAcc); err != nil {
-		return
-	}
 
-	paidTotal, err := manager.AddPaidTodayZNHB(now, payout)
-	if err != nil {
-		return
-	}
+	var paidTotal *big.Int
+	if payout.Sign() > 0 {
+		treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, payout)
+		if err := sp.setAccount(cfg.Treasury, treasuryAcc); err != nil {
+			return
+		}
 
-	var recipient [20]byte
-	copy(recipient[:], pending.Recipient[:])
-	persist := true
-	var account *types.Account
-	if ctx != nil && ctx.ToAccount != nil && len(ctx.To) == len(recipient) && bytes.Equal(ctx.To, recipient[:]) {
-		account = ctx.ToAccount
-		persist = false
-	} else {
-		acct, err := sp.getAccount(recipient[:])
+		var recipient [20]byte
+		copy(recipient[:], pending.Recipient[:])
+		persist := true
+		var account *types.Account
+		if ctx != nil && ctx.ToAccount != nil && len(ctx.To) == len(recipient) && bytes.Equal(ctx.To, recipient[:]) {
+			account = ctx.ToAccount
+			persist = false
+		} else {
+			acct, err := sp.getAccount(recipient[:])
+			if err != nil {
+				return
+			}
+			account = acct
+		}
+		if account.BalanceZNHB == nil {
+			account.BalanceZNHB = big.NewInt(0)
+		}
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, payout)
+		if persist {
+			if err := sp.setAccount(recipient[:], account); err != nil {
+				return
+			}
+		}
+
+		paidTotal, err = manager.AddPaidTodayZNHB(now, payout)
 		if err != nil {
 			return
 		}
-		account = acct
-	}
-	if account.BalanceZNHB == nil {
-		account.BalanceZNHB = big.NewInt(0)
-	}
-	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, payout)
-	if persist {
-		if err := sp.setAccount(recipient[:], account); err != nil {
+	} else {
+		paidTotal, err = manager.AddPaidTodayZNHB(now, nil)
+		if err != nil {
 			return
 		}
 	}
@@ -4481,6 +4487,23 @@ func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardConte
 			ratio,
 			ratioToFloat(paidTotal),
 		)
+	}
+
+	if payout.Cmp(requested) < 0 {
+		ratioFP := big.NewInt(0)
+		if requested.Sign() > 0 {
+			ratioFP = new(big.Int).Mul(new(big.Int).Set(payout), big.NewInt(events.LoyaltyProrationScale))
+			ratioFP.Quo(ratioFP, requested)
+		}
+		evt := (events.LoyaltyBudgetProRated{
+			Day:        now.UTC().Format("2006-01-02"),
+			BudgetZNHB: budget,
+			DemandZNHB: requested,
+			RatioFP:    ratioFP,
+		}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
 	}
 }
 

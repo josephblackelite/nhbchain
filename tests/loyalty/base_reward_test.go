@@ -329,4 +329,105 @@ func TestBaseRewardImmediateSettlementRecordsPartialRatio(t *testing.T) {
 	if math.Abs(ratio-expectedRatio) > 1e-9 {
 		t.Fatalf("expected ratio %.2f, got %f", expectedRatio, ratio)
 	}
+
+	var prorateEvt *types.Event
+	for _, evt := range sp.Events() {
+		if evt.Type == events.TypeLoyaltyBudgetProRated {
+			prorateEvt = &evt
+			break
+		}
+	}
+	if prorateEvt == nil {
+		t.Fatalf("expected pro-rate event for partial payout")
+	}
+
+	expectedRatioFP := new(big.Int).Mul(expectedPayout, big.NewInt(events.LoyaltyProrationScale))
+	expectedRatioFP.Quo(expectedRatioFP, requestedReward)
+	if got := prorateEvt.Attributes["ratio_fp"]; got != expectedRatioFP.String() {
+		t.Fatalf("unexpected ratio_fp attribute: got %s want %s", got, expectedRatioFP.String())
+	}
+}
+
+func TestBaseRewardImmediateSettlementRecordsZeroRatio(t *testing.T) {
+	sp, manager := setupLoyaltyState(t)
+
+	var treasury [20]byte
+	treasury[13] = 0xBC
+	cfg := (&loyalty.GlobalConfig{
+		Active:       true,
+		Treasury:     treasury[:],
+		MinSpend:     big.NewInt(0),
+		CapPerTx:     big.NewInt(0),
+		DailyCapUser: big.NewInt(0),
+		Dynamic: loyalty.DynamicConfig{
+			EnableProRate:    false,
+			EnableProRateSet: true,
+		},
+	}).Normalize()
+	if err := manager.SetLoyaltyGlobalConfig(cfg); err != nil {
+		t.Fatalf("set global config: %v", err)
+	}
+
+	mustPutAccount(t, manager, treasury, &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	var spender [20]byte
+	spender[12] = 0xCD
+	mustPutAccount(t, manager, spender, &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	fromAcc := mustAccount(t, manager, spender)
+	var recipient [20]byte
+	recipient[11] = 0xDE
+	mustPutAccount(t, manager, recipient, &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	ctx := &loyalty.BaseRewardContext{
+		From:        append([]byte(nil), spender[:]...),
+		To:          append([]byte(nil), recipient[:]...),
+		Token:       "NHB",
+		Amount:      big.NewInt(150),
+		Timestamp:   time.Date(2024, 3, 2, 9, 0, 0, 0, time.UTC),
+		FromAccount: fromAcc,
+	}
+
+	requestedReward := big.NewInt(80)
+	sp.QueuePendingBaseReward(ctx, requestedReward)
+
+	recipientAcc := mustAccount(t, manager, recipient)
+	if recipientAcc.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected no payout, got %s", recipientAcc.BalanceZNHB.String())
+	}
+
+	treasuryAcc := mustAccount(t, manager, treasury)
+	if treasuryAcc.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected treasury balance unchanged, got %s", treasuryAcc.BalanceZNHB.String())
+	}
+
+	ratio := testutil.ToFloat64(observability.Loyalty().RatioGauge())
+	if ratio != 0 {
+		t.Fatalf("expected ratio 0, got %f", ratio)
+	}
+
+	paidTotal, err := manager.AddPaidTodayZNHB(ctx.Timestamp, nil)
+	if err != nil {
+		t.Fatalf("load paid total: %v", err)
+	}
+	if paidTotal.Sign() != 0 {
+		t.Fatalf("expected no paid total, got %s", paidTotal.String())
+	}
+
+	var prorateEvt *types.Event
+	for _, evt := range sp.Events() {
+		if evt.Type == events.TypeLoyaltyBudgetProRated {
+			prorateEvt = &evt
+			break
+		}
+	}
+	if prorateEvt == nil {
+		t.Fatalf("expected pro-rate event when payout is zero")
+	}
+	if got := prorateEvt.Attributes["ratio_fp"]; got != "0" {
+		t.Fatalf("expected ratio_fp 0, got %s", got)
+	}
+	if got := prorateEvt.Attributes["demand_zn"]; got != requestedReward.String() {
+		t.Fatalf("unexpected demand attribute: got %s want %s", got, requestedReward.String())
+	}
 }
