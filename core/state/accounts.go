@@ -125,9 +125,13 @@ func ensureAccountDefaults(account *types.Account) {
 	}
 	if len(account.StorageRoot) == 0 {
 		account.StorageRoot = gethtypes.EmptyRootHash.Bytes()
+	} else if len(account.StorageRoot) != common.HashLength {
+		account.StorageRoot = common.BytesToHash(account.StorageRoot).Bytes()
 	}
 	if len(account.CodeHash) == 0 {
 		account.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	} else if len(account.CodeHash) != common.HashLength {
+		account.CodeHash = common.BytesToHash(account.CodeHash).Bytes()
 	}
 }
 
