@@ -47,6 +47,24 @@ type Config struct {
 	Admin         AdminConfig  `yaml:"admin"`
 }
 
+type loadOptions struct {
+	allowInsecureBearerWithoutTLS bool
+}
+
+// Option customises behaviour when loading swapd configuration.
+type Option func(*loadOptions)
+
+// WithAllowInsecureBearerWithoutTLS permits bearer authentication without TLS.
+// Intended for development overrides only.
+func WithAllowInsecureBearerWithoutTLS() Option {
+	return func(o *loadOptions) {
+		if o == nil {
+			return
+		}
+		o.allowInsecureBearerWithoutTLS = true
+	}
+}
+
 // AdminConfig captures security settings for the admin API.
 type AdminConfig struct {
 	BearerToken     string         `yaml:"bearer_token"`
@@ -118,8 +136,14 @@ type StableAsset struct {
 }
 
 // Load reads configuration from the supplied path.
-func Load(path string) (Config, error) {
+func Load(path string, opts ...Option) (Config, error) {
 	cfg := Config{}
+	options := loadOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return cfg, fmt.Errorf("open config: %w", err)
@@ -130,7 +154,7 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("decode config: %w", err)
 	}
 	applyDefaults(&cfg)
-	if err := cfg.Admin.normalise(); err != nil {
+	if err := cfg.Admin.normalise(options.allowInsecureBearerWithoutTLS); err != nil {
 		return cfg, fmt.Errorf("admin security: %w", err)
 	}
 	if err := validate(cfg); err != nil {
@@ -188,7 +212,7 @@ func validate(cfg Config) error {
 	return nil
 }
 
-func (a *AdminConfig) normalise() error {
+func (a *AdminConfig) normalise(allowInsecureBearerWithoutTLS bool) error {
 	if a == nil {
 		return fmt.Errorf("admin configuration missing")
 	}
@@ -208,6 +232,9 @@ func (a *AdminConfig) normalise() error {
 
 	if a.TLS.CertPath == "" && a.TLS.KeyPath == "" {
 		a.TLS.Disable = true
+	}
+	if a.TLS.Disable && token != "" && !allowInsecureBearerWithoutTLS {
+		return fmt.Errorf("admin bearer_token requires TLS to be enabled")
 	}
 	if !a.TLS.Disable {
 		if a.TLS.CertPath == "" {

@@ -31,3 +31,9 @@ config:
       mint_limit: 50
       redeem_limit: 25
       window: "30m"
+    admin:
+      bearer_token_file: /var/run/secrets/swapd-admin-token
+      tls:
+        cert: /etc/swapd/tls/tls.crt
+        key: /etc/swapd/tls/tls.key
+      # Bearer tokens require TLS; leave enabled in staging deployments.

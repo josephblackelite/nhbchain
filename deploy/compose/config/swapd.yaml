@@ -18,3 +18,9 @@ policy:
   mint_limit: 10
   redeem_limit: 5
   window: "1h"
+admin:
+  bearer_token_file: /var/run/secrets/swapd-admin-token
+  tls:
+    cert: /etc/swapd/tls/tls.crt
+    key: /etc/swapd/tls/tls.key
+  # TLS must stay enabled when bearer_token is configured. Use the dev CLI override for HTTP-only testing.

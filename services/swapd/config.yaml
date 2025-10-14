@@ -31,3 +31,12 @@ stable:
     - symbol: ZNHB
       base: ZNHB
       quote: USD
+admin:
+  bearer_token_file: /var/run/secrets/swapd-admin-token
+  tls:
+    cert: /etc/swapd/tls/tls.crt
+    key: /etc/swapd/tls/tls.key
+  # Bearer tokens require TLS. Only disable TLS for ad-hoc local testing when using the dev override flag.
+  mtls:
+    enabled: true
+    client_ca: /etc/swapd/tls/client-ca.crt

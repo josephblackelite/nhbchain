@@ -27,3 +27,9 @@ config:
       mint_limit: 100
       redeem_limit: 100
       window: "10m"
+    admin:
+      bearer_token_file: /var/run/secrets/swapd-admin-token
+      tls:
+        cert: /etc/swapd/tls/tls.crt
+        key: /etc/swapd/tls/tls.key
+      # Keep TLS enabled when bearer_token is present; use --allow-insecure-bearer-without-tls only with NHB_ENV=dev.
