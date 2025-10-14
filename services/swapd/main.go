@@ -25,8 +25,12 @@ import (
 )
 
 func main() {
-	var cfgPath string
+	var (
+		cfgPath                       string
+		allowInsecureBearerWithoutTLS bool
+	)
 	flag.StringVar(&cfgPath, "config", "services/swapd/config.yaml", "path to swapd configuration file")
+	flag.BoolVar(&allowInsecureBearerWithoutTLS, "allow-insecure-bearer-without-tls", false, "allow admin bearer authentication without TLS (dev only)")
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
@@ -57,7 +61,16 @@ func main() {
 		}
 	}()
 
-	cfg, err := config.Load(cfgPath)
+	var loadOptions []config.Option
+	if allowInsecureBearerWithoutTLS {
+		if env != "dev" {
+			log.Fatalf("swapd: --allow-insecure-bearer-without-tls requires NHB_ENV=dev")
+		}
+		log.Printf("swapd: WARNING: allowing admin bearer token without TLS (development override)")
+		loadOptions = append(loadOptions, config.WithAllowInsecureBearerWithoutTLS())
+	}
+
+	cfg, err := config.Load(cfgPath, loadOptions...)
 	if err != nil {
 		log.Fatalf("swapd: load config: %v", err)
 	}

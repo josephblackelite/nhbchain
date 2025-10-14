@@ -15,7 +15,7 @@ func TestAdminConfigNormaliseRequiresClientCAForMTLS(t *testing.T) {
 		},
 	}
 
-	err := cfg.normalise()
+	err := cfg.normalise(false)
 	if err == nil {
 		t.Fatalf("expected error when mTLS is enabled without client CA")
 	}
@@ -36,7 +36,7 @@ func TestAdminConfigNormaliseAllowsMTLSWithClientCA(t *testing.T) {
 		},
 	}
 
-	if err := cfg.normalise(); err != nil {
+	if err := cfg.normalise(false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !cfg.MTLS.Enabled {
@@ -44,5 +44,38 @@ func TestAdminConfigNormaliseAllowsMTLSWithClientCA(t *testing.T) {
 	}
 	if cfg.MTLS.ClientCAPath != "ca.pem" {
 		t.Fatalf("unexpected client CA path: %q", cfg.MTLS.ClientCAPath)
+	}
+}
+
+func TestAdminConfigNormaliseRequiresTLSEnabledForBearer(t *testing.T) {
+	cfg := AdminConfig{
+		BearerToken: "secret",
+		TLS: AdminTLSConfig{
+			Disable: true,
+		},
+	}
+
+	err := cfg.normalise(false)
+	if err == nil {
+		t.Fatalf("expected error when bearer token is set without TLS")
+	}
+	if got, want := err.Error(), "admin bearer_token requires TLS to be enabled"; got != want {
+		t.Fatalf("unexpected error: got %q, want %q", got, want)
+	}
+}
+
+func TestAdminConfigNormaliseAllowsInsecureOverride(t *testing.T) {
+	cfg := AdminConfig{
+		BearerToken: "secret",
+		TLS: AdminTLSConfig{
+			Disable: true,
+		},
+	}
+
+	if err := cfg.normalise(true); err != nil {
+		t.Fatalf("expected insecure override to bypass TLS requirement, got %v", err)
+	}
+	if cfg.BearerToken != "secret" {
+		t.Fatalf("expected bearer token to persist, got %q", cfg.BearerToken)
 	}
 }

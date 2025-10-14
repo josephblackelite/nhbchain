@@ -62,7 +62,10 @@ admin:
 
 TLS is enabled by default whenever certificate and key paths are present. Disable it only for local development by setting
 `admin.tls.disable: true`. When `mtls.enabled` is true and a client CA bundle is supplied, the server requires verified client
-certificates signed by that authority.
+certificates signed by that authority. `swapd` refuses to start when `admin.bearer_token` (or `bearer_token_file`) is populated
+and TLS is disabled to avoid leaking credentials over plaintext HTTP. For ad-hoc local testing you can bypass this guard by
+running `swapd --allow-insecure-bearer-without-tls` with `NHB_ENV=dev`; the daemon logs a prominent warning and continues
+starting without TLS. Never use the override in staging or production.
 
 Example authenticated requests:
 
