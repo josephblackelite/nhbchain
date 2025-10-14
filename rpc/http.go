@@ -1003,12 +1003,28 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "swap_voucher_export":
 		s.handleSwapVoucherExport(recorder, r, req)
 	case "nhb_requestSwapApproval":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
 		s.handleStableRequestSwapApproval(recorder, r, req)
 	case "nhb_swapMint":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
 		s.handleStableSwapMint(recorder, r, req)
 	case "nhb_swapBurn":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
 		s.handleStableSwapBurn(recorder, r, req)
 	case "nhb_getSwapStatus":
+		if authErr := s.requireAuth(r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
 		s.handleStableGetSwapStatus(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
