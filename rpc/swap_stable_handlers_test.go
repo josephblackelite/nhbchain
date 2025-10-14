@@ -18,6 +18,7 @@ import (
 )
 
 func TestStableRPCHandlersFlow(t *testing.T) {
+	t.Setenv("NHB_RPC_TOKEN", "test-token")
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
 	engine := newStableRPCTestEngine(t, base)
 	limits := stable.Limits{DailyCap: 1_000_000}
@@ -57,7 +58,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 			map[string]any{"asset": "ZNHB", "amount": 100, "account": "merchant-123"},
 		},
 	}
-	quoteResp := doSignedStableRPCRequest(t, srv, traceCtx, quoteReq, base, "nonce-1")
+	quoteResp := doSignedStableRPCRequest(t, srv, traceCtx, quoteReq, base, "nonce-1", "test-token", http.StatusOK)
 	var quoteRPC RPCResponse
 	if err := json.Unmarshal(quoteResp, &quoteRPC); err != nil {
 		t.Fatalf("unmarshal quote response: %v", err)
@@ -88,7 +89,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 			map[string]any{"quoteId": quoteID, "amountIn": 100, "account": "merchant-123"},
 		},
 	}
-	reserveResp := doSignedStableRPCRequest(t, srv, traceCtx, reserveReq, base.Add(time.Second), "nonce-2")
+	reserveResp := doSignedStableRPCRequest(t, srv, traceCtx, reserveReq, base.Add(time.Second), "nonce-2", "test-token", http.StatusOK)
 	var reserveRPC RPCResponse
 	if err := json.Unmarshal(reserveResp, &reserveRPC); err != nil {
 		t.Fatalf("unmarshal reserve response: %v", err)
@@ -116,7 +117,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 			map[string]any{"reservationId": reservationID},
 		},
 	}
-	burnResp := doSignedStableRPCRequest(t, srv, traceCtx, burnReq, base.Add(2*time.Second), "nonce-3")
+	burnResp := doSignedStableRPCRequest(t, srv, traceCtx, burnReq, base.Add(2*time.Second), "nonce-3", "test-token", http.StatusOK)
 	var burnRPC RPCResponse
 	if err := json.Unmarshal(burnResp, &burnRPC); err != nil {
 		t.Fatalf("unmarshal burn response: %v", err)
@@ -140,7 +141,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 		"id":      4,
 		"method":  "nhb_getSwapStatus",
 	}
-	statusResp := doSignedStableRPCRequest(t, srv, traceCtx, statusReq, base.Add(3*time.Second), "nonce-4")
+	statusResp := doSignedStableRPCRequest(t, srv, traceCtx, statusReq, base.Add(3*time.Second), "nonce-4", "test-token", http.StatusOK)
 	var statusRPC RPCResponse
 	if err := json.Unmarshal(statusResp, &statusRPC); err != nil {
 		t.Fatalf("unmarshal status response: %v", err)
@@ -152,7 +153,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("status result type %T", statusRPC.Result)
 	}
-	if statusResult["quotes"].(float64) != 1 || statusResult["reservations"].(float64) != 1 || statusResult["assets"].(float64) != 1 {
+	if statusResult["quotes"].(float64) != 0 || statusResult["reservations"].(float64) != 0 || statusResult["assets"].(float64) != 1 {
 		t.Fatalf("unexpected status counters: %+v", statusResult)
 	}
 	if statusResult["updatedAt"].(string) != "2024-06-07T19:15:27Z" {
@@ -160,7 +161,114 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 	}
 }
 
-func doSignedStableRPCRequest(t *testing.T, srv *Server, ctx context.Context, payload map[string]any, ts time.Time, nonce string) []byte {
+func TestStableRPCHandlersRequireRPCAuth(t *testing.T) {
+	t.Setenv("NHB_RPC_TOKEN", "test-token")
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newStableRPCTestEngine(t, base)
+	limits := stable.Limits{DailyCap: 1_000_000}
+	asset := stable.Asset{
+		Symbol:         "ZNHB",
+		BasePair:       "ZNHB",
+		QuotePair:      "USD",
+		QuoteTTL:       time.Minute,
+		MaxSlippageBps: 50,
+		SoftInventory:  1_000_000,
+	}
+	srv := NewServer(nil, nil, ServerConfig{
+		SwapAuth: SwapAuthConfig{
+			Secrets:              map[string]string{"partner": "secret"},
+			AllowedTimestampSkew: time.Minute,
+			NonceTTL:             5 * time.Minute,
+			NonceCapacity:        32,
+			RateLimitWindow:      time.Minute,
+			Now: func() time.Time {
+				return base
+			},
+		},
+	})
+	srv.ConfigureStableEngine(engine, limits, []stable.Asset{asset}, func() time.Time { return base.Add(10 * time.Second) })
+
+	traceCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x01},
+		SpanID:     trace.SpanID{0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E, 0x10},
+		TraceFlags: trace.FlagsSampled,
+	}))
+
+	tests := []struct {
+		name    string
+		payload map[string]any
+		nonce   string
+		offset  time.Duration
+	}{
+		{
+			name: "request approval",
+			payload: map[string]any{
+				"jsonrpc": "2.0",
+				"id":      10,
+				"method":  "nhb_requestSwapApproval",
+				"params": []any{
+					map[string]any{"asset": "ZNHB", "amount": 100, "account": "merchant-123"},
+				},
+			},
+			nonce:  "unauth-1",
+			offset: 0,
+		},
+		{
+			name: "swap mint",
+			payload: map[string]any{
+				"jsonrpc": "2.0",
+				"id":      11,
+				"method":  "nhb_swapMint",
+				"params": []any{
+					map[string]any{"quoteId": "q-1717787718000000000", "amountIn": 100, "account": "merchant-123"},
+				},
+			},
+			nonce:  "unauth-2",
+			offset: time.Second,
+		},
+		{
+			name: "swap burn",
+			payload: map[string]any{
+				"jsonrpc": "2.0",
+				"id":      12,
+				"method":  "nhb_swapBurn",
+				"params": []any{
+					map[string]any{"reservationId": "q-1717787718000000000"},
+				},
+			},
+			nonce:  "unauth-3",
+			offset: 2 * time.Second,
+		},
+		{
+			name: "swap status",
+			payload: map[string]any{
+				"jsonrpc": "2.0",
+				"id":      13,
+				"method":  "nhb_getSwapStatus",
+			},
+			nonce:  "unauth-4",
+			offset: 3 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doSignedStableRPCRequest(t, srv, traceCtx, tc.payload, base.Add(tc.offset), tc.nonce, "", http.StatusUnauthorized)
+			var rpcResp RPCResponse
+			if err := json.Unmarshal(resp, &rpcResp); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if rpcResp.Error == nil {
+				t.Fatalf("expected error response")
+			}
+			if rpcResp.Error.Code != codeUnauthorized {
+				t.Fatalf("unexpected error code %d", rpcResp.Error.Code)
+			}
+		})
+	}
+}
+
+func doSignedStableRPCRequest(t *testing.T, srv *Server, ctx context.Context, payload map[string]any, ts time.Time, nonce string, authToken string, wantStatus int) []byte {
 	t.Helper()
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -175,10 +283,13 @@ func doSignedStableRPCRequest(t *testing.T, srv *Server, ctx context.Context, pa
 	req.Header.Set(gatewayauth.HeaderNonce, nonce)
 	signature := gatewayauth.ComputeSignature("secret", timestamp, nonce, req.Method, gatewayauth.CanonicalRequestPath(req), body)
 	req.Header.Set(gatewayauth.HeaderSignature, hex.EncodeToString(signature))
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
 
 	recorder := httptest.NewRecorder()
 	srv.handle(recorder, req)
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != wantStatus {
 		t.Fatalf("unexpected status %d body %s", recorder.Code, recorder.Body.String())
 	}
 	return recorder.Body.Bytes()
@@ -204,5 +315,7 @@ func newStableRPCTestEngine(t *testing.T, base time.Time) *stable.Engine {
 		counter++
 		return ts
 	})
+	engine.RecordPrice("ZNHB", "USD", 1.0, base)
+	engine.SetPriceMaxAge(0)
 	return engine
 }
