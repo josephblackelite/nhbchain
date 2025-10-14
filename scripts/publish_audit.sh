@@ -4,22 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CHECKLIST_FILE="${REPO_ROOT}/docs/audit/latest.md"
-GO_SCRIPT="${REPO_ROOT}/scripts/audit_proofs.go"
+GO_PACKAGE="${REPO_ROOT}/scripts/audit-proofs"
 
 if [[ ! -f "${CHECKLIST_FILE}" ]]; then
   echo "publish_audit: checklist file not found at ${CHECKLIST_FILE}" >&2
   exit 1
 fi
 
-if [[ ! -f "${GO_SCRIPT}" ]]; then
-  echo "publish_audit: generator script missing at ${GO_SCRIPT}" >&2
+if [[ ! -d "${GO_PACKAGE}" ]]; then
+  echo "publish_audit: generator package missing at ${GO_PACKAGE}" >&2
   exit 1
 fi
 
 PROOFS_TMP="$(mktemp)"
 trap 'rm -f "${PROOFS_TMP}"' EXIT
 
-( cd "${REPO_ROOT}" && go run "${GO_SCRIPT}" -checklist "${CHECKLIST_FILE}" -root "${REPO_ROOT}" -out "${PROOFS_TMP}" )
+( cd "${REPO_ROOT}" && go run "${GO_PACKAGE}" -checklist "${CHECKLIST_FILE}" -root "${REPO_ROOT}" -out "${PROOFS_TMP}" )
 
 python3 - "${CHECKLIST_FILE}" "${PROOFS_TMP}" <<'PY'
 import re
