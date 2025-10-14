@@ -556,6 +556,9 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if !policy.Enabled {
 		return nil
 	}
+	if policy.DailyCapWei == nil || policy.DailyCapWei.Sign() <= 0 {
+		return fmt.Errorf("paymaster auto top-up daily cap must be positive when enabled")
+	}
 	token := strings.ToUpper(strings.TrimSpace(policy.Token))
 	if token == "" {
 		token = "ZNHB"
