@@ -90,9 +90,38 @@ With the nonce in hand, sign the envelope and forward the full JSON-RPC request
 from trusted infrastructure. Attach `Authorization: Bearer <NHB_RPC_TOKEN>` to
 the HTTP headers (see the
 [`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
-walkthrough for the complete header list). The example below mirrors the exact
-payload format validators accept, including populated `r`/`s`/`v` signature
-components:
+walkthrough for the complete header list). The RPC layer enforces the bearer
+token via [`requireAuth`](../../rpc/http.go#L1795-L1835), which rejects requests
+missing the header or using the wrong scheme.
+
+```bash
+curl https://validator.nhbchain.example/rpc \
+  -H "Authorization: Bearer ${NHB_RPC_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "id": 2,
+    "jsonrpc": "2.0",
+    "method": "nhb_sendTransaction",
+    "params": [
+      {
+        "chainId": "0x4e4842",
+        "type": 16,
+        "nonce": 42,
+        "to": "0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a",
+        "value": "0xde0b6b3a7640000",
+        "gasLimit": "0x61a8",
+        "gasPrice": "0x3b9aca00",
+        "data": "0x",
+        "r": "0x9d6bb1226fb5c07f42d41f017cbf6f6fb1dcf1c563cb5b5b6f2a7d2639a4bce1",
+        "s": "0x42fdedb6f5b1f59fa3d793c9d86b8b156382fa4995df794ba53d0d2ca4f8cb22",
+        "v": "0x1c"
+      }
+    ]
+  }'
+```
+
+The example above mirrors the exact payload format validators accept,
+including populated `r`/`s`/`v` signature components:
 
 ```json
 // Authorization: Bearer <NHB_RPC_TOKEN>
