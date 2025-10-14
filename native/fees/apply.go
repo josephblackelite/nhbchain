@@ -38,11 +38,12 @@ type AssetPolicy struct {
 
 // DomainPolicy captures the configuration applied to a specific fee domain.
 type DomainPolicy struct {
-	FreeTierTxPerMonth uint64
-	MDRBasisPoints     uint32
-	OwnerWallet        [20]byte
-	Assets             map[string]AssetPolicy
-	FreeTierPerAsset   bool
+	FreeTierTxPerMonth    uint64
+	FreeTierTxPerMonthSet bool
+	MDRBasisPoints        uint32
+	OwnerWallet           [20]byte
+	Assets                map[string]AssetPolicy
+	FreeTierPerAsset      bool
 }
 
 // NormalizeAsset canonicalises asset identifiers for consistent lookups.
@@ -61,17 +62,20 @@ func isZeroWallet(addr [20]byte) bool {
 
 func (p DomainPolicy) normalized(domain string) DomainPolicy {
 	normalized := p
-	if normalized.FreeTierTxPerMonth == 0 {
-		normalized.FreeTierTxPerMonth = DefaultFreeTierTxPerMonth
-		if domain = strings.TrimSpace(domain); domain != "" {
-			if _, logged := freeTierDefaultWarned.LoadOrStore(strings.ToLower(domain), struct{}{}); !logged {
-				log.Printf("fees: domain %s missing FreeTierTxPerMonth, defaulting to %d", domain, DefaultFreeTierTxPerMonth)
-			}
-		} else {
-			if _, logged := freeTierDefaultWarned.LoadOrStore("", struct{}{}); !logged {
-				log.Printf("fees: missing FreeTierTxPerMonth, defaulting to %d", DefaultFreeTierTxPerMonth)
+	if !normalized.FreeTierTxPerMonthSet {
+		if normalized.FreeTierTxPerMonth == 0 {
+			normalized.FreeTierTxPerMonth = DefaultFreeTierTxPerMonth
+			if domain = strings.TrimSpace(domain); domain != "" {
+				if _, logged := freeTierDefaultWarned.LoadOrStore(strings.ToLower(domain), struct{}{}); !logged {
+					log.Printf("fees: domain %s missing FreeTierTxPerMonth, defaulting to %d", domain, DefaultFreeTierTxPerMonth)
+				}
+			} else {
+				if _, logged := freeTierDefaultWarned.LoadOrStore("", struct{}{}); !logged {
+					log.Printf("fees: missing FreeTierTxPerMonth, defaulting to %d", DefaultFreeTierTxPerMonth)
+				}
 			}
 		}
+		normalized.FreeTierTxPerMonthSet = true
 	}
 	if normalized.MDRBasisPoints == 0 {
 		normalized.MDRBasisPoints = DefaultMDRBasisPoints

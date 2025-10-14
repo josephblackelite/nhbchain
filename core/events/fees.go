@@ -64,9 +64,7 @@ func (e FeeApplied) Event() *types.Event {
 		attrs["ownerWallet"] = hex.EncodeToString(e.OwnerWallet[:])
 	}
 	attrs["freeTierApplied"] = strconv.FormatBool(e.FreeTierApplied)
-	if e.FreeTierLimit > 0 {
-		attrs["freeTierLimit"] = strconv.FormatUint(e.FreeTierLimit, 10)
-	}
+	attrs["freeTierLimit"] = strconv.FormatUint(e.FreeTierLimit, 10)
 	attrs["freeTierRemaining"] = strconv.FormatUint(e.FreeTierRemaining, 10)
 	if e.UsageCount > 0 {
 		attrs["usageCount"] = strconv.FormatUint(e.UsageCount, 10)
