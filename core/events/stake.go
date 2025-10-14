@@ -176,6 +176,7 @@ func (StakeCapHit) EventType() string { return TypeStakeCapHit }
 func (e StakeCapHit) Event() *types.Event {
 	attrs := map[string]string{
 		"requestedZNHB": formatAmount(e.RequestedZNHB),
+		"attemptedZNHB": formatAmount(e.RequestedZNHB),
 		"allowedZNHB":   formatAmount(e.AllowedZNHB),
 		"ytd":           formatAmount(e.YTD),
 		"cap":           formatAmount(e.Cap),

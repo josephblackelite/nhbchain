@@ -195,6 +195,9 @@ func Test_EmissionCap_PartialMintAndEvent(t *testing.T) {
 	if got := capEvt.Attributes["attemptedZNHB"]; got != attempted.String() {
 		t.Fatalf("cap attempted mismatch: got %s want %s", got, attempted.String())
 	}
+	if got := capEvt.Attributes["requestedZNHB"]; got != attempted.String() {
+		t.Fatalf("cap requested mismatch: got %s want %s", got, attempted.String())
+	}
 	if got := capEvt.Attributes["ytd"]; got != "750" {
 		t.Fatalf("cap ytd mismatch: got %s", got)
 	}
