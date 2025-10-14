@@ -11,8 +11,10 @@ import (
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"nhbchain/core/genesis"
+	"nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/storage"
+	"nhbchain/storage/trie"
 )
 
 // Blockchain manages the collection of blocks.
@@ -299,14 +301,34 @@ func (bc *Blockchain) GenesisHash() []byte {
 	return cloneBytes(bc.genesis)
 }
 
-func createGenesisBlock() *types.Block {
+func createGenesisBlock(db storage.Database) (*types.Block, error) {
+	if db == nil {
+		return nil, fmt.Errorf("create genesis block: database must not be nil")
+	}
+
 	header := &types.BlockHeader{
 		Height:    0,
 		Timestamp: 1672531200,
 		PrevHash:  []byte{},
-		StateRoot: gethtypes.EmptyRootHash.Bytes(),
+		TxRoot:    gethtypes.EmptyRootHash.Bytes(),
 	}
-	return types.NewBlock(header, []*types.Transaction{})
+	stateTrie, err := trie.NewTrie(db, nil)
+	if err != nil {
+		return nil, fmt.Errorf("init state trie: %w", err)
+	}
+	manager := state.NewManager(stateTrie)
+	if err := manager.SetStateVersion(state.StateVersion); err != nil {
+		return nil, fmt.Errorf("set state version: %w", err)
+	}
+
+	parentRoot := stateTrie.Root()
+	newRoot, err := stateTrie.Commit(parentRoot, header.Height)
+	if err != nil {
+		return nil, fmt.Errorf("commit state trie: %w", err)
+	}
+	header.StateRoot = newRoot.Bytes()
+
+	return types.NewBlock(header, []*types.Transaction{}), nil
 }
 
 func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) (*types.Block, *genesis.GenesisSpec, error) {
@@ -345,7 +367,11 @@ func genesisFromSource(path string, allowAutogenesis bool, db storage.Database) 
 	}
 
 	fmt.Println("Autogenesis override enabled (dev mode); creating ephemeral genesis block.")
-	return createGenesisBlock(), nil, nil
+	block, err := createGenesisBlock(db)
+	if err != nil {
+		return nil, nil, err
+	}
+	return block, nil, nil
 }
 
 func rebuildGenesisState(db storage.Database, genesisPath string) error {

@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"nhbchain/core/genesis"
+	"nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
+	"nhbchain/storage/trie"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 )
@@ -166,5 +168,44 @@ func Test_StateVersion_RefusesOldSchemaWithoutFlag(t *testing.T) {
 
 	if _, err := NewNode(db, key, "", false, true); err != nil {
 		t.Fatalf("allow-migrate should bypass state version guard: %v", err)
+	}
+}
+
+func Test_StateVersion_AutogenesisSetsVersion(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	node, err := NewNode(db, key, "", true, false)
+	if err != nil {
+		t.Fatalf("autogenesis should not trigger schema mismatch: %v", err)
+	}
+	if node == nil {
+		t.Fatalf("expected node instance")
+	}
+
+	header := node.chain.CurrentHeader()
+	if header == nil {
+		t.Fatalf("autogenesis should produce a genesis header")
+	}
+
+	stateTrie, err := trie.NewTrie(db, header.StateRoot)
+	if err != nil {
+		t.Fatalf("open state trie: %v", err)
+	}
+	manager := state.NewManager(stateTrie)
+	version, ok, err := manager.StateVersion()
+	if err != nil {
+		t.Fatalf("query state version: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected stored state version")
+	}
+	if version != state.StateVersion {
+		t.Fatalf("unexpected state version: got %d want %d", version, state.StateVersion)
 	}
 }
