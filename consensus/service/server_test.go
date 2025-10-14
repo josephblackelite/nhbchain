@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -107,6 +108,72 @@ func buildModuleEnvelope(t testing.TB, msg proto.Message) (*consensusv1.SignedTx
 		t.Fatalf("sign module envelope: %v", err)
 	}
 	return signed, key
+}
+
+func sampleSwapPayoutReceipt() *swapv1.PayoutReceipt {
+	return &swapv1.PayoutReceipt{
+		ReceiptId:    "rcpt-1",
+		IntentId:     "intent-1",
+		StableAsset:  "USDC",
+		StableAmount: "1000",
+		NhbAmount:    "1000",
+		TxHash:       "0xabc",
+		EvidenceUri:  "https://example.com/receipt",
+		SettledAt:    time.Now().UTC().Unix(),
+	}
+}
+
+func marshalSwapPayoutPayload(t testing.TB) []byte {
+	t.Helper()
+	msg := &swapv1.MsgPayoutReceipt{Authority: "treasury", Receipt: sampleSwapPayoutReceipt()}
+	packed, err := anypb.New(msg)
+	if err != nil {
+		t.Fatalf("pack payout receipt: %v", err)
+	}
+	raw, err := proto.Marshal(packed)
+	if err != nil {
+		t.Fatalf("marshal payout receipt: %v", err)
+	}
+	return raw
+}
+
+type enforcingConsensusNode struct {
+	*fakeConsensusNode
+}
+
+func newEnforcingConsensusNode() *enforcingConsensusNode {
+	return &enforcingConsensusNode{fakeConsensusNode: newFakeConsensusNode()}
+}
+
+func (f *enforcingConsensusNode) SubmitTransaction(tx *types.Transaction) error {
+	if err := enforceRecoverableSignature(tx); err != nil {
+		return err
+	}
+	return f.fakeConsensusNode.SubmitTransaction(tx)
+}
+
+func (f *enforcingConsensusNode) SubmitTxEnvelope(env *consensusv1.SignedTxEnvelope) error {
+	if err := f.enforceEnvelope(env); err != nil {
+		return err
+	}
+	return f.fakeConsensusNode.SubmitTxEnvelope(env)
+}
+
+func (f *enforcingConsensusNode) enforceEnvelope(env *consensusv1.SignedTxEnvelope) error {
+	tx, err := codec.TransactionFromEnvelope(env)
+	if err != nil {
+		return err
+	}
+	return enforceRecoverableSignature(tx)
+}
+
+func enforceRecoverableSignature(tx *types.Transaction) error {
+	if types.RequiresSignature(tx.Type) {
+		if _, err := tx.From(); err != nil {
+			return fmt.Errorf("%w: recover sender: %w", core.ErrInvalidTransaction, err)
+		}
+	}
+	return nil
 }
 
 func (f *fakeConsensusNode) SubmitTxEnvelope(tx *consensusv1.SignedTxEnvelope) error {
@@ -252,17 +319,7 @@ func TestServerSubmitTxEnvelopeModulePayload(t *testing.T) {
 	node := newFakeConsensusNode()
 	srv := NewServer(node)
 
-	receipt := &swapv1.PayoutReceipt{
-		ReceiptId:    "rcpt-1",
-		IntentId:     "intent-1",
-		StableAsset:  "USDC",
-		StableAmount: "1000",
-		NhbAmount:    "1000",
-		TxHash:       "0xabc",
-		EvidenceUri:  "https://example.com/receipt",
-		SettledAt:    time.Now().UTC().Unix(),
-	}
-	msg := &swapv1.MsgPayoutReceipt{Authority: "treasury", Receipt: receipt}
+	msg := &swapv1.MsgPayoutReceipt{Authority: "treasury", Receipt: sampleSwapPayoutReceipt()}
 	envelope, _ := buildModuleEnvelope(t, msg)
 
 	if _, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: envelope}); err != nil {
@@ -279,6 +336,50 @@ func TestServerSubmitTxEnvelopeUnsupportedModulePayload(t *testing.T) {
 
 	if _, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: envelope}); err == nil {
 		t.Fatalf("expected unsupported module payload error")
+	}
+}
+
+func TestServerSubmitTransactionRejectsUnsignedSwapPayoutReceipt(t *testing.T) {
+	node := newEnforcingConsensusNode()
+	srv := NewServer(node)
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSwapPayoutReceipt,
+		Nonce:    1,
+		GasPrice: big.NewInt(0),
+		Data:     marshalSwapPayoutPayload(t),
+	}
+	protoTx, err := codec.TransactionToProto(tx)
+	if err != nil {
+		t.Fatalf("transaction to proto: %v", err)
+	}
+	_, err = srv.SubmitTransaction(context.Background(), &consensusv1.SubmitTransactionRequest{Transaction: protoTx})
+	if err == nil {
+		t.Fatalf("expected signature enforcement error")
+	}
+	if !errors.Is(err, core.ErrInvalidTransaction) {
+		t.Fatalf("expected ErrInvalidTransaction, got %v", err)
+	}
+}
+
+func TestServerSubmitTxEnvelopeRejectsUnsignedSwapPayoutReceipt(t *testing.T) {
+	node := newEnforcingConsensusNode()
+	srv := NewServer(node)
+
+	msg := &swapv1.MsgPayoutReceipt{Authority: "treasury", Receipt: sampleSwapPayoutReceipt()}
+	envelope, _ := buildModuleEnvelope(t, msg)
+
+	if _, err := srv.SubmitTxEnvelope(context.Background(), &consensusv1.SubmitTxEnvelopeRequest{Tx: envelope}); err == nil {
+		t.Fatalf("expected signature enforcement error")
+	} else if !errors.Is(err, core.ErrInvalidTransaction) {
+		t.Fatalf("expected ErrInvalidTransaction, got %v", err)
+	}
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.envelopes != 0 {
+		t.Fatalf("expected envelope submission to be rejected")
 	}
 }
 

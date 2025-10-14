@@ -55,7 +55,7 @@ const (
 // from module attestations rely on their envelope signatures instead.
 func RequiresSignature(t TxType) bool {
 	switch t {
-	case TxTypeMint, TxTypeSwapPayoutReceipt:
+	case TxTypeMint:
 		return false
 	default:
 		return true
