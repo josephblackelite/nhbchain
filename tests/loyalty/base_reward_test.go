@@ -1,15 +1,19 @@
 package loyalty_test
 
 import (
+	"math"
 	"math/big"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"nhbchain/core"
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/native/loyalty"
+	"nhbchain/observability"
 )
 
 type staticPauseView struct {
@@ -266,5 +270,63 @@ func TestBaseRewardHonorsCapPerTx(t *testing.T) {
 	}
 	if evts[2].Type != "loyalty.program.skipped" {
 		t.Fatalf("expected program skipped event third, got %s", evts[2].Type)
+	}
+}
+
+func TestBaseRewardImmediateSettlementRecordsPartialRatio(t *testing.T) {
+	sp, manager := setupLoyaltyState(t)
+
+	var treasury [20]byte
+	treasury[14] = 0xAB
+	cfg := (&loyalty.GlobalConfig{
+		Active:       true,
+		Treasury:     treasury[:],
+		MinSpend:     big.NewInt(0),
+		CapPerTx:     big.NewInt(0),
+		DailyCapUser: big.NewInt(0),
+		Dynamic: loyalty.DynamicConfig{
+			EnableProRate:    false,
+			EnableProRateSet: true,
+		},
+	}).Normalize()
+	if err := manager.SetLoyaltyGlobalConfig(cfg); err != nil {
+		t.Fatalf("set global config: %v", err)
+	}
+
+	mustPutAccount(t, manager, treasury, &types.Account{BalanceZNHB: big.NewInt(60), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	var spender [20]byte
+	spender[13] = 0xCD
+	mustPutAccount(t, manager, spender, &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	fromAcc := mustAccount(t, manager, spender)
+	var recipient [20]byte
+	recipient[12] = 0xEF
+	mustPutAccount(t, manager, recipient, &types.Account{BalanceZNHB: big.NewInt(0), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	ctx := &loyalty.BaseRewardContext{
+		From:        append([]byte(nil), spender[:]...),
+		To:          append([]byte(nil), recipient[:]...),
+		Token:       "NHB",
+		Amount:      big.NewInt(200),
+		Timestamp:   time.Date(2024, 3, 1, 15, 0, 0, 0, time.UTC),
+		FromAccount: fromAcc,
+	}
+
+	requestedReward := big.NewInt(100)
+	sp.QueuePendingBaseReward(ctx, requestedReward)
+
+	expectedPayout := big.NewInt(60)
+	recipientAcc := mustAccount(t, manager, recipient)
+	if recipientAcc.BalanceZNHB.Cmp(expectedPayout) != 0 {
+		t.Fatalf("expected payout %s, got %s", expectedPayout.String(), recipientAcc.BalanceZNHB.String())
+	}
+
+	ratio := testutil.ToFloat64(observability.Loyalty().RatioGauge())
+	const expectedRatio = 0.6
+	if ratio < 0 || ratio > 1 {
+		t.Fatalf("expected ratio within [0,1], got %f", ratio)
+	}
+	if math.Abs(ratio-expectedRatio) > 1e-9 {
+		t.Fatalf("expected ratio %.2f, got %f", expectedRatio, ratio)
 	}
 }

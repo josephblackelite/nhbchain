@@ -97,6 +97,14 @@ func (m *LoyaltyMetrics) RecordBudget(budget, demand, ratio, paid float64) {
 	m.paidToday.Set(paid)
 }
 
+// RatioGauge exposes the loyalty pro-rate ratio gauge for testing.
+func (m *LoyaltyMetrics) RatioGauge() prometheus.Gauge {
+	if m == nil {
+		return nil
+	}
+	return m.ratio
+}
+
 // LoyaltyMetrics captures the daily loyalty budget utilisation telemetry.
 type LoyaltyMetrics struct {
 	budget    prometheus.Gauge
