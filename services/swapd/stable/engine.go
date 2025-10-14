@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -53,15 +54,15 @@ type Limits struct {
 type Quote struct {
 	ID        string
 	Asset     string
-	Price     float64
+	Price     int64
 	ExpiresAt time.Time
 }
 
 // Reservation represents a reserved quote.
 type Reservation struct {
 	QuoteID   string
-	AmountIn  float64
-	AmountOut float64
+	AmountIn  int64
+	AmountOut int64
 	ExpiresAt time.Time
 	Account   string
 }
@@ -95,7 +96,7 @@ func NewEngine(assets []Asset, limits Limits) (*Engine, error) {
 	}
 	ledger := make(map[string]*assetLedger, len(assetMap))
 	for _, cfg := range assetMap {
-		ledger[strings.ToUpper(cfg.Symbol)] = &assetLedger{available: float64(cfg.SoftInventory)}
+		ledger[strings.ToUpper(cfg.Symbol)] = &assetLedger{available: cfg.SoftInventory * amountScale}
 	}
 	return &Engine{
 		assets:    assetMap,
@@ -137,8 +138,8 @@ func (e *Engine) PriceQuote(ctx context.Context, asset string, amount float64) (
 		e.metrics.Observe("quote", e.clock().Sub(start), err)
 		return Quote{}, ErrNotSupported
 	}
-	if amount <= 0 {
-		err := fmt.Errorf("amount must be positive")
+	amountUnits, err := toAmountUnits(amount)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		e.metrics.Observe("quote", e.clock().Sub(start), err)
@@ -160,7 +161,7 @@ func (e *Engine) PriceQuote(ctx context.Context, asset string, amount float64) (
 	}
 	e.quotes[quote.ID] = &quoteState{
 		Quote:  quote,
-		Amount: amount,
+		Amount: amountUnits,
 		Asset:  assetCfg.Symbol,
 		Price:  price.rate,
 		Issued: now,
@@ -204,14 +205,14 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 		e.metrics.Observe("reserve", e.clock().Sub(start), err)
 		return Reservation{}, err
 	}
-	if amountIn <= 0 {
-		err := fmt.Errorf("amount must be positive")
+	amountUnits, err := toAmountUnits(amountIn)
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		e.metrics.Observe("reserve", e.clock().Sub(start), err)
 		return Reservation{}, err
 	}
-	if !amountMatches(amountIn, quoteState.Amount) {
+	if !amountMatches(amountUnits, quoteState.Amount) {
 		err := ErrQuoteAmountMismatch
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -233,7 +234,7 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 		e.metrics.Observe("reserve", e.clock().Sub(start), err)
 		return Reservation{}, err
 	}
-	amountOut := amountIn * quoteState.Price
+	amountOut := mulDivRound(amountUnits, quoteState.Price, priceScale)
 	ledger := e.ledger[strings.ToUpper(assetCfg.Symbol)]
 	if ledger == nil {
 		err := ErrNotSupported
@@ -259,7 +260,7 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 	ledger.reserved += amountOut
 	res := Reservation{
 		QuoteID:   quote.ID,
-		AmountIn:  amountIn,
+		AmountIn:  amountUnits,
 		AmountOut: amountOut,
 		ExpiresAt: quote.ExpiresAt,
 		Account:   account,
@@ -331,24 +332,25 @@ func (e *Engine) CreateCashOutIntent(ctx context.Context, reservationID string) 
 	}
 	ledger.reserved -= res.AmountOut
 	ledger.payouts += res.AmountOut
+	payout := fromAmountUnits(res.AmountOut)
 	intent := CashOutIntent{
 		ID:            fmt.Sprintf("i-%d", now.UnixNano()),
 		ReservationID: reservationID,
-		Amount:        res.AmountOut,
+		Amount:        payout,
 		CreatedAt:     now,
 	}
 	resState.IntentCreated = true
 	resState.IntentID = intent.ID
 	resState.IntentCreatedAt = now
 	span.SetAttributes(
-		attribute.Float64("amount", intent.Amount),
+		attribute.Float64("amount", payout),
 		attribute.String("account", res.Account),
 	)
 	span.SetStatus(codes.Ok, "intent created")
 	e.metrics.Observe("cashout_intent", e.clock().Sub(start), nil)
 	slog.InfoContext(ctx, "cashout intent created",
 		slog.String("reservation_id", reservationID),
-		slog.Float64("amount", intent.Amount),
+		slog.Float64("amount", payout),
 		slog.String("account", res.Account),
 	)
 	return intent, nil
@@ -388,9 +390,9 @@ func (e *Engine) Status(ctx context.Context) Status {
 
 type quoteState struct {
 	Quote    Quote
-	Amount   float64
+	Amount   int64
 	Asset    string
-	Price    float64
+	Price    int64
 	Issued   time.Time
 	Consumed bool
 }
@@ -398,22 +400,27 @@ type quoteState struct {
 type reservationState struct {
 	Reservation     Reservation
 	Asset           string
-	Price           float64
+	Price           int64
 	IntentCreated   bool
 	IntentID        string
 	IntentCreatedAt time.Time
 }
 
 type assetLedger struct {
-	available float64
-	reserved  float64
-	payouts   float64
+	available int64
+	reserved  int64
+	payouts   int64
 }
 
 type pricePoint struct {
-	rate    float64
+	rate    int64
 	updated time.Time
 }
+
+const (
+	amountScale = int64(1_000_000)
+	priceScale  = int64(1_000_000_000)
+)
 
 func pairKey(base, quote string) string {
 	b := strings.ToUpper(strings.TrimSpace(base))
@@ -422,6 +429,78 @@ func pairKey(base, quote string) string {
 		return ""
 	}
 	return b + "/" + q
+}
+
+func toAmountUnits(amount float64) (int64, error) {
+	if amount <= 0 {
+		return 0, fmt.Errorf("amount must be positive")
+	}
+	scaled := math.Round(amount * float64(amountScale))
+	units := int64(scaled)
+	if units <= 0 {
+		return 0, fmt.Errorf("amount must be positive")
+	}
+	if !withinTolerance(amount, units, amountScale) {
+		return 0, fmt.Errorf("amount precision exceeds supported scale")
+	}
+	return units, nil
+}
+
+func fromAmountUnits(units int64) float64 {
+	return float64(units) / float64(amountScale)
+}
+
+func toRateUnits(rate float64) (int64, error) {
+	if rate <= 0 {
+		return 0, fmt.Errorf("rate must be positive")
+	}
+	scaled := math.Round(rate * float64(priceScale))
+	units := int64(scaled)
+	if units <= 0 {
+		return 0, fmt.Errorf("rate must be positive")
+	}
+	if !withinTolerance(rate, units, priceScale) {
+		return 0, fmt.Errorf("rate precision exceeds supported scale")
+	}
+	return units, nil
+}
+
+func fromRateUnits(units int64) float64 {
+	return float64(units) / float64(priceScale)
+}
+
+func withinTolerance(value float64, units, scale int64) bool {
+	recon := float64(units) / float64(scale)
+	diff := math.Abs(value - recon)
+	tolerance := 1.0 / float64(scale*10)
+	return diff <= tolerance
+}
+
+func mulDivRound(a, b, denom int64) int64 {
+	if denom == 0 {
+		return 0
+	}
+	numerator := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
+	denomBig := big.NewInt(denom)
+	quotient := new(big.Int)
+	remainder := new(big.Int)
+	quotient.QuoRem(numerator, denomBig, remainder)
+	doubled := new(big.Int).Lsh(new(big.Int).Abs(remainder), 1)
+	if doubled.Cmp(new(big.Int).Abs(denomBig)) >= 0 {
+		if numerator.Sign() >= 0 {
+			quotient.Add(quotient, big.NewInt(1))
+		} else {
+			quotient.Sub(quotient, big.NewInt(1))
+		}
+	}
+	return quotient.Int64()
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (e *Engine) lookupPrice(assetCfg Asset) (pricePoint, error) {
@@ -439,7 +518,7 @@ func (e *Engine) lookupPrice(assetCfg Asset) (pricePoint, error) {
 	return price, nil
 }
 
-func (e *Engine) applyDailyLimit(amount float64, now time.Time) error {
+func (e *Engine) applyDailyLimit(amount int64, now time.Time) error {
 	if e.limits.DailyCap <= 0 {
 		return nil
 	}
@@ -448,14 +527,18 @@ func (e *Engine) applyDailyLimit(amount float64, now time.Time) error {
 		e.daily.day = day
 		e.daily.amount = 0
 	}
-	if e.daily.amount+amount > float64(e.limits.DailyCap) {
+	capUnits := e.limits.DailyCap * amountScale
+	if capUnits <= 0 {
+		return nil
+	}
+	if e.daily.amount+amount > capUnits {
 		return ErrDailyCapExceeded
 	}
 	e.daily.amount += amount
 	return nil
 }
 
-func (e *Engine) revertDaily(amount float64, now time.Time) {
+func (e *Engine) revertDaily(amount int64, now time.Time) {
 	if e.limits.DailyCap <= 0 || amount <= 0 {
 		return
 	}
@@ -486,28 +569,22 @@ func (e *Engine) releaseReservationLocked(state *reservationState, now time.Time
 
 type dailyUsage struct {
 	day    time.Time
-	amount float64
+	amount int64
 }
 
-var epsilon = 1e-6
-
-func amountMatches(a, b float64) bool {
-	if b == 0 {
-		return a == 0
-	}
-	diff := math.Abs(a - b)
-	return diff <= math.Max(epsilon, math.Abs(b)*epsilon)
+func amountMatches(a, b int64) bool {
+	return a == b
 }
 
-func exceedsSlippage(reference, observed float64, maxBps int) bool {
+func exceedsSlippage(reference, observed int64, maxBps int) bool {
 	if reference <= 0 || observed <= 0 {
 		return true
 	}
 	if maxBps <= 0 {
 		return false
 	}
-	diff := math.Abs(observed-reference) / reference
-	return diff*10000 > float64(maxBps)
+	diff := absInt64(observed - reference)
+	return diff*10000 > reference*int64(maxBps)
 }
 
 func sameDay(a, b time.Time) bool {
@@ -524,6 +601,10 @@ func (e *Engine) RecordPrice(base, quote string, rate float64, updated time.Time
 	if rate <= 0 {
 		return
 	}
+	rateUnits, err := toRateUnits(rate)
+	if err != nil {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if updated.IsZero() {
@@ -533,7 +614,7 @@ func (e *Engine) RecordPrice(base, quote string, rate float64, updated time.Time
 			updated = time.Now()
 		}
 	}
-	e.prices[pairKey(base, quote)] = pricePoint{rate: rate, updated: updated}
+	e.prices[pairKey(base, quote)] = pricePoint{rate: rateUnits, updated: updated}
 }
 
 // LedgerBalance returns a snapshot of the treasury ledger for the asset.
@@ -547,7 +628,7 @@ func (e *Engine) LedgerBalance(asset string) (float64, float64, float64, bool) {
 	if !ok || state == nil {
 		return 0, 0, 0, false
 	}
-	return state.available, state.reserved, state.payouts, true
+	return fromAmountUnits(state.available), fromAmountUnits(state.reserved), fromAmountUnits(state.payouts), true
 }
 
 // SetPriceMaxAge overrides the maximum allowed staleness for oracle prices.
