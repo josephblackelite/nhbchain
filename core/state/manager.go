@@ -2324,6 +2324,7 @@ func identityReverseKey(addr []byte) []byte {
 
 type storedAliasRecord struct {
 	Alias     string
+	Owner     [20]byte
 	Primary   [20]byte
 	Addresses [][]byte
 	AvatarRef string
@@ -2339,6 +2340,7 @@ func newStoredAliasRecord(record *identity.AliasRecord) *storedAliasRecord {
 	normalized.Addresses = uniqueAliasAddresses(normalized.Primary, normalized.Addresses)
 	stored := &storedAliasRecord{
 		Alias:     normalized.Alias,
+		Owner:     normalized.Owner,
 		Primary:   normalized.Primary,
 		AvatarRef: normalized.AvatarRef,
 		CreatedAt: big.NewInt(normalized.CreatedAt),
@@ -2359,6 +2361,7 @@ func (s *storedAliasRecord) toAliasRecord() (*identity.AliasRecord, error) {
 	}
 	record := &identity.AliasRecord{
 		Alias:     s.Alias,
+		Owner:     s.Owner,
 		Primary:   s.Primary,
 		AvatarRef: s.AvatarRef,
 		CreatedAt: 0,
@@ -3648,8 +3651,14 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 	if err != nil {
 		return err
 	}
-	if exists && existingRecord != nil && existingRecord.Primary != address {
-		return identity.ErrAliasTaken
+	if exists && existingRecord != nil {
+		owner := existingRecord.Owner
+		if owner == ([20]byte{}) {
+			owner = existingRecord.Primary
+		}
+		if owner != address {
+			return identity.ErrAliasTaken
+		}
 	}
 
 	reverseKey := identityReverseKey(addr)
@@ -3662,6 +3671,13 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 	baseRecord := &identity.AliasRecord{Alias: normalized}
 	if exists && existingRecord != nil {
 		baseRecord = existingRecord.Clone()
+	}
+
+	if baseRecord.Owner == ([20]byte{}) {
+		baseRecord.Owner = address
+	}
+	if !containsAliasAddress(baseRecord.Addresses, baseRecord.Owner) {
+		baseRecord.Addresses = append(baseRecord.Addresses, baseRecord.Owner)
 	}
 
 	if currentAlias != "" && currentAlias != normalized {

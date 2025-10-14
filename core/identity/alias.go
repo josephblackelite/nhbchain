@@ -12,6 +12,7 @@ import (
 // AliasRecord captures the metadata for a registered alias.
 type AliasRecord struct {
 	Alias     string
+	Owner     [20]byte
 	Primary   [20]byte
 	Addresses [][20]byte
 	AvatarRef string

@@ -114,6 +114,8 @@ type DynamicConfig struct {
 	PriceGuard                     PriceGuardConfig
 	EnableProRate                  bool
 	EnforceProRate                 bool
+	EnableProRateSet               bool
+	EnforceProRateSet              bool
 }
 
 // PriceGuardConfig enforces sanity bounds when consuming reference prices.
@@ -140,6 +142,8 @@ func (d DynamicConfig) Clone() DynamicConfig {
 		PriceGuard:                     d.PriceGuard,
 		EnableProRate:                  d.EnableProRate,
 		EnforceProRate:                 d.EnforceProRate,
+		EnableProRateSet:               d.EnableProRateSet,
+		EnforceProRateSet:              d.EnforceProRateSet,
 	}
 	return clone
 }

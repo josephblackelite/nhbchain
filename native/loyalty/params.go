@@ -82,6 +82,12 @@ func (d *DynamicConfig) ApplyDefaults() *DynamicConfig {
 		d.YearlyCapPctOfInitialSupplyBps = DefaultDynamicYearlyCapPctOfInitialSupplyBps
 	}
 	d.PriceGuard.ApplyDefaults()
+	if !d.EnableProRateSet {
+		d.EnableProRate = true
+	}
+	if !d.EnforceProRateSet {
+		d.EnforceProRate = true
+	}
 	return d
 }
 

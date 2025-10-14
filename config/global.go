@@ -155,8 +155,10 @@ func (g Global) LoyaltyDynamicConfig() loyalty.DynamicConfig {
 			MaxDeviationBps:    dyn.PriceGuard.MaxDeviationBPS,
 			PriceMaxAgeSeconds: dyn.PriceGuard.PriceMaxAgeSeconds,
 		},
-		EnableProRate:  dyn.EnableProRate,
-		EnforceProRate: dyn.EnforceProRate,
+		EnableProRate:     dyn.EnableProRate,
+		EnforceProRate:    dyn.EnforceProRate,
+		EnableProRateSet:  true,
+		EnforceProRateSet: true,
 	}
 	return cfg
 }
