@@ -2,12 +2,14 @@ package core
 
 import (
 	"math/big"
+	"strconv"
 	"testing"
 	"time"
 
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
+	"nhbchain/native/governance"
 )
 
 const (
@@ -175,5 +177,79 @@ func TestClaim_TwoPeriods(t *testing.T) {
 				t.Fatalf("minted mismatch: got %s want %s (|diff|=%s)", minted, expected, diff)
 			}
 		})
+	}
+}
+
+func TestClaim_CustomPayoutPeriod(t *testing.T) {
+	t.Parallel()
+
+	sp := newStakingStateProcessor(t)
+
+	var delegator [20]byte
+	delegator[19] = 0x92
+
+	aprBps := uint64(1_050)
+	customDays := uint64(14)
+	period := time.Duration(customDays) * 24 * time.Hour
+
+	start := time.Unix(1_801_200_000, 0).UTC()
+	end := start.Add(period)
+
+	engine := rewards.NewEngine()
+	engine.UpdateGlobalIndex(start, aprBps)
+	indexStart := engine.Index()
+	engine.UpdateGlobalIndex(end, aprBps)
+	indexEnd := engine.Index()
+
+	stake := big.NewInt(4_000)
+	account := &types.Account{
+		StakeShares:       new(big.Int).Set(stake),
+		StakeLastIndex:    new(big.Int).Set(indexStart),
+		StakeLastPayoutTs: uint64(start.Unix()),
+	}
+	writeAccount(t, sp, delegator, account)
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.ParamStoreSet(governance.ParamKeyStakingPayoutPeriodDays, []byte(strconv.FormatUint(customDays, 10))); err != nil {
+		t.Fatalf("set payout period: %v", err)
+	}
+	if err := manager.PutAccountMetadata(delegator[:], account); err != nil {
+		t.Fatalf("put account metadata: %v", err)
+	}
+	if err := manager.SetStakingGlobalIndex(indexEnd); err != nil {
+		t.Fatalf("set global index: %v", err)
+	}
+
+	sp.stakeRewardAPR = aprBps
+
+	sp.nowFunc = func() time.Time { return end.Add(-time.Second) }
+	if _, err := sp.StakeClaimRewards(delegator[:]); err == nil {
+		t.Fatalf("expected error before payout window elapses")
+	}
+
+	sp.nowFunc = func() time.Time { return end }
+	minted, err := sp.StakeClaimRewards(delegator[:])
+	if err != nil {
+		t.Fatalf("claim rewards: %v", err)
+	}
+	if minted.Sign() <= 0 {
+		t.Fatalf("expected positive mint, got %s", minted)
+	}
+
+	elapsedSeconds := big.NewInt(int64(period / time.Second))
+	aprRat := new(big.Rat).SetFrac(new(big.Int).SetUint64(aprBps), big.NewInt(testBasisPointsDenom))
+	stakeRat := new(big.Rat).SetInt(stake)
+	durationRat := new(big.Rat).SetFrac(elapsedSeconds, big.NewInt(testSecondsPerYear))
+
+	expectedTokens := new(big.Rat).Mul(aprRat, stakeRat)
+	expectedTokens.Mul(expectedTokens, durationRat)
+
+	expectedWei := new(big.Rat).Mul(expectedTokens, new(big.Rat).SetInt(rewards.IndexUnit()))
+	expected := new(big.Int).Quo(expectedWei.Num(), expectedWei.Denom())
+
+	diff := new(big.Int).Sub(minted, expected)
+	tolerance := rewards.IndexUnit()
+	if diff.Abs(diff); diff.Cmp(tolerance) > 0 {
+		t.Fatalf("minted mismatch: got %s want %s (|diff|=%s)", minted, expected, diff)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"sort"
 	"strconv"
@@ -2670,8 +2671,13 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	if err != nil {
 		return nil, err
 	}
+	manager := nhbstate.NewManager(sp.Trie)
+
+	periodSeconds, err := sp.stakingPayoutPeriodSeconds(manager)
+	if err != nil {
+		return nil, err
+	}
 	nowTs := uint64(sp.now().Unix())
-	periodSeconds := uint64(stakePayoutPeriodSeconds)
 	if periodSeconds == 0 {
 		return nil, fmt.Errorf("staking rewards: invalid payout period")
 	}
@@ -2723,8 +2729,6 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 		}
 		return big.NewInt(0), nil
 	}
-
-	manager := nhbstate.NewManager(sp.Trie)
 
 	emissionYear := uint32(time.Unix(int64(nowTs), 0).UTC().Year())
 	emissionTotal, err := manager.StakingEmissionYTD(emissionYear)
@@ -2813,6 +2817,37 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	}
 
 	return minted, nil
+}
+
+func (sp *StateProcessor) stakingPayoutPeriodSeconds(manager *nhbstate.Manager) (uint64, error) {
+	days := uint64(stakePayoutPeriodDays)
+	if manager != nil {
+		raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays)
+		if err != nil {
+			return 0, fmt.Errorf("staking rewards: load payout period: %w", err)
+		}
+		if ok {
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed != "" {
+				value, parseErr := strconv.ParseUint(trimmed, 10, 64)
+				if parseErr != nil {
+					return 0, fmt.Errorf("staking rewards: parse payout period: %w", parseErr)
+				}
+				if value > 0 {
+					days = value
+				}
+			}
+		}
+	}
+
+	secondsPerDayUint := uint64(secondsPerDay)
+	if days == 0 {
+		return 0, fmt.Errorf("staking rewards: payout period not configured")
+	}
+	if days > math.MaxUint64/secondsPerDayUint {
+		return 0, fmt.Errorf("staking rewards: payout period too large")
+	}
+	return days * secondsPerDayUint, nil
 }
 
 func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error {
