@@ -217,6 +217,9 @@ func (a *AdminConfig) normalise() error {
 			return fmt.Errorf("tls.key must be configured when TLS is enabled")
 		}
 	}
+	if a.MTLS.Enabled && a.MTLS.ClientCAPath == "" {
+		return fmt.Errorf("mtls.client_ca must be configured when mTLS is enabled")
+	}
 	if a.MTLS.Enabled && a.TLS.Disable {
 		return fmt.Errorf("mTLS requires TLS to be enabled")
 	}

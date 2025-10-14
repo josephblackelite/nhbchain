@@ -165,19 +165,20 @@ func main() {
 	if !cfg.Admin.TLS.Disable {
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		if cfg.Admin.MTLS.Enabled {
-			tlsConfig.ClientAuth = tls.RequireAnyClientCert
-			if caPath := strings.TrimSpace(cfg.Admin.MTLS.ClientCAPath); caPath != "" {
-				caData, err := os.ReadFile(caPath)
-				if err != nil {
-					log.Fatalf("swapd: load admin client CA: %v", err)
-				}
-				pool := x509.NewCertPool()
-				if !pool.AppendCertsFromPEM(caData) {
-					log.Fatalf("swapd: parse admin client CA: %s", caPath)
-				}
-				tlsConfig.ClientCAs = pool
-				tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			caPath := strings.TrimSpace(cfg.Admin.MTLS.ClientCAPath)
+			if caPath == "" {
+				log.Fatalf("swapd: admin mTLS requires client_ca to be configured")
 			}
+			caData, err := os.ReadFile(caPath)
+			if err != nil {
+				log.Fatalf("swapd: load admin client CA: %v", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caData) {
+				log.Fatalf("swapd: parse admin client CA: %s", caPath)
+			}
+			tlsConfig.ClientCAs = pool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 		}
 	}
 
