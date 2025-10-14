@@ -49,6 +49,7 @@ func configureLoyalty(t *testing.T, manager *nhbstate.Manager, treasury [20]byte
 			DailyCapPctOf7dFeesBps: dailyCapBps,
 			DailyCapUsd:            0,
 			EnableProRate:          enableProRate,
+			EnableProRateSet:       true,
 			PriceGuard: loyalty.PriceGuardConfig{
 				Enabled: false,
 			},

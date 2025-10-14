@@ -3397,6 +3397,19 @@ func aliasRecordHasAddress(record *identity.AliasRecord, addr [20]byte) bool {
 	return false
 }
 
+func aliasRecordOwnedBy(record *identity.AliasRecord, owner [20]byte) bool {
+	if record == nil {
+		return false
+	}
+	if record.Owner == owner {
+		return true
+	}
+	if record.Owner == ([20]byte{}) && record.Primary == owner {
+		return true
+	}
+	return false
+}
+
 func (n *Node) IdentityAddAddress(owner [20]byte, alias string, addr [20]byte) (*identity.AliasRecord, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
@@ -3406,7 +3419,7 @@ func (n *Node) IdentityAddAddress(owner [20]byte, alias string, addr [20]byte) (
 	if !ok || record == nil {
 		return nil, identity.ErrAliasNotFound
 	}
-	if record.Primary != owner {
+	if !aliasRecordOwnedBy(record, owner) {
 		return nil, identity.ErrNotAliasOwner
 	}
 	alreadyLinked := aliasRecordHasAddress(record, addr)
@@ -3433,7 +3446,7 @@ func (n *Node) IdentityRemoveAddress(owner [20]byte, alias string, addr [20]byte
 	if !ok || record == nil {
 		return nil, identity.ErrAliasNotFound
 	}
-	if record.Primary != owner {
+	if !aliasRecordOwnedBy(record, owner) {
 		return nil, identity.ErrNotAliasOwner
 	}
 	updated, err := manager.IdentityRemoveAddress(record.Alias, addr[:], time.Now().Unix())
@@ -3456,7 +3469,7 @@ func (n *Node) IdentitySetPrimary(owner [20]byte, alias string, addr [20]byte) (
 	if !ok || record == nil {
 		return nil, identity.ErrAliasNotFound
 	}
-	if record.Primary != owner {
+	if !aliasRecordOwnedBy(record, owner) {
 		return nil, identity.ErrNotAliasOwner
 	}
 	if record.Primary == addr {
@@ -3485,7 +3498,7 @@ func (n *Node) IdentityRename(owner [20]byte, alias string, newAlias string) (*i
 	if !ok || record == nil {
 		return nil, identity.ErrAliasNotFound
 	}
-	if record.Primary != owner {
+	if !aliasRecordOwnedBy(record, owner) {
 		return nil, identity.ErrNotAliasOwner
 	}
 	previousAlias := record.Alias
