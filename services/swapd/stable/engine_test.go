@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+func mustAmountUnits(t *testing.T, amount float64) int64 {
+	t.Helper()
+	units, err := toAmountUnits(amount)
+	if err != nil {
+		t.Fatalf("amount quantisation failed: %v", err)
+	}
+	return units
+}
+
+func mustRateUnits(t *testing.T, rate float64) int64 {
+	t.Helper()
+	units, err := toRateUnits(rate)
+	if err != nil {
+		t.Fatalf("rate quantisation failed: %v", err)
+	}
+	return units
+}
+
 type testClock struct {
 	now  time.Time
 	step time.Duration
@@ -59,8 +77,8 @@ func TestEnginePriceQuoteRequiresFreshOracle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("price quote: %v", err)
 	}
-	if quote.Price != 1.05 {
-		t.Fatalf("unexpected price: got %.2f want 1.05", quote.Price)
+	if quote.Price != mustRateUnits(t, 1.05) {
+		t.Fatalf("unexpected price units: got %d want %d", quote.Price, mustRateUnits(t, 1.05))
 	}
 	expiryDelta := quote.ExpiresAt.Sub(base)
 	if expiryDelta < time.Minute || expiryDelta > time.Minute+10*time.Second {
@@ -99,8 +117,8 @@ func TestEngineReserveSlippageAndInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve quote: %v", err)
 	}
-	if res.AmountOut != 100 {
-		t.Fatalf("unexpected amount out: got %.2f want %.2f", res.AmountOut, 100.0)
+	if res.AmountOut != mustAmountUnits(t, 100) {
+		t.Fatalf("unexpected amount out units: got %d want %d", res.AmountOut, mustAmountUnits(t, 100))
 	}
 	available, reserved, _, _ = engine.LedgerBalance("ZNHB")
 	if diff := math.Abs(available - (1_000 - 100)); diff > 1e-9 {
@@ -232,5 +250,78 @@ func TestEngineReservationExpiryReleasesInventory(t *testing.T) {
 	}
 	if _, err := engine.ReserveQuote(ctx, quote.ID, "merchant", 150); err != nil {
 		t.Fatalf("reserve after expiry cleanup: %v", err)
+	}
+}
+
+func TestEnginePrecisionPreserved(t *testing.T) {
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine, _ := buildTestEngine(t, base, 1_000_000, 2*time.Minute, Limits{})
+	ctx := context.Background()
+	engine.RecordPrice("ZNHB", "USD", 1.23456789, time.Time{})
+	amount := 123.456789
+	quote, err := engine.PriceQuote(ctx, "ZNHB", amount)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	if quote.Price != mustRateUnits(t, 1.23456789) {
+		t.Fatalf("unexpected price units: got %d", quote.Price)
+	}
+	res, err := engine.ReserveQuote(ctx, quote.ID, "acct", amount)
+	if err != nil {
+		t.Fatalf("reserve quote: %v", err)
+	}
+	amountUnits := mustAmountUnits(t, amount)
+	rateUnits := mustRateUnits(t, 1.23456789)
+	expectedOut := mulDivRound(amountUnits, rateUnits, priceScale)
+	if res.AmountOut != expectedOut {
+		t.Fatalf("unexpected amount out units: got %d want %d", res.AmountOut, expectedOut)
+	}
+	available, reserved, _, _ := engine.LedgerBalance("ZNHB")
+	expectedOutFloat := fromAmountUnits(expectedOut)
+	if diff := math.Abs(available - (1_000_000 - expectedOutFloat)); diff > 1e-6 {
+		t.Fatalf("available mismatch with precision preservation: diff=%f", diff)
+	}
+	if diff := math.Abs(reserved - expectedOutFloat); diff > 1e-6 {
+		t.Fatalf("reserved mismatch with precision preservation: diff=%f", diff)
+	}
+}
+
+func TestEngineDailyCapBoundaryExactMatch(t *testing.T) {
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine, _ := buildTestEngine(t, base, 1_000, time.Minute, Limits{DailyCap: 150})
+	ctx := context.Background()
+	engine.RecordPrice("ZNHB", "USD", 1.0, time.Time{})
+	quote, err := engine.PriceQuote(ctx, "ZNHB", 100)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	if _, err := engine.ReserveQuote(ctx, quote.ID, "acct", 100); err != nil {
+		t.Fatalf("reserve quote: %v", err)
+	}
+	engine.RecordPrice("ZNHB", "USD", 1.0, time.Time{})
+	quote, err = engine.PriceQuote(ctx, "ZNHB", 50)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	if _, err := engine.ReserveQuote(ctx, quote.ID, "acct", 50); err != nil {
+		t.Fatalf("reserve quote hitting cap: %v", err)
+	}
+	engine.RecordPrice("ZNHB", "USD", 1.0, time.Time{})
+	quote, err = engine.PriceQuote(ctx, "ZNHB", 0.000001)
+	if err != nil {
+		t.Fatalf("price quote tiny amount: %v", err)
+	}
+	if _, err := engine.ReserveQuote(ctx, quote.ID, "acct", 0.000001); !errors.Is(err, ErrDailyCapExceeded) {
+		t.Fatalf("expected daily cap exceeded on boundary, got %v", err)
+	}
+}
+
+func TestEngineRejectsExcessPrecisionAmounts(t *testing.T) {
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine, _ := buildTestEngine(t, base, 1_000, time.Minute, Limits{})
+	ctx := context.Background()
+	engine.RecordPrice("ZNHB", "USD", 1.0, time.Time{})
+	if _, err := engine.PriceQuote(ctx, "ZNHB", 1.0000004); err == nil {
+		t.Fatalf("expected precision error")
 	}
 }
