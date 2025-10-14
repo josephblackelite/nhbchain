@@ -405,9 +405,8 @@ func (e *RewardEngine) Claim(addr common.Address, now time.Time) (paid *big.Int,
 	if stakeBalance.Sign() > 0 && aprBps > 0 {
 		expected = new(big.Int).Set(stakeBalance)
 		expected.Mul(expected, new(big.Int).SetUint64(aprBps))
-		expected.Mul(expected, big.NewInt(periods64))
-		denom := big.NewInt(basisPointsDenom * 12)
-		expected.Quo(expected, denom)
+		expected.Mul(expected, big.NewInt(elapsed))
+		expected.Quo(expected, accrualDenominator)
 	}
 
 	accrued := big.NewInt(0)
