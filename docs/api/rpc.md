@@ -5,7 +5,10 @@
 Returns a transaction summary with the asset inferred from the type. ZapNHB
 (transfer type `TransferZNHB`) responses will include `"asset": "ZNHB"` so
 explorers and wallets can distinguish token flows without re-simulating the
-payload.
+payload. All RPC calls issued to validator endpoints must include the standard
+bearer token in the `Authorization` header (see the
+[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
+guide for full header context).
 
 ```json
 {
@@ -62,6 +65,7 @@ validator expectations:
 
 ```jsonc
 // Request
+// Authorization: Bearer <NHB_RPC_TOKEN>
 {
   "id": 1,
   "jsonrpc": "2.0",
@@ -83,10 +87,15 @@ validator expectations:
 ```
 
 With the nonce in hand, sign the envelope and forward the full JSON-RPC request
-from trusted infrastructure. The example below mirrors the exact payload format
-validators accept, including populated `r`/`s`/`v` signature components:
+from trusted infrastructure. Attach `Authorization: Bearer <NHB_RPC_TOKEN>` to
+the HTTP headers (see the
+[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
+walkthrough for the complete header list). The example below mirrors the exact
+payload format validators accept, including populated `r`/`s`/`v` signature
+components:
 
 ```json
+// Authorization: Bearer <NHB_RPC_TOKEN>
 {
   "id": 2,
   "jsonrpc": "2.0",
@@ -130,6 +139,7 @@ Returns the rewards currently payable for the supplied delegator alongside the
 timestamp of the next eligible payout window.
 
 ```json
+// Authorization: Bearer <NHB_RPC_TOKEN>
 {
   "id": 3,
   "jsonrpc": "2.0",
@@ -159,6 +169,7 @@ Exposes the delegator’s current staking ledger snapshot so operators can check
 shares, reward index, and payout timing without inspecting raw account state.
 
 ```json
+// Authorization: Bearer <NHB_RPC_TOKEN>
 {
   "id": 4,
   "jsonrpc": "2.0",
@@ -186,6 +197,7 @@ reward periods settled, and the timestamp when the next payout becomes
 available.
 
 ```json
+// Authorization: Bearer <NHB_RPC_TOKEN>
 {
   "id": 5,
   "jsonrpc": "2.0",
