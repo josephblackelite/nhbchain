@@ -324,6 +324,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		return nil, err
 	}
 
+	defaultSwapCfg := swap.Config{}.Normalise()
+	stateProcessor.SetSwapPayoutAuthorities(defaultSwapCfg.PayoutAuthorities)
+
 	node := &Node{
 		db:                         db,
 		state:                      stateProcessor,
@@ -334,6 +337,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		posArrival:                 make(map[string]time.Time),
 		escrowTreasury:             treasury,
 		engagementMgr:              engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapCfg:                    defaultSwapCfg,
 		swapSanctions:              swap.DefaultSanctionsChecker,
 		swapRefundSink:             treasury,
 		evidenceStore:              evidence.NewStore(db),
@@ -939,6 +943,11 @@ func (n *Node) SetSwapConfig(cfg swap.Config) {
 	n.swapCfgMu.Lock()
 	n.swapCfg = normalised
 	n.swapCfgMu.Unlock()
+	n.stateMu.Lock()
+	if n.state != nil {
+		n.state.SetSwapPayoutAuthorities(normalised.PayoutAuthorities)
+	}
+	n.stateMu.Unlock()
 }
 
 // swapConfig returns a copy of the currently configured swap settings.

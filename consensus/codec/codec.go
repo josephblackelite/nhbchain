@@ -227,6 +227,7 @@ func moduleSwapPayoutReceiptTx(body *consensusv1.TxEnvelope, packed *anypb.Any, 
 		GasLimit: 0,
 		GasPrice: big.NewInt(0),
 	}
+	tx.MerchantAddress = strings.ToLower(strings.TrimSpace(msg.GetAuthority()))
 	return tx, nil
 }
 
@@ -238,9 +239,15 @@ func hydrateIntentMetadata(tx *types.Transaction, body *consensusv1.TxEnvelope) 
 		tx.IntentRef = append([]byte(nil), ref...)
 	}
 	tx.IntentExpiry = body.GetIntentExpiry()
-	tx.MerchantAddress = strings.TrimSpace(body.GetMerchantAddr())
-	tx.DeviceID = strings.TrimSpace(body.GetDeviceId())
-	tx.RefundOf = strings.TrimSpace(body.GetRefundOf())
+	if merchant := strings.TrimSpace(body.GetMerchantAddr()); merchant != "" {
+		tx.MerchantAddress = merchant
+	}
+	if device := strings.TrimSpace(body.GetDeviceId()); device != "" {
+		tx.DeviceID = device
+	}
+	if refund := strings.TrimSpace(body.GetRefundOf()); refund != "" {
+		tx.RefundOf = refund
+	}
 }
 
 // BlockHeaderToProto converts a block header.
