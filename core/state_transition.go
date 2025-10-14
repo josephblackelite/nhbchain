@@ -2255,6 +2255,9 @@ func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("swap: transaction required")
 	}
+	if _, err := tx.From(); err != nil {
+		return fmt.Errorf("swap: recover signer: %w", err)
+	}
 	if len(tx.Data) == 0 {
 		return fmt.Errorf("swap: payout receipt payload required")
 	}
