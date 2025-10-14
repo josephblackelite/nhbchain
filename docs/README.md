@@ -16,9 +16,9 @@ Two automated checks keep the docs healthy:
    directory into Markdown. Run the verifier to ensure every fenced block stays
    synchronised and still compiles:
 
-   ```bash
-   go run ./scripts/verify_docs_snippets.go
-   ```
+  ```bash
+  go run ./scripts/verify-docs-snippets
+  ```
 
 2. **Markdown link checking** &mdash; validate external and intra-site links before
    landing a change:
