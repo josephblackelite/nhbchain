@@ -1,7 +1,7 @@
 listen: ":8095"
 consensus: "localhost:9090"
 chain_id: "localnet"
-signer_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+signer_key_env: "ORACLE_ATTESTER_SIGNER_KEY"
 nonce_start: 1
 authority: "swap-module-authority"
 treasury_account: "nhb1treasuryaccount"

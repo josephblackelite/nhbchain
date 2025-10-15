@@ -1,7 +1,7 @@
 listen: ":50061"
 consensus: "localhost:9090"
 chain_id: "localnet"
-signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+signer_key_env: "GOVERND_SIGNER_KEY"
 nonce_start: 1
 nonce_store_path: "services/governd/data/nonce"
 fee:
@@ -10,7 +10,7 @@ fee:
   payer: ""
 tls:
   cert: "services/governd/config/server.crt"
-  key: "services/governd/config/server.key"
+  key_env: "GOVERND_TLS_KEY_PATH"
   client_ca: ""
 auth:
   api_tokens: []

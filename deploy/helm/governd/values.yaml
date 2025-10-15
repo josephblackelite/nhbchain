@@ -8,13 +8,22 @@ image:
 env:
   - name: NHB_ENV
     value: staging
+  - name: GOVERND_SIGNER_KEY
+    valueFrom:
+      secretKeyRef:
+        name: governd-secrets
+        key: signer-key
+  - name: GOVERND_TLS_KEY_PATH
+    value: /var/run/nhb/tls/server.key
+
+secrets:
+  signerKeySecretName: governd-secrets
+  signerKeySecretKey: signer-key
+  tlsKeyPath: /var/run/nhb/tls/server.key
 
 service:
   type: ClusterIP
   port: 50061
-
-secrets:
-  signerKey: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 config:
   enabled: true
@@ -31,7 +40,7 @@ config:
     listen: ":50061"
     consensus: "{{ .Values.config.consensusEndpoint }}"
     chain_id: "{{ .Values.config.chainID }}"
-    signer_key: "{{ .Values.secrets.signerKey }}"
+    signer_key_env: "GOVERND_SIGNER_KEY"
     nonce_start: {{ .Values.config.nonceStart }}
     nonce_store_path: "{{ .Values.config.nonceStorePath }}"
     fee:

@@ -3,8 +3,17 @@ image:
 env:
   - name: NHB_ENV
     value: staging
+  - name: GOVERND_SIGNER_KEY
+    valueFrom:
+      secretKeyRef:
+        name: governd-secrets
+        key: signer-key
+  - name: GOVERND_TLS_KEY_PATH
+    value: /var/run/nhb/tls/server.key
 secrets:
-  signerKey: "{{ required \"governd.signerKey must be set\" .Values.secrets.signerKey }}"
+  signerKeySecretName: governd-secrets
+  signerKeySecretKey: signer-key
+  tlsKeyPath: /var/run/nhb/tls/server.key
 config:
   chainID: nhb-staging
   consensusEndpoint: consensusd:9090
@@ -18,7 +27,7 @@ config:
     listen: ":50061"
     consensus: "{{ .Values.config.consensusEndpoint }}"
     chain_id: "{{ .Values.config.chainID }}"
-    signer_key: "{{ .Values.secrets.signerKey }}"
+    signer_key_env: "GOVERND_SIGNER_KEY"
     nonce_start: {{ .Values.config.nonceStart }}
     nonce_store_path: "{{ .Values.config.nonceStorePath }}"
     fee:

@@ -71,13 +71,15 @@ type AdminTLSConfig struct {
 
 // ConsensusConfig configures the consensus client used to emit receipts.
 type ConsensusConfig struct {
-	Endpoint  string `yaml:"endpoint"`
-	ChainID   string `yaml:"chain_id"`
-	SignerKey string `yaml:"signer_key"`
-	FeeAmount string `yaml:"fee_amount"`
-	FeeDenom  string `yaml:"fee_denom"`
-	FeePayer  string `yaml:"fee_payer"`
-	Memo      string `yaml:"memo"`
+	Endpoint      string `yaml:"endpoint"`
+	ChainID       string `yaml:"chain_id"`
+	SignerKey     string `yaml:"signer_key"`
+	SignerKeyFile string `yaml:"signer_key_file"`
+	SignerKeyEnv  string `yaml:"signer_key_env"`
+	FeeAmount     string `yaml:"fee_amount"`
+	FeeDenom      string `yaml:"fee_denom"`
+	FeePayer      string `yaml:"fee_payer"`
+	Memo          string `yaml:"memo"`
 }
 
 // WalletConfig captures parameters for the treasury hot wallet.
@@ -99,6 +101,9 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("decode config: %w", err)
 	}
 	applyDefaults(&cfg)
+	if err := cfg.Consensus.normalise(); err != nil {
+		return cfg, fmt.Errorf("consensus signer: %w", err)
+	}
 	if err := cfg.Admin.normalise(); err != nil {
 		return cfg, fmt.Errorf("admin security: %w", err)
 	}
@@ -144,6 +149,35 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.Admin.BearerToken == "" && !cfg.Admin.MTLS.Enabled {
 		return fmt.Errorf("configure either bearer_token or mTLS for admin authentication")
+	}
+	return nil
+}
+
+func (c *ConsensusConfig) normalise() error {
+	if c == nil {
+		return fmt.Errorf("consensus configuration missing")
+	}
+	c.SignerKey = strings.TrimSpace(c.SignerKey)
+	c.SignerKeyEnv = strings.TrimSpace(c.SignerKeyEnv)
+	c.SignerKeyFile = strings.TrimSpace(c.SignerKeyFile)
+	if c.SignerKey != "" {
+		return nil
+	}
+	switch {
+	case c.SignerKeyEnv != "":
+		value := strings.TrimSpace(os.Getenv(c.SignerKeyEnv))
+		if value == "" {
+			return fmt.Errorf("signer_key_env %s is empty", c.SignerKeyEnv)
+		}
+		c.SignerKey = value
+	case c.SignerKeyFile != "":
+		contents, err := os.ReadFile(c.SignerKeyFile)
+		if err != nil {
+			return fmt.Errorf("read signer_key_file: %w", err)
+		}
+		c.SignerKey = strings.TrimSpace(string(contents))
+	default:
+		return fmt.Errorf("signer_key is required")
 	}
 	return nil
 }

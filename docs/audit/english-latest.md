@@ -14572,15 +14572,16 @@ Handlers should enforce per-IP or per-key limits to avoid DoS.
 
 **Proofs:**
 
-- `services/governd/config/server.key:1`
-
-````
------BEGIN PRIVATE KEY-----
-````
+- Private TLS key material previously stored in `services/governd/config/server.key`
+  has been purged from the repository. Runtime deployments must now supply
+  secrets via environment variables (`signer_key_env`, `tls.key_env`). See
+  [Security – Key management and rotation](../../SECURITY.md#key-management-and-rotation)
+  for the updated procedure.
 
 **Remediation:**
 
-- Add middleware or queue caps to bound inbound load and document SLOs.
+- Completed – key material rotated off-repo with automated scanning to prevent
+  regressions.
 
 ### Missing rate limiting (WARN)
 

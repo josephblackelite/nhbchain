@@ -21,9 +21,12 @@ operational procedures required to safely run the service.
 ## Key management
 
 * **Signer keys** – the attestation signer uses a secp256k1 key stored in the MPC/HSM
-  service. Export the compressed private key as a hex string when generating the
-  configuration. Rotate keys by updating the consensus authority account and restarting
-  payoutd with the new secret.
+  service. Export the compressed private key as a hex string and load it via the
+  `signer_key_env` environment variable when generating configuration. Rotate keys by
+  updating the consensus authority account, rotating the secret in the manager (for
+  example Kubernetes secrets or Vault), and restarting payoutd with the new secret
+  projected into the environment. The legacy inline `signer_key` scalar remains for
+  local testing only.
 * **Hot wallet** – ERC-20 transfers are executed using the `treasury_hot` key held in
   the custody HSM. MPC policies should enforce dual-operator approval and velocity
   limits aligned with payoutd's caps.

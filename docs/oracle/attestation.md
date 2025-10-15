@@ -53,6 +53,16 @@ of confirmations. If the receipt cannot be fetched, fails, or the log scan does
 not find an exact amount match, the webhook returns `409 Conflict` and the
 invoice reservation is released so that later retries can succeed.
 
+## Secrets and key management
+
+`oracle-attesterd` signs consensus submissions with the key referenced by
+`signer_key_env`. The environment variable must contain a lowercase hexadecimal
+encoding of the 32 byte secp256k1 private key. For development-only workflows
+the legacy `signer_key` scalar is still accepted, but production deployments
+should source the key from a secret manager (for example Kubernetes secrets or
+HashiCorp Vault agents) and project it into the container environment. Rotating
+the key only requires updating the secret and restarting the deployment.
+
 ## Voucher minting and idempotency
 
 Every successfully validated webhook reserves the invoice identifier in the
@@ -69,7 +79,8 @@ local BoltDB-backed store. Once on-chain verification passes, the service:
    - `voucher.memo`: settlement transaction hash.
    - `voucher.created_at`: webhook timestamp (seconds).
 3. Wraps the message in a consensus transaction envelope (applying optional
-   fee metadata) and signs it with `signer_key` before submitting to the
+   fee metadata) and signs it with the key resolved from `signer_key_env`
+   before submitting to the
    consensus endpoint.
 
 On success the invoice status is upgraded to `minted`, ensuring subsequent

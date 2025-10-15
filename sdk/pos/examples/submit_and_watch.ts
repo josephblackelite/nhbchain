@@ -10,9 +10,12 @@ import {
 
 const TX_ENDPOINT = process.env.POS_TX_GRPC ?? "localhost:9090";
 const REALTIME_ENDPOINT = process.env.POS_REALTIME_GRPC ?? "localhost:9090";
-const PRIVATE_KEY_PEM = `-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEICMcFMi4mUlFP5w0JIweUlBl7U8tpyrkJc7m+aaxPIKn
------END PRIVATE KEY-----`;
+const PRIVATE_KEY_PEM = process.env.POS_EXAMPLE_PRIVATE_KEY_PEM;
+if (!PRIVATE_KEY_PEM) {
+  throw new Error(
+    "POS_EXAMPLE_PRIVATE_KEY_PEM must be set to an Ed25519 private key PEM before running this example"
+  );
+}
 
 interface IntentEnvelope {
   intentRef: Buffer;

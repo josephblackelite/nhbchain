@@ -1,10 +1,27 @@
 listen: ":50061"
 consensus: "consensusd:9090"
-chain_id: "nhb-local"
-signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+chain_id: "localnet"
+signer_key_env: "GOVERND_SIGNER_KEY"
 nonce_start: 1
-nonce_store_path: "/var/lib/nhb/governd/nonce"
+nonce_store_path: "/var/lib/nhb/governd-nonce"
 fee:
   amount: "0"
-  denom: ""
-  payer: ""
+  denom: "nhb"
+  payer: "nhb1signerpayer"
+tls:
+  cert: "/etc/nhb/tls/server.crt"
+  key_env: "GOVERND_TLS_KEY_PATH"
+  client_ca: ""
+auth:
+  api_tokens: []
+  mtls:
+    allowed_common_names: []
+consensus_client:
+  allow_insecure: false
+  tls:
+    cert_env: "GOVERND_CLIENT_CERT_PATH"
+    key_env: "GOVERND_CLIENT_KEY_PATH"
+    ca: "/etc/nhb/tls/consensus-ca.crt"
+  shared_secret:
+    header: "authorization"
+    token: ""
