@@ -471,6 +471,7 @@ type pricePoint struct {
 const (
 	amountScale = int64(1_000_000)
 	priceScale  = int64(1_000_000_000)
+	maxInt64    = int64(^uint64(0) >> 1)
 )
 
 func pairKey(base, quote string) string {
@@ -588,9 +589,17 @@ func (e *Engine) applyDailyLimit(amount int64, now time.Time) error {
 		e.daily.day = day
 		e.daily.amount = 0
 	}
-	capUnits := e.limits.DailyCap * amountScale
+	var capUnits int64
+	if e.limits.DailyCap > maxInt64/amountScale {
+		capUnits = maxInt64
+	} else {
+		capUnits = e.limits.DailyCap * amountScale
+	}
 	if capUnits <= 0 {
 		return nil
+	}
+	if amount > maxInt64-e.daily.amount {
+		return ErrDailyCapExceeded
 	}
 	if e.daily.amount+amount > capUnits {
 		return ErrDailyCapExceeded
@@ -705,8 +714,8 @@ func (e *Engine) RecordPrice(base, quote string, rate float64, updated time.Time
 	e.prices[pairKey(base, quote)] = pricePoint{rate: rateUnits, updated: updated}
 }
 
-// LedgerBalance returns a snapshot of the treasury ledger for the asset.
-func (e *Engine) LedgerBalance(asset string) (float64, float64, float64, bool) {
+// LedgerBalance returns a snapshot of the treasury ledger for the asset in scaled units.
+func (e *Engine) LedgerBalance(asset string) (int64, int64, int64, bool) {
 	if e == nil {
 		return 0, 0, 0, false
 	}
@@ -716,7 +725,7 @@ func (e *Engine) LedgerBalance(asset string) (float64, float64, float64, bool) {
 	if !ok || state == nil {
 		return 0, 0, 0, false
 	}
-	return fromAmountUnits(state.available), fromAmountUnits(state.reserved), fromAmountUnits(state.payouts), true
+	return state.available, state.reserved, state.payouts, true
 }
 
 // SetPriceMaxAge overrides the maximum allowed staleness for oracle prices.
