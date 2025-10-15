@@ -209,6 +209,58 @@
       ],
       "title": "24h Failure Count",
       "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Snapshot of the trailing 24h minted volume compared with the configured auto top-up cap.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 80},
+              {"color": "red", "value": 100}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 8},
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "exemplar": false,
+          "expr": "sum(increase(nhb_paymaster_autotopup_amount_wei_total{outcome=\"success\"}[1d])) / 1e18",
+          "interval": "",
+          "legendFormat": "Minted (24h)",
+          "refId": "A"
+        },
+        {
+          "exemplar": false,
+          "expr": "vector(${daily_cap_wei}) / 1e18",
+          "interval": "",
+          "legendFormat": "Configured Cap",
+          "refId": "B"
+        }
+      ],
+      "title": "24h Minted vs Cap Snapshot",
+      "type": "stat"
     }
   ],
   "refresh": "5m",
