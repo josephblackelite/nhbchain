@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+func TestAuthenticateByBearerValidToken(t *testing.T) {
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "topsecret"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	request.Header.Set("Authorization", "Bearer topsecret")
+	if !auth.authenticateByBearer(request) {
+		t.Fatalf("expected token to be accepted")
+	}
+}
+
+func TestAuthenticateByBearerInvalidToken(t *testing.T) {
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "topsecret"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	request.Header.Set("Authorization", "Bearer notsecret")
+	if auth.authenticateByBearer(request) {
+		t.Fatalf("expected token to be rejected")
+	}
+}
+
 func TestAuthenticatorAllowsBearer(t *testing.T) {
 	auth, err := NewAuthenticator(AuthConfig{BearerToken: "secret"})
 	if err != nil {
