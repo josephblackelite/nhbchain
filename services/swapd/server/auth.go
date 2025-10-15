@@ -68,7 +68,9 @@ func (a *Authenticator) authenticateByBearer(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(a.bearerToken)) == 1
+	provided := []byte(token)
+	expected := []byte(a.bearerToken)
+	return subtle.ConstantTimeCompare(provided, expected) == 1
 }
 
 func (a *Authenticator) authenticateByMTLS(r *http.Request) bool {

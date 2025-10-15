@@ -32,6 +32,35 @@ func TestAuthenticateByBearerInvalidToken(t *testing.T) {
 	}
 }
 
+func TestAuthenticatorAuthenticateBearerTokens(t *testing.T) {
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "topsecret"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		header string
+		want   bool
+	}{
+		{name: "valid token", header: "Bearer topsecret", want: true},
+		{name: "invalid token", header: "Bearer notsecret", want: false},
+		{name: "missing token", header: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+			if tt.header != "" {
+				request.Header.Set("Authorization", tt.header)
+			}
+			if got := auth.authenticate(request); got != tt.want {
+				t.Fatalf("authenticate() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAuthenticatorAllowsBearer(t *testing.T) {
 	auth, err := NewAuthenticator(AuthConfig{BearerToken: "secret"})
 	if err != nil {
