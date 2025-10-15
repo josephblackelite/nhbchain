@@ -47,6 +47,11 @@ type POSLifecycleMetrics struct {
 	authExpired prometheus.Counter
 }
 
+// SecurityMetrics captures security-sensitive configuration signals.
+type SecurityMetrics struct {
+	insecureBinds *prometheus.CounterVec
+}
+
 // Loyalty returns the singleton registry tracking loyalty reward budget usage.
 func Loyalty() *LoyaltyMetrics {
 	loyaltyMetricsOnce.Do(func() {
@@ -143,6 +148,9 @@ var (
 
 	posLifecycleOnce     sync.Once
 	posLifecycleRegistry *POSLifecycleMetrics
+
+	securityMetricsOnce sync.Once
+	securityRegistry    *SecurityMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -184,6 +192,38 @@ func ModuleMetrics() *moduleMetrics {
 		)
 	})
 	return moduleRegistry
+}
+
+// Security returns the metrics registry tracking sensitive configuration states.
+func Security() *SecurityMetrics {
+	securityMetricsOnce.Do(func() {
+		securityRegistry = &SecurityMetrics{
+			insecureBinds: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "security",
+				Name:      "insecure_binds_total",
+				Help:      "Count of listeners started with AllowInsecure segmented by loopback safety.",
+			}, []string{"service", "loopback"}),
+		}
+		prometheus.MustRegister(securityRegistry.insecureBinds)
+	})
+	return securityRegistry
+}
+
+// RecordInsecureBind records whether an insecure listener bound to a loopback interface.
+func (m *SecurityMetrics) RecordInsecureBind(service string, loopback bool) {
+	if m == nil {
+		return
+	}
+	normalized := strings.TrimSpace(service)
+	if normalized == "" {
+		normalized = "unknown"
+	}
+	loopbackLabel := "false"
+	if loopback {
+		loopbackLabel = "true"
+	}
+	m.insecureBinds.WithLabelValues(normalized, loopbackLabel).Inc()
 }
 
 // Observe records the outcome of a module request. The status code should be

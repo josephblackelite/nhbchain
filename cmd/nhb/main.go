@@ -410,14 +410,15 @@ func main() {
 			Audience:         append([]string{}, cfg.RPCJWT.Audience...),
 			MaxSkewSeconds:   cfg.RPCJWT.MaxSkewSeconds,
 		},
-		ReadHeaderTimeout: time.Duration(cfg.RPCReadHeaderTimeout) * time.Second,
-		ReadTimeout:       time.Duration(cfg.RPCReadTimeout) * time.Second,
-		WriteTimeout:      time.Duration(cfg.RPCWriteTimeout) * time.Second,
-		IdleTimeout:       time.Duration(cfg.RPCIdleTimeout) * time.Second,
-		TLSCertFile:       cfg.RPCTLSCertFile,
-		TLSKeyFile:        cfg.RPCTLSKeyFile,
-		TLSClientCAFile:   cfg.RPCTLSClientCAFile,
-		AllowInsecure:     cfg.RPCAllowInsecure,
+		ReadHeaderTimeout:        time.Duration(cfg.RPCReadHeaderTimeout) * time.Second,
+		ReadTimeout:              time.Duration(cfg.RPCReadTimeout) * time.Second,
+		WriteTimeout:             time.Duration(cfg.RPCWriteTimeout) * time.Second,
+		IdleTimeout:              time.Duration(cfg.RPCIdleTimeout) * time.Second,
+		TLSCertFile:              cfg.RPCTLSCertFile,
+		TLSKeyFile:               cfg.RPCTLSKeyFile,
+		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
+		AllowInsecure:            cfg.RPCAllowInsecure,
+		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
 	})
 	rpcErrCh := make(chan error, 1)
 	go func() {

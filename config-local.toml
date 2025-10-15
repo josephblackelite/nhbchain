@@ -39,6 +39,8 @@ WriteTimeout = 5
 MaxMsgBytes = 1048576
 ClientVersion = "nhbchain/node"
 RPCAllowInsecure = true
+# Treat container-style wildcard binds as loopback for local development.
+RPCAllowInsecureUnspecified = true
 RPCTLSCertFile = ""
 RPCTLSKeyFile = ""
 RPCTLSClientCAFile = ""
