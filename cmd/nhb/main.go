@@ -402,7 +402,7 @@ func main() {
 
 	// --- Server Startup ---
 	networkAdapter := &p2pNetworkAdapter{server: p2pServer}
-	rpcServer := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
+	rpcServer, err := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
 		AllowlistCIDRs:    append([]string{}, cfg.RPCAllowlistCIDRs...),
@@ -429,6 +429,10 @@ func main() {
 		AllowInsecure:            cfg.RPCAllowInsecure,
 		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
 	})
+	if err != nil {
+		logger.Error("failed to initialise RPC server", slog.Any("error", err))
+		os.Exit(1)
+	}
 	rpcErrCh := make(chan error, 1)
 	go func() {
 		err := rpcServer.Start(cfg.RPCAddress)

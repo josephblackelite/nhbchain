@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"go.opentelemetry.io/otel/trace"
 
 	gatewayauth "nhbchain/gateway/auth"
@@ -18,7 +19,6 @@ import (
 )
 
 func TestStableRPCHandlersFlow(t *testing.T) {
-	t.Setenv("NHB_RPC_TOKEN", "test-token")
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
 	engine := newStableRPCTestEngine(t, base)
 	limits := stable.Limits{DailyCap: 1_000_000}
@@ -30,7 +30,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}
-	srv := NewServer(nil, nil, ServerConfig{
+	srv := newTestServer(t, nil, nil, ServerConfig{
 		SwapAuth: SwapAuthConfig{
 			Secrets:              map[string]string{"partner": "secret"},
 			AllowedTimestampSkew: time.Minute,
@@ -49,6 +49,9 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 		SpanID:     trace.SpanID{0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E, 0x10},
 		TraceFlags: trace.FlagsSampled,
 	}))
+	if srv.jwtVerifier != nil {
+		srv.jwtVerifier.now = func() time.Time { return base }
+	}
 
 	quoteReq := map[string]any{
 		"jsonrpc": "2.0",
@@ -58,7 +61,9 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 			map[string]any{"asset": "ZNHB", "amount": 100, "account": "merchant-123"},
 		},
 	}
-	quoteResp := doSignedStableRPCRequest(t, srv, traceCtx, quoteReq, base, "nonce-1", "test-token", http.StatusOK)
+	token := signStableJWT(t, base)
+
+	quoteResp := doSignedStableRPCRequest(t, srv, traceCtx, quoteReq, base, "nonce-1", token, http.StatusOK)
 	var quoteRPC RPCResponse
 	if err := json.Unmarshal(quoteResp, &quoteRPC); err != nil {
 		t.Fatalf("unmarshal quote response: %v", err)
@@ -89,7 +94,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 			map[string]any{"quoteId": quoteID, "amountIn": 100, "account": "merchant-123"},
 		},
 	}
-	reserveResp := doSignedStableRPCRequest(t, srv, traceCtx, reserveReq, base.Add(time.Second), "nonce-2", "test-token", http.StatusOK)
+	reserveResp := doSignedStableRPCRequest(t, srv, traceCtx, reserveReq, base.Add(time.Second), "nonce-2", token, http.StatusOK)
 	var reserveRPC RPCResponse
 	if err := json.Unmarshal(reserveResp, &reserveRPC); err != nil {
 		t.Fatalf("unmarshal reserve response: %v", err)
@@ -117,7 +122,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 			map[string]any{"reservationId": reservationID},
 		},
 	}
-	burnResp := doSignedStableRPCRequest(t, srv, traceCtx, burnReq, base.Add(2*time.Second), "nonce-3", "test-token", http.StatusOK)
+	burnResp := doSignedStableRPCRequest(t, srv, traceCtx, burnReq, base.Add(2*time.Second), "nonce-3", token, http.StatusOK)
 	var burnRPC RPCResponse
 	if err := json.Unmarshal(burnResp, &burnRPC); err != nil {
 		t.Fatalf("unmarshal burn response: %v", err)
@@ -141,7 +146,7 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 		"id":      4,
 		"method":  "nhb_getSwapStatus",
 	}
-	statusResp := doSignedStableRPCRequest(t, srv, traceCtx, statusReq, base.Add(3*time.Second), "nonce-4", "test-token", http.StatusOK)
+	statusResp := doSignedStableRPCRequest(t, srv, traceCtx, statusReq, base.Add(3*time.Second), "nonce-4", token, http.StatusOK)
 	var statusRPC RPCResponse
 	if err := json.Unmarshal(statusResp, &statusRPC); err != nil {
 		t.Fatalf("unmarshal status response: %v", err)
@@ -162,7 +167,6 @@ func TestStableRPCHandlersFlow(t *testing.T) {
 }
 
 func TestStableRPCHandlersRequireRPCAuth(t *testing.T) {
-	t.Setenv("NHB_RPC_TOKEN", "test-token")
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
 	engine := newStableRPCTestEngine(t, base)
 	limits := stable.Limits{DailyCap: 1_000_000}
@@ -174,7 +178,7 @@ func TestStableRPCHandlersRequireRPCAuth(t *testing.T) {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}
-	srv := NewServer(nil, nil, ServerConfig{
+	srv := newTestServer(t, nil, nil, ServerConfig{
 		SwapAuth: SwapAuthConfig{
 			Secrets:              map[string]string{"partner": "secret"},
 			AllowedTimestampSkew: time.Minute,
@@ -318,4 +322,21 @@ func newStableRPCTestEngine(t *testing.T, base time.Time) *stable.Engine {
 	engine.RecordPrice("ZNHB", "USD", 1.0, base)
 	engine.SetPriceMaxAge(0)
 	return engine
+}
+
+func signStableJWT(t *testing.T, now time.Time) string {
+	t.Helper()
+	claims := jwt.RegisteredClaims{
+		Issuer:    "rpc-tests",
+		Audience:  jwt.ClaimStrings([]string{"unit-tests"}),
+		ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(testJWTSecret))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
 }

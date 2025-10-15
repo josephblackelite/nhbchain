@@ -18,7 +18,7 @@ This note captures the current state of authentication and JWT configuration plu
 ## RPC server JWT plumbing (`rpc/http.go` and `config/types.go`)
 
 * `rpc.JWTConfig` / `config.RPCJWT` already support enabling JWT enforcement with HS256 or RS256, specifying issuer, audiences, skew, and secrets (via env) or RSA public keys (via file path).
-* `rpc.NewServer` currently tolerates `JWT.Enable == false` and instead falls back to a legacy static token read from `NHB_RPC_TOKEN` unless mutual TLS is used.
+* `rpc.NewServer` now requires JWTs unless mutual TLS is configured. The static `NHB_RPC_TOKEN` fallback has been removed in favour of short-lived bearer tokens signed by the configured issuer.
 * When JWT is enabled, `newJWTVerifier` builds a verifier with issuer/audience enforcement, default 30s leeway, and supports HS256 (env secret) or RS256 (PEM public key) via `parseRSAPublicKey`.
 * `TestRequireAuthWithJWT` in `tests/rpc/security_test.go` validates issuer/audience/expiry enforcement for HS256 tokens. MTLS bypass is exercised by `TestRequireAuthWithMTLS`.
 
@@ -26,5 +26,5 @@ This note captures the current state of authentication and JWT configuration plu
 
 * OTC gateway lacks real JWT parsing, signature verification, claim validation, and WebAuthn attestation integration.
 * Configuration has no concept of JWT/WebAuthn secrets or key sources for the gateway.
-* RPC server still exposes the static token fallback when JWTs are disabled, contrary to the desired behaviour of failing fast unless MTLS is configured.
-* Test coverage focuses on happy-path JWT verification at the RPC layer but does not cover expired/invalid JWTs for OTC gateway interactions.
+* RPC server enforces JWTs whenever mTLS is absent, satisfying the fail-fast requirement for misconfigured deployments.
+* Test coverage now exercises expired/invalid JWTs at the RPC layer and adds middleware tests for OTC gateway JWT + WebAuthn enforcement.

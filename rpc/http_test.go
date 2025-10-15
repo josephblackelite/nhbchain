@@ -31,7 +31,7 @@ func injectClientIP(t *testing.T, srv *Server, req *http.Request) *http.Request 
 }
 
 func TestResolveClientIPRejectsUntrustedForwardedFor(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{ProxyHeaders: ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle}})
+	server := newTestServer(t, nil, nil, ServerConfig{ProxyHeaders: ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle}})
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.RemoteAddr = "10.0.0.5:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
@@ -41,7 +41,7 @@ func TestResolveClientIPRejectsUntrustedForwardedFor(t *testing.T) {
 }
 
 func TestServerServeRejectsPlaintextWithoutAllowInsecure(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -52,7 +52,7 @@ func TestServerServeRejectsPlaintextWithoutAllowInsecure(t *testing.T) {
 }
 
 func TestServerServeAllowsPlaintextOnLoopbackWhenExplicit(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	server := newTestServer(t, nil, nil, ServerConfig{AllowInsecure: true})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -84,7 +84,7 @@ func TestServerServeAllowsPlaintextOnLoopbackWhenExplicit(t *testing.T) {
 }
 
 func TestServerServeRejectsPlaintextOnNonLoopback(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	server := newTestServer(t, nil, nil, ServerConfig{AllowInsecure: true})
 	base, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -96,7 +96,7 @@ func TestServerServeRejectsPlaintextOnNonLoopback(t *testing.T) {
 }
 
 func TestServerServeRejectsPlaintextOnUnspecifiedWithoutOverride(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	server := newTestServer(t, nil, nil, ServerConfig{AllowInsecure: true})
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -107,7 +107,7 @@ func TestServerServeRejectsPlaintextOnUnspecifiedWithoutOverride(t *testing.T) {
 }
 
 func TestServerServeAllowsPlaintextOnUnspecifiedWithOverride(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true, AllowInsecureUnspecified: true})
+	server := newTestServer(t, nil, nil, ServerConfig{AllowInsecure: true, AllowInsecureUnspecified: true})
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -148,7 +148,7 @@ func (l *addrOverrideListener) Addr() net.Addr {
 }
 
 func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{
+	server := newTestServer(t, nil, nil, ServerConfig{
 		TrustedProxies: []string{"10.0.0.1"},
 		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
 	})
@@ -162,7 +162,7 @@ func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
 }
 
 func TestClientSourceHonorsForwardedForWhenTrustFlagEnabled(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{
+	server := newTestServer(t, nil, nil, ServerConfig{
 		TrustProxyHeaders: true,
 		ProxyHeaders:      ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
 	})
@@ -176,7 +176,7 @@ func TestClientSourceHonorsForwardedForWhenTrustFlagEnabled(t *testing.T) {
 }
 
 func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{
+	server := newTestServer(t, nil, nil, ServerConfig{
 		TrustedProxies: []string{"10.0.0.1"},
 		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
 	})
@@ -212,7 +212,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 }
 
 func TestClientSourceCanonicalizesForwardedFor(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{
+	server := newTestServer(t, nil, nil, ServerConfig{
 		TrustedProxies: []string{"10.0.0.1"},
 		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
 	})
@@ -226,7 +226,7 @@ func TestClientSourceCanonicalizesForwardedFor(t *testing.T) {
 }
 
 func TestClientSourceCapsForwardedForChain(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{
+	server := newTestServer(t, nil, nil, ServerConfig{
 		TrustedProxies: []string{"10.0.0.1"},
 		ProxyHeaders:   ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
 	})
@@ -243,7 +243,7 @@ func TestClientSourceCapsForwardedForChain(t *testing.T) {
 }
 
 func TestRateLimiterNormalizesSources(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 
 	if !server.allowSource(" 198.51.100.11 ", now) {
@@ -261,7 +261,7 @@ func TestRateLimiterNormalizesSources(t *testing.T) {
 }
 
 func TestRateLimiterEvictsStaleEntries(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 	staleTime := now.Add(-rateLimiterStaleAfter - time.Second)
 
@@ -293,7 +293,7 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 }
 
 func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 
 	for i := 0; i < rateLimiterMaxEntries; i++ {
@@ -331,7 +331,7 @@ func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
 }
 
 func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 	source := "198.51.100.200"
 
@@ -354,7 +354,7 @@ func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 }
 
 func TestServerRememberTxRejectsDuplicateWithinTTL(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 
 	if !server.rememberTx("tx-1", now) {
@@ -375,7 +375,7 @@ func TestServerRememberTxRejectsDuplicateWithinTTL(t *testing.T) {
 }
 
 func TestServerRememberTxEvictsExpired(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	base := time.Now().Add(-2 * txSeenTTL)
 
 	if !server.rememberTx("tx-old", base) {
@@ -401,7 +401,7 @@ func TestServerRememberTxEvictsExpired(t *testing.T) {
 }
 
 func TestServerRememberTxIncludesPaymasterInHash(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 
 	senderKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -473,7 +473,7 @@ func TestServerRememberTxIncludesPaymasterInHash(t *testing.T) {
 }
 
 func TestHandleSendTransactionInvalidSignature(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 
 	tx := &types.Transaction{
 		ChainID:  types.NHBChainID(),
@@ -512,7 +512,7 @@ func TestHandleSendTransactionInvalidSignature(t *testing.T) {
 }
 
 func TestHandleSendTransactionInvalidChainID(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 
 	tx := &types.Transaction{
 		ChainID:  big.NewInt(12345),
@@ -600,7 +600,7 @@ func TestHandleSendTransactionAcceptsZNHBTransfer(t *testing.T) {
 		t.Fatalf("seed accounts: %v", err)
 	}
 
-	server := NewServer(node, nil, ServerConfig{})
+	server := newTestServer(t, node, nil, ServerConfig{})
 
 	tx := &types.Transaction{
 		ChainID:  types.NHBChainID(),
@@ -656,7 +656,7 @@ func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
 		t.Fatalf("new node: %v", err)
 	}
 
-	server := NewServer(node, nil, ServerConfig{})
+	server := newTestServer(t, node, nil, ServerConfig{})
 
 	senderKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -702,7 +702,7 @@ func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
 }
 
 func TestHandleGetBalanceRejectsMalformedAddress(t *testing.T) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(t, nil, nil, ServerConfig{})
 	recorder := httptest.NewRecorder()
 	req := &RPCRequest{ID: 7}
 	req.Params = []json.RawMessage{json.RawMessage(`"not-a-valid-address"`)}

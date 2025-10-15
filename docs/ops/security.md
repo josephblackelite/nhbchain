@@ -29,8 +29,11 @@ Nodes now support multiple layers of RPC hardening beyond TLS:
 * **JWT bearer tokens.** Configure `RPCJWT` with either an environment-derived
   HMAC secret (`HSSecretEnv`) or an RSA public key (`RSAPublicKeyFile`). Issued
   tokens must present matching `iss`/`aud` claims and remain within the
-  configured skew window. Rotate secrets regularly and avoid distributing static
-  `NHB_RPC_TOKEN` strings to untrusted infrastructure.
+  configured skew window. Rotate signing material via your secret manager and
+  mint short-lived JWTs for callers. Clients should fetch a fresh token from the
+  issuer (for example by populating an `NHB_RPC_TOKEN` environment variable at
+  start-up) and refresh before expiry—the node no longer accepts static bearer
+  strings.
 * **Mutual TLS.** Set `RPCTLSClientCAFile` to require client certificates from
   wallets, custodians, or gateways. When mTLS is enabled the node accepts either
   a valid client certificate or a JWT that satisfies the configured policy.

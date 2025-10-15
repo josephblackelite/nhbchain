@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -34,9 +36,20 @@ type rpcError struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+var weiUnit = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+func weiString(n int64) string {
+	return new(big.Int).Mul(big.NewInt(n), weiUnit).String()
+}
+
+func weiBig(n int64) *big.Int {
+	return new(big.Int).Mul(big.NewInt(n), weiUnit)
+}
+
 func TestLendingRPCEndpoints(t *testing.T) {
-	token := "test-token"
-	t.Setenv("NHB_RPC_TOKEN", token)
+	const jwtEnv = "LENDING_RPC_JWT_SECRET"
+	const jwtSecret = "lending-secret"
+	t.Setenv(jwtEnv, jwtSecret)
 
 	db := storage.NewMemDB()
 	t.Cleanup(func() { db.Close() })
@@ -82,7 +95,20 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("seed lending state: %v", err)
 	}
 
-	server := rpc.NewServer(node, nil, rpc.ServerConfig{AllowInsecure: true})
+	server, err := rpc.NewServer(node, nil, rpc.ServerConfig{
+		AllowInsecure: true,
+		JWT: rpc.JWTConfig{
+			Enable:         true,
+			Alg:            "HS256",
+			HSSecretEnv:    jwtEnv,
+			Issuer:         "lending-tests",
+			Audience:       []string{"lending-cli"},
+			MaxSkewSeconds: 60,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new rpc server: %v", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -109,6 +135,8 @@ func TestLendingRPCEndpoints(t *testing.T) {
 			t.Fatalf("serve RPC: %v", err)
 		}
 	})
+
+	token := issueLendingJWT(t, []byte(jwtSecret), "lending-tests", []string{"lending-cli"}, time.Hour)
 
 	marketResp := callRPC(t, client, baseURL, token, "lending_getMarket", nil)
 	var marketResult struct {
@@ -157,14 +185,14 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected two pools, got %+v", poolsResult.Pools)
 	}
 
-	callRPC(t, client, baseURL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": "1000"})
-	callRPC(t, client, baseURL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": "600"})
-	callRPC(t, client, baseURL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": "400"})
-	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "400"})
-	callRPC(t, client, baseURL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": "100"})
-	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": "101"})
-	callRPC(t, client, baseURL, token, "lending_withdrawNHB", map[string]string{"from": userAddrStr, "amount": "500"})
-	callRPC(t, client, baseURL, token, "lending_withdrawZNHB", map[string]string{"from": userAddrStr, "amount": "300"})
+	callRPC(t, client, baseURL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": weiString(1000)})
+	callRPC(t, client, baseURL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": weiString(600)})
+	callRPC(t, client, baseURL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": weiString(400)})
+	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": weiString(400)})
+	callRPC(t, client, baseURL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": weiString(100)})
+	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": weiString(101)})
+	callRPC(t, client, baseURL, token, "lending_withdrawNHB", map[string]string{"from": userAddrStr, "amount": weiString(500)})
+	callRPC(t, client, baseURL, token, "lending_withdrawZNHB", map[string]string{"from": userAddrStr, "amount": weiString(300)})
 
 	accountResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", userAddrStr)
 	var accountResult struct {
@@ -177,10 +205,10 @@ func TestLendingRPCEndpoints(t *testing.T) {
 	if err := json.Unmarshal(accountResp.Result, &accountResult); err != nil {
 		t.Fatalf("decode account: %v", err)
 	}
-	if accountResult.Account.SupplyShares == nil || accountResult.Account.SupplyShares.String() != "500" {
+	if accountResult.Account.SupplyShares == nil || accountResult.Account.SupplyShares.Cmp(weiBig(500)) != 0 {
 		t.Fatalf("unexpected supply shares: %v", accountResult.Account.SupplyShares)
 	}
-	if accountResult.Account.CollateralZNHB == nil || accountResult.Account.CollateralZNHB.String() != "300" {
+	if accountResult.Account.CollateralZNHB == nil || accountResult.Account.CollateralZNHB.Cmp(weiBig(300)) != 0 {
 		t.Fatalf("unexpected collateral: %v", accountResult.Account.CollateralZNHB)
 	}
 	if accountResult.Account.DebtNHB == nil || accountResult.Account.DebtNHB.Sign() != 0 {
@@ -202,7 +230,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 	if borrowerResult.Account.DebtNHB == nil || borrowerResult.Account.DebtNHB.Sign() != 0 {
 		t.Fatalf("expected borrower debt cleared, got %v", borrowerResult.Account.DebtNHB)
 	}
-	if borrowerResult.Account.CollateralZNHB == nil || borrowerResult.Account.CollateralZNHB.Cmp(big.NewInt(150)) >= 0 {
+	if borrowerResult.Account.CollateralZNHB == nil || borrowerResult.Account.CollateralZNHB.Cmp(weiBig(150)) >= 0 {
 		t.Fatalf("expected borrower collateral reduced, got %v", borrowerResult.Account.CollateralZNHB)
 	}
 
@@ -223,7 +251,7 @@ func TestLendingRPCEndpoints(t *testing.T) {
 
 func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr crypto.Address) error {
 	return node.WithState(func(manager *nhbstate.Manager) error {
-		userAccount := &types.Account{BalanceNHB: big.NewInt(2000), BalanceZNHB: big.NewInt(1000)}
+		userAccount := &types.Account{BalanceNHB: weiBig(2000), BalanceZNHB: weiBig(1000)}
 		if err := manager.PutAccount(userAddr.Bytes(), userAccount); err != nil {
 			return err
 		}
@@ -240,7 +268,7 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 			return err
 		}
 
-		liquidatorAccount := &types.Account{BalanceNHB: big.NewInt(500), BalanceZNHB: big.NewInt(0)}
+		liquidatorAccount := &types.Account{BalanceNHB: weiBig(500), BalanceZNHB: big.NewInt(0)}
 		if err := manager.PutAccount(liquidatorAddr.Bytes(), liquidatorAccount); err != nil {
 			return err
 		}
@@ -259,9 +287,9 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 
 		unhealthy := &lending.UserAccount{
 			Address:        borrowerAddr,
-			CollateralZNHB: big.NewInt(100),
-			DebtNHB:        big.NewInt(120),
-			ScaledDebt:     big.NewInt(120),
+			CollateralZNHB: weiBig(100),
+			DebtNHB:        weiBig(120),
+			ScaledDebt:     weiBig(120),
 		}
 		if err := manager.LendingPutUserAccount(poolID, unhealthy); err != nil {
 			return err
@@ -274,12 +302,12 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 		if !ok || updatedMarket == nil {
 			updatedMarket = &lending.Market{}
 		}
-		updatedMarket.TotalNHBBorrowed = big.NewInt(120)
-		updatedMarket.TotalNHBSupplied = big.NewInt(500)
+		updatedMarket.TotalNHBBorrowed = weiBig(120)
+		updatedMarket.TotalNHBSupplied = weiBig(500)
 		if err := manager.LendingPutMarket(poolID, updatedMarket); err != nil {
 			return err
 		}
-		collateralAccount.BalanceZNHB = new(big.Int).Add(collateralAccount.BalanceZNHB, big.NewInt(100))
+		collateralAccount.BalanceZNHB = new(big.Int).Add(collateralAccount.BalanceZNHB, weiBig(100))
 		if err := manager.PutAccount(collateralAddr.Bytes(), collateralAccount); err != nil {
 			return err
 		}
@@ -335,6 +363,24 @@ func callRPC(t *testing.T, client *http.Client, url, token, method string, param
 		t.Fatalf("rpc error for %s: %+v", method, parsed.Error)
 	}
 	return parsed
+}
+
+func issueLendingJWT(t *testing.T, secret []byte, issuer string, audience []string, lifetime time.Duration) string {
+	t.Helper()
+	now := time.Now().UTC()
+	claims := jwt.RegisteredClaims{
+		Issuer:    issuer,
+		Audience:  jwt.ClaimStrings(audience),
+		ExpiresAt: jwt.NewNumericDate(now.Add(lifetime)),
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(secret)
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
 }
 
 func waitForServer(t *testing.T, addr string) {
