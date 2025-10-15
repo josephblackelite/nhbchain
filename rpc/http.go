@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -253,6 +254,7 @@ type jwtVerifier struct {
 type contextKey string
 
 const clientIPContextKey contextKey = "rpc_client_ip"
+const clientIdentityContextKey contextKey = "rpc_client_identity"
 
 func normalizeProxyMode(mode ProxyHeaderMode) ProxyHeaderMode {
 	switch strings.ToLower(string(mode)) {
@@ -507,9 +509,9 @@ func parseRSAPublicKey(data []byte) (*rsa.PublicKey, error) {
 	return nil, errors.New("no RSA public key found in PEM data")
 }
 
-func (v *jwtVerifier) Verify(token string) error {
+func (v *jwtVerifier) Verify(token string) (*jwt.RegisteredClaims, error) {
 	if v == nil {
-		return errors.New("JWT verifier not configured")
+		return nil, errors.New("JWT verifier not configured")
 	}
 	opts := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{v.method.Alg()}),
@@ -526,10 +528,10 @@ func (v *jwtVerifier) Verify(token string) error {
 		return v.key, nil
 	}, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !parsed.Valid {
-		return errors.New("token validation failed")
+		return nil, errors.New("token validation failed")
 	}
 	if len(v.audience) > 0 {
 		if claims, ok := parsed.Claims.(*jwt.RegisteredClaims); ok {
@@ -546,11 +548,11 @@ func (v *jwtVerifier) Verify(token string) error {
 				}
 			}
 			if !matched {
-				return errors.New("token audience mismatch")
+				return nil, errors.New("token audience mismatch")
 			}
 		}
 	}
-	return nil
+	return claims, nil
 }
 
 // ConfigureStableEngine wires the experimental stable engine into the RPC surface.
@@ -964,7 +966,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Method {
 	case "nhb_sendTransaction":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -974,7 +976,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "tx_getSponsorshipConfig":
 		s.handleTxGetSponsorshipConfig(recorder, r, req)
 	case "tx_setSponsorshipEnabled":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -1008,25 +1010,25 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "swap_voucher_export":
 		s.handleSwapVoucherExport(recorder, r, req)
 	case "nhb_requestSwapApproval":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleStableRequestSwapApproval(recorder, r, req)
 	case "nhb_swapMint":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleStableSwapMint(recorder, r, req)
 	case "nhb_swapBurn":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleStableSwapBurn(recorder, r, req)
 	case "nhb_getSwapStatus":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -1036,31 +1038,31 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "fees_getMonthlyStatus":
 		s.handleFeesGetMonthlyStatus(recorder, r, req)
 	case "swap_limits":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleSwapLimits(recorder, r, req)
 	case "swap_provider_status":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleSwapProviderStatus(recorder, r, req)
 	case "swap_burn_list":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleSwapBurnList(recorder, r, req)
 	case "swap_voucher_reverse":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleSwapVoucherReverse(recorder, r, req)
 	case "pos_sweepVoids":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -1232,13 +1234,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "p2p_resolve":
 		s.handleP2PResolve(recorder, r, req)
 	case "engagement_register_device":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handleEngagementRegisterDevice(recorder, r, req)
 	case "engagement_submit_heartbeat":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -1254,25 +1256,25 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "potso_params":
 		s.handlePotsoParams(recorder, r, req)
 	case "potso_stake_lock":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handlePotsoStakeLock(recorder, r, req)
 	case "potso_stake_unbond":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handlePotsoStakeUnbond(recorder, r, req)
 	case "potso_stake_withdraw":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 		s.handlePotsoStakeWithdraw(recorder, r, req)
 	case "potso_stake_info":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -1282,7 +1284,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "potso_epoch_payouts":
 		s.handlePotsoEpochPayouts(recorder, r, req)
 	case "potso_reward_claim":
-		if authErr := s.requireAuth(r); authErr != nil {
+		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
@@ -1808,23 +1810,43 @@ func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, r *http.Request, req
 	writeResult(w, req.ID, map[string]int{"voided": count})
 }
 
-func (s *Server) requireAuth(r *http.Request) *RPCError {
+func (s *Server) requireAuth(r *http.Request) (*http.Request, *RPCError) {
 	if s.requireClientCert && hasVerifiedClientCert(r) {
-		return nil
+		return r, nil
 	}
 	if s.jwtVerifierErr != nil {
-		return &RPCError{Code: codeUnauthorized, Message: "JWT authentication misconfigured", Data: s.jwtVerifierErr.Error()}
+		return nil, &RPCError{Code: codeUnauthorized, Message: "JWT authentication misconfigured", Data: s.jwtVerifierErr.Error()}
 	}
 	if s.jwtVerifier == nil {
-		return &RPCError{Code: codeUnauthorized, Message: "JWT authentication not configured"}
+		return nil, &RPCError{Code: codeUnauthorized, Message: "JWT authentication not configured"}
 	}
 	token, err := extractBearerToken(r.Header.Get("Authorization"))
 	if err != nil {
-		return &RPCError{Code: codeUnauthorized, Message: err.Error()}
+		return nil, &RPCError{Code: codeUnauthorized, Message: err.Error()}
 	}
-	if err := s.jwtVerifier.Verify(token); err != nil {
-		return &RPCError{Code: codeUnauthorized, Message: "invalid JWT", Data: err.Error()}
+	claims, err := s.jwtVerifier.Verify(token)
+	if err != nil {
+		return nil, &RPCError{Code: codeUnauthorized, Message: "invalid JWT", Data: err.Error()}
 	}
+	if claims != nil {
+		identity := strings.TrimSpace(claims.Subject)
+		if identity != "" {
+			ctx := context.WithValue(r.Context(), clientIdentityContextKey, identity)
+			r = r.WithContext(ctx)
+		}
+	}
+	return r, nil
+}
+
+func (s *Server) requireAuthInto(r **http.Request) *RPCError {
+	if r == nil || *r == nil {
+		return &RPCError{Code: codeUnauthorized, Message: "request unavailable"}
+	}
+	updated, err := s.requireAuth(*r)
+	if err != nil {
+		return err
+	}
+	*r = updated
 	return nil
 }
 
@@ -1856,7 +1878,7 @@ func hasVerifiedClientCert(r *http.Request) bool {
 }
 
 // TestRequireAuth exposes the internal authentication helper for integration tests.
-func (s *Server) TestRequireAuth(r *http.Request) *RPCError {
+func (s *Server) TestRequireAuth(r *http.Request) (*http.Request, *RPCError) {
 	return s.requireAuth(r)
 }
 
@@ -1911,10 +1933,27 @@ func (s *Server) swapNow() time.Time {
 	return time.Now()
 }
 
-func (s *Server) allowSource(source string, now time.Time) bool {
+func (s *Server) allowSource(source, identity, chainNonce string, now time.Time) bool {
 	normalized := canonicalHost(source)
-	if normalized == "" {
-		normalized = "unknown"
+	key := normalized
+	trimmedIdentity := strings.TrimSpace(identity)
+	if trimmedIdentity != "" {
+		key = strings.ToLower(trimmedIdentity)
+	}
+	trimmedChain := strings.TrimSpace(chainNonce)
+	if trimmedChain != "" {
+		if key != "" {
+			key = key + "|" + trimmedChain
+		} else {
+			key = trimmedChain
+		}
+	}
+	if key == "" {
+		if normalized == "" {
+			key = "unknown"
+		} else {
+			key = normalized
+		}
 	}
 
 	s.mu.Lock()
@@ -1922,13 +1961,13 @@ func (s *Server) allowSource(source string, now time.Time) bool {
 
 	s.evictRateLimitersLocked(now)
 
-	limiter, ok := s.rateLimiters[normalized]
+	limiter, ok := s.rateLimiters[key]
 	if !ok {
 		if len(s.rateLimiters) >= rateLimiterMaxEntries {
 			s.evictOldestLimiterLocked()
 		}
 		limiter = &rateLimiter{windowStart: now, lastSeen: now}
-		s.rateLimiters[normalized] = limiter
+		s.rateLimiters[key] = limiter
 	}
 
 	if now.Sub(limiter.windowStart) >= rateLimitWindow {
@@ -2201,7 +2240,16 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 
 	now := time.Now()
 	source := s.clientSource(r)
-	if !s.allowSource(source, now) {
+	identity, _ := r.Context().Value(clientIdentityContextKey).(string)
+	chainKey := ""
+	if tx.ChainID != nil {
+		chainKey = strings.TrimSpace(tx.ChainID.String())
+	}
+	nonceKey := strconv.FormatUint(tx.Nonce, 10)
+	if chainKey != "" {
+		nonceKey = chainKey + ":" + nonceKey
+	}
+	if !s.allowSource(source, identity, nonceKey, now) {
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "transaction rate limit exceeded", source)
 		return
 	}

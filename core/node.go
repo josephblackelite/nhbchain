@@ -71,6 +71,9 @@ type Node struct {
 	proposedTxs                  map[string]struct{}
 	mempoolLimit                 int
 	allowUnlimitedMempool        bool
+	senderUsage                  map[string]*senderQuotaUsage
+	senderNonces                 map[string]map[uint64]time.Time
+	pendingNonces                map[string]nonceRecord
 	posArrival                   map[string]time.Time
 	txValidationMu               sync.RWMutex
 	txSimulationEnabled          bool
@@ -164,9 +167,39 @@ var ErrMempoolFull = errors.New("mempool: transaction limit reached")
 // ErrInvalidTransaction marks transactions that fail basic validation or cannot be executed.
 var ErrInvalidTransaction = errors.New("mempool: invalid transaction")
 
+// ErrMempoolByteLimit indicates the aggregate mempool byte capacity has been reached.
+var ErrMempoolByteLimit = errors.New("mempool: byte capacity reached")
+
+// ErrMempoolSenderLimit indicates a sender-specific cap has been exceeded.
+var ErrMempoolSenderLimit = errors.New("mempool: sender capacity reached")
+
+// ErrMempoolNonceDuplicate guards against rapid nonce replays from the same sender.
+var ErrMempoolNonceDuplicate = errors.New("mempool: nonce recently used")
+
+// ErrMempoolQuotaExceeded indicates the caller exhausted their governance-configured quota window.
+var ErrMempoolQuotaExceeded = errors.New("mempool: sender quota exceeded")
+
 // DefaultBlockTimestampTolerance bounds how far ahead of the local clock a
 // block timestamp may drift before it is rejected.
 const DefaultBlockTimestampTolerance = 5 * time.Second
+
+const (
+	senderNonceTTL        = 15 * time.Minute
+	senderUsagePruneAfter = 48 * time.Hour
+	mempoolMaxSenderTx    = 32
+	mempoolMaxSenderBytes = 256 << 10 // 256 KiB per sender window
+)
+
+type senderQuotaUsage struct {
+	epoch    uint64
+	counters nativecommon.QuotaNow
+	updated  time.Time
+}
+
+type nonceRecord struct {
+	sender string
+	nonce  uint64
+}
 
 // ErrBlockTimestampOutOfWindow marks blocks whose timestamps fall outside the
 // permitted window derived from the previous block and the local clock.
@@ -335,6 +368,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		mempool:                    make([]*types.Transaction, 0),
 		proposedTxs:                make(map[string]struct{}),
 		posArrival:                 make(map[string]time.Time),
+		senderUsage:                make(map[string]*senderQuotaUsage),
+		senderNonces:               make(map[string]map[uint64]time.Time),
+		pendingNonces:              make(map[string]nonceRecord),
 		escrowTreasury:             treasury,
 		engagementMgr:              engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapCfg:                    defaultSwapCfg,
@@ -366,7 +402,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				MinWindowSecs: 60,
 				MaxWindowSecs: 60,
 			},
-			Mempool: config.Mempool{MaxBytes: 1, POSReservationBPS: consensus.DefaultPOSReservationBPS},
+			Mempool: config.Mempool{MaxBytes: 16 << 20, POSReservationBPS: consensus.DefaultPOSReservationBPS},
 			Blocks:  config.Blocks{MaxTxs: 1},
 			Staking: config.Staking{
 				AprBps:                1250,
@@ -593,10 +629,175 @@ func (n *Node) IsPaused(module string) bool {
 	return paused
 }
 
+func (n *Node) devNetwork() bool {
+	mode := strings.ToLower(strings.TrimSpace(n.networkMode))
+	switch mode {
+	case "", "dev", "development", "local", "test", "testing", "staging":
+		return true
+	default:
+		return false
+	}
+}
+
+func (n *Node) pruneSenderUsageLocked(now time.Time) {
+	if len(n.senderUsage) == 0 {
+		return
+	}
+	for key, usage := range n.senderUsage {
+		if usage == nil {
+			delete(n.senderUsage, key)
+			continue
+		}
+		if now.Sub(usage.updated) > senderUsagePruneAfter {
+			delete(n.senderUsage, key)
+		}
+	}
+}
+
+func (n *Node) pruneSenderNoncesLocked(now time.Time) {
+	if len(n.senderNonces) == 0 {
+		return
+	}
+	for sender, nonces := range n.senderNonces {
+		if len(nonces) == 0 {
+			delete(n.senderNonces, sender)
+			continue
+		}
+		for nonce, expiry := range nonces {
+			if now.After(expiry) {
+				delete(nonces, nonce)
+			}
+		}
+		if len(nonces) == 0 {
+			delete(n.senderNonces, sender)
+		}
+	}
+}
+
+func (n *Node) registerSenderNonceLocked(sender string, nonce uint64, now time.Time) error {
+	if sender == "" || nonce == 0 {
+		return nil
+	}
+	n.pruneSenderNoncesLocked(now)
+	if n.senderNonces == nil {
+		n.senderNonces = make(map[string]map[uint64]time.Time)
+	}
+	table := n.senderNonces[sender]
+	if table == nil {
+		table = make(map[uint64]time.Time)
+		n.senderNonces[sender] = table
+	}
+	if expiry, ok := table[nonce]; ok && now.Before(expiry) {
+		return ErrMempoolNonceDuplicate
+	}
+	table[nonce] = now.Add(senderNonceTTL)
+	return nil
+}
+
+func (n *Node) applySenderQuotaLocked(sender string, quota nativecommon.Quota, now time.Time) error {
+	if sender == "" || (quota.MaxRequestsPerMin == 0 && quota.MaxNHBPerEpoch == 0) {
+		return nil
+	}
+	epoch := quotaEpochForConfig(quota, now)
+	if n.senderUsage == nil {
+		n.senderUsage = make(map[string]*senderQuotaUsage)
+	}
+	usage, ok := n.senderUsage[sender]
+	if !ok || usage == nil || usage.epoch != epoch {
+		usage = &senderQuotaUsage{epoch: epoch, counters: nativecommon.QuotaNow{EpochID: epoch}}
+		n.senderUsage[sender] = usage
+	}
+	next, err := nativecommon.CheckQuota(quota, epoch, usage.counters, 1, 0)
+	if err != nil {
+		return err
+	}
+	usage.counters = next
+	usage.updated = now
+	return nil
+}
+
+func (n *Node) trackTransactionLocked(key string, sender []byte, nonce uint64, now time.Time) {
+	if key == "" {
+		return
+	}
+	if n.pendingNonces == nil {
+		n.pendingNonces = make(map[string]nonceRecord)
+	}
+	record := nonceRecord{}
+	if len(sender) > 0 && nonce > 0 {
+		record.sender = hex.EncodeToString(sender)
+		record.nonce = nonce
+	}
+	n.pendingNonces[key] = record
+}
+
+func (n *Node) untrackTransactionLocked(key string) {
+	if key == "" || len(n.pendingNonces) == 0 {
+		return
+	}
+	record, ok := n.pendingNonces[key]
+	if !ok {
+		return
+	}
+	delete(n.pendingNonces, key)
+	if record.sender == "" || record.nonce == 0 {
+		return
+	}
+	table, ok := n.senderNonces[record.sender]
+	if !ok {
+		return
+	}
+	delete(table, record.nonce)
+	if len(table) == 0 {
+		delete(n.senderNonces, record.sender)
+	}
+}
+
+func quotaFromConfig(q config.Quota) nativecommon.Quota {
+	return nativecommon.Quota{
+		MaxRequestsPerMin: q.MaxRequestsPerMin,
+		MaxNHBPerEpoch:    q.MaxNHBPerEpoch,
+		EpochSeconds:      q.EpochSeconds,
+	}
+}
+
+func quotaEpochForConfig(q nativecommon.Quota, ts time.Time) uint64 {
+	seconds := q.EpochSeconds
+	if seconds == 0 {
+		seconds = 60
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	unix := ts.Unix()
+	if unix < 0 {
+		unix = 0
+	}
+	return uint64(unix) / uint64(seconds)
+}
+
+func transactionSize(tx *types.Transaction) (int, error) {
+	msg, err := codec.TransactionToProto(tx)
+	if err != nil {
+		return 0, err
+	}
+	if msg == nil {
+		return 0, fmt.Errorf("transaction proto nil")
+	}
+	raw, err := proto.Marshal(msg)
+	if err != nil {
+		return 0, err
+	}
+	return len(raw), nil
+}
+
 // SetMempoolUnlimitedOptIn toggles acceptance of an unbounded mempool.
 func (n *Node) SetMempoolUnlimitedOptIn(allow bool) {
 	if n == nil {
 		return
+	}
+	if allow && !n.devNetwork() {
+		allow = false
 	}
 	n.mempoolMu.Lock()
 	n.allowUnlimitedMempool = allow
@@ -631,6 +832,7 @@ func (n *Node) SetMempoolLimit(limit int) {
 					if n.posArrival != nil {
 						delete(n.posArrival, key)
 					}
+					n.untrackTransactionLocked(key)
 				}
 			}
 		}
@@ -1420,8 +1622,32 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	if err := n.validateTransaction(tx); err != nil {
 		return err
 	}
+	snapshot := n.globalConfigSnapshot()
+	txSize, err := transactionSize(tx)
+	if err != nil {
+		return fmt.Errorf("%w: encode transaction: %w", ErrInvalidTransaction, err)
+	}
+	var sender []byte
+	var senderKey string
+	var nonce uint64
+	if types.RequiresSignature(tx.Type) {
+		sender, err = tx.From()
+		if err != nil {
+			return fmt.Errorf("%w: recover sender: %w", ErrInvalidTransaction, err)
+		}
+		senderKey = hex.EncodeToString(sender)
+		nonce = tx.Nonce
+		if account, accountErr := n.GetAccount(sender); accountErr == nil && account != nil {
+			if nonce < account.Nonce {
+				return fmt.Errorf("%w: nonce %d has already been used; current account nonce is %d", ErrInvalidTransaction, nonce, account.Nonce)
+			}
+		}
+	}
+	now := n.currentTime()
 	n.mempoolMu.Lock()
 	defer n.mempoolMu.Unlock()
+	n.pruneSenderUsageLocked(now)
+	n.pruneSenderNoncesLocked(now)
 
 	if tx.Type == types.TxTypeMint {
 		voucher, _, err := decodeMintTransaction(tx.Data)
@@ -1449,6 +1675,47 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
+	var currentBytes int64
+	var senderCount int
+	var senderBytes int64
+	maxBytes := snapshot.Mempool.MaxBytes
+	if maxBytes > 0 || senderKey != "" {
+		for _, existing := range n.mempool {
+			if existing == nil {
+				continue
+			}
+			sz, sizeErr := transactionSize(existing)
+			if sizeErr != nil {
+				continue
+			}
+			if maxBytes > 0 {
+				currentBytes += int64(sz)
+			}
+			if senderKey != "" && types.RequiresSignature(existing.Type) {
+				existingFrom, fromErr := existing.From()
+				if fromErr == nil && hex.EncodeToString(existingFrom) == senderKey {
+					senderCount++
+					senderBytes += int64(sz)
+				}
+			}
+		}
+	}
+	if maxBytes > 0 && currentBytes+int64(txSize) > maxBytes {
+		return ErrMempoolByteLimit
+	}
+	if senderKey != "" {
+		if senderCount >= mempoolMaxSenderTx || senderBytes+int64(txSize) > mempoolMaxSenderBytes {
+			return ErrMempoolSenderLimit
+		}
+	}
+	if senderKey != "" {
+		if err := n.registerSenderNonceLocked(senderKey, nonce, now); err != nil {
+			return err
+		}
+		if err := n.applySenderQuotaLocked(senderKey, quotaFromConfig(snapshot.Quotas.Trade), now); err != nil {
+			return fmt.Errorf("%w: %w", ErrMempoolQuotaExceeded, err)
+		}
+	}
 	if mempool.IsPOSLaneEligible(tx) {
 		if key, err := transactionKey(tx); err == nil {
 			if n.posArrival == nil {
@@ -1462,7 +1729,12 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 			}
 		}
 	}
+	key, keyErr := transactionKey(tx)
+	if keyErr != nil {
+		return fmt.Errorf("%w: derive transaction key: %w", ErrInvalidTransaction, keyErr)
+	}
 	n.mempool = append(n.mempool, tx)
+	n.trackTransactionLocked(key, sender, nonce, now)
 	if mempool.IsPOSLaneEligible(tx) {
 		if hash, err := tx.Hash(); err == nil {
 			n.publishPOSFinality(POSFinalityUpdate{
@@ -1679,6 +1951,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		}
 		committed[key] = struct{}{}
 		delete(n.proposedTxs, key)
+		n.untrackTransactionLocked(key)
 		if mempool.IsPOSLaneEligible(tx) && n.posArrival != nil {
 			if enqueuedAt, ok := n.posArrival[key]; ok {
 				latency := n.currentTime().Sub(enqueuedAt)
@@ -1701,6 +1974,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 			continue
 		}
 		if _, ok := committed[key]; ok {
+			n.untrackTransactionLocked(key)
 			continue
 		}
 		filtered = append(filtered, tx)

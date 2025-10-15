@@ -28,7 +28,7 @@ type syncStatusResult struct {
 }
 
 func (s *Server) handleSyncSnapshotExport(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -54,7 +54,7 @@ func (s *Server) handleSyncSnapshotExport(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleSyncSnapshotImport(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

@@ -80,7 +80,7 @@ func (s *Server) handleNetPeers(w http.ResponseWriter, r *http.Request, req *RPC
 }
 
 func (s *Server) handleNetDial(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -107,7 +107,7 @@ func (s *Server) handleNetDial(w http.ResponseWriter, r *http.Request, req *RPCR
 }
 
 func (s *Server) handleNetBan(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

@@ -35,6 +35,16 @@ func newSponsorshipState(t *testing.T) *StateProcessor {
 	return sp
 }
 
+func commitState(t *testing.T, sp *StateProcessor) {
+	t.Helper()
+	if sp == nil {
+		return
+	}
+	if _, err := sp.Commit(0); err != nil {
+		t.Fatalf("commit state: %v", err)
+	}
+}
+
 func signTransaction(t *testing.T, tx *types.Transaction, key *crypto.PrivateKey) {
 	t.Helper()
 	if err := tx.Sign(key.PrivateKey); err != nil {
@@ -759,6 +769,7 @@ func TestApplyTransactionSponsorshipRejection(t *testing.T) {
 		if err := sp.setAccount(paymasterAddr, paymasterAccount); err != nil {
 			t.Fatalf("seed paymaster: %v", err)
 		}
+		commitState(t, sp)
 
 		tx := &types.Transaction{
 			ChainID:   types.NHBChainID(),
@@ -832,6 +843,7 @@ func TestApplyTransactionSponsorshipRejection(t *testing.T) {
 		if err := sp.setAccount(paymasterAddr, paymasterAccount); err != nil {
 			t.Fatalf("seed paymaster: %v", err)
 		}
+		commitState(t, sp)
 
 		tx := &types.Transaction{
 			ChainID:         types.NHBChainID(),

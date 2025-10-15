@@ -68,7 +68,7 @@ func parseAmount(amount string) (*big.Int, error) {
 }
 
 func (s *Server) handleStakeDelegate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -114,7 +114,7 @@ func (s *Server) handleStakeDelegate(w http.ResponseWriter, r *http.Request, req
 }
 
 func (s *Server) handleStakeUndelegate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -159,7 +159,7 @@ func (s *Server) handleStakeUndelegate(w http.ResponseWriter, r *http.Request, r
 }
 
 func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -207,7 +207,7 @@ func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *R
 }
 
 func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -259,7 +259,7 @@ func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) handleStakeGetPosition(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -293,7 +293,7 @@ func (s *Server) handleStakeGetPosition(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleStakePreviewClaim(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -348,7 +348,8 @@ func (s *Server) guardStakeRequest(w http.ResponseWriter, r *http.Request, req *
 		return time.Time{}, false
 	}
 	source := s.clientSource(r)
-	if !s.allowSource(source, now) {
+	identity, _ := r.Context().Value(clientIdentityContextKey).(string)
+	if !s.allowSource(source, identity, "", now) {
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "staking rate limit exceeded", source)
 		return time.Time{}, false
 	}

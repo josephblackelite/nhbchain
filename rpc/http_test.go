@@ -189,7 +189,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("X-Forwarded-For", forwarded)
 		req = injectClientIP(t, server, req)
-		if !server.allowSource(server.clientSource(req), now) {
+		if !server.allowSource(server.clientSource(req), "", "", now) {
 			t.Fatalf("trusted proxy request %d should be allowed", i)
 		}
 	}
@@ -198,7 +198,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	req.RemoteAddr = remoteAddr
 	req.Header.Set("X-Forwarded-For", forwarded)
 	req = injectClientIP(t, server, req)
-	if server.allowSource(server.clientSource(req), now) {
+	if server.allowSource(server.clientSource(req), "", "", now) {
 		t.Fatalf("expected rate limit when exceeding window for same client")
 	}
 
@@ -206,7 +206,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	req.RemoteAddr = remoteAddr
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req = injectClientIP(t, server, req)
-	if !server.allowSource(server.clientSource(req), now) {
+	if !server.allowSource(server.clientSource(req), "", "", now) {
 		t.Fatalf("distinct client behind trusted proxy should be allowed")
 	}
 }
@@ -246,10 +246,10 @@ func TestRateLimiterNormalizesSources(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 
-	if !server.allowSource(" 198.51.100.11 ", now) {
+	if !server.allowSource(" 198.51.100.11 ", "", "", now) {
 		t.Fatalf("expected first request to be allowed")
 	}
-	if !server.allowSource("198.51.100.11", now) {
+	if !server.allowSource("198.51.100.11", "", "", now) {
 		t.Fatalf("expected normalized source to use same limiter")
 	}
 	server.mu.Lock()
@@ -267,7 +267,7 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		source := fmt.Sprintf("198.51.100.%d", i)
-		if !server.allowSource(source, staleTime) {
+		if !server.allowSource(source, "", "", staleTime) {
 			t.Fatalf("expected stale source %d to be tracked", i)
 		}
 	}
@@ -278,7 +278,7 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 	}
 	server.mu.Unlock()
 
-	if !server.allowSource("new-source", now) {
+	if !server.allowSource("new-source", "", "", now) {
 		t.Fatalf("expected request from new source to be allowed")
 	}
 
@@ -298,12 +298,12 @@ func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
 
 	for i := 0; i < rateLimiterMaxEntries; i++ {
 		source := fmt.Sprintf("client-%d", i)
-		if !server.allowSource(source, now) {
+		if !server.allowSource(source, "", "", now) {
 			t.Fatalf("expected initial requests to be allowed")
 		}
 	}
 
-	if !server.allowSource("extra-client", now) {
+	if !server.allowSource("extra-client", "", "", now) {
 		t.Fatalf("expected extra client to be allowed after eviction")
 	}
 
@@ -336,20 +336,43 @@ func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 	source := "198.51.100.200"
 
 	for i := 0; i < maxTxPerWindow; i++ {
-		if !server.allowSource(source, now) {
+		if !server.allowSource(source, "", "", now) {
 			t.Fatalf("expected request %d to be allowed", i)
 		}
 	}
 
 	for i := 0; i < rateLimiterMaxEntries-1; i++ {
 		churnSource := fmt.Sprintf("churn-%d", i)
-		if !server.allowSource(churnSource, now) {
+		if !server.allowSource(churnSource, "", "", now) {
 			t.Fatalf("expected churn source %d to be allowed", i)
 		}
 	}
 
-	if server.allowSource(source, now) {
+	if server.allowSource(source, "", "", now) {
 		t.Fatalf("expected churned source to remain rate limited within same window")
+	}
+}
+
+func TestRateLimiterUsesIdentityAndNonce(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{})
+	now := time.Now()
+
+	identity := "user@example.com"
+	nonceKey := "chain-1:1"
+	for i := 0; i < maxTxPerWindow; i++ {
+		if !server.allowSource("203.0.113.10", identity, nonceKey, now) {
+			t.Fatalf("expected request %d for identity to be allowed", i)
+		}
+	}
+	if server.allowSource("203.0.113.10", identity, nonceKey, now) {
+		t.Fatalf("expected identity to be rate limited once window exhausted")
+	}
+
+	if !server.allowSource("198.51.100.5", identity, "chain-1:2", now) {
+		t.Fatalf("expected new nonce window for identity to be allowed")
+	}
+	if !server.allowSource("198.51.100.5", "other@example.com", nonceKey, now) {
+		t.Fatalf("expected distinct identity to have separate rate limiter")
 	}
 }
 

@@ -107,7 +107,7 @@ func identityRecordToResult(record *identity.AliasRecord) identityResolveResult 
 }
 
 func (s *Server) handleIdentitySetAlias(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Server) handleIdentitySetAlias(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleIdentitySetAvatar(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -194,7 +194,7 @@ func (s *Server) handleIdentitySetAvatar(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) handleIdentityAddAddress(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -246,7 +246,7 @@ func (s *Server) handleIdentityAddAddress(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleIdentityRemoveAddress(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -300,7 +300,7 @@ func (s *Server) handleIdentityRemoveAddress(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleIdentitySetPrimary(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -352,7 +352,7 @@ func (s *Server) handleIdentitySetPrimary(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleIdentityRename(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -420,7 +420,7 @@ func (s *Server) handleIdentityResolve(w http.ResponseWriter, _ *http.Request, r
 }
 
 func (s *Server) handleIdentityCreateClaimable(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -482,7 +482,7 @@ func (s *Server) handleIdentityCreateClaimable(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleIdentityClaim(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
