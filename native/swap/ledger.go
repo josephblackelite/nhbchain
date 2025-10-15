@@ -24,6 +24,7 @@ type Storage interface {
 	KVDelete(key []byte) error
 	KVAppend(key []byte, value []byte) error
 	KVGetList(key []byte, out interface{}) error
+	AdjustTokenSupply(symbol string, delta *big.Int) (*big.Int, error)
 }
 
 var (

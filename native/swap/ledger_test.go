@@ -12,12 +12,13 @@ import (
 )
 
 type mockStorage struct {
-	kv    map[string][]byte
-	lists map[string][][]byte
+	kv       map[string][]byte
+	lists    map[string][][]byte
+	supplies map[string]*big.Int
 }
 
 func newMockStorage() *mockStorage {
-	return &mockStorage{kv: make(map[string][]byte), lists: make(map[string][][]byte)}
+	return &mockStorage{kv: make(map[string][]byte), lists: make(map[string][][]byte), supplies: make(map[string]*big.Int)}
 }
 
 func (m *mockStorage) KVPut(key []byte, value interface{}) error {
@@ -60,6 +61,25 @@ func (m *mockStorage) KVGetList(key []byte, out interface{}) error {
 		return err
 	}
 	return rlp.DecodeBytes(encoded, out)
+}
+
+func (m *mockStorage) AdjustTokenSupply(symbol string, delta *big.Int) (*big.Int, error) {
+	if m.supplies == nil {
+		m.supplies = make(map[string]*big.Int)
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	current := new(big.Int)
+	if existing, ok := m.supplies[normalized]; ok && existing != nil {
+		current = new(big.Int).Set(existing)
+	}
+	if delta != nil {
+		current = current.Add(current, delta)
+	}
+	if current.Sign() < 0 {
+		return nil, fmt.Errorf("supply underflow for %s", normalized)
+	}
+	m.supplies[normalized] = new(big.Int).Set(current)
+	return new(big.Int).Set(current), nil
 }
 
 func TestLedgerPutAndGet(t *testing.T) {
