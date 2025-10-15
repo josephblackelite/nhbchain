@@ -24,6 +24,13 @@ import (
 	"nhbchain/services/swapd/storage"
 )
 
+const amountScale = 1_000_000
+
+func mustAmountUnits(t *testing.T, amount float64) int64 {
+	t.Helper()
+	return int64(math.Round(amount * float64(amountScale)))
+}
+
 func TestStableHandlersFlow(t *testing.T) {
 	store, err := storage.Open("file:stable_handlers?mode=memory&cache=shared")
 	if err != nil {
@@ -84,14 +91,14 @@ func TestStableHandlersFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("ledger balance missing")
 	}
-	if got, want := available, 1_000_000-102.0; math.Abs(got-want) > 1e-9 {
-		t.Fatalf("available balance mismatch: got %.2f want %.2f", got, want)
+	if got, want := available, mustAmountUnits(t, 1_000_000-102); got != want {
+		t.Fatalf("available balance mismatch: got %d want %d", got, want)
 	}
-	if got, want := reserved, 102.0; math.Abs(got-want) > 1e-9 {
-		t.Fatalf("reserved balance mismatch: got %.2f want %.2f", got, want)
+	if got, want := reserved, mustAmountUnits(t, 102); got != want {
+		t.Fatalf("reserved balance mismatch: got %d want %d", got, want)
 	}
 	if payouts != 0 {
-		t.Fatalf("expected payouts 0, got %.2f", payouts)
+		t.Fatalf("expected payouts 0, got %d", payouts)
 	}
 
 	reservationID := extractField(t, reserveResp.Body.Bytes(), "reservation_id")
@@ -102,14 +109,14 @@ func TestStableHandlersFlow(t *testing.T) {
 	assertGoldenJSON(t, "stable_cashout.json", cashOutResp.Body.Bytes())
 
 	available, reserved, payouts, _ = engine.LedgerBalance("ZNHB")
-	if got, want := available, 1_000_000-102.0; math.Abs(got-want) > 1e-9 {
-		t.Fatalf("available after cashout mismatch: got %.2f want %.2f", got, want)
+	if got, want := available, mustAmountUnits(t, 1_000_000-102); got != want {
+		t.Fatalf("available after cashout mismatch: got %d want %d", got, want)
 	}
 	if reserved != 0 {
-		t.Fatalf("reserved after cashout mismatch: got %.2f want 0", reserved)
+		t.Fatalf("reserved after cashout mismatch: got %d want 0", reserved)
 	}
-	if got, want := payouts, 102.0; math.Abs(got-want) > 1e-9 {
-		t.Fatalf("payouts mismatch: got %.2f want %.2f", got, want)
+	if got, want := payouts, mustAmountUnits(t, 102); got != want {
+		t.Fatalf("payouts mismatch: got %d want %d", got, want)
 	}
 
 	cashOutAgain := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody)

@@ -121,8 +121,8 @@ func TestEngineReserveSlippageAndInventory(t *testing.T) {
 	if !ok {
 		t.Fatalf("ledger missing")
 	}
-	if available != 1_000 || reserved != 0 || payouts != 0 {
-		t.Fatalf("ledger mutated on slippage rejection: available=%.2f reserved=%.2f payouts=%.2f", available, reserved, payouts)
+	if available != mustAmountUnits(t, 1_000) || reserved != 0 || payouts != 0 {
+		t.Fatalf("ledger mutated on slippage rejection: available=%d reserved=%d payouts=%d", available, reserved, payouts)
 	}
 	// Rewind price within tolerance and reserve successfully.
 	engine.RecordPrice("ZNHB", "USD", 1.004, time.Time{})
@@ -134,11 +134,11 @@ func TestEngineReserveSlippageAndInventory(t *testing.T) {
 		t.Fatalf("unexpected amount out units: got %d want %d", res.AmountOut, mustAmountUnits(t, 100))
 	}
 	available, reserved, _, _ = engine.LedgerBalance("ZNHB")
-	if diff := math.Abs(available - (1_000 - 100)); diff > 1e-9 {
-		t.Fatalf("available mismatch after reserve: got %.2f", available)
+	if available != mustAmountUnits(t, 900) {
+		t.Fatalf("available mismatch after reserve: got %d", available)
 	}
-	if diff := math.Abs(reserved - 100); diff > 1e-9 {
-		t.Fatalf("reserved mismatch after reserve: got %.2f", reserved)
+	if reserved != mustAmountUnits(t, 100) {
+		t.Fatalf("reserved mismatch after reserve: got %d", reserved)
 	}
 }
 
@@ -187,14 +187,14 @@ func TestEngineCashOutFlow(t *testing.T) {
 		t.Fatalf("reserve quote: %v", err)
 	}
 	available, reserved, payouts, _ := engine.LedgerBalance("ZNHB")
-	if diff := math.Abs(available - (10_000 - 100.0)); diff > 1e-9 {
-		t.Fatalf("available mismatch: got %.2f", available)
+	if available != mustAmountUnits(t, 9_900) {
+		t.Fatalf("available mismatch: got %d", available)
 	}
-	if diff := math.Abs(reserved - 100.0); diff > 1e-9 {
-		t.Fatalf("reserved mismatch: got %.2f", reserved)
+	if reserved != mustAmountUnits(t, 100) {
+		t.Fatalf("reserved mismatch: got %d", reserved)
 	}
 	if payouts != 0 {
-		t.Fatalf("unexpected payouts: %.2f", payouts)
+		t.Fatalf("unexpected payouts: %d", payouts)
 	}
 	intent, err := engine.CreateCashOutIntent(ctx, res.QuoteID)
 	if err != nil {
@@ -204,14 +204,14 @@ func TestEngineCashOutFlow(t *testing.T) {
 		t.Fatalf("unexpected intent amount: %.2f", intent.Amount)
 	}
 	available, reserved, payouts, _ = engine.LedgerBalance("ZNHB")
-	if diff := math.Abs(available - (10_000 - 100.0)); diff > 1e-9 {
-		t.Fatalf("available after cashout mismatch: got %.2f", available)
+	if available != mustAmountUnits(t, 9_900) {
+		t.Fatalf("available after cashout mismatch: got %d", available)
 	}
 	if reserved != 0 {
-		t.Fatalf("reserved after cashout mismatch: %.2f", reserved)
+		t.Fatalf("reserved after cashout mismatch: %d", reserved)
 	}
-	if diff := math.Abs(payouts - 100.0); diff > 1e-9 {
-		t.Fatalf("payouts mismatch: %.2f", payouts)
+	if payouts != mustAmountUnits(t, 100) {
+		t.Fatalf("payouts mismatch: %d", payouts)
 	}
 	if _, err := engine.CreateCashOutIntent(ctx, res.QuoteID); !errors.Is(err, ErrReservationConsumed) {
 		t.Fatalf("expected consumed reservation error, got %v", err)
@@ -239,22 +239,22 @@ func TestEngineReservationExpiryReleasesInventory(t *testing.T) {
 		t.Fatalf("reserve quote: %v", err)
 	}
 	available, reserved, _, _ := engine.LedgerBalance("ZNHB")
-	if diff := math.Abs(available - (5_000 - 150)); diff > 1e-9 {
-		t.Fatalf("available mismatch: %.2f", available)
+	if available != mustAmountUnits(t, 4_850) {
+		t.Fatalf("available mismatch: %d", available)
 	}
-	if diff := math.Abs(reserved - 150); diff > 1e-9 {
-		t.Fatalf("reserved mismatch: %.2f", reserved)
+	if reserved != mustAmountUnits(t, 150) {
+		t.Fatalf("reserved mismatch: %d", reserved)
 	}
 	clock.Advance(5 * time.Second)
 	if _, err := engine.CreateCashOutIntent(ctx, res.QuoteID); !errors.Is(err, ErrReservationExpired) {
 		t.Fatalf("expected reservation expired, got %v", err)
 	}
 	available, reserved, _, _ = engine.LedgerBalance("ZNHB")
-	if diff := math.Abs(available - 5_000); diff > 1e-9 {
-		t.Fatalf("available not restored: %.2f", available)
+	if available != mustAmountUnits(t, 5_000) {
+		t.Fatalf("available not restored: %d", available)
 	}
 	if reserved != 0 {
-		t.Fatalf("reserved not released: %.2f", reserved)
+		t.Fatalf("reserved not released: %d", reserved)
 	}
 	engine.RecordPrice("ZNHB", "USD", 1.00, time.Time{})
 	quote, err = engine.PriceQuote(ctx, "ZNHB", 150)
@@ -357,12 +357,11 @@ func TestEnginePrecisionPreserved(t *testing.T) {
 		t.Fatalf("unexpected amount out units: got %d want %d", res.AmountOut, expectedOut)
 	}
 	available, reserved, _, _ := engine.LedgerBalance("ZNHB")
-	expectedOutFloat := fromAmountUnits(expectedOut)
-	if diff := math.Abs(available - (1_000_000 - expectedOutFloat)); diff > 1e-6 {
-		t.Fatalf("available mismatch with precision preservation: diff=%f", diff)
+	if available != mustAmountUnits(t, 1_000_000)-expectedOut {
+		t.Fatalf("available mismatch with precision preservation: got %d want %d", available, mustAmountUnits(t, 1_000_000)-expectedOut)
 	}
-	if diff := math.Abs(reserved - expectedOutFloat); diff > 1e-6 {
-		t.Fatalf("reserved mismatch with precision preservation: diff=%f", diff)
+	if reserved != expectedOut {
+		t.Fatalf("reserved mismatch with precision preservation: got %d want %d", reserved, expectedOut)
 	}
 }
 
@@ -403,5 +402,50 @@ func TestEngineRejectsExcessPrecisionAmounts(t *testing.T) {
 	engine.RecordPrice("ZNHB", "USD", 1.0, time.Time{})
 	if _, err := engine.PriceQuote(ctx, "ZNHB", 1.0000004); err == nil {
 		t.Fatalf("expected precision error")
+	}
+}
+
+func TestEngineReserveQuoteRoundingUp(t *testing.T) {
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine, _ := buildTestEngine(t, base, 10_000, time.Minute, Limits{})
+	ctx := context.Background()
+	engine.RecordPrice("ZNHB", "USD", 1.0000005, time.Time{})
+	quote, err := engine.PriceQuote(ctx, "ZNHB", 1)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	res, err := engine.ReserveQuote(ctx, quote.ID, "acct", 1)
+	if err != nil {
+		t.Fatalf("reserve quote: %v", err)
+	}
+	expected := mustAmountUnits(t, 1.000001)
+	if res.AmountOut != expected {
+		t.Fatalf("unexpected rounded amount: got %d want %d", res.AmountOut, expected)
+	}
+	available, reserved, _, _ := engine.LedgerBalance("ZNHB")
+	if available != mustAmountUnits(t, 10_000)-expected {
+		t.Fatalf("available mismatch after rounding reserve: got %d", available)
+	}
+	if reserved != expected {
+		t.Fatalf("reserved mismatch after rounding reserve: got %d want %d", reserved, expected)
+	}
+}
+
+func TestEngineDailyCapWithLargeValues(t *testing.T) {
+	base := time.Date(2024, time.July, 10, 9, 30, 0, 0, time.UTC)
+	hugeCap := int64(math.MaxInt64 / amountScale)
+	engine, _ := buildTestEngine(t, base, 1_000_000_000, time.Minute, Limits{DailyCap: hugeCap})
+	ctx := context.Background()
+	engine.RecordPrice("ZNHB", "USD", 1.01, time.Time{})
+	quote, err := engine.PriceQuote(ctx, "ZNHB", 100)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	if _, err := engine.ReserveQuote(ctx, quote.ID, "acct", 100); err != nil {
+		t.Fatalf("reserve quote under large cap: %v", err)
+	}
+	available, reserved, _, _ := engine.LedgerBalance("ZNHB")
+	if available <= 0 || reserved <= 0 {
+		t.Fatalf("ledger not updated for large cap scenario: available=%d reserved=%d", available, reserved)
 	}
 }
