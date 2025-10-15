@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"math/big"
 	"sort"
@@ -580,7 +580,7 @@ func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
 	if !timestamp.IsZero() && sp.Trie != nil {
 		manager := nhbstate.NewManager(sp.Trie)
 		if _, err := manager.FeesEnsureMonthlyRollover(timestamp); err != nil {
-			log.Printf("fees: monthly rollover check failed: %v", err)
+			slog.Warn("fees: monthly rollover check failed", slog.Any("error", err))
 		}
 	}
 	sp.blockCtx.PendingRewards.ClearPendingRewards()
