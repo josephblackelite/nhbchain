@@ -20,7 +20,7 @@ func TestPartnerOnboardingFlow(t *testing.T) {
 	rootAdminID := uuid.New()
 	partnerAdminID := uuid.New()
 
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, RootAdminSubjects: []string{rootAdminID.String()}})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, []string{rootAdminID.String()})})
 	handler := srv.Handler()
 
 	branch := models.Branch{ID: uuid.New(), Name: "HQ", Region: "US", RegionCap: 100000, InvoiceLimit: 50000}
@@ -31,7 +31,7 @@ func TestPartnerOnboardingFlow(t *testing.T) {
 	body := `{"name":"Atlas Capital","legal_name":"Atlas Capital LLC","kyb_object_key":"s3://kyb","licensing_object_key":"s3://license","contacts":[{"name":"Alice","email":"alice@example.com","role":"admin","subject":"` + partnerAdminID.String() + `","phone":"+1"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/partners", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(partnerAdminID, auth.RolePartnerAdmin) {
+	for k, v := range newAuthHeader(t, partnerAdminID, auth.RolePartnerAdmin) {
 		req.Header.Set(k, v)
 	}
 	resp := httptest.NewRecorder()
@@ -57,7 +57,7 @@ func TestPartnerOnboardingFlow(t *testing.T) {
 	// Partner cannot create invoices until approved.
 	invoiceReq := httptest.NewRequest(http.MethodPost, "/api/v1/invoices", strings.NewReader(`{"branch_id":"`+branch.ID.String()+`","amount":1000}`))
 	invoiceReq.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(partnerAdminID, auth.RolePartnerAdmin) {
+	for k, v := range newAuthHeader(t, partnerAdminID, auth.RolePartnerAdmin) {
 		invoiceReq.Header.Set(k, v)
 	}
 	resp = httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestPartnerOnboardingFlow(t *testing.T) {
 	// Upload dossier details.
 	dossierReq := httptest.NewRequest(http.MethodPost, "/api/v1/partners/"+created.Partner.ID.String()+"/dossier", strings.NewReader(`{"kyb_object_key":"s3://kyb/latest","licensing_object_key":"s3://license/latest"}`))
 	dossierReq.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(partnerAdminID, auth.RolePartnerAdmin) {
+	for k, v := range newAuthHeader(t, partnerAdminID, auth.RolePartnerAdmin) {
 		dossierReq.Header.Set(k, v)
 	}
 	resp = httptest.NewRecorder()
@@ -81,7 +81,7 @@ func TestPartnerOnboardingFlow(t *testing.T) {
 	// Root admin approval required.
 	approveReq := httptest.NewRequest(http.MethodPost, "/api/v1/partners/"+created.Partner.ID.String()+"/approve", strings.NewReader(`{"notes":"ok"}`))
 	approveReq.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(rootAdminID, auth.RoleRootAdmin) {
+	for k, v := range newAuthHeader(t, rootAdminID, auth.RoleRootAdmin) {
 		approveReq.Header.Set(k, v)
 	}
 	resp = httptest.NewRecorder()

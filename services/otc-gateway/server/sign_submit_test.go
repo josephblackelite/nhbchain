@@ -103,14 +103,15 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 	signer := &stubSigner{sig: bytes.Repeat([]byte{0x1}, 65), signerDN: "CN=HSM,O=NHB"}
 	swap := &stubSwapClient{txHash: "0xabc", minted: true, status: &swaprpc.VoucherStatus{Status: "MINTED", TxHash: "0xabc"}}
 	srv := New(Config{
-		DB:         db,
-		TZ:         testTZ(),
-		ChainID:    1,
-		S3Bucket:   "bucket",
-		Signer:     signer,
-		SwapClient: swap,
-		VoucherTTL: time.Minute,
-		Provider:   "otc-gateway",
+		DB:            db,
+		TZ:            testTZ(),
+		ChainID:       1,
+		S3Bucket:      "bucket",
+		Signer:        signer,
+		SwapClient:    swap,
+		VoucherTTL:    time.Minute,
+		Provider:      "otc-gateway",
+		Authenticator: newTestMiddleware(t, nil),
 	})
 	handler := srv.Handler()
 
@@ -122,7 +123,7 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(uuid.New(), auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, uuid.New(), auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 
@@ -219,14 +220,15 @@ func TestSignAndSubmit_PartnerComplianceMetadata(t *testing.T) {
 	}}
 
 	srv := New(Config{
-		DB:         db,
-		TZ:         testTZ(),
-		ChainID:    1,
-		S3Bucket:   "bucket",
-		Signer:     signer,
-		SwapClient: swap,
-		Identity:   identityStub,
-		VoucherTTL: time.Minute,
+		DB:            db,
+		TZ:            testTZ(),
+		ChainID:       1,
+		S3Bucket:      "bucket",
+		Signer:        signer,
+		SwapClient:    swap,
+		Identity:      identityStub,
+		VoucherTTL:    time.Minute,
+		Authenticator: newTestMiddleware(t, nil),
 	})
 	handler := srv.Handler()
 
@@ -234,7 +236,7 @@ func TestSignAndSubmit_PartnerComplianceMetadata(t *testing.T) {
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(uuid.New(), auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, uuid.New(), auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 
@@ -339,14 +341,14 @@ func TestSignAndSubmit_PartnerMissingAttestation(t *testing.T) {
 	swap := &stubSwapClient{}
 	identityStub := &stubIdentityClient{resolution: &identity.Resolution{PartnerDID: "did:example:bad", Verified: false}}
 
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, Identity: identityStub, VoucherTTL: time.Minute})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, Identity: identityStub, VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
 	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(uuid.New(), auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, uuid.New(), auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 
@@ -378,7 +380,7 @@ func TestSignAndSubmit_MakerChecker(t *testing.T) {
 	approver := uuid.New()
 	invoice := createApprovedInvoice(t, db, branch, creator, approver, 2500)
 
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
 	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
@@ -387,7 +389,7 @@ func TestSignAndSubmit_MakerChecker(t *testing.T) {
 	// Creator cannot sign
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(creator, auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, creator, auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 	resp := httptest.NewRecorder()
@@ -399,7 +401,7 @@ func TestSignAndSubmit_MakerChecker(t *testing.T) {
 	// Approver cannot sign
 	req = httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(approver, auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, approver, auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 	resp = httptest.NewRecorder()
@@ -421,14 +423,14 @@ func TestSignAndSubmit_IdempotentReplay(t *testing.T) {
 
 	signer := &stubSigner{sig: bytes.Repeat([]byte{0x1}, 65), signerDN: "CN=Signer"}
 	swap := &stubSwapClient{txHash: "0xhash", minted: true, status: &swaprpc.VoucherStatus{Status: "MINTED", TxHash: "0xhash"}}
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, VoucherTTL: time.Minute})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
 	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(uuid.New(), auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, uuid.New(), auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 	resp := httptest.NewRecorder()
@@ -440,7 +442,7 @@ func TestSignAndSubmit_IdempotentReplay(t *testing.T) {
 	// Replay should not re-sign
 	req = httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(uuid.New(), auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, uuid.New(), auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 	resp = httptest.NewRecorder()
@@ -465,14 +467,14 @@ func TestSignAndSubmit_AwaitMinted(t *testing.T) {
 
 	signer := &stubSigner{sig: bytes.Repeat([]byte{0x2}, 65), signerDN: "CN=Signer"}
 	swap := &stubSwapClient{txHash: "0xslow", minted: false}
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, VoucherTTL: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, VoucherTTL: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
 	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(uuid.New(), auth.RoleSuperAdmin) {
+	for k, v := range newAuthHeader(t, uuid.New(), auth.RoleSuperAdmin) {
 		req.Header.Set(k, v)
 	}
 	resp := httptest.NewRecorder()
