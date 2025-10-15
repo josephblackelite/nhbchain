@@ -750,3 +750,50 @@ func TestHandleGetBalanceRejectsMalformedAddress(t *testing.T) {
 		t.Fatalf("expected error message to be present")
 	}
 }
+
+func TestWriteErrorScrubsInternalDetails(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeError(recorder, http.StatusInternalServerError, 42, codeServerError, "failed to encode transaction", "sensitive detail")
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected error in response")
+	}
+	if resp.Error.Data != nil {
+		t.Fatalf("expected error data to be scrubbed, got %#v", resp.Error.Data)
+	}
+	if strings.Contains(recorder.Body.String(), "sensitive detail") {
+		t.Fatalf("response leaked sensitive detail: %s", recorder.Body.String())
+	}
+}
+
+func TestWriteErrorRetainsClientDetailsForBadRequest(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeError(recorder, http.StatusBadRequest, 7, codeInvalidParams, "invalid parameter", "client detail")
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("expected error in response")
+	}
+	detail, ok := resp.Error.Data.(string)
+	if !ok {
+		t.Fatalf("expected string data, got %T", resp.Error.Data)
+	}
+	if detail != "client detail" {
+		t.Fatalf("unexpected error data: %s", detail)
+	}
+}

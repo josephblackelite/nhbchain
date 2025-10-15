@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -796,11 +797,18 @@ func writeError(w http.ResponseWriter, status int, id interface{}, code int, mes
 		w.WriteHeader(status)
 	}
 	errObj := &RPCError{Code: code, Message: message}
-	if data != nil {
+	if data != nil && !shouldScrubErrorDetails(status, code) {
 		errObj.Data = data
 	}
 	resp := RPCResponse{JSONRPC: jsonRPCVersion, ID: id, Error: errObj}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func shouldScrubErrorDetails(status int, code int) bool {
+	if status >= http.StatusInternalServerError {
+		return true
+	}
+	return code == codeServerError
 }
 
 func writeResult(w http.ResponseWriter, id interface{}, result interface{}) {
@@ -1422,7 +1430,11 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, re
 	}
 	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(hash)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to resolve transaction", err.Error())
+		slog.Error("rpc: failed to resolve transaction",
+			slog.String("method", "nhb_getTransaction"),
+			slog.String("hash", hash),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to resolve transaction", nil)
 		return
 	}
 	if tx == nil {
@@ -1431,7 +1443,11 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, re
 	}
 	result, err := buildTransactionResult(tx, canonicalHash, blockHash, blockNumber)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to encode transaction", err.Error())
+		slog.Error("rpc: failed to encode transaction",
+			slog.String("method", "nhb_getTransaction"),
+			slog.String("hash", canonicalHash),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to encode transaction", nil)
 		return
 	}
 	writeResult(w, req.ID, result)
@@ -1453,7 +1469,11 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 	}
 	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(hash)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to resolve transaction", err.Error())
+		slog.Error("rpc: failed to resolve transaction",
+			slog.String("method", "nhb_getTransactionReceipt"),
+			slog.String("hash", hash),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to resolve transaction", nil)
 		return
 	}
 	if tx == nil {
@@ -1462,7 +1482,11 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 	}
 	receipt, err := s.buildReceiptResult(tx, canonicalHash, blockHash, blockNumber)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to encode receipt", err.Error())
+		slog.Error("rpc: failed to encode receipt",
+			slog.String("method", "nhb_getTransactionReceipt"),
+			slog.String("hash", canonicalHash),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to encode receipt", nil)
 		return
 	}
 	writeResult(w, req.ID, receipt)
@@ -1821,7 +1845,12 @@ func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, r *http.Request, req
 	}
 	count, err := s.node.SweepExpiredPOSAuthorizations(now)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, err.Error(), nil)
+		args := []any{slog.Time("timestamp", now), slog.Any("error", err)}
+		if params.Timestamp != nil {
+			args = append(args, slog.Int64("requestedTimestamp", *params.Timestamp))
+		}
+		slog.Error("rpc: sweep expired POS authorizations failed", args...)
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to sweep expired POS authorizations", nil)
 		return
 	}
 	writeResult(w, req.ID, map[string]int{"voided": count})
@@ -2245,9 +2274,15 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 
+	senderHex := hex.EncodeToString(from)
 	account, err := s.node.GetAccount(from)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load sender account", err.Error())
+		slog.Error("rpc: failed to load sender account",
+			slog.String("method", "nhb_sendTransaction"),
+			slog.String("sender", senderHex),
+			slog.Uint64("nonce", tx.Nonce),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load sender account", nil)
 		return
 	}
 	if tx.Nonce < account.Nonce {
@@ -2273,7 +2308,12 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 
 	hashBytes, err := tx.Hash()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to hash transaction", err.Error())
+		slog.Error("rpc: failed to hash transaction",
+			slog.String("method", "nhb_sendTransaction"),
+			slog.String("sender", senderHex),
+			slog.Uint64("nonce", tx.Nonce),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to hash transaction", nil)
 		return
 	}
 	hash := hex.EncodeToString(hashBytes)
@@ -2291,7 +2331,11 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeMempoolFull, "mempool full", nil)
 			return
 		default:
-			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to add transaction", err.Error())
+			slog.Error("rpc: failed to add transaction",
+				slog.String("method", "nhb_sendTransaction"),
+				slog.String("hash", hash),
+				slog.Any("error", err))
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to add transaction", nil)
 			return
 		}
 	}
@@ -2459,7 +2503,11 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, _ *http.Request, req *R
 	}
 	account, err := s.node.GetAccount(addr.Bytes())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", err.Error())
+		slog.Error("rpc: failed to load account",
+			slog.String("method", "nhb_getBalance"),
+			slog.String("address", addrStr),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load account", nil)
 		return
 	}
 	resp := balanceResponseFromAccount(addrStr, account)
