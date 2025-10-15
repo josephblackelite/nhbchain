@@ -1,6 +1,7 @@
 package paymaster
 
 import (
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -57,6 +58,15 @@ func signPaymaster(t *testing.T, tx *types.Transaction, key *crypto.PrivateKey) 
 	tx.PaymasterR = new(big.Int).SetBytes(sig[:32])
 	tx.PaymasterS = new(big.Int).SetBytes(sig[32:64])
 	tx.PaymasterV = new(big.Int).SetUint64(uint64(sig[64]) + 27)
+}
+
+func findEventByType(events []types.Event, eventType string) *types.Event {
+	for i := range events {
+		if events[i].Type == eventType {
+			return &events[i]
+		}
+	}
+	return nil
 }
 
 func TestPaymasterAutoTopUpSuccess(t *testing.T) {
@@ -140,6 +150,21 @@ func TestPaymasterAutoTopUpSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get paymaster: %v", err)
 	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged before apply, got %v", account.BalanceZNHB)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
+	}
+
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transaction: %v", err)
+	}
+
+	account, err = sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
 	if account.BalanceZNHB == nil || account.BalanceZNHB.Cmp(big.NewInt(2_500)) != 0 {
 		t.Fatalf("expected balance 2500, got %v", account.BalanceZNHB)
 	}
@@ -154,12 +179,12 @@ func TestPaymasterAutoTopUpSuccess(t *testing.T) {
 	}
 
 	eventsList := sp.Events()
-	if len(eventsList) == 0 || eventsList[len(eventsList)-1].Type != events.TypePaymasterAutoTopUp {
+	evt := findEventByType(eventsList, events.TypePaymasterAutoTopUp)
+	if evt == nil {
 		t.Fatalf("expected auto top-up event, got %#v", eventsList)
 	}
-	attrs := eventsList[len(eventsList)-1].Attributes
-	if attrs["status"] != "success" {
-		t.Fatalf("expected success status, got %v", attrs["status"])
+	if status := evt.Attributes["status"]; status != "success" {
+		t.Fatalf("expected success status, got %v", status)
 	}
 }
 
@@ -250,7 +275,7 @@ func TestPaymasterAutoTopUpRespectsCooldown(t *testing.T) {
 		t.Fatalf("get paymaster: %v", err)
 	}
 	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
-		t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+		t.Fatalf("expected balance unchanged before apply, got %v", account.BalanceZNHB)
 	}
 
 	dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
@@ -258,16 +283,39 @@ func TestPaymasterAutoTopUpRespectsCooldown(t *testing.T) {
 		t.Fatalf("get top-up day: %v", err)
 	}
 	if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
-		t.Fatalf("expected no minted amount, got %#v", dayRecord)
+		t.Fatalf("expected no minted amount before apply, got %#v", dayRecord)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
+	}
+
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transaction: %v", err)
+	}
+
+	account, err = sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+	}
+
+	dayRecord, _, err = manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+	if err != nil {
+		t.Fatalf("get top-up day: %v", err)
+	}
+	if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
+		t.Fatalf("expected no minted amount after apply, got %#v", dayRecord)
 	}
 
 	eventsList := sp.Events()
-	if len(eventsList) == 0 || eventsList[len(eventsList)-1].Type != events.TypePaymasterAutoTopUp {
+	evt := findEventByType(eventsList, events.TypePaymasterAutoTopUp)
+	if evt == nil {
 		t.Fatalf("expected auto top-up event, got %#v", eventsList)
 	}
-	attrs := eventsList[len(eventsList)-1].Attributes
-	if attrs["status"] != "failure" || attrs["reason"] != "cooldown_active" {
-		t.Fatalf("expected cooldown failure, got %#v", attrs)
+	if evt.Attributes["status"] != "failure" || evt.Attributes["reason"] != "cooldown_active" {
+		t.Fatalf("expected cooldown failure, got %#v", evt.Attributes)
 	}
 }
 
@@ -379,7 +427,7 @@ func TestPaymasterAutoTopUpRoleValidation(t *testing.T) {
 				t.Fatalf("get paymaster: %v", err)
 			}
 			if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
-				t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+				t.Fatalf("expected balance unchanged before apply, got %v", account.BalanceZNHB)
 			}
 
 			dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
@@ -387,16 +435,39 @@ func TestPaymasterAutoTopUpRoleValidation(t *testing.T) {
 				t.Fatalf("get top-up day: %v", err)
 			}
 			if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
-				t.Fatalf("expected no minted amount, got %#v", dayRecord)
+				t.Fatalf("expected no minted amount before apply, got %#v", dayRecord)
+			}
+			if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+				t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
+			}
+
+			if err := sp.ApplyTransaction(tx); err != nil {
+				t.Fatalf("apply transaction: %v", err)
+			}
+
+			account, err = sp.GetAccount(paymasterAddr.Bytes())
+			if err != nil {
+				t.Fatalf("get paymaster: %v", err)
+			}
+			if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+				t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+			}
+
+			dayRecord, _, err = manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+			if err != nil {
+				t.Fatalf("get top-up day: %v", err)
+			}
+			if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
+				t.Fatalf("expected no minted amount after apply, got %#v", dayRecord)
 			}
 
 			eventsList := sp.Events()
-			if len(eventsList) == 0 || eventsList[len(eventsList)-1].Type != events.TypePaymasterAutoTopUp {
+			evt := findEventByType(eventsList, events.TypePaymasterAutoTopUp)
+			if evt == nil {
 				t.Fatalf("expected auto top-up event, got %#v", eventsList)
 			}
-			attrs := eventsList[len(eventsList)-1].Attributes
-			if attrs["status"] != "failure" || attrs["reason"] != tc.expectedReason {
-				t.Fatalf("expected %s failure, got %#v", tc.expectedReason, attrs)
+			if evt.Attributes["status"] != "failure" || evt.Attributes["reason"] != tc.expectedReason {
+				t.Fatalf("expected %s failure, got %#v", tc.expectedReason, evt.Attributes)
 			}
 		})
 	}
@@ -493,7 +564,7 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 		t.Fatalf("get paymaster: %v", err)
 	}
 	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
-		t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+		t.Fatalf("expected balance unchanged before apply, got %v", account.BalanceZNHB)
 	}
 
 	dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
@@ -501,15 +572,283 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 		t.Fatalf("get top-up day: %v", err)
 	}
 	if dayRecord == nil || dayRecord.MintedWei.Cmp(big.NewInt(9_500)) != 0 {
-		t.Fatalf("expected minted amount 9500, got %#v", dayRecord)
+		t.Fatalf("expected minted amount 9500 before apply, got %#v", dayRecord)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
+	}
+
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transaction: %v", err)
+	}
+
+	account, err = sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+	}
+
+	dayRecord, _, err = manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+	if err != nil {
+		t.Fatalf("get top-up day: %v", err)
+	}
+	if dayRecord == nil || dayRecord.MintedWei.Cmp(big.NewInt(9_500)) != 0 {
+		t.Fatalf("expected minted amount 9500 after apply, got %#v", dayRecord)
 	}
 
 	eventsList := sp.Events()
-	if len(eventsList) == 0 || eventsList[len(eventsList)-1].Type != events.TypePaymasterAutoTopUp {
+	evt := findEventByType(eventsList, events.TypePaymasterAutoTopUp)
+	if evt == nil {
 		t.Fatalf("expected auto top-up event, got %#v", eventsList)
 	}
-	attrs := eventsList[len(eventsList)-1].Attributes
-	if attrs["status"] != "failure" || attrs["reason"] != "daily_cap_exceeded" {
-		t.Fatalf("expected daily cap failure, got %#v", attrs)
+	if evt.Attributes["status"] != "failure" || evt.Attributes["reason"] != "daily_cap_exceeded" {
+		t.Fatalf("expected daily cap failure, got %#v", evt.Attributes)
+	}
+}
+
+func TestPaymasterAutoTopUpNoMutationWhenThrottled(t *testing.T) {
+	sp := newStateProcessor(t)
+	manager := nhbstate.NewManager(sp.Trie)
+	registerZNHB(t, manager)
+
+	operatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate operator: %v", err)
+	}
+	operatorAddr := operatorKey.PubKey().Address()
+	var operatorBytes [20]byte
+	copy(operatorBytes[:], operatorAddr.Bytes())
+
+	policy := core.PaymasterAutoTopUpPolicy{
+		Enabled:        true,
+		Token:          "ZNHB",
+		MinBalanceWei:  big.NewInt(1_000),
+		TopUpAmountWei: big.NewInt(2_500),
+		DailyCapWei:    big.NewInt(10_000),
+		Cooldown:       time.Hour,
+		Operator:       operatorBytes,
+		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
+		MinterRole:     "MINTER_ZNHB",
+	}
+	sp.SetPaymasterAutoTopUpPolicy(policy)
+
+	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+		t.Fatalf("assign minter role: %v", err)
+	}
+	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+		t.Fatalf("assign approver role: %v", err)
+	}
+
+	paymasterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate paymaster key: %v", err)
+	}
+	paymasterAddr := paymasterKey.PubKey().Address()
+
+	sp.SetPaymasterEnabled(true)
+	sp.SetPaymasterLimits(core.PaymasterLimits{GlobalDailyCapWei: big.NewInt(1)})
+
+	if err := manager.SetBalance(paymasterAddr.Bytes(), "NHB", big.NewInt(1_000_000_000)); err != nil {
+		t.Fatalf("seed paymaster balance: %v", err)
+	}
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address()
+	if err := manager.SetBalance(senderAddr.Bytes(), "ZNHB", big.NewInt(0)); err != nil {
+		t.Fatalf("seed sender metadata: %v", err)
+	}
+
+	start := time.Unix(1_700_400_000, 0).UTC()
+	sp.BeginBlock(1, start)
+	defer sp.EndBlock()
+
+	tx := &types.Transaction{
+		ChainID:   types.NHBChainID(),
+		Type:      types.TxTypeTransfer,
+		Nonce:     0,
+		To:        common.Address{0xEE}.Bytes(),
+		Value:     big.NewInt(1),
+		GasLimit:  21000,
+		GasPrice:  big.NewInt(1),
+		Paymaster: paymasterAddr.Bytes(),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign sender: %v", err)
+	}
+	signPaymaster(t, tx, paymasterKey)
+
+	assessment, err := sp.EvaluateSponsorship(tx)
+	if err != nil {
+		t.Fatalf("evaluate sponsorship: %v", err)
+	}
+	if assessment.Status != core.SponsorshipStatusThrottled {
+		t.Fatalf("expected throttled status, got %s", assessment.Status)
+	}
+
+	account, err := sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+	}
+	dayKey := start.UTC().Format(nhbstate.PaymasterDayFormat)
+	dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+	if err != nil {
+		t.Fatalf("get top-up day: %v", err)
+	}
+	if dayRecord != nil {
+		t.Fatalf("expected no day record, got %#v", dayRecord)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
+	}
+
+	err = sp.ApplyTransaction(tx)
+	if !errors.Is(err, core.ErrSponsorshipRejected) {
+		t.Fatalf("expected sponsorship rejection, got %v", err)
+	}
+
+	account, err = sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged after apply, got %v", account.BalanceZNHB)
+	}
+	dayRecord, _, err = manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+	if err != nil {
+		t.Fatalf("get top-up day: %v", err)
+	}
+	if dayRecord != nil {
+		t.Fatalf("expected no day record after apply, got %#v", dayRecord)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event after apply: %#v", evt)
+	}
+}
+
+func TestPaymasterAutoTopUpNoMutationOnFailure(t *testing.T) {
+	sp := newStateProcessor(t)
+	manager := nhbstate.NewManager(sp.Trie)
+	registerZNHB(t, manager)
+
+	operatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate operator: %v", err)
+	}
+	operatorAddr := operatorKey.PubKey().Address()
+	var operatorBytes [20]byte
+	copy(operatorBytes[:], operatorAddr.Bytes())
+
+	policy := core.PaymasterAutoTopUpPolicy{
+		Enabled:        true,
+		Token:          "ZNHB",
+		MinBalanceWei:  big.NewInt(1_000),
+		TopUpAmountWei: big.NewInt(2_500),
+		DailyCapWei:    big.NewInt(10_000),
+		Cooldown:       time.Hour,
+		Operator:       operatorBytes,
+		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
+		MinterRole:     "MINTER_ZNHB",
+	}
+	sp.SetPaymasterAutoTopUpPolicy(policy)
+
+	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+		t.Fatalf("assign minter role: %v", err)
+	}
+	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+		t.Fatalf("assign approver role: %v", err)
+	}
+
+	paymasterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate paymaster key: %v", err)
+	}
+	paymasterAddr := paymasterKey.PubKey().Address()
+
+	sp.SetPaymasterEnabled(true)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address()
+	if err := manager.SetBalance(senderAddr.Bytes(), "ZNHB", big.NewInt(0)); err != nil {
+		t.Fatalf("seed sender metadata: %v", err)
+	}
+
+	start := time.Unix(1_700_500_000, 0).UTC()
+	sp.BeginBlock(1, start)
+	defer sp.EndBlock()
+
+	tx := &types.Transaction{
+		ChainID:   types.NHBChainID(),
+		Type:      types.TxTypeTransfer,
+		Nonce:     0,
+		To:        common.Address{0xEF}.Bytes(),
+		Value:     big.NewInt(1),
+		GasLimit:  21000,
+		GasPrice:  big.NewInt(1),
+		Paymaster: paymasterAddr.Bytes(),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign sender: %v", err)
+	}
+	signPaymaster(t, tx, paymasterKey)
+
+	assessment, err := sp.EvaluateSponsorship(tx)
+	if err != nil {
+		t.Fatalf("evaluate sponsorship: %v", err)
+	}
+	if assessment.Status != core.SponsorshipStatusInsufficientBalance {
+		t.Fatalf("expected insufficient balance status, got %s", assessment.Status)
+	}
+
+	account, err := sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged, got %v", account.BalanceZNHB)
+	}
+	dayKey := start.UTC().Format(nhbstate.PaymasterDayFormat)
+	dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+	if err != nil {
+		t.Fatalf("get top-up day: %v", err)
+	}
+	if dayRecord != nil {
+		t.Fatalf("expected no day record, got %#v", dayRecord)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
+	}
+
+	err = sp.ApplyTransaction(tx)
+	if !errors.Is(err, core.ErrSponsorshipRejected) {
+		t.Fatalf("expected sponsorship rejection, got %v", err)
+	}
+
+	account, err = sp.GetAccount(paymasterAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get paymaster: %v", err)
+	}
+	if account.BalanceZNHB == nil || account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected balance unchanged after apply, got %v", account.BalanceZNHB)
+	}
+	dayRecord, _, err = manager.PaymasterGetTopUpDay(paymasterStorageKey(paymasterAddr), dayKey)
+	if err != nil {
+		t.Fatalf("get top-up day: %v", err)
+	}
+	if dayRecord != nil {
+		t.Fatalf("expected no day record after apply, got %#v", dayRecord)
+	}
+	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
+		t.Fatalf("unexpected auto top-up event after apply: %#v", evt)
 	}
 }

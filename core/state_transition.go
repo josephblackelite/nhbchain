@@ -1596,6 +1596,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 	var sponsorshipCtx *sponsorshipRuntime
 	var sponsorshipErr error
+	var paymasterTopUp *paymasterTopUpMutation
 	var txHashBytes []byte
 	if len(tx.Paymaster) > 0 {
 		txHashBytes, _ = tx.Hash()
@@ -1714,6 +1715,17 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	if err := sp.Trie.Reset(newRoot); err != nil {
 		return nil, fmt.Errorf("trie reset: %w", err)
 	}
+	if sponsorshipCtx != nil {
+		account, err := sp.getAccount(tx.Paymaster)
+		if err != nil {
+			return nil, err
+		}
+		mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, account)
+		if err != nil {
+			return nil, err
+		}
+		paymasterTopUp = mutation
+	}
 	if isTransfer && txHashReady {
 		amount := new(big.Int).Set(tx.Value)
 		timestamp := uint64(blockTime.Unix())
@@ -1731,7 +1743,15 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 
 	if sponsorshipCtx != nil {
 		if err := sp.recordPaymasterUsage(sponsorshipCtx, paymasterCharged); err != nil {
+			if paymasterTopUp != nil {
+				if rollbackErr := paymasterTopUp.Rollback(sp); rollbackErr != nil {
+					return nil, errors.Join(err, rollbackErr)
+				}
+			}
 			return nil, err
+		}
+		if paymasterTopUp != nil {
+			paymasterTopUp.Finalize(sp)
 		}
 	}
 

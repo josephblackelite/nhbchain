@@ -443,3 +443,19 @@ func (m *Manager) PaymasterPutTopUpStatus(status *PaymasterTopUpStatus) error {
 	normalized := status.Clone()
 	return m.KVPut(paymasterTopUpLastKey(normalized.Paymaster), normalized)
 }
+
+// PaymasterDeleteTopUpDay removes the automatic top-up usage record for the provided paymaster and day.
+func (m *Manager) PaymasterDeleteTopUpDay(paymaster, day string) error {
+	if m == nil {
+		return fmt.Errorf("state manager not initialised")
+	}
+	return m.KVDelete(paymasterTopUpDayKey(paymaster, day))
+}
+
+// PaymasterDeleteTopUpStatus removes the most recent automatic top-up status for the provided paymaster.
+func (m *Manager) PaymasterDeleteTopUpStatus(paymaster string) error {
+	if m == nil {
+		return fmt.Errorf("state manager not initialised")
+	}
+	return m.KVDelete(paymasterTopUpLastKey(paymaster))
+}
