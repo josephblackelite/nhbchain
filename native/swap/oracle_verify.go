@@ -24,8 +24,33 @@ type PriceProof struct {
 	Signature []byte
 }
 
+type priceProofOptions struct {
+	requireSignature bool
+}
+
+// PriceProofOption configures optional behaviours when parsing price proofs.
+type PriceProofOption func(*priceProofOptions)
+
+// WithSignatureRequired enforces that the constructed price proof must include a
+// canonical signature.
+func WithSignatureRequired(require bool) PriceProofOption {
+	return func(opts *priceProofOptions) {
+		if opts == nil {
+			return
+		}
+		opts.requireSignature = require
+	}
+}
+
 // NewPriceProof constructs a price proof instance from the raw submission payload.
-func NewPriceProof(domain, provider, pair, rate string, ts int64, signature []byte) (*PriceProof, error) {
+func NewPriceProof(domain, provider, pair, rate string, ts int64, signature []byte, opts ...PriceProofOption) (*PriceProof, error) {
+	options := priceProofOptions{}
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt(&options)
+	}
 	trimmedDomain := strings.TrimSpace(domain)
 	if trimmedDomain == "" {
 		return nil, fmt.Errorf("price proof: domain required")
@@ -61,6 +86,9 @@ func NewPriceProof(domain, provider, pair, rate string, ts int64, signature []by
 	if ts <= 0 {
 		return nil, fmt.Errorf("price proof: timestamp required")
 	}
+	if options.requireSignature && len(signature) == 0 {
+		return nil, ErrPriceProofSignatureMissing
+	}
 	proof := &PriceProof{
 		Domain:    trimmedDomain,
 		Provider:  trimmedProvider,
@@ -70,6 +98,9 @@ func NewPriceProof(domain, provider, pair, rate string, ts int64, signature []by
 		Timestamp: time.Unix(ts, 0).UTC(),
 	}
 	if len(signature) > 0 {
+		if len(signature) != 65 {
+			return nil, ErrPriceProofSignatureInvalid
+		}
 		proof.Signature = append([]byte(nil), signature...)
 	}
 	return proof, nil

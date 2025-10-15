@@ -345,6 +345,53 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	}
 }
 
+func TestSwapSubmitVoucherUnsignedProofRejected(t *testing.T) {
+	env := newTestEnv(t)
+	minterKey, _ := crypto.GeneratePrivateKey()
+	var minterAddr [20]byte
+	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
+	configureSwapToken(t, env.node, minterAddr)
+
+	cfg := swap.Config{
+		AllowedFiat:        []string{"USD"},
+		MaxQuoteAgeSeconds: 120,
+		SlippageBps:        50,
+		OraclePriority:     []string{"manual"},
+		Risk: swap.RiskConfig{
+			PriceProofSignatureRequired: true,
+		},
+	}
+	env.node.SetSwapConfig(cfg)
+
+	recipientKey, _ := crypto.GeneratePrivateKey()
+	var recipient [20]byte
+	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
+
+	env.setManualRate(t, "0.10", time.Now())
+	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-SIG")
+	sig := signSwapVoucher(t, minterKey, voucher)
+
+	payload := map[string]interface{}{
+		"voucher":      voucher,
+		"sig":          "0x" + hex.EncodeToString(sig),
+		"provider":     "nowpayments",
+		"providerTxId": "ORDER-SIG",
+	}
+	req := &RPCRequest{ID: 7, Params: []json.RawMessage{marshalParam(t, payload)}}
+	recorder := httptest.NewRecorder()
+	env.server.handleSwapSubmitVoucher(recorder, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr == nil {
+		t.Fatalf("expected error")
+	}
+	if rpcErr.Code != codeInvalidParams {
+		t.Fatalf("expected invalid params code, got %d", rpcErr.Code)
+	}
+	if !strings.Contains(rpcErr.Message, core.ErrSwapPriceProofRequired.Error()) {
+		t.Fatalf("expected price proof required message, got %q", rpcErr.Message)
+	}
+}
+
 func TestSwapSubmitVoucherStaleOracle(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()

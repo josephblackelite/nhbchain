@@ -12,39 +12,42 @@ import (
 
 // RiskConfig captures operator-defined mint guardrails parsed from configuration.
 type RiskConfig struct {
-	PerAddressDailyCapWei   string        `toml:"PerAddressDailyCapWei"`
-	PerAddressMonthlyCapWei string        `toml:"PerAddressMonthlyCapWei"`
-	PerTxMinWei             string        `toml:"PerTxMinWei"`
-	PerTxMaxWei             string        `toml:"PerTxMaxWei"`
-	VelocityWindowSeconds   int64         `toml:"VelocityWindowSeconds"`
-	VelocityMaxMints        uint64        `toml:"VelocityMaxMints"`
-	SanctionsCheckEnabled   bool          `toml:"SanctionsCheckEnabled"`
-	CashOut                 CashOutConfig `toml:"cashOut"`
+	PerAddressDailyCapWei       string        `toml:"PerAddressDailyCapWei"`
+	PerAddressMonthlyCapWei     string        `toml:"PerAddressMonthlyCapWei"`
+	PerTxMinWei                 string        `toml:"PerTxMinWei"`
+	PerTxMaxWei                 string        `toml:"PerTxMaxWei"`
+	VelocityWindowSeconds       int64         `toml:"VelocityWindowSeconds"`
+	VelocityMaxMints            uint64        `toml:"VelocityMaxMints"`
+	SanctionsCheckEnabled       bool          `toml:"SanctionsCheckEnabled"`
+	PriceProofSignatureRequired bool          `toml:"PriceProofSignatureRequired"`
+	CashOut                     CashOutConfig `toml:"cashOut"`
 }
 
 // RiskParameters represents canonical, runtime-ready interpretations of the risk settings.
 type RiskParameters struct {
-	PerAddressDailyCapWei   *big.Int
-	PerAddressMonthlyCapWei *big.Int
-	PerTxMinWei             *big.Int
-	PerTxMaxWei             *big.Int
-	VelocityWindowSeconds   uint64
-	VelocityMaxMints        uint64
-	SanctionsCheckEnabled   bool
-	CashOut                 CashOutParameters
+	PerAddressDailyCapWei       *big.Int
+	PerAddressMonthlyCapWei     *big.Int
+	PerTxMinWei                 *big.Int
+	PerTxMaxWei                 *big.Int
+	VelocityWindowSeconds       uint64
+	VelocityMaxMints            uint64
+	SanctionsCheckEnabled       bool
+	PriceProofSignatureRequired bool
+	CashOut                     CashOutParameters
 }
 
 // Normalise trims whitespace and applies canonical defaults to defensive copies.
 func (rc RiskConfig) Normalise() RiskConfig {
 	cfg := RiskConfig{
-		PerAddressDailyCapWei:   strings.TrimSpace(rc.PerAddressDailyCapWei),
-		PerAddressMonthlyCapWei: strings.TrimSpace(rc.PerAddressMonthlyCapWei),
-		PerTxMinWei:             strings.TrimSpace(rc.PerTxMinWei),
-		PerTxMaxWei:             strings.TrimSpace(rc.PerTxMaxWei),
-		VelocityWindowSeconds:   rc.VelocityWindowSeconds,
-		VelocityMaxMints:        rc.VelocityMaxMints,
-		SanctionsCheckEnabled:   rc.SanctionsCheckEnabled,
-		CashOut:                 rc.CashOut.Normalise(),
+		PerAddressDailyCapWei:       strings.TrimSpace(rc.PerAddressDailyCapWei),
+		PerAddressMonthlyCapWei:     strings.TrimSpace(rc.PerAddressMonthlyCapWei),
+		PerTxMinWei:                 strings.TrimSpace(rc.PerTxMinWei),
+		PerTxMaxWei:                 strings.TrimSpace(rc.PerTxMaxWei),
+		VelocityWindowSeconds:       rc.VelocityWindowSeconds,
+		VelocityMaxMints:            rc.VelocityMaxMints,
+		SanctionsCheckEnabled:       rc.SanctionsCheckEnabled,
+		PriceProofSignatureRequired: rc.PriceProofSignatureRequired,
+		CashOut:                     rc.CashOut.Normalise(),
 	}
 	if cfg.VelocityWindowSeconds < 0 {
 		cfg.VelocityWindowSeconds = 0
@@ -55,7 +58,10 @@ func (rc RiskConfig) Normalise() RiskConfig {
 // Parameters converts the textual configuration into runtime big integers and bounds.
 func (rc RiskConfig) Parameters() (RiskParameters, error) {
 	normalized := rc.Normalise()
-	params := RiskParameters{SanctionsCheckEnabled: normalized.SanctionsCheckEnabled}
+	params := RiskParameters{
+		SanctionsCheckEnabled:       normalized.SanctionsCheckEnabled,
+		PriceProofSignatureRequired: normalized.PriceProofSignatureRequired,
+	}
 	if normalized.PerAddressDailyCapWei != "" {
 		amount, err := parseWeiAmount(normalized.PerAddressDailyCapWei)
 		if err != nil {
