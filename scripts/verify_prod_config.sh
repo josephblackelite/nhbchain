@@ -43,6 +43,7 @@ fi
 export CONFIG_PATH
 
 python3 - <<'PY'
+import ipaddress
 import os
 import sys
 from typing import Iterable, Sequence
@@ -80,6 +81,35 @@ def ensure_string(paths: Iterable[Sequence[str]], label: str):
     if value is None or not isinstance(value, str) or not value.strip():
         errors.append(f"{label} must be set")
 
+def is_unspecified_address(value: str) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return True
+    if raw.startswith("unix://"):
+        return False
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    host = raw
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end != -1:
+            host = raw[1:end]
+    elif ":" in raw:
+        host = raw.rsplit(":", 1)[0]
+    host = host.strip()
+    if not host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_unspecified
+    except ValueError:
+        return host in {"*", "0.0.0.0"}
+
+def ensure_not_unspecified(paths: Iterable[Sequence[str]], label: str):
+    value = first_defined(paths)
+    if isinstance(value, str) and is_unspecified_address(value):
+        errors.append(f"{label} must not bind to an unspecified or wildcard address")
+
 # TLS requirements
 allow_insecure = first_defined((("network_security", "AllowInsecure"),))
 if allow_insecure is not False:
@@ -101,6 +131,10 @@ ensure_string((("network_security", "ClientTLSCertFile"),), "Client TLS certific
 ensure_string((("network_security", "ClientTLSKeyFile"),), "Client TLS private key path")
 ensure_string((("network_security", "ClientCAFile"),), "Client CA bundle path")
 ensure_string((("network_security", "ServerCAFile"),), "Server CA bundle path")
+
+# Listener binding checks
+ensure_not_unspecified((("ListenAddress",),), "ListenAddress")
+ensure_not_unspecified((("RPCAddress",),), "RPCAddress")
 
 # RPC TLS configuration may be nested or flat.
 ensure_string((

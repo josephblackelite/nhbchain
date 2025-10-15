@@ -168,7 +168,8 @@ func TestNetworkServerSecurityRequiresAuthenticator(t *testing.T) {
 			AllowInsecure: true,
 		},
 	}
-	if _, _, _, err := network.BuildServerSecurity(&cfg.NetworkSecurity, "", nil); err == nil || !strings.Contains(err.Error(), "shared secret or client certificate authentication") {
+	loopback := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}
+	if _, _, _, err := network.BuildServerSecurity(&cfg.NetworkSecurity, "", nil, true, loopback); err == nil || !strings.Contains(err.Error(), "shared secret or client certificate authentication") {
 		t.Fatalf("expected missing authenticator error, got %v", err)
 	}
 }
@@ -180,7 +181,8 @@ func TestNetworkServerSecurityRequiresTLSUnlessExplicitlyInsecure(t *testing.T) 
 			SharedSecret:  "token",
 		},
 	}
-	if _, _, _, err := network.BuildServerSecurity(&cfg.NetworkSecurity, "", nil); err == nil || !strings.Contains(err.Error(), "missing TLS material") {
+	loopback := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9091}
+	if _, _, _, err := network.BuildServerSecurity(&cfg.NetworkSecurity, "", nil, false, loopback); err == nil || !strings.Contains(err.Error(), "missing TLS material") {
 		t.Fatalf("expected missing TLS error, got %v", err)
 	}
 }

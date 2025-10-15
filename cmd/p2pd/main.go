@@ -42,6 +42,7 @@ func main() {
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file")
 	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "Allow automatic genesis creation when no stored genesis exists")
 	grpcAddress := flag.String("grpc", "127.0.0.1:9091", "Address for the internal network gRPC server")
+	allowInsecureFlag := flag.Bool("allow-insecure", false, "DEV ONLY: permit plaintext listeners on loopback interfaces")
 	flag.Parse()
 
 	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
@@ -248,7 +249,7 @@ func main() {
 		panic(fmt.Sprintf("failed to listen on %s: %v", *grpcAddress, err))
 	}
 	baseDir := filepath.Dir(*configFile)
-	serverCreds, auth, readAuth, err := buildNetworkServerSecurity(cfg, baseDir)
+	serverCreds, auth, readAuth, err := buildNetworkServerSecurity(cfg, baseDir, *allowInsecureFlag, grpcListener.Addr())
 	if err != nil {
 		panic(fmt.Sprintf("failed to initialise network security: %v", err))
 	}
@@ -285,12 +286,19 @@ func main() {
 
 type envLookupFunc func(string) (string, bool)
 
-func buildNetworkServerSecurity(cfg *config.Config, baseDir string) (credentials.TransportCredentials, network.Authenticator, network.Authenticator, error) {
+func buildNetworkServerSecurity(cfg *config.Config, baseDir string, allowInsecureFlag bool, listener net.Addr) (credentials.TransportCredentials, network.Authenticator, network.Authenticator, error) {
 	if cfg == nil {
 		auth := network.ChainAuthenticators()
+		if !allowInsecureFlag {
+			return nil, nil, nil, fmt.Errorf("plaintext network bridge requires --allow-insecure runtime flag")
+		}
+		tcpAddr, ok := listener.(*net.TCPAddr)
+		if !ok || tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+			return nil, nil, nil, fmt.Errorf("plaintext network bridge is restricted to loopback listeners; refusing %v", listener)
+		}
 		return insecure.NewCredentials(), auth, auth, nil
 	}
-	return network.BuildServerSecurity(&cfg.NetworkSecurity, baseDir, os.LookupEnv)
+	return network.BuildServerSecurity(&cfg.NetworkSecurity, baseDir, os.LookupEnv, allowInsecureFlag, listener)
 }
 
 func resolvePath(baseDir, path string) string {

@@ -89,6 +89,7 @@ func main() {
 	allowMigrateFlag := flag.Bool("allow-migrate", false, "Allow starting with a mismatched state schema (manual migrations only)")
 	grpcAddress := flag.String("grpc", "127.0.0.1:9090", "Address for the consensus gRPC server")
 	networkAddress := flag.String("p2p", "localhost:9091", "Address of the p2p daemon network service")
+	allowInsecureFlag := flag.Bool("allow-insecure", false, "DEV ONLY: permit plaintext loopback connections to p2pd")
 	var proposalTimeoutFlag durationFlag
 	var prevoteTimeoutFlag durationFlag
 	var precommitTimeoutFlag durationFlag
@@ -328,7 +329,7 @@ func main() {
 
 	broadcaster := newResilientBroadcaster(ctx)
 	baseDir := filepath.Dir(*configFile)
-	allowInsecureNetwork, networkDialOpts, err := buildNetworkDialOptions(cfg, baseDir)
+	allowInsecureNetwork, networkDialOpts, err := buildNetworkDialOptions(cfg, baseDir, *networkAddress, *allowInsecureFlag)
 	if err != nil {
 		panic(fmt.Sprintf("failed to initialise network client security: %v", err))
 	}
@@ -347,7 +348,7 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to listen on %s: %v", *grpcAddress, err))
 	}
-	serverCreds, serverAuth, err := buildConsensusServerSecurity(cfg, baseDir)
+	serverCreds, serverAuth, err := buildConsensusServerSecurity(cfg, baseDir, *allowInsecureFlag, grpcListener.Addr())
 	if err != nil {
 		panic(fmt.Sprintf("failed to configure consensus server security: %v", err))
 	}
@@ -511,8 +512,14 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 
 type envLookupFunc func(string) (string, bool)
 
-func buildNetworkDialOptions(cfg *config.Config, baseDir string) (bool, []grpc.DialOption, error) {
+func buildNetworkDialOptions(cfg *config.Config, baseDir string, target string, allowInsecureFlag bool) (bool, []grpc.DialOption, error) {
 	if cfg == nil {
+		if !allowInsecureFlag {
+			return false, nil, fmt.Errorf("plaintext network bridge requires --allow-insecure runtime flag")
+		}
+		if !isLoopbackTarget(target) {
+			return false, nil, fmt.Errorf("plaintext network bridge requires loopback target; refusing %q", target)
+		}
 		return true, []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, nil
 	}
 	sec := cfg.NetworkSecurity
@@ -561,14 +568,21 @@ func buildNetworkDialOptions(cfg *config.Config, baseDir string) (bool, []grpc.D
 		useTLS = true
 	}
 
-	allowInsecure := sec.AllowInsecure
+	allowInsecure := false
 	var opts []grpc.DialOption
 	if useTLS {
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-	} else if allowInsecure {
+	} else if sec.AllowInsecure {
+		if !allowInsecureFlag {
+			return false, nil, fmt.Errorf("plaintext network bridge requires --allow-insecure runtime flag")
+		}
+		if !isLoopbackTarget(target) {
+			return false, nil, fmt.Errorf("plaintext network bridge requires loopback target; refusing %q", target)
+		}
+		allowInsecure = true
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else {
-		return false, nil, fmt.Errorf("network security configuration is missing TLS material; set AllowInsecure=true only for development")
+		return false, nil, fmt.Errorf("network security configuration is missing TLS material; set AllowInsecure=false or provide certificates")
 	}
 
 	if secret != "" {
@@ -578,7 +592,7 @@ func buildNetworkDialOptions(cfg *config.Config, baseDir string) (bool, []grpc.D
 	return allowInsecure, opts, nil
 }
 
-func buildConsensusServerSecurity(cfg *config.Config, baseDir string) (credentials.TransportCredentials, service.Authorizer, error) {
+func buildConsensusServerSecurity(cfg *config.Config, baseDir string, allowInsecureFlag bool, listener net.Addr) (credentials.TransportCredentials, service.Authorizer, error) {
 	if cfg == nil {
 		return nil, nil, fmt.Errorf("missing configuration for consensus security")
 	}
@@ -634,13 +648,19 @@ func buildConsensusServerSecurity(cfg *config.Config, baseDir string) (credentia
 	}
 
 	var creds credentials.TransportCredentials
-	if tlsConfig != nil {
+	switch {
+	case tlsConfig != nil:
 		creds = credentials.NewTLS(tlsConfig)
-	} else {
-		if !sec.AllowInsecure {
-			return nil, nil, fmt.Errorf("consensus security requires TLS unless AllowInsecure is explicitly enabled")
+	case sec.AllowInsecure:
+		if !allowInsecureFlag {
+			return nil, nil, fmt.Errorf("plaintext consensus server requires --allow-insecure runtime flag")
+		}
+		if listener == nil || !isLoopbackListener(listener) {
+			return nil, nil, fmt.Errorf("plaintext consensus server is restricted to loopback listeners; refusing %v", listener)
 		}
 		creds = insecure.NewCredentials()
+	default:
+		return nil, nil, fmt.Errorf("consensus security requires TLS material; set AllowInsecure=false or provide certificates")
 	}
 
 	return creds, network.ChainAuthenticators(auths...), nil
@@ -705,6 +725,45 @@ func resolveAllowAutogenesis(cfgValue bool, cliSet bool, cliValue bool, lookup e
 	}
 
 	return allow, nil
+}
+
+func isLoopbackListener(addr net.Addr) bool {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	ip := tcpAddr.IP
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+func isLoopbackTarget(target string) bool {
+	host := strings.TrimSpace(target)
+	if host == "" {
+		return false
+	}
+	// Strip scheme if provided.
+	if idx := strings.Index(host, "://"); idx != -1 {
+		host = host[idx+3:]
+	}
+	// Separate host from port for IPv4/hostname style targets.
+	if strings.HasPrefix(host, "[") {
+		if end := strings.Index(host, "]"); end != -1 {
+			host = host[1:end]
+		}
+	} else if colon := strings.LastIndex(host, ":"); colon != -1 {
+		host = host[:colon]
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
 }
 
 func flagWasProvided(name string) bool {

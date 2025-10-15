@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,8 @@ import (
 // AllowUnauthenticatedReads is false the returned read authenticator matches the
 // write authenticator so callers must pass the returned values directly into
 // network.NewService.
-func BuildServerSecurity(sec *config.NetworkSecurity, baseDir string, lookup func(string) (string, bool)) (credentials.TransportCredentials, Authenticator, Authenticator, error) {
+func BuildServerSecurity(sec *config.NetworkSecurity, baseDir string, lookup func(string) (string, bool), allowInsecureFlag bool,
+	listener net.Addr) (credentials.TransportCredentials, Authenticator, Authenticator, error) {
 	if sec == nil {
 		return nil, nil, nil, fmt.Errorf("network security configuration is missing")
 	}
@@ -78,9 +80,15 @@ func BuildServerSecurity(sec *config.NetworkSecurity, baseDir string, lookup fun
 	case tlsConfig != nil:
 		creds = credentials.NewTLS(tlsConfig)
 	case sec.AllowInsecure:
+		if !allowInsecureFlag {
+			return nil, nil, nil, fmt.Errorf("plaintext network bridge requires --allow-insecure runtime flag")
+		}
+		if listener == nil || !isLoopbackListener(listener) {
+			return nil, nil, nil, fmt.Errorf("plaintext network bridge is restricted to loopback listeners; refusing %v", listener)
+		}
 		creds = insecure.NewCredentials()
 	default:
-		return nil, nil, nil, fmt.Errorf("network security configuration is missing TLS material; set AllowInsecure=true only for development")
+		return nil, nil, nil, fmt.Errorf("network security configuration is missing TLS material; set AllowInsecure=false or provide certificates")
 	}
 
 	writeAuth := ChainAuthenticators(auths...)
@@ -100,4 +108,16 @@ func resolveSecurityPath(baseDir, path string) string {
 		return filepath.Join(baseDir, trimmed)
 	}
 	return trimmed
+}
+
+func isLoopbackListener(addr net.Addr) bool {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	ip := tcpAddr.IP
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
