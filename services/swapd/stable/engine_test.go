@@ -6,6 +6,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"nhbchain/services/swapd/storage"
 )
 
 func mustAmountUnits(t *testing.T, amount float64) int64 {
@@ -63,6 +65,17 @@ func buildTestEngine(t *testing.T, base time.Time, inventory int64, ttl time.Dur
 	engine.WithClock(clock.Now)
 	engine.SetPriceMaxAge(24 * time.Hour)
 	return engine, clock
+}
+
+func openTestStorage(t *testing.T) *storage.Storage {
+	t.Helper()
+	dsn := "file:swapd_engine_test?mode=memory&cache=shared"
+	store, err := storage.Open(dsn)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
 func TestEnginePriceQuoteRequiresFreshOracle(t *testing.T) {
@@ -250,6 +263,73 @@ func TestEngineReservationExpiryReleasesInventory(t *testing.T) {
 	}
 	if _, err := engine.ReserveQuote(ctx, quote.ID, "merchant", 150); err != nil {
 		t.Fatalf("reserve after expiry cleanup: %v", err)
+	}
+}
+
+func TestEngineDailyCapPersistsAcrossRestart(t *testing.T) {
+	base := time.Date(2024, time.July, 10, 9, 30, 0, 0, time.UTC)
+	limits := Limits{DailyCap: 150}
+	store := openTestStorage(t)
+	ctx := context.Background()
+
+	engine, _ := buildTestEngine(t, base, 1_000, time.Minute, limits)
+	engine.WithDailyUsageStore(store)
+	engine.RecordPrice("ZNHB", "USD", 1.00, time.Time{})
+	quote, err := engine.PriceQuote(ctx, "ZNHB", 100)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	if _, err := engine.ReserveQuote(ctx, quote.ID, "acct", 100); err != nil {
+		t.Fatalf("reserve quote: %v", err)
+	}
+	usage, ok, err := store.LatestDailyUsage(ctx)
+	if err != nil {
+		t.Fatalf("latest usage: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected persisted usage record")
+	}
+	wantUnits := mustAmountUnits(t, 100)
+	if usage.Amount != wantUnits {
+		t.Fatalf("unexpected stored amount: got %d want %d", usage.Amount, wantUnits)
+	}
+	if !sameDay(usage.Day, base) {
+		t.Fatalf("unexpected stored day: got %s want %s", usage.Day, base)
+	}
+
+	// Simulate restart by constructing a new engine and restoring persisted state.
+	restartBase := base.Add(2 * time.Hour)
+	engine2, _ := buildTestEngine(t, restartBase, 1_000, time.Minute, limits)
+	engine2.WithDailyUsageStore(store)
+	engine2.RecordPrice("ZNHB", "USD", 1.00, time.Time{})
+	engine2.RestoreDailyUsage(usage.Day, usage.Amount)
+
+	quote, err = engine2.PriceQuote(ctx, "ZNHB", 40)
+	if err != nil {
+		t.Fatalf("price quote after restart: %v", err)
+	}
+	if _, err := engine2.ReserveQuote(ctx, quote.ID, "acct", 40); err != nil {
+		t.Fatalf("reserve after restart: %v", err)
+	}
+	quote, err = engine2.PriceQuote(ctx, "ZNHB", 20)
+	if err != nil {
+		t.Fatalf("price quote for cap check: %v", err)
+	}
+	if _, err := engine2.ReserveQuote(ctx, quote.ID, "acct", 20); !errors.Is(err, ErrDailyCapExceeded) {
+		t.Fatalf("expected cap exceeded after restart, got %v", err)
+	}
+
+	// Ensure persistence reflects the latest successful reservation.
+	usage, ok, err = store.LatestDailyUsage(ctx)
+	if err != nil {
+		t.Fatalf("latest usage post restart: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected usage record after restart reservations")
+	}
+	remaining := wantUnits + mustAmountUnits(t, 40)
+	if usage.Amount != remaining {
+		t.Fatalf("unexpected stored amount after restart: got %d want %d", usage.Amount, remaining)
 	}
 }
 

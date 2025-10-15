@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -147,6 +148,12 @@ CREATE TABLE IF NOT EXISTS throttle_events (
     occurred_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_throttle_events ON throttle_events(policy_id, action, occurred_at);
+
+CREATE TABLE IF NOT EXISTS daily_usage (
+    day TEXT PRIMARY KEY,
+    amount INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
 `
 
 func pairKey(base, quote string) string {
@@ -164,6 +171,12 @@ type Policy struct {
 	MintLimit   int
 	RedeemLimit int
 	Window      time.Duration
+}
+
+// DailyUsage captures the aggregate amount processed for a UTC day.
+type DailyUsage struct {
+	Day    time.Time
+	Amount int64
 }
 
 // SavePolicy upserts the throttle configuration.
@@ -258,4 +271,56 @@ func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action Thr
 		return false, fmt.Errorf("commit throttle: %w", err)
 	}
 	return true, nil
+}
+
+// SaveDailyUsage upserts the processed amount for the supplied UTC day.
+func (s *Storage) SaveDailyUsage(ctx context.Context, day time.Time, amount int64) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	day = day.UTC().Truncate(24 * time.Hour)
+	if day.IsZero() {
+		return fmt.Errorf("day required")
+	}
+	if amount < 0 {
+		amount = 0
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO daily_usage(day, amount, updated_at)
+        VALUES(?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(day) DO UPDATE SET
+            amount=excluded.amount,
+            updated_at=CURRENT_TIMESTAMP
+    `, day.Format(time.DateOnly), amount)
+	if err != nil {
+		return fmt.Errorf("save daily usage: %w", err)
+	}
+	return nil
+}
+
+// LatestDailyUsage returns the most recent persisted usage record if present.
+func (s *Storage) LatestDailyUsage(ctx context.Context) (DailyUsage, bool, error) {
+	result := DailyUsage{}
+	if s == nil {
+		return result, false, fmt.Errorf("storage not configured")
+	}
+	row := s.db.QueryRowContext(ctx, `
+        SELECT day, amount
+        FROM daily_usage
+        ORDER BY day DESC
+        LIMIT 1
+    `)
+	var dayStr string
+	if err := row.Scan(&dayStr, &result.Amount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, false, nil
+		}
+		return result, false, fmt.Errorf("query daily usage: %w", err)
+	}
+	day, err := time.Parse(time.DateOnly, strings.TrimSpace(dayStr))
+	if err != nil {
+		return result, false, fmt.Errorf("parse daily usage day: %w", err)
+	}
+	result.Day = day
+	return result, true, nil
 }

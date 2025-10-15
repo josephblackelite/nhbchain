@@ -76,6 +76,59 @@ func TestThrottlePolicy(t *testing.T) {
 	}
 }
 
+func TestDailyUsagePersistence(t *testing.T) {
+	store := openTestDB(t)
+	ctx := context.Background()
+	day := time.Date(2024, time.March, 4, 12, 0, 0, 0, time.UTC)
+	if err := store.SaveDailyUsage(ctx, day, 123); err != nil {
+		t.Fatalf("save usage: %v", err)
+	}
+	usage, ok, err := store.LatestDailyUsage(ctx)
+	if err != nil {
+		t.Fatalf("latest usage: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected usage record")
+	}
+	if usage.Amount != 123 {
+		t.Fatalf("unexpected amount: got %d want %d", usage.Amount, 123)
+	}
+	wantDay := day.UTC().Truncate(24 * time.Hour)
+	if !usage.Day.Equal(wantDay) {
+		t.Fatalf("unexpected day: got %s want %s", usage.Day, wantDay)
+	}
+	if err := store.SaveDailyUsage(ctx, day, 456); err != nil {
+		t.Fatalf("update usage: %v", err)
+	}
+	usage, ok, err = store.LatestDailyUsage(ctx)
+	if err != nil {
+		t.Fatalf("latest usage after update: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected usage record after update")
+	}
+	if usage.Amount != 456 {
+		t.Fatalf("unexpected amount after update: got %d want %d", usage.Amount, 456)
+	}
+	nextDay := wantDay.Add(24 * time.Hour)
+	if err := store.SaveDailyUsage(ctx, nextDay, 10); err != nil {
+		t.Fatalf("save next day usage: %v", err)
+	}
+	usage, ok, err = store.LatestDailyUsage(ctx)
+	if err != nil {
+		t.Fatalf("latest usage next day: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected usage record for next day")
+	}
+	if !usage.Day.Equal(nextDay) {
+		t.Fatalf("unexpected day for next day record: got %s want %s", usage.Day, nextDay)
+	}
+	if usage.Amount != 10 {
+		t.Fatalf("unexpected amount for next day record: got %d want %d", usage.Amount, 10)
+	}
+}
+
 func openTestDB(t *testing.T) *Storage {
 	t.Helper()
 	store, err := Open("file:swapd_test?mode=memory&cache=shared")
