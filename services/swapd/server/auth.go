@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"strings"
@@ -67,7 +68,7 @@ func (a *Authenticator) authenticateByBearer(r *http.Request) bool {
 	if token == "" {
 		return false
 	}
-	return token == a.bearerToken
+	return subtle.ConstantTimeCompare([]byte(token), []byte(a.bearerToken)) == 1
 }
 
 func (a *Authenticator) authenticateByMTLS(r *http.Request) bool {
