@@ -96,6 +96,18 @@ remain gated by the configured authenticators. Because unauthenticated reads
 expose topology and scoring metadata, restrict the listener address or rely on
 network-level ACLs when enabling the toggle.
 
+## Listener binding policy
+
+Production manifests now default to loopback bindings for every externally
+reachable daemon. `config.toml`, the Docker Compose examples, and all Helm
+values ship with `127.0.0.1` listeners so operators are forced to publish
+services through a hardened reverse proxy, Service mesh, or load balancer. The
+`scripts/verify_prod_config.sh` helper enforces this policy in CI by failing the
+build whenever `0.0.0.0` or `AllowInsecure = true` appears in production
+artifacts. Use a dedicated `config-dev.toml` (or explicit overrides) when you
+need wildcard binds and plaintext transport for short-lived labs, and ensure the
+`--allow-insecure` flag accompanies those experiments.
+
 ## Seeds
 
 Seeds are static peers that a freshly booted node will dial to discover the

@@ -1,5 +1,8 @@
-ListenAddress = ":6001"
-RPCAddress = ":8080"
+ListenAddress = "127.0.0.1:6001"
+# Production deployments are expected to front consensusd with a reverse proxy
+# or load balancer that terminates TLS on the public interface. Bind RPC to
+# loopback so the daemon is only reachable through the proxy layer.
+RPCAddress = "127.0.0.1:8080"
 DataDir = "./nhb-data"
 # Provide the absolute or relative path to the vetted genesis file for this network.
 GenesisFile = "./config/genesis.json"
@@ -118,6 +121,7 @@ dailycappctof7dfees = 0.60
 dailycapusd = 5000
 yearlycappctofinitialsupply = 10
 enableprorate = true
+EnforceProRate = true
 
   [global.loyalty.Dynamic.PriceGuard]
   enabled = true

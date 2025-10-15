@@ -1,4 +1,4 @@
-listen: ":7074"
+listen: "127.0.0.1:7074"
 database: "/var/lib/nhb/swapd.sqlite"
 oracle:
   interval: "30s"

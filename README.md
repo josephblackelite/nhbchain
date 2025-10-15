@@ -120,8 +120,8 @@ This produces two executables:
 On first launch the node prompts for a validator keystore passphrase (or uses the `NHB_VALIDATOR_PASS` environment variable) before creating `config.toml` alongside the encrypted validator keystore. The passphrase must be non-empty and should be reused by every binary that reads the validator key (`nhb`, `consensusd`, `p2pd`, etc.). The shared configuration loader, `config.Load`, automatically provisions a fresh validator keystore when `ValidatorKeystorePath` is empty or resolves to a missing file; operators simply enter the passphrase at the prompt on first run and the loader writes the encrypted key to the resolved path (for example, inside the node's data directory). To pre-configure or inspect settings, edit `config.toml` and point `GenesisFile` at the vetted genesis JSON supplied by network operations (autogenesis is only for isolated dev workflows):
 
 ```toml
-ListenAddress = "0.0.0.0:6001"
-RPCAddress    = "0.0.0.0:8080"
+ListenAddress = "127.0.0.1:6001"
+RPCAddress    = "127.0.0.1:8080" # expose externally via a reverse proxy or load balancer
 DataDir       = "./nhb-data"
 GenesisFile   = "./config/genesis.json" # required: must match the network's published hash
 AllowAutogenesis = false                 # dev override; never enable on shared networks
