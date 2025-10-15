@@ -10,6 +10,15 @@ message MsgAuthorizePayment {
   string amount = 3;
   uint64 expiry = 4;
   bytes intent_ref = 5;
+  // Nonce the client signs over to guarantee uniqueness of the
+  // authorization intent within the chosen chain.
+  uint64 nonce = 6;
+  // Unix timestamp (seconds) after which the signed authorization
+  // should be considered expired by verifiers.
+  uint64 expires_at = 7;
+  // Chain identifier used to scope signatures and prevent cross-network
+  // replay attacks.
+  string chain_id = 8;
 }
 
 message MsgAuthorizePaymentResponse {
@@ -20,6 +29,15 @@ message MsgCapturePayment {
   string merchant = 1;
   string authorization_id = 2;
   string amount = 3;
+  // Nonce scoped to the capture request to prevent replay of the same
+  // authorization on the target chain.
+  uint64 nonce = 4;
+  // Expiration for the capture signature expressed as a unix timestamp
+  // in seconds.
+  uint64 expires_at = 5;
+  // Chain identifier that bind the capture signature to a specific
+  // execution environment.
+  string chain_id = 6;
 }
 
 message MsgCapturePaymentResponse {
@@ -32,6 +50,15 @@ message MsgVoidPayment {
   string merchant = 1;
   string authorization_id = 2;
   string reason = 3;
+  // Nonce scoped to the void request to prevent replays within the
+  // selected chain.
+  uint64 nonce = 4;
+  // Expiration for the void signature expressed as a unix timestamp in
+  // seconds.
+  uint64 expires_at = 5;
+  // Chain identifier the void signature was produced for, preventing
+  // cross-network reuse.
+  string chain_id = 6;
 }
 
 message MsgVoidPaymentResponse {
