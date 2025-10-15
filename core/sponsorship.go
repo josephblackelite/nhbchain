@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -557,7 +558,7 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 		return nil
 	}
 	if policy.DailyCapWei == nil || policy.DailyCapWei.Sign() <= 0 {
-		return fmt.Errorf("paymaster auto top-up daily cap must be positive when enabled")
+		return errors.New("paymaster auto top-up requires a positive daily cap when enabled")
 	}
 	token := strings.ToUpper(strings.TrimSpace(policy.Token))
 	if token == "" {
