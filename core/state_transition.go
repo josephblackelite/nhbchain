@@ -1802,8 +1802,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		return nil, err
 	}
 
-	fmt.Printf("EVM transaction processed. Gas used: %d. Output: %x\n", result.UsedGas, result.ReturnData)
-	return exec, nil
+       return exec, nil
 }
 
 // --- Native handlers (original semantics + new dispute flow) ---
@@ -2178,9 +2177,7 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []
 	if err := sp.setAccount(sender, senderAccount); err != nil {
 		return err
 	}
-	fmt.Printf("Identity processed: Username '%s' registered to %s.\n",
-		username, crypto.MustNewAddress(crypto.NHBPrefix, sender).String())
-	return nil
+       return nil
 }
 
 func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
@@ -3086,9 +3083,7 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, s
 		sp.AppendEvent(evt)
 	}
 
-	fmt.Printf("Heartbeat processed: %s recorded %d minute(s).\n",
-		crypto.MustNewAddress(crypto.NHBPrefix, sender).String(), minutes)
-	return nil
+       return nil
 }
 
 type stakeUnbond struct {
