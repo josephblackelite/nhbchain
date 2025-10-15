@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
@@ -31,10 +33,66 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func newAuthHeader(user uuid.UUID, role auth.Role) map[string]string {
+const testJWTSecret = "test-otc-secret"
+
+func newTestMiddleware(t *testing.T, rootAdmins []string) *auth.Middleware {
+	t.Helper()
+	t.Setenv("OTC_TEST_JWT_SECRET", testJWTSecret)
+	verifier := auth.WebAuthnVerifierFunc(func(ctx context.Context, claims *auth.Claims, assertion string) error {
+		if assertion != "attestation-ok" {
+			return fmt.Errorf("unexpected assertion %q", assertion)
+		}
+		return nil
+	})
+	mw, err := auth.NewMiddleware(auth.MiddlewareConfig{
+		JWT: auth.JWTOptions{
+			Enable:         true,
+			Alg:            "HS256",
+			Issuer:         "test-suite",
+			Audience:       []string{"otc"},
+			MaxSkewSeconds: 60,
+			HSSecretEnv:    "OTC_TEST_JWT_SECRET",
+			RoleClaim:      "role",
+		},
+		WebAuthn: auth.WebAuthnOptions{
+			AssertionHeader: "X-WebAuthn-Attestation",
+		},
+		RootAdminSubjects: rootAdmins,
+		WebAuthnVerifier:  verifier,
+	})
+	if err != nil {
+		t.Fatalf("create middleware: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = mw.Close()
+	})
+	return mw
+}
+
+func signTestJWT(t *testing.T, user uuid.UUID, role auth.Role) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"iss":  "test-suite",
+		"sub":  user.String(),
+		"aud":  []string{"otc"},
+		"exp":  time.Now().Add(time.Hour).Unix(),
+		"iat":  time.Now().Add(-time.Minute).Unix(),
+		"nbf":  time.Now().Add(-time.Minute).Unix(),
+		"role": string(role),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(testJWTSecret))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
+}
+
+func newAuthHeader(t *testing.T, user uuid.UUID, role auth.Role) map[string]string {
+	token := signTestJWT(t, user, role)
 	return map[string]string{
-		"Authorization":       "Bearer " + user.String() + "|" + string(role),
-		"X-WebAuthn-Verified": "true",
+		"Authorization":          "Bearer " + token,
+		"X-WebAuthn-Attestation": "attestation-ok",
 	}
 }
 
@@ -50,12 +108,12 @@ func TestInvoiceLifecycle(t *testing.T) {
 	tellerID := uuid.New()
 	supervisorID := uuid.New()
 
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/invoices", strings.NewReader(`{"branch_id":"`+branchID.String()+`","amount":1000,"currency":"USD"}`))
-	for k, v := range newAuthHeader(tellerID, auth.RoleTeller) {
+	for k, v := range newAuthHeader(t, tellerID, auth.RoleTeller) {
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -73,7 +131,7 @@ func TestInvoiceLifecycle(t *testing.T) {
 	// Upload receipt
 	recorder = httptest.NewRecorder()
 	receiptReq := httptest.NewRequest(http.MethodPost, "/api/v1/invoices/"+invoice.ID.String()+"/receipt", strings.NewReader(`{"object_key":"s3://receipt"}`))
-	for k, v := range newAuthHeader(tellerID, auth.RoleTeller) {
+	for k, v := range newAuthHeader(t, tellerID, auth.RoleTeller) {
 		receiptReq.Header.Set(k, v)
 	}
 	receiptReq.Header.Set("Content-Type", "application/json")
@@ -85,7 +143,7 @@ func TestInvoiceLifecycle(t *testing.T) {
 	// Mark pending review
 	recorder = httptest.NewRecorder()
 	pendingReq := httptest.NewRequest(http.MethodPost, "/api/v1/invoices/"+invoice.ID.String()+"/pending-review", nil)
-	for k, v := range newAuthHeader(supervisorID, auth.RoleSupervisor) {
+	for k, v := range newAuthHeader(t, supervisorID, auth.RoleSupervisor) {
 		pendingReq.Header.Set(k, v)
 	}
 	handler.ServeHTTP(recorder, pendingReq)
@@ -96,7 +154,7 @@ func TestInvoiceLifecycle(t *testing.T) {
 	// Approve invoice
 	recorder = httptest.NewRecorder()
 	approveReq := httptest.NewRequest(http.MethodPost, "/api/v1/invoices/"+invoice.ID.String()+"/approve", strings.NewReader(`{"notes":"ok"}`))
-	for k, v := range newAuthHeader(supervisorID, auth.RoleSupervisor) {
+	for k, v := range newAuthHeader(t, supervisorID, auth.RoleSupervisor) {
 		approveReq.Header.Set(k, v)
 	}
 	approveReq.Header.Set("Content-Type", "application/json")
@@ -153,7 +211,7 @@ func TestHandleFundingWebhook(t *testing.T) {
 	}
 
 	rootAdmin := uuid.New()
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, RootAdminSubjects: []string{rootAdmin.String()}})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, []string{rootAdmin.String()})})
 	srv.Now = func() time.Time { return now }
 
 	payload := map[string]interface{}{
@@ -168,7 +226,7 @@ func TestHandleFundingWebhook(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/integrations/otc/funding/webhook", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	for k, v := range newAuthHeader(rootAdmin, auth.RoleRootAdmin) {
+	for k, v := range newAuthHeader(t, rootAdmin, auth.RoleRootAdmin) {
 		req.Header.Set(k, v)
 	}
 

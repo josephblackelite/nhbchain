@@ -15,11 +15,13 @@ import (
 
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
+	"nhbchain/services/otc-gateway/auth"
 	"nhbchain/services/otc-gateway/config"
 	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/otc-gateway/identity"
 	"nhbchain/services/otc-gateway/models"
 	"nhbchain/services/otc-gateway/recon"
+	"nhbchain/services/otc-gateway/secrets"
 	"nhbchain/services/otc-gateway/server"
 	"nhbchain/services/otc-gateway/swaprpc"
 )
@@ -56,6 +58,14 @@ func main() {
 	cfg, err := config.FromEnv()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
+	}
+
+	secretManager, err := secrets.NewManager(secrets.Config{
+		Backend:  secrets.Backend(strings.ToLower(strings.TrimSpace(cfg.Auth.Secrets.Backend))),
+		BasePath: cfg.Auth.Secrets.Directory,
+	})
+	if err != nil {
+		log.Fatalf("secret manager error: %v", err)
 	}
 
 	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
@@ -105,18 +115,75 @@ func main() {
 		log.Fatalf("swap client error: %v", err)
 	}
 
+	jwtRoleMap := make(map[string]auth.Role, len(cfg.Auth.JWT.RoleMap))
+	for raw, mapped := range cfg.Auth.JWT.RoleMap {
+		normalized := strings.ToLower(strings.TrimSpace(mapped))
+		if normalized == "" {
+			continue
+		}
+		jwtRoleMap[strings.ToLower(strings.TrimSpace(raw))] = auth.Role(normalized)
+	}
+
+	var webRoles []auth.Role
+	for _, roleStr := range cfg.Auth.WebAuthn.RequireRoles {
+		trimmed := strings.ToLower(strings.TrimSpace(roleStr))
+		if trimmed == "" {
+			continue
+		}
+		webRoles = append(webRoles, auth.Role(trimmed))
+	}
+
+	middleware, err := auth.NewMiddleware(auth.MiddlewareConfig{
+		JWT: auth.JWTOptions{
+			Enable:             cfg.Auth.JWT.Enable,
+			Alg:                cfg.Auth.JWT.Alg,
+			Issuer:             cfg.Auth.JWT.Issuer,
+			Audience:           cfg.Auth.JWT.Audience,
+			MaxSkewSeconds:     cfg.Auth.JWT.MaxSkewSeconds,
+			HSSecretEnv:        cfg.Auth.JWT.HSSecretEnv,
+			HSSecretName:       cfg.Auth.JWT.HSSecretName,
+			RSAPublicKeyFile:   cfg.Auth.JWT.RSAPublicKeyFile,
+			RSAPublicKeySecret: cfg.Auth.JWT.RSAPublicKeySecret,
+			RoleClaim:          cfg.Auth.JWT.RoleClaim,
+			RoleMap:            jwtRoleMap,
+			RefreshInterval:    cfg.Auth.JWT.RefreshInterval,
+		},
+		WebAuthn: auth.WebAuthnOptions{
+			Enable:          cfg.Auth.WebAuthn.Enable,
+			Endpoint:        cfg.Auth.WebAuthn.Endpoint,
+			Timeout:         cfg.Auth.WebAuthn.Timeout,
+			APIKeyEnv:       cfg.Auth.WebAuthn.APIKeyEnv,
+			APIKeySecret:    cfg.Auth.WebAuthn.APIKeySecret,
+			RPID:            cfg.Auth.WebAuthn.RPID,
+			Origin:          cfg.Auth.WebAuthn.Origin,
+			AssertionHeader: cfg.Auth.WebAuthn.AssertionHeader,
+			RequireRoles:    webRoles,
+			APIKeyRefresh:   cfg.Auth.WebAuthn.APIKeyRefresh,
+		},
+		RootAdminSubjects: cfg.Auth.RootAdminSubjects,
+		SecretProvider:    secretManager,
+	})
+	if err != nil {
+		log.Fatalf("auth middleware error: %v", err)
+	}
+	defer func() {
+		if err := middleware.Close(); err != nil {
+			log.Printf("auth middleware shutdown: %v", err)
+		}
+	}()
+
 	srv := server.New(server.Config{
-		DB:                db,
-		TZ:                cfg.DefaultTZ,
-		ChainID:           chainID,
-		S3Bucket:          cfg.S3Bucket,
-		SwapClient:        swapClient,
-		Identity:          identityClient,
-		Signer:            signer,
-		VoucherTTL:        cfg.VoucherTTL,
-		Provider:          cfg.SwapProvider,
-		PollInterval:      cfg.MintPollInterval,
-		RootAdminSubjects: cfg.RootAdminSubjects,
+		DB:            db,
+		TZ:            cfg.DefaultTZ,
+		ChainID:       chainID,
+		S3Bucket:      cfg.S3Bucket,
+		SwapClient:    swapClient,
+		Identity:      identityClient,
+		Signer:        signer,
+		VoucherTTL:    cfg.VoucherTTL,
+		Provider:      cfg.SwapProvider,
+		PollInterval:  cfg.MintPollInterval,
+		Authenticator: middleware,
 	})
 
 	reconciler, err := recon.NewReconciler(recon.Config{

@@ -37,18 +37,18 @@ type IdentityClient interface {
 
 // Config captures the dependencies required to construct the server.
 type Config struct {
-	DB                *gorm.DB
-	TZ                *time.Location
-	ChainID           uint64
-	S3Bucket          string
-	SwapClient        SwapClient
-	Identity          IdentityClient
-	Signer            hsm.Signer
-	VoucherTTL        time.Duration
-	Provider          string
-	PollInterval      time.Duration
-	RootAdminSubjects []string
-	FundingProcessor  *funding.Processor
+	DB               *gorm.DB
+	TZ               *time.Location
+	ChainID          uint64
+	S3Bucket         string
+	SwapClient       SwapClient
+	Identity         IdentityClient
+	Signer           hsm.Signer
+	VoucherTTL       time.Duration
+	Provider         string
+	PollInterval     time.Duration
+	FundingProcessor *funding.Processor
+	Authenticator    *auth.Middleware
 }
 
 // Server encapsulates dependencies for the HTTP API.
@@ -66,6 +66,8 @@ type Server struct {
 	Now          func() time.Time
 	Funding      *funding.Processor
 
+	auth *auth.Middleware
+
 	router http.Handler
 }
 
@@ -82,6 +84,9 @@ var (
 
 // New constructs a configured HTTP router with authentication and idempotency support.
 func New(cfg Config) *Server {
+	if cfg.Authenticator == nil {
+		panic("authenticator middleware is required")
+	}
 	if cfg.VoucherTTL <= 0 {
 		cfg.VoucherTTL = 15 * time.Minute
 	}
@@ -100,6 +105,7 @@ func New(cfg Config) *Server {
 		Provider:     strings.TrimSpace(cfg.Provider),
 		PollInterval: cfg.PollInterval,
 		Funding:      cfg.FundingProcessor,
+		auth:         cfg.Authenticator,
 	}
 	if srv.Now == nil {
 		srv.Now = func() time.Time { return time.Now().In(srv.TZ) }
@@ -107,7 +113,6 @@ func New(cfg Config) *Server {
 	if srv.Funding == nil {
 		srv.Funding = funding.NewProcessor(cfg.DB, srv.Now)
 	}
-	auth.SetRootAdmins(cfg.RootAdminSubjects)
 	srv.router = srv.buildRouter()
 	return srv
 }
@@ -124,7 +129,7 @@ func (s *Server) buildRouter() http.Handler {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(func(next http.Handler) http.Handler { return otcmw.WithIdempotency(s.DB, next) })
-	r.Use(auth.Authenticate)
+	r.Use(s.auth.Middleware)
 
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Route("/partners", func(partners chi.Router) {
