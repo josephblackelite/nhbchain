@@ -58,6 +58,7 @@ type identityCreateClaimableParams struct {
 	Token     string `json:"token"`
 	Amount    string `json:"amount"`
 	Deadline  int64  `json:"deadline"`
+	callerMetadataParams
 }
 
 type identityCreateClaimableResult struct {
@@ -73,6 +74,7 @@ type identityClaimParams struct {
 	ClaimID  string `json:"claimId"`
 	Payee    string `json:"payee"`
 	Preimage string `json:"preimage"`
+	callerMetadataParams
 }
 
 type identityClaimResult struct {
@@ -436,6 +438,10 @@ func (s *Server) handleIdentityCreateClaimable(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
 	}
+	if err := s.validateCallerMetadata(callerKeyFromAddress(payer), params.callerMetadataParams); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
+		return
+	}
 	token := strings.ToUpper(strings.TrimSpace(params.Token))
 	if token != "NHB" && token != "ZNHB" {
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "token must be NHB or ZNHB")
@@ -501,6 +507,10 @@ func (s *Server) handleIdentityClaim(w http.ResponseWriter, r *http.Request, req
 	}
 	preimage, err := parseHexBytes(params.Preimage)
 	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	if err := s.validateCallerMetadata(callerKeyFromAddress(payee), params.callerMetadataParams); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
 	}

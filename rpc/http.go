@@ -229,6 +229,9 @@ type Server struct {
 		now    func() time.Time
 	}
 
+	callerNonceMu sync.Mutex
+	callerNonces  map[string]callerNonceState
+
 	serverMu    sync.Mutex
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
@@ -397,6 +400,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		swapRateWindow:           swapWindow,
 		swapRateCounters:         make(map[string]*rateLimiter),
 		swapNowFn:                swapNow,
+		callerNonces:             make(map[string]callerNonceState),
 	}
 	srv.swapStable.assets = make(map[string]stable.Asset)
 	srv.swapStable.now = time.Now
