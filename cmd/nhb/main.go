@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/url"
@@ -25,6 +26,7 @@ import (
 	"nhbchain/native/lending"
 	nativeparams "nhbchain/native/params"
 	swap "nhbchain/native/swap"
+	"nhbchain/observability/logging"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
 	"nhbchain/rpc"
@@ -48,6 +50,9 @@ func main() {
 
 	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
 
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logger := logging.Setup("nhb", env)
+
 	passSource := passphrase.NewSource(validatorPassEnv)
 
 	cfg, err := config.Load(*configFile, config.WithKeystorePassphraseSource(passSource.Get))
@@ -57,13 +62,13 @@ func main() {
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to resolve autogenesis setting: %v\n", err)
+		logger.Error("Failed to resolve autogenesis setting", slog.Any("error", err))
 		os.Exit(1)
 	}
 
 	genesisPath, err := resolveGenesisPath(*genesisFlag, cfg.GenesisFile, allowAutogenesis, os.LookupEnv)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to resolve genesis path: %v\n", err)
+		logger.Error("Failed to resolve genesis path", slog.Any("error", err))
 		os.Exit(1)
 	}
 
@@ -291,13 +296,17 @@ func main() {
 		}
 		nodePart, addrPart, found := strings.Cut(trimmed, "@")
 		if !found {
-			fmt.Printf("Ignoring seed %q: missing node ID\n", trimmed)
+			logger.Warn("Ignoring seed due to missing node ID",
+				logging.MaskField("seed", trimmed),
+				slog.String("reason", "missing node id"))
 			continue
 		}
 		node := strings.TrimSpace(nodePart)
 		addr := strings.TrimSpace(addrPart)
 		if node == "" || addr == "" {
-			fmt.Printf("Ignoring seed %q: empty components\n", trimmed)
+			logger.Warn("Ignoring seed due to empty components",
+				logging.MaskField("seed", trimmed),
+				slog.String("reason", "empty components"))
 			continue
 		}
 		key := strings.ToLower(node) + "@" + strings.ToLower(addr)
@@ -311,18 +320,18 @@ func main() {
 
 	var seedRegistry *seeds.Registry
 	if rawRegistry, ok, err := node.NetworkSeedsParam(); err != nil {
-		fmt.Printf("Failed to load network.seeds: %v\n", err)
+		logger.Error("Failed to load network seeds", slog.Any("error", err))
 	} else if ok {
 		registry, parseErr := seeds.Parse(rawRegistry)
 		if parseErr != nil {
-			fmt.Printf("Failed to parse network.seeds: %v\n", parseErr)
+			logger.Error("Failed to parse network seeds", slog.Any("error", parseErr))
 		} else {
 			seedRegistry = registry
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			resolved, resolveErr := registry.Resolve(ctx, time.Now(), seeds.DefaultResolver())
 			cancel()
 			if resolveErr != nil {
-				fmt.Printf("DNS seed resolution failed: %v\n", resolveErr)
+				logger.Error("DNS seed resolution failed", slog.Any("error", resolveErr))
 			}
 			for _, entry := range resolved {
 				addr := strings.TrimSpace(entry.Address)
@@ -428,19 +437,19 @@ func main() {
 	}()
 
 	if err := waitForRPCStartup(cfg.RPCAddress, rpcErrCh, 5*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "RPC server failed to start: %v\n", err)
+		logger.Error("RPC server failed to start", slog.Any("error", err))
 		os.Exit(1)
 	}
 
 	go func() {
 		if err, ok := <-rpcErrCh; ok && err != nil {
-			fmt.Fprintf(os.Stderr, "RPC server terminated: %v\n", err)
+			logger.Error("RPC server terminated", slog.Any("error", err))
 		}
 	}()
 
 	go p2pServer.Start()
 
-	fmt.Println("--- NHBCoin Node Initialized and Running ---")
+	logger.Info("NHBCoin node initialised and running")
 	go node.StartConsensus()
 	select {}
 }

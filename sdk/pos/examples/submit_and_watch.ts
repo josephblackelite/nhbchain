@@ -132,11 +132,14 @@ const watchFinality = async (intentRef: Buffer): Promise<void> => {
     const privateKey = createPrivateKey(PRIVATE_KEY_PEM);
     const signature = edSign(null, Buffer.from(canonical, "utf8"), privateKey);
     const uri = buildUri(envelope, signature);
-
-    console.log(`Generated NHB Pay URI: ${uri}`);
+    // The generated URI embeds merchant routing data; never log the literal value in production.
+    void uri;
+    console.log("Generated NHB Pay URI (value omitted; handle securely)");
 
     const authorizationId = await authorizePayment(envelope, "nhb1samplepayer");
-    console.log(`POS authorization id: ${authorizationId}`);
+    // Authorization identifiers are replayable secrets; persist them securely instead of printing.
+    void authorizationId;
+    console.log("POS authorization id obtained (value omitted; persist securely)");
 
     console.log("Watching finality updates...");
     await watchFinality(intentRef);
