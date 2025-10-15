@@ -2,11 +2,14 @@ package p2p
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"nhbchain/observability/logging"
 )
 
 const (
@@ -25,6 +28,7 @@ type connManager struct {
 	outboundTarget int
 	maxPeers       int
 	checkInterval  time.Duration
+	logger         *slog.Logger
 }
 
 func newConnManager(server *Server) *connManager {
@@ -47,6 +51,7 @@ func newConnManager(server *Server) *connManager {
 		outboundTarget: server.cfg.OutboundPeers,
 		maxPeers:       server.cfg.MaxPeers,
 		checkInterval:  defaultConnmgrCheckInterval,
+		logger:         slog.Default(),
 	}
 	if mgr.now == nil {
 		mgr.now = time.Now
@@ -64,6 +69,16 @@ func newConnManager(server *Server) *connManager {
 		mgr.checkInterval = defaultConnmgrCheckInterval
 	}
 	return mgr
+}
+
+func (m *connManager) log() *slog.Logger {
+	if m == nil {
+		return slog.Default()
+	}
+	if m.logger == nil {
+		m.logger = slog.Default()
+	}
+	return m.logger
 }
 
 func (m *connManager) seedSnapshot() []seedEndpoint {
@@ -151,7 +166,10 @@ func (m *connManager) runSeedLoop(seed seedEndpoint) {
 			continue
 		}
 		if err := m.server.Connect(seed.Address); err != nil {
-			fmt.Printf("Seed dial %s (%s) failed: %v\n", seed.Address, seed.NodeID, err)
+			m.log().Warn("Seed dial failed",
+				logging.MaskField("seed_address", seed.Address),
+				logging.MaskField("seed_id", seed.NodeID),
+				slog.Any("error", err))
 			m.markFailure(seed)
 			continue
 		}
@@ -183,7 +201,10 @@ func (m *connManager) ensureReady(seed seedEndpoint) bool {
 		if m.store != nil {
 			entry := PeerstoreEntry{Addr: seed.Address, NodeID: seed.NodeID}
 			if err := m.store.Put(entry); err != nil {
-				fmt.Printf("Persist seed %s: %v\n", seed.Address, err)
+				m.log().Error("Persist seed failed",
+					logging.MaskField("seed_address", seed.Address),
+					logging.MaskField("seed_id", seed.NodeID),
+					slog.Any("error", err))
 			}
 			now := m.now()
 			if m.store.IsBanned(seed.NodeID, now) {
@@ -210,7 +231,9 @@ func (m *connManager) markFailure(seed seedEndpoint) {
 		return
 	}
 	if _, err := m.store.RecordFail(seed.NodeID, m.now()); err != nil {
-		fmt.Printf("Record seed failure %s: %v\n", seed.NodeID, err)
+		m.log().Error("Record seed failure",
+			logging.MaskField("seed_id", seed.NodeID),
+			slog.Any("error", err))
 	}
 }
 
@@ -264,8 +287,10 @@ func (m *connManager) enforceLimits() {
 		if peer.peer == nil {
 			return
 		}
-		fmt.Printf("Connection manager pruning peer %s (score=%d, lastSeen=%s)\n",
-			peer.peer.id, peer.score, peer.lastSeen.Format(time.RFC3339))
+		m.log().Warn("Pruning peer due to connection limits",
+			logging.MaskField("peer_id", peer.peer.id),
+			slog.Int("score", peer.score),
+			slog.String("last_seen", peer.lastSeen.Format(time.RFC3339)))
 		peer.peer.terminate(false, fmt.Errorf("pruned by connection manager"))
 		peers = append(peers[:idx], peers[idx+1:]...)
 		excess--
@@ -328,7 +353,9 @@ func (m *connManager) dialAddress(entry PeerstoreEntry) {
 	}
 	defer m.releaseDial(addr)
 	if err := m.server.Connect(addr); err != nil {
-		fmt.Printf("Connection manager dial %s failed: %v\n", addr, err)
+		m.log().Warn("Connection manager dial failed",
+			logging.MaskField("peer_address", addr),
+			slog.Any("error", err))
 		m.server.scheduleReconnect(addr)
 	}
 }
@@ -531,40 +558,45 @@ func (m *connManager) logNATStatus() {
 	}
 	listen := strings.TrimSpace(m.server.cfg.ListenAddress)
 	if listen == "" {
-		fmt.Printf("Connection manager: listen address not configured; NAT status unknown\n")
+		m.log().Info("NAT status unknown: listen address not configured")
 		return
 	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		fmt.Printf("Connection manager: parse listen address %q: %v\n", listen, err)
+		m.log().Warn("NAT status unknown: failed to parse listen address",
+			slog.String("listen", listen),
+			slog.Any("error", err))
 		return
 	}
 	host = strings.TrimSpace(host)
 	if host == "" {
-		fmt.Printf("Connection manager: listening on all interfaces (port %s); assuming private network\n", port)
+		m.log().Info("Listening on all interfaces; assuming private network",
+			slog.String("port", port))
 		m.logUPnPStub(port)
 		return
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		fmt.Printf("Connection manager: listen host %q not an IP; NAT status unknown\n", host)
+		m.log().Info("NAT status unknown: listen host not an IP",
+			slog.String("host", host))
 		return
 	}
 	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() {
-		fmt.Printf("Connection manager: private or unspecified listen address %s detected\n", listen)
+		m.log().Info("Detected private or unspecified listen address",
+			slog.String("listen", listen))
 		m.logUPnPStub(port)
 		return
 	}
-	fmt.Printf("Connection manager: public listen address %s detected\n", listen)
+	m.log().Info("Detected public listen address", slog.String("listen", listen))
 }
 
 func (m *connManager) logUPnPStub(port string) {
 	if port == "" {
-		fmt.Printf("Connection manager: UPnP port mapping stub engaged (no port specified)\n")
+		m.log().Info("UPnP port mapping stub engaged (no port specified)")
 	} else {
-		fmt.Printf("Connection manager: attempting UPnP port mapping for tcp/%s (stub)\n", port)
+		m.log().Info("Attempting UPnP port mapping (stub)", slog.String("port", port))
 	}
-	fmt.Printf("Connection manager: UPnP functionality not implemented; please ensure manual port forwarding\n")
+	m.log().Warn("UPnP not implemented; manual port forwarding required")
 }
 
 type connectedPeer struct {
@@ -593,7 +625,9 @@ func (s *Server) startDialers() {
 		seen[addr] = struct{}{}
 		go func(target string) {
 			if err := s.Connect(target); err != nil {
-				fmt.Printf("Bootstrap dial %s failed: %v\n", target, err)
+				slog.Default().Warn("Bootstrap dial failed",
+					logging.MaskField("peer_address", target),
+					slog.Any("error", err))
 				s.scheduleReconnect(target)
 			}
 		}(addr)
@@ -640,7 +674,9 @@ func (s *Server) scheduleReconnect(addr string) {
 		delete(s.pendingDial, addr)
 		s.dialMu.Unlock()
 		if err := s.Connect(addr); err != nil {
-			fmt.Printf("Reconnect to %s failed: %v\n", addr, err)
+			slog.Default().Warn("Reconnect failed",
+				logging.MaskField("peer_address", addr),
+				slog.Any("error", err))
 			s.scheduleReconnect(addr)
 		} else {
 			s.resetBackoff(addr)
@@ -688,6 +724,8 @@ func (s *Server) markDialFailure(addr string) {
 		return
 	}
 	if _, err := s.peerstore.RecordFail(rec.NodeID, s.now()); err != nil {
-		fmt.Printf("record dial failure %s: %v\n", rec.NodeID, err)
+		slog.Default().Error("Record dial failure",
+			logging.MaskField("peer_id", rec.NodeID),
+			slog.Any("error", err))
 	}
 }

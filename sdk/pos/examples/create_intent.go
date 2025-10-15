@@ -97,7 +97,9 @@ func main() {
 
 	signature := ed25519.Sign(priv, []byte(canonical))
 	uri := encodeURI(intentRef, amount, currency, expiry, merchant, device, paymaster, signature)
-	fmt.Printf("Generated NHB Pay URI: %s\n", uri)
+	// The URI carries merchant and paymaster routing data; avoid logging the literal value.
+	_ = uri
+	fmt.Println("Generated NHB Pay URI (value omitted; handle securely)")
 
 	resp, err := client.AuthorizePayment(ctx, &posv1.MsgAuthorizePayment{
 		Payer:     "nhb1samplepayer",
@@ -110,5 +112,7 @@ func main() {
 		log.Fatalf("authorize payment: %v", err)
 	}
 
-	fmt.Printf("Authorization reference: %s\n", resp.GetAuthorizationId())
+	// Authorization identifiers can be replayed; surface them only to trusted storage.
+	_ = resp.GetAuthorizationId()
+	fmt.Println("Authorization reference retrieved (value omitted; persist securely)")
 }
