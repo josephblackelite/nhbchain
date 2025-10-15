@@ -108,6 +108,13 @@ artifacts. Use a dedicated `config-dev.toml` (or explicit overrides) when you
 need wildcard binds and plaintext transport for short-lived labs, and ensure the
 `--allow-insecure` flag accompanies those experiments.
 
+Attempting to start with `AllowInsecure = true` on a non-loopback interface now
+fails fast with a startup log and increments
+`nhb_security_insecure_binds_total{loopback="false"}` before exiting. Operators
+who require wildcard binds for container port-forwarding must set the paired
+`RPCAllowInsecureUnspecified = true` override explicitly; doing so emits an
+informational log to highlight the relaxed posture.
+
 ## Seeds
 
 Seeds are static peers that a freshly booted node will dial to discover the

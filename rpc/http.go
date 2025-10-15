@@ -632,10 +632,24 @@ func (s *Server) Serve(listener net.Listener) error {
 		}
 		loopback := isLoopback(listener.Addr(), s.allowInsecureUnspecified)
 		observability.Security().RecordInsecureBind("rpc", loopback)
-		fmt.Printf("AllowInsecure enabled; plaintext RPC binding to %s (loopback=%t)\n", listener.Addr(), loopback)
+		tcpAddr, _ := listener.Addr().(*net.TCPAddr)
+		var ip net.IP
+		if tcpAddr != nil {
+			ip = tcpAddr.IP
+		}
+		unspecified := ip == nil || ip.IsUnspecified()
 		if !loopback {
+			fmt.Printf("AllowInsecure enabled but plaintext RPC attempted on non-loopback address %s; refusing to start\n", listener.Addr())
+			if unspecified && !s.allowInsecureUnspecified {
+				fmt.Printf("Hint: leave RPCAllowInsecureUnspecified=false in production. Set it to true only for controlled lab port-forwarding.\n")
+			}
 			_ = listener.Close()
 			return errors.New("plaintext RPC is only permitted on loopback interfaces")
+		}
+		if unspecified && s.allowInsecureUnspecified {
+			fmt.Printf("AllowInsecure enabled; treating unspecified bind %s as loopback via RPCAllowInsecureUnspecified override\n", listener.Addr())
+		} else {
+			fmt.Printf("AllowInsecure enabled; plaintext RPC bound to loopback interface %s\n", listener.Addr())
 		}
 		srv.Handler = h2c.NewHandler(baseHandler, &http2.Server{})
 	}
@@ -730,7 +744,10 @@ func isLoopback(addr net.Addr, allowUnspecified bool) bool {
 		return false
 	}
 	ip := tcpAddr.IP
-	if ip == nil || ip.IsUnspecified() {
+	if ip == nil {
+		return allowUnspecified
+	}
+	if ip.IsUnspecified() {
 		return allowUnspecified
 	}
 	if ip.IsLoopback() {
