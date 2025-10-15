@@ -15,7 +15,7 @@ func TestAuthenticateByBearerValidToken(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	request.Header.Set("Authorization", "Bearer topsecret")
-	if !auth.authenticateByBearer(request) {
+	if principal := auth.authenticateByBearer(request); principal == nil {
 		t.Fatalf("expected token to be accepted")
 	}
 }
@@ -27,7 +27,7 @@ func TestAuthenticateByBearerInvalidToken(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	request.Header.Set("Authorization", "Bearer notsecret")
-	if auth.authenticateByBearer(request) {
+	if principal := auth.authenticateByBearer(request); principal != nil {
 		t.Fatalf("expected token to be rejected")
 	}
 }
@@ -54,7 +54,7 @@ func TestAuthenticatorAuthenticateBearerTokens(t *testing.T) {
 			if tt.header != "" {
 				request.Header.Set("Authorization", tt.header)
 			}
-			if got := auth.authenticate(request); got != tt.want {
+			if _, got := auth.authenticate(request); got != tt.want {
 				t.Fatalf("authenticate() = %v, want %v", got, tt.want)
 			}
 		})

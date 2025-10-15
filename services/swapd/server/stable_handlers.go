@@ -15,16 +15,24 @@ import (
 )
 
 func (s *Server) registerStableHandlers(mux *http.ServeMux) {
-	mux.HandleFunc("/v1/stable/quote", s.handleStableQuote)
-	mux.HandleFunc("/v1/stable/reserve", s.handleStableReserve)
-	mux.HandleFunc("/v1/stable/cashout", s.handleStableCashOut)
-	mux.HandleFunc("/v1/stable/status", s.handleStableStatus)
-	mux.HandleFunc("/v1/stable/limits", s.handleStableLimits)
+	if mux == nil {
+		return
+	}
+	stableMux := http.NewServeMux()
+	stableMux.HandleFunc("/v1/stable/quote", s.handleStableQuote)
+	stableMux.HandleFunc("/v1/stable/reserve", s.handleStableReserve)
+	stableMux.HandleFunc("/v1/stable/cashout", s.handleStableCashOut)
+	stableMux.HandleFunc("/v1/stable/status", s.handleStableStatus)
+	stableMux.HandleFunc("/v1/stable/limits", s.handleStableLimits)
+	mux.Handle("/v1/stable/", s.requireAdmin(stableMux))
 }
 
 func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.ensureStablePrincipal(w, r) {
 		return
 	}
 	if !s.stableEngineEnabled() {
@@ -70,6 +78,9 @@ func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.ensureStablePrincipal(w, r) {
 		return
 	}
 	if !s.stableEngineEnabled() {
@@ -119,6 +130,9 @@ func (s *Server) handleStableCashOut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.ensureStablePrincipal(w, r) {
+		return
+	}
 	if !s.stableEngineEnabled() {
 		s.writeStableDisabled(w)
 		return
@@ -162,6 +176,9 @@ func (s *Server) handleStableStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.ensureStablePrincipal(w, r) {
+		return
+	}
 	if !s.stableEngineEnabled() {
 		s.writeStableDisabled(w)
 		return
@@ -179,6 +196,9 @@ func (s *Server) handleStableStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStableLimits(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.ensureStablePrincipal(w, r) {
 		return
 	}
 	if !s.stableEngineEnabled() {
@@ -223,6 +243,19 @@ func (s *Server) writeStableJSON(w http.ResponseWriter, status int, payload any)
 		w.WriteHeader(status)
 	}
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (s *Server) ensureStablePrincipal(w http.ResponseWriter, r *http.Request) bool {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		s.writeStableError(w, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	if principal.Method == "" {
+		s.writeStableError(w, http.StatusForbidden, "principal not authorized")
+		return false
+	}
+	return true
 }
 
 func (s *Server) stableEngineEnabled() bool {

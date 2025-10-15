@@ -79,3 +79,23 @@ func TestAdminConfigNormaliseAllowsInsecureOverride(t *testing.T) {
 		t.Fatalf("expected bearer token to persist, got %q", cfg.BearerToken)
 	}
 }
+
+func TestValidateRequiresTLSWhenStableEnabled(t *testing.T) {
+	cfg := Config{
+		Pairs:   []Pair{{Base: "ZNHB", Quote: "USD"}},
+		Sources: []Source{{Name: "oracle", Type: "mock"}},
+		Stable: StableConfig{
+			Paused: false,
+			Assets: []StableAsset{{Symbol: "ZNHB"}},
+		},
+		Admin: AdminConfig{TLS: AdminTLSConfig{Disable: true}},
+	}
+
+	err := validate(cfg)
+	if err == nil {
+		t.Fatalf("expected error when stable runtime is enabled without TLS")
+	}
+	if got, want := err.Error(), "stable runtime requires admin TLS to be enabled"; got != want {
+		t.Fatalf("unexpected error: got %q want %q", got, want)
+	}
+}
