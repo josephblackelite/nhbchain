@@ -44,16 +44,23 @@ import (
 )
 
 const (
-	jsonRPCVersion          = "2.0"
-	maxRequestBytes         = 1 << 20 // 1 MiB
-	rateLimitWindow         = time.Minute
-	maxTxPerWindow          = 5
-	txSeenTTL               = 15 * time.Minute
-	rateLimiterMaxEntries   = 512
-	rateLimiterStaleAfter   = 10 * rateLimitWindow
-	rateLimiterSweepBackoff = rateLimitWindow
-	maxForwardedForAddrs    = 5
-	maxTrustedProxyEntries  = 32
+	jsonRPCVersion                = "2.0"
+	maxRequestBytes               = 1 << 20 // 1 MiB
+	defaultRateLimitWindow        = time.Minute
+	defaultMaxTxPerWindow         = 5
+	txSeenTTL                     = 15 * time.Minute
+	rateLimiterMaxEntries         = 512
+	rateLimiterStaleMultiple      = 10
+	maxForwardedForAddrs          = 5
+	maxTrustedProxyEntries        = 32
+	limiterScopeIP                = "ip"
+	limiterScopeIdentity          = "identity"
+	limiterScopeChain             = "chain"
+	limiterScopeIdentityChain     = "identity_chain"
+	limiterKeyPrefixIP            = "ip:"
+	limiterKeyPrefixIdentity      = "identity:"
+	limiterKeyPrefixChain         = "chain:"
+	limiterKeyPrefixIdentityChain = "identity_chain:"
 
 	swapMaxTimestampSkew  = 2 * time.Minute
 	swapDefaultTimestamp  = swapMaxTimestampSkew
@@ -157,6 +164,15 @@ type ServerConfig struct {
 	WriteTimeout time.Duration
 	// IdleTimeout defines how long to keep idle connections open.
 	IdleTimeout time.Duration
+	// MaxTxPerWindow sets the maximum number of transactions that a single
+	// source (IP, identity, or chain nonce) may submit within the configured
+	// rate limit window. Zero disables the override and falls back to the
+	// default.
+	MaxTxPerWindow int
+	// RateLimitWindow controls the duration of the sliding window used for the
+	// per-source transaction quota. Zero disables the override and falls back to
+	// the default window.
+	RateLimitWindow time.Duration
 	// TLSCertFile is the path to a PEM-encoded certificate chain.
 	TLSCertFile string
 	// TLSKeyFile is the path to the PEM-encoded private key for TLSCertFile.
@@ -214,12 +230,16 @@ type Server struct {
 	jwtVerifier              *jwtVerifier
 	jwtVerifierErr           error
 
-	swapAuth          *gatewayauth.Authenticator
-	swapPartnerLimits map[string]int
-	swapRateWindow    time.Duration
-	swapRateCounters  map[string]*rateLimiter
-	swapRateMu        sync.Mutex
-	swapNowFn         func() time.Time
+	swapAuth                *gatewayauth.Authenticator
+	swapPartnerLimits       map[string]int
+	swapRateWindow          time.Duration
+	swapRateCounters        map[string]*rateLimiter
+	swapRateMu              sync.Mutex
+	maxTxPerWindow          int
+	rateLimitWindow         time.Duration
+	rateLimiterStaleAfter   time.Duration
+	rateLimiterSweepBackoff time.Duration
+	swapNowFn               func() time.Time
 
 	swapStableMu sync.RWMutex
 	swapStable   struct {
@@ -372,6 +392,15 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 			swapLimits[trimmedKey] = limit
 		}
 	}
+	maxTx := cfg.MaxTxPerWindow
+	if maxTx <= 0 {
+		maxTx = defaultMaxTxPerWindow
+	}
+	rateWindow := cfg.RateLimitWindow
+	if rateWindow <= 0 {
+		rateWindow = defaultRateLimitWindow
+	}
+	staleAfter := time.Duration(rateLimiterStaleMultiple) * rateWindow
 	srv := &Server{
 		node:                     node,
 		net:                      netClient,
@@ -403,6 +432,10 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		swapRateCounters:         make(map[string]*rateLimiter),
 		swapNowFn:                swapNow,
 		callerNonces:             make(map[string]callerNonceState),
+		maxTxPerWindow:           maxTx,
+		rateLimitWindow:          rateWindow,
+		rateLimiterStaleAfter:    staleAfter,
+		rateLimiterSweepBackoff:  rateWindow,
 	}
 	srv.swapStable.assets = make(map[string]stable.Asset)
 	srv.swapStable.now = time.Now
@@ -1981,51 +2014,68 @@ func (s *Server) swapNow() time.Time {
 
 func (s *Server) allowSource(source, identity, chainNonce string, now time.Time) bool {
 	normalized := canonicalHost(source)
-	key := normalized
-	trimmedIdentity := strings.TrimSpace(identity)
-	if trimmedIdentity != "" {
-		key = strings.ToLower(trimmedIdentity)
+	if normalized == "" {
+		normalized = "unknown"
 	}
+	trimmedIdentity := strings.ToLower(strings.TrimSpace(identity))
 	trimmedChain := strings.TrimSpace(chainNonce)
+	type limiterKey struct {
+		key   string
+		scope string
+	}
+	keys := make([]limiterKey, 0, 4)
+	if trimmedIdentity != "" && trimmedChain != "" {
+		keys = append(keys, limiterKey{
+			key:   limiterKeyPrefixIdentityChain + trimmedIdentity + "|" + trimmedChain,
+			scope: limiterScopeIdentityChain,
+		})
+	}
+	if trimmedIdentity != "" {
+		keys = append(keys, limiterKey{
+			key:   limiterKeyPrefixIdentity + trimmedIdentity,
+			scope: limiterScopeIdentity,
+		})
+	}
 	if trimmedChain != "" {
-		if key != "" {
-			key = key + "|" + trimmedChain
-		} else {
-			key = trimmedChain
-		}
+		keys = append(keys, limiterKey{
+			key:   limiterKeyPrefixChain + trimmedChain,
+			scope: limiterScopeChain,
+		})
 	}
-	if key == "" {
-		if normalized == "" {
-			key = "unknown"
-		} else {
-			key = normalized
-		}
-	}
+	keys = append(keys, limiterKey{
+		key:   limiterKeyPrefixIP + normalized,
+		scope: limiterScopeIP,
+	})
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.evictRateLimitersLocked(now)
-
-	limiter, ok := s.rateLimiters[key]
-	if !ok {
-		if len(s.rateLimiters) >= rateLimiterMaxEntries {
-			s.evictOldestLimiterLocked()
+	limiters := make([]*rateLimiter, len(keys))
+	for i, descriptor := range keys {
+		limiter, ok := s.rateLimiters[descriptor.key]
+		if !ok {
+			if len(s.rateLimiters) >= rateLimiterMaxEntries {
+				s.evictOldestLimiterLocked()
+			}
+			limiter = &rateLimiter{windowStart: now, lastSeen: now}
+			s.rateLimiters[descriptor.key] = limiter
 		}
-		limiter = &rateLimiter{windowStart: now, lastSeen: now}
-		s.rateLimiters[key] = limiter
+		if now.Sub(limiter.windowStart) >= s.rateLimitWindow {
+			limiter.windowStart = now
+			limiter.count = 0
+		}
+		if limiter.count >= s.maxTxPerWindow {
+			limiter.lastSeen = now
+			s.mu.Unlock()
+			observability.RPC().RecordLimiterHit(descriptor.scope)
+			return false
+		}
+		limiters[i] = limiter
 	}
-
-	if now.Sub(limiter.windowStart) >= rateLimitWindow {
-		limiter.windowStart = now
-		limiter.count = 0
-	}
-	if limiter.count >= maxTxPerWindow {
+	for _, limiter := range limiters {
+		limiter.count++
 		limiter.lastSeen = now
-		return false
 	}
-	limiter.count++
-	limiter.lastSeen = now
+	s.mu.Unlock()
 	return true
 }
 
@@ -2033,14 +2083,14 @@ func (s *Server) evictRateLimitersLocked(now time.Time) {
 	if len(s.rateLimiters) == 0 {
 		return
 	}
-	if !s.rateLimiterSweep.IsZero() && now.Sub(s.rateLimiterSweep) < rateLimiterSweepBackoff && len(s.rateLimiters) < rateLimiterMaxEntries {
+	if s.rateLimiterSweepBackoff > 0 && !s.rateLimiterSweep.IsZero() && now.Sub(s.rateLimiterSweep) < s.rateLimiterSweepBackoff && len(s.rateLimiters) < rateLimiterMaxEntries {
 		return
 	}
 	for key, limiter := range s.rateLimiters {
 		if limiter.lastSeen.IsZero() {
 			continue
 		}
-		if now.Sub(limiter.lastSeen) > rateLimiterStaleAfter {
+		if now.Sub(limiter.lastSeen) > s.rateLimiterStaleAfter {
 			delete(s.rateLimiters, key)
 		}
 	}

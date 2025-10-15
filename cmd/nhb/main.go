@@ -423,6 +423,8 @@ func main() {
 		ReadTimeout:              time.Duration(cfg.RPCReadTimeout) * time.Second,
 		WriteTimeout:             time.Duration(cfg.RPCWriteTimeout) * time.Second,
 		IdleTimeout:              time.Duration(cfg.RPCIdleTimeout) * time.Second,
+		MaxTxPerWindow:           cfg.RPCMaxTxPerWindow,
+		RateLimitWindow:          time.Duration(cfg.RPCRateLimitWindow) * time.Second,
 		TLSCertFile:              cfg.RPCTLSCertFile,
 		TLSKeyFile:               cfg.RPCTLSKeyFile,
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,

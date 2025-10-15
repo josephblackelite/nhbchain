@@ -5,9 +5,10 @@ HTTP listener. All examples assume the daemon is reachable at
 `http://127.0.0.1:8080` and that the `NHB_RPC_TOKEN` environment variable is set
 when authentication is required. Starting with this release the RPC server only
 trusts proxy forwarding headers from addresses explicitly allow-listed via
-`RPCTrustedProxies`, applies a five-transaction-per-minute quota per resolved
-client IP, and honours the tightened read/write/idle timeout values exposed in
-`config.toml`. Enable TLS by setting `RPCTLSCertFile`/`RPCTLSKeyFile` and
+`RPCTrustedProxies`, enforces the `RPCMaxTxPerWindow` / `RPCRateLimitWindow`
+quota across client IPs, identities, and chain nonces, and honours the tightened
+read/write/idle timeout values exposed in `config.toml`. Enable TLS by setting
+`RPCTLSCertFile`/`RPCTLSKeyFile` and
 propagate client IPs through a trusted reverse proxy before toggling
 `RPCTrustProxyHeaders`.
 
@@ -24,9 +25,10 @@ Operators migrating existing infrastructure should:
    sources will ignore `X-Forwarded-For` headers.
 2. Leave `RPCTrustProxyHeaders` disabled until the trusted proxy list is in
    place; once enabled, ensure the proxy strips untrusted forwarding headers.
-3. Review the enforced quota (five transactions per minute and client) and
-   build exponential backoff into tooling to gracefully handle HTTP 429 /
-   `-32020` responses.
+3. Review the enforced quota (`RPCMaxTxPerWindow` requests per
+   `RPCRateLimitWindow`) and build exponential backoff into tooling to
+   gracefully handle HTTP 429 / `-32020` responses. Track enforcement via the
+   `nhb_rpc_limiter_hits_total` Prometheus counter when tuning.
 4. Set `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
    `RPCIdleTimeout` to align with organisational SLAs. These defaults are
    intentionally conservative and should mirror the perimeter’s timeout budget.

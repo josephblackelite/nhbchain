@@ -29,9 +29,10 @@ half of the tolerance.
 - Keep `RPCTrustProxyHeaders` disabled until the proxy tier is locked down and
   actively strips inbound forwarding headers. Only enable it after verifying the
   chain of custody in staging.
-- Review the enforced per-source quota (five transactions per minute). Update
-  tooling to surface HTTP 429 / `-32020` responses with retry guidance instead
-  of blindly retrying.
+- Review the enforced per-source quota (`RPCMaxTxPerWindow` requests per
+  `RPCRateLimitWindow`). Update tooling to surface HTTP 429 / `-32020`
+  responses with retry guidance instead of blindly retrying, and monitor
+  `nhb_rpc_limiter_hits_total` to validate the chosen values.
 - Align `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
   `RPCIdleTimeout` with upstream load-balancer/ingress settings to avoid idle
   disconnects. Document the final values in the deployment checklist.

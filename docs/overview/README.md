@@ -23,9 +23,12 @@ The governance module coordinates configuration changes across the network.
 - **Trusted proxies:** The HTTP RPC server only honours `X-Forwarded-For` when the
   remote IP is declared in `RPCTrustedProxies` and `RPCTrustProxyHeaders=true`.
   Leave the toggle off until a hardened proxy tier is in place.
-- **Client quotas:** Each unique client source may submit five transactions per
-  minute. Exceeding the quota yields HTTP 429 / `-32020`. Wallets and SDKs
-  should treat this as a backoff signal and avoid retry storms.
+- **Client quotas:** Each unique client source (IP, identity, and chain nonce)
+  may submit up to `RPCMaxTxPerWindow` transactions within the
+  `RPCRateLimitWindow`. Exceeding the quota yields HTTP 429 / `-32020` and is
+  recorded via the `nhb_rpc_limiter_hits_total` metric so operators can tune the
+  window for their traffic mix. Wallets and SDKs should treat rate limits as a
+  backoff signal and avoid retry storms.
 - **Timeout/TLS posture:** `RPCReadHeaderTimeout`, `RPCReadTimeout`,
   `RPCWriteTimeout`, `RPCIdleTimeout`, `RPCTLSCertFile`, and `RPCTLSKeyFile`
   expose node-level controls that must mirror load-balancer settings. Operators

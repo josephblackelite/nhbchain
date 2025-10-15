@@ -66,6 +66,8 @@ type Config struct {
 	RPCReadTimeout              int             `toml:"RPCReadTimeout"`
 	RPCWriteTimeout             int             `toml:"RPCWriteTimeout"`
 	RPCIdleTimeout              int             `toml:"RPCIdleTimeout"`
+	RPCMaxTxPerWindow           int             `toml:"RPCMaxTxPerWindow"`
+	RPCRateLimitWindow          int             `toml:"RPCRateLimitWindow"`
 	RPCAllowInsecure            bool            `toml:"RPCAllowInsecure"`
 	RPCAllowInsecureUnspecified bool            `toml:"RPCAllowInsecureUnspecified"`
 	RPCTLSCertFile              string          `toml:"RPCTLSCertFile"`
@@ -492,6 +494,12 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		cfg.NetworkSecurity.RelayDropLogRatio = defaultRelayDropLogRatio
 	} else if cfg.NetworkSecurity.RelayDropLogRatio > 1 {
 		cfg.NetworkSecurity.RelayDropLogRatio = 1
+	}
+	if cfg.RPCMaxTxPerWindow <= 0 {
+		cfg.RPCMaxTxPerWindow = 5
+	}
+	if cfg.RPCRateLimitWindow <= 0 {
+		cfg.RPCRateLimitWindow = int((time.Minute).Seconds())
 	}
 
 	if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
@@ -1155,6 +1163,8 @@ func createDefault(path string, passphrase string) (*Config, error) {
 		RPCReadTimeout:       int((15 * time.Second).Seconds()),
 		RPCWriteTimeout:      int((15 * time.Second).Seconds()),
 		RPCIdleTimeout:       int((120 * time.Second).Seconds()),
+		RPCMaxTxPerWindow:    5,
+		RPCRateLimitWindow:   int((time.Minute).Seconds()),
 		MaxMsgBytes:          1 << 20,
 		MaxMsgsPerSecond:     32,
 		ClientVersion:        "nhbchain/node",
