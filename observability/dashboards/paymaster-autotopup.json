@@ -1,0 +1,240 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Primary Prometheus datasource",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "panel", "id": "timeseries", "name": "Time series", "version": "1.0.0"},
+    {"type": "panel", "id": "stat", "name": "Stat", "version": "1.0.0"}
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Trailing 24h minted ZNHB through automatic paymaster top-ups compared to the configured cap.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "mappings": [],
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 80},
+              {"color": "red", "value": 100}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "exemplar": false,
+          "expr": "sum(increase(nhb_paymaster_autotopup_amount_wei_total{outcome=\"success\"}[1d])) / 1e18",
+          "interval": "",
+          "legendFormat": "Minted (24h)",
+          "refId": "A"
+        },
+        {
+          "exemplar": false,
+          "expr": "vector(${daily_cap_wei}) / 1e18",
+          "interval": "",
+          "legendFormat": "Configured Cap",
+          "refId": "B"
+        }
+      ],
+      "title": "Automatic Top-up Volume vs Cap",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Hourly automatic paymaster top-up attempts segmented by outcome.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0},
+              {"color": "red", "value": 0}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "exemplar": false,
+          "expr": "sum(increase(nhb_paymaster_autotopups_total{outcome=\"success\"}[1h]))",
+          "interval": "",
+          "legendFormat": "Success",
+          "refId": "A"
+        },
+        {
+          "exemplar": false,
+          "expr": "sum(increase(nhb_paymaster_autotopups_total{outcome=\"failure\"}[1h]))",
+          "interval": "",
+          "legendFormat": "Failure",
+          "refId": "B"
+        }
+      ],
+      "title": "Automatic Top-up Attempts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Percentage of the configured daily cap consumed by successful automatic top-ups during the trailing 24h window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 80},
+              {"color": "red", "value": 100}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 8},
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "exemplar": false,
+          "expr": "(sum(increase(nhb_paymaster_autotopup_amount_wei_total{outcome=\"success\"}[1d])) / scalar(${daily_cap_wei})) * 100",
+          "interval": "",
+          "legendFormat": "Daily Cap Used",
+          "refId": "A"
+        }
+      ],
+      "title": "Daily Cap Utilisation",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Last observed automatic top-up failures to highlight saturation or misconfiguration.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 8},
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "exemplar": false,
+          "expr": "sum(increase(nhb_paymaster_autotopups_total{outcome=\"failure\"}[1d]))",
+          "interval": "",
+          "legendFormat": "Failures (24h)",
+          "refId": "A"
+        }
+      ],
+      "title": "24h Failure Count",
+      "type": "stat"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 37,
+  "style": "dark",
+  "tags": ["paymaster", "autotopup"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "1e21", "value": "1e21"},
+        "hide": 0,
+        "label": "Auto top-up daily cap (wei)",
+        "name": "daily_cap_wei",
+        "options": [],
+        "query": "1e21",
+        "type": "constant"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Paymaster Automatic Top-ups",
+  "uid": "paymaster-autotopup-overview",
+  "version": 1
+}
