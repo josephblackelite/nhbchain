@@ -52,6 +52,11 @@ type SecurityMetrics struct {
 	insecureBinds *prometheus.CounterVec
 }
 
+// SupplyMetrics captures token supply telemetry.
+type SupplyMetrics struct {
+	total *prometheus.GaugeVec
+}
+
 // Loyalty returns the singleton registry tracking loyalty reward budget usage.
 func Loyalty() *LoyaltyMetrics {
 	loyaltyMetricsOnce.Do(func() {
@@ -151,6 +156,9 @@ var (
 
 	securityMetricsOnce sync.Once
 	securityRegistry    *SecurityMetrics
+
+	supplyMetricsOnce sync.Once
+	supplyRegistry    *SupplyMetrics
 )
 
 // ModuleMetrics returns the lazily-initialised module metrics registry used to
@@ -208,6 +216,34 @@ func Security() *SecurityMetrics {
 		prometheus.MustRegister(securityRegistry.insecureBinds)
 	})
 	return securityRegistry
+}
+
+// Supply exposes the metrics registry tracking token supply totals.
+func Supply() *SupplyMetrics {
+	supplyMetricsOnce.Do(func() {
+		supplyRegistry = &SupplyMetrics{
+			total: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "token",
+				Name:      "supply_total",
+				Help:      "Total circulating supply per token in wei.",
+			}, []string{"token"}),
+		}
+		prometheus.MustRegister(supplyRegistry.total)
+	})
+	return supplyRegistry
+}
+
+// RecordTotal updates the tracked supply gauge for the token symbol.
+func (m *SupplyMetrics) RecordTotal(symbol string, total *big.Int) {
+	if m == nil {
+		return
+	}
+	value := bigToFloat(total)
+	if value < 0 {
+		value = 0
+	}
+	m.total.WithLabelValues(labelAsset(symbol)).Set(value)
 }
 
 // RecordInsecureBind records whether an insecure listener bound to a loopback interface.

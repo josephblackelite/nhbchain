@@ -46,7 +46,8 @@ func TestStableStoreDepositVoucherIdempotent(t *testing.T) {
 }
 
 func TestStableStoreCashOutLifecycleBurnAfterReceipt(t *testing.T) {
-	store := NewStableStore(newMockStorage())
+	backend := newMockStorage()
+	store := NewStableStore(backend)
 	now := time.Unix(1700000500, 0)
 	store.SetClock(func() time.Time { return now })
 
@@ -60,6 +61,9 @@ func TestStableStoreCashOutLifecycleBurnAfterReceipt(t *testing.T) {
 	}
 	if err := store.PutDepositVoucher(deposit); err != nil {
 		t.Fatalf("put deposit: %v", err)
+	}
+	if _, err := backend.AdjustTokenSupply("NHB", deposit.NhbAmount); err != nil {
+		t.Fatalf("prime supply: %v", err)
 	}
 
 	intent := &CashOutIntent{
@@ -99,6 +103,11 @@ func TestStableStoreCashOutLifecycleBurnAfterReceipt(t *testing.T) {
 	if err := store.RecordPayoutReceipt(receipt); err != nil {
 		t.Fatalf("record receipt: %v", err)
 	}
+	expectedSupply := new(big.Int).Sub(deposit.NhbAmount, receipt.NhbAmount)
+	total := backend.supplies["NHB"]
+	if total == nil || total.Cmp(expectedSupply) != 0 {
+		t.Fatalf("unexpected supply total: got %v want %s", total, expectedSupply)
+	}
 	settledIntent, ok, err := store.GetCashOutIntent("intent-001")
 	if err != nil || !ok {
 		t.Fatalf("get settled intent: %v ok=%v", err, ok)
@@ -134,7 +143,8 @@ func TestStableStoreCashOutLifecycleBurnAfterReceipt(t *testing.T) {
 }
 
 func TestStableStoreSoftInventoryAccrual(t *testing.T) {
-	store := NewStableStore(newMockStorage())
+	backend := newMockStorage()
+	store := NewStableStore(backend)
 	store.SetClock(func() time.Time { return time.Unix(1700001000, 0) })
 
 	deposits := []*DepositVoucher{
@@ -156,6 +166,9 @@ func TestStableStoreSoftInventoryAccrual(t *testing.T) {
 	for _, voucher := range deposits {
 		if err := store.PutDepositVoucher(voucher); err != nil {
 			t.Fatalf("put deposit %s: %v", voucher.InvoiceID, err)
+		}
+		if _, err := backend.AdjustTokenSupply("NHB", voucher.NhbAmount); err != nil {
+			t.Fatalf("prime supply %s: %v", voucher.InvoiceID, err)
 		}
 	}
 	inventory, err := store.GetSoftInventory(StableAssetUSDT)
@@ -196,5 +209,10 @@ func TestStableStoreSoftInventoryAccrual(t *testing.T) {
 	}
 	if inventory.Payouts.Cmp(receipt.StableAmount) != 0 {
 		t.Fatalf("unexpected payouts total: %s", inventory.Payouts)
+	}
+	expectedSupply := new(big.Int).Sub(new(big.Int).Add(deposits[0].NhbAmount, deposits[1].NhbAmount), receipt.NhbAmount)
+	total := backend.supplies["NHB"]
+	if total == nil || total.Cmp(expectedSupply) != 0 {
+		t.Fatalf("unexpected supply after payout: got %v want %s", total, expectedSupply)
 	}
 }

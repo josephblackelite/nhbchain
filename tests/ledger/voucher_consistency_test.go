@@ -1,10 +1,12 @@
 package ledger
 
 import (
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,12 +17,13 @@ import (
 )
 
 type memoryStore struct {
-	kv    map[string][]byte
-	lists map[string][][]byte
+	kv       map[string][]byte
+	lists    map[string][][]byte
+	supplies map[string]*big.Int
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{kv: make(map[string][]byte), lists: make(map[string][][]byte)}
+	return &memoryStore{kv: make(map[string][]byte), lists: make(map[string][][]byte), supplies: make(map[string]*big.Int)}
 }
 
 func (m *memoryStore) KVPut(key []byte, value interface{}) error {
@@ -63,6 +66,25 @@ func (m *memoryStore) KVGetList(key []byte, out interface{}) error {
 		return err
 	}
 	return rlp.DecodeBytes(encoded, out)
+}
+
+func (m *memoryStore) AdjustTokenSupply(symbol string, delta *big.Int) (*big.Int, error) {
+	if m.supplies == nil {
+		m.supplies = make(map[string]*big.Int)
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	current := new(big.Int)
+	if existing, ok := m.supplies[normalized]; ok && existing != nil {
+		current = new(big.Int).Set(existing)
+	}
+	if delta != nil {
+		current = current.Add(current, delta)
+	}
+	if current.Sign() < 0 {
+		return nil, fmt.Errorf("supply underflow for %s", normalized)
+	}
+	m.supplies[normalized] = new(big.Int).Set(current)
+	return new(big.Int).Set(current), nil
 }
 
 type ledgerFixture struct {

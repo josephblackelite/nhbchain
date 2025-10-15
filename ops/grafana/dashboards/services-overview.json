@@ -189,6 +189,53 @@
       ],
       "title": "Request Throughput",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROMETHEUS_DS"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "nhb_token_supply_total / 1e18",
+          "legendFormat": "{{token}}",
+          "refId": "A"
+        },
+        {
+          "expr": "(nhb_token_supply_total - min_over_time(nhb_token_supply_total[5m])) / 1e18",
+          "legendFormat": "{{token}} Δ5m",
+          "refId": "B"
+        }
+      ],
+      "title": "Token Supply & 5m Change",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

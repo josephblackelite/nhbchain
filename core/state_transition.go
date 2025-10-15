@@ -4664,6 +4664,24 @@ func (sp *StateProcessor) AppendEvent(evt *types.Event) {
 	sp.events = append(sp.events, types.Event{Type: evt.Type, Attributes: attrs})
 }
 
+func (sp *StateProcessor) recordTokenSupplyChange(token string, delta, total *big.Int, reason string) {
+	if sp == nil {
+		return
+	}
+	if metrics := observability.Supply(); metrics != nil {
+		metrics.RecordTotal(token, total)
+	}
+	evt := events.TokenSupply{
+		Token:  token,
+		Total:  cloneBigInt(total),
+		Delta:  cloneBigInt(delta),
+		Reason: reason,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+}
+
 func (sp *StateProcessor) emitStakePaused(addr []byte, operation string, unbondID uint64) {
 	if sp == nil {
 		return
@@ -4846,20 +4864,32 @@ func (sp *StateProcessor) MintToken(symbol string, addr []byte, amount *big.Int)
 	if err != nil {
 		return err
 	}
+	manager := nhbstate.NewManager(sp.Trie)
 	switch normalized {
 	case "NHB":
 		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
-		return sp.setAccount(addr, account)
+		if err := sp.setAccount(addr, account); err != nil {
+			return err
+		}
 	case "ZNHB":
 		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
-		return sp.setAccount(addr, account)
+		if err := sp.setAccount(addr, account); err != nil {
+			return err
+		}
 	default:
-		manager := nhbstate.NewManager(sp.Trie)
 		balance, err := manager.Balance(addr, normalized)
 		if err != nil {
 			return err
 		}
 		updated := new(big.Int).Add(balance, amount)
-		return manager.SetBalance(addr, normalized, updated)
+		if err := manager.SetBalance(addr, normalized, updated); err != nil {
+			return err
+		}
 	}
+	totalSupply, err := manager.AdjustTokenSupply(normalized, amount)
+	if err != nil {
+		return err
+	}
+	sp.recordTokenSupplyChange(normalized, amount, totalSupply, events.SupplyReasonMint)
+	return nil
 }

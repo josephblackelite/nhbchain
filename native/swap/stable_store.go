@@ -378,6 +378,12 @@ func (s *StableStore) RecordPayoutReceipt(receipt *PayoutReceipt) error {
 	if err := s.store.KVPut(stableEscrowLockKey(intentID), storedLock); err != nil {
 		return err
 	}
+	if nhbAmount.Sign() > 0 {
+		delta := new(big.Int).Neg(new(big.Int).Set(nhbAmount))
+		if _, err := s.store.AdjustTokenSupply("NHB", delta); err != nil {
+			return err
+		}
+	}
 	// Mark intent settled.
 	intent.Status = CashOutStatusSettled
 	intent.SettledAt = settledAt

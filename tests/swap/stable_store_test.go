@@ -1,7 +1,9 @@
 package swap_test
 
 import (
+	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,12 +13,13 @@ import (
 )
 
 type mockStableStorage struct {
-	kv    map[string][]byte
-	lists map[string][][]byte
+	kv       map[string][]byte
+	lists    map[string][][]byte
+	supplies map[string]*big.Int
 }
 
 func newMockStableStorage() *mockStableStorage {
-	return &mockStableStorage{kv: make(map[string][]byte), lists: make(map[string][][]byte)}
+	return &mockStableStorage{kv: make(map[string][]byte), lists: make(map[string][][]byte), supplies: make(map[string]*big.Int)}
 }
 
 func (m *mockStableStorage) KVPut(key []byte, value interface{}) error {
@@ -61,6 +64,25 @@ func (m *mockStableStorage) KVGetList(key []byte, out interface{}) error {
 	return rlp.DecodeBytes(encoded, out)
 }
 
+func (m *mockStableStorage) AdjustTokenSupply(symbol string, delta *big.Int) (*big.Int, error) {
+	if m.supplies == nil {
+		m.supplies = make(map[string]*big.Int)
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	current := new(big.Int)
+	if existing, ok := m.supplies[normalized]; ok && existing != nil {
+		current = new(big.Int).Set(existing)
+	}
+	if delta != nil {
+		current = current.Add(current, delta)
+	}
+	if current.Sign() < 0 {
+		return nil, fmt.Errorf("supply underflow for %s", normalized)
+	}
+	m.supplies[normalized] = new(big.Int).Set(current)
+	return new(big.Int).Set(current), nil
+}
+
 func TestDepositVoucherIdempotent(t *testing.T) {
 	store := swap.NewStableStore(newMockStableStorage())
 	now := time.Unix(1700000000, 0)
@@ -101,7 +123,8 @@ func TestDepositVoucherIdempotent(t *testing.T) {
 }
 
 func TestCashOutLifecycle_BurnAfterReceipt(t *testing.T) {
-	store := swap.NewStableStore(newMockStableStorage())
+	backend := newMockStableStorage()
+	store := swap.NewStableStore(backend)
 	now := time.Unix(1700000500, 0)
 	store.SetClock(func() time.Time { return now })
 
@@ -115,6 +138,9 @@ func TestCashOutLifecycle_BurnAfterReceipt(t *testing.T) {
 	}
 	if err := store.PutDepositVoucher(deposit); err != nil {
 		t.Fatalf("put deposit: %v", err)
+	}
+	if _, err := backend.AdjustTokenSupply("NHB", deposit.NhbAmount); err != nil {
+		t.Fatalf("prime supply: %v", err)
 	}
 
 	intent := &swap.CashOutIntent{
@@ -154,6 +180,10 @@ func TestCashOutLifecycle_BurnAfterReceipt(t *testing.T) {
 	if err := store.RecordPayoutReceipt(receipt); err != nil {
 		t.Fatalf("record receipt: %v", err)
 	}
+	expectedSupply := new(big.Int).Sub(deposit.NhbAmount, receipt.NhbAmount)
+	if total := backend.supplies["NHB"]; total == nil || total.Cmp(expectedSupply) != 0 {
+		t.Fatalf("unexpected supply total: got %v want %s", total, expectedSupply)
+	}
 	settledIntent, ok, err := store.GetCashOutIntent("intent-001")
 	if err != nil || !ok {
 		t.Fatalf("get settled intent: %v ok=%v", err, ok)
@@ -189,7 +219,8 @@ func TestCashOutLifecycle_BurnAfterReceipt(t *testing.T) {
 }
 
 func TestSoftInventoryAccrual(t *testing.T) {
-	store := swap.NewStableStore(newMockStableStorage())
+	backend := newMockStableStorage()
+	store := swap.NewStableStore(backend)
 	store.SetClock(func() time.Time { return time.Unix(1700001000, 0) })
 
 	deposits := []*swap.DepositVoucher{
@@ -211,6 +242,9 @@ func TestSoftInventoryAccrual(t *testing.T) {
 	for _, voucher := range deposits {
 		if err := store.PutDepositVoucher(voucher); err != nil {
 			t.Fatalf("put deposit %s: %v", voucher.InvoiceID, err)
+		}
+		if _, err := backend.AdjustTokenSupply("NHB", voucher.NhbAmount); err != nil {
+			t.Fatalf("prime supply %s: %v", voucher.InvoiceID, err)
 		}
 	}
 	inventory, err := store.GetSoftInventory(swap.StableAssetUSDT)
@@ -251,5 +285,9 @@ func TestSoftInventoryAccrual(t *testing.T) {
 	}
 	if inventory.Payouts.Cmp(receipt.StableAmount) != 0 {
 		t.Fatalf("unexpected payouts total: %s", inventory.Payouts)
+	}
+	expectedSupply := new(big.Int).Sub(new(big.Int).Add(deposits[0].NhbAmount, deposits[1].NhbAmount), receipt.NhbAmount)
+	if total := backend.supplies["NHB"]; total == nil || total.Cmp(expectedSupply) != 0 {
+		t.Fatalf("unexpected supply after payout: got %v want %s", total, expectedSupply)
 	}
 }
