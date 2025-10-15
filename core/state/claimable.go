@@ -3,6 +3,7 @@ package state
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -213,28 +214,65 @@ func (m *Manager) ClaimableCredit(payer [20]byte, token string, amt *big.Int) er
 	if err != nil {
 		return err
 	}
+	originalPayer := cloneAccount(payerAcc)
+	originalVault := cloneAccount(vaultAcc)
 	payerAcc = cloneAccount(payerAcc)
 	vaultAcc = cloneAccount(vaultAcc)
+
+	rollbacks := make([]func(), 0, 2)
+	revert := func() {
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			if rollbacks[i] != nil {
+				rollbacks[i]()
+			}
+		}
+	}
 	switch normalized {
 	case "NHB":
-		if payerAcc.BalanceNHB.Cmp(amt) < 0 {
-			return claimable.ErrInsufficientFunds
+		rollback, subErr := MustSubBalance(payerAcc.BalanceNHB, amt)
+		if subErr != nil {
+			if errors.Is(subErr, ErrInsufficientBalance) {
+				return claimable.ErrInsufficientFunds
+			}
+			return subErr
 		}
-		payerAcc.BalanceNHB = new(big.Int).Sub(payerAcc.BalanceNHB, amt)
-		vaultAcc.BalanceNHB = new(big.Int).Add(vaultAcc.BalanceNHB, amt)
+		rollbacks = append(rollbacks, rollback)
+		rollback, addErr := MustAddBalance(vaultAcc.BalanceNHB, amt)
+		if addErr != nil {
+			revert()
+			return addErr
+		}
+		rollbacks = append(rollbacks, rollback)
 	case "ZNHB":
-		if payerAcc.BalanceZNHB.Cmp(amt) < 0 {
-			return claimable.ErrInsufficientFunds
+		rollback, subErr := MustSubBalance(payerAcc.BalanceZNHB, amt)
+		if subErr != nil {
+			if errors.Is(subErr, ErrInsufficientBalance) {
+				return claimable.ErrInsufficientFunds
+			}
+			return subErr
 		}
-		payerAcc.BalanceZNHB = new(big.Int).Sub(payerAcc.BalanceZNHB, amt)
-		vaultAcc.BalanceZNHB = new(big.Int).Add(vaultAcc.BalanceZNHB, amt)
+		rollbacks = append(rollbacks, rollback)
+		rollback, addErr := MustAddBalance(vaultAcc.BalanceZNHB, amt)
+		if addErr != nil {
+			revert()
+			return addErr
+		}
+		rollbacks = append(rollbacks, rollback)
 	default:
 		return claimable.ErrInvalidToken
 	}
 	if err := m.PutAccount(payer[:], payerAcc); err != nil {
+		revert()
 		return err
 	}
 	if err := m.PutAccount(vault[:], vaultAcc); err != nil {
+		revert()
+		if restoreErr := m.PutAccount(payer[:], originalPayer); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("claimable: rollback payer: %w", restoreErr))
+		}
+		if restoreErr := m.PutAccount(vault[:], originalVault); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("claimable: rollback vault: %w", restoreErr))
+		}
 		return err
 	}
 	return nil
@@ -260,28 +298,65 @@ func (m *Manager) ClaimableDebit(token string, amt *big.Int, recipient [20]byte)
 	if err != nil {
 		return err
 	}
+	originalVault := cloneAccount(vaultAcc)
+	originalRecipient := cloneAccount(recipientAcc)
 	vaultAcc = cloneAccount(vaultAcc)
 	recipientAcc = cloneAccount(recipientAcc)
+
+	rollbacks := make([]func(), 0, 2)
+	revert := func() {
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			if rollbacks[i] != nil {
+				rollbacks[i]()
+			}
+		}
+	}
 	switch normalized {
 	case "NHB":
-		if vaultAcc.BalanceNHB.Cmp(amt) < 0 {
-			return claimable.ErrInsufficientFunds
+		rollback, subErr := MustSubBalance(vaultAcc.BalanceNHB, amt)
+		if subErr != nil {
+			if errors.Is(subErr, ErrInsufficientBalance) {
+				return claimable.ErrInsufficientFunds
+			}
+			return subErr
 		}
-		vaultAcc.BalanceNHB = new(big.Int).Sub(vaultAcc.BalanceNHB, amt)
-		recipientAcc.BalanceNHB = new(big.Int).Add(recipientAcc.BalanceNHB, amt)
+		rollbacks = append(rollbacks, rollback)
+		rollback, addErr := MustAddBalance(recipientAcc.BalanceNHB, amt)
+		if addErr != nil {
+			revert()
+			return addErr
+		}
+		rollbacks = append(rollbacks, rollback)
 	case "ZNHB":
-		if vaultAcc.BalanceZNHB.Cmp(amt) < 0 {
-			return claimable.ErrInsufficientFunds
+		rollback, subErr := MustSubBalance(vaultAcc.BalanceZNHB, amt)
+		if subErr != nil {
+			if errors.Is(subErr, ErrInsufficientBalance) {
+				return claimable.ErrInsufficientFunds
+			}
+			return subErr
 		}
-		vaultAcc.BalanceZNHB = new(big.Int).Sub(vaultAcc.BalanceZNHB, amt)
-		recipientAcc.BalanceZNHB = new(big.Int).Add(recipientAcc.BalanceZNHB, amt)
+		rollbacks = append(rollbacks, rollback)
+		rollback, addErr := MustAddBalance(recipientAcc.BalanceZNHB, amt)
+		if addErr != nil {
+			revert()
+			return addErr
+		}
+		rollbacks = append(rollbacks, rollback)
 	default:
 		return claimable.ErrInvalidToken
 	}
 	if err := m.PutAccount(vault[:], vaultAcc); err != nil {
+		revert()
 		return err
 	}
 	if err := m.PutAccount(recipient[:], recipientAcc); err != nil {
+		revert()
+		if restoreErr := m.PutAccount(vault[:], originalVault); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("claimable: rollback vault: %w", restoreErr))
+		}
+		if restoreErr := m.PutAccount(recipient[:], originalRecipient); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("claimable: rollback recipient: %w", restoreErr))
+		}
 		return err
 	}
 	return nil

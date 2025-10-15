@@ -160,3 +160,142 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 		t.Fatalf("expected expire replay to be no-op")
 	}
 }
+
+func TestClaimableCreditRollbackOnCommitFailure(t *testing.T) {
+	manager := newTestManager(t)
+	var payer [20]byte
+	payer[19] = 4
+	fundAccount(t, manager, payer, 100, 0)
+
+	vault, err := escrowModuleAddress("NHB")
+	if err != nil {
+		t.Fatalf("vault address: %v", err)
+	}
+	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	if err := manager.PutAccount(vault[:], &types.Account{BalanceNHB: new(big.Int).Set(maxUint256), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	if err := manager.ClaimableCredit(payer, "NHB", big.NewInt(1)); err == nil {
+		t.Fatalf("expected overflow error when crediting vault")
+	}
+
+	payerAcc, err := manager.GetAccount(payer[:])
+	if err != nil {
+		t.Fatalf("get payer: %v", err)
+	}
+	if want := big.NewInt(100); payerAcc.BalanceNHB.Cmp(want) != 0 {
+		t.Fatalf("payer balance mutated on failed credit: got %s want %s", payerAcc.BalanceNHB, want)
+	}
+
+	vaultAcc, err := manager.GetAccount(vault[:])
+	if err != nil {
+		t.Fatalf("get vault: %v", err)
+	}
+	if vaultAcc.BalanceNHB.Cmp(maxUint256) != 0 {
+		t.Fatalf("vault balance changed on failed credit")
+	}
+}
+
+func TestClaimableCreditInsufficientFunds(t *testing.T) {
+	manager := newTestManager(t)
+	var payer [20]byte
+	payer[19] = 5
+	fundAccount(t, manager, payer, 50, 0)
+
+	vault, err := escrowModuleAddress("NHB")
+	if err != nil {
+		t.Fatalf("vault address: %v", err)
+	}
+	fundAccount(t, manager, vault, 0, 0)
+
+	if err := manager.ClaimableCredit(payer, "NHB", big.NewInt(60)); !errors.Is(err, claimable.ErrInsufficientFunds) {
+		t.Fatalf("expected insufficient funds error, got %v", err)
+	}
+
+	payerAcc, err := manager.GetAccount(payer[:])
+	if err != nil {
+		t.Fatalf("get payer: %v", err)
+	}
+	if want := big.NewInt(50); payerAcc.BalanceNHB.Cmp(want) != 0 {
+		t.Fatalf("payer balance changed after insufficient funds: got %s want %s", payerAcc.BalanceNHB, want)
+	}
+
+	vaultAcc, err := manager.GetAccount(vault[:])
+	if err != nil {
+		t.Fatalf("get vault: %v", err)
+	}
+	if want := big.NewInt(0); vaultAcc.BalanceNHB.Cmp(want) != 0 {
+		t.Fatalf("vault balance changed after insufficient funds: got %s want %s", vaultAcc.BalanceNHB, want)
+	}
+}
+
+func TestClaimableDebitRollbackOnCommitFailure(t *testing.T) {
+	manager := newTestManager(t)
+	vault, err := escrowModuleAddress("NHB")
+	if err != nil {
+		t.Fatalf("vault address: %v", err)
+	}
+	fundAccount(t, manager, vault, 200, 0)
+
+	var recipient [20]byte
+	recipient[19] = 6
+	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	fundAccount(t, manager, recipient, 0, 0)
+	if err := manager.PutAccount(recipient[:], &types.Account{BalanceNHB: new(big.Int).Set(maxUint256), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+
+	if err := manager.ClaimableDebit("NHB", big.NewInt(1), recipient); err == nil {
+		t.Fatalf("expected overflow error when debiting vault")
+	}
+
+	vaultAcc, err := manager.GetAccount(vault[:])
+	if err != nil {
+		t.Fatalf("get vault: %v", err)
+	}
+	if want := big.NewInt(200); vaultAcc.BalanceNHB.Cmp(want) != 0 {
+		t.Fatalf("vault balance mutated on failed debit: got %s want %s", vaultAcc.BalanceNHB, want)
+	}
+
+	recipientAcc, err := manager.GetAccount(recipient[:])
+	if err != nil {
+		t.Fatalf("get recipient: %v", err)
+	}
+	if recipientAcc.BalanceNHB.Cmp(maxUint256) != 0 {
+		t.Fatalf("recipient balance changed on failed debit")
+	}
+}
+
+func TestClaimableDebitInsufficientFunds(t *testing.T) {
+	manager := newTestManager(t)
+	vault, err := escrowModuleAddress("NHB")
+	if err != nil {
+		t.Fatalf("vault address: %v", err)
+	}
+	fundAccount(t, manager, vault, 10, 0)
+
+	var recipient [20]byte
+	recipient[19] = 7
+	fundAccount(t, manager, recipient, 0, 0)
+
+	if err := manager.ClaimableDebit("NHB", big.NewInt(20), recipient); !errors.Is(err, claimable.ErrInsufficientFunds) {
+		t.Fatalf("expected insufficient funds error, got %v", err)
+	}
+
+	vaultAcc, err := manager.GetAccount(vault[:])
+	if err != nil {
+		t.Fatalf("get vault: %v", err)
+	}
+	if want := big.NewInt(10); vaultAcc.BalanceNHB.Cmp(want) != 0 {
+		t.Fatalf("vault balance changed after insufficient funds: got %s want %s", vaultAcc.BalanceNHB, want)
+	}
+
+	recipientAcc, err := manager.GetAccount(recipient[:])
+	if err != nil {
+		t.Fatalf("get recipient: %v", err)
+	}
+	if want := big.NewInt(0); recipientAcc.BalanceNHB.Cmp(want) != 0 {
+		t.Fatalf("recipient balance changed after insufficient funds: got %s want %s", recipientAcc.BalanceNHB, want)
+	}
+}
