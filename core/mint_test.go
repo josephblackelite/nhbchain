@@ -17,6 +17,7 @@ import (
 
 func newTestNode(t *testing.T) *Node {
 	t.Helper()
+	t.Setenv("NHB_ENV", "dev")
 	db := storage.NewMemDB()
 	t.Cleanup(func() { db.Close() })
 	validatorKey, err := crypto.GeneratePrivateKey()

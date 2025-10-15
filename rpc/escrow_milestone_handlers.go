@@ -82,7 +82,7 @@ type milestoneLegJSON struct {
 }
 
 func (s *Server) handleEscrowMilestoneCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -161,7 +161,7 @@ func (s *Server) handleEscrowMilestoneGet(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleEscrowMilestoneFund(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -196,7 +196,7 @@ func (s *Server) handleEscrowMilestoneFund(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleEscrowMilestoneRelease(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -231,7 +231,7 @@ func (s *Server) handleEscrowMilestoneRelease(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleEscrowMilestoneCancel(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -266,7 +266,7 @@ func (s *Server) handleEscrowMilestoneCancel(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleEscrowMilestoneSubscriptionUpdate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

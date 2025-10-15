@@ -129,7 +129,7 @@ func formatAddress(addr [20]byte) string {
 }
 
 func (s *Server) handleCreatorPublish(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -162,7 +162,7 @@ func (s *Server) handleCreatorPublish(w http.ResponseWriter, r *http.Request, re
 }
 
 func (s *Server) handleCreatorTip(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -212,7 +212,7 @@ func (s *Server) handleCreatorTip(w http.ResponseWriter, r *http.Request, req *R
 }
 
 func (s *Server) handleCreatorStake(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -266,7 +266,7 @@ func (s *Server) handleCreatorStake(w http.ResponseWriter, r *http.Request, req 
 }
 
 func (s *Server) handleCreatorUnstake(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -314,7 +314,7 @@ func (s *Server) handleCreatorUnstake(w http.ResponseWriter, r *http.Request, re
 }
 
 func (s *Server) handleCreatorPayouts(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

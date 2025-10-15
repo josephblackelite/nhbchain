@@ -22,15 +22,15 @@ const (
 )
 
 type p2pCreateParams struct {
-        OfferID     string `json:"offerId"`
-        Buyer       string `json:"buyer"`
-        Seller      string `json:"seller"`
-        BaseToken   string `json:"baseToken"`
-        BaseAmount  string `json:"baseAmount"`
-        QuoteToken  string `json:"quoteToken"`
-        QuoteAmount string `json:"quoteAmount"`
-        Deadline    int64  `json:"deadline"`
-        SlippageBps uint32 `json:"slippageBps"`
+	OfferID     string `json:"offerId"`
+	Buyer       string `json:"buyer"`
+	Seller      string `json:"seller"`
+	BaseToken   string `json:"baseToken"`
+	BaseAmount  string `json:"baseAmount"`
+	QuoteToken  string `json:"quoteToken"`
+	QuoteAmount string `json:"quoteAmount"`
+	Deadline    int64  `json:"deadline"`
+	SlippageBps uint32 `json:"slippageBps"`
 }
 
 type p2pIDParams struct {
@@ -69,21 +69,21 @@ type p2pPayIntentResult struct {
 }
 
 type tradeJSON struct {
-        ID          string `json:"id"`
-        OfferID     string `json:"offerId"`
-        Buyer       string `json:"buyer"`
-        Seller      string `json:"seller"`
-        QuoteToken  string `json:"quoteToken"`
-        QuoteAmount string `json:"quoteAmount"`
-        EscrowQuote string `json:"escrowQuoteId"`
-        BaseToken   string `json:"baseToken"`
-        BaseAmount  string `json:"baseAmount"`
-        EscrowBase  string `json:"escrowBaseId"`
-        Deadline    int64  `json:"deadline"`
-        CreatedAt   int64  `json:"createdAt"`
-        FundedAt    int64  `json:"fundedAt"`
-        SlippageBps uint32 `json:"slippageBps"`
-        Status      string `json:"status"`
+	ID          string `json:"id"`
+	OfferID     string `json:"offerId"`
+	Buyer       string `json:"buyer"`
+	Seller      string `json:"seller"`
+	QuoteToken  string `json:"quoteToken"`
+	QuoteAmount string `json:"quoteAmount"`
+	EscrowQuote string `json:"escrowQuoteId"`
+	BaseToken   string `json:"baseToken"`
+	BaseAmount  string `json:"baseAmount"`
+	EscrowBase  string `json:"escrowBaseId"`
+	Deadline    int64  `json:"deadline"`
+	CreatedAt   int64  `json:"createdAt"`
+	FundedAt    int64  `json:"fundedAt"`
+	SlippageBps uint32 `json:"slippageBps"`
+	Status      string `json:"status"`
 }
 
 var validP2PResolveOutcomes = map[string]struct{}{
@@ -94,7 +94,7 @@ var validP2PResolveOutcomes = map[string]struct{}{
 }
 
 func (s *Server) handleP2PCreateTrade(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -141,16 +141,16 @@ func (s *Server) handleP2PCreateTrade(w http.ResponseWriter, r *http.Request, re
 		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
 		return
 	}
-        now := time.Now().Unix()
-        if params.Deadline < now {
-                writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "deadline must be in the future")
-                return
-        }
-        if params.SlippageBps > 10_000 {
-                writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "slippageBps must be <= 10000")
-                return
-        }
-        tradeID, escrowBaseID, escrowQuoteID, err := s.node.P2PCreateTrade(params.OfferID, buyer, seller, normalizedBase, baseAmount, normalizedQuote, quoteAmount, params.Deadline, params.SlippageBps)
+	now := time.Now().Unix()
+	if params.Deadline < now {
+		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "deadline must be in the future")
+		return
+	}
+	if params.SlippageBps > 10_000 {
+		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "slippageBps must be <= 10000")
+		return
+	}
+	tradeID, escrowBaseID, escrowQuoteID, err := s.node.P2PCreateTrade(params.OfferID, buyer, seller, normalizedBase, baseAmount, normalizedQuote, quoteAmount, params.Deadline, params.SlippageBps)
 	if err != nil {
 		writeP2PError(w, req.ID, err)
 		return
@@ -211,7 +211,7 @@ func (s *Server) handleP2PGetTrade(w http.ResponseWriter, r *http.Request, req *
 }
 
 func (s *Server) handleP2PSettle(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -219,7 +219,7 @@ func (s *Server) handleP2PSettle(w http.ResponseWriter, r *http.Request, req *RP
 }
 
 func (s *Server) handleP2PDispute(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -254,7 +254,7 @@ func (s *Server) handleP2PDispute(w http.ResponseWriter, r *http.Request, req *R
 }
 
 func (s *Server) handleP2PResolve(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -352,23 +352,23 @@ func formatTradeJSON(trade *escrow.Trade) tradeJSON {
 	if trade.BaseAmount != nil {
 		baseAmt = trade.BaseAmount.String()
 	}
-        return tradeJSON{
-                ID:          formatTradeID(trade.ID),
-                OfferID:     trade.OfferID,
-                Buyer:       buyer,
-                Seller:      seller,
-                QuoteToken:  trade.QuoteToken,
-                QuoteAmount: quoteAmt,
-                EscrowQuote: formatEscrowID(trade.EscrowQuote),
-                BaseToken:   trade.BaseToken,
-                BaseAmount:  baseAmt,
-                EscrowBase:  formatEscrowID(trade.EscrowBase),
-                Deadline:    trade.Deadline,
-                CreatedAt:   trade.CreatedAt,
-                FundedAt:    trade.FundedAt,
-                SlippageBps: trade.SlippageBps,
-                Status:      tradeStatusString(trade.Status),
-        }
+	return tradeJSON{
+		ID:          formatTradeID(trade.ID),
+		OfferID:     trade.OfferID,
+		Buyer:       buyer,
+		Seller:      seller,
+		QuoteToken:  trade.QuoteToken,
+		QuoteAmount: quoteAmt,
+		EscrowQuote: formatEscrowID(trade.EscrowQuote),
+		BaseToken:   trade.BaseToken,
+		BaseAmount:  baseAmt,
+		EscrowBase:  formatEscrowID(trade.EscrowBase),
+		Deadline:    trade.Deadline,
+		CreatedAt:   trade.CreatedAt,
+		FundedAt:    trade.FundedAt,
+		SlippageBps: trade.SlippageBps,
+		Status:      tradeStatusString(trade.Status),
+	}
 }
 
 func formatTradeID(id [32]byte) string {

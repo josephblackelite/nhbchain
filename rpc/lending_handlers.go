@@ -116,7 +116,7 @@ func (s *Server) handleLendGetPools(w http.ResponseWriter, _ *http.Request, req 
 }
 
 func (s *Server) handleLendCreatePool(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Server) handleLendingWithdrawZNHB(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleLendingBorrowNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -227,7 +227,7 @@ func (s *Server) handleLendingBorrowNHB(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleLendingBorrowNHBWithFee(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -276,7 +276,7 @@ func (s *Server) handleLendingRepayNHB(w http.ResponseWriter, r *http.Request, r
 }
 
 func (s *Server) handleLendingLiquidate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -308,7 +308,7 @@ func (s *Server) handleLendingLiquidate(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleLendingAmountTx(w http.ResponseWriter, r *http.Request, req *RPCRequest, fn func(string, [20]byte, *big.Int) (string, *modules.ModuleError)) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

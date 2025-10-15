@@ -103,7 +103,7 @@ type businessResult struct {
 }
 
 func (s *Server) handleLoyaltyCreateBusiness(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -149,7 +149,7 @@ func (s *Server) handleLoyaltyCreateBusiness(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleLoyaltySetPaymaster(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -199,7 +199,7 @@ func (s *Server) handleLoyaltySetPaymaster(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleLoyaltyAddMerchant(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -249,7 +249,7 @@ func (s *Server) handleLoyaltyAddMerchant(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleLoyaltyRemoveMerchant(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -299,7 +299,7 @@ func (s *Server) handleLoyaltyRemoveMerchant(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleLoyaltyCreateProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -358,7 +358,7 @@ func (s *Server) handleLoyaltyCreateProgram(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleLoyaltyUpdateProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -395,7 +395,7 @@ func (s *Server) handleLoyaltyUpdateProgram(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleLoyaltyPauseProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -427,7 +427,7 @@ func (s *Server) handleLoyaltyPauseProgram(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleLoyaltyResumeProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

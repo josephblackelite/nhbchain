@@ -1,15 +1,15 @@
 package rpc
 
 import (
-        "encoding/json"
-        "errors"
-        "fmt"
-        "math/big"
-        "net/http"
-        "strings"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"net/http"
+	"strings"
 
-        govcfg "nhbchain/native/gov"
-        "nhbchain/native/governance"
+	govcfg "nhbchain/native/gov"
+	"nhbchain/native/governance"
 )
 
 type govProposeParams struct {
@@ -73,7 +73,7 @@ func parseNonNegativeAmount(value string) (*big.Int, error) {
 }
 
 func (s *Server) handleGovernancePropose(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -110,20 +110,20 @@ func (s *Server) handleGovernancePropose(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
-        proposalID, err := s.node.GovernancePropose(proposer, kind, payload, deposit)
-        if err != nil {
-                code := codeInvalidParams
-                if errors.Is(err, govcfg.ErrInvalidPolicyInvariants) {
-                        code = codeInvalidPolicyInvariants
-                }
-                writeError(w, http.StatusBadRequest, req.ID, code, err.Error(), nil)
-                return
-        }
+	proposalID, err := s.node.GovernancePropose(proposer, kind, payload, deposit)
+	if err != nil {
+		code := codeInvalidParams
+		if errors.Is(err, govcfg.ErrInvalidPolicyInvariants) {
+			code = codeInvalidPolicyInvariants
+		}
+		writeError(w, http.StatusBadRequest, req.ID, code, err.Error(), nil)
+		return
+	}
 	writeResult(w, req.ID, govProposeResponse{ProposalID: proposalID})
 }
 
 func (s *Server) handleGovernanceVote(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -220,7 +220,7 @@ func (s *Server) handleGovernanceList(w http.ResponseWriter, r *http.Request, re
 }
 
 func (s *Server) handleGovernanceFinalize(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -246,7 +246,7 @@ func (s *Server) handleGovernanceFinalize(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleGovernanceQueue(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -272,7 +272,7 @@ func (s *Server) handleGovernanceQueue(w http.ResponseWriter, r *http.Request, r
 }
 
 func (s *Server) handleGovernanceExecute(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}

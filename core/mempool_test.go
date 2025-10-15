@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"nhbchain/config"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -164,6 +165,83 @@ func TestCommitBlockSuccessPrunesMempool(t *testing.T) {
 
 	if remaining := node.GetMempool(); len(remaining) != 0 {
 		t.Fatalf("expected mempool to be empty after successful commit, got %d", len(remaining))
+	}
+}
+
+func TestNodeMempoolByteLimit(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+	node.SetMempoolLimit(10)
+
+	keyA, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	txA := prepareSignedTransaction(t, node, keyA, 0, types.NHBChainID())
+	sizeA, err := transactionSize(txA)
+	if err != nil {
+		t.Fatalf("transaction size: %v", err)
+	}
+	node.globalCfgMu.Lock()
+	node.globalCfg.Mempool.MaxBytes = int64(sizeA)
+	node.globalCfgMu.Unlock()
+
+	if err := node.AddTransaction(txA); err != nil {
+		t.Fatalf("add first transaction: %v", err)
+	}
+
+	keyB, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	txB := prepareSignedTransaction(t, node, keyB, 0, types.NHBChainID())
+	if err := node.AddTransaction(txB); err == nil || !errors.Is(err, ErrMempoolByteLimit) {
+		t.Fatalf("expected ErrMempoolByteLimit, got %v", err)
+	}
+}
+
+func TestNodeMempoolPerSenderLimit(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+	node.SetMempoolLimit(mempoolMaxSenderTx + 5)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	for i := 0; i < mempoolMaxSenderTx; i++ {
+		tx := prepareSignedTransaction(t, node, senderKey, uint64(i), types.NHBChainID())
+		if err := node.AddTransaction(tx); err != nil {
+			t.Fatalf("unexpected add error %d: %v", i, err)
+		}
+	}
+	blockingTx := prepareSignedTransaction(t, node, senderKey, uint64(mempoolMaxSenderTx), types.NHBChainID())
+	if err := node.AddTransaction(blockingTx); err == nil || !errors.Is(err, ErrMempoolSenderLimit) {
+		t.Fatalf("expected ErrMempoolSenderLimit, got %v", err)
+	}
+}
+
+func TestNodeMempoolQuotaLimit(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+	node.SetMempoolLimit(10)
+	node.globalCfgMu.Lock()
+	node.globalCfg.Quotas.Trade = config.Quota{MaxRequestsPerMin: 1, EpochSeconds: 86400}
+	node.globalCfgMu.Unlock()
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	first := prepareSignedTransaction(t, node, senderKey, 0, types.NHBChainID())
+	if err := node.AddTransaction(first); err != nil {
+		t.Fatalf("add first transaction: %v", err)
+	}
+	second := prepareSignedTransaction(t, node, senderKey, 1, types.NHBChainID())
+	if err := node.AddTransaction(second); err == nil || !errors.Is(err, ErrMempoolQuotaExceeded) {
+		t.Fatalf("expected ErrMempoolQuotaExceeded, got %v", err)
 	}
 }
 

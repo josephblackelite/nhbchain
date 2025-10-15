@@ -86,7 +86,7 @@ type escrowJSON struct {
 }
 
 func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -179,7 +179,7 @@ func (s *Server) handleEscrowGet(w http.ResponseWriter, r *http.Request, req *RP
 }
 
 func (s *Server) handleEscrowFund(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -222,7 +222,7 @@ func (s *Server) handleEscrowDispute(w http.ResponseWriter, r *http.Request, req
 }
 
 func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, req *RPCRequest, fn func([32]byte, [20]byte) error) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -253,7 +253,7 @@ func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleEscrowExpire(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
@@ -279,7 +279,7 @@ func (s *Server) handleEscrowExpire(w http.ResponseWriter, r *http.Request, req 
 }
 
 func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuth(r); authErr != nil {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 		return
 	}
