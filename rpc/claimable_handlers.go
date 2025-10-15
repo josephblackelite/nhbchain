@@ -27,6 +27,7 @@ type claimableCreateParams struct {
 	Amount   string `json:"amount"`
 	Deadline int64  `json:"deadline"`
 	HashLock string `json:"hashLock"`
+	callerMetadataParams
 }
 
 type claimableIDParams struct {
@@ -37,11 +38,13 @@ type claimableClaimParams struct {
 	ID       string `json:"id"`
 	Preimage string `json:"preimage"`
 	Payee    string `json:"payee"`
+	callerMetadataParams
 }
 
 type claimableCancelParams struct {
 	ID     string `json:"id"`
 	Caller string `json:"caller"`
+	callerMetadataParams
 }
 
 type claimableCreateResult struct {
@@ -79,6 +82,10 @@ func (s *Server) handleClaimableCreate(w http.ResponseWriter, r *http.Request, r
 	}
 	payer, err := parseBech32Address(params.Payer)
 	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	if err := s.validateCallerMetadata(callerKeyFromAddress(payer), params.callerMetadataParams); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
 	}
@@ -139,6 +146,10 @@ func (s *Server) handleClaimableClaim(w http.ResponseWriter, r *http.Request, re
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
 	}
+	if err := s.validateCallerMetadata(callerKeyFromAddress(payee), params.callerMetadataParams); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
+		return
+	}
 	if err := s.node.ClaimableClaim(id, preimage, payee); err != nil {
 		writeClaimableError(w, req.ID, err)
 		return
@@ -167,6 +178,10 @@ func (s *Server) handleClaimableCancel(w http.ResponseWriter, r *http.Request, r
 	}
 	caller, err := parseBech32Address(params.Caller)
 	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	if err := s.validateCallerMetadata(callerKeyFromAddress(caller), params.callerMetadataParams); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
 	}
