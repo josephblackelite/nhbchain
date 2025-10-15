@@ -58,7 +58,7 @@ func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{
 		"quote_id":   quote.Quote.ID,
 		"asset":      quote.Quote.Asset,
-		"price":      quote.Quote.Price,
+		"price":      stable.FromRateUnits(quote.Quote.Price),
 		"expires_at": quote.Quote.ExpiresAt.UTC().Format(time.RFC3339),
 	}
 	if traceID != "" {
@@ -104,8 +104,8 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{
 		"reservation_id": reservation.Reservation.QuoteID,
 		"quote_id":       reservation.Reservation.QuoteID,
-		"amount_in":      reservation.Reservation.AmountIn,
-		"amount_out":     reservation.Reservation.AmountOut,
+		"amount_in":      stable.FromAmountUnits(reservation.Reservation.AmountIn),
+		"amount_out":     stable.FromAmountUnits(reservation.Reservation.AmountOut),
 		"expires_at":     reservation.Reservation.ExpiresAt.UTC().Format(time.RFC3339),
 	}
 	if traceID != "" {

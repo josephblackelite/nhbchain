@@ -21,18 +21,20 @@ import (
 
 // Engine provides a high level facade for pricing and reservation flows.
 type Engine struct {
-	mu        sync.RWMutex
-	assets    map[string]Asset
-	limits    Limits
-	quotes    map[string]*quoteState
-	reserve   map[string]*reservationState
-	ledger    map[string]*assetLedger
-	prices    map[string]pricePoint
-	daily     dailyUsage
-	clock     func() time.Time
-	metrics   *observability.SwapStableMetrics
-	tracer    trace.Tracer
-	priceAges time.Duration
+	mu           sync.RWMutex
+	assets       map[string]Asset
+	limits       Limits
+	quotes       map[string]*quoteState
+	reserve      map[string]*reservationState
+	ledger       map[string]*assetLedger
+	prices       map[string]pricePoint
+	daily        dailyUsage
+	dailyCtx     context.Context
+	dailyPersist DailyUsageStore
+	clock        func() time.Time
+	metrics      *observability.SwapStableMetrics
+	tracer       trace.Tracer
+	priceAges    time.Duration
 }
 
 // Asset captures a supported stable asset and its parameters.
@@ -48,6 +50,11 @@ type Asset struct {
 // Limits represent soft throttles for intents.
 type Limits struct {
 	DailyCap int64
+}
+
+// DailyUsageStore persists the cumulative daily usage for minting operations.
+type DailyUsageStore interface {
+	SaveDailyUsage(ctx context.Context, day time.Time, amount int64) error
 }
 
 // Quote represents a computed exchange quote.
@@ -105,11 +112,35 @@ func NewEngine(assets []Asset, limits Limits) (*Engine, error) {
 		reserve:   make(map[string]*reservationState),
 		ledger:    ledger,
 		prices:    make(map[string]pricePoint),
+		dailyCtx:  context.Background(),
 		clock:     time.Now,
 		metrics:   observability.SwapStable(),
 		tracer:    otel.Tracer("swapd/stable"),
 		priceAges: 5 * time.Minute,
 	}, nil
+}
+
+// WithDailyUsageStore wires persistence for daily usage accounting.
+func (e *Engine) WithDailyUsageStore(store DailyUsageStore) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.dailyPersist = store
+}
+
+// RestoreDailyUsage initialises the in-memory counters from persisted state.
+func (e *Engine) RestoreDailyUsage(day time.Time, amount int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if amount < 0 {
+		amount = 0
+	}
+	day = day.UTC().Truncate(24 * time.Hour)
+	if day.IsZero() {
+		e.daily = dailyUsage{}
+		return
+	}
+	e.daily.day = day
+	e.daily.amount = amount
 }
 
 // WithClock overrides the engine clock for deterministic tests.
@@ -469,6 +500,16 @@ func fromRateUnits(units int64) float64 {
 	return float64(units) / float64(priceScale)
 }
 
+// FromAmountUnits converts scaled integer amounts to user friendly values.
+func FromAmountUnits(units int64) float64 {
+	return fromAmountUnits(units)
+}
+
+// FromRateUnits converts scaled integer rates to user friendly values.
+func FromRateUnits(units int64) float64 {
+	return fromRateUnits(units)
+}
+
 func withinTolerance(value float64, units, scale int64) bool {
 	recon := float64(units) / float64(scale)
 	diff := math.Abs(value - recon)
@@ -535,6 +576,13 @@ func (e *Engine) applyDailyLimit(amount int64, now time.Time) error {
 		return ErrDailyCapExceeded
 	}
 	e.daily.amount += amount
+	if err := e.persistDailyLocked(); err != nil {
+		e.daily.amount -= amount
+		if e.daily.amount < 0 {
+			e.daily.amount = 0
+		}
+		return err
+	}
 	return nil
 }
 
@@ -549,6 +597,9 @@ func (e *Engine) revertDaily(amount int64, now time.Time) {
 	e.daily.amount -= amount
 	if e.daily.amount < 0 {
 		e.daily.amount = 0
+	}
+	if err := e.persistDailyLocked(); err != nil {
+		slog.Error("swapd/stable: persist daily usage on revert", "error", err)
 	}
 }
 
@@ -570,6 +621,23 @@ func (e *Engine) releaseReservationLocked(state *reservationState, now time.Time
 type dailyUsage struct {
 	day    time.Time
 	amount int64
+}
+
+func (e *Engine) persistDailyLocked() error {
+	if e.dailyPersist == nil {
+		return nil
+	}
+	if e.daily.day.IsZero() {
+		return nil
+	}
+	ctx := e.dailyCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := e.dailyPersist.SaveDailyUsage(ctx, e.daily.day, e.daily.amount); err != nil {
+		return fmt.Errorf("persist daily usage: %w", err)
+	}
+	return nil
 }
 
 func amountMatches(a, b int64) bool {
