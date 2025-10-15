@@ -4923,6 +4923,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	riskEngine := swap.NewRiskEngine(manager)
 	sanctionsLog := swap.NewSanctionsLog(manager)
 	priceEngine := swap.NewPriceProofEngine(manager, cfg.MaxQuoteAge(), cfg.PriceProofMaxDeviationBps)
+	priceEngine.RequireSignature(riskParams.PriceProofSignatureRequired)
 	quote, err := oracle.GetRate("USD", token)
 	if err != nil {
 		if errors.Is(err, swap.ErrNoFreshQuote) {
@@ -4947,16 +4948,30 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		if timestamp == 0 {
 			timestamp = time.Now().UTC().Unix()
 		}
-		fallback, err := swap.NewPriceProof(swap.PriceProofDomainV1, providerID, pair, rateStr, timestamp, nil)
+		fallback, err := swap.NewPriceProof(
+			swap.PriceProofDomainV1,
+			providerID,
+			pair,
+			rateStr,
+			timestamp,
+			nil,
+			swap.WithSignatureRequired(riskParams.PriceProofSignatureRequired),
+		)
 		if err != nil {
+			if errors.Is(err, swap.ErrPriceProofSignatureMissing) {
+				return "", false, ErrSwapPriceProofRequired
+			}
 			return "", false, fmt.Errorf("swap: price proof: %w", err)
 		}
 		priceProof = fallback
 	}
-	if len(priceProof.Signature) == 65 {
+	if priceProof == nil {
+		return "", false, ErrSwapPriceProofRequired
+	}
+	if riskParams.PriceProofSignatureRequired || len(priceProof.Signature) == 65 {
 		if err := priceEngine.Verify(priceProof, provider, token); err != nil {
 			switch {
-			case errors.Is(err, swap.ErrPriceProofNil):
+			case errors.Is(err, swap.ErrPriceProofNil), errors.Is(err, swap.ErrPriceProofSignatureMissing):
 				return "", false, ErrSwapPriceProofRequired
 			case errors.Is(err, swap.ErrPriceProofDomain),
 				errors.Is(err, swap.ErrPriceProofPair),
@@ -4973,8 +4988,6 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 				return "", false, fmt.Errorf("swap: price proof verify: %w", err)
 			}
 		}
-	} else if priceProof == nil {
-		return "", false, ErrSwapPriceProofRequired
 	}
 	proofID, err := priceProof.ID()
 	if err != nil {

@@ -24,6 +24,8 @@ var (
 	ErrPriceProofSignerUnknown = errors.New("swap: price proof signer unknown")
 	// ErrPriceProofSignatureInvalid indicates the signature could not be recovered or did not match the registered signer.
 	ErrPriceProofSignatureInvalid = errors.New("swap: price proof signature invalid")
+	// ErrPriceProofSignatureMissing indicates the proof omitted a signature when required.
+	ErrPriceProofSignatureMissing = errors.New("swap: price proof signature missing")
 	// ErrPriceProofStale indicates the proof exceeded the configured freshness window.
 	ErrPriceProofStale = errors.New("swap: price proof stale")
 	// ErrPriceProofDeviation indicates the proof deviated beyond the allowed threshold from the previous observation.
@@ -39,11 +41,12 @@ type PriceProofStore interface {
 
 // PriceProofEngine validates signed price proofs emitted by off-chain oracles.
 type PriceProofEngine struct {
-	store           PriceProofStore
-	maxAge          time.Duration
-	maxDeviationBps uint64
-	now             func() time.Time
-	futureTolerance time.Duration
+	store            PriceProofStore
+	maxAge           time.Duration
+	maxDeviationBps  uint64
+	now              func() time.Time
+	futureTolerance  time.Duration
+	requireSignature bool
 }
 
 // NewPriceProofEngine constructs an engine backed by the supplied store.
@@ -63,6 +66,14 @@ func (e *PriceProofEngine) SetClock(now func() time.Time) {
 		return
 	}
 	e.now = now
+}
+
+// RequireSignature configures whether proofs without signatures should be rejected.
+func (e *PriceProofEngine) RequireSignature(require bool) {
+	if e == nil {
+		return
+	}
+	e.requireSignature = require
 }
 
 // Verify validates the supplied price proof against the configured guards.
@@ -101,27 +112,33 @@ func (e *PriceProofEngine) Verify(proof *PriceProof, provider string, token stri
 	if strings.TrimSpace(token) != "" && !strings.EqualFold(token, base) {
 		return ErrPriceProofPair
 	}
-	signer, ok, err := e.store.SwapPriceSigner(proofProvider)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrPriceProofSignerUnknown
-	}
-	hash, err := proof.Hash()
-	if err != nil {
-		return err
-	}
-	if len(proof.Signature) != 65 {
-		return ErrPriceProofSignatureInvalid
-	}
-	pubKey, err := ethcrypto.SigToPub(hash, proof.Signature)
-	if err != nil {
-		return ErrPriceProofSignatureInvalid
-	}
-	recovered := ethcrypto.PubkeyToAddress(*pubKey)
-	if recovered != ethcommon.BytesToAddress(signer[:]) {
-		return ErrPriceProofSignatureInvalid
+	if len(proof.Signature) == 0 {
+		if e.requireSignature {
+			return ErrPriceProofSignatureMissing
+		}
+	} else {
+		signer, ok, err := e.store.SwapPriceSigner(proofProvider)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrPriceProofSignerUnknown
+		}
+		if len(proof.Signature) != 65 {
+			return ErrPriceProofSignatureInvalid
+		}
+		hash, err := proof.Hash()
+		if err != nil {
+			return err
+		}
+		pubKey, err := ethcrypto.SigToPub(hash, proof.Signature)
+		if err != nil {
+			return ErrPriceProofSignatureInvalid
+		}
+		recovered := ethcrypto.PubkeyToAddress(*pubKey)
+		if recovered != ethcommon.BytesToAddress(signer[:]) {
+			return ErrPriceProofSignatureInvalid
+		}
 	}
 	ts := proof.Timestamp
 	if ts.IsZero() {

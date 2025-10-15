@@ -123,3 +123,37 @@ func TestPriceProofEngineVerification(t *testing.T) {
 		t.Fatalf("expected provider mismatch, got %v", err)
 	}
 }
+
+func TestPriceProofEngineRequiresSignature(t *testing.T) {
+	store := newStubPriceStore()
+	priv, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	provider := "prime-gateway"
+	store.setSigner(provider, addrToArray(ethcrypto.PubkeyToAddress(priv.PublicKey)))
+
+	now := time.Unix(1700000000, 0).UTC()
+	engine := swap.NewPriceProofEngine(store, time.Minute, 200)
+	engine.SetClock(func() time.Time { return now })
+	engine.RequireSignature(true)
+
+	if _, err := swap.NewPriceProof(swap.PriceProofDomainV1, provider, "ZNHB/USD", "0.10", now.Unix(), nil, swap.WithSignatureRequired(true)); !errors.Is(err, swap.ErrPriceProofSignatureMissing) {
+		t.Fatalf("expected signature missing error, got %v", err)
+	}
+
+	proof, err := swap.NewPriceProof(swap.PriceProofDomainV1, provider, "ZNHB/USD", "0.10", now.Unix(), nil)
+	if err != nil {
+		t.Fatalf("new price proof: %v", err)
+	}
+	signProof(t, proof, priv)
+
+	if err := engine.Verify(proof, provider, "ZNHB"); err != nil {
+		t.Fatalf("verify signed proof: %v", err)
+	}
+
+	proof.Signature = nil
+	if err := engine.Verify(proof, provider, "ZNHB"); !errors.Is(err, swap.ErrPriceProofSignatureMissing) {
+		t.Fatalf("expected signature missing error, got %v", err)
+	}
+}
