@@ -148,27 +148,53 @@ groups:
             The payout processor pause toggle has been active within the last five minutes.
             Confirm the pause is intentional and execute the payout incident runbook if required.
 
-      - alert: PaymasterAutoTopUpSpike
+      - alert: PaymasterAutoTopUpSpikeWarning
         expr: sum(increase(nhb_paymaster_autotopups_total{outcome="success"}[5m])) > 3
         for: 10m
         labels:
           severity: warning
           team: treasury
         annotations:
-          summary: "Automatic paymaster top-up spike"
+          summary: "Automatic paymaster top-up spike (warning)"
           description: |
             More than three successful automatic paymaster top-ups executed within five minutes.
             Review recent sponsored activity and confirm the surge aligns with expected merchant load.
 
-      - alert: PaymasterAutoTopUpCapSaturation
+      - alert: PaymasterAutoTopUpSpikeCritical
+        expr: sum(increase(nhb_paymaster_autotopups_total{outcome="success"}[5m])) > 10
+        for: 10m
+        labels:
+          severity: critical
+          team: treasury
+        annotations:
+          summary: "Automatic paymaster top-up spike (critical)"
+          description: |
+            More than ten successful automatic paymaster top-ups executed within five minutes.
+            Treat the surge as a potential abuse event or runaway sponsorship configuration and
+            coordinate with security for immediate review.
+
+      - alert: PaymasterAutoTopUpCapSaturationWarning
         expr: sum(increase(nhb_paymaster_autotopups_total{outcome="failure"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: treasury
+        annotations:
+          summary: "Automatic paymaster top-ups nearing cap"
+          description: |
+            Automatic paymaster top-up failures were observed during the last 15 minutes. Inspect the
+            `paymaster.autotopup` events for a `daily_cap_exceeded` reason and confirm the configured
+            cap still matches the active budget.
+
+      - alert: PaymasterAutoTopUpCapSaturationCritical
+        expr: sum(increase(nhb_paymaster_autotopups_total{outcome="failure"}[15m])) > 3
         for: 15m
         labels:
           severity: critical
           team: treasury
         annotations:
-          summary: "Automatic paymaster top-ups are failing"
+          summary: "Automatic paymaster top-ups capped"
           description: |
-            Automatic paymaster top-ups have started failing during the last 15 minutes. Inspect
-            the `paymaster.autotopup` events for a `daily_cap_exceeded` reason and adjust limits or
-            funding before merchants are throttled.
+            More than three automatic paymaster top-up failures occurred within 15 minutes. The
+            paymaster is likely saturating its mint cap—raise limits or replenish balances before
+            sponsored transactions are throttled.
