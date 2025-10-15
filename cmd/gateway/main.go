@@ -78,6 +78,23 @@ func main() {
 		configDir = filepath.Dir(cfgPath)
 	}
 
+	if cfg.Security.AllowInsecure {
+		if !strings.EqualFold(env, "dev") {
+			logger.Fatal("security.allowInsecure requires NHB_ENV=dev")
+		}
+		if !isLoopbackAddress(cfg.ListenAddress) {
+			logger.Fatal("security.allowInsecure requires the gateway to bind to a loopback address")
+		}
+	}
+	if allowInsecureFlag {
+		if !strings.EqualFold(env, "dev") {
+			logger.Fatal("--allow-insecure requires NHB_ENV=dev")
+		}
+		if !isLoopbackAddress(cfg.ListenAddress) {
+			logger.Fatal("--allow-insecure requires the gateway to bind to a loopback address")
+		}
+	}
+
 	configuredMode := compat.ModeAuto
 	if compatModeFlag != "" {
 		parsed, err := compat.ParseMode(compatModeFlag)
@@ -102,7 +119,10 @@ func main() {
 		logger.Printf("compat deprecation plan not loaded: %v", err)
 	}
 
-	serviceEndpoints := ensureServiceConfig(cfg)
+	serviceEndpoints, err := ensureServiceConfig(env, cfg)
+	if err != nil {
+		logger.Fatalf("configure service endpoints: %v", err)
+	}
 	autoUpgrade := cfg.Security.AutoUpgradeHTTP
 	if override := strings.TrimSpace(os.Getenv("NHB_GATEWAY_AUTO_HTTPS")); override != "" {
 		parsed, err := strconv.ParseBool(override)
@@ -256,6 +276,7 @@ func main() {
 		if !strings.EqualFold(env, "dev") && !isLoopbackAddress(cfg.ListenAddress) {
 			logger.Fatal("plaintext gateway mode is restricted to loopback listeners or dev environment")
 		}
+		logger.Println("WARNING: gateway running without TLS; only permitted for NHB_ENV=dev on loopback interfaces")
 	}
 
 	server := &http.Server{
@@ -301,7 +322,7 @@ func main() {
 	}
 }
 
-func ensureServiceConfig(cfg config.Config) map[string]string {
+func ensureServiceConfig(env string, cfg config.Config) (map[string]string, error) {
 	endpoints := map[string]string{
 		"lendingd":   "http://127.0.0.1:7101",
 		"swapd":      "http://127.0.0.1:7102",
@@ -325,7 +346,26 @@ func ensureServiceConfig(cfg config.Config) map[string]string {
 		}
 		endpoints[svc.Name] = svc.Endpoint
 	}
-	return endpoints
+	if !strings.EqualFold(strings.TrimSpace(env), "dev") {
+		effectiveEnv := strings.TrimSpace(env)
+		if effectiveEnv == "" {
+			effectiveEnv = "(unset)"
+		}
+		for name, endpoint := range endpoints {
+			trimmed := strings.TrimSpace(endpoint)
+			if trimmed == "" {
+				return nil, fmt.Errorf("endpoint for service %s is empty", name)
+			}
+			parsed, err := url.Parse(trimmed)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s endpoint: %w", name, err)
+			}
+			if !strings.EqualFold(parsed.Scheme, "https") {
+				return nil, fmt.Errorf("%s endpoint must use https:// when NHB_ENV=%s", name, effectiveEnv)
+			}
+		}
+	}
+	return endpoints, nil
 }
 
 func servicesMap(services []*compat.Service) map[string]*compat.Service {

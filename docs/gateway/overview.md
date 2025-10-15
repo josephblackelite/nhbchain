@@ -47,4 +47,14 @@ services are:
 | `consensusd` | `http://127.0.0.1:7104` |
 
 Override these with environment variables (`NHB_GATEWAY_LENDING_URL`, etc.) or in
-`gateway.yaml`.
+`gateway.yaml`. These HTTP defaults exist strictly for local development. When
+`NHB_ENV` is anything other than `dev`, every service endpoint **must** use
+`https://` and present a valid certificate; the gateway now refuses to boot if a
+plaintext endpoint is configured. Operators should provision TLS material for
+each backend (or terminate TLS in front of the gateway and configure
+mutual-TLS-terminating proxies) before rolling out to staging or production.
+
+The CLI `--allow-insecure` escape hatch is likewise restricted to dev-only
+loopback testing. The binary exits immediately if the flag is supplied without
+`NHB_ENV=dev` or when binding to anything other than `127.0.0.1`/`::1`, and it
+logs a warning whenever TLS is disabled.
