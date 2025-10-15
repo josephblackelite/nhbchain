@@ -24,17 +24,59 @@ export const protobufPackage = "pos.v1";
 export interface Merchant {
   address: string;
   paused: boolean;
+  /**
+   * Nonce that was signed when the merchant registration state was
+   * produced, allowing clients to verify the latest replay-safe context.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp that scopes the merchant registration
+   * signature in seconds since epoch.
+   */
+  expiresAt: number;
+  /**
+   * Chain identifier binding the merchant registration to a specific
+   * network.
+   */
+  chainId: string;
 }
 
 export interface Device {
   deviceId: string;
   merchantAddr: string;
   revoked: boolean;
+  /**
+   * Nonce carried alongside the device registration for replay
+   * protection when mirrored back to clients.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp that scopes the device registration signature
+   * in seconds since epoch.
+   */
+  expiresAt: number;
+  /** Chain identifier binding this device registration to a network. */
+  chainId: string;
 }
 
 export interface MsgRegisterMerchant {
   authority: string;
   merchantAddr: string;
+  /**
+   * Nonce that must match between the signature payload and the
+   * resulting merchant record to prevent replay on the same chain.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp defining how long the registration signature
+   * remains valid.
+   */
+  expiresAt: number;
+  /**
+   * Chain identifier binding the registration signature to a specific
+   * network.
+   */
+  chainId: string;
 }
 
 export interface MsgRegisterMerchantResponse {
@@ -45,6 +87,18 @@ export interface MsgRegisterDevice {
   authority: string;
   merchantAddr: string;
   deviceId: string;
+  /**
+   * Nonce that must match the device signature payload, preventing
+   * replay for a specific chain.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp defining the validity window for the device
+   * registration signature.
+   */
+  expiresAt: number;
+  /** Chain identifier binding the registration to a specific network. */
+  chainId: string;
 }
 
 export interface MsgRegisterDeviceResponse {
@@ -54,6 +108,18 @@ export interface MsgRegisterDeviceResponse {
 export interface MsgPauseMerchant {
   authority: string;
   merchantAddr: string;
+  /**
+   * Nonce to scope the pause operation signature within the target
+   * chain.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp defining how long the pause signature is valid
+   * in seconds since epoch.
+   */
+  expiresAt: number;
+  /** Chain identifier binding the pause signature to a network. */
+  chainId: string;
 }
 
 export interface MsgPauseMerchantResponse {
@@ -63,6 +129,18 @@ export interface MsgPauseMerchantResponse {
 export interface MsgResumeMerchant {
   authority: string;
   merchantAddr: string;
+  /**
+   * Nonce to scope the resume operation signature within the target
+   * chain.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp defining how long the resume signature is
+   * valid in seconds since epoch.
+   */
+  expiresAt: number;
+  /** Chain identifier binding the resume signature to a network. */
+  chainId: string;
 }
 
 export interface MsgResumeMerchantResponse {
@@ -73,6 +151,18 @@ export interface MsgRevokeDevice {
   authority: string;
   merchantAddr: string;
   deviceId: string;
+  /**
+   * Nonce to scope the revoke operation signature within the target
+   * chain.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp defining how long the revoke signature is
+   * valid in seconds since epoch.
+   */
+  expiresAt: number;
+  /** Chain identifier binding the revoke signature to a network. */
+  chainId: string;
 }
 
 export interface MsgRevokeDeviceResponse {
@@ -83,6 +173,18 @@ export interface MsgRestoreDevice {
   authority: string;
   merchantAddr: string;
   deviceId: string;
+  /**
+   * Nonce to scope the restore operation signature within the target
+   * chain.
+   */
+  nonce: number;
+  /**
+   * Expiration timestamp defining how long the restore signature is
+   * valid in seconds since epoch.
+   */
+  expiresAt: number;
+  /** Chain identifier binding the restore signature to a network. */
+  chainId: string;
 }
 
 export interface MsgRestoreDeviceResponse {
@@ -90,7 +192,7 @@ export interface MsgRestoreDeviceResponse {
 }
 
 function createBaseMerchant(): Merchant {
-  return { address: "", paused: false };
+  return { address: "", paused: false, nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const Merchant: MessageFns<Merchant> = {
@@ -100,6 +202,15 @@ export const Merchant: MessageFns<Merchant> = {
     }
     if (message.paused !== false) {
       writer.uint32(16).bool(message.paused);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(24).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(32).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(42).string(message.chainId);
     }
     return writer;
   },
@@ -127,6 +238,30 @@ export const Merchant: MessageFns<Merchant> = {
           message.paused = reader.bool();
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -140,6 +275,9 @@ export const Merchant: MessageFns<Merchant> = {
     return {
       address: isSet(object.address) ? globalThis.String(object.address) : "",
       paused: isSet(object.paused) ? globalThis.Boolean(object.paused) : false,
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -151,6 +289,15 @@ export const Merchant: MessageFns<Merchant> = {
     if (message.paused !== false) {
       obj.paused = message.paused;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -161,12 +308,15 @@ export const Merchant: MessageFns<Merchant> = {
     const message = createBaseMerchant();
     message.address = object.address ?? "";
     message.paused = object.paused ?? false;
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
 
 function createBaseDevice(): Device {
-  return { deviceId: "", merchantAddr: "", revoked: false };
+  return { deviceId: "", merchantAddr: "", revoked: false, nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const Device: MessageFns<Device> = {
@@ -179,6 +329,15 @@ export const Device: MessageFns<Device> = {
     }
     if (message.revoked !== false) {
       writer.uint32(24).bool(message.revoked);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(32).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(40).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(50).string(message.chainId);
     }
     return writer;
   },
@@ -214,6 +373,30 @@ export const Device: MessageFns<Device> = {
           message.revoked = reader.bool();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -228,6 +411,9 @@ export const Device: MessageFns<Device> = {
       deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
       revoked: isSet(object.revoked) ? globalThis.Boolean(object.revoked) : false,
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -242,6 +428,15 @@ export const Device: MessageFns<Device> = {
     if (message.revoked !== false) {
       obj.revoked = message.revoked;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -253,12 +448,15 @@ export const Device: MessageFns<Device> = {
     message.deviceId = object.deviceId ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
     message.revoked = object.revoked ?? false;
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
 
 function createBaseMsgRegisterMerchant(): MsgRegisterMerchant {
-  return { authority: "", merchantAddr: "" };
+  return { authority: "", merchantAddr: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgRegisterMerchant: MessageFns<MsgRegisterMerchant> = {
@@ -268,6 +466,15 @@ export const MsgRegisterMerchant: MessageFns<MsgRegisterMerchant> = {
     }
     if (message.merchantAddr !== "") {
       writer.uint32(18).string(message.merchantAddr);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(24).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(32).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(42).string(message.chainId);
     }
     return writer;
   },
@@ -295,6 +502,30 @@ export const MsgRegisterMerchant: MessageFns<MsgRegisterMerchant> = {
           message.merchantAddr = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -308,6 +539,9 @@ export const MsgRegisterMerchant: MessageFns<MsgRegisterMerchant> = {
     return {
       authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -319,6 +553,15 @@ export const MsgRegisterMerchant: MessageFns<MsgRegisterMerchant> = {
     if (message.merchantAddr !== "") {
       obj.merchantAddr = message.merchantAddr;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -329,6 +572,9 @@ export const MsgRegisterMerchant: MessageFns<MsgRegisterMerchant> = {
     const message = createBaseMsgRegisterMerchant();
     message.authority = object.authority ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -392,7 +638,7 @@ export const MsgRegisterMerchantResponse: MessageFns<MsgRegisterMerchantResponse
 };
 
 function createBaseMsgRegisterDevice(): MsgRegisterDevice {
-  return { authority: "", merchantAddr: "", deviceId: "" };
+  return { authority: "", merchantAddr: "", deviceId: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgRegisterDevice: MessageFns<MsgRegisterDevice> = {
@@ -405,6 +651,15 @@ export const MsgRegisterDevice: MessageFns<MsgRegisterDevice> = {
     }
     if (message.deviceId !== "") {
       writer.uint32(26).string(message.deviceId);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(32).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(40).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(50).string(message.chainId);
     }
     return writer;
   },
@@ -440,6 +695,30 @@ export const MsgRegisterDevice: MessageFns<MsgRegisterDevice> = {
           message.deviceId = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -454,6 +733,9 @@ export const MsgRegisterDevice: MessageFns<MsgRegisterDevice> = {
       authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
       deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -468,6 +750,15 @@ export const MsgRegisterDevice: MessageFns<MsgRegisterDevice> = {
     if (message.deviceId !== "") {
       obj.deviceId = message.deviceId;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -479,6 +770,9 @@ export const MsgRegisterDevice: MessageFns<MsgRegisterDevice> = {
     message.authority = object.authority ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
     message.deviceId = object.deviceId ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -542,7 +836,7 @@ export const MsgRegisterDeviceResponse: MessageFns<MsgRegisterDeviceResponse> = 
 };
 
 function createBaseMsgPauseMerchant(): MsgPauseMerchant {
-  return { authority: "", merchantAddr: "" };
+  return { authority: "", merchantAddr: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgPauseMerchant: MessageFns<MsgPauseMerchant> = {
@@ -552,6 +846,15 @@ export const MsgPauseMerchant: MessageFns<MsgPauseMerchant> = {
     }
     if (message.merchantAddr !== "") {
       writer.uint32(18).string(message.merchantAddr);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(24).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(32).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(42).string(message.chainId);
     }
     return writer;
   },
@@ -579,6 +882,30 @@ export const MsgPauseMerchant: MessageFns<MsgPauseMerchant> = {
           message.merchantAddr = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -592,6 +919,9 @@ export const MsgPauseMerchant: MessageFns<MsgPauseMerchant> = {
     return {
       authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -603,6 +933,15 @@ export const MsgPauseMerchant: MessageFns<MsgPauseMerchant> = {
     if (message.merchantAddr !== "") {
       obj.merchantAddr = message.merchantAddr;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -613,6 +952,9 @@ export const MsgPauseMerchant: MessageFns<MsgPauseMerchant> = {
     const message = createBaseMsgPauseMerchant();
     message.authority = object.authority ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -676,7 +1018,7 @@ export const MsgPauseMerchantResponse: MessageFns<MsgPauseMerchantResponse> = {
 };
 
 function createBaseMsgResumeMerchant(): MsgResumeMerchant {
-  return { authority: "", merchantAddr: "" };
+  return { authority: "", merchantAddr: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgResumeMerchant: MessageFns<MsgResumeMerchant> = {
@@ -686,6 +1028,15 @@ export const MsgResumeMerchant: MessageFns<MsgResumeMerchant> = {
     }
     if (message.merchantAddr !== "") {
       writer.uint32(18).string(message.merchantAddr);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(24).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(32).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(42).string(message.chainId);
     }
     return writer;
   },
@@ -713,6 +1064,30 @@ export const MsgResumeMerchant: MessageFns<MsgResumeMerchant> = {
           message.merchantAddr = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -726,6 +1101,9 @@ export const MsgResumeMerchant: MessageFns<MsgResumeMerchant> = {
     return {
       authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -737,6 +1115,15 @@ export const MsgResumeMerchant: MessageFns<MsgResumeMerchant> = {
     if (message.merchantAddr !== "") {
       obj.merchantAddr = message.merchantAddr;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -747,6 +1134,9 @@ export const MsgResumeMerchant: MessageFns<MsgResumeMerchant> = {
     const message = createBaseMsgResumeMerchant();
     message.authority = object.authority ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -810,7 +1200,7 @@ export const MsgResumeMerchantResponse: MessageFns<MsgResumeMerchantResponse> = 
 };
 
 function createBaseMsgRevokeDevice(): MsgRevokeDevice {
-  return { authority: "", merchantAddr: "", deviceId: "" };
+  return { authority: "", merchantAddr: "", deviceId: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgRevokeDevice: MessageFns<MsgRevokeDevice> = {
@@ -823,6 +1213,15 @@ export const MsgRevokeDevice: MessageFns<MsgRevokeDevice> = {
     }
     if (message.deviceId !== "") {
       writer.uint32(26).string(message.deviceId);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(32).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(40).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(50).string(message.chainId);
     }
     return writer;
   },
@@ -858,6 +1257,30 @@ export const MsgRevokeDevice: MessageFns<MsgRevokeDevice> = {
           message.deviceId = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -872,6 +1295,9 @@ export const MsgRevokeDevice: MessageFns<MsgRevokeDevice> = {
       authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
       deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -886,6 +1312,15 @@ export const MsgRevokeDevice: MessageFns<MsgRevokeDevice> = {
     if (message.deviceId !== "") {
       obj.deviceId = message.deviceId;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -897,6 +1332,9 @@ export const MsgRevokeDevice: MessageFns<MsgRevokeDevice> = {
     message.authority = object.authority ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
     message.deviceId = object.deviceId ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -960,7 +1398,7 @@ export const MsgRevokeDeviceResponse: MessageFns<MsgRevokeDeviceResponse> = {
 };
 
 function createBaseMsgRestoreDevice(): MsgRestoreDevice {
-  return { authority: "", merchantAddr: "", deviceId: "" };
+  return { authority: "", merchantAddr: "", deviceId: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgRestoreDevice: MessageFns<MsgRestoreDevice> = {
@@ -973,6 +1411,15 @@ export const MsgRestoreDevice: MessageFns<MsgRestoreDevice> = {
     }
     if (message.deviceId !== "") {
       writer.uint32(26).string(message.deviceId);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(32).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(40).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(50).string(message.chainId);
     }
     return writer;
   },
@@ -1008,6 +1455,30 @@ export const MsgRestoreDevice: MessageFns<MsgRestoreDevice> = {
           message.deviceId = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1022,6 +1493,9 @@ export const MsgRestoreDevice: MessageFns<MsgRestoreDevice> = {
       authority: isSet(object.authority) ? globalThis.String(object.authority) : "",
       merchantAddr: isSet(object.merchantAddr) ? globalThis.String(object.merchantAddr) : "",
       deviceId: isSet(object.deviceId) ? globalThis.String(object.deviceId) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -1036,6 +1510,15 @@ export const MsgRestoreDevice: MessageFns<MsgRestoreDevice> = {
     if (message.deviceId !== "") {
       obj.deviceId = message.deviceId;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -1047,6 +1530,9 @@ export const MsgRestoreDevice: MessageFns<MsgRestoreDevice> = {
     message.authority = object.authority ?? "";
     message.merchantAddr = object.merchantAddr ?? "";
     message.deviceId = object.deviceId ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -1288,6 +1774,17 @@ export type DeepPartial<T> = T extends Builtin ? T
   : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>>
   : T extends {} ? { [K in keyof T]?: DeepPartial<T[K]> }
   : Partial<T>;
+
+function longToNumber(int64: { toString(): string }): number {
+  const num = globalThis.Number(int64.toString());
+  if (num > globalThis.Number.MAX_SAFE_INTEGER) {
+    throw new globalThis.Error("Value is larger than Number.MAX_SAFE_INTEGER");
+  }
+  if (num < globalThis.Number.MIN_SAFE_INTEGER) {
+    throw new globalThis.Error("Value is smaller than Number.MIN_SAFE_INTEGER");
+  }
+  return num;
+}
 
 function isSet(value: any): boolean {
   return value !== null && value !== undefined;

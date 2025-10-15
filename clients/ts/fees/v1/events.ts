@@ -67,7 +67,7 @@ export const FeeApplied: MessageFns<FeeApplied> = {
     if (message.ownerWallet.length !== 0) {
       writer.uint32(58).bytes(message.ownerWallet);
     }
-    if (message.freeTierApplied === true) {
+    if (message.freeTierApplied !== false) {
       writer.uint32(64).bool(message.freeTierApplied);
     }
     if (message.freeTierLimit !== 0) {
@@ -249,7 +249,7 @@ export const FeeApplied: MessageFns<FeeApplied> = {
     if (message.ownerWallet.length !== 0) {
       obj.ownerWallet = base64FromBytes(message.ownerWallet);
     }
-    if (message.freeTierApplied === true) {
+    if (message.freeTierApplied !== false) {
       obj.freeTierApplied = message.freeTierApplied;
     }
     if (message.freeTierLimit !== 0) {

@@ -27,6 +27,21 @@ export interface MsgAuthorizePayment {
   amount: string;
   expiry: number;
   intentRef: Buffer;
+  /**
+   * Nonce the client signs over to guarantee uniqueness of the
+   * authorization intent within the chosen chain.
+   */
+  nonce: number;
+  /**
+   * Unix timestamp (seconds) after which the signed authorization
+   * should be considered expired by verifiers.
+   */
+  expiresAt: number;
+  /**
+   * Chain identifier used to scope signatures and prevent cross-network
+   * replay attacks.
+   */
+  chainId: string;
 }
 
 export interface MsgAuthorizePaymentResponse {
@@ -37,6 +52,21 @@ export interface MsgCapturePayment {
   merchant: string;
   authorizationId: string;
   amount: string;
+  /**
+   * Nonce scoped to the capture request to prevent replay of the same
+   * authorization on the target chain.
+   */
+  nonce: number;
+  /**
+   * Expiration for the capture signature expressed as a unix timestamp
+   * in seconds.
+   */
+  expiresAt: number;
+  /**
+   * Chain identifier that bind the capture signature to a specific
+   * execution environment.
+   */
+  chainId: string;
 }
 
 export interface MsgCapturePaymentResponse {
@@ -49,6 +79,21 @@ export interface MsgVoidPayment {
   merchant: string;
   authorizationId: string;
   reason: string;
+  /**
+   * Nonce scoped to the void request to prevent replays within the
+   * selected chain.
+   */
+  nonce: number;
+  /**
+   * Expiration for the void signature expressed as a unix timestamp in
+   * seconds.
+   */
+  expiresAt: number;
+  /**
+   * Chain identifier the void signature was produced for, preventing
+   * cross-network reuse.
+   */
+  chainId: string;
 }
 
 export interface MsgVoidPaymentResponse {
@@ -58,7 +103,16 @@ export interface MsgVoidPaymentResponse {
 }
 
 function createBaseMsgAuthorizePayment(): MsgAuthorizePayment {
-  return { payer: "", merchant: "", amount: "", expiry: 0, intentRef: Buffer.alloc(0) };
+  return {
+    payer: "",
+    merchant: "",
+    amount: "",
+    expiry: 0,
+    intentRef: Buffer.alloc(0),
+    nonce: 0,
+    expiresAt: 0,
+    chainId: "",
+  };
 }
 
 export const MsgAuthorizePayment: MessageFns<MsgAuthorizePayment> = {
@@ -77,6 +131,15 @@ export const MsgAuthorizePayment: MessageFns<MsgAuthorizePayment> = {
     }
     if (message.intentRef.length !== 0) {
       writer.uint32(42).bytes(message.intentRef);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(48).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(56).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(66).string(message.chainId);
     }
     return writer;
   },
@@ -128,6 +191,30 @@ export const MsgAuthorizePayment: MessageFns<MsgAuthorizePayment> = {
           message.intentRef = Buffer.from(reader.bytes());
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -144,6 +231,9 @@ export const MsgAuthorizePayment: MessageFns<MsgAuthorizePayment> = {
       amount: isSet(object.amount) ? globalThis.String(object.amount) : "",
       expiry: isSet(object.expiry) ? globalThis.Number(object.expiry) : 0,
       intentRef: isSet(object.intentRef) ? Buffer.from(bytesFromBase64(object.intentRef)) : Buffer.alloc(0),
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -164,6 +254,15 @@ export const MsgAuthorizePayment: MessageFns<MsgAuthorizePayment> = {
     if (message.intentRef.length !== 0) {
       obj.intentRef = base64FromBytes(message.intentRef);
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -177,6 +276,9 @@ export const MsgAuthorizePayment: MessageFns<MsgAuthorizePayment> = {
     message.amount = object.amount ?? "";
     message.expiry = object.expiry ?? 0;
     message.intentRef = object.intentRef ?? Buffer.alloc(0);
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -240,7 +342,7 @@ export const MsgAuthorizePaymentResponse: MessageFns<MsgAuthorizePaymentResponse
 };
 
 function createBaseMsgCapturePayment(): MsgCapturePayment {
-  return { merchant: "", authorizationId: "", amount: "" };
+  return { merchant: "", authorizationId: "", amount: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgCapturePayment: MessageFns<MsgCapturePayment> = {
@@ -253,6 +355,15 @@ export const MsgCapturePayment: MessageFns<MsgCapturePayment> = {
     }
     if (message.amount !== "") {
       writer.uint32(26).string(message.amount);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(32).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(40).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(50).string(message.chainId);
     }
     return writer;
   },
@@ -288,6 +399,30 @@ export const MsgCapturePayment: MessageFns<MsgCapturePayment> = {
           message.amount = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -302,6 +437,9 @@ export const MsgCapturePayment: MessageFns<MsgCapturePayment> = {
       merchant: isSet(object.merchant) ? globalThis.String(object.merchant) : "",
       authorizationId: isSet(object.authorizationId) ? globalThis.String(object.authorizationId) : "",
       amount: isSet(object.amount) ? globalThis.String(object.amount) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -316,6 +454,15 @@ export const MsgCapturePayment: MessageFns<MsgCapturePayment> = {
     if (message.amount !== "") {
       obj.amount = message.amount;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -327,6 +474,9 @@ export const MsgCapturePayment: MessageFns<MsgCapturePayment> = {
     message.merchant = object.merchant ?? "";
     message.authorizationId = object.authorizationId ?? "";
     message.amount = object.amount ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
@@ -424,7 +574,7 @@ export const MsgCapturePaymentResponse: MessageFns<MsgCapturePaymentResponse> = 
 };
 
 function createBaseMsgVoidPayment(): MsgVoidPayment {
-  return { merchant: "", authorizationId: "", reason: "" };
+  return { merchant: "", authorizationId: "", reason: "", nonce: 0, expiresAt: 0, chainId: "" };
 }
 
 export const MsgVoidPayment: MessageFns<MsgVoidPayment> = {
@@ -437,6 +587,15 @@ export const MsgVoidPayment: MessageFns<MsgVoidPayment> = {
     }
     if (message.reason !== "") {
       writer.uint32(26).string(message.reason);
+    }
+    if (message.nonce !== 0) {
+      writer.uint32(32).uint64(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      writer.uint32(40).uint64(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      writer.uint32(50).string(message.chainId);
     }
     return writer;
   },
@@ -472,6 +631,30 @@ export const MsgVoidPayment: MessageFns<MsgVoidPayment> = {
           message.reason = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nonce = longToNumber(reader.uint64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAt = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.chainId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -486,6 +669,9 @@ export const MsgVoidPayment: MessageFns<MsgVoidPayment> = {
       merchant: isSet(object.merchant) ? globalThis.String(object.merchant) : "",
       authorizationId: isSet(object.authorizationId) ? globalThis.String(object.authorizationId) : "",
       reason: isSet(object.reason) ? globalThis.String(object.reason) : "",
+      nonce: isSet(object.nonce) ? globalThis.Number(object.nonce) : 0,
+      expiresAt: isSet(object.expiresAt) ? globalThis.Number(object.expiresAt) : 0,
+      chainId: isSet(object.chainId) ? globalThis.String(object.chainId) : "",
     };
   },
 
@@ -500,6 +686,15 @@ export const MsgVoidPayment: MessageFns<MsgVoidPayment> = {
     if (message.reason !== "") {
       obj.reason = message.reason;
     }
+    if (message.nonce !== 0) {
+      obj.nonce = Math.round(message.nonce);
+    }
+    if (message.expiresAt !== 0) {
+      obj.expiresAt = Math.round(message.expiresAt);
+    }
+    if (message.chainId !== "") {
+      obj.chainId = message.chainId;
+    }
     return obj;
   },
 
@@ -511,6 +706,9 @@ export const MsgVoidPayment: MessageFns<MsgVoidPayment> = {
     message.merchant = object.merchant ?? "";
     message.authorizationId = object.authorizationId ?? "";
     message.reason = object.reason ?? "";
+    message.nonce = object.nonce ?? 0;
+    message.expiresAt = object.expiresAt ?? 0;
+    message.chainId = object.chainId ?? "";
     return message;
   },
 };
