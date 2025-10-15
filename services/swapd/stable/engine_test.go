@@ -282,7 +282,7 @@ func TestEngineDailyCapPersistsAcrossRestart(t *testing.T) {
 	if _, err := engine.ReserveQuote(ctx, quote.ID, "acct", 100); err != nil {
 		t.Fatalf("reserve quote: %v", err)
 	}
-	usage, ok, err := store.LatestDailyUsage(ctx)
+	day, amount, ok, err := store.LatestDailyUsage(ctx)
 	if err != nil {
 		t.Fatalf("latest usage: %v", err)
 	}
@@ -290,11 +290,11 @@ func TestEngineDailyCapPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("expected persisted usage record")
 	}
 	wantUnits := mustAmountUnits(t, 100)
-	if usage.Amount != wantUnits {
-		t.Fatalf("unexpected stored amount: got %d want %d", usage.Amount, wantUnits)
+	if amount != wantUnits {
+		t.Fatalf("unexpected stored amount: got %d want %d", amount, wantUnits)
 	}
-	if !sameDay(usage.Day, base) {
-		t.Fatalf("unexpected stored day: got %s want %s", usage.Day, base)
+	if !sameDay(day, base) {
+		t.Fatalf("unexpected stored day: got %s want %s", day, base)
 	}
 
 	// Simulate restart by constructing a new engine and restoring persisted state.
@@ -302,7 +302,6 @@ func TestEngineDailyCapPersistsAcrossRestart(t *testing.T) {
 	engine2, _ := buildTestEngine(t, restartBase, 1_000, time.Minute, limits)
 	engine2.WithDailyUsageStore(store)
 	engine2.RecordPrice("ZNHB", "USD", 1.00, time.Time{})
-	engine2.RestoreDailyUsage(usage.Day, usage.Amount)
 
 	quote, err = engine2.PriceQuote(ctx, "ZNHB", 40)
 	if err != nil {
@@ -320,7 +319,7 @@ func TestEngineDailyCapPersistsAcrossRestart(t *testing.T) {
 	}
 
 	// Ensure persistence reflects the latest successful reservation.
-	usage, ok, err = store.LatestDailyUsage(ctx)
+	day, amount, ok, err = store.LatestDailyUsage(ctx)
 	if err != nil {
 		t.Fatalf("latest usage post restart: %v", err)
 	}
@@ -328,8 +327,11 @@ func TestEngineDailyCapPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("expected usage record after restart reservations")
 	}
 	remaining := wantUnits + mustAmountUnits(t, 40)
-	if usage.Amount != remaining {
-		t.Fatalf("unexpected stored amount after restart: got %d want %d", usage.Amount, remaining)
+	if amount != remaining {
+		t.Fatalf("unexpected stored amount after restart: got %d want %d", amount, remaining)
+	}
+	if !sameDay(day, base) {
+		t.Fatalf("expected persisted day to remain unchanged, got %s want %s", day, base)
 	}
 }
 

@@ -55,6 +55,7 @@ type Limits struct {
 // DailyUsageStore persists the cumulative daily usage for minting operations.
 type DailyUsageStore interface {
 	SaveDailyUsage(ctx context.Context, day time.Time, amount int64) error
+	LatestDailyUsage(ctx context.Context) (time.Time, int64, bool, error)
 }
 
 // Quote represents a computed exchange quote.
@@ -125,12 +126,31 @@ func (e *Engine) WithDailyUsageStore(store DailyUsageStore) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.dailyPersist = store
+	if store == nil {
+		return
+	}
+	ctx := e.dailyCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	day, amount, ok, err := store.LatestDailyUsage(ctx)
+	if err != nil {
+		slog.Error("swapd/stable: load daily usage", "error", err)
+		return
+	}
+	if ok {
+		e.restoreDailyLocked(day, amount)
+	}
 }
 
 // RestoreDailyUsage initialises the in-memory counters from persisted state.
 func (e *Engine) RestoreDailyUsage(day time.Time, amount int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.restoreDailyLocked(day, amount)
+}
+
+func (e *Engine) restoreDailyLocked(day time.Time, amount int64) {
 	if amount < 0 {
 		amount = 0
 	}

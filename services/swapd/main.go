@@ -158,11 +158,6 @@ func main() {
 			log.Fatalf("swapd: stable engine: %v", err)
 		}
 		engine.WithDailyUsageStore(store)
-		if usage, ok, err := store.LatestDailyUsage(ctx); err != nil {
-			log.Printf("swapd: load daily usage: %v", err)
-		} else if ok {
-			engine.RestoreDailyUsage(usage.Day, usage.Amount)
-		}
 		stableRuntime = server.StableRuntime{
 			Enabled: true,
 			Engine:  engine,

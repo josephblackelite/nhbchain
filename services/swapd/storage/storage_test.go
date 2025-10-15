@@ -83,49 +83,49 @@ func TestDailyUsagePersistence(t *testing.T) {
 	if err := store.SaveDailyUsage(ctx, day, 123); err != nil {
 		t.Fatalf("save usage: %v", err)
 	}
-	usage, ok, err := store.LatestDailyUsage(ctx)
+	dayOut, amountOut, ok, err := store.LatestDailyUsage(ctx)
 	if err != nil {
 		t.Fatalf("latest usage: %v", err)
 	}
 	if !ok {
 		t.Fatalf("expected usage record")
 	}
-	if usage.Amount != 123 {
-		t.Fatalf("unexpected amount: got %d want %d", usage.Amount, 123)
+	if amountOut != 123 {
+		t.Fatalf("unexpected amount: got %d want %d", amountOut, 123)
 	}
 	wantDay := day.UTC().Truncate(24 * time.Hour)
-	if !usage.Day.Equal(wantDay) {
-		t.Fatalf("unexpected day: got %s want %s", usage.Day, wantDay)
+	if !dayOut.Equal(wantDay) {
+		t.Fatalf("unexpected day: got %s want %s", dayOut, wantDay)
 	}
 	if err := store.SaveDailyUsage(ctx, day, 456); err != nil {
 		t.Fatalf("update usage: %v", err)
 	}
-	usage, ok, err = store.LatestDailyUsage(ctx)
+	dayOut, amountOut, ok, err = store.LatestDailyUsage(ctx)
 	if err != nil {
 		t.Fatalf("latest usage after update: %v", err)
 	}
 	if !ok {
 		t.Fatalf("expected usage record after update")
 	}
-	if usage.Amount != 456 {
-		t.Fatalf("unexpected amount after update: got %d want %d", usage.Amount, 456)
+	if amountOut != 456 {
+		t.Fatalf("unexpected amount after update: got %d want %d", amountOut, 456)
 	}
 	nextDay := wantDay.Add(24 * time.Hour)
 	if err := store.SaveDailyUsage(ctx, nextDay, 10); err != nil {
 		t.Fatalf("save next day usage: %v", err)
 	}
-	usage, ok, err = store.LatestDailyUsage(ctx)
+	dayOut, amountOut, ok, err = store.LatestDailyUsage(ctx)
 	if err != nil {
 		t.Fatalf("latest usage next day: %v", err)
 	}
 	if !ok {
 		t.Fatalf("expected usage record for next day")
 	}
-	if !usage.Day.Equal(nextDay) {
-		t.Fatalf("unexpected day for next day record: got %s want %s", usage.Day, nextDay)
+	if !dayOut.Equal(nextDay) {
+		t.Fatalf("unexpected day for next day record: got %s want %s", dayOut, nextDay)
 	}
-	if usage.Amount != 10 {
-		t.Fatalf("unexpected amount for next day record: got %d want %d", usage.Amount, 10)
+	if amountOut != 10 {
+		t.Fatalf("unexpected amount for next day record: got %d want %d", amountOut, 10)
 	}
 }
 
