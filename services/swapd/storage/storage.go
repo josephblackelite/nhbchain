@@ -173,12 +173,6 @@ type Policy struct {
 	Window      time.Duration
 }
 
-// DailyUsage captures the aggregate amount processed for a UTC day.
-type DailyUsage struct {
-	Day    time.Time
-	Amount int64
-}
-
 // SavePolicy upserts the throttle configuration.
 func (s *Storage) SavePolicy(ctx context.Context, policy Policy) error {
 	if s == nil {
@@ -299,10 +293,9 @@ func (s *Storage) SaveDailyUsage(ctx context.Context, day time.Time, amount int6
 }
 
 // LatestDailyUsage returns the most recent persisted usage record if present.
-func (s *Storage) LatestDailyUsage(ctx context.Context) (DailyUsage, bool, error) {
-	result := DailyUsage{}
+func (s *Storage) LatestDailyUsage(ctx context.Context) (time.Time, int64, bool, error) {
 	if s == nil {
-		return result, false, fmt.Errorf("storage not configured")
+		return time.Time{}, 0, false, fmt.Errorf("storage not configured")
 	}
 	row := s.db.QueryRowContext(ctx, `
         SELECT day, amount
@@ -311,16 +304,16 @@ func (s *Storage) LatestDailyUsage(ctx context.Context) (DailyUsage, bool, error
         LIMIT 1
     `)
 	var dayStr string
-	if err := row.Scan(&dayStr, &result.Amount); err != nil {
+	var amount int64
+	if err := row.Scan(&dayStr, &amount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return result, false, nil
+			return time.Time{}, 0, false, nil
 		}
-		return result, false, fmt.Errorf("query daily usage: %w", err)
+		return time.Time{}, 0, false, fmt.Errorf("query daily usage: %w", err)
 	}
 	day, err := time.Parse(time.DateOnly, strings.TrimSpace(dayStr))
 	if err != nil {
-		return result, false, fmt.Errorf("parse daily usage day: %w", err)
+		return time.Time{}, 0, false, fmt.Errorf("parse daily usage day: %w", err)
 	}
-	result.Day = day
-	return result, true, nil
+	return day, amount, true, nil
 }
