@@ -95,8 +95,19 @@ func TestServerServeRejectsPlaintextOnNonLoopback(t *testing.T) {
 	}
 }
 
-func TestServerServeAllowsPlaintextOnUnspecified(t *testing.T) {
+func TestServerServeRejectsPlaintextOnUnspecifiedWithoutOverride(t *testing.T) {
 	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true})
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := server.Serve(listener); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected loopback restriction error, got %v", err)
+	}
+}
+
+func TestServerServeAllowsPlaintextOnUnspecifiedWithOverride(t *testing.T) {
+	server := NewServer(nil, nil, ServerConfig{AllowInsecure: true, AllowInsecureUnspecified: true})
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

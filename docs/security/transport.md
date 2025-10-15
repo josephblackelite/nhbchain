@@ -80,7 +80,10 @@ MaxSkewSeconds = 120
 * Leaving `RPCAllowInsecure = false` forces TLS. The process exits if the key or
   certificate is missing.
 * Set `RPCAllowInsecure = true` **only** for local development on loopback. The
-  server still verifies the listener is loopback and refuses to bind otherwise.
+  server refuses to bind to non-loopback addresses and now treats wildcard binds
+  (`0.0.0.0`/`::`) as non-loopback unless paired with the
+  `RPCAllowInsecureUnspecified = true` override for tightly controlled lab
+  environments such as container port-forwarding.
 * Populate `RPCTLSClientCAFile` to require mutual TLS from wallets, custodians,
   or proxies connecting to the RPC port.
 * `RPCAllowlistCIDRs` restricts clients to specific subnets. Requests originating

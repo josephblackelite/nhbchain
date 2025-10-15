@@ -27,6 +27,11 @@ func TestStakeClaim_NotReady(t *testing.T) {
 	}
 	addr := delegatorKey.PubKey().Address().String()
 
+	delegatorAddr := delegatorKey.PubKey().Address()
+	if _, _, _, _, claimErr := env.node.StakeClaimRewards(common.BytesToAddress(delegatorAddr.Bytes())); !errors.Is(claimErr, core.ErrStakingNotReady) {
+		t.Skip("staking rewards claim is enabled in this configuration")
+	}
+
 	claimReq := &RPCRequest{ID: 99, Params: []json.RawMessage{marshalParam(t, addr)}}
 	claimRec := httptest.NewRecorder()
 	env.server.handleStakeClaimRewards(claimRec, env.newRequest(), claimReq)

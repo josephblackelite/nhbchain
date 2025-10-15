@@ -166,6 +166,10 @@ type ServerConfig struct {
 	// AllowInsecure permits plaintext HTTP when running on loopback interfaces.
 	// This should only be enabled for local development.
 	AllowInsecure bool
+	// AllowInsecureUnspecified treats unspecified listener addresses (0.0.0.0 or
+	// ::) as loopback when AllowInsecure is enabled. This override exists solely
+	// for tightly controlled lab setups such as container port-forwarding.
+	AllowInsecureUnspecified bool
 	// SwapAuth configures API authentication and rate limiting for swap RPC methods.
 	SwapAuth SwapAuthConfig
 }
@@ -183,31 +187,32 @@ type Server struct {
 	node *core.Node
 	net  NetworkService
 
-	mu                sync.Mutex
-	txSeen            map[string]time.Time
-	txSeenQueue       []txSeenEntry
-	rateLimiters      map[string]*rateLimiter
-	rateLimiterSweep  time.Time
-	authToken         string
-	potsoEvidence     *modules.PotsoEvidenceModule
-	transactions      *modules.TransactionsModule
-	escrow            *modules.EscrowModule
-	lending           *modules.LendingModule
-	trustProxyHeaders bool
-	trustedProxies    map[string]struct{}
-	readHeaderTimeout time.Duration
-	readTimeout       time.Duration
-	writeTimeout      time.Duration
-	idleTimeout       time.Duration
-	tlsCertFile       string
-	tlsKeyFile        string
-	clientCAFile      string
-	requireClientCert bool
-	allowInsecure     bool
-	proxyPolicy       proxyPolicy
-	allowlist         []*net.IPNet
-	jwtVerifier       *jwtVerifier
-	jwtVerifierErr    error
+	mu                       sync.Mutex
+	txSeen                   map[string]time.Time
+	txSeenQueue              []txSeenEntry
+	rateLimiters             map[string]*rateLimiter
+	rateLimiterSweep         time.Time
+	authToken                string
+	potsoEvidence            *modules.PotsoEvidenceModule
+	transactions             *modules.TransactionsModule
+	escrow                   *modules.EscrowModule
+	lending                  *modules.LendingModule
+	trustProxyHeaders        bool
+	trustedProxies           map[string]struct{}
+	readHeaderTimeout        time.Duration
+	readTimeout              time.Duration
+	writeTimeout             time.Duration
+	idleTimeout              time.Duration
+	tlsCertFile              string
+	tlsKeyFile               string
+	clientCAFile             string
+	requireClientCert        bool
+	allowInsecure            bool
+	allowInsecureUnspecified bool
+	proxyPolicy              proxyPolicy
+	allowlist                []*net.IPNet
+	jwtVerifier              *jwtVerifier
+	jwtVerifierErr           error
 
 	swapAuth          *gatewayauth.Authenticator
 	swapPartnerLimits map[string]int
@@ -362,35 +367,36 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		}
 	}
 	srv := &Server{
-		node:              node,
-		net:               netClient,
-		txSeen:            make(map[string]time.Time),
-		rateLimiters:      make(map[string]*rateLimiter),
-		authToken:         token,
-		potsoEvidence:     modules.NewPotsoEvidenceModule(node),
-		transactions:      modules.NewTransactionsModule(node),
-		escrow:            modules.NewEscrowModule(node),
-		lending:           modules.NewLendingModule(node),
-		trustProxyHeaders: cfg.TrustProxyHeaders,
-		trustedProxies:    trusted,
-		readHeaderTimeout: cfg.ReadHeaderTimeout,
-		readTimeout:       cfg.ReadTimeout,
-		writeTimeout:      cfg.WriteTimeout,
-		idleTimeout:       cfg.IdleTimeout,
-		tlsCertFile:       strings.TrimSpace(cfg.TLSCertFile),
-		tlsKeyFile:        strings.TrimSpace(cfg.TLSKeyFile),
-		clientCAFile:      clientCAPath,
-		requireClientCert: clientCAPath != "",
-		allowInsecure:     cfg.AllowInsecure,
-		proxyPolicy:       policy,
-		allowlist:         allowlist,
-		jwtVerifier:       jwtVerifier,
-		jwtVerifierErr:    jwtErr,
-		swapAuth:          swapAuth,
-		swapPartnerLimits: swapLimits,
-		swapRateWindow:    swapWindow,
-		swapRateCounters:  make(map[string]*rateLimiter),
-		swapNowFn:         swapNow,
+		node:                     node,
+		net:                      netClient,
+		txSeen:                   make(map[string]time.Time),
+		rateLimiters:             make(map[string]*rateLimiter),
+		authToken:                token,
+		potsoEvidence:            modules.NewPotsoEvidenceModule(node),
+		transactions:             modules.NewTransactionsModule(node),
+		escrow:                   modules.NewEscrowModule(node),
+		lending:                  modules.NewLendingModule(node),
+		trustProxyHeaders:        cfg.TrustProxyHeaders,
+		trustedProxies:           trusted,
+		readHeaderTimeout:        cfg.ReadHeaderTimeout,
+		readTimeout:              cfg.ReadTimeout,
+		writeTimeout:             cfg.WriteTimeout,
+		idleTimeout:              cfg.IdleTimeout,
+		tlsCertFile:              strings.TrimSpace(cfg.TLSCertFile),
+		tlsKeyFile:               strings.TrimSpace(cfg.TLSKeyFile),
+		clientCAFile:             clientCAPath,
+		requireClientCert:        clientCAPath != "",
+		allowInsecure:            cfg.AllowInsecure,
+		allowInsecureUnspecified: cfg.AllowInsecureUnspecified,
+		proxyPolicy:              policy,
+		allowlist:                allowlist,
+		jwtVerifier:              jwtVerifier,
+		jwtVerifierErr:           jwtErr,
+		swapAuth:                 swapAuth,
+		swapPartnerLimits:        swapLimits,
+		swapRateWindow:           swapWindow,
+		swapRateCounters:         make(map[string]*rateLimiter),
+		swapNowFn:                swapNow,
 	}
 	srv.swapStable.assets = make(map[string]stable.Asset)
 	srv.swapStable.now = time.Now
@@ -621,7 +627,10 @@ func (s *Server) Serve(listener net.Listener) error {
 			_ = listener.Close()
 			return errors.New("TLS is required for RPC server; configure certificates or enable AllowInsecure")
 		}
-		if !isLoopback(listener.Addr()) {
+		loopback := isLoopback(listener.Addr(), s.allowInsecureUnspecified)
+		observability.Security().RecordInsecureBind("rpc", loopback)
+		fmt.Printf("AllowInsecure enabled; plaintext RPC binding to %s (loopback=%t)\n", listener.Addr(), loopback)
+		if !loopback {
 			_ = listener.Close()
 			return errors.New("plaintext RPC is only permitted on loopback interfaces")
 		}
@@ -712,21 +721,14 @@ func (s *Server) buildTLSConfig() (*tls.Config, error) {
 	return config, nil
 }
 
-func isLoopback(addr net.Addr) bool {
+func isLoopback(addr net.Addr, allowUnspecified bool) bool {
 	tcpAddr, ok := addr.(*net.TCPAddr)
 	if !ok {
 		return false
 	}
 	ip := tcpAddr.IP
-	if ip == nil {
-		// net.Listen("tcp", "0.0.0.0:port") produces a nil IP, which corresponds to the
-		// unspecified address. Treat it as loopback so local development environments that
-		// expose ports via container port-forwarding can run without TLS when AllowInsecure
-		// is explicitly enabled.
-		return true
-	}
-	if ip.IsUnspecified() {
-		return true
+	if ip == nil || ip.IsUnspecified() {
+		return allowUnspecified
 	}
 	if ip.IsLoopback() {
 		return true
