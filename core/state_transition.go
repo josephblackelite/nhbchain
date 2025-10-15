@@ -363,31 +363,29 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 			return fmt.Errorf("fees: missing route wallet for asset %s", result.Asset)
 		}
 		routed := new(big.Int).Set(result.Fee)
-		deducted := false
+		var payerAcc *types.Account
+		switch cfg.EffectiveFeePayer() {
+		case fees.FeePayerRecipient:
+			payerAcc = toAcc
+		default:
+			payerAcc = fromAcc
+		}
+		if payerAcc == nil {
+			return fmt.Errorf("fees: insufficient balance to route fee")
+		}
 		switch result.Asset {
 		case fees.AssetNHB:
-			if toAcc != nil && toAcc.BalanceNHB != nil && toAcc.BalanceNHB.Cmp(routed) >= 0 {
-				toAcc.BalanceNHB.Sub(toAcc.BalanceNHB, routed)
-				deducted = true
+			if payerAcc.BalanceNHB == nil || payerAcc.BalanceNHB.Cmp(routed) < 0 {
+				return fmt.Errorf("fees: insufficient balance to route fee")
 			}
-			if !deducted && fromAcc != nil && fromAcc.BalanceNHB != nil && fromAcc.BalanceNHB.Cmp(routed) >= 0 {
-				fromAcc.BalanceNHB.Sub(fromAcc.BalanceNHB, routed)
-				deducted = true
-			}
+			payerAcc.BalanceNHB.Sub(payerAcc.BalanceNHB, routed)
 		case fees.AssetZNHB:
-			if toAcc != nil && toAcc.BalanceZNHB != nil && toAcc.BalanceZNHB.Cmp(routed) >= 0 {
-				toAcc.BalanceZNHB.Sub(toAcc.BalanceZNHB, routed)
-				deducted = true
+			if payerAcc.BalanceZNHB == nil || payerAcc.BalanceZNHB.Cmp(routed) < 0 {
+				return fmt.Errorf("fees: insufficient balance to route fee")
 			}
-			if !deducted && fromAcc != nil && fromAcc.BalanceZNHB != nil && fromAcc.BalanceZNHB.Cmp(routed) >= 0 {
-				fromAcc.BalanceZNHB.Sub(fromAcc.BalanceZNHB, routed)
-				deducted = true
-			}
+			payerAcc.BalanceZNHB.Sub(payerAcc.BalanceZNHB, routed)
 		default:
 			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
-		}
-		if !deducted {
-			return fmt.Errorf("fees: insufficient balance to route fee")
 		}
 		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
 		if err != nil {

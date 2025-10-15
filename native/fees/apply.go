@@ -36,6 +36,25 @@ type AssetPolicy struct {
 	OwnerWallet    [20]byte
 }
 
+// FeePayer identifies the account responsible for fee deductions.
+type FeePayer string
+
+const (
+	// FeePayerSender charges fees to the transaction sender.
+	FeePayerSender FeePayer = "sender"
+	// FeePayerRecipient charges fees to the transaction recipient.
+	FeePayerRecipient FeePayer = "recipient"
+)
+
+func normalizeFeePayer(payer FeePayer) FeePayer {
+	switch strings.ToLower(strings.TrimSpace(string(payer))) {
+	case string(FeePayerRecipient):
+		return FeePayerRecipient
+	default:
+		return FeePayerSender
+	}
+}
+
 // DomainPolicy captures the configuration applied to a specific fee domain.
 type DomainPolicy struct {
 	FreeTierTxPerMonth    uint64
@@ -44,6 +63,7 @@ type DomainPolicy struct {
 	OwnerWallet           [20]byte
 	Assets                map[string]AssetPolicy
 	FreeTierPerAsset      bool
+	FeePayer              FeePayer
 	freeTierExplicit      bool
 }
 
@@ -113,8 +133,14 @@ func (p DomainPolicy) normalized(domain string) DomainPolicy {
 		}
 	}
 	normalized.Assets = assets
+	normalized.FeePayer = normalizeFeePayer(normalized.FeePayer)
 	normalized.freeTierExplicit = false
 	return normalized
+}
+
+// EffectiveFeePayer resolves the normalized fee payer configuration.
+func (p DomainPolicy) EffectiveFeePayer() FeePayer {
+	return normalizeFeePayer(p.FeePayer)
 }
 
 // FreeTierScope resolves the counter scope applied when tracking free-tier usage.
