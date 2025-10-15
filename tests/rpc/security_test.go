@@ -1,9 +1,11 @@
 package rpc_test
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +116,109 @@ func TestRequireAuthWithMTLS(t *testing.T) {
 func TestNewServerRejectsMissingJWTWithoutMTLS(t *testing.T) {
 	if _, err := rpc.NewServer(nil, nil, rpc.ServerConfig{}); err == nil {
 		t.Fatalf("expected missing JWT configuration to fail")
+	}
+}
+
+func TestStableRPCMethodsRequireBearerToken(t *testing.T) {
+	base := time.Unix(1717787717, 0).UTC()
+	const codeUnauthorized = -32001
+	t.Setenv("TEST_RPC_JWT_SECRET", "integration-secret")
+	cfg := rpc.ServerConfig{
+		JWT: rpc.JWTConfig{
+			Enable:      true,
+			Alg:         "HS256",
+			HSSecretEnv: "TEST_RPC_JWT_SECRET",
+			Issuer:      "rpc-service",
+			Audience:    []string{"integration-tests"},
+		},
+		SwapAuth: rpc.SwapAuthConfig{
+			Secrets:              map[string]string{"partner": "secret"},
+			AllowedTimestampSkew: time.Minute,
+			NonceTTL:             5 * time.Minute,
+			NonceCapacity:        32,
+			RateLimitWindow:      time.Minute,
+			Now: func() time.Time {
+				return base
+			},
+		},
+	}
+	srv, err := rpc.NewServer(nil, nil, cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	type testCase struct {
+		name   string
+		method string
+		params map[string]any
+	}
+
+	tests := []testCase{
+		{
+			name:   "request approval",
+			method: "nhb_requestSwapApproval",
+			params: map[string]any{"asset": "ZNHB", "amount": 100, "account": "merchant-123"},
+		},
+		{
+			name:   "swap mint",
+			method: "nhb_swapMint",
+			params: map[string]any{"quoteId": "q-1717787718000000000", "amountIn": 100, "account": "merchant-123"},
+		},
+		{
+			name:   "swap burn",
+			method: "nhb_swapBurn",
+			params: map[string]any{"reservationId": "q-1717787718000000000"},
+		},
+		{
+			name:   "swap status",
+			method: "nhb_getSwapStatus",
+			params: nil,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      i + 1,
+				"method":  tc.method,
+			}
+			if tc.params != nil {
+				payload["params"] = []any{tc.params}
+			} else {
+				payload["params"] = []any{}
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			timestamp := strconv.FormatInt(base.Add(time.Duration(i)*time.Second).Unix(), 10)
+			nonce := "integration-nonce-" + strconv.Itoa(i)
+			req.Header.Set(gatewayauth.HeaderAPIKey, "partner")
+			req.Header.Set(gatewayauth.HeaderTimestamp, timestamp)
+			req.Header.Set(gatewayauth.HeaderNonce, nonce)
+			signature := gatewayauth.ComputeSignature("secret", timestamp, nonce, req.Method, gatewayauth.CanonicalRequestPath(req), body)
+			req.Header.Set(gatewayauth.HeaderSignature, hex.EncodeToString(signature))
+
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected unauthorized, got %d body %s", rec.Code, rec.Body.String())
+			}
+
+			var resp rpc.RPCResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if resp.Error == nil {
+				t.Fatalf("expected RPC error response")
+			}
+			if resp.Error.Code != codeUnauthorized {
+				t.Fatalf("unexpected error code %d", resp.Error.Code)
+			}
+		})
 	}
 }
 
