@@ -46,22 +46,55 @@ type Config struct {
 }
 
 type AuthConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	HMACSecret     string        `yaml:"hmacSecret"`
-	Issuer         string        `yaml:"issuer"`
-	Audience       string        `yaml:"audience"`
-	ScopeClaim     string        `yaml:"scopeClaim"`
-	OptionalPaths  []string      `yaml:"optionalPaths"`
-	AllowAnonymous bool          `yaml:"allowAnonymous"`
-	ClockSkew      time.Duration `yaml:"clockSkew"`
+	Enabled           bool          `yaml:"enabled"`
+	HMACSecret        string        `yaml:"hmacSecret"`
+	Issuer            string        `yaml:"issuer"`
+	Audience          string        `yaml:"audience"`
+	ScopeClaim        string        `yaml:"scopeClaim"`
+	OptionalPaths     []string      `yaml:"optionalPaths"`
+	AllowAnonymous    bool          `yaml:"allowAnonymous"`
+	ClockSkew         time.Duration `yaml:"clockSkew"`
+	allowAnonymousSet bool          `yaml:"-"`
+}
+
+func (a *AuthConfig) UnmarshalYAML(node *yaml.Node) error {
+	type rawAuthConfig struct {
+		Enabled        bool          `yaml:"enabled"`
+		HMACSecret     string        `yaml:"hmacSecret"`
+		Issuer         string        `yaml:"issuer"`
+		Audience       string        `yaml:"audience"`
+		ScopeClaim     string        `yaml:"scopeClaim"`
+		OptionalPaths  []string      `yaml:"optionalPaths"`
+		AllowAnonymous *bool         `yaml:"allowAnonymous"`
+		ClockSkew      time.Duration `yaml:"clockSkew"`
+	}
+	var raw rawAuthConfig
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	a.Enabled = raw.Enabled
+	a.HMACSecret = raw.HMACSecret
+	a.Issuer = raw.Issuer
+	a.Audience = raw.Audience
+	a.ScopeClaim = raw.ScopeClaim
+	a.OptionalPaths = raw.OptionalPaths
+	if raw.AllowAnonymous != nil {
+		a.AllowAnonymous = *raw.AllowAnonymous
+		a.allowAnonymousSet = true
+	} else {
+		a.AllowAnonymous = false
+		a.allowAnonymousSet = false
+	}
+	a.ClockSkew = raw.ClockSkew
+	return nil
 }
 
 type SecurityConfig struct {
-        AutoUpgradeHTTP bool   `yaml:"autoUpgradeHTTP"`
-        AllowInsecure   bool   `yaml:"allowInsecure"`
-        TLSCertFile     string `yaml:"tlsCertFile"`
-        TLSKeyFile      string `yaml:"tlsKeyFile"`
-        TLSClientCAFile string `yaml:"tlsClientCAFile"`
+	AutoUpgradeHTTP bool   `yaml:"autoUpgradeHTTP"`
+	AllowInsecure   bool   `yaml:"allowInsecure"`
+	TLSCertFile     string `yaml:"tlsCertFile"`
+	TLSKeyFile      string `yaml:"tlsKeyFile"`
+	TLSClientCAFile string `yaml:"tlsClientCAFile"`
 }
 
 func Load(path string) (Config, error) {
@@ -85,8 +118,9 @@ func Load(path string) (Config, error) {
 		},
 	}
 	if path == "" {
-		if cfg.Auth.ClockSkew <= 0 {
-			cfg.Auth.ClockSkew = 2 * time.Minute
+		cfg.applyAuthDefaults()
+		if err := cfg.Validate(); err != nil {
+			return Config{}, fmt.Errorf("validate config: %w", err)
 		}
 		return cfg, nil
 	}
@@ -100,10 +134,52 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	cfg.applyAuthDefaults()
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("validate config: %w", err)
+	}
+	return cfg, nil
+}
+
+func (cfg *Config) applyAuthDefaults() {
+	if cfg == nil {
+		return
+	}
 	if cfg.Auth.ClockSkew <= 0 {
 		cfg.Auth.ClockSkew = 2 * time.Minute
 	}
-	return cfg, nil
+	if cfg.Auth.ScopeClaim == "" {
+		cfg.Auth.ScopeClaim = "scope"
+	}
+	if !cfg.Auth.allowAnonymousSet {
+		if cfg.Auth.Enabled {
+			cfg.Auth.AllowAnonymous = false
+		} else {
+			cfg.Auth.AllowAnonymous = true
+		}
+	}
+}
+
+func (cfg *Config) Validate() error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	trimmed := make([]string, len(cfg.Auth.OptionalPaths))
+	for i, path := range cfg.Auth.OptionalPaths {
+		trimmedPath := strings.TrimSpace(path)
+		if trimmedPath == "" {
+			return fmt.Errorf("auth.optionalPaths[%d] cannot be empty", i)
+		}
+		if !strings.HasPrefix(trimmedPath, "/") {
+			return fmt.Errorf("auth.optionalPaths[%d] must start with '/'", i)
+		}
+		trimmed[i] = trimmedPath
+	}
+	cfg.Auth.OptionalPaths = trimmed
+	if cfg.Auth.Enabled && cfg.Auth.AllowAnonymous && len(cfg.Auth.OptionalPaths) == 0 {
+		return fmt.Errorf("auth.optionalPaths must list at least one entry when auth.allowAnonymous is true")
+	}
+	return nil
 }
 
 func (s ServiceConfig) URL() (*url.URL, error) {
