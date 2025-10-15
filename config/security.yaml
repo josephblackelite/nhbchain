@@ -24,6 +24,7 @@ node:
     Enable: true
     Alg: HS256
     HSSecretEnv: NHB_RPC_JWT_SECRET
+    # Issuer/audience must match the short-lived JWTs minted by your identity service.
     Issuer: nhb-rpc
     Audience:
       - wallets

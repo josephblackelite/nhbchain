@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -192,7 +191,6 @@ type Server struct {
 	txSeenQueue              []txSeenEntry
 	rateLimiters             map[string]*rateLimiter
 	rateLimiterSweep         time.Time
-	authToken                string
 	potsoEvidence            *modules.PotsoEvidenceModule
 	transactions             *modules.TransactionsModule
 	escrow                   *modules.EscrowModule
@@ -267,8 +265,7 @@ func normalizeProxyMode(mode ProxyHeaderMode) ProxyHeaderMode {
 	}
 }
 
-func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Server {
-	token := strings.TrimSpace(os.Getenv("NHB_RPC_TOKEN"))
+func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Server, error) {
 	trusted := make(map[string]struct{}, len(cfg.TrustedProxies))
 	count := 0
 	for _, entry := range cfg.TrustedProxies {
@@ -311,10 +308,13 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 	}
 	var jwtVerifier *jwtVerifier
 	var jwtErr error
+	clientCAPath := strings.TrimSpace(cfg.TLSClientCAFile)
+	requireClientCert := clientCAPath != ""
 	if cfg.JWT.Enable {
 		jwtVerifier, jwtErr = newJWTVerifier(cfg.JWT)
+	} else if !requireClientCert {
+		return nil, fmt.Errorf("JWT authentication must be enabled unless mutual TLS is configured")
 	}
-	clientCAPath := strings.TrimSpace(cfg.TLSClientCAFile)
 	var swapAuth *gatewayauth.Authenticator
 	swapLimits := make(map[string]int)
 	swapWindow := cfg.SwapAuth.RateLimitWindow
@@ -374,7 +374,6 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		net:                      netClient,
 		txSeen:                   make(map[string]time.Time),
 		rateLimiters:             make(map[string]*rateLimiter),
-		authToken:                token,
 		potsoEvidence:            modules.NewPotsoEvidenceModule(node),
 		transactions:             modules.NewTransactionsModule(node),
 		escrow:                   modules.NewEscrowModule(node),
@@ -388,7 +387,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 		tlsCertFile:              strings.TrimSpace(cfg.TLSCertFile),
 		tlsKeyFile:               strings.TrimSpace(cfg.TLSKeyFile),
 		clientCAFile:             clientCAPath,
-		requireClientCert:        clientCAPath != "",
+		requireClientCert:        requireClientCert,
 		allowInsecure:            cfg.AllowInsecure,
 		allowInsecureUnspecified: cfg.AllowInsecureUnspecified,
 		proxyPolicy:              policy,
@@ -407,7 +406,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) *Ser
 	if node != nil {
 		srv.posRealtime = NewFinalityStream(node)
 	}
-	return srv
+	return srv, nil
 }
 
 func newJWTVerifier(cfg JWTConfig) (*jwtVerifier, error) {
@@ -1816,25 +1815,15 @@ func (s *Server) requireAuth(r *http.Request) *RPCError {
 	if s.jwtVerifierErr != nil {
 		return &RPCError{Code: codeUnauthorized, Message: "JWT authentication misconfigured", Data: s.jwtVerifierErr.Error()}
 	}
-	if s.jwtVerifier != nil {
-		token, err := extractBearerToken(r.Header.Get("Authorization"))
-		if err != nil {
-			return &RPCError{Code: codeUnauthorized, Message: err.Error()}
-		}
-		if err := s.jwtVerifier.Verify(token); err != nil {
-			return &RPCError{Code: codeUnauthorized, Message: "invalid JWT", Data: err.Error()}
-		}
-		return nil
-	}
-	if s.authToken == "" {
-		return &RPCError{Code: codeUnauthorized, Message: "RPC authentication token not configured"}
+	if s.jwtVerifier == nil {
+		return &RPCError{Code: codeUnauthorized, Message: "JWT authentication not configured"}
 	}
 	token, err := extractBearerToken(r.Header.Get("Authorization"))
 	if err != nil {
 		return &RPCError{Code: codeUnauthorized, Message: err.Error()}
 	}
-	if subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) != 1 {
-		return &RPCError{Code: codeUnauthorized, Message: "invalid RPC credentials"}
+	if err := s.jwtVerifier.Verify(token); err != nil {
+		return &RPCError{Code: codeUnauthorized, Message: "invalid JWT", Data: err.Error()}
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
@@ -28,7 +29,7 @@ import (
 func TestPosQosSla(t *testing.T) {
 	t.Helper()
 
-	t.Setenv("NHB_RPC_TOKEN", "pos-loader-token")
+	t.Setenv("NHB_RPC_TOKEN", mintMiniChainJWT(t))
 
 	chain := newMiniChain(t)
 	node := chain.Node()
@@ -161,6 +162,24 @@ func TestPosQosSla(t *testing.T) {
 	if finality.GetSampleCount() < enqueuedCount {
 		t.Fatalf("starvation detected: enqueued=%d finalized=%d", enqueuedCount, finality.GetSampleCount())
 	}
+}
+
+func mintMiniChainJWT(t *testing.T) string {
+	t.Helper()
+	now := time.Now().UTC()
+	claims := jwt.RegisteredClaims{
+		Issuer:    "minichain",
+		Audience:  jwt.ClaimStrings([]string{"pos-tests"}),
+		ExpiresAt: jwt.NewNumericDate(now.Add(30 * time.Minute)),
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte("minichain-secret"))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
 }
 
 func histogramPercentile(hist *dto.Histogram, quantile float64) float64 {

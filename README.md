@@ -135,12 +135,14 @@ PersistentPeers = [
 ]
 ```
 
-Set required secrets as environment variables before bootstrapping (the node will refuse to start without a validator keystore passphrase):
+Set required secrets as environment variables before bootstrapping. The node will refuse to start without a validator keystore passphrase, and it now requires a JWT verifier secret to validate short-lived RPC credentials minted by your identity service:
 
 ```bash
 export NHB_VALIDATOR_PASS="choose-a-strong-passphrase"
-export NHB_RPC_TOKEN="choose-a-strong-shared-secret"
+export NHB_RPC_JWT_SECRET="signing-secret-managed-by-your-issuer"
 ```
+
+JWTs presented to the RPC server should be issued with the configured issuer/audience, signed using `NHB_RPC_JWT_SECRET` (or the equivalent entry from your secret store), and rotated frequently. Operators typically deliver the current JWT to automation via a runtime environment variable such as `NHB_RPC_TOKEN` fetched from Vault or AWS Secrets Manager; the value must be refreshed before expiry because the server no longer accepts static bearer strings.
 
 If migrating from legacy plaintext keys, convert them with:
 

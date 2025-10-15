@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"nhbchain/core"
 	"nhbchain/crypto"
@@ -29,13 +30,6 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	token := "test-token"
-	if err := os.Setenv("NHB_RPC_TOKEN", token); err != nil {
-		t.Fatalf("set env: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Unsetenv("NHB_RPC_TOKEN")
-	})
 	db := storage.NewMemDB()
 	key, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -52,8 +46,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	node.SetSwapOracle(agg)
 	node.SetSwapManualOracle(manual)
 
-	env := &testEnv{token: token, now: time.Unix(1700000000, 0).UTC(), swapKey: "partner", swapSecret: "secret"}
-	server := NewServer(node, nil, ServerConfig{
+	now := time.Unix(1700000000, 0).UTC()
+	env := &testEnv{now: now, swapKey: "partner", swapSecret: "secret"}
+	env.token = signEnvJWT(t, now)
+	server := newTestServer(t, node, nil, ServerConfig{
 		SwapAuth: SwapAuthConfig{
 			Secrets:              map[string]string{env.swapKey: env.swapSecret},
 			AllowedTimestampSkew: time.Minute,
@@ -67,8 +63,28 @@ func newTestEnv(t *testing.T) *testEnv {
 		},
 	})
 	env.server = server
+	if server.jwtVerifier != nil {
+		server.jwtVerifier.now = func() time.Time { return env.now }
+	}
 	env.node = node
 	return env
+}
+
+func signEnvJWT(t *testing.T, now time.Time) string {
+	t.Helper()
+	claims := jwt.RegisteredClaims{
+		Issuer:    "rpc-tests",
+		Audience:  jwt.ClaimStrings([]string{"unit-tests"}),
+		ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(testJWTSecret))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
 }
 
 func (env *testEnv) newRequest() *http.Request {

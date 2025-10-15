@@ -19,7 +19,19 @@ import (
 )
 
 func TestRPCRejectsPlaintextWithoutAllowInsecure(t *testing.T) {
-	srv := rpc.NewServer(nil, nil, rpc.ServerConfig{})
+	t.Setenv("TEST_RPC_JWT_SECRET", "reject-plaintext")
+	srv, err := rpc.NewServer(nil, nil, rpc.ServerConfig{
+		JWT: rpc.JWTConfig{
+			Enable:      true,
+			Alg:         "HS256",
+			HSSecretEnv: "TEST_RPC_JWT_SECRET",
+			Issuer:      "rpc-suite",
+			Audience:    []string{"tests"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -42,7 +54,10 @@ func TestRequireAuthWithJWT(t *testing.T) {
 			MaxSkewSeconds: 60,
 		},
 	}
-	srv := rpc.NewServer(nil, nil, cfg)
+	srv, err := rpc.NewServer(nil, nil, cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
 	fixed := time.Now().UTC()
 	secret := []byte("super-secret")
 	valid := signJWT(t, secret, "rpc-service", []string{"wallets"}, fixed.Add(time.Hour), fixed.Add(-time.Minute))
@@ -72,10 +87,20 @@ func TestRequireAuthWithJWT(t *testing.T) {
 	if err := srv.TestRequireAuth(req); err == nil || err.Message != "invalid JWT" {
 		t.Fatalf("expected expired token to fail, got %v", err)
 	}
+
+	invalidSig := signJWT(t, []byte("other-secret"), "rpc-service", []string{"wallets"}, fixed.Add(time.Hour), fixed.Add(-time.Minute))
+	req = httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+invalidSig)
+	if err := srv.TestRequireAuth(req); err == nil || err.Message != "invalid JWT" {
+		t.Fatalf("expected invalid signature to fail, got %v", err)
+	}
 }
 
 func TestRequireAuthWithMTLS(t *testing.T) {
-	srv := rpc.NewServer(nil, nil, rpc.ServerConfig{TLSClientCAFile: "dummy-ca.pem"})
+	srv, err := rpc.NewServer(nil, nil, rpc.ServerConfig{TLSClientCAFile: "dummy-ca.pem"})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.TLS = &tls.ConnectionState{
 		VerifiedChains:    [][]*x509.Certificate{{{}}},
@@ -83,6 +108,12 @@ func TestRequireAuthWithMTLS(t *testing.T) {
 	}
 	if err := srv.TestRequireAuth(req); err != nil {
 		t.Fatalf("expected client certificate to satisfy auth: %v", err)
+	}
+}
+
+func TestNewServerRejectsMissingJWTWithoutMTLS(t *testing.T) {
+	if _, err := rpc.NewServer(nil, nil, rpc.ServerConfig{}); err == nil {
+		t.Fatalf("expected missing JWT configuration to fail")
 	}
 }
 
@@ -100,7 +131,18 @@ func TestSwapHMACEnforcesSkewAndNonceTTL(t *testing.T) {
 			},
 		},
 	}
-	srv := rpc.NewServer(nil, nil, cfg)
+	t.Setenv("TEST_RPC_JWT_SECRET", "swap-auth-secret")
+	cfg.JWT = rpc.JWTConfig{
+		Enable:      true,
+		Alg:         "HS256",
+		HSSecretEnv: "TEST_RPC_JWT_SECRET",
+		Issuer:      "rpc-service",
+		Audience:    []string{"swap-tests"},
+	}
+	srv, err := rpc.NewServer(nil, nil, cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
 
 	sign := func(ts time.Time, nonce string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, "https://example.com/swap", nil)

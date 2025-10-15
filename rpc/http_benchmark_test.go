@@ -8,7 +8,7 @@ import (
 )
 
 func BenchmarkServerRememberTx(b *testing.B) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(b, nil, nil, ServerConfig{})
 	start := time.Now()
 
 	b.ResetTimer()
@@ -23,7 +23,7 @@ func BenchmarkServerRememberTx(b *testing.B) {
 }
 
 func BenchmarkServerRememberTxParallel(b *testing.B) {
-	server := NewServer(nil, nil, ServerConfig{})
+	server := newTestServer(b, nil, nil, ServerConfig{})
 	var counter uint64
 	start := time.Now()
 

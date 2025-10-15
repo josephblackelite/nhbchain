@@ -61,7 +61,10 @@ systems can render them unambiguously.
 Wallet integrations submit signed ZNHB transfers through the privileged
 `nhb_sendTransaction` RPC using the `TransferZNHB (0x10)` transaction type. Fetch
 the next nonce from `nhb_getBalance` before signing so the payload aligns with
-validator expectations:
+validator expectations. The `NHB_RPC_TOKEN` referenced in the examples below must
+be a short-lived JWT issued by your infrastructure with the issuer/audience
+configured under `RPCJWT`; refresh the token before it expires so the server
+accepts the request:
 
 ```jsonc
 // Request

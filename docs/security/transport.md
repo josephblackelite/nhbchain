@@ -94,8 +94,10 @@ MaxSkewSeconds = 120
   spoofed headers.
 * `RPCJWT` enables signed bearer tokens. Operators should rotate the secret
   referenced by `HSSecretEnv` (or provide a PEM file via `RSAPublicKeyFile` when
-  using RS256), and issue tokens with matching `Issuer`/`Audience` claims. Expiry
-  and not-before checks apply with the configured skew window.
+  using RS256), and issue short-lived tokens with matching `Issuer`/`Audience`
+  claims. Expiry and not-before checks apply with the configured skew window, so
+  automation must refresh the bearer presented in `Authorization: Bearer <token>`
+  before it expires.
 
 After restarting the node, validate the transport:
 

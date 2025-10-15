@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -41,7 +42,25 @@ func NewMiniChain() (*MiniChain, error) {
 		return nil, fmt.Errorf("create node: %w", err)
 	}
 
-	server := rpc.NewServer(node, nil, rpc.ServerConfig{AllowInsecure: true})
+	const jwtEnv = "MINICHAIN_RPC_JWT_SECRET"
+	if err := os.Setenv(jwtEnv, "minichain-secret"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set JWT secret: %w", err)
+	}
+	server, err := rpc.NewServer(node, nil, rpc.ServerConfig{
+		AllowInsecure: true,
+		JWT: rpc.JWTConfig{
+			Enable:      true,
+			Alg:         "HS256",
+			HSSecretEnv: jwtEnv,
+			Issuer:      "minichain",
+			Audience:    []string{"pos-tests"},
+		},
+	})
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create rpc server: %w", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		db.Close()

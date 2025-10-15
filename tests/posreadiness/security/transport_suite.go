@@ -245,7 +245,26 @@ func newRPCTestServer(t *testing.T, cfg rpc.ServerConfig) *rpcTestServer {
 		t.Fatalf("new node: %v", err)
 	}
 
-	server := rpc.NewServer(node, nil, cfg)
+	if !cfg.JWT.Enable && strings.TrimSpace(cfg.TLSClientCAFile) == "" {
+		const jwtEnv = "POSREADINESS_RPC_JWT_SECRET"
+		if err := os.Setenv(jwtEnv, "posreadiness-secret"); err != nil {
+			db.Close()
+			t.Fatalf("set jwt secret: %v", err)
+		}
+		cfg.JWT = rpc.JWTConfig{
+			Enable:      true,
+			Alg:         "HS256",
+			HSSecretEnv: jwtEnv,
+			Issuer:      "posreadiness",
+			Audience:    []string{"transport-suite"},
+		}
+	}
+
+	server, err := rpc.NewServer(node, nil, cfg)
+	if err != nil {
+		db.Close()
+		t.Fatalf("new rpc server: %v", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		db.Close()
