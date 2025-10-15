@@ -132,8 +132,12 @@ services:
       - "/etc/nhb/governd.yaml"
     environment:
       NHB_ENV: local
+      GOVERND_SIGNER_KEY: ${GOVERND_SIGNER_KEY:?set to the hex-encoded governd signer key}
+      GOVERND_TLS_KEY_PATH: /etc/nhb/tls/server.key
     volumes:
       - ./config/governd.yaml:/etc/nhb/governd.yaml:ro
+      - ${GOVERND_TLS_KEY_FILE:?set to the TLS private key file for governd}:/etc/nhb/tls/server.key:ro
+      - ${GOVERND_TLS_CERT_FILE:-./services/governd/config/server.crt}:/etc/nhb/tls/server.crt:ro
     ports:
       - "50061:50061"
     restart: unless-stopped

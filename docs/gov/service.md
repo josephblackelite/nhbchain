@@ -14,7 +14,7 @@ can interact with governance without embedding consensus-specific logic.
 listen: ":50061"              # gRPC listen address
 consensus: "localhost:9090"   # consensus service endpoint
 chain_id: "localnet"          # consensus chain identifier
-signer_key: "<hex private key>" # 32 byte hex encoded secp256k1 key material
+signer_key_env: "GOVERND_SIGNER_KEY" # environment variable containing a 32 byte hex encoded key
 nonce_start: 1                 # baseline account nonce used when no persisted state exists
 nonce_store_path: "/var/lib/nhb/governd/nonce" # file used to persist the next nonce across restarts
 fee:                           # optional transaction fee metadata
@@ -23,7 +23,7 @@ fee:                           # optional transaction fee metadata
   payer: ""
 tls:                           # TLS assets for the gRPC listener
   cert: "services/governd/config/server.crt"
-  key: "services/governd/config/server.key"
+  key_env: "GOVERND_TLS_KEY_PATH" # path supplied via environment variable/secret manager
   client_ca: ""               # optional PEM bundle of allowed client certificate authorities
 auth:
   api_tokens: []               # list of accepted bearer tokens for Msg RPCs
@@ -40,8 +40,11 @@ consensus_client:              # security settings for the outbound consensus cl
     token: ""                 # optional static shared secret sent to consensus
 ```
 
-* **`signer_key`** is required and must be the lowercase hexadecimal encoding of
-  the 32 byte secp256k1 private key used to sign governance transactions.
+* **`signer_key_env`** points to an environment variable resolved at runtime. The
+  variable must contain the lowercase hexadecimal encoding of the 32 byte
+  secp256k1 private key used to sign governance transactions. For local testing,
+  the legacy `signer_key` scalar is still accepted but should not be used in
+  production deployments.
 * **`nonce_start`** should be set to the next available account nonce for the
   configured signer. The service treats this as a baseline when no persisted
   nonce information is available on disk.
@@ -49,8 +52,10 @@ consensus_client:              # security settings for the outbound consensus cl
   nonce after each successful transaction broadcast. The value is reloaded
   during startup so restarts continue from the last used nonce.
 * **`tls`** must point at the PEM encoded certificate and private key the
-  service should present. Supplying `client_ca` enables mTLS and requires
-  clients to authenticate with a certificate issued by the supplied authority.
+  service should present. Production deployments should inject the private key
+  path using `tls.key_env` (for example via Kubernetes secrets or HashiCorp
+  Vault agents). Supplying `client_ca` enables mTLS and requires clients to
+  authenticate with a certificate issued by the supplied authority.
 * **`auth.api_tokens`** accepts static bearer tokens. Requests should send the
   token using the `authorization: bearer <token>` metadata entry. The
   `x-api-token` metadata key is also supported for backwards compatibility with

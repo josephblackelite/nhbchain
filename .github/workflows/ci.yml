@@ -4,7 +4,19 @@ on:
   pull_request:
 
 jobs:
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install git-secrets
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-secrets
+      - name: Scan tracked files for PEM private keys
+        run: scripts/check_private_keys.sh
+
   build-test:
+    needs: secrets-scan
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

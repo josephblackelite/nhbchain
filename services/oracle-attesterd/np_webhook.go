@@ -41,6 +41,8 @@ type Config struct {
 	ConsensusEndpoint string        `yaml:"consensus"`
 	ChainID           string        `yaml:"chain_id"`
 	SignerKey         string        `yaml:"signer_key"`
+	SignerKeyFile     string        `yaml:"signer_key_file"`
+	SignerKeyEnv      string        `yaml:"signer_key_env"`
 	NonceStart        uint64        `yaml:"nonce_start"`
 	Authority         string        `yaml:"authority"`
 	TreasuryAccount   string        `yaml:"treasury_account"`
@@ -110,8 +112,25 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("chain_id required")
 	}
 	cfg.SignerKey = strings.TrimSpace(cfg.SignerKey)
+	cfg.SignerKeyEnv = strings.TrimSpace(cfg.SignerKeyEnv)
+	cfg.SignerKeyFile = strings.TrimSpace(cfg.SignerKeyFile)
 	if cfg.SignerKey == "" {
-		return Config{}, fmt.Errorf("signer_key required")
+		switch {
+		case cfg.SignerKeyEnv != "":
+			value := strings.TrimSpace(os.Getenv(cfg.SignerKeyEnv))
+			if value == "" {
+				return Config{}, fmt.Errorf("signer_key_env %s is empty", cfg.SignerKeyEnv)
+			}
+			cfg.SignerKey = value
+		case cfg.SignerKeyFile != "":
+			contents, err := os.ReadFile(cfg.SignerKeyFile)
+			if err != nil {
+				return Config{}, fmt.Errorf("read signer_key_file: %w", err)
+			}
+			cfg.SignerKey = strings.TrimSpace(string(contents))
+		default:
+			return Config{}, fmt.Errorf("signer_key required")
+		}
 	}
 	cfg.Authority = strings.TrimSpace(cfg.Authority)
 	if cfg.Authority == "" {
