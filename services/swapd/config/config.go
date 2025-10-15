@@ -209,6 +209,9 @@ func validate(cfg Config) error {
 	if len(cfg.Stable.Assets) == 0 {
 		return fmt.Errorf("stable assets must be configured when stable engine is enabled")
 	}
+	if cfg.Admin.TLS.Disable {
+		return fmt.Errorf("stable runtime requires admin TLS to be enabled")
+	}
 	return nil
 }
 

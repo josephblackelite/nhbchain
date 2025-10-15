@@ -175,6 +175,10 @@ func main() {
 		log.Fatalf("swapd: configure admin auth: %v", err)
 	}
 
+	if stableRuntime.Enabled && cfg.Admin.TLS.Disable {
+		log.Fatalf("swapd: stable runtime requires admin TLS to be enabled")
+	}
+
 	var tlsConfig *tls.Config
 	if !cfg.Admin.TLS.Disable {
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}

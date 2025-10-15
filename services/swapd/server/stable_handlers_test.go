@@ -76,14 +76,14 @@ func TestStableHandlersFlow(t *testing.T) {
 	quoteBody := `{"asset":"ZNHB","amount":100,"account":"merchant-123"}`
 	engine.RecordPrice("ZNHB", "USD", 1.02, base)
 
-	quoteResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", quoteBody)
+	quoteResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", quoteBody, "Bearer test-token")
 	assertStatus(t, quoteResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_quote.json", quoteResp.Body.Bytes())
 
 	quoteID := extractField(t, quoteResp.Body.Bytes(), "quote_id")
 
 	reserveBody := `{"quote_id":"` + quoteID + `","amount_in":100,"account":"merchant-123"}`
-	reserveResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", reserveBody)
+	reserveResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", reserveBody, "Bearer test-token")
 	assertStatus(t, reserveResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_reserve.json", reserveResp.Body.Bytes())
 
@@ -104,7 +104,7 @@ func TestStableHandlersFlow(t *testing.T) {
 	reservationID := extractField(t, reserveResp.Body.Bytes(), "reservation_id")
 
 	cashOutBody := `{"reservation_id":"` + reservationID + `"}`
-	cashOutResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody)
+	cashOutResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody, "Bearer test-token")
 	assertStatus(t, cashOutResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_cashout.json", cashOutResp.Body.Bytes())
 
@@ -119,24 +119,24 @@ func TestStableHandlersFlow(t *testing.T) {
 		t.Fatalf("payouts mismatch: got %d want %d", got, want)
 	}
 
-	cashOutAgain := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody)
+	cashOutAgain := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody, "Bearer test-token")
 	assertStatus(t, cashOutAgain.Code, http.StatusConflict)
 
 	slippageBody := `{"asset":"ZNHB","amount":50,"account":"merchant-123"}`
-	quoteSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", slippageBody)
+	quoteSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", slippageBody, "Bearer test-token")
 	assertStatus(t, quoteSlippage.Code, http.StatusOK)
 	newQuoteID := extractField(t, quoteSlippage.Body.Bytes(), "quote_id")
 
 	// Move the oracle by 5% to trigger slippage guard (limit is 0.5%).
 	engine.RecordPrice("ZNHB", "USD", 1.07, base.Add(30*time.Second))
-	reserveSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", `{"quote_id":"`+newQuoteID+`","amount_in":50,"account":"merchant-123"}`)
+	reserveSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", `{"quote_id":"`+newQuoteID+`","amount_in":50,"account":"merchant-123"}`, "Bearer test-token")
 	assertStatus(t, reserveSlippage.Code, http.StatusConflict)
 
-	statusResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/status", "")
+	statusResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/status", "", "Bearer test-token")
 	assertStatus(t, statusResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_status.json", statusResp.Body.Bytes())
 
-	limitsResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/limits", "")
+	limitsResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/limits", "", "Bearer test-token")
 	assertStatus(t, limitsResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_limits.json", limitsResp.Body.Bytes())
 }
@@ -159,9 +159,91 @@ func TestStableHandlersDisabled(t *testing.T) {
 	mux := http.NewServeMux()
 	srv.registerStableHandlers(mux)
 
-	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "")
+	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", "Bearer test-token")
 	assertStatus(t, resp.Code, http.StatusNotImplemented)
 	assertGoldenJSON(t, "stable_disabled.json", resp.Body.Bytes())
+}
+
+func TestStableHandlersRequireAuthentication(t *testing.T) {
+	store, err := storage.Open("file:stable_handlers_auth?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newTestStableEngine(t, base)
+	limits := stable.Limits{DailyCap: 1_000_000}
+	asset := stable.Asset{
+		Symbol:         "ZNHB",
+		BasePair:       "ZNHB",
+		QuotePair:      "USD",
+		QuoteTTL:       time.Minute,
+		MaxSlippageBps: 50,
+		SoftInventory:  1_000_000,
+	}
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{
+		Enabled: true,
+		Engine:  engine,
+		Limits:  limits,
+		Assets:  []stable.Asset{asset},
+	}, auth)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	srv.registerStableHandlers(mux)
+
+	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", "")
+	assertStatus(t, resp.Code, http.StatusUnauthorized)
+}
+
+func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
+	store, err := storage.Open("file:stable_handlers_forbidden?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newTestStableEngine(t, base)
+	limits := stable.Limits{DailyCap: 1_000_000}
+	asset := stable.Asset{
+		Symbol:         "ZNHB",
+		BasePair:       "ZNHB",
+		QuotePair:      "USD",
+		QuoteTTL:       time.Minute,
+		MaxSlippageBps: 50,
+		SoftInventory:  1_000_000,
+	}
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{
+		Enabled: true,
+		Engine:  engine,
+		Limits:  limits,
+		Assets:  []stable.Asset{asset},
+	}, auth)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/stable/status", nil)
+	ctx := context.WithValue(req.Context(), principalContextKey{}, &Principal{})
+	req = req.WithContext(ctx)
+	recorder := httptest.NewRecorder()
+
+	srv.handleStableStatus(recorder, req)
+
+	assertStatus(t, recorder.Code, http.StatusForbidden)
+	assertGoldenJSON(t, "stable_principal_forbidden.json", recorder.Body.Bytes())
 }
 
 func newTestStableEngine(t *testing.T, base time.Time) *stable.Engine {
@@ -192,7 +274,7 @@ func newTestStableEngine(t *testing.T, base time.Time) *stable.Engine {
 	return engine
 }
 
-func doStableRequest(t *testing.T, mux *http.ServeMux, ctx context.Context, method, path, body string) *httptest.ResponseRecorder {
+func doStableRequest(t *testing.T, mux *http.ServeMux, ctx context.Context, method, path, body, authHeader string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
 	if body == "" {
@@ -204,6 +286,9 @@ func doStableRequest(t *testing.T, mux *http.ServeMux, ctx context.Context, meth
 	req = req.WithContext(ctx)
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
 	}
 	resp := httptest.NewRecorder()
 	mux.ServeHTTP(resp, req)

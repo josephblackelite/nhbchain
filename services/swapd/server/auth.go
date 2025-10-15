@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -18,6 +19,25 @@ type Authenticator struct {
 	bearerToken string
 	allowBearer bool
 	allowMTLS   bool
+}
+
+// Principal describes an authenticated actor accessing the admin API.
+type Principal struct {
+	Method string
+}
+
+type principalContextKey struct{}
+
+// PrincipalFromContext extracts the authenticated principal from the request context.
+func PrincipalFromContext(ctx context.Context) (*Principal, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	principal, ok := ctx.Value(principalContextKey{}).(*Principal)
+	if !ok || principal == nil {
+		return nil, false
+	}
+	return principal, true
 }
 
 // NewAuthenticator constructs an authenticator from configuration.
@@ -38,56 +58,65 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			http.Error(w, "authentication unavailable", http.StatusInternalServerError)
 			return
 		}
-		if a.authenticate(r) {
-			next.ServeHTTP(w, r)
+		principal, ok := a.authenticate(r)
+		if ok {
+			ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 	})
 }
 
-func (a *Authenticator) authenticate(r *http.Request) bool {
+func (a *Authenticator) authenticate(r *http.Request) (*Principal, bool) {
 	if a == nil {
-		return false
+		return nil, false
 	}
-	if a.allowBearer && a.authenticateByBearer(r) {
-		return true
+	if a.allowBearer {
+		if principal := a.authenticateByBearer(r); principal != nil {
+			return principal, true
+		}
 	}
-	if a.allowMTLS && a.authenticateByMTLS(r) {
-		return true
+	if a.allowMTLS {
+		if principal := a.authenticateByMTLS(r); principal != nil {
+			return principal, true
+		}
 	}
-	return false
+	return nil, false
 }
 
-func (a *Authenticator) authenticateByBearer(r *http.Request) bool {
+func (a *Authenticator) authenticateByBearer(r *http.Request) *Principal {
 	if r == nil {
-		return false
+		return nil
 	}
 	header := r.Header.Get("Authorization")
 	token := parseBearerToken(header)
 	if token == "" {
-		return false
+		return nil
 	}
 	provided := []byte(token)
 	expected := []byte(a.bearerToken)
-	return subtle.ConstantTimeCompare(provided, expected) == 1
+	if subtle.ConstantTimeCompare(provided, expected) != 1 {
+		return nil
+	}
+	return &Principal{Method: "bearer"}
 }
 
-func (a *Authenticator) authenticateByMTLS(r *http.Request) bool {
+func (a *Authenticator) authenticateByMTLS(r *http.Request) *Principal {
 	if r == nil {
-		return false
+		return nil
 	}
 	state := r.TLS
 	if state == nil {
-		return false
+		return nil
 	}
 	if len(state.VerifiedChains) > 0 {
-		return true
+		return &Principal{Method: "mtls"}
 	}
 	if len(state.PeerCertificates) > 0 && state.HandshakeComplete {
-		return true
+		return &Principal{Method: "mtls"}
 	}
-	return false
+	return nil
 }
 
 func parseBearerToken(header string) string {
