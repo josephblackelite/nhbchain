@@ -25,9 +25,12 @@ security:
   chains to the supplied bundle. The gateway rejects untrusted clients before
   hitting routing logic.
 * `allowInsecure` only permits plaintext when **all** of the following hold:
-  loopback listener (`127.0.0.1` / `::1`) or `NHB_ENV=dev`, the flag
-  `--allow-insecure` is supplied, and the configuration explicitly enables it.
-  Production deployments should keep this `false`.
+  the process runs with `NHB_ENV=dev` *and* binds to a loopback address
+  (`127.0.0.1` / `::1`). The runtime refuses to start if those conditions are
+  not met. Pairing the config knob with `--allow-insecure` keeps certificates
+  optional for local development, but the gateway logs a prominent warning and
+  still exits when an operator attempts to use plaintext elsewhere. Production
+  deployments must keep this `false`.
 
 To launch the gateway with locally generated certificates:
 
