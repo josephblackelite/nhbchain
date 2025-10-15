@@ -15,8 +15,10 @@ persistence:
 config:
   chainName: nhb-staging
   content: |
-    ListenAddress = "0.0.0.0:6002"
-    RPCAddress = "0.0.0.0:8081"
+    ListenAddress = "127.0.0.1:6002"
+    # The chart exposes consensusd via Kubernetes Services; keep listeners bound
+    # to loopback and surface them through the Service mesh or ingress layer.
+    RPCAddress = "127.0.0.1:8081"
     DataDir = "/var/lib/nhb/consensus"
     AllowAutogenesis = true
     NetworkName = "nhb-staging"

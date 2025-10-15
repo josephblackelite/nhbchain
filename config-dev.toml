@@ -1,0 +1,43 @@
+# WARNING: Development-only configuration. This sample intentionally binds to
+# 0.0.0.0 and enables plaintext transport for ad-hoc labs. Never ship this to
+# production or commit it to persistent infrastructure.
+ListenAddress = "0.0.0.0:6002"
+RPCAddress = "0.0.0.0:8081"
+DataDir = "./nhb-data-local"
+GenesisFile = "./config/genesis.local.json"
+AllowAutogenesis = false
+ValidatorKeystorePath = "./nhb-data-local/validator.keystore"
+NetworkName = "nhb-local"
+
+[mempool]
+MaxTransactions = 5000
+
+[p2p]
+NetworkId = 187001
+MaxPeers = 64
+MaxInbound = 60
+MaxOutbound = 30
+MinPeers = 12
+OutboundPeers = 16
+Bootnodes = []
+PersistentPeers = []
+Seeds = []
+
+PeerBanSeconds = 3600
+ReadTimeout = 90
+WriteTimeout = 5
+MaxMsgBytes = 1048576
+ClientVersion = "nhbchain/node"
+# AllowInsecure must only be flipped together with loopback binds and the
+# --allow-insecure flag. This file defaults to true for convenience in labs.
+RPCAllowInsecure = true
+RPCAllowInsecureUnspecified = true
+RPCTLSCertFile = ""
+RPCTLSKeyFile = ""
+RPCTLSClientCAFile = ""
+
+[network_security]
+SharedSecret = "local-dev-shared-secret"
+# AllowInsecure=true disables TLS and must never be used for shared or
+# production deployments. Pair this with --allow-insecure on the command line.
+AllowInsecure = true

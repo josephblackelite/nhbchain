@@ -211,3 +211,53 @@ if errors:
         print(f"[verify_prod_config] {err}", file=sys.stderr)
     sys.exit(1)
 PY
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+
+prod_targets=(
+  "${REPO_ROOT}/config.toml"
+  "${REPO_ROOT}/deploy/compose/config"
+  "${REPO_ROOT}/deploy/helm/values/prod"
+  "${REPO_ROOT}/deploy/helm/values/staging"
+  "${REPO_ROOT}/deploy/helm/values/dev"
+  "${REPO_ROOT}/deploy/helm/consensusd/values.yaml"
+)
+
+violations=0
+
+search_pattern() {
+  local regex="$1"
+  local path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg --no-heading --line-number "$regex" "$path"
+  else
+    grep -R -n -E "$regex" "$path"
+  fi
+}
+
+for target in "${prod_targets[@]}"; do
+  if [[ -d "$target" ]]; then
+    if search_pattern '^[[:space:]]*[^#\n]*0\.0\.0\.0' "$target"; then
+      echo "error: wildcard bind detected in production artifact '$target'" >&2
+      violations=1
+    fi
+    if search_pattern '^[[:space:]]*[^#\n]*AllowInsecure[[:space:]]*=[[:space:]]*true' "$target"; then
+      echo "error: AllowInsecure=true found in production artifact '$target'" >&2
+      violations=1
+    fi
+  elif [[ -f "$target" ]]; then
+    if search_pattern '^[[:space:]]*[^#\n]*0\.0\.0\.0' "$target"; then
+      echo "error: wildcard bind detected in production artifact '$target'" >&2
+      violations=1
+    fi
+    if search_pattern '^[[:space:]]*[^#\n]*AllowInsecure[[:space:]]*=[[:space:]]*true' "$target"; then
+      echo "error: AllowInsecure=true found in production artifact '$target'" >&2
+      violations=1
+    fi
+  fi
+done
+
+if [[ "$violations" -ne 0 ]]; then
+  exit 1
+fi

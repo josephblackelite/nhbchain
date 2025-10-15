@@ -1,4 +1,4 @@
-listen: ":50061"
+listen: "127.0.0.1:50061"
 consensus: "consensusd:9090"
 chain_id: "nhb-local"
 signer_key: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"

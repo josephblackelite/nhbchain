@@ -11,8 +11,11 @@ persistence:
   enabled: false
 config:
   content: |
-    ListenAddress = "0.0.0.0:6002"
-    RPCAddress = "0.0.0.0:8081"
+    ListenAddress = "127.0.0.1:6002"
+    # For local dev clusters you can switch back to 0.0.0.0 when exposing via
+    # `kubectl port-forward`. The default remains loopback to avoid accidental
+    # public binds.
+    RPCAddress = "127.0.0.1:8081"
     DataDir = "/var/lib/nhb/consensus"
     AllowAutogenesis = true
     NetworkName = "nhb-dev"
