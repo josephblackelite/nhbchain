@@ -63,10 +63,11 @@ const (
 )
 
 var (
-	ErrNonceMismatch      = errors.New("transaction nonce mismatch")
-	ErrInvalidChainID     = errors.New("invalid chain id")
-	ErrTransferNHBPaused  = errors.New("nhb transfer: paused")
-	ErrTransferZNHBPaused = errors.New("znhb transfer: paused")
+	ErrNonceMismatch       = errors.New("transaction nonce mismatch")
+	ErrInvalidChainID      = errors.New("invalid chain id")
+	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
+	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
+	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
 	// ErrStakePaused indicates governance has paused staking mutations.
 	ErrStakePaused = errors.New("staking: module paused")
 )
@@ -1441,7 +1442,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	}
 	if err != nil {
-		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) {
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -1596,6 +1597,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		return nil, err
 	}
 	var sponsorshipCtx *sponsorshipRuntime
+	var sponsorshipErr error
 	var txHashBytes []byte
 	if len(tx.Paymaster) > 0 {
 		txHashBytes, _ = tx.Hash()
@@ -1650,10 +1652,22 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		case SponsorshipStatusNone:
 			// no sponsorship requested
 		default:
-			if len(txHashBytes) > 0 {
-				sp.emitSponsorshipFailureEvent(fromAddr, assessment, bytesToHash32(txHashBytes))
+			txHash := [32]byte{}
+			if len(txHashBytes) == 0 {
+				if h, hashErr := tx.Hash(); hashErr == nil {
+					txHashBytes = h
+				}
 			}
+			if len(txHashBytes) > 0 {
+				txHash = bytesToHash32(txHashBytes)
+			}
+			sp.emitSponsorshipFailureEvent(fromAddr, assessment, txHash)
+			sponsorshipErr = fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, assessment.Status, strings.TrimSpace(assessment.Reason))
 		}
+	}
+
+	if sponsorshipErr != nil {
+		return nil, sponsorshipErr
 	}
 
 	gp := new(gethcore.GasPool).AddGas(tx.GasLimit)
@@ -1802,7 +1816,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		return nil, err
 	}
 
-       return exec, nil
+	return exec, nil
 }
 
 // --- Native handlers (original semantics + new dispute flow) ---
@@ -2177,7 +2191,7 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []
 	if err := sp.setAccount(sender, senderAccount); err != nil {
 		return err
 	}
-       return nil
+	return nil
 }
 
 func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
@@ -3083,7 +3097,7 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, s
 		sp.AppendEvent(evt)
 	}
 
-       return nil
+	return nil
 }
 
 type stakeUnbond struct {

@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -54,6 +55,41 @@ func signPaymaster(t *testing.T, tx *types.Transaction, key *crypto.PrivateKey) 
 	tx.PaymasterR = new(big.Int).SetBytes(sig[:32])
 	tx.PaymasterS = new(big.Int).SetBytes(sig[32:64])
 	tx.PaymasterV = new(big.Int).SetUint64(uint64(sig[64]) + 27)
+}
+
+type accountSnapshot struct {
+	nonce      uint64
+	balanceNHB *big.Int
+}
+
+func captureAccountSnapshot(t *testing.T, sp *StateProcessor, addr []byte) accountSnapshot {
+	t.Helper()
+	acc, err := sp.getAccount(addr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	snapshot := accountSnapshot{}
+	if acc != nil {
+		snapshot.nonce = acc.Nonce
+		if acc.BalanceNHB != nil {
+			snapshot.balanceNHB = new(big.Int).Set(acc.BalanceNHB)
+		}
+	}
+	return snapshot
+}
+
+func (s accountSnapshot) equal(other accountSnapshot) bool {
+	if s.nonce != other.nonce {
+		return false
+	}
+	switch {
+	case s.balanceNHB == nil && other.balanceNHB == nil:
+		return true
+	case s.balanceNHB == nil || other.balanceNHB == nil:
+		return false
+	default:
+		return s.balanceNHB.Cmp(other.balanceNHB) == 0
+	}
 }
 
 func TestEvaluateSponsorship(t *testing.T) {
@@ -696,4 +732,160 @@ func TestPaymasterCountersAccumulate(t *testing.T) {
 	if snapshot.DeviceBudgetWei.Cmp(expectedBudget) != 0 {
 		t.Fatalf("expected device budget %s, got %s", expectedBudget, snapshot.DeviceBudgetWei)
 	}
+}
+
+func TestApplyTransactionSponsorshipRejection(t *testing.T) {
+	t.Run("invalid signature leaves state untouched", func(t *testing.T) {
+		sp := newSponsorshipState(t)
+		sp.SetPaymasterEnabled(true)
+		sp.BeginBlock(1, time.Unix(1, 0).UTC())
+
+		senderKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate sender key: %v", err)
+		}
+		senderAddr := senderKey.PubKey().Address().Bytes()
+		paymasterKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate paymaster key: %v", err)
+		}
+		paymasterAddr := paymasterKey.PubKey().Address().Bytes()
+
+		senderAccount := &types.Account{BalanceNHB: big.NewInt(10_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+		if err := sp.setAccount(senderAddr, senderAccount); err != nil {
+			t.Fatalf("seed sender: %v", err)
+		}
+		paymasterAccount := &types.Account{BalanceNHB: big.NewInt(10_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+		if err := sp.setAccount(paymasterAddr, paymasterAccount); err != nil {
+			t.Fatalf("seed paymaster: %v", err)
+		}
+
+		tx := &types.Transaction{
+			ChainID:   types.NHBChainID(),
+			Type:      types.TxTypeTransfer,
+			Nonce:     0,
+			To:        append([]byte(nil), common.Address{0xAA}.Bytes()...),
+			Value:     big.NewInt(1),
+			GasLimit:  21_000,
+			GasPrice:  big.NewInt(1),
+			Paymaster: append([]byte(nil), paymasterAddr...),
+		}
+		signTransaction(t, tx, senderKey)
+
+		rootBefore := sp.Trie.Hash()
+		senderBefore := captureAccountSnapshot(t, sp, senderAddr)
+		paymasterBefore := captureAccountSnapshot(t, sp, paymasterAddr)
+
+		err = sp.ApplyTransaction(tx)
+		if err == nil {
+			t.Fatalf("expected sponsorship rejection error")
+		}
+		if !errors.Is(err, ErrSponsorshipRejected) {
+			t.Fatalf("expected ErrSponsorshipRejected, got %v", err)
+		}
+
+		if rootAfter := sp.Trie.Hash(); rootAfter != rootBefore {
+			t.Fatalf("expected trie root unchanged, got %s vs %s", rootAfter.Hex(), rootBefore.Hex())
+		}
+		if senderAfter := captureAccountSnapshot(t, sp, senderAddr); !senderAfter.equal(senderBefore) {
+			t.Fatalf("sender account mutated: before=%+v after=%+v", senderBefore, senderAfter)
+		}
+		if paymasterAfter := captureAccountSnapshot(t, sp, paymasterAddr); !paymasterAfter.equal(paymasterBefore) {
+			t.Fatalf("paymaster account mutated: before=%+v after=%+v", paymasterBefore, paymasterAfter)
+		}
+
+		eventsList := sp.Events()
+		if len(eventsList) == 0 {
+			t.Fatalf("expected sponsorship failure event")
+		}
+		last := eventsList[len(eventsList)-1]
+		if last.Type != events.TypeTxSponsorshipFailed {
+			t.Fatalf("expected failure event, got %s", last.Type)
+		}
+		if status := last.Attributes["status"]; status != string(SponsorshipStatusSignatureMissing) {
+			t.Fatalf("expected status %s, got %s", SponsorshipStatusSignatureMissing, status)
+		}
+	})
+
+	t.Run("throttled sponsorship emits events", func(t *testing.T) {
+		sp := newSponsorshipState(t)
+		sp.SetPaymasterEnabled(true)
+		sp.SetPaymasterLimits(PaymasterLimits{DeviceDailyTxCap: 1})
+		sp.BeginBlock(1, time.Unix(2, 0).UTC())
+
+		senderKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate sender key: %v", err)
+		}
+		senderAddr := senderKey.PubKey().Address().Bytes()
+		paymasterKey, err := crypto.GeneratePrivateKey()
+		if err != nil {
+			t.Fatalf("generate paymaster key: %v", err)
+		}
+		paymasterAddr := paymasterKey.PubKey().Address().Bytes()
+
+		senderAccount := &types.Account{BalanceNHB: big.NewInt(10_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+		if err := sp.setAccount(senderAddr, senderAccount); err != nil {
+			t.Fatalf("seed sender: %v", err)
+		}
+		paymasterAccount := &types.Account{BalanceNHB: big.NewInt(10_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+		if err := sp.setAccount(paymasterAddr, paymasterAccount); err != nil {
+			t.Fatalf("seed paymaster: %v", err)
+		}
+
+		tx := &types.Transaction{
+			ChainID:         types.NHBChainID(),
+			Type:            types.TxTypeTransfer,
+			Nonce:           0,
+			To:              append([]byte(nil), common.Address{0xBB}.Bytes()...),
+			Value:           big.NewInt(1),
+			GasLimit:        21_000,
+			GasPrice:        big.NewInt(1),
+			Paymaster:       append([]byte(nil), paymasterAddr...),
+			MerchantAddress: "merchant-1",
+		}
+		signTransaction(t, tx, senderKey)
+		signPaymaster(t, tx, paymasterKey)
+
+		rootBefore := sp.Trie.Hash()
+		senderBefore := captureAccountSnapshot(t, sp, senderAddr)
+		paymasterBefore := captureAccountSnapshot(t, sp, paymasterAddr)
+
+		err = sp.ApplyTransaction(tx)
+		if err == nil {
+			t.Fatalf("expected sponsorship rejection error")
+		}
+		if !errors.Is(err, ErrSponsorshipRejected) {
+			t.Fatalf("expected ErrSponsorshipRejected, got %v", err)
+		}
+
+		if rootAfter := sp.Trie.Hash(); rootAfter != rootBefore {
+			t.Fatalf("expected trie root unchanged, got %s vs %s", rootAfter.Hex(), rootBefore.Hex())
+		}
+		if senderAfter := captureAccountSnapshot(t, sp, senderAddr); !senderAfter.equal(senderBefore) {
+			t.Fatalf("sender account mutated: before=%+v after=%+v", senderBefore, senderAfter)
+		}
+		if paymasterAfter := captureAccountSnapshot(t, sp, paymasterAddr); !paymasterAfter.equal(paymasterBefore) {
+			t.Fatalf("paymaster account mutated: before=%+v after=%+v", paymasterBefore, paymasterAfter)
+		}
+
+		eventsList := sp.Events()
+		if len(eventsList) < 2 {
+			t.Fatalf("expected failure and throttle events, got %#v", eventsList)
+		}
+		failure := eventsList[len(eventsList)-2]
+		throttle := eventsList[len(eventsList)-1]
+		if failure.Type != events.TypeTxSponsorshipFailed {
+			t.Fatalf("expected failure event, got %s", failure.Type)
+		}
+		if status := failure.Attributes["status"]; status != string(SponsorshipStatusThrottled) {
+			t.Fatalf("expected throttled status, got %s", status)
+		}
+		if throttle.Type != events.TypePaymasterThrottled {
+			t.Fatalf("expected throttle event, got %s", throttle.Type)
+		}
+		if _, ok := throttle.Attributes["scope"]; !ok {
+			t.Fatalf("expected throttle scope attribute, got %#v", throttle.Attributes)
+		}
+	})
 }
