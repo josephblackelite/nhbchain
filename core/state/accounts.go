@@ -2,6 +2,7 @@ package state
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -19,6 +20,18 @@ var (
 	accountMetadataPrefix = []byte("account-meta:")
 	usernameIndexKey      = ethcrypto.Keccak256([]byte("username-index"))
 	validatorSetKey       = ethcrypto.Keccak256([]byte("validator-set"))
+)
+
+var (
+	// ErrInsufficientBalance is returned when a balance mutation would drive the
+	// value negative. Callers are expected to translate this into
+	// domain-specific errors (e.g. claimable.ErrInsufficientFunds).
+	ErrInsufficientBalance = errors.New("state: insufficient balance")
+
+	// ErrInvalidAmount signals that a balance mutation request used an
+	// invalid amount (nil or negative). It protects against programming
+	// mistakes when staging account updates.
+	ErrInvalidAmount = errors.New("state: invalid amount")
 )
 
 type accountMetadata struct {
@@ -133,6 +146,49 @@ func ensureAccountDefaults(account *types.Account) {
 	} else if len(account.CodeHash) != common.HashLength {
 		account.CodeHash = common.BytesToHash(account.CodeHash).Bytes()
 	}
+}
+
+// MustSubBalance subtracts amt from balance, returning a rollback closure to
+// restore the original value if the caller needs to undo staged mutations. The
+// balance is mutated in-place only when the subtraction succeeds.
+func MustSubBalance(balance *big.Int, amt *big.Int) (func(), error) {
+	if amt == nil || amt.Sign() < 0 {
+		return nil, ErrInvalidAmount
+	}
+	if balance == nil {
+		return nil, fmt.Errorf("state: nil balance pointer")
+	}
+	if amt.Sign() == 0 {
+		return func() {}, nil
+	}
+	if balance.Cmp(amt) < 0 {
+		return nil, ErrInsufficientBalance
+	}
+	original := new(big.Int).Set(balance)
+	balance.Sub(balance, amt)
+	return func() {
+		balance.Set(original)
+	}, nil
+}
+
+// MustAddBalance adds amt to balance, returning a rollback closure to undo the
+// staged mutation if a later operation fails. The balance pointer must be
+// non-nil and amt must be non-negative.
+func MustAddBalance(balance *big.Int, amt *big.Int) (func(), error) {
+	if amt == nil || amt.Sign() < 0 {
+		return nil, ErrInvalidAmount
+	}
+	if balance == nil {
+		return nil, fmt.Errorf("state: nil balance pointer")
+	}
+	if amt.Sign() == 0 {
+		return func() {}, nil
+	}
+	original := new(big.Int).Set(balance)
+	balance.Add(balance, amt)
+	return func() {
+		balance.Set(original)
+	}, nil
 }
 
 // GetAccount reconstructs the high-level account structure stored under the
