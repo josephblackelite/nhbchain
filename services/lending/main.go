@@ -157,6 +157,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.Listen, err)
 	}
+	if cfg.AllowInsecure {
+		tcpAddr, _ := listener.Addr().(*net.TCPAddr)
+		loopback := tcpAddr != nil && tcpAddr.IP != nil && tcpAddr.IP.IsLoopback()
+		if !strings.EqualFold(env, "dev") && !loopback {
+			log.Fatalf("plaintext lendingd mode is restricted to loopback listeners or dev environment")
+		}
+	}
 
 	options, err := lendingserver.Interceptors(srvCfg)
 	if err != nil {

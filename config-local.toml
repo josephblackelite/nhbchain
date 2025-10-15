@@ -38,8 +38,8 @@ ReadTimeout = 90
 WriteTimeout = 5
 MaxMsgBytes = 1048576
 ClientVersion = "nhbchain/node"
-RPCAllowInsecure = true
-# Treat container-style wildcard binds as loopback for local development.
+RPCAllowInsecure = false
+# Set RPCAllowInsecure = true only alongside --allow-insecure and loopback binds during local testing.
 RPCAllowInsecureUnspecified = true
 RPCTLSCertFile = ""
 RPCTLSKeyFile = ""
@@ -54,11 +54,9 @@ Staking = false
 # to an empty secret. Production deployments should supply the secret via
 # SharedSecretFile or SharedSecretEnv and/or enable mutual TLS.
 SharedSecret = "local-dev-shared-secret"
-# Local development defaults to plaintext. Keep this at true only for throwaway
-# labs and always pair it with a shared secret. Production operators must
-# provision TLS and set AllowInsecure = false; the daemon now fails fast when TLS
-# material is absent.
-AllowInsecure = true
+# Local development defaults to TLS. Enable plaintext only for throwaway labs by
+# setting AllowInsecure = true and starting with --allow-insecure; TLS remains the default.
+AllowInsecure = false
 # ServerTLSCertFile = "./tls/p2pd.crt"
 # ServerTLSKeyFile = "./tls/p2pd.key"
 # ClientTLSCertFile = "./tls/consensus.crt"

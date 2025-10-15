@@ -68,6 +68,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen on %s: %v", cfg.ListenAddress, err)
 	}
+	if cfg.TLS.AllowInsecure {
+		tcpAddr, _ := listener.Addr().(*net.TCPAddr)
+		loopback := tcpAddr != nil && tcpAddr.IP != nil && tcpAddr.IP.IsLoopback()
+		if !strings.EqualFold(env, "dev") && !loopback {
+			log.Fatalf("plaintext lendingd mode is restricted to loopback listeners or dev environment")
+		}
+	}
 	creds, err := loadServerCredentials(cfg.TLS)
 	if err != nil {
 		log.Fatalf("configure tls: %v", err)
