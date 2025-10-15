@@ -20,6 +20,11 @@ type moduleMetrics struct {
 	throttles *prometheus.CounterVec
 }
 
+// RPCMetrics captures instrumentation for RPC-specific safeguards.
+type RPCMetrics struct {
+	limiterHits *prometheus.CounterVec
+}
+
 // MempoolMetrics surfaces instrumentation for POS QoS accounting.
 type MempoolMetrics struct {
 	posLaneFill    prometheus.Gauge
@@ -122,6 +127,9 @@ var (
 	moduleMetricsOnce sync.Once
 	moduleRegistry    *moduleMetrics
 
+	rpcMetricsOnce sync.Once
+	rpcRegistry    *RPCMetrics
+
 	swapStableOnce sync.Once
 	swapStableReg  *SwapStableMetrics
 
@@ -194,6 +202,23 @@ func ModuleMetrics() *moduleMetrics {
 	return moduleRegistry
 }
 
+// RPC returns the singleton registry for RPC-specific safeguards such as rate
+// limiting.
+func RPC() *RPCMetrics {
+	rpcMetricsOnce.Do(func() {
+		rpcRegistry = &RPCMetrics{
+			limiterHits: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "rpc",
+				Name:      "limiter_hits_total",
+				Help:      "Count of RPC rate limiter rejections segmented by attribution scope.",
+			}, []string{"scope"}),
+		}
+		prometheus.MustRegister(rpcRegistry.limiterHits)
+	})
+	return rpcRegistry
+}
+
 // Security returns the metrics registry tracking sensitive configuration states.
 func Security() *SecurityMetrics {
 	securityMetricsOnce.Do(func() {
@@ -263,6 +288,27 @@ func (m *moduleMetrics) RecordThrottle(module, reason string) {
 		reason = "unspecified"
 	}
 	m.throttles.WithLabelValues(module, reason).Inc()
+}
+
+// RecordLimiterHit increments the limiter hit counter for the supplied
+// attribution scope.
+func (m *RPCMetrics) RecordLimiterHit(scope string) {
+	if m == nil {
+		return
+	}
+	normalized := strings.TrimSpace(scope)
+	if normalized == "" {
+		normalized = "unknown"
+	}
+	m.limiterHits.WithLabelValues(normalized).Inc()
+}
+
+// LimiterHits exposes the limiter hit counter for testing.
+func (m *RPCMetrics) LimiterHits() *prometheus.CounterVec {
+	if m == nil {
+		return nil
+	}
+	return m.limiterHits
 }
 
 // SwapStableMetrics captures metrics for the experimental stable swap flows.

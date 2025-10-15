@@ -85,9 +85,11 @@ Governance proposals now control the RPC-facing transaction safeguards:
 - `mempool.MaxTransactions` bounds the number of pending user transactions in
   memory. Raising the limit allows additional burst capacity but increases the
   memory footprint across all validators.
-- The per-source submission quota (five transactions per minute) is enforced by
-  the RPC service. Policy changes that relax this limit must include downstream
-  tooling updates so wallets and SDKs still honour backoff semantics.
+- The per-source submission quota (`RPCMaxTxPerWindow` transactions per
+  `RPCRateLimitWindow`) is enforced by the RPC service across IPs, identities,
+  and chain nonces. Policy changes that relax this limit must include downstream
+  tooling updates so wallets and SDKs still honour backoff semantics and should
+  reference `nhb_rpc_limiter_hits_total` trends to justify the change.
 - Any proposal that toggles `RPCTrustProxyHeaders` or edits
   `RPCTrustedProxies`/timeout values must include a migration plan for operators
   to update edge proxies and TLS certificates; without coordinated rollout the

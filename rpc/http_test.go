@@ -17,7 +17,10 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/observability"
 	"nhbchain/storage"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func injectClientIP(t *testing.T, srv *Server, req *http.Request) *http.Request {
@@ -184,7 +187,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	remoteAddr := "10.0.0.1:5000"
 
 	forwarded := "198.51.100.1"
-	for i := 0; i < maxTxPerWindow; i++ {
+	for i := 0; i < server.maxTxPerWindow; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("X-Forwarded-For", forwarded)
@@ -263,7 +266,7 @@ func TestRateLimiterNormalizesSources(t *testing.T) {
 func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
-	staleTime := now.Add(-rateLimiterStaleAfter - time.Second)
+	staleTime := now.Add(-server.rateLimiterStaleAfter - time.Second)
 
 	for i := 0; i < 3; i++ {
 		source := fmt.Sprintf("198.51.100.%d", i)
@@ -284,9 +287,12 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 
 	server.mu.Lock()
 	if len(server.rateLimiters) != 1 {
-		t.Fatalf("expected stale limiters to be evicted, got %d entries", len(server.rateLimiters))
+		count := len(server.rateLimiters)
+		server.mu.Unlock()
+		t.Fatalf("expected stale limiters to be evicted, got %d entries", count)
 	}
-	if _, ok := server.rateLimiters["new-source"]; !ok {
+	if _, ok := server.rateLimiters[limiterKeyPrefixIP+"new-source"]; !ok {
+		server.mu.Unlock()
 		t.Fatalf("expected new source limiter to remain")
 	}
 	server.mu.Unlock()
@@ -313,13 +319,13 @@ func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
 		server.mu.Unlock()
 		t.Fatalf("expected limiter map to cap at %d entries, got %d", rateLimiterMaxEntries, count)
 	}
-	if _, ok := server.rateLimiters["extra-client"]; !ok {
+	if _, ok := server.rateLimiters[limiterKeyPrefixIP+"extra-client"]; !ok {
 		server.mu.Unlock()
 		t.Fatalf("expected extra client limiter to be stored")
 	}
 	evictedInitial := false
 	for i := 0; i < rateLimiterMaxEntries; i++ {
-		if _, ok := server.rateLimiters[fmt.Sprintf("client-%d", i)]; !ok {
+		if _, ok := server.rateLimiters[limiterKeyPrefixIP+fmt.Sprintf("client-%d", i)]; !ok {
 			evictedInitial = true
 			break
 		}
@@ -335,7 +341,7 @@ func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 	now := time.Now()
 	source := "198.51.100.200"
 
-	for i := 0; i < maxTxPerWindow; i++ {
+	for i := 0; i < server.maxTxPerWindow; i++ {
 		if !server.allowSource(source, "", "", now) {
 			t.Fatalf("expected request %d to be allowed", i)
 		}
@@ -359,7 +365,7 @@ func TestRateLimiterUsesIdentityAndNonce(t *testing.T) {
 
 	identity := "user@example.com"
 	nonceKey := "chain-1:1"
-	for i := 0; i < maxTxPerWindow; i++ {
+	for i := 0; i < server.maxTxPerWindow; i++ {
 		if !server.allowSource("203.0.113.10", identity, nonceKey, now) {
 			t.Fatalf("expected request %d for identity to be allowed", i)
 		}
@@ -368,11 +374,32 @@ func TestRateLimiterUsesIdentityAndNonce(t *testing.T) {
 		t.Fatalf("expected identity to be rate limited once window exhausted")
 	}
 
-	if !server.allowSource("198.51.100.5", identity, "chain-1:2", now) {
-		t.Fatalf("expected new nonce window for identity to be allowed")
+	if server.allowSource("198.51.100.5", identity, "chain-1:2", now) {
+		t.Fatalf("expected identity limiter to persist across nonce changes")
 	}
-	if !server.allowSource("198.51.100.5", "other@example.com", nonceKey, now) {
-		t.Fatalf("expected distinct identity to have separate rate limiter")
+	if server.allowSource("198.51.100.5", "other@example.com", nonceKey, now) {
+		t.Fatalf("expected chain limiter to prevent reuse under a new identity")
+	}
+}
+
+func TestRateLimiterRecordsMetrics(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{})
+	now := time.Now()
+	metrics := observability.RPC()
+	counter := metrics.LimiterHits()
+	initial := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP))
+	source := "198.51.100.250"
+	for i := 0; i < server.maxTxPerWindow; i++ {
+		if !server.allowSource(source, "", "", now) {
+			t.Fatalf("expected request %d to be allowed", i)
+		}
+	}
+	if server.allowSource(source, "", "", now) {
+		t.Fatalf("expected limiter to reject request beyond window")
+	}
+	final := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP))
+	if final-initial != 1 {
+		t.Fatalf("expected limiter hits metric to increment by 1, got %.0f -> %.0f", initial, final)
 	}
 }
 

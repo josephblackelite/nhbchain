@@ -49,6 +49,8 @@ RPCReadHeaderTimeout = 6
 RPCReadTimeout = 20
 RPCWriteTimeout = 18
 RPCIdleTimeout = 45
+RPCMaxTxPerWindow = 10
+RPCRateLimitWindow = 120
 RPCAllowInsecure = true
 RPCTLSCertFile = "/path/to/cert.pem"
 RPCTLSKeyFile = "/path/to/key.pem"
@@ -158,6 +160,12 @@ PEX = false
 	}
 	if cfg.RPCIdleTimeout != 45 {
 		t.Fatalf("unexpected RPC idle timeout: %d", cfg.RPCIdleTimeout)
+	}
+	if cfg.RPCMaxTxPerWindow != 10 {
+		t.Fatalf("unexpected RPC max tx per window: %d", cfg.RPCMaxTxPerWindow)
+	}
+	if cfg.RPCRateLimitWindow != 120 {
+		t.Fatalf("unexpected RPC rate limit window: %d", cfg.RPCRateLimitWindow)
 	}
 	if !cfg.RPCAllowInsecure {
 		t.Fatalf("expected RPCAllowInsecure to be true")
