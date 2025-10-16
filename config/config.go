@@ -72,6 +72,7 @@ type Config struct {
 	RPCMaxTxPerChain            int             `toml:"RPCMaxTxPerChain"`
 	RPCMaxTxPerIdentityChain    int             `toml:"RPCMaxTxPerIdentityChain"`
 	RPCRateLimitWindow          int             `toml:"RPCRateLimitWindow"`
+	RPCCallerMetadataMaxTTL     int             `toml:"RPCCallerMetadataMaxTTL"`
 	RPCAllowInsecure            bool            `toml:"RPCAllowInsecure"`
 	RPCAllowInsecureUnspecified bool            `toml:"RPCAllowInsecureUnspecified"`
 	RPCTLSCertFile              string          `toml:"RPCTLSCertFile"`
@@ -523,6 +524,9 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 	}
 	if cfg.RPCRateLimitWindow <= 0 {
 		cfg.RPCRateLimitWindow = int((time.Minute).Seconds())
+	}
+	if cfg.RPCCallerMetadataMaxTTL <= 0 {
+		cfg.RPCCallerMetadataMaxTTL = int((15 * time.Minute).Seconds())
 	}
 
 	if cfg.Governance.BlockTimestampToleranceSeconds == 0 {

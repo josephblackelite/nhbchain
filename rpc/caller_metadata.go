@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +31,7 @@ func (s *Server) validateCallerMetadata(actorKey string, params callerMetadataPa
 	if err != nil {
 		return err
 	}
-	expiry, err := parseMetadataExpiry(now, params.ExpiresAt, params.TTL)
+	expiry, err := parseMetadataExpiry(now, params.ExpiresAt, params.TTL, s.callerMetadataMaxTTL)
 	if err != nil {
 		return err
 	}
@@ -69,7 +70,7 @@ func (s *Server) normalizeChainID(input string) (string, error) {
 	return strconv.FormatUint(id, 10), nil
 }
 
-func parseMetadataExpiry(now time.Time, expiresAt, ttl *int64) (time.Time, error) {
+func parseMetadataExpiry(now time.Time, expiresAt, ttl *int64, maxTTL time.Duration) (time.Time, error) {
 	if expiresAt != nil && ttl != nil {
 		return time.Time{}, fmt.Errorf("provide at most one of expiresAt or ttl")
 	}
@@ -83,9 +84,22 @@ func parseMetadataExpiry(now time.Time, expiresAt, ttl *int64) (time.Time, error
 		if *ttl <= 0 {
 			return time.Time{}, fmt.Errorf("ttl must be positive seconds")
 		}
-		expiry = now.Add(time.Duration(*ttl) * time.Second)
+		if *ttl > int64(math.MaxInt64/int64(time.Second)) {
+			return time.Time{}, fmt.Errorf("ttl exceeds supported range")
+		}
+		duration := time.Duration(*ttl) * time.Second
+		if maxTTL > 0 && duration > maxTTL {
+			return time.Time{}, fmt.Errorf("ttl exceeds maximum of %d seconds", int64(maxTTL/time.Second))
+		}
+		expiry = now.Add(duration)
 	}
 	if !expiry.IsZero() {
+		if maxTTL > 0 {
+			limit := now.Add(maxTTL)
+			if expiry.After(limit) {
+				return time.Time{}, fmt.Errorf("expiry exceeds maximum ttl of %s", maxTTL)
+			}
+		}
 		skew := time.Duration(deadlineSkewSeconds) * time.Second
 		if expiry.Before(now.Add(-skew)) {
 			return time.Time{}, fmt.Errorf("expiry must be in the future")

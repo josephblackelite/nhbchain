@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -55,11 +56,12 @@ type AuthConfig struct {
 	AllowAnonymous    bool          `yaml:"allowAnonymous"`
 	ClockSkew         time.Duration `yaml:"clockSkew"`
 	allowAnonymousSet bool          `yaml:"-"`
+	enabledSet        bool          `yaml:"-"`
 }
 
 func (a *AuthConfig) UnmarshalYAML(node *yaml.Node) error {
 	type rawAuthConfig struct {
-		Enabled        bool          `yaml:"enabled"`
+		Enabled        *bool         `yaml:"enabled"`
 		HMACSecret     string        `yaml:"hmacSecret"`
 		Issuer         string        `yaml:"issuer"`
 		Audience       string        `yaml:"audience"`
@@ -72,7 +74,13 @@ func (a *AuthConfig) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&raw); err != nil {
 		return err
 	}
-	a.Enabled = raw.Enabled
+	if raw.Enabled != nil {
+		a.Enabled = *raw.Enabled
+		a.enabledSet = true
+	} else {
+		a.Enabled = false
+		a.enabledSet = false
+	}
 	a.HMACSecret = raw.HMACSecret
 	a.Issuer = raw.Issuer
 	a.Audience = raw.Audience
@@ -113,7 +121,7 @@ func Load(path string) (Config, error) {
 		Auth: AuthConfig{
 			Enabled:        false,
 			ScopeClaim:     "scope",
-			AllowAnonymous: true,
+			AllowAnonymous: false,
 			ClockSkew:      2 * time.Minute,
 		},
 	}
@@ -152,17 +160,18 @@ func (cfg *Config) applyAuthDefaults() {
 		cfg.Auth.ScopeClaim = "scope"
 	}
 	if !cfg.Auth.allowAnonymousSet {
-		if cfg.Auth.Enabled {
-			cfg.Auth.AllowAnonymous = false
-		} else {
-			cfg.Auth.AllowAnonymous = true
-		}
+		cfg.Auth.AllowAnonymous = false
 	}
 }
+
+var ErrAuthEnabledNotConfigured = errors.New("auth.enabled must be explicitly set for sensitive deployments")
 
 func (cfg *Config) Validate() error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
+	}
+	if cfg.isSensitiveDeployment() && !cfg.Auth.enabledSet {
+		return ErrAuthEnabledNotConfigured
 	}
 	trimmed := make([]string, len(cfg.Auth.OptionalPaths))
 	for i, path := range cfg.Auth.OptionalPaths {
@@ -200,6 +209,25 @@ func (cfg Config) ServiceByName(name string) (*ServiceConfig, error) {
 		}
 	}
 	return nil, fmt.Errorf("service %s not configured", name)
+}
+
+func (cfg *Config) isSensitiveDeployment() bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.Security.AutoUpgradeHTTP {
+		return true
+	}
+	if strings.TrimSpace(cfg.Security.TLSCertFile) != "" {
+		return true
+	}
+	if strings.TrimSpace(cfg.Security.TLSKeyFile) != "" {
+		return true
+	}
+	if strings.TrimSpace(cfg.Security.TLSClientCAFile) != "" {
+		return true
+	}
+	return false
 }
 
 // EnforceSecureScheme ensures the supplied URL uses HTTPS outside of the dev environment.

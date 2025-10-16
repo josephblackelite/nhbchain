@@ -429,6 +429,7 @@ func main() {
 		MaxTxPerChain:            cfg.RPCMaxTxPerChain,
 		MaxTxPerIdentityChain:    cfg.RPCMaxTxPerIdentityChain,
 		RateLimitWindow:          time.Duration(cfg.RPCRateLimitWindow) * time.Second,
+		CallerMetadataMaxTTL:     time.Duration(cfg.RPCCallerMetadataMaxTTL) * time.Second,
 		TLSCertFile:              cfg.RPCTLSCertFile,
 		TLSKeyFile:               cfg.RPCTLSKeyFile,
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
