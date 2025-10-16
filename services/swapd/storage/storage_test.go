@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"math/big"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -129,9 +131,20 @@ func TestDailyUsagePersistence(t *testing.T) {
 	}
 }
 
+func TestOpenRequiresPath(t *testing.T) {
+	if _, err := Open(""); !errors.Is(err, ErrPathRequired) {
+		t.Fatalf("expected ErrPathRequired, got %v", err)
+	}
+}
+
 func openTestDB(t *testing.T) *Storage {
 	t.Helper()
-	store, err := Open("file:swapd_test?mode=memory&cache=shared")
+	dir := t.TempDir()
+	dsn, err := FileDSN(filepath.Join(dir, "swapd.sqlite"))
+	if err != nil {
+		t.Fatalf("build DSN: %v", err)
+	}
+	store, err := Open(dsn)
 	if err != nil {
 		t.Fatalf("open storage: %v", err)
 	}

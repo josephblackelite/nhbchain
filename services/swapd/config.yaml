@@ -1,4 +1,5 @@
 listen: ":7074"
+# Path to the on-disk SQLite database. This must not be left empty.
 database: "/var/data/swapd.sqlite"
 oracle:
   interval: "30s"

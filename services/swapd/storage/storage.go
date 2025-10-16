@@ -18,12 +18,25 @@ type Storage struct {
 	db *sql.DB
 }
 
+var (
+	// ErrPathRequired is returned when the backing store path is missing.
+	ErrPathRequired = errors.New("swapd storage path must be configured")
+
+	// fallbackMemoryDSN is populated by explicit test builds that need an
+	// in-memory database. Production binaries must provide an on-disk DSN.
+	fallbackMemoryDSN string
+)
+
 // Open initialises the backing store using sqlite-compatible DSN.
 func Open(path string) (*Storage, error) {
-	if strings.TrimSpace(path) == "" {
-		path = "file:swapd?mode=memory&cache=shared"
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		trimmed = fallbackMemoryDSN
+		if trimmed == "" {
+			return nil, ErrPathRequired
+		}
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
