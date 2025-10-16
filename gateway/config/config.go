@@ -119,10 +119,11 @@ func Load(path string) (Config, error) {
 			MetricsPrefix: "gateway",
 		},
 		Auth: AuthConfig{
-			Enabled:        false,
+			Enabled:        true,
 			ScopeClaim:     "scope",
 			AllowAnonymous: false,
 			ClockSkew:      2 * time.Minute,
+			enabledSet:     true,
 		},
 	}
 	if path == "" {
@@ -153,6 +154,10 @@ func (cfg *Config) applyAuthDefaults() {
 	if cfg == nil {
 		return
 	}
+	if !cfg.Auth.enabledSet {
+		cfg.Auth.Enabled = true
+		cfg.Auth.enabledSet = true
+	}
 	if cfg.Auth.ClockSkew <= 0 {
 		cfg.Auth.ClockSkew = 2 * time.Minute
 	}
@@ -172,6 +177,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.isSensitiveDeployment() && !cfg.Auth.enabledSet {
 		return ErrAuthEnabledNotConfigured
+	}
+	if cfg.Auth.AllowAnonymous && !cfg.Auth.allowAnonymousSet {
+		return fmt.Errorf("auth.allowAnonymous must be explicitly set to true to enable anonymous access")
 	}
 	trimmed := make([]string, len(cfg.Auth.OptionalPaths))
 	for i, path := range cfg.Auth.OptionalPaths {

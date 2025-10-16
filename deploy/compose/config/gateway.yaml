@@ -31,6 +31,10 @@ rateLimits:
     requestsPerMinute: 240
     burst: 40
 auth:
+  # Authentication is enabled by default; disable only for local docker-compose flows.
   enabled: false
   scopeClaim: scope
   allowAnonymous: true
+  optionalPaths:
+    - /v1/lending/markets
+    - /v1/lending/markets/get

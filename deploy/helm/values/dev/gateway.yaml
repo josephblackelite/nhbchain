@@ -25,9 +25,13 @@ config:
         endpoint: http://consensusd:9090
     rateLimits: []
     auth:
+      # Authentication defaults to enabled; disable only for local development clusters.
       enabled: false
       hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
       scopeClaim: scope
       allowAnonymous: true
+      optionalPaths:
+        - /v1/lending/markets
+        - /v1/lending/markets/get
 secrets:
   gatewayHMAC: ""

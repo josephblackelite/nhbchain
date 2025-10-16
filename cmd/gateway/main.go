@@ -72,7 +72,7 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		if errors.Is(err, config.ErrAuthEnabledNotConfigured) {
-			logger.Fatalf("load config: %v; add `auth.enabled: true` (or false) to mark the intended authentication mode", err)
+			logger.Fatalf("load config: %v; set `auth.enabled: false` to intentionally disable authentication", err)
 		}
 		logger.Fatalf("load config: %v", err)
 	}

@@ -35,6 +35,7 @@ config:
         requestsPerMinute: 480
         burst: 80
     auth:
+      # Keep authentication enabled for staging traffic.
       enabled: true
       hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
       scopeClaim: scope

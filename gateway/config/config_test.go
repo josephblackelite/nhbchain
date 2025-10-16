@@ -17,10 +17,16 @@ func writeConfig(t *testing.T, content string) string {
 	return path
 }
 
-func TestLoadDefaultsAllowAnonymousDisabledByDefault(t *testing.T) {
+func TestLoadDefaultsSecureByDefault(t *testing.T) {
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.Auth.Enabled {
+		t.Fatalf("expected auth.enabled to default to true")
+	}
+	if !cfg.Auth.enabledSet {
+		t.Fatalf("expected auth.enabled default to mark enabledSet true")
 	}
 	if cfg.Auth.AllowAnonymous {
 		t.Fatalf("expected auth.allowAnonymous to default to false")
@@ -45,15 +51,15 @@ func TestLoadRequiresOptionalPathsWhenAllowAnonymousEnabled(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresAuthEnabledForSensitiveTLSConfig(t *testing.T) {
+func TestLoadDefaultsEnableAuthForSensitiveTLSConfig(t *testing.T) {
 	yaml := "security:\n  tlsCertFile: /etc/gateway/cert.pem\n  tlsKeyFile: /etc/gateway/key.pem\n"
 	path := writeConfig(t, yaml)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatalf("expected load to fail when auth.enabled is omitted for sensitive TLS configuration")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
 	}
-	if !strings.Contains(err.Error(), "auth.enabled must be explicitly set") {
-		t.Fatalf("unexpected error: %v", err)
+	if !cfg.Auth.Enabled {
+		t.Fatalf("expected auth.enabled to default to true for TLS configuration")
 	}
 }
 
@@ -65,11 +71,15 @@ func TestLoadAllowsExplicitAuthDisabledForSensitiveTLSConfig(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresAuthEnabledForAutoUpgrade(t *testing.T) {
+func TestLoadDefaultsEnableAuthForAutoUpgrade(t *testing.T) {
 	yaml := "security:\n  autoUpgradeHTTP: true\n"
 	path := writeConfig(t, yaml)
-	if _, err := Load(path); err == nil {
-		t.Fatalf("expected load to fail when auth.enabled is omitted with auto HTTPS enabled")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.Auth.Enabled {
+		t.Fatalf("expected auth.enabled to default to true when auto HTTPS is enabled")
 	}
 }
 
@@ -96,5 +106,23 @@ func TestLoadRejectsOptionalPathsWithoutLeadingSlash(t *testing.T) {
 	path := writeConfig(t, yaml)
 	if _, err := Load(path); err == nil {
 		t.Fatalf("expected validation error for optional path without leading slash")
+	}
+}
+
+func TestValidateRejectsImplicitAnonymousAccess(t *testing.T) {
+	cfg := Config{
+		Auth: AuthConfig{
+			Enabled:        true,
+			OptionalPaths:  []string{"/v1/lending/markets"},
+			AllowAnonymous: true,
+			enabledSet:     true,
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error when auth.allowAnonymous is true without explicit opt-in")
+	}
+	if !strings.Contains(err.Error(), "auth.allowAnonymous must be explicitly set") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

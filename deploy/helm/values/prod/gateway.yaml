@@ -35,6 +35,7 @@ config:
         requestsPerMinute: 1200
         burst: 200
     auth:
+      # Keep authentication enabled for production traffic.
       enabled: true
       hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
       scopeClaim: scope
