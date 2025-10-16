@@ -53,6 +53,14 @@ func newTestAddress(fill byte) [20]byte {
 	return addr
 }
 
+func testRealmMetadata() *EscrowRealmMetadata {
+	return &EscrowRealmMetadata{
+		Scope:             EscrowRealmScopePlatform,
+		ProviderProfile:   "core-team",
+		ArbitrationFeeBps: 0,
+	}
+}
+
 func cloneAccount(acc *types.Account) *types.Account {
 	if acc == nil {
 		return &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
@@ -501,6 +509,7 @@ func TestCreateWithRealmFreezesPolicy(t *testing.T) {
 			Threshold: 1,
 			Members:   [][20]byte{arbitrator},
 		},
+		Metadata: testRealmMetadata(),
 	}
 	if err := state.EscrowRealmPut(baseRealm); err != nil {
 		t.Fatalf("put realm: %v", err)
@@ -517,6 +526,12 @@ func TestCreateWithRealmFreezesPolicy(t *testing.T) {
 	}
 	if esc.FrozenArb == nil {
 		t.Fatalf("expected frozen policy on escrow")
+	}
+	if esc.FrozenArb.Metadata == nil {
+		t.Fatalf("expected frozen metadata captured")
+	}
+	if esc.FrozenArb.Metadata.ProviderProfile != "core-team" {
+		t.Fatalf("unexpected frozen provider profile: %s", esc.FrozenArb.Metadata.ProviderProfile)
 	}
 	if esc.FrozenArb.PolicyNonce != 1 {
 		t.Fatalf("expected frozen policy nonce 1, got %d", esc.FrozenArb.PolicyNonce)
@@ -576,6 +591,7 @@ func TestRealmLifecycleEvents(t *testing.T) {
 			Threshold: 2,
 			Members:   [][20]byte{newTestAddress(0xA1), newTestAddress(0xA2), newTestAddress(0xA3)},
 		},
+		Metadata: testRealmMetadata(),
 	}
 	created, err := engine.CreateRealm(realmInput)
 	if err != nil {
@@ -598,6 +614,7 @@ func TestRealmLifecycleEvents(t *testing.T) {
 			Threshold: 3,
 			Members:   [][20]byte{newTestAddress(0xA1), newTestAddress(0xA2), newTestAddress(0xA3), newTestAddress(0xA4)},
 		},
+		Metadata: &EscrowRealmMetadata{Scope: EscrowRealmScopeMarketplace, ProviderProfile: "alpha-ops", ArbitrationFeeBps: 0},
 	}
 	updated, err := engine.UpdateRealm(update)
 	if err != nil {
@@ -626,6 +643,9 @@ func TestRealmLifecycleEvents(t *testing.T) {
 	if stored.NextPolicyNonce != updated.NextPolicyNonce {
 		t.Fatalf("stored nonce mismatch: %d", stored.NextPolicyNonce)
 	}
+	if stored.Metadata.ProviderProfile != "alpha-ops" {
+		t.Fatalf("expected updated provider profile, got %s", stored.Metadata.ProviderProfile)
+	}
 }
 
 func TestCreateRealmRespectsBounds(t *testing.T) {
@@ -639,6 +659,7 @@ func TestCreateRealmRespectsBounds(t *testing.T) {
 			Threshold: 1,
 			Members:   [][20]byte{newTestAddress(0xB1), newTestAddress(0xB2)},
 		},
+		Metadata: testRealmMetadata(),
 	})
 	if err == nil {
 		t.Fatalf("expected error due to threshold below governance minimum")
@@ -926,6 +947,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 			Threshold: 2,
 			Members:   [][20]byte{addrA, addrB, addrC},
 		},
+		Metadata: testRealmMetadata(),
 	}
 	if _, err := engine.CreateRealm(realm); err != nil {
 		t.Fatalf("create realm: %v", err)
@@ -1009,6 +1031,7 @@ func TestArbitratedReleaseZeroFeeWithoutTreasury(t *testing.T) {
 			Threshold: 2,
 			Members:   [][20]byte{addrA, addrB},
 		},
+		Metadata: testRealmMetadata(),
 	}
 	if _, err := engine.CreateRealm(realm); err != nil {
 		t.Fatalf("create realm: %v", err)
@@ -1066,6 +1089,7 @@ func TestResolveWithSignaturesRejectsUnderQuorum(t *testing.T) {
 			Threshold: 2,
 			Members:   [][20]byte{addrA, addrB},
 		},
+		Metadata: testRealmMetadata(),
 	}
 	if _, err := engine.CreateRealm(realm); err != nil {
 		t.Fatalf("create realm: %v", err)
@@ -1114,6 +1138,7 @@ func TestResolveWithSignaturesReplay(t *testing.T) {
 			Threshold: 2,
 			Members:   [][20]byte{addrA, addrB},
 		},
+		Metadata: testRealmMetadata(),
 	}
 	if _, err := engine.CreateRealm(realm); err != nil {
 		t.Fatalf("create realm: %v", err)

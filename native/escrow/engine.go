@@ -409,6 +409,9 @@ func (e *Engine) prepareFrozenPolicy(realmID string, now int64) (*EscrowRealm, *
 		Members:      append([][20]byte(nil), sanitizedSet.Members...),
 		FrozenAt:     now,
 	}
+	if sanitizedRealm.Metadata != nil {
+		frozen.Metadata = sanitizedRealm.Metadata.Clone()
+	}
 	sanitizedRealm.NextPolicyNonce++
 	sanitizedRealm.UpdatedAt = now
 	return sanitizedRealm, frozen, nil
@@ -447,6 +450,7 @@ func (e *Engine) CreateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		Arbitrators:     sanitizedSet,
+		Metadata:        realm.Metadata.Clone(),
 	}
 	sanitizedRealm, err := SanitizeEscrowRealm(candidate)
 	if err != nil {
@@ -493,6 +497,13 @@ func (e *Engine) UpdateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 	sanitizedCurrent.Version++
 	sanitizedCurrent.Arbitrators = sanitizedSet
 	sanitizedCurrent.UpdatedAt = e.now()
+	if realm.Metadata != nil {
+		sanitizedMeta, err := SanitizeEscrowRealmMetadata(realm.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		sanitizedCurrent.Metadata = sanitizedMeta
+	}
 	sanitizedRealm, err := SanitizeEscrowRealm(sanitizedCurrent)
 	if err != nil {
 		return nil, err
