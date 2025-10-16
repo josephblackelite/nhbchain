@@ -27,6 +27,8 @@ type mockNodeClient struct {
 	createErr    error
 	getResp      *EscrowState
 	getErr       error
+	realmResp    *EscrowRealm
+	realmErr     error
 	createCalls  int
 	releaseCalls int
 	refundCalls  int
@@ -41,6 +43,8 @@ type mockNodeClient struct {
 	refundErr  error
 	disputeErr error
 	resolveErr error
+
+	realmCalls int
 
 	p2pCreateResp  *P2PAcceptResponse
 	p2pCreateErr   error
@@ -77,6 +81,28 @@ func (m *mockNodeClient) EscrowGet(ctx context.Context, id string) (*EscrowState
 	}
 	if m.getResp != nil {
 		resp := *m.getResp
+		return &resp, nil
+	}
+	return nil, nil
+}
+
+func (m *mockNodeClient) EscrowGetRealm(ctx context.Context, id string) (*EscrowRealm, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.realmCalls++
+	if m.realmErr != nil {
+		return nil, m.realmErr
+	}
+	if m.realmResp != nil {
+		resp := *m.realmResp
+		if m.realmResp.Metadata != nil {
+			meta := *m.realmResp.Metadata
+			resp.Metadata = &meta
+		}
+		if m.realmResp.Arbitrators != nil {
+			policy := *m.realmResp.Arbitrators
+			resp.Arbitrators = &policy
+		}
 		return &resp, nil
 	}
 	return nil, nil
@@ -162,7 +188,7 @@ func (m *mockNodeClient) FetchEvents(ctx context.Context, afterSeq int64, limit 
 	return append([]NodeEvent(nil), m.events...), nil
 }
 
-func newTestServer(t *testing.T, node NodeClient) (*Server, *SQLiteStore, *WebhookQueue) {
+func newTestServer(t *testing.T, node NodeClient, merchants map[string]MerchantConfig) (*Server, *SQLiteStore, *WebhookQueue) {
 	t.Helper()
 	store, err := NewSQLiteStore("file:testdb?mode=memory&cache=shared")
 	if err != nil {
@@ -172,7 +198,7 @@ func newTestServer(t *testing.T, node NodeClient) (*Server, *SQLiteStore, *Webho
 		return time.Unix(1700000000, 0).UTC()
 	})
 	queue := NewWebhookQueue()
-	server := NewServer(auth, node, store, queue, NewPayIntentBuilder())
+	server := NewServer(auth, node, store, queue, NewPayIntentBuilder(), merchants)
 	return server, store, queue
 }
 
@@ -210,7 +236,7 @@ func signWalletRequest(t *testing.T, priv *ecdsa.PrivateKey, method, path string
 
 func TestAuthenticateRejectsInvalidSignature(t *testing.T) {
 	node := &mockNodeClient{}
-	server, store, _ := newTestServer(t, node)
+	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
 	body := []byte(`{"payer":"a","payee":"b","token":"NHB","amount":"1","feeBps":0,"deadline":1700000500}`)
@@ -234,7 +260,7 @@ func TestAuthenticateRejectsInvalidSignature(t *testing.T) {
 
 func TestIdempotentCreateCachesResponse(t *testing.T) {
 	node := &mockNodeClient{createResp: &EscrowCreateResponse{ID: "0xabc"}}
-	server, store, queue := newTestServer(t, node)
+	server, store, queue := newTestServer(t, node, nil)
 	defer store.Close()
 
 	payload := EscrowCreateRequest{
@@ -292,7 +318,7 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 
 func TestCreateValidationMissingFields(t *testing.T) {
 	node := &mockNodeClient{createResp: &EscrowCreateResponse{ID: "0xabc"}}
-	server, store, _ := newTestServer(t, node)
+	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
 	body := []byte(`{"payee":"payee"}`)
@@ -317,6 +343,111 @@ func TestCreateValidationMissingFields(t *testing.T) {
 	}
 }
 
+func TestEscrowGetIncludesProviderMetadata(t *testing.T) {
+	scope := "marketplace"
+	realmType := "private"
+	profile := "Acme Arbitrators"
+	feeBps := uint32(150)
+	recipient := "nhb1feeaddress"
+	node := &mockNodeClient{
+		getResp: &EscrowState{
+			ID:                "0xabc",
+			Payer:             "nhb1payer",
+			Payee:             "nhb1payee",
+			Status:            "init",
+			RealmScope:        &scope,
+			RealmType:         &realmType,
+			RealmProfile:      &profile,
+			RealmFeeBps:       &feeBps,
+			RealmFeeRecipient: &recipient,
+		},
+	}
+	server, store, _ := newTestServer(t, node, nil)
+	defer store.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/escrow/0xabc", nil)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", rec.Code)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := payload["realmScope"]; got != scope {
+		t.Fatalf("expected realmScope %s got %v", scope, got)
+	}
+	if got := payload["realmType"]; got != realmType {
+		t.Fatalf("expected realmType %s got %v", realmType, got)
+	}
+	if got := payload["realmProfile"]; got != profile {
+		t.Fatalf("expected realmProfile %s got %v", profile, got)
+	}
+	if got := payload["realmFeeRecipient"]; got != recipient {
+		t.Fatalf("expected fee recipient %s got %v", recipient, got)
+	}
+	if got := payload["realmFeeBps"]; got != float64(feeBps) {
+		t.Fatalf("expected fee bps %d got %v", feeBps, got)
+	}
+}
+
+func TestCreateRejectsRealmOutsideMerchantScope(t *testing.T) {
+	node := &mockNodeClient{
+		realmResp: &EscrowRealm{
+			ID: "core",
+			Metadata: &EscrowRealmMetadata{
+				Scope: "platform",
+				Type:  "public",
+			},
+		},
+		createResp: &EscrowCreateResponse{ID: "0xescrow"},
+	}
+	merchants := map[string]MerchantConfig{
+		"test": {
+			Identity: "merchant-xyz",
+			Realm: MerchantRealmConfig{
+				Scope: "marketplace",
+			},
+		},
+	}
+	server, store, _ := newTestServer(t, node, merchants)
+	defer store.Close()
+
+	payload := EscrowCreateRequest{
+		Payer:    "payer",
+		Payee:    "payee",
+		Token:    "NHB",
+		Amount:   "10",
+		FeeBps:   0,
+		Deadline: 1700000500,
+		Nonce:    1,
+		Realm:    "core",
+	}
+	body, _ := json.Marshal(payload)
+	ts := time.Unix(1700000000, 0).UTC()
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-merchant-scope")
+
+	req := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
+	req.Header.Set(headerAPIKey, "test")
+	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+	req.Header.Set(headerIdempotencyKey, "scope123")
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 got %d", rec.Code)
+	}
+	if node.createCalls != 0 {
+		t.Fatalf("expected create not invoked, got %d", node.createCalls)
+	}
+	if node.realmCalls == 0 {
+		t.Fatalf("expected realm metadata lookup")
+	}
+}
+
 func TestEscrowReleaseWithValidSignature(t *testing.T) {
 	priv, addr := newWallet(t)
 	node := &mockNodeClient{
@@ -327,7 +458,7 @@ func TestEscrowReleaseWithValidSignature(t *testing.T) {
 			Status: "funded",
 		},
 	}
-	server, store, _ := newTestServer(t, node)
+	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
 	body := []byte(`{"escrowId":"0xdeadbeef"}`)
@@ -365,7 +496,7 @@ func TestEscrowResolveAuthorisedSignature(t *testing.T) {
 			Status: "disputed",
 		},
 	}
-	server, store, _ := newTestServer(t, node)
+	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
 	body := []byte(`{"escrowId":"0xabc","outcome":"release"}`)
@@ -410,7 +541,7 @@ func TestP2POfferLifecycle(t *testing.T) {
 			},
 		},
 	}
-	server, store, _ := newTestServer(t, node)
+	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 	server.nowFn = func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
