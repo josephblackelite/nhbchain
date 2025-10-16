@@ -5,10 +5,12 @@ import (
 	"errors"
 	"math/big"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	gatewayauth "nhbchain/gateway/auth"
 	swap "nhbchain/native/swap"
 )
 
@@ -165,6 +167,57 @@ func TestDailyUsagePersistence(t *testing.T) {
 func TestOpenRequiresPath(t *testing.T) {
 	if _, err := Open(""); !errors.Is(err, ErrPathRequired) {
 		t.Fatalf("expected ErrPathRequired, got %v", err)
+	}
+}
+
+func TestAPINoncePersistence(t *testing.T) {
+	store := openTestDB(t)
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	record := gatewayauth.NonceRecord{
+		APIKey:     "partner",
+		Timestamp:  strconv.FormatInt(now.Unix(), 10),
+		Nonce:      "nonce-1",
+		ObservedAt: now,
+	}
+	existed, err := store.EnsureNonce(ctx, record)
+	if err != nil {
+		t.Fatalf("ensure nonce: %v", err)
+	}
+	if existed {
+		t.Fatalf("expected new nonce to be inserted")
+	}
+	existed, err = store.EnsureNonce(ctx, record)
+	if err != nil {
+		t.Fatalf("ensure nonce second time: %v", err)
+	}
+	if !existed {
+		t.Fatalf("expected duplicate nonce to be reported")
+	}
+	cutoff := now.Add(-time.Minute)
+	records, err := store.RecentNonces(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("recent nonces: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("unexpected nonce count: %d", len(records))
+	}
+	loaded := records[0]
+	if loaded.APIKey != record.APIKey || loaded.Timestamp != record.Timestamp || loaded.Nonce != record.Nonce {
+		t.Fatalf("unexpected nonce record: %+v", loaded)
+	}
+	if err := store.PruneNonces(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("prune nonces: %v", err)
+	}
+	records, err = store.RecentNonces(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("recent nonces after prune: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected nonces to be pruned, got %d", len(records))
+	}
+}
+
 func TestLedgerAndReservationPersistence(t *testing.T) {
 	store := openTestDB(t)
 	ctx := context.Background()

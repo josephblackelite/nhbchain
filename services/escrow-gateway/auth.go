@@ -27,7 +27,7 @@ func NewAuthenticator(keys []APIKeyConfig, skew, nonceTTL time.Duration, nonceCa
 	for _, key := range keys {
 		secrets[key.Key] = key.Secret
 	}
-	auth := gatewayauth.NewAuthenticator(secrets, skew, nonceTTL, nonceCap, nowFn)
+	auth := gatewayauth.NewAuthenticator(secrets, skew, nonceTTL, nonceCap, nowFn, nil)
 	return auth
 }
 

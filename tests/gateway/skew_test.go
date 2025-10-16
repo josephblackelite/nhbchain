@@ -17,7 +17,7 @@ func TestAuthenticatorRejectsOlderTimestamp(t *testing.T) {
 	current := base
 	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 0, 0, 0, func() time.Time {
 		return current
-	})
+	}, nil)
 
 	body := []byte(`{"payload":"example"}`)
 	req := httptest.NewRequest(http.MethodPost, "/payments?id=1", bytes.NewReader(body))
@@ -53,7 +53,7 @@ func TestAuthenticatorAcceptsNewerTimestamp(t *testing.T) {
 	current := base
 	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 0, 0, 0, func() time.Time {
 		return current
-	})
+	}, nil)
 
 	body := []byte(`{"payload":"example"}`)
 	req := httptest.NewRequest(http.MethodPost, "/payments?id=1", bytes.NewReader(body))

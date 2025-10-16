@@ -2,6 +2,7 @@ package auth
 
 import (
 	"container/list"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,17 +28,33 @@ const (
 	// MaxBodyForSignature is the maximum body size we will hash when authenticating.
 	MaxBodyForSignature int = 1 << 20 // 1 MiB
 
-	maxAllowedTimestampSkew = 2 * time.Minute
-	defaultTimestampSkew    = maxAllowedTimestampSkew
-	maxNonceWindow          = 10 * time.Minute
-	defaultNonceWindow      = maxNonceWindow
-	defaultNonceCapacity    = 4096
-	maxNonceCapacity        = 65536
+	maxAllowedTimestampSkew  = 2 * time.Minute
+	defaultTimestampSkew     = maxAllowedTimestampSkew
+	maxNonceWindow           = 10 * time.Minute
+	defaultNonceWindow       = maxNonceWindow
+	defaultNonceCapacity     = 4096
+	maxNonceCapacity         = 65536
+	persistencePruneInterval = time.Minute
 )
 
 // Principal represents an authenticated API client.
 type Principal struct {
 	APIKey string
+}
+
+// NonceRecord captures persisted nonce usage metadata.
+type NonceRecord struct {
+	APIKey     string
+	Timestamp  string
+	Nonce      string
+	ObservedAt time.Time
+}
+
+// NoncePersistence provides durable storage for API key nonce usage.
+type NoncePersistence interface {
+	EnsureNonce(ctx context.Context, record NonceRecord) (bool, error)
+	RecentNonces(ctx context.Context, cutoff time.Time) ([]NonceRecord, error)
+	PruneNonces(ctx context.Context, cutoff time.Time) error
 }
 
 // Authenticator verifies API key + HMAC signatures on incoming requests.
@@ -53,11 +70,14 @@ type Authenticator struct {
 
 	lastSeenMu sync.Mutex
 	lastSeen   map[string]int64
+
+	persistence NoncePersistence
+	lastPruned  time.Time
 }
 
 // NewAuthenticator builds an Authenticator keyed by the provided secrets. The map
 // should contain API key identifiers mapped to their shared secret.
-func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL time.Duration, nonceCapacity int, nowFn func() time.Time) *Authenticator {
+func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL time.Duration, nonceCapacity int, nowFn func() time.Time, persistence NoncePersistence) *Authenticator {
 	cloned := make(map[string]string, len(secrets))
 	for k, v := range secrets {
 		cloned[strings.TrimSpace(k)] = strings.TrimSpace(v)
@@ -91,6 +111,7 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 		nowFn:                nowFn,
 		nonces:               make(map[string]*nonceStore),
 		lastSeen:             make(map[string]int64),
+		persistence:          persistence,
 	}
 }
 
@@ -139,7 +160,11 @@ func (a *Authenticator) Authenticate(r *http.Request, body []byte) (*Principal, 
 	if !hmac.Equal(providedBytes, expected) {
 		return nil, errors.New("invalid signature")
 	}
-	if a.isReplay(apiKey, timestampHeader, nonce, now) {
+	duplicate, err := a.registerNonce(r.Context(), apiKey, timestampHeader, nonce, now)
+	if err != nil {
+		return nil, err
+	}
+	if duplicate {
 		return nil, errors.New("nonce already used")
 	}
 	if a.isTimestampReplay(apiKey, ts, now) {
@@ -148,10 +173,70 @@ func (a *Authenticator) Authenticate(r *http.Request, body []byte) (*Principal, 
 	return &Principal{APIKey: apiKey}, nil
 }
 
-func (a *Authenticator) isReplay(apiKey, timestamp, nonce string, now time.Time) bool {
+// HydrateNonces warms the in-memory cache with persisted nonce usage records.
+func (a *Authenticator) HydrateNonces(ctx context.Context, cutoff time.Time) error {
+	if a == nil || a.persistence == nil {
+		return nil
+	}
+	records, err := a.persistence.RecentNonces(ctx, cutoff)
+	if err != nil {
+		return fmt.Errorf("load persistent nonces: %w", err)
+	}
+	for _, rec := range records {
+		if strings.TrimSpace(rec.APIKey) == "" || strings.TrimSpace(rec.Timestamp) == "" || strings.TrimSpace(rec.Nonce) == "" {
+			continue
+		}
+		observed := rec.ObservedAt
+		if observed.IsZero() {
+			observed = cutoff
+		}
+		store := a.nonceStore(rec.APIKey)
+		store.Add(rec.Timestamp+"|"+rec.Nonce, observed)
+	}
+	return nil
+}
+
+func (a *Authenticator) registerNonce(ctx context.Context, apiKey, timestamp, nonce string, now time.Time) (bool, error) {
 	cache := a.nonceStore(apiKey)
 	composite := timestamp + "|" + nonce
-	return cache.Seen(composite, now)
+	if cache.Contains(composite, now) {
+		return true, nil
+	}
+	if a.persistence != nil {
+		if err := a.prunePersistent(ctx, now); err != nil {
+			return false, err
+		}
+		record := NonceRecord{
+			APIKey:     apiKey,
+			Timestamp:  timestamp,
+			Nonce:      nonce,
+			ObservedAt: now,
+		}
+		existed, err := a.persistence.EnsureNonce(ctx, record)
+		if err != nil {
+			return false, fmt.Errorf("persist nonce: %w", err)
+		}
+		if existed {
+			cache.Add(composite, now)
+			return true, nil
+		}
+	}
+	cache.Add(composite, now)
+	return false, nil
+}
+
+func (a *Authenticator) prunePersistent(ctx context.Context, now time.Time) error {
+	if a.persistence == nil || a.nonceTTL <= 0 {
+		return nil
+	}
+	cutoff := now.Add(-a.nonceTTL)
+	if a.lastPruned.IsZero() || now.Sub(a.lastPruned) >= persistencePruneInterval {
+		if err := a.persistence.PruneNonces(ctx, cutoff); err != nil {
+			return fmt.Errorf("prune persistent nonces: %w", err)
+		}
+		a.lastPruned = now
+	}
+	return nil
 }
 
 func (a *Authenticator) isTimestampReplay(apiKey string, ts time.Time, now time.Time) bool {
@@ -271,10 +356,36 @@ func newNonceStore(ttl time.Duration, capacity int) *nonceStore {
 func (n *nonceStore) Seen(key string, now time.Time) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	cutoff := now.Add(-n.ttl)
-	n.evictExpired(cutoff)
+	n.evictExpired(now.Add(-n.ttl))
 	if _, exists := n.entries[key]; exists {
 		return true
+	}
+	n.insertLocked(key, now)
+	return false
+}
+
+// Contains reports whether the nonce has been observed without mutating the cache when new.
+func (n *nonceStore) Contains(key string, now time.Time) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.evictExpired(now.Add(-n.ttl))
+	_, exists := n.entries[key]
+	return exists
+}
+
+// Add registers a nonce in the cache, applying eviction as required.
+func (n *nonceStore) Add(key string, now time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.evictExpired(now.Add(-n.ttl))
+	n.insertLocked(key, now)
+}
+
+func (n *nonceStore) insertLocked(key string, now time.Time) {
+	if elem, exists := n.entries[key]; exists {
+		elem.Value = nonceEntry{key: key, ts: now}
+		n.order.MoveToBack(elem)
+		return
 	}
 	if n.capacity > 0 {
 		for n.order.Len() >= n.capacity {
@@ -283,7 +394,6 @@ func (n *nonceStore) Seen(key string, now time.Time) bool {
 	}
 	elem := n.order.PushBack(nonceEntry{key: key, ts: now})
 	n.entries[key] = elem
-	return false
 }
 
 func (n *nonceStore) evictExpired(cutoff time.Time) {
