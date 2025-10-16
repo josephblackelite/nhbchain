@@ -3,6 +3,7 @@ package events
 import (
 	"math/big"
 	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -36,6 +37,9 @@ const (
 	// TypeLoyaltyBudgetProRated is emitted when the base reward payouts are
 	// scaled down due to insufficient daily budget.
 	TypeLoyaltyBudgetProRated = "loyalty.budget.prorated"
+	// TypeLoyaltyPriceFallback is emitted when the loyalty controller applies a
+	// fallback strategy after price guard failures.
+	TypeLoyaltyPriceFallback = "loyalty.price.fallback"
 )
 
 const (
@@ -168,6 +172,40 @@ func (e LoyaltyCapHit) Event() *types.Event {
 			"cap":       cap.String(),
 			"emitted":   emitted.String(),
 			"remaining": remaining.String(),
+		},
+	}
+}
+
+// LoyaltyPriceFallback captures the fallback strategy used when oracle guards fail.
+type LoyaltyPriceFallback struct {
+	Strategy   string
+	Base       string
+	BudgetZNHB *big.Int
+}
+
+// EventType implements the Event interface.
+func (LoyaltyPriceFallback) EventType() string { return TypeLoyaltyPriceFallback }
+
+// Event converts the fallback signal into the generic event payload.
+func (e LoyaltyPriceFallback) Event() *types.Event {
+	budget := big.NewInt(0)
+	if e.BudgetZNHB != nil {
+		budget = new(big.Int).Set(e.BudgetZNHB)
+	}
+	strategy := strings.TrimSpace(e.Strategy)
+	if strategy == "" {
+		strategy = "unknown"
+	}
+	base := strings.ToUpper(strings.TrimSpace(e.Base))
+	if base == "" {
+		base = "UNKNOWN"
+	}
+	return &types.Event{
+		Type: TypeLoyaltyPriceFallback,
+		Attributes: map[string]string{
+			"strategy": strategy,
+			"base":     base,
+			"budget":   budget.String(),
 		},
 	}
 }

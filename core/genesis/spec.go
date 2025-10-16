@@ -87,11 +87,15 @@ type LoyaltyDynamicSpec struct {
 }
 
 type LoyaltyPriceGuardSpec struct {
-	Enabled            bool   `json:"enabled"`
-	PricePair          string `json:"pricePair"`
-	TwapWindowSeconds  uint32 `json:"twapWindowSeconds"`
-	MaxDeviationBps    uint32 `json:"maxDeviationBps"`
-	PriceMaxAgeSeconds uint32 `json:"priceMaxAgeSeconds"`
+	Enabled                    bool   `json:"enabled"`
+	PricePair                  string `json:"pricePair"`
+	TwapWindowSeconds          uint32 `json:"twapWindowSeconds"`
+	MaxDeviationBps            uint32 `json:"maxDeviationBps"`
+	PriceMaxAgeSeconds         uint32 `json:"priceMaxAgeSeconds"`
+	FallbackMinEmissionZNHBWei string `json:"fallbackMinEmissionZNHBWei"`
+	UseLastGoodPriceFallback   bool   `json:"useLastGoodPriceFallback"`
+
+	fallbackMinEmission *big.Int
 }
 
 func (d *LoyaltyDynamicSpec) validate() error {
@@ -128,6 +132,19 @@ func (d *LoyaltyDynamicSpec) validate() error {
 	}
 	if d.PriceGuard.MaxDeviationBps > loyalty.BaseRewardBpsDenominator {
 		return fmt.Errorf("priceGuard.maxDeviationBps must be <= %d", loyalty.BaseRewardBpsDenominator)
+	}
+	trimmedFallback := strings.TrimSpace(d.PriceGuard.FallbackMinEmissionZNHBWei)
+	if trimmedFallback != "" {
+		amount, ok := new(big.Int).SetString(trimmedFallback, 10)
+		if !ok {
+			return fmt.Errorf("priceGuard.fallbackMinEmissionZNHBWei must be a base-10 integer")
+		}
+		if amount.Sign() < 0 {
+			return fmt.Errorf("priceGuard.fallbackMinEmissionZNHBWei must be >= 0")
+		}
+		d.PriceGuard.fallbackMinEmission = amount
+	} else {
+		d.PriceGuard.fallbackMinEmission = big.NewInt(0)
 	}
 	return nil
 }
@@ -477,6 +494,13 @@ func (l *LoyaltyGlobalSpec) Config() (*loyalty.GlobalConfig, *big.Int, error) {
 				TwapWindowSeconds:  l.Dynamic.PriceGuard.TwapWindowSeconds,
 				MaxDeviationBps:    l.Dynamic.PriceGuard.MaxDeviationBps,
 				PriceMaxAgeSeconds: l.Dynamic.PriceGuard.PriceMaxAgeSeconds,
+				FallbackMinEmissionZNHB: func() *big.Int {
+					if l.Dynamic.PriceGuard.fallbackMinEmission == nil {
+						return big.NewInt(0)
+					}
+					return new(big.Int).Set(l.Dynamic.PriceGuard.fallbackMinEmission)
+				}(),
+				UseLastGoodPriceFallback: l.Dynamic.PriceGuard.UseLastGoodPriceFallback,
 			},
 		},
 	}

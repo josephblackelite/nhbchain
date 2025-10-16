@@ -117,6 +117,15 @@ func ValidateConfig(g Global) error {
 	if g.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS > consensus.BPSDenominator {
 		return fmt.Errorf("loyalty.dynamic.price_guard: max_deviation_bps must be <= %d", consensus.BPSDenominator)
 	}
+	if trimmed := strings.TrimSpace(g.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei); trimmed != "" {
+		amount, ok := new(big.Int).SetString(trimmed, 10)
+		if !ok {
+			return fmt.Errorf("loyalty.dynamic.price_guard: fallback_min_emission_znhb_wei must be a base-10 integer")
+		}
+		if amount.Sign() < 0 {
+			return fmt.Errorf("loyalty.dynamic.price_guard: fallback_min_emission_znhb_wei must be >= 0")
+		}
+	}
 	znhbEnabled := false
 	for _, asset := range g.Fees.Assets {
 		if strings.EqualFold(strings.TrimSpace(asset.Asset), fees.AssetZNHB) {

@@ -120,11 +120,13 @@ type DynamicConfig struct {
 
 // PriceGuardConfig enforces sanity bounds when consuming reference prices.
 type PriceGuardConfig struct {
-	Enabled            bool
-	PricePair          string
-	TwapWindowSeconds  uint32
-	MaxDeviationBps    uint32
-	PriceMaxAgeSeconds uint32
+	Enabled                  bool
+	PricePair                string
+	TwapWindowSeconds        uint32
+	MaxDeviationBps          uint32
+	PriceMaxAgeSeconds       uint32
+	FallbackMinEmissionZNHB  *big.Int
+	UseLastGoodPriceFallback bool
 }
 
 // Clone produces a deep copy of the dynamic configuration.
@@ -139,7 +141,7 @@ func (d DynamicConfig) Clone() DynamicConfig {
 		DailyCapPctOf7dFeesBps:         d.DailyCapPctOf7dFeesBps,
 		DailyCapUsd:                    d.DailyCapUsd,
 		YearlyCapPctOfInitialSupplyBps: d.YearlyCapPctOfInitialSupplyBps,
-		PriceGuard:                     d.PriceGuard,
+		PriceGuard:                     d.PriceGuard.Clone(),
 		EnableProRate:                  d.EnableProRate,
 		EnforceProRate:                 d.EnforceProRate,
 		EnableProRateSet:               d.EnableProRateSet,
@@ -165,6 +167,12 @@ func (p *PriceGuardConfig) Normalize() *PriceGuardConfig {
 	}
 	p.ApplyDefaults()
 	p.PricePair = strings.TrimSpace(p.PricePair)
+	if p.FallbackMinEmissionZNHB == nil {
+		p.FallbackMinEmissionZNHB = big.NewInt(0)
+	}
+	if p.FallbackMinEmissionZNHB.Sign() < 0 {
+		p.FallbackMinEmissionZNHB = big.NewInt(0)
+	}
 	return p
 }
 
@@ -220,5 +228,24 @@ func (p *PriceGuardConfig) Validate() error {
 	if p.MaxDeviationBps > BaseRewardBpsDenominator {
 		return fmt.Errorf("maxDeviationBps must be <= %d", BaseRewardBpsDenominator)
 	}
+	if p.FallbackMinEmissionZNHB != nil && p.FallbackMinEmissionZNHB.Sign() < 0 {
+		return fmt.Errorf("fallbackMinEmissionZNHB must be >= 0")
+	}
 	return nil
+}
+
+// Clone returns a deep copy of the price guard configuration.
+func (p PriceGuardConfig) Clone() PriceGuardConfig {
+	clone := PriceGuardConfig{
+		Enabled:                  p.Enabled,
+		PricePair:                p.PricePair,
+		TwapWindowSeconds:        p.TwapWindowSeconds,
+		MaxDeviationBps:          p.MaxDeviationBps,
+		PriceMaxAgeSeconds:       p.PriceMaxAgeSeconds,
+		UseLastGoodPriceFallback: p.UseLastGoodPriceFallback,
+	}
+	if p.FallbackMinEmissionZNHB != nil {
+		clone.FallbackMinEmissionZNHB = new(big.Int).Set(p.FallbackMinEmissionZNHB)
+	}
+	return clone
 }

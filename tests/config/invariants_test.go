@@ -32,10 +32,12 @@ func validLoyalty() config.Loyalty {
 			DailyCapUSD:                 5000,
 			YearlyCapPctOfInitialSupply: 10,
 			PriceGuard: config.LoyaltyPriceGuard{
-				PricePair:          "ZNHB/USD",
-				TwapWindowSeconds:  3600,
-				MaxDeviationBPS:    500,
-				PriceMaxAgeSeconds: 900,
+				PricePair:                  "ZNHB/USD",
+				TwapWindowSeconds:          3600,
+				MaxDeviationBPS:            500,
+				PriceMaxAgeSeconds:         900,
+				FallbackMinEmissionZNHBWei: "0",
+				UseLastGoodPriceFallback:   true,
 			},
 		},
 	}

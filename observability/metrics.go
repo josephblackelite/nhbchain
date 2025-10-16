@@ -91,12 +91,19 @@ func Loyalty() *LoyaltyMetrics {
 				Name:      "paid_today_zn",
 				Help:      "Total base rewards paid out today expressed in ZNHB.",
 			}),
+			fallbacks: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "loyalty",
+				Name:      "price_fallback_total",
+				Help:      "Count of loyalty price guard fallbacks segmented by strategy.",
+			}, []string{"strategy"}),
 		}
 		prometheus.MustRegister(
 			loyaltyRegistry.budget,
 			loyaltyRegistry.demand,
 			loyaltyRegistry.ratio,
 			loyaltyRegistry.paidToday,
+			loyaltyRegistry.fallbacks,
 		)
 	})
 	return loyaltyRegistry
@@ -127,6 +134,27 @@ type LoyaltyMetrics struct {
 	demand    prometheus.Gauge
 	ratio     prometheus.Gauge
 	paidToday prometheus.Gauge
+	fallbacks *prometheus.CounterVec
+}
+
+// RecordGuardFallback increments the fallback counter for the supplied strategy label.
+func (m *LoyaltyMetrics) RecordGuardFallback(strategy string) {
+	if m == nil || m.fallbacks == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(strategy)
+	if trimmed == "" {
+		trimmed = "unknown"
+	}
+	m.fallbacks.WithLabelValues(trimmed).Inc()
+}
+
+// FallbackCounterVec exposes the fallback counter vector for testing.
+func (m *LoyaltyMetrics) FallbackCounterVec() *prometheus.CounterVec {
+	if m == nil {
+		return nil
+	}
+	return m.fallbacks
 }
 
 var (

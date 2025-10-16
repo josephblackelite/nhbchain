@@ -312,6 +312,12 @@ func TestEnsureGlobalDefaultsLoyaltyDynamic(t *testing.T) {
 	if guard.PriceMaxAgeSeconds != defaultLoyaltyPriceGuardMaxAgeSeconds {
 		t.Fatalf("unexpected price max age: %d", guard.PriceMaxAgeSeconds)
 	}
+	if guard.FallbackMinEmissionZNHBWei != defaultLoyaltyPriceGuardFallbackMinEmission {
+		t.Fatalf("unexpected fallback min emission: %s", guard.FallbackMinEmissionZNHBWei)
+	}
+	if !guard.UseLastGoodPriceFallback {
+		t.Fatalf("expected last good price fallback enabled by default")
+	}
 	if !dyn.EnforceProRate {
 		t.Fatalf("expected pro-rate enforcement default enabled")
 	}
@@ -338,6 +344,8 @@ EnforceProRate = false
   TwapWindowSeconds = 7200
   MaxDeviationBPS = 275
   PriceMaxAgeSeconds = 450
+  FallbackMinEmissionZNHBWei = "250000000000000000"
+  UseLastGoodPriceFallback = false
 `
 
 	var cfg Config
@@ -373,6 +381,12 @@ EnforceProRate = false
 	}
 	if guard.TwapWindowSeconds != 7200 || guard.MaxDeviationBPS != 275 || guard.PriceMaxAgeSeconds != 450 {
 		t.Fatalf("unexpected price guard values: %+v", guard)
+	}
+	if guard.FallbackMinEmissionZNHBWei != "250000000000000000" {
+		t.Fatalf("unexpected fallback min emission override: %s", guard.FallbackMinEmissionZNHBWei)
+	}
+	if guard.UseLastGoodPriceFallback {
+		t.Fatalf("expected last good price fallback override to disable")
 	}
 	if dyn.EnableProRate {
 		t.Fatalf("expected pro-rate toggle override to disable queueing")
