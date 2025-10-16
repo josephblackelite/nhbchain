@@ -50,21 +50,22 @@ ListenAddress = "0.0.0.0:6002"
 
 - Set allowinsecure=false in production configs and document TLS setup.
 
-### Production config allows insecure transport (ERROR)
+### Development sample locks down transport (INFO)
 
-Configuration permits plaintext transport
+`config/bad-sample.toml` now binds to localhost and disables plaintext fallbacks by default so that the example cannot be misused in production.
 
 **Proofs:**
 
 - `config/bad-sample.toml:1`
 
 ````
-ListenAddress = ":6001"
+# --------------------------------------------------------------
+# WARNING: Development-only sample configuration.
 ````
 
 **Remediation:**
 
-- Set allowinsecure=false in production configs and document TLS setup.
+- None. Keep the prominent warning and loopback bindings so operators understand the risks of enabling insecure transport.
 
 ### Insecure transport enabled (ERROR)
 
