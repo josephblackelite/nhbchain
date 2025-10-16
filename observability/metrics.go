@@ -41,10 +41,11 @@ type PaymasterMetrics struct {
 
 // StakingMetrics captures staking module health and activity counters.
 type StakingMetrics struct {
-	rewardsPaid prometheus.Counter
-	paused      prometheus.Gauge
-	totalStaked *prometheus.GaugeVec
-	capHit      prometheus.Counter
+	rewardsPaid          prometheus.Counter
+	paused               prometheus.Gauge
+	totalStaked          *prometheus.GaugeVec
+	capHit               prometheus.Counter
+	indexPersistFailures prometheus.Counter
 }
 
 // POSLifecycleMetrics captures automatic expiry sweep counters for POS authorizations.
@@ -615,12 +616,19 @@ func Staking() *StakingMetrics {
 				Name:      "cap_hit",
 				Help:      "Count of staking claims that exhausted the configured emission cap.",
 			}),
+			indexPersistFailures: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "staking",
+				Name:      "index_persist_failures_total",
+				Help:      "Count of staking reward index persistence failures.",
+			}),
 		}
 		prometheus.MustRegister(
 			stakingRegistry.rewardsPaid,
 			stakingRegistry.paused,
 			stakingRegistry.totalStaked,
 			stakingRegistry.capHit,
+			stakingRegistry.indexPersistFailures,
 		)
 	})
 	return stakingRegistry
@@ -675,6 +683,22 @@ func (m *StakingMetrics) RecordCapHit() {
 		return
 	}
 	m.capHit.Inc()
+}
+
+// RecordIndexPersistFailure increments the counter tracking failed staking index persistence attempts.
+func (m *StakingMetrics) RecordIndexPersistFailure() {
+	if m == nil {
+		return
+	}
+	m.indexPersistFailures.Inc()
+}
+
+// IndexPersistFailureCounter exposes the persistence failure counter for testing.
+func (m *StakingMetrics) IndexPersistFailureCounter() prometheus.Counter {
+	if m == nil {
+		return nil
+	}
+	return m.indexPersistFailures
 }
 
 // PayoutdMetrics wraps collectors tracking payout engine health.

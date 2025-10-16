@@ -1,9 +1,11 @@
 package core
 
 import (
+	"log/slog"
 	"math/big"
 
 	"nhbchain/core/rewards"
+	"nhbchain/observability"
 
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -85,6 +87,19 @@ func (sp *StateProcessor) persistStakeRewardState() error {
 		return err
 	}
 	return sp.Trie.Update(stakeRewardStateKey, encoded)
+}
+
+func (sp *StateProcessor) persistStakeRewardStateInstrumented() error {
+	persist := sp.persistStakeRewardState
+	if sp.stakeRewardPersistOverride != nil {
+		persist = sp.stakeRewardPersistOverride
+	}
+	if err := persist(); err != nil {
+		observability.Staking().RecordIndexPersistFailure()
+		slog.Error("staking: persist reward state failed", slog.Any("error", err))
+		return err
+	}
+	return nil
 }
 
 func (sp *StateProcessor) loadRewardHistory() error {

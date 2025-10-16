@@ -1,16 +1,20 @@
 package core
 
 import (
+	"errors"
 	"math/big"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"nhbchain/core/events"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/native/governance"
+	"nhbchain/observability"
 )
 
 func Test_AccrualOnStakeTopUpAndUnstake(t *testing.T) {
@@ -314,5 +318,43 @@ func Test_YTD_RolloverNewYear(t *testing.T) {
 	}
 	if got := last.Attributes["minted"]; got != expectedSecond.String() {
 		t.Fatalf("legacy minted mismatch: got %s want %s", got, expectedSecond)
+	}
+}
+
+func TestStakeDelegate_PersistFailureAbortsBlock(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	var delegator [20]byte
+	delegator[19] = 0xF1
+
+	account := &types.Account{BalanceZNHB: big.NewInt(1_000)}
+	writeAccount(t, sp, delegator, account)
+
+	sp.BeginBlock(1, time.Unix(1_800_000_000, 0).UTC())
+
+	persistErr := errors.New("staking persist failure")
+	sp.stakeRewardPersistOverride = func() error { return persistErr }
+
+	metrics := observability.Staking()
+	before := testutil.ToFloat64(metrics.IndexPersistFailureCounter())
+
+	if _, err := sp.StakeDelegate(delegator[:], nil, big.NewInt(100)); !errors.Is(err, persistErr) {
+		t.Fatalf("expected persist failure, got %v", err)
+	}
+
+	after := testutil.ToFloat64(metrics.IndexPersistFailureCounter())
+	if got, want := after, before+1; got != want {
+		t.Fatalf("unexpected persistence failure count: got %.0f want %.0f", got, want)
+	}
+
+	stored, err := sp.getAccount(delegator[:])
+	if err != nil {
+		t.Fatalf("reload account: %v", err)
+	}
+	if stored.LockedZNHB.Sign() != 0 {
+		t.Fatalf("expected locked balance to remain zero, got %s", stored.LockedZNHB)
+	}
+	if stored.BalanceZNHB.Cmp(account.BalanceZNHB) != 0 {
+		t.Fatalf("expected balance unchanged: got %s want %s", stored.BalanceZNHB, account.BalanceZNHB)
 	}
 }

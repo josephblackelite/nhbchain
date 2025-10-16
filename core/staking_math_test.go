@@ -27,10 +27,14 @@ func TestStakingIndexMonthly_1250bps(t *testing.T) {
 	payoutDays := uint64(30)
 	start := time.Unix(1_700_000_000, 0).UTC()
 
-	engine.UpdateGlobalIndex(aprBps, payoutDays, start)
+	if err := engine.UpdateGlobalIndex(aprBps, payoutDays, start); err != nil {
+		t.Fatalf("update global index at start: %v", err)
+	}
 
 	end := start.Add(30 * 24 * time.Hour)
-	engine.UpdateGlobalIndex(aprBps, payoutDays, end)
+	if err := engine.UpdateGlobalIndex(aprBps, payoutDays, end); err != nil {
+		t.Fatalf("update global index at end: %v", err)
+	}
 
 	globalIndex, err := mgr.GetGlobalIndex()
 	if err != nil {
