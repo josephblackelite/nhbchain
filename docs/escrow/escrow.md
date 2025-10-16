@@ -163,6 +163,28 @@ at-least-once and deduplicate using `eventId` + `sequence`.
 All write methods require signed transactions using account keys. Transactions include a per-call `idempotencyKey` stored on-chain to
 prevent replay.
 
+#### Client helper & wallet route
+
+TypeScript integrations can rely on the `EscrowDisputeClient` helper in [`clients/ts/escrow/dispute.ts`](../../clients/ts/escrow/dispute.ts).
+The helper automatically fetches the recorded payer address via `escrow_get` before invoking `escrow_dispute`, ensuring the dispute
+payload uses the canonical caller. An optional reason string is forwarded for downstream audit trails:
+
+```ts
+import EscrowDisputeClient from '../../clients/ts/escrow/dispute';
+
+const client = new EscrowDisputeClient({
+  baseUrl: process.env.NHB_RPC_URL!,
+  authToken: process.env.NHB_RPC_TOKEN!,
+});
+
+await client.dispute('ESC123...', 'suspected fraud');
+```
+
+Wallet surfaces can display payee identity metadata through the gateway helper route `GET /v1/consensus/wallet/escrows/{escrowId}`.
+The endpoint resolves the escrow record and, when available, enriches it with the alias returned by `identity_reverse`. UI flows can
+combine the gateway response with the dispute helper above to implement a “mark as scam” toggle that both freezes the escrow and
+records the merchant-provided reason.
+
 ### 5.2 P2P trade RPC methods
 
 | Method | Description |

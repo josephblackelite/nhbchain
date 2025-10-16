@@ -87,6 +87,17 @@ interface SubscriptionPreview {
   occurrences: Array<{ dueAt: string; amount: string }>;
 }
 
+interface EscrowDisputeView {
+  id: string;
+  status: string;
+  payer: string;
+  payee: string;
+  token: string;
+  amount: string;
+  payeeAlias?: string;
+  payeeAliasId?: string;
+}
+
 function formatNumber(value?: string) {
   if (!value) return '0';
   const trimmed = value.replace(/^0+/, '') || '0';
@@ -145,6 +156,14 @@ export default function WalletLiteApp() {
   const [unstakeError, setUnstakeError] = useState<string | null>(null);
   const [subscriptionPreview, setSubscriptionPreview] = useState<SubscriptionPreview | null>(null);
   const [subscriptionPreviewError, setSubscriptionPreviewError] = useState<string | null>(null);
+  const [disputeEscrowId, setDisputeEscrowId] = useState('');
+  const [disputeDetails, setDisputeDetails] = useState<EscrowDisputeView | null>(null);
+  const [disputeLoading, setDisputeLoading] = useState(false);
+  const [disputeError, setDisputeError] = useState<string | null>(null);
+  const [disputeReason, setDisputeReason] = useState('');
+  const [disputeMarking, setDisputeMarking] = useState(false);
+  const [disputeSuccess, setDisputeSuccess] = useState<string | null>(null);
+  const [markAsScam, setMarkAsScam] = useState(false);
 
   useEffect(() => {
     if (!address) {
@@ -477,6 +496,64 @@ export default function WalletLiteApp() {
     } catch (error) {
       setSubscriptionPreview(null);
       setSubscriptionPreviewError((error as Error).message);
+    }
+  };
+
+  const handleLoadEscrowDetails = async () => {
+    const id = disputeEscrowId.trim();
+    if (!id) {
+      setDisputeDetails(null);
+      setDisputeError('Escrow ID required');
+      return;
+    }
+    try {
+      setDisputeLoading(true);
+      setDisputeError(null);
+      setDisputeSuccess(null);
+      setMarkAsScam(false);
+      const res = await fetch(`/api/escrow/${encodeURIComponent(id)}`);
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to load escrow');
+      }
+      setDisputeDetails(payload as EscrowDisputeView);
+    } catch (error) {
+      setDisputeDetails(null);
+      setDisputeError((error as Error).message);
+    } finally {
+      setDisputeLoading(false);
+    }
+  };
+
+  const handleMarkAsScamToggle = async (checked: boolean) => {
+    setMarkAsScam(checked);
+    if (!checked) {
+      return;
+    }
+    if (!disputeDetails) {
+      setDisputeError('Load escrow details before flagging a dispute.');
+      setMarkAsScam(false);
+      return;
+    }
+    try {
+      setDisputeMarking(true);
+      setDisputeError(null);
+      const res = await fetch(`/api/escrow/${encodeURIComponent(disputeDetails.id)}/mark-scam`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: disputeReason })
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to submit dispute');
+      }
+      setDisputeSuccess('Escrow dispute submitted to the node.');
+    } catch (error) {
+      setMarkAsScam(false);
+      setDisputeSuccess(null);
+      setDisputeError((error as Error).message);
+    } finally {
+      setDisputeMarking(false);
     }
   };
 
@@ -865,6 +942,72 @@ export default function WalletLiteApp() {
         <button type="button" onClick={handleClaim}>Claim</button>
         {claimStatus && <div className="alert alert-success">{claimStatus}</div>}
         {claimError && <div className="alert alert-error">{claimError}</div>}
+      </section>
+
+      <section>
+        <h2>Escrow disputes</h2>
+        <p>Review escrow details, surface the payee identity, and freeze the funds if a scam is suspected.</p>
+        <label htmlFor="disputeEscrowId">Escrow ID</label>
+        <input
+          id="disputeEscrowId"
+          placeholder="ESCROW..."
+          value={disputeEscrowId}
+          onChange={(event) => setDisputeEscrowId(event.target.value)}
+        />
+        <div className="form-footer">
+          <button type="button" onClick={handleLoadEscrowDetails} disabled={disputeLoading}>
+            {disputeLoading ? 'Loading escrow…' : 'Load escrow'}
+          </button>
+        </div>
+        {disputeDetails && (
+          <div className="card-list">
+            <div className="card-list-item">
+              <strong>Status</strong>
+              <div>{disputeDetails.status}</div>
+            </div>
+            <div className="card-list-item">
+              <strong>Token</strong>
+              <div>
+                {disputeDetails.token} · {formatNumber(disputeDetails.amount)}
+              </div>
+            </div>
+            <div className="card-list-item">
+              <strong>Payee address</strong>
+              <div className="code-inline">{disputeDetails.payee}</div>
+            </div>
+            <div className="card-list-item">
+              <strong>Payee identity</strong>
+              <div>{disputeDetails.payeeAlias ? `@${disputeDetails.payeeAlias}` : '—'}</div>
+            </div>
+            {disputeDetails.payeeAliasId && (
+              <div className="card-list-item">
+                <strong>Alias ID</strong>
+                <div className="code-inline">{disputeDetails.payeeAliasId}</div>
+              </div>
+            )}
+          </div>
+        )}
+        <label htmlFor="disputeReason">Dispute reason (optional)</label>
+        <textarea
+          id="disputeReason"
+          placeholder="Describe what went wrong…"
+          value={disputeReason}
+          onChange={(event) => setDisputeReason(event.target.value)}
+          rows={3}
+        />
+        <label className="checkbox" htmlFor="markScamToggle" style={{ marginTop: '0.5rem' }}>
+          <input
+            id="markScamToggle"
+            type="checkbox"
+            checked={markAsScam}
+            onChange={(event) => handleMarkAsScamToggle(event.target.checked)}
+            disabled={!disputeDetails || disputeMarking}
+          />
+          <span>Mark this escrow as scam</span>
+        </label>
+        {disputeMarking && <p>Submitting dispute…</p>}
+        {disputeSuccess && <div className="alert alert-success">{disputeSuccess}</div>}
+        {disputeError && <div className="alert alert-error">{disputeError}</div>}
       </section>
 
       <section>

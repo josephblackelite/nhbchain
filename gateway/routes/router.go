@@ -69,6 +69,14 @@ func New(cfg Config) (http.Handler, error) {
 			}
 			txBridge = tr
 		}
+		var walletBridge *walletRoutes
+		if route.Name == "consensus" {
+			wr, err := newWalletRoutes(route.Target)
+			if err != nil {
+				return nil, fmt.Errorf("configure wallet routes: %w", err)
+			}
+			walletBridge = wr
+		}
 		r.Route(route.Prefix, func(sr chi.Router) {
 			if cfg.RateLimiter != nil && route.RateLimitKey != "" {
 				sr.Use(cfg.RateLimiter.Middleware(route.RateLimitKey))
@@ -84,6 +92,9 @@ func New(cfg Config) (http.Handler, error) {
 			}
 			if txBridge != nil {
 				txBridge.mount(sr)
+			}
+			if walletBridge != nil {
+				walletBridge.mount(sr)
 			}
 			sr.Handle("/*", proxy)
 			sr.Handle("/", proxy)
