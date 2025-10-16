@@ -309,7 +309,7 @@ func newStableRPCTestEngine(t *testing.T, base time.Time) *stable.Engine {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}}
-	engine, err := stable.NewEngine(assets, stable.Limits{DailyCap: 1_000_000})
+	engine, err := stable.NewEngine(assets, stable.Limits{DailyCap: 1_000_000}, nil)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}

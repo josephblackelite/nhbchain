@@ -17,24 +17,26 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"nhbchain/observability"
+	"nhbchain/services/swapd/storage"
 )
 
 // Engine provides a high level facade for pricing and reservation flows.
 type Engine struct {
-	mu           sync.RWMutex
-	assets       map[string]Asset
-	limits       Limits
-	quotes       map[string]*quoteState
-	reserve      map[string]*reservationState
-	ledger       map[string]*assetLedger
-	prices       map[string]pricePoint
-	daily        dailyUsage
-	dailyCtx     context.Context
-	dailyPersist DailyUsageStore
-	clock        func() time.Time
-	metrics      *observability.SwapStableMetrics
-	tracer       trace.Tracer
-	priceAges    time.Duration
+	mu            sync.RWMutex
+	assets        map[string]Asset
+	limits        Limits
+	quotes        map[string]*quoteState
+	reserve       map[string]*reservationState
+	ledger        map[string]*assetLedger
+	prices        map[string]pricePoint
+	daily         dailyUsage
+	dailyCtx      context.Context
+	dailyPersist  DailyUsageStore
+	ledgerPersist LedgerReservationStore
+	clock         func() time.Time
+	metrics       *observability.SwapStableMetrics
+	tracer        trace.Tracer
+	priceAges     time.Duration
 }
 
 // Asset captures a supported stable asset and its parameters.
@@ -56,6 +58,15 @@ type Limits struct {
 type DailyUsageStore interface {
 	SaveDailyUsage(ctx context.Context, day time.Time, amount int64) error
 	LatestDailyUsage(ctx context.Context) (time.Time, int64, bool, error)
+}
+
+// LedgerReservationStore persists ledger balances and outstanding reservations.
+type LedgerReservationStore interface {
+	SaveLedgerBalance(ctx context.Context, record storage.LedgerBalanceRecord) error
+	LoadLedgerBalances(ctx context.Context) ([]storage.LedgerBalanceRecord, error)
+	SaveReservation(ctx context.Context, record storage.ReservationRecord) error
+	LoadReservations(ctx context.Context) ([]storage.ReservationRecord, error)
+	DeleteReservation(ctx context.Context, id string) error
 }
 
 // Quote represents a computed exchange quote.
@@ -90,8 +101,8 @@ var (
 	ErrReservationConsumed = errors.New("reservation already consumed")
 )
 
-// NewEngine constructs an Engine from assets and limits.
-func NewEngine(assets []Asset, limits Limits) (*Engine, error) {
+// NewEngine constructs an Engine from assets and limits, restoring persisted state if available.
+func NewEngine(assets []Asset, limits Limits, store LedgerReservationStore) (*Engine, error) {
 	if len(assets) == 0 {
 		return nil, fmt.Errorf("at least one asset must be configured")
 	}
@@ -106,7 +117,7 @@ func NewEngine(assets []Asset, limits Limits) (*Engine, error) {
 	for _, cfg := range assetMap {
 		ledger[strings.ToUpper(cfg.Symbol)] = &assetLedger{available: cfg.SoftInventory * amountScale}
 	}
-	return &Engine{
+	engine := &Engine{
 		assets:    assetMap,
 		limits:    limits,
 		quotes:    make(map[string]*quoteState),
@@ -118,28 +129,63 @@ func NewEngine(assets []Asset, limits Limits) (*Engine, error) {
 		metrics:   observability.SwapStable(),
 		tracer:    otel.Tracer("swapd/stable"),
 		priceAges: 5 * time.Minute,
-	}, nil
+	}
+	if store != nil {
+		if err := engine.attachLedgerStore(store); err != nil {
+			return nil, err
+		}
+	}
+	return engine, nil
+}
+
+func (e *Engine) attachLedgerStore(store LedgerReservationStore) error {
+	if store == nil {
+		return nil
+	}
+	ctx := context.Background()
+	e.mu.RLock()
+	if e.dailyCtx != nil {
+		ctx = e.dailyCtx
+	}
+	e.mu.RUnlock()
+	balances, err := store.LoadLedgerBalances(ctx)
+	if err != nil {
+		return fmt.Errorf("load ledger balances: %w", err)
+	}
+	reservations, err := store.LoadReservations(ctx)
+	if err != nil {
+		return fmt.Errorf("load reservations: %w", err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.applyLedgerStateLocked(store, balances, reservations)
+	return nil
 }
 
 // WithDailyUsageStore wires persistence for daily usage accounting.
 func (e *Engine) WithDailyUsageStore(store DailyUsageStore) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.dailyPersist = store
-	if store == nil {
-		return
-	}
 	ctx := e.dailyCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	e.mu.Unlock()
+	if store == nil {
+		return
+	}
 	day, amount, ok, err := store.LatestDailyUsage(ctx)
 	if err != nil {
 		slog.Error("swapd/stable: load daily usage", "error", err)
-		return
-	}
-	if ok {
+	} else if ok {
+		e.mu.Lock()
 		e.restoreDailyLocked(day, amount)
+		e.mu.Unlock()
+	}
+	if ledgerStore, ok := any(store).(LedgerReservationStore); ok {
+		if err := e.attachLedgerStore(ledgerStore); err != nil {
+			slog.Error("swapd/stable: load ledger state", "error", err)
+		}
 	}
 }
 
@@ -161,6 +207,57 @@ func (e *Engine) restoreDailyLocked(day time.Time, amount int64) {
 	}
 	e.daily.day = day
 	e.daily.amount = amount
+}
+
+func (e *Engine) applyLedgerStateLocked(store LedgerReservationStore, balances []storage.LedgerBalanceRecord, reservations []storage.ReservationRecord) {
+	if e.ledger == nil {
+		e.ledger = make(map[string]*assetLedger)
+	}
+	e.ledgerPersist = store
+	for _, record := range balances {
+		asset := strings.ToUpper(strings.TrimSpace(record.Asset))
+		if asset == "" {
+			continue
+		}
+		if ledger, ok := e.ledger[asset]; ok && ledger != nil {
+			ledger.available = record.Available
+			ledger.reserved = record.Reserved
+			ledger.payouts = record.Payouts
+			continue
+		}
+		if _, ok := e.assets[asset]; !ok {
+			slog.Warn("swapd/stable: skip persisted ledger for unknown asset", "asset", asset)
+			continue
+		}
+		e.ledger[asset] = &assetLedger{available: record.Available, reserved: record.Reserved, payouts: record.Payouts}
+	}
+	restored := make(map[string]*reservationState, len(reservations))
+	for _, record := range reservations {
+		asset := strings.ToUpper(strings.TrimSpace(record.Asset))
+		if _, ok := e.assets[asset]; !ok {
+			slog.Warn("swapd/stable: skip persisted reservation for unknown asset", "asset", asset, "reservation", record.ID)
+			continue
+		}
+		res := Reservation{
+			QuoteID:   strings.TrimSpace(record.ID),
+			AmountIn:  record.AmountIn,
+			AmountOut: record.AmountOut,
+			ExpiresAt: record.ExpiresAt,
+			Account:   strings.TrimSpace(record.Account),
+		}
+		if res.QuoteID == "" {
+			continue
+		}
+		restored[res.QuoteID] = &reservationState{
+			Reservation:     res,
+			Asset:           asset,
+			Price:           record.Price,
+			IntentCreated:   record.IntentCreated,
+			IntentID:        record.IntentID,
+			IntentCreatedAt: record.IntentCreatedAt,
+		}
+	}
+	e.reserve = restored
 }
 
 // WithClock overrides the engine clock for deterministic tests.
@@ -307,6 +404,8 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 		e.metrics.Observe("reserve", e.clock().Sub(start), err)
 		return Reservation{}, err
 	}
+	prevAvailable := ledger.available
+	prevReserved := ledger.reserved
 	ledger.available -= amountOut
 	ledger.reserved += amountOut
 	res := Reservation{
@@ -316,7 +415,37 @@ func (e *Engine) ReserveQuote(ctx context.Context, id, account string, amountIn 
 		ExpiresAt: quote.ExpiresAt,
 		Account:   account,
 	}
-	e.reserve[quote.ID] = &reservationState{Reservation: res, Asset: assetCfg.Symbol, Price: quoteState.Price}
+	state := &reservationState{Reservation: res, Asset: assetCfg.Symbol, Price: quoteState.Price}
+	e.reserve[quote.ID] = state
+	if err := e.persistLedgerLocked(assetCfg.Symbol); err != nil {
+		ledger.available = prevAvailable
+		ledger.reserved = prevReserved
+		delete(e.reserve, quote.ID)
+		e.revertDaily(amountOut, now)
+		if revertErr := e.persistLedgerLocked(assetCfg.Symbol); revertErr != nil {
+			slog.Error("swapd/stable: revert ledger after persistence failure", "error", revertErr, "asset", assetCfg.Symbol)
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		e.metrics.Observe("reserve", e.clock().Sub(start), err)
+		return Reservation{}, err
+	}
+	if err := e.persistReservationLocked(state); err != nil {
+		delete(e.reserve, quote.ID)
+		ledger.available = prevAvailable
+		ledger.reserved = prevReserved
+		if revertErr := e.persistLedgerLocked(assetCfg.Symbol); revertErr != nil {
+			slog.Error("swapd/stable: revert ledger after reservation persistence failure", "error", revertErr, "asset", assetCfg.Symbol)
+		}
+		if deleteErr := e.deleteReservationLocked(quote.ID); deleteErr != nil {
+			slog.Error("swapd/stable: cleanup reservation persistence", "error", deleteErr, "reservation", quote.ID)
+		}
+		e.revertDaily(amountOut, now)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		e.metrics.Observe("reserve", e.clock().Sub(start), err)
+		return Reservation{}, err
+	}
 	quoteState.Consumed = true
 	span.SetAttributes(attribute.String("reservation.id", res.QuoteID))
 	span.SetStatus(codes.Ok, "reservation created")
@@ -351,7 +480,9 @@ func (e *Engine) CreateCashOutIntent(ctx context.Context, reservationID string) 
 	res := resState.Reservation
 	now := e.clock()
 	if !res.ExpiresAt.IsZero() && now.After(res.ExpiresAt) {
-		e.releaseReservationLocked(resState, now)
+		if err := e.releaseReservationLocked(resState, now); err != nil {
+			slog.Error("swapd/stable: release expired reservation", "error", err, "reservation", reservationID)
+		}
 		delete(e.reserve, reservationID)
 		err := ErrReservationExpired
 		span.RecordError(err)
@@ -381,6 +512,11 @@ func (e *Engine) CreateCashOutIntent(ctx context.Context, reservationID string) 
 		e.metrics.Observe("cashout_intent", e.clock().Sub(start), err)
 		return CashOutIntent{}, err
 	}
+	prevReserved := ledger.reserved
+	prevPayouts := ledger.payouts
+	prevIntentCreated := resState.IntentCreated
+	prevIntentID := resState.IntentID
+	prevIntentAt := resState.IntentCreatedAt
 	ledger.reserved -= res.AmountOut
 	ledger.payouts += res.AmountOut
 	payout := fromAmountUnits(res.AmountOut)
@@ -393,6 +529,34 @@ func (e *Engine) CreateCashOutIntent(ctx context.Context, reservationID string) 
 	resState.IntentCreated = true
 	resState.IntentID = intent.ID
 	resState.IntentCreatedAt = now
+	if err := e.persistLedgerLocked(resState.Asset); err != nil {
+		ledger.reserved = prevReserved
+		ledger.payouts = prevPayouts
+		resState.IntentCreated = prevIntentCreated
+		resState.IntentID = prevIntentID
+		resState.IntentCreatedAt = prevIntentAt
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		e.metrics.Observe("cashout_intent", e.clock().Sub(start), err)
+		return CashOutIntent{}, err
+	}
+	if err := e.persistReservationLocked(resState); err != nil {
+		ledger.reserved = prevReserved
+		ledger.payouts = prevPayouts
+		if revertErr := e.persistLedgerLocked(resState.Asset); revertErr != nil {
+			slog.Error("swapd/stable: revert ledger after cashout persistence failure", "error", revertErr, "asset", resState.Asset)
+		}
+		resState.IntentCreated = prevIntentCreated
+		resState.IntentID = prevIntentID
+		resState.IntentCreatedAt = prevIntentAt
+		if revertErr := e.persistReservationLocked(resState); revertErr != nil {
+			slog.Error("swapd/stable: revert reservation after persistence failure", "error", revertErr, "reservation", reservationID)
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		e.metrics.Observe("cashout_intent", e.clock().Sub(start), err)
+		return CashOutIntent{}, err
+	}
 	span.SetAttributes(
 		attribute.Float64("amount", payout),
 		attribute.String("account", res.Account),
@@ -632,19 +796,35 @@ func (e *Engine) revertDaily(amount int64, now time.Time) {
 	}
 }
 
-func (e *Engine) releaseReservationLocked(state *reservationState, now time.Time) {
+func (e *Engine) releaseReservationLocked(state *reservationState, now time.Time) error {
 	if state == nil {
-		return
+		return nil
 	}
 	ledger := e.ledger[strings.ToUpper(state.Asset)]
 	if ledger == nil {
-		return
+		return nil
 	}
+	prevAvailable := ledger.available
+	prevReserved := ledger.reserved
 	ledger.available += state.Reservation.AmountOut
 	if ledger.reserved >= state.Reservation.AmountOut {
 		ledger.reserved -= state.Reservation.AmountOut
+	} else {
+		ledger.reserved = 0
+	}
+	if err := e.persistLedgerLocked(state.Asset); err != nil {
+		ledger.available = prevAvailable
+		ledger.reserved = prevReserved
+		if revertErr := e.persistLedgerLocked(state.Asset); revertErr != nil {
+			slog.Error("swapd/stable: revert ledger after release failure", "error", revertErr, "asset", state.Asset)
+		}
+		return err
 	}
 	e.revertDaily(state.Reservation.AmountOut, now)
+	if err := e.deleteReservationLocked(state.Reservation.QuoteID); err != nil {
+		slog.Error("swapd/stable: delete reservation on release", "error", err, "reservation", state.Reservation.QuoteID)
+	}
+	return nil
 }
 
 type dailyUsage struct {
@@ -665,6 +845,80 @@ func (e *Engine) persistDailyLocked() error {
 	}
 	if err := e.dailyPersist.SaveDailyUsage(ctx, e.daily.day, e.daily.amount); err != nil {
 		return fmt.Errorf("persist daily usage: %w", err)
+	}
+	return nil
+}
+
+func (e *Engine) persistLedgerLocked(asset string) error {
+	if e.ledgerPersist == nil {
+		return nil
+	}
+	assetKey := strings.ToUpper(strings.TrimSpace(asset))
+	if assetKey == "" {
+		return nil
+	}
+	state, ok := e.ledger[assetKey]
+	if !ok || state == nil {
+		return nil
+	}
+	ctx := e.dailyCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	record := storage.LedgerBalanceRecord{
+		Asset:     assetKey,
+		Available: state.available,
+		Reserved:  state.reserved,
+		Payouts:   state.payouts,
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := e.ledgerPersist.SaveLedgerBalance(ctx, record); err != nil {
+		return fmt.Errorf("persist ledger: %w", err)
+	}
+	return nil
+}
+
+func (e *Engine) persistReservationLocked(state *reservationState) error {
+	if e.ledgerPersist == nil || state == nil {
+		return nil
+	}
+	ctx := e.dailyCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	record := storage.ReservationRecord{
+		ID:              state.Reservation.QuoteID,
+		Asset:           state.Asset,
+		AmountIn:        state.Reservation.AmountIn,
+		AmountOut:       state.Reservation.AmountOut,
+		Price:           state.Price,
+		ExpiresAt:       state.Reservation.ExpiresAt,
+		Account:         state.Reservation.Account,
+		IntentCreated:   state.IntentCreated,
+		IntentID:        state.IntentID,
+		IntentCreatedAt: state.IntentCreatedAt,
+		UpdatedAt:       time.Now().UTC(),
+	}
+	if err := e.ledgerPersist.SaveReservation(ctx, record); err != nil {
+		return fmt.Errorf("persist reservation: %w", err)
+	}
+	return nil
+}
+
+func (e *Engine) deleteReservationLocked(id string) error {
+	if e.ledgerPersist == nil {
+		return nil
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	ctx := e.dailyCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := e.ledgerPersist.DeleteReservation(ctx, id); err != nil {
+		return fmt.Errorf("delete reservation: %w", err)
 	}
 	return nil
 }

@@ -155,6 +155,28 @@ CREATE TABLE IF NOT EXISTS daily_usage (
     amount INTEGER NOT NULL,
     updated_at TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS stable_ledger (
+    asset TEXT PRIMARY KEY,
+    available INTEGER NOT NULL,
+    reserved INTEGER NOT NULL,
+    payouts INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stable_reservations (
+    id TEXT PRIMARY KEY,
+    asset TEXT NOT NULL,
+    amount_in INTEGER NOT NULL,
+    amount_out INTEGER NOT NULL,
+    price INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    account TEXT NOT NULL,
+    intent_created INTEGER NOT NULL,
+    intent_id TEXT,
+    intent_created_at INTEGER,
+    updated_at TIMESTAMP NOT NULL
+);
 `
 
 func pairKey(base, quote string) string {
@@ -353,4 +375,210 @@ func (s *Storage) LatestDailyUsage(ctx context.Context) (time.Time, int64, bool,
 		return time.Time{}, 0, false, fmt.Errorf("parse daily usage day: %w", err)
 	}
 	return day, amount, true, nil
+}
+
+// LedgerBalanceRecord captures the persisted treasury balances for an asset.
+type LedgerBalanceRecord struct {
+	Asset     string
+	Available int64
+	Reserved  int64
+	Payouts   int64
+	UpdatedAt time.Time
+}
+
+// SaveLedgerBalance upserts the treasury balances for the supplied asset.
+func (s *Storage) SaveLedgerBalance(ctx context.Context, record LedgerBalanceRecord) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	asset := strings.ToUpper(strings.TrimSpace(record.Asset))
+	if asset == "" {
+		return fmt.Errorf("asset required")
+	}
+	if record.Available < 0 {
+		record.Available = 0
+	}
+	if record.Reserved < 0 {
+		record.Reserved = 0
+	}
+	if record.Payouts < 0 {
+		record.Payouts = 0
+	}
+	updatedAt := time.Now().UTC()
+	if !record.UpdatedAt.IsZero() {
+		updatedAt = record.UpdatedAt.UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO stable_ledger(asset, available, reserved, payouts, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(asset) DO UPDATE SET
+            available=excluded.available,
+            reserved=excluded.reserved,
+            payouts=excluded.payouts,
+            updated_at=excluded.updated_at
+    `, asset, record.Available, record.Reserved, record.Payouts, updatedAt)
+	if err != nil {
+		return fmt.Errorf("save ledger: %w", err)
+	}
+	return nil
+}
+
+// LoadLedgerBalances returns all persisted treasury balances.
+func (s *Storage) LoadLedgerBalances(ctx context.Context) ([]LedgerBalanceRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT asset, available, reserved, payouts, updated_at
+        FROM stable_ledger
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("query ledger: %w", err)
+	}
+	defer rows.Close()
+	var records []LedgerBalanceRecord
+	for rows.Next() {
+		var rec LedgerBalanceRecord
+		if err := rows.Scan(&rec.Asset, &rec.Available, &rec.Reserved, &rec.Payouts, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan ledger: %w", err)
+		}
+		rec.Asset = strings.ToUpper(strings.TrimSpace(rec.Asset))
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate ledger: %w", err)
+	}
+	return records, nil
+}
+
+// ReservationRecord captures the state required to restore outstanding reservations.
+type ReservationRecord struct {
+	ID              string
+	Asset           string
+	AmountIn        int64
+	AmountOut       int64
+	Price           int64
+	ExpiresAt       time.Time
+	Account         string
+	IntentCreated   bool
+	IntentID        string
+	IntentCreatedAt time.Time
+	UpdatedAt       time.Time
+}
+
+// SaveReservation upserts the reservation record.
+func (s *Storage) SaveReservation(ctx context.Context, record ReservationRecord) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	id := strings.TrimSpace(record.ID)
+	if id == "" {
+		return fmt.Errorf("reservation id required")
+	}
+	asset := strings.ToUpper(strings.TrimSpace(record.Asset))
+	if asset == "" {
+		return fmt.Errorf("asset required")
+	}
+	if record.AmountIn <= 0 || record.AmountOut <= 0 {
+		return fmt.Errorf("amounts must be positive")
+	}
+	if record.Price <= 0 {
+		return fmt.Errorf("price must be positive")
+	}
+	account := strings.TrimSpace(record.Account)
+	if account == "" {
+		return fmt.Errorf("account required")
+	}
+	expiresAt := record.ExpiresAt.UTC()
+	if record.ExpiresAt.IsZero() {
+		expiresAt = time.Unix(0, 0).UTC()
+	}
+	intentCreated := 0
+	if record.IntentCreated {
+		intentCreated = 1
+	}
+	intentCreatedAt := int64(0)
+	if !record.IntentCreatedAt.IsZero() {
+		intentCreatedAt = record.IntentCreatedAt.UTC().Unix()
+	}
+	updatedAt := time.Now().UTC()
+	if !record.UpdatedAt.IsZero() {
+		updatedAt = record.UpdatedAt.UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO stable_reservations(id, asset, amount_in, amount_out, price, expires_at, account, intent_created, intent_id, intent_created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            asset=excluded.asset,
+            amount_in=excluded.amount_in,
+            amount_out=excluded.amount_out,
+            price=excluded.price,
+            expires_at=excluded.expires_at,
+            account=excluded.account,
+            intent_created=excluded.intent_created,
+            intent_id=excluded.intent_id,
+            intent_created_at=excluded.intent_created_at,
+            updated_at=excluded.updated_at
+    `, id, asset, record.AmountIn, record.AmountOut, record.Price, expiresAt.Unix(), account, intentCreated, strings.TrimSpace(record.IntentID), intentCreatedAt, updatedAt)
+	if err != nil {
+		return fmt.Errorf("save reservation: %w", err)
+	}
+	return nil
+}
+
+// DeleteReservation removes the persisted reservation.
+func (s *Storage) DeleteReservation(ctx context.Context, id string) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("reservation id required")
+	}
+	if _, err := s.db.ExecContext(ctx, `
+        DELETE FROM stable_reservations WHERE id = ?
+    `, id); err != nil {
+		return fmt.Errorf("delete reservation: %w", err)
+	}
+	return nil
+}
+
+// LoadReservations returns all persisted reservations.
+func (s *Storage) LoadReservations(ctx context.Context) ([]ReservationRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, asset, amount_in, amount_out, price, expires_at, account, intent_created, intent_id, intent_created_at, updated_at
+        FROM stable_reservations
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("query reservations: %w", err)
+	}
+	defer rows.Close()
+	var records []ReservationRecord
+	for rows.Next() {
+		var rec ReservationRecord
+		var expiresAt int64
+		var intentCreated int
+		var intentCreatedAt sql.NullInt64
+		if err := rows.Scan(&rec.ID, &rec.Asset, &rec.AmountIn, &rec.AmountOut, &rec.Price, &expiresAt, &rec.Account, &intentCreated, &rec.IntentID, &intentCreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan reservation: %w", err)
+		}
+		rec.Asset = strings.ToUpper(strings.TrimSpace(rec.Asset))
+		rec.Account = strings.TrimSpace(rec.Account)
+		rec.IntentID = strings.TrimSpace(rec.IntentID)
+		if expiresAt > 0 {
+			rec.ExpiresAt = time.Unix(expiresAt, 0).UTC()
+		}
+		rec.IntentCreated = intentCreated != 0
+		if intentCreatedAt.Valid && intentCreatedAt.Int64 > 0 {
+			rec.IntentCreatedAt = time.Unix(intentCreatedAt.Int64, 0).UTC()
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reservations: %w", err)
+	}
+	return records, nil
 }
