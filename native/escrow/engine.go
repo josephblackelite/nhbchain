@@ -140,6 +140,15 @@ func cloneBigInt(v *big.Int) *big.Int {
 	return new(big.Int).Set(v)
 }
 
+func calculateFee(amount *big.Int, bps uint32) *big.Int {
+	if amount == nil || amount.Sign() <= 0 || bps == 0 {
+		return big.NewInt(0)
+	}
+	numerator := new(big.Int).Mul(amount, new(big.Int).SetUint64(uint64(bps)))
+	numerator.Div(numerator, big.NewInt(10_000))
+	return numerator
+}
+
 func ensureAccount(acc *types.Account) *types.Account {
 	if acc == nil {
 		return &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
@@ -232,6 +241,36 @@ func (e *Engine) ensureTreasuryConfigured() error {
 		return errNilTreasury
 	}
 	return nil
+}
+
+func (e *Engine) computeDisputePayouts(esc *Escrow) (*big.Int, *big.Int, *big.Int, [20]byte, error) {
+	var zeroAddr [20]byte
+	if esc == nil {
+		return nil, nil, nil, zeroAddr, fmt.Errorf("escrow: nil escrow")
+	}
+	total := cloneBigInt(esc.Amount)
+	if total.Sign() <= 0 {
+		return nil, nil, nil, zeroAddr, fmt.Errorf("escrow: amount must be positive")
+	}
+	fee := calculateFee(total, esc.FeeBps)
+	var realmFee *big.Int
+	var recipient [20]byte
+	if esc.FrozenArb != nil && esc.FrozenArb.FeeSchedule != nil {
+		schedule := esc.FrozenArb.FeeSchedule
+		realmFee = calculateFee(total, schedule.FeeBps)
+		recipient = schedule.Recipient
+		if realmFee.Sign() > 0 && recipient == ([20]byte{}) {
+			return nil, nil, nil, zeroAddr, fmt.Errorf("escrow: realm fee recipient missing")
+		}
+	} else {
+		realmFee = big.NewInt(0)
+	}
+	payout := new(big.Int).Sub(total, fee)
+	payout.Sub(payout, realmFee)
+	if payout.Sign() < 0 {
+		return nil, nil, nil, zeroAddr, fmt.Errorf("escrow: dispute fees exceed escrow amount")
+	}
+	return payout, fee, realmFee, recipient, nil
 }
 
 func defaultRealmSchemeMap() map[ArbitrationScheme]struct{} {
@@ -408,6 +447,7 @@ func (e *Engine) prepareFrozenPolicy(realmID string, now int64) (*EscrowRealm, *
 		Threshold:    sanitizedSet.Threshold,
 		Members:      append([][20]byte(nil), sanitizedSet.Members...),
 		FrozenAt:     now,
+		FeeSchedule:  sanitizedRealm.FeeSchedule.Clone(),
 	}
 	if sanitizedRealm.Metadata != nil {
 		frozen.Metadata = sanitizedRealm.Metadata.Clone()
@@ -443,6 +483,10 @@ func (e *Engine) CreateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 		return nil, err
 	}
 	now := e.now()
+	var schedule *RealmFeeSchedule
+	if realm.FeeSchedule != nil {
+		schedule = realm.FeeSchedule.Clone()
+	}
 	candidate := &EscrowRealm{
 		ID:              trimmed,
 		Version:         1,
@@ -450,6 +494,7 @@ func (e *Engine) CreateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		Arbitrators:     sanitizedSet,
+		FeeSchedule:     schedule,
 		Metadata:        realm.Metadata.Clone(),
 	}
 	sanitizedRealm, err := SanitizeEscrowRealm(candidate)
@@ -496,6 +541,11 @@ func (e *Engine) UpdateRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 	}
 	sanitizedCurrent.Version++
 	sanitizedCurrent.Arbitrators = sanitizedSet
+	if realm.FeeSchedule != nil {
+		sanitizedCurrent.FeeSchedule = realm.FeeSchedule.Clone()
+	} else {
+		sanitizedCurrent.FeeSchedule = nil
+	}
 	sanitizedCurrent.UpdatedAt = e.now()
 	if realm.Metadata != nil {
 		sanitizedMeta, err := SanitizeEscrowRealmMetadata(realm.Metadata)
@@ -697,9 +747,23 @@ func (e *Engine) Release(id [32]byte, caller [20]byte) error {
 	if total.Sign() <= 0 {
 		return fmt.Errorf("escrow: amount must be positive")
 	}
-	fee := new(big.Int).Mul(total, new(big.Int).SetUint64(uint64(esc.FeeBps)))
-	fee.Div(fee, big.NewInt(10_000))
-	payout := new(big.Int).Sub(total, fee)
+	var (
+		payout     *big.Int
+		fee        *big.Int
+		realmFee   *big.Int
+		realmPayee [20]byte
+	)
+	if esc.Status == EscrowDisputed {
+		var err error
+		payout, fee, realmFee, realmPayee, err = e.computeDisputePayouts(esc)
+		if err != nil {
+			return err
+		}
+	} else {
+		fee = calculateFee(total, esc.FeeBps)
+		payout = new(big.Int).Sub(total, fee)
+		realmFee = big.NewInt(0)
+	}
 	if payout.Sign() > 0 {
 		if err := e.transferToken(vault, esc.Payee, esc.Token, payout); err != nil {
 			return err
@@ -710,6 +774,14 @@ func (e *Engine) Release(id [32]byte, caller [20]byte) error {
 			return err
 		}
 		if err := e.transferToken(vault, e.feeTreasury, esc.Token, fee); err != nil {
+			return err
+		}
+	}
+	if realmFee != nil && realmFee.Sign() > 0 {
+		if realmPayee == ([20]byte{}) {
+			return fmt.Errorf("escrow: realm fee recipient missing")
+		}
+		if err := e.transferToken(vault, realmPayee, esc.Token, realmFee); err != nil {
 			return err
 		}
 	}
@@ -932,9 +1004,23 @@ func (e *Engine) arbitratedRelease(esc *Escrow) error {
 	if total.Sign() <= 0 {
 		return fmt.Errorf("escrow: amount must be positive")
 	}
-	fee := new(big.Int).Mul(total, new(big.Int).SetUint64(uint64(esc.FeeBps)))
-	fee.Div(fee, big.NewInt(10_000))
-	payout := new(big.Int).Sub(total, fee)
+	var (
+		payout     *big.Int
+		fee        *big.Int
+		realmFee   *big.Int
+		realmPayee [20]byte
+	)
+	if esc.Status == EscrowDisputed {
+		var err error
+		payout, fee, realmFee, realmPayee, err = e.computeDisputePayouts(esc)
+		if err != nil {
+			return err
+		}
+	} else {
+		fee = calculateFee(total, esc.FeeBps)
+		payout = new(big.Int).Sub(total, fee)
+		realmFee = big.NewInt(0)
+	}
 	if payout.Sign() > 0 {
 		if err := e.transferToken(vault, esc.Payee, esc.Token, payout); err != nil {
 			return err
@@ -948,6 +1034,14 @@ func (e *Engine) arbitratedRelease(esc *Escrow) error {
 			return err
 		}
 	}
+	if realmFee != nil && realmFee.Sign() > 0 {
+		if realmPayee == ([20]byte{}) {
+			return fmt.Errorf("escrow: realm fee recipient missing")
+		}
+		if err := e.transferToken(vault, realmPayee, esc.Token, realmFee); err != nil {
+			return err
+		}
+	}
 	if err := e.state.EscrowDebit(esc.ID, esc.Token, total); err != nil {
 		return err
 	}
@@ -956,6 +1050,73 @@ func (e *Engine) arbitratedRelease(esc *Escrow) error {
 		return err
 	}
 	e.emit(NewReleasedEvent(esc))
+	return nil
+}
+
+func (e *Engine) arbitratedRefund(esc *Escrow) error {
+	if esc == nil {
+		return fmt.Errorf("escrow: nil escrow")
+	}
+	if esc.Status == EscrowRefunded {
+		return nil
+	}
+	if esc.Status != EscrowFunded && esc.Status != EscrowDisputed {
+		return fmt.Errorf("escrow: cannot refund in status %d", esc.Status)
+	}
+	vault, err := e.state.EscrowVaultAddress(esc.Token)
+	if err != nil {
+		return err
+	}
+	total := cloneBigInt(esc.Amount)
+	if total.Sign() <= 0 {
+		return fmt.Errorf("escrow: amount must be positive")
+	}
+	var (
+		payout     *big.Int
+		fee        *big.Int
+		realmFee   *big.Int
+		realmPayee [20]byte
+	)
+	if esc.Status == EscrowDisputed {
+		var computeErr error
+		payout, fee, realmFee, realmPayee, computeErr = e.computeDisputePayouts(esc)
+		if computeErr != nil {
+			return computeErr
+		}
+	} else {
+		payout = cloneBigInt(total)
+		fee = big.NewInt(0)
+		realmFee = big.NewInt(0)
+	}
+	if payout.Sign() > 0 {
+		if err := e.transferToken(vault, esc.Payer, esc.Token, payout); err != nil {
+			return err
+		}
+	}
+	if fee != nil && fee.Sign() > 0 {
+		if err := e.ensureTreasuryConfigured(); err != nil {
+			return err
+		}
+		if err := e.transferToken(vault, e.feeTreasury, esc.Token, fee); err != nil {
+			return err
+		}
+	}
+	if realmFee != nil && realmFee.Sign() > 0 {
+		if realmPayee == ([20]byte{}) {
+			return fmt.Errorf("escrow: realm fee recipient missing")
+		}
+		if err := e.transferToken(vault, realmPayee, esc.Token, realmFee); err != nil {
+			return err
+		}
+	}
+	if err := e.state.EscrowDebit(esc.ID, esc.Token, total); err != nil {
+		return err
+	}
+	esc.Status = EscrowRefunded
+	if err := e.storeEscrow(esc); err != nil {
+		return err
+	}
+	e.emit(NewRefundedEvent(esc))
 	return nil
 }
 
@@ -988,7 +1149,7 @@ func (e *Engine) Resolve(id [32]byte, caller [20]byte, outcome string) error {
 			return err
 		}
 	case DecisionOutcomeRefund:
-		if err := e.refundEscrow(esc, esc.Payer, EscrowRefunded, NewRefundedEvent); err != nil {
+		if err := e.arbitratedRefund(esc); err != nil {
 			return err
 		}
 	default:
@@ -1041,7 +1202,7 @@ func (e *Engine) ResolveWithSignatures(id [32]byte, decisionPayload []byte, sign
 			return err
 		}
 	case DecisionOutcomeRefund:
-		if err := e.refundEscrow(esc, esc.Payer, EscrowRefunded, NewRefundedEvent); err != nil {
+		if err := e.arbitratedRefund(esc); err != nil {
 			esc.ResolutionHash = prevHash
 			return err
 		}

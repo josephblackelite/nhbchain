@@ -2616,6 +2616,8 @@ type storedEscrowRealm struct {
 	CreatedAt       *big.Int
 	UpdatedAt       *big.Int
 	Arbitrators     *storedArbitratorSet
+	FeeBps          uint32
+	FeeRecipient    [20]byte
 	Metadata        *storedEscrowRealmMetadata
 }
 
@@ -2625,6 +2627,12 @@ func newStoredEscrowRealm(r *escrow.EscrowRealm) *storedEscrowRealm {
 	}
 	created := big.NewInt(r.CreatedAt)
 	updated := big.NewInt(r.UpdatedAt)
+	var feeBps uint32
+	var feeRecipient [20]byte
+	if r.FeeSchedule != nil {
+		feeBps = r.FeeSchedule.FeeBps
+		feeRecipient = r.FeeSchedule.Recipient
+	}
 	return &storedEscrowRealm{
 		ID:              strings.TrimSpace(r.ID),
 		Version:         r.Version,
@@ -2632,6 +2640,8 @@ func newStoredEscrowRealm(r *escrow.EscrowRealm) *storedEscrowRealm {
 		CreatedAt:       created,
 		UpdatedAt:       updated,
 		Arbitrators:     newStoredArbitratorSet(r.Arbitrators),
+		FeeBps:          feeBps,
+		FeeRecipient:    feeRecipient,
 		Metadata:        newStoredEscrowRealmMetadata(r.Metadata),
 	}
 }
@@ -2659,6 +2669,9 @@ func (s *storedEscrowRealm) toEscrowRealm() (*escrow.EscrowRealm, error) {
 		return nil, err
 	}
 	realm.Arbitrators = set
+	if s.FeeBps > 0 || s.FeeRecipient != ([20]byte{}) {
+		realm.FeeSchedule = &escrow.RealmFeeSchedule{FeeBps: s.FeeBps, Recipient: s.FeeRecipient}
+	}
 	if s.Metadata == nil {
 		return nil, fmt.Errorf("escrow: realm missing metadata")
 	}
@@ -2682,6 +2695,8 @@ type storedFrozenArb struct {
 	Threshold    uint32
 	Members      [][20]byte
 	FrozenAt     *big.Int
+	FeeBps       uint32
+	FeeRecipient [20]byte
 	Metadata     *storedEscrowRealmMetadata
 }
 
@@ -2691,6 +2706,12 @@ func newStoredFrozenArb(f *escrow.FrozenArb) *storedFrozenArb {
 	}
 	members := make([][20]byte, len(f.Members))
 	copy(members, f.Members)
+	var feeBps uint32
+	var feeRecipient [20]byte
+	if f.FeeSchedule != nil {
+		feeBps = f.FeeSchedule.FeeBps
+		feeRecipient = f.FeeSchedule.Recipient
+	}
 	return &storedFrozenArb{
 		RealmID:      strings.TrimSpace(f.RealmID),
 		RealmVersion: f.RealmVersion,
@@ -2699,6 +2720,8 @@ func newStoredFrozenArb(f *escrow.FrozenArb) *storedFrozenArb {
 		Threshold:    f.Threshold,
 		Members:      members,
 		FrozenAt:     big.NewInt(f.FrozenAt),
+		FeeBps:       feeBps,
+		FeeRecipient: feeRecipient,
 		Metadata:     newStoredEscrowRealmMetadata(f.Metadata),
 	}
 }
@@ -2720,6 +2743,9 @@ func (s *storedFrozenArb) toFrozenArb() (*escrow.FrozenArb, error) {
 	}
 	if s.FrozenAt != nil {
 		frozen.FrozenAt = s.FrozenAt.Int64()
+	}
+	if s.FeeBps > 0 || s.FeeRecipient != ([20]byte{}) {
+		frozen.FeeSchedule = &escrow.RealmFeeSchedule{FeeBps: s.FeeBps, Recipient: s.FeeRecipient}
 	}
 	if s.Metadata == nil {
 		return nil, fmt.Errorf("escrow: frozen policy missing metadata")

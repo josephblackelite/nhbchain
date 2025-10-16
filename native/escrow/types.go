@@ -90,6 +90,7 @@ type EscrowRealm struct {
 	CreatedAt       int64
 	UpdatedAt       int64
 	Arbitrators     *ArbitratorSet
+	FeeSchedule     *RealmFeeSchedule
 	Metadata        *EscrowRealmMetadata
 }
 
@@ -100,6 +101,8 @@ func (r *EscrowRealm) Clone() *EscrowRealm {
 	}
 	clone := *r
 	clone.Arbitrators = r.Arbitrators.Clone()
+	if r.FeeSchedule != nil {
+		clone.FeeSchedule = r.FeeSchedule.Clone()
 	if r.Metadata != nil {
 		clone.Metadata = r.Metadata.Clone()
 	}
@@ -117,6 +120,7 @@ type FrozenArb struct {
 	Threshold    uint32
 	Members      [][20]byte
 	FrozenAt     int64
+	FeeSchedule  *RealmFeeSchedule
 	Metadata     *EscrowRealmMetadata
 }
 
@@ -137,6 +141,8 @@ func (f *FrozenArb) Clone() *FrozenArb {
 		clone.Members = make([][20]byte, len(f.Members))
 		copy(clone.Members, f.Members)
 	}
+	if f.FeeSchedule != nil {
+		clone.FeeSchedule = f.FeeSchedule.Clone()
 	if f.Metadata != nil {
 		clone.Metadata = f.Metadata.Clone()
 	}
@@ -204,6 +210,21 @@ var (
 		ArbitrationSchemeCommittee,
 	}
 )
+
+// RealmFeeSchedule captures the arbitration fee routing rules for a realm.
+type RealmFeeSchedule struct {
+	FeeBps    uint32
+	Recipient [20]byte
+}
+
+// Clone returns a copy safe for callers to mutate.
+func (s *RealmFeeSchedule) Clone() *RealmFeeSchedule {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	return &clone
+}
 
 const (
 	// ParamKeyRealmMinThreshold controls the minimum allowed arbitration
@@ -510,6 +531,13 @@ func SanitizeEscrowRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 		return nil, err
 	}
 	clone.Arbitrators = sanitized
+	if clone.FeeSchedule != nil {
+		schedule, err := SanitizeRealmFeeSchedule(clone.FeeSchedule)
+		if err != nil {
+			return nil, err
+		}
+		clone.FeeSchedule = schedule
+	}
 	if clone.Metadata == nil {
 		return nil, fmt.Errorf("realm metadata required")
 	}
@@ -556,6 +584,28 @@ func SanitizeFrozenArb(frozen *FrozenArb) (*FrozenArb, error) {
 		if member == ([20]byte{}) {
 			return nil, fmt.Errorf("frozen policy member %d is zero address", idx)
 		}
+	}
+	if clone.FeeSchedule != nil {
+		schedule, err := SanitizeRealmFeeSchedule(clone.FeeSchedule)
+		if err != nil {
+			return nil, err
+		}
+		clone.FeeSchedule = schedule
+	}
+	return clone, nil
+}
+
+// SanitizeRealmFeeSchedule validates arbitration fee routing rules.
+func SanitizeRealmFeeSchedule(schedule *RealmFeeSchedule) (*RealmFeeSchedule, error) {
+	if schedule == nil {
+		return nil, nil
+	}
+	clone := schedule.Clone()
+	if clone.FeeBps > 10_000 {
+		return nil, fmt.Errorf("realm arbitration fee bps out of range: %d", clone.FeeBps)
+	}
+	if clone.FeeBps > 0 && clone.Recipient == ([20]byte{}) {
+		return nil, fmt.Errorf("realm arbitration fee recipient required")
 	}
 	if clone.Metadata == nil {
 		return nil, fmt.Errorf("frozen policy metadata required")
