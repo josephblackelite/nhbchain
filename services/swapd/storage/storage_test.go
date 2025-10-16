@@ -164,6 +164,50 @@ func TestDailyUsagePersistence(t *testing.T) {
 	}
 }
 
+func TestConsumePartnerQuota(t *testing.T) {
+	store := openTestDB(t)
+	ctx := context.Background()
+	day := time.Date(2024, time.January, 10, 0, 0, 0, 0, time.UTC)
+	allowed, remaining, err := store.ConsumePartnerQuota(ctx, "desk-1", day, 100, 500)
+	if err != nil {
+		t.Fatalf("consume quota: %v", err)
+	}
+	if !allowed {
+		t.Fatalf("expected initial consumption to succeed")
+	}
+	if remaining != 400 {
+		t.Fatalf("unexpected remaining quota: got %d want %d", remaining, 400)
+	}
+	allowed, remaining, err = store.ConsumePartnerQuota(ctx, "desk-1", day, 300, 500)
+	if err != nil {
+		t.Fatalf("consume quota second time: %v", err)
+	}
+	if !allowed {
+		t.Fatalf("expected quota to allow cumulative usage below limit")
+	}
+	if remaining != 100 {
+		t.Fatalf("unexpected remaining after second usage: got %d want %d", remaining, 100)
+	}
+	allowed, remaining, err = store.ConsumePartnerQuota(ctx, "desk-1", day, 150, 500)
+	if err != nil {
+		t.Fatalf("consume quota third time: %v", err)
+	}
+	if allowed {
+		t.Fatalf("expected quota exhaustion to reject consumption")
+	}
+	if remaining != 100 {
+		t.Fatalf("unexpected remaining after rejection: got %d want %d", remaining, 100)
+	}
+	// Ensure usage persisted across calls.
+	allowed, remaining, err = store.ConsumePartnerQuota(ctx, "desk-1", day, 100, 500)
+	if err != nil {
+		t.Fatalf("consume quota fourth time: %v", err)
+	}
+	if !allowed || remaining != 0 {
+		t.Fatalf("unexpected final consumption result: allowed=%v remaining=%d", allowed, remaining)
+	}
+}
+
 func TestOpenRequiresPath(t *testing.T) {
 	if _, err := Open(""); !errors.Is(err, ErrPathRequired) {
 		t.Fatalf("expected ErrPathRequired, got %v", err)

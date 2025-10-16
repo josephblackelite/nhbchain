@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -253,6 +254,14 @@ CREATE TABLE IF NOT EXISTS daily_usage (
     updated_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS partner_quota_usage (
+    partner_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (partner_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS stable_ledger (
     asset TEXT PRIMARY KEY,
     available INTEGER NOT NULL,
@@ -472,6 +481,82 @@ func (s *Storage) LatestDailyUsage(ctx context.Context) (time.Time, int64, bool,
 		return time.Time{}, 0, false, fmt.Errorf("parse daily usage day: %w", err)
 	}
 	return day, amount, true, nil
+}
+
+// ConsumePartnerQuota atomically applies the supplied amount against the partner's daily allowance.
+func (s *Storage) ConsumePartnerQuota(ctx context.Context, partnerID string, day time.Time, amount int64, limit int64) (bool, int64, error) {
+	if s == nil {
+		return false, 0, fmt.Errorf("storage not configured")
+	}
+	partner := strings.TrimSpace(partnerID)
+	if partner == "" {
+		return false, 0, fmt.Errorf("partner id required")
+	}
+	if amount <= 0 {
+		return true, limit, nil
+	}
+	day = day.UTC().Truncate(24 * time.Hour)
+	if day.IsZero() {
+		return false, 0, fmt.Errorf("day required")
+	}
+	dayKey := day.Format(time.DateOnly)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return false, 0, fmt.Errorf("begin partner quota tx: %w", err)
+	}
+	defer tx.Rollback()
+	var used int64
+	row := tx.QueryRowContext(ctx, `
+        SELECT amount
+        FROM partner_quota_usage
+        WHERE partner_id = ? AND day = ?
+    `, partner, dayKey)
+	switch err := row.Scan(&used); {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		used = 0
+	case err != nil:
+		return false, 0, fmt.Errorf("query partner quota: %w", err)
+	}
+	if used < 0 {
+		used = 0
+	}
+	if limit > 0 && amount > 0 {
+		if amount > math.MaxInt64-used {
+			return false, limit - used, nil
+		}
+		if used+amount > limit {
+			remaining := limit - used
+			if remaining < 0 {
+				remaining = 0
+			}
+			return false, remaining, nil
+		}
+	}
+	total := used + amount
+	if total < 0 {
+		total = 0
+	}
+	if _, err := tx.ExecContext(ctx, `
+        INSERT INTO partner_quota_usage(partner_id, day, amount, updated_at)
+        VALUES(?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(partner_id, day) DO UPDATE SET
+            amount=excluded.amount,
+            updated_at=CURRENT_TIMESTAMP
+    `, partner, dayKey, total); err != nil {
+		return false, 0, fmt.Errorf("save partner quota: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, fmt.Errorf("commit partner quota: %w", err)
+	}
+	remaining := int64(0)
+	if limit > 0 {
+		remaining = limit - total
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+	return true, remaining, nil
 }
 
 // LedgerBalanceRecord captures the persisted treasury balances for an asset.

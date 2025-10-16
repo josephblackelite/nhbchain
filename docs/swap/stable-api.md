@@ -6,7 +6,18 @@ This document captures the HTTP surface for `/v1/stable/*`, expected request/res
 
 ## Authentication
 
-Partners invoking the JSON-RPC gateway methods `nhb_requestSwapApproval`, `nhb_swapMint`, `nhb_swapBurn`, and `nhb_getSwapStatus` must present an RPC bearer credential (`Authorization: Bearer …`) in addition to the swap API signing headers. Requests missing either the JWT or the HMAC signature are rejected with `401 unauthorized` and the JSON-RPC error code `-32001`. This enforcement is enabled in production and staging gateways; only localnet fixtures bypass the check for developer ergonomics.
+Stable API requests are authenticated with per-partner HMAC headers. Each desk receives an API key and shared secret during onboarding. Every HTTP request must include the following headers:
+
+| Header | Purpose |
+| ------ | ------- |
+| `X-Api-Key` | Identifies the partner making the request. |
+| `X-Timestamp` | Unix timestamp (seconds) when the signature was produced. |
+| `X-Nonce` | Unique nonce for replay protection. |
+| `X-Signature` | Hex-encoded HMAC-SHA256 signature covering the request. |
+
+The signature is computed as `HMAC_SHA256(secret, timestamp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + body)` using the canonical request path (no query string) and the exact request body bytes. Swapd enforces a 1 MiB signing limit, a two minute timestamp skew window, and persistent nonce tracking. Requests with missing headers, reused nonces, or invalid signatures are rejected with `401 unauthorized`.
+
+API keys are allow-listed in `swapd` configuration. Requests carrying an unknown key return `403 forbidden` with `{"error": "partner not allowed"}`. Desks should monitor for these responses during rollout—they usually indicate a mismatched credential or configuration drift between staging and production.
 
 ## Endpoints at a Glance
 
@@ -163,15 +174,16 @@ In preview the endpoint returns the `stable engine not enabled` error. Operation
 | 404    | `quote not found`             | Reserve/cashout on unknown quote    | Fetch latest quote from `/v1/stable/quote` |
 | 409    | `quote expired`               | Attempting to reserve stale quote   | Regenerate quote before TTL lapses |
 | 422    | `reservation not found`       | Cashout on consumed reservation     | Inspect `/v1/stable/status` counters |
+| 429    | `partner quota exceeded`      | Partner-specific mint cap breached  | Pause new reservations or request a quota increase |
 | 429    | `throttled`                   | Breach of per-account policy        | Contact operations or wait for rolling window |
 | 501    | `stable engine not enabled`   | Preview mode guardrail              | Flip `stable.paused=false` and run regression suite |
 
 ## Quotas and Telemetry
 
-The soft limits surfaced by `/v1/stable/limits` come directly from the running `swapd` configuration:
+Swapd enforces two layers of guard rails:
 
-- `daily_cap` mirrors `policy.mint_limit` and governs the total amount OTC desks may settle during the rolling throttle window.
-- `asset_caps` entries reflect each configured asset's `quote_ttl`, `max_slippage_bps`, and `soft_inventory` values. Operations can update these knobs in `services/swapd/config.yaml` and hot-reload `swapd` to publish new limits.
+- `/v1/stable/limits` echoes the global soft caps configured under `policy.*` and `stable.assets`. These values govern aggregate desk activity across the programme.
+- Per-partner quotas are tracked in the new `partner_quota_usage` table. Each reservation consumes from the desk's daily allowance; once exhausted, swapd returns `429 partner quota exceeded` and rolls back the reservation so ledgers remain unchanged. Quota counters survive process restarts and reset automatically at UTC day boundaries.
 
 Stable counters (`/v1/stable/status`) increment as quotes, reservations, and intents are processed. They feed Grafana dashboards via OTLP metrics (`swapd_stable_quote_latency`, `swapd_stable_reserve_latency`, and `swapd_stable_cashout_intent_latency`) and structured logs (`cashout intent created`).
 
@@ -180,8 +192,11 @@ Stable counters (`/v1/stable/status`) increment as quotes, reservations, and int
 To onboard a new OTC desk to the stable API:
 
 1. **Submit desk profile:** Treasury reviews the desk's legal entity, settlement accounts, and compliance artefacts. Once approved, operations set `stable.paused = false` in the deployment environment and ensure the desk's account identifier matches the `account` field used in `quote`/`reserve` payloads.
-2. **Configure limits:** Operations tune `policy.mint_limit`/`policy.redeem_limit` and, if necessary, add a dedicated entry under `stable.assets` with bespoke `quote_ttl`, `max_slippage_bps`, or `soft_inventory`. The resulting limits propagate automatically to `/v1/stable/limits`.
-3. **Exchange connectivity details:** OTC desks provide network allow-list information and preferred telemetry endpoints. Operations update the gateway ACLs and share the OpenTelemetry trace requirements so partners can forward `traceparent` headers, enabling `trace_id` propagation end-to-end.
+2. **Provision credentials:** Operations add the desk to `stable.partners` in `services/swapd/config.yaml`, assigning an API key, shared secret, and daily quota. Swapd hot-reloads the configuration and begins accepting HMAC-authenticated requests immediately.
+3. **Configure limits:** Tune `policy.mint_limit`/`policy.redeem_limit` and, if necessary, add a dedicated entry under `stable.assets` with bespoke `quote_ttl`, `max_slippage_bps`, or `soft_inventory`. The resulting global limits propagate automatically to `/v1/stable/limits`.
+4. **Exchange connectivity details:** OTC desks provide network allow-list information and preferred telemetry endpoints. Operations update the gateway ACLs and share the OpenTelemetry trace requirements so partners can forward `traceparent` headers, enabling `trace_id` propagation end-to-end.
+
+During smoke testing desks should verify a signed `GET /v1/stable/status` request succeeds and that `429 partner quota exceeded` surfaces once the configured allowance is consumed. Treasury can reset quotas by editing the partner configuration or waiting for the next UTC day boundary.
 
 Partners should verify integration by calling `/v1/stable/status` and `/v1/stable/limits` after onboarding to confirm the live quotas before sending production traffic.
 

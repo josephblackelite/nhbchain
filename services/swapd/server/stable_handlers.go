@@ -23,8 +23,8 @@ func (s *Server) registerStableHandlers(mux *http.ServeMux) {
 	stableMux.HandleFunc("/v1/stable/reserve", s.handleStableReserve)
 	stableMux.HandleFunc("/v1/stable/cashout", s.handleStableCashOut)
 	stableMux.HandleFunc("/v1/stable/status", s.handleStableStatus)
-	mux.Handle("/v1/stable/limits", s.requireAdmin(http.HandlerFunc(s.handleStableLimits)))
-	mux.Handle("/v1/stable/", s.requireAdmin(stableMux))
+	mux.Handle("/v1/stable/limits", s.requirePartner(http.HandlerFunc(s.handleStableLimits)))
+	mux.Handle("/v1/stable/", s.requirePartner(stableMux))
 }
 
 func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +33,10 @@ func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.ensureStablePrincipal(w, r) {
+		return
+	}
+	if _, ok := partnerPrincipalFromRequest(r); !ok {
+		s.writeStableError(w, http.StatusForbidden, "partner not authorized")
 		return
 	}
 	if !s.stableEngineEnabled() {
@@ -83,6 +87,11 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureStablePrincipal(w, r) {
 		return
 	}
+	partner, ok := partnerPrincipalFromRequest(r)
+	if !ok {
+		s.writeStableError(w, http.StatusForbidden, "partner not authorized")
+		return
+	}
 	if !s.stableEngineEnabled() {
 		s.writeStableDisabled(w)
 		return
@@ -111,6 +120,25 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 		s.writeStableError(w, status, message)
 		return
 	}
+	amountOut := reservation.Reservation.AmountOut
+	allowed, _, quotaErr := s.enforcePartnerQuota(r.Context(), partner, amountOut)
+	if quotaErr != nil {
+		if cancelErr := s.stable.engine.CancelReservation(r.Context(), reservation.Reservation.QuoteID); cancelErr != nil && s.logger != nil {
+			s.logger.Printf("swapd: revert reservation after quota error: %v", cancelErr)
+		}
+		if s.logger != nil {
+			s.logger.Printf("swapd: partner quota enforcement error: %v", quotaErr)
+		}
+		s.writeStableError(w, http.StatusInternalServerError, "quota enforcement failed")
+		return
+	}
+	if !allowed {
+		if cancelErr := s.stable.engine.CancelReservation(r.Context(), reservation.Reservation.QuoteID); cancelErr != nil && s.logger != nil {
+			s.logger.Printf("swapd: revert reservation after quota exhaustion: %v", cancelErr)
+		}
+		s.writeStableError(w, http.StatusTooManyRequests, "partner quota exceeded")
+		return
+	}
 	traceID := traceIDFromContext(r.Context())
 	response := map[string]any{
 		"reservation_id": reservation.Reservation.QuoteID,
@@ -131,6 +159,10 @@ func (s *Server) handleStableCashOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.ensureStablePrincipal(w, r) {
+		return
+	}
+	if _, ok := partnerPrincipalFromRequest(r); !ok {
+		s.writeStableError(w, http.StatusForbidden, "partner not authorized")
 		return
 	}
 	if !s.stableEngineEnabled() {
@@ -177,6 +209,10 @@ func (s *Server) handleStableStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.ensureStablePrincipal(w, r) {
+		return
+	}
+	if _, ok := partnerPrincipalFromRequest(r); !ok {
+		s.writeStableError(w, http.StatusForbidden, "partner not authorized")
 		return
 	}
 	if !s.stableEngineEnabled() {
@@ -246,20 +282,55 @@ func (s *Server) writeStableJSON(w http.ResponseWriter, status int, payload any)
 }
 
 func (s *Server) ensureStablePrincipal(w http.ResponseWriter, r *http.Request) bool {
+	if partner, ok := PartnerFromContext(r.Context()); ok && partner != nil && strings.TrimSpace(partner.ID) != "" {
+		return true
+	}
 	principal, ok := PrincipalFromContext(r.Context())
 	if !ok {
 		s.writeStableError(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
-	if principal.Method == "" {
+	if strings.TrimSpace(principal.Method) == "" {
 		s.writeStableError(w, http.StatusForbidden, "principal not authorized")
 		return false
 	}
 	return true
 }
 
+func partnerPrincipalFromRequest(r *http.Request) (*PartnerPrincipal, bool) {
+	if r == nil {
+		return nil, false
+	}
+	partner, ok := PartnerFromContext(r.Context())
+	if !ok || partner == nil {
+		return nil, false
+	}
+	if strings.TrimSpace(partner.ID) == "" {
+		return nil, false
+	}
+	return partner, true
+}
+
 func (s *Server) stableEngineEnabled() bool {
 	return s != nil && s.stable.enabled && s.stable.engine != nil
+}
+
+func (s *Server) enforcePartnerQuota(ctx context.Context, partner *PartnerPrincipal, amount int64) (bool, int64, error) {
+	if s == nil || s.storage == nil || partner == nil {
+		return true, 0, nil
+	}
+	if amount <= 0 {
+		return true, partner.DailyQuota, nil
+	}
+	partnerID := strings.TrimSpace(partner.ID)
+	if partnerID == "" {
+		return true, partner.DailyQuota, nil
+	}
+	now := s.stableNow()
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return s.storage.ConsumePartnerQuota(ctx, partnerID, now, amount, partner.DailyQuota)
 }
 
 func traceIDFromContext(ctx context.Context) string {

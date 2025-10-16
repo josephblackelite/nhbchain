@@ -35,21 +35,23 @@ type TLSConfig struct {
 
 // StableRuntime configures the optional stable engine wiring.
 type StableRuntime struct {
-	Enabled bool
-	Engine  *stable.Engine
-	Limits  stable.Limits
-	Assets  []stable.Asset
-	Now     func() time.Time
+	Enabled  bool
+	Engine   *stable.Engine
+	Limits   stable.Limits
+	Assets   []stable.Asset
+	Now      func() time.Time
+	Partners []Partner
 }
 
 // Server hosts admin and health endpoints for swapd.
 type Server struct {
-	cfg       Config
-	storage   *storage.Storage
-	policyMu  sync.RWMutex
-	policy    storage.Policy
-	logger    *log.Logger
-	adminAuth *Authenticator
+	cfg         Config
+	storage     *storage.Storage
+	policyMu    sync.RWMutex
+	policy      storage.Policy
+	logger      *log.Logger
+	adminAuth   *Authenticator
+	partnerAuth *PartnerAuthenticator
 
 	tls struct {
 		disabled bool
@@ -102,6 +104,17 @@ func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime S
 			}
 			srv.stable.assets[symbol] = asset
 		}
+		if len(stableRuntime.Partners) == 0 {
+			return nil, fmt.Errorf("stable runtime requires partner configuration")
+		}
+		partnerAuth, err := NewPartnerAuthenticator(stableRuntime.Partners, nil, store)
+		if err != nil {
+			return nil, fmt.Errorf("configure partner auth: %w", err)
+		}
+		if err := partnerAuth.Hydrate(context.Background()); err != nil && logger != nil {
+			logger.Printf("swapd: hydrate partner auth: %v", err)
+		}
+		srv.partnerAuth = partnerAuth
 	}
 	if policy, err := store.GetPolicy(context.Background(), cfg.PolicyID); err == nil {
 		srv.setPolicy(policy)
@@ -149,6 +162,16 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		})
 	}
 	return s.adminAuth.Middleware(next)
+}
+
+func (s *Server) requirePartner(next http.Handler) http.Handler {
+	if s.partnerAuth == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), partnerContextKey{}, &PartnerPrincipal{ID: "anonymous"})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+	return s.partnerAuth.Middleware(next)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

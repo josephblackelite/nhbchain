@@ -87,6 +87,11 @@ func TestValidateRequiresTLSWhenStableEnabled(t *testing.T) {
 		Stable: StableConfig{
 			Paused: false,
 			Assets: []StableAsset{{Symbol: "ZNHB"}},
+			Partners: []StablePartner{{
+				ID:     "desk-1",
+				APIKey: "api-key",
+				Secret: "secret",
+			}},
 		},
 		Admin: AdminConfig{TLS: AdminTLSConfig{Disable: true}},
 	}
@@ -96,6 +101,26 @@ func TestValidateRequiresTLSWhenStableEnabled(t *testing.T) {
 		t.Fatalf("expected error when stable runtime is enabled without TLS")
 	}
 	if got, want := err.Error(), "stable runtime requires admin TLS to be enabled"; got != want {
+		t.Fatalf("unexpected error: got %q want %q", got, want)
+	}
+}
+
+func TestValidateRequiresPartners(t *testing.T) {
+	cfg := Config{
+		Pairs:   []Pair{{Base: "ZNHB", Quote: "USD"}},
+		Sources: []Source{{Name: "oracle", Type: "mock"}},
+		Stable: StableConfig{
+			Paused: false,
+			Assets: []StableAsset{{Symbol: "ZNHB"}},
+		},
+		Admin: AdminConfig{TLS: AdminTLSConfig{Disable: false, CertPath: "cert", KeyPath: "key"}},
+	}
+
+	err := validate(cfg)
+	if err == nil {
+		t.Fatalf("expected error when partners not configured")
+	}
+	if got, want := err.Error(), "stable partners must be configured when stable engine is enabled"; got != want {
 		t.Fatalf("unexpected error: got %q want %q", got, want)
 	}
 }
