@@ -88,7 +88,9 @@ policy limits.
 
 ## Stable Engine Preview
 
-The `/v1/stable/*` endpoints are published alongside the admin API and are currently guarded by a feature flag. When
+The `/v1/stable/*` endpoints are published alongside the admin API and are currently guarded by a feature flag. All
+production access requires the partner HMAC headers documented in [Stable Funding API](stable-api.md#authentication).
+When
 `stable.paused=true` (the default in configuration), each endpoint returns `501 Not Implemented` with
 `{"error": "stable engine not enabled"}`. The [Stable Funding API reference](stable-api.md) documents the success-path
 contracts that will activate once the engine is unpaused.

@@ -59,7 +59,7 @@ go run ./examples/docs/ops/swap_pause_inspect \
   --swapd https://swapd.internal.nhb
 ```
 
-The CLI prints `global.pauses.swap` plus the live `/v1/stable/status` response so responders can confirm swapd is still rejecting redemptions with `501 stable engine not enabled` during readiness windows.
+The CLI prints `global.pauses.swap` plus the live `/v1/stable/status` response so responders can confirm swapd is still rejecting redemptions with `501 stable engine not enabled` during readiness windows. Ensure the helper is configured with partner credentials (or run against localnet) so the status call is accepted.
 
 ## Troubleshooting
 
