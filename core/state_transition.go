@@ -96,39 +96,40 @@ type BlockCtx struct {
 }
 
 type StateProcessor struct {
-	Trie                  *trie.Trie
-	stateDB               *gethstate.CachingDB
-	LoyaltyEngine         *loyalty.Engine
-	EscrowEngine          *escrow.Engine
-	TradeEngine           *escrow.TradeEngine
-	pauses                nativecommon.PauseView
-	escrowFeeTreasury     [20]byte
-	usernameToAddr        map[string][]byte
-	ValidatorSet          map[string]*big.Int
-	EligibleValidators    map[string]*big.Int
-	committedRoot         common.Hash
-	events                []types.Event
-	nowFunc               func() time.Time
-	execContext           *blockExecutionContext
-	engagementConfig      engagement.Config
-	epochConfig           epoch.Config
-	epochHistory          []epoch.Snapshot
-	rewardConfig          rewards.Config
-	rewardAccrual         *rewards.Accumulator
-	rewardHistory         []rewards.EpochSettlement
-	stakeRewardEngine     *rewards.Engine
-	stakeRewardAPR        uint64
-	potsoRewardConfig     potso.RewardConfig
-	potsoWeightConfig     potso.WeightParams
-	paymasterEnabled      bool
-	paymasterLimits       PaymasterLimits
-	paymasterTopUp        PaymasterAutoTopUpPolicy
-	quotaConfig           map[string]nativecommon.Quota
-	quotaStore            *systemquotas.Store
-	intentTTL             time.Duration
-	feePolicy             fees.Policy
-	blockCtx              BlockCtx
-	swapPayoutAuthorities map[string]struct{}
+	Trie                       *trie.Trie
+	stateDB                    *gethstate.CachingDB
+	LoyaltyEngine              *loyalty.Engine
+	EscrowEngine               *escrow.Engine
+	TradeEngine                *escrow.TradeEngine
+	pauses                     nativecommon.PauseView
+	escrowFeeTreasury          [20]byte
+	usernameToAddr             map[string][]byte
+	ValidatorSet               map[string]*big.Int
+	EligibleValidators         map[string]*big.Int
+	committedRoot              common.Hash
+	events                     []types.Event
+	nowFunc                    func() time.Time
+	execContext                *blockExecutionContext
+	engagementConfig           engagement.Config
+	epochConfig                epoch.Config
+	epochHistory               []epoch.Snapshot
+	rewardConfig               rewards.Config
+	rewardAccrual              *rewards.Accumulator
+	rewardHistory              []rewards.EpochSettlement
+	stakeRewardEngine          *rewards.Engine
+	stakeRewardAPR             uint64
+	stakeRewardPersistOverride func() error
+	potsoRewardConfig          potso.RewardConfig
+	potsoWeightConfig          potso.WeightParams
+	paymasterEnabled           bool
+	paymasterLimits            PaymasterLimits
+	paymasterTopUp             PaymasterAutoTopUpPolicy
+	quotaConfig                map[string]nativecommon.Quota
+	quotaStore                 *systemquotas.Store
+	intentTTL                  time.Duration
+	feePolicy                  fees.Policy
+	blockCtx                   BlockCtx
+	swapPayoutAuthorities      map[string]struct{}
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -1336,33 +1337,41 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		}
 	}
 
+	var clonedEngine *rewards.Engine
+	if sp.stakeRewardEngine != nil {
+		clonedEngine = sp.stakeRewardEngine.Clone()
+	}
+
 	return &StateProcessor{
-		Trie:                  trieCopy,
-		stateDB:               sp.stateDB,
-		LoyaltyEngine:         sp.LoyaltyEngine,
-		EscrowEngine:          sp.EscrowEngine,
-		TradeEngine:           sp.TradeEngine,
-		pauses:                sp.pauses,
-		usernameToAddr:        usernameCopy,
-		ValidatorSet:          validatorCopy,
-		EligibleValidators:    eligibleCopy,
-		committedRoot:         sp.committedRoot,
-		events:                eventsCopy,
-		nowFunc:               sp.nowFunc,
-		engagementConfig:      sp.engagementConfig,
-		epochConfig:           sp.epochConfig,
-		epochHistory:          historyCopy,
-		rewardConfig:          sp.rewardConfig.Clone(),
-		rewardHistory:         rewardHistoryCopy,
-		potsoRewardConfig:     clonePotsoRewardConfig(sp.potsoRewardConfig),
-		potsoWeightConfig:     clonePotsoWeightConfig(sp.potsoWeightConfig),
-		paymasterEnabled:      sp.paymasterEnabled,
-		paymasterLimits:       sp.paymasterLimits.Clone(),
-		quotaConfig:           quotaCopy,
-		intentTTL:             sp.intentTTL,
-		feePolicy:             sp.feePolicy.Clone(),
-		blockCtx:              sp.blockCtx,
-		swapPayoutAuthorities: payoutAuthCopy,
+		Trie:                       trieCopy,
+		stateDB:                    sp.stateDB,
+		LoyaltyEngine:              sp.LoyaltyEngine,
+		EscrowEngine:               sp.EscrowEngine,
+		TradeEngine:                sp.TradeEngine,
+		pauses:                     sp.pauses,
+		usernameToAddr:             usernameCopy,
+		ValidatorSet:               validatorCopy,
+		EligibleValidators:         eligibleCopy,
+		committedRoot:              sp.committedRoot,
+		events:                     eventsCopy,
+		nowFunc:                    sp.nowFunc,
+		engagementConfig:           sp.engagementConfig,
+		epochConfig:                sp.epochConfig,
+		epochHistory:               historyCopy,
+		rewardConfig:               sp.rewardConfig.Clone(),
+		rewardHistory:              rewardHistoryCopy,
+		stakeRewardEngine:          clonedEngine,
+		stakeRewardAPR:             sp.stakeRewardAPR,
+		stakeRewardPersistOverride: sp.stakeRewardPersistOverride,
+		potsoRewardConfig:          clonePotsoRewardConfig(sp.potsoRewardConfig),
+		potsoWeightConfig:          clonePotsoWeightConfig(sp.potsoWeightConfig),
+		paymasterEnabled:           sp.paymasterEnabled,
+		paymasterLimits:            sp.paymasterLimits.Clone(),
+		quotaConfig:                quotaCopy,
+		intentTTL:                  sp.intentTTL,
+		feePolicy:                  sp.feePolicy.Clone(),
+		blockCtx:                   sp.blockCtx,
+		swapPayoutAuthorities:      payoutAuthCopy,
 	}, nil
 }
 
@@ -3012,7 +3021,7 @@ func (sp *StateProcessor) SetStakeRewardAPR(apr uint64) error {
 	}
 	sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
 	sp.stakeRewardAPR = apr
-	return sp.persistStakeRewardState()
+	return sp.persistStakeRewardStateInstrumented()
 }
 
 func (sp *StateProcessor) advanceStakeRewards() (*big.Int, error) {
@@ -3024,7 +3033,7 @@ func (sp *StateProcessor) advanceStakeRewards() (*big.Int, error) {
 	}
 	index, changed := sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
 	if changed {
-		if err := sp.persistStakeRewardState(); err != nil {
+		if err := sp.persistStakeRewardStateInstrumented(); err != nil {
 			return nil, err
 		}
 	}

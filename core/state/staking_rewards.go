@@ -111,14 +111,14 @@ func NewRewardEngine(mgr *Manager) *RewardEngine {
 }
 
 // updateGlobalIndex advances the global reward index snapshot.
-func (e *RewardEngine) updateGlobalIndex(aprBps, payoutDays uint64, now time.Time) {
+func (e *RewardEngine) updateGlobalIndex(aprBps, payoutDays uint64, now time.Time) error {
 	if e == nil || e.mgr == nil {
-		return
+		return nil
 	}
 
 	snapshot, err := e.mgr.GetGlobalIndex()
 	if err != nil {
-		return
+		return err
 	}
 	if snapshot == nil {
 		snapshot = &GlobalIndex{}
@@ -130,23 +130,20 @@ func (e *RewardEngine) updateGlobalIndex(aprBps, payoutDays uint64, now time.Tim
 	if ts <= 0 {
 		snapshot.LastUpdateUnix = ts
 		snapshot.UQ128x128 = encodeUQ128x128(current)
-		_ = e.mgr.PutGlobalIndex(snapshot)
-		return
+		return e.mgr.PutGlobalIndex(snapshot)
 	}
 
 	if snapshot.LastUpdateUnix == 0 {
 		snapshot.LastUpdateUnix = ts
 		snapshot.UQ128x128 = encodeUQ128x128(current)
-		_ = e.mgr.PutGlobalIndex(snapshot)
-		return
+		return e.mgr.PutGlobalIndex(snapshot)
 	}
 
 	delta := ts - snapshot.LastUpdateUnix
 	if delta <= 0 {
 		snapshot.LastUpdateUnix = ts
 		snapshot.UQ128x128 = encodeUQ128x128(current)
-		_ = e.mgr.PutGlobalIndex(snapshot)
-		return
+		return e.mgr.PutGlobalIndex(snapshot)
 	}
 
 	if payoutDays > 0 {
@@ -171,14 +168,14 @@ func (e *RewardEngine) updateGlobalIndex(aprBps, payoutDays uint64, now time.Tim
 
 	snapshot.LastUpdateUnix = ts
 	snapshot.UQ128x128 = encodeUQ128x128(current)
-	_ = e.mgr.PutGlobalIndex(snapshot)
+	return e.mgr.PutGlobalIndex(snapshot)
 }
 
 // UpdateGlobalIndex is a public wrapper around updateGlobalIndex to allow other packages
 // to advance the global staking index. It delegates to the internal implementation to
 // avoid exposing additional state management details.
-func (e *RewardEngine) UpdateGlobalIndex(aprBps, payoutDays uint64, now time.Time) {
-	e.updateGlobalIndex(aprBps, payoutDays, now)
+func (e *RewardEngine) UpdateGlobalIndex(aprBps, payoutDays uint64, now time.Time) error {
+	return e.updateGlobalIndex(aprBps, payoutDays, now)
 }
 
 // accrue processes pending rewards for the provided account address.
