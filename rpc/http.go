@@ -164,11 +164,23 @@ type ServerConfig struct {
 	WriteTimeout time.Duration
 	// IdleTimeout defines how long to keep idle connections open.
 	IdleTimeout time.Duration
-	// MaxTxPerWindow sets the maximum number of transactions that a single
-	// source (IP, identity, or chain nonce) may submit within the configured
-	// rate limit window. Zero disables the override and falls back to the
-	// default.
+	// MaxTxPerWindow defines the default maximum number of transactions that a
+	// single source may submit within the configured rate limit window. Zero
+	// disables the override and falls back to the default.
 	MaxTxPerWindow int
+	// MaxTxPerIP overrides the per-IP submission quota. Zero falls back to the
+	// default limit.
+	MaxTxPerIP int
+	// MaxTxPerIdentity overrides the per-identity submission quota. Zero falls
+	// back to the default limit.
+	MaxTxPerIdentity int
+	// MaxTxPerChain overrides the per-chain submission quota. Zero falls back
+	// to the default limit.
+	MaxTxPerChain int
+	// MaxTxPerIdentityChain overrides the per identity+chain submission quota.
+	// Zero falls back to the tighter of the identity or chain limits when
+	// configured, or the default limit otherwise.
+	MaxTxPerIdentityChain int
 	// RateLimitWindow controls the duration of the sliding window used for the
 	// per-source transaction quota. Zero disables the override and falls back to
 	// the default window.
@@ -235,7 +247,7 @@ type Server struct {
 	swapRateWindow          time.Duration
 	swapRateCounters        map[string]*rateLimiter
 	swapRateMu              sync.Mutex
-	maxTxPerWindow          int
+	rateLimitMax            map[string]int
 	rateLimitWindow         time.Duration
 	rateLimiterStaleAfter   time.Duration
 	rateLimiterSweepBackoff time.Duration
@@ -396,6 +408,35 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 	if maxTx <= 0 {
 		maxTx = defaultMaxTxPerWindow
 	}
+	fallbackLimit := func(value int) int {
+		if value <= 0 {
+			return maxTx
+		}
+		return value
+	}
+	maxIP := fallbackLimit(cfg.MaxTxPerIP)
+	maxIdentity := fallbackLimit(cfg.MaxTxPerIdentity)
+	maxChain := fallbackLimit(cfg.MaxTxPerChain)
+	identityChainDefault := maxTx
+	if maxIdentity > 0 && (identityChainDefault <= 0 || maxIdentity < identityChainDefault) {
+		identityChainDefault = maxIdentity
+	}
+	if maxChain > 0 && (identityChainDefault <= 0 || maxChain < identityChainDefault) {
+		identityChainDefault = maxChain
+	}
+	maxIdentityChain := cfg.MaxTxPerIdentityChain
+	if maxIdentityChain <= 0 {
+		maxIdentityChain = identityChainDefault
+		if maxIdentityChain <= 0 {
+			maxIdentityChain = maxTx
+		}
+	}
+	rateLimits := map[string]int{
+		limiterScopeIP:            maxIP,
+		limiterScopeIdentity:      maxIdentity,
+		limiterScopeChain:         maxChain,
+		limiterScopeIdentityChain: maxIdentityChain,
+	}
 	rateWindow := cfg.RateLimitWindow
 	if rateWindow <= 0 {
 		rateWindow = defaultRateLimitWindow
@@ -432,7 +473,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		swapRateCounters:         make(map[string]*rateLimiter),
 		swapNowFn:                swapNow,
 		callerNonces:             make(map[string]callerNonceState),
-		maxTxPerWindow:           maxTx,
+		rateLimitMax:             rateLimits,
 		rateLimitWindow:          rateWindow,
 		rateLimiterStaleAfter:    staleAfter,
 		rateLimiterSweepBackoff:  rateWindow,
@@ -2063,7 +2104,8 @@ func (s *Server) allowSource(source, identity, chainNonce string, now time.Time)
 			limiter.windowStart = now
 			limiter.count = 0
 		}
-		if limiter.count >= s.maxTxPerWindow {
+		limit := s.rateLimitMax[descriptor.scope]
+		if limit > 0 && limiter.count >= limit {
 			limiter.lastSeen = now
 			s.mu.Unlock()
 			observability.RPC().RecordLimiterHit(descriptor.scope)

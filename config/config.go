@@ -67,6 +67,10 @@ type Config struct {
 	RPCWriteTimeout             int             `toml:"RPCWriteTimeout"`
 	RPCIdleTimeout              int             `toml:"RPCIdleTimeout"`
 	RPCMaxTxPerWindow           int             `toml:"RPCMaxTxPerWindow"`
+	RPCMaxTxPerIP               int             `toml:"RPCMaxTxPerIP"`
+	RPCMaxTxPerIdentity         int             `toml:"RPCMaxTxPerIdentity"`
+	RPCMaxTxPerChain            int             `toml:"RPCMaxTxPerChain"`
+	RPCMaxTxPerIdentityChain    int             `toml:"RPCMaxTxPerIdentityChain"`
 	RPCRateLimitWindow          int             `toml:"RPCRateLimitWindow"`
 	RPCAllowInsecure            bool            `toml:"RPCAllowInsecure"`
 	RPCAllowInsecureUnspecified bool            `toml:"RPCAllowInsecureUnspecified"`
@@ -497,6 +501,25 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 	}
 	if cfg.RPCMaxTxPerWindow <= 0 {
 		cfg.RPCMaxTxPerWindow = 5
+	}
+	if cfg.RPCMaxTxPerIP <= 0 {
+		cfg.RPCMaxTxPerIP = cfg.RPCMaxTxPerWindow
+	}
+	if cfg.RPCMaxTxPerIdentity <= 0 {
+		cfg.RPCMaxTxPerIdentity = cfg.RPCMaxTxPerWindow
+	}
+	if cfg.RPCMaxTxPerChain <= 0 {
+		cfg.RPCMaxTxPerChain = cfg.RPCMaxTxPerWindow
+	}
+	if cfg.RPCMaxTxPerIdentityChain <= 0 {
+		minLimit := cfg.RPCMaxTxPerIdentity
+		if minLimit <= 0 || (cfg.RPCMaxTxPerChain > 0 && cfg.RPCMaxTxPerChain < minLimit) {
+			minLimit = cfg.RPCMaxTxPerChain
+		}
+		if minLimit <= 0 {
+			minLimit = cfg.RPCMaxTxPerWindow
+		}
+		cfg.RPCMaxTxPerIdentityChain = minLimit
 	}
 	if cfg.RPCRateLimitWindow <= 0 {
 		cfg.RPCRateLimitWindow = int((time.Minute).Seconds())
@@ -1143,31 +1166,35 @@ func createDefault(path string, passphrase string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddress:        ":6001",
-		RPCAddress:           ":8080",
-		DataDir:              "./nhb-data",
-		GenesisFile:          "",
-		AllowAutogenesis:     false,
-		NetworkName:          "nhb-local",
-		Bootnodes:            []string{},
-		PersistentPeers:      []string{},
-		MaxPeers:             64,
-		MaxInbound:           64,
-		MaxOutbound:          64,
-		MinPeers:             32,
-		OutboundPeers:        16,
-		PeerBanSeconds:       int((60 * time.Minute).Seconds()),
-		ReadTimeout:          int((90 * time.Second).Seconds()),
-		WriteTimeout:         int((5 * time.Second).Seconds()),
-		RPCReadHeaderTimeout: int((10 * time.Second).Seconds()),
-		RPCReadTimeout:       int((15 * time.Second).Seconds()),
-		RPCWriteTimeout:      int((15 * time.Second).Seconds()),
-		RPCIdleTimeout:       int((120 * time.Second).Seconds()),
-		RPCMaxTxPerWindow:    5,
-		RPCRateLimitWindow:   int((time.Minute).Seconds()),
-		MaxMsgBytes:          1 << 20,
-		MaxMsgsPerSecond:     32,
-		ClientVersion:        "nhbchain/node",
+		ListenAddress:            ":6001",
+		RPCAddress:               ":8080",
+		DataDir:                  "./nhb-data",
+		GenesisFile:              "",
+		AllowAutogenesis:         false,
+		NetworkName:              "nhb-local",
+		Bootnodes:                []string{},
+		PersistentPeers:          []string{},
+		MaxPeers:                 64,
+		MaxInbound:               64,
+		MaxOutbound:              64,
+		MinPeers:                 32,
+		OutboundPeers:            16,
+		PeerBanSeconds:           int((60 * time.Minute).Seconds()),
+		ReadTimeout:              int((90 * time.Second).Seconds()),
+		WriteTimeout:             int((5 * time.Second).Seconds()),
+		RPCReadHeaderTimeout:     int((10 * time.Second).Seconds()),
+		RPCReadTimeout:           int((15 * time.Second).Seconds()),
+		RPCWriteTimeout:          int((15 * time.Second).Seconds()),
+		RPCIdleTimeout:           int((120 * time.Second).Seconds()),
+		RPCMaxTxPerWindow:        5,
+		RPCMaxTxPerIP:            5,
+		RPCMaxTxPerIdentity:      5,
+		RPCMaxTxPerChain:         5,
+		RPCMaxTxPerIdentityChain: 5,
+		RPCRateLimitWindow:       int((time.Minute).Seconds()),
+		MaxMsgBytes:              1 << 20,
+		MaxMsgsPerSecond:         32,
+		ClientVersion:            "nhbchain/node",
 	}
 	cfg.Mempool.MaxTransactions = DefaultMempoolMaxTransactions
 	cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize
