@@ -1,12 +1,27 @@
-ListenAddress = ":6001"
-RPCAddress = ":8080"
-DataDir = "/var/lib/nhb"
-GenesisFile = "/etc/nhb/genesis.json"
+# --------------------------------------------------------------
+# WARNING: Development-only sample configuration.
+# This file intentionally binds only to loopback interfaces and
+# disables insecure transport. Do not copy these values into any
+# production configuration without a deliberate security review.
+# --------------------------------------------------------------
+
+# Bind all node services to localhost so the sample cannot be
+# deployed to a publicly reachable interface by accident.
+ListenAddress = "127.0.0.1:6001"
+RPCAddress = "127.0.0.1:8080"
+
+# Use throwaway local paths to reinforce that this profile is not
+# meant for production persistence.
+DataDir = "./nhb-data-dev"
+GenesisFile = "./genesis.dev.json"
 AllowAutogenesis = false
-NetworkName = "nhb-mainnet"
+NetworkName = "nhb-devnet"
 
 [network_security]
-AllowInsecure = true
+# Keep transport encrypted by default. If you must disable TLS for
+# troubleshooting, set AllowInsecure=true temporarily and understand
+# that this exposes traffic in plaintext.
+AllowInsecure = false
 ServerTLSCertFile = ""
 ServerTLSKeyFile = ""
 ClientTLSCertFile = ""
@@ -14,7 +29,9 @@ ClientTLSKeyFile = ""
 ClientCAFile = ""
 ServerCAFile = ""
 
-RPCAllowInsecure = true
+# RPC also requires TLS unless explicitly disabled. The comment
+# above applies here as well.
+RPCAllowInsecure = false
 
 [global.staking]
 MaxEmissionPerYearWei = "0"
