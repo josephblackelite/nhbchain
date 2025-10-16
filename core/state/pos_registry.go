@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"strings"
 
 	"nhbchain/native/pos"
 )
@@ -35,6 +36,7 @@ func (m *Manager) POSGetMerchant(addr string) (*pos.Merchant, bool, error) {
 		return nil, ok, err
 	}
 	stored.Address = NormalizePaymasterMerchant(stored.Address)
+	stored.ChainID = strings.TrimSpace(stored.ChainID)
 	return &stored, true, nil
 }
 
@@ -50,7 +52,13 @@ func (m *Manager) POSPutMerchant(record *pos.Merchant) error {
 	if normalized == "" {
 		return fmt.Errorf("pos: merchant address required")
 	}
-	stored := &pos.Merchant{Address: normalized, Paused: record.Paused}
+	stored := &pos.Merchant{
+		Address:   normalized,
+		Paused:    record.Paused,
+		Nonce:     record.Nonce,
+		ExpiresAt: record.ExpiresAt,
+		ChainID:   strings.TrimSpace(record.ChainID),
+	}
 	return m.KVPut(posMerchantKey(normalized), stored)
 }
 
@@ -83,6 +91,7 @@ func (m *Manager) POSGetDevice(id string) (*pos.Device, bool, error) {
 	}
 	stored.DeviceID = NormalizePaymasterDevice(stored.DeviceID)
 	stored.Merchant = NormalizePaymasterMerchant(stored.Merchant)
+	stored.ChainID = strings.TrimSpace(stored.ChainID)
 	return &stored, true, nil
 }
 
@@ -99,7 +108,14 @@ func (m *Manager) POSPutDevice(record *pos.Device) error {
 		return fmt.Errorf("pos: device id required")
 	}
 	normalizedMerchant := NormalizePaymasterMerchant(record.Merchant)
-	stored := &pos.Device{DeviceID: normalizedID, Merchant: normalizedMerchant, Revoked: record.Revoked}
+	stored := &pos.Device{
+		DeviceID:  normalizedID,
+		Merchant:  normalizedMerchant,
+		Revoked:   record.Revoked,
+		Nonce:     record.Nonce,
+		ExpiresAt: record.ExpiresAt,
+		ChainID:   strings.TrimSpace(record.ChainID),
+	}
 	return m.KVPut(posDeviceKey(normalizedID), stored)
 }
 

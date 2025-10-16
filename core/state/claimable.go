@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -39,6 +40,9 @@ type storedClaimable struct {
 	RecipientHint [32]byte
 	Deadline      *big.Int
 	CreatedAt     *big.Int
+	Nonce         *big.Int
+	ExpiresAt     *big.Int
+	ChainID       string
 	Status        uint8
 }
 
@@ -59,6 +63,9 @@ func newStoredClaimable(c *claimable.Claimable) *storedClaimable {
 		RecipientHint: c.RecipientHint,
 		Deadline:      big.NewInt(c.Deadline),
 		CreatedAt:     big.NewInt(c.CreatedAt),
+		Nonce:         new(big.Int).SetUint64(c.Nonce),
+		ExpiresAt:     big.NewInt(c.ExpiresAt),
+		ChainID:       strings.TrimSpace(c.ChainID),
 		Status:        uint8(c.Status),
 	}
 }
@@ -78,6 +85,7 @@ func (s *storedClaimable) toClaimable() (*claimable.Claimable, error) {
 		Amount:        big.NewInt(0),
 		HashLock:      s.HashLock,
 		RecipientHint: s.RecipientHint,
+		ChainID:       strings.TrimSpace(s.ChainID),
 		Status:        claimable.ClaimStatus(s.Status),
 	}
 	if s.Amount != nil {
@@ -88,6 +96,12 @@ func (s *storedClaimable) toClaimable() (*claimable.Claimable, error) {
 	}
 	if s.CreatedAt != nil {
 		out.CreatedAt = s.CreatedAt.Int64()
+	}
+	if s.Nonce != nil {
+		out.Nonce = s.Nonce.Uint64()
+	}
+	if s.ExpiresAt != nil {
+		out.ExpiresAt = s.ExpiresAt.Int64()
 	}
 	if !out.Status.Valid() {
 		return nil, claimable.ErrInvalidState
@@ -169,6 +183,9 @@ func (m *Manager) ClaimablePut(c *claimable.Claimable) error {
 		RecipientHint: c.RecipientHint,
 		Deadline:      c.Deadline,
 		CreatedAt:     c.CreatedAt,
+		Nonce:         c.Nonce,
+		ExpiresAt:     c.ExpiresAt,
+		ChainID:       c.ChainID,
 		Status:        c.Status,
 	})
 	encoded, err := rlp.EncodeToBytes(record)
@@ -362,7 +379,7 @@ func (m *Manager) ClaimableDebit(token string, amt *big.Int, recipient [20]byte)
 	return nil
 }
 
-func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte) (*claimable.Claimable, error) {
+func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte, chainID string) (*claimable.Claimable, error) {
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, claimable.ErrInvalidAmount
 	}
@@ -390,6 +407,9 @@ func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int,
 		RecipientHint: hint,
 		Deadline:      deadline,
 		CreatedAt:     time.Now().Unix(),
+		Nonce:         nonce,
+		ExpiresAt:     deadline,
+		ChainID:       strings.TrimSpace(chainID),
 		Status:        claimable.ClaimStatusInit,
 	}
 	if err := m.ClaimablePut(record); err != nil {

@@ -59,6 +59,9 @@ type Claimable struct {
 	RecipientHint [32]byte
 	Deadline      int64
 	CreatedAt     int64
+	Nonce         uint64
+	ExpiresAt     int64
+	ChainID       string
 	Status        ClaimStatus
 }
 
@@ -72,5 +75,6 @@ func (c *Claimable) Clone() *Claimable {
 	} else {
 		out.Amount = big.NewInt(0)
 	}
+	out.ChainID = c.ChainID
 	return &out
 }

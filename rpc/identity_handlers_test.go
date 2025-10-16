@@ -390,6 +390,37 @@ func TestHandleIdentityClaimableFlow(t *testing.T) {
 	if createResp.ClaimID == "" || createResp.RecipientHint != hintHex {
 		t.Fatalf("unexpected create response: %+v", createResp)
 	}
+	if createResp.ExpiresAt != deadline {
+		t.Fatalf("expected expiresAt %d, got %d", deadline, createResp.ExpiresAt)
+	}
+	if strings.TrimSpace(createResp.ChainID) == "" {
+		t.Fatalf("expected chainID to be returned")
+	}
+
+	claimIDBytes, err := hex.DecodeString(strings.TrimPrefix(createResp.ClaimID, "0x"))
+	if err != nil {
+		t.Fatalf("decode claim id: %v", err)
+	}
+	var claimID [32]byte
+	copy(claimID[:], claimIDBytes)
+	if err := env.node.WithState(func(m *nhbstate.Manager) error {
+		rec, ok := m.ClaimableGet(claimID)
+		if !ok {
+			return fmt.Errorf("claimable not stored")
+		}
+		if rec == nil {
+			return fmt.Errorf("claimable nil")
+		}
+		if rec.Nonce != createResp.Nonce {
+			return fmt.Errorf("unexpected nonce: got %d want %d", rec.Nonce, createResp.Nonce)
+		}
+		if strings.TrimSpace(rec.ChainID) != strings.TrimSpace(createResp.ChainID) {
+			return fmt.Errorf("unexpected chain id: got %s want %s", rec.ChainID, createResp.ChainID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("verify claimable domain: %v", err)
+	}
 
 	payeeKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -477,6 +508,9 @@ func TestHandleIdentityClaimableAliasAuthorization(t *testing.T) {
 	if createResp.RecipientHint != aliasHex {
 		t.Fatalf("expected alias hint, got %s", createResp.RecipientHint)
 	}
+	if strings.TrimSpace(createResp.ChainID) == "" {
+		t.Fatalf("expected chainID to be returned")
+	}
 	claimIDBytes, err := hex.DecodeString(strings.TrimPrefix(createResp.ClaimID, "0x"))
 	if err != nil {
 		t.Fatalf("decode claim id: %v", err)
@@ -493,6 +527,12 @@ func TestHandleIdentityClaimableAliasAuthorization(t *testing.T) {
 		}
 		if rec.RecipientHint != aliasID {
 			return fmt.Errorf("unexpected recipient hint: got %x", rec.RecipientHint)
+		}
+		if rec.Nonce != createResp.Nonce {
+			return fmt.Errorf("unexpected nonce: got %d want %d", rec.Nonce, createResp.Nonce)
+		}
+		if strings.TrimSpace(rec.ChainID) != strings.TrimSpace(createResp.ChainID) {
+			return fmt.Errorf("unexpected chain id: got %s want %s", rec.ChainID, createResp.ChainID)
 		}
 		return nil
 	}); err != nil {
