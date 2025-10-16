@@ -78,6 +78,7 @@ type EscrowSnapshotResult struct {
 	Nonce          uint64              `json:"nonce"`
 	Status         string              `json:"status"`
 	Meta           string              `json:"meta"`
+	DisputeReason  *string             `json:"disputeReason,omitempty"`
 	Realm          *string             `json:"realm,omitempty"`
 	FrozenPolicy   *FrozenPolicyResult `json:"frozenPolicy,omitempty"`
 	ResolutionHash *string             `json:"resolutionHash,omitempty"`
@@ -260,6 +261,10 @@ func formatSnapshotResult(esc *escrow.Escrow) *EscrowSnapshotResult {
 	if esc.Mediator != ([20]byte{}) {
 		mediator := crypto.MustNewAddress(crypto.NHBPrefix, esc.Mediator[:]).String()
 		result.Mediator = &mediator
+	}
+	if trimmed := strings.TrimSpace(esc.DisputeReason); trimmed != "" {
+		reason := trimmed
+		result.DisputeReason = &reason
 	}
 	if trimmed := strings.TrimSpace(esc.RealmID); trimmed != "" {
 		realm := trimmed

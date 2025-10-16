@@ -1,13 +1,16 @@
 package rpc
 
 import (
+	"bytes"
 	"encoding/json"
+	"math/big"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"nhbchain/crypto"
+	escrow "nhbchain/native/escrow"
 )
 
 func TestEscrowCreateInvalidBech32(t *testing.T) {
@@ -256,10 +259,43 @@ func TestEscrowCreateAndGet(t *testing.T) {
 	if esc.Mediator == nil || *esc.Mediator != createPayload["mediator"].(string) {
 		t.Fatalf("mediator mismatch")
 	}
+	if esc.DisputeReason != nil {
+		t.Fatalf("expected no dispute reason, got %q", *esc.DisputeReason)
+	}
 	if esc.CreatedAt < before {
 		t.Fatalf("createdAt too old: %d", esc.CreatedAt)
 	}
 	if esc.CreatedAt > time.Now().Unix() {
 		t.Fatalf("createdAt in future: %d", esc.CreatedAt)
+	}
+}
+
+func TestFormatEscrowJSONIncludesReason(t *testing.T) {
+	var id [32]byte
+	copy(id[:], bytes.Repeat([]byte{0xAB}, 32))
+	var payer [20]byte
+	copy(payer[:], bytes.Repeat([]byte{0x01}, 20))
+	var payee [20]byte
+	copy(payee[:], bytes.Repeat([]byte{0x02}, 20))
+	esc := &escrow.Escrow{
+		ID:            id,
+		Payer:         payer,
+		Payee:         payee,
+		Token:         "NHB",
+		Amount:        big.NewInt(10),
+		FeeBps:        50,
+		Deadline:      1234,
+		CreatedAt:     1200,
+		Nonce:         1,
+		Status:        escrow.EscrowFunded,
+		MetaHash:      [32]byte{0xAA},
+		DisputeReason: "item damaged",
+	}
+	formatted := formatEscrowJSON(esc)
+	if formatted.DisputeReason == nil {
+		t.Fatalf("expected dispute reason pointer")
+	}
+	if *formatted.DisputeReason != "item damaged" {
+		t.Fatalf("unexpected dispute reason: %q", *formatted.DisputeReason)
 	}
 }

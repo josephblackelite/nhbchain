@@ -844,8 +844,10 @@ func (e *Engine) Expire(id [32]byte, now int64) error {
 }
 
 // Dispute flags the escrow as disputed. Only the payer or payee may invoke the
-// transition. The operation is idempotent.
-func (e *Engine) Dispute(id [32]byte, caller [20]byte) error {
+// transition. The operation is idempotent. When provided, a dispute reason is
+// recorded and emitted with the dispute event so arbitrators can review the
+// supplied context.
+func (e *Engine) Dispute(id [32]byte, caller [20]byte, reason string) error {
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return err
 	}
@@ -853,7 +855,16 @@ func (e *Engine) Dispute(id [32]byte, caller [20]byte) error {
 	if err != nil {
 		return err
 	}
+	trimmedReason := strings.TrimSpace(reason)
 	if esc.Status == EscrowDisputed {
+		if trimmedReason == "" || strings.TrimSpace(esc.DisputeReason) != "" {
+			return nil
+		}
+		esc.DisputeReason = trimmedReason
+		if err := e.storeEscrow(esc); err != nil {
+			return err
+		}
+		e.emit(NewDisputedEvent(esc))
 		return nil
 	}
 	if esc.Status != EscrowFunded {
@@ -863,6 +874,9 @@ func (e *Engine) Dispute(id [32]byte, caller [20]byte) error {
 		return fmt.Errorf("escrow: unauthorized dispute caller")
 	}
 	esc.Status = EscrowDisputed
+	if trimmedReason != "" {
+		esc.DisputeReason = trimmedReason
+	}
 	if err := e.storeEscrow(esc); err != nil {
 		return err
 	}

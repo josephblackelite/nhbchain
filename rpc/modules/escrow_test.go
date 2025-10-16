@@ -80,19 +80,20 @@ func TestFormatSnapshotResultIncludesFrozenMetadata(t *testing.T) {
 		Metadata:     frozenMeta,
 	}
 	esc := &escrow.Escrow{
-		ID:        [32]byte{0x01},
-		Payer:     [20]byte{0x02},
-		Payee:     [20]byte{0x03},
-		Token:     "NHB",
-		Amount:    big.NewInt(500),
-		FeeBps:    25,
-		Deadline:  400,
-		CreatedAt: 250,
-		Nonce:     8,
-		Status:    escrow.EscrowFunded,
-		MetaHash:  [32]byte{0xFF},
-		RealmID:   "realm-ops",
-		FrozenArb: frozen,
+		ID:            [32]byte{0x01},
+		Payer:         [20]byte{0x02},
+		Payee:         [20]byte{0x03},
+		Token:         "NHB",
+		Amount:        big.NewInt(500),
+		FeeBps:        25,
+		Deadline:      400,
+		CreatedAt:     250,
+		Nonce:         8,
+		Status:        escrow.EscrowFunded,
+		MetaHash:      [32]byte{0xFF},
+		RealmID:       "realm-ops",
+		FrozenArb:     frozen,
+		DisputeReason: "delivery mismatch",
 	}
 	frozen.Metadata.FeeRecipientBech32 = feeRecipient
 	result := formatSnapshotResult(esc)
@@ -105,5 +106,8 @@ func TestFormatSnapshotResultIncludesFrozenMetadata(t *testing.T) {
 	}
 	if !strings.Contains(payload, "\"scope\":\"platform\"") {
 		t.Fatalf("expected scope in payload: %s", payload)
+	}
+	if !strings.Contains(payload, "delivery mismatch") {
+		t.Fatalf("expected dispute reason in payload: %s", payload)
 	}
 }

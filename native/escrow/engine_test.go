@@ -949,7 +949,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 			Members:   [][20]byte{addrA, addrB, addrC},
 		},
 		FeeSchedule: &RealmFeeSchedule{FeeBps: 120, Recipient: arbRecipient},
-		Metadata: testRealmMetadata(),
+		Metadata:    testRealmMetadata(),
 	}
 	if _, err := engine.CreateRealm(realm); err != nil {
 		t.Fatalf("create realm: %v", err)
@@ -968,7 +968,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
-	if err := engine.Dispute(esc.ID, payee); err != nil {
+	if err := engine.Dispute(esc.ID, payee, "counterfeit goods"); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
 
@@ -990,6 +990,9 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	if stored.ResolutionHash != digest {
 		t.Fatalf("expected resolution hash %x, got %x", digest[:], stored.ResolutionHash[:])
 	}
+	if stored.DisputeReason != "counterfeit goods" {
+		t.Fatalf("expected stored dispute reason, got %q", stored.DisputeReason)
+	}
 	payeeAcc := state.account(payee)
 	if got := payeeAcc.BalanceNHB.String(); got != "563" {
 		t.Fatalf("expected payee 563, got %s", got)
@@ -1005,6 +1008,19 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	events := emitter.typesEvents()
 	if len(events) == 0 {
 		t.Fatalf("expected events emitted")
+	}
+	var disputeEvt *types.Event
+	for _, evt := range events {
+		if evt.Type == EventTypeEscrowDisputed {
+			disputeEvt = evt
+			break
+		}
+	}
+	if disputeEvt == nil {
+		t.Fatalf("expected disputed event to be emitted")
+	}
+	if disputeEvt.Attributes["disputeReason"] != "counterfeit goods" {
+		t.Fatalf("expected dispute reason attribute, got %q", disputeEvt.Attributes["disputeReason"])
 	}
 	last := events[len(events)-1]
 	if last.Type != EventTypeEscrowResolved {
@@ -1056,7 +1072,7 @@ func TestResolveWithSignaturesRefundRoutesFees(t *testing.T) {
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
-	if err := engine.Dispute(esc.ID, payer); err != nil {
+	if err := engine.Dispute(esc.ID, payer, "quality issue"); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
 
@@ -1119,7 +1135,7 @@ func TestArbitratedReleaseZeroFeeWithoutTreasury(t *testing.T) {
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
-	if err := engine.Dispute(esc.ID, payee); err != nil {
+	if err := engine.Dispute(esc.ID, payee, "late delivery"); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
 
@@ -1177,7 +1193,7 @@ func TestResolveWithSignaturesRejectsUnderQuorum(t *testing.T) {
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
-	if err := engine.Dispute(esc.ID, payer); err != nil {
+	if err := engine.Dispute(esc.ID, payer, "duplicate request"); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
 	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "refund", [32]byte{})
@@ -1226,7 +1242,7 @@ func TestResolveWithSignaturesReplay(t *testing.T) {
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
-	if err := engine.Dispute(esc.ID, payer); err != nil {
+	if err := engine.Dispute(esc.ID, payer, ""); err != nil {
 		t.Fatalf("dispute: %v", err)
 	}
 	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "refund", [32]byte{})

@@ -103,6 +103,7 @@ func (r *EscrowRealm) Clone() *EscrowRealm {
 	clone.Arbitrators = r.Arbitrators.Clone()
 	if r.FeeSchedule != nil {
 		clone.FeeSchedule = r.FeeSchedule.Clone()
+	}
 	if r.Metadata != nil {
 		clone.Metadata = r.Metadata.Clone()
 	}
@@ -143,6 +144,7 @@ func (f *FrozenArb) Clone() *FrozenArb {
 	}
 	if f.FeeSchedule != nil {
 		clone.FeeSchedule = f.FeeSchedule.Clone()
+	}
 	if f.Metadata != nil {
 		clone.Metadata = f.Metadata.Clone()
 	}
@@ -317,6 +319,7 @@ type Escrow struct {
 	RealmID        string
 	FrozenArb      *FrozenArb
 	ResolutionHash [32]byte
+	DisputeReason  string
 }
 
 // Clone returns a deep copy of the escrow object so callers can safely mutate
@@ -431,6 +434,7 @@ func SanitizeEscrow(e *Escrow) (*Escrow, error) {
 		}
 		clone.FrozenArb = sanitized
 	}
+	clone.DisputeReason = strings.TrimSpace(clone.DisputeReason)
 	return clone, nil
 }
 

@@ -2763,20 +2763,21 @@ func (s *storedFrozenArb) toFrozenArb() (*escrow.FrozenArb, error) {
 }
 
 type storedEscrow struct {
-	ID           [32]byte
-	Payer        [20]byte
-	Payee        [20]byte
-	Mediator     [20]byte
-	Token        string
-	Amount       *big.Int
-	FeeBps       uint32
-	Deadline     *big.Int
-	CreatedAt    *big.Int
-	Nonce        *big.Int
-	MetaHash     [32]byte
-	Status       uint8
-	RealmID      string
-	DecisionHash [32]byte
+	ID            [32]byte
+	Payer         [20]byte
+	Payee         [20]byte
+	Mediator      [20]byte
+	Token         string
+	Amount        *big.Int
+	FeeBps        uint32
+	Deadline      *big.Int
+	CreatedAt     *big.Int
+	Nonce         *big.Int
+	MetaHash      [32]byte
+	Status        uint8
+	RealmID       string
+	DecisionHash  [32]byte
+	DisputeReason string
 }
 
 // EscrowRealmPut stores the provided realm definition after sanitising it.
@@ -2862,20 +2863,21 @@ func newStoredEscrow(e *escrow.Escrow) *storedEscrow {
 	created := big.NewInt(e.CreatedAt)
 	nonce := new(big.Int).SetUint64(e.Nonce)
 	return &storedEscrow{
-		ID:           e.ID,
-		Payer:        e.Payer,
-		Payee:        e.Payee,
-		Mediator:     e.Mediator,
-		Token:        e.Token,
-		Amount:       amount,
-		FeeBps:       e.FeeBps,
-		Deadline:     deadline,
-		CreatedAt:    created,
-		Nonce:        nonce,
-		MetaHash:     e.MetaHash,
-		Status:       uint8(e.Status),
-		RealmID:      strings.TrimSpace(e.RealmID),
-		DecisionHash: e.ResolutionHash,
+		ID:            e.ID,
+		Payer:         e.Payer,
+		Payee:         e.Payee,
+		Mediator:      e.Mediator,
+		Token:         e.Token,
+		Amount:        amount,
+		FeeBps:        e.FeeBps,
+		Deadline:      deadline,
+		CreatedAt:     created,
+		Nonce:         nonce,
+		MetaHash:      e.MetaHash,
+		Status:        uint8(e.Status),
+		RealmID:       strings.TrimSpace(e.RealmID),
+		DecisionHash:  e.ResolutionHash,
+		DisputeReason: strings.TrimSpace(e.DisputeReason),
 	}
 }
 
@@ -2900,6 +2902,7 @@ func (s *storedEscrow) toEscrow() (*escrow.Escrow, error) {
 		Status:         escrow.EscrowStatus(s.Status),
 		RealmID:        strings.TrimSpace(s.RealmID),
 		ResolutionHash: s.DecisionHash,
+		DisputeReason:  strings.TrimSpace(s.DisputeReason),
 	}
 	if s.Deadline != nil {
 		out.Deadline = s.Deadline.Int64()

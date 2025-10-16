@@ -168,6 +168,9 @@ func newEscrowEvent(eventType string, e *Escrow) *types.Event {
 	if sanitized.Mediator != ([20]byte{}) {
 		attrs["mediator"] = hex.EncodeToString(sanitized.Mediator[:])
 	}
+	if trimmed := strings.TrimSpace(sanitized.DisputeReason); trimmed != "" {
+		attrs["disputeReason"] = trimmed
+	}
 	if strings.TrimSpace(sanitized.RealmID) != "" {
 		attrs["realmId"] = sanitized.RealmID
 	}
