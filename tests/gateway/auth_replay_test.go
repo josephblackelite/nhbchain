@@ -17,7 +17,7 @@ func TestHMACReplayRejected(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
 	auth := gatewayauth.NewAuthenticator(map[string]string{"test": "secret"}, 2*time.Minute, 0, 0, func() time.Time {
 		return now
-	})
+	}, nil)
 
 	body := []byte(`{"payload":"example"}`)
 	req := httptest.NewRequest(http.MethodPost, "/payments?id=1&sort=desc", bytes.NewReader(body))

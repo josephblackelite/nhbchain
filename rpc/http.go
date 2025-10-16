@@ -104,6 +104,7 @@ type SwapAuthConfig struct {
 	RateLimitWindow      time.Duration
 	PartnerRateLimits    map[string]int
 	Now                  func() time.Time
+	Persistence          gatewayauth.NoncePersistence
 }
 
 // ProxyHeaderMode defines how the server treats reverse proxy headers that can
@@ -396,7 +397,17 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 			if nonceCapacity > swapMaxNonceCache {
 				nonceCapacity = swapMaxNonceCache
 			}
-			swapAuth = gatewayauth.NewAuthenticator(secrets, allowedSkew, nonceTTL, nonceCapacity, swapNow)
+			swapAuth = gatewayauth.NewAuthenticator(secrets, allowedSkew, nonceTTL, nonceCapacity, swapNow, cfg.SwapAuth.Persistence)
+			if swapAuth != nil && cfg.SwapAuth.Persistence != nil {
+				now := swapNow()
+				cutoff := now.Add(-nonceTTL)
+				if err := cfg.SwapAuth.Persistence.PruneNonces(context.Background(), cutoff); err != nil {
+					return nil, fmt.Errorf("prune swap nonces: %w", err)
+				}
+				if err := swapAuth.HydrateNonces(context.Background(), cutoff); err != nil {
+					return nil, fmt.Errorf("hydrate swap nonces: %w", err)
+				}
+			}
 		}
 	}
 	if len(cfg.SwapAuth.PartnerRateLimits) > 0 {

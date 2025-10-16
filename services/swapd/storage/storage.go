@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/glebarez/sqlite"
 
+	gatewayauth "nhbchain/gateway/auth"
 	swap "nhbchain/native/swap"
 )
 
@@ -124,6 +125,80 @@ type Snapshot struct {
 	RecordedAt     time.Time
 }
 
+// EnsureNonce persists the API key nonce usage, returning true when the record
+// was already present.
+func (s *Storage) EnsureNonce(ctx context.Context, rec gatewayauth.NonceRecord) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("storage not configured")
+	}
+	apiKey := strings.TrimSpace(rec.APIKey)
+	ts := strings.TrimSpace(rec.Timestamp)
+	nonce := strings.TrimSpace(rec.Nonce)
+	if apiKey == "" || ts == "" || nonce == "" {
+		return false, fmt.Errorf("nonce record incomplete")
+	}
+	observed := rec.ObservedAt.UTC()
+	if observed.IsZero() {
+		observed = time.Now().UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `
+        INSERT INTO api_nonce_usage(api_key, timestamp, nonce, observed_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(api_key, timestamp, nonce) DO NOTHING
+    `, apiKey, ts, nonce, observed)
+	if err != nil {
+		return false, fmt.Errorf("record api nonce: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return affected == 0, nil
+}
+
+// RecentNonces returns persisted API key nonces observed at or after the provided cutoff.
+func (s *Storage) RecentNonces(ctx context.Context, cutoff time.Time) ([]gatewayauth.NonceRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT api_key, timestamp, nonce, observed_at
+        FROM api_nonce_usage
+        WHERE observed_at >= ?
+        ORDER BY observed_at ASC
+    `, cutoff.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("query api nonces: %w", err)
+	}
+	defer rows.Close()
+	records := make([]gatewayauth.NonceRecord, 0)
+	for rows.Next() {
+		var rec gatewayauth.NonceRecord
+		if err := rows.Scan(&rec.APIKey, &rec.Timestamp, &rec.Nonce, &rec.ObservedAt); err != nil {
+			return nil, fmt.Errorf("scan api nonce: %w", err)
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate api nonces: %w", err)
+	}
+	return records, nil
+}
+
+// PruneNonces removes API key nonces observed before the cutoff.
+func (s *Storage) PruneNonces(ctx context.Context, cutoff time.Time) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	if _, err := s.db.ExecContext(ctx, `
+        DELETE FROM api_nonce_usage
+        WHERE observed_at < ?
+    `, cutoff.UTC()); err != nil {
+		return fmt.Errorf("prune api nonces: %w", err)
+	}
+	return nil
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS oracle_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,6 +220,15 @@ CREATE TABLE IF NOT EXISTS oracle_snapshots (
     recorded_at TIMESTAMP NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_oracle_snapshots_pair_ts ON oracle_snapshots(pair, observed_at);
+
+CREATE TABLE IF NOT EXISTS api_nonce_usage (
+    api_key TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    observed_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (api_key, timestamp, nonce)
+);
+CREATE INDEX IF NOT EXISTS idx_api_nonce_usage_observed ON api_nonce_usage(observed_at);
 
 CREATE TABLE IF NOT EXISTS throttle_policy (
     id TEXT PRIMARY KEY,
