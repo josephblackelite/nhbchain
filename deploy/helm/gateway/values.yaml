@@ -57,10 +57,9 @@ config:
         requestsPerMinute: 240
         burst: 40
     auth:
-      enabled: false
+      # Authentication defaults to enabled; set `enabled: false` only for tightly controlled development installs.
       hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"
       scopeClaim: scope
-      allowAnonymous: true
 
 env: []
 

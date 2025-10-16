@@ -36,15 +36,19 @@ turned off in the gateway configuration.
 ## Configuration
 
 The gateway is configured via YAML (or environment variables) to set backend
-endpoints, auth secrets, and rate limits. When authentication is enabled the
-gateway now defaults to rejecting anonymous requests unless specific path
-prefixes are listed under `auth.optionalPaths`. This ensures operators
-consciously opt in to any unauthenticated traffic and mirrors the tightened
-defaults in `gateway/config.Config`.
+endpoints, auth secrets, and rate limits.
+
+### Secure defaults
+
+Authentication is now enabled by default. Deployments that omit the
+`auth.enabled` flag remain protected and can rely on bearer tokens out of the
+box. Anonymous access requires an explicit opt-in by setting
+`auth.allowAnonymous: true` *and* enumerating the permitted prefixes beneath
+`auth.optionalPaths`. This mirrors the loader's runtime validation and ensures
+that any unauthenticated surface area is intentionally scoped.
 
 ```yaml
 auth:
-  enabled: true
   hmacSecret: ${GATEWAY_HMAC_SECRET}
   allowAnonymous: true
   optionalPaths:
@@ -56,6 +60,23 @@ The example above preserves anonymous access to the lending market catalogue and
 market detail lookup endpoints while leaving every other route gated by bearer
 tokens. Omit the block or set `allowAnonymous: false` to require authentication
 for the entire surface.
+
+> [!TIP]
+> Local development clusters that need to run without OAuth/JWT tokens should
+> opt out explicitly:
+>
+> ```yaml
+> auth:
+>   enabled: false        # Disable auth for dev-only environments
+>   allowAnonymous: true  # Permit anonymous calls for selected prefixes
+>   optionalPaths:
+>     - /v1/lending/markets
+>     - /v1/lending/markets/get
+> ```
+>
+> Avoid carrying this configuration into staging or production. In those
+> environments remove `enabled: false` (or set it back to `true`) and clear the
+> anonymous access list to restore the secure default.
 
 The default ports for the internal services are:
 
