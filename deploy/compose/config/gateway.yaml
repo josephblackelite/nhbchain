@@ -10,13 +10,13 @@ observability:
   metricsPrefix: "gateway"
 services:
   - name: lendingd
-    endpoint: http://lendingd:50053
+    endpoint: http://127.0.0.1:50053
   - name: swapd
-    endpoint: http://swapd:7074
+    endpoint: http://127.0.0.1:7074
   - name: governd
-    endpoint: http://governd:50061
+    endpoint: http://127.0.0.1:50061
   - name: consensusd
-    endpoint: http://consensusd:9090
+    endpoint: http://127.0.0.1:9090
 rateLimits:
   - id: lending
     requestsPerMinute: 120

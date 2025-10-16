@@ -1,5 +1,5 @@
 listen: "127.0.0.1:50061"
-consensus: "consensusd:9090"
+consensus: "127.0.0.1:9090"
 chain_id: "localnet"
 signer_key_env: "GOVERND_SIGNER_KEY"
 nonce_start: 1

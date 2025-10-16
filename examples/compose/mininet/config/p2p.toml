@@ -1,4 +1,4 @@
-ListenAddress = ":26656"
+ListenAddress = "127.0.0.1:26656"
 DataDir = "/var/lib/nhb/p2p"
 GenesisFile = ""
 AllowAutogenesis = true

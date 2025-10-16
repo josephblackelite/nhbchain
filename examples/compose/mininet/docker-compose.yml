@@ -1,17 +1,18 @@
 version: "3.9"
 
 services:
+  # Each service opts into host networking so gRPC and P2P listeners stay on
+  # 127.0.0.1. Override `network_mode` when running on platforms without host
+  # networking support (e.g. Docker Desktop on macOS/Windows).
   p2pd:
     image: nhbchain/p2pd:mininet
     build:
       context: ../../..
       dockerfile: examples/compose/mininet/Dockerfile.p2pd
-    command: ["--config", "/etc/nhb/p2p.toml", "--grpc", ":9091"]
+    command: ["--config", "/etc/nhb/p2p.toml", "--grpc", "127.0.0.1:9091"]
     volumes:
       - p2p-data:/var/lib/nhb
-    ports:
-      - "26656:26656"
-      - "9091:9091"
+    network_mode: host
     healthcheck:
       test: ["CMD", "grpcurl", "-plaintext", "localhost:9091", "network.v1.NetworkService/ListPeers"]
       interval: 30s
@@ -24,7 +25,7 @@ services:
       context: ../../..
       dockerfile: examples/compose/mininet/Dockerfile.consensusd
     command:
-      ["--config", "/etc/nhb/consensus.toml", "--grpc", ":9090", "--p2p", "p2pd:9091"]
+      ["--config", "/etc/nhb/consensus.toml", "--grpc", "127.0.0.1:9090", "--p2p", "127.0.0.1:9091"]
     depends_on:
       p2pd:
         condition: service_healthy
@@ -33,8 +34,7 @@ services:
       - NHB_ALLOW_AUTOGENESIS=true
     volumes:
       - consensus-data:/var/lib/nhb
-    ports:
-      - "9090:9090"
+    network_mode: host
     healthcheck:
       test: ["CMD", "grpcurl", "-plaintext", "localhost:9090", "consensus.v1.ConsensusService/GetHeight"]
       interval: 30s

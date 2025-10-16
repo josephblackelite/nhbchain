@@ -3,6 +3,12 @@
 The repository includes a development stack under `deploy/compose` that
 builds all NHB services from source and runs them with Docker Compose.
 It is intended for one-shot local integration testing and API exploration.
+All services bind to `127.0.0.1` and the compose file opts into Docker's host
+network so nothing is reachable from other hosts unless you deliberately
+override the bind addresses. Host networking is only available on Linux; use a
+compose override or custom deployment when developing on macOS/Windows.
+Adjust the configuration files or compose overrides before exposing ports
+beyond loopback.
 
 ## Prerequisites
 
@@ -35,14 +41,14 @@ without losing state.
 
 | Service      | Port | Notes |
 |--------------|------|-------|
-| gateway      | 8080 | REST gateway |
-| swapd        | 7074 | HTTP oracle |
-| governd      | 50061 | gRPC |
-| lendingd     | 50053 | gRPC (preview – returns UNIMPLEMENTED) |
-| consensusd   | 9090 | gRPC (public) |
-| consensusd   | 8081 | HTTP RPC |
-| p2pd         | 26656 | Tendermint-style P2P |
-| p2pd         | 9091 | internal gRPC |
+| gateway      | 127.0.0.1:8080 | REST gateway |
+| swapd        | 127.0.0.1:7074 | HTTP oracle |
+| governd      | 127.0.0.1:50061 | gRPC |
+| lendingd     | 127.0.0.1:50053 | gRPC (preview – returns UNIMPLEMENTED) |
+| consensusd   | 127.0.0.1:9090 | gRPC (public) |
+| consensusd   | 127.0.0.1:8081 | HTTP RPC |
+| p2pd         | 127.0.0.1:26656 | Tendermint-style P2P |
+| p2pd         | 127.0.0.1:9091 | internal gRPC |
 
 `consensusd` and `p2pd` are configured with `AllowAutogenesis=true`, so the
 stack will mint a throwaway genesis if none exists.
