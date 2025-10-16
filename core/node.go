@@ -3177,13 +3177,13 @@ func (n *Node) EscrowExpire(id [32]byte) error {
 	return engine.Expire(id, time.Now().Unix())
 }
 
-func (n *Node) EscrowDispute(id [32]byte, caller [20]byte) error {
+func (n *Node) EscrowDispute(id [32]byte, caller [20]byte, reason string) error {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	engine := n.newEscrowEngine(manager)
-	return engine.Dispute(id, caller)
+	return engine.Dispute(id, caller, reason)
 }
 
 func (n *Node) EscrowResolve(id [32]byte, caller [20]byte, outcome string) error {

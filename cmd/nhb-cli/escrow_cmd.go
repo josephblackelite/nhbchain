@@ -248,8 +248,8 @@ func runEscrowDispute(args []string, stdout, stderr io.Writer) int {
 		return printEscrowError(stderr, "--caller is required")
 	}
 	params := map[string]interface{}{"id": id, "caller": caller}
-	if strings.TrimSpace(message) != "" {
-		params["message"] = message
+	if trimmed := strings.TrimSpace(message); trimmed != "" {
+		params["reason"] = trimmed
 	}
 	result, rpcErr, err := escrowRPCCall("escrow_dispute", params, true)
 	if err != nil {

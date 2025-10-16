@@ -19,7 +19,7 @@ type NodeClient interface {
 	EscrowGet(ctx context.Context, id string) (*EscrowState, error)
 	EscrowRelease(ctx context.Context, escrowID, caller string) error
 	EscrowRefund(ctx context.Context, escrowID, caller string) error
-	EscrowDispute(ctx context.Context, escrowID, caller string) error
+	EscrowDispute(ctx context.Context, escrowID, caller, reason string) error
 	EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error
 	P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error)
 	P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error)
@@ -109,8 +109,11 @@ func (c *RPCNodeClient) EscrowRefund(ctx context.Context, escrowID, caller strin
 	return c.call(ctx, "escrow_refund", []interface{}{params}, nil)
 }
 
-func (c *RPCNodeClient) EscrowDispute(ctx context.Context, escrowID, caller string) error {
+func (c *RPCNodeClient) EscrowDispute(ctx context.Context, escrowID, caller, reason string) error {
 	params := map[string]string{"id": escrowID, "caller": caller}
+	if strings.TrimSpace(reason) != "" {
+		params["reason"] = reason
+	}
 	return c.call(ctx, "escrow_dispute", []interface{}{params}, nil)
 }
 

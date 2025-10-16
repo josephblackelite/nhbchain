@@ -22,17 +22,18 @@ import (
 )
 
 type mockNodeClient struct {
-	mu           sync.Mutex
-	createResp   *EscrowCreateResponse
-	createErr    error
-	getResp      *EscrowState
-	getErr       error
-	createCalls  int
-	releaseCalls int
-	refundCalls  int
-	disputeCalls int
-	resolveCalls int
-	resolveArgs  []struct {
+	mu                sync.Mutex
+	createResp        *EscrowCreateResponse
+	createErr         error
+	getResp           *EscrowState
+	getErr            error
+	createCalls       int
+	releaseCalls      int
+	refundCalls       int
+	disputeCalls      int
+	lastDisputeReason string
+	resolveCalls      int
+	resolveArgs       []struct {
 		escrowID string
 		caller   string
 		outcome  string
@@ -102,10 +103,11 @@ func (m *mockNodeClient) EscrowRefund(ctx context.Context, escrowID, caller stri
 	return nil
 }
 
-func (m *mockNodeClient) EscrowDispute(ctx context.Context, escrowID, caller string) error {
+func (m *mockNodeClient) EscrowDispute(ctx context.Context, escrowID, caller, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.disputeCalls++
+	m.lastDisputeReason = reason
 	if m.disputeErr != nil {
 		return m.disputeErr
 	}
