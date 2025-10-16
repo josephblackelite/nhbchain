@@ -141,6 +141,11 @@ func (g Global) LoyaltyDynamicConfig() loyalty.DynamicConfig {
 		dailyCapUsd = 0
 	}
 
+	fallbackMin, err := parseUintAmount(dyn.PriceGuard.FallbackMinEmissionZNHBWei)
+	if err != nil {
+		fallbackMin = big.NewInt(0)
+	}
+
 	cfg := loyalty.DynamicConfig{
 		TargetBps:                      dyn.TargetBPS,
 		MinBps:                         dyn.MinBPS,
@@ -152,11 +157,13 @@ func (g Global) LoyaltyDynamicConfig() loyalty.DynamicConfig {
 		DailyCapUsd:                    uint64(dailyCapUsd),
 		YearlyCapPctOfInitialSupplyBps: uint32(yearlyCapBps),
 		PriceGuard: loyalty.PriceGuardConfig{
-			Enabled:            dyn.PriceGuard.Enabled,
-			PricePair:          dyn.PriceGuard.PricePair,
-			TwapWindowSeconds:  dyn.PriceGuard.TwapWindowSeconds,
-			MaxDeviationBps:    dyn.PriceGuard.MaxDeviationBPS,
-			PriceMaxAgeSeconds: dyn.PriceGuard.PriceMaxAgeSeconds,
+			Enabled:                  dyn.PriceGuard.Enabled,
+			PricePair:                dyn.PriceGuard.PricePair,
+			TwapWindowSeconds:        dyn.PriceGuard.TwapWindowSeconds,
+			MaxDeviationBps:          dyn.PriceGuard.MaxDeviationBPS,
+			PriceMaxAgeSeconds:       dyn.PriceGuard.PriceMaxAgeSeconds,
+			FallbackMinEmissionZNHB:  fallbackMin,
+			UseLastGoodPriceFallback: dyn.PriceGuard.UseLastGoodPriceFallback,
 		},
 		EnableProRate:     dyn.EnableProRate,
 		EnforceProRate:    dyn.EnforceProRate,

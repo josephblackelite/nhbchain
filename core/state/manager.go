@@ -1635,14 +1635,17 @@ func (m *Manager) SwapPutPriceProof(base string, record *swap.PriceProofRecord) 
 	}
 	stored := struct {
 		Rate      string
-		Timestamp int64
+		Timestamp uint64
 	}{}
 	if record != nil {
 		if record.Rate != nil {
 			stored.Rate = strings.TrimSpace(record.Rate.FloatString(18))
 		}
 		if !record.Timestamp.IsZero() {
-			stored.Timestamp = record.Timestamp.UTC().Unix()
+			ts := record.Timestamp.UTC().Unix()
+			if ts > 0 {
+				stored.Timestamp = uint64(ts)
+			}
 		}
 	}
 	return m.KVPut(swapPriceProofKey(trimmed), stored)
@@ -1656,7 +1659,7 @@ func (m *Manager) SwapLastPriceProof(base string) (*swap.PriceProofRecord, bool,
 	}
 	var stored struct {
 		Rate      string
-		Timestamp int64
+		Timestamp uint64
 	}
 	ok, err := m.KVGet(swapPriceProofKey(trimmed), &stored)
 	if err != nil {
@@ -1675,7 +1678,7 @@ func (m *Manager) SwapLastPriceProof(base string) (*swap.PriceProofRecord, bool,
 		record.Rate = rat
 	}
 	if stored.Timestamp != 0 {
-		record.Timestamp = time.Unix(stored.Timestamp, 0).UTC()
+		record.Timestamp = time.Unix(int64(stored.Timestamp), 0).UTC()
 	}
 	return record, true, nil
 }

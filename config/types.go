@@ -209,11 +209,13 @@ func (d LoyaltyDynamic) YearlyCapZNHBWei(initialSupply *big.Int) *big.Int {
 
 // LoyaltyPriceGuard defines the deviation limits applied when consuming external price data.
 type LoyaltyPriceGuard struct {
-	Enabled            bool
-	PricePair          string
-	TwapWindowSeconds  uint32
-	MaxDeviationBPS    uint32
-	PriceMaxAgeSeconds uint32
+	Enabled                    bool
+	PricePair                  string
+	TwapWindowSeconds          uint32
+	MaxDeviationBPS            uint32
+	PriceMaxAgeSeconds         uint32
+	FallbackMinEmissionZNHBWei string
+	UseLastGoodPriceFallback   bool
 }
 
 // Global bundles the runtime configuration values enforced by ValidateConfig.

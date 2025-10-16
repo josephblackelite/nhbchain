@@ -222,11 +222,13 @@ func defaultGlobalConfig() Global {
 				DailyCapUSD:                 defaultLoyaltyDailyCapUSD,
 				YearlyCapPctOfInitialSupply: defaultLoyaltyYearlyCapPctOfInitialSupply,
 				PriceGuard: LoyaltyPriceGuard{
-					Enabled:            true,
-					PricePair:          defaultLoyaltyPricePair,
-					TwapWindowSeconds:  defaultLoyaltyPriceGuardTwapWindowSeconds,
-					MaxDeviationBPS:    defaultLoyaltyPriceGuardMaxDeviation,
-					PriceMaxAgeSeconds: defaultLoyaltyPriceGuardMaxAgeSeconds,
+					Enabled:                    true,
+					PricePair:                  defaultLoyaltyPricePair,
+					TwapWindowSeconds:          defaultLoyaltyPriceGuardTwapWindowSeconds,
+					MaxDeviationBPS:            defaultLoyaltyPriceGuardMaxDeviation,
+					PriceMaxAgeSeconds:         defaultLoyaltyPriceGuardMaxAgeSeconds,
+					FallbackMinEmissionZNHBWei: defaultLoyaltyPriceGuardFallbackMinEmission,
+					UseLastGoodPriceFallback:   true,
 				},
 				EnableProRate:  true,
 				EnforceProRate: defaultLoyaltyEnforceProRate,
@@ -249,21 +251,22 @@ const (
 	defaultStreamQueueSize                = 128
 	defaultRelayDropLogRatio              = 0.1
 	// DefaultMempoolMaxTransactions bounds pending transactions when no explicit limit is provided.
-	DefaultMempoolMaxTransactions             = 4000
-	defaultLoyaltyTargetBPS                   = 50
-	defaultLoyaltyMinBPS                      = 25
-	defaultLoyaltyMaxBPS                      = 100
-	defaultLoyaltySmoothingStepBPS            = 5
-	defaultLoyaltyCoverageMax                 = 0.50
-	defaultLoyaltyCoverageLookbackDays        = 7
-	defaultLoyaltyDailyCapPctOf7dFees         = 0.60
-	defaultLoyaltyDailyCapUSD                 = 5_000.0
-	defaultLoyaltyYearlyCapPctOfInitialSupply = 10.0
-	defaultLoyaltyPricePair                   = "ZNHB/USD"
-	defaultLoyaltyPriceGuardTwapWindowSeconds = uint32(7_200)
-	defaultLoyaltyPriceGuardMaxDeviation      = 300
-	defaultLoyaltyPriceGuardMaxAgeSeconds     = uint32(600)
-	defaultLoyaltyEnforceProRate              = true
+	DefaultMempoolMaxTransactions               = 4000
+	defaultLoyaltyTargetBPS                     = 50
+	defaultLoyaltyMinBPS                        = 25
+	defaultLoyaltyMaxBPS                        = 100
+	defaultLoyaltySmoothingStepBPS              = 5
+	defaultLoyaltyCoverageMax                   = 0.50
+	defaultLoyaltyCoverageLookbackDays          = 7
+	defaultLoyaltyDailyCapPctOf7dFees           = 0.60
+	defaultLoyaltyDailyCapUSD                   = 5_000.0
+	defaultLoyaltyYearlyCapPctOfInitialSupply   = 10.0
+	defaultLoyaltyPricePair                     = "ZNHB/USD"
+	defaultLoyaltyPriceGuardTwapWindowSeconds   = uint32(7_200)
+	defaultLoyaltyPriceGuardMaxDeviation        = 300
+	defaultLoyaltyPriceGuardMaxAgeSeconds       = uint32(600)
+	defaultLoyaltyPriceGuardFallbackMinEmission = "0"
+	defaultLoyaltyEnforceProRate                = true
 )
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
@@ -724,6 +727,12 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "MaxDeviationBPS") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS = defaults.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS
+	}
+	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei) == "" {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei = defaults.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei
+	}
+	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "UseLastGoodPriceFallback") {
+		cfg.Global.Loyalty.Dynamic.PriceGuard.UseLastGoodPriceFallback = defaults.Loyalty.Dynamic.PriceGuard.UseLastGoodPriceFallback
 	}
 	if !meta.IsDefined("global", "loyalty", "Dynamic", "EnableProRate") {
 		cfg.Global.Loyalty.Dynamic.EnableProRate = defaults.Loyalty.Dynamic.EnableProRate

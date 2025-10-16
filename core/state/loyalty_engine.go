@@ -55,6 +55,14 @@ type loyaltyDaySnapshot struct {
 	TotalProposedZNHB *big.Int
 }
 
+// LoyaltyPriceFallbackSignal captures telemetry about a price fallback used when
+// computing the daily budget.
+type LoyaltyPriceFallbackSignal struct {
+	Strategy   string
+	Base       string
+	BudgetZNHB *big.Int
+}
+
 func newLoyaltyDaySnapshot() *loyaltyDaySnapshot {
 	return (&loyaltyDaySnapshot{}).normalize()
 }
@@ -178,56 +186,89 @@ func (m *Manager) AddPaidTodayZNHB(now time.Time, amount *big.Int) (*big.Int, er
 // GetRemainingDailyBudgetZNHB resolves the remaining daily base reward budget
 // expressed in ZNHB for the supplied timestamp. When price guard checks fail or
 // configuration is missing the function returns zero without error.
-func (m *Manager) GetRemainingDailyBudgetZNHB(now time.Time) (*big.Int, error) {
+func (m *Manager) GetRemainingDailyBudgetZNHB(now time.Time) (*big.Int, *LoyaltyPriceFallbackSignal, error) {
 	if m == nil {
-		return big.NewInt(0), fmt.Errorf("loyalty budget: state manager unavailable")
+		return big.NewInt(0), nil, fmt.Errorf("loyalty budget: state manager unavailable")
 	}
 	cfg, err := m.LoyaltyGlobalConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if cfg == nil {
-		return big.NewInt(0), nil
+		return big.NewInt(0), nil, nil
 	}
 	normalized := cfg.Clone().Normalize()
 	day := loyaltyDayFromTime(now)
 	snapshot, err := m.loadLoyaltyDaySnapshot(day)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	price, ok, err := m.resolveLoyaltyPrice(now, normalized.Dynamic.PriceGuard)
+	guard := normalized.Dynamic.PriceGuard
+	base := loyaltyPriceBase(guard)
+	price, ok, err := m.resolveLoyaltyPrice(now, guard, base)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if !ok {
-		return big.NewInt(0), nil
-	}
-
 	tracker := NewRollingFees(m)
 	feesNHB, err := tracker.Get7dNetFeesNHB(now)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	feesZNHB, err := tracker.Get7dNetFeesZNHB(now)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	budget := CalcDailyBudgetZNHB(now, feesNHB, feesZNHB, price, &normalized.Dynamic)
+	var fallback *LoyaltyPriceFallbackSignal
+	var priceForBudget *big.Rat
+	priceForBudget = price
+	if !ok {
+		priceForBudget = nil
+		if guard.UseLastGoodPriceFallback {
+			lastGood, lastOK, err := m.lastKnownLoyaltyPrice(base)
+			if err != nil {
+				return nil, nil, err
+			}
+			if lastOK {
+				priceForBudget = lastGood
+				fallback = &LoyaltyPriceFallbackSignal{Strategy: "last_good_price", Base: base}
+			}
+		}
+	}
+
+	var budget *big.Int
+	if priceForBudget != nil && priceForBudget.Sign() > 0 {
+		budget = CalcDailyBudgetZNHB(now, feesNHB, feesZNHB, priceForBudget, &normalized.Dynamic)
+	} else {
+		budget = big.NewInt(0)
+	}
+
+	minEmission := guard.FallbackMinEmissionZNHB
+	if minEmission == nil {
+		minEmission = big.NewInt(0)
+	}
+	if minEmission.Sign() > 0 {
+		if budget.Sign() == 0 || budget.Cmp(minEmission) < 0 {
+			budget = new(big.Int).Set(minEmission)
+			if fallback == nil {
+				fallback = &LoyaltyPriceFallbackSignal{Strategy: "min_emission", Base: base}
+			}
+		}
+	}
+
+	if fallback != nil {
+		fallback.BudgetZNHB = new(big.Int).Set(budget)
+	}
+
 	remaining := new(big.Int).Sub(budget, snapshot.PaidZNHB)
 	if remaining.Sign() < 0 {
 		remaining = big.NewInt(0)
 	}
-	return remaining, nil
+	return remaining, fallback, nil
 }
 
-func (m *Manager) resolveLoyaltyPrice(now time.Time, guard loyalty.PriceGuardConfig) (*big.Rat, bool, error) {
-	normalized := guard
-	normalized.Normalize()
-	if !normalized.Enabled {
-		return big.NewRat(1, 1), true, nil
-	}
-	pair := strings.TrimSpace(normalized.PricePair)
+func loyaltyPriceBase(guard loyalty.PriceGuardConfig) string {
+	pair := strings.TrimSpace(guard.PricePair)
 	parts := strings.Split(pair, "/")
 	base := "ZNHB"
 	if len(parts) > 0 {
@@ -235,6 +276,15 @@ func (m *Manager) resolveLoyaltyPrice(now time.Time, guard loyalty.PriceGuardCon
 		if token != "" {
 			base = strings.ToUpper(token)
 		}
+	}
+	return base
+}
+
+func (m *Manager) resolveLoyaltyPrice(now time.Time, guard loyalty.PriceGuardConfig, base string) (*big.Rat, bool, error) {
+	normalized := guard
+	normalized.Normalize()
+	if !normalized.Enabled {
+		return big.NewRat(1, 1), true, nil
 	}
 	record, ok, err := m.SwapLastPriceProof(base)
 	if err != nil {
@@ -248,6 +298,21 @@ func (m *Manager) resolveLoyaltyPrice(now time.Time, guard loyalty.PriceGuardCon
 		if record.Timestamp.IsZero() || record.Timestamp.Before(cutoff) {
 			return nil, false, nil
 		}
+	}
+	return new(big.Rat).Set(record.Rate), true, nil
+}
+
+func (m *Manager) lastKnownLoyaltyPrice(base string) (*big.Rat, bool, error) {
+	trimmed := strings.TrimSpace(base)
+	if trimmed == "" {
+		trimmed = "ZNHB"
+	}
+	record, ok, err := m.SwapLastPriceProof(trimmed)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok || record == nil || record.Rate == nil || record.Rate.Sign() <= 0 {
+		return nil, false, nil
 	}
 	return new(big.Rat).Set(record.Rate), true, nil
 }

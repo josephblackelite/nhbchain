@@ -3,8 +3,12 @@ package state
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	"nhbchain/native/loyalty"
+	"nhbchain/native/swap"
+	"nhbchain/storage"
+	"nhbchain/storage/trie"
 )
 
 func TestLoyaltyEngineStateStepLimitsMovement(t *testing.T) {
@@ -113,5 +117,116 @@ func TestLoyaltyEngineStateCanEmitUnlimitedWhenCapUnset(t *testing.T) {
 	}
 	if want := big.NewInt(500); state.YtdEmissionsZNHB.Cmp(want) != 0 {
 		t.Fatalf("unexpected ytd after emission: got %s want %s", state.YtdEmissionsZNHB, want)
+	}
+}
+
+func newLoyaltyTestManager(t *testing.T) *Manager {
+	t.Helper()
+	db := storage.NewMemDB()
+	t.Cleanup(func() {
+		db.Close()
+	})
+	tr, err := trie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	return NewManager(tr)
+}
+
+func TestGetRemainingDailyBudgetZNHB_UsesLastGoodPriceFallback(t *testing.T) {
+	manager := newLoyaltyTestManager(t)
+	now := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	cfg := (&loyalty.GlobalConfig{
+		Active:   true,
+		Treasury: make([]byte, 20),
+		Dynamic: loyalty.DynamicConfig{
+			DailyCapPctOf7dFeesBps: 5000,
+			DailyCapUsd:            0,
+			PriceGuard: loyalty.PriceGuardConfig{
+				Enabled:                  true,
+				PricePair:                "ZNHB/USD",
+				TwapWindowSeconds:        60,
+				PriceMaxAgeSeconds:       60,
+				UseLastGoodPriceFallback: true,
+				FallbackMinEmissionZNHB:  big.NewInt(0),
+			},
+		},
+	}).Normalize()
+	if err := manager.SetLoyaltyGlobalConfig(cfg); err != nil {
+		t.Fatalf("set loyalty config: %v", err)
+	}
+
+	fees := NewRollingFees(manager)
+	if err := fees.AddDay(now.AddDate(0, 0, -1), tokensToWei(0), tokensToWei(100)); err != nil {
+		t.Fatalf("add rolling fees: %v", err)
+	}
+
+	staleProof := &swap.PriceProofRecord{Rate: big.NewRat(2, 1)}
+	if err := manager.SwapPutPriceProof("ZNHB", staleProof); err != nil {
+		t.Fatalf("put price proof: %v", err)
+	}
+
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
+	if err != nil {
+		t.Fatalf("remaining budget: %v", err)
+	}
+	expected := tokensToWei(50)
+	if budget.Cmp(expected) != 0 {
+		t.Fatalf("unexpected budget: got %s want %s", budget.String(), expected.String())
+	}
+	if fallback == nil {
+		t.Fatalf("expected fallback signal when price guard fails")
+	}
+	if fallback.Strategy != "last_good_price" {
+		t.Fatalf("unexpected fallback strategy: %s", fallback.Strategy)
+	}
+	if fallback.Base != "ZNHB" {
+		t.Fatalf("unexpected fallback base: %s", fallback.Base)
+	}
+	if fallback.BudgetZNHB.Cmp(budget) != 0 {
+		t.Fatalf("expected fallback budget to match remaining budget")
+	}
+}
+
+func TestGetRemainingDailyBudgetZNHB_MinEmissionFallback(t *testing.T) {
+	manager := newLoyaltyTestManager(t)
+	now := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	minEmission := tokensToWei(10)
+	cfg := (&loyalty.GlobalConfig{
+		Active:   true,
+		Treasury: make([]byte, 20),
+		Dynamic: loyalty.DynamicConfig{
+			DailyCapPctOf7dFeesBps: 0,
+			DailyCapUsd:            0,
+			PriceGuard: loyalty.PriceGuardConfig{
+				Enabled:                 true,
+				PricePair:               "ZNHB/USD",
+				TwapWindowSeconds:       60,
+				PriceMaxAgeSeconds:      60,
+				FallbackMinEmissionZNHB: new(big.Int).Set(minEmission),
+			},
+		},
+	}).Normalize()
+	if err := manager.SetLoyaltyGlobalConfig(cfg); err != nil {
+		t.Fatalf("set loyalty config: %v", err)
+	}
+
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
+	if err != nil {
+		t.Fatalf("remaining budget: %v", err)
+	}
+	if budget.Cmp(minEmission) != 0 {
+		t.Fatalf("unexpected budget: got %s want %s", budget.String(), minEmission.String())
+	}
+	if fallback == nil {
+		t.Fatalf("expected fallback signal when only min emission is configured")
+	}
+	if fallback.Strategy != "min_emission" {
+		t.Fatalf("unexpected fallback strategy: %s", fallback.Strategy)
+	}
+	if fallback.BudgetZNHB.Cmp(budget) != 0 {
+		t.Fatalf("expected fallback budget to match remaining budget")
 	}
 }

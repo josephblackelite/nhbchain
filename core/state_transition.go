@@ -622,10 +622,20 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 		return
 	}
 
-	budget, err := manager.GetRemainingDailyBudgetZNHB(now)
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
 	if err != nil {
 		sp.blockCtx.PendingRewards.ClearPendingRewards()
 		return
+	}
+
+	if fallback != nil {
+		if metrics := observability.Loyalty(); metrics != nil {
+			metrics.RecordGuardFallback(fallback.Strategy)
+		}
+		evt := (events.LoyaltyPriceFallback{Strategy: fallback.Strategy, Base: fallback.Base, BudgetZNHB: fallback.BudgetZNHB}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
 	}
 
 	ratioNum := big.NewInt(1)
@@ -4558,9 +4568,17 @@ func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardConte
 		}
 	}
 
-	budget, err := manager.GetRemainingDailyBudgetZNHB(now)
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
 	if err != nil {
 		budget = big.NewInt(0)
+	} else if fallback != nil {
+		if metrics := observability.Loyalty(); metrics != nil {
+			metrics.RecordGuardFallback(fallback.Strategy)
+		}
+		evt := (events.LoyaltyPriceFallback{Strategy: fallback.Strategy, Base: fallback.Base, BudgetZNHB: fallback.BudgetZNHB}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
 	}
 	ratio := ratioToFloatFromFrac(payout, requested)
 	if ratio < 0 {
