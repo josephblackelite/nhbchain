@@ -402,6 +402,16 @@ func main() {
 
 	// --- Server Startup ---
 	networkAdapter := &p2pNetworkAdapter{server: p2pServer}
+	routeLimits := make(map[string]rpc.RouteRateLimitConfig, len(cfg.RPCRouteRateLimits))
+	for method, limit := range cfg.RPCRouteRateLimits {
+		routeLimits[method] = rpc.RouteRateLimitConfig{
+			MaxTxPerWindow:        limit.MaxTxPerWindow,
+			MaxTxPerIP:            limit.MaxTxPerIP,
+			MaxTxPerIdentity:      limit.MaxTxPerIdentity,
+			MaxTxPerChain:         limit.MaxTxPerChain,
+			MaxTxPerIdentityChain: limit.MaxTxPerIdentityChain,
+		}
+	}
 	rpcServer, err := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
@@ -428,6 +438,7 @@ func main() {
 		MaxTxPerIdentity:         cfg.RPCMaxTxPerIdentity,
 		MaxTxPerChain:            cfg.RPCMaxTxPerChain,
 		MaxTxPerIdentityChain:    cfg.RPCMaxTxPerIdentityChain,
+		RouteRateLimits:          routeLimits,
 		RateLimitWindow:          time.Duration(cfg.RPCRateLimitWindow) * time.Second,
 		CallerMetadataMaxTTL:     time.Duration(cfg.RPCCallerMetadataMaxTTL) * time.Second,
 		TLSCertFile:              cfg.RPCTLSCertFile,

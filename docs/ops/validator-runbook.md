@@ -32,7 +32,19 @@ half of the tolerance.
 - Review the enforced per-source quota (`RPCMaxTxPerWindow` requests per
   `RPCRateLimitWindow`). Update tooling to surface HTTP 429 / `-32020`
   responses with retry guidance instead of blindly retrying, and monitor
-  `nhb_rpc_limiter_hits_total` to validate the chosen values.
+  `nhb_rpc_limiter_hits_total` (now segmented by `module`/`route`) to validate
+  the chosen values.
+- Override especially sensitive JSON-RPC methods with
+  `RPCRouteRateLimits`. Each key matches a JSON-RPC method name (for example
+  `"nhb_sendTransaction"`) and accepts the same quota knobs as the global
+  `RPCMaxTxPer*` settings. This lets operators isolate per-module throughput so
+  read-heavy traffic cannot starve administrative or transaction endpoints.
+
+```toml
+[RPCRouteRateLimits."nhb_sendTransaction"]
+MaxTxPerWindow = 3
+MaxTxPerIP = 3
+```
 - Align `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
   `RPCIdleTimeout` with upstream load-balancer/ingress settings to avoid idle
   disconnects. Document the final values in the deployment checklist.

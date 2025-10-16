@@ -349,7 +349,7 @@ func (s *Server) guardStakeRequest(w http.ResponseWriter, r *http.Request, req *
 	}
 	source := s.clientSource(r)
 	identity, _ := r.Context().Value(clientIdentityContextKey).(string)
-	if !s.allowSource(source, identity, "", now) {
+	if !s.allowSource(source, identity, "", req.Method, now) {
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "staking rate limit exceeded", source)
 		return time.Time{}, false
 	}
