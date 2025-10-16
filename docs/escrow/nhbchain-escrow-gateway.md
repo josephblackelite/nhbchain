@@ -119,7 +119,7 @@ GET /escrow/{id}/events
 ### Webhooks
 
 - `escrow.created`, `escrow.funded`, `escrow.released`, `escrow.refunded`, `escrow.expired`, `escrow.disputed`, `escrow.resolved`.
-- Payload: `{escrowId, payer, payee, token, amount, txHash?, meta.reference}`.
+- Payload: `{escrowId, payer, payee, token, amount, txHash?, meta.reference, provider}` with `provider` covering the realm scope/type, provider profile, arbitration fee basis points, and fee recipient address.
 
 ### Node Integration
 

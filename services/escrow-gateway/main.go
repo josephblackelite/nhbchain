@@ -65,7 +65,7 @@ func main() {
 		WithWebhookTTL(cfg.WebhookQueueTTL),
 	)
 	intents := NewPayIntentBuilder()
-	server := NewServer(auth, node, store, queue, intents)
+	server := NewServer(auth, node, store, queue, intents, cfg.MerchantConfigs)
 
 	srv := &http.Server{
 		Addr:    cfg.ListenAddress,

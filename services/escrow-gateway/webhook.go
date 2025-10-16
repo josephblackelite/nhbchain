@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"nhbchain/services/webhook"
@@ -88,6 +90,9 @@ func (w *WebhookWorker) handleDelivery(ctx context.Context, task WebhookTask) {
 		"attributes": task.Event.Attributes,
 		"timestamp":  task.Event.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
+	if provider := extractProviderMetadata(task.Event.Attributes); provider != nil {
+		body["provider"] = provider
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		w.recordAttempt(ctx, task, "error", err.Error(), now, time.Time{})
@@ -160,4 +165,46 @@ func signPayload(secret string, payload []byte) string {
 func bytesClone(b []byte) *bytes.Reader {
 	clone := append([]byte(nil), b...)
 	return bytes.NewReader(clone)
+}
+
+func extractProviderMetadata(attrs map[string]string) map[string]interface{} {
+	if len(attrs) == 0 {
+		return nil
+	}
+	provider := make(map[string]interface{})
+	if scope := strings.TrimSpace(attrs["realmScope"]); scope != "" {
+		provider["scope"] = normalizeScope(scope)
+	}
+	if rType := strings.TrimSpace(attrs["realmType"]); rType != "" {
+		provider["type"] = strings.ToLower(rType)
+	}
+	if profile := strings.TrimSpace(attrs["realmProfile"]); profile != "" {
+		provider["profile"] = profile
+	}
+	if feeRaw := strings.TrimSpace(attrs["realmFeeBps"]); feeRaw != "" {
+		if fee, err := strconv.ParseUint(feeRaw, 10, 32); err == nil {
+			provider["feeBps"] = fee
+		} else {
+			provider["feeBps"] = feeRaw
+		}
+	}
+	if recipient := strings.TrimSpace(attrs["realmFeeRecipient"]); recipient != "" {
+		provider["feeRecipient"] = recipient
+	}
+	if len(provider) == 0 {
+		return nil
+	}
+	return provider
+}
+
+func normalizeScope(scope string) string {
+	lowered := strings.ToLower(scope)
+	switch lowered {
+	case "1", "platform":
+		return "platform"
+	case "2", "marketplace":
+		return "marketplace"
+	default:
+		return lowered
+	}
 }

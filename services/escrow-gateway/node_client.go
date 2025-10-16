@@ -17,6 +17,7 @@ import (
 type NodeClient interface {
 	EscrowCreate(ctx context.Context, req EscrowCreateRequest) (*EscrowCreateResponse, error)
 	EscrowGet(ctx context.Context, id string) (*EscrowState, error)
+	EscrowGetRealm(ctx context.Context, id string) (*EscrowRealm, error)
 	EscrowRelease(ctx context.Context, escrowID, caller string) error
 	EscrowRefund(ctx context.Context, escrowID, caller string) error
 	EscrowDispute(ctx context.Context, escrowID, caller string) error
@@ -94,6 +95,18 @@ func (c *RPCNodeClient) EscrowGet(ctx context.Context, id string) (*EscrowState,
 	var result EscrowState
 	err := c.call(ctx, "escrow_get", []interface{}{map[string]string{"id": id}}, &result)
 	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *RPCNodeClient) EscrowGetRealm(ctx context.Context, id string) (*EscrowRealm, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil, errors.New("realm id required")
+	}
+	var result EscrowRealm
+	if err := c.call(ctx, "escrow_getRealm", []interface{}{map[string]string{"id": trimmed}}, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -226,25 +239,57 @@ type EscrowCreateResponse struct {
 
 // EscrowState mirrors the JSON returned by the node for escrow_get.
 type EscrowState struct {
-	ID          string   `json:"id"`
-	Payer       string   `json:"payer"`
-	Payee       string   `json:"payee"`
-	Mediator    *string  `json:"mediator,omitempty"`
-	Token       string   `json:"token"`
-	Amount      string   `json:"amount"`
-	FeeBps      uint32   `json:"feeBps"`
-	Deadline    int64    `json:"deadline"`
-	CreatedAt   int64    `json:"createdAt"`
-	Nonce       uint64   `json:"nonce"`
-	Status      string   `json:"status"`
-	Meta        string   `json:"meta"`
-	Realm       *string  `json:"realm,omitempty"`
-	FrozenAt    *int64   `json:"frozenAt,omitempty"`
-	Scheme      *uint8   `json:"arbScheme,omitempty"`
-	Threshold   *uint32  `json:"arbThreshold,omitempty"`
-	PolicyNonce *uint64  `json:"policyNonce,omitempty"`
-	Version     *uint64  `json:"realmVersion,omitempty"`
-	Members     []string `json:"arbitrators,omitempty"`
+	ID                string   `json:"id"`
+	Payer             string   `json:"payer"`
+	Payee             string   `json:"payee"`
+	Mediator          *string  `json:"mediator,omitempty"`
+	Token             string   `json:"token"`
+	Amount            string   `json:"amount"`
+	FeeBps            uint32   `json:"feeBps"`
+	Deadline          int64    `json:"deadline"`
+	CreatedAt         int64    `json:"createdAt"`
+	Nonce             uint64   `json:"nonce"`
+	Status            string   `json:"status"`
+	Meta              string   `json:"meta"`
+	Realm             *string  `json:"realm,omitempty"`
+	FrozenAt          *int64   `json:"frozenAt,omitempty"`
+	Scheme            *uint8   `json:"arbScheme,omitempty"`
+	Threshold         *uint32  `json:"arbThreshold,omitempty"`
+	PolicyNonce       *uint64  `json:"policyNonce,omitempty"`
+	Version           *uint64  `json:"realmVersion,omitempty"`
+	Members           []string `json:"arbitrators,omitempty"`
+	RealmScope        *string  `json:"realmScope,omitempty"`
+	RealmType         *string  `json:"realmType,omitempty"`
+	RealmProfile      *string  `json:"realmProfile,omitempty"`
+	RealmFeeBps       *uint32  `json:"realmFeeBps,omitempty"`
+	RealmFeeRecipient *string  `json:"realmFeeRecipient,omitempty"`
+}
+
+// EscrowRealm mirrors the JSON returned by escrow_getRealm.
+type EscrowRealm struct {
+	ID              string               `json:"id"`
+	Version         uint64               `json:"version"`
+	NextPolicyNonce uint64               `json:"nextPolicyNonce"`
+	CreatedAt       int64                `json:"createdAt"`
+	UpdatedAt       int64                `json:"updatedAt"`
+	Arbitrators     *EscrowRealmPolicy   `json:"arbitrators,omitempty"`
+	Metadata        *EscrowRealmMetadata `json:"metadata,omitempty"`
+}
+
+// EscrowRealmPolicy captures the arbitrator scheme for a realm.
+type EscrowRealmPolicy struct {
+	Scheme    string   `json:"scheme"`
+	Threshold uint32   `json:"threshold"`
+	Members   []string `json:"members,omitempty"`
+}
+
+// EscrowRealmMetadata exposes provider context for a realm.
+type EscrowRealmMetadata struct {
+	Scope             string `json:"scope"`
+	Type              string `json:"type,omitempty"`
+	ProviderProfile   string `json:"providerProfile,omitempty"`
+	ArbitrationFeeBps uint32 `json:"arbitrationFeeBps"`
+	FeeRecipient      string `json:"feeRecipient,omitempty"`
 }
 
 // P2PAcceptRequest captures the gateway request forwarded to the node RPC when
