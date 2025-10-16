@@ -75,7 +75,11 @@ func main() {
 		log.Fatalf("swapd: load config: %v", err)
 	}
 
-	store, err := storage.Open(cfg.DatabasePath)
+	dsn, err := storage.FileDSN(cfg.DatabasePath)
+	if err != nil {
+		log.Fatalf("swapd: resolve storage DSN: %v", err)
+	}
+	store, err := storage.Open(dsn)
 	if err != nil {
 		log.Fatalf("swapd: open storage: %v", err)
 	}

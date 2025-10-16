@@ -32,10 +32,7 @@ func mustAmountUnits(t *testing.T, amount float64) int64 {
 }
 
 func TestStableHandlersFlow(t *testing.T) {
-	store, err := storage.Open("file:stable_handlers?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("open storage: %v", err)
-	}
+	store := openStableTestStore(t, "stable_handlers_flow")
 	t.Cleanup(func() { _ = store.Close() })
 
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
@@ -142,10 +139,7 @@ func TestStableHandlersFlow(t *testing.T) {
 }
 
 func TestStableHandlersDisabled(t *testing.T) {
-	store, err := storage.Open("file:stable_handlers_disabled?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("open storage: %v", err)
-	}
+	store := openStableTestStore(t, "stable_handlers_disabled")
 	t.Cleanup(func() { _ = store.Close() })
 
 	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
@@ -165,10 +159,7 @@ func TestStableHandlersDisabled(t *testing.T) {
 }
 
 func TestStableHandlersRequireAuthentication(t *testing.T) {
-	store, err := storage.Open("file:stable_handlers_auth?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("open storage: %v", err)
-	}
+	store := openStableTestStore(t, "stable_handlers_auth")
 	t.Cleanup(func() { _ = store.Close() })
 
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
@@ -207,10 +198,7 @@ func TestStableHandlersRequireAuthentication(t *testing.T) {
 }
 
 func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
-	store, err := storage.Open("file:stable_handlers_forbidden?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("open storage: %v", err)
-	}
+	store := openStableTestStore(t, "stable_handlers_forbidden")
 	t.Cleanup(func() { _ = store.Close() })
 
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
@@ -322,6 +310,21 @@ func assertGoldenJSON(t *testing.T, filename string, actual []byte) {
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("payload mismatch for %s: want=%s got=%s", filename, strings.TrimSpace(string(wantBytes)), strings.TrimSpace(string(actual)))
 	}
+}
+
+func openStableTestStore(t *testing.T, name string) *storage.Storage {
+	t.Helper()
+	dir := t.TempDir()
+	file := strings.ReplaceAll(name, "/", "_") + ".sqlite"
+	dsn, err := storage.FileDSN(filepath.Join(dir, file))
+	if err != nil {
+		t.Fatalf("build DSN: %v", err)
+	}
+	store, err := storage.Open(dsn)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	return store
 }
 
 func extractField(t *testing.T, payload []byte, field string) string {

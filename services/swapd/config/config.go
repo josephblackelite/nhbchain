@@ -37,14 +37,15 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 
 // Config captures runtime configuration for swapd.
 type Config struct {
-	ListenAddress string       `yaml:"listen"`
-	DatabasePath  string       `yaml:"database"`
-	Oracle        OracleConfig `yaml:"oracle"`
-	Sources       []Source     `yaml:"sources"`
-	Pairs         []Pair       `yaml:"pairs"`
-	Policy        PolicyConfig `yaml:"policy"`
-	Stable        StableConfig `yaml:"stable"`
-	Admin         AdminConfig  `yaml:"admin"`
+	ListenAddress string `yaml:"listen"`
+	// DatabasePath must resolve to an on-disk SQLite database file.
+	DatabasePath string       `yaml:"database"`
+	Oracle       OracleConfig `yaml:"oracle"`
+	Sources      []Source     `yaml:"sources"`
+	Pairs        []Pair       `yaml:"pairs"`
+	Policy       PolicyConfig `yaml:"policy"`
+	Stable       StableConfig `yaml:"stable"`
+	Admin        AdminConfig  `yaml:"admin"`
 }
 
 type loadOptions struct {

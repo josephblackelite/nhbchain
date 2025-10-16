@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -69,7 +70,11 @@ func buildTestEngine(t *testing.T, base time.Time, inventory int64, ttl time.Dur
 
 func openTestStorage(t *testing.T) *storage.Storage {
 	t.Helper()
-	dsn := "file:swapd_engine_test?mode=memory&cache=shared"
+	dir := t.TempDir()
+	dsn, err := storage.FileDSN(filepath.Join(dir, "swapd-engine.sqlite"))
+	if err != nil {
+		t.Fatalf("build DSN: %v", err)
+	}
 	store, err := storage.Open(dsn)
 	if err != nil {
 		t.Fatalf("open storage: %v", err)

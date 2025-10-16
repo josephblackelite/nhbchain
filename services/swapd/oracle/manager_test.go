@@ -3,6 +3,7 @@ package oracle
 import (
 	"context"
 	"math/big"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -37,7 +38,12 @@ func (c *capturingPublisher) PublishOracleUpdate(ctx context.Context, update Upd
 }
 
 func TestManagerTickAggregatesMedian(t *testing.T) {
-	store, err := storage.Open("file:oracle_mgr?mode=memory&cache=shared")
+	dir := t.TempDir()
+	dsn, err := storage.FileDSN(filepath.Join(dir, "oracle-manager.sqlite"))
+	if err != nil {
+		t.Fatalf("build DSN: %v", err)
+	}
+	store, err := storage.Open(dsn)
 	if err != nil {
 		t.Fatalf("open storage: %v", err)
 	}
