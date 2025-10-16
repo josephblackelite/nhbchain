@@ -4,11 +4,14 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"nhbchain/observability/logging"
 )
 
 const (
@@ -42,9 +45,15 @@ type pexManager struct {
 
 	seenTokens map[string]time.Time
 	sentTokens map[string]sentToken
+
+	logger *slog.Logger
 }
 
 func newPexManager(server *Server) *pexManager {
+	logger := slog.Default().With(slog.String("component", "p2p_pex"))
+	if server != nil {
+		logger = server.log().With(slog.String("component", "p2p_pex"))
+	}
 	mgr := &pexManager{
 		server:     server,
 		ttl:        pexAddressTTL,
@@ -52,6 +61,7 @@ func newPexManager(server *Server) *pexManager {
 		book:       make(map[string]*pexEntry),
 		seenTokens: make(map[string]time.Time),
 		sentTokens: make(map[string]sentToken),
+		logger:     logger,
 	}
 	now := mgr.now()
 	for _, seed := range server.seedSnapshot() {
@@ -68,6 +78,16 @@ func (m *pexManager) now() time.Time {
 		return m.server.now()
 	}
 	return time.Now()
+}
+
+func (m *pexManager) log() *slog.Logger {
+	if m == nil {
+		return slog.Default().With(slog.String("component", "p2p_pex"))
+	}
+	if m.logger == nil {
+		m.logger = slog.Default().With(slog.String("component", "p2p_pex"))
+	}
+	return m.logger
 }
 
 func (m *pexManager) pruneLocked(now time.Time) {
@@ -287,7 +307,10 @@ func (m *pexManager) persist(entry pexEntry) {
 	}
 	rec := PeerstoreEntry{Addr: entry.Addr, NodeID: entry.NodeID, LastSeen: entry.LastSeen}
 	if err := m.server.peerstore.Put(rec); err != nil {
-		fmt.Printf("persist learned peer %s: %v\n", entry.NodeID, err)
+		m.log().Warn("Failed to persist discovered peer",
+			logging.MaskField("peer_id", entry.NodeID),
+			logging.MaskField("peer_address", entry.Addr),
+			slog.Any("error", err))
 	}
 }
 
@@ -296,7 +319,10 @@ type seedEndpoint struct {
 	Address string
 }
 
-func parseSeedList(values []string) []seedEndpoint {
+func parseSeedList(values []string, logger *slog.Logger) []seedEndpoint {
+	if logger == nil {
+		logger = slog.Default().With(slog.String("component", "p2p_pex"))
+	}
 	seeds := make([]seedEndpoint, 0, len(values))
 	seen := make(map[string]struct{})
 	for _, raw := range values {
@@ -306,17 +332,22 @@ func parseSeedList(values []string) []seedEndpoint {
 		}
 		nodePart, addrPart, found := strings.Cut(trimmed, "@")
 		if !found {
-			fmt.Printf("Ignoring seed %q: missing node ID\n", trimmed)
+			logger.Warn("Ignoring seed: missing node identifier",
+				logging.MaskField("seed", trimmed))
 			continue
 		}
 		node := normalizeHex(nodePart)
 		if node == "" {
-			fmt.Printf("Ignoring seed %q: empty node ID\n", trimmed)
+			logger.Warn("Ignoring seed: empty node identifier",
+				logging.MaskField("seed", trimmed))
 			continue
 		}
 		addr := strings.TrimSpace(addrPart)
 		if _, _, err := net.SplitHostPort(addr); err != nil {
-			fmt.Printf("Ignoring seed %q: invalid address: %v\n", trimmed, err)
+			logger.Warn("Ignoring seed: invalid address",
+				logging.MaskField("seed", trimmed),
+				logging.MaskField("seed_address", addr),
+				slog.Any("error", err))
 			continue
 		}
 		key := node + "@" + addr
