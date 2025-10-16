@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -173,9 +174,24 @@ func (s *Server) handleThrottleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Action string `json:"action"`
+		Amount string `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	amountStr := strings.TrimSpace(req.Amount)
+	if amountStr == "" {
+		http.Error(w, "amount required", http.StatusBadRequest)
+		return
+	}
+	amount := new(big.Int)
+	if _, ok := amount.SetString(amountStr, 10); !ok {
+		http.Error(w, "invalid amount", http.StatusBadRequest)
+		return
+	}
+	if amount.Sign() <= 0 {
+		http.Error(w, "amount must be positive", http.StatusBadRequest)
 		return
 	}
 	policy := s.currentPolicy()
@@ -186,9 +202,9 @@ func (s *Server) handleThrottleCheck(w http.ResponseWriter, r *http.Request) {
 	)
 	switch strings.ToLower(strings.TrimSpace(req.Action)) {
 	case "mint":
-		allowed, err = s.storage.CheckThrottle(r.Context(), policy.ID, storage.ActionMint, policy.MintLimit, policy.Window, now)
+		allowed, err = s.storage.CheckThrottle(r.Context(), policy.ID, storage.ActionMint, policy.MintLimit, policy.Window, amount, now)
 	case "redeem":
-		allowed, err = s.storage.CheckThrottle(r.Context(), policy.ID, storage.ActionRedeem, policy.RedeemLimit, policy.Window, now)
+		allowed, err = s.storage.CheckThrottle(r.Context(), policy.ID, storage.ActionRedeem, policy.RedeemLimit, policy.Window, amount, now)
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return

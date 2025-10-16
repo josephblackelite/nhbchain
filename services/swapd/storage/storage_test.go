@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestRecordSnapshotAndLatest(t *testing.T) {
 func TestThrottlePolicy(t *testing.T) {
 	store := openTestDB(t)
 	ctx := context.Background()
-	policy := Policy{ID: "default", MintLimit: 2, RedeemLimit: 1, Window: time.Minute}
+	policy := Policy{ID: "default", MintLimit: 100, RedeemLimit: 50, Window: time.Minute}
 	if err := store.SavePolicy(ctx, policy); err != nil {
 		t.Fatalf("save policy: %v", err)
 	}
@@ -44,35 +45,65 @@ func TestThrottlePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get policy: %v", err)
 	}
-	if loaded.MintLimit != 2 || loaded.RedeemLimit != 1 {
+	if loaded.MintLimit != 100 || loaded.RedeemLimit != 50 {
 		t.Fatalf("unexpected policy: %+v", loaded)
 	}
 	now := time.Now()
-	allow, err := store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, now)
+	allow, err := store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, big.NewInt(40), now)
 	if err != nil {
 		t.Fatalf("check throttle: %v", err)
 	}
 	if !allow {
 		t.Fatalf("expected first mint to pass")
 	}
-	allow, _ = store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, now.Add(time.Second))
+	var stored string
+	if err := store.db.QueryRowContext(ctx, `
+        SELECT amount FROM throttle_events WHERE policy_id = ? AND action = ? ORDER BY occurred_at LIMIT 1
+    `, "default", string(ActionMint)).Scan(&stored); err != nil {
+		t.Fatalf("load stored amount: %v", err)
+	}
+	if strings.TrimSpace(stored) != "40" {
+		t.Fatalf("unexpected stored amount: %q", stored)
+	}
+	allow, _ = store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, big.NewInt(30), now.Add(time.Second))
 	if !allow {
 		t.Fatalf("expected second mint to pass")
 	}
-	allow, _ = store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, now.Add(2*time.Second))
+	allow, _ = store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, big.NewInt(40), now.Add(2*time.Second))
 	if allow {
 		t.Fatalf("expected third mint to fail")
 	}
-	allow, err = store.CheckThrottle(ctx, "default", ActionRedeem, loaded.RedeemLimit, loaded.Window, now)
+	allow, err = store.CheckThrottle(ctx, "default", ActionMint, loaded.MintLimit, loaded.Window, big.NewInt(40), now.Add(loaded.Window+time.Second))
+	if err != nil {
+		t.Fatalf("check throttle after window: %v", err)
+	}
+	if !allow {
+		t.Fatalf("expected mint to pass after window")
+	}
+	allow, err = store.CheckThrottle(ctx, "default", ActionRedeem, loaded.RedeemLimit, loaded.Window, big.NewInt(30), now)
 	if err != nil {
 		t.Fatalf("check redeem: %v", err)
 	}
 	if !allow {
 		t.Fatalf("expected redeem to pass")
 	}
-	allow, _ = store.CheckThrottle(ctx, "default", ActionRedeem, loaded.RedeemLimit, loaded.Window, now.Add(2*time.Second))
+	allow, err = store.CheckThrottle(ctx, "default", ActionRedeem, loaded.RedeemLimit, loaded.Window, big.NewInt(15), now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("second redeem: %v", err)
+	}
+	if !allow {
+		t.Fatalf("expected second redeem to pass")
+	}
+	allow, _ = store.CheckThrottle(ctx, "default", ActionRedeem, loaded.RedeemLimit, loaded.Window, big.NewInt(10), now.Add(3*time.Second))
 	if allow {
-		t.Fatalf("expected redeem to fail")
+		t.Fatalf("expected redeem to fail when exceeding remainder")
+	}
+	allow, err = store.CheckThrottle(ctx, "default", ActionRedeem, loaded.RedeemLimit, loaded.Window, big.NewInt(10), now.Add(loaded.Window+time.Second))
+	if err != nil {
+		t.Fatalf("redeem after window: %v", err)
+	}
+	if !allow {
+		t.Fatalf("expected redeem to pass after window")
 	}
 }
 

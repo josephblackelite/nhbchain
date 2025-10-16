@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -144,7 +145,7 @@ CREATE TABLE IF NOT EXISTS throttle_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     policy_id TEXT NOT NULL,
     action TEXT NOT NULL,
-    amount TEXT,
+    amount TEXT NOT NULL,
     occurred_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_throttle_events ON throttle_events(policy_id, action, occurred_at);
@@ -231,12 +232,23 @@ const (
 )
 
 // CheckThrottle records the event if it does not exceed the configured limit.
-func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action ThrottleAction, limit int, window time.Duration, when time.Time) (bool, error) {
+func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action ThrottleAction, limit int, window time.Duration, amount *big.Int, when time.Time) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("storage not configured")
 	}
 	if limit <= 0 {
 		return true, nil
+	}
+	normalized := big.NewInt(0)
+	if amount != nil {
+		normalized = new(big.Int).Set(amount)
+	}
+	if normalized.Sign() < 0 {
+		normalized = big.NewInt(0)
+	}
+	limitBig := big.NewInt(int64(limit))
+	if normalized.Cmp(limitBig) > 0 {
+		return false, nil
 	}
 	cutoff := when.Add(-window).Unix()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
@@ -244,21 +256,46 @@ func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action Thr
 		return false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
-	var count int
-	if err := tx.QueryRowContext(ctx, `
-        SELECT COUNT(1)
+	rows, err := tx.QueryContext(ctx, `
+        SELECT amount
         FROM throttle_events
         WHERE policy_id = ? AND action = ? AND occurred_at >= ?
-    `, policyID, string(action), cutoff).Scan(&count); err != nil {
-		return false, fmt.Errorf("count events: %w", err)
+    `, policyID, string(action), cutoff)
+	if err != nil {
+		return false, fmt.Errorf("query throttle events: %w", err)
 	}
-	if count >= limit {
+	defer rows.Close()
+	used := big.NewInt(0)
+	for rows.Next() {
+		var stored string
+		if err := rows.Scan(&stored); err != nil {
+			return false, fmt.Errorf("scan throttle amount: %w", err)
+		}
+		stored = strings.TrimSpace(stored)
+		if stored == "" {
+			continue
+		}
+		amt := new(big.Int)
+		if _, ok := amt.SetString(stored, 10); ok {
+			used.Add(used, amt)
+			continue
+		}
+		return false, fmt.Errorf("parse throttle amount: %q", stored)
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate throttle events: %w", err)
+	}
+	remainder := new(big.Int).Sub(limitBig, used)
+	if remainder.Sign() <= 0 {
+		return false, nil
+	}
+	if remainder.Cmp(normalized) < 0 {
 		return false, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO throttle_events(policy_id, action, amount, occurred_at)
-        VALUES(?, ?, '', ?)
-    `, policyID, string(action), when.Unix()); err != nil {
+        VALUES(?, ?, ?, ?)
+    `, policyID, string(action), normalized.String(), when.Unix()); err != nil {
 		return false, fmt.Errorf("record event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
