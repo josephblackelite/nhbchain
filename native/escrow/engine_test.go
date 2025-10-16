@@ -919,6 +919,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	keyB, addrB := mustGenerateArbitrator(t)
 	_, addrC := mustGenerateArbitrator(t)
 
+	arbRecipient := newTestAddress(0xAD)
 	realm := &EscrowRealm{
 		ID: "realm-alpha",
 		Arbitrators: &ArbitratorSet{
@@ -926,6 +927,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 			Threshold: 2,
 			Members:   [][20]byte{addrA, addrB, addrC},
 		},
+		FeeSchedule: &RealmFeeSchedule{FeeBps: 120, Recipient: arbRecipient},
 	}
 	if _, err := engine.CreateRealm(realm); err != nil {
 		t.Fatalf("create realm: %v", err)
@@ -936,6 +938,9 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 500, 1_700_001_000, 46, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
+	}
+	if esc.FrozenArb == nil || esc.FrozenArb.FeeSchedule == nil {
+		t.Fatalf("expected frozen fee schedule")
 	}
 	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
@@ -964,12 +969,16 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 		t.Fatalf("expected resolution hash %x, got %x", digest[:], stored.ResolutionHash[:])
 	}
 	payeeAcc := state.account(payee)
-	if got := payeeAcc.BalanceNHB.String(); got != "570" {
-		t.Fatalf("expected payee 570, got %s", got)
+	if got := payeeAcc.BalanceNHB.String(); got != "563" {
+		t.Fatalf("expected payee 563, got %s", got)
 	}
 	treasuryAcc := state.account(engine.feeTreasury)
 	if got := treasuryAcc.BalanceNHB.String(); got != "30" {
 		t.Fatalf("expected treasury 30, got %s", got)
+	}
+	arbAcc := state.account(arbRecipient)
+	if got := arbAcc.BalanceNHB.String(); got != "7" {
+		t.Fatalf("expected arbitrator recipient 7, got %s", got)
 	}
 	events := emitter.typesEvents()
 	if len(events) == 0 {
@@ -991,6 +1000,69 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	}, ",")
 	if last.Attributes["decisionSigners"] != expectedSigners {
 		t.Fatalf("unexpected signers: %s", last.Attributes["decisionSigners"])
+	}
+}
+
+func TestResolveWithSignaturesRefundRoutesFees(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+
+	keyA, addrA := mustGenerateArbitrator(t)
+	keyB, addrB := mustGenerateArbitrator(t)
+
+	arbRecipient := newTestAddress(0xAE)
+	realm := &EscrowRealm{
+		ID: "realm-delta",
+		Arbitrators: &ArbitratorSet{
+			Scheme:    ArbitrationSchemeCommittee,
+			Threshold: 2,
+			Members:   [][20]byte{addrA, addrB},
+		},
+		FeeSchedule: &RealmFeeSchedule{FeeBps: 150, Recipient: arbRecipient},
+	}
+	if _, err := engine.CreateRealm(realm); err != nil {
+		t.Fatalf("create realm: %v", err)
+	}
+
+	payer := newTestAddress(0x93)
+	payee := newTestAddress(0x94)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 400, 1_700_001_100, 47, nil, [32]byte{}, realm.ID)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if err := engine.Dispute(esc.ID, payer); err != nil {
+		t.Fatalf("dispute: %v", err)
+	}
+
+	payload := buildDecisionPayload(t, esc.ID, esc.FrozenArb.PolicyNonce, "refund", [32]byte{})
+	sigs := [][]byte{
+		signDecisionPayload(t, payload, keyA),
+		signDecisionPayload(t, payload, keyB),
+	}
+	if err := engine.ResolveWithSignatures(esc.ID, payload, sigs); err != nil {
+		t.Fatalf("resolve with signatures: %v", err)
+	}
+
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowRefunded {
+		t.Fatalf("expected refunded status, got %d", stored.Status)
+	}
+
+	payerAcc := state.account(payer)
+	if got := payerAcc.BalanceNHB.String(); got != "973" {
+		t.Fatalf("expected payer balance 973, got %s", got)
+	}
+	treasuryAcc := state.account(engine.feeTreasury)
+	if got := treasuryAcc.BalanceNHB.String(); got != "20" {
+		t.Fatalf("expected treasury 20, got %s", got)
+	}
+	arbAcc := state.account(arbRecipient)
+	if got := arbAcc.BalanceNHB.String(); got != "7" {
+		t.Fatalf("expected arbitrator recipient 7, got %s", got)
 	}
 }
 
