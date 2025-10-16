@@ -63,6 +63,9 @@ type claimableJSON struct {
 	HashLock  string `json:"hashLock"`
 	Deadline  int64  `json:"deadline"`
 	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt"`
+	Nonce     uint64 `json:"nonce"`
+	ChainID   string `json:"chainId"`
 	Status    string `json:"status"`
 }
 
@@ -263,6 +266,9 @@ func formatClaimableJSON(record *claimable.Claimable) claimableJSON {
 		HashLock:  "0x" + hex.EncodeToString(record.HashLock[:]),
 		Deadline:  record.Deadline,
 		CreatedAt: record.CreatedAt,
+		ExpiresAt: record.ExpiresAt,
+		Nonce:     record.Nonce,
+		ChainID:   record.ChainID,
 		Status:    record.Status.String(),
 	}
 }

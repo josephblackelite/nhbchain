@@ -68,6 +68,8 @@ type identityCreateClaimableResult struct {
 	Amount        string `json:"amount"`
 	ExpiresAt     int64  `json:"expiresAt"`
 	CreatedAt     int64  `json:"createdAt"`
+	Nonce         uint64 `json:"nonce"`
+	ChainID       string `json:"chainId"`
 }
 
 type identityClaimParams struct {
@@ -476,8 +478,10 @@ func (s *Server) handleIdentityCreateClaimable(w http.ResponseWriter, r *http.Re
 		RecipientHint: "0x" + hex.EncodeToString(record.RecipientHint[:]),
 		Token:         record.Token,
 		Amount:        amountStr,
-		ExpiresAt:     record.Deadline,
+		ExpiresAt:     record.ExpiresAt,
 		CreatedAt:     record.CreatedAt,
+		Nonce:         record.Nonce,
+		ChainID:       record.ChainID,
 	})
 }
 

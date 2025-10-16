@@ -4566,7 +4566,8 @@ func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, ha
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{})
+	chainID := fmt.Sprintf("%d", n.ChainID())
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -4593,7 +4594,8 @@ func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big
 	hash := ethcrypto.Keccak256(hint[:])
 	var hashLock [32]byte
 	copy(hashLock[:], hash)
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint)
+	chainID := fmt.Sprintf("%d", n.ChainID())
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID)
 	if err != nil {
 		return nil, err
 	}
