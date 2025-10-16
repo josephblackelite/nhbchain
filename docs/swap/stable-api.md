@@ -145,7 +145,7 @@ Preview response:
 }
 ```
 
-`status` surfaces live counters and is wired to Grafana panels under `Stable ▸ Engine overview`. The endpoint remains read-only and does not require authentication on localnet fixtures.
+`status` surfaces live counters and is wired to Grafana panels under `Stable ▸ Engine overview`. All production requests must carry partner authentication headers; localnet fixtures may disable the middleware for smoke testing only.
 
 ## GET `/v1/stable/limits`
 
@@ -164,7 +164,7 @@ When enabled the limits endpoint echoes the soft mint/redeem thresholds configur
 }
 ```
 
-In preview the endpoint returns the `stable engine not enabled` error. Operations teams can cross-reference this payload with the governance proposals that authorise cap changes.
+The endpoint requires the same signed partner headers described above. In preview the endpoint returns the `stable engine not enabled` error. Operations teams can cross-reference this payload with the governance proposals that authorise cap changes.
 
 ## Error Catalogue
 
@@ -198,7 +198,7 @@ To onboard a new OTC desk to the stable API:
 
 During smoke testing desks should verify a signed `GET /v1/stable/status` request succeeds and that `429 partner quota exceeded` surfaces once the configured allowance is consumed. Treasury can reset quotas by editing the partner configuration or waiting for the next UTC day boundary.
 
-Partners should verify integration by calling `/v1/stable/status` and `/v1/stable/limits` after onboarding to confirm the live quotas before sending production traffic.
+Partners should verify integration by sending signed requests to `/v1/stable/status` and `/v1/stable/limits` after onboarding to confirm the live quotas before sending production traffic.
 
 ## Transparency Appendix
 

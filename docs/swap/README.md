@@ -226,7 +226,7 @@ Operators have two independent switches when triaging incidents:
 
    To re-enable redemptions after readiness drills, set `.stable.paused = false` and rerun the restart.
 
-Inspect both toggles with the combined helper:
+Inspect both toggles with the combined helper (pass partner HMAC headers when querying swapd outside localnet):
 
 ```bash
 go run ./examples/docs/ops/swap_pause_inspect \
