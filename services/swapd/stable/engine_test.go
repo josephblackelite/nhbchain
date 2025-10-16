@@ -57,7 +57,7 @@ func buildTestEngine(t *testing.T, base time.Time, inventory int64, ttl time.Dur
 		MaxSlippageBps: 50,
 		SoftInventory:  inventory,
 	}
-	engine, err := NewEngine([]Asset{asset}, limits)
+	engine, err := NewEngine([]Asset{asset}, limits, nil)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -263,6 +263,89 @@ func TestEngineReservationExpiryReleasesInventory(t *testing.T) {
 	}
 	if _, err := engine.ReserveQuote(ctx, quote.ID, "merchant", 150); err != nil {
 		t.Fatalf("reserve after expiry cleanup: %v", err)
+	}
+}
+
+func TestEnginePersistenceAcrossRestart(t *testing.T) {
+	store := openTestStorage(t)
+	ctx := context.Background()
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	asset := Asset{
+		Symbol:         "ZNHB",
+		BasePair:       "ZNHB",
+		QuotePair:      "USD",
+		QuoteTTL:       time.Minute,
+		MaxSlippageBps: 50,
+		SoftInventory:  1_000_000,
+	}
+	limits := Limits{DailyCap: 1_000_000}
+	engine, err := NewEngine([]Asset{asset}, limits, store)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	clock := newTestClock(base)
+	engine.WithClock(clock.Now)
+	engine.SetPriceMaxAge(24 * time.Hour)
+	engine.RecordPrice("ZNHB", "USD", 1.02, base)
+	quote, err := engine.PriceQuote(ctx, "ZNHB", 100)
+	if err != nil {
+		t.Fatalf("price quote: %v", err)
+	}
+	reservation, err := engine.ReserveQuote(ctx, quote.ID, "acct", 100)
+	if err != nil {
+		t.Fatalf("reserve quote: %v", err)
+	}
+	available, reserved, payouts, _ := engine.LedgerBalance("ZNHB")
+	if available != mustAmountUnits(t, 1_000_000-102) {
+		t.Fatalf("available mismatch after reserve: got %d", available)
+	}
+	if reserved != mustAmountUnits(t, 102) {
+		t.Fatalf("reserved mismatch after reserve: got %d", reserved)
+	}
+	if payouts != 0 {
+		t.Fatalf("unexpected payouts after reserve: %d", payouts)
+	}
+
+	engineRestart, err := NewEngine([]Asset{asset}, limits, store)
+	if err != nil {
+		t.Fatalf("restart engine: %v", err)
+	}
+	clock2 := newTestClock(base.Add(10 * time.Second))
+	engineRestart.WithClock(clock2.Now)
+	available, reserved, payouts, ok := engineRestart.LedgerBalance("ZNHB")
+	if !ok {
+		t.Fatalf("ledger missing after restart")
+	}
+	if available != mustAmountUnits(t, 1_000_000-102) || reserved != mustAmountUnits(t, 102) || payouts != 0 {
+		t.Fatalf("ledger mismatch after restart: available=%d reserved=%d payouts=%d", available, reserved, payouts)
+	}
+	intent, err := engineRestart.CreateCashOutIntent(ctx, reservation.QuoteID)
+	if err != nil {
+		t.Fatalf("cashout after restart: %v", err)
+	}
+	if intent.ReservationID != reservation.QuoteID {
+		t.Fatalf("intent reservation mismatch: got %s want %s", intent.ReservationID, reservation.QuoteID)
+	}
+	available, reserved, payouts, _ = engineRestart.LedgerBalance("ZNHB")
+	if available != mustAmountUnits(t, 1_000_000-102) || reserved != 0 || payouts != mustAmountUnits(t, 102) {
+		t.Fatalf("ledger mismatch after cashout: available=%d reserved=%d payouts=%d", available, reserved, payouts)
+	}
+
+	engineFinal, err := NewEngine([]Asset{asset}, limits, store)
+	if err != nil {
+		t.Fatalf("final restart engine: %v", err)
+	}
+	clock3 := newTestClock(base.Add(20 * time.Second))
+	engineFinal.WithClock(clock3.Now)
+	available, reserved, payouts, ok = engineFinal.LedgerBalance("ZNHB")
+	if !ok {
+		t.Fatalf("ledger missing after final restart")
+	}
+	if available != mustAmountUnits(t, 1_000_000-102) || reserved != 0 || payouts != mustAmountUnits(t, 102) {
+		t.Fatalf("ledger mismatch after final restart: available=%d reserved=%d payouts=%d", available, reserved, payouts)
+	}
+	if _, err := engineFinal.CreateCashOutIntent(ctx, reservation.QuoteID); !errors.Is(err, ErrReservationConsumed) {
+		t.Fatalf("expected reservation consumed after restart, got %v", err)
 	}
 }
 

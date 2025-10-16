@@ -39,7 +39,7 @@ func TestStableHandlersFlow(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
-	engine := newTestStableEngine(t, base)
+	engine := newTestStableEngine(t, base, store)
 	limits := stable.Limits{DailyCap: 1_000_000}
 	asset := stable.Asset{
 		Symbol:         "ZNHB",
@@ -172,7 +172,7 @@ func TestStableHandlersRequireAuthentication(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
-	engine := newTestStableEngine(t, base)
+	engine := newTestStableEngine(t, base, store)
 	limits := stable.Limits{DailyCap: 1_000_000}
 	asset := stable.Asset{
 		Symbol:         "ZNHB",
@@ -211,7 +211,7 @@ func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
-	engine := newTestStableEngine(t, base)
+	engine := newTestStableEngine(t, base, store)
 	limits := stable.Limits{DailyCap: 1_000_000}
 	asset := stable.Asset{
 		Symbol:         "ZNHB",
@@ -246,7 +246,7 @@ func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
 	assertGoldenJSON(t, "stable_principal_forbidden.json", recorder.Body.Bytes())
 }
 
-func newTestStableEngine(t *testing.T, base time.Time) *stable.Engine {
+func newTestStableEngine(t *testing.T, base time.Time, store *storage.Storage) *stable.Engine {
 	t.Helper()
 	assets := []stable.Asset{{
 		Symbol:         "ZNHB",
@@ -256,7 +256,7 @@ func newTestStableEngine(t *testing.T, base time.Time) *stable.Engine {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}}
-	engine, err := stable.NewEngine(assets, stable.Limits{DailyCap: 1_000_000})
+	engine, err := stable.NewEngine(assets, stable.Limits{DailyCap: 1_000_000}, store)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
