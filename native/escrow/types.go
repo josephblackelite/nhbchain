@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
+
+	"github.com/btcsuite/btcutil/bech32"
 )
 
 // ArbitrationScheme enumerates the supported strategies for evaluating an
@@ -87,6 +90,7 @@ type EscrowRealm struct {
 	CreatedAt       int64
 	UpdatedAt       int64
 	Arbitrators     *ArbitratorSet
+	Metadata        *EscrowRealmMetadata
 }
 
 // Clone returns a deep copy of the realm definition.
@@ -96,6 +100,9 @@ func (r *EscrowRealm) Clone() *EscrowRealm {
 	}
 	clone := *r
 	clone.Arbitrators = r.Arbitrators.Clone()
+	if r.Metadata != nil {
+		clone.Metadata = r.Metadata.Clone()
+	}
 	return &clone
 }
 
@@ -110,6 +117,7 @@ type FrozenArb struct {
 	Threshold    uint32
 	Members      [][20]byte
 	FrozenAt     int64
+	Metadata     *EscrowRealmMetadata
 }
 
 // Clone returns a deep copy of the frozen arbitrator policy.
@@ -129,8 +137,55 @@ func (f *FrozenArb) Clone() *FrozenArb {
 		clone.Members = make([][20]byte, len(f.Members))
 		copy(clone.Members, f.Members)
 	}
+	if f.Metadata != nil {
+		clone.Metadata = f.Metadata.Clone()
+	}
 	return clone
 }
+
+// EscrowRealmScope describes the intended usage scope for an escrow realm.
+type EscrowRealmScope uint8
+
+const (
+	// EscrowRealmScopeUnspecified represents an unset scope.
+	EscrowRealmScopeUnspecified EscrowRealmScope = iota
+	// EscrowRealmScopePlatform denotes platform-wide governance managed by core teams.
+	EscrowRealmScopePlatform
+	// EscrowRealmScopeMarketplace denotes realms managed by marketplace operators.
+	EscrowRealmScopeMarketplace
+)
+
+// Valid reports whether the realm scope is recognised by the runtime.
+func (s EscrowRealmScope) Valid() bool {
+	switch s {
+	case EscrowRealmScopePlatform, EscrowRealmScopeMarketplace:
+		return true
+	default:
+		return false
+	}
+}
+
+// EscrowRealmMetadata captures provider context and fee routing for a realm.
+type EscrowRealmMetadata struct {
+	Scope              EscrowRealmScope
+	ProviderProfile    string
+	ArbitrationFeeBps  uint32
+	FeeRecipientBech32 string
+}
+
+// Clone returns a deep copy of the metadata structure.
+func (m *EscrowRealmMetadata) Clone() *EscrowRealmMetadata {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+	return &clone
+}
+
+const (
+	// EscrowRealmMaxProviderProfileLength bounds the provider profile metadata.
+	EscrowRealmMaxProviderProfileLength = 512
+)
 
 const (
 	// DefaultRealmMinThreshold defines the lower bound for committee
@@ -384,6 +439,56 @@ func SanitizeArbitratorSet(set *ArbitratorSet) (*ArbitratorSet, error) {
 	return sanitized, nil
 }
 
+// SanitizeEscrowRealmMetadata validates the governance metadata attached to a realm.
+func SanitizeEscrowRealmMetadata(meta *EscrowRealmMetadata) (*EscrowRealmMetadata, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("nil realm metadata")
+	}
+	clone := meta.Clone()
+	if !clone.Scope.Valid() {
+		return nil, fmt.Errorf("unsupported realm scope")
+	}
+	profile := strings.TrimSpace(clone.ProviderProfile)
+	if profile == "" {
+		return nil, fmt.Errorf("realm provider profile required")
+	}
+	if utf8.RuneCountInString(profile) > EscrowRealmMaxProviderProfileLength {
+		return nil, fmt.Errorf("realm provider profile too long")
+	}
+	clone.ProviderProfile = profile
+	if clone.ArbitrationFeeBps > 10_000 {
+		return nil, fmt.Errorf("realm arbitration fee bps out of range")
+	}
+	trimmedRecipient := strings.TrimSpace(clone.FeeRecipientBech32)
+	if trimmedRecipient != "" {
+		if err := validateBech32Account(trimmedRecipient); err != nil {
+			return nil, fmt.Errorf("realm fee recipient invalid: %w", err)
+		}
+		clone.FeeRecipientBech32 = trimmedRecipient
+	} else if clone.ArbitrationFeeBps > 0 {
+		return nil, fmt.Errorf("realm fee recipient required when fee bps > 0")
+	}
+	return clone, nil
+}
+
+func validateBech32Account(addr string) error {
+	hrp, data, err := bech32.Decode(addr)
+	if err != nil {
+		return err
+	}
+	if hrp != "nhb" && hrp != "znhb" {
+		return fmt.Errorf("unsupported hrp %q", hrp)
+	}
+	decoded, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil {
+		return err
+	}
+	if len(decoded) != 20 {
+		return fmt.Errorf("invalid address length %d", len(decoded))
+	}
+	return nil
+}
+
 // SanitizeEscrowRealm validates the supplied realm definition.
 func SanitizeEscrowRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 	if realm == nil {
@@ -405,6 +510,14 @@ func SanitizeEscrowRealm(realm *EscrowRealm) (*EscrowRealm, error) {
 		return nil, err
 	}
 	clone.Arbitrators = sanitized
+	if clone.Metadata == nil {
+		return nil, fmt.Errorf("realm metadata required")
+	}
+	meta, err := SanitizeEscrowRealmMetadata(clone.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	clone.Metadata = meta
 	if clone.UpdatedAt != 0 && clone.UpdatedAt < clone.CreatedAt {
 		return nil, fmt.Errorf("realm updatedAt before createdAt")
 	}
@@ -444,5 +557,13 @@ func SanitizeFrozenArb(frozen *FrozenArb) (*FrozenArb, error) {
 			return nil, fmt.Errorf("frozen policy member %d is zero address", idx)
 		}
 	}
+	if clone.Metadata == nil {
+		return nil, fmt.Errorf("frozen policy metadata required")
+	}
+	meta, err := SanitizeEscrowRealmMetadata(clone.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	clone.Metadata = meta
 	return clone, nil
 }

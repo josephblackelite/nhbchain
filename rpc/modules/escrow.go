@@ -39,12 +39,13 @@ type listEventsParams struct {
 
 // EscrowRealmResult represents an arbitration realm definition returned over RPC.
 type EscrowRealmResult struct {
-	ID              string                  `json:"id"`
-	Version         uint64                  `json:"version"`
-	NextPolicyNonce uint64                  `json:"nextPolicyNonce"`
-	CreatedAt       int64                   `json:"createdAt"`
-	UpdatedAt       int64                   `json:"updatedAt"`
-	Arbitrators     *EscrowArbitratorResult `json:"arbitrators,omitempty"`
+	ID              string                     `json:"id"`
+	Version         uint64                     `json:"version"`
+	NextPolicyNonce uint64                     `json:"nextPolicyNonce"`
+	CreatedAt       int64                      `json:"createdAt"`
+	UpdatedAt       int64                      `json:"updatedAt"`
+	Arbitrators     *EscrowArbitratorResult    `json:"arbitrators,omitempty"`
+	Metadata        *EscrowRealmMetadataResult `json:"metadata,omitempty"`
 }
 
 // EscrowArbitratorResult captures the resolved arbitrator policy for a realm.
@@ -52,6 +53,14 @@ type EscrowArbitratorResult struct {
 	Scheme    string   `json:"scheme"`
 	Threshold uint32   `json:"threshold"`
 	Members   []string `json:"members,omitempty"`
+}
+
+// EscrowRealmMetadataResult exposes the governance metadata for a realm.
+type EscrowRealmMetadataResult struct {
+	Scope             string `json:"scope"`
+	ProviderProfile   string `json:"providerProfile"`
+	ArbitrationFeeBps uint32 `json:"arbitrationFeeBps"`
+	FeeRecipient      string `json:"feeRecipient,omitempty"`
 }
 
 // EscrowSnapshotResult describes the latest persisted escrow state along with
@@ -77,13 +86,14 @@ type EscrowSnapshotResult struct {
 // FrozenPolicyResult exposes the immutable arbitrator policy captured at
 // escrow creation time.
 type FrozenPolicyResult struct {
-	RealmID      string   `json:"realmId"`
-	RealmVersion uint64   `json:"realmVersion"`
-	PolicyNonce  uint64   `json:"policyNonce"`
-	Scheme       string   `json:"scheme"`
-	Threshold    uint32   `json:"threshold"`
-	Members      []string `json:"members,omitempty"`
-	FrozenAt     int64    `json:"frozenAt,omitempty"`
+	RealmID      string                     `json:"realmId"`
+	RealmVersion uint64                     `json:"realmVersion"`
+	PolicyNonce  uint64                     `json:"policyNonce"`
+	Scheme       string                     `json:"scheme"`
+	Threshold    uint32                     `json:"threshold"`
+	Members      []string                   `json:"members,omitempty"`
+	FrozenAt     int64                      `json:"frozenAt,omitempty"`
+	Metadata     *EscrowRealmMetadataResult `json:"metadata,omitempty"`
 }
 
 // EscrowEventResult represents an emitted escrow-related event.
@@ -220,6 +230,9 @@ func formatRealmResult(realm *escrow.EscrowRealm) EscrowRealmResult {
 			Members:   formatAddressList(realm.Arbitrators.Members),
 		}
 	}
+	if realm.Metadata != nil {
+		result.Metadata = formatRealmMetadata(realm.Metadata)
+	}
 	return result
 }
 
@@ -261,6 +274,7 @@ func formatSnapshotResult(esc *escrow.Escrow) *EscrowSnapshotResult {
 			Threshold:    esc.FrozenArb.Threshold,
 			Members:      formatAddressList(esc.FrozenArb.Members),
 			FrozenAt:     esc.FrozenArb.FrozenAt,
+			Metadata:     formatRealmMetadata(esc.FrozenArb.Metadata),
 		}
 	}
 	if esc.ResolutionHash != ([32]byte{}) {
@@ -279,6 +293,32 @@ func formatScheme(s escrow.ArbitrationScheme) string {
 	default:
 		return "unspecified"
 	}
+}
+
+func formatScope(scope escrow.EscrowRealmScope) string {
+	switch scope {
+	case escrow.EscrowRealmScopePlatform:
+		return "platform"
+	case escrow.EscrowRealmScopeMarketplace:
+		return "marketplace"
+	default:
+		return "unspecified"
+	}
+}
+
+func formatRealmMetadata(meta *escrow.EscrowRealmMetadata) *EscrowRealmMetadataResult {
+	if meta == nil {
+		return nil
+	}
+	result := &EscrowRealmMetadataResult{
+		Scope:             formatScope(meta.Scope),
+		ProviderProfile:   meta.ProviderProfile,
+		ArbitrationFeeBps: meta.ArbitrationFeeBps,
+	}
+	if trimmed := strings.TrimSpace(meta.FeeRecipientBech32); trimmed != "" {
+		result.FeeRecipient = trimmed
+	}
+	return result
 }
 
 func formatAddressList(members [][20]byte) []string {
