@@ -61,6 +61,7 @@ const (
 	limiterKeyPrefixIdentity      = "identity:"
 	limiterKeyPrefixChain         = "chain:"
 	limiterKeyPrefixIdentityChain = "identity_chain:"
+	limiterMethodWildcard         = "*"
 
 	swapMaxTimestampSkew  = 2 * time.Minute
 	swapDefaultTimestamp  = swapMaxTimestampSkew
@@ -105,6 +106,15 @@ type SwapAuthConfig struct {
 	PartnerRateLimits    map[string]int
 	Now                  func() time.Time
 	Persistence          gatewayauth.NoncePersistence
+}
+
+// RouteRateLimitConfig captures optional per-method quota overrides for JSON-RPC handlers.
+type RouteRateLimitConfig struct {
+	MaxTxPerWindow        int
+	MaxTxPerIP            int
+	MaxTxPerIdentity      int
+	MaxTxPerChain         int
+	MaxTxPerIdentityChain int
 }
 
 // ProxyHeaderMode defines how the server treats reverse proxy headers that can
@@ -204,6 +214,10 @@ type ServerConfig struct {
 	SwapAuth SwapAuthConfig
 	// CallerMetadataMaxTTL bounds the expiry horizon permitted for caller metadata.
 	CallerMetadataMaxTTL time.Duration
+	// RouteRateLimits enumerates optional per-method rate limit overrides. Keys are
+	// JSON-RPC method names (e.g. "nhb_sendTransaction"). Values mirror the global
+	// MaxTxPer* knobs but apply only to the corresponding method.
+	RouteRateLimits map[string]RouteRateLimitConfig
 }
 
 // NetworkService abstracts the network control plane used by RPC handlers to
@@ -250,7 +264,7 @@ type Server struct {
 	swapRateWindow          time.Duration
 	swapRateCounters        map[string]*rateLimiter
 	swapRateMu              sync.Mutex
-	rateLimitMax            map[string]int
+	rateLimitMax            map[string]map[string]int
 	rateLimitWindow         time.Duration
 	rateLimiterStaleAfter   time.Duration
 	rateLimiterSweepBackoff time.Duration
@@ -446,11 +460,56 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 			maxIdentityChain = maxTx
 		}
 	}
-	rateLimits := map[string]int{
-		limiterScopeIP:            maxIP,
-		limiterScopeIdentity:      maxIdentity,
-		limiterScopeChain:         maxChain,
-		limiterScopeIdentityChain: maxIdentityChain,
+	rateLimits := map[string]map[string]int{
+		limiterScopeIP:            {"": maxIP},
+		limiterScopeIdentity:      {"": maxIdentity},
+		limiterScopeChain:         {"": maxChain},
+		limiterScopeIdentityChain: {"": maxIdentityChain},
+	}
+	for method, override := range cfg.RouteRateLimits {
+		trimmedMethod := strings.TrimSpace(method)
+		if trimmedMethod == "" {
+			continue
+		}
+		routeMax := override.MaxTxPerWindow
+		if routeMax <= 0 {
+			routeMax = maxTx
+		}
+		routeFallback := func(value int) int {
+			if value <= 0 {
+				return routeMax
+			}
+			return value
+		}
+		routeIP := routeFallback(override.MaxTxPerIP)
+		routeIdentity := routeFallback(override.MaxTxPerIdentity)
+		routeChain := routeFallback(override.MaxTxPerChain)
+		identityChainDefault := routeMax
+		if routeIdentity > 0 && (identityChainDefault <= 0 || routeIdentity < identityChainDefault) {
+			identityChainDefault = routeIdentity
+		}
+		if routeChain > 0 && (identityChainDefault <= 0 || routeChain < identityChainDefault) {
+			identityChainDefault = routeChain
+		}
+		routeIdentityChain := override.MaxTxPerIdentityChain
+		if routeIdentityChain <= 0 {
+			routeIdentityChain = identityChainDefault
+			if routeIdentityChain <= 0 {
+				routeIdentityChain = routeMax
+			}
+		}
+		if limits := rateLimits[limiterScopeIP]; limits != nil {
+			limits[trimmedMethod] = routeIP
+		}
+		if limits := rateLimits[limiterScopeIdentity]; limits != nil {
+			limits[trimmedMethod] = routeIdentity
+		}
+		if limits := rateLimits[limiterScopeChain]; limits != nil {
+			limits[trimmedMethod] = routeChain
+		}
+		if limits := rateLimits[limiterScopeIdentityChain]; limits != nil {
+			limits[trimmedMethod] = routeIdentityChain
+		}
 	}
 	rateWindow := cfg.RateLimitWindow
 	if rateWindow <= 0 {
@@ -494,7 +553,6 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		callerNonces:             make(map[string]callerNonceState),
 		rateLimitMax:             rateLimits,
 		callerMetadataMaxTTL:     maxCallerTTL,
-		maxTxPerWindow:           maxTx,
 		rateLimitWindow:          rateWindow,
 		rateLimiterStaleAfter:    staleAfter,
 		rateLimiterSweepBackoff:  rateWindow,
@@ -2019,8 +2077,9 @@ func hasVerifiedClientCert(r *http.Request) bool {
 }
 
 // TestRequireAuth exposes the internal authentication helper for integration tests.
-func (s *Server) TestRequireAuth(r *http.Request) (*http.Request, *RPCError) {
-	return s.requireAuth(r)
+func (s *Server) TestRequireAuth(r *http.Request) *RPCError {
+	_, err := s.requireAuth(r)
+	return err
 }
 
 // TestAuthenticateSwap exposes the swap authenticator for integration tests.
@@ -2074,13 +2133,19 @@ func (s *Server) swapNow() time.Time {
 	return time.Now()
 }
 
-func (s *Server) allowSource(source, identity, chainNonce string, now time.Time) bool {
+func (s *Server) allowSource(source, identity, chainNonce, method string, now time.Time) bool {
 	normalized := canonicalHost(source)
 	if normalized == "" {
 		normalized = "unknown"
 	}
 	trimmedIdentity := strings.ToLower(strings.TrimSpace(identity))
 	trimmedChain := strings.TrimSpace(chainNonce)
+	trimmedMethod := strings.TrimSpace(method)
+	moduleName, _ := moduleAndMethod(trimmedMethod)
+	methodKey := strings.ReplaceAll(trimmedMethod, "|", "_")
+	if methodKey == "" {
+		methodKey = limiterMethodWildcard
+	}
 	type limiterKey struct {
 		key   string
 		scope string
@@ -2088,29 +2153,44 @@ func (s *Server) allowSource(source, identity, chainNonce string, now time.Time)
 	keys := make([]limiterKey, 0, 4)
 	if trimmedIdentity != "" && trimmedChain != "" {
 		keys = append(keys, limiterKey{
-			key:   limiterKeyPrefixIdentityChain + trimmedIdentity + "|" + trimmedChain,
+			key:   limiterKeyPrefixIdentityChain + trimmedIdentity + "|" + trimmedChain + "|" + methodKey,
 			scope: limiterScopeIdentityChain,
 		})
 	}
 	if trimmedIdentity != "" {
 		keys = append(keys, limiterKey{
-			key:   limiterKeyPrefixIdentity + trimmedIdentity,
+			key:   limiterKeyPrefixIdentity + trimmedIdentity + "|" + methodKey,
 			scope: limiterScopeIdentity,
 		})
 	}
 	if trimmedChain != "" {
 		keys = append(keys, limiterKey{
-			key:   limiterKeyPrefixChain + trimmedChain,
+			key:   limiterKeyPrefixChain + trimmedChain + "|" + methodKey,
 			scope: limiterScopeChain,
 		})
 	}
 	keys = append(keys, limiterKey{
-		key:   limiterKeyPrefixIP + normalized,
+		key:   limiterKeyPrefixIP + normalized + "|" + methodKey,
 		scope: limiterScopeIP,
 	})
 
 	s.mu.Lock()
 	s.evictRateLimitersLocked(now)
+	lookupLimit := func(scope string) int {
+		limits := s.rateLimitMax[scope]
+		if limits == nil {
+			return 0
+		}
+		if trimmedMethod != "" {
+			if limit, ok := limits[trimmedMethod]; ok {
+				return limit
+			}
+		}
+		if limit, ok := limits[""]; ok {
+			return limit
+		}
+		return 0
+	}
 	limiters := make([]*rateLimiter, len(keys))
 	for i, descriptor := range keys {
 		limiter, ok := s.rateLimiters[descriptor.key]
@@ -2125,11 +2205,11 @@ func (s *Server) allowSource(source, identity, chainNonce string, now time.Time)
 			limiter.windowStart = now
 			limiter.count = 0
 		}
-		limit := s.rateLimitMax[descriptor.scope]
+		limit := lookupLimit(descriptor.scope)
 		if limit > 0 && limiter.count >= limit {
 			limiter.lastSeen = now
 			s.mu.Unlock()
-			observability.RPC().RecordLimiterHit(descriptor.scope)
+			observability.RPC().RecordLimiterHit(descriptor.scope, moduleName, trimmedMethod)
 			return false
 		}
 		limiters[i] = limiter
@@ -2414,7 +2494,7 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	if chainKey != "" {
 		nonceKey = chainKey + ":" + nonceKey
 	}
-	if !s.allowSource(source, identity, nonceKey, now) {
+	if !s.allowSource(source, identity, nonceKey, req.Method, now) {
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "transaction rate limit exceeded", source)
 		return
 	}

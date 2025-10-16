@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
+
+const rateLimitTestMethod = "nhb_testMethod"
 
 func injectClientIP(t *testing.T, srv *Server, req *http.Request) *http.Request {
 	t.Helper()
@@ -187,13 +190,13 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	remoteAddr := "10.0.0.1:5000"
 
 	forwarded := "198.51.100.1"
-	limit := server.rateLimitMax[limiterScopeIP]
+	limit := server.rateLimitMax[limiterScopeIP][""]
 	for i := 0; i < limit; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("X-Forwarded-For", forwarded)
 		req = injectClientIP(t, server, req)
-		if !server.allowSource(server.clientSource(req), "", "", now) {
+		if !server.allowSource(server.clientSource(req), "", "", rateLimitTestMethod, now) {
 			t.Fatalf("trusted proxy request %d should be allowed", i)
 		}
 	}
@@ -202,7 +205,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	req.RemoteAddr = remoteAddr
 	req.Header.Set("X-Forwarded-For", forwarded)
 	req = injectClientIP(t, server, req)
-	if server.allowSource(server.clientSource(req), "", "", now) {
+	if server.allowSource(server.clientSource(req), "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected rate limit when exceeding window for same client")
 	}
 
@@ -210,7 +213,7 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	req.RemoteAddr = remoteAddr
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req = injectClientIP(t, server, req)
-	if !server.allowSource(server.clientSource(req), "", "", now) {
+	if !server.allowSource(server.clientSource(req), "", "", rateLimitTestMethod, now) {
 		t.Fatalf("distinct client behind trusted proxy should be allowed")
 	}
 }
@@ -250,10 +253,10 @@ func TestRateLimiterNormalizesSources(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
 
-	if !server.allowSource(" 198.51.100.11 ", "", "", now) {
+	if !server.allowSource(" 198.51.100.11 ", "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected first request to be allowed")
 	}
-	if !server.allowSource("198.51.100.11", "", "", now) {
+	if !server.allowSource("198.51.100.11", "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected normalized source to use same limiter")
 	}
 	server.mu.Lock()
@@ -271,7 +274,7 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		source := fmt.Sprintf("198.51.100.%d", i)
-		if !server.allowSource(source, "", "", staleTime) {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, staleTime) {
 			t.Fatalf("expected stale source %d to be tracked", i)
 		}
 	}
@@ -282,7 +285,7 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 	}
 	server.mu.Unlock()
 
-	if !server.allowSource("new-source", "", "", now) {
+	if !server.allowSource("new-source", "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected request from new source to be allowed")
 	}
 
@@ -292,7 +295,11 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 		server.mu.Unlock()
 		t.Fatalf("expected stale limiters to be evicted, got %d entries", count)
 	}
-	if _, ok := server.rateLimiters[limiterKeyPrefixIP+"new-source"]; !ok {
+	methodSuffix := "|" + strings.ReplaceAll(rateLimitTestMethod, "|", "_")
+	if rateLimitTestMethod == "" {
+		methodSuffix = "|" + limiterMethodWildcard
+	}
+	if _, ok := server.rateLimiters[limiterKeyPrefixIP+"new-source"+methodSuffix]; !ok {
 		server.mu.Unlock()
 		t.Fatalf("expected new source limiter to remain")
 	}
@@ -302,15 +309,19 @@ func TestRateLimiterEvictsStaleEntries(t *testing.T) {
 func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
+	methodSuffix := "|" + strings.ReplaceAll(rateLimitTestMethod, "|", "_")
+	if rateLimitTestMethod == "" {
+		methodSuffix = "|" + limiterMethodWildcard
+	}
 
 	for i := 0; i < rateLimiterMaxEntries; i++ {
 		source := fmt.Sprintf("client-%d", i)
-		if !server.allowSource(source, "", "", now) {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, now) {
 			t.Fatalf("expected initial requests to be allowed")
 		}
 	}
 
-	if !server.allowSource("extra-client", "", "", now) {
+	if !server.allowSource("extra-client", "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected extra client to be allowed after eviction")
 	}
 
@@ -320,13 +331,13 @@ func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
 		server.mu.Unlock()
 		t.Fatalf("expected limiter map to cap at %d entries, got %d", rateLimiterMaxEntries, count)
 	}
-	if _, ok := server.rateLimiters[limiterKeyPrefixIP+"extra-client"]; !ok {
+	if _, ok := server.rateLimiters[limiterKeyPrefixIP+"extra-client"+methodSuffix]; !ok {
 		server.mu.Unlock()
 		t.Fatalf("expected extra client limiter to be stored")
 	}
 	evictedInitial := false
 	for i := 0; i < rateLimiterMaxEntries; i++ {
-		if _, ok := server.rateLimiters[limiterKeyPrefixIP+fmt.Sprintf("client-%d", i)]; !ok {
+		if _, ok := server.rateLimiters[limiterKeyPrefixIP+fmt.Sprintf("client-%d", i)+methodSuffix]; !ok {
 			evictedInitial = true
 			break
 		}
@@ -342,21 +353,21 @@ func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 	now := time.Now()
 	source := "198.51.100.200"
 
-	limit := server.rateLimitMax[limiterScopeIP]
+	limit := server.rateLimitMax[limiterScopeIP][""]
 	for i := 0; i < limit; i++ {
-		if !server.allowSource(source, "", "", now) {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, now) {
 			t.Fatalf("expected request %d to be allowed", i)
 		}
 	}
 
 	for i := 0; i < rateLimiterMaxEntries-1; i++ {
 		churnSource := fmt.Sprintf("churn-%d", i)
-		if !server.allowSource(churnSource, "", "", now) {
+		if !server.allowSource(churnSource, "", "", rateLimitTestMethod, now) {
 			t.Fatalf("expected churn source %d to be allowed", i)
 		}
 	}
 
-	if server.allowSource(source, "", "", now) {
+	if server.allowSource(source, "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected churned source to remain rate limited within same window")
 	}
 }
@@ -367,20 +378,20 @@ func TestRateLimiterUsesIdentityAndNonce(t *testing.T) {
 
 	identity := "user@example.com"
 	nonceKey := "chain-1:1"
-	limit := server.rateLimitMax[limiterScopeIdentityChain]
+	limit := server.rateLimitMax[limiterScopeIdentityChain][""]
 	for i := 0; i < limit; i++ {
-		if !server.allowSource("203.0.113.10", identity, nonceKey, now) {
+		if !server.allowSource("203.0.113.10", identity, nonceKey, rateLimitTestMethod, now) {
 			t.Fatalf("expected request %d for identity to be allowed", i)
 		}
 	}
-	if server.allowSource("203.0.113.10", identity, nonceKey, now) {
+	if server.allowSource("203.0.113.10", identity, nonceKey, rateLimitTestMethod, now) {
 		t.Fatalf("expected identity to be rate limited once window exhausted")
 	}
 
-	if server.allowSource("198.51.100.5", identity, "chain-1:2", now) {
+	if server.allowSource("198.51.100.5", identity, "chain-1:2", rateLimitTestMethod, now) {
 		t.Fatalf("expected identity limiter to persist across nonce changes")
 	}
-	if server.allowSource("198.51.100.5", "other@example.com", nonceKey, now) {
+	if server.allowSource("198.51.100.5", "other@example.com", nonceKey, rateLimitTestMethod, now) {
 		t.Fatalf("expected chain limiter to prevent reuse under a new identity")
 	}
 }
@@ -398,23 +409,23 @@ func TestRateLimiterIsolatesIdentitiesSharingIP(t *testing.T) {
 	alice := "alice@example.com"
 	bob := "bob@example.com"
 
-	if !server.allowSource(source, alice, chain, now) {
+	if !server.allowSource(source, alice, chain, rateLimitTestMethod, now) {
 		t.Fatalf("expected initial request for alice to be allowed")
 	}
-	if !server.allowSource(source, alice, chain, now) {
+	if !server.allowSource(source, alice, chain, rateLimitTestMethod, now) {
 		t.Fatalf("expected second request for alice to be allowed")
 	}
-	if server.allowSource(source, alice, chain, now) {
+	if server.allowSource(source, alice, chain, rateLimitTestMethod, now) {
 		t.Fatalf("expected alice to be rate limited after exhausting identity quota")
 	}
 
-	if !server.allowSource(source, bob, chain, now) {
+	if !server.allowSource(source, bob, chain, rateLimitTestMethod, now) {
 		t.Fatalf("expected bob to be allowed despite alice being rate limited")
 	}
-	if !server.allowSource(source, bob, chain, now) {
+	if !server.allowSource(source, bob, chain, rateLimitTestMethod, now) {
 		t.Fatalf("expected bob to have independent quota behind same IP")
 	}
-	if server.allowSource(source, bob, chain, now) {
+	if server.allowSource(source, bob, chain, rateLimitTestMethod, now) {
 		t.Fatalf("expected bob to eventually hit identity quota independently")
 	}
 }
@@ -424,20 +435,78 @@ func TestRateLimiterRecordsMetrics(t *testing.T) {
 	now := time.Now()
 	metrics := observability.RPC()
 	counter := metrics.LimiterHits()
-	initial := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP))
+	initial := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP, "nhb", rateLimitTestMethod))
 	source := "198.51.100.250"
-	limit := server.rateLimitMax[limiterScopeIP]
+	limit := server.rateLimitMax[limiterScopeIP][""]
 	for i := 0; i < limit; i++ {
-		if !server.allowSource(source, "", "", now) {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, now) {
 			t.Fatalf("expected request %d to be allowed", i)
 		}
 	}
-	if server.allowSource(source, "", "", now) {
+	if server.allowSource(source, "", "", rateLimitTestMethod, now) {
 		t.Fatalf("expected limiter to reject request beyond window")
 	}
-	final := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP))
+	final := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP, "nhb", rateLimitTestMethod))
 	if final-initial != 1 {
 		t.Fatalf("expected limiter hits metric to increment by 1, got %.0f -> %.0f", initial, final)
+	}
+}
+
+func TestRateLimiterIsolatesMethods(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{
+		MaxTxPerWindow: 5,
+		RouteRateLimits: map[string]RouteRateLimitConfig{
+			"nhb_sendTransaction": {MaxTxPerWindow: 3},
+		},
+	})
+	now := time.Now()
+	source := "198.51.100.42"
+	methodA := "nhb_sendTransaction"
+	methodB := "tx_previewSponsorship"
+	lookup := func(scope, method string) int {
+		limits := server.rateLimitMax[scope]
+		if limits == nil {
+			return 0
+		}
+		if limit, ok := limits[method]; ok {
+			return limit
+		}
+		return limits[""]
+	}
+	limitA := lookup(limiterScopeIP, methodA)
+	limitB := lookup(limiterScopeIP, methodB)
+	if limitA == limitB {
+		t.Fatalf("expected divergent limits for methods, got %d", limitA)
+	}
+	var mu sync.Mutex
+	allowed := map[string]int{"a": 0, "b": 0}
+	var wg sync.WaitGroup
+	total := 20
+	for i := 0; i < total; i++ {
+		wg.Add(2)
+		go func() {
+			if server.allowSource(source, "", "", methodA, now) {
+				mu.Lock()
+				allowed["a"]++
+				mu.Unlock()
+			}
+			wg.Done()
+		}()
+		go func() {
+			if server.allowSource(source, "", "", methodB, now) {
+				mu.Lock()
+				allowed["b"]++
+				mu.Unlock()
+			}
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	if allowed["a"] != limitA {
+		t.Fatalf("expected method %s to allow %d requests, got %d", methodA, limitA, allowed["a"])
+	}
+	if allowed["b"] != limitB {
+		t.Fatalf("expected method %s to allow %d requests, got %d", methodB, limitB, allowed["b"])
 	}
 }
 

@@ -248,8 +248,8 @@ func RPC() *RPCMetrics {
 				Namespace: "nhb",
 				Subsystem: "rpc",
 				Name:      "limiter_hits_total",
-				Help:      "Count of RPC rate limiter rejections segmented by attribution scope.",
-			}, []string{"scope"}),
+				Help:      "Count of RPC rate limiter rejections segmented by attribution scope and route.",
+			}, []string{"scope", "module", "route"}),
 		}
 		prometheus.MustRegister(rpcRegistry.limiterHits)
 	})
@@ -356,8 +356,8 @@ func (m *moduleMetrics) RecordThrottle(module, reason string) {
 }
 
 // RecordLimiterHit increments the limiter hit counter for the supplied
-// attribution scope.
-func (m *RPCMetrics) RecordLimiterHit(scope string) {
+// attribution scope and route.
+func (m *RPCMetrics) RecordLimiterHit(scope, module, route string) {
 	if m == nil {
 		return
 	}
@@ -365,7 +365,15 @@ func (m *RPCMetrics) RecordLimiterHit(scope string) {
 	if normalized == "" {
 		normalized = "unknown"
 	}
-	m.limiterHits.WithLabelValues(normalized).Inc()
+	trimmedModule := strings.TrimSpace(module)
+	if trimmedModule == "" {
+		trimmedModule = "unknown"
+	}
+	trimmedRoute := strings.TrimSpace(route)
+	if trimmedRoute == "" {
+		trimmedRoute = "unknown"
+	}
+	m.limiterHits.WithLabelValues(normalized, trimmedModule, trimmedRoute).Inc()
 }
 
 // LimiterHits exposes the limiter hit counter for testing.
