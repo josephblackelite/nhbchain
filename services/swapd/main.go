@@ -162,11 +162,30 @@ func main() {
 			log.Fatalf("swapd: stable engine: %v", err)
 		}
 		engine.WithDailyUsageStore(store)
+		partners := make([]server.Partner, 0, len(cfg.Stable.Partners))
+		for _, partner := range cfg.Stable.Partners {
+			id := strings.TrimSpace(partner.ID)
+			apiKey := strings.TrimSpace(partner.APIKey)
+			secret := strings.TrimSpace(partner.Secret)
+			if id == "" || apiKey == "" || secret == "" {
+				log.Fatalf("swapd: stable partner configuration incomplete")
+			}
+			var dailyQuota int64
+			if partner.Quota.Daily > 0 {
+				units, err := server.ToStableAmountUnits(partner.Quota.Daily)
+				if err != nil {
+					log.Fatalf("swapd: parse partner quota for %s: %v", id, err)
+				}
+				dailyQuota = units
+			}
+			partners = append(partners, server.Partner{ID: id, APIKey: apiKey, Secret: secret, DailyQuota: dailyQuota})
+		}
 		stableRuntime = server.StableRuntime{
-			Enabled: true,
-			Engine:  engine,
-			Limits:  limits,
-			Assets:  assets,
+			Enabled:  true,
+			Engine:   engine,
+			Limits:   limits,
+			Assets:   assets,
+			Partners: partners,
 		}
 	}
 

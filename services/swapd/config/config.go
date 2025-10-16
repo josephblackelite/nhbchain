@@ -119,11 +119,12 @@ type PolicyConfig struct {
 
 // StableConfig captures configuration for the experimental stable engine.
 type StableConfig struct {
-	Assets        []StableAsset `yaml:"assets"`
-	QuoteTTL      Duration      `yaml:"quote_ttl"`
-	MaxSlippage   int           `yaml:"max_slippage_bps"`
-	SoftInventory int64         `yaml:"soft_inventory"`
-	Paused        bool          `yaml:"paused"`
+	Assets        []StableAsset   `yaml:"assets"`
+	QuoteTTL      Duration        `yaml:"quote_ttl"`
+	MaxSlippage   int             `yaml:"max_slippage_bps"`
+	SoftInventory int64           `yaml:"soft_inventory"`
+	Paused        bool            `yaml:"paused"`
+	Partners      []StablePartner `yaml:"partners"`
 }
 
 // StableAsset allows per-asset overrides for the stable engine.
@@ -134,6 +135,19 @@ type StableAsset struct {
 	QuoteTTL      Duration `yaml:"quote_ttl"`
 	MaxSlippage   int      `yaml:"max_slippage_bps"`
 	SoftInventory int64    `yaml:"soft_inventory"`
+}
+
+// StablePartner enumerates partner credentials and quota knobs.
+type StablePartner struct {
+	ID     string             `yaml:"id"`
+	APIKey string             `yaml:"api_key"`
+	Secret string             `yaml:"secret"`
+	Quota  StablePartnerQuota `yaml:"quota"`
+}
+
+// StablePartnerQuota exposes soft quota configuration per partner.
+type StablePartnerQuota struct {
+	Daily float64 `yaml:"daily"`
 }
 
 // Load reads configuration from the supplied path.
@@ -209,6 +223,33 @@ func validate(cfg Config) error {
 	}
 	if len(cfg.Stable.Assets) == 0 {
 		return fmt.Errorf("stable assets must be configured when stable engine is enabled")
+	}
+	if len(cfg.Stable.Partners) == 0 {
+		return fmt.Errorf("stable partners must be configured when stable engine is enabled")
+	}
+	seenIDs := make(map[string]struct{}, len(cfg.Stable.Partners))
+	seenKeys := make(map[string]struct{}, len(cfg.Stable.Partners))
+	for _, partner := range cfg.Stable.Partners {
+		id := strings.TrimSpace(partner.ID)
+		if id == "" {
+			return fmt.Errorf("stable partner id required")
+		}
+		if _, exists := seenIDs[id]; exists {
+			return fmt.Errorf("duplicate stable partner id: %s", id)
+		}
+		seenIDs[id] = struct{}{}
+		apiKey := strings.TrimSpace(partner.APIKey)
+		if apiKey == "" {
+			return fmt.Errorf("stable partner api_key required")
+		}
+		if _, exists := seenKeys[apiKey]; exists {
+			return fmt.Errorf("duplicate stable partner api_key: %s", apiKey)
+		}
+		seenKeys[apiKey] = struct{}{}
+		secret := strings.TrimSpace(partner.Secret)
+		if secret == "" {
+			return fmt.Errorf("stable partner secret required")
+		}
 	}
 	if cfg.Admin.TLS.Disable {
 		return fmt.Errorf("stable runtime requires admin TLS to be enabled")

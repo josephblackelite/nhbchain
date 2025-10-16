@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +24,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	gatewayauth "nhbchain/gateway/auth"
 	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
 )
@@ -30,6 +35,17 @@ func mustAmountUnits(t *testing.T, amount float64) int64 {
 	t.Helper()
 	return int64(math.Round(amount * float64(amountScale)))
 }
+
+type partnerCreds struct {
+	id     string
+	apiKey string
+	secret string
+}
+
+var (
+	nonceCounter     uint64
+	timestampCounter int64 = time.Now().UTC().Unix()
+)
 
 func TestStableHandlersFlow(t *testing.T) {
 	store := openStableTestStore(t, "stable_handlers_flow")
@@ -46,6 +62,7 @@ func TestStableHandlersFlow(t *testing.T) {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}
+	creds := partnerCreds{id: "desk-1", apiKey: "test-key", secret: "test-secret"}
 	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
 	if err != nil {
 		t.Fatalf("new authenticator: %v", err)
@@ -55,7 +72,13 @@ func TestStableHandlersFlow(t *testing.T) {
 		Engine:  engine,
 		Limits:  limits,
 		Assets:  []stable.Asset{asset},
-		Now:     func() time.Time { return base.Add(10 * time.Second) },
+		Partners: []Partner{{
+			ID:         creds.id,
+			APIKey:     creds.apiKey,
+			Secret:     creds.secret,
+			DailyQuota: mustAmountUnits(t, 10_000),
+		}},
+		Now: func() time.Time { return base.Add(10 * time.Second) },
 	}, auth)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -73,14 +96,14 @@ func TestStableHandlersFlow(t *testing.T) {
 	quoteBody := `{"asset":"ZNHB","amount":100,"account":"merchant-123"}`
 	engine.RecordPrice("ZNHB", "USD", 1.02, base)
 
-	quoteResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", quoteBody, "Bearer test-token")
+	quoteResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", quoteBody, &creds)
 	assertStatus(t, quoteResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_quote.json", quoteResp.Body.Bytes())
 
 	quoteID := extractField(t, quoteResp.Body.Bytes(), "quote_id")
 
 	reserveBody := `{"quote_id":"` + quoteID + `","amount_in":100,"account":"merchant-123"}`
-	reserveResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", reserveBody, "Bearer test-token")
+	reserveResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", reserveBody, &creds)
 	assertStatus(t, reserveResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_reserve.json", reserveResp.Body.Bytes())
 
@@ -101,7 +124,7 @@ func TestStableHandlersFlow(t *testing.T) {
 	reservationID := extractField(t, reserveResp.Body.Bytes(), "reservation_id")
 
 	cashOutBody := `{"reservation_id":"` + reservationID + `"}`
-	cashOutResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody, "Bearer test-token")
+	cashOutResp := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody, &creds)
 	assertStatus(t, cashOutResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_cashout.json", cashOutResp.Body.Bytes())
 
@@ -116,26 +139,99 @@ func TestStableHandlersFlow(t *testing.T) {
 		t.Fatalf("payouts mismatch: got %d want %d", got, want)
 	}
 
-	cashOutAgain := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody, "Bearer test-token")
+	cashOutAgain := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/cashout", cashOutBody, &creds)
 	assertStatus(t, cashOutAgain.Code, http.StatusConflict)
 
 	slippageBody := `{"asset":"ZNHB","amount":50,"account":"merchant-123"}`
-	quoteSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", slippageBody, "Bearer test-token")
+	quoteSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/quote", slippageBody, &creds)
 	assertStatus(t, quoteSlippage.Code, http.StatusOK)
 	newQuoteID := extractField(t, quoteSlippage.Body.Bytes(), "quote_id")
 
 	// Move the oracle by 5% to trigger slippage guard (limit is 0.5%).
 	engine.RecordPrice("ZNHB", "USD", 1.07, base.Add(30*time.Second))
-	reserveSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", `{"quote_id":"`+newQuoteID+`","amount_in":50,"account":"merchant-123"}`, "Bearer test-token")
+	reserveSlippage := doStableRequest(t, mux, traceCtx, http.MethodPost, "/v1/stable/reserve", `{"quote_id":"`+newQuoteID+`","amount_in":50,"account":"merchant-123"}`, &creds)
 	assertStatus(t, reserveSlippage.Code, http.StatusConflict)
 
-	statusResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/status", "", "Bearer test-token")
+	statusResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/status", "", &creds)
 	assertStatus(t, statusResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_status.json", statusResp.Body.Bytes())
 
-	limitsResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/limits", "", "Bearer test-token")
+	limitsResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/limits", "", &creds)
 	assertStatus(t, limitsResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_limits.json", limitsResp.Body.Bytes())
+}
+
+func TestStableHandlersEnforcePartnerQuota(t *testing.T) {
+	store := openStableTestStore(t, "stable_handlers_quota")
+	t.Cleanup(func() { _ = store.Close() })
+
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newTestStableEngine(t, base, store)
+	limits := stable.Limits{DailyCap: 1_000_000}
+	asset := stable.Asset{
+		Symbol:         "ZNHB",
+		BasePair:       "ZNHB",
+		QuotePair:      "USD",
+		QuoteTTL:       time.Minute,
+		MaxSlippageBps: 50,
+		SoftInventory:  1_000_000,
+	}
+	creds := partnerCreds{id: "desk-1", apiKey: "test-key", secret: "test-secret"}
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{
+		Enabled: true,
+		Engine:  engine,
+		Limits:  limits,
+		Assets:  []stable.Asset{asset},
+		Partners: []Partner{{
+			ID:         creds.id,
+			APIKey:     creds.apiKey,
+			Secret:     creds.secret,
+			DailyQuota: mustAmountUnits(t, 150),
+		}},
+	}, auth)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	mux := http.NewServeMux()
+	srv.registerStableHandlers(mux)
+
+	quoteBody := `{"asset":"ZNHB","amount":100,"account":"merchant-123"}`
+	quoteResp := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/quote", quoteBody, &creds)
+	if quoteResp.Code != http.StatusOK {
+		t.Fatalf("quote status=%d body=%s", quoteResp.Code, quoteResp.Body.String())
+	}
+	quoteID := extractField(t, quoteResp.Body.Bytes(), "quote_id")
+
+	reserveBody := `{"quote_id":"` + quoteID + `","amount_in":100,"account":"merchant-123"}`
+	reserveResp := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/reserve", reserveBody, &creds)
+	if reserveResp.Code != http.StatusOK {
+		t.Fatalf("reserve status=%d body=%s", reserveResp.Code, reserveResp.Body.String())
+	}
+
+	quoteBody2 := `{"asset":"ZNHB","amount":60,"account":"merchant-123"}`
+	quoteResp2 := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/quote", quoteBody2, &creds)
+	assertStatus(t, quoteResp2.Code, http.StatusOK)
+	quoteID2 := extractField(t, quoteResp2.Body.Bytes(), "quote_id")
+
+	reserveBody2 := `{"quote_id":"` + quoteID2 + `","amount_in":60,"account":"merchant-123"}`
+	reserveResp2 := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/reserve", reserveBody2, &creds)
+	assertStatus(t, reserveResp2.Code, http.StatusTooManyRequests)
+	assertGoldenJSON(t, "stable_quota_exceeded.json", reserveResp2.Body.Bytes())
+
+	available, reserved, _, ok := engine.LedgerBalance("ZNHB")
+	if !ok {
+		t.Fatalf("ledger balance missing")
+	}
+	if got, want := reserved, mustAmountUnits(t, 102); got != want {
+		t.Fatalf("reserved balance mismatch after quota enforcement: got %d want %d", got, want)
+	}
+	if got, want := available, mustAmountUnits(t, 1_000_000-102); got != want {
+		t.Fatalf("available balance mismatch after quota enforcement: got %d want %d", got, want)
+	}
 }
 
 func TestStableHandlersDisabled(t *testing.T) {
@@ -153,7 +249,7 @@ func TestStableHandlersDisabled(t *testing.T) {
 	mux := http.NewServeMux()
 	srv.registerStableHandlers(mux)
 
-	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", "Bearer test-token")
+	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", nil)
 	assertStatus(t, resp.Code, http.StatusNotImplemented)
 	assertGoldenJSON(t, "stable_disabled.json", resp.Body.Bytes())
 }
@@ -173,6 +269,7 @@ func TestStableHandlersRequireAuthentication(t *testing.T) {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}
+	creds := partnerCreds{id: "desk-1", apiKey: "test-key", secret: "test-secret"}
 	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
 	if err != nil {
 		t.Fatalf("new authenticator: %v", err)
@@ -182,6 +279,12 @@ func TestStableHandlersRequireAuthentication(t *testing.T) {
 		Engine:  engine,
 		Limits:  limits,
 		Assets:  []stable.Asset{asset},
+		Partners: []Partner{{
+			ID:         creds.id,
+			APIKey:     creds.apiKey,
+			Secret:     creds.secret,
+			DailyQuota: mustAmountUnits(t, 10_000),
+		}},
 	}, auth)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -190,10 +293,10 @@ func TestStableHandlersRequireAuthentication(t *testing.T) {
 	mux := http.NewServeMux()
 	srv.registerStableHandlers(mux)
 
-	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", "")
+	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", nil)
 	assertStatus(t, resp.Code, http.StatusUnauthorized)
 
-	limitsResp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/limits", "", "")
+	limitsResp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/limits", "", nil)
 	assertStatus(t, limitsResp.Code, http.StatusUnauthorized)
 }
 
@@ -212,6 +315,7 @@ func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
 		MaxSlippageBps: 50,
 		SoftInventory:  1_000_000,
 	}
+	creds := partnerCreds{id: "desk-1", apiKey: "test-key", secret: "test-secret"}
 	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
 	if err != nil {
 		t.Fatalf("new authenticator: %v", err)
@@ -221,6 +325,12 @@ func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
 		Engine:  engine,
 		Limits:  limits,
 		Assets:  []stable.Asset{asset},
+		Partners: []Partner{{
+			ID:         creds.id,
+			APIKey:     creds.apiKey,
+			Secret:     creds.secret,
+			DailyQuota: mustAmountUnits(t, 10_000),
+		}},
 	}, auth)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -265,7 +375,7 @@ func newTestStableEngine(t *testing.T, base time.Time, store *storage.Storage) *
 	return engine
 }
 
-func doStableRequest(t *testing.T, mux *http.ServeMux, ctx context.Context, method, path, body, authHeader string) *httptest.ResponseRecorder {
+func doStableRequest(t *testing.T, mux *http.ServeMux, ctx context.Context, method, path, body string, creds *partnerCreds) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
 	if body == "" {
@@ -278,8 +388,8 @@ func doStableRequest(t *testing.T, mux *http.ServeMux, ctx context.Context, meth
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
+	if creds != nil {
+		signPartnerRequest(t, req, []byte(body), creds)
 	}
 	resp := httptest.NewRecorder()
 	mux.ServeHTTP(resp, req)
@@ -342,4 +452,19 @@ func extractField(t *testing.T, payload []byte, field string) string {
 		t.Fatalf("field %s not string", field)
 	}
 	return str
+}
+
+func signPartnerRequest(t *testing.T, req *http.Request, body []byte, creds *partnerCreds) {
+	t.Helper()
+	if req == nil || creds == nil {
+		return
+	}
+	ts := atomic.AddInt64(&timestampCounter, 1)
+	timestamp := strconv.FormatInt(ts, 10)
+	nonce := fmt.Sprintf("nonce-%d", atomic.AddUint64(&nonceCounter, 1))
+	signature := gatewayauth.ComputeSignature(creds.secret, timestamp, nonce, req.Method, gatewayauth.CanonicalRequestPath(req), body)
+	req.Header.Set(gatewayauth.HeaderAPIKey, creds.apiKey)
+	req.Header.Set(gatewayauth.HeaderTimestamp, timestamp)
+	req.Header.Set(gatewayauth.HeaderNonce, nonce)
+	req.Header.Set(gatewayauth.HeaderSignature, hex.EncodeToString(signature))
 }
