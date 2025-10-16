@@ -157,7 +157,7 @@ func main() {
 			})
 		}
 		limits := stable.Limits{DailyCap: int64(cfg.Policy.MintLimit)}
-		engine, err := stable.NewEngine(assets, limits)
+		engine, err := stable.NewEngine(assets, limits, store)
 		if err != nil {
 			log.Fatalf("swapd: stable engine: %v", err)
 		}

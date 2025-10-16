@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -157,7 +158,7 @@ CREATE TABLE IF NOT EXISTS throttle_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     policy_id TEXT NOT NULL,
     action TEXT NOT NULL,
-    amount TEXT,
+    amount TEXT NOT NULL,
     occurred_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_throttle_events ON throttle_events(policy_id, action, occurred_at);
@@ -165,6 +166,28 @@ CREATE INDEX IF NOT EXISTS idx_throttle_events ON throttle_events(policy_id, act
 CREATE TABLE IF NOT EXISTS daily_usage (
     day TEXT PRIMARY KEY,
     amount INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stable_ledger (
+    asset TEXT PRIMARY KEY,
+    available INTEGER NOT NULL,
+    reserved INTEGER NOT NULL,
+    payouts INTEGER NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stable_reservations (
+    id TEXT PRIMARY KEY,
+    asset TEXT NOT NULL,
+    amount_in INTEGER NOT NULL,
+    amount_out INTEGER NOT NULL,
+    price INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    account TEXT NOT NULL,
+    intent_created INTEGER NOT NULL,
+    intent_id TEXT,
+    intent_created_at INTEGER,
     updated_at TIMESTAMP NOT NULL
 );
 `
@@ -244,12 +267,23 @@ const (
 )
 
 // CheckThrottle records the event if it does not exceed the configured limit.
-func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action ThrottleAction, limit int, window time.Duration, when time.Time) (bool, error) {
+func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action ThrottleAction, limit int, window time.Duration, amount *big.Int, when time.Time) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("storage not configured")
 	}
 	if limit <= 0 {
 		return true, nil
+	}
+	normalized := big.NewInt(0)
+	if amount != nil {
+		normalized = new(big.Int).Set(amount)
+	}
+	if normalized.Sign() < 0 {
+		normalized = big.NewInt(0)
+	}
+	limitBig := big.NewInt(int64(limit))
+	if normalized.Cmp(limitBig) > 0 {
+		return false, nil
 	}
 	cutoff := when.Add(-window).Unix()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
@@ -257,21 +291,46 @@ func (s *Storage) CheckThrottle(ctx context.Context, policyID string, action Thr
 		return false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
-	var count int
-	if err := tx.QueryRowContext(ctx, `
-        SELECT COUNT(1)
+	rows, err := tx.QueryContext(ctx, `
+        SELECT amount
         FROM throttle_events
         WHERE policy_id = ? AND action = ? AND occurred_at >= ?
-    `, policyID, string(action), cutoff).Scan(&count); err != nil {
-		return false, fmt.Errorf("count events: %w", err)
+    `, policyID, string(action), cutoff)
+	if err != nil {
+		return false, fmt.Errorf("query throttle events: %w", err)
 	}
-	if count >= limit {
+	defer rows.Close()
+	used := big.NewInt(0)
+	for rows.Next() {
+		var stored string
+		if err := rows.Scan(&stored); err != nil {
+			return false, fmt.Errorf("scan throttle amount: %w", err)
+		}
+		stored = strings.TrimSpace(stored)
+		if stored == "" {
+			continue
+		}
+		amt := new(big.Int)
+		if _, ok := amt.SetString(stored, 10); ok {
+			used.Add(used, amt)
+			continue
+		}
+		return false, fmt.Errorf("parse throttle amount: %q", stored)
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate throttle events: %w", err)
+	}
+	remainder := new(big.Int).Sub(limitBig, used)
+	if remainder.Sign() <= 0 {
+		return false, nil
+	}
+	if remainder.Cmp(normalized) < 0 {
 		return false, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO throttle_events(policy_id, action, amount, occurred_at)
-        VALUES(?, ?, '', ?)
-    `, policyID, string(action), when.Unix()); err != nil {
+        VALUES(?, ?, ?, ?)
+    `, policyID, string(action), normalized.String(), when.Unix()); err != nil {
 		return false, fmt.Errorf("record event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -329,4 +388,210 @@ func (s *Storage) LatestDailyUsage(ctx context.Context) (time.Time, int64, bool,
 		return time.Time{}, 0, false, fmt.Errorf("parse daily usage day: %w", err)
 	}
 	return day, amount, true, nil
+}
+
+// LedgerBalanceRecord captures the persisted treasury balances for an asset.
+type LedgerBalanceRecord struct {
+	Asset     string
+	Available int64
+	Reserved  int64
+	Payouts   int64
+	UpdatedAt time.Time
+}
+
+// SaveLedgerBalance upserts the treasury balances for the supplied asset.
+func (s *Storage) SaveLedgerBalance(ctx context.Context, record LedgerBalanceRecord) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	asset := strings.ToUpper(strings.TrimSpace(record.Asset))
+	if asset == "" {
+		return fmt.Errorf("asset required")
+	}
+	if record.Available < 0 {
+		record.Available = 0
+	}
+	if record.Reserved < 0 {
+		record.Reserved = 0
+	}
+	if record.Payouts < 0 {
+		record.Payouts = 0
+	}
+	updatedAt := time.Now().UTC()
+	if !record.UpdatedAt.IsZero() {
+		updatedAt = record.UpdatedAt.UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO stable_ledger(asset, available, reserved, payouts, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(asset) DO UPDATE SET
+            available=excluded.available,
+            reserved=excluded.reserved,
+            payouts=excluded.payouts,
+            updated_at=excluded.updated_at
+    `, asset, record.Available, record.Reserved, record.Payouts, updatedAt)
+	if err != nil {
+		return fmt.Errorf("save ledger: %w", err)
+	}
+	return nil
+}
+
+// LoadLedgerBalances returns all persisted treasury balances.
+func (s *Storage) LoadLedgerBalances(ctx context.Context) ([]LedgerBalanceRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT asset, available, reserved, payouts, updated_at
+        FROM stable_ledger
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("query ledger: %w", err)
+	}
+	defer rows.Close()
+	var records []LedgerBalanceRecord
+	for rows.Next() {
+		var rec LedgerBalanceRecord
+		if err := rows.Scan(&rec.Asset, &rec.Available, &rec.Reserved, &rec.Payouts, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan ledger: %w", err)
+		}
+		rec.Asset = strings.ToUpper(strings.TrimSpace(rec.Asset))
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate ledger: %w", err)
+	}
+	return records, nil
+}
+
+// ReservationRecord captures the state required to restore outstanding reservations.
+type ReservationRecord struct {
+	ID              string
+	Asset           string
+	AmountIn        int64
+	AmountOut       int64
+	Price           int64
+	ExpiresAt       time.Time
+	Account         string
+	IntentCreated   bool
+	IntentID        string
+	IntentCreatedAt time.Time
+	UpdatedAt       time.Time
+}
+
+// SaveReservation upserts the reservation record.
+func (s *Storage) SaveReservation(ctx context.Context, record ReservationRecord) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	id := strings.TrimSpace(record.ID)
+	if id == "" {
+		return fmt.Errorf("reservation id required")
+	}
+	asset := strings.ToUpper(strings.TrimSpace(record.Asset))
+	if asset == "" {
+		return fmt.Errorf("asset required")
+	}
+	if record.AmountIn <= 0 || record.AmountOut <= 0 {
+		return fmt.Errorf("amounts must be positive")
+	}
+	if record.Price <= 0 {
+		return fmt.Errorf("price must be positive")
+	}
+	account := strings.TrimSpace(record.Account)
+	if account == "" {
+		return fmt.Errorf("account required")
+	}
+	expiresAt := record.ExpiresAt.UTC()
+	if record.ExpiresAt.IsZero() {
+		expiresAt = time.Unix(0, 0).UTC()
+	}
+	intentCreated := 0
+	if record.IntentCreated {
+		intentCreated = 1
+	}
+	intentCreatedAt := int64(0)
+	if !record.IntentCreatedAt.IsZero() {
+		intentCreatedAt = record.IntentCreatedAt.UTC().Unix()
+	}
+	updatedAt := time.Now().UTC()
+	if !record.UpdatedAt.IsZero() {
+		updatedAt = record.UpdatedAt.UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO stable_reservations(id, asset, amount_in, amount_out, price, expires_at, account, intent_created, intent_id, intent_created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            asset=excluded.asset,
+            amount_in=excluded.amount_in,
+            amount_out=excluded.amount_out,
+            price=excluded.price,
+            expires_at=excluded.expires_at,
+            account=excluded.account,
+            intent_created=excluded.intent_created,
+            intent_id=excluded.intent_id,
+            intent_created_at=excluded.intent_created_at,
+            updated_at=excluded.updated_at
+    `, id, asset, record.AmountIn, record.AmountOut, record.Price, expiresAt.Unix(), account, intentCreated, strings.TrimSpace(record.IntentID), intentCreatedAt, updatedAt)
+	if err != nil {
+		return fmt.Errorf("save reservation: %w", err)
+	}
+	return nil
+}
+
+// DeleteReservation removes the persisted reservation.
+func (s *Storage) DeleteReservation(ctx context.Context, id string) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("reservation id required")
+	}
+	if _, err := s.db.ExecContext(ctx, `
+        DELETE FROM stable_reservations WHERE id = ?
+    `, id); err != nil {
+		return fmt.Errorf("delete reservation: %w", err)
+	}
+	return nil
+}
+
+// LoadReservations returns all persisted reservations.
+func (s *Storage) LoadReservations(ctx context.Context) ([]ReservationRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT id, asset, amount_in, amount_out, price, expires_at, account, intent_created, intent_id, intent_created_at, updated_at
+        FROM stable_reservations
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("query reservations: %w", err)
+	}
+	defer rows.Close()
+	var records []ReservationRecord
+	for rows.Next() {
+		var rec ReservationRecord
+		var expiresAt int64
+		var intentCreated int
+		var intentCreatedAt sql.NullInt64
+		if err := rows.Scan(&rec.ID, &rec.Asset, &rec.AmountIn, &rec.AmountOut, &rec.Price, &expiresAt, &rec.Account, &intentCreated, &rec.IntentID, &intentCreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan reservation: %w", err)
+		}
+		rec.Asset = strings.ToUpper(strings.TrimSpace(rec.Asset))
+		rec.Account = strings.TrimSpace(rec.Account)
+		rec.IntentID = strings.TrimSpace(rec.IntentID)
+		if expiresAt > 0 {
+			rec.ExpiresAt = time.Unix(expiresAt, 0).UTC()
+		}
+		rec.IntentCreated = intentCreated != 0
+		if intentCreatedAt.Valid && intentCreatedAt.Int64 > 0 {
+			rec.IntentCreatedAt = time.Unix(intentCreatedAt.Int64, 0).UTC()
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reservations: %w", err)
+	}
+	return records, nil
 }
