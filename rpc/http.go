@@ -189,6 +189,8 @@ type ServerConfig struct {
 	AllowInsecureUnspecified bool
 	// SwapAuth configures API authentication and rate limiting for swap RPC methods.
 	SwapAuth SwapAuthConfig
+	// CallerMetadataMaxTTL bounds the expiry horizon permitted for caller metadata.
+	CallerMetadataMaxTTL time.Duration
 }
 
 // NetworkService abstracts the network control plane used by RPC handlers to
@@ -251,6 +253,8 @@ type Server struct {
 
 	callerNonceMu sync.Mutex
 	callerNonces  map[string]callerNonceState
+	// callerMetadataMaxTTL caps the maximum expiry accepted for caller metadata.
+	callerMetadataMaxTTL time.Duration
 
 	serverMu    sync.Mutex
 	httpServer  *http.Server
@@ -401,6 +405,10 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		rateWindow = defaultRateLimitWindow
 	}
 	staleAfter := time.Duration(rateLimiterStaleMultiple) * rateWindow
+	maxCallerTTL := cfg.CallerMetadataMaxTTL
+	if maxCallerTTL < 0 {
+		maxCallerTTL = 0
+	}
 	srv := &Server{
 		node:                     node,
 		net:                      netClient,
@@ -432,6 +440,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		swapRateCounters:         make(map[string]*rateLimiter),
 		swapNowFn:                swapNow,
 		callerNonces:             make(map[string]callerNonceState),
+		callerMetadataMaxTTL:     maxCallerTTL,
 		maxTxPerWindow:           maxTx,
 		rateLimitWindow:          rateWindow,
 		rateLimiterStaleAfter:    staleAfter,

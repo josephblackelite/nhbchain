@@ -68,6 +68,7 @@ type Config struct {
 	RPCIdleTimeout              int             `toml:"RPCIdleTimeout"`
 	RPCMaxTxPerWindow           int             `toml:"RPCMaxTxPerWindow"`
 	RPCRateLimitWindow          int             `toml:"RPCRateLimitWindow"`
+	RPCCallerMetadataMaxTTL     int             `toml:"RPCCallerMetadataMaxTTL"`
 	RPCAllowInsecure            bool            `toml:"RPCAllowInsecure"`
 	RPCAllowInsecureUnspecified bool            `toml:"RPCAllowInsecureUnspecified"`
 	RPCTLSCertFile              string          `toml:"RPCTLSCertFile"`
@@ -500,6 +501,9 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 	}
 	if cfg.RPCRateLimitWindow <= 0 {
 		cfg.RPCRateLimitWindow = int((time.Minute).Seconds())
+	}
+	if cfg.RPCCallerMetadataMaxTTL <= 0 {
+		cfg.RPCCallerMetadataMaxTTL = int((15 * time.Minute).Seconds())
 	}
 
 	if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
@@ -1143,31 +1147,32 @@ func createDefault(path string, passphrase string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddress:        ":6001",
-		RPCAddress:           ":8080",
-		DataDir:              "./nhb-data",
-		GenesisFile:          "",
-		AllowAutogenesis:     false,
-		NetworkName:          "nhb-local",
-		Bootnodes:            []string{},
-		PersistentPeers:      []string{},
-		MaxPeers:             64,
-		MaxInbound:           64,
-		MaxOutbound:          64,
-		MinPeers:             32,
-		OutboundPeers:        16,
-		PeerBanSeconds:       int((60 * time.Minute).Seconds()),
-		ReadTimeout:          int((90 * time.Second).Seconds()),
-		WriteTimeout:         int((5 * time.Second).Seconds()),
-		RPCReadHeaderTimeout: int((10 * time.Second).Seconds()),
-		RPCReadTimeout:       int((15 * time.Second).Seconds()),
-		RPCWriteTimeout:      int((15 * time.Second).Seconds()),
-		RPCIdleTimeout:       int((120 * time.Second).Seconds()),
-		RPCMaxTxPerWindow:    5,
-		RPCRateLimitWindow:   int((time.Minute).Seconds()),
-		MaxMsgBytes:          1 << 20,
-		MaxMsgsPerSecond:     32,
-		ClientVersion:        "nhbchain/node",
+		ListenAddress:           ":6001",
+		RPCAddress:              ":8080",
+		DataDir:                 "./nhb-data",
+		GenesisFile:             "",
+		AllowAutogenesis:        false,
+		NetworkName:             "nhb-local",
+		Bootnodes:               []string{},
+		PersistentPeers:         []string{},
+		MaxPeers:                64,
+		MaxInbound:              64,
+		MaxOutbound:             64,
+		MinPeers:                32,
+		OutboundPeers:           16,
+		PeerBanSeconds:          int((60 * time.Minute).Seconds()),
+		ReadTimeout:             int((90 * time.Second).Seconds()),
+		WriteTimeout:            int((5 * time.Second).Seconds()),
+		RPCReadHeaderTimeout:    int((10 * time.Second).Seconds()),
+		RPCReadTimeout:          int((15 * time.Second).Seconds()),
+		RPCWriteTimeout:         int((15 * time.Second).Seconds()),
+		RPCIdleTimeout:          int((120 * time.Second).Seconds()),
+		RPCMaxTxPerWindow:       5,
+		RPCRateLimitWindow:      int((time.Minute).Seconds()),
+		RPCCallerMetadataMaxTTL: int((15 * time.Minute).Seconds()),
+		MaxMsgBytes:             1 << 20,
+		MaxMsgsPerSecond:        32,
+		ClientVersion:           "nhbchain/node",
 	}
 	cfg.Mempool.MaxTransactions = DefaultMempoolMaxTransactions
 	cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize

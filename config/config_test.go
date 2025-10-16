@@ -51,6 +51,7 @@ RPCWriteTimeout = 18
 RPCIdleTimeout = 45
 RPCMaxTxPerWindow = 10
 RPCRateLimitWindow = 120
+RPCCallerMetadataMaxTTL = 300
 RPCAllowInsecure = true
 RPCTLSCertFile = "/path/to/cert.pem"
 RPCTLSKeyFile = "/path/to/key.pem"
@@ -166,6 +167,9 @@ PEX = false
 	}
 	if cfg.RPCRateLimitWindow != 120 {
 		t.Fatalf("unexpected RPC rate limit window: %d", cfg.RPCRateLimitWindow)
+	}
+	if cfg.RPCCallerMetadataMaxTTL != 300 {
+		t.Fatalf("unexpected RPC caller metadata ttl: %d", cfg.RPCCallerMetadataMaxTTL)
 	}
 	if !cfg.RPCAllowInsecure {
 		t.Fatalf("expected RPCAllowInsecure to be true")

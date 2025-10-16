@@ -425,6 +425,7 @@ func main() {
 		IdleTimeout:              time.Duration(cfg.RPCIdleTimeout) * time.Second,
 		MaxTxPerWindow:           cfg.RPCMaxTxPerWindow,
 		RateLimitWindow:          time.Duration(cfg.RPCRateLimitWindow) * time.Second,
+		CallerMetadataMaxTTL:     time.Duration(cfg.RPCCallerMetadataMaxTTL) * time.Second,
 		TLSCertFile:              cfg.RPCTLSCertFile,
 		TLSKeyFile:               cfg.RPCTLSKeyFile,
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
