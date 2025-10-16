@@ -50,6 +50,10 @@ RPCReadTimeout = 20
 RPCWriteTimeout = 18
 RPCIdleTimeout = 45
 RPCMaxTxPerWindow = 10
+RPCMaxTxPerIP = 12
+RPCMaxTxPerIdentity = 7
+RPCMaxTxPerChain = 9
+RPCMaxTxPerIdentityChain = 6
 RPCRateLimitWindow = 120
 RPCCallerMetadataMaxTTL = 300
 RPCAllowInsecure = true
@@ -164,6 +168,18 @@ PEX = false
 	}
 	if cfg.RPCMaxTxPerWindow != 10 {
 		t.Fatalf("unexpected RPC max tx per window: %d", cfg.RPCMaxTxPerWindow)
+	}
+	if cfg.RPCMaxTxPerIP != 12 {
+		t.Fatalf("unexpected RPC max tx per IP: %d", cfg.RPCMaxTxPerIP)
+	}
+	if cfg.RPCMaxTxPerIdentity != 7 {
+		t.Fatalf("unexpected RPC max tx per identity: %d", cfg.RPCMaxTxPerIdentity)
+	}
+	if cfg.RPCMaxTxPerChain != 9 {
+		t.Fatalf("unexpected RPC max tx per chain: %d", cfg.RPCMaxTxPerChain)
+	}
+	if cfg.RPCMaxTxPerIdentityChain != 6 {
+		t.Fatalf("unexpected RPC max tx per identity+chain: %d", cfg.RPCMaxTxPerIdentityChain)
 	}
 	if cfg.RPCRateLimitWindow != 120 {
 		t.Fatalf("unexpected RPC rate limit window: %d", cfg.RPCRateLimitWindow)

@@ -187,7 +187,8 @@ func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	remoteAddr := "10.0.0.1:5000"
 
 	forwarded := "198.51.100.1"
-	for i := 0; i < server.maxTxPerWindow; i++ {
+	limit := server.rateLimitMax[limiterScopeIP]
+	for i := 0; i < limit; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("X-Forwarded-For", forwarded)
@@ -341,7 +342,8 @@ func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 	now := time.Now()
 	source := "198.51.100.200"
 
-	for i := 0; i < server.maxTxPerWindow; i++ {
+	limit := server.rateLimitMax[limiterScopeIP]
+	for i := 0; i < limit; i++ {
 		if !server.allowSource(source, "", "", now) {
 			t.Fatalf("expected request %d to be allowed", i)
 		}
@@ -365,7 +367,8 @@ func TestRateLimiterUsesIdentityAndNonce(t *testing.T) {
 
 	identity := "user@example.com"
 	nonceKey := "chain-1:1"
-	for i := 0; i < server.maxTxPerWindow; i++ {
+	limit := server.rateLimitMax[limiterScopeIdentityChain]
+	for i := 0; i < limit; i++ {
 		if !server.allowSource("203.0.113.10", identity, nonceKey, now) {
 			t.Fatalf("expected request %d for identity to be allowed", i)
 		}
@@ -382,6 +385,40 @@ func TestRateLimiterUsesIdentityAndNonce(t *testing.T) {
 	}
 }
 
+func TestRateLimiterIsolatesIdentitiesSharingIP(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{
+		MaxTxPerIP:            10,
+		MaxTxPerIdentity:      2,
+		MaxTxPerChain:         5,
+		MaxTxPerIdentityChain: 2,
+	})
+	now := time.Now()
+	source := "198.51.100.42"
+	chain := "chain-1:1"
+	alice := "alice@example.com"
+	bob := "bob@example.com"
+
+	if !server.allowSource(source, alice, chain, now) {
+		t.Fatalf("expected initial request for alice to be allowed")
+	}
+	if !server.allowSource(source, alice, chain, now) {
+		t.Fatalf("expected second request for alice to be allowed")
+	}
+	if server.allowSource(source, alice, chain, now) {
+		t.Fatalf("expected alice to be rate limited after exhausting identity quota")
+	}
+
+	if !server.allowSource(source, bob, chain, now) {
+		t.Fatalf("expected bob to be allowed despite alice being rate limited")
+	}
+	if !server.allowSource(source, bob, chain, now) {
+		t.Fatalf("expected bob to have independent quota behind same IP")
+	}
+	if server.allowSource(source, bob, chain, now) {
+		t.Fatalf("expected bob to eventually hit identity quota independently")
+	}
+}
+
 func TestRateLimiterRecordsMetrics(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()
@@ -389,7 +426,8 @@ func TestRateLimiterRecordsMetrics(t *testing.T) {
 	counter := metrics.LimiterHits()
 	initial := testutil.ToFloat64(counter.WithLabelValues(limiterScopeIP))
 	source := "198.51.100.250"
-	for i := 0; i < server.maxTxPerWindow; i++ {
+	limit := server.rateLimitMax[limiterScopeIP]
+	for i := 0; i < limit; i++ {
 		if !server.allowSource(source, "", "", now) {
 			t.Fatalf("expected request %d to be allowed", i)
 		}
