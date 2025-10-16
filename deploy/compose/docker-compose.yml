@@ -5,6 +5,9 @@ x-go-build: &go-build
   dockerfile: deploy/compose/Dockerfile
 
 services:
+  # Services run with host networking so they only bind to 127.0.0.1 by default.
+  # Override `network_mode`/bind addresses when exposing ports beyond loopback
+  # or using Docker Desktop (no host networking support).
   p2pd:
     build:
       <<: *go-build
@@ -15,7 +18,7 @@ services:
       - "--config"
       - "/etc/nhb/p2p.toml"
       - "--grpc"
-      - ":9091"
+      - "127.0.0.1:9091"
       - "--allow-autogenesis"
     environment:
       NHB_ENV: local
@@ -23,9 +26,7 @@ services:
     volumes:
       - p2p-data:/var/lib/nhb
       - ./config/p2p.toml:/etc/nhb/p2p.toml:ro
-    ports:
-      - "26656:26656"
-      - "9091:9091"
+    network_mode: host
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9091"]
       interval: 30s
@@ -46,9 +47,9 @@ services:
       - "--config"
       - "/etc/nhb/consensus.toml"
       - "--grpc"
-      - ":9090"
+      - "127.0.0.1:9090"
       - "--p2p"
-      - "p2pd:9091"
+      - "127.0.0.1:9091"
       - "--allow-autogenesis"
     environment:
       NHB_ENV: local
@@ -57,9 +58,7 @@ services:
     volumes:
       - consensus-data:/var/lib/nhb
       - ./config/consensus.toml:/etc/nhb/consensus.toml:ro
-    ports:
-      - "8081:8081"
-      - "9090:9090"
+    network_mode: host
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9090"]
       interval: 30s
@@ -80,6 +79,7 @@ services:
       NHB_ENV: local
     volumes:
       - ./config/lendingd.yaml:/etc/nhb/lendingd.yaml:ro
+    network_mode: host
     restart: unless-stopped
 
   swapd:
@@ -96,8 +96,7 @@ services:
     volumes:
       - swapd-data:/var/lib/nhb
       - ./config/swapd.yaml:/etc/nhb/swapd.yaml:ro
-    ports:
-      - "7074:7074"
+    network_mode: host
     restart: unless-stopped
 
   identity-gateway:
@@ -109,13 +108,13 @@ services:
     environment:
       NHB_ENV: local
       IDENTITY_GATEWAY_PORT: "8095"
+      IDENTITY_GATEWAY_LISTEN: "127.0.0.1:8095"
       IDENTITY_GATEWAY_DB: /var/lib/nhb/identity-gateway.db
       IDENTITY_EMAIL_SALT: local-development-salt
       IDENTITY_GATEWAY_API_KEYS: local:local-secret
     volumes:
       - identity-gateway-data:/var/lib/nhb
-    ports:
-      - "8095:8095"
+    network_mode: host
     restart: unless-stopped
 
   governd:
@@ -138,8 +137,7 @@ services:
       - ./config/governd.yaml:/etc/nhb/governd.yaml:ro
       - ${GOVERND_TLS_KEY_FILE:?set to the TLS private key file for governd}:/etc/nhb/tls/server.key:ro
       - ${GOVERND_TLS_CERT_FILE:-./services/governd/config/server.crt}:/etc/nhb/tls/server.crt:ro
-    ports:
-      - "50061:50061"
+    network_mode: host
     restart: unless-stopped
 
   gateway:
@@ -162,10 +160,9 @@ services:
       - "/etc/nhb/gateway.yaml"
     environment:
       NHB_ENV: local
-    ports:
-      - "8080:8080"
     volumes:
       - ./config/gateway.yaml:/etc/nhb/gateway.yaml:ro
+    network_mode: host
     restart: unless-stopped
 
 volumes:

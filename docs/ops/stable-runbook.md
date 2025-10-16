@@ -14,7 +14,10 @@ This runbook explains how to exercise the `/v1/stable/*` suite on localnet, publ
 docker compose -f deploy/compose/docker-compose.yml up -d swapd
 ```
 
-The command builds the swapd container and exposes port `7074`. When running the full regression plan use the convenience wrapper:
+The command builds the swapd container and exposes port `127.0.0.1:7074` only.
+Override the bind address in `deploy/compose/config/swapd.yaml` if you need
+remote clients to reach the API. When running the full regression plan use the
+convenience wrapper:
 
 ```bash
 make up
