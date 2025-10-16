@@ -23,7 +23,7 @@ func (s *Server) registerStableHandlers(mux *http.ServeMux) {
 	stableMux.HandleFunc("/v1/stable/reserve", s.handleStableReserve)
 	stableMux.HandleFunc("/v1/stable/cashout", s.handleStableCashOut)
 	stableMux.HandleFunc("/v1/stable/status", s.handleStableStatus)
-	stableMux.HandleFunc("/v1/stable/limits", s.handleStableLimits)
+	mux.Handle("/v1/stable/limits", s.requireAdmin(http.HandlerFunc(s.handleStableLimits)))
 	mux.Handle("/v1/stable/", s.requireAdmin(stableMux))
 }
 

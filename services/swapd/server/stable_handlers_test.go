@@ -201,6 +201,9 @@ func TestStableHandlersRequireAuthentication(t *testing.T) {
 
 	resp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/status", "", "")
 	assertStatus(t, resp.Code, http.StatusUnauthorized)
+
+	limitsResp := doStableRequest(t, mux, context.Background(), http.MethodGet, "/v1/stable/limits", "", "")
+	assertStatus(t, limitsResp.Code, http.StatusUnauthorized)
 }
 
 func TestStableHandlersRejectInvalidPrincipal(t *testing.T) {
