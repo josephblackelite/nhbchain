@@ -179,6 +179,16 @@ func newEscrowEvent(eventType string, e *Escrow) *types.Event {
 		if members := formatArbitratorMembers(sanitized.FrozenArb.Members); members != "" {
 			attrs["arbitrators"] = members
 		}
+		if sanitized.FrozenArb.Metadata != nil {
+			attrs["realmScope"] = strconv.FormatUint(uint64(sanitized.FrozenArb.Metadata.Scope), 10)
+			if trimmed := strings.TrimSpace(sanitized.FrozenArb.Metadata.ProviderProfile); trimmed != "" {
+				attrs["realmProfile"] = trimmed
+			}
+			attrs["realmFeeBps"] = strconv.FormatUint(uint64(sanitized.FrozenArb.Metadata.ArbitrationFeeBps), 10)
+			if recipient := strings.TrimSpace(sanitized.FrozenArb.Metadata.FeeRecipientBech32); recipient != "" {
+				attrs["realmFeeRecipient"] = recipient
+			}
+		}
 	}
 	return &types.Event{Type: eventType, Attributes: attrs}
 }
@@ -234,6 +244,16 @@ func newRealmEvent(eventType string, r *EscrowRealm) *types.Event {
 		attrs["arbThreshold"] = strconv.FormatUint(uint64(sanitized.Arbitrators.Threshold), 10)
 		if members := formatArbitratorMembers(sanitized.Arbitrators.Members); members != "" {
 			attrs["arbitrators"] = members
+		}
+	}
+	if sanitized.Metadata != nil {
+		attrs["realmScope"] = strconv.FormatUint(uint64(sanitized.Metadata.Scope), 10)
+		if trimmed := strings.TrimSpace(sanitized.Metadata.ProviderProfile); trimmed != "" {
+			attrs["realmProfile"] = trimmed
+		}
+		attrs["realmFeeBps"] = strconv.FormatUint(uint64(sanitized.Metadata.ArbitrationFeeBps), 10)
+		if recipient := strings.TrimSpace(sanitized.Metadata.FeeRecipientBech32); recipient != "" {
+			attrs["realmFeeRecipient"] = recipient
 		}
 	}
 	return &types.Event{Type: eventType, Attributes: attrs}
