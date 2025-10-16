@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"nhbchain/crypto"
+	"nhbchain/observability/logging"
 	"nhbchain/p2p/seeds"
 )
 
@@ -97,10 +99,13 @@ type SeedOrigin struct {
 	NotAfter  int64
 }
 
-func normalizeSeedOrigins(cfg ServerConfig) (static []SeedOrigin, dynamic []SeedOrigin) {
+func normalizeSeedOrigins(cfg ServerConfig, logger *slog.Logger) (static []SeedOrigin, dynamic []SeedOrigin) {
+	if logger == nil {
+		logger = slog.Default().With(slog.String("component", "p2p_server"))
+	}
 	origins := cfg.SeedOrigins
 	if len(origins) == 0 {
-		endpoints := parseSeedList(cfg.Seeds)
+		endpoints := parseSeedList(cfg.Seeds, logger)
 		static = make([]SeedOrigin, 0, len(endpoints))
 		for _, ep := range endpoints {
 			static = append(static, SeedOrigin{NodeID: ep.NodeID, Address: ep.Address, Source: "config"})
@@ -110,7 +115,10 @@ func normalizeSeedOrigins(cfg ServerConfig) (static []SeedOrigin, dynamic []Seed
 	for _, origin := range origins {
 		node, addr, err := normalizeSeedComponents(origin.NodeID, origin.Address)
 		if err != nil {
-			fmt.Printf("Ignoring seed %q@%q: %v\n", strings.TrimSpace(origin.NodeID), strings.TrimSpace(origin.Address), err)
+			logger.Warn("Ignoring configured seed origin",
+				logging.MaskField("seed_id", origin.NodeID),
+				logging.MaskField("seed_address", origin.Address),
+				slog.Any("error", err))
 			continue
 		}
 		source := strings.TrimSpace(origin.Source)
@@ -157,6 +165,8 @@ type Server struct {
 	privKey *crypto.PrivateKey
 	nodeID  string
 	genesis []byte
+
+	logger *slog.Logger
 
 	mu               sync.RWMutex
 	peers            map[string]*Peer
@@ -300,7 +310,8 @@ func (s *Server) seedRotationLoop() {
 		select {
 		case <-ticker.C:
 			if err := s.refreshSeedRegistry(); err != nil {
-				fmt.Printf("Seed registry refresh failed: %v\n", err)
+				s.log().Warn("Seed registry refresh failed",
+					slog.Any("error", err))
 			}
 		case <-s.seedQuit:
 			return
@@ -529,12 +540,15 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		GreylistDuration: time.Minute,
 	})
 
+	baseLogger := slog.Default().With(slog.String("component", "p2p_server"))
+
 	server := &Server{
 		cfg:              cfg,
 		handler:          handler,
 		privKey:          privKey,
 		nodeID:           nodeID,
 		genesis:          cloneBytes(cfg.GenesisHash),
+		logger:           baseLogger,
 		peers:            make(map[string]*Peer),
 		metrics:          make(map[string]*peerMetrics),
 		byAddr:           make(map[string]string),
@@ -566,14 +580,15 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		server.seedRefresh = server.seedRegistry.RefreshInterval()
 	}
 
-	staticOrigins, dynamicOrigins := normalizeSeedOrigins(cfg)
+	staticOrigins, dynamicOrigins := normalizeSeedOrigins(cfg, server.log())
 	server.installStaticSeeds(staticOrigins)
 	if len(dynamicOrigins) > 0 {
 		server.setDynamicSeeds(dynamicOrigins)
 	}
 	if server.seedRegistry != nil && len(dynamicOrigins) == 0 {
 		if err := server.refreshSeedRegistry(); err != nil {
-			fmt.Printf("Seed registry lookup failed: %v\n", err)
+			server.log().Warn("Seed registry lookup failed",
+				slog.Any("error", err))
 		}
 	}
 
@@ -631,8 +646,12 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("NHB P2P listening on %s | chain=%d | genesis=%s | node=%s | client=%s\n",
-		ln.Addr().String(), s.cfg.ChainID, summarizeHash(s.genesis), s.nodeID, s.cfg.ClientVersion)
+	s.log().Info("P2P server listening",
+		logging.MaskField("listen_address", ln.Addr().String()),
+		slog.Uint64("chain_id", s.cfg.ChainID),
+		slog.String("genesis", summarizeHash(s.genesis)),
+		logging.MaskField("node_id", s.nodeID),
+		slog.String("client_version", s.cfg.ClientVersion))
 	s.addListenAddress(ln.Addr().String())
 
 	s.startConnManager()
@@ -652,7 +671,9 @@ func (s *Server) Start() error {
 
 func (s *Server) handleInbound(conn net.Conn) {
 	if err := s.initPeer(conn, true, false, ""); err != nil {
-		fmt.Printf("Inbound connection from %s rejected: %v\n", conn.RemoteAddr(), err)
+		s.log().Warn("Inbound connection rejected",
+			logging.MaskField("peer_address", conn.RemoteAddr().String()),
+			slog.Any("error", err))
 		conn.Close()
 	}
 }
@@ -713,10 +734,15 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if s.peerstore != nil && primaryAddr != "" {
 		entry := PeerstoreEntry{Addr: primaryAddr, NodeID: remote.nodeID}
 		if err := s.peerstore.Put(entry); err != nil {
-			fmt.Printf("persist peer %s: %v\n", remote.nodeID, err)
+			s.log().Warn("Failed to persist peer entry",
+				logging.MaskField("peer_id", remote.nodeID),
+				logging.MaskField("peer_address", entry.Addr),
+				slog.Any("error", err))
 		}
 		if _, err := s.peerstore.RecordSuccess(remote.nodeID, now); err != nil {
-			fmt.Printf("record peer success %s: %v\n", remote.nodeID, err)
+			s.log().Warn("Failed to record peer success",
+				logging.MaskField("peer_id", remote.nodeID),
+				slog.Any("error", err))
 		}
 	}
 
@@ -728,7 +754,11 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if err := s.registerPeer(peer); err != nil {
 		return err
 	}
-	fmt.Printf("New peer connected: %s (%s) client=%s\n", peer.id, peer.remoteAddr, remote.ClientVersion)
+	s.log().Info("Peer connected",
+		logging.MaskField("peer_id", peer.id),
+		logging.MaskField("peer_address", peer.remoteAddr),
+		slog.String("client_version", remote.ClientVersion),
+		slog.Bool("inbound", inbound))
 	peer.start()
 	return nil
 }
@@ -880,11 +910,19 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 
 	if ban {
 		s.applyBan(peer.id, peer.persistent)
-		fmt.Printf("Peer %s disconnected and banned: %v\n", peer.id, reason)
+		s.log().Warn("Peer disconnected and banned",
+			logging.MaskField("peer_id", peer.id),
+			logging.MaskField("peer_address", peer.remoteAddr),
+			slog.Any("error", reason))
 	} else if reason != nil {
-		fmt.Printf("Peer %s disconnected: %v\n", peer.id, reason)
+		s.log().Info("Peer disconnected",
+			logging.MaskField("peer_id", peer.id),
+			logging.MaskField("peer_address", peer.remoteAddr),
+			slog.Any("error", reason))
 	} else {
-		fmt.Printf("Peer %s disconnected\n", peer.id)
+		s.log().Info("Peer disconnected",
+			logging.MaskField("peer_id", peer.id),
+			logging.MaskField("peer_address", peer.remoteAddr))
 	}
 
 	if peer.persistent && !peer.inbound {
@@ -916,7 +954,8 @@ func (s *Server) Connect(addr string) error {
 		s.markDialFailure(addr)
 		return fmt.Errorf("handshake with %s failed: %w", addr, err)
 	}
-	fmt.Printf("Connected to peer: %s\n", addr)
+	s.log().Info("Outbound connection established",
+		logging.MaskField("peer_address", addr))
 	s.resetBackoff(addr)
 	return nil
 }
@@ -935,7 +974,8 @@ func (s *Server) Broadcast(msg *Message) error {
 		if err := peer.Enqueue(msg); err != nil {
 			errs = append(errs, fmt.Errorf("peer %s: %w", peer.id, err))
 			if errors.Is(err, errQueueFull) {
-				fmt.Printf("Peer %s send queue full, disconnecting\n", peer.id)
+				s.log().Warn("Peer send queue full",
+					logging.MaskField("peer_id", peer.id))
 				peer.server.adjustScore(peer.id, -slowPenalty)
 			}
 			peer.terminate(false, err)
@@ -1355,7 +1395,9 @@ func (s *Server) BanPeer(nodeID string, duration time.Duration) error {
 	}
 	if storeEntry != nil && s.peerstore != nil {
 		if err := s.peerstore.SetBan(normalized, until); err != nil {
-			fmt.Printf("record ban %s: %v\n", normalized, err)
+			s.log().Warn("Failed to record ban in peerstore",
+				logging.MaskField("peer_id", normalized),
+				slog.Any("error", err))
 		}
 	}
 
@@ -1397,7 +1439,9 @@ func (s *Server) enqueueDial(addr string, wait time.Duration) error {
 		delete(s.pendingDial, target)
 		s.dialMu.Unlock()
 		if err != nil {
-			fmt.Printf("Manual dial %s failed: %v\n", target, err)
+			s.log().Warn("Manual dial failed",
+				logging.MaskField("peer_address", target),
+				slog.Any("error", err))
 			s.scheduleReconnect(target)
 		} else {
 			s.resetBackoff(target)
@@ -1451,7 +1495,8 @@ func looksLikeNodeID(value string) bool {
 
 func (s *Server) handleRateLimit(peer *Peer, global bool) {
 	if global {
-		fmt.Printf("Dropping message from %s due to global rate cap\n", peer.id)
+		s.log().Warn("Global rate cap exceeded",
+			logging.MaskField("peer_id", peer.id))
 		peer.terminate(false, fmt.Errorf("global rate cap exceeded"))
 		return
 	}
@@ -1463,7 +1508,9 @@ func (s *Server) handleRateLimit(peer *Peer, global bool) {
 		}
 	}
 	status := s.adjustScore(peer.id, -ratePenalty)
-	fmt.Printf("Peer %s exceeded rate limit (score %d)\n", peer.id, status.Score)
+	s.log().Warn("Peer exceeded rate limit",
+		logging.MaskField("peer_id", peer.id),
+		slog.Int("score", status.Score))
 	peer.terminate(status.Banned, fmt.Errorf("peer rate limit exceeded"))
 }
 
@@ -1509,13 +1556,19 @@ func (s *Server) handleProtocolViolation(peer *Peer, err error) {
 		}
 	}
 	if s.updatePeerMetrics(peer.id, false) {
-		fmt.Printf("Protocol violation from %s: %v (banned: invalid rate)\n", peer.id, err)
+		s.log().Warn("Protocol violation: invalid message rate",
+			logging.MaskField("peer_id", peer.id),
+			slog.Any("error", err))
 		peer.terminate(true, fmt.Errorf("invalid message rate: %w", err))
 		return
 	}
 
 	status := s.adjustScore(peer.id, -malformedPenalty)
-	fmt.Printf("Protocol violation from %s: %v (score %d)\n", peer.id, err, status.Score)
+	s.log().Warn("Protocol violation",
+		logging.MaskField("peer_id", peer.id),
+		slog.Any("error", err),
+		slog.Int("score", status.Score),
+		slog.Bool("banned", status.Banned))
 	peer.terminate(status.Banned, err)
 }
 
@@ -1627,6 +1680,16 @@ func summarizeHash(input []byte) string {
 		return fmt.Sprintf("%x", input)
 	}
 	return fmt.Sprintf("%x…%x", input[:4], input[len(input)-4:])
+}
+
+func (s *Server) log() *slog.Logger {
+	if s == nil {
+		return slog.Default().With(slog.String("component", "p2p_server"))
+	}
+	if s.logger == nil {
+		s.logger = slog.Default().With(slog.String("component", "p2p_server"))
+	}
+	return s.logger
 }
 
 func cloneBytes(input []byte) []byte {
