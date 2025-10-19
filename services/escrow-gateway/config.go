@@ -12,8 +12,23 @@ import (
 
 // APIKeyConfig describes a single API key + secret pair accepted by the gateway.
 type APIKeyConfig struct {
-	Key    string
-	Secret string
+	Key      string          `json:"key"`
+	Secret   string          `json:"secret"`
+	Merchant *MerchantConfig `json:"merchant,omitempty"`
+}
+
+// MerchantConfig captures merchant-specific defaults and constraints.
+type MerchantConfig struct {
+	Identity string              `json:"identity,omitempty"`
+	Realm    MerchantRealmConfig `json:"realm"`
+}
+
+// MerchantRealmConfig controls realm defaults and enforcement for a merchant.
+type MerchantRealmConfig struct {
+	Default              string `json:"default,omitempty"`
+	Scope                string `json:"scope,omitempty"`
+	Type                 string `json:"type,omitempty"`
+	EnforceIdentityMatch bool   `json:"enforceIdentityMatch,omitempty"`
 }
 
 // Config captures runtime configuration for the escrow gateway service.
@@ -26,6 +41,7 @@ type Config struct {
 	NonceTTL             time.Duration
 	NonceCapacity        int
 	APIKeys              []APIKeyConfig
+	MerchantConfigs      map[string]MerchantConfig
 	WebhookQueueCapacity int
 	WebhookHistorySize   int
 	WebhookQueueTTL      time.Duration
@@ -121,17 +137,27 @@ func LoadConfigFromEnv() (Config, error) {
 	if apiJSON == "" {
 		return Config{}, errors.New("ESCROW_GATEWAY_API_KEYS is required")
 	}
-	var entries []map[string]string
+	var entries []APIKeyConfig
 	if err := json.Unmarshal([]byte(apiJSON), &entries); err != nil {
 		return Config{}, err
 	}
+	cfg.MerchantConfigs = make(map[string]MerchantConfig)
 	for _, entry := range entries {
-		key := strings.TrimSpace(entry["key"])
-		secret := strings.TrimSpace(entry["secret"])
+		key := strings.TrimSpace(entry.Key)
+		secret := strings.TrimSpace(entry.Secret)
 		if key == "" || secret == "" {
 			return Config{}, errors.New("api key entries must include key and secret")
 		}
-		cfg.APIKeys = append(cfg.APIKeys, APIKeyConfig{Key: key, Secret: secret})
+		sanitized := APIKeyConfig{Key: key, Secret: secret}
+		if entry.Merchant != nil {
+			merchant, err := sanitizeMerchantConfig(key, *entry.Merchant)
+			if err != nil {
+				return Config{}, err
+			}
+			cfg.MerchantConfigs[key] = merchant
+			sanitized.Merchant = &merchant
+		}
+		cfg.APIKeys = append(cfg.APIKeys, sanitized)
 	}
 
 	if len(cfg.APIKeys) == 0 {
@@ -155,4 +181,38 @@ func parseUnixTimestamp(v string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return time.Unix(secs, 0).UTC(), nil
+}
+
+func sanitizeMerchantConfig(apiKey string, input MerchantConfig) (MerchantConfig, error) {
+	merchant := MerchantConfig{
+		Identity: strings.TrimSpace(input.Identity),
+		Realm: MerchantRealmConfig{
+			Default:              strings.TrimSpace(input.Realm.Default),
+			Scope:                strings.ToLower(strings.TrimSpace(input.Realm.Scope)),
+			Type:                 strings.ToLower(strings.TrimSpace(input.Realm.Type)),
+			EnforceIdentityMatch: input.Realm.EnforceIdentityMatch,
+		},
+	}
+	if merchant.Identity == "" {
+		merchant.Identity = strings.TrimSpace(apiKey)
+	}
+	if l := len(merchant.Realm.Default); l > 0 && l > 64 {
+		return MerchantConfig{}, fmt.Errorf("merchant realm default exceeds 64 characters")
+	}
+	if l := len(merchant.Identity); l > 0 && l > 128 {
+		return MerchantConfig{}, fmt.Errorf("merchant identity exceeds 128 characters")
+	}
+	if merchant.Realm.Scope != "" && merchant.Realm.Scope != "platform" && merchant.Realm.Scope != "marketplace" {
+		return MerchantConfig{}, fmt.Errorf("unsupported merchant realm scope: %s", merchant.Realm.Scope)
+	}
+	if merchant.Realm.Type != "" && merchant.Realm.Type != "public" && merchant.Realm.Type != "private" {
+		return MerchantConfig{}, fmt.Errorf("unsupported merchant realm type: %s", merchant.Realm.Type)
+	}
+	if merchant.Realm.EnforceIdentityMatch && merchant.Realm.Type != "private" {
+		merchant.Realm.Type = "private"
+	}
+	if merchant.Realm.Default == "" && merchant.Realm.EnforceIdentityMatch {
+		merchant.Realm.Default = merchant.Identity
+	}
+	return merchant, nil
 }
