@@ -91,7 +91,7 @@ All filters are index-backed to meet SLA latency (<250 ms p95 for 100-row pages)
 | Method & Path | Description | Notes |
 |---------------|-------------|-------|
 | `GET /escrows` | List escrows by status, token, dispute flag. | Supports filters `status`, `token`, `payer`, `payee`, `deadline_before/after`, `disputed=true`. |
-| `GET /escrows/{escrow_id}` | Fetch escrow detail. | Includes transaction hashes and event references. |
+| `GET /escrows/{escrow_id}` | Fetch escrow detail. | Includes transaction hashes, event references, and provider metadata (`realmScope`, `realmType`, `realmProfile`, `realmFeeBps`, `realmFeeRecipient`). |
 | `POST /escrows/{escrow_id}/fund` | Mark escrow as funded after deposit. | Requires payer wallet signature. Idempotent. |
 | `POST /escrows/{escrow_id}/release` | Release funds to payee. | Allowed for payee, mediator, or arbitrator. |
 | `POST /escrows/{escrow_id}/refund` | Refund payer. | Payer-only unless dispute resolved to refund outcome. |

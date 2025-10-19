@@ -38,9 +38,10 @@ type Server struct {
 	queue         *WebhookQueue
 	intents       *PayIntentBuilder
 	nowFn         func() time.Time
+	merchants     map[string]MerchantConfig
 }
 
-func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *WebhookQueue, intents *PayIntentBuilder) *Server {
+func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *WebhookQueue, intents *PayIntentBuilder, merchants map[string]MerchantConfig) *Server {
 	if auth == nil {
 		panic("authenticator required")
 	}
@@ -56,6 +57,10 @@ func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *
 	if intents == nil {
 		intents = NewPayIntentBuilder()
 	}
+	clonedMerchants := make(map[string]MerchantConfig, len(merchants))
+	for k, v := range merchants {
+		clonedMerchants[strings.TrimSpace(k)] = v
+	}
 	return &Server{
 		authenticator: auth,
 		node:          node,
@@ -63,6 +68,7 @@ func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *
 		queue:         queue,
 		intents:       intents,
 		nowFn:         time.Now,
+		merchants:     clonedMerchants,
 	}
 }
 
@@ -134,7 +140,10 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
 		s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
 	}
-	if validationErr := validateEscrowCreate(req); validationErr != nil {
+	merchant := s.merchantSettings(principal.APIKey)
+	applyMerchantDefaults(&req, merchant)
+
+	if validationErr := validateEscrowCreate(&req); validationErr != nil {
 		s.writeError(w, http.StatusBadRequest, validationErr)
 		s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(fmt.Sprintf(`{"error":"%s"}`, validationErr.Error())))
 		return
@@ -142,6 +151,16 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	if err := s.enforceRealmConstraints(ctx, merchant, principal.APIKey, req.Realm); err != nil {
+		status := http.StatusBadGateway
+		var realmErr *realmValidationError
+		if errors.As(err, &realmErr) {
+			status = http.StatusBadRequest
+		}
+		s.writeError(w, status, err)
+		s.audit(r.Context(), principal, r, body, status, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+		return
+	}
 	created, err := s.node.EscrowCreate(ctx, req)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err)
@@ -522,17 +541,65 @@ func (s *Server) audit(ctx context.Context, principal *Principal, r *http.Reques
 	_ = s.store.InsertAuditLog(ctx, entry)
 }
 
-func validateEscrowCreate(req EscrowCreateRequest) error {
-	if strings.TrimSpace(req.Payer) == "" {
+func (s *Server) merchantSettings(apiKey string) *MerchantConfig {
+	if s == nil || len(s.merchants) == 0 {
+		return nil
+	}
+	cfg, ok := s.merchants[strings.TrimSpace(apiKey)]
+	if !ok {
+		return nil
+	}
+	clone := cfg
+	return &clone
+}
+
+func applyMerchantDefaults(req *EscrowCreateRequest, merchant *MerchantConfig) {
+	if req == nil || merchant == nil {
+		return
+	}
+	if strings.TrimSpace(req.Realm) != "" {
+		return
+	}
+	if trimmed := strings.TrimSpace(merchant.Realm.Default); trimmed != "" {
+		req.Realm = trimmed
+		return
+	}
+	if merchant.Realm.EnforceIdentityMatch {
+		if identity := strings.TrimSpace(merchant.Identity); identity != "" {
+			req.Realm = identity
+		}
+	}
+}
+
+type realmValidationError struct {
+	reason string
+}
+
+func (e *realmValidationError) Error() string {
+	if e == nil {
+		return "realm validation failed"
+	}
+	return e.reason
+}
+
+func validateEscrowCreate(req *EscrowCreateRequest) error {
+	if req == nil {
+		return errors.New("request is required")
+	}
+	req.Payer = strings.TrimSpace(req.Payer)
+	if req.Payer == "" {
 		return errors.New("payer is required")
 	}
-	if strings.TrimSpace(req.Payee) == "" {
+	req.Payee = strings.TrimSpace(req.Payee)
+	if req.Payee == "" {
 		return errors.New("payee is required")
 	}
-	if strings.TrimSpace(req.Token) == "" {
+	req.Token = strings.TrimSpace(req.Token)
+	if req.Token == "" {
 		return errors.New("token is required")
 	}
-	if strings.TrimSpace(req.Amount) == "" {
+	req.Amount = strings.TrimSpace(req.Amount)
+	if req.Amount == "" {
 		return errors.New("amount is required")
 	}
 	if req.Deadline == 0 {
@@ -541,8 +608,65 @@ func validateEscrowCreate(req EscrowCreateRequest) error {
 	if req.Nonce == 0 {
 		return errors.New("nonce is required")
 	}
-	if trimmed := strings.TrimSpace(req.Realm); len(trimmed) > 64 {
+	trimmedRealm := strings.TrimSpace(req.Realm)
+	if len(trimmedRealm) > 64 {
 		return errors.New("realm must be <= 64 characters")
+	}
+	req.Realm = trimmedRealm
+	return nil
+}
+
+func (s *Server) enforceRealmConstraints(ctx context.Context, merchant *MerchantConfig, principalKey, realm string) error {
+	if merchant == nil {
+		return nil
+	}
+	settings := merchant.Realm
+	trimmed := strings.TrimSpace(realm)
+	if trimmed == "" {
+		if settings.Scope != "" || settings.Type != "" || settings.EnforceIdentityMatch || settings.Default != "" {
+			return &realmValidationError{reason: "realm selection required"}
+		}
+		return nil
+	}
+	if settings.Scope == "" && settings.Type == "" && !settings.EnforceIdentityMatch {
+		return nil
+	}
+	info, err := s.node.EscrowGetRealm(ctx, trimmed)
+	if err != nil {
+		return err
+	}
+	meta := info.Metadata
+	if meta == nil {
+		return &realmValidationError{reason: "realm metadata unavailable"}
+	}
+	if expected := strings.TrimSpace(settings.Scope); expected != "" {
+		if strings.TrimSpace(meta.Scope) == "" {
+			return &realmValidationError{reason: "realm scope metadata unavailable"}
+		}
+		if !strings.EqualFold(meta.Scope, expected) {
+			return &realmValidationError{reason: fmt.Sprintf("realm scope %s does not match required scope %s", meta.Scope, expected)}
+		}
+	}
+	expectedType := strings.TrimSpace(settings.Type)
+	if expectedType == "" && settings.EnforceIdentityMatch {
+		expectedType = "private"
+	}
+	if expectedType != "" {
+		if strings.TrimSpace(meta.Type) == "" {
+			return &realmValidationError{reason: "realm type metadata unavailable"}
+		}
+		if !strings.EqualFold(meta.Type, expectedType) {
+			return &realmValidationError{reason: fmt.Sprintf("realm type %s does not match required type %s", meta.Type, expectedType)}
+		}
+	}
+	if settings.EnforceIdentityMatch {
+		identity := strings.TrimSpace(merchant.Identity)
+		if identity == "" {
+			identity = strings.TrimSpace(principalKey)
+		}
+		if identity != "" && !strings.EqualFold(trimmed, identity) {
+			return &realmValidationError{reason: fmt.Sprintf("realm must match merchant identity %s", identity)}
+		}
 	}
 	return nil
 }
