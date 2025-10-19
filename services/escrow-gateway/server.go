@@ -279,7 +279,7 @@ func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, 
 	case escrowTransitionRefund:
 		callErr = s.node.EscrowRefund(ctx, req.EscrowID, signer)
 	case escrowTransitionDispute:
-		callErr = s.node.EscrowDispute(ctx, req.EscrowID, signer)
+		callErr = s.node.EscrowDispute(ctx, req.EscrowID, signer, req.Reason)
 	default:
 		callErr = errors.New("unsupported transition")
 	}

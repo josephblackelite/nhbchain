@@ -48,6 +48,13 @@ type escrowActorParams struct {
 	Caller string `json:"caller"`
 }
 
+type escrowDisputeParams struct {
+	ID      string `json:"id"`
+	Caller  string `json:"caller"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 type escrowFundParams struct {
 	ID   string `json:"id"`
 	From string `json:"from"`
@@ -64,25 +71,26 @@ type escrowCreateResult struct {
 }
 
 type escrowJSON struct {
-	ID           string   `json:"id"`
-	Payer        string   `json:"payer"`
-	Payee        string   `json:"payee"`
-	Mediator     *string  `json:"mediator,omitempty"`
-	Token        string   `json:"token"`
-	Amount       string   `json:"amount"`
-	FeeBps       uint32   `json:"feeBps"`
-	Deadline     int64    `json:"deadline"`
-	CreatedAt    int64    `json:"createdAt"`
-	Nonce        uint64   `json:"nonce"`
-	Status       string   `json:"status"`
-	Meta         string   `json:"meta"`
-	Realm        *string  `json:"realm,omitempty"`
-	RealmVersion *uint64  `json:"realmVersion,omitempty"`
-	PolicyNonce  *uint64  `json:"policyNonce,omitempty"`
-	ArbScheme    *uint8   `json:"arbScheme,omitempty"`
-	ArbThreshold *uint32  `json:"arbThreshold,omitempty"`
-	FrozenAt     *int64   `json:"frozenAt,omitempty"`
-	Arbitrators  []string `json:"arbitrators,omitempty"`
+	ID            string   `json:"id"`
+	Payer         string   `json:"payer"`
+	Payee         string   `json:"payee"`
+	Mediator      *string  `json:"mediator,omitempty"`
+	Token         string   `json:"token"`
+	Amount        string   `json:"amount"`
+	FeeBps        uint32   `json:"feeBps"`
+	Deadline      int64    `json:"deadline"`
+	CreatedAt     int64    `json:"createdAt"`
+	Nonce         uint64   `json:"nonce"`
+	Status        string   `json:"status"`
+	Meta          string   `json:"meta"`
+	DisputeReason *string  `json:"disputeReason,omitempty"`
+	Realm         *string  `json:"realm,omitempty"`
+	RealmVersion  *uint64  `json:"realmVersion,omitempty"`
+	PolicyNonce   *uint64  `json:"policyNonce,omitempty"`
+	ArbScheme     *uint8   `json:"arbScheme,omitempty"`
+	ArbThreshold  *uint32  `json:"arbThreshold,omitempty"`
+	FrozenAt      *int64   `json:"frozenAt,omitempty"`
+	Arbitrators   []string `json:"arbitrators,omitempty"`
 }
 
 func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
@@ -218,7 +226,38 @@ func (s *Server) handleEscrowRefund(w http.ResponseWriter, r *http.Request, req 
 }
 
 func (s *Server) handleEscrowDispute(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleEscrowTransition(w, r, req, s.node.EscrowDispute)
+	if authErr := s.requireAuthInto(&r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return
+	}
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
+		return
+	}
+	var params escrowDisputeParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	id, err := parseEscrowID(params.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	caller, err := parseBech32Address(params.Caller)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	reason := strings.TrimSpace(params.Reason)
+	if reason == "" {
+		reason = strings.TrimSpace(params.Message)
+	}
+	if err := s.node.EscrowDispute(id, caller, reason); err != nil {
+		writeEscrowError(w, req.ID, err)
+		return
+	}
+	writeResult(w, req.ID, "ok")
 }
 
 func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, req *RPCRequest, fn func([32]byte, [20]byte) error) {
@@ -396,6 +435,11 @@ func formatEscrowJSON(esc *escrow.Escrow) escrowJSON {
 		amount = esc.Amount.String()
 	}
 	meta := "0x" + hex.EncodeToString(esc.MetaHash[:])
+	var disputeReasonPtr *string
+	if trimmed := strings.TrimSpace(esc.DisputeReason); trimmed != "" {
+		disputeReason := trimmed
+		disputeReasonPtr = &disputeReason
+	}
 	var realmPtr *string
 	var realmVersionPtr *uint64
 	var policyNoncePtr *uint64
@@ -428,25 +472,26 @@ func formatEscrowJSON(esc *escrow.Escrow) escrowJSON {
 		}
 	}
 	return escrowJSON{
-		ID:           formatEscrowID(esc.ID),
-		Payer:        payer,
-		Payee:        payee,
-		Mediator:     mediatorPtr,
-		Token:        esc.Token,
-		Amount:       amount,
-		FeeBps:       esc.FeeBps,
-		Deadline:     esc.Deadline,
-		CreatedAt:    esc.CreatedAt,
-		Nonce:        esc.Nonce,
-		Status:       escrowStatusString(esc.Status),
-		Meta:         meta,
-		Realm:        realmPtr,
-		RealmVersion: realmVersionPtr,
-		PolicyNonce:  policyNoncePtr,
-		ArbScheme:    schemePtr,
-		ArbThreshold: thresholdPtr,
-		FrozenAt:     frozenAtPtr,
-		Arbitrators:  arbitrators,
+		ID:            formatEscrowID(esc.ID),
+		Payer:         payer,
+		Payee:         payee,
+		Mediator:      mediatorPtr,
+		Token:         esc.Token,
+		Amount:        amount,
+		FeeBps:        esc.FeeBps,
+		Deadline:      esc.Deadline,
+		CreatedAt:     esc.CreatedAt,
+		Nonce:         esc.Nonce,
+		Status:        escrowStatusString(esc.Status),
+		Meta:          meta,
+		DisputeReason: disputeReasonPtr,
+		Realm:         realmPtr,
+		RealmVersion:  realmVersionPtr,
+		PolicyNonce:   policyNoncePtr,
+		ArbScheme:     schemePtr,
+		ArbThreshold:  thresholdPtr,
+		FrozenAt:      frozenAtPtr,
+		Arbitrators:   arbitrators,
 	}
 }
 

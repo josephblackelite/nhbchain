@@ -36,17 +36,18 @@ func TestManagerEscrowPutGet(t *testing.T) {
 	amount := big.NewInt(1_000_000)
 	created := int64(1_695_000_000)
 	escrowDef := &escrowpkg.Escrow{
-		ID:        id,
-		Payer:     payer,
-		Payee:     payee,
-		Mediator:  mediator,
-		Token:     "nhb",
-		Amount:    amount,
-		FeeBps:    250,
-		Deadline:  1_700_000_000,
-		CreatedAt: created,
-		Nonce:     1,
-		Status:    escrowpkg.EscrowFunded,
+		ID:            id,
+		Payer:         payer,
+		Payee:         payee,
+		Mediator:      mediator,
+		Token:         "nhb",
+		Amount:        amount,
+		FeeBps:        250,
+		Deadline:      1_700_000_000,
+		CreatedAt:     created,
+		Nonce:         1,
+		Status:        escrowpkg.EscrowFunded,
+		DisputeReason: " delayed shipment ",
 	}
 
 	if err := mgr.EscrowPut(escrowDef); err != nil {
@@ -84,6 +85,9 @@ func TestManagerEscrowPutGet(t *testing.T) {
 	}
 	if stored.Payer != payer || stored.Payee != payee || stored.Mediator != mediator {
 		t.Fatalf("addresses mutated during round trip")
+	}
+	if stored.DisputeReason != "delayed shipment" {
+		t.Fatalf("unexpected dispute reason: %q", stored.DisputeReason)
 	}
 }
 
