@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,6 +43,17 @@ func TestRPCRejectsPlaintextWithoutAllowInsecure(t *testing.T) {
 	if err := srv.Serve(listener); err == nil || !strings.Contains(err.Error(), "TLS is required") {
 		t.Fatalf("expected TLS requirement error, got %v", err)
 	}
+}
+
+func newSwapPersistence(t *testing.T) gatewayauth.NoncePersistence {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := gatewayauth.NewLevelDBNoncePersistence(filepath.Join(dir, "nonces"))
+	if err != nil {
+		t.Fatalf("new persistence: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
 func TestRequireAuthWithJWT(t *testing.T) {
@@ -142,6 +154,7 @@ func TestStableRPCMethodsRequireBearerToken(t *testing.T) {
 			},
 		},
 	}
+	cfg.SwapAuth.Persistence = newSwapPersistence(t)
 	srv, err := rpc.NewServer(nil, nil, cfg)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -236,6 +249,7 @@ func TestSwapHMACEnforcesSkewAndNonceTTL(t *testing.T) {
 			},
 		},
 	}
+	cfg.SwapAuth.Persistence = newSwapPersistence(t)
 	t.Setenv("TEST_RPC_JWT_SECRET", "swap-auth-secret")
 	cfg.JWT = rpc.JWTConfig{
 		Enable:      true,

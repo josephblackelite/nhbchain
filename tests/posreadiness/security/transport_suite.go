@@ -260,6 +260,16 @@ func newRPCTestServer(t *testing.T, cfg rpc.ServerConfig) *rpcTestServer {
 		}
 	}
 
+	if len(cfg.SwapAuth.Secrets) > 0 && cfg.SwapAuth.Persistence == nil {
+		store, err := gatewayauth.NewLevelDBNoncePersistence(filepath.Join(t.TempDir(), "swap-nonces"))
+		if err != nil {
+			db.Close()
+			t.Fatalf("new swap persistence: %v", err)
+		}
+		cfg.SwapAuth.Persistence = store
+		t.Cleanup(func() { _ = store.Close() })
+	}
+
 	server, err := rpc.NewServer(node, nil, cfg)
 	if err != nil {
 		db.Close()

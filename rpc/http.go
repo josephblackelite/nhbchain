@@ -390,6 +390,9 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 			secrets[trimmedKey] = trimmedSecret
 		}
 		if len(secrets) > 0 {
+			if cfg.SwapAuth.Persistence == nil {
+				return nil, fmt.Errorf("swap auth persistence required when API secrets are configured")
+			}
 			allowedSkew := cfg.SwapAuth.AllowedTimestampSkew
 			if allowedSkew <= 0 {
 				allowedSkew = swapDefaultTimestamp
@@ -412,15 +415,13 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 				nonceCapacity = swapMaxNonceCache
 			}
 			swapAuth = gatewayauth.NewAuthenticator(secrets, allowedSkew, nonceTTL, nonceCapacity, swapNow, cfg.SwapAuth.Persistence)
-			if swapAuth != nil && cfg.SwapAuth.Persistence != nil {
-				now := swapNow()
-				cutoff := now.Add(-nonceTTL)
-				if err := cfg.SwapAuth.Persistence.PruneNonces(context.Background(), cutoff); err != nil {
-					return nil, fmt.Errorf("prune swap nonces: %w", err)
-				}
-				if err := swapAuth.HydrateNonces(context.Background(), cutoff); err != nil {
-					return nil, fmt.Errorf("hydrate swap nonces: %w", err)
-				}
+			now := swapNow()
+			cutoff := now.Add(-nonceTTL)
+			if err := cfg.SwapAuth.Persistence.PruneNonces(context.Background(), cutoff); err != nil {
+				return nil, fmt.Errorf("prune swap nonces: %w", err)
+			}
+			if err := swapAuth.HydrateNonces(context.Background(), cutoff); err != nil {
+				return nil, fmt.Errorf("hydrate swap nonces: %w", err)
 			}
 		}
 	}

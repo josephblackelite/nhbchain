@@ -32,6 +32,8 @@ import (
 	"nhbchain/rpc"
 	"nhbchain/storage"
 
+	gatewayauth "nhbchain/gateway/auth"
+
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -412,6 +414,62 @@ func main() {
 			MaxTxPerIdentityChain: limit.MaxTxPerIdentityChain,
 		}
 	}
+	swapSecrets := make(map[string]string, len(cfg.RPCSwapAuth.Secrets))
+	for key, secret := range cfg.RPCSwapAuth.Secrets {
+		trimmedKey := strings.TrimSpace(key)
+		trimmedSecret := strings.TrimSpace(secret)
+		if trimmedKey == "" || trimmedSecret == "" {
+			continue
+		}
+		swapSecrets[trimmedKey] = trimmedSecret
+	}
+	partnerLimits := make(map[string]int, len(cfg.RPCSwapAuth.PartnerRateLimits))
+	for key, limit := range cfg.RPCSwapAuth.PartnerRateLimits {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" || limit <= 0 {
+			continue
+		}
+		partnerLimits[trimmedKey] = limit
+	}
+	var swapPersistence gatewayauth.NoncePersistence
+	if len(swapSecrets) > 0 {
+		backend := strings.ToLower(strings.TrimSpace(cfg.RPCSwapAuth.Persistence.Backend))
+		switch backend {
+		case "leveldb":
+			path := strings.TrimSpace(cfg.RPCSwapAuth.Persistence.LevelDBPath)
+			if path == "" {
+				logger.Error("swap RPC auth persistence path required", slog.String("backend", backend))
+				os.Exit(1)
+			}
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cfg.DataDir, path)
+			}
+			store, err := gatewayauth.NewLevelDBNoncePersistence(path)
+			if err != nil {
+				logger.Error("failed to initialise swap nonce persistence", slog.Any("error", err))
+				os.Exit(1)
+			}
+			swapPersistence = store
+			if closer, ok := swapPersistence.(interface{ Close() error }); ok {
+				defer closer.Close()
+			}
+		case "", "none":
+			logger.Error("swap RPC auth persistence backend required when secrets are configured")
+			os.Exit(1)
+		default:
+			logger.Error("unsupported swap RPC auth persistence backend", slog.String("backend", backend))
+			os.Exit(1)
+		}
+	}
+	swapAuthCfg := rpc.SwapAuthConfig{
+		Secrets:              swapSecrets,
+		AllowedTimestampSkew: time.Duration(cfg.RPCSwapAuth.AllowedTimestampSkewSecs) * time.Second,
+		NonceTTL:             time.Duration(cfg.RPCSwapAuth.NonceTTLSeconds) * time.Second,
+		NonceCapacity:        cfg.RPCSwapAuth.NonceCapacity,
+		RateLimitWindow:      time.Duration(cfg.RPCSwapAuth.RateLimitWindowSeconds) * time.Second,
+		PartnerRateLimits:    partnerLimits,
+		Persistence:          swapPersistence,
+	}
 	rpcServer, err := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
@@ -446,6 +504,7 @@ func main() {
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
 		AllowInsecure:            cfg.RPCAllowInsecure,
 		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
+		SwapAuth:                 swapAuthCfg,
 	})
 	if err != nil {
 		logger.Error("failed to initialise RPC server", slog.Any("error", err))
