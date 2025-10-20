@@ -63,10 +63,14 @@ func TestValidatorForParamStaking(t *testing.T) {
 		{name: "min stake negative", key: ParamKeyStakingMinStakeWei, payload: json.RawMessage("-1"), wantErr: true},
 		{name: "max emission valid", key: ParamKeyStakingMaxEmissionPerYearWei, payload: json.RawMessage("0")},
 		{name: "max emission negative", key: ParamKeyStakingMaxEmissionPerYearWei, payload: json.RawMessage("-5"), wantErr: true},
+		{name: "mint nhb emission valid", key: ParamKeyMintNHBMaxEmissionPerYearWei, payload: json.RawMessage("\"1000\"")},
+		{name: "mint nhb emission negative", key: ParamKeyMintNHBMaxEmissionPerYearWei, payload: json.RawMessage("-1"), wantErr: true},
+		{name: "mint znhb emission valid", key: ParamKeyMintZNHBMaxEmissionPerYearWei, payload: json.RawMessage("100")},
+		{name: "mint znhb emission negative", key: ParamKeyMintZNHBMaxEmissionPerYearWei, payload: json.RawMessage("\"-5\""), wantErr: true},
 		{name: "reward asset valid", key: ParamKeyStakingRewardAsset, payload: json.RawMessage("\"ZNHB\"")},
 		{name: "reward asset empty", key: ParamKeyStakingRewardAsset, payload: json.RawMessage("\"   \""), wantErr: true},
 		{name: "compound valid", key: ParamKeyStakingCompoundDefault, payload: json.RawMessage("true")},
-                {name: "compound invalid", key: ParamKeyStakingCompoundDefault, payload: json.RawMessage("\"maybe\""), wantErr: true},
+		{name: "compound invalid", key: ParamKeyStakingCompoundDefault, payload: json.RawMessage("\"maybe\""), wantErr: true},
 	}
 
 	for _, tc := range tests {

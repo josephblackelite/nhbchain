@@ -25,10 +25,53 @@ func TestStakingKeyFormats(t *testing.T) {
 		t.Fatalf("unexpected emission key: %s", string(emissionKey))
 	}
 
+	mintKey := MintEmissionYTDKey("znhb", 2024)
+	if string(mintKey) != "mint/ZNHB/ytdEmissions/2024" {
+		t.Fatalf("unexpected mint emission key: %s", string(mintKey))
+	}
+
 	acctKey := StakingAcctKey([]byte{0x01, 0x02, 0x03})
 	expectedAcct := append([]byte("staking/account/"), 0x01, 0x02, 0x03)
 	if string(acctKey) != string(expectedAcct) {
 		t.Fatalf("unexpected account key: %x", acctKey)
+	}
+}
+
+func TestMintEmissionHelpers(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	tr, err := trie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	mgr := NewManager(tr)
+
+	if err := mgr.SetMintEmissionYTD("NHB", 2025, big.NewInt(150)); err != nil {
+		t.Fatalf("set mint emission: %v", err)
+	}
+	total, err := mgr.MintEmissionYTD("nhb", 2025)
+	if err != nil {
+		t.Fatalf("get mint emission: %v", err)
+	}
+	if total.Cmp(big.NewInt(150)) != 0 {
+		t.Fatalf("unexpected mint emission total: %s", total)
+	}
+
+	updated, err := mgr.IncrementMintEmissionYTD("nhb", 2025, big.NewInt(25))
+	if err != nil {
+		t.Fatalf("increment mint emission: %v", err)
+	}
+	if updated.Cmp(big.NewInt(175)) != 0 {
+		t.Fatalf("unexpected updated mint emission: %s", updated)
+	}
+
+	stored, err := mgr.MintEmissionYTD("NHB", 2025)
+	if err != nil {
+		t.Fatalf("reload mint emission: %v", err)
+	}
+	if stored.Cmp(big.NewInt(175)) != 0 {
+		t.Fatalf("unexpected stored mint emission: %s", stored)
 	}
 }
 

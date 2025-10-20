@@ -146,6 +146,12 @@ func StakingEmissionYTDKey(year uint32) []byte {
 	return []byte(fmt.Sprintf(stakingEmissionYTDKeyFormat, year))
 }
 
+// MintEmissionYTDKey constructs the year-scoped key for tracking mint emissions per token.
+func MintEmissionYTDKey(token string, year uint32) []byte {
+	normalized := strings.ToUpper(strings.TrimSpace(token))
+	return []byte(fmt.Sprintf(mintEmissionYTDKeyFormat, normalized, year))
+}
+
 // StakingAcctKey composes the storage key holding a snapshot of a delegator's
 // staking metadata. Account addresses are appended verbatim to avoid encoding
 // ambiguity across clients.
@@ -330,6 +336,57 @@ func (m *Manager) IncrementStakingEmissionYTD(year uint32, delta *big.Int) (*big
 	}
 	updated := new(big.Int).Add(current, delta)
 	if err := m.SetStakingEmissionYTD(year, updated); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// MintEmissionYTD fetches the cumulative mint emission for the provided token and year.
+// Missing entries default to zero.
+func (m *Manager) MintEmissionYTD(token string, year uint32) (*big.Int, error) {
+	if m == nil {
+		return big.NewInt(0), nil
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(token))
+	if normalized == "" {
+		return nil, fmt.Errorf("token symbol required")
+	}
+	return m.loadBigInt(MintEmissionYTDKey(normalized, year))
+}
+
+// SetMintEmissionYTD overwrites the stored mint emission total for the provided token and year.
+func (m *Manager) SetMintEmissionYTD(token string, year uint32, total *big.Int) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(token))
+	if normalized == "" {
+		return fmt.Errorf("token symbol required")
+	}
+	return m.writeBigInt(MintEmissionYTDKey(normalized, year), total)
+}
+
+// IncrementMintEmissionYTD adds the supplied delta to the stored mint emission counter.
+func (m *Manager) IncrementMintEmissionYTD(token string, year uint32, delta *big.Int) (*big.Int, error) {
+	if m == nil {
+		return big.NewInt(0), fmt.Errorf("state manager unavailable")
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(token))
+	if normalized == "" {
+		return nil, fmt.Errorf("token symbol required")
+	}
+	if delta == nil {
+		delta = big.NewInt(0)
+	}
+	if delta.Sign() < 0 {
+		return nil, fmt.Errorf("emission delta must be non-negative")
+	}
+	current, err := m.MintEmissionYTD(normalized, year)
+	if err != nil {
+		return nil, err
+	}
+	updated := new(big.Int).Add(current, delta)
+	if err := m.SetMintEmissionYTD(normalized, year, updated); err != nil {
 		return nil, err
 	}
 	return updated, nil

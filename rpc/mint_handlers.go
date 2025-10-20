@@ -70,6 +70,8 @@ func (s *Server) handleMintWithSig(w http.ResponseWriter, _ *http.Request, req *
 			writeError(w, http.StatusConflict, req.ID, codeDuplicateTx, err.Error(), voucher.InvoiceID)
 		case errors.Is(err, core.ErrMintExpired), errors.Is(err, core.ErrMintInvalidChainID), errors.Is(err, core.ErrMintInvalidPayload):
 			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		case errors.Is(err, core.ErrMintEmissionCapExceeded):
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		case errors.Is(err, core.ErrMempoolFull):
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeMempoolFull, "mempool full", nil)
 		default:

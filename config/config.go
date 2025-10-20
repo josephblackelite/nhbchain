@@ -29,6 +29,8 @@ var defaultAllowedGovernanceParams = []string{
 	governance.ParamKeyStakingUnbondingDays,
 	governance.ParamKeyStakingMinStakeWei,
 	governance.ParamKeyStakingMaxEmissionPerYearWei,
+	governance.ParamKeyMintNHBMaxEmissionPerYearWei,
+	governance.ParamKeyMintZNHBMaxEmissionPerYearWei,
 	governance.ParamKeyStakingRewardAsset,
 	governance.ParamKeyStakingCompoundDefault,
 	governance.ParamKeyLoyaltyDynamicTargetBps,
