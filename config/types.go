@@ -29,6 +29,23 @@ type RPCJWT struct {
 	MaxSkewSeconds   int64    `toml:"MaxSkewSeconds"`
 }
 
+// RPCSwapAuthPersistence configures the backend used for durable swap nonce storage.
+type RPCSwapAuthPersistence struct {
+	Backend     string `toml:"Backend"`
+	LevelDBPath string `toml:"LevelDBPath"`
+}
+
+// RPCSwapAuth configures HMAC authentication for swap RPC methods.
+type RPCSwapAuth struct {
+	Secrets                  map[string]string      `toml:"Secrets"`
+	AllowedTimestampSkewSecs int                    `toml:"AllowedTimestampSkewSeconds"`
+	NonceTTLSeconds          int                    `toml:"NonceTTLSeconds"`
+	NonceCapacity            int                    `toml:"NonceCapacity"`
+	RateLimitWindowSeconds   int                    `toml:"RateLimitWindowSeconds"`
+	PartnerRateLimits        map[string]int         `toml:"PartnerRateLimits"`
+	Persistence              RPCSwapAuthPersistence `toml:"Persistence"`
+}
+
 // Governance captures global governance policy knobs that must be validated
 // before applying runtime configuration updates.
 type Governance struct {

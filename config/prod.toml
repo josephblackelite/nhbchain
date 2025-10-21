@@ -53,6 +53,18 @@ RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
 RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
 RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
 
+[RPCSwapAuth]
+# Secrets = { partner = "shared-secret" }
+# AllowedTimestampSkewSeconds = 120
+# NonceTTLSeconds = 600
+# NonceCapacity = 4096
+# RateLimitWindowSeconds = 60
+# PartnerRateLimits = { }
+
+[RPCSwapAuth.Persistence]
+# Backend = "leveldb"
+# LevelDBPath = "/var/lib/nhb/rpc/swap-nonces"
+
 [global.staking]
 MaxEmissionPerYearWei = "5000000000000000000"
 

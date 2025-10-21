@@ -62,6 +62,7 @@ type Config struct {
 	RPCAllowlistCIDRs           []string                     `toml:"RPCAllowlistCIDRs"`
 	RPCProxyHeaders             RPCProxyHeaders              `toml:"RPCProxyHeaders"`
 	RPCJWT                      RPCJWT                       `toml:"RPCJWT"`
+	RPCSwapAuth                 RPCSwapAuth                  `toml:"RPCSwapAuth"`
 	RPCReadHeaderTimeout        int                          `toml:"RPCReadHeaderTimeout"`
 	RPCReadTimeout              int                          `toml:"RPCReadTimeout"`
 	RPCWriteTimeout             int                          `toml:"RPCWriteTimeout"`
