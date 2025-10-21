@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -555,10 +556,14 @@ type paymasterTopUpMutation struct {
 	paymasterBytes   [20]byte
 	paymasterRaw     []byte
 	paymasterKey     string
+	funding          [20]byte
+	fundingRaw       []byte
 	token            string
 	amount           *big.Int
 	previousBalance  *big.Int
 	newBalance       *big.Int
+	previousFunding  *big.Int
+	newFunding       *big.Int
 	day              string
 	previousDay      *nhbstate.PaymasterTopUpDay
 	dayRecordExisted bool
@@ -592,6 +597,23 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 	}
 	if err := sp.setAccount(m.paymasterRaw, account); err != nil {
 		return err
+	}
+	if len(m.fundingRaw) > 0 {
+		fundingAccount, err := sp.getAccount(m.fundingRaw)
+		if err != nil {
+			return err
+		}
+		if fundingAccount == nil {
+			fundingAccount = &types.Account{}
+		}
+		if m.previousFunding != nil {
+			fundingAccount.BalanceZNHB = new(big.Int).Set(m.previousFunding)
+		} else {
+			fundingAccount.BalanceZNHB = big.NewInt(0)
+		}
+		if err := sp.setAccount(m.fundingRaw, fundingAccount); err != nil {
+			return err
+		}
 	}
 	manager := nhbstate.NewManager(sp.Trie)
 	if m.dayRecordExisted {
@@ -671,11 +693,11 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if err != nil {
 		return nil, err
 	}
-	mintedSoFar := big.NewInt(0)
-	if dayRecord != nil && dayRecord.MintedWei != nil {
-		mintedSoFar = new(big.Int).Set(dayRecord.MintedWei)
+	debitedSoFar := big.NewInt(0)
+	if dayRecord != nil && dayRecord.DebitedWei != nil {
+		debitedSoFar = new(big.Int).Set(dayRecord.DebitedWei)
 	}
-	projected := new(big.Int).Add(mintedSoFar, amount)
+	projected := new(big.Int).Add(debitedSoFar, amount)
 	if policy.DailyCapWei != nil && policy.DailyCapWei.Sign() > 0 && projected.Cmp(policy.DailyCapWei) > 0 {
 		var paymasterBytes [20]byte
 		copy(paymasterBytes[:], addr.Bytes())
@@ -705,18 +727,26 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 		return nil, nil
 	}
 	funding := policy.FundingAccount
+	fundingRaw := append([]byte(nil), funding[:]...)
+	fundingAccount, err := sp.getAccount(fundingRaw)
+	if err != nil {
+		return nil, err
+	}
+	if fundingAccount == nil {
+		fundingAccount = &types.Account{}
+	}
+	if fundingAccount.BalanceZNHB == nil {
+		fundingAccount.BalanceZNHB = big.NewInt(0)
+	}
 	minter := policy.Minter
 	if minter == ([20]byte{}) {
-		minter = funding
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "minter_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
 	}
 	if strings.TrimSpace(policy.MinterRole) != "" {
-		if minter == ([20]byte{}) {
-			var paymasterBytes [20]byte
-			copy(paymasterBytes[:], addr.Bytes())
-			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "minter_missing")
-			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
-			return nil, nil
-		}
 		if !manager.HasRole(policy.MinterRole, minter[:]) {
 			var paymasterBytes [20]byte
 			copy(paymasterBytes[:], addr.Bytes())
@@ -727,16 +757,20 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	}
 	approver := policy.Approver
 	if approver == ([20]byte{}) {
-		approver = funding
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
+	}
+	if bytes.Equal(minter[:], approver[:]) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
 	}
 	if strings.TrimSpace(policy.ApproverRole) != "" {
-		if approver == ([20]byte{}) {
-			var paymasterBytes [20]byte
-			copy(paymasterBytes[:], addr.Bytes())
-			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_missing")
-			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
-			return nil, nil
-		}
 		if !manager.HasRole(policy.ApproverRole, approver[:]) {
 			var paymasterBytes [20]byte
 			copy(paymasterBytes[:], addr.Bytes())
@@ -745,13 +779,24 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 			return nil, nil
 		}
 	}
+	fundingBalance := new(big.Int).Set(fundingAccount.BalanceZNHB)
+	if fundingBalance.Cmp(amount) < 0 {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "funding_insufficient")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
+	}
 	mutation := &paymasterTopUpMutation{
 		paymaster:        addr,
 		paymasterRaw:     append([]byte(nil), raw...),
 		paymasterKey:     paymasterKey,
+		funding:          funding,
+		fundingRaw:       append([]byte(nil), fundingRaw...),
 		token:            token,
 		amount:           new(big.Int).Set(amount),
 		previousBalance:  new(big.Int).Set(currentBalance),
+		previousFunding:  new(big.Int).Set(fundingBalance),
 		day:              day,
 		dayRecordExisted: dayRecord != nil,
 		previousDay:      nil,
@@ -765,6 +810,11 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if statusRecord != nil {
 		mutation.previousStatus = statusRecord.Clone()
 	}
+	fundingAccount.BalanceZNHB = new(big.Int).Sub(fundingAccount.BalanceZNHB, amount)
+	if err := sp.setAccount(mutation.fundingRaw, fundingAccount); err != nil {
+		return nil, err
+	}
+	mutation.newFunding = new(big.Int).Set(fundingAccount.BalanceZNHB)
 
 	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
 	if err := sp.setAccount(raw, account); err != nil {
@@ -773,9 +823,9 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 
 	updatedDay := dayRecord
 	if updatedDay == nil {
-		updatedDay = &nhbstate.PaymasterTopUpDay{Paymaster: paymasterKey, Day: day, MintedWei: big.NewInt(0)}
+		updatedDay = &nhbstate.PaymasterTopUpDay{Paymaster: paymasterKey, Day: day, DebitedWei: big.NewInt(0)}
 	}
-	updatedDay.MintedWei = projected
+	updatedDay.DebitedWei = projected
 	if err := manager.PaymasterPutTopUpDay(updatedDay); err != nil {
 		if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
 			return nil, errors.Join(err, rollbackErr)
