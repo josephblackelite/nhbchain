@@ -107,9 +107,9 @@ func (p *PaymasterGlobalDay) Clone() *PaymasterGlobalDay {
 
 // PaymasterTopUpDay captures the automatic top-up usage for a paymaster on a single day.
 type PaymasterTopUpDay struct {
-	Paymaster string
-	Day       string
-	MintedWei *big.Int
+	Paymaster  string
+	Day        string
+	DebitedWei *big.Int
 }
 
 // Clone returns a deep copy of the top-up record.
@@ -121,8 +121,8 @@ func (p *PaymasterTopUpDay) Clone() *PaymasterTopUpDay {
 		Paymaster: NormalizePaymasterAddress(p.Paymaster),
 		Day:       NormalizePaymasterDay(p.Day),
 	}
-	if p.MintedWei != nil {
-		clone.MintedWei = new(big.Int).Set(p.MintedWei)
+	if p.DebitedWei != nil {
+		clone.DebitedWei = new(big.Int).Set(p.DebitedWei)
 	}
 	ensurePaymasterTopUpDayDefaults(clone)
 	return clone
@@ -225,8 +225,8 @@ func ensurePaymasterTopUpDayDefaults(record *PaymasterTopUpDay) {
 	if record == nil {
 		return
 	}
-	if record.MintedWei == nil {
-		record.MintedWei = big.NewInt(0)
+	if record.DebitedWei == nil {
+		record.DebitedWei = big.NewInt(0)
 	}
 	record.Paymaster = NormalizePaymasterAddress(record.Paymaster)
 	record.Day = NormalizePaymasterDay(record.Day)

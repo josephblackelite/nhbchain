@@ -60,6 +60,46 @@ func signPaymaster(t *testing.T, tx *types.Transaction, key *crypto.PrivateKey) 
 	tx.PaymasterV = new(big.Int).SetUint64(uint64(sig[64]) + 27)
 }
 
+type autoTopUpActors struct {
+	fundingAddr   crypto.Address
+	minterAddr    crypto.Address
+	approverAddr  crypto.Address
+	fundingBytes  [20]byte
+	minterBytes   [20]byte
+	approverBytes [20]byte
+}
+
+func newAutoTopUpActors(t *testing.T) autoTopUpActors {
+	t.Helper()
+	fundingKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate funding: %v", err)
+	}
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate minter: %v", err)
+	}
+	approverKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate approver: %v", err)
+	}
+	fundingAddr := fundingKey.PubKey().Address()
+	minterAddr := minterKey.PubKey().Address()
+	approverAddr := approverKey.PubKey().Address()
+	var fundingBytes, minterBytes, approverBytes [20]byte
+	copy(fundingBytes[:], fundingAddr.Bytes())
+	copy(minterBytes[:], minterAddr.Bytes())
+	copy(approverBytes[:], approverAddr.Bytes())
+	return autoTopUpActors{
+		fundingAddr:   fundingAddr,
+		minterAddr:    minterAddr,
+		approverAddr:  approverAddr,
+		fundingBytes:  fundingBytes,
+		minterBytes:   minterBytes,
+		approverBytes: approverBytes,
+	}
+}
+
 func findEventByType(events []types.Event, eventType string) *types.Event {
 	for i := range events {
 		if events[i].Type == eventType {
@@ -74,13 +114,7 @@ func TestPaymasterAutoTopUpSuccess(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	registerZNHB(t, manager)
 
-	operatorKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate operator: %v", err)
-	}
-	operatorAddr := operatorKey.PubKey().Address()
-	var operatorBytes [20]byte
-	copy(operatorBytes[:], operatorAddr.Bytes())
+	actors := newAutoTopUpActors(t)
 
 	policy := core.PaymasterAutoTopUpPolicy{
 		Enabled:        true,
@@ -89,19 +123,23 @@ func TestPaymasterAutoTopUpSuccess(t *testing.T) {
 		TopUpAmountWei: big.NewInt(2_500),
 		DailyCapWei:    big.NewInt(10_000),
 		Cooldown:       time.Hour,
-		FundingAccount: operatorBytes,
-		Minter:         operatorBytes,
-		Approver:       operatorBytes,
+		FundingAccount: actors.fundingBytes,
+		Minter:         actors.minterBytes,
+		Approver:       actors.approverBytes,
 		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
 		MinterRole:     "MINTER_ZNHB",
 	}
 	sp.SetPaymasterAutoTopUpPolicy(policy)
 
-	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.MinterRole, actors.minterAddr.Bytes()); err != nil {
 		t.Fatalf("assign minter role: %v", err)
 	}
-	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.ApproverRole, actors.approverAddr.Bytes()); err != nil {
 		t.Fatalf("assign approver role: %v", err)
+	}
+
+	if err := manager.SetBalance(actors.fundingAddr.Bytes(), "ZNHB", big.NewInt(10_000)); err != nil {
+		t.Fatalf("seed funding balance: %v", err)
 	}
 
 	paymasterKey, err := crypto.GeneratePrivateKey()
@@ -176,8 +214,16 @@ func TestPaymasterAutoTopUpSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get top-up day: %v", err)
 	}
-	if dayRecord == nil || dayRecord.MintedWei.Cmp(big.NewInt(2_500)) != 0 {
-		t.Fatalf("expected minted 2500, got %#v", dayRecord)
+	if dayRecord == nil || dayRecord.DebitedWei.Cmp(big.NewInt(2_500)) != 0 {
+		t.Fatalf("expected debited 2500, got %#v", dayRecord)
+	}
+
+	fundingAccount, err := sp.GetAccount(actors.fundingAddr.Bytes())
+	if err != nil {
+		t.Fatalf("get funding: %v", err)
+	}
+	if fundingAccount.BalanceZNHB == nil || fundingAccount.BalanceZNHB.Cmp(big.NewInt(7_500)) != 0 {
+		t.Fatalf("expected funding balance 7500, got %v", fundingAccount.BalanceZNHB)
 	}
 
 	eventsList := sp.Events()
@@ -195,13 +241,7 @@ func TestPaymasterAutoTopUpRespectsCooldown(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	registerZNHB(t, manager)
 
-	operatorKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate operator: %v", err)
-	}
-	operatorAddr := operatorKey.PubKey().Address()
-	var operatorBytes [20]byte
-	copy(operatorBytes[:], operatorAddr.Bytes())
+	actors := newAutoTopUpActors(t)
 
 	policy := core.PaymasterAutoTopUpPolicy{
 		Enabled:        true,
@@ -210,19 +250,23 @@ func TestPaymasterAutoTopUpRespectsCooldown(t *testing.T) {
 		TopUpAmountWei: big.NewInt(2_500),
 		DailyCapWei:    big.NewInt(10_000),
 		Cooldown:       time.Hour,
-		FundingAccount: operatorBytes,
-		Minter:         operatorBytes,
-		Approver:       operatorBytes,
+		FundingAccount: actors.fundingBytes,
+		Minter:         actors.minterBytes,
+		Approver:       actors.approverBytes,
 		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
 		MinterRole:     "MINTER_ZNHB",
 	}
 	sp.SetPaymasterAutoTopUpPolicy(policy)
 
-	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.MinterRole, actors.minterAddr.Bytes()); err != nil {
 		t.Fatalf("assign minter role: %v", err)
 	}
-	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.ApproverRole, actors.approverAddr.Bytes()); err != nil {
 		t.Fatalf("assign approver role: %v", err)
+	}
+
+	if err := manager.SetBalance(actors.fundingAddr.Bytes(), "ZNHB", big.NewInt(10_000)); err != nil {
+		t.Fatalf("seed funding balance: %v", err)
 	}
 
 	paymasterKey, err := crypto.GeneratePrivateKey()
@@ -286,8 +330,8 @@ func TestPaymasterAutoTopUpRespectsCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get top-up day: %v", err)
 	}
-	if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
-		t.Fatalf("expected no minted amount before apply, got %#v", dayRecord)
+	if dayRecord != nil && dayRecord.DebitedWei.Sign() != 0 {
+		t.Fatalf("expected no debited amount before apply, got %#v", dayRecord)
 	}
 	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
 		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
@@ -309,8 +353,8 @@ func TestPaymasterAutoTopUpRespectsCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get top-up day: %v", err)
 	}
-	if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
-		t.Fatalf("expected no minted amount after apply, got %#v", dayRecord)
+	if dayRecord != nil && dayRecord.DebitedWei.Sign() != 0 {
+		t.Fatalf("expected no debited amount after apply, got %#v", dayRecord)
 	}
 
 	eventsList := sp.Events()
@@ -348,13 +392,7 @@ func TestPaymasterAutoTopUpRoleValidation(t *testing.T) {
 			manager := nhbstate.NewManager(sp.Trie)
 			registerZNHB(t, manager)
 
-			operatorKey, err := crypto.GeneratePrivateKey()
-			if err != nil {
-				t.Fatalf("generate operator: %v", err)
-			}
-			operatorAddr := operatorKey.PubKey().Address()
-			var operatorBytes [20]byte
-			copy(operatorBytes[:], operatorAddr.Bytes())
+			actors := newAutoTopUpActors(t)
 
 			policy := core.PaymasterAutoTopUpPolicy{
 				Enabled:        true,
@@ -363,23 +401,27 @@ func TestPaymasterAutoTopUpRoleValidation(t *testing.T) {
 				TopUpAmountWei: big.NewInt(2_500),
 				DailyCapWei:    big.NewInt(10_000),
 				Cooldown:       time.Hour,
-				FundingAccount: operatorBytes,
-				Minter:         operatorBytes,
-				Approver:       operatorBytes,
+				FundingAccount: actors.fundingBytes,
+				Minter:         actors.minterBytes,
+				Approver:       actors.approverBytes,
 				ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
 				MinterRole:     "MINTER_ZNHB",
 			}
 			sp.SetPaymasterAutoTopUpPolicy(policy)
 
 			if tc.assignMinter {
-				if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+				if err := manager.SetRole(policy.MinterRole, actors.minterAddr.Bytes()); err != nil {
 					t.Fatalf("assign minter role: %v", err)
 				}
 			}
 			if tc.assignApprover {
-				if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+				if err := manager.SetRole(policy.ApproverRole, actors.approverAddr.Bytes()); err != nil {
 					t.Fatalf("assign approver role: %v", err)
 				}
+			}
+
+			if err := manager.SetBalance(actors.fundingAddr.Bytes(), "ZNHB", big.NewInt(10_000)); err != nil {
+				t.Fatalf("seed funding balance: %v", err)
 			}
 
 			paymasterKey, err := crypto.GeneratePrivateKey()
@@ -440,8 +482,8 @@ func TestPaymasterAutoTopUpRoleValidation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("get top-up day: %v", err)
 			}
-			if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
-				t.Fatalf("expected no minted amount before apply, got %#v", dayRecord)
+			if dayRecord != nil && dayRecord.DebitedWei.Sign() != 0 {
+				t.Fatalf("expected no debited amount before apply, got %#v", dayRecord)
 			}
 			if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
 				t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
@@ -463,8 +505,8 @@ func TestPaymasterAutoTopUpRoleValidation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("get top-up day: %v", err)
 			}
-			if dayRecord != nil && dayRecord.MintedWei.Sign() != 0 {
-				t.Fatalf("expected no minted amount after apply, got %#v", dayRecord)
+			if dayRecord != nil && dayRecord.DebitedWei.Sign() != 0 {
+				t.Fatalf("expected no debited amount after apply, got %#v", dayRecord)
 			}
 
 			eventsList := sp.Events()
@@ -484,13 +526,7 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	registerZNHB(t, manager)
 
-	operatorKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate operator: %v", err)
-	}
-	operatorAddr := operatorKey.PubKey().Address()
-	var operatorBytes [20]byte
-	copy(operatorBytes[:], operatorAddr.Bytes())
+	actors := newAutoTopUpActors(t)
 
 	policy := core.PaymasterAutoTopUpPolicy{
 		Enabled:        true,
@@ -499,19 +535,23 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 		TopUpAmountWei: big.NewInt(2_500),
 		DailyCapWei:    big.NewInt(10_000),
 		Cooldown:       time.Hour,
-		FundingAccount: operatorBytes,
-		Minter:         operatorBytes,
-		Approver:       operatorBytes,
+		FundingAccount: actors.fundingBytes,
+		Minter:         actors.minterBytes,
+		Approver:       actors.approverBytes,
 		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
 		MinterRole:     "MINTER_ZNHB",
 	}
 	sp.SetPaymasterAutoTopUpPolicy(policy)
 
-	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.MinterRole, actors.minterAddr.Bytes()); err != nil {
 		t.Fatalf("assign minter role: %v", err)
 	}
-	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.ApproverRole, actors.approverAddr.Bytes()); err != nil {
 		t.Fatalf("assign approver role: %v", err)
+	}
+
+	if err := manager.SetBalance(actors.fundingAddr.Bytes(), "ZNHB", big.NewInt(10_000)); err != nil {
+		t.Fatalf("seed funding balance: %v", err)
 	}
 
 	paymasterKey, err := crypto.GeneratePrivateKey()
@@ -534,9 +574,9 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 	start := time.Unix(1_700_300_000, 0).UTC()
 	dayKey := start.UTC().Format(nhbstate.PaymasterDayFormat)
 	if err := manager.PaymasterPutTopUpDay(&nhbstate.PaymasterTopUpDay{
-		Paymaster: paymasterStorageKey(paymasterAddr),
-		Day:       dayKey,
-		MintedWei: big.NewInt(9_500),
+		Paymaster:  paymasterStorageKey(paymasterAddr),
+		Day:        dayKey,
+		DebitedWei: big.NewInt(9_500),
 	}); err != nil {
 		t.Fatalf("seed day record: %v", err)
 	}
@@ -579,8 +619,8 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get top-up day: %v", err)
 	}
-	if dayRecord == nil || dayRecord.MintedWei.Cmp(big.NewInt(9_500)) != 0 {
-		t.Fatalf("expected minted amount 9500 before apply, got %#v", dayRecord)
+	if dayRecord == nil || dayRecord.DebitedWei.Cmp(big.NewInt(9_500)) != 0 {
+		t.Fatalf("expected debited amount 9500 before apply, got %#v", dayRecord)
 	}
 	if evt := findEventByType(sp.Events(), events.TypePaymasterAutoTopUp); evt != nil {
 		t.Fatalf("unexpected auto top-up event before apply: %#v", evt)
@@ -602,8 +642,8 @@ func TestPaymasterAutoTopUpDailyCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get top-up day: %v", err)
 	}
-	if dayRecord == nil || dayRecord.MintedWei.Cmp(big.NewInt(9_500)) != 0 {
-		t.Fatalf("expected minted amount 9500 after apply, got %#v", dayRecord)
+	if dayRecord == nil || dayRecord.DebitedWei.Cmp(big.NewInt(9_500)) != 0 {
+		t.Fatalf("expected debited amount 9500 after apply, got %#v", dayRecord)
 	}
 
 	eventsList := sp.Events()
@@ -621,13 +661,7 @@ func TestPaymasterAutoTopUpNoMutationWhenThrottled(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	registerZNHB(t, manager)
 
-	operatorKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate operator: %v", err)
-	}
-	operatorAddr := operatorKey.PubKey().Address()
-	var operatorBytes [20]byte
-	copy(operatorBytes[:], operatorAddr.Bytes())
+	actors := newAutoTopUpActors(t)
 
 	policy := core.PaymasterAutoTopUpPolicy{
 		Enabled:        true,
@@ -636,19 +670,23 @@ func TestPaymasterAutoTopUpNoMutationWhenThrottled(t *testing.T) {
 		TopUpAmountWei: big.NewInt(2_500),
 		DailyCapWei:    big.NewInt(10_000),
 		Cooldown:       time.Hour,
-		FundingAccount: operatorBytes,
-		Minter:         operatorBytes,
-		Approver:       operatorBytes,
+		FundingAccount: actors.fundingBytes,
+		Minter:         actors.minterBytes,
+		Approver:       actors.approverBytes,
 		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
 		MinterRole:     "MINTER_ZNHB",
 	}
 	sp.SetPaymasterAutoTopUpPolicy(policy)
 
-	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.MinterRole, actors.minterAddr.Bytes()); err != nil {
 		t.Fatalf("assign minter role: %v", err)
 	}
-	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.ApproverRole, actors.approverAddr.Bytes()); err != nil {
 		t.Fatalf("assign approver role: %v", err)
+	}
+
+	if err := manager.SetBalance(actors.fundingAddr.Bytes(), "ZNHB", big.NewInt(10_000)); err != nil {
+		t.Fatalf("seed funding balance: %v", err)
 	}
 
 	paymasterKey, err := crypto.GeneratePrivateKey()
@@ -748,13 +786,7 @@ func TestPaymasterAutoTopUpNoMutationOnFailure(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	registerZNHB(t, manager)
 
-	operatorKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate operator: %v", err)
-	}
-	operatorAddr := operatorKey.PubKey().Address()
-	var operatorBytes [20]byte
-	copy(operatorBytes[:], operatorAddr.Bytes())
+	actors := newAutoTopUpActors(t)
 
 	policy := core.PaymasterAutoTopUpPolicy{
 		Enabled:        true,
@@ -763,18 +795,18 @@ func TestPaymasterAutoTopUpNoMutationOnFailure(t *testing.T) {
 		TopUpAmountWei: big.NewInt(2_500),
 		DailyCapWei:    big.NewInt(10_000),
 		Cooldown:       time.Hour,
-		FundingAccount: operatorBytes,
-		Minter:         operatorBytes,
-		Approver:       operatorBytes,
+		FundingAccount: actors.fundingBytes,
+		Minter:         actors.minterBytes,
+		Approver:       actors.approverBytes,
 		ApproverRole:   "ROLE_PAYMASTER_AUTOFUND",
 		MinterRole:     "MINTER_ZNHB",
 	}
 	sp.SetPaymasterAutoTopUpPolicy(policy)
 
-	if err := manager.SetRole(policy.MinterRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.MinterRole, actors.minterAddr.Bytes()); err != nil {
 		t.Fatalf("assign minter role: %v", err)
 	}
-	if err := manager.SetRole(policy.ApproverRole, operatorAddr.Bytes()); err != nil {
+	if err := manager.SetRole(policy.ApproverRole, actors.approverAddr.Bytes()); err != nil {
 		t.Fatalf("assign approver role: %v", err)
 	}
 
