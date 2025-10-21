@@ -704,6 +704,15 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	if !meta.IsDefined("global", "paymaster", "AutoTopUp", "CooldownSeconds") {
 		cfg.Global.Paymaster.AutoTopUp.CooldownSeconds = defaults.Paymaster.AutoTopUp.CooldownSeconds
 	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.FundingAccount) == "" {
+		cfg.Global.Paymaster.AutoTopUp.Governance.FundingAccount = strings.TrimSpace(defaults.Paymaster.AutoTopUp.Governance.FundingAccount)
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.Minter) == "" {
+		cfg.Global.Paymaster.AutoTopUp.Governance.Minter = strings.TrimSpace(defaults.Paymaster.AutoTopUp.Governance.Minter)
+	}
+	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.Approver) == "" {
+		cfg.Global.Paymaster.AutoTopUp.Governance.Approver = strings.TrimSpace(defaults.Paymaster.AutoTopUp.Governance.Approver)
+	}
 	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.MinterRole) == "" {
 		cfg.Global.Paymaster.AutoTopUp.Governance.MinterRole = defaults.Paymaster.AutoTopUp.Governance.MinterRole
 	}

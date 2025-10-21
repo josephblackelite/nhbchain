@@ -76,9 +76,11 @@ type PaymasterAutoTopUp struct {
 // PaymasterAutoTopUpGovernance captures the role based guardrails required to
 // execute automatic top-ups.
 type PaymasterAutoTopUpGovernance struct {
-	Operator     string
-	MinterRole   string
-	ApproverRole string
+	FundingAccount string
+	Minter         string
+	Approver       string
+	MinterRole     string
+	ApproverRole   string
 }
 
 // FeeAsset captures per-asset MDR and routing configuration.
