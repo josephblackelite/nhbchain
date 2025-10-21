@@ -2069,6 +2069,22 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 		recipient = resolved.Primary
 	}
 
+	emissionYear := uint32(blockTime.UTC().Year())
+	emissionTotal, err := manager.MintEmissionYTD(token, emissionYear)
+	if err != nil {
+		return err
+	}
+	maxEmission, err := sp.mintMaxEmissionPerYear(manager, token)
+	if err != nil {
+		return err
+	}
+	if maxEmission.Sign() > 0 {
+		projected := new(big.Int).Add(emissionTotal, amount)
+		if projected.Cmp(maxEmission) > 0 {
+			return ErrMintEmissionCapExceeded
+		}
+	}
+
 	account, err := manager.GetAccount(recipient[:])
 	if err != nil {
 		return err
@@ -2080,6 +2096,10 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
 	}
 	if err := manager.PutAccount(recipient[:], account); err != nil {
+		return err
+	}
+	updatedEmission := new(big.Int).Add(emissionTotal, amount)
+	if err := manager.SetMintEmissionYTD(token, emissionYear, updatedEmission); err != nil {
 		return err
 	}
 	if err := manager.KVPut(key, true); err != nil {
@@ -4368,6 +4388,46 @@ func (sp *StateProcessor) stakingMaxEmissionPerYear(manager *nhbstate.Manager) (
 		manager = nhbstate.NewManager(sp.Trie)
 	}
 	raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingMaxEmissionPerYearWei)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return big.NewInt(0), nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid max emission value %q", trimmed)
+	}
+	if value.Sign() < 0 {
+		return nil, fmt.Errorf("max emission must be non-negative")
+	}
+	return value, nil
+}
+
+func (sp *StateProcessor) mintMaxEmissionPerYear(manager *nhbstate.Manager, token string) (*big.Int, error) {
+	if sp == nil {
+		return big.NewInt(0), nil
+	}
+	if manager == nil {
+		if sp.Trie == nil {
+			return big.NewInt(0), nil
+		}
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	var paramKey string
+	switch strings.ToUpper(strings.TrimSpace(token)) {
+	case "NHB":
+		paramKey = governance.ParamKeyMintNHBMaxEmissionPerYearWei
+	case "ZNHB":
+		paramKey = governance.ParamKeyMintZNHBMaxEmissionPerYearWei
+	default:
+		return nil, fmt.Errorf("unsupported token %q", token)
+	}
+	raw, ok, err := manager.ParamStoreGet(paramKey)
 	if err != nil {
 		return nil, err
 	}

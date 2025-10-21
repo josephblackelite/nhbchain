@@ -161,6 +161,10 @@ const (
 	ParamKeyStakingMinStakeWei = "staking.minStakeWei"
 	// ParamKeyStakingMaxEmissionPerYearWei caps the annual reward emission in Wei.
 	ParamKeyStakingMaxEmissionPerYearWei = "staking.maxEmissionPerYearWei"
+	// ParamKeyMintNHBMaxEmissionPerYearWei caps the NHB mint emission per calendar year.
+	ParamKeyMintNHBMaxEmissionPerYearWei = "mint.nhb.maxEmissionPerYearWei"
+	// ParamKeyMintZNHBMaxEmissionPerYearWei caps the ZNHB mint emission per calendar year.
+	ParamKeyMintZNHBMaxEmissionPerYearWei = "mint.znhb.maxEmissionPerYearWei"
 	// ParamKeyStakingRewardAsset selects the asset used for staking rewards.
 	ParamKeyStakingRewardAsset = "staking.rewardAsset"
 	// ParamKeyStakingCompoundDefault toggles auto-compounding by default for new delegations.

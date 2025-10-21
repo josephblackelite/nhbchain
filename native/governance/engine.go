@@ -392,14 +392,16 @@ func validatorForParam(key string) paramValidator {
 			}
 			return nil
 		}
-	case ParamKeyStakingMaxEmissionPerYearWei:
+	case ParamKeyStakingMaxEmissionPerYearWei,
+		ParamKeyMintNHBMaxEmissionPerYearWei,
+		ParamKeyMintZNHBMaxEmissionPerYearWei:
 		return func(raw json.RawMessage) error {
 			amount, err := parseUintRaw(raw)
 			if err != nil {
-				return fmt.Errorf("%s: %w", ParamKeyStakingMaxEmissionPerYearWei, err)
+				return fmt.Errorf("%s: %w", key, err)
 			}
 			if amount.Sign() < 0 {
-				return fmt.Errorf("%s: must be >= 0", ParamKeyStakingMaxEmissionPerYearWei)
+				return fmt.Errorf("%s: must be >= 0", key)
 			}
 			return nil
 		}

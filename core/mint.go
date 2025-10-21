@@ -25,6 +25,8 @@ var (
 	ErrMintInvalidChainID = errors.New("mint: invalid chain id")
 	// ErrMintInvalidPayload indicates the mint transaction payload could not be decoded.
 	ErrMintInvalidPayload = errors.New("mint: invalid payload")
+	// ErrMintEmissionCapExceeded indicates the configured emission cap would be exceeded.
+	ErrMintEmissionCapExceeded = errors.New("mint: emission cap exceeded")
 )
 
 // MintVoucher represents the canonical payload that is signed off-chain by a mint authority.

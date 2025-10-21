@@ -2239,6 +2239,8 @@ func isFatalMintError(err error) bool {
 		return true
 	case errors.Is(err, ErrMintInvalidPayload):
 		return true
+	case errors.Is(err, ErrMintEmissionCapExceeded):
+		return true
 	case errors.Is(err, ErrMintInvalidSigner):
 		return true
 	case errors.Is(err, ErrMintInvoiceUsed):
