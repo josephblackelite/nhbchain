@@ -171,12 +171,14 @@ func main() {
 		panic(fmt.Sprintf("Failed to parse paymaster auto top-up policy: %v", err))
 	}
 	autoPolicy := core.PaymasterAutoTopUpPolicy{
-		Enabled:      autoTopUpCfg.Enabled,
-		Token:        autoTopUpCfg.Token,
-		Cooldown:     autoTopUpCfg.Cooldown,
-		Operator:     autoTopUpCfg.Operator,
-		ApproverRole: autoTopUpCfg.ApproverRole,
-		MinterRole:   autoTopUpCfg.MinterRole,
+		Enabled:        autoTopUpCfg.Enabled,
+		Token:          autoTopUpCfg.Token,
+		Cooldown:       autoTopUpCfg.Cooldown,
+		FundingAccount: autoTopUpCfg.FundingAccount,
+		Minter:         autoTopUpCfg.Minter,
+		Approver:       autoTopUpCfg.Approver,
+		ApproverRole:   autoTopUpCfg.ApproverRole,
+		MinterRole:     autoTopUpCfg.MinterRole,
 	}
 	if autoTopUpCfg.MinBalanceWei != nil {
 		autoPolicy.MinBalanceWei = new(big.Int).Set(autoTopUpCfg.MinBalanceWei)

@@ -121,7 +121,9 @@ type PaymasterAutoTopUpPolicy struct {
 	TopUpAmountWei *big.Int
 	DailyCapWei    *big.Int
 	Cooldown       time.Duration
-	Operator       [20]byte
+	FundingAccount [20]byte
+	Minter         [20]byte
+	Approver       [20]byte
 	ApproverRole   string
 	MinterRole     string
 }
@@ -129,12 +131,14 @@ type PaymasterAutoTopUpPolicy struct {
 // Clone returns a deep copy of the policy structure.
 func (p PaymasterAutoTopUpPolicy) Clone() PaymasterAutoTopUpPolicy {
 	clone := PaymasterAutoTopUpPolicy{
-		Enabled:      p.Enabled,
-		Token:        p.Token,
-		Cooldown:     p.Cooldown,
-		Operator:     p.Operator,
-		ApproverRole: p.ApproverRole,
-		MinterRole:   p.MinterRole,
+		Enabled:        p.Enabled,
+		Token:          p.Token,
+		Cooldown:       p.Cooldown,
+		FundingAccount: p.FundingAccount,
+		Minter:         p.Minter,
+		Approver:       p.Approver,
+		ApproverRole:   p.ApproverRole,
+		MinterRole:     p.MinterRole,
 	}
 	if p.MinBalanceWei != nil {
 		clone.MinBalanceWei = new(big.Int).Set(p.MinBalanceWei)
@@ -693,28 +697,53 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 			return nil, nil
 		}
 	}
-	if policy.Operator == ([20]byte{}) {
+	if policy.FundingAccount == ([20]byte{}) {
 		var paymasterBytes [20]byte
 		copy(paymasterBytes[:], addr.Bytes())
-		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "operator_missing")
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "funding_account_missing")
 		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
 		return nil, nil
 	}
-	operator := policy.Operator
-	operatorBytes := operator[:]
-	if strings.TrimSpace(policy.MinterRole) != "" && !manager.HasRole(policy.MinterRole, operatorBytes) {
-		var paymasterBytes [20]byte
-		copy(paymasterBytes[:], addr.Bytes())
-		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "minter_role_missing")
-		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
-		return nil, nil
+	funding := policy.FundingAccount
+	minter := policy.Minter
+	if minter == ([20]byte{}) {
+		minter = funding
 	}
-	if strings.TrimSpace(policy.ApproverRole) != "" && !manager.HasRole(policy.ApproverRole, operatorBytes) {
-		var paymasterBytes [20]byte
-		copy(paymasterBytes[:], addr.Bytes())
-		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_role_missing")
-		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
-		return nil, nil
+	if strings.TrimSpace(policy.MinterRole) != "" {
+		if minter == ([20]byte{}) {
+			var paymasterBytes [20]byte
+			copy(paymasterBytes[:], addr.Bytes())
+			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "minter_missing")
+			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+			return nil, nil
+		}
+		if !manager.HasRole(policy.MinterRole, minter[:]) {
+			var paymasterBytes [20]byte
+			copy(paymasterBytes[:], addr.Bytes())
+			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "minter_role_missing")
+			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+			return nil, nil
+		}
+	}
+	approver := policy.Approver
+	if approver == ([20]byte{}) {
+		approver = funding
+	}
+	if strings.TrimSpace(policy.ApproverRole) != "" {
+		if approver == ([20]byte{}) {
+			var paymasterBytes [20]byte
+			copy(paymasterBytes[:], addr.Bytes())
+			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_missing")
+			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+			return nil, nil
+		}
+		if !manager.HasRole(policy.ApproverRole, approver[:]) {
+			var paymasterBytes [20]byte
+			copy(paymasterBytes[:], addr.Bytes())
+			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "approver_role_missing")
+			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+			return nil, nil
+		}
 	}
 	mutation := &paymasterTopUpMutation{
 		paymaster:        addr,

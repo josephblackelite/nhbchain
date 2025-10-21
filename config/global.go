@@ -26,7 +26,9 @@ type PaymasterAutoTopUpConfig struct {
 	TopUpAmountWei *big.Int
 	DailyCapWei    *big.Int
 	Cooldown       time.Duration
-	Operator       [20]byte
+	FundingAccount [20]byte
+	Minter         [20]byte
+	Approver       [20]byte
 	ApproverRole   string
 	MinterRole     string
 }
@@ -84,13 +86,31 @@ func (g Global) PaymasterAutoTopUpConfig() (PaymasterAutoTopUpConfig, error) {
 		cfg.Cooldown = time.Duration(g.Paymaster.AutoTopUp.CooldownSeconds) * time.Second
 	}
 
-	operatorRef := strings.TrimSpace(g.Paymaster.AutoTopUp.Governance.Operator)
-	if operatorRef != "" {
-		addr, err := crypto.DecodeAddress(operatorRef)
+	fundingRef := strings.TrimSpace(g.Paymaster.AutoTopUp.Governance.FundingAccount)
+	if fundingRef != "" {
+		addr, err := crypto.DecodeAddress(fundingRef)
 		if err != nil {
-			return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.Governance.Operator: %w", err)
+			return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.Governance.FundingAccount: %w", err)
 		}
-		copy(cfg.Operator[:], addr.Bytes())
+		copy(cfg.FundingAccount[:], addr.Bytes())
+	}
+
+	minterRef := strings.TrimSpace(g.Paymaster.AutoTopUp.Governance.Minter)
+	if minterRef != "" {
+		addr, err := crypto.DecodeAddress(minterRef)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.Governance.Minter: %w", err)
+		}
+		copy(cfg.Minter[:], addr.Bytes())
+	}
+
+	approverRef := strings.TrimSpace(g.Paymaster.AutoTopUp.Governance.Approver)
+	if approverRef != "" {
+		addr, err := crypto.DecodeAddress(approverRef)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.Governance.Approver: %w", err)
+		}
+		copy(cfg.Approver[:], addr.Bytes())
 	}
 
 	cfg.ApproverRole = strings.TrimSpace(g.Paymaster.AutoTopUp.Governance.ApproverRole)
