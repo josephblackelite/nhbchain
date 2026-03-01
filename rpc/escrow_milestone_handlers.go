@@ -137,7 +137,7 @@ func (s *Server) handleEscrowMilestoneCreate(w http.ResponseWriter, r *http.Requ
 	writeResult(w, req.ID, milestoneCreateResult{ID: formatEscrowID(created.ID)})
 }
 
-func (s *Server) handleEscrowMilestoneGet(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleEscrowMilestoneGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
 		return

@@ -33,7 +33,6 @@ type TxType byte
 
 const (
 	TxTypeTransfer          TxType = 0x01 // A standard transfer of NHB
-	TxTypeTransferZNHB      TxType = 0x10 // A standard transfer of ZapNHB (ZNHB)
 	TxTypeRegisterIdentity  TxType = 0x02 // A transaction to claim a username
 	TxTypeCreateEscrow      TxType = 0x03 // Create escrow
 	TxTypeReleaseEscrow     TxType = 0x04 // NEW: Buyer releases funds to seller
@@ -48,6 +47,9 @@ const (
 	TxTypeStakeClaim        TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
 	TxTypeMint              TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
 	TxTypeSwapPayoutReceipt TxType = 0x0F // NEW: Record a swap payout receipt attested by the treasury
+	TxTypeTransferZNHB      TxType = 0x10 // A standard transfer of ZapNHB (ZNHB)
+	TxTypeSwapMint          TxType = 0x11 // Native On-Chain Swap minting NHB
+	TxTypeSwapBurn          TxType = 0x12 // Native On-Chain Swap burning NHB
 	TxTypePOSAuthorize      TxType = 0x20 // Pre-authorize a merchant payment
 	TxTypePOSCapture        TxType = 0x21 // Capture an authorized payment
 	TxTypePOSVoid           TxType = 0x22 // Void authorized payment

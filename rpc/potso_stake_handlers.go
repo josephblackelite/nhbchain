@@ -13,23 +13,23 @@ import (
 )
 
 type potsoStakeLockParams struct {
-        Owner     string `json:"owner"`
-        Amount    string `json:"amount"`
-        Nonce     uint64 `json:"nonce"`
-        Signature string `json:"signature"`
+	Owner     string `json:"owner"`
+	Amount    string `json:"amount"`
+	Nonce     uint64 `json:"nonce"`
+	Signature string `json:"signature"`
 }
 
 type potsoStakeUnbondParams struct {
-        Owner     string `json:"owner"`
-        Amount    string `json:"amount"`
-        Nonce     uint64 `json:"nonce"`
-        Signature string `json:"signature"`
+	Owner     string `json:"owner"`
+	Amount    string `json:"amount"`
+	Nonce     uint64 `json:"nonce"`
+	Signature string `json:"signature"`
 }
 
 type potsoStakeWithdrawParams struct {
-        Owner     string `json:"owner"`
-        Nonce     uint64 `json:"nonce"`
-        Signature string `json:"signature"`
+	Owner     string `json:"owner"`
+	Nonce     uint64 `json:"nonce"`
+	Signature string `json:"signature"`
 }
 
 type potsoStakeInfoParams struct {
@@ -72,27 +72,27 @@ type potsoStakeInfoLock struct {
 }
 
 func potsoStakeDigest(action, owner string, amount *big.Int, nonce uint64) []byte {
-        normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
-        payload := "potso_stake_" + action + "|" + normalizedOwner
-        if amount != nil {
-                payload += "|" + amount.String()
-        }
-        payload += "|" + fmt.Sprint(nonce)
-        digest := sha256.Sum256([]byte(payload))
-        return digest[:]
+	normalizedOwner := strings.ToLower(strings.TrimSpace(owner))
+	payload := "potso_stake_" + action + "|" + normalizedOwner
+	if amount != nil {
+		payload += "|" + amount.String()
+	}
+	payload += "|" + fmt.Sprint(nonce)
+	digest := sha256.Sum256([]byte(payload))
+	return digest[:]
 }
 
 func decodeStakeSignature(action, owner string, amount *big.Int, nonce uint64, signature string) ([20]byte, error) {
-        var zero [20]byte
-        if nonce == 0 {
-                return zero, fmt.Errorf("nonce must be greater than zero")
-        }
-        digest := potsoStakeDigest(action, owner, amount, nonce)
-        sigBytes, err := decodeHexBytes(signature)
-        if err != nil {
-                return zero, err
-        }
-        if len(sigBytes) != 65 {
+	var zero [20]byte
+	if nonce == 0 {
+		return zero, fmt.Errorf("nonce must be greater than zero")
+	}
+	digest := potsoStakeDigest(action, owner, amount, nonce)
+	sigBytes, err := decodeHexBytes(signature)
+	if err != nil {
+		return zero, err
+	}
+	if len(sigBytes) != 65 {
 		return zero, fmt.Errorf("signature must be 65 bytes")
 	}
 	pubKey, err := ethcrypto.SigToPub(digest, sigBytes)
@@ -126,81 +126,81 @@ func amountFromString(value string) (*big.Int, error) {
 }
 
 func (s *Server) handlePotsoStakeLock(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-        if len(req.Params) != 1 {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
-                return
-        }
-        var params potsoStakeLockParams
-        if err := json.Unmarshal(req.Params[0], &params); err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-                return
-        }
-        amount, err := amountFromString(params.Amount)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        ownerAddr, err := decodeStakeSignature("lock", params.Owner, amount, params.Nonce, params.Signature)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        nonce, _, err := s.node.PotsoStakeLock(ownerAddr, amount, params.Nonce)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        writeResult(w, req.ID, potsoStakeLockResult{OK: true, Nonce: nonce})
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
+		return
+	}
+	var params potsoStakeLockParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
+		return
+	}
+	amount, err := amountFromString(params.Amount)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	ownerAddr, err := decodeStakeSignature("lock", params.Owner, amount, params.Nonce, params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	nonce, _, err := s.node.PotsoStakeLock(ownerAddr, amount, params.Nonce)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	writeResult(w, req.ID, potsoStakeLockResult{OK: true, Nonce: nonce})
 }
 
-func (s *Server) handlePotsoStakeUnbond(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-        if len(req.Params) != 1 {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
-                return
-        }
+func (s *Server) handlePotsoStakeUnbond(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
+		return
+	}
 	var params potsoStakeUnbondParams
 	if err := json.Unmarshal(req.Params[0], &params); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
 		return
 	}
-        amount, err := amountFromString(params.Amount)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        ownerAddr, err := decodeStakeSignature("unbond", params.Owner, amount, params.Nonce, params.Signature)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        total, withdrawAt, err := s.node.PotsoStakeUnbond(ownerAddr, amount, params.Nonce)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        writeResult(w, req.ID, potsoStakeUnbondResult{OK: true, Amount: total.String(), WithdrawAt: withdrawAt})
+	amount, err := amountFromString(params.Amount)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	ownerAddr, err := decodeStakeSignature("unbond", params.Owner, amount, params.Nonce, params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	total, withdrawAt, err := s.node.PotsoStakeUnbond(ownerAddr, amount, params.Nonce)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	writeResult(w, req.ID, potsoStakeUnbondResult{OK: true, Amount: total.String(), WithdrawAt: withdrawAt})
 }
 
-func (s *Server) handlePotsoStakeWithdraw(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-        if len(req.Params) != 1 {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
-                return
-        }
+func (s *Server) handlePotsoStakeWithdraw(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
+		return
+	}
 	var params potsoStakeWithdrawParams
 	if err := json.Unmarshal(req.Params[0], &params); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
 		return
 	}
-        ownerAddr, err := decodeStakeSignature("withdraw", params.Owner, nil, params.Nonce, params.Signature)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
-        payouts, err := s.node.PotsoStakeWithdraw(ownerAddr, params.Nonce)
-        if err != nil {
-                writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-                return
-        }
+	ownerAddr, err := decodeStakeSignature("withdraw", params.Owner, nil, params.Nonce, params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
+	payouts, err := s.node.PotsoStakeWithdraw(ownerAddr, params.Nonce)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
+		return
+	}
 	result := potsoStakeWithdrawResult{Withdrawn: make([]potsoStakeWithdrawEntry, len(payouts))}
 	for i, payout := range payouts {
 		amount := "0"

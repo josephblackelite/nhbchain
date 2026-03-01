@@ -187,6 +187,29 @@ func (s *Server) handleP2PCreateTrade(w http.ResponseWriter, r *http.Request, re
 	writeResult(w, req.ID, result)
 }
 
+func (s *Server) handleP2PGetPeers(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "exactly one parameter object expected")
+		return
+	}
+	var params p2pIDParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	id, err := parseTradeID(params.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	trade, err := s.node.P2PGetTrade(id)
+	if err != nil {
+		writeP2PError(w, req.ID, err)
+		return
+	}
+	writeResult(w, req.ID, formatTradeJSON(trade))
+}
+
 func (s *Server) handleP2PGetTrade(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "exactly one parameter object expected")

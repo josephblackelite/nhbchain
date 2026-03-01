@@ -194,3 +194,12 @@ func traceIDFromRPCContext(ctx context.Context) string {
 	}
 	return spanCtx.TraceID().String()
 }
+
+func (s *Server) handleCheckSwapAllowance(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	// For native layer swaps, tokens are internally provisioned within the chain state.
+	// As we don't use standard ERC-20 allowances, this always returns maximum allowance.
+	writeResult(w, req.ID, map[string]any{
+		"allowed":   true,
+		"allowance": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	})
+}

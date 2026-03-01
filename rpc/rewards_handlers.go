@@ -49,7 +49,7 @@ type rewardPayoutParams struct {
 	Account string  `json:"account"`
 }
 
-func (s *Server) handleGetRewardEpoch(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleGetRewardEpoch(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	var epochNumber uint64
 	var haveEpoch bool
 	if len(req.Params) > 0 {
@@ -108,7 +108,7 @@ func (s *Server) handleGetRewardEpoch(w http.ResponseWriter, r *http.Request, re
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handleGetRewardPayout(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleGetRewardPayout(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "account parameter required", nil)
 		return

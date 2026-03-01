@@ -1,0 +1,17 @@
+﻿Starting node with validator address: nhb10cnxy564uzkjjypknvu0qm2zuj0ceeuyvxkg47
+Autogenesis override enabled (dev mode); creating ephemeral genesis block.
+--- FAIL: TestLendingSupplyFailsWhenPaused (0.01s)
+    pause_test.go:28: new node: NHB_ENV environment variable is required
+FAIL
+FAIL	nhbchain/tests/system	0.204s
+Starting node with validator address: nhb19nz0c0a68rv086g8xn5lc7k5m9a45a4d05m3qy
+Autogenesis override enabled (dev mode); creating ephemeral genesis block.
+--- FAIL: TestPotsoRewardConfigRejectsZeroEmission (0.01s)
+    emission_invariant_test.go:28: new node: NHB_ENV environment variable is required
+Starting node with validator address: nhb1djr28znudtxnqgsqywy220gc0365xa6sylx390
+Autogenesis override enabled (dev mode); creating ephemeral genesis block.
+--- FAIL: TestPotsoHeartbeatRateLimitAndMetrics (0.00s)
+    emission_invariant_test.go:50: new node: NHB_ENV environment variable is required
+FAIL
+FAIL	nhbchain/tests/potso	0.138s
+FAIL

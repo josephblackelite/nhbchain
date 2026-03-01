@@ -79,7 +79,7 @@ func (s *Server) handleSyncSnapshotImport(w http.ResponseWriter, r *http.Request
 	writeResult(w, req.ID, map[string]string{"stateRoot": root.Hex()})
 }
 
-func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleSyncStatus(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", "sync_status takes no parameters")
 		return

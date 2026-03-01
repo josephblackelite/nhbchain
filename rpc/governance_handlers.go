@@ -161,7 +161,7 @@ func (s *Server) handleGovernanceVote(w http.ResponseWriter, r *http.Request, re
 	writeResult(w, req.ID, govAckResponse{OK: true})
 }
 
-func (s *Server) handleGovernanceProposal(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleGovernanceProposal(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
 		return
@@ -187,7 +187,7 @@ func (s *Server) handleGovernanceProposal(w http.ResponseWriter, r *http.Request
 	writeResult(w, req.ID, proposal)
 }
 
-func (s *Server) handleGovernanceList(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleGovernanceList(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	var params govListParams
 	if len(req.Params) > 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "at most one parameter object expected", nil)

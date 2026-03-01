@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ func TestPotsoRewardConfigRejectsZeroEmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
+	os.Setenv("NHB_ENV", "dev")
 	node, err := core.NewNode(db, key, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
@@ -45,6 +47,7 @@ func TestPotsoHeartbeatRateLimitAndMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
+	os.Setenv("NHB_ENV", "dev")
 	node, err := core.NewNode(db, key, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
@@ -88,7 +91,7 @@ func TestPotsoHeartbeatRateLimitAndMetrics(t *testing.T) {
 	}
 	firstUptime := meter.UptimeSeconds
 
-	secondTS := ts + potso.HeartbeatIntervalSeconds + 5
+	secondTS := ts + potso.HeartbeatIntervalSeconds + 1
 	meter, delta, err = node.PotsoHeartbeat(participant, block.Header.Height, hash, secondTS)
 	if err != nil {
 		t.Fatalf("second heartbeat: %v", err)
@@ -101,7 +104,7 @@ func TestPotsoHeartbeatRateLimitAndMetrics(t *testing.T) {
 		t.Fatalf("expected uptime to increase")
 	}
 
-	thirdTS := secondTS + potso.HeartbeatIntervalSeconds + 5
+	thirdTS := secondTS + 1
 	if _, _, err = node.PotsoHeartbeat(participant, block.Header.Height, hash, thirdTS); !errors.Is(err, potso.ErrHeartbeatRateLimited) {
 		t.Fatalf("expected rate limit error, got %v", err)
 	}

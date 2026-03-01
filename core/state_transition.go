@@ -2236,6 +2236,16 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return nil
+	case types.TxTypeSwapMint:
+		if err := sp.applySwapMint(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeSwapBurn:
+		if err := sp.applySwapBurn(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	}
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }
@@ -2499,6 +2509,60 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *typ
 	}
 	if err := sp.EscrowEngine.ResolveWithSignatures(id, []byte(payload.Decision), sigs); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (sp *StateProcessor) applySwapMint(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Stablecoin string   `json:"stablecoin"`
+		Amount     *big.Int `json:"amount"`
+		QuoteID    string   `json:"quoteId"`
+	}
+	if err := json.Unmarshal(tx.Data, &payload); err != nil {
+		return fmt.Errorf("swap: decode mint payload: %w", err)
+	}
+	if payload.Amount == nil || payload.Amount.Sign() <= 0 {
+		return fmt.Errorf("swap: amount must be positive")
+	}
+	// In the real on-chain mint flow, a user's signed TxTypeSwapMint expresses the intention to
+	// consume an Oracle Quote for a stablecoin deposit they are finalizing.
+	senderAccount.Nonce++
+	return sp.setAccount(sender, senderAccount)
+}
+
+func (sp *StateProcessor) applySwapBurn(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Amount           *big.Int `json:"amount"`
+		TargetStablecoin string   `json:"targetStablecoin"`
+		RecipientAddress string   `json:"recipientAddress"`
+	}
+	if err := json.Unmarshal(tx.Data, &payload); err != nil {
+		return fmt.Errorf("swap: decode burn payload: %w", err)
+	}
+	if payload.Amount == nil || payload.Amount.Sign() <= 0 {
+		return fmt.Errorf("swap: invalid burn amount")
+	}
+	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(payload.Amount) < 0 {
+		return fmt.Errorf("swap: insufficient NHB for burn")
+	}
+
+	// Burn the NHB locally.
+	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, payload.Amount)
+	senderAccount.Nonce++
+
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
+
+	evt := events.SwapBurnRecorded{
+		ReceiptID: fmt.Sprintf("burn-%x", tx.Nonce),
+		Token:     payload.TargetStablecoin,
+		Amount:    payload.Amount,
+	}.Event()
+
+	if evt != nil {
+		sp.AppendEvent(evt)
 	}
 	return nil
 }

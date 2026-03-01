@@ -195,7 +195,7 @@ func (s *Server) handleClaimableCancel(w http.ResponseWriter, r *http.Request, r
 	writeResult(w, req.ID, claimableOKResult{OK: true})
 }
 
-func (s *Server) handleClaimableGet(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleClaimableGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "exactly one parameter object expected")
 		return

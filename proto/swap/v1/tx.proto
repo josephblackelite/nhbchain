@@ -52,3 +52,21 @@ message MsgAbortCashOutIntent {
 }
 
 message MsgAbortCashOutIntentResponse {}
+
+message MsgSwapMint {
+  string trader = 1;
+  string stablecoin_type = 2; // e.g. USDT or USDC
+  string amount = 3;          // amount to mint
+  string quote_id = 4;        // fetched from Oracle previously
+}
+
+message MsgSwapMintResponse {}
+
+message MsgSwapBurn {
+  string trader = 1;
+  string amount = 2;              // amount to burn
+  string target_stablecoin = 3;   // e.g. USDT
+  string recipient_address = 4;   // where the offramp sends it
+}
+
+message MsgSwapBurnResponse {}

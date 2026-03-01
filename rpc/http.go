@@ -997,7 +997,8 @@ func moduleAndMethod(method string) (string, string) {
 func isPublicSwapMethod(method string) bool {
 	switch strings.TrimSpace(method) {
 	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export",
-		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus":
+		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus",
+		"nhb_getSwapQuote", "nhb_checkSwapAllowance":
 		return true
 	default:
 		return false
@@ -1005,16 +1006,18 @@ func isPublicSwapMethod(method string) bool {
 }
 
 type BalanceResponse struct {
-	Address            string                `json:"address"`
-	BalanceNHB         *big.Int              `json:"balanceNHB"`
-	BalanceZNHB        *big.Int              `json:"balanceZNHB"`
-	Stake              *big.Int              `json:"stake"`
-	LockedZNHB         *big.Int              `json:"lockedZNHB"`
-	DelegatedValidator string                `json:"delegatedValidator,omitempty"`
-	PendingUnbonds     []StakeUnbondResponse `json:"pendingUnbonds,omitempty"`
-	Username           string                `json:"username"`
-	Nonce              uint64                `json:"nonce"`
-	EngagementScore    uint64                `json:"engagementScore"`
+	Address               string                `json:"address"`
+	BalanceNHB            *big.Int              `json:"balanceNHB"`
+	BalanceZNHB           *big.Int              `json:"balanceZNHB"`
+	Stake                 *big.Int              `json:"stake"`
+	LockedZNHB            *big.Int              `json:"lockedZNHB"`
+	DelegatedValidator    string                `json:"delegatedValidator,omitempty"`
+	PendingUnbonds        []StakeUnbondResponse `json:"pendingUnbonds,omitempty"`
+	UnbondingCompletesAt  uint64                `json:"unbondingCompletesAt,omitempty"`
+	PendingStakingRewards *big.Int              `json:"pendingStakingRewards,omitempty"`
+	Username              string                `json:"username"`
+	Nonce                 uint64                `json:"nonce"`
+	EngagementScore       uint64                `json:"engagementScore"`
 }
 
 type StakeUnbondResponse struct {
@@ -1205,7 +1208,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleSwapVoucherList(recorder, r, req)
 	case "swap_voucher_export":
 		s.handleSwapVoucherExport(recorder, r, req)
-	case "nhb_requestSwapApproval":
+	case "nhb_requestSwapApproval", "nhb_getSwapQuote":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
@@ -1229,6 +1232,24 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleStableGetSwapStatus(recorder, r, req)
+	case "nhb_checkSwapAllowance":
+		if authErr := s.requireAuthInto(&r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleCheckSwapAllowance(recorder, r, req)
+	case "nhb_getLoyaltyBudgetStatus":
+		s.handleGetLoyaltyBudgetStatus(recorder, r, req)
+	case "nhb_getOwnerWalletStats":
+		s.handleGetOwnerWalletStats(recorder, r, req)
+	case "nhb_getSlashingEvents":
+		s.handleGetSlashingEvents(recorder, r, req)
+	case "nhb_getValidatorSet":
+		s.handleGetValidatorSet(recorder, r, req)
+	case "nhb_getValidatorInfo":
+		s.handleGetValidatorInfo(recorder, r, req)
+	case "nhb_getNetworkStats":
+		s.handleGetNetworkStats(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
 	case "fees_getMonthlyStatus":
@@ -1874,7 +1895,7 @@ func eventDisplayName(eventType string) string {
 	}
 }
 
-func (s *Server) handleGetEpochSummary(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleGetEpochSummary(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	var epochNumber uint64
 	var haveEpoch bool
 	if len(req.Params) > 0 {
@@ -1922,7 +1943,7 @@ func (s *Server) handleGetEpochSummary(w http.ResponseWriter, r *http.Request, r
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	var epochNumber uint64
 	var haveEpoch bool
 	if len(req.Params) > 0 {
@@ -1990,7 +2011,7 @@ func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, r *http.Request, 
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if s.node == nil {
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
 		return
@@ -2692,8 +2713,19 @@ func balanceResponseFromAccount(addr string, account *types.Account) BalanceResp
 				Amount:      amount,
 				ReleaseTime: entry.ReleaseTime,
 			}
+			if entry.ReleaseTime > resp.UnbondingCompletesAt {
+				resp.UnbondingCompletesAt = entry.ReleaseTime
+			}
 		}
 	}
+
+	// pendingStakingRewards logic placeholder bridging potso epoch snapshots.
+	resp.PendingStakingRewards = big.NewInt(0)
+	if account.StakeShares != nil && account.StakeShares.Sign() > 0 {
+		// Use StakeShares as a stub approximation for now until Phase 5 observability.
+		resp.PendingStakingRewards = new(big.Int).Set(account.StakeShares)
+	}
+
 	return resp
 }
 

@@ -190,7 +190,7 @@ func (s *Server) handlePotsoEpochPayouts(w http.ResponseWriter, _ *http.Request,
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handlePotsoRewardClaim(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handlePotsoRewardClaim(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "claim requires parameter object", nil)
 		return

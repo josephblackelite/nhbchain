@@ -2,6 +2,7 @@ package system
 
 import (
 	"math/big"
+	"os"
 	"testing"
 
 	"nhbchain/core"
@@ -23,6 +24,7 @@ func TestLendingSupplyFailsWhenPaused(t *testing.T) {
 		t.Fatalf("generate validator key: %v", err)
 	}
 
+	os.Setenv("NHB_ENV", "dev")
 	node, err := core.NewNode(db, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)

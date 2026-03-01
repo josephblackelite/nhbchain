@@ -163,7 +163,7 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req 
 	writeResult(w, req.ID, escrowCreateResult{ID: formatEscrowID(id)})
 }
 
-func (s *Server) handleEscrowGet(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+func (s *Server) handleEscrowGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
 		return
