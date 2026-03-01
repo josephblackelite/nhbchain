@@ -23,6 +23,7 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/codec"
 	"nhbchain/consensus/potso/evidence"
+	"nhbchain/consensus/potso/penalty"
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
@@ -52,6 +53,9 @@ import (
 	consensusv1 "nhbchain/proto/consensus/v1"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
+
+	statebank "nhbchain/state/bank"
+	statepotso "nhbchain/state/potso"
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -120,6 +124,7 @@ type Node struct {
 	feesPolicy                   fees.Policy
 	potsoEngineMu                sync.Mutex
 	potsoEngine                  *potso.Engine
+	potsoLedger                  *statepotso.Ledger
 	globalCfgMu                  sync.RWMutex
 	globalCfg                    config.Global
 	networkMode                  string
@@ -360,6 +365,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	defaultSwapCfg := swap.Config{}.Normalise()
 	stateProcessor.SetSwapPayoutAuthorities(defaultSwapCfg.PayoutAuthorities)
 
+	pLedger, _ := statepotso.NewLedger(nil, nil)
+
 	node := &Node{
 		db:                         db,
 		state:                      stateProcessor,
@@ -391,6 +398,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		moduleQuotas:               make(map[string]nativecommon.Quota),
 		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		potsoEngine:                potsoEngine,
+		potsoLedger:                pLedger,
 		txSimulationEnabled:        true,
 		globalCfg: config.Global{
 			Governance: config.Governance{
@@ -403,7 +411,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				MaxWindowSecs: 60,
 			},
 			Mempool: config.Mempool{MaxBytes: 16 << 20, POSReservationBPS: consensus.DefaultPOSReservationBPS},
-			Blocks:  config.Blocks{MaxTxs: 1},
+			Blocks:  config.Blocks{MaxTxs: 500},
 			Staking: config.Staking{
 				AprBps:                1250,
 				PayoutPeriodDays:      30,
@@ -2180,6 +2188,13 @@ func (n *Node) CommitBlock(b *types.Block) (err error) {
 		return fmt.Errorf("block lifecycle: %w", err)
 	}
 
+	if err := n.processPendingEvidence(b.Header.Height); err != nil {
+		if rbErr := rollback(); rbErr != nil {
+			return fmt.Errorf("process evidence: %v (rollback failed: %w)", err, rbErr)
+		}
+		return fmt.Errorf("process evidence: %w", err)
+	}
+
 	if err := n.refreshModulePauses(); err != nil {
 		if rbErr := rollback(); rbErr != nil {
 			return fmt.Errorf("refresh module pauses: %v (rollback failed: %w)", err, rbErr)
@@ -2355,6 +2370,64 @@ func (n *Node) PotsoEvidenceByHash(hash [32]byte) (*evidence.Record, bool, error
 		return nil, false, fmt.Errorf("evidence store not initialised")
 	}
 	return n.evidenceStore.Get(hash)
+}
+
+// processPendingEvidence loops over all unprocessed POTSO evidence and applies them through the penalty engine.
+func (n *Node) processPendingEvidence(currentHeight uint64) error {
+	if n == nil || n.evidenceStore == nil || n.state == nil {
+		return nil
+	}
+
+	cfg := penalty.DefaultConfig()
+	cfg.SlashEnabled = true
+	cfg.EquivocationSlashBps = 10000 // 100% slashing on equivocation
+
+	catalog, err := penalty.BuildCatalog(cfg)
+	if err != nil {
+		return fmt.Errorf("build penalty catalog: %w", err)
+	}
+
+	manager := nhbstate.NewManager(n.state.Trie)
+	slasher := statebank.NewValidatorSlasher(manager)
+	engine := penalty.NewEngine(catalog, n.potsoLedger, slasher)
+
+	fromHeight := uint64(0)
+	if currentHeight > n.evidenceMaxAge {
+		fromHeight = currentHeight - n.evidenceMaxAge
+	}
+
+	filter := evidence.Filter{
+		FromHeight: &fromHeight,
+		Limit:      evidence.DefaultPageLimit,
+	}
+
+	for {
+		records, nextOffset, err := n.evidenceStore.List(filter)
+		if err != nil {
+			return fmt.Errorf("list evidence: %w", err)
+		}
+
+		for _, rec := range records {
+			ctx := penalty.Context{
+				BlockHeight:  currentHeight,
+				MissedEpochs: 0,
+			}
+			res, err := engine.Apply(rec, ctx)
+			if err != nil {
+				return fmt.Errorf("apply penalty for %x: %w", rec.Hash, err)
+			}
+			if !res.Idempotent && res.Event != nil {
+				n.state.AppendEvent(res.Event)
+			}
+		}
+
+		if nextOffset < 0 {
+			break
+		}
+		filter.Offset = nextOffset
+	}
+
+	return nil
 }
 
 // PotsoEvidenceList returns stored evidence filtered by the provided constraints.

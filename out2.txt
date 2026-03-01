@@ -1,0 +1,30 @@
+go : # 
+nhbchain/native/escrow
+At line:1 char:1
++ go build ./... 2>&1 | 
+Out-File -Encoding ASCII 
+out2.txt
++ ~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo         
+     : NotSpecified: (# n  
+  hbchain/native/escrow:   
+ String) [], RemoteExce    
+ption
+    + FullyQualifiedErrorI 
+   d : NativeCommandError
+ 
+native\escrow\types.go:614:
+11: clone.Metadata 
+undefined (type 
+*RealmFeeSchedule has no 
+field or method Metadata)
+native\escrow\types.go:617:
+49: clone.Metadata 
+undefined (type 
+*RealmFeeSchedule has no 
+field or method Metadata)
+native\escrow\types.go:621:
+8: clone.Metadata 
+undefined (type 
+*RealmFeeSchedule has no 
+field or method Metadata)

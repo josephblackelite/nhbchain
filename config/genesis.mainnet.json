@@ -1,0 +1,20 @@
+{
+  "genesisTime": "2026-03-01T00:00:00Z",
+  "chainId": 187001,
+  "nativeTokens": [
+    {
+      "symbol": "NHB",
+      "name": "NHBCoin",
+      "decimals": 18
+    },
+    {
+      "symbol": "ZNHB",
+      "name": "ZapNHB",
+      "decimals": 18,
+      "initialMintPaused": false
+    }
+  ],
+  "validators": [],
+  "alloc": {},
+  "roles": {}
+}

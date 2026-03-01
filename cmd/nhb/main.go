@@ -95,13 +95,7 @@ func main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to load genesis spec: %v", err))
 		}
-		info := genesis.ValidatorAutoPopulateInfo{
-			Address: validatorAddr.String(),
-			PubKey:  pubKeyHex,
-		}
-		if _, err := spec.ResolveValidatorAutoPopulate(&info); err != nil {
-			panic(fmt.Sprintf("Failed to resolve genesis validator entry: %v", err))
-		}
+
 		if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 			panic(fmt.Sprintf("Failed to prepare data directory for genesis spec: %v", err))
 		}
@@ -556,6 +550,15 @@ func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, l
 
 	trimmedCfg := strings.TrimSpace(cfgPath)
 	if trimmedCfg != "" {
+		if _, err := os.Stat(trimmedCfg); os.IsNotExist(err) && !allowAutogenesis {
+			fmt.Printf("Default genesis file %s not found, writing embedded mainnet genesis...\n", trimmedCfg)
+			if err := os.MkdirAll(filepath.Dir(trimmedCfg), 0755); err != nil {
+				return "", fmt.Errorf("failed to create genesis parent directory: %w", err)
+			}
+			if err := os.WriteFile(trimmedCfg, config.MainnetGenesis, 0644); err != nil {
+				return "", fmt.Errorf("failed to write embedded genesis: %w", err)
+			}
+		}
 		return trimmedCfg, nil
 	}
 

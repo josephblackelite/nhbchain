@@ -76,17 +76,17 @@ Staking = false
 [global.fees]
 free_tier_tx_per_month = 100
 mdr_basis_points = 150
-owner_wallet = "nhb1ownerwallet000000000000000000000000000000"
+owner_wallet = ""
 
 [[global.fees.assets]]
 asset = "NHB"
 mdr_basis_points = 150
-owner_wallet = "nhb1ownerwallet000000000000000000000000000000"
+owner_wallet = ""
 
 [[global.fees.assets]]
 asset = "ZNHB"
 mdr_basis_points = 150
-owner_wallet = "znhb1ownerwallet000000000000000000000000000"
+owner_wallet = ""
 
 [global.loyalty.Dynamic]
 targetbps = 50
@@ -113,7 +113,7 @@ EpochLengthBlocks = 120
 AlphaStakeBps = 7000
 MinPayoutWei = "1000000000000000"
 EmissionPerEpoch = "1000000000000000000"
-TreasuryAddress = "nhb1treasury0000000000000000000000000000000"
+TreasuryAddress = ""
 MaxWinnersPerEpoch = 5000
 CarryRemainder = true
 PayoutMode = "auto"

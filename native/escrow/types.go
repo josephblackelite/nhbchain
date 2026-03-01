@@ -596,6 +596,14 @@ func SanitizeFrozenArb(frozen *FrozenArb) (*FrozenArb, error) {
 		}
 		clone.FeeSchedule = schedule
 	}
+	if clone.Metadata == nil {
+		return nil, fmt.Errorf("frozen policy metadata required")
+	}
+	meta, err := SanitizeEscrowRealmMetadata(clone.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	clone.Metadata = meta
 	return clone, nil
 }
 
@@ -611,13 +619,5 @@ func SanitizeRealmFeeSchedule(schedule *RealmFeeSchedule) (*RealmFeeSchedule, er
 	if clone.FeeBps > 0 && clone.Recipient == ([20]byte{}) {
 		return nil, fmt.Errorf("realm arbitration fee recipient required")
 	}
-	if clone.Metadata == nil {
-		return nil, fmt.Errorf("frozen policy metadata required")
-	}
-	meta, err := SanitizeEscrowRealmMetadata(clone.Metadata)
-	if err != nil {
-		return nil, err
-	}
-	clone.Metadata = meta
 	return clone, nil
 }

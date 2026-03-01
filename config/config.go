@@ -194,7 +194,7 @@ func defaultGlobalConfig() Global {
 			MaxWindowSecs: 600,
 		},
 		Mempool: Mempool{MaxBytes: 16 << 20, POSReservationBPS: consensus.DefaultPOSReservationBPS},
-		Blocks:  Blocks{MaxTxs: 5000},
+		Blocks:  Blocks{MaxTxs: 500},
 		Staking: Staking{
 			AprBps:                1250,
 			PayoutPeriodDays:      30,

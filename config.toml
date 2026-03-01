@@ -91,23 +91,26 @@ Issuer = "nhb-rpc"
 Audience = ["wallets"]
 MaxSkewSeconds = 120
 
+[global.blocks]
+MaxTxs = 500
+
 [global.pauses]
 Staking = false
 
 [global.fees]
 free_tier_tx_per_month = 100
 mdr_basis_points = 150
-owner_wallet = "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"
+owner_wallet = ""
 
 [[global.fees.assets]]
 asset = "NHB"
 mdr_basis_points = 150
-owner_wallet = "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"
+owner_wallet = ""
 
 [[global.fees.assets]]
 asset = "ZNHB"
 mdr_basis_points = 150
-owner_wallet = "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"
+owner_wallet = ""
 
 [global.loyalty.Dynamic]
 # Operators can override these defaults per environment while the guard remains enabled by default.
@@ -135,7 +138,7 @@ EpochLengthBlocks = 120
 AlphaStakeBps = 7000
 MinPayoutWei = "1000000000000000"
 EmissionPerEpoch = "0"
-TreasuryAddress = "nhb1exampletreasury000000000000000000000"
+TreasuryAddress = ""
 MaxWinnersPerEpoch = 5000
 CarryRemainder = true
 PayoutMode = "auto"

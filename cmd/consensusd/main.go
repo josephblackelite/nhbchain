@@ -696,6 +696,15 @@ func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, l
 
 	trimmedCfg := strings.TrimSpace(cfgPath)
 	if trimmedCfg != "" {
+		if _, err := os.Stat(trimmedCfg); os.IsNotExist(err) && !allowAutogenesis {
+            fmt.Printf("Default genesis file %s not found, writing embedded mainnet genesis...\n", trimmedCfg)
+			if err := os.MkdirAll(filepath.Dir(trimmedCfg), 0755); err != nil {
+				return "", fmt.Errorf("failed to create genesis parent directory: %w", err)
+			}
+			if err := os.WriteFile(trimmedCfg, config.MainnetGenesis, 0644); err != nil {
+				return "", fmt.Errorf("failed to write embedded genesis: %w", err)
+			}
+		}
 		return trimmedCfg, nil
 	}
 

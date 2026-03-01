@@ -2365,7 +2365,7 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byt
 		return err
 	}
 	caller := bytesToAddress(sender)
-	if err := sp.EscrowEngine.Dispute(id, caller); err != nil {
+	if err := sp.EscrowEngine.Dispute(id, caller, ""); err != nil {
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)

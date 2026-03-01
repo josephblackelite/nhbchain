@@ -10,12 +10,13 @@ import (
 	"testing"
 	"time"
 
-	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"nhbchain/core/genesis"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
+
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 )
 
 func newTestBlock(height uint64, prevHash []byte) *types.Block {
@@ -263,7 +264,7 @@ func TestNewBlockchainChainIDMismatchDoesNotPersistState(t *testing.T) {
 
 	tempDB := storage.NewMemDB()
 	defer tempDB.Close()
-	block, finalize, err := genesis.BuildGenesisFromSpec(&spec, tempDB, nil)
+	block, finalize, err := genesis.BuildGenesisFromSpec(&spec, tempDB)
 	if err != nil {
 		t.Fatalf("build genesis for derived chain id: %v", err)
 	}

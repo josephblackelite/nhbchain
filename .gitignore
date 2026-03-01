@@ -43,3 +43,13 @@ nhb-data-local/p2p/node_key.json
 nhb-data-local/000001.log
 nhb-data-local/p2p/peerstore/000001.log
 go.work.sum
+
+# Environments
+.env
+.env.*
+!.env.example
+
+# Internal Mainnet Planning and Audits
+docs/2026-0*-report.md
+docs/2026-0*-mainnet-blueprint.md
+docs/2026-0*-mainnet-task-list.md
