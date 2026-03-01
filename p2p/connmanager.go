@@ -592,11 +592,16 @@ func (m *connManager) logNATStatus() {
 
 func (m *connManager) logUPnPStub(port string) {
 	if port == "" {
-		m.log().Info("UPnP port mapping stub engaged (no port specified)")
-	} else {
-		m.log().Info("Attempting UPnP port mapping (stub)", slog.String("port", port))
+		port = "26656"
 	}
-	m.log().Warn("UPnP not implemented; manual port forwarding required")
+	m.log().Info("=====================================================================================")
+	m.log().Info("============================= PUBLIC NODE SETUP REQUIRED ============================")
+	m.log().Info("UPnP auto-mapping is NOT supported.")
+	m.log().Info("To participate in consensus and earn UptimeWeightBps rewards, you MUST manually")
+	m.log().Info(fmt.Sprintf("port-forward your router's external IP to this node's internal IP on port %s.", port))
+	m.log().Info("Please ensure TCP traffic is allowed through your firewall to remain reachable.")
+	m.log().Info("Failure to be reachable from the outside will drastically lower expected POTSO rewards.")
+	m.log().Info("=====================================================================================")
 }
 
 type connectedPeer struct {

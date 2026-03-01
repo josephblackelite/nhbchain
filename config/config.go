@@ -54,6 +54,20 @@ var defaultAllowedGovernanceParams = []string{
 	"potso.abuse.QuadraticTxDampenPower",
 	"potso.rewards.EmissionPerEpochWei",
 	"potso.weights.AlphaStakeBps",
+	"swap.PerAddressDailyCapWei",
+	"swap.PerAddressMonthlyCapWei",
+	"swap.PerTxMinWei",
+	"swap.PerTxMaxWei",
+	"swap.VelocityWindowSeconds",
+	"swap.VelocityMaxMints",
+	"swap.cashOut.assetMonthlyCapWei",
+	"lending.MaxLTVBps",
+	"lending.LiquidationThresholdBps",
+	"lending.ReserveFactorBps",
+	"lending.ProtocolFeeBps",
+	"lending.breaker.MaxTotalSupplyWei",
+	"lending.breaker.MaxTotalBorrowWei",
+	"lending.breaker.MaxTotalCollateralWei",
 }
 
 type Config struct {
@@ -545,7 +559,9 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		cfg.RPCCallerMetadataMaxTTL = int((15 * time.Minute).Seconds())
 	}
 
-	if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
+	if cfg.NetworkName == "mainnet" || cfg.NetworkName == "nhbchain-1" {
+		cfg.Governance.BlockTimestampToleranceSeconds = 5
+	} else if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
 		cfg.Governance.BlockTimestampToleranceSeconds = defaultBlockTimestampToleranceSeconds
 	}
 
@@ -553,7 +569,7 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		cfg.Potso.Rewards.MinPayoutWei = "0"
 	}
 	if strings.TrimSpace(cfg.Potso.Rewards.EmissionPerEpoch) == "" {
-		cfg.Potso.Rewards.EmissionPerEpoch = "0"
+		cfg.Potso.Rewards.EmissionPerEpoch = "1000000000000000000"
 	}
 
 	weightDefaults := potso.DefaultWeightParams()
@@ -612,6 +628,10 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 
 	cfg.Swap = cfg.Swap.Normalise()
 	cfg.syncTopLevelToP2P()
+
+	if cfg.NetworkName == "mainnet" && len(cfg.RPCSwapAuth.Secrets) == 0 {
+		return nil, fmt.Errorf("swap RPC authentication secrets are required for mainnet deployment")
+	}
 
 	return cfg, nil
 }

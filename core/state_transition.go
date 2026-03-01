@@ -2189,6 +2189,14 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applyHeartbeat(tx, sender, senderAccount)
+	case types.TxTypePOSAuthorize:
+		return sp.applyPOSAuthorize(tx)
+	case types.TxTypePOSCapture:
+		return sp.applyPOSCapture(tx)
+	case types.TxTypePOSVoid:
+		return sp.applyPOSVoid(tx)
+	case types.TxTypePOSRegistry:
+		return sp.applyPOSRegistry(tx)
 
 	// --- NEW DISPUTE RESOLUTION CASES ---
 	case types.TxTypeLockEscrow:

@@ -624,6 +624,9 @@ var (
 type SanctionsChecker func([20]byte) bool
 
 // DefaultSanctionsChecker allows all addresses, providing a safe default when operators do not wire external services.
+// COMMUNITY INTERFACE: For mainnet deployment, node operators MUST wire this interface to a
+// real compliance API endpoint (e.g. Chainalysis, TRM Labs, or OFAC lists) to enforce local
+// regulatory constraints.
 func DefaultSanctionsChecker([20]byte) bool { return true }
 
 func (re *RiskEngine) pruneBuckets(addr [20]byte, now time.Time) error {

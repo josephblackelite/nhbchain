@@ -1,17 +1,33 @@
 package logging
 
 import (
+	"io"
 	"log"
 	"log/slog"
 	"os"
 	"strings"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // Setup configures the standard library logger to emit structured JSON and returns
 // the underlying slog.Logger for richer logging within the service. All log lines
 // include the service name and environment when provided.
 func Setup(service, env string) *slog.Logger {
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	var out io.Writer = os.Stdout
+
+	logFile := os.Getenv("NHB_LOG_FILE")
+	if logFile != "" {
+		out = io.MultiWriter(os.Stdout, &lumberjack.Logger{
+			Filename:   logFile,
+			MaxSize:    100, // megabytes
+			MaxBackups: 5,
+			MaxAge:     28, // days
+			Compress:   true,
+		})
+	}
+
+	handler := slog.NewJSONHandler(out, &slog.HandlerOptions{
 		AddSource: false,
 		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
 			if attr.Key == slog.TimeKey {

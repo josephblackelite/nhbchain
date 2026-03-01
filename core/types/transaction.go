@@ -48,6 +48,10 @@ const (
 	TxTypeStakeClaim        TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
 	TxTypeMint              TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
 	TxTypeSwapPayoutReceipt TxType = 0x0F // NEW: Record a swap payout receipt attested by the treasury
+	TxTypePOSAuthorize      TxType = 0x20 // Pre-authorize a merchant payment
+	TxTypePOSCapture        TxType = 0x21 // Capture an authorized payment
+	TxTypePOSVoid           TxType = 0x22 // Void authorized payment
+	TxTypePOSRegistry       TxType = 0x23 // POS merchant/device registry update
 )
 
 // RequiresSignature reports whether the transaction type must carry an

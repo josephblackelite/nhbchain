@@ -761,6 +761,11 @@ func (s *Server) Serve(listener net.Listener) error {
 		posv1.RegisterRealtimeServer(grpcServer, s.posRealtime)
 	}
 
+	// Register POS Tx and Registry services
+	posSrv := NewPOSServer(s.node, "nhbchain", nil) // Gateway delegates signature to the frontend intent or node
+	posv1.RegisterTxServer(grpcServer, posSrv)
+	posv1.RegisterRegistryServer(grpcServer, posSrv)
+
 	baseHandler := grpcHandler(grpcServer, mux)
 	srv := &http.Server{
 		Addr:              listener.Addr().String(),
@@ -859,8 +864,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor == 2 && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
-			grpcServer.ServeHTTP(w, r)
-			return
+			// Only intercept registered POS services, forward others to the proxy
+			if strings.HasPrefix(r.URL.Path, "/pos.v1.") {
+				grpcServer.ServeHTTP(w, r)
+				return
+			}
 		}
 		other.ServeHTTP(w, r)
 	})
@@ -1139,6 +1147,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if !s.allowSwapPrincipal(principal.APIKey, s.swapNow()) {
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "swap partner rate limit exceeded", nil)
+			return
+		}
+	}
+
+	if req.Method != "nhb_sendTransaction" {
+		source := s.clientSource(r)
+		identity, _ := r.Context().Value(clientIdentityContextKey).(string)
+		if !s.allowSource(source, identity, "", req.Method, time.Now()) {
+			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "RPC rate limit exceeded", source)
 			return
 		}
 	}

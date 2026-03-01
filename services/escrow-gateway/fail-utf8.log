@@ -1,0 +1,26 @@
+﻿=== RUN   TestAuthenticateRejectsInvalidSignature
+--- PASS: TestAuthenticateRejectsInvalidSignature (0.00s)
+=== RUN   TestIdempotentCreateCachesResponse
+--- PASS: TestIdempotentCreateCachesResponse (0.00s)
+=== RUN   TestCreateValidationMissingFields
+--- PASS: TestCreateValidationMissingFields (0.00s)
+=== RUN   TestEscrowGetIncludesProviderMetadata
+--- PASS: TestEscrowGetIncludesProviderMetadata (0.00s)
+=== RUN   TestCreateRejectsRealmOutsideMerchantScope
+--- PASS: TestCreateRejectsRealmOutsideMerchantScope (0.00s)
+=== RUN   TestEscrowReleaseWithValidSignature
+--- PASS: TestEscrowReleaseWithValidSignature (0.01s)
+=== RUN   TestEscrowResolveAuthorisedSignature
+--- PASS: TestEscrowResolveAuthorisedSignature (0.00s)
+=== RUN   TestP2POfferLifecycle
+--- PASS: TestP2POfferLifecycle (0.00s)
+=== RUN   TestEventWatcherProcessesEvents
+--- PASS: TestEventWatcherProcessesEvents (0.00s)
+=== RUN   TestWebhookWorkerDelivers
+--- PASS: TestWebhookWorkerDelivers (0.01s)
+=== RUN   TestWebhookQueueDropOldest
+--- PASS: TestWebhookQueueDropOldest (0.00s)
+=== RUN   TestWebhookQueueEvictsExpired
+--- PASS: TestWebhookQueueEvictsExpired (0.10s)
+PASS
+ok  	nhbchain/services/escrow-gateway	0.287s

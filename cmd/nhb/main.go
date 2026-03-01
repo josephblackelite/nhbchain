@@ -33,8 +33,6 @@ import (
 	"nhbchain/storage"
 
 	gatewayauth "nhbchain/gateway/auth"
-
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -84,10 +82,6 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load validator key: %v", err))
 	}
-
-	validatorAddr := privKey.PubKey().Address()
-	pubKeyBytes := ethcrypto.FromECDSAPub(privKey.PubKey().PublicKey)
-	pubKeyHex := hex.EncodeToString(pubKeyBytes)
 
 	trimmedGenesis := strings.TrimSpace(genesisPath)
 	if trimmedGenesis != "" {

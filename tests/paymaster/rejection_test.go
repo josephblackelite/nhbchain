@@ -74,6 +74,9 @@ func TestSponsoredTransactionRejectionDoesNotMutateState(t *testing.T) {
 		if err := sp.PutAccount(paymasterAddr, paymasterAccount); err != nil {
 			t.Fatalf("put paymaster account: %v", err)
 		}
+		if _, err := sp.Commit(0); err != nil {
+			t.Fatalf("commit initial state: %v", err)
+		}
 
 		tx := &types.Transaction{
 			ChainID:   types.NHBChainID(),
@@ -153,6 +156,9 @@ func TestSponsoredTransactionRejectionDoesNotMutateState(t *testing.T) {
 		paymasterAccount := &types.Account{BalanceNHB: big.NewInt(10_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
 		if err := sp.PutAccount(paymasterAddr, paymasterAccount); err != nil {
 			t.Fatalf("put paymaster account: %v", err)
+		}
+		if _, err := sp.Commit(0); err != nil {
+			t.Fatalf("commit initial state: %v", err)
 		}
 
 		tx := &types.Transaction{

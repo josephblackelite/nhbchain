@@ -12,6 +12,7 @@ import (
 
 	"nhbchain/core/types"
 	consensusv1 "nhbchain/proto/consensus/v1"
+	posv1 "nhbchain/proto/pos"
 	swapv1 "nhbchain/proto/swap/v1"
 )
 
@@ -195,9 +196,44 @@ func transactionFromModulePayload(body *consensusv1.TxEnvelope, payload *anypb.A
 	switch typed := msg.(type) {
 	case *swapv1.MsgPayoutReceipt:
 		return moduleSwapPayoutReceiptTx(body, payload, typed)
+	case *posv1.MsgAuthorizePayment:
+		return modulePOSTx(body, payload, types.TxTypePOSAuthorize)
+	case *posv1.MsgCapturePayment:
+		return modulePOSTx(body, payload, types.TxTypePOSCapture)
+	case *posv1.MsgVoidPayment:
+		return modulePOSTx(body, payload, types.TxTypePOSVoid)
+	case *posv1.MsgRegisterMerchant, *posv1.MsgRegisterDevice, *posv1.MsgPauseMerchant, *posv1.MsgResumeMerchant, *posv1.MsgRevokeDevice, *posv1.MsgRestoreDevice:
+		return modulePOSTx(body, payload, types.TxTypePOSRegistry)
 	default:
 		return nil, fmt.Errorf("envelope: unsupported module payload type %q", payload.GetTypeUrl())
 	}
+}
+
+func modulePOSTx(body *consensusv1.TxEnvelope, packed *anypb.Any, txType types.TxType) (*types.Transaction, error) {
+	if body == nil {
+		return nil, fmt.Errorf("envelope: body required")
+	}
+	chainIDStr := strings.TrimSpace(body.GetChainId())
+	if chainIDStr == "" {
+		return nil, fmt.Errorf("envelope: chain id required")
+	}
+	chainID, ok := new(big.Int).SetString(chainIDStr, 10)
+	if !ok {
+		return nil, fmt.Errorf("envelope: invalid chain id %q", chainIDStr)
+	}
+	data, err := proto.Marshal(packed)
+	if err != nil {
+		return nil, fmt.Errorf("pos: marshal data: %w", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  chainID,
+		Type:     txType,
+		Nonce:    body.GetNonce(),
+		Data:     data,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+	return tx, nil
 }
 
 func moduleSwapPayoutReceiptTx(body *consensusv1.TxEnvelope, packed *anypb.Any, msg *swapv1.MsgPayoutReceipt) (*types.Transaction, error) {

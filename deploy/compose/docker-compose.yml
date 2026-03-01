@@ -54,7 +54,8 @@ services:
     environment:
       NHB_ENV: local
       NHB_ALLOW_AUTOGENESIS: "true"
-      NHB_VALIDATOR_PASS: "change-me"
+    env_file:
+      - .env
     volumes:
       - consensus-data:/var/lib/nhb
       - ./config/consensus.toml:/etc/nhb/consensus.toml:ro
@@ -110,8 +111,8 @@ services:
       IDENTITY_GATEWAY_PORT: "8095"
       IDENTITY_GATEWAY_LISTEN: "127.0.0.1:8095"
       IDENTITY_GATEWAY_DB: /var/lib/nhb/identity-gateway.db
-      IDENTITY_EMAIL_SALT: local-development-salt
-      IDENTITY_GATEWAY_API_KEYS: local:local-secret
+    env_file:
+      - .env
     volumes:
       - identity-gateway-data:/var/lib/nhb
     network_mode: host

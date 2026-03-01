@@ -232,6 +232,21 @@ func main() {
 				RateLimitKey:   "gov",
 			},
 			{
+				Name:           "gov_grpc_msg",
+				Prefix:         "/gov.v1.Msg",
+				Target:         servicesByName["governd"].BaseURL,
+				RequireAuth:    true,
+				RequiredScopes: []string{"gov"},
+				RateLimitKey:   "gov",
+			},
+			{
+				Name:         "gov_grpc_query",
+				Prefix:       "/gov.v1.Query",
+				Target:       servicesByName["governd"].BaseURL,
+				RequireAuth:  false,
+				RateLimitKey: "gov",
+			},
+			{
 				Name:         "transactions",
 				Prefix:       "/v1/transactions",
 				Target:       servicesByName["consensusd"].BaseURL,
@@ -241,6 +256,13 @@ func main() {
 			{
 				Name:         "consensus",
 				Prefix:       "/v1/consensus",
+				Target:       servicesByName["consensusd"].BaseURL,
+				RequireAuth:  false,
+				RateLimitKey: "consensus",
+			},
+			{
+				Name:         "consensus_grpc",
+				Prefix:       "/consensus.v1.ConsensusService",
 				Target:       servicesByName["consensusd"].BaseURL,
 				RequireAuth:  false,
 				RateLimitKey: "consensus",

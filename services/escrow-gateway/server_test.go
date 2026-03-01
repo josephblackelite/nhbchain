@@ -43,6 +43,8 @@ type mockNodeClient struct {
 	disputeErr error
 	resolveErr error
 
+	realmResp  *EscrowRealm
+	realmErr   error
 	realmCalls int
 
 	p2pCreateResp  *P2PAcceptResponse

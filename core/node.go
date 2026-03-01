@@ -152,11 +152,6 @@ const (
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
 
-// ErrStakingNotReady indicates staking reward claims are not yet enabled on the
-// node. The RPC surface is exposed ahead of the underlying minting logic being
-// wired up so that clients can integrate against a stable method name.
-var ErrStakingNotReady = errors.New("staking not ready")
-
 // ErrMilestoneUnsupported is returned when milestone functionality has not been
 // wired into the node yet. The current implementation exposes the RPC surface
 // but leaves execution to follow-on upgrades.
@@ -430,6 +425,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		posStreamHistory: make([]POSFinalityUpdate, 0, posFinalityHistoryLimit),
 	}
 
+	if node.networkMode == "" {
+		return nil, errors.New("NHB_ENV environment variable is required")
+	}
+
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
 	stateProcessor.SetPaymasterLimits(node.paymasterLimits)
 	stateProcessor.SetPaymasterAutoTopUpPolicy(node.paymasterTopUpPolicy)
@@ -640,7 +639,7 @@ func (n *Node) IsPaused(module string) bool {
 func (n *Node) devNetwork() bool {
 	mode := strings.ToLower(strings.TrimSpace(n.networkMode))
 	switch mode {
-	case "", "dev", "development", "local", "test", "testing", "staging":
+	case "dev", "development", "local", "test", "testing", "staging":
 		return true
 	default:
 		return false
@@ -3327,9 +3326,7 @@ func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods in
 		paid, periods, next, aprBps, err = engine.Claim(addr, now)
 		return err
 	})
-	if errors.Is(err, nhbstate.ErrNotReady) {
-		return nil, 0, 0, 0, ErrStakingNotReady
-	}
+
 	if errors.Is(err, stakeerrors.ErrStakingPaused) {
 		return nil, 0, 0, 0, stakeerrors.ErrStakingPaused
 	}
@@ -3482,37 +3479,151 @@ func (n *Node) EscrowVaultAddress(token string) ([20]byte, error) {
 	return manager.EscrowVaultAddress(token)
 }
 
-// EscrowMilestoneCreate is a placeholder implementation used by the milestone
-// RPC surface. The engine is not yet connected to state transitions.
-func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject) (*escrow.MilestoneProject, error) {
-	return nil, ErrMilestoneUnsupported
+// milestoneStorageKey generates a namespaced state key for milestone projects.
+func milestoneStorageKey(id [32]byte) []byte {
+	return append([]byte("milestone-proj-"), id[:]...)
 }
 
-// EscrowMilestoneGet returns the current milestone project state when
-// persistence is available.
+// EscrowMilestoneCreate persists a new milestone project to state.
+func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject) (*escrow.MilestoneProject, error) {
+	if n == nil || n.state == nil {
+		return nil, fmt.Errorf("node or state unavailable")
+	}
+	engine := escrow.NewMilestoneEngine(func() time.Time { return n.currentTime() })
+	if err := engine.CreateProject(project); err != nil {
+		return nil, err
+	}
+
+	// Generate a stable ID for the project hash
+	var idSource []byte
+	idSource = append(idSource, project.Payer[:]...)
+	idSource = append(idSource, project.Payee[:]...)
+	idSource = append(idSource, project.RealmID...)
+	idSource = append(idSource, []byte(fmt.Sprintf("%d", project.CreatedAt))...)
+	project.ID = sha256.Sum256(idSource)
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	if err := manager.KVPut(milestoneStorageKey(project.ID), project); err != nil {
+		return nil, fmt.Errorf("persist milestone: %w", err)
+	}
+	return project, nil
+}
+
+// EscrowMilestoneGet returns the current milestone project state from persistence.
 func (n *Node) EscrowMilestoneGet(id [32]byte) (*escrow.MilestoneProject, error) {
-	return nil, ErrMilestoneUnsupported
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	var project escrow.MilestoneProject
+	ok, err := manager.KVGet(milestoneStorageKey(id), &project)
+	if err != nil {
+		return nil, fmt.Errorf("read milestone: %w", err)
+	}
+	if !ok {
+		return nil, escrow.ErrMilestoneNotFound
+	}
+	return &project, nil
 }
 
 // EscrowMilestoneFund transitions a milestone leg into the funded state.
 func (n *Node) EscrowMilestoneFund(id [32]byte, legID uint64, caller [20]byte) error {
-	return ErrMilestoneUnsupported
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	var project escrow.MilestoneProject
+	ok, err := manager.KVGet(milestoneStorageKey(id), &project)
+	if err != nil {
+		return fmt.Errorf("read milestone: %w", err)
+	}
+	if !ok {
+		return escrow.ErrMilestoneNotFound
+	}
+
+	engine := escrow.NewMilestoneEngine(func() time.Time { return n.currentTime() })
+	if err := engine.FundLeg(&project, legID); err != nil {
+		return err
+	}
+	if err := manager.KVPut(milestoneStorageKey(project.ID), &project); err != nil {
+		return fmt.Errorf("persist milestone: %w", err)
+	}
+	return nil
 }
 
 // EscrowMilestoneRelease releases a funded milestone leg to the payee.
 func (n *Node) EscrowMilestoneRelease(id [32]byte, legID uint64, caller [20]byte) error {
-	return ErrMilestoneUnsupported
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	var project escrow.MilestoneProject
+	ok, err := manager.KVGet(milestoneStorageKey(id), &project)
+	if err != nil {
+		return fmt.Errorf("read milestone: %w", err)
+	}
+	if !ok {
+		return escrow.ErrMilestoneNotFound
+	}
+
+	engine := escrow.NewMilestoneEngine(func() time.Time { return n.currentTime() })
+	if err := engine.ReleaseLeg(&project, legID); err != nil {
+		return err
+	}
+	if err := manager.KVPut(milestoneStorageKey(project.ID), &project); err != nil {
+		return fmt.Errorf("persist milestone: %w", err)
+	}
+	return nil
 }
 
 // EscrowMilestoneCancel cancels a milestone leg.
 func (n *Node) EscrowMilestoneCancel(id [32]byte, legID uint64, caller [20]byte) error {
-	return ErrMilestoneUnsupported
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	var project escrow.MilestoneProject
+	ok, err := manager.KVGet(milestoneStorageKey(id), &project)
+	if err != nil {
+		return fmt.Errorf("read milestone: %w", err)
+	}
+	if !ok {
+		return escrow.ErrMilestoneNotFound
+	}
+
+	engine := escrow.NewMilestoneEngine(func() time.Time { return n.currentTime() })
+	if err := engine.CancelLeg(&project, legID); err != nil {
+		return err
+	}
+	if err := manager.KVPut(milestoneStorageKey(project.ID), &project); err != nil {
+		return fmt.Errorf("persist milestone: %w", err)
+	}
+	return nil
 }
 
 // EscrowMilestoneSubscriptionUpdate updates the subscription toggle for a
 // milestone project.
 func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, caller [20]byte, active bool) (*escrow.MilestoneProject, error) {
-	return nil, ErrMilestoneUnsupported
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	manager := nhbstate.NewManager(n.state.Trie)
+	var project escrow.MilestoneProject
+	ok, err := manager.KVGet(milestoneStorageKey(id), &project)
+	if err != nil {
+		return nil, fmt.Errorf("read milestone: %w", err)
+	}
+	if !ok {
+		return nil, escrow.ErrMilestoneNotFound
+	}
+
+	if project.Subscription == nil {
+		return nil, fmt.Errorf("escrow: project does not have a subscription")
+	}
+	project.Subscription.Active = active
+	project.UpdatedAt = n.currentTime().Unix()
+
+	if err := manager.KVPut(milestoneStorageKey(project.ID), &project); err != nil {
+		return nil, fmt.Errorf("persist milestone: %w", err)
+	}
+	return &project, nil
 }
 
 // ReputationVerifySkill validates the caller's verifier role and records a

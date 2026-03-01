@@ -16,6 +16,11 @@ type NodeAdapter struct {
 	cli *rpcclient.Client
 }
 
+type lendingPoolsResult struct {
+	Pools          []*MarketSnapshot `json:"pools"`
+	RiskParameters RiskParameters    `json:"riskParameters"`
+}
+
 // NewNodeAdapter constructs an Engine backed by the provided JSON-RPC client.
 func NewNodeAdapter(cli *rpcclient.Client) *NodeAdapter {
 	return &NodeAdapter{cli: cli}
@@ -23,45 +28,45 @@ func NewNodeAdapter(cli *rpcclient.Client) *NodeAdapter {
 
 func (a *NodeAdapter) Supply(ctx context.Context, addr, market, amount string) error {
 	params := map[string]string{
-		"account": addr,
-		"market":  market,
-		"amount":  amount,
+		"from":   addr,
+		"poolId": market,
+		"amount": amount,
 	}
-	return a.invoke(ctx, "lending_supply", params, nil)
+	return a.invoke(ctx, "lending_supplyNHB", params, nil)
 }
 
 func (a *NodeAdapter) Borrow(ctx context.Context, addr, market, amount string) error {
 	params := map[string]string{
-		"account": addr,
-		"market":  market,
-		"amount":  amount,
+		"borrower": addr,
+		"poolId":   market,
+		"amount":   amount,
 	}
-	return a.invoke(ctx, "lending_borrow", params, nil)
+	return a.invoke(ctx, "lending_borrowNHB", params, nil)
 }
 
 func (a *NodeAdapter) Repay(ctx context.Context, addr, market, amount string) error {
 	params := map[string]string{
-		"account": addr,
-		"market":  market,
-		"amount":  amount,
+		"from":   addr,
+		"poolId": market,
+		"amount": amount,
 	}
-	return a.invoke(ctx, "lending_repay", params, nil)
+	return a.invoke(ctx, "lending_repayNHB", params, nil)
 }
 
 func (a *NodeAdapter) Withdraw(ctx context.Context, addr, market, amount string) error {
 	params := map[string]string{
-		"account": addr,
-		"market":  market,
-		"amount":  amount,
+		"from":   addr,
+		"poolId": market,
+		"amount": amount,
 	}
-	return a.invoke(ctx, "lending_withdraw", params, nil)
+	return a.invoke(ctx, "lending_withdrawNHB", params, nil)
 }
 
 func (a *NodeAdapter) Liquidate(ctx context.Context, liquidator, borrower, market, amount string) error {
 	params := map[string]string{
 		"liquidator": liquidator,
 		"borrower":   borrower,
-		"market":     market,
+		"poolId":     market,
 	}
 	if strings.TrimSpace(amount) != "" {
 		params["amount"] = amount
@@ -72,7 +77,7 @@ func (a *NodeAdapter) Liquidate(ctx context.Context, liquidator, borrower, marke
 func (a *NodeAdapter) GetMarket(ctx context.Context, market string) (Market, error) {
 	var params any
 	if trimmed := strings.TrimSpace(market); trimmed != "" {
-		params = map[string]string{"market": trimmed}
+		params = map[string]string{"poolId": trimmed}
 	}
 	var resp Market
 	if err := a.invoke(ctx, "lending_getMarket", params, &resp); err != nil {
@@ -82,20 +87,27 @@ func (a *NodeAdapter) GetMarket(ctx context.Context, market string) (Market, err
 }
 
 func (a *NodeAdapter) ListMarkets(ctx context.Context) ([]Market, error) {
-	var resp []Market
-	if err := a.invoke(ctx, "lending_listMarkets", nil, &resp); err != nil {
+	var resp lendingPoolsResult
+	if err := a.invoke(ctx, "lending_getPools", nil, &resp); err != nil {
 		return nil, err
 	}
-	return resp, nil
+	var markets []Market
+	for _, p := range resp.Pools {
+		markets = append(markets, Market{
+			Market:         p,
+			RiskParameters: resp.RiskParameters,
+		})
+	}
+	return markets, nil
 }
 
 func (a *NodeAdapter) GetPosition(ctx context.Context, addr, market string) (Position, error) {
 	params := map[string]string{
-		"account": addr,
-		"market":  market,
+		"address": addr,
+		"poolId":  market,
 	}
 	var resp Position
-	if err := a.invoke(ctx, "lending_getPosition", params, &resp); err != nil {
+	if err := a.invoke(ctx, "lending_getUserAccount", params, &resp); err != nil {
 		return Position{}, err
 	}
 	if resp.Account == nil {

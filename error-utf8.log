@@ -1,0 +1,38 @@
+﻿=== RUN   TestPaymasterAutoTopUpSuccess
+    autofund_test.go:245: apply transaction: statedb init: missing trie node b3878b8b1efaa979188181d1017a7bc812866c4c5d3c59427926d6b9a41b47bc (path ) state 0xb3878b8b1efaa979188181d1017a7bc812866c4c5d3c59427926d6b9a41b47bc is not available, not found
+--- FAIL: TestPaymasterAutoTopUpSuccess (0.01s)
+=== RUN   TestPaymasterAutoTopUpRespectsCooldown
+    autofund_test.go:394: apply transaction: statedb init: missing trie node 6f8fb37ae603b6e78f7c624fe7f0185734b3640168e0901ab65db24909a6231c (path ) state 0x6f8fb37ae603b6e78f7c624fe7f0185734b3640168e0901ab65db24909a6231c is not available, not found
+--- FAIL: TestPaymasterAutoTopUpRespectsCooldown (0.00s)
+=== RUN   TestPaymasterAutoTopUpRoleValidation
+=== RUN   TestPaymasterAutoTopUpRoleValidation/missing-minter-identity
+    autofund_test.go:573: apply transaction: statedb init: missing trie node 537433d37b4f57d5485d6590393645093e5b78621ac36bbb8c48cd7ae188a1ad (path ) state 0x537433d37b4f57d5485d6590393645093e5b78621ac36bbb8c48cd7ae188a1ad is not available, not found
+=== RUN   TestPaymasterAutoTopUpRoleValidation/missing-approver-identity
+    autofund_test.go:573: apply transaction: statedb init: missing trie node 7ef800f1fafca84590e3a047325ff6cf29967c083d7fd30506290c88efa9578b (path ) state 0x7ef800f1fafca84590e3a047325ff6cf29967c083d7fd30506290c88efa9578b is not available, not found
+=== RUN   TestPaymasterAutoTopUpRoleValidation/missing-minter-role
+    autofund_test.go:573: apply transaction: statedb init: missing trie node f5547b09ed62bcbc919aa419dd0eee7a9f9f1963ad2ea4c57ac2be94967e3886 (path ) state 0xf5547b09ed62bcbc919aa419dd0eee7a9f9f1963ad2ea4c57ac2be94967e3886 is not available, not found
+=== RUN   TestPaymasterAutoTopUpRoleValidation/missing-approver-role
+    autofund_test.go:573: apply transaction: statedb init: missing trie node 5fffe6af536545bfd1942d640dd84000a646ca2b7b655cdab91ec4bdb9f52a81 (path ) state 0x5fffe6af536545bfd1942d640dd84000a646ca2b7b655cdab91ec4bdb9f52a81 is not available, not found
+--- FAIL: TestPaymasterAutoTopUpRoleValidation (0.00s)
+    --- FAIL: TestPaymasterAutoTopUpRoleValidation/missing-minter-identity (0.00s)
+    --- FAIL: TestPaymasterAutoTopUpRoleValidation/missing-approver-identity (0.00s)
+    --- FAIL: TestPaymasterAutoTopUpRoleValidation/missing-minter-role (0.00s)
+    --- FAIL: TestPaymasterAutoTopUpRoleValidation/missing-approver-role (0.00s)
+=== RUN   TestPaymasterAutoTopUpDailyCap
+    autofund_test.go:711: apply transaction: statedb init: missing trie node 5ac9abc7f5b40227601a618a7c45068616d6176b6b56798e255cfb8001254097 (path ) state 0x5ac9abc7f5b40227601a618a7c45068616d6176b6b56798e255cfb8001254097 is not available, not found
+--- FAIL: TestPaymasterAutoTopUpDailyCap (0.00s)
+=== RUN   TestPaymasterAutoTopUpNoMutationWhenThrottled
+    autofund_test.go:820: expected throttled status, got insufficient_balance
+--- FAIL: TestPaymasterAutoTopUpNoMutationWhenThrottled (0.00s)
+=== RUN   TestPaymasterAutoTopUpNoMutationOnFailure
+    autofund_test.go:948: expected insufficient balance status, got ready
+--- FAIL: TestPaymasterAutoTopUpNoMutationOnFailure (0.00s)
+=== RUN   TestSponsoredTransactionRejectionDoesNotMutateState
+=== RUN   TestSponsoredTransactionRejectionDoesNotMutateState/invalid_signature
+=== RUN   TestSponsoredTransactionRejectionDoesNotMutateState/throttled_sponsorship
+--- PASS: TestSponsoredTransactionRejectionDoesNotMutateState (0.00s)
+    --- PASS: TestSponsoredTransactionRejectionDoesNotMutateState/invalid_signature (0.00s)
+    --- PASS: TestSponsoredTransactionRejectionDoesNotMutateState/throttled_sponsorship (0.00s)
+FAIL
+FAIL	nhbchain/tests/paymaster	0.157s
+FAIL
