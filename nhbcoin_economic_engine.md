@@ -9,12 +9,14 @@ This is exactly how Web2 companies win. If a user downloads NHBPortal, they shou
 
 The Mechanic: The network (using your Master Paymaster) automatically pays the gas for their first 100 transactions behind the scenes.
 The Result: Massive user adoption because it feels as fast, free, and easy as Venmo or PayPal.
-2. The Revenue Engine (1.5% Volume Fee)
+2. The Revenue Engine (Dynamic Volume Fee via Governance)
 Once a user is hooked and exceeds 100 transactions, the "trial" is over.
 
-A 1.5% fee on transfer volume is massive for network revenue.
-If they send 1,000 NHB to a merchant, the network takes 15 NHB as a fee.
+A protocol fee on transfer volume (e.g., 1.5%) is massive for network revenue.
+If they send 1,000 NHB to a merchant, the network takes a 15 NHB fee (at 1.5%).
 Because NHB = USDT in your Master Treasury, that 15 NHB fee is 15 real dollars of profit for your network company. This is your primary business revenue model.
+
+**Stage 4 Update:** This fee rate is *no longer hardcoded*. It is stored in the blockchain state as a `GlobalFeeRate` parameter controlled entirely by the **On-Chain Governance Module**. Staked businesses can vote to raise or lower this fee dynamically to respond to market conditions without requiring a developer hard fork. This establishes the ultimate utility value for holding and staking ZNHB.
 3. ZNHB as the Ultimate Loyalty Point (Not an Open-Market Coin)
 By deciding not to list ZNHB on an open market like Uniswap, you maintain total control. ZNHB becomes a powerful, internal currency that lives and dies entirely within the NHB ecosystem. Here is how it drives the economy:
 
