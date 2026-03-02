@@ -1660,7 +1660,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	originalValue := tx.Value
 	if isTransfer && tx.Value != nil && tx.Value.Sign() > 0 && sp.blockHeight() > 1000 {
 		// Fetch the dynamic fee rate governed by the community (defaults to 150 basis points / 1.5%)
-		feeBps := getGlobalFeeRate(statedb)
+		feeBps := getGlobalFeeRate(sp.stateDB)
 		tax := new(big.Int).Mul(tx.Value, big.NewInt(int64(feeBps)))
 		tax = tax.Div(tax, big.NewInt(10000))
 		if tax.Sign() > 0 {
@@ -1950,6 +1950,8 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 		if recipientAccount.BalanceZNHB == nil {
 			recipientAccount.BalanceZNHB = big.NewInt(0)
 		}
+	}
+
 	// Calculate Dynamic Global Routing Tax on ZNHB transfers
 	var routingTax *big.Int
 	originalAmount := amount

@@ -145,9 +145,12 @@ const (
 	ProposalKindSlashingPolicy    = "policy.slashing"
 	ProposalKindRoleAllowlist     = "role.allowlist"
 	ProposalKindTreasuryDirective = "treasury.directive"
+	ProposalKindUpdateFeeRate     = "param.update_fee_rate"
 )
 
 const (
+	// ParamKeyProtocolFeeRateBps controls the global routing tax strictly configured by the governance module.
+	ParamKeyProtocolFeeRateBps = "protocol.feeRateBps"
 	// ParamKeyMinimumValidatorStake controls the minimum stake required for
 	// an account to qualify for validator eligibility and selection.
 	ParamKeyMinimumValidatorStake = "staking.minimumValidatorStake"

@@ -351,6 +351,17 @@ func validatorForParam(key string) paramValidator {
 			}
 			return nil
 		}
+	case ParamKeyProtocolFeeRateBps:
+		return func(raw json.RawMessage) error {
+			value, err := parseUint64Raw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyProtocolFeeRateBps, err)
+			}
+			if value > maxBasisPoints {
+				return fmt.Errorf("%s: must be <= %d", ParamKeyProtocolFeeRateBps, maxBasisPoints)
+			}
+			return nil
+		}
 	case ParamKeyStakingAprBps:
 		return func(raw json.RawMessage) error {
 			value, err := parseUint64Raw(raw)
@@ -835,7 +846,6 @@ func parseBoolRaw(raw json.RawMessage) (bool, error) {
 	default:
 		return false, fmt.Errorf("value must be boolean")
 	}
-	return false, fmt.Errorf("value must be boolean")
 }
 
 func (e *Engine) validateParamPayload(payloadJSON string) (map[string]json.RawMessage, error) {
@@ -1300,7 +1310,7 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 	}
 
 	switch proposalKind {
-	case ProposalKindParamUpdate, ProposalKindParamEmergency:
+	case ProposalKindUpdateFeeRate, ProposalKindParamUpdate, ProposalKindParamEmergency:
 		payload, err := e.validateParamPayload(payloadJSON)
 		if err != nil {
 			return 0, err
@@ -1715,7 +1725,7 @@ func (e *Engine) Execute(proposalID uint64) error {
 	detail := map[string]interface{}{"kind": target}
 
 	switch target {
-	case ProposalKindParamUpdate, ProposalKindParamEmergency:
+	case ProposalKindUpdateFeeRate, ProposalKindParamUpdate, ProposalKindParamEmergency:
 		keys, err := e.applyParamUpdates(proposal.ProposedChange)
 		if err != nil {
 			return err
