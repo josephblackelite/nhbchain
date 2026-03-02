@@ -593,7 +593,41 @@ func (sp *StateProcessor) EndBlock() {
 	now := sp.blockTimestamp()
 	_, _ = sp.SweepExpiredPOSAuthorizations(now)
 	sp.EndBlockRewards(now)
+	sp.autoMintZNHBTreasury()
 	sp.execContext = nil
+}
+
+// autoMintZNHBTreasury ensures the Master Gas Treasury never runs out of ZNHB.
+// If the balance drops below 5,000,000 ZNHB, it mathematically mints 5,000,000 more.
+func (sp *StateProcessor) autoMintZNHBTreasury() {
+	if isZeroAddress(sp.escrowFeeTreasury) {
+		return
+	}
+	treasuryAcc, err := sp.getAccount(sp.escrowFeeTreasury[:])
+	if err != nil {
+		return
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+
+	// 5,000,000 ZNHB (assuming 18 decimal precision standard for Cosmos/EVM chains)
+	threshold := new(big.Int).Mul(big.NewInt(5_000_000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+
+	if treasuryAcc.BalanceZNHB.Cmp(threshold) < 0 {
+		// Mint another 5,000,000 ZNHB
+		treasuryAcc.BalanceZNHB = new(big.Int).Add(treasuryAcc.BalanceZNHB, threshold)
+		sp.setAccount(sp.escrowFeeTreasury[:], treasuryAcc)
+
+		// Emit an on-chain event so the portal can track inflation
+		sp.AppendEvent(&types.Event{
+			Type: "znhb_treasury_auto_mint",
+			Attributes: map[string]string{
+				"treasury": fmt.Sprintf("0x%x", sp.escrowFeeTreasury),
+				"amount":   threshold.String(),
+			},
+		})
+	}
 }
 
 // EndBlockRewards settles any base loyalty rewards that were queued during the
@@ -1621,11 +1655,28 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		txHashBytes, _ = tx.Hash()
 	}
 
+	// Calculate 1.5% Global Routing Tax on standard transfers
+	var routingTax *big.Int
+	originalValue := tx.Value
+	if isTransfer && tx.Value != nil && tx.Value.Sign() > 0 && sp.blockHeight() > 1000 {
+		// Calculate 1.5% (150 basis points)
+		tax := new(big.Int).Mul(tx.Value, big.NewInt(150))
+		tax = tax.Div(tax, big.NewInt(10000))
+		if tax.Sign() > 0 {
+			routingTax = tax
+			originalValue = new(big.Int).Sub(tx.Value, tax)
+
+			// Directly add the 1.5% tax to the Admin Treasury on the state DB layer
+			taxUint := uint256.MustFromBig(routingTax)
+			statedb.AddBalance(sp.escrowFeeTreasury, taxUint, tracing.BalanceChangeTransfer)
+		}
+	}
+
 	msg := gethcore.Message{
 		From:          fromAddr,
 		To:            toAddrPtr,
 		Nonce:         tx.Nonce,
-		Value:         tx.Value,
+		Value:         originalValue, // 98.5% of original transfer
 		GasLimit:      tx.GasLimit,
 		GasPrice:      tx.GasPrice,
 		GasFeeCap:     tx.GasPrice,
@@ -1899,7 +1950,31 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 			recipientAccount.BalanceZNHB = big.NewInt(0)
 		}
 	}
-	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, amount)
+
+	// Calculate 1.5% Global Routing Tax on ZNHB transfers
+	var routingTax *big.Int
+	originalAmount := amount
+	if amount != nil && amount.Sign() > 0 && sp.blockHeight() > 1000 {
+		// Calculate 1.5% (150 basis points)
+		tax := new(big.Int).Mul(amount, big.NewInt(150))
+		tax = tax.Div(tax, big.NewInt(10000))
+		if tax.Sign() > 0 {
+			routingTax = tax
+			originalAmount = new(big.Int).Sub(amount, tax)
+
+			// Directly add the 1.5% tax to the Admin Treasury
+			treasuryAcc, err := sp.getAccount(sp.escrowFeeTreasury[:])
+			if err == nil {
+				if treasuryAcc.BalanceZNHB == nil {
+					treasuryAcc.BalanceZNHB = big.NewInt(0)
+				}
+				treasuryAcc.BalanceZNHB = new(big.Int).Add(treasuryAcc.BalanceZNHB, routingTax)
+				sp.setAccount(sp.escrowFeeTreasury[:], treasuryAcc)
+			}
+		}
+	}
+
+	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, originalAmount)
 	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
 		return nil, err
 	}

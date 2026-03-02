@@ -27,6 +27,7 @@ $env:NHB_ENV = "local"
 $env:NHB_VALIDATOR_PASS = "devpassphrase"
 $env:NHB_RPC_JWT_SECRET = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 $env:NHB_ALLOW_AUTOGENESIS = "true"
+$env:NHB_MASTER_TREASURY = "nhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwz78h0q4"
 
 # 3. Clean up any previous state to prevent genesis mismatches across restarts
 Write-Host "Clearing old chain data..." -ForegroundColor DarkGray

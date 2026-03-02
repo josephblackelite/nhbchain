@@ -29,6 +29,7 @@ import (
 	"nhbchain/core/epoch"
 	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
+	"nhbchain/core/genesis"
 	"nhbchain/core/identity"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
@@ -345,6 +346,15 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	var treasury [20]byte
 	copy(treasury[:], validatorAddr.Bytes())
+
+	if masterTreasury := strings.TrimSpace(os.Getenv("NHB_MASTER_TREASURY")); masterTreasury != "" {
+		if addr, err := genesis.ParseBech32Account(masterTreasury); err == nil {
+			copy(treasury[:], addr[:])
+		} else {
+			fmt.Printf("Warning: Failed to parse NHB_MASTER_TREASURY, falling back to validator: %v\n", err)
+		}
+	}
+
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 
 	moduleAddr := deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix)

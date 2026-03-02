@@ -6,13 +6,13 @@
       "symbol": "NHB",
       "name": "NHBCoin",
       "decimals": 18,
-      "mintAuthority": "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"
+      "mintAuthority": "nhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwz78h0q4"
     },
     {
       "symbol": "ZNHB",
       "name": "ZapNHB",
       "decimals": 18,
-      "mintAuthority": "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w",
+      "mintAuthority": "znhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwzn43y65",
       "initialMintPaused": false
     }
   ],
@@ -24,19 +24,19 @@
     }
   ],
   "alloc": {
-    "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka": {
-      "NHB": "1000000"
+    "nhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwz78h0q4": {
+      "NHB": "10000000000000000000000"
     },
-    "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w": {
-      "ZNHB": "10000000"
+    "znhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwzn43y65": {
+      "ZNHB": "10000000000000000000000000"
     }
   },
   "roles": {
     "MINTER_NHB": [
-      "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"
+      "nhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwz78h0q4"
     ],
     "MINTER_ZNHB": [
-      "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"
+      "znhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwzn43y65"
     ]
   }
 }
