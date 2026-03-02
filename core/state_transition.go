@@ -1655,18 +1655,19 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		txHashBytes, _ = tx.Hash()
 	}
 
-	// Calculate 1.5% Global Routing Tax on standard transfers
+	// Calculate Dynamic Global Routing Tax on standard transfers
 	var routingTax *big.Int
 	originalValue := tx.Value
 	if isTransfer && tx.Value != nil && tx.Value.Sign() > 0 && sp.blockHeight() > 1000 {
-		// Calculate 1.5% (150 basis points)
-		tax := new(big.Int).Mul(tx.Value, big.NewInt(150))
+		// Fetch the dynamic fee rate governed by the community (defaults to 150 basis points / 1.5%)
+		feeBps := getGlobalFeeRate(statedb)
+		tax := new(big.Int).Mul(tx.Value, big.NewInt(int64(feeBps)))
 		tax = tax.Div(tax, big.NewInt(10000))
 		if tax.Sign() > 0 {
 			routingTax = tax
 			originalValue = new(big.Int).Sub(tx.Value, tax)
 
-			// Directly add the 1.5% tax to the Admin Treasury on the state DB layer
+			// Directly add the dynamic tax to the Admin Treasury on the state DB layer
 			taxUint := uint256.MustFromBig(routingTax)
 			statedb.AddBalance(sp.escrowFeeTreasury, taxUint, tracing.BalanceChangeTransfer)
 		}
@@ -1949,20 +1950,19 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 		if recipientAccount.BalanceZNHB == nil {
 			recipientAccount.BalanceZNHB = big.NewInt(0)
 		}
-	}
-
-	// Calculate 1.5% Global Routing Tax on ZNHB transfers
+	// Calculate Dynamic Global Routing Tax on ZNHB transfers
 	var routingTax *big.Int
 	originalAmount := amount
 	if amount != nil && amount.Sign() > 0 && sp.blockHeight() > 1000 {
-		// Calculate 1.5% (150 basis points)
-		tax := new(big.Int).Mul(amount, big.NewInt(150))
+		// Fetch dynamic rate
+		feeBps := getGlobalFeeRate(sp.stateDB)
+		tax := new(big.Int).Mul(amount, big.NewInt(int64(feeBps)))
 		tax = tax.Div(tax, big.NewInt(10000))
 		if tax.Sign() > 0 {
 			routingTax = tax
 			originalAmount = new(big.Int).Sub(amount, tax)
 
-			// Directly add the 1.5% tax to the Admin Treasury
+			// Directly add the dynamic tax to the Admin Treasury
 			treasuryAcc, err := sp.getAccount(sp.escrowFeeTreasury[:])
 			if err == nil {
 				if treasuryAcc.BalanceZNHB == nil {
@@ -5144,4 +5144,11 @@ func (sp *StateProcessor) MintToken(symbol string, addr []byte, amount *big.Int)
 	}
 	sp.recordTokenSupplyChange(normalized, amount, totalSupply, events.SupplyReasonMint)
 	return nil
+}
+
+// getGlobalFeeRate retrieves the dynamically governed protocol fee rate (in basis points).
+// Currently stubbed to return 150 (1.5%) until the L1 parameter store is fully wired.
+func getGlobalFeeRate(statedb *gethstate.CachingDB) uint64 {
+	// TODO: Wire this to `statedb.GetParamStore().GetGlobalFeeRate()` during the Governance module linkage in the next step.
+	return 150
 }
