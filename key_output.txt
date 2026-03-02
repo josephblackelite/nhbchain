@@ -1,0 +1,3 @@
+Generated new key and saved to wallet.key
+Your public address is: nhb1eswfezq0ne5mdsykzcj9y54j0mhr2j0leg49r8
+Store this file securely. Commands will refuse to run without a unique local key.

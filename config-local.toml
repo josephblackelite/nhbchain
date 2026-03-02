@@ -4,11 +4,20 @@ DataDir = "./nhb-data-local"
 # Required: point to the genesis file that defines your local dev network.
 GenesisFile = "./config/genesis.local.json"
 # Set to true only if you intentionally want the node to fabricate an ephemeral genesis.
-AllowAutogenesis = false
+AllowAutogenesis = true
 ValidatorKeystorePath = "./nhb-data-local/validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
 NetworkName = "nhb-local"
+ReadTimeout = 90
+WriteTimeout = 5
+MaxMsgBytes = 1048576
+ClientVersion = "nhbchain/node"
+RPCAllowInsecure = true
+RPCAllowInsecureUnspecified = true
+RPCTLSCertFile = ""
+RPCTLSKeyFile = ""
+RPCTLSClientCAFile = ""
 
 [mempool]
 MaxTransactions = 5000
@@ -33,17 +42,6 @@ BanDurationSeconds = 3600
 DialBackoffSeconds = 30
 PEX = true
 
-PeerBanSeconds = 3600
-ReadTimeout = 90
-WriteTimeout = 5
-MaxMsgBytes = 1048576
-ClientVersion = "nhbchain/node"
-RPCAllowInsecure = false
-# Set RPCAllowInsecure = true only alongside --allow-insecure and loopback binds during local testing.
-RPCAllowInsecureUnspecified = true
-RPCTLSCertFile = ""
-RPCTLSKeyFile = ""
-RPCTLSClientCAFile = ""
 
 [global.pauses]
 Staking = false
@@ -61,3 +59,10 @@ AllowInsecure = false
 # ServerTLSKeyFile = "./tls/p2pd.key"
 # ClientTLSCertFile = "./tls/consensus.crt"
 # ClientTLSKeyFile = "./tls/consensus.key"
+
+[RPCJWT]
+Enable = true
+Alg = "HS256"
+HSSecretEnv = "NHB_RPC_JWT_SECRET"
+Issuer = "nhbchain"
+Audience = ["nhbchain"]

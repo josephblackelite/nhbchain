@@ -1,19 +1,20 @@
-﻿Starting node with validator address: nhb1cx33sq9qws2rdf05qfr3ee73qwmzc3u46ry3jh
-Found existing genesis block.
+Starting node with validator address: nhb149cnayp7qvxe4wq7q2eekz0v77w2z4fwhhccz6
+No genesis block found. Loading from nhb-data-local\genesis.resolved.json.
+Loaded genesis from nhb-data-local\genesis.resolved.json  hash=0xfd672115a6e81059d65865610e4a210deddce2c6be272cd087d0ce5e456ae68a  chainID=18259599591075221593  accounts=2  validators=1
 Starting JSON-RPC server on [::]:8081
-{"timestamp":"2026-03-01T16:30:44.493298-08:00","severity":"INFO","message":"NHBCoin node initialised and running","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0171852-08:00","severity":"INFO","message":"NHBCoin node initialised and running","service":"nhb","env":"local"}
 BFT Consensus Engine Started.
-{"timestamp":"2026-03-01T16:30:44.493298-08:00","severity":"ERROR","message":"RPC server terminated","service":"nhb","env":"local","error":"TLS is required for RPC server; configure certificates or enable AllowInsecure"}
-{"timestamp":"2026-03-01T16:30:44.493298-08:00","severity":"INFO","message":"P2P server listening","service":"nhb","env":"local","component":"p2p_server","listen_address":"[REDACTED]","chain_id":18259599591075221593,"genesis":"fd672115ΓÇª456ae68a","node_id":"[REDACTED]","client_version":"nhbchain/node"}
-{"timestamp":"2026-03-01T16:30:44.4948977-08:00","severity":"INFO","message":"Detected private or unspecified listen address","service":"nhb","env":"local","listen":"0.0.0.0:6002"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"=====================================================================================","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"============================= PUBLIC NODE SETUP REQUIRED ============================","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"UPnP auto-mapping is NOT supported.","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"To participate in consensus and earn UptimeWeightBps rewards, you MUST manually","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"port-forward your router's external IP to this node's internal IP on port 6002.","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"Please ensure TCP traffic is allowed through your firewall to remain reachable.","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"Failure to be reachable from the outside will drastically lower expected POTSO rewards.","service":"nhb","env":"local"}
-{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"=====================================================================================","service":"nhb","env":"local"}
+AllowInsecure enabled; treating unspecified bind [::]:8081 as loopback via RPCAllowInsecureUnspecified override
+{"timestamp":"2026-03-01T18:49:43.0171852-08:00","severity":"INFO","message":"P2P server listening","service":"nhb","env":"local","component":"p2p_server","listen_address":"[REDACTED]","chain_id":18259599591075221593,"genesis":"fd672115…456ae68a","node_id":"[REDACTED]","client_version":"nhbchain/node"}
+{"timestamp":"2026-03-01T18:49:43.0363124-08:00","severity":"INFO","message":"Detected private or unspecified listen address","service":"nhb","env":"local","listen":"0.0.0.0:6002"}
+{"timestamp":"2026-03-01T18:49:43.045699-08:00","severity":"INFO","message":"=====================================================================================","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.045699-08:00","severity":"INFO","message":"============================= PUBLIC NODE SETUP REQUIRED ============================","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0466967-08:00","severity":"INFO","message":"UPnP auto-mapping is NOT supported.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0466967-08:00","severity":"INFO","message":"To participate in consensus and earn UptimeWeightBps rewards, you MUST manually","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0466967-08:00","severity":"INFO","message":"port-forward your router's external IP to this node's internal IP on port 6002.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0466967-08:00","severity":"INFO","message":"Please ensure TCP traffic is allowed through your firewall to remain reachable.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0466967-08:00","severity":"INFO","message":"Failure to be reachable from the outside will drastically lower expected POTSO rewards.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T18:49:43.0466967-08:00","severity":"INFO","message":"=====================================================================================","service":"nhb","env":"local"}
 
 --- Starting BFT round for Height: 1, Round: 1 ---
 
@@ -399,3 +400,244 @@ BFT Consensus Engine Started.
 
 --- Starting BFT round for Height: 1, Round: 192 ---
 
+--- Starting BFT round for Height: 1, Round: 193 ---
+
+--- Starting BFT round for Height: 1, Round: 194 ---
+
+--- Starting BFT round for Height: 1, Round: 195 ---
+
+--- Starting BFT round for Height: 1, Round: 196 ---
+
+--- Starting BFT round for Height: 1, Round: 197 ---
+
+--- Starting BFT round for Height: 1, Round: 198 ---
+
+--- Starting BFT round for Height: 1, Round: 199 ---
+
+--- Starting BFT round for Height: 1, Round: 200 ---
+
+--- Starting BFT round for Height: 1, Round: 201 ---
+
+--- Starting BFT round for Height: 1, Round: 202 ---
+
+--- Starting BFT round for Height: 1, Round: 203 ---
+
+--- Starting BFT round for Height: 1, Round: 204 ---
+
+--- Starting BFT round for Height: 1, Round: 205 ---
+
+--- Starting BFT round for Height: 1, Round: 206 ---
+
+--- Starting BFT round for Height: 1, Round: 207 ---
+
+--- Starting BFT round for Height: 1, Round: 208 ---
+
+--- Starting BFT round for Height: 1, Round: 209 ---
+
+--- Starting BFT round for Height: 1, Round: 210 ---
+
+--- Starting BFT round for Height: 1, Round: 211 ---
+
+--- Starting BFT round for Height: 1, Round: 212 ---
+
+--- Starting BFT round for Height: 1, Round: 213 ---
+
+--- Starting BFT round for Height: 1, Round: 214 ---
+
+--- Starting BFT round for Height: 1, Round: 215 ---
+
+--- Starting BFT round for Height: 1, Round: 216 ---
+
+--- Starting BFT round for Height: 1, Round: 217 ---
+
+--- Starting BFT round for Height: 1, Round: 218 ---
+
+--- Starting BFT round for Height: 1, Round: 219 ---
+
+--- Starting BFT round for Height: 1, Round: 220 ---
+
+--- Starting BFT round for Height: 1, Round: 221 ---
+
+--- Starting BFT round for Height: 1, Round: 222 ---
+
+--- Starting BFT round for Height: 1, Round: 223 ---
+
+--- Starting BFT round for Height: 1, Round: 224 ---
+
+--- Starting BFT round for Height: 1, Round: 225 ---
+
+--- Starting BFT round for Height: 1, Round: 226 ---
+
+--- Starting BFT round for Height: 1, Round: 227 ---
+
+--- Starting BFT round for Height: 1, Round: 228 ---
+
+--- Starting BFT round for Height: 1, Round: 229 ---
+
+--- Starting BFT round for Height: 1, Round: 230 ---
+
+--- Starting BFT round for Height: 1, Round: 231 ---
+
+--- Starting BFT round for Height: 1, Round: 232 ---
+
+--- Starting BFT round for Height: 1, Round: 233 ---
+
+--- Starting BFT round for Height: 1, Round: 234 ---
+
+--- Starting BFT round for Height: 1, Round: 235 ---
+
+--- Starting BFT round for Height: 1, Round: 236 ---
+
+--- Starting BFT round for Height: 1, Round: 237 ---
+
+--- Starting BFT round for Height: 1, Round: 238 ---
+
+--- Starting BFT round for Height: 1, Round: 239 ---
+
+--- Starting BFT round for Height: 1, Round: 240 ---
+
+--- Starting BFT round for Height: 1, Round: 241 ---
+
+--- Starting BFT round for Height: 1, Round: 242 ---
+
+--- Starting BFT round for Height: 1, Round: 243 ---
+
+--- Starting BFT round for Height: 1, Round: 244 ---
+
+--- Starting BFT round for Height: 1, Round: 245 ---
+
+--- Starting BFT round for Height: 1, Round: 246 ---
+
+--- Starting BFT round for Height: 1, Round: 247 ---
+
+--- Starting BFT round for Height: 1, Round: 248 ---
+
+--- Starting BFT round for Height: 1, Round: 249 ---
+
+--- Starting BFT round for Height: 1, Round: 250 ---
+
+--- Starting BFT round for Height: 1, Round: 251 ---
+
+--- Starting BFT round for Height: 1, Round: 252 ---
+
+--- Starting BFT round for Height: 1, Round: 253 ---
+
+--- Starting BFT round for Height: 1, Round: 254 ---
+
+--- Starting BFT round for Height: 1, Round: 255 ---
+
+--- Starting BFT round for Height: 1, Round: 256 ---
+
+--- Starting BFT round for Height: 1, Round: 257 ---
+
+--- Starting BFT round for Height: 1, Round: 258 ---
+
+--- Starting BFT round for Height: 1, Round: 259 ---
+
+--- Starting BFT round for Height: 1, Round: 260 ---
+
+--- Starting BFT round for Height: 1, Round: 261 ---
+
+--- Starting BFT round for Height: 1, Round: 262 ---
+
+--- Starting BFT round for Height: 1, Round: 263 ---
+
+--- Starting BFT round for Height: 1, Round: 264 ---
+
+--- Starting BFT round for Height: 1, Round: 265 ---
+
+--- Starting BFT round for Height: 1, Round: 266 ---
+
+--- Starting BFT round for Height: 1, Round: 267 ---
+
+--- Starting BFT round for Height: 1, Round: 268 ---
+
+--- Starting BFT round for Height: 1, Round: 269 ---
+
+--- Starting BFT round for Height: 1, Round: 270 ---
+
+--- Starting BFT round for Height: 1, Round: 271 ---
+
+--- Starting BFT round for Height: 1, Round: 272 ---
+
+--- Starting BFT round for Height: 1, Round: 273 ---
+
+--- Starting BFT round for Height: 1, Round: 274 ---
+
+--- Starting BFT round for Height: 1, Round: 275 ---
+
+--- Starting BFT round for Height: 1, Round: 276 ---
+
+--- Starting BFT round for Height: 1, Round: 277 ---
+
+--- Starting BFT round for Height: 1, Round: 278 ---
+
+--- Starting BFT round for Height: 1, Round: 279 ---
+
+--- Starting BFT round for Height: 1, Round: 280 ---
+
+--- Starting BFT round for Height: 1, Round: 281 ---
+
+--- Starting BFT round for Height: 1, Round: 282 ---
+
+--- Starting BFT round for Height: 1, Round: 283 ---
+
+--- Starting BFT round for Height: 1, Round: 284 ---
+
+--- Starting BFT round for Height: 1, Round: 285 ---
+
+--- Starting BFT round for Height: 1, Round: 286 ---
+
+--- Starting BFT round for Height: 1, Round: 287 ---
+
+--- Starting BFT round for Height: 1, Round: 288 ---
+
+--- Starting BFT round for Height: 1, Round: 289 ---
+
+--- Starting BFT round for Height: 1, Round: 290 ---
+
+--- Starting BFT round for Height: 1, Round: 291 ---
+
+--- Starting BFT round for Height: 1, Round: 292 ---
+
+--- Starting BFT round for Height: 1, Round: 293 ---
+
+--- Starting BFT round for Height: 1, Round: 294 ---
+
+--- Starting BFT round for Height: 1, Round: 295 ---
+
+--- Starting BFT round for Height: 1, Round: 296 ---
+
+--- Starting BFT round for Height: 1, Round: 297 ---
+
+--- Starting BFT round for Height: 1, Round: 298 ---
+
+--- Starting BFT round for Height: 1, Round: 299 ---
+
+--- Starting BFT round for Height: 1, Round: 300 ---
+
+--- Starting BFT round for Height: 1, Round: 301 ---
+
+--- Starting BFT round for Height: 1, Round: 302 ---
+
+--- Starting BFT round for Height: 1, Round: 303 ---
+
+--- Starting BFT round for Height: 1, Round: 304 ---
+
+--- Starting BFT round for Height: 1, Round: 305 ---
+
+--- Starting BFT round for Height: 1, Round: 306 ---
+
+--- Starting BFT round for Height: 1, Round: 307 ---
+
+--- Starting BFT round for Height: 1, Round: 308 ---
+
+--- Starting BFT round for Height: 1, Round: 309 ---
+
+--- Starting BFT round for Height: 1, Round: 310 ---
+
+--- Starting BFT round for Height: 1, Round: 311 ---
+
+--- Starting BFT round for Height: 1, Round: 312 ---
+
+--- Starting BFT round for Height: 1, Round: 313 ---

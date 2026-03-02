@@ -1,0 +1,4 @@
+Starting node with validator address: nhb1cx33sq9qws2rdf05qfr3ee73qwmzc3u46ry3jh
+Found existing genesis block.
+Starting JSON-RPC server on [::]:8081
+{"timestamp":"2026-03-01T16:45:56.5502481-08:00","severity":"ERROR","message":"RPC server failed to start","service":"nhb","env":"local","error":"TLS is required for RPC server; configure certificates or enable AllowInsecure"}

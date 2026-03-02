@@ -1,6 +1,5 @@
 {
   "genesisTime": "2024-09-01T00:00:00Z",
-  "chainId": 18259599591075221593,
   "nativeTokens": [
     {
       "symbol": "NHB",
@@ -18,9 +17,9 @@
   ],
   "validators": [
     {
+      "address": "nhb1eswfezq0ne5mdsykzcj9y54j0mhr2j0leg49r8",
       "power": 10,
-      "moniker": "local-validator",
-      "address": "nhb1eswfezq0ne5mdsykzcj9y54j0mhr2j0leg49r8"
+      "moniker": "local-validator"
     }
   ],
   "alloc": {
@@ -38,5 +37,6 @@
     "MINTER_ZNHB": [
       "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"
     ]
-  }
+  },
+  "chainId": 18259599591075221593
 }

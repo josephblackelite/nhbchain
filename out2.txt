@@ -1,30 +1,370 @@
-go : # 
-nhbchain/native/escrow
-At line:1 char:1
-+ go build ./... 2>&1 | 
-Out-File -Encoding ASCII 
-out2.txt
-+ ~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo         
-     : NotSpecified: (# n  
-  hbchain/native/escrow:   
- String) [], RemoteExce    
-ption
-    + FullyQualifiedErrorI 
-   d : NativeCommandError
- 
-native\escrow\types.go:614:
-11: clone.Metadata 
-undefined (type 
-*RealmFeeSchedule has no 
-field or method Metadata)
-native\escrow\types.go:617:
-49: clone.Metadata 
-undefined (type 
-*RealmFeeSchedule has no 
-field or method Metadata)
-native\escrow\types.go:621:
-8: clone.Metadata 
-undefined (type 
-*RealmFeeSchedule has no 
-field or method Metadata)
+Starting node with validator address: nhb1cx33sq9qws2rdf05qfr3ee73qwmzc3u46ry3jh
+Found existing genesis block.
+Starting JSON-RPC server on [::]:8081
+{"timestamp":"2026-03-01T16:30:44.493298-08:00","severity":"INFO","message":"NHBCoin node initialised and running","service":"nhb","env":"local"}
+BFT Consensus Engine Started.
+{"timestamp":"2026-03-01T16:30:44.493298-08:00","severity":"ERROR","message":"RPC server terminated","service":"nhb","env":"local","error":"TLS is required for RPC server; configure certificates or enable AllowInsecure"}
+{"timestamp":"2026-03-01T16:30:44.493298-08:00","severity":"INFO","message":"P2P server listening","service":"nhb","env":"local","component":"p2p_server","listen_address":"[REDACTED]","chain_id":18259599591075221593,"genesis":"fd672115…456ae68a","node_id":"[REDACTED]","client_version":"nhbchain/node"}
+{"timestamp":"2026-03-01T16:30:44.4948977-08:00","severity":"INFO","message":"Detected private or unspecified listen address","service":"nhb","env":"local","listen":"0.0.0.0:6002"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"=====================================================================================","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"============================= PUBLIC NODE SETUP REQUIRED ============================","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"UPnP auto-mapping is NOT supported.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"To participate in consensus and earn UptimeWeightBps rewards, you MUST manually","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"port-forward your router's external IP to this node's internal IP on port 6002.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"Please ensure TCP traffic is allowed through your firewall to remain reachable.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"Failure to be reachable from the outside will drastically lower expected POTSO rewards.","service":"nhb","env":"local"}
+{"timestamp":"2026-03-01T16:30:44.4959081-08:00","severity":"INFO","message":"=====================================================================================","service":"nhb","env":"local"}
+
+--- Starting BFT round for Height: 1, Round: 1 ---
+
+--- Starting BFT round for Height: 1, Round: 2 ---
+
+--- Starting BFT round for Height: 1, Round: 3 ---
+
+--- Starting BFT round for Height: 1, Round: 4 ---
+
+--- Starting BFT round for Height: 1, Round: 5 ---
+
+--- Starting BFT round for Height: 1, Round: 6 ---
+
+--- Starting BFT round for Height: 1, Round: 7 ---
+
+--- Starting BFT round for Height: 1, Round: 8 ---
+
+--- Starting BFT round for Height: 1, Round: 9 ---
+
+--- Starting BFT round for Height: 1, Round: 10 ---
+
+--- Starting BFT round for Height: 1, Round: 11 ---
+
+--- Starting BFT round for Height: 1, Round: 12 ---
+
+--- Starting BFT round for Height: 1, Round: 13 ---
+
+--- Starting BFT round for Height: 1, Round: 14 ---
+
+--- Starting BFT round for Height: 1, Round: 15 ---
+
+--- Starting BFT round for Height: 1, Round: 16 ---
+
+--- Starting BFT round for Height: 1, Round: 17 ---
+
+--- Starting BFT round for Height: 1, Round: 18 ---
+
+--- Starting BFT round for Height: 1, Round: 19 ---
+
+--- Starting BFT round for Height: 1, Round: 20 ---
+
+--- Starting BFT round for Height: 1, Round: 21 ---
+
+--- Starting BFT round for Height: 1, Round: 22 ---
+
+--- Starting BFT round for Height: 1, Round: 23 ---
+
+--- Starting BFT round for Height: 1, Round: 24 ---
+
+--- Starting BFT round for Height: 1, Round: 25 ---
+
+--- Starting BFT round for Height: 1, Round: 26 ---
+
+--- Starting BFT round for Height: 1, Round: 27 ---
+
+--- Starting BFT round for Height: 1, Round: 28 ---
+
+--- Starting BFT round for Height: 1, Round: 29 ---
+
+--- Starting BFT round for Height: 1, Round: 30 ---
+
+--- Starting BFT round for Height: 1, Round: 31 ---
+
+--- Starting BFT round for Height: 1, Round: 32 ---
+
+--- Starting BFT round for Height: 1, Round: 33 ---
+
+--- Starting BFT round for Height: 1, Round: 34 ---
+
+--- Starting BFT round for Height: 1, Round: 35 ---
+
+--- Starting BFT round for Height: 1, Round: 36 ---
+
+--- Starting BFT round for Height: 1, Round: 37 ---
+
+--- Starting BFT round for Height: 1, Round: 38 ---
+
+--- Starting BFT round for Height: 1, Round: 39 ---
+
+--- Starting BFT round for Height: 1, Round: 40 ---
+
+--- Starting BFT round for Height: 1, Round: 41 ---
+
+--- Starting BFT round for Height: 1, Round: 42 ---
+
+--- Starting BFT round for Height: 1, Round: 43 ---
+
+--- Starting BFT round for Height: 1, Round: 44 ---
+
+--- Starting BFT round for Height: 1, Round: 45 ---
+
+--- Starting BFT round for Height: 1, Round: 46 ---
+
+--- Starting BFT round for Height: 1, Round: 47 ---
+
+--- Starting BFT round for Height: 1, Round: 48 ---
+
+--- Starting BFT round for Height: 1, Round: 49 ---
+
+--- Starting BFT round for Height: 1, Round: 50 ---
+
+--- Starting BFT round for Height: 1, Round: 51 ---
+
+--- Starting BFT round for Height: 1, Round: 52 ---
+
+--- Starting BFT round for Height: 1, Round: 53 ---
+
+--- Starting BFT round for Height: 1, Round: 54 ---
+
+--- Starting BFT round for Height: 1, Round: 55 ---
+
+--- Starting BFT round for Height: 1, Round: 56 ---
+
+--- Starting BFT round for Height: 1, Round: 57 ---
+
+--- Starting BFT round for Height: 1, Round: 58 ---
+
+--- Starting BFT round for Height: 1, Round: 59 ---
+
+--- Starting BFT round for Height: 1, Round: 60 ---
+
+--- Starting BFT round for Height: 1, Round: 61 ---
+
+--- Starting BFT round for Height: 1, Round: 62 ---
+
+--- Starting BFT round for Height: 1, Round: 63 ---
+
+--- Starting BFT round for Height: 1, Round: 64 ---
+
+--- Starting BFT round for Height: 1, Round: 65 ---
+
+--- Starting BFT round for Height: 1, Round: 66 ---
+
+--- Starting BFT round for Height: 1, Round: 67 ---
+
+--- Starting BFT round for Height: 1, Round: 68 ---
+
+--- Starting BFT round for Height: 1, Round: 69 ---
+
+--- Starting BFT round for Height: 1, Round: 70 ---
+
+--- Starting BFT round for Height: 1, Round: 71 ---
+
+--- Starting BFT round for Height: 1, Round: 72 ---
+
+--- Starting BFT round for Height: 1, Round: 73 ---
+
+--- Starting BFT round for Height: 1, Round: 74 ---
+
+--- Starting BFT round for Height: 1, Round: 75 ---
+
+--- Starting BFT round for Height: 1, Round: 76 ---
+
+--- Starting BFT round for Height: 1, Round: 77 ---
+
+--- Starting BFT round for Height: 1, Round: 78 ---
+
+--- Starting BFT round for Height: 1, Round: 79 ---
+
+--- Starting BFT round for Height: 1, Round: 80 ---
+
+--- Starting BFT round for Height: 1, Round: 81 ---
+
+--- Starting BFT round for Height: 1, Round: 82 ---
+
+--- Starting BFT round for Height: 1, Round: 83 ---
+
+--- Starting BFT round for Height: 1, Round: 84 ---
+
+--- Starting BFT round for Height: 1, Round: 85 ---
+
+--- Starting BFT round for Height: 1, Round: 86 ---
+
+--- Starting BFT round for Height: 1, Round: 87 ---
+
+--- Starting BFT round for Height: 1, Round: 88 ---
+
+--- Starting BFT round for Height: 1, Round: 89 ---
+
+--- Starting BFT round for Height: 1, Round: 90 ---
+
+--- Starting BFT round for Height: 1, Round: 91 ---
+
+--- Starting BFT round for Height: 1, Round: 92 ---
+
+--- Starting BFT round for Height: 1, Round: 93 ---
+
+--- Starting BFT round for Height: 1, Round: 94 ---
+
+--- Starting BFT round for Height: 1, Round: 95 ---
+
+--- Starting BFT round for Height: 1, Round: 96 ---
+
+--- Starting BFT round for Height: 1, Round: 97 ---
+
+--- Starting BFT round for Height: 1, Round: 98 ---
+
+--- Starting BFT round for Height: 1, Round: 99 ---
+
+--- Starting BFT round for Height: 1, Round: 100 ---
+
+--- Starting BFT round for Height: 1, Round: 101 ---
+
+--- Starting BFT round for Height: 1, Round: 102 ---
+
+--- Starting BFT round for Height: 1, Round: 103 ---
+
+--- Starting BFT round for Height: 1, Round: 104 ---
+
+--- Starting BFT round for Height: 1, Round: 105 ---
+
+--- Starting BFT round for Height: 1, Round: 106 ---
+
+--- Starting BFT round for Height: 1, Round: 107 ---
+
+--- Starting BFT round for Height: 1, Round: 108 ---
+
+--- Starting BFT round for Height: 1, Round: 109 ---
+
+--- Starting BFT round for Height: 1, Round: 110 ---
+
+--- Starting BFT round for Height: 1, Round: 111 ---
+
+--- Starting BFT round for Height: 1, Round: 112 ---
+
+--- Starting BFT round for Height: 1, Round: 113 ---
+
+--- Starting BFT round for Height: 1, Round: 114 ---
+
+--- Starting BFT round for Height: 1, Round: 115 ---
+
+--- Starting BFT round for Height: 1, Round: 116 ---
+
+--- Starting BFT round for Height: 1, Round: 117 ---
+
+--- Starting BFT round for Height: 1, Round: 118 ---
+
+--- Starting BFT round for Height: 1, Round: 119 ---
+
+--- Starting BFT round for Height: 1, Round: 120 ---
+
+--- Starting BFT round for Height: 1, Round: 121 ---
+
+--- Starting BFT round for Height: 1, Round: 122 ---
+
+--- Starting BFT round for Height: 1, Round: 123 ---
+
+--- Starting BFT round for Height: 1, Round: 124 ---
+
+--- Starting BFT round for Height: 1, Round: 125 ---
+
+--- Starting BFT round for Height: 1, Round: 126 ---
+
+--- Starting BFT round for Height: 1, Round: 127 ---
+
+--- Starting BFT round for Height: 1, Round: 128 ---
+
+--- Starting BFT round for Height: 1, Round: 129 ---
+
+--- Starting BFT round for Height: 1, Round: 130 ---
+
+--- Starting BFT round for Height: 1, Round: 131 ---
+
+--- Starting BFT round for Height: 1, Round: 132 ---
+
+--- Starting BFT round for Height: 1, Round: 133 ---
+
+--- Starting BFT round for Height: 1, Round: 134 ---
+
+--- Starting BFT round for Height: 1, Round: 135 ---
+
+--- Starting BFT round for Height: 1, Round: 136 ---
+
+--- Starting BFT round for Height: 1, Round: 137 ---
+
+--- Starting BFT round for Height: 1, Round: 138 ---
+
+--- Starting BFT round for Height: 1, Round: 139 ---
+
+--- Starting BFT round for Height: 1, Round: 140 ---
+
+--- Starting BFT round for Height: 1, Round: 141 ---
+
+--- Starting BFT round for Height: 1, Round: 142 ---
+
+--- Starting BFT round for Height: 1, Round: 143 ---
+
+--- Starting BFT round for Height: 1, Round: 144 ---
+
+--- Starting BFT round for Height: 1, Round: 145 ---
+
+--- Starting BFT round for Height: 1, Round: 146 ---
+
+--- Starting BFT round for Height: 1, Round: 147 ---
+
+--- Starting BFT round for Height: 1, Round: 148 ---
+
+--- Starting BFT round for Height: 1, Round: 149 ---
+
+--- Starting BFT round for Height: 1, Round: 150 ---
+
+--- Starting BFT round for Height: 1, Round: 151 ---
+
+--- Starting BFT round for Height: 1, Round: 152 ---
+
+--- Starting BFT round for Height: 1, Round: 153 ---
+
+--- Starting BFT round for Height: 1, Round: 154 ---
+
+--- Starting BFT round for Height: 1, Round: 155 ---
+
+--- Starting BFT round for Height: 1, Round: 156 ---
+
+--- Starting BFT round for Height: 1, Round: 157 ---
+
+--- Starting BFT round for Height: 1, Round: 158 ---
+
+--- Starting BFT round for Height: 1, Round: 159 ---
+
+--- Starting BFT round for Height: 1, Round: 160 ---
+
+--- Starting BFT round for Height: 1, Round: 161 ---
+
+--- Starting BFT round for Height: 1, Round: 162 ---
+
+--- Starting BFT round for Height: 1, Round: 163 ---
+
+--- Starting BFT round for Height: 1, Round: 164 ---
+
+--- Starting BFT round for Height: 1, Round: 165 ---
+
+--- Starting BFT round for Height: 1, Round: 166 ---
+
+--- Starting BFT round for Height: 1, Round: 167 ---
+
+--- Starting BFT round for Height: 1, Round: 168 ---
+
+--- Starting BFT round for Height: 1, Round: 169 ---
+
+--- Starting BFT round for Height: 1, Round: 170 ---
+
+--- Starting BFT round for Height: 1, Round: 171 ---
+
+--- Starting BFT round for Height: 1, Round: 172 ---
+
+--- Starting BFT round for Height: 1, Round: 173 ---
+
+--- Starting BFT round for Height: 1, Round: 174 ---
+
+--- Starting BFT round for Height: 1, Round: 175 ---
+
+--- Starting BFT round for Height: 1, Round: 176 ---
+
+--- Starting BFT round for Height: 1, Round: 177 ---

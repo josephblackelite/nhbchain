@@ -1,0 +1,5 @@
+panic: Failed to load validator key: unable to decrypt keystore ./nhb-data-local/validator.keystore: could not decrypt key with given password
+
+goroutine 1 [running]:
+main.main()
+	C:/Users/Mba1/Documents/Nwudu/nhbchain/cmd/nhb/main.go:83 +0x52ee
