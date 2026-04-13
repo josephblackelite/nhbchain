@@ -1,0 +1,138 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install git-secrets
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-secrets
+      - name: Scan tracked files for PEM private keys
+        run: scripts/check_private_keys.sh
+
+  build-test:
+    needs: secrets-scan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ['1.23.0']
+        test_target: ['./...']
+        include:
+          - os: ubuntu-latest
+            go: '1.23.0'
+            test_target: ./services/lending/...
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - name: Set Go flags
+        run: echo "GOFLAGS=-buildvcs=false" >> "$GITHUB_ENV"
+      - name: Tidy
+        if: matrix.test_target == './...'
+        run: go mod tidy
+      - name: Build
+        if: matrix.test_target == './...'
+        run: go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/nhb ./cmd/nhb
+      - name: Test ${{ matrix.test_target }}
+        run: go test ${{ matrix.test_target }}
+
+  bugcheck-linux:
+    runs-on: ubuntu-latest
+    needs: build-test
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.0'
+          check-latest: true
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Verify Docker availability
+        run: |
+          docker version
+          docker compose version
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Verify production config safety rails
+        run: bash scripts/verify_prod_config.sh -c config/prod.toml
+      - name: Run bugcheck pipeline
+        env:
+          GOFLAGS: -buildvcs=false
+        run: bash scripts/bugcheck.sh
+      - name: Publish bugcheck docs
+        if: always()
+        run: bash scripts/publish_bugcheck.sh
+      - name: Upload bugcheck artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugcheck-artifacts
+          path: |
+            logs/
+            artifacts/bugcheck-*
+          if-no-files-found: ignore
+      - name: Upload bugcheck docs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugcheck-docs
+          path: |
+            docs/audit/index.md
+            docs/audit/latest.md
+            docs/audit/_meta.json
+            docs/audit/history/
+          if-no-files-found: ignore
+
+  audit-endpoints:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Start swapd
+        run: docker compose -f deploy/compose/docker-compose.yml up -d swapd
+      - name: Wait for swapd
+        run: |
+          for i in {1..30}; do
+            if curl -sSf http://localhost:7074/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "swapd did not become healthy" >&2
+          docker compose -f deploy/compose/docker-compose.yml logs swapd
+          exit 1
+      - name: Run stable endpoint regression
+        run: make audit:endpoints
+      - name: Upload stable endpoint artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-endpoints
+          path: |
+            artifacts/endpoints/newman-report.json
+            logs/audit-endpoints.log
+      - name: Teardown swapd
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml down -v

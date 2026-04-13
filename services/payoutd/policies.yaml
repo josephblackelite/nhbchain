@@ -1,0 +1,40 @@
+- asset: USDC
+  daily_cap: "100000000000"
+  soft_inventory: "500000000000"
+  confirmations: 3
+  per_user_daily_cap: "25000000000"
+  per_user_hourly_cap: "10000000000"
+  per_destination_daily_cap: "50000000000"
+  max_payouts_per_hour: 5
+  max_payouts_per_day: 20
+  require_review_above: "15000000000"
+  require_review_for_regions:
+    - high-risk
+  require_review_for_partners:
+    - partner-watch
+  blocked_destinations: []
+  allowed_destination_prefixes:
+    - "0x"
+  blocked_accounts: []
+  blocked_regions: []
+  blocked_partners: []
+- asset: USDT
+  daily_cap: "100000000000"
+  soft_inventory: "500000000000"
+  confirmations: 3
+  per_user_daily_cap: "25000000000"
+  per_user_hourly_cap: "10000000000"
+  per_destination_daily_cap: "50000000000"
+  max_payouts_per_hour: 5
+  max_payouts_per_day: 20
+  require_review_above: "15000000000"
+  require_review_for_regions:
+    - high-risk
+  require_review_for_partners:
+    - partner-watch
+  blocked_destinations: []
+  allowed_destination_prefixes:
+    - "0x"
+  blocked_accounts: []
+  blocked_regions: []
+  blocked_partners: []

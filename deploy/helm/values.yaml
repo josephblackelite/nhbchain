@@ -1,0 +1,3 @@
+lendingd:
+  # preview until handlers GA
+  replicaCount: 0

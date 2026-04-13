@@ -1,0 +1,24 @@
+### Start email verification (REST)
+POST {{GATEWAY_URL}}/identity/email/register
+Content-Type: application/json
+X-API-Key: {{API_KEY}}
+X-API-Timestamp: {{TIMESTAMP}}
+X-API-Signature: {{HMAC_SIG}}
+Idempotency-Key: {{UUID}}
+
+{
+  "email": "frank@example.com",
+  "aliasHint": "frankrocks"
+}
+
+### Complete email verification (REST)
+POST {{GATEWAY_URL}}/identity/email/verify
+Content-Type: application/json
+X-API-Key: {{API_KEY}}
+X-API-Timestamp: {{TIMESTAMP}}
+X-API-Signature: {{HMAC_SIG}}
+
+{
+  "email": "frank@example.com",
+  "code": "483921"
+}

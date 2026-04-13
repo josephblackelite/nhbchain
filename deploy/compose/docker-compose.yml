@@ -1,0 +1,173 @@
+version: "3.9"
+
+x-go-build: &go-build
+  context: ../..
+  dockerfile: deploy/compose/Dockerfile
+
+services:
+  # Services run with host networking so they only bind to 127.0.0.1 by default.
+  # Override `network_mode`/bind addresses when exposing ports beyond loopback
+  # or using Docker Desktop (no host networking support).
+  p2pd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./cmd/p2pd
+    image: nhbchain/p2pd:local
+    command:
+      - "--config"
+      - "/etc/nhb/p2p.toml"
+      - "--grpc"
+      - "127.0.0.1:9091"
+      - "--allow-autogenesis"
+    environment:
+      NHB_ENV: local
+      NHB_ALLOW_AUTOGENESIS: "true"
+    volumes:
+      - p2p-data:/var/lib/nhb
+      - ./config/p2p.toml:/etc/nhb/p2p.toml:ro
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9091"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  consensusd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./cmd/consensusd
+    image: nhbchain/consensusd:local
+    depends_on:
+      p2pd:
+        condition: service_healthy
+    command:
+      - "--config"
+      - "/etc/nhb/consensus.toml"
+      - "--grpc"
+      - "127.0.0.1:9090"
+      - "--p2p"
+      - "127.0.0.1:9091"
+      - "--allow-autogenesis"
+    environment:
+      NHB_ENV: local
+      NHB_ALLOW_AUTOGENESIS: "true"
+    env_file:
+      - .env
+    volumes:
+      - consensus-data:/var/lib/nhb
+      - ./config/consensus.toml:/etc/nhb/consensus.toml:ro
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  lendingd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/lendingd
+    image: nhbchain/lendingd:local
+    command:
+      - "--config"
+      - "/etc/nhb/lendingd.yaml"
+    environment:
+      NHB_ENV: local
+    volumes:
+      - ./config/lendingd.yaml:/etc/nhb/lendingd.yaml:ro
+    network_mode: host
+    restart: unless-stopped
+
+  swapd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/swapd
+    image: nhbchain/swapd:local
+    command:
+      - "--config"
+      - "/etc/nhb/swapd.yaml"
+    environment:
+      NHB_ENV: local
+    volumes:
+      - swapd-data:/var/lib/nhb
+      - ./config/swapd.yaml:/etc/nhb/swapd.yaml:ro
+    network_mode: host
+    restart: unless-stopped
+
+  identity-gateway:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/identity-gateway/cmd/identity-gateway
+    image: nhbchain/identity-gateway:local
+    environment:
+      NHB_ENV: local
+      IDENTITY_GATEWAY_PORT: "8095"
+      IDENTITY_GATEWAY_LISTEN: "127.0.0.1:8095"
+      IDENTITY_GATEWAY_DB: /var/lib/nhb/identity-gateway.db
+    env_file:
+      - .env
+    volumes:
+      - identity-gateway-data:/var/lib/nhb
+    network_mode: host
+    restart: unless-stopped
+
+  governd:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./services/governd
+    image: nhbchain/governd:local
+    depends_on:
+      consensusd:
+        condition: service_started
+    command:
+      - "--config"
+      - "/etc/nhb/governd.yaml"
+    environment:
+      NHB_ENV: local
+      GOVERND_SIGNER_KEY: ${GOVERND_SIGNER_KEY:?set to the hex-encoded governd signer key}
+      GOVERND_TLS_KEY_PATH: /etc/nhb/tls/server.key
+    volumes:
+      - ./config/governd.yaml:/etc/nhb/governd.yaml:ro
+      - ${GOVERND_TLS_KEY_FILE:?set to the TLS private key file for governd}:/etc/nhb/tls/server.key:ro
+      - ${GOVERND_TLS_CERT_FILE:-./services/governd/config/server.crt}:/etc/nhb/tls/server.crt:ro
+    network_mode: host
+    restart: unless-stopped
+
+  gateway:
+    build:
+      <<: *go-build
+      args:
+        TARGET: ./cmd/gateway
+    image: nhbchain/gateway:local
+    depends_on:
+      lendingd:
+        condition: service_started
+      swapd:
+        condition: service_started
+      governd:
+        condition: service_started
+      consensusd:
+        condition: service_started
+    command:
+      - "--config"
+      - "/etc/nhb/gateway.yaml"
+    environment:
+      NHB_ENV: local
+    volumes:
+      - ./config/gateway.yaml:/etc/nhb/gateway.yaml:ro
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  p2p-data:
+  consensus-data:
+  swapd-data:
+  identity-gateway-data:

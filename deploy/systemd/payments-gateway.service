@@ -1,0 +1,17 @@
+[Unit]
+Description=NHBChain Payments Gateway
+After=network-online.target nhb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhb
+Group=nhb
+WorkingDirectory=/opt/nhbchain
+EnvironmentFile=/etc/nhbchain/payments-gateway.env
+ExecStart=/opt/nhbchain/bin/payments-gateway
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

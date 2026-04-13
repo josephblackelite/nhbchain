@@ -1,0 +1,23 @@
+phase: determinism
+description: >-
+  Validates engagement rate limits and consensus vote handling remain deterministic
+  across repeated executions.
+checks:
+  - name: Engagement heartbeat monotonicity
+    target: core/engagement
+    expect: Heartbeat submissions enforce monotonic timestamps and replay protection.
+    severity: high
+    coverage:
+      - engagement
+      - determinism
+  - name: Byzantine vote rejection
+    target: consensus/bft
+    expect: Duplicate or unauthorised votes are rejected before affecting quorum state.
+    severity: high
+artifacts:
+  - name: Determinism test log
+    path: logs/determinism-tests.json
+    format: jsonl
+metadata:
+  reviewer: protocol
+  cadence: nightly

@@ -1,0 +1,15 @@
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "p2pd.fullname" . }}
+  labels:
+    {{- include "p2pd.labels" . | nindent 4 }}
+data:
+  p2p.toml: |
+{{- if .Values.config.content }}
+{{ tpl .Values.config.content . | indent 4 }}
+{{- else }}
+    {}
+{{- end }}
+{{- end }}

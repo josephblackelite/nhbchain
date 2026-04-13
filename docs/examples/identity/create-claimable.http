@@ -1,0 +1,16 @@
+### Create claimable for email hash (JSON-RPC)
+POST {{NODE_RPC_URL}}
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "identity_createClaimable",
+  "params": [
+    "0x5e2c...",
+    "NHB",
+    "10.00",
+    1718736000,
+    "0xPAYER_SIG"
+  ]
+}

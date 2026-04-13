@@ -1,0 +1,54 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nhbchain/swapd
+  tag: ""
+  pullPolicy: IfNotPresent
+
+env:
+  - name: NHB_ENV
+    value: staging
+
+service:
+  type: ClusterIP
+  port: 7074
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 5Gi
+  annotations: {}
+
+config:
+  enabled: true
+  path: /etc/nhb/swapd.yaml
+  content: |
+    listen: ":7074"
+    database: "/var/lib/nhb/swapd.sqlite"
+    oracle:
+      interval: "30s"
+      max_age: "2m"
+      min_feeds: 1
+    sources:
+      - name: gecko
+        type: coingecko
+        endpoint: https://api.coingecko.com/api/v3/simple/price
+        assets:
+          ZNHB: znhb
+    pairs:
+      - base: ZNHB
+        quote: USD
+    policy:
+      id: default
+      mint_limit: 10
+      redeem_limit: 5
+      window: "1h"
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

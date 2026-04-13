@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  # Each service opts into host networking so gRPC and P2P listeners stay on
+  # 127.0.0.1. Override `network_mode` when running on platforms without host
+  # networking support (e.g. Docker Desktop on macOS/Windows).
+  p2pd:
+    image: nhbchain/p2pd:mininet
+    build:
+      context: ../../..
+      dockerfile: examples/compose/mininet/Dockerfile.p2pd
+    command: ["--config", "/etc/nhb/p2p.toml", "--grpc", "127.0.0.1:9091"]
+    volumes:
+      - p2p-data:/var/lib/nhb
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:9091", "network.v1.NetworkService/ListPeers"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  consensusd:
+    image: nhbchain/consensusd:mininet
+    build:
+      context: ../../..
+      dockerfile: examples/compose/mininet/Dockerfile.consensusd
+    command:
+      ["--config", "/etc/nhb/consensus.toml", "--grpc", "127.0.0.1:9090", "--p2p", "127.0.0.1:9091"]
+    depends_on:
+      p2pd:
+        condition: service_healthy
+    environment:
+      - NHB_VALIDATOR_PASS=change-me
+      - NHB_ALLOW_AUTOGENESIS=true
+    volumes:
+      - consensus-data:/var/lib/nhb
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:9090", "consensus.v1.ConsensusService/GetHeight"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+networks:
+  default:
+    name: nhb-mininet
+
+volumes:
+  p2p-data:
+  consensus-data:

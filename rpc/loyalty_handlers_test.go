@@ -1,0 +1,338 @@
+package rpc
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+
+	"nhbchain/core"
+	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
+	"nhbchain/crypto"
+	gatewayauth "nhbchain/gateway/auth"
+	"nhbchain/native/loyalty"
+	swap "nhbchain/native/swap"
+	"nhbchain/storage"
+)
+
+type testEnv struct {
+	server     *Server
+	node       *core.Node
+	token      string
+	swapKey    string
+	swapSecret string
+	now        time.Time
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	db := storage.NewMemDB()
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	node, err := core.NewNode(db, key, "", true, true)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	node.SetSwapConfig(swap.Config{AllowedFiat: []string{"USD"}, MaxQuoteAgeSeconds: 120, SlippageBps: 50, OraclePriority: []string{"manual"}})
+	manual := swap.NewManualOracle()
+	agg := swap.NewOracleAggregator([]string{"manual"}, 5*time.Minute)
+	agg.Register("manual", manual)
+	node.SetSwapOracle(agg)
+	node.SetSwapManualOracle(manual)
+
+	now := time.Unix(1700000000, 0).UTC()
+	env := &testEnv{now: now, swapKey: "partner", swapSecret: "secret"}
+	env.token = signEnvJWT(t, now)
+	server := newTestServer(t, node, nil, ServerConfig{
+		SwapAuth: SwapAuthConfig{
+			Secrets:              map[string]string{env.swapKey: env.swapSecret},
+			AllowedTimestampSkew: time.Minute,
+			NonceTTL:             2 * time.Minute,
+			NonceCapacity:        1024,
+			RateLimitWindow:      time.Minute,
+			PartnerRateLimits:    map[string]int{env.swapKey: 100},
+			Now: func() time.Time {
+				return env.now
+			},
+		},
+	})
+	env.server = server
+	if server.jwtVerifier != nil {
+		server.jwtVerifier.now = func() time.Time { return env.now }
+	}
+	env.node = node
+	var treasury [20]byte
+	treasury[19] = 0xEE
+	cfg := env.node.PotsoRewardConfig()
+	cfg.TreasuryAddress = treasury
+	if err := env.node.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("configure rewards treasury: %v", err)
+	}
+	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
+		account := &types.Account{
+			BalanceNHB:  big.NewInt(0),
+			BalanceZNHB: new(big.Int).Exp(big.NewInt(10), big.NewInt(30), nil),
+			Stake:       big.NewInt(0),
+		}
+		return manager.PutAccount(treasury[:], account)
+	}); err != nil {
+		t.Fatalf("seed rewards treasury: %v", err)
+	}
+	return env
+}
+
+func signEnvJWT(t *testing.T, now time.Time) string {
+	t.Helper()
+	claims := jwt.RegisteredClaims{
+		Issuer:    "rpc-tests",
+		Audience:  jwt.ClaimStrings([]string{"unit-tests"}),
+		ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+		IssuedAt:  jwt.NewNumericDate(now),
+		NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(testJWTSecret))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
+}
+
+func (env *testEnv) newRequest() *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	return req
+}
+
+func (env *testEnv) signSwapRequest(t *testing.T, req *http.Request, body []byte, nonce string) {
+	t.Helper()
+	if req == nil {
+		t.Fatalf("request is nil")
+	}
+	timestamp := strconv.FormatInt(env.now.Unix(), 10)
+	sig := gatewayauth.ComputeSignature(env.swapSecret, timestamp, nonce, req.Method, gatewayauth.CanonicalRequestPath(req), body)
+	req.Header.Set(gatewayauth.HeaderAPIKey, env.swapKey)
+	req.Header.Set(gatewayauth.HeaderTimestamp, timestamp)
+	req.Header.Set(gatewayauth.HeaderNonce, nonce)
+	req.Header.Set(gatewayauth.HeaderSignature, hex.EncodeToString(sig))
+}
+
+func marshalParam(t *testing.T, v interface{}) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal param: %v", err)
+	}
+	return raw
+}
+
+func decodeRPCResponse(t *testing.T, rec *httptest.ResponseRecorder) (json.RawMessage, *RPCError) {
+	t.Helper()
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *RPCError       `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return resp.Result, resp.Error
+}
+
+func decodeBusinessID(t *testing.T, idStr string) loyalty.BusinessID {
+	t.Helper()
+	id, err := parseBusinessID(idStr)
+	if err != nil {
+		t.Fatalf("parse business id: %v", err)
+	}
+	return id
+}
+
+func decodeProgramID(t *testing.T, idStr string) loyalty.ProgramID {
+	id, err := parseProgramID(idStr)
+	if err != nil {
+		t.Fatalf("parse program id: %v", err)
+	}
+	return id
+}
+
+func TestHandleLoyaltyCreateBusinessSuccess(t *testing.T) {
+	env := newTestEnv(t)
+	ownerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate owner: %v", err)
+	}
+	ownerAddr := ownerKey.PubKey().Address().String()
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller": ownerAddr,
+		"name":   "Acme Corp",
+	})}}
+	recorder := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateBusiness(recorder, env.newRequest(), req)
+
+	result, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcErr)
+	}
+	var businessID string
+	if err := json.Unmarshal(result, &businessID); err != nil {
+		t.Fatalf("decode business id: %v", err)
+	}
+	id := decodeBusinessID(t, businessID)
+	business, ok, err := env.node.LoyaltyBusinessByID(id)
+	if err != nil {
+		t.Fatalf("load business: %v", err)
+	}
+	if !ok {
+		t.Fatalf("business not found")
+	}
+	if business.Name != "Acme Corp" {
+		t.Fatalf("unexpected business name: %s", business.Name)
+	}
+	if crypto.MustNewAddress(crypto.NHBPrefix, business.Owner[:]).String() != ownerAddr {
+		t.Fatalf("owner mismatch")
+	}
+}
+
+func TestHandleLoyaltyCreateBusinessInvalidAddress(t *testing.T) {
+	env := newTestEnv(t)
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller": "invalid",
+		"name":   "Bad",
+	})}}
+	recorder := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateBusiness(recorder, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr == nil {
+		t.Fatalf("expected error")
+	}
+	if rpcErr.Code != codeInvalidParams {
+		t.Fatalf("expected invalid params code, got %d", rpcErr.Code)
+	}
+}
+
+func TestHandleLoyaltySetPaymasterUnauthorized(t *testing.T) {
+	env := newTestEnv(t)
+	ownerKey, _ := crypto.GeneratePrivateKey()
+	ownerAddr := ownerKey.PubKey().Address().String()
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller": ownerAddr,
+		"name":   "Biz",
+	})}}
+	recorder := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateBusiness(recorder, env.newRequest(), req)
+	result, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr != nil {
+		t.Fatalf("unexpected error creating business: %+v", rpcErr)
+	}
+	var businessID string
+	if err := json.Unmarshal(result, &businessID); err != nil {
+		t.Fatalf("decode business id: %v", err)
+	}
+
+	outsiderKey, _ := crypto.GeneratePrivateKey()
+	outsiderAddr := outsiderKey.PubKey().Address().String()
+	payload := map[string]string{
+		"caller":     outsiderAddr,
+		"businessId": businessID,
+		"paymaster":  ownerAddr,
+	}
+	setReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, payload)}}
+	setRecorder := httptest.NewRecorder()
+	env.server.handleLoyaltySetPaymaster(setRecorder, env.newRequest(), setReq)
+	_, setErr := decodeRPCResponse(t, setRecorder)
+	if setErr == nil {
+		t.Fatalf("expected unauthorized error")
+	}
+	if setErr.Code != codeUnauthorized {
+		t.Fatalf("expected code %d got %d", codeUnauthorized, setErr.Code)
+	}
+}
+
+func TestHandleLoyaltyCreateProgramSuccess(t *testing.T) {
+	env := newTestEnv(t)
+	manager := env.node.LoyaltyManager()
+	if err := manager.RegisterToken("ZNHB", "Zap", 18); err != nil {
+		t.Fatalf("register token: %v", err)
+	}
+	ownerKey, _ := crypto.GeneratePrivateKey()
+	ownerAddr := ownerKey.PubKey().Address().String()
+	businessReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller": ownerAddr,
+		"name":   "Rewards",
+	})}}
+	bizRec := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateBusiness(bizRec, env.newRequest(), businessReq)
+	bizResult, bizErr := decodeRPCResponse(t, bizRec)
+	if bizErr != nil {
+		t.Fatalf("create business: %+v", bizErr)
+	}
+	var businessID string
+	if err := json.Unmarshal(bizResult, &businessID); err != nil {
+		t.Fatalf("decode business id: %v", err)
+	}
+
+	merchantKey, _ := crypto.GeneratePrivateKey()
+	merchantAddr := merchantKey.PubKey().Address().String()
+	addReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller":     ownerAddr,
+		"businessId": businessID,
+		"merchant":   merchantAddr,
+	})}}
+	addRec := httptest.NewRecorder()
+	env.server.handleLoyaltyAddMerchant(addRec, env.newRequest(), addReq)
+	_, addErr := decodeRPCResponse(t, addRec)
+	if addErr != nil {
+		t.Fatalf("add merchant: %+v", addErr)
+	}
+
+	var programID [32]byte
+	programID[31] = 1
+	programIDHex := "0x" + hex.EncodeToString(programID[:])
+	poolKey, _ := crypto.GeneratePrivateKey()
+	poolAddr := poolKey.PubKey().Address().String()
+	spec := map[string]interface{}{
+		"id":          programIDHex,
+		"owner":       merchantAddr,
+		"pool":        poolAddr,
+		"tokenSymbol": "ZNHB",
+		"accrualBps":  100,
+	}
+	envReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
+		"caller":     merchantAddr,
+		"businessId": businessID,
+		"spec":       spec,
+	})}}
+	envRec := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateProgram(envRec, env.newRequest(), envReq)
+	programResult, programErr := decodeRPCResponse(t, envRec)
+	if programErr != nil {
+		t.Fatalf("create program error: %+v", programErr)
+	}
+	var returnedID string
+	if err := json.Unmarshal(programResult, &returnedID); err != nil {
+		t.Fatalf("decode program id: %v", err)
+	}
+	if returnedID != programIDHex {
+		t.Fatalf("unexpected program id: %s", returnedID)
+	}
+	loaded, ok, err := env.node.LoyaltyProgramByID(decodeProgramID(t, returnedID))
+	if err != nil {
+		t.Fatalf("load program: %v", err)
+	}
+	if !ok {
+		t.Fatalf("program not found")
+	}
+	if !loaded.Active || loaded.AccrualBps != 100 {
+		t.Fatalf("unexpected program state")
+	}
+}

@@ -1,0 +1,2 @@
+# Prevent committing regenerated TLS private keys
+*.key

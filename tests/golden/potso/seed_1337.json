@@ -1,0 +1,100 @@
+{
+  "deliveries": {
+    "0bd640184a2bb66da9bedac0118c68514699290af3266c244f917bf1b5b03089": {
+      "address": "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7",
+      "amount": "902"
+    },
+    "1f6fce17ef155be1b5e99bf419a225a94e4902e18037f70b8d0c7a7aa6591ece": {
+      "address": "c6874b346c5e31b7b5da627f27f44a777ab77844",
+      "amount": "247"
+    },
+    "476eac81cf0c7156020ef35cff66eac5a4417de3fe2429aa884326ee09c5c219": {
+      "address": "fc21f6ed8312e9bdd625a70a490933d53903be38",
+      "amount": "172"
+    },
+    "52f775b7df4a04fc29eec30bf15768076248eb02d3494f673a306c234ee6aba4": {
+      "address": "53e02a61d82147172ae994e8c327143c0434495a",
+      "amount": "650"
+    },
+    "61beb53e16017923fc782ee5e48d0a517180671b183099ef1c1ef56ec827fbba": {
+      "address": "c6874b346c5e31b7b5da627f27f44a777ab77844",
+      "amount": "305"
+    },
+    "7ffb993193138f347e09db8fddac3d8d7e09b578da9620123b15819cfc9c07b5": {
+      "address": "c6874b346c5e31b7b5da627f27f44a777ab77844",
+      "amount": "383"
+    },
+    "96fc6ad33570f496320f608f9c815fa0ef22249a7f5837f6e174316cecae1310": {
+      "address": "fc21f6ed8312e9bdd625a70a490933d53903be38",
+      "amount": "213"
+    },
+    "a4f416c6558aca420bf94986fa51e4f5768cc2da0ad3c62dc7c00de326fae0d0": {
+      "address": "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7",
+      "amount": "1116"
+    },
+    "af5f1e3549b33b68e39128f32d26bcb017bbc101dd49083d17b0d2d2cbce3b4e": {
+      "address": "d9d2ee494797c5d696c88233e8a31897b62eb15e",
+      "amount": "550"
+    },
+    "c6f03825a0a9c4e4e49179917a404f62eb332daa29887bb1be4c37ba87b66826": {
+      "address": "53e02a61d82147172ae994e8c327143c0434495a",
+      "amount": "815"
+    },
+    "cd256bf8af9fa84f3fd36ee72d51cb14b17bde1fc6b9b51abda3aef61a86815a": {
+      "address": "d9d2ee494797c5d696c88233e8a31897b62eb15e",
+      "amount": "853"
+    },
+    "d2d70201d1f6df6ab11396a1f0179b6967dc7585e3aab029774f57b61d5f78e0": {
+      "address": "53e02a61d82147172ae994e8c327143c0434495a",
+      "amount": "526"
+    },
+    "d4adde9b17045cc5790dbb4865ead31268e6d23d637aa1923e5af04e7d90e00a": {
+      "address": "fc21f6ed8312e9bdd625a70a490933d53903be38",
+      "amount": "267"
+    },
+    "e7e53ab18f1019b9d4736aedc1855c131cbace489cf3f112e966ae43d71d727f": {
+      "address": "d9d2ee494797c5d696c88233e8a31897b62eb15e",
+      "amount": "681"
+    },
+    "e8428b153b9d8afa33f1dbbd99e1f7c29b944d9e79a0f6056f8e8dd8e7bcaa9b": {
+      "address": "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7",
+      "amount": "1400"
+    }
+  },
+  "dust": "2",
+  "rewards": {
+    "1": {
+      "53e02a61d82147172ae994e8c327143c0434495a": "815",
+      "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7": "1400",
+      "c6874b346c5e31b7b5da627f27f44a777ab77844": "383",
+      "d9d2ee494797c5d696c88233e8a31897b62eb15e": "853",
+      "fc21f6ed8312e9bdd625a70a490933d53903be38": "267"
+    },
+    "2": {
+      "53e02a61d82147172ae994e8c327143c0434495a": "650",
+      "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7": "1116",
+      "c6874b346c5e31b7b5da627f27f44a777ab77844": "305",
+      "d9d2ee494797c5d696c88233e8a31897b62eb15e": "681",
+      "fc21f6ed8312e9bdd625a70a490933d53903be38": "213"
+    },
+    "3": {
+      "53e02a61d82147172ae994e8c327143c0434495a": "526",
+      "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7": "902",
+      "c6874b346c5e31b7b5da627f27f44a777ab77844": "247",
+      "d9d2ee494797c5d696c88233e8a31897b62eb15e": "550",
+      "fc21f6ed8312e9bdd625a70a490933d53903be38": "172"
+    }
+  },
+  "totals": {
+    "1": "3718",
+    "2": "2965",
+    "3": "2397"
+  },
+  "weights": {
+    "53e02a61d82147172ae994e8c327143c0434495a": "430",
+    "6122ceebf1b46e844f45f86e2dd0d5c708bf2af7": "738",
+    "c6874b346c5e31b7b5da627f27f44a777ab77844": "202",
+    "d9d2ee494797c5d696c88233e8a31897b62eb15e": "450",
+    "fc21f6ed8312e9bdd625a70a490933d53903be38": "141"
+  }
+}

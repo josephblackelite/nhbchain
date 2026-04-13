@@ -1,0 +1,58 @@
+openapi: 3.0.3
+info:
+  title: NHBChain Gateway
+  version: 1.0.0
+  description: |
+    Edge API that fronts the NHBChain microservices. Legacy JSON-RPC consumers
+    should continue POSTing to `/rpc`. New integrations should use the versioned
+    REST resources described here.
+servers:
+  - url: https://nhbcoin.net
+paths:
+  /v1/lending/markets/get:
+    post:
+      summary: Fetch a lending market definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                poolId:
+                  type: string
+      responses:
+        '200':
+          description: Market information
+  /v1/swap/voucher/submit:
+    post:
+      summary: Submit a signed swap voucher
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Voucher accepted
+  /v1/gov/proposals:
+    get:
+      summary: List governance proposals
+      responses:
+        '200':
+          description: Proposal list
+  /v1/consensus/status:
+    get:
+      summary: Retrieve consensus status
+      responses:
+        '200':
+          description: Status payload
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

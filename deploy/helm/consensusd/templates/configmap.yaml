@@ -1,0 +1,15 @@
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "consensusd.fullname" . }}
+  labels:
+    {{- include "consensusd.labels" . | nindent 4 }}
+data:
+  consensus.toml: |
+{{- if .Values.config.content }}
+{{ tpl .Values.config.content . | indent 4 }}
+{{- else }}
+    {}
+{{- end }}
+{{- end }}

@@ -1,0 +1,40 @@
+listen: ":7082"
+policies: "/etc/nhbchain/policies.yaml"
+treasury_store: "/var/lib/nhbchain/payoutd/treasury.db"
+execution_store: "/var/lib/nhbchain/payoutd/executions.db"
+hold_store: "/var/lib/nhbchain/payoutd/holds.db"
+authority: "nhb1authority"
+pause: false
+poll_interval: "5s"
+
+consensus:
+  endpoint: "127.0.0.1:9090"
+  chain_id: "nhb-mainnet-1"
+  signer_key_env: "PAYOUTD_CONSENSUS_KEY"
+  fee_amount: "1"
+  fee_denom: "NHB"
+
+wallet:
+  rpc_url: "https://ethereum-rpc.example"
+  chain_id: "1"
+  signer_key_env: "PAYOUTD_WALLET_KEY"
+  from_address: "0xTreasuryHotWallet"
+  confirmations: 3
+  poll_interval: "3s"
+  assets:
+    - symbol: "USDC"
+      token_address: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+      cold_address: "0xTreasuryColdWallet"
+      hot_min_balance: "25000000000"
+      hot_target_balance: "50000000000"
+    - symbol: "USDT"
+      token_address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+      cold_address: "0xTreasuryColdWallet"
+      hot_min_balance: "25000000000"
+      hot_target_balance: "50000000000"
+
+admin:
+  bearer_token_file: "/etc/nhbchain/secrets/payoutd-admin-token"
+  tls:
+    cert: "/etc/nhbchain/tls/payoutd.crt"
+    key: "/etc/nhbchain/tls/payoutd.key"

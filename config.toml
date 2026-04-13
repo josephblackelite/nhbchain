@@ -1,0 +1,291 @@
+ListenAddress = "127.0.0.1:6001"
+RPCAddress = "127.0.0.1:8545"
+RPCTrustProxyHeaders = false
+RPCReadHeaderTimeout = 0
+RPCReadTimeout = 0
+RPCWriteTimeout = 0
+RPCIdleTimeout = 0
+RPCMaxTxPerWindow = 10000
+RPCMaxTxPerIP = 10000
+RPCMaxTxPerIdentity = 10000
+RPCMaxTxPerChain = 10000
+RPCMaxTxPerIdentityChain = 10000
+RPCRateLimitWindow = 60
+RPCCallerMetadataMaxTTL = 600
+RPCAllowInsecure = true
+RPCAllowInsecureUnspecified = false
+RPCTLSCertFile = ""
+RPCTLSKeyFile = ""
+RPCTLSClientCAFile = ""
+DataDir = "./nhb-data"
+GenesisFile = "./config/genesis.json"
+AllowAutogenesis = false
+ValidatorKeystorePath = "validator.keystore"
+ValidatorKMSURI = ""
+ValidatorKMSEnv = ""
+NetworkName = "nhb-local"
+MaxPeers = 0
+MaxInbound = 0
+MaxOutbound = 0
+MinPeers = 0
+OutboundPeers = 0
+PeerBanSeconds = 0
+ReadTimeout = 0
+WriteTimeout = 0
+MaxMsgBytes = 0
+MaxMsgsPerSecond = 0.0
+ClientVersion = ""
+
+[RPCProxyHeaders]
+  XForwardedFor = "ignore"
+  XRealIP = "ignore"
+
+[RPCJWT]
+  Enable = true
+  Alg = "HS256"
+  HSSecretEnv = "NHB_RPC_JWT_SECRET"
+  RSAPublicKeyFile = ""
+  Issuer = "nhb-rpc"
+  Audience = ["wallets"]
+  MaxSkewSeconds = 120
+
+[RPCSwapAuth]
+  AllowedTimestampSkewSeconds = 0
+  NonceTTLSeconds = 0
+  NonceCapacity = 0
+  RateLimitWindowSeconds = 0
+  [RPCSwapAuth.Persistence]
+    Backend = ""
+    LevelDBPath = ""
+
+[p2p]
+  NetworkId = 187001
+  MaxPeers = 64
+  MaxInbound = 60
+  MaxOutbound = 30
+  MinPeers = 12
+  OutboundPeers = 16
+  Bootnodes = []
+  PersistentPeers = []
+  Seeds = []
+  BanScore = 100
+  GreyScore = 50
+  RateMsgsPerSec = 50.0
+  Burst = 200.0
+  HandshakeTimeoutMs = 3000
+  PingIntervalSeconds = 30
+  PingTimeoutSeconds = 90
+  BanDurationSeconds = 3600
+  DialBackoffSeconds = 30
+  PEX = true
+
+[potso]
+  [potso.rewards]
+    EpochLengthBlocks = 120
+    AlphaStakeBps = 7000
+    MinPayoutWei = "1000000000000000"
+    EmissionPerEpoch = "50000000000000000000" # 50 ZNHB reward per epoch (example)
+    TreasuryAddress = "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt"
+    MaxWinnersPerEpoch = 5000
+    CarryRemainder = true
+    PayoutMode = "auto"
+  [potso.weights]
+    AlphaStakeBps = 7000
+    TxWeightBps = 6000
+    EscrowWeightBps = 3000
+    UptimeWeightBps = 1000
+    MaxEngagementPerEpoch = 1000
+    MinStakeToWinWei = "0"
+    MinEngagementToWin = 0
+    DecayHalfLifeEpochs = 7
+    TopKWinners = 5000
+    TieBreak = "addrHash"
+  [potso.abuse]
+    MinStakeToEarnWei = "0"
+    QuadraticTxDampenAfter = 0
+    QuadraticTxDampenPower = 2
+    MaxUserShareBps = 0
+
+[governance]
+  MinDepositWei = "1000e18"
+  VotingPeriodSeconds = 604800
+  TimelockSeconds = 172800
+  QuorumBps = 2000
+  PassThresholdBps = 5000
+  AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps"]
+  BlockTimestampToleranceSeconds = 5
+
+[swap]
+  AllowedFiat = ["USD", "EUR", "GBP"]
+  MaxQuoteAgeSeconds = 120
+  SlippageBps = 50
+  OraclePriority = ["nowpayments", "coingecko", "manual"]
+  TwapWindowSeconds = 300
+  TwapSampleCap = 128
+  PriceProofMaxDeviationBps = 0
+  PayoutAuthorities = ["treasury"]
+  [swap.risk]
+    PerAddressDailyCapWei = "10000e18"
+    PerAddressMonthlyCapWei = "300000e18"
+    PerTxMinWei = "1e18"
+    PerTxMaxWei = "50000e18"
+    VelocityWindowSeconds = 600
+    VelocityMaxMints = 5
+    SanctionsCheckEnabled = true
+    PriceProofSignatureRequired = false
+    [swap.risk.cashOut]
+  [swap.providers]
+    Allow = ["nowpayments"]
+  [swap.sanctions]
+
+[lending]
+  MaxLTVBps = 0
+  LiquidationThresholdBps = 0
+  ReserveFactorBps = 0
+  ProtocolFeeBps = 0
+  DeveloperFeeBps = 0
+  DeveloperFeeCollector = ""
+  [lending.breaker]
+  [lending.collateralRouting]
+    LiquidatorBps = 0
+    DeveloperBps = 0
+    DeveloperAddress = ""
+    ProtocolBps = 0
+    ProtocolAddress = ""
+
+[mempool]
+  MaxTransactions = 5000
+  AllowUnlimited = false
+
+[global]
+  [global.Governance]
+    QuorumBPS = 0
+    PassThresholdBPS = 0
+    VotingPeriodSecs = 0
+  [global.Slashing]
+    MinWindowSecs = 0
+    MaxWindowSecs = 0
+  [global.Mempool]
+    MaxBytes = 0
+    POSReservationBPS = 0
+  [global.Blocks]
+    MaxTxs = 500
+  [global.Staking]
+    AprBps = 0
+    PayoutPeriodDays = 0
+    UnbondingDays = 0
+    MinStakeWei = ""
+    MaxEmissionPerYearWei = "5000000000000000000"
+    RewardAsset = ""
+    CompoundDefault = false
+  [global.Pauses]
+    Lending = false
+    Swap = false
+    Escrow = false
+    Trade = false
+    Loyalty = false
+    POTSO = false
+    TransferNHB = false
+    TransferZNHB = false
+    Staking = false
+  [global.Quotas]
+    [global.Quotas.Lending]
+      MaxRequestsPerMin = 0
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 0
+    [global.Quotas.Swap]
+      MaxRequestsPerMin = 0
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 0
+    [global.Quotas.Escrow]
+      MaxRequestsPerMin = 0
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 0
+    [global.Quotas.Trade]
+      MaxRequestsPerMin = 0
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 0
+    [global.Quotas.Loyalty]
+      MaxRequestsPerMin = 0
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 0
+    [global.Quotas.POTSO]
+      MaxRequestsPerMin = 0
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 0
+  [global.Paymaster]
+    MerchantDailyCapWei = ""
+    DeviceDailyTxCap = 0
+    GlobalDailyCapWei = ""
+    [global.Paymaster.AutoTopUp]
+      Enabled = false
+      Token = ""
+      MinBalanceWei = ""
+      TopUpAmountWei = ""
+      DailyCapWei = ""
+      CooldownSeconds = 0
+      [global.Paymaster.AutoTopUp.Governance]
+        FundingAccount = ""
+        Minter = ""
+        Approver = ""
+        MinterRole = ""
+        ApproverRole = ""
+  [global.Fees]
+    FreeTierTxPerMonth = 100
+    MDRBasisPoints = 150
+    OwnerWallet = "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32"
+
+    [[global.Fees.Assets]]
+      Asset = "NHB"
+      MDRBasisPoints = 150
+      OwnerWallet = "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32"
+
+    [[global.Fees.Assets]]
+      Asset = "ZNHB"
+      MDRBasisPoints = 200
+      OwnerWallet = "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt"
+  [global.Loyalty]
+    [global.Loyalty.Dynamic]
+      TargetBPS = 50
+      MinBPS = 25
+      MaxBPS = 100
+      SmoothingStepBPS = 5
+      CoverageMax = 0.5
+      CoverageLookbackDays = 7
+      DailyCapPctOf7dFees = 0.6
+      DailyCapUSD = 5000.0
+      YearlyCapPctOfInitialSupply = 10.0
+      EnableProRate = true
+      EnforceProRate = true
+      [global.Loyalty.Dynamic.PriceGuard]
+        Enabled = true
+        PricePair = "ZNHB/USD"
+        TwapWindowSeconds = 7200
+        MaxDeviationBPS = 300
+        PriceMaxAgeSeconds = 600
+        FallbackMinEmissionZNHBWei = ""
+        UseLastGoodPriceFallback = false
+
+[consensus]
+  ProposalTimeout = "0s"
+  PrevoteTimeout = "0s"
+  PrecommitTimeout = "0s"
+  CommitTimeout = "0s"
+
+[network_security]
+  ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
+  ServerTLSKeyFile = "/etc/nhb/tls/p2pd.key"
+  ServerCAFile = "/etc/nhb/tls/p2pd-ca.pem"
+  ClientCAFile = "/etc/nhb/tls/consensus-ca.pem"
+  ClientTLSCertFile = "/etc/nhb/tls/consensus.crt"
+  ClientTLSKeyFile = "/etc/nhb/tls/consensus.key"
+  AllowInsecure = false
+  AllowUnauthenticatedReads = false
+  SharedSecret = ""
+  SharedSecretFile = "/etc/nhb/network.token"
+  SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
+  AuthorizationHeader = "x-nhb-network-token"
+  AllowedClientCommonNames = ["consensusd"]
+  ServerName = "p2pd.internal"
+  StreamQueueSize = 0
+  RelayDropLogRatio = 0.0

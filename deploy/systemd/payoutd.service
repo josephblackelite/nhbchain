@@ -1,0 +1,17 @@
+[Unit]
+Description=NHBChain payoutd
+After=network-online.target nhb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhb
+Group=nhb
+WorkingDirectory=/opt/nhbchain
+EnvironmentFile=/etc/nhbchain/payoutd.env
+ExecStart=/opt/nhbchain/bin/payoutd --config /etc/nhbchain/payoutd.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

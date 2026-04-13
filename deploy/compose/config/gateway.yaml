@@ -1,0 +1,40 @@
+listen: "127.0.0.1:8080"
+readTimeout: 30s
+writeTimeout: 30s
+idleTimeout: 120s
+observability:
+  serviceName: "nhb-gateway"
+  metrics: true
+  tracing: false
+  logRequests: true
+  metricsPrefix: "gateway"
+services:
+  - name: lendingd
+    endpoint: http://127.0.0.1:50053
+  - name: swapd
+    endpoint: http://127.0.0.1:7074
+  - name: governd
+    endpoint: http://127.0.0.1:50061
+  - name: consensusd
+    endpoint: http://127.0.0.1:9090
+rateLimits:
+  - id: lending
+    requestsPerMinute: 120
+    burst: 20
+  - id: swap
+    requestsPerMinute: 60
+    burst: 10
+  - id: gov
+    requestsPerMinute: 60
+    burst: 10
+  - id: consensus
+    requestsPerMinute: 240
+    burst: 40
+auth:
+  # Authentication is enabled by default; disable only for local docker-compose flows.
+  enabled: false
+  scopeClaim: scope
+  allowAnonymous: true
+  optionalPaths:
+    - /v1/lending/markets
+    - /v1/lending/markets/get

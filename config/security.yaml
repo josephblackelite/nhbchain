@@ -1,0 +1,33 @@
+# Example security configuration snippets used for TLS-enabled deployments.
+# Copy these blocks into your gateway and node configuration files and update
+# the file paths to match your certificate locations.
+
+gateway:
+  security:
+    tlsCertFile: /etc/nhb/gateway/tls.crt
+    tlsKeyFile: /etc/nhb/gateway/tls.key
+    # Provide a CA bundle to require mutual TLS from upstream callers.
+    tlsClientCAFile: /etc/nhb/gateway/clients-ca.pem
+    allowInsecure: false
+
+node:
+  RPCTLSCertFile: /etc/nhb/rpc/rpc.crt
+  RPCTLSKeyFile: /etc/nhb/rpc/rpc.key
+  RPCTLSClientCAFile: /etc/nhb/rpc/clients-ca.pem
+  RPCAllowlistCIDRs:
+    - 10.0.0.0/24
+    - 192.168.10.0/24
+  RPCProxyHeaders:
+    XForwardedFor: single
+    XRealIP: ignore
+  RPCJWT:
+    Enable: true
+    Alg: HS256
+    HSSecretEnv: NHB_RPC_JWT_SECRET
+    # Issuer/audience must match the short-lived JWTs minted by your identity service.
+    Issuer: nhb-rpc
+    Audience:
+      - wallets
+    MaxSkewSeconds: 120
+  # DEV ONLY: gate plaintext RPC to loopback when running locally.
+  RPCAllowInsecure: false

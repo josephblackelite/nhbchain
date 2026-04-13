@@ -1,0 +1,9 @@
+Usage:
+  nhb-cli p2p <command> [flags]
+
+Commands:
+  create-trade  Create a new dual-leg trade
+  get           Fetch trade details by id
+  settle        Settle a trade atomically
+  dispute       Dispute a trade
+  resolve       Resolve a disputed trade

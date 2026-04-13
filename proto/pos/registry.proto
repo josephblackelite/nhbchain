@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package pos.v1;
+
+option go_package = "nhbchain/proto/pos;posv1";
+
+message Merchant {
+  string address = 1;
+  bool paused = 2;
+  // Nonce that was signed when the merchant registration state was
+  // produced, allowing clients to verify the latest replay-safe context.
+  uint64 nonce = 3;
+  // Expiration timestamp that scopes the merchant registration
+  // signature in seconds since epoch.
+  uint64 expires_at = 4;
+  // Chain identifier binding the merchant registration to a specific
+  // network.
+  string chain_id = 5;
+}
+
+message Device {
+  string device_id = 1;
+  string merchant_addr = 2;
+  bool revoked = 3;
+  // Nonce carried alongside the device registration for replay
+  // protection when mirrored back to clients.
+  uint64 nonce = 4;
+  // Expiration timestamp that scopes the device registration signature
+  // in seconds since epoch.
+  uint64 expires_at = 5;
+  // Chain identifier binding this device registration to a network.
+  string chain_id = 6;
+}
+
+message MsgRegisterMerchant {
+  string authority = 1;
+  string merchant_addr = 2;
+  // Nonce that must match between the signature payload and the
+  // resulting merchant record to prevent replay on the same chain.
+  uint64 nonce = 3;
+  // Expiration timestamp defining how long the registration signature
+  // remains valid.
+  uint64 expires_at = 4;
+  // Chain identifier binding the registration signature to a specific
+  // network.
+  string chain_id = 5;
+}
+
+message MsgRegisterMerchantResponse {
+  string tx_hash = 1;
+}
+
+message MsgRegisterDevice {
+  string authority = 1;
+  string merchant_addr = 2;
+  string device_id = 3;
+  // Nonce that must match the device signature payload, preventing
+  // replay for a specific chain.
+  uint64 nonce = 4;
+  // Expiration timestamp defining the validity window for the device
+  // registration signature.
+  uint64 expires_at = 5;
+  // Chain identifier binding the registration to a specific network.
+  string chain_id = 6;
+}
+
+message MsgRegisterDeviceResponse {
+  string tx_hash = 1;
+}
+
+message MsgPauseMerchant {
+  string authority = 1;
+  string merchant_addr = 2;
+  // Nonce to scope the pause operation signature within the target
+  // chain.
+  uint64 nonce = 3;
+  // Expiration timestamp defining how long the pause signature is valid
+  // in seconds since epoch.
+  uint64 expires_at = 4;
+  // Chain identifier binding the pause signature to a network.
+  string chain_id = 5;
+}
+
+message MsgPauseMerchantResponse {
+  string tx_hash = 1;
+}
+
+message MsgResumeMerchant {
+  string authority = 1;
+  string merchant_addr = 2;
+  // Nonce to scope the resume operation signature within the target
+  // chain.
+  uint64 nonce = 3;
+  // Expiration timestamp defining how long the resume signature is
+  // valid in seconds since epoch.
+  uint64 expires_at = 4;
+  // Chain identifier binding the resume signature to a network.
+  string chain_id = 5;
+}
+
+message MsgResumeMerchantResponse {
+  string tx_hash = 1;
+}
+
+message MsgRevokeDevice {
+  string authority = 1;
+  string merchant_addr = 2;
+  string device_id = 3;
+  // Nonce to scope the revoke operation signature within the target
+  // chain.
+  uint64 nonce = 4;
+  // Expiration timestamp defining how long the revoke signature is
+  // valid in seconds since epoch.
+  uint64 expires_at = 5;
+  // Chain identifier binding the revoke signature to a network.
+  string chain_id = 6;
+}
+
+message MsgRevokeDeviceResponse {
+  string tx_hash = 1;
+}
+
+message MsgRestoreDevice {
+  string authority = 1;
+  string merchant_addr = 2;
+  string device_id = 3;
+  // Nonce to scope the restore operation signature within the target
+  // chain.
+  uint64 nonce = 4;
+  // Expiration timestamp defining how long the restore signature is
+  // valid in seconds since epoch.
+  uint64 expires_at = 5;
+  // Chain identifier binding the restore signature to a network.
+  string chain_id = 6;
+}
+
+message MsgRestoreDeviceResponse {
+  string tx_hash = 1;
+}
+
+service Registry {
+  rpc RegisterMerchant(MsgRegisterMerchant) returns (MsgRegisterMerchantResponse);
+  rpc RegisterDevice(MsgRegisterDevice) returns (MsgRegisterDeviceResponse);
+  rpc PauseMerchant(MsgPauseMerchant) returns (MsgPauseMerchantResponse);
+  rpc ResumeMerchant(MsgResumeMerchant) returns (MsgResumeMerchantResponse);
+  rpc RevokeDevice(MsgRevokeDevice) returns (MsgRevokeDeviceResponse);
+  rpc RestoreDevice(MsgRestoreDevice) returns (MsgRestoreDeviceResponse);
+}

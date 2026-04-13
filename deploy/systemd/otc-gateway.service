@@ -1,0 +1,17 @@
+[Unit]
+Description=NHBChain OTC Gateway
+After=network-online.target nhb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhb
+Group=nhb
+WorkingDirectory=/opt/nhbchain
+EnvironmentFile=/etc/nhbchain/otc-gateway.env
+ExecStart=/opt/nhbchain/bin/otc-gateway
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

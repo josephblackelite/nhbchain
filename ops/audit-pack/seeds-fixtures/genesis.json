@@ -1,0 +1,26 @@
+{
+  "chain_id": "nhbchain-audit",
+  "genesis_time": "2024-01-01T00:00:00Z",
+  "validators": [
+    {
+      "address": "nhbvaloper1audit0000000000000000000000000000000",
+      "power": "1000000",
+      "name": "audit-validator"
+    }
+  ],
+  "app_state": {
+    "bank": {
+      "balances": [
+        {
+          "address": "nhb1auditsample000000000000000000000000",
+          "coins": [
+            {
+              "denom": "nhb",
+              "amount": "100000000000"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

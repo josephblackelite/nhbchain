@@ -1,0 +1,8 @@
+﻿=== RUN   TestPotsoHeartbeatRateLimitAndMetrics
+Starting node with validator address: nhb14dpq9l0vrfn5rx5zspk4ejka6xxyvue4vqmpz2
+Autogenesis override enabled (dev mode); creating ephemeral genesis block.
+    emission_invariant_test.go:109: expected rate limit error, got heartbeat timestamp outside tolerance
+--- FAIL: TestPotsoHeartbeatRateLimitAndMetrics (0.02s)
+FAIL
+exit status 1
+FAIL	nhbchain/tests/potso	0.173s

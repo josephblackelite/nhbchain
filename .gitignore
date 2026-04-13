@@ -1,0 +1,80 @@
+# Build artifacts
+/bin/
+/build/
+/dist/
+/out/
+.next/
+node_modules/
+*.exe
+*.test
+*.out
+
+# Go workspace/vendor (if you vendor, you can remove this)
+vendor/
+
+# Runtime / DB state (leveldb/rocksdb/bolt/etc.)
+nhb-data/
+nhb-data-peer/
+nhb-data-mainnet/
+*.db
+*.sqlite
+*.sqlite3
+**/CURRENT
+**/LOCK
+**/LOG
+**/LOG.old
+**/MANIFEST-*
+**/*.sst
+**/*.ldb
+
+# Wallet / CLI secrets
+wallet.key
+wallet-*.key
+*.wallet.key
+*.wallet
+validator-local.keystore
+*.keystore
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.secret
+*.token
+*.jwt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+config-win.toml
+config/local-genesis.json
+nhb-data-local/p2p/node_key.json
+nhb-data-local/000001.log
+nhb-data-local/p2p/peerstore/000001.log
+go.work.sum
+
+# Environments
+.env
+.env.*
+!.env.example
+
+# Internal Mainnet Planning and Audits
+docs/2026-0*-report.md
+docs/2026-0*-mainnet-blueprint.md
+docs/2026-0*-mainnet-task-list.md
+nhbcoin_economic_engine.md
+.cursorrules
+nhbchain.pem
+docs/L1_NETWORK_MASTER_PLAYBOOK.md
+docs/deploy/live-rollout-todo.md
+docs/aprilaudit/live-rollout-todo.md
+codex-audit-april-2026.md
+NHBChain Marketing.txt
+token.txt
+KEYS & ENODE - SUNDAY 14-3.txt
+cmd/nhb/nhb_startup_err.log
+node.log
+build_err.txt

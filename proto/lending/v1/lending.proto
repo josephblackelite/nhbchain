@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package lending.v1;
+
+option go_package = "nhbchain/proto/lending/v1;lendingv1";
+
+message MarketKey {
+  string symbol = 1;
+}
+
+message Market {
+  MarketKey key = 1;
+  string base_asset = 2;
+  string collateral_factor = 3;
+  string reserve_factor = 4;
+  string liquidity_index = 5;
+  string borrow_index = 6;
+}
+
+message AccountPosition {
+  string account = 1;
+  string supplied = 2;
+  string borrowed = 3;
+  string collateral = 4;
+  string health_factor = 5;
+}
+
+message GetMarketRequest {
+  MarketKey key = 1;
+}
+
+message GetMarketResponse {
+  Market market = 1;
+}
+
+message ListMarketsRequest {}
+
+message ListMarketsResponse {
+  repeated Market markets = 1;
+}
+
+message GetPositionRequest {
+  string account = 1;
+}
+
+message GetPositionResponse {
+  AccountPosition position = 1;
+}
+
+message SupplyAssetRequest {
+  string account = 1;
+  MarketKey market = 2;
+  string amount = 3;
+}
+
+message SupplyAssetResponse {
+  AccountPosition position = 1;
+}
+
+message WithdrawAssetRequest {
+  string account = 1;
+  MarketKey market = 2;
+  string amount = 3;
+}
+
+message WithdrawAssetResponse {
+  AccountPosition position = 1;
+}
+
+message BorrowAssetRequest {
+  string account = 1;
+  MarketKey market = 2;
+  string amount = 3;
+}
+
+message BorrowAssetResponse {
+  AccountPosition position = 1;
+}
+
+message RepayAssetRequest {
+  string account = 1;
+  MarketKey market = 2;
+  string amount = 3;
+}
+
+message RepayAssetResponse {
+  AccountPosition position = 1;
+}
+
+service LendingService {
+  rpc GetMarket(GetMarketRequest) returns (GetMarketResponse);
+  rpc ListMarkets(ListMarketsRequest) returns (ListMarketsResponse);
+  rpc GetPosition(GetPositionRequest) returns (GetPositionResponse);
+  rpc SupplyAsset(SupplyAssetRequest) returns (SupplyAssetResponse);
+  rpc WithdrawAsset(WithdrawAssetRequest) returns (WithdrawAssetResponse);
+  rpc BorrowAsset(BorrowAssetRequest) returns (BorrowAssetResponse);
+  rpc RepayAsset(RepayAssetRequest) returns (RepayAssetResponse);
+}

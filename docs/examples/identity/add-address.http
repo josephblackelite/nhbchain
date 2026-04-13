@@ -1,0 +1,14 @@
+### Add linked address (JSON-RPC)
+POST {{NODE_RPC_URL}}
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "identity_addAddress",
+  "params": [
+    "frankrocks",
+    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
+    "0xSIG"
+  ]
+}

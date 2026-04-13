@@ -1,0 +1,13 @@
+Unknown escrow subcommand: unknown
+Usage:
+  nhb-cli escrow <command> [flags]
+
+Commands:
+  create  Create a new escrow definition
+  get     Fetch escrow details by id
+  fund    Fund an escrow from the payer account
+  release Release funds to the payee
+  refund  Refund funds to the payer
+  expire  Expire an escrow after the deadline
+  dispute Flag an escrow for mediation
+  resolve Resolve a disputed escrow

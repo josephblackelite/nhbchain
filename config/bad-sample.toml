@@ -1,0 +1,54 @@
+# --------------------------------------------------------------
+# WARNING: Development-only sample configuration.
+# This file intentionally binds only to loopback interfaces and
+# disables insecure transport. Do not copy these values into any
+# production configuration without a deliberate security review.
+# --------------------------------------------------------------
+
+# Bind all node services to localhost so the sample cannot be
+# deployed to a publicly reachable interface by accident.
+ListenAddress = "127.0.0.1:6001"
+RPCAddress = "127.0.0.1:8080"
+
+# Use throwaway local paths to reinforce that this profile is not
+# meant for production persistence.
+DataDir = "./nhb-data-dev"
+GenesisFile = "./genesis.dev.json"
+AllowAutogenesis = false
+NetworkName = "nhb-devnet"
+
+[network_security]
+# Keep transport encrypted by default. If you must disable TLS for
+# troubleshooting, set AllowInsecure=true temporarily and understand
+# that this exposes traffic in plaintext.
+AllowInsecure = false
+ServerTLSCertFile = ""
+ServerTLSKeyFile = ""
+ClientTLSCertFile = ""
+ClientTLSKeyFile = ""
+ClientCAFile = ""
+ServerCAFile = ""
+
+# RPC also requires TLS unless explicitly disabled. The comment
+# above applies here as well.
+RPCAllowInsecure = false
+
+[global.staking]
+MaxEmissionPerYearWei = "0"
+
+[global.pauses]
+Staking = true
+
+[global.fees]
+free_tier_tx_per_month = 100
+mdr_basis_points = 150
+owner_wallet = ""
+
+[[global.fees.assets]]
+asset = "NHB"
+mdr_basis_points = 150
+owner_wallet = ""
+
+[global.loyalty.Dynamic]
+enableprorate = false
+EnforceProRate = false

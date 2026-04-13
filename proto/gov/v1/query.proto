@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package gov.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "nhbchain/proto/gov/v1;govv1";
+
+enum ProposalStatus {
+  PROPOSAL_STATUS_UNSPECIFIED = 0;
+  PROPOSAL_STATUS_DEPOSIT_PERIOD = 1;
+  PROPOSAL_STATUS_VOTING_PERIOD = 2;
+  PROPOSAL_STATUS_PASSED = 3;
+  PROPOSAL_STATUS_REJECTED = 4;
+  PROPOSAL_STATUS_FAILED = 5;
+  PROPOSAL_STATUS_EXPIRED = 6;
+  PROPOSAL_STATUS_EXECUTED = 7;
+}
+
+message Proposal {
+  uint64 id = 1;
+  string title = 2;
+  string summary = 3;
+  string metadata_uri = 4;
+  string proposer = 5;
+  ProposalStatus status = 6;
+  string deposit = 7;
+  google.protobuf.Timestamp submit_time = 8;
+  google.protobuf.Timestamp voting_start_time = 9;
+  google.protobuf.Timestamp voting_end_time = 10;
+  google.protobuf.Timestamp timelock_end_time = 11;
+  string target = 12;
+  string proposed_change = 13;
+  bool queued = 14;
+}
+
+message ProposalTally {
+  uint64 proposal_id = 1;
+  ProposalStatus status = 2;
+  uint64 turnout_bps = 3;
+  uint64 quorum_bps = 4;
+  uint64 yes_power_bps = 5;
+  uint64 no_power_bps = 6;
+  uint64 abstain_power_bps = 7;
+  uint64 yes_ratio_bps = 8;
+  uint64 pass_threshold_bps = 9;
+  uint64 total_ballots = 10;
+}
+
+message GetProposalRequest {
+  uint64 id = 1;
+}
+
+message GetProposalResponse {
+  Proposal proposal = 1;
+}
+
+message ListProposalsRequest {
+  uint32 page_size = 1;
+  string page_token = 2;
+  ProposalStatus status_filter = 3;
+}
+
+message ListProposalsResponse {
+  repeated Proposal proposals = 1;
+  string next_page_token = 2;
+}
+
+message GetTallyRequest {
+  uint64 id = 1;
+}
+
+message GetTallyResponse {
+  ProposalTally tally = 1;
+}
+
+service Query {
+  rpc GetProposal(GetProposalRequest) returns (GetProposalResponse);
+  rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse);
+  rpc GetTally(GetTallyRequest) returns (GetTallyResponse);
+}

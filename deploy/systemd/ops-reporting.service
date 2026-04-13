@@ -1,0 +1,17 @@
+[Unit]
+Description=NHBChain Operator Reporting
+After=network-online.target payments-gateway.service payoutd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhb
+Group=nhb
+WorkingDirectory=/opt/nhbchain
+EnvironmentFile=/etc/nhbchain/ops-reporting.env
+ExecStart=/opt/nhbchain/bin/ops-reporting
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

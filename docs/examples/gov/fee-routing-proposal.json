@@ -1,0 +1,12 @@
+{
+  "module": "feepolicy",
+  "changes": {
+    "owner_fee_wallet_nhb": "nhb1ownerwalletrotatedxxxxxxxxxxxxxxxxxxxx",
+    "znhb_proceeds_wallet": "nhb1stablewalletrotatedxxxxxxxxxxxxxxxxxx",
+    "owner_fee_wallet_usdc": "usdc1custodyvaultrotatedxxxxxxxxxxxxxxxx"
+  },
+  "metadata": {
+    "reason": "Treasury wallet rotation for FY25",
+    "effective_epoch": 490
+  }
+}

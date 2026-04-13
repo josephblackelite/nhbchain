@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "consensusd.fullname" . }}
+  labels:
+    {{- include "consensusd.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "consensusd.fullname" . }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "consensusd.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "consensusd.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: consensusd
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "{{ .Values.config.path }}"
+            - "--grpc"
+            - ":9090"
+            - "--p2p"
+            - "{{ .Values.p2pEndpoint | default "p2pd:9091" }}"
+            {{- if .Values.setAllowAutogenesisFlag }}
+            - "--allow-autogenesis"
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.service.ports.grpc }}
+              name: grpc
+            - containerPort: {{ .Values.service.ports.rpc }}
+              name: rpc
+          env:
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              {{- if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- else }}
+              value: {{ default "" .value | quote }}
+              {{- end }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/nhb
+            {{- if .Values.config.enabled }}
+            - name: config
+              mountPath: {{ .Values.config.path }}
+              subPath: consensus.toml
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.config.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "consensusd.fullname" . }}
+            items:
+              - key: consensus.toml
+                path: consensus.toml
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
