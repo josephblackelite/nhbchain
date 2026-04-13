@@ -20,6 +20,7 @@ import (
 type failingNode struct {
 	validatorSet map[string]*big.Int
 	commitErr    error
+	validateErr  error
 	height       uint64
 }
 
@@ -27,6 +28,7 @@ func (n *failingNode) GetMempool() []*types.Transaction { return nil }
 func (n *failingNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	return nil, nil
 }
+func (n *failingNode) ValidateBlock(block *types.Block) error { return n.validateErr }
 func (n *failingNode) CommitBlock(block *types.Block) error { return n.commitErr }
 func (n *failingNode) GetValidatorSet() map[string]*big.Int { return n.validatorSet }
 func (n *failingNode) GetAccount(addr []byte) (*types.Account, error) {
@@ -47,6 +49,7 @@ func (r *recordingBroadcaster) Broadcast(msg *p2p.Message) error {
 type trackingNode struct {
 	validatorSet map[string]*big.Int
 	committed    []*types.Block
+	validateErr  error
 	height       uint64
 }
 
@@ -54,6 +57,7 @@ func (n *trackingNode) GetMempool() []*types.Transaction { return nil }
 func (n *trackingNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	return nil, nil
 }
+func (n *trackingNode) ValidateBlock(block *types.Block) error { return n.validateErr }
 func (n *trackingNode) CommitBlock(block *types.Block) error {
 	n.committed = append(n.committed, block)
 	if block != nil && block.Header != nil {
@@ -75,6 +79,7 @@ func (n *trackingNode) GetHeight() uint64         { return n.height }
 type emptyBlockNode struct {
 	validatorSet map[string]*big.Int
 	committed    []*types.Block
+	validateErr  error
 	height       uint64
 	validator    []byte
 }
@@ -87,6 +92,7 @@ func (n *emptyBlockNode) CreateBlock(txs []*types.Transaction) (*types.Block, er
 	}
 	return types.NewBlock(header, txs), nil
 }
+func (n *emptyBlockNode) ValidateBlock(block *types.Block) error { return n.validateErr }
 func (n *emptyBlockNode) CommitBlock(block *types.Block) error {
 	n.committed = append(n.committed, block)
 	if block != nil && block.Header != nil {
@@ -229,6 +235,218 @@ func TestCommitBroadcastsPrevoteNilOnExecutionFailure(t *testing.T) {
 	}
 	if engine.committedBlocks[engine.currentState.Height] {
 		t.Fatalf("block should not be marked committed on execution failure")
+	}
+}
+
+func TestHandleFutureProposalRequestsCatchUp(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	node := &trackingNode{validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)}}
+	broadcaster := &recordingBroadcaster{}
+	engine := NewEngine(node, validatorKey, broadcaster)
+
+	block := types.NewBlock(&types.BlockHeader{Height: 3, Validator: validatorAddr}, nil)
+	proposal := &SignedProposal{
+		Proposal: &Proposal{Block: block, Round: 0},
+		Proposer: validatorAddr,
+	}
+	hash := sha256.Sum256(proposal.Proposal.bytes())
+	sig, err := ethcrypto.Sign(hash[:], validatorKey.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign proposal: %v", err)
+	}
+	proposal.Signature = &Signature{Scheme: SignatureSchemeSecp256k1, Signature: sig}
+
+	if err := engine.HandleProposal(proposal); err != nil {
+		t.Fatalf("handle proposal: %v", err)
+	}
+	if len(broadcaster.messages) != 1 {
+		t.Fatalf("expected 1 catch-up request, got %d", len(broadcaster.messages))
+	}
+	if broadcaster.messages[0].Type != p2p.MsgTypeGetBlocks {
+		t.Fatalf("expected get-blocks message, got %d", broadcaster.messages[0].Type)
+	}
+}
+
+func TestHandleProposalBuffersFutureRoundAndAdvancesRound(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	otherKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate second validator key: %v", err)
+	}
+	otherAddr := otherKey.PubKey().Address().Bytes()
+	node := &trackingNode{
+		validatorSet: map[string]*big.Int{
+			string(validatorAddr): big.NewInt(1),
+			string(otherAddr):     big.NewInt(1),
+		},
+	}
+	engine := NewEngine(node, validatorKey, &recordingBroadcaster{})
+	engine.mu.Lock()
+	engine.currentState = State{Height: 1, Round: 0}
+	engine.mu.Unlock()
+
+	block := types.NewBlock(&types.BlockHeader{Height: 1, Validator: otherAddr}, nil)
+	proposal := &SignedProposal{
+		Proposal: &Proposal{Block: block, Round: 2},
+		Proposer: otherAddr,
+	}
+	hash := sha256.Sum256(proposal.Proposal.bytes())
+	sig, err := ethcrypto.Sign(hash[:], otherKey.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign proposal: %v", err)
+	}
+	proposal.Signature = &Signature{Scheme: SignatureSchemeSecp256k1, Signature: sig}
+
+	if err := engine.HandleProposal(proposal); err != nil {
+		t.Fatalf("handle proposal: %v", err)
+	}
+
+	engine.startNewRound()
+
+	engine.mu.RLock()
+	if engine.currentState.Round != 2 {
+		engine.mu.RUnlock()
+		t.Fatalf("expected round to advance to buffered future round 2, got %d", engine.currentState.Round)
+	}
+	engine.mu.RUnlock()
+
+	engine.replayBufferedMessages(1, 2)
+
+	select {
+	case got := <-engine.proposalCh:
+		if got != proposal {
+			t.Fatalf("expected replayed proposal to match buffered proposal")
+		}
+	default:
+		t.Fatalf("expected buffered proposal to be replayed into the proposal queue")
+	}
+}
+
+func TestRunRoundRejectsInvalidProposalBeforeVoting(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	otherKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate second validator key: %v", err)
+	}
+	otherAddr := otherKey.PubKey().Address().Bytes()
+	node := &trackingNode{
+		validatorSet: map[string]*big.Int{
+			string(validatorAddr): big.NewInt(1),
+			string(otherAddr):     big.NewInt(1),
+		},
+		validateErr:  errors.New("state root mismatch"),
+	}
+	broadcaster := &recordingBroadcaster{}
+	engine := NewEngine(node, validatorKey, broadcaster, WithTimeouts(TimeoutConfig{
+		Proposal:  25 * time.Millisecond,
+		Prevote:   25 * time.Millisecond,
+		Precommit: 25 * time.Millisecond,
+		Commit:    25 * time.Millisecond,
+	}))
+
+	targetRound := 1
+	for ; targetRound < 32; targetRound++ {
+		if proposer := engine.selectProposer(targetRound); len(proposer) > 0 && string(proposer) == string(otherAddr) {
+			break
+		}
+	}
+	if targetRound == 32 {
+		t.Fatalf("failed to find round where external validator is proposer")
+	}
+
+	block := types.NewBlock(&types.BlockHeader{Height: 1, Validator: otherAddr}, nil)
+	engine.mu.Lock()
+	engine.currentState = State{Height: 1, Round: targetRound - 1}
+	engine.mu.Unlock()
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		engine.proposalCh <- &SignedProposal{
+			Proposal: &Proposal{Block: block, Round: targetRound},
+			Proposer: otherAddr,
+		}
+	}()
+
+	engine.runRound()
+
+	if len(node.committed) != 0 {
+		t.Fatalf("expected invalid proposal to avoid commit")
+	}
+	if len(broadcaster.messages) == 0 {
+		t.Fatalf("expected a prevote-nil broadcast for invalid proposal")
+	}
+	last := broadcaster.messages[len(broadcaster.messages)-1]
+	if last.Type != p2p.MsgTypeVote {
+		t.Fatalf("expected vote broadcast, got %d", last.Type)
+	}
+	var signedVote SignedVote
+	if err := json.Unmarshal(last.Payload, &signedVote); err != nil {
+		t.Fatalf("unmarshal vote: %v", err)
+	}
+	if signedVote.Vote == nil || signedVote.Vote.Type != Prevote {
+		t.Fatalf("expected prevote broadcast, got %#v", signedVote.Vote)
+	}
+	if len(signedVote.Vote.BlockHash) != 0 {
+		t.Fatalf("expected prevote nil for invalid proposal, got %x", signedVote.Vote.BlockHash)
+	}
+}
+
+func TestCommitBroadcastsCommittedBlockAndStatus(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	node := &emptyBlockNode{
+		validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)},
+		height:       0,
+		validator:    validatorAddr,
+	}
+	broadcaster := &recordingBroadcaster{}
+	engine := NewEngine(node, validatorKey, broadcaster)
+
+	block, err := node.CreateBlock(nil)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	engine.mu.Lock()
+	engine.currentState = State{Height: 1, Round: 0}
+	engine.activeProposal = &SignedProposal{
+		Proposal: &Proposal{Block: block, Round: 0},
+		Proposer: validatorAddr,
+	}
+	engine.receivedVotes[Precommit] = map[string]*SignedVote{
+		string(validatorAddr): {
+			Vote:      &Vote{Round: 0, Type: Precommit, Height: 1},
+			Validator: validatorAddr,
+		},
+	}
+	engine.receivedPower[Precommit] = new(big.Int).Set(node.validatorSet[string(validatorAddr)])
+	engine.mu.Unlock()
+
+	if !engine.commit() {
+		t.Fatalf("expected commit to succeed")
+	}
+	if len(broadcaster.messages) < 2 {
+		t.Fatalf("expected committed block and status broadcasts, got %d", len(broadcaster.messages))
+	}
+	if broadcaster.messages[len(broadcaster.messages)-2].Type != p2p.MsgTypeBlock {
+		t.Fatalf("expected block broadcast, got %d", broadcaster.messages[len(broadcaster.messages)-2].Type)
+	}
+	if broadcaster.messages[len(broadcaster.messages)-1].Type != p2p.MsgTypeStatus {
+		t.Fatalf("expected status broadcast, got %d", broadcaster.messages[len(broadcaster.messages)-1].Type)
 	}
 }
 

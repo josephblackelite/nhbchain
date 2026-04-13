@@ -61,6 +61,7 @@ func seedEligibleValidator(t *testing.T, sp *StateProcessor, stake int64, engage
 		BalanceZNHB:     big.NewInt(0),
 		Stake:           big.NewInt(stake),
 		EngagementScore: engagement,
+		EngagementLastHeartbeat: uint64(rewardBlockTimestamp1),
 	}
 	if err := sp.setAccount(addr, account); err != nil {
 		t.Fatalf("set account: %v", err)

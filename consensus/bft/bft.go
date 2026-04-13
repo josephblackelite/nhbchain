@@ -39,6 +39,8 @@ type Engine struct {
 	receivedPower    map[VoteType]*big.Int
 	totalVotingPower *big.Int
 	committedBlocks  map[uint64]bool
+	bufferedProposal map[uint64]map[int][]*SignedProposal
+	bufferedVotes    map[uint64]map[int][]*SignedVote
 
 	proposalCh chan *SignedProposal
 	voteCh     chan *SignedVote
@@ -50,6 +52,7 @@ type Engine struct {
 
 	prevoteSent   bool
 	precommitSent bool
+	lastCatchUpAt time.Time
 }
 
 // TimeoutConfig captures the per-phase round timers used by the engine.
@@ -141,6 +144,8 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		},
 		totalVotingPower: totalPower,
 		committedBlocks:  make(map[uint64]bool),
+		bufferedProposal: make(map[uint64]map[int][]*SignedProposal),
+		bufferedVotes:    make(map[uint64]map[int][]*SignedVote),
 		proposalCh:       make(chan *SignedProposal, defaultProposalQueueSize),
 		voteCh:           make(chan *SignedVote, calculateVoteQueueCapacity(validatorSet)),
 		proposalTimeout:  defaultProposalTimeout,
@@ -160,7 +165,9 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 
 func (e *Engine) Start() {
 	fmt.Println("BFT Consensus Engine Started.")
-	time.Sleep(5 * time.Second)
+	fmt.Println("BFT waiting for peer connections before starting rounds.")
+	time.Sleep(30 * time.Second)
+	e.requestStatus()
 	for {
 		e.runRound()
 	}
@@ -173,6 +180,7 @@ func (e *Engine) runRound() {
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	e.replayBufferedMessages(height, round)
 
 	proposer := e.selectProposer(round)
 	myAddr := e.privKey.PubKey().Address().Bytes()
@@ -212,6 +220,13 @@ func (e *Engine) runRound() {
 				continue
 			}
 			if sp.Proposal.Block.Header.Height != height || sp.Proposal.Round != round {
+				continue
+			}
+			if err := e.node.ValidateBlock(sp.Proposal.Block); err != nil {
+				fmt.Printf("rejected invalid proposal for height %d: %v\n", sp.Proposal.Block.Header.Height, err)
+				e.mu.Lock()
+				e.broadcastPrevoteNilLocked(err)
+				e.mu.Unlock()
 				continue
 			}
 			if e.acceptProposal(sp) {
@@ -263,6 +278,15 @@ func (e *Engine) HandleProposal(p *SignedProposal) error {
 	e.mu.RUnlock()
 
 	if p.Proposal.Block.Header.Height != height || p.Proposal.Round < round {
+		if p.Proposal.Block.Header.Height > height {
+			e.requestCatchUp(height)
+		}
+		return nil
+	}
+	if p.Proposal.Round > round {
+		e.mu.Lock()
+		e.bufferProposalLocked(p)
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -291,6 +315,15 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 	e.mu.RUnlock()
 
 	if v.Vote.Height != height || v.Vote.Round < round {
+		if v.Vote.Height > height {
+			e.requestCatchUp(height)
+		}
+		return nil
+	}
+	if v.Vote.Round > round {
+		e.mu.Lock()
+		e.bufferVoteLocked(v)
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -316,6 +349,9 @@ func (e *Engine) propose() error {
 	}
 	if block == nil || block.Header == nil {
 		return fmt.Errorf("proposed block missing header")
+	}
+	if err := e.node.ValidateBlock(block); err != nil {
+		return fmt.Errorf("local block validation failed: %w", err)
 	}
 
 	e.mu.RLock()
@@ -466,7 +502,73 @@ func (e *Engine) commit() bool {
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
 	e.syncHeightWithNodeLocked()
+	e.broadcastCommittedBlock(block)
+	e.broadcastStatus()
 	return true
+}
+
+func (e *Engine) requestStatus() {
+	if e == nil || e.broadcaster == nil {
+		return
+	}
+	msg, err := p2p.NewGetStatusMessage()
+	if err != nil {
+		fmt.Printf("failed to build status request: %v\n", err)
+		return
+	}
+	if err := e.broadcaster.Broadcast(msg); err != nil {
+		fmt.Printf("failed to broadcast status request: %v\n", err)
+	}
+}
+
+func (e *Engine) requestCatchUp(currentHeight uint64) {
+	if e == nil || e.broadcaster == nil {
+		return
+	}
+	e.mu.Lock()
+	now := time.Now()
+	if !e.lastCatchUpAt.IsZero() && now.Sub(e.lastCatchUpAt) < time.Second {
+		e.mu.Unlock()
+		return
+	}
+	e.lastCatchUpAt = now
+	e.mu.Unlock()
+	msg, err := p2p.NewGetBlocksMessage(currentHeight + 1)
+	if err != nil {
+		fmt.Printf("failed to build catch-up request: %v\n", err)
+		return
+	}
+	if err := e.broadcaster.Broadcast(msg); err != nil {
+		fmt.Printf("failed to broadcast catch-up request: %v\n", err)
+	}
+}
+
+func (e *Engine) broadcastCommittedBlock(block *types.Block) {
+	if e == nil || e.broadcaster == nil || block == nil {
+		return
+	}
+	msg, err := p2p.NewBlockMessage(block)
+	if err != nil {
+		fmt.Printf("failed to build committed block message: %v\n", err)
+		return
+	}
+	if err := e.broadcaster.Broadcast(msg); err != nil {
+		fmt.Printf("failed to broadcast committed block: %v\n", err)
+	}
+}
+
+func (e *Engine) broadcastStatus() {
+	if e == nil || e.broadcaster == nil || e.node == nil {
+		return
+	}
+	msg, err := p2p.NewStatusMessage(e.node.GetHeight())
+	if err != nil {
+		fmt.Printf("failed to build status message: %v\n", err)
+		return
+	}
+	if err := e.broadcaster.Broadcast(msg); err != nil {
+		fmt.Printf("failed to broadcast status: %v\n", err)
+	}
 }
 
 func (e *Engine) broadcastVote(vote *SignedVote) {
@@ -651,6 +753,9 @@ func (e *Engine) startNewRound() {
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
+	if nextRound, ok := e.nextBufferedRoundLocked(e.currentState.Height, e.currentState.Round+1); ok {
+		e.currentState.Round = nextRound
+	}
 	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
 }
@@ -668,9 +773,107 @@ func (e *Engine) syncHeightWithNodeLocked() bool {
 	if e.currentState.Height <= nodeHeight {
 		e.currentState.Height = nodeHeight + 1
 		e.currentState.Round = 0
+		for height := range e.bufferedProposal {
+			if height <= nodeHeight {
+				delete(e.bufferedProposal, height)
+			}
+		}
+		for height := range e.bufferedVotes {
+			if height <= nodeHeight {
+				delete(e.bufferedVotes, height)
+			}
+		}
 		return true
 	}
 	return false
+}
+
+func (e *Engine) bufferProposalLocked(p *SignedProposal) {
+	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
+		return
+	}
+	height := p.Proposal.Block.Header.Height
+	round := p.Proposal.Round
+	if _, ok := e.bufferedProposal[height]; !ok {
+		e.bufferedProposal[height] = make(map[int][]*SignedProposal)
+	}
+	e.bufferedProposal[height][round] = append(e.bufferedProposal[height][round], p)
+}
+
+func (e *Engine) bufferVoteLocked(v *SignedVote) {
+	if v == nil || v.Vote == nil {
+		return
+	}
+	height := v.Vote.Height
+	round := v.Vote.Round
+	if _, ok := e.bufferedVotes[height]; !ok {
+		e.bufferedVotes[height] = make(map[int][]*SignedVote)
+	}
+	e.bufferedVotes[height][round] = append(e.bufferedVotes[height][round], v)
+}
+
+func (e *Engine) nextBufferedRoundLocked(height uint64, minRound int) (int, bool) {
+	next := 0
+	found := false
+	if rounds := e.bufferedProposal[height]; rounds != nil {
+		for round, proposals := range rounds {
+			if round < minRound || len(proposals) == 0 {
+				continue
+			}
+			if !found || round < next {
+				next = round
+				found = true
+			}
+		}
+	}
+	if rounds := e.bufferedVotes[height]; rounds != nil {
+		for round, votes := range rounds {
+			if round < minRound || len(votes) == 0 {
+				continue
+			}
+			if !found || round < next {
+				next = round
+				found = true
+			}
+		}
+	}
+	return next, found
+}
+
+func (e *Engine) replayBufferedMessages(height uint64, round int) {
+	e.mu.Lock()
+	var proposals []*SignedProposal
+	if rounds := e.bufferedProposal[height]; rounds != nil {
+		proposals = append(proposals, rounds[round]...)
+		delete(rounds, round)
+		if len(rounds) == 0 {
+			delete(e.bufferedProposal, height)
+		}
+	}
+	var votes []*SignedVote
+	if rounds := e.bufferedVotes[height]; rounds != nil {
+		votes = append(votes, rounds[round]...)
+		delete(rounds, round)
+		if len(rounds) == 0 {
+			delete(e.bufferedVotes, height)
+		}
+	}
+	e.mu.Unlock()
+
+	for _, proposal := range proposals {
+		select {
+		case e.proposalCh <- proposal:
+		default:
+			fmt.Printf("dropping buffered proposal for height %d round %d: proposal queue full\n", height, round)
+		}
+	}
+	for _, vote := range votes {
+		select {
+		case e.voteCh <- vote:
+		default:
+			fmt.Printf("dropping buffered vote for height %d round %d: vote queue full\n", height, round)
+		}
+	}
 }
 
 func (e *Engine) selectProposer(round int) []byte {

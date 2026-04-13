@@ -145,6 +145,9 @@ func main() {
 	if err := node.SyncStakingParams(); err != nil {
 		panic(fmt.Sprintf("Failed to apply staking params: %v", err))
 	}
+	if err := node.SyncValidatorThresholds(); err != nil {
+		panic(fmt.Sprintf("Failed to normalize validator thresholds: %v", err))
+	}
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
 	if err != nil {
@@ -381,6 +384,7 @@ func main() {
 	}
 	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
 	p2pServer.SetPeerstore(peerstore)
+	node.SetNetworkBroadcaster(p2pServer)
 
 	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
 	bftEngine := bft.NewEngine(node, privKey, p2pServer, bft.WithTimeouts(bft.TimeoutConfig{
@@ -520,10 +524,46 @@ func main() {
 	}()
 
 	go p2pServer.Start()
+	go startValidatorHeartbeatLoop(node, privKey, logger)
 
 	logger.Info("NHBCoin node initialised and running")
 	go node.StartConsensus()
 	select {}
+}
+
+func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, logger *slog.Logger) {
+	if node == nil || privKey == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "validator"
+	}
+	validatorAddr := privKey.PubKey().Address()
+	var validatorAddrBytes [20]byte
+	copy(validatorAddrBytes[:], validatorAddr.Bytes())
+	deviceID := fmt.Sprintf("%s-%x", strings.ToLower(strings.TrimSpace(host)), validatorAddr.Bytes()[:4])
+	token, err := node.EngagementRegisterDevice(validatorAddrBytes, deviceID)
+	if err != nil {
+		logger.Warn("validator heartbeat registration failed", slog.Any("error", err))
+		return
+	}
+
+	submit := func() {
+		if _, err := node.EngagementSubmitHeartbeat(deviceID, token, 0); err != nil {
+			logger.Warn("validator heartbeat submission failed", slog.Any("error", err))
+		}
+	}
+
+	time.AfterFunc(5*time.Second, submit)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		submit()
+	}
 }
 
 type envLookupFunc func(string) (string, bool)

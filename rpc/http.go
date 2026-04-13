@@ -935,6 +935,12 @@ type RPCResponse struct {
 	Error   *RPCError   `json:"error,omitempty"`
 }
 
+type rpcResultEnvelope struct {
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id"`
+	Result  interface{} `json:"result"`
+}
+
 type rpcResponseRecorder struct {
 	http.ResponseWriter
 	status int
@@ -975,6 +981,11 @@ func shouldScrubErrorDetails(status int, code int) bool {
 
 func writeResult(w http.ResponseWriter, id interface{}, result interface{}) {
 	resp := RPCResponse{JSONRPC: jsonRPCVersion, ID: id, Result: result}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func writeResultAllowNil(w http.ResponseWriter, id interface{}, result interface{}) {
+	resp := rpcResultEnvelope{JSONRPC: jsonRPCVersion, ID: id, Result: result}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -1632,7 +1643,7 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, re
 		return
 	}
 	if tx == nil {
-		writeResult(w, req.ID, nil)
+		writeResultAllowNil(w, req.ID, nil)
 		return
 	}
 	result, err := buildTransactionResult(tx, canonicalHash, blockHash, blockNumber)
@@ -1671,7 +1682,7 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 		return
 	}
 	if tx == nil {
-		writeResult(w, req.ID, nil)
+		writeResultAllowNil(w, req.ID, nil)
 		return
 	}
 	receipt, err := s.buildReceiptResult(tx, canonicalHash, blockHash, blockNumber)
@@ -2731,7 +2742,7 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 			return
 		}
 	}
-	writeResult(w, req.ID, "Transaction received by node.")
+	writeResult(w, req.ID, "0x"+hash)
 }
 
 func (s *Server) handleEscrowGetRealm(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

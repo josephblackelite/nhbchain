@@ -91,7 +91,7 @@ The L1 is organized into modular layers that together deliver the payment networ
 - **ZapNHB (ZNHB)** — The fixed-cap governance and utility asset. It secures the network, powers protocol and merchant loyalty rewards, and governs validator elections.
 - **Dual-Purpose Staking** — Staking ZNHB serves two simultaneous functions:
   1. **Governance:** Every 1 ZNHB staked equals 1 governing vote for network parameters and protocol upgrades.
-  2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator is authorized as a Network Validator. They earn POTSO block rewards by maintaining server uptime and submitting heartbeat transactions. You do **not** need a separate stake for governance.
+  2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator becomes a **validator candidate**. The node joins the active validator set at the next epoch only after it is online, synced, and submitting validator heartbeats. You do **not** need a separate stake for governance.
 
 ## 🚀 Quick Start for Node Operators (Step-by-Step)
 
@@ -176,6 +176,30 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 - **Currency Symbol:** `NHB`
 - **Mainnet P2P Bootnode (enode):** 
   `"enode://9606e2dd587cef5c8c46c6d41d03faf365edcb2f394921099e2b812261010841@52.1.96.250:6001"`
+
+### Join As A Validator In One Command
+
+On a fresh Ubuntu server, clone the repo and run:
+
+```bash
+chmod +x scripts/deployvalidator.sh
+bash scripts/deployvalidator.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+```
+
+What this does:
+
+- writes `/etc/nhbchain/node.env` with your validator key
+- installs `nhb.service`
+- builds the validator binaries
+- points the node at the NHBCoin mainnet bootnode
+- starts the validator and keeps validator heartbeats flowing automatically
+
+Operational model:
+
+- staking `>= 10,000 ZNHB` makes the wallet a **validator candidate**
+- the server becomes **active next epoch**, not instantly
+- readiness requires the node to be online, synced, and heartbeat-ready
+- offline validators are removed from quorum automatically at epoch rollover instead of freezing the network
 
 ---
 

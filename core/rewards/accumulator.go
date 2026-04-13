@@ -94,3 +94,28 @@ func normalizeBig(value *big.Int) *big.Int {
 	}
 	return new(big.Int).Set(value)
 }
+
+// Clone returns a deep copy of the accumulator so speculative execution does
+// not mutate the caller's live epoch accrual state.
+func (a *Accumulator) Clone() *Accumulator {
+	if a == nil {
+		return nil
+	}
+	return &Accumulator{
+		Epoch:              a.Epoch,
+		Length:             a.Length,
+		BlocksProcessed:    a.BlocksProcessed,
+		ValidatorsPlanned:  normalizeBig(a.ValidatorsPlanned),
+		StakersPlanned:     normalizeBig(a.StakersPlanned),
+		EngagementPlanned:  normalizeBig(a.EngagementPlanned),
+		ValidatorsAccrued:  normalizeBig(a.ValidatorsAccrued),
+		StakersAccrued:     normalizeBig(a.StakersAccrued),
+		EngagementAccrued:  normalizeBig(a.EngagementAccrued),
+		validatorBase:      normalizeBig(a.validatorBase),
+		stakerBase:         normalizeBig(a.stakerBase),
+		engageBase:         normalizeBig(a.engageBase),
+		validatorRemainder: a.validatorRemainder,
+		stakerRemainder:    a.stakerRemainder,
+		engageRemainder:    a.engageRemainder,
+	}
+}

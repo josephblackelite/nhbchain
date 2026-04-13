@@ -353,7 +353,7 @@ func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
 		t.Fatalf("set epoch config: %v", err)
 	}
 
-	validatorAddr := seedEligibleValidator(t, node.state, 5000, 0)
+	validatorAddr := seedEligibleValidator(t, node.state, 15000, 0)
 
 	txRoot, err := ComputeTxRoot(nil)
 	if err != nil {
@@ -362,6 +362,18 @@ func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
 
 	currentTime := time.Unix(1_900_000_100, 0).UTC()
 	node.SetTimeSource(func() time.Time { return currentTime })
+	node.stateMu.Lock()
+	account, err := node.state.getAccount(validatorAddr)
+	if err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("load validator account: %v", err)
+	}
+	account.EngagementLastHeartbeat = uint64(currentTime.Unix())
+	if err := node.state.setAccount(validatorAddr, account); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("update validator heartbeat: %v", err)
+	}
+	node.stateMu.Unlock()
 
 	for i := 0; i < 2; i++ {
 		currentTime = currentTime.Add(time.Second)

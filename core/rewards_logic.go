@@ -12,6 +12,13 @@ import (
 	"nhbchain/crypto"
 )
 
+func cloneRewardAccumulator(acc *rewards.Accumulator) *rewards.Accumulator {
+	if acc == nil {
+		return nil
+	}
+	return acc.Clone()
+}
+
 func (sp *StateProcessor) accrueEpochRewards(height uint64) error {
 	if !sp.rewardConfig.IsEnabled() {
 		return nil

@@ -5,12 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"bytes"
 	"sync"
 	"testing"
+	"time"
 
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/p2p"
+	"nhbchain/storage"
 )
+
+type testBroadcaster struct {
+	messages []*p2p.Message
+}
+
+func (b *testBroadcaster) Broadcast(msg *p2p.Message) error {
+	b.messages = append(b.messages, msg)
+	return nil
+}
 
 func TestProcessNetworkMessageRejectsInvalidTransaction(t *testing.T) {
 	node := newTestNode(t)
@@ -94,5 +107,267 @@ func TestGetAccountConcurrentWithCommit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("concurrent access failed: %v", err)
 		}
+	}
+}
+
+func TestProcessNetworkMessageGetStatusBroadcastsStatus(t *testing.T) {
+	node := newTestNode(t)
+	broadcaster := &testBroadcaster{}
+	node.SetNetworkBroadcaster(broadcaster)
+
+	if err := node.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeGetStatus, Payload: []byte(`{}`)}); err != nil {
+		t.Fatalf("process get status: %v", err)
+	}
+	if len(broadcaster.messages) != 1 {
+		t.Fatalf("expected 1 status broadcast, got %d", len(broadcaster.messages))
+	}
+	if broadcaster.messages[0].Type != p2p.MsgTypeStatus {
+		t.Fatalf("expected status message, got %d", broadcaster.messages[0].Type)
+	}
+}
+
+func TestProcessNetworkMessageGetBlocksBroadcastsChunk(t *testing.T) {
+	node := newTestNode(t)
+	broadcaster := &testBroadcaster{}
+	node.SetNetworkBroadcaster(broadcaster)
+
+	for i := 0; i < 2; i++ {
+		block, err := node.CreateBlock(nil)
+		if err != nil {
+			t.Fatalf("create block %d: %v", i, err)
+		}
+		if err := node.CommitBlock(block); err != nil {
+			t.Fatalf("commit block %d: %v", i, err)
+		}
+	}
+
+	payload, err := json.Marshal(p2p.GetBlocksPayload{From: 1})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := node.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeGetBlocks, Payload: payload}); err != nil {
+		t.Fatalf("process get blocks: %v", err)
+	}
+	if len(broadcaster.messages) != 1 {
+		t.Fatalf("expected 1 blocks broadcast, got %d", len(broadcaster.messages))
+	}
+	if broadcaster.messages[0].Type != p2p.MsgTypeBlocks {
+		t.Fatalf("expected blocks message, got %d", broadcaster.messages[0].Type)
+	}
+}
+
+func TestProcessNetworkMessageBlocksCatchUpCommitsMissingBlocks(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	sourceDB := storage.NewMemDB()
+	t.Cleanup(func() { sourceDB.Close() })
+	source, err := NewNode(sourceDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new source node: %v", err)
+	}
+
+	targetDB := storage.NewMemDB()
+	t.Cleanup(func() { targetDB.Close() })
+	target, err := NewNode(targetDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new target node: %v", err)
+	}
+	target.SetNetworkBroadcaster(&testBroadcaster{})
+
+	var blocks []*types.Block
+	for i := 0; i < 2; i++ {
+		block, err := source.CreateBlock(nil)
+		if err != nil {
+			t.Fatalf("source create block %d: %v", i, err)
+		}
+		if err := source.CommitBlock(block); err != nil {
+			t.Fatalf("source commit block %d: %v", i, err)
+		}
+		blocks = append(blocks, block)
+	}
+
+	payload, err := json.Marshal(p2p.BlocksPayload{Blocks: blocks})
+	if err != nil {
+		t.Fatalf("marshal blocks payload: %v", err)
+	}
+	if err := target.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeBlocks, Payload: payload}); err != nil {
+		t.Fatalf("process blocks: %v", err)
+	}
+	if got := target.GetHeight(); got != source.GetHeight() {
+		t.Fatalf("expected target height %d, got %d", source.GetHeight(), got)
+	}
+}
+
+func TestProcessNetworkMessageBlocksCatchUpAllowsHistoricalTimestamps(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	sourceDB := storage.NewMemDB()
+	t.Cleanup(func() { sourceDB.Close() })
+	source, err := NewNode(sourceDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new source node: %v", err)
+	}
+	baseTime := time.Unix(1_776_115_000, 0).UTC()
+	source.SetTimeSource(func() time.Time { return baseTime })
+
+	targetDB := storage.NewMemDB()
+	t.Cleanup(func() { targetDB.Close() })
+	target, err := NewNode(targetDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new target node: %v", err)
+	}
+	target.SetNetworkBroadcaster(&testBroadcaster{})
+	target.SetTimeSource(func() time.Time { return baseTime.Add(30 * time.Minute) })
+
+	var blocks []*types.Block
+	for i := 0; i < 2; i++ {
+		block, err := source.CreateBlock(nil)
+		if err != nil {
+			t.Fatalf("source create block %d: %v", i, err)
+		}
+		if err := source.CommitBlock(block); err != nil {
+			t.Fatalf("source commit block %d: %v", i, err)
+		}
+		blocks = append(blocks, block)
+	}
+
+	payload, err := json.Marshal(p2p.BlocksPayload{Blocks: blocks})
+	if err != nil {
+		t.Fatalf("marshal blocks payload: %v", err)
+	}
+	if err := target.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeBlocks, Payload: payload}); err != nil {
+		t.Fatalf("process blocks: %v", err)
+	}
+	if got := target.GetHeight(); got != source.GetHeight() {
+		t.Fatalf("expected target height %d, got %d", source.GetHeight(), got)
+	}
+}
+
+func TestValidateBlockAllowsPeerClockSkewWhenTimestampIsMonotonic(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	sourceDB := storage.NewMemDB()
+	t.Cleanup(func() { sourceDB.Close() })
+	source, err := NewNode(sourceDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new source node: %v", err)
+	}
+
+	targetDB := storage.NewMemDB()
+	t.Cleanup(func() { targetDB.Close() })
+	target, err := NewNode(targetDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new target node: %v", err)
+	}
+
+	baseTime := time.Unix(1_776_121_660, 0).UTC()
+	source.SetTimeSource(func() time.Time { return baseTime.Add(7 * time.Second) })
+	target.SetTimeSource(func() time.Time { return baseTime.Add(30 * time.Second) })
+
+	block, err := source.CreateBlock(nil)
+	if err != nil {
+		t.Fatalf("source create block: %v", err)
+	}
+	if err := target.ValidateBlock(block); err != nil {
+		t.Fatalf("expected target to accept monotonic peer block despite local clock skew: %v", err)
+	}
+}
+
+func TestCommitBlockDuplicateCommittedBlockIsIdempotent(t *testing.T) {
+	node := newTestNode(t)
+
+	block, err := node.CreateBlock(nil)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("duplicate commit should be idempotent, got %v", err)
+	}
+	if got := node.GetHeight(); got != 1 {
+		t.Fatalf("expected height 1 after duplicate commit, got %d", got)
+	}
+}
+
+func TestSyncStakingParamsUsesDeterministicReferenceTime(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	dbA := storage.NewMemDB()
+	t.Cleanup(func() { dbA.Close() })
+	nodeA, err := NewNode(dbA, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node A: %v", err)
+	}
+	dbB := storage.NewMemDB()
+	t.Cleanup(func() { dbB.Close() })
+	nodeB, err := NewNode(dbB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node B: %v", err)
+	}
+
+	baseTime := time.Unix(1_776_121_660, 0).UTC()
+	nodeA.SetTimeSource(func() time.Time { return baseTime.Add(7 * time.Second) })
+	nodeB.SetTimeSource(func() time.Time { return baseTime.Add(37 * time.Second) })
+
+	if err := nodeA.SyncStakingParams(); err != nil {
+		t.Fatalf("sync staking params A: %v", err)
+	}
+	if err := nodeB.SyncStakingParams(); err != nil {
+		t.Fatalf("sync staking params B: %v", err)
+	}
+
+	nodeA.stateMu.RLock()
+	rootA := nodeA.state.PendingRoot()
+	nodeA.stateMu.RUnlock()
+
+	nodeB.stateMu.RLock()
+	rootB := nodeB.state.PendingRoot()
+	nodeB.stateMu.RUnlock()
+
+	if rootA != rootB {
+		t.Fatalf("expected deterministic staking sync roots, got %x vs %x", rootA.Bytes(), rootB.Bytes())
+	}
+}
+
+func TestCommitBlockFailureRollbackPreservesNextProposalStateRoot(t *testing.T) {
+	node := newTestNode(t)
+	fixedTime := time.Unix(1_776_117_900, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
+
+	block, err := node.CreateBlock(nil)
+	if err != nil {
+		t.Fatalf("create initial block: %v", err)
+	}
+	brokenHeader := *block.Header
+	brokenHeader.StateRoot = []byte{0x01}
+	broken := &types.Block{Header: &brokenHeader, Transactions: block.Transactions}
+	if err := node.CommitBlock(broken); err == nil {
+		t.Fatalf("expected state root mismatch commit failure")
+	}
+
+	nextBlock, err := node.CreateBlock(nil)
+	if err != nil {
+		t.Fatalf("create next block: %v", err)
+	}
+	if !bytes.Equal(nextBlock.Header.StateRoot, block.Header.StateRoot) {
+		t.Fatalf("expected recreated proposal state root %x, got %x", block.Header.StateRoot, nextBlock.Header.StateRoot)
 	}
 }

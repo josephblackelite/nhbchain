@@ -9,6 +9,7 @@ import (
 type NodeInterface interface {
 	GetMempool() []*types.Transaction
 	CreateBlock(txs []*types.Transaction) (*types.Block, error)
+	ValidateBlock(block *types.Block) error
 	CommitBlock(block *types.Block) error
 	GetValidatorSet() map[string]*big.Int
 	GetAccount(addr []byte) (*types.Account, error)

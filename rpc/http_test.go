@@ -901,8 +901,13 @@ func TestHandleSendTransactionAcceptsZNHBTransfer(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected string result, got %T", resp.Result)
 	}
-	if msg != "Transaction received by node." {
-		t.Fatalf("unexpected result message: %s", msg)
+	hash, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash transaction: %v", err)
+	}
+	expected := "0x" + hex.EncodeToString(hash)
+	if msg != expected {
+		t.Fatalf("unexpected result message: got %s want %s", msg, expected)
 	}
 }
 
@@ -959,6 +964,34 @@ func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
 	}
 	if resp.Error.Code != codeInvalidParams {
 		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
+	}
+}
+
+func TestHandleGetTransactionReceiptMissingReturnsExplicitNullResult(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	server := newTestServer(t, node, nil, ServerConfig{})
+	recorder := httptest.NewRecorder()
+	req := &RPCRequest{ID: 11}
+	req.Params = []json.RawMessage{json.RawMessage(`"0xdeadbeef"`)}
+
+	server.handleGetTransactionReceipt(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"result":null`) {
+		t.Fatalf("expected explicit null result, got %s", body)
 	}
 }
 
