@@ -170,11 +170,12 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 If you are setting up a frontend application, a Web3 wallet (like MetaMask), or configuring your Node manually, here are the official Mainnet parameters:
 
 - **Network Name:** NHBCoin Mainnet
-- **Chain ID:** `5756470643927894962` *(Note: This dynamic ID is mathematically enforced by the genesis state to prevent cross-chain replay attacks)*
+- **Network ID:** `14699254016670310680` *(This dynamic network identifier is mathematically enforced by the genesis state to prevent cross-network replay and handshake confusion.)*
+- **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
 - **Mainnet P2P Bootnode (enode):** 
-  `"enode://6d9d6fbb218fee20934aea43651cdd71cf181bdaad15e7bf7cb26367639f7437@52.1.96.250:6001"`
+  `"enode://9606e2dd587cef5c8c46c6d41d03faf365edcb2f394921099e2b812261010841@52.1.96.250:6001"`
 
 ---
 
