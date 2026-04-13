@@ -11,8 +11,8 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
-// MintChainID defines the chain identifier expected inside mint vouchers.
-const MintChainID uint64 = 187001
+// MintChainID defines the founder-mainnet chain identifier expected inside mint vouchers.
+const MintChainID uint64 = 14699254016670310680
 
 var (
 	// ErrMintInvalidSigner indicates the recovered signer does not hold the required role.

@@ -14,7 +14,7 @@ func TestVoucherHashDeterministic(t *testing.T) {
 	recipient := repoCrypto.MustNewAddress(repoCrypto.NHBPrefix, recipientBytes).String()
 	voucher := VoucherV1{
 		Domain:     "NHB_SWAP_VOUCHER_V1",
-		ChainID:    187001,
+		ChainID:    14699254016670310680,
 		Token:      "ZNHB",
 		Recipient:  recipient,
 		Amount:     "1000000000000000000",
@@ -52,7 +52,7 @@ func TestSignVoucherRecoverAddress(t *testing.T) {
 
 	voucher := VoucherV1{
 		Domain:     "NHB_SWAP_VOUCHER_V1",
-		ChainID:    187001,
+		ChainID:    14699254016670310680,
 		Token:      "ZNHB",
 		Recipient:  recipient,
 		Amount:     "1000000000000000000",

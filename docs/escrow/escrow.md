@@ -1,6 +1,6 @@
 # NHBChain Escrow & P2P Settlement
 
-> Version: v1 (Task 5 rollout) • ChainID: **187001** • HRPs: **nhb**, **znhb**
+> Version: v1 (Task 5 rollout) • ChainID: **14699254016670310680** • HRPs: **nhb**, **znhb**
 
 NHBChain's escrow module safeguards funds until a deterministic terminal outcome is reached. With Task 5 the module now drives
 **atomic dual-lock settlement** for peer-to-peer (P2P) commerce, enabling both sides of a trade to fund independent legs while the

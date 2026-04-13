@@ -13,7 +13,7 @@ import (
 // VoucherV1 mirrors the payload the gateway submits to the node.
 type VoucherV1 struct {
 	Domain     string `json:"domain"`
-	ChainID    int64  `json:"chainId"`
+	ChainID    uint64 `json:"chainId"`
 	Token      string `json:"token"`
 	Recipient  string `json:"recipient"`
 	Amount     string `json:"amount"`

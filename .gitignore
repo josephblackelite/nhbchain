@@ -32,6 +32,7 @@ wallet.key
 wallet-*.key
 *.wallet.key
 *.wallet
+*.mnemonic
 validator-local.keystore
 *.keystore
 *.crt
@@ -65,12 +66,16 @@ go.work.sum
 docs/2026-0*-report.md
 docs/2026-0*-mainnet-blueprint.md
 docs/2026-0*-mainnet-task-list.md
+docs/aprilaudit/
+docs/audit/history/
+docs/deploy/live-rollout-todo.md
+docs/L1_NETWORK_MASTER_PLAYBOOK.md
+audit/*
+!audit/.gitkeep
+ops/audit-pack/seeds-fixtures/
 nhbcoin_economic_engine.md
 .cursorrules
 nhbchain.pem
-docs/L1_NETWORK_MASTER_PLAYBOOK.md
-docs/deploy/live-rollout-todo.md
-docs/aprilaudit/live-rollout-todo.md
 codex-audit-april-2026.md
 NHBChain Marketing.txt
 token.txt

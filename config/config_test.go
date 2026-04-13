@@ -93,7 +93,7 @@ AllowedClientCommonNames = ["consensusd"]
 ServerName = "p2pd.internal"
 
 [p2p]
-NetworkId = 187001
+NetworkId = 14699254016670310680
 MaxPeers = 42
 MaxInbound = 21
 MaxOutbound = 20

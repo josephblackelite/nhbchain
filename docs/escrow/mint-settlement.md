@@ -17,7 +17,7 @@ bridge between fiat settlements and on-chain supply adjustments.
 | `recipient` | string | NHB bech32 address or username. Usernames resolve through the identity module; otherwise the value must be an address. |
 | `token`     | string | Token symbol being minted. Founder mainnet uses `NHB`; `ZNHB` remains mint-paused after genesis. |
 | `amount`    | string | Base unit amount (integer). Must be strictly positive. |
-| `chainId`   | number | Must equal `187001` (`core.MintChainID`). Prevents cross-network replay. |
+| `chainId`   | number | Must equal `14699254016670310680` (`core.MintChainID`). Prevents cross-network replay. |
 | `expiry`    | number | UNIX timestamp (seconds). Must be greater than the node's current time when processed. |
 
 All string values are trimmed before processing and token symbols are normalised to upper-case.
@@ -66,7 +66,7 @@ anchors.
 1. A fiat invoice is created through NowPayments and stored in the payments gateway database.
 2. Once the webhook reports a finished payment, the gateway constructs a `core.MintVoucher` with:
    * `invoiceId` set to the internal invoice record.
-   * `chainId` fixed to `187001` and `expiry` set to `now + 10 minutes` (configurable via `mintVoucherTTL`).
+   * `chainId` fixed to `14699254016670310680` and `expiry` set to `now + 10 minutes` (configurable via `mintVoucherTTL`).
    * Token amount sourced from the locked quote.
 3. The gateway signs the canonical JSON using the configured KMS key (holding the appropriate minter role).
 4. The RPC client submits `mint_with_sig(voucherJSON, signatureHex)` to the node.
@@ -110,7 +110,7 @@ This alignment provides auditors and partners with a full trail from fiat settle
       "recipient": "nhb1alice...",
       "token": "NHB",
       "amount": "2500000000000000000",
-      "chainId": 187001,
+      "chainId": 14699254016670310680,
       "expiry": 1733070300
     },
     "0x...signature..."

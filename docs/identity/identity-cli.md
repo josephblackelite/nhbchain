@@ -6,7 +6,7 @@ configured with the correct node endpoint (`--node`) and chain ID.
 ## Common Flags
 
 * `--node`: JSON-RPC endpoint (default from config).
-* `--chain-id`: chain ID (e.g., `187001`).
+* `--chain-id`: chain ID (e.g., `14699254016670310680`).
 * `--key`: local key name or path to signing key.
 * `--expiry`: optional signature expiry override (seconds from now).
 

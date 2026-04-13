@@ -19,7 +19,7 @@ the TCP connection is established. Each side sends exactly one message:
 ```json
 {
   "protoVersion": 1,
-  "chainId": 187001,
+  "chainId": 14699254016670310680,
   "genesisHash": "0x5e2c…7fa1",
   "nodeIdPub": "0x04…",
   "nodeAddrBech32": "nhb1u8…r9fz",

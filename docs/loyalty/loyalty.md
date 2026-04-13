@@ -1,6 +1,6 @@
 # NHBChain Loyalty Engine – Developer Guide
 
-> Version: v0 (Phase 1–4) • ChainID: **187001** • HRPs: **nhb**, **znhb**  
+> Version: v0 (Phase 1–4) • ChainID: **14699254016670310680** • HRPs: **nhb**, **znhb**  
 > Status: **Beta** (APIs stable; subject to additive changes)
 
 ## Table of Contents
@@ -343,7 +343,7 @@ Server responses include `X-Request-ID` for tracing and `Replay-After` for rate 
 
 ## 6) CLI – `nhb-cli` (loyalty)
 
-The `nhb-cli` binary ships with subcommands to manage loyalty constructs. Commands implicitly use local keystore accounts unless `--from` is specified. Use `--chain-id 187001` when targeting devnet.
+The `nhb-cli` binary ships with subcommands to manage loyalty constructs. Commands implicitly use local keystore accounts unless `--from` is specified. Use `--chain-id 14699254016670310680` when targeting founder mainnet.
 
 ```bash
 # Create business

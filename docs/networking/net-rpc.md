@@ -62,7 +62,7 @@ curl -s \
       "inbound": 5,
       "outbound": 3
     },
-    "chainId": 187001,
+    "chainId": 14699254016670310680,
     "genesisHash": "7bf4...",
     "listenAddrs": [
       "0.0.0.0:6001",

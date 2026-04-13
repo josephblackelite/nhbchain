@@ -132,7 +132,7 @@ func main() {
 func run() error {
 	port := getEnv("SWAP_PORT", "8090")
 	nodeURL := getEnv("SWAP_NODE_RPC_URL", "http://127.0.0.1:8545")
-	chainIDStr := getEnv("SWAP_CHAIN_ID", "187001")
+	chainIDStr := getEnv("SWAP_CHAIN_ID", "14699254016670310680")
 	hmacSecret := os.Getenv("SWAP_PAYMENT_HMAC_SECRET")
 	priceSource := getEnv("SWAP_PRICE_SOURCE", "fixed:0.10")
 	minterAddr := getEnv("MINTER_ZNHB_ADDRESS", "")
@@ -142,7 +142,7 @@ func run() error {
 		return errors.New("MINTER_ZNHB_ADDRESS and MINTER_ZNHB_PRIVKEY must be set")
 	}
 
-	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	chainID, err := strconv.ParseUint(chainIDStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid SWAP_CHAIN_ID: %w", err)
 	}
@@ -332,7 +332,7 @@ type webhookResponse struct {
 	Minted    string `json:"minted"`
 }
 
-func handlePaymentWebhook(w http.ResponseWriter, r *http.Request, store *orderStore, quoter *Quoter, client VoucherSubmitter, chainID int64, minterAddr, minterPriv, hmacSecret string) {
+func handlePaymentWebhook(w http.ResponseWriter, r *http.Request, store *orderStore, quoter *Quoter, client VoucherSubmitter, chainID uint64, minterAddr, minterPriv, hmacSecret string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)

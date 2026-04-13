@@ -1,6 +1,6 @@
 {
   "genesisTime": "2026-03-01T00:00:00Z",
-  "chainId": 187001,
+  "chainId": 14699254016670310680,
   "loyaltyGlobal": {
     "active": true,
     "treasury": "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt",
@@ -49,7 +49,7 @@
     {
       "power": 10,
       "moniker": "mainnet-alpha",
-      "address": "nhb1depea9gwcj864385lh7rzue7fjek8r3szam87z"
+      "address": "nhb10v8m88e3gh5ahvc3r7u9725cy92j9xnhaj3fug"
     }
   ],
   "alloc": {

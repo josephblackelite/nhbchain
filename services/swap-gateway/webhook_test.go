@@ -80,7 +80,7 @@ func TestHandlePaymentWebhook(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	submitter := &stubSubmitter{}
 
-	handlePaymentWebhook(recorder, req, store, nil, submitter, 187001, minterAddr, "0x"+keyHex, secret)
+	handlePaymentWebhook(recorder, req, store, nil, submitter, 14699254016670310680, minterAddr, "0x"+keyHex, secret)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d", recorder.Code)
