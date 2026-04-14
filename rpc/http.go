@@ -1197,10 +1197,18 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetLatestBlocks(recorder, r, req)
 	case "nhb_getLatestTransactions":
 		s.handleGetLatestTransactions(recorder, r, req)
+	case "nhb_getTransactionHistory":
+		s.handleGetTransactionHistory(recorder, r, req)
+	case "nhb_getAddressActivity":
+		s.handleGetAddressActivity(recorder, r, req)
 	case "nhb_getTransaction":
 		s.handleGetTransaction(recorder, r, req)
 	case "nhb_getTransactionReceipt":
 		s.handleGetTransactionReceipt(recorder, r, req)
+	case "nhb_searchExplorer":
+		s.handleSearchExplorer(recorder, r, req)
+	case "nhb_getExplorerSnapshot":
+		s.handleGetExplorerSnapshot(recorder, r, req)
 	case "nhb_getEpochSummary":
 		s.handleGetEpochSummary(recorder, r, req)
 	case "nhb_getEpochSnapshot":

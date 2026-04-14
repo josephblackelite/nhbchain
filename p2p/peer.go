@@ -244,18 +244,20 @@ func (p *Peer) readLoop() {
 			return
 		}
 
-		now := time.Now()
-		if !p.server.allowIP(p.remoteAddr, now) {
-			p.server.handleRateLimit(p, false)
-			return
-		}
-		if !p.limiter.allow(now) {
-			p.server.handleRateLimit(p, false)
-			return
-		}
-		if !p.server.allowGlobal(now) {
-			p.server.handleRateLimit(p, true)
-			return
+		if !p.persistent {
+			now := time.Now()
+			if !p.server.allowIP(p.remoteAddr, now) {
+				p.server.handleRateLimit(p, false)
+				return
+			}
+			if !p.limiter.allow(now) {
+				p.server.handleRateLimit(p, false)
+				return
+			}
+			if !p.server.allowGlobal(now) {
+				p.server.handleRateLimit(p, true)
+				return
+			}
 		}
 
 		var msg Message

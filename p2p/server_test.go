@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -131,6 +132,81 @@ func TestPeerRateLimitDisconnect(t *testing.T) {
 	}
 }
 
+func TestTrustedInboundPersistentPeerSkipsRateLimitDisconnect(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xBC}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.RateMsgsPerSec = 1
+	cfg.RateBurst = 1
+	cfg.PersistentPeers = []string{"127.0.0.1:34567"}
+	cfg.PeerBanDuration = 100 * time.Millisecond
+
+	server := NewServer(handler, mustKey(t), cfg)
+	remote := NewServer(handler, mustKey(t), cfg)
+	remote.addListenAddress("127.0.0.1:34567")
+
+	left, right := net.Pipe()
+	defer right.Close()
+
+	go server.handleInbound(left)
+
+	reader := bufio.NewReader(right)
+	if _, err := reader.ReadBytes('\n'); err != nil {
+		t.Fatalf("read local handshake: %v", err)
+	}
+	payload, err := remote.buildHandshake()
+	if err != nil {
+		t.Fatalf("build handshake: %v", err)
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal handshake: %v", err)
+	}
+	if _, err := right.Write(append(data, '\n')); err != nil {
+		t.Fatalf("write handshake: %v", err)
+	}
+
+	wait := func(cond func() bool) bool {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return true
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return cond()
+	}
+
+	if !wait(func() bool {
+		server.mu.RLock()
+		peer, ok := server.peers[remote.nodeID]
+		server.mu.RUnlock()
+		return ok && peer != nil && peer.persistent
+	}) {
+		t.Fatal("trusted inbound peer was not classified as persistent")
+	}
+
+	msgData, err := json.Marshal(&Message{Type: 1, Payload: []byte("spam")})
+	if err != nil {
+		t.Fatalf("marshal message: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := right.Write(append(msgData, '\n')); err != nil {
+			t.Fatalf("write message: %v", err)
+		}
+	}
+
+	if !wait(func() bool {
+		server.mu.RLock()
+		_, ok := server.peers[remote.nodeID]
+		server.mu.RUnlock()
+		return ok
+	}) {
+		t.Fatal("trusted persistent peer should not have been dropped by the generic rate limiter")
+	}
+}
+
 func TestServerBootnodeDialing(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)
@@ -168,6 +244,30 @@ func TestServerBootnodeDialing(t *testing.T) {
 		if _, ok := seen[addr]; !ok {
 			t.Fatalf("expected dial attempt to %s, got %v", addr, addrs)
 		}
+	}
+}
+
+func TestRegisterPeerDuplicateUsesSentinelError(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xAA}, 32)
+	cfg := baseConfig(genesis)
+	server := NewServer(handler, mustKey(t), cfg)
+
+	leftA, rightA := net.Pipe()
+	defer leftA.Close()
+	defer rightA.Close()
+	leftB, rightB := net.Pipe()
+	defer leftB.Close()
+	defer rightB.Close()
+
+	peerA := newPeer("peer-1", cfg.ClientVersion, leftA, bufio.NewReader(leftA), server, false, false, "127.0.0.1:6001")
+	peerB := newPeer("peer-1", cfg.ClientVersion, leftB, bufio.NewReader(leftB), server, false, false, "127.0.0.1:6001")
+
+	if err := server.registerPeer(peerA); err != nil {
+		t.Fatalf("register first peer: %v", err)
+	}
+	if err := server.registerPeer(peerB); !errors.Is(err, ErrPeerAlreadyConnected) {
+		t.Fatalf("expected ErrPeerAlreadyConnected, got %v", err)
 	}
 }
 

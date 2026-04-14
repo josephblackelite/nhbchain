@@ -800,6 +800,7 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if trimmedDial == "" {
 		trimmedDial = primaryAddr
 	}
+	persistent = persistent || s.isPersistentRemote(remote.nodeID, addresses, trimmedDial)
 
 	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, trimmedDial)
 	if err := s.registerPeer(peer); err != nil {
@@ -893,7 +894,7 @@ func (s *Server) registerPeer(peer *Peer) error {
 	defer s.mu.Unlock()
 
 	if _, exists := s.peers[peer.id]; exists {
-		return fmt.Errorf("peer %s already connected", peer.id)
+		return fmt.Errorf("%w: %s", ErrPeerAlreadyConnected, peer.id)
 	}
 	if banned, until := s.reputation.BanInfo(peer.id, s.now()); banned {
 		return fmt.Errorf("peer %s banned until %s", peer.id, until.Format(time.RFC3339))
@@ -1002,6 +1003,9 @@ func (s *Server) Connect(addr string) error {
 	persistent := s.isPersistent(addr)
 	if err := s.initPeer(conn, false, persistent, addr); err != nil {
 		conn.Close()
+		if errors.Is(err, ErrPeerAlreadyConnected) {
+			return nil
+		}
 		s.markDialFailure(addr)
 		return fmt.Errorf("handshake with %s failed: %w", addr, err)
 	}
@@ -1711,6 +1715,30 @@ func (s *Server) isPersistentPeer(id string) bool {
 	defer s.mu.RUnlock()
 	_, ok := s.persistentIDs[id]
 	return ok
+}
+
+func (s *Server) isPersistentRemote(nodeID string, addrs []string, dialAddr string) bool {
+	if s == nil {
+		return false
+	}
+	if normalized := normalizeHex(nodeID); normalized != "" && s.isPersistentPeer(normalized) {
+		return true
+	}
+	candidates := make([]string, 0, len(addrs)+1)
+	if trimmed := strings.TrimSpace(dialAddr); trimmed != "" {
+		candidates = append(candidates, trimmed)
+	}
+	for _, addr := range addrs {
+		if trimmed := strings.TrimSpace(addr); trimmed != "" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	for _, addr := range candidates {
+		if s.isPersistent(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func directionForPeer(peer *Peer) string {
