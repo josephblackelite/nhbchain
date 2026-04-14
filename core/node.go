@@ -5132,12 +5132,12 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 		return 0, err
 	}
 
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	account, err := n.state.GetAccount(validator.Bytes())
+	account, err := n.GetAccount(validator.Bytes())
 	if err != nil {
 		return 0, err
+	}
+	if account == nil {
+		return 0, fmt.Errorf("validator account not found")
 	}
 
 	tx := &types.Transaction{
