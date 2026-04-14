@@ -50,10 +50,10 @@ func seedValidatorWithHeartbeat(t *testing.T, sp *StateProcessor, stake int64, e
 	}
 	addr := key.PubKey().Address().Bytes()
 	account := &types.Account{
-		BalanceNHB:      big.NewInt(0),
-		BalanceZNHB:     big.NewInt(0),
-		Stake:           big.NewInt(stake),
-		EngagementScore: engagement,
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(stake),
+		EngagementScore:         engagement,
 		EngagementLastHeartbeat: heartbeat,
 	}
 	if err := sp.setAccount(addr, account); err != nil {
@@ -292,6 +292,50 @@ func TestNonRotatingActivationWaitsUntilNextEpoch(t *testing.T) {
 	}
 	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
 		t.Fatalf("candidate should enter active validator set at epoch boundary")
+	}
+}
+
+func TestEpochRotationRetainsPreviousValidatorsWhenHeartbeatSelectionIsEmpty(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+	cfg := sp.EpochConfig()
+	cfg.RotationEnabled = true
+	cfg.MaxValidators = 10
+	if err := sp.SetEpochConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	addr := seedValidatorWithHeartbeat(t, sp, 40000, 10, uint64(testEpochTimestamp))
+	sp.ValidatorSet[string(addr)] = big.NewInt(40000)
+
+	// Clear the heartbeat so the next epoch selection would otherwise be empty.
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	account.EngagementLastHeartbeat = 0
+	if err := sp.setAccount(addr, account); err != nil {
+		t.Fatalf("update account: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
+		t.Fatalf("process block: %v", err)
+	}
+	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
+		t.Fatalf("expected existing validator to remain active when epoch selection is empty")
+	}
+}
+
+func TestEnsureValidatorSetLivenessRecoversFromEligibleValidators(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+	addr := seedValidator(t, sp, 40000, 10)
+	sp.ValidatorSet = map[string]*big.Int{}
+	sp.EligibleValidators[string(addr)] = big.NewInt(40000)
+
+	if err := sp.ensureValidatorSetLiveness(time.Unix(testEpochTimestamp, 0).UTC()); err != nil {
+		t.Fatalf("ensure validator set liveness: %v", err)
+	}
+	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
+		t.Fatalf("expected eligible validator to repopulate empty active set")
 	}
 }
 

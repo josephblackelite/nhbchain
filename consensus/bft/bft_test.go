@@ -25,6 +25,7 @@ type failingNode struct {
 }
 
 func (n *failingNode) GetMempool() []*types.Transaction { return nil }
+func (n *failingNode) RequeueTransactions(txs []*types.Transaction) {}
 func (n *failingNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	return nil, nil
 }
@@ -54,6 +55,7 @@ type trackingNode struct {
 }
 
 func (n *trackingNode) GetMempool() []*types.Transaction { return nil }
+func (n *trackingNode) RequeueTransactions(txs []*types.Transaction) {}
 func (n *trackingNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	return nil, nil
 }
@@ -85,6 +87,7 @@ type emptyBlockNode struct {
 }
 
 func (n *emptyBlockNode) GetMempool() []*types.Transaction { return nil }
+func (n *emptyBlockNode) RequeueTransactions(txs []*types.Transaction) {}
 func (n *emptyBlockNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	header := &types.BlockHeader{
 		Height:    n.height + 1,
@@ -110,6 +113,27 @@ func (n *emptyBlockNode) GetAccount(addr []byte) (*types.Account, error) {
 }
 func (n *emptyBlockNode) GetLastCommitHash() []byte { return nil }
 func (n *emptyBlockNode) GetHeight() uint64         { return n.height }
+
+type requeueTrackingNode struct {
+	validatorSet map[string]*big.Int
+	requeued     []*types.Transaction
+}
+
+func (n *requeueTrackingNode) GetMempool() []*types.Transaction { return nil }
+func (n *requeueTrackingNode) RequeueTransactions(txs []*types.Transaction) {
+	n.requeued = append(n.requeued, txs...)
+}
+func (n *requeueTrackingNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
+	return nil, nil
+}
+func (n *requeueTrackingNode) ValidateBlock(block *types.Block) error { return nil }
+func (n *requeueTrackingNode) CommitBlock(block *types.Block) error   { return nil }
+func (n *requeueTrackingNode) GetValidatorSet() map[string]*big.Int   { return n.validatorSet }
+func (n *requeueTrackingNode) GetAccount(addr []byte) (*types.Account, error) {
+	return &types.Account{Stake: big.NewInt(1)}, nil
+}
+func (n *requeueTrackingNode) GetLastCommitHash() []byte { return nil }
+func (n *requeueTrackingNode) GetHeight() uint64         { return 1 }
 
 func TestNewEngineAppliesCustomTimeouts(t *testing.T) {
 	validatorKey, err := crypto.GeneratePrivateKey()
@@ -163,6 +187,33 @@ func TestNewEngineWithTimeoutsFallsBackToDefaults(t *testing.T) {
 	}
 	if engine.commitTimeout != defaultCommitTimeout {
 		t.Fatalf("expected default commit timeout, got %s", engine.commitTimeout)
+	}
+}
+
+func TestStartNewRoundRequeuesActiveProposalTransactions(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	node := &requeueTrackingNode{validatorSet: map[string]*big.Int{string(validatorAddr): big.NewInt(1)}}
+
+	engine := NewEngine(node, validatorKey, &recordingBroadcaster{})
+	tx := &types.Transaction{Type: types.TxTypeTransfer}
+
+	engine.mu.Lock()
+	engine.activeProposal = &SignedProposal{
+		Proposal: &Proposal{
+			Block: types.NewBlock(&types.BlockHeader{Height: 2, Validator: validatorAddr}, []*types.Transaction{tx}),
+			Round: 0,
+		},
+	}
+	engine.mu.Unlock()
+
+	engine.startNewRound()
+
+	if len(node.requeued) != 1 || node.requeued[0] != tx {
+		t.Fatalf("expected active proposal transactions to be requeued on round rollover")
 	}
 }
 

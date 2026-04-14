@@ -207,6 +207,24 @@ func TestTrustedInboundPersistentPeerSkipsRateLimitDisconnect(t *testing.T) {
 	}
 }
 
+func TestPersistentPeerIdentitySurvivesReconnectByAlternateAddress(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xCD}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.PersistentPeers = []string{"52.1.96.250:6001"}
+
+	server := NewServer(handler, mustKey(t), cfg)
+	server.rememberPersistentPeerID("0xdeadbeef")
+
+	if !server.isConfiguredPersistentPeer("0xdeadbeef") {
+		t.Fatal("expected learned persistent node ID to remain trusted")
+	}
+	if !server.isPersistentRemote("0xdeadbeef", []string{"172.31.19.213:6001"}, "172.31.19.213:6001") {
+		t.Fatal("expected reconnect via alternate address to remain classified as persistent")
+	}
+}
+
 func TestServerBootnodeDialing(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xAA}, 32)

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"sync"
@@ -239,6 +240,94 @@ func TestCreateBlockCommitBlockSettlesTransferBalances(t *testing.T) {
 	}
 }
 
+func TestCreateBlockPrunesStaleNonceTransactions(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+
+	staleSenderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate stale sender key: %v", err)
+	}
+	validSenderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate valid sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	ensureAccountState(t, node, staleSenderKey, 0)
+	ensureAccountState(t, node, validSenderKey, 0)
+	ensureAccountBytesState(t, node, recipientKey.PubKey().Address().Bytes(), 0, 0)
+
+	staleTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientKey.PubKey().Address().Bytes()...),
+		Value:    big.NewInt(25),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := staleTx.Sign(staleSenderKey.PrivateKey); err != nil {
+		t.Fatalf("sign stale transfer: %v", err)
+	}
+	if err := node.AddTransaction(staleTx); err != nil {
+		t.Fatalf("add stale transfer: %v", err)
+	}
+
+	// Advance the sender nonce in state after admission so the queued transaction
+	// becomes stale and would previously poison proposer block construction.
+	ensureAccountState(t, node, staleSenderKey, 1)
+
+	validTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientKey.PubKey().Address().Bytes()...),
+		Value:    big.NewInt(75),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := validTx.Sign(validSenderKey.PrivateKey); err != nil {
+		t.Fatalf("sign valid transfer: %v", err)
+	}
+	if err := node.AddTransaction(validTx); err != nil {
+		t.Fatalf("add valid transfer: %v", err)
+	}
+
+	proposed := node.GetMempool()
+	if len(proposed) != 2 {
+		t.Fatalf("expected 2 transactions in proposal set, got %d", len(proposed))
+	}
+
+	block, err := node.CreateBlock(proposed)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if got := len(block.Transactions); got != 1 {
+		t.Fatalf("expected 1 transaction after stale nonce pruning, got %d", got)
+	}
+	if block.Transactions[0] != validTx {
+		t.Fatalf("expected valid transaction to remain in block")
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	recipientAccount, err := node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get recipient account: %v", err)
+	}
+	if recipientAccount.BalanceNHB.Cmp(big.NewInt(75)) != 0 {
+		t.Fatalf("unexpected recipient NHB balance after stale prune: got %s", recipientAccount.BalanceNHB.String())
+	}
+	if remaining := node.GetMempool(); len(remaining) != 0 {
+		t.Fatalf("expected stale transaction to be pruned from mempool, got %d transactions", len(remaining))
+	}
+}
+
 func TestCreateBlockCommitBlockSettlesFounderLoyaltyTransfer(t *testing.T) {
 	node := newTestNode(t)
 	node.SetTransactionSimulationEnabled(false)
@@ -265,14 +354,14 @@ func TestCreateBlockCommitBlockSettlesFounderLoyaltyTransfer(t *testing.T) {
 		CapPerTx:     new(big.Int).Mul(big.NewInt(50), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		DailyCapUser: new(big.Int).Mul(big.NewInt(200), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 		Dynamic: loyalty.DynamicConfig{
-			TargetBps:               50,
-			MinBps:                  25,
-			MaxBps:                  100,
-			SmoothingStepBps:        5,
-			CoverageMaxBps:          5000,
-			CoverageLookbackDays:    7,
-			DailyCapPctOf7dFeesBps: 6000,
-			DailyCapUsd:             5000,
+			TargetBps:                      50,
+			MinBps:                         25,
+			MaxBps:                         100,
+			SmoothingStepBps:               5,
+			CoverageMaxBps:                 5000,
+			CoverageLookbackDays:           7,
+			DailyCapPctOf7dFeesBps:         6000,
+			DailyCapUsd:                    5000,
 			YearlyCapPctOfInitialSupplyBps: 1000,
 			PriceGuard: loyalty.PriceGuardConfig{
 				Enabled:                  true,
@@ -435,6 +524,54 @@ func TestMempoolSizeDoesNotConsumeProposalEligibility(t *testing.T) {
 	proposed := node.GetMempool()
 	if len(proposed) != 1 {
 		t.Fatalf("expected transaction to remain proposal-eligible after size inspection, got %d", len(proposed))
+	}
+}
+
+func TestHasPendingTransactionHashMatchesMempoolEntries(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	ensureAccountState(t, node, senderKey, 0)
+	ensureAccountBytesState(t, node, recipientKey.PubKey().Address().Bytes(), 0, 0)
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientKey.PubKey().Address().Bytes()...),
+		Value:    big.NewInt(100),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+	if err := node.AddTransaction(tx); err != nil {
+		t.Fatalf("add transfer: %v", err)
+	}
+
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash transfer: %v", err)
+	}
+	hash := hex.EncodeToString(hashBytes)
+	if !node.HasPendingTransactionHash(hash) {
+		t.Fatalf("expected pending hash lookup to match canonical hash")
+	}
+	if !node.HasPendingTransactionHash("0x" + hash) {
+		t.Fatalf("expected pending hash lookup to match prefixed hash")
+	}
+	if node.HasPendingTransactionHash("0xdeadbeef") {
+		t.Fatalf("did not expect unrelated hash to match")
 	}
 }
 

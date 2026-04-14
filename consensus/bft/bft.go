@@ -261,6 +261,22 @@ func (e *Engine) runRound() {
 	}
 }
 
+func (e *Engine) requeueActiveProposal() {
+	if e == nil || e.node == nil {
+		return
+	}
+	e.mu.RLock()
+	var txs []*types.Transaction
+	if e.activeProposal != nil && e.activeProposal.Proposal != nil && e.activeProposal.Proposal.Block != nil && len(e.activeProposal.Proposal.Block.Transactions) > 0 {
+		txs = append([]*types.Transaction(nil), e.activeProposal.Proposal.Block.Transactions...)
+	}
+	e.mu.RUnlock()
+	if len(txs) == 0 {
+		return
+	}
+	e.node.RequeueTransactions(txs)
+}
+
 func (e *Engine) HandleProposal(p *SignedProposal) error {
 	if err := e.verifySignedProposal(p); err != nil {
 		return err
@@ -735,6 +751,7 @@ func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
 }
 
 func (e *Engine) startNewRound() {
+	e.requeueActiveProposal()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

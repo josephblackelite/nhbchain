@@ -30,6 +30,7 @@ import (
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
 	"nhbchain/rpc"
+	"nhbchain/services/swapd/stable"
 	"nhbchain/storage"
 
 	gatewayauth "nhbchain/gateway/auth"
@@ -273,6 +274,8 @@ func main() {
 	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
 	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
 	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "nhb", "ZNHB": "znhb"}))
+	_ = manualOracle.SetDecimal("USD", "NHB", "1.0", time.Now().UTC())
+	_ = manualOracle.SetDecimal("USD", "ZNHB", "1.0", time.Now().UTC())
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
 	sanctionsParams, err := swapCfg.Sanctions.Parameters()
@@ -505,6 +508,14 @@ func main() {
 		logger.Error("failed to initialise RPC server", slog.Any("error", err))
 		os.Exit(1)
 	}
+	if err := ensureDefaultLendingPool(node, privKey); err != nil {
+		logger.Error("failed to initialise default lending pool", slog.Any("error", err))
+		os.Exit(1)
+	}
+	if err := configureStableTradingEngine(rpcServer, aggregator, logger); err != nil {
+		logger.Error("failed to configure stable trading engine", slog.Any("error", err))
+		os.Exit(1)
+	}
 	rpcErrCh := make(chan error, 1)
 	go func() {
 		err := rpcServer.Start(cfg.RPCAddress)
@@ -564,6 +575,103 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 	for range ticker.C {
 		submit()
 	}
+}
+
+func ensureDefaultLendingPool(node *core.Node, privKey *crypto.PrivateKey) error {
+	if node == nil || privKey == nil {
+		return nil
+	}
+	owner := privKey.PubKey().Address()
+	return node.WithState(func(manager *nhbstate.Manager) error {
+		existing, ok, err := manager.LendingGetMarket("default")
+		if err != nil {
+			return err
+		}
+		if ok && existing != nil {
+			return nil
+		}
+		feeBps, collector := node.LendingDeveloperFeeConfig()
+		market := &lending.Market{
+			PoolID:                "default",
+			DeveloperOwner:        owner,
+			DeveloperFeeBps:       feeBps,
+			DeveloperFeeCollector: collector,
+			ReserveFactor:         node.LendingReserveFactorBps(),
+			LastUpdateBlock:       node.GetHeight(),
+			TotalNHBSupplied:      big.NewInt(0),
+			TotalSupplyShares:     big.NewInt(0),
+			TotalNHBBorrowed:      big.NewInt(0),
+		}
+		return manager.LendingPutMarket("default", market)
+	})
+}
+
+func configureStableTradingEngine(rpcServer *rpc.Server, aggregator *swap.OracleAggregator, logger *slog.Logger) error {
+	if rpcServer == nil {
+		return nil
+	}
+	assets := []stable.Asset{
+		{
+			Symbol:         "NHB",
+			BasePair:       "USD",
+			QuotePair:      "NHB",
+			QuoteTTL:       30 * time.Second,
+			MaxSlippageBps: 250,
+			SoftInventory:  1_000_000_000,
+		},
+		{
+			Symbol:         "ZNHB",
+			BasePair:       "USD",
+			QuotePair:      "ZNHB",
+			QuoteTTL:       30 * time.Second,
+			MaxSlippageBps: 500,
+			SoftInventory:  1_000_000_000,
+		},
+	}
+	engine, err := stable.NewEngine(assets, stable.Limits{DailyCap: 1_000_000_000}, nil)
+	if err != nil {
+		return err
+	}
+	engine.SetPriceMaxAge(10 * time.Minute)
+	rpcServer.ConfigureStableEngine(engine, stable.Limits{DailyCap: 1_000_000_000}, assets, time.Now)
+
+	refresh := func() {
+		if aggregator == nil {
+			return
+		}
+		now := time.Now().UTC()
+		for _, symbol := range []string{"NHB", "ZNHB"} {
+			quote, err := aggregator.GetRate("USD", symbol)
+			if err != nil {
+				if logger != nil {
+					logger.Warn("stable engine price refresh failed", slog.String("asset", symbol), slog.Any("error", err))
+				}
+				continue
+			}
+			if quote.Rate == nil || quote.Rate.Sign() <= 0 {
+				continue
+			}
+			rate, _ := quote.Rate.Float64()
+			if rate <= 0 {
+				continue
+			}
+			updated := quote.Timestamp
+			if updated.IsZero() {
+				updated = now
+			}
+			engine.RecordPrice("USD", symbol, rate, updated)
+		}
+	}
+
+	refresh()
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			refresh()
+		}
+	}()
+	return nil
 }
 
 type envLookupFunc func(string) (string, bool)

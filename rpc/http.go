@@ -287,6 +287,12 @@ type Server struct {
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
 	posRealtime *FinalityStream
+
+	explorerRealtime *ExplorerStream
+	explorerMu       sync.RWMutex
+	explorerSnapshot *ExplorerSnapshotResult
+	explorerHeight   uint64
+	explorerWindow   int
 }
 
 type proxyPolicy struct {
@@ -562,6 +568,9 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 	srv.swapStable.now = time.Now
 	if node != nil {
 		srv.posRealtime = NewFinalityStream(node)
+		srv.explorerWindow = explorerDefaultRecentBlocks
+		srv.explorerRealtime = NewExplorerStream()
+		srv.startExplorerSnapshotLoop()
 	}
 	return srv, nil
 }
@@ -755,6 +764,7 @@ func (s *Server) Serve(listener net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 	mux.HandleFunc("/ws/pos/finality", s.handlePOSFinalityWS)
+	mux.HandleFunc("/ws/explorer", s.handleExplorerWS)
 
 	grpcServer := grpc.NewServer()
 	if s.posRealtime != nil {
@@ -2340,6 +2350,26 @@ func (s *Server) rememberTx(hash string, now time.Time) bool {
 	return true
 }
 
+func (s *Server) forgetTx(hash string) {
+	if s == nil || strings.TrimSpace(hash) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.txSeen, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "0x")))
+}
+
+func (s *Server) transactionStillKnown(hash string) bool {
+	if s == nil || s.node == nil {
+		return false
+	}
+	if s.node.HasPendingTransactionHash(hash) {
+		return true
+	}
+	tx, _, _, _, err := s.findTransaction(hash)
+	return err == nil && tx != nil
+}
+
 func (s *Server) evictExpiredTxLocked(now time.Time) {
 	if len(s.txSeenQueue) == 0 {
 		return
@@ -2729,8 +2759,15 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	}
 	hash := hex.EncodeToString(hashBytes)
 	if !s.rememberTx(hash, now) {
-		writeError(w, http.StatusConflict, req.ID, codeDuplicateTx, "transaction has already been submitted", hash)
-		return
+		if s.transactionStillKnown(hash) {
+			writeResult(w, req.ID, "0x"+hash)
+			return
+		}
+		s.forgetTx(hash)
+		if !s.rememberTx(hash, now) {
+			writeResult(w, req.ID, "0x"+hash)
+			return
+		}
 	}
 
 	if err := s.node.AddTransaction(&tx); err != nil {

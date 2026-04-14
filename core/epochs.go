@@ -261,6 +261,15 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 			}
 			newSet[string(addr)] = copyBigInt(account.Stake)
 		}
+		if len(newSet) == 0 {
+			fallback, err := sp.fallbackValidatorSet(minStake)
+			if err != nil {
+				return err
+			}
+			if len(fallback) > 0 {
+				newSet = fallback
+			}
+		}
 		sp.ValidatorSet = newSet
 		if err := sp.persistValidatorSet(); err != nil {
 			return err
@@ -286,6 +295,15 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 		}
 		desired[k] = copyBigInt(v)
 	}
+	if len(desired) == 0 {
+		fallback, err := sp.fallbackValidatorSet(minStake)
+		if err != nil {
+			return err
+		}
+		if len(fallback) > 0 {
+			desired = fallback
+		}
+	}
 	if !validatorMapsEqual(sp.ValidatorSet, desired) {
 		sp.ValidatorSet = desired
 		if err := sp.persistValidatorSet(); err != nil {
@@ -293,6 +311,63 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 		}
 	}
 	return nil
+}
+
+func (sp *StateProcessor) ensureValidatorSetLiveness(now time.Time) error {
+	if sp == nil || len(sp.ValidatorSet) > 0 {
+		return nil
+	}
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return err
+	}
+	fallback, err := sp.fallbackValidatorSet(minStake)
+	if err != nil {
+		return err
+	}
+	if len(fallback) == 0 {
+		return nil
+	}
+	sp.ValidatorSet = fallback
+	return sp.persistValidatorSet()
+}
+
+func (sp *StateProcessor) fallbackValidatorSet(minStake *big.Int) (map[string]*big.Int, error) {
+	fallback := make(map[string]*big.Int)
+	addrs := make([][]byte, 0, len(sp.ValidatorSet)+len(sp.EligibleValidators))
+	seen := make(map[string]struct{})
+	appendAddr := func(addr []byte) {
+		key := string(addr)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		addrs = append(addrs, append([]byte(nil), addr...))
+	}
+
+	for addrKey := range sp.ValidatorSet {
+		appendAddr([]byte(addrKey))
+	}
+	for addrKey := range sp.EligibleValidators {
+		appendAddr([]byte(addrKey))
+	}
+	for i := len(sp.epochHistory) - 1; i >= 0; i-- {
+		for _, addr := range sp.epochHistory[i].Selected {
+			appendAddr(addr)
+		}
+	}
+
+	for _, addr := range addrs {
+		account, err := sp.getAccount(addr)
+		if err != nil {
+			return nil, err
+		}
+		if account == nil || account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
+			continue
+		}
+		fallback[string(addr)] = copyBigInt(account.Stake)
+	}
+	return fallback, nil
 }
 
 func (sp *StateProcessor) validatorReadyForActivation(account *types.Account, now time.Time) bool {

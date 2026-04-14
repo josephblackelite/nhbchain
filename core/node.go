@@ -327,6 +327,9 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	if err := stateProcessor.SetPotsoWeightConfig(n.state.PotsoWeightConfig()); err != nil {
 		return err
 	}
+	if err := stateProcessor.ensureValidatorSetLiveness(n.currentTime()); err != nil {
+		return err
+	}
 	n.state = stateProcessor
 	if err := n.refreshModulePauses(); err != nil {
 		return err
@@ -393,6 +396,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	stateProcessor, err := NewStateProcessor(stateTrie)
 	if err != nil {
+		return nil, err
+	}
+	if err := stateProcessor.ensureValidatorSetLiveness(time.Now().UTC()); err != nil {
 		return nil, err
 	}
 
@@ -2356,6 +2362,36 @@ func (n *Node) MempoolSize() int {
 	return len(n.mempool)
 }
 
+// HasPendingTransactionHash reports whether the current mempool contains a
+// transaction matching the provided canonical or 0x-prefixed hash.
+func (n *Node) HasPendingTransactionHash(hash string) bool {
+	if n == nil {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "0x"))
+	if normalized == "" {
+		return false
+	}
+
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+
+	for _, tx := range n.mempool {
+		if tx == nil {
+			continue
+		}
+		txHash, err := tx.Hash()
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(hex.EncodeToString(txHash), normalized) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func transactionKey(tx *types.Transaction) (string, error) {
 	if tx == nil {
 		return "", fmt.Errorf("nil transaction")
@@ -2393,6 +2429,13 @@ func (n *Node) requeueTransactions(txs []*types.Transaction) {
 		}
 		delete(n.proposedTxs, key)
 	}
+}
+
+// RequeueTransactions releases proposal bookkeeping for transactions that were
+// selected into a round but not finalized, allowing them to be proposed again
+// in a later round.
+func (n *Node) RequeueTransactions(txs []*types.Transaction) {
+	n.requeueTransactions(txs)
 }
 
 func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
@@ -2445,6 +2488,52 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		n.mempool[i] = nil
 	}
 	n.mempool = filtered
+}
+
+func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
+	if n == nil || len(txs) == 0 {
+		return
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+
+	dropped := make(map[string]struct{}, len(txs))
+	for _, tx := range txs {
+		key, err := transactionKey(tx)
+		if err != nil {
+			continue
+		}
+		dropped[key] = struct{}{}
+		delete(n.proposedTxs, key)
+		if n.posArrival != nil {
+			delete(n.posArrival, key)
+		}
+		n.untrackTransactionLocked(key)
+	}
+	if len(dropped) == 0 || len(n.mempool) == 0 {
+		return
+	}
+
+	filtered := n.mempool[:0]
+	for _, tx := range n.mempool {
+		key, err := transactionKey(tx)
+		if err != nil {
+			filtered = append(filtered, tx)
+			continue
+		}
+		if _, ok := dropped[key]; ok {
+			continue
+		}
+		filtered = append(filtered, tx)
+	}
+	for i := len(filtered); i < len(n.mempool); i++ {
+		n.mempool[i] = nil
+	}
+	n.mempool = filtered
+}
+
+func isPrunableProposalError(err error) bool {
+	return errors.Is(err, ErrNonceMismatch)
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
@@ -2521,57 +2610,91 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 		txs = txs[:int(maxTxs)]
 	}
 
-	orderedTxs, executionGraphRoot, err := computeDependencyGraph(txs)
-	if err != nil {
-		return nil, fmt.Errorf("canonical scheduler failed: %w", err)
+	height := n.chain.GetHeight() + 1
+	prevHash := n.chain.Tip()
+	validator := n.validatorKey.PubKey().Address().Bytes()
+
+	buildProposalState := func(candidateTxs []*types.Transaction) (*StateProcessor, []*types.Transaction, []byte, error) {
+		orderedTxs, executionGraphRoot, err := computeDependencyGraph(candidateTxs)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("canonical scheduler failed: %w", err)
+		}
+
+		n.stateMu.Lock()
+		if err := n.refreshModulePauses(); err != nil {
+			n.stateMu.Unlock()
+			return nil, nil, nil, err
+		}
+		stateCopy, err := n.state.Copy()
+		n.stateMu.Unlock()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		stateCopy.SetPauseView(n)
+		stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
+		blockTime = time.Unix(timestamp, 0).UTC()
+		stateCopy.BeginBlock(height, blockTime)
+
+		keptTxs := make([]*types.Transaction, 0, len(orderedTxs))
+		attemptPruned := make([]*types.Transaction, 0)
+		for _, tx := range orderedTxs {
+			if err := stateCopy.ApplyTransaction(tx); err != nil {
+				if isPrunableProposalError(err) {
+					attemptPruned = append(attemptPruned, tx)
+					continue
+				}
+				stateCopy.EndBlock()
+				return nil, nil, nil, err
+			}
+			keptTxs = append(keptTxs, tx)
+		}
+		if len(attemptPruned) > 0 {
+			prunedTxs = append(prunedTxs, attemptPruned...)
+			n.dropTransactionsFromMempool(attemptPruned)
+			stateCopy.EndBlock()
+			return nil, keptTxs, nil, nil
+		}
+		if err := stateCopy.ProcessBlockLifecycle(height, timestamp); err != nil {
+			stateCopy.EndBlock()
+			return nil, nil, nil, err
+		}
+		if err := n.processPendingEvidenceForState(stateCopy, height); err != nil {
+			stateCopy.EndBlock()
+			return nil, nil, nil, err
+		}
+		stateCopy.FinalizeBlock()
+		return stateCopy, keptTxs, executionGraphRoot, nil
 	}
-	txs = orderedTxs
+
+	var (
+		stateCopy          *StateProcessor
+		executionGraphRoot []byte
+	)
+	for {
+		stateCopy, txs, executionGraphRoot, err = buildProposalState(txs)
+		if err != nil {
+			return nil, err
+		}
+		if stateCopy != nil {
+			break
+		}
+	}
+	defer stateCopy.EndBlock()
 
 	header := &types.BlockHeader{
-		Height:    n.chain.GetHeight() + 1,
-		Timestamp: timestamp,
-		PrevHash:  n.chain.Tip(),
-		Validator: n.validatorKey.PubKey().Address().Bytes(),
+		Height:             height,
+		Timestamp:          timestamp,
+		PrevHash:           prevHash,
+		Validator:          validator,
+		ExecutionGraphRoot: executionGraphRoot,
 	}
 
-	// Compute TxRoot over ordered transactions
 	txRoot, err := ComputeTxRoot(txs)
 	if err != nil {
 		return nil, err
 	}
 	header.TxRoot = txRoot
-	header.ExecutionGraphRoot = executionGraphRoot
-
-	// Execute against a copy of StateDB to derive StateRoot
-	n.stateMu.Lock()
-	if err := n.refreshModulePauses(); err != nil {
-		n.stateMu.Unlock()
-		return nil, err
-	}
-	stateCopy, err := n.state.Copy()
-	n.stateMu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	stateCopy.SetPauseView(n)
-	stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
-	blockTime = time.Unix(header.Timestamp, 0).UTC()
-	stateCopy.BeginBlock(header.Height, blockTime)
-	defer stateCopy.EndBlock()
-	for _, tx := range txs {
-		if err := stateCopy.ApplyTransaction(tx); err != nil {
-			return nil, err
-		}
-	}
-	if err := stateCopy.ProcessBlockLifecycle(header.Height, header.Timestamp); err != nil {
-		return nil, err
-	}
-	if err := n.processPendingEvidenceForState(stateCopy, header.Height); err != nil {
-		return nil, err
-	}
-	stateCopy.FinalizeBlock()
-	stateRoot := stateCopy.PendingRoot()
-	header.StateRoot = stateRoot.Bytes()
+	header.StateRoot = stateCopy.PendingRoot().Bytes()
 
 	return types.NewBlock(header, txs), nil
 }

@@ -18,6 +18,7 @@ import (
 const (
 	explorerDefaultRecentBlocks        = 120
 	explorerMaxRecentBlocks            = 400
+	explorerHistoricalBackfillLimit    = 50000
 	explorerDefaultLatestBlockCount    = 15
 	explorerDefaultLatestTxCount       = 20
 	explorerDefaultAddressHistoryLimit = 50
@@ -28,13 +29,13 @@ const (
 )
 
 type explorerAddressStats struct {
-	address        string
-	label          string
-	segment        string
-	txCount24h     int
-	znhbInflow24h  *big.Int
-	balanceNHB     string
-	balanceZNHB    string
+	address       string
+	label         string
+	segment       string
+	txCount24h    int
+	znhbInflow24h *big.Int
+	balanceNHB    string
+	balanceZNHB   string
 }
 
 type explorerMerchantStats struct {
@@ -59,10 +60,14 @@ func (s *Server) handleGetExplorerSnapshot(w http.ResponseWriter, _ *http.Reques
 		recentBlocks = explorerMaxRecentBlocks
 	}
 
-	snapshot, err := s.buildExplorerSnapshot(recentBlocks)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to build explorer snapshot", err.Error())
-		return
+	snapshot := s.cachedExplorerSnapshot(recentBlocks)
+	var err error
+	if snapshot == nil {
+		snapshot, err = s.buildExplorerSnapshot(recentBlocks)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to build explorer snapshot", err.Error())
+			return
+		}
 	}
 	writeResult(w, req.ID, snapshot)
 }
@@ -201,25 +206,13 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 	totalPayments24h := 0
 	totalZNHBFlow := big.NewInt(0)
 
-	for idx, block := range recent {
+	collectBlock := func(block *types.Block, blockTps float64, includeSeries bool) {
 		if block == nil || block.Header == nil {
-			continue
+			return
 		}
 		blockHash, _ := block.Header.Hash()
 		blockRewardFlow := big.NewInt(0)
 		blockPaymentCount := 0
-
-		var blockTps float64
-		if idx > 0 && recent[idx-1] != nil && recent[idx-1].Header != nil {
-			delta := block.Header.Timestamp - recent[idx-1].Header.Timestamp
-			if delta > 0 {
-				blockTps = float64(len(block.Transactions)) / float64(delta)
-			} else {
-				blockTps = float64(len(block.Transactions))
-			}
-		} else {
-			blockTps = float64(len(block.Transactions))
-		}
 
 		for _, tx := range block.Transactions {
 			txHashBytes, hashErr := tx.Hash()
@@ -230,8 +223,10 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 			if err != nil {
 				continue
 			}
-			latestTransactions = append(latestTransactions, *record)
-			s.recordAddressActivity(addressStats, record)
+			if isExplorerUserFacingType(tx.Type) {
+				latestTransactions = append(latestTransactions, *record)
+				s.recordAddressActivity(addressStats, record)
+			}
 			s.recordMerchantActivity(merchantStats, record)
 			if isPaymentLikeType(tx.Type) {
 				blockPaymentCount++
@@ -245,10 +240,47 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 			}
 		}
 
-		timestamp := time.Unix(block.Header.Timestamp, 0).UTC().Format(time.RFC3339)
-		throughputHistory = append(throughputHistory, ExplorerSeriesPoint{Timestamp: timestamp, Value: roundTo(blockTps, 2)})
-		paymentsHistory = append(paymentsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Payments: blockPaymentCount})
-		rewardsHistory = append(rewardsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Rewards: decimalAsFloat(blockRewardFlow, explorerTokenDecimals)})
+		if includeSeries {
+			timestamp := time.Unix(block.Header.Timestamp, 0).UTC().Format(time.RFC3339)
+			throughputHistory = append(throughputHistory, ExplorerSeriesPoint{Timestamp: timestamp, Value: roundTo(blockTps, 2)})
+			paymentsHistory = append(paymentsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Payments: blockPaymentCount})
+			rewardsHistory = append(rewardsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Rewards: decimalAsFloat(blockRewardFlow, explorerTokenDecimals)})
+		}
+	}
+
+	for idx, block := range recent {
+		var blockTps float64
+		if idx > 0 && recent[idx-1] != nil && recent[idx-1].Header != nil {
+			delta := block.Header.Timestamp - recent[idx-1].Header.Timestamp
+			if delta > 0 {
+				blockTps = float64(len(block.Transactions)) / float64(delta)
+			} else {
+				blockTps = float64(len(block.Transactions))
+			}
+		} else {
+			blockTps = float64(len(block.Transactions))
+		}
+		collectBlock(block, blockTps, true)
+	}
+
+	if len(latestTransactions) < explorerDefaultLatestTxCount || len(addressStats) == 0 {
+		var oldestHeight uint64
+		if len(recent) > 0 && recent[0] != nil && recent[0].Header != nil {
+			oldestHeight = recent[0].Header.Height
+		}
+		backfillScanned := 0
+		for height := oldestHeight; height > 0 && backfillScanned < explorerHistoricalBackfillLimit; height-- {
+			block, err := chain.GetBlockByHeight(height - 1)
+			if err != nil || block == nil || block.Header == nil {
+				backfillScanned++
+				continue
+			}
+			collectBlock(block, 0, false)
+			backfillScanned++
+			if len(latestTransactions) >= explorerDefaultLatestTxCount && len(addressStats) > 0 {
+				break
+			}
+		}
 	}
 
 	sort.Slice(latestTransactions, func(i, j int) bool {
@@ -315,6 +347,9 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 		blockHash, _ := block.Header.Hash()
 		for _, tx := range block.Transactions {
 			if !transactionTouchesAddress(tx, addr.Bytes()) {
+				continue
+			}
+			if !isExplorerUserFacingType(tx.Type) {
 				continue
 			}
 			txHashBytes, hashErr := tx.Hash()
@@ -799,5 +834,14 @@ func isPaymentLikeType(t types.TxType) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isExplorerUserFacingType(t types.TxType) bool {
+	switch t {
+	case types.TxTypeHeartbeat:
+		return false
+	default:
+		return true
 	}
 }
