@@ -1150,39 +1150,22 @@ func buildTransferGasPolicyFromConfig(cfg config.Fees, defaultCollector [20]byte
 	return policy, nil
 }
 
-// SyncStakingParams refreshes the staking configuration by loading any
-// governance-managed overrides from the parameter store and applying the result
-// to the staking reward engine. Callers should ensure the global configuration
-// baseline has already been populated via SetGlobalConfig so defaults are
-// available when no overrides exist.
+// SyncStakingParams refreshes the runtime staking configuration by loading any
+// governance-managed overrides from the parameter store. This bootstrap path
+// must remain read-only with respect to canonical chain state; on-chain staking
+// reward state is advanced only during normal block execution.
 func (n *Node) SyncStakingParams() error {
 	if n == nil {
 		return fmt.Errorf("node unavailable")
 	}
 
 	base := n.globalConfigSnapshot().Staking
-	referenceHeight := uint64(0)
-	referenceTime := time.Unix(0, 0).UTC()
-	if n.chain != nil {
-		referenceHeight = n.chain.Height()
-		if ts := n.chain.LastTimestamp(); ts > 0 {
-			referenceTime = time.Unix(ts, 0).UTC()
-		}
-	}
-	if referenceTime.Unix() == 0 {
-		referenceTime = n.currentTime()
-	}
-
 	n.stateMu.Lock()
 	if n.state == nil {
 		n.stateMu.Unlock()
 		return fmt.Errorf("state unavailable")
 	}
-	n.state.BeginBlock(referenceHeight, referenceTime)
-	defer n.state.EndBlock()
-
 	manager := nhbstate.NewManager(n.state.Trie)
-
 	merged := base
 
 	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingAprBps); err != nil {
@@ -1275,10 +1258,7 @@ func (n *Node) SyncStakingParams() error {
 		}
 	}
 
-	if err := n.state.SetStakeRewardAPR(uint64(merged.AprBps)); err != nil {
-		n.stateMu.Unlock()
-		return fmt.Errorf("apply staking APR: %w", err)
-	}
+	n.state.stakeRewardAPR = uint64(merged.AprBps)
 	n.stateMu.Unlock()
 
 	n.globalCfgMu.Lock()
@@ -1292,27 +1272,20 @@ func (n *Node) SyncValidatorThresholds() error {
 	if n == nil {
 		return fmt.Errorf("node unavailable")
 	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
 	if n.state == nil {
 		return fmt.Errorf("state unavailable")
 	}
 	manager := nhbstate.NewManager(n.state.Trie)
-	if cfgMinStake := strings.TrimSpace(n.globalConfigSnapshot().Staking.MinStakeWei); cfgMinStake != "" {
-		if _, ok, err := manager.ParamStoreGet(governance.ParamKeyMinimumValidatorStake); err != nil {
-			return fmt.Errorf("load %s: %w", governance.ParamKeyMinimumValidatorStake, err)
-		} else if !ok {
-			if err := manager.ParamStoreSet(governance.ParamKeyMinimumValidatorStake, []byte(cfgMinStake)); err != nil {
-				return fmt.Errorf("persist %s: %w", governance.ParamKeyMinimumValidatorStake, err)
+	if _, ok, err := manager.ParamStoreGet(governance.ParamKeyMinimumValidatorStake); err != nil {
+		return fmt.Errorf("load %s: %w", governance.ParamKeyMinimumValidatorStake, err)
+	} else if !ok {
+		if cfgMinStake := strings.TrimSpace(n.globalConfigSnapshot().Staking.MinStakeWei); cfgMinStake != "" {
+			if _, valid := new(big.Int).SetString(cfgMinStake, 10); !valid {
+				return fmt.Errorf("invalid configured minimum validator stake %q", cfgMinStake)
 			}
 		}
-	}
-	changed, err := n.state.normalizeValidatorThresholds()
-	if err != nil {
-		return err
-	}
-	if changed {
-		n.refreshValidatorSet()
 	}
 	return nil
 }

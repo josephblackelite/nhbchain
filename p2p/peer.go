@@ -40,10 +40,20 @@ type Peer struct {
 	closed    chan struct{}
 }
 
+const (
+	persistentPeerRateFloor  = 256.0
+	persistentPeerBurstFloor = 1024.0
+	persistentPeerRateFactor = 8.0
+)
+
 func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reader, server *Server, inbound bool, persistent bool, dialAddr string) *Peer {
 	ctx, cancel := context.WithCancel(context.Background())
 	rate := server.ratePerPeer
 	burst := server.rateBurst
+	if persistent {
+		rate = maxFloat(rate*persistentPeerRateFactor, persistentPeerRateFloor)
+		burst = maxFloat(burst*persistentPeerRateFactor, persistentPeerBurstFloor)
+	}
 	if burst < rate {
 		burst = rate
 	}
@@ -67,6 +77,13 @@ func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reade
 		cancel:        cancel,
 		closed:        make(chan struct{}),
 	}
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ID returns the peer identifier.

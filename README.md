@@ -145,14 +145,22 @@ bash scripts/run_nhbcoin_node.sh --reset-state
 **That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
 ### Step 6: Delegate your 10,000 ZNHB (Stake)
-NHBCoin uses a highly secure "Cold Wallet / Hot Server" architecture. Your server is running, but it has no voting power yet. 
-To protect your funds, do **not** send your 10,000 ZNHB to your internet-connected server. Instead:
+The validator bootstrap now uses the private key from your NHBCoin wallet
+directly, so the server and the validator wallet address are the same account.
 
-1. When you ran Step 5, the script printed a line like this: `[SUCCESS] Generated Hot Validator: nhb1...`. Copy that `nhb1...` address.
-2. Log into your secure web wallet on `nhbcoin.com` (where your 10,000 ZNHB lives).
-3. Go to the **Validator** section. Paste your server's `nhb1...` address into the Node Input and Authorize.
+1. Create or log into your wallet at `nhbcoin.com`.
+2. Make sure that wallet has at least `10,000 ZNHB` staked or ready to stake.
+3. In the wallet app, go to **Settings** and reveal your private key.
+4. On your Ubuntu validator server, run:
 
-Your 10,000 ZNHB remains securely locked inside your encrypted web wallet, but the blockchain grants the block-producing (voting) power to your unhackable Linux server. All ZNHB rewards earned by the server are automatically deposited back into your secure web wallet!
+```bash
+chmod +x scripts/validator-only-bootstrap.sh
+bash scripts/validator-only-bootstrap.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+```
+
+Once the server is online, synced, and emitting validator heartbeats, the
+staked wallet becomes a validator candidate and then joins the active set at
+the next epoch boundary.
 
 ---
 
@@ -182,8 +190,8 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 On a fresh Ubuntu server, clone the repo and run:
 
 ```bash
-chmod +x scripts/deployvalidator.sh
-bash scripts/deployvalidator.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+chmod +x scripts/validator-only-bootstrap.sh
+bash scripts/validator-only-bootstrap.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
 ```
 
 What this does:
@@ -192,6 +200,7 @@ What this does:
 - installs `nhb.service`
 - builds the validator binaries
 - points the node at the NHBCoin mainnet bootnode
+- syncs block history from the network until it reaches the current head
 - starts the validator and keeps validator heartbeats flowing automatically
 
 Operational model:
@@ -200,6 +209,11 @@ Operational model:
 - the server becomes **active next epoch**, not instantly
 - readiness requires the node to be online, synced, and heartbeat-ready
 - offline validators are removed from quorum automatically at epoch rollover instead of freezing the network
+
+Compatibility note:
+
+- `scripts/deployvalidator.sh` remains available as a backwards-compatible alias
+  to the same validator-only bootstrap flow.
 
 ---
 

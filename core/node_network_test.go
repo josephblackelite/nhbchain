@@ -1,17 +1,19 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
-	"bytes"
 	"sync"
 	"testing"
 	"time"
 
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/governance"
 	"nhbchain/p2p"
 	"nhbchain/storage"
 )
@@ -327,6 +329,24 @@ func TestSyncStakingParamsUsesDeterministicReferenceTime(t *testing.T) {
 	nodeA.SetTimeSource(func() time.Time { return baseTime.Add(7 * time.Second) })
 	nodeB.SetTimeSource(func() time.Time { return baseTime.Add(37 * time.Second) })
 
+	nodeA.stateMu.Lock()
+	managerA := nhbstate.NewManager(nodeA.state.Trie)
+	if err := managerA.ParamStoreSet(governance.ParamKeyStakingAprBps, []byte("1750")); err != nil {
+		nodeA.stateMu.Unlock()
+		t.Fatalf("set staking apr A: %v", err)
+	}
+	rootABefore := nodeA.state.CurrentRoot()
+	nodeA.stateMu.Unlock()
+
+	nodeB.stateMu.Lock()
+	managerB := nhbstate.NewManager(nodeB.state.Trie)
+	if err := managerB.ParamStoreSet(governance.ParamKeyStakingAprBps, []byte("1750")); err != nil {
+		nodeB.stateMu.Unlock()
+		t.Fatalf("set staking apr B: %v", err)
+	}
+	rootBBefore := nodeB.state.CurrentRoot()
+	nodeB.stateMu.Unlock()
+
 	if err := nodeA.SyncStakingParams(); err != nil {
 		t.Fatalf("sync staking params A: %v", err)
 	}
@@ -335,15 +355,63 @@ func TestSyncStakingParamsUsesDeterministicReferenceTime(t *testing.T) {
 	}
 
 	nodeA.stateMu.RLock()
-	rootA := nodeA.state.PendingRoot()
+	rootA := nodeA.state.CurrentRoot()
+	aprA := nodeA.state.StakeRewardAPR()
 	nodeA.stateMu.RUnlock()
 
 	nodeB.stateMu.RLock()
-	rootB := nodeB.state.PendingRoot()
+	rootB := nodeB.state.CurrentRoot()
+	aprB := nodeB.state.StakeRewardAPR()
 	nodeB.stateMu.RUnlock()
 
 	if rootA != rootB {
 		t.Fatalf("expected deterministic staking sync roots, got %x vs %x", rootA.Bytes(), rootB.Bytes())
+	}
+	if rootA != rootABefore {
+		t.Fatalf("expected staking sync A to keep canonical root stable, got %x want %x", rootA.Bytes(), rootABefore.Bytes())
+	}
+	if rootB != rootBBefore {
+		t.Fatalf("expected staking sync B to keep canonical root stable, got %x want %x", rootB.Bytes(), rootBBefore.Bytes())
+	}
+	if aprA != 1750 || aprB != 1750 {
+		t.Fatalf("expected runtime staking APR 1750, got %d and %d", aprA, aprB)
+	}
+}
+
+func TestSyncValidatorThresholdsDoesNotMutateCanonicalState(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	cfg := node.globalConfigSnapshot()
+	cfg.Staking.MinStakeWei = "10000000000000000000000"
+	if err := node.SetGlobalConfig(cfg); err != nil {
+		t.Fatalf("set global config: %v", err)
+	}
+
+	node.stateMu.RLock()
+	rootBefore := node.state.CurrentRoot()
+	node.stateMu.RUnlock()
+
+	if err := node.SyncValidatorThresholds(); err != nil {
+		t.Fatalf("sync validator thresholds: %v", err)
+	}
+
+	node.stateMu.RLock()
+	rootAfter := node.state.CurrentRoot()
+	node.stateMu.RUnlock()
+
+	if rootAfter != rootBefore {
+		t.Fatalf("expected validator threshold sync to keep canonical root stable, got %x want %x", rootAfter.Bytes(), rootBefore.Bytes())
 	}
 }
 

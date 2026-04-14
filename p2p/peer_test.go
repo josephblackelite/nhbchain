@@ -94,3 +94,28 @@ func TestPeerReadLoopRejectsOversizedLine(t *testing.T) {
 		t.Fatalf("expected invalid metric to be recorded, got %+v", metrics)
 	}
 }
+
+func TestPersistentPeerGetsElevatedRateLimit(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xCD}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.RateMsgsPerSec = 32
+	cfg.RateBurst = 200
+	server := NewServer(handler, mustKey(t), cfg)
+
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	peer := newPeer("peer-persistent", cfg.ClientVersion, left, bufio.NewReader(left), server, false, true, "127.0.0.1:6001")
+	if peer.baseRate < persistentPeerRateFloor {
+		t.Fatalf("expected persistent peer rate floor, got %.2f", peer.baseRate)
+	}
+	if peer.baseBurst < persistentPeerBurstFloor {
+		t.Fatalf("expected persistent peer burst floor, got %.2f", peer.baseBurst)
+	}
+	if peer.baseBurst < peer.baseRate {
+		t.Fatalf("expected burst >= rate, got rate %.2f burst %.2f", peer.baseRate, peer.baseBurst)
+	}
+}
