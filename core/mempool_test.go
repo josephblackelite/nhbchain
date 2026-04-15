@@ -14,6 +14,8 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/swap"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestNodeMempoolConcurrentAdds(t *testing.T) {
@@ -678,27 +680,58 @@ func ensureAccountState(t *testing.T, node *Node, key *crypto.PrivateKey, nonce 
 func ensureAccountBytesState(t *testing.T, node *Node, addr []byte, nonce uint64, balanceNHB int64) {
 	t.Helper()
 	node.stateMu.Lock()
-	defer node.stateMu.Unlock()
 	manager := nhbstate.NewManager(node.state.Trie)
 	account := &types.Account{
 		Nonce:      nonce,
 		BalanceNHB: big.NewInt(balanceNHB),
 	}
 	if err := manager.PutAccount(addr, account); err != nil {
+		node.stateMu.Unlock()
 		t.Fatalf("put account: %v", err)
 	}
+	root, err := node.state.Commit(node.chain.GetHeight())
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("commit seeded account state: %v", err)
+	}
+	commitStateAsEmptyBlock(t, node, root)
 }
 
 func setAccountBalanceNHB(t *testing.T, node *Node, addr []byte, nonce uint64, balanceNHB *big.Int) {
 	t.Helper()
 	node.stateMu.Lock()
-	defer node.stateMu.Unlock()
 	manager := nhbstate.NewManager(node.state.Trie)
 	account := &types.Account{
 		Nonce:      nonce,
 		BalanceNHB: new(big.Int).Set(balanceNHB),
 	}
 	if err := manager.PutAccount(addr, account); err != nil {
+		node.stateMu.Unlock()
 		t.Fatalf("put account: %v", err)
+	}
+	root, err := node.state.Commit(node.chain.GetHeight())
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("commit seeded account state: %v", err)
+	}
+	commitStateAsEmptyBlock(t, node, root)
+}
+
+func commitStateAsEmptyBlock(t *testing.T, node *Node, root common.Hash) {
+	t.Helper()
+	txRoot, err := ComputeTxRoot(nil)
+	if err != nil {
+		t.Fatalf("compute empty tx root: %v", err)
+	}
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: node.currentTime().Unix(),
+		PrevHash:  node.chain.Tip(),
+		StateRoot: root.Bytes(),
+		TxRoot:    txRoot,
+		Validator: node.validatorKey.PubKey().Address().Bytes(),
+	}
+	if err := node.chain.AddBlock(types.NewBlock(header, nil)); err != nil {
+		t.Fatalf("commit seeded empty block: %v", err)
 	}
 }

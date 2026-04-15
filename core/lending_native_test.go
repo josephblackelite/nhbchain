@@ -127,6 +127,79 @@ func TestStateProcessorPersistsLendingPoolState(t *testing.T) {
 	}
 }
 
+func TestLendingStateAdapterMigratesLegacyAccountState(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	tr, err := statetrie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	sp, err := NewStateProcessor(tr)
+	if err != nil {
+		t.Fatalf("new state processor: %v", err)
+	}
+	sp.SetLendingRiskParameters(lending.RiskParameters{
+		MaxLTV:               7_500,
+		LiquidationThreshold: 8_000,
+	})
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	account := &types.Account{
+		Nonce:             0,
+		BalanceNHB:        big.NewInt(0),
+		BalanceZNHB:       big.NewInt(0),
+		CollateralBalance: mustBigInt(t, "15000000000000000000000"),
+		SupplyShares:      mustBigInt(t, "1500000000000000000000"),
+		DebtPrincipal:     mustBigInt(t, "250000000000000000000"),
+	}
+	if err := manager.PutAccount(userKey.PubKey().Address().Bytes(), account); err != nil {
+		t.Fatalf("seed legacy account: %v", err)
+	}
+
+	adapter := sp.lendingStateAdapter("default")
+	user, err := adapter.GetUserAccount("default", crypto.MustNewAddress(crypto.NHBPrefix, userKey.PubKey().Address().Bytes()))
+	if err != nil {
+		t.Fatalf("migrate legacy user account: %v", err)
+	}
+	if user == nil {
+		t.Fatalf("expected migrated lending account")
+	}
+	if user.CollateralZNHB.Cmp(account.CollateralBalance) != 0 {
+		t.Fatalf("unexpected collateral after migration: %v", user.CollateralZNHB)
+	}
+	if user.DebtNHB.Cmp(account.DebtPrincipal) != 0 {
+		t.Fatalf("unexpected debt after migration: %v", user.DebtNHB)
+	}
+
+	var raw [20]byte
+	copy(raw[:], userKey.PubKey().Address().Bytes())
+	storedUser, ok, err := manager.LendingGetUserAccount("default", raw)
+	if err != nil {
+		t.Fatalf("load migrated lending user: %v", err)
+	}
+	if !ok || storedUser == nil {
+		t.Fatalf("expected migrated lending user to persist")
+	}
+	market, ok, err := manager.LendingGetMarket("default")
+	if err != nil {
+		t.Fatalf("load migrated market: %v", err)
+	}
+	if !ok || market == nil {
+		t.Fatalf("expected migrated market to persist")
+	}
+	if market.TotalNHBSupplied == nil || market.TotalNHBSupplied.Sign() <= 0 {
+		t.Fatalf("expected migrated supplied NHB total, got %v", market.TotalNHBSupplied)
+	}
+	if market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Cmp(account.DebtPrincipal) != 0 {
+		t.Fatalf("unexpected migrated borrowed total: %v", market.TotalNHBBorrowed)
+	}
+}
+
 func mustSignLendingTx(t *testing.T, key *crypto.PrivateKey, txType types.TxType, nonce uint64, value *big.Int, payload lendingNativePayload) *types.Transaction {
 	t.Helper()
 	data, err := json.Marshal(payload)

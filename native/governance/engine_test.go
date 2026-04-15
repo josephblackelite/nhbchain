@@ -88,6 +88,28 @@ func TestValidatorForParamStaking(t *testing.T) {
 	}
 }
 
+func TestValidateParamPayloadAcceptsLegacyWrapperCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	engine := NewEngine()
+	engine.SetPolicy(ProposalPolicy{
+		AllowedParams: []string{ParamKeyStakingAprBps},
+	})
+
+	payload := `{"Update":{"staking.aprBps":1250}}`
+	validated, err := engine.validateParamPayload(payload)
+	if err != nil {
+		t.Fatalf("validate legacy wrapped payload: %v", err)
+	}
+	raw, ok := validated[ParamKeyStakingAprBps]
+	if !ok {
+		t.Fatalf("expected validated payload for %s", ParamKeyStakingAprBps)
+	}
+	if strings.TrimSpace(string(raw)) != "1250" {
+		t.Fatalf("unexpected normalized payload value: %s", string(raw))
+	}
+}
+
 func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernanceState {
 	accounts := make(map[string]*types.Account)
 	for addr, acc := range initial {

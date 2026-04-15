@@ -14,6 +14,8 @@ import (
 
 const defaultLendingPoolID = "default"
 
+var lendingLegacyRay = mustLegacyBigInt("1000000000000000000000000000")
+
 type lendingNativePayload struct {
 	PoolID          string `json:"poolId,omitempty"`
 	UseDeveloperFee bool   `json:"useDeveloperFee,omitempty"`
@@ -103,8 +105,9 @@ func (sp *StateProcessor) decodeLendingPayload(data []byte) (*lendingNativePaylo
 
 func (sp *StateProcessor) lendingStateAdapter(poolID string) *lendingStateAdapter {
 	return &lendingStateAdapter{
-		manager: nhbstate.NewManager(sp.Trie),
-		poolID:  normalizeLendingPoolID(poolID),
+		manager:   nhbstate.NewManager(sp.Trie),
+		poolID:    normalizeLendingPoolID(poolID),
+		processor: sp,
 	}
 }
 
@@ -114,6 +117,14 @@ func normalizeLendingPoolID(poolID string) string {
 		return defaultLendingPoolID
 	}
 	return trimmed
+}
+
+func mustLegacyBigInt(value string) *big.Int {
+	out, ok := new(big.Int).SetString(strings.TrimSpace(value), 10)
+	if !ok {
+		panic("invalid lending legacy integer constant")
+	}
+	return out
 }
 
 func (sp *StateProcessor) ensureLendingMarket(adapter *lendingStateAdapter) (*lending.Market, error) {
@@ -149,6 +160,9 @@ func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lendin
 		return nil, nil, fmt.Errorf("lending: state unavailable")
 	}
 	adapter := sp.lendingStateAdapter(poolID)
+	if err := adapter.reconcileLegacyPoolState(); err != nil {
+		return nil, nil, err
+	}
 	market, err := sp.ensureLendingMarket(adapter)
 	if err != nil {
 		return nil, nil, err
@@ -300,8 +314,191 @@ func (sp *StateProcessor) incrementNativeAccountNonce(sender []byte) error {
 }
 
 type lendingStateAdapter struct {
-	manager *nhbstate.Manager
-	poolID  string
+	manager   *nhbstate.Manager
+	poolID    string
+	processor *StateProcessor
+}
+
+func (a *lendingStateAdapter) reconcileLegacyPoolState() error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	accounts, err := a.manager.AccountList()
+	if err != nil {
+		return err
+	}
+	for _, addr := range accounts {
+		if _, err := a.reconcileLegacyUserAccount(crypto.MustNewAddress(crypto.NHBPrefix, addr[:])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*lending.UserAccount, error) {
+	if a == nil || a.manager == nil {
+		return nil, fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	if account, ok, err := a.manager.LendingGetUserAccount(a.poolID, raw); err != nil {
+		return nil, err
+	} else if ok {
+		if account.Address.Bytes() == nil {
+			account.Address = addr
+		}
+		return account, nil
+	}
+
+	legacyAccount, err := a.manager.GetAccount(addr.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	user, supplyAmount, debtAmount, ok := a.legacyLendingPosition(addr, legacyAccount)
+	if !ok {
+		return nil, nil
+	}
+
+	market, okMarket, err := a.manager.LendingGetMarket(a.poolID)
+	if err != nil {
+		return nil, err
+	}
+	if !okMarket || market == nil {
+		market = a.defaultMarket()
+	}
+	if market.SupplyIndex == nil || market.SupplyIndex.Sign() == 0 {
+		market.SupplyIndex = normalizedLendingIndexLegacy(legacyAccount.LendingSnapshot.SupplyIndex)
+	}
+	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
+		market.BorrowIndex = normalizedLendingIndexLegacy(legacyAccount.LendingSnapshot.BorrowIndex)
+	}
+	if market.BorrowedThisBlock == nil {
+		market.BorrowedThisBlock = big.NewInt(0)
+	}
+	if market.OracleMedianWei == nil {
+		market.OracleMedianWei = big.NewInt(0)
+	}
+	if market.OraclePrevMedianWei == nil {
+		market.OraclePrevMedianWei = big.NewInt(0)
+	}
+	market.TotalSupplyShares = sumBigIntLegacy(market.TotalSupplyShares, user.SupplyShares)
+	market.TotalNHBSupplied = sumBigIntLegacy(market.TotalNHBSupplied, supplyAmount)
+	market.TotalNHBBorrowed = sumBigIntLegacy(market.TotalNHBBorrowed, debtAmount)
+	if a.processor != nil {
+		market.LastUpdateBlock = a.processor.blockHeight()
+	}
+
+	if err := a.manager.LendingPutMarket(a.poolID, market); err != nil {
+		return nil, err
+	}
+	if err := a.manager.LendingPutUserAccount(a.poolID, user); err != nil {
+		return nil, err
+	}
+	if err := a.manager.PutAccount(addr.Bytes(), legacyAccount); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (a *lendingStateAdapter) defaultMarket() *lending.Market {
+	market := &lending.Market{
+		PoolID:              a.poolID,
+		LastUpdateBlock:     0,
+		TotalNHBSupplied:    big.NewInt(0),
+		TotalSupplyShares:   big.NewInt(0),
+		TotalNHBBorrowed:    big.NewInt(0),
+		SupplyIndex:         new(big.Int).Set(lendingLegacyRay),
+		BorrowIndex:         new(big.Int).Set(lendingLegacyRay),
+		BorrowedThisBlock:   big.NewInt(0),
+		OracleMedianWei:     big.NewInt(0),
+		OraclePrevMedianWei: big.NewInt(0),
+	}
+	if a.processor != nil {
+		market.LastUpdateBlock = a.processor.blockHeight()
+		market.ReserveFactor = a.processor.lendingReserveFactorBps
+		market.DeveloperFeeBps = a.processor.lendingDeveloperFeeBps
+		market.DeveloperOwner = cloneAddress(a.processor.lendingModuleAddr)
+		market.DeveloperFeeCollector = cloneAddress(a.processor.lendingDeveloperCollector)
+	}
+	return market
+}
+
+func (a *lendingStateAdapter) legacyLendingPosition(addr crypto.Address, account *types.Account) (*lending.UserAccount, *big.Int, *big.Int, bool) {
+	if account == nil {
+		return nil, nil, nil, false
+	}
+	collateral := cloneBigIntLegacy(account.CollateralBalance)
+	supplyShares := cloneBigIntLegacy(account.SupplyShares)
+	debt := cloneBigIntLegacy(account.DebtPrincipal)
+	if collateral.Sign() == 0 && supplyShares.Sign() == 0 && debt.Sign() == 0 {
+		return nil, nil, nil, false
+	}
+	supplyIndex := normalizedLendingIndexLegacy(account.LendingSnapshot.SupplyIndex)
+	borrowIndex := normalizedLendingIndexLegacy(account.LendingSnapshot.BorrowIndex)
+	user := &lending.UserAccount{
+		Address:        addr,
+		CollateralZNHB: collateral,
+		SupplyShares:   supplyShares,
+		DebtNHB:        debt,
+		ScaledDebt:     scaledDebtFromAmountLegacy(debt, borrowIndex),
+	}
+	return user, liquidityFromSharesLegacy(supplyShares, supplyIndex), debt, true
+}
+
+func normalizedLendingIndexLegacy(index *big.Int) *big.Int {
+	if index == nil || index.Sign() == 0 {
+		return new(big.Int).Set(lendingLegacyRay)
+	}
+	return new(big.Int).Set(index)
+}
+
+func cloneBigIntLegacy(value *big.Int) *big.Int {
+	if value == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(value)
+}
+
+func sumBigIntLegacy(dst, add *big.Int) *big.Int {
+	out := cloneBigIntLegacy(dst)
+	if add == nil {
+		return out
+	}
+	return out.Add(out, add)
+}
+
+func liquidityFromSharesLegacy(shares, index *big.Int) *big.Int {
+	if shares == nil || shares.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	normalized := normalizedLendingIndexLegacy(index)
+	scaled := new(big.Int).Mul(shares, normalized)
+	scaled.Add(scaled, new(big.Int).Rsh(new(big.Int).Set(lendingLegacyRay), 1))
+	scaled.Quo(scaled, lendingLegacyRay)
+	return scaled
+}
+
+func scaledDebtFromAmountLegacy(amount, index *big.Int) *big.Int {
+	if amount == nil || amount.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	normalized := normalizedLendingIndexLegacy(index)
+	scaled := new(big.Int).Mul(amount, lendingLegacyRay)
+	scaled.Add(scaled, halfUpLegacy(normalized))
+	scaled.Quo(scaled, normalized)
+	if scaled.Sign() == 0 {
+		return big.NewInt(1)
+	}
+	return scaled
+}
+
+func halfUpLegacy(x *big.Int) *big.Int {
+	if x == nil || x.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	half := new(big.Int).Add(x, big.NewInt(1))
+	half.Rsh(half, 1)
+	return half
 }
 
 func (a *lendingStateAdapter) GetMarket(string) (*lending.Market, error) {
@@ -336,7 +533,7 @@ func (a *lendingStateAdapter) GetUserAccount(_ string, addr crypto.Address) (*le
 		return nil, err
 	}
 	if !ok {
-		return nil, nil
+		return a.reconcileLegacyUserAccount(addr)
 	}
 	if account.Address.Bytes() == nil {
 		account.Address = addr

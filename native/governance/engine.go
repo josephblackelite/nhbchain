@@ -856,6 +856,11 @@ func (e *Engine) validateParamPayload(payloadJSON string) (map[string]json.RawMe
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("governance: payload must contain at least one parameter")
 	}
+	if normalized, ok, err := normalizeLegacyParamPayload(payload); err != nil {
+		return nil, err
+	} else if ok {
+		payload = normalized
+	}
 	validated := make(map[string]json.RawMessage, len(payload))
 	for key, raw := range payload {
 		trimmed := strings.TrimSpace(key)
@@ -875,6 +880,26 @@ func (e *Engine) validateParamPayload(payloadJSON string) (map[string]json.RawMe
 		validated[trimmed] = append(json.RawMessage(nil), raw...)
 	}
 	return validated, nil
+}
+
+func normalizeLegacyParamPayload(payload map[string]json.RawMessage) (map[string]json.RawMessage, bool, error) {
+	if len(payload) != 1 {
+		return nil, false, nil
+	}
+	for key, raw := range payload {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "update", "parameter", "params":
+			var nested map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &nested); err != nil {
+				return nil, false, fmt.Errorf("governance: invalid legacy parameter payload: %w", err)
+			}
+			if len(nested) == 0 {
+				return nil, false, fmt.Errorf("governance: payload must contain at least one parameter")
+			}
+			return nested, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 func parseUintString(value string) (*big.Int, error) {
