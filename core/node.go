@@ -311,6 +311,11 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetPaymasterAutoTopUpPolicy(n.paymasterTopUpPolicy)
 	stateProcessor.SetFeePolicy(n.feesPolicy)
 	stateProcessor.SetTransferGasPolicy(n.transferGasPolicy)
+	stateProcessor.SetLendingAddresses(n.lendingModuleAddr, n.lendingCollateralAddr)
+	stateProcessor.SetLendingRiskParameters(n.lendingParams)
+	stateProcessor.SetLendingAccrualConfig(n.lendingReserveFactorBps, n.lendingProtocolFeeBps, n.lendingInterestModel)
+	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
+	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	if err := stateProcessor.SetEngagementConfig(n.state.EngagementConfig()); err != nil {
 		return err
@@ -510,6 +515,11 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetPaymasterAutoTopUpPolicy(node.paymasterTopUpPolicy)
 	stateProcessor.SetFeePolicy(node.feesPolicy)
 	stateProcessor.SetTransferGasPolicy(node.transferGasPolicy)
+	stateProcessor.SetLendingAddresses(node.lendingModuleAddr, node.lendingCollateralAddr)
+	stateProcessor.SetLendingRiskParameters(node.lendingParams)
+	stateProcessor.SetLendingAccrualConfig(node.lendingReserveFactorBps, node.lendingProtocolFeeBps, node.lendingInterestModel)
+	stateProcessor.SetLendingDeveloperFee(node.lendingDeveloperFeeBps, node.lendingDeveloperFeeCollector)
+	stateProcessor.SetLendingCollateralRouting(node.lendingCollateralRouting)
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -557,6 +567,32 @@ func shouldAttemptGenesisRebuild(err error) bool {
 
 func normalizeModuleName(module string) string {
 	return strings.ToLower(strings.TrimSpace(module))
+}
+
+func (n *Node) ensurePendingStateMatchesCommittedHeadLocked(context string) error {
+	if n == nil || n.state == nil || n.chain == nil {
+		return nil
+	}
+	header := n.chain.CurrentHeader()
+	if header == nil || len(header.StateRoot) == 0 {
+		return nil
+	}
+	expectedRoot := common.BytesToHash(header.StateRoot)
+	pendingRoot := n.state.PendingRoot()
+	if pendingRoot == expectedRoot {
+		return nil
+	}
+	slog.Warn(
+		"state root drift detected; resetting to committed chain head",
+		slog.String("context", strings.TrimSpace(context)),
+		slog.Uint64("height", header.Height),
+		slog.String("expected_state_root", fmt.Sprintf("%x", expectedRoot.Bytes())),
+		slog.String("pending_state_root", fmt.Sprintf("%x", pendingRoot.Bytes())),
+	)
+	if err := n.state.ResetToRoot(expectedRoot); err != nil {
+		return fmt.Errorf("reset drifted state root: %w", err)
+	}
+	return nil
 }
 
 // refreshModulePauses loads pause configuration from state. Callers must hold
@@ -1656,6 +1692,11 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 	n.lendingMu.Lock()
 	n.lendingParams = copyParams
 	n.lendingMu.Unlock()
+	n.stateMu.Lock()
+	if n.state != nil {
+		n.state.SetLendingRiskParameters(copyParams)
+	}
+	n.stateMu.Unlock()
 }
 
 // LendingRiskParameters returns the currently configured lending risk limits.
@@ -1683,7 +1724,13 @@ func (n *Node) SetLendingAccrualConfig(reserveBps, protocolFeeBps uint64, model 
 	} else {
 		n.lendingInterestModel = nil
 	}
+	stateModel := cloneLendingInterestModel(n.lendingInterestModel)
 	n.lendingMu.Unlock()
+	n.stateMu.Lock()
+	if n.state != nil {
+		n.state.SetLendingAccrualConfig(reserveBps, protocolFeeBps, stateModel)
+	}
+	n.stateMu.Unlock()
 }
 
 // LendingReserveFactorBps exposes the configured reserve factor basis points.
@@ -1725,6 +1772,11 @@ func (n *Node) SetLendingDeveloperFee(bps uint64, collector crypto.Address) {
 	n.lendingDeveloperFeeBps = bps
 	n.lendingDeveloperFeeCollector = cloned
 	n.lendingMu.Unlock()
+	n.stateMu.Lock()
+	if n.state != nil {
+		n.state.SetLendingDeveloperFee(bps, cloned)
+	}
+	n.stateMu.Unlock()
 }
 
 // LendingDeveloperFeeConfig returns the currently configured developer fee
@@ -1748,6 +1800,11 @@ func (n *Node) SetLendingCollateralRouting(routing lending.CollateralRouting) {
 	n.lendingMu.Lock()
 	n.lendingCollateralRouting = clone
 	n.lendingMu.Unlock()
+	n.stateMu.Lock()
+	if n.state != nil {
+		n.state.SetLendingCollateralRouting(clone)
+	}
+	n.stateMu.Unlock()
 }
 
 // LendingCollateralRouting returns a copy of the currently configured
@@ -2621,6 +2678,10 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 		}
 
 		n.stateMu.Lock()
+		if err := n.ensurePendingStateMatchesCommittedHeadLocked("create block"); err != nil {
+			n.stateMu.Unlock()
+			return nil, nil, nil, err
+		}
 		if err := n.refreshModulePauses(); err != nil {
 			n.stateMu.Unlock()
 			return nil, nil, nil, err
@@ -2735,6 +2796,9 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
+	if err := n.ensurePendingStateMatchesCommittedHeadLocked("validate block"); err != nil {
+		return err
+	}
 	if err := n.refreshModulePauses(); err != nil {
 		return err
 	}
@@ -2879,6 +2943,9 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
+	if err := n.ensurePendingStateMatchesCommittedHeadLocked("commit block"); err != nil {
+		return err
+	}
 
 	currentHeight := n.chain.Height()
 	if b.Header.Height <= currentHeight {
@@ -7053,6 +7120,9 @@ func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
 	defer n.stateMu.Unlock()
 	if n.state == nil {
 		return fmt.Errorf("state unavailable")
+	}
+	if err := n.ensurePendingStateMatchesCommittedHeadLocked("with state"); err != nil {
+		return err
 	}
 	manager := nhbstate.NewManager(n.state.Trie)
 	return fn(manager)

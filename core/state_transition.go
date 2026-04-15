@@ -26,6 +26,7 @@ import (
 	"nhbchain/native/escrow"
 	"nhbchain/native/fees"
 	"nhbchain/native/governance"
+	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
 	"nhbchain/native/pos"
 	"nhbchain/native/potso"
@@ -129,6 +130,15 @@ type StateProcessor struct {
 	intentTTL                  time.Duration
 	feePolicy                  fees.Policy
 	transferGasPolicy          TransferGasPolicy
+	lendingParams              lending.RiskParameters
+	lendingModuleAddr          crypto.Address
+	lendingCollateralAddr      crypto.Address
+	lendingDeveloperFeeBps     uint64
+	lendingDeveloperCollector  crypto.Address
+	lendingInterestModel       *lending.InterestModel
+	lendingReserveFactorBps    uint64
+	lendingProtocolFeeBps      uint64
+	lendingCollateralRouting   lending.CollateralRouting
 	blockCtx                   BlockCtx
 	swapPayoutAuthorities      map[string]struct{}
 }
@@ -138,36 +148,43 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	escEngine := escrow.NewEngine()
 	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
-		Trie:                  tr,
-		stateDB:               stateDB,
-		LoyaltyEngine:         loyalty.NewEngine(),
-		EscrowEngine:          escEngine,
-		TradeEngine:           tradeEngine,
-		usernameToAddr:        make(map[string][]byte),
-		ValidatorSet:          make(map[string]*big.Int),
-		EligibleValidators:    make(map[string]*big.Int),
-		committedRoot:         tr.Root(),
-		events:                make([]types.Event, 0),
-		nowFunc:               time.Now,
-		execContext:           nil,
-		engagementConfig:      engagement.DefaultConfig(),
-		epochConfig:           epoch.DefaultConfig(),
-		epochHistory:          make([]epoch.Snapshot, 0),
-		rewardConfig:          rewards.DefaultConfig(),
-		rewardHistory:         make([]rewards.EpochSettlement, 0),
-		stakeRewardEngine:     rewards.NewEngine(),
-		stakeRewardAPR:        0,
-		potsoRewardConfig:     potso.DefaultRewardConfig(),
-		potsoWeightConfig:     potso.DefaultWeightParams(),
-		paymasterEnabled:      true,
-		paymasterLimits:       PaymasterLimits{},
-		paymasterTopUp:        PaymasterAutoTopUpPolicy{Token: "ZNHB"},
-		quotaConfig:           make(map[string]nativecommon.Quota),
-		intentTTL:             defaultIntentTTL,
-		feePolicy:             fees.Policy{Domains: map[string]fees.DomainPolicy{}},
-		transferGasPolicy:     TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
-		blockCtx:              BlockCtx{},
-		swapPayoutAuthorities: make(map[string]struct{}),
+		Trie:                     tr,
+		stateDB:                  stateDB,
+		LoyaltyEngine:            loyalty.NewEngine(),
+		EscrowEngine:             escEngine,
+		TradeEngine:              tradeEngine,
+		usernameToAddr:           make(map[string][]byte),
+		ValidatorSet:             make(map[string]*big.Int),
+		EligibleValidators:       make(map[string]*big.Int),
+		committedRoot:            tr.Root(),
+		events:                   make([]types.Event, 0),
+		nowFunc:                  time.Now,
+		execContext:              nil,
+		engagementConfig:         engagement.DefaultConfig(),
+		epochConfig:              epoch.DefaultConfig(),
+		epochHistory:             make([]epoch.Snapshot, 0),
+		rewardConfig:             rewards.DefaultConfig(),
+		rewardHistory:            make([]rewards.EpochSettlement, 0),
+		stakeRewardEngine:        rewards.NewEngine(),
+		stakeRewardAPR:           0,
+		potsoRewardConfig:        potso.DefaultRewardConfig(),
+		potsoWeightConfig:        potso.DefaultWeightParams(),
+		paymasterEnabled:         true,
+		paymasterLimits:          PaymasterLimits{},
+		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		quotaConfig:              make(map[string]nativecommon.Quota),
+		intentTTL:                defaultIntentTTL,
+		feePolicy:                fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		transferGasPolicy:        TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
+		lendingParams:            lending.RiskParameters{},
+		lendingModuleAddr:        deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix),
+		lendingCollateralAddr:    deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix),
+		lendingInterestModel:     lending.DefaultInterestModel.Clone(),
+		lendingReserveFactorBps:  0,
+		lendingProtocolFeeBps:    0,
+		lendingCollateralRouting: lending.CollateralRouting{},
+		blockCtx:                 BlockCtx{},
+		swapPayoutAuthorities:    make(map[string]struct{}),
 	}
 	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
@@ -1478,6 +1495,15 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		intentTTL:                  sp.intentTTL,
 		feePolicy:                  sp.feePolicy.Clone(),
 		transferGasPolicy:          sp.transferGasPolicy.Clone(),
+		lendingParams:              cloneLendingRiskParameters(sp.lendingParams),
+		lendingModuleAddr:          cloneAddress(sp.lendingModuleAddr),
+		lendingCollateralAddr:      cloneAddress(sp.lendingCollateralAddr),
+		lendingDeveloperFeeBps:     sp.lendingDeveloperFeeBps,
+		lendingDeveloperCollector:  cloneAddress(sp.lendingDeveloperCollector),
+		lendingInterestModel:       cloneLendingInterestModel(sp.lendingInterestModel),
+		lendingReserveFactorBps:    sp.lendingReserveFactorBps,
+		lendingProtocolFeeBps:      sp.lendingProtocolFeeBps,
+		lendingCollateralRouting:   sp.lendingCollateralRouting.Clone(),
 		blockCtx:                   blockCtxCopy,
 		swapPayoutAuthorities:      payoutAuthCopy,
 	}, nil
@@ -2570,6 +2596,54 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeLendingSupplyNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingSupplyNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingWithdrawNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingWithdrawNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingDepositZNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingDepositZNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingWithdrawZNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingWithdrawZNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingBorrowNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingBorrowNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingRepayNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingRepayNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	}
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }

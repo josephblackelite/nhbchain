@@ -40,6 +40,7 @@ const (
 	validatorPassEnv    = "NHB_VALIDATOR_PASS"
 	genesisPathEnv      = "NHB_GENESIS"
 	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
+	znhbOraclePriceEnv  = "NHB_ZNHB_ORACLE_PRICE_USD"
 )
 
 func main() {
@@ -273,9 +274,9 @@ func main() {
 	aggregator.Register("manual", manualOracle)
 	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
 	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
-	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "nhb", "ZNHB": "znhb"}))
+	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "tether"}))
 	_ = manualOracle.SetDecimal("USD", "NHB", "1.0", time.Now().UTC())
-	_ = manualOracle.SetDecimal("USD", "ZNHB", "1.0", time.Now().UTC())
+	_ = manualOracle.SetDecimal("USD", "ZNHB", resolveZNHBOraclePrice(), time.Now().UTC())
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
 	sanctionsParams, err := swapCfg.Sanctions.Parameters()
@@ -733,6 +734,17 @@ func resolveAllowAutogenesis(cfgValue bool, cliSet bool, cliValue bool, lookup e
 	}
 
 	return allow, nil
+}
+
+func resolveZNHBOraclePrice() string {
+	trimmed := strings.TrimSpace(os.Getenv(znhbOraclePriceEnv))
+	if trimmed == "" {
+		return "0.05"
+	}
+	if _, ok := new(big.Rat).SetString(trimmed); !ok {
+		return "0.05"
+	}
+	return trimmed
 }
 
 func flagWasProvided(name string) bool {

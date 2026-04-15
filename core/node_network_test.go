@@ -253,6 +253,90 @@ func TestProcessNetworkMessageBlocksCatchUpAllowsHistoricalTimestamps(t *testing
 	}
 }
 
+func TestProcessNetworkMessageBlocksCatchUpResetsLocalStateDrift(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	sourceDB := storage.NewMemDB()
+	t.Cleanup(func() { sourceDB.Close() })
+	source, err := NewNode(sourceDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new source node: %v", err)
+	}
+
+	targetDB := storage.NewMemDB()
+	t.Cleanup(func() { targetDB.Close() })
+	target, err := NewNode(targetDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new target node: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		block, err := source.CreateBlock(nil)
+		if err != nil {
+			t.Fatalf("source create block %d: %v", i, err)
+		}
+		if err := source.CommitBlock(block); err != nil {
+			t.Fatalf("source commit block %d: %v", i, err)
+		}
+	}
+
+	initialBlocks := make([]*types.Block, 0, 2)
+	for height := uint64(1); height <= source.GetHeight(); height++ {
+		block, err := source.GetBlockByHeight(height)
+		if err != nil {
+			t.Fatalf("get source block %d: %v", height, err)
+		}
+		initialBlocks = append(initialBlocks, block)
+	}
+	initialPayload, err := json.Marshal(p2p.BlocksPayload{Blocks: initialBlocks})
+	if err != nil {
+		t.Fatalf("marshal initial blocks payload: %v", err)
+	}
+	if err := target.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeBlocks, Payload: initialPayload}); err != nil {
+		t.Fatalf("prime target blocks: %v", err)
+	}
+	if got := target.GetHeight(); got != source.GetHeight() {
+		t.Fatalf("expected target height %d after initial sync, got %d", source.GetHeight(), got)
+	}
+
+	// Simulate a non-canonical local trie mutation on the target validator.
+	target.stateMu.Lock()
+	manager := nhbstate.NewManager(target.state.Trie)
+	if err := manager.ParamStoreSet(governance.ParamKeyMinimumValidatorStake, []byte("123456789")); err != nil {
+		target.stateMu.Unlock()
+		t.Fatalf("mutate target state: %v", err)
+	}
+	driftedRoot := target.state.PendingRoot()
+	target.stateMu.Unlock()
+
+	if bytes.Equal(driftedRoot.Bytes(), target.chain.CurrentHeader().StateRoot) {
+		t.Fatalf("expected drifted pending root to differ from committed chain head")
+	}
+
+	block, err := source.CreateBlock(nil)
+	if err != nil {
+		t.Fatalf("source create post-drift block: %v", err)
+	}
+	if err := source.CommitBlock(block); err != nil {
+		t.Fatalf("source commit post-drift block: %v", err)
+	}
+
+	payload, err := json.Marshal(p2p.BlocksPayload{Blocks: []*types.Block{block}})
+	if err != nil {
+		t.Fatalf("marshal blocks payload: %v", err)
+	}
+	if err := target.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeBlocks, Payload: payload}); err != nil {
+		t.Fatalf("process blocks after drift: %v", err)
+	}
+	if got := target.GetHeight(); got != source.GetHeight() {
+		t.Fatalf("expected target height %d, got %d", source.GetHeight(), got)
+	}
+}
+
 func TestValidateBlockAllowsPeerClockSkewWhenTimestampIsMonotonic(t *testing.T) {
 	t.Setenv("NHB_ENV", "dev")
 	validatorKey, err := crypto.GeneratePrivateKey()

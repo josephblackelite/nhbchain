@@ -1019,7 +1019,7 @@ func isPublicSwapMethod(method string) bool {
 	switch strings.TrimSpace(method) {
 	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export",
 		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus",
-		"nhb_getSwapQuote", "nhb_checkSwapAllowance":
+		"nhb_getSwapQuote", "nhb_checkSwapAllowance", "nhb_getOraclePrice":
 		return true
 	default:
 		return false
@@ -1279,6 +1279,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetValidatorInfo(recorder, r, req)
 	case "nhb_getNetworkStats":
 		s.handleGetNetworkStats(recorder, r, req)
+	case "nhb_getOraclePrice":
+		s.handleGetOraclePrice(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
 	case "fees_getMonthlyStatus":

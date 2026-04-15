@@ -139,9 +139,9 @@ ClientVersion = ""
   [swap.sanctions]
 
 [lending]
-  MaxLTVBps = 0
-  LiquidationThresholdBps = 0
-  ReserveFactorBps = 0
+  MaxLTVBps = 7500
+  LiquidationThresholdBps = 8500
+  ReserveFactorBps = 1000
   ProtocolFeeBps = 0
   DeveloperFeeBps = 0
   DeveloperFeeCollector = ""

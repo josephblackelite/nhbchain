@@ -34,28 +34,34 @@ func IsValidChainID(chainID *big.Int) bool {
 type TxType byte
 
 const (
-	TxTypeTransfer          TxType = 0x01 // A standard transfer of NHB
-	TxTypeRegisterIdentity  TxType = 0x02 // A transaction to claim a username
-	TxTypeCreateEscrow      TxType = 0x03 // Create escrow
-	TxTypeReleaseEscrow     TxType = 0x04 // NEW: Buyer releases funds to seller
-	TxTypeRefundEscrow      TxType = 0x05 // NEW: Seller refunds funds to buyer
-	TxTypeStake             TxType = 0x06 // Implenting stake
-	TxTypeUnstake           TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
-	TxTypeHeartbeat         TxType = 0x08 // Heartbeat from users device
-	TxTypeLockEscrow        TxType = 0x09 // NEW: Buyer commits to a purchase
-	TxTypeDisputeEscrow     TxType = 0x0A // NEW: Buyer raises a dispute
-	TxTypeArbitrateRelease  TxType = 0x0B // NEW: Admin-only action to release to buyer
-	TxTypeArbitrateRefund   TxType = 0x0C // NEW: Admin-only action to refund seller
-	TxTypeStakeClaim        TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
-	TxTypeMint              TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
-	TxTypeSwapPayoutReceipt TxType = 0x0F // NEW: Record a swap payout receipt attested by the treasury
-	TxTypeTransferZNHB      TxType = 0x10 // A standard transfer of ZapNHB (ZNHB)
-	TxTypeSwapMint          TxType = 0x11 // Native On-Chain Swap minting NHB
-	TxTypeSwapBurn          TxType = 0x12 // Native On-Chain Swap burning NHB
-	TxTypePOSAuthorize      TxType = 0x20 // Pre-authorize a merchant payment
-	TxTypePOSCapture        TxType = 0x21 // Capture an authorized payment
-	TxTypePOSVoid           TxType = 0x22 // Void authorized payment
-	TxTypePOSRegistry       TxType = 0x23 // POS merchant/device registry update
+	TxTypeTransfer            TxType = 0x01 // A standard transfer of NHB
+	TxTypeRegisterIdentity    TxType = 0x02 // A transaction to claim a username
+	TxTypeCreateEscrow        TxType = 0x03 // Create escrow
+	TxTypeReleaseEscrow       TxType = 0x04 // NEW: Buyer releases funds to seller
+	TxTypeRefundEscrow        TxType = 0x05 // NEW: Seller refunds funds to buyer
+	TxTypeStake               TxType = 0x06 // Implenting stake
+	TxTypeUnstake             TxType = 0x07 // NEW: A transaction to un-stake ZapNHB
+	TxTypeHeartbeat           TxType = 0x08 // Heartbeat from users device
+	TxTypeLockEscrow          TxType = 0x09 // NEW: Buyer commits to a purchase
+	TxTypeDisputeEscrow       TxType = 0x0A // NEW: Buyer raises a dispute
+	TxTypeArbitrateRelease    TxType = 0x0B // NEW: Admin-only action to release to buyer
+	TxTypeArbitrateRefund     TxType = 0x0C // NEW: Admin-only action to refund seller
+	TxTypeStakeClaim          TxType = 0x0D // NEW: Claim matured unbonded ZapNHB
+	TxTypeMint                TxType = 0x0E // NEW: Execute a signed mint voucher on-chain
+	TxTypeSwapPayoutReceipt   TxType = 0x0F // NEW: Record a swap payout receipt attested by the treasury
+	TxTypeTransferZNHB        TxType = 0x10 // A standard transfer of ZapNHB (ZNHB)
+	TxTypeSwapMint            TxType = 0x11 // Native On-Chain Swap minting NHB
+	TxTypeSwapBurn            TxType = 0x12 // Native On-Chain Swap burning NHB
+	TxTypeLendingSupplyNHB    TxType = 0x13 // Supply NHB liquidity to a lending pool
+	TxTypeLendingWithdrawNHB  TxType = 0x14 // Withdraw NHB liquidity from a lending pool
+	TxTypeLendingDepositZNHB  TxType = 0x15 // Deposit ZNHB collateral into a lending pool
+	TxTypeLendingWithdrawZNHB TxType = 0x16 // Withdraw ZNHB collateral from a lending pool
+	TxTypeLendingBorrowNHB    TxType = 0x17 // Borrow NHB against ZNHB collateral
+	TxTypeLendingRepayNHB     TxType = 0x18 // Repay NHB debt in a lending pool
+	TxTypePOSAuthorize        TxType = 0x20 // Pre-authorize a merchant payment
+	TxTypePOSCapture          TxType = 0x21 // Capture an authorized payment
+	TxTypePOSVoid             TxType = 0x22 // Void authorized payment
+	TxTypePOSRegistry         TxType = 0x23 // POS merchant/device registry update
 )
 
 // RequiresSignature reports whether the transaction type must carry an

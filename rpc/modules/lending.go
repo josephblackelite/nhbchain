@@ -54,6 +54,9 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 	if err != nil {
 		return nil, params, m.wrapError(err)
 	}
+	if market == nil && id == defaultLendingPoolID {
+		market = m.defaultMarket(id)
+	}
 	return market, params, nil
 }
 
@@ -74,10 +77,32 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 	if err != nil {
 		return nil, params, m.wrapError(err)
 	}
-	if markets == nil {
-		markets = []*lending.Market{}
+	if len(markets) == 0 {
+		markets = []*lending.Market{m.defaultMarket(defaultLendingPoolID)}
 	}
 	return markets, params, nil
+}
+
+func (m *LendingModule) defaultMarket(poolID string) *lending.Market {
+	if m == nil || m.node == nil {
+		return nil
+	}
+	id := strings.TrimSpace(poolID)
+	if id == "" {
+		id = defaultLendingPoolID
+	}
+	feeBps, collector := m.node.LendingDeveloperFeeConfig()
+	return &lending.Market{
+		PoolID:                id,
+		DeveloperOwner:        m.node.LendingModuleAddress(),
+		DeveloperFeeBps:       feeBps,
+		DeveloperFeeCollector: collector,
+		ReserveFactor:         m.node.LendingReserveFactorBps(),
+		LastUpdateBlock:       m.node.GetHeight(),
+		TotalNHBSupplied:      big.NewInt(0),
+		TotalSupplyShares:     big.NewInt(0),
+		TotalNHBBorrowed:      big.NewInt(0),
+	}
 }
 
 func (m *LendingModule) CreatePool(poolID string, owner [20]byte) (*lending.Market, *ModuleError) {

@@ -53,22 +53,22 @@ type ExplorerBlockResult struct {
 // ExplorerTransactionResult provides an explorer-friendly, chain-authentic
 // transaction record with decimal amounts and block timing metadata.
 type ExplorerTransactionResult struct {
-	ID           string `json:"id"`
-	Hash         string `json:"hash"`
-	Type         string `json:"type"`
-	Asset        string `json:"asset,omitempty"`
-	Amount       string `json:"amount,omitempty"`
+	ID            string `json:"id"`
+	Hash          string `json:"hash"`
+	Type          string `json:"type"`
+	Asset         string `json:"asset,omitempty"`
+	Amount        string `json:"amount,omitempty"`
 	DisplayAmount string `json:"displayAmount,omitempty"`
-	Decimals     int    `json:"decimals,omitempty"`
-	BlockHash    string `json:"blockHash,omitempty"`
-	BlockNumber  uint64 `json:"blockNumber,omitempty"`
-	Timestamp    int64  `json:"timestamp,omitempty"`
-	From         string `json:"from,omitempty"`
-	To           string `json:"to,omitempty"`
-	Nonce        uint64 `json:"nonce,omitempty"`
-	GasLimit     uint64 `json:"gasLimit,omitempty"`
-	GasPrice     string `json:"gasPrice,omitempty"`
-	Status       string `json:"status,omitempty"`
+	Decimals      int    `json:"decimals,omitempty"`
+	BlockHash     string `json:"blockHash,omitempty"`
+	BlockNumber   uint64 `json:"blockNumber,omitempty"`
+	Timestamp     int64  `json:"timestamp,omitempty"`
+	From          string `json:"from,omitempty"`
+	To            string `json:"to,omitempty"`
+	Nonce         uint64 `json:"nonce,omitempty"`
+	GasLimit      uint64 `json:"gasLimit,omitempty"`
+	GasPrice      string `json:"gasPrice,omitempty"`
+	Status        string `json:"status,omitempty"`
 }
 
 // ExplorerAddressBalances exposes the current chain-derived balances for an
@@ -84,24 +84,24 @@ type ExplorerAddressBalances struct {
 // ExplorerAddressResult describes an address together with current balances and
 // historical transactions resolved from chain data.
 type ExplorerAddressResult struct {
-	Address      string                    `json:"address"`
-	Username     string                    `json:"username,omitempty"`
-	Label        string                    `json:"label,omitempty"`
-	Segment      string                    `json:"segment,omitempty"`
-	TxCount      uint64                    `json:"txCount"`
-	FirstSeen    int64                     `json:"firstSeen,omitempty"`
-	LastSeen     int64                     `json:"lastSeen,omitempty"`
-	Balances     ExplorerAddressBalances   `json:"balances"`
+	Address      string                      `json:"address"`
+	Username     string                      `json:"username,omitempty"`
+	Label        string                      `json:"label,omitempty"`
+	Segment      string                      `json:"segment,omitempty"`
+	TxCount      uint64                      `json:"txCount"`
+	FirstSeen    int64                       `json:"firstSeen,omitempty"`
+	LastSeen     int64                       `json:"lastSeen,omitempty"`
+	Balances     ExplorerAddressBalances     `json:"balances"`
 	Transactions []ExplorerTransactionResult `json:"transactions"`
 }
 
 // ExplorerSearchResult returns one canonical explorer result for a query.
 type ExplorerSearchResult struct {
-	Query       string                   `json:"query"`
-	Kind        string                   `json:"kind"`
-	Block       *ExplorerBlockResult     `json:"block,omitempty"`
+	Query       string                     `json:"query"`
+	Kind        string                     `json:"kind"`
+	Block       *ExplorerBlockResult       `json:"block,omitempty"`
 	Transaction *ExplorerTransactionResult `json:"transaction,omitempty"`
-	Address     *ExplorerAddressResult   `json:"address,omitempty"`
+	Address     *ExplorerAddressResult     `json:"address,omitempty"`
 }
 
 // ExplorerSeriesPoint is used for explorer charts and time-series summaries.
@@ -127,36 +127,36 @@ type ExplorerMerchantResult struct {
 // ExplorerActiveAddressResult captures the most active addresses over the
 // recent explorer window together with their current balances.
 type ExplorerActiveAddressResult struct {
-	Address          string `json:"address"`
-	Label            string `json:"label,omitempty"`
-	Segment          string `json:"segment"`
-	BalanceNHB       string `json:"balanceNHB"`
-	BalanceZNHB      string `json:"balanceZNHB,omitempty"`
-	RewardsZNHB24h   string `json:"rewardsZNHB24h"`
-	TxCount24h       int    `json:"txCount24h"`
+	Address        string `json:"address"`
+	Label          string `json:"label,omitempty"`
+	Segment        string `json:"segment"`
+	BalanceNHB     string `json:"balanceNHB"`
+	BalanceZNHB    string `json:"balanceZNHB,omitempty"`
+	RewardsZNHB24h string `json:"rewardsZNHB24h"`
+	TxCount24h     int    `json:"txCount24h"`
 }
 
 // ExplorerSnapshotResult aggregates the explorer overview, recent feeds, and
 // search-friendly address lists into a single chain-authentic payload.
 type ExplorerSnapshotResult struct {
-	UpdatedAt          string                      `json:"updatedAt"`
-	LatestHeight       uint64                      `json:"latestHeight"`
-	ActiveValidators   int                         `json:"activeValidators"`
-	CurrentEpoch       uint64                      `json:"currentEpoch"`
-	CurrentTime        int64                       `json:"currentTime"`
-	MempoolSize        int                         `json:"mempoolSize"`
-	CurrentTps         float64                     `json:"currentTps"`
-	AverageTps24h      float64                     `json:"averageTps24h"`
-	Payments24h        int                         `json:"payments24h"`
-	TotalRewards24h    float64                     `json:"totalRewards24h"`
-	ZNHBCirculatingSupply string                   `json:"znhbCirculatingSupply"`
-	ThroughputHistory  []ExplorerSeriesPoint       `json:"throughputHistory"`
-	PaymentsHistory    []ExplorerSeriesPoint       `json:"paymentsHistory"`
-	RewardsHistory     []ExplorerSeriesPoint       `json:"rewardsHistory"`
-	TopMerchants       []ExplorerMerchantResult    `json:"topMerchants"`
-	ActiveAddresses    []ExplorerActiveAddressResult `json:"activeAddresses"`
-	LatestBlocks       []ExplorerBlockResult       `json:"latestBlocks"`
-	LatestTransactions []ExplorerTransactionResult `json:"latestTransactions"`
+	UpdatedAt             string                        `json:"updatedAt"`
+	LatestHeight          uint64                        `json:"latestHeight"`
+	ActiveValidators      int                           `json:"activeValidators"`
+	CurrentEpoch          uint64                        `json:"currentEpoch"`
+	CurrentTime           int64                         `json:"currentTime"`
+	MempoolSize           int                           `json:"mempoolSize"`
+	CurrentTps            float64                       `json:"currentTps"`
+	AverageTps24h         float64                       `json:"averageTps24h"`
+	Payments24h           int                           `json:"payments24h"`
+	TotalRewards24h       float64                       `json:"totalRewards24h"`
+	ZNHBCirculatingSupply string                        `json:"znhbCirculatingSupply"`
+	ThroughputHistory     []ExplorerSeriesPoint         `json:"throughputHistory"`
+	PaymentsHistory       []ExplorerSeriesPoint         `json:"paymentsHistory"`
+	RewardsHistory        []ExplorerSeriesPoint         `json:"rewardsHistory"`
+	TopMerchants          []ExplorerMerchantResult      `json:"topMerchants"`
+	ActiveAddresses       []ExplorerActiveAddressResult `json:"activeAddresses"`
+	LatestBlocks          []ExplorerBlockResult         `json:"latestBlocks"`
+	LatestTransactions    []ExplorerTransactionResult   `json:"latestTransactions"`
 }
 
 // hexString formats a uint64 as a 0x-prefixed hexadecimal string.
@@ -210,6 +210,18 @@ func formatTxType(t types.TxType) string {
 		return "Mint"
 	case types.TxTypeSwapPayoutReceipt:
 		return "SwapPayoutReceipt"
+	case types.TxTypeLendingSupplyNHB:
+		return "LendingSupplyNHB"
+	case types.TxTypeLendingWithdrawNHB:
+		return "LendingWithdrawNHB"
+	case types.TxTypeLendingDepositZNHB:
+		return "LendingDepositZNHB"
+	case types.TxTypeLendingWithdrawZNHB:
+		return "LendingWithdrawZNHB"
+	case types.TxTypeLendingBorrowNHB:
+		return "LendingBorrowNHB"
+	case types.TxTypeLendingRepayNHB:
+		return "LendingRepayNHB"
 	default:
 		return fmt.Sprintf("0x%02x", byte(t))
 	}
@@ -218,9 +230,15 @@ func formatTxType(t types.TxType) string {
 // assetLabel returns the canonical asset for transfer-style transactions.
 func assetLabel(t types.TxType) string {
 	switch t {
-	case types.TxTypeTransfer:
+	case types.TxTypeTransfer,
+		types.TxTypeLendingSupplyNHB,
+		types.TxTypeLendingWithdrawNHB,
+		types.TxTypeLendingBorrowNHB,
+		types.TxTypeLendingRepayNHB:
 		return "NHB"
-	case types.TxTypeTransferZNHB:
+	case types.TxTypeTransferZNHB,
+		types.TxTypeLendingDepositZNHB,
+		types.TxTypeLendingWithdrawZNHB:
 		return "ZNHB"
 	default:
 		return ""
