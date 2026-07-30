@@ -32,8 +32,15 @@ type NowPaymentsInvoiceRequest struct {
 	OrderID       string `json:"order_id"`
 	OrderDesc     string `json:"order_description,omitempty"`
 	FixedRate     bool   `json:"is_fixed_rate"`
-	SuccessURL    string `json:"success_url,omitempty"`
-	CancelURL     string `json:"cancel_url,omitempty"`
+	// IsFeePaidByUser instructs NOWPayments to gross up the amount charged
+	// to the payer so the merchant still receives the full PriceAmount
+	// after NOWPayments' own processing fee is deducted. Without this, the
+	// swapper's payment would be net of NOWPayments' fee and NHBCoin would
+	// effectively absorb it by minting the full quoted amount anyway.
+	IsFeePaidByUser bool   `json:"is_fee_paid_by_user"`
+	SuccessURL      string `json:"success_url,omitempty"`
+	CancelURL       string `json:"cancel_url,omitempty"`
+	IpnCallbackURL  string `json:"ipn_callback_url,omitempty"`
 }
 
 // NowPaymentsInvoice captures the relevant invoice attributes used by the service.

@@ -301,6 +301,68 @@ func (bc *Blockchain) GenesisHash() []byte {
 	return cloneBytes(bc.genesis)
 }
 
+// PatchTipStateRoot rewrites the current tip block's declared StateRoot and
+// re-persists it under the resulting new hash. This is an operator recovery
+// primitive: it lets an intentional, already-applied state correction (for
+// example Node.ReplaceValidatorSet) become the canonical baseline that
+// ensurePendingStateMatchesCommittedHeadLocked checks pending state against,
+// instead of being treated as unexpected drift and silently reverted the
+// next time a block is built. It only ever touches the current tip block; it
+// does not rewrite chain history below the tip, and the old block bytes are
+// left in place under their original hash (unreferenced, harmless) rather
+// than deleted.
+func (bc *Blockchain) PatchTipStateRoot(newStateRoot []byte) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if bc.height == 0 {
+		return fmt.Errorf("cannot patch the genesis block")
+	}
+
+	oldHash := cloneBytes(bc.tip)
+	blockBytes, err := bc.db.Get(oldHash)
+	if err != nil {
+		return fmt.Errorf("load tip block: %w", err)
+	}
+	var block types.Block
+	if err := json.Unmarshal(blockBytes, &block); err != nil {
+		return fmt.Errorf("decode tip block: %w", err)
+	}
+	if block.Header == nil {
+		return fmt.Errorf("tip block missing header")
+	}
+
+	block.Header.StateRoot = cloneBytes(newStateRoot)
+	newHash, err := block.Header.Hash()
+	if err != nil {
+		return fmt.Errorf("hash patched block: %w", err)
+	}
+	newBlockBytes, err := json.Marshal(&block)
+	if err != nil {
+		return fmt.Errorf("marshal patched block: %w", err)
+	}
+
+	height := bc.height
+	if err := bc.db.Put(newHash, newBlockBytes); err != nil {
+		return fmt.Errorf("store patched block: %w", err)
+	}
+	if err := bc.db.Put(tipKey, newHash); err != nil {
+		return fmt.Errorf("store tip: %w", err)
+	}
+	if err := bc.db.Put(heightKey(height), newHash); err != nil {
+		return fmt.Errorf("store height index: %w", err)
+	}
+	if err := bc.db.Put(hashKey(newHash), encodeUint64(height)); err != nil {
+		return fmt.Errorf("store hash index: %w", err)
+	}
+
+	bc.tip = cloneBytes(newHash)
+	bc.heights[height] = cloneBytes(newHash)
+
+	fmt.Printf("Patched tip block header at height %d. Old hash: %x New hash: %x\n", height, oldHash, newHash)
+	return nil
+}
+
 func createGenesisBlock(db storage.Database) (*types.Block, error) {
 	if db == nil {
 		return nil, fmt.Errorf("create genesis block: database must not be nil")

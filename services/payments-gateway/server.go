@@ -43,6 +43,7 @@ type Server struct {
 	serviceFeeBps    int
 	hmacSecret       []byte
 	nowFn            func() time.Time
+	ipnCallbackURL   string
 }
 
 // QuoteRequest is the payload accepted by POST /quotes.
@@ -84,7 +85,7 @@ type NowPaymentsWebhookPayload struct {
 }
 
 // NewServer constructs a payments gateway server.
-func NewServer(store *SQLiteStore, oracle *Oracle, nowClient NowPaymentsClient, node NodeClient, signer Signer, quoteTTL time.Duration, quoteCurrency, defaultMintAsset string, serviceFeeBps int, hmacSecret string) *Server {
+func NewServer(store *SQLiteStore, oracle *Oracle, nowClient NowPaymentsClient, node NodeClient, signer Signer, quoteTTL time.Duration, quoteCurrency, defaultMintAsset string, serviceFeeBps int, hmacSecret string, ipnCallbackURL string) *Server {
 	if store == nil {
 		panic("store required")
 	}
@@ -125,6 +126,7 @@ func NewServer(store *SQLiteStore, oracle *Oracle, nowClient NowPaymentsClient, 
 		serviceFeeBps:    serviceFeeBps,
 		hmacSecret:       secret,
 		nowFn:            time.Now,
+		ipnCallbackURL:   strings.TrimSpace(ipnCallbackURL),
 	}
 }
 
@@ -418,6 +420,11 @@ func (s *Server) handleInvoiceCreate(w http.ResponseWriter, r *http.Request) {
 		OrderID:       invoiceID,
 		OrderDesc:     fmt.Sprintf("Mint %s %s via %s", quote.AmountToken, quote.MintAsset, quote.PayCurrency),
 		FixedRate:     true,
+		// The swapper bears NOWPayments' processing cost, not the NHBCoin
+		// treasury: NOWPayments grosses up what the payer is asked to send
+		// so the merchant account still receives TotalFiat in full.
+		IsFeePaidByUser: true,
+		IpnCallbackURL:  s.ipnCallbackURL,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()

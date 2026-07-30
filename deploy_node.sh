@@ -1,4 +1,19 @@
 #!/bin/bash
+# This script wipes existing chain state (nhb-data) and the validator
+# keystore, then bootstraps a brand-new genesis and hot validator key. It is
+# NOT a routine "redeploy latest code" script despite the generic name --
+# running it against a server with real chain history will destroy that
+# history. Guarded behind NHB_CONFIRM_RESET so it cannot run by accident.
+if [ "${NHB_CONFIRM_RESET:-}" != "yes" ]; then
+  echo "Error: this script deletes nhb-data and validator.keystore and rebuilds genesis from scratch."
+  echo "Set NHB_CONFIRM_RESET=yes if that is genuinely what you intend to do."
+  exit 1
+fi
+if [ -z "${NHB_VALIDATOR_PASS:-}" ]; then
+  echo "Error: NHB_VALIDATOR_PASS must be set in the environment before running this script."
+  exit 1
+fi
+
 export PATH=/usr/local/go/bin:$PATH
 cd /home/ubuntu/nhbchain
 
@@ -15,7 +30,6 @@ rm -rf nhb-data
 rm -f validator.keystore
 
 # Prepare Hot Validator Architecture
-export NHB_VALIDATOR_PASS="nhbmaster2026"
 export NHB_ENV="prod"
 
 echo "Generating new Hot Validator Key..."

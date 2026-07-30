@@ -25,6 +25,7 @@ type Config struct {
 	NowPaymentsIPNSecret string
 	NowPaymentsBaseURL   string
 	MinterKMSEnv         string
+	PublicIPNCallbackURL string
 }
 
 const (
@@ -42,6 +43,7 @@ const (
 	envNowIPNSecret    = "PAY_GATEWAY_NOW_IPN_SECRET"
 	envNowBaseURL      = "PAY_GATEWAY_NOW_BASE"
 	envKMSEnv          = "PAY_GATEWAY_MINTER_KMS_ENV"
+	envIPNCallbackURL  = "PAY_GATEWAY_PUBLIC_IPN_URL"
 )
 
 // LoadConfigFromEnv resolves configuration from environment variables with sane defaults.
@@ -62,6 +64,9 @@ func LoadConfigFromEnv() (*Config, error) {
 		NowPaymentsIPNSecret: os.Getenv(envNowIPNSecret),
 		NowPaymentsBaseURL:   getenvDefault(envNowBaseURL, "https://api.nowpayments.io/v1"),
 		MinterKMSEnv:         os.Getenv(envKMSEnv),
+		// Optional: if unset, NOWPayments falls back to whichever IPN URL is
+		// configured in the merchant dashboard for the account.
+		PublicIPNCallbackURL: strings.TrimSpace(os.Getenv(envIPNCallbackURL)),
 	}
 
 	if cfg.NodeURL == "" {

@@ -102,7 +102,7 @@ func (s *stubSigner) Sign(ctx context.Context, payload []byte) ([]byte, error) {
 
 func newTestServer(t *testing.T, store *SQLiteStore, np *stubNowPayments, node *stubNode, signer *stubSigner) *Server {
 	oracle := NewOracle(time.Minute, 0.10, 0.50)
-	srv := NewServer(store, oracle, np, node, signer, time.Minute, "USD", "NHB", 0, "secret")
+	srv := NewServer(store, oracle, np, node, signer, time.Minute, "USD", "NHB", 0, "secret", "https://api.nhbcoin.com/webhooks/nowpayments")
 	fixed := time.Date(2024, 12, 1, 10, 0, 0, 0, time.UTC)
 	srv.nowFn = func() time.Time { return fixed }
 	return srv

@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -305,7 +306,12 @@ const (
 
 // P2PSection captures nested configuration for the peer-to-peer subsystem.
 type P2PSection struct {
-	NetworkID           uint64   `toml:"NetworkId"`
+	// NetworkID is populated after decoding from NetworkIDRaw (see Load), not
+	// directly by TOML: the TOML integer type is 64-bit signed, but NHBCoin
+	// network IDs can exceed int64's range, so the raw value is decoded as a
+	// string and parsed with strconv.ParseUint instead.
+	NetworkID           uint64   `toml:"-"`
+	NetworkIDRaw        string   `toml:"NetworkId"`
 	MaxPeers            int      `toml:"MaxPeers"`
 	MaxInbound          int      `toml:"MaxInbound"`
 	MaxOutbound         int      `toml:"MaxOutbound"`
@@ -413,6 +419,20 @@ func WithKeystorePassphraseSource(source func() (string, error)) LoadOption {
 }
 
 // Load loads the configuration from the given path.
+// networkIDPattern matches a bare (unquoted) integer literal assigned to
+// NetworkId so Load can quote it before handing the document to the TOML
+// decoder. TOML's integer type is 64-bit signed and cannot represent every
+// valid uint64 network ID; already-quoted values are left untouched.
+var networkIDPattern = regexp.MustCompile(`(?m)^([ \t]*NetworkId[ \t]*=[ \t]*)(\d+)([ \t]*)$`)
+
+// quoteOversizedNetworkID rewrites a bare NetworkId integer literal as a
+// quoted string in-memory, without touching the file on disk, so it can be
+// decoded as a string and parsed with strconv.ParseUint regardless of
+// magnitude. See P2PSection.NetworkIDRaw.
+func quoteOversizedNetworkID(raw []byte) []byte {
+	return networkIDPattern.ReplaceAll(raw, []byte(`$1"$2"$3`))
+}
+
 func Load(path string, opts ...LoadOption) (*Config, error) {
 	options := loadOptions{}
 	for _, opt := range opts {
@@ -448,7 +468,12 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		return createDefault(path, resolved)
 	}
 
-	meta, err := toml.DecodeFile(path, cfg)
+	rawConfig, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	meta, err := toml.Decode(string(quoteOversizedNetworkID(rawConfig)), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -457,6 +482,14 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		if len(undecoded) == 1 && undecoded[0] == "ValidatorKey" {
 			return nil, fmt.Errorf("config file %s uses deprecated ValidatorKey field; run nhbctl migrate-keystore", path)
 		}
+	}
+
+	if raw := strings.TrimSpace(cfg.P2P.NetworkIDRaw); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("config file %s: parse p2p.NetworkId: %w", path, err)
+		}
+		cfg.P2P.NetworkID = parsed
 	}
 
 	if cfg.ValidatorKMSURI == "" && cfg.ValidatorKMSEnv == "" {

@@ -66,7 +66,7 @@ func main() {
 	nowClient := NewHTTPNowPaymentsClient(cfg.NowPaymentsBaseURL, cfg.NowPaymentsAPIKey)
 	nodeClient := NewRPCNodeClient(cfg.NodeURL, cfg.NodeAuthToken)
 
-	server := NewServer(store, oracle, nowClient, nodeClient, signer, cfg.QuoteTTL, cfg.QuoteCurrency, cfg.DefaultMintAsset, cfg.ServiceFeeBps, cfg.NowPaymentsIPNSecret)
+	server := NewServer(store, oracle, nowClient, nodeClient, signer, cfg.QuoteTTL, cfg.QuoteCurrency, cfg.DefaultMintAsset, cfg.ServiceFeeBps, cfg.NowPaymentsIPNSecret, cfg.PublicIPNCallbackURL)
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: otelhttp.NewHandler(server, "payments-gateway")}
 
 	go func() {

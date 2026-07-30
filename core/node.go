@@ -3141,6 +3141,120 @@ func (n *Node) GetValidatorSet() map[string]*big.Int {
 	}
 	return snapshot
 }
+// RemoveValidatorFromSet permanently removes addr from the active and
+// eligible validator sets and persists the change to the trie (staged, not
+// yet committed to a block). This is an operator recovery primitive for a
+// validator that has been permanently decommissioned and will never vote
+// again, so its previously-registered power no longer counts toward BFT's
+// 2/3 quorum threshold and blocks the remaining validator(s) from ever
+// reaching it. It does not touch genesis, stake/account balances, or any
+// other state. The caller is responsible for finalizing the staged change
+// into a real block via CreateBlock/CommitBlock.
+func (n *Node) RemoveValidatorFromSet(addr [20]byte) (removed bool, remainingPower *big.Int, err error) {
+	if n == nil || n.state == nil {
+		return false, nil, fmt.Errorf("node not initialised")
+	}
+
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	key := string(addr[:])
+	if _, ok := n.state.ValidatorSet[key]; !ok {
+		return false, nil, nil
+	}
+	delete(n.state.ValidatorSet, key)
+	delete(n.state.EligibleValidators, key)
+
+	remaining := big.NewInt(0)
+	for _, power := range n.state.ValidatorSet {
+		if power != nil {
+			remaining.Add(remaining, power)
+		}
+	}
+
+	if err := n.state.persistValidatorSet(); err != nil {
+		return false, nil, fmt.Errorf("persist validator set: %w", err)
+	}
+	if err := n.state.persistEligibleValidatorSet(); err != nil {
+		return false, nil, fmt.Errorf("persist eligible validator set: %w", err)
+	}
+	return true, remaining, nil
+}
+
+// ReplaceValidatorSet atomically replaces the entire active and eligible
+// validator sets with newSet and persists the change (staged, not yet
+// committed to a block). This is an operator recovery primitive for
+// correcting consensus state to match reality -- for example after a
+// validator hot-key rotation that was never reflected in the persisted
+// validator set, leaving the running node signing with a key the chain
+// does not recognize as a validator, so its own votes can never count
+// toward BFT quorum no matter how many rounds elapse. It is not a
+// mechanism for normal validator onboarding/offboarding, which should go
+// through the regular staking/epoch-rollover path whenever the chain is
+// healthy enough to process transactions.
+func (n *Node) ReplaceValidatorSet(newSet map[string]*big.Int) error {
+	if n == nil || n.state == nil {
+		return fmt.Errorf("node not initialised")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+
+	cleaned := make(map[string]*big.Int, len(newSet))
+	for k, v := range newSet {
+		if v == nil {
+			continue
+		}
+		cleaned[k] = new(big.Int).Set(v)
+	}
+	n.state.ValidatorSet = cleaned
+	n.state.EligibleValidators = make(map[string]*big.Int, len(cleaned))
+	for k, v := range cleaned {
+		n.state.EligibleValidators[k] = new(big.Int).Set(v)
+	}
+
+	if err := n.state.persistValidatorSet(); err != nil {
+		return fmt.Errorf("persist validator set: %w", err)
+	}
+	if err := n.state.persistEligibleValidatorSet(); err != nil {
+		return fmt.Errorf("persist eligible validator set: %w", err)
+	}
+	return nil
+}
+
+// PendingStateRoot returns the state root that would result from the
+// node's current in-memory pending state, without requiring a block to be
+// created or committed first.
+func (n *Node) PendingStateRoot() []byte {
+	if n == nil || n.state == nil {
+		return nil
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	root := n.state.PendingRoot()
+	return root.Bytes()
+}
+
+// PatchTipStateRoot corrects the declared StateRoot of the current tip
+// block to newStateRoot. See Blockchain.PatchTipStateRoot for details on
+// when and why this operator recovery primitive is needed.
+func (n *Node) PatchTipStateRoot(newStateRoot []byte) error {
+	if n == nil || n.chain == nil {
+		return fmt.Errorf("node not initialised")
+	}
+	return n.chain.PatchTipStateRoot(newStateRoot)
+}
+
+// SelfValidatorAddress returns the address derived from this node's own
+// configured validator key.
+func (n *Node) SelfValidatorAddress() [20]byte {
+	var out [20]byte
+	if n == nil || n.validatorKey == nil {
+		return out
+	}
+	copy(out[:], n.validatorKey.PubKey().Address().Bytes())
+	return out
+}
+
 func (n *Node) GetHeight() uint64 { return n.chain.Height() }
 
 // GetBlockByHeight retrieves the block stored at the requested height.
@@ -5303,13 +5417,27 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 		return 0, fmt.Errorf("validator account not found")
 	}
 
+	// If a heartbeat at this nonce is still sitting unmined in the mempool
+	// (the account nonce has not advanced past it yet), resubmitting at the
+	// same gas price is rejected outright by the mempool's replace-by-fee
+	// rule ("transaction with nonce %d already exists and fee is not
+	// higher"), permanently stranding validator liveness after any missed
+	// block since every later tick reconstructs an identical tx. Bump the
+	// fee above the pending transaction's so a retry can actually replace
+	// it instead of failing forever.
+	gasPrice := big.NewInt(1)
+	if pendingFee := n.pendingHeartbeatFee(validator.Bytes(), account.Nonce); pendingFee != nil {
+		pendingGasPrice := new(big.Int).Div(pendingFee, big.NewInt(21000))
+		gasPrice = new(big.Int).Add(pendingGasPrice, big.NewInt(1))
+	}
+
 	tx := &types.Transaction{
 		ChainID:  types.NHBChainID(),
 		Type:     types.TxTypeHeartbeat,
 		Nonce:    account.Nonce,
 		Data:     data,
 		GasLimit: 21000,
-		GasPrice: big.NewInt(1),
+		GasPrice: gasPrice,
 	}
 	if err := tx.Sign(n.validatorKey.PrivateKey); err != nil {
 		return 0, err
@@ -5318,6 +5446,27 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 		return 0, err
 	}
 	return ts, nil
+}
+
+// pendingHeartbeatFee returns the total fee (gasPrice * gasLimit) of an
+// existing mempool transaction from addr at nonce, if one is already
+// pending, so a heartbeat retry can bump its fee instead of being rejected
+// by the mempool's replace-by-fee rule.
+func (n *Node) pendingHeartbeatFee(addr []byte, nonce uint64) *big.Int {
+	for _, existing := range n.GetMempool() {
+		if existing == nil || existing.Nonce != nonce {
+			continue
+		}
+		sender, err := existing.From()
+		if err != nil || !bytes.Equal(sender, addr) {
+			continue
+		}
+		if existing.GasPrice == nil {
+			return big.NewInt(0)
+		}
+		return new(big.Int).Mul(existing.GasPrice, new(big.Int).SetUint64(existing.GasLimit))
+	}
+	return nil
 }
 
 func (n *Node) GovernancePropose(proposer [20]byte, kind, payload string, deposit *big.Int) (uint64, error) {

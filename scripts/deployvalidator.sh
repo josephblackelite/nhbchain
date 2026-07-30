@@ -10,7 +10,7 @@ STATE_DIR=/var/lib/nhbchain
 SERVICE_USER=nhb
 
 BOOTNODE_DEFAULT='enode://9606e2dd587cef5c8c46c6d41d03faf365edcb2f394921099e2b812261010841@52.1.96.250:6001'
-NETWORK_ID_DEFAULT='14699254016670310680'
+NETWORK_ID_DEFAULT='187001'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
@@ -29,7 +29,7 @@ Usage:
 Options:
   --validator-key <hex>   Raw NHB validator private key from your wallet.
   --bootnode <enode>      Bootnode enode to join. Default: NHBCoin mainnet bootnode.
-  --network-id <id>       P2P network ID. Default: 14699254016670310680
+  --network-id <id>       P2P network ID. Default: 187001
   --listen-addr <addr>    P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>       Local RPC listen address. Default: 127.0.0.1:8545
   --reset-state           Remove existing local chain state before first start.
