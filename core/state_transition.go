@@ -104,6 +104,8 @@ type StateProcessor struct {
 	TradeEngine                *escrow.TradeEngine
 	pauses                     nativecommon.PauseView
 	escrowFeeTreasury          [20]byte
+	adminWallet                [20]byte
+	hasAdminWallet             bool
 	usernameToAddr             map[string][]byte
 	ValidatorSet               map[string]*big.Int
 	EligibleValidators         map[string]*big.Int
@@ -660,6 +662,13 @@ func (sp *StateProcessor) pruneQuotaCounters(ts time.Time) error {
 // release transitions.
 func (sp *StateProcessor) SetEscrowFeeTreasury(addr [20]byte) {
 	sp.escrowFeeTreasury = addr
+}
+
+// SetAdminWallet configures the genesis-declared admin/treasury wallet used
+// as the sole counterparty for the ZNHB purchase flow (applyBuyZNHB).
+func (sp *StateProcessor) SetAdminWallet(addr [20]byte, ok bool) {
+	sp.adminWallet = addr
+	sp.hasAdminWallet = ok
 }
 
 // BeginBlock records the execution context for the block currently being applied.
@@ -2596,6 +2605,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeBuyZNHB:
+		if err := sp.applyBuyZNHB(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
 	case types.TxTypeLendingSupplyNHB:
 		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
 			return err
@@ -2925,54 +2939,99 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *typ
 	return nil
 }
 
+// applySwapMint and applySwapBurn are deliberately disabled -- see
+// docs/issue30.md item 1. The nhbportal frontend was calling these for the
+// ZNHB-purchase UI flow, but as written applySwapBurn destroyed the sender's
+// NHB with no credit to anything (it only ever incremented a nonce on the
+// mint side), and the frontend's JSON payload encoding didn't even match
+// this RLP decode. Fail loudly rather than silently destroy funds. The
+// correct replacement is TxTypeBuyZNHB / applyBuyZNHB below; nhbportal needs
+// to be repointed at it before either of these can safely return to service
+// for their original (pre-existing, stablecoin-deposit-voucher) purpose.
 func (sp *StateProcessor) applySwapMint(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
-	var payload struct {
-		Stablecoin string   `json:"stablecoin"`
-		Amount     *big.Int `json:"amount"`
-		QuoteID    string   `json:"quoteId"`
-	}
-	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
-		return fmt.Errorf("swap: decode mint payload: %w", err)
-	}
-	if payload.Amount == nil || payload.Amount.Sign() <= 0 {
-		return fmt.Errorf("swap: amount must be positive")
-	}
-	// In the real on-chain mint flow, a user's signed TxTypeSwapMint expresses the intention to
-	// consume an Oracle Quote for a stablecoin deposit they are finalizing.
-	senderAccount.Nonce++
-	return sp.setAccount(sender, senderAccount)
+	return fmt.Errorf("swap: native on-chain swap mint is disabled -- use the buyZNHB transaction type instead")
 }
 
 func (sp *StateProcessor) applySwapBurn(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	return fmt.Errorf("swap: native on-chain swap burn is disabled -- use the buyZNHB transaction type instead")
+}
+
+// applyBuyZNHB implements the founder-specified ZNHB purchase flow: the
+// buyer's NHB moves to the admin wallet (this is platform revenue), and an
+// equal-in-agreement amount of ZNHB moves from the admin wallet to the buyer.
+// This is the ONLY on-chain path that moves ZNHB out of the admin wallet's
+// initial 1,000,000,000 allocation, and it is strictly one-directional --
+// there is deliberately no corresponding path that lets a buyer convert ZNHB
+// back into NHB through the admin wallet, since that would let unbacked
+// value leave the system disguised as NHB (which is otherwise always backed
+// 1:1 by NOWPayments-custodied USDT/USDC). ZNHB, once purchased, can only
+// ever move peer-to-peer (ordinary TxTypeTransferZNHB) from then on.
+//
+// Both amounts are specified explicitly by the signed transaction (from a
+// quote the buyer already agreed to), so this function only validates
+// balances and moves exactly what was agreed -- it does not itself compute
+// or look up a price.
+func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	if !sp.hasAdminWallet {
+		return fmt.Errorf("buyZNHB: no admin wallet configured for this network")
+	}
 	var payload struct {
-		Amount           *big.Int `json:"amount"`
-		TargetStablecoin string   `json:"targetStablecoin"`
-		RecipientAddress string   `json:"recipientAddress"`
+		NHBAmount  *big.Int `json:"nhbAmount"`
+		ZNHBAmount *big.Int `json:"znhbAmount"`
+		QuoteID    string   `json:"quoteId,omitempty"`
 	}
 	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
-		return fmt.Errorf("swap: decode burn payload: %w", err)
+		return fmt.Errorf("buyZNHB: decode payload: %w", err)
 	}
-	if payload.Amount == nil || payload.Amount.Sign() <= 0 {
-		return fmt.Errorf("swap: invalid burn amount")
+	if payload.NHBAmount == nil || payload.NHBAmount.Sign() <= 0 {
+		return fmt.Errorf("buyZNHB: nhbAmount must be positive")
 	}
-	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(payload.Amount) < 0 {
-		return fmt.Errorf("swap: insufficient NHB for burn")
+	if payload.ZNHBAmount == nil || payload.ZNHBAmount.Sign() <= 0 {
+		return fmt.Errorf("buyZNHB: znhbAmount must be positive")
+	}
+	if bytes.Equal(sender, sp.adminWallet[:]) {
+		return fmt.Errorf("buyZNHB: the admin wallet cannot buy from itself")
+	}
+	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(payload.NHBAmount) < 0 {
+		return fmt.Errorf("buyZNHB: insufficient NHB balance")
 	}
 
-	// Burn the NHB locally.
-	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, payload.Amount)
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("buyZNHB: load admin wallet: %w", err)
+	}
+	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Cmp(payload.ZNHBAmount) < 0 {
+		return fmt.Errorf("buyZNHB: admin wallet has insufficient ZNHB")
+	}
+
+	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, payload.NHBAmount)
+	if senderAccount.BalanceZNHB == nil {
+		senderAccount.BalanceZNHB = big.NewInt(0)
+	}
+	senderAccount.BalanceZNHB = new(big.Int).Add(senderAccount.BalanceZNHB, payload.ZNHBAmount)
 	senderAccount.Nonce++
 
+	if adminAccount.BalanceNHB == nil {
+		adminAccount.BalanceNHB = big.NewInt(0)
+	}
+	adminAccount.BalanceNHB = new(big.Int).Add(adminAccount.BalanceNHB, payload.NHBAmount)
+	adminAccount.BalanceZNHB = new(big.Int).Sub(adminAccount.BalanceZNHB, payload.ZNHBAmount)
+
 	if err := sp.setAccount(sender, senderAccount); err != nil {
-		return err
+		return fmt.Errorf("buyZNHB: persist buyer: %w", err)
+	}
+	if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+		return fmt.Errorf("buyZNHB: persist admin wallet: %w", err)
 	}
 
-	evt := events.SwapBurnRecorded{
-		ReceiptID: fmt.Sprintf("burn-%x", tx.Nonce),
-		Token:     payload.TargetStablecoin,
-		Amount:    payload.Amount,
+	var buyerAddr [20]byte
+	copy(buyerAddr[:], sender)
+	evt := events.BuyZNHBRecorded{
+		Buyer:      buyerAddr,
+		AdminAddr:  sp.adminWallet,
+		NHBAmount:  payload.NHBAmount,
+		ZNHBAmount: payload.ZNHBAmount,
 	}.Event()
-
 	if evt != nil {
 		sp.AppendEvent(evt)
 	}

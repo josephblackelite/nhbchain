@@ -413,20 +413,28 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	// The genesis-declared admin wallet (if the loaded genesis configures
 	// one) is the canonical treasury -- fee revenue, escrow refunds, and the
 	// transfer-gas fee collector all derive from it instead of defaulting to
-	// the validator's own address.
+	// the validator's own address. hasAdminWallet tracks whether a *real*
+	// admin wallet was configured (genesis field or explicit env override),
+	// as distinct from the validator-address fallback -- code that must
+	// never silently operate against the fallback (e.g. the ZNHB purchase
+	// flow) checks this instead of just using treasury directly.
+	var hasAdminWallet bool
 	if adminAddr, ok := chain.AdminWallet(); ok {
 		copy(treasury[:], adminAddr[:])
+		hasAdminWallet = true
 	}
 
 	if masterTreasury := strings.TrimSpace(os.Getenv("NHB_MASTER_TREASURY")); masterTreasury != "" {
 		if addr, err := genesis.ParseBech32Account(masterTreasury); err == nil {
 			copy(treasury[:], addr[:])
+			hasAdminWallet = true
 		} else {
 			fmt.Printf("Warning: Failed to parse NHB_MASTER_TREASURY, falling back to validator: %v\n", err)
 		}
 	}
 
 	stateProcessor.SetEscrowFeeTreasury(treasury)
+	stateProcessor.SetAdminWallet(treasury, hasAdminWallet)
 
 	moduleAddr := deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix)
 	collateralAddr := deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix)

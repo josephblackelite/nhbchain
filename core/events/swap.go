@@ -26,7 +26,45 @@ const (
 	TypeSwapTreasuryReconciled = "swap.treasury.reconciled"
 	// TypeSwapRedeemProof references the oracle proofs associated with redeemed vouchers.
 	TypeSwapRedeemProof = "swap.redeem.proof"
+	// TypeBuyZNHBRecorded is emitted when a user purchases ZNHB from the admin wallet using NHB.
+	TypeBuyZNHBRecorded = "swap.buyznhb.recorded"
 )
+
+// BuyZNHBRecorded captures an admin-wallet-mediated ZNHB purchase: NHB moves
+// buyer->admin, ZNHB moves admin->buyer. Always one-directional -- there is
+// no on-chain path back from ZNHB to NHB.
+type BuyZNHBRecorded struct {
+	Buyer      [20]byte
+	AdminAddr  [20]byte
+	NHBAmount  *big.Int
+	ZNHBAmount *big.Int
+}
+
+// EventType returns the canonical event identifier.
+func (BuyZNHBRecorded) EventType() string { return TypeBuyZNHBRecorded }
+
+// Event renders the ZNHB purchase event payload.
+func (b BuyZNHBRecorded) Event() *types.Event {
+	nhbAmount := big.NewInt(0)
+	if b.NHBAmount != nil {
+		nhbAmount = new(big.Int).Set(b.NHBAmount)
+	}
+	znhbAmount := big.NewInt(0)
+	if b.ZNHBAmount != nil {
+		znhbAmount = new(big.Int).Set(b.ZNHBAmount)
+	}
+	attrs := map[string]string{
+		"nhbAmount":  nhbAmount.String(),
+		"znhbAmount": znhbAmount.String(),
+	}
+	if b.Buyer != ([20]byte{}) {
+		attrs["buyer"] = crypto.MustNewAddress(crypto.NHBPrefix, b.Buyer[:]).String()
+	}
+	if b.AdminAddr != ([20]byte{}) {
+		attrs["admin"] = crypto.MustNewAddress(crypto.NHBPrefix, b.AdminAddr[:]).String()
+	}
+	return &types.Event{Type: TypeBuyZNHBRecorded, Attributes: attrs}
+}
 
 type SwapMinted struct {
 	OrderID    string
