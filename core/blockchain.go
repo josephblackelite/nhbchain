@@ -19,14 +19,16 @@ import (
 
 // Blockchain manages the collection of blocks.
 type Blockchain struct {
-	db            storage.Database // Uses the generic Database interface
-	tip           []byte
-	height        uint64
-	heights       map[uint64][]byte
-	mu            sync.RWMutex
-	chainID       uint64
-	genesis       []byte
-	lastTimestamp int64
+	db              storage.Database // Uses the generic Database interface
+	tip             []byte
+	height          uint64
+	heights         map[uint64][]byte
+	mu              sync.RWMutex
+	chainID         uint64
+	genesis         []byte
+	lastTimestamp   int64
+	adminWallet     [20]byte
+	hasAdminWallet  bool
 }
 
 var (
@@ -112,6 +114,10 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 		if spec != nil {
 			fmt.Printf("Loaded genesis from %s  hash=0x%x  chainID=%d  accounts=%d  validators=%d\n",
 				trimmedPath, genesisHash, bc.chainID, len(spec.Alloc), len(spec.Validators))
+			if addr, ok := spec.AdminWalletAddress(); ok {
+				bc.adminWallet = addr
+				bc.hasAdminWallet = true
+			}
 		}
 		if genesis != nil && genesis.Header != nil {
 			bc.lastTimestamp = genesis.Header.Timestamp
@@ -151,6 +157,20 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 	bc.genesis = cloneBytes(genesisHash)
 	bc.chainID = binary.BigEndian.Uint64(genesisHash[:8])
 
+	// The admin wallet isn't persisted separately -- it's read-only metadata
+	// re-derived from the genesis file on every startup, same source of
+	// truth as a fresh genesis creation above. This is a pure parse+validate
+	// (genesis.LoadGenesisSpec), not a re-application of genesis state, so
+	// it's safe to call against an already-initialized chain.
+	if trimmedPath := strings.TrimSpace(genesisPath); trimmedPath != "" {
+		if spec, specErr := genesis.LoadGenesisSpec(trimmedPath); specErr == nil {
+			if addr, ok := spec.AdminWalletAddress(); ok {
+				bc.adminWallet = addr
+				bc.hasAdminWallet = true
+			}
+		}
+	}
+
 	if raw, err := db.Get(lastTimestampKey); err == nil {
 		bc.lastTimestamp = decodeInt64(raw)
 	} else if header := bc.CurrentHeader(); header != nil {
@@ -158,6 +178,17 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 	}
 
 	return bc, nil
+}
+
+// AdminWallet returns the genesis-declared admin/treasury wallet address, if
+// the loaded genesis file configured one. Fee routing, the ZNHB sale flow,
+// and other admin-wallet-dependent code should call this instead of relying
+// on separately-configured addresses that can drift out of sync with
+// genesis.
+func (bc *Blockchain) AdminWallet() ([20]byte, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.adminWallet, bc.hasAdminWallet
 }
 
 // AddBlock validates a new block and adds it to the chain.

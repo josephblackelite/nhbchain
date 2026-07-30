@@ -24,10 +24,18 @@ type GenesisSpec struct {
 	Roles         map[string][]string          `json:"roles"` // role -> []addr
 	ChainID       *uint64                      `json:"chainId,omitempty"`
 	LoyaltyGlobal *LoyaltyGlobalSpec           `json:"loyaltyGlobal,omitempty"`
+	// AdminWallet is the network's single canonical treasury/admin address --
+	// fee revenue, ZNHB sale proceeds, and mint authority all derive from
+	// this one field instead of being configured separately in each
+	// consuming subsystem. Optional for backward compatibility with genesis
+	// files that predate this field (e.g. the old stalled mainnet genesis).
+	AdminWallet string `json:"adminWallet,omitempty"`
 
 	genesisTimestamp time.Time
 	chainIDValue     uint64
 	hasChainID       bool
+	adminWalletAddr  [20]byte
+	hasAdminWallet   bool
 }
 
 type NativeTokenSpec struct {
@@ -171,6 +179,16 @@ func (s *GenesisSpec) ChainIDValue() (uint64, bool) {
 	return 0, false
 }
 
+// AdminWalletAddress returns the genesis-declared admin/treasury wallet, if
+// one was configured. Callers must handle the false case explicitly --
+// genesis files written before this field existed will not have one.
+func (s *GenesisSpec) AdminWalletAddress() ([20]byte, bool) {
+	if s.hasAdminWallet {
+		return s.adminWalletAddr, true
+	}
+	return [20]byte{}, false
+}
+
 func (s *GenesisSpec) validate() error {
 	parsedTime, err := parseGenesisTime(s.GenesisTime)
 	if err != nil {
@@ -183,6 +201,17 @@ func (s *GenesisSpec) validate() error {
 	if s.ChainID != nil {
 		s.hasChainID = true
 		s.chainIDValue = *s.ChainID
+	}
+
+	s.hasAdminWallet = false
+	s.adminWalletAddr = [20]byte{}
+	if trimmed := strings.TrimSpace(s.AdminWallet); trimmed != "" {
+		addr, err := ParseBech32Account(trimmed)
+		if err != nil {
+			return fmt.Errorf("adminWallet: %w", err)
+		}
+		s.adminWalletAddr = addr
+		s.hasAdminWallet = true
 	}
 
 	// native tokens

@@ -410,6 +410,14 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	var treasury [20]byte
 	copy(treasury[:], validatorAddr.Bytes())
 
+	// The genesis-declared admin wallet (if the loaded genesis configures
+	// one) is the canonical treasury -- fee revenue, escrow refunds, and the
+	// transfer-gas fee collector all derive from it instead of defaulting to
+	// the validator's own address.
+	if adminAddr, ok := chain.AdminWallet(); ok {
+		copy(treasury[:], adminAddr[:])
+	}
+
 	if masterTreasury := strings.TrimSpace(os.Getenv("NHB_MASTER_TREASURY")); masterTreasury != "" {
 		if addr, err := genesis.ParseBech32Account(masterTreasury); err == nil {
 			copy(treasury[:], addr[:])
@@ -466,8 +474,12 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		moduleQuotas:               make(map[string]nativecommon.Quota),
 		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		transferGasPolicy: TransferGasPolicy{
-			Enabled:           true,
-			FreeSpendLimitWei: big.NewInt(1000),
+			Enabled: true,
+			// 1000 NHB (18 decimals), not 1000 base units -- the founder's
+			// "$1000 free tier" spec, matching NHB's 1:1 USD peg. The old
+			// literal big.NewInt(1000) was 0.000000000000001 NHB, exhausting
+			// the free tier on a wallet's first transaction.
+			FreeSpendLimitWei: new(big.Int).Mul(big.NewInt(1000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 			Window:            TransferGasWindowLifetime,
 			FeeCollector:      treasury,
 		},
@@ -495,9 +507,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				RewardAsset:           "ZNHB",
 			},
 			Fees: config.Fees{
-				FreeTierTxPerMonth:       config.DefaultFreeTierTxPerMonth,
-				MDRBasisPoints:           config.DefaultMDRBasisPoints,
-				TransferFreeTierSpendWei: "1000",
+				FreeTierTxPerMonth: config.DefaultFreeTierTxPerMonth,
+				MDRBasisPoints:     config.DefaultMDRBasisPoints,
+				// 1000 NHB at 18 decimals -- see docs/issue30.md item 7.
+				TransferFreeTierSpendWei: "1000000000000000000000",
 				TransferFreeTierWindow:   TransferGasWindowLifetime,
 			},
 		},
@@ -7525,6 +7538,12 @@ func (n *Node) GenesisHash() []byte {
 // ChainID exposes the chain identifier (used by P2P authenticated handshake).
 func (n *Node) ChainID() uint64 {
 	return n.chain.ChainID()
+}
+
+// AdminWallet exposes the genesis-declared admin/treasury wallet address, if
+// the loaded genesis file configured one.
+func (n *Node) AdminWallet() ([20]byte, bool) {
+	return n.chain.AdminWallet()
 }
 
 // GetLastCommitHash returns a commit hash/seed (used by BFT proposer selection).

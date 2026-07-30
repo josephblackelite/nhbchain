@@ -237,8 +237,11 @@ func defaultGlobalConfig() Global {
 		Fees: Fees{
 			FreeTierTxPerMonth:       DefaultFreeTierTxPerMonth,
 			MDRBasisPoints:           DefaultMDRBasisPoints,
-			OwnerWallet:              "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
-			TransferFreeTierSpendWei: "1000",
+			OwnerWallet: "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
+			// 1000 NHB at 18 decimals -- see docs/issue30.md item 7. The
+			// previous "1000" (0.000000000000001 NHB) exhausted the free
+			// tier on a wallet's first transaction.
+			TransferFreeTierSpendWei: "1000000000000000000000",
 			TransferFreeTierWindow:   "lifetime",
 			Assets: []FeeAsset{
 				{Asset: fees.AssetNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"},
