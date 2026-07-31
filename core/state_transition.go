@@ -5308,6 +5308,28 @@ func (sp *StateProcessor) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.In
 	return sp.writeBigInt(key, amount)
 }
 
+func (sp *StateProcessor) LoyaltyBasePairDailyAccrued(pairKey []byte, day string) (*big.Int, error) {
+	if len(pairKey) == 0 {
+		return nil, fmt.Errorf("pair key must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBasePairDailyMeterKey(pairKey, day)
+	return sp.loadBigInt(key)
+}
+
+func (sp *StateProcessor) SetLoyaltyBasePairDailyAccrued(pairKey []byte, day string, amount *big.Int) error {
+	if len(pairKey) == 0 {
+		return fmt.Errorf("pair key must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBasePairDailyMeterKey(pairKey, day)
+	return sp.writeBigInt(key, amount)
+}
+
 // QueuePendingBaseReward records a computed base reward for later settlement at
 // the end of the block.
 func (sp *StateProcessor) QueuePendingBaseReward(ctx *loyalty.BaseRewardContext, reward *big.Int) {

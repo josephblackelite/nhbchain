@@ -17,7 +17,15 @@ type GlobalConfig struct {
 	MinSpend     *big.Int
 	CapPerTx     *big.Int
 	DailyCapUser *big.Int
-	Dynamic      DynamicConfig
+	// DailyCapCounterparty bounds how much base reward can accrue in a single
+	// UTC day from transfers between one specific, order-independent pair of
+	// addresses (A->B and B->A share the same budget). Genuine commerce
+	// naturally spreads across many distinct counterparties; wash trading
+	// concentrates value moving back and forth between a small, fixed set of
+	// addresses one person controls. Zero disables the check. See
+	// docs/issue30.md item 6/36.
+	DailyCapCounterparty *big.Int
+	Dynamic              DynamicConfig
 }
 
 // Clone produces a deep copy of the configuration.
@@ -42,6 +50,9 @@ func (c *GlobalConfig) Clone() *GlobalConfig {
 	if c.DailyCapUser != nil {
 		clone.DailyCapUser = new(big.Int).Set(c.DailyCapUser)
 	}
+	if c.DailyCapCounterparty != nil {
+		clone.DailyCapCounterparty = new(big.Int).Set(c.DailyCapCounterparty)
+	}
 	return clone
 }
 
@@ -61,6 +72,9 @@ func (c *GlobalConfig) Normalize() *GlobalConfig {
 	if c.DailyCapUser == nil {
 		c.DailyCapUser = big.NewInt(0)
 	}
+	if c.DailyCapCounterparty == nil {
+		c.DailyCapCounterparty = big.NewInt(0)
+	}
 	c.Dynamic.Normalize()
 	if c.MinSpend.Sign() < 0 {
 		c.MinSpend = big.NewInt(0)
@@ -70,6 +84,9 @@ func (c *GlobalConfig) Normalize() *GlobalConfig {
 	}
 	if c.DailyCapUser.Sign() < 0 {
 		c.DailyCapUser = big.NewInt(0)
+	}
+	if c.DailyCapCounterparty.Sign() < 0 {
+		c.DailyCapCounterparty = big.NewInt(0)
 	}
 	return c
 }
@@ -93,6 +110,9 @@ func (c *GlobalConfig) Validate() error {
 	}
 	if c.DailyCapUser != nil && c.DailyCapUser.Sign() < 0 {
 		return fmt.Errorf("dailyCapUser must not be negative")
+	}
+	if c.DailyCapCounterparty != nil && c.DailyCapCounterparty.Sign() < 0 {
+		return fmt.Errorf("dailyCapCounterparty must not be negative")
 	}
 	if err := c.Dynamic.Validate(); err != nil {
 		return fmt.Errorf("dynamic: %w", err)

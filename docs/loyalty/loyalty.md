@@ -105,10 +105,17 @@ network-wide base reward. Operators can toggle or tune it through governance:
 * `Treasury` (`[20]byte`): address that funds base payouts.
 * `BaseBps` (`uint32`): founder default is **50 bps (0.50%)**, paying 0.5 ZNHB for every 100 NHB of qualifying spend.
 * `MinSpend`, `CapPerTx`, `DailyCapUser` (`*big.Int`): caps expressed in wei (18 decimal places).
+* `DailyCapCounterparty` (`*big.Int`, wei): anti-wash-trading control. Bounds how much base reward can
+  accrue in one UTC day between one specific pair of addresses, regardless of which side sends --
+  A→B and B→A share the same budget. Genuine commerce naturally spreads across many distinct
+  counterparties (a merchant with many customers); two wallets cycling funds back and forth to farm
+  rewards do not. Set to `0` to disable (matches pre-existing behavior). Configured at genesis via
+  `LoyaltyGlobalSpec.dailyCapCounterparty` alongside the other caps above; there is no runtime RPC to
+  change it.
 
 With the default 50 bps rate, a settlement of `100 NHB` (`100 * 10^18` wei) accrues
 `0.5 ZNHB` (`0.5 * 10^18` wei) to the **spender** so long as the treasury holds enough balance and the
-per-transaction and daily caps permit it.
+per-transaction, daily, and counterparty-pair caps permit it.
 
 Founder mainnet treats `ZNHB` as fixed-supply in practice:
 

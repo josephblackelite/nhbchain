@@ -57,6 +57,7 @@ var (
 	loyaltyDynamicStateKeyBytes    = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
 	loyaltyDailyPrefix             = []byte("loyalty-meter:base-daily:")
 	loyaltyTotalPrefix             = []byte("loyalty-meter:base-total:")
+	loyaltyPairDailyPrefix         = []byte("loyalty-meter:base-pair-daily:")
 	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
 	loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
 	loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
@@ -974,6 +975,21 @@ func LoyaltyBaseTotalMeterKey(addr []byte) []byte {
 	buf := make([]byte, len(loyaltyTotalPrefix)+len(addr))
 	copy(buf, loyaltyTotalPrefix)
 	copy(buf[len(loyaltyTotalPrefix):], addr)
+	return ethcrypto.Keccak256(buf)
+}
+
+// LoyaltyBasePairDailyMeterKey derives the storage key for the base reward
+// accrued today between one counterparty pair. pairKey must already be
+// order-independent (see loyalty.CounterpartyPairKey) so that A->B and B->A
+// transfers share the same meter -- that's what makes this an anti-wash-
+// trading control rather than just a second per-address cap.
+func LoyaltyBasePairDailyMeterKey(pairKey []byte, day string) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(loyaltyPairDailyPrefix)+len(trimmed)+1+len(pairKey))
+	copy(buf, loyaltyPairDailyPrefix)
+	copy(buf[len(loyaltyPairDailyPrefix):], trimmed)
+	buf[len(loyaltyPairDailyPrefix)+len(trimmed)] = ':'
+	copy(buf[len(loyaltyPairDailyPrefix)+len(trimmed)+1:], pairKey)
 	return ethcrypto.Keccak256(buf)
 }
 

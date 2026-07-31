@@ -1,6 +1,7 @@
 package loyalty
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -26,8 +27,33 @@ type BaseRewardState interface {
 	SetLoyaltyBaseDailyAccrued(addr []byte, day string, amount *big.Int) error
 	LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error)
 	SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.Int) error
+	// LoyaltyBasePairDailyAccrued/SetLoyaltyBasePairDailyAccrued meter reward
+	// accrued today between one counterparty pair (see CounterpartyPairKey),
+	// independent of the per-address meters above -- the anti-wash-trading
+	// control (docs/issue30.md item 6/36).
+	LoyaltyBasePairDailyAccrued(pairKey []byte, day string) (*big.Int, error)
+	SetLoyaltyBasePairDailyAccrued(pairKey []byte, day string, amount *big.Int) error
 	AppendEvent(evt *types.Event)
 	QueuePendingBaseReward(ctx *BaseRewardContext, reward *big.Int)
+}
+
+// CounterpartyPairKey derives an order-independent identifier for a pair of
+// addresses: a transfer from A to B and a later transfer from B to A collapse
+// to the same key, so back-and-forth cycling between two wallets shares one
+// daily budget instead of doubling it. Genuine commerce naturally spreads
+// across many distinct counterparties (a merchant with many customers, a
+// customer paying many merchants); this only bites a small, fixed set of
+// addresses trading repeatedly with each other.
+func CounterpartyPairKey(a, b []byte) []byte {
+	first, second := a, b
+	if bytes.Compare(first, second) > 0 {
+		first, second = second, first
+	}
+	key := make([]byte, 0, len(first)+len(second)+1)
+	key = append(key, first...)
+	key = append(key, ':')
+	key = append(key, second...)
+	return key
 }
 
 // BaseRewardContext captures the transaction metadata needed to evaluate the
@@ -171,6 +197,26 @@ func (e *Engine) ApplyBaseReward(st BaseRewardState, ctx *BaseRewardContext) {
 			reward = remaining
 		}
 	}
+
+	var pairKey []byte
+	if len(ctx.To) > 0 {
+		pairKey = CounterpartyPairKey(ctx.From, ctx.To)
+	}
+	if cfg.DailyCapCounterparty.Sign() > 0 && dayKey != "" && len(pairKey) > 0 {
+		pairAccruedToday, err := st.LoyaltyBasePairDailyAccrued(pairKey, dayKey)
+		if err != nil {
+			emitSkip(st, ctx, "meter_error", map[string]string{"error": err.Error()})
+			return
+		}
+		remaining := new(big.Int).Sub(cfg.DailyCapCounterparty, pairAccruedToday)
+		if remaining.Sign() <= 0 {
+			emitSkip(st, ctx, "counterparty_daily_cap_reached", map[string]string{"dailyCapCounterparty": cfg.DailyCapCounterparty.String()})
+			return
+		}
+		if reward.Cmp(remaining) > 0 {
+			reward = remaining
+		}
+	}
 	if reward.Sign() <= 0 {
 		emitSkip(st, ctx, "reward_zero", nil)
 		return
@@ -199,6 +245,18 @@ func (e *Engine) ApplyBaseReward(st BaseRewardState, ctx *BaseRewardContext) {
 		}
 		newDaily := new(big.Int).Add(accruedToday, reward)
 		if err := st.SetLoyaltyBaseDailyAccrued(ctx.From, dayKey, newDaily); err != nil {
+			emitSkip(st, ctx, "meter_error", map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if dayKey != "" && len(pairKey) > 0 {
+		pairAccruedToday, err := st.LoyaltyBasePairDailyAccrued(pairKey, dayKey)
+		if err != nil {
+			emitSkip(st, ctx, "meter_error", map[string]string{"error": err.Error()})
+			return
+		}
+		newPairDaily := new(big.Int).Add(pairAccruedToday, reward)
+		if err := st.SetLoyaltyBasePairDailyAccrued(pairKey, dayKey, newPairDaily); err != nil {
 			emitSkip(st, ctx, "meter_error", map[string]string{"error": err.Error()})
 			return
 		}

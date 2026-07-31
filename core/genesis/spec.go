@@ -54,20 +54,22 @@ type ValidatorSpec struct {
 }
 
 type LoyaltyGlobalSpec struct {
-	Active       bool               `json:"active"`
-	Treasury     string             `json:"treasury"`
-	BaseBps      uint32             `json:"baseBps"`
-	MinSpend     string             `json:"minSpend"`
-	CapPerTx     string             `json:"capPerTx"`
-	DailyCapUser string             `json:"dailyCapUser"`
-	SeedZNHB     string             `json:"seedZNHB"`
-	Dynamic      LoyaltyDynamicSpec `json:"dynamic"`
+	Active               bool               `json:"active"`
+	Treasury             string             `json:"treasury"`
+	BaseBps              uint32             `json:"baseBps"`
+	MinSpend             string             `json:"minSpend"`
+	CapPerTx             string             `json:"capPerTx"`
+	DailyCapUser         string             `json:"dailyCapUser"`
+	DailyCapCounterparty string             `json:"dailyCapCounterparty,omitempty"`
+	SeedZNHB             string             `json:"seedZNHB"`
+	Dynamic              LoyaltyDynamicSpec `json:"dynamic"`
 
-	treasuryAddr []byte
-	minSpendAmt  *big.Int
-	capPerTxAmt  *big.Int
-	dailyCapAmt  *big.Int
-	seedZNHB     *big.Int
+	treasuryAddr            []byte
+	minSpendAmt             *big.Int
+	capPerTxAmt             *big.Int
+	dailyCapAmt             *big.Int
+	dailyCapCounterpartyAmt *big.Int
+	seedZNHB                *big.Int
 }
 
 type LoyaltyDynamicSpec struct {
@@ -385,6 +387,10 @@ func (l *LoyaltyGlobalSpec) validate(tokenSymbols map[string]struct{}) error {
 	if err != nil {
 		return fmt.Errorf("dailyCapUser: %w", err)
 	}
+	dailyCapCounterparty, err := parseAmountString(l.DailyCapCounterparty)
+	if err != nil {
+		return fmt.Errorf("dailyCapCounterparty: %w", err)
+	}
 	seed, err := parseAmountString(l.SeedZNHB)
 	if err != nil {
 		return fmt.Errorf("seedZNHB: %w", err)
@@ -400,6 +406,7 @@ func (l *LoyaltyGlobalSpec) validate(tokenSymbols map[string]struct{}) error {
 	l.minSpendAmt = minSpend
 	l.capPerTxAmt = capPerTx
 	l.dailyCapAmt = dailyCap
+	l.dailyCapCounterpartyAmt = dailyCapCounterparty
 	l.seedZNHB = seed
 	return nil
 }
@@ -412,12 +419,13 @@ func (l *LoyaltyGlobalSpec) Config() (*loyalty.GlobalConfig, *big.Int, error) {
 		return nil, nil, fmt.Errorf("loyalty global spec not validated")
 	}
 	cfg := &loyalty.GlobalConfig{
-		Active:       l.Active,
-		Treasury:     append([]byte(nil), l.treasuryAddr...),
-		BaseBps:      l.BaseBps,
-		MinSpend:     new(big.Int).Set(l.minSpendAmt),
-		CapPerTx:     new(big.Int).Set(l.capPerTxAmt),
-		DailyCapUser: new(big.Int).Set(l.dailyCapAmt),
+		Active:               l.Active,
+		Treasury:             append([]byte(nil), l.treasuryAddr...),
+		BaseBps:              l.BaseBps,
+		MinSpend:             new(big.Int).Set(l.minSpendAmt),
+		CapPerTx:             new(big.Int).Set(l.capPerTxAmt),
+		DailyCapUser:         new(big.Int).Set(l.dailyCapAmt),
+		DailyCapCounterparty: new(big.Int).Set(l.dailyCapCounterpartyAmt),
 		Dynamic: loyalty.DynamicConfig{
 			TargetBps:                      l.Dynamic.TargetBps,
 			MinBps:                         l.Dynamic.MinBps,

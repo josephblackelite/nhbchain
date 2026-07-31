@@ -10,12 +10,13 @@ import (
 )
 
 type mockState struct {
-	cfg      *GlobalConfig
-	accounts map[string]*types.Account
-	daily    map[string]map[string]*big.Int
-	total    map[string]*big.Int
-	events   []types.Event
-	queued   []queuedReward
+	cfg       *GlobalConfig
+	accounts  map[string]*types.Account
+	daily     map[string]map[string]*big.Int
+	total     map[string]*big.Int
+	pairDaily map[string]map[string]*big.Int
+	events    []types.Event
+	queued    []queuedReward
 }
 
 type queuedReward struct {
@@ -25,12 +26,13 @@ type queuedReward struct {
 
 func newMockState(cfg *GlobalConfig) *mockState {
 	return &mockState{
-		cfg:      cfg.Clone().Normalize(),
-		accounts: make(map[string]*types.Account),
-		daily:    make(map[string]map[string]*big.Int),
-		total:    make(map[string]*big.Int),
-		events:   []types.Event{},
-		queued:   []queuedReward{},
+		cfg:       cfg.Clone().Normalize(),
+		accounts:  make(map[string]*types.Account),
+		daily:     make(map[string]map[string]*big.Int),
+		total:     make(map[string]*big.Int),
+		pairDaily: make(map[string]map[string]*big.Int),
+		events:    []types.Event{},
+		queued:    []queuedReward{},
 	}
 }
 
@@ -95,6 +97,23 @@ func (m *mockState) LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error) {
 
 func (m *mockState) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.Int) error {
 	m.total[string(addr)] = new(big.Int).Set(amount)
+	return nil
+}
+
+func (m *mockState) LoyaltyBasePairDailyAccrued(pairKey []byte, day string) (*big.Int, error) {
+	if dayMap, ok := m.pairDaily[day]; ok {
+		if amt, exists := dayMap[string(pairKey)]; exists {
+			return new(big.Int).Set(amt), nil
+		}
+	}
+	return big.NewInt(0), nil
+}
+
+func (m *mockState) SetLoyaltyBasePairDailyAccrued(pairKey []byte, day string, amount *big.Int) error {
+	if _, ok := m.pairDaily[day]; !ok {
+		m.pairDaily[day] = make(map[string]*big.Int)
+	}
+	m.pairDaily[day][string(pairKey)] = new(big.Int).Set(amount)
 	return nil
 }
 
@@ -371,5 +390,108 @@ func TestApplyBaseRewardDefaultRatePrecision(t *testing.T) {
 	treasuryAcc, _ := state.GetAccount(treasury)
 	if treasuryAcc.BalanceZNHB.Cmp(treasuryBalance) != 0 {
 		t.Fatalf("expected treasury balance unchanged %s, got %s", treasuryBalance.String(), treasuryAcc.BalanceZNHB.String())
+	}
+}
+
+// TestApplyBaseRewardCounterpartyDailyCapLimitsCycling verifies the
+// anti-wash-trading control: two wallets sending funds back and forth to
+// each other hit the counterparty pair's daily budget long before either
+// wallet's own (much more generous) per-address daily cap, and A->B / B->A
+// share the same budget rather than doubling it.
+func TestApplyBaseRewardCounterpartyDailyCapLimitsCycling(t *testing.T) {
+	treasury := []byte("treasury")
+	walletA := []byte("wallet-a")
+	walletB := []byte("wallet-b")
+	cfg := (&GlobalConfig{
+		Active:               true,
+		Treasury:             append([]byte(nil), treasury...),
+		BaseBps:              5_000, // 50%, so the numbers are easy to check by hand
+		MinSpend:             big.NewInt(0),
+		CapPerTx:             big.NewInt(0),
+		DailyCapUser:         big.NewInt(1_000), // generous per-address cap -- should never be the binding constraint here
+		DailyCapCounterparty: big.NewInt(80),    // tight pair cap -- this is what should actually bite
+	}).Normalize()
+	state := newMockState(cfg)
+	state.addAccount(treasury, &types.Account{BalanceZNHB: big.NewInt(10_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	day := time.Date(2024, 2, 1, 12, 0, 0, 0, time.UTC)
+	engine := NewEngine()
+	freshAccount := func() *types.Account {
+		return &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	}
+
+	// Hop 1, A->B: raw reward 50, well within the pair's 80 budget.
+	engine.ApplyBaseReward(state, &BaseRewardContext{
+		From: append([]byte(nil), walletA...), To: append([]byte(nil), walletB...),
+		Token: "NHB", Amount: big.NewInt(100), Timestamp: day, FromAccount: freshAccount(),
+	})
+	if len(state.queued) != 1 || state.queued[0].amount.String() != "50" {
+		t.Fatalf("expected hop 1 reward 50, got %#v", state.queued)
+	}
+
+	// Hop 2, B->A (money cycles back): same pair (order doesn't matter), 50
+	// already spent of the 80 budget, so only 30 remains -- the reward must
+	// be clamped to 30, not the 50 it would otherwise be, even though B's own
+	// per-address daily cap (1000) isn't remotely close to being hit.
+	engine.ApplyBaseReward(state, &BaseRewardContext{
+		From: append([]byte(nil), walletB...), To: append([]byte(nil), walletA...),
+		Token: "NHB", Amount: big.NewInt(100), Timestamp: day, FromAccount: freshAccount(),
+	})
+	if len(state.queued) != 2 {
+		t.Fatalf("expected hop 2 to still queue a (clamped) reward, got %#v", state.queued)
+	}
+	if got := state.queued[1].amount.String(); got != "30" {
+		t.Fatalf("expected hop 2 reward clamped to remaining pair budget 30, got %s", got)
+	}
+
+	// Hop 3, A->B again: the pair's 80 budget is now fully spent (50+30), so
+	// no further reward accrues at all, even though neither wallet's own
+	// per-address daily cap is anywhere near exhausted.
+	engine.ApplyBaseReward(state, &BaseRewardContext{
+		From: append([]byte(nil), walletA...), To: append([]byte(nil), walletB...),
+		Token: "NHB", Amount: big.NewInt(100), Timestamp: day, FromAccount: freshAccount(),
+	})
+	if len(state.queued) != 2 {
+		t.Fatalf("expected no further reward once the counterparty pair cap is exhausted, got %#v", state.queued)
+	}
+	last := state.events[len(state.events)-1]
+	if last.Type != eventBaseSkipped || last.Attributes["reason"] != "counterparty_daily_cap_reached" {
+		t.Fatalf("expected counterparty_daily_cap_reached skip, got %#v", last)
+	}
+}
+
+// TestApplyBaseRewardCounterpartyCapDoesNotThrottleDistinctCounterparties
+// verifies the safeguard doesn't penalize genuine commerce: a merchant paid
+// by many different real customers earns each customer their full reward,
+// even though the merchant's total received today far exceeds the (tight)
+// per-pair cap -- because each customer is a distinct pair with its own
+// budget, unlike two wallets cycling funds with each other.
+func TestApplyBaseRewardCounterpartyCapDoesNotThrottleDistinctCounterparties(t *testing.T) {
+	treasury := []byte("treasury")
+	merchant := []byte("merchant")
+	cfg := (&GlobalConfig{
+		Active:               true,
+		Treasury:             append([]byte(nil), treasury...),
+		BaseBps:              5_000,
+		MinSpend:             big.NewInt(0),
+		CapPerTx:             big.NewInt(0),
+		DailyCapUser:         big.NewInt(0), // disabled, isolating this test to the pair cap alone
+		DailyCapCounterparty: big.NewInt(80),
+	}).Normalize()
+	state := newMockState(cfg)
+	state.addAccount(treasury, &types.Account{BalanceZNHB: big.NewInt(10_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	day := time.Date(2024, 2, 2, 12, 0, 0, 0, time.UTC)
+	engine := NewEngine()
+	customers := [][]byte{[]byte("customer-1"), []byte("customer-2"), []byte("customer-3")}
+	for i, customer := range customers {
+		engine.ApplyBaseReward(state, &BaseRewardContext{
+			From: append([]byte(nil), customer...), To: append([]byte(nil), merchant...),
+			Token: "NHB", Amount: big.NewInt(100), Timestamp: day,
+			FromAccount: &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)},
+		})
+		if len(state.queued) != i+1 || state.queued[i].amount.String() != "50" {
+			t.Fatalf("customer %d: expected full reward 50 unaffected by other customers, got %#v", i, state.queued)
+		}
 	}
 }
