@@ -85,6 +85,17 @@ type Node struct {
 	txSimulationEnabled          bool
 	bftEngine                    *bft.Engine
 	stateMu                      sync.RWMutex
+	// selfProposedHash is the header hash of the block CreateBlock most
+	// recently built from the current, possibly-drifted n.state (guarded by
+	// stateMu). ValidateBlock/commitBlock skip the committed-head drift
+	// check when the block they're processing matches this hash, since it
+	// means n.state's current content -- including any pending direct-state
+	// RPC writes (lending, escrow) folded in by WithState -- is exactly what
+	// produced that block's declared root, not unrelated local drift. Any
+	// other block (a peer's proposal, a catch-up/synced block) did not come
+	// from this state, so the drift check still applies to it. See
+	// docs/issue30.md item 2 / task #32.
+	selfProposedHash []byte
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
 	govPolicy                    governance.ProposalPolicy
@@ -563,19 +574,14 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		node.syncMgr = mgr
 	}
 
-	if header := chain.CurrentHeader(); header != nil && len(header.StateRoot) > 0 {
-		expectedRoot := common.BytesToHash(header.StateRoot)
-		if pendingRoot := stateProcessor.PendingRoot(); pendingRoot != expectedRoot {
-			slog.Warn(
-				"startup state root drift detected; resetting to committed chain head",
-				slog.Uint64("height", header.Height),
-				slog.String("expected_state_root", fmt.Sprintf("%x", expectedRoot.Bytes())),
-				slog.String("pending_state_root", fmt.Sprintf("%x", pendingRoot.Bytes())),
-			)
-			if err := stateProcessor.ResetToRoot(expectedRoot); err != nil {
-				return nil, fmt.Errorf("reset startup state root: %w", err)
-			}
-		}
+	// Startup is the one time comparing pending state against the last
+	// committed header is actually correct: a hard crash can leave the
+	// on-disk trie store out of sync with the last persisted block, and
+	// there are no legitimate pending mutations yet (nothing has run).
+	// See ensurePendingStateMatchesCommittedHeadLocked for why this same
+	// check must NOT run during normal operation.
+	if err := node.ensurePendingStateMatchesCommittedHeadLocked("startup"); err != nil {
+		return nil, err
 	}
 
 	return node, nil
@@ -590,6 +596,20 @@ func normalizeModuleName(module string) string {
 	return strings.ToLower(strings.TrimSpace(module))
 }
 
+// ensurePendingStateMatchesCommittedHeadLocked resets pending state to the
+// last committed block's declared root if the two disagree. Only two things
+// call this: NewNode at startup (unconditionally -- a hard crash can leave
+// the on-disk trie store out of sync with the last persisted block, and
+// there are no legitimate pending mutations yet), and
+// resetDriftUnlessSelfProposedLocked (conditionally -- see below). It must
+// never run unconditionally inside CreateBlock/ValidateBlock/CommitBlock/
+// WithState during normal operation: n.state is deliberately mutated
+// directly by direct-state RPCs (lending, escrow, and formerly staking) via
+// WithState ahead of block inclusion, so its pending root legitimately --
+// and expectedly -- differs from the last committed head between blocks.
+// Running this unconditionally there previously silently discarded every
+// such write the instant any block operation ran next, with only a WARN log
+// to show for it (see docs/issue30.md item 2 / task #32).
 func (n *Node) ensurePendingStateMatchesCommittedHeadLocked(context string) error {
 	if n == nil || n.state == nil || n.chain == nil {
 		return nil
@@ -614,6 +634,33 @@ func (n *Node) ensurePendingStateMatchesCommittedHeadLocked(context string) erro
 		return fmt.Errorf("reset drifted state root: %w", err)
 	}
 	return nil
+}
+
+// resetDriftUnlessSelfProposedLocked is the guard ValidateBlock and
+// commitBlock actually use. b is the block about to be validated/committed.
+// If it's the exact block this node's own CreateBlock most recently built
+// from the current n.state (tracked via selfProposedHash), n.state's
+// pending content -- including any WithState writes folded in ahead of that
+// proposal -- is exactly what produced b's declared root, so there is
+// nothing to reset: doing so anyway would wipe those writes and then fail
+// this same block's own state-root check for a completely spurious reason.
+// For any other block (a peer's competing/later proposal, a catch-up/synced
+// block, or anything from a prior, now-superseded round), n.state's current
+// content did not contribute to it and must be reset to the last committed
+// head first, exactly like ensurePendingStateMatchesCommittedHeadLocked
+// always did -- otherwise this validator could never validate or adopt
+// another block again once it had any pending local drift of its own.
+// Callers must hold stateMu.
+func (n *Node) resetDriftUnlessSelfProposedLocked(b *types.Block, context string) error {
+	if n == nil {
+		return nil
+	}
+	if b != nil && b.Header != nil && len(n.selfProposedHash) > 0 {
+		if hash, err := b.Header.Hash(); err == nil && bytes.Equal(hash, n.selfProposedHash) {
+			return nil
+		}
+	}
+	return n.ensurePendingStateMatchesCommittedHeadLocked(context)
 }
 
 // refreshModulePauses loads pause configuration from state. Callers must hold
@@ -2699,10 +2746,6 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 		}
 
 		n.stateMu.Lock()
-		if err := n.ensurePendingStateMatchesCommittedHeadLocked("create block"); err != nil {
-			n.stateMu.Unlock()
-			return nil, nil, nil, err
-		}
 		if err := n.refreshModulePauses(); err != nil {
 			n.stateMu.Unlock()
 			return nil, nil, nil, err
@@ -2778,7 +2821,13 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 	header.TxRoot = txRoot
 	header.StateRoot = stateCopy.PendingRoot().Bytes()
 
-	return types.NewBlock(header, txs), nil
+	block = types.NewBlock(header, txs)
+	if hash, hashErr := header.Hash(); hashErr == nil {
+		n.stateMu.Lock()
+		n.selfProposedHash = hash
+		n.stateMu.Unlock()
+	}
+	return block, nil
 }
 
 func (n *Node) CommitBlock(b *types.Block) error {
@@ -2817,7 +2866,7 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
-	if err := n.ensurePendingStateMatchesCommittedHeadLocked("validate block"); err != nil {
+	if err := n.resetDriftUnlessSelfProposedLocked(b, "validate block"); err != nil {
 		return err
 	}
 	if err := n.refreshModulePauses(); err != nil {
@@ -2964,7 +3013,7 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
-	if err := n.ensurePendingStateMatchesCommittedHeadLocked("commit block"); err != nil {
+	if err := n.resetDriftUnlessSelfProposedLocked(b, "commit block"); err != nil {
 		return err
 	}
 
@@ -7290,9 +7339,6 @@ func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
 	defer n.stateMu.Unlock()
 	if n.state == nil {
 		return fmt.Errorf("state unavailable")
-	}
-	if err := n.ensurePendingStateMatchesCommittedHeadLocked("with state"); err != nil {
-		return err
 	}
 	manager := nhbstate.NewManager(n.state.Trie)
 	return fn(manager)

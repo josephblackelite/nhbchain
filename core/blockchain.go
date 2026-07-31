@@ -336,12 +336,18 @@ func (bc *Blockchain) GenesisHash() []byte {
 // re-persists it under the resulting new hash. This is an operator recovery
 // primitive: it lets an intentional, already-applied state correction (for
 // example Node.ReplaceValidatorSet) become the canonical baseline that
-// ensurePendingStateMatchesCommittedHeadLocked checks pending state against,
-// instead of being treated as unexpected drift and silently reverted the
-// next time a block is built. It only ever touches the current tip block; it
-// does not rewrite chain history below the tip, and the old block bytes are
-// left in place under their original hash (unreferenced, harmless) rather
-// than deleted.
+// Node.ensurePendingStateMatchesCommittedHeadLocked's startup check compares
+// pending state against, instead of being treated as drift and silently
+// reverted on the node's next restart. (A live-running node no longer needs
+// this to fold the correction into its own very next self-proposed block --
+// Node.resetDriftUnlessSelfProposedLocked lets a node's own pending state
+// flow into a block it proposes itself. This primitive still matters when
+// the correction was made with the node stopped, e.g. via a one-off
+// recovery binary, and needs to survive the following restart, since
+// startup has no "self-proposed" block to compare against.) It only ever
+// touches the current tip block; it does not rewrite chain history below
+// the tip, and the old block bytes are left in place under their original
+// hash (unreferenced, harmless) rather than deleted.
 func (bc *Blockchain) PatchTipStateRoot(newStateRoot []byte) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
