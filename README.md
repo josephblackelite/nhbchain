@@ -144,23 +144,36 @@ bash scripts/run_nhbcoin_node.sh --reset-state
 
 **That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
-### Step 6: Delegate your 10,000 ZNHB (Stake)
-The validator bootstrap now uses the private key from your NHBCoin wallet
-directly, so the server and the validator wallet address are the same account.
+### Step 6: Get paid (delegate 10,000 ZNHB, or more)
+The validator's signing key and your everyday NHBCoin wallet are **two
+different things by design**. The validator key is generated on the server
+itself and never leaves it; you never export or paste a private key
+anywhere for this step.
 
-1. Create or log into your wallet at `nhbcoin.com`.
-2. Make sure that wallet has at least `10,000 ZNHB` staked or ready to stake.
-3. In the wallet app, go to **Settings** and reveal your private key.
-4. On your Ubuntu validator server, run:
+1. On your Ubuntu validator server, run:
 
 ```bash
 chmod +x scripts/validator-only-bootstrap.sh
-bash scripts/validator-only-bootstrap.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
 ```
 
+   This generates a fresh validator key **on this machine** the first time
+   it runs (reused on later runs), prints that validator's node address, and
+   -- since `--beneficiary` was given -- automatically redirects its future
+   consensus rewards to your wallet address, signed locally before the key
+   is used for anything else. Add `--email you@example.com` to also get the
+   node address and instructions emailed to you.
+
+2. Create or log into your wallet at `nhbcoin.com`.
+3. Go to **Validator Hub -> Delegate**, paste the node address the script
+   printed, and delegate at least `10,000 ZNHB` from that wallet.
+
 Once the server is online, synced, and emitting validator heartbeats, the
-staked wallet becomes a validator candidate and then joins the active set at
-the next epoch boundary.
+delegated stake becomes a validator candidate and then joins the active set
+at the next epoch boundary. Your wallet earns the ordinary staking yield via
+the delegation itself; `--beneficiary` additionally routes the separate
+consensus-participation reward to the same wallet, so nothing accumulates at
+an address you can't reach.
 
 ---
 
@@ -191,17 +204,41 @@ On a fresh Ubuntu server, clone the repo and run:
 
 ```bash
 chmod +x scripts/validator-only-bootstrap.sh
-bash scripts/validator-only-bootstrap.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
 ```
+
+Never pass a private key to this script -- it generates one for you, on
+this machine, the first time it runs. `--beneficiary` is optional but
+recommended: it points this validator's consensus reward at a wallet you
+actually use (see "Getting paid" below); without it, that reward
+accumulates at the validator's own address, whose key intentionally never
+leaves this server.
 
 What this does:
 
-- writes `/etc/nhbchain/node.env` with your validator key
+- generates a fresh validator key on this machine (idempotent -- reused on
+  later runs instead of replaced)
+- writes `/etc/nhbchain/node.env` with that key
 - installs `nhb.service`
 - builds the validator binaries
 - points the node at the NHBCoin mainnet bootnode
 - syncs block history from the network until it reaches the current head
 - starts the validator and keeps validator heartbeats flowing automatically
+- if `--beneficiary` was given, signs a one-time transaction locally
+  redirecting this validator's consensus reward to that address
+- prints the validator's node address and exactly what to do next
+
+Getting paid:
+
+- **Staking yield**: from any nhbcoin.com wallet, go to Validator Hub ->
+  Delegate, paste the node address this script printed, delegate at least
+  10,000 ZNHB. That wallet earns the yield directly.
+- **Consensus reward**: a separate, smaller reward for actively
+  participating in consensus. Defaults to the validator's own
+  (server-only) address; `--beneficiary` redirects it to your wallet
+  automatically. You can set or change this later without rerunning the
+  whole script:
+  `nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key`
 
 Operational model:
 
