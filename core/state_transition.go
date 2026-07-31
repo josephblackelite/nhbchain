@@ -547,7 +547,7 @@ func (sp *StateProcessor) transferGasWindowKey() string {
 	}
 }
 
-func (sp *StateProcessor) transferGasStatus(sender []byte) (nhbstate.TransferGasSpendStatus, error) {
+func (sp *StateProcessor) transferGasStatus(sender []byte, asset string) (nhbstate.TransferGasSpendStatus, error) {
 	if sp == nil {
 		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("fees: state unavailable")
 	}
@@ -558,10 +558,10 @@ func (sp *StateProcessor) transferGasStatus(sender []byte) (nhbstate.TransferGas
 	var wallet [20]byte
 	copy(wallet[:], sender)
 	manager := nhbstate.NewManager(sp.Trie)
-	return manager.TransferGasSpendStatus(wallet, sp.transferGasWindowKey(), sp.blockTimestamp(), policy.FreeSpendLimitWei)
+	return manager.TransferGasSpendStatus(wallet, sp.transferGasWindowKey(), sp.blockTimestamp(), policy.FreeSpendLimitWei, asset)
 }
 
-func (sp *StateProcessor) recordTransferGasSpend(sender []byte, amount *big.Int) error {
+func (sp *StateProcessor) recordTransferGasSpend(sender []byte, amount *big.Int, asset string) error {
 	if sp == nil || amount == nil || amount.Sign() <= 0 {
 		return nil
 	}
@@ -572,7 +572,7 @@ func (sp *StateProcessor) recordTransferGasSpend(sender []byte, amount *big.Int)
 	var wallet [20]byte
 	copy(wallet[:], sender)
 	manager := nhbstate.NewManager(sp.Trie)
-	_, err := manager.TransferGasSpendAdd(wallet, sp.transferGasWindowKey(), sp.blockTimestamp(), amount, policy.FreeSpendLimitWei)
+	_, err := manager.TransferGasSpendAdd(wallet, sp.transferGasWindowKey(), sp.blockTimestamp(), amount, policy.FreeSpendLimitWei, asset)
 	return err
 }
 
@@ -1779,13 +1779,14 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			fromAcc.BalanceNHB = big.NewInt(0)
 		}
 
-		gasCost := big.NewInt(0)
-		if tx.GasPrice != nil {
-			gasCost = new(big.Int).Mul(new(big.Int).SetUint64(tx.GasLimit), tx.GasPrice)
-		}
+		// gasCost is the protocol-enforced fee (docs/issue30.md item 7b) --
+		// a percentage of the transfer value, NOT derived from
+		// tx.GasPrice/GasLimit, which the sender's own wallet sets and could
+		// set to zero, defeating any fee floor.
+		gasCost := transferGasPolicy.ComputeFee(tx.Value)
 		freeTransferGas := false
 		if sponsorshipCtx == nil && transferGasPolicy.Enabled {
-			status, err := sp.transferGasStatus(from)
+			status, err := sp.transferGasStatus(from, "NHB")
 			if err != nil {
 				return nil, err
 			}
@@ -1887,7 +1888,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		if err := sp.updateSenderNonce(from, fromAcc, fromAcc.Nonce+1); err != nil {
 			return nil, err
 		}
-		if err := sp.recordTransferGasSpend(from, tx.Value); err != nil {
+		if err := sp.recordTransferGasSpend(from, tx.Value, "NHB"); err != nil {
 			return nil, err
 		}
 
@@ -2234,10 +2235,29 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	if senderAccount.BalanceZNHB == nil {
 		senderAccount.BalanceZNHB = big.NewInt(0)
 	}
-	if senderAccount.BalanceZNHB.Cmp(amount) < 0 {
+
+	// ZNHB equivalent of the NHB free-tier + protocol-enforced fee (same
+	// mechanism as applyEvmTransaction's transfer fast path, tracked under
+	// its own asset-scoped spend counter since NHB and ZNHB are not
+	// fungible for this purpose) -- see docs/issue30.md item 7b.
+	transferGasPolicy := sp.TransferGasPolicy()
+	gasCost := transferGasPolicy.ComputeFee(amount)
+	freeTransferGas := false
+	if transferGasPolicy.Enabled {
+		status, err := sp.transferGasStatus(sender, "ZNHB")
+		if err != nil {
+			return nil, err
+		}
+		freeTransferGas = status.Eligible
+	}
+	if freeTransferGas {
+		gasCost = big.NewInt(0)
+	}
+	totalRequired := new(big.Int).Add(amount, gasCost)
+	if senderAccount.BalanceZNHB.Cmp(totalRequired) < 0 {
 		return nil, fmt.Errorf("znhb transfer: insufficient balance")
 	}
-	senderAccount.BalanceZNHB = new(big.Int).Sub(senderAccount.BalanceZNHB, amount)
+	senderAccount.BalanceZNHB = new(big.Int).Sub(senderAccount.BalanceZNHB, totalRequired)
 	selfTransfer := bytes.Equal(sender, tx.To)
 	recipientAccount := senderAccount
 	if !selfTransfer {
@@ -2252,6 +2272,29 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	}
 
 	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, amount)
+	if gasCost.Sign() > 0 {
+		switch {
+		case bytes.Equal(transferGasPolicy.FeeCollector[:], sender):
+			senderAccount.BalanceZNHB = new(big.Int).Add(senderAccount.BalanceZNHB, gasCost)
+		case !selfTransfer && bytes.Equal(transferGasPolicy.FeeCollector[:], tx.To):
+			recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, gasCost)
+		default:
+			if isZeroAddress(transferGasPolicy.FeeCollector) {
+				return nil, fmt.Errorf("fees: transfer gas collector not configured")
+			}
+			collectorAccount, err := sp.getAccount(transferGasPolicy.FeeCollector[:])
+			if err != nil {
+				return nil, err
+			}
+			if collectorAccount.BalanceZNHB == nil {
+				collectorAccount.BalanceZNHB = big.NewInt(0)
+			}
+			collectorAccount.BalanceZNHB = new(big.Int).Add(collectorAccount.BalanceZNHB, gasCost)
+			if err := sp.setAccount(transferGasPolicy.FeeCollector[:], collectorAccount); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
 		return nil, err
 	}
@@ -2262,6 +2305,9 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 		if err := sp.setAccount(tx.To, recipientAccount); err != nil {
 			return nil, err
 		}
+	}
+	if err := sp.recordTransferGasSpend(sender, amount, "ZNHB"); err != nil {
+		return nil, err
 	}
 	if err := sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1); err != nil {
 		return nil, err

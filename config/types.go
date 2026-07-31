@@ -115,7 +115,17 @@ type Fees struct {
 	TransferFreeTierSpendWei string
 	TransferFreeTierWindow   string
 	TransferFeeCollector     string
-	Assets                   []FeeAsset
+	// TransferFeeBps is the protocol-enforced fee, in basis points of the
+	// transfer amount, charged once the sender has exceeded
+	// TransferFreeTierSpendWei -- replaces the old sender-self-declared
+	// GasPrice*GasLimit charge, which had no protocol-enforced floor (a
+	// sender's own wallet could set GasPrice=0 and pay nothing even above
+	// the free tier). A percentage rather than a flat fee so it scales with
+	// value moved -- competitive against the exchange-swap-fee round trips
+	// NHB is meant to substitute for, without being negligible at volume or
+	// disproportionate on small transfers. See docs/issue30.md item 7b.
+	TransferFeeBps uint32
+	Assets             []FeeAsset
 }
 
 // RouteWalletByAsset returns a normalised map of asset identifiers to the

@@ -243,6 +243,12 @@ func defaultGlobalConfig() Global {
 			// tier on a wallet's first transaction.
 			TransferFreeTierSpendWei: "1000000000000000000000",
 			TransferFreeTierWindow:   "lifetime",
+			// 20 bps (0.20%) once the free tier is exhausted -- comfortably
+			// undercuts a single exchange trading leg (typically 10-50bps),
+			// let alone the two-legged swap-in/swap-out round trip NHB is
+			// meant to replace, while still scaling with real volume instead
+			// of being negligible per-transaction. See docs/issue30.md item 7b.
+			TransferFeeBps: 20,
 			Assets: []FeeAsset{
 				{Asset: fees.AssetNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"},
 				{Asset: fees.AssetZNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"},
@@ -797,6 +803,9 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "fees", "TransferFeeCollector") {
 		cfg.Global.Fees.TransferFeeCollector = defaults.Fees.TransferFeeCollector
+	}
+	if !meta.IsDefined("global", "fees", "TransferFeeBps") {
+		cfg.Global.Fees.TransferFeeBps = defaults.Fees.TransferFeeBps
 	}
 	if len(cfg.Global.Fees.Assets) == 0 {
 		cfg.Global.Fees.Assets = append([]FeeAsset{}, defaults.Fees.Assets...)

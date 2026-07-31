@@ -501,6 +501,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			FreeSpendLimitWei: new(big.Int).Mul(big.NewInt(1000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)),
 			Window:            TransferGasWindowLifetime,
 			FeeCollector:      treasury,
+			// 20 bps (0.20%) once the free tier is exhausted -- see
+			// docs/issue30.md item 7b.
+			FeeBps: 20,
 		},
 		potsoEngine:         potsoEngine,
 		potsoLedger:         pLedger,
@@ -531,6 +534,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				// 1000 NHB at 18 decimals -- see docs/issue30.md item 7.
 				TransferFreeTierSpendWei: "1000000000000000000000",
 				TransferFreeTierWindow:   TransferGasWindowLifetime,
+				// 20 bps -- see docs/issue30.md item 7b.
+				TransferFeeBps: 20,
 			},
 		},
 		networkMode:      strings.TrimSpace(os.Getenv("NHB_ENV")),
@@ -840,7 +845,7 @@ func (n *Node) TransferGasStatus(addr []byte) (nhbstate.TransferGasSpendStatus, 
 		if normalizeTransferGasWindow(policy.Window) == TransferGasWindowMonthly {
 			window = nhbstate.TransferGasWindowMonthly
 		}
-		snapshot, err := m.TransferGasSpendStatus(wallet, window, n.state.blockTimestamp(), policy.FreeSpendLimitWei)
+		snapshot, err := m.TransferGasSpendStatus(wallet, window, n.state.blockTimestamp(), policy.FreeSpendLimitWei, "NHB")
 		if err != nil {
 			return err
 		}
@@ -1254,6 +1259,7 @@ func buildTransferGasPolicyFromConfig(cfg config.Fees, defaultCollector [20]byte
 	if policy.FreeSpendLimitWei == nil {
 		policy.FreeSpendLimitWei = big.NewInt(0)
 	}
+	policy.FeeBps = cfg.TransferFeeBps
 	if policy.FreeSpendLimitWei.Sign() <= 0 {
 		policy.Enabled = false
 	}
@@ -1450,6 +1456,7 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			TransferFreeTierSpendWei: n.globalCfg.Fees.TransferFreeTierSpendWei,
 			TransferFreeTierWindow:   n.globalCfg.Fees.TransferFreeTierWindow,
 			TransferFeeCollector:     n.globalCfg.Fees.TransferFeeCollector,
+			TransferFeeBps:           n.globalCfg.Fees.TransferFeeBps,
 			Assets:                   append([]config.FeeAsset{}, n.globalCfg.Fees.Assets...),
 		},
 	}

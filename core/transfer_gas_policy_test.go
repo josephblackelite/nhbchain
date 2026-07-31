@@ -31,6 +31,7 @@ func TestTransferGasPolicyFreeTierAndThreshold(t *testing.T) {
 		FreeSpendLimitWei: big.NewInt(1000),
 		Window:            TransferGasWindowLifetime,
 		FeeCollector:      collector,
+		FeeBps:            1_000, // 10%, chosen for clean test arithmetic
 	})
 
 	if err := sp.setAccount(senderAddr, &types.Account{BalanceNHB: big.NewInt(50_000)}); err != nil {
@@ -77,7 +78,7 @@ func TestTransferGasPolicyFreeTierAndThreshold(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	var senderWallet [20]byte
 	copy(senderWallet[:], senderAddr)
-	status, err := manager.TransferGasSpendStatus(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(1000))
+	status, err := manager.TransferGasSpendStatus(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(1000), "NHB")
 	if err != nil {
 		t.Fatalf("load spend status after first transfer: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestTransferGasPolicyFreeTierAndThreshold(t *testing.T) {
 		t.Fatalf("expected sender to remain eligible below threshold")
 	}
 
-	if _, err := manager.TransferGasSpendAdd(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(600), big.NewInt(1000)); err != nil {
+	if _, err := manager.TransferGasSpendAdd(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(600), big.NewInt(1000), "NHB"); err != nil {
 		t.Fatalf("prime sender spend to threshold: %v", err)
 	}
 
@@ -112,7 +113,11 @@ func TestTransferGasPolicyFreeTierAndThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load sender after second transfer: %v", err)
 	}
-	expectedSender := big.NewInt(49_600 - 200 - 21_000)
+	// The charge is 10% of the transfer value (20), not GasLimit*GasPrice
+	// (21_000*1) -- see docs/issue30.md item 7b. The sender's self-declared
+	// GasLimit/GasPrice on this transaction must not influence what's
+	// actually charged.
+	expectedSender := big.NewInt(49_600 - 200 - 20)
 	if updatedSender.BalanceNHB.Cmp(expectedSender) != 0 {
 		t.Fatalf("expected sender balance %s after paid transfer, got %s", expectedSender, updatedSender.BalanceNHB)
 	}
@@ -127,8 +132,8 @@ func TestTransferGasPolicyFreeTierAndThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load collector after second transfer: %v", err)
 	}
-	if collectorAcc.BalanceNHB.Cmp(big.NewInt(21_000)) != 0 {
-		t.Fatalf("expected collector balance 21000, got %s", collectorAcc.BalanceNHB)
+	if collectorAcc.BalanceNHB.Cmp(big.NewInt(20)) != 0 {
+		t.Fatalf("expected collector balance 20 (10%% of the 200 transfer), got %s", collectorAcc.BalanceNHB)
 	}
 }
 
@@ -154,6 +159,10 @@ func TestTransferGasPolicyThresholdCrossingTransferRemainsFree(t *testing.T) {
 		FreeSpendLimitWei: big.NewInt(1000),
 		Window:            TransferGasWindowLifetime,
 		FeeCollector:      collector,
+		// Nonzero on purpose: proves the free-tier exemption actually
+		// suppresses the fee below, rather than the transfer merely looking
+		// free because no fee was configured at all.
+		FeeBps: 1_000,
 	})
 
 	if err := sp.setAccount(senderAddr, &types.Account{BalanceNHB: big.NewInt(5_000)}); err != nil {
@@ -169,7 +178,7 @@ func TestTransferGasPolicyThresholdCrossingTransferRemainsFree(t *testing.T) {
 	manager := nhbstate.NewManager(sp.Trie)
 	var senderWallet [20]byte
 	copy(senderWallet[:], senderAddr)
-	if _, err := manager.TransferGasSpendAdd(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(900), big.NewInt(1000)); err != nil {
+	if _, err := manager.TransferGasSpendAdd(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(900), big.NewInt(1000), "NHB"); err != nil {
 		t.Fatalf("prime spend status: %v", err)
 	}
 
@@ -196,7 +205,7 @@ func TestTransferGasPolicyThresholdCrossingTransferRemainsFree(t *testing.T) {
 	if updatedSender.BalanceNHB.Cmp(big.NewInt(4_800)) != 0 {
 		t.Fatalf("expected threshold-crossing transfer to stay free, got %s", updatedSender.BalanceNHB)
 	}
-	status, err := manager.TransferGasSpendStatus(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(1000))
+	status, err := manager.TransferGasSpendStatus(senderWallet, nhbstate.TransferGasWindowLifetime, sp.blockTimestamp(), big.NewInt(1000), "NHB")
 	if err != nil {
 		t.Fatalf("load final spend status: %v", err)
 	}

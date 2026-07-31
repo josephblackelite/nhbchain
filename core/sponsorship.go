@@ -255,6 +255,16 @@ func (sp *StateProcessor) EvaluateSponsorship(tx *types.Transaction) (*Sponsorsh
 		return assessment, nil
 	}
 
+	// Paymaster sponsorship is a separate, opt-in mechanism from the
+	// self-pay free-tier fee (docs/issue30.md item 7b): a paymaster
+	// explicitly commits its own budget via the GasLimit/GasPrice it signs
+	// off on, rather than a sender trying to underpay their own charge.
+	// This pre-check intentionally stays gas-price-based; the actual debit
+	// in state_transition.go's transfer fast path is computed independently
+	// from the protocol-enforced fee regardless of what's assessed here, so
+	// there's no way for a sponsored transaction to evade that fee by
+	// declaring a low GasPrice -- this only affects how conservative the
+	// paymaster-affordability pre-check is.
 	gasPrice := big.NewInt(0)
 	if tx.GasPrice != nil {
 		gasPrice = new(big.Int).Set(tx.GasPrice)

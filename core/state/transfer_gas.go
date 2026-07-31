@@ -63,13 +63,30 @@ func transferGasNextReset(window string, now time.Time) time.Time {
 	}
 }
 
-func transferGasSpendKey(wallet [20]byte, window, windowKey string) []byte {
+func normalizeTransferGasAsset(asset string) string {
+	trimmed := strings.ToUpper(strings.TrimSpace(asset))
+	if trimmed == "" {
+		return "NHB"
+	}
+	return trimmed
+}
+
+// transferGasSpendKey is asset-scoped (docs/issue30.md item 7 ZNHB
+// equivalent) so NHB and ZNHB free-tier spend are tracked independently --
+// they are different tokens with different (pegged vs. floating) value, not
+// fungible for this purpose.
+func transferGasSpendKey(wallet [20]byte, window, windowKey, asset string) []byte {
 	normalizedWindow := normalizeTransferGasWindow(window)
+	normalizedAsset := normalizeTransferGasAsset(asset)
 	trimmedKey := strings.TrimSpace(windowKey)
 	hexAddr := hex.EncodeToString(wallet[:])
-	buf := make([]byte, len(transferGasSpendPrefix)+len(normalizedWindow)+1+len(trimmedKey)+1+len(hexAddr))
+	buf := make([]byte, len(transferGasSpendPrefix)+len(normalizedAsset)+1+len(normalizedWindow)+1+len(trimmedKey)+1+len(hexAddr))
 	copy(buf, transferGasSpendPrefix)
 	offset := len(transferGasSpendPrefix)
+	copy(buf[offset:], normalizedAsset)
+	offset += len(normalizedAsset)
+	buf[offset] = '/'
+	offset++
 	copy(buf[offset:], normalizedWindow)
 	offset += len(normalizedWindow)
 	buf[offset] = '/'
@@ -90,8 +107,10 @@ func cloneBig(value *big.Int) *big.Int {
 }
 
 // TransferGasSpendStatus returns the currently tracked spend snapshot for the
-// wallet under the supplied sponsorship window.
-func (m *Manager) TransferGasSpendStatus(wallet [20]byte, window string, now time.Time, freeLimit *big.Int) (TransferGasSpendStatus, error) {
+// wallet under the supplied sponsorship window, scoped to asset ("NHB" or
+// "ZNHB" -- see docs/issue30.md item 7's ZNHB equivalent). NHB and ZNHB spend
+// are tracked independently since they are different tokens.
+func (m *Manager) TransferGasSpendStatus(wallet [20]byte, window string, now time.Time, freeLimit *big.Int, asset string) (TransferGasSpendStatus, error) {
 	if m == nil {
 		return TransferGasSpendStatus{}, fmt.Errorf("fees: state manager not initialised")
 	}
@@ -106,7 +125,7 @@ func (m *Manager) TransferGasSpendStatus(wallet [20]byte, window string, now tim
 		NextReset: transferGasNextReset(normalizedWindow, now),
 	}
 	var stored storedTransferGasSpend
-	ok, err := m.KVGet(transferGasSpendKey(wallet, normalizedWindow, windowKey), &stored)
+	ok, err := m.KVGet(transferGasSpendKey(wallet, normalizedWindow, windowKey, asset), &stored)
 	if err != nil {
 		return TransferGasSpendStatus{}, fmt.Errorf("fees: load transfer gas spend: %w", err)
 	}
@@ -121,10 +140,10 @@ func (m *Manager) TransferGasSpendStatus(wallet [20]byte, window string, now tim
 	return status, nil
 }
 
-// TransferGasSpendAdd records additional NHB spend for the wallet in the active
-// sponsorship window and returns the updated snapshot.
-func (m *Manager) TransferGasSpendAdd(wallet [20]byte, window string, now time.Time, amount, freeLimit *big.Int) (TransferGasSpendStatus, error) {
-	status, err := m.TransferGasSpendStatus(wallet, window, now, freeLimit)
+// TransferGasSpendAdd records additional spend for the wallet in the active
+// sponsorship window and returns the updated snapshot, scoped to asset.
+func (m *Manager) TransferGasSpendAdd(wallet [20]byte, window string, now time.Time, amount, freeLimit *big.Int, asset string) (TransferGasSpendStatus, error) {
+	status, err := m.TransferGasSpendStatus(wallet, window, now, freeLimit, asset)
 	if err != nil {
 		return TransferGasSpendStatus{}, err
 	}
@@ -135,7 +154,7 @@ func (m *Manager) TransferGasSpendAdd(wallet [20]byte, window string, now time.T
 		Window: status.WindowKey,
 		Spent:  new(big.Int).Set(status.Spent),
 	}
-	if err := m.KVPut(transferGasSpendKey(wallet, status.Window, status.WindowKey), &stored); err != nil {
+	if err := m.KVPut(transferGasSpendKey(wallet, status.Window, status.WindowKey, asset), &stored); err != nil {
 		return TransferGasSpendStatus{}, fmt.Errorf("fees: store transfer gas spend: %w", err)
 	}
 	status.RecordedAt = now.UTC()

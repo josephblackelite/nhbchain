@@ -562,9 +562,14 @@ func TestTransferNHBNotAffectedByZNHBPause(t *testing.T) {
 		if updatedSender.Nonce != 1 {
 			t.Fatalf("expected sender nonce incremented, got %d", updatedSender.Nonce)
 		}
-		expectedBalance := new(big.Int).Sub(initialBalance, big.NewInt(21_000))
-		if updatedSender.BalanceNHB.Cmp(expectedBalance) != 0 {
-			t.Fatalf("expected sender balance %s after gas, got %s", expectedBalance, updatedSender.BalanceNHB)
+		// newStakingStateProcessor leaves TransferGasPolicy at its zero
+		// value (FeeBps unset), so no fee is charged -- the protocol-
+		// enforced fee (docs/issue30.md item 7b) is a percentage of the
+		// transfer value that must be explicitly configured, not derived
+		// from this transaction's GasLimit/GasPrice (21_000*1), which the
+		// old mechanism used regardless of any policy at all.
+		if updatedSender.BalanceNHB.Cmp(initialBalance) != 0 {
+			t.Fatalf("expected sender balance unchanged at %s with no fee configured, got %s", initialBalance, updatedSender.BalanceNHB)
 		}
 	})
 }
