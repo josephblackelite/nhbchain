@@ -171,12 +171,21 @@ ClientVersion = ""
   [global.Blocks]
     MaxTxs = 500
   [global.Staking]
-    AprBps = 0
-    PayoutPeriodDays = 0
-    UnbondingDays = 0
+    # Previously all four of these were placeholder zero/empty values, which
+    # -- since the TOML key is present (not absent) -- actively override the
+    # sensible Go-level defaults (1250/30/7/"ZNHB") rather than falling back
+    # to them, per config/config.go's IsDefined-gated merge logic. That
+    # silently made staking rewards a no-op (0% APR, 0-day payout period,
+    # no reward asset resolvable) and unbonding instant (0 days -- also
+    # moot before this session, since the real unbonding delay was a
+    # hardcoded 72h constant that never read this value at all; see
+    # docs/issue30.md item 15). Corrected to match the Go-level defaults.
+    AprBps = 1250
+    PayoutPeriodDays = 30
+    UnbondingDays = 7
     MinStakeWei = "10000000000000000000000"
     MaxEmissionPerYearWei = "5000000000000000000"
-    RewardAsset = ""
+    RewardAsset = "ZNHB"
     CompoundDefault = false
   [global.Pauses]
     Lending = false

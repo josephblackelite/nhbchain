@@ -53,7 +53,14 @@ import (
 
 const engagementDayFormat = "2006-01-02"
 
-const unbondingPeriod = 72 * time.Hour
+// unbondingPeriod is the fallback used by stakingUnbondingPeriod when
+// governance hasn't set staking.unbondingDays (ParamKeyStakingUnbondingDays)
+// -- 7 days, matching config/config.go's and core/node.go's own Go-level
+// default. Previously this was the ONLY unbonding period: hardcoded at 72
+// hours and never actually read from config or governance at all, so the
+// configurable staking.unbondingDays parameter silently had no effect on
+// real behavior no matter what it was set to. See docs/issue30.md item 15.
+const unbondingPeriod = 7 * 24 * time.Hour
 
 const defaultIntentTTL = 24 * time.Hour
 
@@ -3430,7 +3437,11 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	}
 	delegatorAcc.LockedZNHB.Sub(delegatorAcc.LockedZNHB, amount)
 
-	releaseTime := uint64(sp.now().Add(unbondingPeriod).Unix())
+	unbondDuration, err := sp.stakingUnbondingPeriod(nhbstate.NewManager(sp.Trie))
+	if err != nil {
+		return nil, err
+	}
+	releaseTime := uint64(sp.now().Add(unbondDuration).Unix())
 	nextID := delegatorAcc.NextUnbondingID
 	if nextID == 0 {
 		nextID = 1
@@ -3889,6 +3900,36 @@ func (sp *StateProcessor) stakingPayoutPeriodSeconds(manager *nhbstate.Manager) 
 		return 0, fmt.Errorf("staking rewards: payout period too large")
 	}
 	return days * secondsPerDayUint, nil
+}
+
+// stakingUnbondingPeriod resolves the real unbonding delay from the
+// governance-configurable staking.unbondingDays parameter, falling back to
+// unbondingPeriod's default (7 days) if unset. See docs/issue30.md item 15
+// -- this parameter previously had no effect on real behavior at all.
+func (sp *StateProcessor) stakingUnbondingPeriod(manager *nhbstate.Manager) (time.Duration, error) {
+	period := unbondingPeriod
+	if manager != nil {
+		raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingUnbondingDays)
+		if err != nil {
+			return 0, fmt.Errorf("staking: load unbonding period: %w", err)
+		}
+		if ok {
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed != "" {
+				days, parseErr := strconv.ParseUint(trimmed, 10, 64)
+				if parseErr != nil {
+					return 0, fmt.Errorf("staking: parse unbonding period: %w", parseErr)
+				}
+				if days > 0 {
+					if days > math.MaxUint64/uint64(secondsPerDay) {
+						return 0, fmt.Errorf("staking: unbonding period too large")
+					}
+					period = time.Duration(days*uint64(secondsPerDay)) * time.Second
+				}
+			}
+		}
+	}
+	return period, nil
 }
 
 func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error {

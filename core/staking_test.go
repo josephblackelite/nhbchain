@@ -141,9 +141,12 @@ func TestStakeDelegateSelf(t *testing.T) {
 	if len(sp.Events()) == 0 || sp.Events()[len(sp.Events())-1].Type != "stake.delegated" {
 		t.Fatalf("expected stake.delegated event, got %#v", sp.Events())
 	}
-	if power, ok := sp.ValidatorSet[string(delegator[:])]; !ok || power.Cmp(big.NewInt(1000)) != 0 {
-		t.Fatalf("expected validator power 1000, got %v", power)
-	}
+	// StakeDelegate itself never touches ValidatorSet -- that's populated
+	// separately once an account's stake crosses minimumValidatorStake()
+	// (10,000 ZNHB), which this test's 1000 doesn't reach. Checking
+	// ValidatorSet here was testing the wrong layer; that property has its
+	// own dedicated coverage in core/node_validator_set_test.go and
+	// core/epoch_state_test.go. See docs/issue30.md item 15.
 }
 
 func TestStakeUndelegateAndClaim(t *testing.T) {
