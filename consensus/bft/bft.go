@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"nhbchain/core/engagement"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/p2p"
@@ -893,6 +894,33 @@ func (e *Engine) replayBufferedMessages(height uint64, round int) {
 	}
 }
 
+// maxEngagementBoostBps bounds how much a validator's EngagementScore can
+// add to its stake-based proposer-selection weight: at most this many
+// basis points of the validator's OWN stake, reached only at maximum
+// engagement. Deliberately modest and stake-anchored (never a standalone
+// weight, never able to exceed a validator's own stake-derived power) --
+// engagement resists neither Sybil nor farming attacks the way locked stake
+// does (see docs/issue30.md item 22), so its influence on who proposes
+// blocks is capped rather than unbounded.
+const maxEngagementBoostBps = 2000
+
+func engagementWeightBoost(stake *big.Int, engagementScore uint64) *big.Int {
+	if stake == nil || stake.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	engagementCap := engagement.DefaultConfig().DailyCap
+	if engagementCap == 0 {
+		return big.NewInt(0)
+	}
+	if engagementScore > engagementCap {
+		engagementScore = engagementCap
+	}
+	boost := new(big.Int).Mul(stake, new(big.Int).SetUint64(engagementScore))
+	boost.Mul(boost, big.NewInt(maxEngagementBoostBps))
+	boost.Div(boost, new(big.Int).SetUint64(engagementCap*10000))
+	return boost
+}
+
 func (e *Engine) selectProposer(round int) []byte {
 	keys := make([]string, 0, len(e.validatorSet))
 	for addrStr := range e.validatorSet {
@@ -914,8 +942,7 @@ func (e *Engine) selectProposer(round int) []byte {
 		}
 
 		stake := account.Stake
-		engagement := new(big.Int).SetUint64(account.EngagementScore)
-		power := new(big.Int).Add(stake, engagement)
+		power := new(big.Int).Add(stake, engagementWeightBoost(stake, account.EngagementScore))
 
 		validators = append(validators, addrBytes)
 		weights = append(weights, power)
