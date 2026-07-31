@@ -24,12 +24,14 @@ type stubNode struct {
 	height     uint64
 }
 
-func (s *stubNode) GetMempool() []*types.Transaction { return nil }
+func (s *stubNode) GetMempool() []*types.Transaction         { return nil }
+func (s *stubNode) RequeueTransactions(txs []*types.Transaction) {}
 func (s *stubNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
 	header := &types.BlockHeader{Height: s.height + 1}
 	return types.NewBlock(header, txs), nil
 }
-func (s *stubNode) CommitBlock(block *types.Block) error { return nil }
+func (s *stubNode) ValidateBlock(block *types.Block) error { return nil }
+func (s *stubNode) CommitBlock(block *types.Block) error   { return nil }
 func (s *stubNode) GetValidatorSet() map[string]*big.Int { return s.validators }
 func (s *stubNode) GetAccount(addr []byte) (*types.Account, error) {
 	weight := s.validators[string(addr)]
