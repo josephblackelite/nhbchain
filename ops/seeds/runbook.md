@@ -26,7 +26,7 @@ proposals.
 
 1. Clone the repository and build the node:
    ```bash
-   git clone https://github.com/nhbchain/nhbchain.git
+   git clone https://github.com/josephblackelite/nhbchain.git
    cd nhbchain
    go build ./cmd/nhb
    sudo install -o nhb -g nhb -m 0755 nhb /usr/local/bin/nhb

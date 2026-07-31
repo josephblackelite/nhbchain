@@ -4,7 +4,7 @@ These steps produce reproducible binaries for the commit pinned in `FROZEN_COMMI
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/nhbchain/nhbchain.git
+   git clone https://github.com/josephblackelite/nhbchain.git
    cd nhbchain
    git checkout ef150bd1bbab00d426c623c06421ea0c67be03de
    ```

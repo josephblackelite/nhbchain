@@ -1,6 +1,5 @@
-Contact: mailto:security@nhbchain.io
-Contact: tel:+14155550119
-Encryption: https://raw.githubusercontent.com/nhbchain/nhbchain/main/docs/security/repository-pgp-key.asc
-Policy: https://github.com/nhbchain/nhbchain/blob/main/docs/security/disclosure.md
+Contact: mailto:security@nhbcoin.com
+Encryption: https://raw.githubusercontent.com/josephblackelite/nhbchain/main/docs/security/repository-pgp-key.asc
+Policy: https://github.com/josephblackelite/nhbchain/blob/main/docs/security/disclosure.md
 Preferred-Languages: en
-Canonical: https://github.com/nhbchain/nhbchain/.well-known/security.txt
+Canonical: https://github.com/josephblackelite/nhbchain/.well-known/security.txt

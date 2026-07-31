@@ -275,7 +275,7 @@ Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Scor
 ./nhb-cli id register <alias> wallet.key
 ```
 
-For the full identity management toolkit, refer to [`docs/identity-cli.md`](./docs/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control—`wallet.key` is now ignored by Git to prevent accidental publication.
+For the full identity management toolkit, refer to [`docs/identity/identity-cli.md`](./docs/identity/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control—`wallet.key` is now ignored by Git to prevent accidental publication.
 
 ## APIs, SDKs, and Documentation
 
