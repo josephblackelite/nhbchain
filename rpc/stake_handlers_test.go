@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"nhbchain/core"
 	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
@@ -228,6 +230,15 @@ func TestStakeClaimRewardsPaused(t *testing.T) {
 	}
 }
 
+// TestStakeHandlersResumeAfterUnpause exercises the pause guard plus the
+// full delegate -> undelegate -> claim lifecycle. It previously drove this
+// through handleStakeDelegate/handleStakeUndelegate/handleStakeClaim, which
+// are now disabled (docs/issue30.md item 3) since they let an
+// unauthenticated caller move funds for any address. It now calls the same
+// underlying Node methods directly -- the exact path nhbportal actually
+// uses (via a signed TxTypeStake/TxTypeUnstake/TxTypeStakeClaim
+// transaction) -- so this test still verifies the real lifecycle and pause
+// behavior without depending on the removed RPC surface.
 func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 	env := newTestEnv(t)
 
@@ -267,45 +278,31 @@ func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 		t.Fatalf("unexpected pause code: got %d want %d", rpcErr.Code, codeModulePaused)
 	}
 
+	if _, err := env.node.StakeDelegate(delegatorBytes, big.NewInt(500), nil); err == nil {
+		t.Fatalf("expected delegate to be rejected while paused")
+	} else if !errors.Is(err, core.ErrStakePaused) && !errors.Is(err, stakeerrors.ErrStakingPaused) {
+		t.Fatalf("unexpected delegate-while-paused error: %v", err)
+	}
+
 	env.node.SetModulePaused("staking", false)
 
-	delegateReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, stakeDelegateParams{
-		Caller: delegator.String(),
-		Amount: "500",
-	})}}
-	delegateRec := httptest.NewRecorder()
-	env.server.handleStakeDelegate(delegateRec, env.newRequest(), delegateReq)
-	delegateResult, rpcErr := decodeRPCResponse(t, delegateRec)
-	if rpcErr != nil {
-		t.Fatalf("delegate error: %+v", rpcErr)
+	delegateAccount, err := env.node.StakeDelegate(delegatorBytes, big.NewInt(500), nil)
+	if err != nil {
+		t.Fatalf("delegate error: %v", err)
 	}
-	var delegateResp BalanceResponse
-	if err := json.Unmarshal(delegateResult, &delegateResp); err != nil {
-		t.Fatalf("decode delegate response: %v", err)
+	if delegateAccount.Stake == nil || delegateAccount.Stake.String() != "500" {
+		t.Fatalf("unexpected stake balance: %+v", delegateAccount.Stake)
 	}
-	if delegateResp.Stake == nil || delegateResp.Stake.String() != "500" {
-		t.Fatalf("unexpected stake balance: %+v", delegateResp.Stake)
-	}
-	if delegateResp.BalanceZNHB == nil || delegateResp.BalanceZNHB.String() != "1500" {
-		t.Fatalf("unexpected liquid balance: %+v", delegateResp.BalanceZNHB)
+	if delegateAccount.BalanceZNHB == nil || delegateAccount.BalanceZNHB.String() != "1500" {
+		t.Fatalf("unexpected liquid balance: %+v", delegateAccount.BalanceZNHB)
 	}
 
-	undelegateReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, stakeUndelegateParams{
-		Caller: delegator.String(),
-		Amount: "200",
-	})}}
-	undelegateRec := httptest.NewRecorder()
-	env.server.handleStakeUndelegate(undelegateRec, env.newRequest(), undelegateReq)
-	undelegateResult, rpcErr := decodeRPCResponse(t, undelegateRec)
-	if rpcErr != nil {
-		t.Fatalf("undelegate error: %+v", rpcErr)
+	unbond, err := env.node.StakeUndelegate(delegatorBytes, big.NewInt(200))
+	if err != nil {
+		t.Fatalf("undelegate error: %v", err)
 	}
-	var unbondResp StakeUnbondResponse
-	if err := json.Unmarshal(undelegateResult, &unbondResp); err != nil {
-		t.Fatalf("decode undelegate response: %v", err)
-	}
-	if unbondResp.Amount == nil || unbondResp.Amount.String() != "200" {
-		t.Fatalf("unexpected unbond amount: %+v", unbondResp.Amount)
+	if unbond.Amount == nil || unbond.Amount.String() != "200" {
+		t.Fatalf("unexpected unbond amount: %+v", unbond.Amount)
 	}
 
 	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
@@ -314,7 +311,7 @@ func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 			return err
 		}
 		for i := range account.PendingUnbonds {
-			if account.PendingUnbonds[i].ID == unbondResp.ID {
+			if account.PendingUnbonds[i].ID == unbond.ID {
 				account.PendingUnbonds[i].ReleaseTime = uint64(time.Now().Add(-time.Hour).Unix())
 			}
 		}
@@ -323,28 +320,19 @@ func TestStakeHandlersResumeAfterUnpause(t *testing.T) {
 		t.Fatalf("mature unbond: %v", err)
 	}
 
-	claimReq := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, stakeClaimParams{
-		Caller:      delegator.String(),
-		UnbondingID: unbondResp.ID,
-	})}}
-	claimRec := httptest.NewRecorder()
-	env.server.handleStakeClaim(claimRec, env.newRequest(), claimReq)
-	claimResult, rpcErr := decodeRPCResponse(t, claimRec)
-	if rpcErr != nil {
-		t.Fatalf("claim error: %+v", rpcErr)
+	claimed, err := env.node.StakeClaim(delegatorBytes, unbond.ID)
+	if err != nil {
+		t.Fatalf("claim error: %v", err)
 	}
-	var claimPayload struct {
-		Claimed StakeUnbondResponse `json:"claimed"`
-		Balance BalanceResponse     `json:"balance"`
+	if claimed.ID != unbond.ID {
+		t.Fatalf("unexpected claimed id: got %d want %d", claimed.ID, unbond.ID)
 	}
-	if err := json.Unmarshal(claimResult, &claimPayload); err != nil {
-		t.Fatalf("decode claim payload: %v", err)
+	claimedAccount, err := env.node.GetAccount(delegatorBytes[:])
+	if err != nil {
+		t.Fatalf("load post-claim account: %v", err)
 	}
-	if claimPayload.Claimed.ID != unbondResp.ID {
-		t.Fatalf("unexpected claimed id: got %d want %d", claimPayload.Claimed.ID, unbondResp.ID)
-	}
-	if claimPayload.Balance.BalanceZNHB == nil || claimPayload.Balance.BalanceZNHB.String() != "1700" {
-		t.Fatalf("unexpected post-claim balance: %+v", claimPayload.Balance.BalanceZNHB)
+	if claimedAccount.BalanceZNHB == nil || claimedAccount.BalanceZNHB.String() != "1700" {
+		t.Fatalf("unexpected post-claim balance: %+v", claimedAccount.BalanceZNHB)
 	}
 
 	previewRec = httptest.NewRecorder()
