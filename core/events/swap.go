@@ -28,7 +28,77 @@ const (
 	TypeSwapRedeemProof = "swap.redeem.proof"
 	// TypeBuyZNHBRecorded is emitted when a user purchases ZNHB from the admin wallet using NHB.
 	TypeBuyZNHBRecorded = "swap.buyznhb.recorded"
+	// TypeRedeemNHBRequested is emitted when a user burns NHB to request an
+	// off-chain stablecoin payout (swap-out).
+	TypeRedeemNHBRequested = "swap.redeem.requested"
+	// TypeRedemptionAttested is emitted when an authorized attestor confirms
+	// or fails a pending redemption's off-chain payout.
+	TypeRedemptionAttested = "swap.redeem.attested"
 )
+
+// RedeemNHBRequested captures a user-initiated NHB burn requesting an
+// off-chain stablecoin payout. The NHB is destroyed immediately and
+// irreversibly on-chain the moment this is recorded -- it is not held in
+// escrow pending payout confirmation.
+type RedeemNHBRequested struct {
+	RequestID          string
+	Account            [20]byte
+	NHBAmount          *big.Int
+	DestinationAsset   string
+	DestinationAddress string
+}
+
+// EventType returns the canonical event identifier.
+func (RedeemNHBRequested) EventType() string { return TypeRedeemNHBRequested }
+
+// Event renders the redemption-request event payload.
+func (r RedeemNHBRequested) Event() *types.Event {
+	amount := big.NewInt(0)
+	if r.NHBAmount != nil {
+		amount = new(big.Int).Set(r.NHBAmount)
+	}
+	attrs := map[string]string{
+		"requestId":          strings.TrimSpace(r.RequestID),
+		"nhbAmount":          amount.String(),
+		"destinationAsset":   strings.TrimSpace(r.DestinationAsset),
+		"destinationAddress": strings.TrimSpace(r.DestinationAddress),
+	}
+	if r.Account != ([20]byte{}) {
+		attrs["account"] = crypto.MustNewAddress(crypto.NHBPrefix, r.Account[:]).String()
+	}
+	return &types.Event{Type: TypeRedeemNHBRequested, Attributes: attrs}
+}
+
+// RedemptionAttested captures an authorized attestor's confirmation or
+// failure report for a pending redemption.
+type RedemptionAttested struct {
+	RequestID       string
+	Attestor        [20]byte
+	Status          string
+	PayoutReference string
+	FailureReason   string
+}
+
+// EventType returns the canonical event identifier.
+func (RedemptionAttested) EventType() string { return TypeRedemptionAttested }
+
+// Event renders the redemption-attestation event payload.
+func (r RedemptionAttested) Event() *types.Event {
+	attrs := map[string]string{
+		"requestId": strings.TrimSpace(r.RequestID),
+		"status":    strings.TrimSpace(r.Status),
+	}
+	if r.Attestor != ([20]byte{}) {
+		attrs["attestor"] = crypto.MustNewAddress(crypto.NHBPrefix, r.Attestor[:]).String()
+	}
+	if trimmed := strings.TrimSpace(r.PayoutReference); trimmed != "" {
+		attrs["payoutReference"] = trimmed
+	}
+	if trimmed := strings.TrimSpace(r.FailureReason); trimmed != "" {
+		attrs["failureReason"] = trimmed
+	}
+	return &types.Event{Type: TypeRedemptionAttested, Attributes: attrs}
+}
 
 // BuyZNHBRecorded captures an admin-wallet-mediated ZNHB purchase: NHB moves
 // buyer->admin, ZNHB moves admin->buyer. Always one-directional -- there is

@@ -2602,6 +2602,10 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		return sp.applyPOSVoid(tx)
 	case types.TxTypePOSRegistry:
 		return sp.applyPOSRegistry(tx)
+	case types.TxTypeRedeemNHB:
+		return sp.applyRedeemNHB(tx, sender, senderAccount)
+	case types.TxTypeAttestRedemption:
+		return sp.applyAttestRedemption(tx, sender, senderAccount)
 
 	// --- NEW DISPUTE RESOLUTION CASES ---
 	case types.TxTypeLockEscrow:
@@ -3123,6 +3127,155 @@ func (sp *StateProcessor) applySetRewardBeneficiary(tx *types.Transaction, sende
 	senderAccount.RewardBeneficiary = append([]byte(nil), beneficiaryBytes...)
 	senderAccount.Nonce++
 	return sp.setAccount(sender, senderAccount)
+}
+
+// RoleSwapPayoutAttestor is the on-chain role required to call
+// applyAttestRedemption -- granted the same way MINTER_NHB/MINTER_ZNHB are,
+// via genesis or governance roles, to the payments-gateway service's own
+// dedicated key. Deliberately checked via nhbstate.Manager.HasRole (a real
+// cryptographic role held by the transaction's recovered signer), not a
+// client-supplied "authority" string like applySwapPayoutReceipt's
+// MsgPayoutReceipt.Authority field -- that field is never compared against
+// the recovered signer at all, so anyone who can produce any validly signed
+// transaction can claim to be "treasury" (docs/issue30.md item 27). This
+// mechanism does not reuse that pattern.
+const RoleSwapPayoutAttestor = "ROLE_SWAP_PAYOUT_ATTESTOR"
+
+// applyRedeemNHB lets a user burn their own NHB to request an off-chain
+// stablecoin payout (swap-out). Per the founder's explicit design, the burn
+// is immediate and irreversible the moment this transaction applies -- NHB
+// is not held in escrow pending payout confirmation. The off-chain payout
+// (via NOWPayments) is payments-gateway's responsibility; it uses the
+// RedemptionRequest this creates to track the request and, once the payout
+// completes or fails, submits a TxTypeAttestRedemption to record the
+// outcome. See docs/issue30.md item 5/35.
+func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		DestinationAsset   string `json:"destinationAsset"`
+		DestinationAddress string `json:"destinationAddress"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("redeemNHB: decode payload: %w", err)
+	}
+	destAsset := strings.ToUpper(strings.TrimSpace(payload.DestinationAsset))
+	if destAsset == "" {
+		return fmt.Errorf("redeemNHB: destinationAsset required")
+	}
+	destAddr := strings.TrimSpace(payload.DestinationAddress)
+	if destAddr == "" {
+		return fmt.Errorf("redeemNHB: destinationAddress required")
+	}
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return fmt.Errorf("redeemNHB: amount must be positive")
+	}
+	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(tx.Value) < 0 {
+		return fmt.Errorf("redeemNHB: insufficient NHB balance")
+	}
+
+	txHash, err := tx.Hash()
+	if err != nil {
+		return fmt.Errorf("redeemNHB: compute tx hash: %w", err)
+	}
+	requestID := nhbstate.RedemptionRequestID(txHash)
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if _, exists, err := manager.GetRedemptionRequest(requestID); err != nil {
+		return fmt.Errorf("redeemNHB: check existing request: %w", err)
+	} else if exists {
+		return fmt.Errorf("redeemNHB: request %s already exists", requestID)
+	}
+
+	// Burn: reduce the sender's balance, credit nothing. Only NHB is ever
+	// destroyed this way -- NOWPayments handles the actual off-chain
+	// release, there is no on-chain path back from a stablecoin to NHB.
+	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, tx.Value)
+	senderAccount.Nonce++
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return fmt.Errorf("redeemNHB: persist sender: %w", err)
+	}
+
+	var accountAddr [20]byte
+	copy(accountAddr[:], sender)
+	request := &nhbstate.StoredRedemptionRequest{
+		RequestID:          requestID,
+		Account:            append([]byte(nil), sender...),
+		NHBAmountWei:       tx.Value.String(),
+		DestinationAsset:   destAsset,
+		DestinationAddress: destAddr,
+		Status:             string(nhbstate.RedemptionStatusPending),
+		CreatedAt:          uint64(sp.blockTimestamp().Unix()),
+	}
+	if err := manager.PutRedemptionRequest(request); err != nil {
+		return fmt.Errorf("redeemNHB: persist request: %w", err)
+	}
+
+	evt := events.RedeemNHBRequested{
+		RequestID:          requestID,
+		Account:            accountAddr,
+		NHBAmount:          new(big.Int).Set(tx.Value),
+		DestinationAsset:   destAsset,
+		DestinationAddress: destAddr,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+// applyAttestRedemption lets an address holding RoleSwapPayoutAttestor
+// confirm or fail a pending redemption's off-chain payout. This is how
+// payments-gateway reports the outcome of its NOWPayments payout call back
+// on-chain. Failure does NOT automatically refund the burned NHB -- see
+// nhbstate.RedemptionStatusFailed's doc comment; that requires manual
+// operator reconciliation by design, since automating a reversal of an
+// already-irreversible burn is a separately-risky mechanism this does not
+// attempt.
+func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleSwapPayoutAttestor, sender) {
+		return fmt.Errorf("attestRedemption: unauthorized attestor")
+	}
+	var payload struct {
+		RequestID       string `json:"requestId"`
+		Status          string `json:"status"`
+		PayoutReference string `json:"payoutReference,omitempty"`
+		FailureReason   string `json:"failureReason,omitempty"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("attestRedemption: decode payload: %w", err)
+	}
+	requestID := strings.TrimSpace(payload.RequestID)
+	if requestID == "" {
+		return fmt.Errorf("attestRedemption: requestId required")
+	}
+	status := nhbstate.RedemptionStatus(strings.ToLower(strings.TrimSpace(payload.Status)))
+	if status != nhbstate.RedemptionStatusPaid && status != nhbstate.RedemptionStatusFailed {
+		return fmt.Errorf("attestRedemption: status must be paid or failed")
+	}
+	if status == nhbstate.RedemptionStatusPaid && strings.TrimSpace(payload.PayoutReference) == "" {
+		return fmt.Errorf("attestRedemption: payoutReference required when marking paid")
+	}
+	settledAt := uint64(sp.blockTimestamp().Unix())
+	if err := manager.UpdateRedemptionStatus(requestID, status, settledAt, payload.PayoutReference, payload.FailureReason); err != nil {
+		return fmt.Errorf("attestRedemption: %w", err)
+	}
+	if err := sp.incrementNativeAccountNonce(sender); err != nil {
+		return fmt.Errorf("attestRedemption: increment nonce: %w", err)
+	}
+
+	var attestorAddr [20]byte
+	copy(attestorAddr[:], sender)
+	evt := events.RedemptionAttested{
+		RequestID:       requestID,
+		Attestor:        attestorAddr,
+		Status:          string(status),
+		PayoutReference: payload.PayoutReference,
+		FailureReason:   payload.FailureReason,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
 }
 
 func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {
