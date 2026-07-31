@@ -87,6 +87,20 @@ func main() {
 			return
 		}
 		heartbeat(args[1])
+	case "set-reward-beneficiary":
+		if len(args) < 3 {
+			fmt.Println("Error: Please provide a beneficiary address (or \"\" to clear) and a key file.")
+			printUsage()
+			return
+		}
+		setRewardBeneficiary(args[1], args[2])
+	case "address":
+		if len(args) < 2 {
+			fmt.Println("Error: Please provide a key file.")
+			printUsage()
+			return
+		}
+		printAddressForKeyFile(args[1])
 	case "send-nhb":
 		if code := runSendNHBCommand(args[1:]); code != 0 {
 			os.Exit(code)
@@ -889,6 +903,8 @@ func printUsage() {
 	fmt.Println("  stake <amount> <path_to_key_file> - (legacy) stake a specified amount of ZapNHB")
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stake a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
+	fmt.Println("  set-reward-beneficiary <address|\"\"> <key_file> - Redirect this validator's epoch reward payouts to another wallet (\"\" clears it)")
+	fmt.Println("  address <key_file>                 - Print the public address for a local key file")
 	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
 	fmt.Println("  id                                 - Identity alias management subcommands")
