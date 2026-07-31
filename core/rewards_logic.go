@@ -166,12 +166,27 @@ func (sp *StateProcessor) applyAccountRewards(epochNumber uint64, rewardMap map[
 		if err != nil {
 			return nil, err
 		}
-		account.BalanceZNHB.Add(account.BalanceZNHB, reward.total)
-		if err := sp.setAccount(reward.addr, account); err != nil {
+		// A validator may redirect its own epoch reward payouts to a wallet
+		// it actually uses day to day (applySetRewardBeneficiary) -- its own
+		// signing key is meant to stay on the validator server. Redirect the
+		// credit there instead of the validator's own address when set.
+		payoutAddr := reward.addr
+		if len(account.RewardBeneficiary) > 0 && !bytes.Equal(account.RewardBeneficiary, reward.addr) {
+			payoutAddr = account.RewardBeneficiary
+		}
+		payoutAccount := account
+		if !bytes.Equal(payoutAddr, reward.addr) {
+			payoutAccount, err = sp.getAccount(payoutAddr)
+			if err != nil {
+				return nil, err
+			}
+		}
+		payoutAccount.BalanceZNHB.Add(payoutAccount.BalanceZNHB, reward.total)
+		if err := sp.setAccount(payoutAddr, payoutAccount); err != nil {
 			return nil, err
 		}
 		payout := rewards.Payout{
-			Account:    append([]byte(nil), reward.addr...),
+			Account:    append([]byte(nil), payoutAddr...),
 			Total:      new(big.Int).Set(reward.total),
 			Validators: new(big.Int).Set(reward.validators),
 			Stakers:    new(big.Int).Set(reward.stakers),
@@ -184,6 +199,9 @@ func (sp *StateProcessor) applyAccountRewards(epochNumber uint64, rewardMap map[
 			"epoch":   strconv.FormatUint(epochNumber, 10),
 			"account": bech.String(),
 			"amount":  payout.Total.String(),
+		}
+		if !bytes.Equal(payoutAddr, reward.addr) {
+			attrs["paidTo"] = crypto.MustNewAddress(crypto.NHBPrefix, payoutAddr).String()
 		}
 		if reward.validators.Sign() > 0 {
 			attrs["validators"] = reward.validators.String()

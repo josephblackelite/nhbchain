@@ -87,6 +87,7 @@ type Account struct {
 	LockedZNHB              *big.Int             `json:"lockedZNHB"`
 	StakingRewards          StakingRewards       `json:"stakingRewards"`
 	DelegatedValidator      []byte               `json:"delegatedValidator,omitempty"`
+	RewardBeneficiary       []byte               `json:"rewardBeneficiary,omitempty"`
 	PendingUnbonds          []StakeUnbond        `json:"pendingUnbonds,omitempty"`
 	NextUnbondingID         uint64               `json:"nextUnbondingId,omitempty"`
 	Username                string               `json:"username"` // NEW: The registered username for this account

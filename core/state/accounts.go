@@ -49,6 +49,7 @@ type accountMetadata struct {
 	LendingSupplyIndex *big.Int
 	LendingBorrowIndex *big.Int
 	DelegatedValidator []byte
+	RewardBeneficiary  []byte
 	Unbonding          []stakeUnbond
 	UnbondingSeq       uint64
 
@@ -265,6 +266,9 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 		if len(meta.DelegatedValidator) > 0 {
 			account.DelegatedValidator = append([]byte(nil), meta.DelegatedValidator...)
 		}
+		if len(meta.RewardBeneficiary) > 0 {
+			account.RewardBeneficiary = append([]byte(nil), meta.RewardBeneficiary...)
+		}
 		if len(meta.Unbonding) > 0 {
 			account.PendingUnbonds = make([]types.StakeUnbond, len(meta.Unbonding))
 			for i, entry := range meta.Unbonding {
@@ -354,6 +358,10 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 	if len(account.DelegatedValidator) > 0 {
 		delegated = append([]byte(nil), account.DelegatedValidator...)
 	}
+	var rewardBeneficiary []byte
+	if len(account.RewardBeneficiary) > 0 {
+		rewardBeneficiary = append([]byte(nil), account.RewardBeneficiary...)
+	}
 	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
 	for i, entry := range account.PendingUnbonds {
 		amount := big.NewInt(0)
@@ -386,6 +394,7 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		LendingSupplyIndex: new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
 		LendingBorrowIndex: new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
 		DelegatedValidator: delegated,
+		RewardBeneficiary:  rewardBeneficiary,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
 
@@ -466,6 +475,10 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 	if len(account.DelegatedValidator) > 0 {
 		delegated = append([]byte(nil), account.DelegatedValidator...)
 	}
+	var rewardBeneficiary []byte
+	if len(account.RewardBeneficiary) > 0 {
+		rewardBeneficiary = append([]byte(nil), account.RewardBeneficiary...)
+	}
 	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
 	for i, entry := range account.PendingUnbonds {
 		amount := big.NewInt(0)
@@ -498,6 +511,7 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		LendingSupplyIndex: new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
 		LendingBorrowIndex: new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
 		DelegatedValidator: delegated,
+		RewardBeneficiary:  rewardBeneficiary,
 		Unbonding:          unbonding,
 		UnbondingSeq:       account.NextUnbondingID,
 

@@ -59,6 +59,7 @@ const (
 	TxTypeLendingBorrowNHB    TxType = 0x17 // Borrow NHB against ZNHB collateral
 	TxTypeLendingRepayNHB     TxType = 0x18 // Repay NHB debt in a lending pool
 	TxTypeBuyZNHB             TxType = 0x19 // Purchase ZNHB from the admin wallet using NHB (one-directional, never reversed on-chain)
+	TxTypeSetRewardBeneficiary TxType = 0x1A // Validator redirects its own epoch reward payouts to a chosen wallet
 	TxTypePOSAuthorize        TxType = 0x20 // Pre-authorize a merchant payment
 	TxTypePOSCapture          TxType = 0x21 // Capture an authorized payment
 	TxTypePOSVoid             TxType = 0x22 // Void authorized payment

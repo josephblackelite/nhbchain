@@ -2610,6 +2610,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return nil
+	case types.TxTypeSetRewardBeneficiary:
+		if err := sp.applySetRewardBeneficiary(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
 	case types.TxTypeLendingSupplyNHB:
 		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
 			return err
@@ -3036,6 +3041,42 @@ func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, sen
 		sp.AppendEvent(evt)
 	}
 	return nil
+}
+
+// applySetRewardBeneficiary lets a validator redirect its own epoch reward
+// payouts (distributeValidatorRewards, core/rewards_logic.go) to a wallet it
+// chooses -- typically one it can actually access day to day, since the
+// validator's own signing key is meant to stay on the validator server and
+// never be loaded into a convenience wallet. Only the account whose own
+// signature authorizes this transaction can set its beneficiary; it is
+// never inferable from delegation, which would otherwise let anyone hijack
+// a validator's future rewards simply by delegating to it first.
+func (sp *StateProcessor) applySetRewardBeneficiary(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Beneficiary string `json:"beneficiary"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("setRewardBeneficiary: decode payload: %w", err)
+	}
+	trimmed := strings.TrimSpace(payload.Beneficiary)
+	if trimmed == "" {
+		// An empty beneficiary clears the redirect -- rewards resume being
+		// credited to this validator's own address.
+		senderAccount.RewardBeneficiary = nil
+		senderAccount.Nonce++
+		return sp.setAccount(sender, senderAccount)
+	}
+	beneficiary, err := crypto.DecodeAddress(trimmed)
+	if err != nil {
+		return fmt.Errorf("setRewardBeneficiary: invalid beneficiary address: %w", err)
+	}
+	beneficiaryBytes := beneficiary.Bytes()
+	if bytes.Equal(beneficiaryBytes, sender) {
+		return fmt.Errorf("setRewardBeneficiary: beneficiary cannot be the validator's own address")
+	}
+	senderAccount.RewardBeneficiary = append([]byte(nil), beneficiaryBytes...)
+	senderAccount.Nonce++
+	return sp.setAccount(sender, senderAccount)
 }
 
 func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {
@@ -3848,6 +3889,7 @@ type accountMetadata struct {
 	LendingSupplyIndex      *big.Int
 	LendingBorrowIndex      *big.Int
 	DelegatedValidator      []byte
+	RewardBeneficiary       []byte
 	Unbonding               []stakeUnbond
 	UnbondingSeq            uint64
 	Username                string
@@ -4012,6 +4054,9 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 		if len(meta.DelegatedValidator) > 0 {
 			account.DelegatedValidator = append([]byte(nil), meta.DelegatedValidator...)
 		}
+		if len(meta.RewardBeneficiary) > 0 {
+			account.RewardBeneficiary = append([]byte(nil), meta.RewardBeneficiary...)
+		}
 		if len(meta.Unbonding) > 0 {
 			account.PendingUnbonds = make([]types.StakeUnbond, len(meta.Unbonding))
 			for i, entry := range meta.Unbonding {
@@ -4101,6 +4146,10 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	if len(account.DelegatedValidator) > 0 {
 		delegated = append([]byte(nil), account.DelegatedValidator...)
 	}
+	var rewardBeneficiary []byte
+	if len(account.RewardBeneficiary) > 0 {
+		rewardBeneficiary = append([]byte(nil), account.RewardBeneficiary...)
+	}
 	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
 	for i, entry := range account.PendingUnbonds {
 		amount := big.NewInt(0)
@@ -4131,6 +4180,7 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		LendingSupplyIndex:        new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
 		LendingBorrowIndex:        new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
 		DelegatedValidator:        delegated,
+		RewardBeneficiary:         rewardBeneficiary,
 		Unbonding:                 unbonding,
 		UnbondingSeq:              account.NextUnbondingID,
 		Username:                  account.Username,
