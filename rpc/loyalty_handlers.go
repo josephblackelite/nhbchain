@@ -67,31 +67,39 @@ type userQRParams struct {
 }
 
 type programSpec struct {
-	ID           string  `json:"id"`
-	Owner        string  `json:"owner"`
-	Pool         string  `json:"pool"`
-	TokenSymbol  string  `json:"tokenSymbol"`
-	AccrualBps   uint32  `json:"accrualBps"`
-	MinSpendWei  *string `json:"minSpendWei,omitempty"`
-	CapPerTx     *string `json:"capPerTx,omitempty"`
-	DailyCapUser *string `json:"dailyCapUser,omitempty"`
-	StartTime    *uint64 `json:"startTime,omitempty"`
-	EndTime      *uint64 `json:"endTime,omitempty"`
-	Active       *bool   `json:"active,omitempty"`
+	ID                 string  `json:"id"`
+	Owner              string  `json:"owner"`
+	Pool               string  `json:"pool"`
+	TokenSymbol        string  `json:"tokenSymbol"`
+	AccrualBps         uint32  `json:"accrualBps"`
+	MinSpendWei        *string `json:"minSpendWei,omitempty"`
+	CapPerTx           *string `json:"capPerTx,omitempty"`
+	DailyCapUser       *string `json:"dailyCapUser,omitempty"`
+	DailyCapProgram    *string `json:"dailyCapProgram,omitempty"`
+	EpochCapProgram    *string `json:"epochCapProgram,omitempty"`
+	EpochLengthSeconds *uint64 `json:"epochLengthSeconds,omitempty"`
+	IssuanceCapUser    *string `json:"issuanceCapUser,omitempty"`
+	StartTime          *uint64 `json:"startTime,omitempty"`
+	EndTime            *uint64 `json:"endTime,omitempty"`
+	Active             *bool   `json:"active,omitempty"`
 }
 
 type programResult struct {
-	ID           string `json:"id"`
-	Owner        string `json:"owner"`
-	Pool         string `json:"pool"`
-	TokenSymbol  string `json:"tokenSymbol"`
-	AccrualBps   uint32 `json:"accrualBps"`
-	MinSpendWei  string `json:"minSpendWei"`
-	CapPerTx     string `json:"capPerTx"`
-	DailyCapUser string `json:"dailyCapUser"`
-	StartTime    uint64 `json:"startTime"`
-	EndTime      uint64 `json:"endTime"`
-	Active       bool   `json:"active"`
+	ID                 string `json:"id"`
+	Owner              string `json:"owner"`
+	Pool               string `json:"pool"`
+	TokenSymbol        string `json:"tokenSymbol"`
+	AccrualBps         uint32 `json:"accrualBps"`
+	MinSpendWei        string `json:"minSpendWei"`
+	CapPerTx           string `json:"capPerTx"`
+	DailyCapUser       string `json:"dailyCapUser"`
+	DailyCapProgram    string `json:"dailyCapProgram"`
+	EpochCapProgram    string `json:"epochCapProgram"`
+	EpochLengthSeconds uint64 `json:"epochLengthSeconds"`
+	IssuanceCapUser    string `json:"issuanceCapUser"`
+	StartTime          uint64 `json:"startTime"`
+	EndTime            uint64 `json:"endTime"`
+	Active             bool   `json:"active"`
 }
 
 type businessResult struct {
@@ -770,17 +778,21 @@ func formatBusiness(business *loyalty.Business) businessResult {
 
 func formatProgram(program *loyalty.Program) programResult {
 	return programResult{
-		ID:           formatProgramID(program.ID),
-		Owner:        crypto.MustNewAddress(crypto.NHBPrefix, program.Owner[:]).String(),
-		Pool:         crypto.MustNewAddress(crypto.NHBPrefix, program.Pool[:]).String(),
-		TokenSymbol:  program.TokenSymbol,
-		AccrualBps:   program.AccrualBps,
-		MinSpendWei:  bigIntToString(program.MinSpendWei),
-		CapPerTx:     bigIntToString(program.CapPerTx),
-		DailyCapUser: bigIntToString(program.DailyCapUser),
-		StartTime:    program.StartTime,
-		EndTime:      program.EndTime,
-		Active:       program.Active,
+		ID:                 formatProgramID(program.ID),
+		Owner:              crypto.MustNewAddress(crypto.NHBPrefix, program.Owner[:]).String(),
+		Pool:               crypto.MustNewAddress(crypto.NHBPrefix, program.Pool[:]).String(),
+		TokenSymbol:        program.TokenSymbol,
+		AccrualBps:         program.AccrualBps,
+		MinSpendWei:        bigIntToString(program.MinSpendWei),
+		CapPerTx:           bigIntToString(program.CapPerTx),
+		DailyCapUser:       bigIntToString(program.DailyCapUser),
+		DailyCapProgram:    bigIntToString(program.DailyCapProgram),
+		EpochCapProgram:    bigIntToString(program.EpochCapProgram),
+		EpochLengthSeconds: program.EpochLengthSeconds,
+		IssuanceCapUser:    bigIntToString(program.IssuanceCapUser),
+		StartTime:          program.StartTime,
+		EndTime:            program.EndTime,
+		Active:             program.Active,
 	}
 }
 
@@ -823,6 +835,22 @@ func buildProgramFromSpec(spec *programSpec) (*loyalty.Program, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid dailyCapUser: %w", err)
 	}
+	dailyCapProgram, err := parseBigInt(spec.DailyCapProgram)
+	if err != nil {
+		return nil, fmt.Errorf("invalid dailyCapProgram: %w", err)
+	}
+	epochCapProgram, err := parseBigInt(spec.EpochCapProgram)
+	if err != nil {
+		return nil, fmt.Errorf("invalid epochCapProgram: %w", err)
+	}
+	issuanceCap, err := parseBigInt(spec.IssuanceCapUser)
+	if err != nil {
+		return nil, fmt.Errorf("invalid issuanceCapUser: %w", err)
+	}
+	epochLengthSeconds := uint64(0)
+	if spec.EpochLengthSeconds != nil {
+		epochLengthSeconds = *spec.EpochLengthSeconds
+	}
 	active := true
 	if spec.Active != nil {
 		active = *spec.Active
@@ -836,17 +864,21 @@ func buildProgramFromSpec(spec *programSpec) (*loyalty.Program, error) {
 		endTime = *spec.EndTime
 	}
 	return &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		Pool:         pool,
-		TokenSymbol:  token,
-		AccrualBps:   spec.AccrualBps,
-		MinSpendWei:  minSpend,
-		CapPerTx:     capPerTx,
-		DailyCapUser: dailyCap,
-		StartTime:    startTime,
-		EndTime:      endTime,
-		Active:       active,
+		ID:                 id,
+		Owner:              owner,
+		Pool:               pool,
+		TokenSymbol:        token,
+		AccrualBps:         spec.AccrualBps,
+		MinSpendWei:        minSpend,
+		CapPerTx:           capPerTx,
+		DailyCapUser:       dailyCap,
+		DailyCapProgram:    dailyCapProgram,
+		EpochCapProgram:    epochCapProgram,
+		EpochLengthSeconds: epochLengthSeconds,
+		IssuanceCapUser:    issuanceCap,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		Active:             active,
 	}, nil
 }
 

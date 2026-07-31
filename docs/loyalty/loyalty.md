@@ -91,10 +91,15 @@ Programs are stored as structured data within the chain’s state. Typical field
 * `MinSpendWei` (`*big.Int`): minimum qualifying spend.
 * `CapPerTx` (`*big.Int`): maximum reward per transaction.
 * `DailyCapUser` (`*big.Int`): maximum reward per user per UTC day.
+* `DailyCapProgram` (`*big.Int`): maximum total reward the program pays out across *all* users per UTC day.
+* `EpochCapProgram` (`*big.Int`) / `EpochLengthSeconds` (`uint64`): maximum total reward per program epoch, and the epoch's length in seconds. `EpochLengthSeconds` is required (>0) whenever `EpochCapProgram` is set.
+* `IssuanceCapUser` (`*big.Int`): maximum reward a single user can ever earn from this program, lifetime.
 * `StartTime`, `EndTime` (`int64`): UNIX timestamps bounding program validity.
 * `Active` (`bool`): indicates whether accrual logic executes.
 * `includeP2P` (`bool`): include P2P escrow releases; default `false`.
 * `metadata` (`map[string]string`): optional key/value data surfaced via analytics.
+
+**Anti-sybil requirement**: `CreateProgram`/`UpdateProgram` reject any program where both `DailyCapProgram` and `EpochCapProgram` are unset/zero (`ErrInvalidProgram`). A per-user cap alone doesn't bound total payout -- an attacker can split spend across any number of self-controlled wallets, each staying under the per-user cap, to draw an unbounded multiple of it from the same merchant's paymaster. At least one program-wide ceiling must always be in place, regardless of how many distinct addresses participate.
 
 ### Global base reward
 
@@ -582,6 +587,7 @@ headers = {
   "minSpendWei": "100000000000000000",
   "capPerTx": "5000000000000000000",
   "dailyCapUser": "10000000000000000000",
+  "dailyCapProgram": "500000000000000000000",
   "startTime": 1730400000,
   "endTime": 1762032000,
   "includeP2P": false,

@@ -80,15 +80,16 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 	var programID loyalty.ProgramID
 	programID[31] = 0x01
 	program := &loyalty.Program{
-		ID:           programID,
-		Owner:        merchant,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   1200,
-		MinSpendWei:  big.NewInt(0),
-		CapPerTx:     big.NewInt(400),
-		DailyCapUser: big.NewInt(800),
-		StartTime:    uint64(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
-		Active:       true,
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      1200,
+		MinSpendWei:     big.NewInt(0),
+		CapPerTx:        big.NewInt(400),
+		DailyCapUser:    big.NewInt(800),
+		DailyCapProgram: big.NewInt(100000),
+		StartTime:       uint64(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
+		Active:          true,
 	}
 	if err := registry.CreateProgram(merchant, program); err != nil {
 		t.Fatalf("create program: %v", err)

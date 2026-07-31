@@ -243,6 +243,18 @@ func sanitizeProgram(p *Program) (*Program, error) {
 	if copyProgram.EndTime != 0 && copyProgram.EndTime < copyProgram.StartTime {
 		return nil, fmt.Errorf("%w: end time before start time", ErrInvalidProgram)
 	}
+	// A per-user cap alone (DailyCapUser/IssuanceCapUser) does not bound total
+	// payout: an attacker can split spend across any number of self-controlled
+	// wallets, each staying under the per-user cap, to draw an unbounded
+	// multiple of it from the same merchant's paymaster. Requiring at least one
+	// program-wide ceiling (daily or epoch) bounds total exposure regardless of
+	// how many distinct addresses participate, the same way DailyCapCounterparty
+	// bounds the global base reward's two-wallet wash-trading case.
+	hasDailyProgramCap := copyProgram.DailyCapProgram != nil && copyProgram.DailyCapProgram.Sign() > 0
+	hasEpochProgramCap := copyProgram.EpochCapProgram != nil && copyProgram.EpochCapProgram.Sign() > 0
+	if !hasDailyProgramCap && !hasEpochProgramCap {
+		return nil, fmt.Errorf("%w: at least one program-wide cap (dailyCapProgram or epochCapProgram) is required to bound total payout exposure", ErrInvalidProgram)
+	}
 	copyProgram.MinSpendWei = cloneBigInt(copyProgram.MinSpendWei)
 	copyProgram.CapPerTx = cloneBigInt(copyProgram.CapPerTx)
 	copyProgram.DailyCapUser = cloneBigInt(copyProgram.DailyCapUser)

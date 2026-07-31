@@ -301,11 +301,12 @@ func TestHandleLoyaltyCreateProgramSuccess(t *testing.T) {
 	poolKey, _ := crypto.GeneratePrivateKey()
 	poolAddr := poolKey.PubKey().Address().String()
 	spec := map[string]interface{}{
-		"id":          programIDHex,
-		"owner":       merchantAddr,
-		"pool":        poolAddr,
-		"tokenSymbol": "ZNHB",
-		"accrualBps":  100,
+		"id":              programIDHex,
+		"owner":           merchantAddr,
+		"pool":            poolAddr,
+		"tokenSymbol":     "ZNHB",
+		"accrualBps":      100,
+		"dailyCapProgram": "1000000000000000000000",
 	}
 	envReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
 		"caller":     merchantAddr,

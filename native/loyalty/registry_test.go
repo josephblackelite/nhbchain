@@ -51,17 +51,18 @@ func TestRegistryCreateAndListPrograms(t *testing.T) {
 	registry.SetEmitter(emitter)
 
 	program := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		Pool:         pool,
-		TokenSymbol:  "znhb",
-		AccrualBps:   150,
-		MinSpendWei:  big.NewInt(10),
-		CapPerTx:     big.NewInt(5),
-		DailyCapUser: big.NewInt(20),
-		StartTime:    100,
-		EndTime:      0,
-		Active:       true,
+		ID:              id,
+		Owner:           owner,
+		Pool:            pool,
+		TokenSymbol:     "znhb",
+		AccrualBps:      150,
+		MinSpendWei:     big.NewInt(10),
+		CapPerTx:        big.NewInt(5),
+		DailyCapUser:    big.NewInt(20),
+		DailyCapProgram: big.NewInt(1000),
+		StartTime:       100,
+		EndTime:         0,
+		Active:          true,
 	}
 	if err := registry.CreateProgram(owner, program); err != nil {
 		t.Fatalf("create program: %v", err)
@@ -103,14 +104,15 @@ func TestRegistryCreateProgramUnauthorized(t *testing.T) {
 	id[0] = 0x01
 
 	program := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   100,
-		MinSpendWei:  big.NewInt(1),
-		CapPerTx:     big.NewInt(1),
-		DailyCapUser: big.NewInt(1),
-		Active:       true,
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		MinSpendWei:     big.NewInt(1),
+		CapPerTx:        big.NewInt(1),
+		DailyCapUser:    big.NewInt(1),
+		DailyCapProgram: big.NewInt(100),
+		Active:          true,
 	}
 	err := registry.CreateProgram(caller, program)
 	if !errors.Is(err, loyalty.ErrUnauthorized) {
@@ -128,11 +130,12 @@ func TestRegistryPauseProgramUnauthorized(t *testing.T) {
 	id[0] = 0x03
 
 	program := &loyalty.Program{
-		ID:          id,
-		Owner:       owner,
-		TokenSymbol: "ZNHB",
-		AccrualBps:  100,
-		Active:      true,
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		DailyCapProgram: big.NewInt(100),
+		Active:          true,
 	}
 	if err := registry.CreateProgram(owner, program); err != nil {
 		t.Fatalf("create program: %v", err)
@@ -152,11 +155,12 @@ func TestRegistryPauseAndResumeProgram(t *testing.T) {
 	id[0] = 0x13
 
 	base := &loyalty.Program{
-		ID:          id,
-		Owner:       owner,
-		TokenSymbol: "ZNHB",
-		AccrualBps:  100,
-		Active:      true,
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		DailyCapProgram: big.NewInt(100),
+		Active:          true,
 	}
 	if err := registry.CreateProgram(owner, base); err != nil {
 		t.Fatalf("create program: %v", err)
@@ -200,33 +204,35 @@ func TestRegistryUpdateProgramByOwner(t *testing.T) {
 	id[0] = 0xFF
 
 	base := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		Pool:         pool,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   100,
-		MinSpendWei:  big.NewInt(10),
-		CapPerTx:     big.NewInt(5),
-		DailyCapUser: big.NewInt(20),
-		StartTime:    10,
-		Active:       true,
+		ID:              id,
+		Owner:           owner,
+		Pool:            pool,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		MinSpendWei:     big.NewInt(10),
+		CapPerTx:        big.NewInt(5),
+		DailyCapUser:    big.NewInt(20),
+		DailyCapProgram: big.NewInt(1000),
+		StartTime:       10,
+		Active:          true,
 	}
 	if err := registry.CreateProgram(owner, base); err != nil {
 		t.Fatalf("create program: %v", err)
 	}
 
 	update := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		Pool:         pool,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   450,
-		MinSpendWei:  big.NewInt(15),
-		CapPerTx:     big.NewInt(6),
-		DailyCapUser: big.NewInt(25),
-		StartTime:    20,
-		EndTime:      1000,
-		Active:       false,
+		ID:              id,
+		Owner:           owner,
+		Pool:            pool,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      450,
+		MinSpendWei:     big.NewInt(15),
+		CapPerTx:        big.NewInt(6),
+		DailyCapUser:    big.NewInt(25),
+		DailyCapProgram: big.NewInt(1000),
+		StartTime:       20,
+		EndTime:         1000,
+		Active:          false,
 	}
 	emitter := &capturingEmitter{}
 	registry.SetEmitter(emitter)
@@ -261,14 +267,15 @@ func TestRegistryUpdateProgramByAdmin(t *testing.T) {
 	id[0] = 0x05
 
 	base := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   100,
-		MinSpendWei:  big.NewInt(10),
-		CapPerTx:     big.NewInt(5),
-		DailyCapUser: big.NewInt(20),
-		Active:       true,
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		MinSpendWei:     big.NewInt(10),
+		CapPerTx:        big.NewInt(5),
+		DailyCapUser:    big.NewInt(20),
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
 	}
 	if err := registry.CreateProgram(owner, base); err != nil {
 		t.Fatalf("create program: %v", err)
@@ -278,14 +285,15 @@ func TestRegistryUpdateProgramByAdmin(t *testing.T) {
 	}
 
 	update := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   250,
-		MinSpendWei:  big.NewInt(15),
-		CapPerTx:     big.NewInt(30),
-		DailyCapUser: big.NewInt(45),
-		Active:       true,
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      250,
+		MinSpendWei:     big.NewInt(15),
+		CapPerTx:        big.NewInt(30),
+		DailyCapUser:    big.NewInt(45),
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
 	}
 	if err := registry.UpdateProgram(admin, update); err != nil {
 		t.Fatalf("admin update: %v", err)
@@ -302,29 +310,89 @@ func TestRegistryRejectsImmutableChanges(t *testing.T) {
 	id[0] = 0x09
 
 	base := &loyalty.Program{
-		ID:           id,
-		Owner:        owner,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   100,
-		MinSpendWei:  big.NewInt(1),
-		CapPerTx:     big.NewInt(1),
-		DailyCapUser: big.NewInt(1),
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		MinSpendWei:     big.NewInt(1),
+		CapPerTx:        big.NewInt(1),
+		DailyCapUser:    big.NewInt(1),
+		DailyCapProgram: big.NewInt(100),
 	}
 	if err := registry.CreateProgram(owner, base); err != nil {
 		t.Fatalf("create program: %v", err)
 	}
 
 	update := &loyalty.Program{
-		ID:           id,
-		Owner:        other,
-		TokenSymbol:  "ZNHB",
-		AccrualBps:   100,
-		MinSpendWei:  big.NewInt(1),
-		CapPerTx:     big.NewInt(1),
-		DailyCapUser: big.NewInt(1),
+		ID:              id,
+		Owner:           other,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		MinSpendWei:     big.NewInt(1),
+		CapPerTx:        big.NewInt(1),
+		DailyCapUser:    big.NewInt(1),
+		DailyCapProgram: big.NewInt(100),
 	}
 	err := registry.UpdateProgram(owner, update)
 	if !errors.Is(err, loyalty.ErrImmutableField) {
 		t.Fatalf("expected immutable field error, got %v", err)
+	}
+}
+
+// TestRegistryRequiresAggregateProgramCap proves a merchant can no longer
+// launch a program with only a per-user cap: without some program-wide
+// ceiling (daily or epoch), an attacker splitting spend across any number of
+// self-controlled wallets -- each staying under the per-user cap -- could
+// draw an unbounded multiple of it from the same paymaster.
+func TestRegistryRequiresAggregateProgramCap(t *testing.T) {
+	registry, _ := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x21
+	var id loyalty.ProgramID
+	id[0] = 0x22
+
+	uncapped := &loyalty.Program{
+		ID:           id,
+		Owner:        owner,
+		TokenSymbol:  "ZNHB",
+		AccrualBps:   100,
+		DailyCapUser: big.NewInt(1000),
+		Active:       true,
+	}
+	err := registry.CreateProgram(owner, uncapped)
+	if !errors.Is(err, loyalty.ErrInvalidProgram) {
+		t.Fatalf("expected invalid program error for missing aggregate cap, got %v", err)
+	}
+	if _, ok := registry.GetProgram(id); ok {
+		t.Fatalf("uncapped program should not have been persisted")
+	}
+
+	withDailyCap := &loyalty.Program{
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		DailyCapUser:    big.NewInt(1000),
+		DailyCapProgram: big.NewInt(5000),
+		Active:          true,
+	}
+	if err := registry.CreateProgram(owner, withDailyCap); err != nil {
+		t.Fatalf("expected program with daily program cap to be accepted: %v", err)
+	}
+
+	var epochID loyalty.ProgramID
+	epochID[0] = 0x23
+	withEpochCap := &loyalty.Program{
+		ID:                 epochID,
+		Owner:              owner,
+		TokenSymbol:        "ZNHB",
+		AccrualBps:         100,
+		DailyCapUser:       big.NewInt(1000),
+		EpochCapProgram:    big.NewInt(5000),
+		EpochLengthSeconds: 3600,
+		Active:             true,
+	}
+	if err := registry.CreateProgram(owner, withEpochCap); err != nil {
+		t.Fatalf("expected program with epoch program cap to be accepted: %v", err)
 	}
 }
