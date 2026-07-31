@@ -2,12 +2,10 @@ package rpc
 
 import (
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"strings"
 
 	"nhbchain/native/lending"
-	"nhbchain/rpc/modules"
 )
 
 const defaultLendingPoolID = "default"
@@ -15,34 +13,6 @@ const defaultLendingPoolID = "default"
 type lendingAccountParams struct {
 	Address string `json:"address"`
 	PoolID  string `json:"poolId,omitempty"`
-}
-
-type lendingAmountParams struct {
-	From   string `json:"from"`
-	Amount string `json:"amount"`
-	PoolID string `json:"poolId,omitempty"`
-}
-
-type lendingBorrowParams struct {
-	Borrower string `json:"borrower"`
-	Amount   string `json:"amount"`
-	PoolID   string `json:"poolId,omitempty"`
-}
-
-type lendingBorrowWithFeeParams struct {
-	Borrower string `json:"borrower"`
-	Amount   string `json:"amount"`
-	PoolID   string `json:"poolId,omitempty"`
-}
-
-type lendingLiquidateParams struct {
-	Liquidator string `json:"liquidator"`
-	Borrower   string `json:"borrower"`
-	PoolID     string `json:"poolId,omitempty"`
-}
-
-type lendingTxResult struct {
-	TxHash string `json:"txHash"`
 }
 
 type lendingMarketResult struct {
@@ -193,172 +163,51 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 	writeResult(w, req.ID, lendingUserAccountResult{Account: account})
 }
 
+// handleLendingSupplyNHB, handleLendingWithdrawNHB, handleLendingDepositZNHB,
+// handleLendingWithdrawZNHB, handleLendingBorrowNHB,
+// handleLendingBorrowNHBWithFee, handleLendingRepayNHB, and
+// handleLendingLiquidate are deliberately disabled -- see docs/issue30.md
+// item 24. They mutated a client-supplied address's lending position
+// directly via WithState, with no signature proving the caller controls
+// that address -- gated only by the shared admin JWT, so anyone holding it
+// could supply/withdraw/borrow/repay/liquidate on behalf of any address.
+// nhbportal never used these (it signs real TxTypeLendingSupplyNHB /
+// TxTypeLendingWithdrawNHB / TxTypeLendingDepositZNHB /
+// TxTypeLendingWithdrawZNHB / TxTypeLendingBorrowNHB / TxTypeLendingRepayNHB
+// transactions instead, which core/state_transition.go already applies
+// correctly), so nothing legitimate depends on them. Fail loudly rather than
+// silently accept an unauthenticated instruction to move someone else's
+// funds.
+const lendingRPCDisabledMessage = "this method is disabled; sign a transaction (TxTypeLendingSupplyNHB/TxTypeLendingWithdrawNHB/TxTypeLendingDepositZNHB/TxTypeLendingWithdrawZNHB/TxTypeLendingBorrowNHB/TxTypeLendingRepayNHB) via nhb_sendTransaction instead, so the caller's own signature authorizes the action"
+
 func (s *Server) handleLendingSupplyNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleLendingAmountTx(w, r, req, s.lending.SupplyNHB)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingWithdrawNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleLendingAmountTx(w, r, req, s.lending.WithdrawNHB)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingDepositZNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleLendingAmountTx(w, r, req, s.lending.DepositZNHB)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingWithdrawZNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleLendingAmountTx(w, r, req, s.lending.WithdrawZNHB)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingBorrowNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	poolID, addr, amount, ok := s.parseBorrowParams(w, req)
-	if !ok {
-		return
-	}
-	txHash, moduleErr := s.lending.BorrowNHB(poolID, addr, amount)
-	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
-		return
-	}
-	writeResult(w, req.ID, lendingTxResult{TxHash: txHash})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingBorrowNHBWithFee(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected parameter object", nil)
-		return
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(req.Params[0], &raw); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	if _, ok := raw["feeRecipient"]; ok {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "feeRecipient is not configurable", nil)
-		return
-	}
-	if _, ok := raw["feeBps"]; ok {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "feeBps is not configurable", nil)
-		return
-	}
-	var params lendingBorrowWithFeeParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	borrower, err := decodeBech32(params.Borrower)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid borrower", err.Error())
-		return
-	}
-	amount, err := parseAmount(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	txHash, moduleErr := s.lending.BorrowNHBWithFee(params.PoolID, borrower, amount)
-	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
-		return
-	}
-	writeResult(w, req.ID, lendingTxResult{TxHash: txHash})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingRepayNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleLendingAmountTx(w, r, req, s.lending.RepayNHB)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLendingLiquidate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected parameter object", nil)
-		return
-	}
-	var params lendingLiquidateParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	liquidator, err := decodeBech32(params.Liquidator)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid liquidator", err.Error())
-		return
-	}
-	borrower, err := decodeBech32(params.Borrower)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid borrower", err.Error())
-		return
-	}
-	txHash, moduleErr := s.lending.Liquidate(params.PoolID, liquidator, borrower)
-	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
-		return
-	}
-	writeResult(w, req.ID, lendingTxResult{TxHash: txHash})
-}
-
-func (s *Server) handleLendingAmountTx(w http.ResponseWriter, r *http.Request, req *RPCRequest, fn func(string, [20]byte, *big.Int) (string, *modules.ModuleError)) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected parameter object", nil)
-		return
-	}
-	var params lendingAmountParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	addr, err := decodeBech32(params.From)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid from", err.Error())
-		return
-	}
-	amount, err := parseAmount(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	poolID := strings.TrimSpace(params.PoolID)
-	txHash, moduleErr := fn(poolID, addr, amount)
-	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
-		return
-	}
-	writeResult(w, req.ID, lendingTxResult{TxHash: txHash})
-}
-
-func (s *Server) parseBorrowParams(w http.ResponseWriter, req *RPCRequest) (string, [20]byte, *big.Int, bool) {
-	var params lendingBorrowParams
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected parameter object", nil)
-		return "", [20]byte{}, nil, false
-	}
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return "", [20]byte{}, nil, false
-	}
-	borrower, err := decodeBech32(params.Borrower)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid borrower", err.Error())
-		return "", [20]byte{}, nil, false
-	}
-	amount, err := parseAmount(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return "", [20]byte{}, nil, false
-	}
-	return params.PoolID, borrower, amount, true
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)
 }

@@ -20,6 +20,7 @@ import (
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
 	"nhbchain/rpc"
+	"nhbchain/rpc/modules"
 	"nhbchain/storage"
 )
 
@@ -37,10 +38,6 @@ type rpcError struct {
 }
 
 var weiUnit = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-
-func weiString(n int64) string {
-	return new(big.Int).Mul(big.NewInt(n), weiUnit).String()
-}
 
 func weiBig(n int64) *big.Int {
 	return new(big.Int).Mul(big.NewInt(n), weiUnit)
@@ -185,14 +182,46 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected two pools, got %+v", poolsResult.Pools)
 	}
 
-	callRPC(t, client, baseURL, token, "lending_supplyNHB", map[string]string{"from": userAddrStr, "amount": weiString(1000)})
-	callRPC(t, client, baseURL, token, "lending_depositZNHB", map[string]string{"from": userAddrStr, "amount": weiString(600)})
-	callRPC(t, client, baseURL, token, "lending_borrowNHB", map[string]string{"borrower": userAddrStr, "amount": weiString(400)})
-	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": weiString(400)})
-	callRPC(t, client, baseURL, token, "lending_borrowNHBWithFee", map[string]interface{}{"borrower": userAddrStr, "amount": weiString(100)})
-	callRPC(t, client, baseURL, token, "lending_repayNHB", map[string]string{"from": userAddrStr, "amount": weiString(101)})
-	callRPC(t, client, baseURL, token, "lending_withdrawNHB", map[string]string{"from": userAddrStr, "amount": weiString(500)})
-	callRPC(t, client, baseURL, token, "lending_withdrawZNHB", map[string]string{"from": userAddrStr, "amount": weiString(300)})
+	// lending_supplyNHB/depositZNHB/borrowNHB/repayNHB/withdrawNHB/withdrawZNHB/
+	// liquidate are deliberately disabled RPC methods (docs/issue30.md item
+	// 24 -- they let anyone holding the admin JWT move funds for any address
+	// with no signature check). Their only public HTTP entry point is gone,
+	// but the underlying module methods they used to call are unchanged and
+	// still exported; call them directly here so this test keeps verifying
+	// the real lending engine stays correctly wired to node state, the same
+	// way it did before, without resurrecting the unauthenticated RPC
+	// surface. (Supply/withdraw/deposit/borrow/repay do have a safe
+	// signed-transaction equivalent now -- TxTypeLendingSupplyNHB etc., which
+	// is what nhbportal actually signs -- but liquidation doesn't yet: it's a
+	// third party acting on someone else's position, not a "move my own
+	// funds" action, so it needs its own design rather than reusing the
+	// buyer/seller signature model. Tracked as a follow-up.)
+	lendingModule := modules.NewLendingModule(node)
+	userAddr20 := [20]byte(userAddr.Bytes())
+	if _, moduleErr := lendingModule.SupplyNHB("", userAddr20, weiBig(1000)); moduleErr != nil {
+		t.Fatalf("supply: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.DepositZNHB("", userAddr20, weiBig(600)); moduleErr != nil {
+		t.Fatalf("deposit collateral: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.BorrowNHB("", userAddr20, weiBig(400)); moduleErr != nil {
+		t.Fatalf("borrow: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.RepayNHB("", userAddr20, weiBig(400)); moduleErr != nil {
+		t.Fatalf("repay: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.BorrowNHBWithFee("", userAddr20, weiBig(100)); moduleErr != nil {
+		t.Fatalf("borrow with fee: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.RepayNHB("", userAddr20, weiBig(101)); moduleErr != nil {
+		t.Fatalf("repay fee debt: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.WithdrawNHB("", userAddr20, weiBig(500)); moduleErr != nil {
+		t.Fatalf("withdraw: %+v", moduleErr)
+	}
+	if _, moduleErr := lendingModule.WithdrawZNHB("", userAddr20, weiBig(300)); moduleErr != nil {
+		t.Fatalf("withdraw collateral: %+v", moduleErr)
+	}
 
 	accountResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", userAddrStr)
 	var accountResult struct {
@@ -215,7 +244,9 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected zero debt, got %v", accountResult.Account.DebtNHB)
 	}
 
-	callRPC(t, client, baseURL, token, "lending_liquidate", map[string]string{"liquidator": liquidatorAddr.String(), "borrower": borrowerAddr.String()})
+	if _, moduleErr := lendingModule.Liquidate("default", [20]byte(liquidatorAddr.Bytes()), [20]byte(borrowerAddr.Bytes())); moduleErr != nil {
+		t.Fatalf("liquidate: %+v", moduleErr)
+	}
 
 	borrowerResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", borrowerAddr.String())
 	var borrowerResult struct {
