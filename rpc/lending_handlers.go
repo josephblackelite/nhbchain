@@ -175,10 +175,14 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 // TxTypeLendingWithdrawNHB / TxTypeLendingDepositZNHB /
 // TxTypeLendingWithdrawZNHB / TxTypeLendingBorrowNHB / TxTypeLendingRepayNHB
 // transactions instead, which core/state_transition.go already applies
-// correctly), so nothing legitimate depends on them. Fail loudly rather than
-// silently accept an unauthenticated instruction to move someone else's
-// funds.
-const lendingRPCDisabledMessage = "this method is disabled; sign a transaction (TxTypeLendingSupplyNHB/TxTypeLendingWithdrawNHB/TxTypeLendingDepositZNHB/TxTypeLendingWithdrawZNHB/TxTypeLendingBorrowNHB/TxTypeLendingRepayNHB) via nhb_sendTransaction instead, so the caller's own signature authorizes the action"
+// correctly), so nothing legitimate depends on them. Liquidate now has a
+// real signed-transaction equivalent too (TxTypeLendingLiquidate, added for
+// issue30 item 25) -- unlike the other six, it's signed by the liquidator,
+// not the borrower, since liquidation is inherently a permissionless
+// third-party action against someone else's unhealthy position. Fail loudly
+// rather than silently accept an unauthenticated instruction to move
+// someone else's funds.
+const lendingRPCDisabledMessage = "this method is disabled; sign a transaction (TxTypeLendingSupplyNHB/TxTypeLendingWithdrawNHB/TxTypeLendingDepositZNHB/TxTypeLendingWithdrawZNHB/TxTypeLendingBorrowNHB/TxTypeLendingRepayNHB/TxTypeLendingLiquidate) via nhb_sendTransaction instead, so the caller's own signature authorizes the action"
 
 func (s *Server) handleLendingSupplyNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, lendingRPCDisabledMessage, nil)

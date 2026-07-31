@@ -62,6 +62,7 @@ const (
 	TxTypeSetRewardBeneficiary TxType = 0x1A // Validator redirects its own epoch reward payouts to a chosen wallet
 	TxTypeRedeemNHB            TxType = 0x1B // User burns NHB to request an off-chain stablecoin payout (swap-out)
 	TxTypeAttestRedemption     TxType = 0x1C // Authorized attestor confirms or fails a pending redemption's off-chain payout
+	TxTypeLendingLiquidate     TxType = 0x1D // Liquidator repays a borrower's unhealthy debt for a discounted share of their collateral (permissionless third-party action, not signed by the borrower)
 	TxTypePOSAuthorize         TxType = 0x20 // Pre-authorize a merchant payment
 	TxTypePOSCapture           TxType = 0x21 // Capture an authorized payment
 	TxTypePOSVoid              TxType = 0x22 // Void authorized payment

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -296,6 +297,60 @@ func (sp *StateProcessor) applyLendingRepayNHB(tx *types.Transaction, sender []b
 		return err
 	}
 	if _, err := engine.Repay(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), tx.Value); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(sender)
+}
+
+type lendingLiquidatePayload struct {
+	PoolID   string `json:"poolId,omitempty"`
+	Borrower string `json:"borrower"`
+}
+
+func (sp *StateProcessor) decodeLendingLiquidatePayload(data []byte) (*lendingLiquidatePayload, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("lending liquidate payload required")
+	}
+	payload := &lendingLiquidatePayload{PoolID: defaultLendingPoolID}
+	if err := json.Unmarshal(data, payload); err != nil {
+		return nil, fmt.Errorf("invalid lending liquidate payload: %w", err)
+	}
+	payload.PoolID = strings.TrimSpace(payload.PoolID)
+	if payload.PoolID == "" {
+		payload.PoolID = defaultLendingPoolID
+	}
+	payload.Borrower = strings.TrimSpace(payload.Borrower)
+	if payload.Borrower == "" {
+		return nil, fmt.Errorf("lending liquidate payload requires a borrower address")
+	}
+	return payload, nil
+}
+
+// applyLendingLiquidate lets any third party ("the liquidator") repay an
+// unhealthy borrower's debt in exchange for a discounted share of their
+// collateral. Unlike the other lending handlers, the acted-upon address
+// (the borrower) is not the transaction sender -- liquidation is inherently
+// a permissionless action against someone else's unhealthy position, so the
+// borrower's own signature is neither required nor meaningful here. The
+// liquidator's signature only authorizes spending the liquidator's own NHB.
+func (sp *StateProcessor) applyLendingLiquidate(tx *types.Transaction, sender []byte) error {
+	payload, err := sp.decodeLendingLiquidatePayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	borrowerAddr, err := crypto.DecodeAddress(payload.Borrower)
+	if err != nil {
+		return fmt.Errorf("invalid borrower address: %w", err)
+	}
+	if bytes.Equal(borrowerAddr.Bytes(), sender) {
+		return fmt.Errorf("lending: a borrower cannot liquidate their own position; use repay instead")
+	}
+	engine, _, err := sp.lendingEngine(payload.PoolID)
+	if err != nil {
+		return err
+	}
+	liquidatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...))
+	if _, _, err := engine.Liquidate(liquidatorAddr, borrowerAddr); err != nil {
 		return err
 	}
 	return sp.incrementNativeAccountNonce(sender)
