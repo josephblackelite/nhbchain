@@ -88,3 +88,5 @@ node.log
 build_err.txt
 nowpayments.txt
 adminwallet.txt
+NHBChain Observed Issues.txt
+.gitignore
