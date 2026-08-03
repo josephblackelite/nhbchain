@@ -5,6 +5,11 @@ Status as of 2026-08-02. This is a scoping document (task `#54` from `docs/issue
 detail behind every claim below was gathered by direct source inspection; file:line
 references are given so each claim can be re-verified.
 
+**Decision confirmed 2026-08-02**: `services/otc-gateway` owns partner
+onboarding/KYB/approval; `services/swapd` is the pure execution/quoting
+backend it calls. Swapd does not grow its own partner/KYB system. This
+decision governs every later item in this doc's milestone plan (step 1).
+
 ## Headline finding
 
 **The user-facing "OTC partner onboarding" system (KYB dossiers, approve/reject
