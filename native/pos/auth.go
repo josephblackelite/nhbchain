@@ -138,6 +138,7 @@ var (
 	errAuthorizationInvalidAddr  = errors.New("pos: address required")
 	errAuthorizationInvalidAmt   = errors.New("pos: amount must be positive")
 	errAuthorizationInsufficient = errors.New("pos: insufficient balance")
+	errAuthorizationUnauthorized = errors.New("pos: caller is not authorized for this authorization")
 )
 
 // Authorize locks the supplied ZapNHB amount on the payer account and records a
@@ -221,8 +222,11 @@ func (l *Lifecycle) Authorize(payer, merchant [20]byte, amount *big.Int, expiry 
 
 // Capture transfers the locked funds to the merchant, optionally releasing any
 // remaining authorization amount back to the payer when capturing less than the
-// authorized total.
-func (l *Lifecycle) Capture(id [32]byte, amount *big.Int) (*Authorization, error) {
+// authorized total. caller must be the merchant the authorization was created
+// for -- capturing someone else's authorized payment is exactly the kind of
+// unauthorized-payload-trust bug this check exists to prevent (see
+// applyPOSCapture, which passes the transaction's recovered signer here).
+func (l *Lifecycle) Capture(id [32]byte, amount *big.Int, caller [20]byte) (*Authorization, error) {
 	if l == nil || l.state == nil {
 		return nil, errLifecycleUninitialised
 	}
@@ -232,6 +236,9 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int) (*Authorization, error
 	auth, err := l.loadAuthorization(id)
 	if err != nil {
 		return nil, err
+	}
+	if !bytes.Equal(auth.Merchant[:], caller[:]) {
+		return nil, errAuthorizationUnauthorized
 	}
 	originalAuth := auth.Clone()
 	if auth.Status == AuthorizationStatusCaptured {
@@ -317,14 +324,19 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int) (*Authorization, error
 }
 
 // Void releases the locked funds back to the payer. The reason string is
-// recorded for analytics and defaults to "manual" when empty.
-func (l *Lifecycle) Void(id [32]byte, reason string) (*Authorization, error) {
+// recorded for analytics and defaults to "manual" when empty. caller must be
+// either the payer or the merchant on the authorization -- either party may
+// cancel a pending hold, but no unrelated account may.
+func (l *Lifecycle) Void(id [32]byte, reason string, caller [20]byte) (*Authorization, error) {
 	if l == nil || l.state == nil {
 		return nil, errLifecycleUninitialised
 	}
 	auth, err := l.loadAuthorization(id)
 	if err != nil {
 		return nil, err
+	}
+	if !bytes.Equal(auth.Payer[:], caller[:]) && !bytes.Equal(auth.Merchant[:], caller[:]) {
+		return nil, errAuthorizationUnauthorized
 	}
 	if auth.Status == AuthorizationStatusCaptured {
 		return nil, errAuthorizationConsumed

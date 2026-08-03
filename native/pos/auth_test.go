@@ -88,7 +88,7 @@ func TestLifecyclePartialCapture(t *testing.T) {
 	}
 
 	engine.SetNowFunc(func() time.Time { return base.Add(10 * time.Minute) })
-	updated, err := engine.Capture(auth.ID, big.NewInt(250))
+	updated, err := engine.Capture(auth.ID, big.NewInt(250), merchant)
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -130,10 +130,10 @@ func TestLifecycleDoubleCaptureRejected(t *testing.T) {
 		t.Fatalf("authorize: %v", err)
 	}
 	engine.SetNowFunc(func() time.Time { return now.Add(5 * time.Minute) })
-	if _, err := engine.Capture(auth.ID, big.NewInt(300)); err != nil {
+	if _, err := engine.Capture(auth.ID, big.NewInt(300), merchant); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	if _, err := engine.Capture(auth.ID, big.NewInt(10)); !errors.Is(err, errAuthorizationConsumed) {
+	if _, err := engine.Capture(auth.ID, big.NewInt(10), merchant); !errors.Is(err, errAuthorizationConsumed) {
 		t.Fatalf("double capture error: got %v want %v", err, errAuthorizationConsumed)
 	}
 }
@@ -154,7 +154,7 @@ func TestLifecycleAutoVoidOnExpiry(t *testing.T) {
 		t.Fatalf("authorize: %v", err)
 	}
 	engine.SetNowFunc(func() time.Time { return base.Add(20 * time.Minute) })
-	updated, err := engine.Capture(auth.ID, big.NewInt(200))
+	updated, err := engine.Capture(auth.ID, big.NewInt(200), merchant)
 	if !errors.Is(err, errAuthorizationExpired) {
 		t.Fatalf("capture after expiry error: got %v want %v", err, errAuthorizationExpired)
 	}

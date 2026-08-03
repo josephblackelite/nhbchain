@@ -120,7 +120,7 @@ func TestPOSSweepVoids(t *testing.T) {
 	}
 
 	lifecycle.SetNowFunc(func() time.Time { return sweepTime })
-	snapshot, err := lifecycle.Void(auth.ID, "")
+	snapshot, err := lifecycle.Void(auth.ID, "", bytes20(payerAddr))
 	if err != nil {
 		t.Fatalf("load authorization: %v", err)
 	}

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"math/big"
 	"time"
@@ -15,15 +16,26 @@ import (
 	posv1 "nhbchain/proto/pos"
 )
 
-// applyPOSAuthorize handles the authorization of a payment intent.
+// applyPOSAuthorize handles the authorization of a payment intent. The payer
+// field is trust-on-verify, not trust-on-read: it must match the account
+// that actually signed this transaction, exactly as with every other
+// value-moving transaction on this chain, otherwise anyone could lock funds
+// out of an arbitrary victim account by simply naming them as msg.Payer.
 func (sp *StateProcessor) applyPOSAuthorize(tx *types.Transaction) error {
 	var msg posv1.MsgAuthorizePayment
 	if err := proto.Unmarshal(tx.Data, &msg); err != nil {
 		return fmt.Errorf("pos: decode authorize msg: %w", err)
 	}
+	signer, err := tx.From()
+	if err != nil {
+		return fmt.Errorf("pos: recover signer: %w", err)
+	}
 	payerDecoded, err := crypto.DecodeAddress(msg.GetPayer())
 	if err != nil {
 		return fmt.Errorf("pos: invalid payer: %w", err)
+	}
+	if !bytes.Equal(payerDecoded.Bytes(), signer) {
+		return fmt.Errorf("pos: payer must match the transaction signer")
 	}
 	merchantDecoded, err := crypto.DecodeAddress(msg.GetMerchant())
 	if err != nil {
@@ -47,11 +59,22 @@ func (sp *StateProcessor) applyPOSAuthorize(tx *types.Transaction) error {
 	return err
 }
 
+// applyPOSCapture claims funds against a pending authorization. Only the
+// merchant the authorization was created for may capture it -- enforced by
+// passing the transaction's recovered signer, not any payload-supplied
+// field, down to Lifecycle.Capture.
 func (sp *StateProcessor) applyPOSCapture(tx *types.Transaction) error {
 	var msg posv1.MsgCapturePayment
 	if err := proto.Unmarshal(tx.Data, &msg); err != nil {
 		return fmt.Errorf("pos: decode capture msg: %w", err)
 	}
+	signer, err := tx.From()
+	if err != nil {
+		return fmt.Errorf("pos: recover signer: %w", err)
+	}
+	var caller [20]byte
+	copy(caller[:], signer)
+
 	amount, ok := new(big.Int).SetString(msg.GetAmount(), 10)
 	if !ok || amount.Sign() <= 0 {
 		return fmt.Errorf("pos: invalid amount")
@@ -69,15 +92,25 @@ func (sp *StateProcessor) applyPOSCapture(tx *types.Transaction) error {
 		copy(authID[:], parsed)
 	}
 
-	_, err := lifecycle.Capture(authID, amount)
+	_, err = lifecycle.Capture(authID, amount, caller)
 	return err
 }
 
+// applyPOSVoid cancels a pending authorization. Either the payer or the
+// merchant on that authorization may void it; enforced against the
+// transaction's recovered signer, same as applyPOSCapture.
 func (sp *StateProcessor) applyPOSVoid(tx *types.Transaction) error {
 	var msg posv1.MsgVoidPayment
 	if err := proto.Unmarshal(tx.Data, &msg); err != nil {
 		return fmt.Errorf("pos: decode void msg: %w", err)
 	}
+	signer, err := tx.From()
+	if err != nil {
+		return fmt.Errorf("pos: recover signer: %w", err)
+	}
+	var caller [20]byte
+	copy(caller[:], signer)
+
 	manager := nhbstate.NewManager(sp.Trie)
 	lifecycle := pos.NewLifecycle(manager)
 	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
@@ -90,7 +123,7 @@ func (sp *StateProcessor) applyPOSVoid(tx *types.Transaction) error {
 		copy(authID[:], parsed)
 	}
 
-	_, err := lifecycle.Void(authID, msg.GetReason())
+	_, err = lifecycle.Void(authID, msg.GetReason(), caller)
 	return err
 }
 
