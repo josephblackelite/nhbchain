@@ -2885,12 +2885,29 @@ func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byt
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
+// applySwapPayoutReceipt records the outcome of an off-chain stablecoin
+// payout against a swap intent. Authorization is checked against the
+// transaction's recovered signer holding RoleSwapPayoutAttestor -- the same
+// real, cryptographic role applyAttestRedemption already uses for the
+// equivalent operation (see that function's doc comment) -- not against
+// MsgPayoutReceipt.Authority, a payload field with no binding to who
+// actually signed the transaction. Previously that field alone gated this
+// call, and it defaulted to accepting the literal string "treasury" with
+// zero configuration, so any account that could produce any validly signed
+// transaction could record arbitrary payout receipts (docs/issue30.md item
+// 27). The Authority field is preserved on the message for logging/audit
+// purposes only now, never as an authorization check.
 func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("swap: transaction required")
 	}
-	if _, err := tx.From(); err != nil {
+	sender, err := tx.From()
+	if err != nil {
 		return fmt.Errorf("swap: recover signer: %w", err)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleSwapPayoutAttestor, sender) {
+		return fmt.Errorf("swap: unauthorized payout attestor")
 	}
 	if len(tx.Data) == 0 {
 		return fmt.Errorf("swap: payout receipt payload required")
@@ -2906,13 +2923,6 @@ func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 	if err := packed.UnmarshalTo(&msg); err != nil {
 		return fmt.Errorf("swap: decode payout receipt: %w", err)
 	}
-	authority := strings.TrimSpace(msg.GetAuthority())
-	if authority == "" {
-		return fmt.Errorf("swap: authority required")
-	}
-	if !sp.isSwapPayoutAuthority(authority) {
-		return fmt.Errorf("swap: unauthorized payout authority %q", authority)
-	}
 	protoReceipt := msg.GetReceipt()
 	if protoReceipt == nil {
 		return fmt.Errorf("swap: receipt required")
@@ -2921,7 +2931,6 @@ func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 	if err != nil {
 		return err
 	}
-	manager := nhbstate.NewManager(sp.Trie)
 	store := swap.NewStableStore(manager)
 	if err := store.RecordPayoutReceipt(receipt); err != nil {
 		return fmt.Errorf("swap: record payout receipt: %w", err)

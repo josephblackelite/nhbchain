@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/ecdsa"
 	"math/big"
 	"strings"
 	"testing"
@@ -9,13 +10,13 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	swapv1 "nhbchain/proto/swap/v1"
 )
 
 func TestApplySwapPayoutReceiptRequiresRecoverableSignature(t *testing.T) {
 	sp, _ := newTestStateProcessor(t)
-	sp.SetSwapPayoutAuthorities([]string{"treasury"})
 
 	receipt := &swapv1.PayoutReceipt{
 		ReceiptId:    "rcpt-1",
@@ -51,12 +52,28 @@ func TestApplySwapPayoutReceiptRequiresRecoverableSignature(t *testing.T) {
 	}
 }
 
-func TestApplySwapPayoutReceiptAcceptsAuthorizedAuthority(t *testing.T) {
-	sp, _ := newTestStateProcessor(t)
-	sp.SetSwapPayoutAuthorities([]string{"treasury"})
+// Authorization now comes from the recovered signer holding
+// RoleSwapPayoutAttestor, not from the payload's self-declared Authority
+// string -- these two tests prove that directly: a signer WITH the role is
+// accepted regardless of what it claims in Authority, and a signer WITHOUT
+// it is rejected even when it claims to be "treasury" (the exact bug this
+// fix closes -- see applySwapPayoutReceipt's doc comment).
 
-	tx := buildSignedSwapPayoutReceiptTx(t, "treasury")
-	err := sp.applySwapPayoutReceipt(tx)
+func TestApplySwapPayoutReceiptAcceptsAuthorizedAttestor(t *testing.T) {
+	sp, _ := newTestStateProcessor(t)
+
+	attestorKey, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate attestor key: %v", err)
+	}
+	attestorAddr := ethcrypto.PubkeyToAddress(attestorKey.PublicKey).Bytes()
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.SetRole(RoleSwapPayoutAttestor, attestorAddr); err != nil {
+		t.Fatalf("grant attestor role: %v", err)
+	}
+
+	tx := buildSignedSwapPayoutReceiptTx(t, "treasury", attestorKey)
+	err = sp.applySwapPayoutReceipt(tx)
 	if err == nil {
 		t.Fatalf("expected missing intent error")
 	}
@@ -65,21 +82,27 @@ func TestApplySwapPayoutReceiptAcceptsAuthorizedAuthority(t *testing.T) {
 	}
 }
 
-func TestApplySwapPayoutReceiptRejectsUnauthorizedAuthority(t *testing.T) {
+func TestApplySwapPayoutReceiptRejectsUnauthorizedAttestor(t *testing.T) {
 	sp, _ := newTestStateProcessor(t)
-	sp.SetSwapPayoutAuthorities([]string{"treasury"})
 
-	tx := buildSignedSwapPayoutReceiptTx(t, "fraudster")
-	err := sp.applySwapPayoutReceipt(tx)
-	if err == nil {
-		t.Fatalf("expected unauthorized authority error")
+	fraudsterKey, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate fraudster key: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unauthorized payout authority") {
+
+	// Claiming to be "treasury" in the payload must not matter -- this
+	// signer holds no role at all.
+	tx := buildSignedSwapPayoutReceiptTx(t, "treasury", fraudsterKey)
+	err = sp.applySwapPayoutReceipt(tx)
+	if err == nil {
+		t.Fatalf("expected unauthorized attestor error")
+	}
+	if !strings.Contains(err.Error(), "unauthorized payout attestor") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func buildSignedSwapPayoutReceiptTx(t *testing.T, authority string) *types.Transaction {
+func buildSignedSwapPayoutReceiptTx(t *testing.T, authority string, key *ecdsa.PrivateKey) *types.Transaction {
 	t.Helper()
 	receipt := &swapv1.PayoutReceipt{
 		ReceiptId:    "rcpt-1",
@@ -106,10 +129,6 @@ func buildSignedSwapPayoutReceiptTx(t *testing.T, authority string) *types.Trans
 		Nonce:    1,
 		GasPrice: big.NewInt(0),
 		Data:     raw,
-	}
-	key, err := ethcrypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
 	}
 	if err := tx.Sign(key); err != nil {
 		t.Fatalf("sign transaction: %v", err)
