@@ -85,7 +85,7 @@ ClientVersion = ""
     AlphaStakeBps = 7000
     MinPayoutWei = "1000000000000000"
     EmissionPerEpoch = "50000000000000000000" # 50 ZNHB reward per epoch (example)
-    TreasuryAddress = "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt"
+    TreasuryAddress = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
     MaxWinnersPerEpoch = 5000
     CarryRemainder = true
     PayoutMode = "auto"
@@ -242,17 +242,17 @@ ClientVersion = ""
   [global.Fees]
     FreeTierTxPerMonth = 100
     MDRBasisPoints = 150
-    OwnerWallet = "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32"
+    OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
 
     [[global.Fees.Assets]]
       Asset = "NHB"
       MDRBasisPoints = 150
-      OwnerWallet = "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32"
+      OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
 
     [[global.Fees.Assets]]
       Asset = "ZNHB"
       MDRBasisPoints = 200
-      OwnerWallet = "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt"
+      OwnerWallet = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
   [global.Loyalty]
     [global.Loyalty.Dynamic]
       TargetBPS = 50

@@ -1,9 +1,10 @@
 {
   "genesisTime": "2026-03-01T00:00:00Z",
   "chainId": 14699254016670310680,
+  "adminWallet": "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h",
   "loyaltyGlobal": {
     "active": true,
-    "treasury": "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt",
+    "treasury": "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak",
     "baseBps": 50,
     "minSpend": "1000000000000000000",
     "capPerTx": "50000000000000000000",
@@ -35,14 +36,14 @@
       "symbol": "NHB",
       "name": "NHBCoin",
       "decimals": 18,
-      "mintAuthority": "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32"
+      "mintAuthority": "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
     },
     {
       "symbol": "ZNHB",
       "name": "ZapNHB",
       "decimals": 18,
       "initialMintPaused": true,
-      "mintAuthority": "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt"
+      "mintAuthority": "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
     }
   ],
   "validators": [
@@ -53,16 +54,16 @@
     }
   ],
   "alloc": {
-    "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32": {
+    "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h": {
       "NHB": "10000000000000000000000"
     },
-    "znhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekpecmtt": {
+    "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak": {
       "ZNHB": "1000000000000000000000000000"
     }
   },
   "roles": {
     "MINTER_NHB": [
-      "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32"
+      "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
     ]
   }
 }
