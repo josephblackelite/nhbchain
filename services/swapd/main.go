@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -114,11 +115,15 @@ func main() {
 		pairs = append(pairs, oracle.Pair{Base: pair.Base, Quote: pair.Quote})
 	}
 
-	mgr, err := oracle.New(store, sources, pairs, cfg.Oracle.Interval.Duration, cfg.Oracle.MaxAge.Duration, cfg.Oracle.MinFeeds)
-	if err != nil {
-		log.Fatalf("swapd: oracle manager: %v", err)
-	}
-
+	// The stable engine is built before the oracle manager, not after, so
+	// its RecordPrice method can be wired in as the oracle's Publisher at
+	// construction time (oracle.New has no way to attach one after the
+	// fact -- WithPublisher is construction-time only). Previously these
+	// were built independently with no link between them at all: the
+	// oracle computed and stored real median prices every tick, but
+	// oracle.New's default no-op publisher meant the stable engine never
+	// received them, so PriceQuote/quote requests had no live price outside
+	// of tests that call RecordPrice directly.
 	stableRuntime := server.StableRuntime{}
 	if !cfg.Stable.Paused {
 		defaultTTL := cfg.Stable.QuoteTTL.Duration
@@ -189,6 +194,15 @@ func main() {
 		}
 	}
 
+	var oracleOpts []oracle.Option
+	if stableRuntime.Enabled && stableRuntime.Engine != nil {
+		oracleOpts = append(oracleOpts, oracle.WithPublisher(&stableEnginePublisher{engine: stableRuntime.Engine}))
+	}
+	mgr, err := oracle.New(store, sources, pairs, cfg.Oracle.Interval.Duration, cfg.Oracle.MaxAge.Duration, cfg.Oracle.MinFeeds, oracleOpts...)
+	if err != nil {
+		log.Fatalf("swapd: oracle manager: %v", err)
+	}
+
 	authConfig := server.AuthConfig{
 		BearerToken: cfg.Admin.BearerToken,
 		AllowMTLS:   cfg.Admin.MTLS.Enabled,
@@ -251,4 +265,30 @@ func main() {
 		log.Printf("swapd: http server error: %v", err)
 		os.Exit(1)
 	}
+}
+
+// stableEnginePublisher adapts the stable engine's RecordPrice into an
+// oracle.Publisher, so every real oracle tick (a median across configured
+// sources, already computed and persisted via storage.RecordSnapshot)
+// reaches the engine's live price cache instead of going nowhere. Without
+// this, PriceQuote/quote requests only ever saw a price if something else
+// (a test, an admin tool) called RecordPrice directly -- the standalone
+// swapd binary itself never fed it one.
+type stableEnginePublisher struct {
+	engine *stable.Engine
+}
+
+func (p *stableEnginePublisher) PublishOracleUpdate(_ context.Context, update oracle.Update) error {
+	if p == nil || p.engine == nil {
+		return nil
+	}
+	rate, err := strconv.ParseFloat(strings.TrimSpace(update.Median), 64)
+	if err != nil {
+		return fmt.Errorf("swapd: parse oracle median %q for %s/%s: %w", update.Median, update.Base, update.Quote, err)
+	}
+	if rate <= 0 {
+		return fmt.Errorf("swapd: non-positive oracle median %q for %s/%s", update.Median, update.Base, update.Quote)
+	}
+	p.engine.RecordPrice(update.Base, update.Quote, rate, update.Time)
+	return nil
 }
