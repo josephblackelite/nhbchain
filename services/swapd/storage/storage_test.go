@@ -330,6 +330,51 @@ func TestLedgerAndReservationPersistence(t *testing.T) {
 	}
 }
 
+func TestRecordAndListAuditEvents(t *testing.T) {
+	store := openTestDB(t)
+	ctx := context.Background()
+
+	events := []AuditEvent{
+		{EventType: "quote", PartnerID: "partner-a", SubjectID: "quote-1", Outcome: "success", Detail: `{"asset":"ZNHB"}`, TraceID: "trace-1"},
+		{EventType: "reserve", PartnerID: "partner-a", SubjectID: "quote-1", Outcome: "quota_exceeded", Detail: `{"amount_out":50}`, TraceID: "trace-2"},
+		{EventType: "quote", PartnerID: "partner-b", SubjectID: "quote-2", Outcome: "error", Detail: `{"error":"boom"}`, TraceID: "trace-3"},
+	}
+	for _, event := range events {
+		if err := store.RecordAuditEvent(ctx, event); err != nil {
+			t.Fatalf("record audit event: %v", err)
+		}
+	}
+
+	all, err := store.ListAuditEvents(ctx, "", 10)
+	if err != nil {
+		t.Fatalf("list all audit events: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 audit events, got %d", len(all))
+	}
+	// Most recent first.
+	if all[0].EventType != "quote" || all[0].PartnerID != "partner-b" || all[0].Outcome != "error" {
+		t.Fatalf("unexpected most recent event: %+v", all[0])
+	}
+
+	filtered, err := store.ListAuditEvents(ctx, "partner-a", 10)
+	if err != nil {
+		t.Fatalf("list filtered audit events: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 audit events for partner-a, got %d", len(filtered))
+	}
+	for _, event := range filtered {
+		if event.PartnerID != "partner-a" {
+			t.Fatalf("unexpected partner in filtered results: %+v", event)
+		}
+	}
+
+	if err := store.RecordAuditEvent(ctx, AuditEvent{PartnerID: "partner-a"}); err == nil {
+		t.Fatalf("expected error for missing event type")
+	}
+}
+
 func openTestDB(t *testing.T) *Storage {
 	t.Helper()
 	dir := t.TempDir()

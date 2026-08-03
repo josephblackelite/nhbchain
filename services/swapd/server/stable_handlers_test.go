@@ -159,6 +159,99 @@ func TestStableHandlersFlow(t *testing.T) {
 	limitsResp := doStableRequest(t, mux, traceCtx, http.MethodGet, "/v1/stable/limits", "", &creds)
 	assertStatus(t, limitsResp.Code, http.StatusOK)
 	assertGoldenJSON(t, "stable_limits.json", limitsResp.Body.Bytes())
+
+	auditEvents, err := store.ListAuditEvents(context.Background(), creds.id, 50)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(auditEvents) != 6 {
+		t.Fatalf("expected 6 audit events, got %d: %+v", len(auditEvents), auditEvents)
+	}
+	var successCount, errorCount int
+	for _, event := range auditEvents {
+		if event.PartnerID != creds.id {
+			t.Fatalf("unexpected partner on audit event: %+v", event)
+		}
+		if event.TraceID == "" {
+			t.Fatalf("expected trace id on audit event: %+v", event)
+		}
+		switch event.Outcome {
+		case "success":
+			successCount++
+		case "error":
+			errorCount++
+		}
+	}
+	if successCount != 4 || errorCount != 2 {
+		t.Fatalf("unexpected audit outcome mix: success=%d error=%d events=%+v", successCount, errorCount, auditEvents)
+	}
+}
+
+func TestAdminAuditEventsEndpoint(t *testing.T) {
+	store := openStableTestStore(t, "admin_audit_events")
+	t.Cleanup(func() { _ = store.Close() })
+
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newTestStableEngine(t, base, store)
+	limits := stable.Limits{DailyCap: 1_000_000}
+	asset := stable.Asset{
+		Symbol:         "ZNHB",
+		BasePair:       "ZNHB",
+		QuotePair:      "USD",
+		QuoteTTL:       time.Minute,
+		MaxSlippageBps: 50,
+		SoftInventory:  1_000_000,
+	}
+	creds := partnerCreds{id: "desk-1", apiKey: "test-key", secret: "test-secret"}
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{
+		Enabled: true,
+		Engine:  engine,
+		Limits:  limits,
+		Assets:  []stable.Asset{asset},
+		Partners: []Partner{{
+			ID:         creds.id,
+			APIKey:     creds.apiKey,
+			Secret:     creds.secret,
+			DailyQuota: mustAmountUnits(t, 10_000),
+		}},
+	}, auth)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	stableMux := http.NewServeMux()
+	srv.registerStableHandlers(stableMux)
+	quoteResp := doStableRequest(t, stableMux, context.Background(), http.MethodPost, "/v1/stable/quote", `{"asset":"ZNHB","amount":10,"account":"merchant-1"}`, &creds)
+	assertStatus(t, quoteResp.Code, http.StatusOK)
+
+	// No admin route without authentication.
+	req := httptest.NewRequest(http.MethodGet, "/admin/audit/events", nil)
+	recorder := httptest.NewRecorder()
+	srv.requireAdmin(http.HandlerFunc(srv.handleAuditEvents)).ServeHTTP(recorder, req)
+	assertStatus(t, recorder.Code, http.StatusUnauthorized)
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/audit/events?partner_id="+creds.id, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	srv.requireAdmin(http.HandlerFunc(srv.handleAuditEvents)).ServeHTTP(recorder, req)
+	assertStatus(t, recorder.Code, http.StatusOK)
+
+	var body struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal audit events response: %v", err)
+	}
+	if len(body.Events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d: %s", len(body.Events), recorder.Body.String())
+	}
+	if body.Events[0]["event_type"] != "quote" || body.Events[0]["partner_id"] != creds.id {
+		t.Fatalf("unexpected audit event: %+v", body.Events[0])
+	}
 }
 
 func TestStableHandlersEnforcePartnerQuota(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.Handle("/healthz", otelhttp.NewHandler(http.HandlerFunc(s.handleHealth), "swapd.health"))
 	mux.Handle("/admin/policy", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handlePolicy)), "swapd.policy"))
 	mux.Handle("/admin/throttle/check", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleThrottleCheck)), "swapd.throttle"))
+	mux.Handle("/admin/audit/events", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleAuditEvents)), "swapd.audit"))
 	s.registerStableHandlers(mux)
 
 	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux, TLSConfig: s.tls.config}
@@ -285,6 +287,45 @@ func (s *Server) putPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setPolicy(policy)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAuditEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.storage == nil {
+		http.Error(w, "storage unavailable", http.StatusInternalServerError)
+		return
+	}
+	query := r.URL.Query()
+	partnerID := strings.TrimSpace(query.Get("partner_id"))
+	limit := 100
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	events, err := s.storage.ListAuditEvents(r.Context(), partnerID, limit)
+	if err != nil {
+		s.logger.Printf("swapd: list audit events: %v", err)
+		http.Error(w, "failed to load audit events", http.StatusInternalServerError)
+		return
+	}
+	response := make([]map[string]any, 0, len(events))
+	for _, event := range events {
+		response = append(response, map[string]any{
+			"id":          event.ID,
+			"event_type":  event.EventType,
+			"partner_id":  event.PartnerID,
+			"subject_id":  event.SubjectID,
+			"outcome":     event.Outcome,
+			"detail":      json.RawMessage(event.Detail),
+			"trace_id":    event.TraceID,
+			"occurred_at": event.OccurredAt.UTC().Format(time.RFC3339),
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]any{"events": response})
 }
 
 func (s *Server) currentPolicy() storage.Policy {

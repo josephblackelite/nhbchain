@@ -285,6 +285,19 @@ CREATE TABLE IF NOT EXISTS stable_reservations (
     intent_created_at INTEGER,
     updated_at TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS swap_audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    partner_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    occurred_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swap_audit_events_partner ON swap_audit_events(partner_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_swap_audit_events_subject ON swap_audit_events(subject_id);
 `
 
 func pairKey(base, quote string) string {
@@ -765,4 +778,96 @@ func (s *Storage) LoadReservations(ctx context.Context) ([]ReservationRecord, er
 		return nil, fmt.Errorf("iterate reservations: %w", err)
 	}
 	return records, nil
+}
+
+// AuditEvent captures a single durable audit record for a stable-swap
+// lifecycle step (quote, reserve, cashout) so the flow can be reconstructed
+// outside log-grepping. Detail is stored as opaque, already-serialised JSON.
+type AuditEvent struct {
+	ID         int64
+	EventType  string
+	PartnerID  string
+	SubjectID  string
+	Outcome    string
+	Detail     string
+	TraceID    string
+	OccurredAt time.Time
+}
+
+// RecordAuditEvent persists a durable audit trail entry. Detail is expected
+// to already be a JSON-encoded string; callers should not pass secrets.
+func (s *Storage) RecordAuditEvent(ctx context.Context, event AuditEvent) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	eventType := strings.TrimSpace(event.EventType)
+	if eventType == "" {
+		return fmt.Errorf("event type required")
+	}
+	outcome := strings.TrimSpace(event.Outcome)
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	occurredAt := event.OccurredAt.UTC()
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+	detail := event.Detail
+	if detail == "" {
+		detail = "{}"
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO swap_audit_events(event_type, partner_id, subject_id, outcome, detail, trace_id, occurred_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+    `, eventType, strings.TrimSpace(event.PartnerID), strings.TrimSpace(event.SubjectID), outcome, detail, strings.TrimSpace(event.TraceID), occurredAt)
+	if err != nil {
+		return fmt.Errorf("record audit event: %w", err)
+	}
+	return nil
+}
+
+// ListAuditEvents returns persisted audit events in reverse-chronological
+// order, optionally filtered by partner ID, capped at limit rows.
+func (s *Storage) ListAuditEvents(ctx context.Context, partnerID string, limit int) ([]AuditEvent, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	partner := strings.TrimSpace(partnerID)
+	var rows *sql.Rows
+	var err error
+	if partner == "" {
+		rows, err = s.db.QueryContext(ctx, `
+            SELECT id, event_type, partner_id, subject_id, outcome, detail, trace_id, occurred_at
+            FROM swap_audit_events
+            ORDER BY id DESC
+            LIMIT ?
+        `, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+            SELECT id, event_type, partner_id, subject_id, outcome, detail, trace_id, occurred_at
+            FROM swap_audit_events
+            WHERE partner_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        `, partner, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query audit events: %w", err)
+	}
+	defer rows.Close()
+	var events []AuditEvent
+	for rows.Next() {
+		var rec AuditEvent
+		if err := rows.Scan(&rec.ID, &rec.EventType, &rec.PartnerID, &rec.SubjectID, &rec.Outcome, &rec.Detail, &rec.TraceID, &rec.OccurredAt); err != nil {
+			return nil, fmt.Errorf("scan audit event: %w", err)
+		}
+		events = append(events, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate audit events: %w", err)
+	}
+	return events, nil
 }

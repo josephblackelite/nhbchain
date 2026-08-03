@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"nhbchain/services/swapd/stable"
+	"nhbchain/services/swapd/storage"
 )
 
 func (s *Server) registerStableHandlers(mux *http.ServeMux) {
@@ -35,7 +36,8 @@ func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureStablePrincipal(w, r) {
 		return
 	}
-	if _, ok := partnerPrincipalFromRequest(r); !ok {
+	partner, ok := partnerPrincipalFromRequest(r)
+	if !ok {
 		s.writeStableError(w, http.StatusForbidden, "partner not authorized")
 		return
 	}
@@ -63,9 +65,20 @@ func (s *Server) handleStableQuote(w http.ResponseWriter, r *http.Request) {
 		if status >= http.StatusInternalServerError && s.logger != nil {
 			s.logger.Printf("swapd: stable quote error: %v", err)
 		}
+		s.recordAudit(r.Context(), "quote", partner.ID, "", "error", map[string]any{
+			"asset":  asset,
+			"amount": payload.Amount,
+			"error":  err.Error(),
+		})
 		s.writeStableError(w, status, message)
 		return
 	}
+	s.recordAudit(r.Context(), "quote", partner.ID, quote.Quote.ID, "success", map[string]any{
+		"asset":      quote.Quote.Asset,
+		"amount":     payload.Amount,
+		"price":      stable.FromRateUnits(quote.Quote.Price),
+		"expires_at": quote.Quote.ExpiresAt.UTC().Format(time.RFC3339),
+	})
 	traceID := traceIDFromContext(r.Context())
 	response := map[string]any{
 		"quote_id":   quote.Quote.ID,
@@ -117,6 +130,11 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 		if status >= http.StatusInternalServerError && s.logger != nil {
 			s.logger.Printf("swapd: stable reserve error: %v", err)
 		}
+		s.recordAudit(r.Context(), "reserve", partner.ID, quoteID, "error", map[string]any{
+			"account":   account,
+			"amount_in": payload.AmountIn,
+			"error":     err.Error(),
+		})
 		s.writeStableError(w, status, message)
 		return
 	}
@@ -129,6 +147,9 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 		if s.logger != nil {
 			s.logger.Printf("swapd: partner quota enforcement error: %v", quotaErr)
 		}
+		s.recordAudit(r.Context(), "reserve", partner.ID, reservation.Reservation.QuoteID, "error", map[string]any{
+			"error": "quota enforcement failed: " + quotaErr.Error(),
+		})
 		s.writeStableError(w, http.StatusInternalServerError, "quota enforcement failed")
 		return
 	}
@@ -136,9 +157,18 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 		if cancelErr := s.stable.engine.CancelReservation(r.Context(), reservation.Reservation.QuoteID); cancelErr != nil && s.logger != nil {
 			s.logger.Printf("swapd: revert reservation after quota exhaustion: %v", cancelErr)
 		}
+		s.recordAudit(r.Context(), "reserve", partner.ID, reservation.Reservation.QuoteID, "quota_exceeded", map[string]any{
+			"amount_out": stable.FromAmountUnits(amountOut),
+		})
 		s.writeStableError(w, http.StatusTooManyRequests, "partner quota exceeded")
 		return
 	}
+	s.recordAudit(r.Context(), "reserve", partner.ID, reservation.Reservation.QuoteID, "success", map[string]any{
+		"account":    account,
+		"amount_in":  stable.FromAmountUnits(reservation.Reservation.AmountIn),
+		"amount_out": stable.FromAmountUnits(reservation.Reservation.AmountOut),
+		"expires_at": reservation.Reservation.ExpiresAt.UTC().Format(time.RFC3339),
+	})
 	traceID := traceIDFromContext(r.Context())
 	response := map[string]any{
 		"reservation_id": reservation.Reservation.QuoteID,
@@ -161,7 +191,8 @@ func (s *Server) handleStableCashOut(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureStablePrincipal(w, r) {
 		return
 	}
-	if _, ok := partnerPrincipalFromRequest(r); !ok {
+	partner, ok := partnerPrincipalFromRequest(r)
+	if !ok {
 		s.writeStableError(w, http.StatusForbidden, "partner not authorized")
 		return
 	}
@@ -187,9 +218,16 @@ func (s *Server) handleStableCashOut(w http.ResponseWriter, r *http.Request) {
 		if status >= http.StatusInternalServerError && s.logger != nil {
 			s.logger.Printf("swapd: stable cashout error: %v", err)
 		}
+		s.recordAudit(r.Context(), "cashout", partner.ID, reservationID, "error", map[string]any{
+			"error": err.Error(),
+		})
 		s.writeStableError(w, status, message)
 		return
 	}
+	s.recordAudit(r.Context(), "cashout", partner.ID, intent.Intent.ID, "success", map[string]any{
+		"reservation_id": intent.Intent.ReservationID,
+		"amount":         intent.Intent.Amount,
+	})
 	traceID := traceIDFromContext(r.Context())
 	response := map[string]any{
 		"intent_id":      intent.Intent.ID,
@@ -331,6 +369,36 @@ func (s *Server) enforcePartnerQuota(ctx context.Context, partner *PartnerPrinci
 		now = time.Now()
 	}
 	return s.storage.ConsumePartnerQuota(ctx, partnerID, now, amount, partner.DailyQuota)
+}
+
+// recordAudit persists a durable audit trail entry for a stable-swap
+// lifecycle step. It is best-effort: a storage failure is logged but never
+// fails the HTTP request, since the audit trail is a reconstruction aid, not
+// part of the transactional path.
+func (s *Server) recordAudit(ctx context.Context, eventType, partnerID, subjectID, outcome string, detail map[string]any) {
+	if s == nil || s.storage == nil {
+		return
+	}
+	partnerID = strings.TrimSpace(partnerID)
+	if partnerID == "" {
+		partnerID = "anonymous"
+	}
+	payload, err := json.Marshal(detail)
+	if err != nil {
+		payload = []byte("{}")
+	}
+	event := storage.AuditEvent{
+		EventType:  eventType,
+		PartnerID:  partnerID,
+		SubjectID:  subjectID,
+		Outcome:    outcome,
+		Detail:     string(payload),
+		TraceID:    traceIDFromContext(ctx),
+		OccurredAt: s.stableNow(),
+	}
+	if err := s.storage.RecordAuditEvent(ctx, event); err != nil && s.logger != nil {
+		s.logger.Printf("swapd: record audit event: %v", err)
+	}
 }
 
 func traceIDFromContext(ctx context.Context) string {
