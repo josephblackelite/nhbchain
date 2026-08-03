@@ -30,6 +30,7 @@ var (
 	authorizationPrefix       = []byte("pos/auth/")
 	authorizationNoncePref    = []byte("pos/auth/nonce/")
 	authorizationPendingIndex = []byte("pos/auth/pending")
+	authorizationIntentRefIdx = []byte("pos/auth/intent/")
 )
 
 // AuthorizationStatus captures the lifecycle state for a payment authorization.
@@ -208,6 +209,15 @@ func (l *Lifecycle) Authorize(payer, merchant [20]byte, amount *big.Int, expiry 
 		_ = l.state.KVDelete(authorizationKey(record.ID))
 		rollback()
 		return nil, err
+	}
+	if len(intentRef) > 0 {
+		// Best-effort convenience index: nothing on-chain depends on this
+		// succeeding (authorizationKey(id) remains the source of truth), but
+		// without it there is no way for a client to ever discover the
+		// authorization ID that resulted from submitting an Authorize
+		// transaction -- they only ever know the IntentRef they generated
+		// client-side, not the server-derived, per-payer-nonce-based ID.
+		_ = l.state.KVPut(intentRefIndexKey(intentRef), record.ID)
 	}
 	l.emitter.Emit(events.PaymentAuthorized{
 		AuthorizationID: authID,
@@ -426,6 +436,47 @@ func (l *Lifecycle) loadAuthorization(id [32]byte) (*Authorization, error) {
 	return record, nil
 }
 
+// IsNotFound reports whether err is (or wraps) the not-found error returned
+// by Get/FindByIntentRef, for callers outside this package (e.g. an RPC
+// handler) that need to distinguish "no such authorization" from a real
+// failure without depending on the unexported sentinel error directly.
+func IsNotFound(err error) bool {
+	return errors.Is(err, errAuthorizationNotFound)
+}
+
+// Get returns a copy of the authorization record for id, for read-only
+// callers (e.g. an RPC query handler) outside this package.
+func (l *Lifecycle) Get(id [32]byte) (*Authorization, error) {
+	auth, err := l.loadAuthorization(id)
+	if err != nil {
+		return nil, err
+	}
+	return auth.Clone(), nil
+}
+
+// FindByIntentRef resolves the authorization created for the given
+// client-supplied intent reference, if any. This is how a caller that only
+// knows the IntentRef it embedded in its Authorize transaction (typically a
+// merchant or gateway, not the payer) discovers the resulting authorization
+// ID, needed for a later Capture or Void.
+func (l *Lifecycle) FindByIntentRef(intentRef []byte) (*Authorization, error) {
+	if l == nil || l.state == nil {
+		return nil, errLifecycleUninitialised
+	}
+	if len(intentRef) == 0 {
+		return nil, errAuthorizationNotFound
+	}
+	var id [32]byte
+	ok, err := l.state.KVGet(intentRefIndexKey(intentRef), &id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errAuthorizationNotFound
+	}
+	return l.Get(id)
+}
+
 func (l *Lifecycle) persistAuthorization(auth *Authorization) error {
 	if l == nil || l.state == nil {
 		return errLifecycleUninitialised
@@ -604,6 +655,10 @@ func authorizationKey(id [32]byte) []byte {
 
 func authorizationNonceKey(payer [20]byte) []byte {
 	return append([]byte(nil), append(authorizationNoncePref, fmt.Sprintf("%x", payer[:])...)...)
+}
+
+func intentRefIndexKey(intentRef []byte) []byte {
+	return append([]byte(nil), append(authorizationIntentRefIdx, fmt.Sprintf("%x", intentRef)...)...)
 }
 
 func isZeroAddress(addr []byte) bool {

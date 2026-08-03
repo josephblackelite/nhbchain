@@ -29,6 +29,7 @@ import (
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	gatewayauth "nhbchain/gateway/auth"
+	"nhbchain/native/pos"
 	"nhbchain/observability"
 	"nhbchain/p2p"
 	posv1 "nhbchain/proto/pos"
@@ -1053,6 +1054,146 @@ type posSweepParams struct {
 	Timestamp *int64 `json:"timestamp,omitempty"`
 }
 
+// POSAuthorizationResult is the JSON shape returned by pos_getAuthorization
+// and pos_getAuthorizationByIntentRef.
+type POSAuthorizationResult struct {
+	ID             string `json:"id"`
+	Payer          string `json:"payer"`
+	Merchant       string `json:"merchant"`
+	Amount         string `json:"amount"`
+	CapturedAmount string `json:"capturedAmount"`
+	RefundedAmount string `json:"refundedAmount"`
+	Expiry         uint64 `json:"expiry"`
+	IntentRef      string `json:"intentRef,omitempty"`
+	Status         string `json:"status"`
+	CreatedAt      uint64 `json:"createdAt"`
+	UpdatedAt      uint64 `json:"updatedAt"`
+	VoidReason     string `json:"voidReason,omitempty"`
+}
+
+func decodeHexParam(value string) ([]byte, error) {
+	trimmed := strings.TrimSpace(value)
+	trimmed = strings.TrimPrefix(trimmed, "0x")
+	trimmed = strings.TrimPrefix(trimmed, "0X")
+	return hex.DecodeString(trimmed)
+}
+
+func posAuthorizationStatusLabel(status pos.AuthorizationStatus) string {
+	switch status {
+	case pos.AuthorizationStatusPending:
+		return "pending"
+	case pos.AuthorizationStatusCaptured:
+		return "captured"
+	case pos.AuthorizationStatusVoided:
+		return "voided"
+	case pos.AuthorizationStatusExpired:
+		return "expired"
+	default:
+		return "unknown"
+	}
+}
+
+func buildPOSAuthorizationResult(auth *pos.Authorization) *POSAuthorizationResult {
+	if auth == nil {
+		return nil
+	}
+	amount := "0"
+	if auth.Amount != nil {
+		amount = auth.Amount.String()
+	}
+	captured := "0"
+	if auth.CapturedAmount != nil {
+		captured = auth.CapturedAmount.String()
+	}
+	refunded := "0"
+	if auth.RefundedAmount != nil {
+		refunded = auth.RefundedAmount.String()
+	}
+	result := &POSAuthorizationResult{
+		ID:             ensureHexPrefix(hex.EncodeToString(auth.ID[:])),
+		Payer:          crypto.MustNewAddress(crypto.NHBPrefix, auth.Payer[:]).String(),
+		Merchant:       crypto.MustNewAddress(crypto.NHBPrefix, auth.Merchant[:]).String(),
+		Amount:         amount,
+		CapturedAmount: captured,
+		RefundedAmount: refunded,
+		Expiry:         auth.Expiry,
+		Status:         posAuthorizationStatusLabel(auth.Status),
+		CreatedAt:      auth.CreatedAt,
+		UpdatedAt:      auth.UpdatedAt,
+		VoidReason:     auth.VoidReason,
+	}
+	if len(auth.IntentRef) > 0 {
+		result.IntentRef = ensureHexPrefix(hex.EncodeToString(auth.IntentRef))
+	}
+	return result
+}
+
+func (s *Server) handlePOSGetAuthorization(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if s.node == nil {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter expected", nil)
+		return
+	}
+	var idHex string
+	if err := json.Unmarshal(req.Params[0], &idHex); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "authorization id must be a hex string", err.Error())
+		return
+	}
+	decoded, err := decodeHexParam(idHex)
+	if err != nil || len(decoded) != 32 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "authorization id must be a 32-byte hex string", nil)
+		return
+	}
+	var id [32]byte
+	copy(id[:], decoded)
+	auth, err := s.node.GetPOSAuthorization(id)
+	if err != nil {
+		if pos.IsNotFound(err) {
+			writeResultAllowNil(w, req.ID, nil)
+			return
+		}
+		slog.Error("rpc: get POS authorization failed", slog.String("id", idHex), slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load authorization", nil)
+		return
+	}
+	writeResult(w, req.ID, buildPOSAuthorizationResult(auth))
+}
+
+func (s *Server) handlePOSGetAuthorizationByIntentRef(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if s.node == nil {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter expected", nil)
+		return
+	}
+	var refHex string
+	if err := json.Unmarshal(req.Params[0], &refHex); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "intentRef must be a hex string", err.Error())
+		return
+	}
+	decoded, err := decodeHexParam(refHex)
+	if err != nil || len(decoded) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "intentRef must be a non-empty hex string", nil)
+		return
+	}
+	auth, err := s.node.GetPOSAuthorizationByIntentRef(decoded)
+	if err != nil {
+		if pos.IsNotFound(err) {
+			writeResultAllowNil(w, req.ID, nil)
+			return
+		}
+		slog.Error("rpc: get POS authorization by intent ref failed", slog.String("intentRef", refHex), slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load authorization", nil)
+		return
+	}
+	writeResult(w, req.ID, buildPOSAuthorizationResult(auth))
+}
+
 type EpochSummaryResult struct {
 	Epoch                  uint64   `json:"epoch"`
 	Height                 uint64   `json:"height"`
@@ -1318,6 +1459,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handlePOSSweepVoids(recorder, r, req)
+	case "pos_getAuthorization":
+		s.handlePOSGetAuthorization(recorder, r, req)
+	case "pos_getAuthorizationByIntentRef":
+		s.handlePOSGetAuthorizationByIntentRef(recorder, r, req)
 	case "lending_getMarket":
 		s.handleLendingGetMarket(recorder, r, req)
 	case "lend_getPools":

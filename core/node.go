@@ -47,6 +47,7 @@ import (
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
 	nativeparams "nhbchain/native/params"
+	"nhbchain/native/pos"
 	"nhbchain/native/potso"
 	"nhbchain/native/reputation"
 	swap "nhbchain/native/swap"
@@ -3603,6 +3604,33 @@ func (n *Node) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
 		return 0, fmt.Errorf("state unavailable")
 	}
 	return n.state.SweepExpiredPOSAuthorizations(now)
+}
+
+// GetPOSAuthorization returns the authorization record for the given ID.
+func (n *Node) GetPOSAuthorization(id [32]byte) (*pos.Authorization, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	return n.state.GetPOSAuthorization(id)
+}
+
+// GetPOSAuthorizationByIntentRef resolves the authorization created for the
+// given client-supplied intent reference, if any.
+func (n *Node) GetPOSAuthorizationByIntentRef(intentRef []byte) (*pos.Authorization, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	return n.state.GetPOSAuthorizationByIntentRef(intentRef)
 }
 
 func (n *Node) EpochConfig() epoch.Config {

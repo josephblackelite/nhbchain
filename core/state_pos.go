@@ -127,6 +127,37 @@ func (sp *StateProcessor) applyPOSVoid(tx *types.Transaction) error {
 	return err
 }
 
+// GetPOSAuthorization returns the authorization record for the given ID, if
+// one exists. Read-only: safe to call outside of transaction application.
+func (sp *StateProcessor) GetPOSAuthorization(id [32]byte) (*pos.Authorization, error) {
+	if sp == nil {
+		return nil, fmt.Errorf("state processor unavailable")
+	}
+	if sp.Trie == nil {
+		return nil, fmt.Errorf("state trie unavailable")
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	lifecycle := pos.NewLifecycle(manager)
+	return lifecycle.Get(id)
+}
+
+// GetPOSAuthorizationByIntentRef resolves the authorization created for the
+// given client-supplied intent reference, if any. This is the only way a
+// caller that only knows the IntentRef it embedded in an Authorize
+// transaction (typically a merchant, not the payer) can discover the
+// resulting authorization ID needed for a later Capture or Void.
+func (sp *StateProcessor) GetPOSAuthorizationByIntentRef(intentRef []byte) (*pos.Authorization, error) {
+	if sp == nil {
+		return nil, fmt.Errorf("state processor unavailable")
+	}
+	if sp.Trie == nil {
+		return nil, fmt.Errorf("state trie unavailable")
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	lifecycle := pos.NewLifecycle(manager)
+	return lifecycle.FindByIntentRef(intentRef)
+}
+
 func (sp *StateProcessor) applyPOSRegistry(tx *types.Transaction) error {
 	// For registry commands, the Gateway acts as Authority. We extract it from Tx From.
 	authority, err := tx.From()
