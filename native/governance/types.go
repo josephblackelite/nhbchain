@@ -161,6 +161,11 @@ const (
 	// ParamKeyStakingUnbondingDays controls the unbonding window in days.
 	ParamKeyStakingUnbondingDays = "staking.unbondingDays"
 	// ParamKeyStakingMinStakeWei controls the minimum delegable stake in Wei.
+	// This is NOT the validator-eligibility gate -- see
+	// ParamKeyMinimumValidatorStake for that. This key currently has no
+	// enforcement path in the staking-delegation transaction handler; it
+	// exists as a configured floor for future use and must not be assumed
+	// to already gate anything.
 	ParamKeyStakingMinStakeWei = "staking.minStakeWei"
 	// ParamKeyStakingMaxEmissionPerYearWei caps the annual reward emission in Wei.
 	ParamKeyStakingMaxEmissionPerYearWei = "staking.maxEmissionPerYearWei"
@@ -200,14 +205,32 @@ const (
 	ParamKeyLoyaltyDynamicPriceMaxDeviationBps = "loyalty.dynamic.priceGuard.maxDeviationBps"
 	// ParamKeyLoyaltyDynamicPriceGuardEnabled toggles oracle guardrails.
 	ParamKeyLoyaltyDynamicPriceGuardEnabled = "loyalty.dynamic.priceGuard.enabled"
-	defaultMinimumValidatorStake            = 1000
 )
 
-// DefaultMinimumValidatorStake exposes the legacy minimum validator stake used
-// prior to parameter governance. It remains available as a migration fallback
-// for networks upgrading from releases that relied on the static constant.
+// defaultMinimumValidatorStakeWei is 10,000 ZNHB expressed in the same
+// 18-decimal Wei scale as every other stake-denominated config value (e.g.
+// config.toml's [global.Staking].MinStakeWei). This is the validator
+// eligibility floor from genesis onward until a passed governance proposal
+// changes staking.minimumValidatorStake explicitly -- it must never default
+// to a near-zero value, since that would let any account become a validator
+// candidate with an effectively trivial stake. Only raise or lower this via
+// governance once real governance participants exist to vote on the change,
+// not by editing this constant.
+const defaultMinimumValidatorStakeWei = "10000000000000000000000"
+
+// DefaultMinimumValidatorStake returns the minimum stake required for
+// validator eligibility whenever staking.minimumValidatorStake has not been
+// explicitly set in the governance param store (i.e. from genesis until the
+// first proposal changes it). See defaultMinimumValidatorStakeWei.
 func DefaultMinimumValidatorStake() *big.Int {
-	return big.NewInt(defaultMinimumValidatorStake)
+	value, ok := new(big.Int).SetString(defaultMinimumValidatorStakeWei, 10)
+	if !ok {
+		// Unreachable for this hardcoded, well-formed literal -- fail loudly
+		// rather than silently returning a zero/nil threshold, which would
+		// defeat the entire point of this default.
+		panic("governance: invalid defaultMinimumValidatorStakeWei constant")
+	}
+	return value
 }
 
 // AuditEvent identifies the lifecycle milestone captured by a governance audit

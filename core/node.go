@@ -1385,7 +1385,20 @@ func (n *Node) SyncStakingParams() error {
 	return nil
 }
 
-func (n *Node) SyncValidatorThresholds() error {
+// ValidateStakingConfig checks that config.toml's [global.Staking].MinStakeWei
+// parses as a valid base-10 integer, if the runtime governance param store
+// has not already had staking.minimumValidatorStake explicitly set.
+//
+// IMPORTANT: despite the historical name this replaced (SyncValidatorThresholds),
+// this function only validates format -- it never writes MinStakeWei (or
+// anything else) into the governance param store. It cannot: a per-node
+// config.toml value is not guaranteed identical across validators, so using
+// it to seed a consensus-relevant threshold at runtime would risk different
+// nodes disagreeing on the actual eligibility floor and diverging on state
+// root. The real default (used whenever the param store is empty) is
+// governance.DefaultMinimumValidatorStake(); the real way to change it after
+// genesis is a passed governance proposal, not a local config edit.
+func (n *Node) ValidateStakingConfig() error {
 	if n == nil {
 		return fmt.Errorf("node unavailable")
 	}

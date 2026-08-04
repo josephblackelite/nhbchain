@@ -1,17 +1,30 @@
 ListenAddress = "127.0.0.1:6001"
 RPCAddress = "127.0.0.1:8545"
-RPCTrustProxyHeaders = false
+# The node sits behind nginx (nhbcoin.nginx.conf), which already forwards
+# real per-client IPs via X-Real-IP/X-Forwarded-For. Trusting only that one
+# local proxy hop lets the rate limiter attribute requests to real client
+# IPs instead of bucketing all traffic behind one shared proxy address --
+# without this, per-IP limits below are meaningless no matter how tight.
+RPCTrustProxyHeaders = true
+RPCTrustedProxies = ["127.0.0.1"]
 RPCReadHeaderTimeout = 0
 RPCReadTimeout = 0
 RPCWriteTimeout = 0
 RPCIdleTimeout = 0
-RPCMaxTxPerWindow = 10000
-RPCMaxTxPerIP = 10000
-RPCMaxTxPerIdentity = 10000
-RPCMaxTxPerChain = 10000
-RPCMaxTxPerIdentityChain = 10000
+# Real per-IP attribution now works (see RPCTrustProxyHeaders above), so
+# these are tight per-bucket limits rather than the previous 10000/60s
+# (~166 req/s, not meaningfully different from unlimited for a public
+# financial RPC endpoint). Tune based on observed legitimate traffic.
+RPCMaxTxPerWindow = 120
+RPCMaxTxPerIP = 120
+RPCMaxTxPerIdentity = 120
+RPCMaxTxPerChain = 120
+RPCMaxTxPerIdentityChain = 120
 RPCRateLimitWindow = 60
 RPCCallerMetadataMaxTTL = 600
+# Safe as-is: rpc/http.go refuses to bind plaintext on a non-loopback
+# address, and RPCAddress above stays 127.0.0.1 -- real TLS termination
+# happens at nginx, which proxies HTTPS down to this loopback-only listener.
 RPCAllowInsecure = true
 RPCAllowInsecureUnspecified = false
 RPCTLSCertFile = ""
@@ -37,8 +50,8 @@ MaxMsgsPerSecond = 0.0
 ClientVersion = ""
 
 [RPCProxyHeaders]
-  XForwardedFor = "ignore"
-  XRealIP = "ignore"
+  XForwardedFor = "single"
+  XRealIP = "single"
 
 [RPCJWT]
   Enable = true

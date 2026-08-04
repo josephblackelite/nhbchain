@@ -8,7 +8,6 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
-	"nhbchain/native/governance"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
@@ -35,11 +34,29 @@ func newEpochStateProcessor(t *testing.T) *StateProcessor {
 	if err := sp.SetEpochConfig(cfg); err != nil {
 		t.Fatalf("set epoch config: %v", err)
 	}
+	// Tests in this file seed validators with small raw stake numbers
+	// (thousands, not the real 18-decimal ZNHB wei scale) to keep test
+	// arithmetic simple -- they are testing epoch selection/rotation logic
+	// in isolation, not real-world stake magnitudes. Explicitly set a small
+	// governed minimum here so these tests stay correct and independent of
+	// governance.DefaultMinimumValidatorStake()'s real production value
+	// (10,000 ZNHB in Wei), which these small raw stakes would never clear.
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.SetMinimumValidatorStake(big.NewInt(1000)); err != nil {
+		t.Fatalf("set test minimum stake: %v", err)
+	}
 	return sp
 }
 
 func seedValidator(t *testing.T, sp *StateProcessor, stake int64, engagement uint64) []byte {
-	return seedValidatorWithHeartbeat(t, sp, stake, engagement, 0)
+	// validatorReadyForActivation unconditionally rejects a zero heartbeat
+	// (see epochs.go), so a heartbeat of 0 here would make every validator
+	// ineligible for epoch weight computation regardless of stake. Callers
+	// that specifically need to exercise "no heartbeat yet" behavior should
+	// use seedValidatorWithHeartbeat(..., 0) directly and go through a
+	// liveness-fallback path that doesn't require a fresh heartbeat, not
+	// this general-purpose helper.
+	return seedValidatorWithHeartbeat(t, sp, stake, engagement, uint64(testEpochTimestamp))
 }
 
 func seedValidatorWithHeartbeat(t *testing.T, sp *StateProcessor, stake int64, engagement uint64, heartbeat uint64) []byte {
@@ -195,7 +212,16 @@ func TestEpochRotationRespectsMinimumStake(t *testing.T) {
 	if _, ok := sp.ValidatorSet[string(eligible2)]; !ok {
 		t.Fatalf("validator 2 not in active set")
 	}
-	threshold := governance.DefaultMinimumValidatorStake()
+	// This test's helper explicitly sets a small governed minimum (see
+	// newEpochStateProcessor) rather than relying on
+	// governance.DefaultMinimumValidatorStake()'s real production value
+	// (10,000 ZNHB in Wei) -- read back the actual governed threshold that
+	// was enforced, not the unrelated production default constant.
+	manager := nhbstate.NewManager(sp.Trie)
+	threshold, err := manager.MinimumValidatorStake()
+	if err != nil {
+		t.Fatalf("read minimum stake: %v", err)
+	}
 	for addr := range sp.ValidatorSet {
 		stake := sp.ValidatorSet[addr]
 		if stake.Cmp(threshold) < 0 {

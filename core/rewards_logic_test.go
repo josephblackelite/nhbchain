@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"nhbchain/core/rewards"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/storage"
@@ -51,6 +52,14 @@ func newRewardTestState(t *testing.T) *StateProcessor {
 
 func seedEligibleValidator(t *testing.T, sp *StateProcessor, stake int64, engagement uint64) []byte {
 	t.Helper()
+	// Tests using this helper seed small raw stake numbers, not the real
+	// 18-decimal ZNHB wei scale -- explicitly set a small governed minimum
+	// so eligibility here stays independent of
+	// governance.DefaultMinimumValidatorStake()'s real production value
+	// (10,000 ZNHB in Wei), which these raw stakes would never clear.
+	if err := nhbstate.NewManager(sp.Trie).SetMinimumValidatorStake(big.NewInt(1000)); err != nil {
+		t.Fatalf("set test minimum stake: %v", err)
+	}
 	key, err := crypto.GeneratePrivateKey()
 	if err != nil {
 		t.Fatalf("generate key: %v", err)

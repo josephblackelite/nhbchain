@@ -462,7 +462,7 @@ func TestSyncStakingParamsUsesDeterministicReferenceTime(t *testing.T) {
 	}
 }
 
-func TestSyncValidatorThresholdsDoesNotMutateCanonicalState(t *testing.T) {
+func TestValidateStakingConfigDoesNotMutateCanonicalState(t *testing.T) {
 	t.Setenv("NHB_ENV", "dev")
 	validatorKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -486,8 +486,8 @@ func TestSyncValidatorThresholdsDoesNotMutateCanonicalState(t *testing.T) {
 	rootBefore := node.state.CurrentRoot()
 	node.stateMu.RUnlock()
 
-	if err := node.SyncValidatorThresholds(); err != nil {
-		t.Fatalf("sync validator thresholds: %v", err)
+	if err := node.ValidateStakingConfig(); err != nil {
+		t.Fatalf("validate staking config: %v", err)
 	}
 
 	node.stateMu.RLock()

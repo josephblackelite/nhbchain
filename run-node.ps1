@@ -24,10 +24,25 @@ if (!(Test-Path -Path ".\nhb-node.exe")) {
 
 # 2. Set the environment variables required for the local network
 $env:NHB_ENV = "local"
-$env:NHB_VALIDATOR_PASS = "devpassphrase"
-$env:NHB_RPC_JWT_SECRET = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 $env:NHB_ALLOW_AUTOGENESIS = "true"
 $env:NHB_MASTER_TREASURY = "nhb138a8dk8nwq4hurvqwdde3mmxj6sf5pwz78h0q4"
+
+# Generate secrets at runtime rather than hardcoding static values -- a
+# static, previously-published value can become load-bearing if this script
+# pattern is ever reused elsewhere or the local port is exposed. Matches the
+# generate-if-unset pattern already used by nhb-go.sh. Set NHB_VALIDATOR_PASS
+# / NHB_RPC_JWT_SECRET yourself beforehand to override.
+if (-not $env:NHB_VALIDATOR_PASS) {
+    $passBytes = New-Object byte[] 18
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($passBytes)
+    $env:NHB_VALIDATOR_PASS = [Convert]::ToBase64String($passBytes)
+}
+if (-not $env:NHB_RPC_JWT_SECRET) {
+    $secretBytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($secretBytes)
+    $env:NHB_RPC_JWT_SECRET = -join ($secretBytes | ForEach-Object { $_.ToString("x2") })
+    Write-Host "[i] Generated a new local RPC JWT secret (not persisted -- set NHB_RPC_JWT_SECRET yourself to reuse one across restarts)." -ForegroundColor DarkGray
+}
 
 # 3. Clean up any previous state to prevent genesis mismatches across restarts
 Write-Host "Clearing old chain data..." -ForegroundColor DarkGray

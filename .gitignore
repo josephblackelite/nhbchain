@@ -89,4 +89,9 @@ build_err.txt
 nowpayments.txt
 adminwallet.txt
 NHBChain Observed Issues.txt
+
+# Ad hoc production incident-response snapshots -- forensic artifacts that
+# belong on the server they were captured from, never in source control.
+live-*.tar
+live-*.tar.gz
 .gitignore

@@ -147,8 +147,8 @@ func main() {
 	if err := node.SyncStakingParams(); err != nil {
 		panic(fmt.Sprintf("Failed to apply staking params: %v", err))
 	}
-	if err := node.SyncValidatorThresholds(); err != nil {
-		panic(fmt.Sprintf("Failed to normalize validator thresholds: %v", err))
+	if err := node.ValidateStakingConfig(); err != nil {
+		panic(fmt.Sprintf("Failed to validate staking config: %v", err))
 	}
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
