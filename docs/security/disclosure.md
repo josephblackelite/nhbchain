@@ -12,7 +12,7 @@ The following assets are **out of scope**: third-party wallets, forked chains, l
 
 ## Reporting Process
 1. Gather detailed reproduction steps, logs, and proof-of-concept material.
-2. The checked-in [repository PGP key](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt reports. It must be regenerated before this step can be followed; until then, email `security@nehborly.net` to arrange a secure channel.
+2. The checked-in [repository PGP key](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt reports. It must be regenerated before this step can be followed; until then, email `security@nhbcoin.com` to arrange a secure channel.
 3. For time-sensitive issues, call or text the Signal hotline `+13234559568` after sending the report.
 4. Do not share vulnerability details publicly or with third parties until we finalize remediation and agree on a disclosure timeline.
 
@@ -36,7 +36,7 @@ Testing activities conducted under this policy are authorized, provided you:
 If legal action is initiated by a third party against you for activities conducted in compliance with this policy, notify us and we will make this authorization known.
 
 ## Contacts & Encryption
-- **Primary Contact:** `security@nehborly.net`
+- **Primary Contact:** `security@nhbcoin.com`
 - **Emergency Contact:** Signal `+13234559568`
 - **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is currently corrupted and unusable; it must be regenerated. No working fingerprint is published until then.
 

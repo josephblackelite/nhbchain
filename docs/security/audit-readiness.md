@@ -21,7 +21,7 @@ Audits should prioritize the consensus engine, staking and escrow modules, RPC g
 Audit findings are treated under the same embargo rules as vulnerability submissions: 45 days for critical issues and 30 days for others, unless early release is mutually agreed. Public disclosure will include auditor attribution when approved.
 
 ## Contacts & Encryption
-- **Program Lead:** `audit@nehborly.net`
-- **Security Team:** `security@nehborly.net`
+- **Program Lead:** `audit@nhbcoin.com`
+- **Security Team:** `security@nhbcoin.com`
 - **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt anything. It must be regenerated before relying on it; no working fingerprint is published until then.
 

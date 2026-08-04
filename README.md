@@ -358,7 +358,7 @@ Archive the `logs/` directory with release artifacts so compliance reviewers can
 ### Reporting Vulnerabilities
 
 1. Encrypt your findings with the [repository PGP key](docs/security/repository-pgp-key.asc) (fingerprint `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`).
-2. Email the encrypted report to `security@nehborly.net` or use the [security issue template](.github/ISSUE_TEMPLATE/security.yml) to create a private triage ticket.
+2. Email the encrypted report to `security@nhbcoin.com` or use the [security issue template](.github/ISSUE_TEMPLATE/security.yml) to create a private triage ticket.
 3. For time-sensitive issues, escalate via Signal at `+13234559568` after sending your report.
 
 Full policy details, SLAs, and embargo expectations live in [`docs/security/disclosure.md`](docs/security/disclosure.md). A machine-readable summary is published at [`.well-known/security.txt`](.well-known/security.txt) for automated scanners.

@@ -28,7 +28,7 @@ SLA targets may be adjusted when coordinated disclosure with upstream dependenci
 Researchers are expected to keep vulnerability details confidential until a coordinated disclosure date is agreed upon. We request a minimum 45-day embargo for critical issues and 30 days for other severities, unless a fix is released earlier. Premature disclosure may impact reward eligibility.
 
 ## Reporting & Contacts
-Send encrypted reports to **security@nehborly.net** with the subject line “Bug Bounty Submission.” Include detailed reproduction steps, affected components, and suggested remediation if available. Urgent matters can also be escalated via our Signal hotline `+13234559568` (voice/text only).
+Send encrypted reports to **security@nhbcoin.com** with the subject line “Bug Bounty Submission.” Include detailed reproduction steps, affected components, and suggested remediation if available. Urgent matters can also be escalated via our Signal hotline `+13234559568` (voice/text only).
 
 ## PGP Key
 * **Key:** [`docs/security/repository-pgp-key.asc`](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt reports. It must be regenerated before it can be relied on.

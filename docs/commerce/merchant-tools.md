@@ -15,5 +15,5 @@ invoice-to-mint reporting. See [payments-reconciliation.md](../api/payments-reco
 
 * **Documentation:** `/docs/escrow/escrow.md` (state machine), `/docs/escrow/gateway-api.md` (REST operations).
 * **SDKs:** TypeScript & Go SDKs include helpers for signing requests and consuming paginated endpoints.
-* **Contact:** Reach the merchant integrations team at `merchants@nehborly.net` for production onboarding or
+* **Contact:** Reach the merchant integrations team at `merchants@nhbcoin.com` for production onboarding or
   escalation support.

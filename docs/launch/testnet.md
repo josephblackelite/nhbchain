@@ -116,4 +116,4 @@ Rate limiting is enforced per IP. If you require dedicated throughput, request a
 * **Explorer not showing data** – Clear cached assets and check <https://status.testnet.nhbcoin.net> for indexer updates.
 * **Governance tx fails** – Confirm minimum deposit and that your account has the governance module permissions enabled.
 
-Report critical incidents to `security@nehborly.net` using the [disclosure policy](../security/release-process.md#vulnerability-disclosure).
+Report critical incidents to `security@nhbcoin.com` using the [disclosure policy](../security/release-process.md#vulnerability-disclosure).
