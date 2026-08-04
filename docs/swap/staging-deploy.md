@@ -58,13 +58,20 @@ ssh staging-host curl -sk https://127.0.0.1:7074/healthz
 `stable.settlement.default_rail` controls how cash-out intents settle by
 default; any partner can override it via `stable.partners[].settlement_rail`.
 
+- **`nowpayments`** -- automated mass payout via the real NOWPayments
+  account. This is the active rail today (product decision), and what this
+  template ships with. Requires real NOWPayments account credentials
+  (`stable.settlement.nowpayments.email_file` / `password_file` /
+  `api_key_file`) -- note this is a *different* NOWPayments credential type
+  than the simple `api_key` used by the oracle price-feed source under
+  `sources:` above; the payout API requires full account login (email +
+  password) for a JWT, not just an API key.
 - **`manual_treasury`** -- no external credentials needed. An operator wires
   funds by hand and confirms the settlement via the admin API. This is the
-  safe default and what this template ships with.
-- **`nowpayments`** -- automated mass payout. Requires real NOWPayments
-  account credentials (`stable.settlement.nowpayments.email_file` /
-  `password_file` / `api_key_file`). Only enable this for a partner once a
-  real NOWPayments account is provisioned for staging.
+  rail to move to once regulatory requirements for full manual treasury are
+  met -- it's also the automatic fallback if `default_rail` is ever left
+  unset, so a misconfigured deployment never silently attempts an automated
+  payout.
 
 ## What this runbook does NOT get you
 

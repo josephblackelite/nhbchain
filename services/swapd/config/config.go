@@ -104,13 +104,35 @@ type OracleConfig struct {
 	MinFeeds int      `yaml:"min_feeds"`
 }
 
-// Source describes an upstream oracle feed.
+// Source describes an upstream oracle feed. APIKeyFile mirrors the
+// bearer_token_file pattern used elsewhere in this config -- it lets a real
+// deployment inject a secret from a file (e.g. a mounted Kubernetes Secret
+// or a host-local path outside git) instead of ever committing the key
+// inline in a tracked config file.
 type Source struct {
-	Name     string            `yaml:"name"`
-	Type     string            `yaml:"type"`
-	Endpoint string            `yaml:"endpoint"`
-	APIKey   string            `yaml:"api_key"`
-	Assets   map[string]string `yaml:"assets"`
+	Name       string            `yaml:"name"`
+	Type       string            `yaml:"type"`
+	Endpoint   string            `yaml:"endpoint"`
+	APIKey     string            `yaml:"api_key"`
+	APIKeyFile string            `yaml:"api_key_file"`
+	Assets     map[string]string `yaml:"assets"`
+}
+
+// normalise resolves APIKeyFile into APIKey if set.
+func (s *Source) normalise() error {
+	if s == nil {
+		return nil
+	}
+	path := strings.TrimSpace(s.APIKeyFile)
+	if path == "" {
+		return nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read api_key_file for source %s: %w", s.Name, err)
+	}
+	s.APIKey = strings.TrimSpace(string(contents))
+	return nil
 }
 
 // Pair identifies a base/quote pair to publish.
@@ -212,6 +234,11 @@ func Load(path string, opts ...Option) (Config, error) {
 	}
 	if err := cfg.Stable.Settlement.NowPayments.normalise(); err != nil {
 		return cfg, fmt.Errorf("stable settlement: %w", err)
+	}
+	for i := range cfg.Sources {
+		if err := cfg.Sources[i].normalise(); err != nil {
+			return cfg, fmt.Errorf("oracle source: %w", err)
+		}
 	}
 	if err := validate(cfg); err != nil {
 		return cfg, err

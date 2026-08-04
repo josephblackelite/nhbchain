@@ -219,3 +219,35 @@ func TestNowPaymentsSettlementConfigNormaliseFailsOnMissingFile(t *testing.T) {
 		t.Fatalf("expected error for unreadable email_file")
 	}
 }
+
+func TestSourceNormaliseReadsAPIKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "api_key")
+	if err := os.WriteFile(keyPath, []byte("real-key-value\n"), 0o600); err != nil {
+		t.Fatalf("write api key file: %v", err)
+	}
+	src := Source{Name: "now", APIKeyFile: keyPath}
+	if err := src.normalise(); err != nil {
+		t.Fatalf("normalise: %v", err)
+	}
+	if src.APIKey != "real-key-value" {
+		t.Fatalf("expected api key loaded from file, got %q", src.APIKey)
+	}
+}
+
+func TestSourceNormaliseLeavesInlineAPIKeyUntouchedWhenNoFile(t *testing.T) {
+	src := Source{Name: "gecko", APIKey: "inline-key"}
+	if err := src.normalise(); err != nil {
+		t.Fatalf("normalise: %v", err)
+	}
+	if src.APIKey != "inline-key" {
+		t.Fatalf("expected inline api key preserved, got %q", src.APIKey)
+	}
+}
+
+func TestSourceNormaliseFailsOnMissingFile(t *testing.T) {
+	src := Source{Name: "now", APIKeyFile: "/nonexistent/path/key"}
+	if err := src.normalise(); err == nil {
+		t.Fatalf("expected error for unreadable api_key_file")
+	}
+}

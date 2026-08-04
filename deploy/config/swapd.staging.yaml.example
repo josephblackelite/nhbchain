@@ -35,12 +35,13 @@ oracle:
   min_feeds: 2
 
 sources:
-  # placeholder: NOWPayments exchange-rate feed. Populate with a real API key
-  # (or leave api_key empty if the endpoint doesn't require one for reads).
+  # NOWPayments exchange-rate feed. api_key_file points at a file containing
+  # just the raw key (no other content) -- never put the real key inline in
+  # this tracked file. See docs/swap/staging-deploy.md for how to populate it.
   - name: now
     type: nowpayments
     endpoint: https://api.nowpayments.io/v1/exchange/rates
-    api_key: "" # placeholder -- fill in a real NOWPayments API key for staging
+    api_key_file: /etc/nhbchain/secrets/swapd-nowpayments-api-key
   - name: gecko
     type: coingecko
     endpoint: https://api.coingecko.com/api/v3/simple/price
@@ -79,31 +80,32 @@ stable:
   # Settlement: controls how a stable-swap cash-out intent actually pays out
   # once created. There are two rails:
   #
+  #   - nowpayments: automated mass-payout via the real NOWPayments account.
+  #     This is the ACTIVE rail today, per product decision -- NOWPayments
+  #     custody handles settlement now. Requires all three secret files
+  #     under settlement.nowpayments below. NOWPayments' payout API needs
+  #     full account login (email + password, for a JWT), not just the
+  #     simple api_key used by the oracle price-feed source above -- these
+  #     are two different NOWPayments credential types, not the same value
+  #     reused twice.
+  #
   #   - manual_treasury: no external credentials required at all. An operator
   #     confirms each settlement by hand via the admin API after wiring funds
-  #     themselves. This is the safe starting point for staging -- nothing
-  #     here can move real money on its own.
-  #
-  #   - nowpayments: automated mass-payout via a real NOWPayments account.
-  #     Requires the three secret files under settlement.nowpayments below.
-  #     This rail is only actually used once default_rail is changed to
-  #     "nowpayments", or an individual partner's settlement_rail is set to
-  #     "nowpayments" (see the example partner entry further down) -- setting
-  #     default_rail to manual_treasury here means the nowpayments block is
-  #     inert unless a partner explicitly opts in.
+  #     themselves. This is the rail to switch to once regulatory
+  #     requirements are met and full manual treasury is required --
+  #     flip default_rail below (or an individual partner's
+  #     settlement_rail) to "manual_treasury" when that time comes. It is
+  #     also the automatic fallback if default_rail is ever left unset, so
+  #     an unconfigured deployment never silently attempts an automated
+  #     payout.
   # --------------------------------------------------------------------------
   settlement:
-    default_rail: manual_treasury
-
-    # Uncomment and populate once a real NOWPayments account is provisioned
-    # for staging AND at least one partner's settlement_rail is set to
-    # "nowpayments" (or default_rail above is changed). Until then this
-    # block is unused and these files do not need to exist.
-    # nowpayments:
-    #   email_file: /etc/nhbchain/secrets/swapd-nowpayments-email
-    #   password_file: /etc/nhbchain/secrets/swapd-nowpayments-password
-    #   api_key_file: /etc/nhbchain/secrets/swapd-nowpayments-api-key
-    #   base_url: https://api.nowpayments.io/v1
+    default_rail: nowpayments
+    nowpayments:
+      email_file: /etc/nhbchain/secrets/swapd-nowpayments-email
+      password_file: /etc/nhbchain/secrets/swapd-nowpayments-password
+      api_key_file: /etc/nhbchain/secrets/swapd-nowpayments-api-key
+      base_url: https://api.nowpayments.io/v1
 
   # Example partner entry. DO NOT ship real credentials in this file --
   # generate them with the swapd-partner-admin CLI instead, which writes
@@ -120,11 +122,12 @@ stable:
       secret: "REPLACE_ME_WITH_REAL_PARTNER_SECRET"
       quota:
         daily: 5000
-      # Leave unset to inherit stable.settlement.default_rail (manual_treasury
-      # above). Set explicitly to "nowpayments" only once the nowpayments
-      # block above is populated and this partner is approved for automated
-      # payout.
-      settlement_rail: manual_treasury
+      # Leave unset to inherit stable.settlement.default_rail (nowpayments
+      # above). Set explicitly to "manual_treasury" to move this specific
+      # partner onto the manual wire-and-confirm flow ahead of the rest,
+      # e.g. once regulatory sign-off for full manual treasury lands for
+      # this partner before it lands account-wide.
+      settlement_rail: nowpayments
 
 admin:
   # placeholder: generate a real bearer token and write it (token contents
