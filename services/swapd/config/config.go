@@ -14,6 +14,16 @@ type Duration struct {
 	time.Duration
 }
 
+// MarshalYAML renders the duration in the same human readable string form
+// consumed by UnmarshalYAML (e.g. "30s"), so that a Config value can be
+// marshaled back to YAML and parsed again symmetrically. Without this,
+// yaml.Marshal falls back to the default struct representation of the
+// embedded time.Duration field (a nested "duration: 30s" mapping) which
+// UnmarshalYAML then rejects, since it requires a scalar node.
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return d.Duration.String(), nil
+}
+
 // UnmarshalYAML parses human readable duration strings.
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	if value == nil {
@@ -119,12 +129,37 @@ type PolicyConfig struct {
 
 // StableConfig captures configuration for the experimental stable engine.
 type StableConfig struct {
-	Assets        []StableAsset   `yaml:"assets"`
-	QuoteTTL      Duration        `yaml:"quote_ttl"`
-	MaxSlippage   int             `yaml:"max_slippage_bps"`
-	SoftInventory int64           `yaml:"soft_inventory"`
-	Paused        bool            `yaml:"paused"`
-	Partners      []StablePartner `yaml:"partners"`
+	Assets        []StableAsset    `yaml:"assets"`
+	QuoteTTL      Duration         `yaml:"quote_ttl"`
+	MaxSlippage   int              `yaml:"max_slippage_bps"`
+	SoftInventory int64            `yaml:"soft_inventory"`
+	Paused        bool             `yaml:"paused"`
+	Partners      []StablePartner  `yaml:"partners"`
+	Settlement    SettlementConfig `yaml:"settlement"`
+}
+
+// SettlementConfig controls how stable-swap cash-out intents are actually
+// settled once created. DefaultRail applies to any partner without an
+// explicit override (see StablePartner.SettlementRail).
+type SettlementConfig struct {
+	// DefaultRail is "nowpayments" or "manual_treasury". Empty defaults to
+	// manual_treasury -- the safest choice, since it never attempts an
+	// automated payout for a partner nobody explicitly configured.
+	DefaultRail string                      `yaml:"default_rail"`
+	NowPayments NowPaymentsSettlementConfig `yaml:"nowpayments"`
+}
+
+// NowPaymentsSettlementConfig holds credentials for the automated
+// NOWPayments mass-payout rail. Only required when default_rail or any
+// partner's settlement_rail is "nowpayments".
+type NowPaymentsSettlementConfig struct {
+	Email        string `yaml:"email"`
+	EmailFile    string `yaml:"email_file"`
+	Password     string `yaml:"password"`
+	PasswordFile string `yaml:"password_file"`
+	APIKey       string `yaml:"api_key"`
+	APIKeyFile   string `yaml:"api_key_file"`
+	BaseURL      string `yaml:"base_url"`
 }
 
 // StableAsset allows per-asset overrides for the stable engine.
@@ -143,6 +178,9 @@ type StablePartner struct {
 	APIKey string             `yaml:"api_key"`
 	Secret string             `yaml:"secret"`
 	Quota  StablePartnerQuota `yaml:"quota"`
+	// SettlementRail overrides stable.settlement.default_rail for this
+	// partner specifically. Empty means "use the default."
+	SettlementRail string `yaml:"settlement_rail"`
 }
 
 // StablePartnerQuota exposes soft quota configuration per partner.
@@ -172,10 +210,49 @@ func Load(path string, opts ...Option) (Config, error) {
 	if err := cfg.Admin.normalise(options.allowInsecureBearerWithoutTLS); err != nil {
 		return cfg, fmt.Errorf("admin security: %w", err)
 	}
+	if err := cfg.Stable.Settlement.NowPayments.normalise(); err != nil {
+		return cfg, fmt.Errorf("stable settlement: %w", err)
+	}
 	if err := validate(cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func (n *NowPaymentsSettlementConfig) normalise() error {
+	if n == nil {
+		return nil
+	}
+	email := strings.TrimSpace(n.Email)
+	if path := strings.TrimSpace(n.EmailFile); path != "" {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read nowpayments email_file: %w", err)
+		}
+		email = strings.TrimSpace(string(contents))
+	}
+	n.Email = email
+
+	password := strings.TrimSpace(n.Password)
+	if path := strings.TrimSpace(n.PasswordFile); path != "" {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read nowpayments password_file: %w", err)
+		}
+		password = strings.TrimSpace(string(contents))
+	}
+	n.Password = password
+
+	apiKey := strings.TrimSpace(n.APIKey)
+	if path := strings.TrimSpace(n.APIKeyFile); path != "" {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read nowpayments api_key_file: %w", err)
+		}
+		apiKey = strings.TrimSpace(string(contents))
+	}
+	n.APIKey = apiKey
+	return nil
 }
 
 func applyDefaults(cfg *Config) {
@@ -209,6 +286,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.Stable.SoftInventory == 0 {
 		cfg.Stable.SoftInventory = 1_000_000
 	}
+	if strings.TrimSpace(cfg.Stable.Settlement.DefaultRail) == "" {
+		cfg.Stable.Settlement.DefaultRail = "manual_treasury"
+	}
+	if strings.TrimSpace(cfg.Stable.Settlement.NowPayments.BaseURL) == "" {
+		cfg.Stable.Settlement.NowPayments.BaseURL = "https://api.nowpayments.io/v1"
+	}
 }
 
 func validate(cfg Config) error {
@@ -227,6 +310,10 @@ func validate(cfg Config) error {
 	if len(cfg.Stable.Partners) == 0 {
 		return fmt.Errorf("stable partners must be configured when stable engine is enabled")
 	}
+	if !validSettlementRail(cfg.Stable.Settlement.DefaultRail) {
+		return fmt.Errorf("stable settlement default_rail must be %q or %q", "nowpayments", "manual_treasury")
+	}
+	usesNowPayments := cfg.Stable.Settlement.DefaultRail == "nowpayments"
 	seenIDs := make(map[string]struct{}, len(cfg.Stable.Partners))
 	seenKeys := make(map[string]struct{}, len(cfg.Stable.Partners))
 	for _, partner := range cfg.Stable.Partners {
@@ -250,11 +337,38 @@ func validate(cfg Config) error {
 		if secret == "" {
 			return fmt.Errorf("stable partner secret required")
 		}
+		if rail := strings.TrimSpace(partner.SettlementRail); rail != "" {
+			if !validSettlementRail(rail) {
+				return fmt.Errorf("stable partner %s settlement_rail must be %q or %q", id, "nowpayments", "manual_treasury")
+			}
+			if rail == "nowpayments" {
+				usesNowPayments = true
+			}
+		}
+	}
+	if usesNowPayments {
+		now := cfg.Stable.Settlement.NowPayments
+		if now.Email == "" || now.Password == "" || now.APIKey == "" {
+			return fmt.Errorf("stable settlement nowpayments email, password, and api_key are required when the nowpayments rail is used")
+		}
 	}
 	if cfg.Admin.TLS.Disable {
 		return fmt.Errorf("stable runtime requires admin TLS to be enabled")
 	}
 	return nil
+}
+
+// validSettlementRail accepts empty (unset -- resolves to manual_treasury at
+// runtime, mirroring settlement.Config.RailFor) alongside the two explicit
+// rail names, so validate() behaves the same whether or not applyDefaults
+// already ran.
+func validSettlementRail(rail string) bool {
+	switch strings.TrimSpace(rail) {
+	case "", "nowpayments", "manual_treasury":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *AdminConfig) normalise(allowInsecureBearerWithoutTLS bool) error {

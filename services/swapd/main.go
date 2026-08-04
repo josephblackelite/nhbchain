@@ -21,6 +21,7 @@ import (
 	"nhbchain/services/swapd/config"
 	"nhbchain/services/swapd/oracle"
 	"nhbchain/services/swapd/server"
+	"nhbchain/services/swapd/settlement"
 	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
 )
@@ -185,12 +186,19 @@ func main() {
 			}
 			partners = append(partners, server.Partner{ID: id, APIKey: apiKey, Secret: secret, DailyQuota: dailyQuota})
 		}
+
+		settlementMgr, err := buildSettlementManager(cfg.Stable, store)
+		if err != nil {
+			log.Fatalf("swapd: settlement: %v", err)
+		}
+
 		stableRuntime = server.StableRuntime{
-			Enabled:  true,
-			Engine:   engine,
-			Limits:   limits,
-			Assets:   assets,
-			Partners: partners,
+			Enabled:    true,
+			Engine:     engine,
+			Limits:     limits,
+			Assets:     assets,
+			Partners:   partners,
+			Settlement: settlementMgr,
 		}
 	}
 
@@ -291,4 +299,48 @@ func (p *stableEnginePublisher) PublishOracleUpdate(_ context.Context, update or
 	}
 	p.engine.RecordPrice(update.Base, update.Quote, rate, update.Time)
 	return nil
+}
+
+// buildSettlementManager wires up the dual-rail settlement manager from
+// config: a NOWPayments payout client is only constructed if the
+// nowpayments rail is actually used (by the default or any partner
+// override) -- a deployment that only ever uses manual_treasury never needs
+// NOWPayments credentials at all.
+func buildSettlementManager(cfg config.StableConfig, store *storage.Storage) (*settlement.Manager, error) {
+	settlementCfg := settlement.Config{
+		DefaultRail:  settlement.Rail(strings.TrimSpace(cfg.Settlement.DefaultRail)),
+		PartnerRails: make(map[string]settlement.Rail, len(cfg.Partners)),
+	}
+	usesNowPayments := settlementCfg.DefaultRail == settlement.RailNowPayments
+	for _, partner := range cfg.Partners {
+		id := strings.TrimSpace(partner.ID)
+		rail := strings.TrimSpace(partner.SettlementRail)
+		if rail == "" {
+			continue
+		}
+		settlementCfg.PartnerRails[id] = settlement.Rail(rail)
+		if settlement.Rail(rail) == settlement.RailNowPayments {
+			usesNowPayments = true
+		}
+	}
+
+	var payoutClient settlement.PayoutClient
+	if usesNowPayments {
+		client, err := settlement.NewHTTPPayoutClient(settlement.NowPaymentsConfig{
+			Email:    cfg.Settlement.NowPayments.Email,
+			Password: cfg.Settlement.NowPayments.Password,
+			APIKey:   cfg.Settlement.NowPayments.APIKey,
+			BaseURL:  cfg.Settlement.NowPayments.BaseURL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("configure nowpayments payout client: %w", err)
+		}
+		payoutClient = client
+	}
+
+	mgr, err := settlement.NewManager(store, settlementCfg, payoutClient)
+	if err != nil {
+		return nil, fmt.Errorf("configure settlement manager: %w", err)
+	}
+	return mgr, nil
 }

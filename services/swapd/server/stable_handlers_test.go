@@ -254,6 +254,69 @@ func TestAdminAuditEventsEndpoint(t *testing.T) {
 	}
 }
 
+func TestHandleStableCashOutRejectsWrongPartnerReservation(t *testing.T) {
+	store := openStableTestStore(t, "stable_handlers_cross_partner")
+	t.Cleanup(func() { _ = store.Close() })
+
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newTestStableEngine(t, base, store)
+	limits := stable.Limits{DailyCap: 1_000_000}
+	asset := stable.Asset{
+		Symbol: "ZNHB", BasePair: "ZNHB", QuotePair: "USD",
+		QuoteTTL: time.Minute, MaxSlippageBps: 50, SoftInventory: 1_000_000,
+	}
+	credsA := partnerCreds{id: "desk-a", apiKey: "key-a", secret: "secret-a"}
+	credsB := partnerCreds{id: "desk-b", apiKey: "key-b", secret: "secret-b"}
+	auth, err := NewAuthenticator(AuthConfig{BearerToken: "test-token"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	srv, err := New(Config{ListenAddress: ":0", PolicyID: "default"}, store, log.New(io.Discard, "", 0), StableRuntime{
+		Enabled: true,
+		Engine:  engine,
+		Limits:  limits,
+		Assets:  []stable.Asset{asset},
+		Partners: []Partner{
+			{ID: credsA.id, APIKey: credsA.apiKey, Secret: credsA.secret, DailyQuota: mustAmountUnits(t, 10_000)},
+			{ID: credsB.id, APIKey: credsB.apiKey, Secret: credsB.secret, DailyQuota: mustAmountUnits(t, 10_000)},
+		},
+	}, auth)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	mux := http.NewServeMux()
+	srv.registerStableHandlers(mux)
+
+	quoteResp := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/quote", `{"asset":"ZNHB","amount":10,"account":"merchant-a"}`, &credsA)
+	assertStatus(t, quoteResp.Code, http.StatusOK)
+	quoteID := extractField(t, quoteResp.Body.Bytes(), "quote_id")
+
+	reserveResp := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/reserve", `{"quote_id":"`+quoteID+`","amount_in":10,"account":"merchant-a"}`, &credsA)
+	assertStatus(t, reserveResp.Code, http.StatusOK)
+	reservationID := extractField(t, reserveResp.Body.Bytes(), "reservation_id")
+
+	// Partner B, fully authenticated with its own valid credentials, must
+	// not be able to cash out a reservation partner A created.
+	crossPartnerAttempt := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/cashout", `{"reservation_id":"`+reservationID+`"}`, &credsB)
+	assertStatus(t, crossPartnerAttempt.Code, http.StatusForbidden)
+
+	// The legitimate owner must still be able to cash it out afterward --
+	// the rejection above must not have consumed or damaged the reservation.
+	ownerAttempt := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/cashout", `{"reservation_id":"`+reservationID+`"}`, &credsA)
+	assertStatus(t, ownerAttempt.Code, http.StatusOK)
+
+	// A retry of the now-already-consumed reservation by its rightful owner
+	// must surface the normal "already consumed" conflict, not a misleading
+	// "not owned" rejection.
+	retryAttempt := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/cashout", `{"reservation_id":"`+reservationID+`"}`, &credsA)
+	assertStatus(t, retryAttempt.Code, http.StatusConflict)
+
+	// An entirely unknown reservation ID must be rejected the same way as a
+	// real-but-foreign one -- no existence oracle.
+	unknownAttempt := doStableRequest(t, mux, context.Background(), http.MethodPost, "/v1/stable/cashout", `{"reservation_id":"q-does-not-exist"}`, &credsB)
+	assertStatus(t, unknownAttempt.Code, http.StatusForbidden)
+}
+
 func TestStableHandlersEnforcePartnerQuota(t *testing.T) {
 	store := openStableTestStore(t, "stable_handlers_quota")
 	t.Cleanup(func() { _ = store.Close() })

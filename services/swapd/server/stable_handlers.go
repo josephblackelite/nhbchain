@@ -11,6 +11,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"nhbchain/services/swapd/settlement"
 	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
 )
@@ -163,6 +164,7 @@ func (s *Server) handleStableReserve(w http.ResponseWriter, r *http.Request) {
 		s.writeStableError(w, http.StatusTooManyRequests, "partner quota exceeded")
 		return
 	}
+	s.setReservationOwner(reservation.Reservation.QuoteID, partner.ID)
 	s.recordAudit(r.Context(), "reserve", partner.ID, reservation.Reservation.QuoteID, "success", map[string]any{
 		"account":    account,
 		"amount_in":  stable.FromAmountUnits(reservation.Reservation.AmountIn),
@@ -212,6 +214,19 @@ func (s *Server) handleStableCashOut(w http.ResponseWriter, r *http.Request) {
 		s.writeStableError(w, http.StatusBadRequest, "reservation_id required")
 		return
 	}
+	// The stable engine itself has no concept of partners (reservation IDs
+	// are opaque, engine-generated strings with no owner check), so this
+	// HTTP-layer check is the only thing stopping one authenticated partner
+	// from cashing out a reservation another partner created. The response
+	// is deliberately identical whether the ID is unknown or just not this
+	// partner's, to avoid turning it into a reservation-ID existence oracle.
+	if owner, ok := s.reservationOwner(reservationID); !ok || owner != partner.ID {
+		s.recordAudit(r.Context(), "cashout", partner.ID, reservationID, "error", map[string]any{
+			"error": "reservation not owned by this partner",
+		})
+		s.writeStableError(w, http.StatusForbidden, "reservation not owned by this partner")
+		return
+	}
 	intent, err := s.stable.engine.CashOut(r.Context(), stable.CashOutRequest{ReservationID: reservationID})
 	if err != nil {
 		status, message := stableErrorStatus(err)
@@ -228,13 +243,47 @@ func (s *Server) handleStableCashOut(w http.ResponseWriter, r *http.Request) {
 		"reservation_id": intent.Intent.ReservationID,
 		"amount":         intent.Intent.Amount,
 	})
-	traceID := traceIDFromContext(r.Context())
+
 	response := map[string]any{
 		"intent_id":      intent.Intent.ID,
 		"reservation_id": intent.Intent.ReservationID,
 		"amount":         intent.Intent.Amount,
 		"created_at":     intent.Intent.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	if s.settlement != nil {
+		settlementRecord, settlementErr := s.settlement.Initiate(r.Context(), settlement.InitiateRequest{
+			IntentID:      intent.Intent.ID,
+			ReservationID: intent.Intent.ReservationID,
+			PartnerID:     partner.ID,
+			Asset:         intent.Intent.Asset,
+			AmountUnits:   intent.Intent.AmountUnits,
+			Account:       intent.Intent.Account,
+		})
+		// Settlement initiation failure never fails the cashout response --
+		// the intent and ledger movement are already durably committed by
+		// this point. A failed/stuck settlement is surfaced via the audit
+		// trail and the settlement fields below for an operator to act on
+		// through /admin/settlements/{id}/retry or /confirm.
+		auditOutcome := "success"
+		auditDetail := map[string]any{
+			"settlement_id": settlementRecord.ID,
+			"rail":          settlementRecord.Rail,
+			"status":        settlementRecord.Status,
+		}
+		if settlementErr != nil {
+			auditOutcome = "error"
+			auditDetail["error"] = settlementErr.Error()
+			if s.logger != nil {
+				s.logger.Printf("swapd: settlement initiation error for intent %s: %v", intent.Intent.ID, settlementErr)
+			}
+		}
+		s.recordAudit(r.Context(), "settlement", partner.ID, settlementRecord.ID, auditOutcome, auditDetail)
+		response["settlement_id"] = settlementRecord.ID
+		response["settlement_rail"] = settlementRecord.Rail
+		response["settlement_status"] = settlementRecord.Status
+	}
+
+	traceID := traceIDFromContext(r.Context())
 	if traceID != "" {
 		response["trace_id"] = traceID
 	}
@@ -347,6 +396,32 @@ func partnerPrincipalFromRequest(r *http.Request) (*PartnerPrincipal, bool) {
 		return nil, false
 	}
 	return partner, true
+}
+
+// setReservationOwner records which partner created a reservation, so a
+// later cash-out attempt can be checked against it.
+func (s *Server) setReservationOwner(reservationID, partnerID string) {
+	if s == nil {
+		return
+	}
+	s.reservationOwnersMu.Lock()
+	defer s.reservationOwnersMu.Unlock()
+	if s.reservationOwners == nil {
+		s.reservationOwners = make(map[string]string)
+	}
+	s.reservationOwners[reservationID] = partnerID
+}
+
+// reservationOwner returns the partner ID that created the reservation, if
+// still tracked.
+func (s *Server) reservationOwner(reservationID string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	s.reservationOwnersMu.Lock()
+	defer s.reservationOwnersMu.Unlock()
+	owner, ok := s.reservationOwners[reservationID]
+	return owner, ok
 }
 
 func (s *Server) stableEngineEnabled() bool {

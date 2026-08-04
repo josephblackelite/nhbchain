@@ -286,6 +286,26 @@ CREATE TABLE IF NOT EXISTS stable_reservations (
     updated_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS swap_settlements (
+    id TEXT PRIMARY KEY,
+    intent_id TEXT NOT NULL,
+    reservation_id TEXT NOT NULL,
+    partner_id TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    amount_units INTEGER NOT NULL,
+    account TEXT NOT NULL,
+    rail TEXT NOT NULL,
+    status TEXT NOT NULL,
+    external_ref TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    settled_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_swap_settlements_partner ON swap_settlements(partner_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_swap_settlements_status ON swap_settlements(status);
+CREATE INDEX IF NOT EXISTS idx_swap_settlements_intent ON swap_settlements(intent_id);
+
 CREATE TABLE IF NOT EXISTS swap_audit_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -870,4 +890,150 @@ func (s *Storage) ListAuditEvents(ctx context.Context, partnerID string, limit i
 		return nil, fmt.Errorf("iterate audit events: %w", err)
 	}
 	return events, nil
+}
+
+// SettlementRecord captures the durable state of a single cash-out intent's
+// real-world settlement -- which rail is moving the money, its external
+// reference (a NOWPayments payout batch ID, or an operator-entered bank wire
+// reference), and its current lifecycle status.
+type SettlementRecord struct {
+	ID            string
+	IntentID      string
+	ReservationID string
+	PartnerID     string
+	Asset         string
+	AmountUnits   int64
+	Account       string
+	Rail          string
+	Status        string
+	ExternalRef   string
+	Detail        string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	SettledAt     time.Time
+}
+
+// SaveSettlement upserts a settlement record by ID.
+func (s *Storage) SaveSettlement(ctx context.Context, record SettlementRecord) error {
+	if s == nil {
+		return fmt.Errorf("storage not configured")
+	}
+	id := strings.TrimSpace(record.ID)
+	if id == "" {
+		return fmt.Errorf("settlement id required")
+	}
+	if strings.TrimSpace(record.IntentID) == "" {
+		return fmt.Errorf("settlement intent id required")
+	}
+	rail := strings.TrimSpace(record.Rail)
+	if rail == "" {
+		return fmt.Errorf("settlement rail required")
+	}
+	status := strings.TrimSpace(record.Status)
+	if status == "" {
+		return fmt.Errorf("settlement status required")
+	}
+	detail := record.Detail
+	if detail == "" {
+		detail = "{}"
+	}
+	updatedAt := record.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	createdAt := record.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = updatedAt
+	}
+	var settledAt any
+	if !record.SettledAt.IsZero() {
+		settledAt = record.SettledAt.UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+        INSERT INTO swap_settlements(id, intent_id, reservation_id, partner_id, asset, amount_units, account, rail, status, external_ref, detail, created_at, updated_at, settled_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            status=excluded.status,
+            external_ref=excluded.external_ref,
+            detail=excluded.detail,
+            updated_at=excluded.updated_at,
+            settled_at=excluded.settled_at
+    `, id, strings.TrimSpace(record.IntentID), strings.TrimSpace(record.ReservationID), strings.TrimSpace(record.PartnerID),
+		strings.ToUpper(strings.TrimSpace(record.Asset)), record.AmountUnits, strings.TrimSpace(record.Account),
+		rail, status, strings.TrimSpace(record.ExternalRef), detail, createdAt, updatedAt, settledAt)
+	if err != nil {
+		return fmt.Errorf("save settlement: %w", err)
+	}
+	return nil
+}
+
+// GetSettlement loads a single settlement record by ID.
+func (s *Storage) GetSettlement(ctx context.Context, id string) (SettlementRecord, error) {
+	var rec SettlementRecord
+	if s == nil {
+		return rec, fmt.Errorf("storage not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return rec, fmt.Errorf("settlement id required")
+	}
+	row := s.db.QueryRowContext(ctx, `
+        SELECT id, intent_id, reservation_id, partner_id, asset, amount_units, account, rail, status, external_ref, detail, created_at, updated_at, settled_at
+        FROM swap_settlements
+        WHERE id = ?
+    `, id)
+	var settledAt sql.NullTime
+	if err := row.Scan(&rec.ID, &rec.IntentID, &rec.ReservationID, &rec.PartnerID, &rec.Asset, &rec.AmountUnits, &rec.Account,
+		&rec.Rail, &rec.Status, &rec.ExternalRef, &rec.Detail, &rec.CreatedAt, &rec.UpdatedAt, &settledAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return rec, fmt.Errorf("settlement not found")
+		}
+		return rec, fmt.Errorf("query settlement: %w", err)
+	}
+	if settledAt.Valid {
+		rec.SettledAt = settledAt.Time
+	}
+	return rec, nil
+}
+
+// ListSettlements returns persisted settlements in reverse-chronological
+// order, optionally filtered by partner ID and/or status, capped at limit.
+func (s *Storage) ListSettlements(ctx context.Context, partnerID, status string, limit int) ([]SettlementRecord, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	partner := strings.TrimSpace(partnerID)
+	statusFilter := strings.TrimSpace(status)
+	query := `
+        SELECT id, intent_id, reservation_id, partner_id, asset, amount_units, account, rail, status, external_ref, detail, created_at, updated_at, settled_at
+        FROM swap_settlements
+        WHERE (? = '' OR partner_id = ?) AND (? = '' OR status = ?)
+        ORDER BY id DESC
+        LIMIT ?
+    `
+	rows, err := s.db.QueryContext(ctx, query, partner, partner, statusFilter, statusFilter, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query settlements: %w", err)
+	}
+	defer rows.Close()
+	var records []SettlementRecord
+	for rows.Next() {
+		var rec SettlementRecord
+		var settledAt sql.NullTime
+		if err := rows.Scan(&rec.ID, &rec.IntentID, &rec.ReservationID, &rec.PartnerID, &rec.Asset, &rec.AmountUnits, &rec.Account,
+			&rec.Rail, &rec.Status, &rec.ExternalRef, &rec.Detail, &rec.CreatedAt, &rec.UpdatedAt, &settledAt); err != nil {
+			return nil, fmt.Errorf("scan settlement: %w", err)
+		}
+		if settledAt.Valid {
+			rec.SettledAt = settledAt.Time
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate settlements: %w", err)
+	}
+	return records, nil
 }

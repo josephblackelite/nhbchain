@@ -375,6 +375,103 @@ func TestRecordAndListAuditEvents(t *testing.T) {
 	}
 }
 
+func TestSaveAndListSettlements(t *testing.T) {
+	store := openTestDB(t)
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0).UTC()
+
+	record := SettlementRecord{
+		ID:            "settle-1",
+		IntentID:      "intent-1",
+		ReservationID: "res-1",
+		PartnerID:     "partner-a",
+		Asset:         "znhb",
+		AmountUnits:   102_000_000,
+		Account:       "merchant-123",
+		Rail:          "nowpayments",
+		Status:        "pending",
+		Detail:        `{"foo":"bar"}`,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := store.SaveSettlement(ctx, record); err != nil {
+		t.Fatalf("save settlement: %v", err)
+	}
+
+	loaded, err := store.GetSettlement(ctx, "settle-1")
+	if err != nil {
+		t.Fatalf("get settlement: %v", err)
+	}
+	if loaded.Asset != "ZNHB" {
+		t.Fatalf("expected asset normalised to upper case, got %q", loaded.Asset)
+	}
+	if loaded.Status != "pending" || loaded.Rail != "nowpayments" || !loaded.SettledAt.IsZero() {
+		t.Fatalf("unexpected loaded record: %+v", loaded)
+	}
+
+	// Transition to settled -- confirms the upsert path updates mutable
+	// fields (status/external_ref/detail/settled_at) without touching the
+	// immutable identity fields (intent/reservation/partner/asset/amount).
+	record.Status = "settled"
+	record.ExternalRef = "wire-ref-9"
+	record.Detail = `{"note":"confirmed"}`
+	record.UpdatedAt = now.Add(time.Minute)
+	record.SettledAt = now.Add(time.Minute)
+	if err := store.SaveSettlement(ctx, record); err != nil {
+		t.Fatalf("update settlement: %v", err)
+	}
+	loaded, err = store.GetSettlement(ctx, "settle-1")
+	if err != nil {
+		t.Fatalf("get updated settlement: %v", err)
+	}
+	if loaded.Status != "settled" || loaded.ExternalRef != "wire-ref-9" || loaded.SettledAt.IsZero() {
+		t.Fatalf("unexpected updated record: %+v", loaded)
+	}
+	if loaded.IntentID != "intent-1" || loaded.AmountUnits != 102_000_000 {
+		t.Fatalf("identity fields must not change on update: %+v", loaded)
+	}
+
+	second := SettlementRecord{
+		ID: "settle-2", IntentID: "intent-2", ReservationID: "res-2", PartnerID: "partner-b",
+		Asset: "ZNHB", AmountUnits: 50_000_000, Account: "merchant-456", Rail: "manual_treasury",
+		Status: "pending", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveSettlement(ctx, second); err != nil {
+		t.Fatalf("save second settlement: %v", err)
+	}
+
+	all, err := store.ListSettlements(ctx, "", "", 10)
+	if err != nil {
+		t.Fatalf("list all settlements: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 settlements, got %d", len(all))
+	}
+
+	filtered, err := store.ListSettlements(ctx, "partner-b", "", 10)
+	if err != nil {
+		t.Fatalf("list by partner: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].ID != "settle-2" {
+		t.Fatalf("unexpected partner filter result: %+v", filtered)
+	}
+
+	settled, err := store.ListSettlements(ctx, "", "settled", 10)
+	if err != nil {
+		t.Fatalf("list by status: %v", err)
+	}
+	if len(settled) != 1 || settled[0].ID != "settle-1" {
+		t.Fatalf("unexpected status filter result: %+v", settled)
+	}
+
+	if _, err := store.GetSettlement(ctx, "missing"); err == nil {
+		t.Fatalf("expected error for missing settlement")
+	}
+	if err := store.SaveSettlement(ctx, SettlementRecord{ID: "bad"}); err == nil {
+		t.Fatalf("expected error for settlement missing required fields")
+	}
+}
+
 func openTestDB(t *testing.T) *Storage {
 	t.Helper()
 	dir := t.TempDir()

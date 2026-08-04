@@ -1,0 +1,16 @@
+[Unit]
+Description=NHBChain Swap Daemon (swapd)
+After=network-online.target nhb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhb
+Group=nhb
+WorkingDirectory=/opt/nhbchain
+ExecStart=/opt/nhbchain/bin/swapd --config /etc/nhbchain/swapd.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

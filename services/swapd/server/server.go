@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"nhbchain/services/swapd/settlement"
 	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
 )
@@ -36,12 +37,13 @@ type TLSConfig struct {
 
 // StableRuntime configures the optional stable engine wiring.
 type StableRuntime struct {
-	Enabled  bool
-	Engine   *stable.Engine
-	Limits   stable.Limits
-	Assets   []stable.Asset
-	Now      func() time.Time
-	Partners []Partner
+	Enabled    bool
+	Engine     *stable.Engine
+	Limits     stable.Limits
+	Assets     []stable.Asset
+	Now        func() time.Time
+	Partners   []Partner
+	Settlement *settlement.Manager
 }
 
 // Server hosts admin and health endpoints for swapd.
@@ -67,7 +69,20 @@ type Server struct {
 		limits  stable.Limits
 		assets  map[string]stable.Asset
 	}
-	stableNow func() time.Time
+	stableNow  func() time.Time
+	settlement *settlement.Manager
+
+	// reservationOwners maps a live reservation ID to the partner ID that
+	// created it via /v1/stable/reserve. The stable engine itself has no
+	// concept of partners at all (by design -- see StableRuntime), so
+	// nothing at that layer stops one authenticated partner from cashing
+	// out a reservation another partner created, since reservation IDs are
+	// returned in the reserve response and are not inherently secret. This
+	// map closes that gap at the HTTP layer, where partner identity is
+	// actually available: handleStableReserve records ownership,
+	// handleStableCashOut checks it before ever calling into the engine.
+	reservationOwnersMu sync.Mutex
+	reservationOwners   map[string]string
 }
 
 // New constructs a new HTTP server.
@@ -84,7 +99,7 @@ func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime S
 	if strings.TrimSpace(cfg.PolicyID) == "" {
 		cfg.PolicyID = "default"
 	}
-	srv := &Server{cfg: cfg, storage: store, logger: logger, adminAuth: auth}
+	srv := &Server{cfg: cfg, storage: store, logger: logger, adminAuth: auth, reservationOwners: make(map[string]string)}
 	srv.tls.disabled = cfg.TLS.Disabled
 	srv.tls.certFile = strings.TrimSpace(cfg.TLS.CertFile)
 	srv.tls.keyFile = strings.TrimSpace(cfg.TLS.KeyFile)
@@ -116,6 +131,7 @@ func New(cfg Config, store *storage.Storage, logger *log.Logger, stableRuntime S
 			logger.Printf("swapd: hydrate partner auth: %v", err)
 		}
 		srv.partnerAuth = partnerAuth
+		srv.settlement = stableRuntime.Settlement
 	}
 	if policy, err := store.GetPolicy(context.Background(), cfg.PolicyID); err == nil {
 		srv.setPolicy(policy)
@@ -133,6 +149,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.Handle("/admin/policy", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handlePolicy)), "swapd.policy"))
 	mux.Handle("/admin/throttle/check", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleThrottleCheck)), "swapd.throttle"))
 	mux.Handle("/admin/audit/events", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleAuditEvents)), "swapd.audit"))
+	mux.Handle("GET /admin/settlements", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleListSettlements)), "swapd.settlements.list"))
+	mux.Handle("POST /admin/settlements/{id}/confirm", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleConfirmSettlement)), "swapd.settlements.confirm"))
+	mux.Handle("POST /admin/settlements/{id}/retry", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleRetrySettlement)), "swapd.settlements.retry"))
+	mux.Handle("POST /admin/settlements/{id}/fail", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleFailSettlement)), "swapd.settlements.fail"))
 	s.registerStableHandlers(mux)
 
 	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux, TLSConfig: s.tls.config}

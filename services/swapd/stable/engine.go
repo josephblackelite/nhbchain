@@ -459,6 +459,9 @@ type CashOutIntent struct {
 	ID            string
 	ReservationID string
 	Amount        float64
+	AmountUnits   int64
+	Asset         string
+	Account       string
 	CreatedAt     time.Time
 }
 
@@ -526,6 +529,9 @@ func (e *Engine) CreateCashOutIntent(ctx context.Context, reservationID string) 
 		ID:            fmt.Sprintf("i-%d", now.UnixNano()),
 		ReservationID: reservationID,
 		Amount:        payout,
+		AmountUnits:   res.AmountOut,
+		Asset:         resState.Asset,
+		Account:       res.Account,
 		CreatedAt:     now,
 	}
 	resState.IntentCreated = true

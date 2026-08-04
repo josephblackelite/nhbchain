@@ -1,0 +1,141 @@
+# ==============================================================================
+# swapd staging configuration TEMPLATE
+#
+# This file is NOT read automatically by swapd and is not wired into any
+# deploy script. It is a starting point for a real staging deployment,
+# distinct from the smoke-test-scale default checked in at
+# services/swapd/config.yaml (which ships with stable.paused: true and no
+# real partners so it's safe to run untouched in CI/local dev).
+#
+# Before use:
+#   1. Copy this file to the target host, e.g. /etc/nhbchain/swapd.yaml
+#      (matching deploy/systemd/swapd.service's --config flag).
+#   2. Replace every placeholder value below (search for REPLACE_ME and the
+#      inline comments marked "placeholder").
+#   3. Generate real TLS material and place it at the paths referenced under
+#      admin.tls / admin.mtls.
+#   4. Generate a real admin bearer token and write it to the file referenced
+#      by admin.bearer_token_file.
+#   5. Add real partner credentials with the swapd-partner-admin CLI (see
+#      cmd/swapd-partner-admin) rather than hand-editing the partners list.
+#
+# See services/swapd/config/config.go for the authoritative schema and
+# docs/swap/staging-deploy.md for the full deploy runbook.
+# ==============================================================================
+
+listen: ":7074"
+
+# On-disk SQLite database path. Use a real persistent volume on the staging
+# host, not a path under /tmp.
+database: "/var/lib/nhbchain/swapd/swapd.sqlite"
+
+oracle:
+  interval: "30s"
+  max_age: "2m"
+  min_feeds: 2
+
+sources:
+  # placeholder: NOWPayments exchange-rate feed. Populate with a real API key
+  # (or leave api_key empty if the endpoint doesn't require one for reads).
+  - name: now
+    type: nowpayments
+    endpoint: https://api.nowpayments.io/v1/exchange/rates
+    api_key: "" # placeholder -- fill in a real NOWPayments API key for staging
+  - name: gecko
+    type: coingecko
+    endpoint: https://api.coingecko.com/api/v3/simple/price
+    assets:
+      ZNHB: znhb
+
+pairs:
+  - base: ZNHB
+    quote: USD
+
+policy:
+  id: default
+  # placeholder: these mirror the smoke-test default. Review with the
+  # business/risk owner before staging exercises real partner volume.
+  mint_limit: 10
+  redeem_limit: 5
+  window: "1h"
+
+stable:
+  # Staging is meant to actually exercise the stable engine end-to-end,
+  # unlike the checked-in default (which stays paused until governance
+  # approves go-live). Flip back to true if you need to temporarily disable
+  # redemptions without tearing down the deployment.
+  paused: false
+  quote_ttl: "1m"
+  max_slippage_bps: 50
+  # placeholder: smoke-test-scale inventory ceiling. Raise to a realistic
+  # staging figure once partner volume expectations are known.
+  soft_inventory: 1000000
+  assets:
+    - symbol: ZNHB
+      base: ZNHB
+      quote: USD
+
+  # --------------------------------------------------------------------------
+  # Settlement: controls how a stable-swap cash-out intent actually pays out
+  # once created. There are two rails:
+  #
+  #   - manual_treasury: no external credentials required at all. An operator
+  #     confirms each settlement by hand via the admin API after wiring funds
+  #     themselves. This is the safe starting point for staging -- nothing
+  #     here can move real money on its own.
+  #
+  #   - nowpayments: automated mass-payout via a real NOWPayments account.
+  #     Requires the three secret files under settlement.nowpayments below.
+  #     This rail is only actually used once default_rail is changed to
+  #     "nowpayments", or an individual partner's settlement_rail is set to
+  #     "nowpayments" (see the example partner entry further down) -- setting
+  #     default_rail to manual_treasury here means the nowpayments block is
+  #     inert unless a partner explicitly opts in.
+  # --------------------------------------------------------------------------
+  settlement:
+    default_rail: manual_treasury
+
+    # Uncomment and populate once a real NOWPayments account is provisioned
+    # for staging AND at least one partner's settlement_rail is set to
+    # "nowpayments" (or default_rail above is changed). Until then this
+    # block is unused and these files do not need to exist.
+    # nowpayments:
+    #   email_file: /etc/nhbchain/secrets/swapd-nowpayments-email
+    #   password_file: /etc/nhbchain/secrets/swapd-nowpayments-password
+    #   api_key_file: /etc/nhbchain/secrets/swapd-nowpayments-api-key
+    #   base_url: https://api.nowpayments.io/v1
+
+  # Example partner entry. DO NOT ship real credentials in this file --
+  # generate them with the swapd-partner-admin CLI instead, which writes
+  # directly into the deployed config.yaml (never into git, and it prints
+  # the generated api_key/secret to the operator's terminal exactly once):
+  #
+  #   swapd-partner-admin add --config <this-file> --id <partner-id>
+  #
+  # The block below is a shape reference only; replace or remove it before
+  # deploying, and never commit real partner secrets.
+  partners:
+    - id: example-partner
+      api_key: "REPLACE_ME_WITH_REAL_PARTNER_API_KEY"
+      secret: "REPLACE_ME_WITH_REAL_PARTNER_SECRET"
+      quota:
+        daily: 5000
+      # Leave unset to inherit stable.settlement.default_rail (manual_treasury
+      # above). Set explicitly to "nowpayments" only once the nowpayments
+      # block above is populated and this partner is approved for automated
+      # payout.
+      settlement_rail: manual_treasury
+
+admin:
+  # placeholder: generate a real bearer token and write it (token contents
+  # only, no trailing newline requirements -- it is trimmed) to this path.
+  bearer_token_file: /etc/nhbchain/secrets/swapd-admin-token
+  tls:
+    # placeholder: real staging TLS certificate/key pair. Bearer tokens
+    # require TLS to be enabled.
+    cert: /etc/nhbchain/tls/swapd.crt
+    key: /etc/nhbchain/tls/swapd.key
+  mtls:
+    enabled: true
+    # placeholder: CA bundle used to validate admin client certificates.
+    client_ca: /etc/nhbchain/tls/swapd-client-ca.crt
