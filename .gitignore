@@ -95,3 +95,7 @@ NHBChain Observed Issues.txt
 live-*.tar
 live-*.tar.gz
 .gitignore
+
+# AI-session continuity notes -- internal working state, not documentation.
+# Never track: same reasoning as .cursorrules/docs/aprilaudit above.
+CONTINUE.md

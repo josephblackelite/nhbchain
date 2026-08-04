@@ -22,12 +22,15 @@ NHBCoin abstracts away the traditional complexities of crypto networks. Native a
 - [Protocol Pillars](#protocol-pillars)
 - [Architecture Overview](#architecture-overview)
 - [Token Economics](#token-economics)
-- [Quick Start for Node Operators](#quick-start-for-node-operators)
-  - [Prerequisites](#prerequisites)
-  - [Clone and Build](#clone-and-build)
-  - [Initial Configuration](#initial-configuration)
-  - [Starting a Node](#starting-a-node)
-- [Joining the Network as a Peer or Validator](#joining-the-network-as-a-peer-or-validator)
+- [Quick Start for Node Operators](#-quick-start-for-node-operators-step-by-step)
+  - [Step 1: Get a Cloud Server](#step-1-get-a-cloud-server-aws-digitalocean-etc)
+  - [Step 2: Connect to your Server](#step-2-connect-to-your-server)
+  - [Step 3: Prepare the Server](#step-3-prepare-the-server)
+  - [Step 4: Clone the Code](#step-4-clone-the-code)
+  - [Step 5: Run the Automated Node Bootstrap](#step-5-run-the-automated-node-bootstrap)
+  - [Step 6: Get Paid](#step-6-get-paid-delegate-10000-znhb-or-more)
+- [Network Connection Details](#-network-connection-details)
+  - [Join As A Validator In One Command](#join-as-a-validator-in-one-command)
 - [Command-Line Interface](#command-line-interface)
 - [APIs, SDKs, and Documentation](#apis-sdks-and-documentation)
 - [Security, Compliance, and Operations](#security-compliance-and-operations)
@@ -131,6 +134,19 @@ cd nhbchain
 
 ### Step 5: Run the Automated Node Bootstrap
 The repository now includes a single node bootstrap script intended to be the public operator entrypoint. It installs the runtime stack, builds the binaries, installs the service units, and brings the node online once your server-side config is ready. Run:
+
+> **Before you run this:** `scripts/run_nhbcoin_node.sh` execs `scripts/bringup_production_stack.sh`, which requires the following files to already exist under `/etc/nhbchain/` on the server — it fails with no guidance if any are missing:
+> - `config.toml`
+> - `node.env`
+> - `payments-gateway.env`
+> - `payoutd.env`
+> - `payoutd.yaml`
+> - `ops-reporting.env`
+>
+> Use the templates under [`deploy/env/`](./deploy/env) (`*.env.example`, `payoutd.config.example.yaml`) as your starting point for each file; see [`docs/deploy/one-shot-deploy.md`](./docs/deploy/one-shot-deploy.md) for the full required-config reference.
+>
+> **Only want to run a validator, not the full production stack?** You don't need any of these files — skip straight to [Join As A Validator In One Command](#join-as-a-validator-in-one-command) instead.
+
 ```bash
 chmod +x scripts/run_nhbcoin_node.sh
 bash scripts/run_nhbcoin_node.sh
@@ -185,6 +201,8 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 3. You now have a native Linux terminal inside Windows. Follow Step 3 through Step 5 from the guide above exactly as if you were on a cloud server!
 
 ---
+
+> ⚠️ **Notice: A genesis relaunch is planned — these network parameters are being retired.** The Network ID, transaction signing Chain ID, and bootnode address below describe the **current** NHBCoin chain, which is being deliberately retired in favor of a fresh genesis relaunch. The relaunch's replacement values **have not been chosen yet** and are not published anywhere in this repository. **Do not configure a new validator or node against the parameters below** in anticipation of the relaunch — wait for an official announcement with the new values. The values below remain accurate only for the current, soon-to-be-retired chain.
 
 ## 🔗 Network Connection Details
 
@@ -270,9 +288,10 @@ Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Scor
 ```bash
 ./nhb-cli generate-key              # Creates a new NHB wallet (saves to wallet.key; required before other commands)
 ./nhb-cli balance nhb1...            # Queries balances and staking state
-./nhb-cli send <to> <amount> wallet.key
+./nhb-cli send-nhb <to> <amount> wallet.key
+./nhb-cli send-znhb <to> <amount> wallet.key   # Same syntax as send-nhb; sends ZNHB instead of NHB
 ./nhb-cli deploy <contract.hex> wallet.key
-./nhb-cli id register <alias> wallet.key
+./nhb-cli id set-alias --addr <addr> --alias <alias>
 ```
 
 For the full identity management toolkit, refer to [`docs/identity/identity-cli.md`](./docs/identity/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control—`wallet.key` is now ignored by Git to prevent accidental publication.
@@ -281,10 +300,10 @@ For the full identity management toolkit, refer to [`docs/identity/identity-cli.
 
 All protocol modules ship with reference documentation under [`docs/`](./docs):
 
-- **Identity & Username Directory** — Concepts, RPC specs, and gateway flows (`docs/identity.md`, `docs/identity-api.md`, `docs/identity-gateway.md`).
-- **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow.md`, `docs/escrow/nhbchain-escrow-gateway.md`).
-- **Loyalty & Rewards** — Network-wide loyalty engine overview (`docs/loyalty.md`).
-- **Pay-by-Username** — UX flows and examples (`docs/pay-by-username.md`, `docs/examples/identity`).
+- **Identity & Username Directory** — Concepts, RPC specs, and gateway flows (`docs/identity/identity.md`, `docs/identity/identity-api.md`, `docs/identity/identity-gateway.md`).
+- **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow/escrow.md`, `docs/escrow/nhbchain-escrow-gateway.md`).
+- **Loyalty & Rewards** — Network-wide loyalty engine overview (`docs/loyalty/loyalty.md`).
+- **Pay-by-Username** — UX flows and examples (`docs/identity/pay-by-username.md`, `docs/examples/identity`).
 - **OpenAPI Specification** — Machine-readable schema for REST integrations (`docs/openapi/identity.yaml`).
 
 > Additional SDKs and tooling (TypeScript, Rust) are in development. Subscribe to governance releases for updates.

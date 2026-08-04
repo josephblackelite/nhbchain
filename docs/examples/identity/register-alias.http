@@ -5,10 +5,9 @@ Content-Type: application/json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "identity_registerAlias",
+  "method": "identity_setAlias",
   "params": [
-    "frankrocks",
     "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpxxx",
-    "0xSIG"
+    "frankrocks"
   ]
 }
