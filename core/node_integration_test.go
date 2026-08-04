@@ -355,11 +355,6 @@ func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
 
 	validatorAddr := seedEligibleValidator(t, node.state, 15000, 0)
 
-	txRoot, err := ComputeTxRoot(nil)
-	if err != nil {
-		t.Fatalf("compute tx root: %v", err)
-	}
-
 	currentTime := time.Unix(1_900_000_100, 0).UTC()
 	node.SetTimeSource(func() time.Time { return currentTime })
 	node.stateMu.Lock()
@@ -378,14 +373,13 @@ func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		currentTime = currentTime.Add(time.Second)
 		nextHeight := node.chain.GetHeight() + 1
-		header := &types.BlockHeader{
-			Height:    nextHeight,
-			Timestamp: currentTime.Unix(),
-			PrevHash:  node.chain.Tip(),
-			TxRoot:    txRoot,
-			Validator: validatorKey.PubKey().Address().Bytes(),
+		// Build the block via the node's own proposal path (not a hand-rolled
+		// header) so CommitBlock recognizes it as self-proposed and carries the
+		// seeded validator/state through instead of resetting to committed state.
+		block, err := node.CreateBlock(nil)
+		if err != nil {
+			t.Fatalf("create block %d: %v", nextHeight, err)
 		}
-		block := types.NewBlock(header, nil)
 		if err := node.CommitBlock(block); err != nil {
 			t.Fatalf("commit block %d: %v", nextHeight, err)
 		}
