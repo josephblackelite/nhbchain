@@ -113,8 +113,28 @@ resolve outstanding holds.
 
 ## Integration points
 
-* **RPC**: The new messages are exposed via the `pos.v1.Tx` service defined in
-  `proto/pos/tx.proto`.
+* **gRPC service not production-ready**: `proto/pos/tx.proto` defines a
+  `pos.v1.Tx` service (`rpc/pos_grpc.go`) intended to expose
+  `MsgAuthorizePayment`/`MsgCapturePayment`/`MsgVoidPayment` directly, but
+  `NewPOSServer` is wired with a hardcoded nil signer -- every submitted
+  payload builds an unsigned transaction envelope and is rejected before it
+  ever reaches execution. `NewPOSServer` has zero call sites anywhere in the
+  codebase and no test coverage. Do not integrate against this service.
+* **Real integration path**: authorize/capture/void are native transactions
+  (`TxTypePOSAuthorize`/`Capture`/`Void`, `0x20`/`0x21`/`0x22`) signed
+  client-side with the payer's or merchant's own wallet key and submitted via
+  the standard `nhb_sendTransaction` RPC, the same path every other native
+  transaction type uses.
+* **Read-only lookups** (undocumented elsewhere, also exposed via
+  `rpc/http.go`'s dispatch table):
+  * `pos_getAuthorization(id)` -- looks up an authorization by its ID, returns
+    a `POSAuthorizationResult` or `null`.
+  * `pos_getAuthorizationByIntentRef(intentRef)` -- the way a merchant/gateway
+    discovers an authorization ID from a client-supplied `intent_ref` after
+    submitting an Authorize transaction. Same response shape.
+  * `pos_sweepVoids(timestamp?)` -- the RPC-level equivalent of
+    `nhb-cli pos sweep-voids`; requires RPC auth (unlike the two lookups
+    above) and returns `{"voided": N}`.
 * **Testing**: Unit tests cover partial capture, double-capture rejection, and
   automatic expiry handling.
 * **Telemetry**: Existing payment processors can subscribe to the new event

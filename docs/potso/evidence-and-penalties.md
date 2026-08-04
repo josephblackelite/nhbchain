@@ -86,14 +86,7 @@ Successful executions emit `potso.penalty.applied { hash, type, offender, decayP
 
 ## Appeals & remediation process
 
-POTSO recognises a structured appeals flow for validators who believe evidence was filed in error:
-
-1. **Appeal intake** – Offenders submit an appeal via `potso_submitAppeal` with the disputed `evidenceHash`, a narrative, and supporting documents (IPFS hashes or URLs). Appeals must land within five epochs of the penalty block.
-2. **Triage** – The compliance rotation reviews the evidence bundle and correlates it with consensus telemetry. During triage the penalty weight decay continues to apply; only slashing transfers are held in escrow.
-3. **Hearing** – A quorum (≥3) of governance signers review the triage packet inside the appeals dashboard. The decision is captured as `approve`, `deny`, or `partial` (for reduced penalties).
-4. **Resolution** – Approved appeals create `potso.penalty.reversed` events and refund any held slash amount. Partial resolutions emit both `potso.penalty.adjusted` and `potso.penalty.refund` events with the adjusted decay and slash.
-
-Appeals are idempotent by `{evidenceHash, offender}`. Replays update the appeal record without changing timestamps so downstream systems can safely retry submissions.
+No dispute or appeals mechanism is currently implemented. There is no `potso_submitAppeal` RPC method or equivalent (confirmed: no "appeal" references anywhere in the Go source), no triage/hearing workflow, and no `potso.penalty.reversed`/`adjusted`/`refund` events. The evidence `type` field is hard-restricted to `DOWNTIME`, `EQUIVOCATION`, and `INVALID_BLOCK_PROPOSAL` with no appeal-flavored type or flag. An offender who believes evidence was filed in error currently has no on-chain or RPC-level recourse -- this is a known gap, not a documented process.
 
 ### Audit logging fields
 
@@ -101,7 +94,7 @@ All evidence and penalty actions feed into the audit log stream `potso.audit`. E
 
 | Field | Description |
 | --- | --- |
-| `eventType` | `evidence_submitted`, `evidence_rejected`, `penalty_applied`, `appeal_filed`, `appeal_decided`, `penalty_reversed`. |
+| `eventType` | `evidence_submitted`, `evidence_rejected`, `penalty_applied`. |
 | `hash` | Canonical evidence hash. |
 | `offender` | Validator address. |
 | `actor` | Reporter or governance signer responsible for the action. |
