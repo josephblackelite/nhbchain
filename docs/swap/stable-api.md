@@ -187,11 +187,20 @@ The endpoint requires the same signed partner headers described above. In previe
 | Status | Error message                 | Scenario                            | Mitigation |
 | ------ | ----------------------------- | ----------------------------------- | ---------- |
 | 400    | `invalid payload`             | Malformed JSON or missing fields    | Validate inputs client-side |
+| 403    | `reservation not owned by this partner` | Cashout attempted by a partner other than the one that created the reservation | Verify the `X-Api-Key` matches the partner that reserved the quote |
+| 404    | `asset not supported`         | Quote/reserve for an unconfigured asset | Check `/v1/stable/limits` for supported assets |
 | 404    | `quote not found`             | Reserve/cashout on unknown quote    | Fetch latest quote from `/v1/stable/quote` |
 | 409    | `quote expired`               | Attempting to reserve stale quote   | Regenerate quote before TTL lapses |
-| 422    | `reservation not found`       | Cashout on consumed reservation     | Inspect `/v1/stable/status` counters |
+| 409    | `slippage exceeded`           | Price moved beyond the configured tolerance between quote and reserve | Re-quote and retry |
+| 409    | `insufficient soft inventory` | Reserve/cashout would exceed configured soft inventory | Wait for inventory to replenish or contact operations |
+| 409    | `reservation expired`         | Cashout attempted after the reservation's TTL lapsed | Reserve a fresh quote and retry |
+| 409    | `reservation already consumed` | Cashout retried on a reservation already used by its owning partner | Fetch the original intent instead of retrying |
+| 422    | `reservation not found`       | Reserve/cashout on an unknown reservation ID | Inspect `/v1/stable/status` counters |
+| 422    | `quote amount mismatch`       | Reservation amount doesn't match the quoted amount | Re-quote; do not reuse stale amounts |
+| 429    | `daily cap exceeded`          | Aggregate daily mint/redeem cap breached (distinct from the per-partner quota below) | Wait for the next UTC day boundary or contact operations |
 | 429    | `partner quota exceeded`      | Partner-specific mint cap breached  | Pause new reservations or request a quota increase |
 | 429    | `throttled`                   | Breach of per-account policy        | Contact operations or wait for rolling window |
+| 503    | `price unavailable`           | Oracle median stale or below minimum feed count | Retry after oracle sources recover; check `/admin/policy` |
 | 501    | `stable engine not enabled`   | Preview mode guardrail              | Flip `stable.paused=false` and run regression suite |
 
 ## Quotas and Telemetry
