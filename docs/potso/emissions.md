@@ -1,68 +1,35 @@
 # POTSO Emissions Observability
 
-The POTSO emissions dashboards give operations, treasury, and integrations
-teams real-time insight into reward budgets, evidence processing, and webhook
-health. Each dashboard is backed by Prometheus metrics exposed by the node and
-can be imported directly into Grafana using the JSON exports stored in
-`observability/grafana/dashboards/`.
+The dashboards, JSON exports, and alert rules described below are real and
+deployed (`observability/grafana/dashboards/`,
+`observability/alerts/alert_rules.yaml`). **Most of the underlying metrics
+are not currently recorded, though.** Of the metrics this document
+references, only the heartbeat-related ones (used by
+`potso_heartbeat_total` and friends, documented elsewhere) are actually
+observed anywhere in the node's evidence/penalty/reward code paths.
+`potso_evidence_accepted_total`, `potso_penalty_applied_total`,
+`potso_epoch_pool`, `potso_rewards_sum`, `potso_rounding_dust`, and
+`potso_webhook_failures_total` are all defined and registered with
+Prometheus, but nothing currently calls their setter methods — every panel
+and alert built on them below will read as flat zero and none of those
+alerts can fire. (`potso_webhook_failures_total` specifically stays dormant
+because nothing dispatches POTSO reward webhooks at all — see the "Not
+currently available" note in [rewards-integration.md](rewards-integration.md).)
+This section documents provisioned-but-inactive observability
+infrastructure, not something you can currently rely on for real-time
+insight — treat it as a reference for when these metrics get wired up, not
+as an operational guide today.
 
-## Emission schedule configuration
+## Emission configuration
 
-Emission targets are driven by a TOML schedule loaded from `config/potso-emissions.toml`. Each entry defines the epoch window, base pool, and optional decay multipliers:
-
-```toml
-[[schedule]]
-start_epoch = 0
-end_epoch   = 90
-base_pool   = "500000000000000000000"  # 500 ZNHB expressed in wei
-decay       = "linear"
-decay_floor = "300000000000000000000"  # stop decaying at 300 ZNHB
-
-[[schedule]]
-start_epoch = 91
-end_epoch   = 180
-base_pool   = "450000000000000000000"
-decay       = "step"
-decay_steps = [
-  { epoch = 120, pool = "400000000000000000000" },
-  { epoch = 150, pool = "350000000000000000000" }
-]
-```
-
-**Rules**
-
-* Epoch ranges are inclusive on `start_epoch` and exclusive on `end_epoch`.
-* Pools are encoded as decimal strings to preserve wei precision.
-* When `decay = "linear"`, the pool decays evenly from `base_pool` to `decay_floor` across the window.
-* When `decay = "step"`, each entry in `decay_steps` supersedes the current pool beginning at the specified `epoch`.
-
-The node validates the schedule on boot; overlapping windows or negative pools reject configuration.
-
-### Epoch math
-
-Epochs advance when `emission_block_interval` blocks have elapsed. Default configuration maps one epoch to 720 blocks (≈1 hour). The scheduler applies:
-
-```
-epoch = floor((blockHeight - genesisEmissionBlock) / emission_block_interval)
-```
-
-At each rollover the next pool is fetched from the schedule. Dust from the previous epoch is added before payouts are computed, ensuring conservation of total supply.
-
-### Cap and decay safeguards
-
-The emission module enforces a global cap derived from the active schedule window. For each epoch:
-
-1. Read the scheduled pool (post-decay) and add accumulated dust.
-2. Clamp the result to the configured `max_epoch_cap`. If the schedule proposes a pool above the cap, `potso.emission.cap_adjustment` is logged with both values.
-3. Apply decay multipliers produced by penalties (`potso_penalty_applied_total`). The decay is idempotent: `pool_after_penalties = max(decayed_pool, decay_floor)`.
-4. Persist the resulting `epoch_pool_actual` and expose it via Prometheus (`potso_epoch_pool`).
-
-When the actual pool diverges from the scheduled pool by more than 5%, the `POTSOEmissionCapApproach` alert fires to prompt investigation.
-
-### Schedule artifacts
-
-* **JSON snapshots** – every accepted schedule is serialised into `observability/snapshots/emission-schedule-<timestamp>.json` for audit.
-* **Change logs** – `potso.audit` emits `emission_schedule_applied` entries with the diff hash, operator ID, and git commit reference used to deploy the change.
+The per-epoch reward pool is a single fixed value, not a decaying schedule:
+`EmissionPerEpoch` under `[potso.rewards]` in the node's TOML config (see
+`config/prod.toml`), expressed as a decimal wei string (e.g.
+`EmissionPerEpoch = "1000000000000000000"` for 1 ZNHB/epoch). There is
+currently no TOML-driven decay schedule, epoch-window configuration, or
+schedule-snapshot/change-log system — changing the emission rate means
+updating `EmissionPerEpoch` and redeploying config, the same as any other
+node config value.
 
 ## Dashboards
 
@@ -83,7 +50,7 @@ When the actual pool diverges from the scheduled pool by more than 5%, the `POTS
 * **Rounding Dust by Epoch** – the running total of
   `potso_rounding_dust{epoch}` to catch rounding regressions.
 
-The corresponding Grafana JSON is stored at `observability/grafana/dashboards/potso-overview.json`. The exported screenshots in `observability/grafana/screenshots/potso-overview.png` illustrate the expected layout for runbook validation.
+The corresponding Grafana JSON is stored at `observability/grafana/dashboards/potso-overview.json`.
 
 ### POTSO Emissions & Caps
 
@@ -93,14 +60,15 @@ The corresponding Grafana JSON is stored at `observability/grafana/dashboards/po
   `potso_epoch_pool` against the sum of `potso_rewards_sum`. When the remaining
   budget drops below 10% the `POTSOEmissionCapApproach` alert fires.
 * **Rounding Dust Share** – calculates the proportion of dust relative to the
-  pool to ensure the carry-over invariant stays below operational thresholds.
+  pool. Note: there is no automatic carry-forward of dust into the next
+  epoch's pool — the reward config has an inert `CarryRemainder` flag that
+  isn't currently wired to any carry-forward logic.
 * **Penalty Pressure** – 15 minute increases of `potso_penalty_applied_total`
   by type show whether penalty workers are saturated.
 
 Artifacts:
 
-* JSON export: `observability/grafana/dashboards/potso-emissions.json`
-* Screenshot: `observability/grafana/screenshots/potso-emissions.png`
+* JSON export: `observability/grafana/dashboards/potso-emissions-and-caps.json`
 
 ### POTSO Rewards Pipeline
 
@@ -116,8 +84,7 @@ Artifacts:
 
 Artifacts:
 
-* JSON export: `observability/grafana/dashboards/potso-rewards.json`
-* Screenshot: `observability/grafana/screenshots/potso-rewards.png`
+* JSON export: `observability/grafana/dashboards/potso-rewards-pipeline.json`
 
 ## Alert Playbooks
 
@@ -157,9 +124,11 @@ Artifacts:
 ### POTSORoundingDustExceedsThreshold
 
 * **Trigger** – Rounding dust exceeds one token on any epoch for 10 minutes.
-* **Response** – Notify finance. Validate reward weight inputs, recalculate the
-  affected epochs, and confirm dust is rolling into the next pool as expected.
-  If dust is not draining, escalate to the core engineering lead.
+* **Response** – Notify finance and validate reward weight inputs for the
+  affected epochs. Dust does not currently carry forward automatically (see
+  the caveat above) — if this alert ever fires it means dust is
+  accumulating, not draining, so escalate to the core engineering lead
+  rather than expecting it to self-resolve.
 
 ### POTSOCapInvariantBreach
 
@@ -169,30 +138,25 @@ Artifacts:
   engineering. Roll back the epoch or patch the reward config before resuming
   settlements.
 
-Keeping these dashboards and playbooks up to date ensures emission invariants
-remain intact and incidents can be remediated quickly.
+Keep this reference current so these playbooks are ready to use the moment
+the underlying metrics get wired into the real evidence/penalty/reward code
+paths (see the caveat at the top of this document).
 
 ## Runbooks
 
-### Updating the emission schedule
+### Changing the emission rate
 
-1. Pull the latest schedule JSON snapshot and TOML template from `config/potso-emissions.toml`.
-2. Draft changes in a feature branch and run `scripts/validate-emission-schedule.sh` to lint for overlaps or negative pools.
-3. Present the diff to governance for approval. Capture the ticket ID.
-4. Deploy by copying the TOML to validators, reloading the service, and confirming `potso.audit` emits `emission_schedule_applied` with the expected hash.
-5. Validate dashboards by comparing against the updated screenshots and confirm `potso_epoch_pool` reflects the new pool.
+1. Update `EmissionPerEpoch` under `[potso.rewards]` in the target
+   environment's TOML config (see `config/prod.toml`).
+2. Present the diff to governance for approval. Capture the ticket ID.
+3. Deploy the updated config to validators and reload the service.
+4. Confirm the change took effect by watching `potso_epoch_pool` on the
+   POTSO Overview dashboard at the next epoch rollover.
 
 ### Responding to cap breach alerts
 
 1. When `POTSOEmissionCapApproach` fires, open the Emissions & Caps dashboard and inspect `potso_epoch_pool` vs `potso_rewards_sum`.
 2. Confirm whether penalties or unexpected dust accumulation drove the delta by reviewing `potso_penalty_applied_total` and `potso_rounding_dust`.
-3. If the scheduled pool is incorrect, revert to the previous snapshot using the change log reference.
-4. If penalties exhausted the pool, coordinate with compliance to review recent evidence and consider temporarily increasing `max_epoch_cap` (with governance approval).
-5. Document the investigation in the incident tracker and update the schedule artifacts if a change was deployed.
-
-### Webhook degradation during emissions
-
-1. Cross-reference the Rewards Pipeline dashboard for the affected destination.
-2. Use the alert playbook `POTSOFailedWebhookDelivery` for initial triage, then throttle retry workers with `scripts/potso-webhook-throttle.sh` if needed.
-3. Notify external partners, share the relevant export checksums, and pause settlements until acknowledgements resume.
-4. After recovery, confirm the webhook availability SLO was restored and close the incident with references to the Grafana screenshot timestamps.
+3. If the configured `EmissionPerEpoch` is wrong for current conditions, coordinate with governance on a corrected value (see above).
+4. If penalties exhausted the pool, coordinate with compliance to review recent evidence.
+5. Document the investigation in the incident tracker.
