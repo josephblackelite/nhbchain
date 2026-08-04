@@ -17,7 +17,6 @@ Treasury operations are now instrumented end-to-end: every burn, mint, and recon
 2. `SwapRecordBurn` writes the receipt to the burn ledger, marks linked vouchers as `reconciled`, and emits:
    - `swap.burn.recorded` – the authoritative off-ramp audit trail.
    - `swap.treasury.reconciled` – declaring the vouchers reconciled against treasury inventory.
-3. Operators can also call `swap_markReconciled` (via RPC) for manual adjustments; the same event stream is produced.
 
 ## Policy guardrails
 

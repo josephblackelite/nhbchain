@@ -36,7 +36,7 @@ sequenceDiagram
 * Display alias avatar (or fallback identicon) from `avatarRef`.
 * Highlight creation date: "Member since May 2024".
 * Render linked address fingerprint: `nhb1...r0cks`.
-* Warn if alias version changed recently (possible re-assignment) by querying `identity_get`.
+* Warn if alias version changed recently (possible re-assignment) by querying `identity_resolve`.
 
 ## 2. Pay by Email (Recipient not yet registered)
 
@@ -110,7 +110,7 @@ znhb://pay?to=@frankrocks&amount=25.75&token=NHB&memo=Lunch
 
 * **Human confirmation**: Always show alias + avatar + creation date before payment.
 * **Fingerprint**: Render a short checksum of the primary address (e.g., BLAKE3 6 chars) to catch last-minute swaps.
-* **Version watch**: If `identity_get` shows `updatedAt` within the last minute, display warning banner.
+* **Version watch**: If `identity_resolve` shows `updatedAt` within the last minute, display warning banner.
 * **Claimable context**: When paying by email, indicate "Funds held until frank@example.com claims by Jun 18".
 * **Escrow link**: Provide "View escrow" CTA linking to [Escrow module docs](../escrow/escrow.md) for transparency.
 

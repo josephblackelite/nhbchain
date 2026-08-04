@@ -41,7 +41,7 @@ bonus programs layered on top where applicable.
 
 ## Monitor Treasury Health
 
-* Track the loyalty treasury balance with `nhb_getAccount` or Prometheus.
+* Track the loyalty treasury balance with `nhb_getBalance` or Prometheus.
 * Watch for `reason=treasury_insufficient` on `loyalty.base.skipped`.
 * Alert before the treasury balance falls below projected reward demand.
 
