@@ -116,9 +116,25 @@ Successful response:
   "reservation_id": "q-1717787718000000000",
   "amount": 100,
   "created_at": "2024-06-07T19:15:24Z",
+  "settlement_id": "settle-1717787724000000000-a1b2c3d4",
+  "settlement_rail": "nowpayments",
+  "settlement_status": "submitted",
   "trace_id": "102030405060708090a0b0c0d0e0f001"
 }
 ```
+
+| Field | Description |
+| --- | --- |
+| `intent_id` | Identifier for the created cash-out intent. |
+| `reservation_id` | The reservation this cash-out consumed. |
+| `amount` | Human-decimal payout amount. |
+| `created_at` | Intent creation timestamp. |
+| `settlement_id` | Durable settlement record ID. Only present when a settlement manager is configured. |
+| `settlement_rail` | `nowpayments` or `manual_treasury` — which rail is settling this cash-out. Only present when settlement is configured. |
+| `settlement_status` | `pending`, `submitted`, `settled`, or `failed`. Only present when settlement is configured. |
+| `trace_id` | OpenTelemetry trace ID for correlation. |
+
+Settlement-initiation failure never fails this response -- the cash-out intent and ledger movement are already durably committed by the time settlement is attempted. A failed or stuck settlement is surfaced via `settlement_status` and the audit trail (`GET /admin/audit/events`), and can be retried or confirmed via the `/admin/settlements/{id}/*` endpoints documented in [service.md](service.md).
 
 Preview response returns the same `501` payload as other endpoints.
 

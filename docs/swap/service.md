@@ -37,14 +37,21 @@ Operational tooling can query these tables directly or export them to CSV for re
 
 ## Admin API
 
-`swapd` exposes three primary administrative endpoints:
+`swapd` exposes these administrative endpoints:
 
-| Method | Path                    | Description                              |
-| ------ | ----------------------- | ---------------------------------------- |
-| GET    | `/healthz`              | Basic liveness check.                    |
-| GET    | `/admin/policy`         | Retrieve the active throttle policy.     |
-| PUT    | `/admin/policy`         | Replace the throttle policy.             |
-| POST   | `/admin/throttle/check` | Reserve capacity for mint/redeem events. |
+| Method | Path                                    | Description                                                                 | Request payload |
+| ------ | ---------------------------------------- | ---------------------------------------------------------------------------- | ---------------- |
+| GET    | `/healthz`                              | Basic liveness check.                                                        | none |
+| GET    | `/admin/policy`                         | Retrieve the active throttle policy.                                         | none |
+| PUT    | `/admin/policy`                         | Replace the throttle policy.                                                 | throttle policy JSON |
+| POST   | `/admin/throttle/check`                 | Reserve capacity for mint/redeem events.                                     | `{"action":"mint"\|"redeem"}` |
+| GET    | `/admin/audit/events`                   | Query the durable quote/reserve/cashout/settlement audit trail.              | query params: `partner_id`, `limit` |
+| GET    | `/admin/settlements`                    | List settlement records (rail, status, external ref) for stable-swap cash-outs. | query params: `partner_id`, `status`, `limit` |
+| POST   | `/admin/settlements/{id}/confirm`       | Record operator-verified evidence a settlement actually completed.           | `{"reference": string, "note"?: string, "operator"?: string}` |
+| POST   | `/admin/settlements/{id}/retry`         | Re-attempt a failed NOWPayments payout submission.                           | none |
+| POST   | `/admin/settlements/{id}/fail`          | Manually close out a stuck pending/submitted settlement.                     | `{"reason"?: string}` |
+
+The four `/admin/settlements*` endpoints return `501 Not Implemented` with `{"error": "settlement not enabled"}` when no settlement manager is configured (see [Stable Funding API](stable-api.md) for the settlement rails themselves).
 
 All admin endpoints require either a valid bearer token or a mutually-authenticated TLS connection. Requests without
 credentials receive `401 Unauthorized` before reaching the business logic. Configure the security block in `services/swapd/config.yaml`:
