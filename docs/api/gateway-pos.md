@@ -1,143 +1,49 @@
 # POS gateway HTTP API
 
-The POS gateway exposes a lightweight HTTP surface for POS terminals and
-merchant middleware to submit signed NHB Pay intents and poll their lifecycle
-status. The gateway accepts the canonical NHB Pay URI payload described in
-[the POS intent spec](../specs/nhb-pay.md) and proxies submissions to the node's
-gRPC transaction service.
+The POS gateway (`gateway/routes/*.go`) does not expose an `/api/pos/*` HTTP
+REST surface. POS payment submission and status lookup are handled by two
+separate, real interfaces instead:
 
-For MDR, free-tier, and routing expectations that apply to these endpoints, see
+For MDR, free-tier, and routing expectations that apply to POS payments, see
 [fee policy](../fees/policy.md) and [fee routing](../fees/routing.md).
 
-All endpoints live under the `/api/pos` prefix and require TLS in production.
-Unless stated otherwise the gateway returns JSON responses and the standard
-`Content-Type: application/json` header.
+## Submitting a payment (gRPC)
 
-## `POST /api/pos/intents`
+POS authorize/capture/void requests are submitted through the `pos.v1.Tx`
+gRPC service defined in [`proto/pos/tx.proto`](../../proto/pos/tx.proto) and
+implemented in [`rpc/pos_grpc.go`](../../rpc/pos_grpc.go):
 
-Submit a signed NHB Pay intent. The gateway validates the payload, enqueues it
-through the POS Tx gRPC service, and returns an authorization reference that can
-be used for follow-up capture or void operations.
-
-### Request body
-
-```json
-{
-  "intentRef": "0x2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01",
-  "uri": "nhbpay://intent/2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01?amount=15.25&currency=USD&expiry=1707436800&merchant=nhb1m0ckmerchantaddre55&device=kiosk-7&paymaster=nhb1sponsorship&sig=5b0481e43cbb27c4c76bf0fa104d8a2ffb329a84797d0c0edc55fb6a2dcef0125c7d4090560ce10a4bf845ba1b4c745cf3e5012ef0d8c2a8d98d00ab91c5dd1a",
-  "payer": "nhb1samplepayer"
-}
-```
-
-| Field | Type | Description |
+| RPC | Request | Response |
 | --- | --- | --- |
-| `intentRef` | string | Lowercase hex-encoded 32 byte reference. |
-| `uri` | string | Canonical NHB Pay URI containing all metadata and merchant signature. |
-| `payer` | string | NHB address of the payer/customer wallet. |
-| `metadata` | object (optional) | Additional device or cashier metadata echoed back in status responses. |
+| `AuthorizePayment` | `MsgAuthorizePayment` (`payer`, `merchant`, `amount`, `expiry`, `intent_ref`, `nonce`, `expires_at`, `chain_id`) | `MsgAuthorizePaymentResponse` (`authorization_id`) |
+| `CapturePayment` | `MsgCapturePayment` (`merchant`, `authorization_id`, `amount`, `nonce`, `expires_at`, `chain_id`) | `MsgCapturePaymentResponse` (`authorization_id`, `captured_amount`, `refunded_amount`) |
+| `VoidPayment` | `MsgVoidPayment` (`merchant`, `authorization_id`, `reason`, `nonce`, `expires_at`, `chain_id`) | `MsgVoidPaymentResponse` (`authorization_id`, `refunded_amount`, `expired`) |
 
-The gateway derives the amount, currency, expiry, and merchant address from the
-URI. Requests missing mandatory query parameters or with invalid signatures are
-rejected with `400 Bad Request`.
+See [the POS intent spec](../specs/nhb-pay.md) and
+[`docs/specs/pos-lifecycle.md`](../specs/pos-lifecycle.md) for the payload
+format and the authorize/capture/void lifecycle these calls drive.
 
-### Response
+## Looking up authorization status (JSON-RPC)
 
-```json
+To resolve an authorization from a client-supplied `intentRef`, call
+`pos_getAuthorizationByIntentRef` on the node's JSON-RPC server (`cmd/nhb`,
+not the gateway). It takes a single hex-encoded `intentRef` parameter, does a
+direct lookup against node state, and returns a `POSAuthorizationResult`
+(`id`, `payer`, `merchant`, `amount`, `capturedAmount`, `refundedAmount`,
+`expiry`, `intentRef`, `status`, `createdAt`) or `null` if unknown. It does
+not combine a gateway submission log with realtime finality updates.
+
+```jsonc
 {
-  "authorizationId": "auth_01hatz8k8k8c8n3qsk4x3k8s1x",
-  "intentRef": "0x2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01",
-  "status": "pending",
-  "submittedAt": "2024-02-08T12:00:00Z"
+  "id": 1,
+  "jsonrpc": "2.0",
+  "method": "pos_getAuthorizationByIntentRef",
+  "params": ["0x2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01"]
 }
 ```
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `authorizationId` | string | Reference returned by the POS gRPC Tx service. |
-| `intentRef` | string | Echoes the submitted intent reference. |
-| `status` | string | Initial lifecycle status (`pending` on success). |
-| `submittedAt` | RFC3339 string | Timestamp the gateway accepted the submission. |
+## Polling strategy
 
-Successful submissions return HTTP `202 Accepted` along with the body above.
-
-The gateway returns the following status codes:
-
-| Code | Description |
-| --- | --- |
-| `202` | Intent accepted and forwarded to the network. |
-| `400` | Malformed request, missing signature, or replayed intent. |
-| `409` | Intent already consumed on-chain. |
-| `422` | Intent expired. |
-| `500` | Upstream gRPC or consensus error. |
-
-## `GET /api/pos/intents/{intentRef}`
-
-Fetch the lifecycle status for a previously submitted intent. This endpoint
-combines the gateway submission log with realtime finality updates streamed from
-`pos.v1.Realtime`.
-
-### Path parameters
-
-| Parameter | Description |
-| --- | --- |
-| `intentRef` | Lowercase hex string identifying the intent. |
-
-### Response
-
-```json
-{
-  "intentRef": "0x2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01",
-  "authorizationId": "auth_01hatz8k8k8c8n3qsk4x3k8s1x",
-  "status": "finalized",
-  "merchant": "nhb1m0ckmerchantaddre55",
-  "amount": "15.25",
-  "currency": "USD",
-  "payer": "nhb1samplepayer",
-  "paymaster": "nhb1sponsorship",
-  "device": "kiosk-7",
-  "submittedAt": "2024-02-08T12:00:00Z",
-  "finalizedAt": "2024-02-08T12:00:05Z",
-  "txHash": "0xe314f9f6f1c80c7a6f332cb4988b0d0d7aab70f6ea51a6f7cd2d6fef3b8c2c77",
-  "height": 145902,
-  "cursor": "pos-finality-145902-7"
-}
-```
-
-`status` transitions through the following states:
-
-| Status | Meaning |
-| --- | --- |
-| `pending` | Intent accepted and awaiting block inclusion. |
-| `finalized` | Intent finalized in a BFT block. |
-| `rejected` | Downstream node rejected the transaction (includes `errorCode`). |
-| `expired` | Gateway dropped the intent because `expiry` elapsed before acceptance. |
-
-If the intent is unknown the gateway returns `404 Not Found`.
-
-### Polling strategy
-
-Gateways retain submission metadata for at least 24 hours. Terminals SHOULD
-prefer the realtime gRPC/WebSocket stream for live updates and only poll the
-status endpoint during recovery or when a terminal cannot maintain a streaming
-connection.
-
-## Error schema
-
-Errors use the following JSON structure:
-
-```json
-{
-  "error": {
-    "code": "INTENT_EXPIRED",
-    "message": "intent expiry 1707436800 is in the past"
-  }
-}
-```
-
-| Field | Description |
-| --- | --- |
-| `code` | Stable identifier for programmatic handling. |
-| `message` | Human-readable description. |
-
-Common error codes include `INVALID_SIGNATURE`, `INTENT_CONSUMED`,
-`INTENT_EXPIRED`, and `UPSTREAM_UNAVAILABLE`.
+Prefer the realtime gRPC/WebSocket stream ([`docs/api/pos-realtime.md`](pos-realtime.md))
+for live updates, and only fall back to polling `pos_getAuthorizationByIntentRef`
+during recovery or when a terminal cannot maintain a streaming connection.

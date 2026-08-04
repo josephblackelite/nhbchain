@@ -14,9 +14,12 @@
 
 1. **Trigger conditions** – Initiate break-glass when the custody oracle is unavailable, deviation
    exceeds approved limits, or proof freshness alarms fire for more than two windows.
-2. **Activate manual feed** – Inject a manual quote via `SetSwapManualQuote` with explicit
-   justification recorded in the incident ticket. Confirm subsequent mints emit `swap.mint.proof`
-   events with `source=manual` and the temporary feeders listed.
+2. **Activate manual feed** – `SetSwapManualQuote` injects a manual quote with explicit
+   justification recorded in the incident ticket, after which subsequent mints emit
+   `swap.mint.proof` events with `source=manual` and the temporary feeders listed. This function
+   has no JSON-RPC method, admin endpoint, or CLI command exposed today; invoking it currently
+   requires a code change and rebuild of the node, so it is not an action an on-call operator can
+   perform in the moment.
 3. **Pause minting** – If manual rates cannot be trusted, pause minting by disabling the token or
    revoking the provider in `swap.ProviderStatus` until market conditions normalize.
 4. **Post-incident review** – Export the affected vouchers and burns, capturing `priceProofId` and

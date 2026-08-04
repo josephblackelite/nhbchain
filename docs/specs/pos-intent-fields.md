@@ -11,8 +11,11 @@ and the real-time QoS guarantees in [POS quality of service](./pos-qos.md).
 | `intent_ref` | 32&nbsp;bytes | Merchant generated nonce that uniquely identifies the payment intent. Values MUST be cryptographically random and collision resistant. Validators persist the reference to guarantee single use. |
 | `intent_expiry` | `uint64` seconds | Unix timestamp indicating the absolute expiry. Consensus clamps the stored expiry to a 24 hour TTL and rejects any payload where `now >= intent_expiry`. |
 | `merchant_addr` | string | Canonical merchant address that wallets surface to the payer. The consensus layer stores the supplied bech32 address verbatim. |
-| `amount` | string | Decimal amount encoded with up to eight fractional digits (for example `12.34`). The ledger interprets the string as base 10 NHB minor units. |
-| `currency` | string | ISO-4217 currency code that qualifies the amount (for example `USD`). |
+
+`amount` is not an envelope metadata field. For a POS-tagged
+`Transfer`/`TransferZNHB` transaction, the amount is the transaction's own
+`Value` field (`core/types/transaction.go`) — a big integer, not a
+decimal-string envelope field. There is no `currency` field anywhere on-chain.
 
 ## Optional context fields
 

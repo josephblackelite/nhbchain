@@ -16,7 +16,7 @@ consensus: "localhost:9090"   # consensus service endpoint
 chain_id: "localnet"          # consensus chain identifier
 signer_key_env: "GOVERND_SIGNER_KEY" # environment variable containing a 32 byte hex encoded key
 nonce_start: 1                 # baseline account nonce used when no persisted state exists
-nonce_store_path: "/var/lib/nhb/governd/nonce" # file used to persist the next nonce across restarts
+nonce_store_path: "services/governd/data/nonce" # file used to persist the next nonce across restarts
 fee:                           # optional transaction fee metadata
   amount: ""
   denom: ""

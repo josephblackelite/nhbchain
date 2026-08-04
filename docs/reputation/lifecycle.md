@@ -27,7 +27,7 @@ value to avoid presenting stale information.
 ## Revocation
 
 Verifiers may revoke their own attestations by calling
-`Node.ReputationRevokeSkill(attestationID, reason)`. Revocation marks the record
+`Node.ReputationRevokeSkill(verifier, attestationID, reason)`. Revocation marks the record
 with a timestamp and optional justification, preventing it from being returned
 on future reads. A `reputation.skillRevoked` audit event is emitted to provide a
 traceable history for downstream systems.

@@ -99,8 +99,9 @@ A simple `GET /healthz` endpoint returns `200 OK` for external monitoring.
 ## Failure modes
 
 - **401 Unauthorized** – Missing or invalid HMAC header.
-- **400 Bad Request** – Malformed JSON, unknown asset, or unsupported amount
-  precision.
+- **400 Bad Request** – Malformed JSON or unsupported amount precision.
+- **422 Unprocessable Entity** – Unknown/unsupported asset, or a token address
+  mismatch for the configured asset.
 - **409 Conflict** – Settlement transaction not yet final or mismatched.
 - **502 Bad Gateway** – Downstream consensus submission failed.
 

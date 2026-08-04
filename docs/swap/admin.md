@@ -79,7 +79,6 @@ Checklist before executing:
 
 If the command returns an error, inspect the JSON error message for guidance:
 
-* `daily limit exceeded` – the voucher was already processed under a new identifier.
 * `insufficient balance` – the custodial account lacks funds; coordinate with treasury.
 * `voucher not found` – confirm the `providerTxId` matches the PSP record exactly.
 

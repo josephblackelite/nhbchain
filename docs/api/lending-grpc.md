@@ -103,7 +103,7 @@ service returns the following codes:
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/ListMarkets <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/ListMarkets <<'JSON'
 {}
 JSON
 ```
@@ -127,7 +127,7 @@ JSON
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/GetMarket <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/GetMarket <<'JSON'
 {
   "key": {"symbol": "nhb"}
 }
@@ -153,7 +153,7 @@ JSON
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/GetPosition <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/GetPosition <<'JSON'
 {
   "account": "nhb1exampleaccount"
 }
@@ -181,7 +181,7 @@ JSON
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/SupplyAsset <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/SupplyAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
@@ -211,7 +211,7 @@ JSON
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/WithdrawAsset <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/WithdrawAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
@@ -241,7 +241,7 @@ JSON
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/BorrowAsset <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/BorrowAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},
@@ -271,7 +271,7 @@ JSON
 **Sample invocation**
 
 ```bash
-grpcurl -plaintext localhost:9090 lending.v1.LendingService/RepayAsset <<'JSON'
+grpcurl -plaintext localhost:9444 lending.v1.LendingService/RepayAsset <<'JSON'
 {
   "account": "nhb1exampleaccount",
   "market": {"symbol": "nhb"},

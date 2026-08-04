@@ -117,7 +117,7 @@ Suggested webhook payload for a successful claim:
 
 ```json
 {
-  "event": "identity.claimable.claimed",
+  "event": "claimable.claimed",
   "id": "0x92fd...",
   "payee": "nhb1recipient...",
   "token": "NHB",
@@ -135,6 +135,6 @@ Include an HMAC signature header so merchants can verify authenticity.
 * **Rate limits** – gateway enforces per-IP and per-email attempt caps (5/hour default). Node RPCs inherit standard bearer-token throttles.
 * **Anomaly detection** – monitor claim events for abnormal velocity by hint or payer. Flag repeated failures, mismatched preimages, or rapidly reused hints.
 * **PII minimisation** – only salted hashes leave the gateway. Wallet logs should redact raw emails and hints whenever possible.
-* **Idempotency** – clients may safely retry create/claim calls; the node returns stable results if nothing changes.
+* **Idempotency** – only `identity_claim` is safe to retry; replays return a stable result without double-paying. `identity_createClaimable` is **not** idempotent — each call mints a new claim and debits the payer again, so retrying it after a network error risks double-debiting.
 
 For a deeper look at alias records and avatar usage, see [identity.md](./identity.md) and [avatars.md](./avatars.md).

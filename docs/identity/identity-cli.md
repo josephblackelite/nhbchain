@@ -7,10 +7,8 @@ configured with the correct node endpoint (`--node`) and chain ID.
 
 * `--node`: JSON-RPC endpoint (default from config).
 * `--chain-id`: chain ID (e.g., `14699254016670310680`).
-* `--key`: local key name or path to signing key.
-* `--expiry`: optional signature expiry override (seconds from now).
 
-All mutating commands prompt for confirmation before broadcasting unless `--yes` is provided.
+Commands build and submit their RPC payload directly — there is no local signing step or broadcast confirmation prompt.
 
 ## Register Alias
 
@@ -121,36 +119,33 @@ nhb-cli id resolve --alias frankr0cks
 
 ```bash
 nhb-cli id create-claimable \
-  --email-hash 0x92fd... \
+  --payer nhb1payer... \
+  --recipient 0x3a4b... \
   --token NHB \
   --amount 10.00 \
-  --expiry 1718736000 \
-  --sig 0xSIG
+  --deadline 1718736000
 ```
 
-CLI prints the `claimId` and expiry timestamp. Notify the recipient with the claim information.
+CLI prints the raw JSON-RPC result (`claimId`, `expiresAt`, etc). Notify the recipient with the claim information.
 
 ## Claim Funds
 
 ```bash
 nhb-cli id claim \
-  --claim-id 0x92fd... \
-  --sig 0xRECIPSIG
+  --id 0x92fd... \
+  --payee nhb1recipient... \
+  --preimage 0x3a4b...
 ```
 
 **Output**
 
-```
-✔ Claim settled
-Amount : 10.00 NHB
-To     : nhb1primary...
-Tx     : 0xabc123...
+```json
+{"ok":true,"token":"NHB","amount":"25"}
 ```
 
 ---
 
 Tips:
 
-* Use `--json` flag on any command to get machine-readable responses.
-* Combine with `nhb-cli events tail --topic identity.*` to monitor alias activity.
+* Output is always raw JSON — no flag needed for machine-readable responses.
 * For advanced scripting, pipe outputs into `jq`.

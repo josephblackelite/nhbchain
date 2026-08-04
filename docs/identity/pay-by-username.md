@@ -15,7 +15,7 @@ aliases to settlement addresses, while claimables bridge first-time recipients v
 2. **Resolve**: Wallet calls `identity_resolve("frankrocks")`.
 3. **Safety Review**: Wallet surfaces alias, avatar, creation date, and a fingerprint of the primary address (first/last 6 chars).
 4. **Confirm & Transfer**: Wallet constructs a token transfer to the returned `primary` address.
-5. **Observe Events**: Clients may subscribe to `identity.alias.primarySet` to detect address changes.
+5. **Observe Events**: Clients may subscribe to `identity.alias.primaryUpdated` to detect address changes.
 
 ```mermaid
 sequenceDiagram
@@ -54,9 +54,9 @@ When the sender only knows an email address, claimables allow funds to be held u
 
 1. Recipient receives email invite with `claimId` and instructions.
 2. Recipient verifies email through the [Identity Gateway](./identity-gateway.md#post-identityemailverify).
-3. Recipient registers an alias via `identity_registerAlias`.
+3. Recipient registers an alias via `identity_setAlias`.
 4. Recipient signs `identity_claim(claimId, recipientSig)`.
-5. Funds settle to the alias primary address; events emitted include `identity.claimable.claimed`.
+5. Funds settle to the alias primary address; events emitted include `claimable.claimed`.
 
 ```mermaid
 sequenceDiagram
@@ -71,7 +71,7 @@ sequenceDiagram
   Wallet->>Node: identity_createClaimable(emailHash,...)
   Node-->>Wallet: {claimId}
   Recipient->>Gateway: POST /identity/email/verify
-  Recipient->>Node: identity_registerAlias
+  Recipient->>Node: identity_setAlias
   Recipient->>Node: identity_claim(claimId)
   Node-->>Recipient: transfer executed
 ```

@@ -82,8 +82,8 @@ accepts the request:
   "jsonrpc": "2.0",
   "result": {
     "address": "nhb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-    "balanceNHB": "0x0000000000000000000000000000000000000000000000002386f26fc10000",
-    "balanceZNHB": "0x0000000000000000000000000000000000000000000000008ac7230489e800",
+    "balanceNHB": 10000000000000000,
+    "balanceZNHB": 2500000000000000000,
     "nonce": 42
   }
 }
@@ -94,7 +94,7 @@ from trusted infrastructure. Attach `Authorization: Bearer <NHB_RPC_TOKEN>` to
 the HTTP headers (see the
 [`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
 walkthrough for the complete header list). The RPC layer enforces the bearer
-token via [`requireAuth`](../../rpc/http.go#L1795-L1835), which rejects requests
+token via [`requireAuth`](../../rpc/http.go#L2230-L2256), which rejects requests
 missing the header or using the wrong scheme.
 
 ```bash
@@ -224,9 +224,9 @@ shares, reward index, and payout timing without inspecting raw account state.
 
 ### `stake_claimRewards`
 
-Claims accrued staking rewards and returns the total paid amount, the number of
-reward periods settled, and the timestamp when the next payout becomes
-available.
+Claims accrued staking rewards and returns the total minted amount, the number
+of reward periods settled, the APR (in basis points) used for the payout, and
+the timestamp when the next payout becomes available.
 
 ```json
 // Authorization: Bearer <NHB_RPC_TOKEN>
@@ -243,15 +243,16 @@ available.
   "id": 5,
   "jsonrpc": "2.0",
   "result": {
-    "paid": "7425000000000000000000",
+    "minted": "7425000000000000000000",
     "periods": 2,
-    "next_eligible": 1722561600
+    "aprBps": 1250,
+    "nextEligibleTs": 1722561600
   }
 }
 ```
 
 Attempting to claim before the payout window elapses yields a `409` response
-with the `stake: claim not yet due` message and a `next_eligible` hint in the
+with the `stake: claim not yet due` message and a `nextEligibleTs` hint in the
 error `data` field. For example:
 
 ```json
@@ -262,7 +263,7 @@ error `data` field. For example:
     "code": -32602,
     "message": "stake: claim not yet due",
     "data": {
-      "next_eligible": 1719979200
+      "nextEligibleTs": 1719979200
     }
   }
 }
@@ -277,10 +278,7 @@ Error responses include:
   the `staking module paused` message when governance pauses staking.
 * `409 Conflict` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
   `stake: claim not yet due` message when the payout window has not elapsed. The
-  response includes a `next_eligible` hint in the error `data` field.
-* `501 Not Implemented` with JSON-RPC code `-32000` (`codeServerError`) and the
-  `staking not ready` message while rewards are still being enabled on the
-  network.
+  response includes a `nextEligibleTs` hint in the error `data` field.
 * `400 Bad Request` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
   `failed to claim staking rewards` message for malformed parameters or other
   validation failures.

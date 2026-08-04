@@ -15,7 +15,6 @@ Identity operations on NHBChain are intentionally observable so that custodians,
 
 All events are appended to the node state log and exposed via:
 
-* JSON-RPC `events_stream` (see Observability docs) – suited for real-time ingestion.
 * Block logs – every committed block includes emitted events in execution order.
 * Gateway webhooks – operators can relay selected events to merchants or compliance tooling.
 
@@ -31,7 +30,7 @@ All events are appended to the node state log and exposed via:
 * **PII minimisation** – on-chain data excludes plaintext email; regulators inspecting the chain see only salted hashes and alias metadata.
 * **Lawful disclosure** – when compelled, operators can map salted hashes back to email addresses using gateway logs. Document the salt rotation schedule to prove uniqueness.
 * **Abuse monitoring** – maintain dashboards tracking alias registrations per IP, verification retries, and claim velocity per payer. Alert on anomalies (e.g., >20 failed verifications/hour from one IP, bursts of high-value claims sharing the same hint).
-* **Incident response** – if an alias is compromised, governance can freeze or reassign by submitting a governance proposal. Wallets should surface alias `UpdatedAt` and event history to end users.
+* **Incident response** – Wallets should surface alias `UpdatedAt` and event history to end users.
 * **Audit trails** – retain the RPC request metadata (caller IP, authenticated user) for identity mutations. Pair with event logs to reconstruct end-to-end changes.
 
 For more operational controls see [identity-security-compliance.md](./identity-security-compliance.md) and the platform observability runbooks.

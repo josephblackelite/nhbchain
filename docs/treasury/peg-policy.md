@@ -11,9 +11,11 @@ pricing risk across custody and exchange venues.
 - **Secondary market data** – CoinGecko and other public APIs remain configured as
   lower-priority fallbacks. They automatically surface when the primary feeds deviate or fail
   freshness checks.
-- **Manual breaker feed** – The on-call team can inject a signed manual quote via
-  `SetSwapManualQuote`. Manual rates sit at the bottom of the priority stack and are only used
-  during emergency circuit-breaker scenarios.
+- **Manual breaker feed** – `SetSwapManualQuote` injects a signed manual quote at the bottom of
+  the priority stack, used only during emergency circuit-breaker scenarios. No JSON-RPC method,
+  admin endpoint, or CLI command currently exposes this function; the on-call team cannot invoke
+  it through any operational interface today — doing so requires a code change and rebuild of the
+  node.
 
 ## Deviation and freshness guards
 

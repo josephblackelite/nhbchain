@@ -12,9 +12,9 @@ example in the RPC reference.
 ## Authenticated submission
 
 `nhb_sendTransaction` is a privileged RPC on validator nodes. Every request is
-wrapped by `requireAuth`, which rejects calls that omit the `Authorization`
-header or fail bearer-token verification before `handleSendTransaction` even
-parses the payload.【F:rpc/http.go†L660-L704】【F:rpc/http.go†L1180-L1198】 Wallets
+wrapped by `requireAuth`/`requireAuthInto`, which reject calls that omit the
+`Authorization` header or fail bearer-token verification before
+`handleSendTransaction` even parses the payload. Wallets
 MUST proxy signed transactions through trusted server infrastructure so the
 token never ships to the browser. Reuse helpers such as `rpcRequest(...,
 withAuth=true)` on your server routes, then forward the fully signed JSON body
@@ -44,8 +44,8 @@ outgoing transaction.
   "jsonrpc": "2.0",
   "result": {
     "address": "nhb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-    "balanceNHB": "0x0000000000000000000000000000000000000000000000002386f26fc10000",
-    "balanceZNHB": "0x0000000000000000000000000000000000000000000000008ac7230489e800",
+    "balanceNHB": 10000000000000000,
+    "balanceZNHB": 39062500000000000,
     "nonce": 42
   }
 }
@@ -117,9 +117,8 @@ ZapNHB uses the new `TxTypeTransferZNHB (0x10)` constant. Only the asset changes
 `nhb_sendTransaction` is a privileged RPC. Every request must present
 `Authorization: Bearer <NHB_RPC_TOKEN>` so only trusted infrastructure can push
 transactions into the network. The HTTP layer enforces this via the
-[`requireAuth`](../../rpc/http.go#L1180-L1211) guard that runs before
-[`handleSendTransaction`](../../rpc/http.go#L1417-L1478), rejecting any call
-that lacks the bearer token. When the header is accepted the handler forwards
+`requireAuth`/`requireAuthInto` guard that runs before `handleSendTransaction`,
+rejecting any call that lacks the bearer token. When the header is accepted the handler forwards
 the payload to `node.AddTransaction`, queuing it for consensus alongside other
 pending transfers. Wallets **must not** ship the bearer token to browsers or
 mobile clients—proxy the submission through a server endpoint (for example the
@@ -133,7 +132,7 @@ execution. ZNHB transfers **do not** carry an additional MDR-style fee; instead
 they follow the per-asset merchant discount rate described in the [fees
 reference](../fees/policy.md) where ZNHB promotions are currently fully
 sponsored. Any NHB required for gas is withdrawn from the sender (or from the
-configured sponsor account if [pass-through sponsorship](../fees/policy.md#pass-through-sponsorship) is
+configured sponsor account if [pass-through sponsorship](../fees/policy.md) is
 enabled for the merchant), while the ZNHB face value routes to the recipient.
 
 ### Expected responses
@@ -187,11 +186,11 @@ nonce:
 * **NHB transfers** – `applyEvmTransaction` executes the envelope on the EVM,
   then reloads sender and recipient accounts to apply gas, loyalty, and fee
   bookkeeping before persisting the debited `from`/credited `to` balances back
-  into the trie.【F:core/state_transition.go†L1187-L1439】
+  into the trie (`core/state_transition.go`, `applyEvmTransaction`).
 * **ZNHB transfers** – `applyTransferZNHB` performs the debit/credit entirely in
   the native state processor, subtracting from `BalanceZNHB`, adding to the
   recipient (creating the account if needed), handling fees, and recording the
-  transfer event.【F:core/state_transition.go†L1463-L1532】
+  transfer event (`core/state_transition.go`, `applyTransferZNHB`).
 
 Gas charges are still paid in NHB, so wallets should confirm sufficient NHB
 balance alongside ZNHB holdings before attempting either transfer type.

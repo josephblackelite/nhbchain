@@ -62,8 +62,10 @@ idle auto-refund flow:
 * Once the explicit `deadline` elapses, the engine refunds any funded legs (or
   cancels the trade outright if neither funded) using the existing expiry rules.
 
-These behaviours guarantee that funds never remain trapped indefinitely—even
-when both sides funded but failed to settle.
+These behaviours are implemented and covered by tests, but `TradeTryExpire` and its `StateProcessor` wrapper are not currently
+invoked by anything outside test files — there is no RPC handler, maintenance ticker, or other production call site that triggers
+it. Until something calls it in production, funds can remain trapped past the deadline/idle timeout rather than being
+automatically refunded.
 
 ## Operational toggles
 
@@ -77,5 +79,6 @@ go run ./examples/docs/ops/pause_toggle --module trade --state pause
 
 Per-offer controls such as `deadline` and `slippageBps` act as on-chain caps and
 surface descriptive `codeInvalidParams` errors when breached (for example
-`"escrow engine: price slippage exceeded"`). Clients should present the error
-messages directly so counterparties understand which guard triggered.
+`"trade: settlement outside slippage tolerance"` or `"trade: slippage exceeds
+allowance"`). Clients should present the error messages directly so
+counterparties understand which guard triggered.

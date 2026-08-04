@@ -56,13 +56,13 @@ All numeric values accept scientific notation (e.g. `10000e18`).
 
 1. **Provider allow-list** – Rejects vouchers whose `provider` field is not in the allow list. Emits `swap.alert.limit_hit` with `limit=provider`.
 2. **Sanctions hook** – Calls the configured checker. A `false` response blocks the mint and emits `swap.alert.sanction`.
-3. **Oracle guardrails** – The signed price proof must be fresh (`MaxQuoteAgeSeconds`) and within the configured deviation window (`PriceProofMaxDeviationBps`). Violations emit `swap.alert.oracle` with `limit=oracle_stale` or `limit=oracle_deviation`.
-4. **Slippage tolerance** – The computed mint amount must be within `SlippageBps` of the voucher amount. Violations emit `swap.alert.limit_hit` with `limit=slippage`.
+3. **Oracle guardrails** – The signed price proof must be fresh (`MaxQuoteAgeSeconds`) and within the configured deviation window (`PriceProofMaxDeviationBps`). Violations currently return an RPC error (`ErrSwapPriceProofStale` or `ErrSwapPriceProofDeviation`) - no on-chain alert event is emitted.
+4. **Slippage tolerance** – The computed mint amount must be within `SlippageBps` of the voucher amount. Violations currently return an RPC error (`ErrSwapSlippageExceeded`) - no on-chain alert event is emitted.
 5. **Per-transaction limits** – Enforced before checking historical buckets. Violations emit `swap.alert.limit_hit` with `limit=per_tx_min` or `per_tx_max`.
 6. **Daily & monthly caps** – UTC buckets keyed per address. Hitting a cap blocks the mint and emits `swap.alert.limit_hit` with `limit=daily_cap` or `monthly_cap`.
 7. **Velocity window** – Evaluates mints inside the configured rolling window and emits `swap.alert.velocity` when the threshold is met. The event reports `windowSeconds`, `allowedMints`, and the observed count.
-8. **Cash-out caps** – Asset and tier caps include pending escrow before locking additional NHB. Violations emit `swap.alert.limit_hit` with `limit=cashout_asset_cap` or `limit=cashout_tier_cap`.
-9. **Pause lever** – Governance can flip `Pauses.Swap` to immediately reject voucher submissions with `swap.alert.limit_hit` (`limit=module_paused`). The same switch blocks cash-out intents.
+8. **Cash-out caps** – Asset and tier caps are defined in config and validation code, but are not currently wired into any live path: `core/node.go` never reads `riskParams.CashOut`, and the real cash-out intent flow only checks soft-inventory balance.
+9. **Pause lever** – Governance can flip `Pauses.Swap` to immediately reject voucher submissions. This correctly blocks submissions (and cash-out intents) via a bare `ErrModulePaused` error, but currently emits no alert event.
 
 All alerts are appended to the state event log for audit trails.
 
@@ -104,7 +104,6 @@ Restart the node (or trigger a config reload) after editing the file to apply th
   * `swap.alert.limit_hit`
   * `swap.alert.velocity`
   * `swap.alert.sanction`
-  * `swap.alert.oracle`
 * Inspect counters via the new RPC:
 
 ```json

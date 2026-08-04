@@ -10,8 +10,10 @@ The swap oracle aggregates price updates from the authority feeders and derives 
 
 ### Signer rotation
 
-1. Provision the replacement KMS keypair and record the address using the `SignerHistory` tooling.
-2. Update the payments gateway configuration (`MinterKMSEnv`) and reload the service; the rotating signer wrapper emits an audit log.
+1. Provision the replacement KMS keypair and record the address. There is no dedicated
+   tooling for recording rotated signer addresses today; track it manually (e.g. the
+   rotation runbook or compliance log).
+2. Update the payments gateway configuration (`MinterKMSEnv`) and reload the service.
 3. Call `swap_provider_status` and confirm the `oracleFeeds` metadata contains fresh observations from the new signer.
 4. Remove access to the previous signer and archive the rotation runbook in the security vault.
 

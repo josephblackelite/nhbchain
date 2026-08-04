@@ -12,10 +12,15 @@ validators can reject replayed payloads and enforce bounded settlement windows.
 | `intent_ref` | 32&nbsp;bytes | Merchant generated nonce that uniquely identifies the payment intent. Terminals SHOULD generate a cryptographically random 32 byte value. Wallets and services MUST treat the field as opaque bytes on-chain. |
 | `intent_expiry` | `uint64` seconds | Unix timestamp indicating the absolute expiry of the intent. Validators clamp the stored expiry to `min(intent_expiry, block_time + 24h)` and reject any payload where `now >= intent_expiry`. |
 | `merchant_addr` | string | Canonical merchant address presented to the customer. The canonical representation is the NHB bech32 string (e.g. `nhb1...`). The consensus layer stores the trimmed string exactly as supplied. |
-| `amount` | string | Decimal amount in NHB minor units (for example `12.34`). The format mirrors API amounts: a base 10 string with up to 8 fractional digits. |
-| `currency` | string | ISO-4217 currency code associated with the amount (e.g. `USD`). |
 | `paymaster` | string (optional) | Address or identifier of the entity subsidising the payment. Wallets MUST ignore unknown paymaster schemes but SHOULD preserve the value when submitting transactions. |
 | `device_id` | string (optional) | Identifier emitted by the POS terminal. The value is opaque to consensus and is only surfaced in events for downstream telemetry. |
+
+`amount` is not a field on the signed envelope alongside `intent_ref`,
+`intent_expiry`, `merchant_addr`, and `device_id`. For the replay-protected
+path (an ordinary `Transfer`/`TransferZNHB` transaction carrying
+`tx.IntentRef`), the amount is the transaction's own `Value` field
+(`core/types/transaction.go`) — a big integer, not a decimal string carried on
+the envelope.
 
 ### Replay protection
 

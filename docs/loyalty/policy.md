@@ -25,7 +25,9 @@ Operators can override these settings in `config.toml` under the `[global.loyalt
 
 ## Yearly emission cap
 
-The yearly cap limits how much ZNHB the loyalty engine may emit across base and program rewards within a calendar year. The cap is derived from the configured `YearlyCapPctOfInitialSupply` percentage and the initial ZNHB supply. Each time a reward is applied the engine increments the year-to-date counter. When an emission would exceed the yearly cap the payout is rejected, the counter remains unchanged, and a `loyalty.cap.hit` event is emitted with the attempted amount, configured cap, cumulative emissions, and the remaining headroom (`0` once saturated). Exact matches to the cap are permitted and flagged with the same event so operators can prepare replenishment or governance actions.
+The yearly cap is designed to limit how much ZNHB the loyalty engine may emit across base and program rewards within a calendar year, derived from the configured `YearlyCapPctOfInitialSupply` percentage and the initial ZNHB supply. A `CanEmit` checker function exists to reject a payout that would exceed the cap and leave the year-to-date counter unchanged, and a `loyalty.cap.hit` event type exists to report the attempted amount, configured cap, cumulative emissions, and remaining headroom (`0` once saturated).
+
+**This enforcement is not currently wired into the live reward-payout code paths.** `CanEmit` is only ever called from its own test file, and `loyalty.cap.hit` is never constructed at runtime — neither the base-reward nor the program-reward payout path references the yearly cap at all today. The yearly cap is fully unenforced in production.
 
 ## Pro-rate mode
 
@@ -48,44 +50,42 @@ Set `Global.Loyalty.Dynamic.EnableProRate = false` in `config.toml` to disable t
 
 Production deployments (`NHB_ENV=prod`) refuse to start when `EnableProRate = false` while `EnforceProRate = true`. The daemon exits with a fatal error containing `loyalty.prorate.locked` and guidance to set `global.loyalty.Dynamic.EnforceProRate=false` before retrying. Operators can only make that override in non-production environments; leaving enforcement enabled ensures mainnet runs always settle through the prorating queue.
 
-When the guard fires, operations dashboards will show the fatal startup message and the service health check will remain `DOWN`. Clearing the condition (either by re-enabling pro-rating or by disabling the enforcement flag outside production) allows the node to boot normally, after which the standard pro-rate telemetry (`loyalty_prorate_ratio`, `LoyaltyBudgetProRated` events) resumes.
+When the guard fires, operations dashboards will show the fatal startup message and the service health check will remain `DOWN`. Clearing the condition (either by re-enabling pro-rating or by disabling the enforcement flag outside production) allows the node to boot normally, after which the standard pro-rate telemetry (`nhb_loyalty_prorate_ratio`, `LoyaltyBudgetProRated` events) resumes.
 
 ### End-of-block pro-rate
 
 `EndBlockRewards` resolves the day's outstanding demand, computes the pro-rate ratio, and emits the settlement telemetry used by the Loyalty Budget dashboard:
 
-1. Aggregate all pending base rewards for the current UTC day (`loyalty_demand_zn`).
-2. Compare demand with the remaining budget (`loyalty_budget_zn`).
-3. Clamp the payout multiplier to `min(1, budget / demand)` and expose it as `loyalty_prorate_ratio`.
-4. Apply the multiplier to each queued reward and increment `loyalty_paid_today_zn` with the distributed amount.
+1. Aggregate all pending base rewards for the current UTC day (`nhb_loyalty_demand_zn`).
+2. Compare demand with the remaining budget (`nhb_loyalty_budget_zn`).
+3. Clamp the payout multiplier to `min(1, budget / demand)` and expose it as `nhb_loyalty_prorate_ratio`.
+4. Apply the multiplier to each queued reward and increment `nhb_loyalty_paid_today_zn` with the distributed amount.
 
-This process ensures every participant within the settlement window receives the same proportional treatment. Operators can watch `loyalty_prorate_ratio < 1` alongside the `LoyaltyBudgetProRated` events to confirm the throttling was intentional rather than the result of oracle guard rails.
+This process ensures every participant within the settlement window receives the same proportional treatment. Operators can watch `nhb_loyalty_prorate_ratio < 1` alongside the `LoyaltyBudgetProRated` events to confirm the throttling was intentional rather than the result of oracle guard rails.
 
 #### Before/after example
 
-- **Before `EndBlockRewards`**: The queue holds 1,250 ZNHB in pending rewards while the budget has 1,000 ZNHB remaining. No payouts have been applied yet, so `loyalty_prorate_ratio` is unset.
-- **After `EndBlockRewards`**: The engine computes a ratio of `0.80`, emits `LoyaltyBudgetProRated{day="2024-03-05", budget_zn="1000", demand_zn="1250", ratio_fp="0.8e18"}`, and each recipient sees their reward scaled to 80% of the original amount. Metrics reflect `loyalty_prorate_ratio = 0.80`, `loyalty_budget_zn = 0`, and `loyalty_paid_today_zn = 1,000`.
+- **Before `EndBlockRewards`**: The queue holds 1,250 ZNHB in pending rewards while the budget has 1,000 ZNHB remaining. No payouts have been applied yet, so `nhb_loyalty_prorate_ratio` is unset.
+- **After `EndBlockRewards`**: The engine computes a ratio of `0.80`, emits `LoyaltyBudgetProRated{day="2024-03-05", budget_zn="1000", demand_zn="1250", ratio_fp="0.8e18"}`, and each recipient sees their reward scaled to 80% of the original amount. Metrics reflect `nhb_loyalty_prorate_ratio = 0.80`, `nhb_loyalty_budget_zn = 0`, and `nhb_loyalty_paid_today_zn = 1,000`.
 
 ### Daily budget & events (`LoyaltyBudgetProRated`)
 
-The daily cap is derived from the trailing seven-day fee pool (`DailyCapPctOf7dFees`) and any explicit hard limit (`DailyCapUSD`). When the cap is recalculated at the UTC boundary the controller resets `loyalty_budget_zn` and clears the pending queue. Throughout the day each block settlement updates:
+The daily cap is derived from the trailing seven-day fee pool (`DailyCapPctOf7dFees`) and any explicit hard limit (`DailyCapUSD`). When the cap is recalculated at the UTC boundary the controller resets `nhb_loyalty_budget_zn` and clears the pending queue. Throughout the day each block settlement updates:
 
-- `loyalty_budget_zn` – how much headroom is left for the day.
-- `loyalty_demand_zn` – the queued demand observed at the start of `EndBlockRewards`.
-- `loyalty_prorate_ratio` – the multiplier applied to all payouts.
+- `nhb_loyalty_budget_zn` – how much headroom is left for the day.
+- `nhb_loyalty_demand_zn` – the queued demand observed at the start of `EndBlockRewards`.
+- `nhb_loyalty_prorate_ratio` – the multiplier applied to all payouts.
 - `LoyaltyBudgetProRated` – the event stream operators follow in Grafana/LogQL and in the alert pipeline.
-
-The observability stack also fans these events into `loyalty_budget_events_total` to count how many blocks triggered proration, which backs the "Prorate Hits" stat on the Loyalty Budget dashboard. A sudden spike in the counter signals that fee inflows or coverage assumptions have shifted and the policy may require governance intervention.
 
 ### Price guards (TWAP window, deviation) with `MinBps` fallback
 
 When `PriceGuard.Enabled = true` the policy protects against stale or manipulated oracle inputs before recomputing coverage ratios:
 
 1. Fetch the latest oracle quote for `PriceGuard.PricePair` and compute the time-weighted average price over `PriceGuard.TwapWindowSeconds`.
-2. Derive the deviation against the TWAP and publish it as `loyalty_price_guard_deviation_bps`.
-3. If the quote age exceeds `PriceGuard.PriceMaxAgeSeconds` or the deviation breaches `PriceGuard.MaxDeviationBps`, the controller freezes adjustments, emits `loyalty_price_guard_fallback_total` (incremented), and reverts to the static `MinBps` rate until fresh data arrives.
+2. Derive the deviation against the TWAP.
+3. If the quote age exceeds `PriceGuard.PriceMaxAgeSeconds` or the deviation breaches `PriceGuard.MaxDeviationBps`, the controller freezes adjustments, emits `nhb_loyalty_price_fallback_total` (incremented), and reverts to the static `MinBps` rate until fresh data arrives.
 
 In the stale-price case the controller still processes pending rewards, but does so using the frozen `MinBps` coverage ratio so rewards remain predictable:
 
 - **Scenario**: `PriceGuard.TwapWindowSeconds = 7200`, `PriceGuard.MaxDeviationBps = 300`. The incoming quote is 8% above the TWAP and 12 minutes old.
-- **Outcome**: The deviation counter jumps to `800` bps, `nhb_oracle_update_age_seconds` plateaus above the freshness threshold, and the controller logs a price-guard violation. Subsequent coverage calculations revert to `MinBps = 25` bps until a fresh quote resets the guard. Operators can confirm the fallback by correlating `loyalty_price_guard_deviation_bps`, `loyalty_price_guard_fallback_total`, and the dashboard panel tracking `loyalty_prorate_ratio`.
+- **Outcome**: The deviation counter jumps to `800` bps and the controller logs a price-guard violation. Subsequent coverage calculations revert to `MinBps = 25` bps until a fresh quote resets the guard. Operators can confirm the fallback by correlating `nhb_loyalty_price_fallback_total` and the dashboard panel tracking `nhb_loyalty_prorate_ratio`.

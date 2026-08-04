@@ -11,8 +11,8 @@ considerations for building against the updated settlement flow.
 
 ## 1. Module Overview
 
-* **Deterministic transitions.** Every state change is validated against predicates and idempotency keys stored on-chain. Replay or
-  duplicate submissions are rejected.
+* **Deterministic transitions.** Every state change is validated against predicates before being applied. Repeated calls on an
+  escrow or trade that has already reached a terminal state are structural no-ops, so replays do not mutate state.
 * **Atomic two-leg settlement.** Trades reference two escrow vaults (base and quote legs). Settlement either applies to both vaults
   or reverts entirely.
 * **Dispute lifecycle.** Parties (payer/payee or buyer/seller) can dispute before final settlement. Authorized arbitrators resolve
@@ -106,10 +106,10 @@ const (
    * If any release fails (insufficient balance, vault transfer error), the entire transaction reverts and both escrows remain funded.
 4. **Disputes.**
    * `p2p_dispute(tradeId, caller, reason)` marks both escrows as disputed. `EscrowDisputed` status prevents release/refund.
-   * Arbitrators submit `p2p_resolve(tradeId, outcome, resolutionMemo)` with an outcome of `release` (buyer receives base asset,
-     seller receives quote) or `refund` (both parties refunded). The decision is atomic across both escrows.
-5. **Expiry & cancellation.** Deadlines are tracked at both escrow and trade level. If deadline passes before funding, watchers
-   call `p2p_expire(tradeId)` which refunds whichever legs are funded. Cancels initiated by buyer/seller also unwind both legs.
+   * Arbitrators submit `p2p_resolve(tradeId, outcome, resolutionMemo)` with one of four outcomes: `release_both`, `refund_both`,
+     `release_base_refund_quote`, or `release_quote_refund_base`. The decision is atomic across both escrows.
+5. **Expiry & cancellation.** Deadlines are tracked at both escrow and trade level. Cancels initiated by buyer/seller unwind both
+   legs.
 
 ---
 
@@ -129,16 +129,15 @@ const (
 
 ### 4.2 Trade events
 
-| Event                   | Emitted when                                          | Payload highlights                                                           |
-|-------------------------|-------------------------------------------------------|-------------------------------------------------------------------------------|
-| `trade.created`         | Trade initialized                                     | `tradeId`, `escrowBaseId`, `escrowQuoteId`, `buyer`, `seller`, `offerId`      |
-| `trade.partialFunded`   | One leg funded                                        | `tradeId`, `fundedLeg`                                                        |
-| `trade.funded`          | Both legs funded                                      | `tradeId`                                                                    |
-| `trade.settled`         | Atomic release executed                               | `tradeId`, `releaseTxHash`, `netBase`, `netQuote`                             |
-| `trade.disputed`        | Dispute opened at trade level                         | `tradeId`, `initiator`, `reasonCode`                                         |
-| `trade.resolved`        | Arbitrator outcome (maps to `trade.settled`/`cancel`) | `tradeId`, `outcome`, `arbitrator`, `resolutionMemo`                          |
-| `trade.expired`         | Deadline triggered refund                             | `tradeId`, `expiredLegs`                                                      |
-| `trade.cancelled`       | Cancel executed prior to settlement                   | `tradeId`, `cancelledBy`                                                      |
+| Event                          | Emitted when                                          | Payload highlights                                                           |
+|--------------------------------|-------------------------------------------------------|-------------------------------------------------------------------------------|
+| `escrow.trade.created`         | Trade initialized                                     | `tradeId`, `escrowBaseId`, `escrowQuoteId`, `buyer`, `seller`, `offerId`      |
+| `escrow.trade.partial_funded`  | One leg funded                                        | `tradeId`, `fundedLeg`                                                        |
+| `escrow.trade.funded`          | Both legs funded                                      | `tradeId`                                                                    |
+| `escrow.trade.settled`         | Atomic release executed                               | `tradeId`, `releaseTxHash`, `netBase`, `netQuote`                             |
+| `escrow.trade.disputed`        | Dispute opened at trade level                         | `tradeId`, `initiator`, `reasonCode`                                         |
+| `escrow.trade.resolved`        | Arbitrator outcome (maps to `escrow.trade.settled`/expiry) | `tradeId`, `outcome`, `arbitrator`, `resolutionMemo`                     |
+| `escrow.trade.expired`         | Deadline triggered refund                             | `tradeId`, `expiredLegs`                                                      |
 
 Events include `sequence`, `blockHeight`, and `eventTime` fields for downstream ordering. Merchants should treat event delivery as
 at-least-once and deduplicate using `eventId` + `sequence`.
@@ -151,17 +150,17 @@ at-least-once and deduplicate using `eventId` + `sequence`.
 
 | Method | Description |
 |--------|-------------|
-| `escrow_create(payer, payee, token, amount, feeBps, deadline, mediator?, metaHash?) -> { id }` | Create escrow record; status `EscrowInit`. Optionally assign mediator and metadata hash. |
+| `escrow_create(payer, payee, token, amount, feeBps, deadline, nonce, mediator?, meta?) -> { id }` | Create escrow record; status `EscrowInit`. `nonce` is required and must be greater than 0. Optionally assign mediator and metadata. |
 | `escrow_fund(id, payer)` | Marks escrow as funded after deposit. Idempotent; repeated calls ignored once funded. |
 | `escrow_release(id, caller)` | Releases funds to payee. Allowed: payee, mediator, arbitrator. Fails if disputed or not funded. |
 | `escrow_refund(id, caller)` | Refunds payer. Allowed: payer (pre-dispute) or arbitrator (via `escrow_resolve`). |
 | `escrow_expire(id)` | Public method: if deadline passed and escrow funded but unsettled, auto-refund to payer. |
 | `escrow_dispute(id, caller, reason)` | Marks escrow as disputed. Allowed: payer or payee. |
-| `escrow_resolve(id, caller, outcome, memo?)` | Arbitrator-only. Outcome `release` or `refund`. Sets `EscrowResolved` and executes atomic payout. |
+| `escrow_resolve(id, caller, outcome, memo?)` | Authorized by the escrow's own `mediator` field (caller must equal the escrow's mediator), not the global arbitrator role. Outcome `release` or `refund`. Sets `EscrowResolved` and executes atomic payout. |
 | `escrow_get(id)` | Returns escrow struct, including current status, leg balances, deadlines, dispute info, and history cursor. |
 
-All write methods require signed transactions using account keys. Transactions include a per-call `idempotencyKey` stored on-chain to
-prevent replay.
+All write methods require signed transactions using account keys. Idempotency is structural: repeated calls on an escrow that has
+already reached a terminal state are no-ops and do not mutate state.
 
 #### Client helper & wallet route
 
@@ -193,11 +192,7 @@ records the merchant-provided reason.
 | `p2p_getTrade(tradeId)` | Returns trade struct, aggregated status, dispute notes, escrow snapshots, and settlement history. |
 | `p2p_settle(tradeId, caller)` | When both legs funded, atomically releases base to buyer and quote to seller. Caller must be buyer, seller, or gateway service key. |
 | `p2p_dispute(tradeId, caller, reason)` | Moves trade to `TradeDisputed`. Both escrows become `EscrowDisputed`. |
-| `p2p_resolve(tradeId, outcome, memo?, evidenceUri?)` | Arbitrator-only. Outcome `release` (trade settles) or `refund` (trade cancels). |
-| `p2p_expire(tradeId)` | Public method. Refunds any funded legs after deadline. |
-| `p2p_listTrades(filter)` | Returns paginated list (mainly for light clients; heavy listing should use REST gateway). |
-
-All RPC responses include `commitHash` (block hash) so clients can anchor snapshots.
+| `p2p_resolve(tradeId, outcome, memo?, evidenceUri?)` | Arbitrator-only. Outcome must be one of `release_both`, `refund_both`, `release_base_refund_quote`, `release_quote_refund_base`. |
 
 ---
 
@@ -205,8 +200,9 @@ All RPC responses include `commitHash` (block hash) so clients can anchor snapsh
 
 * **Atomicity guarantees.** Dual-lock settlement is guarded by a single module call which either releases both legs or reverts.
   Partial release is impossible because both `Escrow` releases share a transaction-scoped state machine lock.
-* **Arbitrator role.** Addresses with `ROLE_ARBITRATOR` can call `escrow_resolve` and `p2p_resolve`. Governance controls role
-  assignment. Arbitration transactions must include an `arbitratorMemo` stored in history.
+* **Arbitrator role.** `p2p_resolve` is gated by `ROLE_ARBITRATOR`, with governance controlling role assignment. `escrow_resolve`
+  is authorized separately: the caller must equal the escrow's own `mediator` field, not the global arbitrator role. Arbitration
+  transactions must include an `arbitratorMemo` stored in history.
 * **Mediator role.** Mediators can release funds (if mutually agreed off-chain) but cannot resolve disputes once flagged.
 * **Deadlines & expiries.** Both escrows and trades enforce `deadline` (Unix epoch). Validators run cron-like watchers to execute
   expiry transitions; merchants should monitor events for refunds.
@@ -217,8 +213,8 @@ All RPC responses include `commitHash` (block hash) so clients can anchor snapsh
 
 ## 7. Operational Guidelines
 
-1. **Use idempotency keys.** Pass stable UUIDs when invoking `escrow_*` and `p2p_*` writes. Replays with same key and payload result
-   in `ERR_DUPLICATE_REQUEST` and do not mutate state.
+1. **Idempotency is structural.** `escrow_*` and `p2p_*` writes are idempotent by state: once an escrow or trade reaches a terminal
+   status, repeated calls with the same parameters are no-ops and do not mutate state. There is no client-supplied idempotency key.
 2. **Monitor events.** Subscribe to WebSocket or use the REST gateway webhooks (see `gateway-api.md`). Use block height + event ID
    to deduplicate.
 3. **Handle disputes promptly.** Once `EscrowDisputed`, only arbitrators can resolve. Merchants should surface dispute status in
@@ -232,14 +228,19 @@ All RPC responses include `commitHash` (block hash) so clients can anchor snapsh
 
 ### 8.1 Error Codes
 
-| Code                    | Meaning                                                                                     |
-|-------------------------|---------------------------------------------------------------------------------------------|
-| `ERR_INVALID_STATUS`    | Requested transition not allowed from current status.                                      |
-| `ERR_DEADLINE_EXCEEDED` | Operation attempted after deadline.                                                         |
-| `ERR_NOT_AUTHORIZED`    | Caller lacks permission (e.g., non-arbitrator attempted resolve).                           |
-| `ERR_ATOMIC_ABORT`      | Atomic trade settlement failed due to vault transfer error; no state change occurred.       |
-| `ERR_DUPLICATE_REQUEST` | Idempotency key replay detected; request ignored.                                           |
-| `ERR_CONFLICTING_FUND`  | Funding attempt mismatched expected token/amount.                                           |
+Escrow and P2P RPC errors use standard numeric JSON-RPC error codes, not symbolic string constants. The `message` field carries a
+plain Go error string describing the specific failure.
+
+| Code     | Constant                                             | Meaning                                                                 |
+|----------|-------------------------------------------------------|--------------------------------------------------------------------------|
+| `-32602` | `codeInvalidParams`                                    | Malformed or missing request parameters.                                |
+| `-32021` | `codeEscrowInvalidParams` / `codeP2PInvalidParams`     | Invalid parameters for an `escrow_*`/`p2p_*` call.                      |
+| `-32022` | `codeEscrowNotFound` / `codeP2PNotFound`               | Escrow or trade ID not found.                                           |
+| `-32023` | `codeEscrowForbidden` / `codeP2PForbidden`             | Caller lacks permission for the requested action.                       |
+| `-32024` | `codeEscrowConflict` / `codeP2PConflict`               | Requested transition not valid from the escrow/trade's current status.  |
+| `-32025` | `codeEscrowInternal` / `codeP2PInternal`               | Internal error while processing the request.                            |
+| `-32010` | `codeDuplicateTx`                                      | Duplicate transaction (same sender/nonce) already known.                |
+| `-32030` | `codeMempoolFull`                                      | Mempool full; resubmit later.                                           |
 
 ### 8.2 Reference types
 

@@ -21,10 +21,9 @@ three components:
    into the proposal metadata so downstream reviewers can confirm it has not
    been altered.
 
-When the proposal enters the voting period, the payload hash is logged in
-`gov.proposed` and the targeted realm is emitted as an attribute. Observers can
-replay the proposal by querying the governance archive or the RPC gateway to
-confirm the address list matches the published memorandum.
+When the proposal enters the voting period, observers can replay the proposal
+by querying the governance archive or the RPC gateway to confirm the address
+list matches the published memorandum.
 
 Upon execution, the runtime updates the allowlist and appends an immutable
 `gov.executed` audit entry. Arbitrator credentials take effect immediately after
@@ -45,7 +44,7 @@ policy later, existing escrows continue to reference their embedded policy to
 prevent retroactive changes.
 
 The frozen policy metadata is also embedded in `escrow_listEvents` payloads
-(`escrow.realm.*`, `escrow.dispute.*`, `escrow.resolved`). Indexers should
+(`escrow.realm.*`, `escrow.disputed`, `escrow.trade.disputed`, `escrow.resolved`). Indexers should
 persist these attributes so external dashboards, regulators, and auditors can
 reconstruct which rule set governed the resolution without performing additional
 state reads.
@@ -55,11 +54,11 @@ state reads.
 Regulators, investors, and third-party auditors should expect the following
 artifacts when reviewing arbitration operations:
 
-- **Proposal packet** – Original payload JSON, memo hash, and the governance
+- **Proposal packet** – Original payload JSON and the governance
   archive entries (`gov.proposed`, `gov.finalized`, `gov.executed`).
 - **Allowlist diff** – A before/after comparison of the arbitrator roster using
   `escrow_getRealm` responses for the relevant realm. The diff should include the
-  sequence number and `updatedAt` timestamp emitted when governance executed the
+  `Version` and `updatedAt` timestamp emitted when governance executed the
   change.
 - **Escrow evidence bundle** – Snapshot exports (via `escrow_getSnapshot`) for
   each disputed contract, including frozen policy metadata, dispute memos, and

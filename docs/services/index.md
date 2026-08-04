@@ -5,11 +5,17 @@ following references to configure, monitor, and integrate with each component.
 
 ## Gateway Service
 
-- **Endpoint:** HTTPS / REST + gRPC streaming.
+- **Endpoint:** HTTPS / REST, proxying to lendingd, swapd, governd, and
+  consensusd.
 - **Responsibilities:** Request authentication, REST to gRPC translation, rate
   limiting, and transaction memo enrichment.
-- **Key configuration:** `GATEWAY_BIND`, `GATEWAY_RATE_LIMIT`,
-  `CONSENSUS_GRPC_ENDPOINT`.
+- **Key configuration:** `cmd/gateway` (`cmd/gateway/main.go`) is configured via
+  a `-config` flag pointing at a TOML file, plus environment variables
+  `NHB_ENV`, `NHB_COMPAT_MODE`, `NHB_GATEWAY_AUTO_HTTPS`, and the per-backend
+  upstream URLs `NHB_GATEWAY_LENDING_URL`, `NHB_GATEWAY_SWAP_URL`,
+  `NHB_GATEWAY_GOV_URL`, `NHB_GATEWAY_CONSENSUS_URL`. Rate limits are
+  configured as structured `cfg.RateLimits` entries in the config file, not a
+  single env var.
 - **Operational notes:** Deploy at least two replicas behind your public load
   balancer. Gateways should be stateless and read the validator set from the
   consensus service on startup.
@@ -19,38 +25,40 @@ following references to configure, monitor, and integrate with each component.
 - **Endpoint:** gRPC on `9090` by default.
 - **Responsibilities:** Validates signed envelopes, executes transactions,
   materialises blocks, and exposes deterministic state queries.
-- **Key configuration:** `CONSENSUS_DB_DSN`, `CONSENSUS_P2P_ADDR`,
-  `P2P_SEEDS`.
+- **Key configuration:** `cmd/consensusd` (`cmd/consensusd/main.go`) is
+  configured via flags: `-config` (path to `config.toml`, default
+  `./config.toml`), `-genesis` (genesis JSON, overrides `NHB_GENESIS`), `-grpc`
+  (gRPC listen address, default `127.0.0.1:9090`), and `-p2p` (p2p daemon
+  network service address, default `localhost:9091`).
 - **Operational notes:** Validators run the consensus service co-located with a
   `p2pd` instance. Horizontally scale read-only replicas for query workloads.
 
-## State Service
-
-- **Endpoint:** gRPC and GraphQL for denormalised projections.
-- **Responsibilities:** Subscribes to block events, projects module state into
-  Postgres, and serves analytical queries.
-- **Key configuration:** `STATE_EVENT_STREAM`, `STATE_GRAPHQL_PORT`,
-  `STATE_RETENTION_DAYS`.
-- **Operational notes:** Scale according to dashboard load. Downstream caches
-  should treat the state service as the source of truth for complex reporting.
-
 ## Lending Service
 
-- **Endpoint:** gRPC on `9444` (configurable).
+- **Endpoint:** HTTPS/mTLS REST on `0.0.0.0:9444` (configurable).
 - **Responsibilities:** Enforces lending business logic, risk limits, and emits
   health factor telemetry per account.
-- **Key configuration:** `LENDING_CONSENSUS_ENDPOINT`,
-  `LENDING_PRICE_ORACLE_ENDPOINT`, `LENDING_MARKET_CONFIG`.
+- **Key configuration:** `services/lending` (`services/lending/config.go`) is
+  configured via environment variables: `LEND_NODE_RPC_URL`,
+  `LEND_NODE_RPC_TOKEN`, `LEND_SHARED_SECRET_HEADER`, `LEND_SHARED_SECRET`,
+  `LEND_TLS_CERT_FILE`, `LEND_TLS_KEY_FILE`, `LEND_TLS_CLIENT_CA_FILE`,
+  `LEND_ALLOW_INSECURE`, `LEND_LISTEN` (default `0.0.0.0:9444`),
+  `LEND_RATE_PER_MIN`, `LEND_MTLS_REQUIRED`, and `LEND_ALLOWED_CNS`.
 - **Operational notes:** Co-locate near the consensus service to minimise
   envelope latency. Configure circuit breakers for price oracle unavailability.
 
-## Price Oracle Service
+## Oracle Attester Service (`oracle-attesterd`)
 
-- **Endpoint:** gRPC streaming on `9555`.
-- **Responsibilities:** Aggregates publisher feeds, normalises price updates,
-  and signs attestations for downstream services.
-- **Key configuration:** `ORACLE_PUBLISHERS`, `ORACLE_MIN_SIGNERS`,
-  `ORACLE_CONSENSUS_ENDPOINT`.
+- **Endpoint:** HTTP webhook listener on `:8085` by default (NOWPayments IPN
+  callback), plus a consensus RPC client connection.
+- **Responsibilities:** Verifies inbound payment provider webhooks, mints the
+  corresponding swap/collector entries, and signs the resulting attestations
+  before submitting them to the consensus service.
+- **Key configuration:** `services/oracle-attesterd` (`np_webhook.go`) loads a
+  YAML config file with keys including `listen` (default `:8085`),
+  `consensus`, `chain_id`, `signer_key`/`signer_key_file`/`signer_key_env`,
+  `authority`, `treasury_account`, `collector`, `confirmations`,
+  `nowpayments_secret`, `database`, `provider`, `fee`, `assets`, and `evm`.
 - **Operational notes:** Run at least three replicas across availability zones.
   Publishers should use mTLS identities issued by the operator.
 

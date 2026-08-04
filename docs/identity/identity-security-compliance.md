@@ -7,8 +7,8 @@ investors.
 
 | Role | Capabilities | Controls |
 | --- | --- | --- |
-| Alias Owner | Register alias, link/unlink addresses, set primary, update avatar, rename. | Must sign EIP-191 payloads tied to
-  aliasId, nonce, and expiry. Signatures verified on-chain. |
+| Alias Owner | Register alias, link/unlink addresses, set primary, update avatar, rename. | Authorized solely by presenting a
+  valid RPC bearer/JWT token; mutating handlers do not accept or verify any per-message owner signature, nonce, or expiry. |
 | Governance | Manage reserved list, adjudicate disputes, freeze aliases in extreme abuse scenarios. | Multisig governance module
   with on-chain proposals and audit logs. |
 | Gateway Operator | Verify emails, manage API keys, moderate avatars. | Access via HMAC-authenticated admin console with hardware
@@ -41,8 +41,8 @@ investors.
 * Alias squatting mitigated with reserved names, staking deposits, and dispute resolution process.
 * Email verification throttled per IP + per email hash; verification codes expire in 10 minutes and are rate-limited.
 * Avatars scanned for malware and explicit content; flagged avatars can be replaced by governance action.
-* Claimables protected via expiry (default 7 days) and signature binding; replayed signatures rejected (`IDN-008`).
-* Comprehensive audit logs: `identity.alias.*` and `identity.claimable.*` events preserved for 365 days in archival nodes.
+* Claimables protected via expiry (default 7 days); the payer can reclaim funds once the deadline passes.
+* Comprehensive audit logs: `identity.alias.*` and `claimable.*` events preserved for 365 days in archival nodes.
 
 ## Regulatory & Investor Notes
 
@@ -68,7 +68,6 @@ investors.
 ## Incident Response & Monitoring
 
 * Alerts on repeated failed HMAC signatures, sudden spike in alias registrations, or avatar moderation failures.
-* Governance has emergency proposal to freeze alias (prevents transfers but preserves data) in case of phishing campaigns.
 * Backups: Gateway database replicated across regions with point-in-time recovery; salts stored in HSM-backed secrets manager.
 
 For engineering detail, see [identity.md](./identity.md) and [identity-gateway.md](./identity-gateway.md).

@@ -41,9 +41,10 @@ The following events surface paymaster health to off-chain monitors:
 * `loyalty.program.skipped` – existing event now reports the human-readable reason string described
   above plus contextual metadata (`available`, `reserveMin`, etc.) when throttling is activated.
 
-The new meters exposed via RPC/state (`loyalty.programDailyTotalAccrued`,
-`loyalty.programEpochAccrued`, and `loyalty.programIssuanceAccrued`) allow operators to reconcile
-cap usage and build dashboards.
+The new meters (`loyalty.programDailyTotalAccrued`, `loyalty.programEpochAccrued`, and
+`loyalty.programIssuanceAccrued`) are tracked in on-chain state and updated during accrual, but are
+not currently exposed via any RPC method. Operators need direct state access, not an RPC call, to
+read them today.
 
 ## Developer notes
 

@@ -1,5 +1,11 @@
 # NHB Pay NFC intents
 
+> **Implementation status:** this NFC/NDEF/CBOR transport is a spec-only
+> proposal. Unlike the URI/signing scheme it references (mirrored by real code
+> in `sdk/pos/examples/create_intent.go`), there is no CBOR encoder/decoder, no
+> NDEF record builder, and no registration of the `application/nhbpay+cbor`
+> MIME type anywhere in this repository today.
+
 This document describes the NFC Forum NDEF payloads that terminals MUST produce
 when broadcasting NHB Pay intents over tap-to-pay experiences. The layout keeps
 compatibility with existing wallet stacks by including both a human-readable URI

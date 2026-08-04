@@ -6,8 +6,8 @@ The OTC gateway captures audit data in the `events` table to provide an immutabl
 
 The service records events for:
 
-- Invoice creation, receipt uploads, state transitions, and approvals.
-- Future enhancements such as rejections, expirations, voucher minting, and login audits.
+- Invoice creation, receipt uploads, state transitions, approvals, and voucher minting (`invoice.signed`, `invoice.submitted`, `invoice.minted` on every Sign & Submit call).
+- Future enhancements such as rejections, expirations, and login audits.
 
 Each event stores:
 

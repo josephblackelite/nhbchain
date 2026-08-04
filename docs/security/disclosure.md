@@ -12,8 +12,8 @@ The following assets are **out of scope**: third-party wallets, forked chains, l
 
 ## Reporting Process
 1. Gather detailed reproduction steps, logs, and proof-of-concept material.
-2. Encrypt your report with our [repository PGP key](./repository-pgp-key.asc) and email it to `security@nehborly.net`.
-3. For time-sensitive issues, call or text the Signal hotline `+13234559568` after sending the encrypted report.
+2. The checked-in [repository PGP key](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt reports. It must be regenerated before this step can be followed; until then, email `security@nehborly.net` to arrange a secure channel.
+3. For time-sensitive issues, call or text the Signal hotline `+13234559568` after sending the report.
 4. Do not share vulnerability details publicly or with third parties until we finalize remediation and agree on a disclosure timeline.
 
 ## Service Level Agreements
@@ -38,6 +38,5 @@ If legal action is initiated by a third party against you for activities conduct
 ## Contacts & Encryption
 - **Primary Contact:** `security@nehborly.net`
 - **Emergency Contact:** Signal `+13234559568`
-- **PGP Fingerprint:** `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`
-- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc)
+- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is currently corrupted and unusable; it must be regenerated. No working fingerprint is published until then.
 

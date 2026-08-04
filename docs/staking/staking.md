@@ -107,115 +107,27 @@ When a caller has never delegated the staking fields remain zeroed, but the sche
 
 ### `stake_delegate`
 
-Delegates ZNHB and optionally selects a validator. When governance pauses the module the RPC endpoint returns `codeModulePaused`; otherwise it responds with the caller's updated balances.
-
-- **Method**: `stake_delegate`
-- **Auth**: Required (same token as `nhb_sendTransaction`).
-- **Params**:
-
-```json
-{
-  "caller": "nhb1delegator...",
-  "amount": "1000",
-  "validator": "nhb1validator..." // optional
-}
-```
-
-- **Result**:
-
-```json
-{
-  "address": "nhb1delegator...",
-  "balanceZNHB": "9500",
-  "stake": "500",
-  "lockedZNHB": "500",
-  "delegatedValidator": "nhb1validator...",
-  "pendingUnbonds": []
-}
-```
-
-Companion CLI example:
-
-```bash
-nhbctl stake delegate \
-  --from nhb1delegator... \
-  --amount 1000 \
-  --validator nhb1validator...
-```
+Permanently disabled. `handleStakeDelegate` unconditionally returns `HTTP 410
+Gone` (`codeMethodDisabled`) regardless of params, because the endpoint used
+to trust a client-supplied `caller` address with no signature proving the
+caller actually controlled it. The real path is signing a `TxTypeStake`
+transaction and submitting it via `nhb_sendTransaction`, so the caller's own
+signature authorizes the action. There is no CLI tool for this today —
+construct and sign the transaction directly.
 
 ### `stake_undelegate`
 
-Queues an unbonding entry for the caller. Responses include the generated unbond ID and its release timestamp. When staking is paused the RPC responds with `codeModulePaused`.
-
-- **Method**: `stake_undelegate`
-- **Params**:
-
-```json
-{
-  "caller": "nhb1delegator...",
-  "amount": "500"
-}
-```
-
-- **Result**:
-
-```json
-{
-  "id": 12,
-  "validator": "nhb1validator...",
-  "amount": "500",
-  "releaseTime": 1700003600
-}
-```
-
-CLI example:
-
-```bash
-nhbctl stake undelegate \
-  --from nhb1delegator... \
-  --amount 500
-```
+Permanently disabled for the same reason as `stake_delegate`. `handleStakeUndelegate`
+unconditionally returns `HTTP 410 Gone` (`codeMethodDisabled`). Queue an
+unbonding entry by signing a `TxTypeUnstake` transaction and submitting it via
+`nhb_sendTransaction`. There is no CLI tool for this today.
 
 ### `stake_claim`
 
-Claims a matured unbond entry and returns both the claimed metadata and updated balances. Claims made before the release timestamp are rejected, and paused networks return `codeModulePaused`.
-
-- **Method**: `stake_claim`
-- **Params**:
-
-```json
-{
-  "caller": "nhb1delegator...",
-  "unbondingId": 2
-}
-```
-
-- **Result**:
-
-```json
-{
-  "claimed": {
-    "id": 12,
-    "validator": "nhb1validator...",
-    "amount": "500",
-    "releaseTime": 1700003600
-  },
-  "balance": {
-    "address": "nhb1delegator...",
-    "balanceZNHB": "10000",
-    "stake": "500",
-    "lockedZNHB": "500"
-  }
-}
-```
-
-CLI counterpart:
-
-```bash
-nhbctl stake claim \
-  --from nhb1delegator... \
-  --unbonding-id 2
-```
+Permanently disabled for the same reason as `stake_delegate`. `handleStakeClaim`
+unconditionally returns `HTTP 410 Gone` (`codeMethodDisabled`). Claim a matured
+unbond entry by signing a `TxTypeStakeClaim` transaction and submitting it via
+`nhb_sendTransaction`. There is no CLI tool for this today.
 
 ### `stake_previewClaim`
 
@@ -339,9 +251,14 @@ These events stream through the existing node event feed so external observers a
 
 ## User Experience Notes (End Users)
 
-1. Use `stake_delegate` (or the CLI `stake` command) to lock ZNHB and optionally support a validator. If the network is paused you will receive `codeModulePaused` until governance resumes the module.
+1. Lock ZNHB and optionally support a validator by signing and submitting a `TxTypeStake` transaction via `nhb_sendTransaction`. If the network is paused you will receive `codeModulePaused` until governance resumes the module.
 2. Monitor `nhb_getBalance` or the CLI `balance` command to view locked stake, delegation target, and pending unbonds. Accounts without historical delegations still return zeroed staking fields.
-3. Initiate withdrawals with `stake_undelegate`. Tokens become claimable after ~72 hours; attempts before then are rejected.
-4. Complete the process with `stake_claim` to restore ZNHB to the liquid balance once the release time has elapsed.
+3. Initiate withdrawals by signing and submitting a `TxTypeUnstake` transaction via `nhb_sendTransaction`. Tokens become claimable after ~72 hours; attempts before then are rejected.
+4. Complete the process by signing and submitting a `TxTypeStakeClaim` transaction via `nhb_sendTransaction` to restore ZNHB to the liquid balance once the release time has elapsed.
+
+The `stake_delegate`, `stake_undelegate`, and `stake_claim` JSON-RPC methods
+and any `nhbctl stake ...` CLI commands are not available — see the
+[JSON-RPC Interface](#json-rpc-interface-developers--integrators) section
+above.
 
 This flow ensures a predictable staking lifecycle with observable state transitions for all stakeholders.

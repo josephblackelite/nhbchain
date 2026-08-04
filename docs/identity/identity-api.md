@@ -10,14 +10,18 @@ requirements, and sample payloads for each method.
 ## Authentication
 
 * **Bearer token** – Mutating methods require the `Authorization: Bearer <token>`
-  header. The token is configured in the node's RPC server (`rpc.authToken`).
-  Requests without the header (or with a mismatched token) return HTTP 401.
+  header. The token is a JWT validated per the node's `[RPCJWT]` TOML config
+  section (algorithm, issuer, audience, and clock-skew tolerance are all
+  configured there); verification happens in `requireAuth` in `rpc/http.go`.
+  Requests without the header (or with an invalid/expired token) return HTTP 401.
 * **Public reads** – `identity_resolve` and `identity_reverse` do not require
   authentication and may be used by wallets or public gateways to look up alias
   data.
-* **Idempotency** – The node enforces idempotent semantics for
-  `identity_createClaimable` and `identity_claim`. Clients may retry safely when
-  receiving network errors.
+* **Idempotency** – Only `identity_claim` is idempotent; replays return the
+  cached result with no additional transfer. `identity_createClaimable` is
+  **not** idempotent — every call mints a new claim and debits the payer, so
+  retrying it after a network error risks creating a duplicate claimable and
+  double-debiting the payer. Only retry `identity_claim` safely.
 
 ## Common Error Shapes
 
@@ -27,11 +31,21 @@ handlers reuse standard node error codes:
 | HTTP Status | `code` | `message` | Typical Cause |
 | --- | --- | --- | --- |
 | `400` | `-32602` | `invalid_params` | Invalid Bech32 address, alias format, or malformed payload. |
-| `401` | `-32000` | `missing Authorization header` (or similar) | Missing/incorrect bearer token. |
-| `403` | `-32060` | `forbidden` | Claimable access errors (payer/payee mismatch). |
-| `404` | `-32602` | `alias not found` / `not_found` | Alias or claimable does not exist. |
-| `409` | `-32061` | `conflict` | Claimable deadline exceeded, already claimed, or invalid preimage. |
-| `500` | `-32001` | `internal_error` | Unexpected server error (check `data`). |
+| `401` | `-32001` | `missing Authorization header` (or similar) | Missing/invalid bearer token. |
+| `403` | `-32001` | `caller not alias owner` | Alias mutation attempted by a non-owner address. Uses the same code as 401. |
+| `404` | `-32602` | `alias not found` / `not_found` | Alias does not exist. |
+| `500` | `-32000` | `internal_error` | Unexpected server error (check `data`). |
+
+`identity_createClaimable` and `identity_claim` use a separate error-code
+family (defined in `rpc/claimable_handlers.go`), not the codes above:
+
+| HTTP Status | `code` | `message` |
+| --- | --- | --- |
+| `400` | `-32041` | `invalid_params` |
+| `404` | `-32042` | `not_found` |
+| `403` | `-32043` | `forbidden` |
+| `409` | `-32044` | `conflict` |
+| `500` | `-32045` | `internal_error` |
 
 ---
 

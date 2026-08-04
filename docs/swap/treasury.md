@@ -13,10 +13,15 @@ Treasury operations are now instrumented end-to-end: every burn, mint, and recon
 
 ## Reconciliation flow
 
-1. Off-ramp burns ZNHB from custody and publishes a burn receipt through the RPC admin API.
-2. `SwapRecordBurn` writes the receipt to the burn ledger, marks linked vouchers as `reconciled`, and emits:
-   - `swap.burn.recorded` – the authoritative off-ramp audit trail.
-   - `swap.treasury.reconciled` – declaring the vouchers reconciled against treasury inventory.
+`SwapRecordBurn` implements the off-ramp reconciliation flow: it writes the receipt to
+the burn ledger, marks linked vouchers as `reconciled`, and emits:
+- `swap.burn.recorded` – the authoritative off-ramp audit trail.
+- `swap.treasury.reconciled` – declaring the vouchers reconciled against treasury inventory.
+
+This flow is implemented but not currently reachable through any live interface: its
+only caller anywhere in the repo is its own unit test. There is no RPC admin write
+endpoint for burns (only the read-only `swap_burn_list` exists) and no CLI tool that
+invokes it.
 
 ## Policy guardrails
 

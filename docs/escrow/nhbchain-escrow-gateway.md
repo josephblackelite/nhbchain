@@ -31,8 +31,9 @@ GATEWAY_WEBHOOK_MAX_RETRY=10
 - API key + HMAC per developer/app (e.g., “usedtown”).
 - Privileged actions (**release**, **dispute**, **resolve**) require participant wallet signature.
   - `X-Sig-Addr`: `nhb…`/`znhb…`.
-  - `X-Sig`: `hex(eip191_sign(keccak256(method|path|body|timestamp|escrowId)))`.
+  - `X-Sig`: `hex(eip191_sign(keccak256(method|path|body|timestamp|nonce|escrowId)))`.
   - `X-Timestamp`: RFC3339 (±300s skew).
+  - `X-Nonce`: required, prevents replay of the same signed payload.
 - Gateway verifies signature matches payer or payee for that escrow, or an arbitrator address.
 
 ### Idempotency
@@ -111,11 +112,6 @@ Body: { "escrowId":"0x…", "outcome":"release"|"refund" }
 → 202 { "queued": true }
 ```
 
-```
-GET /escrow/{id}/events
-→ [{ "type":"escrow.funded", "ts":..., "txHash":"0x…" }, ...]
-```
-
 ### Webhooks
 
 - `escrow.created`, `escrow.funded`, `escrow.released`, `escrow.refunded`, `escrow.expired`, `escrow.disputed`, `escrow.resolved`.
@@ -169,7 +165,7 @@ GET /escrow/{id}/events
 
 ### Events & Acceptance
 
-- Events: `p2p.offer.created/accepted/cancelled` with escrow lifecycle integration.
+- Events: none are emitted for offer creation or acceptance — `handleCreateOffer`/`handleAcceptOffer` only perform database writes.
 - Integration: seller creates offer → buyer accepts → funds → release → seller receives.
 
 ## Part C — Escrow Pay Intent Specification
@@ -177,26 +173,6 @@ GET /escrow/{id}/events
 - **Vault**: module vault bech32 per token.
 - **Memo/Data**: `ESCROW:<idhex>` or ABI call `depositEscrow(bytes32 id)`.
 - **QR URI**: `znhb://pay?to=<vault>&token=<NHB|ZNHB>&amount=<wei>&memo=ESCROW:<idhex>`.
-
-## Part D — Loyalty Alignment
-
-- Loyalty accrues on escrow release; gateway-triggered release invokes loyalty engine.
-- Webhooks include `escrow.released` and optional `loyalty.program.accrued`.
-
-## Part E — Developer SDK Stubs (Bonus)
-
-- Directories: `sdks/js`, `sdks/go`.
-- Provide helpers for signing (EIP-191), HMAC, REST client with idempotency.
-- Example usage:
-
-```ts
-await client.createEscrow({
-  payer, payee, token: "NHB", amount: "100000000000000000000",
-  deadline: in3Days(), meta: { reference: "ORDER-123" }
-});
-await wallet.payQR(payIntent.qr);
-await client.release({ escrowId }, { signer: buyerWallet });
-```
 
 ---
 
@@ -283,10 +259,9 @@ Body: { "offerId":"OFF_123", "buyer":"nhb1...", "reference":"P2P-123" }
 }
 ```
 
-- `GET /p2p/trades/{tradeId}` surfaces status (`INIT|PARTIAL_FUNDED|FUNDED|DISPUTED|SETTLED|EXPIRED|CANCELLED`).
-- `POST /p2p/trades/{tradeId}/settle` (mutual) requires signatures from both buyer and seller.
-- `POST /p2p/trades/{tradeId}/dispute` (buyer or seller).
-- `POST /p2p/trades/{tradeId}/resolve` (arbitrator) with outcome mapping.
+- `GET /p2p/trades/{tradeId}` surfaces status (`INIT|PARTIAL_FUNDED|FUNDED|DISPUTED|SETTLED|EXPIRED|CANCELLED`). This is a
+  read-only lookup — there is no gateway REST endpoint to settle, dispute, or resolve a trade. Those actions go through the
+  node's `p2p_settle`, `p2p_dispute`, and `p2p_resolve` JSON-RPC methods directly (see Part B above).
 
 ### Expiry
 
@@ -294,7 +269,8 @@ Body: { "offerId":"OFF_123", "buyer":"nhb1...", "reference":"P2P-123" }
 
 ### Webhooks
 
-- `p2p.trade.created`, `.partial_funded`, `.funded`, `.settled`, `.disputed`, `.resolved`, `.expired`, `.cancelled`.
+- `escrow.trade.created`, `.partial_funded`, `.funded`, `.disputed`, `.resolved`, `.settled`, `.expired` (the gateway's trade
+  watcher switches on the on-chain `escrow.trade.*` namespace, not `p2p.trade.*`). There is no `.cancelled` variant.
 
 ### Security
 
@@ -331,7 +307,7 @@ Title: Add P2P dual-lock escrow (reverse escrow) with atomic settlement
 Scope:
 - Core escrow: Trade struct, atomic SettleTradeAtomic(tradeId), dispute/resolve outcomes for two-leg trades.
 - Node RPC: p2p_createTrade, p2p_getTrade, p2p_settle, p2p_dispute, p2p_resolve.
-- Gateway REST: POST /p2p/accept creates dual escrows & returns payIntents for buyer & seller; /p2p/trades/{id}/settle (mutual), /dispute, /resolve.
+- Gateway REST: POST /p2p/accept creates dual escrows & returns payIntents for buyer & seller; GET /p2p/trades/{id} for status (read-only — settle/dispute/resolve go through node RPC, not REST).
 - Events: escrow.trade.* (created/funded/partial_funded/settled/disputed/resolved/expired).
 - Timeouts: auto-refund funded leg if the other leg never funds by deadline.
 - Security: API key + HMAC; wallet signatures (buyer/seller/arbitrator); idempotency.

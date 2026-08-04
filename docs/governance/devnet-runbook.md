@@ -24,7 +24,10 @@ go build -o bin/nhb-cli ./cmd/nhb-cli/
 
 ## 2. One-node devnet
 
-Create a fresh config that enables governance parameter updates and fast POTSO snapshots:
+Create a fresh config that enables governance parameter updates and fast POTSO snapshots.
+`rpc.NewServer()` refuses to start unless `[RPCJWT]` is enabled (or a TLS client
+CA is configured), so the sample below includes the `[RPCJWT]` block required
+for the node to boot:
 
 ```bash
 cat > devnet.toml <<'TOML'
@@ -34,6 +37,14 @@ DataDir = "./nhb-data-devnet"
 GenesisFile = ""
 ValidatorKeystorePath = "./validator-devnet.keystore"
 NetworkName = "nhb-devnet"
+
+[RPCJWT]
+Enable = true
+Alg = "HS256"
+HSSecretEnv = "NHB_RPC_JWT_SECRET"
+Issuer = "nhb-rpc"
+Audience = ["wallets"]
+MaxSkewSeconds = 120
 
 [p2p]
 NetworkId = 187001
@@ -115,7 +126,7 @@ Start the node (keep this terminal running):
 
 ```bash
 export NHB_VALIDATOR_PASS="devnet-passphrase"
-export NHB_RPC_TOKEN="devnet-token"
+export NHB_RPC_JWT_SECRET="devnet-jwt-secret-change-me"
 RPC_URL="http://127.0.0.1:8081"
 # Explicitly opt into autogenesis for this throwaway devnet instance.
 GOFLAGS=-buildvcs=false bin/nhb-node --config ./devnet.toml --allow-autogenesis
@@ -126,31 +137,40 @@ set `NHB_ALLOW_AUTOGENESIS=1` or `AllowAutogenesis = true` in `devnet.toml` if y
 
 ## 3. Bootstrap accounts & voting power
 
-In a second terminal, export the RPC details for the CLI:
+In a second terminal, export the RPC details for the CLI. `NHB_RPC_JWT_SECRET`
+must match the value the node was started with, so the CLI can mint a bearer
+token that validates against the node's `[RPCJWT]` config:
 
 ```bash
 export RPC_URL="http://127.0.0.1:8081"
-export NHB_RPC_TOKEN="devnet-token"
+export NHB_RPC_JWT_SECRET="devnet-jwt-secret-change-me"
+export NHB_RPC_TOKEN=$(go run generate_jwt.go)
 ```
 
-1. Generate three operator keys (one proposer + two voters) and capture their addresses:
+1. Generate three operator keys (one proposer + two voters) and capture their addresses.
+   `generate-key` always writes to `./wallet.key` and prints the address to stdout
+   (there is no way to redirect the key material itself), so move the file after
+   each run and read the address back with the `address` subcommand:
 
    ```bash
-   bin/nhb-cli generate-key > proposer.key
-   bin/nhb-cli generate-key > voter1.key
-   bin/nhb-cli generate-key > voter2.key
-   proposer=$(bin/nhb-cli balance proposer.key | jq -r '.address')
-   voter1=$(bin/nhb-cli balance voter1.key | jq -r '.address')
-   voter2=$(bin/nhb-cli balance voter2.key | jq -r '.address')
+   bin/nhb-cli generate-key
+   mv wallet.key proposer.key
+   bin/nhb-cli generate-key
+   mv wallet.key voter1.key
+   bin/nhb-cli generate-key
+   mv wallet.key voter2.key
+   proposer=$(bin/nhb-cli address proposer.key)
+   voter1=$(bin/nhb-cli address voter1.key)
+   voter2=$(bin/nhb-cli address voter2.key)
    ```
 
 2. Seed the three accounts from the validator (replace `VALIDATOR_ADDR` with the address printed on node start):
 
    ```bash
    validator="VALIDATOR_ADDR"
-   bin/nhb-cli send "$proposer" 500000000000000000 proposer.key --rpc $RPC_URL
-   bin/nhb-cli send "$voter1" 500000000000000000 proposer.key --rpc $RPC_URL
-   bin/nhb-cli send "$voter2" 500000000000000000 proposer.key --rpc $RPC_URL
+   bin/nhb-cli send-nhb --rpc "$RPC_URL" "$proposer" 500000000000000000 proposer.key
+   bin/nhb-cli send-nhb --rpc "$RPC_URL" "$voter1" 500000000000000000 proposer.key
+   bin/nhb-cli send-nhb --rpc "$RPC_URL" "$voter2" 500000000000000000 proposer.key
    ```
 
 3. Give the voters stake so they appear in the next POTSO snapshot:
@@ -237,17 +257,18 @@ bin/nhb-cli gov execute --id 1
 
 ### 4.6 Verify the parameter diff
 
-Query the parameter store directly:
+Confirm the proposal executed:
 
 ```bash
 curl -s "$RPC_URL" -H "Authorization: Bearer $NHB_RPC_TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"gov_proposal","params":[{"id":1}]}' | jq '.result.status'
-
-curl -s "$RPC_URL" -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"nhb_paramGet","params":["fees.baseFee"]}' | jq -r '.result.value'
 ```
 
-The first command shows `"executed"`; the second returns `"2000000000"`, confirming the live parameter now reflects the proposal payload.
+The command shows `"executed"`. There is currently no dedicated RPC method for
+reading back an individual live parameter value (`gov/params` prefix queries
+only expose `staking.minimumValidatorStake`; see
+[state-indexes.md](./state-indexes.md)), so confirm `fees.baseFee` changed by
+inspecting node logs or state directly.
 
 ## 5. Cleanup / rerun
 

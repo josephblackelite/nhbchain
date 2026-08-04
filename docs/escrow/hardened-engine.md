@@ -96,11 +96,12 @@ policies are registered and frozen during escrow creation.
 The engine derives the escrow identifier deterministically as:
 
 ```
-escrowID = keccak256(payer || payee || metaHash)
+escrowID = keccak256(payer || payee || metaHash || nonce)
 ```
 
-Because native transactions now defer creation to the engine, clients can
-pre-compute IDs using the same rule, guaranteeing they match the stored record.
+where `nonce` is the mandatory, caller-supplied positive `uint64` encoded as 8 bytes big-endian. `Create` rejects any request with
+`nonce == 0`. Because native transactions now defer creation to the engine, clients can pre-compute IDs using the same rule
+(including the nonce), guaranteeing they match the stored record.
 
 ## Behavioural Guarantees
 

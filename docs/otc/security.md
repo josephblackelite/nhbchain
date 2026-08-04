@@ -3,8 +3,8 @@
 ## Identity and Access Management
 
 - **OIDC SSO** – All API requests must include an access token mapped to internal staff identities. The reference implementation expects an `Authorization` header where the bearer token encodes the subject UUID and role.
-- **WebAuthn MFA** – Requests must confirm possession of a registered WebAuthn credential via the `X-WebAuthn-Verified` header. Production deployments should integrate with a WebAuthn server and reject requests without recent assertions.
-- **Role-Based Access Control** – Supported roles: teller, supervisor, compliance, superadmin, auditor. Each API endpoint enforces role guards matching operational responsibilities.
+- **WebAuthn MFA** – Requests must confirm possession of a registered WebAuthn credential via the `X-WebAuthn-Attestation` header (configurable via `OTC_WEBAUTHN_ASSERTION_HEADER`), carrying a genuine assertion value verified by the configured WebAuthn verifier. Production deployments should integrate with a WebAuthn server and reject requests without recent assertions.
+- **Role-Based Access Control** – Supported roles: teller, supervisor, compliance, superadmin, auditor, partner, partneradmin, rootadmin. The partner, partneradmin, and rootadmin roles gate partner-management endpoints. Each API endpoint enforces role guards matching operational responsibilities.
 
 ## Data Protection
 

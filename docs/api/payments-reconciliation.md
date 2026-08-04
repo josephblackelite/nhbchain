@@ -39,8 +39,13 @@ Response shape:
       "status": "minted",
       "fiat": "USD",
       "token": "NHB",
+      "mintAsset": "NHB",
+      "payCurrency": "usdttrc20",
       "amountFiat": "35",
+      "serviceFeeFiat": "1.05",
+      "totalFiat": "36.05",
       "amountToken": "7",
+      "estimatedPayAmount": "35.87",
       "quoteExpiry": "2026-04-12T10:01:00Z",
       "createdAt": "2026-04-12T10:00:00Z",
       "updatedAt": "2026-04-12T10:00:10Z",
@@ -113,8 +118,13 @@ CSV columns:
 * `status`
 * `fiat`
 * `token`
+* `mint_asset`
+* `pay_currency`
 * `amount_fiat`
+* `service_fee_fiat`
+* `total_fiat`
 * `amount_token`
+* `estimated_pay_amount`
 * `quote_expiry`
 * `created_at`
 * `updated_at`

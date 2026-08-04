@@ -29,10 +29,16 @@ case (currently `USDC` and `USDT`) and rejected if unsupported.
    - Validates the invoice is new, persists the `DepositVoucher`, and appends it to the
      stable voucher index.
    - Adds the deposit amount to the treasury soft inventory for the asset.
+   - Not currently reachable: `TxTypeSwapMint` is stubbed in `core/state_transition.go`
+     to return "native on-chain swap mint is disabled -- use the buyZNHB transaction
+     type instead", and `PutDepositVoucher` is only called from test files.
 
 2. **Cash-out intent** (`MsgCreateCashOutIntent`)
    - Requires sufficient soft inventory balance before locking NHB in escrow.
    - Stores the pending `CashOutIntent` and associated `EscrowLock` (burn deferred).
+   - Not currently reachable: `TxTypeSwapBurn` is stubbed the same way, and
+     `CreateCashOutIntent` is only called from test files - no transaction type or RPC
+     handler wires it up today.
 
 3. **Payout receipt** (`MsgPayoutReceipt`)
    - Verifies the receipt matches the intent, decrements soft inventory, and burns the
@@ -41,6 +47,7 @@ case (currently `USDC` and `USDT`) and rejected if unsupported.
 
 4. **Abort** (`MsgAbortCashOutIntent`)
    - Releases the escrow and marks the intent `aborted` (implementation TBD).
+   - Not currently reachable from any live transaction type or RPC handler today.
 
 ## Invariants
 
@@ -52,5 +59,8 @@ case (currently `USDC` and `USDT`) and rejected if unsupported.
   "burn-after-settle" requirements.
 - Stable assets are validated for every mutation to avoid unexpected buckets.
 
-The keeper exposes query endpoints (`QueryDepositVoucher`, `QueryCashOutIntent`,
-`QuerySoftInventory`) to assist treasury dashboards and auditors with real-time views.
+The keeper exposes `GetDepositVoucher`, `GetCashOutIntent`, and `GetSoftInventory`
+methods (`native/swap/stable_store.go`) that could back treasury dashboards and
+auditors with real-time views. These are Go methods only - the generated protobuf
+`Query*` message types exist with no service/rpc block, so there is no RPC/gRPC
+endpoint exposing them under any name today.

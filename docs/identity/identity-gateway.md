@@ -12,8 +12,7 @@ mutating endpoints require HMAC-authenticated API keys issued to partner applica
   "\n" + timestamp))`.
 * **Timestamp**: `X-API-Timestamp` (unix seconds). Requests older than 300s are rejected (`IDN-401`).
 * **Idempotency**: `Idempotency-Key` header (UUID v4). Repeating the same key returns the initial response.
-* **Rate Limits**: Default 60 write requests/minute per API key, 600 public lookups/minute. Limit headers:
-  * `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+* **Rate Limits**: Default 60 write requests/minute per API key, 600 public lookups/minute.
 
 ### Error Format
 
@@ -146,71 +145,14 @@ Binds a verified email to an alias ID for opt-in lookup.
 
 If the email was not previously verified, the endpoint returns `IDN-401`.
 
-### GET `/identity/resolve?username=<alias>`
+### Alias resolution and avatars
 
-Public lookup that resolves an alias to addresses and avatar.
-
-**Example Request**
-
-```http
-GET /identity/resolve?username=frankrocks HTTP/1.1
-Host: gateway.dev.nhbcoin.net
-Accept: application/json
-```
-
-**Response**
-
-```json
-{
-  "alias": "frankrocks",
-  "aliasId": "0x5e2c...",
-  "primary": "nhb1...",
-  "addresses": ["nhb1...", "nhb1alt..."],
-  "avatarUrl": "https://cdn.nhb/id/frankrocks.png",
-  "createdAt": "2024-05-01T12:00:00Z"
-}
-```
-
-No authentication required, but requests are rate-limited per IP.
-
-### GET `/identity/reverse?address=<bech32>`
-
-Returns alias metadata for a linked address.
-
-**Response**
-
-```json
-{
-  "alias": "frankrocks",
-  "aliasId": "0x5e2c..."
-}
-```
-
-If no alias is found, returns `404` with `IDN-404` payload.
-
-### POST `/identity/avatars/upload`
-
-Uploads avatar media and returns a canonical avatar reference.
-
-**Headers**: include API auth and `Content-Type: multipart/form-data`.
-
-**Multipart Fields**
-
-* `file`: binary image (PNG, JPEG, WebP), max 512 KB.
-* `aliasId`: hex aliasId (optional; if supplied, gateway enforces owner signature header `X-Alias-Signature`).
-
-**Response**
-
-```json
-{
-  "avatarRef": "https://cdn.nhb/avatars/0x5e2c/20240612.png",
-  "contentType": "image/png",
-  "size": 183421,
-  "etag": "\"f0d-1c2\""
-}
-```
-
-Uploaded avatars undergo content scanning (nudity, violence, malware). Non-compliant uploads return `IDN-422`.
+The gateway does not expose lookup or upload endpoints. Alias resolution (and
+reverse lookup by address) is done via the node's `identity_resolve` /
+`identity_reverse` JSON-RPC methods (see [JSON-RPC Reference](./identity-api.md)).
+Avatars are set via the `identity_setAvatar` JSON-RPC method, where the caller
+supplies an HTTPS URL or `blob://` reference string directly — there is no
+gateway upload endpoint.
 
 ---
 
@@ -237,24 +179,6 @@ curl -X POST "$GATEWAY/identity/email/register" \
   -H "Idempotency-Key: $(uuidgen)" \
   -H "Content-Type: application/json" \
   -d '{"email":"frank@example.com","aliasHint":"frankrocks"}'
-```
-
-### cURL – Resolve Alias
-
-```bash
-curl "$GATEWAY/identity/resolve?username=frankrocks" | jq
-```
-
-### cURL – Upload Avatar
-
-```bash
-curl -X POST "$GATEWAY/identity/avatars/upload" \
-  -H "X-API-Key: $API_KEY" \
-  -H "X-API-Timestamp: $(date +%s)" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "X-API-Signature: $SIG" \
-  -F "file=@avatar.png" \
-  -F "aliasId=0x5e2c..."
 ```
 
 ## OpenAPI Specification

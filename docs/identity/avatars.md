@@ -1,15 +1,16 @@
 # Avatar Specification
 
 Aliases can present avatars to improve recognition and reduce payment errors. Avatars are referenced on-chain as immutable
-strings (`avatarRef`) and retrieved via HTTPS or on-chain blob storage.
+strings (`avatarRef`); the chain itself stores only the string and does not host or retrieve the underlying media.
 
 ## Allowed Sources
 
 | Source | Format | Notes |
 | --- | --- | --- |
 | HTTPS URL | `https://cdn.nhb/...` or partner CDN. | Must use TLS 1.2+. Wallets should enforce HTTPS and check MIME type. |
-| Blob reference | `blob://<cid>` referencing on-chain stored blob. | CIDs follow NHBChain blob module rules; wallets fetch via node
-  blob RPC. |
+| Blob-shaped reference | `blob://<cid>`-formatted string. | There is no on-chain blob storage or blob RPC. The node only checks
+  for the `blob://` prefix; resolving the CID to actual media is entirely up to the client (e.g. a wallet-configured IPFS
+  gateway or partner CDN). |
 
 ## Size & Content Rules
 
@@ -27,10 +28,11 @@ strings (`avatarRef`) and retrieved via HTTPS or on-chain blob storage.
 
 ## Updating Avatars
 
-1. Owner uploads media via [`POST /identity/avatars/upload`](./identity-gateway.md#post-identityavatarsupload).
-2. Gateway returns canonical `avatarRef` (HTTPS URL or `blob://` reference) after validation.
-3. Owner calls `identity_setAvatar(ownerAddr, avatarRef)` over authenticated RPC to update the on-chain record.
-4. Event `identity.alias.avatarUpdated` notifies subscribers to refresh caches.
+1. Owner hosts the avatar media externally (HTTPS CDN) or otherwise obtains a `blob://`-shaped reference; there is no gateway
+   upload endpoint.
+2. Owner calls `identity_setAvatar(ownerAddr, avatarRef)` over authenticated RPC to update the on-chain record. The node only
+   checks that `avatarRef` has an `https://` or `blob://` prefix — it performs no content validation or storage.
+3. Event `identity.alias.avatarUpdated` notifies subscribers to refresh caches.
 
 ## Recommended Client Behavior
 

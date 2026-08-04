@@ -67,17 +67,16 @@ ledger systems.
 
 The governance router enforces a strict proposal state machine. Each proposal ID
 advances linearly: `draft -> voting -> finalized -> queued -> executed`.
-Requests that do not match the expected next state are rejected with a
-`StateTransitionError`. Execution payloads are protected by a content hash that
-is logged when the proposal is created; the executor re-validates the hash
-before applying the change so mutated payloads cannot be replayed.
+Requests that do not match the expected next state are rejected with a plain
+error (for example `"governance: proposal %d not accepting votes"`) rather than
+a dedicated error type.
 
-On-chain signatures are bound to a `nonce` and `chain_id` value. The `nonce`
-increments per account, preventing off-chain copied votes from being accepted,
-while the `chain_id` disallows replaying the same transaction on a forked or
-test environment. These safeguards ensure that even if a validator observes a
-vote transaction, it cannot re-submit the message without the signer's private
-key.
+Votes are submitted to the RPC as a plain `{id, from, choice}` JSON object and
+authenticated only by the caller's bearer JWT — `CastVote` does not verify a
+cryptographic signature over the vote, and there is no per-vote nonce or
+`chain_id` binding today. This means a vote is not cryptographically bound to
+the voter's private key; anyone holding a valid bearer token for the `from`
+address's session can cast or observe votes on its behalf.
 
 ## Tally Reproducibility
 
@@ -104,8 +103,8 @@ events:
 
 | Event | Trigger | Key Attributes |
 | --- | --- | --- |
-| `gov.proposed` | Proposal created and deposit escrowed. | `proposal_id`, `snapshot_epoch`, `payload_hash`, `deposit_amount` |
-| `gov.vote` | Ballot accepted during voting window. | `proposal_id`, `voter`, `choice`, `weight_bps` |
-| `gov.finalized` | Voting window closed and tally computed. | `proposal_id`, `yes_ratio_bps`, `turnout_bps`, `outcome` |
-| `gov.queued` | Proposal enqueued into timelock. | `proposal_id`, `execute_after`, `payload_hash` |
-| `gov.executed` | Timelock satisfied and payload applied. | `proposal_id`, `executor`, `effect_hash` |
+| `gov.proposed` | Proposal created and deposit escrowed. | `id`, `proposer`, `kind`, `deposit`, `votingStart`, `votingEnd`, `timelockEnd` |
+| `gov.vote` | Ballot accepted during voting window. | `id`, `voter`, `choice`, `powerBps` |
+| `gov.finalized` | Voting window closed and tally computed. | `id`, `status`, `turnoutBps`, `quorumBps`, `yesPowerBps`, `noPowerBps`, `abstainPowerBps`, `yesRatioBps`, `passThresholdBps`, `totalBallots` |
+| `gov.queued` | Proposal enqueued into timelock. | `id`, `timelockEnd` |
+| `gov.executed` | Timelock satisfied and payload applied. | `id`, `status` |

@@ -27,13 +27,12 @@ identity gateway service. Together they allow wallets, gateways, and merchants t
 
 ## Normalization & Uniqueness Rules
 
-* Aliases are normalized to lower-case and NFC (`unicode.org/reports/tr15/`), with secondary NFKC pass for compatibility.
-* Allowed characters: ASCII letters (`a–z`), digits (`0–9`), dot (`.`), underscore (`_`), and hyphen (`-`).
-* Length: minimum 3, maximum 32 Unicode code points after normalization.
+* Aliases are normalized by trimming surrounding whitespace and lower-casing (ASCII); there is no Unicode NFC/NFKC
+  normalization pass.
+* Allowed characters: ASCII letters (`a–z`), digits (`0–9`), dot (`.`), underscore (`_`), and hyphen (`-`), enforced by the
+  pattern `^[a-z0-9._-]+$`.
+* Length: minimum 3, maximum 32 characters after normalization.
 * Uniqueness is case-insensitive (`FrankRocks` and `frankrocks` resolve to the same canonical alias).
-* Reserved names: governance publishes a list (e.g., `admin`, `support`, trademarks). Reserved names throw `IDN-001`.
-* Confusable/homoglyph aliases are blocked (leverages Unicode security profile). Punycode-only names are rejected; users should
-  choose ASCII-native aliases. Guidance is provided in CLI and RPC error payloads.
 
 ## Alias State Model (On-Chain)
 
@@ -107,7 +106,7 @@ type Claimable struct {
 * Claimables are created by senders when the recipient alias/email cannot yet resolve.
 * Funds are held in the identity escrow submodule. Upon `identity_claim`, the amount is released to the claimant's address once
   the provided preimage matches `RecipientHint`.
-* Events emitted: `identity.claimable.created`, `identity.claimable.claimed`, `identity.claimable.expired`.
+* Events emitted: `claimable.created`, `claimable.claimed`, `claimable.cancelled`, `claimable.expired`.
 * Claimables integrate with the [Escrow module](../escrow/escrow.md#1-overview) for audit and settlement guarantees.
 
 ### Pay-by-Username Flow
@@ -152,10 +151,11 @@ sequenceDiagram
 
 | Threat | Mitigation |
 | --- | --- |
-| Alias squatting | Governance-managed reserved list; cooldown periods after release; optional staking deposit. |
-| Homoglyph spoofing | Unicode confusable detection and strict ASCII policy; wallets display creation timestamp & address
-  fingerprint. |
-| Unauthorized mutations | All mutating RPCs require owner signatures (EIP-191) with nonce + expiry; replay protection enforced. |
+| Alias squatting | Not currently mitigated beyond global uniqueness (first-come, first-registered); no reserved-name list,
+  staking deposit, cooldown period, or dispute-resolution process exists today. |
+| Homoglyph spoofing | Strict ASCII-only charset policy; wallets display creation timestamp & address fingerprint. |
+| Unauthorized mutations | Not currently enforced via per-message owner signatures — no `identity_*` mutating RPC accepts or
+  verifies a signature, nonce, or expiry. Authorization is solely holding a valid RPC bearer/JWT token. |
 | Rate-based abuse | Gateway enforces per-IP/user rate limits and API-key HMAC auth. |
 | Avatar abuse | Content policy scanning (size/type), moderated by gateway; on-chain references may be flagged by governance. |
 | Email harvesting | Only salted hashes stored; lookup requires opt-in; DSAR processes allow deletion. |

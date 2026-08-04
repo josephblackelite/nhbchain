@@ -6,7 +6,7 @@ This guide equips independent assessors with the artifacts and processes require
 Audits should prioritize the consensus engine, staking and escrow modules, RPC gateway, and validator configuration. The [ops/audit-pack](../../ops/audit-pack/README.md) contains architecture diagrams, frozen dependencies, and configuration references. External smart contracts deployed by partners are out of scope unless explicitly documented in the audit brief.
 
 ## Documentation & Artifacts
-- **Frozen Commit Hash:** See `ops/audit-pack/FROZEN_COMMIT.txt` for the exact revision to audit.
+- **Frozen Commit Hash:** `ops/audit-pack/FROZEN_COMMIT.txt` currently records a hash that does not exist in this repository's git history. It must be regenerated from a real commit before it can be relied on to identify the revision to audit.
 - **Reproducible Build:** `ops/audit-pack/BUILD_STEPS.md` walks through deterministic builds using Docker and Nix.
 - **Configuration Samples:** Example validator, RPC, and wallet configuration lives under `ops/audit-pack/config-samples/`.
 - **Seeds & Fixtures:** Deterministic chain seeds and integration fixtures are published under `ops/audit-pack/seeds-fixtures/` to help auditors replay consensus scenarios.
@@ -23,6 +23,5 @@ Audit findings are treated under the same embargo rules as vulnerability submiss
 ## Contacts & Encryption
 - **Program Lead:** `audit@nehborly.net`
 - **Security Team:** `security@nehborly.net`
-- **PGP Fingerprint:** `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`
-- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc)
+- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt anything. It must be regenerated before relying on it; no working fingerprint is published until then.
 

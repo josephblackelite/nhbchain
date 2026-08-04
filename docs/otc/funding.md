@@ -36,16 +36,18 @@ Invoices and vouchers carry additional fiat metadata:
 
 ## Compliance dashboard
 
-Operations Console users can monitor funding readiness through the "Funding Assurance"
-section. The dashboard surfaces:
+The Operations Console includes a "Funding Assurance" section intended to surface:
 
 - Counts of pending, confirmed, and rejected wires.
 - Confirmed fiat volume versus total notional to highlight reconciliation progress.
 - A live checklist of invoices still awaiting confirmation, including branches, amounts,
   and last update timestamps.
 
-These metrics complement the Prometheus feed and ensure the funding queue is cleared
-before invoking Sign & Submit.
+This dashboard currently shows only hardcoded sample data, not live funding state:
+`services/otc-ops-ui`'s compliance dashboard is fed exclusively by an in-memory
+`InvoiceStore` seeded with 3 hardcoded sample invoices, and it never calls the real
+otc-gateway REST API or its Postgres database. Do not rely on it to confirm the funding
+queue is clear before invoking Sign & Submit.
 
 ## Reconciliation expectations
 
@@ -54,9 +56,12 @@ before invoking Sign & Submit.
 - **Funding references** – every confirmed invoice must store the reference provided by the
   banking or custody platform. This identifier is logged with the voucher hash and must be
   supplied to reconciliation when matching on-chain mints to fiat deposits.
-- **Rejected wires** – when the webhook marks an invoice as `REJECTED`, transition the
-  invoice back to `PENDING_REVIEW` and document remediation steps before reattempting
-  funding.
+- **Rejected wires** – rejection handling is not currently implemented. `Processor.Process`
+  decodes the notification's `Status` field but never branches on it, so every valid webhook
+  notification is treated unconditionally as a confirmation regardless of the status it
+  carries. There is currently no path that sets `FundingStatusRejected` or moves an invoice
+  back to `PENDING_REVIEW`. Treat rejected wires as a manual, out-of-band process until this
+  is built.
 - **Monitoring** – the reconciliation ratio on the dashboard should trend toward 100% prior
   to mint windows. Investigate any delta between confirmed fiat volume and OTC notional
   before releasing vouchers.

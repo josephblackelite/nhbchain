@@ -5,12 +5,12 @@
 ## Proposal Intake
 
 Community members draft proposals off-chain using the published template, then
-submit them through the governance module with a deterministic payload hash and
-targeted change set. The intake endpoint records the author address, the
-referenced POTSO snapshot epoch, and embeds the payload hash into the
-`gov.proposed` event. Intake rejects submissions that omit mandatory disclosures
-or reference an epoch newer than `E-1`, ensuring all voters share the same
-eligibility dataset.
+submit them through the governance module with a targeted change set. The
+intake endpoint records the submitter address and proposal target, and emits a
+`gov.proposed` event (`id`, `proposer`, `kind`, `deposit`, `votingStart`,
+`votingEnd`, `timelockEnd`). Intake rejects submissions that omit mandatory
+disclosures. POTSO snapshot epoch eligibility is checked later, at
+vote-casting time — see [Voting Period](#voting-period) below.
 
 ### Supported Proposal Kinds
 
@@ -59,18 +59,18 @@ eligible voters.
 ## Timelock Enforcement
 
 Once a proposal finalises with a passing outcome, the proposer (or any keeper)
-must queue it for execution. Queuing records `execute_after = finalized_at +
-TimelockDuration`. The runtime refuses to execute the payload before the
-timestamp elapses and emits `gov.queued` for monitoring systems. During the
-timelock window, stakeholders can review the payload hash, compare it against the
-original proposal, and raise alerts if downstream integrations require manual
+must queue it for execution. Queuing sets the proposal's `timelockEnd`
+(`finalized_at + TimelockDuration`) and emits `gov.queued` with attributes
+`id` and `timelockEnd`. The runtime refuses to execute the payload before that
+timestamp elapses. During the timelock window, stakeholders can review the
+queued proposal and raise alerts if downstream integrations require manual
 intervention.
 
 ## Execution and Archival
 
 After the timelock expires, any address may call `ExecuteProposal`. The runtime
-verifies the payload hash, applies the parameter changes atomically, and emits
-`gov.executed`. Completed proposals are archived with their final state, vote
+applies the parameter changes atomically and emits `gov.executed` (attributes
+`id`, `status`). Completed proposals are archived with their final state, vote
 summary, execution transaction hash, and an immutable audit record that
 captures the executor, timestamp, and a JSON summary of the effect. The audit
 log is append-only and keyed by sequence number so regulators and downstream

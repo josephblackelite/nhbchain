@@ -73,7 +73,11 @@ This runbook codifies the standard operating procedure for onboarding a new OTC 
 ## 7. Audit Expectations
 
 - Ensure all approval/rejection decisions include notes referencing supporting evidence.
-- Periodically export partner tables for compliance review using the existing recon tooling.
+- There is currently no tooling to export partner tables for compliance review: `Reconciler.Run()`
+  in `services/otc-gateway/recon/reconciler.go` only loads/exports Invoice, Branch, Voucher, and
+  Event records, and no other partner-export code path exists. Exporting `Partner`,
+  `PartnerContact`, or `PartnerApproval` data today requires a direct database query, or building
+  dedicated export tooling.
 - Partner-related audit events (action prefix `partner.`) are stored in the shared `events` table for single-pane investigations.
 
 Following this runbook keeps KYB evidence, operational readiness, and production permissions tightly coupled, reducing the risk of minting for unverified partners.

@@ -27,7 +27,7 @@ All messages describe a `tx_update` event:
 | `intentRef` | bytes/hex | POS intent reference. |
 | `txHash` | bytes/hex | Transaction hash. |
 | `status` | enum/string | `pending` (accepted) or `finalized` (BFT commit). |
-| `blockHash` | bytes/hex | Present when `status=finalized`. |
+| `blockHash` (gRPC) / `block` (WebSocket) | bytes/hex | Present when `status=finalized`. Field is `blockHash` in the protojson gRPC payload and `block` in the WebSocket JSON payload. |
 | `height` | uint64 | Finalized block height, `0` while pending. |
 | `ts`/`timestamp` | int64 | Block or enqueue timestamp (Unix seconds). |
 

@@ -21,20 +21,21 @@ Every mitigation below maps to at least one of these scenarios.
 ## RPC & Gateway Protection
 
 1. **Mandatory authentication** – JSON-RPC methods that mutate chain state must
-   sit behind HMAC authentication (`X-NHB-APIKEY`, `X-NHB-SIGNATURE`). Do not
-   expose unauthenticated endpoints on public interfaces. The configuration
-   examples in [`docs/networking/net-rpc.md`](../networking/net-rpc.md) show the
-   required headers and expected error codes.
+   sit behind bearer-token authentication (`Authorization: Bearer <RPCJWT>`).
+   Do not expose unauthenticated endpoints on public interfaces. The
+   configuration examples in
+   [`docs/networking/net-rpc.md`](../networking/net-rpc.md) show the required
+   header and expected error codes.
 2. **Mutual TLS or private networking** – Validators should restrict RPC access
    to an API gateway that validates client certificates. Partners connecting
    over the internet must use mutual TLS; browser clients should go through a
    gateway that proxies requests on their behalf.
 3. **Request validation** – Reject mismatched `chainId`, stale timestamps
-   (±60 seconds), and nonce replays. The stock handlers already enforce these
+   (±120 seconds), and nonce replays. The stock handlers already enforce these
    checks; ensure any custom middleware preserves them.
-4. **Rate limiting** – Keep the defaults from `config.toml` (`RateMsgsPerSec=50`,
-   `Burst=200`) for operator RPC. API gateways should additionally enforce per
-   IP and per key quotas that align with commercial agreements.
+4. **Rate limiting** – Keep the defaults from `config.toml` (`RPCMaxTxPerWindow`,
+   `RPCRateLimitWindow`) for operator RPC. API gateways should additionally
+   enforce per IP and per key quotas that align with commercial agreements.
 5. **Audit logging** – Ship RPC access logs to your SIEM. Alert on spikes in
    401/403 responses, large payloads, or methods invoked outside policy.
 
@@ -118,8 +119,8 @@ Track these items in the security backlog and revisit after each major release.
 
 Use this list before promoting infrastructure to production or public testnet:
 
-- [ ] RPC endpoints enforce HMAC auth or mutual TLS and reject unauthenticated
-      calls.
+- [ ] RPC endpoints enforce Bearer/RPCJWT auth or mutual TLS and reject
+      unauthenticated calls.
 - [ ] Rate limiting is active at the node and edge layers.
 - [ ] Gateways enforce allowlists for RPC/REST methods and reject unknown routes.
 - [ ] REST write paths require idempotency keys and drop replays for 24 hours.

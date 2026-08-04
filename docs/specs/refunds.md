@@ -43,6 +43,14 @@ committed, ensuring double-refunds cannot occur.
 `RefundThread(origin_tx)` RPC returns the ledger view needed to surface refund
 threads in wallets and dashboards.
 
+The proto messages, service definition, and generated stubs exist, and the
+backing data (`RefundLedger.Thread`) is real and wired into transaction
+execution. However, no concrete server implementation for this `Query`
+service is registered on any running gRPC server (compare with
+`services/governd/main.go`, which does register the analogous governance
+`Query` service). The generated code currently just returns `Unimplemented` —
+this RPC is not reachable today.
+
 **Response fields:**
 
 * `origin_tx` – the referenced transaction hash.
@@ -74,5 +82,6 @@ to avoid JSON precision loss.
 4. Refund transaction C: any amount > `0` would be rejected because the origin
    has already been fully refunded.
 
-This behaviour is captured by the unit test suite (`refund threading visible`
-and `over-refund rejected`).
+This behaviour is captured by the unit test suite
+(`TestRefundLedgerRecordAndThread` and `TestRefundLedgerOverRefund` in
+`core/state/refund_ledger_test.go`).

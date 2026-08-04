@@ -31,6 +31,5 @@ Researchers are expected to keep vulnerability details confidential until a coor
 Send encrypted reports to **security@nehborly.net** with the subject line “Bug Bounty Submission.” Include detailed reproduction steps, affected components, and suggested remediation if available. Urgent matters can also be escalated via our Signal hotline `+13234559568` (voice/text only).
 
 ## PGP Key
-* **Fingerprint:** `8F2D 3C71 9A0B 4D52 8EFA 9C1B 6D74 C5A2 1D3F 8B9E`
-* **Key:** See [`docs/security/repository-pgp-key.asc`](./repository-pgp-key.asc).
+* **Key:** [`docs/security/repository-pgp-key.asc`](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt reports. It must be regenerated before it can be relied on.
 

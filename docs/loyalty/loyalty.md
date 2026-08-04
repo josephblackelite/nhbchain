@@ -8,7 +8,6 @@
 2. [Concepts & Roles](#2-concepts--roles)
 3. [On-Chain Model](#3-on-chain-model)
 4. [Node JSON-RPC (Loyalty Admin & Read)](#4-node-json-rpc-loyalty-admin--read)
-5. [Escrow Gateway (External Awards API)](#5-escrow-gateway--external-awards-api-off-network-purchases)
 6. [CLI (`nhb-cli`) Command Reference](#6-cli--nhb-cli-loyalty)
 7. [Events & Analytics](#7-events--analytics)
 8. [Security & Compliance (Regulators--Auditors)](#8-security--compliance-regulators--auditors)
@@ -25,15 +24,14 @@ The Loyalty Engine grants **ZNHB** rewards to users based on **final settlement*
 
 **Key properties**
 
-* **Deterministic:** reward amounts are derived from deterministic calculations performed at escrow release or explicit award submissions.
-* **Idempotent:** duplicate award submissions with identical `referenceId` or settlement identifiers are ignored after the first success.
+* **Deterministic:** reward amounts are derived from deterministic calculations performed at escrow release.
+* **Idempotent:** duplicate award submissions with identical settlement identifiers are ignored after the first success.
 * **Composable:** programs can be combined with base network rewards or marketing incentives without double-counting accruals.
 * **Observable:** every action emits an event and can be retrieved from RPC or the Escrow Gateway for analytics tooling.
 
 **Reward triggers**
 
 * **Escrow-linked rewards:** On escrow `release` the engine checks the active programs for the merchant/business and allocates rewards from their paymaster wallets.
-* **External awards:** Businesses can directly allocate rewards off-network via the Escrow Gateway, enabling marketing programs for non-escrow activity.
 * **Base rewards:** network-wide base reward funded from the protocol loyalty treasury and credited to the **spender** on qualifying NHB commerce payments.
 
 **Qualified spend guardrail**
@@ -54,7 +52,7 @@ treasury movements, swap minting, or cash-out/redemption flows.
 * Protocol base rewards move `ZNHB` from the **loyalty treasury → spender**.
 * Merchant bonus rewards move `ZNHB` from the **business paymaster → spender**.
 * Founder mainnet treats `ZNHB` as a fixed-supply asset; ongoing loyalty execution does not depend on post-genesis `ZNHB` minting.
-* Paymaster balances must be topped up by the business before reward execution. Insufficient paymaster balance causes the accrual to be skipped (event + webhook) without impacting settlement completion.
+* Paymaster balances must be topped up by the business before reward execution. Insufficient paymaster balance causes the accrual to be skipped (event) without impacting settlement completion.
 
 ---
 
@@ -65,7 +63,7 @@ treasury movements, swap minting, or cash-out/redemption flows.
 | **Business** | An owner address that manages one or more loyalty programs. Responsible for funding paymaster wallets and defining program parameters. | `businessID` (bytes32); owner wallet (Bech32 HRP `nhb`). |
 | **Merchant** | Receiving address associated with a business. Merchants inherit the business’s programs. | `merchantID` (derived from address); registered via RPC or CLI. |
 | **Program** | Reward configuration (basis points, caps, eligibility windows) funded via a business paymaster wallet. | `programID` (bytes32); references paymaster address. |
-| **User** | An address (optionally mapped from username/email via Escrow Gateway) that receives rewards. | Bech32 addresses with HRPs `nhb` or `znhb`. |
+| **User** | An address that receives rewards. | Bech32 addresses with HRPs `nhb` or `znhb`. |
 | **Paymaster** | Wallet holding ZNHB reserved for merchant-funded loyalty rewards. | Standard on-chain account managed by the business. |
 | **Roles (on-chain)** | Privileged roles that govern advanced functionality. | `ROLE_ARBITRATOR`, `PAYMASTER`, `MINTER_NHB`. |
 
@@ -155,7 +153,7 @@ struct SettlementContext {
 }
 ```
 
-The loyalty module evaluates active programs for `businessID`, filters by `token` and thresholds, computes rewards, debits paymaster pools, and emits `loyalty.accrued` events per user.
+The loyalty module evaluates active programs for `businessID`, filters by `token` and thresholds, computes rewards, debits paymaster pools, and emits `loyalty.program.accrued` events per user.
 
 ---
 
@@ -171,53 +169,52 @@ All loyalty RPC calls use standard JSON-RPC 2.0 at the node endpoint (default `h
 
 ### Admin (write)
 
-#### `loyalty.createBusiness(ownerBech32, name) -> businessID`
+#### `loyalty_createBusiness(ownerBech32, name) -> businessID`
 * **Parameters**
   * `ownerBech32` (`string`): address that will own the business.
   * `name` (`string`): optional display name.
 * **Requirements:** Transaction sender must equal `ownerBech32`.
 * **Returns:** `businessID` (hex-encoded bytes32).
-* **Errors:** `INVALID_BECH32`, `BUSINESS_EXISTS`, `UNAUTHORIZED_CALLER`.
+* **Errors:** `-32602` invalid params (e.g. `"invalid caller address"`, `"invalid owner address"`, `"name is required"`); `-32001` unauthorized (`"caller not authorized"`).
 
-#### `loyalty.setPaymaster(businessID, paymasterBech32)`
+#### `loyalty_setPaymaster(businessID, paymasterBech32)`
 * Rotates the paymaster pool used for all programs under the business.
 * Emits `loyalty.paymaster.rotated` with `{businessID, old, new}`.
 * **Checks:** caller is business owner/admin; paymaster must be a valid address.
 
-#### `loyalty.addMerchant(businessID, merchantBech32)` / `loyalty.removeMerchant(...)`
+#### `loyalty_addMerchant(businessID, merchantBech32)` / `loyalty_removeMerchant(...)`
 * Adds or removes merchant mappings. Merchants inherit all active programs instantly.
 * Removing a merchant stops future accruals but does not claw back existing rewards.
 
-#### `loyalty.createProgram(businessID, ProgramSpecJSON) -> programID`
+#### `loyalty_createProgram(businessID, ProgramSpecJSON) -> programID`
 * `ProgramSpecJSON` includes all fields described in [On-Chain Model](#3-on-chain-model).
 * **Validation:** ensures token symbol is `ZNHB`, time windows are valid, caps are non-negative, and paymaster balance >= configured reserve threshold.
 * Returns `programID` (hex string).
 
-#### `loyalty.updateProgram(programID, ProgramSpecJSON)`
+#### `loyalty_updateProgram(programID, ProgramSpecJSON)`
 * Partial updates permitted. Omitted fields remain unchanged.
-* Sensitive fields (token symbol, owner) immutable; attempting to change them returns `FIELD_IMMUTABLE`.
+* Invalid specs or update failures return `-32602` invalid params with the underlying reason.
 
-#### `loyalty.pauseProgram(programID)` / `loyalty.resumeProgram(programID)`
+#### `loyalty_pauseProgram(programID)` / `loyalty_resumeProgram(programID)`
 * Toggles `Active` flag. Paused programs skip accruals but maintain meters for historical reference.
 * Emits `loyalty.program.paused` or `loyalty.program.resumed` events.
 
 ### Read (dashboard)
 
-#### `loyalty.getBusiness(businessID)`
+#### `loyalty_getBusiness(businessID)`
 * Returns business metadata, current paymaster, and merchant list.
 
-#### `loyalty.listPrograms(businessID)`
+#### `loyalty_listPrograms(businessID)`
 * Returns an array of active and inactive programs.
 * Supports optional pagination parameters: `offset`, `limit` when provided via named params.
 
-#### `loyalty.programStats(programID, dayUTC)`
-* Provides aggregated metrics for the specified UTC day (format `YYYY-MM-DD`).
-* Fields: `rewardsPaid`, `txCount`, `capUsage`, `skips` (count of skipped accruals).
+#### `loyalty_programStats(programID, dayUTC)`
+* **Currently a stub:** the handler validates `programID`/`dayUTC` and unconditionally returns `{"rewardsPaid": "0", "txCount": "0", "capUsage": "0"}` regardless of actual on-chain state; it does not read program meters yet.
 
-#### `loyalty.userDaily(userBech32, programID, dayUTC)`
+#### `loyalty_userDaily(userBech32, programID, dayUTC)`
 * Returns user-specific meter details for compliance or customer support.
 
-#### `loyalty.paymasterBalance(businessID)`
+#### `loyalty_paymasterBalance(businessID)`
 * Returns the ZNHB balance of the current paymaster pool and reserved amounts (pending awards).
 
 **JSON-RPC cURL example**
@@ -226,168 +223,47 @@ All loyalty RPC calls use standard JSON-RPC 2.0 at the node endpoint (default `h
 curl -s http://127.0.0.1:8545 -H 'Content-Type: application/json' -d '{
   "jsonrpc":"2.0",
   "id":1,
-  "method":"loyalty.listPrograms",
+  "method":"loyalty_listPrograms",
   "params":["0x<businessID>"]
 }'
 ```
-
-**WebSocket subscription (optional)**
-
-Nodes exposing WebSocket transport support `subscribe` to loyalty events. See RPC docs for `eth_subscribe` usage with filter topic `loyalty.*`.
-
----
-
-## 5) Escrow Gateway – External Awards API (Off-Network Purchases)
-
-The Escrow Gateway exposes REST APIs for businesses that operate outside the on-chain settlement loop but still want to issue loyalty rewards. Requests require API keys and HMAC signatures. Idempotency is enforced via headers to guarantee at-most-once award issuance.
-
-**Base URL:** service deployment of `services/escrow-gateway` (e.g., `https://api.devnet.nhbcoin.net`).
-
-### Authentication headers
-
-| Header | Description |
-|--------|-------------|
-| `X-Api-Key` | Public identifier for the client. |
-| `X-Timestamp` | RFC3339 timestamp. Skew must be within ±300s of server time. |
-| `X-Signature` | Hex-encoded HMAC-SHA256 signature computed as `HMAC(secret, method|path|body|timestamp)`. |
-| `Idempotency-Key` | Unique key per request (UUID or hash). Required for POSTs. |
-| `X-Sig-Addr` / `X-Sig` | Optional wallet signature headers for endpoints requiring additional authorization. |
-
-Server responses include `X-Request-ID` for tracing and `Replay-After` for rate limiting when `429` is returned.
-
-### Endpoints
-
-#### `POST /external/users/lookup`
-
-* **Request body**
-  ```json
-  { "externalId": "user@example.com" }
-  ```
-* **Response**
-  ```json
-  { "address": "nhb1qxy..." }
-  ```
-* Returns `address: null` if no mapping exists. Include hashed external IDs in analytics logs to avoid raw PII retention.
-
-#### `POST /external/users/register`
-
-* **Request body**
-  ```json
-  {
-    "externalId": "user@example.com",
-    "bech32": "nhb1qxy..."
-  }
-  ```
-* Registers or updates the mapping. The gateway salts and hashes the identifier before persistence.
-* Response: `{ "address": "nhb1qxy...", "status": "created|updated" }`.
-
-#### `POST /external/awards`
-
-* **Request body**
-  ```json
-  {
-    "referenceId": "REF123",
-    "user": "nhb1qxy...",
-    "programId": "0xabc123...",
-    "amount": "1000000000000000000",
-    "metadata": {
-      "campaign": "spring-2025",
-      "note": "manual adjustment"
-    }
-  }
-  ```
-* **Behavior**
-  * Validates `referenceId` uniqueness per API key.
-  * Debits the program paymaster and queues on-chain transfer via internal worker.
-  * Returns 202 Accepted when asynchronous submission is scheduled; clients should poll status.
-* **Response**
-  ```json
-  {
-    "referenceId": "REF123",
-    "status": "queued",
-    "queuedAt": "2025-03-21T12:30:45Z"
-  }
-  ```
-
-#### `GET /external/awards/{referenceId}`
-
-* Returns
-  ```json
-  {
-    "referenceId": "REF123",
-    "status": "queued|submitted|settled|skipped|reversed",
-    "txHash": "0x...",             // when submitted
-    "skipReason": "POOL_INSUFFICIENT_FUNDS",
-    "amount": "1000000000000000000",
-    "programId": "0xabc123...",
-    "updatedAt": "2025-03-21T12:35:10Z"
-  }
-  ```
-
-#### `POST /external/awards/{referenceId}/reverse`
-
-* Initiates reversal when business policy allows clawbacks. Requires wallet signature headers.
-* Response contains `status: "reversed"` or `status: "pending"` if asynchronous.
-
-### Webhooks
-
-* **Events**: `award.settled`, `award.skipped`.
-* Payload example:
-  ```json
-  {
-    "event": "award.settled",
-    "referenceId": "REF123",
-    "programId": "0xabc123...",
-    "user": "nhb1qxy...",
-    "amount": "1000000000000000000",
-    "txHash": "0x...",
-    "settledAt": "2025-03-21T12:37:21Z"
-  }
-  ```
-* Webhook signatures reuse the HMAC header scheme (`X-Api-Key`, `X-Timestamp`, `X-Signature`). Verify before processing.
-
-### Rate limits
-
-* Default: `60` award submissions per minute per API key; `600` lookup/register requests per minute.
-* Bursting beyond rate limits returns `429` with `Retry-After` header. Clients should implement exponential backoff.
 
 ---
 
 ## 6) CLI – `nhb-cli` (loyalty)
 
-The `nhb-cli` binary ships with subcommands to manage loyalty constructs. Commands implicitly use local keystore accounts unless `--from` is specified. Use `--chain-id 14699254016670310680` when targeting founder mainnet.
+The `nhb-cli` binary ships with subcommands to manage loyalty constructs. Commands implicitly use local keystore accounts unless `--from` is specified.
 
 ```bash
 # Create business
-nhb-cli loyalty create-business --owner nhb1... --name "Zenith Hotels"
+nhb-cli loyalty-create-business nhb1... "Zenith Hotels"
 
 # Set paymaster
-nhb-cli loyalty set-paymaster --business 0x... --paymaster nhb1...
+nhb-cli loyalty-set-paymaster nhb1... 0x... nhb1...
 
 # Add merchant
-nhb-cli loyalty add-merchant --business 0x... --merchant nhb1...
+nhb-cli loyalty-add-merchant nhb1... 0x... nhb1...
 
 # Create program
-nhb-cli loyalty create-program --business 0x... --spec ./program.json
+nhb-cli loyalty-create-program nhb1... 0x... '{"...program spec JSON..."}'
 
 # Update program (partial)
-nhb-cli loyalty update-program --program 0x... --spec ./program-update.json
+nhb-cli loyalty-update-program nhb1... '{"...program spec JSON..."}'
 
 # Pause / Resume
-nhb-cli loyalty pause --program 0x...
-nhb-cli loyalty resume --program 0x...
+nhb-cli loyalty-pause-program nhb1... 0x...
+nhb-cli loyalty-resume-program nhb1... 0x...
 
 # Stats
-nhb-cli loyalty stats --program 0x... --day 2025-09-22
+nhb-cli loyalty-program-stats 0x... 2025-09-22
 
 # User meter lookup
-nhb-cli loyalty user-daily --program 0x... --user nhb1... --day 2025-09-22
+nhb-cli loyalty-user-daily nhb1... 0x... 2025-09-22
 ```
 
 **CLI configuration tips**
 
-* Use `--node http://127.0.0.1:8545` to override default RPC URL.
-* Set `NHBCHAIN_KEYRING_PASS` env var for unattended scripts.
+* Use `--rpc http://127.0.0.1:8545` to override default RPC URL.
 * Combine with `jq` to parse JSON output for automation pipelines.
 
 ---
@@ -398,8 +274,10 @@ Events are emitted both on-chain and via the Escrow Gateway for downstream inges
 
 | Event | Description | Payload fields |
 |-------|-------------|----------------|
-| `loyalty.accrued` | Reward successfully applied to a user. | `{ program, user, merchant, token, amount, bps, escrowId, txHash }` |
-| `loyalty.skipped` | Reward skipped due to validation failure or insufficient funds. | `{ program, user, reason, ctx }` |
+| `loyalty.program.accrued` | Program-funded reward successfully applied to a user. | `{ program, user, merchant, token, amount, bps, escrowId, txHash }` |
+| `loyalty.program.skipped` | Program-funded reward skipped due to validation failure or insufficient funds. | `{ program, user, reason, ctx }` |
+| `loyalty.base.accrued` | Base (protocol treasury) reward successfully applied to a spender. | `{ user, token, amount, txHash }` |
+| `loyalty.base.skipped` | Base reward skipped due to validation failure or insufficient funds. | `{ user, reason, ctx }` |
 | `loyalty.program.paused` / `loyalty.program.resumed` | Program state toggled. | `{ program, actor, timestamp }` |
 | `loyalty.paymaster.rotated` | Paymaster changed for a business. | `{ business, old, new, actor }` |
 
@@ -427,7 +305,7 @@ Events are emitted both on-chain and via the Escrow Gateway for downstream inges
 ### Determinism & Accounting Controls
 
 * All reward computations use fixed-point math via `big.Int`. Avoid floating-point operations in client code.
-* Programs cannot overdraft paymaster pools. When funds are insufficient, the accrual is skipped and flagged. Businesses should monitor balances via `loyalty.paymasterBalance`.
+* Programs cannot overdraft paymaster pools. When funds are insufficient, the accrual is skipped and flagged. Businesses should monitor balances via `loyalty_paymasterBalance`.
 * Daily and per-transaction caps are enforced at the time of accrual; updates to caps affect only future accruals.
 
 ### Audit & Retention
@@ -438,8 +316,7 @@ Events are emitted both on-chain and via the Escrow Gateway for downstream inges
 
 ### Privacy & Data Handling
 
-* External ID mappings use salted hashes; salts are rotated periodically. Store salts in a secure secret manager.
-* Do not persist raw PII outside secure, access-controlled systems. Ensure webhook consumers follow the same policy.
+* Do not persist raw PII outside secure, access-controlled systems.
 
 ### Compliance Checklist
 
@@ -461,40 +338,14 @@ Events are emitted both on-chain and via the Escrow Gateway for downstream inges
 4. **Create program** defining accrual rate and caps.
 5. **Fund paymaster** periodically (`wallet send` or bridging). Ensure buffer covers expected rewards.
 6. **Escrow release** occurs → loyalty engine evaluates and transfers rewards.
-7. **Event handling:** `loyalty.accrued` event and optional webhook notify downstream systems.
-8. **Reporting:** Use `loyalty.programStats` and `loyalty.userDaily` to reconcile payouts.
+7. **Event handling:** `loyalty.program.accrued` event notifies downstream systems.
+8. **Reporting:** Use `loyalty_programStats` and `loyalty_userDaily` to reconcile payouts.
 
-### External Award (Off-Network) via Escrow Gateway
-
-1. **Register user** mapping (`POST /external/users/register`).
-2. **Submit award** with unique `referenceId` via `POST /external/awards`.
-3. **Poll status** using `GET /external/awards/{referenceId}` until `settled` or `skipped`.
-4. **Handle webhook** if configured, confirming final state.
-5. **Reversals** (if necessary) using `POST /external/awards/{referenceId}/reverse` with wallet signature.
-
-### Automation example (cURL + CLI)
+### Automation example (CLI)
 
 ```bash
-# 1. Lookup address for external user
-curl -s "$GATEWAY/external/users/lookup" \
-  -H "Content-Type: application/json" \
-  -H "X-Api-Key: $API_KEY" \
-  -H "X-Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "X-Signature: $(./scripts/sign-hmac.sh lookup /external/users/lookup '{"externalId":"user@example.com"}')" \
-  -d '{"externalId":"user@example.com"}'
-
-# 2. Submit award once escrow release confirmed
-curl -s "$GATEWAY/external/awards" \
-  -H "Content-Type: application/json" \
-  -H "X-Api-Key: $API_KEY" \
-  -H "X-Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -H "Idempotency-Key: REF123" \
-  -H "X-Signature: $(./scripts/sign-hmac.sh post /external/awards '{"referenceId":"REF123","user":"nhb1...","programId":"0x...","amount":"1000000000000000000"}')" \
-  -d '{"referenceId":"REF123","user":"nhb1...","programId":"0x...","amount":"1000000000000000000"}'
-
-# 3. Query program stats for daily reconciliation
-nhb-cli loyalty stats --program 0x... --day $(date -u +%Y-%m-%d)
+# Query program stats for daily reconciliation
+nhb-cli loyalty-program-stats 0x... $(date -u +%Y-%m-%d)
 ```
 
 ---
@@ -503,38 +354,20 @@ nhb-cli loyalty stats --program 0x... --day $(date -u +%Y-%m-%d)
 
 ### JSON-RPC error codes
 
+Loyalty RPC handlers return standard numeric JSON-RPC error codes paired with a plain-English message, not string error codes:
+
 | Code | Description | Recommended action |
 |------|-------------|--------------------|
-| `INVALID_BECH32` | Address fails Bech32 validation. | Verify HRP (`nhb`/`znhb`) and checksum. |
-| `UNKNOWN_PROGRAM` | Program ID not found or belongs to another business. | List programs and confirm ID. |
-| `POOL_INSUFFICIENT_FUNDS` | Paymaster balance below required amount. | Top up ZNHB; use `loyalty.paymasterBalance`. |
-| `CAP_EXCEEDED_TX` | Reward exceeds per-transaction cap. | Adjust program caps or split transaction. |
-| `CAP_EXCEEDED_DAILY` | User reached daily maximum. | Inform customer; resets at UTC midnight. |
-| `UNAUTHORIZED_CALLER` | Caller lacks required role or ownership. | Sign transaction with authorized wallet. |
-
-### REST error model
-
-* Standard JSON object:
-  ```json
-  {
-    "error": {
-      "code": "POOL_INSUFFICIENT_FUNDS",
-      "message": "Paymaster balance below required minimum",
-      "details": {"required": "1000000000000000000", "available": "0"}
-    },
-    "idempotencyKey": "REF123"
-  }
-  ```
-* HTTP status mapping: `400` (validation), `401/403` (auth), `409` (duplicate idempotency key), `422` (business rule), `429` (rate limit), `500` (unexpected).
+| `-32602` (invalid params) | Malformed or invalid request parameters, e.g. `"invalid caller address"`, `"invalid businessId"`, `"business not found"`. | Check the message text and correct the request. |
+| `-32001` (unauthorized) | Caller lacks required role or ownership, e.g. `"caller not authorized"`. | Sign the transaction with the business owner wallet or a `ROLE_LOYALTY_ADMIN` holder. |
+| `-32000` (server error) | Internal failure loading state (business, account, meters, programs). | Retry; if persistent, contact node operator. |
 
 ### Troubleshooting checklist
 
-* **Signature mismatch:** ensure canonical JSON encoding (no whitespace changes) when computing HMAC; confirm server timestamp tolerance.
-* **Delayed settlement:** check worker queue health; use gateway status endpoint for updates.
-* **High skip rate:** monitor `loyalty.skipped` events; inspect `reason` field for patterns (caps, balance, inactive program).
+* **High skip rate:** monitor `loyalty.program.skipped` / `loyalty.base.skipped` events; inspect the `reason` field for patterns (caps, balance, inactive program).
 * **Program not applying to merchant:** verify merchant is registered to the business and program `StartTime/EndTime` encompasses settlement timestamp.
 * **Module paused:** run `go run ./examples/docs/ops/read_pauses` to confirm the loyalty flag is `false`; resume with `go run ./examples/docs/ops/pause_toggle --module loyalty --state resume` when cleared by governance.
-* **Cap rejections:** inspect the program meters via `loyalty.programStats` to see `capUsage` and compare against configured per-transaction / daily caps before retrying.
+* **Cap rejections:** inspect the program meters via `loyalty_programStats` to see `capUsage` and compare against configured per-transaction / daily caps before retrying. Note: `loyalty_programStats` currently always returns zeros (see [Section 4](#4-node-json-rpc-loyalty-admin--read)); use direct state access for accurate cap usage until it is wired up.
 
 ---
 

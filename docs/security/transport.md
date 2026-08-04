@@ -125,8 +125,10 @@ grpcurl -cacert clients-ca.pem \
 HMAC protected routes enforce tighter bounds:
 
 * Maximum timestamp skew defaults to 120 seconds and is tunable via
-  `swapAuth.allowedTimestampSkew` in the node configuration.
-* Nonce TTL defaults to 10 minutes and is tunable via `swapAuth.nonceTTL`.
+  `AllowedTimestampSkewSeconds` under `[RPCSwapAuth]` in the node
+  configuration.
+* Nonce TTL defaults to 10 minutes and is tunable via `NonceTTLSeconds` under
+  `[RPCSwapAuth]`.
 * Nonce caches: bounded LRU per API key to 65,536 entries.
 
 These limits stop replay amplification while keeping retry budgets predictable.

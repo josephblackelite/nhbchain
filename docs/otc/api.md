@@ -1,12 +1,12 @@
 # OTC Gateway API
 
-All endpoints require OIDC SSO access tokens combined with a WebAuthn assertion. For the reference implementation this is represented by the headers:
+All endpoints require OIDC SSO access tokens combined with a WebAuthn assertion. The reference implementation enforces this via the headers:
 
-- `Authorization: Bearer <subject>|<role>`
-- `X-WebAuthn-Verified: true`
+- `Authorization: Bearer <jwt>` – a signed JWT verified with `jwt.ParseWithClaims`; the subject and role are read from the `sub` claim and the configured role claim (not encoded ad hoc into the bearer value).
+- `X-WebAuthn-Attestation: <assertion>` (header name configurable via `OTC_WEBAUTHN_ASSERTION_HEADER`) – a genuine WebAuthn assertion verified by the configured `WebAuthnVerifier`, not a literal `true`.
 - `Idempotency-Key: <uuid>` (optional but recommended for POST requests)
 
-Supported roles are `teller`, `supervisor`, `compliance`, `superadmin`, and `auditor`.
+Supported roles are `teller`, `supervisor`, `compliance`, `superadmin`, `auditor`, `partner`, `partneradmin`, and `rootadmin`. The `partner`, `partneradmin`, and `rootadmin` roles gate partner-management endpoints (`POST /api/v1/partners`, `/partners/{id}/dossier`, `/approve`, `/reject`).
 
 Base path: `/api/v1`
 
@@ -43,7 +43,7 @@ Create a new OTC invoice.
 }
 ```
 
-- Roles: teller, supervisor, superadmin
+- Roles: teller, supervisor, superadmin, partner, partneradmin
 - Response: `201 Created` with the created invoice object.
 
 ## `POST /invoices/{id}/receipt`
@@ -55,7 +55,7 @@ Register an uploaded receipt for the invoice and transition the order to `RECEIP
 }
 ```
 
-- Roles: teller, supervisor, superadmin
+- Roles: teller, supervisor, superadmin, partner, partneradmin
 - Response: `200 OK` with `{ "status": "RECEIPT_UPLOADED" }`
 
 ## `POST /invoices/{id}/pending-review`
@@ -108,4 +108,4 @@ Errors are returned as plain text with relevant HTTP status codes. Clients shoul
 
 ## Idempotency
 
-When `Idempotency-Key` is supplied, the service records the first response generated for a given key and replays it for any subsequent identical request. Idempotency is currently scoped to the entire path and method pair.
+When `Idempotency-Key` is supplied, the service records the first response generated for a given key and replays it for any subsequent request carrying that key. Idempotency is currently scoped to the key alone, not to the key plus path/method: the replay lookup filters only on `Idempotency-Key`, so reusing a key against a different endpoint replays the original response instead of executing the new request. Clients must treat idempotency keys as globally unique, not merely unique per endpoint.

@@ -11,7 +11,7 @@ with a module-specific JSON payload. The constants below are defined in
 | `param.emergency_override` | Bypasses the standard timelock for critical parameter changes. | Same as `param.update`; execution occurs immediately after the proposal passes. |
 | `policy.slashing` | Updates the slashing policy (enablement, penalties, evidence windows). | Matches `governance.SlashingPolicyPayload` with fields such as `enabled`, `maxPenaltyBps`, `windowSeconds`, and `evidenceTtlSeconds`. |
 | `role.allowlist` | Grants or revokes governance-managed roles (e.g. treasury signers). | `{ "grant"?: [{"role": string, "address": bech32}], "revoke"?: [...] , "memo"?: string }`. Addresses are NHB bech32 strings. |
-| `treasury.directive` | Disburses funds from a governance-controlled treasury bucket. | Array of transfers `{ "source": bech32, "transfers": [{"to": bech32, "amount": string, "kind": string, "memo"?: string}], "memo"?: string }`. Amounts are decimal strings in Wei. |
+| `treasury.directive` | Disburses funds from a governance-controlled treasury bucket. | Array of transfers `{ "source": bech32, "transfers": [{"to": bech32, "amountWei": string, "kind": string, "memo"?: string}], "memo"?: string }`. Amounts are decimal strings in Wei. |
 
 ## General guidelines
 
