@@ -181,6 +181,40 @@ func TestProcessPotsoRewardEpoch(t *testing.T) {
 		t.Fatalf("unexpected last processed epoch: %d", lastProcessed)
 	}
 
+	// Governance's CastVote reads voting power from exactly this key/epoch
+	// pair (native/governance/engine.go). Before this fix, nothing ever
+	// wrote it, so every vote failed with "potso snapshot unavailable"
+	// regardless of chain age or treasury funding. Assert it's now
+	// populated with the real, already-computed weights for this epoch.
+	govSnapshot, ok, err := manager.SnapshotPotsoWeights(lastProcessed)
+	if err != nil {
+		t.Fatalf("snapshot potso weights: %v", err)
+	}
+	if !ok || govSnapshot == nil {
+		t.Fatalf("expected governance-facing potso weight snapshot for epoch %d", lastProcessed)
+	}
+	if len(govSnapshot.Entries) != 2 {
+		t.Fatalf("expected 2 weight entries, got %d", len(govSnapshot.Entries))
+	}
+	var sawA, sawB bool
+	for _, entry := range govSnapshot.Entries {
+		if entry.Address == participantA {
+			sawA = true
+			if entry.WeightBps == 0 {
+				t.Fatalf("expected nonzero weight for participant A")
+			}
+		}
+		if entry.Address == participantB {
+			sawB = true
+			if entry.WeightBps == 0 {
+				t.Fatalf("expected nonzero weight for participant B")
+			}
+		}
+	}
+	if !sawA || !sawB {
+		t.Fatalf("expected both participants in governance weight snapshot: sawA=%v sawB=%v", sawA, sawB)
+	}
+
 	// Ensure no additional payouts occur when processing subsequent block in same epoch.
 	if err := sp.ProcessBlockLifecycle(3, now.Add(time.Second).Unix()); err != nil {
 		t.Fatalf("process block 3: %v", err)

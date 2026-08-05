@@ -953,6 +953,23 @@ func (m *Manager) SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapsho
 	return &snapshot, true, nil
 }
 
+// SetSnapshotPotsoWeights persists the composite weights snapshot governance
+// voting reads for the epoch (native/governance/engine.go CastVote). This is
+// deliberately a separate key/write from PotsoMetricsSetSnapshot's
+// leaderboard-facing snapshot, even though today's caller passes the same
+// already-computed value to both: the leaderboard key is free to change its
+// own retention/pruning independently in the future without silently
+// breaking governance's ability to read voting power for older, still-open
+// proposals. Called once per POTSO reward epoch close, from the same place
+// that already writes the metrics snapshot -- see core/state_transition.go's
+// processPotsoRewardEpoch.
+func (m *Manager) SetSnapshotPotsoWeights(epoch uint64, snapshot *potso.StoredWeightSnapshot) error {
+	if snapshot == nil {
+		return fmt.Errorf("snapshot potso weights: snapshot must not be nil")
+	}
+	return m.KVPut(SnapshotPotsoWeightsKey(epoch), snapshot)
+}
+
 func LoyaltyGlobalStorageKey() []byte {
 	return append([]byte(nil), loyaltyGlobalKeyBytes...)
 }

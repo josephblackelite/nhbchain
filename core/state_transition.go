@@ -17,6 +17,7 @@ import (
 	"nhbchain/core/epoch"
 	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
+	"nhbchain/core/identity"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -1223,7 +1224,16 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 	}
 
 	if outcome.WeightSnapshot != nil {
-		if err := manager.PotsoMetricsSetSnapshot(epochNumber, outcome.WeightSnapshot.ToStored()); err != nil {
+		stored := outcome.WeightSnapshot.ToStored()
+		if err := manager.PotsoMetricsSetSnapshot(epochNumber, stored); err != nil {
+			return err
+		}
+		// Governance (CastVote) reads voting power from this key, keyed by
+		// the exact same epoch number PotsoRewardsSetLastProcessedEpoch
+		// records below. Without this write, every proposal is permanently
+		// stuck at the voting stage with "potso snapshot unavailable" --
+		// see docs/nhbgtm2026.md's governance-voting root-cause writeup.
+		if err := manager.SetSnapshotPotsoWeights(epochNumber, stored); err != nil {
 			return err
 		}
 	}
@@ -2732,18 +2742,34 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
 }
 
+// applyRegisterIdentity claims a username via a signed TxTypeRegisterIdentity
+// transaction (the only username-claim path nhbportal's Settings page
+// exposes to users). Previously this only set Account.Username and the
+// legacy sp.usernameToAddr index (consumed solely by the unrelated
+// loyalty_resolveUsername RPC) -- it never touched the identity.AliasRecord
+// trie that identity_resolve actually reads, which is what the Send flow's
+// send-to-username resolution calls. That meant a claimed username always
+// looked successful but could never actually receive a transaction: sending
+// to it 404'd with "alias not found" every time. Normalizing through
+// identity.NormalizeAlias and writing the real alias record here closes that
+// gap in the same atomic transaction as the claim, so claim and resolve
+// operate on the same registry.
 func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
-	username := string(tx.Data)
-	if len(username) < 3 || len(username) > 20 {
-		return fmt.Errorf("username must be 3-20 characters")
+	normalized, err := identity.NormalizeAlias(string(tx.Data))
+	if err != nil {
+		return fmt.Errorf("username: %w", err)
 	}
-	if _, ok := sp.usernameToAddr[username]; ok {
-		return fmt.Errorf("username '%s' taken", username)
+	if _, ok := sp.usernameToAddr[normalized]; ok {
+		return fmt.Errorf("username '%s' taken", normalized)
 	}
 	if senderAccount.Username != "" {
 		return fmt.Errorf("account already has username")
 	}
-	senderAccount.Username = username
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.IdentitySetAlias(sender, normalized); err != nil {
+		return fmt.Errorf("username: %w", err)
+	}
+	senderAccount.Username = normalized
 	senderAccount.Nonce++
 	if err := sp.setAccount(sender, senderAccount); err != nil {
 		return err
