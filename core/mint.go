@@ -11,8 +11,12 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
-// MintChainID defines the founder-mainnet chain identifier expected inside mint vouchers.
-const MintChainID uint64 = 14699254016670310680
+// MintChainID defines the founder-mainnet chain identifier expected inside mint
+// vouchers. This is the genesis-hash-derived ID (Blockchain.ChainID(), the
+// first 8 bytes of the genesis block hash) for the GTM 2026 relaunch genesis
+// launched 2026-08-04, read directly from that node's own startup log
+// ("Loaded genesis... chainID=..."), not chosen or guessed.
+const MintChainID uint64 = 10698789873712925303
 
 var (
 	// ErrMintInvalidSigner indicates the recovered signer does not hold the required role.

@@ -98,6 +98,14 @@ The L1 is organized into modular layers that together deliver the payment networ
 
 ## 🚀 Quick Start for Node Operators (Step-by-Step)
 
+> **If you're setting up a validator, skip straight to ["Join As A Validator In
+> One Command"](#join-as-a-validator-in-one-command) below** — it's the
+> current, actually-one-command path: clone the repo, run one script, done.
+> It installs its own prerequisites (including Go) automatically. The manual
+> walkthrough below is for standing up a full node for other reasons and
+> assumes more hands-on setup, including config files under `/etc/nhbchain/`
+> this walkthrough does not generate for you.
+
 We have intentionally designed this process so that **anyone**, regardless of Linux experience, can spin up a node in under 5 minutes. 
 
 ### Step 1: Get a Cloud Server (AWS, DigitalOcean, etc.)
@@ -214,7 +222,8 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
 - **Mainnet P2P Bootnode (enode):** 
-  `"enode://9606e2dd587cef5c8c46c6d41d03faf365edcb2f394921099e2b812261010841@52.1.96.250:6001"`
+  `"enode://bc1717ec2932efac3b37b9891f20f55cff491d48b790346ac02977cd646d4454@52.1.96.250:6001"`
+  *(Updated 2026-08-04 for the GTM 2026 genesis relaunch — this identity changes on any future genesis relaunch too; verify against the live node's `p2p_info` RPC result if this ever looks stale.)*
 
 ### Join As A Validator In One Command
 
