@@ -36,6 +36,7 @@ var (
 	errBorrowCapUtilisation  = errors.New("lending engine: borrow exceeds utilisation cap")
 	errOracleStale           = errors.New("lending engine: oracle quote stale")
 	errOracleDeviation       = errors.New("lending engine: oracle deviation too large")
+	errMaxLTVExceeded        = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
 )
 
 const blocksPerYear = 31_536_000
@@ -552,6 +553,11 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	if !e.positionHealthy(borrowerUser.CollateralZNHB, projectedDebt) {
 		return nil, errHealthCheckFailed
 	}
+	// Borrow-time cap, stricter than and independent of the liquidation
+	// threshold above -- see withinMaxLTV.
+	if !e.withinMaxLTV(borrowerUser.CollateralZNHB, projectedDebt) {
+		return nil, errMaxLTVExceeded
+	}
 
 	moduleAcc, err := e.loadAccount(e.moduleAddress)
 	if err != nil {
@@ -1055,6 +1061,26 @@ func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
 		return false
 	}
 	num := new(big.Int).Mul(collateral, big.NewInt(int64(e.params.LiquidationThreshold)))
+	den := new(big.Int).Mul(debt, basisPoints)
+	return num.Cmp(den) >= 0
+}
+
+// withinMaxLTV enforces RiskParameters.MaxLTV as a borrow-time cap, distinct
+// from and stricter than positionHealthy's LiquidationThreshold. The two
+// were previously configured independently (live config already has a real
+// 75%/85% split) but only LiquidationThreshold was ever checked -- MaxLTV
+// was accepted, stored, and silently ignored, letting a borrower go straight
+// to the liquidation edge with zero safety buffer. Same comparison shape as
+// positionHealthy, deliberately, so the two stay easy to reason about
+// side by side.
+func (e *Engine) withinMaxLTV(collateral, debt *big.Int) bool {
+	if debt == nil || debt.Sign() == 0 {
+		return true
+	}
+	if collateral == nil || collateral.Sign() == 0 {
+		return false
+	}
+	num := new(big.Int).Mul(collateral, big.NewInt(int64(e.params.MaxLTV)))
 	den := new(big.Int).Mul(debt, basisPoints)
 	return num.Cmp(den) >= 0
 }
