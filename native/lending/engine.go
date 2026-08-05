@@ -1053,6 +1053,24 @@ func (e *Engine) guardOracle(market *Market) error {
 	return nil
 }
 
+// positionHealthy compares collateral (ZNHB wei) directly against debt (NHB
+// wei) at an implicit 1:1 exchange rate -- there is currently no price
+// oracle wired into this comparison. RiskParameters.Oracle/Market.
+// OracleMedianWei exist and are read by guardOracle, but nothing in this
+// engine ever WRITES a real price into OracleMedianWei (confirmed: grepped
+// every assignment site, all three just zero-initialize it), and the live
+// config has both Oracle.MaxAgeBlocks and MaxDeviationBps at 0, so
+// guardOracle's checks never fire either. If ZNHB's market value ever
+// diverges materially from NHB's, this 1:1 treatment either lets borrowers
+// draw more real value than their collateral covers (bad debt risk to
+// suppliers) or needlessly under-collateralizes the other way. A real fix
+// means wiring a deterministic on-chain price into OracleMedianWei (the
+// swap.OracleAggregator + core/pricing.DefaultPriceFeed infrastructure
+// already exists and is live for swap/loyalty pricing, but nothing
+// currently publishes its output into lending's Market state) and
+// converting collateral through it here before comparing -- not a small
+// change, and not done yet. Until then, treat any deployment enabling
+// borrowing as implicitly assuming ZNHB tracks NHB 1:1.
 func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
 	if debt == nil || debt.Sign() == 0 {
 		return true
