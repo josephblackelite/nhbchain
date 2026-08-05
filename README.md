@@ -234,6 +234,12 @@ chmod +x scripts/validator-only-bootstrap.sh
 bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
 ```
 
+**`--reset-state` is only safe on a brand-new server with no existing chain
+data.** It wipes this node's local block history before starting, which is
+correct the very first time this runs on a fresh machine but destructive if
+copy-pasted again later against a node that's already synced or already
+validating -- drop the flag on any re-run.
+
 Never pass a private key to this script -- it generates one for you, on
 this machine, the first time it runs. `--beneficiary` is optional but
 recommended: it points this validator's consensus reward at a wallet you
