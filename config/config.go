@@ -1317,7 +1317,7 @@ func createDefault(path string, passphrase string) (*Config, error) {
 	cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize
 	cfg.NetworkSecurity.RelayDropLogRatio = defaultRelayDropLogRatio
 	cfg.P2P = P2PSection{
-		NetworkID:          14699254016670310680,
+		NetworkID:          10698789873712925303,
 		MaxPeers:           64,
 		MaxInbound:         60,
 		MaxOutbound:        30,
