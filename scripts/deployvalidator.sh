@@ -11,7 +11,7 @@ SERVICE_USER=nhb
 VALIDATOR_KEY_FILE="${CONFIG_DIR}/validator.key"
 ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://api.nhbcoin.com/v1/validators/onboarding-email'
 
-BOOTNODE_DEFAULT='enode://9606e2dd587cef5c8c46c6d41d03faf365edcb2f394921099e2b812261010841@52.1.96.250:6001'
+BOOTNODE_DEFAULT='enode://bc1717ec2932efac3b37b9891f20f55cff491d48b790346ac02977cd646d4454@52.1.96.250:6001'
 NETWORK_ID_DEFAULT='187001'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
@@ -122,9 +122,37 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_cmd sudo
+require_cmd systemctl
+
+# "Open a fresh EC2 Ubuntu server, git pull, run this script" is the whole
+# promise -- a stock Ubuntu AMI has neither Go, rsync, nor perl installed, so
+# failing here with "command not found" instead of just installing them
+# would break that promise on literally the first run. Install what's
+# missing instead of demanding the operator do it by hand first.
+GO_VERSION="1.24.3"
+GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
+
+APT_MISSING=()
+command -v rsync >/dev/null 2>&1 || APT_MISSING+=(rsync)
+command -v perl >/dev/null 2>&1 || APT_MISSING+=(perl)
+command -v curl >/dev/null 2>&1 || APT_MISSING+=(curl)
+if [[ ${#APT_MISSING[@]} -gt 0 ]]; then
+  echo "[INFO] installing missing packages: ${APT_MISSING[*]}"
+  sudo apt-get update -y
+  sudo apt-get install -y "${APT_MISSING[@]}"
+fi
+
+if [[ ! -x /usr/local/go/bin/go ]]; then
+  echo "[INFO] Go not found at /usr/local/go/bin/go -- installing Go ${GO_VERSION}"
+  TMP_GO_DIR=$(mktemp -d)
+  curl -fsSL "https://go.dev/dl/${GO_TARBALL}" -o "${TMP_GO_DIR}/${GO_TARBALL}"
+  sudo rm -rf /usr/local/go
+  sudo tar -C /usr/local -xzf "${TMP_GO_DIR}/${GO_TARBALL}"
+  rm -rf "${TMP_GO_DIR}"
+fi
+
 require_cmd rsync
 require_cmd perl
-require_cmd systemctl
 require_cmd /usr/local/go/bin/go
 
 sudo useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
