@@ -47,44 +47,97 @@ message GetPositionResponse {
   AccountPosition position = 1;
 }
 
+// signed_tx_json carries the caller's fully signed NHB_TX_V3_MAINNET
+// transaction, JSON-encoded in the same shape the node's nhb_sendTransaction
+// RPC already accepts (chainId/type/nonce/to/value/data/gasLimit/gasPrice/r/s/v).
+// The daemon relays it opaquely via nhb_sendTransaction rather than deriving
+// or re-signing anything -- account/market/amount below are for
+// validation/logging only, never a substitute for the signature: the actual
+// on-chain identity comes from the tx's own recovered signer.
 message SupplyAssetRequest {
   string account = 1;
   MarketKey market = 2;
   string amount = 3;
+  string signed_tx_json = 4;
 }
 
+// tx_hash is the mempool-accepted transaction hash (as returned by
+// nhb_sendTransaction) -- these mutations are asynchronous, so no
+// post-mutation AccountPosition is returned here. Callers poll GetPosition
+// once the tx confirms.
 message SupplyAssetResponse {
-  AccountPosition position = 1;
+  string tx_hash = 1;
 }
 
 message WithdrawAssetRequest {
   string account = 1;
   MarketKey market = 2;
   string amount = 3;
+  string signed_tx_json = 4;
 }
 
 message WithdrawAssetResponse {
-  AccountPosition position = 1;
+  string tx_hash = 1;
 }
 
 message BorrowAssetRequest {
   string account = 1;
   MarketKey market = 2;
   string amount = 3;
+  string signed_tx_json = 4;
 }
 
 message BorrowAssetResponse {
-  AccountPosition position = 1;
+  string tx_hash = 1;
 }
 
 message RepayAssetRequest {
   string account = 1;
   MarketKey market = 2;
   string amount = 3;
+  string signed_tx_json = 4;
 }
 
 message RepayAssetResponse {
-  AccountPosition position = 1;
+  string tx_hash = 1;
+}
+
+message DepositCollateralRequest {
+  string account = 1;
+  MarketKey market = 2;
+  string amount = 3;
+  string signed_tx_json = 4;
+}
+
+message DepositCollateralResponse {
+  string tx_hash = 1;
+}
+
+message WithdrawCollateralRequest {
+  string account = 1;
+  MarketKey market = 2;
+  string amount = 3;
+  string signed_tx_json = 4;
+}
+
+message WithdrawCollateralResponse {
+  string tx_hash = 1;
+}
+
+// LiquidateRequest is signed by the liquidator, not the borrower --
+// liquidation is a permissionless third-party action against someone else's
+// unhealthy position (see core/lending_native.go's applyLendingLiquidate).
+// borrower identifies the position being liquidated; the liquidator's
+// identity comes from signed_tx_json's own recovered signer.
+message LiquidateRequest {
+  string liquidator = 1;
+  MarketKey market = 2;
+  string borrower = 3;
+  string signed_tx_json = 4;
+}
+
+message LiquidateResponse {
+  string tx_hash = 1;
 }
 
 service LendingService {
@@ -95,4 +148,7 @@ service LendingService {
   rpc WithdrawAsset(WithdrawAssetRequest) returns (WithdrawAssetResponse);
   rpc BorrowAsset(BorrowAssetRequest) returns (BorrowAssetResponse);
   rpc RepayAsset(RepayAssetRequest) returns (RepayAssetResponse);
+  rpc DepositCollateral(DepositCollateralRequest) returns (DepositCollateralResponse);
+  rpc WithdrawCollateral(WithdrawCollateralRequest) returns (WithdrawCollateralResponse);
+  rpc Liquidate(LiquidateRequest) returns (LiquidateResponse);
 }

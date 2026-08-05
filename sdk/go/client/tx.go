@@ -226,6 +226,13 @@ func (c *Client) prepareTransferTx(ctx context.Context, key *crypto.PrivateKey, 
 }
 
 func (c *Client) fetchNonce(ctx context.Context, address string) (uint64, error) {
+	return c.AccountNonce(ctx, address)
+}
+
+// AccountNonce fetches the current nonce for address. Exported so callers
+// building transactions for services other than this client's own transfer
+// helpers (e.g. sdk/lending's signed-tx builders) can reuse the same lookup.
+func (c *Client) AccountNonce(ctx context.Context, address string) (uint64, error) {
 	var resp balanceResponse
 	if err := c.call(ctx, "nhb_getBalance", []interface{}{address}, false, &resp); err != nil {
 		return 0, err

@@ -113,7 +113,7 @@ func (s *Service) GetPosition(ctx context.Context, req *lendingv1.GetPositionReq
 	return &lendingv1.GetPositionResponse{Position: toProtoPosition(position)}, nil
 }
 
-// SupplyAsset transfers liquidity into the market on behalf of the caller.
+// SupplyAsset relays the caller's pre-signed supply transaction to the node.
 func (s *Service) SupplyAsset(ctx context.Context, req *lendingv1.SupplyAssetRequest) (*lendingv1.SupplyAssetResponse, error) {
 	if err := s.ensureEngine(); err != nil {
 		return nil, err
@@ -124,17 +124,18 @@ func (s *Service) SupplyAsset(ctx context.Context, req *lendingv1.SupplyAssetReq
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request required")
 	}
-	account, symbol, amount, err := validateAccountMarketAmount(req.GetAccount(), req.GetMarket(), req.GetAmount())
+	account, symbol, amount, signedTx, err := validateMutationRequest(req.GetAccount(), req.GetMarket(), req.GetAmount(), req.GetSignedTxJson())
 	if err != nil {
 		return nil, err
 	}
-	if err := s.engine.Supply(ctx, account, symbol, amount); err != nil {
+	txHash, err := s.engine.Supply(ctx, account, symbol, amount, signedTx)
+	if err != nil {
 		return nil, s.translateEngineError("supply_asset", err)
 	}
-	return &lendingv1.SupplyAssetResponse{}, nil
+	return &lendingv1.SupplyAssetResponse{TxHash: txHash}, nil
 }
 
-// WithdrawAsset redeems supplied liquidity back to the account.
+// WithdrawAsset relays the caller's pre-signed withdraw transaction to the node.
 func (s *Service) WithdrawAsset(ctx context.Context, req *lendingv1.WithdrawAssetRequest) (*lendingv1.WithdrawAssetResponse, error) {
 	if err := s.ensureEngine(); err != nil {
 		return nil, err
@@ -145,17 +146,18 @@ func (s *Service) WithdrawAsset(ctx context.Context, req *lendingv1.WithdrawAsse
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request required")
 	}
-	account, symbol, amount, err := validateAccountMarketAmount(req.GetAccount(), req.GetMarket(), req.GetAmount())
+	account, symbol, amount, signedTx, err := validateMutationRequest(req.GetAccount(), req.GetMarket(), req.GetAmount(), req.GetSignedTxJson())
 	if err != nil {
 		return nil, err
 	}
-	if err := s.engine.Withdraw(ctx, account, symbol, amount); err != nil {
+	txHash, err := s.engine.Withdraw(ctx, account, symbol, amount, signedTx)
+	if err != nil {
 		return nil, s.translateEngineError("withdraw_asset", err)
 	}
-	return &lendingv1.WithdrawAssetResponse{}, nil
+	return &lendingv1.WithdrawAssetResponse{TxHash: txHash}, nil
 }
 
-// BorrowAsset executes a borrow against the supplied collateral.
+// BorrowAsset relays the caller's pre-signed borrow transaction to the node.
 func (s *Service) BorrowAsset(ctx context.Context, req *lendingv1.BorrowAssetRequest) (*lendingv1.BorrowAssetResponse, error) {
 	if err := s.ensureEngine(); err != nil {
 		return nil, err
@@ -166,17 +168,18 @@ func (s *Service) BorrowAsset(ctx context.Context, req *lendingv1.BorrowAssetReq
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request required")
 	}
-	account, symbol, amount, err := validateAccountMarketAmount(req.GetAccount(), req.GetMarket(), req.GetAmount())
+	account, symbol, amount, signedTx, err := validateMutationRequest(req.GetAccount(), req.GetMarket(), req.GetAmount(), req.GetSignedTxJson())
 	if err != nil {
 		return nil, err
 	}
-	if err := s.engine.Borrow(ctx, account, symbol, amount); err != nil {
+	txHash, err := s.engine.Borrow(ctx, account, symbol, amount, signedTx)
+	if err != nil {
 		return nil, s.translateEngineError("borrow_asset", err)
 	}
-	return &lendingv1.BorrowAssetResponse{}, nil
+	return &lendingv1.BorrowAssetResponse{TxHash: txHash}, nil
 }
 
-// RepayAsset settles outstanding borrowed balance.
+// RepayAsset relays the caller's pre-signed repay transaction to the node.
 func (s *Service) RepayAsset(ctx context.Context, req *lendingv1.RepayAssetRequest) (*lendingv1.RepayAssetResponse, error) {
 	if err := s.ensureEngine(); err != nil {
 		return nil, err
@@ -187,14 +190,97 @@ func (s *Service) RepayAsset(ctx context.Context, req *lendingv1.RepayAssetReque
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request required")
 	}
-	account, symbol, amount, err := validateAccountMarketAmount(req.GetAccount(), req.GetMarket(), req.GetAmount())
+	account, symbol, amount, signedTx, err := validateMutationRequest(req.GetAccount(), req.GetMarket(), req.GetAmount(), req.GetSignedTxJson())
 	if err != nil {
 		return nil, err
 	}
-	if err := s.engine.Repay(ctx, account, symbol, amount); err != nil {
+	txHash, err := s.engine.Repay(ctx, account, symbol, amount, signedTx)
+	if err != nil {
 		return nil, s.translateEngineError("repay_asset", err)
 	}
-	return &lendingv1.RepayAssetResponse{}, nil
+	return &lendingv1.RepayAssetResponse{TxHash: txHash}, nil
+}
+
+// DepositCollateral relays the caller's pre-signed ZNHB collateral deposit.
+func (s *Service) DepositCollateral(ctx context.Context, req *lendingv1.DepositCollateralRequest) (*lendingv1.DepositCollateralResponse, error) {
+	if err := s.ensureEngine(); err != nil {
+		return nil, err
+	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request required")
+	}
+	account, symbol, amount, signedTx, err := validateMutationRequest(req.GetAccount(), req.GetMarket(), req.GetAmount(), req.GetSignedTxJson())
+	if err != nil {
+		return nil, err
+	}
+	txHash, err := s.engine.DepositCollateral(ctx, account, symbol, amount, signedTx)
+	if err != nil {
+		return nil, s.translateEngineError("deposit_collateral", err)
+	}
+	return &lendingv1.DepositCollateralResponse{TxHash: txHash}, nil
+}
+
+// WithdrawCollateral relays the caller's pre-signed ZNHB collateral withdrawal.
+func (s *Service) WithdrawCollateral(ctx context.Context, req *lendingv1.WithdrawCollateralRequest) (*lendingv1.WithdrawCollateralResponse, error) {
+	if err := s.ensureEngine(); err != nil {
+		return nil, err
+	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request required")
+	}
+	account, symbol, amount, signedTx, err := validateMutationRequest(req.GetAccount(), req.GetMarket(), req.GetAmount(), req.GetSignedTxJson())
+	if err != nil {
+		return nil, err
+	}
+	txHash, err := s.engine.WithdrawCollateral(ctx, account, symbol, amount, signedTx)
+	if err != nil {
+		return nil, s.translateEngineError("withdraw_collateral", err)
+	}
+	return &lendingv1.WithdrawCollateralResponse{TxHash: txHash}, nil
+}
+
+// Liquidate relays a liquidator's pre-signed transaction repaying an
+// unhealthy borrower's debt in exchange for a discounted share of their
+// collateral. It is signed by the liquidator, not the borrower -- see
+// core/lending_native.go's applyLendingLiquidate for why the borrower's own
+// signature is neither required nor meaningful here.
+func (s *Service) Liquidate(ctx context.Context, req *lendingv1.LiquidateRequest) (*lendingv1.LiquidateResponse, error) {
+	if err := s.ensureEngine(); err != nil {
+		return nil, err
+	}
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request required")
+	}
+	liquidator := strings.TrimSpace(req.GetLiquidator())
+	if liquidator == "" {
+		return nil, status.Error(codes.InvalidArgument, "liquidator required")
+	}
+	borrower := strings.TrimSpace(req.GetBorrower())
+	if borrower == "" {
+		return nil, status.Error(codes.InvalidArgument, "borrower required")
+	}
+	var symbol string
+	if req.GetMarket() != nil {
+		symbol = strings.TrimSpace(req.GetMarket().GetSymbol())
+	}
+	signedTx := strings.TrimSpace(req.GetSignedTxJson())
+	if signedTx == "" {
+		return nil, status.Error(codes.InvalidArgument, "signed transaction required")
+	}
+	txHash, err := s.engine.Liquidate(ctx, liquidator, borrower, symbol, signedTx)
+	if err != nil {
+		return nil, s.translateEngineError("liquidate", err)
+	}
+	return &lendingv1.LiquidateResponse{TxHash: txHash}, nil
 }
 
 func (s *Service) authorize(ctx context.Context) error {
@@ -235,23 +321,31 @@ func (s *Service) log() *slog.Logger {
 	return slog.Default()
 }
 
-func validateAccountMarketAmount(account string, market *lendingv1.MarketKey, amount string) (string, string, string, error) {
+// validateMutationRequest validates the logging/validation-only fields
+// (account, market, amount) alongside the caller's signed transaction JSON,
+// which is what actually authorizes the mutation on-chain -- see the Engine
+// interface doc comment in services/lending/engine/engine.go.
+func validateMutationRequest(account string, market *lendingv1.MarketKey, amount, signedTxJSON string) (string, string, string, string, error) {
 	trimmedAccount := strings.TrimSpace(account)
 	if trimmedAccount == "" {
-		return "", "", "", status.Error(codes.InvalidArgument, "account required")
+		return "", "", "", "", status.Error(codes.InvalidArgument, "account required")
 	}
 	var symbol string
 	if market != nil {
 		symbol = strings.TrimSpace(market.GetSymbol())
 	}
 	if symbol == "" {
-		return "", "", "", status.Error(codes.InvalidArgument, "market symbol required")
+		return "", "", "", "", status.Error(codes.InvalidArgument, "market symbol required")
 	}
 	trimmedAmount := strings.TrimSpace(amount)
 	if trimmedAmount == "" {
-		return "", "", "", status.Error(codes.InvalidArgument, "amount required")
+		return "", "", "", "", status.Error(codes.InvalidArgument, "amount required")
 	}
-	return trimmedAccount, symbol, trimmedAmount, nil
+	trimmedSignedTx := strings.TrimSpace(signedTxJSON)
+	if trimmedSignedTx == "" {
+		return "", "", "", "", status.Error(codes.InvalidArgument, "signed transaction required")
+	}
+	return trimmedAccount, symbol, trimmedAmount, trimmedSignedTx, nil
 }
 
 func toProtoMarket(snapshot engine.Market) *lendingv1.Market {

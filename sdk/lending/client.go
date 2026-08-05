@@ -116,66 +116,128 @@ func (c *Client) GetPosition(ctx context.Context, account string) (*lendingv1.Ac
 	return resp.GetPosition(), nil
 }
 
-// SupplyAsset submits a supply transaction and returns the updated position.
-func (c *Client) SupplyAsset(ctx context.Context, account, symbol, amount string) (*lendingv1.AccountPosition, error) {
+// SupplyAsset relays the caller's already-signed supply transaction
+// (signedTxJSON, JSON-encoded in the shape core/types.Transaction marshals
+// to -- see NewSignedTx) and returns the mempool-accepted transaction hash.
+// account/symbol/amount are for server-side validation/logging only; the
+// signed transaction's own recovered signer is what actually authorizes the
+// mutation on-chain. Poll GetPosition once the transaction confirms.
+func (c *Client) SupplyAsset(ctx context.Context, account, symbol, amount, signedTxJSON string) (string, error) {
 	if c == nil {
-		return nil, grpc.ErrClientConnClosing
+		return "", grpc.ErrClientConnClosing
 	}
 	resp, err := c.raw.SupplyAsset(ctx, &lendingv1.SupplyAssetRequest{
-		Account: account,
-		Market:  &lendingv1.MarketKey{Symbol: symbol},
-		Amount:  amount,
+		Account:      account,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Amount:       amount,
+		SignedTxJson: signedTxJSON,
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return resp.GetPosition(), nil
+	return resp.GetTxHash(), nil
 }
 
-// WithdrawAsset withdraws supplied collateral and returns the updated position.
-func (c *Client) WithdrawAsset(ctx context.Context, account, symbol, amount string) (*lendingv1.AccountPosition, error) {
+// WithdrawAsset relays the caller's already-signed withdraw transaction. See SupplyAsset.
+func (c *Client) WithdrawAsset(ctx context.Context, account, symbol, amount, signedTxJSON string) (string, error) {
 	if c == nil {
-		return nil, grpc.ErrClientConnClosing
+		return "", grpc.ErrClientConnClosing
 	}
 	resp, err := c.raw.WithdrawAsset(ctx, &lendingv1.WithdrawAssetRequest{
-		Account: account,
-		Market:  &lendingv1.MarketKey{Symbol: symbol},
-		Amount:  amount,
+		Account:      account,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Amount:       amount,
+		SignedTxJson: signedTxJSON,
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return resp.GetPosition(), nil
+	return resp.GetTxHash(), nil
 }
 
-// BorrowAsset executes a borrow against the supplied collateral.
-func (c *Client) BorrowAsset(ctx context.Context, account, symbol, amount string) (*lendingv1.AccountPosition, error) {
+// BorrowAsset relays the caller's already-signed borrow transaction. See SupplyAsset.
+func (c *Client) BorrowAsset(ctx context.Context, account, symbol, amount, signedTxJSON string) (string, error) {
 	if c == nil {
-		return nil, grpc.ErrClientConnClosing
+		return "", grpc.ErrClientConnClosing
 	}
 	resp, err := c.raw.BorrowAsset(ctx, &lendingv1.BorrowAssetRequest{
-		Account: account,
-		Market:  &lendingv1.MarketKey{Symbol: symbol},
-		Amount:  amount,
+		Account:      account,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Amount:       amount,
+		SignedTxJson: signedTxJSON,
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return resp.GetPosition(), nil
+	return resp.GetTxHash(), nil
 }
 
-// RepayAsset repays borrowed balance and returns the latest position.
-func (c *Client) RepayAsset(ctx context.Context, account, symbol, amount string) (*lendingv1.AccountPosition, error) {
+// RepayAsset relays the caller's already-signed repay transaction. See SupplyAsset.
+func (c *Client) RepayAsset(ctx context.Context, account, symbol, amount, signedTxJSON string) (string, error) {
 	if c == nil {
-		return nil, grpc.ErrClientConnClosing
+		return "", grpc.ErrClientConnClosing
 	}
 	resp, err := c.raw.RepayAsset(ctx, &lendingv1.RepayAssetRequest{
-		Account: account,
-		Market:  &lendingv1.MarketKey{Symbol: symbol},
-		Amount:  amount,
+		Account:      account,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Amount:       amount,
+		SignedTxJson: signedTxJSON,
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return resp.GetPosition(), nil
+	return resp.GetTxHash(), nil
+}
+
+// DepositCollateral relays the caller's already-signed ZNHB collateral deposit. See SupplyAsset.
+func (c *Client) DepositCollateral(ctx context.Context, account, symbol, amount, signedTxJSON string) (string, error) {
+	if c == nil {
+		return "", grpc.ErrClientConnClosing
+	}
+	resp, err := c.raw.DepositCollateral(ctx, &lendingv1.DepositCollateralRequest{
+		Account:      account,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Amount:       amount,
+		SignedTxJson: signedTxJSON,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.GetTxHash(), nil
+}
+
+// WithdrawCollateral relays the caller's already-signed ZNHB collateral withdrawal. See SupplyAsset.
+func (c *Client) WithdrawCollateral(ctx context.Context, account, symbol, amount, signedTxJSON string) (string, error) {
+	if c == nil {
+		return "", grpc.ErrClientConnClosing
+	}
+	resp, err := c.raw.WithdrawCollateral(ctx, &lendingv1.WithdrawCollateralRequest{
+		Account:      account,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Amount:       amount,
+		SignedTxJson: signedTxJSON,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.GetTxHash(), nil
+}
+
+// Liquidate relays a liquidator's already-signed transaction repaying an
+// unhealthy borrower's debt. It is signed by the liquidator, not the
+// borrower -- liquidation is a permissionless third-party action.
+func (c *Client) Liquidate(ctx context.Context, liquidator, symbol, borrower, signedTxJSON string) (string, error) {
+	if c == nil {
+		return "", grpc.ErrClientConnClosing
+	}
+	resp, err := c.raw.Liquidate(ctx, &lendingv1.LiquidateRequest{
+		Liquidator:   liquidator,
+		Market:       &lendingv1.MarketKey{Symbol: symbol},
+		Borrower:     borrower,
+		SignedTxJson: signedTxJSON,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.GetTxHash(), nil
 }

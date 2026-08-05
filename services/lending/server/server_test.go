@@ -39,9 +39,10 @@ func TestService_SupplyAsset(t *testing.T) {
 
 	ctx := context.Background()
 	req := &lendingv1.SupplyAssetRequest{
-		Account: "  alice  ",
-		Market:  &lendingv1.MarketKey{Symbol: "  nhb  "},
-		Amount:  "  1000  ",
+		Account:      "  alice  ",
+		Market:       &lendingv1.MarketKey{Symbol: "  nhb  "},
+		Amount:       "  1000  ",
+		SignedTxJson: `{"type":19}`,
 	}
 
 	t.Run("success", func(t *testing.T) {
@@ -49,7 +50,7 @@ func TestService_SupplyAsset(t *testing.T) {
 
 		auth := &fakeAuthorizer{}
 		eng := &fakeEngine{
-			supplyFn: func(_ context.Context, addr, market, amount string) error {
+			supplyFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 				if addr != "alice" {
 					t.Fatalf("unexpected account: %q", addr)
 				}
@@ -59,7 +60,10 @@ func TestService_SupplyAsset(t *testing.T) {
 				if amount != "1000" {
 					t.Fatalf("unexpected amount: %q", amount)
 				}
-				return nil
+				if signedTxJSON != `{"type":19}` {
+					t.Fatalf("unexpected signed tx: %q", signedTxJSON)
+				}
+				return "0xhash", nil
 			},
 		}
 		svc := &Service{engine: eng, auth: auth}
@@ -70,6 +74,9 @@ func TestService_SupplyAsset(t *testing.T) {
 		}
 		if resp == nil {
 			t.Fatalf("expected response")
+		}
+		if resp.GetTxHash() != "0xhash" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
 		}
 		if !auth.called {
 			t.Fatalf("expected authorizer to be called")
@@ -83,8 +90,8 @@ func TestService_SupplyAsset(t *testing.T) {
 
 			auth := &fakeAuthorizer{}
 			eng := &fakeEngine{
-				supplyFn: func(context.Context, string, string, string) error {
-					return wrapError(tc.err)
+				supplyFn: func(context.Context, string, string, string, string) (string, error) {
+					return "", wrapError(tc.err)
 				},
 			}
 			svc := &Service{engine: eng, auth: auth}
@@ -126,9 +133,10 @@ func TestService_WithdrawAsset(t *testing.T) {
 
 	ctx := context.Background()
 	req := &lendingv1.WithdrawAssetRequest{
-		Account: "  bob  ",
-		Market:  &lendingv1.MarketKey{Symbol: "  usdc  "},
-		Amount:  "  500  ",
+		Account:      "  bob  ",
+		Market:       &lendingv1.MarketKey{Symbol: "  usdc  "},
+		Amount:       "  500  ",
+		SignedTxJson: `{"type":20}`,
 	}
 
 	t.Run("success", func(t *testing.T) {
@@ -136,7 +144,7 @@ func TestService_WithdrawAsset(t *testing.T) {
 
 		auth := &fakeAuthorizer{}
 		eng := &fakeEngine{
-			withdrawFn: func(_ context.Context, addr, market, amount string) error {
+			withdrawFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 				if addr != "bob" {
 					t.Fatalf("unexpected account: %q", addr)
 				}
@@ -146,7 +154,10 @@ func TestService_WithdrawAsset(t *testing.T) {
 				if amount != "500" {
 					t.Fatalf("unexpected amount: %q", amount)
 				}
-				return nil
+				if signedTxJSON != `{"type":20}` {
+					t.Fatalf("unexpected signed tx: %q", signedTxJSON)
+				}
+				return "0xhash", nil
 			},
 		}
 		svc := &Service{engine: eng, auth: auth}
@@ -157,6 +168,9 @@ func TestService_WithdrawAsset(t *testing.T) {
 		}
 		if resp == nil {
 			t.Fatalf("expected response")
+		}
+		if resp.GetTxHash() != "0xhash" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
 		}
 		if !auth.called {
 			t.Fatalf("expected authorizer to be called")
@@ -170,8 +184,8 @@ func TestService_WithdrawAsset(t *testing.T) {
 
 			auth := &fakeAuthorizer{}
 			eng := &fakeEngine{
-				withdrawFn: func(context.Context, string, string, string) error {
-					return wrapError(tc.err)
+				withdrawFn: func(context.Context, string, string, string, string) (string, error) {
+					return "", wrapError(tc.err)
 				},
 			}
 			svc := &Service{engine: eng, auth: auth}
@@ -199,9 +213,10 @@ func TestService_BorrowAsset(t *testing.T) {
 
 	ctx := context.Background()
 	req := &lendingv1.BorrowAssetRequest{
-		Account: "  carol  ",
-		Market:  &lendingv1.MarketKey{Symbol: "  nhb  "},
-		Amount:  "  42  ",
+		Account:      "  carol  ",
+		Market:       &lendingv1.MarketKey{Symbol: "  nhb  "},
+		Amount:       "  42  ",
+		SignedTxJson: `{"type":23}`,
 	}
 
 	t.Run("success", func(t *testing.T) {
@@ -209,7 +224,7 @@ func TestService_BorrowAsset(t *testing.T) {
 
 		auth := &fakeAuthorizer{}
 		eng := &fakeEngine{
-			borrowFn: func(_ context.Context, addr, market, amount string) error {
+			borrowFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 				if addr != "carol" {
 					t.Fatalf("unexpected account: %q", addr)
 				}
@@ -219,7 +234,10 @@ func TestService_BorrowAsset(t *testing.T) {
 				if amount != "42" {
 					t.Fatalf("unexpected amount: %q", amount)
 				}
-				return nil
+				if signedTxJSON != `{"type":23}` {
+					t.Fatalf("unexpected signed tx: %q", signedTxJSON)
+				}
+				return "0xhash", nil
 			},
 		}
 		svc := &Service{engine: eng, auth: auth}
@@ -230,6 +248,9 @@ func TestService_BorrowAsset(t *testing.T) {
 		}
 		if resp == nil {
 			t.Fatalf("expected response")
+		}
+		if resp.GetTxHash() != "0xhash" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
 		}
 		if !auth.called {
 			t.Fatalf("expected authorizer to be called")
@@ -243,8 +264,8 @@ func TestService_BorrowAsset(t *testing.T) {
 
 			auth := &fakeAuthorizer{}
 			eng := &fakeEngine{
-				borrowFn: func(context.Context, string, string, string) error {
-					return wrapError(tc.err)
+				borrowFn: func(context.Context, string, string, string, string) (string, error) {
+					return "", wrapError(tc.err)
 				},
 			}
 			svc := &Service{engine: eng, auth: auth}
@@ -272,9 +293,10 @@ func TestService_RepayAsset(t *testing.T) {
 
 	ctx := context.Background()
 	req := &lendingv1.RepayAssetRequest{
-		Account: "  dave  ",
-		Market:  &lendingv1.MarketKey{Symbol: "  nhb  "},
-		Amount:  "  7  ",
+		Account:      "  dave  ",
+		Market:       &lendingv1.MarketKey{Symbol: "  nhb  "},
+		Amount:       "  7  ",
+		SignedTxJson: `{"type":24}`,
 	}
 
 	t.Run("success", func(t *testing.T) {
@@ -282,7 +304,7 @@ func TestService_RepayAsset(t *testing.T) {
 
 		auth := &fakeAuthorizer{}
 		eng := &fakeEngine{
-			repayFn: func(_ context.Context, addr, market, amount string) error {
+			repayFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 				if addr != "dave" {
 					t.Fatalf("unexpected account: %q", addr)
 				}
@@ -292,7 +314,10 @@ func TestService_RepayAsset(t *testing.T) {
 				if amount != "7" {
 					t.Fatalf("unexpected amount: %q", amount)
 				}
-				return nil
+				if signedTxJSON != `{"type":24}` {
+					t.Fatalf("unexpected signed tx: %q", signedTxJSON)
+				}
+				return "0xhash", nil
 			},
 		}
 		svc := &Service{engine: eng, auth: auth}
@@ -303,6 +328,9 @@ func TestService_RepayAsset(t *testing.T) {
 		}
 		if resp == nil {
 			t.Fatalf("expected response")
+		}
+		if resp.GetTxHash() != "0xhash" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
 		}
 		if !auth.called {
 			t.Fatalf("expected authorizer to be called")
@@ -316,8 +344,8 @@ func TestService_RepayAsset(t *testing.T) {
 
 			auth := &fakeAuthorizer{}
 			eng := &fakeEngine{
-				repayFn: func(context.Context, string, string, string) error {
-					return wrapError(tc.err)
+				repayFn: func(context.Context, string, string, string, string) (string, error) {
+					return "", wrapError(tc.err)
 				},
 			}
 			svc := &Service{engine: eng, auth: auth}

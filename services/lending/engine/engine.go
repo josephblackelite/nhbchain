@@ -3,12 +3,25 @@ package engine
 import "context"
 
 // Engine describes the operations required by the lending gRPC surface.
+//
+// The mutating methods (Supply/Withdraw/Borrow/Repay/DepositCollateral/
+// WithdrawCollateral/Liquidate) take a signedTxJSON parameter: the caller's
+// already-signed NHB_TX_V3_MAINNET transaction, JSON-encoded in the exact
+// shape the node's nhb_sendTransaction RPC accepts. The engine relays this
+// opaquely -- it never derives, holds, or re-signs a private key. addr/
+// market/amount are for request validation and structured logging only;
+// the transaction's own recovered signer is the actual on-chain identity.
+// Each mutating call returns the mempool-accepted transaction hash, not a
+// post-mutation position -- submission is asynchronous, so callers poll
+// GetPosition once the transaction confirms.
 type Engine interface {
-	Supply(ctx context.Context, addr, market, amount string) error
-	Borrow(ctx context.Context, addr, market, amount string) error
-	Repay(ctx context.Context, addr, market, amount string) error
-	Withdraw(ctx context.Context, addr, market, amount string) error
-	Liquidate(ctx context.Context, liquidator, borrower, market, amount string) error
+	Supply(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	Borrow(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	Repay(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	Withdraw(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	DepositCollateral(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	WithdrawCollateral(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	Liquidate(ctx context.Context, liquidator, borrower, market, signedTxJSON string) (string, error)
 	GetMarket(ctx context.Context, market string) (Market, error)
 	ListMarkets(ctx context.Context) ([]Market, error)
 	GetPosition(ctx context.Context, addr, market string) (Position, error)

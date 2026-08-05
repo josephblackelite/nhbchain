@@ -75,7 +75,7 @@ func TestIntegration_LendingService(t *testing.T) {
 				},
 			}, nil
 		},
-		supplyFn: func(_ context.Context, addr, market, amount string) error {
+		supplyFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 			supplyCalled = true
 			if addr != "alice" {
 				t.Fatalf("unexpected supply account: %q", addr)
@@ -86,9 +86,12 @@ func TestIntegration_LendingService(t *testing.T) {
 			if amount != "1000" {
 				t.Fatalf("unexpected supply amount: %q", amount)
 			}
-			return nil
+			if signedTxJSON == "" {
+				t.Fatalf("expected signed tx to be forwarded")
+			}
+			return "0xsupply", nil
 		},
-		withdrawFn: func(_ context.Context, addr, market, amount string) error {
+		withdrawFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 			withdrawCalled = true
 			if addr != "bob" {
 				t.Fatalf("unexpected withdraw account: %q", addr)
@@ -99,9 +102,12 @@ func TestIntegration_LendingService(t *testing.T) {
 			if amount != "250" {
 				t.Fatalf("unexpected withdraw amount: %q", amount)
 			}
-			return nil
+			if signedTxJSON == "" {
+				t.Fatalf("expected signed tx to be forwarded")
+			}
+			return "0xwithdraw", nil
 		},
-		borrowFn: func(_ context.Context, addr, market, amount string) error {
+		borrowFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 			borrowCalled = true
 			if addr != "dave" {
 				t.Fatalf("unexpected borrow account: %q", addr)
@@ -112,9 +118,12 @@ func TestIntegration_LendingService(t *testing.T) {
 			if amount != "75" {
 				t.Fatalf("unexpected borrow amount: %q", amount)
 			}
-			return nil
+			if signedTxJSON == "" {
+				t.Fatalf("expected signed tx to be forwarded")
+			}
+			return "0xborrow", nil
 		},
-		repayFn: func(_ context.Context, addr, market, amount string) error {
+		repayFn: func(_ context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 			repayCalled = true
 			if addr != "erin" {
 				t.Fatalf("unexpected repay account: %q", addr)
@@ -125,7 +134,10 @@ func TestIntegration_LendingService(t *testing.T) {
 			if amount != "125" {
 				t.Fatalf("unexpected repay amount: %q", amount)
 			}
-			return nil
+			if signedTxJSON == "" {
+				t.Fatalf("expected signed tx to be forwarded")
+			}
+			return "0xrepay", nil
 		},
 	}
 
@@ -223,10 +235,11 @@ func TestIntegration_LendingService(t *testing.T) {
 	})
 
 	t.Run("SupplyAsset", func(t *testing.T) {
-		_, err := client.SupplyAsset(ctx, &lendingv1.SupplyAssetRequest{
-			Account: "  alice  ",
-			Market:  &lendingv1.MarketKey{Symbol: "  nhb  "},
-			Amount:  " 1000 ",
+		resp, err := client.SupplyAsset(ctx, &lendingv1.SupplyAssetRequest{
+			Account:      "  alice  ",
+			Market:       &lendingv1.MarketKey{Symbol: "  nhb  "},
+			Amount:       " 1000 ",
+			SignedTxJson: `{"type":19}`,
 		})
 		if status.Code(err) != codes.OK {
 			t.Fatalf("expected OK, got %v", err)
@@ -234,13 +247,17 @@ func TestIntegration_LendingService(t *testing.T) {
 		if !supplyCalled {
 			t.Fatalf("expected supply to be invoked")
 		}
+		if resp.GetTxHash() != "0xsupply" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
+		}
 	})
 
 	t.Run("WithdrawAsset", func(t *testing.T) {
-		_, err := client.WithdrawAsset(ctx, &lendingv1.WithdrawAssetRequest{
-			Account: "  bob  ",
-			Market:  &lendingv1.MarketKey{Symbol: "  usdc  "},
-			Amount:  " 250 ",
+		resp, err := client.WithdrawAsset(ctx, &lendingv1.WithdrawAssetRequest{
+			Account:      "  bob  ",
+			Market:       &lendingv1.MarketKey{Symbol: "  usdc  "},
+			Amount:       " 250 ",
+			SignedTxJson: `{"type":20}`,
 		})
 		if status.Code(err) != codes.OK {
 			t.Fatalf("expected OK, got %v", err)
@@ -248,13 +265,17 @@ func TestIntegration_LendingService(t *testing.T) {
 		if !withdrawCalled {
 			t.Fatalf("expected withdraw to be invoked")
 		}
+		if resp.GetTxHash() != "0xwithdraw" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
+		}
 	})
 
 	t.Run("BorrowAsset", func(t *testing.T) {
-		_, err := client.BorrowAsset(ctx, &lendingv1.BorrowAssetRequest{
-			Account: "  dave  ",
-			Market:  &lendingv1.MarketKey{Symbol: "  eth  "},
-			Amount:  " 75 ",
+		resp, err := client.BorrowAsset(ctx, &lendingv1.BorrowAssetRequest{
+			Account:      "  dave  ",
+			Market:       &lendingv1.MarketKey{Symbol: "  eth  "},
+			Amount:       " 75 ",
+			SignedTxJson: `{"type":23}`,
 		})
 		if status.Code(err) != codes.OK {
 			t.Fatalf("expected OK, got %v", err)
@@ -262,19 +283,26 @@ func TestIntegration_LendingService(t *testing.T) {
 		if !borrowCalled {
 			t.Fatalf("expected borrow to be invoked")
 		}
+		if resp.GetTxHash() != "0xborrow" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
+		}
 	})
 
 	t.Run("RepayAsset", func(t *testing.T) {
-		_, err := client.RepayAsset(ctx, &lendingv1.RepayAssetRequest{
-			Account: "  erin  ",
-			Market:  &lendingv1.MarketKey{Symbol: "  btc  "},
-			Amount:  " 125 ",
+		resp, err := client.RepayAsset(ctx, &lendingv1.RepayAssetRequest{
+			Account:      "  erin  ",
+			Market:       &lendingv1.MarketKey{Symbol: "  btc  "},
+			Amount:       " 125 ",
+			SignedTxJson: `{"type":24}`,
 		})
 		if status.Code(err) != codes.OK {
 			t.Fatalf("expected OK, got %v", err)
 		}
 		if !repayCalled {
 			t.Fatalf("expected repay to be invoked")
+		}
+		if resp.GetTxHash() != "0xrepay" {
+			t.Fatalf("unexpected tx hash: %q", resp.GetTxHash())
 		}
 	})
 }

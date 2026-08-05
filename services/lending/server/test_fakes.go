@@ -7,50 +7,66 @@ import (
 )
 
 type fakeEngine struct {
-	supplyFn      func(ctx context.Context, addr, market, amount string) error
-	borrowFn      func(ctx context.Context, addr, market, amount string) error
-	repayFn       func(ctx context.Context, addr, market, amount string) error
-	withdrawFn    func(ctx context.Context, addr, market, amount string) error
-	liquidateFn   func(ctx context.Context, liquidator, borrower, market, amount string) error
-	getMarketFn   func(ctx context.Context, market string) (engine.Market, error)
-	listMarketsFn func(ctx context.Context) ([]engine.Market, error)
-	getPositionFn func(ctx context.Context, addr, market string) (engine.Position, error)
-	getHealthFn   func(ctx context.Context, addr string) (engine.Health, error)
+	supplyFn             func(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	borrowFn             func(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	repayFn              func(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	withdrawFn           func(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	depositCollateralFn  func(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	withdrawCollateralFn func(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error)
+	liquidateFn          func(ctx context.Context, liquidator, borrower, market, signedTxJSON string) (string, error)
+	getMarketFn          func(ctx context.Context, market string) (engine.Market, error)
+	listMarketsFn        func(ctx context.Context) ([]engine.Market, error)
+	getPositionFn        func(ctx context.Context, addr, market string) (engine.Position, error)
+	getHealthFn          func(ctx context.Context, addr string) (engine.Health, error)
 }
 
-func (f *fakeEngine) Supply(ctx context.Context, addr, market, amount string) error {
+func (f *fakeEngine) Supply(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 	if f != nil && f.supplyFn != nil {
-		return f.supplyFn(ctx, addr, market, amount)
+		return f.supplyFn(ctx, addr, market, amount, signedTxJSON)
 	}
-	return nil
+	return "", nil
 }
 
-func (f *fakeEngine) Borrow(ctx context.Context, addr, market, amount string) error {
+func (f *fakeEngine) Borrow(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 	if f != nil && f.borrowFn != nil {
-		return f.borrowFn(ctx, addr, market, amount)
+		return f.borrowFn(ctx, addr, market, amount, signedTxJSON)
 	}
-	return nil
+	return "", nil
 }
 
-func (f *fakeEngine) Repay(ctx context.Context, addr, market, amount string) error {
+func (f *fakeEngine) Repay(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 	if f != nil && f.repayFn != nil {
-		return f.repayFn(ctx, addr, market, amount)
+		return f.repayFn(ctx, addr, market, amount, signedTxJSON)
 	}
-	return nil
+	return "", nil
 }
 
-func (f *fakeEngine) Withdraw(ctx context.Context, addr, market, amount string) error {
+func (f *fakeEngine) Withdraw(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
 	if f != nil && f.withdrawFn != nil {
-		return f.withdrawFn(ctx, addr, market, amount)
+		return f.withdrawFn(ctx, addr, market, amount, signedTxJSON)
 	}
-	return nil
+	return "", nil
 }
 
-func (f *fakeEngine) Liquidate(ctx context.Context, liquidator, borrower, market, amount string) error {
-	if f != nil && f.liquidateFn != nil {
-		return f.liquidateFn(ctx, liquidator, borrower, market, amount)
+func (f *fakeEngine) DepositCollateral(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	if f != nil && f.depositCollateralFn != nil {
+		return f.depositCollateralFn(ctx, addr, market, amount, signedTxJSON)
 	}
-	return nil
+	return "", nil
+}
+
+func (f *fakeEngine) WithdrawCollateral(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	if f != nil && f.withdrawCollateralFn != nil {
+		return f.withdrawCollateralFn(ctx, addr, market, amount, signedTxJSON)
+	}
+	return "", nil
+}
+
+func (f *fakeEngine) Liquidate(ctx context.Context, liquidator, borrower, market, signedTxJSON string) (string, error) {
+	if f != nil && f.liquidateFn != nil {
+		return f.liquidateFn(ctx, liquidator, borrower, market, signedTxJSON)
+	}
+	return "", nil
 }
 
 func (f *fakeEngine) GetMarket(ctx context.Context, market string) (engine.Market, error) {

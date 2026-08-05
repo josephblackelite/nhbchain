@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 
@@ -27,52 +29,62 @@ func NewNodeAdapter(cli *rpcclient.Client) *NodeAdapter {
 	return &NodeAdapter{cli: cli}
 }
 
-func (a *NodeAdapter) Supply(ctx context.Context, addr, market, amount string) error {
-	params := map[string]string{
-		"from":   addr,
-		"poolId": market,
-		"amount": amount,
-	}
-	return a.invoke(ctx, "lending_supplyNHB", params, nil)
+// Supply, Withdraw, Borrow, Repay, DepositCollateral, WithdrawCollateral,
+// and Liquidate no longer call the disabled lending_* RPC methods (see
+// rpc/lending_handlers.go -- those were retired for a shared-JWT signature
+// gap: any caller holding the admin JWT could act as any account, since the
+// request only carried an "address"/"borrower" string with no signature
+// binding it). Every mutation now submits the caller's own pre-signed
+// transaction via nhb_sendTransaction instead, so the node -- not
+// lendingd -- recovers and enforces the real signer. addr/market/amount
+// still get logged/validated by the caller (see server.go) but are never
+// sent to the node; only the signed tx is.
+func (a *NodeAdapter) Supply(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
 }
 
-func (a *NodeAdapter) Borrow(ctx context.Context, addr, market, amount string) error {
-	params := map[string]string{
-		"borrower": addr,
-		"poolId":   market,
-		"amount":   amount,
-	}
-	return a.invoke(ctx, "lending_borrowNHB", params, nil)
+func (a *NodeAdapter) Borrow(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
 }
 
-func (a *NodeAdapter) Repay(ctx context.Context, addr, market, amount string) error {
-	params := map[string]string{
-		"from":   addr,
-		"poolId": market,
-		"amount": amount,
-	}
-	return a.invoke(ctx, "lending_repayNHB", params, nil)
+func (a *NodeAdapter) Repay(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
 }
 
-func (a *NodeAdapter) Withdraw(ctx context.Context, addr, market, amount string) error {
-	params := map[string]string{
-		"from":   addr,
-		"poolId": market,
-		"amount": amount,
-	}
-	return a.invoke(ctx, "lending_withdrawNHB", params, nil)
+func (a *NodeAdapter) Withdraw(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
 }
 
-func (a *NodeAdapter) Liquidate(ctx context.Context, liquidator, borrower, market, amount string) error {
-	params := map[string]string{
-		"liquidator": liquidator,
-		"borrower":   borrower,
-		"poolId":     market,
+func (a *NodeAdapter) DepositCollateral(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
+}
+
+func (a *NodeAdapter) WithdrawCollateral(ctx context.Context, addr, market, amount, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
+}
+
+func (a *NodeAdapter) Liquidate(ctx context.Context, liquidator, borrower, market, signedTxJSON string) (string, error) {
+	return a.sendSignedTx(ctx, signedTxJSON)
+}
+
+// sendSignedTx relays a caller-signed transaction to the node's
+// nhb_sendTransaction RPC exactly as received (parsed only enough to
+// confirm it is a JSON object, never re-encoded field by field) and returns
+// the mempool-accepted transaction hash nhb_sendTransaction responds with.
+func (a *NodeAdapter) sendSignedTx(ctx context.Context, signedTxJSON string) (string, error) {
+	trimmed := strings.TrimSpace(signedTxJSON)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: signed transaction required", ErrInvalidAmount)
 	}
-	if strings.TrimSpace(amount) != "" {
-		params["amount"] = amount
+	raw := json.RawMessage(trimmed)
+	if !json.Valid(raw) {
+		return "", fmt.Errorf("%w: signed transaction must be valid JSON", ErrInvalidAmount)
 	}
-	return a.invoke(ctx, "lending_liquidate", params, nil)
+	var hash string
+	if err := a.invoke(ctx, "nhb_sendTransaction", raw, &hash); err != nil {
+		return "", err
+	}
+	return hash, nil
 }
 
 func (a *NodeAdapter) GetMarket(ctx context.Context, market string) (Market, error) {
