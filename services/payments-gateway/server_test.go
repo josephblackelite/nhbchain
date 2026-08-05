@@ -53,8 +53,8 @@ func (s *stubNowPayments) Estimate(ctx context.Context, req *NowPaymentsEstimate
 		return &NowPaymentsEstimate{
 			CurrencyFrom:    req.CurrencyFrom,
 			CurrencyTo:      req.CurrencyTo,
-			EstimatedAmount: req.Amount,
-			AmountTo:        req.Amount,
+			EstimatedAmount: flexibleAmount(req.Amount),
+			AmountTo:        flexibleAmount(req.Amount),
 		}, nil
 	}
 	return s.estimateFn(ctx, req)

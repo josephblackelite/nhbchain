@@ -45,17 +45,17 @@ type NowPaymentsInvoiceRequest struct {
 
 // NowPaymentsInvoice captures the relevant invoice attributes used by the service.
 type NowPaymentsInvoice struct {
-	ID            string `json:"id"`
-	InvoiceID     string `json:"invoice_id"`
-	OrderID       string `json:"order_id"`
-	PriceAmount   string `json:"price_amount"`
-	PayCurrency   string `json:"pay_currency"`
-	PriceCurrency string `json:"price_currency"`
-	PaymentStatus string `json:"payment_status"`
-	InvoiceURL    string `json:"invoice_url"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
-	Status        string `json:"status"`
+	ID            string         `json:"id"`
+	InvoiceID     string         `json:"invoice_id"`
+	OrderID       string         `json:"order_id"`
+	PriceAmount   flexibleAmount `json:"price_amount"`
+	PayCurrency   string         `json:"pay_currency"`
+	PriceCurrency string         `json:"price_currency"`
+	PaymentStatus string         `json:"payment_status"`
+	InvoiceURL    string         `json:"invoice_url"`
+	CreatedAt     string         `json:"created_at"`
+	UpdatedAt     string         `json:"updated_at"`
+	Status        string         `json:"status"`
 }
 
 // NowPaymentsEstimateRequest represents a request to estimate a pay amount.
@@ -67,11 +67,40 @@ type NowPaymentsEstimateRequest struct {
 
 // NowPaymentsEstimate captures the invoice-side estimate for a selected pay currency.
 type NowPaymentsEstimate struct {
-	CurrencyFrom    string `json:"currency_from"`
-	CurrencyTo      string `json:"currency_to"`
-	EstimatedAmount string `json:"estimated_amount"`
-	AmountFrom      string `json:"amount_from"`
-	AmountTo        string `json:"amount_to"`
+	CurrencyFrom    string         `json:"currency_from"`
+	CurrencyTo      string         `json:"currency_to"`
+	EstimatedAmount flexibleAmount `json:"estimated_amount"`
+	AmountFrom      flexibleAmount `json:"amount_from"`
+	AmountTo        flexibleAmount `json:"amount_to"`
+}
+
+// flexibleAmount decodes a NOWPayments amount field regardless of whether
+// their API returns it as a JSON string or a bare number -- confirmed live
+// that /estimate returns amount_from as a number while this client
+// originally only accepted a string, which made json.Decode fail the
+// *entire* response (Go aborts the whole unmarshal on one field's type
+// mismatch, even for fields nothing downstream reads). Every amount in
+// this package is kept as decimal text end-to-end to avoid float64
+// precision loss, so this preserves that: a numeric literal's raw JSON
+// bytes are already valid decimal text, no float parsing needed.
+type flexibleAmount string
+
+func (a *flexibleAmount) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" {
+		*a = ""
+		return nil
+	}
+	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("flexibleAmount: %w", err)
+		}
+		*a = flexibleAmount(s)
+		return nil
+	}
+	*a = flexibleAmount(trimmed)
+	return nil
 }
 
 // Paid returns whether the invoice is considered settled.

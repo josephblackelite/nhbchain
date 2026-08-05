@@ -325,7 +325,7 @@ func (s *Server) estimatePayAmount(ctx context.Context, totalFiat, payCurrency s
 	if err != nil {
 		return "", err
 	}
-	amount := strings.TrimSpace(firstNonEmpty(estimate.EstimatedAmount, estimate.AmountTo))
+	amount := strings.TrimSpace(firstNonEmpty(string(estimate.EstimatedAmount), string(estimate.AmountTo)))
 	if amount == "" {
 		return "", fmt.Errorf("nowpayments estimate returned empty amount")
 	}
