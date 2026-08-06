@@ -509,10 +509,6 @@ func main() {
 		logger.Error("failed to initialise RPC server", slog.Any("error", err))
 		os.Exit(1)
 	}
-	if err := ensureDefaultLendingPool(node, privKey); err != nil {
-		logger.Error("failed to initialise default lending pool", slog.Any("error", err))
-		os.Exit(1)
-	}
 	if err := configureStableTradingEngine(rpcServer, aggregator, logger); err != nil {
 		logger.Error("failed to configure stable trading engine", slog.Any("error", err))
 		os.Exit(1)
@@ -576,51 +572,6 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 	for range ticker.C {
 		submit()
 	}
-}
-
-func ensureDefaultLendingPool(node *core.Node, privKey *crypto.PrivateKey) error {
-	if node == nil || privKey == nil {
-		return nil
-	}
-	// This must be a value every validator derives identically -- it gets
-	// written into the shared state trie (via WithState, ahead of the next
-	// block's commit) and folds into the canonical state root. Using the
-	// running validator's own key here was a real, live consensus bug: a
-	// second validator started fresh, with its own different key, computed
-	// a different DeveloperOwner for the same "default" pool than what the
-	// first validator's key had already baked into the live chain, causing
-	// permanent state-root divergence the moment it tried to sync block 1.
-	// Confirmed by diffing the live validator's actual on-disk trie against
-	// a fresh sync attempt: every other write matched byte-for-byte except
-	// this one, which held the original validator's own address.
-	owner := crypto.Address{}
-	if adminAddr, ok := node.AdminWallet(); ok {
-		if addr, err := crypto.NewAddress(crypto.NHBPrefix, adminAddr[:]); err == nil {
-			owner = addr
-		}
-	}
-	return node.WithState(func(manager *nhbstate.Manager) error {
-		existing, ok, err := manager.LendingGetMarket("default")
-		if err != nil {
-			return err
-		}
-		if ok && existing != nil {
-			return nil
-		}
-		feeBps, collector := node.LendingDeveloperFeeConfig()
-		market := &lending.Market{
-			PoolID:                "default",
-			DeveloperOwner:        owner,
-			DeveloperFeeBps:       feeBps,
-			DeveloperFeeCollector: collector,
-			ReserveFactor:         node.LendingReserveFactorBps(),
-			LastUpdateBlock:       node.GetHeight(),
-			TotalNHBSupplied:      big.NewInt(0),
-			TotalSupplyShares:     big.NewInt(0),
-			TotalNHBBorrowed:      big.NewInt(0),
-		}
-		return manager.LendingPutMarket("default", market)
-	})
 }
 
 func configureStableTradingEngine(rpcServer *rpc.Server, aggregator *swap.OracleAggregator, logger *slog.Logger) error {
