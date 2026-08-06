@@ -156,7 +156,6 @@ The repository now includes a single node bootstrap script intended to be the pu
 > **Only want to run a validator, not the full production stack?** You don't need any of these files — skip straight to [Join As A Validator In One Command](#join-as-a-validator-in-one-command) instead.
 
 ```bash
-chmod +x scripts/run_nhbcoin_node.sh
 bash scripts/run_nhbcoin_node.sh
 ```
 
@@ -177,7 +176,6 @@ anywhere for this step.
 1. On your Ubuntu validator server, run:
 
 ```bash
-chmod +x scripts/validator-only-bootstrap.sh
 bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
 ```
 
@@ -210,14 +208,12 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 
 ---
 
-> ⚠️ **Notice: A genesis relaunch is planned — these network parameters are being retired.** The Network ID, transaction signing Chain ID, and bootnode address below describe the **current** NHBCoin chain, which is being deliberately retired in favor of a fresh genesis relaunch. The relaunch's replacement values **have not been chosen yet** and are not published anywhere in this repository. **Do not configure a new validator or node against the parameters below** in anticipation of the relaunch — wait for an official announcement with the new values. The values below remain accurate only for the current, soon-to-be-retired chain.
-
 ## 🔗 Network Connection Details
 
 If you are setting up a frontend application, a Web3 wallet (like MetaMask), or configuring your Node manually, here are the official Mainnet parameters:
 
 - **Network Name:** NHBCoin Mainnet
-- **Network ID:** `187001` *(P2P handshake identifier for the live mainnet deployment. Nodes advertising a different value will not be able to peer with mainnet validators.)*
+- **Network ID:** `10698789873712925303` *(P2P handshake identifier for the live mainnet deployment, effective from the GTM 2026 genesis relaunch on 2026-08-04 -- genesis-hash-derived, not a chosen number. Nodes advertising a different value will not be able to peer with mainnet validators. Verify against the live node's `net_info`/`p2p_info` RPC result if this ever looks stale.)*
 - **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
@@ -230,7 +226,6 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 On a fresh Ubuntu server, clone the repo and run:
 
 ```bash
-chmod +x scripts/validator-only-bootstrap.sh
 bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
 ```
 
