@@ -12,7 +12,7 @@ VALIDATOR_KEY_FILE="${CONFIG_DIR}/validator.key"
 ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://api.nhbcoin.com/v1/validators/onboarding-email'
 
 BOOTNODE_DEFAULT='enode://bc1717ec2932efac3b37b9891f20f55cff491d48b790346ac02977cd646d4454@52.1.96.250:6001'
-NETWORK_ID_DEFAULT='187001'
+NETWORK_ID_DEFAULT='10698789873712925303'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
@@ -40,7 +40,7 @@ Options:
                            best-effort, does not fail the script if it can't
                            be sent).
   --bootnode <enode>       Bootnode enode to join. Default: NHBCoin mainnet bootnode.
-  --network-id <id>        P2P network ID. Default: 187001
+  --network-id <id>        P2P network ID. Default: 10698789873712925303
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
   --reset-state            Remove existing local chain state before first start.
@@ -259,8 +259,14 @@ sudo perl -0pi -e "s#(?m)^ValidatorKeystorePath = \".*\"#ValidatorKeystorePath =
 sudo perl -0pi -e "s#(?m)^ValidatorKMSEnv = \".*\"#ValidatorKMSEnv = \"NHB_VALIDATOR_RAW_KEY\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^NetworkName = \".*\"#NetworkName = \"nhb-mainnet-validator\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^  NetworkId = .*#  NetworkId = ${NETWORK_ID}#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^  Bootnodes = \\[.*\\]#  Bootnodes = [\"${BOOTNODE}\"]#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^  PersistentPeers = \\[.*\\]#  PersistentPeers = [\"${BOOTNODE}\"]#;" "${CONFIG_DIR}/config.toml"
+# The enode string contains "@" (nodeid@host:port). Perl treats an
+# unescaped "@" in the s/// replacement text as array interpolation
+# (e.g. "@52" -> array @52, silently expanding to ""), which corrupted
+# the peer address into "<nodeid>.1.96.250:6001" and broke P2P dialing.
+# Escape it to a literal before splicing into the Perl program.
+BOOTNODE_ESCAPED=$(printf '%s' "${BOOTNODE}" | sed 's/@/\\\\@/g')
+sudo perl -0pi -e "s#(?m)^  Bootnodes = \\[.*\\]#  Bootnodes = [\"${BOOTNODE_ESCAPED}\"]#;" "${CONFIG_DIR}/config.toml"
+sudo perl -0pi -e "s#(?m)^  PersistentPeers = \\[.*\\]#  PersistentPeers = [\"${BOOTNODE_ESCAPED}\"]#;" "${CONFIG_DIR}/config.toml"
 
 sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}" "${STATE_DIR}"
 

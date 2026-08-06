@@ -72,7 +72,7 @@ ClientVersion = ""
     LevelDBPath = ""
 
 [p2p]
-  NetworkId = 187001
+  NetworkId = 10698789873712925303
   MaxPeers = 64
   MaxInbound = 60
   MaxOutbound = 30
