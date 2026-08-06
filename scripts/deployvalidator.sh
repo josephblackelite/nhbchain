@@ -19,7 +19,7 @@ ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://api.nhbcoin.com/v1/validators/onboard
 # as a real bug: "dial tcp: address enode://...: too many colons in
 # address" -- the node never dialed its bootnode at all.
 BOOTNODE_DEFAULT='52.1.96.250:6001'
-NETWORK_ID_DEFAULT='10698789873712925303'
+NETWORK_ID_DEFAULT='430060579445266314'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
@@ -48,7 +48,7 @@ Options:
                            be sent).
   --bootnode <host:port>   Bootnode address to join (plain host:port, not
                            an enode:// URI). Default: NHBCoin mainnet bootnode.
-  --network-id <id>        P2P network ID. Default: 10698789873712925303
+  --network-id <id>        P2P network ID. Default: 430060579445266314
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
   --reset-state            Remove existing local chain state before first start.

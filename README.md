@@ -213,13 +213,13 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 If you are setting up a frontend application, a Web3 wallet (like MetaMask), or configuring your Node manually, here are the official Mainnet parameters:
 
 - **Network Name:** NHBCoin Mainnet
-- **Network ID:** `10698789873712925303` *(P2P handshake identifier for the live mainnet deployment, effective from the GTM 2026 genesis relaunch on 2026-08-04 -- genesis-hash-derived, not a chosen number. Nodes advertising a different value will not be able to peer with mainnet validators. Verify against the live node's `net_info`/`p2p_info` RPC result if this ever looks stale.)*
+- **Network ID:** `430060579445266314` *(P2P handshake identifier for the live mainnet deployment, effective from the Phase E genesis relaunch on 2026-08-06 -- genesis-hash-derived, not a chosen number. Nodes advertising a different value will not be able to peer with mainnet validators. Verify against the live node's `net_info`/`p2p_info` RPC result if this ever looks stale. The prior GTM 2026 genesis (10698789873712925303) was abandoned after a real consensus bug was found: no second validator could ever sync it -- see config/genesis.phase-e.json and core/mint.go's MintChainID comment for the full story. Account balances were snapshotted forward into the new genesis, nobody lost funds.)*
 - **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
 - **Mainnet P2P Bootnode:**
   `"52.1.96.250:6001"`
-  *(This node's `Bootnodes`/`PersistentPeers` config values are plain `host:port` -- the P2P dialer connects directly with `net.Dial("tcp", addr)` and does not parse an `enode://nodeid@host:port` URI scheme, so don't use that format here even though it's a common convention on other chains. Updated 2026-08-04 for the GTM 2026 genesis relaunch — this address changes on any future genesis relaunch too; verify against the live node's `p2p_info` RPC result if this ever looks stale.)*
+  *(This node's `Bootnodes`/`PersistentPeers` config values are plain `host:port` -- the P2P dialer connects directly with `net.Dial("tcp", addr)` and does not parse an `enode://nodeid@host:port` URI scheme, so don't use that format here even though it's a common convention on other chains. Updated 2026-08-06 for the Phase E genesis relaunch — this address changes on any future genesis relaunch too; verify against the live node's `p2p_info` RPC result if this ever looks stale.)*
 
 ### Join As A Validator In One Command
 

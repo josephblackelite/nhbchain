@@ -31,7 +31,7 @@ RPCTLSCertFile = ""
 RPCTLSKeyFile = ""
 RPCTLSClientCAFile = ""
 DataDir = "./nhb-data"
-GenesisFile = "./config/genesis.gtm2026.json"
+GenesisFile = "./config/genesis.phase-e.json"
 AllowAutogenesis = false
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
@@ -72,7 +72,7 @@ ClientVersion = ""
     LevelDBPath = ""
 
 [p2p]
-  NetworkId = 10698789873712925303
+  NetworkId = 430060579445266314
   MaxPeers = 64
   MaxInbound = 60
   MaxOutbound = 30

@@ -13,10 +13,15 @@ import (
 
 // MintChainID defines the founder-mainnet chain identifier expected inside mint
 // vouchers. This is the genesis-hash-derived ID (Blockchain.ChainID(), the
-// first 8 bytes of the genesis block hash) for the GTM 2026 relaunch genesis
-// launched 2026-08-04, read directly from that node's own startup log
-// ("Loaded genesis... chainID=..."), not chosen or guessed.
-const MintChainID uint64 = 10698789873712925303
+// first 8 bytes of the genesis block hash) for the Phase E relaunch genesis
+// (config/genesis.phase-e.json), read directly from that node's own startup
+// log ("Loaded genesis... chainID=..."), not chosen or guessed. The prior
+// GTM 2026 genesis (launched 2026-08-04, chainID=10698789873712925303) was
+// abandoned: a real consensus bug (see the ensureDefaultLendingPool fix)
+// meant no second validator could ever sync it, so its 35,000+ blocks of
+// history were snapshotted into this new genesis's alloc instead of carried
+// forward on-chain.
+const MintChainID uint64 = 430060579445266314
 
 var (
 	// ErrMintInvalidSigner indicates the recovered signer does not hold the required role.
