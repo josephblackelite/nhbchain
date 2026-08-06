@@ -523,3 +523,81 @@ func TestCommitBlockFailureRollbackPreservesNextProposalStateRoot(t *testing.T) 
 		t.Fatalf("expected recreated proposal state root %x, got %x", block.Header.StateRoot, nextBlock.Header.StateRoot)
 	}
 }
+
+// Regression test for a live bug: a transaction submitted to any validator
+// other than the current block proposer could never be mined, because
+// nothing ever gossiped it to peers -- p2p.NewTxMessage was defined but
+// never called anywhere. Confirmed live: a second validator's own
+// heartbeat transaction landed in its own local mempool but the primary's
+// mempool (the sole proposer) never received it. AddTransaction must
+// broadcast a newly-accepted, locally-originated transaction to peers so a
+// different validator can include it in a block it proposes.
+func TestAddTransactionBroadcastsToPeers(t *testing.T) {
+	node := newTestNode(t)
+	broadcaster := &testBroadcaster{}
+	node.SetNetworkBroadcaster(broadcaster)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tx := prepareSignedTransaction(t, node, senderKey, 0, types.NHBChainID())
+
+	if err := node.AddTransaction(tx); err != nil {
+		t.Fatalf("add transaction: %v", err)
+	}
+
+	if len(broadcaster.messages) != 1 {
+		t.Fatalf("expected 1 transaction broadcast, got %d", len(broadcaster.messages))
+	}
+	if broadcaster.messages[0].Type != p2p.MsgTypeTx {
+		t.Fatalf("expected tx message, got type %d", broadcaster.messages[0].Type)
+	}
+	gossiped := new(types.Transaction)
+	if err := json.Unmarshal(broadcaster.messages[0].Payload, gossiped); err != nil {
+		t.Fatalf("unmarshal gossiped transaction: %v", err)
+	}
+	gossipedHash, err := gossiped.Hash()
+	if err != nil {
+		t.Fatalf("hash gossiped transaction: %v", err)
+	}
+	wantHash, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash original transaction: %v", err)
+	}
+	if !bytes.Equal(gossipedHash, wantHash) {
+		t.Fatalf("gossiped transaction does not match the one submitted: got %x want %x", gossipedHash, wantHash)
+	}
+}
+
+// A transaction that arrives FROM a peer must not be rebroadcast -- with
+// only two nodes that's a pointless echo straight back to the sender, and
+// with more nodes it would flood the network with no relay/dedup logic to
+// stop it. ProcessNetworkMessage must route MsgTypeTx through the
+// non-broadcasting internal path.
+func TestProcessNetworkMessageTxDoesNotRebroadcast(t *testing.T) {
+	node := newTestNode(t)
+	broadcaster := &testBroadcaster{}
+	node.SetNetworkBroadcaster(broadcaster)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tx := prepareSignedTransaction(t, node, senderKey, 0, types.NHBChainID())
+	msg, err := p2p.NewTxMessage(tx)
+	if err != nil {
+		t.Fatalf("build tx message: %v", err)
+	}
+
+	if err := node.ProcessNetworkMessage(msg); err != nil {
+		t.Fatalf("process network message: %v", err)
+	}
+
+	if len(broadcaster.messages) != 0 {
+		t.Fatalf("expected no rebroadcast of a peer-received transaction, got %d messages", len(broadcaster.messages))
+	}
+	if len(node.GetMempool()) != 1 {
+		t.Fatalf("expected the peer-received transaction to still be added locally, got %d mempool entries", len(node.GetMempool()))
+	}
+}

@@ -1999,7 +1999,11 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		if err := json.Unmarshal(msg.Payload, tx); err != nil {
 			return err
 		}
-		if err := n.AddTransaction(tx); err != nil {
+		// broadcast=false: this transaction arrived FROM a peer -- rebroadcasting
+		// it would just echo it straight back with no other peers to reach in
+		// today's small topology (and risks a flood loop once the network grows
+		// beyond two nodes, absent real multi-hop relay/dedup semantics).
+		if err := n.addTransaction(tx, false); err != nil {
 			if errors.Is(err, ErrInvalidTransaction) {
 				return fmt.Errorf("%w: %v", p2p.ErrInvalidPayload, err)
 			}
@@ -2166,7 +2170,18 @@ func (n *Node) HandleMessage(msg *p2p.Message) error {
 	return n.ProcessNetworkMessage(msg)
 }
 
+// AddTransaction enqueues a locally-originated transaction (from an RPC
+// call, the validator's own heartbeat loop, a mint voucher submission, etc.)
+// into the local mempool and, on success, gossips it to connected peers so a
+// validator other than this one can eventually include it in a block. Use
+// addTransaction(tx, false) instead for a transaction that arrived FROM a
+// peer via ProcessNetworkMessage -- rebroadcasting it would just echo it
+// straight back with no other peers to reach in today's small topology.
 func (n *Node) AddTransaction(tx *types.Transaction) error {
+	return n.addTransaction(tx, true)
+}
+
+func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	if n == nil || tx == nil {
 		return fmt.Errorf("add transaction: invalid arguments")
 	}
@@ -2240,6 +2255,7 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 						if key, keyErr := transactionKey(tx); keyErr == nil {
 							n.trackTransactionLocked(key, sender, nonce, now)
 						}
+						n.gossipTransactionLocked(tx, broadcast)
 						return nil // Replaced! Do not append.
 					} else {
 						return fmt.Errorf("%w: transaction with nonce %d already exists and fee is not higher", ErrInvalidTransaction, nonce)
@@ -2335,6 +2351,7 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 	}
 	n.mempool = append(n.mempool, tx)
 	n.trackTransactionLocked(key, sender, nonce, now)
+	n.gossipTransactionLocked(tx, broadcast)
 	if mempool.IsPOSLaneEligible(tx) {
 		if hash, err := tx.Hash(); err == nil {
 			n.publishPOSFinality(POSFinalityUpdate{
@@ -2346,6 +2363,28 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 		}
 	}
 	return nil
+}
+
+// gossipTransactionLocked broadcasts tx to connected peers so a validator
+// other than this one can include it in a block -- without this, a
+// transaction submitted to any validator that isn't currently the block
+// proposer can never be mined, since building a block only ever draws from
+// the proposer's own local mempool. Called with n.mempoolMu already held
+// (matching addTransaction's callers), which is safe: Broadcast only takes a
+// brief peer-list read-lock and enqueues onto each peer's bounded send
+// channel, it doesn't block on network I/O.
+func (n *Node) gossipTransactionLocked(tx *types.Transaction, broadcast bool) {
+	if !broadcast || n == nil || n.networkBroadcaster == nil {
+		return
+	}
+	msg, err := p2p.NewTxMessage(tx)
+	if err != nil {
+		slog.Warn("Failed to encode transaction for gossip", slog.Any("error", err))
+		return
+	}
+	if err := n.networkBroadcaster.Broadcast(msg); err != nil {
+		slog.Warn("Failed to gossip transaction to peers", slog.Any("error", err))
+	}
 }
 
 func (n *Node) validateTransaction(tx *types.Transaction) error {
