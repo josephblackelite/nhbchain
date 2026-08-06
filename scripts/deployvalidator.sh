@@ -204,10 +204,16 @@ cd "${INSTALL_ROOT}"
 # INSTALL_ROOT instead, which is already on that real disk.
 GOCACHE_DIR="${INSTALL_ROOT}/.gocache"
 GOPATH_DIR="${INSTALL_ROOT}/.gopath"
-sudo mkdir -p "${GOCACHE_DIR}" "${GOPATH_DIR}"
-sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" HOME=/root \
+# go build also stages per-package scratch files under a $WORK dir, which
+# defaults to $TMPDIR (usually /tmp). On small instances /tmp is a tiny
+# tmpfs -- confirmed via a live build filling it and failing with "no
+# space left on device" even with GOCACHE/GOPATH already disk-backed.
+# Give it its own disk-backed scratch dir too.
+GOTMP_DIR="${INSTALL_ROOT}/.gotmp"
+sudo mkdir -p "${GOCACHE_DIR}" "${GOPATH_DIR}" "${GOTMP_DIR}"
+sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" GOTMPDIR="${GOTMP_DIR}" TMPDIR="${GOTMP_DIR}" HOME=/root \
   /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/nhb" ./cmd/nhb
-sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" HOME=/root \
+sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" GOTMPDIR="${GOTMP_DIR}" TMPDIR="${GOTMP_DIR}" HOME=/root \
   /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/nhb-cli" ./cmd/nhb-cli
 
 # Generate the validator key ON THIS MACHINE the first time this script
