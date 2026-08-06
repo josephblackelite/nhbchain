@@ -178,6 +178,17 @@ fi
 
 sudo useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
 sudo mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}/bin"
+# Confirmed by running this exact script end-to-end: nhb.service (which runs
+# as User=nhb, not root) crash-looped forever with "panic: Failed to load
+# config: open /etc/nhbchain/config.toml: permission denied" -- mkdir here
+# runs under sudo, so the directory was owned by root, and mode 700 denies
+# *every* non-owner, including the nhb user, from even traversing into it
+# to read config.toml/node.env/validator.key -- regardless of those
+# individual files' own (correct) nhb:nhb ownership. The service silently
+# never actually started; only the crash-loop's own restart backoff kept
+# systemd from reporting it as immediately failed. Own the directory as the
+# service user so it can read what's already correctly chowned to it.
+sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
 sudo chmod 700 "${CONFIG_DIR}"
 
 sudo rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
@@ -263,14 +274,36 @@ sudo systemctl daemon-reload
 sudo systemctl enable nhb.service
 sudo systemctl restart nhb.service
 
+# Confirmed by running this exact script end-to-end: the service can
+# silently crash-loop forever (e.g. a config it can't read) while this
+# script barrels ahead and prints a false "[OK] Validator node started" at
+# the end regardless -- the RPC-wait loop below previously only ran when
+# --beneficiary was given, and even then it just moved on after timing out
+# rather than treating that as a real failure. Always wait for the RPC to
+# actually come up, and stop with clear diagnostics if it never does.
+echo "[INFO] waiting for the node's RPC to come up"
+NODE_HEALTHY=0
+for _ in $(seq 1 30); do
+  if curl -fsS -m 2 "http://${RPC_ADDR}/" >/dev/null 2>&1; then
+    NODE_HEALTHY=1
+    break
+  fi
+  sleep 2
+done
+
+if [[ "${NODE_HEALTHY}" != "1" ]]; then
+  echo
+  echo "=================================================================="
+  echo "[ERROR] nhb.service did not come up after 60 seconds."
+  echo
+  echo "Check what's actually wrong with:"
+  echo "  sudo systemctl status nhb.service"
+  echo "  sudo journalctl -u nhb.service -n 50 --no-pager"
+  echo "=================================================================="
+  exit 1
+fi
+
 if [[ -n "${BENEFICIARY}" ]]; then
-  echo "[INFO] waiting for the node's RPC to come up so the reward beneficiary can be set"
-  for _ in $(seq 1 30); do
-    if curl -fsS -m 2 "http://${RPC_ADDR}/" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 2
-  done
   echo "[INFO] setting reward beneficiary to ${BENEFICIARY}"
   if ! sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" \
       set-reward-beneficiary "${BENEFICIARY}" "${VALIDATOR_KEY_FILE}"; then
