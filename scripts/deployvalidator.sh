@@ -312,7 +312,17 @@ sudo systemctl restart nhb.service
 echo "[INFO] waiting for the node's RPC to come up"
 NODE_HEALTHY=0
 for _ in $(seq 1 30); do
-  if curl -fsS -m 2 "http://${RPC_ADDR}/" >/dev/null 2>&1; then
+  # This is a JSON-RPC endpoint: it only accepts POST with a JSON body and
+  # correctly returns 400 to a bare GET, which curl -f treats as failure
+  # regardless of whether the node is healthy. Confirmed live: a real,
+  # already-syncing validator (height 60+, producing blocks) failed this
+  # exact check every time because it only ever sent a bare GET. POST a
+  # trivial, unauthenticated, side-effect-free read instead so the check
+  # reflects whether the node can actually answer requests.
+  if curl -fsS -m 2 "http://${RPC_ADDR}/" \
+      -X POST -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"nhb_getNetworkStats","params":[]}' \
+      >/dev/null 2>&1; then
     NODE_HEALTHY=1
     break
   fi
