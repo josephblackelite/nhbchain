@@ -269,10 +269,18 @@ sudo perl -0pi -e "s#(?m)^  NetworkId = .*#  NetworkId = ${NETWORK_ID}#;" "${CON
 # unescaped "@" in the s/// replacement text as array interpolation
 # (e.g. "@52" -> array @52, silently expanding to ""), which corrupted
 # the peer address into "<nodeid>.1.96.250:6001" and broke P2P dialing.
-# Escape it to a literal before splicing into the Perl program.
-BOOTNODE_ESCAPED=$(printf '%s' "${BOOTNODE}" | sed 's/@/\\\\@/g')
-sudo perl -0pi -e "s#(?m)^  Bootnodes = \\[.*\\]#  Bootnodes = [\"${BOOTNODE_ESCAPED}\"]#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^  PersistentPeers = \\[.*\\]#  PersistentPeers = [\"${BOOTNODE_ESCAPED}\"]#;" "${CONFIG_DIR}/config.toml"
+# A prior fix here tried to backslash-escape the "@" before splicing it
+# into the Perl program text, but that depends on how many backslashes
+# the shell's `sed` collapses -- verified to differ between sed
+# implementations, and on the real target (GNU sed) it produced a
+# *different* corruption ("\.1.96.250"). Passing the value through
+# $ENV{} instead avoids the interpolation problem entirely: it's read
+# as data at runtime, never parsed as part of the Perl program text.
+sudo env BOOTNODE="${BOOTNODE}" perl -0pi -e '
+  my $bn = $ENV{"BOOTNODE"};
+  s/^  Bootnodes = \[.*\]$/  Bootnodes = ["$bn"]/m;
+  s/^  PersistentPeers = \[.*\]$/  PersistentPeers = ["$bn"]/m;
+' "${CONFIG_DIR}/config.toml"
 
 sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}" "${STATE_DIR}"
 
