@@ -163,9 +163,19 @@ sudo rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 
 echo "[INFO] building NHB validator binaries"
 cd "${INSTALL_ROOT}"
-sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE=/tmp/nhb-gocache GOPATH=/tmp/nhb-gopath HOME=/root \
+# Go's module cache for this dependency tree (go-ethereum, protobuf, sqlite,
+# opentelemetry, etc.) needs well over a gigabyte -- confirmed by running
+# this exact script on a stock Ubuntu AMI, which builds cleanly, /tmp filled
+# up mid-download ("no space left on device") because /tmp there is a
+# tmpfs mount capped at a few hundred MB (RAM-backed, common EC2 default),
+# while the real disk had 90+ GB free and untouched. Build under
+# INSTALL_ROOT instead, which is already on that real disk.
+GOCACHE_DIR="${INSTALL_ROOT}/.gocache"
+GOPATH_DIR="${INSTALL_ROOT}/.gopath"
+sudo mkdir -p "${GOCACHE_DIR}" "${GOPATH_DIR}"
+sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" HOME=/root \
   /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/nhb" ./cmd/nhb
-sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE=/tmp/nhb-gocache GOPATH=/tmp/nhb-gopath HOME=/root \
+sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" HOME=/root \
   /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/nhb-cli" ./cmd/nhb-cli
 
 # Generate the validator key ON THIS MACHINE the first time this script
