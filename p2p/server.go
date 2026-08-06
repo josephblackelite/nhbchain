@@ -802,7 +802,7 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if trimmedDial == "" {
 		trimmedDial = primaryAddr
 	}
-	persistent = persistent || s.isPersistentRemote(remote.nodeID, addresses, trimmedDial)
+	persistent = persistent || s.isPersistentRemote(remote.nodeID)
 
 	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, trimmedDial)
 	if err := s.registerPeer(peer); err != nil {
@@ -1759,28 +1759,34 @@ func (s *Server) isConfiguredPersistentPeer(id string) bool {
 	return ok
 }
 
-func (s *Server) isPersistentRemote(nodeID string, addrs []string, dialAddr string) bool {
+// isPersistentRemote reports whether a connected peer should be trusted as a
+// configured persistent peer. It deliberately checks nodeID only.
+//
+// A peer's advertised ListenAddrs (and, for inbound connections, the dial
+// address derived from them -- see initPeer) are self-reported and unsigned:
+// nothing in the handshake binds them to the connection. Matching those
+// addresses against the operator's configured Bootnodes/PersistentPeers list
+// used to grant any inbound connection full rate-limit exemption, eviction
+// immunity, and ban immunity just by claiming to be listening at a trusted
+// address -- regardless of its real nodeID. isConfiguredPersistentPeer's
+// nodeID check has no such gap: nodeIDs are established either by the
+// operator's config or, at runtime, by rememberPersistentPeerID after a
+// connection this server itself dialed (via the address it independently
+// chose to dial -- see Connect/isPersistent) was confirmed persistent. A
+// peer that has never been reached that way, and isn't in the static config,
+// gets no persistent trust from an inbound connection alone. Binding
+// ListenAddrs into the signed handshake digest would let a genuinely
+// address-configured peer be recognized on first inbound contact too, but
+// that needs a handshake-version bump and is tracked separately.
+func (s *Server) isPersistentRemote(nodeID string) bool {
 	if s == nil {
 		return false
 	}
-	if normalized := normalizeHex(nodeID); normalized != "" && s.isConfiguredPersistentPeer(normalized) {
-		return true
+	normalized := normalizeHex(nodeID)
+	if normalized == "" {
+		return false
 	}
-	candidates := make([]string, 0, len(addrs)+1)
-	if trimmed := strings.TrimSpace(dialAddr); trimmed != "" {
-		candidates = append(candidates, trimmed)
-	}
-	for _, addr := range addrs {
-		if trimmed := strings.TrimSpace(addr); trimmed != "" {
-			candidates = append(candidates, trimmed)
-		}
-	}
-	for _, addr := range candidates {
-		if s.isPersistent(addr) {
-			return true
-		}
-	}
-	return false
+	return s.isConfiguredPersistentPeer(normalized)
 }
 
 func directionForPeer(peer *Peer) string {

@@ -146,6 +146,16 @@ func TestTrustedInboundPersistentPeerSkipsRateLimitDisconnect(t *testing.T) {
 	remote := NewServer(handler, mustKey(t), cfg)
 	remote.addListenAddress("127.0.0.1:34567")
 
+	// Simulate this remote node ID having already been vetted as persistent
+	// -- normally learned when this server successfully dials the peer's
+	// configured address itself (see isPersistent/Connect). Inbound
+	// connections no longer gain persistent trust from a self-reported
+	// ListenAddr alone (see TestIsPersistentRemoteIgnoresSelfReportedAddress
+	// and TestSpoofedListenAddressDoesNotGrantInboundPersistentTrust), so
+	// the node ID must be recognized ahead of time for this test to exercise
+	// the rate-limit-exemption behavior it's actually about.
+	server.rememberPersistentPeerID(remote.nodeID)
+
 	left, right := net.Pipe()
 	defer right.Close()
 
@@ -207,6 +217,104 @@ func TestTrustedInboundPersistentPeerSkipsRateLimitDisconnect(t *testing.T) {
 	}
 }
 
+// Regression test for a live spoofing bug: isPersistentRemote used to grant
+// persistent status to any inbound connection whose self-reported,
+// unsigned ListenAddrs matched a configured Bootnode/PersistentPeer address
+// string, with no check that the connection actually came from that peer.
+// An attacker who simply claimed the real bootnode's address in its
+// handshake payload got rate-limiter exemption, eviction immunity, and ban
+// immunity for a node ID that was never configured or previously dialed.
+func TestSpoofedListenAddressDoesNotGrantInboundPersistentTrust(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xBD}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.RateMsgsPerSec = 1
+	cfg.RateBurst = 1
+	cfg.PersistentPeers = []string{"127.0.0.1:34567"}
+	cfg.PeerBanDuration = 100 * time.Millisecond
+
+	server := NewServer(handler, mustKey(t), cfg)
+	attacker := NewServer(handler, mustKey(t), cfg)
+	// The attacker's real node ID was never configured as persistent and
+	// was never dialed by this server, but it claims to be listening at the
+	// configured persistent-peer address anyway.
+	attacker.addListenAddress("127.0.0.1:34567")
+
+	left, right := net.Pipe()
+	defer right.Close()
+
+	go server.handleInbound(left)
+
+	reader := bufio.NewReader(right)
+	if _, err := reader.ReadBytes('\n'); err != nil {
+		t.Fatalf("read local handshake: %v", err)
+	}
+	payload, err := attacker.buildHandshake()
+	if err != nil {
+		t.Fatalf("build handshake: %v", err)
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal handshake: %v", err)
+	}
+	if _, err := right.Write(append(data, '\n')); err != nil {
+		t.Fatalf("write handshake: %v", err)
+	}
+
+	wait := func(cond func() bool) bool {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return true
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return cond()
+	}
+
+	if !wait(func() bool {
+		server.mu.RLock()
+		_, ok := server.peers[attacker.nodeID]
+		server.mu.RUnlock()
+		return ok
+	}) {
+		t.Fatal("attacker connection never registered")
+	}
+
+	server.mu.RLock()
+	peer, ok := server.peers[attacker.nodeID]
+	server.mu.RUnlock()
+	if !ok || peer == nil {
+		t.Fatal("expected attacker peer to be tracked")
+	}
+	if peer.persistent {
+		t.Fatal("spoofed ListenAddr must not grant persistent trust to an unrecognized node ID")
+	}
+
+	msgData, err := json.Marshal(&Message{Type: 1, Payload: []byte("spam")})
+	if err != nil {
+		t.Fatalf("marshal message: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := right.Write(append(msgData, '\n')); err != nil {
+			if strings.Contains(err.Error(), "closed") {
+				break
+			}
+			t.Fatalf("write message: %v", err)
+		}
+	}
+
+	if !wait(func() bool {
+		server.mu.RLock()
+		_, ok := server.peers[attacker.nodeID]
+		server.mu.RUnlock()
+		return !ok
+	}) {
+		t.Fatal("spoofed peer should have been subject to the generic rate limiter like any other untrusted peer")
+	}
+}
+
 func TestPersistentPeerIdentitySurvivesReconnectByAlternateAddress(t *testing.T) {
 	handler := noopHandler{}
 	genesis := bytes.Repeat([]byte{0xCD}, 32)
@@ -220,8 +328,25 @@ func TestPersistentPeerIdentitySurvivesReconnectByAlternateAddress(t *testing.T)
 	if !server.isConfiguredPersistentPeer("0xdeadbeef") {
 		t.Fatal("expected learned persistent node ID to remain trusted")
 	}
-	if !server.isPersistentRemote("0xdeadbeef", []string{"172.31.19.213:6001"}, "172.31.19.213:6001") {
-		t.Fatal("expected reconnect via alternate address to remain classified as persistent")
+	if !server.isPersistentRemote("0xdeadbeef") {
+		t.Fatal("expected reconnect from a remembered node ID to remain classified as persistent")
+	}
+}
+
+func TestIsPersistentRemoteIgnoresSelfReportedAddress(t *testing.T) {
+	handler := noopHandler{}
+	genesis := bytes.Repeat([]byte{0xCE}, 32)
+
+	cfg := baseConfig(genesis)
+	cfg.PersistentPeers = []string{"52.1.96.250:6001"}
+
+	server := NewServer(handler, mustKey(t), cfg)
+
+	// This node ID was never configured and never learned via a connection
+	// this server itself dialed, so merely claiming the bootnode's own
+	// address must not grant persistent trust.
+	if server.isPersistentRemote("0xattacker") {
+		t.Fatal("expected unrecognized node ID to stay untrusted regardless of claimed address")
 	}
 }
 

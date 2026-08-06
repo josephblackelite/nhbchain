@@ -38,6 +38,17 @@ func (m *LendingModule) moduleUnavailable() *ModuleError {
 	return &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: "lending module not available"}
 }
 
+// GetMarket, GetPools, and GetUserAccount are unauthenticated, read-only RPC
+// methods. The legacy-migration logic below (rebuildPoolStateInto,
+// reconcileLegacyPoolStateInto, reconcileLegacyUserAccount) computes derived
+// records for callers that predate the on-chain lending market format. It
+// must never write through m.node.WithState: that mutates the live pending
+// state trie ahead of this validator's next self-proposed block, so a stray
+// read-only query would get silently baked into that block's state root --
+// a root no other validator, which never received the query, would ever
+// reproduce. WithStateView runs the same logic against a disposable state
+// copy instead, so the computed values are still returned to the caller but
+// nothing persists past this call.
 func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskParameters, *ModuleError) {
 	if m == nil || m.node == nil {
 		return nil, lending.RiskParameters{}, m.moduleUnavailable()
@@ -48,7 +59,7 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 	}
 	params := m.node.LendingRiskParameters()
 	var market *lending.Market
-	err := m.node.WithState(func(manager *nhbstate.Manager) error {
+	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetMarket(id)
 		if err != nil {
 			return err
@@ -56,16 +67,10 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 		if ok {
 			market = stored
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, params, m.wrapError(err)
-	}
-	if marketNeedsRebuild(market) {
-		if err := m.rebuildCommittedPoolState(id); err != nil {
-			return nil, params, m.wrapError(err)
-		}
-		err = m.node.WithState(func(manager *nhbstate.Manager) error {
+		if marketNeedsRebuild(market) {
+			if err := m.rebuildPoolStateInto(manager, id); err != nil {
+				return err
+			}
 			stored, ok, err := manager.LendingGetMarket(id)
 			if err != nil {
 				return err
@@ -73,14 +78,11 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 			if ok {
 				market = stored
 			}
-			return nil
-		})
-		if err != nil {
-			return nil, params, m.wrapError(err)
 		}
-	}
-	if err := m.reconcileLegacyPoolState(id); err != nil {
-		return nil, lending.RiskParameters{}, m.wrapError(err)
+		return m.reconcileLegacyPoolStateInto(manager, id)
+	})
+	if err != nil {
+		return nil, params, m.wrapError(err)
 	}
 	if market == nil && id == defaultLendingPoolID {
 		market = m.defaultMarket(id)
@@ -94,35 +96,26 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 	}
 	params := m.node.LendingRiskParameters()
 	var markets []*lending.Market
-	err := m.node.WithState(func(manager *nhbstate.Manager) error {
+	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		list, err := manager.LendingListMarkets()
 		if err != nil {
 			return err
 		}
 		markets = list
-		return nil
-	})
-	if err != nil {
-		return nil, params, m.wrapError(err)
-	}
-	if len(markets) == 0 || allMarketsNeedRebuild(markets) {
-		if err := m.rebuildCommittedPoolState(defaultLendingPoolID); err != nil {
-			return nil, params, m.wrapError(err)
-		}
-		err = m.node.WithState(func(manager *nhbstate.Manager) error {
+		if len(markets) == 0 || allMarketsNeedRebuild(markets) {
+			if err := m.rebuildPoolStateInto(manager, defaultLendingPoolID); err != nil {
+				return err
+			}
 			list, err := manager.LendingListMarkets()
 			if err != nil {
 				return err
 			}
 			markets = list
-			return nil
-		})
-		if err != nil {
-			return nil, params, m.wrapError(err)
 		}
-	}
-	if err := m.reconcileLegacyPoolState(defaultLendingPoolID); err != nil {
-		return nil, lending.RiskParameters{}, m.wrapError(err)
+		return m.reconcileLegacyPoolStateInto(manager, defaultLendingPoolID)
+	})
+	if err != nil {
+		return nil, params, m.wrapError(err)
 	}
 	if len(markets) == 0 {
 		markets = []*lending.Market{m.defaultMarket(defaultLendingPoolID)}
@@ -203,7 +196,7 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 		id = defaultLendingPoolID
 	}
 	var account *lending.UserAccount
-	err := m.node.WithState(func(manager *nhbstate.Manager) error {
+	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetUserAccount(id, addr)
 		if err != nil {
 			return err
@@ -217,28 +210,23 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 			return migratedErr
 		}
 		account = migrated
+		if account != nil {
+			return nil
+		}
+		if err := m.rebuildPoolStateInto(manager, id); err != nil {
+			return err
+		}
+		stored, ok, err = manager.LendingGetUserAccount(id, addr)
+		if err != nil {
+			return err
+		}
+		if ok {
+			account = stored
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, m.wrapError(err)
-	}
-	if account == nil {
-		if err := m.rebuildCommittedPoolState(id); err != nil {
-			return nil, m.wrapError(err)
-		}
-		err = m.node.WithState(func(manager *nhbstate.Manager) error {
-			stored, ok, err := manager.LendingGetUserAccount(id, addr)
-			if err != nil {
-				return err
-			}
-			if ok {
-				account = stored
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, m.wrapError(err)
-		}
 	}
 	return account, nil
 }
@@ -268,7 +256,10 @@ func allMarketsNeedRebuild(markets []*lending.Market) bool {
 	return true
 }
 
-func (m *LendingModule) rebuildCommittedPoolState(poolID string) error {
+// rebuildPoolStateInto replays committed lending transactions for poolID and
+// writes the result through manager -- the caller controls whether that
+// manager is backed by live state or a disposable WithStateView copy.
+func (m *LendingModule) rebuildPoolStateInto(manager *nhbstate.Manager, poolID string) error {
 	if m == nil || m.node == nil {
 		return fmt.Errorf("lending module unavailable")
 	}
@@ -283,17 +274,15 @@ func (m *LendingModule) rebuildCommittedPoolState(poolID string) error {
 	if market == nil {
 		return nil
 	}
-	return m.node.WithState(func(manager *nhbstate.Manager) error {
-		if err := manager.LendingPutMarket(id, market); err != nil {
+	if err := manager.LendingPutMarket(id, market); err != nil {
+		return err
+	}
+	for _, user := range users {
+		if err := manager.LendingPutUserAccount(id, user); err != nil {
 			return err
 		}
-		for _, user := range users {
-			if err := manager.LendingPutUserAccount(id, user); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func (m *LendingModule) replayCommittedPoolState(poolID string) (*lending.Market, map[[20]byte]*lending.UserAccount, error) {
@@ -435,7 +424,11 @@ func lendingPoolIDFromTxData(data []byte) (string, error) {
 	return id, nil
 }
 
-func (m *LendingModule) reconcileLegacyPoolState(poolID string) error {
+// reconcileLegacyPoolStateInto mirrors rebuildPoolStateInto: it performs the
+// same legacy-account migration as reconcileLegacyUserAccount, scaled across
+// every account, but writes through the caller-supplied manager instead of
+// opening its own live-state transaction.
+func (m *LendingModule) reconcileLegacyPoolStateInto(manager *nhbstate.Manager, poolID string) error {
 	if m == nil || m.node == nil {
 		return fmt.Errorf("lending module unavailable")
 	}
@@ -443,18 +436,16 @@ func (m *LendingModule) reconcileLegacyPoolState(poolID string) error {
 	if id == "" {
 		id = defaultLendingPoolID
 	}
-	return m.node.WithState(func(manager *nhbstate.Manager) error {
-		accounts, err := manager.AccountList()
-		if err != nil {
+	accounts, err := manager.AccountList()
+	if err != nil {
+		return err
+	}
+	for _, addr := range accounts {
+		if _, err := m.reconcileLegacyUserAccount(manager, id, addr); err != nil {
 			return err
 		}
-		for _, addr := range accounts {
-			if _, err := m.reconcileLegacyUserAccount(manager, id, addr); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func (m *LendingModule) reconcileLegacyUserAccount(manager *nhbstate.Manager, poolID string, addr [20]byte) (*lending.UserAccount, error) {

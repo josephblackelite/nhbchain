@@ -7392,6 +7392,32 @@ func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
 	return fn(manager)
 }
 
+// WithStateView runs fn against a disposable copy of the current state trie.
+// Any writes fn performs land only in that copy and are discarded when it
+// returns -- the live pending state (which feeds the next self-proposed
+// block's root) is never touched. Use this for read-only RPC handlers that
+// need to compute derived/migrated views of state (e.g. lazily replaying
+// legacy records) without risking a state-root fork: a write made through
+// WithState from a query handler becomes part of this validator's next
+// block proposal even though no other validator executed the query, so
+// their independently computed root would diverge from this one's.
+func (n *Node) WithStateView(fn func(*nhbstate.Manager) error) error {
+	if fn == nil {
+		return fmt.Errorf("state callback required")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	view, err := n.state.Copy()
+	if err != nil {
+		return err
+	}
+	manager := nhbstate.NewManager(view.Trie)
+	return fn(manager)
+}
+
 func (n *Node) QueryState(namespace, key string) (*QueryResult, error) {
 	if n == nil {
 		return nil, fmt.Errorf("node unavailable")
