@@ -155,6 +155,27 @@ require_cmd rsync
 require_cmd perl
 require_cmd /usr/local/go/bin/go
 
+# Confirmed by running this exact script on a real t3.micro-class instance
+# (908MB RAM, no swap -- a common free-tier/cheap default): compiling this
+# dependency tree's CGo-free SQLite implementation (modernc.org/libc) got
+# OOM-killed mid-build ("signal: killed"), even though disk space was
+# plentiful. Add a swap file when there's little to no RAM and no existing
+# swap, so the build has somewhere to page out to instead of getting killed
+# -- cheap and safe on the plentiful disk space confirmed available above,
+# and left in place afterward since the running validator benefits from the
+# same headroom.
+if [[ ! -f /swapfile ]] && [[ "$(swapon --show=SIZE --noheadings 2>/dev/null | wc -l)" -eq 0 ]]; then
+  TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+  if [[ -n "${TOTAL_MEM_KB}" ]] && [[ "${TOTAL_MEM_KB}" -lt 4194304 ]]; then
+    echo "[INFO] low memory ($((TOTAL_MEM_KB / 1024))MB) and no swap configured -- adding a 4G swap file"
+    sudo fallocate -l 4G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+  fi
+fi
+
 sudo useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
 sudo mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}/bin"
 sudo chmod 700 "${CONFIG_DIR}"
