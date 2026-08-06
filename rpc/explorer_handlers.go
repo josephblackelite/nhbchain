@@ -75,7 +75,7 @@ func (s *Server) handleGetNetworkStats(w http.ResponseWriter, _ *http.Request, r
 		"activeValidators": len(s.node.GetValidatorSet()),
 		"currentEpoch":     currentEpoch,
 		"currentTime":      time.Now().Unix(),
-		"mempoolSize":      len(s.node.GetMempool()),
+		"mempoolSize":      s.node.MempoolSize(),
 		"tps":              estimateRecentTPS(s.node),
 	})
 }

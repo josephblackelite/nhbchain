@@ -287,6 +287,12 @@ type Server struct {
 	httpServer  *http.Server
 	grpcServer  *grpc.Server
 	posRealtime *FinalityStream
+
+	explorerRealtime *ExplorerStream
+	explorerMu       sync.RWMutex
+	explorerSnapshot *ExplorerSnapshotResult
+	explorerHeight   uint64
+	explorerWindow   int
 }
 
 type proxyPolicy struct {
@@ -562,6 +568,9 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 	srv.swapStable.now = time.Now
 	if node != nil {
 		srv.posRealtime = NewFinalityStream(node)
+		srv.explorerWindow = explorerDefaultRecentBlocks
+		srv.explorerRealtime = NewExplorerStream()
+		srv.startExplorerSnapshotLoop()
 	}
 	return srv, nil
 }
@@ -755,6 +764,7 @@ func (s *Server) Serve(listener net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 	mux.HandleFunc("/ws/pos/finality", s.handlePOSFinalityWS)
+	mux.HandleFunc("/ws/explorer", s.handleExplorerWS)
 
 	grpcServer := grpc.NewServer()
 	if s.posRealtime != nil {
@@ -935,6 +945,12 @@ type RPCResponse struct {
 	Error   *RPCError   `json:"error,omitempty"`
 }
 
+type rpcResultEnvelope struct {
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id"`
+	Result  interface{} `json:"result"`
+}
+
 type rpcResponseRecorder struct {
 	http.ResponseWriter
 	status int
@@ -978,6 +994,11 @@ func writeResult(w http.ResponseWriter, id interface{}, result interface{}) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+func writeResultAllowNil(w http.ResponseWriter, id interface{}, result interface{}) {
+	resp := rpcResultEnvelope{JSONRPC: jsonRPCVersion, ID: id, Result: result}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 func moduleAndMethod(method string) (string, string) {
 	trimmed := strings.TrimSpace(method)
 	if trimmed == "" {
@@ -998,7 +1019,7 @@ func isPublicSwapMethod(method string) bool {
 	switch strings.TrimSpace(method) {
 	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export",
 		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus",
-		"nhb_getSwapQuote", "nhb_checkSwapAllowance":
+		"nhb_getSwapQuote", "nhb_checkSwapAllowance", "nhb_getOraclePrice":
 		return true
 	default:
 		return false
@@ -1186,10 +1207,18 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetLatestBlocks(recorder, r, req)
 	case "nhb_getLatestTransactions":
 		s.handleGetLatestTransactions(recorder, r, req)
+	case "nhb_getTransactionHistory":
+		s.handleGetTransactionHistory(recorder, r, req)
+	case "nhb_getAddressActivity":
+		s.handleGetAddressActivity(recorder, r, req)
 	case "nhb_getTransaction":
 		s.handleGetTransaction(recorder, r, req)
 	case "nhb_getTransactionReceipt":
 		s.handleGetTransactionReceipt(recorder, r, req)
+	case "nhb_searchExplorer":
+		s.handleSearchExplorer(recorder, r, req)
+	case "nhb_getExplorerSnapshot":
+		s.handleGetExplorerSnapshot(recorder, r, req)
 	case "nhb_getEpochSummary":
 		s.handleGetEpochSummary(recorder, r, req)
 	case "nhb_getEpochSnapshot":
@@ -1250,6 +1279,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetValidatorInfo(recorder, r, req)
 	case "nhb_getNetworkStats":
 		s.handleGetNetworkStats(recorder, r, req)
+	case "nhb_getOraclePrice":
+		s.handleGetOraclePrice(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
 	case "fees_getMonthlyStatus":
@@ -1632,7 +1663,7 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, re
 		return
 	}
 	if tx == nil {
-		writeResult(w, req.ID, nil)
+		writeResultAllowNil(w, req.ID, nil)
 		return
 	}
 	result, err := buildTransactionResult(tx, canonicalHash, blockHash, blockNumber)
@@ -1671,7 +1702,7 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 		return
 	}
 	if tx == nil {
-		writeResult(w, req.ID, nil)
+		writeResultAllowNil(w, req.ID, nil)
 		return
 	}
 	receipt, err := s.buildReceiptResult(tx, canonicalHash, blockHash, blockNumber)
@@ -2321,6 +2352,26 @@ func (s *Server) rememberTx(hash string, now time.Time) bool {
 	return true
 }
 
+func (s *Server) forgetTx(hash string) {
+	if s == nil || strings.TrimSpace(hash) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.txSeen, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "0x")))
+}
+
+func (s *Server) transactionStillKnown(hash string) bool {
+	if s == nil || s.node == nil {
+		return false
+	}
+	if s.node.HasPendingTransactionHash(hash) {
+		return true
+	}
+	tx, _, _, _, err := s.findTransaction(hash)
+	return err == nil && tx != nil
+}
+
 func (s *Server) evictExpiredTxLocked(now time.Time) {
 	if len(s.txSeenQueue) == 0 {
 		return
@@ -2710,8 +2761,15 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	}
 	hash := hex.EncodeToString(hashBytes)
 	if !s.rememberTx(hash, now) {
-		writeError(w, http.StatusConflict, req.ID, codeDuplicateTx, "transaction has already been submitted", hash)
-		return
+		if s.transactionStillKnown(hash) {
+			writeResult(w, req.ID, "0x"+hash)
+			return
+		}
+		s.forgetTx(hash)
+		if !s.rememberTx(hash, now) {
+			writeResult(w, req.ID, "0x"+hash)
+			return
+		}
 	}
 
 	if err := s.node.AddTransaction(&tx); err != nil {
@@ -2731,7 +2789,7 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 			return
 		}
 	}
-	writeResult(w, req.ID, "Transaction received by node.")
+	writeResult(w, req.ID, "0x"+hash)
 }
 
 func (s *Server) handleEscrowGetRealm(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

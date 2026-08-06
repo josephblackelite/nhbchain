@@ -970,6 +970,21 @@ func (e *Engine) RecordPrice(base, quote string, rate float64, updated time.Time
 	e.prices[pairKey(base, quote)] = pricePoint{rate: rateUnits, updated: updated}
 }
 
+// CurrentPrice returns the currently cached rate for the requested pair as a
+// float along with the timestamp of the observation.
+func (e *Engine) CurrentPrice(base, quote string) (float64, time.Time, bool) {
+	if e == nil {
+		return 0, time.Time{}, false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	point, ok := e.prices[pairKey(base, quote)]
+	if !ok || point.rate <= 0 {
+		return 0, time.Time{}, false
+	}
+	return fromRateUnits(point.rate), point.updated, true
+}
+
 // LedgerBalance returns a snapshot of the treasury ledger for the asset in scaled units.
 func (e *Engine) LedgerBalance(asset string) (int64, int64, int64, bool) {
 	if e == nil {

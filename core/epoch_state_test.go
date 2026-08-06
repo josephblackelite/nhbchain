@@ -3,6 +3,7 @@ package core
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -38,6 +39,10 @@ func newEpochStateProcessor(t *testing.T) *StateProcessor {
 }
 
 func seedValidator(t *testing.T, sp *StateProcessor, stake int64, engagement uint64) []byte {
+	return seedValidatorWithHeartbeat(t, sp, stake, engagement, 0)
+}
+
+func seedValidatorWithHeartbeat(t *testing.T, sp *StateProcessor, stake int64, engagement uint64, heartbeat uint64) []byte {
 	t.Helper()
 	key, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -45,10 +50,11 @@ func seedValidator(t *testing.T, sp *StateProcessor, stake int64, engagement uin
 	}
 	addr := key.PubKey().Address().Bytes()
 	account := &types.Account{
-		BalanceNHB:      big.NewInt(0),
-		BalanceZNHB:     big.NewInt(0),
-		Stake:           big.NewInt(stake),
-		EngagementScore: engagement,
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(stake),
+		EngagementScore:         engagement,
+		EngagementLastHeartbeat: heartbeat,
 	}
 	if err := sp.setAccount(addr, account); err != nil {
 		t.Fatalf("set account: %v", err)
@@ -59,9 +65,9 @@ func seedValidator(t *testing.T, sp *StateProcessor, stake int64, engagement uin
 func TestEpochSnapshotDeterminism(t *testing.T) {
 	sp := newEpochStateProcessor(t)
 
-	a := seedValidator(t, sp, 2000, 10)
-	b := seedValidator(t, sp, 3000, 5)
-	c := seedValidator(t, sp, 2500, 12)
+	a := seedValidator(t, sp, 20000, 10)
+	b := seedValidator(t, sp, 30000, 5)
+	c := seedValidator(t, sp, 25000, 12)
 
 	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
 		t.Fatalf("process block: %v", err)
@@ -121,8 +127,8 @@ func TestEpochTieBreaks(t *testing.T) {
 		t.Fatalf("set epoch config: %v", err)
 	}
 
-	a := seedValidator(t, sp, 2000, 0)
-	b := seedValidator(t, sp, 2000, 0)
+	a := seedValidator(t, sp, 20000, 0)
+	b := seedValidator(t, sp, 20000, 0)
 
 	if bytesCompare(a, b) > 0 {
 		a, b = b, a
@@ -153,9 +159,10 @@ func TestEpochRotationRespectsMinimumStake(t *testing.T) {
 		t.Fatalf("set config: %v", err)
 	}
 
-	eligible1 := seedValidator(t, sp, 2000, 10)
-	eligible2 := seedValidator(t, sp, 3000, 5)
-	_ = seedValidator(t, sp, 500, 100) // below minimum stake
+	heartbeat := uint64(testEpochTimestamp)
+	eligible1 := seedValidatorWithHeartbeat(t, sp, 20000, 10, heartbeat)
+	eligible2 := seedValidatorWithHeartbeat(t, sp, 30000, 5, heartbeat)
+	_ = seedValidatorWithHeartbeat(t, sp, 5000, 100, heartbeat) // below minimum stake
 
 	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
 		t.Fatalf("process block: %v", err)
@@ -200,9 +207,10 @@ func TestEpochRotationRespectsMinimumStake(t *testing.T) {
 func TestEpochSelectionUpdatesWithGovernedMinimumStake(t *testing.T) {
 	sp := newEpochStateProcessor(t)
 
-	high := seedValidator(t, sp, 5000, 10)
-	mid := seedValidator(t, sp, 2800, 5)
-	low := seedValidator(t, sp, 1500, 7)
+	heartbeat := uint64(testEpochTimestamp)
+	high := seedValidatorWithHeartbeat(t, sp, 50000, 10, heartbeat)
+	mid := seedValidatorWithHeartbeat(t, sp, 28000, 5, heartbeat)
+	low := seedValidatorWithHeartbeat(t, sp, 15000, 7, heartbeat)
 
 	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
 		t.Fatalf("process block: %v", err)
@@ -216,7 +224,7 @@ func TestEpochSelectionUpdatesWithGovernedMinimumStake(t *testing.T) {
 	}
 
 	manager := nhbstate.NewManager(sp.Trie)
-	if err := manager.SetMinimumValidatorStake(big.NewInt(3500)); err != nil {
+	if err := manager.SetMinimumValidatorStake(big.NewInt(35000)); err != nil {
 		t.Fatalf("set minimum stake: %v", err)
 	}
 
@@ -241,6 +249,93 @@ func TestEpochSelectionUpdatesWithGovernedMinimumStake(t *testing.T) {
 	}
 	if len(sp.ValidatorSet) != 1 {
 		t.Fatalf("expected validator set to contain only the qualifying validator")
+	}
+}
+
+func TestEpochActivationRequiresRecentHeartbeat(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+	cfg := sp.EpochConfig()
+	cfg.RotationEnabled = true
+	cfg.MaxValidators = 10
+	if err := sp.SetEpochConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	ready := seedValidatorWithHeartbeat(t, sp, 40000, 10, uint64(testEpochTimestamp))
+	_ = seedValidatorWithHeartbeat(t, sp, 45000, 20, 0)
+	_ = seedValidatorWithHeartbeat(t, sp, 50000, 30, uint64(testEpochTimestamp-int64((20*time.Minute).Seconds())))
+
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
+		t.Fatalf("process block: %v", err)
+	}
+
+	snapshot, ok := sp.LatestEpochSnapshot()
+	if !ok {
+		t.Fatalf("expected snapshot")
+	}
+	if len(snapshot.Selected) != 1 {
+		t.Fatalf("expected exactly one heartbeat-ready validator, got %d", len(snapshot.Selected))
+	}
+	if !bytesEqual(snapshot.Selected[0], ready) {
+		t.Fatalf("unexpected selected validator")
+	}
+}
+
+func TestNonRotatingActivationWaitsUntilNextEpoch(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+	addr := seedValidatorWithHeartbeat(t, sp, 40000, 10, uint64(testEpochTimestamp))
+	if _, ok := sp.ValidatorSet[string(addr)]; ok {
+		t.Fatalf("candidate should not enter active validator set before epoch finalization")
+	}
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
+		t.Fatalf("process block: %v", err)
+	}
+	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
+		t.Fatalf("candidate should enter active validator set at epoch boundary")
+	}
+}
+
+func TestEpochRotationRetainsPreviousValidatorsWhenHeartbeatSelectionIsEmpty(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+	cfg := sp.EpochConfig()
+	cfg.RotationEnabled = true
+	cfg.MaxValidators = 10
+	if err := sp.SetEpochConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	addr := seedValidatorWithHeartbeat(t, sp, 40000, 10, uint64(testEpochTimestamp))
+	sp.ValidatorSet[string(addr)] = big.NewInt(40000)
+
+	// Clear the heartbeat so the next epoch selection would otherwise be empty.
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	account.EngagementLastHeartbeat = 0
+	if err := sp.setAccount(addr, account); err != nil {
+		t.Fatalf("update account: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(1, testEpochTimestamp); err != nil {
+		t.Fatalf("process block: %v", err)
+	}
+	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
+		t.Fatalf("expected existing validator to remain active when epoch selection is empty")
+	}
+}
+
+func TestEnsureValidatorSetLivenessRecoversFromEligibleValidators(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+	addr := seedValidator(t, sp, 40000, 10)
+	sp.ValidatorSet = map[string]*big.Int{}
+	sp.EligibleValidators[string(addr)] = big.NewInt(40000)
+
+	if err := sp.ensureValidatorSetLiveness(time.Unix(testEpochTimestamp, 0).UTC()); err != nil {
+		t.Fatalf("ensure validator set liveness: %v", err)
+	}
+	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
+		t.Fatalf("expected eligible validator to repopulate empty active set")
 	}
 }
 

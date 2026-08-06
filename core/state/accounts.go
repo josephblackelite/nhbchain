@@ -18,6 +18,7 @@ import (
 
 var (
 	accountMetadataPrefix = []byte("account-meta:")
+	accountIndexKey       = ethcrypto.Keccak256([]byte("account-index"))
 	usernameIndexKey      = ethcrypto.Keccak256([]byte("username-index"))
 	validatorSetKey       = ethcrypto.Keccak256([]byte("validator-set"))
 )
@@ -407,7 +408,47 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 	if err := m.writeAccountMetadata(addr, meta); err != nil {
 		return err
 	}
-	return nil
+	return m.ensureAccountIndexed(addr)
+}
+
+func (m *Manager) ensureAccountIndexed(addr []byte) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	return m.KVAppend(accountIndexKey, append([]byte(nil), addr...))
+}
+
+// AccountList returns the set of known account addresses that have been
+// persisted through PutAccount.
+func (m *Manager) AccountList() ([][20]byte, error) {
+	if m == nil {
+		return nil, fmt.Errorf("state manager unavailable")
+	}
+	var raw [][]byte
+	if err := m.KVGetList(accountIndexKey, &raw); err != nil {
+		return nil, err
+	}
+	seen := make(map[[20]byte]struct{}, len(raw))
+	accounts := make([][20]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) == 0 {
+			continue
+		}
+		var addr [20]byte
+		copy(addr[:], entry)
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		accounts = append(accounts, addr)
+	}
+	sort.Slice(accounts, func(i, j int) bool {
+		return bytes.Compare(accounts[i][:], accounts[j][:]) < 0
+	})
+	return accounts, nil
 }
 
 // PutAccountMetadata persists only the account metadata (non-EVM balances,

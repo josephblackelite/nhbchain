@@ -168,15 +168,16 @@ type Server struct {
 
 	logger *slog.Logger
 
-	mu               sync.RWMutex
-	peers            map[string]*Peer
-	inboundCount     int
-	outboundCount    int
-	metrics          map[string]*peerMetrics
-	byAddr           map[string]string
-	persistentIDs    map[string]struct{}
-	records          map[string]*PeerRecord
-	metricsCollector *networkMetrics
+	mu                sync.RWMutex
+	peers             map[string]*Peer
+	inboundCount      int
+	outboundCount     int
+	metrics           map[string]*peerMetrics
+	byAddr            map[string]string
+	persistentIDs     map[string]struct{}
+	persistentNodeIDs map[string]struct{}
+	records           map[string]*PeerRecord
+	metricsCollector  *networkMetrics
 
 	listenMu    sync.RWMutex
 	listenAddrs []string
@@ -545,34 +546,35 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	baseLogger := slog.Default().With(slog.String("component", "p2p_server"))
 
 	server := &Server{
-		cfg:              cfg,
-		handler:          handler,
-		privKey:          privKey,
-		nodeID:           nodeID,
-		genesis:          cloneBytes(cfg.GenesisHash),
-		logger:           baseLogger,
-		peers:            make(map[string]*Peer),
-		metrics:          make(map[string]*peerMetrics),
-		byAddr:           make(map[string]string),
-		persistentIDs:    make(map[string]struct{}),
-		records:          make(map[string]*PeerRecord),
-		metricsCollector: newNetworkMetrics(),
-		dialFn:           defaultDialer,
-		now:              time.Now,
-		backoff:          make(map[string]time.Duration),
-		pendingDial:      make(map[string]struct{}),
-		persistent:       make(map[string]struct{}),
-		reputation:       rep,
-		ratePerPeer:      cfg.RateMsgsPerSec,
-		rateBurst:        cfg.RateBurst,
-		handshakeTimeout: cfg.HandshakeTimeout,
-		pingTimeout:      cfg.PingTimeout,
-		nonceGuard:       newNonceGuard(handshakeReplayWindow),
-		listenAddrs:      []string{},
-		seedResolver:     cfg.SeedResolver,
-		seedRegistry:     cfg.SeedRegistry,
-		seedRefresh:      cfg.SeedRefresh,
-		seedQuit:         make(chan struct{}),
+		cfg:               cfg,
+		handler:           handler,
+		privKey:           privKey,
+		nodeID:            nodeID,
+		genesis:           cloneBytes(cfg.GenesisHash),
+		logger:            baseLogger,
+		peers:             make(map[string]*Peer),
+		metrics:           make(map[string]*peerMetrics),
+		byAddr:            make(map[string]string),
+		persistentIDs:     make(map[string]struct{}),
+		persistentNodeIDs: make(map[string]struct{}),
+		records:           make(map[string]*PeerRecord),
+		metricsCollector:  newNetworkMetrics(),
+		dialFn:            defaultDialer,
+		now:               time.Now,
+		backoff:           make(map[string]time.Duration),
+		pendingDial:       make(map[string]struct{}),
+		persistent:        make(map[string]struct{}),
+		reputation:        rep,
+		ratePerPeer:       cfg.RateMsgsPerSec,
+		rateBurst:         cfg.RateBurst,
+		handshakeTimeout:  cfg.HandshakeTimeout,
+		pingTimeout:       cfg.PingTimeout,
+		nonceGuard:        newNonceGuard(handshakeReplayWindow),
+		listenAddrs:       []string{},
+		seedResolver:      cfg.SeedResolver,
+		seedRegistry:      cfg.SeedRegistry,
+		seedRefresh:       cfg.SeedRefresh,
+		seedQuit:          make(chan struct{}),
 	}
 
 	if server.seedResolver == nil {
@@ -800,10 +802,14 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if trimmedDial == "" {
 		trimmedDial = primaryAddr
 	}
+	persistent = persistent || s.isPersistentRemote(remote.nodeID, addresses, trimmedDial)
 
 	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, trimmedDial)
 	if err := s.registerPeer(peer); err != nil {
 		return err
+	}
+	if peer.persistent {
+		s.rememberPersistentPeerID(peer.id)
 	}
 	s.log().Info("Peer connected",
 		logging.MaskField("peer_id", peer.id),
@@ -893,7 +899,7 @@ func (s *Server) registerPeer(peer *Peer) error {
 	defer s.mu.Unlock()
 
 	if _, exists := s.peers[peer.id]; exists {
-		return fmt.Errorf("peer %s already connected", peer.id)
+		return fmt.Errorf("%w: %s", ErrPeerAlreadyConnected, peer.id)
 	}
 	if banned, until := s.reputation.BanInfo(peer.id, s.now()); banned {
 		return fmt.Errorf("peer %s banned until %s", peer.id, until.Format(time.RFC3339))
@@ -918,6 +924,7 @@ func (s *Server) registerPeer(peer *Peer) error {
 	}
 	if peer.persistent {
 		s.persistentIDs[peer.id] = struct{}{}
+		s.persistentNodeIDs[peer.id] = struct{}{}
 	}
 	return nil
 }
@@ -1002,6 +1009,9 @@ func (s *Server) Connect(addr string) error {
 	persistent := s.isPersistent(addr)
 	if err := s.initPeer(conn, false, persistent, addr); err != nil {
 		conn.Close()
+		if errors.Is(err, ErrPeerAlreadyConnected) {
+			return nil
+		}
 		s.markDialFailure(addr)
 		return fmt.Errorf("handshake with %s failed: %w", addr, err)
 	}
@@ -1545,6 +1555,12 @@ func looksLikeNodeID(value string) bool {
 }
 
 func (s *Server) handleRateLimit(peer *Peer, global bool) {
+	if s.isConfiguredPersistentPeer(peer.id) {
+		s.log().Warn("Ignoring generic rate-limit disconnect for configured persistent peer",
+			logging.MaskField("peer_id", peer.id),
+			slog.Bool("global", global))
+		return
+	}
 	if global {
 		s.log().Warn("Global rate cap exceeded",
 			logging.MaskField("peer_id", peer.id))
@@ -1627,7 +1643,7 @@ func (s *Server) adjustScore(id string, delta int) ReputationStatus {
 	if s.reputation == nil {
 		return ReputationStatus{}
 	}
-	persistent := s.isPersistentPeer(id)
+	persistent := s.isConfiguredPersistentPeer(id)
 	status := s.reputation.Adjust(id, delta, s.now(), persistent)
 	s.updatePeerGreylist(id, status.Greylisted)
 	s.updatePeerRecordScore(id, status.Score)
@@ -1711,6 +1727,60 @@ func (s *Server) isPersistentPeer(id string) bool {
 	defer s.mu.RUnlock()
 	_, ok := s.persistentIDs[id]
 	return ok
+}
+
+func (s *Server) rememberPersistentPeerID(id string) {
+	if s == nil {
+		return
+	}
+	normalized := normalizeHex(id)
+	if normalized == "" {
+		return
+	}
+	s.mu.Lock()
+	s.persistentNodeIDs[normalized] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *Server) isConfiguredPersistentPeer(id string) bool {
+	if s == nil {
+		return false
+	}
+	normalized := normalizeHex(id)
+	if normalized == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.persistentIDs[normalized]; ok {
+		return true
+	}
+	_, ok := s.persistentNodeIDs[normalized]
+	return ok
+}
+
+func (s *Server) isPersistentRemote(nodeID string, addrs []string, dialAddr string) bool {
+	if s == nil {
+		return false
+	}
+	if normalized := normalizeHex(nodeID); normalized != "" && s.isConfiguredPersistentPeer(normalized) {
+		return true
+	}
+	candidates := make([]string, 0, len(addrs)+1)
+	if trimmed := strings.TrimSpace(dialAddr); trimmed != "" {
+		candidates = append(candidates, trimmed)
+	}
+	for _, addr := range addrs {
+		if trimmed := strings.TrimSpace(addr); trimmed != "" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	for _, addr := range candidates {
+		if s.isPersistent(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func directionForPeer(peer *Peer) string {

@@ -92,12 +92,21 @@ func identityRecordToResult(record *identity.AliasRecord) identityResolveResult 
 	aliasID := record.AliasID()
 	addresses := make([]string, 0, len(record.Addresses))
 	for _, addr := range record.Addresses {
+		if addr == ([20]byte{}) {
+			continue
+		}
 		addresses = append(addresses, crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String())
+	}
+	primary := ""
+	if record.Primary != ([20]byte{}) {
+		primary = crypto.MustNewAddress(crypto.NHBPrefix, record.Primary[:]).String()
+	} else if len(addresses) > 0 {
+		primary = addresses[0]
 	}
 	result := identityResolveResult{
 		Alias:     record.Alias,
 		AliasID:   "0x" + hex.EncodeToString(aliasID[:]),
-		Primary:   crypto.MustNewAddress(crypto.NHBPrefix, record.Primary[:]).String(),
+		Primary:   primary,
 		Addresses: addresses,
 		CreatedAt: record.CreatedAt,
 		UpdatedAt: record.UpdatedAt,

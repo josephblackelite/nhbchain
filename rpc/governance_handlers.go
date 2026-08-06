@@ -12,6 +12,12 @@ import (
 	"nhbchain/native/governance"
 )
 
+var governanceLegacyPayloadWrappers = map[string]struct{}{
+	"update":    {},
+	"parameter": {},
+	"params":    {},
+}
+
 type govProposeParams struct {
 	Kind    string `json:"kind"`
 	Payload string `json:"payload"`
@@ -72,6 +78,43 @@ func parseNonNegativeAmount(value string) (*big.Int, error) {
 	return amount, nil
 }
 
+func normalizeGovernancePayload(kind, payload string) (string, error) {
+	normalizedKind := strings.TrimSpace(strings.ToLower(kind))
+	if normalizedKind != "param.update" && normalizedKind != "param.emergency_override" {
+		return payload, nil
+	}
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+		return payload, nil
+	}
+
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return payload, nil
+	}
+	if len(parsed) != 1 {
+		return payload, nil
+	}
+	for key, value := range parsed {
+		if _, ok := governanceLegacyPayloadWrappers[strings.ToLower(strings.TrimSpace(key))]; !ok {
+			return payload, nil
+		}
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(value, &nested); err != nil {
+			return payload, nil
+		}
+		if len(nested) == 0 {
+			return "", fmt.Errorf("governance payload must include at least one parameter")
+		}
+		normalized, err := json.Marshal(nested)
+		if err != nil {
+			return "", err
+		}
+		return string(normalized), nil
+	}
+	return payload, nil
+}
+
 func (s *Server) handleGovernancePropose(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
@@ -94,6 +137,12 @@ func (s *Server) handleGovernancePropose(w http.ResponseWriter, r *http.Request,
 	payload := strings.TrimSpace(params.Payload)
 	if payload == "" {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "payload is required", nil)
+		return
+	}
+	var err error
+	payload, err = normalizeGovernancePayload(kind, payload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
 		return
 	}
 	if strings.TrimSpace(params.From) == "" {

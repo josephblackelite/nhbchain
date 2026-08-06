@@ -6,8 +6,14 @@ import (
 
 	"nhbchain/core/epoch"
 	"nhbchain/core/events"
+	"nhbchain/core/types"
 
 	"github.com/ethereum/go-ethereum/rlp"
+)
+
+const (
+	validatorReadinessMinGrace          = 15 * time.Minute
+	validatorReadinessHeartbeatMultiple = 5
 )
 
 type epochWeightRecord struct {
@@ -143,7 +149,8 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 }
 
 func (sp *StateProcessor) finalizeEpoch(height uint64, timestamp int64) error {
-	weights, totalWeight, err := sp.computeEpochWeights()
+	now := time.Unix(timestamp, 0).UTC()
+	weights, totalWeight, err := sp.computeEpochWeights(now)
 	if err != nil {
 		return err
 	}
@@ -169,10 +176,10 @@ func (sp *StateProcessor) finalizeEpoch(height uint64, timestamp int64) error {
 		return err
 	}
 	sp.emitEpochEvents(snapshot)
-	return sp.applyValidatorSelection(snapshot)
+	return sp.applyValidatorSelection(snapshot, now)
 }
 
-func (sp *StateProcessor) computeEpochWeights() ([]epoch.Weight, *big.Int, error) {
+func (sp *StateProcessor) computeEpochWeights(now time.Time) ([]epoch.Weight, *big.Int, error) {
 	if sp.EligibleValidators == nil {
 		return []epoch.Weight{}, big.NewInt(0), nil
 	}
@@ -189,6 +196,9 @@ func (sp *StateProcessor) computeEpochWeights() ([]epoch.Weight, *big.Int, error
 			return nil, nil, err
 		}
 		if account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
+			continue
+		}
+		if !sp.validatorReadyForActivation(account, now) {
 			continue
 		}
 		composite := epoch.ComputeCompositeWeight(sp.epochConfig, account.Stake, account.EngagementScore)
@@ -234,7 +244,7 @@ func (sp *StateProcessor) selectValidators(weights []epoch.Weight) ([][]byte, er
 	return selected, nil
 }
 
-func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot) error {
+func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now time.Time) error {
 	minStake, err := sp.minimumValidatorStake()
 	if err != nil {
 		return err
@@ -250,6 +260,15 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot) error
 				continue
 			}
 			newSet[string(addr)] = copyBigInt(account.Stake)
+		}
+		if len(newSet) == 0 {
+			fallback, err := sp.fallbackValidatorSet(minStake)
+			if err != nil {
+				return err
+			}
+			if len(fallback) > 0 {
+				newSet = fallback
+			}
 		}
 		sp.ValidatorSet = newSet
 		if err := sp.persistValidatorSet(); err != nil {
@@ -267,7 +286,23 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot) error
 		if v == nil || v.Cmp(minStake) < 0 {
 			continue
 		}
+		account, err := sp.getAccount([]byte(k))
+		if err != nil {
+			return err
+		}
+		if !sp.validatorReadyForActivation(account, now) {
+			continue
+		}
 		desired[k] = copyBigInt(v)
+	}
+	if len(desired) == 0 {
+		fallback, err := sp.fallbackValidatorSet(minStake)
+		if err != nil {
+			return err
+		}
+		if len(fallback) > 0 {
+			desired = fallback
+		}
 	}
 	if !validatorMapsEqual(sp.ValidatorSet, desired) {
 		sp.ValidatorSet = desired
@@ -276,6 +311,88 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot) error
 		}
 	}
 	return nil
+}
+
+func (sp *StateProcessor) ensureValidatorSetLiveness(now time.Time) error {
+	if sp == nil || len(sp.ValidatorSet) > 0 {
+		return nil
+	}
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return err
+	}
+	fallback, err := sp.fallbackValidatorSet(minStake)
+	if err != nil {
+		return err
+	}
+	if len(fallback) == 0 {
+		return nil
+	}
+	sp.ValidatorSet = fallback
+	return sp.persistValidatorSet()
+}
+
+func (sp *StateProcessor) fallbackValidatorSet(minStake *big.Int) (map[string]*big.Int, error) {
+	fallback := make(map[string]*big.Int)
+	addrs := make([][]byte, 0, len(sp.ValidatorSet)+len(sp.EligibleValidators))
+	seen := make(map[string]struct{})
+	appendAddr := func(addr []byte) {
+		key := string(addr)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		addrs = append(addrs, append([]byte(nil), addr...))
+	}
+
+	for addrKey := range sp.ValidatorSet {
+		appendAddr([]byte(addrKey))
+	}
+	for addrKey := range sp.EligibleValidators {
+		appendAddr([]byte(addrKey))
+	}
+	for i := len(sp.epochHistory) - 1; i >= 0; i-- {
+		for _, addr := range sp.epochHistory[i].Selected {
+			appendAddr(addr)
+		}
+	}
+
+	for _, addr := range addrs {
+		account, err := sp.getAccount(addr)
+		if err != nil {
+			return nil, err
+		}
+		if account == nil || account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
+			continue
+		}
+		fallback[string(addr)] = copyBigInt(account.Stake)
+	}
+	return fallback, nil
+}
+
+func (sp *StateProcessor) validatorReadyForActivation(account *types.Account, now time.Time) bool {
+	if sp == nil || account == nil {
+		return false
+	}
+	if account.EngagementLastHeartbeat == 0 {
+		return false
+	}
+	last := time.Unix(int64(account.EngagementLastHeartbeat), 0).UTC()
+	if last.After(now.Add(2 * time.Minute)) {
+		return false
+	}
+	return now.Sub(last) <= sp.validatorReadinessGracePeriod()
+}
+
+func (sp *StateProcessor) validatorReadinessGracePeriod() time.Duration {
+	if sp == nil {
+		return validatorReadinessMinGrace
+	}
+	grace := time.Duration(validatorReadinessHeartbeatMultiple) * sp.engagementConfig.HeartbeatInterval
+	if grace < validatorReadinessMinGrace {
+		grace = validatorReadinessMinGrace
+	}
+	return grace
 }
 
 func (sp *StateProcessor) emitEpochEvents(snapshot epoch.Snapshot) {

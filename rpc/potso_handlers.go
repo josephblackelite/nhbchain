@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-
 	"nhbchain/crypto"
 	"nhbchain/native/potso"
 )
@@ -61,56 +59,18 @@ func decodeHexBytes(value string) ([]byte, error) {
 }
 
 func (s *Server) handlePotsoHeartbeat(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "heartbeat requires parameter object", nil)
-		return
-	}
-	var params potsoHeartbeatParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid request parameters", err.Error())
-		return
-	}
-	if params.User == "" || params.Signature == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "user and signature are required", nil)
-		return
-	}
-	addr, err := decodeBech32(params.User)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid user", err.Error())
-		return
-	}
-	blockHash, err := decodeHexBytes(params.LastBlockHash)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid block hash", err.Error())
-		return
-	}
-	sig, err := decodeHexBytes(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid signature", err.Error())
-		return
-	}
-	if len(sig) != 65 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "signature must be 65 bytes", nil)
-		return
-	}
-	digest := heartbeatDigest(params.User, params.LastBlock, blockHash, params.Timestamp)
-	pubKey, err := ethcrypto.SigToPub(digest, sig)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid signature", err.Error())
-		return
-	}
-	recovered := ethcrypto.PubkeyToAddress(*pubKey)
-	if !strings.EqualFold(recovered.Hex()[2:], hex.EncodeToString(addr[:])) {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "signature does not match user", nil)
-		return
-	}
-	meter, delta, err := s.node.PotsoHeartbeat(addr, params.LastBlock, blockHash, params.Timestamp)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	result := potsoHeartbeatResult{Accepted: delta > 0, UptimeDelta: delta, Meter: meter}
-	writeResult(w, req.ID, result)
+	// Heartbeats used to mutate consensus state directly over JSON-RPC, which
+	// let wallet background polling diverge validator trie roots outside the
+	// canonical block path. Until heartbeats are mediated through committed
+	// transactions / epoch processing, keep this endpoint read-only-disabled.
+	writeError(
+		w,
+		http.StatusServiceUnavailable,
+		req.ID,
+		codeServerError,
+		"potso heartbeat rpc is temporarily disabled; submit engagement through the canonical transaction pipeline",
+		nil,
+	)
 }
 
 func (s *Server) handlePotsoUserMeters(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

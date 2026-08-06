@@ -901,8 +901,13 @@ func TestHandleSendTransactionAcceptsZNHBTransfer(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected string result, got %T", resp.Result)
 	}
-	if msg != "Transaction received by node." {
-		t.Fatalf("unexpected result message: %s", msg)
+	hash, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash transaction: %v", err)
+	}
+	expected := "0x" + hex.EncodeToString(hash)
+	if msg != expected {
+		t.Fatalf("unexpected result message: got %s want %s", msg, expected)
 	}
 }
 
@@ -959,6 +964,106 @@ func TestHandleSendTransactionInvalidTransactionError(t *testing.T) {
 	}
 	if resp.Error.Code != codeInvalidParams {
 		t.Fatalf("expected invalid params error code, got %d", resp.Error.Code)
+	}
+}
+
+func TestHandleGetTransactionReceiptMissingReturnsExplicitNullResult(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	server := newTestServer(t, node, nil, ServerConfig{})
+	recorder := httptest.NewRecorder()
+	req := &RPCRequest{ID: 11}
+	req.Params = []json.RawMessage{json.RawMessage(`"0xdeadbeef"`)}
+
+	server.handleGetTransactionReceipt(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"result":null`) {
+		t.Fatalf("expected explicit null result, got %s", body)
+	}
+}
+
+func TestHandleSendTransactionForgetsStaleDuplicateHash(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	node.SetTransactionSimulationEnabled(false)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		if err := m.PutAccount(senderAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0), Nonce: 0}); err != nil {
+			return err
+		}
+		return m.PutAccount(recipientAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0), Nonce: 0})
+	}); err != nil {
+		t.Fatalf("seed accounts: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(123),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash transaction: %v", err)
+	}
+
+	server := newTestServer(t, node, nil, ServerConfig{})
+	if !server.rememberTx(hex.EncodeToString(hashBytes), time.Now()) {
+		t.Fatalf("expected initial rememberTx to succeed")
+	}
+
+	param, err := json.Marshal(tx)
+	if err != nil {
+		t.Fatalf("marshal transaction: %v", err)
+	}
+	req := &RPCRequest{ID: 19, Params: []json.RawMessage{param}}
+	recorder := httptest.NewRecorder()
+
+	server.handleSendTransaction(recorder, httptest.NewRequest(http.MethodPost, "/", nil), req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := node.MempoolSize(); got != 1 {
+		t.Fatalf("expected transaction to be re-admitted after stale duplicate hash, got mempool size %d", got)
 	}
 }
 

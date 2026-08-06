@@ -70,6 +70,42 @@ func NewBlockMessage(b *types.Block) (*Message, error) {
 	return &Message{Type: MsgTypeBlock, Payload: payload}, nil
 }
 
+// NewGetStatusMessage requests the latest observed chain height from peers.
+func NewGetStatusMessage() (*Message, error) {
+	payload, err := json.Marshal(struct{}{})
+	if err != nil {
+		return nil, err
+	}
+	return &Message{Type: MsgTypeGetStatus, Payload: payload}, nil
+}
+
+// NewStatusMessage advertises the latest committed chain height.
+func NewStatusMessage(height uint64) (*Message, error) {
+	payload, err := json.Marshal(StatusPayload{Height: height})
+	if err != nil {
+		return nil, err
+	}
+	return &Message{Type: MsgTypeStatus, Payload: payload}, nil
+}
+
+// NewGetBlocksMessage requests blocks starting at the provided height.
+func NewGetBlocksMessage(from uint64) (*Message, error) {
+	payload, err := json.Marshal(GetBlocksPayload{From: from})
+	if err != nil {
+		return nil, err
+	}
+	return &Message{Type: MsgTypeGetBlocks, Payload: payload}, nil
+}
+
+// NewBlocksMessage advertises a batch of canonical blocks.
+func NewBlocksMessage(blocks []*types.Block) (*Message, error) {
+	payload, err := json.Marshal(BlocksPayload{Blocks: blocks})
+	if err != nil {
+		return nil, err
+	}
+	return &Message{Type: MsgTypeBlocks, Payload: payload}, nil
+}
+
 // NewPingMessage builds a ping keepalive message using the provided nonce and timestamp.
 func NewPingMessage(nonce uint64, ts time.Time) (*Message, error) {
 	payload, err := json.Marshal(PingPayload{Nonce: nonce, Timestamp: ts.UnixNano()})

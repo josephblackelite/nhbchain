@@ -91,7 +91,7 @@ The L1 is organized into modular layers that together deliver the payment networ
 - **ZapNHB (ZNHB)** — The fixed-cap governance and utility asset. It secures the network, powers protocol and merchant loyalty rewards, and governs validator elections.
 - **Dual-Purpose Staking** — Staking ZNHB serves two simultaneous functions:
   1. **Governance:** Every 1 ZNHB staked equals 1 governing vote for network parameters and protocol upgrades.
-  2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator is authorized as a Network Validator. They earn POTSO block rewards by maintaining server uptime and submitting heartbeat transactions. You do **not** need a separate stake for governance.
+  2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator becomes a **validator candidate**. The node joins the active validator set at the next epoch only after it is online, synced, and submitting validator heartbeats. You do **not** need a separate stake for governance.
 
 ## 🚀 Quick Start for Node Operators (Step-by-Step)
 
@@ -145,14 +145,22 @@ bash scripts/run_nhbcoin_node.sh --reset-state
 **That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
 ### Step 6: Delegate your 10,000 ZNHB (Stake)
-NHBCoin uses a highly secure "Cold Wallet / Hot Server" architecture. Your server is running, but it has no voting power yet. 
-To protect your funds, do **not** send your 10,000 ZNHB to your internet-connected server. Instead:
+The validator bootstrap now uses the private key from your NHBCoin wallet
+directly, so the server and the validator wallet address are the same account.
 
-1. When you ran Step 5, the script printed a line like this: `[SUCCESS] Generated Hot Validator: nhb1...`. Copy that `nhb1...` address.
-2. Log into your secure web wallet on `nhbcoin.com` (where your 10,000 ZNHB lives).
-3. Go to the **Validator** section. Paste your server's `nhb1...` address into the Node Input and Authorize.
+1. Create or log into your wallet at `nhbcoin.com`.
+2. Make sure that wallet has at least `10,000 ZNHB` staked or ready to stake.
+3. In the wallet app, go to **Settings** and reveal your private key.
+4. On your Ubuntu validator server, run:
 
-Your 10,000 ZNHB remains securely locked inside your encrypted web wallet, but the blockchain grants the block-producing (voting) power to your unhackable Linux server. All ZNHB rewards earned by the server are automatically deposited back into your secure web wallet!
+```bash
+chmod +x scripts/validator-only-bootstrap.sh
+bash scripts/validator-only-bootstrap.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+```
+
+Once the server is online, synced, and emitting validator heartbeats, the
+staked wallet becomes a validator candidate and then joins the active set at
+the next epoch boundary.
 
 ---
 
@@ -170,11 +178,42 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 If you are setting up a frontend application, a Web3 wallet (like MetaMask), or configuring your Node manually, here are the official Mainnet parameters:
 
 - **Network Name:** NHBCoin Mainnet
-- **Chain ID:** `5756470643927894962` *(Note: This dynamic ID is mathematically enforced by the genesis state to prevent cross-chain replay attacks)*
+- **Network ID:** `14699254016670310680` *(This dynamic network identifier is mathematically enforced by the genesis state to prevent cross-network replay and handshake confusion.)*
+- **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
 - **Mainnet P2P Bootnode (enode):** 
-  `"enode://6d9d6fbb218fee20934aea43651cdd71cf181bdaad15e7bf7cb26367639f7437@52.1.96.250:6001"`
+  `"enode://9606e2dd587cef5c8c46c6d41d03faf365edcb2f394921099e2b812261010841@52.1.96.250:6001"`
+
+### Join As A Validator In One Command
+
+On a fresh Ubuntu server, clone the repo and run:
+
+```bash
+chmod +x scripts/validator-only-bootstrap.sh
+bash scripts/validator-only-bootstrap.sh --validator-key YOUR_WALLET_PRIVATE_KEY_HEX --reset-state
+```
+
+What this does:
+
+- writes `/etc/nhbchain/node.env` with your validator key
+- installs `nhb.service`
+- builds the validator binaries
+- points the node at the NHBCoin mainnet bootnode
+- syncs block history from the network until it reaches the current head
+- starts the validator and keeps validator heartbeats flowing automatically
+
+Operational model:
+
+- staking `>= 10,000 ZNHB` makes the wallet a **validator candidate**
+- the server becomes **active next epoch**, not instantly
+- readiness requires the node to be online, synced, and heartbeat-ready
+- offline validators are removed from quorum automatically at epoch rollover instead of freezing the network
+
+Compatibility note:
+
+- `scripts/deployvalidator.sh` remains available as a backwards-compatible alias
+  to the same validator-only bootstrap flow.
 
 ---
 
