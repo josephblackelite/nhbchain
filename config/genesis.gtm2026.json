@@ -1,0 +1,68 @@
+{
+  "genesisTime": "2026-08-04T17:20:39Z",
+  "adminWallet": "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h",
+  "loyaltyGlobal": {
+    "active": true,
+    "treasury": "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak",
+    "baseBps": 50,
+    "minSpend": "1000000000000000000",
+    "capPerTx": "50000000000000000000",
+    "dailyCapUser": "200000000000000000000",
+    "seedZNHB": "0",
+    "dynamic": {
+      "targetBps": 50,
+      "minBps": 25,
+      "maxBps": 100,
+      "smoothingStepBps": 5,
+      "coverageMax": 0.5,
+      "coverageLookbackDays": 7,
+      "dailyCapPctOf7dFees": 0.6,
+      "dailyCapUsd": 5000,
+      "yearlyCapPctOfInitialSupply": 10,
+      "priceGuard": {
+        "enabled": true,
+        "pricePair": "ZNHB/USD",
+        "twapWindowSeconds": 7200,
+        "maxDeviationBps": 300,
+        "priceMaxAgeSeconds": 600,
+        "fallbackMinEmissionZNHBWei": "0",
+        "useLastGoodPriceFallback": true
+      }
+    }
+  },
+  "nativeTokens": [
+    {
+      "symbol": "NHB",
+      "name": "NHBCoin",
+      "decimals": 18,
+      "mintAuthority": "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+    },
+    {
+      "symbol": "ZNHB",
+      "name": "ZapNHB",
+      "decimals": 18,
+      "initialMintPaused": true,
+      "mintAuthority": "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+    }
+  ],
+  "validators": [
+    {
+      "power": 10,
+      "moniker": "nhbcoin-genesis-2026",
+      "address": "nhb1pku3zrdqmyk2vmazu5ny3msw5xjtyhz3s06zx4"
+    }
+  ],
+  "alloc": {
+    "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h": {
+      "NHB": "10000000000000000000000"
+    },
+    "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak": {
+      "ZNHB": "1000000000000000000000000000"
+    }
+  },
+  "roles": {
+    "MINTER_NHB": [
+      "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+    ]
+  }
+}
