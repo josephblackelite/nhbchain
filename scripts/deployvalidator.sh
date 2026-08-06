@@ -11,7 +11,14 @@ SERVICE_USER=nhb
 VALIDATOR_KEY_FILE="${CONFIG_DIR}/validator.key"
 ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://api.nhbcoin.com/v1/validators/onboarding-email'
 
-BOOTNODE_DEFAULT='enode://bc1717ec2932efac3b37b9891f20f55cff491d48b790346ac02977cd646d4454@52.1.96.250:6001'
+# p2p.Server.Connect dials this string directly via net.Dial("tcp", addr)
+# -- it never parses an "enode://nodeid@host:port" URI scheme (confirmed
+# by grepping the whole repo: nothing handles that scheme anywhere), so
+# this MUST be plain host:port, not an enode URI. An earlier version of
+# this script and the README used the enode:// form, which live-tested
+# as a real bug: "dial tcp: address enode://...: too many colons in
+# address" -- the node never dialed its bootnode at all.
+BOOTNODE_DEFAULT='52.1.96.250:6001'
 NETWORK_ID_DEFAULT='10698789873712925303'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
@@ -39,7 +46,8 @@ Options:
   --email <address>        Email to receive setup instructions (optional;
                            best-effort, does not fail the script if it can't
                            be sent).
-  --bootnode <enode>       Bootnode enode to join. Default: NHBCoin mainnet bootnode.
+  --bootnode <host:port>   Bootnode address to join (plain host:port, not
+                           an enode:// URI). Default: NHBCoin mainnet bootnode.
   --network-id <id>        P2P network ID. Default: 10698789873712925303
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
@@ -265,17 +273,17 @@ sudo perl -0pi -e "s#(?m)^ValidatorKeystorePath = \".*\"#ValidatorKeystorePath =
 sudo perl -0pi -e "s#(?m)^ValidatorKMSEnv = \".*\"#ValidatorKMSEnv = \"NHB_VALIDATOR_RAW_KEY\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^NetworkName = \".*\"#NetworkName = \"nhb-mainnet-validator\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^  NetworkId = .*#  NetworkId = ${NETWORK_ID}#;" "${CONFIG_DIR}/config.toml"
-# The enode string contains "@" (nodeid@host:port). Perl treats an
-# unescaped "@" in the s/// replacement text as array interpolation
-# (e.g. "@52" -> array @52, silently expanding to ""), which corrupted
-# the peer address into "<nodeid>.1.96.250:6001" and broke P2P dialing.
-# A prior fix here tried to backslash-escape the "@" before splicing it
-# into the Perl program text, but that depends on how many backslashes
-# the shell's `sed` collapses -- verified to differ between sed
-# implementations, and on the real target (GNU sed) it produced a
-# *different* corruption ("\.1.96.250"). Passing the value through
-# $ENV{} instead avoids the interpolation problem entirely: it's read
-# as data at runtime, never parsed as part of the Perl program text.
+# BOOTNODE is expected to be plain host:port (see the note above its
+# default definition -- an enode://nodeid@host:port URI was tried here
+# once and doesn't work with this codebase's dialer). Still splice it in
+# via $ENV{} rather than string-interpolating it into the Perl program
+# text: a custom --bootnode value is user-supplied, and any value
+# containing "@" would hit Perl's array-interpolation footgun (confirmed
+# live: an unescaped "@52" in replacement text silently vanishes, and
+# escaping it beforehand turned out to be shell/sed-dialect-dependent
+# and broke differently on the real target than in local testing).
+# $ENV{} is read as data at runtime and never parsed as program text, so
+# it's correct regardless of what characters the value contains.
 sudo env BOOTNODE="${BOOTNODE}" perl -0pi -e '
   my $bn = $ENV{"BOOTNODE"};
   s/^  Bootnodes = \[.*\]$/  Bootnodes = ["$bn"]/m;

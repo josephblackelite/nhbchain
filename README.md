@@ -217,9 +217,9 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 - **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
-- **Mainnet P2P Bootnode (enode):** 
-  `"enode://bc1717ec2932efac3b37b9891f20f55cff491d48b790346ac02977cd646d4454@52.1.96.250:6001"`
-  *(Updated 2026-08-04 for the GTM 2026 genesis relaunch — this identity changes on any future genesis relaunch too; verify against the live node's `p2p_info` RPC result if this ever looks stale.)*
+- **Mainnet P2P Bootnode:**
+  `"52.1.96.250:6001"`
+  *(This node's `Bootnodes`/`PersistentPeers` config values are plain `host:port` -- the P2P dialer connects directly with `net.Dial("tcp", addr)` and does not parse an `enode://nodeid@host:port` URI scheme, so don't use that format here even though it's a common convention on other chains. Updated 2026-08-04 for the GTM 2026 genesis relaunch — this address changes on any future genesis relaunch too; verify against the live node's `p2p_info` RPC result if this ever looks stale.)*
 
 ### Join As A Validator In One Command
 
