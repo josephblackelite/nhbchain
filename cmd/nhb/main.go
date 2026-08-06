@@ -582,7 +582,23 @@ func ensureDefaultLendingPool(node *core.Node, privKey *crypto.PrivateKey) error
 	if node == nil || privKey == nil {
 		return nil
 	}
-	owner := privKey.PubKey().Address()
+	// This must be a value every validator derives identically -- it gets
+	// written into the shared state trie (via WithState, ahead of the next
+	// block's commit) and folds into the canonical state root. Using the
+	// running validator's own key here was a real, live consensus bug: a
+	// second validator started fresh, with its own different key, computed
+	// a different DeveloperOwner for the same "default" pool than what the
+	// first validator's key had already baked into the live chain, causing
+	// permanent state-root divergence the moment it tried to sync block 1.
+	// Confirmed by diffing the live validator's actual on-disk trie against
+	// a fresh sync attempt: every other write matched byte-for-byte except
+	// this one, which held the original validator's own address.
+	owner := crypto.Address{}
+	if adminAddr, ok := node.AdminWallet(); ok {
+		if addr, err := crypto.NewAddress(crypto.NHBPrefix, adminAddr[:]); err == nil {
+			owner = addr
+		}
+	}
 	return node.WithState(func(manager *nhbstate.Manager) error {
 		existing, ok, err := manager.LendingGetMarket("default")
 		if err != nil {
