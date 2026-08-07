@@ -14,6 +14,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"math/big"
@@ -34,7 +35,13 @@ func main() {
 	validatorAddr := flag.String("validator", "", "bech32 address of the validator to remove")
 	fixSelf := flag.Bool("fix-self", false, "Replace the entire validator set with this node's own running key, keeping the current total power")
 	dryRun := flag.Bool("dry-run", false, "Report what would change without committing a block")
+	skipBlock := flag.Bool("skip-block", false, "Patch state and the tip's declared state root, but do NOT create/commit a new block. Use this when another validator already produced a real (zero-transaction) block reflecting the same out-of-band patch -- e.g. resyncing a node from genesis that will hit that exact historical block via normal P2P sync next. Patching here first makes this node's pending state already equal that block's declared root, so it can accept the real incoming block instead of needing its own (differently-hashed) synthetic one. Mutually exclusive with --dry-run.")
 	flag.Parse()
+
+	if *skipBlock && *dryRun {
+		fmt.Fprintln(os.Stderr, "Error: --skip-block and --dry-run are mutually exclusive")
+		os.Exit(1)
+	}
 
 	if *fixSelf && strings.TrimSpace(*validatorAddr) != "" {
 		fmt.Fprintln(os.Stderr, "Error: --fix-self and --validator are mutually exclusive")
@@ -151,6 +158,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *skipBlock {
+		fmt.Printf("--skip-block set: patched tip state root to %x at height %d, but did not create a new block.\n", newRoot, node.GetHeight())
+		fmt.Println("This node's pending state now matches a real block elsewhere in the network that reflects the same patch with zero transactions. Start the real nhb service so it can sync that block normally instead of needing its own.")
+		return
+	}
+
 	heightBefore := node.GetHeight()
 	block, err := node.CreateBlock(nil)
 	if err != nil {
@@ -175,8 +188,25 @@ func printAddr(rawKey string, power *big.Int) {
 }
 
 func loadValidatorKey(cfg *config.Config, resolvePassphrase func() (string, error)) (*crypto.PrivateKey, error) {
-	if cfg.ValidatorKMSURI != "" || cfg.ValidatorKMSEnv != "" {
-		return nil, fmt.Errorf("KMS-backed validator keys are not supported by this recovery tool; run it on a host with a local keystore")
+	// Every validator brought up via the one-command bootstrap script
+	// (scripts/deployvalidator.sh) configures ValidatorKMSEnv, not a file
+	// keystore -- the raw key lives only in node.env as a hex string. This
+	// tool used to hard-refuse that configuration entirely, which meant it
+	// could only ever run against a hand-deployed, keystore-file validator
+	// (like the original primary), not a validator that joined through the
+	// documented, recommended flow. The key material here is read the exact
+	// same way cmd/nhb's own loadFromKMS/keyFromEnv does -- straight from
+	// the environment variable this validator's own systemd unit already
+	// exposes to it, never derived, generated, or logged by this tool.
+	if envName := strings.TrimSpace(cfg.ValidatorKMSEnv); envName != "" {
+		value, ok := os.LookupEnv(envName)
+		if !ok {
+			return nil, fmt.Errorf("environment variable %q not set", envName)
+		}
+		return parseHexPrivateKey(value)
+	}
+	if cfg.ValidatorKMSURI != "" {
+		return nil, fmt.Errorf("ValidatorKMSURI is not supported by this recovery tool; run it on a host with a local keystore or ValidatorKMSEnv")
 	}
 	if cfg.ValidatorKeystorePath == "" {
 		return nil, fmt.Errorf("validator keystore path not configured")
@@ -196,4 +226,20 @@ func loadValidatorKey(cfg *config.Config, resolvePassphrase func() (string, erro
 		return nil, fmt.Errorf("unable to decrypt keystore %s: %w", cfg.ValidatorKeystorePath, err)
 	}
 	return key, nil
+}
+
+// parseHexPrivateKey mirrors cmd/nhb's parsePrivateKeyMaterial: the raw key
+// material stored in a ValidatorKMSEnv variable is hex, optionally
+// 0x-prefixed.
+func parseHexPrivateKey(material string) (*crypto.PrivateKey, error) {
+	trimmed := strings.TrimSpace(material)
+	trimmed = strings.TrimPrefix(trimmed, "0x")
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty private key material")
+	}
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hex private key: %w", err)
+	}
+	return crypto.PrivateKeyFromBytes(raw)
 }
