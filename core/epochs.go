@@ -365,6 +365,18 @@ func (sp *StateProcessor) fallbackValidatorSet(minStake *big.Int) (map[string]*b
 		if account == nil || account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
 			continue
 		}
+		// This fallback intentionally skips the heartbeat-recency check
+		// (validatorReadyForActivation) so a validator having a brief
+		// liveness blip doesn't zero out the active set. But an address
+		// that has NEVER once sent a heartbeat has never proven it runs
+		// a node at all -- resurrecting it here would let a pure stake
+		// balance (e.g. from an accidental self-stake with no validator
+		// target) get swept into active consensus power the moment every
+		// real validator's heartbeat happens to lapse at once, which is
+		// exactly the failure mode that stalled quorum in production.
+		if account.EngagementLastHeartbeat == 0 {
+			continue
+		}
 		fallback[string(addr)] = copyBigInt(account.Stake)
 	}
 	return fallback, nil

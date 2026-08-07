@@ -4099,7 +4099,15 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, s
 		}
 	}
 	if payload.Timestamp == 0 {
-		payload.Timestamp = time.Now().UTC().Unix()
+		// Must be the deterministic block timestamp, not wall-clock time --
+		// this value is written into consensus state (EngagementLastHeartbeat)
+		// and feeds validatorReadyForActivation. A caller that omits an
+		// explicit timestamp (e.g. the portal's manual "send heartbeat"
+		// button) previously got time.Now(), which any node replaying this
+		// same transaction later computes differently, producing a
+		// permanent state-root divergence at the next epoch boundary. See
+		// docs/CLAUDE.md incident log.
+		payload.Timestamp = sp.blockTimestamp().Unix()
 	}
 	now := time.Unix(payload.Timestamp, 0).UTC()
 

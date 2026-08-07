@@ -333,12 +333,18 @@ func TestEpochRotationRetainsPreviousValidatorsWhenHeartbeatSelectionIsEmpty(t *
 	addr := seedValidatorWithHeartbeat(t, sp, 40000, 10, uint64(testEpochTimestamp))
 	sp.ValidatorSet[string(addr)] = big.NewInt(40000)
 
-	// Clear the heartbeat so the next epoch selection would otherwise be empty.
+	// Make the heartbeat STALE (outside the readiness grace period) rather
+	// than zeroing it out entirely -- a stale-but-nonzero heartbeat models a
+	// real validator that has run before and is just having a liveness
+	// blip, which the fallback is meant to tolerate. A zero heartbeat means
+	// "has never once proven it runs a node," which is the phantom-
+	// validator case the fallback must NOT recover (see
+	// TestFallbackValidatorSetExcludesNeverHeartbeatedAddress).
 	account, err := sp.getAccount(addr)
 	if err != nil {
 		t.Fatalf("get account: %v", err)
 	}
-	account.EngagementLastHeartbeat = 0
+	account.EngagementLastHeartbeat = uint64(testEpochTimestamp - 3600)
 	if err := sp.setAccount(addr, account); err != nil {
 		t.Fatalf("update account: %v", err)
 	}
@@ -348,6 +354,39 @@ func TestEpochRotationRetainsPreviousValidatorsWhenHeartbeatSelectionIsEmpty(t *
 	}
 	if _, ok := sp.ValidatorSet[string(addr)]; !ok {
 		t.Fatalf("expected existing validator to remain active when epoch selection is empty")
+	}
+}
+
+// TestFallbackValidatorSetExcludesNeverHeartbeatedAddress is the regression
+// test for the production incident this fix addresses: an address that
+// accumulated enough .Stake to be "eligible" (e.g. via an accidental
+// undirected self-stake) but has NEVER sent a single heartbeat must not be
+// resurrected into the active validator set by the empty-selection fallback,
+// even though it would otherwise have enough stake and even though the
+// fallback deliberately skips the heartbeat-recency check for validators
+// that HAVE heartbeated before.
+func TestFallbackValidatorSetExcludesNeverHeartbeatedAddress(t *testing.T) {
+	sp := newEpochStateProcessor(t)
+
+	real := seedValidatorWithHeartbeat(t, sp, 40000, 10, uint64(testEpochTimestamp-3600))
+	sp.ValidatorSet[string(real)] = big.NewInt(40000)
+
+	phantom := seedValidatorWithHeartbeat(t, sp, 40000, 0, 0)
+	sp.EligibleValidators[string(phantom)] = big.NewInt(40000)
+
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		t.Fatalf("minimum validator stake: %v", err)
+	}
+	fallback, err := sp.fallbackValidatorSet(minStake)
+	if err != nil {
+		t.Fatalf("fallback validator set: %v", err)
+	}
+	if _, ok := fallback[string(real)]; !ok {
+		t.Fatalf("expected previously-active validator with heartbeat history to be recoverable")
+	}
+	if _, ok := fallback[string(phantom)]; ok {
+		t.Fatalf("never-heartbeated address must not be swept into the fallback validator set")
 	}
 }
 

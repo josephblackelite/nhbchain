@@ -145,6 +145,14 @@ type Node struct {
 	networkMode                  string
 	networkBroadcaster           p2p.Broadcaster
 	blockSyncMu                  sync.Mutex
+	// externalCommitNotifier, if set, is called after a block committed via
+	// the peer-sync path (handleNetworkBlocks/commitSyncedBlock) so the BFT
+	// engine can immediately abandon a stale in-flight round for a height
+	// the network already finalized, instead of discovering it lazily up
+	// to a full round-timeout later. Wired by cmd/nhb/main.go to the BFT
+	// engine's NotifyExternalCommit once both are constructed, mirroring
+	// the SetNetworkBroadcaster wiring pattern below.
+	externalCommitNotifier func()
 
 	posStreamMu      sync.RWMutex
 	posStreamSeq     uint64
@@ -1534,6 +1542,17 @@ func (n *Node) SetNetworkBroadcaster(broadcaster p2p.Broadcaster) {
 	n.networkBroadcaster = broadcaster
 }
 
+// SetExternalCommitNotifier installs a callback invoked after this node
+// commits a block that arrived via peer sync rather than this node's own
+// BFT round. See the field doc on externalCommitNotifier for why this
+// exists.
+func (n *Node) SetExternalCommitNotifier(notify func()) {
+	if n == nil {
+		return
+	}
+	n.externalCommitNotifier = notify
+}
+
 // SetSwapConfig installs the swap mint configuration after applying canonical
 // defaults to avoid surprising zero values.
 func (n *Node) SetSwapConfig(cfg swap.Config) {
@@ -2143,6 +2162,9 @@ func (n *Node) handleNetworkBlocks(blocks []*types.Block) error {
 			return fmt.Errorf("commit synced block %d: %w", block.Header.Height, err)
 		}
 		applied++
+		if n.externalCommitNotifier != nil {
+			n.externalCommitNotifier()
+		}
 	}
 
 	if applied > 0 && len(blocks) >= networkBlockSyncBatchSize {

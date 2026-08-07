@@ -358,6 +358,7 @@ func main() {
 	}
 	p2pCfg := p2p.ServerConfig{
 		ListenAddress:    cfg.ListenAddress,
+		ExternalAddress:  cfg.P2P.ExternalAddress,
 		ChainID:          node.ChainID(),
 		GenesisHash:      node.GenesisHash(),
 		ClientVersion:    cfg.ClientVersion,
@@ -400,6 +401,7 @@ func main() {
 
 	// 4. Set the fully configured BFT engine on the node.
 	node.SetBftEngine(bftEngine)
+	node.SetExternalCommitNotifier(bftEngine.NotifyExternalCommit)
 
 	// --- Server Startup ---
 	networkAdapter := &p2pNetworkAdapter{server: p2pServer}

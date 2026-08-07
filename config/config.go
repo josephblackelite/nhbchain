@@ -321,6 +321,17 @@ type P2PSection struct {
 	// string and parsed with strconv.ParseUint instead.
 	NetworkID           uint64   `toml:"-"`
 	NetworkIDRaw        string   `toml:"NetworkId"`
+	// ExternalAddress is this node's own publicly-dialable host:port (e.g.
+	// its EC2 public IP on the P2P port). ListenAddress is typically bound
+	// to 0.0.0.0 so the process can actually accept connections, but an
+	// unspecified address like that is not something a remote peer can
+	// dial back to, so it's filtered out of the handshake's self-reported
+	// ListenAddrs. Without an explicit external address, a peer that first
+	// reaches this node via an inbound connection has no way to record a
+	// usable address for reconnecting later -- it falls back to that one
+	// connection's ephemeral source port, which is never a listening
+	// socket, so every subsequent reconnect attempt permanently fails.
+	ExternalAddress     string   `toml:"ExternalAddress"`
 	MaxPeers            int      `toml:"MaxPeers"`
 	MaxInbound          int      `toml:"MaxInbound"`
 	MaxOutbound         int      `toml:"MaxOutbound"`

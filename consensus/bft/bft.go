@@ -45,6 +45,18 @@ type Engine struct {
 
 	proposalCh chan *SignedProposal
 	voteCh     chan *SignedVote
+	// externalCommitCh is signaled when a block for the current height was
+	// committed OUTSIDE this engine's own round (e.g. synced from a peer
+	// that already reached quorum, via core.Node.commitSyncedBlock). The
+	// engine otherwise only reconciles e.currentState.Height against the
+	// node's real chain height at the top of startNewRound(), which can
+	// lag by up to a full commitTimeout after an external commit lands --
+	// during that window this node may keep racing its own round for a
+	// height the network has already finalized, needlessly stalling
+	// (never a safety issue -- it can't manufacture quorum alone -- but a
+	// real, observed liveness bug). Signaling this channel makes runRound
+	// abandon the stale round immediately instead of waiting out the timer.
+	externalCommitCh chan struct{}
 
 	proposalTimeout  time.Duration
 	prevoteTimeout   time.Duration
@@ -149,6 +161,7 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		bufferedVotes:    make(map[uint64]map[int][]*SignedVote),
 		proposalCh:       make(chan *SignedProposal, defaultProposalQueueSize),
 		voteCh:           make(chan *SignedVote, calculateVoteQueueCapacity(validatorSet)),
+		externalCommitCh: make(chan struct{}, 1),
 		proposalTimeout:  defaultProposalTimeout,
 		prevoteTimeout:   defaultPrevoteTimeout,
 		precommitTimeout: defaultPrecommitTimeout,
@@ -215,6 +228,13 @@ func (e *Engine) runRound() {
 				return
 			}
 		case <-commitTimer.C:
+			return
+		case <-e.externalCommitCh:
+			// A block for this height (or later) was just committed via
+			// the peer-sync path rather than this engine's own round.
+			// Abandon this round now -- the next startNewRound() will
+			// pick up the real height via syncHeightWithNodeLocked()
+			// instead of continuing to race for a decided height.
 			return
 		case sp := <-e.proposalCh:
 			if sp == nil || sp.Proposal == nil || sp.Proposal.Block == nil || sp.Proposal.Block.Header == nil {
@@ -535,6 +555,25 @@ func (e *Engine) requestStatus() {
 	}
 	if err := e.broadcaster.Broadcast(msg); err != nil {
 		fmt.Printf("failed to broadcast status request: %v\n", err)
+	}
+}
+
+// NotifyExternalCommit tells the engine a block was just committed to the
+// chain through some path other than this engine's own round (e.g. a synced
+// block adopted from a peer that already reached quorum). It's safe to call
+// from any goroutine, at any height, at any time -- it never blocks and it
+// makes no claim about which height changed, since the engine re-derives the
+// real height itself from e.node.GetHeight() on its next round start. This
+// only needs to happen when the node is genuinely behind (an in-flight round
+// still targeting an already-finalized height); calling it spuriously just
+// causes one harmless extra round restart.
+func (e *Engine) NotifyExternalCommit() {
+	if e == nil {
+		return
+	}
+	select {
+	case e.externalCommitCh <- struct{}{}:
+	default:
 	}
 }
 

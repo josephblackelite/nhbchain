@@ -986,3 +986,123 @@ func TestEngineHandlesLargeValidatorSets(t *testing.T) {
 		t.Fatalf("expected committed block to advance node height to 1, got %d", node.height)
 	}
 }
+
+// syncedHeightNode is a NodeInterface stub whose height can be mutated
+// concurrently with an in-flight runRound() -- unlike trackingNode's plain
+// field, this guards access with a mutex so the test can simulate a peer-
+// synced commit landing on a different goroutine, the same way
+// core.Node.commitSyncedBlock does in production, without racing the BFT
+// engine's own goroutine reading GetHeight() inside startNewRound().
+type syncedHeightNode struct {
+	mu           sync.Mutex
+	height       uint64
+	validatorSet map[string]*big.Int
+}
+
+func (n *syncedHeightNode) GetMempool() []*types.Transaction               { return nil }
+func (n *syncedHeightNode) RequeueTransactions(txs []*types.Transaction)   {}
+func (n *syncedHeightNode) CreateBlock(txs []*types.Transaction) (*types.Block, error) {
+	return nil, nil
+}
+func (n *syncedHeightNode) ValidateBlock(block *types.Block) error { return nil }
+func (n *syncedHeightNode) CommitBlock(block *types.Block) error   { return nil }
+func (n *syncedHeightNode) GetValidatorSet() map[string]*big.Int  { return n.validatorSet }
+func (n *syncedHeightNode) GetAccount(addr []byte) (*types.Account, error) {
+	return &types.Account{Stake: big.NewInt(0)}, nil
+}
+func (n *syncedHeightNode) GetLastCommitHash() []byte { return nil }
+func (n *syncedHeightNode) GetHeight() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.height
+}
+func (n *syncedHeightNode) setHeight(h uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.height = h
+}
+
+// TestNotifyExternalCommitAbandonsStaleRound is the regression test for the
+// production incident this fix addresses: a two-validator network where one
+// validator commits a height via its own round and broadcasts it, but the
+// other validator -- still waiting on votes for that same height inside its
+// own in-flight runRound() -- would otherwise only discover the peer's
+// already-decided block up to a full commitTimeout later (at the top of its
+// next startNewRound()), during which it could go on to needlessly race its
+// own competing round for an already-finalized height. NotifyExternalCommit
+// must make an in-flight runRound() abandon immediately instead of riding
+// out the timeout.
+func TestNotifyExternalCommitAbandonsStaleRound(t *testing.T) {
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	validatorAddr := validatorKey.PubKey().Address().Bytes()
+	otherKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate second validator key: %v", err)
+	}
+	otherAddr := otherKey.PubKey().Address().Bytes()
+
+	node := &syncedHeightNode{
+		validatorSet: map[string]*big.Int{
+			string(validatorAddr): big.NewInt(1),
+			string(otherAddr):     big.NewInt(1),
+		},
+	}
+	broadcaster := &recordingBroadcaster{}
+
+	// A commitTimeout long enough that, absent the fix, the round would
+	// clearly still be in flight when we assert -- proving a fast return
+	// is due to the notify, not coincidental timing.
+	const commitTimeout = 500 * time.Millisecond
+	engine := NewEngine(node, validatorKey, broadcaster, WithTimeouts(TimeoutConfig{
+		Proposal:  commitTimeout,
+		Prevote:   commitTimeout,
+		Precommit: commitTimeout,
+		Commit:    commitTimeout,
+	}))
+
+	// This engine is starting a round for height 1 (node is at height 0).
+	// No proposal/votes will ever arrive for it in this test -- it would
+	// otherwise sit until commitTimeout fires.
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		engine.runRound()
+		close(done)
+	}()
+
+	// Give runRound a moment to actually enter its select loop before
+	// simulating the external commit.
+	time.Sleep(20 * time.Millisecond)
+
+	// Simulate a peer's synced block landing: the node's real chain height
+	// advances (exactly what core.Node.commitSyncedBlock does), and the
+	// notifier fires (exactly what core.Node.handleNetworkBlocks now does
+	// via the externalCommitNotifier hook).
+	node.setHeight(1)
+	engine.NotifyExternalCommit()
+
+	select {
+	case <-done:
+	case <-time.After(commitTimeout / 2):
+		t.Fatalf("runRound did not abandon the stale round promptly after NotifyExternalCommit")
+	}
+	elapsed := time.Since(start)
+	if elapsed >= commitTimeout {
+		t.Fatalf("runRound took %v, expected it to return well before the %v commit timeout", elapsed, commitTimeout)
+	}
+
+	// The next round must pick up the real height via
+	// syncHeightWithNodeLocked() instead of continuing to target height 1.
+	// (startNewRound, not runRound, since runRound would block again
+	// waiting on votes that will never arrive in this test.)
+	engine.startNewRound()
+	engine.mu.RLock()
+	got := engine.currentState.Height
+	engine.mu.RUnlock()
+	if got != 2 {
+		t.Fatalf("expected engine to resync to height 2 (node height 1 + 1) on next round, got %d", got)
+	}
+}

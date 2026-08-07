@@ -58,6 +58,11 @@ var errQueueFull = errors.New("peer outbound queue full")
 // ServerConfig encapsulates runtime settings for the p2p server.
 type ServerConfig struct {
 	ListenAddress    string
+	// ExternalAddress is this node's own publicly-dialable host:port, used
+	// to self-report a usable ListenAddrs entry in the handshake when
+	// ListenAddress is bound to an unspecified address (0.0.0.0) that
+	// can't itself be advertised. See config.P2PSection.ExternalAddress.
+	ExternalAddress  string
 	ChainID          uint64
 	GenesisHash      []byte
 	ClientVersion    string
@@ -615,6 +620,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	}
 
 	server.addListenAddress(cfg.ListenAddress)
+	server.addListenAddress(cfg.ExternalAddress)
 
 	if server.seedRegistry != nil {
 		go server.seedRotationLoop()
