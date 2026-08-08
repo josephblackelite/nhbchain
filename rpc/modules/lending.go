@@ -85,6 +85,7 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 	if market == nil && id == defaultLendingPoolID {
 		market = m.defaultMarket(id)
 	}
+	m.applyComputedAPY(market)
 	return market, params, nil
 }
 
@@ -127,7 +128,33 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 	if len(markets) == 0 {
 		markets = []*lending.Market{m.defaultMarket(defaultLendingPoolID)}
 	}
+	for _, market := range markets {
+		m.applyComputedAPY(market)
+	}
 	return markets, params, nil
+}
+
+// applyComputedAPY populates a market's read-only DepositApyBps/BorrowApyBps
+// fields from the node's configured utilisation-based interest model. These
+// values are derived on demand (not persisted, see storedLendingMarket in
+// core/state/manager.go), so every read path that hands a market snapshot to
+// an RPC caller must recompute them here using the same rate curve the
+// engine applies during accrual (see InterestModel.BorrowAPR/SupplyAPY).
+func (m *LendingModule) applyComputedAPY(market *lending.Market) {
+	if m == nil || m.node == nil || market == nil {
+		return
+	}
+	model := m.node.LendingInterestModel()
+	if model == nil {
+		market.BorrowApyBps = 0
+		market.DepositApyBps = 0
+		return
+	}
+	reserveBps := m.node.LendingReserveFactorBps()
+	borrowAPR := model.BorrowAPR(market.TotalNHBBorrowed, market.TotalNHBSupplied)
+	supplyAPY := model.SupplyAPY(market.TotalNHBBorrowed, market.TotalNHBSupplied, reserveBps)
+	market.BorrowApyBps = lending.RateBps(borrowAPR)
+	market.DepositApyBps = lending.RateBps(supplyAPY)
 }
 
 func (m *LendingModule) defaultMarket(poolID string) *lending.Market {
@@ -191,6 +218,7 @@ func (m *LendingModule) CreatePool(poolID string, owner [20]byte) (*lending.Mark
 	if err != nil {
 		return nil, m.wrapError(err)
 	}
+	m.applyComputedAPY(created)
 	return created, nil
 }
 

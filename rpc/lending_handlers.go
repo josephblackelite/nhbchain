@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -11,6 +12,10 @@ import (
 )
 
 const defaultLendingPoolID = "default"
+
+// weiPerWholeUnit is the scaling factor between a wei-denominated amount and
+// its whole-token representation (NHB and ZNHB both use 18 decimals).
+var weiPerWholeUnit = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 
 type lendingAccountParams struct {
 	Address string `json:"address"`
@@ -55,8 +60,108 @@ type lendingPoolsResult struct {
 	RiskParameters lending.RiskParameters `json:"riskParameters"`
 }
 
+// lendingPositionResult describes a single per-pool supply or borrow
+// position, matching the shape the finance-hub frontend expects for entries
+// in an account's supplied/borrowed arrays.
+type lendingPositionResult struct {
+	PoolID    string `json:"poolId"`
+	AmountWei string `json:"amountWei"`
+	ValueUsd  string `json:"valueUsd"`
+}
+
+// lendingAccountResult is the JSON-tagged account view returned over RPC.
+// lending.UserAccount itself has no JSON tags and carries an unexported
+// crypto.Address field that serializes as "{}", so it can never be returned
+// to clients directly -- this type is the properly-shaped replacement.
+type lendingAccountResult struct {
+	Address            string                  `json:"address"`
+	Supplied           []lendingPositionResult `json:"supplied"`
+	Borrowed           []lendingPositionResult `json:"borrowed"`
+	CollateralValueUsd string                  `json:"collateralValueUsd"`
+	BorrowedValueUsd   string                  `json:"borrowedValueUsd"`
+	RewardsWei         string                  `json:"rewardsWei"`
+}
+
 type lendingUserAccountResult struct {
-	Account *lending.UserAccount `json:"account"`
+	Account *lendingAccountResult `json:"account"`
+}
+
+// weiToDecimalString renders a wei-denominated amount (18 decimals) as a
+// trimmed base-10 decimal string, e.g. "12.5", mirroring the nhbportal
+// client's own fromWei conversion so amounts surfaced over RPC render
+// consistently with values the client formats locally. NHB is a $1-pegged
+// asset (see README.md) and, per the known collateral-valuation placeholder
+// in native/lending/engine.go (positionHealthy compares raw ZNHB collateral
+// directly against NHB debt with no oracle conversion), ZNHB collateral is
+// currently valued 1:1 against it. This helper therefore doubles as the
+// wei-to-USD converter for collateralValueUsd/borrowedValueUsd until a real
+// price oracle is wired in -- it does not attempt to fix that pricing gap,
+// only to surface whatever value the engine already computes.
+func weiToDecimalString(amount *big.Int) string {
+	if amount == nil || amount.Sign() == 0 {
+		return "0"
+	}
+	negative := amount.Sign() < 0
+	abs := new(big.Int).Abs(amount)
+	whole := new(big.Int).Quo(abs, weiPerWholeUnit)
+	frac := new(big.Int).Mod(abs, weiPerWholeUnit)
+	fracStr := frac.String()
+	if len(fracStr) < 18 {
+		fracStr = strings.Repeat("0", 18-len(fracStr)) + fracStr
+	}
+	fracStr = strings.TrimRight(fracStr, "0")
+	result := whole.String()
+	if fracStr != "" {
+		result += "." + fracStr
+	}
+	if negative {
+		result = "-" + result
+	}
+	return result
+}
+
+// newLendingAccountResult builds the properly JSON-tagged account view from
+// the raw engine state. supplyIndex is the owning market's current supply
+// index (or nil if unknown) and is only used to convert the account's LP
+// share balance into a redeemable NHB amount, matching the conversion the
+// engine already applies internally during Withdraw (see
+// lending.RedeemableSupply).
+func newLendingAccountResult(poolID string, addr [20]byte, account *lending.UserAccount, supplyIndex *big.Int) *lendingAccountResult {
+	result := &lendingAccountResult{
+		Address:  "0x" + hex.EncodeToString(addr[:]),
+		Supplied: []lendingPositionResult{},
+		Borrowed: []lendingPositionResult{},
+		// The lending engine does not yet accrue a separate rewards balance
+		// (see native/lending/engine.go); report zero rather than inventing
+		// a figure until that mechanism exists.
+		RewardsWei:         "0",
+		CollateralValueUsd: "0",
+		BorrowedValueUsd:   "0",
+	}
+	if account == nil {
+		return result
+	}
+
+	if account.SupplyShares != nil && account.SupplyShares.Sign() > 0 {
+		redeemable := lending.RedeemableSupply(account.SupplyShares, supplyIndex)
+		result.Supplied = append(result.Supplied, lendingPositionResult{
+			PoolID:    poolID,
+			AmountWei: redeemable.String(),
+			ValueUsd:  weiToDecimalString(redeemable),
+		})
+	}
+
+	if account.DebtNHB != nil && account.DebtNHB.Sign() > 0 {
+		result.Borrowed = append(result.Borrowed, lendingPositionResult{
+			PoolID:    poolID,
+			AmountWei: account.DebtNHB.String(),
+			ValueUsd:  weiToDecimalString(account.DebtNHB),
+		})
+	}
+
+	result.CollateralValueUsd = weiToDecimalString(account.CollateralZNHB)
+	result.BorrowedValueUsd = weiToDecimalString(account.DebtNHB)
+	return result
 }
 
 type lendingCreatePoolParams struct {
@@ -190,7 +295,29 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "account not found", trimmed)
 		return
 	}
-	writeResult(w, req.ID, lendingUserAccountResult{Account: account})
+
+	resolvedPoolID := strings.TrimSpace(poolID)
+	if resolvedPoolID == "" {
+		resolvedPoolID = defaultLendingPoolID
+	}
+
+	// The market snapshot is only consulted to convert the account's LP
+	// share balance into a redeemable NHB amount via the current supply
+	// index; a missing/uninitialised market is not an error here, it just
+	// means there is nothing to redeem yet.
+	market, _, marketErr := s.lending.GetMarket(resolvedPoolID)
+	if marketErr != nil {
+		writeError(w, marketErr.HTTPStatus, req.ID, marketErr.Code, marketErr.Message, marketErr.Data)
+		return
+	}
+	var supplyIndex *big.Int
+	if market != nil {
+		supplyIndex = market.SupplyIndex
+	}
+
+	writeResult(w, req.ID, lendingUserAccountResult{
+		Account: newLendingAccountResult(resolvedPoolID, addr, account, supplyIndex),
+	})
 }
 
 func (s *Server) handleLendingSupplyNHB(w http.ResponseWriter, r *http.Request, req *RPCRequest) {

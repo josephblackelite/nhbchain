@@ -58,6 +58,19 @@ type Market struct {
 	// OracleUpdatedBlock captures the block height when the median quote was
 	// last refreshed.
 	OracleUpdatedBlock uint64
+	// DepositApyBps exposes the current supplier-side APY, expressed in basis
+	// points, derived from the real utilisation-based interest curve (see
+	// InterestModel.SupplyAPY). It is computed on demand by the RPC layer for
+	// client consumption and is intentionally excluded from the persisted
+	// on-chain market snapshot (see storedLendingMarket in
+	// core/state/manager.go), so it always reflects the current utilisation
+	// rather than a stale value.
+	DepositApyBps uint64 `json:"depositApyBps"`
+	// BorrowApyBps exposes the current borrower-side APR, expressed in basis
+	// points, derived from the real utilisation-based interest curve (see
+	// InterestModel.BorrowAPR). Like DepositApyBps it is computed on demand
+	// and is not persisted.
+	BorrowApyBps uint64 `json:"borrowApyBps"`
 }
 
 // CollateralRouting captures the liquidation collateral distribution between
