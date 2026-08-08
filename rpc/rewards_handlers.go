@@ -163,6 +163,74 @@ func (s *Server) handleGetRewardPayout(w http.ResponseWriter, _ *http.Request, r
 	writeError(w, http.StatusNotFound, req.ID, codeServerError, "payout not found", nil)
 }
 
+type rewardHistoryParams struct {
+	Account string `json:"account"`
+}
+
+type rewardHistoryEntryResult struct {
+	Epoch      uint64 `json:"epoch"`
+	Height     uint64 `json:"height"`
+	ClosedAt   int64  `json:"closedAt"`
+	Total      string `json:"total"`
+	Validators string `json:"validators"`
+	Stakers    string `json:"stakers"`
+	Engagement string `json:"engagement"`
+}
+
+type rewardHistoryResult struct {
+	Account string                     `json:"account"`
+	Entries []rewardHistoryEntryResult `json:"entries"`
+}
+
+// handleGetRewardHistory answers nhb_getRewardHistory: every epoch-emission
+// payout (validator/staker/engagement split) an address has received across
+// the node's retained reward-history window. This only reads state that is
+// already durably persisted and identically replicated by every validator
+// (core.StateProcessor.RewardHistory), so it adds no new write path.
+func (s *Server) handleGetRewardHistory(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "account parameter required", nil)
+		return
+	}
+	var params rewardHistoryParams
+	raw := req.Params[0]
+	if err := json.Unmarshal(raw, &params); err != nil {
+		var direct string
+		if err2 := json.Unmarshal(raw, &direct); err2 == nil {
+			params.Account = direct
+		} else {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameters", nil)
+			return
+		}
+	}
+	addrBytes, err := parseRewardAccount(params.Account)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid account", err.Error())
+		return
+	}
+	if s == nil || s.node == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	entries := s.node.RewardHistoryForAddress(addrBytes)
+	result := rewardHistoryResult{
+		Account: "0x" + hex.EncodeToString(addrBytes),
+		Entries: make([]rewardHistoryEntryResult, len(entries)),
+	}
+	for i, entry := range entries {
+		result.Entries[i] = rewardHistoryEntryResult{
+			Epoch:      entry.Epoch,
+			Height:     entry.Height,
+			ClosedAt:   entry.ClosedAt,
+			Total:      bigIntString(entry.Total),
+			Validators: bigIntString(entry.Validators),
+			Stakers:    bigIntString(entry.Stakers),
+			Engagement: bigIntString(entry.Engagement),
+		}
+	}
+	writeResult(w, req.ID, result)
+}
+
 func parseRewardAccount(value string) ([]byte, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {

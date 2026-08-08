@@ -3141,6 +3141,7 @@ func (n *Node) GetValidatorSet() map[string]*big.Int {
 	}
 	return snapshot
 }
+
 // RemoveValidatorFromSet permanently removes addr from the active and
 // eligible validator sets and persists the change to the trie (staged, not
 // yet committed to a block). This is an operator recovery primitive for a
@@ -3715,6 +3716,56 @@ func (n *Node) LatestRewardEpochSettlement() (*rewards.EpochSettlement, bool) {
 		return nil, false
 	}
 	return n.state.LatestRewardEpochSettlement()
+}
+
+// RewardHistoryEntry describes a single account's payout within one settled
+// epoch-emission reward distribution (validator/staker/engagement split).
+type RewardHistoryEntry struct {
+	Epoch      uint64
+	Height     uint64
+	ClosedAt   int64
+	Total      *big.Int
+	Validators *big.Int
+	Stakers    *big.Int
+	Engagement *big.Int
+}
+
+// RewardHistoryForAddress returns every payout entry for addr across the
+// currently retained epoch-emission reward settlements (bounded by the
+// node's configured reward-history retention window, see
+// StateProcessor.RewardHistory). This is a read-only walk over state that
+// every validator already computed and persisted identically inside
+// ProcessBlockLifecycle -> settleEpochRewards: it introduces no new trie
+// writes and no new determinism surface, since RewardHistory() only returns
+// data that is already part of consensus state.
+func (n *Node) RewardHistoryForAddress(addr []byte) []RewardHistoryEntry {
+	if n == nil || len(addr) == 0 {
+		return nil
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil
+	}
+	var out []RewardHistoryEntry
+	for _, settlement := range n.state.RewardHistory() {
+		for i := range settlement.Payouts {
+			payout := settlement.Payouts[i]
+			if !bytes.Equal(payout.Account, addr) {
+				continue
+			}
+			out = append(out, RewardHistoryEntry{
+				Epoch:      settlement.Epoch,
+				Height:     settlement.Height,
+				ClosedAt:   settlement.ClosedAt,
+				Total:      payout.Total,
+				Validators: payout.Validators,
+				Stakers:    payout.Stakers,
+				Engagement: payout.Engagement,
+			})
+		}
+	}
+	return out
 }
 
 func (n *Node) PotsoLatestRewardEpoch() (uint64, bool, error) {

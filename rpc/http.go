@@ -1227,6 +1227,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetRewardEpoch(recorder, r, req)
 	case "nhb_getRewardPayout":
 		s.handleGetRewardPayout(recorder, r, req)
+	case "nhb_getRewardHistory":
+		s.handleGetRewardHistory(recorder, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(recorder, r, req)
 	case "swap_submitVoucher":
