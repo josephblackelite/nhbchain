@@ -20,7 +20,7 @@ func (s *Server) handleGetOraclePrice(w http.ResponseWriter, _ *http.Request, re
 		return
 	}
 
-	rate, observedAt, ok := engine.CurrentPrice(currency, asset)
+	rate, observedAt, stale, ok := engine.CurrentPrice(currency, asset)
 	if !ok || rate <= 0 {
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "oracle unavailable", "price unavailable")
 		return
@@ -36,6 +36,7 @@ func (s *Server) handleGetOraclePrice(w http.ResponseWriter, _ *http.Request, re
 		"price":      rate,
 		"observedAt": observedAt.UTC().Format(time.RFC3339),
 		"source":     "nhb-oracle",
+		"stale":      stale,
 	})
 }
 

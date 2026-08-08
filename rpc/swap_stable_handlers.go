@@ -48,8 +48,8 @@ func (s *Server) handleStableRequestSwapApproval(w http.ResponseWriter, r *http.
 			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to quote asset pair", err.Error())
 			return
 		}
-		payRate, _, payOK := engine.CurrentPrice("USD", payAsset)
-		getRate, _, getOK := engine.CurrentPrice("USD", getAsset)
+		payRate, _, _, payOK := engine.CurrentPrice("USD", payAsset)
+		getRate, _, _, getOK := engine.CurrentPrice("USD", getAsset)
 		if !payOK || !getOK {
 			writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "price unavailable", nil)
 			return
@@ -244,8 +244,8 @@ func quoteCrossAsset(engine *stable.Engine, payAsset string, getAsset string, am
 	if engine == nil {
 		return "", stable.ErrPriceUnavailable
 	}
-	payRate, _, payOK := engine.CurrentPrice("USD", payAsset)
-	getRate, _, getOK := engine.CurrentPrice("USD", getAsset)
+	payRate, _, _, payOK := engine.CurrentPrice("USD", payAsset)
+	getRate, _, _, getOK := engine.CurrentPrice("USD", getAsset)
 	if !payOK || !getOK || payRate <= 0 || getRate <= 0 {
 		return "", stable.ErrPriceUnavailable
 	}

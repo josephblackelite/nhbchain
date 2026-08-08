@@ -274,6 +274,11 @@ func main() {
 	aggregator.Register("manual", manualOracle)
 	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
 	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
+	// ZNHB has no public CoinGecko listing, so it is intentionally left out of
+	// this id map: CoinGeckoOracle.assetID() only resolves symbols with an
+	// explicit entry here, so ZNHB quotes fail fast with "unmapped asset" and
+	// the aggregator falls through to the next configured oracle source
+	// instead of guessing a nonexistent id and making a doomed network call.
 	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "tether"}))
 	_ = manualOracle.SetDecimal("USD", "NHB", "1.0", time.Now().UTC())
 	_ = manualOracle.SetDecimal("USD", "ZNHB", resolveZNHBOraclePrice(), time.Now().UTC())

@@ -433,6 +433,12 @@ func NewCoinGeckoOracle(client HTTPDoer, endpoint string, idMap map[string]strin
 	return &CoinGeckoOracle{client: client, endpoint: ep, idMap: mapped}
 }
 
+// assetID resolves the CoinGecko asset identifier for the supplied on-chain
+// symbol. Only symbols with an explicit entry in idMap are resolved; symbols
+// without a registered mapping return "" so callers can fail fast instead of
+// guessing a lowercase symbol as the CoinGecko id (which is very rarely the
+// real id and produces a doomed network call for tokens that simply aren't
+// listed on CoinGecko).
 func (o *CoinGeckoOracle) assetID(symbol string) string {
 	if o == nil {
 		return ""
@@ -440,7 +446,7 @@ func (o *CoinGeckoOracle) assetID(symbol string) string {
 	if id, ok := o.idMap[normaliseSymbol(symbol)]; ok && id != "" {
 		return id
 	}
-	return strings.ToLower(strings.TrimSpace(symbol))
+	return ""
 }
 
 func (o *CoinGeckoOracle) GetRate(base, quote string) (PriceQuote, error) {

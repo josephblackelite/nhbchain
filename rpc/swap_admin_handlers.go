@@ -167,6 +167,57 @@ func (s *Server) handleSwapBurnList(w http.ResponseWriter, _ *http.Request, req 
 	writeResult(w, req.ID, map[string]interface{}{"receipts": formatted, "nextCursor": nextCursor})
 }
 
+// swapManualQuoteParams captures the payload accepted by swap_setManualQuote.
+type swapManualQuoteParams struct {
+	Base      string `json:"base"`
+	Quote     string `json:"quote"`
+	Rate      string `json:"rate"`
+	Timestamp *int64 `json:"timestamp,omitempty"`
+}
+
+// handleSwapSetManualQuote publishes a manual override rate for the supplied
+// currency pair. The manual oracle tier is the lowest-priority circuit
+// breaker used during incidents (see docs/treasury/peg-policy.md); without
+// this endpoint the seed quote set at process startup goes stale after
+// MaxQuoteAgeSeconds with no way to refresh it short of restarting the node.
+func (s *Server) handleSwapSetManualQuote(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected base, quote, and rate payload", nil)
+		return
+	}
+	var params swapManualQuoteParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid payload", err.Error())
+		return
+	}
+	base := strings.TrimSpace(params.Base)
+	quote := strings.TrimSpace(params.Quote)
+	rate := strings.TrimSpace(params.Rate)
+	if base == "" || quote == "" || rate == "" {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "base, quote, and rate required", nil)
+		return
+	}
+	ts := time.Now().UTC()
+	if params.Timestamp != nil {
+		if *params.Timestamp < 0 {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "timestamp must be non-negative", nil)
+			return
+		}
+		ts = time.Unix(*params.Timestamp, 0).UTC()
+	}
+	if err := s.node.SetSwapManualQuote(base, quote, rate, ts); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to set manual quote", err.Error())
+		return
+	}
+	writeResult(w, req.ID, map[string]any{
+		"ok":         true,
+		"base":       strings.ToUpper(base),
+		"quote":      strings.ToUpper(quote),
+		"rate":       rate,
+		"observedAt": ts.Format(time.RFC3339),
+	})
+}
+
 // handleSwapVoucherReverse reverses a minted voucher and moves funds into the refund sink.
 func (s *Server) handleSwapVoucherReverse(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
