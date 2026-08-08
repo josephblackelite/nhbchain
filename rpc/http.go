@@ -1429,6 +1429,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleFeesGetMonthlyStatus(recorder, r, req)
 	case "fees_getTransferStatus":
 		s.handleFeesGetTransferStatus(recorder, r, req)
+	case "fees_getTransferQuote":
+		s.handleFeesGetTransferQuote(recorder, r, req)
 	case "swap_limits":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)

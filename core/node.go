@@ -867,6 +867,40 @@ func (n *Node) TransferGasStatus(addr []byte) (nhbstate.TransferGasSpendStatus, 
 	return status, nil
 }
 
+// TransferGasStatusForAsset returns the active transfer gas sponsorship
+// status for the supplied wallet, scoped to asset ("NHB" or "ZNHB"). Unlike
+// TransferGasStatus (which is always scoped to NHB for backward
+// compatibility), this allows callers to check ZNHB free-tier eligibility as
+// well, since NHB and ZNHB spend are tracked independently.
+func (n *Node) TransferGasStatusForAsset(addr []byte, asset string) (nhbstate.TransferGasSpendStatus, error) {
+	if n == nil {
+		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("node unavailable")
+	}
+	if len(addr) != 20 {
+		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("address must be 20 bytes")
+	}
+	policy := n.TransferGasPolicy()
+	var status nhbstate.TransferGasSpendStatus
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		var wallet [20]byte
+		copy(wallet[:], addr)
+		window := nhbstate.TransferGasWindowLifetime
+		if normalizeTransferGasWindow(policy.Window) == TransferGasWindowMonthly {
+			window = nhbstate.TransferGasWindowMonthly
+		}
+		snapshot, err := m.TransferGasSpendStatus(wallet, window, n.state.blockTimestamp(), policy.FreeSpendLimitWei, asset)
+		if err != nil {
+			return err
+		}
+		status = snapshot
+		return nil
+	})
+	if err != nil {
+		return nhbstate.TransferGasSpendStatus{}, err
+	}
+	return status, nil
+}
+
 func (n *Node) SetModulePaused(module string, paused bool) {
 	if n == nil {
 		return
