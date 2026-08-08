@@ -93,7 +93,10 @@ func main() {
 			printUsage()
 			return
 		}
-		setRewardBeneficiary(args[1], args[2])
+		if code := setRewardBeneficiary(args[1], args[2]); code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "address":
 		if len(args) < 2 {
 			fmt.Println("Error: Please provide a key file.")

@@ -9,7 +9,7 @@ CONFIG_DIR=/etc/nhbchain
 STATE_DIR=/var/lib/nhbchain
 SERVICE_USER=nhb
 VALIDATOR_KEY_FILE="${CONFIG_DIR}/validator.key"
-ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://api.nhbcoin.com/v1/validators/onboarding-email'
+ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://nhbcoin.com/api/v1/validators/onboarding-email'
 
 # p2p.Server.Connect dials this string directly via net.Dial("tcp", addr)
 # -- it never parses an "enode://nodeid@host:port" URI scheme (confirmed
@@ -31,6 +31,8 @@ RESET_STATE=0
 BENEFICIARY=''
 OPERATOR_EMAIL=''
 ONBOARDING_EMAIL_ENDPOINT="${ONBOARDING_EMAIL_ENDPOINT_DEFAULT}"
+EXTERNAL_ADDRESS=''
+EXTERNAL_ADDRESS_HOSTPORT=''
 
 usage() {
   cat <<'EOF'
@@ -42,7 +44,11 @@ Options:
                            payouts (see "Getting paid" below). Strongly
                            recommended -- without it, rewards accumulate at
                            this validator's own address, whose key never
-                           leaves this server.
+                           leaves this server. MUST be different from this
+                           validator's own node address (printed at the end
+                           of this script) -- the chain rejects a beneficiary
+                           that matches the validator's own address, so don't
+                           re-paste that address here.
   --email <address>        Email to receive setup instructions (optional;
                            best-effort, does not fail the script if it can't
                            be sent).
@@ -51,6 +57,11 @@ Options:
   --network-id <id>        P2P network ID. Default: 430060579445266314
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
+  --external-address <ip>  This node's own publicly-dialable IP (the address
+                           peers should use to reconnect to it). Needed
+                           because --listen-addr normally binds to 0.0.0.0,
+                           which a peer can't dial back to. Default:
+                           auto-detected from this machine's public IP.
   --reset-state            Remove existing local chain state before first start.
   --help                   Show this help message.
 
@@ -111,6 +122,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rpc-addr)
       RPC_ADDR="${2:-}"
+      shift 2
+      ;;
+    --external-address)
+      EXTERNAL_ADDRESS="${2:-}"
       shift 2
       ;;
     --reset-state)
@@ -251,6 +266,9 @@ if [[ -z "${VALIDATOR_ADDRESS}" ]]; then
   # only the CLI (running as the service user) does this -- never dump the
   # raw key itself to stdout/logs.
   VALIDATOR_ADDRESS=$(sudo -u "${SERVICE_USER}" "${INSTALL_ROOT}/bin/nhb-cli" address "${VALIDATOR_KEY_FILE}" 2>/dev/null || true)
+  if [[ -z "${VALIDATOR_ADDRESS}" ]]; then
+    echo "[WARN] could not determine validator address for display -- check ${VALIDATOR_KEY_FILE} manually"
+  fi
 fi
 
 VALIDATOR_KEY_HEX=$(sudo od -An -tx1 "${VALIDATOR_KEY_FILE}" | tr -d ' \n')
@@ -265,6 +283,42 @@ sudo chmod 600 "${CONFIG_DIR}/node.env"
 sudo chown root:root "${CONFIG_DIR}/node.env"
 unset VALIDATOR_KEY_HEX
 
+if [[ -z "${EXTERNAL_ADDRESS}" ]]; then
+  echo "[INFO] --external-address not provided -- attempting to auto-detect this server's public IP"
+  # Try the EC2 instance metadata service (IMDSv2) first, since the OOM/tmpfs
+  # workarounds earlier in this script already assume this commonly targets
+  # an EC2 instance; fall back to a public echo service for non-EC2 hosts.
+  # Best-effort only: if neither responds, ExternalAddress is left blank in
+  # config.toml, which is the same as this script's behavior before this
+  # flag existed -- peers that only ever reach this node inbound still won't
+  # get a reconnectable address for it.
+  IMDS_TOKEN=$(curl -fsS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)
+  if [[ -n "${IMDS_TOKEN}" ]]; then
+    EXTERNAL_ADDRESS=$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+      "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  fi
+  if [[ -z "${EXTERNAL_ADDRESS}" ]]; then
+    EXTERNAL_ADDRESS=$(curl -fsS -m 3 https://ifconfig.me 2>/dev/null || true)
+  fi
+  if [[ -n "${EXTERNAL_ADDRESS}" ]]; then
+    echo "[INFO] auto-detected public IP: ${EXTERNAL_ADDRESS}"
+  else
+    echo "[WARN] could not auto-detect a public IP -- peers that only ever connect to this node inbound will not be able to reconnect to it later. Re-run with --external-address <ip> to fix this."
+  fi
+fi
+
+if [[ -n "${EXTERNAL_ADDRESS}" ]]; then
+  # ExternalAddress must be host:port, matching ListenAddress's format (see
+  # config/config.go's P2PSection.ExternalAddress doc comment) -- combine the
+  # detected/provided host with the P2P port from --listen-addr, unless the
+  # caller already passed a host:port pair via --external-address themselves.
+  case "${EXTERNAL_ADDRESS}" in
+    *:*) EXTERNAL_ADDRESS_HOSTPORT="${EXTERNAL_ADDRESS}" ;;
+    *) EXTERNAL_ADDRESS_HOSTPORT="${EXTERNAL_ADDRESS}:${LISTEN_ADDR##*:}" ;;
+  esac
+fi
+
 sudo cp "${REPO_ROOT}/config.toml" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ListenAddress = \".*\"#ListenAddress = \"${LISTEN_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^RPCAddress = \".*\"#RPCAddress = \"${RPC_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
@@ -273,6 +327,9 @@ sudo perl -0pi -e "s#(?m)^ValidatorKeystorePath = \".*\"#ValidatorKeystorePath =
 sudo perl -0pi -e "s#(?m)^ValidatorKMSEnv = \".*\"#ValidatorKMSEnv = \"NHB_VALIDATOR_RAW_KEY\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^NetworkName = \".*\"#NetworkName = \"nhb-mainnet-validator\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^  NetworkId = .*#  NetworkId = ${NETWORK_ID}#;" "${CONFIG_DIR}/config.toml"
+if [[ -n "${EXTERNAL_ADDRESS_HOSTPORT}" ]]; then
+  sudo perl -0pi -e "s#(?m)^  ExternalAddress = \".*\"#  ExternalAddress = \"${EXTERNAL_ADDRESS_HOSTPORT}\"#;" "${CONFIG_DIR}/config.toml"
+fi
 # BOOTNODE is expected to be plain host:port (see the note above its
 # default definition -- an enode://nodeid@host:port URI was tried here
 # once and doesn't work with this codebase's dialer). Still splice it in
@@ -369,6 +426,12 @@ if [[ -n "${VALIDATOR_ADDRESS}" ]]; then
   echo "  ${VALIDATOR_ADDRESS}"
   echo
 fi
+if [[ -n "${EXTERNAL_ADDRESS_HOSTPORT}" ]]; then
+  echo "This node advertises itself to peers as: ${EXTERNAL_ADDRESS_HOSTPORT}"
+else
+  echo "[WARN] no external address is set -- peers that only connect to this node inbound will not be able to reconnect. Re-run with --external-address <ip> to fix this."
+fi
+echo
 echo "To get paid, from a wallet you actually use:"
 echo "  1. Go to https://nhbcoin.com and open (or create) your wallet."
 echo "  2. Go to Validator Hub -> Delegate."

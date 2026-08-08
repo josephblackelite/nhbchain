@@ -29,18 +29,26 @@ func printAddressForKeyFile(keyFile string) {
 // own key can authorize where its rewards go, and that key should never
 // leave the validator server, so this command is meant to be run there.
 // An empty beneficiary clears the redirect.
-func setRewardBeneficiary(beneficiary string, keyFile string) {
+//
+// Returns 0 on success and 1 on any failure, matching the exit-code
+// convention used by the other transaction-sending subcommands in this CLI
+// (see runSendNHBCommand/runSendZNHBCommand in send.go). Callers such as
+// scripts/deployvalidator.sh rely on a non-zero process exit to detect a
+// failed beneficiary update -- returning only a printed message here (the
+// previous behavior) makes that failure invisible to `if ! nhb-cli
+// set-reward-beneficiary ...; then` checks.
+func setRewardBeneficiary(beneficiary string, keyFile string) int {
 	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
 		fmt.Printf("Error loading private key: %v\n", err)
-		return
+		return 1
 	}
 	pubAddr := privKey.PubKey().Address().String()
 
 	account, err := fetchAccount(pubAddr)
 	if err != nil {
 		fmt.Printf("Error fetching account details: %v\n", err)
-		return
+		return 1
 	}
 
 	payload := struct {
@@ -49,7 +57,7 @@ func setRewardBeneficiary(beneficiary string, keyFile string) {
 	data, err := rlp.EncodeToBytes(payload)
 	if err != nil {
 		fmt.Printf("Error encoding payload: %v\n", err)
-		return
+		return 1
 	}
 
 	tx := types.Transaction{
@@ -62,18 +70,19 @@ func setRewardBeneficiary(beneficiary string, keyFile string) {
 	}
 	if err := tx.Sign(privKey.PrivateKey); err != nil {
 		fmt.Printf("Error signing transaction: %v\n", err)
-		return
+		return 1
 	}
 
 	if _, err := sendTransaction(&tx); err != nil {
 		fmt.Printf("Error sending transaction: %v\n", err)
-		return
+		return 1
 	}
 
 	if payload.Beneficiary == "" {
 		fmt.Printf("Cleared reward beneficiary for %s. Future rewards will be credited to this address directly.\n", pubAddr)
-		return
+		return 0
 	}
 	fmt.Printf("Set reward beneficiary for %s to %s.\n", pubAddr, payload.Beneficiary)
 	fmt.Println("Future validator-selection rewards will be credited to that wallet instead of this address.")
+	return 0
 }
