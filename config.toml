@@ -73,6 +73,7 @@ ClientVersion = ""
 
 [p2p]
   NetworkId = 430060579445266314
+  ExternalAddress = ""
   MaxPeers = 64
   MaxInbound = 60
   MaxOutbound = 30
