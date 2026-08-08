@@ -43,6 +43,22 @@ func weiBig(n int64) *big.Int {
 	return new(big.Int).Mul(big.NewInt(n), weiUnit)
 }
 
+// decimalToWei converts a whole-unit decimal string (as returned by the
+// lending_getUserAccount RPC's *ValueUsd fields, e.g. "300" or "300.5") back
+// into a wei-scaled *big.Int for comparison against weiBig(...) fixtures.
+func decimalToWei(t *testing.T, decimal string) *big.Int {
+	t.Helper()
+	rat, ok := new(big.Rat).SetString(decimal)
+	if !ok {
+		t.Fatalf("invalid decimal string: %q", decimal)
+	}
+	rat.Mul(rat, new(big.Rat).SetInt(weiUnit))
+	if !rat.IsInt() {
+		t.Fatalf("decimal string %q did not convert to an exact wei amount", decimal)
+	}
+	return rat.Num()
+}
+
 func TestLendingRPCEndpoints(t *testing.T) {
 	const jwtEnv = "LENDING_RPC_JWT_SECRET"
 	const jwtSecret = "lending-secret"
@@ -226,22 +242,32 @@ func TestLendingRPCEndpoints(t *testing.T) {
 	accountResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", userAddrStr)
 	var accountResult struct {
 		Account struct {
-			CollateralZNHB *big.Int `json:"collateralZNHB"`
-			SupplyShares   *big.Int `json:"supplyShares"`
-			DebtNHB        *big.Int `json:"debtNHB"`
+			Address  string `json:"address"`
+			Supplied []struct {
+				PoolID    string `json:"poolId"`
+				AmountWei string `json:"amountWei"`
+				ValueUsd  string `json:"valueUsd"`
+			} `json:"supplied"`
+			Borrowed []struct {
+				PoolID    string `json:"poolId"`
+				AmountWei string `json:"amountWei"`
+				ValueUsd  string `json:"valueUsd"`
+			} `json:"borrowed"`
+			CollateralValueUsd string `json:"collateralValueUsd"`
+			BorrowedValueUsd   string `json:"borrowedValueUsd"`
 		} `json:"account"`
 	}
 	if err := json.Unmarshal(accountResp.Result, &accountResult); err != nil {
 		t.Fatalf("decode account: %v", err)
 	}
-	if accountResult.Account.SupplyShares == nil || accountResult.Account.SupplyShares.Cmp(weiBig(500)) != 0 {
-		t.Fatalf("unexpected supply shares: %v", accountResult.Account.SupplyShares)
+	if len(accountResult.Account.Supplied) != 1 || accountResult.Account.Supplied[0].AmountWei != weiBig(500).String() {
+		t.Fatalf("unexpected supplied positions: %+v", accountResult.Account.Supplied)
 	}
-	if accountResult.Account.CollateralZNHB == nil || accountResult.Account.CollateralZNHB.Cmp(weiBig(300)) != 0 {
-		t.Fatalf("unexpected collateral: %v", accountResult.Account.CollateralZNHB)
+	if got := decimalToWei(t, accountResult.Account.CollateralValueUsd); got.Cmp(weiBig(300)) != 0 {
+		t.Fatalf("unexpected collateral: %v", accountResult.Account.CollateralValueUsd)
 	}
-	if accountResult.Account.DebtNHB == nil || accountResult.Account.DebtNHB.Sign() != 0 {
-		t.Fatalf("expected zero debt, got %v", accountResult.Account.DebtNHB)
+	if len(accountResult.Account.Borrowed) != 0 || accountResult.Account.BorrowedValueUsd != "0" {
+		t.Fatalf("expected zero debt, got borrowed=%+v borrowedValueUsd=%v", accountResult.Account.Borrowed, accountResult.Account.BorrowedValueUsd)
 	}
 
 	if _, moduleErr := lendingModule.Liquidate("default", [20]byte(liquidatorAddr.Bytes()), [20]byte(borrowerAddr.Bytes())); moduleErr != nil {
@@ -251,18 +277,21 @@ func TestLendingRPCEndpoints(t *testing.T) {
 	borrowerResp := callRPC(t, client, baseURL, token, "lending_getUserAccount", borrowerAddr.String())
 	var borrowerResult struct {
 		Account struct {
-			CollateralZNHB *big.Int `json:"collateralZNHB"`
-			DebtNHB        *big.Int `json:"debtNHB"`
+			Borrowed []struct {
+				AmountWei string `json:"amountWei"`
+			} `json:"borrowed"`
+			CollateralValueUsd string `json:"collateralValueUsd"`
+			BorrowedValueUsd   string `json:"borrowedValueUsd"`
 		} `json:"account"`
 	}
 	if err := json.Unmarshal(borrowerResp.Result, &borrowerResult); err != nil {
 		t.Fatalf("decode borrower: %v", err)
 	}
-	if borrowerResult.Account.DebtNHB == nil || borrowerResult.Account.DebtNHB.Sign() != 0 {
-		t.Fatalf("expected borrower debt cleared, got %v", borrowerResult.Account.DebtNHB)
+	if len(borrowerResult.Account.Borrowed) != 0 || borrowerResult.Account.BorrowedValueUsd != "0" {
+		t.Fatalf("expected borrower debt cleared, got borrowed=%+v borrowedValueUsd=%v", borrowerResult.Account.Borrowed, borrowerResult.Account.BorrowedValueUsd)
 	}
-	if borrowerResult.Account.CollateralZNHB == nil || borrowerResult.Account.CollateralZNHB.Cmp(weiBig(150)) >= 0 {
-		t.Fatalf("expected borrower collateral reduced, got %v", borrowerResult.Account.CollateralZNHB)
+	if got := decimalToWei(t, borrowerResult.Account.CollateralValueUsd); got.Cmp(weiBig(150)) >= 0 {
+		t.Fatalf("expected borrower collateral reduced, got %v", borrowerResult.Account.CollateralValueUsd)
 	}
 
 	err = node.WithState(func(manager *nhbstate.Manager) error {
