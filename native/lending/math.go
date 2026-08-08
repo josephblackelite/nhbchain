@@ -95,6 +95,23 @@ func sharesFromLiquidity(amount, index *big.Int) *big.Int {
 	return scaled
 }
 
+// RedeemableSupply converts a supplier's LP share balance into the
+// underlying NHB liquidity amount using the market's current supply index,
+// mirroring the conversion the engine already applies internally during
+// Withdraw. It is exposed as a read-only accessor for callers (such as the
+// RPC layer) that need to report a supplier's redeemable balance without
+// access to the engine's unexported share-accounting helpers. An unset (nil
+// or zero) index is treated as the initial 1:1 ray index, matching the
+// bootstrap value the engine assigns via ensureMarket before any accrual has
+// occurred.
+func RedeemableSupply(shares, supplyIndex *big.Int) *big.Int {
+	index := supplyIndex
+	if index == nil || index.Sign() == 0 {
+		index = ray
+	}
+	return liquidityFromShares(shares, index)
+}
+
 func liquidityFromShares(shares, index *big.Int) *big.Int {
 	if shares == nil || shares.Sign() <= 0 || index == nil || index.Sign() == 0 {
 		return big.NewInt(0)

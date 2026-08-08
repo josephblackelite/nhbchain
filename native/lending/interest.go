@@ -1,6 +1,9 @@
 package lending
 
-import "math/big"
+import (
+	"math"
+	"math/big"
+)
 
 // InterestModel encapsulates the parameters that shape how interest rates react
 // to market utilisation.
@@ -132,6 +135,28 @@ func (m *InterestModel) SupplyAPY(totalBorrowed, totalSupplied *big.Int, reserve
 	supplyAPY := new(big.Rat).Mul(borrowAPR, utilisation)
 	supplyAPY.Mul(supplyAPY, oneMinusReserve)
 	return supplyAPY
+}
+
+// RateBps converts an annualised rate expressed as a rational fraction, such
+// as the values returned by BorrowAPR or SupplyAPY, into whole basis points
+// rounded to the nearest integer. It is a read-only accessor intended for
+// reporting layers (for example RPC responses) that need a human-friendly
+// figure derived from the real interest-rate curve; it does not participate
+// in any accrual, liquidation, or index math and never mutates its input.
+func RateBps(rate *big.Rat) uint64 {
+	if rate == nil || rate.Sign() <= 0 {
+		return 0
+	}
+	num := new(big.Int).Mul(rate.Num(), big.NewInt(10_000))
+	den := rate.Denom()
+	half := new(big.Int).Add(den, big.NewInt(1))
+	half.Rsh(half, 1)
+	num.Add(num, half)
+	result := new(big.Int).Quo(num, den)
+	if !result.IsUint64() {
+		return math.MaxUint64
+	}
+	return result.Uint64()
 }
 
 func cloneRat(r *big.Rat) *big.Rat {
