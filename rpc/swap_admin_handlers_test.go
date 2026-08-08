@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http/httptest"
@@ -254,5 +255,95 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 	}
 	if !okResp.OK {
 		t.Fatalf("expected ok response on idempotent call")
+	}
+}
+
+func TestHandleSwapSetManualQuoteRefreshesOracle(t *testing.T) {
+	env := newTestEnv(t)
+	minterKey, _ := crypto.GeneratePrivateKey()
+	var minterAddr [20]byte
+	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
+	configureSwapToken(t, env.node, minterAddr)
+
+	recipientKey, _ := crypto.GeneratePrivateKey()
+	var recipient [20]byte
+	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
+
+	// Seed a stale manual quote to simulate a node that has been running past
+	// MaxQuoteAgeSeconds with no way to refresh it (the bug being fixed).
+	env.setManualRate(t, "0.10", time.Now().Add(-time.Hour))
+
+	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-STALE-1")
+	sig := signSwapVoucher(t, minterKey, voucher)
+	payload := map[string]interface{}{
+		"voucher":      voucher,
+		"sig":          "0x" + hex.EncodeToString(sig),
+		"provider":     "nowpayments",
+		"providerTxId": "ORDER-STALE-1",
+	}
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, payload)}}
+	recorder := httptest.NewRecorder()
+	env.server.handleSwapSubmitVoucher(recorder, env.newRequest(), req)
+	if _, rpcErr := decodeRPCResponse(t, recorder); rpcErr == nil || rpcErr.Code != codeInvalidParams {
+		t.Fatalf("expected stale-oracle rejection before refresh, got %+v", rpcErr)
+	}
+
+	// Refresh the manual quote via the new admin RPC endpoint.
+	quoteParams := map[string]interface{}{"base": "USD", "quote": "ZNHB", "rate": "0.10"}
+	quoteReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, quoteParams)}}
+	quoteRecorder := httptest.NewRecorder()
+	env.server.handleSwapSetManualQuote(quoteRecorder, env.newRequest(), quoteReq)
+	raw, rpcErr := decodeRPCResponse(t, quoteRecorder)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rpc error setting manual quote: %+v", rpcErr)
+	}
+	var setResp struct {
+		OK    bool   `json:"ok"`
+		Base  string `json:"base"`
+		Quote string `json:"quote"`
+		Rate  string `json:"rate"`
+	}
+	if err := json.Unmarshal(raw, &setResp); err != nil {
+		t.Fatalf("decode set-manual-quote response: %v", err)
+	}
+	if !setResp.OK || setResp.Base != "USD" || setResp.Quote != "ZNHB" || setResp.Rate != "0.10" {
+		t.Fatalf("unexpected set-manual-quote response: %+v", setResp)
+	}
+
+	// The same rate should now mint successfully since the manual oracle is
+	// fresh again.
+	voucher2 := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-FRESH-1")
+	sig2 := signSwapVoucher(t, minterKey, voucher2)
+	payload2 := map[string]interface{}{
+		"voucher":      voucher2,
+		"sig":          "0x" + hex.EncodeToString(sig2),
+		"provider":     "nowpayments",
+		"providerTxId": "ORDER-FRESH-1",
+	}
+	req2 := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, payload2)}}
+	recorder2 := httptest.NewRecorder()
+	env.server.handleSwapSubmitVoucher(recorder2, env.newRequest(), req2)
+	if _, rpcErr2 := decodeRPCResponse(t, recorder2); rpcErr2 != nil {
+		t.Fatalf("expected voucher to mint after manual quote refresh, got %+v", rpcErr2)
+	}
+}
+
+func TestHandleSwapSetManualQuoteInvalidPayload(t *testing.T) {
+	env := newTestEnv(t)
+
+	cases := []map[string]interface{}{
+		{"base": "", "quote": "ZNHB", "rate": "1.0"},
+		{"base": "USD", "quote": "", "rate": "1.0"},
+		{"base": "USD", "quote": "ZNHB", "rate": ""},
+		{"base": "USD", "quote": "ZNHB", "rate": "not-a-number"},
+		{"base": "USD", "quote": "ZNHB", "rate": "-1.0"},
+	}
+	for i, params := range cases {
+		req := &RPCRequest{ID: i + 1, Params: []json.RawMessage{marshalParam(t, params)}}
+		recorder := httptest.NewRecorder()
+		env.server.handleSwapSetManualQuote(recorder, env.newRequest(), req)
+		if _, rpcErr := decodeRPCResponse(t, recorder); rpcErr == nil || rpcErr.Code != codeInvalidParams {
+			t.Fatalf("case %d: expected invalid params, got %+v", i, rpcErr)
+		}
 	}
 }

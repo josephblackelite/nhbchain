@@ -977,18 +977,22 @@ func (e *Engine) RecordPrice(base, quote string, rate float64, updated time.Time
 }
 
 // CurrentPrice returns the currently cached rate for the requested pair as a
-// float along with the timestamp of the observation.
-func (e *Engine) CurrentPrice(base, quote string) (float64, time.Time, bool) {
+// float along with the timestamp of the observation, plus whether that
+// observation is stale under the same freshness window lookupPrice enforces
+// (e.MaxQuoteAge/priceAges). The returned rate is unchanged either way -
+// stale only tells the caller whether to trust it as "live".
+func (e *Engine) CurrentPrice(base, quote string) (float64, time.Time, bool, bool) {
 	if e == nil {
-		return 0, time.Time{}, false
+		return 0, time.Time{}, false, false
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	point, ok := e.prices[pairKey(base, quote)]
 	if !ok || point.rate <= 0 {
-		return 0, time.Time{}, false
+		return 0, time.Time{}, false, false
 	}
-	return fromRateUnits(point.rate), point.updated, true
+	stale := e.priceAges > 0 && e.clock().Sub(point.updated) > e.priceAges
+	return fromRateUnits(point.rate), point.updated, stale, true
 }
 
 // LedgerBalance returns a snapshot of the treasury ledger for the asset in scaled units.

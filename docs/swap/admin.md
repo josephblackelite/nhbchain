@@ -82,6 +82,25 @@ If the command returns an error, inspect the JSON error message for guidance:
 * `insufficient balance` – the custodial account lacks funds; coordinate with treasury.
 * `voucher not found` – confirm the `providerTxId` matches the PSP record exactly.
 
+### `swap_setManualQuote`
+
+Publishes a manual override rate for a currency pair on the manual oracle tier. Manual rates sit at the bottom of the priority stack (see `docs/treasury/peg-policy.md`) and are the on-call circuit breaker used during custody outages or extreme volatility. Without a fresh call to this endpoint, the manual tier goes stale after `MaxQuoteAgeSeconds` and is skipped by the aggregator.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "swap_setManualQuote",
+  "params": [{"base": "USD", "quote": "ZNHB", "rate": "0.05", "timestamp": 1734000000}]
+}
+```
+
+* `base` / `quote` – currency pair, e.g. `USD` / `ZNHB`.
+* `rate` – decimal string, quote per base (must be positive).
+* `timestamp` – optional Unix seconds; defaults to the current time when omitted.
+
+Record the justification and incident ticket ID before invoking this command, per the break-glass procedure in `docs/treasury/operations.md`.
+
 ## Incident Response
 
 * Spike in `swap.alert.velocity` – confirm PSP behaviour, temporarily raise `VelocityMaxMints` if needed, and log the change.
