@@ -3,6 +3,7 @@ package rpc
 import (
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"strings"
 
