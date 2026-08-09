@@ -2865,6 +2865,51 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 // genuinely can change (a signer gets registered, a pause lifts, a daily
 // bucket resets), so pruning on them could silently discard a transaction
 // that would have succeeded on a later, unrelated block.
+//
+// ErrSwapPriceProofRequired and ErrSwapPriceProofStale (added in round 3)
+// belong in the same "pure function of immutable payload / monotonic state"
+// category as ErrSwapExpired:
+//
+//   - ErrSwapPriceProofRequired fires only when the transaction's OWN
+//     embedded price proof is absent, or its signature is absent, and this
+//     transaction type unconditionally requires both (see RequireSignature
+//     (true) above -- hardcoded, not read from mutable operator config). A
+//     resubmission of the identical transaction bytes can never later carry
+//     a price proof or signature it does not already contain, so this can
+//     never succeed later either.
+//   - ErrSwapPriceProofStale fires when the block timestamp has advanced
+//     more than swap.Config.MaxQuoteAgeSeconds past the price proof's own
+//     fixed signing timestamp. Block time (n.currentTime(), read fresh on
+//     every CreateBlock attempt) only moves forward, so once a specific
+//     proof is stale relative to it, it can only ever become MORE stale on
+//     every later retry -- exactly ErrSwapExpired's reasoning, just applied
+//     to the quote's freshness window instead of the voucher's own expiry.
+//     Round 1/2's reported liveness bug (an entirely ordinary voucher that
+//     sits in the mempool past the default 120s quote window permanently
+//     wedges the proposing validator) lives here. Note: native/swap/engine.
+//     go's Verify also raises this same sentinel for a price-proof
+//     timestamp implausibly far in the FUTURE (>30s ahead of block time,
+//     e.g. signer/validator clock skew); that sub-case is not strictly
+//     monotonic (it can self-resolve once block time catches up), but it
+//     requires a fixed operational clock-skew anomaly to trigger at all, and
+//     pruning it only costs the submitter a fresh resubmission with a
+//     current price proof -- not a validator-wide liveness stall, which is
+//     the far more severe failure mode this whole function exists to avoid.
+//
+// Deliberately still NOT included, by the same mutable-state reasoning as
+// signer-unknown above: ErrSwapPriceProofSignerUnknown (the SwapPriceSigner
+// registry is exactly the kind of mutable operator config the existing
+// exclusions already guard -- an operator could register a signer for that
+// provider after this transaction was submitted, and a later resubmission
+// would then succeed) and ErrSwapPriceProofInvalid (its signature-mismatch
+// case is checked against that SAME mutable SwapPriceSigner registry --
+// recovered-pubkey-vs-currently-registered-signer -- so a correction to a
+// stale/incorrect signer registration could likewise make a later
+// resubmission succeed; ErrSwapPriceProofInvalid also covers pure-payload
+// causes like domain/pair mismatch and a non-positive rate, but Go's
+// errors.Is cannot distinguish which branch fired, so the conservative,
+// correct choice is to leave the whole sentinel unpruned rather than risk
+// silently and permanently dropping a valid pending mint).
 func isPrunableProposalError(err error) bool {
 	if errors.Is(err, ErrNonceMismatch) {
 		return true
@@ -2894,7 +2939,9 @@ func isPrunableProposalError(err error) bool {
 		errors.Is(err, ErrSwapInvalidDomain),
 		errors.Is(err, ErrSwapInvalidChainID),
 		errors.Is(err, ErrSwapInvalidToken),
-		errors.Is(err, ErrSwapInvalidSignature):
+		errors.Is(err, ErrSwapInvalidSignature),
+		errors.Is(err, ErrSwapPriceProofRequired),
+		errors.Is(err, ErrSwapPriceProofStale):
 		return true
 	}
 	return false
@@ -6949,10 +6996,30 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 // SwapSubmitVoucher enqueues a fiat-gateway-attested ZNHB mint voucher as a
 // signed TxTypeSwapVoucherMint transaction and returns immediately -- it does
 // NOT wait for the transaction to be included in a block. This mirrors
-// MintWithSignature's contract (and the otc-gateway's already-built
-// awaitMinted polling flow, which already handles minted=false by polling
+// MintWithSignature's contract, and the otc-gateway's existing awaitMinted
+// polling loop (services/otc-gateway/server/sign_submit.go) is written to
+// tolerate exactly that: it already handles minted=false by polling
 // swap_voucher_get / this method's ledger record until the voucher
-// transitions to Minted).
+// transitions to Minted.
+//
+// CORRECTION (round 3): an earlier version of this comment claimed the
+// otc-gateway needed "zero gateway-side changes" for this RPC-shape
+// contract. That is false and pre-dates this whole effort (present in
+// round 1, round 2, and the original pre-conversion code alike): the
+// gateway's request-building code (services/otc-gateway/server/
+// sign_submit.go, via swaprpc/client.go's SubmitMintVoucher) actually
+// builds and sends a core.MintVoucher-shaped JSON payload -- the shape for
+// the unrelated mint_with_sig RPC -- to swap_submitVoucher, whose handler
+// (rpc/swap_handlers.go's handleSwapSubmitVoucher) decodes into a
+// swap.VoucherV1, a different shape with required domain/orderId/nonce
+// fields that MintVoucher's encoding never produces. Every real submission
+// from the actual gateway therefore fails immediately at JSON-decode with
+// "voucher: domain required", before any of the transaction-type or
+// price-proof logic above is ever reached. This is a separate,
+// pre-existing, unrelated payload-shape bug in the otc-gateway itself --
+// out of scope for the swap-voucher-mint TxType conversion this file
+// implements -- and still needs its own fix before the fiat-onramp flow
+// works end-to-end in production.
 //
 // Prior to this, SwapSubmitVoucher performed a direct, non-consensus
 // state-trie write inside this RPC handler: its duplicate-submission check

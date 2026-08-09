@@ -466,3 +466,125 @@ func TestSwapVoucherMintDuplicateDoesNotBlockProposal(t *testing.T) {
 		t.Fatalf("expected mempool empty after commit (pruned duplicate must not linger), got %d", stillPending)
 	}
 }
+
+// TestSwapVoucherMintStalePriceProofDoesNotBlockProposal closes the round 3
+// gap: ErrSwapPriceProofStale has the exact same "monotonic, once-true-
+// always-true" property as ErrSwapExpired (already prunable since round 2)
+// -- a price proof's timestamp is fixed at signing time and block time only
+// ever increases, so once a proof exceeds swap.Config.MaxQuoteAgeSeconds
+// (120s here, matching setupSwapVoucherTestNode's config and the real
+// production default) it can never become fresh again for that specific
+// transaction. An entirely ordinary, non-duplicate, non-adversarial voucher
+// that simply sits in the mempool longer than that window -- routine under
+// any mempool backlog or round delay, no race required -- must be pruned
+// from the proposal like any other permanently-doomed transaction, not
+// treated as a hard error that aborts the ENTIRE block and leaves the
+// transaction stuck to fail identically every round until the voucher's
+// own, much longer, expiry.
+func TestSwapVoucherMintStalePriceProofDoesNotBlockProposal(t *testing.T) {
+	node, minterKey, oracleKey := setupSwapVoucherTestNode(t)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+	recipient := toAddress(recipientKey)
+
+	current := time.Now().UTC().Truncate(time.Second)
+	node.SetTimeSource(func() time.Time { return current })
+	defer node.SetTimeSource(nil)
+
+	// Voucher A: submitted now, with a price proof signed now. Its own
+	// voucher expiry is a full hour out (swapVoucherTestVoucher's default)
+	// -- only the price proof's much shorter freshness window is meant to
+	// be exercised here.
+	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-STALEPROOF-A")
+	sigA := signSwapVoucherCore(t, minterKey, voucherA)
+	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", current)
+	submissionA := &swap.VoucherSubmission{
+		Voucher: &voucherA, Signature: sigA, Provider: "nowpayments",
+		ProviderTxID: "STALEPROOF-1", PriceProof: proofA,
+	}
+	if _, _, err := node.SwapSubmitVoucher(submissionA); err != nil {
+		t.Fatalf("submit voucher A: %v", err)
+	}
+	if got := len(node.mempool); got != 1 {
+		t.Fatalf("expected 1 transaction in mempool after submitting A, got %d", got)
+	}
+
+	// Advance the node's clock past MaxQuoteAgeSeconds (120s), simulating
+	// ordinary mempool residency time under backlog or a slow round --
+	// deliberately NOT touching the voucher's own, much longer, expiry.
+	current = current.Add(130 * time.Second)
+
+	// Voucher B: a second, entirely unrelated, genuinely valid transaction
+	// submitted after the clock advance, with a freshly-signed price proof
+	// (as a real caller re-quoting at proposal time would produce). It must
+	// still land in the same block as proof that only the stale
+	// transaction is pruned, not the whole proposal.
+	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-STALEPROOF-B")
+	sigB := signSwapVoucherCore(t, minterKey, voucherB)
+	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", current)
+	submissionB := &swap.VoucherSubmission{
+		Voucher: &voucherB, Signature: sigB, Provider: "nowpayments",
+		ProviderTxID: "STALEPROOF-2", PriceProof: proofB,
+	}
+	if _, _, err := node.SwapSubmitVoucher(submissionB); err != nil {
+		t.Fatalf("submit voucher B: %v", err)
+	}
+
+	pending := append([]*types.Transaction(nil), node.mempool...)
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending transactions (A and B), got %d", len(pending))
+	}
+
+	block, err := node.CreateBlock(pending)
+	if err != nil {
+		t.Fatalf("CreateBlock must not abort the whole proposal for one stale price proof: %v", err)
+	}
+	if block == nil {
+		t.Fatalf("expected a block to be produced")
+	}
+
+	// B must have been included; A (stale price proof) must have been
+	// pruned, not included.
+	foundB := false
+	for _, tx := range block.Transactions {
+		submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+		if err != nil {
+			continue
+		}
+		if submission.ProviderTxID == "STALEPROOF-2" {
+			foundB = true
+		}
+		if submission.ProviderTxID == "STALEPROOF-1" {
+			t.Fatalf("expected the stale-price-proof transaction (voucher A) to be pruned, not included in the block")
+		}
+	}
+	if !foundB {
+		t.Fatalf("expected the unrelated valid transaction (voucher B) to still be included in the block")
+	}
+
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	// The pruned stale-price-proof transaction must not be stuck in the
+	// mempool either -- it was dropped, not left to be re-proposed and fail
+	// identically every round until the voucher's own expiry.
+	node.mempoolMu.Lock()
+	stillPending := len(node.mempool)
+	node.mempoolMu.Unlock()
+	if stillPending != 0 {
+		t.Fatalf("expected mempool empty after commit (pruned stale-price-proof tx must not linger), got %d", stillPending)
+	}
+
+	// And the genuinely valid mint (voucher B) must have actually landed.
+	account, err := node.GetAccount(recipient[:])
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if account.BalanceZNHB.Cmp(voucherB.Amount) != 0 {
+		t.Fatalf("expected ZNHB balance %s from voucher B, got %s", voucherB.Amount, account.BalanceZNHB)
+	}
+}
