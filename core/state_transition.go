@@ -79,6 +79,19 @@ var (
 	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
 	// ErrStakePaused indicates governance has paused staking mutations.
 	ErrStakePaused = errors.New("staking: module paused")
+	// ErrHeartbeatTooSoon indicates applyHeartbeat rejected a heartbeat
+	// transaction because not enough time has elapsed since the account's
+	// on-chain EngagementLastHeartbeat (the rate-limit check) or because
+	// its payload.Timestamp does not advance past it (the replay check).
+	// Both are timing-ordering rejections specific to a single
+	// transaction, not signs of a malformed or malicious transaction, so
+	// isPrunableProposalError treats this the same way as
+	// ErrNonceMismatch: drop just this transaction from the proposal
+	// instead of aborting the whole block. See core/node.go's
+	// pendingHeartbeatFee and EngagementValidatorHeartbeatDue for the
+	// submission-side mechanics that keep a well-behaved caller from ever
+	// producing a transaction that hits this in practice.
+	ErrHeartbeatTooSoon = errors.New("heartbeat too soon")
 )
 
 const stakePauseReasonGovernance = "paused by governance"
@@ -4116,10 +4129,10 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, s
 		minDelta := int64(sp.engagementConfig.HeartbeatInterval.Seconds())
 		last := int64(senderAccount.EngagementLastHeartbeat)
 		if payload.Timestamp <= last {
-			return fmt.Errorf("heartbeat replay detected")
+			return fmt.Errorf("heartbeat replay detected: %w", ErrHeartbeatTooSoon)
 		}
 		if payload.Timestamp-last < minDelta {
-			return fmt.Errorf("heartbeat rate limited")
+			return fmt.Errorf("heartbeat rate limited: %w", ErrHeartbeatTooSoon)
 		}
 	}
 

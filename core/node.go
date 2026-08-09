@@ -2774,7 +2774,21 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 }
 
 func isPrunableProposalError(err error) bool {
-	return errors.Is(err, ErrNonceMismatch)
+	// ErrHeartbeatTooSoon covers applyHeartbeat's rate-limit and replay
+	// rejections. Those are timing-ordering problems specific to a single
+	// heartbeat transaction (see ErrHeartbeatTooSoon's doc comment in
+	// state_transition.go) -- a validator's own liveness ping should never
+	// be able to abort an entire block proposal for everyone else's
+	// transactions just because it arrived slightly too soon. Pruning it
+	// here is a defense-in-depth backstop: normally a well-behaved
+	// submitter (see EngagementValidatorHeartbeatDue and
+	// pendingHeartbeatFee) never produces a heartbeat transaction that
+	// reaches this check already doomed, and the admission-time
+	// simulation in validateTransaction filters most bad ones out before
+	// they ever enter the mempool -- but that simulation can be disabled
+	// (SetTransactionSimulationEnabled), so CreateBlock must not assume it
+	// always ran.
+	return errors.Is(err, ErrNonceMismatch) || errors.Is(err, ErrHeartbeatTooSoon)
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
@@ -5657,6 +5671,84 @@ func (n *Node) EngagementRegisterDevice(addr [20]byte, deviceID string) (string,
 	return n.engagementMgr.RegisterDevice(addr, deviceID)
 }
 
+// HeartbeatSubmissionMargin is added on top of the configured
+// engagement.Config.HeartbeatInterval before EngagementValidatorHeartbeatDue
+// will report that another heartbeat submission is due. A periodic ticker
+// whose nominal period exactly equals the enforced minimum interval races
+// ordinary scheduling/processing jitter: at second-granularity, "elapsed
+// since last heartbeat" frequently rounds down to one second less than the
+// interval, producing spurious "heartbeat rate limited" rejections purely
+// from timing noise rather than any real problem. This margin is small
+// relative to the 15-minute validator-readiness grace window
+// (validatorReadinessMinGrace in epochs.go), so it costs nothing in
+// practice while making the interval comparison immune to jitter on that
+// scale.
+const HeartbeatSubmissionMargin = 15 * time.Second
+
+// EngagementHeartbeatInterval returns the minimum spacing enforced between
+// heartbeats, as configured on the node's engagement manager -- which is
+// itself constructed from the same engagement.Config the StateProcessor
+// uses for applyHeartbeat's on-chain rate check (see NewNode's
+// engagement.NewManager(stateProcessor.EngagementConfig()) call), so the
+// two never drift apart. Exposed so callers deciding "is it time to submit
+// another heartbeat" against real chain state don't need to hard-code a
+// duplicate constant.
+func (n *Node) EngagementHeartbeatInterval() time.Duration {
+	if n == nil || n.engagementMgr == nil {
+		return engagement.DefaultConfig().HeartbeatInterval
+	}
+	if interval := n.engagementMgr.HeartbeatInterval(); interval > 0 {
+		return interval
+	}
+	return engagement.DefaultConfig().HeartbeatInterval
+}
+
+// EngagementValidatorHeartbeatDue reports whether enough time has elapsed,
+// per the authoritative on-chain EngagementLastHeartbeat recorded against
+// addr's account, to attempt another heartbeat submission as of now.
+//
+// This exists specifically for the automatic validator heartbeat loop
+// (cmd/nhb/main.go's startValidatorHeartbeatLoop). That loop used to decide
+// "is it time yet" purely from core/engagement.Manager's local, in-memory
+// per-device bookkeeping, which resets to empty on every process restart --
+// while the authoritative on-chain EngagementLastHeartbeat does not. That
+// mismatch let a freshly-restarted process immediately queue a heartbeat
+// transaction that the mempool's deterministic admission-time re-check
+// (validateTransaction's scratch-state simulation of applyHeartbeat, which
+// evaluates against the real, still-recent on-chain state) would then
+// reject as too soon, wasting the attempt. Consulting the real on-chain
+// value here instead closes that gap: a restart can never fool this check
+// into thinking no heartbeat has happened recently when one actually has.
+//
+// The local engagement manager's device-registration/token bookkeeping is
+// untouched by this and continues to serve its own purpose (authenticating
+// the caller and rejecting literal timestamp replay) for every caller,
+// including this one and the RPC-exposed manual submission path.
+//
+// A HeartbeatSubmissionMargin is added on top of the configured interval so
+// ordinary scheduling/processing jitter around a periodic ticker can never
+// cause the comparison to be satisfied or rejected by second-rounding
+// alone -- see HeartbeatSubmissionMargin's doc comment for the underlying
+// race this avoids.
+func (n *Node) EngagementValidatorHeartbeatDue(addr []byte, now time.Time) (bool, error) {
+	if n == nil {
+		return false, fmt.Errorf("node unavailable")
+	}
+	account, err := n.GetAccount(addr)
+	if err != nil {
+		return false, err
+	}
+	if account == nil || account.EngagementLastHeartbeat == 0 {
+		// No on-chain heartbeat has ever been recorded for this account --
+		// nothing to rate-limit against yet, matching applyHeartbeat's own
+		// "EngagementLastHeartbeat != 0" guard.
+		return true, nil
+	}
+	minElapsed := n.EngagementHeartbeatInterval() + HeartbeatSubmissionMargin
+	elapsed := now.UTC().Unix() - int64(account.EngagementLastHeartbeat)
+	return elapsed >= int64(minElapsed.Seconds()), nil
+}
+
 func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64) (int64, error) {
 	if n.engagementMgr == nil {
 		return 0, fmt.Errorf("engagement manager unavailable")
@@ -5716,8 +5808,31 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 // existing mempool transaction from addr at nonce, if one is already
 // pending, so a heartbeat retry can bump its fee instead of being rejected
 // by the mempool's replace-by-fee rule.
+//
+// This must scan the raw mempool (n.mempool, under n.mempoolMu) directly
+// rather than going through GetMempool(). GetMempool() exists for BFT
+// proposal-building (consensus/bft/bft.go) and the consensus gRPC service
+// (consensus/service/server.go's GetMempool handler), and it has a side
+// effect that makes it unsuitable as a passive peek: every transaction it
+// returns gets marked in n.proposedTxs and is excluded from every
+// subsequent call until the block that (attempted to) include it is
+// resolved via CreateBlock's own bookkeeping. A validator that isn't
+// currently the active block proposer never resolves that bookkeeping
+// through its own CreateBlock, so once anything -- an actual proposal
+// attempt, or the consensus gRPC endpoint if something polls it -- calls
+// GetMempool() once and observes the still-pending heartbeat transaction,
+// every later call here would see it as already excluded and return nil.
+// That makes gasPrice silently fall back to the default of 1, which
+// collides with the still-pending transaction's own price of 1
+// ("already exists and fee is not higher"), stranding the account's nonce
+// indefinitely -- this was confirmed as the actual root cause of the
+// multi-hour stuck-nonce pattern observed in production. Reading
+// n.mempool directly has no such side effect and always reflects exactly
+// what is physically queued right now, proposed or not.
 func (n *Node) pendingHeartbeatFee(addr []byte, nonce uint64) *big.Int {
-	for _, existing := range n.GetMempool() {
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	for _, existing := range n.mempool {
 		if existing == nil || existing.Nonce != nonce {
 			continue
 		}
