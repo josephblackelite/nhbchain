@@ -567,8 +567,47 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 		return
 	}
 
+	// lastAttempt tracks, purely in-process, the last time this loop
+	// actually called EngagementSubmitHeartbeat -- independent of whether
+	// that attempt ends up mined on-chain. It complements
+	// node.EngagementValidatorHeartbeatDue's on-chain-driven check: if a
+	// submitted heartbeat's on-chain EngagementLastHeartbeat is slow to
+	// advance (for example due to ordinary consensus/mining latency),
+	// EngagementValidatorHeartbeatDue alone would keep reporting "due" on
+	// every tick once its threshold is first crossed, causing this loop to
+	// retry at the ticker's raw ~60s cadence -- which would re-expose the
+	// exact second-rounding jitter race this loop exists to avoid, just
+	// measured against our own last attempt instead of the account's
+	// on-chain timestamp. Requiring both checks to agree keeps every real
+	// attempt spaced by at least the interval-plus-margin regardless of
+	// how quickly heartbeats actually land on-chain. A zero value means
+	// "no attempt yet this process run" and never blocks the first one.
+	var lastAttempt time.Time
+
 	submit := func() {
-		if _, err := node.EngagementSubmitHeartbeat(deviceID, token, 0); err != nil {
+		now := time.Now().UTC()
+		minElapsed := node.EngagementHeartbeatInterval() + core.HeartbeatSubmissionMargin
+		if !lastAttempt.IsZero() && now.Sub(lastAttempt) < minElapsed {
+			return
+		}
+		due, err := node.EngagementValidatorHeartbeatDue(validatorAddrBytes[:], now)
+		if err != nil {
+			logger.Warn("validator heartbeat readiness check failed", slog.Any("error", err))
+			return
+		}
+		if !due {
+			return
+		}
+		lastAttempt = now
+		// Pass the timestamp explicitly (never 0) so the value baked into
+		// the signed transaction is exactly the "now" this readiness
+		// check already validated against real on-chain state, rather
+		// than letting the local engagement manager independently
+		// recompute wall-clock time and gate on its own ephemeral,
+		// restart-resetting bookkeeping. See
+		// Node.EngagementValidatorHeartbeatDue's doc comment for why that
+		// ephemeral bookkeeping is unreliable for this specific caller.
+		if _, err := node.EngagementSubmitHeartbeat(deviceID, token, now.Unix()); err != nil {
 			logger.Warn("validator heartbeat submission failed", slog.Any("error", err))
 		}
 	}
