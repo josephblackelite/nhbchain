@@ -85,6 +85,84 @@ func signSwapVoucher(t *testing.T, key *crypto.PrivateKey, voucher swap.VoucherV
 	return sig
 }
 
+// registerSwapPriceSigner writes the trusted signer address for a price-proof
+// provider directly into node state. This mirrors how other tests in this
+// suite (e.g. TestHandleSwapVoucherReverse) seed state via node.WithState --
+// safe for a single-node test harness, but NOT how production would do this
+// (see the round-2 fix report: there is currently no consensus-safe,
+// governance-controlled way to register a signer in production without
+// risking the same non-replayable direct-state-write bug class tracked
+// elsewhere in this codebase).
+func registerSwapPriceSigner(t *testing.T, node *core.Node, provider string, key *crypto.PrivateKey) {
+	t.Helper()
+	var addr [20]byte
+	copy(addr[:], key.PubKey().Address().Bytes())
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return m.SwapSetPriceSigner(provider, addr)
+	}); err != nil {
+		t.Fatalf("register price signer: %v", err)
+	}
+}
+
+// signedSwapPriceProof builds a ZNHB/USD price proof signed by key, matching
+// the domain/pair/provider a real registered oracle signer would produce.
+// TxTypeSwapVoucherMint's deterministic execution path (fix #3) requires
+// every submission to carry one of these -- unlike the retired direct-write
+// RPC path, an unsigned or missing price proof is always rejected regardless
+// of the general swap.risk.PriceProofSignatureRequired toggle.
+func signedSwapPriceProof(t *testing.T, key *crypto.PrivateKey, provider, rate string, ts time.Time) *swap.PriceProof {
+	t.Helper()
+	proof, err := swap.NewPriceProof(swap.PriceProofDomainV1, provider, "ZNHB/USD", rate, ts.UTC().Unix(), nil)
+	if err != nil {
+		t.Fatalf("build price proof: %v", err)
+	}
+	hash, err := proof.Hash()
+	if err != nil {
+		t.Fatalf("hash price proof: %v", err)
+	}
+	sig, err := ethcrypto.Sign(hash, key.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign price proof: %v", err)
+	}
+	proof.Signature = sig
+	return proof
+}
+
+// priceProofParam renders a *swap.PriceProof into the JSON shape
+// swap_submitVoucher's "priceProof" payload field expects.
+func priceProofParam(proof *swap.PriceProof) map[string]interface{} {
+	rate := ""
+	if proof.Rate != nil {
+		rate = proof.Rate.FloatString(18)
+	}
+	return map[string]interface{}{
+		"domain":    proof.Domain,
+		"provider":  proof.Provider,
+		"pair":      proof.Base + "/" + proof.Quote,
+		"rate":      rate,
+		"timestamp": proof.Timestamp.UTC().Unix(),
+		"signature": "0x" + hex.EncodeToString(proof.Signature),
+	}
+}
+
+// mineSwapBlock drains the mempool into a new block and commits it,
+// exercising the same AddTransaction -> mempool -> CreateBlock ->
+// CommitBlock path a real validator round takes -- the "genuine end-to-end
+// coverage" round 1 was missing, since minted balance/ledger/events for
+// TxTypeSwapVoucherMint now only land after consensus, not synchronously
+// from the RPC call.
+func mineSwapBlock(t *testing.T, node *core.Node) {
+	t.Helper()
+	pending := node.GetMempool()
+	block, err := node.CreateBlock(pending)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+}
+
 func TestSwapSubmitVoucherInvalidDomain(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
@@ -227,6 +305,9 @@ func TestSwapSubmitVoucherInvalidSigner(t *testing.T) {
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
 
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
+
 	rogueKey, _ := crypto.GeneratePrivateKey()
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
@@ -235,12 +316,14 @@ func TestSwapSubmitVoucherInvalidSigner(t *testing.T) {
 	env.setManualRate(t, "0.10", time.Now())
 	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-123")
 	sig := signSwapVoucher(t, rogueKey, voucher)
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "ORDER-123",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 5, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -254,12 +337,22 @@ func TestSwapSubmitVoucherInvalidSigner(t *testing.T) {
 	}
 }
 
+// TestSwapSubmitVoucherSuccessAndReplay is the primary genuine end-to-end
+// test for the fix: it drives the real Node.SwapSubmitVoucher -> AddTransaction
+// -> mempool -> CreateBlock -> CommitBlock path (not just a StateProcessor-only
+// unit test) and only checks minted balance/ledger/events AFTER the block
+// commits, matching how minting actually happens now. It then verifies the
+// network-wide-agreed duplicate guard (ledger.Exists) rejects a replay of the
+// same providerTxID once the first mint is durably committed to state.
 func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
 	var minterAddr [20]byte
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
+
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
 
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
@@ -269,11 +362,13 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	chainID := env.node.Chain().ChainID()
 	voucher := buildSwapVoucher(t, chainID, recipient, "0.10", "ORDER-123")
 	sig := signSwapVoucher(t, minterKey, voucher)
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "ORDER-123",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 6, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -289,11 +384,31 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	if err := json.Unmarshal(result, &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !response.Minted {
-		t.Fatalf("expected minted true")
+	if response.Minted {
+		t.Fatalf("expected minted false -- submission now only enqueues, consensus mints")
 	}
 	if response.TxHash == "" {
 		t.Fatalf("expected tx hash")
+	}
+	if got := env.node.MempoolSize(); got != 1 {
+		t.Fatalf("expected 1 pending transaction in mempool before commit, got %d", got)
+	}
+
+	// Balance must not move until the transaction is actually included in a
+	// committed block -- this is the whole point of the fix (real,
+	// network-wide-agreed execution instead of a direct RPC-time write).
+	preCommit, err := env.node.GetAccount(recipient[:])
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if preCommit.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected zero balance before commit, got %s", preCommit.BalanceZNHB.String())
+	}
+
+	mineSwapBlock(t, env.node)
+
+	if got := env.node.MempoolSize(); got != 0 {
+		t.Fatalf("expected mempool empty after commit, got %d", got)
 	}
 
 	account, err := env.node.GetAccount(recipient[:])
@@ -305,9 +420,6 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	}
 
 	evts := env.node.Events()
-	if len(evts) != 3 {
-		t.Fatalf("expected 3 events got %d", len(evts))
-	}
 	var mintedEvt, proofEvt, supplyEvt *types.Event
 	for i := range evts {
 		switch evts[i].Type {
@@ -344,7 +456,10 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 		t.Fatalf("expected priceProofId in proof event")
 	}
 
-	// Replay should be rejected
+	// Replay after commit: the providerTxID is now durably recorded in the
+	// committed ledger (a real, network-wide-agreed check once state is
+	// synced), not just this node's in-memory mempool, so the resubmission
+	// must be rejected deterministically by applySwapVoucherMintTransaction.
 	replayRec := httptest.NewRecorder()
 	env.server.handleSwapSubmitVoucher(replayRec, env.newRequest(), req)
 	_, replayErr := decodeRPCResponse(t, replayRec)
@@ -369,6 +484,10 @@ func TestSwapSubmitVoucherUnsignedProofRejected(t *testing.T) {
 		SlippageBps:        50,
 		OraclePriority:     []string{"manual"},
 		Risk: swap.RiskConfig{
+			// This toggle is deliberately irrelevant to the assertion below:
+			// TxTypeSwapVoucherMint requires a signed price proof
+			// unconditionally now (fix #3), regardless of
+			// PriceProofSignatureRequired's value.
 			PriceProofSignatureRequired: true,
 		},
 	}
@@ -403,36 +522,59 @@ func TestSwapSubmitVoucherUnsignedProofRejected(t *testing.T) {
 	}
 }
 
-func TestSwapSubmitVoucherStaleOracle(t *testing.T) {
+// TestSwapSubmitVoucherPriceProofStale covers fix #3's freshness guard: the
+// deterministic path no longer calls a live oracle at all, so staleness is
+// now judged purely from the price proof's own embedded timestamp against
+// swap.MaxQuoteAgeSeconds -- this replaces the old
+// TestSwapSubmitVoucherStaleOracle, whose premise (a stale *live oracle*
+// quote blocking the mint) no longer applies once oracle.GetRate() was
+// removed from the execution path.
+func TestSwapSubmitVoucherPriceProofStale(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
 	var minterAddr [20]byte
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
 
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
+
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
 
-	env.setManualRate(t, "0.10", time.Now().Add(-time.Hour))
+	env.setManualRate(t, "0.10", time.Now())
 	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-STALE")
 	sig := signSwapVoucher(t, minterKey, voucher)
+	// swap.MaxQuoteAgeSeconds is 120 in this env's config; a proof signed an
+	// hour ago must be rejected as stale.
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now().Add(-time.Hour))
 
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "ORDER-STALE",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 7, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
 	env.server.handleSwapSubmitVoucher(recorder, env.newRequest(), req)
 	_, rpcErr := decodeRPCResponse(t, recorder)
 	if rpcErr == nil || rpcErr.Code != codeInvalidParams {
-		t.Fatalf("expected invalid params due to stale oracle, got %+v", rpcErr)
+		t.Fatalf("expected invalid params due to stale price proof, got %+v", rpcErr)
+	}
+	if !strings.Contains(rpcErr.Message, core.ErrSwapPriceProofStale.Error()) {
+		t.Fatalf("expected stale price proof message, got %q", rpcErr.Message)
 	}
 }
 
+// TestSwapSubmitVoucherSlippageExceeded now supplies a genuinely valid,
+// signed price proof whose rate disagrees with the voucher's own signed
+// Amount by more than swap.SlippageBps -- exercising the real deterministic
+// slippage gate (computed from the price proof's rate, not a live oracle
+// call) instead of accidentally passing because no price proof was supplied
+// at all.
 func TestSwapSubmitVoucherSlippageExceeded(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
@@ -440,20 +582,28 @@ func TestSwapSubmitVoucherSlippageExceeded(t *testing.T) {
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
 
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
+
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
 
 	env.setManualRate(t, "0.10", time.Now())
 	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-SLIP")
+	// Voucher.Amount now claims double the ZNHB the price proof's rate
+	// would justify for the same FiatAmount -- well beyond the default 50bps
+	// slippage allowance.
 	voucher.Amount = new(big.Int).Mul(voucher.Amount, big.NewInt(2))
 	sig := signSwapVoucher(t, minterKey, voucher)
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "ORDER-SLIP",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 8, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -461,6 +611,9 @@ func TestSwapSubmitVoucherSlippageExceeded(t *testing.T) {
 	_, rpcErr := decodeRPCResponse(t, recorder)
 	if rpcErr == nil || rpcErr.Code != codeInvalidParams {
 		t.Fatalf("expected invalid params due to slippage, got %+v", rpcErr)
+	}
+	if !strings.Contains(rpcErr.Message, core.ErrSwapSlippageExceeded.Error()) {
+		t.Fatalf("expected slippage exceeded message, got %q", rpcErr.Message)
 	}
 }
 
@@ -471,6 +624,9 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
 
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
+
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
@@ -478,11 +634,13 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	env.setManualRate(t, "0.10", time.Now())
 	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-A")
 	sig := signSwapVoucher(t, minterKey, voucher)
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "PROVIDER-1",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 9, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -495,14 +653,18 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 		t.Fatalf("expected result")
 	}
 
-	// Second voucher with different order but same providerTxId should be rejected.
+	// Second voucher with different order but same providerTxId, still
+	// resident in this node's own mempool (the first hasn't been mined yet)
+	// -- rejected by the local same-mempool dedup check.
 	voucherB := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-B")
 	sigB := signSwapVoucher(t, minterKey, voucherB)
+	proofB := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 	payloadB := map[string]interface{}{
 		"voucher":      voucherB,
 		"sig":          "0x" + hex.EncodeToString(sigB),
 		"provider":     "nowpayments",
 		"providerTxId": "PROVIDER-1",
+		"priceProof":   priceProofParam(proofB),
 	}
 	reqB := &RPCRequest{ID: 10, Params: []json.RawMessage{marshalParam(t, payloadB)}}
 	recorderB := httptest.NewRecorder()
@@ -513,6 +675,12 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	}
 }
 
+// TestSwapSubmitVoucherSanctioned exercises the deterministic,
+// config-driven sanctions deny-list (swap.SanctionsConfig.DenyList) instead
+// of the old Node-level SetSwapSanctionsChecker callback hook -- a Go
+// closure cannot run inside consensus execution (StateProcessor has no
+// access to Node-level callbacks), so the deny-list is now the only sanctions
+// mechanism the deterministic TxTypeSwapVoucherMint path can honour.
 func TestSwapSubmitVoucherSanctioned(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
@@ -520,9 +688,13 @@ func TestSwapSubmitVoucherSanctioned(t *testing.T) {
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
 
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
+
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
+	recipientAddrStr := crypto.MustNewAddress(crypto.NHBPrefix, recipient[:]).String()
 
 	cfg := swap.Config{
 		AllowedFiat:        []string{"USD"},
@@ -530,21 +702,21 @@ func TestSwapSubmitVoucherSanctioned(t *testing.T) {
 		SlippageBps:        50,
 		OraclePriority:     []string{"manual"},
 		Risk:               swap.RiskConfig{SanctionsCheckEnabled: true},
+		Sanctions:          swap.SanctionsConfig{DenyList: []string{recipientAddrStr}},
 	}
 	env.node.SetSwapConfig(cfg)
-	env.node.SetSwapSanctionsChecker(func(addr [20]byte) bool {
-		return addr != recipient
-	})
 
 	env.setManualRate(t, "0.10", time.Now())
 	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-SANCTION")
 	sig := signSwapVoucher(t, minterKey, voucher)
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "ORDER-SANCTION",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 11, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -566,6 +738,9 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
 	configureSwapToken(t, env.node, minterAddr)
 
+	oracleKey, _ := crypto.GeneratePrivateKey()
+	registerSwapPriceSigner(t, env.node, "nowpayments", oracleKey)
+
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
@@ -573,11 +748,13 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	env.setManualRate(t, "0.10", time.Now())
 	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-EXPORT")
 	sig := signSwapVoucher(t, minterKey, voucher)
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
 		"provider":     "nowpayments",
 		"providerTxId": "PROVIDER-EXP",
+		"priceProof":   priceProofParam(proof),
 	}
 	req := &RPCRequest{ID: 11, Params: []json.RawMessage{marshalParam(t, payload)}}
 	recorder := httptest.NewRecorder()
@@ -585,6 +762,11 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	if _, rpcErr := decodeRPCResponse(t, recorder); rpcErr != nil {
 		t.Fatalf("unexpected error: %+v", rpcErr)
 	}
+
+	// The ledger record (what export/list read) only exists once the
+	// transaction is actually committed -- it is not written synchronously
+	// by the RPC call anymore.
+	mineSwapBlock(t, env.node)
 
 	start := time.Now().Add(-time.Hour).Unix()
 	end := time.Now().Add(time.Hour).Unix()

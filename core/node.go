@@ -68,24 +68,24 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db                           storage.Database
-	state                        *StateProcessor
-	chain                        *Blockchain
-	syncMgr                      *syncmgr.Manager
-	validatorKey                 *crypto.PrivateKey
-	mempool                      []*types.Transaction
-	mempoolMu                    sync.Mutex
-	proposedTxs                  map[string]struct{}
-	mempoolLimit                 int
-	allowUnlimitedMempool        bool
-	senderUsage                  map[string]*senderQuotaUsage
-	senderNonces                 map[string]map[uint64]time.Time
-	pendingNonces                map[string]nonceRecord
-	posArrival                   map[string]time.Time
-	txValidationMu               sync.RWMutex
-	txSimulationEnabled          bool
-	bftEngine                    *bft.Engine
-	stateMu                      sync.RWMutex
+	db                    storage.Database
+	state                 *StateProcessor
+	chain                 *Blockchain
+	syncMgr               *syncmgr.Manager
+	validatorKey          *crypto.PrivateKey
+	mempool               []*types.Transaction
+	mempoolMu             sync.Mutex
+	proposedTxs           map[string]struct{}
+	mempoolLimit          int
+	allowUnlimitedMempool bool
+	senderUsage           map[string]*senderQuotaUsage
+	senderNonces          map[string]map[uint64]time.Time
+	pendingNonces         map[string]nonceRecord
+	posArrival            map[string]time.Time
+	txValidationMu        sync.RWMutex
+	txSimulationEnabled   bool
+	bftEngine             *bft.Engine
+	stateMu               sync.RWMutex
 	// selfProposedHash is the header hash of the block CreateBlock most
 	// recently built from the current, possibly-drifted n.state (guarded by
 	// stateMu). ValidateBlock/commitBlock skip the committed-head drift
@@ -96,7 +96,7 @@ type Node struct {
 	// other block (a peer's proposal, a catch-up/synced block) did not come
 	// from this state, so the drift check still applies to it. See
 	// docs/issue30.md item 2 / task #32.
-	selfProposedHash []byte
+	selfProposedHash             []byte
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
 	govPolicy                    governance.ProposalPolicy
@@ -337,6 +337,10 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
+	stateProcessor.SetSwapConfig(n.swapConfig())
+	if n.chain != nil {
+		stateProcessor.SetSwapVoucherChainID(n.chain.ChainID())
+	}
 	if err := stateProcessor.SetEngagementConfig(n.state.EngagementConfig()); err != nil {
 		return err
 	}
@@ -468,6 +472,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	defaultSwapCfg := swap.Config{}.Normalise()
 	stateProcessor.SetSwapPayoutAuthorities(defaultSwapCfg.PayoutAuthorities)
+	stateProcessor.SetSwapConfig(defaultSwapCfg)
+	stateProcessor.SetSwapVoucherChainID(chain.ChainID())
 
 	pLedger, _ := statepotso.NewLedger(nil, nil)
 
@@ -1600,6 +1606,7 @@ func (n *Node) SetSwapConfig(cfg swap.Config) {
 	n.stateMu.Lock()
 	if n.state != nil {
 		n.state.SetSwapPayoutAuthorities(normalised.PayoutAuthorities)
+		n.state.SetSwapConfig(normalised)
 	}
 	n.stateMu.Unlock()
 }
@@ -2344,6 +2351,43 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 		}
 	}
 
+	// Cheap, same-mempool duplicate rejection for TxTypeSwapVoucherMint,
+	// mirroring TxTypeMint's invoiceID dedup above. This only catches a
+	// duplicate resubmission that is CURRENTLY resident in this validator's
+	// own mempool -- it cannot catch the cross-validator race (two
+	// validators each independently synthesize a distinct priceProof for
+	// the same voucher, producing two different transaction hashes that
+	// never sit in the same mempool at the same time). That race is what
+	// applySwapVoucherMintTransaction's ledger.Exists/HasSeenSwapNonce
+	// checks (a real, network-wide-agreed check once state is synced) and
+	// isPrunableProposalError below actually guard against.
+	if tx.Type == types.TxTypeSwapVoucherMint {
+		submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
+		}
+		if submission == nil || submission.Voucher == nil {
+			return fmt.Errorf("%w: %w", ErrInvalidTransaction, ErrSwapVoucherInvalidPayload)
+		}
+		providerTxID := strings.TrimSpace(submission.ProviderTxID)
+		orderID := strings.TrimSpace(submission.Voucher.OrderID)
+		for _, existing := range n.mempool {
+			if existing == nil || existing.Type != types.TxTypeSwapVoucherMint {
+				continue
+			}
+			existingSubmission, err := decodeSwapVoucherMintTransaction(existing.Data)
+			if err != nil || existingSubmission == nil || existingSubmission.Voucher == nil {
+				continue
+			}
+			if providerTxID != "" && strings.TrimSpace(existingSubmission.ProviderTxID) == providerTxID {
+				return ErrSwapDuplicateProviderTx
+			}
+			if orderID != "" && strings.TrimSpace(existingSubmission.Voucher.OrderID) == orderID {
+				return ErrSwapNonceUsed
+			}
+		}
+	}
+
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
@@ -2546,6 +2590,18 @@ func (n *Node) GetMempool() []*types.Transaction {
 					continue
 				}
 			}
+			if tx.Type == types.TxTypeSwapVoucherMint {
+				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= now {
+					if key, keyErr := transactionKey(tx); keyErr == nil {
+						delete(n.proposedTxs, key)
+						if n.posArrival != nil {
+							delete(n.posArrival, key)
+						}
+					}
+					continue
+				}
+			}
 			filtered = append(filtered, tx)
 			if mempool.IsPOSLaneEligible(tx) {
 				lanes.POS = append(lanes.POS, tx)
@@ -2641,7 +2697,13 @@ func transactionKey(tx *types.Transaction) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if tx.Type == types.TxTypeMint {
+	// Senderless/envelope-unsigned transaction types (TxTypeMint,
+	// TxTypeSwapVoucherMint) have no recoverable envelope signature -- keying
+	// solely on hash matches RequiresSignature's classification instead of
+	// hardcoding each type here, so any future senderless type is covered
+	// automatically instead of silently calling tx.From() on a transaction
+	// that was never signed.
+	if !types.RequiresSignature(tx.Type) {
 		return hex.EncodeToString(hash), nil
 	}
 	from, err := tx.From()
@@ -2773,8 +2835,52 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 	n.mempool = filtered
 }
 
+// isPrunableProposalError reports whether a transaction that failed during
+// proposal building (stateCopy.ApplyTransaction in CreateBlock's
+// buildProposalState) is permanently unexecutable and can safely be dropped
+// from the mempool immediately, rather than left resident to be re-proposed
+// (and fail identically) every subsequent round.
+//
+// This matters most for TxTypeSwapVoucherMint: when the same fiat voucher
+// reaches two validators nearly simultaneously (each independently
+// synthesizes its own price proof when the caller omits one, producing
+// distinct transaction hashes local mempool dedup can never catch across
+// nodes), only one can ever commit -- correct, that's the whole point of
+// routing this through consensus. But the LOSING validator's copy of the
+// voucher transaction must be prunable, or CreateBlock aborts the entire
+// proposal (not just this one transaction) every round it tries to include
+// the now-permanently-invalid duplicate, blocking that validator from
+// proposing ANY block, for ANY transaction, until the voucher's own expiry.
+// On a small validator set that can stall block production network-wide.
+//
+// Every error classified prunable here is a pure function of the
+// transaction's OWN immutable payload (decode failure, domain/chainId/token
+// mismatch, unrecoverable signature) or of monotonic state that can never
+// revert once true (a provider transaction ID or order nonce already
+// consumed, a voucher past its fixed expiry) -- so re-proposing the exact
+// same transaction bytes can never succeed later either. Deliberately NOT
+// included: signer-unknown, mint-paused, provider-not-allowed,
+// fiat-not-allowed, slippage/deviation, sanctions, and the velocity/cap risk
+// checks -- those depend on mutable operator config or rolling counters that
+// genuinely can change (a signer gets registered, a pause lifts, a daily
+// bucket resets), so pruning on them could silently discard a transaction
+// that would have succeeded on a later, unrelated block.
 func isPrunableProposalError(err error) bool {
-	return errors.Is(err, ErrNonceMismatch)
+	if errors.Is(err, ErrNonceMismatch) {
+		return true
+	}
+	switch {
+	case errors.Is(err, ErrSwapDuplicateProviderTx),
+		errors.Is(err, ErrSwapNonceUsed),
+		errors.Is(err, ErrSwapExpired),
+		errors.Is(err, ErrSwapVoucherInvalidPayload),
+		errors.Is(err, ErrSwapInvalidDomain),
+		errors.Is(err, ErrSwapInvalidChainID),
+		errors.Is(err, ErrSwapInvalidToken),
+		errors.Is(err, ErrSwapInvalidSignature):
+		return true
+	}
+	return false
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
@@ -2826,6 +2932,13 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 			if tx.Type == types.TxTypeMint {
 				voucher, _, err := decodeMintTransaction(tx.Data)
 				if err != nil || voucher == nil || voucher.Expiry <= timestamp {
+					prunedTxs = append(prunedTxs, tx)
+					continue
+				}
+			}
+			if tx.Type == types.TxTypeSwapVoucherMint {
+				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= timestamp {
 					prunedTxs = append(prunedTxs, tx)
 					continue
 				}
@@ -6715,12 +6828,38 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 	return txHash, nil
 }
 
+// SwapSubmitVoucher enqueues a fiat-gateway-attested ZNHB mint voucher as a
+// signed TxTypeSwapVoucherMint transaction and returns immediately -- it does
+// NOT wait for the transaction to be included in a block. This mirrors
+// MintWithSignature's contract (and the otc-gateway's already-built
+// awaitMinted polling flow, which already handles minted=false by polling
+// swap_voucher_get / this method's ledger record until the voucher
+// transitions to Minted).
+//
+// Prior to this, SwapSubmitVoucher performed a direct, non-consensus
+// state-trie write inside this RPC handler: its duplicate-submission check
+// (ledger.Exists / HasSeenSwapNonce) only ever saw ONE validator's own local
+// state, so the same fiat voucher reaching two validators independently
+// could mint ZNHB twice. Routing through AddTransaction -> mempool -> gossip
+// -> ApplyTransaction makes the duplicate check a real, network-wide-agreed
+// check: see applySwapVoucherMintTransaction in swap_voucher_tx.go for the
+// deterministic execution path every validator now runs identically.
+//
+// Only shallow, stateless shape validation happens here (domain, chain id,
+// basic field presence, signature length) -- exactly mirroring
+// MintWithSignature's own shallow pre-checks. Every stateful check (fiat
+// allow-list, provider allow-list, mint-authority signer match, mandatory
+// price-proof signature verification, slippage, risk limits, sanctions,
+// duplicate providerTxID/orderID) lives solely in
+// applySwapVoucherMintTransaction so there is exactly one implementation of
+// the business rules -- AddTransaction synchronously simulates that same
+// deterministic path via validateTransaction before admitting the
+// transaction to the mempool, so malformed/invalid submissions still fail
+// synchronously from the caller's point of view; only successful
+// submissions become asynchronous (enqueued, not yet minted).
 func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bool, error) {
 	if submission == nil || submission.Voucher == nil {
 		return "", false, fmt.Errorf("swap: voucher required")
-	}
-	if err := nativecommon.Guard(n, moduleSwap); err != nil {
-		return "", false, err
 	}
 	voucher := submission.Voucher
 	if strings.TrimSpace(voucher.Domain) != swap.VoucherDomainV1 {
@@ -6729,7 +6868,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if voucher.ChainID != n.chain.ChainID() {
 		return "", false, ErrSwapInvalidChainID
 	}
-	if voucher.Expiry <= time.Now().Unix() {
+	if voucher.Expiry <= n.currentTime().Unix() {
 		return "", false, ErrSwapExpired
 	}
 	if voucher.Amount == nil || voucher.Amount.Sign() <= 0 {
@@ -6753,438 +6892,41 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if providerTxID == "" {
 		return "", false, fmt.Errorf("swap: providerTxId required")
 	}
-	signature := append([]byte(nil), submission.Signature...)
-	if len(signature) == 0 {
+	if len(submission.Signature) != 65 {
 		return "", false, ErrSwapInvalidSignature
 	}
-	priceProof := submission.PriceProof
 	token := strings.ToUpper(strings.TrimSpace(voucher.Token))
 	if token != "ZNHB" {
 		return "", false, ErrSwapInvalidToken
 	}
-	hash := voucher.Hash()
-	if len(hash) == 0 {
-		return "", false, ErrSwapInvalidSignature
-	}
-	if len(signature) != 65 {
-		return "", false, ErrSwapInvalidSignature
-	}
-	pubKey, err := ethcrypto.SigToPub(hash, signature)
-	if err != nil {
-		return "", false, fmt.Errorf("swap: recover signer: %w", err)
-	}
-	recovered := ethcrypto.PubkeyToAddress(*pubKey)
 
-	cfg := n.swapConfig()
-	riskParams, err := cfg.Risk.Parameters()
+	payload, err := encodeSwapVoucherMintTransaction(submission)
 	if err != nil {
 		return "", false, err
 	}
-	if !cfg.IsFiatAllowed(voucher.Fiat) {
-		return "", false, ErrSwapUnsupportedFiat
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSwapVoucherMint,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
 	}
-	n.swapCfgMu.RLock()
-	oracle := n.swapOracle
-	n.swapCfgMu.RUnlock()
-	if oracle == nil {
-		return "", false, ErrSwapOracleUnavailable
-	}
-
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	riskEngine := swap.NewRiskEngine(manager)
-	sanctionsLog := swap.NewSanctionsLog(manager)
-	priceEngine := swap.NewPriceProofEngine(manager, cfg.MaxQuoteAge(), cfg.PriceProofMaxDeviationBps)
-	priceEngine.RequireSignature(riskParams.PriceProofSignatureRequired)
-	quote, err := oracle.GetRate("USD", token)
-	if err != nil {
-		if errors.Is(err, swap.ErrNoFreshQuote) {
-			return "", false, ErrSwapQuoteStale
-		}
-		return "", false, fmt.Errorf("swap: oracle: %w", err)
-	}
-	if priceProof == nil {
-		rateStr := strings.TrimSpace(voucher.Rate)
-		if rateStr == "" && quote.Rate != nil {
-			rateStr = quote.Rate.FloatString(18)
-		}
-		providerID := "manual"
-		if len(cfg.OraclePriority) > 0 {
-			trimmed := strings.TrimSpace(cfg.OraclePriority[0])
-			if trimmed != "" {
-				providerID = trimmed
-			}
-		}
-		pair := fmt.Sprintf("%s/USD", token)
-		timestamp := quote.Timestamp.UTC().Unix()
-		if timestamp == 0 {
-			timestamp = time.Now().UTC().Unix()
-		}
-		fallback, err := swap.NewPriceProof(
-			swap.PriceProofDomainV1,
-			providerID,
-			pair,
-			rateStr,
-			timestamp,
-			nil,
-			swap.WithSignatureRequired(riskParams.PriceProofSignatureRequired),
-		)
-		if err != nil {
-			if errors.Is(err, swap.ErrPriceProofSignatureMissing) {
-				return "", false, ErrSwapPriceProofRequired
-			}
-			return "", false, fmt.Errorf("swap: price proof: %w", err)
-		}
-		priceProof = fallback
-	}
-	if priceProof == nil {
-		return "", false, ErrSwapPriceProofRequired
-	}
-	if riskParams.PriceProofSignatureRequired || len(priceProof.Signature) == 65 {
-		if err := priceEngine.Verify(priceProof, provider, token); err != nil {
-			switch {
-			case errors.Is(err, swap.ErrPriceProofNil), errors.Is(err, swap.ErrPriceProofSignatureMissing):
-				return "", false, ErrSwapPriceProofRequired
-			case errors.Is(err, swap.ErrPriceProofDomain),
-				errors.Is(err, swap.ErrPriceProofPair),
-				errors.Is(err, swap.ErrPriceProofProviderMismatch),
-				errors.Is(err, swap.ErrPriceProofSignatureInvalid):
-				return "", false, ErrSwapPriceProofInvalid
-			case errors.Is(err, swap.ErrPriceProofSignerUnknown):
-				return "", false, ErrSwapPriceProofSignerUnknown
-			case errors.Is(err, swap.ErrPriceProofStale):
-				return "", false, ErrSwapPriceProofStale
-			case errors.Is(err, swap.ErrPriceProofDeviation):
-				return "", false, ErrSwapPriceProofDeviation
-			default:
-				return "", false, fmt.Errorf("swap: price proof verify: %w", err)
-			}
-		}
-	}
-	proofID, err := priceProof.ID()
-	if err != nil {
-		return "", false, fmt.Errorf("swap: price proof id: %w", err)
-	}
-	if len(cfg.Providers.Allow) > 0 && !cfg.Providers.IsAllowed(provider) {
-		n.emitSwapLimitAlert(events.SwapLimitAlert{
-			Address:      voucher.Recipient,
-			Provider:     provider,
-			ProviderTxID: providerTxID,
-			Limit:        "provider",
-			Amount:       new(big.Int).Set(voucher.Amount),
-		})
-		return "", false, ErrSwapProviderNotAllowed
-	}
-	if riskParams.SanctionsCheckEnabled {
-		checker := n.swapSanctionsChecker()
-		if checker != nil && !checker(voucher.Recipient) {
-			if err := sanctionsLog.RecordFailure(voucher.Recipient, provider, providerTxID); err != nil {
-				return "", false, fmt.Errorf("swap: record sanctions failure: %w", err)
-			}
-			n.emitSwapSanctionAlert(events.SwapSanctionAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-			})
-			return "", false, ErrSwapSanctioned
-		}
-	}
-	violation, err := riskEngine.CheckLimits(voucher.Recipient, voucher.Amount, riskParams)
+	hashBytes, err := tx.Hash()
 	if err != nil {
 		return "", false, err
 	}
-	if violation != nil {
-		switch violation.Code {
-		case swap.RiskCodeVelocity:
-			n.emitSwapVelocityAlert(events.SwapVelocityAlert{
-				Address:       voucher.Recipient,
-				Provider:      provider,
-				ProviderTxID:  providerTxID,
-				WindowSeconds: violation.WindowSeconds,
-				ObservedCount: violation.Count,
-				AllowedMints:  riskParams.VelocityMaxMints,
-			})
-			return "", false, ErrSwapVelocityExceeded
-		case swap.RiskCodePerTxMin:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapAmountBelowMinimum
-		case swap.RiskCodePerTxMax:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapAmountAboveMaximum
-		case swap.RiskCodeDailyCap:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapDailyCapExceeded
-		case swap.RiskCodeMonthlyCap:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapMonthlyCapExceeded
-		default:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, fmt.Errorf("swap: risk violation %s", violation.Code)
-		}
-	}
-	tokenMeta, err := manager.Token(token)
-	if err != nil {
-		return "", false, err
-	}
-	if tokenMeta == nil {
-		return "", false, ErrSwapInvalidToken
-	}
-	if tokenMeta.MintPaused {
-		return "", false, ErrSwapMintPaused
-	}
-	if len(tokenMeta.MintAuthority) != 20 {
-		return "", false, fmt.Errorf("swap: mint authority not configured")
-	}
-	if !bytes.Equal(tokenMeta.MintAuthority, recovered.Bytes()) {
-		return "", false, ErrSwapInvalidSigner
-	}
-	if quote.Rate == nil {
-		return "", false, fmt.Errorf("swap: oracle rate unavailable")
-	}
-	if priceProof.Rate == nil {
-		return "", false, ErrSwapPriceProofInvalid
-	}
-	rateDiff := new(big.Rat).Sub(quote.Rate, priceProof.Rate)
-	if rateDiff.Sign() < 0 {
-		rateDiff.Neg(rateDiff)
-	}
-	if priceProof.Rate.Sign() == 0 {
-		return "", false, ErrSwapPriceProofInvalid
-	}
-	ratio := new(big.Rat).Quo(rateDiff, priceProof.Rate)
-	ratio.Mul(ratio, big.NewRat(10000, 1))
-	threshold := new(big.Rat).SetInt64(int64(cfg.PriceProofMaxDeviationBps))
-	if cfg.PriceProofMaxDeviationBps > 0 && ratio.Cmp(threshold) == 1 {
-		return "", false, ErrSwapPriceProofDeviation
-	}
-	quote.Timestamp = priceProof.Timestamp
-	quote.Source = strings.ToLower(strings.TrimSpace(priceProof.Provider))
-	n.recordSwapOracleHealth(time.Now())
-	twapWindow := cfg.TwapWindow()
-	priceProofID := proofID
-	var (
-		twapRate          string
-		twapCount         int
-		twapWindowSeconds int64
-		twapStart         int64
-		twapEnd           int64
-		oracleMedian      string
-		oracleFeeders     []string
-	)
-	if twapOracle, ok := oracle.(swap.TWAPOracle); ok {
-		snapshot, err := twapOracle.TWAP("USD", token, twapWindow)
-		if err == nil && snapshot.Average != nil {
-			twapRate = snapshot.Average.FloatString(18)
-			twapCount = snapshot.Count
-			if snapshot.Window > 0 {
-				twapWindowSeconds = int64(snapshot.Window / time.Second)
-			} else if twapWindow > 0 {
-				twapWindowSeconds = int64(twapWindow / time.Second)
-			}
-			if !snapshot.Start.IsZero() {
-				twapStart = snapshot.Start.UTC().Unix()
-			}
-			if !snapshot.End.IsZero() {
-				twapEnd = snapshot.End.UTC().Unix()
-			}
-			if snapshot.Median != nil {
-				oracleMedian = snapshot.Median.FloatString(18)
-			}
-			if len(snapshot.Feeders) > 0 {
-				oracleFeeders = append([]string{}, snapshot.Feeders...)
-			}
-			if strings.TrimSpace(snapshot.ProofID) != "" {
-				priceProofID = strings.TrimSpace(snapshot.ProofID)
-			}
-		}
-	}
-	maxAge := cfg.MaxQuoteAge()
-	if maxAge > 0 {
-		cutoff := time.Now().Add(-maxAge)
-		if quote.Timestamp.IsZero() || quote.Timestamp.Before(cutoff) {
-			return "", false, ErrSwapQuoteStale
-		}
-	}
-	mintAmount, err := swap.ComputeMintAmount(voucher.FiatAmount, quote.Rate, tokenMeta.Decimals)
-	if err != nil {
-		return "", false, err
-	}
-	if mintAmount == nil || mintAmount.Sign() == 0 {
-		return "", false, fmt.Errorf("swap: computed mint amount zero")
-	}
-	diff := new(big.Int).Sub(mintAmount, voucher.Amount)
-	if diff.Sign() < 0 {
-		diff.Neg(diff)
-	}
-	allowance := new(big.Int).SetUint64(cfg.SlippageBps)
-	slippage := new(big.Int).Mul(diff, big.NewInt(10000))
-	slippage.Div(slippage, mintAmount)
-	if slippage.Cmp(allowance) == 1 {
-		return "", false, ErrSwapSlippageExceeded
-	}
-
-	ledger := swap.NewLedger(manager)
-	exists, err := ledger.Exists(providerTxID)
-	if err != nil {
-		return "", false, err
-	}
-	if exists {
-		return "", false, ErrSwapDuplicateProviderTx
-	}
-	if manager.HasSeenSwapNonce(orderID) {
-		return "", false, ErrSwapNonceUsed
-	}
-	if len(priceProof.Signature) == 65 {
-		if err := priceEngine.Record(priceProof); err != nil {
-			return "", false, fmt.Errorf("swap: record price proof: %w", err)
-		}
-	}
-	if err := n.state.MintToken(token, voucher.Recipient[:], voucher.Amount); err != nil {
-		return "", false, err
-	}
-	if err := manager.MarkSwapNonce(orderID); err != nil {
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if err := n.AddTransaction(tx); err != nil {
+		// Every ErrSwap* sentinel raised by applySwapVoucherMintTransaction
+		// (via AddTransaction's synchronous simulation, or the mempool-level
+		// duplicate check below) propagates through errors.Is regardless of
+		// how many times it was wrapped, so callers checking
+		// errors.Is(err, core.ErrSwapXxx) -- e.g. rpc/swap_handlers.go's
+		// existing error-to-HTTP-status switch -- keep working unchanged.
 		return "", false, err
 	}
 
-	usdAmount := strings.TrimSpace(submission.USDAmount)
-	if usdAmount == "" && strings.EqualFold(voucher.Fiat, "USD") {
-		usdAmount = strings.TrimSpace(voucher.FiatAmount)
-	}
-	if priceProofID == "" {
-		builder := strings.Builder{}
-		builder.WriteString(strings.TrimSpace(providerTxID))
-		builder.WriteString("|")
-		builder.WriteString(strings.TrimSpace(token))
-		builder.WriteString("|")
-		if quote.Rate != nil {
-			builder.WriteString(quote.Rate.FloatString(18))
-		}
-		builder.WriteString("|")
-		builder.WriteString(strconv.FormatInt(quote.Timestamp.UTC().UnixNano(), 10))
-		if twapRate != "" {
-			builder.WriteString("|")
-			builder.WriteString(twapRate)
-		}
-		if oracleMedian != "" {
-			builder.WriteString("|")
-			builder.WriteString(oracleMedian)
-		}
-		if len(oracleFeeders) > 0 {
-			builder.WriteString("|")
-			builder.WriteString(strings.Join(oracleFeeders, ","))
-		}
-		sum := sha256.Sum256([]byte(builder.String()))
-		priceProofID = hex.EncodeToString(sum[:])
-	}
-	record := &swap.VoucherRecord{
-		Provider:          provider,
-		ProviderTxID:      providerTxID,
-		FiatCurrency:      strings.ToUpper(strings.TrimSpace(voucher.Fiat)),
-		FiatAmount:        strings.TrimSpace(voucher.FiatAmount),
-		USD:               usdAmount,
-		Rate:              quote.RateString(18),
-		Token:             token,
-		MintAmountWei:     new(big.Int).Set(voucher.Amount),
-		Recipient:         voucher.Recipient,
-		Username:          strings.TrimSpace(submission.Username),
-		Address:           strings.TrimSpace(submission.Address),
-		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
-		OracleSource:      quote.Source,
-		OracleMedian:      oracleMedian,
-		OracleFeeders:     append([]string{}, oracleFeeders...),
-		PriceProofID:      priceProofID,
-		MinterSignature:   "0x" + hex.EncodeToString(signature),
-		Status:            swap.VoucherStatusMinted,
-		TwapRate:          twapRate,
-		TwapObservations:  twapCount,
-		TwapWindowSeconds: twapWindowSeconds,
-		TwapStart:         twapStart,
-		TwapEnd:           twapEnd,
-	}
-	if err := ledger.Put(record); err != nil {
-		return "", false, err
-	}
-
-	if err := riskEngine.RecordMint(voucher.Recipient, voucher.Amount, riskParams.VelocityWindowSeconds); err != nil {
-		return "", false, err
-	}
-
-	txHashBytes := ethcrypto.Keccak256(append(hash, signature...))
-	txHash := "0x" + hex.EncodeToString(txHashBytes)
-
-	evt := events.SwapMinted{
-		OrderID:    orderID,
-		Recipient:  voucher.Recipient,
-		Amount:     new(big.Int).Set(voucher.Amount),
-		Fiat:       voucher.Fiat,
-		FiatAmount: voucher.FiatAmount,
-		Rate:       voucher.Rate,
-	}.Event()
-	if evt != nil {
-		n.state.AppendEvent(evt)
-	}
-	proofEvt := events.SwapMintProof{
-		ProviderTxID:      providerTxID,
-		OrderID:           orderID,
-		Token:             token,
-		PriceProofID:      priceProofID,
-		OracleSource:      quote.Source,
-		OracleMedian:      oracleMedian,
-		OracleFeeders:     append([]string{}, oracleFeeders...),
-		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
-		TwapRate:          twapRate,
-		TwapObservations:  twapCount,
-		TwapWindowSeconds: twapWindowSeconds,
-		TwapStart:         twapStart,
-		TwapEnd:           twapEnd,
-	}.Event()
-	if proofEvt != nil {
-		n.state.AppendEvent(proofEvt)
-	}
-
-	return txHash, true, nil
+	return txHash, false, nil
 }
 
 // SwapGetVoucher returns the ledger record for the supplied provider

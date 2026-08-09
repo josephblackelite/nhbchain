@@ -208,6 +208,8 @@ func formatTxType(t types.TxType) string {
 		return "StakeClaim"
 	case types.TxTypeMint:
 		return "Mint"
+	case types.TxTypeSwapVoucherMint:
+		return "SwapVoucherMint"
 	case types.TxTypeSwapPayoutReceipt:
 		return "SwapPayoutReceipt"
 	case types.TxTypeLendingSupplyNHB:

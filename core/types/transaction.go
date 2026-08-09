@@ -63,10 +63,24 @@ const (
 	TxTypeRedeemNHB            TxType = 0x1B // User burns NHB to request an off-chain stablecoin payout (swap-out)
 	TxTypeAttestRedemption     TxType = 0x1C // Authorized attestor confirms or fails a pending redemption's off-chain payout
 	TxTypeLendingLiquidate     TxType = 0x1D // Liquidator repays a borrower's unhealthy debt for a discounted share of their collateral (permissionless third-party action, not signed by the borrower)
-	TxTypePOSAuthorize         TxType = 0x20 // Pre-authorize a merchant payment
-	TxTypePOSCapture           TxType = 0x21 // Capture an authorized payment
-	TxTypePOSVoid              TxType = 0x22 // Void authorized payment
-	TxTypePOSRegistry          TxType = 0x23 // POS merchant/device registry update
+	// TxTypeSwapVoucherMint executes a fiat-gateway-attested ZNHB mint voucher
+	// as a signed, network-wide-agreed on-chain transaction (mempool ->
+	// gossip -> ApplyTransaction -> consensus), replacing the old
+	// Node.SwapSubmitVoucher direct state-trie write whose duplicate check
+	// only ever saw one validator's own local state. Senderless/envelope-
+	// unsigned like TxTypeMint: the payload carries its own MintAuthority
+	// signature over the voucher, so no separate envelope signature is
+	// required. 0x1E is the next free byte after 0x1D
+	// (TxTypeLendingLiquidate) -- verified against this file's real, current
+	// tip: 0x19-0x1D are taken by TxTypeBuyZNHB/TxTypeSetRewardBeneficiary/
+	// TxTypeRedeemNHB/TxTypeAttestRedemption/TxTypeLendingLiquidate, and
+	// 0x20+ by the POS types below. Do not reuse without re-checking this
+	// file's current tip for newly added types.
+	TxTypeSwapVoucherMint TxType = 0x1E
+	TxTypePOSAuthorize    TxType = 0x20 // Pre-authorize a merchant payment
+	TxTypePOSCapture      TxType = 0x21 // Capture an authorized payment
+	TxTypePOSVoid         TxType = 0x22 // Void authorized payment
+	TxTypePOSRegistry     TxType = 0x23 // POS merchant/device registry update
 )
 
 // RequiresSignature reports whether the transaction type must carry an
@@ -74,7 +88,7 @@ const (
 // from module attestations rely on their envelope signatures instead.
 func RequiresSignature(t TxType) bool {
 	switch t {
-	case TxTypeMint:
+	case TxTypeMint, TxTypeSwapVoucherMint:
 		return false
 	default:
 		return true

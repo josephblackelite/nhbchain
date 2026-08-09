@@ -151,6 +151,17 @@ type StateProcessor struct {
 	lendingCollateralRouting   lending.CollateralRouting
 	blockCtx                   BlockCtx
 	swapPayoutAuthorities      map[string]struct{}
+	swapConfig                 swap.Config
+	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
+	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
+	// must match. This is deliberately distinct from types.NHBChainID()
+	// (the fixed "NHB" constant used for the outer transaction envelope's
+	// ChainID field, validated separately in executeTransaction) -- the two
+	// have never been the same value in this codebase (see MintChainID for
+	// the analogous case on TxTypeMint). Fixed at genesis and identical
+	// across every validator on the same chain, so comparing against it
+	// here is fully deterministic.
+	swapVoucherChainID uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -195,6 +206,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		lendingCollateralRouting: lending.CollateralRouting{},
 		blockCtx:                 BlockCtx{},
 		swapPayoutAuthorities:    make(map[string]struct{}),
+		swapConfig:               swap.Config{},
 	}
 	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
@@ -290,6 +302,29 @@ func (sp *StateProcessor) isSwapPayoutAuthority(authority string) bool {
 	}
 	_, ok := sp.swapPayoutAuthorities[canonical]
 	return ok
+}
+
+// SetSwapVoucherChainID installs the genesis-derived Blockchain.ChainID()
+// value used to validate TxTypeSwapVoucherMint payloads' embedded voucher
+// chain id deterministically (see the swapVoucherChainID field doc comment).
+func (sp *StateProcessor) SetSwapVoucherChainID(id uint64) {
+	if sp == nil {
+		return
+	}
+	sp.swapVoucherChainID = id
+}
+
+// SetSwapConfig installs the swap module's risk/provider/oracle configuration
+// used by the deterministic TxTypeSwapVoucherMint execution path. This is a
+// plain-data snapshot of operator config (risk limits, provider allow-list,
+// sanctions deny-list, price proof deviation/freshness windows) -- read-only
+// during transaction execution, so a shallow value copy is safe and mirrors
+// how engagementConfig/epochConfig are already carried across Copy().
+func (sp *StateProcessor) SetSwapConfig(cfg swap.Config) {
+	if sp == nil {
+		return
+	}
+	sp.swapConfig = cfg
 }
 
 // SetFeePolicy updates the fee policy applied to eligible transactions.
@@ -1532,6 +1567,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		lendingCollateralRouting:   sp.lendingCollateralRouting.Clone(),
 		blockCtx:                   blockCtxCopy,
 		swapPayoutAuthorities:      payoutAuthCopy,
+		swapConfig:                 sp.swapConfig,
+		swapVoucherChainID:         sp.swapVoucherChainID,
 	}, nil
 }
 
@@ -1588,7 +1625,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		senderAccount *types.Account
 		err           error
 	)
-	if tx.Type != types.TxTypeMint {
+	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -1599,6 +1636,9 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	switch tx.Type {
 	case types.TxTypeMint:
 		err = sp.applyMintTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeSwapVoucherMint:
+		err = sp.applySwapVoucherMintTransaction(tx)
 		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)
