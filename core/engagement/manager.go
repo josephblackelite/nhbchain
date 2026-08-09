@@ -49,6 +49,21 @@ func (m *Manager) SetNow(now func() time.Time) {
 	m.now = now
 }
 
+// HeartbeatInterval returns the configured minimum spacing between
+// heartbeats. Exposed so callers that need to independently reason about
+// heartbeat cadence (for example, deciding whether enough on-chain time has
+// elapsed to attempt another submission) can stay in sync with the
+// manager's own configuration instead of hard-coding a duplicate constant
+// that could silently drift from it.
+func (m *Manager) HeartbeatInterval() time.Duration {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.config.HeartbeatInterval
+}
+
 // RegisterDevice associates a device identifier with a validator address and
 // returns a freshly generated authentication token for subsequent heartbeats.
 func (m *Manager) RegisterDevice(address [20]byte, deviceID string) (string, error) {

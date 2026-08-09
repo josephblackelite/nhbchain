@@ -26,6 +26,21 @@ func TestManagerRateLimit(t *testing.T) {
 	}
 }
 
+func TestManagerHeartbeatInterval(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HeartbeatInterval = 42 * time.Second
+	mgr := NewManager(cfg)
+
+	if got := mgr.HeartbeatInterval(); got != 42*time.Second {
+		t.Fatalf("expected configured heartbeat interval 42s, got %s", got)
+	}
+
+	var nilMgr *Manager
+	if got := nilMgr.HeartbeatInterval(); got != 0 {
+		t.Fatalf("expected zero heartbeat interval for nil manager, got %s", got)
+	}
+}
+
 func TestManagerReplay(t *testing.T) {
 	cfg := DefaultConfig()
 	mgr := NewManager(cfg)
