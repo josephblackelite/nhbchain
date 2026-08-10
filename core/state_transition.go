@@ -72,7 +72,24 @@ const (
 )
 
 var (
-	ErrNonceMismatch       = errors.New("transaction nonce mismatch")
+	// ErrNonceMismatch is the umbrella sentinel for any tx.Nonce !=
+	// account.Nonce rejection. It always wraps one of the two more specific
+	// sentinels below (ErrNonceTooLow / ErrNonceTooHigh) via a multi-%w
+	// fmt.Errorf, so every existing errors.Is(err, ErrNonceMismatch) check
+	// keeps matching unmodified regardless of which sub-case fired.
+	ErrNonceMismatch = errors.New("transaction nonce mismatch")
+	// ErrNonceTooLow indicates tx.Nonce < account.Nonce: the nonce has
+	// already been consumed (stale resubmission or replay). This is
+	// monotonic -- account.Nonce only ever increases -- so a transaction
+	// that hits this can never succeed later either; CreateBlock's proposal
+	// classifier (classifyProposalError) treats it as PRUNE-safe.
+	ErrNonceTooLow = errors.New("transaction nonce mismatch: already used")
+	// ErrNonceTooHigh indicates tx.Nonce > account.Nonce: a lower-nonce
+	// transaction from the same sender hasn't landed yet. Unlike
+	// ErrNonceTooLow this is genuinely order-dependent -- a different
+	// attempt (later round, different candidate set) can succeed once the
+	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
+	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
 	ErrInvalidChainID      = errors.New("invalid chain id")
 	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
@@ -85,13 +102,21 @@ var (
 	// its payload.Timestamp does not advance past it (the replay check).
 	// Both are timing-ordering rejections specific to a single
 	// transaction, not signs of a malformed or malicious transaction, so
-	// isPrunableProposalError treats this the same way as
-	// ErrNonceMismatch: drop just this transaction from the proposal
-	// instead of aborting the whole block. See core/node.go's
-	// pendingHeartbeatFee and EngagementValidatorHeartbeatDue for the
-	// submission-side mechanics that keep a well-behaved caller from ever
-	// producing a transaction that hits this in practice.
+	// classifyProposalError treats this the same way as ErrNonceTooLow:
+	// drop just this transaction from the proposal instead of aborting the
+	// whole block. See core/node.go's pendingHeartbeatFee and
+	// EngagementValidatorHeartbeatDue for the submission-side mechanics
+	// that keep a well-behaved caller from ever producing a transaction
+	// that hits this in practice.
 	ErrHeartbeatTooSoon = errors.New("heartbeat too soon")
+	// ErrUnknownTransactionType indicates handleNativeTransaction's dispatch
+	// switch found no case for tx.Type. Within one running binary the set of
+	// recognized TxType values is a compiled constant, so retrying the
+	// identical bytes can never succeed for the lifetime of this process --
+	// classifyProposalError treats it as PRUNE-safe (local-mempool-only;
+	// peers running newer software that recognize the type keep their own
+	// copy and can still gossip/re-propagate it).
+	ErrUnknownTransactionType = errors.New("unknown native transaction type")
 )
 
 const stakePauseReasonGovernance = "paused by governance"
@@ -1725,7 +1750,10 @@ func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, 
 		return nil, nil, err
 	}
 	if tx.Nonce != account.Nonce {
-		return nil, nil, fmt.Errorf("%w: account=%d tx=%d", ErrNonceMismatch, account.Nonce, tx.Nonce)
+		if tx.Nonce < account.Nonce {
+			return nil, nil, fmt.Errorf("%w: %w: account=%d tx=%d", ErrNonceMismatch, ErrNonceTooLow, account.Nonce, tx.Nonce)
+		}
+		return nil, nil, fmt.Errorf("%w: %w: account=%d tx=%d", ErrNonceMismatch, ErrNonceTooHigh, account.Nonce, tx.Nonce)
 	}
 	return sender, account, nil
 }
@@ -2792,7 +2820,7 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	}
-	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
+	return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
 }
 
 // applyRegisterIdentity claims a username via a signed TxTypeRegisterIdentity

@@ -2360,7 +2360,7 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	// never sit in the same mempool at the same time). That race is what
 	// applySwapVoucherMintTransaction's ledger.Exists/HasSeenSwapNonce
 	// checks (a real, network-wide-agreed check once state is synced) and
-	// isPrunableProposalError below actually guard against.
+	// classifyProposalError below actually guard against.
 	if tx.Type == types.TxTypeSwapVoucherMint {
 		submission, err := decodeSwapVoucherMintTransaction(tx.Data)
 		if err != nil {
@@ -2835,11 +2835,50 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 	n.mempool = filtered
 }
 
-// isPrunableProposalError reports whether a transaction that failed during
-// proposal building (stateCopy.ApplyTransaction in CreateBlock's
-// buildProposalState) is permanently unexecutable and can safely be dropped
-// from the mempool immediately, rather than left resident to be re-proposed
-// (and fail identically) every subsequent round.
+// proposalTxDisposition is classifyProposalError's verdict for a transaction
+// that failed stateCopy.ApplyTransaction while CreateBlock's buildProposalState
+// is speculatively assembling a block.
+type proposalTxDisposition int
+
+const (
+	// proposalDispositionAbort is the zero value and the safe default for
+	// any error classifyProposalError does not explicitly recognize: the
+	// whole in-progress proposal attempt fails and CreateBlock returns the
+	// error to its caller. This is deliberately what "unclassified" means
+	// -- adding a new disposition always requires a positive, reviewed
+	// decision (see the ABORT-is-correct discussion below); silence must
+	// never be read as "safe to skip or prune".
+	proposalDispositionAbort proposalTxDisposition = iota
+	// proposalDispositionPrune means the transaction is permanently
+	// unexecutable -- a pure function of its own immutable payload, or of
+	// monotonic state that can never revert once true -- so it is dropped
+	// from the mempool immediately (n.dropTransactionsFromMempool) instead
+	// of being left resident to fail identically every subsequent round.
+	proposalDispositionPrune
+	// proposalDispositionSkip means the transaction failed for a reason
+	// that depends on mutable state shared with other transactions in the
+	// SAME proposal attempt (a rolling cap, a governance pause, a signer
+	// registry) or on ordering within this attempt -- a later attempt
+	// (next round, a different candidate set, state that has since
+	// changed) can genuinely succeed. It is excluded from THIS attempt's
+	// block but its mempool "in-flight" mark is released
+	// (n.requeueTransactions) so it is reconsidered next round; it is
+	// never removed from n.mempool.
+	proposalDispositionSkip
+)
+
+// classifyProposalError reports the disposition for a transaction that
+// failed during proposal building (stateCopy.ApplyTransaction in
+// CreateBlock's buildProposalState). Getting this wrong in either direction
+// is dangerous: classifying a transiently-failing error as PRUNE silently
+// and permanently destroys a transaction that would have succeeded later;
+// leaving a routinely-occurring error unclassified (ABORT) lets it block
+// EVERY OTHER pending transaction, for EVERY subsequent round, until the
+// offending transaction's own expiry -- a validator-wide liveness stall, not
+// just a loss for one submitter. This function (and the SKIP disposition
+// specifically) exists because that second failure mode was found to be far
+// more common, and far more severe, than originally assumed -- see the
+// module-pause discussion below.
 //
 // This matters most for TxTypeSwapVoucherMint: when the same fiat voucher
 // reaches two validators nearly simultaneously (each independently
@@ -2853,30 +2892,21 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 // proposing ANY block, for ANY transaction, until the voucher's own expiry.
 // On a small validator set that can stall block production network-wide.
 //
-// Every error classified prunable here is a pure function of the
-// transaction's OWN immutable payload (decode failure, domain/chainId/token
-// mismatch, unrecoverable signature) or of monotonic state that can never
-// revert once true (a provider transaction ID or order nonce already
-// consumed, a voucher past its fixed expiry) -- so re-proposing the exact
-// same transaction bytes can never succeed later either. Deliberately NOT
-// included: signer-unknown, mint-paused, provider-not-allowed,
-// fiat-not-allowed, slippage/deviation, sanctions, and the velocity/cap risk
-// checks -- those depend on mutable operator config or rolling counters that
-// genuinely can change (a signer gets registered, a pause lifts, a daily
-// bucket resets), so pruning on them could silently discard a transaction
-// that would have succeeded on a later, unrelated block.
+// == PRUNE: pure function of the transaction's own immutable payload, or of
+// monotonic state that can never revert once true ==
 //
-// ErrSwapPriceProofRequired and ErrSwapPriceProofStale (added in round 3)
-// belong in the same "pure function of immutable payload / monotonic state"
-// category as ErrSwapExpired:
+// Decode failure, domain/chainId/token mismatch, unrecoverable signature, a
+// provider transaction ID or order nonce already consumed, a voucher past
+// its fixed expiry: re-proposing the exact same transaction bytes can never
+// succeed later either.
 //
 //   - ErrSwapPriceProofRequired fires only when the transaction's OWN
 //     embedded price proof is absent, or its signature is absent, and this
 //     transaction type unconditionally requires both (see RequireSignature
-//     (true) above -- hardcoded, not read from mutable operator config). A
-//     resubmission of the identical transaction bytes can never later carry
-//     a price proof or signature it does not already contain, so this can
-//     never succeed later either.
+//     (true) in applySwapVoucherMintTransaction -- hardcoded, not read from
+//     mutable operator config). A resubmission of the identical transaction
+//     bytes can never later carry a price proof or signature it does not
+//     already contain, so this can never succeed later either.
 //   - ErrSwapPriceProofStale fires when the block timestamp has advanced
 //     more than swap.Config.MaxQuoteAgeSeconds past the price proof's own
 //     fixed signing timestamp. Block time (n.currentTime(), read fresh on
@@ -2895,44 +2925,167 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 //     pruning it only costs the submitter a fresh resubmission with a
 //     current price proof -- not a validator-wide liveness stall, which is
 //     the far more severe failure mode this whole function exists to avoid.
+//   - ErrNonceTooLow (tx.Nonce < account.Nonce): account.Nonce only ever
+//     increases, so a stale/replayed nonce can never become valid again.
+//   - ErrHeartbeatTooSoon covers applyHeartbeat's rate-limit and replay
+//     rejections. Those are timing-ordering problems specific to a single
+//     heartbeat transaction (see ErrHeartbeatTooSoon's doc comment in
+//     state_transition.go) -- a validator's own liveness ping should never
+//     be able to abort an entire block proposal for everyone else's
+//     transactions just because it arrived slightly too soon. Pruning it
+//     here is a defense-in-depth backstop: normally a well-behaved
+//     submitter (see EngagementValidatorHeartbeatDue and
+//     pendingHeartbeatFee) never produces a heartbeat transaction that
+//     reaches this check already doomed, and the admission-time simulation
+//     in validateTransaction filters most bad ones out before they ever
+//     enter the mempool -- but that simulation can be disabled
+//     (SetTransactionSimulationEnabled), so CreateBlock must not assume it
+//     always ran. Both of ErrHeartbeatTooSoon's sub-cases compare a fixed
+//     payload.Timestamp against a monotonically-increasing on-chain
+//     EngagementLastHeartbeat, so -- unlike the nonce split above -- no
+//     further split is needed here; both sub-cases are equally permanent.
+//   - ErrUnknownTransactionType: within one running binary the set of
+//     recognized TxType values is a compiled constant, so retrying the
+//     identical bytes can never succeed for the lifetime of this process.
+//     This only drops the transaction from THIS validator's local mempool;
+//     a peer running newer software that recognizes the type keeps its own
+//     copy and can still gossip/re-propagate it, and if this validator
+//     later upgrades it re-learns the transaction via gossip like any
+//     other.
+//   - The TxTypeMint analogues of the swap payload/monotonic-state PRUNE
+//     errors: ErrMintInvoiceUsed (monotonic dedup, same pattern as
+//     ErrSwapDuplicateProviderTx/ErrSwapNonceUsed), ErrMintInvalidChainID,
+//     ErrMintExpired, and ErrMintInvalidPayload (all pure functions of the
+//     voucher's own immutable payload, same pattern as their swap
+//     equivalents).
 //
-// Deliberately still NOT included, by the same mutable-state reasoning as
-// signer-unknown above: ErrSwapPriceProofSignerUnknown (the SwapPriceSigner
-// registry is exactly the kind of mutable operator config the existing
-// exclusions already guard -- an operator could register a signer for that
-// provider after this transaction was submitted, and a later resubmission
-// would then succeed) and ErrSwapPriceProofInvalid (its signature-mismatch
-// case is checked against that SAME mutable SwapPriceSigner registry --
-// recovered-pubkey-vs-currently-registered-signer -- so a correction to a
-// stale/incorrect signer registration could likewise make a later
-// resubmission succeed; ErrSwapPriceProofInvalid also covers pure-payload
-// causes like domain/pair mismatch and a non-positive rate, but Go's
-// errors.Is cannot distinguish which branch fired, so the conservative,
-// correct choice is to leave the whole sentinel unpruned rather than risk
-// silently and permanently dropping a valid pending mint).
-func isPrunableProposalError(err error) bool {
-	if errors.Is(err, ErrNonceMismatch) {
-		return true
-	}
-	// ErrHeartbeatTooSoon covers applyHeartbeat's rate-limit and replay
-	// rejections. Those are timing-ordering problems specific to a single
-	// heartbeat transaction (see ErrHeartbeatTooSoon's doc comment in
-	// state_transition.go) -- a validator's own liveness ping should never
-	// be able to abort an entire block proposal for everyone else's
-	// transactions just because it arrived slightly too soon. Pruning it
-	// here is a defense-in-depth backstop: normally a well-behaved
-	// submitter (see EngagementValidatorHeartbeatDue and
-	// pendingHeartbeatFee) never produces a heartbeat transaction that
-	// reaches this check already doomed, and the admission-time
-	// simulation in validateTransaction filters most bad ones out before
-	// they ever enter the mempool -- but that simulation can be disabled
-	// (SetTransactionSimulationEnabled), so CreateBlock must not assume it
-	// always ran.
-	if errors.Is(err, ErrHeartbeatTooSoon) {
-		return true
-	}
+// == SKIP: depends on mutable state shared across transactions in this
+// attempt, or on ordering within this attempt -- a later attempt can
+// genuinely succeed ==
+//
+//   - ErrSwapDailyCapExceeded / ErrSwapMonthlyCapExceeded: per-recipient
+//     rolling totals that reset at day/month boundaries. Two vouchers to
+//     the same recipient in one proposal attempt can trip the cap for the
+//     second even though each independently passed admission-time
+//     simulation; a later attempt (different candidate set, or after the
+//     window rolls over) can succeed.
+//   - ErrSwapVelocityExceeded: a rolling count within
+//     RiskParameters.VelocityWindowSeconds -- strictly order/timing
+//     dependent within the same block-building pass.
+//   - ErrSwapPriceProofDeviation: compares the proof's rate to a
+//     live-updating reference; a later attempt (rate moved back in range,
+//     or a fresher proof arrives) can succeed.
+//   - ErrSwapSlippageExceeded: compares the computed mint amount to
+//     voucher.Amount using the CURRENT price proof's rate -- depends on
+//     which price proof made it through, itself order/timing dependent.
+//   - ErrSwapInvalidSigner, ErrSwapPriceProofSignerUnknown,
+//     ErrSwapMintPaused, ErrSwapUnsupportedFiat, ErrSwapProviderNotAllowed,
+//     ErrSwapAmountBelowMinimum, ErrSwapAmountAboveMaximum, ErrSwapSanctioned:
+//     all depend on mutable operator config or registries that genuinely
+//     can change (a signer gets registered, a pause lifts, an allow-list is
+//     edited, a sanctions entry is delisted) -- a resubmission-free later
+//     attempt of the exact same transaction bytes can succeed once the
+//     config changes. ErrSwapSanctioned specifically: harmlessly re-skipping
+//     a sanctioned voucher every round is strictly better than letting it
+//     freeze every OTHER user's transactions; it is bounded by the same
+//     worst-case argument as every other SKIP entry (see "Termination"
+//     below). Note ErrSwapPriceProofInvalid is deliberately NOT included
+//     here -- see the ABORT section.
+//   - nativecommon.ErrModulePaused (returned directly by
+//     applySwapVoucherMintTransaction's nativecommon.Guard(sp.pauses,
+//     moduleSwap) call), ErrStakePaused (the wrapped form every moduleStaking
+//     Guard call site in state_transition.go returns), ErrTransferNHBPaused,
+//     ErrTransferZNHBPaused: pausing a module is a normal, designed
+//     governance/admin action (maintenance, incident response), not a rare
+//     edge case, and un-pausing is equally normal and expected soon after.
+//     TxTypeTransfer (ordinary NHB transfers) is almost certainly the
+//     single most common transaction type on this chain. Before this
+//     disposition existed, none of these were classified at all (fell to
+//     ABORT by default): if governance paused NHB transfers (or ZNHB
+//     transfers, staking, or swap) while even one matching transaction sat
+//     in a validator's mempool, that validator could not propose ANY block
+//     for ANY sender until the pause lifted or that one transaction was
+//     otherwise evicted -- a strictly worse, strictly more likely-to-trigger
+//     version of the swap-cap liveness bug this whole mechanism exists to
+//     fix.
+//   - nativecommon.ErrQuotaRequestsExceeded, ErrQuotaNHBCapExceeded,
+//     ErrQuotaCounterOverflow (reached via applyQuota, which wraps with
+//     fmt.Errorf("quota: %s: %w", ...) -- errors.Is still matches through
+//     the %w): per-sender, per-epoch rolling counters that reset over time,
+//     structurally identical to the swap daily/monthly caps. Reached by
+//     escrow, trade, staking (via POTSO's quota, not the staking pause),
+//     and every TxTypeLending* transaction type.
+//   - ErrMintPaused, ErrMintInvalidSigner, ErrMintEmissionCapExceeded: the
+//     TxTypeMint analogues of the module-pause and signer-registry SKIP
+//     entries above, plus a per-year emission cap that resets yearly and is
+//     directly order-dependent (two mint vouchers processed in the same
+//     proposal attempt can contend for remaining headroom) -- the identical
+//     failure mode described for swap caps, just for the plain NHB/ZNHB
+//     mint path instead.
+//   - ErrNonceTooHigh (tx.Nonce > account.Nonce): a lower-nonce transaction
+//     from the same sender hasn't landed yet. Today addTransaction enforces
+//     strict admission-time nonce sequencing for every dispatchable tx type
+//     (nonce != expectedNonce is rejected at admission), so this is
+//     believed unreachable in practice via the current mempool -- but
+//     classifying it SKIP rather than relying on that invariant is cheap
+//     defense-in-depth against a future admission-time relaxation (e.g.
+//     nonce-queuing for UX) or a scheduler reordering bug.
+//
+// == ABORT: deliberately still unclassified ==
+//
+//   - ErrSwapPriceProofInvalid: its signature-mismatch case is checked
+//     against the SAME mutable SwapPriceSigner registry as
+//     ErrSwapPriceProofSignerUnknown (recovered-pubkey-vs-currently-
+//     registered-signer), so a correction to a stale/incorrect signer
+//     registration could make a later resubmission succeed -- SKIP-shaped
+//     reasoning. But it ALSO covers pure-payload causes (domain/pair
+//     mismatch, a non-positive rate) that are PRUNE-shaped, and Go's
+//     errors.Is cannot distinguish which branch fired. The conservative,
+//     correct choice for an ambiguous sentinel is to leave it unclassified
+//     (ABORT) rather than risk either silently, permanently dropping a
+//     transaction that would have succeeded (wrong PRUNE), or endlessly
+//     retrying real corruption forever masked as "try again later" (wrong
+//     SKIP). This is intentionally NOT the same risk profile as a routine
+//     operational event like a pause or a cap -- it requires a genuinely
+//     malformed or adversarial payload to trigger, so ABORT's liveness cost
+//     is bounded to that rare case rather than to ordinary usage.
+//   - Two node-infrastructure failure classes that run in buildProposalState
+//     before or after the per-tx loop, not inside it, and are therefore
+//     never seen by this function at all: n.refreshModulePauses() /
+//     n.state.Copy() failures (a precondition for building ANY block,
+//     including an empty one -- no transaction-exclusion strategy can fix
+//     an inability to read config or snapshot state), and
+//     stateCopy.ProcessBlockLifecycle / n.processPendingEvidenceForState
+//     failures (whole-block epoch rollover and slashing-evidence
+//     processing, not attributable to any single pending transaction).
+//     Both are surfaced as CreateBlock errors so the round fails visibly
+//     and another validator's block production can cover it.
+//
+// == Termination ==
+//
+// The per-tx loop in buildProposalState never stops scanning on a PRUNE or
+// SKIP verdict (it `continue`s), so every candidate is attempted exactly
+// once per retry. CreateBlock's outer loop retries only when the candidate
+// set strictly shrank (at least one PRUNE or SKIP hit), so it terminates in
+// at most len(original txs)+1 iterations -- the last one either succeeding
+// (trivially, on an empty set if every transaction was excluded) or
+// hard-erroring via an ABORT-classified error. Worst case, EVERY mempool
+// transaction is SKIP-classified (e.g. a burst that trips a shared cap, or
+// a module pause hitting a fully-transfer-heavy mempool): the candidate set
+// shrinks to empty within that same bound, computeDependencyGraph(nil)
+// succeeds trivially, and buildProposalState returns a valid, successful,
+// EMPTY *StateProcessor -- CreateBlock returns an empty block, not an
+// error, not a hang. The validator stays live and proposes an empty block
+// instead of dropping out of the round entirely. See
+// TestCreateBlockAllSkippableTransactionsProducesEmptyBlockNotHang for a
+// test that exercises exactly this worst case with a large synthetic
+// mempool.
+func classifyProposalError(err error) proposalTxDisposition {
 	switch {
-	case errors.Is(err, ErrSwapDuplicateProviderTx),
+	case errors.Is(err, ErrNonceTooLow),
+		errors.Is(err, ErrHeartbeatTooSoon),
+		errors.Is(err, ErrUnknownTransactionType),
+		errors.Is(err, ErrSwapDuplicateProviderTx),
 		errors.Is(err, ErrSwapNonceUsed),
 		errors.Is(err, ErrSwapExpired),
 		errors.Is(err, ErrSwapVoucherInvalidPayload),
@@ -2941,16 +3094,69 @@ func isPrunableProposalError(err error) bool {
 		errors.Is(err, ErrSwapInvalidToken),
 		errors.Is(err, ErrSwapInvalidSignature),
 		errors.Is(err, ErrSwapPriceProofRequired),
-		errors.Is(err, ErrSwapPriceProofStale):
-		return true
+		errors.Is(err, ErrSwapPriceProofStale),
+		errors.Is(err, ErrMintInvoiceUsed),
+		errors.Is(err, ErrMintInvalidChainID),
+		errors.Is(err, ErrMintExpired),
+		errors.Is(err, ErrMintInvalidPayload):
+		return proposalDispositionPrune
+	case errors.Is(err, ErrNonceTooHigh),
+		errors.Is(err, ErrSwapDailyCapExceeded),
+		errors.Is(err, ErrSwapMonthlyCapExceeded),
+		errors.Is(err, ErrSwapVelocityExceeded),
+		errors.Is(err, ErrSwapPriceProofDeviation),
+		errors.Is(err, ErrSwapSlippageExceeded),
+		errors.Is(err, ErrSwapInvalidSigner),
+		errors.Is(err, ErrSwapPriceProofSignerUnknown),
+		errors.Is(err, ErrSwapMintPaused),
+		errors.Is(err, ErrSwapUnsupportedFiat),
+		errors.Is(err, ErrSwapProviderNotAllowed),
+		errors.Is(err, ErrSwapAmountBelowMinimum),
+		errors.Is(err, ErrSwapAmountAboveMaximum),
+		errors.Is(err, ErrSwapSanctioned),
+		errors.Is(err, nativecommon.ErrModulePaused),
+		errors.Is(err, ErrStakePaused),
+		errors.Is(err, ErrTransferNHBPaused),
+		errors.Is(err, ErrTransferZNHBPaused),
+		errors.Is(err, nativecommon.ErrQuotaRequestsExceeded),
+		errors.Is(err, nativecommon.ErrQuotaNHBCapExceeded),
+		errors.Is(err, nativecommon.ErrQuotaCounterOverflow),
+		errors.Is(err, ErrMintPaused),
+		errors.Is(err, ErrMintInvalidSigner),
+		errors.Is(err, ErrMintEmissionCapExceeded):
+		return proposalDispositionSkip
 	}
-	return false
+	return proposalDispositionAbort
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
 	proposedTxs := append([]*types.Transaction(nil), txs...)
 	var prunedTxs []*types.Transaction
+	// skippedTxs accumulates every transaction excluded from this attempt via
+	// proposalDispositionSkip across every buildProposalState retry within
+	// this single CreateBlock call. Unlike prunedTxs it is never a mempool
+	// structure and never persisted -- it exists only for the duration of
+	// this call, exactly like prunedTxs already does.
+	var skippedTxs []*types.Transaction
 	defer func() {
+		// Unconditional release, regardless of whether CreateBlock ultimately
+		// succeeds or fails: buildProposalState already calls
+		// n.requeueTransactions(attemptSkipped) immediately upon detecting a
+		// SKIP disposition (see below), releasing the mempool "in-flight"
+		// mark as early as correctness allows. This second call is
+		// deliberately redundant -- requeueTransactions only ever does
+		// delete(n.proposedTxs, key), so deleting an already-deleted key is a
+		// safe no-op -- and exists as a structural guarantee: on the SUCCESS
+		// path (err == nil) the rest of this defer never runs (see the next
+		// check), so without this unconditional release here, a
+		// successfully-skipped transaction's "in-flight" mark would never be
+		// cleared, permanently hiding it from every future GetMempool() call
+		// even though it is still physically resident in n.mempool -- a
+		// silent, latent "phantom prune" bug distinct from, but just as bad
+		// as, calling dropTransactionsFromMempool on it.
+		if len(skippedTxs) > 0 {
+			n.requeueTransactions(skippedTxs)
+		}
 		if err == nil || len(proposedTxs) == 0 {
 			return
 		}
@@ -3055,20 +3261,41 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 
 		keptTxs := make([]*types.Transaction, 0, len(orderedTxs))
 		attemptPruned := make([]*types.Transaction, 0)
+		// attemptSkipped collects this attempt's SKIP-classified failures --
+		// see classifyProposalError's proposalDispositionSkip doc for why
+		// these must NOT be treated like attemptPruned (mempool-removed) or
+		// silently left in-flight (never reconsidered again).
+		attemptSkipped := make([]*types.Transaction, 0)
 		for _, tx := range orderedTxs {
 			if err := stateCopy.ApplyTransaction(tx); err != nil {
-				if isPrunableProposalError(err) {
+				switch classifyProposalError(err) {
+				case proposalDispositionPrune:
 					attemptPruned = append(attemptPruned, tx)
 					continue
+				case proposalDispositionSkip:
+					attemptSkipped = append(attemptSkipped, tx)
+					continue
+				default: // proposalDispositionAbort
+					stateCopy.EndBlock()
+					return nil, nil, nil, err
 				}
-				stateCopy.EndBlock()
-				return nil, nil, nil, err
 			}
 			keptTxs = append(keptTxs, tx)
 		}
-		if len(attemptPruned) > 0 {
+		if len(attemptPruned) > 0 || len(attemptSkipped) > 0 {
 			prunedTxs = append(prunedTxs, attemptPruned...)
+			skippedTxs = append(skippedTxs, attemptSkipped...)
+			// PRUNE txs are permanently removed from the real mempool.
 			n.dropTransactionsFromMempool(attemptPruned)
+			// SKIP txs are released from "in-flight" bookkeeping immediately
+			// (as early as correctness allows, matching
+			// dropTransactionsFromMempool's timing above) so the next
+			// GetMempool() call can offer them again -- but n.mempool itself
+			// is deliberately left untouched: requeueTransactions only ever
+			// deletes from n.proposedTxs, never from n.mempool. See
+			// CreateBlock's top-level defer for the unconditional,
+			// idempotent backstop release of the same set.
+			n.requeueTransactions(attemptSkipped)
 			stateCopy.EndBlock()
 			return nil, keptTxs, nil, nil
 		}
