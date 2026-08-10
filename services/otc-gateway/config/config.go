@@ -10,34 +10,38 @@ import (
 
 // Config represents runtime configuration for the OTC gateway service.
 type Config struct {
-	Port             string
-	DatabaseURL      string
-	S3Bucket         string
-	ChainID          string
-	SwapRPCBase      string
-	SwapAPIKey       string
-	SwapAPISecret    string
-	SwapMethodAllow  []string
-	SwapRateLimit    int
-	IdentityBaseURL  string
-	IdentityAPIKey   string
-	IdentityTimeout  time.Duration
-	DefaultTZ        *time.Location
-	HSMBaseURL       string
-	HSMCACert        string
-	HSMClientCert    string
-	HSMClientKey     string
-	HSMKeyLabel      string
-	HSMOverrideDN    string
-	SwapProvider     string
-	VoucherTTL       time.Duration
-	MintPollInterval time.Duration
-	ReconOutputDir   string
-	ReconRunHour     int
-	ReconRunMinute   int
-	ReconDryRun      bool
-	ReconWindow      time.Duration
-	Auth             AuthConfig
+	Port                string
+	DatabaseURL         string
+	S3Bucket            string
+	ChainID             string
+	SwapRPCBase         string
+	SwapAPIKey          string
+	SwapAPISecret       string
+	SwapMethodAllow     []string
+	SwapRateLimit       int
+	IdentityBaseURL     string
+	IdentityAPIKey      string
+	IdentityTimeout     time.Duration
+	DefaultTZ           *time.Location
+	HSMBaseURL          string
+	HSMCACert           string
+	HSMClientCert       string
+	HSMClientKey        string
+	HSMKeyLabel         string
+	HSMOverrideDN       string
+	SwapProvider        string
+	PriceProofURL       string
+	PriceProofAPIKey    string
+	PriceProofAPISecret string
+	PriceProofPair      string
+	VoucherTTL          time.Duration
+	MintPollInterval    time.Duration
+	ReconOutputDir      string
+	ReconRunHour        int
+	ReconRunMinute      int
+	ReconDryRun         bool
+	ReconWindow         time.Duration
+	Auth                AuthConfig
 }
 
 // AuthConfig captures authentication requirements for the OTC gateway.
@@ -157,6 +161,23 @@ func FromEnv() (*Config, error) {
 	hsmKeyLabel := getEnvDefault("OTC_HSM_KEY_LABEL", "MINTER_NHB")
 	swapProvider := getEnvDefault("OTC_SWAP_PROVIDER", "otc-gateway")
 
+	// OTC_PRICE_PROOF_URL points at swapd's POST /v1/price-proof endpoint
+	// (services/swapd/server/priceproof_handlers.go). Left empty, the
+	// gateway boots normally but every sign-and-submit call fails at
+	// request time with a clear "price proof source not configured" error
+	// -- this is deliberately not a hard startup requirement (many gateway
+	// endpoints have nothing to do with minting), matching how a missing
+	// HSM/SwapClient configuration is already handled (server.SignAndSubmit
+	// checks for nil dependencies and returns 503 rather than failing to
+	// boot).
+	priceProofURL := strings.TrimSpace(os.Getenv("OTC_PRICE_PROOF_URL"))
+	priceProofAPIKey := strings.TrimSpace(os.Getenv("OTC_PRICE_PROOF_API_KEY"))
+	priceProofAPISecret := strings.TrimSpace(os.Getenv("OTC_PRICE_PROOF_API_SECRET"))
+	priceProofPair := getEnvDefault("OTC_PRICE_PROOF_PAIR", "ZNHB/USD")
+	if priceProofURL != "" && (priceProofAPIKey == "" || priceProofAPISecret == "") {
+		return nil, fmt.Errorf("OTC_PRICE_PROOF_API_KEY and OTC_PRICE_PROOF_API_SECRET are required when OTC_PRICE_PROOF_URL is set")
+	}
+
 	ttlSeconds := getEnvDefault("OTC_VOUCHER_TTL_SECONDS", "900")
 	ttl, err := strconv.Atoi(ttlSeconds)
 	if err != nil || ttl <= 0 {
@@ -265,33 +286,37 @@ func FromEnv() (*Config, error) {
 	}
 
 	return &Config{
-		Port:             normalizePort(port),
-		DatabaseURL:      dbURL,
-		S3Bucket:         bucket,
-		ChainID:          chainID,
-		SwapRPCBase:      rpcBase,
-		SwapAPIKey:       swapAPIKey,
-		SwapAPISecret:    swapAPISecret,
-		SwapMethodAllow:  swapMethods,
-		SwapRateLimit:    rateLimit,
-		IdentityBaseURL:  identityBase,
-		IdentityAPIKey:   identityAPIKey,
-		IdentityTimeout:  time.Duration(identityTimeoutValue) * time.Second,
-		DefaultTZ:        tz,
-		HSMBaseURL:       hsmBase,
-		HSMCACert:        hsmCACert,
-		HSMClientCert:    hsmClientCert,
-		HSMClientKey:     hsmClientKey,
-		HSMKeyLabel:      hsmKeyLabel,
-		HSMOverrideDN:    os.Getenv("OTC_HSM_SIGNER_DN"),
-		SwapProvider:     swapProvider,
-		VoucherTTL:       time.Duration(ttl) * time.Second,
-		MintPollInterval: time.Duration(poll) * time.Second,
-		ReconOutputDir:   reconDir,
-		ReconRunHour:     reconHour,
-		ReconRunMinute:   reconMinute,
-		ReconDryRun:      reconDryRun,
-		ReconWindow:      reconWindow,
+		Port:                normalizePort(port),
+		DatabaseURL:         dbURL,
+		S3Bucket:            bucket,
+		ChainID:             chainID,
+		SwapRPCBase:         rpcBase,
+		SwapAPIKey:          swapAPIKey,
+		SwapAPISecret:       swapAPISecret,
+		SwapMethodAllow:     swapMethods,
+		SwapRateLimit:       rateLimit,
+		IdentityBaseURL:     identityBase,
+		IdentityAPIKey:      identityAPIKey,
+		IdentityTimeout:     time.Duration(identityTimeoutValue) * time.Second,
+		DefaultTZ:           tz,
+		HSMBaseURL:          hsmBase,
+		HSMCACert:           hsmCACert,
+		HSMClientCert:       hsmClientCert,
+		HSMClientKey:        hsmClientKey,
+		HSMKeyLabel:         hsmKeyLabel,
+		HSMOverrideDN:       os.Getenv("OTC_HSM_SIGNER_DN"),
+		SwapProvider:        swapProvider,
+		PriceProofURL:       priceProofURL,
+		PriceProofAPIKey:    priceProofAPIKey,
+		PriceProofAPISecret: priceProofAPISecret,
+		PriceProofPair:      priceProofPair,
+		VoucherTTL:          time.Duration(ttl) * time.Second,
+		MintPollInterval:    time.Duration(poll) * time.Second,
+		ReconOutputDir:      reconDir,
+		ReconRunHour:        reconHour,
+		ReconRunMinute:      reconMinute,
+		ReconDryRun:         reconDryRun,
+		ReconWindow:         reconWindow,
 		Auth: AuthConfig{
 			RootAdminSubjects: rootAdmins,
 			JWT:               jwtCfg,

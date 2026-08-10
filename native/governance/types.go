@@ -146,6 +146,20 @@ const (
 	ProposalKindRoleAllowlist     = "role.allowlist"
 	ProposalKindTreasuryDirective = "treasury.directive"
 	ProposalKindUpdateFeeRate     = "param.update_fee_rate"
+	// ProposalKindSwapPriceSignerUpdate registers (or revokes) the trusted
+	// signer address for a swap price-proof provider -- the on-chain
+	// counterpart of native/swap.PriceProofEngine's SwapPriceSigner lookup,
+	// which TxTypeSwapVoucherMint's mandatory price-proof signature check
+	// (core/swap_voucher_tx.go's applySwapVoucherMintTransaction) always
+	// consults. This is deliberately its own dedicated proposal kind --
+	// applied via nhbstate.Manager.SwapSetPriceSigner/SwapClearPriceSigner
+	// directly, exactly like ProposalKindRoleAllowlist and
+	// ProposalKindSlashingPolicy already are -- rather than routed through
+	// the generic param.update AllowedParams mechanism, which would require
+	// native/swap's PriceProofStore/PriceProofEngine to read from a
+	// different storage path than the dedicated
+	// SwapSetPriceSigner/SwapPriceSigner key it already uses today.
+	ProposalKindSwapPriceSignerUpdate = "policy.swapPriceSigner"
 )
 
 const (
@@ -306,6 +320,18 @@ type RoleAllowlistPayload struct {
 	Grant  []RoleAddressPair `json:"grant"`
 	Revoke []RoleAddressPair `json:"revoke"`
 	Memo   string            `json:"memo,omitempty"`
+}
+
+// SwapPriceSignerPayload defines the expected schema for
+// ProposalKindSwapPriceSignerUpdate proposals. Setting Revoke clears any
+// existing signer for Provider instead of registering SignerAddress -- a
+// single payload shape covers both registration and removal so there is
+// only one proposal kind and one execution code path to reason about.
+type SwapPriceSignerPayload struct {
+	Provider      string `json:"provider"`
+	SignerAddress string `json:"signerAddress,omitempty"`
+	Memo          string `json:"memo,omitempty"`
+	Revoke        bool   `json:"revoke,omitempty"`
 }
 
 // TreasuryTransfer describes a single debit from the treasury source to a

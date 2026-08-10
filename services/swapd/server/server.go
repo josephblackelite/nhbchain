@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"nhbchain/services/swapd/priceproof"
 	"nhbchain/services/swapd/settlement"
 	"nhbchain/services/swapd/stable"
 	"nhbchain/services/swapd/storage"
@@ -83,6 +84,49 @@ type Server struct {
 	// handleStableCashOut checks it before ever calling into the engine.
 	reservationOwnersMu sync.Mutex
 	reservationOwners   map[string]string
+
+	// priceProofService/priceProofAuth back the optional POST
+	// /v1/price-proof endpoint (see SetPriceProofRuntime). priceProofAuth is
+	// deliberately a SEPARATE PartnerAuthenticator from partnerAuth -- an
+	// operator can grant a caller price-proof access without also granting
+	// it stable-engine trading access, and the endpoint fails closed
+	// (unlike requirePartner's anonymous fallback) if it is ever enabled
+	// without partner credentials configured.
+	priceProofService *priceproof.Service
+	priceProofAuth    *PartnerAuthenticator
+}
+
+// PriceProofRuntime configures the optional price-proof signing endpoint.
+type PriceProofRuntime struct {
+	Service  *priceproof.Service
+	Partners []Partner
+}
+
+// SetPriceProofRuntime wires the price-proof signing endpoint (POST
+// /v1/price-proof) into the server. It must be called before Run. Partners
+// must be non-empty -- this endpoint gates real ZNHB minting downstream (via
+// TxTypeSwapVoucherMint's mandatory price-proof signature check), so it must
+// never silently run unauthenticated.
+func (s *Server) SetPriceProofRuntime(rt PriceProofRuntime) error {
+	if s == nil {
+		return fmt.Errorf("server not configured")
+	}
+	if rt.Service == nil {
+		return nil
+	}
+	if len(rt.Partners) == 0 {
+		return fmt.Errorf("price proof runtime requires partner configuration")
+	}
+	auth, err := NewPartnerAuthenticator(rt.Partners, nil, s.storage)
+	if err != nil {
+		return fmt.Errorf("configure price proof partner auth: %w", err)
+	}
+	if err := auth.Hydrate(context.Background()); err != nil && s.logger != nil {
+		s.logger.Printf("swapd: hydrate price proof partner auth: %v", err)
+	}
+	s.priceProofAuth = auth
+	s.priceProofService = rt.Service
+	return nil
 }
 
 // New constructs a new HTTP server.
@@ -154,6 +198,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.Handle("POST /admin/settlements/{id}/retry", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleRetrySettlement)), "swapd.settlements.retry"))
 	mux.Handle("POST /admin/settlements/{id}/fail", otelhttp.NewHandler(s.requireAdmin(http.HandlerFunc(s.handleFailSettlement)), "swapd.settlements.fail"))
 	s.registerStableHandlers(mux)
+	s.registerPriceProofHandlers(mux)
 
 	srv := &http.Server{Addr: s.cfg.ListenAddress, Handler: mux, TLSConfig: s.tls.config}
 
@@ -184,6 +229,15 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		})
 	}
 	return s.adminAuth.Middleware(next)
+}
+
+func (s *Server) requirePriceProofPartner(next http.Handler) http.Handler {
+	if s.priceProofAuth == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "price proof authentication unavailable", http.StatusInternalServerError)
+		})
+	}
+	return s.priceProofAuth.Middleware(next)
 }
 
 func (s *Server) requirePartner(next http.Handler) http.Handler {

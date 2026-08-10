@@ -15,11 +15,71 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	nhbcrypto "nhbchain/crypto"
+	swap "nhbchain/native/swap"
 	"nhbchain/services/otc-gateway/auth"
 	"nhbchain/services/otc-gateway/identity"
 	"nhbchain/services/otc-gateway/models"
 	"nhbchain/services/otc-gateway/swaprpc"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
+
+// validRecipientAddress returns a well-formed, checksum-valid NHB bech32
+// address suitable for SignAndSubmit's recipient field. Earlier tests used
+// the placeholder string "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", which
+// happened to work only because the previous (broken) code path never
+// actually decoded the recipient string -- it was passed straight through
+// into core.MintVoucher.Recipient as an opaque string. Gap 1's fix decodes
+// it into swap.VoucherV1.Recipient's [20]byte field up front, so it must now
+// be a real, checksum-valid address.
+func validRecipientAddress(t *testing.T) string {
+	t.Helper()
+	var raw [20]byte
+	raw[19] = 0x2A
+	return nhbcrypto.MustNewAddress(nhbcrypto.NHBPrefix, raw[:]).String()
+}
+
+// stubPriceProofSource satisfies server.PriceProofSource for tests.
+type stubPriceProofSource struct {
+	proof *swap.PriceProof
+	err   error
+	calls int
+}
+
+func (s *stubPriceProofSource) PriceProof(ctx context.Context, pair string) (*swap.PriceProof, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.proof, nil
+}
+
+// testPriceProof builds a genuinely signed swap.PriceProof (a real
+// secp256k1 signature over the proof's canonical digest, matching the shape
+// native/swap.PriceProofEngine.Verify expects at consensus time) for use as
+// a stubPriceProofSource's canned response.
+func testPriceProof(t *testing.T) *swap.PriceProof {
+	t.Helper()
+	key, err := nhbcrypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate price proof key: %v", err)
+	}
+	proof, err := swap.NewPriceProof(swap.PriceProofDomainV1, "otc-gateway", "ZNHB/USD", "0.10", time.Now().Unix(), nil)
+	if err != nil {
+		t.Fatalf("build price proof: %v", err)
+	}
+	hash, err := proof.Hash()
+	if err != nil {
+		t.Fatalf("hash price proof: %v", err)
+	}
+	sig, err := ethcrypto.Sign(hash, key.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign price proof: %v", err)
+	}
+	proof.Signature = sig
+	return proof
+}
 
 type stubSigner struct {
 	sig      []byte
@@ -109,6 +169,7 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 		S3Bucket:      "bucket",
 		Signer:        signer,
 		SwapClient:    swap,
+		PriceProof:    &stubPriceProofSource{proof: testPriceProof(t)},
 		VoucherTTL:    time.Minute,
 		Provider:      "otc-gateway",
 		Authenticator: newTestMiddleware(t, nil),
@@ -116,9 +177,9 @@ func TestSignAndSubmit_Minted(t *testing.T) {
 	handler := srv.Handler()
 
 	payload := map[string]string{
-		"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c",
+		"recipient": validRecipientAddress(t),
 		"amount":    "1000",
-		"token":     "NHB",
+		"token":     "ZNHB",
 	}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
@@ -226,13 +287,14 @@ func TestSignAndSubmit_PartnerComplianceMetadata(t *testing.T) {
 		S3Bucket:      "bucket",
 		Signer:        signer,
 		SwapClient:    swap,
+		PriceProof:    &stubPriceProofSource{proof: testPriceProof(t)},
 		Identity:      identityStub,
 		VoucherTTL:    time.Minute,
 		Authenticator: newTestMiddleware(t, nil),
 	})
 	handler := srv.Handler()
 
-	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "42", "token": "NHB"}
+	payload := map[string]string{"recipient": validRecipientAddress(t), "amount": "42", "token": "ZNHB"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -341,10 +403,10 @@ func TestSignAndSubmit_PartnerMissingAttestation(t *testing.T) {
 	swap := &stubSwapClient{}
 	identityStub := &stubIdentityClient{resolution: &identity.Resolution{PartnerDID: "did:example:bad", Verified: false}}
 
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, Identity: identityStub, VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, PriceProof: &stubPriceProofSource{proof: testPriceProof(t)}, Identity: identityStub, VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
-	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
+	payload := map[string]string{"recipient": validRecipientAddress(t), "amount": "10"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -383,7 +445,7 @@ func TestSignAndSubmit_MakerChecker(t *testing.T) {
 	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
-	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
+	payload := map[string]string{"recipient": validRecipientAddress(t), "amount": "10"}
 	body, _ := json.Marshal(payload)
 
 	// Creator cannot sign
@@ -423,10 +485,10 @@ func TestSignAndSubmit_IdempotentReplay(t *testing.T) {
 
 	signer := &stubSigner{sig: bytes.Repeat([]byte{0x1}, 65), signerDN: "CN=Signer"}
 	swap := &stubSwapClient{txHash: "0xhash", minted: true, status: &swaprpc.VoucherStatus{Status: "MINTED", TxHash: "0xhash"}}
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, PriceProof: &stubPriceProofSource{proof: testPriceProof(t)}, VoucherTTL: time.Minute, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
-	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
+	payload := map[string]string{"recipient": validRecipientAddress(t), "amount": "10"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -467,10 +529,10 @@ func TestSignAndSubmit_AwaitMinted(t *testing.T) {
 
 	signer := &stubSigner{sig: bytes.Repeat([]byte{0x2}, 65), signerDN: "CN=Signer"}
 	swap := &stubSwapClient{txHash: "0xslow", minted: false}
-	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, VoucherTTL: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, Authenticator: newTestMiddleware(t, nil)})
+	srv := New(Config{DB: db, TZ: testTZ(), ChainID: 1, S3Bucket: "bucket", Signer: signer, SwapClient: swap, PriceProof: &stubPriceProofSource{proof: testPriceProof(t)}, VoucherTTL: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, Authenticator: newTestMiddleware(t, nil)})
 	handler := srv.Handler()
 
-	payload := map[string]string{"recipient": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsn7d3c", "amount": "10"}
+	payload := map[string]string{"recipient": validRecipientAddress(t), "amount": "10"}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/ops/otc/invoices/"+invoice.ID.String()+"/sign-and-submit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

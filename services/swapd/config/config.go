@@ -49,13 +49,14 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 type Config struct {
 	ListenAddress string `yaml:"listen"`
 	// DatabasePath must resolve to an on-disk SQLite database file.
-	DatabasePath string       `yaml:"database"`
-	Oracle       OracleConfig `yaml:"oracle"`
-	Sources      []Source     `yaml:"sources"`
-	Pairs        []Pair       `yaml:"pairs"`
-	Policy       PolicyConfig `yaml:"policy"`
-	Stable       StableConfig `yaml:"stable"`
-	Admin        AdminConfig  `yaml:"admin"`
+	DatabasePath string           `yaml:"database"`
+	Oracle       OracleConfig     `yaml:"oracle"`
+	Sources      []Source         `yaml:"sources"`
+	Pairs        []Pair           `yaml:"pairs"`
+	Policy       PolicyConfig     `yaml:"policy"`
+	Stable       StableConfig     `yaml:"stable"`
+	Admin        AdminConfig      `yaml:"admin"`
+	PriceProof   PriceProofConfig `yaml:"price_proof"`
 }
 
 type loadOptions struct {
@@ -210,6 +211,35 @@ type StablePartnerQuota struct {
 	Daily float64 `yaml:"daily"`
 }
 
+// PriceProofConfig configures the optional price-proof signing endpoint
+// (POST /v1/price-proof), used by external callers such as the otc-gateway
+// fiat onramp to obtain a freshly signed swap.PriceProof at voucher
+// submission time. Disabled unless Enabled is true. Partners is a
+// deliberately independent authentication list from stable.partners -- an
+// operator can grant a caller price-proof access without also granting it
+// stable-engine trading access.
+type PriceProofConfig struct {
+	Enabled  bool                   `yaml:"enabled"`
+	Provider string                 `yaml:"provider"`
+	Pairs    []string               `yaml:"pairs"`
+	Signer   PriceProofSignerConfig `yaml:"signer"`
+	Partners []StablePartner        `yaml:"partners"`
+}
+
+// PriceProofSignerConfig configures the HSM proxy signer used to sign price
+// proofs. This MUST reference a key distinct from any mint-voucher-signing
+// key used elsewhere (e.g. the otc-gateway's MINTER_ZNHB signer) -- a
+// price-signer key must not carry the same blast radius as the ZNHB
+// mint-authority key.
+type PriceProofSignerConfig struct {
+	BaseURL        string `yaml:"base_url"`
+	KeyLabel       string `yaml:"key_label"`
+	CACertPath     string `yaml:"ca_cert"`
+	ClientCertPath string `yaml:"client_cert"`
+	ClientKeyPath  string `yaml:"client_key"`
+	SignPath       string `yaml:"sign_path"`
+}
+
 // Load reads configuration from the supplied path.
 func Load(path string, opts ...Option) (Config, error) {
 	cfg := Config{}
@@ -319,6 +349,9 @@ func applyDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.Stable.Settlement.NowPayments.BaseURL) == "" {
 		cfg.Stable.Settlement.NowPayments.BaseURL = "https://api.nowpayments.io/v1"
 	}
+	if cfg.PriceProof.Enabled && len(cfg.PriceProof.Pairs) == 0 {
+		cfg.PriceProof.Pairs = []string{"ZNHB/USD"}
+	}
 }
 
 func validate(cfg Config) error {
@@ -327,6 +360,12 @@ func validate(cfg Config) error {
 	}
 	if len(cfg.Sources) == 0 {
 		return fmt.Errorf("at least one oracle source must be configured")
+	}
+	// Validated unconditionally (unlike the stable-engine checks below) --
+	// the price-proof signing endpoint is an independent feature that must
+	// work whether or not the stable trading engine is paused.
+	if err := validatePriceProof(cfg.PriceProof); err != nil {
+		return err
 	}
 	if cfg.Stable.Paused {
 		return nil
@@ -381,6 +420,71 @@ func validate(cfg Config) error {
 	}
 	if cfg.Admin.TLS.Disable {
 		return fmt.Errorf("stable runtime requires admin TLS to be enabled")
+	}
+	return nil
+}
+
+// validatePriceProof validates the optional price-proof signing endpoint's
+// configuration. It is a no-op when the feature is disabled -- the whole
+// point is that a deployment can leave this off (the current production
+// default: nothing signs price proofs yet) without any of these fields
+// being required.
+func validatePriceProof(cfg PriceProofConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Provider) == "" {
+		return fmt.Errorf("price_proof.provider is required when price_proof is enabled")
+	}
+	if len(cfg.Pairs) == 0 {
+		return fmt.Errorf("price_proof.pairs must include at least one pair when price_proof is enabled")
+	}
+	for _, pair := range cfg.Pairs {
+		trimmed := strings.TrimSpace(pair)
+		if trimmed == "" || !strings.Contains(trimmed, "/") {
+			return fmt.Errorf("price_proof.pairs entries must be BASE/QUOTE, got %q", pair)
+		}
+	}
+	if strings.TrimSpace(cfg.Signer.BaseURL) == "" {
+		return fmt.Errorf("price_proof.signer.base_url is required when price_proof is enabled")
+	}
+	if strings.TrimSpace(cfg.Signer.KeyLabel) == "" {
+		return fmt.Errorf("price_proof.signer.key_label is required when price_proof is enabled")
+	}
+	if strings.TrimSpace(cfg.Signer.CACertPath) == "" {
+		return fmt.Errorf("price_proof.signer.ca_cert is required when price_proof is enabled")
+	}
+	if strings.TrimSpace(cfg.Signer.ClientCertPath) == "" {
+		return fmt.Errorf("price_proof.signer.client_cert is required when price_proof is enabled")
+	}
+	if strings.TrimSpace(cfg.Signer.ClientKeyPath) == "" {
+		return fmt.Errorf("price_proof.signer.client_key is required when price_proof is enabled")
+	}
+	if len(cfg.Partners) == 0 {
+		return fmt.Errorf("price_proof.partners must be configured when price_proof is enabled")
+	}
+	seenIDs := make(map[string]struct{}, len(cfg.Partners))
+	seenKeys := make(map[string]struct{}, len(cfg.Partners))
+	for _, partner := range cfg.Partners {
+		id := strings.TrimSpace(partner.ID)
+		if id == "" {
+			return fmt.Errorf("price_proof partner id required")
+		}
+		if _, exists := seenIDs[id]; exists {
+			return fmt.Errorf("duplicate price_proof partner id: %s", id)
+		}
+		seenIDs[id] = struct{}{}
+		apiKey := strings.TrimSpace(partner.APIKey)
+		if apiKey == "" {
+			return fmt.Errorf("price_proof partner api_key required")
+		}
+		if _, exists := seenKeys[apiKey]; exists {
+			return fmt.Errorf("duplicate price_proof partner api_key: %s", apiKey)
+		}
+		seenKeys[apiKey] = struct{}{}
+		if strings.TrimSpace(partner.Secret) == "" {
+			return fmt.Errorf("price_proof partner secret required")
+		}
 	}
 	return nil
 }

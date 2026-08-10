@@ -157,8 +157,33 @@ func (m *Manager) Tick(ctx context.Context) error {
 func (m *Manager) processPair(ctx context.Context, pair Pair) error {
 	base := strings.TrimSpace(pair.Base)
 	quote := strings.TrimSpace(pair.Quote)
+	median, feeders, now, err := m.aggregate(ctx, base, quote)
+	if err != nil {
+		return err
+	}
+	proof := proofID(base, quote, feeders, now)
+	medianStr := median.FloatString(18)
+	if err := m.storage.RecordSnapshot(ctx, base, quote, medianStr, feeders, proof, now); err != nil {
+		return fmt.Errorf("record snapshot: %w", err)
+	}
+	update := Update{Base: base, Quote: quote, Median: medianStr, Feeders: feeders, ProofID: proof, Time: now}
+	if err := m.publisher.PublishOracleUpdate(ctx, update); err != nil {
+		return fmt.Errorf("publish update: %w", err)
+	}
+	return nil
+}
+
+// aggregate polls every configured source for the given pair and returns the
+// computed median alongside the feeders that contributed and the time the
+// aggregation was performed. It is the shared core used by both the periodic
+// Tick loop (processPair) and Quote, the on-demand synchronous accessor used
+// by callers (e.g. the price-proof signing endpoint) that need a
+// freshly-aggregated rate at request time.
+func (m *Manager) aggregate(ctx context.Context, base, quote string) (*big.Rat, []string, time.Time, error) {
+	base = strings.TrimSpace(base)
+	quote = strings.TrimSpace(quote)
 	if base == "" || quote == "" {
-		return fmt.Errorf("invalid pair configuration")
+		return nil, nil, time.Time{}, fmt.Errorf("invalid pair configuration")
 	}
 	now := time.Now()
 	quotes := make([]swap.PriceQuote, 0, len(m.sources))
@@ -191,22 +216,35 @@ func (m *Manager) processPair(ctx context.Context, pair Pair) error {
 		}
 	}
 	if len(quotes) < m.minFeeds {
-		return fmt.Errorf("insufficient oracle feeds for %s/%s", base, quote)
+		return nil, nil, time.Time{}, fmt.Errorf("insufficient oracle feeds for %s/%s", base, quote)
 	}
 	median := computeMedian(quotes)
 	if median == nil || median.Sign() <= 0 {
-		return fmt.Errorf("median computation failed for %s/%s", base, quote)
+		return nil, nil, time.Time{}, fmt.Errorf("median computation failed for %s/%s", base, quote)
+	}
+	return median, feeders, now, nil
+}
+
+// Quote synchronously aggregates a fresh median for the given pair without
+// publishing to the internal stable-quote engine. It exists for callers that
+// need an up-to-the-second rate signed at request time -- e.g. the
+// price-proof signing endpoint (services/swapd/priceproof), where
+// swap.Config.MaxQuoteAgeSeconds's ~2 minute on-chain freshness window rules
+// out ever serving a cached or batched value. A snapshot is still recorded
+// for audit parity with the periodic Tick path.
+func (m *Manager) Quote(ctx context.Context, base, quote string) (*big.Rat, []string, time.Time, error) {
+	if m == nil {
+		return nil, nil, time.Time{}, fmt.Errorf("manager not configured")
+	}
+	median, feeders, now, err := m.aggregate(ctx, base, quote)
+	if err != nil {
+		return nil, nil, time.Time{}, err
 	}
 	proof := proofID(base, quote, feeders, now)
-	medianStr := median.FloatString(18)
-	if err := m.storage.RecordSnapshot(ctx, base, quote, medianStr, feeders, proof, now); err != nil {
-		return fmt.Errorf("record snapshot: %w", err)
+	if err := m.storage.RecordSnapshot(ctx, base, quote, median.FloatString(18), feeders, proof, now); err != nil {
+		m.logger.Printf("swapd: record snapshot: %v", err)
 	}
-	update := Update{Base: base, Quote: quote, Median: medianStr, Feeders: feeders, ProofID: proof, Time: now}
-	if err := m.publisher.PublishOracleUpdate(ctx, update); err != nil {
-		return fmt.Errorf("publish update: %w", err)
-	}
-	return nil
+	return median, feeders, now, nil
 }
 
 func computeMedian(quotes []swap.PriceQuote) *big.Rat {

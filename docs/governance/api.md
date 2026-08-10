@@ -17,6 +17,7 @@ Submits a proposal for any supported `kind`. The payload schema depends on the t
 | `policy.slashing` | Updates the slashing policy envelope. | `{"enabled": bool, "maxPenaltyBps": int, "windowSeconds": int, "maxSlashWei": string, "evidenceTtlSeconds": int, "notes"?: string}` |
 | `role.allowlist` | Grants or revokes governance-managed roles. | `{"grant"?: [{"role": string, "address": bech32}], "revoke"?: [...], "memo"?: string}` |
 | `treasury.directive` | Executes a treasury-funded transfer to one or more recipients. | `{"source": bech32, "transfers": [{"to": bech32, "amountWei": string, "memo"?: string, "kind"?: string}], "memo"?: string}` |
+| `policy.swapPriceSigner` | Registers or revokes the trusted signer address for a swap price-proof provider (consulted by `TxTypeSwapVoucherMint`'s mandatory price-proof signature check). | `{"provider": string, "signerAddress"?: bech32, "memo"?: string, "revoke"?: bool}` |
 
 **Request**
 
@@ -117,7 +118,28 @@ Additional examples:
 }
 ```
 
-Invalid payloads return `codeInvalidParams` along with a descriptive error. Examples include unknown parameter keys, out-of-range numeric values, unapproved roles, or treasury sources that are not allow-listed.
+*Swap price signer registration*
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "gov_propose",
+  "params": {
+    "proposer": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp8d7z2",
+    "kind": "policy.swapPriceSigner",
+    "payload": {
+      "provider": "nowpayments",
+      "signerAddress": "nhb1exampleoraclesigner00000000000000000",
+      "memo": "Provision production ZNHB/USD oracle signer"
+    }
+  }
+}
+```
+
+Setting `"revoke": true` (and omitting `signerAddress`) removes any existing signer registered for `provider` instead of registering one.
+
+Invalid payloads return `codeInvalidParams` along with a descriptive error. Examples include unknown parameter keys, out-of-range numeric values, unapproved roles, treasury sources that are not allow-listed, or a swap price signer payload missing `provider` / using the zero address.
 
 ### Tally Schema
 

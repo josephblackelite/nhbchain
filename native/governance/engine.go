@@ -73,6 +73,8 @@ type proposalState interface {
 	ParamStoreSet(name string, value []byte) error
 	SetRole(role string, addr []byte) error
 	RemoveRole(role string, addr []byte) error
+	SwapSetPriceSigner(provider string, addr [20]byte) error
+	SwapClearPriceSigner(provider string) error
 	PotsoRewardsLastProcessedEpoch() (uint64, bool, error)
 	SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error)
 }
@@ -170,6 +172,13 @@ type parsedTreasuryDirective struct {
 type parsedSlashingPolicy struct {
 	payload  SlashingPolicyPayload
 	maxSlash *big.Int
+}
+
+type parsedSwapPriceSigner struct {
+	provider string
+	addr     [20]byte
+	revoke   bool
+	memo     string
 }
 
 type paramValidator func(raw json.RawMessage) error
@@ -973,6 +982,49 @@ func parseSlashingPolicyPayload(payloadJSON string) (*parsedSlashingPolicy, erro
 	return &parsedSlashingPolicy{payload: payload, maxSlash: maxSlash}, nil
 }
 
+// maxSwapPriceSignerProviderLen bounds the provider identifier length. Swap
+// provider identifiers are short slugs (e.g. "nowpayments", "otc-gateway")
+// -- this is a generous ceiling to reject obviously-malformed payloads, not
+// a meaningful business constraint.
+const maxSwapPriceSignerProviderLen = 64
+
+// parseSwapPriceSignerPayload validates a ProposalKindSwapPriceSignerUpdate
+// payload. Unlike role allowlist and treasury directive proposals, this kind
+// is not gated behind an engine-configured allow-list: it follows
+// ProposalKindSlashingPolicy's precedent of being unconditionally available,
+// since the safety of the proposal lives in the normal governance
+// quorum/threshold/timelock gate, exactly like every other governance action.
+func parseSwapPriceSignerPayload(payloadJSON string) (*parsedSwapPriceSigner, error) {
+	var payload SwapPriceSignerPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	provider := strings.TrimSpace(payload.Provider)
+	if provider == "" {
+		return nil, fmt.Errorf("governance: provider must not be empty")
+	}
+	if len(provider) > maxSwapPriceSignerProviderLen {
+		return nil, fmt.Errorf("governance: provider must be <= %d characters", maxSwapPriceSignerProviderLen)
+	}
+	result := &parsedSwapPriceSigner{
+		provider: provider,
+		revoke:   payload.Revoke,
+		memo:     strings.TrimSpace(payload.Memo),
+	}
+	if payload.Revoke {
+		return result, nil
+	}
+	addr, err := decodeAddress(payload.SignerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("governance: invalid signer address: %w", err)
+	}
+	if addr == ([20]byte{}) {
+		return nil, fmt.Errorf("governance: signer address must not be the zero address")
+	}
+	result.addr = addr
+	return result, nil
+}
+
 func (e *Engine) parseRoleAllowlistPayload(payloadJSON string) (*parsedRoleAllowlist, error) {
 	if len(e.allowedRoles) == 0 {
 		return nil, fmt.Errorf("governance: role allowlist proposals are disabled")
@@ -1137,6 +1189,49 @@ func (e *Engine) applyRoleAllowlist(parsed *parsedRoleAllowlist) (map[string]int
 	detail := map[string]interface{}{
 		"grants":  grants,
 		"revokes": revocations,
+	}
+	if parsed.memo != "" {
+		detail["memo"] = parsed.memo
+	}
+	return detail, nil
+}
+
+// applySwapPriceSignerUpdate registers or revokes the trusted signer address
+// for a swap price-proof provider. This deliberately calls
+// nhbstate.Manager's dedicated SwapSetPriceSigner/SwapClearPriceSigner
+// setters directly -- the exact same call native/swap.PriceProofEngine.Verify
+// consults at TxTypeSwapVoucherMint execution time -- rather than writing
+// through the generic ParamStoreSet path, so this proposal kind requires no
+// changes to native/swap at all.
+//
+// Operational note: like every governance proposal kind today, Execute is
+// invoked from a plain RPC handler (Node.GovernanceExecute) that mutates a
+// single validator's state trie directly -- it is not yet routed through
+// AddTransaction -> mempool -> ApplyTransaction the way TxTypeSwapVoucherMint
+// itself now is. Until governance's own proposal lifecycle receives that same
+// consensus-safety treatment (tracked separately, see the backlog items
+// covering direct-state-write RPC methods), operators must issue gov_execute
+// against every validator to keep price-signer state in sync, exactly as
+// already required for every other proposal kind. This is a pre-existing
+// property of the governance module, not something introduced by this
+// proposal kind.
+func (e *Engine) applySwapPriceSignerUpdate(parsed *parsedSwapPriceSigner) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil swap price signer payload")
+	}
+	detail := map[string]interface{}{
+		"provider": parsed.provider,
+	}
+	if parsed.revoke {
+		if err := e.state.SwapClearPriceSigner(parsed.provider); err != nil {
+			return nil, err
+		}
+		detail["revoked"] = true
+	} else {
+		if err := e.state.SwapSetPriceSigner(parsed.provider, parsed.addr); err != nil {
+			return nil, err
+		}
+		detail["signerAddress"] = formatAddress(parsed.addr)
 	}
 	if parsed.memo != "" {
 		detail["memo"] = parsed.memo
@@ -1353,6 +1448,10 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindTreasuryDirective:
 		if _, err := e.parseTreasuryDirectivePayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindSwapPriceSignerUpdate:
+		if _, err := parseSwapPriceSignerPayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	default:
@@ -1790,6 +1889,18 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return err
 		}
 		for k, v := range treasuryDetail {
+			detail[k] = v
+		}
+	case ProposalKindSwapPriceSignerUpdate:
+		parsed, err := parseSwapPriceSignerPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		signerDetail, err := e.applySwapPriceSignerUpdate(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range signerDetail {
 			detail[k] = v
 		}
 	default:
