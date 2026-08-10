@@ -226,18 +226,70 @@ type PriceProofConfig struct {
 	Partners []StablePartner        `yaml:"partners"`
 }
 
-// PriceProofSignerConfig configures the HSM proxy signer used to sign price
-// proofs. This MUST reference a key distinct from any mint-voucher-signing
-// key used elsewhere (e.g. the otc-gateway's MINTER_ZNHB signer) -- a
-// price-signer key must not carry the same blast radius as the ZNHB
-// mint-authority key.
+// Recognised values for PriceProofSignerConfig.Type. PriceProofSignerTypeHSM
+// is the default -- selected automatically whenever Type is left blank --
+// so every deployment configured before the "local" option existed keeps
+// working unmodified.
+const (
+	PriceProofSignerTypeHSM   = "hsm"
+	PriceProofSignerTypeLocal = "local"
+)
+
+// PriceProofSignerConfig configures the signer used to sign price proofs.
+// Type selects between two mutually exclusive implementations:
+//
+//   - "hsm" (default): an mTLS-fronted HSM proxy, configured via BaseURL,
+//     KeyLabel, CACertPath, ClientCertPath, ClientKeyPath, and optionally
+//     SignPath. This is the only option that existed before local signing
+//     was added, so it stays the default for backward compatibility with
+//     any already-deployed config that predates the Type field.
+//   - "local": a local encrypted keystore file (the same Ethereum V3
+//     keystore format this repo already uses for validator keys), decrypted
+//     once at startup. Configured via KeystorePath and PassphraseEnv. This
+//     exists for operators who want to reuse a wallet they already hold as
+//     a keystore file without provisioning real HSM infrastructure.
+//
+// Whichever type is chosen, the referenced key MUST be distinct from any
+// mint-voucher-signing key used elsewhere (e.g. the otc-gateway's
+// MINTER_ZNHB signer) -- a price-signer key must not carry the same blast
+// radius as the ZNHB mint-authority key.
 type PriceProofSignerConfig struct {
+	Type string `yaml:"type"`
+
+	// HSM signer fields. Required when Type is "hsm" (or left blank).
 	BaseURL        string `yaml:"base_url"`
 	KeyLabel       string `yaml:"key_label"`
 	CACertPath     string `yaml:"ca_cert"`
 	ClientCertPath string `yaml:"client_cert"`
 	ClientKeyPath  string `yaml:"client_key"`
 	SignPath       string `yaml:"sign_path"`
+
+	// Local keystore signer fields. Required when Type is "local".
+
+	// KeystorePath is the path to an encrypted keystore file created via
+	// `nhb-cli keystore import` (see cmd/nhb-cli/keystore_cmd.go) -- never a
+	// raw private key pasted directly into this config.
+	KeystorePath string `yaml:"keystore_path"`
+	// PassphraseEnv is the NAME of an environment variable holding the
+	// keystore's decryption passphrase -- never the passphrase value itself.
+	// A passphrase must never appear in this (or any) config file, since
+	// config files are the kind of thing that ends up committed to git or
+	// captured in a log/debug dump.
+	PassphraseEnv string `yaml:"passphrase_env"`
+}
+
+// NormalizedType returns c.Type, lower-cased and trimmed, defaulting to
+// PriceProofSignerTypeHSM when blank. Both validatePriceProof and
+// services/swapd/main.go call this rather than comparing c.Type directly, so
+// "unset" and "hsm" are always treated identically no matter which of the
+// two ever gets the field populated first (e.g. applyDefaults, or a test
+// constructing a Config literal by hand without going through Load).
+func (c PriceProofSignerConfig) NormalizedType() string {
+	t := strings.ToLower(strings.TrimSpace(c.Type))
+	if t == "" {
+		return PriceProofSignerTypeHSM
+	}
+	return t
 }
 
 // Load reads configuration from the supplied path.
@@ -352,6 +404,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.PriceProof.Enabled && len(cfg.PriceProof.Pairs) == 0 {
 		cfg.PriceProof.Pairs = []string{"ZNHB/USD"}
 	}
+	if strings.TrimSpace(cfg.PriceProof.Signer.Type) == "" {
+		cfg.PriceProof.Signer.Type = PriceProofSignerTypeHSM
+	}
 }
 
 func validate(cfg Config) error {
@@ -445,20 +500,32 @@ func validatePriceProof(cfg PriceProofConfig) error {
 			return fmt.Errorf("price_proof.pairs entries must be BASE/QUOTE, got %q", pair)
 		}
 	}
-	if strings.TrimSpace(cfg.Signer.BaseURL) == "" {
-		return fmt.Errorf("price_proof.signer.base_url is required when price_proof is enabled")
-	}
-	if strings.TrimSpace(cfg.Signer.KeyLabel) == "" {
-		return fmt.Errorf("price_proof.signer.key_label is required when price_proof is enabled")
-	}
-	if strings.TrimSpace(cfg.Signer.CACertPath) == "" {
-		return fmt.Errorf("price_proof.signer.ca_cert is required when price_proof is enabled")
-	}
-	if strings.TrimSpace(cfg.Signer.ClientCertPath) == "" {
-		return fmt.Errorf("price_proof.signer.client_cert is required when price_proof is enabled")
-	}
-	if strings.TrimSpace(cfg.Signer.ClientKeyPath) == "" {
-		return fmt.Errorf("price_proof.signer.client_key is required when price_proof is enabled")
+	switch cfg.Signer.NormalizedType() {
+	case PriceProofSignerTypeHSM:
+		if strings.TrimSpace(cfg.Signer.BaseURL) == "" {
+			return fmt.Errorf("price_proof.signer.base_url is required when price_proof is enabled")
+		}
+		if strings.TrimSpace(cfg.Signer.KeyLabel) == "" {
+			return fmt.Errorf("price_proof.signer.key_label is required when price_proof is enabled")
+		}
+		if strings.TrimSpace(cfg.Signer.CACertPath) == "" {
+			return fmt.Errorf("price_proof.signer.ca_cert is required when price_proof is enabled")
+		}
+		if strings.TrimSpace(cfg.Signer.ClientCertPath) == "" {
+			return fmt.Errorf("price_proof.signer.client_cert is required when price_proof is enabled")
+		}
+		if strings.TrimSpace(cfg.Signer.ClientKeyPath) == "" {
+			return fmt.Errorf("price_proof.signer.client_key is required when price_proof is enabled")
+		}
+	case PriceProofSignerTypeLocal:
+		if strings.TrimSpace(cfg.Signer.KeystorePath) == "" {
+			return fmt.Errorf("price_proof.signer.keystore_path is required when price_proof.signer.type is %q", PriceProofSignerTypeLocal)
+		}
+		if strings.TrimSpace(cfg.Signer.PassphraseEnv) == "" {
+			return fmt.Errorf("price_proof.signer.passphrase_env is required when price_proof.signer.type is %q", PriceProofSignerTypeLocal)
+		}
+	default:
+		return fmt.Errorf("price_proof.signer.type must be %q or %q, got %q", PriceProofSignerTypeHSM, PriceProofSignerTypeLocal, cfg.Signer.Type)
 	}
 	if len(cfg.Partners) == 0 {
 		return fmt.Errorf("price_proof.partners must be configured when price_proof is enabled")

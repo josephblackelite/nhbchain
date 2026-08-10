@@ -363,3 +363,107 @@ func TestApplyDefaultsSetsDefaultPriceProofPair(t *testing.T) {
 		t.Fatalf("expected default pair ZNHB/USD, got %#v", cfg.PriceProof.Pairs)
 	}
 }
+
+func TestApplyDefaultsSetsDefaultSignerType(t *testing.T) {
+	cfg := &Config{PriceProof: PriceProofConfig{Enabled: true}}
+	applyDefaults(cfg)
+	if cfg.PriceProof.Signer.Type != PriceProofSignerTypeHSM {
+		t.Fatalf("expected default signer type %q, got %q", PriceProofSignerTypeHSM, cfg.PriceProof.Signer.Type)
+	}
+}
+
+func TestApplyDefaultsLeavesExplicitSignerTypeAlone(t *testing.T) {
+	cfg := &Config{PriceProof: PriceProofConfig{Enabled: true, Signer: PriceProofSignerConfig{Type: "local"}}}
+	applyDefaults(cfg)
+	if cfg.PriceProof.Signer.Type != "local" {
+		t.Fatalf("expected explicit signer type to be preserved, got %q", cfg.PriceProof.Signer.Type)
+	}
+}
+
+func TestNormalizedTypeDefaultsToHSMWhenBlank(t *testing.T) {
+	var c PriceProofSignerConfig
+	if got := c.NormalizedType(); got != PriceProofSignerTypeHSM {
+		t.Fatalf("expected blank type to normalize to %q, got %q", PriceProofSignerTypeHSM, got)
+	}
+	c.Type = "  HSM  "
+	if got := c.NormalizedType(); got != PriceProofSignerTypeHSM {
+		t.Fatalf("expected mixed-case/whitespace hsm to normalize to %q, got %q", PriceProofSignerTypeHSM, got)
+	}
+	c.Type = "Local"
+	if got := c.NormalizedType(); got != PriceProofSignerTypeLocal {
+		t.Fatalf("expected mixed-case local to normalize to %q, got %q", PriceProofSignerTypeLocal, got)
+	}
+}
+
+func baseLocalPriceProofConfig() PriceProofConfig {
+	return PriceProofConfig{
+		Enabled:  true,
+		Provider: "nowpayments",
+		Pairs:    []string{"ZNHB/USD"},
+		Signer: PriceProofSignerConfig{
+			Type:          PriceProofSignerTypeLocal,
+			KeystorePath:  "/etc/nhbchain/secrets/swapd-price-signer.keystore.json",
+			PassphraseEnv: "SWAPD_PRICE_SIGNER_PASSPHRASE",
+		},
+		Partners: []StablePartner{{ID: "otc-gateway", APIKey: "key-1", Secret: "secret-1"}},
+	}
+}
+
+func TestValidatePriceProofAcceptsCompleteLocalSignerConfig(t *testing.T) {
+	if err := validatePriceProof(baseLocalPriceProofConfig()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePriceProofRequiresLocalSignerFields(t *testing.T) {
+	cases := []func(*PriceProofConfig){
+		func(c *PriceProofConfig) { c.Signer.KeystorePath = "" },
+		func(c *PriceProofConfig) { c.Signer.PassphraseEnv = "" },
+	}
+	for i, mutate := range cases {
+		cfg := baseLocalPriceProofConfig()
+		mutate(&cfg)
+		if err := validatePriceProof(cfg); err == nil {
+			t.Fatalf("case %d: expected error for incomplete local signer config", i)
+		}
+	}
+}
+
+func TestValidatePriceProofLocalSignerDoesNotRequireHSMFields(t *testing.T) {
+	cfg := baseLocalPriceProofConfig()
+	// Explicitly confirm none of the HSM-only fields are populated, and
+	// that validation still passes -- a local signer config must not be
+	// forced to also carry unused HSM placeholders.
+	cfg.Signer.BaseURL = ""
+	cfg.Signer.KeyLabel = ""
+	cfg.Signer.CACertPath = ""
+	cfg.Signer.ClientCertPath = ""
+	cfg.Signer.ClientKeyPath = ""
+	if err := validatePriceProof(cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePriceProofRejectsUnknownSignerType(t *testing.T) {
+	cfg := basePriceProofConfig()
+	cfg.Signer.Type = "carrier-pigeon"
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for unknown signer type")
+	}
+}
+
+func TestValidatePriceProofDefaultBlankSignerTypeBehavesAsHSM(t *testing.T) {
+	// basePriceProofConfig leaves Signer.Type unset -- validatePriceProof
+	// must treat that exactly like "hsm" (backward compatibility for any
+	// config written before the Type field existed), including requiring
+	// the HSM fields it already sets.
+	cfg := basePriceProofConfig()
+	cfg.Signer.Type = ""
+	if err := validatePriceProof(cfg); err != nil {
+		t.Fatalf("unexpected error for blank signer type with complete hsm fields: %v", err)
+	}
+	cfg.Signer.BaseURL = ""
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error: blank signer type must still require hsm fields")
+	}
+}
