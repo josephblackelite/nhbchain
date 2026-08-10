@@ -2495,9 +2495,18 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	if voucher == nil {
 		return fmt.Errorf("%w: voucher required", ErrMintInvalidPayload)
 	}
+	// AmountBig and CanonicalJSON are pure functions of the voucher's own
+	// payload fields (no state/oracle dependency) -- wrap their failures with
+	// ErrMintInvalidPayload so classifyProposalError can recognize them as
+	// permanently unsatisfiable, same as every other payload check in this
+	// function. Do not change these shared MintVoucher methods themselves:
+	// they're also called from core/node.go's pre-enqueue validation and
+	// from off-chain signing code in services/otc-gateway and
+	// services/payments-gateway, which have no reason to know about this
+	// package's sentinel.
 	amount, err := voucher.AmountBig()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
 	}
 	if voucher.ChainID != MintChainID {
 		return ErrMintInvalidChainID
@@ -2508,7 +2517,7 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	}
 	canonical, err := voucher.CanonicalJSON()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
 	}
 	if len(signature) != 65 {
 		return fmt.Errorf("%w: invalid signature length", ErrMintInvalidPayload)
