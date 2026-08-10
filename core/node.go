@@ -68,24 +68,24 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db                           storage.Database
-	state                        *StateProcessor
-	chain                        *Blockchain
-	syncMgr                      *syncmgr.Manager
-	validatorKey                 *crypto.PrivateKey
-	mempool                      []*types.Transaction
-	mempoolMu                    sync.Mutex
-	proposedTxs                  map[string]struct{}
-	mempoolLimit                 int
-	allowUnlimitedMempool        bool
-	senderUsage                  map[string]*senderQuotaUsage
-	senderNonces                 map[string]map[uint64]time.Time
-	pendingNonces                map[string]nonceRecord
-	posArrival                   map[string]time.Time
-	txValidationMu               sync.RWMutex
-	txSimulationEnabled          bool
-	bftEngine                    *bft.Engine
-	stateMu                      sync.RWMutex
+	db                    storage.Database
+	state                 *StateProcessor
+	chain                 *Blockchain
+	syncMgr               *syncmgr.Manager
+	validatorKey          *crypto.PrivateKey
+	mempool               []*types.Transaction
+	mempoolMu             sync.Mutex
+	proposedTxs           map[string]struct{}
+	mempoolLimit          int
+	allowUnlimitedMempool bool
+	senderUsage           map[string]*senderQuotaUsage
+	senderNonces          map[string]map[uint64]time.Time
+	pendingNonces         map[string]nonceRecord
+	posArrival            map[string]time.Time
+	txValidationMu        sync.RWMutex
+	txSimulationEnabled   bool
+	bftEngine             *bft.Engine
+	stateMu               sync.RWMutex
 	// selfProposedHash is the header hash of the block CreateBlock most
 	// recently built from the current, possibly-drifted n.state (guarded by
 	// stateMu). ValidateBlock/commitBlock skip the committed-head drift
@@ -96,7 +96,7 @@ type Node struct {
 	// other block (a peer's proposal, a catch-up/synced block) did not come
 	// from this state, so the drift check still applies to it. See
 	// docs/issue30.md item 2 / task #32.
-	selfProposedHash []byte
+	selfProposedHash             []byte
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
 	govPolicy                    governance.ProposalPolicy
@@ -337,6 +337,10 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
+	stateProcessor.SetSwapConfig(n.swapConfig())
+	if n.chain != nil {
+		stateProcessor.SetSwapVoucherChainID(n.chain.ChainID())
+	}
 	if err := stateProcessor.SetEngagementConfig(n.state.EngagementConfig()); err != nil {
 		return err
 	}
@@ -468,6 +472,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	defaultSwapCfg := swap.Config{}.Normalise()
 	stateProcessor.SetSwapPayoutAuthorities(defaultSwapCfg.PayoutAuthorities)
+	stateProcessor.SetSwapConfig(defaultSwapCfg)
+	stateProcessor.SetSwapVoucherChainID(chain.ChainID())
 
 	pLedger, _ := statepotso.NewLedger(nil, nil)
 
@@ -1600,6 +1606,7 @@ func (n *Node) SetSwapConfig(cfg swap.Config) {
 	n.stateMu.Lock()
 	if n.state != nil {
 		n.state.SetSwapPayoutAuthorities(normalised.PayoutAuthorities)
+		n.state.SetSwapConfig(normalised)
 	}
 	n.stateMu.Unlock()
 }
@@ -2344,6 +2351,43 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 		}
 	}
 
+	// Cheap, same-mempool duplicate rejection for TxTypeSwapVoucherMint,
+	// mirroring TxTypeMint's invoiceID dedup above. This only catches a
+	// duplicate resubmission that is CURRENTLY resident in this validator's
+	// own mempool -- it cannot catch the cross-validator race (two
+	// validators each independently synthesize a distinct priceProof for
+	// the same voucher, producing two different transaction hashes that
+	// never sit in the same mempool at the same time). That race is what
+	// applySwapVoucherMintTransaction's ledger.Exists/HasSeenSwapNonce
+	// checks (a real, network-wide-agreed check once state is synced) and
+	// classifyProposalError below actually guard against.
+	if tx.Type == types.TxTypeSwapVoucherMint {
+		submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
+		}
+		if submission == nil || submission.Voucher == nil {
+			return fmt.Errorf("%w: %w", ErrInvalidTransaction, ErrSwapVoucherInvalidPayload)
+		}
+		providerTxID := strings.TrimSpace(submission.ProviderTxID)
+		orderID := strings.TrimSpace(submission.Voucher.OrderID)
+		for _, existing := range n.mempool {
+			if existing == nil || existing.Type != types.TxTypeSwapVoucherMint {
+				continue
+			}
+			existingSubmission, err := decodeSwapVoucherMintTransaction(existing.Data)
+			if err != nil || existingSubmission == nil || existingSubmission.Voucher == nil {
+				continue
+			}
+			if providerTxID != "" && strings.TrimSpace(existingSubmission.ProviderTxID) == providerTxID {
+				return ErrSwapDuplicateProviderTx
+			}
+			if orderID != "" && strings.TrimSpace(existingSubmission.Voucher.OrderID) == orderID {
+				return ErrSwapNonceUsed
+			}
+		}
+	}
+
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
@@ -2546,6 +2590,18 @@ func (n *Node) GetMempool() []*types.Transaction {
 					continue
 				}
 			}
+			if tx.Type == types.TxTypeSwapVoucherMint {
+				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= now {
+					if key, keyErr := transactionKey(tx); keyErr == nil {
+						delete(n.proposedTxs, key)
+						if n.posArrival != nil {
+							delete(n.posArrival, key)
+						}
+					}
+					continue
+				}
+			}
 			filtered = append(filtered, tx)
 			if mempool.IsPOSLaneEligible(tx) {
 				lanes.POS = append(lanes.POS, tx)
@@ -2641,7 +2697,13 @@ func transactionKey(tx *types.Transaction) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if tx.Type == types.TxTypeMint {
+	// Senderless/envelope-unsigned transaction types (TxTypeMint,
+	// TxTypeSwapVoucherMint) have no recoverable envelope signature -- keying
+	// solely on hash matches RequiresSignature's classification instead of
+	// hardcoding each type here, so any future senderless type is covered
+	// automatically instead of silently calling tx.From() on a transaction
+	// that was never signed.
+	if !types.RequiresSignature(tx.Type) {
 		return hex.EncodeToString(hash), nil
 	}
 	from, err := tx.From()
@@ -2773,28 +2835,329 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 	n.mempool = filtered
 }
 
-func isPrunableProposalError(err error) bool {
-	// ErrHeartbeatTooSoon covers applyHeartbeat's rate-limit and replay
-	// rejections. Those are timing-ordering problems specific to a single
-	// heartbeat transaction (see ErrHeartbeatTooSoon's doc comment in
-	// state_transition.go) -- a validator's own liveness ping should never
-	// be able to abort an entire block proposal for everyone else's
-	// transactions just because it arrived slightly too soon. Pruning it
-	// here is a defense-in-depth backstop: normally a well-behaved
-	// submitter (see EngagementValidatorHeartbeatDue and
-	// pendingHeartbeatFee) never produces a heartbeat transaction that
-	// reaches this check already doomed, and the admission-time
-	// simulation in validateTransaction filters most bad ones out before
-	// they ever enter the mempool -- but that simulation can be disabled
-	// (SetTransactionSimulationEnabled), so CreateBlock must not assume it
-	// always ran.
-	return errors.Is(err, ErrNonceMismatch) || errors.Is(err, ErrHeartbeatTooSoon)
+// proposalTxDisposition is classifyProposalError's verdict for a transaction
+// that failed stateCopy.ApplyTransaction while CreateBlock's buildProposalState
+// is speculatively assembling a block.
+type proposalTxDisposition int
+
+const (
+	// proposalDispositionAbort is the zero value and the safe default for
+	// any error classifyProposalError does not explicitly recognize: the
+	// whole in-progress proposal attempt fails and CreateBlock returns the
+	// error to its caller. This is deliberately what "unclassified" means
+	// -- adding a new disposition always requires a positive, reviewed
+	// decision (see the ABORT-is-correct discussion below); silence must
+	// never be read as "safe to skip or prune".
+	proposalDispositionAbort proposalTxDisposition = iota
+	// proposalDispositionPrune means the transaction is permanently
+	// unexecutable -- a pure function of its own immutable payload, or of
+	// monotonic state that can never revert once true -- so it is dropped
+	// from the mempool immediately (n.dropTransactionsFromMempool) instead
+	// of being left resident to fail identically every subsequent round.
+	proposalDispositionPrune
+	// proposalDispositionSkip means the transaction failed for a reason
+	// that depends on mutable state shared with other transactions in the
+	// SAME proposal attempt (a rolling cap, a governance pause, a signer
+	// registry) or on ordering within this attempt -- a later attempt
+	// (next round, a different candidate set, state that has since
+	// changed) can genuinely succeed. It is excluded from THIS attempt's
+	// block but its mempool "in-flight" mark is released
+	// (n.requeueTransactions) so it is reconsidered next round; it is
+	// never removed from n.mempool.
+	proposalDispositionSkip
+)
+
+// classifyProposalError reports the disposition for a transaction that
+// failed during proposal building (stateCopy.ApplyTransaction in
+// CreateBlock's buildProposalState). Getting this wrong in either direction
+// is dangerous: classifying a transiently-failing error as PRUNE silently
+// and permanently destroys a transaction that would have succeeded later;
+// leaving a routinely-occurring error unclassified (ABORT) lets it block
+// EVERY OTHER pending transaction, for EVERY subsequent round, until the
+// offending transaction's own expiry -- a validator-wide liveness stall, not
+// just a loss for one submitter. This function (and the SKIP disposition
+// specifically) exists because that second failure mode was found to be far
+// more common, and far more severe, than originally assumed -- see the
+// module-pause discussion below.
+//
+// This matters most for TxTypeSwapVoucherMint: when the same fiat voucher
+// reaches two validators nearly simultaneously (each independently
+// synthesizes its own price proof when the caller omits one, producing
+// distinct transaction hashes local mempool dedup can never catch across
+// nodes), only one can ever commit -- correct, that's the whole point of
+// routing this through consensus. But the LOSING validator's copy of the
+// voucher transaction must be prunable, or CreateBlock aborts the entire
+// proposal (not just this one transaction) every round it tries to include
+// the now-permanently-invalid duplicate, blocking that validator from
+// proposing ANY block, for ANY transaction, until the voucher's own expiry.
+// On a small validator set that can stall block production network-wide.
+//
+// == PRUNE: pure function of the transaction's own immutable payload, or of
+// monotonic state that can never revert once true ==
+//
+// Decode failure, domain/chainId/token mismatch, unrecoverable signature, a
+// provider transaction ID or order nonce already consumed, a voucher past
+// its fixed expiry: re-proposing the exact same transaction bytes can never
+// succeed later either.
+//
+//   - ErrSwapPriceProofRequired fires only when the transaction's OWN
+//     embedded price proof is absent, or its signature is absent, and this
+//     transaction type unconditionally requires both (see RequireSignature
+//     (true) in applySwapVoucherMintTransaction -- hardcoded, not read from
+//     mutable operator config). A resubmission of the identical transaction
+//     bytes can never later carry a price proof or signature it does not
+//     already contain, so this can never succeed later either.
+//   - ErrSwapPriceProofStale fires when the block timestamp has advanced
+//     more than swap.Config.MaxQuoteAgeSeconds past the price proof's own
+//     fixed signing timestamp. Block time (n.currentTime(), read fresh on
+//     every CreateBlock attempt) only moves forward, so once a specific
+//     proof is stale relative to it, it can only ever become MORE stale on
+//     every later retry -- exactly ErrSwapExpired's reasoning, just applied
+//     to the quote's freshness window instead of the voucher's own expiry.
+//     Round 1/2's reported liveness bug (an entirely ordinary voucher that
+//     sits in the mempool past the default 120s quote window permanently
+//     wedges the proposing validator) lives here. Note: native/swap/engine.
+//     go's Verify also raises this same sentinel for a price-proof
+//     timestamp implausibly far in the FUTURE (>30s ahead of block time,
+//     e.g. signer/validator clock skew); that sub-case is not strictly
+//     monotonic (it can self-resolve once block time catches up), but it
+//     requires a fixed operational clock-skew anomaly to trigger at all, and
+//     pruning it only costs the submitter a fresh resubmission with a
+//     current price proof -- not a validator-wide liveness stall, which is
+//     the far more severe failure mode this whole function exists to avoid.
+//   - ErrNonceTooLow (tx.Nonce < account.Nonce): account.Nonce only ever
+//     increases, so a stale/replayed nonce can never become valid again.
+//   - ErrHeartbeatTooSoon covers applyHeartbeat's rate-limit and replay
+//     rejections. Those are timing-ordering problems specific to a single
+//     heartbeat transaction (see ErrHeartbeatTooSoon's doc comment in
+//     state_transition.go) -- a validator's own liveness ping should never
+//     be able to abort an entire block proposal for everyone else's
+//     transactions just because it arrived slightly too soon. Pruning it
+//     here is a defense-in-depth backstop: normally a well-behaved
+//     submitter (see EngagementValidatorHeartbeatDue and
+//     pendingHeartbeatFee) never produces a heartbeat transaction that
+//     reaches this check already doomed, and the admission-time simulation
+//     in validateTransaction filters most bad ones out before they ever
+//     enter the mempool -- but that simulation can be disabled
+//     (SetTransactionSimulationEnabled), so CreateBlock must not assume it
+//     always ran. Both of ErrHeartbeatTooSoon's sub-cases compare a fixed
+//     payload.Timestamp against a monotonically-increasing on-chain
+//     EngagementLastHeartbeat, so -- unlike the nonce split above -- no
+//     further split is needed here; both sub-cases are equally permanent.
+//   - ErrUnknownTransactionType: within one running binary the set of
+//     recognized TxType values is a compiled constant, so retrying the
+//     identical bytes can never succeed for the lifetime of this process.
+//     This only drops the transaction from THIS validator's local mempool;
+//     a peer running newer software that recognizes the type keeps its own
+//     copy and can still gossip/re-propagate it, and if this validator
+//     later upgrades it re-learns the transaction via gossip like any
+//     other.
+//   - The TxTypeMint analogues of the swap payload/monotonic-state PRUNE
+//     errors: ErrMintInvoiceUsed (monotonic dedup, same pattern as
+//     ErrSwapDuplicateProviderTx/ErrSwapNonceUsed), ErrMintInvalidChainID,
+//     ErrMintExpired, and ErrMintInvalidPayload (all pure functions of the
+//     voucher's own immutable payload, same pattern as their swap
+//     equivalents).
+//
+// == SKIP: depends on mutable state shared across transactions in this
+// attempt, or on ordering within this attempt -- a later attempt can
+// genuinely succeed ==
+//
+//   - ErrSwapDailyCapExceeded / ErrSwapMonthlyCapExceeded: per-recipient
+//     rolling totals that reset at day/month boundaries. Two vouchers to
+//     the same recipient in one proposal attempt can trip the cap for the
+//     second even though each independently passed admission-time
+//     simulation; a later attempt (different candidate set, or after the
+//     window rolls over) can succeed.
+//   - ErrSwapVelocityExceeded: a rolling count within
+//     RiskParameters.VelocityWindowSeconds -- strictly order/timing
+//     dependent within the same block-building pass.
+//   - ErrSwapPriceProofDeviation: compares the proof's rate to a
+//     live-updating reference; a later attempt (rate moved back in range,
+//     or a fresher proof arrives) can succeed.
+//   - ErrSwapSlippageExceeded: compares the computed mint amount to
+//     voucher.Amount using the CURRENT price proof's rate -- depends on
+//     which price proof made it through, itself order/timing dependent.
+//   - ErrSwapInvalidSigner, ErrSwapPriceProofSignerUnknown,
+//     ErrSwapMintPaused, ErrSwapUnsupportedFiat, ErrSwapProviderNotAllowed,
+//     ErrSwapAmountBelowMinimum, ErrSwapAmountAboveMaximum, ErrSwapSanctioned:
+//     all depend on mutable operator config or registries that genuinely
+//     can change (a signer gets registered, a pause lifts, an allow-list is
+//     edited, a sanctions entry is delisted) -- a resubmission-free later
+//     attempt of the exact same transaction bytes can succeed once the
+//     config changes. ErrSwapSanctioned specifically: harmlessly re-skipping
+//     a sanctioned voucher every round is strictly better than letting it
+//     freeze every OTHER user's transactions; it is bounded by the same
+//     worst-case argument as every other SKIP entry (see "Termination"
+//     below). Note ErrSwapPriceProofInvalid is deliberately NOT included
+//     here -- see the ABORT section.
+//   - nativecommon.ErrModulePaused (returned directly by
+//     applySwapVoucherMintTransaction's nativecommon.Guard(sp.pauses,
+//     moduleSwap) call), ErrStakePaused (the wrapped form every moduleStaking
+//     Guard call site in state_transition.go returns), ErrTransferNHBPaused,
+//     ErrTransferZNHBPaused: pausing a module is a normal, designed
+//     governance/admin action (maintenance, incident response), not a rare
+//     edge case, and un-pausing is equally normal and expected soon after.
+//     TxTypeTransfer (ordinary NHB transfers) is almost certainly the
+//     single most common transaction type on this chain. Before this
+//     disposition existed, none of these were classified at all (fell to
+//     ABORT by default): if governance paused NHB transfers (or ZNHB
+//     transfers, staking, or swap) while even one matching transaction sat
+//     in a validator's mempool, that validator could not propose ANY block
+//     for ANY sender until the pause lifted or that one transaction was
+//     otherwise evicted -- a strictly worse, strictly more likely-to-trigger
+//     version of the swap-cap liveness bug this whole mechanism exists to
+//     fix.
+//   - nativecommon.ErrQuotaRequestsExceeded, ErrQuotaNHBCapExceeded,
+//     ErrQuotaCounterOverflow (reached via applyQuota, which wraps with
+//     fmt.Errorf("quota: %s: %w", ...) -- errors.Is still matches through
+//     the %w): per-sender, per-epoch rolling counters that reset over time,
+//     structurally identical to the swap daily/monthly caps. Reached by
+//     escrow, trade, staking (via POTSO's quota, not the staking pause),
+//     and every TxTypeLending* transaction type.
+//   - ErrMintPaused, ErrMintInvalidSigner, ErrMintEmissionCapExceeded: the
+//     TxTypeMint analogues of the module-pause and signer-registry SKIP
+//     entries above, plus a per-year emission cap that resets yearly and is
+//     directly order-dependent (two mint vouchers processed in the same
+//     proposal attempt can contend for remaining headroom) -- the identical
+//     failure mode described for swap caps, just for the plain NHB/ZNHB
+//     mint path instead.
+//   - ErrNonceTooHigh (tx.Nonce > account.Nonce): a lower-nonce transaction
+//     from the same sender hasn't landed yet. Today addTransaction enforces
+//     strict admission-time nonce sequencing for every dispatchable tx type
+//     (nonce != expectedNonce is rejected at admission), so this is
+//     believed unreachable in practice via the current mempool -- but
+//     classifying it SKIP rather than relying on that invariant is cheap
+//     defense-in-depth against a future admission-time relaxation (e.g.
+//     nonce-queuing for UX) or a scheduler reordering bug.
+//
+// == ABORT: deliberately still unclassified ==
+//
+//   - ErrSwapPriceProofInvalid: its signature-mismatch case is checked
+//     against the SAME mutable SwapPriceSigner registry as
+//     ErrSwapPriceProofSignerUnknown (recovered-pubkey-vs-currently-
+//     registered-signer), so a correction to a stale/incorrect signer
+//     registration could make a later resubmission succeed -- SKIP-shaped
+//     reasoning. But it ALSO covers pure-payload causes (domain/pair
+//     mismatch, a non-positive rate) that are PRUNE-shaped, and Go's
+//     errors.Is cannot distinguish which branch fired. The conservative,
+//     correct choice for an ambiguous sentinel is to leave it unclassified
+//     (ABORT) rather than risk either silently, permanently dropping a
+//     transaction that would have succeeded (wrong PRUNE), or endlessly
+//     retrying real corruption forever masked as "try again later" (wrong
+//     SKIP). This is intentionally NOT the same risk profile as a routine
+//     operational event like a pause or a cap -- it requires a genuinely
+//     malformed or adversarial payload to trigger, so ABORT's liveness cost
+//     is bounded to that rare case rather than to ordinary usage.
+//   - Two node-infrastructure failure classes that run in buildProposalState
+//     before or after the per-tx loop, not inside it, and are therefore
+//     never seen by this function at all: n.refreshModulePauses() /
+//     n.state.Copy() failures (a precondition for building ANY block,
+//     including an empty one -- no transaction-exclusion strategy can fix
+//     an inability to read config or snapshot state), and
+//     stateCopy.ProcessBlockLifecycle / n.processPendingEvidenceForState
+//     failures (whole-block epoch rollover and slashing-evidence
+//     processing, not attributable to any single pending transaction).
+//     Both are surfaced as CreateBlock errors so the round fails visibly
+//     and another validator's block production can cover it.
+//
+// == Termination ==
+//
+// The per-tx loop in buildProposalState never stops scanning on a PRUNE or
+// SKIP verdict (it `continue`s), so every candidate is attempted exactly
+// once per retry. CreateBlock's outer loop retries only when the candidate
+// set strictly shrank (at least one PRUNE or SKIP hit), so it terminates in
+// at most len(original txs)+1 iterations -- the last one either succeeding
+// (trivially, on an empty set if every transaction was excluded) or
+// hard-erroring via an ABORT-classified error. Worst case, EVERY mempool
+// transaction is SKIP-classified (e.g. a burst that trips a shared cap, or
+// a module pause hitting a fully-transfer-heavy mempool): the candidate set
+// shrinks to empty within that same bound, computeDependencyGraph(nil)
+// succeeds trivially, and buildProposalState returns a valid, successful,
+// EMPTY *StateProcessor -- CreateBlock returns an empty block, not an
+// error, not a hang. The validator stays live and proposes an empty block
+// instead of dropping out of the round entirely. See
+// TestCreateBlockAllSkippableTransactionsProducesEmptyBlockNotHang for a
+// test that exercises exactly this worst case with a large synthetic
+// mempool.
+func classifyProposalError(err error) proposalTxDisposition {
+	switch {
+	case errors.Is(err, ErrNonceTooLow),
+		errors.Is(err, ErrHeartbeatTooSoon),
+		errors.Is(err, ErrUnknownTransactionType),
+		errors.Is(err, ErrSwapDuplicateProviderTx),
+		errors.Is(err, ErrSwapNonceUsed),
+		errors.Is(err, ErrSwapExpired),
+		errors.Is(err, ErrSwapVoucherInvalidPayload),
+		errors.Is(err, ErrSwapInvalidDomain),
+		errors.Is(err, ErrSwapInvalidChainID),
+		errors.Is(err, ErrSwapInvalidToken),
+		errors.Is(err, ErrSwapInvalidSignature),
+		errors.Is(err, ErrSwapPriceProofRequired),
+		errors.Is(err, ErrSwapPriceProofStale),
+		errors.Is(err, ErrMintInvoiceUsed),
+		errors.Is(err, ErrMintInvalidChainID),
+		errors.Is(err, ErrMintExpired),
+		errors.Is(err, ErrMintInvalidPayload):
+		return proposalDispositionPrune
+	case errors.Is(err, ErrNonceTooHigh),
+		errors.Is(err, ErrSwapDailyCapExceeded),
+		errors.Is(err, ErrSwapMonthlyCapExceeded),
+		errors.Is(err, ErrSwapVelocityExceeded),
+		errors.Is(err, ErrSwapPriceProofDeviation),
+		errors.Is(err, ErrSwapSlippageExceeded),
+		errors.Is(err, ErrSwapInvalidSigner),
+		errors.Is(err, ErrSwapPriceProofSignerUnknown),
+		errors.Is(err, ErrSwapMintPaused),
+		errors.Is(err, ErrSwapUnsupportedFiat),
+		errors.Is(err, ErrSwapProviderNotAllowed),
+		errors.Is(err, ErrSwapAmountBelowMinimum),
+		errors.Is(err, ErrSwapAmountAboveMaximum),
+		errors.Is(err, ErrSwapSanctioned),
+		errors.Is(err, nativecommon.ErrModulePaused),
+		errors.Is(err, ErrStakePaused),
+		errors.Is(err, ErrTransferNHBPaused),
+		errors.Is(err, ErrTransferZNHBPaused),
+		errors.Is(err, nativecommon.ErrQuotaRequestsExceeded),
+		errors.Is(err, nativecommon.ErrQuotaNHBCapExceeded),
+		errors.Is(err, nativecommon.ErrQuotaCounterOverflow),
+		errors.Is(err, ErrMintPaused),
+		errors.Is(err, ErrMintInvalidSigner),
+		errors.Is(err, ErrMintEmissionCapExceeded),
+		errors.Is(err, ErrMintRecipientUnresolved):
+		return proposalDispositionSkip
+	}
+	return proposalDispositionAbort
 }
 
 func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
 	proposedTxs := append([]*types.Transaction(nil), txs...)
 	var prunedTxs []*types.Transaction
+	// skippedTxs accumulates every transaction excluded from this attempt via
+	// proposalDispositionSkip across every buildProposalState retry within
+	// this single CreateBlock call. Unlike prunedTxs it is never a mempool
+	// structure and never persisted -- it exists only for the duration of
+	// this call, exactly like prunedTxs already does.
+	var skippedTxs []*types.Transaction
 	defer func() {
+		// Unconditional release, regardless of whether CreateBlock ultimately
+		// succeeds or fails: buildProposalState already calls
+		// n.requeueTransactions(attemptSkipped) immediately upon detecting a
+		// SKIP disposition (see below), releasing the mempool "in-flight"
+		// mark as early as correctness allows. This second call is
+		// deliberately redundant -- requeueTransactions only ever does
+		// delete(n.proposedTxs, key), so deleting an already-deleted key is a
+		// safe no-op -- and exists as a structural guarantee: on the SUCCESS
+		// path (err == nil) the rest of this defer never runs (see the next
+		// check), so without this unconditional release here, a
+		// successfully-skipped transaction's "in-flight" mark would never be
+		// cleared, permanently hiding it from every future GetMempool() call
+		// even though it is still physically resident in n.mempool -- a
+		// silent, latent "phantom prune" bug distinct from, but just as bad
+		// as, calling dropTransactionsFromMempool on it.
+		if len(skippedTxs) > 0 {
+			n.requeueTransactions(skippedTxs)
+		}
 		if err == nil || len(proposedTxs) == 0 {
 			return
 		}
@@ -2840,6 +3203,13 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 			if tx.Type == types.TxTypeMint {
 				voucher, _, err := decodeMintTransaction(tx.Data)
 				if err != nil || voucher == nil || voucher.Expiry <= timestamp {
+					prunedTxs = append(prunedTxs, tx)
+					continue
+				}
+			}
+			if tx.Type == types.TxTypeSwapVoucherMint {
+				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
+				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= timestamp {
 					prunedTxs = append(prunedTxs, tx)
 					continue
 				}
@@ -2892,20 +3262,41 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 
 		keptTxs := make([]*types.Transaction, 0, len(orderedTxs))
 		attemptPruned := make([]*types.Transaction, 0)
+		// attemptSkipped collects this attempt's SKIP-classified failures --
+		// see classifyProposalError's proposalDispositionSkip doc for why
+		// these must NOT be treated like attemptPruned (mempool-removed) or
+		// silently left in-flight (never reconsidered again).
+		attemptSkipped := make([]*types.Transaction, 0)
 		for _, tx := range orderedTxs {
 			if err := stateCopy.ApplyTransaction(tx); err != nil {
-				if isPrunableProposalError(err) {
+				switch classifyProposalError(err) {
+				case proposalDispositionPrune:
 					attemptPruned = append(attemptPruned, tx)
 					continue
+				case proposalDispositionSkip:
+					attemptSkipped = append(attemptSkipped, tx)
+					continue
+				default: // proposalDispositionAbort
+					stateCopy.EndBlock()
+					return nil, nil, nil, err
 				}
-				stateCopy.EndBlock()
-				return nil, nil, nil, err
 			}
 			keptTxs = append(keptTxs, tx)
 		}
-		if len(attemptPruned) > 0 {
+		if len(attemptPruned) > 0 || len(attemptSkipped) > 0 {
 			prunedTxs = append(prunedTxs, attemptPruned...)
+			skippedTxs = append(skippedTxs, attemptSkipped...)
+			// PRUNE txs are permanently removed from the real mempool.
 			n.dropTransactionsFromMempool(attemptPruned)
+			// SKIP txs are released from "in-flight" bookkeeping immediately
+			// (as early as correctness allows, matching
+			// dropTransactionsFromMempool's timing above) so the next
+			// GetMempool() call can offer them again -- but n.mempool itself
+			// is deliberately left untouched: requeueTransactions only ever
+			// deletes from n.proposedTxs, never from n.mempool. See
+			// CreateBlock's top-level defer for the unconditional,
+			// idempotent backstop release of the same set.
+			n.requeueTransactions(attemptSkipped)
 			stateCopy.EndBlock()
 			return nil, keptTxs, nil, nil
 		}
@@ -6830,12 +7221,58 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 	return txHash, nil
 }
 
+// SwapSubmitVoucher enqueues a fiat-gateway-attested ZNHB mint voucher as a
+// signed TxTypeSwapVoucherMint transaction and returns immediately -- it does
+// NOT wait for the transaction to be included in a block. This mirrors
+// MintWithSignature's contract, and the otc-gateway's existing awaitMinted
+// polling loop (services/otc-gateway/server/sign_submit.go) is written to
+// tolerate exactly that: it already handles minted=false by polling
+// swap_voucher_get / this method's ledger record until the voucher
+// transitions to Minted.
+//
+// CORRECTION (round 3): an earlier version of this comment claimed the
+// otc-gateway needed "zero gateway-side changes" for this RPC-shape
+// contract. That is false and pre-dates this whole effort (present in
+// round 1, round 2, and the original pre-conversion code alike): the
+// gateway's request-building code (services/otc-gateway/server/
+// sign_submit.go, via swaprpc/client.go's SubmitMintVoucher) actually
+// builds and sends a core.MintVoucher-shaped JSON payload -- the shape for
+// the unrelated mint_with_sig RPC -- to swap_submitVoucher, whose handler
+// (rpc/swap_handlers.go's handleSwapSubmitVoucher) decodes into a
+// swap.VoucherV1, a different shape with required domain/orderId/nonce
+// fields that MintVoucher's encoding never produces. Every real submission
+// from the actual gateway therefore fails immediately at JSON-decode with
+// "voucher: domain required", before any of the transaction-type or
+// price-proof logic above is ever reached. This is a separate,
+// pre-existing, unrelated payload-shape bug in the otc-gateway itself --
+// out of scope for the swap-voucher-mint TxType conversion this file
+// implements -- and still needs its own fix before the fiat-onramp flow
+// works end-to-end in production.
+//
+// Prior to this, SwapSubmitVoucher performed a direct, non-consensus
+// state-trie write inside this RPC handler: its duplicate-submission check
+// (ledger.Exists / HasSeenSwapNonce) only ever saw ONE validator's own local
+// state, so the same fiat voucher reaching two validators independently
+// could mint ZNHB twice. Routing through AddTransaction -> mempool -> gossip
+// -> ApplyTransaction makes the duplicate check a real, network-wide-agreed
+// check: see applySwapVoucherMintTransaction in swap_voucher_tx.go for the
+// deterministic execution path every validator now runs identically.
+//
+// Only shallow, stateless shape validation happens here (domain, chain id,
+// basic field presence, signature length) -- exactly mirroring
+// MintWithSignature's own shallow pre-checks. Every stateful check (fiat
+// allow-list, provider allow-list, mint-authority signer match, mandatory
+// price-proof signature verification, slippage, risk limits, sanctions,
+// duplicate providerTxID/orderID) lives solely in
+// applySwapVoucherMintTransaction so there is exactly one implementation of
+// the business rules -- AddTransaction synchronously simulates that same
+// deterministic path via validateTransaction before admitting the
+// transaction to the mempool, so malformed/invalid submissions still fail
+// synchronously from the caller's point of view; only successful
+// submissions become asynchronous (enqueued, not yet minted).
 func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bool, error) {
 	if submission == nil || submission.Voucher == nil {
 		return "", false, fmt.Errorf("swap: voucher required")
-	}
-	if err := nativecommon.Guard(n, moduleSwap); err != nil {
-		return "", false, err
 	}
 	voucher := submission.Voucher
 	if strings.TrimSpace(voucher.Domain) != swap.VoucherDomainV1 {
@@ -6844,7 +7281,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if voucher.ChainID != n.chain.ChainID() {
 		return "", false, ErrSwapInvalidChainID
 	}
-	if voucher.Expiry <= time.Now().Unix() {
+	if voucher.Expiry <= n.currentTime().Unix() {
 		return "", false, ErrSwapExpired
 	}
 	if voucher.Amount == nil || voucher.Amount.Sign() <= 0 {
@@ -6868,438 +7305,41 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	if providerTxID == "" {
 		return "", false, fmt.Errorf("swap: providerTxId required")
 	}
-	signature := append([]byte(nil), submission.Signature...)
-	if len(signature) == 0 {
+	if len(submission.Signature) != 65 {
 		return "", false, ErrSwapInvalidSignature
 	}
-	priceProof := submission.PriceProof
 	token := strings.ToUpper(strings.TrimSpace(voucher.Token))
 	if token != "ZNHB" {
 		return "", false, ErrSwapInvalidToken
 	}
-	hash := voucher.Hash()
-	if len(hash) == 0 {
-		return "", false, ErrSwapInvalidSignature
-	}
-	if len(signature) != 65 {
-		return "", false, ErrSwapInvalidSignature
-	}
-	pubKey, err := ethcrypto.SigToPub(hash, signature)
-	if err != nil {
-		return "", false, fmt.Errorf("swap: recover signer: %w", err)
-	}
-	recovered := ethcrypto.PubkeyToAddress(*pubKey)
 
-	cfg := n.swapConfig()
-	riskParams, err := cfg.Risk.Parameters()
+	payload, err := encodeSwapVoucherMintTransaction(submission)
 	if err != nil {
 		return "", false, err
 	}
-	if !cfg.IsFiatAllowed(voucher.Fiat) {
-		return "", false, ErrSwapUnsupportedFiat
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSwapVoucherMint,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
 	}
-	n.swapCfgMu.RLock()
-	oracle := n.swapOracle
-	n.swapCfgMu.RUnlock()
-	if oracle == nil {
-		return "", false, ErrSwapOracleUnavailable
-	}
-
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	riskEngine := swap.NewRiskEngine(manager)
-	sanctionsLog := swap.NewSanctionsLog(manager)
-	priceEngine := swap.NewPriceProofEngine(manager, cfg.MaxQuoteAge(), cfg.PriceProofMaxDeviationBps)
-	priceEngine.RequireSignature(riskParams.PriceProofSignatureRequired)
-	quote, err := oracle.GetRate("USD", token)
-	if err != nil {
-		if errors.Is(err, swap.ErrNoFreshQuote) {
-			return "", false, ErrSwapQuoteStale
-		}
-		return "", false, fmt.Errorf("swap: oracle: %w", err)
-	}
-	if priceProof == nil {
-		rateStr := strings.TrimSpace(voucher.Rate)
-		if rateStr == "" && quote.Rate != nil {
-			rateStr = quote.Rate.FloatString(18)
-		}
-		providerID := "manual"
-		if len(cfg.OraclePriority) > 0 {
-			trimmed := strings.TrimSpace(cfg.OraclePriority[0])
-			if trimmed != "" {
-				providerID = trimmed
-			}
-		}
-		pair := fmt.Sprintf("%s/USD", token)
-		timestamp := quote.Timestamp.UTC().Unix()
-		if timestamp == 0 {
-			timestamp = time.Now().UTC().Unix()
-		}
-		fallback, err := swap.NewPriceProof(
-			swap.PriceProofDomainV1,
-			providerID,
-			pair,
-			rateStr,
-			timestamp,
-			nil,
-			swap.WithSignatureRequired(riskParams.PriceProofSignatureRequired),
-		)
-		if err != nil {
-			if errors.Is(err, swap.ErrPriceProofSignatureMissing) {
-				return "", false, ErrSwapPriceProofRequired
-			}
-			return "", false, fmt.Errorf("swap: price proof: %w", err)
-		}
-		priceProof = fallback
-	}
-	if priceProof == nil {
-		return "", false, ErrSwapPriceProofRequired
-	}
-	if riskParams.PriceProofSignatureRequired || len(priceProof.Signature) == 65 {
-		if err := priceEngine.Verify(priceProof, provider, token); err != nil {
-			switch {
-			case errors.Is(err, swap.ErrPriceProofNil), errors.Is(err, swap.ErrPriceProofSignatureMissing):
-				return "", false, ErrSwapPriceProofRequired
-			case errors.Is(err, swap.ErrPriceProofDomain),
-				errors.Is(err, swap.ErrPriceProofPair),
-				errors.Is(err, swap.ErrPriceProofProviderMismatch),
-				errors.Is(err, swap.ErrPriceProofSignatureInvalid):
-				return "", false, ErrSwapPriceProofInvalid
-			case errors.Is(err, swap.ErrPriceProofSignerUnknown):
-				return "", false, ErrSwapPriceProofSignerUnknown
-			case errors.Is(err, swap.ErrPriceProofStale):
-				return "", false, ErrSwapPriceProofStale
-			case errors.Is(err, swap.ErrPriceProofDeviation):
-				return "", false, ErrSwapPriceProofDeviation
-			default:
-				return "", false, fmt.Errorf("swap: price proof verify: %w", err)
-			}
-		}
-	}
-	proofID, err := priceProof.ID()
-	if err != nil {
-		return "", false, fmt.Errorf("swap: price proof id: %w", err)
-	}
-	if len(cfg.Providers.Allow) > 0 && !cfg.Providers.IsAllowed(provider) {
-		n.emitSwapLimitAlert(events.SwapLimitAlert{
-			Address:      voucher.Recipient,
-			Provider:     provider,
-			ProviderTxID: providerTxID,
-			Limit:        "provider",
-			Amount:       new(big.Int).Set(voucher.Amount),
-		})
-		return "", false, ErrSwapProviderNotAllowed
-	}
-	if riskParams.SanctionsCheckEnabled {
-		checker := n.swapSanctionsChecker()
-		if checker != nil && !checker(voucher.Recipient) {
-			if err := sanctionsLog.RecordFailure(voucher.Recipient, provider, providerTxID); err != nil {
-				return "", false, fmt.Errorf("swap: record sanctions failure: %w", err)
-			}
-			n.emitSwapSanctionAlert(events.SwapSanctionAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-			})
-			return "", false, ErrSwapSanctioned
-		}
-	}
-	violation, err := riskEngine.CheckLimits(voucher.Recipient, voucher.Amount, riskParams)
+	hashBytes, err := tx.Hash()
 	if err != nil {
 		return "", false, err
 	}
-	if violation != nil {
-		switch violation.Code {
-		case swap.RiskCodeVelocity:
-			n.emitSwapVelocityAlert(events.SwapVelocityAlert{
-				Address:       voucher.Recipient,
-				Provider:      provider,
-				ProviderTxID:  providerTxID,
-				WindowSeconds: violation.WindowSeconds,
-				ObservedCount: violation.Count,
-				AllowedMints:  riskParams.VelocityMaxMints,
-			})
-			return "", false, ErrSwapVelocityExceeded
-		case swap.RiskCodePerTxMin:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapAmountBelowMinimum
-		case swap.RiskCodePerTxMax:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapAmountAboveMaximum
-		case swap.RiskCodeDailyCap:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapDailyCapExceeded
-		case swap.RiskCodeMonthlyCap:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, ErrSwapMonthlyCapExceeded
-		default:
-			n.emitSwapLimitAlert(events.SwapLimitAlert{
-				Address:      voucher.Recipient,
-				Provider:     provider,
-				ProviderTxID: providerTxID,
-				Limit:        string(violation.Code),
-				Amount:       new(big.Int).Set(voucher.Amount),
-				LimitValue:   cloneBigInt(violation.Limit),
-				CurrentValue: cloneBigInt(violation.Current),
-			})
-			return "", false, fmt.Errorf("swap: risk violation %s", violation.Code)
-		}
-	}
-	tokenMeta, err := manager.Token(token)
-	if err != nil {
-		return "", false, err
-	}
-	if tokenMeta == nil {
-		return "", false, ErrSwapInvalidToken
-	}
-	if tokenMeta.MintPaused {
-		return "", false, ErrSwapMintPaused
-	}
-	if len(tokenMeta.MintAuthority) != 20 {
-		return "", false, fmt.Errorf("swap: mint authority not configured")
-	}
-	if !bytes.Equal(tokenMeta.MintAuthority, recovered.Bytes()) {
-		return "", false, ErrSwapInvalidSigner
-	}
-	if quote.Rate == nil {
-		return "", false, fmt.Errorf("swap: oracle rate unavailable")
-	}
-	if priceProof.Rate == nil {
-		return "", false, ErrSwapPriceProofInvalid
-	}
-	rateDiff := new(big.Rat).Sub(quote.Rate, priceProof.Rate)
-	if rateDiff.Sign() < 0 {
-		rateDiff.Neg(rateDiff)
-	}
-	if priceProof.Rate.Sign() == 0 {
-		return "", false, ErrSwapPriceProofInvalid
-	}
-	ratio := new(big.Rat).Quo(rateDiff, priceProof.Rate)
-	ratio.Mul(ratio, big.NewRat(10000, 1))
-	threshold := new(big.Rat).SetInt64(int64(cfg.PriceProofMaxDeviationBps))
-	if cfg.PriceProofMaxDeviationBps > 0 && ratio.Cmp(threshold) == 1 {
-		return "", false, ErrSwapPriceProofDeviation
-	}
-	quote.Timestamp = priceProof.Timestamp
-	quote.Source = strings.ToLower(strings.TrimSpace(priceProof.Provider))
-	n.recordSwapOracleHealth(time.Now())
-	twapWindow := cfg.TwapWindow()
-	priceProofID := proofID
-	var (
-		twapRate          string
-		twapCount         int
-		twapWindowSeconds int64
-		twapStart         int64
-		twapEnd           int64
-		oracleMedian      string
-		oracleFeeders     []string
-	)
-	if twapOracle, ok := oracle.(swap.TWAPOracle); ok {
-		snapshot, err := twapOracle.TWAP("USD", token, twapWindow)
-		if err == nil && snapshot.Average != nil {
-			twapRate = snapshot.Average.FloatString(18)
-			twapCount = snapshot.Count
-			if snapshot.Window > 0 {
-				twapWindowSeconds = int64(snapshot.Window / time.Second)
-			} else if twapWindow > 0 {
-				twapWindowSeconds = int64(twapWindow / time.Second)
-			}
-			if !snapshot.Start.IsZero() {
-				twapStart = snapshot.Start.UTC().Unix()
-			}
-			if !snapshot.End.IsZero() {
-				twapEnd = snapshot.End.UTC().Unix()
-			}
-			if snapshot.Median != nil {
-				oracleMedian = snapshot.Median.FloatString(18)
-			}
-			if len(snapshot.Feeders) > 0 {
-				oracleFeeders = append([]string{}, snapshot.Feeders...)
-			}
-			if strings.TrimSpace(snapshot.ProofID) != "" {
-				priceProofID = strings.TrimSpace(snapshot.ProofID)
-			}
-		}
-	}
-	maxAge := cfg.MaxQuoteAge()
-	if maxAge > 0 {
-		cutoff := time.Now().Add(-maxAge)
-		if quote.Timestamp.IsZero() || quote.Timestamp.Before(cutoff) {
-			return "", false, ErrSwapQuoteStale
-		}
-	}
-	mintAmount, err := swap.ComputeMintAmount(voucher.FiatAmount, quote.Rate, tokenMeta.Decimals)
-	if err != nil {
-		return "", false, err
-	}
-	if mintAmount == nil || mintAmount.Sign() == 0 {
-		return "", false, fmt.Errorf("swap: computed mint amount zero")
-	}
-	diff := new(big.Int).Sub(mintAmount, voucher.Amount)
-	if diff.Sign() < 0 {
-		diff.Neg(diff)
-	}
-	allowance := new(big.Int).SetUint64(cfg.SlippageBps)
-	slippage := new(big.Int).Mul(diff, big.NewInt(10000))
-	slippage.Div(slippage, mintAmount)
-	if slippage.Cmp(allowance) == 1 {
-		return "", false, ErrSwapSlippageExceeded
-	}
-
-	ledger := swap.NewLedger(manager)
-	exists, err := ledger.Exists(providerTxID)
-	if err != nil {
-		return "", false, err
-	}
-	if exists {
-		return "", false, ErrSwapDuplicateProviderTx
-	}
-	if manager.HasSeenSwapNonce(orderID) {
-		return "", false, ErrSwapNonceUsed
-	}
-	if len(priceProof.Signature) == 65 {
-		if err := priceEngine.Record(priceProof); err != nil {
-			return "", false, fmt.Errorf("swap: record price proof: %w", err)
-		}
-	}
-	if err := n.state.MintToken(token, voucher.Recipient[:], voucher.Amount); err != nil {
-		return "", false, err
-	}
-	if err := manager.MarkSwapNonce(orderID); err != nil {
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if err := n.AddTransaction(tx); err != nil {
+		// Every ErrSwap* sentinel raised by applySwapVoucherMintTransaction
+		// (via AddTransaction's synchronous simulation, or the mempool-level
+		// duplicate check below) propagates through errors.Is regardless of
+		// how many times it was wrapped, so callers checking
+		// errors.Is(err, core.ErrSwapXxx) -- e.g. rpc/swap_handlers.go's
+		// existing error-to-HTTP-status switch -- keep working unchanged.
 		return "", false, err
 	}
 
-	usdAmount := strings.TrimSpace(submission.USDAmount)
-	if usdAmount == "" && strings.EqualFold(voucher.Fiat, "USD") {
-		usdAmount = strings.TrimSpace(voucher.FiatAmount)
-	}
-	if priceProofID == "" {
-		builder := strings.Builder{}
-		builder.WriteString(strings.TrimSpace(providerTxID))
-		builder.WriteString("|")
-		builder.WriteString(strings.TrimSpace(token))
-		builder.WriteString("|")
-		if quote.Rate != nil {
-			builder.WriteString(quote.Rate.FloatString(18))
-		}
-		builder.WriteString("|")
-		builder.WriteString(strconv.FormatInt(quote.Timestamp.UTC().UnixNano(), 10))
-		if twapRate != "" {
-			builder.WriteString("|")
-			builder.WriteString(twapRate)
-		}
-		if oracleMedian != "" {
-			builder.WriteString("|")
-			builder.WriteString(oracleMedian)
-		}
-		if len(oracleFeeders) > 0 {
-			builder.WriteString("|")
-			builder.WriteString(strings.Join(oracleFeeders, ","))
-		}
-		sum := sha256.Sum256([]byte(builder.String()))
-		priceProofID = hex.EncodeToString(sum[:])
-	}
-	record := &swap.VoucherRecord{
-		Provider:          provider,
-		ProviderTxID:      providerTxID,
-		FiatCurrency:      strings.ToUpper(strings.TrimSpace(voucher.Fiat)),
-		FiatAmount:        strings.TrimSpace(voucher.FiatAmount),
-		USD:               usdAmount,
-		Rate:              quote.RateString(18),
-		Token:             token,
-		MintAmountWei:     new(big.Int).Set(voucher.Amount),
-		Recipient:         voucher.Recipient,
-		Username:          strings.TrimSpace(submission.Username),
-		Address:           strings.TrimSpace(submission.Address),
-		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
-		OracleSource:      quote.Source,
-		OracleMedian:      oracleMedian,
-		OracleFeeders:     append([]string{}, oracleFeeders...),
-		PriceProofID:      priceProofID,
-		MinterSignature:   "0x" + hex.EncodeToString(signature),
-		Status:            swap.VoucherStatusMinted,
-		TwapRate:          twapRate,
-		TwapObservations:  twapCount,
-		TwapWindowSeconds: twapWindowSeconds,
-		TwapStart:         twapStart,
-		TwapEnd:           twapEnd,
-	}
-	if err := ledger.Put(record); err != nil {
-		return "", false, err
-	}
-
-	if err := riskEngine.RecordMint(voucher.Recipient, voucher.Amount, riskParams.VelocityWindowSeconds); err != nil {
-		return "", false, err
-	}
-
-	txHashBytes := ethcrypto.Keccak256(append(hash, signature...))
-	txHash := "0x" + hex.EncodeToString(txHashBytes)
-
-	evt := events.SwapMinted{
-		OrderID:    orderID,
-		Recipient:  voucher.Recipient,
-		Amount:     new(big.Int).Set(voucher.Amount),
-		Fiat:       voucher.Fiat,
-		FiatAmount: voucher.FiatAmount,
-		Rate:       voucher.Rate,
-	}.Event()
-	if evt != nil {
-		n.state.AppendEvent(evt)
-	}
-	proofEvt := events.SwapMintProof{
-		ProviderTxID:      providerTxID,
-		OrderID:           orderID,
-		Token:             token,
-		PriceProofID:      priceProofID,
-		OracleSource:      quote.Source,
-		OracleMedian:      oracleMedian,
-		OracleFeeders:     append([]string{}, oracleFeeders...),
-		QuoteTimestamp:    quote.Timestamp.UTC().Unix(),
-		TwapRate:          twapRate,
-		TwapObservations:  twapCount,
-		TwapWindowSeconds: twapWindowSeconds,
-		TwapStart:         twapStart,
-		TwapEnd:           twapEnd,
-	}.Event()
-	if proofEvt != nil {
-		n.state.AppendEvent(proofEvt)
-	}
-
-	return txHash, true, nil
+	return txHash, false, nil
 }
 
 // SwapGetVoucher returns the ledger record for the supplied provider

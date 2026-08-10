@@ -72,7 +72,24 @@ const (
 )
 
 var (
-	ErrNonceMismatch       = errors.New("transaction nonce mismatch")
+	// ErrNonceMismatch is the umbrella sentinel for any tx.Nonce !=
+	// account.Nonce rejection. It always wraps one of the two more specific
+	// sentinels below (ErrNonceTooLow / ErrNonceTooHigh) via a multi-%w
+	// fmt.Errorf, so every existing errors.Is(err, ErrNonceMismatch) check
+	// keeps matching unmodified regardless of which sub-case fired.
+	ErrNonceMismatch = errors.New("transaction nonce mismatch")
+	// ErrNonceTooLow indicates tx.Nonce < account.Nonce: the nonce has
+	// already been consumed (stale resubmission or replay). This is
+	// monotonic -- account.Nonce only ever increases -- so a transaction
+	// that hits this can never succeed later either; CreateBlock's proposal
+	// classifier (classifyProposalError) treats it as PRUNE-safe.
+	ErrNonceTooLow = errors.New("transaction nonce mismatch: already used")
+	// ErrNonceTooHigh indicates tx.Nonce > account.Nonce: a lower-nonce
+	// transaction from the same sender hasn't landed yet. Unlike
+	// ErrNonceTooLow this is genuinely order-dependent -- a different
+	// attempt (later round, different candidate set) can succeed once the
+	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
+	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
 	ErrInvalidChainID      = errors.New("invalid chain id")
 	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
@@ -85,13 +102,21 @@ var (
 	// its payload.Timestamp does not advance past it (the replay check).
 	// Both are timing-ordering rejections specific to a single
 	// transaction, not signs of a malformed or malicious transaction, so
-	// isPrunableProposalError treats this the same way as
-	// ErrNonceMismatch: drop just this transaction from the proposal
-	// instead of aborting the whole block. See core/node.go's
-	// pendingHeartbeatFee and EngagementValidatorHeartbeatDue for the
-	// submission-side mechanics that keep a well-behaved caller from ever
-	// producing a transaction that hits this in practice.
+	// classifyProposalError treats this the same way as ErrNonceTooLow:
+	// drop just this transaction from the proposal instead of aborting the
+	// whole block. See core/node.go's pendingHeartbeatFee and
+	// EngagementValidatorHeartbeatDue for the submission-side mechanics
+	// that keep a well-behaved caller from ever producing a transaction
+	// that hits this in practice.
 	ErrHeartbeatTooSoon = errors.New("heartbeat too soon")
+	// ErrUnknownTransactionType indicates handleNativeTransaction's dispatch
+	// switch found no case for tx.Type. Within one running binary the set of
+	// recognized TxType values is a compiled constant, so retrying the
+	// identical bytes can never succeed for the lifetime of this process --
+	// classifyProposalError treats it as PRUNE-safe (local-mempool-only;
+	// peers running newer software that recognize the type keep their own
+	// copy and can still gossip/re-propagate it).
+	ErrUnknownTransactionType = errors.New("unknown native transaction type")
 )
 
 const stakePauseReasonGovernance = "paused by governance"
@@ -164,6 +189,17 @@ type StateProcessor struct {
 	lendingCollateralRouting   lending.CollateralRouting
 	blockCtx                   BlockCtx
 	swapPayoutAuthorities      map[string]struct{}
+	swapConfig                 swap.Config
+	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
+	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
+	// must match. This is deliberately distinct from types.NHBChainID()
+	// (the fixed "NHB" constant used for the outer transaction envelope's
+	// ChainID field, validated separately in executeTransaction) -- the two
+	// have never been the same value in this codebase (see MintChainID for
+	// the analogous case on TxTypeMint). Fixed at genesis and identical
+	// across every validator on the same chain, so comparing against it
+	// here is fully deterministic.
+	swapVoucherChainID uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -208,6 +244,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		lendingCollateralRouting: lending.CollateralRouting{},
 		blockCtx:                 BlockCtx{},
 		swapPayoutAuthorities:    make(map[string]struct{}),
+		swapConfig:               swap.Config{},
 	}
 	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
@@ -303,6 +340,29 @@ func (sp *StateProcessor) isSwapPayoutAuthority(authority string) bool {
 	}
 	_, ok := sp.swapPayoutAuthorities[canonical]
 	return ok
+}
+
+// SetSwapVoucherChainID installs the genesis-derived Blockchain.ChainID()
+// value used to validate TxTypeSwapVoucherMint payloads' embedded voucher
+// chain id deterministically (see the swapVoucherChainID field doc comment).
+func (sp *StateProcessor) SetSwapVoucherChainID(id uint64) {
+	if sp == nil {
+		return
+	}
+	sp.swapVoucherChainID = id
+}
+
+// SetSwapConfig installs the swap module's risk/provider/oracle configuration
+// used by the deterministic TxTypeSwapVoucherMint execution path. This is a
+// plain-data snapshot of operator config (risk limits, provider allow-list,
+// sanctions deny-list, price proof deviation/freshness windows) -- read-only
+// during transaction execution, so a shallow value copy is safe and mirrors
+// how engagementConfig/epochConfig are already carried across Copy().
+func (sp *StateProcessor) SetSwapConfig(cfg swap.Config) {
+	if sp == nil {
+		return
+	}
+	sp.swapConfig = cfg
 }
 
 // SetFeePolicy updates the fee policy applied to eligible transactions.
@@ -1545,6 +1605,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		lendingCollateralRouting:   sp.lendingCollateralRouting.Clone(),
 		blockCtx:                   blockCtxCopy,
 		swapPayoutAuthorities:      payoutAuthCopy,
+		swapConfig:                 sp.swapConfig,
+		swapVoucherChainID:         sp.swapVoucherChainID,
 	}, nil
 }
 
@@ -1601,7 +1663,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		senderAccount *types.Account
 		err           error
 	)
-	if tx.Type != types.TxTypeMint {
+	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -1612,6 +1674,9 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	switch tx.Type {
 	case types.TxTypeMint:
 		err = sp.applyMintTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeSwapVoucherMint:
+		err = sp.applySwapVoucherMintTransaction(tx)
 		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)
@@ -1685,7 +1750,10 @@ func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, 
 		return nil, nil, err
 	}
 	if tx.Nonce != account.Nonce {
-		return nil, nil, fmt.Errorf("%w: account=%d tx=%d", ErrNonceMismatch, account.Nonce, tx.Nonce)
+		if tx.Nonce < account.Nonce {
+			return nil, nil, fmt.Errorf("%w: %w: account=%d tx=%d", ErrNonceMismatch, ErrNonceTooLow, account.Nonce, tx.Nonce)
+		}
+		return nil, nil, fmt.Errorf("%w: %w: account=%d tx=%d", ErrNonceMismatch, ErrNonceTooHigh, account.Nonce, tx.Nonce)
 	}
 	return sender, account, nil
 }
@@ -2427,9 +2495,18 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	if voucher == nil {
 		return fmt.Errorf("%w: voucher required", ErrMintInvalidPayload)
 	}
+	// AmountBig and CanonicalJSON are pure functions of the voucher's own
+	// payload fields (no state/oracle dependency) -- wrap their failures with
+	// ErrMintInvalidPayload so classifyProposalError can recognize them as
+	// permanently unsatisfiable, same as every other payload check in this
+	// function. Do not change these shared MintVoucher methods themselves:
+	// they're also called from core/node.go's pre-enqueue validation and
+	// from off-chain signing code in services/otc-gateway and
+	// services/payments-gateway, which have no reason to know about this
+	// package's sentinel.
 	amount, err := voucher.AmountBig()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
 	}
 	if voucher.ChainID != MintChainID {
 		return ErrMintInvalidChainID
@@ -2440,15 +2517,15 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	}
 	canonical, err := voucher.CanonicalJSON()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
 	}
 	if len(signature) != 65 {
-		return fmt.Errorf("invalid signature length")
+		return fmt.Errorf("%w: invalid signature length", ErrMintInvalidPayload)
 	}
 	digest := ethcrypto.Keccak256(canonical)
 	pubKey, err := ethcrypto.SigToPub(digest, signature)
 	if err != nil {
-		return fmt.Errorf("recover signer: %w", err)
+		return fmt.Errorf("%w: recover signer: %v", ErrMintInvalidPayload, err)
 	}
 	recovered := ethcrypto.PubkeyToAddress(*pubKey)
 	var recoveredBytes [20]byte
@@ -2462,16 +2539,16 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	case "ZNHB":
 		requiredRole = "MINTER_ZNHB"
 	default:
-		return fmt.Errorf("unsupported token %q", voucher.Token)
+		return fmt.Errorf("%w: unsupported token %q", ErrMintInvalidPayload, voucher.Token)
 	}
 
 	invoiceID := voucher.TrimmedInvoiceID()
 	if invoiceID == "" {
-		return fmt.Errorf("invoiceId required")
+		return fmt.Errorf("%w: invoiceId required", ErrMintInvalidPayload)
 	}
 	recipientRef := voucher.TrimmedRecipient()
 	if recipientRef == "" {
-		return fmt.Errorf("recipient required")
+		return fmt.Errorf("%w: recipient required", ErrMintInvalidPayload)
 	}
 
 	manager := nhbstate.NewManager(sp.Trie)
@@ -2499,7 +2576,10 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	} else {
 		resolved, ok := manager.IdentityResolve(recipientRef)
 		if !ok || resolved == nil {
-			return fmt.Errorf("recipient not found: %s", recipientRef)
+			// Identity registration is mutable on-chain state -- an alias
+			// registered after this transaction was submitted could resolve
+			// successfully on a later attempt, so this must not be pruned.
+			return fmt.Errorf("%w: %s", ErrMintRecipientUnresolved, recipientRef)
 		}
 		recipient = resolved.Primary
 	}
@@ -2752,7 +2832,7 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	}
-	return fmt.Errorf("unknown native transaction type: %d", tx.Type)
+	return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
 }
 
 // applyRegisterIdentity claims a username via a signed TxTypeRegisterIdentity

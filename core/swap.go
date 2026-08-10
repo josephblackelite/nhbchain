@@ -59,4 +59,9 @@ var (
 	ErrSwapPriceProofStale = errors.New("swap: price proof stale")
 	// ErrSwapPriceProofDeviation indicates the proof deviated beyond the allowed tolerance.
 	ErrSwapPriceProofDeviation = errors.New("swap: price proof deviation too large")
+	// ErrSwapVoucherInvalidPayload indicates a TxTypeSwapVoucherMint transaction's
+	// Data payload could not be decoded into a voucher submission. Since this is a
+	// pure function of the transaction's own immutable bytes, it can never become
+	// valid later -- safe to treat as a prunable proposal error.
+	ErrSwapVoucherInvalidPayload = errors.New("swap: invalid voucher transaction payload")
 )

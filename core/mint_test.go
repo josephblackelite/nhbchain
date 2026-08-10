@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -357,6 +358,89 @@ func TestMintVoucherExpiresBeforeCommit(t *testing.T) {
 	}
 	if got := len(node.mempool); got != 0 {
 		t.Fatalf("expected mempool to be empty after successful commit, got %d", got)
+	}
+}
+
+// TestMintMalformedPayloadPrunesInsteadOfAbortingProposal guards a gap an
+// independent reviewer found in classifyProposalError's coverage: MintVoucher
+// AmountBig() and CanonicalJSON() failures (empty amount, empty invoiceId,
+// etc.) reach applyMintTransaction via node.mempool -> CreateBlock exactly
+// like every other TxTypeMint validation error, but were previously returned
+// bare (no sentinel), so a malformed mint transaction that somehow bypassed
+// MintWithSignature's own cheap pre-validation (e.g. injected directly, or
+// gossiped from a peer with transaction simulation disabled) would abort the
+// entire block proposal instead of being pruned. Reproduces that exact
+// bypass path directly, since MintWithSignature itself already rejects a
+// malformed voucher before it ever reaches the mempool.
+func TestMintMalformedPayloadPrunesInsteadOfAbortingProposal(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+	malformed := MintVoucher{
+		InvoiceID: "inv-malformed",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "", // empty -- AmountBig() fails, must be PRUNE not ABORT
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	payload, err := encodeMintTransaction(&malformed, []byte{0x01})
+	if err != nil {
+		t.Fatalf("encode malformed mint tx: %v", err)
+	}
+	badTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeMint,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+	if err := node.AddTransaction(badTx); err != nil {
+		t.Fatalf("add malformed transaction (simulation disabled): %v", err)
+	}
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_NHB", toAddress(minterKey))
+	good := MintVoucher{
+		InvoiceID: "inv-good",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "10",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	sig := signVoucher(t, minterKey, good)
+	if _, err := node.MintWithSignature(&good, sig); err != nil {
+		t.Fatalf("mint submission (good): %v", err)
+	}
+
+	block, err := node.CreateBlock(append([]*types.Transaction(nil), node.mempool...))
+	if err != nil {
+		t.Fatalf("CreateBlock must not abort the whole proposal for one malformed mint: %v", err)
+	}
+	if len(block.Transactions) != 1 {
+		t.Fatalf("expected exactly the valid mint in the block, got %d txs", len(block.Transactions))
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected malformed mint pruned from mempool, got %d remaining", got)
+	}
+
+	account, err := node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if account.BalanceNHB.Cmp(big.NewInt(10)) != 0 {
+		t.Fatalf("expected the valid mint to succeed, got balance %s", account.BalanceNHB)
 	}
 }
 

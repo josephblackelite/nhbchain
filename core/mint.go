@@ -38,6 +38,13 @@ var (
 	ErrMintEmissionCapExceeded = errors.New("mint: emission cap exceeded")
 	// ErrMintPaused indicates the token mint path has been paused.
 	ErrMintPaused = errors.New("mint: token mint paused")
+	// ErrMintRecipientUnresolved indicates the voucher's recipient reference
+	// could not be resolved to an address via the on-chain identity registry.
+	// Unlike the other payload checks in this file, this depends on mutable
+	// state (an identity alias registered after this transaction was
+	// submitted could make a retry succeed), so it must not be treated as
+	// permanently unsatisfiable.
+	ErrMintRecipientUnresolved = errors.New("mint: recipient identity unresolved")
 )
 
 // MintVoucher represents the canonical payload that is signed off-chain by a mint authority.
