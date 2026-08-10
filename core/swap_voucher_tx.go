@@ -183,25 +183,25 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 		return ErrSwapExpired
 	}
 	if voucher.Amount == nil || voucher.Amount.Sign() <= 0 {
-		return fmt.Errorf("swap: invalid amount")
+		return fmt.Errorf("%w: invalid amount", ErrSwapVoucherInvalidPayload)
 	}
 	if len(voucher.Nonce) == 0 {
-		return fmt.Errorf("swap: nonce required")
+		return fmt.Errorf("%w: nonce required", ErrSwapVoucherInvalidPayload)
 	}
 	if voucher.Recipient == ([20]byte{}) {
-		return fmt.Errorf("swap: recipient required")
+		return fmt.Errorf("%w: recipient required", ErrSwapVoucherInvalidPayload)
 	}
 	orderID := strings.TrimSpace(voucher.OrderID)
 	if orderID == "" {
-		return fmt.Errorf("swap: orderId required")
+		return fmt.Errorf("%w: orderId required", ErrSwapVoucherInvalidPayload)
 	}
 	provider := strings.TrimSpace(submission.Provider)
 	if provider == "" {
-		return fmt.Errorf("swap: provider required")
+		return fmt.Errorf("%w: provider required", ErrSwapVoucherInvalidPayload)
 	}
 	providerTxID := strings.TrimSpace(submission.ProviderTxID)
 	if providerTxID == "" {
-		return fmt.Errorf("swap: providerTxId required")
+		return fmt.Errorf("%w: providerTxId required", ErrSwapVoucherInvalidPayload)
 	}
 	signature := append([]byte(nil), submission.Signature...)
 	if len(signature) != 65 {
@@ -217,7 +217,7 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	}
 	pubKey, err := ethcrypto.SigToPub(hash, signature)
 	if err != nil {
-		return fmt.Errorf("swap: recover signer: %w", err)
+		return fmt.Errorf("%w: recover signer: %v", ErrSwapVoucherInvalidPayload, err)
 	}
 	recovered := ethcrypto.PubkeyToAddress(*pubKey)
 
@@ -328,7 +328,12 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 		return ErrSwapMintPaused
 	}
 	if len(tokenMeta.MintAuthority) != 20 {
-		return fmt.Errorf("swap: mint authority not configured")
+		// Not yet configured, not "wrong" -- an admin could set MintAuthority
+		// after this transaction was submitted, so this must SKIP (retry
+		// later), not PRUNE (permanent), matching ErrSwapInvalidSigner's own
+		// classification for the same tokenMeta.MintAuthority-mutable-state
+		// reasoning just below.
+		return fmt.Errorf("%w: mint authority not configured", ErrSwapInvalidSigner)
 	}
 	if !bytes.Equal(tokenMeta.MintAuthority, recovered.Bytes()) {
 		return ErrSwapInvalidSigner
@@ -339,10 +344,14 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	}
 	mintAmount, err := swap.ComputeMintAmount(voucher.FiatAmount, priceProof.Rate, tokenMeta.Decimals)
 	if err != nil {
-		return err
+		// voucher.FiatAmount and priceProof.Rate are both fixed values from
+		// this transaction's own immutable payload (tokenMeta.Decimals is
+		// static genesis config) -- a deterministic function of tx bytes, so
+		// this can never succeed on retry either.
+		return fmt.Errorf("%w: compute mint amount: %v", ErrSwapVoucherInvalidPayload, err)
 	}
 	if mintAmount == nil || mintAmount.Sign() == 0 {
-		return fmt.Errorf("swap: computed mint amount zero")
+		return fmt.Errorf("%w: computed mint amount zero", ErrSwapVoucherInvalidPayload)
 	}
 	diff := new(big.Int).Sub(mintAmount, voucher.Amount)
 	if diff.Sign() < 0 {

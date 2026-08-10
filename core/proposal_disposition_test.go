@@ -76,6 +76,7 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"mint paused", ErrMintPaused, proposalDispositionSkip},
 		{"mint invalid signer", ErrMintInvalidSigner, proposalDispositionSkip},
 		{"mint emission cap exceeded", ErrMintEmissionCapExceeded, proposalDispositionSkip},
+		{"mint recipient unresolved", ErrMintRecipientUnresolved, proposalDispositionSkip},
 
 		// ABORT: deliberately unclassified (ambiguous sentinel, or a plain
 		// unrecognized error).

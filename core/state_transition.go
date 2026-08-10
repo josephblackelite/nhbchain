@@ -2511,12 +2511,12 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 		return err
 	}
 	if len(signature) != 65 {
-		return fmt.Errorf("invalid signature length")
+		return fmt.Errorf("%w: invalid signature length", ErrMintInvalidPayload)
 	}
 	digest := ethcrypto.Keccak256(canonical)
 	pubKey, err := ethcrypto.SigToPub(digest, signature)
 	if err != nil {
-		return fmt.Errorf("recover signer: %w", err)
+		return fmt.Errorf("%w: recover signer: %v", ErrMintInvalidPayload, err)
 	}
 	recovered := ethcrypto.PubkeyToAddress(*pubKey)
 	var recoveredBytes [20]byte
@@ -2530,16 +2530,16 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	case "ZNHB":
 		requiredRole = "MINTER_ZNHB"
 	default:
-		return fmt.Errorf("unsupported token %q", voucher.Token)
+		return fmt.Errorf("%w: unsupported token %q", ErrMintInvalidPayload, voucher.Token)
 	}
 
 	invoiceID := voucher.TrimmedInvoiceID()
 	if invoiceID == "" {
-		return fmt.Errorf("invoiceId required")
+		return fmt.Errorf("%w: invoiceId required", ErrMintInvalidPayload)
 	}
 	recipientRef := voucher.TrimmedRecipient()
 	if recipientRef == "" {
-		return fmt.Errorf("recipient required")
+		return fmt.Errorf("%w: recipient required", ErrMintInvalidPayload)
 	}
 
 	manager := nhbstate.NewManager(sp.Trie)
@@ -2567,7 +2567,10 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	} else {
 		resolved, ok := manager.IdentityResolve(recipientRef)
 		if !ok || resolved == nil {
-			return fmt.Errorf("recipient not found: %s", recipientRef)
+			// Identity registration is mutable on-chain state -- an alias
+			// registered after this transaction was submitted could resolve
+			// successfully on a later attempt, so this must not be pruned.
+			return fmt.Errorf("%w: %s", ErrMintRecipientUnresolved, recipientRef)
 		}
 		recipient = resolved.Primary
 	}

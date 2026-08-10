@@ -3123,7 +3123,8 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, nativecommon.ErrQuotaCounterOverflow),
 		errors.Is(err, ErrMintPaused),
 		errors.Is(err, ErrMintInvalidSigner),
-		errors.Is(err, ErrMintEmissionCapExceeded):
+		errors.Is(err, ErrMintEmissionCapExceeded),
+		errors.Is(err, ErrMintRecipientUnresolved):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
