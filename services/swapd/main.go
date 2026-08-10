@@ -17,9 +17,11 @@ import (
 
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
+	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/swapd/adapters"
 	"nhbchain/services/swapd/config"
 	"nhbchain/services/swapd/oracle"
+	"nhbchain/services/swapd/priceproof"
 	"nhbchain/services/swapd/server"
 	"nhbchain/services/swapd/settlement"
 	"nhbchain/services/swapd/stable"
@@ -257,6 +259,38 @@ func main() {
 	}, store, log.Default(), stableRuntime, authenticator)
 	if err != nil {
 		log.Fatalf("swapd: server: %v", err)
+	}
+
+	if cfg.PriceProof.Enabled {
+		signerClient, err := hsm.NewClient(hsm.Config{
+			BaseURL:    cfg.PriceProof.Signer.BaseURL,
+			KeyLabel:   cfg.PriceProof.Signer.KeyLabel,
+			CACertPath: cfg.PriceProof.Signer.CACertPath,
+			ClientCert: cfg.PriceProof.Signer.ClientCertPath,
+			ClientKey:  cfg.PriceProof.Signer.ClientKeyPath,
+			SignPath:   cfg.PriceProof.Signer.SignPath,
+		})
+		if err != nil {
+			log.Fatalf("swapd: configure price proof signer: %v", err)
+		}
+		priceProofService, err := priceproof.New(mgr, signerClient, cfg.PriceProof.Provider)
+		if err != nil {
+			log.Fatalf("swapd: configure price proof service: %v", err)
+		}
+		priceProofPartners := make([]server.Partner, 0, len(cfg.PriceProof.Partners))
+		for _, partner := range cfg.PriceProof.Partners {
+			id := strings.TrimSpace(partner.ID)
+			apiKey := strings.TrimSpace(partner.APIKey)
+			secret := strings.TrimSpace(partner.Secret)
+			if id == "" || apiKey == "" || secret == "" {
+				log.Fatalf("swapd: price proof partner configuration incomplete")
+			}
+			priceProofPartners = append(priceProofPartners, server.Partner{ID: id, APIKey: apiKey, Secret: secret})
+		}
+		if err := srv.SetPriceProofRuntime(server.PriceProofRuntime{Service: priceProofService, Partners: priceProofPartners}); err != nil {
+			log.Fatalf("swapd: price proof runtime: %v", err)
+		}
+		log.Printf("swapd: price proof signing endpoint enabled (provider=%s pairs=%v)", cfg.PriceProof.Provider, cfg.PriceProof.Pairs)
 	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

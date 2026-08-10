@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,11 +18,14 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"nhbchain/core"
+	nhbcrypto "nhbchain/crypto"
+	swap "nhbchain/native/swap"
 	"nhbchain/services/otc-gateway/auth"
 	"nhbchain/services/otc-gateway/identity"
 	"nhbchain/services/otc-gateway/models"
 	"nhbchain/services/otc-gateway/swaprpc"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 // SignAndSubmit constructs a mint voucher, signs it via the HSM, and submits it to the swap RPC.
@@ -58,15 +63,34 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "recipient is required", http.StatusBadRequest)
 		return
 	}
+	recipientAddr, err := nhbcrypto.DecodeAddress(recipient)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid recipient: %v", err), http.StatusBadRequest)
+		return
+	}
+	var recipientBytes [20]byte
+	copy(recipientBytes[:], recipientAddr.Bytes())
 	amount := strings.TrimSpace(req.Amount)
 	if amount == "" {
 		http.Error(w, "amount is required", http.StatusBadRequest)
 		return
 	}
-	token := strings.TrimSpace(req.Token)
-	if token == "" {
-		token = "NHB"
+	amountBig, ok := new(big.Int).SetString(amount, 10)
+	if !ok || amountBig.Sign() <= 0 {
+		http.Error(w, "invalid amount", http.StatusBadRequest)
+		return
 	}
+	// The swap voucher path (rpc's swap_submitVoucher, the only RPC this
+	// handler's SwapClient ever calls) mints ZNHB exclusively --
+	// core/swap_voucher_tx.go's applySwapVoucherMintTransaction hard-rejects
+	// any other token. Reject an explicit non-ZNHB request rather than
+	// silently minting the wrong asset; NHB minting goes through a
+	// different rail (mint_with_sig) this endpoint does not use.
+	if requestedToken := strings.TrimSpace(req.Token); requestedToken != "" && !strings.EqualFold(requestedToken, "ZNHB") {
+		http.Error(w, "token must be ZNHB", http.StatusBadRequest)
+		return
+	}
+	const token = "ZNHB"
 	providerTxID := strings.TrimSpace(req.ProviderTxID)
 
 	actorID, err := uuid.Parse(claims.Subject)
@@ -76,24 +100,6 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expiry := s.Now().Add(s.VoucherTTL).Unix()
-	voucher := core.MintVoucher{
-		InvoiceID: invoiceID.String(),
-		Recipient: recipient,
-		Token:     token,
-		Amount:    amount,
-		ChainID:   s.ChainID,
-		Expiry:    expiry,
-	}
-	payload, err := voucher.CanonicalJSON()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("voucher: %v", err), http.StatusBadRequest)
-		return
-	}
-	digest, err := voucher.Digest()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("digest: %v", err), http.StatusInternalServerError)
-		return
-	}
 
 	if providerTxID == "" {
 		providerTxID = invoiceID.String()
@@ -156,6 +162,35 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 	if fiatCurrency == "" {
 		fiatCurrency = "USD"
 	}
+
+	// Build the real swap.VoucherV1 payload now that every field it needs
+	// (recipient, amount, fiat currency/amount, order id, expiry) is known.
+	// This is the shape swap_submitVoucher's decoder actually expects --
+	// see swaprpc.MintSubmission's doc comment for why the previous
+	// core.MintVoucher shape never worked here.
+	nonce := make([]byte, 24)
+	if _, err := rand.Read(nonce); err != nil {
+		http.Error(w, fmt.Sprintf("generate nonce: %v", err), http.StatusInternalServerError)
+		return
+	}
+	voucher := swap.VoucherV1{
+		Domain:     swap.VoucherDomainV1,
+		ChainID:    s.ChainID,
+		Token:      token,
+		Recipient:  recipientBytes,
+		Amount:     amountBig,
+		Fiat:       fiatCurrency,
+		FiatAmount: strconv.FormatFloat(fiatAmount, 'f', 2, 64),
+		OrderID:    invoiceID.String(),
+		Nonce:      nonce,
+		Expiry:     expiry,
+	}
+	payload, err := json.Marshal(voucher)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("voucher: %v", err), http.StatusInternalServerError)
+		return
+	}
+	digest := voucher.Hash()
 
 	partner, err := s.ensureInvoicePartnerApproved(nil, preflight.CreatedByID)
 	if err != nil {
@@ -393,23 +428,64 @@ func (s *Server) SignAndSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fetch a freshly-signed price proof -- swap_submitVoucher's consensus
+	// execution path (applySwapVoucherMintTransaction) unconditionally
+	// requires one, verified against a governance-registered
+	// swap.priceSigners entry (see native/governance's
+	// ProposalKindSwapPriceSignerUpdate). Fetched now, immediately before
+	// signing/submitting, so the quote is as fresh as possible relative to
+	// swap.Config.MaxQuoteAgeSeconds's on-chain freshness window.
+	if s.PriceProof == nil {
+		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, "price proof source not configured")
+		http.Error(w, "price proof source not configured", http.StatusServiceUnavailable)
+		return
+	}
+	pricePair := strings.TrimSpace(s.PriceProofPair)
+	if pricePair == "" {
+		pricePair = "ZNHB/USD"
+	}
+	priceProof, err := s.PriceProof.PriceProof(r.Context(), pricePair)
+	if err != nil {
+		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
+		http.Error(w, fmt.Sprintf("fetch price proof: %v", err), http.StatusBadGateway)
+		return
+	}
+	priceProofRate := ""
+	if priceProof.Rate != nil {
+		priceProofRate = priceProof.Rate.FloatString(18)
+	}
+	priceProofPayload := swaprpc.PriceProofPayload{
+		Domain:    priceProof.Domain,
+		Provider:  priceProof.Provider,
+		Pair:      strings.TrimSpace(priceProof.Base) + "/" + strings.TrimSpace(priceProof.Quote),
+		Rate:      priceProofRate,
+		Timestamp: priceProof.Timestamp.UTC().Unix(),
+		Signature: "0x" + hex.EncodeToString(priceProof.Signature),
+	}
+
 	sigBytes, signerDN, err := s.Signer.Sign(r.Context(), digest)
 	if err != nil {
 		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
 		http.Error(w, fmt.Sprintf("sign voucher: %v", err), http.StatusBadGateway)
 		return
 	}
-	voucherHash, err := core.MintVoucherHash(&voucher, sigBytes)
-	if err != nil {
-		s.markVoucherFailure(invoiceID, existingVoucher.ProviderTxID, err.Error())
-		http.Error(w, fmt.Sprintf("voucher hash: %v", err), http.StatusInternalServerError)
-		return
-	}
+	// voucherHash is an audit/display convenience (keccak256 of the
+	// voucher's canonical bytes concatenated with its signature) -- it is
+	// not consumed by consensus; providerTxId/orderId are the real
+	// correlation keys.
+	voucherHash := "0x" + hex.EncodeToString(ethcrypto.Keccak256(append(append([]byte(nil), payload...), sigBytes...)))
 	sigHex := hex.EncodeToString(sigBytes)
+	usdAmount := ""
+	if strings.EqualFold(fiatCurrency, "USD") {
+		usdAmount = voucher.FiatAmount
+	}
 	submission := swaprpc.MintSubmission{
 		Voucher:      voucher,
 		SignatureHex: "0x" + sigHex,
 		ProviderTxID: existingVoucher.ProviderTxID,
+		Address:      recipient,
+		USDAmount:    usdAmount,
+		PriceProof:   priceProofPayload,
 		Compliance:   compliancePayload,
 	}
 	txHash, minted, err := s.SwapClient.SubmitMintVoucher(r.Context(), submission)

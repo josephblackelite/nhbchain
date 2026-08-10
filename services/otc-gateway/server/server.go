@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	nhbswap "nhbchain/native/swap"
 	"nhbchain/services/otc-gateway/auth"
 	"nhbchain/services/otc-gateway/funding"
 	"nhbchain/services/otc-gateway/hsm"
@@ -35,6 +36,18 @@ type IdentityClient interface {
 	ResolvePartner(ctx context.Context, partnerID uuid.UUID) (*identity.Resolution, error)
 }
 
+// PriceProofSource resolves a freshly-signed swap.PriceProof for the
+// requested "BASE/QUOTE" pair (e.g. "ZNHB/USD"). This is the piece that was
+// entirely missing before (gap 2b): swap_submitVoucher's consensus
+// execution path unconditionally requires a signed price proof, verified
+// against a governance-registered signer, and nothing in this repository
+// previously produced one. See services/swapd/priceproof for the reference
+// implementation (a synchronous, sign-at-request-time HSM-backed signer)
+// exposed over HTTP via swapd's POST /v1/price-proof.
+type PriceProofSource interface {
+	PriceProof(ctx context.Context, pair string) (*nhbswap.PriceProof, error)
+}
+
 // Config captures the dependencies required to construct the server.
 type Config struct {
 	DB               *gorm.DB
@@ -44,6 +57,8 @@ type Config struct {
 	SwapClient       SwapClient
 	Identity         IdentityClient
 	Signer           hsm.Signer
+	PriceProof       PriceProofSource
+	PriceProofPair   string
 	VoucherTTL       time.Duration
 	Provider         string
 	PollInterval     time.Duration
@@ -53,18 +68,20 @@ type Config struct {
 
 // Server encapsulates dependencies for the HTTP API.
 type Server struct {
-	DB           *gorm.DB
-	TZ           *time.Location
-	ChainID      uint64
-	S3Bucket     string
-	SwapClient   SwapClient
-	Identity     IdentityClient
-	Signer       hsm.Signer
-	VoucherTTL   time.Duration
-	Provider     string
-	PollInterval time.Duration
-	Now          func() time.Time
-	Funding      *funding.Processor
+	DB             *gorm.DB
+	TZ             *time.Location
+	ChainID        uint64
+	S3Bucket       string
+	SwapClient     SwapClient
+	Identity       IdentityClient
+	Signer         hsm.Signer
+	PriceProof     PriceProofSource
+	PriceProofPair string
+	VoucherTTL     time.Duration
+	Provider       string
+	PollInterval   time.Duration
+	Now            func() time.Time
+	Funding        *funding.Processor
 
 	auth *auth.Middleware
 
@@ -93,19 +110,25 @@ func New(cfg Config) *Server {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 10 * time.Second
 	}
+	priceProofPair := strings.TrimSpace(cfg.PriceProofPair)
+	if priceProofPair == "" {
+		priceProofPair = "ZNHB/USD"
+	}
 	srv := &Server{
-		DB:           cfg.DB,
-		TZ:           cfg.TZ,
-		ChainID:      cfg.ChainID,
-		S3Bucket:     cfg.S3Bucket,
-		SwapClient:   cfg.SwapClient,
-		Identity:     cfg.Identity,
-		Signer:       cfg.Signer,
-		VoucherTTL:   cfg.VoucherTTL,
-		Provider:     strings.TrimSpace(cfg.Provider),
-		PollInterval: cfg.PollInterval,
-		Funding:      cfg.FundingProcessor,
-		auth:         cfg.Authenticator,
+		DB:             cfg.DB,
+		TZ:             cfg.TZ,
+		ChainID:        cfg.ChainID,
+		S3Bucket:       cfg.S3Bucket,
+		SwapClient:     cfg.SwapClient,
+		Identity:       cfg.Identity,
+		Signer:         cfg.Signer,
+		PriceProof:     cfg.PriceProof,
+		PriceProofPair: priceProofPair,
+		VoucherTTL:     cfg.VoucherTTL,
+		Provider:       strings.TrimSpace(cfg.Provider),
+		PollInterval:   cfg.PollInterval,
+		Funding:        cfg.FundingProcessor,
+		auth:           cfg.Authenticator,
 	}
 	if srv.Now == nil {
 		srv.Now = func() time.Time { return time.Now().In(srv.TZ) }

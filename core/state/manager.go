@@ -1703,6 +1703,20 @@ func (m *Manager) SwapSetPriceSigner(provider string, addr [20]byte) error {
 	return m.KVPut(swapPriceSignerKey(trimmed), addr[:])
 }
 
+// SwapClearPriceSigner removes any registered signer address for the
+// provider price proofs, so a subsequent SwapPriceSigner lookup reports
+// "not found" rather than a sentinel address. Used by the governance
+// "revoke" path (ProposalKindSwapPriceSignerUpdate) to deregister a
+// compromised or retired signer without relying on a magic zero-address
+// value that could, in principle, ever be mistaken for a real signer.
+func (m *Manager) SwapClearPriceSigner(provider string) error {
+	trimmed := strings.TrimSpace(provider)
+	if trimmed == "" {
+		return fmt.Errorf("swap: provider id must not be empty")
+	}
+	return m.KVDelete(swapPriceSignerKey(trimmed))
+}
+
 // SwapPriceSigner retrieves the configured signer address for the provider price proofs.
 func (m *Manager) SwapPriceSigner(provider string) ([20]byte, bool, error) {
 	var signer [20]byte

@@ -26,6 +26,7 @@ type mockGovernanceState struct {
 	nextID         uint64
 	params         map[string][]byte
 	roles          map[string]map[string]struct{}
+	swapSigners    map[string][20]byte
 	audit          []*AuditRecord
 }
 
@@ -123,6 +124,7 @@ func newMockGovernanceState(initial map[[20]byte]*types.Account) *mockGovernance
 		snapshots:      make(map[uint64]*potso.StoredWeightSnapshot),
 		params:         make(map[string][]byte),
 		roles:          make(map[string]map[string]struct{}),
+		swapSigners:    make(map[string][20]byte),
 	}
 }
 
@@ -274,6 +276,24 @@ func (m *mockGovernanceState) RemoveRole(role string, addr []byte) error {
 	if len(bucket) == 0 {
 		delete(m.roles, trimmed)
 	}
+	return nil
+}
+
+func (m *mockGovernanceState) SwapSetPriceSigner(provider string, addr [20]byte) error {
+	trimmed := strings.TrimSpace(provider)
+	if trimmed == "" {
+		return fmt.Errorf("provider must not be empty")
+	}
+	m.swapSigners[trimmed] = addr
+	return nil
+}
+
+func (m *mockGovernanceState) SwapClearPriceSigner(provider string) error {
+	trimmed := strings.TrimSpace(provider)
+	if trimmed == "" {
+		return fmt.Errorf("provider must not be empty")
+	}
+	delete(m.swapSigners, trimmed)
 	return nil
 }
 
@@ -1293,6 +1313,185 @@ func TestExecuteRoleAllowlistProposal(t *testing.T) {
 	}
 	if _, ok := grantBucket[string(revoke[:])]; ok {
 		t.Fatalf("expected revoke address removed")
+	}
+}
+
+// TestExecuteSwapPriceSignerProposal drives the full proposal lifecycle
+// (submit -> pass -> queue -> execute) for ProposalKindSwapPriceSignerUpdate
+// and asserts the registered signer address lands in state via exactly the
+// same nhbstate.Manager.SwapSetPriceSigner call native/swap's
+// PriceProofEngine.Verify reads at TxTypeSwapVoucherMint execution time --
+// proving governance is a viable, non-bespoke way to provision Gap 2's
+// missing price signer.
+func TestExecuteSwapPriceSignerProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 5
+	var signer [20]byte
+	signer[0] = 0xAB
+	signer[19] = 0xCD
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+		AllowedParams:       []string{"fees.baseFee"},
+	})
+	now := time.Unix(1_700_300_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := fmt.Sprintf(`{"provider":"nowpayments","signerAddress":"%s","memo":"initial oracle signer"}`,
+		crypto.MustNewAddress(crypto.NHBPrefix, signer[:]).String(),
+	)
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindSwapPriceSignerUpdate, payload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit swap price signer proposal: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue swap price signer proposal: %v", err)
+	}
+	proposal = state.proposals[proposalID]
+	proposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute swap price signer proposal: %v", err)
+	}
+
+	got, ok := state.swapSigners["nowpayments"]
+	if !ok {
+		t.Fatalf("expected a registered signer for provider nowpayments")
+	}
+	if got != signer {
+		t.Fatalf("unexpected registered signer: got %x want %x", got, signer)
+	}
+
+	if len(state.audit) != 3 {
+		t.Fatalf("expected three audit entries, got %d", len(state.audit))
+	}
+	if state.audit[2].Event != AuditEventExecuted {
+		t.Fatalf("unexpected final audit event: %s", state.audit[2].Event)
+	}
+
+	// Now revoke it via a second proposal and confirm the signer is removed
+	// entirely (not left registered to some sentinel value).
+	revokePayload := `{"provider":"nowpayments","revoke":true}`
+	revokeID, err := engine.SubmitProposal(proposer, ProposalKindSwapPriceSignerUpdate, revokePayload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit revoke proposal: %v", err)
+	}
+	revokeProposal := state.proposals[revokeID]
+	revokeProposal.Status = ProposalStatusPassed
+	if err := engine.QueueExecution(revokeID); err != nil {
+		t.Fatalf("queue revoke proposal: %v", err)
+	}
+	revokeProposal = state.proposals[revokeID]
+	revokeProposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(2 * time.Minute) })
+	if err := engine.Execute(revokeID); err != nil {
+		t.Fatalf("execute revoke proposal: %v", err)
+	}
+	if _, ok := state.swapSigners["nowpayments"]; ok {
+		t.Fatalf("expected signer to be removed after revoke proposal")
+	}
+}
+
+// TestSwapPriceSignerProposalDeterministicAcrossValidators simulates two
+// independent validators (two separate mockGovernanceState instances seeded
+// identically) executing the identical queued proposal payload, and asserts
+// both end up with byte-identical SwapSetPriceSigner state. This is the
+// property required for the mechanism to be safe to use in production:
+// every validator that replays the same gov_execute call must converge on
+// the same result, deterministically, from the same inputs.
+func TestSwapPriceSignerProposalDeterministicAcrossValidators(t *testing.T) {
+	var proposer [20]byte
+	proposer[7] = 9
+	var signer [20]byte
+	signer[5] = 0x11
+	signer[15] = 0x22
+
+	newSeededEngine := func() (*Engine, *mockGovernanceState) {
+		state := newMockGovernanceState(map[[20]byte]*types.Account{
+			proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+		})
+		engine := NewEngine()
+		engine.SetState(state)
+		engine.SetPolicy(ProposalPolicy{
+			MinDepositWei:       big.NewInt(0),
+			VotingPeriodSeconds: 60,
+			TimelockSeconds:     0,
+			AllowedParams:       []string{"fees.baseFee"},
+		})
+		now := time.Unix(1_700_400_000, 0).UTC()
+		engine.SetNowFunc(func() time.Time { return now })
+		return engine, state
+	}
+
+	payload := fmt.Sprintf(`{"provider":"otc-gateway","signerAddress":"%s"}`,
+		crypto.MustNewAddress(crypto.NHBPrefix, signer[:]).String(),
+	)
+
+	engineA, stateA := newSeededEngine()
+	idA, err := engineA.SubmitProposal(proposer, ProposalKindSwapPriceSignerUpdate, payload, big.NewInt(0))
+	if err != nil {
+		t.Fatalf("validator A submit: %v", err)
+	}
+	stateA.proposals[idA].Status = ProposalStatusPassed
+	if err := engineA.QueueExecution(idA); err != nil {
+		t.Fatalf("validator A queue: %v", err)
+	}
+	stateA.proposals[idA].TimelockEnd = time.Time{}
+	if err := engineA.Execute(idA); err != nil {
+		t.Fatalf("validator A execute: %v", err)
+	}
+
+	engineB, stateB := newSeededEngine()
+	idB, err := engineB.SubmitProposal(proposer, ProposalKindSwapPriceSignerUpdate, payload, big.NewInt(0))
+	if err != nil {
+		t.Fatalf("validator B submit: %v", err)
+	}
+	stateB.proposals[idB].Status = ProposalStatusPassed
+	if err := engineB.QueueExecution(idB); err != nil {
+		t.Fatalf("validator B queue: %v", err)
+	}
+	stateB.proposals[idB].TimelockEnd = time.Time{}
+	if err := engineB.Execute(idB); err != nil {
+		t.Fatalf("validator B execute: %v", err)
+	}
+
+	gotA, okA := stateA.swapSigners["otc-gateway"]
+	gotB, okB := stateB.swapSigners["otc-gateway"]
+	if !okA || !okB {
+		t.Fatalf("expected both validators to register a signer: okA=%v okB=%v", okA, okB)
+	}
+	if gotA != gotB {
+		t.Fatalf("validators diverged: A=%x B=%x", gotA, gotB)
+	}
+	if gotA != signer {
+		t.Fatalf("unexpected signer: got %x want %x", gotA, signer)
+	}
+}
+
+func TestParseSwapPriceSignerPayloadRejectsZeroAddress(t *testing.T) {
+	var zero [20]byte
+	payload := fmt.Sprintf(`{"provider":"nowpayments","signerAddress":"%s"}`,
+		crypto.MustNewAddress(crypto.NHBPrefix, zero[:]).String(),
+	)
+	if _, err := parseSwapPriceSignerPayload(payload); err == nil {
+		t.Fatalf("expected error for zero signer address")
+	}
+}
+
+func TestParseSwapPriceSignerPayloadRequiresProvider(t *testing.T) {
+	if _, err := parseSwapPriceSignerPayload(`{"signerAddress":""}`); err == nil {
+		t.Fatalf("expected error for missing provider")
 	}
 }
 

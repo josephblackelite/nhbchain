@@ -251,3 +251,115 @@ func TestSourceNormaliseFailsOnMissingFile(t *testing.T) {
 		t.Fatalf("expected error for unreadable api_key_file")
 	}
 }
+
+func basePriceProofConfig() PriceProofConfig {
+	return PriceProofConfig{
+		Enabled:  true,
+		Provider: "nowpayments",
+		Pairs:    []string{"ZNHB/USD"},
+		Signer: PriceProofSignerConfig{
+			BaseURL:        "https://hsm.internal:8443",
+			KeyLabel:       "swapd-price-signer",
+			CACertPath:     "ca.pem",
+			ClientCertPath: "client.pem",
+			ClientKeyPath:  "client.key",
+		},
+		Partners: []StablePartner{{ID: "otc-gateway", APIKey: "key-1", Secret: "secret-1"}},
+	}
+}
+
+func TestValidatePriceProofDisabledIsNoop(t *testing.T) {
+	if err := validatePriceProof(PriceProofConfig{}); err != nil {
+		t.Fatalf("expected no error when price proof disabled, got %v", err)
+	}
+}
+
+func TestValidatePriceProofAcceptsCompleteConfig(t *testing.T) {
+	if err := validatePriceProof(basePriceProofConfig()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePriceProofRequiresProvider(t *testing.T) {
+	cfg := basePriceProofConfig()
+	cfg.Provider = ""
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for missing provider")
+	}
+}
+
+func TestValidatePriceProofRequiresPairs(t *testing.T) {
+	cfg := basePriceProofConfig()
+	cfg.Pairs = nil
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for missing pairs")
+	}
+}
+
+func TestValidatePriceProofRejectsMalformedPair(t *testing.T) {
+	cfg := basePriceProofConfig()
+	cfg.Pairs = []string{"ZNHBUSD"}
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for pair missing separator")
+	}
+}
+
+func TestValidatePriceProofRequiresSignerFields(t *testing.T) {
+	cases := []func(*PriceProofConfig){
+		func(c *PriceProofConfig) { c.Signer.BaseURL = "" },
+		func(c *PriceProofConfig) { c.Signer.KeyLabel = "" },
+		func(c *PriceProofConfig) { c.Signer.CACertPath = "" },
+		func(c *PriceProofConfig) { c.Signer.ClientCertPath = "" },
+		func(c *PriceProofConfig) { c.Signer.ClientKeyPath = "" },
+	}
+	for i, mutate := range cases {
+		cfg := basePriceProofConfig()
+		mutate(&cfg)
+		if err := validatePriceProof(cfg); err == nil {
+			t.Fatalf("case %d: expected error for incomplete signer config", i)
+		}
+	}
+}
+
+func TestValidatePriceProofRequiresPartners(t *testing.T) {
+	cfg := basePriceProofConfig()
+	cfg.Partners = nil
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for missing partners")
+	}
+}
+
+func TestValidatePriceProofRejectsDuplicatePartnerCredentials(t *testing.T) {
+	cfg := basePriceProofConfig()
+	cfg.Partners = append(cfg.Partners, StablePartner{ID: "otc-gateway", APIKey: "key-2", Secret: "secret-2"})
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for duplicate partner id")
+	}
+
+	cfg = basePriceProofConfig()
+	cfg.Partners = append(cfg.Partners, StablePartner{ID: "other", APIKey: "key-1", Secret: "secret-2"})
+	if err := validatePriceProof(cfg); err == nil {
+		t.Fatalf("expected error for duplicate partner api_key")
+	}
+}
+
+func TestValidateRunsPriceProofChecksEvenWhenStablePaused(t *testing.T) {
+	cfg := Config{
+		Pairs:      []Pair{{Base: "ZNHB", Quote: "USD"}},
+		Sources:    []Source{{Name: "oracle", Type: "mock"}},
+		Stable:     StableConfig{Paused: true},
+		PriceProof: basePriceProofConfig(),
+	}
+	cfg.PriceProof.Provider = ""
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected price proof validation error even though stable engine is paused")
+	}
+}
+
+func TestApplyDefaultsSetsDefaultPriceProofPair(t *testing.T) {
+	cfg := &Config{PriceProof: PriceProofConfig{Enabled: true}}
+	applyDefaults(cfg)
+	if len(cfg.PriceProof.Pairs) != 1 || cfg.PriceProof.Pairs[0] != "ZNHB/USD" {
+		t.Fatalf("expected default pair ZNHB/USD, got %#v", cfg.PriceProof.Pairs)
+	}
+}

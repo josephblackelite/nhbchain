@@ -142,3 +142,36 @@ admin:
     enabled: true
     # placeholder: CA bundle used to validate admin client certificates.
     client_ca: /etc/nhbchain/tls/swapd-client-ca.crt
+
+# price_proof enables POST /v1/price-proof: a synchronous, sign-at-request-
+# time endpoint that produces a swap.PriceProof for a caller (e.g.
+# otc-gateway) to submit alongside a swap_submitVoucher call. Disabled by
+# default -- nothing signs price proofs until this is turned on AND a
+# matching governance policy.swapPriceSigner proposal has registered the
+# signer address this key corresponds to (see docs/gov/proposal-types.md).
+#
+# `provider` MUST exactly match the provider string registered via that
+# governance proposal, and `signer` MUST reference a key distinct from any
+# mint-voucher-signing key (e.g. otc-gateway's MINTER_ZNHB key) -- a
+# price-signer key must not carry the ZNHB mint-authority key's blast
+# radius.
+price_proof:
+  enabled: false
+  provider: nowpayments
+  pairs:
+    - ZNHB/USD
+  signer:
+    # placeholder: mTLS-fronted HSM proxy endpoint, structurally identical to
+    # otc-gateway's own HSM signer config but pointed at a SEPARATE key.
+    base_url: https://hsm.internal.example.com:8443
+    key_label: swapd-price-signer
+    ca_cert: /etc/nhbchain/tls/hsm-ca.crt
+    client_cert: /etc/nhbchain/tls/swapd-price-signer-client.crt
+    client_key: /etc/nhbchain/tls/swapd-price-signer-client.key
+  partners:
+    # placeholder: grant otc-gateway (and only otc-gateway, unless other
+    # callers are intentionally added) access to this endpoint. Deliberately
+    # a separate credential from stable.partners above.
+    - id: otc-gateway
+      api_key: "REPLACE_ME_WITH_REAL_OTC_GATEWAY_API_KEY"
+      secret: "REPLACE_ME_WITH_REAL_OTC_GATEWAY_SECRET"

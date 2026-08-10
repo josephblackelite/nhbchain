@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nhbchain/core"
 	gatewayauth "nhbchain/gateway/auth"
+	swap "nhbchain/native/swap"
 )
 
 // Client provides a thin JSON-RPC wrapper for swap voucher submission.
@@ -125,13 +125,38 @@ type MintCompliance struct {
 	SanctionsStatus  string          `json:"sanctionsStatus,omitempty"`
 }
 
-// MintSubmission wraps the voucher payload, signature, and compliance metadata.
+// PriceProofPayload is the wire shape rpc/swap_handlers.go's
+// handleSwapSubmitVoucher expects for the "priceProof" submission field. It
+// mirrors swap.PriceProof's on-wire encoding exactly (see
+// core/swap_voucher_tx.go's swapVoucherMintPriceProofPayload for the
+// consensus-side counterpart).
+type PriceProofPayload struct {
+	Domain    string `json:"domain"`
+	Provider  string `json:"provider"`
+	Pair      string `json:"pair"`
+	Rate      string `json:"rate"`
+	Timestamp int64  `json:"timestamp"`
+	Signature string `json:"signature"`
+}
+
+// MintSubmission wraps the swap.VoucherV1 payload, signature, mandatory
+// price proof, and compliance metadata submitted to swap_submitVoucher.
+//
+// This shape replaces the previous core.MintVoucher-shaped payload, which
+// was silently incompatible with swap_submitVoucher's actual decoder
+// (swap.VoucherV1's UnmarshalJSON): every real submission from this client
+// failed immediately with "voucher: domain required" before any
+// price-proof or risk-control logic ever ran. See
+// core/node.go's SwapSubmitVoucher doc comment for the full history.
 type MintSubmission struct {
-	Voucher      core.MintVoucher `json:"voucher"`
-	SignatureHex string           `json:"sig"`
-	Provider     string           `json:"provider"`
-	ProviderTxID string           `json:"providerTxId"`
-	Compliance   *MintCompliance  `json:"compliance,omitempty"`
+	Voucher      swap.VoucherV1    `json:"voucher"`
+	SignatureHex string            `json:"sig"`
+	Provider     string            `json:"provider"`
+	ProviderTxID string            `json:"providerTxId"`
+	Address      string            `json:"address,omitempty"`
+	USDAmount    string            `json:"usdAmount,omitempty"`
+	PriceProof   PriceProofPayload `json:"priceProof"`
+	Compliance   *MintCompliance   `json:"compliance,omitempty"`
 }
 
 // VoucherExportRecord captures the decoded row returned by swap_voucher_export.

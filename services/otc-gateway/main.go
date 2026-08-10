@@ -20,6 +20,7 @@ import (
 	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/otc-gateway/identity"
 	"nhbchain/services/otc-gateway/models"
+	"nhbchain/services/otc-gateway/priceproofclient"
 	"nhbchain/services/otc-gateway/recon"
 	"nhbchain/services/otc-gateway/secrets"
 	"nhbchain/services/otc-gateway/server"
@@ -115,6 +116,26 @@ func main() {
 		log.Fatalf("swap client error: %v", err)
 	}
 
+	// priceProofSource is nil when OTC_PRICE_PROOF_URL is unset -- the
+	// gateway still boots (many endpoints have nothing to do with minting),
+	// but SignAndSubmit fails at request time with a clear error rather
+	// than proceeding without a mandatory price proof. See
+	// config.FromEnv's OTC_PRICE_PROOF_URL comment.
+	var priceProofSource server.PriceProofSource
+	if cfg.PriceProofURL != "" {
+		priceProofClient, err := priceproofclient.NewClient(priceproofclient.Config{
+			URL:       cfg.PriceProofURL,
+			APIKey:    cfg.PriceProofAPIKey,
+			APISecret: cfg.PriceProofAPISecret,
+		})
+		if err != nil {
+			log.Fatalf("price proof client error: %v", err)
+		}
+		priceProofSource = priceProofClient
+	} else {
+		log.Printf("otc-gateway: OTC_PRICE_PROOF_URL not set -- sign-and-submit will fail until a price proof source is configured")
+	}
+
 	jwtRoleMap := make(map[string]auth.Role, len(cfg.Auth.JWT.RoleMap))
 	for raw, mapped := range cfg.Auth.JWT.RoleMap {
 		normalized := strings.ToLower(strings.TrimSpace(mapped))
@@ -173,17 +194,19 @@ func main() {
 	}()
 
 	srv := server.New(server.Config{
-		DB:            db,
-		TZ:            cfg.DefaultTZ,
-		ChainID:       chainID,
-		S3Bucket:      cfg.S3Bucket,
-		SwapClient:    swapClient,
-		Identity:      identityClient,
-		Signer:        signer,
-		VoucherTTL:    cfg.VoucherTTL,
-		Provider:      cfg.SwapProvider,
-		PollInterval:  cfg.MintPollInterval,
-		Authenticator: middleware,
+		DB:             db,
+		TZ:             cfg.DefaultTZ,
+		ChainID:        chainID,
+		S3Bucket:       cfg.S3Bucket,
+		SwapClient:     swapClient,
+		Identity:       identityClient,
+		Signer:         signer,
+		PriceProof:     priceProofSource,
+		PriceProofPair: cfg.PriceProofPair,
+		VoucherTTL:     cfg.VoucherTTL,
+		Provider:       cfg.SwapProvider,
+		PollInterval:   cfg.MintPollInterval,
+		Authenticator:  middleware,
 	})
 
 	reconciler, err := recon.NewReconciler(recon.Config{
