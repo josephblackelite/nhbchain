@@ -20,6 +20,7 @@ import (
 	"nhbchain/services/otc-gateway/hsm"
 	"nhbchain/services/swapd/adapters"
 	"nhbchain/services/swapd/config"
+	"nhbchain/services/swapd/localsigner"
 	"nhbchain/services/swapd/oracle"
 	"nhbchain/services/swapd/priceproof"
 	"nhbchain/services/swapd/server"
@@ -262,16 +263,38 @@ func main() {
 	}
 
 	if cfg.PriceProof.Enabled {
-		signerClient, err := hsm.NewClient(hsm.Config{
-			BaseURL:    cfg.PriceProof.Signer.BaseURL,
-			KeyLabel:   cfg.PriceProof.Signer.KeyLabel,
-			CACertPath: cfg.PriceProof.Signer.CACertPath,
-			ClientCert: cfg.PriceProof.Signer.ClientCertPath,
-			ClientKey:  cfg.PriceProof.Signer.ClientKeyPath,
-			SignPath:   cfg.PriceProof.Signer.SignPath,
-		})
-		if err != nil {
-			log.Fatalf("swapd: configure price proof signer: %v", err)
+		var signerClient priceproof.Signer
+		switch signerType := cfg.PriceProof.Signer.NormalizedType(); signerType {
+		case config.PriceProofSignerTypeLocal:
+			// Loads and decrypts the keystore file exactly once, here, at
+			// startup. NewClient returns an error (never a partially-usable
+			// client) if the keystore can't be decrypted, so a misconfigured
+			// or wrong-passphrase deployment fails loudly via log.Fatalf
+			// below instead of silently starting with no working signer.
+			localClient, err := localsigner.NewClient(localsigner.Config{
+				KeystorePath:  cfg.PriceProof.Signer.KeystorePath,
+				PassphraseEnv: cfg.PriceProof.Signer.PassphraseEnv,
+			})
+			if err != nil {
+				log.Fatalf("swapd: configure local price proof signer: %v", err)
+			}
+			log.Printf("swapd: price proof signer loaded from local keystore %s (address=%s) -- confirm this matches the wallet you intended to configure", cfg.PriceProof.Signer.KeystorePath, localClient.Address())
+			signerClient = localClient
+		case config.PriceProofSignerTypeHSM:
+			hsmClient, err := hsm.NewClient(hsm.Config{
+				BaseURL:    cfg.PriceProof.Signer.BaseURL,
+				KeyLabel:   cfg.PriceProof.Signer.KeyLabel,
+				CACertPath: cfg.PriceProof.Signer.CACertPath,
+				ClientCert: cfg.PriceProof.Signer.ClientCertPath,
+				ClientKey:  cfg.PriceProof.Signer.ClientKeyPath,
+				SignPath:   cfg.PriceProof.Signer.SignPath,
+			})
+			if err != nil {
+				log.Fatalf("swapd: configure price proof signer: %v", err)
+			}
+			signerClient = hsmClient
+		default:
+			log.Fatalf("swapd: unknown price_proof.signer.type %q", signerType)
 		}
 		priceProofService, err := priceproof.New(mgr, signerClient, cfg.PriceProof.Provider)
 		if err != nil {

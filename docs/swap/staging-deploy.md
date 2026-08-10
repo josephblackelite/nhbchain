@@ -73,6 +73,62 @@ default; any partner can override it via `stable.partners[].settlement_rail`.
   unset, so a misconfigured deployment never silently attempts an automated
   payout.
 
+## Configuring the price-proof signer
+
+`price_proof.signer.type` selects which of two signer implementations signs
+`swap.PriceProof` payloads at `POST /v1/price-proof`. See
+`deploy/config/swapd.staging.yaml.example` for the two commented-out
+`signer:` blocks this section describes.
+
+- **`hsm`** (default when `type` is omitted) -- an mTLS-fronted HSM proxy.
+  Requires real HSM infrastructure (`base_url`, `key_label`, `ca_cert`,
+  `client_cert`, `client_key`).
+- **`local`** -- a local encrypted keystore file, using this repo's own
+  standard Ethereum V3 keystore encryption (the same mechanism already used
+  for validator keys -- see `crypto/keystore.go`). Use this if you want to
+  reuse a wallet you already hold rather than provisioning HSM
+  infrastructure.
+
+  1. Create the keystore file with `nhb-cli keystore import`. This reads the
+     raw private key and the encryption passphrase from environment
+     variables ONLY -- never a CLI argument (which would leak into shell
+     history and process listings) and never a config file:
+
+     ```bash
+     NHB_KEYSTORE_IMPORT_PRIVATE_KEY=<hex-key> \
+     NHB_KEYSTORE_IMPORT_PASSPHRASE=<passphrase> \
+       nhb-cli keystore import --out /etc/nhbchain/secrets/swapd-price-signer.keystore.json
+     ```
+
+     The command writes the encrypted file, then immediately re-reads and
+     decrypts it with the same passphrase to confirm the write succeeded,
+     and prints the resulting public address. **Compare that printed
+     address against the wallet you intended to import before trusting the
+     file for anything** -- the command has no independent way to know
+     whether the correct key was supplied.
+
+  2. Set `price_proof.signer.type: local`, `keystore_path` to that file's
+     path, and `passphrase_env` to the NAME of an environment variable (not
+     the passphrase itself) that swapd will read at startup, e.g.
+     `SWAPD_PRICE_SIGNER_PASSPHRASE`.
+
+  3. Set that environment variable for the swapd process -- e.g. via
+     `deploy/systemd/swapd.service`'s `EnvironmentFile=`, pointing at a
+     root-only-readable file, never inline in the unit file or in
+     `swapd.yaml` itself.
+
+  swapd decrypts the keystore exactly once, at startup. If the passphrase is
+  wrong or the file is missing/corrupted, swapd refuses to start (fails
+  loudly) rather than falling back to running with no working signer.
+
+Whichever type you choose, the referenced key MUST be distinct from any
+mint-voucher-signing key used elsewhere (e.g. otc-gateway's `MINTER_ZNHB`
+key) -- a price-signer key must not carry the ZNHB mint-authority key's
+blast radius. And regardless of signer type, nothing is actually verified
+on-chain until the corresponding address is registered via a governance
+`policy.swapPriceSigner` proposal (see `docs/gov/proposal-types.md`) under
+the exact `provider` string this config uses.
+
 ## What this runbook does NOT get you
 
 Completing the steps above gets you a reachable staging `swapd` instance --

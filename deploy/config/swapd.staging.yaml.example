@@ -155,19 +155,64 @@ admin:
 # mint-voucher-signing key (e.g. otc-gateway's MINTER_ZNHB key) -- a
 # price-signer key must not carry the ZNHB mint-authority key's blast
 # radius.
+#
+# `signer.type` selects which of the two signer implementations below is
+# active -- exactly ONE of the two `signer:` blocks should be uncommented,
+# never both. Leaving `type` unset defaults to "hsm" (backward compatible
+# with configs written before "local" existed).
 price_proof:
   enabled: false
   provider: nowpayments
   pairs:
     - ZNHB/USD
+
+  # --- Option A: type "hsm" -- mTLS-fronted HSM proxy. -----------------------
+  # Real HSM infrastructure, structurally identical to otc-gateway's own HSM
+  # signer config but pointed at a SEPARATE key. This is the default type
+  # when `type` is omitted.
   signer:
-    # placeholder: mTLS-fronted HSM proxy endpoint, structurally identical to
-    # otc-gateway's own HSM signer config but pointed at a SEPARATE key.
+    type: hsm
+    # placeholder: mTLS-fronted HSM proxy endpoint.
     base_url: https://hsm.internal.example.com:8443
     key_label: swapd-price-signer
     ca_cert: /etc/nhbchain/tls/hsm-ca.crt
     client_cert: /etc/nhbchain/tls/swapd-price-signer-client.crt
     client_key: /etc/nhbchain/tls/swapd-price-signer-client.key
+
+  # --- Option B: type "local" -- local encrypted keystore file. -------------
+  # Use this if you don't operate HSM infrastructure and instead want to
+  # reuse a wallet you already hold as a local keystore file. It uses this
+  # repo's own standard Ethereum V3 keystore encryption (the same mechanism
+  # already used for validator keys) -- NOT a new/weaker scheme.
+  #
+  # The keystore file itself MUST be created with `nhb-cli keystore import`
+  # (see cmd/nhb-cli/keystore_cmd.go) -- never by hand-authoring a keystore
+  # JSON file, and NEVER by pasting a raw private key anywhere in this YAML.
+  # That command reads the raw key and the encryption passphrase from
+  # environment variables only (NHB_KEYSTORE_IMPORT_PRIVATE_KEY /
+  # NHB_KEYSTORE_IMPORT_PASSPHRASE), never a CLI argument or a config file,
+  # and prints the resulting public address so you can confirm it matches
+  # the wallet you meant to import before trusting the file:
+  #
+  #   NHB_KEYSTORE_IMPORT_PRIVATE_KEY=<hex-key> \
+  #   NHB_KEYSTORE_IMPORT_PASSPHRASE=<passphrase> \
+  #     nhb-cli keystore import --out /etc/nhbchain/secrets/swapd-price-signer.keystore.json
+  #
+  # `passphrase_env` below only names the environment variable swapd reads
+  # the decryption passphrase from at startup -- it must be set to the SAME
+  # passphrase used above (e.g. via the systemd unit's Environment= or
+  # EnvironmentFile=), and must NEVER be the passphrase value itself.
+  #
+  # signer:
+  #   type: local
+  #   # placeholder: path to a keystore file created via `nhb-cli keystore
+  #   # import` above. Not a raw key -- an encrypted V3 keystore JSON file.
+  #   keystore_path: /etc/nhbchain/secrets/swapd-price-signer.keystore.json
+  #   # placeholder: name of the environment variable swapd reads the
+  #   # keystore passphrase from at startup. Set that variable via the
+  #   # systemd unit's EnvironmentFile, not inline in this file.
+  #   passphrase_env: SWAPD_PRICE_SIGNER_PASSPHRASE
+
   partners:
     # placeholder: grant otc-gateway (and only otc-gateway, unless other
     # callers are intentionally added) access to this endpoint. Deliberately

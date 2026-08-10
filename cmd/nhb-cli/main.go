@@ -169,6 +169,12 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "keystore":
+		code := runKeystoreCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "gov":
 		code := runGovCommand(args[1:], os.Stdout, os.Stderr)
 		if code != 0 {
@@ -916,4 +922,5 @@ func printUsage() {
 	fmt.Println("  p2p                                - P2P trade orchestration subcommands")
 	fmt.Println("  potso                              - POTSO telemetry subcommands")
 	fmt.Println("  swap                               - Swap voucher queries and export")
+	fmt.Println("  keystore import --out <path>       - Encrypt a private key (env vars only) into a local keystore file")
 }
