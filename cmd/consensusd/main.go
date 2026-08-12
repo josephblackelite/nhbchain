@@ -307,7 +307,13 @@ func main() {
 	aggregator.Register("manual", manualOracle)
 	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
 	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
-	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "nhb", "ZNHB": "znhb"}))
+	// Neither NHB nor ZNHB has a public CoinGecko listing -- both are
+	// private-chain assets, not tradeable anywhere CoinGecko can see. An
+	// empty id map means CoinGeckoOracle.assetID() fails fast with
+	// "unmapped asset" for both instead of guessing nonexistent ids ("nhb",
+	// "znhb") and making a doomed network call. See cmd/nhb/main.go's
+	// matching oracle setup for the fuller rationale.
+	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{}))
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
 

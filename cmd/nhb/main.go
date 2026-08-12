@@ -274,12 +274,19 @@ func main() {
 	aggregator.Register("manual", manualOracle)
 	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
 	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
-	// ZNHB has no public CoinGecko listing, so it is intentionally left out of
-	// this id map: CoinGeckoOracle.assetID() only resolves symbols with an
-	// explicit entry here, so ZNHB quotes fail fast with "unmapped asset" and
-	// the aggregator falls through to the next configured oracle source
-	// instead of guessing a nonexistent id and making a doomed network call.
-	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{"NHB": "tether"}))
+	// Neither NHB nor ZNHB has a public CoinGecko listing, so both are
+	// intentionally left out of this id map: CoinGeckoOracle.assetID() only
+	// resolves symbols with an explicit entry here, so quotes for either
+	// fail fast with "unmapped asset" and the aggregator falls through to
+	// the next configured oracle source instead of guessing a nonexistent
+	// id and making a doomed network call. An earlier version of this map
+	// pointed "NHB" at CoinGecko's "tether" id as a stand-in -- that made a
+	// real API call but silently returned Tether's market price mislabeled
+	// as NHB's, which is worse than an honest peg. NHB is a private-chain
+	// gas unit with no external market at all; it is pegged to $1 by
+	// design (see the manual oracle seed below), not floating, so there is
+	// nothing for an external price source to legitimately report.
+	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{}))
 	_ = manualOracle.SetDecimal("USD", "NHB", "1.0", time.Now().UTC())
 	_ = manualOracle.SetDecimal("USD", "ZNHB", resolveZNHBOraclePrice(), time.Now().UTC())
 	node.SetSwapOracle(aggregator)
