@@ -43,6 +43,24 @@ func configureSwapToken(t *testing.T, node *core.Node, minterAddr [20]byte) {
 	}
 }
 
+// configureAdminWallet wires up the ZNHB Sale Pool admin/treasury wallet
+// this env's node needs to exercise the real curve-priced swap-voucher-mint
+// path (core.Node.ConfigureAdminWalletForTests). Tests that only exercise
+// checks upstream of the curve pricing logic (bad domain, bad chain,
+// expired, sanctioned, etc.) don't need this.
+func (env *testEnv) configureAdminWallet(t *testing.T) {
+	t.Helper()
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+	if err := env.node.ConfigureAdminWalletForTests(adminAddr); err != nil {
+		t.Fatalf("configure admin wallet: %v", err)
+	}
+}
+
 func (env *testEnv) setManualRate(t *testing.T, rate string, ts time.Time) {
 	t.Helper()
 	if err := env.node.SetSwapManualQuote("USD", "ZNHB", rate, ts); err != nil {
@@ -346,6 +364,7 @@ func TestSwapSubmitVoucherInvalidSigner(t *testing.T) {
 // same providerTxID once the first mint is durably committed to state.
 func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	env := newTestEnv(t)
+	env.configureAdminWallet(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
 	var minterAddr [20]byte
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
@@ -358,11 +377,11 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
 
-	env.setManualRate(t, "0.10", time.Now())
+	env.setManualRate(t, "0.05", time.Now())
 	chainID := env.node.Chain().ChainID()
-	voucher := buildSwapVoucher(t, chainID, recipient, "0.10", "ORDER-123")
+	voucher := buildSwapVoucher(t, chainID, recipient, "0.05", "ORDER-123")
 	sig := signSwapVoucher(t, minterKey, voucher)
-	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.05", time.Now())
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
@@ -437,20 +456,17 @@ func TestSwapSubmitVoucherSuccessAndReplay(t *testing.T) {
 	if proofEvt == nil {
 		t.Fatalf("expected swap.mint.proof event")
 	}
-	if supplyEvt == nil {
-		t.Fatalf("expected token.supply event")
+	// No token.supply event: this now moves ZNHB out of the treasury Sale
+	// Pool into the recipient (core/swap_voucher_tx.go), it does not mint
+	// new supply, so total ZNHB supply must not change.
+	if supplyEvt != nil {
+		t.Fatalf("expected no token.supply event -- swap-voucher mint no longer inflates ZNHB supply, got %+v", supplyEvt)
 	}
 	if mintedEvt.Attributes["orderId"] != voucher.OrderID {
 		t.Fatalf("unexpected orderId %s", mintedEvt.Attributes["orderId"])
 	}
 	if mintedEvt.Attributes["amount"] != voucher.Amount.String() {
 		t.Fatalf("unexpected amount %s", mintedEvt.Attributes["amount"])
-	}
-	if supplyEvt.Attributes["token"] != strings.ToUpper(voucher.Token) {
-		t.Fatalf("unexpected supply token %s", supplyEvt.Attributes["token"])
-	}
-	if supplyEvt.Attributes["delta"] != voucher.Amount.String() {
-		t.Fatalf("unexpected supply delta %s", supplyEvt.Attributes["delta"])
 	}
 	if proofEvt.Attributes["priceProofId"] == "" {
 		t.Fatalf("expected priceProofId in proof event")
@@ -619,6 +635,7 @@ func TestSwapSubmitVoucherSlippageExceeded(t *testing.T) {
 
 func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	env := newTestEnv(t)
+	env.configureAdminWallet(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
 	var minterAddr [20]byte
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
@@ -631,10 +648,10 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
 
-	env.setManualRate(t, "0.10", time.Now())
-	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-A")
+	env.setManualRate(t, "0.05", time.Now())
+	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.05", "ORDER-A")
 	sig := signSwapVoucher(t, minterKey, voucher)
-	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.05", time.Now())
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),
@@ -656,9 +673,9 @@ func TestSwapSubmitVoucherDuplicateProvider(t *testing.T) {
 	// Second voucher with different order but same providerTxId, still
 	// resident in this node's own mempool (the first hasn't been mined yet)
 	// -- rejected by the local same-mempool dedup check.
-	voucherB := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-B")
+	voucherB := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.05", "ORDER-B")
 	sigB := signSwapVoucher(t, minterKey, voucherB)
-	proofB := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proofB := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.05", time.Now())
 	payloadB := map[string]interface{}{
 		"voucher":      voucherB,
 		"sig":          "0x" + hex.EncodeToString(sigB),
@@ -733,6 +750,7 @@ func TestSwapSubmitVoucherSanctioned(t *testing.T) {
 
 func TestSwapVoucherExportAndList(t *testing.T) {
 	env := newTestEnv(t)
+	env.configureAdminWallet(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
 	var minterAddr [20]byte
 	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
@@ -745,10 +763,10 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	var recipient [20]byte
 	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
 
-	env.setManualRate(t, "0.10", time.Now())
-	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.10", "ORDER-EXPORT")
+	env.setManualRate(t, "0.05", time.Now())
+	voucher := buildSwapVoucher(t, env.node.Chain().ChainID(), recipient, "0.05", "ORDER-EXPORT")
 	sig := signSwapVoucher(t, minterKey, voucher)
-	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proof := signedSwapPriceProof(t, oracleKey, "nowpayments", "0.05", time.Now())
 	payload := map[string]interface{}{
 		"voucher":      voucher,
 		"sig":          "0x" + hex.EncodeToString(sig),

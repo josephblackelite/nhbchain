@@ -133,6 +133,9 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.accrueEpochRewards(height); err != nil {
 		return err
 	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		return err
+	}
 	if sp.epochConfig.Length == 0 {
 		return nil
 	}

@@ -26,6 +26,7 @@ import (
 	"nhbchain/core"
 	"nhbchain/core/epoch"
 	"nhbchain/core/events"
+	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	gatewayauth "nhbchain/gateway/auth"
@@ -1425,6 +1426,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetNetworkStats(recorder, r, req)
 	case "nhb_getOraclePrice":
 		s.handleGetOraclePrice(recorder, r, req)
+	case "znhb_getTokenomicsState":
+		s.handleGetZNHBTokenomicsState(recorder, r, req)
+	case "znhb_quoteBuy":
+		s.handleZNHBQuoteBuy(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
 	case "fees_getMonthlyStatus":
@@ -3138,4 +3143,46 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, _ *http.Request, req *R
 	resp := balanceResponseFromAccount(addrStr, account)
 	attachPendingStakingRewards(s.node, addrStr, &resp)
 	writeResult(w, req.ID, resp)
+}
+
+func (s *Server) handleGetZNHBTokenomicsState(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	state, err := s.node.GetZNHBTokenomicsState()
+	if err != nil {
+		slog.Error("rpc: failed to load ZNHB tokenomics state",
+			slog.String("method", "znhb_getTokenomicsState"),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load tokenomics state", nil)
+		return
+	}
+	writeResult(w, req.ID, state)
+}
+
+func (s *Server) handleZNHBQuoteBuy(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "znhbAmount parameter required", nil)
+		return
+	}
+	var amountStr string
+	if err := json.Unmarshal(req.Params[0], &amountStr); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid znhbAmount parameter", err.Error())
+		return
+	}
+	znhbAmount, ok := new(big.Int).SetString(strings.TrimSpace(amountStr), 10)
+	if !ok || znhbAmount.Sign() <= 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "znhbAmount must be a positive decimal integer (attoZNHB)", nil)
+		return
+	}
+	quote, err := s.node.QuoteBuyZNHB(znhbAmount)
+	if err != nil {
+		if errors.Is(err, curve.ErrExceedsSalePool) {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "znhbAmount exceeds the treasury Sale Pool's remaining inventory", nil)
+			return
+		}
+		slog.Error("rpc: failed to quote ZNHB purchase",
+			slog.String("method", "znhb_quoteBuy"),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to compute quote", nil)
+		return
+	}
+	writeResult(w, req.ID, quote)
 }

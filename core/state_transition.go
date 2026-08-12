@@ -20,6 +20,7 @@ import (
 	"nhbchain/core/identity"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/bank"
@@ -750,6 +751,111 @@ func (sp *StateProcessor) SetEscrowFeeTreasury(addr [20]byte) {
 func (sp *StateProcessor) SetAdminWallet(addr [20]byte, ok bool) {
 	sp.adminWallet = addr
 	sp.hasAdminWallet = ok
+}
+
+// znhbExpectedTotalSupplyWei, znhbExpectedSalePoolWei, and
+// znhbExpectedRewardPoolWei are the genesis-fixed ZNHB supply split: exactly
+// 1,000,000,000 ZNHB, divided 80/20 into a Sale Pool (feeds the Genesis
+// Treasury Distribution Curve and the treasury buyback) and a Reward Pool
+// (feeds the validator reward halving schedule, fully decoupled from sale
+// pricing). See core/tokenomics/curve and the tokenomics design document.
+var (
+	znhbExpectedTotalSupplyWei, _  = new(big.Int).SetString("1000000000000000000000000000", 10)
+	znhbExpectedSalePoolWei, _     = new(big.Int).SetString("800000000000000000000000000", 10)
+	znhbExpectedRewardPoolWei, _   = new(big.Int).SetString("200000000000000000000000000", 10)
+)
+
+// EnsureZNHBPoolsBootstrapped performs the one-time genesis split of the
+// admin/treasury wallet's ZNHB into the fixed Sale Pool and Reward Pool
+// sub-ledgers. Idempotent -- safe to call on every startup, a no-op once
+// the split has already run (guarded by the znhbPoolsBootstrapped flag in
+// state). Hard-fails, rather than silently skipping, if a real admin
+// wallet is configured but its ZNHB balance does not exactly match the
+// expected 1,000,000,000 ZNHB genesis allocation -- a mismatch there would
+// mean the pool split is about to start from the wrong number, which must
+// never happen quietly.
+func (sp *StateProcessor) EnsureZNHBPoolsBootstrapped() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if bootstrapped {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Cmp(znhbExpectedTotalSupplyWei) != 0 {
+		balance := "<nil>"
+		if adminAccount.BalanceZNHB != nil {
+			balance = adminAccount.BalanceZNHB.String()
+		}
+		return fmt.Errorf("znhb: admin wallet ZNHB balance %s does not match expected genesis total %s -- refusing to bootstrap pools against an unexpected balance", balance, znhbExpectedTotalSupplyWei)
+	}
+
+	if err := manager.ZNHBSetSalePoolBalance(new(big.Int).Set(znhbExpectedSalePoolWei)); err != nil {
+		return fmt.Errorf("znhb: set sale pool balance: %w", err)
+	}
+	if err := manager.ZNHBSetRewardPoolBalance(new(big.Int).Set(znhbExpectedRewardPoolWei)); err != nil {
+		return fmt.Errorf("znhb: set reward pool balance: %w", err)
+	}
+	if err := manager.ZNHBSetCumulativeSaleDistributed(big.NewInt(0)); err != nil {
+		return fmt.Errorf("znhb: set cumulative sale distributed: %w", err)
+	}
+	if err := manager.ZNHBMarkPoolsBootstrapped(); err != nil {
+		return fmt.Errorf("znhb: mark pools bootstrapped: %w", err)
+	}
+	return nil
+}
+
+// CheckZNHBSupplyInvariant asserts that the Sale Pool and Reward Pool
+// sub-ledgers together account for exactly the admin/treasury wallet's
+// live ZNHB balance -- the consensus-critical guarantee that no ZNHB has
+// been created or destroyed outside the two ring-fenced pools. Intended to
+// be called every block (see core/epochs.go's ProcessBlockLifecycle); a
+// violation is a hard consensus error the caller must halt on, not a
+// warning, since it means the fixed 1,000,000,000 ZNHB supply invariant
+// has already been broken somewhere in that block's transactions.
+func (sp *StateProcessor) CheckZNHBSupplyInvariant() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if !bootstrapped {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load sale pool balance: %w", err)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load reward pool balance: %w", err)
+	}
+	sum := new(big.Int).Add(salePool, rewardPool)
+	adminBalance := adminAccount.BalanceZNHB
+	if adminBalance == nil {
+		adminBalance = big.NewInt(0)
+	}
+	if sum.Cmp(adminBalance) != 0 {
+		return fmt.Errorf("znhb: supply invariant violated -- sale pool (%s) + reward pool (%s) = %s, but admin wallet ZNHB balance = %s", salePool, rewardPool, sum, adminBalance)
+	}
+	return nil
 }
 
 // BeginBlock records the execution context for the block currently being applied.
@@ -1607,6 +1713,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		swapPayoutAuthorities:      payoutAuthCopy,
 		swapConfig:                 sp.swapConfig,
 		swapVoucherChainID:         sp.swapVoucherChainID,
+		adminWallet:                sp.adminWallet,
+		hasAdminWallet:             sp.hasAdminWallet,
 	}, nil
 }
 
@@ -3154,44 +3262,80 @@ func (sp *StateProcessor) applySwapBurn(tx *types.Transaction, sender []byte, se
 	return fmt.Errorf("swap: native on-chain swap burn is disabled -- use the buyZNHB transaction type instead")
 }
 
-// applyBuyZNHB implements the founder-specified ZNHB purchase flow: the
-// buyer's NHB moves to the admin wallet (this is platform revenue), and an
-// equal-in-agreement amount of ZNHB moves from the admin wallet to the buyer.
-// This is the ONLY on-chain path that moves ZNHB out of the admin wallet's
-// initial 1,000,000,000 allocation, and it is strictly one-directional --
-// there is deliberately no corresponding path that lets a buyer convert ZNHB
-// back into NHB through the admin wallet, since that would let unbacked
-// value leave the system disguised as NHB (which is otherwise always backed
-// 1:1 by NOWPayments-custodied USDT/USDC). ZNHB, once purchased, can only
-// ever move peer-to-peer (ordinary TxTypeTransferZNHB) from then on.
+// applyBuyZNHB implements the founder-specified ZNHB purchase flow, priced
+// by the Genesis Treasury Distribution Curve (core/tokenomics/curve): the
+// buyer's NHB moves to the admin wallet (platform revenue), and the exact
+// curve-computed amount of ZNHB moves from the treasury's Sale Pool
+// sub-ledger to the buyer. This is one of two on-chain paths (together with
+// applySwapVoucherMintTransaction) that move ZNHB out of the Sale Pool, and
+// it is strictly one-directional through THIS function -- there is
+// deliberately no corresponding path that lets a buyer convert ZNHB back
+// into NHB through the admin wallet, since that would let unbacked value
+// leave the system disguised as NHB (which is otherwise always backed 1:1
+// by NOWPayments-custodied USDT/USDC). ZNHB, once purchased, moves
+// peer-to-peer (ordinary TxTypeTransferZNHB) or back into the treasury only
+// via the formulaic buyback -- never through this function.
 //
-// Both amounts are specified explicitly by the signed transaction (from a
-// quote the buyer already agreed to), so this function only validates
-// balances and moves exactly what was agreed -- it does not itself compute
-// or look up a price.
+// The buyer specifies the ZNHB amount they want and a maximum NHB they are
+// willing to pay (slippage protection); the chain computes the exact cost
+// on-chain from the curve, using cumulative_sale_distributed as it stands
+// at execution time, and rejects the purchase if the cost exceeds the
+// buyer's cap. This is a breaking change from the prior payload shape
+// ({NHBAmount, ZNHBAmount}, a pre-agreed pair trusted with zero on-chain
+// price enforcement) -- nhbportal's buyZNHB() caller must be updated in
+// lockstep.
 func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	if !sp.hasAdminWallet {
 		return fmt.Errorf("buyZNHB: no admin wallet configured for this network")
 	}
 	var payload struct {
-		NHBAmount  *big.Int `json:"nhbAmount"`
-		ZNHBAmount *big.Int `json:"znhbAmount"`
-		QuoteID    string   `json:"quoteId,omitempty"`
+		ZNHBAmount   *big.Int `json:"znhbAmount"`
+		MaxNHBAmount *big.Int `json:"maxNHBAmount"`
+		QuoteID      string   `json:"quoteId,omitempty"`
 	}
 	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
 		return fmt.Errorf("buyZNHB: decode payload: %w", err)
 	}
-	if payload.NHBAmount == nil || payload.NHBAmount.Sign() <= 0 {
-		return fmt.Errorf("buyZNHB: nhbAmount must be positive")
-	}
 	if payload.ZNHBAmount == nil || payload.ZNHBAmount.Sign() <= 0 {
 		return fmt.Errorf("buyZNHB: znhbAmount must be positive")
+	}
+	if payload.MaxNHBAmount == nil || payload.MaxNHBAmount.Sign() <= 0 {
+		return fmt.Errorf("buyZNHB: maxNHBAmount must be positive")
 	}
 	if bytes.Equal(sender, sp.adminWallet[:]) {
 		return fmt.Errorf("buyZNHB: the admin wallet cannot buy from itself")
 	}
-	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(payload.NHBAmount) < 0 {
+
+	manager := nhbstate.NewManager(sp.Trie)
+	c0, err := manager.ZNHBCumulativeSaleDistributed()
+	if err != nil {
+		return fmt.Errorf("buyZNHB: load cumulative sale distributed: %w", err)
+	}
+	c1 := new(big.Int).Add(c0, payload.ZNHBAmount)
+
+	params := curve.Default()
+	costRat, err := params.Cost(c0, c1)
+	if err != nil {
+		if errors.Is(err, curve.ErrExceedsSalePool) {
+			return fmt.Errorf("buyZNHB: purchase would exceed the treasury Sale Pool's remaining inventory")
+		}
+		return fmt.Errorf("buyZNHB: compute cost: %w", err)
+	}
+	nhbCost := curve.RoundCostUp(costRat)
+	if nhbCost.Cmp(payload.MaxNHBAmount) > 0 {
+		return fmt.Errorf("buyZNHB: price moved -- cost %s exceeds your maximum %s, please refresh your quote", nhbCost, payload.MaxNHBAmount)
+	}
+
+	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(nhbCost) < 0 {
 		return fmt.Errorf("buyZNHB: insufficient NHB balance")
+	}
+
+	salePoolBalance, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("buyZNHB: load sale pool balance: %w", err)
+	}
+	if salePoolBalance.Cmp(payload.ZNHBAmount) < 0 {
+		return fmt.Errorf("buyZNHB: treasury sale pool has insufficient ZNHB")
 	}
 
 	adminAccount, err := sp.getAccount(sp.adminWallet[:])
@@ -3202,7 +3346,7 @@ func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, sen
 		return fmt.Errorf("buyZNHB: admin wallet has insufficient ZNHB")
 	}
 
-	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, payload.NHBAmount)
+	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, nhbCost)
 	if senderAccount.BalanceZNHB == nil {
 		senderAccount.BalanceZNHB = big.NewInt(0)
 	}
@@ -3212,7 +3356,7 @@ func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, sen
 	if adminAccount.BalanceNHB == nil {
 		adminAccount.BalanceNHB = big.NewInt(0)
 	}
-	adminAccount.BalanceNHB = new(big.Int).Add(adminAccount.BalanceNHB, payload.NHBAmount)
+	adminAccount.BalanceNHB = new(big.Int).Add(adminAccount.BalanceNHB, nhbCost)
 	adminAccount.BalanceZNHB = new(big.Int).Sub(adminAccount.BalanceZNHB, payload.ZNHBAmount)
 
 	if err := sp.setAccount(sender, senderAccount); err != nil {
@@ -3222,12 +3366,20 @@ func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, sen
 		return fmt.Errorf("buyZNHB: persist admin wallet: %w", err)
 	}
 
+	newSalePoolBalance := new(big.Int).Sub(salePoolBalance, payload.ZNHBAmount)
+	if err := manager.ZNHBSetSalePoolBalance(newSalePoolBalance); err != nil {
+		return fmt.Errorf("buyZNHB: update sale pool balance: %w", err)
+	}
+	if err := manager.ZNHBSetCumulativeSaleDistributed(c1); err != nil {
+		return fmt.Errorf("buyZNHB: advance cumulative sale distributed: %w", err)
+	}
+
 	var buyerAddr [20]byte
 	copy(buyerAddr[:], sender)
 	evt := events.BuyZNHBRecorded{
 		Buyer:      buyerAddr,
 		AdminAddr:  sp.adminWallet,
-		NHBAmount:  payload.NHBAmount,
+		NHBAmount:  nhbCost,
 		ZNHBAmount: payload.ZNHBAmount,
 	}.Event()
 	if evt != nil {

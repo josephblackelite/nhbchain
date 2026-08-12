@@ -12,6 +12,7 @@ import (
 
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
 	nativecommon "nhbchain/native/common"
 	swap "nhbchain/native/swap"
@@ -376,19 +377,97 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 		return ErrSwapNonceUsed
 	}
 
-	if err := priceEngine.Record(priceProof); err != nil {
-		return fmt.Errorf("swap: record price proof: %w", err)
-	}
-	if err := sp.MintToken(token, voucher.Recipient[:], voucher.Amount); err != nil {
-		return err
-	}
-	if err := manager.MarkSwapNonce(orderID); err != nil {
-		return err
-	}
-
 	usdAmount := strings.TrimSpace(submission.USDAmount)
 	if usdAmount == "" && strings.EqualFold(voucher.Fiat, "USD") {
 		usdAmount = strings.TrimSpace(voucher.FiatAmount)
+	}
+
+	// The Genesis Treasury Distribution Curve (core/tokenomics/curve), not
+	// the price-proof rate above, is ZNHB's authoritative treasury price.
+	// The price-proof check just above still matters (it validates the
+	// OTC gateway's own submitted rate is internally consistent with what
+	// it requested), but the curve independently prices exactly how much
+	// this voucher's ZNHB amount actually costs against the treasury's
+	// own Sale Pool schedule, and the transfer below draws from that same
+	// pool -- mirroring applyBuyZNHB, never sp.MintToken.
+	curveManager := manager
+	c0, err := curveManager.ZNHBCumulativeSaleDistributed()
+	if err != nil {
+		return fmt.Errorf("swap: load cumulative sale distributed: %w", err)
+	}
+	c1 := new(big.Int).Add(c0, voucher.Amount)
+	curveParams := curve.Default()
+	curveCostRat, err := curveParams.Cost(c0, c1)
+	if err != nil {
+		if errors.Is(err, curve.ErrExceedsSalePool) {
+			// Depends on the CURRENT cumulative_sale_distributed, which is
+			// mutable (buybacks can lower it) -- a voucher that exceeds
+			// capacity right now could become valid later, so this must
+			// SKIP (retry), not PRUNE (permanent), matching this file's
+			// existing reasoning for other mutable-state-dependent checks
+			// (see the "mint authority not configured" comment above).
+			return fmt.Errorf("%w: mint would exceed the treasury Sale Pool's remaining inventory", ErrSwapAmountAboveMaximum)
+		}
+		return fmt.Errorf("swap: compute curve cost: %w", err)
+	}
+	budgetRat, ok := new(big.Rat).SetString(usdAmount)
+	if !ok || budgetRat.Sign() <= 0 {
+		return fmt.Errorf("%w: invalid usd/fiat budget", ErrSwapVoucherInvalidPayload)
+	}
+	curveDiff := new(big.Rat).Sub(curveCostRat, budgetRat)
+	curveDiff.Abs(curveDiff)
+	curveAllowance := new(big.Rat).SetFrac64(int64(cfg.SlippageBps), 10000)
+	curveTolerance := new(big.Rat).Mul(curveCostRat, curveAllowance)
+	if curveDiff.Cmp(curveTolerance) > 0 {
+		return ErrSwapSlippageExceeded
+	}
+
+	if !sp.hasAdminWallet {
+		return fmt.Errorf("%w: no admin wallet configured for this network", ErrSwapInvalidSigner)
+	}
+	salePoolBalance, err := curveManager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("swap: load sale pool balance: %w", err)
+	}
+	if salePoolBalance.Cmp(voucher.Amount) < 0 {
+		return fmt.Errorf("%w: treasury sale pool has insufficient ZNHB", ErrSwapInvalidSigner)
+	}
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("swap: load admin wallet: %w", err)
+	}
+	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Cmp(voucher.Amount) < 0 {
+		return fmt.Errorf("%w: admin wallet has insufficient ZNHB", ErrSwapInvalidSigner)
+	}
+
+	if err := priceEngine.Record(priceProof); err != nil {
+		return fmt.Errorf("swap: record price proof: %w", err)
+	}
+
+	recipientAccount, err := sp.getAccount(voucher.Recipient[:])
+	if err != nil {
+		return fmt.Errorf("swap: load recipient: %w", err)
+	}
+	if recipientAccount.BalanceZNHB == nil {
+		recipientAccount.BalanceZNHB = big.NewInt(0)
+	}
+	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, voucher.Amount)
+	adminAccount.BalanceZNHB = new(big.Int).Sub(adminAccount.BalanceZNHB, voucher.Amount)
+	if err := sp.setAccount(voucher.Recipient[:], recipientAccount); err != nil {
+		return fmt.Errorf("swap: persist recipient: %w", err)
+	}
+	if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+		return fmt.Errorf("swap: persist admin wallet: %w", err)
+	}
+	if err := curveManager.ZNHBSetSalePoolBalance(new(big.Int).Sub(salePoolBalance, voucher.Amount)); err != nil {
+		return fmt.Errorf("swap: update sale pool balance: %w", err)
+	}
+	if err := curveManager.ZNHBSetCumulativeSaleDistributed(c1); err != nil {
+		return fmt.Errorf("swap: advance cumulative sale distributed: %w", err)
+	}
+
+	if err := manager.MarkSwapNonce(orderID); err != nil {
+		return err
 	}
 	record := &swap.VoucherRecord{
 		Provider:        provider,

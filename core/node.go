@@ -35,6 +35,7 @@ import (
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	syncmgr "nhbchain/core/sync"
+	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/mempool"
@@ -459,6 +460,9 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 	stateProcessor.SetAdminWallet(treasury, hasAdminWallet)
+	if err := stateProcessor.EnsureZNHBPoolsBootstrapped(); err != nil {
+		return nil, fmt.Errorf("bootstrap ZNHB sale/reward pools: %w", err)
+	}
 
 	moduleAddr := deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix)
 	collateralAddr := deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix)
@@ -7973,6 +7977,168 @@ func (n *Node) ChainID() uint64 {
 // the loaded genesis file configured one.
 func (n *Node) AdminWallet() ([20]byte, bool) {
 	return n.chain.AdminWallet()
+}
+
+// ConfigureAdminWalletForTests wires up a genesis-equivalent admin/treasury
+// wallet for tests in other packages that need to exercise ZNHB-purchase or
+// swap-voucher-mint paths gated on the admin wallet, without constructing a
+// full genesis file. It sets the in-memory admin wallet, credits it with the
+// full 1,000,000,000 ZNHB genesis supply, and runs the one-time Sale/Reward
+// Pool bootstrap split -- mirroring exactly what NewNode does when a real
+// genesis file declares an admin wallet. Production code never calls this;
+// it always derives the admin wallet from genesis (see NewNode).
+func (n *Node) ConfigureAdminWalletForTests(addr [20]byte) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	n.state.SetAdminWallet(addr, true)
+	manager := nhbstate.NewManager(n.state.Trie)
+	account := &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}
+	if err := manager.PutAccount(addr[:], account); err != nil {
+		return fmt.Errorf("seed admin wallet balance: %w", err)
+	}
+	return n.state.EnsureZNHBPoolsBootstrapped()
+}
+
+// ZNHBTokenomicsState is the public, read-only snapshot of the Genesis
+// Treasury Distribution Curve's live state -- everything needed to
+// independently recompute the current treasury price without trusting
+// anyone's word for it. Exposed via the znhb_getTokenomicsState RPC method.
+type ZNHBTokenomicsState struct {
+	// CurrentTranchePrice is the exact spot price, in USD-equivalent NHB,
+	// of the tranche the treasury is currently selling from -- formatted
+	// as a decimal string (never a float) to preserve exactness.
+	CurrentTranchePrice string `json:"currentTranchePrice"`
+	// CurrentTrancheIndex is which of the 16,000 tranches is currently
+	// active, and FullySoldOut is true once the Sale Pool is exhausted
+	// (CurrentTranchePrice then reports the terminal price instead).
+	CurrentTrancheIndex uint64 `json:"currentTrancheIndex"`
+	FullySoldOut        bool   `json:"fullySoldOut"`
+	// CumulativeSaleDistributed is the exact attoZNHB counter the curve is
+	// priced against (0 to the Sale Pool's 800,000,000 ZNHB cap).
+	CumulativeSaleDistributed string `json:"cumulativeSaleDistributedWei"`
+	SalePoolBalanceWei        string `json:"salePoolBalanceWei"`
+	RewardPoolBalanceWei      string `json:"rewardPoolBalanceWei"`
+	BuybackAccrualBalanceWei  string `json:"buybackAccrualBalanceWei"`
+}
+
+// GetZNHBTokenomicsState returns the live, independently-verifiable state
+// of the Genesis Treasury Distribution Curve. Returns zero-valued fields,
+// not an error, if the ZNHB pools have never been bootstrapped (e.g. no
+// admin wallet configured on this network).
+func (n *Node) GetZNHBTokenomicsState() (*ZNHBTokenomicsState, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	cumulative, err := manager.ZNHBCumulativeSaleDistributed()
+	if err != nil {
+		return nil, fmt.Errorf("load cumulative sale distributed: %w", err)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return nil, fmt.Errorf("load sale pool balance: %w", err)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return nil, fmt.Errorf("load reward pool balance: %w", err)
+	}
+	buybackAccrual, err := manager.ZNHBBuybackAccrualBalance()
+	if err != nil {
+		return nil, fmt.Errorf("load buyback accrual balance: %w", err)
+	}
+
+	params := curve.Default()
+	state := &ZNHBTokenomicsState{
+		CumulativeSaleDistributed: cumulative.String(),
+		SalePoolBalanceWei:        salePool.String(),
+		RewardPoolBalanceWei:      rewardPool.String(),
+		BuybackAccrualBalanceWei:  buybackAccrual.String(),
+	}
+	if cumulative.Cmp(params.SalePoolCapWei()) >= 0 {
+		state.FullySoldOut = true
+		state.CurrentTrancheIndex = params.TrancheCount
+		state.CurrentTranchePrice = params.TerminalPrice().FloatString(curve.Decimals)
+		return state, nil
+	}
+	idx := params.TrancheIndexFor(cumulative)
+	price, err := params.TranchePrice(idx)
+	if err != nil {
+		return nil, fmt.Errorf("compute current tranche price: %w", err)
+	}
+	state.CurrentTrancheIndex = idx
+	state.CurrentTranchePrice = price.FloatString(curve.Decimals)
+	return state, nil
+}
+
+// ZNHBBuyQuote is the public, read-only quote for buying a specific amount
+// of ZNHB from the treasury Sale Pool: the exact NHB cost applyBuyZNHB
+// would charge right now, computed with the same curve.Cost math the
+// on-chain transition itself uses. Callers (e.g. nhbportal) use this to
+// build a buyZNHB transaction's MaxNHBAmount without ever having to
+// replicate the Genesis Treasury Distribution Curve client-side.
+type ZNHBBuyQuote struct {
+	ZNHBAmountWei string `json:"znhbAmountWei"`
+	// NHBCostWei is rounded the same protocol-favoring direction (up)
+	// applyBuyZNHB itself uses (curve.RoundCostUp) -- it is the exact
+	// amount that transaction will charge if submitted immediately, not
+	// an approximation.
+	NHBCostWei string `json:"nhbCostWei"`
+	// EffectiveRate is NHBCostWei/ZNHBAmountWei as a decimal string, purely
+	// for display -- callers must use NHBCostWei for the actual on-chain
+	// slippage cap, not a value recomputed from this rate.
+	EffectiveRate string `json:"effectiveRate"`
+}
+
+// QuoteBuyZNHB returns the live cost of buying znhbAmount (attoZNHB) from
+// the treasury Sale Pool at the curve's current position. Returns
+// curve.ErrExceedsSalePool (unwrapped, check with errors.Is) if the
+// requested amount exceeds the Sale Pool's remaining inventory.
+func (n *Node) QuoteBuyZNHB(znhbAmount *big.Int) (*ZNHBBuyQuote, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	if znhbAmount == nil || znhbAmount.Sign() <= 0 {
+		return nil, fmt.Errorf("znhbAmount must be positive")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	c0, err := manager.ZNHBCumulativeSaleDistributed()
+	if err != nil {
+		return nil, fmt.Errorf("load cumulative sale distributed: %w", err)
+	}
+	c1 := new(big.Int).Add(c0, znhbAmount)
+
+	params := curve.Default()
+	costRat, err := params.Cost(c0, c1)
+	if err != nil {
+		return nil, err
+	}
+	nhbCost := curve.RoundCostUp(costRat)
+	effectiveRate := new(big.Rat).SetFrac(nhbCost, znhbAmount)
+	return &ZNHBBuyQuote{
+		ZNHBAmountWei: znhbAmount.String(),
+		NHBCostWei:    nhbCost.String(),
+		EffectiveRate: effectiveRate.FloatString(curve.Decimals),
+	}, nil
 }
 
 // GetLastCommitHash returns a commit hash/seed (used by BFT proposer selection).

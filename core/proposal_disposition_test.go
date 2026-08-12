@@ -122,7 +122,7 @@ func TestSwapVoucherMintDailyCapExceededSkipsNotAborts(t *testing.T) {
 	}
 	recipient := toAddress(recipientKey)
 
-	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-CAP-A")
+	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-CAP-A")
 
 	// Configure a daily cap that admits exactly one voucher's worth (1.0x)
 	// but not two (2.0x) -- 1.5x headroom.
@@ -138,7 +138,7 @@ func TestSwapVoucherMintDailyCapExceededSkipsNotAborts(t *testing.T) {
 	})
 
 	sigA := signSwapVoucherCore(t, minterKey, voucherA)
-	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submissionA := &swap.VoucherSubmission{
 		Voucher: &voucherA, Signature: sigA, Provider: "nowpayments",
 		ProviderTxID: "CAP-1", PriceProof: proofA,
@@ -155,9 +155,9 @@ func TestSwapVoucherMintDailyCapExceededSkipsNotAborts(t *testing.T) {
 	// test exercises exactly what CreateBlock's own sequential,
 	// same-attempt application does -- independent of whatever the
 	// admission-time simulation would separately decide.
-	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-CAP-B")
+	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-CAP-B")
 	sigB := signSwapVoucherCore(t, minterKey, voucherB)
-	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submissionB := &swap.VoucherSubmission{
 		Voucher: &voucherB, Signature: sigB, Provider: "nowpayments",
 		ProviderTxID: "CAP-2", PriceProof: proofB,
@@ -402,9 +402,9 @@ func TestModulePauseSkipsTransactionInsteadOfAbortingProposal(t *testing.T) {
 	}
 	recipient := toAddress(recipientKey)
 
-	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-PAUSED")
+	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-PAUSED")
 	sig := signSwapVoucherCore(t, minterKey, voucher)
-	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submission := &swap.VoucherSubmission{
 		Voucher: &voucher, Signature: sig, Provider: "nowpayments",
 		ProviderTxID: "PAUSED-1", PriceProof: proof,

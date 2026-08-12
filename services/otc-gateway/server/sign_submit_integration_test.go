@@ -67,7 +67,7 @@ func (s *integrationPriceProofSource) PriceProof(ctx context.Context, pair strin
 func newSignedPriceProofHandler(t *testing.T, key *nhbcrypto.PrivateKey, provider string) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proof, err := swap.NewPriceProof(swap.PriceProofDomainV1, provider, "ZNHB/USD", "0.10", time.Now().UTC().Unix(), nil)
+		proof, err := swap.NewPriceProof(swap.PriceProofDomainV1, provider, "ZNHB/USD", "0.05", time.Now().UTC().Unix(), nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -120,6 +120,21 @@ func TestSignAndSubmitAgainstRealSwapSubmitVoucherHandler(t *testing.T) {
 	node, err := nhbcore.NewNode(chainDB, validatorKey, "", true, false)
 	if err != nil {
 		t.Fatalf("new node: %v", err)
+	}
+
+	// applySwapVoucherMintTransaction now prices and settles mints against
+	// the Genesis Treasury Distribution Curve's Sale Pool (core/swap_voucher_tx.go),
+	// which requires a configured admin/treasury wallet -- this test's
+	// ephemeral autogenesis node has none by default, so wire one up the
+	// same way a real genesis file would.
+	adminKey, err := nhbcrypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+	if err := node.ConfigureAdminWalletForTests(adminAddr); err != nil {
+		t.Fatalf("configure admin wallet: %v", err)
 	}
 
 	minterKey, err := nhbcrypto.GeneratePrivateKey()
@@ -260,9 +275,10 @@ func TestSignAndSubmitAgainstRealSwapSubmitVoucherHandler(t *testing.T) {
 
 	payload := map[string]string{
 		"recipient": recipient,
-		// 0.10 ZNHB/USD * 100.00 USD => 1000 ZNHB, matching the price proof
-		// the stub swapd endpoint below signs.
-		"amount":        "1000000000000000000000",
+		// 100.00 USD / 0.05 ZNHB/USD => 2000 ZNHB, matching both the price
+		// proof the stub swapd endpoint below signs and the Genesis Treasury
+		// Distribution Curve's real $0.05 starting price (core/tokenomics/curve).
+		"amount":        "2000000000000000000000",
 		"fiat_amount":   "100.00",
 		"fiat_currency": "USD",
 	}

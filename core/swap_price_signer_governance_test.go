@@ -124,9 +124,9 @@ func TestSwapPriceSignerGovernanceProposalEndToEndMint(t *testing.T) {
 	}
 	recipient := toAddress(recipientKey)
 
-	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-GOV-SIGNER")
+	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-GOV-SIGNER")
 	sig := signSwapVoucherCore(t, minterKey, voucher)
-	proof := signedPriceProofCore(t, oracleKey, provider, "0.10", time.Now())
+	proof := signedPriceProofCore(t, oracleKey, provider, "0.05", time.Now())
 
 	submission := &swap.VoucherSubmission{
 		Voucher:      &voucher,
@@ -208,9 +208,9 @@ func TestSwapPriceSignerGovernanceProposalRevoke(t *testing.T) {
 		t.Fatalf("post-revoke check: %v", err)
 	}
 
-	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-GOV-REVOKED")
+	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-GOV-REVOKED")
 	sig := signSwapVoucherCore(t, minterKey, voucher)
-	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submission := &swap.VoucherSubmission{
 		Voucher:      &voucher,
 		Signature:    sig,

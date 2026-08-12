@@ -115,6 +115,14 @@ func setupSwapVoucherTestNode(t *testing.T) (*Node, *crypto.PrivateKey, *crypto.
 	}
 	minterAddr := toAddress(minterKey)
 	assignRole(t, node, "MINTER_ZNHB", minterAddr)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("admin key: %v", err)
+	}
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+
 	node.stateMu.Lock()
 	manager := nhbstate.NewManager(node.state.Trie)
 	if err := manager.RegisterToken("ZNHB", "Zero NHB", 18); err != nil {
@@ -125,7 +133,27 @@ func setupSwapVoucherTestNode(t *testing.T) (*Node, *crypto.PrivateKey, *crypto.
 		node.stateMu.Unlock()
 		t.Fatalf("set mint authority: %v", err)
 	}
+	// applySwapVoucherMintTransaction now transfers voucher.Amount out of
+	// the treasury's Sale Pool sub-ledger (mirroring applyBuyZNHB) instead
+	// of calling the old, genuinely inflationary sp.MintToken -- so these
+	// tests need a real, correctly-sized admin wallet, bootstrapped the
+	// same way production does, not the bare token registration the old
+	// MintToken-based path got away with.
+	node.state.SetAdminWallet(adminAddr, true)
+	if err := node.state.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed admin wallet: %v", err)
+	}
 	node.stateMu.Unlock()
+
+	if err := node.state.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap ZNHB pools: %v", err)
+	}
+
 	node.SetSwapConfig(swap.Config{
 		AllowedFiat:        []string{"USD"},
 		MaxQuoteAgeSeconds: 120,
@@ -153,9 +181,9 @@ func TestSwapVoucherMintExecutesInBlock(t *testing.T) {
 	}
 	recipient := toAddress(recipientKey)
 
-	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-BLOCK")
+	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-BLOCK")
 	sig := signSwapVoucherCore(t, minterKey, voucher)
-	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 
 	submission := &swap.VoucherSubmission{
 		Voucher:      &voucher,
@@ -253,6 +281,14 @@ func TestSwapVoucherMintMandatoryPriceProofSignature(t *testing.T) {
 	}
 	minterAddr := toAddress(minterKey)
 	assignRole(t, node, "MINTER_ZNHB", minterAddr)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("admin key: %v", err)
+	}
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+
 	node.stateMu.Lock()
 	manager := nhbstate.NewManager(node.state.Trie)
 	if err := manager.RegisterToken("ZNHB", "Zero NHB", 18); err != nil {
@@ -263,7 +299,19 @@ func TestSwapVoucherMintMandatoryPriceProofSignature(t *testing.T) {
 		node.stateMu.Unlock()
 		t.Fatalf("set mint authority: %v", err)
 	}
+	node.state.SetAdminWallet(adminAddr, true)
+	if err := node.state.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed admin wallet: %v", err)
+	}
 	node.stateMu.Unlock()
+	if err := node.state.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap ZNHB pools: %v", err)
+	}
 	// Deliberately do NOT set PriceProofSignatureRequired -- defaults false,
 	// matching the real deployed config.toml this fix targets.
 	node.SetSwapConfig(swap.Config{
@@ -278,7 +326,7 @@ func TestSwapVoucherMintMandatoryPriceProofSignature(t *testing.T) {
 		t.Fatalf("recipient key: %v", err)
 	}
 	recipient := toAddress(recipientKey)
-	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-NOSIG")
+	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-NOSIG")
 	sig := signSwapVoucherCore(t, minterKey, voucher)
 
 	// No price signer registered at all, and no priceProof supplied -- this
@@ -320,7 +368,7 @@ func TestSwapVoucherMintMandatoryPriceProofSignature(t *testing.T) {
 		t.Fatalf("oracle key: %v", err)
 	}
 	registerSwapPriceSignerCore(t, node, "nowpayments", oracleKey)
-	validProof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	validProof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submission3 := &swap.VoucherSubmission{
 		Voucher:      &voucher,
 		Signature:    sig,
@@ -351,9 +399,9 @@ func TestSwapVoucherMintDuplicateDoesNotBlockProposal(t *testing.T) {
 
 	// Voucher A: submit, mine, and commit -- providerTxID "RACE-1" is now
 	// durably recorded in the ledger.
-	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-RACE-A")
+	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-RACE-A")
 	sigA := signSwapVoucherCore(t, minterKey, voucherA)
-	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submissionA := &swap.VoucherSubmission{
 		Voucher: &voucherA, Signature: sigA, Provider: "nowpayments",
 		ProviderTxID: "RACE-1", PriceProof: proofA,
@@ -386,9 +434,9 @@ func TestSwapVoucherMintDuplicateDoesNotBlockProposal(t *testing.T) {
 	// synchronous simulation deliberately here to reproduce that scenario:
 	// build voucher B's transaction directly and inject it into the mempool
 	// alongside a genuinely valid, unrelated voucher C.
-	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-RACE-B")
+	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-RACE-B")
 	sigB := signSwapVoucherCore(t, minterKey, voucherB)
-	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submissionB := &swap.VoucherSubmission{
 		Voucher: &voucherB, Signature: sigB, Provider: "nowpayments",
 		ProviderTxID: "RACE-1", PriceProof: proofB,
@@ -402,9 +450,9 @@ func TestSwapVoucherMintDuplicateDoesNotBlockProposal(t *testing.T) {
 		Data: payloadB, GasLimit: 0, GasPrice: big.NewInt(0),
 	}
 
-	voucherC := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-RACE-C")
+	voucherC := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-RACE-C")
 	sigC := signSwapVoucherCore(t, minterKey, voucherC)
-	proofC := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", time.Now())
+	proofC := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
 	submissionC := &swap.VoucherSubmission{
 		Voucher: &voucherC, Signature: sigC, Provider: "nowpayments",
 		ProviderTxID: "RACE-2", PriceProof: proofC,
@@ -498,9 +546,9 @@ func TestSwapVoucherMintStalePriceProofDoesNotBlockProposal(t *testing.T) {
 	// voucher expiry is a full hour out (swapVoucherTestVoucher's default)
 	// -- only the price proof's much shorter freshness window is meant to
 	// be exercised here.
-	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-STALEPROOF-A")
+	voucherA := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-STALEPROOF-A")
 	sigA := signSwapVoucherCore(t, minterKey, voucherA)
-	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", current)
+	proofA := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", current)
 	submissionA := &swap.VoucherSubmission{
 		Voucher: &voucherA, Signature: sigA, Provider: "nowpayments",
 		ProviderTxID: "STALEPROOF-1", PriceProof: proofA,
@@ -522,9 +570,9 @@ func TestSwapVoucherMintStalePriceProofDoesNotBlockProposal(t *testing.T) {
 	// (as a real caller re-quoting at proposal time would produce). It must
 	// still land in the same block as proof that only the stale
 	// transaction is pruned, not the whole proposal.
-	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.10", "ORDER-STALEPROOF-B")
+	voucherB := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-STALEPROOF-B")
 	sigB := signSwapVoucherCore(t, minterKey, voucherB)
-	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.10", current)
+	proofB := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", current)
 	submissionB := &swap.VoucherSubmission{
 		Voucher: &voucherB, Signature: sigB, Provider: "nowpayments",
 		ProviderTxID: "STALEPROOF-2", PriceProof: proofB,

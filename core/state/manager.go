@@ -88,6 +88,11 @@ var (
 	swapOrderPrefix                = []byte("swap/order/")
 	swapPriceSignerPrefix          = []byte("swap/oracle/signer/")
 	swapPriceProofPrefix           = []byte("swap/oracle/last/")
+	znhbSalePoolBalanceKey         = []byte("znhb/sale/poolBalance")
+	znhbRewardPoolBalanceKey       = []byte("znhb/reward/poolBalance")
+	znhbCumulativeSoldKey          = []byte("znhb/sale/cumulativeDistributed")
+	znhbBuybackAccrualKey          = []byte("znhb/buyback/baaBalance")
+	znhbPoolsBootstrappedKey       = []byte("znhb/sale/poolsBootstrapped")
 	potsoHeartbeatPrefix           = []byte("potso/heartbeat/")
 	potsoMeterPrefix               = []byte("potso/meter/")
 	potsoDayIndexPrefix            = []byte("potso/day-index/")
@@ -1737,6 +1742,105 @@ func (m *Manager) SwapPriceSigner(provider string) ([20]byte, bool, error) {
 	}
 	copy(signer[:], raw)
 	return signer, true, nil
+}
+
+// ZNHBSalePoolBalance returns the remaining balance of the Sale Pool
+// sub-ledger (the fixed 800,000,000 ZNHB carved out of the admin/treasury
+// wallet's genesis allocation to feed the Genesis Treasury Distribution
+// Curve and the treasury buyback). Returns zero, not an error, if the
+// pools have not been bootstrapped yet.
+func (m *Manager) ZNHBSalePoolBalance() (*big.Int, error) {
+	return m.getZNHBPoolBalance(znhbSalePoolBalanceKey)
+}
+
+// ZNHBSetSalePoolBalance overwrites the Sale Pool sub-ledger balance.
+func (m *Manager) ZNHBSetSalePoolBalance(v *big.Int) error {
+	return m.setZNHBPoolBalance(znhbSalePoolBalanceKey, v)
+}
+
+// ZNHBRewardPoolBalance returns the remaining balance of the Reward Pool
+// sub-ledger (the fixed 200,000,000 ZNHB ring-fenced for the validator
+// reward halving schedule -- see core/rewards). Returns zero, not an
+// error, if the pools have not been bootstrapped yet.
+func (m *Manager) ZNHBRewardPoolBalance() (*big.Int, error) {
+	return m.getZNHBPoolBalance(znhbRewardPoolBalanceKey)
+}
+
+// ZNHBSetRewardPoolBalance overwrites the Reward Pool sub-ledger balance.
+func (m *Manager) ZNHBSetRewardPoolBalance(v *big.Int) error {
+	return m.setZNHBPoolBalance(znhbRewardPoolBalanceKey, v)
+}
+
+// ZNHBCumulativeSaleDistributed returns the Genesis Treasury Distribution
+// Curve's pricing counter: net ZNHB sold out of the Sale Pool so far. It
+// rises on tranche sales (applyBuyZNHB, applySwapVoucherMintTransaction)
+// and falls on buyback settlements -- it is an explicit, dedicated
+// consensus counter, never inferred from the treasury wallet's live
+// balance (which would be ambiguous under an unrelated incoming transfer).
+// Returns zero, not an error, if unset.
+func (m *Manager) ZNHBCumulativeSaleDistributed() (*big.Int, error) {
+	return m.getZNHBPoolBalance(znhbCumulativeSoldKey)
+}
+
+// ZNHBSetCumulativeSaleDistributed overwrites the distribution-curve counter.
+func (m *Manager) ZNHBSetCumulativeSaleDistributed(v *big.Int) error {
+	return m.setZNHBPoolBalance(znhbCumulativeSoldKey, v)
+}
+
+// ZNHBBuybackAccrualBalance returns the Buyback Accrual Account's current
+// NHB balance (fee revenue swept in, pending the next buyback auction
+// settlement). Returns zero, not an error, if unset.
+func (m *Manager) ZNHBBuybackAccrualBalance() (*big.Int, error) {
+	return m.getZNHBPoolBalance(znhbBuybackAccrualKey)
+}
+
+// ZNHBSetBuybackAccrualBalance overwrites the Buyback Accrual Account balance.
+func (m *Manager) ZNHBSetBuybackAccrualBalance(v *big.Int) error {
+	return m.setZNHBPoolBalance(znhbBuybackAccrualKey, v)
+}
+
+// ZNHBPoolsBootstrapped reports whether the one-time genesis split of the
+// admin wallet's ZNHB into Sale/Reward pools has already run.
+func (m *Manager) ZNHBPoolsBootstrapped() (bool, error) {
+	var flag bool
+	ok, err := m.KVGet(znhbPoolsBootstrappedKey, &flag)
+	if err != nil {
+		return false, err
+	}
+	return ok && flag, nil
+}
+
+// ZNHBMarkPoolsBootstrapped records that the one-time genesis split has run,
+// so it is never repeated. Called only from the bootstrap orchestration in
+// core/state_transition.go, after both pool balances have been written.
+func (m *Manager) ZNHBMarkPoolsBootstrapped() error {
+	return m.KVPut(znhbPoolsBootstrappedKey, true)
+}
+
+// getZNHBPoolBalance is a shared helper: every ZNHB tokenomics counter is
+// stored the same way (a *big.Int under a fixed, un-namespaced key), and
+// reads as zero rather than erroring when unset, matching how an
+// un-bootstrapped chain should behave before genesis wiring runs.
+func (m *Manager) getZNHBPoolBalance(key []byte) (*big.Int, error) {
+	var stored *big.Int
+	ok, err := m.KVGet(key, &stored)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || stored == nil {
+		return big.NewInt(0), nil
+	}
+	return stored, nil
+}
+
+func (m *Manager) setZNHBPoolBalance(key []byte, v *big.Int) error {
+	if v == nil {
+		return fmt.Errorf("znhb: balance must not be nil")
+	}
+	if v.Sign() < 0 {
+		return fmt.Errorf("znhb: balance must not be negative")
+	}
+	return m.KVPut(key, v)
 }
 
 // SwapPutPriceProof stores the last accepted price proof for the provided base token.
