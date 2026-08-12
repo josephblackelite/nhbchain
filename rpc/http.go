@@ -1430,6 +1430,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetZNHBTokenomicsState(recorder, r, req)
 	case "znhb_quoteBuy":
 		s.handleZNHBQuoteBuy(recorder, r, req)
+	case "buyback_getRefPriceStatus":
+		s.handleBuybackGetRefPriceStatus(recorder, r, req)
+	case "buyback_submitRefPrice":
+		if authErr := s.requireAuthInto(&r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleBuybackSubmitRefPrice(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
 	case "fees_getMonthlyStatus":

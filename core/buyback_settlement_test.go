@@ -23,15 +23,11 @@ type buybackAskPayload struct {
 	ZNHBAmount *big.Int
 }
 
-// buybackRefPricePayload mirrors applyBuybackRefPrice's unexported payload
-// shape.
-type buybackRefPricePayload struct {
-	RateNum    *big.Int
-	RateDenom  *big.Int
-	Epoch      uint64
-	Timestamp  uint64
-	Signatures [][]byte
-}
+// buybackRefPricePayload (mirroring applyBuybackRefPrice's unexported
+// payload shape) is defined once in node.go, since SubmitBuybackRefPrice
+// needs the same encode-side struct in a non-test file -- reused here
+// rather than redeclared to avoid two structurally-identical types drifting
+// apart.
 
 func newBuybackTestState(t *testing.T) (sp *StateProcessor, adminAddr, accrualAddr [20]byte, signerKey *crypto.PrivateKey) {
 	t.Helper()

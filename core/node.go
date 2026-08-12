@@ -64,6 +64,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	gethtrie "github.com/ethereum/go-ethereum/trie"
 	"google.golang.org/protobuf/proto"
 )
@@ -7394,6 +7395,156 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 	return txHash, false, nil
 }
 
+// buybackRefPricePayload mirrors, field-for-field and in the same order,
+// the anonymous decode-side struct in core/buyback_tx.go's
+// applyBuybackRefPrice -- RLP encodes/decodes structs positionally, so this
+// shape must never drift from that one. Unexported: constructing this is an
+// internal encoding detail of SubmitBuybackRefPrice, not part of the Node
+// API surface.
+type buybackRefPricePayload struct {
+	RateNum    *big.Int
+	RateDenom  *big.Int
+	Epoch      uint64
+	Timestamp  uint64
+	Signatures [][]byte
+}
+
+// CurrentBuybackEpoch returns the treasury buyback engine's current open
+// epoch bucket -- the epoch a reference-price submission must target right
+// now to land before that epoch's settlement (see
+// core/buyback_settlement.go's currentBuybackEpoch doc comment). The second
+// return value is false if epoch scheduling isn't enabled on this network
+// (EpochLengthBlocks == 0) or the chain hasn't produced its first block yet.
+//
+// Deliberately does NOT delegate to StateProcessor.currentBuybackEpoch(),
+// which reads sp.execContext.height -- a value only populated transiently
+// while a block is actively being processed (BeginBlock/EndBlock), and zero
+// otherwise. A standalone status read like this one needs the same stable,
+// externally-observable height AddTransaction's own synchronous simulation
+// validates a submission against: n.chain.GetHeight()+1 (see
+// validateTransaction). Using any other height source here would let this
+// method report a different "current epoch" than what a real submission
+// actually gets checked against.
+func (n *Node) CurrentBuybackEpoch() (uint64, bool) {
+	if n == nil {
+		return 0, false
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return 0, false
+	}
+	length := n.state.epochConfig.Length
+	if length == 0 {
+		return 0, false
+	}
+	var height uint64
+	if n.chain != nil {
+		height = n.chain.GetHeight() + 1
+	}
+	if height == 0 {
+		return 0, false
+	}
+	return (height + length - 1) / length, true
+}
+
+// BuybackRefPriceStatus is a JSON-safe snapshot of whatever reference-price
+// record (if any) is currently on file for the requested epoch. All
+// big.Int-scale fields are decimal strings for the same reason
+// ZNHBTokenomicsState's are: JSON's float64 numbers silently lose precision
+// on values this large.
+type BuybackRefPriceStatus struct {
+	Epoch       uint64 `json:"epoch"`
+	HasRefPrice bool   `json:"hasRefPrice"`
+	RateNum     string `json:"rateNum,omitempty"`
+	RateDenom   string `json:"rateDenom,omitempty"`
+	TimestampAt uint64 `json:"timestampAt,omitempty"`
+	SignerCount int    `json:"signerCount,omitempty"`
+}
+
+// BuybackRefPriceStatus reports whether epoch already has a verified
+// reference price on file -- a submission service should check this before
+// signing and submitting, both to avoid a wasted submission (only the first
+// per epoch is ever accepted, see applyBuybackRefPrice) and to confirm a
+// prior submission actually landed.
+func (n *Node) BuybackRefPriceStatusForEpoch(epoch uint64) (*BuybackRefPriceStatus, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	rec, ok, err := manager.BuybackRefPriceForEpoch(epoch)
+	if err != nil {
+		return nil, fmt.Errorf("buyback: load reference price status: %w", err)
+	}
+	status := &BuybackRefPriceStatus{Epoch: epoch, HasRefPrice: ok}
+	if ok && rec != nil {
+		if rec.RateNum != nil {
+			status.RateNum = rec.RateNum.String()
+		}
+		if rec.RateDenom != nil {
+			status.RateDenom = rec.RateDenom.String()
+		}
+		status.TimestampAt = rec.TimestampAt
+		status.SignerCount = len(rec.Signers)
+	}
+	return status, nil
+}
+
+// SubmitBuybackRefPrice constructs and injects a TxTypeBuybackRefPrice
+// transaction carrying the supplied M-of-N signature bundle -- mirroring
+// SwapSubmitVoucher's pattern exactly, since both are senderless,
+// envelope-unsigned transaction types whose real authorization lives
+// entirely inside tx.Data (see core/buyback_tx.go's applyBuybackRefPrice
+// doc comment). Signature verification against the genesis-immutable
+// signer quorum happens there, synchronously, during AddTransaction's
+// simulation -- this method does no verification of its own and trusts
+// nothing about the signatures beyond what that consensus code checks.
+func (n *Node) SubmitBuybackRefPrice(rateNum, rateDenom *big.Int, epoch, timestamp uint64, signatures [][]byte) (string, error) {
+	if rateNum == nil || rateNum.Sign() <= 0 || rateDenom == nil || rateDenom.Sign() <= 0 {
+		return "", fmt.Errorf("buyback: rate must be a positive fraction")
+	}
+	if epoch == 0 {
+		return "", fmt.Errorf("buyback: epoch required")
+	}
+	if timestamp == 0 {
+		return "", fmt.Errorf("buyback: timestamp required")
+	}
+	if len(signatures) == 0 {
+		return "", fmt.Errorf("buyback: at least one signature required")
+	}
+	payload, err := rlp.EncodeToBytes(buybackRefPricePayload{
+		RateNum:    new(big.Int).Set(rateNum),
+		RateDenom:  new(big.Int).Set(rateDenom),
+		Epoch:      epoch,
+		Timestamp:  timestamp,
+		Signatures: signatures,
+	})
+	if err != nil {
+		return "", fmt.Errorf("buyback: encode payload: %w", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeBuybackRefPrice,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return "", fmt.Errorf("buyback: hash transaction: %w", err)
+	}
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if err := n.AddTransaction(tx); err != nil {
+		return "", err
+	}
+	return txHash, nil
+}
+
 // SwapGetVoucher returns the ledger record for the supplied provider
 // transaction identifier.
 func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {
@@ -8055,6 +8206,43 @@ func (n *Node) ConfigureAdminWalletForTests(addr [20]byte) error {
 		return fmt.Errorf("seed admin wallet balance: %w", err)
 	}
 	return n.state.EnsureZNHBPoolsBootstrapped()
+}
+
+// ConfigureBuybackForTests wires up a genesis-equivalent treasury buyback
+// signer quorum for tests in other packages that need to exercise
+// SubmitBuybackRefPrice / BuybackRefPriceStatusForEpoch without constructing
+// a full genesis file. Production code never calls this; it always derives
+// the signer quorum from genesis (see NewNode's BuybackSignerConfig read).
+func (n *Node) ConfigureBuybackForTests(cfg buyback.Config) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	return n.state.SetBuybackConfig(cfg)
+}
+
+// ConfigureEpochLengthForTests sets the epoch length (in blocks) for tests
+// in other packages that need CurrentBuybackEpoch/the buyback engine to see
+// a real open epoch without constructing a full genesis file or config.toml
+// (both of which is where EpochLengthBlocks normally comes from -- see
+// NewNode's config.EpochLengthBlocks read). Production code never calls
+// this.
+func (n *Node) ConfigureEpochLengthForTests(length uint64) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	cfg := n.state.EpochConfig()
+	cfg.Length = length
+	return n.state.SetEpochConfig(cfg)
 }
 
 // ZNHBTokenomicsState is the public, read-only snapshot of the Genesis
