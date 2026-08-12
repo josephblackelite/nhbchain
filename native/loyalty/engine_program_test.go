@@ -44,6 +44,7 @@ func cloneProgram(p *Program) *Program {
 	clone.DailyCapProgram = cloneBigInt(p.DailyCapProgram)
 	clone.EpochCapProgram = cloneBigInt(p.EpochCapProgram)
 	clone.IssuanceCapUser = cloneBigInt(p.IssuanceCapUser)
+	clone.FixedRewardWei = cloneBigInt(p.FixedRewardWei)
 	return &clone
 }
 
@@ -755,6 +756,297 @@ func TestApplyProgramRewardIssuanceCap(t *testing.T) {
 	}
 	if issuance.String() != "150" {
 		t.Fatalf("expected issuance total 150, got %s", issuance.String())
+	}
+}
+
+func TestApplyProgramRewardFixedModeHappyPath(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[19] = 0x61
+	var merchant [20]byte
+	merchant[19] = 0x62
+	var paymaster [20]byte
+	paymaster[19] = 0x63
+	var programID ProgramID
+	programID[31] = 0xCC
+	var businessID BusinessID
+	businessID[31] = 0xDD
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      RewardModeFixed,
+		FixedRewardWei:  big.NewInt(10),
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{ID: businessID, Owner: merchant, Paymaster: paymaster, Merchants: [][20]byte{merchant}})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1_000_000), // spend size must not affect a fixed reward
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); result != resultAccrued {
+		t.Fatalf("expected result %q, got %q", resultAccrued, result)
+	}
+	if got := ctx.FromAccount.BalanceZNHB.String(); got != "10" {
+		t.Fatalf("expected flat reward 10 regardless of spend size, got %s", got)
+	}
+	paymasterAcc, _ := state.GetAccount(paymaster[:])
+	if got := paymasterAcc.BalanceZNHB.String(); got != "990" {
+		t.Fatalf("expected paymaster balance 990, got %s", got)
+	}
+	if state.events[0].Attributes["rewardMode"] != "fixed" {
+		t.Fatalf("expected rewardMode=fixed event attribute, got %q", state.events[0].Attributes["rewardMode"])
+	}
+	if state.events[0].Attributes["fixedRewardWei"] != "10" {
+		t.Fatalf("expected fixedRewardWei=10 event attribute, got %q", state.events[0].Attributes["fixedRewardWei"])
+	}
+
+	// A second purchase with a very different spend size must pay the exact
+	// same flat amount -- this is the whole point of fixed mode.
+	ctx2 := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1),
+		Timestamp:   ctx.Timestamp.Add(time.Hour),
+		FromAccount: fromAccount,
+	}
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx2}); result != resultAccrued {
+		t.Fatalf("expected second result %q, got %q", resultAccrued, result)
+	}
+	if got := ctx2.FromAccount.BalanceZNHB.String(); got != "20" {
+		t.Fatalf("expected cumulative reward 20 after two identical flat payouts, got %s", got)
+	}
+}
+
+func TestApplyProgramRewardFixedModeCapPerTxClamps(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[18] = 0x71
+	var merchant [20]byte
+	merchant[18] = 0x72
+	var paymaster [20]byte
+	paymaster[18] = 0x73
+	var programID ProgramID
+	programID[30] = 0xCC
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      RewardModeFixed,
+		FixedRewardWei:  big.NewInt(100),
+		CapPerTx:        big.NewInt(5), // deliberately below FixedRewardWei
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{Paymaster: paymaster})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); result != resultAccrued {
+		t.Fatalf("expected result %q, got %q", resultAccrued, result)
+	}
+	if got := ctx.FromAccount.BalanceZNHB.String(); got != "5" {
+		t.Fatalf("expected CapPerTx to clamp the fixed reward down to 5, got %s", got)
+	}
+}
+
+func TestApplyProgramRewardFixedModeNoRewardRate(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[17] = 0x81
+	var merchant [20]byte
+	merchant[17] = 0x82
+	var paymaster [20]byte
+	paymaster[17] = 0x83
+	var programID ProgramID
+	programID[29] = 0xCC
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	// RewardMode=Fixed but FixedRewardWei was never set (e.g. a program
+	// mistakenly saved with mode=fixed and amount=0) must skip cleanly, not
+	// silently fall back to a percentage or pay zero-as-success.
+	program := &Program{
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      RewardModeFixed,
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{Paymaster: paymaster})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); result != "no_reward_rate" {
+		t.Fatalf("expected no_reward_rate, got %q", result)
+	}
+	if fromAccount.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected no reward paid, got %s", fromAccount.BalanceZNHB.String())
+	}
+}
+
+func TestApplyProgramRewardFixedModePaymasterInsufficientSkipsCleanly(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[16] = 0x91
+	var merchant [20]byte
+	merchant[16] = 0x92
+	var paymaster [20]byte
+	paymaster[16] = 0x93
+	var programID ProgramID
+	programID[28] = 0xCC
+
+	// Paymaster only has 5 ZNHB but the program promises a flat 10.
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(5), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      RewardModeFixed,
+		FixedRewardWei:  big.NewInt(10),
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{Paymaster: paymaster})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); result != "paymaster_insufficient" {
+		t.Fatalf("expected paymaster_insufficient, got %q", result)
+	}
+	if fromAccount.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected no partial payout, got %s", fromAccount.BalanceZNHB.String())
+	}
+	paymasterAcc, _ := state.GetAccount(paymaster[:])
+	if paymasterAcc.BalanceZNHB.Cmp(big.NewInt(5)) != 0 {
+		t.Fatalf("expected paymaster balance untouched at 5, got %s", paymasterAcc.BalanceZNHB.String())
+	}
+}
+
+func TestApplyProgramRewardFixedModeDailyCapUserClamps(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[15] = 0xA1
+	var merchant [20]byte
+	merchant[15] = 0xA2
+	var paymaster [20]byte
+	paymaster[15] = 0xA3
+	var programID ProgramID
+	programID[27] = 0xCC
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(10_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      RewardModeFixed,
+		FixedRewardWei:  big.NewInt(10),
+		DailyCapUser:    big.NewInt(15), // less than two full flat rewards (20)
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{Paymaster: paymaster})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); result != resultAccrued {
+		t.Fatalf("expected first result %q, got %q", resultAccrued, result)
+	}
+	if fromAccount.BalanceZNHB.String() != "10" {
+		t.Fatalf("expected first flat reward 10, got %s", fromAccount.BalanceZNHB.String())
+	}
+
+	ctx2 := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   ctx.Timestamp.Add(time.Hour),
+		FromAccount: fromAccount,
+	}
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx2}); result != resultAccrued {
+		t.Fatalf("expected second result %q, got %q", resultAccrued, result)
+	}
+	// Second flat reward of 10 would bring the daily total to 20, above the
+	// 15 cap -- must be clamped down to the remaining 5, not paid in full
+	// and not skipped outright.
+	if fromAccount.BalanceZNHB.String() != "15" {
+		t.Fatalf("expected daily cap to clamp cumulative reward to 15, got %s", fromAccount.BalanceZNHB.String())
 	}
 }
 

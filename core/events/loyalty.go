@@ -51,11 +51,13 @@ const (
 // LoyaltyProgramCreated captures the key metadata of a newly created loyalty
 // program.
 type LoyaltyProgramCreated struct {
-	ID          [32]byte
-	Owner       [20]byte
-	Pool        [20]byte
-	TokenSymbol string
-	AccrualBps  uint32
+	ID             [32]byte
+	Owner          [20]byte
+	Pool           [20]byte
+	TokenSymbol    string
+	AccrualBps     uint32
+	RewardMode     uint8
+	FixedRewardWei *big.Int
 }
 
 // EventType implements the Event interface.
@@ -67,6 +69,8 @@ type LoyaltyProgramUpdated struct {
 	ID                 [32]byte
 	Active             bool
 	AccrualBps         uint32
+	RewardMode         uint8
+	FixedRewardWei     *big.Int
 	MinSpendWei        *big.Int
 	CapPerTx           *big.Int
 	DailyCapUser       *big.Int

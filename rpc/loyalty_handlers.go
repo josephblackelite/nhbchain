@@ -71,7 +71,9 @@ type programSpec struct {
 	Owner              string  `json:"owner"`
 	Pool               string  `json:"pool"`
 	TokenSymbol        string  `json:"tokenSymbol"`
+	RewardMode         string  `json:"rewardMode,omitempty"`
 	AccrualBps         uint32  `json:"accrualBps"`
+	FixedRewardWei     *string `json:"fixedRewardWei,omitempty"`
 	MinSpendWei        *string `json:"minSpendWei,omitempty"`
 	CapPerTx           *string `json:"capPerTx,omitempty"`
 	DailyCapUser       *string `json:"dailyCapUser,omitempty"`
@@ -89,7 +91,9 @@ type programResult struct {
 	Owner              string `json:"owner"`
 	Pool               string `json:"pool"`
 	TokenSymbol        string `json:"tokenSymbol"`
+	RewardMode         string `json:"rewardMode"`
 	AccrualBps         uint32 `json:"accrualBps"`
+	FixedRewardWei     string `json:"fixedRewardWei"`
 	MinSpendWei        string `json:"minSpendWei"`
 	CapPerTx           string `json:"capPerTx"`
 	DailyCapUser       string `json:"dailyCapUser"`
@@ -776,13 +780,22 @@ func formatBusiness(business *loyalty.Business) businessResult {
 	}
 }
 
+func formatRewardMode(mode loyalty.RewardMode) string {
+	if mode == loyalty.RewardModeFixed {
+		return "fixed"
+	}
+	return "bps"
+}
+
 func formatProgram(program *loyalty.Program) programResult {
 	return programResult{
 		ID:                 formatProgramID(program.ID),
 		Owner:              crypto.MustNewAddress(crypto.NHBPrefix, program.Owner[:]).String(),
 		Pool:               crypto.MustNewAddress(crypto.NHBPrefix, program.Pool[:]).String(),
 		TokenSymbol:        program.TokenSymbol,
+		RewardMode:         formatRewardMode(program.RewardMode),
 		AccrualBps:         program.AccrualBps,
+		FixedRewardWei:     bigIntToString(program.FixedRewardWei),
 		MinSpendWei:        bigIntToString(program.MinSpendWei),
 		CapPerTx:           bigIntToString(program.CapPerTx),
 		DailyCapUser:       bigIntToString(program.DailyCapUser),
@@ -822,6 +835,14 @@ func buildProgramFromSpec(spec *programSpec) (*loyalty.Program, error) {
 	token := strings.ToUpper(strings.TrimSpace(spec.TokenSymbol))
 	if token == "" {
 		return nil, fmt.Errorf("tokenSymbol required")
+	}
+	rewardMode, err := parseRewardMode(spec.RewardMode)
+	if err != nil {
+		return nil, err
+	}
+	fixedReward, err := parseBigInt(spec.FixedRewardWei)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fixedRewardWei: %w", err)
 	}
 	minSpend, err := parseBigInt(spec.MinSpendWei)
 	if err != nil {
@@ -868,7 +889,9 @@ func buildProgramFromSpec(spec *programSpec) (*loyalty.Program, error) {
 		Owner:              owner,
 		Pool:               pool,
 		TokenSymbol:        token,
+		RewardMode:         rewardMode,
 		AccrualBps:         spec.AccrualBps,
+		FixedRewardWei:     fixedReward,
 		MinSpendWei:        minSpend,
 		CapPerTx:           capPerTx,
 		DailyCapUser:       dailyCap,
@@ -880,6 +903,22 @@ func buildProgramFromSpec(spec *programSpec) (*loyalty.Program, error) {
 		EndTime:            endTime,
 		Active:             active,
 	}, nil
+}
+
+// parseRewardMode accepts "bps" or "" (both -> RewardModeBps, preserving
+// backward compatibility with any caller that predates this field) and
+// "fixed" (-> RewardModeFixed). Anything else is rejected outright rather
+// than silently defaulting, since a typo here would otherwise silently
+// configure the wrong reward mechanism.
+func parseRewardMode(input string) (loyalty.RewardMode, error) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "", "bps":
+		return loyalty.RewardModeBps, nil
+	case "fixed":
+		return loyalty.RewardModeFixed, nil
+	default:
+		return 0, fmt.Errorf("invalid rewardMode %q: must be \"bps\" or \"fixed\"", input)
+	}
 }
 
 func parseBigInt(input *string) (*big.Int, error) {

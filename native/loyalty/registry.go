@@ -90,11 +90,13 @@ func (r *Registry) CreateProgram(caller [20]byte, p *Program) error {
 		return err
 	}
 	r.emit(events.LoyaltyProgramCreated{
-		ID:          sanitized.ID,
-		Owner:       sanitized.Owner,
-		Pool:        sanitized.Pool,
-		TokenSymbol: sanitized.TokenSymbol,
-		AccrualBps:  sanitized.AccrualBps,
+		ID:             sanitized.ID,
+		Owner:          sanitized.Owner,
+		Pool:           sanitized.Pool,
+		TokenSymbol:    sanitized.TokenSymbol,
+		AccrualBps:     sanitized.AccrualBps,
+		RewardMode:     uint8(sanitized.RewardMode),
+		FixedRewardWei: cloneBigInt(sanitized.FixedRewardWei),
 	})
 	return nil
 }
@@ -136,7 +138,9 @@ func (r *Registry) UpdateProgram(caller [20]byte, p *Program) error {
 		return fmt.Errorf("%w: %d", ErrAccrualBpsTooHigh, sanitized.AccrualBps)
 	}
 
+	existing.RewardMode = sanitized.RewardMode
 	existing.AccrualBps = sanitized.AccrualBps
+	existing.FixedRewardWei = sanitized.FixedRewardWei
 	existing.MinSpendWei = sanitized.MinSpendWei
 	existing.CapPerTx = sanitized.CapPerTx
 	existing.DailyCapUser = sanitized.DailyCapUser
@@ -157,6 +161,8 @@ func (r *Registry) UpdateProgram(caller [20]byte, p *Program) error {
 		ID:                 existing.ID,
 		Active:             existing.Active,
 		AccrualBps:         existing.AccrualBps,
+		RewardMode:         uint8(existing.RewardMode),
+		FixedRewardWei:     cloneBigInt(existing.FixedRewardWei),
 		MinSpendWei:        cloneBigInt(existing.MinSpendWei),
 		CapPerTx:           cloneBigInt(existing.CapPerTx),
 		DailyCapUser:       cloneBigInt(existing.DailyCapUser),
@@ -243,6 +249,11 @@ func sanitizeProgram(p *Program) (*Program, error) {
 	if copyProgram.EndTime != 0 && copyProgram.EndTime < copyProgram.StartTime {
 		return nil, fmt.Errorf("%w: end time before start time", ErrInvalidProgram)
 	}
+	if copyProgram.RewardMode == RewardModeFixed {
+		if copyProgram.FixedRewardWei == nil || copyProgram.FixedRewardWei.Sign() <= 0 {
+			return nil, fmt.Errorf("%w: fixedRewardWei must be positive in fixed reward mode", ErrInvalidProgram)
+		}
+	}
 	// A per-user cap alone (DailyCapUser/IssuanceCapUser) does not bound total
 	// payout: an attacker can split spend across any number of self-controlled
 	// wallets, each staying under the per-user cap, to draw an unbounded
@@ -261,6 +272,7 @@ func sanitizeProgram(p *Program) (*Program, error) {
 	copyProgram.DailyCapProgram = cloneBigInt(copyProgram.DailyCapProgram)
 	copyProgram.EpochCapProgram = cloneBigInt(copyProgram.EpochCapProgram)
 	copyProgram.IssuanceCapUser = cloneBigInt(copyProgram.IssuanceCapUser)
+	copyProgram.FixedRewardWei = cloneBigInt(copyProgram.FixedRewardWei)
 	return &copyProgram, nil
 }
 

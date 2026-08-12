@@ -396,3 +396,107 @@ func TestRegistryRequiresAggregateProgramCap(t *testing.T) {
 		t.Fatalf("expected program with epoch program cap to be accepted: %v", err)
 	}
 }
+
+func TestRegistryCreateFixedRewardProgram(t *testing.T) {
+	registry, _ := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x31
+	var id loyalty.ProgramID
+	id[0] = 0x32
+
+	program := &loyalty.Program{
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      loyalty.RewardModeFixed,
+		FixedRewardWei:  big.NewInt(10_000_000_000_000_000), // 0.01 ZNHB
+		DailyCapProgram: big.NewInt(1_000_000_000_000_000_000),
+		Active:          true,
+	}
+	if err := registry.CreateProgram(owner, program); err != nil {
+		t.Fatalf("create fixed-reward program: %v", err)
+	}
+
+	stored, ok := registry.GetProgram(id)
+	if !ok {
+		t.Fatalf("expected program to exist")
+	}
+	if stored.RewardMode != loyalty.RewardModeFixed {
+		t.Fatalf("expected stored RewardMode to be Fixed, got %d", stored.RewardMode)
+	}
+	if stored.FixedRewardWei == nil || stored.FixedRewardWei.String() != "10000000000000000" {
+		t.Fatalf("expected stored FixedRewardWei to round-trip, got %v", stored.FixedRewardWei)
+	}
+}
+
+func TestRegistryCreateFixedRewardProgramRejectsZeroAmount(t *testing.T) {
+	registry, _ := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x41
+	var id loyalty.ProgramID
+	id[0] = 0x42
+
+	// A program declared fixed-mode with no amount (or a zero amount) must
+	// be rejected outright at submission time, not silently persisted as a
+	// reward that will always skip -- this is exactly the class of bug
+	// (a program that looks configured but pays nothing) this feature
+	// exists to close off.
+	program := &loyalty.Program{
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      loyalty.RewardModeFixed,
+		DailyCapProgram: big.NewInt(1_000_000_000_000_000_000),
+		Active:          true,
+	}
+	if err := registry.CreateProgram(owner, program); !errors.Is(err, loyalty.ErrInvalidProgram) {
+		t.Fatalf("expected invalid program error for fixed mode with no amount, got %v", err)
+	}
+	if _, ok := registry.GetProgram(id); ok {
+		t.Fatalf("invalid fixed-reward program should not have been persisted")
+	}
+}
+
+func TestRegistryUpdateProgramCarriesRewardModeAndFixedAmount(t *testing.T) {
+	registry, _ := newTestRegistry(t)
+	var owner [20]byte
+	owner[0] = 0x51
+	var id loyalty.ProgramID
+	id[0] = 0x52
+
+	program := &loyalty.Program{
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      100,
+		DailyCapProgram: big.NewInt(1_000_000_000_000_000_000),
+		Active:          true,
+	}
+	if err := registry.CreateProgram(owner, program); err != nil {
+		t.Fatalf("create program: %v", err)
+	}
+
+	updated := &loyalty.Program{
+		ID:              id,
+		Owner:           owner,
+		TokenSymbol:     "ZNHB",
+		RewardMode:      loyalty.RewardModeFixed,
+		FixedRewardWei:  big.NewInt(5_000_000_000_000_000),
+		DailyCapProgram: big.NewInt(1_000_000_000_000_000_000),
+		Active:          true,
+	}
+	if err := registry.UpdateProgram(owner, updated); err != nil {
+		t.Fatalf("update program to fixed mode: %v", err)
+	}
+
+	stored, ok := registry.GetProgram(id)
+	if !ok {
+		t.Fatalf("expected program to exist")
+	}
+	if stored.RewardMode != loyalty.RewardModeFixed {
+		t.Fatalf("expected update to switch stored RewardMode to Fixed, got %d", stored.RewardMode)
+	}
+	if stored.FixedRewardWei == nil || stored.FixedRewardWei.String() != "5000000000000000" {
+		t.Fatalf("expected update to persist the new FixedRewardWei, got %v", stored.FixedRewardWei)
+	}
+}

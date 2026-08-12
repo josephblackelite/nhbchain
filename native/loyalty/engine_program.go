@@ -81,7 +81,15 @@ func (ctx *ProgramRewardContext) programEventAttributes(program *Program, busine
 	}
 	if program != nil {
 		attrs["programId"] = hex.EncodeToString(program.ID[:])
-		attrs["accrualBps"] = strconv.FormatUint(uint64(program.AccrualBps), 10)
+		if program.RewardMode == RewardModeFixed {
+			attrs["rewardMode"] = "fixed"
+			if program.FixedRewardWei != nil {
+				attrs["fixedRewardWei"] = program.FixedRewardWei.String()
+			}
+		} else {
+			attrs["rewardMode"] = "bps"
+			attrs["accrualBps"] = strconv.FormatUint(uint64(program.AccrualBps), 10)
+		}
 		token := strings.ToUpper(strings.TrimSpace(program.TokenSymbol))
 		if token != "" {
 			attrs["rewardToken"] = token
@@ -158,16 +166,30 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 		emitProgramSkip(st, ctx, program, business, "program_ended", map[string]string{"endTime": strconv.FormatUint(program.EndTime, 10)})
 		return "program_ended"
 	}
-	if program.AccrualBps == 0 {
-		emitProgramSkip(st, ctx, program, business, "no_reward_rate", nil)
-		return "no_reward_rate"
-	}
-
-	reward := new(big.Int).Mul(amount, new(big.Int).SetUint64(uint64(program.AccrualBps)))
-	reward = reward.Quo(reward, big.NewInt(10_000))
-	if reward.Sign() <= 0 {
-		emitProgramSkip(st, ctx, program, business, "reward_zero", nil)
-		return "reward_zero"
+	// RewardMode only changes how the initial reward amount is computed --
+	// every safeguard below this point (per-tx/daily/epoch/issuance caps,
+	// paymaster-funded debit/credit, exactly-once event emission) applies
+	// identically regardless of mode, so a fixed reward inherits the same
+	// atomicity and funding guarantees the bps path already has.
+	var reward *big.Int
+	switch program.RewardMode {
+	case RewardModeFixed:
+		if program.FixedRewardWei == nil || program.FixedRewardWei.Sign() <= 0 {
+			emitProgramSkip(st, ctx, program, business, "no_reward_rate", nil)
+			return "no_reward_rate"
+		}
+		reward = new(big.Int).Set(program.FixedRewardWei)
+	default:
+		if program.AccrualBps == 0 {
+			emitProgramSkip(st, ctx, program, business, "no_reward_rate", nil)
+			return "no_reward_rate"
+		}
+		reward = new(big.Int).Mul(amount, new(big.Int).SetUint64(uint64(program.AccrualBps)))
+		reward = reward.Quo(reward, big.NewInt(10_000))
+		if reward.Sign() <= 0 {
+			emitProgramSkip(st, ctx, program, business, "reward_zero", nil)
+			return "reward_zero"
+		}
 	}
 	if program.CapPerTx != nil && program.CapPerTx.Sign() > 0 && reward.Cmp(program.CapPerTx) > 0 {
 		reward = new(big.Int).Set(program.CapPerTx)
