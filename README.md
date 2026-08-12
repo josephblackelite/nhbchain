@@ -22,6 +22,7 @@ NHBCoin abstracts away the traditional complexities of crypto networks. Native a
 - [Protocol Pillars](#protocol-pillars)
 - [Architecture Overview](#architecture-overview)
 - [Token Economics](#token-economics)
+  - [Full tokenomics reference](docs/tokenomics/tokenomics.md)
 - [Quick Start for Node Operators](#-quick-start-for-node-operators-step-by-step)
   - [Step 1: Get a Cloud Server](#step-1-get-a-cloud-server-aws-digitalocean-etc)
   - [Step 2: Connect to your Server](#step-2-connect-to-your-server)
@@ -55,9 +56,9 @@ To guarantee mathematical sustainability and zero human intervention, NHBCoin is
 - **Transparency:** This eliminates hidden gas inflation. The network organically funds its own underlying operations purely through real-world utility and transaction volume, meaning the stablecoin supply remains mathematically solvent.
 
 ### 2. The Fixed-Supply ZNHB Treasury (System Wallet `znhb1...`)
-- **Function:** `ZNHB` is the loyalty, utility, and network-incentive asset. The founder economic model uses a fixed genesis supply that is preallocated to treasury-controlled wallets.
-- **Automation:** Protocol base rewards, merchant loyalty campaigns, and validator/POTSO rewards are paid from funded treasuries and paymasters, not from ongoing inflationary minting.
-- **Transparency:** This keeps the circulating and treasury balances auditable on-chain and preserves the scarcity story for `ZNHB` holders.
+- **Function:** `ZNHB` has a hard genesis supply of exactly 1,000,000,000 tokens, split once at genesis into an 800,000,000-ZNHB **Sale Pool** and a 200,000,000-ZNHB **Reward Pool**. Nothing is ever minted to satisfy a purchase or a reward — both pools only ever move ZNHB that already exists.
+- **Automation:** Sale Pool purchases are priced entirely on-chain by the Genesis Treasury Distribution Curve — a 16,000-tranche bonding curve computed in exact rational arithmetic, immune to order-splitting. Merchant loyalty rewards are paid from business-funded paymasters, unrelated to either pool. Validator/staking rewards are designed to draw from the Reward Pool via a Bitcoin-style halving schedule that provably converges to less than the pool's own size — that mechanism is built and enforced (`core/rewards_logic.go`), but not yet activated on this network.
+- **Transparency:** A block-level invariant (`CheckZNHBSupplyInvariant`) asserts `Sale Pool + Reward Pool == treasury wallet's live ZNHB balance` every block, and two public RPCs (`znhb_getTokenomicsState`, `znhb_quoteBuy`) expose the curve's live position and pool balances to anyone. Full detail: [`docs/tokenomics/tokenomics.md`](docs/tokenomics/tokenomics.md).
 
 ## Why NHBCoin Matters
 
@@ -90,11 +91,20 @@ The L1 is organized into modular layers that together deliver the payment networ
 
 ## Token Economics
 
-- **NHBCoin (NHB)** — Stable, dollar-pegged medium of exchange for all payments and settlements ($1 = 1 NHB). This is pure value transfer and is **never** minted as a reward.
-- **ZapNHB (ZNHB)** — The fixed-cap governance and utility asset. It secures the network, powers protocol and merchant loyalty rewards, and governs validator elections.
+- **NHBCoin (NHB)** — Stable, dollar-pegged medium of exchange for all payments and settlements ($1 = 1 NHB). Mint-on-deposit, burn-on-redemption, no fixed supply cap. This is pure value transfer and is **never** minted as a reward.
+- **ZapNHB (ZNHB)** — A hard-capped, genesis-fixed **1,000,000,000 ZNHB** total supply, no more, ever. Secures the network, powers protocol and merchant loyalty rewards, and governs validator elections. ZNHB carries **no protocol-defined valuation ceiling or promise** — see below.
 - **Dual-Purpose Staking** — Staking ZNHB serves two simultaneous functions:
-  1. **Governance:** Every 1 ZNHB staked equals 1 governing vote for network parameters and protocol upgrades.
+  1. **Governance:** Voting power in NHBChain governance is POTSO-weighted (network participation), not raw staked balance — see the nhbportal wallet's **Governance → How governance works** tab for the full, accurate breakdown of what's votable today.
   2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator becomes a **validator candidate**. The node joins the active validator set at the next epoch only after it is online, synced, and submitting validator heartbeats. You do **not** need a separate stake for governance.
+
+### How ZNHB enters circulation
+
+ZNHB is never minted on demand. All 1,000,000,000 tokens exist at genesis, split once into an 800,000,000-ZNHB **Sale Pool** and a 200,000,000-ZNHB **Reward Pool** — a block-level invariant enforces that the two pools always sum to exactly what the treasury wallet holds.
+
+- **Sale Pool (live):** priced by the **Genesis Treasury Distribution Curve** — 16,000 tranches of 50,000 ZNHB each, starting at $0.05 and rising to a $1.00 terminal price for the treasury's own last unit of inventory (not a market cap or ceiling on ZNHB itself). Every purchase, whether a direct buy or a swap-voucher mint, is priced on-chain in exact rational arithmetic and is immune to order-splitting. Query the live price and pool balances with `znhb_getTokenomicsState`; get an exact purchase quote with `znhb_quoteBuy`.
+- **Reward Pool (built, not yet activated):** designed to fund validator/staking rewards via a Bitcoin-style halving schedule (50,000 ZNHB/epoch, halving every 2,000 epochs) that mathematically converges to less than the pool's own size. The ledger-level safeguard — clamp to the pool's live balance, debit by the exact amount paid — is implemented and tested. No validator or staking reward is being paid out on this network today; that requires a separate activation step.
+
+Full detail, including the exact pricing formula and RPC response shapes: **[`docs/tokenomics/tokenomics.md`](docs/tokenomics/tokenomics.md)**.
 
 ## 🚀 Quick Start for Node Operators (Step-by-Step)
 
@@ -287,9 +297,8 @@ Compatibility note:
 Anyone can connect a wallet to the network, send funds, vote in governance, or use smart contracts with absolutely **zero** minimum balances. The 10,000 ZNHB requirement applies *strictly to Server Operators (Validators)*.
 
 ### What is the benefit of running a Validator Server?
-Validators earn rewards through the **POTSO (Proof of True Staking and Operation)** consensus mechanism. 
-Every epoch (approx. 120 blocks), the network distributes fees and newly minted ZapNHB (ZNHB) to active validators. 
-Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Score**. Validators that process more transactions, handle escrow events, and maintain perfect uptime earn significantly higher yields than passive, wealthy nodes.
+Validators earn staking yield on delegated stake today. A separate, additional **POTSO (Proof of Time Spent Online)**-weighted reward, designed to pay out ZNHB from the fixed 200,000,000-ZNHB Reward Pool on a halving schedule (never newly minted), exists in code but is **not yet active** on this network — see [Token Economics](#token-economics) for the current status.
+Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Score**, so once active, validators that process more transactions, handle escrow events, and maintain perfect uptime are designed to earn significantly higher yields than passive, wealthy nodes.
 
 ## Command-Line Interface
 
@@ -313,6 +322,7 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 - **Identity & Username Directory** — Concepts, RPC specs, and gateway flows (`docs/identity/identity.md`, `docs/identity/identity-api.md`, `docs/identity/identity-gateway.md`).
 - **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow/escrow.md`, `docs/escrow/nhbchain-escrow-gateway.md`).
 - **Loyalty & Rewards** — Network-wide loyalty engine overview (`docs/loyalty/loyalty.md`).
+- **Tokenomics** — Genesis Treasury Distribution Curve, Sale/Reward Pool mechanics, and the RPC methods for reading them (`docs/tokenomics/tokenomics.md`).
 - **Pay-by-Username** — UX flows and examples (`docs/identity/pay-by-username.md`, `docs/examples/identity`).
 - **OpenAPI Specification** — Machine-readable schema for REST integrations (`docs/openapi/identity.yaml`).
 
