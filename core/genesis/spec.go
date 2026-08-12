@@ -30,12 +30,27 @@ type GenesisSpec struct {
 	// consuming subsystem. Optional for backward compatibility with genesis
 	// files that predate this field (e.g. the old stalled mainnet genesis).
 	AdminWallet string `json:"adminWallet,omitempty"`
+	// BuybackSigners and BuybackSignerThreshold declare the ZNHB treasury
+	// buyback's M-of-N reference-price signer quorum
+	// (core/tokenomics/buyback). Genesis-only and, by design, permanently
+	// immutable after this file is loaded -- no governance proposal kind or
+	// runtime code path may change them (see policy.buybackParams in
+	// native/governance, which deliberately only ever touches the buyback's
+	// fee-share/discount/safety-margin parameters, never these). Both
+	// optional: a network with no buyback signers configured simply never
+	// activates the buyback engine, the same way an unset AdminWallet
+	// leaves the ZNHB Sale/Reward pools dormant.
+	BuybackSigners         []string `json:"buybackSigners,omitempty"`
+	BuybackSignerThreshold uint32   `json:"buybackSignerThreshold,omitempty"`
 
-	genesisTimestamp time.Time
-	chainIDValue     uint64
-	hasChainID       bool
-	adminWalletAddr  [20]byte
-	hasAdminWallet   bool
+	genesisTimestamp       time.Time
+	chainIDValue            uint64
+	hasChainID              bool
+	adminWalletAddr         [20]byte
+	hasAdminWallet          bool
+	buybackSignerAddrs      [][20]byte
+	buybackSignerThreshold  uint32
+	hasBuybackSigners       bool
 }
 
 type NativeTokenSpec struct {
@@ -191,6 +206,20 @@ func (s *GenesisSpec) AdminWalletAddress() ([20]byte, bool) {
 	return [20]byte{}, false
 }
 
+// BuybackSignerConfig returns the genesis-declared buyback reference-price
+// signer set and threshold, if configured. Callers must handle the false
+// case explicitly -- most genesis files, and every one written before the
+// buyback engine existed, will not have this configured, and the buyback
+// stays dormant until it is.
+func (s *GenesisSpec) BuybackSignerConfig() ([][20]byte, uint32, bool) {
+	if !s.hasBuybackSigners {
+		return nil, 0, false
+	}
+	addrs := make([][20]byte, len(s.buybackSignerAddrs))
+	copy(addrs, s.buybackSignerAddrs)
+	return addrs, s.buybackSignerThreshold, true
+}
+
 func (s *GenesisSpec) validate() error {
 	parsedTime, err := parseGenesisTime(s.GenesisTime)
 	if err != nil {
@@ -214,6 +243,40 @@ func (s *GenesisSpec) validate() error {
 		}
 		s.adminWalletAddr = addr
 		s.hasAdminWallet = true
+	}
+
+	s.hasBuybackSigners = false
+	s.buybackSignerAddrs = nil
+	s.buybackSignerThreshold = 0
+	if len(s.BuybackSigners) > 0 {
+		seen := make(map[[20]byte]struct{}, len(s.BuybackSigners))
+		addrs := make([][20]byte, 0, len(s.BuybackSigners))
+		for i, raw := range s.BuybackSigners {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				return fmt.Errorf("buybackSigners[%d]: address must not be empty", i)
+			}
+			addr, err := ParseBech32Account(trimmed)
+			if err != nil {
+				return fmt.Errorf("buybackSigners[%d]: %w", i, err)
+			}
+			if _, dup := seen[addr]; dup {
+				return fmt.Errorf("buybackSigners[%d]: duplicate signer", i)
+			}
+			seen[addr] = struct{}{}
+			addrs = append(addrs, addr)
+		}
+		if s.BuybackSignerThreshold == 0 {
+			return fmt.Errorf("buybackSignerThreshold must be positive when buybackSigners is set")
+		}
+		if int(s.BuybackSignerThreshold) > len(addrs) {
+			return fmt.Errorf("buybackSignerThreshold %d exceeds buybackSigners count %d", s.BuybackSignerThreshold, len(addrs))
+		}
+		s.buybackSignerAddrs = addrs
+		s.buybackSignerThreshold = s.BuybackSignerThreshold
+		s.hasBuybackSigners = true
+	} else if s.BuybackSignerThreshold != 0 {
+		return fmt.Errorf("buybackSignerThreshold set without any buybackSigners")
 	}
 
 	// native tokens

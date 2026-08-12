@@ -1025,6 +1025,28 @@ func parseSwapPriceSignerPayload(payloadJSON string) (*parsedSwapPriceSigner, er
 	return result, nil
 }
 
+// parseBuybackParamsPayload validates a ProposalKindBuybackParams payload.
+// Follows ProposalKindSlashingPolicy's precedent of being unconditionally
+// available (not gated behind an engine-configured allow-list) -- the
+// safety of the proposal lives in the normal governance quorum/threshold
+// /timelock gate, exactly like every other dedicated proposal kind.
+func parseBuybackParamsPayload(payloadJSON string) (*BuybackParamsPayload, error) {
+	var payload BuybackParamsPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	if payload.FeeShareBps > uint32(maxBasisPoints) {
+		return nil, fmt.Errorf("governance: feeShareBps must be <= %d", maxBasisPoints)
+	}
+	if payload.DiscountBps > uint32(maxBasisPoints) {
+		return nil, fmt.Errorf("governance: discountBps must be <= %d", maxBasisPoints)
+	}
+	if payload.SafetyMarginBps > uint32(maxBasisPoints) {
+		return nil, fmt.Errorf("governance: safetyMarginBps must be <= %d", maxBasisPoints)
+	}
+	return &payload, nil
+}
+
 func (e *Engine) parseRoleAllowlistPayload(payloadJSON string) (*parsedRoleAllowlist, error) {
 	if len(e.allowedRoles) == 0 {
 		return nil, fmt.Errorf("governance: role allowlist proposals are disabled")
@@ -1158,6 +1180,34 @@ func (e *Engine) applySlashingPolicy(parsed *parsedSlashingPolicy) (map[string]i
 	}
 	if strings.TrimSpace(policy.Notes) != "" {
 		detail["notes"] = strings.TrimSpace(policy.Notes)
+	}
+	return detail, nil
+}
+
+// applyBuybackParams persists a passed ProposalKindBuybackParams proposal's
+// three basis-point fields via ParamStoreSet, exactly like applySlashingPolicy
+// does for its own bps fields. Nothing here can ever touch the buyback
+// signer quorum -- BuybackParamsPayload has no field for it, by design.
+func (e *Engine) applyBuybackParams(payload *BuybackParamsPayload) (map[string]interface{}, error) {
+	if payload == nil {
+		return nil, fmt.Errorf("governance: nil buyback params payload")
+	}
+	if err := e.state.ParamStoreSet(ParamKeyBuybackFeeShareBps, []byte(strconv.FormatUint(uint64(payload.FeeShareBps), 10))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(ParamKeyBuybackDiscountBps, []byte(strconv.FormatUint(uint64(payload.DiscountBps), 10))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(ParamKeyBuybackSafetyMarginBps, []byte(strconv.FormatUint(uint64(payload.SafetyMarginBps), 10))); err != nil {
+		return nil, err
+	}
+	detail := map[string]interface{}{
+		"feeShareBps":     payload.FeeShareBps,
+		"discountBps":     payload.DiscountBps,
+		"safetyMarginBps": payload.SafetyMarginBps,
+	}
+	if strings.TrimSpace(payload.Memo) != "" {
+		detail["memo"] = strings.TrimSpace(payload.Memo)
 	}
 	return detail, nil
 }
@@ -1452,6 +1502,10 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindSwapPriceSignerUpdate:
 		if _, err := parseSwapPriceSignerPayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindBuybackParams:
+		if _, err := parseBuybackParamsPayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	default:
@@ -1901,6 +1955,18 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return err
 		}
 		for k, v := range signerDetail {
+			detail[k] = v
+		}
+	case ProposalKindBuybackParams:
+		parsed, err := parseBuybackParamsPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		buybackDetail, err := e.applyBuybackParams(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range buybackDetail {
 			detail[k] = v
 		}
 	default:

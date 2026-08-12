@@ -81,6 +81,21 @@ const (
 	TxTypePOSCapture      TxType = 0x21 // Capture an authorized payment
 	TxTypePOSVoid         TxType = 0x22 // Void authorized payment
 	TxTypePOSRegistry     TxType = 0x23 // POS merchant/device registry update
+	// TxTypeBuybackAsk lets a ZNHB holder offer ZNHB for sale into the
+	// treasury's per-epoch buyback (core/tokenomics/buyback). A market ask,
+	// not a priced bid -- filled pro-rata under oversubscription at the
+	// epoch's independently-computed max price (core/buyback_settlement.go),
+	// never at a seller-chosen price. 0x24 is the next free byte after
+	// TxTypePOSRegistry (0x23).
+	TxTypeBuybackAsk TxType = 0x24
+	// TxTypeBuybackRefPrice submits an M-of-N-signed independent market
+	// reference price for the buyback's safety-margin check
+	// (core/tokenomics/buyback.VerifyReferencePrice). Senderless/envelope-
+	// unsigned like TxTypeSwapVoucherMint -- the payload carries its own
+	// signature bundle, verified against the genesis-immutable signer set,
+	// not a single envelope signature. 0x25 is the next free byte after
+	// TxTypeBuybackAsk (0x24).
+	TxTypeBuybackRefPrice TxType = 0x25
 )
 
 // RequiresSignature reports whether the transaction type must carry an
@@ -88,7 +103,7 @@ const (
 // from module attestations rely on their envelope signatures instead.
 func RequiresSignature(t TxType) bool {
 	switch t {
-	case TxTypeMint, TxTypeSwapVoucherMint:
+	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice:
 		return false
 	default:
 		return true

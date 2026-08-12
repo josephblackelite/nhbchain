@@ -20,6 +20,7 @@ import (
 	"nhbchain/core/identity"
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/tokenomics/buyback"
 	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -153,6 +154,9 @@ type StateProcessor struct {
 	escrowFeeTreasury          [20]byte
 	adminWallet                [20]byte
 	hasAdminWallet             bool
+	buybackConfig              buyback.Config
+	hasBuybackConfig           bool
+	buybackAccrualAddr         crypto.Address
 	usernameToAddr             map[string][]byte
 	ValidatorSet               map[string]*big.Int
 	EligibleValidators         map[string]*big.Int
@@ -507,6 +511,25 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		default:
 			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
 		}
+		// A share of NHB-denominated fee revenue funds the treasury buyback
+		// engine's accrual account (core/tokenomics/buyback) instead of
+		// going entirely to the domain's OwnerWallet. This is a no-op
+		// (buybackShare stays zero) unless a real buyback signer quorum was
+		// configured at genesis -- see SetBuybackConfig/hasBuybackConfig --
+		// so it changes nothing for any node that hasn't opted in.
+		// FeeShareBps is read live from the governance param store (a passed
+		// policy.buybackParams proposal), falling back to the genesis
+		// default when ungoverned -- see effectiveBuybackConfig.
+		ownerShare := new(big.Int).Set(routed)
+		buybackShare := big.NewInt(0)
+		if result.Asset == fees.AssetNHB && sp.hasBuybackConfig && sp.buybackAccrualAddr.Bytes() != nil {
+			feeShareBps := sp.effectiveBuybackConfig(manager).FeeShareBps
+			if feeShareBps > 0 {
+				buybackShare = new(big.Int).Mul(routed, big.NewInt(int64(feeShareBps)))
+				buybackShare.Div(buybackShare, big.NewInt(buyback.SplitDenominator))
+				ownerShare = new(big.Int).Sub(routed, buybackShare)
+			}
+		}
 		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
 		if err != nil {
 			return err
@@ -516,17 +539,33 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 			if routeAcc.BalanceNHB == nil {
 				routeAcc.BalanceNHB = big.NewInt(0)
 			}
-			routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, routed)
+			routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, ownerShare)
 		case fees.AssetZNHB:
 			if routeAcc.BalanceZNHB == nil {
 				routeAcc.BalanceZNHB = big.NewInt(0)
 			}
-			routeAcc.BalanceZNHB.Add(routeAcc.BalanceZNHB, routed)
+			routeAcc.BalanceZNHB.Add(routeAcc.BalanceZNHB, ownerShare)
 		default:
 			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
 		}
 		if err := sp.setAccount(result.OwnerWallet[:], routeAcc); err != nil {
 			return err
+		}
+		if buybackShare.Sign() > 0 {
+			accrualAcc, err := sp.getAccount(sp.buybackAccrualAddr.Bytes())
+			if err != nil {
+				return fmt.Errorf("fees: load buyback accrual account: %w", err)
+			}
+			if accrualAcc.BalanceNHB == nil {
+				accrualAcc.BalanceNHB = big.NewInt(0)
+			}
+			accrualAcc.BalanceNHB.Add(accrualAcc.BalanceNHB, buybackShare)
+			if err := sp.setAccount(sp.buybackAccrualAddr.Bytes(), accrualAcc); err != nil {
+				return fmt.Errorf("fees: persist buyback accrual account: %w", err)
+			}
+			if err := manager.ZNHBSetBuybackAccrualBalance(new(big.Int).Set(accrualAcc.BalanceNHB)); err != nil {
+				return fmt.Errorf("fees: update buyback accrual ledger: %w", err)
+			}
 		}
 	}
 	sp.AppendEvent(events.FeeApplied{
@@ -753,16 +792,63 @@ func (sp *StateProcessor) SetAdminWallet(addr [20]byte, ok bool) {
 	sp.hasAdminWallet = ok
 }
 
+// SetBuybackConfig configures the treasury buyback engine's parameters and
+// genesis-immutable reference-price signer quorum. Validates the config
+// before installing it -- an invalid config (e.g. threshold exceeding signer
+// count) must never silently become active.
+func (sp *StateProcessor) SetBuybackConfig(cfg buyback.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("buyback: invalid config: %w", err)
+	}
+	sp.buybackConfig = cfg.Clone()
+	sp.hasBuybackConfig = true
+	return nil
+}
+
+// BuybackConfig returns the currently configured treasury buyback
+// parameters, if the buyback engine has been configured.
+func (sp *StateProcessor) BuybackConfig() (buyback.Config, bool) {
+	if !sp.hasBuybackConfig {
+		return buyback.Config{}, false
+	}
+	return sp.buybackConfig.Clone(), true
+}
+
+// SetBuybackAccrualAddress configures the module account that holds swept
+// NHB fee revenue pending the next buyback auction settlement. Real NHB
+// lives in this account's balance -- the ZNHBBuybackAccrualBalance ledger
+// key (core/state.Manager) is kept as a mirror of it for cheap RPC reads,
+// not an independent source of truth.
+func (sp *StateProcessor) SetBuybackAccrualAddress(addr crypto.Address) {
+	if sp == nil || addr.Bytes() == nil {
+		return
+	}
+	sp.buybackAccrualAddr = cloneAddress(addr)
+}
+
 // znhbExpectedTotalSupplyWei, znhbExpectedSalePoolWei, and
-// znhbExpectedRewardPoolWei are the genesis-fixed ZNHB supply split: exactly
-// 1,000,000,000 ZNHB, divided 80/20 into a Sale Pool (feeds the Genesis
-// Treasury Distribution Curve and the treasury buyback) and a Reward Pool
-// (feeds the validator reward halving schedule, fully decoupled from sale
-// pricing). See core/tokenomics/curve and the tokenomics design document.
+// znhbExpectedRewardPoolWei are the genesis-fixed ZNHB supply split.
+//
+// The intended design was an exact 1,000,000,000 ZNHB total, split 80/20.
+// The live Phase E genesis snapshot, verified directly against
+// config/genesis.phase-e.json, actually carries 1,000,008,000 ZNHB --
+// 8,000 ZNHB of pre-existing inflation from mint-path bugs (since fixed:
+// applySwapVoucherMintTransaction used to call sp.MintToken directly) that
+// were already live before this reconciliation and got carried forward
+// when balances were snapshotted into the Phase E genesis. Rather than
+// touch any holder's real balance to force the round number, the
+// overage is absorbed entirely into the Sale Pool's initial ledger
+// balance -- the Reward Pool stays at exactly 200,000,000 ZNHB so the
+// halving schedule's convergence proof (core/rewards/halving.go) remains
+// exact. The curve itself (core/tokenomics/curve) still only ever prices
+// and sells 800,000,000 ZNHB through its 16,000 tranches -- the extra
+// 8,000 ZNHB sits in the Sale Pool ledger as a permanent, documented
+// reconciliation remainder that ordinary curve purchases can never reach,
+// not a new bug and not silently discarded.
 var (
-	znhbExpectedTotalSupplyWei, _  = new(big.Int).SetString("1000000000000000000000000000", 10)
-	znhbExpectedSalePoolWei, _     = new(big.Int).SetString("800000000000000000000000000", 10)
-	znhbExpectedRewardPoolWei, _   = new(big.Int).SetString("200000000000000000000000000", 10)
+	znhbExpectedTotalSupplyWei, _ = new(big.Int).SetString("1000008000000000000000000000", 10)
+	znhbExpectedSalePoolWei, _    = new(big.Int).SetString("800008000000000000000000000", 10)
+	znhbExpectedRewardPoolWei, _  = new(big.Int).SetString("200000000000000000000000000", 10)
 )
 
 // EnsureZNHBPoolsBootstrapped performs the one-time genesis split of the
@@ -1715,6 +1801,9 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		swapVoucherChainID:         sp.swapVoucherChainID,
 		adminWallet:                sp.adminWallet,
 		hasAdminWallet:             sp.hasAdminWallet,
+		buybackConfig:              sp.buybackConfig.Clone(),
+		hasBuybackConfig:           sp.hasBuybackConfig,
+		buybackAccrualAddr:         cloneAddress(sp.buybackAccrualAddr),
 	}, nil
 }
 
@@ -1771,7 +1860,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		senderAccount *types.Account
 		err           error
 	)
-	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint {
+	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -1785,6 +1874,9 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	case types.TxTypeSwapVoucherMint:
 		err = sp.applySwapVoucherMintTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeBuybackRefPrice:
+		err = sp.applyBuybackRefPrice(tx)
 		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)
@@ -2875,6 +2967,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeBuyZNHB:
 		if err := sp.applyBuyZNHB(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeBuybackAsk:
+		if err := sp.applyBuybackAsk(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return nil

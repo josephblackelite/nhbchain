@@ -19,16 +19,19 @@ import (
 
 // Blockchain manages the collection of blocks.
 type Blockchain struct {
-	db              storage.Database // Uses the generic Database interface
-	tip             []byte
-	height          uint64
-	heights         map[uint64][]byte
-	mu              sync.RWMutex
-	chainID         uint64
-	genesis         []byte
-	lastTimestamp   int64
-	adminWallet     [20]byte
-	hasAdminWallet  bool
+	db                     storage.Database // Uses the generic Database interface
+	tip                    []byte
+	height                 uint64
+	heights                map[uint64][]byte
+	mu                     sync.RWMutex
+	chainID                uint64
+	genesis                []byte
+	lastTimestamp          int64
+	adminWallet            [20]byte
+	hasAdminWallet         bool
+	buybackSigners         [][20]byte
+	buybackSignerThreshold uint32
+	hasBuybackSigners      bool
 }
 
 var (
@@ -118,6 +121,11 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 				bc.adminWallet = addr
 				bc.hasAdminWallet = true
 			}
+			if signers, threshold, ok := spec.BuybackSignerConfig(); ok {
+				bc.buybackSigners = signers
+				bc.buybackSignerThreshold = threshold
+				bc.hasBuybackSigners = true
+			}
 		}
 		if genesis != nil && genesis.Header != nil {
 			bc.lastTimestamp = genesis.Header.Timestamp
@@ -168,6 +176,11 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 				bc.adminWallet = addr
 				bc.hasAdminWallet = true
 			}
+			if signers, threshold, ok := spec.BuybackSignerConfig(); ok {
+				bc.buybackSigners = signers
+				bc.buybackSignerThreshold = threshold
+				bc.hasBuybackSigners = true
+			}
 		}
 	}
 
@@ -189,6 +202,22 @@ func (bc *Blockchain) AdminWallet() ([20]byte, bool) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.adminWallet, bc.hasAdminWallet
+}
+
+// BuybackSigners returns the genesis-configured M-of-N reference-price signer
+// quorum for the treasury buyback engine, if one was configured at genesis.
+// This set is intentionally immutable after genesis: unlike admin-wallet or
+// reward-schedule configuration, it is never re-derived from governance state,
+// so a captured governance vote can never redirect buyback authority.
+func (bc *Blockchain) BuybackSigners() ([][20]byte, uint32, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if !bc.hasBuybackSigners {
+		return nil, 0, false
+	}
+	signers := make([][20]byte, len(bc.buybackSigners))
+	copy(signers, bc.buybackSigners)
+	return signers, bc.buybackSignerThreshold, true
 }
 
 // AddBlock validates a new block and adds it to the chain.

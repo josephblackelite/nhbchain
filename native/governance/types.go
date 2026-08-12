@@ -160,6 +160,18 @@ const (
 	// different storage path than the dedicated
 	// SwapSetPriceSigner/SwapPriceSigner key it already uses today.
 	ProposalKindSwapPriceSignerUpdate = "policy.swapPriceSigner"
+	// ProposalKindBuybackParams adjusts the treasury buyback engine's three
+	// adjustable parameters -- fee_share_bps, discount_bps, safety_margin_bps
+	// (core/tokenomics/buyback.Config) -- via ParamStoreSet, following
+	// ProposalKindSlashingPolicy's precedent exactly. Deliberately excludes
+	// the buyback's M-of-N reference-price signer quorum, which has no
+	// governance path at all: it is set once from genesis
+	// (genesis.BuybackSignerConfig) and never touched again by any proposal
+	// kind, because a captured governance vote swapping in colluding
+	// signers could exploit the very next epoch's settlement -- a timelock
+	// delays that but does not prevent it. See core/tokenomics/buyback's
+	// package doc comment for the full rationale.
+	ProposalKindBuybackParams = "policy.buybackParams"
 )
 
 const (
@@ -219,6 +231,20 @@ const (
 	ParamKeyLoyaltyDynamicPriceMaxDeviationBps = "loyalty.dynamic.priceGuard.maxDeviationBps"
 	// ParamKeyLoyaltyDynamicPriceGuardEnabled toggles oracle guardrails.
 	ParamKeyLoyaltyDynamicPriceGuardEnabled = "loyalty.dynamic.priceGuard.enabled"
+	// ParamKeyBuybackFeeShareBps controls the share of NHB transaction-fee
+	// revenue swept into the treasury buyback engine's accrual account
+	// (core/tokenomics/buyback, core/state_transition.go's applyTransactionFee).
+	ParamKeyBuybackFeeShareBps = "buyback.feeShareBps"
+	// ParamKeyBuybackDiscountBps controls the discount applied to the Sale
+	// Pool's own live curve price when the buyback engine computes its max
+	// purchase price each epoch (core/buyback_settlement.go).
+	ParamKeyBuybackDiscountBps = "buyback.discountBps"
+	// ParamKeyBuybackSafetyMarginBps controls the safety margin applied to
+	// the buyback engine's independently signed reference price. There is
+	// deliberately no governance param key for the buyback's M-of-N
+	// reference-price signer quorum itself -- it is genesis-immutable and
+	// reachable by no proposal kind, ever (see ProposalKindBuybackParams).
+	ParamKeyBuybackSafetyMarginBps = "buyback.safetyMarginBps"
 )
 
 // defaultMinimumValidatorStakeWei is 10,000 ZNHB expressed in the same
@@ -305,6 +331,19 @@ type SlashingPolicyPayload struct {
 	MaxSlashWei   string `json:"maxSlashWei"`
 	EvidenceTTL   uint64 `json:"evidenceTtlSeconds"`
 	Notes         string `json:"notes,omitempty"`
+}
+
+// BuybackParamsPayload defines the expected schema for
+// ProposalKindBuybackParams proposals: the three governance-adjustable
+// treasury buyback parameters (core/tokenomics/buyback.Config). All three
+// basis-point fields must be within [0, 10_000]. There is deliberately no
+// field here for the buyback's M-of-N reference-price signer quorum -- see
+// ProposalKindBuybackParams's doc comment for why.
+type BuybackParamsPayload struct {
+	FeeShareBps     uint32 `json:"feeShareBps"`
+	DiscountBps     uint32 `json:"discountBps"`
+	SafetyMarginBps uint32 `json:"safetyMarginBps"`
+	Memo            string `json:"memo,omitempty"`
 }
 
 // RoleAddressPair captures a role membership mutation in role allowlist

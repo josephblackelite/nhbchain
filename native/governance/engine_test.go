@@ -1403,6 +1403,80 @@ func TestExecuteSwapPriceSignerProposal(t *testing.T) {
 	}
 }
 
+func TestExecuteBuybackParamsProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 7
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	now := time.Unix(1_700_300_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := `{"feeShareBps":3000,"discountBps":750,"safetyMarginBps":250,"memo":"raise fee share"}`
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindBuybackParams, payload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit buyback params proposal: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue buyback params proposal: %v", err)
+	}
+	proposal = state.proposals[proposalID]
+	proposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute buyback params proposal: %v", err)
+	}
+
+	assertParam := func(key string, want string) {
+		t.Helper()
+		got, ok := state.params[key]
+		if !ok {
+			t.Fatalf("expected param %s to be set", key)
+		}
+		if string(got) != want {
+			t.Fatalf("param %s = %s, want %s", key, got, want)
+		}
+	}
+	assertParam(ParamKeyBuybackFeeShareBps, "3000")
+	assertParam(ParamKeyBuybackDiscountBps, "750")
+	assertParam(ParamKeyBuybackSafetyMarginBps, "250")
+}
+
+func TestSubmitBuybackParamsProposalRejectsOutOfRangeBps(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 9
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	engine.SetNowFunc(func() time.Time { return time.Unix(1_700_300_000, 0).UTC() })
+
+	payload := `{"feeShareBps":10001,"discountBps":0,"safetyMarginBps":0}`
+	if _, err := engine.SubmitProposal(proposer, ProposalKindBuybackParams, payload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected submission to reject feeShareBps > 10000")
+	}
+}
+
 // TestSwapPriceSignerProposalDeterministicAcrossValidators simulates two
 // independent validators (two separate mockGovernanceState instances seeded
 // identically) executing the identical queued proposal payload, and asserts

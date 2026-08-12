@@ -35,6 +35,7 @@ import (
 	"nhbchain/core/rewards"
 	nhbstate "nhbchain/core/state"
 	syncmgr "nhbchain/core/sync"
+	"nhbchain/core/tokenomics/buyback"
 	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -462,6 +463,45 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetAdminWallet(treasury, hasAdminWallet)
 	if err := stateProcessor.EnsureZNHBPoolsBootstrapped(); err != nil {
 		return nil, fmt.Errorf("bootstrap ZNHB sale/reward pools: %w", err)
+	}
+	if hasAdminWallet {
+		// Activates the halving-schedule validator/staking reward emission
+		// (core/rewards/halving.go) backed by the ZNHB Reward Pool. This is a
+		// pure function of built-in constants (not chain state), so it's safe
+		// to recompute identically on every process start -- rewardConfig
+		// itself is in-memory only, never persisted. 20/50/30 validator/
+		// staker/engagement split matches this codebase's existing test
+		// convention (core/rewards_logic_test.go). Not currently governance
+		// -adjustable -- rewards.Config has no ParamStore hook, unlike
+		// staking's APR/payout-period knobs (see config.toml's
+		// AllowedParams). Changing the split requires a code change today.
+		rewardCfg := rewards.HalvingScheduleConfig(2000, 5000, 3000, 2000)
+		if err := stateProcessor.SetRewardConfig(rewardCfg); err != nil {
+			return nil, fmt.Errorf("activate ZNHB reward halving schedule: %w", err)
+		}
+	}
+
+	// The treasury buyback engine's reference-price signer quorum is
+	// genesis-immutable (core/blockchain.go's BuybackSigners, sourced from
+	// genesis.BuybackSignerConfig) -- unlike the bps parameters below, it is
+	// never touched by governance, so a captured vote can never redirect
+	// buyback authority to colluding signers. fee_share_bps/discount_bps/
+	// safety_margin_bps are deliberately conservative launch defaults
+	// (20% of fee revenue, 5% below curve price, 5% below reference price)
+	// intended to become governance-adjustable via a future
+	// policy.buybackParams proposal kind -- the signer set itself never will.
+	if signers, threshold, ok := chain.BuybackSigners(); ok {
+		buybackCfg := buyback.Config{
+			FeeShareBps:     2000,
+			DiscountBps:     500,
+			SafetyMarginBps: 500,
+			SignerThreshold: threshold,
+			Signers:         signers,
+		}
+		if err := stateProcessor.SetBuybackConfig(buybackCfg); err != nil {
+			return nil, fmt.Errorf("configure ZNHB treasury buyback engine: %w", err)
+		}
+		stateProcessor.SetBuybackAccrualAddress(deriveModuleAddress("module/tokenomics/buybackAccrual", crypto.NHBPrefix))
 	}
 
 	moduleAddr := deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix)

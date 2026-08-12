@@ -173,6 +173,9 @@ func (sp *StateProcessor) finalizeEpoch(height uint64, timestamp int64) error {
 	if err := sp.settleEpochRewards(snapshot); err != nil {
 		return err
 	}
+	if err := sp.settleBuybackEpoch(snapshot); err != nil {
+		return err
+	}
 	sp.epochHistory = append(sp.epochHistory, snapshot)
 	sp.pruneEpochHistory()
 	if err := sp.persistEpochHistory(); err != nil {

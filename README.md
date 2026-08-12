@@ -56,8 +56,8 @@ To guarantee mathematical sustainability and zero human intervention, NHBCoin is
 - **Transparency:** This eliminates hidden gas inflation. The network organically funds its own underlying operations purely through real-world utility and transaction volume, meaning the stablecoin supply remains mathematically solvent.
 
 ### 2. The Fixed-Supply ZNHB Treasury (System Wallet `znhb1...`)
-- **Function:** `ZNHB` has a hard genesis supply of exactly 1,000,000,000 tokens, split once at genesis into an 800,000,000-ZNHB **Sale Pool** and a 200,000,000-ZNHB **Reward Pool**. Nothing is ever minted to satisfy a purchase or a reward — both pools only ever move ZNHB that already exists.
-- **Automation:** Sale Pool purchases are priced entirely on-chain by the Genesis Treasury Distribution Curve — a 16,000-tranche bonding curve computed in exact rational arithmetic, immune to order-splitting. Merchant loyalty rewards are paid from business-funded paymasters, unrelated to either pool. Validator/staking rewards are designed to draw from the Reward Pool via a Bitcoin-style halving schedule that provably converges to less than the pool's own size — that mechanism is built and enforced (`core/rewards_logic.go`), but not yet activated on this network.
+- **Function:** `ZNHB` has a hard genesis supply of exactly 1,000,008,000 tokens (the 8,000 above the originally-intended 1,000,000,000 is a documented reconciliation remainder from pre-existing, since-fixed mint-path bugs — see `docs/tokenomics/tokenomics.md`), split once at genesis into an 800,008,000-ZNHB **Sale Pool** and a 200,000,000-ZNHB **Reward Pool**. Nothing is ever minted to satisfy a purchase or a reward — both pools only ever move ZNHB that already exists.
+- **Automation:** Sale Pool purchases are priced entirely on-chain by the Genesis Treasury Distribution Curve — a 16,000-tranche bonding curve computed in exact rational arithmetic, immune to order-splitting. Merchant loyalty rewards are paid from business-funded paymasters, unrelated to either pool. Validator/staking rewards draw from the Reward Pool via a live Bitcoin-style halving schedule that provably converges to less than the pool's own size (`core/rewards_logic.go`). A treasury **buyback engine** (`core/tokenomics/buyback`) funds itself from a share of NHB fee revenue, repurchases ZNHB from willing sellers each epoch at a price no more favorable than an independently signed reference price, and recycles what it buys straight back into the Sale Pool — never burned, never re-minted.
 - **Transparency:** A block-level invariant (`CheckZNHBSupplyInvariant`) asserts `Sale Pool + Reward Pool == treasury wallet's live ZNHB balance` every block, and two public RPCs (`znhb_getTokenomicsState`, `znhb_quoteBuy`) expose the curve's live position and pool balances to anyone. Full detail: [`docs/tokenomics/tokenomics.md`](docs/tokenomics/tokenomics.md).
 
 ## Why NHBCoin Matters
@@ -92,19 +92,20 @@ The L1 is organized into modular layers that together deliver the payment networ
 ## Token Economics
 
 - **NHBCoin (NHB)** — Stable, dollar-pegged medium of exchange for all payments and settlements ($1 = 1 NHB). Mint-on-deposit, burn-on-redemption, no fixed supply cap. This is pure value transfer and is **never** minted as a reward.
-- **ZapNHB (ZNHB)** — A hard-capped, genesis-fixed **1,000,000,000 ZNHB** total supply, no more, ever. Secures the network, powers protocol and merchant loyalty rewards, and governs validator elections. ZNHB carries **no protocol-defined valuation ceiling or promise** — see below.
+- **ZapNHB (ZNHB)** — A hard-capped, genesis-fixed **1,000,008,000 ZNHB** total supply, no more, ever. Secures the network, powers protocol and merchant loyalty rewards, and governs validator elections. ZNHB carries **no protocol-defined valuation ceiling or promise** — see below.
 - **Dual-Purpose Staking** — Staking ZNHB serves two simultaneous functions:
   1. **Governance:** Voting power in NHBChain governance is POTSO-weighted (network participation), not raw staked balance — see the nhbportal wallet's **Governance → How governance works** tab for the full, accurate breakdown of what's votable today.
   2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator becomes a **validator candidate**. The node joins the active validator set at the next epoch only after it is online, synced, and submitting validator heartbeats. You do **not** need a separate stake for governance.
 
 ### How ZNHB enters circulation
 
-ZNHB is never minted on demand. All 1,000,000,000 tokens exist at genesis, split once into an 800,000,000-ZNHB **Sale Pool** and a 200,000,000-ZNHB **Reward Pool** — a block-level invariant enforces that the two pools always sum to exactly what the treasury wallet holds.
+ZNHB is never minted on demand. All 1,000,008,000 tokens exist at genesis, split once into an 800,008,000-ZNHB **Sale Pool** and a 200,000,000-ZNHB **Reward Pool** — a block-level invariant enforces that the two pools always sum to exactly what the treasury wallet holds.
 
 - **Sale Pool (live):** priced by the **Genesis Treasury Distribution Curve** — 16,000 tranches of 50,000 ZNHB each, starting at $0.05 and rising to a $1.00 terminal price for the treasury's own last unit of inventory (not a market cap or ceiling on ZNHB itself). Every purchase, whether a direct buy or a swap-voucher mint, is priced on-chain in exact rational arithmetic and is immune to order-splitting. Query the live price and pool balances with `znhb_getTokenomicsState`; get an exact purchase quote with `znhb_quoteBuy`.
-- **Reward Pool (built, not yet activated):** designed to fund validator/staking rewards via a Bitcoin-style halving schedule (50,000 ZNHB/epoch, halving every 2,000 epochs) that mathematically converges to less than the pool's own size. The ledger-level safeguard — clamp to the pool's live balance, debit by the exact amount paid — is implemented and tested. No validator or staking reward is being paid out on this network today; that requires a separate activation step.
+- **Reward Pool (live):** funds validator/staking rewards via a Bitcoin-style halving schedule (50,000 ZNHB/epoch, halving every 2,000 epochs) that mathematically converges to less than the pool's own size. Every epoch's payout is clamped to the pool's live balance and debits it by the exact amount paid — the pool can never go negative regardless of any formula edge case.
+- **Treasury buyback (live mechanism):** a share of NHB transaction-fee revenue (20% by default) automatically funds a per-epoch buyback that repurchases ZNHB from willing sellers at a price capped below both the curve's own spot price and an independently signed reference price, then recycles what it buys straight back into the Sale Pool. Activates automatically once a network's genesis configures a reference-price signer quorum; the signer quorum itself is permanently outside governance's reach, by design.
 
-Full detail, including the exact pricing formula and RPC response shapes: **[`docs/tokenomics/tokenomics.md`](docs/tokenomics/tokenomics.md)**.
+Full detail, including the exact pricing formula, buyback mechanics, and RPC response shapes: **[`docs/tokenomics/tokenomics.md`](docs/tokenomics/tokenomics.md)**.
 
 ## 🚀 Quick Start for Node Operators (Step-by-Step)
 
@@ -297,8 +298,8 @@ Compatibility note:
 Anyone can connect a wallet to the network, send funds, vote in governance, or use smart contracts with absolutely **zero** minimum balances. The 10,000 ZNHB requirement applies *strictly to Server Operators (Validators)*.
 
 ### What is the benefit of running a Validator Server?
-Validators earn staking yield on delegated stake today. A separate, additional **POTSO (Proof of Time Spent Online)**-weighted reward, designed to pay out ZNHB from the fixed 200,000,000-ZNHB Reward Pool on a halving schedule (never newly minted), exists in code but is **not yet active** on this network — see [Token Economics](#token-economics) for the current status.
-Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Score**, so once active, validators that process more transactions, handle escrow events, and maintain perfect uptime are designed to earn significantly higher yields than passive, wealthy nodes.
+Validators earn staking yield on delegated stake today. A separate, additional **POTSO (Proof of Time Spent Online)**-weighted reward pays out ZNHB from the fixed 200,000,000-ZNHB Reward Pool on a halving schedule (never newly minted) — see [Token Economics](#token-economics) for the current status.
+Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Score**, so validators that process more transactions, handle escrow events, and maintain perfect uptime earn significantly higher yields than passive, wealthy nodes.
 
 ## Command-Line Interface
 
