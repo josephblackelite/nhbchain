@@ -826,30 +826,33 @@ func (sp *StateProcessor) SetBuybackAccrualAddress(addr crypto.Address) {
 	sp.buybackAccrualAddr = cloneAddress(addr)
 }
 
-// znhbExpectedTotalSupplyWei, znhbExpectedSalePoolWei, and
-// znhbExpectedRewardPoolWei are the genesis-fixed ZNHB supply split.
+// znhbExpectedTotalSupplyWei is a fixed test fixture: the total ZNHB
+// balance test helpers fund a fake admin wallet with before calling
+// EnsureZNHBPoolsBootstrapped, matching the live Phase E genesis
+// snapshot's total at the time this was written (1,000,008,000 ZNHB --
+// 8,000 ZNHB of pre-existing inflation from mint-path bugs, since fixed,
+// that were already live before reconciliation and got carried forward
+// into the snapshot). It is deliberately NOT enforced against the live
+// admin wallet balance -- see EnsureZNHBPoolsBootstrapped's doc comment
+// for why an earlier version of this code tried that and it was wrong.
 //
-// The intended design was an exact 1,000,000,000 ZNHB total, split 80/20.
-// The live Phase E genesis snapshot, verified directly against
-// config/genesis.phase-e.json, actually carries 1,000,008,000 ZNHB --
-// 8,000 ZNHB of pre-existing inflation from mint-path bugs (since fixed:
-// applySwapVoucherMintTransaction used to call sp.MintToken directly) that
-// were already live before this reconciliation and got carried forward
-// when balances were snapshotted into the Phase E genesis. Rather than
-// touch any holder's real balance to force the round number, the
-// overage is absorbed entirely into the Sale Pool's initial ledger
-// balance -- the Reward Pool stays at exactly 200,000,000 ZNHB so the
-// halving schedule's convergence proof (core/rewards/halving.go) remains
-// exact. The curve itself (core/tokenomics/curve) still only ever prices
-// and sells 800,000,000 ZNHB through its 16,000 tranches -- the extra
-// 8,000 ZNHB sits in the Sale Pool ledger as a permanent, documented
-// reconciliation remainder that ordinary curve purchases can never reach,
-// not a new bug and not silently discarded.
+// znhbExpectedSalePoolWei/znhbExpectedRewardPoolWei are derived from it
+// via the exact same 80/20 arithmetic EnsureZNHBPoolsBootstrapped uses on
+// a real balance, so these test fixtures can never silently drift out of
+// sync with what the real bootstrap logic actually computes.
 var (
 	znhbExpectedTotalSupplyWei, _ = new(big.Int).SetString("1000008000000000000000000000", 10)
-	znhbExpectedSalePoolWei, _    = new(big.Int).SetString("800008000000000000000000000", 10)
-	znhbExpectedRewardPoolWei, _  = new(big.Int).SetString("200000000000000000000000000", 10)
+	znhbExpectedRewardPoolWei     = znhbPoolRewardShare(znhbExpectedTotalSupplyWei)
+	znhbExpectedSalePoolWei       = new(big.Int).Sub(znhbExpectedTotalSupplyWei, znhbExpectedRewardPoolWei)
 )
+
+// znhbPoolRewardShare returns the Reward Pool's 20% share of totalWei,
+// floored (any remainder from integer division goes to the Sale Pool, so
+// the two always sum to exactly totalWei with no wei lost or created).
+func znhbPoolRewardShare(totalWei *big.Int) *big.Int {
+	reward := new(big.Int).Mul(totalWei, big.NewInt(20))
+	return reward.Quo(reward, big.NewInt(100))
+}
 
 // EnsureZNHBPoolsBootstrapped performs the one-time genesis split of the
 // admin/treasury wallet's ZNHB into the fixed Sale Pool and Reward Pool
@@ -877,18 +880,30 @@ func (sp *StateProcessor) EnsureZNHBPoolsBootstrapped() error {
 	if err != nil {
 		return fmt.Errorf("znhb: load admin wallet: %w", err)
 	}
-	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Cmp(znhbExpectedTotalSupplyWei) != 0 {
+	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Sign() <= 0 {
 		balance := "<nil>"
 		if adminAccount.BalanceZNHB != nil {
 			balance = adminAccount.BalanceZNHB.String()
 		}
-		return fmt.Errorf("znhb: admin wallet ZNHB balance %s does not match expected genesis total %s -- refusing to bootstrap pools against an unexpected balance", balance, znhbExpectedTotalSupplyWei)
+		return fmt.Errorf("znhb: admin wallet ZNHB balance %s is not positive -- refusing to bootstrap pools with nothing to split", balance)
 	}
 
-	if err := manager.ZNHBSetSalePoolBalance(new(big.Int).Set(znhbExpectedSalePoolWei)); err != nil {
+	// Bootstrap runs exactly once, whenever a node first processes a block
+	// under code that knows about the pools -- not necessarily at genesis.
+	// By the time that happens the admin wallet's live balance may already
+	// differ from any frozen genesis snapshot (real buyZNHB purchases move
+	// it before the first restart that carries this logic). The 80/20
+	// split ratio is the design intent, not a specific absolute number, so
+	// bootstrap always splits whatever the live balance actually is at the
+	// moment it first runs, rather than asserting it against a stale
+	// constant and refusing to start the node.
+	rewardPoolWei := znhbPoolRewardShare(adminAccount.BalanceZNHB)
+	salePoolWei := new(big.Int).Sub(adminAccount.BalanceZNHB, rewardPoolWei)
+
+	if err := manager.ZNHBSetSalePoolBalance(salePoolWei); err != nil {
 		return fmt.Errorf("znhb: set sale pool balance: %w", err)
 	}
-	if err := manager.ZNHBSetRewardPoolBalance(new(big.Int).Set(znhbExpectedRewardPoolWei)); err != nil {
+	if err := manager.ZNHBSetRewardPoolBalance(rewardPoolWei); err != nil {
 		return fmt.Errorf("znhb: set reward pool balance: %w", err)
 	}
 	if err := manager.ZNHBSetCumulativeSaleDistributed(big.NewInt(0)); err != nil {

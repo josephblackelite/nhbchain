@@ -106,22 +106,72 @@ func TestEnsureZNHBPoolsBootstrapped_IsIdempotent(t *testing.T) {
 	}
 }
 
-func TestEnsureZNHBPoolsBootstrapped_HardFailsOnWrongBalance(t *testing.T) {
+func TestEnsureZNHBPoolsBootstrapped_SplitsWhateverLiveBalanceIs(t *testing.T) {
 	sp := newZNHBPoolsStateProcessor(t)
 	adminAddr := [20]byte{0xAD}
 	sp.SetAdminWallet(adminAddr, true)
-	// Deliberately wrong balance -- one wei short of the expected total.
-	wrongBalance := new(big.Int).Sub(znhbExpectedTotalSupplyWei, big.NewInt(1))
+	// A balance that has drifted from any frozen genesis snapshot -- e.g.
+	// real buyZNHB purchases moved it before the node's first restart
+	// under bootstrap-aware code. Bootstrap must split whatever this
+	// actually is, not refuse to start the node.
+	drift, ok := new(big.Int).SetString("21171800000000000000000", 10)
+	if !ok {
+		t.Fatalf("parse drift constant")
+	}
+	liveBalance := new(big.Int).Sub(znhbExpectedTotalSupplyWei, drift)
 	if err := sp.setAccount(adminAddr[:], &types.Account{
 		BalanceNHB:  big.NewInt(0),
-		BalanceZNHB: wrongBalance,
+		BalanceZNHB: new(big.Int).Set(liveBalance),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap should succeed against a drifted live balance: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	wantReward := znhbPoolRewardShare(liveBalance)
+	wantSale := new(big.Int).Sub(liveBalance, wantReward)
+
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read reward pool: %v", err)
+	}
+	if rewardPool.Cmp(wantReward) != 0 {
+		t.Fatalf("reward pool = %s, want %s (20%% of live balance)", rewardPool, wantReward)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		t.Fatalf("read sale pool: %v", err)
+	}
+	if salePool.Cmp(wantSale) != 0 {
+		t.Fatalf("sale pool = %s, want %s (remainder of live balance)", salePool, wantSale)
+	}
+	if new(big.Int).Add(salePool, rewardPool).Cmp(liveBalance) != 0 {
+		t.Fatalf("sale pool + reward pool must sum to exactly the live balance")
+	}
+
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("supply invariant should hold immediately after bootstrap: %v", err)
+	}
+}
+
+func TestEnsureZNHBPoolsBootstrapped_HardFailsOnZeroBalance(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(0),
 		Stake:       big.NewInt(0),
 	}); err != nil {
 		t.Fatalf("seed admin wallet: %v", err)
 	}
 
 	if err := sp.EnsureZNHBPoolsBootstrapped(); err == nil {
-		t.Fatalf("expected a hard failure for a mismatched admin wallet balance, got nil error")
+		t.Fatalf("expected a hard failure for a zero admin wallet balance, got nil error")
 	}
 
 	manager := nhbstate.NewManager(sp.Trie)
