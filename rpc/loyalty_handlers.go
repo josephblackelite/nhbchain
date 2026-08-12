@@ -398,6 +398,48 @@ func (s *Server) handleLoyaltyUpdateProgram(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid program spec", err.Error())
 		return
 	}
+	// Authorize against the program's TRUE existing owner, not
+	// program.Owner as parsed from the caller-supplied spec: Owner is
+	// immutable (the registry rejects any spec whose Owner differs from
+	// the stored record), so an attacker could otherwise satisfy a
+	// spec-based check trivially by setting spec.owner to their own
+	// address. Loading the existing record first, as registry.UpdateProgram
+	// itself does, closes that gap and lets us reject unauthorized callers
+	// here with a proper 403 instead of relying solely on the registry's
+	// internal check.
+	existing, ok, err := s.node.LoyaltyProgramByID(program.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load program", err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "program not found", nil)
+		return
+	}
+	if !addressesEqual(callerAddr, existing.Owner) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
+		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
+		return
+	}
+	if strings.TrimSpace(envelope.BusinessID) != "" {
+		businessID, err := parseBusinessID(envelope.BusinessID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid businessId", err.Error())
+			return
+		}
+		business, ok, err := s.node.LoyaltyBusinessByID(businessID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "business not found", envelope.BusinessID)
+			return
+		}
+		if !isMerchantOf(business, existing.Owner) {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "owner is not a registered merchant", nil)
+			return
+		}
+	}
 	registry := s.node.LoyaltyRegistry()
 	if err := registry.UpdateProgram(callerAddr, program); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to update program", err.Error())

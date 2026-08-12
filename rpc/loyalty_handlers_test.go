@@ -337,3 +337,103 @@ func TestHandleLoyaltyCreateProgramSuccess(t *testing.T) {
 		t.Fatalf("unexpected program state")
 	}
 }
+
+func TestHandleLoyaltyUpdateProgramUnauthorized(t *testing.T) {
+	env := newTestEnv(t)
+	manager := env.node.LoyaltyManager()
+	if err := manager.RegisterToken("ZNHB", "Zap", 18); err != nil {
+		t.Fatalf("register token: %v", err)
+	}
+	ownerKey, _ := crypto.GeneratePrivateKey()
+	ownerAddr := ownerKey.PubKey().Address().String()
+	businessReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller": ownerAddr,
+		"name":   "Rewards",
+	})}}
+	bizRec := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateBusiness(bizRec, env.newRequest(), businessReq)
+	bizResult, bizErr := decodeRPCResponse(t, bizRec)
+	if bizErr != nil {
+		t.Fatalf("create business: %+v", bizErr)
+	}
+	var businessID string
+	if err := json.Unmarshal(bizResult, &businessID); err != nil {
+		t.Fatalf("decode business id: %v", err)
+	}
+
+	merchantKey, _ := crypto.GeneratePrivateKey()
+	merchantAddr := merchantKey.PubKey().Address().String()
+	addReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller":     ownerAddr,
+		"businessId": businessID,
+		"merchant":   merchantAddr,
+	})}}
+	addRec := httptest.NewRecorder()
+	env.server.handleLoyaltyAddMerchant(addRec, env.newRequest(), addReq)
+	if _, addErr := decodeRPCResponse(t, addRec); addErr != nil {
+		t.Fatalf("add merchant: %+v", addErr)
+	}
+
+	var programID [32]byte
+	programID[31] = 1
+	programIDHex := "0x" + hex.EncodeToString(programID[:])
+	poolKey, _ := crypto.GeneratePrivateKey()
+	poolAddr := poolKey.PubKey().Address().String()
+	createSpec := map[string]interface{}{
+		"id":              programIDHex,
+		"owner":           merchantAddr,
+		"pool":            poolAddr,
+		"tokenSymbol":     "ZNHB",
+		"accrualBps":      100,
+		"dailyCapProgram": "1000000000000000000000",
+	}
+	createReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
+		"caller":     merchantAddr,
+		"businessId": businessID,
+		"spec":       createSpec,
+	})}}
+	createRec := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateProgram(createRec, env.newRequest(), createReq)
+	if _, createErr := decodeRPCResponse(t, createRec); createErr != nil {
+		t.Fatalf("create program: %+v", createErr)
+	}
+
+	// An outsider -- neither the program's owner nor a ROLE_LOYALTY_ADMIN --
+	// must not be able to update the program, even by declaring themselves
+	// as both caller and spec owner (Owner is immutable and checked against
+	// the real existing record, not the caller-supplied spec).
+	outsiderKey, _ := crypto.GeneratePrivateKey()
+	outsiderAddr := outsiderKey.PubKey().Address().String()
+	updateSpec := map[string]interface{}{
+		"id":              programIDHex,
+		"owner":           merchantAddr,
+		"pool":            poolAddr,
+		"tokenSymbol":     "ZNHB",
+		"accrualBps":      500,
+		"dailyCapProgram": "1000000000000000000000",
+	}
+	updateReq := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
+		"caller": outsiderAddr,
+		"spec":   updateSpec,
+	})}}
+	updateRec := httptest.NewRecorder()
+	env.server.handleLoyaltyUpdateProgram(updateRec, env.newRequest(), updateReq)
+	_, updateErr := decodeRPCResponse(t, updateRec)
+	if updateErr == nil {
+		t.Fatalf("expected unauthorized error")
+	}
+	if updateErr.Code != codeUnauthorized {
+		t.Fatalf("expected code %d got %d", codeUnauthorized, updateErr.Code)
+	}
+
+	loaded, ok, err := env.node.LoyaltyProgramByID(decodeProgramID(t, programIDHex))
+	if err != nil {
+		t.Fatalf("load program: %v", err)
+	}
+	if !ok {
+		t.Fatalf("program not found")
+	}
+	if loaded.AccrualBps != 100 {
+		t.Fatalf("unauthorized update must not apply: accrualBps = %d, want 100", loaded.AccrualBps)
+	}
+}
