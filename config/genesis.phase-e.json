@@ -74,5 +74,11 @@
       "nhb1rwceqkjt2xyufk3l44ggctxp9e20r5ekvt7s32",
       "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
     ]
-  }
+  },
+  "buybackSigners": [
+    "nhb1xt6yffpj0hdp0jaewq7us22mcupk9gr69k09t4",
+    "nhb1f982j3ztr9cddn7wfx9pmejufhs2kgs28s9a89",
+    "nhb1x3xhmaj249xrwecfsmmptur9sa8aesamnknvxa"
+  ],
+  "buybackSignerThreshold": 2
 }
