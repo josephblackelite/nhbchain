@@ -3,6 +3,7 @@ package core
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -224,5 +225,124 @@ func TestCheckZNHBSupplyInvariant_DetectsViolation(t *testing.T) {
 
 	if err := sp.CheckZNHBSupplyInvariant(); err == nil {
 		t.Fatalf("expected the supply invariant check to catch a desynced pool balance")
+	}
+}
+
+// TestZNHBPoolBootstrap_PreCommitWriteDoesNotSurviveDriftReset documents the
+// mechanism behind a real production incident: calling
+// EnsureZNHBPoolsBootstrapped before any block has been committed leaves its
+// writes only in the trie's pending (uncommitted) state. core/node.go's
+// startup drift-reset safety net (ensurePendingStateMatchesCommittedHeadLocked)
+// unconditionally resets pending state to the last committed root whenever
+// they disagree -- which they always will immediately after a fresh
+// bootstrap write, since nothing has committed it yet. The reset silently
+// discarded the bootstrap with no error: the node came up looking healthy
+// while the pools were never actually bootstrapped. See
+// TestProcessBlockLifecycle_BootstrapsZNHBPoolsOnFirstBlock for the fix.
+func TestZNHBPoolBootstrap_PreCommitWriteDoesNotSurviveDriftReset(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+	committedRoot, err := sp.Commit(0)
+	if err != nil {
+		t.Fatalf("commit seeded admin wallet: %v", err)
+	}
+
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read reward pool: %v", err)
+	}
+	if rewardPool.Sign() == 0 {
+		t.Fatalf("expected bootstrap to have written a nonzero reward pool before the reset")
+	}
+
+	// Simulate the startup drift-reset firing before this write was ever
+	// folded into a committed block -- exactly what happened in production.
+	if err := sp.ResetToRoot(committedRoot); err != nil {
+		t.Fatalf("reset to committed root: %v", err)
+	}
+
+	manager = nhbstate.NewManager(sp.Trie)
+	rewardPool, err = manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read reward pool after reset: %v", err)
+	}
+	if rewardPool.Sign() != 0 {
+		t.Fatalf("reward pool = %s, want 0 -- a pre-commit bootstrap write must not survive a drift reset", rewardPool)
+	}
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		t.Fatalf("read bootstrap flag after reset: %v", err)
+	}
+	if bootstrapped {
+		t.Fatalf("bootstrap flag must also be reset, so a later real bootstrap attempt is not blocked as a false idempotent no-op")
+	}
+}
+
+// TestProcessBlockLifecycle_BootstrapsZNHBPoolsOnFirstBlock verifies the fix:
+// EnsureZNHBPoolsBootstrapped runs as part of ProcessBlockLifecycle, so its
+// writes are folded into a real committed block and survive exactly the
+// kind of reset that silently discarded them when it ran at node startup.
+func TestProcessBlockLifecycle_BootstrapsZNHBPoolsOnFirstBlock(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(1, time.Now().UTC().Unix()); err != nil {
+		t.Fatalf("process block lifecycle: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		t.Fatalf("read bootstrap flag: %v", err)
+	}
+	if !bootstrapped {
+		t.Fatalf("expected ProcessBlockLifecycle to bootstrap the pools on the first block")
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read reward pool: %v", err)
+	}
+	wantReward := znhbPoolRewardShare(znhbExpectedTotalSupplyWei)
+	if rewardPool.Cmp(wantReward) != 0 {
+		t.Fatalf("reward pool = %s, want %s", rewardPool, wantReward)
+	}
+
+	// Commit this block and reset to that committed root: unlike the
+	// pre-commit case above, this write is now part of a real committed
+	// block and must survive.
+	committedRoot, err := sp.Commit(1)
+	if err != nil {
+		t.Fatalf("commit block 1: %v", err)
+	}
+	if err := sp.ResetToRoot(committedRoot); err != nil {
+		t.Fatalf("reset to committed root: %v", err)
+	}
+	manager = nhbstate.NewManager(sp.Trie)
+	bootstrapped, err = manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		t.Fatalf("read bootstrap flag after reset to committed root: %v", err)
+	}
+	if !bootstrapped {
+		t.Fatalf("bootstrap must survive a reset to its own committed root")
 	}
 }

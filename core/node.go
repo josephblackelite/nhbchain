@@ -461,9 +461,17 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 	stateProcessor.SetAdminWallet(treasury, hasAdminWallet)
-	if err := stateProcessor.EnsureZNHBPoolsBootstrapped(); err != nil {
-		return nil, fmt.Errorf("bootstrap ZNHB sale/reward pools: %w", err)
-	}
+	// Deliberately NOT calling EnsureZNHBPoolsBootstrapped() here. A prior
+	// version of this code did, and it caused a real production incident:
+	// this call happens before ensurePendingStateMatchesCommittedHeadLocked
+	// ("startup") runs further down NewNode, so its writes were still
+	// pending/uncommitted when that drift-reset compared PendingRoot()
+	// against the last committed header and silently discarded them --
+	// the node came up looking healthy with no error, but the pools were
+	// never actually bootstrapped. EnsureZNHBPoolsBootstrapped is instead
+	// called from ProcessBlockLifecycle (core/epochs.go), so its writes are
+	// folded into a real committed block on every validator identically,
+	// the same way CheckZNHBSupplyInvariant's adjacent call already is.
 	if hasAdminWallet {
 		// Activates the halving-schedule validator/staking reward emission
 		// (core/rewards/halving.go) backed by the ZNHB Reward Pool. This is a

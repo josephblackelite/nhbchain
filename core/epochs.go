@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"math/big"
 	"time"
 
@@ -132,6 +133,16 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	}
 	if err := sp.accrueEpochRewards(height); err != nil {
 		return err
+	}
+	// Called here, as part of normal block state-transition, rather than at
+	// node startup: EnsureZNHBPoolsBootstrapped's writes must be folded into
+	// a real committed block (like every other write in this function) so
+	// they can't be silently discarded by the startup/peer-block state-root
+	// drift-reset in core/node.go -- see NewNode's comment on why it
+	// deliberately does not call this itself. Idempotent, so this is a
+	// cheap no-op on every block after the first successful bootstrap.
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		return fmt.Errorf("bootstrap ZNHB sale/reward pools: %w", err)
 	}
 	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
 		return err
