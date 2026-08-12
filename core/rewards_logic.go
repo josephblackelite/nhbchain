@@ -2,12 +2,14 @@ package core
 
 import (
 	"bytes"
+	"fmt"
 	"math/big"
 	"sort"
 	"strconv"
 
 	"nhbchain/core/epoch"
 	"nhbchain/core/rewards"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 )
@@ -50,6 +52,19 @@ func (sp *StateProcessor) accrueEpochRewards(height uint64) error {
 	return nil
 }
 
+// scaleRewardToBudget proportionally reduces amount so that, summed across
+// every reward category, an epoch's total payout never exceeds budget.
+// Always rounds down (protocol-favoring, mirroring curve.RoundZNHBDown's
+// rounding direction for the same reason) -- never grants more ZNHB than
+// the Reward Pool actually has, even after each category's own rounding.
+func scaleRewardToBudget(amount, plannedTotal, budget *big.Int) *big.Int {
+	if plannedTotal == nil || plannedTotal.Sign() <= 0 || amount == nil || amount.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	scaled := new(big.Int).Mul(amount, budget)
+	return scaled.Quo(scaled, plannedTotal)
+}
+
 type accountReward struct {
 	addr       []byte
 	total      *big.Int
@@ -84,6 +99,39 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 		}
 	}
 
+	// Validator/staking rewards are backed by the ZNHB Reward Pool
+	// (core/tokenomics), not minted from nothing -- when a real admin
+	// wallet is configured, the pool's live remaining balance is the hard
+	// ceiling on what this epoch can pay out, never the schedule's planned
+	// amount alone. Without an admin wallet there is no Reward Pool to
+	// check against, matching how EnsureZNHBPoolsBootstrapped/
+	// CheckZNHBSupplyInvariant already treat that case as a no-op (e.g. in
+	// unit tests that exercise reward distribution without a genesis
+	// treasury).
+	var rewardManager *nhbstate.Manager
+	rewardPoolBalance := big.NewInt(0)
+	if sp.hasAdminWallet {
+		rewardManager = nhbstate.NewManager(sp.Trie)
+		balance, err := rewardManager.ZNHBRewardPoolBalance()
+		if err != nil {
+			return fmt.Errorf("settleEpochRewards: load reward pool balance: %w", err)
+		}
+		rewardPoolBalance = balance
+
+		plannedTotal := new(big.Int).Add(validatorsPlan, stakersPlan)
+		plannedTotal.Add(plannedTotal, engagementPlan)
+		if plannedTotal.Cmp(rewardPoolBalance) > 0 {
+			// The schedule wants to pay out more than the pool has left --
+			// scale every category down proportionally (never round up) so
+			// the epoch's total payout can never exceed what the pool can
+			// actually back, instead of paying some categories in full
+			// while silently starving others.
+			validatorsPlan = scaleRewardToBudget(validatorsPlan, plannedTotal, rewardPoolBalance)
+			stakersPlan = scaleRewardToBudget(stakersPlan, plannedTotal, rewardPoolBalance)
+			engagementPlan = scaleRewardToBudget(engagementPlan, plannedTotal, rewardPoolBalance)
+		}
+	}
+
 	rewardMap := make(map[string]*accountReward)
 	validatorPaid := distributeValidatorRewards(validatorsPlan, snapshot.Selected, rewardMap)
 	stakerPaid := distributeStakerRewards(stakersPlan, snapshot.Weights, rewardMap)
@@ -102,6 +150,18 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 	payouts, err := sp.applyAccountRewards(snapshot.Epoch, rewardMap)
 	if err != nil {
 		return err
+	}
+
+	if sp.hasAdminWallet && paidTotal.Sign() > 0 {
+		newRewardPoolBalance := new(big.Int).Sub(rewardPoolBalance, paidTotal)
+		if newRewardPoolBalance.Sign() < 0 {
+			// Unreachable given the clamp above, but never let the pool go
+			// negative regardless of any formula or rounding edge case.
+			newRewardPoolBalance = big.NewInt(0)
+		}
+		if err := rewardManager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
+			return fmt.Errorf("settleEpochRewards: update reward pool balance: %w", err)
+		}
 	}
 
 	settlement := rewards.EpochSettlement{
