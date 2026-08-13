@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/rlp"
+
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/potso"
 )
@@ -25,6 +28,37 @@ func fundAccount(t *testing.T, node *Node, addr [20]byte, amount *big.Int) {
 	}
 }
 
+// submitPotsoStakeTx builds, signs (with key, at nonce), and applies a
+// TxTypePotsoStakeLock/Unbond/Withdraw transaction directly against node's
+// StateProcessor -- the owner is always the signer, never a payload field
+// (see core/potso_stake_tx.go), and replay protection is the standard
+// account nonce (checked generically by sp.validateSenderAccount before
+// dispatch), replacing the old bespoke authNonce parameter these tests used
+// to pass to Node.PotsoStakeLock/Unbond/Withdraw directly.
+func submitPotsoStakeTx(t *testing.T, node *Node, key *crypto.PrivateKey, nonce uint64, txType types.TxType, amount *big.Int) error {
+	t.Helper()
+	var data []byte
+	if txType != types.TxTypePotsoStakeWithdraw {
+		encoded, err := rlp.EncodeToBytes(struct{ Amount *big.Int }{Amount: amount})
+		if err != nil {
+			t.Fatalf("encode payload: %v", err)
+		}
+		data = encoded
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     txType,
+		Nonce:    nonce,
+		Data:     data,
+		GasLimit: 100_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(key.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+	return node.state.ApplyTransaction(tx)
+}
+
 func TestPotsoStakeLifecycle(t *testing.T) {
 	node := newTestNode(t)
 	ownerKey, err := crypto.GeneratePrivateKey()
@@ -34,25 +68,19 @@ func TestPotsoStakeLifecycle(t *testing.T) {
 	owner := toAddress(ownerKey)
 	fundAccount(t, node, owner, big.NewInt(1000))
 
-        nonce1, lock1, err := node.PotsoStakeLock(owner, big.NewInt(600), 1)
-        if err != nil {
-                t.Fatalf("stake lock: %v", err)
-        }
-        if lock1 == nil || lock1.Amount == nil || lock1.Amount.String() != "600" {
-                t.Fatalf("unexpected lock1 amount: %+v", lock1)
-        }
-        if _, _, err := node.PotsoStakeLock(owner, big.NewInt(1), 1); err == nil {
-                t.Fatalf("expected stale nonce rejection")
-        }
-        nonce2, _, err := node.PotsoStakeLock(owner, big.NewInt(400), 2)
-        if err != nil {
-                t.Fatalf("second stake lock: %v", err)
-        }
-        if nonce2 == nonce1 {
-                t.Fatalf("expected distinct nonces")
-        }
+	if err := submitPotsoStakeTx(t, node, ownerKey, 0, types.TxTypePotsoStakeLock, big.NewInt(600)); err != nil {
+		t.Fatalf("stake lock: %v", err)
+	}
+	// Same nonce again must be rejected by the standard account-nonce check
+	// -- there is no separate bespoke nonce left to duplicate/stale-check.
+	if err := submitPotsoStakeTx(t, node, ownerKey, 0, types.TxTypePotsoStakeLock, big.NewInt(1)); err == nil {
+		t.Fatalf("expected stale nonce rejection")
+	}
+	if err := submitPotsoStakeTx(t, node, ownerKey, 1, types.TxTypePotsoStakeLock, big.NewInt(400)); err != nil {
+		t.Fatalf("second stake lock: %v", err)
+	}
 
-        info, err := node.PotsoStakeInfo(owner)
+	info, err := node.PotsoStakeInfo(owner)
 	if err != nil {
 		t.Fatalf("stake info: %v", err)
 	}
@@ -63,20 +91,16 @@ func TestPotsoStakeLifecycle(t *testing.T) {
 		t.Fatalf("expected two locks, got %d", len(info.Locks))
 	}
 
-        unbonded, withdrawAt, err := node.PotsoStakeUnbond(owner, big.NewInt(700), 3)
-        if err != nil {
-                t.Fatalf("stake unbond: %v", err)
-        }
-        if unbonded == nil || unbonded.String() != "700" {
-                t.Fatalf("unexpected unbonded amount %v", unbonded)
-        }
-        if _, _, err := node.PotsoStakeUnbond(owner, big.NewInt(1), 3); err == nil {
-                t.Fatalf("expected stale nonce rejection for unbond")
-        }
-        info, err = node.PotsoStakeInfo(owner)
-        if err != nil {
-                t.Fatalf("stake info after unbond: %v", err)
-        }
+	if err := submitPotsoStakeTx(t, node, ownerKey, 2, types.TxTypePotsoStakeUnbond, big.NewInt(700)); err != nil {
+		t.Fatalf("stake unbond: %v", err)
+	}
+	if err := submitPotsoStakeTx(t, node, ownerKey, 2, types.TxTypePotsoStakeUnbond, big.NewInt(1)); err == nil {
+		t.Fatalf("expected stale nonce rejection for unbond")
+	}
+	info, err = node.PotsoStakeInfo(owner)
+	if err != nil {
+		t.Fatalf("stake info after unbond: %v", err)
+	}
 	if info.Bonded.String() != "300" {
 		t.Fatalf("expected bonded 300, got %s", info.Bonded.String())
 	}
@@ -87,9 +111,22 @@ func TestPotsoStakeLifecycle(t *testing.T) {
 		t.Fatalf("expected zero withdrawable, got %s", info.Withdrawable.String())
 	}
 
-        if _, err := node.PotsoStakeWithdraw(owner, 4); err == nil {
-                t.Fatalf("expected withdraw to fail before cooldown")
-        }
+	// Find the withdrawAt timestamp the unbond just scheduled, to relocate
+	// the queue entry into the past below (this test doesn't want to sleep
+	// 7 real days).
+	var withdrawAt uint64
+	for _, lock := range info.Locks {
+		if lock.UnbondAt != 0 && lock.WithdrawAt > withdrawAt {
+			withdrawAt = lock.WithdrawAt
+		}
+	}
+	if withdrawAt == 0 {
+		t.Fatalf("expected an unbonding lock with a scheduled withdrawAt")
+	}
+
+	if err := submitPotsoStakeTx(t, node, ownerKey, 3, types.TxTypePotsoStakeWithdraw, nil); err == nil {
+		t.Fatalf("expected withdraw to fail before cooldown")
+	}
 
 	past := uint64(time.Now().Add(-time.Hour).Unix())
 	originalDay := potso.WithdrawDay(withdrawAt)
@@ -128,39 +165,25 @@ func TestPotsoStakeLifecycle(t *testing.T) {
 	}
 	node.stateMu.Unlock()
 
-        payouts, err := node.PotsoStakeWithdraw(owner, 4)
-        if err != nil {
-                t.Fatalf("withdraw matured: %v", err)
-        }
-	total := big.NewInt(0)
-	for _, payout := range payouts {
-		total.Add(total, payout.Amount)
-	}
-	if total.String() != "700" {
-		t.Fatalf("expected 700 withdrawn, got %s", total.String())
-	}
-	if len(payouts) == 0 {
-		t.Fatalf("expected at least one payout")
+	// submitPotsoStakeTx at nonce 3 above failed validation before the tx
+	// ever incremented the account nonce, so 3 is still the next valid one.
+	if err := submitPotsoStakeTx(t, node, ownerKey, 3, types.TxTypePotsoStakeWithdraw, nil); err != nil {
+		t.Fatalf("withdraw matured: %v", err)
 	}
 
-        if _, err := node.PotsoStakeWithdraw(owner, 4); err == nil {
-                t.Fatalf("expected stale nonce rejection for withdraw")
-        }
-
-        second, err := node.PotsoStakeWithdraw(owner, 5)
-        if err != nil {
-                t.Fatalf("idempotent withdraw failed: %v", err)
-        }
-	if len(second) != 0 {
-		t.Fatalf("expected no payouts on second withdraw, got %d", len(second))
-	}
-
-	info, err = node.PotsoStakeInfo(owner)
+	infoAfterWithdraw, err := node.PotsoStakeInfo(owner)
 	if err != nil {
 		t.Fatalf("stake info after withdraw: %v", err)
 	}
-	if info.Withdrawable.Sign() != 0 {
-		t.Fatalf("expected no withdrawable after payout, got %s", info.Withdrawable.String())
+	if infoAfterWithdraw.Withdrawable.Sign() != 0 {
+		t.Fatalf("expected no withdrawable after payout, got %s", infoAfterWithdraw.Withdrawable.String())
+	}
+
+	if err := submitPotsoStakeTx(t, node, ownerKey, 3, types.TxTypePotsoStakeWithdraw, nil); err == nil {
+		t.Fatalf("expected stale nonce rejection for withdraw")
+	}
+	if err := submitPotsoStakeTx(t, node, ownerKey, 4, types.TxTypePotsoStakeWithdraw, nil); err != nil {
+		t.Fatalf("idempotent withdraw failed: %v", err)
 	}
 
 	events := node.Events()

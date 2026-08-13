@@ -3088,6 +3088,21 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applyLendingCreatePoolTransaction(tx, sender)
+	case types.TxTypePotsoStakeLock:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyPotsoStakeLockTransaction(tx, sender)
+	case types.TxTypePotsoStakeUnbond:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyPotsoStakeUnbondTransaction(tx, sender)
+	case types.TxTypePotsoStakeWithdraw:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyPotsoStakeWithdrawTransaction(tx, sender)
 	case types.TxTypeLendingSupplyNHB:
 		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
 			return err

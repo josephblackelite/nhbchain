@@ -1683,24 +1683,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoLeaderboard(recorder, r, req)
 	case "potso_params":
 		s.handlePotsoParams(recorder, r, req)
-	case "potso_stake_lock":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
-		s.handlePotsoStakeLock(recorder, r, req)
-	case "potso_stake_unbond":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
-		s.handlePotsoStakeUnbond(recorder, r, req)
-	case "potso_stake_withdraw":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
-		s.handlePotsoStakeWithdraw(recorder, r, req)
+	// potso_stake_lock/unbond/withdraw were removed -- stake actions now go
+	// through nhb_sendTransaction like every other signed native
+	// transaction type (see rpc/potso_stake_handlers.go's comment).
 	case "potso_stake_info":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)

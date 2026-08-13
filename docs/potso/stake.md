@@ -57,38 +57,54 @@ These events enable downstream consumers to track lock creation, pending withdra
 
 ## JSON-RPC Endpoints
 
-All staking RPC methods require bearer authentication (`NHB_RPC_TOKEN`) and an ECDSA signature from the owner authorising the action. Requests use decimal strings for ZNHB amounts.
+Lock, unbond, and withdraw are real signed native transactions
+(`TxTypePotsoStakeLock`/`Unbond`/`Withdraw`), submitted via the generic
+`nhb_sendTransaction` RPC method like every other signed transaction on this
+chain -- there is no bespoke `potso_stake_lock`/`potso_stake_unbond`/
+`potso_stake_withdraw` RPC method anymore. Only the read-only status query
+remains a dedicated method:
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `potso_stake_lock` | `{owner, amount, nonce, signature}` | `{ok, nonce}` |
-| `potso_stake_unbond` | `{owner, amount, nonce, signature}` | `{ok, amount, withdrawAt}` |
-| `potso_stake_withdraw` | `{owner, nonce, signature}` | `{withdrawn: [{nonce, amount}]}` |
 | `potso_stake_info` | `{owner}` | `{bonded, pendingUnbond, withdrawable, locks}` |
 
-Signatures cover `sha256("potso_stake_<action>|<owner>|<amount>|<nonce>")`. The amount segment is omitted for withdrawals but the nonce is always present. The nonce must increase monotonically per account across all staking actions; replays with previously used nonces are rejected. Any mismatch between the recovered address and the provided owner yields a `signature does not match owner` error.
+The owner of a lock/unbond/withdraw is always the transaction's own
+cryptographically recovered signer (`tx.From()`) -- there is no owner field
+in the payload to spoof, and no separate bespoke signature or nonce to
+manage. Replay protection is the same standard account nonce every other
+transaction on this chain uses (`nhb_getBalance`'s `nonce` field), not a
+staking-specific one. `TxTypePotsoStakeLock`/`Unbond` carry an RLP-encoded
+`{Amount}` payload (a positive ZNHB-wei integer); `TxTypePotsoStakeWithdraw`
+carries no payload at all.
 
-Withdrawals return a list of processed lock fragments and are safe to call repeatedly—subsequent calls simply return an empty list.
+Withdrawals process every matured lock fragment in one transaction and are
+safe to submit repeatedly -- a call with nothing left to withdraw succeeds
+as a no-op rather than erroring.
 
 ## CLI Support
 
 `nhb-cli` bundles convenience wrappers under `potso stake`:
 
 ```bash
-nhb-cli potso stake lock --owner nhb1... --amount 100e18 --nonce 1 --key wallet.key
-nhb-cli potso stake unbond --owner nhb1... --amount 40e18 --nonce 2 --key wallet.key
-nhb-cli potso stake withdraw --owner nhb1... --nonce 3 --key wallet.key
+nhb-cli potso stake lock --amount 100e18 --key wallet.key
+nhb-cli potso stake unbond --amount 40e18 --key wallet.key
+nhb-cli potso stake withdraw --key wallet.key
 nhb-cli potso stake info --owner nhb1...
 ```
 
-Amounts accept decimal or scientific notation (`100e18`, `1.5e18`, etc.). Callers must advance the staking nonce for every lock, unbond, or withdraw request; reusing a nonce causes the RPC to return `staking nonce <n> has already been used`. The CLI automatically signs the payload using the provided private key and forwards the bearer token when available.
+Amounts accept decimal or scientific notation (`100e18`, `1.5e18`, etc.).
+`lock`/`unbond`/`withdraw` sign and broadcast a real transaction using the
+key's own address as owner and the account's current on-chain nonce -- there
+is no `--owner` or `--nonce` flag anymore, since the owner is always
+whichever key signs, and the nonce is fetched automatically. `info` remains
+a plain read-only query by address.
 
 ## Compliance & Operational Notes
 
 * **Cooldown Enforcement** – `StakeUnbondSeconds` defaults to 604800 seconds (7 days). Operators may adjust this constant before network launch but must coordinate with wallet providers and publish any changes.
 * **Vault Solvency** – Periodically reconcile `potso/stake/<owner>` totals against the vault balance to ensure no out-of-band transfers occurred. Any imbalance breaks withdrawal guarantees.
 * **Idempotency Guarantees** – Locks are deleted immediately after a successful withdrawal. This ensures repeated calls cannot double-spend funds and provides clear audit trails.
-* **Signature Requirements** – All state-changing RPCs demand EOA signatures from the owner. This protects against compromised RPC credentials; possession of the private key remains the final authority.
+* **Signature Requirements** – Every state-changing action is a standard signed transaction from the owner's own key, applied identically by every validator via consensus (not a single validator's local RPC call). Possession of the private key remains the final authority.
 * **Monitoring** – Track `potso.stake.unbonded` events to forecast upcoming withdrawals and confirm the queue drains as expected. Alert on large pending totals that fail to mature.
 
 By following the lifecycle and operational guidance above, validators and compliance auditors can transparently monitor staking activity without ambiguity.

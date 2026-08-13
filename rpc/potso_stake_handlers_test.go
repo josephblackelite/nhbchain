@@ -1,29 +1,15 @@
 package rpc
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http/httptest"
 	"testing"
-	"time"
-
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 	"nhbchain/native/potso"
 )
-
-func signStake(t *testing.T, key *crypto.PrivateKey, action, owner string, amount *big.Int, nonce uint64) string {
-        t.Helper()
-        digest := potsoStakeDigest(action, owner, amount, nonce)
-        sig, err := ethcrypto.Sign(digest, key.PrivateKey)
-        if err != nil {
-                t.Fatalf("sign stake action: %v", err)
-        }
-        return "0x" + hex.EncodeToString(sig)
-}
 
 func addressFromKey(key *crypto.PrivateKey) [20]byte {
 	var out [20]byte
@@ -31,7 +17,17 @@ func addressFromKey(key *crypto.PrivateKey) [20]byte {
 	return out
 }
 
-func TestPotsoStakeHandlersFlow(t *testing.T) {
+// TestPotsoStakeInfoReportsLocks covers the only potso_stake_* RPC method
+// that still exists (handlePotsoStakeInfo, read-only) -- lock/unbond/withdraw
+// are real signed transactions now (TxTypePotsoStakeLock/Unbond/Withdraw,
+// core/potso_stake_tx.go), submitted via nhb_sendTransaction like every
+// other signed native transaction type, not bespoke RPC methods; their
+// lifecycle (including replay rejection via the standard account nonce) is
+// covered at the state-transition level by core/potso_stake_test.go's
+// TestPotsoStakeLifecycle. This test seeds lock state directly (the shape a
+// real TxTypePotsoStakeLock/Unbond would have produced) purely to verify
+// potso_stake_info reads it back correctly.
+func TestPotsoStakeInfoReportsLocks(t *testing.T) {
 	env := newTestEnv(t)
 	ownerKey, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -45,142 +41,31 @@ func TestPotsoStakeHandlersFlow(t *testing.T) {
 		if err != nil {
 			return err
 		}
-                account.BalanceZNHB = big.NewInt(2000)
-                return manager.PutAccount(ownerBytes[:], account)
-        }); err != nil {
-                t.Fatalf("fund owner: %v", err)
-        }
-
-        lockParams := potsoStakeLockParams{Owner: owner, Amount: "600", Nonce: 1, Signature: signStake(t, ownerKey, "lock", owner, big.NewInt(600), 1)}
-        lockReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, lockParams)}}
-        rec := httptest.NewRecorder()
-        env.server.handlePotsoStakeLock(rec, env.newRequest(), lockReq)
-        result, rpcErr := decodeRPCResponse(t, rec)
-        if rpcErr != nil {
-		t.Fatalf("lock rpc error: %+v", rpcErr)
-	}
-	var lockResp potsoStakeLockResult
-	if err := json.Unmarshal(result, &lockResp); err != nil {
-		t.Fatalf("decode lock response: %v", err)
-        }
-        if !lockResp.OK || lockResp.Nonce == 0 {
-                t.Fatalf("unexpected lock response: %+v", lockResp)
-        }
-
-        replayLock := httptest.NewRecorder()
-        env.server.handlePotsoStakeLock(replayLock, env.newRequest(), lockReq)
-        if _, err := decodeRPCResponse(t, replayLock); err == nil {
-                t.Fatalf("expected replayed lock to fail")
-        }
-
-        unbondParams := potsoStakeUnbondParams{Owner: owner, Amount: "400", Nonce: 2, Signature: signStake(t, ownerKey, "unbond", owner, big.NewInt(400), 2)}
-        unbondReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, unbondParams)}}
-        unbondRec := httptest.NewRecorder()
-        env.server.handlePotsoStakeUnbond(unbondRec, env.newRequest(), unbondReq)
-        result, rpcErr = decodeRPCResponse(t, unbondRec)
-        if rpcErr != nil {
-		t.Fatalf("unbond rpc error: %+v", rpcErr)
-	}
-	var unbondResp potsoStakeUnbondResult
-	if err := json.Unmarshal(result, &unbondResp); err != nil {
-		t.Fatalf("decode unbond response: %v", err)
-        }
-        if !unbondResp.OK || unbondResp.Amount != "400" || unbondResp.WithdrawAt == 0 {
-                t.Fatalf("unexpected unbond response: %+v", unbondResp)
-        }
-
-        replayUnbond := httptest.NewRecorder()
-        env.server.handlePotsoStakeUnbond(replayUnbond, env.newRequest(), unbondReq)
-        if _, err := decodeRPCResponse(t, replayUnbond); err == nil {
-                t.Fatalf("expected replayed unbond to fail")
-        }
-
-        withdrawParams := potsoStakeWithdrawParams{Owner: owner, Nonce: 3, Signature: signStake(t, ownerKey, "withdraw", owner, nil, 3)}
-        withdrawReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, withdrawParams)}}
-        earlyRec := httptest.NewRecorder()
-        env.server.handlePotsoStakeWithdraw(earlyRec, env.newRequest(), withdrawReq)
-        if _, rpcErr = decodeRPCResponse(t, earlyRec); rpcErr == nil {
-                t.Fatalf("expected early withdraw to fail")
-	}
-
-	past := uint64(time.Now().Add(-time.Hour).Unix())
-	originalDay := potso.WithdrawDay(unbondResp.WithdrawAt)
-	newDay := potso.WithdrawDay(past)
-
-	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
-		entries, err := manager.PotsoStakeQueueEntries(originalDay)
-		if err != nil {
+		account.BalanceZNHB = big.NewInt(1400)
+		if err := manager.PutAccount(ownerBytes[:], account); err != nil {
 			return err
 		}
-		if err := manager.PotsoStakePutQueueEntries(originalDay, nil); err != nil {
+		bondedLock := &potso.StakeLock{Owner: ownerBytes, Amount: big.NewInt(600), CreatedAt: 1}
+		if err := manager.PotsoStakePutLock(ownerBytes, 1, bondedLock); err != nil {
 			return err
 		}
-		for _, entry := range entries {
-			lock, ok, getErr := manager.PotsoStakeGetLock(ownerBytes, entry.Nonce)
-			if getErr != nil {
-				return getErr
-			}
-			if !ok {
-				continue
-			}
-			lock.WithdrawAt = past
-			if err := manager.PotsoStakePutLock(ownerBytes, entry.Nonce, lock); err != nil {
-				return err
-			}
-			entry.Amount = new(big.Int).Set(lock.Amount)
-			if err := manager.PotsoStakeQueueAppend(newDay, entry); err != nil {
-				return err
-			}
+		unbondingLock := &potso.StakeLock{Owner: ownerBytes, Amount: big.NewInt(400), CreatedAt: 1, UnbondAt: 2, WithdrawAt: 999999999999}
+		if err := manager.PotsoStakePutLock(ownerBytes, 2, unbondingLock); err != nil {
+			return err
 		}
-		return nil
+		if err := manager.PotsoStakePutLockNonces(ownerBytes, []uint64{1, 2}); err != nil {
+			return err
+		}
+		return manager.PotsoStakeSetBondedTotal(ownerBytes, big.NewInt(600))
 	}); err != nil {
-		t.Fatalf("adjust queue: %v", err)
+		t.Fatalf("seed stake state: %v", err)
 	}
 
-	withdrawRec := httptest.NewRecorder()
-	env.server.handlePotsoStakeWithdraw(withdrawRec, env.newRequest(), withdrawReq)
-	result, rpcErr = decodeRPCResponse(t, withdrawRec)
-	if rpcErr != nil {
-		t.Fatalf("withdraw matured error: %+v", rpcErr)
-	}
-	var withdrawResp potsoStakeWithdrawResult
-	if err := json.Unmarshal(result, &withdrawResp); err != nil {
-		t.Fatalf("decode withdraw response: %v", err)
-	}
-        if len(withdrawResp.Withdrawn) == 0 {
-                t.Fatalf("expected payouts, got none")
-        }
-        if withdrawResp.Withdrawn[0].Amount == "" {
-                t.Fatalf("missing amount in payout")
-        }
-
-        replayWithdraw := httptest.NewRecorder()
-        env.server.handlePotsoStakeWithdraw(replayWithdraw, env.newRequest(), withdrawReq)
-        if _, err := decodeRPCResponse(t, replayWithdraw); err == nil {
-                t.Fatalf("expected replayed withdraw to fail")
-        }
-
-        followUpParams := potsoStakeWithdrawParams{Owner: owner, Nonce: 4, Signature: signStake(t, ownerKey, "withdraw", owner, nil, 4)}
-        followUpReq := &RPCRequest{ID: 5, Params: []json.RawMessage{marshalParam(t, followUpParams)}}
-        emptyRec := httptest.NewRecorder()
-        env.server.handlePotsoStakeWithdraw(emptyRec, env.newRequest(), followUpReq)
-        result, rpcErr = decodeRPCResponse(t, emptyRec)
-        if rpcErr != nil {
-                t.Fatalf("second withdraw rpc error: %+v", rpcErr)
-        }
-        var emptyResp potsoStakeWithdrawResult
-        if err := json.Unmarshal(result, &emptyResp); err != nil {
-                t.Fatalf("decode empty withdraw response: %v", err)
-        }
-        if len(emptyResp.Withdrawn) != 0 {
-                t.Fatalf("expected empty withdraw response, got %+v", emptyResp)
-        }
-
-        infoParams := potsoStakeInfoParams{Owner: owner}
-        infoReq := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, infoParams)}}
-        infoRec := httptest.NewRecorder()
-        env.server.handlePotsoStakeInfo(infoRec, env.newRequest(), infoReq)
-	result, rpcErr = decodeRPCResponse(t, infoRec)
+	infoParams := potsoStakeInfoParams{Owner: owner}
+	infoReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, infoParams)}}
+	infoRec := httptest.NewRecorder()
+	env.server.handlePotsoStakeInfo(infoRec, env.newRequest(), infoReq)
+	result, rpcErr := decodeRPCResponse(t, infoRec)
 	if rpcErr != nil {
 		t.Fatalf("info rpc error: %+v", rpcErr)
 	}
@@ -188,7 +73,13 @@ func TestPotsoStakeHandlersFlow(t *testing.T) {
 	if err := json.Unmarshal(result, &infoResp); err != nil {
 		t.Fatalf("decode info response: %v", err)
 	}
-	if infoResp.Bonded == "" || infoResp.PendingUnbond == "" || infoResp.Withdrawable == "" {
-		t.Fatalf("unexpected info payload: %+v", infoResp)
+	if infoResp.Bonded != "600" {
+		t.Fatalf("expected bonded 600, got %s", infoResp.Bonded)
+	}
+	if infoResp.PendingUnbond != "400" {
+		t.Fatalf("expected pendingUnbond 400, got %s", infoResp.PendingUnbond)
+	}
+	if len(infoResp.Locks) != 2 {
+		t.Fatalf("expected two locks, got %+v", infoResp.Locks)
 	}
 }

@@ -144,6 +144,22 @@ const (
 	// current tip; do not reuse without re-checking for newly added types
 	// above this comment.
 	TxTypeLendingCreatePool TxType = 0x2C
+	// TxTypePotsoStakeLock/Unbond/Withdraw replace the old
+	// Node.PotsoStakeLock/Unbond/Withdraw direct-state-trie writes
+	// (core/node.go, removed) with real signed, consensus-routed
+	// transactions -- see core/potso_stake_tx.go's doc comment for the
+	// full rationale, including why the bespoke sha256/secp256k1
+	// signature + authNonce scheme the old RPC methods used
+	// (rpc/potso_stake_handlers.go, removed) is now fully redundant with
+	// the standard envelope signature (tx.From()) and standard account
+	// nonce. The owner of a lock/unbond/withdraw is always tx.From(),
+	// never a payload field. 0x2D is the next free byte after
+	// TxTypeLendingCreatePool (0x2C) -- verified against this file's
+	// real, current tip; do not reuse without re-checking for newly added
+	// types above this comment.
+	TxTypePotsoStakeLock     TxType = 0x2D
+	TxTypePotsoStakeUnbond   TxType = 0x2E
+	TxTypePotsoStakeWithdraw TxType = 0x2F
 )
 
 // RequiresSignature reports whether the transaction type must carry an
