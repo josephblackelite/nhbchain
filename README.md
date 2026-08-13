@@ -235,6 +235,9 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 
 ### Join As A Validator In One Command
 
+For the full step-by-step walkthrough, including troubleshooting, see
+[Validator Onboarding Guide](docs/validators/onboarding.md).
+
 On a fresh Ubuntu server, clone the repo and run:
 
 ```bash
@@ -345,7 +348,7 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 - **Consensus:** [BFT height sync](docs/consensus/bft-height-sync.md), [Consensus invariants](docs/consensus/invariants.md).
 - **Performance:** [Baselines](docs/perf/baselines.md), [Tuning guide](docs/perf/tuning.md).
 - **Security:** [Network security](docs/security/networking.md), [Supply chain security](docs/security/supply-chain.md).
-- **Operations:** [Configuration guardrails](docs/ops/configuration.md), [Snapshot operations](docs/ops/snapshots.md), [Validator runbook](docs/ops/validator-runbook.md).
+- **Operations:** [Configuration guardrails](docs/ops/configuration.md), [Snapshot operations](docs/ops/snapshots.md), [Validator runbook](docs/ops/validator-runbook.md), [Validator onboarding guide](docs/validators/onboarding.md).
 
 ### Operational Audit Harness
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=NHBChain Buyback Reference-Price Daemon (buybackd)
+After=network-online.target nhb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhb
+Group=nhb
+WorkingDirectory=/opt/nhbchain
+EnvironmentFile=/etc/nhbchain/buybackd.env
+ExecStart=/opt/nhbchain/bin/buybackd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
