@@ -186,8 +186,12 @@ ClientVersion = ""
   ManagementFeeBps = 100
   ManagementFeeCapBps = 500
   # Treasury receives every charge's management-fee share. Required once
-  # ManagementFeeBps > 0 -- node startup panics otherwise.
-  Treasury = ""
+  # ManagementFeeBps > 0 -- node startup panics otherwise. Set to the
+  # network's single treasury wallet (NHB_MASTER_TREASURY in node.env),
+  # which already receives every other fee app-wide -- confirmed
+  # 2026-08-13 after this placeholder caused both live validators to
+  # crash-loop on their first restart after this section was added.
+  Treasury = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
   # MaxRetries is how many consecutive failed charge attempts a
   # subscription tolerates (spaced RetryIntervalSeconds apart) before
   # being permanently suspended.
