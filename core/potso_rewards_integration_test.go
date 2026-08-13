@@ -225,6 +225,113 @@ func TestProcessPotsoRewardEpoch(t *testing.T) {
 	}
 }
 
+// TestProcessPotsoRewardEpoch_PreservesSupplyInvariant reproduces the
+// production incident where POTSO's reward treasury was configured to the
+// same account as the ZNHB admin/treasury wallet: processPotsoRewardEpoch's
+// auto-payout branch used to debit that wallet's BalanceZNHB without ever
+// shrinking the ZNHB Reward Pool ledger, so CheckZNHBSupplyInvariant broke
+// by exactly the paid-out amount the very first time the shared treasury
+// held a real, spendable balance. Real numbers from the incident: emission
+// paid out was 5,415,335,462,788,785,942 wei (~5.415 ZNHB) and the pool
+// sum came up short of the wallet's expected balance by that exact amount.
+func TestProcessPotsoRewardEpoch_PreservesSupplyInvariant(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(db.Close)
+	trie, err := statetrie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	sp, err := NewStateProcessor(trie)
+	if err != nil {
+		t.Fatalf("state processor: %v", err)
+	}
+
+	admin := [20]byte{0xAD}
+	sp.SetAdminWallet(admin, true)
+
+	manager := nhbstate.NewManager(sp.Trie)
+	salePool := big.NewInt(800_000)
+	rewardPool := big.NewInt(200_000)
+	if err := manager.ZNHBSetSalePoolBalance(salePool); err != nil {
+		t.Fatalf("seed sale pool: %v", err)
+	}
+	if err := manager.ZNHBSetRewardPoolBalance(rewardPool); err != nil {
+		t.Fatalf("seed reward pool: %v", err)
+	}
+	adminAcc, err := manager.GetAccount(admin[:])
+	if err != nil {
+		t.Fatalf("admin account: %v", err)
+	}
+	adminAcc.BalanceZNHB = new(big.Int).Add(salePool, rewardPool)
+	if err := manager.PutAccount(admin[:], adminAcc); err != nil {
+		t.Fatalf("store admin account: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold before any POTSO payout: %v", err)
+	}
+
+	// POTSO's TreasuryAddress deliberately set to the SAME account as the
+	// admin wallet, exactly matching this chain's live config.toml.
+	cfg := potso.RewardConfig{
+		EpochLengthBlocks:  2,
+		AlphaStakeBps:      7000,
+		MinPayoutWei:       big.NewInt(0),
+		EmissionPerEpoch:   big.NewInt(900),
+		TreasuryAddress:    admin,
+		MaxWinnersPerEpoch: 10,
+		CarryRemainder:     true,
+	}
+	if err := sp.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("set potso config: %v", err)
+	}
+
+	participantA := [20]byte{2}
+	participantB := [20]byte{3}
+	if err := manager.PotsoStakeSetBondedTotal(participantA, big.NewInt(600)); err != nil {
+		t.Fatalf("set stake A: %v", err)
+	}
+	if err := manager.PotsoStakeSetBondedTotal(participantB, big.NewInt(400)); err != nil {
+		t.Fatalf("set stake B: %v", err)
+	}
+
+	now := time.Unix(1_700_000_300, 0).UTC()
+	day := now.Format(potso.DayFormat)
+	if err := manager.PotsoPutMeter(participantA, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
+		t.Fatalf("put meter A: %v", err)
+	}
+	if err := manager.PotsoPutMeter(participantB, &potso.Meter{Day: day, UptimeSeconds: 10 * 60}); err != nil {
+		t.Fatalf("put meter B: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
+		t.Fatalf("process block 1: %v", err)
+	}
+	if err := sp.ProcessBlockLifecycle(2, now.Unix()); err != nil {
+		t.Fatalf("process block 2: %v", err)
+	}
+
+	meta, ok, err := manager.PotsoRewardsGetMeta(0)
+	if err != nil || !ok || meta == nil {
+		t.Fatalf("expected epoch meta: ok=%v err=%v", ok, err)
+	}
+	if meta.TotalPaid.Sign() <= 0 {
+		t.Fatalf("expected a nonzero payout so the invariant is actually exercised")
+	}
+
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant violated after POTSO auto payout: %v", err)
+	}
+
+	updatedRewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("reload reward pool: %v", err)
+	}
+	wantRewardPool := new(big.Int).Sub(rewardPool, meta.TotalPaid)
+	if updatedRewardPool.Cmp(wantRewardPool) != 0 {
+		t.Fatalf("reward pool not debited by paid amount: got %s want %s", updatedRewardPool, wantRewardPool)
+	}
+}
+
 func TestPotsoRewardClaimFlow(t *testing.T) {
 	db := storage.NewMemDB()
 	t.Cleanup(db.Close)

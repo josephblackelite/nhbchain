@@ -1748,6 +1748,38 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 			if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
 				return err
 			}
+			// POTSO's reward treasury commonly points at the same
+			// admin/treasury wallet the ZNHB Reward Pool ledger backs (see
+			// CheckZNHBSupplyInvariant). Debiting that wallet's balance
+			// above without also shrinking the pool label it backs mints
+			// ZNHB from nothing in the invariant's eyes -- mirrors the
+			// identical fix already applied to settleEpochRewards for the
+			// halving-schedule payout path.
+			if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
+				selfPaid := big.NewInt(0)
+				for _, winner := range outcome.Winners {
+					if bytes.Equal(winner.Address[:], sp.adminWallet[:]) {
+						selfPaid.Add(selfPaid, winner.Amount)
+					}
+				}
+				externalPaid := new(big.Int).Sub(totalPaid, selfPaid)
+				if externalPaid.Sign() > 0 {
+					rewardPool, err := manager.ZNHBRewardPoolBalance()
+					if err != nil {
+						return err
+					}
+					newRewardPool := new(big.Int).Sub(rewardPool, externalPaid)
+					if newRewardPool.Sign() < 0 {
+						// Unreachable in practice (the pool dwarfs any single
+						// POTSO epoch's emission), but never let the ledger
+						// go negative regardless of formula/rounding edges.
+						newRewardPool = big.NewInt(0)
+					}
+					if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		for _, winner := range outcome.Winners {
 			if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
