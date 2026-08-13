@@ -1726,20 +1726,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoGetEvidence(recorder, r, req)
 	case "potso_listEvidence":
 		s.handlePotsoListEvidence(recorder, r, req)
-	case "gov_propose":
-		s.handleGovernancePropose(recorder, r, req)
-	case "gov_vote":
-		s.handleGovernanceVote(recorder, r, req)
+	// gov_propose/gov_vote/gov_finalize/gov_queue/gov_execute were removed --
+	// governance writes now go through nhb_sendTransaction like every other
+	// signed native transaction type (see rpc/governance_handlers.go).
 	case "gov_proposal":
 		s.handleGovernanceProposal(recorder, r, req)
 	case "gov_list":
 		s.handleGovernanceList(recorder, r, req)
-	case "gov_finalize":
-		s.handleGovernanceFinalize(recorder, r, req)
-	case "gov_queue":
-		s.handleGovernanceQueue(recorder, r, req)
-	case "gov_execute":
-		s.handleGovernanceExecute(recorder, r, req)
 	case "reputation_verifySkill":
 		s.handleReputationVerifySkill(recorder, r, req)
 	default:

@@ -108,6 +108,28 @@ const (
 	// (0x25) -- verified against this file's real, current tip; do not
 	// reuse without re-checking for newly added types above this comment.
 	TxTypeLendingRefPrice TxType = 0x26
+	// TxTypeGovPropose/Vote/Finalize/Queue/Execute replace the old
+	// Node.GovernancePropose/Vote/Finalize/Queue/Execute direct-state-trie
+	// writes (core/node.go, removed) with real signed, gossiped,
+	// consensus-routed transactions -- the same fix pattern as
+	// TxTypeSwapVoucherMint's own predecessor bug. Unlike the senderless
+	// reference-price types above, these DO require a real envelope
+	// signature (RequiresSignature's default, not added to the exemption
+	// switch below): the proposer/voter's identity must be the
+	// cryptographically-recovered tx.From(), never a client-supplied
+	// payload field -- closing the previously wide-open hole where any RPC
+	// caller could submit a proposal or cast a vote "as" any address on the
+	// network with zero proof of private-key possession. 0x27 is the next
+	// free byte after TxTypeLendingRefPrice (0x26) -- verified against this
+	// file's real, current tip; do not reuse without re-checking for newly
+	// added types above this comment. (0x1F remains an unexplained
+	// historical gap between TxTypeSwapVoucherMint and the POS types --
+	// left alone rather than reused here.)
+	TxTypeGovPropose  TxType = 0x27
+	TxTypeGovVote     TxType = 0x28
+	TxTypeGovFinalize TxType = 0x29
+	TxTypeGovQueue    TxType = 0x2A
+	TxTypeGovExecute  TxType = 0x2B
 )
 
 // RequiresSignature reports whether the transaction type must carry an

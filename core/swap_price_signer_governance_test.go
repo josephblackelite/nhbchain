@@ -7,12 +7,140 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/rlp"
+
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/governance"
 	swap "nhbchain/native/swap"
 )
+
+// govProposePayload/govFinalizePayload/govQueuePayload/govExecutePayload
+// mirror the anonymous decode-side payload shapes in
+// core/governance_tx.go's applyGovProposeTransaction/applyGovFinalizeTransaction/
+// applyGovQueueTransaction/applyGovExecuteTransaction -- RLP encodes/decodes
+// structs positionally, so these only need to match structurally.
+type govProposePayload struct {
+	Kind    string
+	Payload string
+	Deposit *big.Int
+}
+
+type govProposalIDPayload struct {
+	ProposalID uint64
+}
+
+// submitGovTx builds, signs (with key, nonce 0 -- every helper here uses a
+// freshly generated throwaway key per call, since finalize/queue/execute
+// have no caller-identity requirement at the engine level and propose's
+// deposit-holding account is seeded fresh per test), and commits a single
+// governance transaction in its own block, driving the real
+// AddTransaction -> mempool -> CreateBlock -> CommitBlock path instead of
+// the removed Node.GovernancePropose/Queue/Execute direct-write methods.
+func submitGovTx(t *testing.T, node *Node, key *crypto.PrivateKey, txType types.TxType, payload interface{}) {
+	t.Helper()
+	data, err := rlp.EncodeToBytes(payload)
+	if err != nil {
+		t.Fatalf("encode governance payload: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     txType,
+		Nonce:    0,
+		Data:     data,
+		GasLimit: 100_000,
+		GasPrice: big.NewInt(0),
+	}
+	if err := tx.Sign(key.PrivateKey); err != nil {
+		t.Fatalf("sign governance tx: %v", err)
+	}
+	if err := node.AddTransaction(tx); err != nil {
+		t.Fatalf("add governance tx (type %d): %v", txType, err)
+	}
+	block, err := node.CreateBlock(append([]*types.Transaction(nil), node.mempool...))
+	if err != nil {
+		t.Fatalf("create block for governance tx: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block for governance tx: %v", err)
+	}
+}
+
+// submitGovProposeTx submits a real signed TxTypeGovPropose transaction from
+// a fresh key (funded with enough ZNHB to cover deposit) and returns the
+// resulting proposal's ID, found by listing proposals after commit rather
+// than assuming a specific sequential ID.
+func submitGovProposeTx(t *testing.T, node *Node, kind, payload string, deposit *big.Int) (uint64, *crypto.PrivateKey) {
+	t.Helper()
+	proposerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate proposer key: %v", err)
+	}
+	proposerAddr := toAddress(proposerKey)
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return m.PutAccount(proposerAddr[:], &types.Account{
+			BalanceZNHB: big.NewInt(1_000_000),
+			BalanceNHB:  big.NewInt(0),
+			Stake:       big.NewInt(0),
+		})
+	}); err != nil {
+		t.Fatalf("seed proposer: %v", err)
+	}
+
+	before, _, err := node.GovernanceListProposals(0, 100)
+	if err != nil {
+		t.Fatalf("list proposals before propose: %v", err)
+	}
+	seen := make(map[uint64]struct{}, len(before))
+	for _, p := range before {
+		seen[p.ID] = struct{}{}
+	}
+
+	submitGovTx(t, node, proposerKey, types.TxTypeGovPropose, govProposePayload{Kind: kind, Payload: payload, Deposit: deposit})
+
+	after, _, err := node.GovernanceListProposals(0, 100)
+	if err != nil {
+		t.Fatalf("list proposals after propose: %v", err)
+	}
+	for _, p := range after {
+		if _, ok := seen[p.ID]; !ok {
+			return p.ID, proposerKey
+		}
+	}
+	t.Fatalf("no new proposal found after submitting propose tx")
+	return 0, nil
+}
+
+func submitGovQueueTx(t *testing.T, node *Node, proposalID uint64) {
+	t.Helper()
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate queue key: %v", err)
+	}
+	addr := toAddress(key)
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return m.PutAccount(addr[:], &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0)})
+	}); err != nil {
+		t.Fatalf("seed queue sender: %v", err)
+	}
+	submitGovTx(t, node, key, types.TxTypeGovQueue, govProposalIDPayload{ProposalID: proposalID})
+}
+
+func submitGovExecuteTx(t *testing.T, node *Node, proposalID uint64) {
+	t.Helper()
+	key, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate execute key: %v", err)
+	}
+	addr := toAddress(key)
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return m.PutAccount(addr[:], &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0)})
+	}); err != nil {
+		t.Fatalf("seed execute sender: %v", err)
+	}
+	submitGovTx(t, node, key, types.TxTypeGovExecute, govProposalIDPayload{ProposalID: proposalID})
+}
 
 // TestSwapPriceSignerGovernanceProposalEndToEndMint closes gap 2a end to
 // end: it proves a governance proposal -- not a bespoke direct-write RPC --
@@ -51,25 +179,10 @@ func TestSwapPriceSignerGovernanceProposalEndToEndMint(t *testing.T) {
 	// mechanism, not incidentally reusing the helper's registration.
 	const provider = "otc-gateway"
 
-	var proposer [20]byte
-	proposer[0] = 0x42
-	if err := node.WithState(func(m *nhbstate.Manager) error {
-		return m.PutAccount(proposer[:], &types.Account{
-			BalanceZNHB: big.NewInt(1_000_000),
-			BalanceNHB:  big.NewInt(0),
-			Stake:       big.NewInt(0),
-		})
-	}); err != nil {
-		t.Fatalf("seed proposer: %v", err)
-	}
-
 	payload := fmt.Sprintf(`{"provider":%q,"signerAddress":%q,"memo":"gov e2e test"}`,
 		provider, crypto.MustNewAddress(crypto.NHBPrefix, oracleAddr[:]).String())
 
-	proposalID, err := node.GovernancePropose(proposer, governance.ProposalKindSwapPriceSignerUpdate, payload, big.NewInt(0))
-	if err != nil {
-		t.Fatalf("submit swap price signer proposal: %v", err)
-	}
+	proposalID, _ := submitGovProposeTx(t, node, governance.ProposalKindSwapPriceSignerUpdate, payload, big.NewInt(0))
 
 	// Confirm it is NOT registered yet -- the proposal must actually be
 	// executed before it takes effect, not merely submitted.
@@ -86,15 +199,11 @@ func TestSwapPriceSignerGovernanceProposalEndToEndMint(t *testing.T) {
 
 	markProposalPassed(t, node, proposalID)
 
-	if _, err := node.GovernanceQueue(proposalID); err != nil {
-		t.Fatalf("queue proposal: %v", err)
-	}
+	submitGovQueueTx(t, node, proposalID)
 
 	clearProposalTimelock(t, node, proposalID)
 
-	if _, err := node.GovernanceExecute(proposalID); err != nil {
-		t.Fatalf("execute proposal: %v", err)
-	}
+	submitGovExecuteTx(t, node, proposalID)
 
 	// Confirm registration landed in the exact state SwapPriceSigner reads,
 	// via the same governance.Engine.Execute -> nhbstate.Manager.SwapSetPriceSigner
@@ -163,18 +272,6 @@ func TestSwapPriceSignerGovernanceProposalEndToEndMint(t *testing.T) {
 func TestSwapPriceSignerGovernanceProposalRevoke(t *testing.T) {
 	node, minterKey, oracleKey := setupSwapVoucherTestNode(t)
 
-	var proposer [20]byte
-	proposer[1] = 0x7
-	if err := node.WithState(func(m *nhbstate.Manager) error {
-		return m.PutAccount(proposer[:], &types.Account{
-			BalanceZNHB: big.NewInt(1_000_000),
-			BalanceNHB:  big.NewInt(0),
-			Stake:       big.NewInt(0),
-		})
-	}); err != nil {
-		t.Fatalf("seed proposer: %v", err)
-	}
-
 	// Sanity: the signer registered by setupSwapVoucherTestNode works before
 	// the revoke.
 	recipientKey, err := crypto.GeneratePrivateKey()
@@ -184,18 +281,11 @@ func TestSwapPriceSignerGovernanceProposalRevoke(t *testing.T) {
 	recipient := toAddress(recipientKey)
 
 	revokePayload := `{"provider":"nowpayments","revoke":true}`
-	proposalID, err := node.GovernancePropose(proposer, governance.ProposalKindSwapPriceSignerUpdate, revokePayload, big.NewInt(0))
-	if err != nil {
-		t.Fatalf("submit revoke proposal: %v", err)
-	}
+	proposalID, _ := submitGovProposeTx(t, node, governance.ProposalKindSwapPriceSignerUpdate, revokePayload, big.NewInt(0))
 	markProposalPassed(t, node, proposalID)
-	if _, err := node.GovernanceQueue(proposalID); err != nil {
-		t.Fatalf("queue revoke proposal: %v", err)
-	}
+	submitGovQueueTx(t, node, proposalID)
 	clearProposalTimelock(t, node, proposalID)
-	if _, err := node.GovernanceExecute(proposalID); err != nil {
-		t.Fatalf("execute revoke proposal: %v", err)
-	}
+	submitGovExecuteTx(t, node, proposalID)
 
 	if err := node.WithState(func(m *nhbstate.Manager) error {
 		if _, ok, err := m.SwapPriceSigner("nowpayments"); err != nil {

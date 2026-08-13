@@ -192,6 +192,7 @@ type StateProcessor struct {
 	lendingReserveFactorBps    uint64
 	lendingProtocolFeeBps      uint64
 	lendingCollateralRouting   lending.CollateralRouting
+	govPolicy                  governance.ProposalPolicy
 	blockCtx                   BlockCtx
 	swapPayoutAuthorities      map[string]struct{}
 	swapConfig                 swap.Config
@@ -1887,6 +1888,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		buybackConfig:              sp.buybackConfig.Clone(),
 		hasBuybackConfig:           sp.hasBuybackConfig,
 		buybackAccrualAddr:         cloneAddress(sp.buybackAccrualAddr),
+		govPolicy:                  cloneGovernancePolicy(sp.govPolicy),
 	}, nil
 }
 
@@ -1963,6 +1965,21 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	case types.TxTypeLendingRefPrice:
 		err = sp.applyLendingRefPriceTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeGovPropose:
+		err = sp.applyGovProposeTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovVote:
+		err = sp.applyGovVoteTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovFinalize:
+		err = sp.applyGovFinalizeTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovQueue:
+		err = sp.applyGovQueueTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovExecute:
+		err = sp.applyGovExecuteTransaction(tx, sender, senderAccount)
 		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)

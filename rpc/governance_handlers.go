@@ -2,34 +2,20 @@ package rpc
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"math/big"
 	"net/http"
-	"strings"
 
-	govcfg "nhbchain/native/gov"
 	"nhbchain/native/governance"
 )
 
-var governanceLegacyPayloadWrappers = map[string]struct{}{
-	"update":    {},
-	"parameter": {},
-	"params":    {},
-}
-
-type govProposeParams struct {
-	Kind    string `json:"kind"`
-	Payload string `json:"payload"`
-	From    string `json:"from"`
-	Deposit string `json:"deposit,omitempty"`
-}
-
-type govVoteParams struct {
-	ID     uint64 `json:"id"`
-	From   string `json:"from"`
-	Choice string `json:"choice"`
-}
+// Governance write actions (propose/vote/finalize/queue/execute) no longer
+// have bespoke RPC methods here -- they were removed along with
+// Node.GovernancePropose/Vote/Finalize/Queue/Execute (core/node.go) for
+// bypassing consensus/gossip entirely and trusting a client-supplied `from`
+// field with no cryptographic proof of caller identity. They're real signed
+// transactions now (TxTypeGovPropose/Vote/Finalize/Queue/Execute,
+// core/governance_tx.go), submitted via nhb_sendTransaction like every
+// other signed native transaction type. Only the two read-only queries
+// remain here.
 
 type govIDParams struct {
 	ID uint64 `json:"id"`
@@ -40,174 +26,9 @@ type govListParams struct {
 	Limit  *int    `json:"limit,omitempty"`
 }
 
-type govProposeResponse struct {
-	ProposalID uint64 `json:"proposalId"`
-}
-
-type govAckResponse struct {
-	OK       bool                 `json:"ok"`
-	Proposal *governance.Proposal `json:"proposal,omitempty"`
-}
-
-type govFinalizeResponse struct {
-	Proposal *governance.Proposal `json:"proposal"`
-	Tally    *governance.Tally    `json:"tally"`
-}
-
 type govListResponse struct {
 	Proposals  []*governance.Proposal `json:"proposals"`
 	NextCursor *uint64                `json:"nextCursor,omitempty"`
-}
-
-func parseNonNegativeAmount(value string) (*big.Int, error) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return big.NewInt(0), nil
-	}
-	normalized := strings.TrimPrefix(trimmed, "+")
-	if strings.HasPrefix(normalized, "-") {
-		return nil, fmt.Errorf("amount must not be negative")
-	}
-	amount, ok := new(big.Int).SetString(normalized, 10)
-	if !ok {
-		return nil, fmt.Errorf("invalid amount")
-	}
-	if amount.Sign() < 0 {
-		return nil, fmt.Errorf("amount must not be negative")
-	}
-	return amount, nil
-}
-
-func normalizeGovernancePayload(kind, payload string) (string, error) {
-	normalizedKind := strings.TrimSpace(strings.ToLower(kind))
-	if normalizedKind != "param.update" && normalizedKind != "param.emergency_override" {
-		return payload, nil
-	}
-	trimmed := strings.TrimSpace(payload)
-	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
-		return payload, nil
-	}
-
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-		return payload, nil
-	}
-	if len(parsed) != 1 {
-		return payload, nil
-	}
-	for key, value := range parsed {
-		if _, ok := governanceLegacyPayloadWrappers[strings.ToLower(strings.TrimSpace(key))]; !ok {
-			return payload, nil
-		}
-		var nested map[string]json.RawMessage
-		if err := json.Unmarshal(value, &nested); err != nil {
-			return payload, nil
-		}
-		if len(nested) == 0 {
-			return "", fmt.Errorf("governance payload must include at least one parameter")
-		}
-		normalized, err := json.Marshal(nested)
-		if err != nil {
-			return "", err
-		}
-		return string(normalized), nil
-	}
-	return payload, nil
-}
-
-func (s *Server) handleGovernancePropose(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params govProposeParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	kind := strings.TrimSpace(params.Kind)
-	if kind == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "kind is required", nil)
-		return
-	}
-	payload := strings.TrimSpace(params.Payload)
-	if payload == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "payload is required", nil)
-		return
-	}
-	var err error
-	payload, err = normalizeGovernancePayload(kind, payload)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	if strings.TrimSpace(params.From) == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "from is required", nil)
-		return
-	}
-	proposer, err := decodeBech32(params.From)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid from address", err.Error())
-		return
-	}
-	deposit, err := parseNonNegativeAmount(params.Deposit)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	proposalID, err := s.node.GovernancePropose(proposer, kind, payload, deposit)
-	if err != nil {
-		code := codeInvalidParams
-		if errors.Is(err, govcfg.ErrInvalidPolicyInvariants) {
-			code = codeInvalidPolicyInvariants
-		}
-		writeError(w, http.StatusBadRequest, req.ID, code, err.Error(), nil)
-		return
-	}
-	writeResult(w, req.ID, govProposeResponse{ProposalID: proposalID})
-}
-
-func (s *Server) handleGovernanceVote(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params govVoteParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	if params.ID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "id is required", nil)
-		return
-	}
-	if strings.TrimSpace(params.From) == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "from is required", nil)
-		return
-	}
-	voter, err := decodeBech32(params.From)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid from address", err.Error())
-		return
-	}
-	choice := strings.TrimSpace(params.Choice)
-	if choice == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "choice is required", nil)
-		return
-	}
-	if err := s.node.GovernanceVote(params.ID, voter, choice); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	writeResult(w, req.ID, govAckResponse{OK: true})
 }
 
 func (s *Server) handleGovernanceProposal(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
@@ -266,82 +87,4 @@ func (s *Server) handleGovernanceList(w http.ResponseWriter, _ *http.Request, re
 		resp.NextCursor = &nextCursor
 	}
 	writeResult(w, req.ID, resp)
-}
-
-func (s *Server) handleGovernanceFinalize(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params govIDParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	if params.ID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "id is required", nil)
-		return
-	}
-	proposal, tally, err := s.node.GovernanceFinalize(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	writeResult(w, req.ID, govFinalizeResponse{Proposal: proposal, Tally: tally})
-}
-
-func (s *Server) handleGovernanceQueue(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params govIDParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	if params.ID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "id is required", nil)
-		return
-	}
-	proposal, err := s.node.GovernanceQueue(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	writeResult(w, req.ID, govAckResponse{OK: true, Proposal: proposal})
-}
-
-func (s *Server) handleGovernanceExecute(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params govIDParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	if params.ID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "id is required", nil)
-		return
-	}
-	proposal, err := s.node.GovernanceExecute(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	writeResult(w, req.ID, govAckResponse{OK: true, Proposal: proposal})
 }

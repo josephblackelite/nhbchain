@@ -339,6 +339,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingAccrualConfig(n.lendingReserveFactorBps, n.lendingProtocolFeeBps, n.lendingInterestModel)
 	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
+	stateProcessor.SetGovernancePolicy(n.governancePolicy())
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -625,6 +626,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetLendingAccrualConfig(node.lendingReserveFactorBps, node.lendingProtocolFeeBps, node.lendingInterestModel)
 	stateProcessor.SetLendingDeveloperFee(node.lendingDeveloperFeeBps, node.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(node.lendingCollateralRouting)
+	stateProcessor.SetGovernancePolicy(node.governancePolicy())
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -1257,6 +1259,9 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 	n.govPolicy = copyPolicy
 	n.govPolicyMu.Unlock()
 	n.applyTimestampTolerance(copyPolicy.BlockTimestampToleranceSeconds)
+	if n.state != nil {
+		n.state.SetGovernancePolicy(copyPolicy)
+	}
 }
 
 // SetGlobalConfig records the last validated global configuration to use when
@@ -6298,30 +6303,15 @@ func (n *Node) pendingHeartbeatFee(addr []byte, nonce uint64) *big.Int {
 	return nil
 }
 
-func (n *Node) GovernancePropose(proposer [20]byte, kind, payload string, deposit *big.Int) (uint64, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	engine := n.newGovernanceEngine(manager)
-	lockAmount := big.NewInt(0)
-	if deposit != nil {
-		if deposit.Sign() < 0 {
-			return 0, fmt.Errorf("governance: deposit must not be negative")
-		}
-		lockAmount = new(big.Int).Set(deposit)
-	}
-	return engine.SubmitProposal(proposer, kind, payload, lockAmount)
-}
-
-func (n *Node) GovernanceVote(proposalID uint64, voter [20]byte, choice string) error {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	engine := n.newGovernanceEngine(manager)
-	return engine.CastVote(proposalID, voter, choice)
-}
+// GovernancePropose/GovernanceVote/GovernanceFinalize/GovernanceQueue/
+// GovernanceExecute (direct-state-trie writes, bypassing consensus/gossip
+// entirely, with no cryptographic proof tying a caller-supplied
+// proposer/voter address to the actual caller) have been removed. Their
+// replacement is real, signed, consensus-routed transactions -- see
+// TxTypeGovPropose/Vote/Finalize/Queue/Execute (core/types/transaction.go)
+// and their apply functions (core/governance_tx.go), submitted the same way
+// every other signed native transaction type is (nhb_sendTransaction), not
+// a bespoke per-feature RPC method.
 
 func (n *Node) GovernanceProposal(id uint64) (*governance.Proposal, bool, error) {
 	n.stateMu.Lock()
@@ -6389,63 +6379,8 @@ func (n *Node) GovernanceListProposals(cursor uint64, limit int) ([]*governance.
 	return proposals, nextCursor, nil
 }
 
-func (n *Node) GovernanceFinalize(proposalID uint64) (*governance.Proposal, *governance.Tally, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	engine := n.newGovernanceEngine(manager)
-	_, tally, err := engine.Finalize(proposalID)
-	if err != nil {
-		return nil, nil, err
-	}
-	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !ok || proposal == nil {
-		return nil, nil, fmt.Errorf("governance: proposal %d not found", proposalID)
-	}
-	return proposal, tally, nil
-}
-
-func (n *Node) GovernanceQueue(proposalID uint64) (*governance.Proposal, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	engine := n.newGovernanceEngine(manager)
-	if err := engine.QueueExecution(proposalID); err != nil {
-		return nil, err
-	}
-	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok || proposal == nil {
-		return nil, fmt.Errorf("governance: proposal %d not found", proposalID)
-	}
-	return proposal, nil
-}
-
-func (n *Node) GovernanceExecute(proposalID uint64) (*governance.Proposal, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	engine := n.newGovernanceEngine(manager)
-	if err := engine.Execute(proposalID); err != nil {
-		return nil, err
-	}
-	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok || proposal == nil {
-		return nil, fmt.Errorf("governance: proposal %d not found", proposalID)
-	}
-	return proposal, nil
-}
+// GovernanceFinalize/GovernanceQueue/GovernanceExecute were removed for the
+// same reason as GovernancePropose/GovernanceVote above -- see that comment.
 
 // PotsoHeartbeat records an authenticated heartbeat for the supplied participant.
 func (n *Node) PotsoHeartbeat(addr [20]byte, blockHeight uint64, blockHash []byte, timestamp int64) (*potso.Meter, uint64, error) {
