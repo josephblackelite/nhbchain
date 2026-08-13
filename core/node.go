@@ -753,6 +753,40 @@ func (n *Node) refreshModulePauses() error {
 	return nil
 }
 
+// StakingPauseOnChain reports the currently persisted on-chain value of the
+// staking module pause flag -- a read-only query, replacing the old
+// ensureStakingPauseCleared's direct trie write (cmd/nhb/main.go,
+// cmd/consensusd/main.go, byte-identical duplicates, both removed). That
+// function unilaterally overwrote this consensus-shared value at process
+// startup whenever it disagreed with the operator's own local config: since
+// refreshModulePauses (above) re-reads this same on-chain value on every
+// single block validate/commit/create cycle (it is the sole source of truth
+// nativecommon.Guard actually enforces against, moments after startup and
+// forever after), a validator whose local config happened to say
+// "unpaused" while the network's last real governance action said
+// "paused" would silently force its own copy of shared state to match its
+// local expectation -- exactly the kind of unilateral consensus-state
+// override the governance/CreatePool/POTSO-stake fixes elsewhere this
+// session close for the RPC surface. Callers should log a mismatch and let
+// the operator resolve it through a real governance action, never
+// overwrite this value directly.
+func (n *Node) StakingPauseOnChain() (bool, error) {
+	if n == nil {
+		return false, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil || n.state.Trie == nil {
+		return false, fmt.Errorf("state unavailable")
+	}
+	store := nativeparams.NewStore(nhbstate.NewManager(n.state.Trie))
+	pauses, err := store.Pauses()
+	if err != nil {
+		return false, fmt.Errorf("load staking pause state: %w", err)
+	}
+	return pauses.Staking, nil
+}
+
 func (n *Node) SetModulePauses(pauses config.Pauses) {
 	if n == nil {
 		return

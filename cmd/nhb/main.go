@@ -21,10 +21,8 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/core"
 	"nhbchain/core/genesis"
-	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
-	nativeparams "nhbchain/native/params"
 	swap "nhbchain/native/swap"
 	"nhbchain/observability/logging"
 	"nhbchain/p2p"
@@ -139,8 +137,10 @@ func main() {
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {
-		if err := ensureStakingPauseCleared(node); err != nil {
-			panic(fmt.Sprintf("Failed to clear staking pause: %v", err))
+		if onChainPaused, err := node.StakingPauseOnChain(); err != nil {
+			logger.Warn("failed to check on-chain staking pause state", slog.Any("error", err))
+		} else if onChainPaused {
+			logger.Warn("local config expects staking unpaused, but the network's last governance-set value is paused -- this validator enforces the on-chain value, not local config; resolve the mismatch via a real governance action if it is unintentional")
 		}
 	}
 
@@ -893,27 +893,6 @@ func (a *p2pNetworkAdapter) Ban(ctx context.Context, nodeID string, duration tim
 		return fmt.Errorf("p2p server unavailable")
 	}
 	return a.server.BanPeer(nodeID, duration)
-}
-
-func ensureStakingPauseCleared(node *core.Node) error {
-	if node == nil {
-		return fmt.Errorf("node unavailable")
-	}
-	return node.WithState(func(manager *nhbstate.Manager) error {
-		store := nativeparams.NewStore(manager)
-		pauses, err := store.Pauses()
-		if err != nil {
-			return fmt.Errorf("load staking pause state: %w", err)
-		}
-		if !pauses.Staking {
-			return nil
-		}
-		pauses.Staking = false
-		if err := store.SetPauses(pauses); err != nil {
-			return fmt.Errorf("persist staking pause state: %w", err)
-		}
-		return nil
-	})
 }
 
 func loadFromKMS(cfg *config.Config) (*crypto.PrivateKey, error) {
