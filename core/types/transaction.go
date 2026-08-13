@@ -160,6 +160,29 @@ const (
 	TxTypePotsoStakeLock     TxType = 0x2D
 	TxTypePotsoStakeUnbond   TxType = 0x2E
 	TxTypePotsoStakeWithdraw TxType = 0x2F
+	// TxTypeSubscriptionCreatePlan/UpdatePlan/Subscribe/Cancel implement
+	// native/subscriptions: a Stripe-like recurring-billing engine where a
+	// merchant defines a Plan (price/asset/interval) and a payer's single
+	// signed TxTypeSubscriptionSubscribe transaction becomes their standing
+	// authorization for the chain to debit that exact, bounded amount every
+	// cycle -- with zero further signature required at charge time (see
+	// core/subscriptions_settlement.go's doc comment for why this is safe:
+	// the debited amount is fixed and disclosed up front, never
+	// open-ended, matching the "bounded standing authorization" discipline
+	// core/rewards_logic.go and core/buyback_settlement.go already
+	// establish for every other system-initiated debit on this chain).
+	// All four types require a real envelope signature (RequiresSignature's
+	// default, not added to the exemption switch below) -- Subscribe's
+	// signature specifically IS the mandate, so it must be the
+	// cryptographically-recovered tx.From(), never a client-supplied
+	// payload field. 0x30 is the next free byte after
+	// TxTypePotsoStakeWithdraw (0x2F) -- verified against this file's real,
+	// current tip; do not reuse without re-checking for newly added types
+	// above this comment.
+	TxTypeSubscriptionCreatePlan TxType = 0x30
+	TxTypeSubscriptionUpdatePlan TxType = 0x31
+	TxTypeSubscriptionSubscribe  TxType = 0x32
+	TxTypeSubscriptionCancel     TxType = 0x33
 )
 
 // RequiresSignature reports whether the transaction type must carry an

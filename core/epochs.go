@@ -128,6 +128,16 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.pruneQuotaCounters(time.Unix(timestamp, 0).UTC()); err != nil {
 		return err
 	}
+	// Subscription billing runs on a calendar-day cadence
+	// (Plan.IntervalSeconds is typically monthly), which has no natural
+	// relationship to epochConfig.Length -- unlike settleEpochRewards and
+	// settleBuybackEpoch below, this must not wait for an epoch boundary.
+	// settleSubscriptionCharges is internally day-gated against its own
+	// persisted watermark, so calling it unconditionally on every block is
+	// a cheap no-op on every block that isn't a day rollover.
+	if err := sp.settleSubscriptionCharges(timestamp); err != nil {
+		return err
+	}
 	if err := sp.maybeProcessPotsoRewards(height, timestamp); err != nil {
 		return err
 	}

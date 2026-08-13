@@ -32,6 +32,7 @@ import (
 	"nhbchain/crypto"
 	nativecommon "nhbchain/native/common"
 	"nhbchain/native/lending"
+	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
 	"nhbchain/observability/logging"
@@ -298,6 +299,27 @@ func main() {
 		ProtocolBps:     routingCfg.ProtocolBps,
 		ProtocolTarget:  protocolCollateral,
 	})
+
+	subscriptionsTreasuryStr := strings.TrimSpace(cfg.Subscriptions.Treasury)
+	var subscriptionsTreasury [20]byte
+	if subscriptionsTreasuryStr != "" {
+		decoded, err := crypto.DecodeAddress(subscriptionsTreasuryStr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode subscriptions treasury address: %v", err))
+		}
+		copy(subscriptionsTreasury[:], decoded.Bytes())
+	} else if cfg.Subscriptions.ManagementFeeBps > 0 {
+		panic("Subscriptions Treasury must be configured when ManagementFeeBps is non-zero")
+	}
+	if err := node.SetSubscriptionsConfig(subscriptions.Config{
+		ManagementFeeBps:     cfg.Subscriptions.ManagementFeeBps,
+		ManagementFeeCapBps:  cfg.Subscriptions.ManagementFeeCapBps,
+		Treasury:             subscriptionsTreasury,
+		MaxRetries:           cfg.Subscriptions.MaxRetries,
+		RetryIntervalSeconds: cfg.Subscriptions.RetryIntervalSeconds,
+	}); err != nil {
+		panic(fmt.Sprintf("Failed to configure subscriptions engine: %v", err))
+	}
 
 	swapCfg := cfg.SwapSettings()
 	node.SetSwapConfig(swapCfg)
@@ -686,7 +708,7 @@ func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, l
 	trimmedCfg := strings.TrimSpace(cfgPath)
 	if trimmedCfg != "" {
 		if _, err := os.Stat(trimmedCfg); os.IsNotExist(err) && !allowAutogenesis {
-            fmt.Printf("Default genesis file %s not found, writing embedded mainnet genesis...\n", trimmedCfg)
+			fmt.Printf("Default genesis file %s not found, writing embedded mainnet genesis...\n", trimmedCfg)
 			if err := os.MkdirAll(filepath.Dir(trimmedCfg), 0755); err != nil {
 				return "", fmt.Errorf("failed to create genesis parent directory: %w", err)
 			}

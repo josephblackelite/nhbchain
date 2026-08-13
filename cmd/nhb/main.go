@@ -23,6 +23,7 @@ import (
 	"nhbchain/core/genesis"
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
+	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 	"nhbchain/observability/logging"
 	"nhbchain/p2p"
@@ -267,6 +268,27 @@ func main() {
 		ProtocolBps:     routingCfg.ProtocolBps,
 		ProtocolTarget:  protocolCollateral,
 	})
+
+	subscriptionsTreasuryStr := strings.TrimSpace(cfg.Subscriptions.Treasury)
+	var subscriptionsTreasury [20]byte
+	if subscriptionsTreasuryStr != "" {
+		decoded, err := crypto.DecodeAddress(subscriptionsTreasuryStr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode subscriptions treasury address: %v", err))
+		}
+		copy(subscriptionsTreasury[:], decoded.Bytes())
+	} else if cfg.Subscriptions.ManagementFeeBps > 0 {
+		panic("Subscriptions Treasury must be configured when ManagementFeeBps is non-zero")
+	}
+	if err := node.SetSubscriptionsConfig(subscriptions.Config{
+		ManagementFeeBps:     cfg.Subscriptions.ManagementFeeBps,
+		ManagementFeeCapBps:  cfg.Subscriptions.ManagementFeeCapBps,
+		Treasury:             subscriptionsTreasury,
+		MaxRetries:           cfg.Subscriptions.MaxRetries,
+		RetryIntervalSeconds: cfg.Subscriptions.RetryIntervalSeconds,
+	}); err != nil {
+		panic(fmt.Sprintf("Failed to configure subscriptions engine: %v", err))
+	}
 
 	swapCfg := cfg.SwapSettings()
 	node.SetSwapConfig(swapCfg)

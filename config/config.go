@@ -123,6 +123,7 @@ type Config struct {
 	Governance                  GovConfig                    `toml:"governance"`
 	Swap                        swap.Config                  `toml:"swap"`
 	Lending                     lending.Config               `toml:"lending"`
+	Subscriptions               Subscriptions                `toml:"subscriptions"`
 	Mempool                     MempoolConfig                `toml:"mempool"`
 	Global                      Global                       `toml:"global"`
 	Consensus                   Consensus                    `toml:"consensus"`
@@ -520,6 +521,7 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 
 	cfg.mergeP2PFromTopLevel()
 	cfg.Lending.EnsureDefaults()
+	cfg.Subscriptions.EnsureDefaults()
 	cfg.ensureMempoolDefaults()
 	cfg.ensureGlobalDefaults(meta)
 	cfg.ensureConsensusDefaults(meta)

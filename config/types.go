@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"strings"
 	"time"
+
+	"nhbchain/native/subscriptions"
 )
 
 const (
@@ -125,7 +127,7 @@ type Fees struct {
 	// NHB is meant to substitute for, without being negligible at volume or
 	// disproportionate on small transfers. See docs/issue30.md item 7b.
 	TransferFeeBps uint32
-	Assets             []FeeAsset
+	Assets         []FeeAsset
 }
 
 // RouteWalletByAsset returns a normalised map of asset identifiers to the
@@ -168,16 +170,61 @@ type Staking struct {
 	CompoundDefault       bool
 }
 
+// Subscriptions captures the runtime configuration for native/subscriptions'
+// recurring-billing engine. Treasury is a bech32 address string (not the
+// runtime [20]byte form native/subscriptions.Config uses directly) so it
+// round-trips through TOML the same way lending.Config.DeveloperFeeCollector
+// does -- decoded once at node construction (cmd/nhb/main.go,
+// cmd/consensusd/main.go), never re-parsed per block.
+type Subscriptions struct {
+	// ManagementFeeBps is NHBCoin's own platform fee for running the
+	// subscriptions engine, in basis points of each charge -- charged
+	// alongside (never instead of) the ordinary transfer fee, since a
+	// subscription charge is not a TxTypeTransfer/TxTypeTransferZNHB and
+	// never goes through that fee path at all.
+	ManagementFeeBps uint32 `toml:"ManagementFeeBps"`
+	// ManagementFeeCapBps is a hard ceiling ManagementFeeBps may never
+	// exceed.
+	ManagementFeeCapBps uint32 `toml:"ManagementFeeCapBps"`
+	// Treasury receives every charge's management-fee share. Required
+	// once ManagementFeeBps > 0.
+	Treasury string `toml:"Treasury"`
+	// MaxRetries is how many consecutive failed charge attempts a
+	// subscription tolerates before being suspended.
+	MaxRetries uint32 `toml:"MaxRetries"`
+	// RetryIntervalSeconds spaces out consecutive retry attempts after a
+	// failed charge.
+	RetryIntervalSeconds uint64 `toml:"RetryIntervalSeconds"`
+}
+
+// EnsureDefaults fills unset fields with native/subscriptions' baseline
+// defaults, mirroring lending.Config.EnsureDefaults' role in Load.
+func (s *Subscriptions) EnsureDefaults() {
+	if s.ManagementFeeBps == 0 {
+		s.ManagementFeeBps = subscriptions.DefaultManagementFeeBps
+	}
+	if s.ManagementFeeCapBps == 0 {
+		s.ManagementFeeCapBps = subscriptions.DefaultManagementFeeCapBps
+	}
+	if s.MaxRetries == 0 {
+		s.MaxRetries = subscriptions.DefaultMaxRetries
+	}
+	if s.RetryIntervalSeconds == 0 {
+		s.RetryIntervalSeconds = subscriptions.DefaultRetryIntervalSeconds
+	}
+}
+
 type Pauses struct {
-	Lending      bool
-	Swap         bool
-	Escrow       bool
-	Trade        bool
-	Loyalty      bool
-	POTSO        bool
-	TransferNHB  bool
-	TransferZNHB bool
-	Staking      bool
+	Lending       bool
+	Swap          bool
+	Escrow        bool
+	Trade         bool
+	Loyalty       bool
+	POTSO         bool
+	TransferNHB   bool
+	TransferZNHB  bool
+	Staking       bool
+	Subscriptions bool
 }
 
 // Quota defines rate limits for module interactions on a per-address basis.

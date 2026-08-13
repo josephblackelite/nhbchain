@@ -181,6 +181,12 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "subscriptions":
+		code := runSubscriptionsCommand(args[1:], os.Stdout, os.Stderr)
+		if code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "loyalty-create-business":
 		if len(args) < 3 {
 			fmt.Println("Usage: loyalty-create-business <owner> <name>")

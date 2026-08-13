@@ -1454,6 +1454,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleFeesGetTransferStatus(recorder, r, req)
 	case "fees_getTransferQuote":
 		s.handleFeesGetTransferQuote(recorder, r, req)
+	case "subscriptions_getPlan":
+		s.handleSubscriptionsGetPlan(recorder, r, req)
+	case "subscriptions_listPlansByMerchant":
+		s.handleSubscriptionsListPlansByMerchant(recorder, r, req)
+	case "subscriptions_getSubscription":
+		s.handleSubscriptionsGetSubscription(recorder, r, req)
+	case "subscriptions_listByPayer":
+		s.handleSubscriptionsListByPayer(recorder, r, req)
+	case "subscriptions_listByMerchant":
+		s.handleSubscriptionsListByMerchant(recorder, r, req)
+	case "subscriptions_listCharges":
+		s.handleSubscriptionsListCharges(recorder, r, req)
+	case "subscriptions_getConfig":
+		s.handleSubscriptionsGetConfig(recorder, r, req)
 	case "swap_limits":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)

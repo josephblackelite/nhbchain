@@ -33,6 +33,7 @@ import (
 	"nhbchain/native/loyalty"
 	"nhbchain/native/pos"
 	"nhbchain/native/potso"
+	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 	systemquotas "nhbchain/native/system/quotas"
 	swapv1 "nhbchain/proto/swap/v1"
@@ -157,6 +158,8 @@ type StateProcessor struct {
 	buybackConfig              buyback.Config
 	hasBuybackConfig           bool
 	buybackAccrualAddr         crypto.Address
+	subscriptionsConfig        subscriptions.Config
+	hasSubscriptionsConfig     bool
 	usernameToAddr             map[string][]byte
 	ValidatorSet               map[string]*big.Int
 	EligibleValidators         map[string]*big.Int
@@ -825,6 +828,31 @@ func (sp *StateProcessor) SetBuybackAccrualAddress(addr crypto.Address) {
 		return
 	}
 	sp.buybackAccrualAddr = cloneAddress(addr)
+}
+
+// SetSubscriptionsConfig configures native/subscriptions' management-fee
+// rate, retry/dunning schedule, and treasury address. Validates the config
+// before installing it, exactly like SetBuybackConfig -- an invalid config
+// (fee exceeding its own cap, zero retry budget) must never silently
+// become active. TxTypeSubscriptionSubscribe and settleSubscriptionCharges
+// both refuse to run until this has been called (mirrors
+// hasBuybackConfig's genesis-opt-in gate).
+func (sp *StateProcessor) SetSubscriptionsConfig(cfg subscriptions.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("subscriptions: invalid config: %w", err)
+	}
+	sp.subscriptionsConfig = cfg
+	sp.hasSubscriptionsConfig = true
+	return nil
+}
+
+// SubscriptionsConfig returns the currently configured subscriptions
+// engine parameters, if configured.
+func (sp *StateProcessor) SubscriptionsConfig() (subscriptions.Config, bool) {
+	if !sp.hasSubscriptionsConfig {
+		return subscriptions.Config{}, false
+	}
+	return sp.subscriptionsConfig, true
 }
 
 // znhbExpectedTotalSupplyWei is a fixed test fixture: the total ZNHB
@@ -1888,6 +1916,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		buybackConfig:              sp.buybackConfig.Clone(),
 		hasBuybackConfig:           sp.hasBuybackConfig,
 		buybackAccrualAddr:         cloneAddress(sp.buybackAccrualAddr),
+		subscriptionsConfig:        sp.subscriptionsConfig,
+		hasSubscriptionsConfig:     sp.hasSubscriptionsConfig,
 		govPolicy:                  cloneGovernancePolicy(sp.govPolicy),
 	}, nil
 }
@@ -3159,6 +3189,26 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeSubscriptionCreatePlan:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionCreatePlanTransaction(tx, sender)
+	case types.TxTypeSubscriptionUpdatePlan:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionUpdatePlanTransaction(tx, sender)
+	case types.TxTypeSubscriptionSubscribe:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionSubscribeTransaction(tx, sender)
+	case types.TxTypeSubscriptionCancel:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionCancelTransaction(tx, sender)
 	}
 	return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
 }

@@ -176,6 +176,24 @@ ClientVersion = ""
     ProtocolBps = 0
     ProtocolAddress = ""
 
+[subscriptions]
+  # ManagementFeeBps is NHBCoin's own platform fee for running the
+  # recurring-billing engine, charged in addition to (never instead of)
+  # the ordinary transfer fee -- a subscription charge never goes through
+  # the transfer-fee path at all. 100 = 1.00%, a fraction of Stripe-class
+  # (~2.9%+30c) take rates by design. ManagementFeeCapBps is a hard
+  # ceiling this value may never exceed without also raising the cap.
+  ManagementFeeBps = 100
+  ManagementFeeCapBps = 500
+  # Treasury receives every charge's management-fee share. Required once
+  # ManagementFeeBps > 0 -- node startup panics otherwise.
+  Treasury = ""
+  # MaxRetries is how many consecutive failed charge attempts a
+  # subscription tolerates (spaced RetryIntervalSeconds apart) before
+  # being permanently suspended.
+  MaxRetries = 3
+  RetryIntervalSeconds = 86400
+
 [mempool]
   MaxTransactions = 5000
   AllowUnlimited = false

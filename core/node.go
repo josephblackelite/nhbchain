@@ -52,6 +52,7 @@ import (
 	"nhbchain/native/pos"
 	"nhbchain/native/potso"
 	"nhbchain/native/reputation"
+	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 	"nhbchain/observability"
 	"nhbchain/p2p"
@@ -176,6 +177,7 @@ const (
 	moduleTransferNHB      = "transfer_nhb"
 	moduleTransferZNHB     = "transfer_znhb"
 	moduleStaking          = "staking"
+	moduleSubscriptions    = "subscriptions"
 )
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
@@ -804,6 +806,7 @@ func (n *Node) SetModulePauses(pauses config.Pauses) {
 	n.modulePauses[moduleTransferNHB] = pauses.TransferNHB
 	n.modulePauses[moduleTransferZNHB] = pauses.TransferZNHB
 	n.modulePauses[moduleStaking] = pauses.Staking
+	n.modulePauses[moduleSubscriptions] = pauses.Subscriptions
 	n.modulePauseMu.Unlock()
 	if n.state != nil {
 		n.state.SetPauseView(n)
@@ -4799,6 +4802,71 @@ func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, erro
 	return n.state.LoyaltyProgramsByOwner(owner)
 }
 
+// SubscriptionsManager returns a fresh state.Manager over the node's
+// current trie -- every accessor below constructs one per call, matching
+// LoyaltyManager's convention (cheap: two pointers + an interface).
+func (n *Node) SubscriptionsManager() *nhbstate.Manager {
+	return nhbstate.NewManager(n.state.Trie)
+}
+
+// SubscriptionsRegistry returns a fresh Registry wired to the node's
+// current pause state, matching LoyaltyRegistry's convention.
+func (n *Node) SubscriptionsRegistry() *subscriptions.Registry {
+	registry := subscriptions.NewRegistry(n.SubscriptionsManager())
+	registry.SetPauses(n)
+	return registry
+}
+
+// SubscriptionPlanByID is a read-only lookup -- no auth required, mirrors
+// every other public on-chain-state RPC read in this codebase.
+func (n *Node) SubscriptionPlanByID(id subscriptions.PlanID) (*subscriptions.Plan, bool) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.SubscriptionsRegistry().GetPlan(id)
+}
+
+func (n *Node) SubscriptionPlansByMerchant(merchant [20]byte) ([]subscriptions.PlanID, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.SubscriptionsRegistry().ListPlansByMerchant(merchant)
+}
+
+func (n *Node) SubscriptionByID(id subscriptions.SubscriptionID) (*subscriptions.Subscription, bool) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.SubscriptionsRegistry().GetSubscription(id)
+}
+
+func (n *Node) SubscriptionsByPayer(payer [20]byte) ([]subscriptions.SubscriptionID, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.SubscriptionsRegistry().ListSubscriptionsByPayer(payer)
+}
+
+func (n *Node) SubscriptionsByMerchant(merchant [20]byte) ([]subscriptions.SubscriptionID, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.SubscriptionsRegistry().ListSubscriptionsByMerchant(merchant)
+}
+
+func (n *Node) SubscriptionCharges(id subscriptions.SubscriptionID) ([]subscriptions.Charge, error) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	return n.SubscriptionsRegistry().ListCharges(id)
+}
+
+// SubscriptionsEngineConfig exposes the deployment-configured management
+// fee/retry parameters read-only, so the portal dashboard can display the
+// real fee rate rather than a hardcoded guess.
+func (n *Node) SubscriptionsEngineConfig() (subscriptions.Config, bool) {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return subscriptions.Config{}, false
+	}
+	return n.state.SubscriptionsConfig()
+}
+
 var (
 	// ErrEscrowNotFound is returned when an escrow record is missing from state.
 	ErrEscrowNotFound = errors.New("escrow not found")
@@ -6572,7 +6640,6 @@ func (n *Node) PotsoTop(day string, limit int) ([]PotsoLeaderboardEntry, error) 
 	return entries, nil
 }
 
-
 // PotsoStakeLock/PotsoStakeUnbond/PotsoStakeWithdraw (direct n.state.Trie
 // writes under n.stateMu.Lock(), outside CreateBlock/ApplyTransaction
 // entirely) were removed -- stake actions are now real signed transactions
@@ -7961,6 +8028,23 @@ func (n *Node) ConfigureAdminWalletForTests(addr [20]byte) error {
 		return fmt.Errorf("seed admin wallet balance: %w", err)
 	}
 	return n.state.EnsureZNHBPoolsBootstrapped()
+}
+
+// SetSubscriptionsConfig wires native/subscriptions' management-fee rate,
+// retry/dunning schedule, and treasury address into the state processor.
+// Called once from cmd/nhb/main.go/cmd/consensusd/main.go, reading
+// config.toml's [subscriptions] section -- mirrors SetLendingRiskParameters'
+// role for the lending module.
+func (n *Node) SetSubscriptionsConfig(cfg subscriptions.Config) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return fmt.Errorf("state unavailable")
+	}
+	return n.state.SetSubscriptionsConfig(cfg)
 }
 
 // ConfigureBuybackForTests wires up a genesis-equivalent treasury buyback
