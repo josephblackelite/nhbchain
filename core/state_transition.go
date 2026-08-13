@@ -3909,7 +3909,7 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	if err != nil {
 		return nil, err
 	}
-	releaseTime := uint64(sp.now().Add(unbondDuration).Unix())
+	releaseTime := uint64(sp.blockTimestamp().Add(unbondDuration).Unix())
 	nextID := delegatorAcc.NextUnbondingID
 	if nextID == 0 {
 		nextID = 1
@@ -4021,7 +4021,7 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 	if index == -1 {
 		return nil, fmt.Errorf("unbonding entry %d not found", unbondID)
 	}
-	if uint64(sp.now().Unix()) < entry.ReleaseTime {
+	if uint64(sp.blockTimestamp().Unix()) < entry.ReleaseTime {
 		return nil, fmt.Errorf("unbonding entry %d is not yet claimable", unbondID)
 	}
 
@@ -4070,7 +4070,7 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 	if err != nil {
 		return nil, err
 	}
-	nowTs := uint64(sp.now().Unix())
+	nowTs := uint64(sp.blockTimestamp().Unix())
 	if periodSeconds == 0 {
 		return nil, fmt.Errorf("staking rewards: invalid payout period")
 	}

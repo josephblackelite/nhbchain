@@ -732,6 +732,8 @@ func TestStakeLifecycleSelfConsistency(t *testing.T) {
 
 	claimTime := start.Add(period)
 	sp.nowFunc = func() time.Time { return claimTime }
+	sp.EndBlock()
+	sp.BeginBlock(2, claimTime)
 	manager := nhbstate.NewManager(sp.Trie)
 	delta := big.NewInt(25)
 	globalIndex := new(big.Int).Add(afterStake.StakeLastIndex, delta)
@@ -784,6 +786,8 @@ func TestStakeLifecycleSelfConsistency(t *testing.T) {
 
 	releaseTime := claimTime.Add(unbondingPeriod + time.Hour)
 	sp.nowFunc = func() time.Time { return releaseTime }
+	sp.EndBlock()
+	sp.BeginBlock(3, releaseTime)
 	if _, err := sp.StakeClaim(delegator[:], unbond.ID); err != nil {
 		t.Fatalf("stake claim: %v", err)
 	}
