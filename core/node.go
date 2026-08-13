@@ -3456,7 +3456,12 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 	blockTime := time.Unix(b.Header.Timestamp, 0).UTC()
 	stateCopy.BeginBlock(b.Header.Height, blockTime)
 	defer stateCopy.EndBlock()
-	traceStateRoots := len(b.Transactions) == 0
+	// Always traced, not just for empty blocks: a real incident (buyback
+	// ref-price transaction inclusion causing a state-root mismatch on
+	// every validator, every round) needed exactly this per-stage
+	// breakdown to diagnose and the gate meant it was blank precisely when
+	// it mattered -- the one case with a non-empty block.
+	traceStateRoots := true
 	hexRoot := func(root common.Hash) string {
 		return fmt.Sprintf("%x", root.Bytes())
 	}
@@ -3624,7 +3629,8 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	blockTime := time.Unix(b.Header.Timestamp, 0).UTC()
 	stateCopy.BeginBlock(b.Header.Height, blockTime)
 	defer stateCopy.EndBlock()
-	traceStateRoots := len(b.Transactions) == 0
+	// Always traced -- see the matching comment in ValidateBlock above.
+	traceStateRoots := true
 	hexRoot := func(root common.Hash) string {
 		return fmt.Sprintf("%x", root.Bytes())
 	}
