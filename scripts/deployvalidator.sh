@@ -40,15 +40,15 @@ Usage:
   bash scripts/deployvalidator.sh [options]
 
 Options:
-  --beneficiary <nhb1...>  Wallet to receive this validator's future reward
-                           payouts (see "Getting paid" below). Strongly
-                           recommended -- without it, rewards accumulate at
-                           this validator's own address, whose key never
-                           leaves this server. MUST be different from this
-                           validator's own node address (printed at the end
-                           of this script) -- the chain rejects a beneficiary
-                           that matches the validator's own address, so don't
-                           re-paste that address here.
+  --beneficiary <nhb1...>  REQUIRED. Wallet to receive this validator's
+                           future reward payouts (see "Getting paid" below).
+                           Without it, rewards accumulate at this validator's
+                           own address, whose key never leaves this server.
+                           MUST be different from this validator's own node
+                           address (printed at the end of this script) -- the
+                           chain rejects a beneficiary that matches the
+                           validator's own address, so don't re-paste that
+                           address here.
   --email <address>        Email to receive setup instructions (optional;
                            best-effort, does not fail the script if it can't
                            be sent).
@@ -143,6 +143,29 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Corrected 2026-08-13: --beneficiary used to be optional, which meant a
+# validator could go live with its reward income landing at an address whose
+# key never leaves this server -- not spendable, not visible in any wallet,
+# recoverable only via a manual `nhb-cli set-reward-beneficiary` CLI step run
+# directly on the box later. Requiring it up front makes "reward income lands
+# in a wallet you actually use, from the first epoch" the guaranteed default
+# for every new validator, not something an operator has to remember to fix
+# after the fact. Deliberately NOT auto-defaulting to any address here --
+# a hardcoded or shared fallback would silently misroute a stranger's
+# validator rewards to a wallet they don't control, which is worse than
+# just requiring the operator to say where their own money goes.
+if [[ -z "${BENEFICIARY}" ]]; then
+  echo "[ERROR] --beneficiary <nhb1...> is required." >&2
+  echo >&2
+  echo "This validator will earn epoch rewards. Without a beneficiary wallet," >&2
+  echo "those rewards accumulate at this validator's own server-only address," >&2
+  echo "which you cannot conveniently spend from. Pass --beneficiary with a" >&2
+  echo "wallet you actually use (see \"Getting paid\" below for details)." >&2
+  echo >&2
+  usage
+  exit 1
+fi
 
 require_cmd sudo
 require_cmd systemctl

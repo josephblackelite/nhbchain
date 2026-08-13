@@ -170,6 +170,115 @@ func StakingAcctKey(addr []byte) []byte {
 	return key
 }
 
+// stakeDelegatorIndexKey returns the raw (un-hashed) KVAppend/KVGetList key
+// for the list of addresses currently delegating to the given validator.
+func stakeDelegatorIndexKey(validator []byte) []byte {
+	buf := make([]byte, len(stakeDelegatorIndexPrefix)+len(validator))
+	copy(buf, stakeDelegatorIndexPrefix)
+	copy(buf[len(stakeDelegatorIndexPrefix):], validator)
+	return buf
+}
+
+// stakeDelegatedInTotalKey returns the pre-hashed loadBigInt/writeBigInt key
+// for a validator's running total of stake delegated to it by others.
+func stakeDelegatedInTotalKey(validator []byte) []byte {
+	buf := make([]byte, len(stakeDelegatedInTotalPrefix)+len(validator))
+	copy(buf, stakeDelegatedInTotalPrefix)
+	copy(buf[len(stakeDelegatedInTotalPrefix):], validator)
+	return kvKey(buf)
+}
+
+// StakeValidatorDelegators lists every address currently delegating to the
+// given validator (i.e. every account whose DelegatedValidator points at it
+// and whose LockedZNHB is still positive). Added 2026-08-13 to fix reward
+// attribution for third-party delegation: StakeDelegate/StakeUndelegate keep
+// this index in sync so the reward-splitting code (distributeStakerRewards,
+// stakeRewardBasis) can find every delegator for a validator without a full
+// account scan.
+func (m *Manager) StakeValidatorDelegators(validator [20]byte) ([][20]byte, error) {
+	var raw [][]byte
+	if err := m.KVGetList(stakeDelegatorIndexKey(validator[:]), &raw); err != nil {
+		return nil, err
+	}
+	delegators := make([][20]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 20 {
+			continue
+		}
+		var addr [20]byte
+		copy(addr[:], entry)
+		delegators = append(delegators, addr)
+	}
+	return delegators, nil
+}
+
+// StakeAddValidatorDelegator records delegator as currently delegating to
+// validator. Idempotent -- KVAppend already dedups. Exported (unlike POTSO's
+// equivalent appendStakeOwner/removeStakeOwner) because core.StateProcessor
+// needs fine-grained control over exactly when an index entry is added vs.
+// removed, which doesn't collapse into a single "set absolute total" call
+// the way PotsoStakeSetBondedTotal's does.
+func (m *Manager) StakeAddValidatorDelegator(validator, delegator [20]byte) error {
+	return m.KVAppend(stakeDelegatorIndexKey(validator[:]), delegator[:])
+}
+
+// StakeRemoveValidatorDelegator removes delegator from validator's delegator
+// index (mirrors removeStakeOwner's filter-and-rewrite shape exactly).
+func (m *Manager) StakeRemoveValidatorDelegator(validator, delegator [20]byte) error {
+	key := stakeDelegatorIndexKey(validator[:])
+	var raw [][]byte
+	if err := m.KVGetList(key, &raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	filtered := make([][]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) == len(delegator) && bytes.Equal(entry, delegator[:]) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if len(filtered) == len(raw) {
+		return nil
+	}
+	if len(filtered) == 0 {
+		return m.trie.Update(kvKey(key), nil)
+	}
+	return m.KVPut(key, filtered)
+}
+
+// StakeValidatorDelegatedInTotal returns the amount currently delegated to
+// validator by everyone else combined (i.e. validator.Stake minus its own
+// self-stake). Zero for any validator nobody has delegated to.
+func (m *Manager) StakeValidatorDelegatedInTotal(validator [20]byte) (*big.Int, error) {
+	return m.loadBigInt(stakeDelegatedInTotalKey(validator[:]))
+}
+
+// StakeValidatorSetDelegatedInTotal updates validator's delegated-in total.
+func (m *Manager) StakeValidatorSetDelegatedInTotal(validator [20]byte, amount *big.Int) error {
+	return m.writeBigInt(stakeDelegatedInTotalKey(validator[:]), amount)
+}
+
+// StakeDelegationIndexBackfilled reports whether the one-time migration that
+// populates StakeValidatorDelegators/StakeValidatorDelegatedInTotal from
+// delegations that existed before this fix has already run.
+func (m *Manager) StakeDelegationIndexBackfilled() (bool, error) {
+	var backfilled bool
+	ok, err := m.KVGet(stakeDelegationIndexBackfilledKey, &backfilled)
+	if err != nil {
+		return false, err
+	}
+	return ok && backfilled, nil
+}
+
+// MarkStakeDelegationIndexBackfilled marks the one-time backfill migration
+// as complete so it never re-runs.
+func (m *Manager) MarkStakeDelegationIndexBackfilled() error {
+	return m.KVPut(stakeDelegationIndexBackfilledKey, true)
+}
+
 // GetGlobalIndex retrieves the persisted protocol-wide staking index metadata.
 // When no snapshot has been recorded yet the function returns a zeroed
 // structure with default big.Int instances to avoid shared references.

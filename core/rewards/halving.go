@@ -5,7 +5,21 @@ import "math/big"
 const (
 	// HalvingBaseEmissionZNHB is B0: the whole-ZNHB emission per epoch
 	// during the first halving era, before any halving has occurred.
-	HalvingBaseEmissionZNHB = 50_000
+	//
+	// Corrected 2026-08-13 (was 50_000): the original value, paired with
+	// the original HalvingEraLengthEpochs=2_000, emitted era 0's full
+	// 100,000,000 ZNHB (half the entire Reward Pool) in ~5.8 days at this
+	// chain's own documented 2.5s/block target -- confirmed live: the very
+	// first real settlement after this schedule activated in production
+	// broke the ZNHB supply invariant and halted block production for 22
+	// hours within about a day of going live. Neither constant was ever
+	// checked against a block-time assumption; 2_000 eras * 100
+	// blocks/epoch = 200,000 blocks/era closely mirrors Bitcoin's 210,000
+	// blocks/halving, which was apparently the origin of the number, but
+	// Bitcoin's block time (~600s) is ~240x slower than this chain's
+	// documented target -- reusing the block *count* without rescaling
+	// compressed a multi-year halving intent into under a week.
+	HalvingBaseEmissionZNHB = 200
 
 	// HalvingEraLengthEpochs is E: the number of epochs in each halving
 	// era. Chosen so a full era at the current era's rate emits exactly
@@ -14,12 +28,23 @@ const (
 	// infinite sum of every era's emission converges to a fixed ceiling
 	// (2 * HalvingBaseEmissionZNHB * HalvingEraLengthEpochs = 200,000,000
 	// ZNHB at these values) and never exceeds it.
-	HalvingEraLengthEpochs = 2_000
+	//
+	// Corrected 2026-08-13 (was 2_000, see HalvingBaseEmissionZNHB comment
+	// for why): re-derived so era 0 (100,000,000 ZNHB, half the Reward
+	// Pool) unwinds over ~3.96 years at this chain's documented 2.5s/block
+	// target (500,000 epochs * 100 blocks/epoch * 2.5s) -- the *faster* of
+	// the two known block-time figures, chosen deliberately so real
+	// (slower) block times can only stretch this out further, never
+	// compress it. The product 2*B0*E is unchanged from the original
+	// constants, so the Reward Pool's 200,000,000 ZNHB ceiling this was
+	// seeded against at genesis is preserved exactly -- only the pacing
+	// changes, not the total ever emitted.
+	HalvingEraLengthEpochs = 500_000
 
 	// maxHalvingEras bounds how many EmissionStep entries
 	// HalvingSchedule builds. Past this many halvings the per-epoch
-	// emission is already zero at attoZNHB precision (50,000 ZNHB is
-	// ~2^75.4 attoZNHB, so era 76 onward always rounds to zero) --
+	// emission is already zero at attoZNHB precision (200 ZNHB is
+	// ~2^67.4 attoZNHB, so era 69 onward always rounds to zero) --
 	// further steps would be dead weight.
 	maxHalvingEras = 80
 )

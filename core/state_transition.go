@@ -1012,6 +1012,100 @@ func (sp *StateProcessor) ReconcileZNHBSupplyDriftOnce() error {
 	return manager.ZNHBMarkSupplyDriftReconciled()
 }
 
+// stakeDelegationBackfillSeed lists (delegator, validator) pairs known to
+// carry an active third-party delegation created before the 2026-08-13
+// delegator-reward-attribution fix (see StakeDelegate/StakeUndelegate and
+// distributeStakerRewards) -- confirmed directly against live chain state
+// via RPC at the time this fix was written. A full state-trie scan for
+// pre-fix delegations was deliberately not built: this network had two
+// separate consensus-halting incidents in the preceding 24 hours from
+// state-handling bugs, and every real pre-fix delegation that exists today
+// was already confirmed by hand, so a scan would add real risk to close a
+// gap of exactly one known entry. If a later node import (e.g. from a
+// different prior binary, or a fresh validator that turns out to already
+// carry pre-fix state) is found to have pre-fix delegations not listed
+// here, add its (delegator, validator) pair before this runs on that node.
+type stakeDelegationBackfillEntry struct {
+	Delegator string
+	Validator string
+}
+
+var stakeDelegationBackfillSeed = []stakeDelegationBackfillEntry{
+	{Delegator: "nhb1heggsvzc8j8vm3zgwn9m4n236cr5t7u4g3av0t", Validator: "nhb1jyhwc26z0tf7mwkg5fgggrjx23spqaqr2f5yjz"},
+}
+
+// BackfillStakeDelegationIndexOnce populates StakeValidatorDelegators /
+// StakeValidatorDelegatedInTotal for delegations listed in
+// stakeDelegationBackfillSeed that predate the index existing at all.
+// Guarded by StakeDelegationIndexBackfilled so it runs at most once; safe to
+// call on every block otherwise (see ProcessBlockLifecycle). Moves no ZNHB
+// and mints nothing -- every seed entry is re-validated against the
+// delegator's own current, already-correct DelegatedValidator/LockedZNHB
+// fields before indexing, and is skipped (not force-applied) if the
+// delegation has since changed or ended. This only makes an already-true
+// fact discoverable to distributeStakerRewards/stakeRewardBasis; correct
+// splitting begins at the next reward settlement/accrual after it runs.
+func (sp *StateProcessor) BackfillStakeDelegationIndexOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	backfilled, err := manager.StakeDelegationIndexBackfilled()
+	if err != nil {
+		return fmt.Errorf("staking: check delegation index backfill flag: %w", err)
+	}
+	if backfilled {
+		return nil
+	}
+	for _, seed := range stakeDelegationBackfillSeed {
+		delegatorAddr, err := crypto.DecodeAddress(seed.Delegator)
+		if err != nil {
+			return fmt.Errorf("staking: decode backfill delegator %q: %w", seed.Delegator, err)
+		}
+		validatorAddr, err := crypto.DecodeAddress(seed.Validator)
+		if err != nil {
+			return fmt.Errorf("staking: decode backfill validator %q: %w", seed.Validator, err)
+		}
+		delegatorAcc, err := sp.getAccount(delegatorAddr.Bytes())
+		if err != nil {
+			return fmt.Errorf("staking: load backfill delegator %q: %w", seed.Delegator, err)
+		}
+		if len(delegatorAcc.DelegatedValidator) == 0 || !bytes.Equal(delegatorAcc.DelegatedValidator, validatorAddr.Bytes()) {
+			// Delegation changed or ended since this seed was written --
+			// nothing to backfill, the live state is already authoritative.
+			continue
+		}
+		if delegatorAcc.LockedZNHB == nil || delegatorAcc.LockedZNHB.Sign() <= 0 {
+			continue
+		}
+		validatorKey := bytesToAddress(validatorAddr.Bytes())
+		delegatorKey := bytesToAddress(delegatorAddr.Bytes())
+		existing, err := manager.StakeValidatorDelegators(validatorKey)
+		if err != nil {
+			return fmt.Errorf("staking: load delegator index for backfill: %w", err)
+		}
+		alreadyIndexed := false
+		for _, d := range existing {
+			if d == delegatorKey {
+				alreadyIndexed = true
+				break
+			}
+		}
+		if alreadyIndexed {
+			continue
+		}
+		if err := manager.StakeAddValidatorDelegator(validatorKey, delegatorKey); err != nil {
+			return fmt.Errorf("staking: backfill delegator index: %w", err)
+		}
+		delegatedIn, err := manager.StakeValidatorDelegatedInTotal(validatorKey)
+		if err != nil {
+			return fmt.Errorf("staking: load delegated-in total for backfill: %w", err)
+		}
+		delegatedIn = new(big.Int).Add(delegatedIn, delegatorAcc.LockedZNHB)
+		if err := manager.StakeValidatorSetDelegatedInTotal(validatorKey, delegatedIn); err != nil {
+			return fmt.Errorf("staking: backfill delegated-in total: %w", err)
+		}
+	}
+	return manager.MarkStakeDelegationIndexBackfilled()
+}
+
 // CheckZNHBSupplyInvariant asserts that the Sale Pool and Reward Pool
 // sub-ledgers together account for exactly the admin/treasury wallet's
 // live ZNHB balance -- the consensus-critical guarantee that no ZNHB has
@@ -3886,7 +3980,7 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 	sameValidator := bytes.Equal(target, delegator)
 
 	delegatorPrevShares := new(big.Int).Set(delegatorAcc.StakeShares)
-	sp.accrueStakeAccount(delegatorAcc, index)
+	sp.accrueStakeAccount(delegatorAcc, delegator, index)
 	delegatorAdded := new(big.Int).Sub(new(big.Int).Set(delegatorAcc.StakeShares), delegatorPrevShares)
 	if delegatorAdded.Sign() < 0 {
 		delegatorAdded = big.NewInt(0)
@@ -3906,12 +4000,36 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 			return nil, err
 		}
 		validatorPrevShares := new(big.Int).Set(validatorAcc.StakeShares)
-		sp.accrueStakeAccount(validatorAcc, index)
+		sp.accrueStakeAccount(validatorAcc, target, index)
 		validatorAdded := new(big.Int).Sub(new(big.Int).Set(validatorAcc.StakeShares), validatorPrevShares)
 		if validatorAdded.Sign() < 0 {
 			validatorAdded = big.NewInt(0)
 		}
 		validatorAcc.Stake.Add(validatorAcc.Stake, amount)
+		manager := nhbstate.NewManager(sp.Trie)
+		wasIndexed := false
+		if existing, err := manager.StakeValidatorDelegators(bytesToAddress(target)); err == nil {
+			delegatorAddr := bytesToAddress(delegator)
+			for _, d := range existing {
+				if d == delegatorAddr {
+					wasIndexed = true
+					break
+				}
+			}
+		}
+		if !wasIndexed {
+			if err := manager.StakeAddValidatorDelegator(bytesToAddress(target), bytesToAddress(delegator)); err != nil {
+				return nil, err
+			}
+		}
+		delegatedIn, err := manager.StakeValidatorDelegatedInTotal(bytesToAddress(target))
+		if err != nil {
+			return nil, err
+		}
+		delegatedIn = new(big.Int).Add(delegatedIn, amount)
+		if err := manager.StakeValidatorSetDelegatedInTotal(bytesToAddress(target), delegatedIn); err != nil {
+			return nil, err
+		}
 		if err := sp.setAccount(target, validatorAcc); err != nil {
 			return nil, err
 		}
@@ -3981,7 +4099,7 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	sameValidator := bytes.Equal(validator, delegator)
 
 	delegatorPrevShares := new(big.Int).Set(delegatorAcc.StakeShares)
-	sp.accrueStakeAccount(delegatorAcc, index)
+	sp.accrueStakeAccount(delegatorAcc, delegator, index)
 	delegatorRemoved := new(big.Int).Sub(delegatorPrevShares, new(big.Int).Set(delegatorAcc.StakeShares))
 	if delegatorRemoved.Sign() < 0 {
 		delegatorRemoved = big.NewInt(0)
@@ -4023,7 +4141,7 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 			return nil, err
 		}
 		validatorPrevShares := new(big.Int).Set(validatorAcc.StakeShares)
-		sp.accrueStakeAccount(validatorAcc, index)
+		sp.accrueStakeAccount(validatorAcc, validator, index)
 		validatorRemoved := new(big.Int).Sub(validatorPrevShares, new(big.Int).Set(validatorAcc.StakeShares))
 		if validatorRemoved.Sign() < 0 {
 			validatorRemoved = big.NewInt(0)
@@ -4032,6 +4150,23 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 			return nil, fmt.Errorf("validator stake underflow")
 		}
 		validatorAcc.Stake.Sub(validatorAcc.Stake, amount)
+		manager := nhbstate.NewManager(sp.Trie)
+		delegatedIn, err := manager.StakeValidatorDelegatedInTotal(bytesToAddress(validator))
+		if err != nil {
+			return nil, err
+		}
+		delegatedIn = new(big.Int).Sub(delegatedIn, amount)
+		if delegatedIn.Sign() < 0 {
+			delegatedIn = big.NewInt(0)
+		}
+		if err := manager.StakeValidatorSetDelegatedInTotal(bytesToAddress(validator), delegatedIn); err != nil {
+			return nil, err
+		}
+		if delegatorAcc.LockedZNHB.Sign() == 0 {
+			if err := manager.StakeRemoveValidatorDelegator(bytesToAddress(validator), bytesToAddress(delegator)); err != nil {
+				return nil, err
+			}
+		}
 		if err := sp.setAccount(validator, validatorAcc); err != nil {
 			return nil, err
 		}
@@ -4091,7 +4226,7 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 	if err != nil {
 		return nil, err
 	}
-	sp.accrueStakeAccount(delegatorAcc, currentIndex)
+	sp.accrueStakeAccount(delegatorAcc, delegator, currentIndex)
 	var (
 		index = -1
 		entry types.StakeUnbond
@@ -4580,12 +4715,66 @@ func (sp *StateProcessor) advanceStakeRewards() (*big.Int, error) {
 	return index, nil
 }
 
-func (sp *StateProcessor) accrueStakeAccount(account *types.Account, index *big.Int) {
+// stakeRewardBasis returns the ZNHB amount an account's APR-based accrual
+// (accrueStakeAccount) should actually be computed against, distinct from
+// account.Stake itself. Added 2026-08-13 alongside the halving-schedule
+// staker-pool fix: StakeDelegate historically added a third-party
+// delegator's amount to the TARGET VALIDATOR's own Stake field, never the
+// delegator's -- so a delegator's own Stake always reads 0 and their basis
+// must come from LockedZNHB instead, while a validator's basis must exclude
+// whatever it's holding on behalf of others (StakeValidatorDelegatedInTotal)
+// so it isn't credited twice for the same delegated amount. For every
+// account nobody has ever delegated to or from -- the entire pre-2026-08-13
+// test suite and the common case -- this returns account.Stake unchanged.
+func (sp *StateProcessor) stakeRewardBasis(account *types.Account, ownAddr []byte) (*big.Int, error) {
+	if account == nil {
+		return big.NewInt(0), nil
+	}
+	if len(account.DelegatedValidator) > 0 && !bytes.Equal(account.DelegatedValidator, ownAddr) {
+		if account.LockedZNHB == nil {
+			return big.NewInt(0), nil
+		}
+		return new(big.Int).Set(account.LockedZNHB), nil
+	}
+	if account.Stake == nil || account.Stake.Sign() == 0 {
+		return big.NewInt(0), nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	delegatedIn, err := manager.StakeValidatorDelegatedInTotal(bytesToAddress(ownAddr))
+	if err != nil {
+		return nil, err
+	}
+	basis := new(big.Int).Sub(account.Stake, delegatedIn)
+	if basis.Sign() < 0 {
+		basis = big.NewInt(0)
+	}
+	return basis, nil
+}
+
+// accrueStakeAccount accrues APR-based stake rewards for the account owned
+// by ownAddr up to index, using stakeRewardBasis rather than account.Stake
+// directly so a third-party delegator's own contribution is credited to
+// them, not to whatever validator they delegated to (see stakeRewardBasis).
+// If the basis lookup fails, falls back to today's account.Stake-only
+// behavior rather than aborting the caller's transaction over an accrual
+// bookkeeping read.
+func (sp *StateProcessor) accrueStakeAccount(account *types.Account, ownAddr []byte, index *big.Int) {
+	if account == nil || index == nil {
+		return
+	}
+	basis, err := sp.stakeRewardBasis(account, ownAddr)
+	if err != nil || basis == nil {
+		basis = account.Stake
+	}
+	sp.accrueStakeAccountWithBasis(account, index, basis)
+}
+
+func (sp *StateProcessor) accrueStakeAccountWithBasis(account *types.Account, index *big.Int, basis *big.Int) {
 	if account == nil || index == nil {
 		return
 	}
 	ensureAccountDefaults(account)
-	if account.Stake.Sign() == 0 {
+	if basis == nil || basis.Sign() == 0 {
 		account.StakeLastIndex = new(big.Int).Set(index)
 		return
 	}
@@ -4598,7 +4787,7 @@ func (sp *StateProcessor) accrueStakeAccount(account *types.Account, index *big.
 		account.StakeLastIndex = new(big.Int).Set(index)
 		return
 	}
-	reward := new(big.Int).Mul(account.Stake, delta)
+	reward := new(big.Int).Mul(basis, delta)
 	reward.Quo(reward, rewards.IndexUnit())
 	if reward.Sign() > 0 {
 		account.StakeShares.Add(account.StakeShares, reward)

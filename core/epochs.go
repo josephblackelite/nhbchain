@@ -161,6 +161,14 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.ReconcileZNHBSupplyDriftOnce(); err != nil {
 		return fmt.Errorf("reconcile ZNHB supply drift: %w", err)
 	}
+	// One-time backfill for the pre-2026-08-13 delegator-reward-attribution
+	// gap (see BackfillStakeDelegationIndexOnce's doc comment). Moves no
+	// funds and doesn't affect the supply invariant either way, so ordering
+	// relative to the two calls above/below doesn't matter -- placed here
+	// only to stay grouped with the other one-time state-repair migrations.
+	if err := sp.BackfillStakeDelegationIndexOnce(); err != nil {
+		return fmt.Errorf("backfill stake delegation index: %w", err)
+	}
 	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
 		return err
 	}

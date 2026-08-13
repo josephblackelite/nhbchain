@@ -193,8 +193,8 @@ bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS -
 
    This generates a fresh validator key **on this machine** the first time
    it runs (reused on later runs), prints that validator's node address, and
-   -- since `--beneficiary` was given -- automatically redirects its future
-   consensus rewards to your wallet address, signed locally before the key
+   automatically redirects its future consensus rewards to your
+   `--beneficiary` wallet address (required), signed locally before the key
    is used for anything else. Add `--email you@example.com` to also get the
    node address and instructions emailed to you.
 
@@ -251,11 +251,12 @@ copy-pasted again later against a node that's already synced or already
 validating -- drop the flag on any re-run.
 
 Never pass a private key to this script -- it generates one for you, on
-this machine, the first time it runs. `--beneficiary` is optional but
-recommended: it points this validator's consensus reward at a wallet you
-actually use (see "Getting paid" below); without it, that reward
-accumulates at the validator's own address, whose key intentionally never
-leaves this server.
+this machine, the first time it runs. `--beneficiary` is **required**: it
+points this validator's consensus reward at a wallet you actually use (see
+"Getting paid" below). Without it, that reward would accumulate at the
+validator's own address, whose key intentionally never leaves this server --
+the script refuses to proceed without a beneficiary specifically to avoid
+that.
 
 What this does:
 
@@ -267,8 +268,8 @@ What this does:
 - points the node at the NHBCoin mainnet bootnode
 - syncs block history from the network until it reaches the current head
 - starts the validator and keeps validator heartbeats flowing automatically
-- if `--beneficiary` was given, signs a one-time transaction locally
-  redirecting this validator's consensus reward to that address
+- signs a one-time transaction locally redirecting this validator's
+  consensus reward to the `--beneficiary` address you provided
 - prints the validator's node address and exactly what to do next
 
 Getting paid:

@@ -68,7 +68,7 @@ Drop it on any later run.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--beneficiary` | *(none)* | Wallet address to redirect the consensus reward to. Optional but recommended. |
+| `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
 | `--email` | *(none)* | Best-effort onboarding notification; failure to send is a warning, not fatal. |
 | `--onboarding-email-endpoint` | `https://nhbcoin.com/api/v1/validators/onboarding-email` | Where the onboarding email is POSTed. |
 | `--bootnode` | `52.1.96.250:6001` | Must be plain `host:port` — see the enode warning below. |
@@ -121,10 +121,11 @@ fails with `dial tcp: address enode://...: too many colons in address`.
     health-check this with `curl -f` on a `GET`) for up to 60 seconds, and
     **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
     node never comes up.
-12. If `--beneficiary` was given, runs
-    `nhb-cli set-reward-beneficiary <addr> <validator.key>` as the `nhb`
-    user. If this step fails, the script only **warns** and prints the exact
-    retry command — it does not fail the script or block the validator from
+12. Runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` as the
+    `nhb` user, using the `--beneficiary` address you passed (the script
+    already exited earlier if you didn't pass one — see Step 1). If this
+    step fails, the script only **warns** and prints the exact retry
+    command — it does not fail the script or block the validator from
     starting.
 13. If `--email` was given, best-effort POSTs to the onboarding-email
     endpoint. Failure here is also just a warning, never fatal.
@@ -145,9 +146,10 @@ gas.
 
 ### Consensus reward beneficiary
 
-By default, the consensus reward accrues to the validator's own
-server-only address. `--beneficiary` (if you passed it) redirects that
-automatically. You can also set or change it later, directly on the server:
+Without `--beneficiary`, the consensus reward would accrue to the
+validator's own server-only address — the bootstrap script requires
+`--beneficiary` up front specifically to avoid that. You can also change
+the beneficiary later, directly on the server:
 
 ```bash
 nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key
