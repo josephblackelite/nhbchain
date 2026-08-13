@@ -77,6 +77,7 @@ NHBCoin L1 differentiates itself through protocol-native capabilities that direc
 - 🧾 **Native Account Abstraction (NAA)** — Every account is a contract account; Paymasters can sponsor gas, enabling truly fee-less experiences for retail users.
 - 🏦 **Dual-Token Model** — NHBCoin (stable settlement currency) and ZapNHB (staking & loyalty asset) are managed directly by the protocol for predictable monetary policy.
 - 🤝 **Embedded P2P Escrow** — Trust-minimized escrow flows enable marketplaces without bespoke contract engineering.
+- 🔁 **Native Subscriptions** — Recurring billing built directly into the L1, not bolted on. Where Stripe requires creating a Product and a Price before anything can be charged, an NHBCoin `Plan` is one object — set a price, an asset, and a billing interval, and it's live. A subscriber signs exactly one transaction; that signature is their entire standing mandate, and the chain itself debits them every cycle from then on — no server-side card vault, no webhook race against a payment processor, no "off-session charge" API to get wrong. NHBCoin takes a small management fee per charge (currently capped at 5%, a fraction of typical card-network take rates) — the only cost beyond the usual transfer fee. Full reference: **[`docs/subscriptions/README.md`](docs/subscriptions/README.md)**.
 - 🆔 **On-Chain Identity** — Human-readable usernames, verified emails, and avatars are part of the base chain, reducing user error and enabling compliant discovery flows.
 - ♻️ **EVM Compatibility** — A bundled Go-Ethereum (Geth) engine lets developers deploy Solidity smart contracts and reuse the broader Ethereum tooling ecosystem.
 
@@ -323,6 +324,7 @@ All protocol modules ship with reference documentation under [`docs/`](./docs):
 - **Identity & Username Directory** — Concepts, RPC specs, and gateway flows (`docs/identity/identity.md`, `docs/identity/identity-api.md`, `docs/identity/identity-gateway.md`).
 - **Escrow Module** — Settlement lifecycle and developer guide (`docs/escrow/escrow.md`, `docs/escrow/nhbchain-escrow-gateway.md`).
 - **Loyalty & Rewards** — Network-wide loyalty engine overview (`docs/loyalty/loyalty.md`).
+- **Subscriptions** — Native recurring-billing engine: the standing-mandate model, fee structure, state layout, signed transactions, and full RPC/CLI reference (`docs/subscriptions/README.md`).
 - **Tokenomics** — Genesis Treasury Distribution Curve, Sale/Reward Pool mechanics, and the RPC methods for reading them (`docs/tokenomics/tokenomics.md`).
 - **Pay-by-Username** — UX flows and examples (`docs/identity/pay-by-username.md`, `docs/examples/identity`).
 - **OpenAPI Specification** — Machine-readable schema for REST integrations (`docs/openapi/identity.yaml`).
