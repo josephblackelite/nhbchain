@@ -153,7 +153,26 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 	}
 
 	if sp.hasAdminWallet && paidTotal.Sign() > 0 {
-		newRewardPoolBalance := new(big.Int).Sub(rewardPoolBalance, paidTotal)
+		// If the admin/treasury wallet is itself among the recipients (e.g.
+		// a phantom self-stake -- see the undelegation work referenced in
+		// this repo's task history), that portion of paidTotal never
+		// actually leaves the treasury: applyAccountRewards just credited
+		// it straight back to the same wallet it was conceptually paid
+		// from. Only the portion that reaches OTHER accounts represents
+		// ZNHB genuinely released from the Reward Pool's ring-fenced
+		// inventory, so that -- not the gross paidTotal -- is what the pool
+		// ledger below must shrink by, or the ledger and the wallet's real
+		// balance (adjusted next) permanently disagree by exactly the
+		// self-paid amount.
+		adminSelfPaid := big.NewInt(0)
+		for _, payout := range payouts {
+			if bytes.Equal(payout.Account, sp.adminWallet[:]) {
+				adminSelfPaid.Add(adminSelfPaid, payout.Total)
+			}
+		}
+		externalPaid := new(big.Int).Sub(paidTotal, adminSelfPaid)
+
+		newRewardPoolBalance := new(big.Int).Sub(rewardPoolBalance, externalPaid)
 		if newRewardPoolBalance.Sign() < 0 {
 			// Unreachable given the clamp above, but never let the pool go
 			// negative regardless of any formula or rounding edge case.
@@ -161,6 +180,36 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 		}
 		if err := rewardManager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
 			return fmt.Errorf("settleEpochRewards: update reward pool balance: %w", err)
+		}
+		// Reward payouts are a real transfer out of the admin/treasury
+		// wallet's own ZNHB balance -- the Reward Pool figure above is only
+		// a bookkeeping label for the portion of that balance earmarked for
+		// future emissions, not a separate source of funds. Debiting the
+		// label without also debiting the wallet that actually backs it
+		// would mint ZNHB from nothing (recipients gain real, spendable
+		// balance with no offsetting debit anywhere), which
+		// CheckZNHBSupplyInvariant (core/state_transition.go) exists
+		// specifically to catch. This debits the full gross paidTotal (not
+		// externalPaid) because applyAccountRewards above already credited
+		// the admin wallet its own adminSelfPaid share when applicable --
+		// debiting the gross and having already credited the self-share
+		// nets out to exactly -externalPaid on the admin wallet's real
+		// balance, matching the pool ledger change above. This must run
+		// after applyAccountRewards so it reads the admin wallet's balance
+		// post-credit.
+		adminAccount, err := sp.getAccount(sp.adminWallet[:])
+		if err != nil {
+			return fmt.Errorf("settleEpochRewards: load admin wallet: %w", err)
+		}
+		if adminAccount.BalanceZNHB == nil {
+			adminAccount.BalanceZNHB = big.NewInt(0)
+		}
+		if adminAccount.BalanceZNHB.Cmp(paidTotal) < 0 {
+			return fmt.Errorf("settleEpochRewards: admin wallet ZNHB balance (%s) is less than this epoch's payout total (%s)", adminAccount.BalanceZNHB, paidTotal)
+		}
+		adminAccount.BalanceZNHB.Sub(adminAccount.BalanceZNHB, paidTotal)
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("settleEpochRewards: debit admin wallet: %w", err)
 		}
 	}
 

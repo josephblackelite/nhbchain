@@ -178,3 +178,135 @@ func TestSettleEpochRewards_ExhaustedRewardPoolPaysNothing(t *testing.T) {
 		t.Fatalf("reward pool balance should remain exactly zero, got %s", got)
 	}
 }
+
+// TestSettleEpochRewards_PreservesSupplyInvariant is a regression test for
+// the production incident where a real reward payout (recipient credited,
+// Reward Pool label debited) never debited the admin wallet's actual ZNHB
+// balance -- a pure mint with no funding side, invisible to every
+// pre-existing test above because none of them checked
+// CheckZNHBSupplyInvariant after a settlement. It broke on the very first
+// live payout and halted block production for ~22 hours. This must pass
+// after every reward settlement, not just be checked incidentally.
+func TestSettleEpochRewards_PreservesSupplyInvariant(t *testing.T) {
+	sp := newRewardTestState(t)
+	withRewardPoolAdminWallet(t, sp)
+
+	seedEligibleValidator(t, sp, 6000, 10)
+	seedEligibleValidator(t, sp, 4000, 5)
+	finalizeRewardEpoch(t, sp)
+
+	settlement, ok := sp.LatestRewardEpochSettlement()
+	if !ok {
+		t.Fatalf("expected settlement")
+	}
+	if settlement.PaidTotal.Sign() <= 0 {
+		t.Fatalf("expected a positive paid total to exercise the debit path, got %s", settlement.PaidTotal)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("supply invariant violated after a reward settlement: %v", err)
+	}
+}
+
+// TestSettleEpochRewards_RecipientIsAdminWalletPreservesInvariant covers the
+// case where the admin/treasury wallet is itself among the reward
+// recipients (e.g. a phantom self-stake) -- the debit and credit land on
+// the same account, and must still net out to a balance that exactly
+// matches what every other recipient actually received.
+func TestSettleEpochRewards_RecipientIsAdminWalletPreservesInvariant(t *testing.T) {
+	sp := newRewardTestState(t)
+	adminAddr := withRewardPoolAdminWallet(t, sp)
+
+	// Make the admin/treasury wallet itself an eligible validator (mirrors
+	// the production "phantom self-stake" scenario) instead of using
+	// seedEligibleValidator, which always mints a fresh unrelated key.
+	if err := nhbstate.NewManager(sp.Trie).SetMinimumValidatorStake(big.NewInt(1000)); err != nil {
+		t.Fatalf("set test minimum stake: %v", err)
+	}
+	adminAccount, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	adminAccount.Stake = big.NewInt(6000)
+	adminAccount.EngagementScore = 10
+	adminAccount.EngagementLastHeartbeat = uint64(rewardBlockTimestamp1)
+	if err := sp.setAccount(adminAddr[:], adminAccount); err != nil {
+		t.Fatalf("seed admin as validator: %v", err)
+	}
+	if sp.EligibleValidators == nil {
+		sp.EligibleValidators = make(map[string]*big.Int)
+	}
+	sp.EligibleValidators[string(adminAddr[:])] = big.NewInt(6000)
+
+	seedEligibleValidator(t, sp, 4000, 5)
+	finalizeRewardEpoch(t, sp)
+
+	settlement, ok := sp.LatestRewardEpochSettlement()
+	if !ok {
+		t.Fatalf("expected settlement")
+	}
+	if settlement.PaidTotal.Sign() <= 0 {
+		t.Fatalf("expected a positive paid total to exercise the debit path, got %s", settlement.PaidTotal)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("supply invariant violated when the admin wallet is itself a reward recipient: %v", err)
+	}
+}
+
+func TestReconcileZNHBSupplyDriftOnce_RepairsExistingDriftAndIsIdempotent(t *testing.T) {
+	sp := newRewardTestState(t)
+	adminAddr := withRewardPoolAdminWallet(t, sp)
+
+	// Simulate the pre-fix bug's aftermath directly: credit a recipient and
+	// debit the Reward Pool label, WITHOUT debiting the admin wallet -- the
+	// exact drift CheckZNHBSupplyInvariant caught in production.
+	manager := nhbstate.NewManager(sp.Trie)
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read reward pool balance: %v", err)
+	}
+	drift := big.NewInt(50)
+	if err := manager.ZNHBSetRewardPoolBalance(new(big.Int).Sub(rewardPool, drift)); err != nil {
+		t.Fatalf("set reward pool balance: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err == nil {
+		t.Fatalf("expected the induced drift to violate the invariant before reconciliation")
+	}
+
+	if err := sp.ReconcileZNHBSupplyDriftOnce(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("supply invariant still violated after reconciliation: %v", err)
+	}
+	adminAccount, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	wantBalance := new(big.Int).Sub(znhbExpectedTotalSupplyWei, drift)
+	if adminAccount.BalanceZNHB.Cmp(wantBalance) != 0 {
+		t.Fatalf("admin balance after reconciliation = %s, want %s", adminAccount.BalanceZNHB, wantBalance)
+	}
+
+	// Idempotency: re-running must not touch state again, even if a fresh
+	// (post-fix) violation appears afterward -- the flag guards against
+	// ever masking a real future bug, not just against re-running cleanly.
+	// Reads the CURRENT (post-reconciliation) pool balance rather than
+	// reusing the pre-reconciliation `rewardPool` value -- that value is
+	// stale (reconciliation only corrects the admin wallet, not the pool
+	// fields, so the pool is already sitting at rewardPool-drift; reusing
+	// it here would be a no-op re-write, not a fresh violation).
+	manager2 := nhbstate.NewManager(sp.Trie)
+	currentRewardPool, err := manager2.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read current reward pool balance: %v", err)
+	}
+	if err := manager2.ZNHBSetRewardPoolBalance(new(big.Int).Sub(currentRewardPool, drift)); err != nil {
+		t.Fatalf("re-induce drift: %v", err)
+	}
+	if err := sp.ReconcileZNHBSupplyDriftOnce(); err != nil {
+		t.Fatalf("reconcile (second call): %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err == nil {
+		t.Fatalf("expected the reconciliation to be a no-op on its second call, leaving the new violation in place")
+	}
+}

@@ -93,6 +93,7 @@ var (
 	znhbCumulativeSoldKey          = []byte("znhb/sale/cumulativeDistributed")
 	znhbBuybackAccrualKey          = []byte("znhb/buyback/baaBalance")
 	znhbPoolsBootstrappedKey       = []byte("znhb/sale/poolsBootstrapped")
+	znhbSupplyDriftReconciledKey   = []byte("znhb/supplyDriftReconciled")
 	potsoHeartbeatPrefix           = []byte("potso/heartbeat/")
 	potsoMeterPrefix               = []byte("potso/meter/")
 	potsoDayIndexPrefix            = []byte("potso/day-index/")
@@ -1815,6 +1816,27 @@ func (m *Manager) ZNHBPoolsBootstrapped() (bool, error) {
 // core/state_transition.go, after both pool balances have been written.
 func (m *Manager) ZNHBMarkPoolsBootstrapped() error {
 	return m.KVPut(znhbPoolsBootstrappedKey, true)
+}
+
+// ZNHBSupplyDriftReconciled reports whether the one-time repair for the
+// pre-fix reward-payout accounting gap (see
+// StateProcessor.ReconcileZNHBSupplyDriftOnce in core/state_transition.go)
+// has already run.
+func (m *Manager) ZNHBSupplyDriftReconciled() (bool, error) {
+	var flag bool
+	ok, err := m.KVGet(znhbSupplyDriftReconciledKey, &flag)
+	if err != nil {
+		return false, err
+	}
+	return ok && flag, nil
+}
+
+// ZNHBMarkSupplyDriftReconciled records that the one-time supply-drift
+// repair has run, so it is never repeated -- any future invariant
+// violation after this flag is set is a real new bug that must halt the
+// chain, not something to silently paper over again.
+func (m *Manager) ZNHBMarkSupplyDriftReconciled() error {
+	return m.KVPut(znhbSupplyDriftReconciledKey, true)
 }
 
 // getZNHBPoolBalance is a shared helper: every ZNHB tokenomics counter is

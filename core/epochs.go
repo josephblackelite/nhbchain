@@ -144,6 +144,13 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
 		return fmt.Errorf("bootstrap ZNHB sale/reward pools: %w", err)
 	}
+	// One-time repair for the pre-fix reward-payout accounting gap (see
+	// ReconcileZNHBSupplyDriftOnce's doc comment) -- must run before the
+	// invariant check below, and is a no-op forever after its guard flag
+	// is set, so it can never mask a genuine future violation.
+	if err := sp.ReconcileZNHBSupplyDriftOnce(); err != nil {
+		return fmt.Errorf("reconcile ZNHB supply drift: %w", err)
+	}
 	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
 		return err
 	}

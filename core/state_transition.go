@@ -915,6 +915,74 @@ func (sp *StateProcessor) EnsureZNHBPoolsBootstrapped() error {
 	return nil
 }
 
+// ReconcileZNHBSupplyDriftOnce repairs a specific, already-identified,
+// one-time accounting gap: early reward-payout code (see
+// StateProcessor.settleEpochRewards in core/rewards_logic.go) credited
+// recipients' ZNHB balances and decremented the Reward Pool's bookkeeping
+// label, but never debited the admin/treasury wallet's actual BalanceZNHB
+// to fund those payouts -- a real transfer needs both sides. That silently
+// inflated total supply by the cumulative payout amount before this was
+// caught (by CheckZNHBSupplyInvariant halting the chain) and fixed (by
+// settleEpochRewards now debiting the admin wallet alongside the pool
+// label). This function repairs the resulting drift in already-committed
+// state exactly once: it brings the admin wallet's balance back down (or
+// up, in the general case) to match the Sale+Reward pool sum, the
+// authoritative ledger of what should have been distributed. Guarded by a
+// persistent flag so it can never run twice and can never mask a genuine
+// future invariant violation once the underlying bug is fixed.
+func (sp *StateProcessor) ReconcileZNHBSupplyDriftOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if !bootstrapped {
+		return nil
+	}
+	reconciled, err := manager.ZNHBSupplyDriftReconciled()
+	if err != nil {
+		return fmt.Errorf("znhb: check supply drift reconciliation flag: %w", err)
+	}
+	if reconciled {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load sale pool balance: %w", err)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load reward pool balance: %w", err)
+	}
+	sum := new(big.Int).Add(salePool, rewardPool)
+	adminBalance := adminAccount.BalanceZNHB
+	if adminBalance == nil {
+		adminBalance = big.NewInt(0)
+	}
+
+	drift := new(big.Int).Sub(adminBalance, sum)
+	if drift.Sign() != 0 {
+		adminAccount.BalanceZNHB = new(big.Int).Set(sum)
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("znhb: apply supply drift correction: %w", err)
+		}
+		sp.AppendEvent(&types.Event{Type: "znhb.supply_drift_reconciled", Attributes: map[string]string{
+			"drift":                drift.String(),
+			"admin_balance_before": adminBalance.String(),
+			"admin_balance_after":  sum.String(),
+		}})
+	}
+	return manager.ZNHBMarkSupplyDriftReconciled()
+}
+
 // CheckZNHBSupplyInvariant asserts that the Sale Pool and Reward Pool
 // sub-ledgers together account for exactly the admin/treasury wallet's
 // live ZNHB balance -- the consensus-critical guarantee that no ZNHB has
