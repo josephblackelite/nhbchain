@@ -563,14 +563,27 @@ func sendTransaction(tx *types.Transaction) (string, error) {
 	var rpcResp struct {
 		Result string `json:"result"`
 		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
+			Code    int             `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
 		return "", fmt.Errorf("failed to decode response from node")
 	}
 	if rpcResp.Error != nil {
+		if len(rpcResp.Error.Data) > 0 {
+			// The server puts the actual validation reason (e.g. "nonce N
+			// has already been used") in `data`, not `message` -- the
+			// latter is often just a generic wrapper like "invalid
+			// transaction". Surface both, since the detail is what an
+			// operator actually needs to act on.
+			var detail string
+			if err := json.Unmarshal(rpcResp.Error.Data, &detail); err == nil && detail != "" {
+				return "", fmt.Errorf("error from node: %s: %s", rpcResp.Error.Message, detail)
+			}
+			return "", fmt.Errorf("error from node: %s: %s", rpcResp.Error.Message, string(rpcResp.Error.Data))
+		}
 		return "", fmt.Errorf("error from node: %s", rpcResp.Error.Message)
 	}
 	return strings.TrimSpace(rpcResp.Result), nil
