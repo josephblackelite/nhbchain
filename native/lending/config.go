@@ -12,6 +12,16 @@ type Config struct {
 	DeveloperFeeBps         uint64                  `toml:"DeveloperFeeBps"`
 	DeveloperFeeCollector   string                  `toml:"DeveloperFeeCollector"`
 	CollateralRouting       CollateralRoutingConfig `toml:"collateralRouting"`
+	// OracleMaxAgeBlocks bounds how many blocks may elapse since a market's
+	// last ref-price update (Market.OracleUpdatedBlock) before guardOracle
+	// treats the quote as stale and refuses to Borrow/WithdrawCollateral/
+	// Liquidate against it. Zero disables the staleness check.
+	OracleMaxAgeBlocks uint64 `toml:"OracleMaxAgeBlocks"`
+	// OracleMaxDeviationBps bounds how far a new ref-price submission may
+	// move relative to the market's previous one (Market.OraclePrevMedianWei)
+	// before guardOracle refuses to lend against it. Zero disables the
+	// deviation check.
+	OracleMaxDeviationBps uint64 `toml:"OracleMaxDeviationBps"`
 }
 
 // CollateralRoutingConfig describes the default collateral distribution applied

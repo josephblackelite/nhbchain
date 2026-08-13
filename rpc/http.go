@@ -1438,6 +1438,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleBuybackSubmitRefPrice(recorder, r, req)
+	case "lending_getRefPriceStatus":
+		s.handleLendingGetRefPriceStatus(recorder, r, req)
+	case "lending_submitRefPrice":
+		if authErr := s.requireAuthInto(&r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleLendingSubmitRefPrice(recorder, r, req)
 	case "fees_listTotals":
 		s.handleFeesListTotals(recorder, r, req)
 	case "fees_getMonthlyStatus":

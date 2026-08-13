@@ -1,6 +1,10 @@
-// Package rpcclient is a minimal JSON-RPC 2.0 client scoped to the two
-// chain-side methods buybackd needs (buyback_getRefPriceStatus,
-// buyback_submitRefPrice) -- mirroring
+// Package rpcclient is a minimal JSON-RPC 2.0 client scoped to the
+// chain-side methods buybackd needs: the buyback engine's own
+// buyback_getRefPriceStatus/buyback_submitRefPrice, plus
+// lending_getRefPriceStatus/lending_submitRefPrice for the lending oracle
+// submission this same process also performs (see
+// services/buybackd/refprice's AttemptLendingRefPrice doc comment on why
+// buybackd, not a separate service, owns this) -- mirroring
 // services/lending/engine/rpcclient's shape rather than importing it, since
 // that package is scoped to the lending engine's own method set and pulling
 // it in here would be a layering violation for an unrelated domain.
@@ -162,6 +166,51 @@ func (c *Client) SubmitRefPrice(ctx context.Context, rateNum, rateDenom *big.Int
 		TxHash string `json:"txHash"`
 	}
 	if err := c.call(ctx, "buyback_submitRefPrice", []any{payload}, &result); err != nil {
+		return "", err
+	}
+	return result.TxHash, nil
+}
+
+// LendingRefPriceStatus mirrors core.LendingRefPriceStatus's JSON shape.
+type LendingRefPriceStatus struct {
+	HasRefPrice  bool   `json:"hasRefPrice"`
+	RateNum      string `json:"rateNum,omitempty"`
+	RateDenom    string `json:"rateDenom,omitempty"`
+	Timestamp    uint64 `json:"timestamp,omitempty"`
+	SignerCount  int    `json:"signerCount,omitempty"`
+	AppliedBlock uint64 `json:"appliedBlock,omitempty"`
+	MarketCount  int    `json:"marketCount,omitempty"`
+}
+
+// GetLendingRefPriceStatus calls lending_getRefPriceStatus.
+func (c *Client) GetLendingRefPriceStatus(ctx context.Context) (*LendingRefPriceStatus, error) {
+	var status LendingRefPriceStatus
+	if err := c.call(ctx, "lending_getRefPriceStatus", nil, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// SubmitLendingRefPrice calls the auth-gated lending_submitRefPrice with an
+// already-signed M-of-N bundle.
+func (c *Client) SubmitLendingRefPrice(ctx context.Context, rateNum, rateDenom *big.Int, timestamp uint64, signatures [][]byte) (string, error) {
+	if rateNum == nil || rateDenom == nil {
+		return "", fmt.Errorf("rpcclient: rate required")
+	}
+	sigHexes := make([]string, len(signatures))
+	for i, sig := range signatures {
+		sigHexes[i] = "0x" + hex.EncodeToString(sig)
+	}
+	payload := map[string]any{
+		"rateNum":    rateNum.String(),
+		"rateDenom":  rateDenom.String(),
+		"timestamp":  timestamp,
+		"signatures": sigHexes,
+	}
+	var result struct {
+		TxHash string `json:"txHash"`
+	}
+	if err := c.call(ctx, "lending_submitRefPrice", []any{payload}, &result); err != nil {
 		return "", err
 	}
 	return result.TxHash, nil

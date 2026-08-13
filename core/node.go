@@ -7551,6 +7551,117 @@ func (n *Node) SubmitBuybackRefPrice(rateNum, rateDenom *big.Int, epoch, timesta
 	return txHash, nil
 }
 
+// lendingRefPricePayload mirrors, field-for-field and in the same order, the
+// anonymous decode-side struct in core/lending_tx.go's
+// applyLendingRefPriceTransaction -- RLP encodes/decodes structs
+// positionally, so this shape must never drift from that one. Unlike
+// buybackRefPricePayload there is no Epoch: lending's oracle price is not
+// epoch-gated (see core/lending_tx.go's domain-separation doc comment).
+// Unexported: constructing this is an internal encoding detail of
+// SubmitLendingRefPrice, not part of the Node API surface.
+type lendingRefPricePayload struct {
+	RateNum    *big.Int
+	RateDenom  *big.Int
+	Timestamp  uint64
+	Signatures [][]byte
+}
+
+// LendingRefPriceStatus is a JSON-safe snapshot of the most recently
+// accepted lending oracle reference price, if any submission has ever been
+// recorded. All big.Int-scale fields are decimal strings for the same
+// reason BuybackRefPriceStatus's are.
+type LendingRefPriceStatus struct {
+	HasRefPrice  bool   `json:"hasRefPrice"`
+	RateNum      string `json:"rateNum,omitempty"`
+	RateDenom    string `json:"rateDenom,omitempty"`
+	Timestamp    uint64 `json:"timestamp,omitempty"`
+	SignerCount  int    `json:"signerCount,omitempty"`
+	AppliedBlock uint64 `json:"appliedBlock,omitempty"`
+	MarketCount  uint64 `json:"marketCount,omitempty"`
+}
+
+// LendingRefPriceStatus reports the most recently accepted lending oracle
+// reference price -- a submission service should check this before signing
+// and submitting, both to confirm a prior submission actually landed and to
+// read back the Timestamp a new submission's own Timestamp must exceed (see
+// applyLendingRefPriceTransaction's replay-protection check).
+func (n *Node) LendingRefPriceStatus() (*LendingRefPriceStatus, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	rec, ok, err := manager.LendingRefPriceLast()
+	if err != nil {
+		return nil, fmt.Errorf("lending: load reference price status: %w", err)
+	}
+	status := &LendingRefPriceStatus{HasRefPrice: ok}
+	if ok && rec != nil {
+		if rec.RateNum != nil {
+			status.RateNum = rec.RateNum.String()
+		}
+		if rec.RateDenom != nil {
+			status.RateDenom = rec.RateDenom.String()
+		}
+		status.Timestamp = rec.Timestamp
+		status.SignerCount = len(rec.Signers)
+		status.AppliedBlock = rec.AppliedBlock
+		status.MarketCount = rec.MarketCount
+	}
+	return status, nil
+}
+
+// SubmitLendingRefPrice constructs and injects a TxTypeLendingRefPrice
+// transaction carrying the supplied M-of-N signature bundle -- mirroring
+// SubmitBuybackRefPrice's pattern exactly, since both are senderless,
+// envelope-unsigned transaction types whose real authorization lives
+// entirely inside tx.Data (see core/lending_tx.go's
+// applyLendingRefPriceTransaction doc comment). Signature verification
+// against the genesis-immutable signer quorum happens there, synchronously,
+// during AddTransaction's simulation -- this method does no verification of
+// its own and trusts nothing about the signatures beyond what that
+// consensus code checks.
+func (n *Node) SubmitLendingRefPrice(rateNum, rateDenom *big.Int, timestamp uint64, signatures [][]byte) (string, error) {
+	if rateNum == nil || rateNum.Sign() <= 0 || rateDenom == nil || rateDenom.Sign() <= 0 {
+		return "", fmt.Errorf("lendingRefPrice: rate must be a positive fraction")
+	}
+	if timestamp == 0 {
+		return "", fmt.Errorf("lendingRefPrice: timestamp required")
+	}
+	if len(signatures) == 0 {
+		return "", fmt.Errorf("lendingRefPrice: at least one signature required")
+	}
+	payload, err := rlp.EncodeToBytes(lendingRefPricePayload{
+		RateNum:    new(big.Int).Set(rateNum),
+		RateDenom:  new(big.Int).Set(rateDenom),
+		Timestamp:  timestamp,
+		Signatures: signatures,
+	})
+	if err != nil {
+		return "", fmt.Errorf("lendingRefPrice: encode payload: %w", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeLendingRefPrice,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return "", fmt.Errorf("lendingRefPrice: hash transaction: %w", err)
+	}
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if err := n.AddTransaction(tx); err != nil {
+		return "", err
+	}
+	return txHash, nil
+}
+
 // SwapGetVoucher returns the ledger record for the supplied provider
 // transaction identifier.
 func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {

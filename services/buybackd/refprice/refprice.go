@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"nhbchain/core/tokenomics/buyback"
+	"nhbchain/core/tokenomics/lendingoracle"
 	"nhbchain/services/buybackd/rpcclient"
 )
 
@@ -147,6 +148,82 @@ func (s *Service) Attempt(ctx context.Context) (submitted bool, txHash string, e
 	hash, err := s.chain.SubmitRefPrice(ctx, rate.Num(), rate.Denom(), epoch, uint64(ts.UTC().Unix()), signatures)
 	if err != nil {
 		return false, "", fmt.Errorf("refprice: submit: %w", err)
+	}
+	return true, hash, nil
+}
+
+// LendingChainClient abstracts the two chain RPC calls the lending
+// reference-price attempt needs. *nhbchain/services/buybackd/rpcclient.Client
+// satisfies this directly.
+type LendingChainClient interface {
+	GetLendingRefPriceStatus(ctx context.Context) (*rpcclient.LendingRefPriceStatus, error)
+	SubmitLendingRefPrice(ctx context.Context, rateNum, rateDenom *big.Int, timestamp uint64, signatures [][]byte) (string, error)
+}
+
+// AttemptLendingRefPrice runs one lending-oracle submission cycle, reusing
+// this Service's already-configured quote source and local signers -- the
+// same operator holding the same buyback signer keys is, today, also the
+// trusted source for lending's oracle price, so a second standalone service
+// with its own keystore-loading/polling loop would just duplicate this
+// one's for no present benefit; see core/lending_tx.go's
+// applyLendingRefPriceTransaction doc comment for the chain-side half of
+// this same reasoning.
+//
+// Deliberately NOT gated on "does the current epoch already have a
+// recorded price" the way Attempt is -- lending's oracle price is not
+// epoch-scoped and is meant to be refreshed every cycle (see
+// core/tokenomics/lendingoracle's doc comment on why it carries no Epoch).
+// Anti-replay instead comes from signing this call's own submission time
+// rather than the underlying quote's origin time (a manually-configured
+// oracle can hold that fixed indefinitely -- see buildQuoteSource's manual
+// oracle seeding in services/buybackd/main.go) and the chain rejecting any
+// submission whose Timestamp doesn't strictly exceed the last accepted one.
+func (s *Service) AttemptLendingRefPrice(ctx context.Context, chain LendingChainClient) (submitted bool, txHash string, err error) {
+	if s == nil {
+		return false, "", fmt.Errorf("refprice: service not configured")
+	}
+	if chain == nil {
+		return false, "", fmt.Errorf("refprice: lending chain client required")
+	}
+
+	rate, _, _, err := s.source.Quote(ctx, s.base, s.quote)
+	if err != nil {
+		return false, "", fmt.Errorf("refprice: lending quote %s/%s: %w", s.base, s.quote, err)
+	}
+	if rate == nil || rate.Sign() <= 0 {
+		return false, "", fmt.Errorf("refprice: lending non-positive rate for %s/%s", s.base, s.quote)
+	}
+
+	now := time.Now().UTC()
+	status, err := chain.GetLendingRefPriceStatus(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("refprice: check lending ref price status: %w", err)
+	}
+	if status.HasRefPrice && uint64(now.Unix()) <= status.Timestamp {
+		return false, "", nil
+	}
+
+	rp := &lendingoracle.ReferencePrice{Rate: rate, Timestamp: now}
+	digest, err := rp.Hash()
+	if err != nil {
+		return false, "", fmt.Errorf("refprice: hash lending reference price: %w", err)
+	}
+
+	signatures := make([][]byte, 0, len(s.signers))
+	for i, signer := range s.signers {
+		sig, _, signErr := signer.Sign(ctx, digest[:])
+		if signErr != nil {
+			return false, "", fmt.Errorf("refprice: sign lending ref price with local signer %d: %w", i, signErr)
+		}
+		if len(sig) != 65 {
+			return false, "", fmt.Errorf("refprice: local signer %d returned unexpected signature length %d (want 65)", i, len(sig))
+		}
+		signatures = append(signatures, sig)
+	}
+
+	hash, err := chain.SubmitLendingRefPrice(ctx, rate.Num(), rate.Denom(), uint64(now.Unix()), signatures)
+	if err != nil {
+		return false, "", fmt.Errorf("refprice: submit lending ref price: %w", err)
 	}
 	return true, hash, nil
 }

@@ -84,7 +84,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	runLoop(ctx, logger, svc, cfg.PollInterval)
+	runLoop(ctx, logger, svc, chainClient, cfg.PollInterval)
 	logger.Info("buybackd shutting down")
 }
 
@@ -143,12 +143,16 @@ func (o *oracleQuoteSource) Quote(ctx context.Context, base, quote string) (*big
 	return result.Rate, []string{result.Source}, result.Timestamp, nil
 }
 
-// runLoop calls svc.Attempt once immediately, then once per interval, until
-// ctx is cancelled (SIGINT/SIGTERM). Every outcome -- submitted, skipped
-// because the epoch already has a recorded price, or errored -- is logged,
-// since this is the only place an operator running buybackd unattended will
-// ever see what it actually did.
-func runLoop(ctx context.Context, logger *slog.Logger, svc *refprice.Service, interval time.Duration) {
+// runLoop calls svc.Attempt (the buyback engine's per-epoch reference price)
+// and svc.AttemptLendingRefPrice (the lending oracle's own, non-epoch-gated
+// reference price -- see that method's doc comment for why this same
+// process/signer set owns both) once immediately, then once per interval,
+// until ctx is cancelled (SIGINT/SIGTERM). Every outcome -- submitted,
+// skipped, or errored -- is logged for each independently, since this is the
+// only place an operator running buybackd unattended will ever see what it
+// actually did. A lending submission failure does not prevent the buyback
+// attempt (or vice versa) from running this cycle.
+func runLoop(ctx context.Context, logger *slog.Logger, svc *refprice.Service, chain refprice.LendingChainClient, interval time.Duration) {
 	attempt := func() {
 		submitted, txHash, err := svc.Attempt(ctx)
 		switch {
@@ -158,6 +162,16 @@ func runLoop(ctx context.Context, logger *slog.Logger, svc *refprice.Service, in
 			logger.Info("submitted reference price", "txHash", txHash)
 		default:
 			logger.Info("no submission needed this cycle (current epoch already has a recorded reference price)")
+		}
+
+		lendingSubmitted, lendingTxHash, lendingErr := svc.AttemptLendingRefPrice(ctx, chain)
+		switch {
+		case lendingErr != nil:
+			logger.Error("lending reference-price submission attempt failed", "error", lendingErr)
+		case lendingSubmitted:
+			logger.Info("submitted lending reference price", "txHash", lendingTxHash)
+		default:
+			logger.Info("no lending submission needed this cycle (quote timestamp not newer than the last accepted one)")
 		}
 	}
 

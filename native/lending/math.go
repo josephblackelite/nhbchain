@@ -7,6 +7,7 @@ var (
 	ray          = mustBigInt("1000000000000000000000000000") // 1e27 precision
 	halfRay      = new(big.Int).Rsh(ray, 1)
 	minLiquidity = mustBigInt("1000000000000000000") // 1 NHB in wei required at bootstrap
+	weiPerToken  = mustBigInt("1000000000000000000") // 1e18, the scale of both a whole ZNHB and Market.OracleMedianWei
 )
 
 func mustBigInt(value string) *big.Int {

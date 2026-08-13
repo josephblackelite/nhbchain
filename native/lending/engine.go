@@ -414,7 +414,16 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 	e.syncDebt(user, market)
 
 	remaining := new(big.Int).Sub(user.CollateralZNHB, amount)
-	if !e.positionHealthy(remaining, user.DebtNHB) {
+	if user.DebtNHB != nil && user.DebtNHB.Sign() > 0 {
+		// Only guard the oracle when the outcome actually depends on
+		// price -- a debt-free withdrawal is always healthy regardless
+		// of quote freshness, and blocking it on a stale price the
+		// check never reads would be pointless friction.
+		if err := e.guardOracle(market); err != nil {
+			return err
+		}
+	}
+	if !e.positionHealthy(market, remaining, user.DebtNHB) {
 		return errHealthCheckFailed
 	}
 
@@ -550,12 +559,12 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 
 	// Health factor check using the projected debt after borrowing.
 	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, totalOut)
-	if !e.positionHealthy(borrowerUser.CollateralZNHB, projectedDebt) {
+	if !e.positionHealthy(market, borrowerUser.CollateralZNHB, projectedDebt) {
 		return nil, errHealthCheckFailed
 	}
 	// Borrow-time cap, stricter than and independent of the liquidation
 	// threshold above -- see withinMaxLTV.
-	if !e.withinMaxLTV(borrowerUser.CollateralZNHB, projectedDebt) {
+	if !e.withinMaxLTV(market, borrowerUser.CollateralZNHB, projectedDebt) {
 		return nil, errMaxLTVExceeded
 	}
 
@@ -755,7 +764,13 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	if borrowerUser.DebtNHB.Sign() == 0 {
 		return nil, nil, errNoDebtToRepay
 	}
-	if e.positionHealthy(borrowerUser.CollateralZNHB, borrowerUser.DebtNHB) {
+	// A stale or wildly-deviated price can't be trusted to determine
+	// whether this position is actually eligible for liquidation --
+	// guard it before making that call, not just at borrow time.
+	if err := e.guardOracle(market); err != nil {
+		return nil, nil, err
+	}
+	if e.positionHealthy(market, borrowerUser.CollateralZNHB, borrowerUser.DebtNHB) {
 		return nil, nil, errNotLiquidatable
 	}
 
@@ -1053,32 +1068,40 @@ func (e *Engine) guardOracle(market *Market) error {
 	return nil
 }
 
-// positionHealthy compares collateral (ZNHB wei) directly against debt (NHB
-// wei) at an implicit 1:1 exchange rate -- there is currently no price
-// oracle wired into this comparison. RiskParameters.Oracle/Market.
-// OracleMedianWei exist and are read by guardOracle, but nothing in this
-// engine ever WRITES a real price into OracleMedianWei (confirmed: grepped
-// every assignment site, all three just zero-initialize it), and the live
-// config has both Oracle.MaxAgeBlocks and MaxDeviationBps at 0, so
-// guardOracle's checks never fire either. If ZNHB's market value ever
-// diverges materially from NHB's, this 1:1 treatment either lets borrowers
-// draw more real value than their collateral covers (bad debt risk to
-// suppliers) or needlessly under-collateralizes the other way. A real fix
-// means wiring a deterministic on-chain price into OracleMedianWei (the
-// swap.OracleAggregator + core/pricing.DefaultPriceFeed infrastructure
-// already exists and is live for swap/loyalty pricing, but nothing
-// currently publishes its output into lending's Market state) and
-// converting collateral through it here before comparing -- not a small
-// change, and not done yet. Until then, treat any deployment enabling
-// borrowing as implicitly assuming ZNHB tracks NHB 1:1.
-func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
+// oracleAdjustedCollateralValue converts a raw ZNHB-wei collateral amount
+// into NHB-wei terms using market.OracleMedianWei -- the NHB-wei value of
+// exactly one whole ZNHB (1e18 ZNHB-wei), as written by
+// applyLendingRefPriceTransaction (core/lending_tx.go). Rounds down
+// (protocol-favoring: a collateral value this conversion produces is never
+// higher than what the signed price bundle actually attests to). Falls back
+// to strict 1:1 when no oracle price has ever been submitted for this market
+// (OracleMedianWei unset/zero), preserving this engine's original behaviour
+// until the first real submission lands.
+func oracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *big.Int {
+	if collateralZNHBWei == nil || collateralZNHBWei.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	if market == nil || market.OracleMedianWei == nil || market.OracleMedianWei.Sign() <= 0 {
+		return collateralZNHBWei
+	}
+	value := new(big.Int).Mul(collateralZNHBWei, market.OracleMedianWei)
+	return value.Quo(value, weiPerToken)
+}
+
+// positionHealthy compares collateral (ZNHB wei, converted to NHB-wei terms
+// via market's oracle price -- see oracleAdjustedCollateralValue) against
+// debt (NHB wei). Callers that let debt influence the outcome (i.e. debt >
+// 0) must call guardOracle(market) first so a stale or wildly-deviated price
+// can never silently pass this check.
+func (e *Engine) positionHealthy(market *Market, collateral, debt *big.Int) bool {
 	if debt == nil || debt.Sign() == 0 {
 		return true
 	}
-	if collateral == nil || collateral.Sign() == 0 {
+	value := oracleAdjustedCollateralValue(market, collateral)
+	if value.Sign() == 0 {
 		return false
 	}
-	num := new(big.Int).Mul(collateral, big.NewInt(int64(e.params.LiquidationThreshold)))
+	num := new(big.Int).Mul(value, big.NewInt(int64(e.params.LiquidationThreshold)))
 	den := new(big.Int).Mul(debt, basisPoints)
 	return num.Cmp(den) >= 0
 }
@@ -1090,15 +1113,16 @@ func (e *Engine) positionHealthy(collateral, debt *big.Int) bool {
 // was accepted, stored, and silently ignored, letting a borrower go straight
 // to the liquidation edge with zero safety buffer. Same comparison shape as
 // positionHealthy, deliberately, so the two stay easy to reason about
-// side by side.
-func (e *Engine) withinMaxLTV(collateral, debt *big.Int) bool {
+// side by side, including the same oracle price conversion.
+func (e *Engine) withinMaxLTV(market *Market, collateral, debt *big.Int) bool {
 	if debt == nil || debt.Sign() == 0 {
 		return true
 	}
-	if collateral == nil || collateral.Sign() == 0 {
+	value := oracleAdjustedCollateralValue(market, collateral)
+	if value.Sign() == 0 {
 		return false
 	}
-	num := new(big.Int).Mul(collateral, big.NewInt(int64(e.params.MaxLTV)))
+	num := new(big.Int).Mul(value, big.NewInt(int64(e.params.MaxLTV)))
 	den := new(big.Int).Mul(debt, basisPoints)
 	return num.Cmp(den) >= 0
 }

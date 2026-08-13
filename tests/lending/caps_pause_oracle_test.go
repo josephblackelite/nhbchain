@@ -43,8 +43,12 @@ func setupCapsEngine(moduleAddr, collateralAddr, borrower crypto.Address, modify
 		TotalNHBBorrowed:    big.NewInt(0),
 		SupplyIndex:         mustRay(),
 		BorrowIndex:         mustRay(),
-		OracleMedianWei:     mustBig("100000000"),
-		OraclePrevMedianWei: mustBig("100000000"),
+		// 1e18 == 1 whole ZNHB priced at exactly 1 whole NHB, preserving
+		// this suite's original implicit 1:1 collateral assumption now
+		// that positionHealthy/withinMaxLTV actually convert through
+		// OracleMedianWei instead of comparing raw wei 1:1 unconditionally.
+		OracleMedianWei:     new(big.Int).Set(one),
+		OraclePrevMedianWei: new(big.Int).Set(one),
 		OracleUpdatedBlock:  5,
 	}
 	state.accounts[state.key(moduleAddr)] = &types.Account{BalanceNHB: new(big.Int).Mul(one, big.NewInt(50))}

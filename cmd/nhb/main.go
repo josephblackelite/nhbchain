@@ -210,6 +210,10 @@ func main() {
 		MaxLTV:               cfg.Lending.MaxLTVBps,
 		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
 		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
+		Oracle: lending.OracleConfig{
+			MaxAgeBlocks:    cfg.Lending.OracleMaxAgeBlocks,
+			MaxDeviationBps: cfg.Lending.OracleMaxDeviationBps,
+		},
 	})
 
 	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)

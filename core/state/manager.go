@@ -1249,6 +1249,25 @@ type storedLendingMarket struct {
 	BorrowIndex        *big.Int
 	LastUpdateBlock    uint64
 	ReserveFactor      uint64
+	// BorrowedThisBlock/LastBorrowBlock/OracleMedianWei/OraclePrevMedianWei/
+	// OracleUpdatedBlock were added after the fields above -- appended at
+	// the end for RLP backward compatibility (see native/loyalty/types.go's
+	// RewardMode for the same pattern) and tagged `rlp:"optional"` since
+	// go-ethereum's RLP decoder otherwise requires an exact list-length
+	// match: without this tag, decoding any market persisted before these
+	// fields existed would fail outright rather than defaulting them. Their
+	// absence here was a real, separate bug found while adding the lending
+	// oracle (core/lending_tx.go): every LendingPutMarket/LendingGetMarket
+	// round-trip silently dropped both the per-block borrow-cap counters
+	// and the oracle price, so BorrowCaps.PerBlock was already effectively
+	// unenforceable in production (LastBorrowBlock always read back as 0,
+	// resetting BorrowedThisBlock to 0 on every single read) long before
+	// this fix, independent of the oracle work.
+	BorrowedThisBlock   *big.Int `rlp:"optional"`
+	LastBorrowBlock     uint64   `rlp:"optional"`
+	OracleMedianWei     *big.Int `rlp:"optional"`
+	OraclePrevMedianWei *big.Int `rlp:"optional"`
+	OracleUpdatedBlock  uint64   `rlp:"optional"`
 }
 
 type storedLendingFees struct {
@@ -1287,6 +1306,17 @@ func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
 	if market.BorrowIndex != nil {
 		stored.BorrowIndex = new(big.Int).Set(market.BorrowIndex)
 	}
+	if market.BorrowedThisBlock != nil {
+		stored.BorrowedThisBlock = new(big.Int).Set(market.BorrowedThisBlock)
+	}
+	stored.LastBorrowBlock = market.LastBorrowBlock
+	if market.OracleMedianWei != nil {
+		stored.OracleMedianWei = new(big.Int).Set(market.OracleMedianWei)
+	}
+	if market.OraclePrevMedianWei != nil {
+		stored.OraclePrevMedianWei = new(big.Int).Set(market.OraclePrevMedianWei)
+	}
+	stored.OracleUpdatedBlock = market.OracleUpdatedBlock
 	return stored
 }
 
@@ -1322,6 +1352,17 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 	if s.BorrowIndex != nil {
 		market.BorrowIndex = new(big.Int).Set(s.BorrowIndex)
 	}
+	if s.BorrowedThisBlock != nil {
+		market.BorrowedThisBlock = new(big.Int).Set(s.BorrowedThisBlock)
+	}
+	market.LastBorrowBlock = s.LastBorrowBlock
+	if s.OracleMedianWei != nil {
+		market.OracleMedianWei = new(big.Int).Set(s.OracleMedianWei)
+	}
+	if s.OraclePrevMedianWei != nil {
+		market.OraclePrevMedianWei = new(big.Int).Set(s.OraclePrevMedianWei)
+	}
+	market.OracleUpdatedBlock = s.OracleUpdatedBlock
 	return market
 }
 

@@ -96,6 +96,18 @@ const (
 	// not a single envelope signature. 0x25 is the next free byte after
 	// TxTypeBuybackAsk (0x24).
 	TxTypeBuybackRefPrice TxType = 0x25
+	// TxTypeLendingRefPrice submits an M-of-N-signed independent ZNHB/NHB
+	// market reference price into every configured lending market's
+	// Market.OracleMedianWei (core/lending_tx.go's
+	// applyLendingRefPriceTransaction), mirroring TxTypeBuybackRefPrice's
+	// senderless/signature-bundle shape but domain-separated
+	// (NHB_LENDING_REFPRICE_V1) and, unlike buyback's ref price, not
+	// epoch-gated -- lending's oracle price may be refreshed as often as
+	// desired, bounded only by guardOracle's staleness/deviation checks on
+	// the read side. 0x26 is the next free byte after TxTypeBuybackRefPrice
+	// (0x25) -- verified against this file's real, current tip; do not
+	// reuse without re-checking for newly added types above this comment.
+	TxTypeLendingRefPrice TxType = 0x26
 )
 
 // RequiresSignature reports whether the transaction type must carry an
@@ -103,7 +115,7 @@ const (
 // from module attestations rely on their envelope signatures instead.
 func RequiresSignature(t TxType) bool {
 	switch t {
-	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice:
+	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice, TxTypeLendingRefPrice:
 		return false
 	default:
 		return true

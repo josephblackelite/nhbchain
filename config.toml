@@ -159,6 +159,15 @@ ClientVersion = ""
   ProtocolFeeBps = 0
   DeveloperFeeBps = 0
   DeveloperFeeCollector = ""
+  # OracleMaxAgeBlocks/OracleMaxDeviationBps bound guardOracle's staleness
+  # and deviation checks on the ZNHB/NHB reference price (see
+  # TxTypeLendingRefPrice). Conservative-but-real defaults: refprice
+  # submitters are expected to update roughly every 5 minutes, so 1000
+  # blocks leaves generous slack before a Borrow/Liquidate is refused for
+  # staleness; 50% deviation tolerates a legitimate manual peg update
+  # without disabling the check outright.
+  OracleMaxAgeBlocks = 1000
+  OracleMaxDeviationBps = 5000
   [lending.breaker]
   [lending.collateralRouting]
     LiquidatorBps = 0

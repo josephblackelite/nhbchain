@@ -1943,7 +1943,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		senderAccount *types.Account
 		err           error
 	)
-	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice {
+	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice && tx.Type != types.TxTypeLendingRefPrice {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -1960,6 +1960,9 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	case types.TxTypeBuybackRefPrice:
 		err = sp.applyBuybackRefPrice(tx)
+		result = &SimulationResult{}
+	case types.TxTypeLendingRefPrice:
+		err = sp.applyLendingRefPriceTransaction(tx)
 		result = &SimulationResult{}
 	case types.TxTypeTransfer:
 		result, err = sp.applyEvmTransaction(tx)
