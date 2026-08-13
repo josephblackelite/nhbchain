@@ -933,7 +933,7 @@ func printUsage() {
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
 	fmt.Println("  set-reward-beneficiary <address|\"\"> <key_file> - Redirect this validator's epoch reward payouts to another wallet (\"\" clears it)")
 	fmt.Println("  address <key_file>                 - Print the public address for a local key file")
-	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
+	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] [--gas-price <price>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")
 	fmt.Println("  id                                 - Identity alias management subcommands")
 	fmt.Println("  escrow                             - Escrow management subcommands")
