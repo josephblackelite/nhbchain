@@ -1498,8 +1498,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLendingGetMarket(recorder, r, req)
 	case "lend_getPools":
 		s.handleLendGetPools(recorder, r, req)
-	case "lend_createPool":
-		s.handleLendCreatePool(recorder, r, req)
+	// lend_createPool was removed -- pool creation is now a real signed
+	// transaction (TxTypeLendingCreatePool) via nhb_sendTransaction, not a
+	// direct state-trie write. See rpc/lending_handlers.go's comment.
 	case "lending_getUserAccount":
 		s.handleLendingGetUserAccount(recorder, r, req)
 	case "lending_supplyNHB":

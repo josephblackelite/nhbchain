@@ -135,11 +135,6 @@ func newLendingAccountResult(poolID string, addr [20]byte, account *lending.User
 	return result
 }
 
-type lendingCreatePoolParams struct {
-	PoolID         string `json:"poolId"`
-	DeveloperOwner string `json:"developerOwner"`
-}
-
 func (s *Server) handleLendingGetMarket(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	var poolID string
 	if len(req.Params) == 1 {
@@ -191,43 +186,17 @@ func (s *Server) handleLendGetPools(w http.ResponseWriter, _ *http.Request, req 
 	writeResult(w, req.ID, lendingPoolsResult{Pools: pools, RiskParameters: params})
 }
 
-func (s *Server) handleLendCreatePool(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected parameter object", nil)
-		return
-	}
-	var input lendingCreatePoolParams
-	if err := json.Unmarshal(req.Params[0], &input); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	poolID := strings.TrimSpace(input.PoolID)
-	if poolID == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "poolId required", nil)
-		return
-	}
-	ownerAddr, err := decodeBech32(input.DeveloperOwner)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid developerOwner", err.Error())
-		return
-	}
-	market, moduleErr := s.lending.CreatePool(poolID, ownerAddr)
-	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
-		return
-	}
-	_, risk, paramsErr := s.lending.GetMarket(poolID)
-	if paramsErr != nil {
-		writeError(w, paramsErr.HTTPStatus, req.ID, paramsErr.Code, paramsErr.Message, paramsErr.Data)
-		return
-	}
-	result := lendingMarketResult{Market: market, RiskParameters: risk}
-	writeResult(w, req.ID, result)
-}
+// lending_createPool (and LendingModule.CreatePool, rpc/modules/lending.go)
+// were removed -- the old handler wrote a brand new market straight into
+// the live pending state trie via Node.WithState (a direct write invisible
+// to every other validator, guaranteed to diverge state roots the moment
+// more than one validator exists) and trusted a client-supplied
+// developerOwner address with zero proof of key possession. Pool creation
+// is now a real signed transaction (TxTypeLendingCreatePool,
+// core/lending_native.go's applyLendingCreatePoolTransaction), submitted
+// via nhb_sendTransaction like every other signed native transaction type.
+// Confirmed via full-repo grep before removal: lending_createPool had no
+// callers anywhere in this repo or nhbportal.
 
 func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {

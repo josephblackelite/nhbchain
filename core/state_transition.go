@@ -3083,6 +3083,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return nil
+	case types.TxTypeLendingCreatePool:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyLendingCreatePoolTransaction(tx, sender)
 	case types.TxTypeLendingSupplyNHB:
 		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
 			return err

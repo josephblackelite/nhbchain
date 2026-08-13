@@ -172,6 +172,16 @@ func (m *LendingModule) defaultMarket(poolID string) *lending.Market {
 	}
 }
 
+// CreatePool's RPC exposure (lend_createPool) was removed -- pool creation
+// is now TxTypeLendingCreatePool, a real signed transaction
+// (core/lending_native.go's applyLendingCreatePoolTransaction) applied
+// identically by every validator via consensus, not a direct Node.WithState
+// write trusting a client-supplied owner address with no proof of key
+// possession. This method itself is kept, unexported from the RPC surface,
+// purely for direct test use -- the same pattern SupplyNHB/DepositZNHB/
+// BorrowNHB/RepayNHB below already established when their own RPC methods
+// were disabled for the identical reason (see tests/e2e/lending_rpc_test.go's
+// comment at its lendingModule.SupplyNHB call).
 func (m *LendingModule) CreatePool(poolID string, owner [20]byte) (*lending.Market, *ModuleError) {
 	if m == nil || m.node == nil {
 		return nil, m.moduleUnavailable()

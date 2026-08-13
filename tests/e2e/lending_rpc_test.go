@@ -177,17 +177,20 @@ func TestLendingRPCEndpoints(t *testing.T) {
 		t.Fatalf("expected default pool, got %+v", poolsResult.Pools)
 	}
 
-	createResp := callRPC(t, client, baseURL, token, "lend_createPool", map[string]string{"poolId": "secondary", "developerOwner": userAddrStr})
-	var createdResult struct {
-		Market struct {
-			PoolID string `json:"poolID"`
-		} `json:"market"`
+	// lend_createPool is deliberately disabled the same way
+	// supply/deposit/borrow/repay are below -- see that comment. Pool
+	// creation's real signed-transaction equivalent is
+	// TxTypeLendingCreatePool (core/lending_native.go's
+	// applyLendingCreatePoolTransaction), which always derives the new
+	// pool's owner from the transaction's own recovered signer; call the
+	// underlying module method directly here to keep verifying pool
+	// creation stays correctly wired to node state.
+	createdMarket, moduleErr := modules.NewLendingModule(node).CreatePool("secondary", [20]byte(userAddr.Bytes()))
+	if moduleErr != nil {
+		t.Fatalf("create pool: %+v", moduleErr)
 	}
-	if err := json.Unmarshal(createResp.Result, &createdResult); err != nil {
-		t.Fatalf("decode create pool: %v", err)
-	}
-	if createdResult.Market.PoolID != "secondary" {
-		t.Fatalf("unexpected pool id in create response: %+v", createdResult.Market)
+	if createdMarket.PoolID != "secondary" {
+		t.Fatalf("unexpected pool id in create response: %+v", createdMarket)
 	}
 
 	poolsResp = callRPC(t, client, baseURL, token, "lend_getPools", nil)

@@ -646,3 +646,53 @@ func (a *lendingStateAdapter) PutAccount(addr crypto.Address, account *types.Acc
 	}
 	return a.manager.PutAccount(addr.Bytes(), account)
 }
+
+// applyLendingCreatePoolTransaction handles TxTypeLendingCreatePool. This
+// replaces LendingModule.CreatePool's old behavior of writing a brand new
+// market straight into the live pending state trie via Node.WithState
+// (rpc/modules/lending.go) -- a write invisible to every other validator,
+// which never received the RPC call, guaranteed to diverge state roots the
+// moment more than one validator exists. The new pool's DeveloperOwner is
+// always the transaction's own recovered signer (sender), never a
+// client-supplied field: the old RPC accepted an arbitrary developerOwner
+// bech32 string with zero proof the caller controlled that address's key,
+// letting anyone hand a stranger's address perpetual developer-fee rights
+// over a pool they never asked for.
+func (sp *StateProcessor) applyLendingCreatePoolTransaction(tx *types.Transaction, sender []byte) error {
+	payload, err := sp.decodeLendingPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	// decodeLendingPayload defaults an empty poolId to defaultLendingPoolID,
+	// so this also catches the empty-payload case -- the implicit "default"
+	// pool is bootstrapped elsewhere (ensureMarket/defaultMarket) and must
+	// never be shadowed by an explicit CreatePool of the same name.
+	poolID := strings.TrimSpace(payload.PoolID)
+	if poolID == defaultLendingPoolID {
+		return fmt.Errorf("lendingCreatePool: a non-default poolId is required")
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if existing, ok, err := manager.LendingGetMarket(poolID); err != nil {
+		return fmt.Errorf("lendingCreatePool: check existing pool: %w", err)
+	} else if ok && existing != nil {
+		return fmt.Errorf("lendingCreatePool: pool %q already exists", poolID)
+	}
+
+	market := &lending.Market{
+		PoolID:                poolID,
+		DeveloperOwner:        crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)),
+		DeveloperFeeBps:       sp.lendingDeveloperFeeBps,
+		DeveloperFeeCollector: sp.lendingDeveloperCollector,
+		ReserveFactor:         sp.lendingReserveFactorBps,
+		LastUpdateBlock:       sp.blockHeight(),
+		TotalNHBSupplied:      big.NewInt(0),
+		TotalSupplyShares:     big.NewInt(0),
+		TotalNHBBorrowed:      big.NewInt(0),
+	}
+	if err := manager.LendingPutMarket(poolID, market); err != nil {
+		return fmt.Errorf("lendingCreatePool: persist market: %w", err)
+	}
+
+	return sp.incrementNativeAccountNonce(sender)
+}

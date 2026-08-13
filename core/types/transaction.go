@@ -130,6 +130,20 @@ const (
 	TxTypeGovFinalize TxType = 0x29
 	TxTypeGovQueue    TxType = 0x2A
 	TxTypeGovExecute  TxType = 0x2B
+	// TxTypeLendingCreatePool replaces the old LendingModule.CreatePool
+	// direct-state-trie write (rpc/modules/lending.go, via
+	// Node.WithState -- see core/lending_native.go's
+	// applyLendingCreatePoolTransaction doc comment) with a real signed,
+	// consensus-routed transaction. The pool's DeveloperOwner is always the
+	// recovered tx signer, never a client-supplied developerOwner field --
+	// the old RPC method let any authenticated caller name an arbitrary
+	// owner address for a newly created pool with no proof of key
+	// possession, the same class of bug the governance fix
+	// (TxTypeGovPropose etc.) closed. 0x2C is the next free byte after
+	// TxTypeGovExecute (0x2B) -- verified against this file's real,
+	// current tip; do not reuse without re-checking for newly added types
+	// above this comment.
+	TxTypeLendingCreatePool TxType = 0x2C
 )
 
 // RequiresSignature reports whether the transaction type must carry an
