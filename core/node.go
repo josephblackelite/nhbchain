@@ -28,7 +28,6 @@ import (
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
-	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
 	"nhbchain/core/genesis"
 	"nhbchain/core/identity"
@@ -5130,72 +5129,15 @@ func (n *Node) StakeClaim(delegator [20]byte, unbondID uint64) (*types.StakeUnbo
 	return n.state.StakeClaim(delegator[:], unbondID)
 }
 
-func (n *Node) StakeClaimRewards(addr common.Address) (paid *big.Int, periods int, next int64, apr uint64, err error) {
-	if n == nil {
-		return nil, 0, 0, 0, fmt.Errorf("staking rewards: node unavailable")
-	}
-	if addr == (common.Address{}) {
-		return nil, 0, 0, 0, fmt.Errorf("staking rewards: address required")
-	}
-
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	now := n.currentTime()
-	apr = n.state.StakeRewardAPR()
-	manager := nhbstate.NewManager(n.state.Trie)
-	account, getErr := manager.GetAccount(addr.Bytes())
-	if getErr != nil {
-		return nil, 0, 0, 0, getErr
-	}
-	lastPayoutTs := uint64(0)
-	if account != nil {
-		lastPayoutTs = account.StakeLastPayoutTs
-		periodSeconds, periodErr := n.state.stakingPayoutPeriodSeconds(manager)
-		if periodErr != nil {
-			return nil, 0, 0, 0, periodErr
-		}
-		if periodSeconds > 0 {
-			nowTs := uint64(now.Unix())
-			if nowTs > lastPayoutTs {
-				periods = int((nowTs - lastPayoutTs) / periodSeconds)
-			}
-		}
-	}
-
-	paid, err = n.state.StakeClaimRewards(addr.Bytes())
-	if errors.Is(err, ErrStakePaused) {
-		return nil, 0, 0, 0, stakeerrors.ErrStakingPaused
-	}
-	if err != nil {
-		return paid, periods, next, apr, err
-	}
-	if paid == nil {
-		paid = big.NewInt(0)
-	}
-	if paid.Sign() == 0 && periods == 0 {
-		if periodSeconds, periodErr := n.state.stakingPayoutPeriodSeconds(manager); periodErr == nil && periodSeconds > 0 {
-			next = int64(lastPayoutTs + periodSeconds)
-		}
-		return nil, periods, next, apr, stakeerrors.ErrNotDue
-	}
-
-	updated, getErr := manager.GetAccount(addr.Bytes())
-	if getErr != nil {
-		return nil, 0, 0, 0, getErr
-	}
-	if updated != nil {
-		periodSeconds, periodErr := n.state.stakingPayoutPeriodSeconds(manager)
-		if periodErr != nil {
-			return nil, 0, 0, 0, periodErr
-		}
-		if periodSeconds > 0 {
-			next = int64(updated.StakeLastPayoutTs + periodSeconds)
-		}
-	}
-
-	return paid, periods, next, apr, nil
-}
+// Node.StakeClaimRewards (the direct-state-trie write that used to back
+// rpc/stake_handlers.go's handleStakeClaimRewards, mutating state under
+// n.stateMu.Lock() completely outside CreateBlock/ApplyTransaction/
+// ValidateBlock) has been removed. Reward claims now go through a real
+// signed TxTypeStakeClaimRewards transaction, applied via
+// StateProcessor.applyStakeClaimRewards -> StateProcessor.StakeClaimRewards
+// (core/state_transition.go) from the standard consensus tx-dispatch path,
+// so every validator applies the payout identically instead of just the
+// one handling the RPC call.
 
 // StakePreviewClaim estimates the staking reward that would be minted if the
 // caller claimed rewards at the provided timestamp. The state is not mutated.

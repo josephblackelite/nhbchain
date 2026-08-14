@@ -206,6 +206,8 @@ func formatTxType(t types.TxType) string {
 		return "ArbitrateRefund"
 	case types.TxTypeStakeClaim:
 		return "StakeClaim"
+	case types.TxTypeStakeClaimRewards:
+		return "StakeClaimRewards"
 	case types.TxTypeMint:
 		return "Mint"
 	case types.TxTypeSwapVoucherMint:

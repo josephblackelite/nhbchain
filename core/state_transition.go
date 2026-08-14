@@ -3158,6 +3158,14 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
+	case types.TxTypeStakeClaimRewards:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyStakeClaimRewards(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
 	case types.TxTypeHeartbeat:
 		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
 			return err
@@ -4710,6 +4718,27 @@ func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction, sender []byte) 
 	}
 	_, err := sp.StakeClaim(sender, payload.UnbondingID)
 	return err
+}
+
+// applyStakeClaimRewards handles TxTypeStakeClaimRewards: claims accrued
+// APR-based staking rewards for the transaction's own signer. It replaces
+// the old rpc/stake_handlers.go handleStakeClaimRewards direct-state-trie
+// write (Node.StakeClaimRewards, called outside consensus) -- the payout
+// math itself is unchanged, this only routes it through the standard
+// signed-transaction dispatch so every validator applies it identically.
+// No payload is required: unlike applyStakeClaim's unbondingId, the reward
+// claim operates purely on sender's own account and the current block
+// timestamp. sp.StakeClaimRewards itself never advances the sender's
+// account nonce (unlike sp.StakeClaim, which bumps it internally), so this
+// wrapper does so explicitly on success via incrementNativeAccountNonce --
+// the same pattern applyAttestRedemption uses -- otherwise a real signed
+// transaction of this type would never consume its nonce and would be
+// replayable/reusable.
+func (sp *StateProcessor) applyStakeClaimRewards(tx *types.Transaction, sender []byte) error {
+	if _, err := sp.StakeClaimRewards(sender); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(sender)
 }
 
 func (sp *StateProcessor) StakeRewardAPR() uint64 {

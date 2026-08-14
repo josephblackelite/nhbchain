@@ -183,6 +183,27 @@ const (
 	TxTypeSubscriptionUpdatePlan TxType = 0x31
 	TxTypeSubscriptionSubscribe  TxType = 0x32
 	TxTypeSubscriptionCancel     TxType = 0x33
+	// TxTypeStakeClaimRewards replaces the old rpc/stake_handlers.go
+	// handleStakeClaimRewards direct-state-trie write (it called
+	// Node.StakeClaimRewards -> StateProcessor.StakeClaimRewards under
+	// n.stateMu.Lock() completely outside CreateBlock/ApplyTransaction/
+	// ValidateBlock) with a real signed, consensus-routed transaction -- the
+	// same fix pattern as CreatePool/governance/POTSO-stake before it. This
+	// is a genuinely different action from TxTypeStakeClaim (0x0D, which
+	// releases already-matured unbonded principal via sp.StakeClaim and an
+	// unbondingId payload): TxTypeStakeClaimRewards pays out accrued
+	// APR-based staking rewards via sp.StakeClaimRewards, operating on
+	// StakeLastIndex/StakeLastPayoutTs/StakingRewards/StakingGlobalIndex/
+	// StakingEmissionYTD and the staking treasury -- disjoint state fields,
+	// zero code-path overlap with StakeClaim. It takes no payload: unlike
+	// StakeClaim's unbondingId, rewards claiming operates purely on the
+	// signer's own account and the current block timestamp, so tx.Data is
+	// unused. The claimant is always tx.From(), never a client-supplied
+	// address parameter. 0x34 is the next free byte after
+	// TxTypeSubscriptionCancel (0x33) -- verified against this file's real,
+	// current tip; do not reuse without re-checking for newly added types
+	// above this comment.
+	TxTypeStakeClaimRewards TxType = 0x34
 )
 
 // RequiresSignature reports whether the transaction type must carry an

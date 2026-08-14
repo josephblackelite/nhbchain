@@ -2,17 +2,11 @@ package rpc
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
 	"time"
-
-	"nhbchain/core"
-	stakeerrors "nhbchain/core/errors"
-
-	"github.com/ethereum/go-ethereum/common"
 )
 
 const stakingModulePausedMessage = "staking module paused"
@@ -31,13 +25,6 @@ type stakeUndelegateParams struct {
 type stakeClaimParams struct {
 	Caller      string `json:"caller"`
 	UnbondingID uint64 `json:"unbondingId"`
-}
-
-type stakeClaimRewardsResponse struct {
-	Minted       string `json:"minted"`
-	Periods      int    `json:"periods"`
-	AprBps       uint64 `json:"aprBps"`
-	NextEligible uint64 `json:"nextEligibleTs"`
 }
 
 type stakePositionResult struct {
@@ -66,17 +53,31 @@ func parseAmount(amount string) (*big.Int, error) {
 	return value, nil
 }
 
-// handleStakeDelegate, handleStakeUndelegate, and handleStakeClaim are
-// deliberately disabled -- see docs/issue30.md item 3. They trusted a
-// client-supplied "caller" address string with no signature proving the
-// caller actually controls it, gated only by the shared admin JWT -- so
-// anyone holding that JWT could lock, unlock, or move another address's
-// stake without their authorization. nhbportal never used these (it signs
-// real TxTypeStake/TxTypeUnstake/TxTypeStakeClaim transactions instead,
-// which is safe), so nothing legitimate depends on them. Fail loudly rather
-// than silently accept an unauthenticated instruction to move someone
-// else's funds.
-const stakeRPCDisabledMessage = "this method is disabled; sign a transaction (TxTypeStake/TxTypeUnstake/TxTypeStakeClaim) via nhb_sendTransaction instead, so the caller's own signature authorizes the action"
+// handleStakeDelegate, handleStakeUndelegate, handleStakeClaim, and
+// handleStakeClaimRewards are deliberately disabled -- see docs/issue30.md
+// item 3. The first three trusted a client-supplied "caller" address string
+// with no signature proving the caller actually controls it, gated only by
+// the shared admin JWT -- so anyone holding that JWT could lock, unlock, or
+// move another address's stake without their authorization. nhbportal never
+// used these (it signs real TxTypeStake/TxTypeUnstake/TxTypeStakeClaim
+// transactions instead, which is safe), so nothing legitimate depends on
+// them.
+//
+// handleStakeClaimRewards was missed by that original cleanup: it called
+// s.node.StakeClaimRewards(addr) directly under n.stateMu.Lock(), mutating
+// the live state trie completely outside CreateBlock/ApplyTransaction/
+// ValidateBlock -- invisible to any other validator and guaranteed to
+// eventually diverge state roots, plus (unlike the three above) it accepted
+// the address as a plain client-supplied parameter with no signature at
+// all. nhbportal's lendingClient.ts claimRewards() did depend on it (wired
+// to the Finance/Lending "Earn" page's claim-rewards button), so it has been
+// switched to sign and submit a real TxTypeStakeClaimRewards transaction via
+// nhb_sendTransaction (see core/state_transition.go's applyStakeClaimRewards
+// and walletManager.ts's claimStakingRewards()) instead of calling this
+// method. Fail loudly rather than silently accept an unauthenticated
+// instruction to move someone else's funds, or a live but consensus-bypassing
+// write.
+const stakeRPCDisabledMessage = "this method is disabled; sign a transaction (TxTypeStake/TxTypeUnstake/TxTypeStakeClaim/TxTypeStakeClaimRewards) via nhb_sendTransaction instead, so the caller's own signature authorizes the action"
 
 func (s *Server) handleStakeDelegate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, stakeRPCDisabledMessage, nil)
@@ -91,52 +92,7 @@ func (s *Server) handleStakeClaim(w http.ResponseWriter, r *http.Request, req *R
 }
 
 func (s *Server) handleStakeClaimRewards(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if _, ok := s.guardStakeRequest(w, r, req); !ok {
-		return
-	}
-	_, addrBytes, err := parseStakeAddressParam(req.Params)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	addr := common.BytesToAddress(addrBytes[:])
-	paid, periods, nextEligible, aprBps, err := s.node.StakeClaimRewards(addr)
-	if err != nil {
-		if errors.Is(err, core.ErrStakePaused) || errors.Is(err, stakeerrors.ErrStakingPaused) {
-			writeError(w, http.StatusServiceUnavailable, req.ID, codeModulePaused, stakingModulePausedMessage, nil)
-			return
-		}
-
-		if errors.Is(err, stakeerrors.ErrNotDue) {
-			data := map[string]interface{}{}
-			if nextEligible > 0 {
-				data["nextEligibleTs"] = uint64(nextEligible)
-			}
-			writeError(w, http.StatusConflict, req.ID, codeInvalidParams, err.Error(), data)
-			return
-		}
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim staking rewards", err.Error())
-		return
-	}
-	paidStr := "0"
-	if paid != nil {
-		paidStr = paid.String()
-	}
-	nextPayout := uint64(0)
-	if nextEligible > 0 {
-		nextPayout = uint64(nextEligible)
-	}
-	result := stakeClaimRewardsResponse{
-		Minted:       paidStr,
-		Periods:      periods,
-		AprBps:       aprBps,
-		NextEligible: nextPayout,
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, stakeRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleStakeGetPosition(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
