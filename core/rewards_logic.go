@@ -94,9 +94,16 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 		validatorsPlan = copyBigInt(sp.rewardAccrual.ValidatorsPlanned)
 		stakersPlan = copyBigInt(sp.rewardAccrual.StakersPlanned)
 		engagementPlan = copyBigInt(sp.rewardAccrual.EngagementPlanned)
-		if sp.rewardAccrual.BlocksProcessed > 0 {
-			blockCount = sp.rewardAccrual.BlocksProcessed
-		}
+		// blockCount is intentionally NOT taken from sp.rewardAccrual.BlocksProcessed:
+		// that field is a process-local counter that is never persisted and resets to
+		// 0 on every restart (see NewStateProcessor -- nothing reconstructs it), so two
+		// independently-restarted validators reaching the same epoch boundary could
+		// disagree on its value. It has no other consensus role (only the *Planned
+		// fields above are read elsewhere), but it WAS getting RLP-encoded into the
+		// state-hashed EpochSettlement.Blocks field via persistRewardHistory, which
+		// caused a real production state-root mismatch at the first epoch boundary
+		// after a validator restart (height 83100, 2026-08-14). blockCount now always
+		// equals the deterministic epoch length instead.
 	}
 
 	// Validator/staking rewards are backed by the ZNHB Reward Pool
