@@ -58,6 +58,16 @@ type Proposal struct {
 	Target         string         `json:"target"`
 	ProposedChange string         `json:"proposed_change"`
 	Queued         bool           `json:"queued"`
+	// Tally holds the vote tally computed by Engine.ComputeTally.
+	// It is nil until the proposal has been finalized (Engine.Finalize
+	// attaches the real, persisted result); RPC read paths may also populate
+	// this field on an in-memory copy with a live, on-demand tally for
+	// proposals still in ProposalStatusVotingPeriod without ever persisting
+	// that value -- see core/node.go's GovernanceProposal/
+	// GovernanceListProposals. Appended after Queued to match the storage
+	// projection's field order (core/state/manager.go's
+	// storedGovernanceProposal).
+	Tally *Tally `json:"tally,omitempty"`
 }
 
 // VoteChoice enumerates the supported governance ballot selections.

@@ -60,6 +60,7 @@ var (
 	loyaltyPairDailyPrefix         = []byte("loyalty-meter:base-pair-daily:")
 	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
 	loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
+	loyaltyProgramDailyTxCountPref = []byte("loyalty-meter:program-daily-txcount:")
 	loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
 	loyaltyProgramIssuancePrefix   = []byte("loyalty-meter:program-issuance:")
 	loyaltyBusinessPrefix          = []byte("loyalty/business/")
@@ -569,6 +570,63 @@ type storedGovernanceProposal struct {
 	Target         string
 	ProposedChange string
 	Queued         bool
+	// Tally was added after Queued -- appended strictly at the end and
+	// tagged rlp:"optional" for backward compatibility with proposals
+	// persisted before this field existed (see storedLendingMarket's
+	// BorrowedThisBlock etc. for the established pattern in this codebase).
+	// A nil pointer means "not finalized yet"; go-ethereum's rlp encoder
+	// omits a zero-valued (nil) trailing optional field entirely from the
+	// encoded list, and its decoder zeroes any optional field it can't find
+	// in a shorter, older-format list, so old records decode this back to
+	// nil rather than a fabricated zero tally. See
+	// TestStoredGovernanceProposalDecodesLegacyEncodingWithoutTally for the
+	// explicit round-trip proof.
+	Tally *storedGovernanceTally `rlp:"optional"`
+}
+
+// storedGovernanceTally is the RLP storage projection of governance.Tally,
+// nested under storedGovernanceProposal.Tally.
+type storedGovernanceTally struct {
+	TurnoutBps       uint64
+	QuorumBps        uint64
+	YesPowerBps      uint64
+	NoPowerBps       uint64
+	AbstainPowerBps  uint64
+	YesRatioBps      uint64
+	PassThresholdBps uint64
+	TotalBallots     uint64
+}
+
+func newStoredGovernanceTally(t *governance.Tally) *storedGovernanceTally {
+	if t == nil {
+		return nil
+	}
+	return &storedGovernanceTally{
+		TurnoutBps:       t.TurnoutBps,
+		QuorumBps:        t.QuorumBps,
+		YesPowerBps:      t.YesPowerBps,
+		NoPowerBps:       t.NoPowerBps,
+		AbstainPowerBps:  t.AbstainPowerBps,
+		YesRatioBps:      t.YesRatioBps,
+		PassThresholdBps: t.PassThresholdBps,
+		TotalBallots:     t.TotalBallots,
+	}
+}
+
+func (s *storedGovernanceTally) toGovernanceTally() *governance.Tally {
+	if s == nil {
+		return nil
+	}
+	return &governance.Tally{
+		TurnoutBps:       s.TurnoutBps,
+		QuorumBps:        s.QuorumBps,
+		YesPowerBps:      s.YesPowerBps,
+		NoPowerBps:       s.NoPowerBps,
+		AbstainPowerBps:  s.AbstainPowerBps,
+		YesRatioBps:      s.YesRatioBps,
+		PassThresholdBps: s.PassThresholdBps,
+		TotalBallots:     s.TotalBallots,
+	}
 }
 
 type storedGovernanceVote struct {
@@ -649,6 +707,7 @@ func newStoredGovernanceProposal(p *governance.Proposal) *storedGovernancePropos
 		Target:         p.Target,
 		ProposedChange: p.ProposedChange,
 		Queued:         p.Queued,
+		Tally:          newStoredGovernanceTally(p.Tally),
 	}
 }
 
@@ -680,6 +739,7 @@ func (s *storedGovernanceProposal) toGovernanceProposal() (*governance.Proposal,
 		Target:         s.Target,
 		ProposedChange: s.ProposedChange,
 		Queued:         s.Queued,
+		Tally:          s.Tally.toGovernanceTally(),
 	}
 	return proposal, nil
 }
@@ -1144,6 +1204,20 @@ func LoyaltyProgramDailyTotalKey(id loyalty.ProgramID, day string) []byte {
 	copy(buf[len(loyaltyProgramDailyTotalPrefix):], id[:])
 	buf[len(loyaltyProgramDailyTotalPrefix)+len(id)] = ':'
 	copy(buf[len(loyaltyProgramDailyTotalPrefix)+len(id)+1:], trimmed)
+	return ethcrypto.Keccak256(buf)
+}
+
+// LoyaltyProgramDailyTxCountKey derives the storage key for the count of
+// accrual events (successful reward payouts) for the provided program and
+// UTC day, independent of the reward amounts tracked by
+// LoyaltyProgramDailyTotalKey.
+func LoyaltyProgramDailyTxCountKey(id loyalty.ProgramID, day string) []byte {
+	trimmed := strings.TrimSpace(day)
+	buf := make([]byte, len(loyaltyProgramDailyTxCountPref)+len(id)+1+len(trimmed))
+	copy(buf, loyaltyProgramDailyTxCountPref)
+	copy(buf[len(loyaltyProgramDailyTxCountPref):], id[:])
+	buf[len(loyaltyProgramDailyTxCountPref)+len(id)] = ':'
+	copy(buf[len(loyaltyProgramDailyTxCountPref)+len(id)+1:], trimmed)
 	return ethcrypto.Keccak256(buf)
 }
 
@@ -3724,6 +3798,29 @@ func (m *Manager) LoyaltyProgramDailyTotalAccrued(id loyalty.ProgramID, day stri
 		return nil, fmt.Errorf("day must not be empty")
 	}
 	return m.loadBigInt(LoyaltyProgramDailyTotalKey(id, day))
+}
+
+// SetLoyaltyProgramDailyTxCount stores the number of accrual events (successful
+// reward payouts, distinct from reward amount) for the provided program and
+// UTC day.
+func (m *Manager) SetLoyaltyProgramDailyTxCount(id loyalty.ProgramID, day string, count uint64) error {
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	return m.writeBigInt(LoyaltyProgramDailyTxCountKey(id, day), new(big.Int).SetUint64(count))
+}
+
+// LoyaltyProgramDailyTxCount returns the number of accrual events recorded for
+// the provided program and UTC day.
+func (m *Manager) LoyaltyProgramDailyTxCount(id loyalty.ProgramID, day string) (uint64, error) {
+	if strings.TrimSpace(day) == "" {
+		return 0, fmt.Errorf("day must not be empty")
+	}
+	value, err := m.loadBigInt(LoyaltyProgramDailyTxCountKey(id, day))
+	if err != nil {
+		return 0, err
+	}
+	return value.Uint64(), nil
 }
 
 // SetLoyaltyProgramEpochAccrued stores the accrued rewards for the provided program and epoch.

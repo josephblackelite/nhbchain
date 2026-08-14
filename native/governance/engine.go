@@ -1804,6 +1804,7 @@ func (e *Engine) Finalize(proposalID uint64) (ProposalStatus, *Tally, error) {
 	}
 
 	proposal.Status = status
+	proposal.Tally = tally
 	if err := e.state.GovernancePutProposal(proposal); err != nil {
 		return ProposalStatusUnspecified, nil, err
 	}

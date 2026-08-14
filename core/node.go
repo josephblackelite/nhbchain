@@ -6415,6 +6415,33 @@ func (n *Node) pendingHeartbeatFee(addr []byte, nonce uint64) *big.Int {
 // every other signed native transaction type is (nhb_sendTransaction), not
 // a bespoke per-feature RPC method.
 
+// governanceAttachLiveTally decorates proposal with a live, on-demand vote
+// tally when it is still accepting votes (ProposalStatusVotingPeriod) and
+// has not been finalized yet (proposal.Tally == nil). It mirrors exactly
+// what governance.Engine.Finalize itself computes via ComputeTally --
+// side-effect free, read-only -- so the result reflects votes cast so far
+// without ever being persisted: only the in-memory proposal object handed
+// back to the RPC caller is mutated. Finalized proposals already carry
+// their real, persisted tally (Engine.Finalize attaches it before the final
+// GovernancePutProposal, see native/governance/engine.go), so this is a
+// no-op for them, and for proposals that haven't entered voting yet
+// (deposit_period) or have no state at all.
+func (n *Node) governanceAttachLiveTally(manager *nhbstate.Manager, engine *governance.Engine, proposal *governance.Proposal) error {
+	if proposal == nil || proposal.Tally != nil || proposal.Status != governance.ProposalStatusVotingPeriod {
+		return nil
+	}
+	votes, err := manager.GovernanceListVotes(proposal.ID)
+	if err != nil {
+		return err
+	}
+	tally, _, err := engine.ComputeTally(proposal, votes)
+	if err != nil {
+		return err
+	}
+	proposal.Tally = tally
+	return nil
+}
+
 func (n *Node) GovernanceProposal(id uint64) (*governance.Proposal, bool, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
@@ -6426,6 +6453,10 @@ func (n *Node) GovernanceProposal(id uint64) (*governance.Proposal, bool, error)
 	}
 	if !ok {
 		return nil, false, nil
+	}
+	engine := n.newGovernanceEngine(manager)
+	if err := n.governanceAttachLiveTally(manager, engine, proposal); err != nil {
+		return nil, false, err
 	}
 	return proposal, true, nil
 }
@@ -6463,6 +6494,7 @@ func (n *Node) GovernanceListProposals(cursor uint64, limit int) ([]*governance.
 		return proposals, 0, nil
 	}
 
+	engine := n.newGovernanceEngine(manager)
 	current := start
 	for current >= 1 && len(proposals) < limit {
 		proposal, ok, err := manager.GovernanceGetProposal(current)
@@ -6470,6 +6502,9 @@ func (n *Node) GovernanceListProposals(cursor uint64, limit int) ([]*governance.
 			return nil, 0, err
 		}
 		if ok && proposal != nil {
+			if err := n.governanceAttachLiveTally(manager, engine, proposal); err != nil {
+				return nil, 0, err
+			}
 			proposals = append(proposals, proposal)
 		}
 		current--
