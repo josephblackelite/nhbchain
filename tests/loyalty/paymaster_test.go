@@ -76,4 +76,22 @@ func TestProgramMetersRoundTrip(t *testing.T) {
 	if missingDay.Sign() != 0 {
 		t.Fatalf("expected zero for missing day, got %s", missingDay.String())
 	}
+
+	if err := sp.SetLoyaltyProgramDailyTxCount(programID, day, 7); err != nil {
+		t.Fatalf("set daily tx count: %v", err)
+	}
+	txCount, err := sp.LoyaltyProgramDailyTxCount(programID, day)
+	if err != nil {
+		t.Fatalf("get daily tx count: %v", err)
+	}
+	if txCount != 7 {
+		t.Fatalf("expected daily tx count 7, got %d", txCount)
+	}
+	missingCount, err := manager.LoyaltyProgramDailyTxCount(programID, "2024-01-21")
+	if err != nil {
+		t.Fatalf("zero daily tx count: %v", err)
+	}
+	if missingCount != 0 {
+		t.Fatalf("expected zero tx count for missing day, got %d", missingCount)
+	}
 }

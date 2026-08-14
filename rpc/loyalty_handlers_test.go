@@ -338,6 +338,119 @@ func TestHandleLoyaltyCreateProgramSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleLoyaltyProgramStatsNotFound(t *testing.T) {
+	env := newTestEnv(t)
+	var programID loyalty.ProgramID
+	programID[31] = 0x99
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(programID[:]),
+		"day":       "2024-01-10",
+	})}}
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyProgramStats(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected not-found error for unknown program")
+	}
+}
+
+// TestHandleLoyaltyProgramStatsCapUsage covers the two honesty-relevant
+// shapes of the response: a program with no configured DailyCapProgram must
+// report capUsage as JSON null (not a fabricated "0" indistinguishable from
+// a capped program with zero usage), while a program with a real daily cap
+// must report a real fraction. rewardsPaid/txCount must reflect real meters
+// in both cases since those are now written unconditionally. The "no daily
+// cap" program still sets EpochCapProgram, since CreateProgram's anti-sybil
+// rule requires at least one program-wide cap -- this is the realistic shape
+// (epoch-capped, not day-capped) rather than a fully uncapped program, which
+// can now only exist as a pre-anti-sybil-rule legacy record.
+func TestHandleLoyaltyProgramStatsCapUsage(t *testing.T) {
+	env := newTestEnv(t)
+	manager := env.node.LoyaltyManager()
+
+	var uncapped loyalty.ProgramID
+	uncapped[10] = 0x01
+	if err := manager.KVPut(loyalty.ProgramStorageKey(uncapped), &loyalty.Program{
+		ID:                 uncapped,
+		TokenSymbol:        "ZNHB",
+		AccrualBps:         500,
+		EpochCapProgram:    big.NewInt(5000),
+		EpochLengthSeconds: 86400,
+		Active:             true,
+	}); err != nil {
+		t.Fatalf("seed uncapped program: %v", err)
+	}
+	if err := manager.SetLoyaltyProgramDailyTotalAccrued(uncapped, "2024-01-10", big.NewInt(300)); err != nil {
+		t.Fatalf("seed uncapped total: %v", err)
+	}
+	if err := manager.SetLoyaltyProgramDailyTxCount(uncapped, "2024-01-10", 3); err != nil {
+		t.Fatalf("seed uncapped tx count: %v", err)
+	}
+
+	uncappedReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(uncapped[:]),
+		"day":       "2024-01-10",
+	})}}
+	uncappedRec := httptest.NewRecorder()
+	env.server.handleLoyaltyProgramStats(uncappedRec, env.newRequest(), uncappedReq)
+	uncappedResult, uncappedErr := decodeRPCResponse(t, uncappedRec)
+	if uncappedErr != nil {
+		t.Fatalf("unexpected error: %+v", uncappedErr)
+	}
+	var uncappedStats programStatsResult
+	if err := json.Unmarshal(uncappedResult, &uncappedStats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if uncappedStats.RewardsPaid != "300" {
+		t.Fatalf("expected rewardsPaid 300, got %s", uncappedStats.RewardsPaid)
+	}
+	if uncappedStats.TxCount != "3" {
+		t.Fatalf("expected txCount 3, got %s", uncappedStats.TxCount)
+	}
+	if uncappedStats.CapUsage != nil {
+		t.Fatalf("expected capUsage null for a program with no configured daily cap, got %q", *uncappedStats.CapUsage)
+	}
+
+	var capped loyalty.ProgramID
+	capped[10] = 0x02
+	if err := manager.KVPut(loyalty.ProgramStorageKey(capped), &loyalty.Program{
+		ID:              capped,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      500,
+		DailyCapProgram: big.NewInt(1000),
+		Active:          true,
+	}); err != nil {
+		t.Fatalf("seed capped program: %v", err)
+	}
+	if err := manager.SetLoyaltyProgramDailyTotalAccrued(capped, "2024-01-10", big.NewInt(250)); err != nil {
+		t.Fatalf("seed capped total: %v", err)
+	}
+
+	cappedReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(capped[:]),
+		"day":       "2024-01-10",
+	})}}
+	cappedRec := httptest.NewRecorder()
+	env.server.handleLoyaltyProgramStats(cappedRec, env.newRequest(), cappedReq)
+	cappedResult, cappedErr := decodeRPCResponse(t, cappedRec)
+	if cappedErr != nil {
+		t.Fatalf("unexpected error: %+v", cappedErr)
+	}
+	var cappedStats programStatsResult
+	if err := json.Unmarshal(cappedResult, &cappedStats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if cappedStats.RewardsPaid != "250" {
+		t.Fatalf("expected rewardsPaid 250, got %s", cappedStats.RewardsPaid)
+	}
+	if cappedStats.CapUsage == nil {
+		t.Fatalf("expected capUsage to be populated for a capped program")
+	}
+	if *cappedStats.CapUsage != "0.2500" {
+		t.Fatalf("expected capUsage 0.2500 (250/1000), got %s", *cappedStats.CapUsage)
+	}
+}
+
 func TestHandleLoyaltyUpdateProgramUnauthorized(t *testing.T) {
 	env := newTestEnv(t)
 	manager := env.node.LoyaltyManager()

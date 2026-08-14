@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"nhbchain/crypto"
@@ -104,6 +105,17 @@ type programResult struct {
 	StartTime          uint64 `json:"startTime"`
 	EndTime            uint64 `json:"endTime"`
 	Active             bool   `json:"active"`
+}
+
+// programStatsResult is the response shape for loyalty_programStats. CapUsage
+// is a pointer so it can be omitted (JSON null) when the program has no
+// configured DailyCapProgram -- there is no cap denominator to compute a
+// ratio against, and reporting "0" in that case would be indistinguishable
+// from a capped program that simply had zero usage today.
+type programStatsResult struct {
+	RewardsPaid string  `json:"rewardsPaid"`
+	TxCount     string  `json:"txCount"`
+	CapUsage    *string `json:"capUsage"`
 }
 
 type businessResult struct {
@@ -605,15 +617,58 @@ func (s *Server) handleLoyaltyProgramStats(w http.ResponseWriter, _ *http.Reques
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "day is required", nil)
 		return
 	}
-	if _, err := parseProgramID(params.ProgramID); err != nil {
+	programID, err := parseProgramID(params.ProgramID)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid programId", err.Error())
 		return
 	}
-	writeResult(w, req.ID, map[string]string{
-		"rewardsPaid": "0",
-		"txCount":     "0",
-		"capUsage":    "0",
-	})
+	program, ok, err := s.node.LoyaltyProgramByID(programID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load program", err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "program not found", params.ProgramID)
+		return
+	}
+
+	// rewardsPaid/txCount are real, always-on meters (native/loyalty's
+	// ApplyProgramReward writes both unconditionally on every successful
+	// accrual, regardless of whether the program has any cap configured --
+	// see engine_program.go). Days before this instrumented write path was
+	// deployed have no recorded meter and read back as zero, indistinguishable
+	// from a genuine zero-activity day; there is no way to retroactively
+	// backfill that from state alone.
+	manager := s.node.LoyaltyManager()
+	rewardsPaid, err := manager.LoyaltyProgramDailyTotalAccrued(programID, params.Day)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load meters", err.Error())
+		return
+	}
+	txCount, err := manager.LoyaltyProgramDailyTxCount(programID, params.Day)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load meters", err.Error())
+		return
+	}
+
+	result := programStatsResult{
+		RewardsPaid: bigIntToString(rewardsPaid),
+		TxCount:     strconv.FormatUint(txCount, 10),
+	}
+	// capUsage is only a meaningful ratio when the program has a configured
+	// DailyCapProgram -- without one there is no denominator to divide by, so
+	// leave it nil (JSON null) rather than reporting a fabricated "0" that
+	// would look identical to a capped program with genuinely zero usage.
+	// Note this deliberately reflects DailyCapProgram only, not
+	// EpochCapProgram: epoch windows are not guaranteed to align with UTC day
+	// boundaries, so an epoch-based ratio would not correspond to the `day`
+	// parameter this method is scoped to.
+	if program.DailyCapProgram != nil && program.DailyCapProgram.Sign() > 0 {
+		usage := new(big.Rat).SetFrac(rewardsPaid, program.DailyCapProgram)
+		usageStr := usage.FloatString(4)
+		result.CapUsage = &usageStr
+	}
+	writeResult(w, req.ID, result)
 }
 
 func (s *Server) handleLoyaltyUserDaily(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

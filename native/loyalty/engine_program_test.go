@@ -16,6 +16,7 @@ type mockProgramState struct {
 	businesses         map[[20]byte]*Business
 	programDaily       map[[32]byte]map[string]map[string]*big.Int
 	programDailyTotals map[[32]byte]map[string]*big.Int
+	programDailyTxCnts map[[32]byte]map[string]uint64
 	programEpochTotals map[[32]byte]map[uint64]*big.Int
 	programIssuance    map[[32]byte]map[string]*big.Int
 }
@@ -28,6 +29,7 @@ func newMockProgramState(cfg *GlobalConfig) *mockProgramState {
 		businesses:         make(map[[20]byte]*Business),
 		programDaily:       make(map[[32]byte]map[string]map[string]*big.Int),
 		programDailyTotals: make(map[[32]byte]map[string]*big.Int),
+		programDailyTxCnts: make(map[[32]byte]map[string]uint64),
 		programEpochTotals: make(map[[32]byte]map[uint64]*big.Int),
 		programIssuance:    make(map[[32]byte]map[string]*big.Int),
 	}
@@ -146,6 +148,22 @@ func (m *mockProgramState) SetLoyaltyProgramDailyTotalAccrued(programID ProgramI
 		m.programDailyTotals[programID] = make(map[string]*big.Int)
 	}
 	m.programDailyTotals[programID][day] = new(big.Int).Set(amount)
+	return nil
+}
+
+func (m *mockProgramState) LoyaltyProgramDailyTxCount(programID ProgramID, day string) (uint64, error) {
+	counts, ok := m.programDailyTxCnts[programID]
+	if !ok {
+		return 0, nil
+	}
+	return counts[day], nil
+}
+
+func (m *mockProgramState) SetLoyaltyProgramDailyTxCount(programID ProgramID, day string, count uint64) error {
+	if _, ok := m.programDailyTxCnts[programID]; !ok {
+		m.programDailyTxCnts[programID] = make(map[string]uint64)
+	}
+	m.programDailyTxCnts[programID][day] = count
 	return nil
 }
 
@@ -595,6 +613,85 @@ func TestApplyProgramRewardDailyProgramCap(t *testing.T) {
 	}
 	if total.String() != "150" {
 		t.Fatalf("expected program daily total 150, got %s", total.String())
+	}
+}
+
+// TestApplyProgramRewardUncappedProgramStillMetersTotals guards the
+// loyalty_programStats fix: a program with neither DailyCapProgram nor
+// EpochCapProgram configured must still accumulate a real per-day total and
+// tx count (previously these meters were only ever written when a cap was
+// configured, so an uncapped program's daily total silently stayed at zero
+// forever regardless of actual reward volume).
+func TestApplyProgramRewardUncappedProgramStillMetersTotals(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[6] = 0x51
+	var merchant [20]byte
+	merchant[6] = 0x52
+	var paymaster [20]byte
+	paymaster[6] = 0x53
+	var programID ProgramID
+	programID[6] = 0x54
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(10_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	// Deliberately no DailyCapProgram/EpochCapProgram -- the anti-sybil
+	// requirement enforced at CreateProgram/UpdateProgram time doesn't apply
+	// here since this test drives the engine directly, and legacy programs
+	// created before that guardrail existed can still be in this state.
+	program := &Program{
+		ID:          programID,
+		Owner:       merchant,
+		TokenSymbol: "ZNHB",
+		AccrualBps:  1000,
+		Active:      true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{Paymaster: paymaster})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	day := time.Date(2024, 2, 1, 8, 0, 0, 0, time.UTC)
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   day,
+		FromAccount: fromAccount,
+	}
+
+	engine := NewEngine()
+	if res := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); res != resultAccrued {
+		t.Fatalf("first accrual expected %q, got %q", resultAccrued, res)
+	}
+	ctx2 := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   day.Add(time.Hour),
+		FromAccount: fromAccount,
+	}
+	if res := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx2}); res != resultAccrued {
+		t.Fatalf("second accrual expected %q, got %q", resultAccrued, res)
+	}
+
+	total, err := state.LoyaltyProgramDailyTotalAccrued(programID, "2024-02-01")
+	if err != nil {
+		t.Fatalf("daily total error: %v", err)
+	}
+	if total.String() != "200" {
+		t.Fatalf("expected uncapped program daily total 200, got %s", total.String())
+	}
+	txCount, err := state.LoyaltyProgramDailyTxCount(programID, "2024-02-01")
+	if err != nil {
+		t.Fatalf("tx count error: %v", err)
+	}
+	if txCount != 2 {
+		t.Fatalf("expected tx count 2, got %d", txCount)
 	}
 }
 

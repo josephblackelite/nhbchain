@@ -30,6 +30,13 @@ type ProgramRewardState interface {
 	SetLoyaltyProgramDailyAccrued(programID ProgramID, addr []byte, day string, amount *big.Int) error
 	LoyaltyProgramDailyTotalAccrued(programID ProgramID, day string) (*big.Int, error)
 	SetLoyaltyProgramDailyTotalAccrued(programID ProgramID, day string, amount *big.Int) error
+	// LoyaltyProgramDailyTxCount/SetLoyaltyProgramDailyTxCount meter the number
+	// of successful accrual events (not the reward amount) for a program on a
+	// given UTC day. Written unconditionally alongside the daily total below so
+	// loyalty_programStats has a real, always-on transaction count regardless
+	// of whether the program has a configured daily/epoch cap.
+	LoyaltyProgramDailyTxCount(programID ProgramID, day string) (uint64, error)
+	SetLoyaltyProgramDailyTxCount(programID ProgramID, day string, count uint64) error
 	LoyaltyProgramEpochAccrued(programID ProgramID, epoch uint64) (*big.Int, error)
 	SetLoyaltyProgramEpochAccrued(programID ProgramID, epoch uint64, amount *big.Int) error
 	LoyaltyProgramIssuanceAccrued(programID ProgramID, addr []byte) (*big.Int, error)
@@ -351,19 +358,36 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 			emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
 			return "meter_error"
 		}
-		if program.DailyCapProgram != nil && program.DailyCapProgram.Sign() > 0 {
-			if programDailyTotal == nil {
-				var err error
-				programDailyTotal, err = st.LoyaltyProgramDailyTotalAccrued(program.ID, dayKey)
-				if err != nil {
-					emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
-					return "meter_error"
-				}
-			}
-			if err := st.SetLoyaltyProgramDailyTotalAccrued(program.ID, dayKey, new(big.Int).Add(programDailyTotal, reward)); err != nil {
+		// The program-wide daily total is now maintained unconditionally (not
+		// just when DailyCapProgram is configured) so that RPC reporting
+		// (loyalty_programStats) has a real, always-on rewardsPaid aggregate
+		// for every program, capped or not. Previously this meter was only
+		// ever written for capped programs, which meant an uncapped program's
+		// daily total silently stayed at its zero-value default forever --
+		// indistinguishable from "no activity" to any reader.
+		if programDailyTotal == nil {
+			var err error
+			programDailyTotal, err = st.LoyaltyProgramDailyTotalAccrued(program.ID, dayKey)
+			if err != nil {
 				emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
 				return "meter_error"
 			}
+		}
+		if err := st.SetLoyaltyProgramDailyTotalAccrued(program.ID, dayKey, new(big.Int).Add(programDailyTotal, reward)); err != nil {
+			emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
+			return "meter_error"
+		}
+		// Mirror the total with an always-on count of accrual events for the
+		// same program/day, purely for reporting (loyalty_programStats'
+		// txCount) -- never consulted by any cap-enforcement logic above.
+		txCount, err := st.LoyaltyProgramDailyTxCount(program.ID, dayKey)
+		if err != nil {
+			emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
+			return "meter_error"
+		}
+		if err := st.SetLoyaltyProgramDailyTxCount(program.ID, dayKey, txCount+1); err != nil {
+			emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
+			return "meter_error"
 		}
 	}
 	if program.EpochCapProgram != nil && program.EpochCapProgram.Sign() > 0 {

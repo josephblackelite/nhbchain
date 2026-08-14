@@ -208,8 +208,12 @@ All loyalty RPC calls use standard JSON-RPC 2.0 at the node endpoint (default `h
 * Returns an array of active and inactive programs.
 * Supports optional pagination parameters: `offset`, `limit` when provided via named params.
 
-#### `loyalty_programStats(programID, dayUTC)`
-* **Currently a stub:** the handler validates `programID`/`dayUTC` and unconditionally returns `{"rewardsPaid": "0", "txCount": "0", "capUsage": "0"}` regardless of actual on-chain state; it does not read program meters yet.
+#### `loyalty_programStats(programID, dayUTC) -> { rewardsPaid, txCount, capUsage }`
+* Returns real, on-chain meter data for the given program and UTC day (`YYYY-MM-DD`). `programID` must reference an existing program (`-32602 "program not found"` otherwise).
+* **`rewardsPaid`** (`string`, wei): the program's total ZNHB rewards paid out across *all* users on that UTC day. Sourced from an always-on per-program daily meter that `ApplyProgramReward` (`native/loyalty/engine_program.go`) writes on every successful accrual, regardless of whether the program has any cap configured.
+* **`txCount`** (`string`, integer): the number of successful accrual events (reward payouts) for the program on that day. Written alongside `rewardsPaid` by the same code path; not affected by `loyalty.program.skipped` events (skips are not counted).
+* **`capUsage`** (`string` or `null`): `rewardsPaid / DailyCapProgram`, formatted as a decimal fraction to 4 places (e.g. `"0.2500"` = 25% of the daily cap used). Returned as JSON `null` when the program has **no configured `DailyCapProgram`** (there is no denominator to divide by) -- this is deliberately distinct from `"0.0000"`, which means a *capped* program with genuinely zero usage that day. A program can have `EpochCapProgram` set without `DailyCapProgram`; `capUsage` does not reflect epoch-cap usage, since epoch windows aren't guaranteed to align with UTC day boundaries.
+* **Known limitation:** `rewardsPaid`/`txCount` are only as complete as the on-chain meter history. Any UTC day that predates this method's real implementation (previously a stub returning hardcoded zeros, and before that the underlying per-program daily-total meter was only written for programs with a configured `DailyCapProgram`) will read back as `"0"`/`"0"` even if real rewards were paid that day -- indistinguishable from genuine zero activity. This cannot be backfilled retroactively from state alone; only days observed after the fix was deployed have complete data.
 
 #### `loyalty_userDaily(userBech32, programID, dayUTC)`
 * Returns user-specific meter details for compliance or customer support.
@@ -367,7 +371,7 @@ Loyalty RPC handlers return standard numeric JSON-RPC error codes paired with a 
 * **High skip rate:** monitor `loyalty.program.skipped` / `loyalty.base.skipped` events; inspect the `reason` field for patterns (caps, balance, inactive program).
 * **Program not applying to merchant:** verify merchant is registered to the business and program `StartTime/EndTime` encompasses settlement timestamp.
 * **Module paused:** run `go run ./examples/docs/ops/read_pauses` to confirm the loyalty flag is `false`; resume with `go run ./examples/docs/ops/pause_toggle --module loyalty --state resume` when cleared by governance.
-* **Cap rejections:** inspect the program meters via `loyalty_programStats` to see `capUsage` and compare against configured per-transaction / daily caps before retrying. Note: `loyalty_programStats` currently always returns zeros (see [Section 4](#4-node-json-rpc-loyalty-admin--read)); use direct state access for accurate cap usage until it is wired up.
+* **Cap rejections:** inspect the program meters via `loyalty_programStats` to see `capUsage` and compare against configured per-transaction / daily caps before retrying. `capUsage` is `null` for programs without a configured `DailyCapProgram` -- see [Section 4](#4-node-json-rpc-loyalty-admin--read) for the full field contract.
 
 ---
 
