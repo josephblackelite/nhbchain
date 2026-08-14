@@ -451,6 +451,99 @@ func TestHandleLoyaltyProgramStatsCapUsage(t *testing.T) {
 	}
 }
 
+// TestHandleLoyaltyProgramStatsLifetimeRewardsPaid proves loyalty_programStats
+// exposes a real, distinct lifetimeRewardsPaid field: cumulative across every
+// day of accrual history, not scoped to the single `day` the request asked
+// about (rewardsPaid/txCount) and not equal to it once history spans more
+// than one day. It also covers a program with no lifetime accrual history
+// reading back a clean "0", not an error or a missing field.
+func TestHandleLoyaltyProgramStatsLifetimeRewardsPaid(t *testing.T) {
+	env := newTestEnv(t)
+	manager := env.node.LoyaltyManager()
+
+	var programID loyalty.ProgramID
+	programID[11] = 0x09
+	if err := manager.KVPut(loyalty.ProgramStorageKey(programID), &loyalty.Program{
+		ID:                 programID,
+		TokenSymbol:        "ZNHB",
+		AccrualBps:         500,
+		EpochCapProgram:    big.NewInt(5000),
+		EpochLengthSeconds: 86400,
+		Active:             true,
+	}); err != nil {
+		t.Fatalf("seed program: %v", err)
+	}
+
+	// Seed history across two distinct days plus a lifetime total that is the
+	// sum of both -- proving the RPC surfaces the lifetime meter directly
+	// rather than deriving it from the requested day's total.
+	if err := manager.SetLoyaltyProgramDailyTotalAccrued(programID, "2024-01-10", big.NewInt(300)); err != nil {
+		t.Fatalf("seed day1 total: %v", err)
+	}
+	if err := manager.SetLoyaltyProgramDailyTotalAccrued(programID, "2024-01-11", big.NewInt(150)); err != nil {
+		t.Fatalf("seed day2 total: %v", err)
+	}
+	if err := manager.SetLoyaltyProgramLifetimeAccrued(programID, big.NewInt(450)); err != nil {
+		t.Fatalf("seed lifetime total: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(programID[:]),
+		"day":       "2024-01-10",
+	})}}
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyProgramStats(rec, env.newRequest(), req)
+	result, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected error: %+v", rpcErr)
+	}
+	var stats programStatsResult
+	if err := json.Unmarshal(result, &stats); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	if stats.RewardsPaid != "300" {
+		t.Fatalf("expected rewardsPaid (day-scoped) 300, got %s", stats.RewardsPaid)
+	}
+	if stats.LifetimeRewardsPaid != "450" {
+		t.Fatalf("expected lifetimeRewardsPaid 450 (300+150), got %s", stats.LifetimeRewardsPaid)
+	}
+	if stats.LifetimeRewardsPaid == stats.RewardsPaid {
+		t.Fatalf("lifetimeRewardsPaid must not collapse to the day-scoped rewardsPaid once history spans multiple days")
+	}
+
+	// A second, untouched program must report a clean zero lifetime total,
+	// not an error and not a missing/null field.
+	var freshProgram loyalty.ProgramID
+	freshProgram[11] = 0x0A
+	if err := manager.KVPut(loyalty.ProgramStorageKey(freshProgram), &loyalty.Program{
+		ID:                 freshProgram,
+		TokenSymbol:        "ZNHB",
+		AccrualBps:         500,
+		EpochCapProgram:    big.NewInt(5000),
+		EpochLengthSeconds: 86400,
+		Active:             true,
+	}); err != nil {
+		t.Fatalf("seed fresh program: %v", err)
+	}
+	freshReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(freshProgram[:]),
+		"day":       "2024-01-10",
+	})}}
+	freshRec := httptest.NewRecorder()
+	env.server.handleLoyaltyProgramStats(freshRec, env.newRequest(), freshReq)
+	freshResult, freshErr := decodeRPCResponse(t, freshRec)
+	if freshErr != nil {
+		t.Fatalf("unexpected error for fresh program: %+v", freshErr)
+	}
+	var freshStats programStatsResult
+	if err := json.Unmarshal(freshResult, &freshStats); err != nil {
+		t.Fatalf("decode fresh stats: %v", err)
+	}
+	if freshStats.LifetimeRewardsPaid != "0" {
+		t.Fatalf("expected lifetimeRewardsPaid 0 for untouched program, got %s", freshStats.LifetimeRewardsPaid)
+	}
+}
+
 func TestHandleLoyaltyUpdateProgramUnauthorized(t *testing.T) {
 	env := newTestEnv(t)
 	manager := env.node.LoyaltyManager()

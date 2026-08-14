@@ -37,6 +37,16 @@ type ProgramRewardState interface {
 	// of whether the program has a configured daily/epoch cap.
 	LoyaltyProgramDailyTxCount(programID ProgramID, day string) (uint64, error)
 	SetLoyaltyProgramDailyTxCount(programID ProgramID, day string, count uint64) error
+	// LoyaltyProgramLifetimeAccrued/SetLoyaltyProgramLifetimeAccrued meter the
+	// cumulative, never-reset total of rewards paid out by a program across
+	// all users and all days. Unlike LoyaltyProgramDailyTotalAccrued this has
+	// no day dimension and is never rolled over or reset -- it is written
+	// unconditionally on every successful accrual (mirroring
+	// LoyaltyProgramDailyAccrued's own unconditional write), giving
+	// loyalty_programStats a genuine all-time total (lifetimeRewardsPaid)
+	// alongside the existing per-day snapshot.
+	LoyaltyProgramLifetimeAccrued(programID ProgramID) (*big.Int, error)
+	SetLoyaltyProgramLifetimeAccrued(programID ProgramID, amount *big.Int) error
 	LoyaltyProgramEpochAccrued(programID ProgramID, epoch uint64) (*big.Int, error)
 	SetLoyaltyProgramEpochAccrued(programID ProgramID, epoch uint64, amount *big.Int) error
 	LoyaltyProgramIssuanceAccrued(programID ProgramID, addr []byte) (*big.Int, error)
@@ -343,6 +353,23 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 		baseCtx.FromAccount.BalanceZNHB = big.NewInt(0)
 	}
 	baseCtx.FromAccount.BalanceZNHB = new(big.Int).Add(baseCtx.FromAccount.BalanceZNHB, reward)
+
+	// The program's all-time lifetime total is metered unconditionally here,
+	// independent of the day-scoped meters below and independent of any
+	// DailyCapProgram/EpochCapProgram configuration -- this is a pure
+	// reporting counter, not a cap-enforcement input, so it must never be
+	// skipped the way LoyaltyProgramIssuanceAccrued is gated on
+	// IssuanceCapUser. It fires exactly once per successful accrual, right
+	// where the reward has just been credited to the user's balance above.
+	lifetimeTotal, err := st.LoyaltyProgramLifetimeAccrued(program.ID)
+	if err != nil {
+		emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
+		return "meter_error"
+	}
+	if err := st.SetLoyaltyProgramLifetimeAccrued(program.ID, new(big.Int).Add(lifetimeTotal, reward)); err != nil {
+		emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
+		return "meter_error"
+	}
 
 	if dayKey != "" {
 		if accruedToday == nil {

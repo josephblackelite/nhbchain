@@ -6769,6 +6769,16 @@ func (sp *StateProcessor) SetLoyaltyProgramDailyTxCount(programID loyalty.Progra
 	return manager.SetLoyaltyProgramDailyTxCount(programID, day, count)
 }
 
+func (sp *StateProcessor) LoyaltyProgramLifetimeAccrued(programID loyalty.ProgramID) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramLifetimeAccrued(programID)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramLifetimeAccrued(programID loyalty.ProgramID, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramLifetimeAccrued(programID, amount)
+}
+
 func (sp *StateProcessor) LoyaltyProgramEpochAccrued(programID loyalty.ProgramID, epoch uint64) (*big.Int, error) {
 	manager := nhbstate.NewManager(sp.Trie)
 	return manager.LoyaltyProgramEpochAccrued(programID, epoch)

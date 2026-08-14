@@ -111,11 +111,15 @@ type programResult struct {
 // is a pointer so it can be omitted (JSON null) when the program has no
 // configured DailyCapProgram -- there is no cap denominator to compute a
 // ratio against, and reporting "0" in that case would be indistinguishable
-// from a capped program that simply had zero usage today.
+// from a capped program that simply had zero usage today. RewardsPaid/TxCount
+// are scoped to the requested `day`; LifetimeRewardsPaid is a separate,
+// never-reset cumulative total across all days, independent of the `day`
+// parameter.
 type programStatsResult struct {
-	RewardsPaid string  `json:"rewardsPaid"`
-	TxCount     string  `json:"txCount"`
-	CapUsage    *string `json:"capUsage"`
+	RewardsPaid         string  `json:"rewardsPaid"`
+	TxCount             string  `json:"txCount"`
+	CapUsage            *string `json:"capUsage"`
+	LifetimeRewardsPaid string  `json:"lifetimeRewardsPaid"`
 }
 
 type businessResult struct {
@@ -650,10 +654,19 @@ func (s *Server) handleLoyaltyProgramStats(w http.ResponseWriter, _ *http.Reques
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load meters", err.Error())
 		return
 	}
+	// lifetimeRewardsPaid is a separate, never-reset cumulative meter -- it is
+	// not derived from rewardsPaid/params.Day and is unaffected by which `day`
+	// was requested. See LoyaltyProgramLifetimeAccrued's doc comment.
+	lifetimeRewardsPaid, err := manager.LoyaltyProgramLifetimeAccrued(programID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load meters", err.Error())
+		return
+	}
 
 	result := programStatsResult{
-		RewardsPaid: bigIntToString(rewardsPaid),
-		TxCount:     strconv.FormatUint(txCount, 10),
+		RewardsPaid:         bigIntToString(rewardsPaid),
+		TxCount:             strconv.FormatUint(txCount, 10),
+		LifetimeRewardsPaid: bigIntToString(lifetimeRewardsPaid),
 	}
 	// capUsage is only a meaningful ratio when the program has a configured
 	// DailyCapProgram -- without one there is no denominator to divide by, so

@@ -61,6 +61,7 @@ var (
 	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
 	loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
 	loyaltyProgramDailyTxCountPref = []byte("loyalty-meter:program-daily-txcount:")
+	loyaltyProgramLifetimePrefix   = []byte("loyalty-meter:program-lifetime:")
 	loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
 	loyaltyProgramIssuancePrefix   = []byte("loyalty-meter:program-issuance:")
 	loyaltyBusinessPrefix          = []byte("loyalty/business/")
@@ -1218,6 +1219,17 @@ func LoyaltyProgramDailyTxCountKey(id loyalty.ProgramID, day string) []byte {
 	copy(buf[len(loyaltyProgramDailyTxCountPref):], id[:])
 	buf[len(loyaltyProgramDailyTxCountPref)+len(id)] = ':'
 	copy(buf[len(loyaltyProgramDailyTxCountPref)+len(id)+1:], trimmed)
+	return ethcrypto.Keccak256(buf)
+}
+
+// LoyaltyProgramLifetimeKey derives the storage key for the cumulative,
+// never-reset total of rewards paid out by the provided program across all
+// users and all days -- unlike LoyaltyProgramDailyTotalKey there is no day
+// component, since this meter is never rolled over or zeroed.
+func LoyaltyProgramLifetimeKey(id loyalty.ProgramID) []byte {
+	buf := make([]byte, len(loyaltyProgramLifetimePrefix)+len(id))
+	copy(buf, loyaltyProgramLifetimePrefix)
+	copy(buf[len(loyaltyProgramLifetimePrefix):], id[:])
 	return ethcrypto.Keccak256(buf)
 }
 
@@ -3821,6 +3833,19 @@ func (m *Manager) LoyaltyProgramDailyTxCount(id loyalty.ProgramID, day string) (
 		return 0, err
 	}
 	return value.Uint64(), nil
+}
+
+// SetLoyaltyProgramLifetimeAccrued stores the cumulative, never-reset total of
+// rewards paid out by the provided program across all users and all days.
+func (m *Manager) SetLoyaltyProgramLifetimeAccrued(id loyalty.ProgramID, amount *big.Int) error {
+	return m.writeBigInt(LoyaltyProgramLifetimeKey(id), amount)
+}
+
+// LoyaltyProgramLifetimeAccrued returns the cumulative, never-reset total of
+// rewards paid out by the provided program across all users and all days. A
+// program with no accrual history yet returns zero, not an error.
+func (m *Manager) LoyaltyProgramLifetimeAccrued(id loyalty.ProgramID) (*big.Int, error) {
+	return m.loadBigInt(LoyaltyProgramLifetimeKey(id))
 }
 
 // SetLoyaltyProgramEpochAccrued stores the accrued rewards for the provided program and epoch.

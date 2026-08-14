@@ -17,6 +17,7 @@ type mockProgramState struct {
 	programDaily       map[[32]byte]map[string]map[string]*big.Int
 	programDailyTotals map[[32]byte]map[string]*big.Int
 	programDailyTxCnts map[[32]byte]map[string]uint64
+	programLifetime    map[[32]byte]*big.Int
 	programEpochTotals map[[32]byte]map[uint64]*big.Int
 	programIssuance    map[[32]byte]map[string]*big.Int
 }
@@ -30,6 +31,7 @@ func newMockProgramState(cfg *GlobalConfig) *mockProgramState {
 		programDaily:       make(map[[32]byte]map[string]map[string]*big.Int),
 		programDailyTotals: make(map[[32]byte]map[string]*big.Int),
 		programDailyTxCnts: make(map[[32]byte]map[string]uint64),
+		programLifetime:    make(map[[32]byte]*big.Int),
 		programEpochTotals: make(map[[32]byte]map[uint64]*big.Int),
 		programIssuance:    make(map[[32]byte]map[string]*big.Int),
 	}
@@ -164,6 +166,18 @@ func (m *mockProgramState) SetLoyaltyProgramDailyTxCount(programID ProgramID, da
 		m.programDailyTxCnts[programID] = make(map[string]uint64)
 	}
 	m.programDailyTxCnts[programID][day] = count
+	return nil
+}
+
+func (m *mockProgramState) LoyaltyProgramLifetimeAccrued(programID ProgramID) (*big.Int, error) {
+	if amt, ok := m.programLifetime[programID]; ok {
+		return new(big.Int).Set(amt), nil
+	}
+	return big.NewInt(0), nil
+}
+
+func (m *mockProgramState) SetLoyaltyProgramLifetimeAccrued(programID ProgramID, amount *big.Int) error {
+	m.programLifetime[programID] = new(big.Int).Set(amount)
 	return nil
 }
 
@@ -1202,5 +1216,136 @@ func TestApplyProgramRewardPaymasterWarning(t *testing.T) {
 	paymasterAcc, _ := state.GetAccount(paymaster[:])
 	if paymasterAcc.BalanceZNHB.String() != "1100" {
 		t.Fatalf("expected paymaster balance 1100, got %s", paymasterAcc.BalanceZNHB.String())
+	}
+}
+
+// TestApplyProgramRewardLifetimeAccruedZeroWithNoHistory guards case (b) of
+// the lifetime-meter contract: a program that has never accrued anything must
+// read back a real, non-nil zero -- not panic and not return an error --
+// exactly like the pre-existing daily/epoch/issuance meters already do for a
+// fresh key.
+func TestApplyProgramRewardLifetimeAccruedZeroWithNoHistory(t *testing.T) {
+	state := newMockProgramState(newConfig(0, 0, 0, 0, []byte("treasury")))
+	var programID ProgramID
+	programID[0] = 0x77
+
+	lifetime, err := state.LoyaltyProgramLifetimeAccrued(programID)
+	if err != nil {
+		t.Fatalf("unexpected error reading lifetime meter with no history: %v", err)
+	}
+	if lifetime == nil {
+		t.Fatalf("expected a real zero value, got nil")
+	}
+	if lifetime.Sign() != 0 {
+		t.Fatalf("expected zero lifetime accrued for untouched program, got %s", lifetime.String())
+	}
+}
+
+// TestApplyProgramRewardLifetimeAccruedAccumulatesAcrossDays guards case (a)
+// of the lifetime-meter contract: LoyaltyProgramLifetimeAccrued must keep
+// summing across every successful accrual for a program regardless of which
+// UTC day each one lands on -- unlike LoyaltyProgramDailyTotalAccrued, it is
+// never reset when the day rolls over. It must also increment for an
+// uncapped program (no DailyCapProgram/EpochCapProgram), since it is written
+// unconditionally, not gated behind cap enforcement the way
+// LoyaltyProgramIssuanceAccrued historically was.
+func TestApplyProgramRewardLifetimeAccruedAccumulatesAcrossDays(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[7] = 0x61
+	var merchant [20]byte
+	merchant[7] = 0x62
+	var paymaster [20]byte
+	paymaster[7] = 0x63
+	var programID ProgramID
+	programID[7] = 0x64
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(10_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	// Deliberately uncapped (no DailyCapProgram/EpochCapProgram) to prove the
+	// lifetime meter is unconditional, unlike the historically cap-gated
+	// issuance meter.
+	program := &Program{
+		ID:          programID,
+		Owner:       merchant,
+		TokenSymbol: "ZNHB",
+		AccrualBps:  1000,
+		Active:      true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{Paymaster: paymaster})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	engine := NewEngine()
+
+	// Day 1: two accruals of 100 each (reward = 1000 * 1000bps / 10000 = 100).
+	day1 := time.Date(2024, 3, 1, 8, 0, 0, 0, time.UTC)
+	ctx1 := &BaseRewardContext{From: toBytes(from), To: toBytes(merchant), Token: "NHB", Amount: big.NewInt(1000), Timestamp: day1, FromAccount: fromAccount}
+	if res := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx1}); res != resultAccrued {
+		t.Fatalf("day1 accrual 1 expected %q, got %q", resultAccrued, res)
+	}
+	ctx2 := &BaseRewardContext{From: toBytes(from), To: toBytes(merchant), Token: "NHB", Amount: big.NewInt(1000), Timestamp: day1.Add(time.Hour), FromAccount: fromAccount}
+	if res := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx2}); res != resultAccrued {
+		t.Fatalf("day1 accrual 2 expected %q, got %q", resultAccrued, res)
+	}
+
+	lifetimeAfterDay1, err := state.LoyaltyProgramLifetimeAccrued(programID)
+	if err != nil {
+		t.Fatalf("lifetime meter error after day1: %v", err)
+	}
+	if lifetimeAfterDay1.String() != "200" {
+		t.Fatalf("expected lifetime total 200 after day1, got %s", lifetimeAfterDay1.String())
+	}
+	// The day-scoped meter must independently show the same total for day1,
+	// since both accruals happened on the same day.
+	dayTotal1, err := state.LoyaltyProgramDailyTotalAccrued(programID, "2024-03-01")
+	if err != nil {
+		t.Fatalf("daily total error for day1: %v", err)
+	}
+	if dayTotal1.String() != "200" {
+		t.Fatalf("expected day1 total 200, got %s", dayTotal1.String())
+	}
+
+	// Day 2 (a full day later, so the daily meter resets its own bucket, but
+	// lifetime must keep accumulating on top of day1's total): one accrual of
+	// 100.
+	day2 := day1.Add(24 * time.Hour)
+	ctx3 := &BaseRewardContext{From: toBytes(from), To: toBytes(merchant), Token: "NHB", Amount: big.NewInt(1000), Timestamp: day2, FromAccount: fromAccount}
+	if res := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx3}); res != resultAccrued {
+		t.Fatalf("day2 accrual expected %q, got %q", resultAccrued, res)
+	}
+
+	lifetimeAfterDay2, err := state.LoyaltyProgramLifetimeAccrued(programID)
+	if err != nil {
+		t.Fatalf("lifetime meter error after day2: %v", err)
+	}
+	if lifetimeAfterDay2.String() != "300" {
+		t.Fatalf("expected cumulative lifetime total 300 (200 + 100) after day2, got %s", lifetimeAfterDay2.String())
+	}
+	// The day2-scoped meter must show only day2's own 100, proving the daily
+	// meter reset for the new day while lifetime did not.
+	dayTotal2, err := state.LoyaltyProgramDailyTotalAccrued(programID, "2024-03-02")
+	if err != nil {
+		t.Fatalf("daily total error for day2: %v", err)
+	}
+	if dayTotal2.String() != "100" {
+		t.Fatalf("expected day2 total 100 (not cumulative with day1), got %s", dayTotal2.String())
+	}
+
+	// Day 3: a third day of accrual to prove this isn't a two-sample fluke.
+	day3 := day2.Add(24 * time.Hour)
+	ctx4 := &BaseRewardContext{From: toBytes(from), To: toBytes(merchant), Token: "NHB", Amount: big.NewInt(1000), Timestamp: day3, FromAccount: fromAccount}
+	if res := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx4}); res != resultAccrued {
+		t.Fatalf("day3 accrual expected %q, got %q", resultAccrued, res)
+	}
+	lifetimeAfterDay3, err := state.LoyaltyProgramLifetimeAccrued(programID)
+	if err != nil {
+		t.Fatalf("lifetime meter error after day3: %v", err)
+	}
+	if lifetimeAfterDay3.String() != "400" {
+		t.Fatalf("expected cumulative lifetime total 400 (300 + 100) after day3, got %s", lifetimeAfterDay3.String())
 	}
 }
