@@ -33,6 +33,15 @@ type BaseRewardState interface {
 	// control (docs/issue30.md item 6/36).
 	LoyaltyBasePairDailyAccrued(pairKey []byte, day string) (*big.Int, error)
 	SetLoyaltyBasePairDailyAccrued(pairKey []byte, day string, amount *big.Int) error
+	// AppendLoyaltyBaseAccrualRecord appends a single individual accrual line
+	// item (kind AccrualKindBase) to the day-bucketed accrual-record index for
+	// the given address, mirroring the program engine's own
+	// AppendLoyaltyProgramAccrualRecord (see ProgramRewardState) but keyed by
+	// address+day rather than programID+day, since the base spend reward has
+	// no program context at all -- it is a chain-wide mechanism, not scoped to
+	// any business's loyalty program. See AccrualRecord's doc comment for the
+	// KVAppend dedup-by-value gotcha this exists to guard against.
+	AppendLoyaltyBaseAccrualRecord(addr []byte, day string, record AccrualRecord) error
 	AppendEvent(evt *types.Event)
 	QueuePendingBaseReward(ctx *BaseRewardContext, reward *big.Int)
 }
@@ -270,6 +279,29 @@ func (e *Engine) ApplyBaseReward(st BaseRewardState, ctx *BaseRewardContext) {
 	if err := st.SetLoyaltyBaseTotalAccrued(ctx.From, newTotal); err != nil {
 		emitSkip(st, ctx, "meter_error", map[string]string{"error": err.Error()})
 		return
+	}
+
+	// Individual accrual line item for the durable "Rewards Accrual History"
+	// index (see AccrualRecord's doc comment) -- written unconditionally
+	// alongside the meters above, right before the reward is confirmed via
+	// emitAccrued below. A write failure here is handled exactly like the
+	// adjacent meter writes: emit "meter_error" and bail out before
+	// emitAccrued fires, rather than letting this new write fail silently or
+	// differently from the meters it sits next to.
+	if dayKey != "" {
+		var fromAddr [20]byte
+		copy(fromAddr[:], ctx.From)
+		record := AccrualRecord{
+			Address:   fromAddr,
+			Amount:    new(big.Int).Set(reward),
+			Kind:      AccrualKindBase,
+			TxHash:    ctx.TxHash,
+			Timestamp: uint64(ctx.Timestamp.UTC().Unix()),
+		}
+		if err := st.AppendLoyaltyBaseAccrualRecord(ctx.From, dayKey, record); err != nil {
+			emitSkip(st, ctx, "meter_error", map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	emitAccrued(st, ctx, cfg.BaseBps, reward)

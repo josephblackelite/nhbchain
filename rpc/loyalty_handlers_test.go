@@ -544,6 +544,151 @@ func TestHandleLoyaltyProgramStatsLifetimeRewardsPaid(t *testing.T) {
 	}
 }
 
+// TestHandleLoyaltyListAccruals covers the loyalty_listAccruals RPC method:
+// it must return every AccrualRecord appended for the requested program/day
+// as JSON with hex-string address/programId/txHash fields and a decimal wei
+// string amount, must not return records from an unrelated day, and must
+// 404 for an unknown programId. The handler is read-only -- this test only
+// ever seeds data through AppendLoyaltyProgramAccrualRecord (the same write
+// path the engine uses) and never exercises any Set*/Append* method from
+// inside the handler itself.
+func TestHandleLoyaltyListAccruals(t *testing.T) {
+	env := newTestEnv(t)
+	manager := env.node.LoyaltyManager()
+
+	var programID loyalty.ProgramID
+	programID[13] = 0x07
+	if err := manager.KVPut(loyalty.ProgramStorageKey(programID), &loyalty.Program{
+		ID:                 programID,
+		TokenSymbol:        "ZNHB",
+		AccrualBps:         500,
+		EpochCapProgram:    big.NewInt(5000),
+		EpochLengthSeconds: 86400,
+		Active:             true,
+	}); err != nil {
+		t.Fatalf("seed program: %v", err)
+	}
+
+	var addrA, addrB [20]byte
+	addrA[19] = 0x01
+	addrB[19] = 0x02
+	var txHashA, txHashB [32]byte
+	txHashA[0] = 0xAA
+	txHashB[0] = 0xBB
+
+	if err := manager.AppendLoyaltyProgramAccrualRecord(programID, "2024-01-10", loyalty.AccrualRecord{
+		ProgramID: programID,
+		Address:   addrA,
+		Amount:    big.NewInt(50),
+		Kind:      loyalty.AccrualKindProgram,
+		TxHash:    txHashA,
+		Timestamp: 1700000000,
+	}); err != nil {
+		t.Fatalf("seed record A: %v", err)
+	}
+	if err := manager.AppendLoyaltyProgramAccrualRecord(programID, "2024-01-10", loyalty.AccrualRecord{
+		ProgramID: programID,
+		Address:   addrB,
+		Amount:    big.NewInt(75),
+		Kind:      loyalty.AccrualKindProgram,
+		TxHash:    txHashB,
+		Timestamp: 1700000100,
+	}); err != nil {
+		t.Fatalf("seed record B: %v", err)
+	}
+	// A record on an unrelated day must never leak into the requested day's
+	// results.
+	if err := manager.AppendLoyaltyProgramAccrualRecord(programID, "2024-01-11", loyalty.AccrualRecord{
+		ProgramID: programID,
+		Address:   addrA,
+		Amount:    big.NewInt(999),
+		Kind:      loyalty.AccrualKindProgram,
+		TxHash:    txHashA,
+		Timestamp: 1700086400,
+	}); err != nil {
+		t.Fatalf("seed unrelated-day record: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(programID[:]),
+		"day":       "2024-01-10",
+	})}}
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyListAccruals(rec, env.newRequest(), req)
+	result, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr != nil {
+		t.Fatalf("unexpected error: %+v", rpcErr)
+	}
+	var records []accrualRecordResult
+	if err := json.Unmarshal(result, &records); err != nil {
+		t.Fatalf("decode records: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records for the requested day, got %d: %#v", len(records), records)
+	}
+	byTxHash := make(map[string]accrualRecordResult, len(records))
+	for _, r := range records {
+		byTxHash[r.TxHash] = r
+	}
+	recA, ok := byTxHash["0x"+hex.EncodeToString(txHashA[:])]
+	if !ok {
+		t.Fatalf("missing record A, got %#v", records)
+	}
+	if recA.Amount != "50" {
+		t.Fatalf("expected record A amount 50, got %s", recA.Amount)
+	}
+	if recA.Kind != loyalty.AccrualKindProgram {
+		t.Fatalf("expected record A kind %q, got %q", loyalty.AccrualKindProgram, recA.Kind)
+	}
+	if recA.ProgramID != "0x"+hex.EncodeToString(programID[:]) {
+		t.Fatalf("unexpected record A programId: %s", recA.ProgramID)
+	}
+	if recA.Timestamp != 1700000000 {
+		t.Fatalf("unexpected record A timestamp: %d", recA.Timestamp)
+	}
+	recB, ok := byTxHash["0x"+hex.EncodeToString(txHashB[:])]
+	if !ok {
+		t.Fatalf("missing record B, got %#v", records)
+	}
+	if recB.Amount != "75" {
+		t.Fatalf("expected record B amount 75, got %s", recB.Amount)
+	}
+
+	// Unknown programId must 404, mirroring loyalty_programStats.
+	var unknownProgram loyalty.ProgramID
+	unknownProgram[13] = 0x08
+	notFoundReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(unknownProgram[:]),
+		"day":       "2024-01-10",
+	})}}
+	notFoundRec := httptest.NewRecorder()
+	env.server.handleLoyaltyListAccruals(notFoundRec, env.newRequest(), notFoundReq)
+	_, notFoundErr := decodeRPCResponse(t, notFoundRec)
+	if notFoundErr == nil {
+		t.Fatalf("expected not-found error for unknown program")
+	}
+
+	// An unrelated day for the real program must come back empty, not the
+	// other day's records.
+	emptyReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"programId": "0x" + hex.EncodeToString(programID[:]),
+		"day":       "2024-01-12",
+	})}}
+	emptyRec := httptest.NewRecorder()
+	env.server.handleLoyaltyListAccruals(emptyRec, env.newRequest(), emptyReq)
+	emptyResult, emptyErr := decodeRPCResponse(t, emptyRec)
+	if emptyErr != nil {
+		t.Fatalf("unexpected error for empty day: %+v", emptyErr)
+	}
+	var emptyRecords []accrualRecordResult
+	if err := json.Unmarshal(emptyResult, &emptyRecords); err != nil {
+		t.Fatalf("decode empty records: %v", err)
+	}
+	if len(emptyRecords) != 0 {
+		t.Fatalf("expected no records for unrelated day, got %d", len(emptyRecords))
+	}
+}
+
 func TestHandleLoyaltyUpdateProgramUnauthorized(t *testing.T) {
 	env := newTestEnv(t)
 	manager := env.node.LoyaltyManager()

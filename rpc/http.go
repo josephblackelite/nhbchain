@@ -1567,6 +1567,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLoyaltyListPrograms(recorder, r, req)
 	case "loyalty_programStats":
 		s.handleLoyaltyProgramStats(recorder, r, req)
+	case "loyalty_listAccruals":
+		s.handleLoyaltyListAccruals(recorder, r, req)
 	case "loyalty_userDaily":
 		s.handleLoyaltyUserDaily(recorder, r, req)
 	case "loyalty_paymasterBalance":

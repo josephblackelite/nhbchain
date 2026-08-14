@@ -122,6 +122,20 @@ type programStatsResult struct {
 	LifetimeRewardsPaid string  `json:"lifetimeRewardsPaid"`
 }
 
+// accrualRecordResult is the response shape for a single entry returned by
+// loyalty_listAccruals -- the decoded, JSON-friendly form of
+// loyalty.AccrualRecord. Address/programId/txHash are hex strings and amount
+// is a decimal wei string, matching how every other loyalty RPC in this file
+// already formats its output (see formatProgram/formatBusiness above).
+type accrualRecordResult struct {
+	ProgramID string `json:"programId"`
+	Address   string `json:"address"`
+	Amount    string `json:"amount"`
+	Kind      string `json:"kind"`
+	TxHash    string `json:"txHash"`
+	Timestamp uint64 `json:"timestamp"`
+}
+
 type businessResult struct {
 	ID        string   `json:"id"`
 	Owner     string   `json:"owner"`
@@ -684,6 +698,59 @@ func (s *Server) handleLoyaltyProgramStats(w http.ResponseWriter, _ *http.Reques
 	writeResult(w, req.ID, result)
 }
 
+// handleLoyaltyListAccruals is a READ-ONLY handler: it only ever calls
+// LoyaltyProgramDailyAccrualRecords (a KVGetList-backed read accessor), never
+// any Set*/Append* method -- see the direct-state-write RPC bug class this
+// codebase has fixed elsewhere (CreatePool, governance, POTSO stake,
+// pause-clear) for why that distinction matters. It returns every individual
+// accrual line item (both base and program-kind, though in practice only
+// program-kind records are ever appended under a real programId -- base
+// rewards have no program context, see
+// BaseRewardState.AppendLoyaltyBaseAccrualRecord's doc comment) recorded for
+// the given program on the given UTC day, powering the "Rewards Accrual
+// History" business dashboard feature.
+func (s *Server) handleLoyaltyListAccruals(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
+		return
+	}
+	var params programStatsParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
+		return
+	}
+	if strings.TrimSpace(params.Day) == "" {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "day is required", nil)
+		return
+	}
+	programID, err := parseProgramID(params.ProgramID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid programId", err.Error())
+		return
+	}
+	_, ok, err := s.node.LoyaltyProgramByID(programID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load program", err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "program not found", params.ProgramID)
+		return
+	}
+
+	manager := s.node.LoyaltyManager()
+	records, err := manager.LoyaltyProgramDailyAccrualRecords(programID, params.Day)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load accrual records", err.Error())
+		return
+	}
+	results := make([]accrualRecordResult, 0, len(records))
+	for _, record := range records {
+		results = append(results, formatAccrualRecord(record))
+	}
+	writeResult(w, req.ID, results)
+}
+
 func (s *Server) handleLoyaltyUserDaily(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
@@ -916,6 +983,17 @@ func formatProgram(program *loyalty.Program) programResult {
 		StartTime:          program.StartTime,
 		EndTime:            program.EndTime,
 		Active:             program.Active,
+	}
+}
+
+func formatAccrualRecord(record loyalty.AccrualRecord) accrualRecordResult {
+	return accrualRecordResult{
+		ProgramID: formatProgramID(record.ProgramID),
+		Address:   crypto.MustNewAddress(crypto.NHBPrefix, record.Address[:]).String(),
+		Amount:    bigIntToString(record.Amount),
+		Kind:      record.Kind,
+		TxHash:    "0x" + hex.EncodeToString(record.TxHash[:]),
+		Timestamp: record.Timestamp,
 	}
 }
 

@@ -11,29 +11,31 @@ import (
 
 type mockProgramState struct {
 	*mockState
-	programs           map[[32]byte]*Program
-	ownerPrograms      map[[20]byte][]ProgramID
-	businesses         map[[20]byte]*Business
-	programDaily       map[[32]byte]map[string]map[string]*big.Int
-	programDailyTotals map[[32]byte]map[string]*big.Int
-	programDailyTxCnts map[[32]byte]map[string]uint64
-	programLifetime    map[[32]byte]*big.Int
-	programEpochTotals map[[32]byte]map[uint64]*big.Int
-	programIssuance    map[[32]byte]map[string]*big.Int
+	programs              map[[32]byte]*Program
+	ownerPrograms         map[[20]byte][]ProgramID
+	businesses            map[[20]byte]*Business
+	programDaily          map[[32]byte]map[string]map[string]*big.Int
+	programDailyTotals    map[[32]byte]map[string]*big.Int
+	programDailyTxCnts    map[[32]byte]map[string]uint64
+	programLifetime       map[[32]byte]*big.Int
+	programEpochTotals    map[[32]byte]map[uint64]*big.Int
+	programIssuance       map[[32]byte]map[string]*big.Int
+	programAccrualRecords map[[32]byte]map[string][]AccrualRecord
 }
 
 func newMockProgramState(cfg *GlobalConfig) *mockProgramState {
 	return &mockProgramState{
-		mockState:          newMockState(cfg),
-		programs:           make(map[[32]byte]*Program),
-		ownerPrograms:      make(map[[20]byte][]ProgramID),
-		businesses:         make(map[[20]byte]*Business),
-		programDaily:       make(map[[32]byte]map[string]map[string]*big.Int),
-		programDailyTotals: make(map[[32]byte]map[string]*big.Int),
-		programDailyTxCnts: make(map[[32]byte]map[string]uint64),
-		programLifetime:    make(map[[32]byte]*big.Int),
-		programEpochTotals: make(map[[32]byte]map[uint64]*big.Int),
-		programIssuance:    make(map[[32]byte]map[string]*big.Int),
+		mockState:             newMockState(cfg),
+		programs:              make(map[[32]byte]*Program),
+		ownerPrograms:         make(map[[20]byte][]ProgramID),
+		businesses:            make(map[[20]byte]*Business),
+		programDaily:          make(map[[32]byte]map[string]map[string]*big.Int),
+		programDailyTotals:    make(map[[32]byte]map[string]*big.Int),
+		programDailyTxCnts:    make(map[[32]byte]map[string]uint64),
+		programLifetime:       make(map[[32]byte]*big.Int),
+		programEpochTotals:    make(map[[32]byte]map[uint64]*big.Int),
+		programIssuance:       make(map[[32]byte]map[string]*big.Int),
+		programAccrualRecords: make(map[[32]byte]map[string][]AccrualRecord),
 	}
 }
 
@@ -219,6 +221,25 @@ func (m *mockProgramState) SetLoyaltyProgramIssuanceAccrued(programID ProgramID,
 	return nil
 }
 
+func (m *mockProgramState) AppendLoyaltyProgramAccrualRecord(programID ProgramID, day string, record AccrualRecord) error {
+	if _, ok := m.programAccrualRecords[programID]; !ok {
+		m.programAccrualRecords[programID] = make(map[string][]AccrualRecord)
+	}
+	m.programAccrualRecords[programID][day] = append(m.programAccrualRecords[programID][day], record)
+	return nil
+}
+
+func (m *mockProgramState) LoyaltyProgramDailyAccrualRecords(programID ProgramID, day string) ([]AccrualRecord, error) {
+	byDay, ok := m.programAccrualRecords[programID]
+	if !ok {
+		return nil, nil
+	}
+	records := byDay[day]
+	out := make([]AccrualRecord, len(records))
+	copy(out, records)
+	return out, nil
+}
+
 func toBytes(addr [20]byte) []byte {
 	return append([]byte(nil), addr[:]...)
 }
@@ -292,6 +313,201 @@ func TestApplyProgramRewardHappyPath(t *testing.T) {
 	}
 	if state.events[0].Attributes["paymaster"] != "0000000000000000000000000000000000000003" {
 		t.Fatalf("expected paymaster attribute, got %s", state.events[0].Attributes["paymaster"])
+	}
+}
+
+// TestApplyProgramRewardAccrualRecordRecorded proves a successful program
+// accrual is recorded in the new day-bucketed accrual-record index
+// (LoyaltyProgramDailyAccrualRecords) with the correct programID/address/
+// amount/kind/txHash. Setup and every pre-existing assertion below are
+// copied verbatim from TestApplyProgramRewardHappyPath (left completely
+// unmodified above) to prove recording the new index does not change any
+// existing meter or event behavior by even one field.
+func TestApplyProgramRewardAccrualRecordRecorded(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[19] = 0x01
+	var merchant [20]byte
+	merchant[19] = 0x02
+	var paymaster [20]byte
+	paymaster[19] = 0x03
+	var programID ProgramID
+	programID[31] = 0xAA
+	var businessID BusinessID
+	businessID[31] = 0xBB
+	var txHash [32]byte
+	txHash[0] = 0xCC
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:           programID,
+		Owner:        merchant,
+		TokenSymbol:  "ZNHB",
+		AccrualBps:   500,
+		MinSpendWei:  big.NewInt(100),
+		CapPerTx:     big.NewInt(500),
+		DailyCapUser: big.NewInt(1000),
+		StartTime:    uint64(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
+		Active:       true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{ID: businessID, Owner: merchant, Paymaster: paymaster, Merchants: [][20]byte{merchant}})
+
+	fromAccount := &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}
+	ctx := &BaseRewardContext{
+		From:        toBytes(from),
+		To:          toBytes(merchant),
+		Token:       "NHB",
+		Amount:      big.NewInt(1000),
+		Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+		FromAccount: fromAccount,
+		TxHash:      txHash,
+	}
+
+	engine := NewEngine()
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: ctx}); result != resultAccrued {
+		t.Fatalf("expected result %q, got %q", resultAccrued, result)
+	}
+
+	// Existing meter/event assertions, unchanged from
+	// TestApplyProgramRewardHappyPath.
+	if got := ctx.FromAccount.BalanceZNHB.String(); got != "50" {
+		t.Fatalf("expected reward 50, got %s", got)
+	}
+	paymasterAcc, _ := state.GetAccount(paymaster[:])
+	if got := paymasterAcc.BalanceZNHB.String(); got != "950" {
+		t.Fatalf("expected paymaster balance 950, got %s", got)
+	}
+	accrued, err := state.LoyaltyProgramDailyAccrued(programID, toBytes(from), "2024-01-10")
+	if err != nil {
+		t.Fatalf("daily accrued error: %v", err)
+	}
+	if accrued.String() != "50" {
+		t.Fatalf("expected daily accrued 50, got %s", accrued.String())
+	}
+	if len(state.events) != 1 || state.events[0].Type != eventProgramAccrued {
+		t.Fatalf("expected program accrued event, got %#v", state.events)
+	}
+	if state.events[0].Attributes["programId"] != "00000000000000000000000000000000000000000000000000000000000000aa" {
+		t.Fatalf("expected program id attribute, got %s", state.events[0].Attributes["programId"])
+	}
+	if state.events[0].Attributes["paymaster"] != "0000000000000000000000000000000000000003" {
+		t.Fatalf("expected paymaster attribute, got %s", state.events[0].Attributes["paymaster"])
+	}
+
+	// New: the individual accrual record shows up with the right fields.
+	records, err := state.LoyaltyProgramDailyAccrualRecords(programID, "2024-01-10")
+	if err != nil {
+		t.Fatalf("load accrual records: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected exactly 1 accrual record, got %d", len(records))
+	}
+	record := records[0]
+	if record.ProgramID != programID {
+		t.Fatalf("unexpected programID: %x", record.ProgramID)
+	}
+	if record.Address != from {
+		t.Fatalf("unexpected address: %x", record.Address)
+	}
+	if record.Amount == nil || record.Amount.String() != "50" {
+		t.Fatalf("unexpected amount: %v", record.Amount)
+	}
+	if record.Kind != AccrualKindProgram {
+		t.Fatalf("unexpected kind: %s", record.Kind)
+	}
+	if record.TxHash != txHash {
+		t.Fatalf("unexpected txHash: %x", record.TxHash)
+	}
+}
+
+// TestApplyProgramRewardAccrualRecordsTwoDistinctAccruals proves that two
+// separate successful accruals for the same program/day, differing only by
+// transaction hash, both show up as two distinct entries from
+// LoyaltyProgramDailyAccrualRecords -- the engine-level counterpart to
+// TestAppendLoyaltyProgramAccrualRecordDedupRegression in
+// core/state/loyalty_accrual_records_test.go, which exercises the real
+// KVAppend dedup-by-serialized-value behavior this guards against (the mock
+// state used here does not replicate that storage-layer dedup, so this test
+// instead proves the engine always populates a real per-transaction TxHash
+// on the record it appends).
+func TestApplyProgramRewardAccrualRecordsTwoDistinctAccruals(t *testing.T) {
+	treasury := []byte("treasury")
+	cfg := newConfig(0, 0, 0, 0, treasury)
+	state := newMockProgramState(cfg)
+
+	var from [20]byte
+	from[19] = 0x01
+	var merchant [20]byte
+	merchant[19] = 0x02
+	var paymaster [20]byte
+	paymaster[19] = 0x03
+	var programID ProgramID
+	programID[31] = 0xAA
+	var businessID BusinessID
+	businessID[31] = 0xBB
+
+	state.addAccount(paymaster[:], &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	program := &Program{
+		ID:              programID,
+		Owner:           merchant,
+		TokenSymbol:     "ZNHB",
+		AccrualBps:      500,
+		MinSpendWei:     big.NewInt(100),
+		CapPerTx:        big.NewInt(500),
+		DailyCapProgram: big.NewInt(1_000_000),
+		StartTime:       uint64(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
+		Active:          true,
+	}
+	state.addProgram(program)
+	state.addBusinessMapping(merchant, &Business{ID: businessID, Owner: merchant, Paymaster: paymaster, Merchants: [][20]byte{merchant}})
+
+	engine := NewEngine()
+
+	var txHashA, txHashB [32]byte
+	txHashA[0] = 0x01
+	txHashB[0] = 0x02
+
+	makeCtx := func(txHash [32]byte) *BaseRewardContext {
+		return &BaseRewardContext{
+			From:        toBytes(from),
+			To:          toBytes(merchant),
+			Token:       "NHB",
+			Amount:      big.NewInt(1000),
+			Timestamp:   time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC),
+			FromAccount: &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)},
+			TxHash:      txHash,
+		}
+	}
+
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: makeCtx(txHashA)}); result != resultAccrued {
+		t.Fatalf("first accrual: expected result %q, got %q", resultAccrued, result)
+	}
+	if result := engine.ApplyProgramReward(state, &ProgramRewardContext{BaseRewardContext: makeCtx(txHashB)}); result != resultAccrued {
+		t.Fatalf("second accrual: expected result %q, got %q", resultAccrued, result)
+	}
+
+	records, err := state.LoyaltyProgramDailyAccrualRecords(programID, "2024-01-10")
+	if err != nil {
+		t.Fatalf("load accrual records: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 distinct accrual records, got %d: %#v", len(records), records)
+	}
+	seen := map[[32]byte]bool{}
+	for _, r := range records {
+		if r.Amount == nil || r.Amount.String() != "50" {
+			t.Fatalf("unexpected amount on record: %v", r.Amount)
+		}
+		seen[r.TxHash] = true
+	}
+	if !seen[txHashA] || !seen[txHashB] {
+		t.Fatalf("expected both tx hashes present, got %#v", records)
 	}
 }
 

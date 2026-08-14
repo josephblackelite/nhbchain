@@ -6319,6 +6319,11 @@ func (sp *StateProcessor) SetLoyaltyBaseDailyAccrued(addr []byte, day string, am
 	return sp.writeBigInt(key, amount)
 }
 
+func (sp *StateProcessor) AppendLoyaltyBaseAccrualRecord(addr []byte, day string, record loyalty.AccrualRecord) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.AppendLoyaltyBaseAccrualRecord(addr, day, record)
+}
+
 func (sp *StateProcessor) LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error) {
 	if len(addr) == 0 {
 		return nil, fmt.Errorf("address must not be empty")
@@ -6797,6 +6802,16 @@ func (sp *StateProcessor) LoyaltyProgramIssuanceAccrued(programID loyalty.Progra
 func (sp *StateProcessor) SetLoyaltyProgramIssuanceAccrued(programID loyalty.ProgramID, addr []byte, amount *big.Int) error {
 	manager := nhbstate.NewManager(sp.Trie)
 	return manager.SetLoyaltyProgramIssuanceAccrued(programID, addr, amount)
+}
+
+func (sp *StateProcessor) AppendLoyaltyProgramAccrualRecord(programID loyalty.ProgramID, day string, record loyalty.AccrualRecord) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.AppendLoyaltyProgramAccrualRecord(programID, day, record)
+}
+
+func (sp *StateProcessor) LoyaltyProgramDailyAccrualRecords(programID loyalty.ProgramID, day string) ([]loyalty.AccrualRecord, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyAccrualRecords(programID, day)
 }
 
 func (sp *StateProcessor) MintToken(symbol string, addr []byte, amount *big.Int) error {

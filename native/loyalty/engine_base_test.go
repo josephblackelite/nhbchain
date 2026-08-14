@@ -10,13 +10,14 @@ import (
 )
 
 type mockState struct {
-	cfg       *GlobalConfig
-	accounts  map[string]*types.Account
-	daily     map[string]map[string]*big.Int
-	total     map[string]*big.Int
-	pairDaily map[string]map[string]*big.Int
-	events    []types.Event
-	queued    []queuedReward
+	cfg                *GlobalConfig
+	accounts           map[string]*types.Account
+	daily              map[string]map[string]*big.Int
+	total              map[string]*big.Int
+	pairDaily          map[string]map[string]*big.Int
+	events             []types.Event
+	queued             []queuedReward
+	baseAccrualRecords map[string]map[string][]AccrualRecord // addr -> day -> records
 }
 
 type queuedReward struct {
@@ -26,13 +27,14 @@ type queuedReward struct {
 
 func newMockState(cfg *GlobalConfig) *mockState {
 	return &mockState{
-		cfg:       cfg.Clone().Normalize(),
-		accounts:  make(map[string]*types.Account),
-		daily:     make(map[string]map[string]*big.Int),
-		total:     make(map[string]*big.Int),
-		pairDaily: make(map[string]map[string]*big.Int),
-		events:    []types.Event{},
-		queued:    []queuedReward{},
+		cfg:                cfg.Clone().Normalize(),
+		accounts:           make(map[string]*types.Account),
+		daily:              make(map[string]map[string]*big.Int),
+		total:              make(map[string]*big.Int),
+		pairDaily:          make(map[string]map[string]*big.Int),
+		events:             []types.Event{},
+		queued:             []queuedReward{},
+		baseAccrualRecords: make(map[string]map[string][]AccrualRecord),
 	}
 }
 
@@ -115,6 +117,22 @@ func (m *mockState) SetLoyaltyBasePairDailyAccrued(pairKey []byte, day string, a
 	}
 	m.pairDaily[day][string(pairKey)] = new(big.Int).Set(amount)
 	return nil
+}
+
+func (m *mockState) AppendLoyaltyBaseAccrualRecord(addr []byte, day string, record AccrualRecord) error {
+	if _, ok := m.baseAccrualRecords[string(addr)]; !ok {
+		m.baseAccrualRecords[string(addr)] = make(map[string][]AccrualRecord)
+	}
+	m.baseAccrualRecords[string(addr)][day] = append(m.baseAccrualRecords[string(addr)][day], record)
+	return nil
+}
+
+func (m *mockState) baseAccrualRecordsFor(addr []byte, day string) []AccrualRecord {
+	byDay, ok := m.baseAccrualRecords[string(addr)]
+	if !ok {
+		return nil
+	}
+	return byDay[day]
 }
 
 func (m *mockState) AppendEvent(evt *types.Event) {

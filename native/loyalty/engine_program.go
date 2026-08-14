@@ -51,6 +51,15 @@ type ProgramRewardState interface {
 	SetLoyaltyProgramEpochAccrued(programID ProgramID, epoch uint64, amount *big.Int) error
 	LoyaltyProgramIssuanceAccrued(programID ProgramID, addr []byte) (*big.Int, error)
 	SetLoyaltyProgramIssuanceAccrued(programID ProgramID, addr []byte, amount *big.Int) error
+	// AppendLoyaltyProgramAccrualRecord/LoyaltyProgramDailyAccrualRecords
+	// maintain a day-bucketed index of individual accrual line items (kind
+	// AccrualKindProgram) for the program, independent of the aggregate
+	// meters above -- this is what backs the "Rewards Accrual History"
+	// business dashboard feature and the loyalty_listAccruals RPC method, see
+	// AccrualRecord's doc comment for why every record carries a transaction
+	// hash.
+	AppendLoyaltyProgramAccrualRecord(programID ProgramID, day string, record AccrualRecord) error
+	LoyaltyProgramDailyAccrualRecords(programID ProgramID, day string) ([]AccrualRecord, error)
 }
 
 // ProgramRewardContext extends the base reward context with optional hints used
@@ -382,6 +391,31 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 		}
 		newDaily := new(big.Int).Add(accruedToday, reward)
 		if err := st.SetLoyaltyProgramDailyAccrued(program.ID, fromAddr, dayKey, newDaily); err != nil {
+			emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
+			return "meter_error"
+		}
+		// Individual accrual line item for the durable "Rewards Accrual
+		// History" index (see AccrualRecord's doc comment), appended right
+		// alongside the per-user daily meter above. A write failure here is
+		// handled exactly like the adjacent meter writes -- emit
+		// "meter_error" and bail out before emitProgramAccrued fires below --
+		// so this new write can never silently fail differently than the
+		// meters it sits next to.
+		var fromAddr20 [20]byte
+		copy(fromAddr20[:], fromAddr)
+		var txHash [32]byte
+		if baseCtx != nil {
+			txHash = baseCtx.TxHash
+		}
+		accrualRecord := AccrualRecord{
+			ProgramID: program.ID,
+			Address:   fromAddr20,
+			Amount:    new(big.Int).Set(reward),
+			Kind:      AccrualKindProgram,
+			TxHash:    txHash,
+			Timestamp: timestamp,
+		}
+		if err := st.AppendLoyaltyProgramAccrualRecord(program.ID, dayKey, accrualRecord); err != nil {
 			emitProgramSkip(st, ctx, program, business, "meter_error", map[string]string{"error": err.Error()})
 			return "meter_error"
 		}
