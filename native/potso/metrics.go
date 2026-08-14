@@ -66,6 +66,23 @@ func DefaultWeightParams() WeightParams {
 	}
 }
 
+// maxDecayHalfLifeEpochs and maxQuadraticTxDampenPower bound computeBetaScaled
+// and integerNthRootRounded's big.Int binary search: each iteration computes
+// mid^exponent, whose bit-length (and therefore cost) scales with the
+// exponent's magnitude, not just the fixed 64-iteration count. Both fields
+// are read directly from config with no other ceiling, and both run on the
+// consensus state-transition path once per epoch -- an unbounded value
+// (operator typo or otherwise) turns what used to be an O(1) float64 call
+// into a computation that can take minutes, stalling epoch settlement on
+// every validator. These caps are generously above any realistic value
+// (production uses DecayHalfLifeEpochs=7, QuadraticTxDampenPower=2) while
+// staying well inside the benchmarked-safe range (100,000 half-life epochs
+// costs ~2.6s; 1,000 dampen power is effectively instant).
+const (
+	maxDecayHalfLifeEpochs    = 100_000
+	maxQuadraticTxDampenPower = 1_000
+)
+
 // Validate ensures the configuration is internally consistent.
 func (p WeightParams) Validate() error {
 	if p.AlphaStakeBps > WeightBpsDenominator {
@@ -79,6 +96,12 @@ func (p WeightParams) Validate() error {
 	}
 	if p.MinStakeToEarnWei != nil && p.MinStakeToEarnWei.Sign() < 0 {
 		return errors.New("min stake to earn cannot be negative")
+	}
+	if p.DecayHalfLifeEpochs > maxDecayHalfLifeEpochs {
+		return fmt.Errorf("decay half life epochs must be <= %d", maxDecayHalfLifeEpochs)
+	}
+	if p.QuadraticTxDampenPower > maxQuadraticTxDampenPower {
+		return fmt.Errorf("quadratic tx dampen power must be <= %d", maxQuadraticTxDampenPower)
 	}
 	switch p.TieBreak {
 	case TieBreakAddrHash, TieBreakAddrLex, "":
@@ -349,7 +372,7 @@ func computeComposite(m EngagementMeter, params WeightParams) uint64 {
 	txCount := m.TxCount
 	if params.QuadraticTxDampenAfter > 0 && txCount > params.QuadraticTxDampenAfter && params.QuadraticTxDampenPower > 1 {
 		excess := txCount - params.QuadraticTxDampenAfter
-		dampened := uint64(math.Round(math.Pow(float64(excess), 1.0/float64(params.QuadraticTxDampenPower))))
+		dampened := integerNthRootRounded(excess, params.QuadraticTxDampenPower)
 		if dampened == 0 {
 			dampened = 1
 		}
@@ -377,17 +400,119 @@ func addWeighted(total *big.Int, count uint64, weight uint64) {
 	total.Add(total, tmp)
 }
 
+// integerNthRootRounded computes round(excess^(1/power)) using exact integer
+// arithmetic (big.Int binary search), matching the rounding behaviour of the
+// previous math.Round(math.Pow(...)) formula without introducing any
+// floating-point, and therefore architecture/compiler-independent
+// non-determinism, into consensus-critical state.
+//
+// The search finds the floor integer root r via binary search over a fixed,
+// data-independent iteration count (64, since excess is a uint64 and its
+// floor nth root for any power >= 1 always fits in 64 bits), then applies a
+// single exact comparison to decide round-half-up, matching math.Round's
+// away-from-zero behaviour on positive inputs.
+func integerNthRootRounded(excess uint64, power uint64) uint64 {
+	if excess == 0 {
+		return 0
+	}
+	n := new(big.Int).SetUint64(excess)
+	p := new(big.Int).SetUint64(power)
+
+	lo := big.NewInt(0)
+	hi := new(big.Int).SetUint64(excess) // nthRoot(excess, power) <= excess for excess >= 1, power >= 1
+	one := big.NewInt(1)
+	for i := 0; i < 64; i++ {
+		if lo.Cmp(hi) >= 0 {
+			break
+		}
+		mid := new(big.Int).Add(lo, hi)
+		mid.Add(mid, one)
+		mid.Rsh(mid, 1)
+		if new(big.Int).Exp(mid, p, nil).Cmp(n) <= 0 {
+			lo.Set(mid)
+		} else {
+			hi.Set(mid)
+			hi.Sub(hi, one)
+		}
+	}
+	r := lo // floor: r^power <= excess < (r+1)^power
+
+	// Round half away from zero: round up iff excess >= (r+0.5)^power, i.e.
+	// excess*2^power >= (2r+1)^power.
+	lhs := new(big.Int).Lsh(n, uint(power))
+	rhs := new(big.Int).Lsh(r, 1)
+	rhs.Add(rhs, one)
+	rhs.Exp(rhs, p, nil)
+	if lhs.Cmp(rhs) >= 0 {
+		r.Add(r, one)
+	}
+
+	if !r.IsUint64() {
+		return math.MaxUint64
+	}
+	return r.Uint64()
+}
+
+// computeBetaScaled derives the fixed-point EMA decay factor
+// beta = round(engagementBetaScale / 2^(1/halfLife)) using exact integer
+// arithmetic (big.Int binary search) instead of math.Pow/math.Round, so the
+// result is bit-identical across CPU architectures, Go compiler versions, and
+// build flags -- required since this value feeds directly into reward
+// payouts that are hashed into the consensus state root.
+//
+// It first computes root = floor(scale * 2^(1/halfLife)) via binary search
+// for the halfLife-th root of (2 * scale^halfLife) in fixed-point units of
+// scale = 2^fixedPointBits, then derives beta = round(engagementBetaScale *
+// scale / root). fixedPointBits=64 gives ~34 bits of safety margin beyond the
+// ~30 bits engagementBetaScale (1e9) needs, and bounds the search range to a
+// fixed size (scale, 2*scale] regardless of halfLife's magnitude, so the loop
+// runs an exact, data-independent 64 iterations -- never a float-epsilon
+// convergence check.
+const fixedPointBits = 64
+
 func computeBetaScaled(halfLife uint64) uint64 {
 	if halfLife == 0 {
 		return 0
 	}
-	exponent := -1.0 / float64(halfLife)
-	value := math.Pow(2, exponent)
-	scaled := uint64(math.Round(value * float64(engagementBetaScale)))
-	if scaled > engagementBetaScale {
+	one := big.NewInt(1)
+	scale := new(big.Int).Lsh(one, fixedPointBits) // scale = 2^fixedPointBits
+	halfLifeBig := new(big.Int).SetUint64(halfLife)
+
+	target := new(big.Int).Exp(scale, halfLifeBig, nil)
+	target.Mul(target, big.NewInt(2)) // target = 2 * scale^halfLife
+
+	lo := new(big.Int).Set(scale)     // R=scale   -> R^halfLife = scale^halfLife   <= target
+	hi := new(big.Int).Lsh(scale, 1)  // R=2*scale -> R^halfLife = (2*scale)^halfLife >= target for halfLife>=1
+	for i := 0; i < fixedPointBits; i++ {
+		if lo.Cmp(hi) >= 0 {
+			break
+		}
+		mid := new(big.Int).Add(lo, hi)
+		mid.Add(mid, one)
+		mid.Rsh(mid, 1)
+		if new(big.Int).Exp(mid, halfLifeBig, nil).Cmp(target) <= 0 {
+			lo.Set(mid)
+		} else {
+			hi.Set(mid)
+			hi.Sub(hi, one)
+		}
+	}
+	root := lo // floor: root^halfLife <= 2*scale^halfLife < (root+1)^halfLife
+
+	// beta = round(engagementBetaScale / (root/scale)) = round(engagementBetaScale*scale / root),
+	// round-half-up, matching math.Round's away-from-zero behaviour on positives.
+	numerator := new(big.Int).Mul(new(big.Int).SetUint64(engagementBetaScale), scale)
+	remainder := new(big.Int)
+	quotient, _ := new(big.Int).QuoRem(numerator, root, remainder)
+	doubledRemainder := new(big.Int).Lsh(remainder, 1)
+	if doubledRemainder.Cmp(root) >= 0 {
+		quotient.Add(quotient, one)
+	}
+
+	if quotient.Cmp(new(big.Int).SetUint64(engagementBetaScale)) > 0 {
 		return engagementBetaScale
 	}
-	return scaled
+	return quotient.Uint64()
 }
 
 func applyEMA(previous, raw, beta uint64) uint64 {
