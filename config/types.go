@@ -200,7 +200,13 @@ type Subscriptions struct {
 // EnsureDefaults fills unset fields with native/subscriptions' baseline
 // defaults, mirroring lending.Config.EnsureDefaults' role in Load.
 func (s *Subscriptions) EnsureDefaults() {
-	if s.ManagementFeeBps == 0 {
+	// Only default ManagementFeeBps to a nonzero value when a Treasury is
+	// already configured to receive it -- cmd/nhb and cmd/consensusd both
+	// panic on startup if ManagementFeeBps>0 with no Treasury set (see
+	// commit 075febe, which patched the one checked-in config.toml but not
+	// this defaulting logic). A config with neither field set should come
+	// up with subscriptions fees disabled, not crash-loop.
+	if s.ManagementFeeBps == 0 && s.Treasury != "" {
 		s.ManagementFeeBps = subscriptions.DefaultManagementFeeBps
 	}
 	if s.ManagementFeeCapBps == 0 {
