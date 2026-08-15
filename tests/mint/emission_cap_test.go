@@ -64,13 +64,19 @@ func mintTransaction(t *testing.T, voucher core.MintVoucher, signer *crypto.Priv
 
 func TestMintEmissionCapEnforced(t *testing.T) {
 	t.Parallel()
+	// ZNHB is deliberately absent here: it is fixed supply and can never be
+	// minted via TxTypeMint, regardless of role grants (see
+	// core/mint.go's ErrMintZNHBNotMintable and the unconditional rejection
+	// in applyMintTransaction) -- the only way to acquire ZNHB is buying NHB
+	// and swapping via applyBuyZNHB. This test previously asserted ZNHB
+	// emission-cap enforcement via direct mint, a scenario that is now
+	// structurally impossible by design, not merely untested.
 	tests := []struct {
 		name     string
 		token    string
 		paramKey string
 	}{
 		{name: "NHB", token: "NHB", paramKey: governance.ParamKeyMintNHBMaxEmissionPerYearWei},
-		{name: "ZNHB", token: "ZNHB", paramKey: governance.ParamKeyMintZNHBMaxEmissionPerYearWei},
 	}
 
 	for _, tc := range tests {

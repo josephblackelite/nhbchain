@@ -263,6 +263,15 @@ func (s *Server) normaliseQuoteRequest(req QuoteRequest) (normalisedQuoteRequest
 		return normalisedQuoteRequest{}, err
 	}
 	mintAsset := strings.ToUpper(strings.TrimSpace(firstNonEmpty(req.MintAsset, req.Token, s.defaultMintAsset)))
+	// ZNHB is fixed supply and can never be minted -- the chain rejects any
+	// TxTypeMint for it unconditionally (core/mint.go's ErrMintZNHBNotMintable),
+	// regardless of role grants. Reject here too, before a real NOWPayments
+	// invoice is created: without this, a customer could pay real fiat/crypto
+	// for a ZNHB quote and only discover the mint is impossible when the
+	// webhook fires post-payment, with no refund path (see mintWithVoucher).
+	if mintAsset == "ZNHB" {
+		return normalisedQuoteRequest{}, errors.New("ZNHB cannot be purchased -- it is fixed supply; buy NHB and swap to ZNHB on-chain instead")
+	}
 	payCurrency := strings.ToUpper(strings.TrimSpace(firstNonEmpty(req.PayCurrency, mintAsset)))
 	amountFiat := strings.TrimSpace(req.AmountFiat)
 	amountMint := strings.TrimSpace(req.AmountMint)

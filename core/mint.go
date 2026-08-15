@@ -45,6 +45,19 @@ var (
 	// submitted could make a retry succeed), so it must not be treated as
 	// permanently unsatisfiable.
 	ErrMintRecipientUnresolved = errors.New("mint: recipient identity unresolved")
+	// ErrMintZNHBNotMintable indicates a mint voucher targeted ZNHB. ZNHB is
+	// a fixed-supply asset by product decision: it is never minted, no
+	// matter what role a signer holds now or is granted in the future. The
+	// only way to acquire ZNHB is to buy NHB and swap it via the
+	// curve-priced NHB->ZNHB path (applyBuyZNHB / the swap-voucher mint
+	// path), which debits the tracked treasury Sale Pool instead of
+	// expanding supply. Wraps ErrMintInvalidPayload so classifyProposalError
+	// (core/node.go) prunes it exactly like every other pure, payload-only
+	// mint rejection in this file: it depends only on the voucher's own
+	// immutable token field, so retrying the identical transaction bytes can
+	// never make it succeed -- no role grant, present or future, can work
+	// around it.
+	ErrMintZNHBNotMintable = fmt.Errorf("%w: ZNHB is fixed supply and cannot be minted; buy NHB and swap to ZNHB instead", ErrMintInvalidPayload)
 )
 
 // MintVoucher represents the canonical payload that is signed off-chain by a mint authority.

@@ -1316,6 +1316,73 @@ func TestExecuteRoleAllowlistProposal(t *testing.T) {
 	}
 }
 
+// TestRoleAllowlistProposalRejectsMinterZNHBGrant is the governance-layer
+// defense-in-depth companion to core/state_transition.go's unconditional
+// applyMintTransaction rejection of ZNHB mints: even if an operator's
+// AllowedRoles config were misconfigured to include "MINTER_ZNHB" (set
+// deliberately here to prove that), a role-allowlist proposal granting it
+// must still be rejected at submission. This does not itself prevent ZNHB
+// inflation -- applyMintTransaction's unconditional rejection is what does
+// that, and would still block the mint even if this role were somehow held
+// -- it only stops governance from misleadingly appearing to authorize a
+// mint path that can never actually be exercised.
+func TestRoleAllowlistProposalRejectsMinterZNHBGrant(t *testing.T) {
+	var proposer [20]byte
+	proposer[9] = 7
+	var grant [20]byte
+	grant[2] = 9
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	// Deliberately include MINTER_ZNHB in the operator-configured
+	// allow-list to prove the rejection is unconditional and structural --
+	// not merely "MINTER_ZNHB happens not to be configured today".
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+		AllowedParams:       []string{"fees.baseFee"},
+		AllowedRoles:        []string{"MINTER_ZNHB", "compliance"},
+	})
+	now := time.Unix(1_700_400_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := fmt.Sprintf(`{"grant":[{"role":"MINTER_ZNHB","address":"%s"}]}`,
+		crypto.MustNewAddress(crypto.NHBPrefix, grant[:]).String(),
+	)
+	if _, err := engine.SubmitProposal(proposer, ProposalKindRoleAllowlist, payload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected role allowlist proposal granting MINTER_ZNHB to be rejected")
+	} else if !strings.Contains(err.Error(), "MINTER_ZNHB") {
+		t.Fatalf("expected error to mention MINTER_ZNHB, got %v", err)
+	}
+
+	// A lower-case grant submission must be caught the same way (EqualFold).
+	lowerCasePayload := fmt.Sprintf(`{"grant":[{"role":"minter_znhb","address":"%s"}]}`,
+		crypto.MustNewAddress(crypto.NHBPrefix, grant[:]).String(),
+	)
+	if _, err := engine.SubmitProposal(proposer, ProposalKindRoleAllowlist, lowerCasePayload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected lower-case minter_znhb grant to be rejected")
+	} else if !strings.Contains(err.Error(), "cannot be granted") {
+		t.Fatalf("expected error to mention the grant is disallowed, got %v", err)
+	}
+
+	// Revoking the role (rather than granting it) must remain unaffected --
+	// there's no reason to block removing a role, only granting it. Uses
+	// the exact allow-listed casing so the pre-existing case-sensitive
+	// allow-list membership check (unrelated to this fix) doesn't also
+	// reject it for a different reason.
+	revokeOnlyPayload := fmt.Sprintf(`{"revoke":[{"role":"MINTER_ZNHB","address":"%s"}]}`,
+		crypto.MustNewAddress(crypto.NHBPrefix, grant[:]).String(),
+	)
+	if _, err := engine.SubmitProposal(proposer, ProposalKindRoleAllowlist, revokeOnlyPayload, big.NewInt(75)); err != nil {
+		t.Fatalf("expected revoke-only MINTER_ZNHB proposal to be allowed, got %v", err)
+	}
+}
+
 // TestExecuteSwapPriceSignerProposal drives the full proposal lifecycle
 // (submit -> pass -> queue -> execute) for ProposalKindSwapPriceSignerUpdate
 // and asserts the registered signer address lands in state via exactly the

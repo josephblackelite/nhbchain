@@ -1061,6 +1061,20 @@ func (e *Engine) parseRoleAllowlistPayload(payloadJSON string) (*parsedRoleAllow
 		if role == "" {
 			return nil, fmt.Errorf("governance: grant role must not be empty")
 		}
+		// Defense-in-depth, structural rule mirroring
+		// core/state_transition.go's unconditional applyMintTransaction
+		// rejection of ZNHB mints: MINTER_ZNHB must never be grantable
+		// through governance, regardless of what an operator's
+		// AllowedRoles config happens to contain. The essential
+		// enforcement lives in applyMintTransaction (it rejects a ZNHB
+		// mint even if this role were somehow held), so this exists only
+		// to stop the social-engineering path of a proposal quietly
+		// putting a real signer into a position that LOOKS authorized,
+		// which would be confusing/misleading even though it can never
+		// actually be exercised.
+		if strings.EqualFold(role, "MINTER_ZNHB") {
+			return nil, fmt.Errorf("governance: role %q cannot be granted: ZNHB is fixed supply and cannot be minted; buy NHB and swap to ZNHB instead", role)
+		}
 		if _, ok := e.allowedRoles[role]; !ok {
 			return nil, fmt.Errorf("governance: role %q not in allow-list", role)
 		}

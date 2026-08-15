@@ -444,6 +444,253 @@ func TestMintMalformedPayloadPrunesInsteadOfAbortingProposal(t *testing.T) {
 	}
 }
 
+// TestMintWithSignatureRejectsZNHB covers the Node-level convenience
+// fast-path in MintWithSignature (used by the mint_withSignature RPC
+// handler): a ZNHB mint request must be rejected immediately, before ever
+// entering the mempool, with the same ErrMintZNHBNotMintable the consensus
+// layer enforces. This is a UX/latency optimization layered on top of the
+// real enforcement -- see TestApplyMintTransactionRejectsZNHBEvenWithRoleGranted
+// for the load-bearing structural guarantee.
+func TestMintWithSignatureRejectsZNHB(t *testing.T) {
+	node := newTestNode(t)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_ZNHB", toAddress(minterKey))
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	voucher := MintVoucher{
+		InvoiceID: "inv-znhb-early",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "ZNHB",
+		Amount:    "10",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	sig := signVoucher(t, minterKey, voucher)
+	if _, err := node.MintWithSignature(&voucher, sig); !errors.Is(err, ErrMintZNHBNotMintable) {
+		t.Fatalf("expected ErrMintZNHBNotMintable, got %v", err)
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected ZNHB mint to never enter mempool, got %d", got)
+	}
+}
+
+// TestApplyMintTransactionRejectsZNHBEvenWithRoleGranted is the essential
+// regression test for the fixed-supply-ZNHB product rule: a real, validly
+// signed TxTypeMint transaction for token="ZNHB" must be rejected by
+// applyMintTransaction itself (via StateProcessor.ApplyTransaction, the same
+// entry point block execution uses -- not just a unit test on a helper
+// function in isolation), even when the signer legitimately holds
+// MINTER_ZNHB. Granting the role in setup here is deliberate: it proves the
+// rejection is unconditional and structural, not merely "no one currently
+// has the role today".
+func TestApplyMintTransactionRejectsZNHBEvenWithRoleGranted(t *testing.T) {
+	node := newTestNode(t)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	minterAddr := toAddress(minterKey)
+	assignRole(t, node, "MINTER_ZNHB", minterAddr)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	voucher := MintVoucher{
+		InvoiceID: "inv-znhb-blocked",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "ZNHB",
+		Amount:    "100",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	sig := signVoucher(t, minterKey, voucher)
+	payload, err := encodeMintTransaction(&voucher, sig)
+	if err != nil {
+		t.Fatalf("encode mint tx: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeMint,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+
+	node.stateMu.Lock()
+	applyErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+
+	if applyErr == nil {
+		t.Fatalf("expected ZNHB mint to be rejected, got nil error")
+	}
+	if !errors.Is(applyErr, ErrMintZNHBNotMintable) {
+		t.Fatalf("expected ErrMintZNHBNotMintable, got %v", applyErr)
+	}
+	// Also confirm it still classifies as a pure-payload (PRUNE-safe) error
+	// for classifyProposalError, same as every other unconditional mint
+	// rejection in this file.
+	if !errors.Is(applyErr, ErrMintInvalidPayload) {
+		t.Fatalf("expected error to wrap ErrMintInvalidPayload, got %v", applyErr)
+	}
+
+	account, err := node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if account.BalanceZNHB != nil && account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected recipient ZNHB balance to remain zero, got %s", account.BalanceZNHB)
+	}
+}
+
+// TestApplyMintTransactionZNHBUnaffectedByEmissionCapOrPause proves the ZNHB
+// rejection fires before ANY other check in applyMintTransaction -- in
+// particular, before the token-mint-paused check and the emission-cap
+// check -- by leaving the ZNHB token completely unregistered (no Token
+// metadata, no emission cap configured) and confirming the error returned
+// is still ErrMintZNHBNotMintable, not some other error that would only
+// arise from those later checks actually running.
+func TestApplyMintTransactionZNHBUnaffectedByEmissionCapOrPause(t *testing.T) {
+	node := newTestNode(t)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_ZNHB", toAddress(minterKey))
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	voucher := MintVoucher{
+		InvoiceID: "inv-znhb-blocked-2",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "znhb", // lower-case, exercises NormalizedToken()'s case-folding
+		Amount:    "1",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	sig := signVoucher(t, minterKey, voucher)
+	payload, err := encodeMintTransaction(&voucher, sig)
+	if err != nil {
+		t.Fatalf("encode mint tx: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeMint,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+
+	node.stateMu.Lock()
+	applyErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+
+	if !errors.Is(applyErr, ErrMintZNHBNotMintable) {
+		t.Fatalf("expected ErrMintZNHBNotMintable, got %v", applyErr)
+	}
+}
+
+// TestMintZNHBPrunedNotAborted drives a real ZNHB mint transaction through
+// the actual mempool -> CreateBlock -> CommitBlock path (bypassing
+// MintWithSignature's own convenience pre-check, the same way
+// TestMintMalformedPayloadPrunesInsteadOfAbortingProposal does) to confirm
+// the new rejection is classified PRUNE, not ABORT: a validator with a
+// stray ZNHB mint transaction in its mempool must still be able to produce
+// a block containing every other valid transaction, not have block
+// production hang or fail outright.
+func TestMintZNHBPrunedNotAborted(t *testing.T) {
+	node := newTestNode(t)
+	node.SetTransactionSimulationEnabled(false)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_ZNHB", toAddress(minterKey))
+	assignRole(t, node, "MINTER_NHB", toAddress(minterKey))
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	znhbVoucher := MintVoucher{
+		InvoiceID: "inv-znhb-pruned",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "ZNHB",
+		Amount:    "500",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	znhbSig := signVoucher(t, minterKey, znhbVoucher)
+	znhbPayload, err := encodeMintTransaction(&znhbVoucher, znhbSig)
+	if err != nil {
+		t.Fatalf("encode znhb mint tx: %v", err)
+	}
+	znhbTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeMint,
+		Data:     znhbPayload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+	if err := node.AddTransaction(znhbTx); err != nil {
+		t.Fatalf("add znhb transaction (simulation disabled): %v", err)
+	}
+
+	nhbVoucher := MintVoucher{
+		InvoiceID: "inv-nhb-alongside",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "20",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	nhbSig := signVoucher(t, minterKey, nhbVoucher)
+	if _, err := node.MintWithSignature(&nhbVoucher, nhbSig); err != nil {
+		t.Fatalf("mint submission (nhb): %v", err)
+	}
+
+	block, err := node.CreateBlock(append([]*types.Transaction(nil), node.mempool...))
+	if err != nil {
+		t.Fatalf("CreateBlock must not abort the whole proposal for one ZNHB mint attempt: %v", err)
+	}
+	if len(block.Transactions) != 1 {
+		t.Fatalf("expected exactly the valid NHB mint in the block, got %d txs", len(block.Transactions))
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected ZNHB mint pruned from mempool, got %d remaining", got)
+	}
+
+	account, err := node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if account.BalanceNHB.Cmp(big.NewInt(20)) != 0 {
+		t.Fatalf("expected the NHB mint to succeed, got balance %s", account.BalanceNHB)
+	}
+	if account.BalanceZNHB != nil && account.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected the ZNHB mint to be rejected, got balance %s", account.BalanceZNHB)
+	}
+}
+
 func toAddress(key *crypto.PrivateKey) [20]byte {
 	var out [20]byte
 	copy(out[:], key.PubKey().Address().Bytes())

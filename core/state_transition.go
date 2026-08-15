@@ -2991,6 +2991,21 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	copy(recoveredBytes[:], recovered.Bytes())
 
 	token := voucher.NormalizedToken()
+	// PRODUCT RULE, not an accident of missing config: ZNHB is fixed supply
+	// and can never be minted, under any role grant present or future. This
+	// unconditional rejection sits before the role/cap checks below (and
+	// before manager/state are even touched), so it cannot be worked around
+	// by granting MINTER_ZNHB to some signer later -- the only way to
+	// acquire ZNHB is to buy NHB and swap it via the curve-priced
+	// NHB->ZNHB path (applyBuyZNHB / applySwapVoucherMintTransaction),
+	// which debits the tracked treasury Sale Pool instead of expanding
+	// supply. This makes the "case ZNHB" branches in the requiredRole
+	// switch just below, and in the balance-credit switch further down,
+	// unreachable by design; they are left in place rather than deleted so
+	// this fix stays minimal and the NHB branches are untouched.
+	if token == "ZNHB" {
+		return ErrMintZNHBNotMintable
+	}
 	var requiredRole string
 	switch token {
 	case "NHB":
@@ -5976,48 +5991,6 @@ func (sp *StateProcessor) persistEligibleValidatorSet() error {
 		return err
 	}
 	return sp.Trie.Update(validatorEligibleKey, encoded)
-}
-
-func (sp *StateProcessor) normalizeValidatorThresholds() (bool, error) {
-	if sp == nil {
-		return false, nil
-	}
-	minStake, err := sp.minimumValidatorStake()
-	if err != nil {
-		return false, err
-	}
-	changed := false
-	if sp.EligibleValidators == nil {
-		sp.EligibleValidators = make(map[string]*big.Int)
-	}
-	for addrKey, stake := range sp.EligibleValidators {
-		if stake == nil || stake.Cmp(minStake) < 0 {
-			delete(sp.EligibleValidators, addrKey)
-			changed = true
-		}
-	}
-	if changed {
-		if err := sp.persistEligibleValidatorSet(); err != nil {
-			return false, err
-		}
-	}
-
-	activeChanged := false
-	if sp.ValidatorSet == nil {
-		sp.ValidatorSet = make(map[string]*big.Int)
-	}
-	for addrKey, stake := range sp.ValidatorSet {
-		if stake == nil || stake.Cmp(minStake) < 0 {
-			delete(sp.ValidatorSet, addrKey)
-			activeChanged = true
-		}
-	}
-	if activeChanged {
-		if err := sp.persistValidatorSet(); err != nil {
-			return false, err
-		}
-	}
-	return changed || activeChanged, nil
 }
 
 func (sp *StateProcessor) loadBigInt(key []byte) (*big.Int, error) {

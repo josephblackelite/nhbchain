@@ -6908,7 +6908,19 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 		return "", err
 	}
 	token := voucher.NormalizedToken()
-	if token != "NHB" && token != "ZNHB" {
+	// Cheap, immediate rejection mirroring applyMintTransaction's
+	// unconditional ZNHB check (core/state_transition.go) -- this is purely
+	// a fast-fail UX convenience so a ZNHB mint attempt gets an instant,
+	// descriptive error instead of round-tripping through mempool admission
+	// first. It is NOT the enforcement mechanism: applyMintTransaction
+	// rejects ZNHB unconditionally regardless of this early return, so the
+	// invariant holds even if this node-level convenience check is ever
+	// bypassed (e.g. a future caller constructs and submits the TxTypeMint
+	// transaction directly instead of going through this method).
+	if token == "ZNHB" {
+		return "", ErrMintZNHBNotMintable
+	}
+	if token != "NHB" {
 		return "", fmt.Errorf("unsupported token %q", voucher.Token)
 	}
 	if len(signature) != 65 {

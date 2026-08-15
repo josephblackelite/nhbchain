@@ -144,6 +144,31 @@ func TestQuoteCalculation(t *testing.T) {
 	}
 }
 
+func TestQuoteRejectsZNHB(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{
+		createFn: func(ctx context.Context, req *NowPaymentsInvoiceRequest) (*NowPaymentsInvoice, error) {
+			t.Fatal("NOWPayments invoice must never be created for a ZNHB quote request")
+			return nil, nil
+		},
+	}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+	reqBody := []byte(`{"fiat":"USD","mintAsset":"ZNHB","payCurrency":"BTC","amountFiat":"100.00"}`)
+	req := httptest.NewRequest(http.MethodPost, "/quotes", bytes.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a ZNHB quote request, got %d: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("fixed supply")) {
+		t.Fatalf("expected a fixed-supply error message, got: %s", w.Body.String())
+	}
+}
+
 func TestInvoiceIdempotency(t *testing.T) {
 	store := newTestStore(t)
 	t.Cleanup(func() { store.Close() })
