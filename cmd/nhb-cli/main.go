@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -74,8 +73,8 @@ func main() {
 			printUsage()
 			return
 		}
-		amount, err := strconv.ParseInt(args[1], 10, 64)
-		if err != nil {
+		amount, ok := new(big.Int).SetString(strings.TrimSpace(args[1]), 10)
+		if !ok || amount.Sign() <= 0 {
 			fmt.Println("Error: Invalid amount.")
 			return
 		}
@@ -313,7 +312,7 @@ func applyGlobalFlags(args []string) ([]string, error) {
 }
 
 // NEW: stake creates and sends a transaction to stake ZapNHB.
-func stake(amount int64, keyFile string) {
+func stake(amount *big.Int, keyFile string) {
 	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
 		fmt.Printf("Error loading private key: %v\n", err)
@@ -332,7 +331,7 @@ func stake(amount int64, keyFile string) {
 		ChainID:  types.NHBChainID(),
 		Type:     types.TxTypeStake,
 		Nonce:    account.Nonce,
-		Value:    big.NewInt(amount), // For a stake tx, Value is the amount of ZapNHB
+		Value:    amount, // For a stake tx, Value is the amount of ZapNHB
 		GasLimit: 21000,
 		GasPrice: big.NewInt(1),
 	}
@@ -343,12 +342,12 @@ func stake(amount int64, keyFile string) {
 		return
 	}
 
-	fmt.Printf("Successfully sent stake transaction for %d ZapNHB.\n", amount)
+	fmt.Printf("Successfully sent stake transaction for %s ZapNHB.\n", amount.String())
 	fmt.Println("Check the node logs for confirmation and wait for the next block.")
 }
 
 // NEW: unStake creates and sends a transaction to un-stake ZapNHB.
-func unStake(amount int64, keyFile string) {
+func unStake(amount *big.Int, keyFile string) {
 	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
 		fmt.Printf("Error loading private key: %v\n", err)
@@ -366,7 +365,7 @@ func unStake(amount int64, keyFile string) {
 		ChainID:  types.NHBChainID(),
 		Type:     types.TxTypeUnstake,
 		Nonce:    account.Nonce,
-		Value:    big.NewInt(amount),
+		Value:    amount,
 		GasLimit: 21000,
 		GasPrice: big.NewInt(1),
 	}
@@ -377,7 +376,7 @@ func unStake(amount int64, keyFile string) {
 		return
 	}
 
-	fmt.Printf("Successfully sent un-stake transaction for %d ZapNHB.\n", amount)
+	fmt.Printf("Successfully sent un-stake transaction for %s ZapNHB.\n", amount.String())
 	fmt.Println("Check the node logs for confirmation and wait for the next block.")
 }
 
@@ -610,6 +609,13 @@ func doRPCRequest(payload []byte, requireAuth bool) (*http.Response, error) {
 	return resp, nil
 }
 
+// privateKeyKeystorePassphraseEnv holds the passphrase for an encrypted V3
+// keystore file passed to loadPrivateKey. Deliberately an environment
+// variable, never a CLI argument -- same discipline as
+// keystoreImportPassphraseEnv above, for the same reason (shell history,
+// /proc/<pid>/cmdline).
+const privateKeyKeystorePassphraseEnv = "NHB_KEYSTORE_PASSPHRASE"
+
 func loadPrivateKey(path string) (*crypto.PrivateKey, error) {
 	keyBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -623,6 +629,17 @@ func loadPrivateKey(path string) (*crypto.PrivateKey, error) {
 	}
 	if bytes.Equal(keyBytes, legacyWalletKeyMaterial) {
 		return nil, fmt.Errorf("private key file %s contains deprecated placeholder material. delete it and run ./nhb-cli generate-key to rotate", path)
+	}
+	// Encrypted V3 keystore files (e.g. a running validator's
+	// ValidatorKeystorePath) are JSON; legacy plaintext key files are raw
+	// hex/binary bytes and are never valid JSON, so this is an unambiguous
+	// format switch.
+	if json.Valid(keyBytes) {
+		passphrase, ok := os.LookupEnv(privateKeyKeystorePassphraseEnv)
+		if !ok || strings.TrimSpace(passphrase) == "" {
+			return nil, fmt.Errorf("%s looks like an encrypted keystore; set %s to its passphrase", path, privateKeyKeystorePassphraseEnv)
+		}
+		return crypto.LoadFromKeystore(path, passphrase)
 	}
 	privKey, err := crypto.PrivateKeyFromBytes(keyBytes)
 	if err != nil {

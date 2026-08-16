@@ -158,8 +158,8 @@ func runStakeClaim(args []string, stdout, stderr io.Writer) int {
 func runLegacyStake(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 2 {
 		amountStr := strings.TrimSpace(args[0])
-		amount, err := strconv.ParseInt(amountStr, 10, 64)
-		if err == nil && amount > 0 {
+		amount, ok := new(big.Int).SetString(amountStr, 10)
+		if ok && amount.Sign() > 0 {
 			stake(amount, args[1])
 			return 0
 		}
