@@ -169,6 +169,13 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.BackfillStakeDelegationIndexOnce(); err != nil {
 		return fmt.Errorf("backfill stake delegation index: %w", err)
 	}
+	// Item 5's grandfathering migration -- see BackfillValidatorRegistrationOnce's
+	// doc comment. Must run on every block (idempotent, no-op after its
+	// guard flag is set) so the currently-active validator(s) are
+	// registered with zero operator action the instant this deploys.
+	if err := sp.BackfillValidatorRegistrationOnce(); err != nil {
+		return fmt.Errorf("backfill validator registration: %w", err)
+	}
 	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
 		return err
 	}
@@ -237,16 +244,31 @@ func (sp *StateProcessor) computeEpochWeights(now time.Time) ([]epoch.Weight, *b
 		if err != nil {
 			return nil, nil, err
 		}
-		if account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
+		if !account.ValidatorRegistered {
+			continue
+		}
+		basis, err := sp.stakeRewardBasis(account, addrBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+		if basis == nil || basis.Cmp(minStake) < 0 {
+			continue
+		}
+		// See selfDelegated's doc comment: without this, an address that has
+		// delegated its own stake AWAY to a different validator would have
+		// basis read back as that delegated-away amount (stakeRewardBasis
+		// falls back to LockedZNHB once DelegatedValidator points elsewhere),
+		// which is not real own-stake and must not count toward epoch weight.
+		if !selfDelegated(account, addrBytes) {
 			continue
 		}
 		if !sp.validatorReadyForActivation(account, now) {
 			continue
 		}
-		composite := epoch.ComputeCompositeWeight(sp.epochConfig, account.Stake, account.EngagementScore)
+		composite := epoch.ComputeCompositeWeight(sp.epochConfig, basis, account.EngagementScore)
 		weight := epoch.Weight{
 			Address:    append([]byte(nil), addrBytes...),
-			Stake:      copyBigInt(account.Stake),
+			Stake:      copyBigInt(basis),
 			Engagement: account.EngagementScore,
 			Composite:  composite,
 		}
@@ -298,10 +320,24 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 			if err != nil {
 				return err
 			}
-			if account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
+			if !account.ValidatorRegistered {
 				continue
 			}
-			newSet[string(addr)] = copyBigInt(account.Stake)
+			basis, err := sp.stakeRewardBasis(account, addr)
+			if err != nil {
+				return err
+			}
+			if basis == nil || basis.Cmp(minStake) < 0 {
+				continue
+			}
+			// See selfDelegated's doc comment / computeEpochWeights above --
+			// same gap, independently reachable here since this branch
+			// re-derives basis straight from live account state rather than
+			// going through EligibleValidators.
+			if !selfDelegated(account, addr) {
+				continue
+			}
+			newSet[string(addr)] = copyBigInt(basis)
 		}
 		if len(newSet) == 0 {
 			fallback, err := sp.fallbackValidatorSet(minStake)
@@ -331,6 +367,14 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 		account, err := sp.getAccount([]byte(k))
 		if err != nil {
 			return err
+		}
+		// EligibleValidators is already gated+basis'd by setAccount, so this
+		// is functionally covered by that alone -- kept here as
+		// defense-in-depth against any path that could ever repopulate
+		// EligibleValidators outside setAccount (legacy-decode/restore paths,
+		// or the manual admin recovery primitives in core/node.go).
+		if !account.ValidatorRegistered {
+			continue
 		}
 		if !sp.validatorReadyForActivation(account, now) {
 			continue
@@ -404,7 +448,31 @@ func (sp *StateProcessor) fallbackValidatorSet(minStake *big.Int) (map[string]*b
 		if err != nil {
 			return nil, err
 		}
-		if account == nil || account.Stake == nil || account.Stake.Cmp(minStake) < 0 {
+		if account == nil {
+			continue
+		}
+		// This fallback deliberately bypasses validatorReadyForActivation
+		// (see that function's own registration gate) so it needs its own
+		// explicit registration check -- without it, a pre-fix phantom
+		// address sitting in historical epochHistory[i].Selected (one of
+		// this function's three address sources) could be resurrected here
+		// purely on stake + a heartbeat, with no registration at all.
+		if !account.ValidatorRegistered {
+			continue
+		}
+		basis, err := sp.stakeRewardBasis(account, addr)
+		if err != nil {
+			return nil, err
+		}
+		if basis == nil || basis.Cmp(minStake) < 0 {
+			continue
+		}
+		// See selfDelegated's doc comment -- same gap, independently
+		// reachable here: an address whose own stake has been fully
+		// delegated away to a different validator must not be resurrected
+		// into the fallback set on the strength of money it no longer has
+		// backing its own candidacy.
+		if !selfDelegated(account, addr) {
 			continue
 		}
 		// This fallback intentionally skips the heartbeat-recency check
@@ -419,13 +487,23 @@ func (sp *StateProcessor) fallbackValidatorSet(minStake *big.Int) (map[string]*b
 		if account.EngagementLastHeartbeat == 0 {
 			continue
 		}
-		fallback[string(addr)] = copyBigInt(account.Stake)
+		fallback[string(addr)] = copyBigInt(basis)
 	}
 	return fallback, nil
 }
 
 func (sp *StateProcessor) validatorReadyForActivation(account *types.Account, now time.Time) bool {
 	if sp == nil || account == nil {
+		return false
+	}
+	// Item 4: the heartbeat-based liveness gate below must only ever be
+	// consulted for accounts that are explicitly registered (item 1) -- an
+	// unregistered account's heartbeats (ordinary POTSO/engagement signal
+	// for everyone) must have zero effect on validator-related computation.
+	// This is the single canonical liveness-check function (called from
+	// computeEpochWeights and applyValidatorSelection's non-rotation
+	// branch), so the gate lives here once rather than at each call site.
+	if !account.ValidatorRegistered {
 		return false
 	}
 	if account.EngagementLastHeartbeat == 0 {

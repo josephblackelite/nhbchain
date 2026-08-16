@@ -1106,6 +1106,56 @@ func (sp *StateProcessor) BackfillStakeDelegationIndexOnce() error {
 	return manager.MarkStakeDelegationIndexBackfilled()
 }
 
+// BackfillValidatorRegistrationOnce is the item-5 migration: the instant the
+// item-1 "must be explicitly registered" gate deploys, the ONE (or few)
+// currently-active, legitimately-running validator(s) already sitting in
+// ValidatorSet via the old automatic-by-stake mechanism must be
+// grandfathered in as ValidatorRegistered, or they immediately fail the new
+// check and drop out of the eligible set -- with only a handful of
+// validators total, that halts the chain. Scoped deliberately to
+// ValidatorSet ONLY, not the broader EligibleValidators: EligibleValidators
+// may still contain exactly the phantom-eligibility entries (see task #94)
+// this whole fix exists to remove, while ValidatorSet only ever contains
+// addresses already selected into live, running consensus. Guarded by
+// ValidatorRegistrationBackfilled so it runs at most once; safe to call on
+// every block otherwise (see ProcessBlockLifecycle). Mirrors
+// BackfillStakeDelegationIndexOnce's established idiom exactly.
+//
+// A same-block ordering hazard is handled separately, not here: setAccount
+// carries its own transitional-grandfather branch (see its doc comment) so
+// any account touched by an earlier transaction in the same block this
+// migration first runs is protected immediately, before this function ever
+// executes.
+func (sp *StateProcessor) BackfillValidatorRegistrationOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	backfilled, err := manager.ValidatorRegistrationBackfilled()
+	if err != nil {
+		return fmt.Errorf("validator: check registration backfill flag: %w", err)
+	}
+	if backfilled {
+		return nil
+	}
+	addrs := make([][]byte, 0, len(sp.ValidatorSet))
+	for addrKey := range sp.ValidatorSet {
+		// Snapshot keys first, not mutate-while-ranging: setValidatorRegistered
+		// (via setAccount) can touch sp.ValidatorSet as a side effect.
+		addrs = append(addrs, []byte(addrKey))
+	}
+	for _, addr := range addrs {
+		account, err := sp.getAccount(addr)
+		if err != nil {
+			return fmt.Errorf("validator: load backfill candidate: %w", err)
+		}
+		if account.ValidatorRegistered {
+			continue
+		}
+		if err := sp.setValidatorRegistered(addr, account, true); err != nil {
+			return fmt.Errorf("validator: persist registration backfill: %w", err)
+		}
+	}
+	return manager.MarkValidatorRegistrationBackfilled()
+}
+
 // CheckZNHBSupplyInvariant asserts that the Sale Pool and Reward Pool
 // sub-ledgers together account for exactly the admin/treasury wallet's
 // live ZNHB balance -- the consensus-critical guarantee that no ZNHB has
@@ -1599,6 +1649,29 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 			continue
 		}
 		stakeTotals[owner] = new(big.Int).Set(amount)
+	}
+
+	// Item 3: registered validators (core/epochs.go's EligibleValidators,
+	// gated by ValidatorRegistered + own-basis >= minimumValidatorStake(),
+	// see setAccount) are instant, automatic governance voting members with
+	// no separate registration/threshold, per product decision.
+	// EligibleValidators' map VALUE is already exactly the own-basis
+	// amount (setAccount stores it that way), so it can be added with no
+	// further computation. Additive, not a replacement: POTSO stake-lock
+	// (TxTypePotsoStakeLock) and validator self-stake are two genuinely
+	// different pools of locked capital for the same address, both real
+	// skin-in-the-game, so both should count toward composite weight.
+	for addrKey, basis := range sp.EligibleValidators {
+		if len(addrKey) != 20 || basis == nil || basis.Sign() <= 0 {
+			continue
+		}
+		var key [20]byte
+		copy(key[:], addrKey)
+		if existing, ok := stakeTotals[key]; ok && existing != nil {
+			stakeTotals[key] = new(big.Int).Add(existing, basis)
+		} else {
+			stakeTotals[key] = new(big.Int).Set(basis)
+		}
 	}
 
 	participants, err := manager.PotsoListParticipants(day)
@@ -4680,40 +4753,107 @@ func (sp *StateProcessor) stakingUnbondingPeriod(manager *nhbstate.Manager) (tim
 	return period, nil
 }
 
+// stakePayload is TxTypeStake's decoded RLP payload. RegisterValidator is
+// the new item-1 explicit validator opt-in flag -- only meaningful/settable
+// on a self-stake (no third-party Validator target); it persists onto the
+// signer's account as ValidatorRegistered independent of later stake-level
+// changes. Tagged rlp:"optional" since RLP list decoding is positional and
+// every pre-existing caller (e.g. nhbportal's plain /stake page and
+// delegateToNode) encodes only the original 1-element [Validator] list --
+// without this tag, decoding those legacy payloads would hard-fail on a
+// list-length mismatch, and RegisterValidator would otherwise default false
+// exactly as intended for them anyway.
+type stakePayload struct {
+	Validator         []byte `json:"validator,omitempty"`
+	RegisterValidator bool   `json:"registerValidator,omitempty" rlp:"optional"`
+}
+
+// applyStake handles TxTypeStake. Reusing the existing, already-audited
+// stake envelope (rather than a new TxType) to carry the item-1 validator
+// registration opt-in: RegisterValidator=true on a self-stake (no
+// third-party Validator target) marks the signer as an explicit validator
+// candidate. A "pure registration" call -- RegisterValidator=true with zero
+// tx.Value -- is supported so an account that already carries sufficient
+// self-stake can flip the flag without a forced additional stake delta.
 func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error {
-	if tx.Value == nil || tx.Value.Sign() <= 0 {
-		return fmt.Errorf("stake must be positive")
-	}
-	var payload struct {
-		Validator []byte `json:"validator,omitempty"`
-	}
+	var payload stakePayload
 	if len(tx.Data) > 0 {
 		if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
 			return fmt.Errorf("invalid stake payload: %w", err)
 		}
 	}
-	_, err := sp.StakeDelegate(sender, payload.Validator, tx.Value)
-	return err
-}
-
-func (sp *StateProcessor) applyUnstake(tx *types.Transaction, sender []byte) error {
-	if tx.Value == nil || tx.Value.Sign() <= 0 {
-		return fmt.Errorf("unstake must be positive")
+	if payload.RegisterValidator && len(payload.Validator) > 0 && !bytes.Equal(payload.Validator, sender) {
+		return fmt.Errorf("registerValidator is only valid for self-stake (no third-party validator target)")
 	}
-	unbond, err := sp.StakeUndelegate(sender, tx.Value)
+	pureRegister := payload.RegisterValidator && (tx.Value == nil || tx.Value.Sign() == 0)
+	if !pureRegister {
+		if tx.Value == nil || tx.Value.Sign() <= 0 {
+			return fmt.Errorf("stake must be positive")
+		}
+		account, err := sp.StakeDelegate(sender, payload.Validator, tx.Value)
+		if err != nil {
+			return err
+		}
+		if payload.RegisterValidator {
+			return sp.setValidatorRegistered(sender, account, true)
+		}
+		return nil
+	}
+	account, err := sp.getAccount(sender)
 	if err != nil {
 		return err
 	}
+	return sp.setValidatorRegistered(sender, account, true)
+}
+
+// unstakePayload is TxTypeUnstake's decoded RLP payload, symmetric with
+// stakePayload -- see its doc comment for the rlp:"optional" reasoning,
+// which applies identically here for existing callers (undelegateFromNode).
+type unstakePayload struct {
+	Validator           []byte `json:"validator,omitempty"`
+	DeregisterValidator bool   `json:"deregisterValidator,omitempty" rlp:"optional"`
+}
+
+// applyUnstake handles TxTypeUnstake, symmetric with applyStake. A "pure
+// deregistration" call -- DeregisterValidator=true with zero tx.Value -- is
+// NOT optional polish: StakeUndelegate hard-errors once an account has
+// already fully unstaked (no active delegation / insufficient locked
+// stake), so without this zero-value path an account that already fully
+// exited could never submit any TxTypeUnstake to flip the flag off, would
+// stay permanently ValidatorRegistered, and would silently regain validator
+// eligibility the instant it (or a later controller of that address) ever
+// re-stakes -- exactly the "no way out" gap item 4/5 exist to prevent.
+func (sp *StateProcessor) applyUnstake(tx *types.Transaction, sender []byte) error {
+	var payload unstakePayload
 	if len(tx.Data) > 0 {
-		var payload struct {
-			Validator []byte `json:"validator,omitempty"`
-		}
 		if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
 			return fmt.Errorf("invalid unstake payload: %w", err)
 		}
-		if len(payload.Validator) > 0 && !bytes.Equal(payload.Validator, unbond.Validator) {
+	}
+	pureDeregister := payload.DeregisterValidator && (tx.Value == nil || tx.Value.Sign() == 0)
+	unbondValidator := append([]byte(nil), sender...)
+	if !pureDeregister {
+		if tx.Value == nil || tx.Value.Sign() <= 0 {
+			return fmt.Errorf("unstake must be positive")
+		}
+		unbond, err := sp.StakeUndelegate(sender, tx.Value)
+		if err != nil {
+			return err
+		}
+		unbondValidator = unbond.Validator
+		if len(payload.Validator) > 0 && !bytes.Equal(payload.Validator, unbondValidator) {
 			return fmt.Errorf("unstake validator mismatch")
 		}
+	}
+	if payload.DeregisterValidator {
+		if !bytes.Equal(unbondValidator, sender) {
+			return fmt.Errorf("deregisterValidator is only valid for self-stake (no third-party validator target)")
+		}
+		account, err := sp.getAccount(sender)
+		if err != nil {
+			return err
+		}
+		return sp.setValidatorRegistered(sender, account, false)
 	}
 	return nil
 }
@@ -4825,6 +4965,61 @@ func (sp *StateProcessor) stakeRewardBasis(account *types.Account, ownAddr []byt
 		basis = big.NewInt(0)
 	}
 	return basis, nil
+}
+
+// selfDelegated reports whether ownAddr is not currently delegating its
+// stake to a DIFFERENT validator -- i.e. it has no active delegation at all,
+// or its DelegatedValidator target is itself. This is the missing half of
+// every validator-eligibility check that consumes stakeRewardBasis: basis
+// alone answers "how much does this address have staked, attributed to the
+// right owner" (see stakeRewardBasis's own doc comment), but it does NOT
+// answer "is that stake currently backing THIS address's own validator
+// candidacy" -- an account whose DelegatedValidator points elsewhere has
+// moved its own skin-in-the-game to a third party's reward-attribution
+// basis and stakeRewardBasis(account, ownAddr) is reading LockedZNHB (the
+// amount delegated away), not a real own-stake figure, for exactly that
+// account. Every eligibility/voting-power gate that calls stakeRewardBasis
+// (setAccount, computeEpochWeights, applyValidatorSelection's rotation
+// branch, fallbackValidatorSet) must additionally require this before
+// treating basis>=minStake as real eligibility.
+func selfDelegated(account *types.Account, ownAddr []byte) bool {
+	if account == nil {
+		return true
+	}
+	return len(account.DelegatedValidator) == 0 || bytes.Equal(account.DelegatedValidator, ownAddr)
+}
+
+// setValidatorRegistered flips account's explicit validator-registration
+// flag (item 1 of the validator-eligibility redesign) and persists it via
+// setAccount, which is also the single call site that recomputes
+// EligibleValidators/ValidatorSet membership from the new flag value (see
+// setAccount's eligibility-gate block). Idempotent: a call that would not
+// change the flag's current value is a no-op and never touches
+// ValidatorRegisteredAt, which is deliberately only ever updated on a
+// genuine false->true transition (re-registering after unregistering
+// updates it; unregistering does not clear it) so it always reflects "when
+// did this address most recently become registered."
+func (sp *StateProcessor) setValidatorRegistered(addr []byte, account *types.Account, registered bool) error {
+	if account == nil {
+		return fmt.Errorf("validator: account required")
+	}
+	if account.ValidatorRegistered == registered {
+		return nil
+	}
+	account.ValidatorRegistered = registered
+	if registered {
+		account.ValidatorRegisteredAt = uint64(sp.blockTimestamp().Unix())
+	}
+	if err := sp.setAccount(addr, account); err != nil {
+		return err
+	}
+	var addrFixed [20]byte
+	copy(addrFixed[:], addr)
+	evt := events.ValidatorRegistrationChanged{Account: addrFixed, Registered: registered, At: account.ValidatorRegisteredAt}
+	if payload := evt.Event(); payload != nil {
+		sp.AppendEvent(payload)
+	}
+	return nil
 }
 
 // accrueStakeAccount accrues APR-based stake rewards for the account owned
@@ -4974,6 +5169,17 @@ type accountMetadata struct {
 
 	LendingCollateralDisabled bool
 	LendingBorrowDisabled     bool
+
+	// ValidatorRegistered/ValidatorRegisteredAt back types.Account's fields
+	// of the same name (see core/types/account.go's doc comment). Tagged
+	// rlp:"optional" -- MANDATORY, not cosmetic: without it, decoding any
+	// account persisted before this field existed would hard-fail on its
+	// very next getAccount() call, since go-ethereum's rlp decoder requires
+	// an exact list-length match for non-optional trailing fields. Matches
+	// the established idiom in native/loyalty/types.go's RewardMode/
+	// FixedRewardWei and core/state/manager.go's Tally field.
+	ValidatorRegistered   bool   `rlp:"optional"`
+	ValidatorRegisteredAt uint64 `rlp:"optional"`
 }
 
 func ensureAccountDefaults(account *types.Account) {
@@ -5161,6 +5367,8 @@ func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
 			CollateralDisabled: meta.LendingCollateralDisabled,
 			BorrowDisabled:     meta.LendingBorrowDisabled,
 		}
+		account.ValidatorRegistered = meta.ValidatorRegistered
+		account.ValidatorRegisteredAt = meta.ValidatorRegisteredAt
 	}
 	manager := nhbstate.NewManager(sp.Trie)
 	rewards, err := manager.GetAccountStakingRewards(addr)
@@ -5238,6 +5446,62 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 			ReleaseTime: entry.ReleaseTime,
 		}
 	}
+	// Eligibility (and, downstream, real BFT voting power -- see
+	// core/epochs.go's applyValidatorSelection non-rotation branch, which
+	// copies this map's values straight into ValidatorSet) requires explicit
+	// registration (item 1) AND an own-stake basis -- self-stake minus
+	// whatever is tracked as delegated-in for this address, the exact same
+	// subtraction stakeRewardBasis already uses for reward attribution --
+	// meeting minimumValidatorStake() (item 2), AND that the address is not
+	// currently delegating its own stake to a DIFFERENT validator (see
+	// selfDelegated's doc comment): without that third condition, basis
+	// itself is not a trustworthy own-stake figure -- stakeRewardBasis
+	// deliberately returns LockedZNHB (the amount delegated AWAY) once
+	// DelegatedValidator points elsewhere, so basis>=minStake alone could be
+	// satisfied by money this address has delegated to someone else, not by
+	// anything actually backing its own candidacy. Delegated-in stake keeps
+	// earning its proportional reward share elsewhere untouched; it no
+	// longer inflates eligibility or voting power here. Computed here, BEFORE
+	// accountMetadata is built below, so a transitional-grandfather
+	// registration flip (see below) lands in the metadata this call persists
+	// rather than being silently discarded.
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return err
+	}
+	basis, err := sp.stakeRewardBasis(account, addr)
+	if err != nil {
+		return err
+	}
+	addrKey := string(addr)
+	registered := account.ValidatorRegistered
+	if !registered {
+		if _, alreadyActive := sp.ValidatorSet[addrKey]; alreadyActive {
+			// Transitional grandfather: the one-time migration
+			// (BackfillValidatorRegistrationOnce, run from
+			// ProcessBlockLifecycle) marks every address already in
+			// ValidatorSet as registered, but it runs AFTER this block's
+			// transactions are applied -- so any earlier transaction this
+			// same block that happens to touch a not-yet-migrated active
+			// validator's account (most plausibly its own heartbeat) would
+			// otherwise evict it before the migration ever runs. Mirror the
+			// same grandfather decision here, persisted immediately (not
+			// just used for this call), so it self-heals on the very first
+			// touch and the later migration pass becomes a no-op for it.
+			manager := nhbstate.NewManager(sp.Trie)
+			migrated, migratedErr := manager.ValidatorRegistrationBackfilled()
+			if migratedErr != nil {
+				return migratedErr
+			}
+			if !migrated {
+				registered = true
+				account.ValidatorRegistered = true
+				account.ValidatorRegisteredAt = uint64(sp.blockTimestamp().Unix())
+			}
+		}
+	}
+	meetsStake := registered && selfDelegated(account, addr) && basis.Cmp(minStake) >= 0
+
 	meta := &accountMetadata{
 		BalanceZNHB:               new(big.Int).Set(account.BalanceZNHB),
 		Stake:                     new(big.Int).Set(account.Stake),
@@ -5264,6 +5528,8 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		EngagementLastHeartbeat:   account.EngagementLastHeartbeat,
 		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
+		ValidatorRegistered:       account.ValidatorRegistered,
+		ValidatorRegisteredAt:     account.ValidatorRegisteredAt,
 	}
 	if err := sp.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -5284,18 +5550,11 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 		return err
 	}
 
-	minStake, err := sp.minimumValidatorStake()
-	if err != nil {
-		return err
-	}
-	meetsStake := account.Stake.Cmp(minStake) >= 0
-	addrKey := string(addr)
-
 	if sp.EligibleValidators == nil {
 		sp.EligibleValidators = make(map[string]*big.Int)
 	}
 	if meetsStake {
-		sp.EligibleValidators[addrKey] = new(big.Int).Set(account.Stake)
+		sp.EligibleValidators[addrKey] = new(big.Int).Set(basis)
 	} else {
 		delete(sp.EligibleValidators, addrKey)
 	}
@@ -5728,20 +5987,22 @@ func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Accoun
 	}
 
 	meta := &accountMetadata{
-		BalanceZNHB:        new(big.Int).Set(legacy.BalanceZNHB),
-		Stake:              new(big.Int).Set(legacy.Stake),
-		StakeShares:        new(big.Int).Set(legacy.StakeShares),
-		StakeLastIndex:     new(big.Int).Set(legacy.StakeLastIndex),
-		StakeLastPayoutTs:  legacy.StakeLastPayoutTs,
-		LockedZNHB:         big.NewInt(0),
-		CollateralBalance:  big.NewInt(0),
-		DebtPrincipal:      big.NewInt(0),
-		SupplyShares:       big.NewInt(0),
-		LendingSupplyIndex: big.NewInt(0),
-		LendingBorrowIndex: big.NewInt(0),
-		Unbonding:          make([]stakeUnbond, 0),
-		Username:           legacy.Username,
-		EngagementScore:    legacy.EngagementScore,
+		BalanceZNHB:           new(big.Int).Set(legacy.BalanceZNHB),
+		Stake:                 new(big.Int).Set(legacy.Stake),
+		StakeShares:           new(big.Int).Set(legacy.StakeShares),
+		StakeLastIndex:        new(big.Int).Set(legacy.StakeLastIndex),
+		StakeLastPayoutTs:     legacy.StakeLastPayoutTs,
+		LockedZNHB:            big.NewInt(0),
+		CollateralBalance:     big.NewInt(0),
+		DebtPrincipal:         big.NewInt(0),
+		SupplyShares:          big.NewInt(0),
+		LendingSupplyIndex:    big.NewInt(0),
+		LendingBorrowIndex:    big.NewInt(0),
+		Unbonding:             make([]stakeUnbond, 0),
+		Username:              legacy.Username,
+		EngagementScore:       legacy.EngagementScore,
+		ValidatorRegistered:   legacy.ValidatorRegistered,
+		ValidatorRegisteredAt: legacy.ValidatorRegisteredAt,
 	}
 	if err := sp.writeAccountMetadata(addr, meta); err != nil {
 		return nil, err
@@ -5757,13 +6018,29 @@ func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Accoun
 	if err != nil {
 		return nil, err
 	}
-	if legacy.Stake.Cmp(minStake) >= 0 {
+	// Gate identical to setAccount's meetsStake (registration + own-basis +
+	// still-self-delegated) -- a legacy-format account was never able to
+	// have ValidatorRegistered=true (the field didn't exist in the old
+	// encoding, so it decodes to its zero value, false), so in practice
+	// this migration never auto-grants eligibility; a legacy account that
+	// wants to become a validator must explicitly register afterward like
+	// any other account, going through the normal setAccount path. Reusing
+	// the same three-part gate here (rather than the old bare
+	// legacy.Stake>=minStake check) closes an independent instance of the
+	// self-delegation gap described in setAccount's own doc comment, and
+	// stores basis (not raw Stake) to match EligibleValidators' invariant
+	// elsewhere.
+	basis, err := sp.stakeRewardBasis(legacy, addr)
+	if err != nil {
+		return nil, err
+	}
+	if legacy.ValidatorRegistered && selfDelegated(legacy, addr) && basis.Cmp(minStake) >= 0 {
 		if sp.EligibleValidators == nil {
 			sp.EligibleValidators = make(map[string]*big.Int)
 		}
 		key := string(addr)
-		sp.EligibleValidators[key] = new(big.Int).Set(legacy.Stake)
-		sp.ValidatorSet[key] = new(big.Int).Set(legacy.Stake)
+		sp.EligibleValidators[key] = new(big.Int).Set(basis)
+		sp.ValidatorSet[key] = new(big.Int).Set(basis)
 		if err := sp.persistEligibleValidatorSet(); err != nil {
 			return nil, err
 		}

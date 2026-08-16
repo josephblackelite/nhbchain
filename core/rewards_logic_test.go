@@ -71,6 +71,12 @@ func seedEligibleValidator(t *testing.T, sp *StateProcessor, stake int64, engage
 		Stake:           big.NewInt(stake),
 		EngagementScore: engagement,
 		EngagementLastHeartbeat: uint64(rewardBlockTimestamp1),
+		// This helper tests reward distribution/epoch-selection logic, not
+		// the item-1 explicit-registration gate itself -- register every
+		// seeded validator so it stays covered by computeEpochWeights/
+		// applyValidatorSelection/fallbackValidatorSet's new registration
+		// check exactly as before this fix.
+		ValidatorRegistered: true,
 	}
 	if err := sp.setAccount(addr, account); err != nil {
 		t.Fatalf("set account: %v", err)

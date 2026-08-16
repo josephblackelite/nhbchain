@@ -68,6 +68,20 @@ type accountMetadata struct {
 	// Lending breakers
 	LendingCollateralDisabled bool
 	LendingBorrowDisabled     bool
+
+	// ValidatorRegistered/ValidatorRegisteredAt back types.Account's fields
+	// of the same name -- see core/types/account.go's doc comment. This
+	// struct and core/state_transition.go's accountMetadata are two
+	// independent Go types that both RLP-encode/decode the SAME trie key
+	// (accountMetadataKey) via GetAccount/PutAccount/PutAccountMetadata
+	// here vs setAccount/getAccount there -- their field sets (and
+	// positional order) must be kept in lockstep or one side's writes
+	// become undecodable by the other. Tagged rlp:"optional" for the same
+	// reason as core/state_transition.go's accountMetadata: without it,
+	// decoding any account persisted before this field existed would
+	// hard-fail on its very next GetAccount() call.
+	ValidatorRegistered   bool   `rlp:"optional"`
+	ValidatorRegisteredAt uint64 `rlp:"optional"`
 }
 
 type validatorEntry struct {
@@ -304,6 +318,8 @@ func (m *Manager) GetAccount(addr []byte) (*types.Account, error) {
 			CollateralDisabled: meta.LendingCollateralDisabled,
 			BorrowDisabled:     meta.LendingBorrowDisabled,
 		}
+		account.ValidatorRegistered = meta.ValidatorRegistered
+		account.ValidatorRegisteredAt = meta.ValidatorRegisteredAt
 	}
 
 	rewards, err := m.GetAccountStakingRewards(addr)
@@ -413,6 +429,9 @@ func (m *Manager) PutAccount(addr []byte, account *types.Account) error {
 		// Lending breakers
 		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
+
+		ValidatorRegistered:   account.ValidatorRegistered,
+		ValidatorRegisteredAt: account.ValidatorRegisteredAt,
 	}
 	if err := m.writeAccountMetadata(addr, meta); err != nil {
 		return err
@@ -530,6 +549,9 @@ func (m *Manager) PutAccountMetadata(addr []byte, account *types.Account) error 
 		// Lending breakers
 		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
+
+		ValidatorRegistered:   account.ValidatorRegistered,
+		ValidatorRegisteredAt: account.ValidatorRegisteredAt,
 	}
 	return m.writeAccountMetadata(addr, meta)
 }

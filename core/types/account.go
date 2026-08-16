@@ -105,4 +105,19 @@ type Account struct {
 	LendingBreaker          LendingBreakerFlags  `json:"lendingBreaker"`
 	CodeHash                []byte               `json:"codeHash"`
 	StorageRoot             []byte               `json:"storageRoot"`
+
+	// ValidatorRegistered is the explicit validator opt-in flag (see
+	// core/state_transition.go's applyStake/applyUnstake). Self-staking
+	// alone (plain TxTypeStake with no validator target) no longer makes an
+	// account eligible for the BFT validator set or governance voting
+	// membership by default -- the signer must additionally set
+	// registerValidator=true on a self-stake TxTypeStake, which persists
+	// this flag independent of later stake-level changes. Symmetric
+	// un-registration is deregisterValidator=true on TxTypeUnstake.
+	ValidatorRegistered bool `json:"validatorRegistered"`
+	// ValidatorRegisteredAt is the unix-second timestamp of the most recent
+	// false->true ValidatorRegistered transition. Zero if never registered.
+	// Unregistering does not clear it, so it always reflects "when did this
+	// address most recently become registered."
+	ValidatorRegisteredAt uint64 `json:"validatorRegisteredAt,omitempty"`
 }

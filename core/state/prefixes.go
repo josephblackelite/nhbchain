@@ -24,4 +24,11 @@ var (
 	// populates the two indexes above from already-existing delegations
 	// created before this fix -- see StakeDelegationIndexBackfilled.
 	stakeDelegationIndexBackfilledKey = []byte("staking/delegationIndexBackfilled")
+
+	// validatorRegistrationBackfilledKey guards the one-time migration that
+	// grandfathers every address already in ValidatorSet as explicitly
+	// ValidatorRegistered the instant the item-1 registration gate deploys
+	// -- see ValidatorRegistrationBackfilled / core/state_transition.go's
+	// BackfillValidatorRegistrationOnce.
+	validatorRegistrationBackfilledKey = []byte("validator/registrationBackfilled")
 )

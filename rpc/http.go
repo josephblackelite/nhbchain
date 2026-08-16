@@ -1042,6 +1042,8 @@ type BalanceResponse struct {
 	Username              string                `json:"username"`
 	Nonce                 uint64                `json:"nonce"`
 	EngagementScore       uint64                `json:"engagementScore"`
+	ValidatorRegistered   bool                  `json:"validatorRegistered"`
+	ValidatorRegisteredAt uint64                `json:"validatorRegisteredAt,omitempty"`
 }
 
 type StakeUnbondResponse struct {
@@ -3072,13 +3074,15 @@ func (s *Server) handleTxGetSponsorshipConfig(w http.ResponseWriter, _ *http.Req
 
 func balanceResponseFromAccount(addr string, account *types.Account) BalanceResponse {
 	resp := BalanceResponse{
-		Address:         addr,
-		BalanceNHB:      account.BalanceNHB,
-		BalanceZNHB:     account.BalanceZNHB,
-		Stake:           account.Stake,
-		Username:        account.Username,
-		Nonce:           account.Nonce,
-		EngagementScore: account.EngagementScore,
+		Address:               addr,
+		BalanceNHB:            account.BalanceNHB,
+		BalanceZNHB:           account.BalanceZNHB,
+		Stake:                 account.Stake,
+		Username:              account.Username,
+		Nonce:                 account.Nonce,
+		EngagementScore:       account.EngagementScore,
+		ValidatorRegistered:   account.ValidatorRegistered,
+		ValidatorRegisteredAt: account.ValidatorRegisteredAt,
 	}
 	if account.LockedZNHB != nil {
 		resp.LockedZNHB = account.LockedZNHB

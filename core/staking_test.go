@@ -107,6 +107,8 @@ func writeAccount(t *testing.T, sp *StateProcessor, addr [20]byte, account *type
 		EngagementScore:           account.EngagementScore,
 		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
 		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
+		ValidatorRegistered:       account.ValidatorRegistered,
+		ValidatorRegisteredAt:     account.ValidatorRegisteredAt,
 	}
 	if err := sp.writeAccountMetadata(addr[:], meta); err != nil {
 		t.Fatalf("write account metadata: %v", err)

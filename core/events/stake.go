@@ -24,6 +24,10 @@ const (
 	TypeStakeEmissionCapHit = TypeStakeCapHit
 	// TypeStakePaused is emitted when staking mutations are rejected due to a pause toggle.
 	TypeStakePaused = "stake.paused"
+	// TypeValidatorRegistrationChanged is emitted whenever an account's
+	// explicit validator-registration flag flips (see
+	// core/state_transition.go's setValidatorRegistered).
+	TypeValidatorRegistrationChanged = "stake.validatorRegistrationChanged"
 
 	// StakeOperationDelegate identifies the delegation flow.
 	StakeOperationDelegate = "delegate"
@@ -182,6 +186,29 @@ func (e StakeCapHit) Event() *types.Event {
 		"cap":           formatAmount(e.Cap),
 	}
 	return &types.Event{Type: TypeStakeCapHit, Attributes: attrs}
+}
+
+// ValidatorRegistrationChanged captures a false<->true transition of an
+// account's explicit validator-registration flag.
+type ValidatorRegistrationChanged struct {
+	Account    [20]byte
+	Registered bool
+	At         uint64
+}
+
+// EventType satisfies the Event interface.
+func (ValidatorRegistrationChanged) EventType() string { return TypeValidatorRegistrationChanged }
+
+// Event converts the structured payload into a broadcastable event.
+func (e ValidatorRegistrationChanged) Event() *types.Event {
+	attrs := map[string]string{
+		"addr":       crypto.MustNewAddress(crypto.NHBPrefix, e.Account[:]).String(),
+		"registered": strconv.FormatBool(e.Registered),
+	}
+	if e.At > 0 {
+		attrs["at"] = strconv.FormatUint(e.At, 10)
+	}
+	return &types.Event{Type: TypeValidatorRegistrationChanged, Attributes: attrs}
 }
 
 // StakePaused captures a staking request rejected due to a governance pause.

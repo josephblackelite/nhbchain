@@ -72,6 +72,12 @@ func seedValidatorWithHeartbeat(t *testing.T, sp *StateProcessor, stake int64, e
 		Stake:                   big.NewInt(stake),
 		EngagementScore:         engagement,
 		EngagementLastHeartbeat: heartbeat,
+		// This suite tests stake-threshold/heartbeat/rotation logic, not the
+		// item-1 explicit-registration gate itself (see
+		// core/validator_registration_test.go for that coverage) -- every
+		// validator seeded here is registered so existing expectations about
+		// eligibility/selection stay meaningful.
+		ValidatorRegistered: true,
 	}
 	if err := sp.setAccount(addr, account); err != nil {
 		t.Fatalf("set account: %v", err)

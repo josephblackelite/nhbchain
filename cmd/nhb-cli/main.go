@@ -96,6 +96,26 @@ func main() {
 			os.Exit(code)
 		}
 		return
+	case "register-validator":
+		if len(args) < 3 {
+			fmt.Println("Error: Please provide an amount (0 for no additional stake) and a key file.")
+			printUsage()
+			return
+		}
+		if code := registerValidator(args[1], args[2]); code != 0 {
+			os.Exit(code)
+		}
+		return
+	case "deregister-validator":
+		if len(args) < 2 {
+			fmt.Println("Error: Please provide a key file.")
+			printUsage()
+			return
+		}
+		if code := deregisterValidator(args[1]); code != 0 {
+			os.Exit(code)
+		}
+		return
 	case "address":
 		if len(args) < 2 {
 			fmt.Println("Error: Please provide a key file.")
@@ -445,6 +465,14 @@ func getBalance(addr string) {
 	if strings.TrimSpace(account.DelegatedValidator) != "" {
 		fmt.Printf("  Delegated Validator: %s\n", account.DelegatedValidator)
 	}
+	if account.ValidatorRegistered {
+		fmt.Println("  Validator Registered: yes")
+		if account.ValidatorRegisteredAt > 0 {
+			fmt.Printf("    Registered At: %s (%d)\n", time.Unix(int64(account.ValidatorRegisteredAt), 0).UTC().Format(time.RFC3339), account.ValidatorRegisteredAt)
+		}
+	} else {
+		fmt.Println("  Validator Registered: no")
+	}
 	if len(account.PendingUnbonds) > 0 {
 		fmt.Println("  Pending Unbonds:")
 		for _, entry := range account.PendingUnbonds {
@@ -496,16 +524,18 @@ func claimUsername(username string, keyFile string) {
 // --- RPC HELPER FUNCTIONS ---
 
 type balanceResponse struct {
-	Address            string        `json:"address"`
-	BalanceNHB         *big.Int      `json:"balanceNHB"`
-	BalanceZNHB        *big.Int      `json:"balanceZNHB"`
-	Stake              *big.Int      `json:"stake"`
-	LockedZNHB         *big.Int      `json:"lockedZNHB"`
-	DelegatedValidator string        `json:"delegatedValidator"`
-	PendingUnbonds     []unbondEntry `json:"pendingUnbonds"`
-	Username           string        `json:"username"`
-	Nonce              uint64        `json:"nonce"`
-	EngagementScore    uint64        `json:"engagementScore"`
+	Address               string        `json:"address"`
+	BalanceNHB            *big.Int      `json:"balanceNHB"`
+	BalanceZNHB           *big.Int      `json:"balanceZNHB"`
+	Stake                 *big.Int      `json:"stake"`
+	LockedZNHB            *big.Int      `json:"lockedZNHB"`
+	DelegatedValidator    string        `json:"delegatedValidator"`
+	PendingUnbonds        []unbondEntry `json:"pendingUnbonds"`
+	Username              string        `json:"username"`
+	Nonce                 uint64        `json:"nonce"`
+	EngagementScore       uint64        `json:"engagementScore"`
+	ValidatorRegistered   bool          `json:"validatorRegistered"`
+	ValidatorRegisteredAt uint64        `json:"validatorRegisteredAt"`
 }
 
 type unbondEntry struct {
@@ -949,6 +979,8 @@ func printUsage() {
 	fmt.Println("  un-stake <amount> <path_to_key_file> - Un-stake a specified amount of ZapNHB")
 	fmt.Println("  heartbeat <path_to_key_file>        - Sends a heartbeat to increase engagement score")
 	fmt.Println("  set-reward-beneficiary <address|\"\"> <key_file> - Redirect this validator's epoch reward payouts to another wallet (\"\" clears it)")
+	fmt.Println("  register-validator <amount> <key_file>   - Explicitly register this address as a validator candidate (0 = no additional stake)")
+	fmt.Println("  deregister-validator <key_file>          - Explicitly un-register this address as a validator candidate")
 	fmt.Println("  address <key_file>                 - Print the public address for a local key file")
 	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] [--gas-price <price>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  deploy <bytecode_file> <key_file>    - Deploys a smart contract")

@@ -281,6 +281,25 @@ func (m *Manager) MarkStakeDelegationIndexBackfilled() error {
 	return m.KVPut(stakeDelegationIndexBackfilledKey, true)
 }
 
+// ValidatorRegistrationBackfilled reports whether the one-time migration
+// that grandfathers every pre-existing ValidatorSet member as explicitly
+// ValidatorRegistered has already run (see
+// core/state_transition.go's BackfillValidatorRegistrationOnce).
+func (m *Manager) ValidatorRegistrationBackfilled() (bool, error) {
+	var backfilled bool
+	ok, err := m.KVGet(validatorRegistrationBackfilledKey, &backfilled)
+	if err != nil {
+		return false, err
+	}
+	return ok && backfilled, nil
+}
+
+// MarkValidatorRegistrationBackfilled marks the one-time validator
+// registration backfill migration as complete so it never re-runs.
+func (m *Manager) MarkValidatorRegistrationBackfilled() error {
+	return m.KVPut(validatorRegistrationBackfilledKey, true)
+}
+
 // GetGlobalIndex retrieves the persisted protocol-wide staking index metadata.
 // When no snapshot has been recorded yet the function returns a zeroed
 // structure with default big.Int instances to avoid shared references.
