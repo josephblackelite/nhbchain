@@ -19,7 +19,8 @@ reference when editing a node's `config.toml`.
 | `TransferFreeTierSpendWei` | Lifetime (or windowed) free-tier transfer spend allowance, in Wei, before the protocol-enforced transfer fee applies. |
 | `TransferFreeTierWindow` | Window over which `TransferFreeTierSpendWei` resets (for example `"lifetime"`). |
 | `TransferFeeCollector` | Wallet that receives the protocol-enforced transfer fee. |
-| `TransferFeeBps` | Protocol-enforced fee, in basis points of the transfer amount, charged once a sender exceeds `TransferFreeTierSpendWei`. |
+| `TransferFeeBps` | Protocol-enforced fee, in basis points of the transfer amount, charged on an **NHB** transfer once a sender exceeds `TransferFreeTierSpendWei`. Default `20` (0.20%). |
+| `TransferFeeBpsZNHB` | `TransferFeeBps`' counterpart for **ZNHB** transfers -- a separate, independently configurable rate. Default `10` (0.10%), deliberately lower than NHB's rate. |
 | `Assets` | Per-asset overrides (`Asset`, `MDRBasisPoints`, `OwnerWallet`) layered on top of the domain defaults above. |
 
 ## Changing fee configuration

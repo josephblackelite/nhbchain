@@ -574,6 +574,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			// 20 bps (0.20%) once the free tier is exhausted -- see
 			// docs/issue30.md item 7b.
 			FeeBps: 20,
+			// 10 bps (0.10%) once the free tier is exhausted -- ZNHB's own,
+			// separately configurable rate, lower than NHB's 20 bps since
+			// ZNHB is a lower-priced asset with its own use case.
+			FeeBpsZNHB: 10,
 		},
 		potsoEngine:         potsoEngine,
 		potsoLedger:         pLedger,
@@ -606,6 +610,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 				TransferFreeTierWindow:   TransferGasWindowLifetime,
 				// 20 bps -- see docs/issue30.md item 7b.
 				TransferFeeBps: 20,
+				// 10 bps -- ZNHB's own, lower rate.
+				TransferFeeBpsZNHB: 10,
 			},
 		},
 		networkMode:      strings.TrimSpace(os.Getenv("NHB_ENV")),
@@ -1403,6 +1409,7 @@ func buildTransferGasPolicyFromConfig(cfg config.Fees, defaultCollector [20]byte
 		policy.FreeSpendLimitWei = big.NewInt(0)
 	}
 	policy.FeeBps = cfg.TransferFeeBps
+	policy.FeeBpsZNHB = cfg.TransferFeeBpsZNHB
 	if policy.FreeSpendLimitWei.Sign() <= 0 {
 		policy.Enabled = false
 	}
@@ -1613,6 +1620,7 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			TransferFreeTierWindow:   n.globalCfg.Fees.TransferFreeTierWindow,
 			TransferFeeCollector:     n.globalCfg.Fees.TransferFeeCollector,
 			TransferFeeBps:           n.globalCfg.Fees.TransferFeeBps,
+			TransferFeeBpsZNHB:       n.globalCfg.Fees.TransferFeeBpsZNHB,
 			Assets:                   append([]config.FeeAsset{}, n.globalCfg.Fees.Assets...),
 		},
 	}

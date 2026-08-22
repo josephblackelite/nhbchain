@@ -216,3 +216,50 @@ func TestTransferGasPolicyThresholdCrossingTransferRemainsFree(t *testing.T) {
 		t.Fatalf("expected sender to become ineligible after crossing threshold")
 	}
 }
+
+// TestComputeFeePerAssetRates proves ComputeFee selects each asset's own
+// configured rate -- FeeBps for NHB, FeeBpsZNHB for ZNHB -- rather than
+// sharing a single rate between them, and that asset matching is
+// case-insensitive with an NHB fallback for anything else. See
+// docs/issue30.md item 7b's NHB/ZNHB fee split.
+func TestComputeFeePerAssetRates(t *testing.T) {
+	policy := TransferGasPolicy{FeeBps: 20, FeeBpsZNHB: 10}
+	amount := big.NewInt(250_000)
+
+	nhbFee := policy.ComputeFee("NHB", amount)
+	if nhbFee.Cmp(big.NewInt(500)) != 0 {
+		t.Fatalf("expected NHB fee 500 (20bps of 250000), got %s", nhbFee)
+	}
+	znhbFee := policy.ComputeFee("ZNHB", amount)
+	if znhbFee.Cmp(big.NewInt(250)) != 0 {
+		t.Fatalf("expected ZNHB fee 250 (10bps of 250000), got %s", znhbFee)
+	}
+	if got := policy.ComputeFee("znhb", amount); got.Cmp(znhbFee) != 0 {
+		t.Fatalf("expected lowercase \"znhb\" to match the ZNHB rate, got %s", got)
+	}
+	if got := policy.ComputeFee("", amount); got.Cmp(nhbFee) != 0 {
+		t.Fatalf("expected empty asset to fall back to the NHB rate, got %s", got)
+	}
+	if got := policy.ComputeFee("USD", amount); got.Cmp(nhbFee) != 0 {
+		t.Fatalf("expected unrecognized asset to fall back to the NHB rate, got %s", got)
+	}
+}
+
+// TestFeeBpsForAsset proves the raw basis-points lookup used by
+// fees_getTransferQuote (FeeBpsForAsset) resolves the same per-asset rate as
+// ComputeFee.
+func TestFeeBpsForAsset(t *testing.T) {
+	policy := TransferGasPolicy{FeeBps: 20, FeeBpsZNHB: 10}
+	if got := policy.FeeBpsForAsset("NHB"); got != 20 {
+		t.Fatalf("expected 20 for NHB, got %d", got)
+	}
+	if got := policy.FeeBpsForAsset("ZNHB"); got != 10 {
+		t.Fatalf("expected 10 for ZNHB, got %d", got)
+	}
+	if got := policy.FeeBpsForAsset("znhb"); got != 10 {
+		t.Fatalf("expected case-insensitive ZNHB match, got %d", got)
+	}
+	if got := policy.FeeBpsForAsset("unknown"); got != 20 {
+		t.Fatalf("expected fallback to the NHB rate, got %d", got)
+	}
+}

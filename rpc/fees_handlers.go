@@ -102,7 +102,10 @@ func (s *Server) handleFeesGetTransferStatus(w http.ResponseWriter, _ *http.Requ
 // for a transfer of amountWei in the given asset from address, reusing the
 // same free-tier eligibility check as fees_getTransferStatus. When the
 // wallet is within its free tier the quoted fee is zero; otherwise the fee
-// is computed from the live protocol-enforced TransferGasPolicy.FeeBps rate.
+// is computed from the live protocol-enforced rate for the requested asset
+// (TransferGasPolicy.FeeBps for NHB, TransferGasPolicy.FeeBpsZNHB for ZNHB --
+// see TransferGasPolicy.FeeBpsForAsset). The response's FeeBps field always
+// echoes back whichever rate actually applied to this request's asset.
 func (s *Server) handleFeesGetTransferQuote(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if s == nil || s.node == nil {
 		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
@@ -141,10 +144,10 @@ func (s *Server) handleFeesGetTransferQuote(w http.ResponseWriter, _ *http.Reque
 	result := feesTransferQuoteResult{
 		Eligible: status.Eligible,
 		FeeWei:   "0",
-		FeeBps:   policy.FeeBps,
+		FeeBps:   policy.FeeBpsForAsset(asset),
 	}
 	if !status.Eligible {
-		result.FeeWei = policy.ComputeFee(amount).String()
+		result.FeeWei = policy.ComputeFee(asset, amount).String()
 	}
 	writeResult(w, req.ID, result)
 }

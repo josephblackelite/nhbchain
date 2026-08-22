@@ -2424,7 +2424,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		// a percentage of the transfer value, NOT derived from
 		// tx.GasPrice/GasLimit, which the sender's own wallet sets and could
 		// set to zero, defeating any fee floor.
-		gasCost := transferGasPolicy.ComputeFee(tx.Value)
+		gasCost := transferGasPolicy.ComputeFee("NHB", tx.Value)
 		freeTransferGas := false
 		if sponsorshipCtx == nil && transferGasPolicy.Enabled {
 			status, err := sp.transferGasStatus(from, "NHB")
@@ -2882,7 +2882,7 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	// its own asset-scoped spend counter since NHB and ZNHB are not
 	// fungible for this purpose) -- see docs/issue30.md item 7b.
 	transferGasPolicy := sp.TransferGasPolicy()
-	gasCost := transferGasPolicy.ComputeFee(amount)
+	gasCost := transferGasPolicy.ComputeFee("ZNHB", amount)
 	freeTransferGas := false
 	if transferGasPolicy.Enabled {
 		status, err := sp.transferGasStatus(sender, "ZNHB")

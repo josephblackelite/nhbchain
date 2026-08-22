@@ -574,6 +574,166 @@ func TestTransferNHBNotAffectedByZNHBPause(t *testing.T) {
 	})
 }
 
+// TestApplyTransferZNHB_FeeUsesZNHBRateNotNHBRate proves applyTransferZNHB
+// charges the transfer's own ZNHB-specific rate (FeeBpsZNHB), not NHB's
+// FeeBps -- see docs/issue30.md item 7b's NHB/ZNHB fee split. FeeBps is
+// deliberately set to an absurd 9999 (99.99%) so that, if applyTransferZNHB
+// ever regressed to using the NHB rate for a ZNHB transfer, the transaction
+// would fail loudly with "insufficient balance" instead of silently passing
+// with a wrong-but-plausible fee amount.
+func TestApplyTransferZNHB_FeeUsesZNHBRateNotNHBRate(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	var collector [20]byte
+	collector[19] = 0x99
+
+	sp.SetTransferGasPolicy(TransferGasPolicy{
+		// Enabled=false forces the fee to always apply regardless of
+		// free-tier bookkeeping (freeTransferGas can only become true when
+		// Enabled is true), keeping this test focused purely on which rate
+		// gets charged.
+		Enabled:      false,
+		FeeCollector: collector,
+		FeeBps:       9_999,
+		FeeBpsZNHB:   10,
+	})
+
+	if err := sp.setAccount(senderAddr, &types.Account{BalanceZNHB: big.NewInt(250_250), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+	if err := sp.setAccount(collector[:], &types.Account{BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed collector: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransferZNHB,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(250_000),
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transaction: %v", err)
+	}
+
+	updatedSender, err := sp.getAccount(senderAddr)
+	if err != nil {
+		t.Fatalf("load sender: %v", err)
+	}
+	if updatedSender.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("expected sender ZNHB balance 0 (250000 sent + 250 fee from a 250250 balance), got %s", updatedSender.BalanceZNHB)
+	}
+	updatedRecipient, err := sp.getAccount(recipientAddr)
+	if err != nil {
+		t.Fatalf("load recipient: %v", err)
+	}
+	if updatedRecipient.BalanceZNHB.Cmp(big.NewInt(250_000)) != 0 {
+		t.Fatalf("expected recipient ZNHB balance 250000, got %s", updatedRecipient.BalanceZNHB)
+	}
+	collectorAcc, err := sp.getAccount(collector[:])
+	if err != nil {
+		t.Fatalf("load collector: %v", err)
+	}
+	if collectorAcc.BalanceZNHB.Cmp(big.NewInt(250)) != 0 {
+		t.Fatalf("expected collector to receive 250 ZNHB (10bps of 250000, the ZNHB rate), got %s", collectorAcc.BalanceZNHB)
+	}
+}
+
+// TestApplyTransferZNHB_SelfCollectionAtZNHBRate proves the fee-collector
+// self-collection path (the collector wallet is credited back its own fee
+// when it originates the transfer) still works correctly for a ZNHB
+// transfer at the new 10bps rate -- the founder's explicit requirement that
+// "the admin wallet earns ZNHB fees even when the admin wallet itself
+// originates the transfer" keeps working exactly as before.
+func TestApplyTransferZNHB_SelfCollectionAtZNHBRate(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	var collector [20]byte
+	copy(collector[:], senderAddr) // the fee collector IS the sender
+
+	sp.SetTransferGasPolicy(TransferGasPolicy{
+		Enabled:      false,
+		FeeCollector: collector,
+		FeeBps:       9_999,
+		FeeBpsZNHB:   10,
+	})
+
+	initialBalance := big.NewInt(1_000_000)
+	if err := sp.setAccount(senderAddr, &types.Account{BalanceZNHB: new(big.Int).Set(initialBalance), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransferZNHB,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(250_000),
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transaction: %v", err)
+	}
+
+	updatedSender, err := sp.getAccount(senderAddr)
+	if err != nil {
+		t.Fatalf("load sender: %v", err)
+	}
+	// The 10bps ZNHB fee (250) is deducted then immediately credited back
+	// to the sender, since the sender IS the configured fee collector --
+	// net cost is just the 250000 actually transferred out, not
+	// 250000+fee. If self-collection were broken, the sender would show
+	// initialBalance-250000-250 instead.
+	expectedSender := new(big.Int).Sub(initialBalance, big.NewInt(250_000))
+	if updatedSender.BalanceZNHB.Cmp(expectedSender) != 0 {
+		t.Fatalf("expected sender (fee collector) ZNHB balance %s after self-collected fee, got %s", expectedSender, updatedSender.BalanceZNHB)
+	}
+	updatedRecipient, err := sp.getAccount(recipientAddr)
+	if err != nil {
+		t.Fatalf("load recipient: %v", err)
+	}
+	if updatedRecipient.BalanceZNHB.Cmp(big.NewInt(250_000)) != 0 {
+		t.Fatalf("expected recipient ZNHB balance 250000, got %s", updatedRecipient.BalanceZNHB)
+	}
+}
+
 func TestApplyTransferZNHB_InvalidRecipient(t *testing.T) {
 	sp := newStakingStateProcessor(t)
 

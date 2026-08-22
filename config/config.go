@@ -250,6 +250,10 @@ func defaultGlobalConfig() Global {
 			// meant to replace, while still scaling with real volume instead
 			// of being negligible per-transaction. See docs/issue30.md item 7b.
 			TransferFeeBps: 20,
+			// 10 bps (0.10%) once the free tier is exhausted -- ZNHB's own,
+			// separately configurable rate, deliberately lower than NHB's
+			// since ZNHB is a lower-priced asset with its own use case.
+			TransferFeeBpsZNHB: 10,
 			Assets: []FeeAsset{
 				{Asset: fees.AssetNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka"},
 				{Asset: fees.AssetZNHB, MDRBasisPoints: DefaultMDRBasisPoints, OwnerWallet: "znhb19l75s7jkyzxp4z7lj3ddgn9r89y3kps54wpv0w"},
@@ -819,6 +823,9 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("global", "fees", "TransferFeeBps") {
 		cfg.Global.Fees.TransferFeeBps = defaults.Fees.TransferFeeBps
+	}
+	if !meta.IsDefined("global", "fees", "TransferFeeBpsZNHB") {
+		cfg.Global.Fees.TransferFeeBpsZNHB = defaults.Fees.TransferFeeBpsZNHB
 	}
 	if len(cfg.Global.Fees.Assets) == 0 {
 		cfg.Global.Fees.Assets = append([]FeeAsset{}, defaults.Fees.Assets...)
