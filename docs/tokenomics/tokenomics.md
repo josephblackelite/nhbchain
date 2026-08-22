@@ -78,8 +78,8 @@ Neither path can create ZNHB beyond what the Sale Pool has left — both fail cl
 Validator and staking rewards are funded from the 200,000,000-ZNHB Reward Pool, using a Bitcoin-style halving schedule (`core/rewards/halving.go`):
 
 ```
-B0 = 50,000 ZNHB / epoch     (base emission, era 0)
-E  = 2,000 epochs / era      (era length)
+B0 = 200 ZNHB / epoch        (base emission, era 0)
+E  = 500,000 epochs / era    (era length)
 emission(epoch) = B0 >> floor((epoch-1) / E)
 ```
 
