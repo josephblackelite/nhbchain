@@ -63,12 +63,15 @@ func TestProcessPotsoRewardEpoch(t *testing.T) {
 	}
 
 	now := time.Unix(1_700_000_300, 0).UTC()
-	day := now.Format(potso.DayFormat)
-	if err := manager.PotsoPutMeter(participantA, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
-		t.Fatalf("put meter A: %v", err)
+	// Seeded into the epoch-keyed engagement store (epoch 0, since
+	// EpochLengthBlocks=2 means heights 1-2 fall in epoch 0), mirroring what
+	// updatePotsoActivity/PotsoHeartbeat write in real time -- NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	if err := manager.PotsoMetricsAddEngagement(0, participantA, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement A: %v", err)
 	}
-	if err := manager.PotsoPutMeter(participantB, &potso.Meter{Day: day, UptimeSeconds: 10 * 60}); err != nil {
-		t.Fatalf("put meter B: %v", err)
+	if err := manager.PotsoMetricsAddEngagement(0, participantB, 0, 0, 10*60); err != nil {
+		t.Fatalf("seed engagement B: %v", err)
 	}
 
 	if err := sp.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
@@ -295,12 +298,14 @@ func TestProcessPotsoRewardEpoch_PreservesSupplyInvariant(t *testing.T) {
 	}
 
 	now := time.Unix(1_700_000_300, 0).UTC()
-	day := now.Format(potso.DayFormat)
-	if err := manager.PotsoPutMeter(participantA, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
-		t.Fatalf("put meter A: %v", err)
+	// Seeded into the epoch-keyed engagement store (epoch 0), mirroring what
+	// updatePotsoActivity/PotsoHeartbeat write in real time -- NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	if err := manager.PotsoMetricsAddEngagement(0, participantA, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement A: %v", err)
 	}
-	if err := manager.PotsoPutMeter(participantB, &potso.Meter{Day: day, UptimeSeconds: 10 * 60}); err != nil {
-		t.Fatalf("put meter B: %v", err)
+	if err := manager.PotsoMetricsAddEngagement(0, participantB, 0, 0, 10*60); err != nil {
+		t.Fatalf("seed engagement B: %v", err)
 	}
 
 	if err := sp.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
@@ -380,12 +385,14 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 	}
 
 	now := time.Unix(1_700_000_400, 0).UTC()
-	day := now.Format(potso.DayFormat)
-	if err := manager.PotsoPutMeter(participantA, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
-		t.Fatalf("put meter A: %v", err)
+	// Seeded into the epoch-keyed engagement store (epoch 0), mirroring what
+	// updatePotsoActivity/PotsoHeartbeat write in real time -- NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	if err := manager.PotsoMetricsAddEngagement(0, participantA, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement A: %v", err)
 	}
-	if err := manager.PotsoPutMeter(participantB, &potso.Meter{Day: day, UptimeSeconds: 10 * 60}); err != nil {
-		t.Fatalf("put meter B: %v", err)
+	if err := manager.PotsoMetricsAddEngagement(0, participantB, 0, 0, 10*60); err != nil {
+		t.Fatalf("seed engagement B: %v", err)
 	}
 
 	if err := node.state.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
@@ -612,12 +619,18 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 
 	base := time.Unix(1_700_000_500, 0).UTC()
 	height := uint64(1)
-	processEpoch := func(day string, ts time.Time) {
-		if err := manager.PotsoPutMeter(participant, &potso.Meter{Day: day, UptimeSeconds: 30 * 60}); err != nil {
-			t.Fatalf("meter participant: %v", err)
+	// epochNum identifies the epoch-keyed engagement bucket to seed --
+	// EpochLengthBlocks=2 means the pair of heights processed by each call
+	// below (height, height+1) always falls in epoch (height-1)/2, i.e. 0,
+	// 1, 2 on successive calls. Seeded into the epoch-keyed store (mirroring
+	// updatePotsoActivity/PotsoHeartbeat's real-time writes), NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	processEpoch := func(epochNum uint64, ts time.Time) {
+		if err := manager.PotsoMetricsAddEngagement(epochNum, participant, 0, 0, 30*60); err != nil {
+			t.Fatalf("seed engagement participant: %v", err)
 		}
-		if err := manager.PotsoPutMeter(other, &potso.Meter{Day: day, UptimeSeconds: 10 * 60}); err != nil {
-			t.Fatalf("meter other: %v", err)
+		if err := manager.PotsoMetricsAddEngagement(epochNum, other, 0, 0, 10*60); err != nil {
+			t.Fatalf("seed engagement other: %v", err)
 		}
 		if err := node.state.ProcessBlockLifecycle(height, ts.Add(-time.Second).Unix()); err != nil {
 			t.Fatalf("process block %d: %v", height, err)
@@ -630,14 +643,14 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 	}
 
 	// Epoch 0 auto
-	processEpoch(base.Format(potso.DayFormat), base)
+	processEpoch(0, base)
 
 	// Switch to claim mode for epoch 1
 	cfg.PayoutMode = potso.RewardPayoutModeClaim
 	if err := node.SetPotsoRewardConfig(cfg); err != nil {
 		t.Fatalf("switch to claim mode: %v", err)
 	}
-	processEpoch(base.Add(24*time.Hour).Format(potso.DayFormat), base.Add(24*time.Hour))
+	processEpoch(1, base.Add(24*time.Hour))
 	payoutEpoch1, _, err := manager.PotsoRewardsGetPayout(1, participant)
 	if err != nil {
 		t.Fatalf("payout epoch1: %v", err)
@@ -654,7 +667,7 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 	if err := node.SetPotsoRewardConfig(cfg); err != nil {
 		t.Fatalf("switch to auto mode: %v", err)
 	}
-	processEpoch(base.Add(48*time.Hour).Format(potso.DayFormat), base.Add(48*time.Hour))
+	processEpoch(2, base.Add(48*time.Hour))
 
 	entries, nextCursor, err := node.PotsoRewardsHistory(participant, "", 2)
 	if err != nil {
@@ -685,5 +698,144 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 	}
 	if next != "" {
 		t.Fatalf("expected no further cursor, got %q", next)
+	}
+}
+
+// TestProcessPotsoRewardEpoch_DeterministicAcrossDelayedProcessing is a
+// regression test for the day/epoch nondeterminism bug: processPotsoRewardEpoch
+// used to select participants and read their engagement meters via a
+// UTC-calendar-day key derived from the WALL-CLOCK timestamp of whichever
+// block happened to trigger the backlog catch-up for a given epoch, rather
+// than from the epoch's own already-committed activity. Two validators (or
+// the same validator restarting after a chain stall) could therefore compute
+// two different reward splits for the exact same epoch number, depending
+// solely on what real time it happened to be when they got around to
+// processing it -- a direct consensus-determinism violation, since reward
+// payouts are hashed into the state root.
+//
+// This test drives two independent state processors through an IDENTICAL
+// height/activity sequence -- height 1 applies real engagement activity via
+// recordEngagementActivity (the same path ApplyTransaction uses), then
+// height 2 is the block whose processing triggers maybeProcessPotsoRewards
+// for epoch 0 (EpochLengthBlocks=2, so currentEpoch=2/2=1, target=0). The
+// ONLY difference between the two runs is the wall-clock timestamp attached
+// to height 2: "on time" (same UTC calendar day as height 1's activity) vs.
+// "delayed" (many days later, simulating a backlogged/late catch-up). Epoch
+// 0's own committed activity is byte-identical in both runs.
+//
+// Before this fix, the "delayed" run's calendar day would not match the day
+// under which height 1's activity was indexed, so processPotsoRewardEpoch
+// would silently see zero engagement for both participants (while still
+// including them via their stake), skewing the stake/engagement weighting
+// and producing a DIFFERENT payout split than the "on time" run -- for the
+// identical epoch, identical activity, identical stake. After this fix,
+// participants and their meters are read from the epoch-keyed store (keyed
+// by block height, never wall-clock time), so both runs must produce
+// byte-identical payouts.
+func TestProcessPotsoRewardEpoch_DeterministicAcrossDelayedProcessing(t *testing.T) {
+	participantA := [20]byte{0x10}
+	participantB := [20]byte{0x11}
+	treasury := [20]byte{0xAA}
+
+	// runScenario builds a fresh state processor, applies identical epoch-0
+	// activity at height 1 (real timestamp blockOneTimestamp), then processes
+	// height 2 -- the epoch-0-triggering block -- at heightTwoTimestamp,
+	// which the caller varies to simulate on-time vs. delayed processing.
+	runScenario := func(t *testing.T, heightTwoTimestamp time.Time) (payoutA, payoutB *big.Int) {
+		db := storage.NewMemDB()
+		t.Cleanup(db.Close)
+		trie, err := statetrie.NewTrie(db, nil)
+		if err != nil {
+			t.Fatalf("new trie: %v", err)
+		}
+		sp, err := NewStateProcessor(trie)
+		if err != nil {
+			t.Fatalf("state processor: %v", err)
+		}
+
+		cfg := potso.RewardConfig{
+			EpochLengthBlocks:  2,
+			AlphaStakeBps:      7000,
+			MinPayoutWei:       big.NewInt(0),
+			EmissionPerEpoch:   big.NewInt(900),
+			TreasuryAddress:    treasury,
+			MaxWinnersPerEpoch: 10,
+			CarryRemainder:     true,
+		}
+		if err := sp.SetPotsoRewardConfig(cfg); err != nil {
+			t.Fatalf("set potso config: %v", err)
+		}
+
+		manager := nhbstate.NewManager(sp.Trie)
+		treasuryAcc, err := manager.GetAccount(treasury[:])
+		if err != nil {
+			t.Fatalf("treasury account: %v", err)
+		}
+		treasuryAcc.BalanceZNHB = big.NewInt(900)
+		if err := manager.PutAccount(treasury[:], treasuryAcc); err != nil {
+			t.Fatalf("store treasury: %v", err)
+		}
+		if err := manager.PotsoStakeSetBondedTotal(participantA, big.NewInt(600)); err != nil {
+			t.Fatalf("set stake A: %v", err)
+		}
+		if err := manager.PotsoStakeSetBondedTotal(participantB, big.NewInt(400)); err != nil {
+			t.Fatalf("set stake B: %v", err)
+		}
+
+		blockOneTimestamp := time.Unix(1_700_000_000, 0).UTC()
+
+		// Height 1: real tx-driven engagement activity, exactly as
+		// ApplyTransaction's tx-type handlers would generate it via
+		// recordEngagementActivity -- bracketed by BeginBlock/EndBlock and
+		// followed by ProcessBlockLifecycle, mirroring node.go's CreateBlock
+		// pipeline order (BeginBlock -> ApplyTransaction(s) ->
+		// ProcessBlockLifecycle -> EndBlock) exactly.
+		sp.BeginBlock(1, blockOneTimestamp)
+		if err := sp.recordEngagementActivity(participantA[:], blockOneTimestamp, 5, 0, 0); err != nil {
+			t.Fatalf("record activity A: %v", err)
+		}
+		if err := sp.recordEngagementActivity(participantB[:], blockOneTimestamp, 1, 0, 0); err != nil {
+			t.Fatalf("record activity B: %v", err)
+		}
+		if err := sp.ProcessBlockLifecycle(1, blockOneTimestamp.Unix()); err != nil {
+			t.Fatalf("process block 1: %v", err)
+		}
+		sp.EndBlock()
+
+		// Height 2: no new activity -- this is purely the block whose
+		// processing happens to trigger maybeProcessPotsoRewards for epoch 0.
+		// heightTwoTimestamp is the only thing that varies between the two
+		// calls to runScenario.
+		sp.BeginBlock(2, heightTwoTimestamp)
+		if err := sp.ProcessBlockLifecycle(2, heightTwoTimestamp.Unix()); err != nil {
+			t.Fatalf("process block 2: %v", err)
+		}
+		sp.EndBlock()
+
+		a, _, err := manager.PotsoRewardsGetPayout(0, participantA)
+		if err != nil {
+			t.Fatalf("payout A: %v", err)
+		}
+		b, _, err := manager.PotsoRewardsGetPayout(0, participantB)
+		if err != nil {
+			t.Fatalf("payout B: %v", err)
+		}
+		return a, b
+	}
+
+	onTimeTimestamp := time.Unix(1_700_000_010, 0).UTC()                   // same UTC day as height 1
+	delayedTimestamp := time.Unix(1_700_000_010, 0).UTC().AddDate(0, 0, 5) // 5 days later
+
+	onTimePayoutA, onTimePayoutB := runScenario(t, onTimeTimestamp)
+	delayedPayoutA, delayedPayoutB := runScenario(t, delayedTimestamp)
+
+	if onTimePayoutA.Sign() <= 0 || onTimePayoutB.Sign() <= 0 {
+		t.Fatalf("expected nonzero payouts in the on-time baseline: A=%s B=%s", onTimePayoutA, onTimePayoutB)
+	}
+	if onTimePayoutA.Cmp(delayedPayoutA) != 0 {
+		t.Fatalf("epoch 0 payout for participant A is not deterministic across processing delay: on-time=%s delayed=%s", onTimePayoutA, delayedPayoutA)
+	}
+	if onTimePayoutB.Cmp(delayedPayoutB) != 0 {
+		t.Fatalf("epoch 0 payout for participant B is not deterministic across processing delay: on-time=%s delayed=%s", onTimePayoutB, delayedPayoutB)
 	}
 }

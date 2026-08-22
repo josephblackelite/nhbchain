@@ -116,6 +116,13 @@ type EngagementMeter struct {
 	TxCount       uint64
 	EscrowCount   uint64
 	UptimeDevices uint64
+	// UptimeSeconds is a storage-only write-time accumulator (raw seconds).
+	// computeComposite (below) never reads it directly -- it is converted to
+	// UptimeDevices exactly once, at the single consumption point in
+	// processPotsoRewardEpoch, mirroring the codebase's existing
+	// single-conversion discipline. Dividing per-delta at write time would
+	// floor away any heartbeat delta under 60s and silently undercount.
+	UptimeSeconds uint64
 }
 
 // WeightInput bundles the raw state required to compute composite weights for

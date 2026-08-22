@@ -1613,6 +1613,11 @@ func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int6
 	if start > target {
 		return nil
 	}
+	// day is derived from the CALL-TIME timestamp (i.e. whenever this backlog
+	// happens to be processed), not from the epoch's own blocks -- it is
+	// therefore cosmetic-only from here down: a label on the stored
+	// snapshot/meta for human/audit purposes, never a decision input for
+	// participant selection or engagement values. See processPotsoRewardEpoch.
 	day := time.Unix(timestamp, 0).UTC().Format(potso.DayFormat)
 	for epochNumber := start; epochNumber <= target; epochNumber++ {
 		if err := sp.processPotsoRewardEpoch(manager, cfg, epochNumber, day, timestamp); err != nil {
@@ -1674,7 +1679,13 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		}
 	}
 
-	participants, err := manager.PotsoListParticipants(day)
+	// Participants are read from the epoch-keyed index (populated in
+	// real-time by updatePotsoActivity/PotsoHeartbeat), NOT the day-keyed
+	// index, so that reprocessing this exact epochNumber later -- e.g. a
+	// delayed/backlogged retry that lands on a different UTC calendar day --
+	// always sees the same participant set. `day` is retained only as a
+	// cosmetic label on the stored snapshot/meta below.
+	participants, err := manager.PotsoMetricsListParticipants(epochNumber)
 	if err != nil {
 		return err
 	}
@@ -1711,19 +1722,19 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 
 	entries := make([]potso.RewardSnapshotEntry, 0, len(addresses))
 	for _, addr := range addresses {
-		meter, _, err := manager.PotsoGetMeter(addr, day)
+		// Pure read: the epoch-keyed meter was already fully accumulated in
+		// real time by updatePotsoActivity/PotsoHeartbeat as the epoch's
+		// blocks were applied, so there is nothing left to write back here.
+		// UptimeDevices is derived from the raw UptimeSeconds accumulator at
+		// this single consumption point (see EngagementMeter's doc comment).
+		engagementMeter, _, err := manager.PotsoMetricsGetMeter(epochNumber, addr)
 		if err != nil {
 			return err
 		}
-		engagementMeter := potso.EngagementMeter{}
-		if meter != nil {
-			engagementMeter.TxCount = meter.TxCount
-			engagementMeter.EscrowCount = meter.EscrowEvents
-			engagementMeter.UptimeDevices = meter.UptimeSeconds / 60
+		if engagementMeter == nil {
+			engagementMeter = &potso.EngagementMeter{}
 		}
-		if err := manager.PotsoMetricsSetMeter(epochNumber, addr, &engagementMeter); err != nil {
-			return err
-		}
+		engagementMeter.UptimeDevices = engagementMeter.UptimeSeconds / 60
 		stake := big.NewInt(0)
 		if value, ok := stakeTotals[addr]; ok && value != nil {
 			stake = new(big.Int).Set(value)
@@ -1732,7 +1743,7 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		entries = append(entries, potso.RewardSnapshotEntry{
 			Address:            addr,
 			Stake:              stake,
-			Meter:              engagementMeter,
+			Meter:              *engagementMeter,
 			PreviousEngagement: prev,
 		})
 	}
@@ -5906,7 +5917,22 @@ func (sp *StateProcessor) updatePotsoActivity(addr []byte, now time.Time, txDelt
 	meter.TxCount += txDelta
 	meter.EscrowEvents += escrowDelta
 	meter.RecomputeScore()
-	return manager.PotsoPutMeter(address, meter)
+	if err := manager.PotsoPutMeter(address, meter); err != nil {
+		return err
+	}
+	// Epoch-scoped leg of the same activity, keyed by the current block
+	// height (never wall-clock time) so reward processing is a pure function
+	// of already-committed trie state -- see processPotsoRewardEpoch, which
+	// reads exclusively from this epoch-keyed store rather than the
+	// day-keyed one above (which never resets except at UTC midnight and is
+	// therefore unsuitable as a per-epoch decision input).
+	if cfg := sp.potsoRewardConfig; cfg.EpochLengthBlocks > 0 {
+		epochNumber := sp.blockHeight() / cfg.EpochLengthBlocks
+		if err := manager.PotsoMetricsAddEngagement(epochNumber, address, txDelta, escrowDelta, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func accountStateKey(addr []byte) []byte {

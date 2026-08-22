@@ -2280,6 +2280,29 @@ func (m *Manager) PotsoMetricsListParticipants(epoch uint64) ([][20]byte, error)
 	return result, nil
 }
 
+// PotsoMetricsAddEngagement accumulates real-time engagement deltas for the
+// CURRENT epoch. epoch MUST be height/EpochLengthBlocks computed at the
+// moment the activity is recorded (never derived from wall-clock time).
+// Read-modify-write (unlike PotsoMetricsSetMeter's overwrite) so repeated
+// activity in the same epoch accumulates. uptimeSecondsDelta is raw seconds,
+// not pre-divided into minutes.
+func (m *Manager) PotsoMetricsAddEngagement(epoch uint64, addr [20]byte, txDelta, escrowDelta, uptimeSecondsDelta uint64) error {
+	if txDelta == 0 && escrowDelta == 0 && uptimeSecondsDelta == 0 {
+		return nil
+	}
+	existing, _, err := m.PotsoMetricsGetMeter(epoch, addr)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		existing = &potso.EngagementMeter{}
+	}
+	existing.TxCount += txDelta
+	existing.EscrowCount += escrowDelta
+	existing.UptimeSeconds += uptimeSecondsDelta
+	return m.PotsoMetricsSetMeter(epoch, addr, existing)
+}
+
 // PotsoMetricsSetSnapshot stores the computed leaderboard snapshot for an epoch.
 func (m *Manager) PotsoMetricsSetSnapshot(epoch uint64, snapshot *potso.StoredWeightSnapshot) error {
 	if snapshot == nil {

@@ -6541,6 +6541,16 @@ func (n *Node) PotsoHeartbeat(addr [20]byte, blockHeight uint64, blockHash []byt
 	if err := manager.PotsoPutMeter(addr, meter); err != nil {
 		return nil, 0, err
 	}
+	// Epoch-scoped leg of the same uptime delta -- see updatePotsoActivity's
+	// comment in core/state_transition.go. epoch here is derived from
+	// blockHeight (already hash-verified above against the finalized block),
+	// never wall-clock time, so this remains a deterministic input to
+	// processPotsoRewardEpoch even if this heartbeat is processed late.
+	if cfg.EpochLengthBlocks > 0 {
+		if err := manager.PotsoMetricsAddEngagement(epoch, addr, 0, 0, delta); err != nil {
+			return nil, 0, err
+		}
+	}
 	if engine != nil {
 		engine.Commit(addr, epoch, delta)
 		if cfg.EmissionPerEpoch == nil || cfg.EmissionPerEpoch.Sign() <= 0 {
