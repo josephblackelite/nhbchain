@@ -265,7 +265,7 @@ func (c *HTTPNowPaymentsClient) ListMerchantCoins(ctx context.Context) ([]string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nowpayments /merchant/coins failed: status=%d", resp.StatusCode)
+		return nil, fmt.Errorf("nowpayments /merchant/coins failed: status=%d body=%s", resp.StatusCode, readErrorBody(resp.Body))
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -334,7 +334,7 @@ func (c *HTTPNowPaymentsClient) doPaymentRequest(ctx context.Context, method, pa
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nowpayments %s failed: status=%d", path, resp.StatusCode)
+		return nil, fmt.Errorf("nowpayments %s failed: status=%d body=%s", path, resp.StatusCode, readErrorBody(resp.Body))
 	}
 	var payment NowPaymentsPayment
 	if err := json.NewDecoder(resp.Body).Decode(&payment); err != nil {
@@ -369,11 +369,26 @@ func (c *HTTPNowPaymentsClient) doRequest(ctx context.Context, method, path stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nowpayments %s failed: status=%d", path, resp.StatusCode)
+		return nil, fmt.Errorf("nowpayments %s failed: status=%d body=%s", path, resp.StatusCode, readErrorBody(resp.Body))
 	}
 	var invoice NowPaymentsInvoice
 	if err := json.NewDecoder(resp.Body).Decode(&invoice); err != nil {
 		return nil, err
 	}
 	return &invoice, nil
+}
+
+// readErrorBody reads and trims a non-2xx response body for inclusion in an
+// error message. NOWPayments' own error responses are small JSON objects
+// (typically {"statusCode":..., "code":"...", "message":"..."}) that name
+// the actual rejection reason (e.g. a too-small amount, an unsupported
+// currency for fixed-rate payments) -- discarding them, as this client used
+// to, left every failure indistinguishable from every other and impossible
+// to diagnose after the fact from logs alone.
+func readErrorBody(r io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(r, 4096))
+	if err != nil || len(raw) == 0 {
+		return "<no body>"
+	}
+	return strings.TrimSpace(string(raw))
 }
