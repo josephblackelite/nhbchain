@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +16,19 @@ type NowPaymentsClient interface {
 	CreateInvoice(ctx context.Context, req *NowPaymentsInvoiceRequest) (*NowPaymentsInvoice, error)
 	GetInvoice(ctx context.Context, id string) (*NowPaymentsInvoice, error)
 	Estimate(ctx context.Context, req *NowPaymentsEstimateRequest) (*NowPaymentsEstimate, error)
+	// CreatePayment creates a headless (deposit-address) payment via POST
+	// /v1/payment -- unlike CreateInvoice, this returns a pay_address and
+	// pay_amount for the caller to display directly, with no NOWPayments
+	// checkout page involved.
+	CreatePayment(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error)
+	// GetPayment re-fetches a headless payment's current status server-side
+	// via GET /v1/payment/{id}, mirroring GetInvoice's role in the invoice
+	// flow: the webhook handler uses this to confirm state rather than
+	// trusting the webhook body's fields directly.
+	GetPayment(ctx context.Context, id string) (*NowPaymentsPayment, error)
+	// ListMerchantCoins returns the lowercased currency codes enabled for
+	// this NOWPayments merchant account via GET /v1/merchant/coins.
+	ListMerchantCoins(ctx context.Context) ([]string, error)
 }
 
 // HTTPNowPaymentsClient implements NowPaymentsClient against the official HTTP API.
@@ -116,6 +130,68 @@ func (i *NowPaymentsInvoice) Paid() bool {
 	return false
 }
 
+// NowPaymentsPaymentRequest represents a headless (deposit-address) payment
+// creation request against POST /v1/payment. Mirrors
+// NowPaymentsInvoiceRequest's shape and fee/rate policy exactly: NOWPayments
+// absorbs FX risk between quote and payment (is_fixed_rate) and the payer
+// bears NOWPayments' own processing fee, not the NHBCoin treasury
+// (is_fee_paid_by_user) -- confirmed by the project owner as sufficient
+// slippage protection on its own, no extra buffer logic needed.
+type NowPaymentsPaymentRequest struct {
+	PriceAmount     string `json:"price_amount"`
+	PriceCurrency   string `json:"price_currency"`
+	PayCurrency     string `json:"pay_currency"`
+	OrderID         string `json:"order_id"`
+	OrderDesc       string `json:"order_description,omitempty"`
+	FixedRate       bool   `json:"is_fixed_rate"`
+	IsFeePaidByUser bool   `json:"is_fee_paid_by_user"`
+	IpnCallbackURL  string `json:"ipn_callback_url,omitempty"`
+}
+
+// NowPaymentsPayment captures the relevant headless payment attributes.
+// PaymentID/ID are typed as flexibleAmount, not string, for the same reason
+// documented on flexibleAmount itself: NOWPayments' payment product
+// commonly returns payment_id as a bare JSON number, and a plain string
+// field would abort decoding the entire response the same way amount_from
+// once did for /estimate.
+type NowPaymentsPayment struct {
+	PaymentID       flexibleAmount `json:"payment_id"`
+	ID              flexibleAmount `json:"id"`
+	OrderID         string         `json:"order_id"`
+	PayAddress      string         `json:"pay_address"`
+	PayAmount       flexibleAmount `json:"pay_amount"`
+	PayCurrency     string         `json:"pay_currency"`
+	PayinExtraID    string         `json:"payin_extra_id"`
+	PriceAmount     flexibleAmount `json:"price_amount"`
+	PriceCurrency   string         `json:"price_currency"`
+	PaymentStatus   string         `json:"payment_status"`
+	ActuallyPaid    flexibleAmount `json:"actually_paid"`
+	OutcomeAmount   flexibleAmount `json:"outcome_amount"`
+	OutcomeCurrency string         `json:"outcome_currency"`
+	CreatedAt       string         `json:"created_at"`
+	UpdatedAt       string         `json:"updated_at"`
+}
+
+// Finished returns whether the headless payment has reached NOWPayments'
+// documented terminal-success status. Unlike NowPaymentsInvoice.Paid --
+// which treats several loosely-related status strings as settled -- the
+// payment product's own status vocabulary (waiting, confirming, confirmed,
+// sending, partially_paid, finished, failed, expired, refunded) reserves
+// "finished" specifically for "funds received and the full amount
+// converted/forwarded"; "confirmed" is only an intermediate on-chain
+// confirmation, not proof the full quoted amount actually arrived. Minting
+// is only ever triggered on this narrower check.
+func (p *NowPaymentsPayment) Finished() bool {
+	return strings.EqualFold(strings.TrimSpace(p.PaymentStatus), "finished")
+}
+
+// NowPaymentsID returns the payment identifier NOWPayments uses to key its
+// IPN callbacks and GET /v1/payment/{id} lookups, preferring payment_id and
+// falling back to id.
+func (p *NowPaymentsPayment) NowPaymentsID() string {
+	return firstNonEmpty(string(p.PaymentID), string(p.ID))
+}
+
 // NewHTTPNowPaymentsClient constructs an HTTP client with sane defaults.
 func NewHTTPNowPaymentsClient(baseURL, apiKey string) *HTTPNowPaymentsClient {
 	return &HTTPNowPaymentsClient{
@@ -164,6 +240,107 @@ func (c *HTTPNowPaymentsClient) Estimate(ctx context.Context, req *NowPaymentsEs
 		return nil, err
 	}
 	return &estimate, nil
+}
+
+func (c *HTTPNowPaymentsClient) CreatePayment(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error) {
+	return c.doPaymentRequest(ctx, http.MethodPost, "/payment", req)
+}
+
+func (c *HTTPNowPaymentsClient) GetPayment(ctx context.Context, id string) (*NowPaymentsPayment, error) {
+	return c.doPaymentRequest(ctx, http.MethodGet, fmt.Sprintf("/payment/%s", id), nil)
+}
+
+func (c *HTTPNowPaymentsClient) ListMerchantCoins(ctx context.Context) ([]string, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nowpayments client not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/merchant/coins", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("nowpayments /merchant/coins failed: status=%d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseMerchantCoins(raw)
+}
+
+// parseMerchantCoins tolerates the several response shapes NOWPayments'
+// merchant/coins endpoint has been observed to return: a bare array, or an
+// object wrapping the list under selectedCurrencies, currencies, or result.
+func parseMerchantCoins(raw []byte) ([]string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return []string{}, nil
+	}
+	if trimmed[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(trimmed, &arr); err != nil {
+			return nil, fmt.Errorf("nowpayments /merchant/coins: %w", err)
+		}
+		return arr, nil
+	}
+	var wrapped struct {
+		SelectedCurrencies []string `json:"selectedCurrencies"`
+		Currencies         []string `json:"currencies"`
+		Result             []string `json:"result"`
+	}
+	if err := json.Unmarshal(trimmed, &wrapped); err != nil {
+		return nil, fmt.Errorf("nowpayments /merchant/coins: unrecognized response shape: %w", err)
+	}
+	switch {
+	case len(wrapped.SelectedCurrencies) > 0:
+		return wrapped.SelectedCurrencies, nil
+	case len(wrapped.Currencies) > 0:
+		return wrapped.Currencies, nil
+	case len(wrapped.Result) > 0:
+		return wrapped.Result, nil
+	}
+	return []string{}, nil
+}
+
+func (c *HTTPNowPaymentsClient) doPaymentRequest(ctx context.Context, method, path string, payload interface{}) (*NowPaymentsPayment, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nowpayments client not configured")
+	}
+	var body *bytes.Reader
+	if payload != nil {
+		buf, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		body = bytes.NewReader(buf)
+	} else {
+		body = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("nowpayments %s failed: status=%d", path, resp.StatusCode)
+	}
+	var payment NowPaymentsPayment
+	if err := json.NewDecoder(resp.Body).Decode(&payment); err != nil {
+		return nil, err
+	}
+	return &payment, nil
 }
 
 func (c *HTTPNowPaymentsClient) doRequest(ctx context.Context, method, path string, payload interface{}) (*NowPaymentsInvoice, error) {

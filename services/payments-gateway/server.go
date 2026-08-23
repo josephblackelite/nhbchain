@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"sort"
@@ -28,7 +29,39 @@ const (
 	headerNowPaymentsSig  = "X-Nowpayments-Signature"
 	headerNowPaymentsSig2 = "x-nowpayments-sig"
 	mintVoucherTTL        = 10 * time.Minute
+
+	// paymentClaimingStatus marks a payments-table row that InsertPayment
+	// has claimed (via idx_payments_active_quote_currency) but that hasn't
+	// been filled in with real NOWPayments data yet. Deliberately not in
+	// isTerminalPaymentStatus's terminal set, so the unique index keeps
+	// blocking a second concurrent claim for the same (quote_id,
+	// pay_currency) slot while this status is in place.
+	paymentClaimingStatus = "claiming"
+
+	// claimPaymentPollInterval/claimPaymentPollTimeout bound how long a
+	// request that lost the initial (quote_id, pay_currency) claim race
+	// spends waiting for either the claim winner to finish filling in its
+	// row (so this request can reuse it), or for the slot to free up (the
+	// winner's NOWPayments call failed) so this request can claim it
+	// itself.
+	claimPaymentPollInterval = 25 * time.Millisecond
+	claimPaymentPollTimeout  = 9 * time.Second
 )
+
+// errClaimPaymentTimedOut is returned by resolvePayment when a caller that
+// lost the initial claim race still hasn't obtained a usable payment --
+// either by reuse or by claiming the slot itself -- after
+// claimPaymentPollTimeout. handlePaymentCreate maps this to a 503 rather
+// than leaving the caller to hang until the outer request timeout.
+var errClaimPaymentTimedOut = errors.New("timed out waiting for a concurrent payment creation to finish")
+
+// nowPaymentsCreateError wraps a NOWPayments CreatePayment failure so it
+// keeps mapping to 502 Bad Gateway (matching the pre-fix behavior) after
+// passing through resolvePayment's single generic error return.
+type nowPaymentsCreateError struct{ err error }
+
+func (e *nowPaymentsCreateError) Error() string { return e.err.Error() }
+func (e *nowPaymentsCreateError) Unwrap() error { return e.err }
 
 // Server exposes HTTP endpoints for fiat-to-token flows.
 type Server struct {
@@ -77,11 +110,28 @@ type InvoiceCreateRequest struct {
 	Recipient string `json:"recipient"`
 }
 
-// NowPaymentsWebhookPayload models the minimal webhook structure.
+// PaymentCreateRequest is accepted by POST /payments -- the headless
+// (deposit-address) sibling of InvoiceCreateRequest. PayCurrency is
+// required (unlike the invoice flow, there is no checkout page for the
+// payer to pick a currency on, so the caller must supply one up front).
+type PaymentCreateRequest struct {
+	QuoteID     string `json:"quoteId"`
+	PayCurrency string `json:"payCurrency"`
+	Recipient   string `json:"recipient"`
+}
+
+// NowPaymentsWebhookPayload models the minimal webhook structure shared by
+// both NOWPayments products this service integrates with: invoice IPNs key
+// off invoice_id, headless payment IPNs key off payment_id (with order_id
+// echoing back whatever we sent at creation time). PaymentID is typed as
+// flexibleAmount because NOWPayments' payment product commonly sends this
+// field as a bare JSON number -- see flexibleAmount's doc comment.
 type NowPaymentsWebhookPayload struct {
-	InvoiceID     string `json:"invoice_id"`
-	PaymentStatus string `json:"payment_status"`
-	Status        string `json:"status"`
+	InvoiceID     string         `json:"invoice_id"`
+	PaymentID     flexibleAmount `json:"payment_id"`
+	OrderID       string         `json:"order_id"`
+	PaymentStatus string         `json:"payment_status"`
+	Status        string         `json:"status"`
 }
 
 // NewServer constructs a payments gateway server.
@@ -140,6 +190,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleInvoiceList(w, r)
 	case r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/invoices/") || strings.HasPrefix(r.URL.Path, "/swap/invoices/")):
 		s.handleInvoiceGet(w, r)
+	case r.Method == http.MethodGet && (r.URL.Path == "/currencies" || r.URL.Path == "/swap/currencies"):
+		s.handleCurrencies(w, r)
+	case r.Method == http.MethodPost && (r.URL.Path == "/payments" || r.URL.Path == "/swap/payments"):
+		s.handlePaymentCreate(w, r)
+	case r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/payments/") || strings.HasPrefix(r.URL.Path, "/swap/payments/")):
+		s.handlePaymentGet(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/reconciliation/summary":
 		s.handleReconciliationSummary(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/reconciliation/export":
@@ -481,6 +537,385 @@ func validateInvoiceCreate(req InvoiceCreateRequest) error {
 	return nil
 }
 
+// preferredCurrencyOrder gives a stable, sensible display order for the
+// headless-payment currency picker: the currencies swappers reach for most
+// come first, everything else NOWPayments has enabled for this merchant
+// account follows in whatever order the API returned them.
+var preferredCurrencyOrder = []string{
+	"btc", "eth", "usdttrc20", "usdtbsc", "usdtsol", "ltc", "sol", "trx", "bnb", "doge",
+}
+
+// maxListedCurrencies caps the size of the GET /swap/currencies response.
+const maxListedCurrencies = 40
+
+func orderPreferredCurrencies(enabled []string, preferred []string, max int) []string {
+	seen := make(map[string]bool, len(enabled))
+	normalized := make([]string, 0, len(enabled))
+	for _, c := range enabled {
+		lc := strings.ToLower(strings.TrimSpace(c))
+		if lc == "" || seen[lc] {
+			continue
+		}
+		seen[lc] = true
+		normalized = append(normalized, lc)
+	}
+	ordered := make([]string, 0, len(normalized))
+	used := make(map[string]bool, len(normalized))
+	for _, p := range preferred {
+		if seen[p] && !used[p] {
+			ordered = append(ordered, p)
+			used[p] = true
+		}
+	}
+	for _, c := range normalized {
+		if !used[c] {
+			ordered = append(ordered, c)
+			used[c] = true
+		}
+	}
+	if max > 0 && len(ordered) > max {
+		ordered = ordered[:max]
+	}
+	return ordered
+}
+
+func currencyEnabled(coins []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return false
+	}
+	for _, c := range coins {
+		if strings.EqualFold(strings.TrimSpace(c), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handleCurrencies(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	coins, err := s.nowPayments.ListMerchantCoins(ctx)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, nil, nil)
+		return
+	}
+	ordered := orderPreferredCurrencies(coins, preferredCurrencyOrder, maxListedCurrencies)
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{"currencies": ordered}, nil)
+}
+
+func validatePaymentCreate(req PaymentCreateRequest) error {
+	if strings.TrimSpace(req.QuoteID) == "" {
+		return errors.New("quoteId required")
+	}
+	if strings.TrimSpace(req.PayCurrency) == "" {
+		return errors.New("payCurrency required")
+	}
+	if strings.TrimSpace(req.Recipient) == "" {
+		return errors.New("recipient required")
+	}
+	return nil
+}
+
+// isTerminalPaymentStatus reports whether a payment (tracked via our own
+// PaymentRecord.Status) is done changing state on its own and therefore
+// safe to leave alone (never silently reused as if still awaiting funds).
+// This covers NOWPayments' own terminal statuses -- finished (success) and
+// failed/expired/refunded (failure) -- plus the two statuses this service
+// layers on top after a "finished" payment is processed by the webhook
+// handler: minted (mint succeeded) and error (mint call failed). The latter
+// two matter here because by the time a row reaches either, NOWPayments has
+// already recorded the payment as finished and funds have already changed
+// hands -- treating them as non-terminal would let handlePaymentCreate spin
+// up a second NOWPayments payment for the same quote+currency and risk
+// double-charging a swapper who already paid.
+func isTerminalPaymentStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "finished", "failed", "expired", "refunded", "minted", "error":
+		return true
+	}
+	return false
+}
+
+// resolvePayment is the atomic-claim half of handlePaymentCreate's
+// idempotent-reuse policy. Unlike a SELECT-then-CreatePayment-then-INSERT
+// sequence (which leaves a window for two concurrent requests to both pass
+// the SELECT before either INSERT commits), this always attempts to INSERT
+// a placeholder payment row for (quote.ID, payCurrency) FIRST:
+// idx_payments_active_quote_currency is a partial UNIQUE index scoped to
+// non-terminal statuses, so that INSERT can only ever succeed for one
+// caller at a time per (quote_id, pay_currency), no matter how tightly two
+// requests race -- SQLite enforces it at the storage layer, not this
+// function's own control flow.
+//
+// The claim winner calls NOWPayments and fills the row in via
+// fillClaimedPayment. Every other caller gets ErrPaymentSlotClaimed back
+// immediately and either:
+//   - reuses the winner's row once it's filled in (the common case: a
+//     genuinely outstanding payment, or another request's claim that just
+//     finished), or
+//   - loops back and tries to claim the slot itself, if it has gone free
+//     (the row is gone, or has reached a terminal status -- e.g. the
+//     winner's NOWPayments call failed and fillClaimedPayment deleted the
+//     placeholder), or
+//   - pauses briefly and re-checks, if the row is still mid-creation
+//     (status == paymentClaimingStatus) by whoever holds it.
+//
+// At most one goroutine/process ever holds the claim for a given
+// (quote_id, pay_currency) pair at any instant, so at most one real
+// NOWPayments CreatePayment call is ever in flight for it.
+func (s *Server) resolvePayment(ctx context.Context, quote *QuoteRecord, payCurrency, recipient string, now time.Time) (PaymentRecord, error) {
+	deadline := time.Now().Add(claimPaymentPollTimeout)
+	for {
+		placeholder := PaymentRecord{
+			ID:          uuid.NewString(),
+			QuoteID:     quote.ID,
+			Recipient:   recipient,
+			Status:      paymentClaimingStatus,
+			PayCurrency: payCurrency,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := s.store.InsertPayment(ctx, placeholder); err == nil {
+			// We hold the claim: it is now impossible for any other request
+			// to win this same (quote_id, pay_currency) slot until this row
+			// reaches a terminal status or is deleted (see
+			// fillClaimedPayment).
+			return s.fillClaimedPayment(ctx, quote, payCurrency, placeholder)
+		} else if !errors.Is(err, ErrPaymentSlotClaimed) {
+			return PaymentRecord{}, err
+		}
+
+		row, selErr := s.store.GetLatestPaymentForQuoteCurrency(ctx, quote.ID, payCurrency)
+		if selErr != nil {
+			return PaymentRecord{}, selErr
+		}
+		switch {
+		case row != nil && !isTerminalPaymentStatus(row.Status) && row.Status != paymentClaimingStatus:
+			// A completed, still-outstanding payment -- genuine reuse.
+			return *row, nil
+		case row != nil && row.Status == paymentClaimingStatus:
+			// Still being filled in by whoever holds the claim -- nothing
+			// to reuse yet, just wait and check again below.
+		default:
+			// row == nil, or row is terminal: the slot is free (the other
+			// claimant's attempt failed and its placeholder was deleted, or
+			// -- defensively -- it reached a terminal status some other
+			// way). Loop back and try to claim it ourselves.
+		}
+
+		if ctx.Err() != nil {
+			return PaymentRecord{}, ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return PaymentRecord{}, errClaimPaymentTimedOut
+		}
+		select {
+		case <-ctx.Done():
+			return PaymentRecord{}, ctx.Err()
+		case <-time.After(claimPaymentPollInterval):
+		}
+	}
+}
+
+// fillClaimedPayment calls NOWPayments to complete a placeholder row that
+// InsertPayment just claimed on this goroutine's behalf. On failure it
+// deletes the placeholder so the (quote_id, pay_currency) slot doesn't stay
+// wedged behind a dead claim -- a transient NOWPayments error must not
+// permanently block that quote+currency pair from ever getting a payment.
+func (s *Server) fillClaimedPayment(ctx context.Context, quote *QuoteRecord, payCurrency string, placeholder PaymentRecord) (PaymentRecord, error) {
+	npReq := &NowPaymentsPaymentRequest{
+		PriceAmount:   quote.TotalFiat,
+		PriceCurrency: quote.FiatCurrency,
+		PayCurrency:   strings.ToLower(payCurrency),
+		OrderID:       placeholder.ID,
+		OrderDesc:     fmt.Sprintf("Mint %s %s via %s", quote.AmountToken, quote.MintAsset, payCurrency),
+		FixedRate:     true,
+		// Same policy as invoice creation: NOWPayments grosses up what the
+		// payer is asked to send so the merchant account still receives
+		// TotalFiat in full; the treasury never absorbs NOWPayments' own
+		// processing fee.
+		IsFeePaidByUser: true,
+		IpnCallbackURL:  s.ipnCallbackURL,
+	}
+	payment, err := s.nowPayments.CreatePayment(ctx, npReq)
+	if err != nil {
+		// Detach from ctx for the cleanup delete -- ctx may already be the
+		// reason this call failed (e.g. its deadline), but the slot still
+		// needs to be freed regardless of that.
+		if delErr := s.store.DeletePayment(context.WithoutCancel(ctx), placeholder.ID); delErr != nil {
+			return PaymentRecord{}, fmt.Errorf("create nowpayments payment: %w (also failed to release claimed slot %s: %v)", err, placeholder.ID, delErr)
+		}
+		return PaymentRecord{}, &nowPaymentsCreateError{err: err}
+	}
+	status := strings.ToLower(strings.TrimSpace(payment.PaymentStatus))
+	if status == "" {
+		status = "waiting"
+	}
+	filled := placeholder
+	filled.Status = status
+	filled.NowID = payment.NowPaymentsID()
+	filled.PayAddress = payment.PayAddress
+	filled.PayAmount = string(payment.PayAmount)
+	filled.PayinExtraID = payment.PayinExtraID
+	// NOWPayments already created a real payment intent at this point (the
+	// CreatePayment call above succeeded) -- unlike the create-failure path,
+	// there is nothing safe to roll back here: deleting the placeholder
+	// would free the (quote_id, pay_currency) slot for a fresh claim while a
+	// real, un-cancellable NOWPayments payment still exists unlinked to any
+	// local row, which is worse than a stuck slot. A local DB write failing
+	// immediately after a successful network call is normally transient, so
+	// retry a few times before giving up; if it still fails, still hand the
+	// correct address/amount back to this caller (their money isn't
+	// stranded) and log loudly -- the pre-existing reconciliation endpoints
+	// (handleReconciliationSummary/Export) are the intended way to catch and
+	// fix a payment that never made it past "claiming" locally.
+	var updateErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond * time.Duration(attempt))
+		}
+		if updateErr = s.store.UpdatePayment(ctx, filled); updateErr == nil {
+			return filled, nil
+		}
+	}
+	log.Printf("payments-gateway: payment %s (nowpayments id %s) created successfully but failed to persist after retries: %v -- requires manual reconciliation", filled.ID, filled.NowID, updateErr)
+	return filled, nil
+}
+
+func (s *Server) handlePaymentCreate(w http.ResponseWriter, r *http.Request) {
+	body, err := s.readBody(w, r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err, body, nil)
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get(headerIdempotencyKey))
+	if key == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("missing Idempotency-Key header"), body, nil)
+		return
+	}
+	requestHash := hashRequest(r.Method, canonicalRequestPath(r), body)
+	if cached, err := s.store.LookupIdempotency(r.Context(), key, requestHash); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrIdempotencyConflict) {
+			status = http.StatusConflict
+		}
+		s.writeError(w, r, status, err, body, nil)
+		return
+	} else if cached != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(cached.Status)
+		_, _ = w.Write(cached.Body)
+		s.audit(r.Context(), r, body, cached.Body, cached.Status)
+		return
+	}
+	var req PaymentCreateRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid JSON payload: %w", err), body, nil)
+		return
+	}
+	if err := validatePaymentCreate(req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err, body, nil)
+		return
+	}
+	quote, err := s.store.GetQuote(r.Context(), req.QuoteID)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
+		return
+	}
+	if quote == nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("quote %s not found", req.QuoteID), body, nil)
+		return
+	}
+	now := s.nowFn().UTC()
+	if now.After(quote.Expiry) {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("quote expired"), body, nil)
+		return
+	}
+	payCurrency := strings.ToUpper(strings.TrimSpace(req.PayCurrency))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Server-side re-validation against the merchant's enabled currencies --
+	// defense in depth even though the caller is expected to have already
+	// checked GET /swap/currencies; never trust client input alone here.
+	coins, err := s.nowPayments.ListMerchantCoins(ctx)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
+		return
+	}
+	if !currencyEnabled(coins, payCurrency) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("pay currency %s is not enabled", payCurrency), body, nil)
+		return
+	}
+
+	// Idempotent reuse + atomic claim: resolvePayment always claims
+	// (quote.ID, payCurrency) via a database-level uniqueness guarantee
+	// (idx_payments_active_quote_currency) BEFORE calling out to
+	// NOWPayments, so a non-terminal payment already outstanding for this
+	// exact quote+currency pair -- or another request's in-flight claim for
+	// it -- is reused/waited-on instead of a second live NOWPayments
+	// payment ever being created for the same intent. A different
+	// currency, or a terminal prior attempt, gets a fresh payment. See
+	// resolvePayment's own comment for the full mechanism this closes the
+	// TOCTOU race with.
+	record, err := s.resolvePayment(ctx, quote, payCurrency, req.Recipient, now)
+	if err != nil {
+		var npErr *nowPaymentsCreateError
+		switch {
+		case errors.As(err, &npErr):
+			s.writeError(w, r, http.StatusBadGateway, npErr.err, body, nil)
+		case errors.Is(err, errClaimPaymentTimedOut),
+			errors.Is(err, context.DeadlineExceeded),
+			errors.Is(err, context.Canceled):
+			s.writeError(w, r, http.StatusServiceUnavailable, err, body, nil)
+		default:
+			s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
+		}
+		return
+	}
+	resp := map[string]string{
+		"paymentId":    record.ID,
+		"payAddress":   record.PayAddress,
+		"payAmount":    record.PayAmount,
+		"payCurrency":  record.PayCurrency,
+		"payinExtraId": record.PayinExtraID,
+	}
+	respBody, _ := json.Marshal(resp)
+	if err := s.store.SaveIdempotency(r.Context(), key, requestHash, http.StatusOK, respBody); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
+		return
+	}
+	s.writeJSONBytes(w, r, http.StatusOK, respBody, body)
+}
+
+func (s *Server) handlePaymentGet(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/payments/")
+	if id == r.URL.Path {
+		id = strings.TrimPrefix(r.URL.Path, "/swap/payments/")
+	}
+	if id == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("payment id required"), nil, nil)
+		return
+	}
+	payment, err := s.store.GetPayment(r.Context(), id)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, nil, nil)
+		return
+	}
+	if payment == nil {
+		s.writeError(w, r, http.StatusNotFound, errors.New("payment not found"), nil, nil)
+		return
+	}
+	resp, err := MarshalPayment(payment)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, nil, nil)
+		return
+	}
+	s.writeJSONBytes(w, r, http.StatusOK, resp, nil)
+}
+
 func (s *Server) handleInvoiceGet(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/invoices/")
 	if id == r.URL.Path {
@@ -617,11 +1052,22 @@ func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid webhook payload: %w", err), body, nil)
 		return
 	}
-	nowID := strings.TrimSpace(firstNonEmpty(payload.InvoiceID))
-	if nowID == "" {
-		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "ignored"}, body)
+	// invoice_id and payment_id key two different NOWPayments products
+	// (checkout-page invoices vs. headless deposit-address payments); a
+	// given IPN body carries exactly one of them depending on which product
+	// generated it. Both flows end at the exact same mintWithVoucher call.
+	if invoiceNowID := strings.TrimSpace(payload.InvoiceID); invoiceNowID != "" {
+		s.handleInvoiceWebhook(w, r, body, invoiceNowID)
 		return
 	}
+	if paymentNowID := strings.TrimSpace(string(payload.PaymentID)); paymentNowID != "" {
+		s.handlePaymentWebhook(w, r, body, paymentNowID)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "ignored"}, body)
+}
+
+func (s *Server) handleInvoiceWebhook(w http.ResponseWriter, r *http.Request, body []byte, nowID string) {
 	invoice, err := s.store.GetInvoiceByNowID(r.Context(), nowID)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
@@ -656,7 +1102,7 @@ func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("quote %s missing", invoice.QuoteID), body, nil)
 		return
 	}
-	txHash, voucherHash, err := s.mintWithVoucher(ctx, invoice, quote)
+	txHash, voucherHash, err := s.mintWithVoucher(ctx, invoice.ID, invoice.Recipient, quote)
 	if err != nil {
 		_ = s.store.UpdateInvoiceStatus(r.Context(), invoice.ID, "error", nil)
 		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
@@ -666,10 +1112,78 @@ func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request
 	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "minted", "txHash": txHash, "voucherHash": voucherHash}, body)
 }
 
-func (s *Server) mintWithVoucher(ctx context.Context, invoice *InvoiceRecord, quote *QuoteRecord) (string, string, error) {
+// handlePaymentWebhook is the headless-payment sibling of
+// handleInvoiceWebhook: same signature-verified-by-the-caller entry point,
+// same re-fetch-by-ID-before-trusting-the-body defensive pattern, same
+// mintWithVoucher call. The only real difference is the settlement check --
+// NowPaymentsPayment.Finished() rather than NowPaymentsInvoice.Paid() -- and
+// that a "not yet finished" payment records NOWPayments' own granular
+// status (waiting/confirming/sending/partially_paid) instead of a single
+// generic "processing", since the payment product's status vocabulary is
+// richer and the /swap/payments/{id} status route is meant to surface it.
+func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request, body []byte, nowID string) {
+	payment, err := s.store.GetPaymentByNowID(r.Context(), nowID)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
+		return
+	}
+	if payment == nil {
+		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "unknown"}, body)
+		return
+	}
+	if strings.EqualFold(payment.Status, "minted") {
+		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "already minted"}, body)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	latest, err := s.nowPayments.GetPayment(ctx, nowID)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
+		return
+	}
+	if !latest.Finished() {
+		pendingStatus := strings.ToLower(strings.TrimSpace(latest.PaymentStatus))
+		if pendingStatus == "" {
+			pendingStatus = "pending"
+		}
+		_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, pendingStatus, nil)
+		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "pending"}, body)
+		return
+	}
+	quote, err := s.store.GetQuote(r.Context(), payment.QuoteID)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
+		return
+	}
+	if quote == nil {
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("quote %s missing", payment.QuoteID), body, nil)
+		return
+	}
+	// is_fixed_rate=true on payment creation locked the exchange rate up
+	// front, so -- exactly like the invoice flow -- we mint the originally
+	// quoted amountToken rather than reconciling against actually_paid /
+	// outcome_amount.
+	txHash, voucherHash, err := s.mintWithVoucher(ctx, payment.ID, payment.Recipient, quote)
+	if err != nil {
+		_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, "error", nil)
+		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
+		return
+	}
+	_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, "minted", &txHash)
+	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "minted", "txHash": txHash, "voucherHash": voucherHash}, body)
+}
+
+// mintWithVoucher signs and submits a mint voucher. It is shared verbatim by
+// both the invoice and headless-payment webhook flows: onChainID just needs
+// a globally-unique string to key on-chain invoice-replay protection (see
+// core.ErrMintInvoiceUsed), and both InvoiceRecord.ID and PaymentRecord.ID
+// are drawn from the same uuid.NewString() pool, so there is no collision
+// risk between the two flows sharing this one field.
+func (s *Server) mintWithVoucher(ctx context.Context, onChainID, recipient string, quote *QuoteRecord) (string, string, error) {
 	voucher := core.MintVoucher{
-		InvoiceID: invoice.ID,
-		Recipient: invoice.Recipient,
+		InvoiceID: onChainID,
+		Recipient: recipient,
 		Token:     quote.Token,
 		Amount:    quote.AmountToken,
 		ChainID:   core.MintChainID,

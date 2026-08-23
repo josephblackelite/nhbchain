@@ -7,10 +7,12 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,10 +33,24 @@ type stubNowPayments struct {
 	getFn       func(ctx context.Context, id string) (*NowPaymentsInvoice, error)
 	estimateFn  func(ctx context.Context, req *NowPaymentsEstimateRequest) (*NowPaymentsEstimate, error)
 	createCalls int
+
+	createPaymentFn    func(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error)
+	getPaymentFn       func(ctx context.Context, id string) (*NowPaymentsPayment, error)
+	listCoinsFn        func(ctx context.Context) ([]string, error)
+	createPaymentCalls int
+	lastPaymentReq     *NowPaymentsPaymentRequest
+
+	// mu guards createCalls/createPaymentCalls/lastPaymentReq so concurrent
+	// callers (see TestPaymentCreateConcurrentRequestsClaimOnlyOnce) don't
+	// race on this stub's own bookkeeping -- independent of whatever
+	// concurrency guarantee the code under test does or doesn't provide.
+	mu sync.Mutex
 }
 
 func (s *stubNowPayments) CreateInvoice(ctx context.Context, req *NowPaymentsInvoiceRequest) (*NowPaymentsInvoice, error) {
+	s.mu.Lock()
 	s.createCalls++
+	s.mu.Unlock()
 	if s.createFn == nil {
 		return &NowPaymentsInvoice{}, nil
 	}
@@ -58,6 +74,37 @@ func (s *stubNowPayments) Estimate(ctx context.Context, req *NowPaymentsEstimate
 		}, nil
 	}
 	return s.estimateFn(ctx, req)
+}
+
+func (s *stubNowPayments) CreatePayment(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error) {
+	s.mu.Lock()
+	s.createPaymentCalls++
+	s.lastPaymentReq = req
+	s.mu.Unlock()
+	if s.createPaymentFn == nil {
+		return &NowPaymentsPayment{
+			PaymentID:     flexibleAmount("np-payment-" + req.OrderID),
+			PayAddress:    "addr-" + req.PayCurrency,
+			PayAmount:     flexibleAmount(req.PriceAmount),
+			PayCurrency:   req.PayCurrency,
+			PaymentStatus: "waiting",
+		}, nil
+	}
+	return s.createPaymentFn(ctx, req)
+}
+
+func (s *stubNowPayments) GetPayment(ctx context.Context, id string) (*NowPaymentsPayment, error) {
+	if s.getPaymentFn == nil {
+		return &NowPaymentsPayment{PaymentID: flexibleAmount(id)}, nil
+	}
+	return s.getPaymentFn(ctx, id)
+}
+
+func (s *stubNowPayments) ListMerchantCoins(ctx context.Context) ([]string, error) {
+	if s.listCoinsFn == nil {
+		return []string{"btc", "eth", "usdttrc20"}, nil
+	}
+	return s.listCoinsFn(ctx)
 }
 
 type stubNode struct {
@@ -309,6 +356,419 @@ func TestWebhookReconciliationAndMint(t *testing.T) {
 	}
 	if !inv.TxHash.Valid {
 		t.Fatalf("expected tx hash to be recorded")
+	}
+}
+
+// createTestQuote is a small helper shared by the headless-payment tests
+// below: it posts /swap/quotes and decodes the response.
+func createTestQuote(t *testing.T, srv *Server, body string) QuoteResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/quotes", bytes.NewReader([]byte(body)))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("quote creation failed: %s", w.Body.String())
+	}
+	var quote QuoteResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &quote); err != nil {
+		t.Fatalf("decode quote: %v", err)
+	}
+	return quote
+}
+
+func createTestPayment(t *testing.T, srv *Server, quoteID, payCurrency, recipient, idemKey string) map[string]string {
+	t.Helper()
+	payload := []byte(`{"quoteId":"` + quoteID + `","payCurrency":"` + payCurrency + `","recipient":"` + recipient + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/swap/payments", bytes.NewReader(payload))
+	req.Header.Set(headerIdempotencyKey, idemKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("payment create failed: %s", w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode payment response: %v", err)
+	}
+	return resp
+}
+
+// TestPaymentCreateIdempotentReuseAndFreshAttempts covers all three branches
+// of the reuse policy described in handlePaymentCreate: a second request for
+// the same quote+currency reuses the outstanding payment untouched; a
+// request for a different currency always creates a fresh one; and once the
+// prior attempt reaches a terminal status, the same currency gets a fresh
+// payment again rather than reusing the dead one.
+func TestPaymentCreateIdempotentReuseAndFreshAttempts(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+
+	quote := createTestQuote(t, srv, `{"fiat":"USD","mintAsset":"NHB","payCurrency":"BTC","amountMint":"10"}`)
+
+	first := createTestPayment(t, srv, quote.QuoteID, "BTC", "nhb1alice", "pay-key-1")
+	if np.createPaymentCalls != 1 {
+		t.Fatalf("expected 1 nowpayments payment creation, got %d", np.createPaymentCalls)
+	}
+
+	// Same quote, same currency, different idempotency key -> must reuse the
+	// existing outstanding (non-terminal) payment rather than create a
+	// second one.
+	second := createTestPayment(t, srv, quote.QuoteID, "BTC", "nhb1alice", "pay-key-2")
+	if np.createPaymentCalls != 1 {
+		t.Fatalf("expected reuse to avoid a second nowpayments call, got %d calls", np.createPaymentCalls)
+	}
+	if first["paymentId"] != second["paymentId"] {
+		t.Fatalf("expected reused payment id, got %s vs %s", first["paymentId"], second["paymentId"])
+	}
+
+	// Different currency on the same quote -> always a fresh payment.
+	third := createTestPayment(t, srv, quote.QuoteID, "ETH", "nhb1alice", "pay-key-3")
+	if np.createPaymentCalls != 2 {
+		t.Fatalf("expected a fresh nowpayments call for a different currency, got %d calls", np.createPaymentCalls)
+	}
+	if third["paymentId"] == first["paymentId"] {
+		t.Fatalf("expected a distinct payment id for a different currency")
+	}
+
+	// Once the BTC attempt is terminal, requesting BTC again must create a
+	// fresh payment rather than reusing the dead one.
+	if err := store.UpdatePaymentStatus(context.Background(), first["paymentId"], "failed", nil); err != nil {
+		t.Fatalf("mark payment failed: %v", err)
+	}
+	fourth := createTestPayment(t, srv, quote.QuoteID, "BTC", "nhb1alice", "pay-key-4")
+	if np.createPaymentCalls != 3 {
+		t.Fatalf("expected a fresh nowpayments call after a terminal prior attempt, got %d calls", np.createPaymentCalls)
+	}
+	if fourth["paymentId"] == first["paymentId"] {
+		t.Fatalf("expected a distinct payment id after the prior attempt went terminal")
+	}
+}
+
+// TestPaymentCreateConcurrentRequestsClaimOnlyOnce is the regression test for
+// the payment-creation TOCTOU: the old SELECT-for-existing-then-
+// CreatePayment-then-INSERT sequence in handlePaymentCreate left a window
+// where two near-simultaneous requests for the same (quote_id, pay_currency)
+// could both pass the SELECT before either INSERT committed, each creating
+// its own live NOWPayments deposit address. Real goroutines (not sequential
+// calls) drive genuinely concurrent requests here, each with its own
+// idempotency key -- mirroring the exact failure mode described in the bug
+// report, where a caller mints a fresh key on every call and so can't rely
+// on the idempotency-key mechanism alone. Run with `go test -race`: the fix
+// must be clean under the race detector, not just functionally correct.
+func TestPaymentCreateConcurrentRequestsClaimOnlyOnce(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+
+	// release holds every goroutine that reaches the (stubbed) NOWPayments
+	// CreatePayment call until they're all let go together, so the test
+	// actually witnesses concurrent requests contending for the claim --
+	// rather than the first request finishing (and releasing the claim)
+	// before the second even starts, which an in-memory SQLite DB is fast
+	// enough to let happen by accident otherwise. entered counts how many
+	// concurrent calls actually got past the claim and into NOWPayments: in
+	// the fixed implementation this must be exactly 1, no matter how many
+	// requests race for the slot, because every other request fails its own
+	// claim attempt immediately and never calls NOWPayments at all.
+	release := make(chan struct{})
+	var mu sync.Mutex
+	entered := 0
+	np := &stubNowPayments{}
+	np.createPaymentFn = func(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error) {
+		mu.Lock()
+		entered++
+		mu.Unlock()
+		<-release
+		return &NowPaymentsPayment{
+			PaymentID:     flexibleAmount("np-payment-" + req.OrderID),
+			PayAddress:    "addr-" + req.PayCurrency,
+			PayAmount:     flexibleAmount(req.PriceAmount),
+			PayCurrency:   req.PayCurrency,
+			PaymentStatus: "waiting",
+		}, nil
+	}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+
+	quote := createTestQuote(t, srv, `{"fiat":"USD","mintAsset":"NHB","payCurrency":"BTC","amountMint":"10"}`)
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	codes := make([]int, concurrency)
+	responses := make([]map[string]string, concurrency)
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func(i int) {
+			defer wg.Done()
+			payload := []byte(`{"quoteId":"` + quote.QuoteID + `","payCurrency":"BTC","recipient":"nhb1alice"}`)
+			req := httptest.NewRequest(http.MethodPost, "/swap/payments", bytes.NewReader(payload))
+			// A distinct idempotency key per request -- the idempotency-key
+			// table must not be what prevents the double-create here; only
+			// the (quote_id, pay_currency) claim may.
+			req.Header.Set(headerIdempotencyKey, fmt.Sprintf("concurrent-key-%d", i))
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			codes[i] = w.Code
+			var resp map[string]string
+			_ = json.Unmarshal(w.Body.Bytes(), &resp)
+			responses[i] = resp
+		}(i)
+	}
+
+	// Best-effort widen of the race window: give every goroutine a chance to
+	// reach (and block in) CreatePayment before releasing them together.
+	// Not required for correctness -- only one should ever get there in the
+	// fixed implementation regardless of scheduling -- just for making the
+	// test meaningfully exercise the wait-for-the-winner path below.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	gotEntered := entered
+	mu.Unlock()
+	if gotEntered != 1 {
+		t.Fatalf("expected exactly 1 concurrent NOWPayments CreatePayment call to be in flight, got %d", gotEntered)
+	}
+	if np.createPaymentCalls != 1 {
+		t.Fatalf("expected exactly 1 NOWPayments CreatePayment call total, got %d", np.createPaymentCalls)
+	}
+
+	var paymentID string
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("request %d failed: %d", i, code)
+		}
+		if responses[i]["paymentId"] == "" {
+			t.Fatalf("request %d missing paymentId: %+v", i, responses[i])
+		}
+		if paymentID == "" {
+			paymentID = responses[i]["paymentId"]
+		} else if responses[i]["paymentId"] != paymentID {
+			t.Fatalf("expected every concurrent request to be given the same reused payment id, got %s vs %s", paymentID, responses[i]["paymentId"])
+		}
+		if responses[i]["payAddress"] == "" {
+			t.Fatalf("request %d got an unfilled placeholder instead of the completed reused payment: %+v", i, responses[i])
+		}
+		// fillClaimedPayment lowercases payCurrency before it ever reaches
+		// NowPaymentsPaymentRequest (NOWPayments' API itself expects
+		// lowercase currency codes), so the stub's echoed "addr-"+PayCurrency
+		// comes back lowercase too.
+		if responses[i]["payAddress"] != "addr-btc" {
+			t.Fatalf("request %d got an unexpected payAddress: %+v", i, responses[i])
+		}
+	}
+
+	// Exactly one row must exist in storage for this quote+currency -- no
+	// duplicate live payment was ever persisted.
+	final, err := store.GetLatestPaymentForQuoteCurrency(context.Background(), quote.QuoteID, "BTC")
+	if err != nil {
+		t.Fatalf("fetch final payment: %v", err)
+	}
+	if final == nil || final.ID != paymentID {
+		t.Fatalf("expected the sole persisted payment to match the reused id, got %+v", final)
+	}
+	if final.PayAddress != "addr-btc" || final.Status != "waiting" {
+		t.Fatalf("expected the persisted payment to be fully filled in, got %+v", final)
+	}
+}
+
+// TestPaymentCreateRejectsDisabledCurrency proves the server re-validates the
+// requested pay currency against NOWPayments' enabled-coins list rather than
+// trusting client input alone.
+func TestPaymentCreateRejectsDisabledCurrency(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{listCoinsFn: func(ctx context.Context) ([]string, error) {
+		return []string{"btc"}, nil
+	}}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+
+	quote := createTestQuote(t, srv, `{"fiat":"USD","mintAsset":"NHB","payCurrency":"XRP","amountMint":"10"}`)
+	payload := []byte(`{"quoteId":"` + quote.QuoteID + `","payCurrency":"XRP","recipient":"nhb1alice"}`)
+	req := httptest.NewRequest(http.MethodPost, "/swap/payments", bytes.NewReader(payload))
+	req.Header.Set(headerIdempotencyKey, "disabled-1")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a disabled currency, got %d: %s", w.Code, w.Body.String())
+	}
+	if np.createPaymentCalls != 0 {
+		t.Fatalf("must never create a nowpayments payment for a rejected currency")
+	}
+}
+
+// TestPaymentStatusRouteReturnsTrackedRecord covers GET /swap/payments/{id}.
+func TestPaymentStatusRouteReturnsTrackedRecord(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{createPaymentFn: func(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error) {
+		return &NowPaymentsPayment{
+			PaymentID:     flexibleAmount("np-status-1"),
+			PayAddress:    "bc1qexample",
+			PayAmount:     flexibleAmount("0.00123"),
+			PayCurrency:   req.PayCurrency,
+			PayinExtraID:  "",
+			PaymentStatus: "waiting",
+		}, nil
+	}}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+
+	quote := createTestQuote(t, srv, `{"fiat":"USD","mintAsset":"NHB","payCurrency":"BTC","amountMint":"10"}`)
+	created := createTestPayment(t, srv, quote.QuoteID, "BTC", "nhb1carol", "status-1")
+
+	getReq := httptest.NewRequest(http.MethodGet, "/swap/payments/"+created["paymentId"], nil)
+	getRes := httptest.NewRecorder()
+	srv.ServeHTTP(getRes, getReq)
+	if getRes.Code != http.StatusOK {
+		t.Fatalf("payment get failed: %s", getRes.Body.String())
+	}
+	var status map[string]interface{}
+	if err := json.Unmarshal(getRes.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode payment status: %v", err)
+	}
+	if status["payAddress"] != "bc1qexample" {
+		t.Fatalf("unexpected payAddress: %+v", status)
+	}
+	if status["payAmount"] != "0.00123" {
+		t.Fatalf("unexpected payAmount: %+v", status)
+	}
+	if status["payCurrency"] != "BTC" {
+		t.Fatalf("unexpected payCurrency: %+v", status)
+	}
+	if status["status"] != "waiting" {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+	if status["quoteId"] != quote.QuoteID {
+		t.Fatalf("unexpected quoteId: %+v", status)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodGet, "/swap/payments/does-not-exist", nil)
+	missingRes := httptest.NewRecorder()
+	srv.ServeHTTP(missingRes, missingReq)
+	if missingRes.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown payment, got %d", missingRes.Code)
+	}
+}
+
+// TestPaymentWebhookMintsOnFinishedAndNoOpsOnDuplicate covers the headless
+// sibling of TestWebhookReconciliationAndMint: a 'finished' payment-shaped
+// IPN mints via the exact same mintWithVoucher mechanism, and a duplicate
+// delivery of the same IPN is a no-op that never mints twice.
+func TestPaymentWebhookMintsOnFinishedAndNoOpsOnDuplicate(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	npID := "np-payment-xyz"
+	np := &stubNowPayments{
+		createPaymentFn: func(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error) {
+			return &NowPaymentsPayment{
+				PaymentID:     flexibleAmount(npID),
+				PayAddress:    "bc1qexample",
+				PayAmount:     flexibleAmount("0.001"),
+				PayCurrency:   req.PayCurrency,
+				PaymentStatus: "waiting",
+			}, nil
+		},
+		getPaymentFn: func(ctx context.Context, id string) (*NowPaymentsPayment, error) {
+			return &NowPaymentsPayment{PaymentID: flexibleAmount(id), PaymentStatus: "finished"}, nil
+		},
+	}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+
+	quote := createTestQuote(t, srv, `{"fiat":"USD","mintAsset":"NHB","payCurrency":"BTC","amountMint":"15"}`)
+	created := createTestPayment(t, srv, quote.QuoteID, "BTC", "nhb1dave", "webhook-1")
+
+	webhook := NowPaymentsWebhookPayload{PaymentID: flexibleAmount(npID), OrderID: created["paymentId"], PaymentStatus: "finished"}
+	body, _ := json.Marshal(webhook)
+	sig := computeTestHMAC("secret", body)
+
+	whReq := httptest.NewRequest(http.MethodPost, "/webhooks/nowpayments", bytes.NewReader(body))
+	whReq.Header.Set(headerNowPaymentsSig, sig)
+	whRes := httptest.NewRecorder()
+	srv.ServeHTTP(whRes, whReq)
+	if whRes.Code != http.StatusOK {
+		t.Fatalf("webhook failed: %s", whRes.Body.String())
+	}
+	var mintResp map[string]string
+	if err := json.Unmarshal(whRes.Body.Bytes(), &mintResp); err != nil {
+		t.Fatalf("decode webhook resp: %v", err)
+	}
+	if mintResp["status"] != "minted" || mintResp["txHash"] == "" {
+		t.Fatalf("expected a minted response, got %+v", mintResp)
+	}
+	if node.callCount != 1 {
+		t.Fatalf("expected exactly one mint call, got %d", node.callCount)
+	}
+	if node.lastVoucher.Recipient != "nhb1dave" || node.lastVoucher.Amount != quote.AmountToken {
+		t.Fatalf("unexpected voucher: %+v", node.lastVoucher)
+	}
+
+	// Duplicate delivery of the same IPN must not mint a second time.
+	whReq2 := httptest.NewRequest(http.MethodPost, "/webhooks/nowpayments", bytes.NewReader(body))
+	whReq2.Header.Set(headerNowPaymentsSig, sig)
+	whRes2 := httptest.NewRecorder()
+	srv.ServeHTTP(whRes2, whReq2)
+	if whRes2.Code != http.StatusOK {
+		t.Fatalf("duplicate webhook failed: %s", whRes2.Body.String())
+	}
+	var dupResp map[string]string
+	if err := json.Unmarshal(whRes2.Body.Bytes(), &dupResp); err != nil {
+		t.Fatalf("decode duplicate webhook resp: %v", err)
+	}
+	if dupResp["status"] != "already minted" {
+		t.Fatalf("expected already-minted no-op, got %+v", dupResp)
+	}
+	if node.callCount != 1 {
+		t.Fatalf("expected mint call count to stay at 1 after duplicate webhook, got %d", node.callCount)
+	}
+
+	payment, err := store.GetPayment(context.Background(), created["paymentId"])
+	if err != nil {
+		t.Fatalf("fetch payment: %v", err)
+	}
+	if payment.Status != "minted" || !payment.TxHash.Valid {
+		t.Fatalf("expected payment marked minted with a tx hash, got %+v", payment)
+	}
+}
+
+// TestCurrenciesRouteOrdersPreferredFirst covers GET /swap/currencies.
+func TestCurrenciesRouteOrdersPreferredFirst(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{listCoinsFn: func(ctx context.Context) ([]string, error) {
+		return []string{"DOGE", "btc", "xmr", "eth", "btc"}, nil
+	}}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+
+	req := httptest.NewRequest(http.MethodGet, "/swap/currencies", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("currencies route failed: %s", w.Body.String())
+	}
+	var resp struct {
+		Currencies []string `json:"currencies"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode currencies: %v", err)
+	}
+	if len(resp.Currencies) != 4 {
+		t.Fatalf("expected deduped currency list of length 4, got %v", resp.Currencies)
+	}
+	if resp.Currencies[0] != "btc" || resp.Currencies[1] != "eth" {
+		t.Fatalf("expected preferred currencies (btc, eth) first, got %v", resp.Currencies)
 	}
 }
 

@@ -10,11 +10,44 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	sqlitedriver "modernc.org/sqlite"
 )
 
 // ErrIdempotencyConflict indicates a key is reused with a different payload.
 var ErrIdempotencyConflict = errors.New("idempotency key conflict")
+
+// ErrPaymentSlotClaimed indicates InsertPayment lost the race for a
+// (quote_id, pay_currency) slot: idx_payments_active_quote_currency already
+// has a non-terminal row for that pair -- either a genuinely outstanding
+// payment to reuse, or another request's in-flight claim. Callers must not
+// treat this as a generic failure; see resolvePayment in server.go for how
+// it's used to close the payment-creation TOCTOU race.
+var ErrPaymentSlotClaimed = errors.New("payment slot already claimed")
+
+// sqliteConstraintUnique is SQLITE_CONSTRAINT_UNIQUE. modernc.org/sqlite
+// enables extended result codes on every connection it opens (see its
+// conn.extendedResultCodes(true) call in newConn), so a real unique-index
+// violation from that driver always surfaces with this exact code.
+const sqliteConstraintUnique = 2067
+
+// isUniqueConstraintErr reports whether err is a SQLite UNIQUE constraint
+// violation -- specifically, for this file's purposes, a collision against
+// idx_payments_active_quote_currency.
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlitedriver.Error
+	if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqliteConstraintUnique {
+		return true
+	}
+	// Fallback for any other SQLite error shape: this exact text is emitted
+	// directly by SQLite's own sqlite3_errmsg() and has been stable across
+	// SQLite versions/bindings for years, so it's a safe secondary signal
+	// if the typed-error check above ever misses (e.g. a future driver
+	// upgrade that changes how errors are wrapped).
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
 
 // SQLiteStore persists quotes, invoices, and audit logs.
 type SQLiteStore struct {
@@ -26,6 +59,19 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite allows only one writer at a time, and this DSN has no
+	// busy-timeout PRAGMA configured, so a second connection that hits a
+	// write lock already held by another fails immediately with
+	// SQLITE_BUSY instead of waiting. Capping the pool at a single
+	// connection instead routes every concurrent caller (reads and writes
+	// alike) through Go's own connection queue, turning lock contention
+	// into a bounded wait rather than a sporadic error. This matters now
+	// that InsertPayment's unique-index claim (see
+	// idx_payments_active_quote_currency below) is relied on to correctly
+	// serialize concurrent payment-creation requests -- that guarantee only
+	// holds if concurrent claim attempts reliably surface as a clean
+	// constraint-violation error rather than occasionally as SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
 	store := &SQLiteStore{db: db}
 	if err := store.init(); err != nil {
 		_ = db.Close()
@@ -73,6 +119,44 @@ func (s *SQLiteStore) init() error {
             updated_at TIMESTAMP NOT NULL,
             UNIQUE(quote_id)
         );`,
+		// payments tracks headless (deposit-address) NOWPayments payments,
+		// the sibling of invoices for the checkout-URL-free flow. Unlike
+		// invoices, quote_id is deliberately NOT unique: the idempotent-reuse
+		// policy allows a fresh payment row for the same quote once a prior
+		// attempt in that currency is terminal, or whenever a different
+		// currency is chosen, so a quote can have multiple payment attempts
+		// over its lifetime.
+		`CREATE TABLE IF NOT EXISTS payments (
+            id TEXT PRIMARY KEY,
+            quote_id TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            status TEXT NOT NULL,
+            nowpayments_id TEXT,
+            pay_currency TEXT NOT NULL,
+            pay_address TEXT,
+            pay_amount TEXT,
+            payin_extra_id TEXT,
+            tx_hash TEXT,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_payments_quote_currency ON payments(quote_id, pay_currency);`,
+		`CREATE INDEX IF NOT EXISTS idx_payments_nowpayments_id ON payments(nowpayments_id);`,
+		// idx_payments_active_quote_currency is what actually closes the
+		// payment-creation TOCTOU race described in InsertPayment/
+		// resolvePayment: a partial UNIQUE index scoped to non-terminal
+		// statuses (the exact same set isTerminalPaymentStatus in server.go
+		// treats as terminal) means SQLite itself enforces "at most one
+		// non-terminal payment row per (quote_id, pay_currency)". A
+		// concurrent second INSERT attempting to claim the same slot while
+		// a non-terminal row already exists fails against this index,
+		// atomically, rather than racing past an application-level
+		// SELECT-then-INSERT check. A terminal prior attempt (or none at
+		// all) doesn't match the WHERE predicate, so it's excluded from the
+		// index and a fresh claim for that same pair succeeds normally.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_active_quote_currency
+            ON payments(quote_id, pay_currency)
+            WHERE status NOT IN ('finished', 'failed', 'expired', 'refunded', 'minted', 'error');`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -570,6 +654,135 @@ func SummarizeInvoiceViews(items []InvoiceView) (InvoiceSummary, error) {
 		summary.AmountTokenByStatus[status] = formatRat(total, 8)
 	}
 	return summary, nil
+}
+
+// PaymentRecord captures stored headless (deposit-address) payment metadata,
+// the sibling of InvoiceRecord for the checkout-URL-free flow.
+type PaymentRecord struct {
+	ID           string
+	QuoteID      string
+	Recipient    string
+	Status       string
+	NowID        string
+	PayCurrency  string
+	PayAddress   string
+	PayAmount    string
+	PayinExtraID string
+	TxHash       sql.NullString
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// InsertPayment inserts a new payment row. When p.Status is non-terminal
+// (e.g. the "claiming" placeholder resolvePayment starts with, or a filled
+// row's real NOWPayments status), idx_payments_active_quote_currency makes
+// this an atomic claim of the (p.QuoteID, p.PayCurrency) slot: a concurrent
+// caller attempting to insert another non-terminal row for the same pair
+// gets ErrPaymentSlotClaimed back instead of a duplicate row ever existing.
+func (s *SQLiteStore) InsertPayment(ctx context.Context, p PaymentRecord) error {
+	const stmt = `INSERT INTO payments(id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(ctx, stmt, p.ID, p.QuoteID, p.Recipient, p.Status, p.NowID, p.PayCurrency, p.PayAddress, p.PayAmount, p.PayinExtraID, p.TxHash, p.CreatedAt, p.UpdatedAt)
+	if err != nil && isUniqueConstraintErr(err) {
+		return ErrPaymentSlotClaimed
+	}
+	return err
+}
+
+// UpdatePayment fills in the real NOWPayments data on a payment row that
+// InsertPayment claimed as a placeholder, completing the claim-then-fill
+// pattern resolvePayment (server.go) drives. Keyed by id, so it only ever
+// touches the exact row the caller claimed -- never another request's.
+func (s *SQLiteStore) UpdatePayment(ctx context.Context, p PaymentRecord) error {
+	const stmt = `UPDATE payments SET status = ?, nowpayments_id = ?, pay_address = ?, pay_amount = ?, payin_extra_id = ?, updated_at = ? WHERE id = ?`
+	_, err := s.db.ExecContext(ctx, stmt, p.Status, p.NowID, p.PayAddress, p.PayAmount, p.PayinExtraID, p.UpdatedAt, p.ID)
+	return err
+}
+
+// DeletePayment removes a payment row outright. resolvePayment uses this to
+// release a claimed (quote_id, pay_currency) slot when the NOWPayments
+// CreatePayment call meant to fill it in fails, so a transient upstream
+// error can't permanently wedge that slot behind a dead placeholder.
+func (s *SQLiteStore) DeletePayment(ctx context.Context, id string) error {
+	const stmt = `DELETE FROM payments WHERE id = ?`
+	_, err := s.db.ExecContext(ctx, stmt, id)
+	return err
+}
+
+func (s *SQLiteStore) GetPayment(ctx context.Context, id string) (*PaymentRecord, error) {
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE id = ?`
+	row := s.db.QueryRowContext(ctx, query, id)
+	return scanPayment(row)
+}
+
+func (s *SQLiteStore) GetPaymentByNowID(ctx context.Context, nowID string) (*PaymentRecord, error) {
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE nowpayments_id = ?`
+	row := s.db.QueryRowContext(ctx, query, nowID)
+	return scanPayment(row)
+}
+
+// GetLatestPaymentForQuoteCurrency returns the most recently created payment
+// attempt for the given quote+currency pair, or nil if none exists. This
+// backs the idempotent-reuse check in handlePaymentCreate: a non-terminal
+// row here is returned as-is instead of creating a duplicate NOWPayments
+// payment for the same intent.
+func (s *SQLiteStore) GetLatestPaymentForQuoteCurrency(ctx context.Context, quoteID, payCurrency string) (*PaymentRecord, error) {
+	// rowid DESC breaks ties when two attempts share the same created_at
+	// (a real possibility: the caller's clock may not have nanosecond
+	// resolution, or a caller may substitute a fixed clock in tests) by
+	// falling back to insertion order, so "latest" always means the most
+	// recently inserted row rather than an arbitrary one among ties.
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE quote_id = ? AND pay_currency = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`
+	row := s.db.QueryRowContext(ctx, query, quoteID, payCurrency)
+	return scanPayment(row)
+}
+
+func scanPayment(row *sql.Row) (*PaymentRecord, error) {
+	var rec PaymentRecord
+	err := row.Scan(&rec.ID, &rec.QuoteID, &rec.Recipient, &rec.Status, &rec.NowID, &rec.PayCurrency, &rec.PayAddress, &rec.PayAmount, &rec.PayinExtraID, &rec.TxHash, &rec.CreatedAt, &rec.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+func (s *SQLiteStore) UpdatePaymentStatus(ctx context.Context, id, status string, txHash *string) error {
+	const stmt = `UPDATE payments SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?`
+	var hash interface{}
+	if txHash != nil {
+		hash = *txHash
+	} else {
+		hash = nil
+	}
+	_, err := s.db.ExecContext(ctx, stmt, status, hash, time.Now().UTC(), id)
+	return err
+}
+
+// MarshalPayment converts a PaymentRecord into a JSON-friendly payload,
+// mirroring MarshalInvoice's shape for the headless-payment sibling route.
+func MarshalPayment(p *PaymentRecord) ([]byte, error) {
+	if p == nil {
+		return json.Marshal(map[string]string{"error": "payment not found"})
+	}
+	payload := map[string]interface{}{
+		"paymentId":     p.ID,
+		"quoteId":       p.QuoteID,
+		"recipient":     p.Recipient,
+		"status":        p.Status,
+		"payCurrency":   p.PayCurrency,
+		"payAddress":    p.PayAddress,
+		"payAmount":     p.PayAmount,
+		"payinExtraId":  p.PayinExtraID,
+		"nowpaymentsId": p.NowID,
+		"createdAt":     p.CreatedAt.UTC().Format(time.RFC3339),
+		"updatedAt":     p.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if p.TxHash.Valid {
+		payload["txHash"] = p.TxHash.String
+	}
+	return json.Marshal(payload)
 }
 
 // MarshalInvoice converts an InvoiceRecord into a JSON-friendly payload.
