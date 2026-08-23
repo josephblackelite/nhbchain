@@ -362,6 +362,19 @@ func TestWebhookReconciliationAndMint(t *testing.T) {
 	if !inv.TxHash.Valid {
 		t.Fatalf("expected tx hash to be recorded")
 	}
+	events, err := store.ListWebhookEvents(context.Background(), WebhookEventFilter{})
+	if err != nil {
+		t.Fatalf("list webhook events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 webhook event, got %d", len(events))
+	}
+	if !events[0].SignatureVerified {
+		t.Fatalf("expected signature_verified=true, got %+v", events[0])
+	}
+	if events[0].EventType != "invoice" || events[0].InvoiceID != npID {
+		t.Fatalf("unexpected webhook event: %+v", events[0])
+	}
 }
 
 // createTestQuote is a small helper shared by the headless-payment tests
@@ -762,6 +775,22 @@ func TestPaymentWebhookMintsOnFinishedAndNoOpsOnDuplicate(t *testing.T) {
 	if payment.Status != "minted" || !payment.TxHash.Valid {
 		t.Fatalf("expected payment marked minted with a tx hash, got %+v", payment)
 	}
+
+	// Both the original and the duplicate delivery are recorded as their own
+	// webhook_events rows -- the audit log tracks every attempt, not just
+	// the ones that actually changed state.
+	events, err := store.ListWebhookEvents(context.Background(), WebhookEventFilter{})
+	if err != nil {
+		t.Fatalf("list webhook events: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 webhook events (original + duplicate), got %d", len(events))
+	}
+	for _, evt := range events {
+		if !evt.SignatureVerified || evt.EventType != "payment" || evt.PaymentID != npID {
+			t.Fatalf("unexpected webhook event: %+v", evt)
+		}
+	}
 }
 
 // TestCurrenciesRouteOrdersPreferredFirst covers GET /swap/currencies.
@@ -816,6 +845,171 @@ func TestWebhookSignatureFailure(t *testing.T) {
 	srv.ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", res.Code)
+	}
+	events, err := store.ListWebhookEvents(context.Background(), WebhookEventFilter{})
+	if err != nil {
+		t.Fatalf("list webhook events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 webhook event recorded even on signature failure, got %d", len(events))
+	}
+	if events[0].SignatureVerified {
+		t.Fatalf("expected signature_verified=false, got %+v", events[0])
+	}
+	if events[0].EventType != "invoice" || events[0].InvoiceID != "np-1" {
+		t.Fatalf("expected best-effort id extraction despite invalid signature, got %+v", events[0])
+	}
+}
+
+func TestAdminWebhookEventsListRequiresAuth(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+	srv.SetAdminToken("admin-secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/webhook-events", nil)
+	res := httptest.NewRecorder()
+	srv.ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with no Authorization header, got %d", res.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/admin/webhook-events", nil)
+	req2.Header.Set("Authorization", "Bearer wrong-token")
+	res2 := httptest.NewRecorder()
+	srv.ServeHTTP(res2, req2)
+	if res2.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with a wrong bearer token, got %d", res2.Code)
+	}
+
+	req3 := httptest.NewRequest(http.MethodGet, "/admin/webhook-events", nil)
+	req3.Header.Set("Authorization", "Bearer admin-secret")
+	res3 := httptest.NewRecorder()
+	srv.ServeHTTP(res3, req3)
+	if res3.Code != http.StatusOK {
+		t.Fatalf("expected 200 with the correct bearer token, got %d: %s", res3.Code, res3.Body.String())
+	}
+}
+
+func TestAdminWebhookEventsListUnsetTokenFailsClosed(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+	// No SetAdminToken call: the route must stay unauthorized rather than
+	// falling open with an empty-token comparison.
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/webhook-events", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	res := httptest.NewRecorder()
+	srv.ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when no admin token is configured, got %d", res.Code)
+	}
+}
+
+func TestAdminWebhookEventsListFilterAndPagination(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+	srv.SetAdminToken("admin-secret")
+
+	// One verified "invoice" event, one signature-failed "unrecognized" event.
+	verifiedBody, _ := json.Marshal(NowPaymentsWebhookPayload{InvoiceID: "inv-filter-1", PaymentStatus: "finished"})
+	verifiedReq := httptest.NewRequest(http.MethodPost, "/webhooks/nowpayments", bytes.NewReader(verifiedBody))
+	verifiedReq.Header.Set(headerNowPaymentsSig, computeTestHMAC("secret", verifiedBody))
+	srv.ServeHTTP(httptest.NewRecorder(), verifiedReq)
+
+	failedBody := []byte(`not-json`)
+	failedReq := httptest.NewRequest(http.MethodPost, "/webhooks/nowpayments", bytes.NewReader(failedBody))
+	failedReq.Header.Set(headerNowPaymentsSig, "bad-signature")
+	srv.ServeHTTP(httptest.NewRecorder(), failedReq)
+
+	authed := func(req *http.Request) *httptest.ResponseRecorder {
+		req.Header.Set("Authorization", "Bearer admin-secret")
+		res := httptest.NewRecorder()
+		srv.ServeHTTP(res, req)
+		return res
+	}
+
+	// Unfiltered list returns both, newest first.
+	listRes := authed(httptest.NewRequest(http.MethodGet, "/admin/webhook-events", nil))
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("list failed: %s", listRes.Body.String())
+	}
+	var listed struct {
+		Total      int                      `json:"total"`
+		Items      []map[string]interface{} `json:"items"`
+		NextCursor interface{}               `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(listRes.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if listed.Total != 2 || len(listed.Items) != 2 {
+		t.Fatalf("expected 2 total events, got %+v", listed)
+	}
+	if listed.Items[0]["eventType"] != "unrecognized" || listed.Items[1]["eventType"] != "invoice" {
+		t.Fatalf("expected newest-first ordering, got %+v", listed.Items)
+	}
+	if listed.NextCursor != nil {
+		t.Fatalf("expected nil nextCursor when page is smaller than the limit, got %v", listed.NextCursor)
+	}
+
+	// Filter by signatureVerified=true isolates the invoice event.
+	filteredRes := authed(httptest.NewRequest(http.MethodGet, "/admin/webhook-events?signatureVerified=true", nil))
+	if filteredRes.Code != http.StatusOK {
+		t.Fatalf("filtered list failed: %s", filteredRes.Body.String())
+	}
+	var filtered struct {
+		Total int                      `json:"total"`
+		Items []map[string]interface{} `json:"items"`
+	}
+	if err := json.Unmarshal(filteredRes.Body.Bytes(), &filtered); err != nil {
+		t.Fatalf("decode filtered list: %v", err)
+	}
+	if filtered.Total != 1 || len(filtered.Items) != 1 || filtered.Items[0]["invoiceId"] != "inv-filter-1" {
+		t.Fatalf("expected signatureVerified filter to isolate the invoice event, got %+v", filtered)
+	}
+
+	// limit=1 pages via beforeId: first page returns the newest row plus a
+	// cursor; the second page (beforeId=<that row's id>) returns the older row.
+	page1 := authed(httptest.NewRequest(http.MethodGet, "/admin/webhook-events?limit=1", nil))
+	var page1Body struct {
+		Items      []map[string]interface{} `json:"items"`
+		NextCursor float64                  `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(page1.Body.Bytes(), &page1Body); err != nil {
+		t.Fatalf("decode page1: %v", err)
+	}
+	if len(page1Body.Items) != 1 || page1Body.Items[0]["eventType"] != "unrecognized" {
+		t.Fatalf("unexpected page1: %+v", page1Body)
+	}
+	if page1Body.NextCursor == 0 {
+		t.Fatalf("expected a non-zero nextCursor on a full page")
+	}
+
+	page2URL := fmt.Sprintf("/admin/webhook-events?limit=1&beforeId=%d", int64(page1Body.NextCursor))
+	page2 := authed(httptest.NewRequest(http.MethodGet, page2URL, nil))
+	var page2Body struct {
+		Items      []map[string]interface{} `json:"items"`
+		NextCursor interface{}              `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(page2.Body.Bytes(), &page2Body); err != nil {
+		t.Fatalf("decode page2: %v", err)
+	}
+	if len(page2Body.Items) != 1 || page2Body.Items[0]["eventType"] != "invoice" {
+		t.Fatalf("unexpected page2: %+v", page2Body)
+	}
+	if page2Body.NextCursor != nil {
+		t.Fatalf("expected nil nextCursor once the last page is reached, got %v", page2Body.NextCursor)
 	}
 }
 

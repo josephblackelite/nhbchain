@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -77,6 +78,21 @@ type Server struct {
 	hmacSecret       []byte
 	nowFn            func() time.Time
 	ipnCallbackURL   string
+	adminToken       []byte
+}
+
+// SetAdminToken configures the bearer token required by GET
+// /admin/webhook-events. Kept as a setter (rather than a NewServer
+// parameter) so it stays optional and doesn't disturb NewServer's existing
+// call sites; an unset token leaves the route permanently unauthorized
+// (fail closed) rather than open.
+func (s *Server) SetAdminToken(token string) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		s.adminToken = nil
+		return
+	}
+	s.adminToken = []byte(trimmed)
 }
 
 // QuoteRequest is the payload accepted by POST /quotes.
@@ -202,6 +218,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleReconciliationExport(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/webhooks/nowpayments":
 		s.handleNowPaymentsWebhook(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/admin/webhook-events":
+		s.handleAdminWebhookEvents(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1115,6 +1133,121 @@ func (s *Server) handleReconciliationExport(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// authorizeAdmin checks the Authorization header against s.adminToken using
+// a constant-time comparison. Deliberately inlined only at the top of
+// handleAdminWebhookEvents -- no blanket middleware, no change to any other
+// route's (lack of) auth. An unset token fails closed: the route is always
+// unauthorized rather than open.
+func (s *Server) authorizeAdmin(r *http.Request) bool {
+	if len(s.adminToken) == 0 {
+		return false
+	}
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	provided := []byte(strings.TrimSpace(strings.TrimPrefix(header, prefix)))
+	return subtle.ConstantTimeCompare(provided, s.adminToken) == 1
+}
+
+func (s *Server) handleAdminWebhookEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	filter, err := parseWebhookEventFilter(r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err, nil, nil)
+		return
+	}
+	// Fetch one extra row beyond the page size so nextCursor can reflect
+	// whether a further page actually has rows, rather than guessing from
+	// "this page happened to be full" (which would send the client on one
+	// extra round trip to an empty final page every time).
+	lookaheadFilter := filter
+	if lookaheadFilter.Limit > 0 {
+		lookaheadFilter.Limit++
+	}
+	items, err := s.store.ListWebhookEvents(r.Context(), lookaheadFilter)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, nil, nil)
+		return
+	}
+	countFilter := filter
+	countFilter.BeforeID = 0
+	total, err := s.store.CountWebhookEvents(r.Context(), countFilter)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, nil, nil)
+		return
+	}
+	var nextCursor interface{}
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		nextCursor = items[filter.Limit-1].ID
+		items = items[:filter.Limit]
+	}
+	rows := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, FormatWebhookEvent(item))
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"total":      total,
+		"items":      rows,
+		"nextCursor": nextCursor,
+	}, nil)
+}
+
+func parseWebhookEventFilter(r *http.Request) (WebhookEventFilter, error) {
+	query := r.URL.Query()
+	filter := WebhookEventFilter{
+		EventType:          strings.TrimSpace(query.Get("eventType")),
+		InvoiceOrPaymentID: strings.TrimSpace(query.Get("id")),
+	}
+	if rawVerified := strings.TrimSpace(query.Get("signatureVerified")); rawVerified != "" {
+		verified, err := strconv.ParseBool(rawVerified)
+		if err != nil {
+			return WebhookEventFilter{}, fmt.Errorf("invalid signatureVerified")
+		}
+		filter.SignatureVerified = &verified
+	}
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit < 0 {
+			return WebhookEventFilter{}, fmt.Errorf("invalid limit")
+		}
+		filter.Limit = limit
+	} else {
+		filter.Limit = 100
+	}
+	if rawBeforeID := strings.TrimSpace(query.Get("beforeId")); rawBeforeID != "" {
+		beforeID, err := strconv.ParseInt(rawBeforeID, 10, 64)
+		if err != nil || beforeID < 0 {
+			return WebhookEventFilter{}, fmt.Errorf("invalid beforeId")
+		}
+		filter.BeforeID = beforeID
+	}
+	parseTime := func(key string) (*time.Time, error) {
+		raw := strings.TrimSpace(query.Get(key))
+		if raw == "" {
+			return nil, nil
+		}
+		ts, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s", key)
+		}
+		utc := ts.UTC()
+		return &utc, nil
+	}
+	var err error
+	if filter.ReceivedFrom, err = parseTime("receivedFrom"); err != nil {
+		return WebhookEventFilter{}, err
+	}
+	if filter.ReceivedTo, err = parseTime("receivedTo"); err != nil {
+		return WebhookEventFilter{}, err
+	}
+	return filter, nil
+}
+
 func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := s.readBody(w, r)
 	if err != nil {
@@ -1125,7 +1258,9 @@ func (s *Server) handleNowPaymentsWebhook(w http.ResponseWriter, r *http.Request
 	if sig == "" {
 		sig = strings.TrimSpace(r.Header.Get(headerNowPaymentsSig2))
 	}
-	if !s.verifyHMAC(body, sig) {
+	verified := s.verifyHMAC(body, sig)
+	s.recordWebhookEvent(r.Context(), body, verified)
+	if !verified {
 		s.writeError(w, r, http.StatusUnauthorized, errors.New("invalid webhook signature"), body, nil)
 		return
 	}
@@ -1439,6 +1574,43 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, 
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 	s.audit(r.Context(), r, reqBody, body, status)
+}
+
+// recordWebhookEvent persists a fire-and-forget audit row for every inbound
+// NOWPayments webhook attempt, valid or not. It does its own independent,
+// best-effort JSON parse (separate from the "real" json.Unmarshal used for
+// business logic in handleNowPaymentsWebhook) so a garbage or
+// signature-failed body still yields a row with blank IDs rather than
+// blocking. Errors are swallowed, mirroring s.audit()'s existing
+// "_ = s.store.InsertAudit(...)" convention -- this must never fail or
+// delay the actual webhook response.
+func (s *Server) recordWebhookEvent(ctx context.Context, body []byte, verified bool) {
+	if s.store == nil {
+		return
+	}
+	var payload NowPaymentsWebhookPayload
+	_ = json.Unmarshal(body, &payload)
+	invoiceID := strings.TrimSpace(payload.InvoiceID)
+	paymentID := strings.TrimSpace(string(payload.PaymentID))
+	eventType := "unrecognized"
+	switch {
+	case invoiceID != "":
+		eventType = "invoice"
+	case paymentID != "":
+		eventType = "payment"
+	}
+	now := s.nowFn().UTC()
+	_ = s.store.InsertWebhookEvent(ctx, WebhookEventRecord{
+		ReceivedAt:        now,
+		EventType:         eventType,
+		InvoiceID:         invoiceID,
+		PaymentID:         paymentID,
+		OrderID:           strings.TrimSpace(payload.OrderID),
+		PaymentStatus:     strings.TrimSpace(firstNonEmpty(payload.PaymentStatus, payload.Status)),
+		SignatureVerified: verified,
+		RawPayload:        body,
+		CreatedAt:         now,
+	})
 }
 
 func (s *Server) audit(ctx context.Context, r *http.Request, requestBody, responseBody []byte, status int) {

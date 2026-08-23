@@ -157,6 +157,26 @@ func (s *SQLiteStore) init() error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_active_quote_currency
             ON payments(quote_id, pay_currency)
             WHERE status NOT IN ('finished', 'failed', 'expired', 'refunded', 'minted', 'error');`,
+		// webhook_events records every inbound NOWPayments IPN attempt, valid
+		// or not -- unlike invoices/payments (~1 row per real transaction),
+		// this logs every POST that reaches the public webhook endpoint,
+		// including replay/spam/signature-failure attempts, for operator
+		// audit visibility into what NOWPayments actually sent us.
+		`CREATE TABLE IF NOT EXISTS webhook_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at TIMESTAMP NOT NULL,
+            event_type TEXT NOT NULL,
+            invoice_id TEXT,
+            payment_id TEXT,
+            order_id TEXT,
+            payment_status TEXT,
+            signature_verified INTEGER NOT NULL,
+            raw_payload BLOB NOT NULL,
+            created_at TIMESTAMP NOT NULL
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_webhook_events_invoice_id ON webhook_events(invoice_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_webhook_events_payment_id ON webhook_events(payment_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_events(received_at);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -541,6 +561,166 @@ func FormatInvoiceView(inv InvoiceView) map[string]interface{} {
 		payload["txHash"] = inv.TxHash.String
 	}
 	return payload
+}
+
+// WebhookEventRecord captures one inbound NOWPayments IPN attempt, valid or not.
+type WebhookEventRecord struct {
+	ID                int64
+	ReceivedAt        time.Time
+	EventType         string
+	InvoiceID         string
+	PaymentID         string
+	OrderID           string
+	PaymentStatus     string
+	SignatureVerified bool
+	RawPayload        []byte
+	CreatedAt         time.Time
+}
+
+// WebhookEventFilter constrains webhook event audit queries. Unlike
+// InvoiceListFilter, pagination is keyset-based (BeforeID) rather than
+// offset-based: this table grows unbounded with every attempt against the
+// public webhook endpoint, so a stable "id < BeforeID" cursor avoids the
+// skip/duplicate issues an OFFSET would have under concurrent inserts.
+type WebhookEventFilter struct {
+	EventType          string
+	InvoiceOrPaymentID string
+	SignatureVerified  *bool
+	ReceivedFrom       *time.Time
+	ReceivedTo         *time.Time
+	BeforeID           int64
+	Limit              int
+}
+
+func webhookEventFilterClauses(filter WebhookEventFilter) ([]string, []interface{}) {
+	clauses := make([]string, 0, 6)
+	args := make([]interface{}, 0, 6)
+	if eventType := strings.TrimSpace(filter.EventType); eventType != "" {
+		clauses = append(clauses, "event_type = ?")
+		args = append(args, eventType)
+	}
+	if id := strings.TrimSpace(filter.InvoiceOrPaymentID); id != "" {
+		clauses = append(clauses, "(invoice_id = ? OR payment_id = ? OR order_id = ?)")
+		args = append(args, id, id, id)
+	}
+	if filter.SignatureVerified != nil {
+		clauses = append(clauses, "signature_verified = ?")
+		args = append(args, boolToInt(*filter.SignatureVerified))
+	}
+	if filter.ReceivedFrom != nil {
+		clauses = append(clauses, "received_at >= ?")
+		args = append(args, filter.ReceivedFrom.UTC())
+	}
+	if filter.ReceivedTo != nil {
+		clauses = append(clauses, "received_at <= ?")
+		args = append(args, filter.ReceivedTo.UTC())
+	}
+	return clauses, args
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func (s *SQLiteStore) InsertWebhookEvent(ctx context.Context, entry WebhookEventRecord) error {
+	receivedAt := entry.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = time.Now().UTC()
+	}
+	createdAt := entry.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = receivedAt
+	}
+	const stmt = `INSERT INTO webhook_events(received_at, event_type, invoice_id, payment_id, order_id, payment_status, signature_verified, raw_payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(ctx, stmt, receivedAt, entry.EventType, entry.InvoiceID, entry.PaymentID, entry.OrderID, entry.PaymentStatus, boolToInt(entry.SignatureVerified), entry.RawPayload, createdAt)
+	return err
+}
+
+// ListWebhookEvents returns webhook audit rows matching filter, newest first.
+func (s *SQLiteStore) ListWebhookEvents(ctx context.Context, filter WebhookEventFilter) ([]WebhookEventRecord, error) {
+	query := `SELECT id, received_at, event_type, invoice_id, payment_id, order_id, payment_status, signature_verified, raw_payload, created_at FROM webhook_events`
+	clauses, args := webhookEventFilterClauses(filter)
+	if filter.BeforeID > 0 {
+		clauses = append(clauses, "id < ?")
+		args = append(args, filter.BeforeID)
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY id DESC"
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += " LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]WebhookEventRecord, 0)
+	for rows.Next() {
+		var item WebhookEventRecord
+		var signatureVerified int
+		if err := rows.Scan(
+			&item.ID,
+			&item.ReceivedAt,
+			&item.EventType,
+			&item.InvoiceID,
+			&item.PaymentID,
+			&item.OrderID,
+			&item.PaymentStatus,
+			&signatureVerified,
+			&item.RawPayload,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.SignatureVerified = signatureVerified != 0
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// CountWebhookEvents returns the number of webhook events matching filter,
+// independent of BeforeID pagination (mirrors CountInvoices' relationship to
+// ListInvoiceViews).
+func (s *SQLiteStore) CountWebhookEvents(ctx context.Context, filter WebhookEventFilter) (int, error) {
+	query := "SELECT COUNT(*) FROM webhook_events"
+	clauses, args := webhookEventFilterClauses(filter)
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// FormatWebhookEvent converts a WebhookEventRecord to a JSON-friendly payload.
+func FormatWebhookEvent(evt WebhookEventRecord) map[string]interface{} {
+	var rawPayload interface{}
+	if json.Valid(evt.RawPayload) {
+		rawPayload = json.RawMessage(evt.RawPayload)
+	} else {
+		rawPayload = string(evt.RawPayload)
+	}
+	return map[string]interface{}{
+		"id":                evt.ID,
+		"receivedAt":        evt.ReceivedAt.UTC().Format(time.RFC3339),
+		"eventType":         evt.EventType,
+		"invoiceId":         evt.InvoiceID,
+		"paymentId":         evt.PaymentID,
+		"orderId":           evt.OrderID,
+		"paymentStatus":     evt.PaymentStatus,
+		"signatureVerified": evt.SignatureVerified,
+		"rawPayload":        rawPayload,
+	}
 }
 
 // MarshalInvoiceViews converts reconciliation rows into JSON.

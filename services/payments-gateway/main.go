@@ -67,6 +67,7 @@ func main() {
 	nodeClient := NewRPCNodeClient(cfg.NodeURL, cfg.NodeAuthToken)
 
 	server := NewServer(store, oracle, nowClient, nodeClient, signer, cfg.QuoteTTL, cfg.QuoteCurrency, cfg.DefaultMintAsset, cfg.ServiceFeeBps, cfg.NowPaymentsIPNSecret, cfg.PublicIPNCallbackURL)
+	server.SetAdminToken(cfg.AdminToken)
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: otelhttp.NewHandler(server, "payments-gateway")}
 
 	reconcilerCtx, stopReconciler := context.WithCancel(context.Background())

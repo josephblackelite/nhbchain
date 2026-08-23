@@ -26,6 +26,7 @@ type Config struct {
 	NowPaymentsBaseURL   string
 	MinterKMSEnv         string
 	PublicIPNCallbackURL string
+	AdminToken           string
 }
 
 const (
@@ -44,6 +45,7 @@ const (
 	envNowBaseURL      = "PAY_GATEWAY_NOW_BASE"
 	envKMSEnv          = "PAY_GATEWAY_MINTER_KMS_ENV"
 	envIPNCallbackURL  = "PAY_GATEWAY_PUBLIC_IPN_URL"
+	envAdminToken      = "PAY_GATEWAY_ADMIN_TOKEN"
 )
 
 // LoadConfigFromEnv resolves configuration from environment variables with sane defaults.
@@ -67,6 +69,10 @@ func LoadConfigFromEnv() (*Config, error) {
 		// Optional: if unset, NOWPayments falls back to whichever IPN URL is
 		// configured in the merchant dashboard for the account.
 		PublicIPNCallbackURL: strings.TrimSpace(os.Getenv(envIPNCallbackURL)),
+		// Optional: if unset, GET /admin/webhook-events stays permanently
+		// unauthorized (fail closed) rather than crashing the whole payment
+		// service over a missing audit-dashboard credential.
+		AdminToken: strings.TrimSpace(os.Getenv(envAdminToken)),
 	}
 
 	if cfg.NodeURL == "" {
