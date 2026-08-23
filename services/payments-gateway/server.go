@@ -375,6 +375,62 @@ func applyFeeToAmount(amountFiat string, feeBps int) (string, string, error) {
 	return formatRat(fee, 8), formatRat(total, 8), nil
 }
 
+// deductFeeFromAmount is applyFeeToAmount's inverse: given an amount that
+// has already landed (e.g. NOWPayments' own outcome_amount, already net of
+// its conversion/network fees), it subtracts our own service fee to get
+// what actually nets to us. Used for settlement-time minting -- unlike
+// quote-time gross-up, where the buyer is asked to pay more than the mint
+// amount, here the fee comes out of what already arrived. Clamped at zero:
+// an amount smaller than our fee (a near-dust payment) nets to nothing
+// rather than a negative mint.
+func deductFeeFromAmount(amount string, feeBps int) (fee, net string, err error) {
+	base, ok := new(big.Rat).SetString(strings.TrimSpace(amount))
+	if !ok {
+		return "", "", fmt.Errorf("invalid amount: %s", amount)
+	}
+	if feeBps <= 0 {
+		text := formatRat(base, 8)
+		return "0", text, nil
+	}
+	feeRat := new(big.Rat).Mul(base, new(big.Rat).SetFrac64(int64(feeBps), 10_000))
+	netRat := new(big.Rat).Sub(base, feeRat)
+	if netRat.Sign() < 0 {
+		netRat = new(big.Rat)
+	}
+	return formatRat(feeRat, 8), formatRat(netRat, 8), nil
+}
+
+// mintDecimals is NHB and ZNHB's on-chain fixed-point precision -- see
+// mintWithVoucher's doc comment for why every mint amount gets scaled by
+// this many decimals at exactly one point before going on-chain.
+const mintDecimals = 18
+
+// decimalToWeiString converts a human-readable decimal amount (e.g.
+// "14.523456") into the base-10 integer string representing that many
+// smallest units at `decimals` precision (e.g. "14523456000000000000" at
+// 18 decimals) -- what MintVoucher.Amount/AmountBig() actually require.
+// Rejects an amount with more fractional digits than `decimals` supports
+// rather than silently truncating or rounding them away: every amount this
+// package produces is already capped at 8 decimal places (formatRat), well
+// within 18, so this should never trigger in practice -- it exists as a
+// defensive check against a future caller supplying more precision than
+// the chain can represent, not a case this package's own callers hit.
+func decimalToWeiString(amount string, decimals int) (string, error) {
+	rat, ok := new(big.Rat).SetString(strings.TrimSpace(amount))
+	if !ok {
+		return "", fmt.Errorf("invalid amount: %s", amount)
+	}
+	if rat.Sign() <= 0 {
+		return "", fmt.Errorf("amount must be positive: %s", amount)
+	}
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	scaled := new(big.Rat).Mul(rat, new(big.Rat).SetInt(scale))
+	if !scaled.IsInt() {
+		return "", fmt.Errorf("amount %s has more than %d fractional digits", amount, decimals)
+	}
+	return scaled.Num().String(), nil
+}
+
 func (s *Server) estimatePayAmount(ctx context.Context, totalFiat, payCurrency string) (string, error) {
 	payCurrency = strings.ToUpper(strings.TrimSpace(payCurrency))
 	if payCurrency == "" || strings.EqualFold(payCurrency, s.quoteCurrency) {
@@ -631,7 +687,7 @@ func validatePaymentCreate(req PaymentCreateRequest) error {
 // double-charging a swapper who already paid.
 func isTerminalPaymentStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "finished", "failed", "expired", "refunded", "minted", "error":
+	case "finished", "failed", "expired", "refunded", "minted", "settled_zero", "error":
 		return true
 	}
 	return false
@@ -1128,7 +1184,7 @@ func (s *Server) handleInvoiceWebhook(w http.ResponseWriter, r *http.Request, bo
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("quote %s missing", invoice.QuoteID), body, nil)
 		return
 	}
-	txHash, voucherHash, err := s.mintWithVoucher(ctx, invoice.ID, invoice.Recipient, quote)
+	txHash, voucherHash, err := s.mintWithVoucher(ctx, invoice.ID, invoice.Recipient, quote.Token, quote.AmountToken)
 	if err != nil {
 		_ = s.store.UpdateInvoiceStatus(r.Context(), invoice.ID, "error", nil)
 		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
@@ -1157,7 +1213,7 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request, bo
 		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "unknown"}, body)
 		return
 	}
-	if strings.EqualFold(payment.Status, "minted") {
+	if strings.EqualFold(payment.Status, "minted") || strings.EqualFold(payment.Status, "settled_zero") {
 		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "already minted"}, body)
 		return
 	}
@@ -1186,32 +1242,88 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request, bo
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Errorf("quote %s missing", payment.QuoteID), body, nil)
 		return
 	}
-	// is_fixed_rate=true on payment creation locked the exchange rate up
-	// front, so -- exactly like the invoice flow -- we mint the originally
-	// quoted amountToken rather than reconciling against actually_paid /
-	// outcome_amount.
-	txHash, voucherHash, err := s.mintWithVoucher(ctx, payment.ID, payment.Recipient, quote)
+	// We mint whatever actually nets to us, never the originally quoted
+	// amountToken: QR codes for these currencies can't carry an amount
+	// (see cryptoPaymentUri.ts) and most wallets don't support prefilling
+	// one for a token transfer even when a scheme could, so buyers
+	// routinely type an amount by hand and senders often deduct their own
+	// withdrawal fee from it -- exact-match settlement made this the
+	// common case, not an edge case. outcome_amount is NOWPayments' own
+	// converted/forwarded amount, already net of its conversion and
+	// network fees; falling back to actually_paid only covers the
+	// unexpected case where NOWPayments omits outcome_amount entirely.
+	outcomeAmount := strings.TrimSpace(string(latest.OutcomeAmount))
+	if outcomeAmount == "" {
+		outcomeAmount = strings.TrimSpace(string(latest.ActuallyPaid))
+	}
+	txHash, mintAmount, err := s.settlePayment(ctx, payment, quote, outcomeAmount)
 	if err != nil {
+		if errors.Is(err, ErrMintDuplicate) {
+			// The reconciler (see reconciler.go) already settled this exact
+			// payment concurrently -- our own attempt was rejected by the
+			// chain's replay protection, not a real failure. Leave status
+			// alone rather than overwriting whatever it already wrote.
+			s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "already minted"}, body)
+			return
+		}
 		_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, "error", nil)
 		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
 		return
 	}
-	_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, "minted", &txHash)
-	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "minted", "txHash": txHash, "voucherHash": voucherHash}, body)
+	var txHashPtr *string
+	if txHash != "" {
+		txHashPtr = &txHash
+	}
+	finalStatus := finalPaymentStatus(mintAmount)
+	_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, finalStatus, txHashPtr)
+	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": finalStatus, "txHash": txHash, "mintAmount": mintAmount}, body)
 }
 
-// mintWithVoucher signs and submits a mint voucher. It is shared verbatim by
-// both the invoice and headless-payment webhook flows: onChainID just needs
-// a globally-unique string to key on-chain invoice-replay protection (see
-// core.ErrMintInvoiceUsed), and both InvoiceRecord.ID and PaymentRecord.ID
-// are drawn from the same uuid.NewString() pool, so there is no collision
-// risk between the two flows sharing this one field.
-func (s *Server) mintWithVoucher(ctx context.Context, onChainID, recipient string, quote *QuoteRecord) (string, string, error) {
+// finalPaymentStatus picks the terminal status a settled payment should
+// land on: "settled_zero" when settlePayment determined nothing nets to us
+// after fees (a near-dust deposit) -- no on-chain mint occurred, and a
+// status of "minted" would misrepresent that to anyone reading the payment
+// record later (an operator, a reconciliation script, or the buyer's own
+// checkout UI) as a real, successful token transfer. "minted" otherwise.
+func finalPaymentStatus(mintAmount string) string {
+	if strings.TrimSpace(mintAmount) == "0" {
+		return "settled_zero"
+	}
+	return "minted"
+}
+
+// mintWithVoucher signs and submits a mint voucher for an explicit
+// token+amount. It is shared verbatim by both the invoice flow (which
+// always mints its originally quoted amountToken) and the headless-payment
+// flow (which mints whatever the payment actually settles for, via
+// settlePayment): onChainID just needs a globally-unique string to key
+// on-chain invoice-replay protection (see core.ErrMintInvoiceUsed), and
+// both InvoiceRecord.ID and PaymentRecord.ID are drawn from the same
+// uuid.NewString() pool, so there is no collision risk between the two
+// flows sharing this one field. Note that replay protection is keyed on
+// onChainID alone, not amount -- a given onChainID can still only ever
+// mint once, so a payment settling in two separate installments needs two
+// distinct onChainID values, not two calls with the same one.
+//
+// amount is a human-readable decimal NHB/ZNHB string (e.g. "14.523456"),
+// matching every value this package computes it from (quote.AmountToken,
+// settlePayment's mintAmount, both produced by formatRat). This is the one
+// place that converts to the on-chain integer representation
+// MintVoucher.Amount/core.MintVoucher.AmountBig() actually require ("amount
+// in wei" -- docs/otc/voucher.md, matching the wallet's own
+// parseUnits(amount, 18)/formatUnits(balance, 18)) -- centralizing it here
+// means every caller gets correct scaling for free, and there is exactly
+// one place that could get it wrong instead of one per caller.
+func (s *Server) mintWithVoucher(ctx context.Context, onChainID, recipient, token, amount string) (string, string, error) {
+	weiAmount, err := decimalToWeiString(amount, mintDecimals)
+	if err != nil {
+		return "", "", err
+	}
 	voucher := core.MintVoucher{
 		InvoiceID: onChainID,
 		Recipient: recipient,
-		Token:     quote.Token,
-		Amount:    quote.AmountToken,
+		Token:     token,
+		Amount:    weiAmount,
 		ChainID:   core.MintChainID,
 		Expiry:    s.nowFn().Add(mintVoucherTTL).Unix(),
 	}
@@ -1232,6 +1344,40 @@ func (s *Server) mintWithVoucher(ctx context.Context, onChainID, recipient strin
 		return "", "", hashErr
 	}
 	return txHash, voucherHash, nil
+}
+
+// settlePayment computes what actually nets to us from a NOWPayments
+// outcome amount -- already net of NOWPayments' own conversion/network
+// fees -- minus our own service fee (PAY_GATEWAY_SERVICE_FEE_BPS), and
+// mints that. Used uniformly by both the webhook path (a payment that
+// reached NOWPayments' own "finished" status) and the reconciler (a
+// partially_paid payment whose grace window has elapsed with nothing
+// further arriving) -- either way we mint whatever landed, never the
+// originally quoted amount. A net amount that rounds to zero or below
+// (a near-dust deposit once our fee comes out) settles with no on-chain
+// mint at all -- returns an empty txHash and "0", not an error, since
+// there is genuinely nothing to mint.
+func (s *Server) settlePayment(ctx context.Context, payment *PaymentRecord, quote *QuoteRecord, outcomeAmount string) (txHash string, mintAmount string, err error) {
+	_, netAmountFiat, err := deductFeeFromAmount(outcomeAmount, s.serviceFeeBps)
+	if err != nil {
+		return "", "", err
+	}
+	netRat, ok := new(big.Rat).SetString(netAmountFiat)
+	if !ok {
+		return "", "", fmt.Errorf("invalid net settlement amount: %s", netAmountFiat)
+	}
+	if netRat.Sign() <= 0 {
+		return "", "0", nil
+	}
+	mintAmount, err = s.computeMintAmount(quote.MintAsset, netAmountFiat, s.nowFn())
+	if err != nil {
+		return "", "", err
+	}
+	txHash, _, err = s.mintWithVoucher(ctx, payment.ID, payment.Recipient, quote.Token, mintAmount)
+	if err != nil {
+		return "", "", err
+	}
+	return txHash, mintAmount, nil
 }
 
 func (s *Server) verifyHMAC(body []byte, signature string) bool {

@@ -338,8 +338,13 @@ func TestWebhookReconciliationAndMint(t *testing.T) {
 	if node.lastVoucher.InvoiceID != invoiceID {
 		t.Fatalf("invoice mismatch: %s", node.lastVoucher.InvoiceID)
 	}
-	if node.lastVoucher.Amount != quote.AmountToken {
-		t.Fatalf("amount mismatch: got %s want %s", node.lastVoucher.Amount, quote.AmountToken)
+	// mintWithVoucher scales the human-readable quote.AmountToken ("20") to
+	// the 18-decimal wei-integer MintVoucher.Amount actually requires (see
+	// docs/otc/voucher.md and mintWithVoucher's doc comment) -- the voucher
+	// amount is never the same string as quote.AmountToken itself.
+	wantAmount := "20000000000000000000"
+	if node.lastVoucher.Amount != wantAmount {
+		t.Fatalf("amount mismatch: got %s want %s (quote.AmountToken=%s)", node.lastVoucher.Amount, wantAmount, quote.AmountToken)
 	}
 	if node.lastVoucher.ChainID != core.MintChainID {
 		t.Fatalf("unexpected chain id: %d", node.lastVoucher.ChainID)
@@ -678,7 +683,15 @@ func TestPaymentWebhookMintsOnFinishedAndNoOpsOnDuplicate(t *testing.T) {
 			}, nil
 		},
 		getPaymentFn: func(ctx context.Context, id string) (*NowPaymentsPayment, error) {
-			return &NowPaymentsPayment{PaymentID: flexibleAmount(id), PaymentStatus: "finished"}, nil
+			// OutcomeAmount deliberately differs from the quoted 15 NHB --
+			// settlement now mints whatever actually netted to us (see
+			// settlePayment), not the originally quoted amountToken, so a
+			// real test of that behavior needs the two to diverge.
+			return &NowPaymentsPayment{
+				PaymentID:     flexibleAmount(id),
+				PaymentStatus: "finished",
+				OutcomeAmount: flexibleAmount("14.5"),
+			}, nil
 		},
 	}
 	node := &stubNode{}
@@ -709,8 +722,18 @@ func TestPaymentWebhookMintsOnFinishedAndNoOpsOnDuplicate(t *testing.T) {
 	if node.callCount != 1 {
 		t.Fatalf("expected exactly one mint call, got %d", node.callCount)
 	}
-	if node.lastVoucher.Recipient != "nhb1dave" || node.lastVoucher.Amount != quote.AmountToken {
-		t.Fatalf("unexpected voucher: %+v", node.lastVoucher)
+	// Mint amount tracks OutcomeAmount ("14.5"), not the originally quoted
+	// amountToken ("15") -- confirms settlement is outcome-driven. The
+	// on-chain voucher amount is wei-scaled (see mintWithVoucher); 14.5 * 1e18.
+	wantWeiAmount := "14500000000000000000"
+	if node.lastVoucher.Recipient != "nhb1dave" || node.lastVoucher.Amount != wantWeiAmount {
+		t.Fatalf("unexpected voucher: %+v (want amount %s)", node.lastVoucher, wantWeiAmount)
+	}
+	if node.lastVoucher.Amount == quote.AmountToken {
+		t.Fatalf("expected mint amount to diverge from quote.AmountToken (%s), got the same value", quote.AmountToken)
+	}
+	if mintResp["mintAmount"] != "14.5" {
+		t.Fatalf("expected mintAmount 14.5 in webhook response, got %+v", mintResp)
 	}
 
 	// Duplicate delivery of the same IPN must not mint a second time.

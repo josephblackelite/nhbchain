@@ -748,6 +748,34 @@ func scanPayment(row *sql.Row) (*PaymentRecord, error) {
 	return &rec, nil
 }
 
+// ListPaymentsByStatusOlderThan returns every payment currently in status
+// with no update (webhook or otherwise) more recent than cutoff. Backs the
+// settlement reconciler's "nothing more is coming" check for partially_paid
+// payments: updated_at is bumped on every webhook delivery regardless of
+// whether the status string itself changed (see handlePaymentWebhook), so a
+// row only matches once NOWPayments has gone quiet on it for the whole
+// grace window.
+func (s *SQLiteStore) ListPaymentsByStatusOlderThan(ctx context.Context, status string, cutoff time.Time) ([]PaymentRecord, error) {
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE status = ? AND updated_at < ?`
+	rows, err := s.db.QueryContext(ctx, query, status, cutoff.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PaymentRecord
+	for rows.Next() {
+		var rec PaymentRecord
+		if err := rows.Scan(&rec.ID, &rec.QuoteID, &rec.Recipient, &rec.Status, &rec.NowID, &rec.PayCurrency, &rec.PayAddress, &rec.PayAmount, &rec.PayinExtraID, &rec.TxHash, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *SQLiteStore) UpdatePaymentStatus(ctx context.Context, id, status string, txHash *string) error {
 	const stmt = `UPDATE payments SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?`
 	var hash interface{}

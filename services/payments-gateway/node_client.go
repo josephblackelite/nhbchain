@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,6 +18,23 @@ import (
 type NodeClient interface {
 	MintWithSig(ctx context.Context, voucher core.MintVoucher, signature string) (string, error)
 }
+
+// ErrMintDuplicate indicates the node rejected a mint voucher because its
+// InvoiceID (the payments-gateway's onChainID) already minted successfully
+// -- the on-chain replay protection the whole system relies on for
+// idempotency, surfaced as JSON-RPC error code -32010 (rpc.codeDuplicateTx
+// / core.ErrMintInvoiceUsed on the node side). Callers that might race a
+// second settlement attempt against the same payment (e.g. the
+// reconciler sweeping a payment a webhook is concurrently minting) should
+// treat this as "already handled", not a real failure -- see
+// errors.Is(err, ErrMintDuplicate).
+var ErrMintDuplicate = errors.New("payments-gateway: mint voucher already settled")
+
+// rpcCodeDuplicateTx mirrors rpc.codeDuplicateTx (rpc/http.go) -- the two
+// packages don't share an import here, so the numeric value is duplicated
+// deliberately rather than pulling in the rpc package's much larger surface
+// for one constant.
+const rpcCodeDuplicateTx = -32010
 
 // RPCNodeClient is a lightweight JSON-RPC client.
 type RPCNodeClient struct {
@@ -43,9 +61,25 @@ func (c *RPCNodeClient) MintWithSig(ctx context.Context, voucher core.MintVouche
 		TxHash string `json:"txHash"`
 	}
 	if err := c.call(ctx, "mint_with_sig", params, &result); err != nil {
+		var rpcErr *rpcError
+		if errors.As(err, &rpcErr) && rpcErr.Code == rpcCodeDuplicateTx {
+			return "", fmt.Errorf("%w: %s", ErrMintDuplicate, rpcErr.Message)
+		}
 		return "", err
 	}
 	return result.TxHash, nil
+}
+
+// rpcError carries the JSON-RPC error's code alongside its message so
+// callers that need to distinguish error classes (see ErrMintDuplicate)
+// aren't reduced to string-matching call()'s flattened error text.
+type rpcError struct {
+	Code    int
+	Message string
+}
+
+func (e *rpcError) Error() string {
+	return fmt.Sprintf("node rpc error: %s", e.Message)
 }
 
 func (c *RPCNodeClient) call(ctx context.Context, method string, params interface{}, out interface{}) error {
@@ -89,7 +123,7 @@ func (c *RPCNodeClient) call(ctx context.Context, method string, params interfac
 		return err
 	}
 	if rpcResp.Error != nil {
-		return fmt.Errorf("node rpc error: %s", rpcResp.Error.Message)
+		return &rpcError{Code: rpcResp.Error.Code, Message: rpcResp.Error.Message}
 	}
 	if out == nil {
 		return nil

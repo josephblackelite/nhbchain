@@ -69,6 +69,9 @@ func main() {
 	server := NewServer(store, oracle, nowClient, nodeClient, signer, cfg.QuoteTTL, cfg.QuoteCurrency, cfg.DefaultMintAsset, cfg.ServiceFeeBps, cfg.NowPaymentsIPNSecret, cfg.PublicIPNCallbackURL)
 	srv := &http.Server{Addr: cfg.ListenAddress, Handler: otelhttp.NewHandler(server, "payments-gateway")}
 
+	reconcilerCtx, stopReconciler := context.WithCancel(context.Background())
+	go server.runPaymentReconciler(reconcilerCtx)
+
 	go func() {
 		log.Printf("payments gateway listening on %s", cfg.ListenAddress)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -81,6 +84,7 @@ func main() {
 	<-sig
 
 	log.Printf("shutting down payments gateway")
+	stopReconciler()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
