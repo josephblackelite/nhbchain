@@ -1904,27 +1904,49 @@ func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byt
 		return nil, "", nil, 0, fmt.Errorf("chain unavailable")
 	}
 	latest := chain.GetHeight()
-	for height := uint64(0); height <= latest; height++ {
+	// Scans backward from the chain tip, bounded by
+	// explorerHistoricalBackfillLimit (shared with the same tradeoff in
+	// explorer_query_handlers.go), rather than forward from genesis with
+	// no bound at all. A forward, unbounded scan re-reads the entire
+	// chain's history on every single lookup regardless of how recent the
+	// target transaction is -- with the chain now past 240k blocks this
+	// took over 5 minutes and forced a live "transaction confirmation
+	// timed out" false negative for a transaction that had actually
+	// already landed, since nhb_getTransactionReceipt (the caller most
+	// wallets poll right after submitting) is backed by this same
+	// function. The overwhelmingly common real case for both
+	// nhb_getTransaction and nhb_getTransactionReceipt is confirming
+	// something that was JUST submitted, which is always near the tip --
+	// a bounded backward scan finds that almost immediately. A genuinely
+	// old transaction lookup (e.g. an explorer search for a historical
+	// hash) beyond the bound now returns "not found" instead of hanging;
+	// a real persistent hash index is the proper fix for that case and is
+	// tracked separately, but "not found" is a strict improvement over an
+	// indefinite hang that ultimately lies about the outcome.
+	scanned := 0
+	for height := latest; scanned < explorerHistoricalBackfillLimit; height-- {
 		block, err := chain.GetBlockByHeight(height)
-		if err != nil || block == nil {
-			continue
+		scanned++
+		if err == nil && block != nil {
+			blockHash, hashErr := block.Header.Hash()
+			if hashErr == nil {
+				for _, tx := range block.Transactions {
+					if tx == nil {
+						continue
+					}
+					hashBytes, err := tx.Hash()
+					if err != nil {
+						continue
+					}
+					canonical := hex.EncodeToString(hashBytes)
+					if strings.EqualFold(canonical, normalized) {
+						return tx, ensureHexPrefix(canonical), blockHash, height, nil
+					}
+				}
+			}
 		}
-		blockHash, err := block.Header.Hash()
-		if err != nil {
-			continue
-		}
-		for _, tx := range block.Transactions {
-			if tx == nil {
-				continue
-			}
-			hashBytes, err := tx.Hash()
-			if err != nil {
-				continue
-			}
-			canonical := hex.EncodeToString(hashBytes)
-			if strings.EqualFold(canonical, normalized) {
-				return tx, ensureHexPrefix(canonical), blockHash, height, nil
-			}
+		if height == 0 {
+			break
 		}
 	}
 	return nil, "", nil, 0, nil
