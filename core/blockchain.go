@@ -41,7 +41,28 @@ var (
 	heightPrefix     = []byte("height:")
 	hashPrefix       = []byte("hash:")
 	lastTimestampKey = []byte("lastTimestamp")
+	// txHashPrefix keys the transaction-hash index (see AddBlock and
+	// FindTransactionHeight): a side-index mapping a transaction's hash to
+	// the height of the block that contains it, living in bc.db exactly
+	// like hashPrefix's block-hash-to-height index above -- not the state
+	// trie, so it's never hashed into the state root and carries no
+	// consensus weight. It only exists to make nhb_getTransaction and
+	// nhb_getTransactionReceipt (rpc/http.go's findTransaction) O(1)
+	// instead of an O(chain height) scan.
+	txHashPrefix = []byte("txhash:")
+	// txIndexBackfillDoneKey marks that BackfillTransactionIndex has
+	// already populated the index for every block that existed before this
+	// index existed. Blocks added via AddBlock after that point are always
+	// indexed as they commit, so this is a one-time, idempotent flag.
+	txIndexBackfillDoneKey = []byte("txHashIndexBackfillDone")
 )
+
+func txHashKey(hash []byte) []byte {
+	key := make([]byte, len(txHashPrefix)+len(hash))
+	copy(key, txHashPrefix)
+	copy(key[len(txHashPrefix):], hash)
+	return key
+}
 
 func encodeUint64(v uint64) []byte {
 	buf := make([]byte, 8)
@@ -283,6 +304,26 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 	if err := bc.db.Put(lastTimestampKey, encodeInt64(b.Header.Timestamp)); err != nil {
 		return fmt.Errorf("store last timestamp: %w", err)
 	}
+	// Index every transaction in this block by hash -> height, same
+	// non-atomic-but-sequential Put pattern already used for the other
+	// indices above (this codebase doesn't batch/transact these writes; a
+	// crash mid-AddBlock already left partial state before this change).
+	// Best-effort: a transaction whose hash computation fails is skipped
+	// rather than failing the whole block commit over an indexing concern
+	// unrelated to consensus -- findTransaction's bounded fallback scan
+	// still covers it if that ever happens.
+	for _, tx := range b.Transactions {
+		if tx == nil {
+			continue
+		}
+		txHashBytes, hashErr := tx.Hash()
+		if hashErr != nil {
+			continue
+		}
+		if err := bc.db.Put(txHashKey(txHashBytes), encodeUint64(newHeight)); err != nil {
+			return fmt.Errorf("store transaction hash index: %w", err)
+		}
+	}
 
 	// Update in-memory pointers after successful persistence.
 	bc.tip = cloneBytes(blockHash)
@@ -339,6 +380,74 @@ func (bc *Blockchain) GetHeight() uint64 {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.height
+}
+
+// FindTransactionHeight looks up a transaction's containing block height via
+// the hash index AddBlock maintains. The second return value is false (with
+// a nil error) when the hash simply isn't indexed -- either it genuinely
+// doesn't exist, or it predates BackfillTransactionIndex ever having run on
+// this node; callers should treat that the same as "not found via the fast
+// path" and fall back to a direct scan rather than treating it as an error.
+func (bc *Blockchain) FindTransactionHeight(txHash []byte) (uint64, bool, error) {
+	raw, err := bc.db.Get(txHashKey(txHash))
+	if err != nil {
+		return 0, false, nil
+	}
+	if len(raw) != 8 {
+		return 0, false, fmt.Errorf("corrupt transaction hash index entry: %d bytes", len(raw))
+	}
+	return decodeUint64(raw), true, nil
+}
+
+// BackfillTransactionIndex populates the transaction-hash index (see
+// AddBlock) for every block that was committed before the index existed.
+// Idempotent and safe to call on every node startup: it checks
+// txIndexBackfillDoneKey first and returns immediately once already done,
+// so this only does real work exactly once per node, the first time it
+// starts running this code. If it's interrupted (crash, restart) before
+// completing, the done marker was never written, so the next startup
+// simply redoes the whole scan from height 1 -- individual entries are
+// idempotent to rewrite, so this is wasted work, not incorrect work, and
+// at this chain's current size that's a low single-digit-seconds cost, not
+// a real concern. Returns the number of transactions indexed (0 if it had
+// already run) for startup logging.
+func (bc *Blockchain) BackfillTransactionIndex() (int, error) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if done, err := bc.db.Get(txIndexBackfillDoneKey); err == nil && len(done) > 0 {
+		return 0, nil
+	}
+
+	indexed := 0
+	for height := uint64(1); height <= bc.height; height++ {
+		hash, ok := bc.heights[height]
+		if !ok {
+			continue
+		}
+		block, err := bc.GetBlockByHash(hash)
+		if err != nil || block == nil {
+			continue
+		}
+		for _, tx := range block.Transactions {
+			if tx == nil {
+				continue
+			}
+			txHashBytes, hashErr := tx.Hash()
+			if hashErr != nil {
+				continue
+			}
+			if err := bc.db.Put(txHashKey(txHashBytes), encodeUint64(height)); err != nil {
+				return indexed, fmt.Errorf("backfill transaction hash index at height %d: %w", height, err)
+			}
+			indexed++
+		}
+	}
+
+	if err := bc.db.Put(txIndexBackfillDoneKey, []byte{1}); err != nil {
+		return indexed, fmt.Errorf("mark transaction hash index backfill done: %w", err)
+	}
+	return indexed, nil
 }
 
 func (bc *Blockchain) Tip() []byte {

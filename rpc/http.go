@@ -1903,6 +1903,17 @@ func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byt
 	if chain == nil {
 		return nil, "", nil, 0, fmt.Errorf("chain unavailable")
 	}
+	hashBytes, hashDecodeErr := hex.DecodeString(normalized)
+	if hashDecodeErr == nil {
+		if height, ok, indexErr := chain.FindTransactionHeight(hashBytes); indexErr == nil && ok {
+			if tx, canonicalHash, blockHash, found := findTransactionInBlock(chain, height, normalized); found {
+				return tx, canonicalHash, blockHash, height, nil
+			}
+			// Index pointed at a height that doesn't actually contain this
+			// hash (shouldn't happen, but the index is a convenience layer,
+			// never a source of truth) -- fall through to the scan below.
+		}
+	}
 	latest := chain.GetHeight()
 	// Scans backward from the chain tip, bounded by
 	// explorerHistoricalBackfillLimit (shared with the same tradeoff in
@@ -1925,31 +1936,44 @@ func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byt
 	// indefinite hang that ultimately lies about the outcome.
 	scanned := 0
 	for height := latest; scanned < explorerHistoricalBackfillLimit; height-- {
-		block, err := chain.GetBlockByHeight(height)
 		scanned++
-		if err == nil && block != nil {
-			blockHash, hashErr := block.Header.Hash()
-			if hashErr == nil {
-				for _, tx := range block.Transactions {
-					if tx == nil {
-						continue
-					}
-					hashBytes, err := tx.Hash()
-					if err != nil {
-						continue
-					}
-					canonical := hex.EncodeToString(hashBytes)
-					if strings.EqualFold(canonical, normalized) {
-						return tx, ensureHexPrefix(canonical), blockHash, height, nil
-					}
-				}
-			}
+		if tx, canonicalHash, blockHash, found := findTransactionInBlock(chain, height, normalized); found {
+			return tx, canonicalHash, blockHash, height, nil
 		}
 		if height == 0 {
 			break
 		}
 	}
 	return nil, "", nil, 0, nil
+}
+
+// findTransactionInBlock looks for normalizedHash (lowercase, no 0x prefix)
+// among a single block's transactions. Shared by findTransaction's fast
+// index-lookup path (which already knows the height and just needs to
+// confirm/locate the transaction within it) and its bounded-scan fallback.
+func findTransactionInBlock(chain *core.Blockchain, height uint64, normalizedHash string) (*types.Transaction, string, []byte, bool) {
+	block, err := chain.GetBlockByHeight(height)
+	if err != nil || block == nil || block.Header == nil {
+		return nil, "", nil, false
+	}
+	blockHash, hashErr := block.Header.Hash()
+	if hashErr != nil {
+		return nil, "", nil, false
+	}
+	for _, tx := range block.Transactions {
+		if tx == nil {
+			continue
+		}
+		txHashBytes, err := tx.Hash()
+		if err != nil {
+			continue
+		}
+		canonical := hex.EncodeToString(txHashBytes)
+		if strings.EqualFold(canonical, normalizedHash) {
+			return tx, ensureHexPrefix(canonical), blockHash, true
+		}
+	}
+	return nil, "", nil, false
 }
 
 func buildTransactionResult(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64) (*TransactionResult, error) {

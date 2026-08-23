@@ -402,6 +402,16 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	if err != nil {
 		return nil, err
 	}
+	// One-time, idempotent: populates the transaction-hash index (see
+	// blockchain.go's AddBlock/FindTransactionHeight) for every block that
+	// existed before this index did. No-ops instantly on every startup
+	// after the first, and on any chain that's already fully indexed
+	// (including a fresh test/dev chain with nothing to backfill).
+	if indexed, backfillErr := chain.BackfillTransactionIndex(); backfillErr != nil {
+		fmt.Printf("Warning: transaction hash index backfill failed: %v (nhb_getTransaction/nhb_getTransactionReceipt fall back to a bounded scan regardless)\n", backfillErr)
+	} else if indexed > 0 {
+		fmt.Printf("Backfilled transaction hash index: %d transactions indexed.\n", indexed)
+	}
 
 	// Load current state root from the chain tip (if any), then open the trie.
 	var root []byte
