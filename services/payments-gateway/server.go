@@ -865,7 +865,33 @@ func (s *Server) handlePaymentCreate(w http.ResponseWriter, r *http.Request) {
 		var npErr *nowPaymentsCreateError
 		switch {
 		case errors.As(err, &npErr):
-			s.writeError(w, r, http.StatusBadGateway, npErr.err, body, nil)
+			// Surface NOWPayments' own rejection reason (e.g. "amountTo is
+			// too small") as the user-facing error instead of the
+			// log-oriented wrapper string -- but only for NOWPayments' own
+			// 400 responses, which is the class it uses for client-input
+			// validation failures. A 401/403/429/5xx is an operational
+			// problem on our side (bad/expired API key, rate limiting,
+			// their outage), not something the customer did wrong --
+			// showing NOWPayments' own wording for those (e.g. "Invalid API
+			// key") would misattribute our failure to them. Always log the
+			// full upstream detail regardless of what's shown to the user,
+			// since the simplified body written below is also what gets
+			// audited -- an operator diagnosing an incident later still
+			// needs the real status/code, even when the customer-facing
+			// message is deliberately shortened.
+			var apiErr *NowPaymentsAPIError
+			if errors.As(npErr.err, &apiErr) {
+				log.Printf("payments-gateway: nowpayments payment create rejected: status=%d code=%s message=%s raw=%s", apiErr.HTTPStatus, apiErr.Code, apiErr.Message, apiErr.Raw)
+			}
+			if errors.As(npErr.err, &apiErr) && apiErr.HTTPStatus == http.StatusBadRequest && apiErr.Message != "" {
+				extra := map[string]interface{}{}
+				if apiErr.Code != "" {
+					extra["providerCode"] = apiErr.Code
+				}
+				s.writeError(w, r, http.StatusBadGateway, errors.New(apiErr.Message), body, extra)
+			} else {
+				s.writeError(w, r, http.StatusBadGateway, npErr.err, body, nil)
+			}
 		case errors.Is(err, errClaimPaymentTimedOut),
 			errors.Is(err, context.DeadlineExceeded),
 			errors.Is(err, context.Canceled):

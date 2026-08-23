@@ -265,7 +265,7 @@ func (c *HTTPNowPaymentsClient) ListMerchantCoins(ctx context.Context) ([]string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nowpayments /merchant/coins failed: status=%d body=%s", resp.StatusCode, readErrorBody(resp.Body))
+		return nil, parseNowPaymentsError(resp.StatusCode, resp.Body)
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -334,7 +334,7 @@ func (c *HTTPNowPaymentsClient) doPaymentRequest(ctx context.Context, method, pa
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nowpayments %s failed: status=%d body=%s", path, resp.StatusCode, readErrorBody(resp.Body))
+		return nil, parseNowPaymentsError(resp.StatusCode, resp.Body)
 	}
 	var payment NowPaymentsPayment
 	if err := json.NewDecoder(resp.Body).Decode(&payment); err != nil {
@@ -369,7 +369,7 @@ func (c *HTTPNowPaymentsClient) doRequest(ctx context.Context, method, path stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nowpayments %s failed: status=%d body=%s", path, resp.StatusCode, readErrorBody(resp.Body))
+		return nil, parseNowPaymentsError(resp.StatusCode, resp.Body)
 	}
 	var invoice NowPaymentsInvoice
 	if err := json.NewDecoder(resp.Body).Decode(&invoice); err != nil {
@@ -378,17 +378,47 @@ func (c *HTTPNowPaymentsClient) doRequest(ctx context.Context, method, path stri
 	return &invoice, nil
 }
 
-// readErrorBody reads and trims a non-2xx response body for inclusion in an
-// error message. NOWPayments' own error responses are small JSON objects
-// (typically {"statusCode":..., "code":"...", "message":"..."}) that name
-// the actual rejection reason (e.g. a too-small amount, an unsupported
-// currency for fixed-rate payments) -- discarding them, as this client used
-// to, left every failure indistinguishable from every other and impossible
-// to diagnose after the fact from logs alone.
-func readErrorBody(r io.Reader) string {
-	raw, err := io.ReadAll(io.LimitReader(r, 4096))
-	if err != nil || len(raw) == 0 {
-		return "<no body>"
+// NowPaymentsAPIError is a parsed NOWPayments error response body (typically
+// {"status":false,"statusCode":400,"code":"BAD_REQUEST","message":"amountTo
+// is too small"}). Message holds NOWPayments' own human-readable rejection
+// reason -- callers that want to explain a failure to the end user (e.g. "the
+// amount is too small for this currency") should errors.As into this type and
+// use Message directly rather than Error(), which stays log-oriented and
+// includes the HTTP status for operators.
+type NowPaymentsAPIError struct {
+	HTTPStatus int
+	Code       string
+	Message    string
+	Raw        string
+}
+
+func (e *NowPaymentsAPIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("nowpayments: %s (status=%d)", e.Message, e.HTTPStatus)
 	}
-	return strings.TrimSpace(string(raw))
+	return fmt.Sprintf("nowpayments request failed: status=%d body=%s", e.HTTPStatus, e.Raw)
+}
+
+// parseNowPaymentsError reads a non-2xx response body and extracts
+// NOWPayments' own code/message fields when present. Discarding this body,
+// as this client used to, left every failure indistinguishable from every
+// other and impossible to diagnose after the fact from logs alone, or to
+// explain to the end user (e.g. distinguishing a too-small amount from an
+// unsupported currency).
+func parseNowPaymentsError(statusCode int, r io.Reader) *NowPaymentsAPIError {
+	raw, err := io.ReadAll(io.LimitReader(r, 4096))
+	trimmed := strings.TrimSpace(string(raw))
+	if err != nil || trimmed == "" {
+		trimmed = "<no body>"
+	}
+	apiErr := &NowPaymentsAPIError{HTTPStatus: statusCode, Raw: trimmed}
+	var parsed struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &parsed) == nil {
+		apiErr.Code = parsed.Code
+		apiErr.Message = strings.TrimSpace(parsed.Message)
+	}
+	return apiErr
 }
