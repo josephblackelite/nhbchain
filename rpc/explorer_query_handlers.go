@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -339,6 +342,18 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 	var firstSeen int64
 	var lastSeen int64
 
+	// The admin/treasury wallet's BuyZNHB credit (NHB paid by every ZNHB
+	// buyer, see applyBuyZNHB) is a real balance mutation that never
+	// appears as this address's own tx.From/tx.To -- it's a side effect
+	// inside the BUYER's transaction. transactionTouchesAddress below can
+	// never find it. Resolving the admin wallet once here (rather than per
+	// transaction) lets the loop synthesize a second, admin-side record for
+	// exactly the one querying address it's relevant to, closing a real gap
+	// reported in production: "wallet correctly credits admin wallet but
+	// there is no history whatsoever" for the admin side of a swap.
+	adminWallet, hasAdminWallet := chain.AdminWallet()
+	queryingAddressIsAdmin := hasAdminWallet && bytes.Equal(addr.Bytes(), adminWallet[:])
+
 	// Scans backward from the chain tip, not forward from genesis: this
 	// endpoint only ever needs the most recent `limit` transactions for an
 	// address (both callers -- nhb_getTransactionHistory for the wallet's
@@ -365,28 +380,50 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 		if err == nil && block != nil && block.Header != nil {
 			blockHash, _ := block.Header.Hash()
 			for _, tx := range block.Transactions {
-				if !transactionTouchesAddress(tx, addr.Bytes()) {
+				if !isExplorerUserFacingType(tx.Type) {
 					continue
 				}
-				if !isExplorerUserFacingType(tx.Type) {
+				touchesDirectly := transactionTouchesAddress(tx, addr.Bytes())
+				// See queryingAddressIsAdmin's doc comment above: a BuyZNHB
+				// transaction affects the admin wallet even though it's
+				// never that transaction's own From/To.
+				touchesAsAdminCredit := queryingAddressIsAdmin && tx.Type == types.TxTypeBuyZNHB
+				if !touchesDirectly && !touchesAsAdminCredit {
 					continue
 				}
 				txHashBytes, hashErr := tx.Hash()
 				if hashErr != nil {
 					continue
 				}
-				record, recErr := buildExplorerTransactionResult(tx, ensureHexPrefix(hex.EncodeToString(txHashBytes)), blockHash, height, block.Header.Timestamp)
-				if recErr != nil {
-					continue
+				txHash := ensureHexPrefix(hex.EncodeToString(txHashBytes))
+				recordedOne := false
+				if touchesDirectly {
+					record, recErr := buildExplorerTransactionResult(tx, txHash, blockHash, height, block.Header.Timestamp)
+					if recErr == nil {
+						if strings.EqualFold(record.From, canonical) {
+							record.Direction = "outgoing"
+						} else if strings.EqualFold(record.To, canonical) {
+							record.Direction = "incoming"
+						}
+						history = append(history, *record)
+						recordedOne = true
+					}
 				}
-				txCount++
-				if firstSeen == 0 || block.Header.Timestamp < firstSeen {
-					firstSeen = block.Header.Timestamp
+				if touchesAsAdminCredit {
+					if record, recErr := buildAdminBuyZNHBCreditRecord(tx, txHash, blockHash, height, block.Header.Timestamp, canonical); recErr == nil {
+						history = append(history, *record)
+						recordedOne = true
+					}
 				}
-				if block.Header.Timestamp > lastSeen {
-					lastSeen = block.Header.Timestamp
+				if recordedOne {
+					txCount++
+					if firstSeen == 0 || block.Header.Timestamp < firstSeen {
+						firstSeen = block.Header.Timestamp
+					}
+					if block.Header.Timestamp > lastSeen {
+						lastSeen = block.Header.Timestamp
+					}
 				}
-				history = append(history, *record)
 			}
 		}
 		if height == 0 {
@@ -528,6 +565,43 @@ func buildExplorerBlockResult(block *types.Block) (*ExplorerBlockResult, error) 
 	return result, nil
 }
 
+// mintVoucherRecipient decodes a TxTypeMint transaction's embedded voucher
+// (core.MintVoucher, JSON-encoded by encodeMintTransaction in core/mint.go)
+// far enough to recover its recipient/token/amount. Unlike every other
+// transaction type here, a mint's real recipient never appears in the
+// standard tx.To field -- core/node.go's MintWithSignature builds the
+// underlying types.Transaction without ever setting To, since the
+// authorized recipient is the voucher's own signed Recipient field instead
+// -- so callers that only look at tx.To/tx.From (transactionTouchesAddress,
+// buildExplorerTransactionResult below) would otherwise treat every mint as
+// touching no address and carrying no asset/amount at all. Mirrors
+// core.MintVoucher's JSON shape locally rather than importing the
+// unexported core.decodeMintTransaction/mintTransactionPayload.
+func mintVoucherRecipient(tx *types.Transaction) (recipient []byte, token string, amountWei *big.Int, ok bool) {
+	if tx == nil || tx.Type != types.TxTypeMint {
+		return nil, "", nil, false
+	}
+	var payload struct {
+		Voucher struct {
+			Recipient string `json:"recipient"`
+			Token     string `json:"token"`
+			Amount    string `json:"amount"`
+		} `json:"voucher"`
+	}
+	if err := json.Unmarshal(tx.Data, &payload); err != nil {
+		return nil, "", nil, false
+	}
+	addr, err := crypto.DecodeAddress(strings.TrimSpace(payload.Voucher.Recipient))
+	if err != nil {
+		return nil, "", nil, false
+	}
+	amount, amountOk := new(big.Int).SetString(strings.TrimSpace(payload.Voucher.Amount), 10)
+	if !amountOk {
+		return nil, "", nil, false
+	}
+	return addr.Bytes(), strings.ToUpper(strings.TrimSpace(payload.Voucher.Token)), amount, true
+}
+
 func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64, timestamp int64) (*ExplorerTransactionResult, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("transaction unavailable")
@@ -536,7 +610,34 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 	decimals := explorerTokenDecimals
 	amount := "0"
 	displayAmount := "0"
-	if tx.Value != nil {
+	mintRecipient, mintToken, mintAmount, isMint := mintVoucherRecipient(tx)
+	if isMint {
+		if mintToken != "" {
+			asset = mintToken
+		}
+		amount = mintAmount.String()
+		displayAmount = formatDecimalAmount(mintAmount, decimals)
+	} else if tx.Type == types.TxTypeBuyZNHB {
+		// applyBuyZNHB never populates tx.Value -- the buyer's requested
+		// ZNHB amount lives in the RLP-encoded payload instead. This is the
+		// one field reliably recoverable for a historical BuyZNHB
+		// transaction without replaying the bonding curve: the purchase
+		// only ever succeeds for the full requested ZNHBAmount (no partial
+		// fills), unlike the NHB side (nhbCost), which is computed on-chain
+		// from cumulative sale state at execution time and isn't otherwise
+		// recorded anywhere -- so it's deliberately not shown here rather
+		// than approximated from MaxNHBAmount (the buyer's slippage
+		// ceiling, not what they actually paid).
+		var payload struct {
+			ZNHBAmount   *big.Int `json:"znhbAmount"`
+			MaxNHBAmount *big.Int `json:"maxNHBAmount"`
+			QuoteID      string   `json:"quoteId,omitempty"`
+		}
+		if err := rlp.DecodeBytes(tx.Data, &payload); err == nil && payload.ZNHBAmount != nil {
+			amount = payload.ZNHBAmount.String()
+			displayAmount = formatDecimalAmount(payload.ZNHBAmount, decimals)
+		}
+	} else if tx.Value != nil {
 		amount = tx.Value.String()
 		displayAmount = formatDecimalAmount(tx.Value, decimals)
 	}
@@ -563,6 +664,13 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 	}
 	if len(tx.To) == 20 {
 		result.To = crypto.MustNewAddress(crypto.NHBPrefix, tx.To).String()
+	} else if isMint && len(mintRecipient) == 20 {
+		// A mint has no natural sender to record as From -- it's a
+		// protocol-authorized credit, not a debit from another account --
+		// so From stays empty here, which is what makes the Direction
+		// classification below (buildAddressActivity) correctly land on
+		// "incoming" for the recipient.
+		result.To = crypto.MustNewAddress(crypto.NHBPrefix, mintRecipient).String()
 	}
 	return result, nil
 }
@@ -570,6 +678,9 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 func transactionTouchesAddress(tx *types.Transaction, address []byte) bool {
 	if tx == nil || len(address) != 20 {
 		return false
+	}
+	if recipient, _, _, ok := mintVoucherRecipient(tx); ok && bytes.Equal(recipient, address) {
+		return true
 	}
 	if from, err := tx.From(); err == nil && len(from) == 20 && strings.EqualFold(hex.EncodeToString(from), hex.EncodeToString(address)) {
 		return true
@@ -861,6 +972,56 @@ func isPaymentLikeType(t types.TxType) bool {
 	default:
 		return false
 	}
+}
+
+// buildAdminBuyZNHBCreditRecord synthesizes the admin wallet's side of a
+// BuyZNHB transaction: real ZNHB left the admin wallet's balance (see
+// applyBuyZNHB), but the admin wallet is never that transaction's own
+// From/To, so buildExplorerTransactionResult's ordinary record (built for
+// the buyer) never surfaces for the admin's own history. Deliberately shows
+// the ZNHB side only (exact -- see buildExplorerTransactionResult's
+// BuyZNHB doc comment), not an approximated NHB revenue figure: the real
+// NHB cost is computed on-chain from the bonding curve's cumulative-sale
+// state at execution time and isn't otherwise recorded anywhere retrievable
+// from historical block data alone, so showing MaxNHBAmount (the buyer's
+// slippage ceiling) as if it were the settled amount would be a real
+// number that's actively wrong, worse for an audit trail than omitting it.
+func buildAdminBuyZNHBCreditRecord(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64, timestamp int64, adminAddress string) (*ExplorerTransactionResult, error) {
+	var payload struct {
+		ZNHBAmount   *big.Int `json:"znhbAmount"`
+		MaxNHBAmount *big.Int `json:"maxNHBAmount"`
+		QuoteID      string   `json:"quoteId,omitempty"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil || payload.ZNHBAmount == nil {
+		return nil, fmt.Errorf("decode buyZNHB payload: %w", err)
+	}
+	buyer := ""
+	if from, err := tx.From(); err == nil && len(from) == 20 {
+		buyer = crypto.MustNewAddress(crypto.NHBPrefix, from).String()
+	}
+	decimals := explorerTokenDecimals
+	result := &ExplorerTransactionResult{
+		ID:            txHash,
+		Hash:          txHash,
+		Type:          formatTxType(tx.Type),
+		Asset:         "ZNHB",
+		Amount:        payload.ZNHBAmount.String(),
+		DisplayAmount: formatDecimalAmount(payload.ZNHBAmount, decimals),
+		Decimals:      decimals,
+		BlockNumber:   blockNumber,
+		Timestamp:     timestamp,
+		Nonce:         tx.Nonce,
+		GasLimit:      tx.GasLimit,
+		GasPrice:      integerString(tx.GasPrice),
+		Status:        "confirmed",
+		From:          adminAddress,
+		To:            buyer,
+		Direction:     "outgoing",
+	}
+	if len(blockHash) > 0 {
+		result.BlockHash = ensureHexPrefix(hex.EncodeToString(blockHash))
+	}
+	return result, nil
 }
 
 func isExplorerUserFacingType(t types.TxType) bool {
