@@ -48,6 +48,12 @@ type lendingAccountResult struct {
 	Address            string                  `json:"address"`
 	Supplied           []lendingPositionResult `json:"supplied"`
 	Borrowed           []lendingPositionResult `json:"borrowed"`
+	// CollateralZNHBWei is the raw ZNHB collateral balance, straight from
+	// state -- unlike CollateralValueUsd, it needs no oracle price and is
+	// never "" when the oracle is unavailable. This is the figure a
+	// withdraw-collateral UI should use to know how much a user can
+	// actually withdraw.
+	CollateralZNHBWei  string                  `json:"collateralZnhbWei"`
 	CollateralValueUsd string                  `json:"collateralValueUsd"`
 	BorrowedValueUsd   string                  `json:"borrowedValueUsd"`
 	RewardsWei         string                  `json:"rewardsWei"`
@@ -61,13 +67,11 @@ type lendingUserAccountResult struct {
 // trimmed base-10 decimal string, e.g. "12.5", mirroring the nhbportal
 // client's own fromWei conversion so amounts surfaced over RPC render
 // consistently with values the client formats locally. NHB is a $1-pegged
-// asset (see README.md) and, per the known collateral-valuation placeholder
-// in native/lending/engine.go (positionHealthy compares raw ZNHB collateral
-// directly against NHB debt with no oracle conversion), ZNHB collateral is
-// currently valued 1:1 against it. This helper therefore doubles as the
-// wei-to-USD converter for collateralValueUsd/borrowedValueUsd until a real
-// price oracle is wired in -- it does not attempt to fix that pricing gap,
-// only to surface whatever value the engine already computes.
+// asset (see README.md), so this is a direct, always-valid USD converter for
+// NHB-denominated amounts (debt, supplied balances). It is NOT used for ZNHB
+// collateral -- see collateralValueUsd below, which requires a real oracle
+// price and must never fall back to treating ZNHB as 1:1 with NHB (that
+// exact fallback caused a live collateral-mispricing incident, 2026-08-24).
 func weiToDecimalString(amount *big.Int) string {
 	if amount == nil || amount.Sign() == 0 {
 		return "0"
@@ -91,13 +95,31 @@ func weiToDecimalString(amount *big.Int) string {
 	return result
 }
 
+// collateralValueUsd renders ZNHB collateral's USD value using the SAME
+// oracle-adjusted conversion (lending.OracleAdjustedCollateralValue) the
+// consensus engine enforces borrows against -- never an independent guess.
+// Returns "" when the market has no live reference price yet
+// (Market.OracleMedianWei unset/zero), so a caller can render "price
+// unavailable" instead of a fabricated dollar figure; it deliberately does
+// NOT fall back to weiToDecimalString's 1:1 treatment the way the old code
+// here used to.
+func collateralValueUsd(market *lending.Market, collateralZNHBWei *big.Int) string {
+	if market == nil || market.OracleMedianWei == nil || market.OracleMedianWei.Sign() <= 0 {
+		return ""
+	}
+	return weiToDecimalString(lending.OracleAdjustedCollateralValue(market, collateralZNHBWei))
+}
+
 // newLendingAccountResult builds the properly JSON-tagged account view from
 // the raw engine state. supplyIndex is the owning market's current supply
 // index (or nil if unknown) and is only used to convert the account's LP
 // share balance into a redeemable NHB amount, matching the conversion the
 // engine already applies internally during Withdraw (see
-// lending.RedeemableSupply).
-func newLendingAccountResult(poolID string, addr [20]byte, account *lending.UserAccount, supplyIndex *big.Int) *lendingAccountResult {
+// lending.RedeemableSupply). market is the same snapshot the caller already
+// loaded for supplyIndex, reused here so collateralValueUsd can read its
+// oracle price -- nil is fine (renders as no-price-available, not a
+// fabricated value).
+func newLendingAccountResult(poolID string, addr [20]byte, account *lending.UserAccount, supplyIndex *big.Int, market *lending.Market) *lendingAccountResult {
 	result := &lendingAccountResult{
 		Address:  "0x" + hex.EncodeToString(addr[:]),
 		Supplied: []lendingPositionResult{},
@@ -106,6 +128,7 @@ func newLendingAccountResult(poolID string, addr [20]byte, account *lending.User
 		// (see native/lending/engine.go); report zero rather than inventing
 		// a figure until that mechanism exists.
 		RewardsWei:         "0",
+		CollateralZNHBWei:  "0",
 		CollateralValueUsd: "0",
 		BorrowedValueUsd:   "0",
 	}
@@ -130,7 +153,10 @@ func newLendingAccountResult(poolID string, addr [20]byte, account *lending.User
 		})
 	}
 
-	result.CollateralValueUsd = weiToDecimalString(account.CollateralZNHB)
+	if account.CollateralZNHB != nil {
+		result.CollateralZNHBWei = account.CollateralZNHB.String()
+	}
+	result.CollateralValueUsd = collateralValueUsd(market, account.CollateralZNHB)
 	result.BorrowedValueUsd = weiToDecimalString(account.DebtNHB)
 	return result
 }
@@ -253,10 +279,18 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 	var supplyIndex *big.Int
 	if market != nil {
 		supplyIndex = market.SupplyIndex
+		// GetMarket above already projects live interest accrual into
+		// market.BorrowIndex (see LendingModule.projectMarketAccrual), but
+		// account.DebtNHB itself was loaded before that projection existed
+		// and never gets re-derived from it on its own -- ProjectUserDebt
+		// re-syncs it, same math the engine runs before every real
+		// Borrow/Repay/Liquidate. A bare zero-value Engine is correct here:
+		// this method never reads its receiver.
+		(&lending.Engine{}).ProjectUserDebt(account, market)
 	}
 
 	writeResult(w, req.ID, lendingUserAccountResult{
-		Account: newLendingAccountResult(resolvedPoolID, addr, account, supplyIndex),
+		Account: newLendingAccountResult(resolvedPoolID, addr, account, supplyIndex, market),
 	})
 }
 

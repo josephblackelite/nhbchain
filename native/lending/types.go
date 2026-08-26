@@ -71,6 +71,14 @@ type Market struct {
 	// InterestModel.BorrowAPR). Like DepositApyBps it is computed on demand
 	// and is not persisted.
 	BorrowApyBps uint64 `json:"borrowApyBps"`
+	// AvailableLiquidityWei is TotalNHBSupplied minus TotalNHBBorrowed
+	// (floored at zero, see Engine.AvailableLiquidity), the actual amount
+	// left to borrow or withdraw right now. Like DepositApyBps/BorrowApyBps
+	// it is computed on demand by the RPC layer and not persisted -- without
+	// it, clients had no way to tell net-available liquidity from gross
+	// total supplied (see nhbportal's lendingStore.ts computeUtilization,
+	// which used to double-count borrowed funds as if still on hand).
+	AvailableLiquidityWei string `json:"availableLiquidityWei"`
 }
 
 // CollateralRouting captures the liquidation collateral distribution between

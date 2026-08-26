@@ -289,7 +289,7 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	// Determine the underlying NHB using the current supply index.
 	redeemAmount := liquidityFromShares(amountLP, market.SupplyIndex)
 
-	liquidity := e.availableLiquidity(market)
+	liquidity := e.AvailableLiquidity(market)
 	if liquidity.Cmp(redeemAmount) < 0 {
 		return nil, errInsufficientLiquidity
 	}
@@ -545,7 +545,7 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		}
 	}
 
-	liquidity := e.availableLiquidity(market)
+	liquidity := e.AvailableLiquidity(market)
 	if liquidity.Cmp(totalOut) < 0 {
 		return nil, errInsufficientLiquidity
 	}
@@ -1031,7 +1031,13 @@ func (e *Engine) persistAccount(addr crypto.Address, acc *types.Account) error {
 	return e.state.PutAccount(addr, acc)
 }
 
-func (e *Engine) availableLiquidity(market *Market) *big.Int {
+// AvailableLiquidity returns the pool's net-available liquidity --
+// TotalNHBSupplied minus TotalNHBBorrowed, floored at zero -- the same
+// figure Borrow/WithdrawCollateral enforce against. Exported so
+// rpc/lending_handlers.go can surface the real available-to-borrow number
+// instead of a gross total that double-counts already-borrowed funds as if
+// still on hand.
+func (e *Engine) AvailableLiquidity(market *Market) *big.Int {
 	liquidity := new(big.Int).Sub(market.TotalNHBSupplied, market.TotalNHBBorrowed)
 	if liquidity.Sign() < 0 {
 		return big.NewInt(0)
@@ -1068,7 +1074,7 @@ func (e *Engine) guardOracle(market *Market) error {
 	return nil
 }
 
-// oracleAdjustedCollateralValue converts a raw ZNHB-wei collateral amount
+// OracleAdjustedCollateralValue converts a raw ZNHB-wei collateral amount
 // into NHB-wei terms using market.OracleMedianWei -- the NHB-wei value of
 // exactly one whole ZNHB (1e18 ZNHB-wei), as written by
 // applyLendingRefPriceTransaction (core/lending_tx.go). Rounds down
@@ -1077,7 +1083,13 @@ func (e *Engine) guardOracle(market *Market) error {
 // to strict 1:1 when no oracle price has ever been submitted for this market
 // (OracleMedianWei unset/zero), preserving this engine's original behaviour
 // until the first real submission lands.
-func oracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *big.Int {
+//
+// Exported so rpc/lending_handlers.go can render the SAME collateral value
+// this engine actually enforces borrows against, instead of maintaining its
+// own separate conversion that can silently drift from what consensus code
+// does -- see the 2026-08-24 incident where the RPC layer independently
+// hardcoded a 1:1 valuation and displayed it as a real USD figure.
+func OracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *big.Int {
 	if collateralZNHBWei == nil || collateralZNHBWei.Sign() <= 0 {
 		return big.NewInt(0)
 	}
@@ -1089,7 +1101,7 @@ func oracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *
 }
 
 // positionHealthy compares collateral (ZNHB wei, converted to NHB-wei terms
-// via market's oracle price -- see oracleAdjustedCollateralValue) against
+// via market's oracle price -- see OracleAdjustedCollateralValue) against
 // debt (NHB wei). Callers that let debt influence the outcome (i.e. debt >
 // 0) must call guardOracle(market) first so a stale or wildly-deviated price
 // can never silently pass this check.
@@ -1097,7 +1109,7 @@ func (e *Engine) positionHealthy(market *Market, collateral, debt *big.Int) bool
 	if debt == nil || debt.Sign() == 0 {
 		return true
 	}
-	value := oracleAdjustedCollateralValue(market, collateral)
+	value := OracleAdjustedCollateralValue(market, collateral)
 	if value.Sign() == 0 {
 		return false
 	}
@@ -1118,7 +1130,7 @@ func (e *Engine) withinMaxLTV(market *Market, collateral, debt *big.Int) bool {
 	if debt == nil || debt.Sign() == 0 {
 		return true
 	}
-	value := oracleAdjustedCollateralValue(market, collateral)
+	value := OracleAdjustedCollateralValue(market, collateral)
 	if value.Sign() == 0 {
 		return false
 	}
@@ -1350,4 +1362,29 @@ func (e *Engine) syncDebt(user *UserAccount, market *Market) {
 		return
 	}
 	user.DebtNHB = debtFromScaled(user.ScaledDebt, market.BorrowIndex)
+}
+
+// ProjectAccrual runs the same interest-accrual math the block-processing
+// path applies (accrueInterest) against the given market, mutating its
+// indices/totals in place. Exported so read-only RPC handlers
+// (rpc/modules/lending.go's GetMarket/GetUserAccount) can show live-accrued
+// figures instead of whatever a real mutating transaction last wrote --
+// today those reads return a market/account frozen at its last on-chain
+// write, sometimes many blocks stale. Safe to call from a read path only
+// because those handlers already run inside Node.WithStateView, a
+// disposable state-trie copy discarded once the RPC call returns; this
+// mutation never reaches consensus state.
+func (e *Engine) ProjectAccrual(market *Market) error {
+	_, _, err := e.accrueInterest(market)
+	return err
+}
+
+// ProjectUserDebt re-syncs a user's DebtNHB against the market's current
+// BorrowIndex, mirroring what every real Borrow/Repay/Liquidate call does
+// before reading debt (see the accrueInterest-then-syncDebt pairing used
+// throughout this file). Call ProjectAccrual(market) first so the index
+// itself is fresh -- same ordering, same WithStateView safety note as
+// ProjectAccrual above.
+func (e *Engine) ProjectUserDebt(user *UserAccount, market *Market) {
+	e.syncDebt(user, market)
 }

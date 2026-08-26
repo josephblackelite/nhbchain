@@ -79,7 +79,10 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 				market = stored
 			}
 		}
-		return m.reconcileLegacyPoolStateInto(manager, id)
+		if err := m.reconcileLegacyPoolStateInto(manager, id); err != nil {
+			return err
+		}
+		return m.projectMarketAccrual(manager, id, market)
 	})
 	if err != nil {
 		return nil, params, m.wrapError(err)
@@ -89,6 +92,29 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 	}
 	m.applyComputedAPY(market)
 	return market, params, nil
+}
+
+// projectMarketAccrual re-runs the engine's own interest-accrual math
+// (Engine.ProjectAccrual) against an already-loaded market so RPC reads see
+// live-accrued indices/totals instead of whatever a real mutating
+// transaction last wrote -- sometimes many blocks stale, since nothing
+// about a plain read triggers accrual on its own. Must run inside the SAME
+// WithStateView-scoped manager the caller already holds: mutating market
+// here is safe only because that view is discarded once the RPC call
+// returns, never committed to real state. A nil market (pool genuinely
+// doesn't exist yet) is a no-op, not an error.
+func (m *LendingModule) projectMarketAccrual(manager *nhbstate.Manager, poolID string, market *lending.Market) error {
+	if market == nil {
+		return nil
+	}
+	engine := lending.NewEngine(m.node.LendingModuleAddress(), m.node.LendingCollateralAddress(), m.node.LendingRiskParameters())
+	engine.SetState(&lendingStateAdapter{manager: manager, poolID: poolID})
+	engine.SetPoolID(poolID)
+	engine.SetInterestModel(m.node.LendingInterestModel())
+	engine.SetReserveFactor(m.node.LendingReserveFactorBps())
+	engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
+	engine.SetBlockHeight(m.node.GetHeight())
+	return engine.ProjectAccrual(market)
 }
 
 func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *ModuleError) {
@@ -113,7 +139,18 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 			}
 			markets = list
 		}
-		return m.reconcileLegacyPoolStateInto(manager, defaultLendingPoolID)
+		if err := m.reconcileLegacyPoolStateInto(manager, defaultLendingPoolID); err != nil {
+			return err
+		}
+		for _, market := range markets {
+			if market == nil {
+				continue
+			}
+			if err := m.projectMarketAccrual(manager, market.PoolID, market); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, params, m.wrapError(err)
@@ -127,12 +164,13 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 	return markets, params, nil
 }
 
-// applyComputedAPY populates a market's read-only DepositApyBps/BorrowApyBps
-// fields from the node's configured utilisation-based interest model. These
-// values are derived on demand (not persisted, see storedLendingMarket in
-// core/state/manager.go), so every read path that hands a market snapshot to
-// an RPC caller must recompute them here using the same rate curve the
-// engine applies during accrual (see InterestModel.BorrowAPR/SupplyAPY).
+// applyComputedAPY populates a market's read-only DepositApyBps/BorrowApyBps/
+// AvailableLiquidityWei fields from the node's configured utilisation-based
+// interest model. These values are derived on demand (not persisted, see
+// storedLendingMarket in core/state/manager.go), so every read path that
+// hands a market snapshot to an RPC caller must recompute them here using
+// the same rate curve the engine applies during accrual (see
+// InterestModel.BorrowAPR/SupplyAPY).
 func (m *LendingModule) applyComputedAPY(market *lending.Market) {
 	if m == nil || m.node == nil || market == nil {
 		return
@@ -148,6 +186,13 @@ func (m *LendingModule) applyComputedAPY(market *lending.Market) {
 	supplyAPY := model.SupplyAPY(market.TotalNHBBorrowed, market.TotalNHBSupplied, reserveBps)
 	market.BorrowApyBps = lending.RateBps(borrowAPR)
 	market.DepositApyBps = lending.RateBps(supplyAPY)
+	// AvailableLiquidity is a stateless calculation (ignores the receiver
+	// entirely -- pure function of market.TotalNHBSupplied/TotalNHBBorrowed),
+	// so a bare zero-value Engine is correct here: it keeps this single
+	// source of truth shared with the real Borrow/WithdrawCollateral path
+	// instead of re-deriving the same subtraction a second place that could
+	// drift.
+	market.AvailableLiquidityWei = (&lending.Engine{}).AvailableLiquidity(market).String()
 }
 
 func (m *LendingModule) defaultMarket(poolID string) *lending.Market {
