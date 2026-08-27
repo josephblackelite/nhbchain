@@ -34,13 +34,9 @@ func TestHandleSwapLimitsSuccess(t *testing.T) {
 		SlippageBps:        50,
 		OraclePriority:     []string{"manual"},
 		Risk: swap.RiskConfig{
-			PerAddressDailyCapWei:   "1000",
-			PerAddressMonthlyCapWei: "5000",
-			PerTxMinWei:             "1",
-			PerTxMaxWei:             "2000",
-			VelocityWindowSeconds:   600,
-			VelocityMaxMints:        5,
-			SanctionsCheckEnabled:   true,
+			VelocityWindowSeconds: 600,
+			VelocityMaxMints:      5,
+			SanctionsCheckEnabled: true,
 		},
 	}
 	env.node.SetSwapConfig(cfg)
@@ -72,11 +68,17 @@ func TestHandleSwapLimitsSuccess(t *testing.T) {
 	if resp.Month["mintedWei"] != "0" {
 		t.Fatalf("expected month minted 0, got %s", resp.Month["mintedWei"])
 	}
-	if resp.DayRemainingWei != "1000" {
-		t.Fatalf("expected day remaining 1000, got %s", resp.DayRemainingWei)
+	// The mint-side numeric caps no longer exist at all (ZNHB voucher mints
+	// draw from a fixed treasury Sale Pool rather than minting new supply,
+	// so they carry no circuit-breaker caps -- see
+	// ProposalKindSwapRiskParams's doc comment) -- cfg.Risk.Parameters()
+	// always leaves the four cap fields nil, so the handler omits both
+	// "*RemainingWei" keys from the response entirely.
+	if resp.DayRemainingWei != "" {
+		t.Fatalf("expected no day remaining (mint-side caps no longer exist), got %s", resp.DayRemainingWei)
 	}
-	if resp.MonthRemainingWei != "5000" {
-		t.Fatalf("expected month remaining 5000, got %s", resp.MonthRemainingWei)
+	if resp.MonthRemainingWei != "" {
+		t.Fatalf("expected no month remaining (mint-side caps no longer exist), got %s", resp.MonthRemainingWei)
 	}
 	if resp.Velocity.MaxMints != 5 || resp.Velocity.Remaining != 5 {
 		t.Fatalf("unexpected velocity payload: %+v", resp.Velocity)

@@ -35,6 +35,8 @@ const (
 	envNOWPaymentsAPIKey      = "BUYBACKD_NOWPAYMENTS_API_KEY"
 	envKeystorePaths          = "BUYBACKD_KEYSTORE_PATHS"
 	envKeystorePassphraseEnvs = "BUYBACKD_KEYSTORE_PASSPHRASE_ENVS"
+	envNHBPortalOracleURL     = "BUYBACKD_NHBPORTAL_ORACLE_URL"
+	envNHBPortalOracleToken   = "BUYBACKD_NHBPORTAL_ORACLE_TOKEN"
 
 	defaultRPCURL              = "https://127.0.0.1:8081"
 	defaultRPCTimeoutSeconds   = 15
@@ -55,17 +57,19 @@ type SignerConfig struct {
 
 // Config captures buybackd's full runtime configuration.
 type Config struct {
-	RPCBaseURL        string
-	RPCBearerToken    string
-	RPCTimeout        time.Duration
-	Pair              string
-	Threshold         int
-	PollInterval      time.Duration
-	MaxQuoteAge       time.Duration
-	OraclePriority    []string
-	ManualRate        string
-	NOWPaymentsAPIKey string
-	Signers           []SignerConfig
+	RPCBaseURL         string
+	RPCBearerToken     string
+	RPCTimeout         time.Duration
+	Pair               string
+	Threshold          int
+	PollInterval       time.Duration
+	MaxQuoteAge        time.Duration
+	OraclePriority     []string
+	ManualRate         string
+	NOWPaymentsAPIKey  string
+	NHBPortalOracleURL string
+	NHBPortalOracleTkn string
+	Signers            []SignerConfig
 }
 
 // LoadFromEnv constructs a Config from environment variables and defaults.
@@ -74,20 +78,35 @@ type Config struct {
 // before deciding whether to fail.
 func LoadFromEnv() Config {
 	cfg := Config{
-		RPCBaseURL:        stringFromEnv(envRPCURL, defaultRPCURL),
-		RPCBearerToken:    strings.TrimSpace(os.Getenv(envRPCBearerToken)),
-		RPCTimeout:        time.Duration(intFromEnv(envRPCTimeoutSeconds, defaultRPCTimeoutSeconds)) * time.Second,
-		Pair:              stringFromEnv(envPair, defaultPair),
-		Threshold:         intFromEnv(envThreshold, defaultThreshold),
-		PollInterval:      time.Duration(intFromEnv(envPollIntervalSeconds, defaultPollIntervalSeconds)) * time.Second,
-		MaxQuoteAge:       time.Duration(intFromEnv(envMaxQuoteAgeSeconds, defaultMaxQuoteAgeSeconds)) * time.Second,
-		OraclePriority:    splitAndTrim(os.Getenv(envOraclePriority)),
-		ManualRate:        strings.TrimSpace(os.Getenv(envManualRate)),
-		NOWPaymentsAPIKey: strings.TrimSpace(os.Getenv(envNOWPaymentsAPIKey)),
-		Signers:           loadSigners(),
+		RPCBaseURL:         stringFromEnv(envRPCURL, defaultRPCURL),
+		RPCBearerToken:     strings.TrimSpace(os.Getenv(envRPCBearerToken)),
+		RPCTimeout:         time.Duration(intFromEnv(envRPCTimeoutSeconds, defaultRPCTimeoutSeconds)) * time.Second,
+		Pair:               stringFromEnv(envPair, defaultPair),
+		Threshold:          intFromEnv(envThreshold, defaultThreshold),
+		PollInterval:       time.Duration(intFromEnv(envPollIntervalSeconds, defaultPollIntervalSeconds)) * time.Second,
+		MaxQuoteAge:        time.Duration(intFromEnv(envMaxQuoteAgeSeconds, defaultMaxQuoteAgeSeconds)) * time.Second,
+		OraclePriority:     splitAndTrim(os.Getenv(envOraclePriority)),
+		ManualRate:         strings.TrimSpace(os.Getenv(envManualRate)),
+		NOWPaymentsAPIKey:  strings.TrimSpace(os.Getenv(envNOWPaymentsAPIKey)),
+		NHBPortalOracleURL: strings.TrimSpace(os.Getenv(envNHBPortalOracleURL)),
+		NHBPortalOracleTkn: strings.TrimSpace(os.Getenv(envNHBPortalOracleToken)),
+		Signers:            loadSigners(),
 	}
 	if len(cfg.OraclePriority) == 0 {
-		cfg.OraclePriority = []string{"manual", "nowpayments", "coingecko"}
+		// No explicit operator override (BUYBACKD_ORACLE_PRIORITY unset) --
+		// pick the default order. When an NHBPortal oracle URL is configured,
+		// it becomes the primary source (see NHBPortalOracle's doc comment
+		// for why: it's a superadmin-set, continuously-updatable rate meant
+		// to lead, not a fallback) by defaulting it to the front of the
+		// list; main.go's buildQuoteSource only ever registers "nhbportal"
+		// with the aggregator when this URL is set, so listing it here
+		// otherwise would be a silent no-op, never a behavior change for a
+		// deployment that hasn't configured it.
+		if cfg.NHBPortalOracleURL != "" {
+			cfg.OraclePriority = []string{"nhbportal", "manual", "nowpayments", "coingecko"}
+		} else {
+			cfg.OraclePriority = []string{"manual", "nowpayments", "coingecko"}
+		}
 	}
 	return cfg
 }
@@ -111,6 +130,9 @@ func (cfg Config) Sanitized() Config {
 	clone := cfg
 	if clone.RPCBearerToken != "" {
 		clone.RPCBearerToken = "***"
+	}
+	if clone.NHBPortalOracleTkn != "" {
+		clone.NHBPortalOracleTkn = "***"
 	}
 	return clone
 }

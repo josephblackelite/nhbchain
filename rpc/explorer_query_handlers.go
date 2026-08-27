@@ -400,7 +400,9 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 				if touchesDirectly {
 					record, recErr := buildExplorerTransactionResult(tx, txHash, blockHash, height, block.Header.Timestamp)
 					if recErr == nil {
-						if strings.EqualFold(record.From, canonical) {
+						if direction, handled := selfDirectedTransactionDirection(tx.Type); handled {
+							record.Direction = direction
+						} else if strings.EqualFold(record.From, canonical) {
 							record.Direction = "outgoing"
 						} else if strings.EqualFold(record.To, canonical) {
 							record.Direction = "incoming"
@@ -673,6 +675,55 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 		result.To = crypto.MustNewAddress(crypto.NHBPrefix, mintRecipient).String()
 	}
 	return result, nil
+}
+
+// selfDirectedTransactionDirection overrides the naive
+// "From==queried-address => outgoing, To==queried-address => incoming"
+// heuristic for transaction types where the queried address is always the
+// transaction's own signer (these are self-service pool/protocol
+// interactions, not payments to a third party) but where that heuristic
+// gets the economic direction backwards.
+//
+// This is the fix for a real, live-reported bug: a successful $150 borrow
+// (TxTypeLendingBorrowNHB) rendered in the wallet's own transaction detail
+// view as "-150.00 NHB / Outgoing" -- because the borrower is the tx's
+// From (they signed it to draw down the pool), the old heuristic called it
+// outgoing even though the pool credits the borrower's NHB balance. Verified
+// against each type's actual state-transition effect (see
+// core/lending_native.go's apply* functions and core/state_transition.go's
+// StakeClaim/StakeClaimRewards) rather than inferred from the type's name:
+//
+//   - LendingBorrowNHB: the pool pays out borrowed NHB to the caller -> incoming.
+//   - LendingWithdrawNHB: previously supplied NHB liquidity is paid back -> incoming.
+//   - LendingWithdrawZNHB: previously deposited ZNHB collateral is paid back -> incoming.
+//   - StakeClaim: a matured unbonding entry is credited into BalanceZNHB -> incoming.
+//   - StakeClaimRewards: accrued staking rewards are credited into the caller's
+//     balance -> incoming.
+//
+// LendingSupplyNHB, LendingDepositZNHB, LendingRepayNHB, and TxTypeStake are
+// deliberately left out of this override: those really do debit the caller
+// (NHB/ZNHB leaves their spendable balance into the pool/stake), so the
+// existing From==queried-address => "outgoing" fallback already gets them
+// right.
+//
+// TxTypeUnstake is also left out, but for a different reason: it only moves
+// ZNHB from the locked "Stake" bucket into a pending-unbond entry, neither of
+// which is spendable balance, so no credit or debit happens at that step (the
+// real debit already happened at the original TxTypeStake, and the eventual
+// credit is a separate, later TxTypeStakeClaim). Falling through to the
+// default heuristic would still mislabel it "outgoing" for an operation that
+// moves nothing in or out right now; that's a known, lower-priority gap this
+// change does not attempt to fix (see the caller's comment for scoping).
+func selfDirectedTransactionDirection(txType types.TxType) (direction string, handled bool) {
+	switch txType {
+	case types.TxTypeLendingBorrowNHB,
+		types.TxTypeLendingWithdrawNHB,
+		types.TxTypeLendingWithdrawZNHB,
+		types.TxTypeStakeClaim,
+		types.TxTypeStakeClaimRewards:
+		return "incoming", true
+	}
+	return "", false
 }
 
 func transactionTouchesAddress(tx *types.Transaction, address []byte) bool {

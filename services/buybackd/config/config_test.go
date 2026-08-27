@@ -106,6 +106,70 @@ func TestValidate_RejectsInvalidPair(t *testing.T) {
 	}
 }
 
+// TestLoadFromEnv_DefaultOraclePriorityWithoutNHBPortal confirms the
+// pre-existing default order (manual, nowpayments, coingecko) is unchanged
+// when BUYBACKD_ORACLE_PRIORITY and BUYBACKD_NHBPORTAL_ORACLE_URL are both
+// unset -- the common case, and the one the nhbportal-aware default must
+// never alter.
+func TestLoadFromEnv_DefaultOraclePriorityWithoutNHBPortal(t *testing.T) {
+	env := validEnv()
+	delete(env, envOraclePriority)
+	withEnv(t, env)
+	cfg := LoadFromEnv()
+	want := []string{"manual", "nowpayments", "coingecko"}
+	if !equalStringSlices(cfg.OraclePriority, want) {
+		t.Fatalf("oracle priority = %v, want %v", cfg.OraclePriority, want)
+	}
+}
+
+// TestLoadFromEnv_DefaultOraclePriorityPutsNHBPortalFirstWhenConfigured is
+// the regression test for the real finding: buildQuoteSource only ever
+// registers "nhbportal" with the oracle aggregator when
+// BUYBACKD_NHBPORTAL_ORACLE_URL is set, but the default OraclePriority list
+// never included "nhbportal" at all, so the aggregator would never actually
+// consult it even when configured as the intended primary source. When the
+// URL is set and the operator has not explicitly overridden
+// BUYBACKD_ORACLE_PRIORITY, "nhbportal" must lead the default order.
+func TestLoadFromEnv_DefaultOraclePriorityPutsNHBPortalFirstWhenConfigured(t *testing.T) {
+	env := validEnv()
+	delete(env, envOraclePriority)
+	env[envNHBPortalOracleURL] = "https://portal.example.com/admin/finance/znhb-rate"
+	withEnv(t, env)
+	cfg := LoadFromEnv()
+	want := []string{"nhbportal", "manual", "nowpayments", "coingecko"}
+	if !equalStringSlices(cfg.OraclePriority, want) {
+		t.Fatalf("oracle priority = %v, want %v", cfg.OraclePriority, want)
+	}
+}
+
+// TestLoadFromEnv_ExplicitOraclePriorityOverridesNHBPortalDefault confirms
+// an operator's own explicit BUYBACKD_ORACLE_PRIORITY always wins over the
+// nhbportal-aware default, even when BUYBACKD_NHBPORTAL_ORACLE_URL is also
+// set.
+func TestLoadFromEnv_ExplicitOraclePriorityOverridesNHBPortalDefault(t *testing.T) {
+	env := validEnv()
+	env[envOraclePriority] = "coingecko,manual"
+	env[envNHBPortalOracleURL] = "https://portal.example.com/admin/finance/znhb-rate"
+	withEnv(t, env)
+	cfg := LoadFromEnv()
+	want := []string{"coingecko", "manual"}
+	if !equalStringSlices(cfg.OraclePriority, want) {
+		t.Fatalf("oracle priority = %v, want %v (explicit operator override must not be reordered)", cfg.OraclePriority, want)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestSanitized_MasksBearerToken(t *testing.T) {
 	withEnv(t, validEnv())
 	cfg := LoadFromEnv()

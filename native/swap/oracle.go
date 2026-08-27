@@ -536,6 +536,78 @@ func (o *CoinGeckoOracle) GetRate(base, quote string) (PriceQuote, error) {
 	return PriceQuote{Rate: rat, Timestamp: ts, Source: "coingecko"}, nil
 }
 
+// NHBPortalOracle fetches the manually-curated reference rate from
+// nhbportal's superadmin-managed rate store (see nhbportal's
+// /admin/finance/znhb-rate page and src/lib/server/admin/znhbReferenceRate.ts)
+// via a narrow, bearer-token-gated internal endpoint. Unlike CoinGeckoOracle
+// or NowPaymentsOracle, this is not a discovered market price -- ZNHB has no
+// real external listing (see docs/tokenomics/tokenomics.md) -- it is a
+// considered human judgment a superadmin entered, with its own approval
+// workflow on the nhbportal side. This is the primary quote source for
+// buybackd's manual oracle priority entry; the static env-var-seeded manual
+// rate (see services/buybackd/main.go's buildQuoteSource) remains as a
+// fallback for when nhbportal is unreachable.
+type NHBPortalOracle struct {
+	client   HTTPDoer
+	endpoint string
+	token    string
+}
+
+// NewNHBPortalOracle constructs the adapter. endpoint is the full URL to
+// nhbportal's GET /api/internal/oracle/znhb-reference-rate route; token is
+// sent as a bearer credential and must match that route's
+// BUYBACKD_ORACLE_SECRET.
+func NewNHBPortalOracle(client HTTPDoer, endpoint, token string) *NHBPortalOracle {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return &NHBPortalOracle{client: client, endpoint: strings.TrimSpace(endpoint), token: strings.TrimSpace(token)}
+}
+
+func (o *NHBPortalOracle) GetRate(base, quote string) (PriceQuote, error) {
+	if o == nil || o.endpoint == "" {
+		return PriceQuote{}, fmt.Errorf("nhbportal oracle not configured")
+	}
+	req, err := http.NewRequest(http.MethodGet, o.endpoint, nil)
+	if err != nil {
+		return PriceQuote{}, err
+	}
+	if o.token != "" {
+		req.Header.Set("Authorization", "Bearer "+o.token)
+	}
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return PriceQuote{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return PriceQuote{}, fmt.Errorf("nhbportal oracle: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var payload struct {
+		Rate      string `json:"rate"`
+		UpdatedAt string `json:"updatedAt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return PriceQuote{}, fmt.Errorf("nhbportal oracle: decode: %w", err)
+	}
+	rateStr := strings.TrimSpace(payload.Rate)
+	if rateStr == "" {
+		return PriceQuote{}, fmt.Errorf("nhbportal oracle: empty rate")
+	}
+	rat, ok := new(big.Rat).SetString(rateStr)
+	if !ok || rat.Sign() <= 0 {
+		return PriceQuote{}, fmt.Errorf("nhbportal oracle: invalid rate %q", payload.Rate)
+	}
+	ts := time.Now().UTC()
+	if payload.UpdatedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, payload.UpdatedAt); err == nil {
+			ts = parsed
+		}
+	}
+	return PriceQuote{Rate: rat, Timestamp: ts, Source: "nhbportal"}, nil
+}
+
 func normaliseSymbol(symbol string) string {
 	return strings.ToUpper(strings.TrimSpace(symbol))
 }
@@ -800,9 +872,17 @@ type Config struct {
 	TwapSampleCap             int
 	PriceProofMaxDeviationBps uint64
 	PayoutAuthorities         []string
-	Risk                      RiskConfig      `toml:"risk"`
-	Providers                 ProviderConfig  `toml:"providers"`
-	Sanctions                 SanctionsConfig `toml:"sanctions"`
+	// Risk configures the mint-side (fiat-gateway voucher mint) guardrails
+	// still left in local config -- velocity, sanctions,
+	// price-proof-signature enforcement, cash-out. The numeric circuit
+	// breaker caps (per-tx min/max, per-address daily/monthly) that used to
+	// live here, and the entire redeem-side [swap.redeemRisk] section, are
+	// GONE from local config -- both are now exclusively
+	// governance-controlled. See RiskConfig's doc comment and
+	// core/swap_risk_params.go.
+	Risk      RiskConfig      `toml:"risk"`
+	Providers ProviderConfig  `toml:"providers"`
+	Sanctions SanctionsConfig `toml:"sanctions"`
 }
 
 // Normalise applies defaults and canonical casing to the configuration values.

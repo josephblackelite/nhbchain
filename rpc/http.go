@@ -296,6 +296,9 @@ type Server struct {
 	explorerSnapshot *ExplorerSnapshotResult
 	explorerHeight   uint64
 	explorerWindow   int
+
+	txWindowStatsMu    sync.Mutex
+	txWindowStatsCache map[int64]*txWindowStatsCacheEntry
 }
 
 type proxyPolicy struct {
@@ -1022,7 +1025,8 @@ func isPublicSwapMethod(method string) bool {
 	switch strings.TrimSpace(method) {
 	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export",
 		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus",
-		"nhb_getSwapQuote", "nhb_checkSwapAllowance", "nhb_getOraclePrice":
+		"nhb_getSwapQuote", "nhb_checkSwapAllowance", "nhb_getOraclePrice",
+		"swap_getRiskParams":
 		return true
 	default:
 		return false
@@ -1376,6 +1380,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetRewardHistory(recorder, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(recorder, r, req)
+	case "swap_getRiskParams":
+		s.handleSwapGetRiskParams(recorder, r, req)
 	case "swap_submitVoucher":
 		s.handleSwapSubmitVoucher(recorder, r, req)
 	case "swap_voucher_get":
@@ -1500,6 +1506,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSwapSetManualQuote(recorder, r, req)
+	case "swap_listPendingRedemptions":
+		if authErr := s.requireAuthInto(&r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleSwapListPendingRedemptions(recorder, r, req)
 	case "pos_sweepVoids":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
@@ -1535,6 +1547,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLendingRepayNHB(recorder, r, req)
 	case "lending_liquidate":
 		s.handleLendingLiquidate(recorder, r, req)
+	case "market_listOpenListings":
+		s.handleMarketListOpenListings(recorder, r, req)
+	case "market_getListing":
+		s.handleMarketGetListing(recorder, r, req)
+	case "market_getMyListings":
+		s.handleMarketGetMyListings(recorder, r, req)
+	case "market_getMyFills":
+		s.handleMarketGetMyFills(recorder, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(recorder, r, req)
 	case "stake_undelegate":
@@ -1722,6 +1742,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handlePotsoRewardClaim(recorder, r, req)
 	case "potso_rewards_history":
 		s.handlePotsoRewardsHistory(recorder, r, req)
+	case "potso_rewards_outflow":
+		s.handlePotsoRewardsOutflow(recorder, r, req)
+	case "nhb_txWindowStats":
+		s.handleTxWindowStats(recorder, r, req)
 	case "potso_export_epoch":
 		s.handlePotsoExportEpoch(recorder, r, req)
 	case "potso_submitEvidence":

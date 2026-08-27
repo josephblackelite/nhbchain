@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"nhbchain/crypto"
 	"nhbchain/native/potso"
@@ -305,6 +306,152 @@ func (s *Server) handlePotsoExportEpoch(w http.ResponseWriter, _ *http.Request, 
 		Winners:   winners,
 	}
 	writeResult(w, req.ID, result)
+}
+
+// potsoRewardsOutflowMaxEpochsScanned bounds the backward epoch scan
+// performed by potso_rewards_outflow. Epochs settle roughly every 20-30
+// minutes (EpochLengthBlocks in config.toml), so even several years of
+// history is a small number of epochs compared to this bound -- it exists
+// only to stop a pathological scan, not to trade accuracy for speed the way
+// explorerHistoricalBackfillLimit does for near-tip explorer lookups.
+const potsoRewardsOutflowMaxEpochsScanned = 2_000_000
+
+type potsoRewardsOutflowParams struct {
+	LookbackDays int64 `json:"lookbackDays"`
+}
+
+// potsoRewardsOutflowResult reports network-wide POTSO reward payouts
+// (RewardEpochMeta.TotalPaid, summed across every settled epoch) for two
+// adjacent day windows ending today: "latest" covers the most recent
+// lookbackDays calendar days, "previous" the lookbackDays before that. Each
+// window's *Complete flag is false only if the scan hit
+// potsoRewardsOutflowMaxEpochsScanned before fully accounting for that
+// window -- callers must treat an incomplete window's total as a partial,
+// not a true, sum.
+type potsoRewardsOutflowResult struct {
+	LookbackDays        int64  `json:"lookbackDays"`
+	LatestTotalPaid     string `json:"latestTotalPaid"`
+	PreviousTotalPaid   string `json:"previousTotalPaid"`
+	LatestEpochs        int    `json:"latestEpochs"`
+	PreviousEpochs      int    `json:"previousEpochs"`
+	LatestComplete      bool   `json:"latestComplete"`
+	PreviousComplete    bool   `json:"previousComplete"`
+	EpochsScanned       int    `json:"epochsScanned"`
+	OldestEpochScanned  uint64 `json:"oldestEpochScanned"`
+	NewestEpochScanned  uint64 `json:"newestEpochScanned"`
+	AsOfDay             string `json:"asOfDay"`
+}
+
+func (s *Server) handlePotsoRewardsOutflow(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "rewards outflow requires a parameter object", nil)
+		return
+	}
+	var params potsoRewardsOutflowParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameters", err.Error())
+		return
+	}
+	if params.LookbackDays <= 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "lookbackDays must be positive", nil)
+		return
+	}
+
+	result, err := s.computePotsoRewardsOutflow(params.LookbackDays)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to compute rewards outflow", err.Error())
+		return
+	}
+	writeResult(w, req.ID, result)
+}
+
+// computePotsoRewardsOutflow walks epochs backward from the latest settled
+// one, bucketing each epoch's TotalPaid into the "latest" or "previous"
+// window by the epoch's own Day label. Epoch numbers increase monotonically
+// with time and Day is derived from the settlement-time timestamp (see
+// maybeProcessPotsoRewards), so Day is non-decreasing as epoch number
+// increases -- a single backward pass suffices, stopping as soon as an
+// epoch older than the previous window's start is seen (or epoch 0 is
+// reached).
+func (s *Server) computePotsoRewardsOutflow(lookbackDays int64) (*potsoRewardsOutflowResult, error) {
+	if s == nil || s.node == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	result := &potsoRewardsOutflowResult{
+		LookbackDays:      lookbackDays,
+		LatestTotalPaid:   "0",
+		PreviousTotalPaid: "0",
+		AsOfDay:           today.Format(potso.DayFormat),
+	}
+
+	latestEpoch, ok, err := s.node.PotsoLatestRewardEpoch()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// No epoch has ever settled -- both windows are trivially complete
+		// (there is nothing to scan) and correctly zero.
+		result.LatestComplete = true
+		result.PreviousComplete = true
+		return result, nil
+	}
+	result.NewestEpochScanned = latestEpoch
+
+	latestTotal := big.NewInt(0)
+	previousTotal := big.NewInt(0)
+	var (
+		scanned      int
+		latestDone   bool
+		previousDone bool
+		epoch        = latestEpoch
+	)
+
+	for scanned < potsoRewardsOutflowMaxEpochsScanned {
+		meta, ok, metaErr := s.node.PotsoRewardEpochInfo(epoch)
+		scanned++
+		result.OldestEpochScanned = epoch
+
+		reachedFirstEpoch := epoch == 0
+		if metaErr == nil && ok && meta != nil {
+			if day, parseErr := time.Parse(potso.DayFormat, meta.Day); parseErr == nil {
+				daysAgo := int64(today.Sub(day).Hours() / 24)
+				paid := meta.TotalPaid
+				switch {
+				case daysAgo < lookbackDays:
+					if paid != nil {
+						latestTotal.Add(latestTotal, paid)
+					}
+					result.LatestEpochs++
+				case daysAgo < 2*lookbackDays:
+					latestDone = true
+					if paid != nil {
+						previousTotal.Add(previousTotal, paid)
+					}
+					result.PreviousEpochs++
+				default:
+					latestDone = true
+					previousDone = true
+				}
+			}
+		}
+		if reachedFirstEpoch {
+			latestDone = true
+			previousDone = true
+		}
+		if previousDone {
+			break
+		}
+		epoch--
+	}
+
+	result.EpochsScanned = scanned
+	result.LatestComplete = latestDone
+	result.PreviousComplete = previousDone
+	result.LatestTotalPaid = latestTotal.String()
+	result.PreviousTotalPaid = previousTotal.String()
+	return result, nil
 }
 
 func bigIntString(value *big.Int) string {

@@ -167,6 +167,43 @@ func TestCoinGeckoOracle(t *testing.T) {
 	}
 }
 
+func TestNHBPortalOracle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("expected bearer token, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"pair":      "ZNHB/USD",
+			"rate":      "0.05",
+			"updatedAt": time.Now().UTC().Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+	oracle := NewNHBPortalOracle(server.Client(), server.URL, "test-token")
+	quote, err := oracle.GetRate("USD", "ZNHB")
+	if err != nil {
+		t.Fatalf("get rate: %v", err)
+	}
+	if quote.Rate == nil || quote.Rate.FloatString(2) != "0.05" {
+		t.Fatalf("unexpected rate: %v", quote.Rate)
+	}
+	if quote.Source != "nhbportal" {
+		t.Fatalf("unexpected source: %s", quote.Source)
+	}
+}
+
+func TestNHBPortalOracleUnauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
+	}))
+	defer server.Close()
+	oracle := NewNHBPortalOracle(server.Client(), server.URL, "wrong-token")
+	if _, err := oracle.GetRate("USD", "ZNHB"); err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+}
+
 func TestComputeMintAmount(t *testing.T) {
 	rate := big.NewRat(25, 1) // $25 per token
 	amount, err := ComputeMintAmount("100.00", rate, 18)

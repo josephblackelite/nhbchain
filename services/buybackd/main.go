@@ -45,6 +45,7 @@ func main() {
 		"signers", len(sanitized.Signers),
 		"pollInterval", sanitized.PollInterval.String(),
 		"oraclePriority", sanitized.OraclePriority,
+		"nhbportalOracleConfigured", sanitized.NHBPortalOracleURL != "",
 	)
 	logger.Warn("neither ZNHB nor NHB has a real external market listing -- see services/buybackd/refprice's package doc comment; whatever this instance's oracle priority actually resolves to is, in practice, a manually configured peg, not genuine market discovery")
 	logger.Warn("this process holds every locally configured signer key in memory and can single-handedly reach quorum if it holds enough keys -- see services/buybackd/refprice's package doc comment on the custody assumption this implies")
@@ -98,6 +99,13 @@ func main() {
 func buildQuoteSource(cfg config.Config, logger *slog.Logger) refprice.QuoteSource {
 	manualOracle := swap.NewManualOracle()
 	aggregator := swap.NewOracleAggregator(cfg.OraclePriority, cfg.MaxQuoteAge)
+	// "nhbportal" -- a superadmin-set, continuously-updatable rate from
+	// nhbportal's /admin/finance/znhb-rate page, see NHBPortalOracle's doc
+	// comment. Only registered when configured; the static env-var "manual"
+	// rate below stays registered unconditionally as its fallback.
+	if cfg.NHBPortalOracleURL != "" {
+		aggregator.Register("nhbportal", swap.NewNHBPortalOracle(nil, cfg.NHBPortalOracleURL, cfg.NHBPortalOracleTkn))
+	}
 	aggregator.Register("manual", manualOracle)
 	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", cfg.NOWPaymentsAPIKey))
 	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{}))
