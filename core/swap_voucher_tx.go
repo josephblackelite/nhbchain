@@ -226,6 +226,7 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	if !cfg.IsFiatAllowed(voucher.Fiat) {
 		return ErrSwapUnsupportedFiat
 	}
+
 	riskParams, err := cfg.Risk.Parameters()
 	if err != nil {
 		return err

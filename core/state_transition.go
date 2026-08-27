@@ -195,6 +195,8 @@ type StateProcessor struct {
 	lendingReserveFactorBps    uint64
 	lendingProtocolFeeBps      uint64
 	lendingCollateralRouting   lending.CollateralRouting
+	marketEscrowAddr           crypto.Address
+	marketFeeCollectorAddr     crypto.Address
 	govPolicy                  governance.ProposalPolicy
 	blockCtx                   BlockCtx
 	swapPayoutAuthorities      map[string]struct{}
@@ -251,6 +253,8 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		lendingReserveFactorBps:  0,
 		lendingProtocolFeeBps:    0,
 		lendingCollateralRouting: lending.CollateralRouting{},
+		marketEscrowAddr:         deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
+		marketFeeCollectorAddr:   deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
 		blockCtx:                 BlockCtx{},
 		swapPayoutAuthorities:    make(map[string]struct{}),
 		swapConfig:               swap.Config{},
@@ -944,6 +948,50 @@ func (sp *StateProcessor) EnsureZNHBPoolsBootstrapped() error {
 	return nil
 }
 
+// adminZNHBOwned computes the admin/treasury wallet's own ZNHB exposure for
+// CheckZNHBSupplyInvariant/ReconcileZNHBSupplyDriftOnce: spendable balance,
+// plus anything the wallet itself has locked into a delegation (whether
+// self-staking or delegating out to another validator), plus anything
+// sitting in its own pending unbonds (matured or not), plus anything held in
+// its own governance-proposal deposit escrow (SubmitProposal debits
+// BalanceZNHB and calls nhbstate.Manager.GovernanceEscrowLock, a completely
+// separate KV ledger from the Account struct's own fields -- confirmed live
+// on 2026-08-26: this wallet submitting a governance proposal with a
+// deposit repeatedly failed block-building with an invariant violation
+// until this term was added, since the escrowed deposit had otherwise
+// vanished from this sum entirely). Account.Stake is deliberately excluded:
+// unlike BalanceZNHB/LockedZNHB/PendingUnbonds -- which
+// StakeDelegate/StakeUndelegate/StakeClaim only ever mutate on the
+// delegating account itself -- Stake is also credited on a validator's
+// account when OTHER people delegate TO it (see StakeDelegate's
+// third-party-delegation branch), and nothing prevents anyone from naming
+// this wallet as their validator. Counting Stake here would let a
+// third-party delegation silently inflate what the sale/reward pools are
+// allowed to claim as treasury-owned funds. Verified against self-stake,
+// self-unstake-to-pending, delegating out to another validator, a third
+// party delegating in, and submitting a governance proposal deposit -- this
+// sum tracks the wallet's own money exactly in every case found so far.
+func adminZNHBOwned(account *types.Account, govEscrow *big.Int) *big.Int {
+	owned := big.NewInt(0)
+	if account != nil {
+		if account.BalanceZNHB != nil {
+			owned.Add(owned, account.BalanceZNHB)
+		}
+		if account.LockedZNHB != nil {
+			owned.Add(owned, account.LockedZNHB)
+		}
+		for _, unbond := range account.PendingUnbonds {
+			if unbond.Amount != nil {
+				owned.Add(owned, unbond.Amount)
+			}
+		}
+	}
+	if govEscrow != nil {
+		owned.Add(owned, govEscrow)
+	}
+	return owned
+}
+
 // ReconcileZNHBSupplyDriftOnce repairs a specific, already-identified,
 // one-time accounting gap: early reward-payout code (see
 // StateProcessor.settleEpochRewards in core/rewards_logic.go) credited
@@ -992,24 +1040,87 @@ func (sp *StateProcessor) ReconcileZNHBSupplyDriftOnce() error {
 		return fmt.Errorf("znhb: load reward pool balance: %w", err)
 	}
 	sum := new(big.Int).Add(salePool, rewardPool)
-	adminBalance := adminAccount.BalanceZNHB
-	if adminBalance == nil {
-		adminBalance = big.NewInt(0)
+	govEscrow, err := manager.GovernanceEscrowBalance(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
 	}
+	adminOwned := adminZNHBOwned(adminAccount, govEscrow)
 
-	drift := new(big.Int).Sub(adminBalance, sum)
+	drift := new(big.Int).Sub(adminOwned, sum)
 	if drift.Sign() != 0 {
-		adminAccount.BalanceZNHB = new(big.Int).Set(sum)
+		// Only BalanceZNHB is adjustable here -- LockedZNHB/PendingUnbonds
+		// represent real, specific obligations (an active delegation, a
+		// named unbonding entry) that this blunt repair must not disturb.
+		adminBalance := adminAccount.BalanceZNHB
+		if adminBalance == nil {
+			adminBalance = big.NewInt(0)
+		}
+		adminAccount.BalanceZNHB = new(big.Int).Sub(adminBalance, drift)
 		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
 			return fmt.Errorf("znhb: apply supply drift correction: %w", err)
 		}
 		sp.AppendEvent(&types.Event{Type: "znhb.supply_drift_reconciled", Attributes: map[string]string{
 			"drift":                drift.String(),
 			"admin_balance_before": adminBalance.String(),
-			"admin_balance_after":  sum.String(),
+			"admin_balance_after":  adminAccount.BalanceZNHB.String(),
 		}})
 	}
 	return manager.ZNHBMarkSupplyDriftReconciled()
+}
+
+// genesisNHBSupplyWei is the exact sum of every NHB balance genesis
+// allocates directly into account state (config/genesis.phase-e.json's
+// "alloc" section: 9994919800000000000000 + 5000000000000000000 +
+// 80200000000000000 wei), confirmed to equal precisely 10,000 NHB. Genesis
+// writes these balances straight into account state without ever calling
+// MintToken/AdjustTokenSupply, so the tracked token/supply/NHB counter
+// starts at zero regardless of this real, circulating amount -- the first
+// TxTypeRedeemNHB burn on this network (2026-08-24) underflowed
+// immediately as a direct result. Hardcoded rather than re-summed from the
+// genesis file at runtime: this is a fixed historical fact about a specific
+// genesis that already happened, not something that should silently change
+// if a genesis file is ever edited or replaced later.
+var genesisNHBSupplyWei = func() *big.Int {
+	amount, ok := new(big.Int).SetString("10000000000000000000000", 10)
+	if !ok {
+		panic("genesisNHBSupplyWei: invalid constant")
+	}
+	return amount
+}()
+
+// SeedGenesisNHBSupplyOnce repairs the tracked NHB token-supply counter's
+// missing genesis allocation exactly once. See genesisNHBSupplyWei's doc
+// comment for the root cause. Idempotent -- guarded by a persistent flag
+// (NHBSupplyGenesisSeeded), so it is a cheap no-op on every block after the
+// first successful run, and can never mask a genuine future supply-tracking
+// bug once that flag is set. Unlike ReconcileZNHBSupplyDriftOnce, this adds
+// a fixed, known amount rather than resolving to an authoritative live
+// total -- MintToken has been correctly calling AdjustTokenSupply since
+// launch, so the counter's existing value (whatever cumulative minting has
+// produced) is added to, not overwritten.
+func (sp *StateProcessor) SeedGenesisNHBSupplyOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	seeded, err := manager.NHBSupplyGenesisSeeded()
+	if err != nil {
+		return fmt.Errorf("nhb: check genesis supply seed flag: %w", err)
+	}
+	if seeded {
+		return nil
+	}
+	before, err := manager.TokenSupply("NHB")
+	if err != nil {
+		return fmt.Errorf("nhb: load token supply: %w", err)
+	}
+	after, err := manager.AdjustTokenSupply("NHB", genesisNHBSupplyWei)
+	if err != nil {
+		return fmt.Errorf("nhb: seed genesis supply: %w", err)
+	}
+	sp.AppendEvent(&types.Event{Type: "nhb.supply_genesis_seeded", Attributes: map[string]string{
+		"seeded_amount": genesisNHBSupplyWei.String(),
+		"supply_before": before.String(),
+		"supply_after":  after.String(),
+	}})
+	return manager.MarkNHBSupplyGenesisSeeded()
 }
 
 // stakeDelegationBackfillSeed lists (delegator, validator) pairs known to
@@ -1190,14 +1301,116 @@ func (sp *StateProcessor) CheckZNHBSupplyInvariant() error {
 		return fmt.Errorf("znhb: load reward pool balance: %w", err)
 	}
 	sum := new(big.Int).Add(salePool, rewardPool)
-	adminBalance := adminAccount.BalanceZNHB
-	if adminBalance == nil {
-		adminBalance = big.NewInt(0)
+	govEscrow, err := manager.GovernanceEscrowBalance(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
 	}
-	if sum.Cmp(adminBalance) != 0 {
-		return fmt.Errorf("znhb: supply invariant violated -- sale pool (%s) + reward pool (%s) = %s, but admin wallet ZNHB balance = %s", salePool, rewardPool, sum, adminBalance)
+	adminOwned := adminZNHBOwned(adminAccount, govEscrow)
+	if sum.Cmp(adminOwned) != 0 {
+		return fmt.Errorf("znhb: supply invariant violated -- sale pool (%s) + reward pool (%s) = %s, but admin wallet BalanceZNHB+LockedZNHB+pendingUnbonds = %s", salePool, rewardPool, sum, adminOwned)
 	}
 	return nil
+}
+
+// staleAdminPendingUnbondSeed lists (unbonding ID, expected amount) pairs on
+// the admin/treasury wallet's own account known to be stale, unclaimable
+// leftovers from the 2026-08-26 incident: the admin wallet self-staked ZNHB
+// (silently breaking the invariant above, since staking moves BalanceZNHB
+// into Stake/LockedZNHB, which the old formula never accounted for), then
+// unstaked into this PendingUnbonds entry. Before the pending unbond
+// matured, the emergency recovery ran ReconcileZNHBSupplyDriftOnce, which
+// (correctly, given what it knew) topped adminAccount.BalanceZNHB back up
+// to match the pool sum -- but that repair predates PendingUnbonds being
+// part of the invariant's accounting, so it silently paid back this exact
+// entry's amount already. Confirmed directly against live chain state via
+// RPC before this was written: Stake=0, LockedZNHB=0, exactly one pending
+// unbond (ID 1, 10,000 ZNHB, self-delegated). If this entry were left in
+// place, CheckZNHBSupplyInvariant's corrected formula (which now includes
+// PendingUnbonds) would immediately double-count it and halt the chain;
+// if it were ever claimed via a normal StakeClaim transaction, the same
+// 10,000 ZNHB would be paid out a second time. Scoped to exact (ID, amount)
+// pairs rather than "clear every pending unbond on this account" so that
+// any pending unbond the admin wallet legitimately creates after this
+// deploys is never touched.
+type staleAdminPendingUnbondEntry struct {
+	ID     uint64
+	Amount *big.Int
+}
+
+var staleAdminPendingUnbondSeed = []staleAdminPendingUnbondEntry{
+	{ID: 1, Amount: func() *big.Int {
+		amount, ok := new(big.Int).SetString("10000000000000000000000", 10)
+		if !ok {
+			panic("staleAdminPendingUnbondSeed: invalid constant")
+		}
+		return amount
+	}()},
+}
+
+// ClearAdminStalePendingUnbondsOnce removes the specific, already-identified
+// stale PendingUnbonds entries listed in staleAdminPendingUnbondSeed from
+// the admin/treasury wallet's account, without crediting BalanceZNHB --
+// that credit already happened, via ReconcileZNHBSupplyDriftOnce (see
+// staleAdminPendingUnbondSeed's doc comment). Guarded by a persistent flag
+// so it runs at most once. Deliberately conservative: an entry is only
+// removed if it is still present with exactly the expected amount; if it is
+// missing (already claimed or already cleared some other way) or its
+// amount doesn't match exactly, it is left untouched and the discrepancy is
+// recorded in the emitted event for later investigation -- this function
+// must never guess. Must run before CheckZNHBSupplyInvariant (see
+// ProcessBlockLifecycle) so the corrected formula never sees this entry.
+func (sp *StateProcessor) ClearAdminStalePendingUnbondsOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	cleared, err := manager.ZNHBAdminStaleUnbondsCleared()
+	if err != nil {
+		return fmt.Errorf("znhb: check admin stale unbonds cleared flag: %w", err)
+	}
+	if cleared {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+
+	removedIDs := make([]string, 0, len(staleAdminPendingUnbondSeed))
+	skippedIDs := make([]string, 0, len(staleAdminPendingUnbondSeed))
+	for _, seed := range staleAdminPendingUnbondSeed {
+		index := -1
+		for i, unbond := range adminAccount.PendingUnbonds {
+			if unbond.ID == seed.ID {
+				index = i
+				break
+			}
+		}
+		if index == -1 {
+			// Already gone (e.g. already claimed) -- nothing to do, and
+			// nothing wrong either.
+			continue
+		}
+		found := adminAccount.PendingUnbonds[index]
+		if found.Amount == nil || seed.Amount == nil || found.Amount.Cmp(seed.Amount) != 0 {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ID))
+			continue
+		}
+		adminAccount.PendingUnbonds = append(adminAccount.PendingUnbonds[:index], adminAccount.PendingUnbonds[index+1:]...)
+		removedIDs = append(removedIDs, fmt.Sprintf("%d", seed.ID))
+	}
+
+	if len(removedIDs) > 0 {
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("znhb: persist admin stale unbonds cleanup: %w", err)
+		}
+	}
+	sp.AppendEvent(&types.Event{Type: "znhb.admin_stale_pending_unbonds_cleared", Attributes: map[string]string{
+		"removed_ids": strings.Join(removedIDs, ","),
+		"skipped_ids": strings.Join(skippedIDs, ","),
+	}})
+	return manager.ZNHBMarkAdminStaleUnbondsCleared()
 }
 
 // BeginBlock records the execution context for the block currently being applied.
@@ -2117,6 +2330,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		lendingReserveFactorBps:    sp.lendingReserveFactorBps,
 		lendingProtocolFeeBps:      sp.lendingProtocolFeeBps,
 		lendingCollateralRouting:   sp.lendingCollateralRouting.Clone(),
+		marketEscrowAddr:           cloneAddress(sp.marketEscrowAddr),
+		marketFeeCollectorAddr:     cloneAddress(sp.marketFeeCollectorAddr),
 		blockCtx:                   blockCtxCopy,
 		swapPayoutAuthorities:      payoutAuthCopy,
 		swapConfig:                 sp.swapConfig,
@@ -3442,6 +3657,21 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applySubscriptionCancelTransaction(tx, sender)
+	case types.TxTypeMarketCreateListing:
+		if err := sp.applyQuota(moduleMarket, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyMarketCreateListing(tx, sender)
+	case types.TxTypeMarketFillListing:
+		if err := sp.applyQuota(moduleMarket, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyMarketFillListing(tx, sender)
+	case types.TxTypeMarketCancelListing:
+		if err := sp.applyQuota(moduleMarket, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyMarketCancelListing(tx, sender)
 	}
 	return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
 }
@@ -3953,21 +4183,57 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 		DestinationAddress string `json:"destinationAddress"`
 	}
 	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
-		return fmt.Errorf("redeemNHB: decode payload: %w", err)
+		return fmt.Errorf("redeemNHB: decode payload: %w: %w", err, ErrRedeemInvalidPayload)
 	}
 	destAsset := strings.ToUpper(strings.TrimSpace(payload.DestinationAsset))
 	if destAsset == "" {
-		return fmt.Errorf("redeemNHB: destinationAsset required")
+		return fmt.Errorf("redeemNHB: destinationAsset required: %w", ErrRedeemInvalidPayload)
 	}
 	destAddr := strings.TrimSpace(payload.DestinationAddress)
 	if destAddr == "" {
-		return fmt.Errorf("redeemNHB: destinationAddress required")
+		return fmt.Errorf("redeemNHB: destinationAddress required: %w", ErrRedeemInvalidPayload)
 	}
 	if tx.Value == nil || tx.Value.Sign() <= 0 {
-		return fmt.Errorf("redeemNHB: amount must be positive")
+		return fmt.Errorf("redeemNHB: amount must be positive: %w", ErrRedeemInvalidPayload)
 	}
 	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(tx.Value) < 0 {
-		return fmt.Errorf("redeemNHB: insufficient NHB balance")
+		return fmt.Errorf("redeemNHB: insufficient NHB balance: %w", ErrRedeemInsufficientBalance)
+	}
+
+	// Pause guard: gates only new burns (this function), never
+	// applyAttestRedemption -- an in-flight payout that has already burned
+	// its NHB must still be able to close out cleanly while new burns are
+	// paused. See moduleSwapRedeem's doc comment in core/node.go.
+	if err := nativecommon.Guard(sp.pauses, moduleSwapRedeem); err != nil {
+		return err
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+
+	var senderAddr [20]byte
+	copy(senderAddr[:], sender)
+
+	// Circuit breaker: a brand-new, unproven money-moving pathway gets a
+	// conservative per-tx and per-address daily/monthly cap, checked before
+	// the burn is ever applied. See native/swap/redeem_risk.go -- this is a
+	// deliberate clone of, not a reuse of, native/swap/risk.go's mint-side
+	// RiskEngine, so mint and redeem activity for the same address never
+	// share a counter. The caps themselves are governance-controlled (see
+	// core/swap_risk_params.go) -- read fresh from state on every
+	// transaction so a passed policy.swapRiskParams proposal takes effect
+	// immediately, network-wide, with no node restart.
+	redeemRiskParams, err := sp.effectiveRedeemRiskParameters(manager)
+	if err != nil {
+		return fmt.Errorf("redeemNHB: risk config: %w", err)
+	}
+	redeemRiskEngine := swap.NewRedeemRiskEngine(manager)
+	redeemRiskEngine.SetClock(func() time.Time { return sp.blockTimestamp() })
+	violation, err := redeemRiskEngine.CheckLimits(senderAddr, tx.Value, redeemRiskParams)
+	if err != nil {
+		return fmt.Errorf("redeemNHB: check risk limits: %w", err)
+	}
+	if violation != nil {
+		return fmt.Errorf("redeemNHB: %w", violation)
 	}
 
 	txHash, err := tx.Hash()
@@ -3976,11 +4242,10 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 	}
 	requestID := nhbstate.RedemptionRequestID(txHash)
 
-	manager := nhbstate.NewManager(sp.Trie)
 	if _, exists, err := manager.GetRedemptionRequest(requestID); err != nil {
 		return fmt.Errorf("redeemNHB: check existing request: %w", err)
 	} else if exists {
-		return fmt.Errorf("redeemNHB: request %s already exists", requestID)
+		return fmt.Errorf("redeemNHB: request %s already exists: %w", requestID, ErrRedeemRequestExists)
 	}
 
 	// Burn: reduce the sender's balance, credit nothing. Only NHB is ever
@@ -3992,8 +4257,21 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 		return fmt.Errorf("redeemNHB: persist sender: %w", err)
 	}
 
-	var accountAddr [20]byte
-	copy(accountAddr[:], sender)
+	// Supply tracking: the burn above must be reflected in the tracked total
+	// NHB supply, mirroring MintToken's AdjustTokenSupply call on the mint
+	// side (state_transition.go's MintToken) so mint and burn stay
+	// symmetric in the same consensus state trie.
+	burnDelta := new(big.Int).Neg(tx.Value)
+	totalSupply, err := manager.AdjustTokenSupply("NHB", burnDelta)
+	if err != nil {
+		return fmt.Errorf("redeemNHB: adjust token supply: %w", err)
+	}
+	sp.recordTokenSupplyChange("NHB", burnDelta, totalSupply, events.SupplyReasonBurn)
+
+	if err := redeemRiskEngine.RecordRedeem(senderAddr, tx.Value); err != nil {
+		return fmt.Errorf("redeemNHB: record risk usage: %w", err)
+	}
+
 	request := &nhbstate.StoredRedemptionRequest{
 		RequestID:          requestID,
 		Account:            append([]byte(nil), sender...),
@@ -4009,7 +4287,7 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 
 	evt := events.RedeemNHBRequested{
 		RequestID:          requestID,
-		Account:            accountAddr,
+		Account:            senderAddr,
 		NHBAmount:          new(big.Int).Set(tx.Value),
 		DestinationAsset:   destAsset,
 		DestinationAddress: destAddr,
@@ -4031,7 +4309,7 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	manager := nhbstate.NewManager(sp.Trie)
 	if !manager.HasRole(RoleSwapPayoutAttestor, sender) {
-		return fmt.Errorf("attestRedemption: unauthorized attestor")
+		return fmt.Errorf("attestRedemption: unauthorized attestor: %w", ErrRedeemUnauthorizedAttestor)
 	}
 	var payload struct {
 		RequestID       string `json:"requestId"`
@@ -4040,18 +4318,18 @@ func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []
 		FailureReason   string `json:"failureReason,omitempty"`
 	}
 	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
-		return fmt.Errorf("attestRedemption: decode payload: %w", err)
+		return fmt.Errorf("attestRedemption: decode payload: %w: %w", err, ErrRedeemInvalidPayload)
 	}
 	requestID := strings.TrimSpace(payload.RequestID)
 	if requestID == "" {
-		return fmt.Errorf("attestRedemption: requestId required")
+		return fmt.Errorf("attestRedemption: requestId required: %w", ErrRedeemInvalidPayload)
 	}
 	status := nhbstate.RedemptionStatus(strings.ToLower(strings.TrimSpace(payload.Status)))
 	if status != nhbstate.RedemptionStatusPaid && status != nhbstate.RedemptionStatusFailed {
-		return fmt.Errorf("attestRedemption: status must be paid or failed")
+		return fmt.Errorf("attestRedemption: status must be paid or failed: %w", ErrRedeemInvalidPayload)
 	}
 	if status == nhbstate.RedemptionStatusPaid && strings.TrimSpace(payload.PayoutReference) == "" {
-		return fmt.Errorf("attestRedemption: payoutReference required when marking paid")
+		return fmt.Errorf("attestRedemption: payoutReference required when marking paid: %w", ErrRedeemInvalidPayload)
 	}
 	settledAt := uint64(sp.blockTimestamp().Unix())
 	if err := manager.UpdateRedemptionStatus(requestID, status, settledAt, payload.PayoutReference, payload.FailureReason); err != nil {
@@ -4083,6 +4361,17 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("stake must be positive")
 	}
+	// The admin/treasury wallet's staking/delegating activity is safe: the
+	// invariant this used to break (see CheckZNHBSupplyInvariant) now
+	// accounts for BalanceZNHB, LockedZNHB, and PendingUnbonds together, so
+	// self-staking, unstaking, and delegating out to another validator all
+	// move this wallet's own ZNHB between fields the invariant already
+	// sums -- none of it can escape unaccounted for. (Account.Stake is
+	// deliberately excluded from that sum instead, since third parties can
+	// delegate in to this wallet with no eligibility check and that must
+	// never be treated as treasury-owned funds -- see adminZNHBOwned's doc
+	// comment.) This is what actually halted the chain on 2026-08-26: not
+	// staking itself, but the invariant's formula being incomplete.
 	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
 		sp.emitStakePaused(delegator, events.StakeOperationDelegate, 0)
 		if errors.Is(err, nativecommon.ErrModulePaused) {
@@ -4485,24 +4774,39 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 
 		var treasuryAddr [20]byte
 		var treasuryAcc *types.Account
+		sameAccount := false
 		if minted.Sign() > 0 {
 			cfg := sp.PotsoRewardConfig()
 			if cfg.TreasuryAddress == ([20]byte{}) {
 				return nil, fmt.Errorf("staking rewards: treasury not configured")
 			}
 			treasuryAddr = cfg.TreasuryAddress
-			treasuryAcc, err = sp.getAccount(treasuryAddr[:])
-			if err != nil {
-				return nil, err
+			sameAccount = bytes.Equal(treasuryAddr[:], addr)
+			if sameAccount {
+				// The claimant IS the configured rewards treasury: debiting
+				// and crediting the same account nets to zero and must be
+				// applied to the single loaded copy -- loading a second,
+				// separate *types.Account for the treasury side and writing
+				// it first would silently lose the debit the moment
+				// account (loaded earlier, before any mutation) is
+				// persisted afterward, minting minted ZNHB from nothing.
+				if account.BalanceZNHB.Cmp(minted) < 0 {
+					return nil, potso.ErrInsufficientTreasury
+				}
+			} else {
+				treasuryAcc, err = sp.getAccount(treasuryAddr[:])
+				if err != nil {
+					return nil, err
+				}
+				if treasuryAcc.BalanceZNHB == nil {
+					treasuryAcc.BalanceZNHB = big.NewInt(0)
+				}
+				if treasuryAcc.BalanceZNHB.Cmp(minted) < 0 {
+					return nil, potso.ErrInsufficientTreasury
+				}
+				treasuryAcc.BalanceZNHB.Sub(treasuryAcc.BalanceZNHB, minted)
+				account.BalanceZNHB.Add(account.BalanceZNHB, minted)
 			}
-			if treasuryAcc.BalanceZNHB == nil {
-				treasuryAcc.BalanceZNHB = big.NewInt(0)
-			}
-			if treasuryAcc.BalanceZNHB.Cmp(minted) < 0 {
-				return nil, potso.ErrInsufficientTreasury
-			}
-			treasuryAcc.BalanceZNHB.Sub(treasuryAcc.BalanceZNHB, minted)
-			account.BalanceZNHB.Add(account.BalanceZNHB, minted)
 		}
 
 		account.StakingRewards.AccruedZNHB.Sub(account.StakingRewards.AccruedZNHB, minted)
@@ -4517,7 +4821,7 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 		if err := manager.PutAccountStakingRewards(addr, &account.StakingRewards); err != nil {
 			return nil, fmt.Errorf("staking rewards: write legacy snapshot: %w", err)
 		}
-		if minted.Sign() > 0 {
+		if minted.Sign() > 0 && !sameAccount {
 			if err := sp.setAccount(treasuryAddr[:], treasuryAcc); err != nil {
 				return nil, err
 			}
@@ -4632,24 +4936,36 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 
 	var treasuryAddr [20]byte
 	var treasuryAcc *types.Account
+	sameAccount := false
 	if minted.Sign() > 0 {
 		cfg := sp.PotsoRewardConfig()
 		if cfg.TreasuryAddress == ([20]byte{}) {
 			return nil, fmt.Errorf("staking rewards: treasury not configured")
 		}
 		treasuryAddr = cfg.TreasuryAddress
-		treasuryAcc, err = sp.getAccount(treasuryAddr[:])
-		if err != nil {
-			return nil, err
+		sameAccount = bytes.Equal(treasuryAddr[:], addr)
+		if sameAccount {
+			// See the identical guard in the legacy-accrued branch above:
+			// claimant == treasury nets to zero and must stay on the single
+			// loaded account copy, or the debit is silently lost when this
+			// account is persisted last.
+			if account.BalanceZNHB.Cmp(minted) < 0 {
+				return nil, potso.ErrInsufficientTreasury
+			}
+		} else {
+			treasuryAcc, err = sp.getAccount(treasuryAddr[:])
+			if err != nil {
+				return nil, err
+			}
+			if treasuryAcc.BalanceZNHB == nil {
+				treasuryAcc.BalanceZNHB = big.NewInt(0)
+			}
+			if treasuryAcc.BalanceZNHB.Cmp(minted) < 0 {
+				return nil, potso.ErrInsufficientTreasury
+			}
+			treasuryAcc.BalanceZNHB.Sub(treasuryAcc.BalanceZNHB, minted)
+			account.BalanceZNHB.Add(account.BalanceZNHB, minted)
 		}
-		if treasuryAcc.BalanceZNHB == nil {
-			treasuryAcc.BalanceZNHB = big.NewInt(0)
-		}
-		if treasuryAcc.BalanceZNHB.Cmp(minted) < 0 {
-			return nil, potso.ErrInsufficientTreasury
-		}
-		treasuryAcc.BalanceZNHB.Sub(treasuryAcc.BalanceZNHB, minted)
-		account.BalanceZNHB.Add(account.BalanceZNHB, minted)
 	}
 	if appliedDelta.Sign() > 0 {
 		account.StakeLastIndex.Add(account.StakeLastIndex, appliedDelta)
@@ -4661,7 +4977,7 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 		return nil, fmt.Errorf("staking rewards: write emission total: %w", err)
 	}
 
-	if minted.Sign() > 0 {
+	if minted.Sign() > 0 && !sameAccount {
 		if err := sp.setAccount(treasuryAddr[:], treasuryAcc); err != nil {
 			return nil, err
 		}

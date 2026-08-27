@@ -169,12 +169,36 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.BackfillStakeDelegationIndexOnce(); err != nil {
 		return fmt.Errorf("backfill stake delegation index: %w", err)
 	}
+	// One-time seed for the missing genesis NHB supply (see
+	// SeedGenesisNHBSupplyOnce's doc comment) -- must run before any
+	// TxTypeRedeemNHB burn is processed in this same block, since that path
+	// now decrements this counter and would underflow without it. No
+	// ordering dependency on the ZNHB calls above.
+	//
+	// ProcessBlockLifecycle itself only runs AFTER the block's own
+	// transactions are applied (see core/node.go's three ApplyTransaction
+	// loops), so relying solely on this call would leave exactly the
+	// underflow window described above. core/node.go now also calls
+	// SeedGenesisNHBSupplyOnce directly, before each of those tx loops --
+	// this call stays here too, idempotent and effectively free once seeded,
+	// as a backstop for any other lifecycle call site.
+	if err := sp.SeedGenesisNHBSupplyOnce(); err != nil {
+		return fmt.Errorf("seed genesis NHB supply: %w", err)
+	}
 	// Item 5's grandfathering migration -- see BackfillValidatorRegistrationOnce's
 	// doc comment. Must run on every block (idempotent, no-op after its
 	// guard flag is set) so the currently-active validator(s) are
 	// registered with zero operator action the instant this deploys.
 	if err := sp.BackfillValidatorRegistrationOnce(); err != nil {
 		return fmt.Errorf("backfill validator registration: %w", err)
+	}
+	// One-time cleanup of the specific stale PendingUnbonds entries left on
+	// the admin wallet by the 2026-08-26 incident (see
+	// ClearAdminStalePendingUnbondsOnce's doc comment) -- must run before
+	// the invariant check below, since CheckZNHBSupplyInvariant now counts
+	// PendingUnbonds, and is a no-op forever after its guard flag is set.
+	if err := sp.ClearAdminStalePendingUnbondsOnce(); err != nil {
+		return fmt.Errorf("clear admin stale pending unbonds: %w", err)
 	}
 	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
 		return err

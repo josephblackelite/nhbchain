@@ -177,6 +177,17 @@ const (
 	moduleTransferZNHB     = "transfer_znhb"
 	moduleStaking          = "staking"
 	moduleSubscriptions    = "subscriptions"
+	// moduleSwapRedeem gates only new TxTypeRedeemNHB burns
+	// (applyRedeemNHB). It deliberately does NOT gate
+	// applyAttestRedemption, so an off-chain payout that has already burned
+	// its NHB can still be attested paid/failed while new burns are paused
+	// -- see applyRedeemNHB's guard call in core/state_transition.go.
+	moduleSwapRedeem = "swap_redeem"
+	// moduleMarket must match native/market/engine.go's own moduleName
+	// constant exactly ("market") -- nativecommon.Guard is keyed by this
+	// string, and the market engine calls it internally via
+	// engine.SetPauses(sp.pauses), not via a call site in this package.
+	moduleMarket = "market"
 )
 
 var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
@@ -822,6 +833,8 @@ func (n *Node) SetModulePauses(pauses config.Pauses) {
 	n.modulePauses[moduleTransferZNHB] = pauses.TransferZNHB
 	n.modulePauses[moduleStaking] = pauses.Staking
 	n.modulePauses[moduleSubscriptions] = pauses.Subscriptions
+	n.modulePauses[moduleSwapRedeem] = pauses.SwapRedeem
+	n.modulePauses[moduleMarket] = pauses.Market
 	n.modulePauseMu.Unlock()
 	if n.state != nil {
 		n.state.SetPauseView(n)
@@ -3193,6 +3206,15 @@ const (
 // test that exercises exactly this worst case with a large synthetic
 // mempool.
 func classifyProposalError(err error) proposalTxDisposition {
+	// *swap.RedeemRiskViolation is a struct type, not a sentinel value, so it
+	// needs errors.As rather than errors.Is -- same disposition as the
+	// mint-side cap-violation sentinels below (a redeem risk cap can free up
+	// on a later attempt, e.g. the next day, or after other same-block
+	// transactions apply, so this is skippable, not prunable).
+	var redeemViolation *swap.RedeemRiskViolation
+	if errors.As(err, &redeemViolation) {
+		return proposalDispositionSkip
+	}
 	switch {
 	case errors.Is(err, ErrNonceTooLow),
 		errors.Is(err, ErrHeartbeatTooSoon),
@@ -3210,7 +3232,10 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrMintInvoiceUsed),
 		errors.Is(err, ErrMintInvalidChainID),
 		errors.Is(err, ErrMintExpired),
-		errors.Is(err, ErrMintInvalidPayload):
+		errors.Is(err, ErrMintInvalidPayload),
+		errors.Is(err, ErrRedeemRequestExists),
+		errors.Is(err, nhbstate.ErrRedeemRequestNotPending),
+		errors.Is(err, ErrRedeemInvalidPayload):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),
@@ -3236,7 +3261,9 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrMintPaused),
 		errors.Is(err, ErrMintInvalidSigner),
 		errors.Is(err, ErrMintEmissionCapExceeded),
-		errors.Is(err, ErrMintRecipientUnresolved):
+		errors.Is(err, ErrMintRecipientUnresolved),
+		errors.Is(err, ErrRedeemInsufficientBalance),
+		errors.Is(err, ErrRedeemUnauthorizedAttestor):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
@@ -3371,6 +3398,20 @@ func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err er
 		stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
 		blockTime = time.Unix(timestamp, 0).UTC()
 		stateCopy.BeginBlock(height, blockTime)
+
+		// Must run before this block's own transactions, not just before
+		// ProcessBlockLifecycle further below -- ProcessBlockLifecycle only
+		// runs AFTER the tx-application loop, so relying on it alone leaves
+		// a window where a TxTypeRedeemNHB burn in this very block executes
+		// before the genesis supply is seeded and underflows (the exact
+		// 2026-08-24 incident this seed exists to fix, now reproducible as a
+		// full block-production abort instead of one rejected tx). Idempotent
+		// and cheap after its first real run, so calling it here in addition
+		// to its existing call inside ProcessBlockLifecycle is safe.
+		if err := stateCopy.SeedGenesisNHBSupplyOnce(); err != nil {
+			stateCopy.EndBlock()
+			return nil, nil, nil, fmt.Errorf("seed genesis NHB supply: %w", err)
+		}
 
 		keptTxs := make([]*types.Transaction, 0, len(orderedTxs))
 		attemptPruned := make([]*types.Transaction, 0)
@@ -3541,6 +3582,13 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 	}
 	if !bytes.Equal(b.Header.ExecutionGraphRoot, executionGraphRoot) {
 		return fmt.Errorf("execution graph root mismatch")
+	}
+	// See the matching comment at the buildProposalState call site -- must
+	// run before this block's own transactions, not just before
+	// ProcessBlockLifecycle below, so a TxTypeRedeemNHB burn in this same
+	// block can't underflow the not-yet-seeded genesis supply counter.
+	if err := stateCopy.SeedGenesisNHBSupplyOnce(); err != nil {
+		return fmt.Errorf("seed genesis NHB supply: %w", err)
 	}
 	for i, tx := range orderedTxs {
 		if err := stateCopy.ApplyTransaction(tx); err != nil {
@@ -3716,6 +3764,14 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	}
 
 	b.Transactions = orderedTxs
+
+	// See the matching comment at the buildProposalState call site -- must
+	// run before this block's own transactions, not just before
+	// ProcessBlockLifecycle below, so a TxTypeRedeemNHB burn in this same
+	// block can't underflow the not-yet-seeded genesis supply counter.
+	if err := stateCopy.SeedGenesisNHBSupplyOnce(); err != nil {
+		return fmt.Errorf("seed genesis NHB supply: %w", err)
+	}
 
 	// Apply transactions deterministically in the canonical topological order
 	for i, tx := range b.Transactions {
@@ -7483,6 +7539,38 @@ func (n *Node) SwapLimits(addr [20]byte) (*swap.RiskUsage, swap.RiskParameters, 
 	return usage.Copy(), params, nil
 }
 
+// SwapRiskParams returns the currently-effective circuit-breaker caps for
+// the swap redeem direction (swap-out burn, TxTypeRedeemNHB): the governance
+// param store's value if a policy.swapRiskParams proposal has ever executed,
+// otherwise the conservative built-in default -- see
+// native/swap/redeem_risk.go's Default* constants, read fresh from state on
+// every call. Backs the public swap_getRiskParams RPC method: unlike
+// SwapLimits (which is address-specific and gated behind requireAuthInto),
+// this reports only network-wide parameters, so any caller -- including a
+// governance UI drafting a proposal -- can see the current values.
+//
+// There is no mint-side (fiat-gateway voucher mint, TxTypeSwapVoucherMint)
+// equivalent: those vouchers draw ZNHB from a fixed, pre-allocated genesis
+// treasury Sale Pool rather than minting new supply (see
+// core/swap_voucher_tx.go's applySwapVoucherMintTransaction), so they carry
+// no external financial risk needing a governance-adjustable circuit
+// breaker -- only the NHB-custody-backed redeem direction does.
+func (n *Node) SwapRiskParams() (swap.RedeemRiskParameters, error) {
+	var redeem swap.RedeemRiskParameters
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		resolved, err := n.state.effectiveRedeemRiskParameters(m)
+		if err != nil {
+			return err
+		}
+		redeem = resolved
+		return nil
+	})
+	if err != nil {
+		return swap.RedeemRiskParameters{}, err
+	}
+	return redeem, nil
+}
+
 // SwapProviderStatus summarises the provider allow list and oracle health metadata.
 func (n *Node) SwapProviderStatus() swap.ProviderStatus {
 	cfg := n.swapConfig()
@@ -7705,6 +7793,27 @@ func (n *Node) SwapListBurnReceipts(startTs, endTs int64, cursor string, limit i
 		return nil, "", err
 	}
 	return receipts, next, nil
+}
+
+// ListPendingRedemptions returns every currently pending TxTypeRedeemNHB
+// swap-out request, backing the swap_listPendingRedemptions RPC method. This
+// is how an off-chain watcher (payments-gateway) discovers burns awaiting an
+// off-chain USDT payout -- see core/state/redemption.go's pending-request
+// index and rpc/swap_redemption_handlers.go.
+func (n *Node) ListPendingRedemptions() ([]*nhbstate.StoredRedemptionRequest, error) {
+	var requests []*nhbstate.StoredRedemptionRequest
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		list, err := m.PendingRedemptionRequests()
+		if err != nil {
+			return err
+		}
+		requests = list
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return requests, nil
 }
 
 func (n *Node) ResolveUsername(username string) ([]byte, bool) {
@@ -8035,6 +8144,12 @@ func (n *Node) ConfigureAdminWalletForTests(addr [20]byte) error {
 		return fmt.Errorf("state unavailable")
 	}
 	n.state.SetAdminWallet(addr, true)
+	// Keep the Blockchain-level copy in sync too -- a real genesis load
+	// populates both (see blockchain.go's genesis-processing paths), but
+	// this ephemeral test-only path only touched the state processor's
+	// copy until this fix, leaving Blockchain.AdminWallet() (what RPC
+	// history-building reads) permanently unconfigured under this helper.
+	n.chain.SetAdminWalletForTests(addr)
 	manager := nhbstate.NewManager(n.state.Trie)
 	account := &types.Account{
 		BalanceNHB:  big.NewInt(0),

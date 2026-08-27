@@ -343,7 +343,18 @@ func seedLendingState(node *core.Node, userAddr, liquidatorAddr, borrowerAddr cr
 
 		poolID := "default"
 		feeBps, feeCollector := node.LendingDeveloperFeeConfig()
-		market := &lending.Market{DeveloperOwner: userAddr, DeveloperFeeBps: feeBps, DeveloperFeeCollector: feeCollector}
+		// OracleMedianWei is seeded at exactly weiPerToken (1e18, a 1:1
+		// ZNHB/NHB price) so this fixture's collateral value assertions
+		// (decimalToWei on CollateralValueUsd, below) get a real
+		// oracle-priced figure rather than "" -- rpc/lending_handlers.go's
+		// collateralValueUsd() deliberately renders "" (never a fabricated
+		// 1:1 fallback) when no oracle price has ever been submitted, per
+		// the 2026-08-24 collateral-mispricing fix. A live network always
+		// has a real submitted price by the time users interact with it
+		// (buybackd polls continuously), so seeding one here keeps this
+		// test exercising the actual production display path instead of
+		// the degenerate never-priced case.
+		market := &lending.Market{DeveloperOwner: userAddr, DeveloperFeeBps: feeBps, DeveloperFeeCollector: feeCollector, OracleMedianWei: new(big.Int).Set(weiUnit)}
 		if err := manager.LendingPutMarket(poolID, market); err != nil {
 			return err
 		}

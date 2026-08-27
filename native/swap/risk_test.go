@@ -107,26 +107,31 @@ func (m *memoryStore) AdjustTokenSupply(symbol string, delta *big.Int) (*big.Int
 	return new(big.Int).Set(current), nil
 }
 
+// TestRiskParametersParse covers RiskConfig.Parameters()'s remaining fields
+// (velocity) -- the four numeric caps (PerTxMinWei/PerTxMaxWei/
+// PerAddressDailyCapWei/PerAddressMonthlyCapWei) are no longer part of
+// RiskConfig at all, with no successor of any kind: ZNHB voucher mints draw
+// from a fixed treasury Sale Pool rather than minting new supply, so they
+// carry no external financial risk needing a circuit breaker (see
+// RiskConfig's doc comment). Parameters() always leaves the four cap fields
+// nil/unset -- confirmed explicitly below, since RiskEngine.CheckLimits
+// treats a nil cap as "no cap configured", which is what makes mint
+// transactions uncapped.
 func TestRiskParametersParse(t *testing.T) {
 	cfg := RiskConfig{
-		PerAddressDailyCapWei:   "10000e18",
-		PerAddressMonthlyCapWei: "300000e18",
-		PerTxMinWei:             "1e18",
-		PerTxMaxWei:             "50000e18",
-		VelocityWindowSeconds:   600,
-		VelocityMaxMints:        5,
+		VelocityWindowSeconds: 600,
+		VelocityMaxMints:      5,
 	}
 	params, err := cfg.Parameters()
 	if err != nil {
 		t.Fatalf("parse parameters: %v", err)
 	}
-	wantDaily, _ := new(big.Int).SetString("10000", 10)
-	wantDaily.Mul(wantDaily, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-	if params.PerAddressDailyCapWei.Cmp(wantDaily) != 0 {
-		t.Fatalf("unexpected daily cap: %s", params.PerAddressDailyCapWei.String())
-	}
 	if params.VelocityWindowSeconds != 600 || params.VelocityMaxMints != 5 {
 		t.Fatalf("unexpected velocity params: %+v", params)
+	}
+	if params.PerAddressDailyCapWei != nil || params.PerAddressMonthlyCapWei != nil ||
+		params.PerTxMinWei != nil || params.PerTxMaxWei != nil {
+		t.Fatalf("expected the four numeric caps to remain unset from RiskConfig.Parameters() alone, got %+v", params)
 	}
 }
 

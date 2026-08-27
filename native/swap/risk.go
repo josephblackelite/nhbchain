@@ -10,7 +10,27 @@ import (
 	"time"
 )
 
-// RiskConfig captures operator-defined mint guardrails parsed from configuration.
+// RiskConfig captures operator-defined mint guardrails parsed from
+// configuration.
+//
+// The four numeric circuit-breaker caps (per-tx min/max, per-address
+// daily/monthly) were briefly removed entirely (no config.toml or governance
+// source), on the reasoning that ZNHB voucher mints (TxTypeSwapVoucherMint)
+// draw from a fixed, pre-allocated genesis treasury Sale Pool rather than
+// minting new supply (see core/swap_voucher_tx.go's
+// applySwapVoucherMintTransaction), so the pool balance alone bounds total
+// exposure. That's true as a worst-case bound, but it left this path with no
+// per-tx/per-address amount-based defense-in-depth at all -- a single large
+// or duplicated voucher could still drain a large fraction of the pool in
+// one shot, with only VelocityMaxMints (a count, not an amount) left as a
+// throttle -- so restored here as static, config.toml-driven caps (as
+// before), a deliberately lighter-weight control than
+// native/swap/redeem_risk.go's RedeemRiskParameters, which protects the
+// swap-out burn path (real custodied money leaving the system) and is
+// governance-adjustable via native/governance's ProposalKindSwapRiskParams
+// (see core/swap_risk_params.go) since that path's risk profile can change
+// over time. The mint side's caps are a simpler, static circuit breaker on
+// top of the pool-balance bound, not a replacement for it.
 type RiskConfig struct {
 	PerAddressDailyCapWei       string        `toml:"PerAddressDailyCapWei"`
 	PerAddressMonthlyCapWei     string        `toml:"PerAddressMonthlyCapWei"`

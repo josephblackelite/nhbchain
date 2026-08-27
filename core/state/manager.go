@@ -24,6 +24,7 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/market"
 	"nhbchain/native/potso"
 	swap "nhbchain/native/swap"
 	"nhbchain/storage/trie"
@@ -49,90 +50,97 @@ type TokenMetadata struct {
 }
 
 var (
-	tokenPrefix                    = []byte("token:")
-	tokenListKey                   = ethcrypto.Keccak256([]byte("token-list"))
-	balancePrefix                  = []byte("balance:")
-	rolePrefix                     = []byte("role:")
-	loyaltyGlobalKeyBytes          = ethcrypto.Keccak256([]byte("loyalty:global"))
-	loyaltyDynamicStateKeyBytes    = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
-	loyaltyDailyPrefix             = []byte("loyalty-meter:base-daily:")
-	loyaltyTotalPrefix             = []byte("loyalty-meter:base-total:")
-	loyaltyPairDailyPrefix         = []byte("loyalty-meter:base-pair-daily:")
-	loyaltyProgramDailyPrefix      = []byte("loyalty-meter:program-daily:")
-	loyaltyProgramDailyTotalPrefix = []byte("loyalty-meter:program-daily-total:")
-	loyaltyProgramDailyTxCountPref = []byte("loyalty-meter:program-daily-txcount:")
-	loyaltyProgramLifetimePrefix   = []byte("loyalty-meter:program-lifetime:")
-	loyaltyProgramEpochPrefix      = []byte("loyalty-meter:program-epoch:")
-	loyaltyProgramIssuancePrefix   = []byte("loyalty-meter:program-issuance:")
-	loyaltyBusinessPrefix          = []byte("loyalty/business/")
-	loyaltyBusinessOwnerPrefix     = []byte("loyalty/business-owner/")
-	loyaltyMerchantIndexPrefix     = []byte("loyalty/merchant-index/")
-	loyaltyBusinessCounterKey      = []byte("loyalty/business/counter")
-	loyaltyOwnerPaymasterPref      = []byte("loyalty/owner-paymaster/")
-	loyaltyDayPrefix               = []byte("loyalty/day/")
-	escrowRecordPrefix             = []byte("escrow/record/")
-	escrowVaultPrefix              = []byte("escrow/vault/")
-	escrowModuleSeedPrefix         = "module/escrow/vault/"
-	escrowRealmPrefix              = []byte("escrow/realm/")
-	escrowFrozenPolicyPrefix       = []byte("escrow/frozen/")
-	creatorContentPrefix           = []byte("creator/content/")
-	creatorStakePrefix             = []byte("creator/stake/")
-	creatorLedgerPrefix            = []byte("creator/ledger/")
-	creatorRateLimitPrefix         = []byte("creator/rate-limit")
-	claimableRecordPrefix          = []byte("claimable/record/")
-	claimableNoncePrefix           = []byte("claimable/nonce/")
-	tradeRecordPrefix              = []byte("trade/record/")
-	tradeEscrowIndexPrefix         = []byte("trade/index/escrow/")
-	identityAliasPrefix            = []byte("identity/alias/")
-	identityAliasIDPrefix          = []byte("identity/alias-id/")
-	identityReversePrefix          = []byte("identity/reverse/")
-	mintInvoicePrefix              = []byte("mint/invoice/")
-	swapOrderPrefix                = []byte("swap/order/")
-	swapPriceSignerPrefix          = []byte("swap/oracle/signer/")
-	swapPriceProofPrefix           = []byte("swap/oracle/last/")
-	znhbSalePoolBalanceKey         = []byte("znhb/sale/poolBalance")
-	znhbRewardPoolBalanceKey       = []byte("znhb/reward/poolBalance")
-	znhbCumulativeSoldKey          = []byte("znhb/sale/cumulativeDistributed")
-	znhbBuybackAccrualKey          = []byte("znhb/buyback/baaBalance")
-	znhbPoolsBootstrappedKey       = []byte("znhb/sale/poolsBootstrapped")
-	znhbSupplyDriftReconciledKey   = []byte("znhb/supplyDriftReconciled")
-	potsoHeartbeatPrefix           = []byte("potso/heartbeat/")
-	potsoMeterPrefix               = []byte("potso/meter/")
-	potsoDayIndexPrefix            = []byte("potso/day-index/")
-	potsoStakeTotalPrefix          = []byte("potso/stake/")
-	potsoStakeNoncePrefix          = []byte("potso/stake/nonce/")
-	potsoStakeAuthNoncePrefix      = []byte("potso/stake/authnonce/")
-	potsoStakeLocksPrefix          = []byte("potso/stake/locks/")
-	potsoStakeLockIndexPrefix      = []byte("potso/stake/locks/index/")
-	potsoStakeQueuePrefix          = []byte("potso/stake/unbondq/")
-	potsoStakeModuleSeedPrefix     = "module/potso/stake/vault"
-	potsoStakeOwnerIndexKey        = []byte("potso/stake/owners")
-	potsoRewardLastProcessed       = []byte("potso/rewards/lastProcessed")
-	potsoRewardMetaKeyFormat       = "potso/rewards/epoch/%d/meta"
-	potsoRewardWinnersFormat       = "potso/rewards/epoch/%d/winners"
-	potsoRewardPayoutFormat        = "potso/rewards/epoch/%d/payout/%x"
-	potsoRewardClaimFormat         = "potso/rewards/epoch/%d/claim/%x"
-	potsoRewardHistoryFormat       = "potso/rewards/history/%x"
-	potsoMetricsMeterPrefix        = []byte("potso/metrics/meter/")
-	potsoMetricsIndexPrefix        = []byte("potso/metrics/index/")
-	potsoMetricsSnapshotPrefix     = []byte("potso/metrics/snapshot/")
-	governanceProposalPrefix       = []byte("gov/proposals/")
-	governanceVotePrefix           = []byte("gov/votes/")
-	governanceVoteIndexPrefix      = []byte("gov/vote-index/")
-	governanceSequenceKey          = []byte("gov/seq")
-	governanceAuditPrefix          = []byte("gov/audit/")
-	governanceAuditSequenceKey     = []byte("gov/audit-seq")
-	governanceEscrowPrefix         = []byte("gov/escrow/")
-	paramsNamespacePrefix          = []byte("params/")
-	snapshotPotsoPrefix            = []byte("snapshots/potso/")
-	lendingMarketPrefix            = []byte("lending/market/")
-	lendingFeeAccrualPrefix        = []byte("lending/fees/")
-	lendingUserPrefix              = []byte("lending/user/")
-	lendingPoolIndexKey            = []byte("lending/pools/index")
-	feesCounterPrefix              = []byte("fees/counter/")
-	feesTotalsPrefix               = []byte("fees/totals/")
-	feesTotalsIndexPrefix          = []byte("fees/totals/index/")
-	transferGasSpendPrefix         = []byte("fees/transfer-gas/spend/")
+	tokenPrefix                     = []byte("token:")
+	tokenListKey                    = ethcrypto.Keccak256([]byte("token-list"))
+	balancePrefix                   = []byte("balance:")
+	rolePrefix                      = []byte("role:")
+	loyaltyGlobalKeyBytes           = ethcrypto.Keccak256([]byte("loyalty:global"))
+	loyaltyDynamicStateKeyBytes     = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
+	loyaltyDailyPrefix              = []byte("loyalty-meter:base-daily:")
+	loyaltyTotalPrefix              = []byte("loyalty-meter:base-total:")
+	loyaltyPairDailyPrefix          = []byte("loyalty-meter:base-pair-daily:")
+	loyaltyProgramDailyPrefix       = []byte("loyalty-meter:program-daily:")
+	loyaltyProgramDailyTotalPrefix  = []byte("loyalty-meter:program-daily-total:")
+	loyaltyProgramDailyTxCountPref  = []byte("loyalty-meter:program-daily-txcount:")
+	loyaltyProgramLifetimePrefix    = []byte("loyalty-meter:program-lifetime:")
+	loyaltyProgramEpochPrefix       = []byte("loyalty-meter:program-epoch:")
+	loyaltyProgramIssuancePrefix    = []byte("loyalty-meter:program-issuance:")
+	loyaltyBusinessPrefix           = []byte("loyalty/business/")
+	loyaltyBusinessOwnerPrefix      = []byte("loyalty/business-owner/")
+	loyaltyMerchantIndexPrefix      = []byte("loyalty/merchant-index/")
+	loyaltyBusinessCounterKey       = []byte("loyalty/business/counter")
+	loyaltyOwnerPaymasterPref       = []byte("loyalty/owner-paymaster/")
+	loyaltyDayPrefix                = []byte("loyalty/day/")
+	escrowRecordPrefix              = []byte("escrow/record/")
+	escrowVaultPrefix               = []byte("escrow/vault/")
+	escrowModuleSeedPrefix          = "module/escrow/vault/"
+	escrowRealmPrefix               = []byte("escrow/realm/")
+	escrowFrozenPolicyPrefix        = []byte("escrow/frozen/")
+	creatorContentPrefix            = []byte("creator/content/")
+	creatorStakePrefix              = []byte("creator/stake/")
+	creatorLedgerPrefix             = []byte("creator/ledger/")
+	creatorRateLimitPrefix          = []byte("creator/rate-limit")
+	claimableRecordPrefix           = []byte("claimable/record/")
+	claimableNoncePrefix            = []byte("claimable/nonce/")
+	tradeRecordPrefix               = []byte("trade/record/")
+	tradeEscrowIndexPrefix          = []byte("trade/index/escrow/")
+	identityAliasPrefix             = []byte("identity/alias/")
+	identityAliasIDPrefix           = []byte("identity/alias-id/")
+	identityReversePrefix           = []byte("identity/reverse/")
+	mintInvoicePrefix               = []byte("mint/invoice/")
+	swapOrderPrefix                 = []byte("swap/order/")
+	swapPriceSignerPrefix           = []byte("swap/oracle/signer/")
+	swapPriceProofPrefix            = []byte("swap/oracle/last/")
+	znhbSalePoolBalanceKey          = []byte("znhb/sale/poolBalance")
+	znhbRewardPoolBalanceKey        = []byte("znhb/reward/poolBalance")
+	znhbCumulativeSoldKey           = []byte("znhb/sale/cumulativeDistributed")
+	znhbBuybackAccrualKey           = []byte("znhb/buyback/baaBalance")
+	znhbPoolsBootstrappedKey        = []byte("znhb/sale/poolsBootstrapped")
+	znhbSupplyDriftReconciledKey    = []byte("znhb/supplyDriftReconciled")
+	znhbAdminStaleUnbondsClearedKey = []byte("znhb/adminStalePendingUnbondsCleared")
+	nhbSupplyGenesisSeededKey       = []byte("nhb/supply/genesisSeeded")
+	potsoHeartbeatPrefix            = []byte("potso/heartbeat/")
+	potsoMeterPrefix                = []byte("potso/meter/")
+	potsoDayIndexPrefix             = []byte("potso/day-index/")
+	potsoStakeTotalPrefix           = []byte("potso/stake/")
+	potsoStakeNoncePrefix           = []byte("potso/stake/nonce/")
+	potsoStakeAuthNoncePrefix       = []byte("potso/stake/authnonce/")
+	potsoStakeLocksPrefix           = []byte("potso/stake/locks/")
+	potsoStakeLockIndexPrefix       = []byte("potso/stake/locks/index/")
+	potsoStakeQueuePrefix           = []byte("potso/stake/unbondq/")
+	potsoStakeModuleSeedPrefix      = "module/potso/stake/vault"
+	potsoStakeOwnerIndexKey         = []byte("potso/stake/owners")
+	potsoRewardLastProcessed        = []byte("potso/rewards/lastProcessed")
+	potsoRewardMetaKeyFormat        = "potso/rewards/epoch/%d/meta"
+	potsoRewardWinnersFormat        = "potso/rewards/epoch/%d/winners"
+	potsoRewardPayoutFormat         = "potso/rewards/epoch/%d/payout/%x"
+	potsoRewardClaimFormat          = "potso/rewards/epoch/%d/claim/%x"
+	potsoRewardHistoryFormat        = "potso/rewards/history/%x"
+	potsoMetricsMeterPrefix         = []byte("potso/metrics/meter/")
+	potsoMetricsIndexPrefix         = []byte("potso/metrics/index/")
+	potsoMetricsSnapshotPrefix      = []byte("potso/metrics/snapshot/")
+	governanceProposalPrefix        = []byte("gov/proposals/")
+	governanceVotePrefix            = []byte("gov/votes/")
+	governanceVoteIndexPrefix       = []byte("gov/vote-index/")
+	governanceSequenceKey           = []byte("gov/seq")
+	governanceAuditPrefix           = []byte("gov/audit/")
+	governanceAuditSequenceKey      = []byte("gov/audit-seq")
+	governanceEscrowPrefix          = []byte("gov/escrow/")
+	paramsNamespacePrefix           = []byte("params/")
+	snapshotPotsoPrefix             = []byte("snapshots/potso/")
+	lendingMarketPrefix             = []byte("lending/market/")
+	lendingFeeAccrualPrefix         = []byte("lending/fees/")
+	lendingUserPrefix               = []byte("lending/user/")
+	lendingPoolIndexKey             = []byte("lending/pools/index")
+	marketListingPrefix             = []byte("market/listing/")
+	marketOpenListingIndexKey       = []byte("market/openListings")
+	marketFillPrefix                = []byte("market/fill/")
+	marketFillsByBuyerPrefix        = []byte("market/fillsByBuyer/")
+	marketFillsBySellerPrefix       = []byte("market/fillsBySeller/")
+	feesCounterPrefix               = []byte("fees/counter/")
+	feesTotalsPrefix                = []byte("fees/totals/")
+	feesTotalsIndexPrefix           = []byte("fees/totals/index/")
+	transferGasSpendPrefix          = []byte("fees/transfer-gas/spend/")
 )
 
 // StakingGlobalIndexKey returns the deterministic storage key for the global
@@ -1840,6 +1848,373 @@ func (m *Manager) LendingPutUserAccount(poolID string, account *lending.UserAcco
 	return m.KVPut(lendingUserKey(normalized, addr.Bytes()), newStoredLendingUser(account))
 }
 
+// ---------------------------------------------------------------------------
+// Peer-to-peer ZNHB-for-NHB marketplace (native/market) storage.
+//
+// Uses a distinct key prefix family (market/listing/, market/openListings,
+// market/fill/, market/fillsByBuyer/, market/fillsBySeller/) rather than
+// reusing any of the lending prefixes above -- listings and fills are a
+// separate record family with their own lifecycle and discovery indices.
+// ---------------------------------------------------------------------------
+
+func marketListingKey(id [32]byte) []byte {
+	buf := make([]byte, len(marketListingPrefix)+len(id))
+	copy(buf, marketListingPrefix)
+	copy(buf[len(marketListingPrefix):], id[:])
+	return buf
+}
+
+func marketFillKey(id [32]byte) []byte {
+	buf := make([]byte, len(marketFillPrefix)+len(id))
+	copy(buf, marketFillPrefix)
+	copy(buf[len(marketFillPrefix):], id[:])
+	return buf
+}
+
+func marketFillsByBuyerKey(addr [20]byte) []byte {
+	buf := make([]byte, len(marketFillsByBuyerPrefix)+len(addr))
+	copy(buf, marketFillsByBuyerPrefix)
+	copy(buf[len(marketFillsByBuyerPrefix):], addr[:])
+	return buf
+}
+
+func marketFillsBySellerKey(addr [20]byte) []byte {
+	buf := make([]byte, len(marketFillsBySellerPrefix)+len(addr))
+	copy(buf, marketFillsBySellerPrefix)
+	copy(buf[len(marketFillsBySellerPrefix):], addr[:])
+	return buf
+}
+
+// storedMarketListing is the RLP-encoded, on-chain representation of a
+// market.Listing. Mirrors storedLendingMarket's pattern: int64 fields
+// (CreatedAt/UpdatedAt) are stored as *big.Int because go-ethereum's rlp
+// package does not support signed integer types directly (see storedEscrow's
+// CreatedAt/Deadline for the same conversion). Any field appended after this
+// type ships to production must be tagged `rlp:"optional"` and placed at the
+// end -- see storedLendingMarket's BorrowedThisBlock etc. for why: without
+// the tag, decoding any listing persisted before the new field existed would
+// fail outright rather than defaulting it.
+type storedMarketListing struct {
+	ID              [32]byte
+	Seller          [20]byte
+	RateNumerator   *big.Int
+	RateDenominator *big.Int
+	TotalAmount     *big.Int
+	RemainingAmount *big.Int
+	AllowPartial    bool
+	Status          uint8
+	CreatedAt       *big.Int
+	UpdatedAt       *big.Int
+}
+
+func newStoredMarketListing(listing *market.Listing) *storedMarketListing {
+	if listing == nil {
+		return nil
+	}
+	stored := &storedMarketListing{
+		ID:           listing.ID,
+		AllowPartial: listing.AllowPartial,
+		Status:       uint8(listing.Status),
+		CreatedAt:    big.NewInt(listing.CreatedAt),
+		UpdatedAt:    big.NewInt(listing.UpdatedAt),
+	}
+	if listing.Seller.Bytes() != nil {
+		copy(stored.Seller[:], listing.Seller.Bytes())
+	}
+	if listing.RateNumerator != nil {
+		stored.RateNumerator = new(big.Int).Set(listing.RateNumerator)
+	}
+	if listing.RateDenominator != nil {
+		stored.RateDenominator = new(big.Int).Set(listing.RateDenominator)
+	}
+	if listing.TotalAmount != nil {
+		stored.TotalAmount = new(big.Int).Set(listing.TotalAmount)
+	}
+	if listing.RemainingAmount != nil {
+		stored.RemainingAmount = new(big.Int).Set(listing.RemainingAmount)
+	}
+	return stored
+}
+
+func (s *storedMarketListing) toListing() (*market.Listing, error) {
+	if s == nil {
+		return nil, fmt.Errorf("market: nil listing storage record")
+	}
+	status := market.ListingStatus(s.Status)
+	if status != market.ListingOpen && status != market.ListingFilled && status != market.ListingCancelled {
+		return nil, fmt.Errorf("market: invalid listing status in storage: %d", s.Status)
+	}
+	listing := &market.Listing{
+		ID:           s.ID,
+		Seller:       crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Seller[:]...)),
+		AllowPartial: s.AllowPartial,
+		Status:       status,
+	}
+	if s.RateNumerator != nil {
+		listing.RateNumerator = new(big.Int).Set(s.RateNumerator)
+	} else {
+		listing.RateNumerator = big.NewInt(0)
+	}
+	if s.RateDenominator != nil {
+		listing.RateDenominator = new(big.Int).Set(s.RateDenominator)
+	} else {
+		listing.RateDenominator = big.NewInt(0)
+	}
+	if s.TotalAmount != nil {
+		listing.TotalAmount = new(big.Int).Set(s.TotalAmount)
+	} else {
+		listing.TotalAmount = big.NewInt(0)
+	}
+	if s.RemainingAmount != nil {
+		listing.RemainingAmount = new(big.Int).Set(s.RemainingAmount)
+	} else {
+		listing.RemainingAmount = big.NewInt(0)
+	}
+	if s.CreatedAt != nil {
+		listing.CreatedAt = s.CreatedAt.Int64()
+	}
+	if s.UpdatedAt != nil {
+		listing.UpdatedAt = s.UpdatedAt.Int64()
+	}
+	return listing, nil
+}
+
+// PutMarketListing persists the supplied market listing snapshot, keyed by
+// its ID. Mirrors LendingPutMarket's shape.
+func (m *Manager) PutMarketListing(listing *market.Listing) error {
+	if listing == nil {
+		return fmt.Errorf("market: listing must not be nil")
+	}
+	return m.KVPut(marketListingKey(listing.ID), newStoredMarketListing(listing))
+}
+
+// GetMarketListing loads a previously persisted market listing by ID.
+func (m *Manager) GetMarketListing(id [32]byte) (*market.Listing, bool, error) {
+	var stored storedMarketListing
+	ok, err := m.KVGet(marketListingKey(id), &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	listing, err := stored.toListing()
+	if err != nil {
+		return nil, false, err
+	}
+	return listing, true, nil
+}
+
+// AppendOpenMarketListing adds id to the market-wide open-listing discovery
+// index. Idempotent -- KVAppend already dedups, mirroring
+// StakeAddValidatorDelegator.
+func (m *Manager) AppendOpenMarketListing(id [32]byte) error {
+	return m.KVAppend(marketOpenListingIndexKey, id[:])
+}
+
+// RemoveOpenMarketListing removes id from the open-listing index. Removing
+// an ID that is not present is a no-op, not an error -- mirrors
+// StakeRemoveValidatorDelegator/removePendingRedemption's filter-and-rewrite
+// shape exactly.
+func (m *Manager) RemoveOpenMarketListing(id [32]byte) error {
+	var raw [][]byte
+	if err := m.KVGetList(marketOpenListingIndexKey, &raw); err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	filtered := make([][]byte, 0, len(raw))
+	for _, entry := range raw {
+		if bytes.Equal(entry, id[:]) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if len(filtered) == len(raw) {
+		return nil
+	}
+	if len(filtered) == 0 {
+		return m.trie.Update(kvKey(marketOpenListingIndexKey), nil)
+	}
+	return m.KVPut(marketOpenListingIndexKey, filtered)
+}
+
+// ListOpenMarketListings returns every listing currently discoverable via
+// the open-listing index, for market-wide discovery. Entries whose
+// underlying record is missing (should not happen -- the index and the
+// record are always written/removed together) are skipped rather than
+// failing the whole call, mirroring PendingRedemptionRequests.
+func (m *Manager) ListOpenMarketListings() ([]*market.Listing, error) {
+	var raw [][]byte
+	if err := m.KVGetList(marketOpenListingIndexKey, &raw); err != nil {
+		return nil, err
+	}
+	listings := make([]*market.Listing, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 32 {
+			continue
+		}
+		var id [32]byte
+		copy(id[:], entry)
+		listing, ok, err := m.GetMarketListing(id)
+		if err != nil {
+			return nil, err
+		}
+		if ok && listing != nil {
+			listings = append(listings, listing)
+		}
+	}
+	return listings, nil
+}
+
+// storedMarketFill is the RLP-encoded, on-chain representation of a
+// market.Fill. CreatedAt is stored as *big.Int for the same reason as
+// storedMarketListing's CreatedAt/UpdatedAt above; BlockHeight is already
+// unsigned so it is stored directly, like storedLendingMarket's
+// LastUpdateBlock.
+type storedMarketFill struct {
+	ID          [32]byte
+	ListingID   [32]byte
+	Buyer       [20]byte
+	Seller      [20]byte
+	ZNHBAmount  *big.Int
+	NHBAmount   *big.Int
+	FeeAmount   *big.Int
+	TxHash      [32]byte
+	CreatedAt   *big.Int
+	BlockHeight uint64
+}
+
+func newStoredMarketFill(fill *market.Fill) *storedMarketFill {
+	if fill == nil {
+		return nil
+	}
+	stored := &storedMarketFill{
+		ID:          fill.ID,
+		ListingID:   fill.ListingID,
+		TxHash:      fill.TxHash,
+		BlockHeight: fill.BlockHeight,
+		CreatedAt:   big.NewInt(fill.CreatedAt),
+	}
+	if fill.Buyer.Bytes() != nil {
+		copy(stored.Buyer[:], fill.Buyer.Bytes())
+	}
+	if fill.Seller.Bytes() != nil {
+		copy(stored.Seller[:], fill.Seller.Bytes())
+	}
+	if fill.ZNHBAmount != nil {
+		stored.ZNHBAmount = new(big.Int).Set(fill.ZNHBAmount)
+	}
+	if fill.NHBAmount != nil {
+		stored.NHBAmount = new(big.Int).Set(fill.NHBAmount)
+	}
+	if fill.FeeAmount != nil {
+		stored.FeeAmount = new(big.Int).Set(fill.FeeAmount)
+	}
+	return stored
+}
+
+func (s *storedMarketFill) toFill() (*market.Fill, error) {
+	if s == nil {
+		return nil, fmt.Errorf("market: nil fill storage record")
+	}
+	fill := &market.Fill{
+		ID:          s.ID,
+		ListingID:   s.ListingID,
+		Buyer:       crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Buyer[:]...)),
+		Seller:      crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Seller[:]...)),
+		TxHash:      s.TxHash,
+		BlockHeight: s.BlockHeight,
+	}
+	if s.ZNHBAmount != nil {
+		fill.ZNHBAmount = new(big.Int).Set(s.ZNHBAmount)
+	} else {
+		fill.ZNHBAmount = big.NewInt(0)
+	}
+	if s.NHBAmount != nil {
+		fill.NHBAmount = new(big.Int).Set(s.NHBAmount)
+	} else {
+		fill.NHBAmount = big.NewInt(0)
+	}
+	if s.FeeAmount != nil {
+		fill.FeeAmount = new(big.Int).Set(s.FeeAmount)
+	} else {
+		fill.FeeAmount = big.NewInt(0)
+	}
+	if s.CreatedAt != nil {
+		fill.CreatedAt = s.CreatedAt.Int64()
+	}
+	return fill, nil
+}
+
+// AppendMarketFill persists the fill record and indexes it under both the
+// buyer's and the seller's fill-history indices (My Purchases / My Sell
+// Orders), mirroring PotsoRewardsAppendHistory's per-address history
+// pattern except that here the index stores fill IDs rather than full
+// records -- see marketListFillsByIndex -- so the canonical record lives in
+// exactly one place (market/fill/<id>).
+func (m *Manager) AppendMarketFill(fill *market.Fill) error {
+	if fill == nil {
+		return fmt.Errorf("market: fill must not be nil")
+	}
+	if err := m.KVPut(marketFillKey(fill.ID), newStoredMarketFill(fill)); err != nil {
+		return err
+	}
+	var buyer, seller [20]byte
+	if fill.Buyer.Bytes() != nil {
+		copy(buyer[:], fill.Buyer.Bytes())
+	}
+	if fill.Seller.Bytes() != nil {
+		copy(seller[:], fill.Seller.Bytes())
+	}
+	if err := m.KVAppend(marketFillsByBuyerKey(buyer), fill.ID[:]); err != nil {
+		return err
+	}
+	return m.KVAppend(marketFillsBySellerKey(seller), fill.ID[:])
+}
+
+func (m *Manager) marketListFillsByIndex(key []byte) ([]*market.Fill, error) {
+	var raw [][]byte
+	if err := m.KVGetList(key, &raw); err != nil {
+		return nil, err
+	}
+	fills := make([]*market.Fill, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 32 {
+			continue
+		}
+		var id [32]byte
+		copy(id[:], entry)
+		var stored storedMarketFill
+		ok, err := m.KVGet(marketFillKey(id), &stored)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		fill, err := stored.toFill()
+		if err != nil {
+			return nil, err
+		}
+		fills = append(fills, fill)
+	}
+	return fills, nil
+}
+
+// ListMarketFillsByBuyer returns every fill where addr was the buyer,
+// oldest-appended first -- backs the "My Purchases" view.
+func (m *Manager) ListMarketFillsByBuyer(addr [20]byte) ([]*market.Fill, error) {
+	return m.marketListFillsByIndex(marketFillsByBuyerKey(addr))
+}
+
+// ListMarketFillsBySeller returns every fill where addr was the seller,
+// oldest-appended first -- backs the "My Sell Orders" view.
+func (m *Manager) ListMarketFillsBySeller(addr [20]byte) ([]*market.Fill, error) {
+	return m.marketListFillsByIndex(marketFillsBySellerKey(addr))
+}
+
 func potsoStakeTotalKey(owner []byte) []byte {
 	buf := make([]byte, len(potsoStakeTotalPrefix)+len(owner))
 	copy(buf, potsoStakeTotalPrefix)
@@ -2092,6 +2467,45 @@ func (m *Manager) ZNHBSupplyDriftReconciled() (bool, error) {
 // chain, not something to silently paper over again.
 func (m *Manager) ZNHBMarkSupplyDriftReconciled() error {
 	return m.KVPut(znhbSupplyDriftReconciledKey, true)
+}
+
+// ZNHBAdminStaleUnbondsCleared reports whether the one-time cleanup of the
+// admin/treasury wallet's stale, already-effectively-settled PendingUnbonds
+// entry (see StateProcessor.ClearAdminStalePendingUnbondsOnce's doc
+// comment) has already run.
+func (m *Manager) ZNHBAdminStaleUnbondsCleared() (bool, error) {
+	var flag bool
+	ok, err := m.KVGet(znhbAdminStaleUnbondsClearedKey, &flag)
+	if err != nil {
+		return false, err
+	}
+	return ok && flag, nil
+}
+
+// ZNHBMarkAdminStaleUnbondsCleared records that the one-time stale-unbond
+// cleanup has run, so it is never repeated.
+func (m *Manager) ZNHBMarkAdminStaleUnbondsCleared() error {
+	return m.KVPut(znhbAdminStaleUnbondsClearedKey, true)
+}
+
+// NHBSupplyGenesisSeeded reports whether the one-time genesis NHB supply
+// seed (see StateProcessor.SeedGenesisNHBSupplyOnce in
+// core/state_transition.go) has already run.
+func (m *Manager) NHBSupplyGenesisSeeded() (bool, error) {
+	var flag bool
+	ok, err := m.KVGet(nhbSupplyGenesisSeededKey, &flag)
+	if err != nil {
+		return false, err
+	}
+	return ok && flag, nil
+}
+
+// MarkNHBSupplyGenesisSeeded records that the one-time genesis NHB supply
+// seed has run, so it is never repeated -- any future underflow after this
+// flag is set is a real new bug that must be rejected, not papered over
+// again.
+func (m *Manager) MarkNHBSupplyGenesisSeeded() error {
+	return m.KVPut(nhbSupplyGenesisSeededKey, true)
 }
 
 // getZNHBPoolBalance is a shared helper: every ZNHB tokenomics counter is

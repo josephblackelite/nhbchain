@@ -126,7 +126,7 @@ ClientVersion = ""
   TimelockSeconds = 172800
   QuorumBps = 2000
   PassThresholdBps = 5000
-  AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps"]
+  AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps", "market.flatFeeWei"]
   BlockTimestampToleranceSeconds = 5
 
 [swap]
@@ -138,6 +138,22 @@ ClientVersion = ""
   TwapSampleCap = 128
   PriceProofMaxDeviationBps = 0
   PayoutAuthorities = ["treasury"]
+  # This section's numeric circuit-breaker caps (per-tx min/max, per-address
+  # daily/monthly) are a static, config.toml-driven mint-side defense in
+  # depth -- worst-case exposure is already bounded by the fixed,
+  # pre-allocated genesis treasury Sale Pool (ZNHB voucher mints draw from
+  # it rather than minting new supply), but a single large or duplicated
+  # voucher could otherwise still drain a large fraction of the pool in one
+  # shot. The redeem-side (swap-out burn, TxTypeRedeemNHB) equivalent --
+  # formerly its own [swap.redeemRisk] section here -- is GONE, but for a
+  # different reason: it is now exclusively governance-controlled. Submit a
+  # policy.swapRiskParams proposal (see native/governance/types.go's
+  # ProposalKindSwapRiskParams) to change the redeem caps, which then takes
+  # effect identically on every validator's very next transaction with no
+  # config edit or restart, ever. Until the first such proposal executes,
+  # conservative built-in defaults apply (native/swap/redeem_risk.go's
+  # DefaultRedeem* constants). Query the public swap_getRiskParams RPC
+  # method to see the values currently in effect.
   [swap.risk]
     PerAddressDailyCapWei = "10000e18"
     PerAddressMonthlyCapWei = "300000e18"
@@ -153,7 +169,14 @@ ClientVersion = ""
   [swap.sanctions]
 
 [lending]
-  MaxLTVBps = 7500
+  # Tightened 2026-08-24 from 7500 (75%) after a live collateral-mispricing
+  # incident: with no ZNHB/NHB reference price ever submitted and the
+  # OracleMaxAgeBlocks guard below previously unset (0, i.e. disabled),
+  # ZNHB collateral was silently valued 1:1 against NHB, letting MaxLTV
+  # pass on borrows that were actually far riskier in real terms. 6000
+  # (60%) is the requested tightened cap, kept well under
+  # LiquidationThresholdBps for a real safety buffer once pricing is fixed.
+  MaxLTVBps = 6000
   LiquidationThresholdBps = 8500
   ReserveFactorBps = 1000
   ProtocolFeeBps = 0
@@ -242,6 +265,9 @@ ClientVersion = ""
     TransferNHB = false
     TransferZNHB = false
     Staking = false
+    # SwapRedeem pauses only new swap-out burns (TxTypeRedeemNHB); it never
+    # blocks attesting an already-burned request paid/failed.
+    SwapRedeem = false
   [global.Quotas]
     [global.Quotas.Lending]
       MaxRequestsPerMin = 0

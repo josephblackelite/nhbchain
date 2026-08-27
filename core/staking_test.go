@@ -374,6 +374,91 @@ func TestStakeClaimRewards_ExactPeriodBoundary(t *testing.T) {
 	}
 }
 
+// TestStakeClaimRewards_TreasuryClaimsOwnRewards_NoSelfOverwrite covers the
+// case where the configured rewards treasury is itself the claimant (e.g.
+// the admin/treasury wallet has staked and is claiming its own rewards).
+// Before the fix this loaded the treasury debit and the claimant credit as
+// two separate *types.Account copies of the same underlying account and
+// persisted the credited copy last, silently discarding the debit and
+// minting `minted` ZNHB from nothing. The correct behavior is a net-zero
+// balance change: the mint still happens (emission counters/index/payout
+// timestamp all still advance), but paying the treasury from itself must
+// not change its own balance.
+func TestStakeClaimRewards_TreasuryClaimsOwnRewards_NoSelfOverwrite(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	now := time.Unix(1_700_100_000, 0).UTC()
+	sp.nowFunc = func() time.Time { return now }
+
+	treasury := [20]byte{0xFE}
+
+	shares := big.NewInt(1_234)
+	lastIndex := rewards.IndexUnit()
+	// Same starting balance newStakingStateProcessor funds the treasury
+	// account with, since here the treasury IS the claimant.
+	startingBalance := new(big.Int).Exp(big.NewInt(10), big.NewInt(60), nil)
+	account := &types.Account{
+		BalanceZNHB:       new(big.Int).Set(startingBalance),
+		StakeShares:       new(big.Int).Set(shares),
+		StakeLastIndex:    new(big.Int).Set(lastIndex),
+		StakeLastPayoutTs: uint64(now.Add(-time.Duration(stakePayoutPeriodSeconds) * time.Second).Unix()),
+	}
+	writeAccount(t, sp, treasury, account)
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.PutAccountMetadata(treasury[:], account); err != nil {
+		t.Fatalf("put account metadata: %v", err)
+	}
+
+	storedBefore, err := sp.getAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("get stored account: %v", err)
+	}
+	balanceBefore := new(big.Int).Set(storedBefore.BalanceZNHB)
+
+	delta := big.NewInt(1_000)
+	globalIndex := new(big.Int).Add(lastIndex, delta)
+	if err := manager.SetStakingGlobalIndex(globalIndex); err != nil {
+		t.Fatalf("set global index: %v", err)
+	}
+	globalIndex, err = manager.StakingGlobalIndex()
+	if err != nil {
+		t.Fatalf("load global index: %v", err)
+	}
+
+	expectedMinted, expectedDelta := expectedStakeMint(t, storedBefore, globalIndex, now)
+	if expectedDelta.Sign() <= 0 {
+		t.Fatalf("expected positive index delta, got %s (last=%s global=%s)", expectedDelta, storedBefore.StakeLastIndex, globalIndex)
+	}
+	if expectedMinted.Sign() <= 0 {
+		t.Fatalf("expected positive minted amount, got %s", expectedMinted)
+	}
+
+	minted, err := sp.StakeClaimRewards(treasury[:])
+	if err != nil {
+		t.Fatalf("claim rewards: %v", err)
+	}
+	if minted.Cmp(expectedMinted) != 0 {
+		t.Fatalf("unexpected minted amount: got %s want %s", minted, expectedMinted)
+	}
+
+	updated, err := sp.getAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if updated.BalanceZNHB.Cmp(balanceBefore) != 0 {
+		t.Fatalf("treasury claiming its own rewards must net to zero balance change: before=%s after=%s (minted=%s)", balanceBefore, updated.BalanceZNHB, minted)
+	}
+
+	expectedIndex := new(big.Int).Add(storedBefore.StakeLastIndex, expectedDelta)
+	if updated.StakeLastIndex.Cmp(expectedIndex) != 0 {
+		t.Fatalf("unexpected last index: got %s want %s", updated.StakeLastIndex, expectedIndex)
+	}
+	if updated.StakeLastPayoutTs != uint64(now.Unix()) {
+		t.Fatalf("unexpected payout timestamp: got %d want %d", updated.StakeLastPayoutTs, now.Unix())
+	}
+}
+
 func TestStakeClaimRewards_MultiPeriodCatchUp(t *testing.T) {
 	sp := newStakingStateProcessor(t)
 
