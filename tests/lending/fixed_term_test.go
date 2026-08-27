@@ -24,11 +24,12 @@ func fixedTermLoanID(seed byte) [32]byte {
 }
 
 // TestBorrowFixedTermComputesInterestAndLocksLiquidity proves the core
-// economics: a 1000-token, 30-day loan at 4% APR owes exactly
-// 1000 * 400/10000 * 30/365 = ~3.287671... tokens of interest (integer wei
-// division truncates), and only the PRINCIPAL leaves the pool's tracked
-// liquidity at issuance -- the locked-in interest is a future receivable,
-// not cash already disbursed.
+// economics: a 1-token, 30-day loan at a flat 400bps (4%) PERIOD rate owes
+// exactly 1 * 400/10000 = 0.04 tokens of interest for the full 30-day term
+// (rateBps is not an APR prorated by tenureDays/365 -- see
+// computeFixedTermInterest's own doc comment for why), and only the
+// PRINCIPAL leaves the pool's tracked liquidity at issuance -- the
+// locked-in interest is a future receivable, not cash already disbursed.
 func TestBorrowFixedTermComputesInterestAndLocksLiquidity(t *testing.T) {
 	moduleAddr := makeAddress(crypto.NHBPrefix, 0x40)
 	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x41)
@@ -51,11 +52,11 @@ func TestBorrowFixedTermComputesInterestAndLocksLiquidity(t *testing.T) {
 		t.Fatalf("expected locked rate 400bps, got %d", loan.RateBps)
 	}
 
-	// principal * 400 * 30 / (10000 * 365), computed the same way as the
-	// implementation to avoid a second, independently-wrong formula here.
+	// principal * 400 / 10000 -- a flat period rate, computed the same way
+	// as the implementation to avoid a second, independently-wrong formula
+	// here.
 	expectedInterest := new(big.Int).Mul(principal, big.NewInt(400))
-	expectedInterest.Mul(expectedInterest, big.NewInt(30))
-	expectedInterest.Quo(expectedInterest, big.NewInt(10_000*365))
+	expectedInterest.Quo(expectedInterest, big.NewInt(10_000))
 	if loan.TotalInterestWei.Cmp(expectedInterest) != 0 {
 		t.Fatalf("expected interest %s, got %s", expectedInterest, loan.TotalInterestWei)
 	}

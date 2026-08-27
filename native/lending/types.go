@@ -154,14 +154,17 @@ type FixedTermLoan struct {
 	PoolID string
 	// TenureDays is the loan's fixed term length (30 or 90 in v1).
 	TenureDays uint64
-	// RateBps is the annualised interest rate locked in at issuance,
-	// expressed in basis points (e.g. 400 = 4% APR). Later changes to the
-	// governance/config rate schedule never affect an already-issued loan.
+	// RateBps is the flat interest rate for this loan's ENTIRE tenure,
+	// locked in at issuance and expressed in basis points (e.g. 1200 = 12%
+	// of principal owed in total for the 30-day term) -- not an annualised
+	// rate prorated by tenure. Later changes to the governance/config rate
+	// schedule never affect an already-issued loan.
 	RateBps uint64
 	// PrincipalWei is the original amount borrowed.
 	PrincipalWei *big.Int
 	// TotalInterestWei is computed once at issuance as
-	// PrincipalWei * RateBps/10000 * TenureDays/365 and owed in full
+	// PrincipalWei * RateBps/10000 -- RateBps is a flat rate for the whole
+	// tenure, not an APR (see computeFixedTermInterest) -- and owed in full
 	// regardless of early repayment timing (a deliberate product decision,
 	// not a bug -- see the fixed-term plan's "Risks" section).
 	TotalInterestWei *big.Int
@@ -208,10 +211,11 @@ func (l *FixedTermLoan) OutstandingWei() *big.Int {
 }
 
 // TenureRateSchedule maps an allowed tenure (in days) to its locked-at-issuance
-// annualised rate, in basis points. v1 config-driven (see
-// Engine.SetFixedTermRateSchedule); a fast-follow can move this under
-// governance control the same way native/swap/redeem_risk.go's caps are,
-// without needing to change any already-issued loan's locked rate.
+// rate, in basis points, flat for the whole tenure (not annualised -- see
+// computeFixedTermInterest). Governance-adjustable (see
+// Engine.SetFixedTermRateSchedule and native/governance's lending rate
+// schedule proposal type); changing it never affects an already-issued
+// loan's locked rate.
 type TenureRateSchedule map[uint64]uint64
 
 // RiskParameters groups the governance controlled safety limits governing

@@ -13,33 +13,34 @@ var (
 	errFixedTermLoanAlreadyActive = errors.New("lending engine: borrower already has an active fixed-term loan in this pool")
 )
 
-const daysPerYear = 365
-
-// DefaultFixedTermRateSchedule is the v1 tenure->rate table: 30 days at 4%
-// APR, 90 days at 6% APR -- placeholder-but-real numbers per the fixed-term
-// lending plan. Config/governance-driven overrides are a deliberate
-// fast-follow (not built in this pass, see the plan's Phase 2A note); using
-// a hardcoded default here is a deployment-flexibility gap, not a safety
-// one -- changing it later only affects newly-issued loans, never
-// already-locked-in ones, so there is no urgency to wire it up before this
-// ships.
+// DefaultFixedTermRateSchedule is the fallback tenure->rate table used only
+// when no governance-set schedule exists yet (e.g. a fresh chain before the
+// first rate-schedule proposal executes). 30 days at 12%, 90 days at 16% --
+// flat rates for the period, not APR (see computeFixedTermInterest). The
+// live schedule is governance-adjustable (native/governance's lending rate
+// schedule proposal type) and changing it only ever affects newly-issued
+// loans, never already-locked-in ones.
 var DefaultFixedTermRateSchedule = TenureRateSchedule{
-	30: 400,
-	90: 600,
+	30: 1200,
+	90: 1600,
 }
 
-// computeFixedTermInterest returns the full-term interest owed, computed
-// once at issuance: principal * rateBps/10000 * tenureDays/365. Multiplies
-// before dividing throughout to avoid precision loss from an intermediate
-// truncation (matching this codebase's established big.Int discipline).
+// computeFixedTermInterest returns the FULL interest owed for the loan's
+// entire tenure. rateBps is a flat PERIOD rate -- what the schedule quotes
+// (e.g. "12%" for the 30-day tenure) is the total interest charged for that
+// tenure, not an annualised rate prorated down by tenureDays/365. This is a
+// deliberate product decision: an annualised-and-prorated rate made the
+// actual amount a borrower pays look tiny relative to the quoted headline
+// number (a 6% "APR" 90-day loan only ever charged ~1.48% of principal),
+// which undersold the real cost/return on both sides of the pool. tenureDays
+// is taken only to validate against the rate schedule's registered tenures
+// (see BorrowFixedTerm) and is not part of this formula.
 func computeFixedTermInterest(principal *big.Int, rateBps, tenureDays uint64) *big.Int {
 	if principal == nil || principal.Sign() <= 0 || rateBps == 0 || tenureDays == 0 {
 		return big.NewInt(0)
 	}
-	numerator := new(big.Int).Mul(principal, new(big.Int).SetUint64(rateBps))
-	numerator.Mul(numerator, new(big.Int).SetUint64(tenureDays))
-	denominator := new(big.Int).SetUint64(10_000 * daysPerYear)
-	return numerator.Quo(numerator, denominator)
+	interest := new(big.Int).Mul(principal, new(big.Int).SetUint64(rateBps))
+	return interest.Quo(interest, big.NewInt(10_000))
 }
 
 // BorrowFixedTerm originates a new locked-rate, fixed-tenure loan. loanID
