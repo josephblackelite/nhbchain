@@ -174,6 +174,19 @@ type parsedSlashingPolicy struct {
 	maxSlash *big.Int
 }
 
+// parsedSwapRiskParams holds a ProposalKindSwapRiskParams payload's four
+// redeem-side wei fields already parsed into big.Ints, alongside the
+// original payload for its Memo field -- mirrors parsedSlashingPolicy's
+// payload+derived-value shape.
+type parsedSwapRiskParams struct {
+	payload SwapRiskParamsPayload
+
+	redeemPerTxMinWei             *big.Int
+	redeemPerTxMaxWei             *big.Int
+	redeemPerAddressDailyCapWei   *big.Int
+	redeemPerAddressMonthlyCapWei *big.Int
+}
+
 type parsedSwapPriceSigner struct {
 	provider string
 	addr     [20]byte
@@ -409,6 +422,14 @@ func validatorForParam(key string) paramValidator {
 			_, err := parseUintRaw(raw)
 			if err != nil {
 				return fmt.Errorf("%s: %w", ParamKeyStakingMinStakeWei, err)
+			}
+			return nil
+		}
+	case ParamKeyMarketFlatFeeWei:
+		return func(raw json.RawMessage) error {
+			_, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyMarketFlatFeeWei, err)
 			}
 			return nil
 		}
@@ -982,6 +1003,82 @@ func parseSlashingPolicyPayload(payloadJSON string) (*parsedSlashingPolicy, erro
 	return &parsedSlashingPolicy{payload: payload, maxSlash: maxSlash}, nil
 }
 
+// parseSwapRiskParamsPayload validates a ProposalKindSwapRiskParams payload.
+// Follows ProposalKindBuybackParams/ProposalKindSlashingPolicy's precedent
+// of being unconditionally available (not gated behind an engine-configured
+// allow-list) -- the safety of the proposal lives in the normal governance
+// quorum/threshold/timelock gate, exactly like every other dedicated
+// proposal kind. Deliberately a straightforward comparison check per the
+// task's own guidance, not a generic validator-registry mechanism: the
+// redeem direction's four fields must satisfy
+// 0 <= min <= max <= dailyCap <= monthlyCap, with max/dailyCap/monthlyCap
+// additionally required to be strictly positive (an absent/zero cap would
+// silently mean "unbounded" once this becomes the sole source of truth,
+// which is never the intent for a circuit breaker).
+func parseSwapRiskParamsPayload(payloadJSON string) (*parsedSwapRiskParams, error) {
+	var payload SwapRiskParamsPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+
+	redeemMin, redeemMax, redeemDaily, redeemMonthly, err := parseSwapRiskCapQuad(
+		"redeem", payload.RedeemPerTxMinWei, payload.RedeemPerTxMaxWei,
+		payload.RedeemPerAddressDailyCapWei, payload.RedeemPerAddressMonthlyCapWei)
+	if err != nil {
+		return nil, err
+	}
+
+	return &parsedSwapRiskParams{
+		payload:                       payload,
+		redeemPerTxMinWei:             redeemMin,
+		redeemPerTxMaxWei:             redeemMax,
+		redeemPerAddressDailyCapWei:   redeemDaily,
+		redeemPerAddressMonthlyCapWei: redeemMonthly,
+	}, nil
+}
+
+// parseSwapRiskCapQuad parses and sanity-checks the redeem direction's four
+// wei fields. label is only used to make error messages identify which
+// direction failed (currently always "redeem", kept as a parameter so a
+// future additional direction could reuse this helper without change).
+func parseSwapRiskCapQuad(label, minWeiStr, maxWeiStr, dailyWeiStr, monthlyWeiStr string) (minWei, maxWei, dailyWei, monthlyWei *big.Int, err error) {
+	minWei, err = parseUintString(minWeiStr)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("governance: invalid %sPerTxMinWei: %w", label, err)
+	}
+	maxWei, err = parseUintString(maxWeiStr)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("governance: invalid %sPerTxMaxWei: %w", label, err)
+	}
+	if maxWei.Sign() <= 0 {
+		return nil, nil, nil, nil, fmt.Errorf("governance: %sPerTxMaxWei must be positive", label)
+	}
+	dailyWei, err = parseUintString(dailyWeiStr)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("governance: invalid %sPerAddressDailyCapWei: %w", label, err)
+	}
+	if dailyWei.Sign() <= 0 {
+		return nil, nil, nil, nil, fmt.Errorf("governance: %sPerAddressDailyCapWei must be positive", label)
+	}
+	monthlyWei, err = parseUintString(monthlyWeiStr)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("governance: invalid %sPerAddressMonthlyCapWei: %w", label, err)
+	}
+	if monthlyWei.Sign() <= 0 {
+		return nil, nil, nil, nil, fmt.Errorf("governance: %sPerAddressMonthlyCapWei must be positive", label)
+	}
+	if minWei.Sign() > 0 && minWei.Cmp(maxWei) > 0 {
+		return nil, nil, nil, nil, fmt.Errorf("governance: %sPerTxMinWei must be <= %sPerTxMaxWei", label, label)
+	}
+	if maxWei.Cmp(dailyWei) > 0 {
+		return nil, nil, nil, nil, fmt.Errorf("governance: %sPerTxMaxWei must be <= %sPerAddressDailyCapWei", label, label)
+	}
+	if dailyWei.Cmp(monthlyWei) > 0 {
+		return nil, nil, nil, nil, fmt.Errorf("governance: %sPerAddressDailyCapWei must be <= %sPerAddressMonthlyCapWei", label, label)
+	}
+	return minWei, maxWei, dailyWei, monthlyWei, nil
+}
+
 // maxSwapPriceSignerProviderLen bounds the provider identifier length. Swap
 // provider identifiers are short slugs (e.g. "nowpayments", "otc-gateway")
 // -- this is a generous ceiling to reject obviously-malformed payloads, not
@@ -1222,6 +1319,42 @@ func (e *Engine) applyBuybackParams(payload *BuybackParamsPayload) (map[string]i
 	}
 	if strings.TrimSpace(payload.Memo) != "" {
 		detail["memo"] = strings.TrimSpace(payload.Memo)
+	}
+	return detail, nil
+}
+
+// applySwapRiskParams persists a passed ProposalKindSwapRiskParams
+// proposal's four redeem-side wei-denominated cap fields via ParamStoreSet,
+// one call per field exactly like applySlashingPolicy/applyBuybackParams.
+// Amounts use big.Int.String() (not strconv.FormatUint) since these are wei
+// quantities, matching applySlashingPolicy's paramKeySlashingMaxSlashWei
+// precedent, not applyBuybackParams's basis-point precedent.
+func (e *Engine) applySwapRiskParams(parsed *parsedSwapRiskParams) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil swap risk params payload")
+	}
+	sets := []struct {
+		key   string
+		value *big.Int
+	}{
+		{ParamKeySwapRiskRedeemPerTxMinWei, parsed.redeemPerTxMinWei},
+		{ParamKeySwapRiskRedeemPerTxMaxWei, parsed.redeemPerTxMaxWei},
+		{ParamKeySwapRiskRedeemPerAddressDailyCapWei, parsed.redeemPerAddressDailyCapWei},
+		{ParamKeySwapRiskRedeemPerAddressMonthlyCapWei, parsed.redeemPerAddressMonthlyCapWei},
+	}
+	for _, set := range sets {
+		if err := e.state.ParamStoreSet(set.key, []byte(set.value.String())); err != nil {
+			return nil, err
+		}
+	}
+	detail := map[string]interface{}{
+		"redeemPerTxMinWei":             parsed.redeemPerTxMinWei.String(),
+		"redeemPerTxMaxWei":             parsed.redeemPerTxMaxWei.String(),
+		"redeemPerAddressDailyCapWei":   parsed.redeemPerAddressDailyCapWei.String(),
+		"redeemPerAddressMonthlyCapWei": parsed.redeemPerAddressMonthlyCapWei.String(),
+	}
+	if strings.TrimSpace(parsed.payload.Memo) != "" {
+		detail["memo"] = strings.TrimSpace(parsed.payload.Memo)
 	}
 	return detail, nil
 }
@@ -1520,6 +1653,10 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindBuybackParams:
 		if _, err := parseBuybackParamsPayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindSwapRiskParams:
+		if _, err := parseSwapRiskParamsPayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	default:
@@ -1982,6 +2119,18 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return err
 		}
 		for k, v := range buybackDetail {
+			detail[k] = v
+		}
+	case ProposalKindSwapRiskParams:
+		parsed, err := parseSwapRiskParamsPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		swapRiskDetail, err := e.applySwapRiskParams(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range swapRiskDetail {
 			detail[k] = v
 		}
 	default:

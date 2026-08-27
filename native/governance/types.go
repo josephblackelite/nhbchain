@@ -182,6 +182,27 @@ const (
 	// delays that but does not prevent it. See core/tokenomics/buyback's
 	// package doc comment for the full rationale.
 	ProposalKindBuybackParams = "policy.buybackParams"
+	// ProposalKindSwapRiskParams adjusts the circuit-breaker caps for the
+	// swap redeem direction -- native/swap/redeem_risk.go's
+	// RedeemRiskParameters, fed by the swap-out burn path, TxTypeRedeemNHB
+	// -- via ParamStoreSet, following ProposalKindBuybackParams's precedent
+	// exactly. This is deliberately redeem-only: the fiat-gateway voucher
+	// mint path (TxTypeSwapVoucherMint) draws ZNHB from a fixed,
+	// pre-allocated genesis treasury Sale Pool rather than minting new
+	// supply (see core/swap_voucher_tx.go's applySwapVoucherMintTransaction),
+	// so it carries no external financial risk needing a
+	// governance-adjustable circuit breaker -- only the NHB-custody-backed
+	// redeem direction (real money leaving the system via the NOWPayments
+	// custody wallet) does. These redeem caps used to live in every
+	// validator's own local config.toml, individually operator-tuned and
+	// requiring a coordinated, lockstep restart of every validator to
+	// change; moving them here means a single passed proposal changes the
+	// effective limit identically, automatically, on every validator's very
+	// next transaction, with no config edit or restart ever required again.
+	// See core/swap_risk_params.go for the read side (the on-chain value if
+	// ever set, otherwise the conservative built-in default) and
+	// native/swap/redeem_risk.go's package doc for the full rationale.
+	ProposalKindSwapRiskParams = "policy.swapRiskParams"
 )
 
 const (
@@ -255,6 +276,27 @@ const (
 	// reference-price signer quorum itself -- it is genesis-immutable and
 	// reachable by no proposal kind, ever (see ProposalKindBuybackParams).
 	ParamKeyBuybackSafetyMarginBps = "buyback.safetyMarginBps"
+	// ParamKeySwapRiskRedeemPerTxMinWei controls the redeem-side (swap-out
+	// burn, TxTypeRedeemNHB) per-transaction floor. May be set to "0" (no
+	// floor) -- unlike the other three redeem keys, this one is not
+	// required to be positive.
+	ParamKeySwapRiskRedeemPerTxMinWei = "swap.risk.redeem.perTxMinWei"
+	// ParamKeySwapRiskRedeemPerTxMaxWei controls the redeem-side
+	// per-transaction ceiling. Always resolves to a positive value -- see
+	// native/swap/redeem_risk.go's DefaultRedeemPerTxMaxWei fallback.
+	ParamKeySwapRiskRedeemPerTxMaxWei = "swap.risk.redeem.perTxMaxWei"
+	// ParamKeySwapRiskRedeemPerAddressDailyCapWei controls the redeem-side
+	// per-address rolling daily cap.
+	ParamKeySwapRiskRedeemPerAddressDailyCapWei = "swap.risk.redeem.perAddressDailyCapWei"
+	// ParamKeySwapRiskRedeemPerAddressMonthlyCapWei controls the redeem-side
+	// per-address rolling monthly cap.
+	ParamKeySwapRiskRedeemPerAddressMonthlyCapWei = "swap.risk.redeem.perAddressMonthlyCapWei"
+	// ParamKeyMarketFlatFeeWei controls the flat NHB fee charged to the
+	// buyer on every peer-to-peer market fill (native/market), on top of
+	// the listing's own rate-derived NHB cost. Settable via a generic
+	// ProposalKindParamUpdate proposal -- no dedicated proposal kind needed
+	// (see core/market_native.go's readGovernedMarketFlatFeeWei).
+	ParamKeyMarketFlatFeeWei = "market.flatFeeWei"
 )
 
 // defaultMinimumValidatorStakeWei is 10,000 ZNHB expressed in the same
@@ -354,6 +396,24 @@ type BuybackParamsPayload struct {
 	DiscountBps     uint32 `json:"discountBps"`
 	SafetyMarginBps uint32 `json:"safetyMarginBps"`
 	Memo            string `json:"memo,omitempty"`
+}
+
+// SwapRiskParamsPayload defines the expected schema for
+// ProposalKindSwapRiskParams proposals: the redeem-side (swap-out burn,
+// TxTypeRedeemNHB) circuit-breaker caps, wei-denominated as decimal integer
+// strings (matching SlashingPolicyPayload's MaxSlashWei convention, since
+// these are amounts rather than basis points). These fields govern
+// native/swap/redeem_risk.go's RedeemRiskParameters. There is deliberately
+// no mint-side equivalent here -- see ProposalKindSwapRiskParams's doc
+// comment for why. Every field except the PerTxMinWei floor must resolve to
+// a positive value -- see parseSwapRiskParamsPayload for the exact ordering
+// checks (min <= max <= dailyCap <= monthlyCap).
+type SwapRiskParamsPayload struct {
+	RedeemPerTxMinWei             string `json:"redeemPerTxMinWei"`
+	RedeemPerTxMaxWei             string `json:"redeemPerTxMaxWei"`
+	RedeemPerAddressDailyCapWei   string `json:"redeemPerAddressDailyCapWei"`
+	RedeemPerAddressMonthlyCapWei string `json:"redeemPerAddressMonthlyCapWei"`
+	Memo                          string `json:"memo,omitempty"`
 }
 
 // RoleAddressPair captures a role membership mutation in role allowlist

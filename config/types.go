@@ -237,6 +237,16 @@ type Pauses struct {
 	TransferZNHB  bool
 	Staking       bool
 	Subscriptions bool
+	// SwapRedeem pauses only new TxTypeRedeemNHB burns (swap-out); it never
+	// blocks TxTypeAttestRedemption, so in-flight payouts that already
+	// burned their NHB can still be attested paid/failed during a pause.
+	SwapRedeem bool
+	// Market pauses the peer-to-peer ZNHB-for-NHB marketplace
+	// (native/market): new listings, fills, and cancellations all gate on
+	// this single flag -- unlike SwapRedeem there is no in-flight-payout
+	// concern to carve out, since every market state transition settles
+	// atomically within its own transaction.
+	Market bool
 }
 
 // Quota defines rate limits for module interactions on a per-address basis.

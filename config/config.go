@@ -55,10 +55,20 @@ var defaultAllowedGovernanceParams = []string{
 	"potso.abuse.QuadraticTxDampenPower",
 	"potso.rewards.EmissionPerEpochWei",
 	"potso.weights.AlphaStakeBps",
-	"swap.PerAddressDailyCapWei",
-	"swap.PerAddressMonthlyCapWei",
-	"swap.PerTxMinWei",
-	"swap.PerTxMaxWei",
+	governance.ParamKeyMarketFlatFeeWei,
+	// swap.PerAddressDailyCapWei/PerAddressMonthlyCapWei/PerTxMinWei/
+	// PerTxMaxWei were removed from this list: they were never actually
+	// wired to a reader (ParamStoreGet was never called with these exact
+	// keys), so a param.update proposal setting them was a silent no-op.
+	// The real, wired mechanism for the swap redeem direction's (swap-out
+	// burn, TxTypeRedeemNHB) equivalent caps is now the dedicated
+	// governance.ProposalKindSwapRiskParams proposal kind (key namespace:
+	// swap.risk.redeem.*), which does not use this generic AllowedParams
+	// allow-list at all. There is no mint-side (fiat-gateway voucher mint,
+	// TxTypeSwapVoucherMint) equivalent at all -- those vouchers draw from a
+	// fixed, pre-allocated genesis treasury Sale Pool rather than minting
+	// new supply, so they carry no external financial risk needing a
+	// circuit breaker. See core/swap_risk_params.go.
 	"swap.VelocityWindowSeconds",
 	"swap.VelocityMaxMints",
 	"swap.cashOut.assetMonthlyCapWei",
@@ -236,9 +246,9 @@ func defaultGlobalConfig() Global {
 			},
 		},
 		Fees: Fees{
-			FreeTierTxPerMonth:       DefaultFreeTierTxPerMonth,
-			MDRBasisPoints:           DefaultMDRBasisPoints,
-			OwnerWallet: "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
+			FreeTierTxPerMonth: DefaultFreeTierTxPerMonth,
+			MDRBasisPoints:     DefaultMDRBasisPoints,
+			OwnerWallet:        "nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka",
 			// 1000 NHB at 18 decimals -- see docs/issue30.md item 7. The
 			// previous "1000" (0.000000000000001 NHB) exhausted the free
 			// tier on a wallet's first transaction.
@@ -324,8 +334,8 @@ type P2PSection struct {
 	// directly by TOML: the TOML integer type is 64-bit signed, but NHBCoin
 	// network IDs can exceed int64's range, so the raw value is decoded as a
 	// string and parsed with strconv.ParseUint instead.
-	NetworkID           uint64   `toml:"-"`
-	NetworkIDRaw        string   `toml:"NetworkId"`
+	NetworkID    uint64 `toml:"-"`
+	NetworkIDRaw string `toml:"NetworkId"`
 	// ExternalAddress is this node's own publicly-dialable host:port (e.g.
 	// its EC2 public IP on the P2P port). ListenAddress is typically bound
 	// to 0.0.0.0 so the process can actually accept connections, but an

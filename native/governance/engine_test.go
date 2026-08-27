@@ -89,6 +89,40 @@ func TestValidatorForParamStaking(t *testing.T) {
 	}
 }
 
+// TestValidatorForParamMarketFlatFeeWei is the regression test for a real
+// finding: market.flatFeeWei (native/market's buyer-side flat fee, see
+// governance.ParamKeyMarketFlatFeeWei's doc comment) had no case in
+// validatorForParam at all, so validateParamPayload rejected every
+// policy.paramUpdate proposal targeting it with "missing validation rule"
+// even once the key was added to AllowedParams.
+func TestValidatorForParamMarketFlatFeeWei(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+		wantErr bool
+	}{
+		{name: "valid wei amount", payload: json.RawMessage("\"250000000000000000\"")},
+		{name: "zero is allowed", payload: json.RawMessage("0")},
+		{name: "negative rejected", payload: json.RawMessage("-1"), wantErr: true},
+		{name: "non-numeric rejected", payload: json.RawMessage("\"not-a-number\""), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			validator := validatorForParam(ParamKeyMarketFlatFeeWei)
+			if validator == nil {
+				t.Fatalf("expected validator for %s", ParamKeyMarketFlatFeeWei)
+			}
+			err := validator(tc.payload)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validator error = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateParamPayloadAcceptsLegacyWrapperCaseInsensitive(t *testing.T) {
 	t.Parallel()
 
@@ -615,6 +649,47 @@ func TestSubmitProposalHappyPath(t *testing.T) {
 	}
 	if payloadEvent.Attributes["deposit"] != deposit.String() {
 		t.Fatalf("unexpected event deposit: %s", payloadEvent.Attributes["deposit"])
+	}
+}
+
+// TestSubmitProposalAcceptsMarketFlatFeeWei is the end-to-end regression
+// test for the same finding TestValidatorForParamMarketFlatFeeWei covers at
+// the unit level: a policy.paramUpdate proposal setting
+// governance.ParamKeyMarketFlatFeeWei (config.toml's [governance]
+// AllowedParams and config/config.go's defaultAllowedGovernanceParams both
+// list it) must actually be admitted by SubmitProposal end-to-end, not just
+// pass AllowedParams membership before failing at validateParamPayload's
+// "missing validation rule" check.
+func TestSubmitProposalAcceptsMarketFlatFeeWei(t *testing.T) {
+	var proposer [20]byte
+	proposer[5] = 7
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(100),
+		VotingPeriodSeconds: 600,
+		TimelockSeconds:     120,
+		AllowedParams:       []string{ParamKeyMarketFlatFeeWei},
+	})
+	engine.SetNowFunc(func() time.Time { return time.Unix(1700000000, 0).UTC() })
+	engine.SetEmitter(&captureEmitter{})
+
+	payload := fmt.Sprintf(`{%q:"250000000000000000"}`, ParamKeyMarketFlatFeeWei)
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindParamUpdate, payload, big.NewInt(300))
+	if err != nil {
+		t.Fatalf("expected market.flatFeeWei param update proposal to validate successfully, got: %v", err)
+	}
+
+	stored := state.proposals[proposalID]
+	if stored == nil {
+		t.Fatalf("expected stored proposal")
+	}
+	if stored.ProposedChange != payload {
+		t.Fatalf("unexpected payload: %s", stored.ProposedChange)
 	}
 }
 
@@ -1541,6 +1616,95 @@ func TestSubmitBuybackParamsProposalRejectsOutOfRangeBps(t *testing.T) {
 	payload := `{"feeShareBps":10001,"discountBps":0,"safetyMarginBps":0}`
 	if _, err := engine.SubmitProposal(proposer, ProposalKindBuybackParams, payload, big.NewInt(75)); err == nil {
 		t.Fatalf("expected submission to reject feeShareBps > 10000")
+	}
+}
+
+// TestExecuteSwapRiskParamsProposal mirrors TestExecuteBuybackParamsProposal
+// exactly: submit -> vote (implicit via forcing Status to Passed, matching
+// the buyback test's own shortcut) -> queue -> timelock elapses -> execute
+// -> confirm every one of the four redeem-side wei-denominated param-store
+// keys holds the proposal's values. There is no mint-side equivalent -- see
+// ProposalKindSwapRiskParams's doc comment for why.
+func TestExecuteSwapRiskParamsProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 11
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	now := time.Unix(1_700_300_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := `{` +
+		`"redeemPerTxMinWei":"2","redeemPerTxMaxWei":"2000","redeemPerAddressDailyCapWei":"8000","redeemPerAddressMonthlyCapWei":"80000",` +
+		`"memo":"tighten caps"}`
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindSwapRiskParams, payload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit swap risk params proposal: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue swap risk params proposal: %v", err)
+	}
+	proposal = state.proposals[proposalID]
+	proposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute swap risk params proposal: %v", err)
+	}
+
+	assertParam := func(key string, want string) {
+		t.Helper()
+		got, ok := state.params[key]
+		if !ok {
+			t.Fatalf("expected param %s to be set", key)
+		}
+		if string(got) != want {
+			t.Fatalf("param %s = %s, want %s", key, got, want)
+		}
+	}
+	assertParam(ParamKeySwapRiskRedeemPerTxMinWei, "2")
+	assertParam(ParamKeySwapRiskRedeemPerTxMaxWei, "2000")
+	assertParam(ParamKeySwapRiskRedeemPerAddressDailyCapWei, "8000")
+	assertParam(ParamKeySwapRiskRedeemPerAddressMonthlyCapWei, "80000")
+}
+
+// TestSubmitSwapRiskParamsProposalRejectsBadOrdering covers
+// parseSwapRiskParamsPayload's sanity checks: a per-tx max that exceeds its
+// own daily cap must be rejected at submission time, before any deposit is
+// locked or proposal created.
+func TestSubmitSwapRiskParamsProposalRejectsBadOrdering(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 12
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	engine.SetNowFunc(func() time.Time { return time.Unix(1_700_300_000, 0).UTC() })
+
+	payload := `{` +
+		`"redeemPerTxMinWei":"0","redeemPerTxMaxWei":"10000","redeemPerAddressDailyCapWei":"5000","redeemPerAddressMonthlyCapWei":"50000"` +
+		`}`
+	if _, err := engine.SubmitProposal(proposer, ProposalKindSwapRiskParams, payload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected submission to reject redeemPerTxMaxWei (10000) exceeding redeemPerAddressDailyCapWei (5000)")
 	}
 }
 
