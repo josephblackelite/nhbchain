@@ -144,15 +144,15 @@ var (
 	// full state-trie scan.
 	lendingFixedTermLoanPrefix       = []byte("lending/loan/")
 	lendingFixedTermActiveLoanPrefix = []byte("lending/loanactive/")
-	marketListingPrefix             = []byte("market/listing/")
-	marketOpenListingIndexKey       = []byte("market/openListings")
-	marketFillPrefix                = []byte("market/fill/")
-	marketFillsByBuyerPrefix        = []byte("market/fillsByBuyer/")
-	marketFillsBySellerPrefix       = []byte("market/fillsBySeller/")
-	feesCounterPrefix               = []byte("fees/counter/")
-	feesTotalsPrefix                = []byte("fees/totals/")
-	feesTotalsIndexPrefix           = []byte("fees/totals/index/")
-	transferGasSpendPrefix          = []byte("fees/transfer-gas/spend/")
+	marketListingPrefix              = []byte("market/listing/")
+	marketOpenListingIndexKey        = []byte("market/openListings")
+	marketFillPrefix                 = []byte("market/fill/")
+	marketFillsByBuyerPrefix         = []byte("market/fillsByBuyer/")
+	marketFillsBySellerPrefix        = []byte("market/fillsBySeller/")
+	feesCounterPrefix                = []byte("fees/counter/")
+	feesTotalsPrefix                 = []byte("fees/totals/")
+	feesTotalsIndexPrefix            = []byte("fees/totals/index/")
+	transferGasSpendPrefix           = []byte("fees/transfer-gas/spend/")
 )
 
 // StakingGlobalIndexKey returns the deterministic storage key for the global
@@ -1629,11 +1629,12 @@ func (s *storedLendingFees) toFeeAccrual() *lending.FeeAccrual {
 }
 
 type storedLendingUser struct {
-	Address        [20]byte
-	CollateralZNHB *big.Int
-	SupplyShares   *big.Int
-	DebtNHB        *big.Int
-	ScaledDebt     *big.Int
+	Address         [20]byte
+	CollateralZNHB  *big.Int
+	SupplyShares    *big.Int
+	DebtNHB         *big.Int
+	ScaledDebt      *big.Int
+	LastSupplyBlock uint64 `rlp:"optional"`
 }
 
 func newStoredLendingUser(account *lending.UserAccount) *storedLendingUser {
@@ -1654,6 +1655,7 @@ func newStoredLendingUser(account *lending.UserAccount) *storedLendingUser {
 	if account.ScaledDebt != nil {
 		stored.ScaledDebt = new(big.Int).Set(account.ScaledDebt)
 	}
+	stored.LastSupplyBlock = account.LastSupplyBlock
 	return stored
 }
 
@@ -1676,6 +1678,7 @@ func (s *storedLendingUser) toUserAccount() *lending.UserAccount {
 	if s.ScaledDebt != nil {
 		account.ScaledDebt = new(big.Int).Set(s.ScaledDebt)
 	}
+	account.LastSupplyBlock = s.LastSupplyBlock
 	return account
 }
 

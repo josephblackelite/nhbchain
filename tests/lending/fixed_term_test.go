@@ -380,6 +380,142 @@ func TestRepayFixedTermInterestFirstThenPrincipal(t *testing.T) {
 	}
 }
 
+// TestRepayFixedTermInterestRoutesToPoolSupplyIndex proves a fixed-term
+// repayment's interest portion is credited to the FLEXIBLE pool's
+// SupplyIndex (so existing supply-share holders can redeem more), not to
+// FeeAccrual.ProtocolFeesWei -- and that it's credited fairly: an existing
+// shareholder's redeemable balance grows by exactly the same proportion the
+// pool's total redeemable value grew by.
+func TestRepayFixedTermInterestRoutesToPoolSupplyIndex(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x70)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x71)
+	borrower := makeAddress(crypto.NHBPrefix, 0x72)
+	one := mustBig("1000000000000000000")
+
+	engine, state := setupFixedTermEngine(moduleAddr, collateralAddr, borrower, func(p *lending.RiskParameters) {
+		p.BorrowCaps.PerBlock = nil
+	})
+	engine.SetState(state)
+	engine.SetBlockHeight(10)
+
+	// setupCapsEngine seeds TotalNHBSupplied=TotalSupplyShares=20 tokens at
+	// the initial 1:1 ray index -- i.e. an existing flexible supplier (or
+	// suppliers, aggregated) redeemable for exactly 20 tokens before this
+	// repayment.
+	suppliedBefore := new(big.Int).Set(state.market.TotalNHBSupplied)
+	sharesBefore := new(big.Int).Set(state.market.TotalSupplyShares)
+	redeemableBefore := lending.RedeemableSupply(sharesBefore, state.market.SupplyIndex)
+	if redeemableBefore.Cmp(suppliedBefore) != 0 {
+		t.Fatalf("test fixture sanity: expected redeemable == supplied at the initial index, got %s want %s", redeemableBefore, suppliedBefore)
+	}
+
+	principal := new(big.Int).Set(one)
+	loan, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(20), 30, principal)
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+	interestOwed := new(big.Int).Set(loan.TotalInterestWei)
+	if interestOwed.Sign() <= 0 {
+		t.Fatalf("test fixture expects nonzero interest, got %s", interestOwed)
+	}
+
+	// Fund the borrower enough to pay interest + principal in full (interest
+	// is money owed TO the pool, not part of the loan's own proceeds -- see
+	// TestRepayFixedTermInterestFirstThenPrincipal's identical reasoning).
+	borrowerAcc := state.accounts[state.key(borrower)]
+	borrowerAcc.BalanceNHB = new(big.Int).Add(borrowerAcc.BalanceNHB, interestOwed)
+
+	if _, err := engine.RepayFixedTerm(borrower, loan.OutstandingWei()); err != nil {
+		t.Fatalf("repay in full: %v", err)
+	}
+
+	// TotalNHBSupplied must have grown by EXACTLY the interest portion (here,
+	// the whole repayment's interest, i.e. all of interestOwed).
+	suppliedAfter := state.market.TotalNHBSupplied
+	wantSuppliedAfter := new(big.Int).Add(suppliedBefore, interestOwed)
+	if suppliedAfter.Cmp(wantSuppliedAfter) != 0 {
+		t.Fatalf("expected TotalNHBSupplied to grow by the interest portion: got %s want %s", suppliedAfter, wantSuppliedAfter)
+	}
+
+	// The existing shareholder's redeemable balance (shares unchanged, index
+	// bumped) must now equal the new TotalNHBSupplied exactly -- proving the
+	// WHOLE lump sum is fairly reflected in what they can redeem, not diluted
+	// or partially lost to rounding beyond a single ray-precision unit.
+	redeemableAfter := lending.RedeemableSupply(sharesBefore, state.market.SupplyIndex)
+	diff := new(big.Int).Sub(redeemableAfter, suppliedAfter)
+	if diff.Sign() < 0 {
+		diff = diff.Neg(diff)
+	}
+	if diff.Cmp(big.NewInt(1)) > 0 {
+		t.Fatalf("expected redeemable supply to track TotalNHBSupplied within rounding, got redeemable=%s totalSupplied=%s", redeemableAfter, suppliedAfter)
+	}
+
+	// The interest must NOT have gone to protocol fees -- accrueInterest
+	// never runs a real rate curve in this fixture (no InterestModel set),
+	// so feesChanged should never have flipped true via any path other than
+	// the one this test guards against.
+	if state.fees != nil && state.fees.ProtocolFeesWei != nil && state.fees.ProtocolFeesWei.Sign() != 0 {
+		t.Fatalf("expected no protocol fees from this repayment, got %s", state.fees.ProtocolFeesWei)
+	}
+}
+
+// TestRepayFixedTermInterestFallsBackToFeesWithNoFlexibleSupply proves the
+// pool-routing bump is skipped in favor of the old protocol-fees behavior
+// when there is no flexible shareholder to fairly credit -- bumping a
+// zero-share SupplyIndex would divide by zero, not distribute anything.
+// TotalSupplyShares is zeroed AFTER the borrow (rather than before, which
+// would make the borrow itself fail on insufficient liquidity, since a
+// fixed-term loan draws its principal from this same TotalNHBSupplied pool)
+// to isolate exactly the guard this test targets: a pool with real supplied
+// liquidity but no shareholder left to claim it, e.g. after every flexible
+// depositor has fully withdrawn.
+func TestRepayFixedTermInterestFallsBackToFeesWithNoFlexibleSupply(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x73)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x74)
+	borrower := makeAddress(crypto.NHBPrefix, 0x75)
+	one := mustBig("1000000000000000000")
+
+	engine, state := setupFixedTermEngine(moduleAddr, collateralAddr, borrower, func(p *lending.RiskParameters) {
+		p.BorrowCaps.PerBlock = nil
+	})
+	engine.SetState(state)
+	engine.SetBlockHeight(10)
+
+	principal := new(big.Int).Set(one)
+	loan, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(21), 30, principal)
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+
+	// Every flexible shareholder has since fully withdrawn -- no one is left
+	// to fairly credit with this loan's interest.
+	state.market.TotalSupplyShares = big.NewInt(0)
+	interestOwed := new(big.Int).Set(loan.TotalInterestWei)
+	if interestOwed.Sign() <= 0 {
+		t.Fatalf("test fixture expects nonzero interest, got %s", interestOwed)
+	}
+
+	suppliedBeforeRepay := new(big.Int).Set(state.market.TotalNHBSupplied)
+
+	borrowerAcc := state.accounts[state.key(borrower)]
+	borrowerAcc.BalanceNHB = new(big.Int).Add(borrowerAcc.BalanceNHB, interestOwed)
+
+	if _, err := engine.RepayFixedTerm(borrower, loan.OutstandingWei()); err != nil {
+		t.Fatalf("repay in full: %v", err)
+	}
+
+	if state.market.TotalNHBSupplied.Cmp(suppliedBeforeRepay) != 0 {
+		t.Fatalf("expected TotalNHBSupplied unchanged (no pool-routing bump) with no flexible shareholder to credit, got %s want %s", state.market.TotalNHBSupplied, suppliedBeforeRepay)
+	}
+	if state.fees == nil || state.fees.ProtocolFeesWei == nil || state.fees.ProtocolFeesWei.Cmp(interestOwed) != 0 {
+		var got interface{} = "nil"
+		if state.fees != nil {
+			got = state.fees.ProtocolFeesWei
+		}
+		t.Fatalf("expected the full interest portion routed to protocol fees, got %v want %s", got, interestOwed)
+	}
+}
+
 // TestRepayFixedTermCapsOverpaymentAtOutstanding proves offering more than
 // the loan's remaining outstanding balance only applies (and only debits)
 // the outstanding amount, mirroring the flexible Repay's existing
@@ -433,5 +569,71 @@ func TestRepayFixedTermNoActiveLoan(t *testing.T) {
 	_, err := engine.RepayFixedTerm(borrower, new(big.Int).Set(one))
 	if err == nil || !strings.Contains(err.Error(), "no outstanding debt") {
 		t.Fatalf("expected no-debt-to-repay rejection, got %v", err)
+	}
+}
+
+// TestFixedTermRateScheduleChangeDoesNotAlterExistingLoan proves the
+// invariant governance.applyLendingRateSchedule's own doc comment calls
+// out: replacing the tenure->rate schedule (as a passed
+// ProposalKindLendingRateSchedule proposal does via
+// engine.SetFixedTermRateSchedule) only affects loans issued AFTER the
+// change -- an already-issued loan's locked-in RateBps/TotalInterestWei,
+// and therefore the amount it charges on repayment, must stay exactly what
+// it was at issuance regardless of how many times the schedule changes in
+// between.
+func TestFixedTermRateScheduleChangeDoesNotAlterExistingLoan(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x80)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x81)
+	borrower := makeAddress(crypto.NHBPrefix, 0x82)
+	one := mustBig("1000000000000000000")
+
+	engine, state := setupFixedTermEngine(moduleAddr, collateralAddr, borrower, func(p *lending.RiskParameters) {
+		p.BorrowCaps.PerBlock = nil
+	})
+	engine.SetState(state)
+	engine.SetBlockHeight(10)
+
+	principal := new(big.Int).Set(one)
+	loan, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(90), 30, principal)
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+	if loan.RateBps != 400 {
+		t.Fatalf("expected loan locked at the original 400bps rate, got %d", loan.RateBps)
+	}
+	lockedInterest := new(big.Int).Set(loan.TotalInterestWei)
+	lockedOutstanding := new(big.Int).Set(loan.OutstandingWei())
+
+	// Simulate a governance proposal changing the schedule for NEW borrows
+	// -- a large jump (400bps -> 5000bps) so any accidental re-read of the
+	// live schedule during repayment would be impossible to miss.
+	engine.SetFixedTermRateSchedule(lending.TenureRateSchedule{30: 5000, 90: 600})
+
+	// Fund the borrower enough to cover the ORIGINAL locked interest amount
+	// only -- if repayment were (incorrectly) charging the new 5000bps
+	// rate, this balance would be insufficient and the repay would fail.
+	borrowerAcc := state.accounts[state.key(borrower)]
+	borrowerAcc.BalanceNHB = new(big.Int).Add(borrowerAcc.BalanceNHB, lockedInterest)
+
+	applied, err := engine.RepayFixedTerm(borrower, lockedOutstanding)
+	if err != nil {
+		t.Fatalf("repay after schedule change: %v", err)
+	}
+	if applied.Cmp(lockedOutstanding) != 0 {
+		t.Fatalf("expected repayment to fully settle the ORIGINAL locked amount %s, got %s", lockedOutstanding, applied)
+	}
+
+	repaidLoan, err := state.GetFixedTermLoan(loan.LoanID)
+	if err != nil {
+		t.Fatalf("reload loan: %v", err)
+	}
+	if repaidLoan.RateBps != 400 {
+		t.Fatalf("expected the repaid loan record to still show its original 400bps rate, got %d", repaidLoan.RateBps)
+	}
+	if repaidLoan.TotalInterestWei.Cmp(lockedInterest) != 0 {
+		t.Fatalf("expected the repaid loan's TotalInterestWei to remain %s, got %s", lockedInterest, repaidLoan.TotalInterestWei)
+	}
+	if repaidLoan.Status != lending.FixedTermLoanStatusRepaid {
+		t.Fatalf("expected loan status repaid, got %s", repaidLoan.Status)
 	}
 }

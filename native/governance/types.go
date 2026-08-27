@@ -203,6 +203,21 @@ const (
 	// ever set, otherwise the conservative built-in default) and
 	// native/swap/redeem_risk.go's package doc for the full rationale.
 	ProposalKindSwapRiskParams = "policy.swapRiskParams"
+	// ProposalKindLendingRateSchedule adjusts the fixed-term lending
+	// tenure->rate table -- native/lending.TenureRateSchedule, currently
+	// hardcoded as DefaultFixedTermRateSchedule and read fresh on every
+	// fixed-term borrow -- via ParamStoreSet, following
+	// ProposalKindSwapRiskParams's precedent exactly. Unlike that dedicated
+	// kind's four fixed scalar fields, the payload here is a variable-length
+	// schedule (each entry a {tenureDays, rateBps} pair), persisted as one
+	// JSON blob under a single param key rather than field-by-field, since
+	// there's no fixed set of keys to enumerate ahead of time. Changing the
+	// schedule only ever affects newly-issued loans -- every already-issued
+	// FixedTermLoan keeps the RateBps it locked in at issuance forever (see
+	// native/lending/types.go's FixedTermLoan.RateBps doc comment). See
+	// core/lending_rate_schedule.go for the read side (the on-chain value
+	// if ever set, otherwise the built-in default).
+	ProposalKindLendingRateSchedule = "policy.lendingRateSchedule"
 )
 
 const (
@@ -297,6 +312,14 @@ const (
 	// ProposalKindParamUpdate proposal -- no dedicated proposal kind needed
 	// (see core/market_native.go's readGovernedMarketFlatFeeWei).
 	ParamKeyMarketFlatFeeWei = "market.flatFeeWei"
+	// ParamKeyLendingFixedTermRateSchedule stores the entire fixed-term
+	// tenure->rate table as one JSON blob (a []LendingTenureRate array, see
+	// LendingRateSchedulePayload), set only via ProposalKindLendingRateSchedule.
+	// Unlike every other key in this block, this one is not a single scalar
+	// -- there's no fixed set of per-tenure keys to enumerate ahead of time,
+	// so the whole schedule is replaced atomically on every passed proposal.
+	// See core/lending_rate_schedule.go for the read side.
+	ParamKeyLendingFixedTermRateSchedule = "lending.fixedTerm.rateSchedule"
 )
 
 // defaultMinimumValidatorStakeWei is 10,000 ZNHB expressed in the same
@@ -414,6 +437,28 @@ type SwapRiskParamsPayload struct {
 	RedeemPerAddressDailyCapWei   string `json:"redeemPerAddressDailyCapWei"`
 	RedeemPerAddressMonthlyCapWei string `json:"redeemPerAddressMonthlyCapWei"`
 	Memo                          string `json:"memo,omitempty"`
+}
+
+// LendingTenureRate is one entry in a ProposalKindLendingRateSchedule
+// payload: a tenure (in days) and its flat rate for that whole tenure, in
+// basis points (not annualised -- see native/lending's
+// computeFixedTermInterest).
+type LendingTenureRate struct {
+	TenureDays uint64 `json:"tenureDays"`
+	RateBps    uint64 `json:"rateBps"`
+}
+
+// LendingRateSchedulePayload defines the expected schema for
+// ProposalKindLendingRateSchedule proposals: the complete replacement
+// fixed-term tenure->rate table for native/lending's TenureRateSchedule.
+// The whole schedule is replaced atomically -- a proposal that only wants
+// to change one tenure's rate must still list every tenure it wants to
+// keep, since this is not a per-tenure incremental update. See
+// parseLendingRateSchedulePayload for the exact validation (non-empty, no
+// duplicate TenureDays, RateBps within a sane bound, TenureDays positive).
+type LendingRateSchedulePayload struct {
+	Schedule []LendingTenureRate `json:"schedule"`
+	Memo     string              `json:"memo,omitempty"`
 }
 
 // RoleAddressPair captures a role membership mutation in role allowlist

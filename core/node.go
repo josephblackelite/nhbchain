@@ -3271,7 +3271,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// apply) can genuinely change the outcome, so this is skippable,
 		// not prunable, same reasoning as the swap caps above.
 		errors.Is(err, lending.ErrHealthCheckFailed),
-		errors.Is(err, lending.ErrMaxLTVExceeded):
+		errors.Is(err, lending.ErrMaxLTVExceeded),
+		// A Withdraw's same-block-as-supply guard (see
+		// native/lending.ErrWithdrawSameBlockAsSupply's doc comment) depends
+		// on whether a same-sender Supply already applied earlier in this
+		// SAME proposal attempt -- a later attempt can genuinely change the
+		// outcome, same reasoning as the two lending errors above.
+		errors.Is(err, lending.ErrWithdrawSameBlockAsSupply):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
@@ -7577,6 +7583,30 @@ func (n *Node) SwapRiskParams() (swap.RedeemRiskParameters, error) {
 		return swap.RedeemRiskParameters{}, err
 	}
 	return redeem, nil
+}
+
+// LendingFixedTermRateSchedule returns the currently-effective tenure->rate
+// table for fixed-term lending borrows: the governance param store's value
+// if a policy.lendingRateSchedule proposal has ever executed, otherwise the
+// conservative built-in default -- see native/lending.DefaultFixedTermRateSchedule,
+// read fresh from state on every call. Mirrors SwapRiskParams's precedent
+// exactly: network-wide only, no account-specific data, safe to expose
+// publicly so a governance UI can display the current schedule before
+// drafting a proposal.
+func (n *Node) LendingFixedTermRateSchedule() (lending.TenureRateSchedule, error) {
+	var schedule lending.TenureRateSchedule
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		resolved, err := n.state.effectiveFixedTermRateSchedule(m)
+		if err != nil {
+			return err
+		}
+		schedule = resolved
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return schedule, nil
 }
 
 // SwapProviderStatus summarises the provider allow list and oracle health metadata.

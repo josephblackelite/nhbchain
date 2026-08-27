@@ -271,12 +271,17 @@ func (e *Engine) RepayFixedTerm(borrower crypto.Address, amount *big.Int) (*big.
 	if err != nil {
 		return nil, err
 	}
+	// Catches the flexible side's SupplyIndex up to the current block BEFORE
+	// the lump-sum bump below, exactly like Supply/Withdraw do at the top of
+	// their own bodies -- otherwise the bump would compound on top of a
+	// stale index instead of the current one. feesChanged/fees are reused
+	// below rather than fetched a second time.
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, err
+	}
 	// Only the principal portion frees up real pool liquidity -- see
-	// BorrowFixedTerm's matching comment. The interest portion is routed to
-	// protocol fee accrual for now (there is no fixed-term depositor to pay
-	// it out to yet -- that's Phase 2C/investor payout, not built in this
-	// pass); revisit once that exists so fixed-term interest actually funds
-	// fixed-term depositor yield rather than sitting as protocol revenue.
+	// BorrowFixedTerm's matching comment.
 	if principalPortion.Sign() > 0 {
 		market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, principalPortion)
 		if market.TotalNHBBorrowed.Sign() < 0 {
@@ -284,6 +289,36 @@ func (e *Engine) RepayFixedTerm(borrower crypto.Address, amount *big.Int) (*big.
 		}
 	}
 	interestPortion := new(big.Int).Sub(applied, principalPortion)
+
+	// Route the interest portion back to the pool so flexible supply-share
+	// holders earn from it -- there is still no fixed-term depositor product
+	// to pay it out to directly (that's Milestone 3), so in the meantime
+	// this is real yield for the SAME shared pool fixed-term loans already
+	// draw liquidity from, rather than sitting as protocol revenue with no
+	// depositor at all. Bumps SupplyIndex by a proportional growth factor
+	// (see RedeemableSupply: redeemable scales linearly with SupplyIndex for
+	// fixed shares) so every CURRENT shareholder's redeemable balance grows
+	// by the exact same ratio, without minting new TotalSupplyShares -- a
+	// deposit sequenced after this call mints shares against the
+	// already-bumped index and gets none of this lump sum; a withdrawal
+	// sequenced before it already reduced TotalSupplyShares and is no
+	// longer a shareholder when the bump happens. Falls back to protocol
+	// fees when there is no flexible shareholder to fairly credit (a pool
+	// with only fixed-term borrowers and zero flexible depositors) --
+	// bumping a zero-supplied index would divide by zero, not distribute
+	// anything.
+	if interestPortion.Sign() > 0 {
+		if market.TotalNHBSupplied != nil && market.TotalNHBSupplied.Sign() > 0 &&
+			market.TotalSupplyShares != nil && market.TotalSupplyShares.Sign() > 0 {
+			totalBefore := new(big.Int).Set(market.TotalNHBSupplied)
+			growthFactor := rayDiv(new(big.Int).Add(totalBefore, interestPortion), totalBefore)
+			market.SupplyIndex = rayMul(market.SupplyIndex, growthFactor)
+			market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, interestPortion)
+		} else {
+			fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, interestPortion)
+			feesChanged = true
+		}
+	}
 
 	fullyRepaid := loan.OutstandingWei().Sign() == 0
 	if fullyRepaid {
@@ -301,13 +336,7 @@ func (e *Engine) RepayFixedTerm(borrower crypto.Address, amount *big.Int) (*big.
 	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
 	}
-
-	if interestPortion.Sign() > 0 {
-		fees, err := e.ensureFeeAccrual()
-		if err != nil {
-			return nil, err
-		}
-		fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, interestPortion)
+	if feesChanged {
 		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 			return nil, err
 		}

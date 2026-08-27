@@ -177,7 +177,6 @@ func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lendin
 	engine.SetProtocolFeeBps(sp.lendingProtocolFeeBps)
 	engine.SetBlockHeight(sp.blockHeight())
 	engine.SetBlockTimestamp(sp.blockTimestamp().Unix())
-	engine.SetFixedTermRateSchedule(lending.DefaultFixedTermRateSchedule)
 	engine.SetCollateralRouting(sp.lendingCollateralRouting.Clone())
 	if market != nil {
 		engine.SetDeveloperFee(market.DeveloperFeeBps, market.DeveloperFeeCollector)
@@ -345,6 +344,17 @@ func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sen
 	if err != nil {
 		return err
 	}
+	// Resolved here, not inside the shared lendingEngine() constructor, so a
+	// corrupted/tampered stored schedule value can only ever fail fixed-term
+	// borrow origination -- not every other lending tx type (supply/withdraw/
+	// collateral/repay/liquidate), which never consult it. Mirrors
+	// core/swap_risk_params.go's effectiveRedeemRiskParameters precedent of
+	// being read only from the specific code path that needs it.
+	rateSchedule, err := sp.effectiveFixedTermRateSchedule(nhbstate.NewManager(sp.Trie))
+	if err != nil {
+		return err
+	}
+	engine.SetFixedTermRateSchedule(rateSchedule)
 	txHash, err := tx.Hash()
 	if err != nil {
 		return fmt.Errorf("lending fixed-term borrow: compute tx hash: %w", err)

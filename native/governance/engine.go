@@ -187,6 +187,34 @@ type parsedSwapRiskParams struct {
 	redeemPerAddressMonthlyCapWei *big.Int
 }
 
+// parsedLendingRateSchedule holds a validated ProposalKindLendingRateSchedule
+// payload, alongside the re-serialized JSON that will be persisted verbatim
+// via ParamStoreSet (re-serialized, not the original payloadJSON, so the
+// stored value is always in canonical field order/shape regardless of how
+// the proposer's client happened to format it).
+type parsedLendingRateSchedule struct {
+	payload       LendingRateSchedulePayload
+	canonicalJSON []byte
+}
+
+const (
+	// maxLendingRateScheduleEntries bounds the schedule to a sane size --
+	// this product realistically only ever needs a handful of tenures, and
+	// an unbounded entry count would let a passed proposal bloat state with
+	// a griefing-sized table.
+	maxLendingRateScheduleEntries = 20
+	// maxLendingRateScheduleTenureDays is a generous sanity ceiling (10
+	// years) to reject obviously-malformed tenure values, not a meaningful
+	// product constraint -- today's tenures are 30/90 days.
+	maxLendingRateScheduleTenureDays = 3650
+	// maxLendingRateScheduleRateBps caps any single tenure's rate at 100% of
+	// principal (10,000 bps) for the whole tenure -- these are flat period
+	// rates now (see native/lending's computeFixedTermInterest), not an
+	// annualised rate, so this is already a generous ceiling above which a
+	// rate would be straightforwardly predatory for a 30/90-day product.
+	maxLendingRateScheduleRateBps = 10_000
+)
+
 type parsedSwapPriceSigner struct {
 	provider string
 	addr     [20]byte
@@ -1079,6 +1107,52 @@ func parseSwapRiskCapQuad(label, minWeiStr, maxWeiStr, dailyWeiStr, monthlyWeiSt
 	return minWei, maxWei, dailyWei, monthlyWei, nil
 }
 
+// parseLendingRateSchedulePayload validates a ProposalKindLendingRateSchedule
+// payload. Follows ProposalKindSwapRiskParams's precedent of being
+// unconditionally available (not gated behind an engine-configured
+// allow-list) -- the safety of the proposal lives in the normal governance
+// quorum/threshold/timelock gate. Unlike that dedicated kind's four fixed
+// scalar fields, this payload is a variable-length collection, so validation
+// is structural (non-empty, bounded size, no duplicate tenures, each entry
+// individually sane) rather than a fixed ordering check.
+func parseLendingRateSchedulePayload(payloadJSON string) (*parsedLendingRateSchedule, error) {
+	var payload LendingRateSchedulePayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	if len(payload.Schedule) == 0 {
+		return nil, fmt.Errorf("governance: lending rate schedule must not be empty")
+	}
+	if len(payload.Schedule) > maxLendingRateScheduleEntries {
+		return nil, fmt.Errorf("governance: lending rate schedule may not exceed %d entries", maxLendingRateScheduleEntries)
+	}
+	seenTenures := make(map[uint64]struct{}, len(payload.Schedule))
+	for _, entry := range payload.Schedule {
+		if entry.TenureDays == 0 {
+			return nil, fmt.Errorf("governance: lending rate schedule tenureDays must be positive")
+		}
+		if entry.TenureDays > maxLendingRateScheduleTenureDays {
+			return nil, fmt.Errorf("governance: lending rate schedule tenureDays must not exceed %d", maxLendingRateScheduleTenureDays)
+		}
+		if entry.RateBps == 0 {
+			return nil, fmt.Errorf("governance: lending rate schedule rateBps must be positive (tenure %d)", entry.TenureDays)
+		}
+		if entry.RateBps > maxLendingRateScheduleRateBps {
+			return nil, fmt.Errorf("governance: lending rate schedule rateBps must not exceed %d (tenure %d)", maxLendingRateScheduleRateBps, entry.TenureDays)
+		}
+		if _, duplicate := seenTenures[entry.TenureDays]; duplicate {
+			return nil, fmt.Errorf("governance: lending rate schedule has a duplicate tenureDays value: %d", entry.TenureDays)
+		}
+		seenTenures[entry.TenureDays] = struct{}{}
+	}
+
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("governance: re-encode lending rate schedule: %w", err)
+	}
+	return &parsedLendingRateSchedule{payload: payload, canonicalJSON: canonical}, nil
+}
+
 // maxSwapPriceSignerProviderLen bounds the provider identifier length. Swap
 // provider identifiers are short slugs (e.g. "nowpayments", "otc-gateway")
 // -- this is a generous ceiling to reject obviously-malformed payloads, not
@@ -1352,6 +1426,37 @@ func (e *Engine) applySwapRiskParams(parsed *parsedSwapRiskParams) (map[string]i
 		"redeemPerTxMaxWei":             parsed.redeemPerTxMaxWei.String(),
 		"redeemPerAddressDailyCapWei":   parsed.redeemPerAddressDailyCapWei.String(),
 		"redeemPerAddressMonthlyCapWei": parsed.redeemPerAddressMonthlyCapWei.String(),
+	}
+	if strings.TrimSpace(parsed.payload.Memo) != "" {
+		detail["memo"] = strings.TrimSpace(parsed.payload.Memo)
+	}
+	return detail, nil
+}
+
+// applyLendingRateSchedule persists a passed ProposalKindLendingRateSchedule
+// proposal's entire tenure->rate table as one JSON blob under a single
+// ParamStoreSet key -- unlike applySwapRiskParams's one-key-per-field
+// pattern, there's no fixed set of per-tenure keys to enumerate ahead of
+// time, so the whole schedule replaces atomically. Only affects newly-issued
+// loans from this point forward (see core/lending_rate_schedule.go, read
+// fresh on every fixed-term borrow) -- never touches any already-issued
+// FixedTermLoan's own locked-in RateBps/TotalInterestWei.
+func (e *Engine) applyLendingRateSchedule(parsed *parsedLendingRateSchedule) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil lending rate schedule payload")
+	}
+	if err := e.state.ParamStoreSet(ParamKeyLendingFixedTermRateSchedule, parsed.canonicalJSON); err != nil {
+		return nil, err
+	}
+	entries := make([]map[string]interface{}, 0, len(parsed.payload.Schedule))
+	for _, entry := range parsed.payload.Schedule {
+		entries = append(entries, map[string]interface{}{
+			"tenureDays": entry.TenureDays,
+			"rateBps":    entry.RateBps,
+		})
+	}
+	detail := map[string]interface{}{
+		"schedule": entries,
 	}
 	if strings.TrimSpace(parsed.payload.Memo) != "" {
 		detail["memo"] = strings.TrimSpace(parsed.payload.Memo)
@@ -1657,6 +1762,10 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindSwapRiskParams:
 		if _, err := parseSwapRiskParamsPayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindLendingRateSchedule:
+		if _, err := parseLendingRateSchedulePayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	default:
@@ -2131,6 +2240,18 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return err
 		}
 		for k, v := range swapRiskDetail {
+			detail[k] = v
+		}
+	case ProposalKindLendingRateSchedule:
+		parsed, err := parseLendingRateSchedulePayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		lendingRateDetail, err := e.applyLendingRateSchedule(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range lendingRateDetail {
 			detail[k] = v
 		}
 	default:

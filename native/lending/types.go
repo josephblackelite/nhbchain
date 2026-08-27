@@ -123,6 +123,13 @@ type UserAccount struct {
 	// ScaledDebt reflects the debt adjusted by the borrow index to capture
 	// accrued interest.
 	ScaledDebt *big.Int
+	// LastSupplyBlock records the block height of this account's most recent
+	// Supply call. Withdraw rejects a same-block withdrawal (see
+	// errWithdrawSameBlockAsSupply) so a lump-sum interest credit routed into
+	// SupplyIndex (RepayFixedTerm's pool-routing path) can't be sniped by an
+	// atomic supply-then-withdraw sequence around it with zero real
+	// capital-at-risk duration. Zero means no supply has ever been recorded.
+	LastSupplyBlock uint64
 }
 
 // FixedTermLoanStatus enumerates the lifecycle states of a fixed-term loan.

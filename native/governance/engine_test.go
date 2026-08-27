@@ -1853,3 +1853,139 @@ func TestExecuteTreasuryDirective(t *testing.T) {
 		t.Fatalf("unexpected recipient balance: %s", recipientAccount.BalanceZNHB.String())
 	}
 }
+
+// TestExecuteLendingRateScheduleProposal mirrors
+// TestExecuteSwapRiskParamsProposal: submit -> force Passed -> queue ->
+// timelock elapses -> execute -> confirm the single
+// lending.fixedTerm.rateSchedule param-store key holds the proposal's
+// canonical JSON schedule.
+func TestExecuteLendingRateScheduleProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 20
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	now := time.Unix(1_700_300_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := `{"schedule":[{"tenureDays":30,"rateBps":1200},{"tenureDays":90,"rateBps":1600}],"memo":"bump rates"}`
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindLendingRateSchedule, payload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit lending rate schedule proposal: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue lending rate schedule proposal: %v", err)
+	}
+	proposal = state.proposals[proposalID]
+	proposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute lending rate schedule proposal: %v", err)
+	}
+
+	got, ok := state.params[ParamKeyLendingFixedTermRateSchedule]
+	if !ok {
+		t.Fatalf("expected param %s to be set", ParamKeyLendingFixedTermRateSchedule)
+	}
+	var stored LendingRateSchedulePayload
+	if err := json.Unmarshal(got, &stored); err != nil {
+		t.Fatalf("decode stored schedule: %v", err)
+	}
+	if len(stored.Schedule) != 2 {
+		t.Fatalf("expected 2 stored tenure entries, got %d", len(stored.Schedule))
+	}
+	rates := map[uint64]uint64{}
+	for _, entry := range stored.Schedule {
+		rates[entry.TenureDays] = entry.RateBps
+	}
+	if rates[30] != 1200 || rates[90] != 1600 {
+		t.Fatalf("unexpected stored schedule: %+v", rates)
+	}
+}
+
+// TestSubmitLendingRateScheduleProposalRejectsInvalidPayload covers
+// parseLendingRateSchedulePayload's validation branches: an empty schedule,
+// a duplicate tenureDays, a zero rateBps, and an over-max entry count must
+// all be rejected at submission time, before any deposit is locked or
+// proposal created.
+func TestSubmitLendingRateScheduleProposalRejectsInvalidPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{name: "empty schedule", payload: `{"schedule":[]}`},
+		{name: "duplicate tenure", payload: `{"schedule":[{"tenureDays":30,"rateBps":1200},{"tenureDays":30,"rateBps":1300}]}`},
+		{name: "zero tenureDays", payload: `{"schedule":[{"tenureDays":0,"rateBps":1200}]}`},
+		{name: "zero rateBps", payload: `{"schedule":[{"tenureDays":30,"rateBps":0}]}`},
+		{name: "oversized tenureDays", payload: `{"schedule":[{"tenureDays":3651,"rateBps":1200}]}`},
+		{name: "oversized rateBps", payload: `{"schedule":[{"tenureDays":30,"rateBps":10001}]}`},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var proposer [20]byte
+			proposer[3] = byte(21 + i)
+
+			state := newMockGovernanceState(map[[20]byte]*types.Account{
+				proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+			})
+
+			engine := NewEngine()
+			engine.SetState(state)
+			engine.SetPolicy(ProposalPolicy{
+				MinDepositWei:       big.NewInt(50),
+				VotingPeriodSeconds: 60,
+				TimelockSeconds:     10,
+			})
+			engine.SetNowFunc(func() time.Time { return time.Unix(1_700_300_000, 0).UTC() })
+
+			if _, err := engine.SubmitProposal(proposer, ProposalKindLendingRateSchedule, tc.payload, big.NewInt(75)); err == nil {
+				t.Fatalf("expected submission to reject payload: %s", tc.payload)
+			}
+		})
+	}
+}
+
+// TestSubmitLendingRateScheduleProposalRejectsOverMaxEntries covers the
+// maxLendingRateScheduleEntries bound with a schedule one entry over the
+// limit -- kept separate from the table above since it needs a generated
+// payload rather than a literal.
+func TestSubmitLendingRateScheduleProposalRejectsOverMaxEntries(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 30
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	engine.SetNowFunc(func() time.Time { return time.Unix(1_700_300_000, 0).UTC() })
+
+	entries := make([]string, 0, maxLendingRateScheduleEntries+1)
+	for i := 0; i < maxLendingRateScheduleEntries+1; i++ {
+		entries = append(entries, fmt.Sprintf(`{"tenureDays":%d,"rateBps":100}`, i+1))
+	}
+	payload := `{"schedule":[` + strings.Join(entries, ",") + `]}`
+
+	if _, err := engine.SubmitProposal(proposer, ProposalKindLendingRateSchedule, payload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected submission to reject a schedule exceeding %d entries", maxLendingRateScheduleEntries)
+	}
+}

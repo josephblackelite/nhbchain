@@ -12,31 +12,32 @@ import (
 )
 
 var (
-	errNilState              = errors.New("lending engine: state not configured")
-	errNilMarket             = errors.New("lending engine: market not initialised")
-	errInvalidAmount         = errors.New("lending engine: amount must be positive")
-	errInsufficientBalance   = errors.New("lending engine: insufficient balance")
-	errInsufficientLiquidity = errors.New("lending engine: insufficient liquidity")
-	errHealthCheckFailed     = errors.New("lending engine: borrower health factor below 1")
-	errNoDebtToRepay         = errors.New("lending engine: no outstanding debt to repay")
-	errNotLiquidatable       = errors.New("lending engine: borrower not eligible for liquidation")
-	errDeveloperFeeRecipient = errors.New("lending engine: developer fee recipient not configured")
-	errDeveloperFeeCap       = errors.New("lending engine: developer fee exceeds cap")
-	errPoolNotConfigured     = errors.New("lending engine: pool identifier not configured")
-	errCollateralRoutingBps  = errors.New("lending engine: collateral routing exceeds 100%")
-	errDeveloperCollateral   = errors.New("lending engine: developer collateral recipient not configured")
-	errProtocolCollateral    = errors.New("lending engine: protocol collateral recipient not configured")
-	errSupplyPaused          = errors.New("lending engine: supply operations paused")
-	errBorrowPaused          = errors.New("lending engine: borrow operations paused")
-	errRepayPaused           = errors.New("lending engine: repay operations paused")
-	errLiquidationsPaused    = errors.New("lending engine: liquidation operations paused")
-	errDepositTooSmall       = errors.New("lending engine: deposit below minimum liquidity")
-	errBorrowCapPerBlock     = errors.New("lending engine: borrow exceeds per-block cap")
-	errBorrowCapGlobal       = errors.New("lending engine: borrow exceeds global cap")
-	errBorrowCapUtilisation  = errors.New("lending engine: borrow exceeds utilisation cap")
-	errOracleStale           = errors.New("lending engine: oracle quote stale")
-	errOracleDeviation       = errors.New("lending engine: oracle deviation too large")
-	errMaxLTVExceeded        = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
+	errNilState                  = errors.New("lending engine: state not configured")
+	errNilMarket                 = errors.New("lending engine: market not initialised")
+	errInvalidAmount             = errors.New("lending engine: amount must be positive")
+	errInsufficientBalance       = errors.New("lending engine: insufficient balance")
+	errInsufficientLiquidity     = errors.New("lending engine: insufficient liquidity")
+	errHealthCheckFailed         = errors.New("lending engine: borrower health factor below 1")
+	errNoDebtToRepay             = errors.New("lending engine: no outstanding debt to repay")
+	errNotLiquidatable           = errors.New("lending engine: borrower not eligible for liquidation")
+	errDeveloperFeeRecipient     = errors.New("lending engine: developer fee recipient not configured")
+	errDeveloperFeeCap           = errors.New("lending engine: developer fee exceeds cap")
+	errPoolNotConfigured         = errors.New("lending engine: pool identifier not configured")
+	errCollateralRoutingBps      = errors.New("lending engine: collateral routing exceeds 100%")
+	errDeveloperCollateral       = errors.New("lending engine: developer collateral recipient not configured")
+	errProtocolCollateral        = errors.New("lending engine: protocol collateral recipient not configured")
+	errSupplyPaused              = errors.New("lending engine: supply operations paused")
+	errBorrowPaused              = errors.New("lending engine: borrow operations paused")
+	errRepayPaused               = errors.New("lending engine: repay operations paused")
+	errLiquidationsPaused        = errors.New("lending engine: liquidation operations paused")
+	errDepositTooSmall           = errors.New("lending engine: deposit below minimum liquidity")
+	errBorrowCapPerBlock         = errors.New("lending engine: borrow exceeds per-block cap")
+	errBorrowCapGlobal           = errors.New("lending engine: borrow exceeds global cap")
+	errBorrowCapUtilisation      = errors.New("lending engine: borrow exceeds utilisation cap")
+	errOracleStale               = errors.New("lending engine: oracle quote stale")
+	errOracleDeviation           = errors.New("lending engine: oracle deviation too large")
+	errMaxLTVExceeded            = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
+	errWithdrawSameBlockAsSupply = errors.New("lending engine: cannot withdraw in the same block as a supply")
 )
 
 // ErrHealthCheckFailed and ErrMaxLTVExceeded are exported aliases of the
@@ -52,6 +53,14 @@ var (
 var (
 	ErrHealthCheckFailed = errHealthCheckFailed
 	ErrMaxLTVExceeded    = errMaxLTVExceeded
+	// ErrWithdrawSameBlockAsSupply is an exported alias of
+	// errWithdrawSameBlockAsSupply -- like the two above, core/node.go's
+	// classifyProposalError needs to recognize it as
+	// proposalDispositionSkip: whether a Withdraw hits this guard depends on
+	// whether a same-sender Supply was already applied earlier in the SAME
+	// proposal attempt, so a later attempt (different ordering, or a
+	// different transaction set) can genuinely change the outcome.
+	ErrWithdrawSameBlockAsSupply = errWithdrawSameBlockAsSupply
 )
 
 const blocksPerYear = 31_536_000
@@ -282,6 +291,7 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 		return nil, err
 	}
 	user.SupplyShares = new(big.Int).Add(user.SupplyShares, mintedShares)
+	user.LastSupplyBlock = e.blockHeight
 
 	market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, amount)
 	market.TotalSupplyShares = new(big.Int).Add(market.TotalSupplyShares, mintedShares)
@@ -333,6 +343,16 @@ func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int,
 	}
 	if user.SupplyShares.Cmp(amountLP) < 0 {
 		return nil, errInsufficientBalance
+	}
+	// Rejects a withdrawal in the same block as this account's most recent
+	// Supply -- closes the atomic, zero-real-duration supply-then-withdraw
+	// round trip that could otherwise snipe a disproportionate share of a
+	// same-block lump-sum SupplyIndex bump (see RepayFixedTerm's pool-routing
+	// comment) at genuine long-term suppliers' expense. LastSupplyBlock==0
+	// means no supply has ever been recorded, so it never falsely blocks a
+	// withdrawal at block height 0.
+	if user.LastSupplyBlock != 0 && user.LastSupplyBlock == e.blockHeight {
+		return nil, errWithdrawSameBlockAsSupply
 	}
 
 	// Determine the underlying NHB using the current supply index.
