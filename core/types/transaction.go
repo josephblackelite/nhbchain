@@ -204,6 +204,25 @@ const (
 	// current tip; do not reuse without re-checking for newly added types
 	// above this comment.
 	TxTypeStakeClaimRewards TxType = 0x34
+
+	// TxTypeMarketCreateListing/FillListing/CancelListing implement the
+	// peer-to-peer ZNHB-for-NHB marketplace (native/market). 0x35/0x36/0x37
+	// are the next free bytes after TxTypeStakeClaimRewards (0x34) --
+	// verified 2026-08-24 against this file's real, current tip (an earlier
+	// draft of this feature mistakenly assumed 0x30-0x32 were free; they
+	// are not, TxTypeSubscription* already occupies them). Do not reuse
+	// without re-checking for newly added types above this comment.
+	//
+	// CreateListing: tx.Value is the ZNHB amount to escrow; tx.Data is
+	// RLP([rateNumerator, rateDenominator, allowPartial]) -- price
+	// expressed as an exact ZNHB-per-NHB rational, never a float.
+	// FillListing: tx.Value is unused (always 0); tx.Data is
+	// RLP([listingID, znhbAmountRequested]) -- the NHB cost is computed
+	// on-chain from the listing's own rate, never client-declared.
+	// CancelListing: tx.Value is unused; tx.Data is RLP([listingID]).
+	TxTypeMarketCreateListing TxType = 0x35
+	TxTypeMarketFillListing   TxType = 0x36
+	TxTypeMarketCancelListing TxType = 0x37
 )
 
 // RequiresSignature reports whether the transaction type must carry an

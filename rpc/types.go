@@ -69,6 +69,17 @@ type ExplorerTransactionResult struct {
 	GasLimit      uint64 `json:"gasLimit,omitempty"`
 	GasPrice      string `json:"gasPrice,omitempty"`
 	Status        string `json:"status,omitempty"`
+	// Direction is "incoming" or "outgoing", computed server-side (in
+	// buildAddressActivity, which knows the address being queried) rather
+	// than left for the frontend to infer from From/To/Type -- inference by
+	// type-name string matching silently defaulted every unrecognized
+	// transaction type to "receive" with a positive sign, which is how a
+	// real ZNHB transfer or NHB redemption could render as an incoming
+	// credit even when the queried address was the sender. Empty for a
+	// synthesized side-effect record where "incoming"/"outgoing" isn't
+	// simply From/To (see buildAddressActivity's admin-wallet/fee-collector
+	// synthesis) -- those set it explicitly instead.
+	Direction string `json:"direction,omitempty"`
 }
 
 // ExplorerAddressBalances exposes the current chain-derived balances for an
@@ -226,6 +237,18 @@ func formatTxType(t types.TxType) string {
 		return "LendingBorrowNHB"
 	case types.TxTypeLendingRepayNHB:
 		return "LendingRepayNHB"
+	case types.TxTypeBuyZNHB:
+		return "BuyZNHB"
+	case types.TxTypeRedeemNHB:
+		return "RedeemNHB"
+	case types.TxTypeAttestRedemption:
+		return "AttestRedemption"
+	case types.TxTypeMarketCreateListing:
+		return "MarketCreateListing"
+	case types.TxTypeMarketFillListing:
+		return "MarketFillListing"
+	case types.TxTypeMarketCancelListing:
+		return "MarketCancelListing"
 	default:
 		return fmt.Sprintf("0x%02x", byte(t))
 	}
@@ -242,8 +265,11 @@ func assetLabel(t types.TxType) string {
 		return "NHB"
 	case types.TxTypeTransferZNHB,
 		types.TxTypeLendingDepositZNHB,
-		types.TxTypeLendingWithdrawZNHB:
+		types.TxTypeLendingWithdrawZNHB,
+		types.TxTypeBuyZNHB:
 		return "ZNHB"
+	case types.TxTypeRedeemNHB:
+		return "NHB"
 	default:
 		return ""
 	}
