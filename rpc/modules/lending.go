@@ -314,6 +314,41 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 	return account, nil
 }
 
+// GetActiveFixedTermLoan returns the borrower's currently-active fixed-term
+// loan in this pool, or (nil, nil) if they have none -- not an error, since
+// "no active loan" is a completely ordinary state for most addresses.
+func (m *LendingModule) GetActiveFixedTermLoan(poolID string, addr [20]byte) (*lending.FixedTermLoan, *ModuleError) {
+	if m == nil || m.node == nil {
+		return nil, m.moduleUnavailable()
+	}
+	id := strings.TrimSpace(poolID)
+	if id == "" {
+		id = defaultLendingPoolID
+	}
+	var loan *lending.FixedTermLoan
+	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
+		loanID, exists, err := manager.LendingGetActiveFixedTermLoanID(id, addr)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		stored, ok, err := manager.LendingGetFixedTermLoan(loanID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			loan = stored
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, m.wrapError(err)
+	}
+	return loan, nil
+}
+
 func marketNeedsRebuild(market *lending.Market) bool {
 	if market == nil {
 		return true
@@ -989,6 +1024,54 @@ func (a *lendingStateAdapter) PutFeeAccrual(_ string, fees *lending.FeeAccrual) 
 		return fmt.Errorf("lending: fee accrual must not be nil")
 	}
 	return a.manager.LendingPutFeeAccrual(a.poolID, fees)
+}
+
+func (a *lendingStateAdapter) GetFixedTermLoan(loanID [32]byte) (*lending.FixedTermLoan, error) {
+	if a == nil || a.manager == nil {
+		return nil, fmt.Errorf("lending: state manager unavailable")
+	}
+	loan, ok, err := a.manager.LendingGetFixedTermLoan(loanID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return loan, nil
+}
+
+func (a *lendingStateAdapter) PutFixedTermLoan(loan *lending.FixedTermLoan) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	return a.manager.LendingPutFixedTermLoan(loan)
+}
+
+func (a *lendingStateAdapter) GetActiveFixedTermLoanID(_ string, addr crypto.Address) ([32]byte, bool, error) {
+	if a == nil || a.manager == nil {
+		return [32]byte{}, false, fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	return a.manager.LendingGetActiveFixedTermLoanID(a.poolID, raw)
+}
+
+func (a *lendingStateAdapter) SetActiveFixedTermLoanID(_ string, addr crypto.Address, loanID [32]byte) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	return a.manager.LendingSetActiveFixedTermLoanID(a.poolID, raw, loanID)
+}
+
+func (a *lendingStateAdapter) ClearActiveFixedTermLoan(_ string, addr crypto.Address) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	return a.manager.LendingClearActiveFixedTermLoan(a.poolID, raw)
 }
 
 func (a *lendingStateAdapter) GetAccount(addr crypto.Address) (*types.Account, error) {

@@ -693,7 +693,8 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 // core/lending_native.go's apply* functions and core/state_transition.go's
 // StakeClaim/StakeClaimRewards) rather than inferred from the type's name:
 //
-//   - LendingBorrowNHB: the pool pays out borrowed NHB to the caller -> incoming.
+//   - LendingBorrowNHB / LendingBorrowFixedTerm: the pool pays out borrowed
+//     NHB to the caller -> incoming.
 //   - LendingWithdrawNHB: previously supplied NHB liquidity is paid back -> incoming.
 //   - LendingWithdrawZNHB: previously deposited ZNHB collateral is paid back -> incoming.
 //   - StakeClaim: a matured unbonding entry is credited into BalanceZNHB -> incoming.
@@ -717,6 +718,7 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 func selfDirectedTransactionDirection(txType types.TxType) (direction string, handled bool) {
 	switch txType {
 	case types.TxTypeLendingBorrowNHB,
+		types.TxTypeLendingBorrowFixedTerm,
 		types.TxTypeLendingWithdrawNHB,
 		types.TxTypeLendingWithdrawZNHB,
 		types.TxTypeStakeClaim,

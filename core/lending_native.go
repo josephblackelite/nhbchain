@@ -176,6 +176,8 @@ func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lendin
 	engine.SetReserveFactor(sp.lendingReserveFactorBps)
 	engine.SetProtocolFeeBps(sp.lendingProtocolFeeBps)
 	engine.SetBlockHeight(sp.blockHeight())
+	engine.SetBlockTimestamp(sp.blockTimestamp().Unix())
+	engine.SetFixedTermRateSchedule(lending.DefaultFixedTermRateSchedule)
 	engine.SetCollateralRouting(sp.lendingCollateralRouting.Clone())
 	if market != nil {
 		engine.SetDeveloperFee(market.DeveloperFeeBps, market.DeveloperFeeCollector)
@@ -297,6 +299,77 @@ func (sp *StateProcessor) applyLendingRepayNHB(tx *types.Transaction, sender []b
 		return err
 	}
 	if _, err := engine.Repay(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), tx.Value); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(sender)
+}
+
+type lendingFixedTermBorrowPayload struct {
+	PoolID     string `json:"poolId,omitempty"`
+	TenureDays uint64 `json:"tenureDays"`
+}
+
+func (sp *StateProcessor) decodeLendingFixedTermBorrowPayload(data []byte) (*lendingFixedTermBorrowPayload, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("lending fixed-term borrow payload required")
+	}
+	payload := &lendingFixedTermBorrowPayload{PoolID: defaultLendingPoolID}
+	if err := json.Unmarshal(data, payload); err != nil {
+		return nil, fmt.Errorf("invalid lending fixed-term borrow payload: %w", err)
+	}
+	payload.PoolID = strings.TrimSpace(payload.PoolID)
+	if payload.PoolID == "" {
+		payload.PoolID = defaultLendingPoolID
+	}
+	if payload.TenureDays == 0 {
+		return nil, fmt.Errorf("lending fixed-term borrow payload requires a tenure")
+	}
+	return payload, nil
+}
+
+// applyLendingBorrowFixedTerm originates a new locked-rate, fixed-tenure
+// loan. loanID is derived from this transaction's own hash -- a pure
+// function of the transaction's own immutable bytes, computed identically
+// by every validator that processes it, never from wall-clock time (see
+// native/lending's FixedTermLoan doc comment for the incident class this
+// avoids).
+func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sender []byte) error {
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return fmt.Errorf("lending fixed-term borrow amount must be positive")
+	}
+	payload, err := sp.decodeLendingFixedTermBorrowPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	engine, _, err := sp.lendingEngine(payload.PoolID)
+	if err != nil {
+		return err
+	}
+	txHash, err := tx.Hash()
+	if err != nil {
+		return fmt.Errorf("lending fixed-term borrow: compute tx hash: %w", err)
+	}
+	var loanID [32]byte
+	copy(loanID[:], txHash)
+	if _, err := engine.BorrowFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), loanID, payload.TenureDays, tx.Value); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(sender)
+}
+
+func (sp *StateProcessor) applyLendingRepayFixedTerm(tx *types.Transaction, sender []byte) error {
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return fmt.Errorf("lending fixed-term repay amount must be positive")
+	}
+	payload, err := sp.decodeLendingPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	engine, _, err := sp.lendingEngine(payload.PoolID)
+	if err != nil {
+		return err
+	}
+	if _, err := engine.RepayFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), tx.Value); err != nil {
 		return err
 	}
 	return sp.incrementNativeAccountNonce(sender)
@@ -628,6 +701,54 @@ func (a *lendingStateAdapter) PutFeeAccrual(_ string, fees *lending.FeeAccrual) 
 		return fmt.Errorf("lending: fee accrual must not be nil")
 	}
 	return a.manager.LendingPutFeeAccrual(a.poolID, fees)
+}
+
+func (a *lendingStateAdapter) GetFixedTermLoan(loanID [32]byte) (*lending.FixedTermLoan, error) {
+	if a == nil || a.manager == nil {
+		return nil, fmt.Errorf("lending: state manager unavailable")
+	}
+	loan, ok, err := a.manager.LendingGetFixedTermLoan(loanID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return loan, nil
+}
+
+func (a *lendingStateAdapter) PutFixedTermLoan(loan *lending.FixedTermLoan) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	return a.manager.LendingPutFixedTermLoan(loan)
+}
+
+func (a *lendingStateAdapter) GetActiveFixedTermLoanID(_ string, addr crypto.Address) ([32]byte, bool, error) {
+	if a == nil || a.manager == nil {
+		return [32]byte{}, false, fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	return a.manager.LendingGetActiveFixedTermLoanID(a.poolID, raw)
+}
+
+func (a *lendingStateAdapter) SetActiveFixedTermLoanID(_ string, addr crypto.Address, loanID [32]byte) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	return a.manager.LendingSetActiveFixedTermLoanID(a.poolID, raw, loanID)
+}
+
+func (a *lendingStateAdapter) ClearActiveFixedTermLoan(_ string, addr crypto.Address) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	var raw [20]byte
+	copy(raw[:], addr.Bytes())
+	return a.manager.LendingClearActiveFixedTermLoan(a.poolID, raw)
 }
 
 func (a *lendingStateAdapter) GetAccount(addr crypto.Address) (*types.Account, error) {

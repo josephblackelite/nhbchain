@@ -223,6 +223,18 @@ const (
 	TxTypeMarketCreateListing TxType = 0x35
 	TxTypeMarketFillListing   TxType = 0x36
 	TxTypeMarketCancelListing TxType = 0x37
+
+	// TxTypeLendingBorrowFixedTerm originates a new locked-rate, fixed-tenure
+	// loan. tx.Value is the principal requested; tx.Data is JSON-encoded
+	// lendingFixedTermBorrowPayload{poolId, tenureDays} (matching every
+	// other lending tx's JSON payload convention, not RLP) -- the rate is
+	// resolved on-chain from the tenure/rate schedule, never client-declared.
+	TxTypeLendingBorrowFixedTerm TxType = 0x38
+	// TxTypeLendingRepayFixedTerm applies a payment to the sender's active
+	// fixed-term loan. tx.Value is the amount offered (capped at the loan's
+	// remaining outstanding balance); tx.Data is JSON-encoded
+	// lendingNativePayload{poolId}.
+	TxTypeLendingRepayFixedTerm TxType = 0x39
 )
 
 // RequiresSignature reports whether the transaction type must carry an

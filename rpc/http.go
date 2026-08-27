@@ -1531,6 +1531,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// direct state-trie write. See rpc/lending_handlers.go's comment.
 	case "lending_getUserAccount":
 		s.handleLendingGetUserAccount(recorder, r, req)
+	case "lending_getFixedTermLoan":
+		s.handleLendingGetFixedTermLoan(recorder, r, req)
 	case "lending_supplyNHB":
 		s.handleLendingSupplyNHB(recorder, r, req)
 	case "lending_withdrawNHB":

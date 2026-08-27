@@ -132,6 +132,18 @@ var (
 	lendingFeeAccrualPrefix         = []byte("lending/fees/")
 	lendingUserPrefix               = []byte("lending/user/")
 	lendingPoolIndexKey             = []byte("lending/pools/index")
+	// lendingFixedTermLoanPrefix/lendingFixedTermActiveLoanPrefix back the new
+	// fixed-term (locked-rate, 30/90-day) borrow product -- a separate record
+	// family from the flexible-rate lendingUserPrefix accounts above, since a
+	// fixed-term loan's economics (rate locked at issuance, full-term
+	// interest owed regardless of early repayment) are incompatible with the
+	// continuously-re-priced BorrowIndex/DebtNHB/ScaledDebt system the
+	// flexible model uses. lendingFixedTermActiveLoanPrefix is a
+	// (poolID, borrower) -> loanID index enforcing "one active fixed-term
+	// loan per borrower per pool at a time" (v1 scoping decision) without a
+	// full state-trie scan.
+	lendingFixedTermLoanPrefix       = []byte("lending/loan/")
+	lendingFixedTermActiveLoanPrefix = []byte("lending/loanactive/")
 	marketListingPrefix             = []byte("market/listing/")
 	marketOpenListingIndexKey       = []byte("market/openListings")
 	marketFillPrefix                = []byte("market/fill/")
@@ -1846,6 +1858,157 @@ func (m *Manager) LendingPutUserAccount(poolID string, account *lending.UserAcco
 		return err
 	}
 	return m.KVPut(lendingUserKey(normalized, addr.Bytes()), newStoredLendingUser(account))
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-term (locked-rate) lending loan storage -- a separate record family
+// from the flexible-rate lendingUserPrefix accounts above (see
+// native/lending's FixedTermLoan doc comment for why).
+// ---------------------------------------------------------------------------
+
+func lendingFixedTermLoanKey(loanID [32]byte) []byte {
+	buf := make([]byte, len(lendingFixedTermLoanPrefix)+len(loanID))
+	copy(buf, lendingFixedTermLoanPrefix)
+	copy(buf[len(lendingFixedTermLoanPrefix):], loanID[:])
+	return buf
+}
+
+func lendingFixedTermActiveLoanKey(poolID string, addr []byte) []byte {
+	trimmed := strings.TrimSpace(poolID)
+	buf := make([]byte, len(lendingFixedTermActiveLoanPrefix)+len(trimmed)+1+len(addr))
+	copy(buf, lendingFixedTermActiveLoanPrefix)
+	copy(buf[len(lendingFixedTermActiveLoanPrefix):], trimmed)
+	buf[len(lendingFixedTermActiveLoanPrefix)+len(trimmed)] = ':'
+	copy(buf[len(lendingFixedTermActiveLoanPrefix)+len(trimmed)+1:], addr)
+	return buf
+}
+
+type storedLendingFixedTermLoan struct {
+	LoanID           [32]byte
+	Borrower         [20]byte
+	PoolID           string
+	TenureDays       uint64
+	RateBps          uint64
+	PrincipalWei     *big.Int
+	TotalInterestWei *big.Int
+	RepaidWei        *big.Int
+	IssuedAtBlock    uint64
+	IssuedAtTime     uint64
+	MaturityTime     uint64
+	Status           string
+}
+
+func newStoredLendingFixedTermLoan(loan *lending.FixedTermLoan) *storedLendingFixedTermLoan {
+	if loan == nil {
+		return nil
+	}
+	stored := &storedLendingFixedTermLoan{
+		LoanID:        loan.LoanID,
+		PoolID:        loan.PoolID,
+		TenureDays:    loan.TenureDays,
+		RateBps:       loan.RateBps,
+		IssuedAtBlock: loan.IssuedAtBlock,
+		IssuedAtTime:  loan.IssuedAtTime,
+		MaturityTime:  loan.MaturityTime,
+		Status:        string(loan.Status),
+	}
+	copy(stored.Borrower[:], loan.Borrower.Bytes())
+	if loan.PrincipalWei != nil {
+		stored.PrincipalWei = new(big.Int).Set(loan.PrincipalWei)
+	}
+	if loan.TotalInterestWei != nil {
+		stored.TotalInterestWei = new(big.Int).Set(loan.TotalInterestWei)
+	}
+	if loan.RepaidWei != nil {
+		stored.RepaidWei = new(big.Int).Set(loan.RepaidWei)
+	}
+	return stored
+}
+
+func (s *storedLendingFixedTermLoan) toFixedTermLoan() *lending.FixedTermLoan {
+	if s == nil {
+		return nil
+	}
+	loan := &lending.FixedTermLoan{
+		LoanID:        s.LoanID,
+		Borrower:      crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Borrower[:]...)),
+		PoolID:        s.PoolID,
+		TenureDays:    s.TenureDays,
+		RateBps:       s.RateBps,
+		IssuedAtBlock: s.IssuedAtBlock,
+		IssuedAtTime:  s.IssuedAtTime,
+		MaturityTime:  s.MaturityTime,
+		Status:        lending.FixedTermLoanStatus(s.Status),
+	}
+	if s.PrincipalWei != nil {
+		loan.PrincipalWei = new(big.Int).Set(s.PrincipalWei)
+	}
+	if s.TotalInterestWei != nil {
+		loan.TotalInterestWei = new(big.Int).Set(s.TotalInterestWei)
+	}
+	if s.RepaidWei != nil {
+		loan.RepaidWei = new(big.Int).Set(s.RepaidWei)
+	}
+	return loan
+}
+
+// LendingGetFixedTermLoan loads a fixed-term loan by its ID.
+func (m *Manager) LendingGetFixedTermLoan(loanID [32]byte) (*lending.FixedTermLoan, bool, error) {
+	var stored storedLendingFixedTermLoan
+	ok, err := m.KVGet(lendingFixedTermLoanKey(loanID), &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return stored.toFixedTermLoan(), true, nil
+}
+
+// LendingPutFixedTermLoan persists a fixed-term loan snapshot.
+func (m *Manager) LendingPutFixedTermLoan(loan *lending.FixedTermLoan) error {
+	if loan == nil {
+		return fmt.Errorf("lending: fixed-term loan must not be nil")
+	}
+	return m.KVPut(lendingFixedTermLoanKey(loan.LoanID), newStoredLendingFixedTermLoan(loan))
+}
+
+// LendingGetActiveFixedTermLoanID returns the loan ID of the borrower's
+// currently-active fixed-term loan in this pool, if any -- backs the v1
+// "one active fixed-term loan per (borrower, pool) at a time" rule without a
+// full state-trie scan.
+func (m *Manager) LendingGetActiveFixedTermLoanID(poolID string, addr [20]byte) ([32]byte, bool, error) {
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
+	var loanID [32]byte
+	ok, err := m.KVGet(lendingFixedTermActiveLoanKey(normalized, addr[:]), &loanID)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
+	return loanID, ok, nil
+}
+
+// LendingSetActiveFixedTermLoanID records loanID as the borrower's active
+// fixed-term loan in this pool.
+func (m *Manager) LendingSetActiveFixedTermLoanID(poolID string, addr [20]byte, loanID [32]byte) error {
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	return m.KVPut(lendingFixedTermActiveLoanKey(normalized, addr[:]), loanID)
+}
+
+// LendingClearActiveFixedTermLoan removes the borrower's active-loan pointer
+// (called once a loan reaches FixedTermLoanStatusRepaid), freeing them to
+// take out a new fixed-term loan in this pool.
+func (m *Manager) LendingClearActiveFixedTermLoan(poolID string, addr [20]byte) error {
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	return m.KVDelete(lendingFixedTermActiveLoanKey(normalized, addr[:]))
 }
 
 // ---------------------------------------------------------------------------

@@ -16,16 +16,20 @@ var (
 )
 
 type lendingFuzzState struct {
-	market   *lending.Market
-	users    map[string]*lending.UserAccount
-	accounts map[string]*types.Account
-	fees     *lending.FeeAccrual
+	market        *lending.Market
+	users         map[string]*lending.UserAccount
+	accounts      map[string]*types.Account
+	fees          *lending.FeeAccrual
+	loans         map[[32]byte]*lending.FixedTermLoan
+	activeLoanIDs map[string][32]byte
 }
 
 func newLendingFuzzState() *lendingFuzzState {
 	return &lendingFuzzState{
-		users:    make(map[string]*lending.UserAccount),
-		accounts: make(map[string]*types.Account),
+		users:         make(map[string]*lending.UserAccount),
+		accounts:      make(map[string]*types.Account),
+		loans:         make(map[[32]byte]*lending.FixedTermLoan),
+		activeLoanIDs: make(map[string][32]byte),
 	}
 }
 
@@ -77,6 +81,33 @@ func (s *lendingFuzzState) GetFeeAccrual(string) (*lending.FeeAccrual, error) { 
 
 func (s *lendingFuzzState) PutFeeAccrual(_ string, fees *lending.FeeAccrual) error {
 	s.fees = fees
+	return nil
+}
+
+func (s *lendingFuzzState) GetFixedTermLoan(loanID [32]byte) (*lending.FixedTermLoan, error) {
+	return s.loans[loanID], nil
+}
+
+func (s *lendingFuzzState) PutFixedTermLoan(loan *lending.FixedTermLoan) error {
+	if loan == nil {
+		return nil
+	}
+	s.loans[loan.LoanID] = loan
+	return nil
+}
+
+func (s *lendingFuzzState) GetActiveFixedTermLoanID(_ string, addr crypto.Address) ([32]byte, bool, error) {
+	id, ok := s.activeLoanIDs[s.key(addr)]
+	return id, ok, nil
+}
+
+func (s *lendingFuzzState) SetActiveFixedTermLoanID(_ string, addr crypto.Address, loanID [32]byte) error {
+	s.activeLoanIDs[s.key(addr)] = loanID
+	return nil
+}
+
+func (s *lendingFuzzState) ClearActiveFixedTermLoan(_ string, addr crypto.Address) error {
+	delete(s.activeLoanIDs, s.key(addr))
 	return nil
 }
 

@@ -9,16 +9,20 @@ import (
 )
 
 type mockEngineState struct {
-	market   *Market
-	users    map[string]*UserAccount
-	accounts map[string]*types.Account
-	fees     *FeeAccrual
+	market        *Market
+	users         map[string]*UserAccount
+	accounts      map[string]*types.Account
+	fees          *FeeAccrual
+	loans         map[[32]byte]*FixedTermLoan
+	activeLoanIDs map[string][32]byte
 }
 
 func newMockEngineState() *mockEngineState {
 	return &mockEngineState{
-		users:    make(map[string]*UserAccount),
-		accounts: make(map[string]*types.Account),
+		users:         make(map[string]*UserAccount),
+		accounts:      make(map[string]*types.Account),
+		loans:         make(map[[32]byte]*FixedTermLoan),
+		activeLoanIDs: make(map[string][32]byte),
 	}
 }
 
@@ -74,6 +78,33 @@ func (m *mockEngineState) GetFeeAccrual(string) (*FeeAccrual, error) {
 
 func (m *mockEngineState) PutFeeAccrual(_ string, fees *FeeAccrual) error {
 	m.fees = fees
+	return nil
+}
+
+func (m *mockEngineState) GetFixedTermLoan(loanID [32]byte) (*FixedTermLoan, error) {
+	return m.loans[loanID], nil
+}
+
+func (m *mockEngineState) PutFixedTermLoan(loan *FixedTermLoan) error {
+	if loan == nil {
+		return nil
+	}
+	m.loans[loan.LoanID] = loan
+	return nil
+}
+
+func (m *mockEngineState) GetActiveFixedTermLoanID(_ string, addr crypto.Address) ([32]byte, bool, error) {
+	id, ok := m.activeLoanIDs[m.key(addr)]
+	return id, ok, nil
+}
+
+func (m *mockEngineState) SetActiveFixedTermLoanID(_ string, addr crypto.Address, loanID [32]byte) error {
+	m.activeLoanIDs[m.key(addr)] = loanID
+	return nil
+}
+
+func (m *mockEngineState) ClearActiveFixedTermLoan(_ string, addr crypto.Address) error {
+	delete(m.activeLoanIDs, m.key(addr))
 	return nil
 }
 

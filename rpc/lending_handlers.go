@@ -63,6 +63,63 @@ type lendingUserAccountResult struct {
 	Account *lendingAccountResult `json:"account"`
 }
 
+// lendingFixedTermLoanResult is the JSON-tagged fixed-term loan view
+// returned over RPC -- lending.FixedTermLoan itself has no JSON tags and
+// carries an unexported crypto.Address field (Borrower), matching
+// lendingAccountResult's own reason for existing above.
+type lendingFixedTermLoanResult struct {
+	LoanID           string `json:"loanId"`
+	Borrower         string `json:"borrower"`
+	PoolID           string `json:"poolId"`
+	TenureDays       uint64 `json:"tenureDays"`
+	RateBps          uint64 `json:"rateBps"`
+	PrincipalWei     string `json:"principalWei"`
+	TotalInterestWei string `json:"totalInterestWei"`
+	RepaidWei        string `json:"repaidWei"`
+	OutstandingWei   string `json:"outstandingWei"`
+	IssuedAtBlock    uint64 `json:"issuedAtBlock"`
+	IssuedAtTime     uint64 `json:"issuedAtTime"`
+	MaturityTime     uint64 `json:"maturityTime"`
+	Status           string `json:"status"`
+}
+
+type lendingFixedTermLoanQueryResult struct {
+	Loan *lendingFixedTermLoanResult `json:"loan"`
+}
+
+func newLendingFixedTermLoanResult(loan *lending.FixedTermLoan) *lendingFixedTermLoanResult {
+	if loan == nil {
+		return nil
+	}
+	principal := "0"
+	if loan.PrincipalWei != nil {
+		principal = loan.PrincipalWei.String()
+	}
+	interest := "0"
+	if loan.TotalInterestWei != nil {
+		interest = loan.TotalInterestWei.String()
+	}
+	repaid := "0"
+	if loan.RepaidWei != nil {
+		repaid = loan.RepaidWei.String()
+	}
+	return &lendingFixedTermLoanResult{
+		LoanID:           hex.EncodeToString(loan.LoanID[:]),
+		Borrower:         loan.Borrower.String(),
+		PoolID:           loan.PoolID,
+		TenureDays:       loan.TenureDays,
+		RateBps:          loan.RateBps,
+		PrincipalWei:     principal,
+		TotalInterestWei: interest,
+		RepaidWei:        repaid,
+		OutstandingWei:   loan.OutstandingWei().String(),
+		IssuedAtBlock:    loan.IssuedAtBlock,
+		IssuedAtTime:     loan.IssuedAtTime,
+		MaturityTime:     loan.MaturityTime,
+		Status:           string(loan.Status),
+	}
+}
+
 // weiToDecimalString renders a wei-denominated amount (18 decimals) as a
 // trimmed base-10 decimal string, e.g. "12.5", mirroring the nhbportal
 // client's own fromWei conversion so amounts surfaced over RPC render
@@ -291,6 +348,48 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 
 	writeResult(w, req.ID, lendingUserAccountResult{
 		Account: newLendingAccountResult(resolvedPoolID, addr, account, supplyIndex, market),
+	})
+}
+
+// handleLendingGetFixedTermLoan returns the queried address's currently
+// active fixed-term loan in the pool, or {"loan": null} if they have none --
+// not an error, since most addresses have no active fixed-term loan at any
+// given time.
+func (s *Server) handleLendingGetFixedTermLoan(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected address parameter", nil)
+		return
+	}
+	var addressParam string
+	poolID := defaultLendingPoolID
+	if err := json.Unmarshal(req.Params[0], &addressParam); err != nil {
+		var wrapped lendingAccountParams
+		if err := json.Unmarshal(req.Params[0], &wrapped); err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address parameter", err.Error())
+			return
+		}
+		addressParam = wrapped.Address
+		if strings.TrimSpace(wrapped.PoolID) != "" {
+			poolID = wrapped.PoolID
+		}
+	}
+	trimmed := strings.TrimSpace(addressParam)
+	if trimmed == "" {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "address required", nil)
+		return
+	}
+	addr, err := decodeBech32(trimmed)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address", err.Error())
+		return
+	}
+	loan, moduleErr := s.lending.GetActiveFixedTermLoan(poolID, addr)
+	if moduleErr != nil {
+		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
+		return
+	}
+	writeResult(w, req.ID, lendingFixedTermLoanQueryResult{
+		Loan: newLendingFixedTermLoanResult(loan),
 	})
 }
 

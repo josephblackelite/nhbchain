@@ -237,6 +237,10 @@ func formatTxType(t types.TxType) string {
 		return "LendingBorrowNHB"
 	case types.TxTypeLendingRepayNHB:
 		return "LendingRepayNHB"
+	case types.TxTypeLendingBorrowFixedTerm:
+		return "LendingBorrowFixedTerm"
+	case types.TxTypeLendingRepayFixedTerm:
+		return "LendingRepayFixedTerm"
 	case types.TxTypeBuyZNHB:
 		return "BuyZNHB"
 	case types.TxTypeRedeemNHB:
@@ -261,7 +265,9 @@ func assetLabel(t types.TxType) string {
 		types.TxTypeLendingSupplyNHB,
 		types.TxTypeLendingWithdrawNHB,
 		types.TxTypeLendingBorrowNHB,
-		types.TxTypeLendingRepayNHB:
+		types.TxTypeLendingRepayNHB,
+		types.TxTypeLendingBorrowFixedTerm,
+		types.TxTypeLendingRepayFixedTerm:
 		return "NHB"
 	case types.TxTypeTransferZNHB,
 		types.TxTypeLendingDepositZNHB,

@@ -125,6 +125,95 @@ type UserAccount struct {
 	ScaledDebt *big.Int
 }
 
+// FixedTermLoanStatus enumerates the lifecycle states of a fixed-term loan.
+type FixedTermLoanStatus string
+
+const (
+	// FixedTermLoanStatusActive means the loan is outstanding and not yet
+	// fully repaid.
+	FixedTermLoanStatusActive FixedTermLoanStatus = "active"
+	// FixedTermLoanStatusRepaid means the borrower has repaid principal and
+	// the full term's interest in full.
+	FixedTermLoanStatusRepaid FixedTermLoanStatus = "repaid"
+)
+
+// FixedTermLoan is a locked-rate, fixed-tenure loan -- deliberately separate
+// state from UserAccount.DebtNHB/ScaledDebt (the flexible-rate model's
+// continuously-re-priced index-based accounting), since a rate locked at
+// issuance is economically incompatible with a shared variable index. Draws
+// from and credits back to the same pool aggregate (Market.TotalNHBSupplied/
+// TotalNHBBorrowed) as the flexible model -- not a separate pool per tenure.
+type FixedTermLoan struct {
+	// LoanID uniquely identifies this loan, derived deterministically from
+	// the borrowing transaction's own hash (see native/market's
+	// non-determinism lesson -- never derived from wall-clock time).
+	LoanID [32]byte
+	// Borrower is the loan's obligor.
+	Borrower crypto.Address
+	// PoolID identifies which lending pool this loan drew liquidity from.
+	PoolID string
+	// TenureDays is the loan's fixed term length (30 or 90 in v1).
+	TenureDays uint64
+	// RateBps is the annualised interest rate locked in at issuance,
+	// expressed in basis points (e.g. 400 = 4% APR). Later changes to the
+	// governance/config rate schedule never affect an already-issued loan.
+	RateBps uint64
+	// PrincipalWei is the original amount borrowed.
+	PrincipalWei *big.Int
+	// TotalInterestWei is computed once at issuance as
+	// PrincipalWei * RateBps/10000 * TenureDays/365 and owed in full
+	// regardless of early repayment timing (a deliberate product decision,
+	// not a bug -- see the fixed-term plan's "Risks" section).
+	TotalInterestWei *big.Int
+	// RepaidWei is the cumulative amount repaid so far across all
+	// repayments, applied interest-first then principal (matching the
+	// flexible model's existing Repay ordering convention).
+	RepaidWei *big.Int
+	// IssuedAtBlock is the height at which this loan was originated.
+	IssuedAtBlock uint64
+	// IssuedAtTime is the block timestamp (deterministic, from
+	// StateProcessor.blockTimestamp -- never wall-clock time) at issuance.
+	IssuedAtTime uint64
+	// MaturityTime is IssuedAtTime + TenureDays*86400.
+	MaturityTime uint64
+	// Status is the loan's current lifecycle state.
+	Status FixedTermLoanStatus
+}
+
+// OutstandingWei returns the total remaining obligation (principal +
+// full-term interest, minus whatever has already been repaid), floored at
+// zero. This is what RepayFixedTerm requires in full to close the loan.
+func (l *FixedTermLoan) OutstandingWei() *big.Int {
+	if l == nil {
+		return big.NewInt(0)
+	}
+	principal := l.PrincipalWei
+	if principal == nil {
+		principal = big.NewInt(0)
+	}
+	interest := l.TotalInterestWei
+	if interest == nil {
+		interest = big.NewInt(0)
+	}
+	repaid := l.RepaidWei
+	if repaid == nil {
+		repaid = big.NewInt(0)
+	}
+	total := new(big.Int).Add(principal, interest)
+	outstanding := new(big.Int).Sub(total, repaid)
+	if outstanding.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	return outstanding
+}
+
+// TenureRateSchedule maps an allowed tenure (in days) to its locked-at-issuance
+// annualised rate, in basis points. v1 config-driven (see
+// Engine.SetFixedTermRateSchedule); a fast-follow can move this under
+// governance control the same way native/swap/redeem_risk.go's caps are,
+// without needing to change any already-issued loan's locked rate.
+type TenureRateSchedule map[uint64]uint64
+
 // RiskParameters groups the governance controlled safety limits governing
 // lending activity.
 type RiskParameters struct {

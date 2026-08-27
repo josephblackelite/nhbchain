@@ -52,6 +52,11 @@ type engineState interface {
 	PutAccount(addr crypto.Address, account *types.Account) error
 	GetFeeAccrual(poolID string) (*FeeAccrual, error)
 	PutFeeAccrual(poolID string, fees *FeeAccrual) error
+	GetFixedTermLoan(loanID [32]byte) (*FixedTermLoan, error)
+	PutFixedTermLoan(loan *FixedTermLoan) error
+	GetActiveFixedTermLoanID(poolID string, addr crypto.Address) ([32]byte, bool, error)
+	SetActiveFixedTermLoanID(poolID string, addr crypto.Address, loanID [32]byte) error
+	ClearActiveFixedTermLoan(poolID string, addr crypto.Address) error
 }
 
 // Engine orchestrates the primary state transitions for the lending module.
@@ -64,6 +69,14 @@ type Engine struct {
 	reserveFactorBps  uint64
 	protocolFeeBps    uint64
 	blockHeight       uint64
+	// blockTimestamp is the deterministic block timestamp (Unix seconds) --
+	// set via SetBlockTimestamp from StateProcessor.blockTimestamp(), NEVER
+	// wall-clock time. Backs FixedTermLoan.IssuedAtTime/MaturityTime, which
+	// get hashed into the loan ID and persisted consensus state; using real
+	// time here would repeat the exact non-determinism bug found and fixed
+	// in the market engine (core/market_native.go's marketEngine()).
+	blockTimestamp    int64
+	fixedTermRates    TenureRateSchedule
 	poolID            string
 	developerFeeBps   uint64
 	developerFeeAddr  crypto.Address
@@ -89,6 +102,27 @@ func (e *Engine) SetPauses(p nativecommon.PauseView) {
 		return
 	}
 	e.pauses = p
+}
+
+// SetBlockTimestamp wires the deterministic block timestamp (Unix seconds)
+// used for fixed-term loan issuance/maturity accounting. Must be sourced
+// from the block's own committed timestamp, never wall-clock time -- see
+// the blockTimestamp field's doc comment.
+func (e *Engine) SetBlockTimestamp(ts int64) {
+	if e == nil {
+		return
+	}
+	e.blockTimestamp = ts
+}
+
+// SetFixedTermRateSchedule configures the tenure -> locked-rate table new
+// fixed-term loans are issued against. Changing this never affects an
+// already-issued loan's locked RateBps.
+func (e *Engine) SetFixedTermRateSchedule(schedule TenureRateSchedule) {
+	if e == nil {
+		return
+	}
+	e.fixedTermRates = schedule
 }
 
 // SetInterestModel configures the interest rate model used by the engine.
