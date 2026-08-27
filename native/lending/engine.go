@@ -39,6 +39,21 @@ var (
 	errMaxLTVExceeded        = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
 )
 
+// ErrHealthCheckFailed and ErrMaxLTVExceeded are exported aliases of the
+// same sentinel values above (not new errors) -- core/node.go's
+// classifyProposalError needs to recognize these two specifically as
+// proposalDispositionSkip, not the default Abort: combinedDebtWei (see its
+// own doc comment) means Borrow/WithdrawCollateral's health/MaxLTV outcome
+// can now depend on a same-sender fixed-term borrow/repay applied earlier
+// in the SAME proposal attempt, so a later attempt (different ordering, or
+// after other same-attempt transactions apply) can genuinely change the
+// outcome -- the same "skippable, not prunable" reasoning already applied
+// to the swap daily/monthly caps and module-pause errors.
+var (
+	ErrHealthCheckFailed = errHealthCheckFailed
+	ErrMaxLTVExceeded    = errMaxLTVExceeded
+)
+
 const blocksPerYear = 31_536_000
 
 const moduleName = "lending"
@@ -448,7 +463,15 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 	e.syncDebt(user, market)
 
 	remaining := new(big.Int).Sub(user.CollateralZNHB, amount)
-	if user.DebtNHB != nil && user.DebtNHB.Sign() > 0 {
+	// An active fixed-term loan has its own claim on this same collateral
+	// (see combinedDebtWei) -- a withdrawal that leaves the flexible side
+	// looking healthy in isolation must not be allowed to strand a fixed-
+	// term loan under-collateralized.
+	combinedDebt, err := e.combinedDebtWei(userAddr, user.DebtNHB)
+	if err != nil {
+		return err
+	}
+	if combinedDebt != nil && combinedDebt.Sign() > 0 {
 		// Only guard the oracle when the outcome actually depends on
 		// price -- a debt-free withdrawal is always healthy regardless
 		// of quote freshness, and blocking it on a stale price the
@@ -457,7 +480,7 @@ func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) er
 			return err
 		}
 	}
-	if !e.positionHealthy(market, remaining, user.DebtNHB) {
+	if !e.positionHealthy(market, remaining, combinedDebt) {
 		return errHealthCheckFailed
 	}
 
@@ -591,14 +614,24 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 
 	e.syncDebt(borrowerUser, market)
 
-	// Health factor check using the projected debt after borrowing.
+	// Health factor check using the projected debt after borrowing. Folds in
+	// any active fixed-term loan's outstanding balance (see combinedDebtWei)
+	// -- BorrowFixedTerm's own issuance check has always accounted for
+	// existing flexible DebtNHB, but this flexible path never accounted for
+	// an existing fixed-term loan's claim on the same collateral, letting a
+	// borrower take out a fixed-term loan against their full collateral and
+	// then also borrow flexibly up to that same full collateral again.
 	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, totalOut)
-	if !e.positionHealthy(market, borrowerUser.CollateralZNHB, projectedDebt) {
+	combinedProjectedDebt, err := e.combinedDebtWei(borrower, projectedDebt)
+	if err != nil {
+		return nil, err
+	}
+	if !e.positionHealthy(market, borrowerUser.CollateralZNHB, combinedProjectedDebt) {
 		return nil, errHealthCheckFailed
 	}
 	// Borrow-time cap, stricter than and independent of the liquidation
 	// threshold above -- see withinMaxLTV.
-	if !e.withinMaxLTV(market, borrowerUser.CollateralZNHB, projectedDebt) {
+	if !e.withinMaxLTV(market, borrowerUser.CollateralZNHB, combinedProjectedDebt) {
 		return nil, errMaxLTVExceeded
 	}
 
@@ -1132,6 +1165,40 @@ func OracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *
 	}
 	value := new(big.Int).Mul(collateralZNHBWei, market.OracleMedianWei)
 	return value.Quo(value, weiPerToken)
+}
+
+// combinedDebtWei folds in a borrower's active fixed-term loan (if any),
+// alongside an already-computed flexible-side debt figure, into the single
+// exposure value a health/LTV check should be evaluated against. The two
+// debt ledgers are deliberately kept separate everywhere else (a fixed-term
+// loan's locked rate is economically incompatible with the flexible side's
+// continuously-reprised BorrowIndex) -- this exists solely so borrow-time
+// and withdraw-time safety checks see the borrower's TRUE combined claim on
+// their collateral, not just whichever ledger happened to change most
+// recently. Uses OutstandingWei() (principal + locked-in interest, less
+// amounts already repaid), not just principal, since that's the loan's real
+// remaining claim -- consistent with how the flexible side's own DebtNHB
+// already reflects accrued interest via BorrowIndex.
+func (e *Engine) combinedDebtWei(borrower crypto.Address, flexibleDebt *big.Int) (*big.Int, error) {
+	combined := flexibleDebt
+	if combined == nil {
+		combined = big.NewInt(0)
+	}
+	loanID, exists, err := e.state.GetActiveFixedTermLoanID(e.poolID, borrower)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return combined, nil
+	}
+	loan, err := e.state.GetFixedTermLoan(loanID)
+	if err != nil {
+		return nil, err
+	}
+	if loan == nil {
+		return combined, nil
+	}
+	return new(big.Int).Add(combined, loan.OutstandingWei()), nil
 }
 
 // positionHealthy compares collateral (ZNHB wei, converted to NHB-wei terms

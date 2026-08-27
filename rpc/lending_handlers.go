@@ -176,7 +176,19 @@ func collateralValueUsd(market *lending.Market, collateralZNHBWei *big.Int) stri
 // loaded for supplyIndex, reused here so collateralValueUsd can read its
 // oracle price -- nil is fine (renders as no-price-available, not a
 // fabricated value).
-func newLendingAccountResult(poolID string, addr [20]byte, account *lending.UserAccount, supplyIndex *big.Int, market *lending.Market) *lendingAccountResult {
+// fixedTermLoan, when the borrower has one active in this pool, folds its
+// OutstandingWei() (principal + locked-in interest, less repayments) into
+// BorrowedValueUsd -- otherwise this figure (which the portal uses for its
+// health-factor/LTV/max-borrowable display) would silently understate real
+// exposure once a fixed-term loan exists, since UserAccount.DebtNHB only
+// ever reflects the flexible-rate ledger (see native/lending/engine.go's
+// combinedDebtWei for the borrow/withdraw-time enforcement counterpart of
+// this same fix). Deliberately NOT added as a second entry in the Borrowed
+// position array: that's keyed by poolID and the portal groups positions by
+// it, so a second same-poolID entry would just overwrite the flexible one
+// rather than add to it -- fixed-term loan detail is already exposed
+// separately via lending_getFixedTermLoan, which the portal already reads.
+func newLendingAccountResult(poolID string, addr [20]byte, account *lending.UserAccount, supplyIndex *big.Int, market *lending.Market, fixedTermLoan *lending.FixedTermLoan) *lendingAccountResult {
 	result := &lendingAccountResult{
 		Address:  "0x" + hex.EncodeToString(addr[:]),
 		Supplied: []lendingPositionResult{},
@@ -214,7 +226,15 @@ func newLendingAccountResult(poolID string, addr [20]byte, account *lending.User
 		result.CollateralZNHBWei = account.CollateralZNHB.String()
 	}
 	result.CollateralValueUsd = collateralValueUsd(market, account.CollateralZNHB)
-	result.BorrowedValueUsd = weiToDecimalString(account.DebtNHB)
+
+	combinedBorrowedWei := big.NewInt(0)
+	if account.DebtNHB != nil {
+		combinedBorrowedWei = combinedBorrowedWei.Add(combinedBorrowedWei, account.DebtNHB)
+	}
+	if fixedTermLoan != nil {
+		combinedBorrowedWei = combinedBorrowedWei.Add(combinedBorrowedWei, fixedTermLoan.OutstandingWei())
+	}
+	result.BorrowedValueUsd = weiToDecimalString(combinedBorrowedWei)
 	return result
 }
 
@@ -346,8 +366,17 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 		(&lending.Engine{}).ProjectUserDebt(account, market)
 	}
 
+	// Folded into BorrowedValueUsd (see newLendingAccountResult) so the
+	// portal's health-factor/LTV/max-borrowable figures reflect a fixed-term
+	// loan's outstanding claim too, not just the flexible-rate ledger.
+	fixedTermLoan, fixedTermErr := s.lending.GetActiveFixedTermLoan(resolvedPoolID, addr)
+	if fixedTermErr != nil {
+		writeError(w, fixedTermErr.HTTPStatus, req.ID, fixedTermErr.Code, fixedTermErr.Message, fixedTermErr.Data)
+		return
+	}
+
 	writeResult(w, req.ID, lendingUserAccountResult{
-		Account: newLendingAccountResult(resolvedPoolID, addr, account, supplyIndex, market),
+		Account: newLendingAccountResult(resolvedPoolID, addr, account, supplyIndex, market, fixedTermLoan),
 	})
 }
 

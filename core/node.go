@@ -3263,7 +3263,15 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrMintEmissionCapExceeded),
 		errors.Is(err, ErrMintRecipientUnresolved),
 		errors.Is(err, ErrRedeemInsufficientBalance),
-		errors.Is(err, ErrRedeemUnauthorizedAttestor):
+		errors.Is(err, ErrRedeemUnauthorizedAttestor),
+		// A lending health/MaxLTV outcome can now depend on a same-sender
+		// fixed-term borrow/repay applied earlier in the SAME proposal
+		// attempt (see native/lending's combinedDebtWei) -- a later attempt
+		// (different ordering, or after other same-attempt transactions
+		// apply) can genuinely change the outcome, so this is skippable,
+		// not prunable, same reasoning as the swap caps above.
+		errors.Is(err, lending.ErrHealthCheckFailed),
+		errors.Is(err, lending.ErrMaxLTVExceeded):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort

@@ -97,7 +97,19 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 	// the flexible and fixed-term borrow paths against it.
 	e.syncDebt(borrowerUser, market)
 
-	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, amount)
+	// The health/MaxLTV check must be run against this loan's REAL total
+	// claim -- principal plus its own full-term locked-in interest, exactly
+	// what FixedTermLoan.OutstandingWei() reports for an unpaid loan at
+	// issuance -- not principal alone. Using principal-only here let a loan
+	// originate exactly at the MaxLTV boundary and be immediately
+	// inconsistent with combinedDebtWei (the check every other borrow/
+	// withdraw path in this engine now applies), which correctly includes a
+	// fixed-term loan's interest: the instant this loan is issued, its own
+	// interest could already push true exposure past the same cap this
+	// check just approved it under.
+	newLoanInterest := computeFixedTermInterest(amount, rateBps, tenureDays)
+	newLoanTotalClaim := new(big.Int).Add(amount, newLoanInterest)
+	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, newLoanTotalClaim)
 	if !e.positionHealthy(market, borrowerUser.CollateralZNHB, projectedDebt) {
 		return nil, errHealthCheckFailed
 	}
@@ -138,7 +150,7 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 		TenureDays:       tenureDays,
 		RateBps:          rateBps,
 		PrincipalWei:     new(big.Int).Set(amount),
-		TotalInterestWei: computeFixedTermInterest(amount, rateBps, tenureDays),
+		TotalInterestWei: newLoanInterest,
 		RepaidWei:        big.NewInt(0),
 		IssuedAtBlock:    e.blockHeight,
 		IssuedAtTime:     issuedAt,

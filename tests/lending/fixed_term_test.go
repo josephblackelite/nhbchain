@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/lending"
 )
@@ -137,11 +138,17 @@ func TestBorrowFixedTermRespectsMaxLTV(t *testing.T) {
 	engine.SetBlockHeight(10)
 
 	// setupCapsEngine gives the borrower 10 collateral, MaxLTV=7500bps ->
-	// max borrowable 7.5. Borrowing 8 must be rejected.
+	// max PRINCIPAL-only borrowable is 7.5, but BorrowFixedTerm's own check
+	// now also counts this loan's own locked-in interest (see
+	// TestBorrowFixedTermIncludesOwnInterestInMaxLTVCheck), so an 8-token
+	// loan breaches both the 75% MaxLTV cap AND (once interest is added)
+	// the 80% liquidation threshold -- accept either rejection reason,
+	// since which check trips first is incidental to whether combined
+	// exposure is correctly enforced.
 	amount := new(big.Int).Mul(one, big.NewInt(8))
 	_, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(5), 30, amount)
-	if err == nil || !strings.Contains(err.Error(), "loan-to-value") {
-		t.Fatalf("expected MaxLTV rejection, got %v", err)
+	if err == nil || (!strings.Contains(err.Error(), "loan-to-value") && !strings.Contains(err.Error(), "health factor")) {
+		t.Fatalf("expected MaxLTV/health rejection, got %v", err)
 	}
 
 	// Existing flexible debt counts toward the same combined exposure check.
@@ -149,8 +156,145 @@ func TestBorrowFixedTermRespectsMaxLTV(t *testing.T) {
 		t.Fatalf("flexible borrow within its own limit should succeed: %v", err)
 	}
 	_, err = engine.BorrowFixedTerm(borrower, fixedTermLoanID(6), 30, new(big.Int).Mul(one, big.NewInt(3)))
-	if err == nil || !strings.Contains(err.Error(), "loan-to-value") {
-		t.Fatalf("expected combined-exposure MaxLTV rejection (5 flexible + 3 fixed-term > 7.5 cap), got %v", err)
+	if err == nil || (!strings.Contains(err.Error(), "loan-to-value") && !strings.Contains(err.Error(), "health factor")) {
+		t.Fatalf("expected combined-exposure rejection (5 flexible + 3 fixed-term > 7.5 cap), got %v", err)
+	}
+}
+
+// TestBorrowRespectsCombinedExposureFromExistingFixedTermLoan is the mirror
+// image of TestBorrowFixedTermRespectsMaxLTV above: an existing ACTIVE
+// fixed-term loan's outstanding balance must count toward the FLEXIBLE
+// Borrow path's own health/MaxLTV check too, not just the other direction.
+// Before combinedDebtWei existed, Borrow's health check only ever read
+// UserAccount.DebtNHB, which BorrowFixedTerm never updates -- so a borrower
+// could take out a fixed-term loan against their full collateral and then
+// separately borrow flexibly up to that same full collateral again.
+func TestBorrowRespectsCombinedExposureFromExistingFixedTermLoan(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x5A)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x5B)
+	borrower := makeAddress(crypto.NHBPrefix, 0x5C)
+	one := mustBig("1000000000000000000")
+
+	engine, state := setupFixedTermEngine(moduleAddr, collateralAddr, borrower, func(p *lending.RiskParameters) {
+		p.BorrowCaps.PerBlock = nil
+	})
+	engine.SetState(state)
+	engine.SetBlockHeight(10)
+
+	// setupCapsEngine gives the borrower 10 collateral, MaxLTV=7500bps ->
+	// max borrowable 7.5.
+	if _, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(7), 30, new(big.Int).Mul(one, big.NewInt(5))); err != nil {
+		t.Fatalf("fixed-term borrow within its own limit should succeed: %v", err)
+	}
+
+	// The fixed-term loan's 5-token principal must now count against the
+	// flexible path's own check too: 5 (fixed-term, plus a sliver of
+	// already-locked-in interest) + 3 (flexible) clears both the 7.5-token
+	// MaxLTV cap and (by the same sliver of interest) the 8-token
+	// liquidation threshold, so this must be rejected -- accept either
+	// rejection reason since which of the two checks trips first depends on
+	// that small interest amount, not on whether combined exposure is
+	// correctly enforced.
+	if _, err := engine.Borrow(borrower, new(big.Int).Mul(one, big.NewInt(3)), crypto.Address{}, 0); err == nil ||
+		(!strings.Contains(err.Error(), "loan-to-value") && !strings.Contains(err.Error(), "health factor")) {
+		t.Fatalf("expected combined-exposure rejection (5 fixed-term + 3 flexible > 7.5 cap), got %v", err)
+	}
+
+	// A flexible borrow that respects the REMAINING headroom (5 fixed-term +
+	// 2 flexible = 7 <= 7.5 cap) must still succeed -- this isn't a blanket
+	// "any flexible borrow with an active fixed-term loan is rejected" bug.
+	if _, err := engine.Borrow(borrower, new(big.Int).Mul(one, big.NewInt(2)), crypto.Address{}, 0); err != nil {
+		t.Fatalf("flexible borrow within the remaining combined headroom should succeed: %v", err)
+	}
+}
+
+// TestBorrowFixedTermIncludesOwnInterestInMaxLTVCheck proves BorrowFixedTerm's
+// own origination-time health/MaxLTV check counts the NEW loan's own locked-
+// in interest, not just its principal -- matching combinedDebtWei's
+// OutstandingWei()-based standard used by every other check in this engine.
+// Sizing a loan at exactly the MaxLTV boundary using principal alone must be
+// rejected once its own interest is folded in, since the loan would
+// otherwise be born already inconsistent with the very combined-exposure
+// check that governs every subsequent Borrow/WithdrawCollateral call against
+// the same position.
+func TestBorrowFixedTermIncludesOwnInterestInMaxLTVCheck(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x60)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x61)
+	borrower := makeAddress(crypto.NHBPrefix, 0x62)
+	one := mustBig("1000000000000000000")
+
+	engine, state := setupFixedTermEngine(moduleAddr, collateralAddr, borrower, func(p *lending.RiskParameters) {
+		p.BorrowCaps.PerBlock = nil
+	})
+	engine.SetState(state)
+	engine.SetBlockHeight(10)
+
+	// setupCapsEngine gives the borrower 10 collateral, MaxLTV=7500bps ->
+	// max PRINCIPAL-only borrowable is exactly 7.5. A 90-day loan at 600bps
+	// on 7.5 tokens owes ~0.111 tokens of interest the instant it's issued
+	// (7.5 * 600/10000 * 90/365), pushing true exposure to ~76.11%, over
+	// the 75% cap -- so this must now be rejected at issuance, not silently
+	// accepted only to already violate combinedDebtWei's standard a moment
+	// later.
+	principal := new(big.Int).Div(new(big.Int).Mul(one, big.NewInt(75)), big.NewInt(10))
+	if _, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(9), 90, principal); err == nil || !strings.Contains(err.Error(), "loan-to-value") {
+		t.Fatalf("expected MaxLTV rejection once the loan's own interest is counted, got %v", err)
+	}
+
+	// A slightly smaller principal that leaves room for its own interest
+	// must still succeed -- this isn't a blanket rejection of every
+	// boundary-adjacent fixed-term borrow.
+	smallerPrincipal := new(big.Int).Mul(one, big.NewInt(7))
+	if _, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(10), 90, smallerPrincipal); err != nil {
+		t.Fatalf("fixed-term borrow that leaves room for its own interest should succeed: %v", err)
+	}
+}
+
+// TestWithdrawCollateralRespectsCombinedExposureFromFixedTermLoan proves
+// WithdrawCollateral's own health check also sees an active fixed-term
+// loan's outstanding balance -- a withdrawal that would strand a fixed-term
+// loan under-collateralized must be rejected even though the flexible-side
+// DebtNHB alone (zero, in this case) would look perfectly healthy.
+func TestWithdrawCollateralRespectsCombinedExposureFromFixedTermLoan(t *testing.T) {
+	moduleAddr := makeAddress(crypto.NHBPrefix, 0x5D)
+	collateralAddr := makeAddress(crypto.ZNHBPrefix, 0x5E)
+	borrower := makeAddress(crypto.NHBPrefix, 0x5F)
+	one := mustBig("1000000000000000000")
+
+	engine, state := setupFixedTermEngine(moduleAddr, collateralAddr, borrower, func(p *lending.RiskParameters) {
+		p.BorrowCaps.PerBlock = nil
+	})
+	engine.SetState(state)
+	engine.SetBlockHeight(10)
+
+	// WithdrawCollateral moves real ZNHB balance between the collateral
+	// module and the borrower's own account, on top of the UserAccount
+	// health check -- setupCapsEngine only seeds the UserAccount-level
+	// CollateralZNHB figure, not these underlying balances, so a withdrawal
+	// that clears the health check still needs them present to complete.
+	state.accounts[state.key(collateralAddr)] = &types.Account{BalanceZNHB: new(big.Int).Mul(one, big.NewInt(10))}
+	state.accounts[state.key(borrower)] = &types.Account{BalanceZNHB: big.NewInt(0)}
+
+	// Borrower starts with 10 collateral, LiquidationThreshold=8000bps, and
+	// no flexible debt at all. A fixed-term loan of 5 tokens principal is
+	// the borrower's ONLY exposure -- pre-fix, WithdrawCollateral's check
+	// read only DebtNHB (zero here), so it would have let this withdrawal
+	// through.
+	if _, err := engine.BorrowFixedTerm(borrower, fixedTermLoanID(8), 30, new(big.Int).Mul(one, big.NewInt(5))); err != nil {
+		t.Fatalf("fixed-term borrow should succeed: %v", err)
+	}
+
+	// Withdrawing down to 5 remaining collateral against ~5 combined debt is
+	// at ~100% LTV, breaching the 80% liquidation threshold -- must be
+	// rejected.
+	if err := engine.WithdrawCollateral(borrower, new(big.Int).Mul(one, big.NewInt(5))); err == nil {
+		t.Fatal("expected withdrawal to be rejected for stranding the fixed-term loan under-collateralized, got nil error")
+	}
+
+	// Withdrawing down to 9 remaining collateral against ~5 combined debt
+	// (9*8000 = 72000 >= 5*10000 = 50000) stays healthy and must succeed.
+	if err := engine.WithdrawCollateral(borrower, one); err != nil {
+		t.Fatalf("withdrawal that keeps the position healthy against combined exposure should succeed: %v", err)
 	}
 }
 
