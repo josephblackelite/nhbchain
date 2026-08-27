@@ -61,6 +61,19 @@ var (
 	// proposal attempt, so a later attempt (different ordering, or a
 	// different transaction set) can genuinely change the outcome.
 	ErrWithdrawSameBlockAsSupply = errWithdrawSameBlockAsSupply
+	// ErrRepayPaused, ErrNoDebtToRepay, and ErrInsufficientBalance are
+	// exported aliases RepayFixedTerm can return for entirely ordinary,
+	// non-storage business/operational reasons (an operator pause, a loan
+	// that reached a terminal status between scheduling and settlement, a
+	// balance race). core/lending_autodebit_settlement.go's settlement hook
+	// needs to recognize these specifically so it can treat them as a soft
+	// missed-payment outcome (like an ordinary insufficient-balance
+	// decision) instead of propagating them as a fatal error that would
+	// abort block production -- see that file's own doc comment for why
+	// only genuine internal/storage errors may do that.
+	ErrRepayPaused         = errRepayPaused
+	ErrNoDebtToRepay       = errNoDebtToRepay
+	ErrInsufficientBalance = errInsufficientBalance
 )
 
 const blocksPerYear = 31_536_000

@@ -361,8 +361,26 @@ func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sen
 	}
 	var loanID [32]byte
 	copy(loanID[:], txHash)
-	if _, err := engine.BorrowFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), loanID, payload.TenureDays, tx.Value); err != nil {
+	loan, err := engine.BorrowFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), loanID, payload.TenureDays, tx.Value)
+	if err != nil {
 		return err
+	}
+	// Schedules the loan's first auto-debit installment (cycle 1) --
+	// settleLendingAutoDebits (core/lending_autodebit_settlement.go) picks
+	// it up from this due-index bucket once its day arrives. Scheduling
+	// here rather than inside the engine itself keeps native/lending free
+	// of core/state's due-index storage concern, matching how the engine
+	// already has no knowledge of block-lifecycle scheduling anywhere else.
+	firstCycleDue := lending.TotalAutoDebitCycles(loan.TenureDays)
+	if firstCycleDue > 0 {
+		dueAt := loan.IssuedAtTime + lending.AutoDebitCycleLengthDays*86400
+		if dueAt > loan.MaturityTime {
+			dueAt = loan.MaturityTime
+		}
+		manager := nhbstate.NewManager(sp.Trie)
+		if err := manager.LendingAutoDebitAppendDue(dueAt/secondsPerDay, loanID); err != nil {
+			return fmt.Errorf("lending fixed-term borrow: schedule auto-debit: %w", err)
+		}
 	}
 	return sp.incrementNativeAccountNonce(sender)
 }

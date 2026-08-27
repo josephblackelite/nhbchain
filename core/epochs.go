@@ -138,6 +138,15 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.settleSubscriptionCharges(timestamp); err != nil {
 		return err
 	}
+	// Fixed-term lending's interest-installment billing has the same
+	// "no natural relationship to epochConfig.Length" shape as subscription
+	// billing above -- see settleLendingAutoDebits' own doc comment.
+	// Internally day-gated against its own watermark, so this is a cheap
+	// no-op on every block that isn't a day rollover or doesn't touch a due
+	// bucket.
+	if err := sp.settleLendingAutoDebits(timestamp); err != nil {
+		return err
+	}
 	if err := sp.maybeProcessPotsoRewards(height, timestamp); err != nil {
 		return err
 	}

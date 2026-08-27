@@ -157,6 +157,11 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 		IssuedAtTime:     issuedAt,
 		MaturityTime:     issuedAt + tenureDays*86400,
 		Status:           FixedTermLoanStatusActive,
+		// Auto-debit defaults ON at issuance (opt-out, not opt-in -- see
+		// FixedTermLoan.AutoDebitEnabled's doc comment); cycle 1 is the
+		// first installment settleLendingAutoDebits will attempt.
+		AutoDebitEnabled:   true,
+		NextAutoDebitCycle: 1,
 	}
 
 	// Only the principal leaves the pool's real liquidity right now -- the

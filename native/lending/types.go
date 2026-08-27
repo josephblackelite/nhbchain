@@ -142,6 +142,25 @@ const (
 	// FixedTermLoanStatusRepaid means the borrower has repaid principal and
 	// the full term's interest in full.
 	FixedTermLoanStatusRepaid FixedTermLoanStatus = "repaid"
+	// FixedTermLoanStatusDelinquent means settleLendingAutoDebits hit
+	// AutoDebitMaxConsecutiveMisses consecutive missed interest
+	// installments -- independent of and in addition to the LTV-based
+	// Liquidate path, which never considers fixed-term debt (see
+	// combinedDebtWei's doc comment for why that stays separate). Auto-debit
+	// stops scheduling further attempts once a loan reaches this status.
+	//
+	// Deliberately does NOT itself seize collateral: doing that correctly
+	// requires converting seized ZNHB into real NHB backing for the pool
+	// (the module's NHB and collateral module's ZNHB balances are
+	// completely separate assets -- there is no atomic, in-module way to
+	// convert one into the other, that's the swap module's job), which is
+	// its own dedicated design/review pass, not something to freehand
+	// alongside the auto-debit billing mechanism itself. This status exists
+	// so the condition is visible and actionable (an event fires, the
+	// portal can surface it, an operator can intervene) rather than
+	// silently doing nothing -- the collateral-recovery mechanism is a
+	// deliberately separate, not-yet-built next step.
+	FixedTermLoanStatusDelinquent FixedTermLoanStatus = "delinquent"
 )
 
 // FixedTermLoan is a locked-rate, fixed-tenure loan -- deliberately separate
@@ -188,6 +207,27 @@ type FixedTermLoan struct {
 	MaturityTime uint64
 	// Status is the loan's current lifecycle state.
 	Status FixedTermLoanStatus
+	// AutoDebitEnabled controls whether settleLendingAutoDebits
+	// (core/lending_autodebit_settlement.go) attempts to collect this
+	// loan's periodic interest installments automatically. Defaults to true
+	// at issuance (opt-out, not opt-in) -- there is no transaction to flip
+	// it yet (a fast-follow), but the settlement hook already honors it so
+	// that future control point is a pure additive change, not a redesign.
+	AutoDebitEnabled bool
+	// NextAutoDebitCycle is the 1-based index of the next interest
+	// installment settleLendingAutoDebits should attempt (1..
+	// TotalAutoDebitCycles(TenureDays)). A 30-day loan has exactly 1 cycle,
+	// due at maturity; a 90-day loan has 3, due at day 30/60/90. Once this
+	// exceeds the loan's total cycle count, auto-debit is done -- the
+	// borrower still must repay principal (and any interest auto-debit
+	// never collected) manually via RepayFixedTerm; auto-debit never
+	// touches principal or collateral itself.
+	NextAutoDebitCycle uint32
+	// ConsecutiveMissedAutoDebits counts auto-debit attempts in a row that
+	// failed for insufficient balance, across the whole loan (not
+	// per-cycle) -- resets to zero on any successful debit. Reaching
+	// AutoDebitMaxConsecutiveMisses triggers LiquidateDelinquentFixedTerm.
+	ConsecutiveMissedAutoDebits uint32
 }
 
 // OutstandingWei returns the total remaining obligation (principal +

@@ -1899,6 +1899,27 @@ type storedLendingFixedTermLoan struct {
 	IssuedAtTime     uint64
 	MaturityTime     uint64
 	Status           string
+	// AutoDebitEnabled/NextAutoDebitCycle/ConsecutiveMissedAutoDebits were
+	// added after the fields above for the auto-debit billing milestone --
+	// appended at the end for RLP backward compatibility (see
+	// native/lending's LastSupplyBlock for the same pattern) and tagged
+	// `rlp:"optional"`. Confirmed via a live query against production
+	// (market.TotalNHBBorrowed is dust-level, not loan-sized) that zero
+	// fixed-term loans exist as of this deploy, so there is no pre-existing
+	// data needing migration -- every loan created from this deploy forward
+	// goes through BorrowFixedTerm, which sets these fields correctly at
+	// issuance. A loan persisted before this field existed would decode
+	// NextAutoDebitCycle as 0; toFixedTermLoan below does NOT attempt to
+	// retroactively schedule such a loan into the auto-debit due-index (an
+	// earlier version of this comment claimed it did -- that claim was
+	// false: adversarial review found the read-side field patch cosmetic
+	// only, since nothing calls LendingAutoDebitAppendDue for it). If this
+	// ever needs to be revisited, it requires a real one-time backfill
+	// migration (mirroring BackfillStakeDelegationIndexOnce in
+	// core/epochs.go), not a read-side patch.
+	AutoDebitEnabled            bool   `rlp:"optional"`
+	NextAutoDebitCycle          uint32 `rlp:"optional"`
+	ConsecutiveMissedAutoDebits uint32 `rlp:"optional"`
 }
 
 func newStoredLendingFixedTermLoan(loan *lending.FixedTermLoan) *storedLendingFixedTermLoan {
@@ -1906,14 +1927,17 @@ func newStoredLendingFixedTermLoan(loan *lending.FixedTermLoan) *storedLendingFi
 		return nil
 	}
 	stored := &storedLendingFixedTermLoan{
-		LoanID:        loan.LoanID,
-		PoolID:        loan.PoolID,
-		TenureDays:    loan.TenureDays,
-		RateBps:       loan.RateBps,
-		IssuedAtBlock: loan.IssuedAtBlock,
-		IssuedAtTime:  loan.IssuedAtTime,
-		MaturityTime:  loan.MaturityTime,
-		Status:        string(loan.Status),
+		LoanID:                      loan.LoanID,
+		PoolID:                      loan.PoolID,
+		TenureDays:                  loan.TenureDays,
+		RateBps:                     loan.RateBps,
+		IssuedAtBlock:               loan.IssuedAtBlock,
+		IssuedAtTime:                loan.IssuedAtTime,
+		MaturityTime:                loan.MaturityTime,
+		Status:                      string(loan.Status),
+		AutoDebitEnabled:            loan.AutoDebitEnabled,
+		NextAutoDebitCycle:          loan.NextAutoDebitCycle,
+		ConsecutiveMissedAutoDebits: loan.ConsecutiveMissedAutoDebits,
 	}
 	copy(stored.Borrower[:], loan.Borrower.Bytes())
 	if loan.PrincipalWei != nil {
@@ -1933,15 +1957,18 @@ func (s *storedLendingFixedTermLoan) toFixedTermLoan() *lending.FixedTermLoan {
 		return nil
 	}
 	loan := &lending.FixedTermLoan{
-		LoanID:        s.LoanID,
-		Borrower:      crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Borrower[:]...)),
-		PoolID:        s.PoolID,
-		TenureDays:    s.TenureDays,
-		RateBps:       s.RateBps,
-		IssuedAtBlock: s.IssuedAtBlock,
-		IssuedAtTime:  s.IssuedAtTime,
-		MaturityTime:  s.MaturityTime,
-		Status:        lending.FixedTermLoanStatus(s.Status),
+		LoanID:                      s.LoanID,
+		Borrower:                    crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Borrower[:]...)),
+		PoolID:                      s.PoolID,
+		TenureDays:                  s.TenureDays,
+		RateBps:                     s.RateBps,
+		IssuedAtBlock:               s.IssuedAtBlock,
+		IssuedAtTime:                s.IssuedAtTime,
+		MaturityTime:                s.MaturityTime,
+		Status:                      lending.FixedTermLoanStatus(s.Status),
+		AutoDebitEnabled:            s.AutoDebitEnabled,
+		NextAutoDebitCycle:          s.NextAutoDebitCycle,
+		ConsecutiveMissedAutoDebits: s.ConsecutiveMissedAutoDebits,
 	}
 	if s.PrincipalWei != nil {
 		loan.PrincipalWei = new(big.Int).Set(s.PrincipalWei)
