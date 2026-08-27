@@ -45,18 +45,18 @@ type lendingPositionResult struct {
 // crypto.Address field that serializes as "{}", so it can never be returned
 // to clients directly -- this type is the properly-shaped replacement.
 type lendingAccountResult struct {
-	Address            string                  `json:"address"`
-	Supplied           []lendingPositionResult `json:"supplied"`
-	Borrowed           []lendingPositionResult `json:"borrowed"`
+	Address  string                  `json:"address"`
+	Supplied []lendingPositionResult `json:"supplied"`
+	Borrowed []lendingPositionResult `json:"borrowed"`
 	// CollateralZNHBWei is the raw ZNHB collateral balance, straight from
 	// state -- unlike CollateralValueUsd, it needs no oracle price and is
 	// never "" when the oracle is unavailable. This is the figure a
 	// withdraw-collateral UI should use to know how much a user can
 	// actually withdraw.
-	CollateralZNHBWei  string                  `json:"collateralZnhbWei"`
-	CollateralValueUsd string                  `json:"collateralValueUsd"`
-	BorrowedValueUsd   string                  `json:"borrowedValueUsd"`
-	RewardsWei         string                  `json:"rewardsWei"`
+	CollateralZNHBWei  string `json:"collateralZnhbWei"`
+	CollateralValueUsd string `json:"collateralValueUsd"`
+	BorrowedValueUsd   string `json:"borrowedValueUsd"`
+	RewardsWei         string `json:"rewardsWei"`
 }
 
 type lendingUserAccountResult struct {
@@ -81,6 +81,16 @@ type lendingFixedTermLoanResult struct {
 	IssuedAtTime     uint64 `json:"issuedAtTime"`
 	MaturityTime     uint64 `json:"maturityTime"`
 	Status           string `json:"status"`
+	// AutoDebitEnabled/NextAutoDebitCycle/TotalAutoDebitCycles/
+	// ConsecutiveMissedAutoDebits were added for the auto-debit billing
+	// milestone (core/lending_autodebit_settlement.go) -- surfaced so a
+	// portal reconcile job can send escalating warnings BEFORE a loan
+	// reaches Status "delinquent", not just detect delinquency after the
+	// fact.
+	AutoDebitEnabled            bool   `json:"autoDebitEnabled"`
+	NextAutoDebitCycle          uint32 `json:"nextAutoDebitCycle"`
+	TotalAutoDebitCycles        uint32 `json:"totalAutoDebitCycles"`
+	ConsecutiveMissedAutoDebits uint32 `json:"consecutiveMissedAutoDebits"`
 }
 
 type lendingFixedTermLoanQueryResult struct {
@@ -104,19 +114,23 @@ func newLendingFixedTermLoanResult(loan *lending.FixedTermLoan) *lendingFixedTer
 		repaid = loan.RepaidWei.String()
 	}
 	return &lendingFixedTermLoanResult{
-		LoanID:           hex.EncodeToString(loan.LoanID[:]),
-		Borrower:         loan.Borrower.String(),
-		PoolID:           loan.PoolID,
-		TenureDays:       loan.TenureDays,
-		RateBps:          loan.RateBps,
-		PrincipalWei:     principal,
-		TotalInterestWei: interest,
-		RepaidWei:        repaid,
-		OutstandingWei:   loan.OutstandingWei().String(),
-		IssuedAtBlock:    loan.IssuedAtBlock,
-		IssuedAtTime:     loan.IssuedAtTime,
-		MaturityTime:     loan.MaturityTime,
-		Status:           string(loan.Status),
+		LoanID:                      hex.EncodeToString(loan.LoanID[:]),
+		Borrower:                    loan.Borrower.String(),
+		PoolID:                      loan.PoolID,
+		TenureDays:                  loan.TenureDays,
+		RateBps:                     loan.RateBps,
+		PrincipalWei:                principal,
+		TotalInterestWei:            interest,
+		RepaidWei:                   repaid,
+		OutstandingWei:              loan.OutstandingWei().String(),
+		IssuedAtBlock:               loan.IssuedAtBlock,
+		IssuedAtTime:                loan.IssuedAtTime,
+		MaturityTime:                loan.MaturityTime,
+		Status:                      string(loan.Status),
+		AutoDebitEnabled:            loan.AutoDebitEnabled,
+		NextAutoDebitCycle:          loan.NextAutoDebitCycle,
+		TotalAutoDebitCycles:        lending.TotalAutoDebitCycles(loan.TenureDays),
+		ConsecutiveMissedAutoDebits: loan.ConsecutiveMissedAutoDebits,
 	}
 }
 
