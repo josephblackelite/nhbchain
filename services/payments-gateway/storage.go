@@ -10,7 +10,24 @@ import (
 	"strings"
 	"time"
 
-	sqlitedriver "modernc.org/sqlite"
+	// Deliberately github.com/glebarez/go-sqlite, not modernc.org/sqlite:
+	// both packages unconditionally call sql.Register("sqlite", ...) in
+	// their own init(), and database/sql.Register panics on a duplicate
+	// name (confirmed by direct reproduction). This package now transitively
+	// pulls in nhbchain/services/swapd/settlement (see redeem_storage.go,
+	// main.go) for the redemption-payout settlement engine, and
+	// settlement's own import of nhbchain/services/swapd/storage already
+	// blank-imports github.com/glebarez/sqlite (which itself imports this
+	// same go-sqlite package) to register that same "sqlite" driver name --
+	// using modernc.org/sqlite here instead would collide with it the
+	// instant both are linked into one binary. github.com/glebarez/go-sqlite
+	// is a close fork of modernc.org/sqlite (same underlying engine, same
+	// *Error type shape with a Code() method, same
+	// extendedResultCodes(true) behavior on every connection -- see
+	// isUniqueConstraintErr below), so this is a same-behavior swap of which
+	// Go package registers the driver, not a change in SQLite engine or in
+	// this file's constraint-detection semantics.
+	sqlitedriver "github.com/glebarez/go-sqlite"
 )
 
 // ErrIdempotencyConflict indicates a key is reused with a different payload.
@@ -24,10 +41,10 @@ var ErrIdempotencyConflict = errors.New("idempotency key conflict")
 // it's used to close the payment-creation TOCTOU race.
 var ErrPaymentSlotClaimed = errors.New("payment slot already claimed")
 
-// sqliteConstraintUnique is SQLITE_CONSTRAINT_UNIQUE. modernc.org/sqlite
+// sqliteConstraintUnique is SQLITE_CONSTRAINT_UNIQUE. github.com/glebarez/go-sqlite
 // enables extended result codes on every connection it opens (see its
-// conn.extendedResultCodes(true) call in newConn), so a real unique-index
-// violation from that driver always surfaces with this exact code.
+// conn.extendedResultCodes(true) call), so a real unique-index violation
+// from that driver always surfaces with this exact code.
 const sqliteConstraintUnique = 2067
 
 // isUniqueConstraintErr reports whether err is a SQLite UNIQUE constraint
@@ -192,6 +209,21 @@ func (s *SQLiteStore) init() error {
 	}
 	for name, def := range quoteColumns {
 		if err := s.ensureColumn("quotes", name, def); err != nil {
+			return err
+		}
+	}
+	// actually_paid: how much NOWPayments reports as actually received so
+	// far, distinct from pay_amount (the originally quoted/expected
+	// amount). Nullable -- unset until at least one webhook or reconciler
+	// pass has told us a real figure. Lets the checkout UI show a
+	// buyer-facing "X received, Y still needed" instead of a generic
+	// "waiting" state that looks identical whether nothing has arrived or a
+	// partial payment already landed.
+	paymentColumns := map[string]string{
+		"actually_paid": "TEXT",
+	}
+	for name, def := range paymentColumns {
+		if err := s.ensureColumn("payments", name, def); err != nil {
 			return err
 		}
 	}
@@ -849,6 +881,7 @@ type PaymentRecord struct {
 	PayAmount    string
 	PayinExtraID string
 	TxHash       sql.NullString
+	ActuallyPaid sql.NullString
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -889,13 +922,13 @@ func (s *SQLiteStore) DeletePayment(ctx context.Context, id string) error {
 }
 
 func (s *SQLiteStore) GetPayment(ctx context.Context, id string) (*PaymentRecord, error) {
-	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE id = ?`
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, actually_paid, created_at, updated_at FROM payments WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, query, id)
 	return scanPayment(row)
 }
 
 func (s *SQLiteStore) GetPaymentByNowID(ctx context.Context, nowID string) (*PaymentRecord, error) {
-	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE nowpayments_id = ?`
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, actually_paid, created_at, updated_at FROM payments WHERE nowpayments_id = ?`
 	row := s.db.QueryRowContext(ctx, query, nowID)
 	return scanPayment(row)
 }
@@ -911,14 +944,14 @@ func (s *SQLiteStore) GetLatestPaymentForQuoteCurrency(ctx context.Context, quot
 	// resolution, or a caller may substitute a fixed clock in tests) by
 	// falling back to insertion order, so "latest" always means the most
 	// recently inserted row rather than an arbitrary one among ties.
-	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE quote_id = ? AND pay_currency = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, actually_paid, created_at, updated_at FROM payments WHERE quote_id = ? AND pay_currency = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`
 	row := s.db.QueryRowContext(ctx, query, quoteID, payCurrency)
 	return scanPayment(row)
 }
 
 func scanPayment(row *sql.Row) (*PaymentRecord, error) {
 	var rec PaymentRecord
-	err := row.Scan(&rec.ID, &rec.QuoteID, &rec.Recipient, &rec.Status, &rec.NowID, &rec.PayCurrency, &rec.PayAddress, &rec.PayAmount, &rec.PayinExtraID, &rec.TxHash, &rec.CreatedAt, &rec.UpdatedAt)
+	err := row.Scan(&rec.ID, &rec.QuoteID, &rec.Recipient, &rec.Status, &rec.NowID, &rec.PayCurrency, &rec.PayAddress, &rec.PayAmount, &rec.PayinExtraID, &rec.TxHash, &rec.ActuallyPaid, &rec.CreatedAt, &rec.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -936,7 +969,7 @@ func scanPayment(row *sql.Row) (*PaymentRecord, error) {
 // row only matches once NOWPayments has gone quiet on it for the whole
 // grace window.
 func (s *SQLiteStore) ListPaymentsByStatusOlderThan(ctx context.Context, status string, cutoff time.Time) ([]PaymentRecord, error) {
-	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, created_at, updated_at FROM payments WHERE status = ? AND updated_at < ?`
+	const query = `SELECT id, quote_id, recipient, status, nowpayments_id, pay_currency, pay_address, pay_amount, payin_extra_id, tx_hash, actually_paid, created_at, updated_at FROM payments WHERE status = ? AND updated_at < ?`
 	rows, err := s.db.QueryContext(ctx, query, status, cutoff.UTC())
 	if err != nil {
 		return nil, err
@@ -945,7 +978,7 @@ func (s *SQLiteStore) ListPaymentsByStatusOlderThan(ctx context.Context, status 
 	var out []PaymentRecord
 	for rows.Next() {
 		var rec PaymentRecord
-		if err := rows.Scan(&rec.ID, &rec.QuoteID, &rec.Recipient, &rec.Status, &rec.NowID, &rec.PayCurrency, &rec.PayAddress, &rec.PayAmount, &rec.PayinExtraID, &rec.TxHash, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.QuoteID, &rec.Recipient, &rec.Status, &rec.NowID, &rec.PayCurrency, &rec.PayAddress, &rec.PayAmount, &rec.PayinExtraID, &rec.TxHash, &rec.ActuallyPaid, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, rec)
@@ -956,14 +989,25 @@ func (s *SQLiteStore) ListPaymentsByStatusOlderThan(ctx context.Context, status 
 	return out, nil
 }
 
-func (s *SQLiteStore) UpdatePaymentStatus(ctx context.Context, id, status string, txHash *string) error {
-	const stmt = `UPDATE payments SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?`
+// UpdatePaymentStatus updates a payment's status (and, when known, its
+// tx hash and NOWPayments-reported actually-paid amount). actuallyPaid is
+// optional (nil leaves the stored value untouched) since most status
+// transitions -- e.g. moving to "error" -- have no fresh figure to report;
+// only the webhook/reconciler paths that just re-checked NOWPayments'
+// live status pass one.
+func (s *SQLiteStore) UpdatePaymentStatus(ctx context.Context, id, status string, txHash *string, actuallyPaid ...string) error {
 	var hash interface{}
 	if txHash != nil {
 		hash = *txHash
 	} else {
 		hash = nil
 	}
+	if len(actuallyPaid) > 0 {
+		const stmt = `UPDATE payments SET status = ?, tx_hash = ?, actually_paid = ?, updated_at = ? WHERE id = ?`
+		_, err := s.db.ExecContext(ctx, stmt, status, hash, actuallyPaid[0], time.Now().UTC(), id)
+		return err
+	}
+	const stmt = `UPDATE payments SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?`
 	_, err := s.db.ExecContext(ctx, stmt, status, hash, time.Now().UTC(), id)
 	return err
 }
@@ -989,6 +1033,17 @@ func MarshalPayment(p *PaymentRecord) ([]byte, error) {
 	}
 	if p.TxHash.Valid {
 		payload["txHash"] = p.TxHash.String
+	}
+	if p.ActuallyPaid.Valid && p.ActuallyPaid.String != "" {
+		payload["actuallyPaid"] = p.ActuallyPaid.String
+	}
+	// settlesAt: only meaningful for partially_paid -- the moment the
+	// reconciler (see partiallyPaidGraceWindow in reconciler.go) will settle
+	// this for whatever actually arrived if nothing else changes. Lets the
+	// checkout UI show a real countdown instead of a generic "still
+	// waiting" with no sense of when anything will happen.
+	if strings.EqualFold(p.Status, "partially_paid") {
+		payload["settlesAt"] = p.UpdatedAt.UTC().Add(partiallyPaidGraceWindow).Format(time.RFC3339)
 	}
 	return json.Marshal(payload)
 }

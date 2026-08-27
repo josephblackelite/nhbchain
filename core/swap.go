@@ -64,4 +64,35 @@ var (
 	// pure function of the transaction's own immutable bytes, it can never become
 	// valid later -- safe to treat as a prunable proposal error.
 	ErrSwapVoucherInvalidPayload = errors.New("swap: invalid voucher transaction payload")
+	// ErrRedeemInsufficientBalance indicates a TxTypeRedeemNHB transaction's
+	// sender does not currently hold enough NHB to cover the burn. Transient:
+	// a same-block ordering effect (another transaction crediting this
+	// address first) or a later resubmission could make this succeed, so
+	// this is a skippable, not prunable, proposal error.
+	ErrRedeemInsufficientBalance = errors.New("redeemNHB: insufficient NHB balance")
+	// ErrRedeemRequestExists indicates a TxTypeRedeemNHB transaction's derived
+	// request ID (from its own transaction hash) already has a stored
+	// redemption request -- i.e. this exact transaction already succeeded in
+	// an earlier block. Since the ID is a pure function of the transaction's
+	// own immutable bytes, this can never become valid later -- prunable.
+	ErrRedeemRequestExists = errors.New("redeemNHB: request already exists")
+	// ErrRedeemRequestNotPending indicates a TxTypeAttestRedemption
+	// transaction targets a redemption request that has already been
+	// settled (paid or failed) by an earlier attestation. Since a request's
+	// terminal status never reverts, a resubmitted attestation for the same
+	// requestId can never become valid later -- prunable.
+	ErrRedeemRequestNotPending = errors.New("redeemNHB: request not pending")
+	// ErrRedeemUnauthorizedAttestor indicates a TxTypeAttestRedemption
+	// transaction's sender does not currently hold RoleSwapPayoutAttestor.
+	// Skippable, not prunable, mirroring ErrSwapInvalidSigner/
+	// ErrMintInvalidSigner above: the role could be granted to this signer
+	// by a later governance action, so a same-attempt exclusion (not a
+	// permanent mempool removal) is the correct disposition.
+	ErrRedeemUnauthorizedAttestor = errors.New("attestRedemption: unauthorized attestor")
+	// ErrRedeemInvalidPayload indicates a TxTypeRedeemNHB or
+	// TxTypeAttestRedemption transaction's Data payload failed to decode or
+	// is missing/malformed required fields. Since this is a pure function of
+	// the transaction's own immutable bytes, it can never become valid
+	// later -- prunable, mirroring ErrSwapVoucherInvalidPayload above.
+	ErrRedeemInvalidPayload = errors.New("redeem: invalid transaction payload")
 )

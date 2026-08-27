@@ -225,6 +225,19 @@ func (bc *Blockchain) AdminWallet() ([20]byte, bool) {
 	return bc.adminWallet, bc.hasAdminWallet
 }
 
+// SetAdminWalletForTests sets the admin wallet outside of genesis loading --
+// only for tests exercising code that reads AdminWallet() (e.g. RPC history
+// building) against a node built via the ephemeral autogenesis path, which
+// never populates this field the way a real genesis file does. Production
+// code must never call this; use a genesis file's admin_wallet field
+// instead.
+func (bc *Blockchain) SetAdminWalletForTests(addr [20]byte) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	bc.adminWallet = addr
+	bc.hasAdminWallet = true
+}
+
 // BuybackSigners returns the genesis-configured M-of-N reference-price signer
 // quorum for the treasury buyback engine, if one was configured at genesis.
 // This set is intentionally immutable after genesis: unlike admin-wallet or

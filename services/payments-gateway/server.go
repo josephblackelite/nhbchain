@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"nhbchain/core"
+	"nhbchain/services/swapd/settlement"
 )
 
 const (
@@ -79,6 +80,50 @@ type Server struct {
 	nowFn            func() time.Time
 	ipnCallbackURL   string
 	adminToken       []byte
+
+	// redeemWatcher is optional: only set (via SetRedeemWatcher) when the
+	// redemption (Swap Out) payout feature is fully configured -- see
+	// Config.RedemptionEnabled/main.go. A nil value here means
+	// POST /admin/redemptions/{id}/{confirm,fail,retry}-payout all stay
+	// unavailable (503) rather than the whole payments-gateway process
+	// refusing to start before the feature's chain-side dependencies exist.
+	//
+	// The admin handlers call into the watcher itself (ConfirmPayout/
+	// FailPayout/RetryPayout), not settlement.Manager directly, so that
+	// every settlement mutation an operator can trigger is serialized
+	// against the watcher's own tick and checked against the redemption's
+	// local status -- see RedeemWatcher.mu's doc comment for why acting on
+	// a settlement after its redemption has already been attested on-chain
+	// is a real money-loss risk, not just a theoretical one.
+	redeemWatcher *RedeemWatcher
+
+	// redeemFeeEstimator is optional, set via SetRedemptionFeeEstimator,
+	// backing GET /swap/redeem-fee-estimate. Kept separate from
+	// redeemWatcher (rather than adding a method there) since fee estimation
+	// never touches redemption_watch/settlement state at all -- it's a pure,
+	// side-effect-free quote against NOWPayments, safe to call before a user
+	// has even signed a burn.
+	redeemFeeEstimator RedemptionFeeEstimator
+}
+
+// RedemptionFeeEstimator is the narrow interface GET /swap/redeem-fee-estimate
+// needs. *settlement.HTTPPayoutClient satisfies it via GetPayoutFeeEstimate.
+type RedemptionFeeEstimator interface {
+	GetPayoutFeeEstimate(ctx context.Context, currency string, amount float64) (float64, error)
+}
+
+// SetRedemptionFeeEstimator wires the client used by
+// GET /swap/redeem-fee-estimate. Mirrors SetRedeemWatcher's pattern.
+func (s *Server) SetRedemptionFeeEstimator(e RedemptionFeeEstimator) {
+	s.redeemFeeEstimator = e
+}
+
+// SetRedeemWatcher wires the redeem watcher used by
+// POST /admin/redemptions/{requestId}/{confirm,fail,retry}-payout. Mirrors
+// SetAdminToken's pattern: a setter, not a NewServer parameter, so it stays
+// optional and doesn't disturb NewServer's existing call sites.
+func (s *Server) SetRedeemWatcher(w *RedeemWatcher) {
+	s.redeemWatcher = w
 }
 
 // SetAdminToken configures the bearer token required by GET
@@ -208,6 +253,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleInvoiceGet(w, r)
 	case r.Method == http.MethodGet && (r.URL.Path == "/currencies" || r.URL.Path == "/swap/currencies"):
 		s.handleCurrencies(w, r)
+	case r.Method == http.MethodGet && (r.URL.Path == "/redeem-fee-estimate" || r.URL.Path == "/swap/redeem-fee-estimate"):
+		s.handleRedemptionFeeEstimate(w, r)
 	case r.Method == http.MethodPost && (r.URL.Path == "/payments" || r.URL.Path == "/swap/payments"):
 		s.handlePaymentCreate(w, r)
 	case r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/payments/") || strings.HasPrefix(r.URL.Path, "/swap/payments/")):
@@ -220,6 +267,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleNowPaymentsWebhook(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/admin/webhook-events":
 		s.handleAdminWebhookEvents(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/admin/reserve-balance":
+		s.handleAdminReserveBalance(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/redemptions/") && strings.HasSuffix(r.URL.Path, "/confirm-payout"):
+		s.handleAdminConfirmRedemptionPayout(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/redemptions/") && strings.HasSuffix(r.URL.Path, "/fail-payout"):
+		s.handleAdminFailRedemptionPayout(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/redemptions/") && strings.HasSuffix(r.URL.Path, "/retry-payout"):
+		s.handleAdminRetryRedemptionPayout(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -676,6 +731,88 @@ func (s *Server) handleCurrencies(w http.ResponseWriter, r *http.Request) {
 	}
 	ordered := orderPreferredCurrencies(coins, preferredCurrencyOrder, maxListedCurrencies)
 	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{"currencies": ordered}, nil)
+}
+
+// handleRedemptionFeeEstimate answers GET /swap/redeem-fee-estimate?amount=
+// <NHB decimal amount>, letting the frontend show a redeemer "you'll
+// receive approximately X after fees" before they ever sign a burn.
+// Public (no auth) -- a read-only quote against no user-specific data,
+// mirroring /quotes and /currencies. Redemptions are always 1:1 NHB:USDT and
+// always pay out via USDTTRC20 (see isValidTRC20Address's doc comment --
+// this feature has never supported any other destination network), so the
+// amount entered is exactly the gross USDT amount this estimates a fee
+// against. This is a display estimate only -- the real redemption still
+// computes its payout amount via computeRedemptionPayout's exact big.Rat
+// math; nothing here is used for any actual money movement.
+func (s *Server) handleRedemptionFeeEstimate(w http.ResponseWriter, r *http.Request) {
+	if s.redeemFeeEstimator == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, errors.New("redemption payout feature not configured"), nil, nil)
+		return
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("amount"))
+	if raw == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("amount query parameter required"), nil, nil)
+		return
+	}
+	amountRat, ok := new(big.Rat).SetString(raw)
+	if !ok || amountRat.Sign() <= 0 {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid amount %q", raw), nil, nil)
+		return
+	}
+	amountFloat, _ := amountRat.Float64()
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	fee, err := s.redeemFeeEstimator.GetPayoutFeeEstimate(ctx, "USDTTRC20", amountFloat)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, nil, nil)
+		return
+	}
+	// NOWPayments' own API returns fee as a JSON float (e.g. 5.58794178).
+	// big.Rat.SetFloat64 would capture that float64's *exact* binary value
+	// (something like 5.5879417799999997...), which produces inconsistent
+	// last-digit rounding depending on what it's subtracted from (confirmed
+	// live: 17-fee correctly rounded to "...22" but 100-fee rounded to
+	// "...23" for the identical fee). Formatting fee through
+	// strconv.FormatFloat's shortest round-trip representation first
+	// recovers the clean decimal NOWPayments actually meant ("5.58794178"),
+	// then parsing that string as an exact decimal rational avoids ever
+	// introducing binary-float imprecision into the subtraction at all.
+	feeStr := strconv.FormatFloat(fee, 'f', -1, 64)
+	feeRat, ok := new(big.Rat).SetString(feeStr)
+	if !ok {
+		s.writeError(w, r, http.StatusBadGateway, fmt.Errorf("nowpayments returned an unparseable fee: %v", fee), nil, nil)
+		return
+	}
+	netRat := new(big.Rat).Sub(amountRat, feeRat)
+	if netRat.Sign() < 0 {
+		netRat.SetInt64(0)
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"currency":  "USDTTRC20",
+		"grossUsdt": formatUSDTRat(amountRat),
+		"feeUsdt":   formatUSDTRat(feeRat),
+		"netUsdt":   formatUSDTRat(netRat),
+	}, nil)
+}
+
+// formatUSDTRat formats a big.Rat as a decimal string with up to 8
+// fractional digits (USDT-TRC20's own on-chain precision), trimmed of
+// trailing zeros. Deliberately uses big.Rat.FloatString rather than
+// formatRat's big.Float-based approach: FloatString does exact rational
+// arithmetic with no magnitude-dependent precision loss, whereas formatRat's
+// fixed *bit* budget (not fixed *decimal-digit* budget) silently loses
+// accuracy in the fractional part as the integer part grows -- confirmed via
+// a real inconsistency (17-fee rounded correctly, 100-fee and 1000-fee did
+// not, for the identical fee value).
+func formatUSDTRat(r *big.Rat) string {
+	const usdtDecimals = 8
+	text := r.FloatString(usdtDecimals)
+	text = strings.TrimRight(text, "0")
+	text = strings.TrimRight(text, ".")
+	if text == "" {
+		text = "0"
+	}
+	return text
 }
 
 func validatePaymentCreate(req PaymentCreateRequest) error {
@@ -1197,6 +1334,242 @@ func (s *Server) handleAdminWebhookEvents(w http.ResponseWriter, r *http.Request
 	}, nil)
 }
 
+// handleAdminReserveBalance backs the admin Treasury Dashboard's "Fiat
+// Reserve" figure with NOWPayments' own GET /v1/balance response -- the
+// actual custodial balance this account holds -- instead of the hardcoded
+// placeholder (mockUsdtReserve) it previously showed. usdtTotal sums every
+// currency entry whose code starts with "usdt" (NOWPayments splits USDT by
+// network -- e.g. usdttrc20, usdterc20, usdtbsc -- and the dashboard cares
+// about total USDT held, not which chain it's on). Uses big.Rat throughout
+// to avoid float64 precision loss summing across entries, matching this
+// file's existing amount-handling discipline.
+func (s *Server) handleAdminReserveBalance(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	balance, err := s.nowPayments.GetBalance(r.Context())
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, fmt.Errorf("nowpayments balance: %w", err), nil, nil)
+		return
+	}
+	usdtTotal := new(big.Rat)
+	breakdown := make(map[string]string, len(balance))
+	for code, entry := range balance {
+		amountStr := strings.TrimSpace(string(entry.Amount))
+		if amountStr == "" {
+			continue
+		}
+		breakdown[code] = amountStr
+		if !strings.HasPrefix(strings.ToLower(code), "usdt") {
+			continue
+		}
+		amount, ok := new(big.Rat).SetString(amountStr)
+		if !ok {
+			continue
+		}
+		usdtTotal.Add(usdtTotal, amount)
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"usdtTotal": usdtTotal.FloatString(2),
+		"breakdown": breakdown,
+	}, nil)
+}
+
+// redemptionConfirmPayoutRequest is the payload accepted by
+// POST /admin/redemptions/{requestId}/confirm-payout.
+type redemptionConfirmPayoutRequest struct {
+	Reference string `json:"reference"`
+	Note      string `json:"note"`
+	Operator  string `json:"operator"`
+}
+
+// extractRedemptionConfirmID pulls {requestId} out of
+// /admin/redemptions/{requestId}/confirm-payout, mirroring
+// handlePaymentGet/handleInvoiceGet's manual path-prefix parsing (this
+// package doesn't use a router library). Returns "" if the path doesn't
+// match the expected shape.
+func extractRedemptionConfirmID(path string) string {
+	const prefix = "/admin/redemptions/"
+	const suffix = "/confirm-payout"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return strings.TrimSpace(id)
+}
+
+// handleAdminConfirmRedemptionPayout is the operator action the redeem
+// watcher depends on to ever attest a redemption "paid": NOWPayments
+// requires an operator-completed email 2FA step before a mass-payout
+// actually moves funds (see services/swapd/settlement/nowpayments.go's
+// HTTPPayoutClient doc comment), so a successful CreatePayout call alone
+// only ever reaches settlement.StatusSubmitted, never StatusSettled. An
+// operator who has verified the payout cleared (via the NOWPayments
+// dashboard) calls this endpoint with real evidence (a reference, e.g. the
+// dashboard's own payout/batch ID); redeem_watcher.go's processInitiating
+// picks up the resulting StatusSettled on its next tick and attests paid
+// on-chain. Auth mirrors handleAdminWebhookEvents' authorizeAdmin check --
+// same bearer-token convention, no new auth mechanism.
+func (s *Server) handleAdminConfirmRedemptionPayout(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	if s.redeemWatcher == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, errors.New("redemption payout feature not configured"), nil, nil)
+		return
+	}
+	requestID := extractRedemptionConfirmID(r.URL.Path)
+	if requestID == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("request id required"), nil, nil)
+		return
+	}
+	body, err := s.readBody(w, r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err, body, nil)
+		return
+	}
+	var req redemptionConfirmPayoutRequest
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid JSON payload: %w", err), body, nil)
+			return
+		}
+	}
+	reference := strings.TrimSpace(req.Reference)
+	if reference == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("reference required"), body, nil)
+		return
+	}
+	operator := strings.TrimSpace(req.Operator)
+	if operator == "" {
+		operator = "admin"
+	}
+	rec, err := s.redeemWatcher.ConfirmPayout(r.Context(), requestID, settlement.Receipt{
+		Reference: reference,
+		Note:      strings.TrimSpace(req.Note),
+		Operator:  operator,
+	})
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"requestId":    requestID,
+		"settlementId": rec.ID,
+		"status":       rec.Status,
+		"externalRef":  rec.ExternalRef,
+	}, body)
+}
+
+// redemptionFailPayoutRequest is accepted by
+// POST /admin/redemptions/{requestId}/fail-payout.
+type redemptionFailPayoutRequest struct {
+	Reason string `json:"reason"`
+}
+
+// extractRedemptionActionID pulls {requestId} out of
+// /admin/redemptions/{requestId}/{suffix}, generalizing
+// extractRedemptionConfirmID for the fail-payout/retry-payout siblings added
+// alongside it. Returns "" if the path doesn't match the expected shape.
+func extractRedemptionActionID(path, suffix string) string {
+	const prefix = "/admin/redemptions/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return strings.TrimSpace(id)
+}
+
+// handleAdminFailRedemptionPayout lets an operator explicitly close out a
+// redemption whose settlement is stuck pending/submitted -- the automated
+// counterpart to an operator manually deciding a payout is dead (NOWPayments
+// rejected it, a wire bounced, etc) rather than waiting on it forever. This
+// is the manual escape hatch; RedeemWatcher.pollSubmitted (redeem_watcher.go)
+// already does this automatically whenever a PayoutStatusChecker is
+// configured and NOWPayments itself reports REJECTED/REJECTED_NOT_CHECKED --
+// this endpoint exists for cases that need a human judgment call instead.
+func (s *Server) handleAdminFailRedemptionPayout(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	if s.redeemWatcher == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, errors.New("redemption payout feature not configured"), nil, nil)
+		return
+	}
+	requestID := extractRedemptionActionID(r.URL.Path, "/fail-payout")
+	if requestID == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("request id required"), nil, nil)
+		return
+	}
+	body, err := s.readBody(w, r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err, body, nil)
+		return
+	}
+	var req redemptionFailPayoutRequest
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid JSON payload: %w", err), body, nil)
+			return
+		}
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("reason required"), body, nil)
+		return
+	}
+	rec, err := s.redeemWatcher.FailPayout(r.Context(), requestID, reason)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, body, nil)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"requestId":    requestID,
+		"settlementId": rec.ID,
+		"status":       rec.Status,
+	}, body)
+}
+
+// handleAdminRetryRedemptionPayout re-attempts a payout for a redemption
+// whose settlement previously failed (settlement.Manager.RetryNowPayments
+// requires StatusFailed -- if a redemption is still Submitted, call
+// fail-payout first). This is how a redemption whose only real problem was a
+// broken/misconfigured payout integration -- rather than anything wrong with
+// the redemption itself -- gets to actually complete, instead of forcing the
+// user to be manually refunded for a burn that could still be honored for
+// real. On success the watcher's normal Submitted-handling (automatic poll
+// if configured, or confirm-payout otherwise) picks the new attempt up from
+// its next tick exactly as it would for a first attempt.
+func (s *Server) handleAdminRetryRedemptionPayout(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	if s.redeemWatcher == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, errors.New("redemption payout feature not configured"), nil, nil)
+		return
+	}
+	requestID := extractRedemptionActionID(r.URL.Path, "/retry-payout")
+	if requestID == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("request id required"), nil, nil)
+		return
+	}
+	rec, err := s.redeemWatcher.RetryPayout(r.Context(), requestID)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, err, nil, nil)
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"requestId":    requestID,
+		"settlementId": rec.ID,
+		"status":       rec.Status,
+		"externalRef":  rec.ExternalRef,
+	}, nil)
+}
+
 func parseWebhookEventFilter(r *http.Request) (WebhookEventFilter, error) {
 	query := r.URL.Query()
 	filter := WebhookEventFilter{
@@ -1364,7 +1737,11 @@ func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request, bo
 		if pendingStatus == "" {
 			pendingStatus = "pending"
 		}
-		_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, pendingStatus, nil)
+		if actuallyPaid := strings.TrimSpace(string(latest.ActuallyPaid)); actuallyPaid != "" {
+			_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, pendingStatus, nil, actuallyPaid)
+		} else {
+			_ = s.store.UpdatePaymentStatus(r.Context(), payment.ID, pendingStatus, nil)
+		}
 		s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "pending"}, body)
 		return
 	}

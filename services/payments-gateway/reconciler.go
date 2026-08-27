@@ -20,7 +20,14 @@ import (
 // notices the shortfall (e.g. from the checkout UI's own error messaging)
 // a real chance to send a top-up to the same deposit address before we
 // lock in the lower amount; it is not a security control.
-const partiallyPaidGraceWindow = 15 * time.Minute
+//
+// 3 minutes (not 15): long enough for a real TRC20/on-chain top-up to
+// broadcast and confirm if the buyer acts right away, short enough that
+// the checkout UI's new partial-payment countdown (see
+// CryptoCheckoutModal.svelte) doesn't leave someone staring at a stuck
+// screen for a quarter of an hour once we've already detected their money
+// arrived.
+const partiallyPaidGraceWindow = 3 * time.Minute
 
 // reconcileInterval is how often the sweep runs. Cheap and safe to run
 // frequently: each tick only touches rows that are already stale.
@@ -93,7 +100,11 @@ func (s *Server) settleStalePartialPayment(ctx context.Context, payment *Payment
 		if livePendingStatus == "" {
 			livePendingStatus = "pending"
 		}
-		_ = s.store.UpdatePaymentStatus(ctx, current.ID, livePendingStatus, nil)
+		if actuallyPaid := strings.TrimSpace(string(latest.ActuallyPaid)); actuallyPaid != "" {
+			_ = s.store.UpdatePaymentStatus(ctx, current.ID, livePendingStatus, nil, actuallyPaid)
+		} else {
+			_ = s.store.UpdatePaymentStatus(ctx, current.ID, livePendingStatus, nil)
+		}
 		return
 	}
 

@@ -27,6 +27,49 @@ type Config struct {
 	MinterKMSEnv         string
 	PublicIPNCallbackURL string
 	AdminToken           string
+
+	// Redemption (Swap Out) payout-side config. All optional/unset by
+	// default -- the redeem watcher only starts (see main.go) once every
+	// value it needs is present, so a payments-gateway deployment that
+	// predates the chain-side swap_listPendingRedemptions RPC method and the
+	// RoleSwapPayoutAttestor governance grant (see the rollout plan) keeps
+	// serving the existing mint/deposit flows normally instead of refusing
+	// to start.
+	//
+	// AttestorKMSEnv names another environment variable holding the
+	// redemption attestor's raw hex-encoded private key -- mirroring
+	// MinterKMSEnv's indirection above. Deliberately a SEPARATE key from the
+	// mint signer: see the isolation requirement in the Swap Out plan
+	// (services/swapd/settlement is reused for the payout API integration,
+	// but credentials and the on-chain signing key must never be shared
+	// with any other NOWPayments-account-scoped integration).
+	AttestorKMSEnv string
+
+	// PayoutNowPaymentsEmail/Password/APIKey/BaseURL configure the
+	// NOWPayments mass-payout (withdrawal) API client used exclusively for
+	// redemption payouts (services/swapd/settlement.HTTPPayoutClient).
+	// Deliberately fully separate env vars from NowPaymentsAPIKey/
+	// NowPaymentsIPNSecret above (the deposit-side invoice/payment API) --
+	// per the plan's explicit isolation requirement, this integration must
+	// never share credentials or code path with the deposit side.
+	PayoutNowPaymentsEmail    string
+	PayoutNowPaymentsPassword string
+	PayoutNowPaymentsAPIKey   string
+	PayoutNowPaymentsBaseURL  string
+
+	// PayoutNowPaymentsTOTPSecret is the base32 TOTP secret for the
+	// NOWPayments account's payout 2FA (Account Settings > 2fa, set to
+	// Google Authenticator rather than email). Optional: when unset, every
+	// payout batch falls back to requiring a human to complete NOWPayments'
+	// email 2FA step by hand, which is what this field exists to eliminate
+	// (see settlement.NowPaymentsConfig.TOTPSecret's doc comment for why
+	// email verification is unsafe to rely on for anything but the lowest
+	// volumes -- an unverified batch auto-rejects on a timer).
+	PayoutNowPaymentsTOTPSecret string
+
+	// RedeemWatcherInterval is the redeem watcher's ticker period, mirroring
+	// reconcileInterval's role for the deposit-side reconciler.
+	RedeemWatcherInterval time.Duration
 }
 
 const (
@@ -46,7 +89,25 @@ const (
 	envKMSEnv          = "PAY_GATEWAY_MINTER_KMS_ENV"
 	envIPNCallbackURL  = "PAY_GATEWAY_PUBLIC_IPN_URL"
 	envAdminToken      = "PAY_GATEWAY_ADMIN_TOKEN"
+
+	// Redemption (Swap Out) payout-side env vars -- see Config's doc
+	// comments above for why these are all optional.
+	envAttestorKMSEnv        = "PAY_GATEWAY_ATTESTOR_KMS_ENV"
+	envPayoutNowEmail        = "PAY_GATEWAY_PAYOUT_NOW_EMAIL"
+	envPayoutNowPassword     = "PAY_GATEWAY_PAYOUT_NOW_PASSWORD"
+	envPayoutNowAPIKey       = "PAY_GATEWAY_PAYOUT_NOW_API_KEY"
+	envPayoutNowBaseURL      = "PAY_GATEWAY_PAYOUT_NOW_BASE"
+	envPayoutNowTOTPSecret   = "PAY_GATEWAY_PAYOUT_NOW_TOTP_SECRET"
+	envRedeemWatcherInterval = "PAY_GATEWAY_REDEEM_WATCHER_INTERVAL"
 )
+
+// defaultRedeemWatcherInterval is how often the redeem watcher polls
+// swap_listPendingRedemptions for newly-burned requests and re-checks
+// in-flight settlements. 30s mirrors the plan's suggested default; unlike
+// reconcileInterval's 1-minute deposit-side sweep, this watcher also drives
+// the attestor's own tx submissions, so a slightly tighter default keeps
+// redeemer-visible latency reasonable without hammering the node.
+const defaultRedeemWatcherInterval = 30 * time.Second
 
 // LoadConfigFromEnv resolves configuration from environment variables with sane defaults.
 func LoadConfigFromEnv() (*Config, error) {
@@ -73,6 +134,16 @@ func LoadConfigFromEnv() (*Config, error) {
 		// unauthorized (fail closed) rather than crashing the whole payment
 		// service over a missing audit-dashboard credential.
 		AdminToken: strings.TrimSpace(os.Getenv(envAdminToken)),
+
+		// Redemption (Swap Out) payout-side config -- all optional, see
+		// Config's doc comments.
+		AttestorKMSEnv:              strings.TrimSpace(os.Getenv(envAttestorKMSEnv)),
+		PayoutNowPaymentsEmail:      strings.TrimSpace(os.Getenv(envPayoutNowEmail)),
+		PayoutNowPaymentsPassword:   strings.TrimSpace(os.Getenv(envPayoutNowPassword)),
+		PayoutNowPaymentsAPIKey:     strings.TrimSpace(os.Getenv(envPayoutNowAPIKey)),
+		PayoutNowPaymentsBaseURL:    getenvDefault(envPayoutNowBaseURL, "https://api.nowpayments.io/v1"),
+		PayoutNowPaymentsTOTPSecret: strings.TrimSpace(os.Getenv(envPayoutNowTOTPSecret)),
+		RedeemWatcherInterval:       parseDurationDefault(envRedeemWatcherInterval, defaultRedeemWatcherInterval),
 	}
 
 	if cfg.NodeURL == "" {
@@ -89,6 +160,26 @@ func LoadConfigFromEnv() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// RedemptionEnabled reports whether every config value the redeem watcher
+// needs is actually present. Unlike the deposit-side settings validated
+// above, none of these fail LoadConfigFromEnv -- the whole redemption
+// (Swap Out) feature depends on chain-side changes (swap_listPendingRedemptions,
+// the RoleSwapPayoutAttestor governance grant) that roll out on their own,
+// slower timeline, so a payments-gateway binary must be deployable and able
+// to keep serving mint/deposit traffic before those land. main.go checks
+// this once at startup and only wires the watcher goroutine when it's true,
+// logging a clear one-line reason otherwise instead of silently doing
+// nothing.
+func (c *Config) RedemptionEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.AttestorKMSEnv != "" &&
+		c.PayoutNowPaymentsEmail != "" &&
+		c.PayoutNowPaymentsPassword != "" &&
+		c.PayoutNowPaymentsAPIKey != ""
 }
 
 func getenvDefault(key, def string) string {

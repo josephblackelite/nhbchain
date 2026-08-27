@@ -29,6 +29,11 @@ type NowPaymentsClient interface {
 	// ListMerchantCoins returns the lowercased currency codes enabled for
 	// this NOWPayments merchant account via GET /v1/merchant/coins.
 	ListMerchantCoins(ctx context.Context) ([]string, error)
+	// GetBalance returns this merchant account's actual held balance per
+	// currency via GET /v1/balance -- the real custodial reserve figure,
+	// not a value derived from on-chain mint/burn totals or a hardcoded
+	// placeholder. Backs GET /admin/reserve-balance.
+	GetBalance(ctx context.Context) (NowPaymentsBalance, error)
 }
 
 // HTTPNowPaymentsClient implements NowPaymentsClient against the official HTTP API.
@@ -248,6 +253,45 @@ func (c *HTTPNowPaymentsClient) CreatePayment(ctx context.Context, req *NowPayme
 
 func (c *HTTPNowPaymentsClient) GetPayment(ctx context.Context, id string) (*NowPaymentsPayment, error) {
 	return c.doPaymentRequest(ctx, http.MethodGet, fmt.Sprintf("/payment/%s", id), nil)
+}
+
+// NowPaymentsBalanceEntry is one currency's entry in the GET /v1/balance
+// response. Amount/PendingAmount are flexibleAmount for the same reason as
+// every other amount field in this file: NOWPayments returns these as bare
+// JSON numbers, which would silently abort decoding the whole map if typed
+// as plain strings.
+type NowPaymentsBalanceEntry struct {
+	Amount        flexibleAmount `json:"amount"`
+	PendingAmount flexibleAmount `json:"pendingAmount"`
+	Currency      string         `json:"currency"`
+}
+
+// NowPaymentsBalance is the full GET /v1/balance response: a map keyed by
+// lowercased currency code (e.g. "usdttrc20", "usdterc20", "btc").
+type NowPaymentsBalance map[string]NowPaymentsBalanceEntry
+
+func (c *HTTPNowPaymentsClient) GetBalance(ctx context.Context) (NowPaymentsBalance, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nowpayments client not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/balance", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, parseNowPaymentsError(resp.StatusCode, resp.Body)
+	}
+	var balance NowPaymentsBalance
+	if err := json.NewDecoder(resp.Body).Decode(&balance); err != nil {
+		return nil, fmt.Errorf("nowpayments /balance: %w", err)
+	}
+	return balance, nil
 }
 
 func (c *HTTPNowPaymentsClient) ListMerchantCoins(ctx context.Context) ([]string, error) {

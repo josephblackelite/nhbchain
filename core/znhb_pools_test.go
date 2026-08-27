@@ -7,6 +7,8 @@ import (
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
+	"nhbchain/crypto"
+	"nhbchain/native/governance"
 	"nhbchain/storage"
 	statetrie "nhbchain/storage/trie"
 )
@@ -225,6 +227,317 @@ func TestCheckZNHBSupplyInvariant_DetectsViolation(t *testing.T) {
 
 	if err := sp.CheckZNHBSupplyInvariant(); err == nil {
 		t.Fatalf("expected the supply invariant check to catch a desynced pool balance")
+	}
+}
+
+// TestCheckZNHBSupplyInvariant_HoldsThroughSelfStakeAndUnstake documents the
+// fix for the 2026-08-26 incident: the admin wallet self-staking used to
+// move ZNHB from BalanceZNHB into Stake/LockedZNHB, which the old
+// balance-only formula had no idea about, breaking the invariant the
+// instant it staked anything. The corrected formula must hold at every
+// step of self-stake -> self-unstake-to-pending, since all of it stays on
+// the admin's own account in fields the formula now sums.
+func TestCheckZNHBSupplyInvariant_HoldsThroughSelfStakeAndUnstake(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold after bootstrap: %v", err)
+	}
+
+	stakeAmount := big.NewInt(10_000)
+	if _, err := sp.StakeDelegate(adminAddr[:], nil, stakeAmount); err != nil {
+		t.Fatalf("admin self-stake: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold immediately after admin self-stake: %v", err)
+	}
+
+	if _, err := sp.StakeUndelegate(adminAddr[:], stakeAmount); err != nil {
+		t.Fatalf("admin self-unstake: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold with the amount sitting in a pending unbond: %v", err)
+	}
+
+	admin, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	if len(admin.PendingUnbonds) != 1 || admin.PendingUnbonds[0].Amount.Cmp(stakeAmount) != 0 {
+		t.Fatalf("expected exactly one pending unbond of %s, got %+v", stakeAmount, admin.PendingUnbonds)
+	}
+}
+
+// TestCheckZNHBSupplyInvariant_IgnoresThirdPartyDelegationIn documents why
+// Account.Stake is deliberately excluded from the invariant formula: any
+// third party can name the admin wallet as their validator with no
+// eligibility check, crediting the admin's own Stake field with money that
+// was never the treasury's. The invariant must not be affected by this at
+// all -- it should hold both before and after such a delegation lands.
+func TestCheckZNHBSupplyInvariant_IgnoresThirdPartyDelegationIn(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	thirdParty := [20]byte{0xB0}
+	if err := sp.setAccount(thirdParty[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(5_000),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed third party: %v", err)
+	}
+
+	if _, err := sp.StakeDelegate(thirdParty[:], adminAddr[:], big.NewInt(5_000)); err != nil {
+		t.Fatalf("third party delegates to admin wallet as validator: %v", err)
+	}
+
+	admin, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	if admin.Stake.Cmp(big.NewInt(5_000)) != 0 {
+		t.Fatalf("expected third-party delegated stake to land on admin.Stake, got %s", admin.Stake)
+	}
+	if admin.BalanceZNHB.Cmp(znhbExpectedTotalSupplyWei) != 0 {
+		t.Fatalf("admin's own BalanceZNHB must be untouched by a delegation it never sent, got %s", admin.BalanceZNHB)
+	}
+
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant must ignore third-party delegated-in stake, got: %v", err)
+	}
+}
+
+// TestClearAdminStalePendingUnbondsOnce_RemovesExactMatchAndIsIdempotent
+// covers the 2026-08-26 incident's specific leftover: a pending unbond
+// already effectively paid out via ReconcileZNHBSupplyDriftOnce's blunt
+// balance top-up, which must be spliced out without a second credit.
+func TestClearAdminStalePendingUnbondsOnce_RemovesExactMatchAndIsIdempotent(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+
+	staleAmount := new(big.Int).Set(staleAdminPendingUnbondSeed[0].Amount)
+	balanceBefore := new(big.Int).Set(znhbExpectedTotalSupplyWei)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(balanceBefore),
+		Stake:       big.NewInt(0),
+		PendingUnbonds: []types.StakeUnbond{
+			{ID: staleAdminPendingUnbondSeed[0].ID, Validator: append([]byte(nil), adminAddr[:]...), Amount: staleAmount, ReleaseTime: 1},
+		},
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	if err := sp.ClearAdminStalePendingUnbondsOnce(); err != nil {
+		t.Fatalf("clear stale pending unbonds: %v", err)
+	}
+
+	admin, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	if len(admin.PendingUnbonds) != 0 {
+		t.Fatalf("expected the stale pending unbond to be removed, got %+v", admin.PendingUnbonds)
+	}
+	if admin.BalanceZNHB.Cmp(balanceBefore) != 0 {
+		t.Fatalf("clearing a stale pending unbond must not credit BalanceZNHB again: before=%s after=%s", balanceBefore, admin.BalanceZNHB)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	cleared, err := manager.ZNHBAdminStaleUnbondsCleared()
+	if err != nil {
+		t.Fatalf("read cleared flag: %v", err)
+	}
+	if !cleared {
+		t.Fatalf("expected the cleared flag to be set")
+	}
+
+	// Idempotency: seed a brand new pending unbond with the same ID and
+	// amount (simulating a legitimate new stake/unstake cycle after this
+	// deploys) and confirm a second call never touches it.
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(balanceBefore),
+		Stake:       big.NewInt(0),
+		PendingUnbonds: []types.StakeUnbond{
+			{ID: staleAdminPendingUnbondSeed[0].ID, Validator: append([]byte(nil), adminAddr[:]...), Amount: new(big.Int).Set(staleAmount), ReleaseTime: 2},
+		},
+	}); err != nil {
+		t.Fatalf("reseed admin wallet: %v", err)
+	}
+	if err := sp.ClearAdminStalePendingUnbondsOnce(); err != nil {
+		t.Fatalf("second clear call: %v", err)
+	}
+	admin, err = sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account after second call: %v", err)
+	}
+	if len(admin.PendingUnbonds) != 1 {
+		t.Fatalf("a legitimate new pending unbond created after the flag is set must never be touched, got %+v", admin.PendingUnbonds)
+	}
+}
+
+// TestClearAdminStalePendingUnbondsOnce_SkipsMismatchedAmount confirms the
+// migration never force-removes an entry whose amount doesn't exactly
+// match what was confirmed live -- it must fail safe (skip) rather than
+// guess, per the adversarial review this fix went through.
+func TestClearAdminStalePendingUnbondsOnce_SkipsMismatchedAmount(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+
+	wrongAmount := new(big.Int).Add(staleAdminPendingUnbondSeed[0].Amount, big.NewInt(1))
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+		PendingUnbonds: []types.StakeUnbond{
+			{ID: staleAdminPendingUnbondSeed[0].ID, Validator: append([]byte(nil), adminAddr[:]...), Amount: wrongAmount, ReleaseTime: 1},
+		},
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	if err := sp.ClearAdminStalePendingUnbondsOnce(); err != nil {
+		t.Fatalf("clear stale pending unbonds: %v", err)
+	}
+
+	admin, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	if len(admin.PendingUnbonds) != 1 {
+		t.Fatalf("an amount mismatch must be left untouched, not removed, got %+v", admin.PendingUnbonds)
+	}
+}
+
+// TestClearAdminStalePendingUnbondsOnce_NoOpIfAlreadyClaimed confirms the
+// migration is a harmless no-op when the entry is simply absent (e.g. it
+// was already claimed through the normal, correct path some other way).
+func TestClearAdminStalePendingUnbondsOnce_NoOpIfAlreadyClaimed(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	if err := sp.ClearAdminStalePendingUnbondsOnce(); err != nil {
+		t.Fatalf("clear stale pending unbonds on an account with none: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	cleared, err := manager.ZNHBAdminStaleUnbondsCleared()
+	if err != nil {
+		t.Fatalf("read cleared flag: %v", err)
+	}
+	if !cleared {
+		t.Fatalf("expected the cleared flag to be set even when there was nothing to clear")
+	}
+}
+
+// TestCheckZNHBSupplyInvariant_HoldsThroughGovernanceProposalDeposit
+// documents a second gap found live in production on 2026-08-26, right
+// after the self-stake/unstake fix above shipped: the admin wallet
+// submitting a real governance proposal (policy.swapRiskParams, with a
+// deposit) repeatedly failed block-building with "supply invariant
+// violated" until adminZNHBOwned() also summed the admin wallet's
+// GovernanceEscrowLock balance -- SubmitProposal debits BalanceZNHB and
+// escrows the deposit in a completely separate KV ledger, invisible to the
+// old two-field-plus-pending-unbonds formula. Drives the real
+// TxTypeGovPropose transaction path (sp.ApplyTransaction via
+// applySignedGovTx), never a direct governance.Engine call, matching this
+// file's sibling swap_risk_params_governance_test.go.
+func TestCheckZNHBSupplyInvariant_HoldsThroughGovernanceProposalDeposit(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	adminAddrBytes := adminKey.PubKey().Address().Bytes()
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminAddrBytes)
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddrBytes, &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(znhbExpectedTotalSupplyWei),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold after bootstrap: %v", err)
+	}
+
+	sp.SetGovernancePolicy(governance.ProposalPolicy{
+		MinDepositWei:       big.NewInt(0),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+
+	deposit := weiAmount(5_000)
+	payload := `{` +
+		`"redeemPerTxMinWei":"0","redeemPerTxMaxWei":"` + weiStr(1_000) + `",` +
+		`"redeemPerAddressDailyCapWei":"` + weiStr(2_000) + `","redeemPerAddressMonthlyCapWei":"` + weiStr(20_000) + `",` +
+		`"memo":"test"` +
+		`}`
+	applySignedGovTx(t, sp, adminKey, types.TxTypeGovPropose, govProposePayload{
+		Kind:    governance.ProposalKindSwapRiskParams,
+		Payload: payload,
+		Deposit: deposit,
+	})
+
+	manager := nhbstate.NewManager(sp.Trie)
+	escrow, err := manager.GovernanceEscrowBalance(adminAddrBytes)
+	if err != nil {
+		t.Fatalf("read governance escrow balance: %v", err)
+	}
+	if escrow.Cmp(deposit) != 0 {
+		t.Fatalf("expected the deposit to be escrowed, got escrow=%s want=%s", escrow, deposit)
+	}
+
+	admin, err := sp.getAccount(adminAddrBytes)
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	wantBalance := new(big.Int).Sub(znhbExpectedTotalSupplyWei, deposit)
+	if admin.BalanceZNHB.Cmp(wantBalance) != 0 {
+		t.Fatalf("expected BalanceZNHB debited by the deposit, got %s want %s", admin.BalanceZNHB, wantBalance)
+	}
+
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold with the deposit escrowed, got: %v", err)
 	}
 }
 

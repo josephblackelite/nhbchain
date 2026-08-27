@@ -37,6 +37,7 @@ type stubNowPayments struct {
 	createPaymentFn    func(ctx context.Context, req *NowPaymentsPaymentRequest) (*NowPaymentsPayment, error)
 	getPaymentFn       func(ctx context.Context, id string) (*NowPaymentsPayment, error)
 	listCoinsFn        func(ctx context.Context) ([]string, error)
+	getBalanceFn       func(ctx context.Context) (NowPaymentsBalance, error)
 	createPaymentCalls int
 	lastPaymentReq     *NowPaymentsPaymentRequest
 
@@ -107,6 +108,15 @@ func (s *stubNowPayments) ListMerchantCoins(ctx context.Context) ([]string, erro
 	return s.listCoinsFn(ctx)
 }
 
+func (s *stubNowPayments) GetBalance(ctx context.Context) (NowPaymentsBalance, error) {
+	if s.getBalanceFn == nil {
+		return NowPaymentsBalance{
+			"usdttrc20": NowPaymentsBalanceEntry{Amount: "1000", Currency: "usdttrc20"},
+		}, nil
+	}
+	return s.getBalanceFn(ctx)
+}
+
 type stubNode struct {
 	lastVoucher   core.MintVoucher
 	lastSignature string
@@ -126,6 +136,23 @@ func (n *stubNode) MintWithSig(ctx context.Context, voucher core.MintVoucher, si
 		n.txHash = "0xdeadbeef"
 	}
 	return n.txHash, nil
+}
+
+// ListPendingRedemptions/SendAttestRedemption/GetTransactionReceipt satisfy
+// the redemption-payout additions to NodeClient (see node_client.go).
+// server_test.go/reconciler_test.go only exercise the mint/deposit flows,
+// so these are unused stubs -- present purely so *stubNode keeps satisfying
+// the (single, shared) NodeClient interface.
+func (n *stubNode) ListPendingRedemptions(ctx context.Context) ([]RedemptionRequest, error) {
+	return nil, nil
+}
+
+func (n *stubNode) SendAttestRedemption(ctx context.Context, requestID, status, payoutReference, failureReason string) (string, error) {
+	return "", fmt.Errorf("stubNode: SendAttestRedemption not implemented")
+}
+
+func (n *stubNode) GetTransactionReceipt(ctx context.Context, txHash string) (bool, error) {
+	return false, fmt.Errorf("stubNode: GetTransactionReceipt not implemented")
 }
 
 type stubSigner struct {
@@ -824,6 +851,125 @@ func TestCurrenciesRouteOrdersPreferredFirst(t *testing.T) {
 	}
 }
 
+// stubFeeEstimator is a controllable RedemptionFeeEstimator for testing
+// GET /swap/redeem-fee-estimate.
+type stubFeeEstimator struct {
+	fee float64
+	err error
+}
+
+func (s *stubFeeEstimator) GetPayoutFeeEstimate(ctx context.Context, currency string, amount float64) (float64, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.fee, nil
+}
+
+// TestRedeemFeeEstimateRoute is the regression test for the real production
+// surprise this endpoint exists to prevent: a redeemer burning 17 NHB and
+// only receiving ~11.41 USDT, with no warning beforehand. Confirms the
+// route reports the real NOWPayments-quoted fee (a flat 5.58794178 USDT in
+// production, independent of amount) rather than hiding it.
+func TestRedeemFeeEstimateRoute(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	np := &stubNowPayments{}
+	node := &stubNode{}
+	signer := &stubSigner{}
+	srv := newTestServer(t, store, np, node, signer)
+	srv.SetRedemptionFeeEstimator(&stubFeeEstimator{fee: 5.58794178})
+
+	req := httptest.NewRequest(http.MethodGet, "/swap/redeem-fee-estimate?amount=17", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("redeem fee estimate route failed: %s", w.Body.String())
+	}
+	var resp struct {
+		Currency  string `json:"currency"`
+		GrossUsdt string `json:"grossUsdt"`
+		FeeUsdt   string `json:"feeUsdt"`
+		NetUsdt   string `json:"netUsdt"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Currency != "USDTTRC20" {
+		t.Fatalf("unexpected currency: %s", resp.Currency)
+	}
+	if resp.GrossUsdt != "17" || resp.FeeUsdt != "5.58794178" || resp.NetUsdt != "11.41205822" {
+		t.Fatalf("unexpected amounts: gross=%s fee=%s net=%s", resp.GrossUsdt, resp.FeeUsdt, resp.NetUsdt)
+	}
+}
+
+// TestRedeemFeeEstimateRouteRoundsConsistently is the regression test for a
+// real bug caught during manual smoke-testing: subtracting the exact same
+// fee (5.58794178) from two different gross amounts produced different
+// last-digit rounding ("...22" for 17, "...23" for 100) because
+// big.Rat.SetFloat64 captures a float64's imprecise binary value rather than
+// the clean decimal NOWPayments actually returned. Every amount here must
+// net out to exactly gross-5.58794178, no matter what gross is.
+func TestRedeemFeeEstimateRouteRoundsConsistently(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	srv := newTestServer(t, store, &stubNowPayments{}, &stubNode{}, &stubSigner{})
+	srv.SetRedemptionFeeEstimator(&stubFeeEstimator{fee: 5.58794178})
+
+	cases := []struct{ gross, wantNet string }{
+		{"17", "11.41205822"},
+		{"100", "94.41205822"},
+		{"6", "0.41205822"},
+		{"1000", "994.41205822"},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/swap/redeem-fee-estimate?amount="+tc.gross, nil)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("gross=%s: unexpected status %d: %s", tc.gross, w.Code, w.Body.String())
+		}
+		var resp struct {
+			NetUsdt string `json:"netUsdt"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("gross=%s: decode response: %v", tc.gross, err)
+		}
+		if resp.NetUsdt != tc.wantNet {
+			t.Errorf("gross=%s: netUsdt = %s, want %s", tc.gross, resp.NetUsdt, tc.wantNet)
+		}
+	}
+}
+
+func TestRedeemFeeEstimateRouteRejectsInvalidAmount(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	srv := newTestServer(t, store, &stubNowPayments{}, &stubNode{}, &stubSigner{})
+	srv.SetRedemptionFeeEstimator(&stubFeeEstimator{fee: 5.58794178})
+
+	for _, amount := range []string{"", "0", "-5", "not-a-number"} {
+		req := httptest.NewRequest(http.MethodGet, "/swap/redeem-fee-estimate?amount="+amount, nil)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("amount=%q: expected 400, got %d: %s", amount, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestRedeemFeeEstimateRouteUnconfiguredFailsClosed(t *testing.T) {
+	store := newTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	srv := newTestServer(t, store, &stubNowPayments{}, &stubNode{}, &stubSigner{})
+	// Deliberately not calling SetRedemptionFeeEstimator.
+
+	req := httptest.NewRequest(http.MethodGet, "/swap/redeem-fee-estimate?amount=17", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when unconfigured, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func computeTestHMAC(secret string, body []byte) string {
 	mac := hmac.New(sha512.New, []byte(secret))
 	mac.Write(body)
@@ -948,7 +1094,7 @@ func TestAdminWebhookEventsListFilterAndPagination(t *testing.T) {
 	var listed struct {
 		Total      int                      `json:"total"`
 		Items      []map[string]interface{} `json:"items"`
-		NextCursor interface{}               `json:"nextCursor"`
+		NextCursor interface{}              `json:"nextCursor"`
 	}
 	if err := json.Unmarshal(listRes.Body.Bytes(), &listed); err != nil {
 		t.Fatalf("decode list: %v", err)

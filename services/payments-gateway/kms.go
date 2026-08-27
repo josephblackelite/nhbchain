@@ -49,6 +49,33 @@ func (s *EnvKMSSigner) Address() string {
 	return s.key.PubKey().Address().String()
 }
 
+// LoadPrivateKeyFromEnv loads a raw hex-encoded secp256k1 private key from
+// the environment variable named by varName, decoding it the same way
+// NewEnvKMSSigner does. Unlike EnvKMSSigner (which wraps the key behind a
+// Keccak256-then-secp256k1-sign Sign() method purpose-built for mint
+// vouchers), callers here need the raw *nhbcrypto.PrivateKey itself -- the
+// redemption attestor signs standard V3 NHB transactions via
+// types.Transaction.Sign(privKey.PrivateKey), a different signing scheme
+// entirely. Used for PAY_GATEWAY_ATTESTOR_KMS_ENV; kept in this file since
+// it duplicates NewEnvKMSSigner's decode logic verbatim rather than
+// factoring it out, so neither caller's error messages or behavior change.
+func LoadPrivateKeyFromEnv(varName string) (*nhbcrypto.PrivateKey, error) {
+	material := strings.TrimSpace(os.Getenv(varName))
+	if material == "" {
+		return nil, fmt.Errorf("environment variable %s not set", varName)
+	}
+	material = strings.TrimPrefix(material, "0x")
+	decoded, err := hex.DecodeString(material)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode private key material: %w", err)
+	}
+	key, err := nhbcrypto.PrivateKeyFromBytes(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key material: %w", err)
+	}
+	return key, nil
+}
+
 // Sign produces a secp256k1 signature over the payload using the configured key.
 func (s *EnvKMSSigner) Sign(ctx context.Context, payload []byte) ([]byte, error) {
 	if s == nil || s.key == nil {
