@@ -349,6 +349,33 @@ func (m *LendingModule) GetActiveFixedTermLoan(poolID string, addr [20]byte) (*l
 	return loan, nil
 }
 
+// GetFixedTermDeposit returns the fixed-term deposit with the given ID, or
+// (nil, nil) if it does not exist -- not an error. Unlike
+// GetActiveFixedTermLoan, this looks up directly by DepositID: a depositor
+// may hold multiple simultaneous fixed-term deposits, so there is no single
+// "the active one" pointer to resolve from an address the way a fixed-term
+// loan has.
+func (m *LendingModule) GetFixedTermDeposit(depositID [32]byte) (*lending.FixedTermDeposit, *ModuleError) {
+	if m == nil || m.node == nil {
+		return nil, m.moduleUnavailable()
+	}
+	var deposit *lending.FixedTermDeposit
+	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
+		stored, ok, err := manager.LendingGetFixedTermDeposit(depositID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			deposit = stored
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, m.wrapError(err)
+	}
+	return deposit, nil
+}
+
 func marketNeedsRebuild(market *lending.Market) bool {
 	if market == nil {
 		return true
@@ -1045,6 +1072,27 @@ func (a *lendingStateAdapter) PutFixedTermLoan(loan *lending.FixedTermLoan) erro
 		return fmt.Errorf("lending: state manager unavailable")
 	}
 	return a.manager.LendingPutFixedTermLoan(loan)
+}
+
+func (a *lendingStateAdapter) GetFixedTermDeposit(depositID [32]byte) (*lending.FixedTermDeposit, error) {
+	if a == nil || a.manager == nil {
+		return nil, fmt.Errorf("lending: state manager unavailable")
+	}
+	deposit, ok, err := a.manager.LendingGetFixedTermDeposit(depositID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return deposit, nil
+}
+
+func (a *lendingStateAdapter) PutFixedTermDeposit(deposit *lending.FixedTermDeposit) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	return a.manager.LendingPutFixedTermDeposit(deposit)
 }
 
 func (a *lendingStateAdapter) GetActiveFixedTermLoanID(_ string, addr crypto.Address) ([32]byte, bool, error) {

@@ -1533,6 +1533,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleLendingGetUserAccount(recorder, r, req)
 	case "lending_getFixedTermLoan":
 		s.handleLendingGetFixedTermLoan(recorder, r, req)
+	case "lending_getFixedTermDeposit":
+		s.handleLendingGetFixedTermDeposit(recorder, r, req)
 	case "lending_getRateSchedule":
 		s.handleLendingGetRateSchedule(recorder, r, req)
 	case "lending_supplyNHB":

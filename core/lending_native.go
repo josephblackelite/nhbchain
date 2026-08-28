@@ -403,6 +403,92 @@ func (sp *StateProcessor) applyLendingRepayFixedTerm(tx *types.Transaction, send
 	return sp.incrementNativeAccountNonce(sender)
 }
 
+type lendingFixedTermSupplyPayload struct {
+	PoolID     string `json:"poolId,omitempty"`
+	TenureDays uint64 `json:"tenureDays"`
+	Payout     string `json:"payout"`
+}
+
+func (sp *StateProcessor) decodeLendingFixedTermSupplyPayload(data []byte) (*lendingFixedTermSupplyPayload, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("lending fixed-term supply payload required")
+	}
+	payload := &lendingFixedTermSupplyPayload{PoolID: defaultLendingPoolID}
+	if err := json.Unmarshal(data, payload); err != nil {
+		return nil, fmt.Errorf("invalid lending fixed-term supply payload: %w", err)
+	}
+	payload.PoolID = strings.TrimSpace(payload.PoolID)
+	if payload.PoolID == "" {
+		payload.PoolID = defaultLendingPoolID
+	}
+	if payload.TenureDays == 0 {
+		return nil, fmt.Errorf("lending fixed-term supply payload requires a tenure")
+	}
+	payload.Payout = strings.TrimSpace(payload.Payout)
+	switch lending.FixedTermDepositPayout(payload.Payout) {
+	case lending.FixedTermDepositPayoutLumpSumAtMaturity, lending.FixedTermDepositPayoutPeriodic:
+	default:
+		return nil, fmt.Errorf("lending fixed-term supply payload has an invalid payout preference %q", payload.Payout)
+	}
+	return payload, nil
+}
+
+// applyLendingSupplyFixedTerm originates a new locked-rate, fixed-tenure
+// deposit -- Milestone 3, the mirror image of applyLendingBorrowFixedTerm on
+// the pool's liability side. depositID is derived from this transaction's
+// own hash, exactly like applyLendingBorrowFixedTerm's loanID -- never from
+// wall-clock time.
+func (sp *StateProcessor) applyLendingSupplyFixedTerm(tx *types.Transaction, sender []byte) error {
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return fmt.Errorf("lending fixed-term supply amount must be positive")
+	}
+	payload, err := sp.decodeLendingFixedTermSupplyPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	engine, _, err := sp.lendingEngine(payload.PoolID)
+	if err != nil {
+		return err
+	}
+	// Resolved here, not inside the shared lendingEngine() constructor --
+	// same reasoning as applyLendingBorrowFixedTerm's own rate-schedule
+	// resolution: a corrupted/tampered stored schedule value can only ever
+	// fail fixed-term deposit origination, not every other lending tx type.
+	depositRateSchedule, err := sp.effectiveFixedTermDepositRateSchedule(nhbstate.NewManager(sp.Trie))
+	if err != nil {
+		return err
+	}
+	engine.SetFixedTermDepositRateSchedule(depositRateSchedule)
+	txHash, err := tx.Hash()
+	if err != nil {
+		return fmt.Errorf("lending fixed-term supply: compute tx hash: %w", err)
+	}
+	var depositID [32]byte
+	copy(depositID[:], txHash)
+	deposit, err := engine.SupplyFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), depositID, payload.TenureDays, tx.Value, lending.FixedTermDepositPayout(payload.Payout))
+	if err != nil {
+		return err
+	}
+	// Schedules the deposit's first payout step -- settleLendingDepositPayouts
+	// (core/lending_deposit_payout_settlement.go) picks it up from this
+	// due-index bucket once its day arrives. Lump-sum: a single step at
+	// maturity. Periodic: cycle 1's own due date.
+	manager := nhbstate.NewManager(sp.Trie)
+	var dueAt uint64
+	if deposit.Payout == lending.FixedTermDepositPayoutLumpSumAtMaturity {
+		dueAt = deposit.MaturityTime
+	} else {
+		dueAt = deposit.IssuedAtTime + lending.AutoDebitCycleLengthDays*86400
+		if dueAt > deposit.MaturityTime {
+			dueAt = deposit.MaturityTime
+		}
+	}
+	if err := manager.LendingDepositPayoutAppendDue(dueAt/secondsPerDay, depositID); err != nil {
+		return fmt.Errorf("lending fixed-term supply: schedule payout: %w", err)
+	}
+	return sp.incrementNativeAccountNonce(sender)
+}
+
 type lendingLiquidatePayload struct {
 	PoolID   string `json:"poolId,omitempty"`
 	Borrower string `json:"borrower"`
@@ -750,6 +836,27 @@ func (a *lendingStateAdapter) PutFixedTermLoan(loan *lending.FixedTermLoan) erro
 		return fmt.Errorf("lending: state manager unavailable")
 	}
 	return a.manager.LendingPutFixedTermLoan(loan)
+}
+
+func (a *lendingStateAdapter) GetFixedTermDeposit(depositID [32]byte) (*lending.FixedTermDeposit, error) {
+	if a == nil || a.manager == nil {
+		return nil, fmt.Errorf("lending: state manager unavailable")
+	}
+	deposit, ok, err := a.manager.LendingGetFixedTermDeposit(depositID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return deposit, nil
+}
+
+func (a *lendingStateAdapter) PutFixedTermDeposit(deposit *lending.FixedTermDeposit) error {
+	if a == nil || a.manager == nil {
+		return fmt.Errorf("lending: state manager unavailable")
+	}
+	return a.manager.LendingPutFixedTermDeposit(deposit)
 }
 
 func (a *lendingStateAdapter) GetActiveFixedTermLoanID(_ string, addr crypto.Address) ([32]byte, bool, error) {

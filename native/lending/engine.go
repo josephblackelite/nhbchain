@@ -38,6 +38,18 @@ var (
 	errOracleDeviation           = errors.New("lending engine: oracle deviation too large")
 	errMaxLTVExceeded            = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
 	errWithdrawSameBlockAsSupply = errors.New("lending engine: cannot withdraw in the same block as a supply")
+
+	errFixedTermDepositTenureNotAllowed = errors.New("lending engine: tenure not in the fixed-term deposit rate schedule")
+	errFixedTermDepositInvalidPayout    = errors.New("lending engine: invalid fixed-term deposit payout preference")
+	errFixedTermDepositCapacityExceeded = errors.New("lending engine: fixed-term deposit would exceed the pool's fixed-term loan interest capacity")
+	errFixedTermDepositNotFound         = errors.New("lending engine: fixed-term deposit not found")
+	errFixedTermDepositNotActive        = errors.New("lending engine: fixed-term deposit is not active")
+	// errFixedTermDepositReserveInsufficient is a soft, retryable outcome --
+	// a genuine but expected timing mismatch between when fixed-term loan
+	// interest has actually been collected and when a deposit payout comes
+	// due -- never a storage error. Callers (settleLendingDepositPayouts)
+	// must reschedule, never treat this as fatal.
+	errFixedTermDepositReserveInsufficient = errors.New("lending engine: fixed-term deposit reserve insufficient for this payout")
 )
 
 // ErrHealthCheckFailed and ErrMaxLTVExceeded are exported aliases of the
@@ -74,6 +86,15 @@ var (
 	ErrRepayPaused         = errRepayPaused
 	ErrNoDebtToRepay       = errNoDebtToRepay
 	ErrInsufficientBalance = errInsufficientBalance
+	// ErrFixedTermDepositReserveInsufficient and ErrInsufficientLiquidity
+	// are exported aliases core/lending_deposit_payout_settlement.go's
+	// settlement hook needs to recognize as soft, retryable outcomes for
+	// the SAME reason as the three above -- a genuine but expected timing
+	// mismatch (fixed-term loan interest, or general pool liquidity,
+	// hasn't caught up with a deposit payout that's come due yet), never a
+	// storage error.
+	ErrFixedTermDepositReserveInsufficient = errFixedTermDepositReserveInsufficient
+	ErrInsufficientLiquidity               = errInsufficientLiquidity
 )
 
 const blocksPerYear = 31_536_000
@@ -94,6 +115,8 @@ type engineState interface {
 	GetActiveFixedTermLoanID(poolID string, addr crypto.Address) ([32]byte, bool, error)
 	SetActiveFixedTermLoanID(poolID string, addr crypto.Address, loanID [32]byte) error
 	ClearActiveFixedTermLoan(poolID string, addr crypto.Address) error
+	GetFixedTermDeposit(depositID [32]byte) (*FixedTermDeposit, error)
+	PutFixedTermDeposit(deposit *FixedTermDeposit) error
 }
 
 // Engine orchestrates the primary state transitions for the lending module.
@@ -112,13 +135,14 @@ type Engine struct {
 	// get hashed into the loan ID and persisted consensus state; using real
 	// time here would repeat the exact non-determinism bug found and fixed
 	// in the market engine (core/market_native.go's marketEngine()).
-	blockTimestamp    int64
-	fixedTermRates    TenureRateSchedule
-	poolID            string
-	developerFeeBps   uint64
-	developerFeeAddr  crypto.Address
-	collateralRouting CollateralRouting
-	pauses            nativecommon.PauseView
+	blockTimestamp        int64
+	fixedTermRates        TenureRateSchedule
+	fixedTermDepositRates TenureRateSchedule
+	poolID                string
+	developerFeeBps       uint64
+	developerFeeAddr      crypto.Address
+	collateralRouting     CollateralRouting
+	pauses                nativecommon.PauseView
 }
 
 // NewEngine constructs a lending engine configured with the module treasury
@@ -160,6 +184,24 @@ func (e *Engine) SetFixedTermRateSchedule(schedule TenureRateSchedule) {
 		return
 	}
 	e.fixedTermRates = schedule
+}
+
+// SetFixedTermDepositRateSchedule configures the tenure -> locked-rate table
+// new fixed-term deposits are issued against. Changing this never affects an
+// already-issued deposit's locked RateBps. Deliberately a separate schedule
+// from SetFixedTermRateSchedule (the borrow side) -- a deposit tenure's rate
+// is NOT cross-validated against the borrow side's rate for the same tenure
+// at proposal time (see ProposalKindLendingDepositRateSchedule's doc comment
+// in native/governance/types.go for why). The real solvency backstop is
+// SupplyFixedTerm's aggregate capacity check: a deposit rate set far above
+// the pool's actual fixed-term loan yield just burns through that aggregate
+// cap faster per unit of principal, it can never make the pool insolvent on
+// its own.
+func (e *Engine) SetFixedTermDepositRateSchedule(schedule TenureRateSchedule) {
+	if e == nil {
+		return
+	}
+	e.fixedTermDepositRates = schedule
 }
 
 // SetInterestModel configures the interest rate model used by the engine.
@@ -1132,13 +1174,33 @@ func (e *Engine) persistAccount(addr crypto.Address, acc *types.Account) error {
 }
 
 // AvailableLiquidity returns the pool's net-available liquidity --
-// TotalNHBSupplied minus TotalNHBBorrowed, floored at zero -- the same
-// figure Borrow/WithdrawCollateral enforce against. Exported so
-// rpc/lending_handlers.go can surface the real available-to-borrow number
-// instead of a gross total that double-counts already-borrowed funds as if
-// still on hand.
+// (TotalNHBSupplied + TotalFixedTermDepositPrincipalWei) minus
+// TotalNHBBorrowed, floored at zero -- the same figure Borrow/
+// WithdrawCollateral/BorrowFixedTerm enforce against. Fixed-term deposit
+// principal (Milestone 3) is a real liability the pool must be able to
+// return at maturity, exactly like flexible suppliers' TotalNHBSupplied
+// claim -- deliberately tracked as a separate field rather than folded
+// into TotalNHBSupplied itself (a depositor's claim is their own deposit
+// record, not a SupplyShares balance), so it must be added here explicitly
+// or the pool could lend out money it owes back to a depositor. Exported
+// so rpc/lending_handlers.go can surface the real available-to-borrow
+// number instead of a gross total that double-counts already-borrowed
+// funds as if still on hand.
 func (e *Engine) AvailableLiquidity(market *Market) *big.Int {
-	liquidity := new(big.Int).Sub(market.TotalNHBSupplied, market.TotalNHBBorrowed)
+	supplied := market.TotalNHBSupplied
+	if supplied == nil {
+		supplied = big.NewInt(0)
+	}
+	depositPrincipal := market.TotalFixedTermDepositPrincipalWei
+	if depositPrincipal == nil {
+		depositPrincipal = big.NewInt(0)
+	}
+	borrowed := market.TotalNHBBorrowed
+	if borrowed == nil {
+		borrowed = big.NewInt(0)
+	}
+	liquidity := new(big.Int).Add(supplied, depositPrincipal)
+	liquidity.Sub(liquidity, borrowed)
 	if liquidity.Sign() < 0 {
 		return big.NewInt(0)
 	}

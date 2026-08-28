@@ -1153,6 +1153,51 @@ func parseLendingRateSchedulePayload(payloadJSON string) (*parsedLendingRateSche
 	return &parsedLendingRateSchedule{payload: payload, canonicalJSON: canonical}, nil
 }
 
+// parseLendingDepositRateSchedulePayload validates a
+// ProposalKindLendingDepositRateSchedule payload -- structurally identical
+// to parseLendingRateSchedulePayload (same LendingRateSchedulePayload shape,
+// same bounds), reusing the exact same validation. See
+// ProposalKindLendingDepositRateSchedule's own doc comment for why this
+// deliberately does not cross-validate against the current borrow-side
+// schedule.
+func parseLendingDepositRateSchedulePayload(payloadJSON string) (*parsedLendingRateSchedule, error) {
+	var payload LendingRateSchedulePayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	if len(payload.Schedule) == 0 {
+		return nil, fmt.Errorf("governance: lending deposit rate schedule must not be empty")
+	}
+	if len(payload.Schedule) > maxLendingRateScheduleEntries {
+		return nil, fmt.Errorf("governance: lending deposit rate schedule may not exceed %d entries", maxLendingRateScheduleEntries)
+	}
+	seenTenures := make(map[uint64]struct{}, len(payload.Schedule))
+	for _, entry := range payload.Schedule {
+		if entry.TenureDays == 0 {
+			return nil, fmt.Errorf("governance: lending deposit rate schedule tenureDays must be positive")
+		}
+		if entry.TenureDays > maxLendingRateScheduleTenureDays {
+			return nil, fmt.Errorf("governance: lending deposit rate schedule tenureDays must not exceed %d", maxLendingRateScheduleTenureDays)
+		}
+		if entry.RateBps == 0 {
+			return nil, fmt.Errorf("governance: lending deposit rate schedule rateBps must be positive (tenure %d)", entry.TenureDays)
+		}
+		if entry.RateBps > maxLendingRateScheduleRateBps {
+			return nil, fmt.Errorf("governance: lending deposit rate schedule rateBps must not exceed %d (tenure %d)", maxLendingRateScheduleRateBps, entry.TenureDays)
+		}
+		if _, duplicate := seenTenures[entry.TenureDays]; duplicate {
+			return nil, fmt.Errorf("governance: lending deposit rate schedule has a duplicate tenureDays value: %d", entry.TenureDays)
+		}
+		seenTenures[entry.TenureDays] = struct{}{}
+	}
+
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("governance: re-encode lending deposit rate schedule: %w", err)
+	}
+	return &parsedLendingRateSchedule{payload: payload, canonicalJSON: canonical}, nil
+}
+
 // maxSwapPriceSignerProviderLen bounds the provider identifier length. Swap
 // provider identifiers are short slugs (e.g. "nowpayments", "otc-gateway")
 // -- this is a generous ceiling to reject obviously-malformed payloads, not
@@ -1446,6 +1491,34 @@ func (e *Engine) applyLendingRateSchedule(parsed *parsedLendingRateSchedule) (ma
 		return nil, fmt.Errorf("governance: nil lending rate schedule payload")
 	}
 	if err := e.state.ParamStoreSet(ParamKeyLendingFixedTermRateSchedule, parsed.canonicalJSON); err != nil {
+		return nil, err
+	}
+	entries := make([]map[string]interface{}, 0, len(parsed.payload.Schedule))
+	for _, entry := range parsed.payload.Schedule {
+		entries = append(entries, map[string]interface{}{
+			"tenureDays": entry.TenureDays,
+			"rateBps":    entry.RateBps,
+		})
+	}
+	detail := map[string]interface{}{
+		"schedule": entries,
+	}
+	if strings.TrimSpace(parsed.payload.Memo) != "" {
+		detail["memo"] = strings.TrimSpace(parsed.payload.Memo)
+	}
+	return detail, nil
+}
+
+// applyLendingDepositRateSchedule mirrors applyLendingRateSchedule exactly,
+// for the deposit-side (Milestone 3) schedule. Only affects newly-issued
+// deposits from this point forward (see core/lending_rate_schedule.go) --
+// never touches any already-issued FixedTermDeposit's own locked-in
+// RateBps/TotalInterestOwedWei.
+func (e *Engine) applyLendingDepositRateSchedule(parsed *parsedLendingRateSchedule) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil lending deposit rate schedule payload")
+	}
+	if err := e.state.ParamStoreSet(ParamKeyLendingFixedTermDepositRateSchedule, parsed.canonicalJSON); err != nil {
 		return nil, err
 	}
 	entries := make([]map[string]interface{}, 0, len(parsed.payload.Schedule))
@@ -1766,6 +1839,10 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindLendingRateSchedule:
 		if _, err := parseLendingRateSchedulePayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindLendingDepositRateSchedule:
+		if _, err := parseLendingDepositRateSchedulePayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	default:
@@ -2252,6 +2329,18 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return err
 		}
 		for k, v := range lendingRateDetail {
+			detail[k] = v
+		}
+	case ProposalKindLendingDepositRateSchedule:
+		parsed, err := parseLendingDepositRateSchedulePayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		lendingDepositRateDetail, err := e.applyLendingDepositRateSchedule(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range lendingDepositRateDetail {
 			detail[k] = v
 		}
 	default:

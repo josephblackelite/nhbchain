@@ -144,15 +144,20 @@ var (
 	// full state-trie scan.
 	lendingFixedTermLoanPrefix       = []byte("lending/loan/")
 	lendingFixedTermActiveLoanPrefix = []byte("lending/loanactive/")
-	marketListingPrefix              = []byte("market/listing/")
-	marketOpenListingIndexKey        = []byte("market/openListings")
-	marketFillPrefix                 = []byte("market/fill/")
-	marketFillsByBuyerPrefix         = []byte("market/fillsByBuyer/")
-	marketFillsBySellerPrefix        = []byte("market/fillsBySeller/")
-	feesCounterPrefix                = []byte("fees/counter/")
-	feesTotalsPrefix                 = []byte("fees/totals/")
-	feesTotalsIndexPrefix            = []byte("fees/totals/index/")
-	transferGasSpendPrefix           = []byte("fees/transfer-gas/spend/")
+	// lendingFixedTermDepositPrefix backs FixedTermDeposit storage
+	// (Milestone 3) -- unlike loans, deposits have no "one active per
+	// depositor" pointer: a depositor may hold multiple simultaneous
+	// deposits, each independently keyed by its own DepositID.
+	lendingFixedTermDepositPrefix = []byte("lending/deposit/")
+	marketListingPrefix           = []byte("market/listing/")
+	marketOpenListingIndexKey     = []byte("market/openListings")
+	marketFillPrefix              = []byte("market/fill/")
+	marketFillsByBuyerPrefix      = []byte("market/fillsByBuyer/")
+	marketFillsBySellerPrefix     = []byte("market/fillsBySeller/")
+	feesCounterPrefix             = []byte("fees/counter/")
+	feesTotalsPrefix              = []byte("fees/totals/")
+	feesTotalsIndexPrefix         = []byte("fees/totals/index/")
+	transferGasSpendPrefix        = []byte("fees/transfer-gas/spend/")
 )
 
 // StakingGlobalIndexKey returns the deterministic storage key for the global
@@ -1502,6 +1507,18 @@ type storedLendingMarket struct {
 	OracleMedianWei     *big.Int `rlp:"optional"`
 	OraclePrevMedianWei *big.Int `rlp:"optional"`
 	OracleUpdatedBlock  uint64   `rlp:"optional"`
+	// TotalFixedTermDepositPrincipalWei/TotalFixedTermDepositInterestOwedWei/
+	// FixedTermDepositReserveWei/TotalFixedTermLoanInterestReceivableWei
+	// were added for Milestone 3 (fixed-term deposits) -- same
+	// appended-at-the-end, `rlp:"optional"` backward-compatibility pattern
+	// as the oracle fields above. A market persisted before this milestone
+	// decodes all four as nil/zero, which is the correct default: zero
+	// deposits ever issued, zero receivable capacity yet accrued for a
+	// market with no fixed-term loans issued since this deployed either.
+	TotalFixedTermDepositPrincipalWei       *big.Int `rlp:"optional"`
+	TotalFixedTermDepositInterestOwedWei    *big.Int `rlp:"optional"`
+	FixedTermDepositReserveWei              *big.Int `rlp:"optional"`
+	TotalFixedTermLoanInterestReceivableWei *big.Int `rlp:"optional"`
 }
 
 type storedLendingFees struct {
@@ -1551,6 +1568,18 @@ func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
 		stored.OraclePrevMedianWei = new(big.Int).Set(market.OraclePrevMedianWei)
 	}
 	stored.OracleUpdatedBlock = market.OracleUpdatedBlock
+	if market.TotalFixedTermDepositPrincipalWei != nil {
+		stored.TotalFixedTermDepositPrincipalWei = new(big.Int).Set(market.TotalFixedTermDepositPrincipalWei)
+	}
+	if market.TotalFixedTermDepositInterestOwedWei != nil {
+		stored.TotalFixedTermDepositInterestOwedWei = new(big.Int).Set(market.TotalFixedTermDepositInterestOwedWei)
+	}
+	if market.FixedTermDepositReserveWei != nil {
+		stored.FixedTermDepositReserveWei = new(big.Int).Set(market.FixedTermDepositReserveWei)
+	}
+	if market.TotalFixedTermLoanInterestReceivableWei != nil {
+		stored.TotalFixedTermLoanInterestReceivableWei = new(big.Int).Set(market.TotalFixedTermLoanInterestReceivableWei)
+	}
 	return stored
 }
 
@@ -1597,6 +1626,18 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 		market.OraclePrevMedianWei = new(big.Int).Set(s.OraclePrevMedianWei)
 	}
 	market.OracleUpdatedBlock = s.OracleUpdatedBlock
+	if s.TotalFixedTermDepositPrincipalWei != nil {
+		market.TotalFixedTermDepositPrincipalWei = new(big.Int).Set(s.TotalFixedTermDepositPrincipalWei)
+	}
+	if s.TotalFixedTermDepositInterestOwedWei != nil {
+		market.TotalFixedTermDepositInterestOwedWei = new(big.Int).Set(s.TotalFixedTermDepositInterestOwedWei)
+	}
+	if s.FixedTermDepositReserveWei != nil {
+		market.FixedTermDepositReserveWei = new(big.Int).Set(s.FixedTermDepositReserveWei)
+	}
+	if s.TotalFixedTermLoanInterestReceivableWei != nil {
+		market.TotalFixedTermLoanInterestReceivableWei = new(big.Int).Set(s.TotalFixedTermLoanInterestReceivableWei)
+	}
 	return market
 }
 
@@ -2001,6 +2042,111 @@ func (m *Manager) LendingPutFixedTermLoan(loan *lending.FixedTermLoan) error {
 		return fmt.Errorf("lending: fixed-term loan must not be nil")
 	}
 	return m.KVPut(lendingFixedTermLoanKey(loan.LoanID), newStoredLendingFixedTermLoan(loan))
+}
+
+func lendingFixedTermDepositKey(depositID [32]byte) []byte {
+	buf := make([]byte, len(lendingFixedTermDepositPrefix)+len(depositID))
+	copy(buf, lendingFixedTermDepositPrefix)
+	copy(buf[len(lendingFixedTermDepositPrefix):], depositID[:])
+	return buf
+}
+
+// storedLendingFixedTermDeposit mirrors storedLendingFixedTermLoan's shape
+// exactly (Milestone 3's mirror-image state).
+type storedLendingFixedTermDeposit struct {
+	DepositID            [32]byte
+	Depositor            [20]byte
+	PoolID               string
+	TenureDays           uint64
+	RateBps              uint64
+	PrincipalWei         *big.Int
+	TotalInterestOwedWei *big.Int
+	PaidInterestWei      *big.Int
+	Payout               string
+	IssuedAtBlock        uint64
+	IssuedAtTime         uint64
+	MaturityTime         uint64
+	Status               string
+	NextPayoutCycle      uint32
+}
+
+func newStoredLendingFixedTermDeposit(deposit *lending.FixedTermDeposit) *storedLendingFixedTermDeposit {
+	if deposit == nil {
+		return nil
+	}
+	stored := &storedLendingFixedTermDeposit{
+		DepositID:       deposit.DepositID,
+		PoolID:          deposit.PoolID,
+		TenureDays:      deposit.TenureDays,
+		RateBps:         deposit.RateBps,
+		Payout:          string(deposit.Payout),
+		IssuedAtBlock:   deposit.IssuedAtBlock,
+		IssuedAtTime:    deposit.IssuedAtTime,
+		MaturityTime:    deposit.MaturityTime,
+		Status:          string(deposit.Status),
+		NextPayoutCycle: deposit.NextPayoutCycle,
+	}
+	copy(stored.Depositor[:], deposit.Depositor.Bytes())
+	if deposit.PrincipalWei != nil {
+		stored.PrincipalWei = new(big.Int).Set(deposit.PrincipalWei)
+	}
+	if deposit.TotalInterestOwedWei != nil {
+		stored.TotalInterestOwedWei = new(big.Int).Set(deposit.TotalInterestOwedWei)
+	}
+	if deposit.PaidInterestWei != nil {
+		stored.PaidInterestWei = new(big.Int).Set(deposit.PaidInterestWei)
+	}
+	return stored
+}
+
+func (s *storedLendingFixedTermDeposit) toFixedTermDeposit() *lending.FixedTermDeposit {
+	if s == nil {
+		return nil
+	}
+	deposit := &lending.FixedTermDeposit{
+		DepositID:       s.DepositID,
+		Depositor:       crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), s.Depositor[:]...)),
+		PoolID:          s.PoolID,
+		TenureDays:      s.TenureDays,
+		RateBps:         s.RateBps,
+		Payout:          lending.FixedTermDepositPayout(s.Payout),
+		IssuedAtBlock:   s.IssuedAtBlock,
+		IssuedAtTime:    s.IssuedAtTime,
+		MaturityTime:    s.MaturityTime,
+		Status:          lending.FixedTermDepositStatus(s.Status),
+		NextPayoutCycle: s.NextPayoutCycle,
+	}
+	if s.PrincipalWei != nil {
+		deposit.PrincipalWei = new(big.Int).Set(s.PrincipalWei)
+	}
+	if s.TotalInterestOwedWei != nil {
+		deposit.TotalInterestOwedWei = new(big.Int).Set(s.TotalInterestOwedWei)
+	}
+	if s.PaidInterestWei != nil {
+		deposit.PaidInterestWei = new(big.Int).Set(s.PaidInterestWei)
+	}
+	return deposit
+}
+
+// LendingGetFixedTermDeposit loads a fixed-term deposit by its ID.
+func (m *Manager) LendingGetFixedTermDeposit(depositID [32]byte) (*lending.FixedTermDeposit, bool, error) {
+	var stored storedLendingFixedTermDeposit
+	ok, err := m.KVGet(lendingFixedTermDepositKey(depositID), &stored)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return stored.toFixedTermDeposit(), true, nil
+}
+
+// LendingPutFixedTermDeposit persists a fixed-term deposit snapshot.
+func (m *Manager) LendingPutFixedTermDeposit(deposit *lending.FixedTermDeposit) error {
+	if deposit == nil {
+		return fmt.Errorf("lending: fixed-term deposit must not be nil")
+	}
+	return m.KVPut(lendingFixedTermDepositKey(deposit.DepositID), newStoredLendingFixedTermDeposit(deposit))
 }
 
 // LendingGetActiveFixedTermLoanID returns the loan ID of the borrower's

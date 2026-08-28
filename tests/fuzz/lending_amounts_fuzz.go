@@ -22,6 +22,7 @@ type lendingFuzzState struct {
 	fees          *lending.FeeAccrual
 	loans         map[[32]byte]*lending.FixedTermLoan
 	activeLoanIDs map[string][32]byte
+	deposits      map[[32]byte]*lending.FixedTermDeposit
 }
 
 func newLendingFuzzState() *lendingFuzzState {
@@ -30,6 +31,7 @@ func newLendingFuzzState() *lendingFuzzState {
 		accounts:      make(map[string]*types.Account),
 		loans:         make(map[[32]byte]*lending.FixedTermLoan),
 		activeLoanIDs: make(map[string][32]byte),
+		deposits:      make(map[[32]byte]*lending.FixedTermDeposit),
 	}
 }
 
@@ -93,6 +95,18 @@ func (s *lendingFuzzState) PutFixedTermLoan(loan *lending.FixedTermLoan) error {
 		return nil
 	}
 	s.loans[loan.LoanID] = loan
+	return nil
+}
+
+func (s *lendingFuzzState) GetFixedTermDeposit(depositID [32]byte) (*lending.FixedTermDeposit, error) {
+	return s.deposits[depositID], nil
+}
+
+func (s *lendingFuzzState) PutFixedTermDeposit(deposit *lending.FixedTermDeposit) error {
+	if deposit == nil {
+		return nil
+	}
+	s.deposits[deposit.DepositID] = deposit
 	return nil
 }
 

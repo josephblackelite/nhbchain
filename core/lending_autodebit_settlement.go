@@ -222,6 +222,47 @@ func (sp *StateProcessor) applyFailedLendingAutoDebit(manager *nhbstate.Manager,
 	}
 
 	if decision.Delinquent {
+		// Write off this loan's remaining UNCOLLECTED interest from the
+		// pool's aggregate fixed-term "receivable" capacity (Milestone 3's
+		// safety cap for fixed-term deposits) -- once a loan stops
+		// auto-billing with no automatic collateral recovery (see
+		// FixedTermLoanStatusDelinquent's own doc comment), that remaining
+		// interest is no longer safely bankable and must not keep counting
+		// toward how much fixed-term deposit interest the pool can safely
+		// promise.
+		market, ok, err := manager.LendingGetMarket(loan.PoolID)
+		if err != nil {
+			return err
+		}
+		if ok && market != nil {
+			interestOwed := loan.TotalInterestWei
+			if interestOwed == nil {
+				interestOwed = big.NewInt(0)
+			}
+			collected := loan.RepaidWei
+			if collected == nil {
+				collected = big.NewInt(0)
+			}
+			if collected.Cmp(interestOwed) > 0 {
+				collected = interestOwed
+			}
+			writeOff := new(big.Int).Sub(interestOwed, collected)
+			if writeOff.Sign() > 0 {
+				receivable := market.TotalFixedTermLoanInterestReceivableWei
+				if receivable == nil {
+					receivable = big.NewInt(0)
+				}
+				receivable = new(big.Int).Sub(receivable, writeOff)
+				if receivable.Sign() < 0 {
+					receivable = big.NewInt(0)
+				}
+				market.TotalFixedTermLoanInterestReceivableWei = receivable
+				if err := manager.LendingPutMarket(loan.PoolID, market); err != nil {
+					return err
+				}
+			}
+		}
+
 		if evt := (events.LendingFixedTermLoanDelinquent{
 			LoanID:         loanID,
 			Borrower:       borrowerBytes20(loan),

@@ -62,24 +62,39 @@ func autoDebitCycleDueTime(loan *FixedTermLoan, cycle uint32) uint64 {
 	return due
 }
 
+// cumulativeInterestByCycle returns the cumulative interest that should have
+// accrued by the end of the given 1-based cycle out of totalInterest owed
+// across tenureDays: totalInterest scaled by how much of the tenure has
+// elapsed at that cycle's due time, floored (favors whichever side owes
+// less-than-proportionally: never demands more, or promises more, than
+// what's proportionally due by that point). The final cycle's value is
+// exactly totalInterest (elapsedDays == tenureDays), so the whole term's
+// interest always fully reconciles across all cycles with no rounding
+// shortfall left over. Shared by both directions of the fixed-term cycle
+// mechanism: autoDebitTargetInterestWei (loan interest collected FROM a
+// borrower) and depositInterestTargetWei (deposit interest paid TO a
+// depositor) -- identical math, opposite direction of money flow.
+func cumulativeInterestByCycle(totalInterest *big.Int, tenureDays uint64, cycle uint32) *big.Int {
+	if totalInterest == nil || tenureDays == 0 {
+		return big.NewInt(0)
+	}
+	elapsedDays := uint64(cycle) * AutoDebitCycleLengthDays
+	if elapsedDays > tenureDays {
+		elapsedDays = tenureDays
+	}
+	target := new(big.Int).Mul(totalInterest, new(big.Int).SetUint64(elapsedDays))
+	return target.Quo(target, new(big.Int).SetUint64(tenureDays))
+}
+
 // autoDebitTargetInterestWei returns the cumulative interest that should
-// have been collected by the end of the given 1-based cycle: TotalInterestWei
-// scaled by how much of the tenure has elapsed at that cycle's due time,
-// floored (protocol-favoring: never demands more than what's proportionally
-// owed by that point). The final cycle's target is exactly TotalInterestWei
-// (elapsedDays == TenureDays), so the whole term's interest is always fully
-// billed across all cycles with no rounding shortfall left uncollected.
+// have been collected by the end of the given 1-based cycle -- see
+// cumulativeInterestByCycle for the shared formula.
 func autoDebitTargetInterestWei(loan *FixedTermLoan) func(cycle uint32) *big.Int {
 	return func(cycle uint32) *big.Int {
-		if loan == nil || loan.TotalInterestWei == nil || loan.TenureDays == 0 {
+		if loan == nil {
 			return big.NewInt(0)
 		}
-		elapsedDays := uint64(cycle) * AutoDebitCycleLengthDays
-		if elapsedDays > loan.TenureDays {
-			elapsedDays = loan.TenureDays
-		}
-		target := new(big.Int).Mul(loan.TotalInterestWei, new(big.Int).SetUint64(elapsedDays))
-		return target.Quo(target, new(big.Int).SetUint64(loan.TenureDays))
+		return cumulativeInterestByCycle(loan.TotalInterestWei, loan.TenureDays, cycle)
 	}
 }
 

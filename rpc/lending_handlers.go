@@ -436,6 +436,112 @@ func (s *Server) handleLendingGetFixedTermLoan(w http.ResponseWriter, _ *http.Re
 	})
 }
 
+// lendingFixedTermDepositResult is the JSON-tagged fixed-term deposit view
+// returned over RPC -- lending.FixedTermDeposit itself has no JSON tags and
+// carries an unexported crypto.Address field (Depositor), matching
+// lendingFixedTermLoanResult's own reason for existing.
+type lendingFixedTermDepositResult struct {
+	DepositID              string `json:"depositId"`
+	Depositor              string `json:"depositor"`
+	PoolID                 string `json:"poolId"`
+	TenureDays             uint64 `json:"tenureDays"`
+	RateBps                uint64 `json:"rateBps"`
+	PrincipalWei           string `json:"principalWei"`
+	TotalInterestOwedWei   string `json:"totalInterestOwedWei"`
+	PaidInterestWei        string `json:"paidInterestWei"`
+	OutstandingInterestWei string `json:"outstandingInterestWei"`
+	Payout                 string `json:"payout"`
+	IssuedAtBlock          uint64 `json:"issuedAtBlock"`
+	IssuedAtTime           uint64 `json:"issuedAtTime"`
+	MaturityTime           uint64 `json:"maturityTime"`
+	Status                 string `json:"status"`
+	NextPayoutCycle        uint32 `json:"nextPayoutCycle"`
+}
+
+type lendingFixedTermDepositQueryResult struct {
+	Deposit *lendingFixedTermDepositResult `json:"deposit"`
+}
+
+func newLendingFixedTermDepositResult(deposit *lending.FixedTermDeposit) *lendingFixedTermDepositResult {
+	if deposit == nil {
+		return nil
+	}
+	principal := "0"
+	if deposit.PrincipalWei != nil {
+		principal = deposit.PrincipalWei.String()
+	}
+	interestOwed := "0"
+	if deposit.TotalInterestOwedWei != nil {
+		interestOwed = deposit.TotalInterestOwedWei.String()
+	}
+	paidInterest := "0"
+	if deposit.PaidInterestWei != nil {
+		paidInterest = deposit.PaidInterestWei.String()
+	}
+	return &lendingFixedTermDepositResult{
+		DepositID:              hex.EncodeToString(deposit.DepositID[:]),
+		Depositor:              deposit.Depositor.String(),
+		PoolID:                 deposit.PoolID,
+		TenureDays:             deposit.TenureDays,
+		RateBps:                deposit.RateBps,
+		PrincipalWei:           principal,
+		TotalInterestOwedWei:   interestOwed,
+		PaidInterestWei:        paidInterest,
+		OutstandingInterestWei: deposit.OutstandingInterestWei().String(),
+		Payout:                 string(deposit.Payout),
+		IssuedAtBlock:          deposit.IssuedAtBlock,
+		IssuedAtTime:           deposit.IssuedAtTime,
+		MaturityTime:           deposit.MaturityTime,
+		Status:                 string(deposit.Status),
+		NextPayoutCycle:        deposit.NextPayoutCycle,
+	}
+}
+
+// handleLendingGetFixedTermDeposit returns the fixed-term deposit with the
+// given ID, or {"deposit": null} if it does not exist -- not an error.
+// Looked up directly by depositId (unlike lending_getFixedTermLoan's
+// address-based lookup): a depositor may hold multiple simultaneous
+// fixed-term deposits, so there is no single "the active one" to resolve
+// from an address alone.
+func (s *Server) handleLendingGetFixedTermDeposit(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected depositId parameter", nil)
+		return
+	}
+	var depositIDParam string
+	if err := json.Unmarshal(req.Params[0], &depositIDParam); err != nil {
+		var wrapped struct {
+			DepositID string `json:"depositId"`
+		}
+		if err := json.Unmarshal(req.Params[0], &wrapped); err != nil {
+			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid depositId parameter", err.Error())
+			return
+		}
+		depositIDParam = wrapped.DepositID
+	}
+	normalized := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(depositIDParam), "0x"))
+	if normalized == "" {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "depositId required", nil)
+		return
+	}
+	raw, err := hex.DecodeString(normalized)
+	if err != nil || len(raw) != 32 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid depositId", "expected a 32-byte hex string")
+		return
+	}
+	var depositID [32]byte
+	copy(depositID[:], raw)
+
+	deposit, moduleErr := s.lending.GetFixedTermDeposit(depositID)
+	if moduleErr != nil {
+		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
+		return
+	}
+	writeResult(w, req.ID, lendingFixedTermDepositQueryResult{
+		Deposit: newLendingFixedTermDepositResult(deposit),
+	})
+}
+
 // handleLendingSupplyNHB, handleLendingWithdrawNHB, handleLendingDepositZNHB,
 // handleLendingWithdrawZNHB, handleLendingBorrowNHB,
 // handleLendingBorrowNHBWithFee, handleLendingRepayNHB, and

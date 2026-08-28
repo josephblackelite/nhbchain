@@ -3653,6 +3653,14 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingSupplyFixedTerm:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingSupplyFixedTerm(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
 	case types.TxTypeSubscriptionCreatePlan:
 		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
 			return err

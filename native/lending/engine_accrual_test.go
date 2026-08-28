@@ -15,6 +15,7 @@ type mockEngineState struct {
 	fees          *FeeAccrual
 	loans         map[[32]byte]*FixedTermLoan
 	activeLoanIDs map[string][32]byte
+	deposits      map[[32]byte]*FixedTermDeposit
 }
 
 func newMockEngineState() *mockEngineState {
@@ -23,6 +24,7 @@ func newMockEngineState() *mockEngineState {
 		accounts:      make(map[string]*types.Account),
 		loans:         make(map[[32]byte]*FixedTermLoan),
 		activeLoanIDs: make(map[string][32]byte),
+		deposits:      make(map[[32]byte]*FixedTermDeposit),
 	}
 }
 
@@ -90,6 +92,18 @@ func (m *mockEngineState) PutFixedTermLoan(loan *FixedTermLoan) error {
 		return nil
 	}
 	m.loans[loan.LoanID] = loan
+	return nil
+}
+
+func (m *mockEngineState) GetFixedTermDeposit(depositID [32]byte) (*FixedTermDeposit, error) {
+	return m.deposits[depositID], nil
+}
+
+func (m *mockEngineState) PutFixedTermDeposit(deposit *FixedTermDeposit) error {
+	if deposit == nil {
+		return nil
+	}
+	m.deposits[deposit.DepositID] = deposit
 	return nil
 }
 

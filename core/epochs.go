@@ -147,6 +147,12 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.settleLendingAutoDebits(timestamp); err != nil {
 		return err
 	}
+	// Fixed-term deposit payouts (Milestone 3) -- the mirror image of the
+	// auto-debit hook above, in the opposite direction of money flow. Same
+	// day-watermark shape; see settleLendingDepositPayouts' own doc comment.
+	if err := sp.settleLendingDepositPayouts(timestamp); err != nil {
+		return err
+	}
 	if err := sp.maybeProcessPotsoRewards(height, timestamp); err != nil {
 		return err
 	}

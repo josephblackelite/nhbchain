@@ -171,6 +171,19 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 	// TotalNHBBorrowed adjustment).
 	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, amount)
 
+	// This loan's full-term interest becomes part of the pool's aggregate
+	// fixed-term "receivable" capacity -- see
+	// Market.TotalFixedTermLoanInterestReceivableWei's doc comment.
+	// SupplyFixedTerm's issuance-time cap depends on this being kept
+	// accurate: incremented here, decremented as interest is actually
+	// collected (RepayFixedTerm) or written off (a loan reaching
+	// FixedTermLoanStatusDelinquent).
+	receivable := market.TotalFixedTermLoanInterestReceivableWei
+	if receivable == nil {
+		receivable = big.NewInt(0)
+	}
+	market.TotalFixedTermLoanInterestReceivableWei = new(big.Int).Add(receivable, newLoanInterest)
+
 	if err := e.state.PutFixedTermLoan(loan); err != nil {
 		return nil, err
 	}
@@ -295,33 +308,75 @@ func (e *Engine) RepayFixedTerm(borrower crypto.Address, amount *big.Int) (*big.
 	}
 	interestPortion := new(big.Int).Sub(applied, principalPortion)
 
-	// Route the interest portion back to the pool so flexible supply-share
-	// holders earn from it -- there is still no fixed-term depositor product
-	// to pay it out to directly (that's Milestone 3), so in the meantime
-	// this is real yield for the SAME shared pool fixed-term loans already
-	// draw liquidity from, rather than sitting as protocol revenue with no
-	// depositor at all. Bumps SupplyIndex by a proportional growth factor
-	// (see RedeemableSupply: redeemable scales linearly with SupplyIndex for
-	// fixed shares) so every CURRENT shareholder's redeemable balance grows
-	// by the exact same ratio, without minting new TotalSupplyShares -- a
-	// deposit sequenced after this call mints shares against the
-	// already-bumped index and gets none of this lump sum; a withdrawal
-	// sequenced before it already reduced TotalSupplyShares and is no
-	// longer a shareholder when the bump happens. Falls back to protocol
-	// fees when there is no flexible shareholder to fairly credit (a pool
-	// with only fixed-term borrowers and zero flexible depositors) --
-	// bumping a zero-supplied index would divide by zero, not distribute
-	// anything.
+	// Interest received reduces the pool's aggregate fixed-term "receivable"
+	// capacity (see Market.TotalFixedTermLoanInterestReceivableWei) --
+	// floored at zero defensively; should already hold by construction
+	// (this loan's own contribution to the aggregate was added once, at
+	// issuance, and can never be collected twice).
 	if interestPortion.Sign() > 0 {
-		if market.TotalNHBSupplied != nil && market.TotalNHBSupplied.Sign() > 0 &&
-			market.TotalSupplyShares != nil && market.TotalSupplyShares.Sign() > 0 {
-			totalBefore := new(big.Int).Set(market.TotalNHBSupplied)
-			growthFactor := rayDiv(new(big.Int).Add(totalBefore, interestPortion), totalBefore)
-			market.SupplyIndex = rayMul(market.SupplyIndex, growthFactor)
-			market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, interestPortion)
+		receivable := market.TotalFixedTermLoanInterestReceivableWei
+		if receivable == nil {
+			receivable = big.NewInt(0)
+		}
+		receivable = new(big.Int).Sub(receivable, interestPortion)
+		if receivable.Sign() < 0 {
+			receivable = big.NewInt(0)
+		}
+		market.TotalFixedTermLoanInterestReceivableWei = receivable
+	}
+
+	// Three-way split of the interest portion, in priority order:
+	//
+	// 1. Top up FixedTermDepositReserveWei, up to whatever is still owed
+	//    across all live fixed-term deposits (Milestone 3) -- this MUST
+	//    happen before any SupplyIndex bump. A depositor's locked return is
+	//    backed by fixed-term LOAN interest specifically (see
+	//    SupplyFixedTerm's issuance-time cap), not by flexible suppliers'
+	//    pro-rata claim; crediting this dollar to SupplyIndex as well as
+	//    reserving it for a deposit would double-count it as belonging to
+	//    both, permanently overstating flexible suppliers' true claim
+	//    relative to what the pool can actually back.
+	// 2. Whatever's left over routes to SupplyIndex, exactly as before
+	//    Milestone 3 -- real yield for flexible suppliers from the SAME
+	//    shared pool fixed-term loans draw liquidity from.
+	// 3. Falls back to protocol fees when there is no flexible shareholder
+	//    to fairly credit (a pool with only fixed-term borrowers and zero
+	//    flexible suppliers) -- bumping a zero-supplied index would divide
+	//    by zero, not distribute anything.
+	if interestPortion.Sign() > 0 {
+		remaining := new(big.Int).Set(interestPortion)
+
+		depositOwed := market.TotalFixedTermDepositInterestOwedWei
+		if depositOwed == nil {
+			depositOwed = big.NewInt(0)
+		}
+		reserve := market.FixedTermDepositReserveWei
+		if reserve == nil {
+			reserve = big.NewInt(0)
+		}
+		shortfall := new(big.Int).Sub(depositOwed, reserve)
+		if shortfall.Sign() > 0 {
+			topUp := new(big.Int).Set(remaining)
+			if topUp.Cmp(shortfall) > 0 {
+				topUp = new(big.Int).Set(shortfall)
+			}
+			market.FixedTermDepositReserveWei = new(big.Int).Add(reserve, topUp)
+			remaining = new(big.Int).Sub(remaining, topUp)
 		} else {
-			fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, interestPortion)
-			feesChanged = true
+			market.FixedTermDepositReserveWei = reserve
+		}
+
+		if remaining.Sign() > 0 {
+			if market.TotalNHBSupplied != nil && market.TotalNHBSupplied.Sign() > 0 &&
+				market.TotalSupplyShares != nil && market.TotalSupplyShares.Sign() > 0 {
+				totalBefore := new(big.Int).Set(market.TotalNHBSupplied)
+				growthFactor := rayDiv(new(big.Int).Add(totalBefore, remaining), totalBefore)
+				market.SupplyIndex = rayMul(market.SupplyIndex, growthFactor)
+				market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, remaining)
+			} else {
+				fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, remaining)
+				feesChanged = true
+			}
 		}
 	}
 

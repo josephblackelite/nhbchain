@@ -235,6 +235,13 @@ const (
 	// remaining outstanding balance); tx.Data is JSON-encoded
 	// lendingNativePayload{poolId}.
 	TxTypeLendingRepayFixedTerm TxType = 0x39
+	// TxTypeLendingSupplyFixedTerm originates a new locked-rate, fixed-tenure
+	// deposit (Milestone 3, the mirror image of TxTypeLendingBorrowFixedTerm
+	// on the pool's liability side). tx.Value is the principal deposited;
+	// tx.Data is JSON-encoded lendingFixedTermSupplyPayload{poolId,
+	// tenureDays, payout} -- the rate is resolved on-chain from the
+	// deposit-side tenure/rate schedule, never client-declared.
+	TxTypeLendingSupplyFixedTerm TxType = 0x3A
 )
 
 // RequiresSignature reports whether the transaction type must carry an

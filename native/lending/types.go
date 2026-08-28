@@ -79,6 +79,39 @@ type Market struct {
 	// total supplied (see nhbportal's lendingStore.ts computeUtilization,
 	// which used to double-count borrowed funds as if still on hand).
 	AvailableLiquidityWei string `json:"availableLiquidityWei"`
+	// TotalFixedTermDepositPrincipalWei is the aggregate principal currently
+	// owed back to all live fixed-term deposits (Milestone 3) -- a
+	// liability parallel to, but deliberately kept separate from,
+	// TotalNHBSupplied (flexible suppliers' claims via SupplyShares/
+	// SupplyIndex): a fixed-term depositor's claim is their own deposit
+	// record, not a SupplyShares balance. Folded into AvailableLiquidity so
+	// the pool never lends out money it owes back to a depositor.
+	TotalFixedTermDepositPrincipalWei *big.Int
+	// TotalFixedTermDepositInterestOwedWei is the aggregate interest still
+	// owed (not yet paid out) across all live fixed-term deposits.
+	TotalFixedTermDepositInterestOwedWei *big.Int
+	// FixedTermDepositReserveWei is NHB already collected from fixed-term
+	// LOAN interest (RepayFixedTerm) and earmarked toward
+	// TotalFixedTermDepositInterestOwedWei -- not yet paid out to a
+	// depositor, and deliberately NOT credited to flexible suppliers via
+	// SupplyIndex (crediting it there too would double-count the same
+	// dollar as both "owed to a depositor" and "owed to flexible
+	// suppliers"). See RepayFixedTerm's three-way interest split for how
+	// this fills up and settleLendingDepositPayouts for how it drains.
+	// Bounded above by TotalFixedTermDepositInterestOwedWei at all times by
+	// construction -- never tops up past what is still actually owed.
+	FixedTermDepositReserveWei *big.Int
+	// TotalFixedTermLoanInterestReceivableWei is the aggregate interest
+	// still owed BY all ACTIVE (non-delinquent) fixed-term loans -- the
+	// pool's real, currently-bankable capacity to fund fixed-term deposit
+	// obligations. SupplyFixedTerm's issuance-time cap requires a new
+	// deposit's total interest, added to the pool's current
+	// TotalFixedTermDepositInterestOwedWei, to never exceed this value.
+	// Delinquent loans' remaining interest is deliberately written off from
+	// this aggregate once a loan reaches FixedTermLoanStatusDelinquent (see
+	// settleLendingAutoDebits' delinquency path) -- it is no longer safely
+	// bankable once auto-billing has given up on collecting it.
+	TotalFixedTermLoanInterestReceivableWei *big.Int
 }
 
 // CollateralRouting captures the liquidation collateral distribution between
@@ -251,6 +284,123 @@ func (l *FixedTermLoan) OutstandingWei() *big.Int {
 	}
 	total := new(big.Int).Add(principal, interest)
 	outstanding := new(big.Int).Sub(total, repaid)
+	if outstanding.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	return outstanding
+}
+
+// FixedTermDepositStatus enumerates the lifecycle states of a fixed-term
+// deposit.
+type FixedTermDepositStatus string
+
+const (
+	// FixedTermDepositStatusActive means the deposit is outstanding: some
+	// principal and/or interest has not yet been paid out.
+	FixedTermDepositStatusActive FixedTermDepositStatus = "active"
+	// FixedTermDepositStatusMatured means the deposit has been paid out in
+	// full (principal and all interest) and is closed.
+	FixedTermDepositStatusMatured FixedTermDepositStatus = "matured"
+)
+
+// FixedTermDepositPayout selects how a fixed-term deposit's interest is
+// paid out over its term.
+type FixedTermDepositPayout string
+
+const (
+	// FixedTermDepositPayoutLumpSumAtMaturity pays principal and the
+	// ENTIRE locked-in interest in one payment at maturity -- nothing is
+	// paid before then.
+	FixedTermDepositPayoutLumpSumAtMaturity FixedTermDepositPayout = "lump_sum_at_maturity"
+	// FixedTermDepositPayoutPeriodic pays interest in monthly installments
+	// during the term (mirroring FixedTermLoan's own auto-debit cadence,
+	// AutoDebitCycleLengthDays, in the opposite direction), with principal
+	// returned separately at maturity once all interest has been paid.
+	FixedTermDepositPayoutPeriodic FixedTermDepositPayout = "periodic_interest_principal_at_maturity"
+)
+
+// FixedTermDeposit is a locked-rate, fixed-tenure deposit -- the mirror
+// image of FixedTermLoan on the pool's liability side. Deliberately
+// separate state from UserAccount.SupplyShares/Market.SupplyIndex (the
+// flexible model's continuously-re-priced, pro-rata accounting): a
+// depositor here is promised a SPECIFIC return regardless of what the
+// flexible pool actually earns, which is economically incompatible with a
+// shared variable index. This locked promise is only safe because of the
+// pool-level cap enforced at issuance (see SupplyFixedTerm): the pool
+// never promises more in aggregate deposit interest than it is already
+// owed in aggregate fixed-term LOAN interest
+// (Market.TotalFixedTermLoanInterestReceivableWei), so the fixed/fixed
+// spread -- not the flexible pool's variable performance -- is what backs
+// this guarantee.
+type FixedTermDeposit struct {
+	// DepositID uniquely identifies this deposit, derived deterministically
+	// from the depositing transaction's own hash (same discipline as
+	// FixedTermLoan.LoanID -- never wall-clock time).
+	DepositID [32]byte
+	// Depositor is the deposit's beneficiary.
+	Depositor crypto.Address
+	// PoolID identifies which lending pool this deposit's principal was
+	// added to.
+	PoolID string
+	// TenureDays is the deposit's fixed term length.
+	TenureDays uint64
+	// RateBps is the flat interest rate for this deposit's ENTIRE tenure,
+	// locked in at issuance, expressed in basis points -- same flat
+	// period-rate convention as FixedTermLoan.RateBps, not an annualised
+	// rate. NOT structurally enforced to stay <= the borrow-side schedule's
+	// rate for the same tenure -- that comparison is deliberately left
+	// un-validated at governance proposal-submission time (see
+	// ProposalKindLendingDepositRateSchedule's doc comment in
+	// native/governance/types.go for why). The pool's actual solvency
+	// backstop is SupplyFixedTerm's aggregate capacity check, not a
+	// per-tenure rate spread.
+	RateBps uint64
+	// PrincipalWei is the amount originally deposited.
+	PrincipalWei *big.Int
+	// TotalInterestOwedWei is computed once at issuance as
+	// PrincipalWei * RateBps/10000, mirroring computeFixedTermInterest.
+	TotalInterestOwedWei *big.Int
+	// PaidInterestWei is the cumulative interest actually paid out so far.
+	// For FixedTermDepositPayoutLumpSumAtMaturity this stays zero until
+	// maturity, when it jumps straight to TotalInterestOwedWei in the same
+	// payment principal is returned. For FixedTermDepositPayoutPeriodic it
+	// grows with each periodic payout, mirroring FixedTermLoan.RepaidWei's
+	// role on the borrow side.
+	PaidInterestWei *big.Int
+	// Payout selects the interest payout schedule (see
+	// FixedTermDepositPayout).
+	Payout FixedTermDepositPayout
+	// IssuedAtBlock is the height at which this deposit was originated.
+	IssuedAtBlock uint64
+	// IssuedAtTime is the block timestamp (deterministic -- never
+	// wall-clock time) at issuance.
+	IssuedAtTime uint64
+	// MaturityTime is IssuedAtTime + TenureDays*86400.
+	MaturityTime uint64
+	// Status is the deposit's current lifecycle state.
+	Status FixedTermDepositStatus
+	// NextPayoutCycle is the 1-based index of the next periodic interest
+	// installment settleLendingDepositPayouts should attempt -- only
+	// meaningful when Payout is FixedTermDepositPayoutPeriodic (unused,
+	// left at zero, for the lump-sum preference).
+	NextPayoutCycle uint32
+}
+
+// OutstandingInterestWei returns the interest still owed on this deposit
+// (TotalInterestOwedWei minus PaidInterestWei so far), floored at zero.
+func (d *FixedTermDeposit) OutstandingInterestWei() *big.Int {
+	if d == nil {
+		return big.NewInt(0)
+	}
+	owed := d.TotalInterestOwedWei
+	if owed == nil {
+		owed = big.NewInt(0)
+	}
+	paid := d.PaidInterestWei
+	if paid == nil {
+		paid = big.NewInt(0)
+	}
+	outstanding := new(big.Int).Sub(owed, paid)
 	if outstanding.Sign() < 0 {
 		return big.NewInt(0)
 	}

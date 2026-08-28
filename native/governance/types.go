@@ -218,6 +218,29 @@ const (
 	// core/lending_rate_schedule.go for the read side (the on-chain value
 	// if ever set, otherwise the built-in default).
 	ProposalKindLendingRateSchedule = "policy.lendingRateSchedule"
+	// ProposalKindLendingDepositRateSchedule adjusts the fixed-term
+	// DEPOSIT (Milestone 3) tenure->rate table -- the mirror image of
+	// ProposalKindLendingRateSchedule on the pool's liability side, same
+	// JSON-blob-under-one-param-key mechanics, same structural validation
+	// (parseLendingDepositRateSchedulePayload: non-empty, bounded size, no
+	// duplicate tenures, each entry individually sane), same "only affects
+	// newly-issued deposits" invariant.
+	//
+	// Deliberately does NOT cross-validate a proposed deposit rate against
+	// the CURRENT borrow-side schedule at submission time -- doing that
+	// would require adding read access to the governance engine's own
+	// state interface (proposalState currently only exposes
+	// ParamStoreSet, never Get) solely for what would only ever be a
+	// sanity guard anyway. The REAL, binding safety constraint lives
+	// elsewhere and does not depend on schedule-level rate comparisons:
+	// SupplyFixedTerm's issuance-time aggregate cap, which compares actual
+	// locked-in obligations (Market.TotalFixedTermDepositInterestOwedWei
+	// vs TotalFixedTermLoanInterestReceivableWei), not schedule rates.
+	// Proposers should still keep deposit rates below borrow rates for the
+	// same tenure as a matter of policy -- the spread is the pool's real
+	// margin -- but the chain enforces solvency via the aggregate cap
+	// regardless of what any schedule says.
+	ProposalKindLendingDepositRateSchedule = "policy.lendingDepositRateSchedule"
 )
 
 const (
@@ -320,6 +343,12 @@ const (
 	// so the whole schedule is replaced atomically on every passed proposal.
 	// See core/lending_rate_schedule.go for the read side.
 	ParamKeyLendingFixedTermRateSchedule = "lending.fixedTerm.rateSchedule"
+	// ParamKeyLendingFixedTermDepositRateSchedule mirrors
+	// ParamKeyLendingFixedTermRateSchedule exactly, for the DEPOSIT
+	// (Milestone 3) side -- set only via
+	// ProposalKindLendingDepositRateSchedule. See
+	// core/lending_rate_schedule.go for the read side.
+	ParamKeyLendingFixedTermDepositRateSchedule = "lending.fixedTerm.depositRateSchedule"
 )
 
 // defaultMinimumValidatorStakeWei is 10,000 ZNHB expressed in the same
