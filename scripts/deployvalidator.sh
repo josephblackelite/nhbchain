@@ -430,6 +430,23 @@ if [[ -n "${BENEFICIARY}" ]]; then
   fi
 fi
 
+# Validator eligibility is now gated on an explicit on-chain opt-in
+# (ValidatorRegistered) plus the account's OWN self-stake meeting
+# staking.minimumValidatorStake -- delegated-in stake from a separate
+# wallet no longer counts toward eligibility at all (core/state_transition.go's
+# applyStake / stakeRewardBasis). This "pure registration" call (zero value,
+# RegisterValidator=true) costs nothing and needs no pre-funding -- it just
+# flips the flag now, so the only step left for the operator is funding this
+# validator's own address and self-staking (printed below). Best-effort,
+# same as set-reward-beneficiary above: warn and print the retry command
+# rather than fail the script.
+echo "[INFO] registering this validator's on-chain eligibility flag"
+if ! sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" \
+    register-validator 0 "${VALIDATOR_KEY_FILE}"; then
+  echo "[WARN] could not register validator eligibility automatically -- retry later with:"
+  echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli register-validator 0 ${VALIDATOR_KEY_FILE}"
+fi
+
 if [[ -n "${OPERATOR_EMAIL}" ]]; then
   echo "[INFO] requesting onboarding instructions be emailed to ${OPERATOR_EMAIL}"
   curl -fsS -m 5 -X POST "${ONBOARDING_EMAIL_ENDPOINT}" \
@@ -455,10 +472,16 @@ else
   echo "[WARN] no external address is set -- peers that only connect to this node inbound will not be able to reconnect. Re-run with --external-address <ip> to fix this."
 fi
 echo
-echo "To get paid, from a wallet you actually use:"
-echo "  1. Go to https://nhbcoin.com and open (or create) your wallet."
-echo "  2. Go to Validator Hub -> Delegate."
-echo "  3. Paste the node address above, delegate at least 10,000 ZNHB."
+echo "To become an ACTIVE validator, self-stake on THIS server's own key --"
+echo "delegating from a separate portal wallet no longer counts toward"
+echo "eligibility (only this validator's own self-stake does):"
+echo "  1. Send at least 10,000 ZNHB to this validator's own node address"
+echo "     (printed above) from wherever you hold it -- an ordinary ZNHB"
+echo "     transfer, not a portal delegation."
+echo "  2. Once that ZNHB has arrived, self-stake and register in one step:"
+echo "     sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli register-validator 10000000000000000000000 ${VALIDATOR_KEY_FILE}"
+echo "  (this validator's eligibility flag was already set automatically above;"
+echo "   step 2 is what actually brings its own stake up to the minimum.)"
 if [[ -z "${BENEFICIARY}" ]]; then
   echo
   echo "You did not pass --beneficiary, so this validator's epoch consensus"

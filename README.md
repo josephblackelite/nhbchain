@@ -270,13 +270,24 @@ What this does:
 - starts the validator and keeps validator heartbeats flowing automatically
 - signs a one-time transaction locally redirecting this validator's
   consensus reward to the `--beneficiary` address you provided
+- signs a second one-time, zero-value transaction registering this
+  validator's on-chain eligibility flag (`ValidatorRegistered`) -- needs no
+  funds, always succeeds
 - prints the validator's node address and exactly what to do next
 
 Getting paid:
 
-- **Staking yield**: from any nhbcoin.com wallet, go to Validator Hub ->
-  Delegate, paste the node address this script printed, delegate at least
-  10,000 ZNHB. That wallet earns the yield directly.
+- **Staking yield, self-stake required**: eligibility is based on this
+  validator's **own self-stake only** -- portal delegation from a separate
+  wallet does not count toward it at all, no matter the amount. Send
+  `>= 10,000 ZNHB` directly to the node address this script printed (an
+  ordinary transfer, not a delegation), then self-stake it on the server:
+  `nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key`
+  (the script already ran this same command once with amount `0` to flip
+  the eligibility flag on; this second call with real ZNHB behind it is
+  what actually reaches the minimum). See the [Validator Onboarding
+  Guide](docs/validators/onboarding.md#staking-self-stake-on-this-server-not-a-portal-delegation)
+  for the full explanation of why delegation doesn't count here.
 - **Consensus reward**: a separate, smaller reward for actively
   participating in consensus. Defaults to the validator's own
   (server-only) address; `--beneficiary` redirects it to your wallet
@@ -286,10 +297,10 @@ Getting paid:
 
 Operational model:
 
-- staking `>= 10,000 ZNHB` makes the wallet a **validator candidate**
+- self-staking `>= 10,000 ZNHB` on the validator's own key makes it a
+  **validator candidate**
 - the server becomes **active next epoch**, not instantly
 - readiness requires the node to be online, synced, and heartbeat-ready
-- offline validators are removed from quorum automatically at epoch rollover instead of freezing the network
 
 Compatibility note:
 

@@ -30,18 +30,25 @@ Do these four things *before* you run anything:
      `127.0.0.1` by default (not externally reachable). Only open this if
      you deliberately want direct external RPC/MetaMask access — leaving it
      internal-only is the safer default.
-3. **An operator wallet**, separate from this server, holding at least
-   `10,000 ZNHB`, ready to delegate through the portal once you know this
-   validator's node address. This is *not* something you run on the server.
+3. **At least `10,000 ZNHB` ready to send to this validator's OWN node
+   address** once you know it (printed at the end of Step 1). Validator
+   eligibility is now based on this validator's own self-stake only --
+   ZNHB delegated in from a separate wallet does **not** count toward
+   eligibility at all (see "Staking" under Step 2 below). You'll send the
+   ZNHB to the server's own address and self-stake it directly on the
+   server; this is *not* a portal delegation.
 4. **Understand gas vs. stake before you start** — this is the single most
    common point of confusion:
-   - **ZNHB for staking** comes from *your own portal wallet*, not the
-     server.
+   - **ZNHB for staking** needs to end up on *this server's own validator
+     key* (send it there once the key exists, then self-stake it) — a
+     separate wallet's stake never counts toward this validator's own
+     eligibility, no matter how much is delegated.
    - **NHB for gas** is *not* required to run this validator's heartbeat or
      to set its reward beneficiary — see "Getting paid" below for why.
 
    Don't send NHB to the server's validator key expecting it to be needed
-   for either of those operations; it currently isn't.
+   for either of those operations; it currently isn't. ZNHB, unlike NHB, IS
+   needed there now — see item 3 above.
 
 ## Step 1 — Run the bootstrap script
 
@@ -134,15 +141,41 @@ fails with `dial tcp: address enode://...: too many colons in address`.
 
 There are two separate things, and they are not the same operation:
 
-### Staking (the ZNHB delegation)
+### Staking (self-stake, on this server, not a portal delegation)
 
-Validator eligibility requires a delegation of **>= 10,000 ZNHB**. This
-delegation is made **from your own operator wallet**, through the
-nhbcoin.com portal (Validator Hub -> Delegate tab), targeting this
-validator's node address — the public `nhb1...` address derived from the
-key the script just generated on the server. This is not something you run
-on the server, and it is not the same thing as funding the server's key with
-gas.
+Validator eligibility requires **>= 10,000 ZNHB of this validator's own
+self-stake** (`staking.minimumValidatorStake`, governance-adjustable,
+currently unchanged from its default). This is a real, load-bearing
+distinction from how staking used to work: ZNHB delegated in from a
+*separate* wallet through the portal's Validator Hub -> Delegate flow is
+tracked separately and does **not** count toward this validator's own
+eligibility at all, no matter the amount. Only stake sitting on the
+validator's own key, self-staked directly, counts (see
+`core/state_transition.go`'s `stakeRewardBasis` if you want the exact
+mechanics).
+
+Two steps, both involving this server's own key:
+
+1. **Send >= 10,000 ZNHB directly to this validator's own node address**
+   (the `nhb1...` address printed at the end of Step 1) from wherever you
+   actually hold ZNHB — an ordinary transfer, the same as sending to any
+   other address. Not a portal delegation.
+2. **Self-stake it and register in one transaction**, run on the server
+   itself using the validator's own key:
+
+   ```bash
+   sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+   ```
+
+   (`10000000000000000000000` is exactly 10,000 ZNHB in base units --
+   raise it if you want extra headroom against the minimum ever being
+   raised by governance later.) The bootstrap script already ran this same
+   command once automatically with an amount of `0` right after startup,
+   purely to flip this validator's on-chain `ValidatorRegistered` flag on
+   (that part needs no funds and always succeeds) -- this second call with
+   real stake is what actually brings its own stake up to the required
+   minimum. It's safe to run again with a larger amount later if you want
+   to add more self-stake; it isn't a one-time-only operation.
 
 ### Consensus reward beneficiary
 
@@ -179,8 +212,8 @@ own key does **not** require any NHB balance on that key. Both transaction
 types go through the default native-transaction handling path and are not
 debited against `BalanceNHB`, unlike an ordinary transfer. You do not need
 to pre-fund the validator server's key with NHB gas for either operation.
-The only real "bring money" step in this whole process is the ZNHB stake
-delegation from your own separate operator wallet, described above.
+The only real "bring money" step in this whole process is the ZNHB
+self-stake onto this server's own validator key, described above.
 
 ## Step 3 — Checking status and eligibility
 
@@ -209,10 +242,11 @@ best available combination:
   or check the public explorer, to see current block height and active
   validator count.
 
-Once staked, your node becomes a validator **candidate**. It joins the
-**active** set only after (1) it is online and synced, and (2) it has begun
-submitting heartbeats successfully — at the start of the next epoch boundary
-after both conditions are met. Epoch length is 120 blocks
+Once registered (the bootstrap script already did this automatically) and
+self-staked to the minimum, your node becomes a validator **candidate**. It
+joins the **active** set only after (1) it is online and synced, and (2) it
+has begun submitting heartbeats successfully — at the start of the next
+epoch boundary after both conditions are met. Epoch length is 120 blocks
 (`EpochLengthBlocks = 120` in `config.toml`). This chain's BFT engine does
 not produce blocks on a fixed time interval (block time varies with network
 conditions and round timeouts), so this document will not give you a precise
@@ -289,11 +323,25 @@ No. Neither `TxTypeHeartbeat` nor `TxTypeSetRewardBeneficiary` debits
 server's key expecting it to be required for either.
 
 **"I staked ZNHB, why isn't my validator active yet?"**
-Staking makes your wallet a validator *candidate*. The server only becomes
-*active* at the next epoch boundary (120-block increments) after it is
-online, synced, and successfully submitting heartbeats. There's no exact
-wall-clock number to give you here — watch block height via
-`nhb_getNetworkStats` or the explorer.
+Self-staking (on the server, via `register-validator`) makes your validator
+a *candidate*. It only becomes *active* at the next epoch boundary
+(120-block increments) after it is online, synced, and successfully
+submitting heartbeats. There's no exact wall-clock number to give you
+here — watch block height via `nhb_getNetworkStats` or the explorer.
+
+**"I delegated ZNHB to my validator's address through the portal's
+Validator Hub, why is it still not active?"**
+Because that doesn't count. This is the single most common trap here:
+portal delegation and this validator's own eligibility are tracked
+completely separately, and only this validator's own self-stake (run
+directly on the server, see "Staking" under Step 2) counts toward the
+`staking.minimumValidatorStake` threshold — no amount of delegated-in ZNHB
+from any other wallet ever does. If you followed older instructions (or
+another guide) that told you to delegate through the portal, that ZNHB is
+not lost, but it also isn't doing anything for this validator's
+eligibility — undelegate it and self-stake it on the server instead, or
+send fresh ZNHB directly to the validator's own address and self-stake
+that.
 
 **"Where do I set my reward beneficiary — the portal or the server?"**
 The server, using `nhb-cli set-reward-beneficiary` with
