@@ -104,9 +104,19 @@ type Claimable struct {
 ```
 
 * Claimables are created by senders when the recipient alias/email cannot yet resolve.
-* Funds are held in the identity escrow submodule. Upon `identity_claim`, the amount is released to the claimant's address once
-  the provided preimage matches `RecipientHint`.
-* Events emitted: `claimable.created`, `claimable.claimed`, `claimable.cancelled`, `claimable.expired`.
+* Funds are held in the identity escrow submodule. `RecipientHint` is either an opaque, payer-chosen secret (meant to be
+  shared with the recipient out of band, e.g. by email) or `identity.DeriveAliasID(alias)` for a plain-username recipient
+  — the two are **not** equally sensitive: an alias-derived hint is publicly computable by anyone who knows the target's
+  username, so it is never treated as proof of anything on its own. For an alias-derived claimable, `identity_claim` (and
+  the generic `claimable_claim`, which shares the same check) additionally requires the claiming address to actually own
+  the resolved alias *at claim time* — if the alias still isn't registered yet, the claim is rejected outright rather than
+  falling back to a preimage-only check. For an opaque-secret claimable, knowledge of the preimage remains the sole
+  authorization, by design (a standard hashlock/HTLC bearer instrument) — the raw hint is never published on-chain for
+  this case, so only whoever the payer actually shared it with can claim. Claims are also only valid before `Deadline`;
+  once it has passed, only `identity_claimableExpire` (permissionless, refunds the payer) applies.
+* Events emitted: `claimable.created`, `claimable.claimed`, `claimable.cancelled`, `claimable.expired`. `recipientHint` on
+  `claimable.created` is only populated for the alias-derived case (already public); it is omitted for an opaque secret so
+  the event log never discloses it ahead of the intended recipient.
 * Claimables integrate with the [Escrow module](../escrow/escrow.md#1-overview) for audit and settlement guarantees.
 
 ### Pay-by-Username Flow
@@ -143,7 +153,8 @@ sequenceDiagram
   Wallet->>Node: identity_createClaimable(emailHash,...)
   Node-->>Wallet: {claimId}
   Recipient->>Wallet: register alias + claim
-  Wallet->>Node: identity_claim(claimId, recipientSig)
+  Wallet->>Node: identity_claim(claimId, payee, preimage)
+  Note over Node: alias-derived hints additionally require payee to own the resolved alias -- see Threat Model
   Node-->>Wallet: funds released to primary address
 ```
 
@@ -159,8 +170,15 @@ sequenceDiagram
 | Rate-based abuse | Gateway enforces per-IP/user rate limits and API-key HMAC auth. |
 | Avatar abuse | Content policy scanning (size/type), moderated by gateway; on-chain references may be flagged by governance. |
 | Email harvesting | Only salted hashes stored; lookup requires opt-in; DSAR processes allow deletion. |
-| Claimable hijack | Claim requires recipient signature bound to aliasId/email hash; expiry auto-refunds payer; audit logs track
-  claims.
+| Claimable hijack | For an alias-derived claimable, claiming additionally requires the claiming address to own the resolved
+  alias at claim time (not just knowledge of the preimage, which is publicly derivable from the username alone) —
+  enforced identically whether reached via `identity_claim` or the generic `claimable_claim`. For a genuine opaque-secret
+  claimable, the secret is never published in the creation event, so only whoever the payer shared it with off-chain can
+  claim. Claims stop being valid once `Deadline` passes; `identity_claimableExpire` (permissionless, refunds the payer)
+  takes over from that point. *(Corrected 2026-09-01 — this row previously claimed claiming required a recipient
+  signature bound to aliasId/email hash; no such signature check ever existed in the code. That gap, plus the missing
+  deadline check and the cleartext event leak of the preimage, was a real, confirmed vulnerability — NHB-TRIAGE-C6 — fixed
+  the same day this row was corrected.)* |
 
 ---
 

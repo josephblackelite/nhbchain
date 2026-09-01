@@ -6056,7 +6056,9 @@ func (n *Node) IdentitySetAlias(addr [20]byte, alias string) error {
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	previous, _ := manager.IdentityReverse(addr[:])
-	if err := manager.IdentitySetAlias(addr[:], alias); err != nil {
+	// RPC-direct write, not consensus block execution -- 0 falls back to
+	// time.Now(), which is fine here (see IdentitySetAlias's doc comment).
+	if err := manager.IdentitySetAlias(addr[:], alias, 0); err != nil {
 		return err
 	}
 	current, ok := manager.IdentityReverse(addr[:])
@@ -6784,7 +6786,7 @@ func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, ha
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	chainID := fmt.Sprintf("%d", n.ChainID())
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID, claimable.RecipientKindNone)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -6803,7 +6805,7 @@ func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, ha
 	return record.ID, nil
 }
 
-func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big.Int, hint [32]byte, deadline int64) (*claimable.Claimable, error) {
+func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big.Int, hint [32]byte, deadline int64, recipientKind claimable.RecipientKind) (*claimable.Claimable, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
@@ -6812,16 +6814,27 @@ func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big
 	var hashLock [32]byte
 	copy(hashLock[:], hash)
 	chainID := fmt.Sprintf("%d", n.ChainID())
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID, recipientKind)
 	if err != nil {
 		return nil, err
+	}
+	// NHB-TRIAGE-C6: only publish the hint on-chain when it's already
+	// public by construction (an alias-derived pointer -- anyone who knows
+	// the target username can compute it themselves, so this discloses
+	// nothing). When it's an opaque bearer secret the payer meant to share
+	// privately (e.g. by email), broadcasting it here in cleartext would
+	// let anyone watching the event log claim it before the intended
+	// recipient ever sees it -- so it's omitted for that case.
+	publicHint := [32]byte{}
+	if record.RecipientKind == claimable.RecipientKindAlias {
+		publicHint = record.RecipientHint
 	}
 	evt := events.ClaimableCreated{
 		ID:            record.ID,
 		Payer:         record.Payer,
 		Token:         record.Token,
 		Amount:        record.Amount,
-		RecipientHint: record.RecipientHint,
+		RecipientHint: publicHint,
 		Deadline:      record.Deadline,
 		CreatedAt:     record.CreatedAt,
 	}.Event()
@@ -6831,12 +6844,60 @@ func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big
 	return record, nil
 }
 
+// authorizeClaimablePayee is the single authorization gate every claim path
+// must pass through before the funds move, closing NHB-TRIAGE-C6 (the
+// generic claimable_claim RPC used to call straight into
+// Manager.ClaimableClaim with no identity check at all -- strictly weaker
+// than identity_claim's already-partial check, and a caller who just wanted
+// to steal an alias-addressed claimable could simply use this endpoint
+// instead).
+//
+// For an alias-derived record (RecipientKind == RecipientKindAlias),
+// knowledge of the preimage proves nothing -- it's a public hash of the
+// recipient's username, not a secret -- so authorization can ONLY come from
+// the claimer actually owning that alias, checked against the CURRENT
+// registry (not whatever was true when the claimable was created). If the
+// alias still isn't registered, the correct outcome is "not yet claimable",
+// not "fall back to a check that grants access to whoever happens to know
+// a public hash". For every other record (RecipientKindNone: no hint, or a
+// genuine opaque bearer secret), no identity check applies -- the hashlock
+// alone is, by design, the whole authorization.
+func (n *Node) authorizeClaimablePayee(manager *nhbstate.Manager, record *claimable.Claimable, payee [20]byte) error {
+	if record == nil || record.RecipientKind != claimable.RecipientKindAlias {
+		return nil
+	}
+	alias, ok := manager.IdentityAliasByID(record.RecipientHint)
+	if !ok {
+		return fmt.Errorf("%w: recipient alias not registered yet", claimable.ErrUnauthorized)
+	}
+	resolved, ok := manager.IdentityResolve(alias)
+	if !ok || resolved == nil {
+		return fmt.Errorf("%w: recipient alias not registered yet", claimable.ErrUnauthorized)
+	}
+	if resolved.Primary == payee {
+		return nil
+	}
+	for _, addr := range resolved.Addresses {
+		if addr == payee {
+			return nil
+		}
+	}
+	return claimable.ErrUnauthorized
+}
+
 func (n *Node) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) error {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
-	record, changed, err := manager.ClaimableClaim(id, preimage, payee)
+	record, ok := manager.ClaimableGet(id)
+	if !ok {
+		return claimable.ErrNotFound
+	}
+	if err := n.authorizeClaimablePayee(manager, record, payee); err != nil {
+		return err
+	}
+	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, time.Now().Unix())
 	if err != nil {
 		return err
 	}
@@ -6844,12 +6905,12 @@ func (n *Node) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) erro
 		return nil
 	}
 	evt := events.ClaimableClaimed{
-		ID:            record.ID,
-		Payer:         record.Payer,
+		ID:            updated.ID,
+		Payer:         updated.Payer,
 		Payee:         payee,
-		Token:         record.Token,
-		Amount:        record.Amount,
-		RecipientHint: record.RecipientHint,
+		Token:         updated.Token,
+		Amount:        updated.Amount,
+		RecipientHint: updated.RecipientHint,
 	}.Event()
 	if evt != nil {
 		n.state.AppendEvent(evt)
@@ -6872,36 +6933,10 @@ func (n *Node) IdentityClaim(id [32]byte, preimage []byte, payee [20]byte) (*cla
 	if record.Status != claimable.ClaimStatusInit {
 		return nil, claimable.ErrInvalidState
 	}
-	hint := record.RecipientHint
-	if hint != ([32]byte{}) {
-		if alias, ok := manager.IdentityAliasByID(hint); ok {
-			resolved, ok := manager.IdentityResolve(alias)
-			if !ok || resolved == nil {
-				return nil, claimable.ErrUnauthorized
-			}
-			authorized := false
-			if resolved.Primary == payee {
-				authorized = true
-			} else {
-				for _, addr := range resolved.Addresses {
-					if addr == payee {
-						authorized = true
-						break
-					}
-				}
-			}
-			if !authorized {
-				return nil, claimable.ErrUnauthorized
-			}
-		}
-		if len(preimage) != len(hint) {
-			return nil, claimable.ErrInvalidPreimage
-		}
-		if !bytes.Equal(hint[:], preimage) {
-			return nil, claimable.ErrInvalidPreimage
-		}
+	if err := n.authorizeClaimablePayee(manager, record, payee); err != nil {
+		return nil, err
 	}
-	updated, changed, err := manager.ClaimableClaim(id, preimage, payee)
+	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, time.Now().Unix())
 	if err != nil {
 		return nil, err
 	}

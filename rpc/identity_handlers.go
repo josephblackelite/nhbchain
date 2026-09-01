@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"nhbchain/core/claimable"
 	"nhbchain/core/identity"
 	"nhbchain/crypto"
 )
@@ -463,7 +464,7 @@ func (s *Server) handleIdentityCreateClaimable(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	hint, err := parseRecipientHint(params.Recipient)
+	hint, recipientKind, err := parseRecipientHint(params.Recipient)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
 		return
@@ -473,7 +474,7 @@ func (s *Server) handleIdentityCreateClaimable(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "deadline must be in the future")
 		return
 	}
-	record, err := s.node.IdentityCreateClaimable(payer, token, amount, hint, params.Deadline)
+	record, err := s.node.IdentityCreateClaimable(payer, token, amount, hint, params.Deadline, recipientKind)
 	if err != nil {
 		writeClaimableError(w, req.ID, err)
 		return
@@ -543,26 +544,35 @@ func (s *Server) handleIdentityClaim(w http.ResponseWriter, r *http.Request, req
 	writeResult(w, req.ID, identityClaimResult{OK: true, Token: token, Amount: amountStr})
 }
 
-func parseRecipientHint(value string) ([32]byte, error) {
+// parseRecipientHint also reports WHICH kind of hint the caller supplied --
+// a raw 32-byte hash is an opaque secret the caller controls entirely (they
+// could have derived it any way they like, including from a private,
+// salted, off-chain-shared value), while a plain alias string always
+// produces the same, publicly-derivable identity.DeriveAliasID(alias). The
+// distinction matters for claim-time authorization (see
+// Node.authorizeClaimablePayee / NHB-TRIAGE-C6) -- an alias-derived hint is
+// never itself proof of anything, since anyone can compute it from the
+// username alone.
+func parseRecipientHint(value string) ([32]byte, claimable.RecipientKind, error) {
 	var out [32]byte
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return out, fmt.Errorf("recipient required")
+		return out, claimable.RecipientKindNone, fmt.Errorf("recipient required")
 	}
 	cleaned := strings.TrimPrefix(strings.TrimPrefix(trimmed, "0x"), "0X")
 	if len(cleaned) == 64 {
 		decoded, err := hex.DecodeString(cleaned)
 		if err != nil {
-			return out, err
+			return out, claimable.RecipientKindNone, err
 		}
 		copy(out[:], decoded)
-		return out, nil
+		return out, claimable.RecipientKindNone, nil
 	}
 	normalized, err := identity.NormalizeAlias(trimmed)
 	if err != nil {
-		return out, fmt.Errorf("recipient must be alias or 32-byte hash")
+		return out, claimable.RecipientKindNone, fmt.Errorf("recipient must be alias or 32-byte hash")
 	}
-	return identity.DeriveAliasID(normalized), nil
+	return identity.DeriveAliasID(normalized), claimable.RecipientKindAlias, nil
 }
 
 func (s *Server) handleIdentityReverse(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

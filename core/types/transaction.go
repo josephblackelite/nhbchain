@@ -348,6 +348,28 @@ func (tx *Transaction) ValidateBasic() error {
 			return fmt.Errorf("%s must not be negative", name)
 		}
 	}
+	// R/S (and PaymasterR/PaymasterS) are secp256k1 signature components and
+	// must never exceed the curve's 32-byte field size. From()/PaymasterSponsor()
+	// both do copy(sig[32-len(x.Bytes()):32], x.Bytes()) with no length check
+	// of their own -- an oversized value (e.g. len(R.Bytes()) > 32, trivially
+	// reachable from a single malformed P2P transaction message) produces a
+	// NEGATIVE slice index there, which panics rather than errors. That panic
+	// is never recovered anywhere in the P2P message-receive path
+	// (p2p/peer.go's per-peer readLoop goroutine calls HandleMessage directly,
+	// no defer/recover in the whole file), so an unauthenticated remote peer
+	// could crash the entire process with one crafted transaction. Rejecting
+	// oversized R/S/PaymasterR/PaymasterS here, before Hash()/From() ever run
+	// (Hash() already calls ValidateBasic() first), closes it at the source.
+	for name, value := range map[string]*big.Int{
+		"r":          tx.R,
+		"s":          tx.S,
+		"paymasterR": tx.PaymasterR,
+		"paymasterS": tx.PaymasterS,
+	} {
+		if value != nil && len(value.Bytes()) > 32 {
+			return fmt.Errorf("%s must not exceed 32 bytes", name)
+		}
+	}
 	return nil
 }
 

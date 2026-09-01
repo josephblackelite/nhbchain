@@ -44,6 +44,14 @@ type storedClaimable struct {
 	ExpiresAt     *big.Int
 	ChainID       string
 	Status        uint8
+	// RecipientKind is additive (rlp:"optional") so records written before
+	// this field existed still decode -- they come back as
+	// claimable.RecipientKindNone (the zero value), which is the safe
+	// default: it never incorrectly grants the stronger alias-ownership
+	// requirement to a record that might genuinely be an opaque bearer
+	// secret. It does mean a pre-existing alias-derived claimable does not
+	// retroactively gain the new protection; see NHB-TRIAGE-C6 fix notes.
+	RecipientKind uint8 `rlp:"optional"`
 }
 
 func newStoredClaimable(c *claimable.Claimable) *storedClaimable {
@@ -67,6 +75,7 @@ func newStoredClaimable(c *claimable.Claimable) *storedClaimable {
 		ExpiresAt:     big.NewInt(c.ExpiresAt),
 		ChainID:       strings.TrimSpace(c.ChainID),
 		Status:        uint8(c.Status),
+		RecipientKind: uint8(c.RecipientKind),
 	}
 }
 
@@ -87,6 +96,7 @@ func (s *storedClaimable) toClaimable() (*claimable.Claimable, error) {
 		RecipientHint: s.RecipientHint,
 		ChainID:       strings.TrimSpace(s.ChainID),
 		Status:        claimable.ClaimStatus(s.Status),
+		RecipientKind: claimable.RecipientKind(s.RecipientKind),
 	}
 	if s.Amount != nil {
 		out.Amount = new(big.Int).Set(s.Amount)
@@ -181,6 +191,7 @@ func (m *Manager) ClaimablePut(c *claimable.Claimable) error {
 		Amount:        c.Amount,
 		HashLock:      c.HashLock,
 		RecipientHint: c.RecipientHint,
+		RecipientKind: c.RecipientKind,
 		Deadline:      c.Deadline,
 		CreatedAt:     c.CreatedAt,
 		Nonce:         c.Nonce,
@@ -379,7 +390,7 @@ func (m *Manager) ClaimableDebit(token string, amt *big.Int, recipient [20]byte)
 	return nil
 }
 
-func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte, chainID string) (*claimable.Claimable, error) {
+func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte, chainID string, recipientKind claimable.RecipientKind) (*claimable.Claimable, error) {
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, claimable.ErrInvalidAmount
 	}
@@ -405,6 +416,7 @@ func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int,
 		Amount:        new(big.Int).Set(amount),
 		HashLock:      hashLock,
 		RecipientHint: hint,
+		RecipientKind: recipientKind,
 		Deadline:      deadline,
 		CreatedAt:     time.Now().Unix(),
 		Nonce:         nonce,
@@ -420,7 +432,14 @@ func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int,
 	return record, nil
 }
 
-func (m *Manager) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) (*claimable.Claimable, bool, error) {
+// ClaimableClaim pays out to payee if preimage hashes to the record's
+// HashLock. now is compared against the record's Deadline so the claim
+// window and ClaimableExpire's refund-to-payer window are exact
+// complements with no gap or overlap: valid here while now < Deadline,
+// valid for Expire once now >= Deadline (NHB-TRIAGE-C6 -- Claim used to
+// have no deadline check at all, so a claim stayed open forever even after
+// the payer's funds were, in principle, supposed to become reclaimable).
+func (m *Manager) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte, now int64) (*claimable.Claimable, bool, error) {
 	record, ok := m.ClaimableGet(id)
 	if !ok {
 		return nil, false, claimable.ErrNotFound
@@ -430,6 +449,9 @@ func (m *Manager) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) (
 	}
 	if record.Status != claimable.ClaimStatusInit {
 		return record, false, claimable.ErrInvalidState
+	}
+	if now >= record.Deadline {
+		return nil, false, claimable.ErrDeadlineExceeded
 	}
 	hash := ethcrypto.Keccak256(preimage)
 	if !bytes.Equal(hash, record.HashLock[:]) {

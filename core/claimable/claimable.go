@@ -23,6 +23,33 @@ func (s ClaimStatus) Valid() bool {
 	}
 }
 
+// RecipientKind records what RecipientHint actually is, so claim-time
+// authorization can apply the right rule for each. The two are NOT
+// interchangeable: an alias-derived hint is public by construction
+// (keccak256 of a lowercased username anyone can compute), so knowing it
+// proves nothing about who the payer intended to pay -- only alias
+// ownership does. An opaque hint is a real secret the payer is expected to
+// share with the intended recipient out of band (e.g. by email), so
+// knowledge of it IS the intended proof, exactly like a classic HTLC.
+// Conflating the two (treating a public alias hash as if it were a secret)
+// was NHB-TRIAGE-C6: any address that merely knew a target's username could
+// drain a claimable meant for them, with no ownership check at all.
+type RecipientKind uint8
+
+const (
+	// RecipientKindNone: no recipient hint, or an opaque hint meant to be a
+	// genuine bearer secret. Authorized by the hashlock alone -- unchanged,
+	// intentional bearer-instrument behavior.
+	RecipientKindNone RecipientKind = 0
+	// RecipientKindAlias: RecipientHint is identity.DeriveAliasID(alias), a
+	// publicly-computable pointer, not a secret. Authorization MUST come
+	// from the claimer owning that alias, checked at claim time (not
+	// creation time, since the alias may not be registered yet) -- the
+	// hashlock/preimage check on this kind of record is not, by itself, a
+	// security boundary.
+	RecipientKindAlias RecipientKind = 1
+)
+
 func (s ClaimStatus) String() string {
 	switch s {
 	case ClaimStatusInit:
@@ -57,6 +84,7 @@ type Claimable struct {
 	Amount        *big.Int
 	HashLock      [32]byte
 	RecipientHint [32]byte
+	RecipientKind RecipientKind
 	Deadline      int64
 	CreatedAt     int64
 	Nonce         uint64

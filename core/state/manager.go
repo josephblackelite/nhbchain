@@ -5052,7 +5052,14 @@ func (m *Manager) IsEscrowFunded(id [32]byte) (bool, error) {
 }
 
 // IdentitySetAlias registers or updates the alias associated with the provided address.
-func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
+// now, if nonzero, is the timestamp stamped into CreatedAt/UpdatedAt --
+// callers on the consensus path (block execution) MUST pass a deterministic
+// value (e.g. the block timestamp), never 0, so that every validator writes
+// identical bytes for the identical alias registration. Passing 0 falls back
+// to time.Now(), matching the convention already used by every sibling
+// Identity* mutator (IdentitySetAvatar, IdentityAddAddress, etc.) and safe
+// only for callers outside block execution (e.g. RPC-direct writes).
+func (m *Manager) IdentitySetAlias(addr []byte, alias string, now int64) error {
 	if len(addr) != 20 {
 		return fmt.Errorf("identity: address must be 20 bytes")
 	}
@@ -5124,7 +5131,9 @@ func (m *Manager) IdentitySetAlias(addr []byte, alias string) error {
 	baseRecord.Alias = normalized
 	baseRecord.Primary = address
 	baseRecord.Addresses = uniqueAliasAddresses(address, baseRecord.Addresses)
-	now := time.Now().Unix()
+	if now == 0 {
+		now = time.Now().Unix()
+	}
 	if baseRecord.CreatedAt == 0 {
 		baseRecord.CreatedAt = now
 	}

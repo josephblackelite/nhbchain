@@ -55,8 +55,20 @@ func (sp *StateProcessor) applyPOSAuthorize(tx *types.Transaction) error {
 	copy(payer[:], payerDecoded.Bytes())
 	copy(merchant[:], merchantDecoded.Bytes())
 
-	_, err = lifecycle.Authorize(payer, merchant, amount, msg.GetExpiry(), msg.GetIntentRef())
-	return err
+	if _, err := lifecycle.Authorize(payer, merchant, amount, msg.GetExpiry(), msg.GetIntentRef()); err != nil {
+		return err
+	}
+	// Every other transaction type advances the signer's account nonce on
+	// success (see incrementNativeAccountNonce's other callers); this one
+	// didn't, so validateSenderAccount's exact-match nonce check let the
+	// identical signed bytes be resubmitted indefinitely -- each resubmission
+	// locks amount again under a fresh, unrelated authorization ID (Authorize
+	// derives that ID from its own internal per-payer counter, not the
+	// transaction nonce), draining the payer's balance into pending holds one
+	// resubmission at a time. Bumping the nonce here closes that replay and
+	// also stops this account's nonce from permanently desyncing from what
+	// any normal wallet would compute next.
+	return sp.incrementNativeAccountNonce(signer)
 }
 
 // applyPOSCapture claims funds against a pending authorization. Only the
@@ -92,8 +104,10 @@ func (sp *StateProcessor) applyPOSCapture(tx *types.Transaction) error {
 		copy(authID[:], parsed)
 	}
 
-	_, err = lifecycle.Capture(authID, amount, caller)
-	return err
+	if _, err := lifecycle.Capture(authID, amount, caller); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(signer)
 }
 
 // applyPOSVoid cancels a pending authorization. Either the payer or the
@@ -123,8 +137,10 @@ func (sp *StateProcessor) applyPOSVoid(tx *types.Transaction) error {
 		copy(authID[:], parsed)
 	}
 
-	_, err = lifecycle.Void(authID, msg.GetReason(), caller)
-	return err
+	if _, err := lifecycle.Void(authID, msg.GetReason(), caller); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(signer)
 }
 
 // GetPOSAuthorization returns the authorization record for the given ID, if
@@ -174,22 +190,32 @@ func (sp *StateProcessor) applyPOSRegistry(tx *types.Transaction) error {
 	if err := proto.Unmarshal(tx.Data, &msgMerchant); err == nil && msgMerchant.MerchantAddr != "" {
 		_, err = registry.RegisterDevice(authorityAddr, "unknown", msgMerchant.MerchantAddr, msgMerchant.Nonce, msgMerchant.ExpiresAt, msgMerchant.ChainId)
 		// Assuming RegisterMerchant is actually UpsertMerchant in pos registry.
-		_, err = registry.UpsertMerchant(authorityAddr, msgMerchant.MerchantAddr, msgMerchant.Nonce, msgMerchant.ExpiresAt, msgMerchant.ChainId)
-		return err
+		if _, err = registry.UpsertMerchant(authorityAddr, msgMerchant.MerchantAddr, msgMerchant.Nonce, msgMerchant.ExpiresAt, msgMerchant.ChainId); err != nil {
+			return err
+		}
+		return sp.incrementNativeAccountNonce(authority)
 	}
 
 	var msgDevice posv1.MsgRegisterDevice
 	if err := proto.Unmarshal(tx.Data, &msgDevice); err == nil && msgDevice.DeviceId != "" {
-		_, err = registry.RegisterDevice(authorityAddr, msgDevice.DeviceId, msgDevice.MerchantAddr, msgDevice.Nonce, msgDevice.ExpiresAt, msgDevice.ChainId)
-		return err
+		if _, err := registry.RegisterDevice(authorityAddr, msgDevice.DeviceId, msgDevice.MerchantAddr, msgDevice.Nonce, msgDevice.ExpiresAt, msgDevice.ChainId); err != nil {
+			return err
+		}
+		return sp.incrementNativeAccountNonce(authority)
 	}
 
 	var msgPause posv1.MsgPauseMerchant
 	if err := proto.Unmarshal(tx.Data, &msgPause); err == nil && msgPause.MerchantAddr != "" {
-		_, err = registry.PauseMerchant(authorityAddr, msgPause.MerchantAddr, msgPause.Nonce, msgPause.ExpiresAt, msgPause.ChainId)
-		return err
+		if _, err := registry.PauseMerchant(authorityAddr, msgPause.MerchantAddr, msgPause.Nonce, msgPause.ExpiresAt, msgPause.ChainId); err != nil {
+			return err
+		}
+		return sp.incrementNativeAccountNonce(authority)
 	}
 
-	// We implement a fallthrough strategy for out of scope messages
-	return nil
+	// We implement a fallthrough strategy for out of scope messages. Nothing
+	// mutated, so the nonce still advances (this transaction was still
+	// included and "succeeded") to avoid leaving the account's nonce stuck
+	// for whatever it sends next -- same reasoning as the three branches
+	// above and applyPOSAuthorize/Capture/Void.
+	return sp.incrementNativeAccountNonce(authority)
 }

@@ -27,7 +27,7 @@ func TestIdentitySetAliasAndResolve(t *testing.T) {
 	var addr [20]byte
 	addr[19] = 1
 
-	if err := manager.IdentitySetAlias(addr[:], "FrankRocks"); err != nil {
+	if err := manager.IdentitySetAlias(addr[:], "FrankRocks", 0); err != nil {
 		t.Fatalf("set alias: %v", err)
 	}
 	resolved, ok := manager.IdentityResolve("frankrocks")
@@ -60,10 +60,10 @@ func TestIdentitySetAliasRename(t *testing.T) {
 	var addr [20]byte
 	addr[19] = 2
 
-	if err := manager.IdentitySetAlias(addr[:], "alpha"); err != nil {
+	if err := manager.IdentitySetAlias(addr[:], "alpha", 0); err != nil {
 		t.Fatalf("set alias alpha: %v", err)
 	}
-	if err := manager.IdentitySetAlias(addr[:], "bravo"); err != nil {
+	if err := manager.IdentitySetAlias(addr[:], "bravo", 0); err != nil {
 		t.Fatalf("rename alias: %v", err)
 	}
 	if _, ok := manager.IdentityResolve("alpha"); ok {
@@ -89,10 +89,10 @@ func TestIdentitySetAliasDuplicateRejected(t *testing.T) {
 	first[19] = 3
 	second[19] = 4
 
-	if err := manager.IdentitySetAlias(first[:], "shared"); err != nil {
+	if err := manager.IdentitySetAlias(first[:], "shared", 0); err != nil {
 		t.Fatalf("set alias for first: %v", err)
 	}
-	err := manager.IdentitySetAlias(second[:], "shared")
+	err := manager.IdentitySetAlias(second[:], "shared", 0)
 	if !errors.Is(err, identity.ErrAliasTaken) {
 		t.Fatalf("expected ErrAliasTaken, got %v", err)
 	}
@@ -105,7 +105,7 @@ func TestIdentitySetAliasValidation(t *testing.T) {
 
 	cases := []string{"ab", "contains space", "UPPERCASE_TOO_LONG................................"}
 	for _, alias := range cases {
-		if err := manager.IdentitySetAlias(addr[:], alias); !errors.Is(err, identity.ErrInvalidAlias) {
+		if err := manager.IdentitySetAlias(addr[:], alias, 0); !errors.Is(err, identity.ErrInvalidAlias) {
 			t.Fatalf("alias %q: expected ErrInvalidAlias, got %v", alias, err)
 		}
 	}
@@ -119,7 +119,7 @@ func TestIdentitySetAvatarUpdatesRecord(t *testing.T) {
 	var addr [20]byte
 	addr[19] = 6
 
-	if err := manager.IdentitySetAlias(addr[:], "avataruser"); err != nil {
+	if err := manager.IdentitySetAlias(addr[:], "avataruser", 0); err != nil {
 		t.Fatalf("set alias: %v", err)
 	}
 	initial, ok := manager.IdentityResolve("avataruser")
@@ -167,7 +167,7 @@ func TestIdentityAddAndRemoveAddress(t *testing.T) {
 	var secondary [20]byte
 	secondary[18] = 1
 
-	if err := manager.IdentitySetAlias(primary[:], "frankrocks"); err != nil {
+	if err := manager.IdentitySetAlias(primary[:], "frankrocks", 0); err != nil {
 		t.Fatalf("set alias: %v", err)
 	}
 	record, err := manager.IdentityAddAddress("frankrocks", secondary[:], 1000)
@@ -220,10 +220,10 @@ func TestIdentityAddressConflicts(t *testing.T) {
 	ownerB[19] = 9
 	shared[10] = 1
 
-	if err := manager.IdentitySetAlias(ownerA[:], "alpha"); err != nil {
+	if err := manager.IdentitySetAlias(ownerA[:], "alpha", 0); err != nil {
 		t.Fatalf("set alias alpha: %v", err)
 	}
-	if err := manager.IdentitySetAlias(ownerB[:], "bravo"); err != nil {
+	if err := manager.IdentitySetAlias(ownerB[:], "bravo", 0); err != nil {
 		t.Fatalf("set alias bravo: %v", err)
 	}
 	if _, err := manager.IdentityAddAddress("alpha", shared[:], 123); err != nil {
@@ -243,7 +243,7 @@ func TestIdentitySetPrimaryPromotesAddress(t *testing.T) {
 	var tertiary [20]byte
 	tertiary[17] = 3
 
-	if err := manager.IdentitySetAlias(primary[:], "gamma"); err != nil {
+	if err := manager.IdentitySetAlias(primary[:], "gamma", 0); err != nil {
 		t.Fatalf("set alias: %v", err)
 	}
 	if _, err := manager.IdentityAddAddress("gamma", secondary[:], 100); err != nil {
@@ -285,7 +285,7 @@ func TestIdentityRenamePreservesMetadata(t *testing.T) {
 	var linked [20]byte
 	linked[16] = 4
 
-	if err := manager.IdentitySetAlias(owner[:], "omega"); err != nil {
+	if err := manager.IdentitySetAlias(owner[:], "omega", 0); err != nil {
 		t.Fatalf("set alias: %v", err)
 	}
 	record, ok := manager.IdentityResolve("omega")
@@ -314,7 +314,7 @@ func TestIdentityRenamePreservesMetadata(t *testing.T) {
 	}
 	var conflict [20]byte
 	conflict[18] = 7
-	if err := manager.IdentitySetAlias(conflict[:], "alpha"); err != nil {
+	if err := manager.IdentitySetAlias(conflict[:], "alpha", 0); err != nil {
 		t.Fatalf("set conflicting alias: %v", err)
 	}
 	if _, err := manager.IdentityRename("omicron", "alpha", 0); !errors.Is(err, identity.ErrAliasTaken) {

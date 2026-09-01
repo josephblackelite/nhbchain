@@ -2374,6 +2374,23 @@ func (sp *StateProcessor) ExecuteTransaction(tx *types.Transaction) (*Simulation
 }
 
 func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*SimulationResult, error) {
+	if tx == nil {
+		// A JSON-encoded block's transactions field is []*Transaction; a
+		// null element (e.g. "transactions":[null]) decodes to a nil
+		// pointer in that slice with no error from encoding/json. The
+		// block-level nil checks in the P2P block-sync path only look at
+		// the block and its header, not each transaction, so a crafted
+		// gossip message reaches commitBlock's apply loop, which calls
+		// this function directly on that nil entry. Without this check the
+		// very next line's tx.ChainID panics on a nil-pointer dereference
+		// -- an unrecovered panic in the per-peer P2P read goroutine that
+		// crashes the entire process, from a single unauthenticated
+		// message. Returning an ordinary error here instead lets the
+		// existing "apply transaction %d: %w" handling in commitBlock
+		// reject the block the same way it rejects any other malformed
+		// transaction.
+		return nil, fmt.Errorf("nil transaction")
+	}
 	if !types.IsValidChainID(tx.ChainID) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
 	}
@@ -3724,7 +3741,15 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []
 		return fmt.Errorf("account already has username")
 	}
 	manager := nhbstate.NewManager(sp.Trie)
-	if err := manager.IdentitySetAlias(sender, normalized); err != nil {
+	// Deterministic block timestamp, not time.Now() -- this runs identically
+	// on every validator during ordinary block execution (see the sibling
+	// recordEngagementActivity call below, which already uses the same
+	// accessor). NHB-TRIAGE-H10: IdentitySetAlias used to call time.Now()
+	// internally, so any two validators applying this transaction even a
+	// second apart persisted different CreatedAt/UpdatedAt bytes -- a
+	// different trie leaf, a different state root, and a rejected block on
+	// every ordinary username registration.
+	if err := manager.IdentitySetAlias(sender, normalized, sp.blockTimestamp().Unix()); err != nil {
 		return fmt.Errorf("username: %w", err)
 	}
 	senderAccount.Username = normalized

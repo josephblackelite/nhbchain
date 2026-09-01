@@ -35,7 +35,7 @@ func TestClaimableCreateAndClaim(t *testing.T) {
 	copy(hashLock[:], hash)
 
 	deadline := int64(500)
-	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain")
+	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -46,11 +46,11 @@ func TestClaimableCreateAndClaim(t *testing.T) {
 	var payee [20]byte
 	payee[19] = 2
 
-	if _, _, err := manager.ClaimableClaim(claim.ID, []byte("bad"), payee); !errors.Is(err, claimable.ErrInvalidPreimage) {
+	if _, _, err := manager.ClaimableClaim(claim.ID, []byte("bad"), payee, deadline-1); !errors.Is(err, claimable.ErrInvalidPreimage) {
 		t.Fatalf("expected invalid preimage error, got %v", err)
 	}
 
-	updated, changed, err := manager.ClaimableClaim(claim.ID, preimage, payee)
+	updated, changed, err := manager.ClaimableClaim(claim.ID, preimage, payee, deadline-1)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -76,12 +76,74 @@ func TestClaimableCreateAndClaim(t *testing.T) {
 		t.Fatalf("unexpected payee balance: got %s want %s", payeeAcc.BalanceNHB, want)
 	}
 
-	_, replayChanged, err := manager.ClaimableClaim(claim.ID, preimage, payee)
+	_, replayChanged, err := manager.ClaimableClaim(claim.ID, preimage, payee, deadline-1)
 	if err != nil {
 		t.Fatalf("claim replay: %v", err)
 	}
 	if replayChanged {
 		t.Fatalf("expected replay claim to be no-op")
+	}
+}
+
+// TestClaimableClaimRejectsAfterDeadline is an independent regression test
+// for the deadline half of NHB-TRIAGE-C6: ClaimableClaim used to never
+// check Deadline at all, so a claim with a correct preimage stayed payable
+// forever, even past the point ClaimableExpire considers the funds
+// reclaimable by the payer. The two windows must be exact complements --
+// valid to claim while now < Deadline, valid to expire once now >=
+// Deadline -- with no gap where either party could still win depending on
+// who calls first.
+func TestClaimableClaimRejectsAfterDeadline(t *testing.T) {
+	manager := newTestManager(t)
+	var payer [20]byte
+	payer[19] = 9
+	fundAccount(t, manager, payer, 1000, 0)
+
+	preimage := []byte("past-the-deadline")
+	hash := ethcrypto.Keccak256(preimage)
+	var hashLock [32]byte
+	copy(hashLock[:], hash)
+
+	deadline := int64(1000)
+	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	if err != nil {
+		t.Fatalf("create claimable: %v", err)
+	}
+
+	var payee [20]byte
+	payee[19] = 10
+
+	if _, _, err := manager.ClaimableClaim(claim.ID, preimage, payee, deadline); !errors.Is(err, claimable.ErrDeadlineExceeded) {
+		t.Fatalf("SECURITY: expected deadline-exceeded error claiming exactly at the deadline, got %v", err)
+	}
+	if _, _, err := manager.ClaimableClaim(claim.ID, preimage, payee, deadline+100); !errors.Is(err, claimable.ErrDeadlineExceeded) {
+		t.Fatalf("SECURITY: expected deadline-exceeded error claiming well past the deadline, got %v", err)
+	}
+
+	payeeAcc, err := manager.GetAccount(payee[:])
+	if err != nil {
+		t.Fatalf("get payee: %v", err)
+	}
+	if payeeAcc.BalanceNHB.Sign() != 0 {
+		t.Fatalf("SECURITY: payee received funds from a claim that should have been rejected: %s", payeeAcc.BalanceNHB)
+	}
+
+	// The record is still Init (not consumed by the rejected attempts), so
+	// the payer's own path -- ClaimableExpire, once the deadline has
+	// passed -- must still succeed and return the funds.
+	expired, changed, err := manager.ClaimableExpire(claim.ID, deadline)
+	if err != nil {
+		t.Fatalf("expire after deadline: %v", err)
+	}
+	if !changed || expired.Status != claimable.ClaimStatusExpired {
+		t.Fatalf("expected expire to succeed and mark the record expired, got changed=%v status=%v", changed, expired.Status)
+	}
+
+	// And now that it's expired, a claim attempt with the exact right
+	// preimage but before the deadline check would matter is still
+	// rejected, this time by the status check.
+	if _, _, err := manager.ClaimableClaim(claim.ID, preimage, payee, deadline-1); !errors.Is(err, claimable.ErrInvalidState) {
+		t.Fatalf("expected invalid-state error claiming an already-expired record, got %v", err)
 	}
 }
 
@@ -93,7 +155,7 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 
 	var hashLock [32]byte
 	deadline := int64(100)
-	claim, err := manager.CreateClaimable(payer, "ZNHB", big.NewInt(200), hashLock, deadline, [32]byte{}, "test-chain")
+	claim, err := manager.CreateClaimable(payer, "ZNHB", big.NewInt(200), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -128,7 +190,7 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 	// Expire path
 	fundAccount(t, manager, payer, 500, 1000) // replenish NHB for second claimable
 	deadlineExpire := int64(50)
-	second, err := manager.CreateClaimable(payer, "NHB", big.NewInt(300), hashLock, deadlineExpire, [32]byte{}, "test-chain")
+	second, err := manager.CreateClaimable(payer, "NHB", big.NewInt(300), hashLock, deadlineExpire, [32]byte{}, "test-chain", claimable.RecipientKindNone)
 	if err != nil {
 		t.Fatalf("create second claimable: %v", err)
 	}
