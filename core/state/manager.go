@@ -3188,10 +3188,23 @@ func (m *Manager) PotsoStakeLockNonces(owner [20]byte) ([]uint64, error) {
 }
 
 // PotsoStakePutLockNonces persists the supplied nonce ordering for the owner.
+//
+// The empty-list ("clear") branch MUST go through KVDelete, not a direct
+// m.trie.Update call, for the exact same reason as PotsoStakeDeleteLock's
+// own doc comment: potsoStakeLockIndexKey already runs its buffer through
+// kvKey() once, and a direct trie.Update call here skips the second wrap
+// KVGet/KVPut apply, so it silently misses the real (twice-wrapped) index
+// entry. This branch is the one that actually mattered in production: a
+// withdrawal that empties a staker's ENTIRE lock list (the common case --
+// unbond everything, wait out the cooldown, withdraw once) hits exactly
+// this path, so the nonce index never actually cleared and kept pointing
+// at a lock PotsoStakeGetLock still found fully intact and still
+// "matured" -- letting an ordinary repeat withdrawal transaction re-pay
+// the same already-withdrawn lock out of the shared vault indefinitely.
 func (m *Manager) PotsoStakePutLockNonces(owner [20]byte, nonces []uint64) error {
 	key := potsoStakeLockIndexKey(owner[:])
 	if len(nonces) == 0 {
-		return m.trie.Update(key, nil)
+		return m.KVDelete(key)
 	}
 	return m.KVPut(key, nonces)
 }
@@ -3218,8 +3231,18 @@ func (m *Manager) PotsoStakePutLock(owner [20]byte, nonce uint64, lock *potso.St
 }
 
 // PotsoStakeDeleteLock removes the referenced lock from storage.
+//
+// MUST go through KVDelete, not a direct m.trie.Update call:
+// potsoStakeLockKey already runs its buffer through kvKey() once (matching
+// what PotsoStakeGetLock/PotsoStakePutLock pass into KVGet/KVPut), and
+// KVGet/KVPut/KVDelete all apply their OWN kvKey() wrap on top of whatever
+// key they're given. A direct m.trie.Update call here would apply kvKey()
+// only once, silently deleting an unrelated, never-populated trie entry
+// instead of the real (twice-wrapped) one Get/Put actually use -- the lock
+// would stay fully readable and re-payable after "deletion". Confirmed
+// exploitable end-to-end via TestPotsoStakeWithdrawCannotDrainVaultByReplaying.
 func (m *Manager) PotsoStakeDeleteLock(owner [20]byte, nonce uint64) error {
-	return m.trie.Update(potsoStakeLockKey(owner[:], nonce), nil)
+	return m.KVDelete(potsoStakeLockKey(owner[:], nonce))
 }
 
 // PotsoStakeQueueEntries returns the withdrawal queue entries for the provided day.
