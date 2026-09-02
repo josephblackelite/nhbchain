@@ -521,6 +521,7 @@ func (e *Engine) commit() bool {
 
 	// Try to commit the block; on failure, broadcast prevote(nil) and reset.
 	block := e.activeProposal.Proposal.Block
+	block.QuorumCert = e.buildQuorumCertLocked(block, e.activeProposal.Proposal.Round)
 	fmt.Printf("COMMIT: Attempting to commit block %d.\n", block.Header.Height)
 	if err := e.node.CommitBlock(block); err != nil {
 		fmt.Printf("failed to commit block: %v\n", err)
@@ -542,6 +543,59 @@ func (e *Engine) commit() bool {
 	e.broadcastCommittedBlock(block)
 	e.broadcastStatus()
 	return true
+}
+
+// buildQuorumCertLocked packages the precommit signatures that already
+// contributed to this commit's 2/3+ quorum (e.receivedVotes[Precommit],
+// still populated at this point -- see commit()'s hasTwoThirdsPowerLocked
+// check just above) into a types.QuorumCert attached to the block before
+// it is committed and gossiped onward. This reuses the exact signatures
+// each validator already produced during the live round; no extra signing
+// happens here. NHB-TRIAGE-C1: without this, a block committed by a real
+// BFT quorum carried no portable proof of that fact, so any node receiving
+// it later via ordinary P2P sync (not the live round) had no way to verify
+// quorum was ever reached -- see core/node.go's QuorumCert verification on
+// the synced-block path. Must be called with e.mu held (same requirement
+// as hasTwoThirdsPowerLocked, whose result gates this call).
+func (e *Engine) buildQuorumCertLocked(block *types.Block, round int) *types.QuorumCert {
+	if block == nil || block.Header == nil {
+		return nil
+	}
+	headerHash, err := block.Header.Hash()
+	if err != nil {
+		fmt.Printf("buildQuorumCert: hash header: %v\n", err)
+		return nil
+	}
+	votes := e.receivedVotes[Precommit]
+	if len(votes) == 0 {
+		return nil
+	}
+	sigs := make([]types.QuorumSignature, 0, len(votes))
+	for _, sv := range votes {
+		if sv == nil || sv.Signature == nil || sv.Validator == nil {
+			continue
+		}
+		if sv.Signature.Scheme != SignatureSchemeSecp256k1 {
+			// Only secp256k1 votes are ever produced by createVote today
+			// (see consensus/bft/types.go) -- skip anything else rather
+			// than attaching a signature the verifier's recover-based
+			// check can't handle.
+			continue
+		}
+		sigs = append(sigs, types.QuorumSignature{
+			Validator: append([]byte(nil), sv.Validator...),
+			Signature: append([]byte(nil), sv.Signature.Signature...),
+		})
+	}
+	if len(sigs) == 0 {
+		return nil
+	}
+	return &types.QuorumCert{
+		Height:     block.Header.Height,
+		Round:      round,
+		BlockHash:  headerHash,
+		Signatures: sigs,
+	}
 }
 
 func (e *Engine) requestStatus() {

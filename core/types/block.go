@@ -22,6 +22,14 @@ type BlockHeader struct {
 type Block struct {
 	Header       *BlockHeader
 	Transactions []*Transaction
+	// QuorumCert proves >=2/3 of the validator set's voting power
+	// precommitted to this exact block during BFT consensus. Deliberately
+	// a Block field, not a BlockHeader field -- BlockHeader.Hash() never
+	// marshals Block, so this can be added, populated, or left nil on an
+	// old/ungraded block without ever changing any block's hash or
+	// identity. See core/types/vote.go's QuorumCert type and
+	// NHB-TRIAGE-C1.
+	QuorumCert *QuorumCert `json:"quorumCert,omitempty"`
 }
 
 // NewBlock creates a new block from a header and a set of transactions.

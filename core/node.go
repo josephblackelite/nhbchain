@@ -100,6 +100,21 @@ type Node struct {
 	// from this state, so the drift check still applies to it. See
 	// docs/issue30.md item 2 / task #32.
 	selfProposedHash             []byte
+	// quorumCertActivationHeight gates NHB-TRIAGE-C1's quorum-certificate
+	// check on the untrusted P2P block-sync path (commitSyncedBlock):
+	// blocks at or below this height are accepted without one (so already
+	// -committed, pre-fix blocks -- which never carry a QuorumCert -- keep
+	// syncing to new/catching-up nodes), blocks above it are rejected
+	// unless they carry a QuorumCert that verifies against the current
+	// validator set. NewNode defaults this to math.MaxUint64 (effectively
+	// disabled -- every existing caller, including the whole test suite,
+	// keeps today's behavior unchanged). Enabling this is an explicit,
+	// deploy-time decision, not automatic: SetQuorumCertActivationHeight
+	// must be called with the chain's current tip height, on every
+	// validator, as part of one coordinated upgrade -- deliberately NOT
+	// auto-detected from chain state, since that could let one validator
+	// silently enforce while its peers don't.
+	quorumCertActivationHeight uint64
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
 	govPolicy                    governance.ProposalPolicy
@@ -576,6 +591,11 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		paymasterTopUpPolicy:       PaymasterAutoTopUpPolicy{Token: "ZNHB"},
 		timestampTolerance:         DefaultBlockTimestampTolerance,
 		timeSource:                 func() time.Time { return time.Now().UTC() },
+		// Disabled by default (see the field doc comment): every existing
+		// caller of NewNode, including the whole test suite, gets today's
+		// unchanged behavior unless SetQuorumCertActivationHeight is
+		// called explicitly to opt in.
+		quorumCertActivationHeight: math.MaxUint64,
 		lendingModuleAddr:          moduleAddr,
 		lendingCollateralAddr:      collateralAddr,
 		creatorPayoutVaultAddr:     creatorVaultAddr,
@@ -3698,6 +3718,27 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		return fmt.Errorf("blockchain not initialised")
 	}
 
+	// NHB-TRIAGE-C1: a block reaching this function via the untrusted P2P
+	// sync path (allowHistoricalTimestamp==true -- see commitSyncedBlock)
+	// used to be accepted with no check at all that any real validator
+	// quorum ever voted for it; Header.Validator is only a claimed
+	// proposer address, not a proof. A locally-produced block
+	// (allowHistoricalTimestamp==false, called from bft.Engine.commit())
+	// does not need this check here -- the BFT engine already verified a
+	// real 2/3+ precommit quorum before ever calling CommitBlock, which is
+	// exactly what QuorumCert.Verify independently re-checks for a synced
+	// block that skipped that live round entirely.
+	if allowHistoricalTimestamp && b.Header.Height > n.quorumCertActivationHeight {
+		headerHash, hashErr := b.Header.Hash()
+		if hashErr != nil {
+			return fmt.Errorf("hash header for quorum verification: %w", hashErr)
+		}
+		validatorPower := n.GetValidatorSet()
+		if err := b.QuorumCert.Verify(headerHash, validatorPower); err != nil {
+			return fmt.Errorf("quorum certificate verification failed: %w", err)
+		}
+	}
+
 	// Verify TxRoot before executing
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {
@@ -3919,6 +3960,24 @@ func (n *Node) GetValidatorSet() map[string]*big.Int {
 		}
 	}
 	return snapshot
+}
+
+// SetQuorumCertActivationHeight configures the height at and below which
+// commitBlock's NHB-TRIAGE-C1 quorum-certificate check is skipped on the
+// P2P sync path -- see the field doc comment on Node.quorumCertActivationHeight.
+// A live chain being upgraded to enforce this check MUST call this with
+// its current tip height as part of a coordinated deploy (every validator
+// needs the same activation height, applied before any of them starts
+// producing new, QC-bearing blocks) -- otherwise already-committed history
+// with no QuorumCert would be rejected by nodes still catching up or
+// resyncing from genesis.
+func (n *Node) SetQuorumCertActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.quorumCertActivationHeight = height
 }
 
 // RemoveValidatorFromSet permanently removes addr from the active and

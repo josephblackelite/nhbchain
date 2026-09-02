@@ -135,6 +135,14 @@ func main() {
 		panic(fmt.Sprintf("Failed to apply global config: %v", err))
 	}
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
+	if cfg.QuorumCertActivationHeight > 0 {
+		// See config.Config.QuorumCertActivationHeight's doc comment --
+		// left unset (0) here means the NHB-TRIAGE-C1 quorum-certificate
+		// check stays disabled, exactly like every prior release. Enabling
+		// it is a deliberate, coordinated, every-validator-at-once decision
+		// made in config.toml, never inferred.
+		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {

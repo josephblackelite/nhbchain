@@ -110,6 +110,20 @@ type Config struct {
 	DataDir                     string                       `toml:"DataDir"`
 	GenesisFile                 string                       `toml:"GenesisFile"`
 	AllowAutogenesis            bool                         `toml:"AllowAutogenesis"`
+	// QuorumCertActivationHeight enables NHB-TRIAGE-C1's quorum-certificate
+	// check on the untrusted P2P block-sync path once set: blocks at this
+	// height or below sync without one (grandfathering already-committed
+	// history); blocks above it must carry a QuorumCert that verifies
+	// against the current validator set, or they're rejected. 0 (the
+	// default/unset value) leaves the check fully disabled -- this field
+	// must be explicitly set to the chain's current tip height, identically
+	// on every validator, as one coordinated deploy (see
+	// core.Node.SetQuorumCertActivationHeight's doc comment). Note: because
+	// 0 means "disabled" here, there is no way to express "enforce from
+	// height 1" via this config field specifically -- that only matters for
+	// a brand-new chain wanting the protection from genesis, not for
+	// upgrading an already-live one.
+	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
 	ValidatorKeystorePath       string                       `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI             string                       `toml:"ValidatorKMSURI"`
 	ValidatorKMSEnv             string                       `toml:"ValidatorKMSEnv"`
