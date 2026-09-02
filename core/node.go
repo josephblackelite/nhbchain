@@ -3733,7 +3733,26 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		if hashErr != nil {
 			return fmt.Errorf("hash header for quorum verification: %w", hashErr)
 		}
-		validatorPower := n.GetValidatorSet()
+		// The validator set active while this block was being voted on is
+		// whatever was committed as of its PARENT's state -- not
+		// necessarily whatever this node's current/latest validator set
+		// happens to be. Using the parent height's own historical set
+		// (validatorSetAtHeight) rather than n.GetValidatorSet() makes this
+		// correct even for a long-range resync spanning a validator-set
+		// change, not just ordinary block-by-block sync. Height 0 (genesis)
+		// has no parent; its own state is the base case.
+		var parentHeight uint64
+		if b.Header.Height > 0 {
+			parentHeight = b.Header.Height - 1
+		}
+		validatorPower, vsErr := n.validatorSetAtHeight(parentHeight)
+		if vsErr != nil {
+			// Fail closed, not open: if the historical validator set can't
+			// be resolved, reject the block rather than silently falling
+			// back to a weaker check (e.g. the current set, which may not
+			// be who was actually active at this height).
+			return fmt.Errorf("resolve validator set for quorum verification: %w", vsErr)
+		}
 		if err := b.QuorumCert.Verify(headerHash, validatorPower); err != nil {
 			return fmt.Errorf("quorum certificate verification failed: %w", err)
 		}
@@ -3960,6 +3979,50 @@ func (n *Node) GetValidatorSet() map[string]*big.Int {
 		}
 	}
 	return snapshot
+}
+
+// validatorSetAtHeight reconstructs the validator set exactly as it existed
+// in the state produced by the block at the given height -- i.e. the set
+// that was actually active while the NEXT block (height+1) was being voted
+// on. Read-only: builds a throwaway StateProcessor over a historical trie
+// root and never touches n.state (unlike rebuildStateProcessorLocked,
+// which replaces it -- do not reuse that function here, it would corrupt
+// the live node's current state view).
+//
+// This relies on nhbchain's trie storage never pruning old nodes:
+// storage/trie/trie.go's Commit only ever calls the underlying
+// hashdb.Database's Commit (which flushes dirty nodes to disk and never
+// deletes anything) -- Cap/Dereference, go-ethereum's only node-eviction
+// APIs, are never called anywhere in this codebase. Confirmed directly
+// against go-ethereum v1.16.3's triedb/hashdb source, not assumed: every
+// historical state root this chain has ever committed remains fully
+// readable. If a future change ever introduces pruning, this function
+// (and NHB-TRIAGE-C1's quorum-certificate verification on the P2P sync
+// path, its only caller) would need to be revisited together with
+// whatever retention window that pruning adopts.
+func (n *Node) validatorSetAtHeight(height uint64) (map[string]*big.Int, error) {
+	if n == nil || n.chain == nil || n.db == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	block, err := n.chain.GetBlockByHeight(height)
+	if err != nil {
+		return nil, fmt.Errorf("validator set at height %d: %w", height, err)
+	}
+	if block == nil || block.Header == nil || len(block.Header.StateRoot) == 0 {
+		return nil, fmt.Errorf("validator set at height %d: missing state root", height)
+	}
+	stateTrie, err := trie.NewTrie(n.db, block.Header.StateRoot)
+	if err != nil {
+		return nil, fmt.Errorf("validator set at height %d: open historical trie: %w", height, err)
+	}
+	sp, err := NewStateProcessor(stateTrie)
+	if err != nil {
+		return nil, fmt.Errorf("validator set at height %d: %w", height, err)
+	}
+	if err := sp.loadValidatorSet(); err != nil {
+		return nil, fmt.Errorf("validator set at height %d: %w", height, err)
+	}
+	return sp.ValidatorSet, nil
 }
 
 // SetQuorumCertActivationHeight configures the height at and below which

@@ -106,17 +106,16 @@ type QuorumCert struct {
 // header hash -- never trust qc.BlockHash alone, it's attacker-controlled
 // input on the untrusted sync path).
 //
-// validatorPower must be the CURRENT validator set (map[string(address
-// bytes)]*big.Int), matching the shape core.Node.GetValidatorSet() /
-// consensus/bft.Engine.validatorSet already use. This codebase has no
-// historical "validator set as of height H" index today (see the C1
-// investigation notes), so verification is necessarily against the
-// verifier's current validator set, not the set that was actually active
-// at qc.Height -- acceptable for ordinary block-by-block sync (validator
-// set changes are infrequent, epoch-scoped events) but NOT a substitute
-// for a real historical lookup if this is ever used for a long-range
-// resync spanning a validator set change. Flagged, not silently assumed
-// away.
+// validatorPower is a map[string(address bytes)]*big.Int, matching the
+// shape core.Node.GetValidatorSet() / consensus/bft.Engine.validatorSet
+// already use. Callers should pass the validator set that was actually
+// active AT the height being verified, not necessarily "whatever the
+// verifier's current/latest set happens to be" -- core.Node.commitBlock's
+// caller does this via validatorSetAtHeight, which reconstructs it from
+// the parent block's own historical state (this codebase's trie storage
+// never prunes old nodes, so any previously-committed height's state
+// remains fully readable). This function itself is agnostic to how the
+// caller sourced the map; it just verifies against whatever it's given.
 func (qc *QuorumCert) Verify(headerHash []byte, validatorPower map[string]*big.Int) error {
 	if qc == nil {
 		return fmt.Errorf("quorum certificate missing")
