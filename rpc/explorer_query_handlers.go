@@ -206,8 +206,6 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 	throughputHistory := make([]ExplorerSeriesPoint, 0, explorerSeriesPointLimit)
 	paymentsHistory := make([]ExplorerSeriesPoint, 0, explorerSeriesPointLimit)
 	rewardsHistory := make([]ExplorerSeriesPoint, 0, explorerSeriesPointLimit)
-	totalPayments24h := 0
-	totalZNHBFlow := big.NewInt(0)
 
 	collectBlock := func(block *types.Block, blockTps float64, includeSeries bool) {
 		if block == nil || block.Header == nil {
@@ -233,12 +231,10 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 			s.recordMerchantActivity(merchantStats, record)
 			if isPaymentLikeType(tx.Type) {
 				blockPaymentCount++
-				totalPayments24h++
 			}
 			if strings.EqualFold(record.Asset, "ZNHB") {
 				if amountWei, ok := new(big.Int).SetString(record.Amount, 10); ok {
 					blockRewardFlow.Add(blockRewardFlow, amountWei)
-					totalZNHBFlow.Add(totalZNHBFlow, amountWei)
 				}
 			}
 		}
@@ -298,6 +294,7 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 
 	activeAddresses := s.materializeActiveAddresses(addressStats)
 	topMerchants := s.materializeTopMerchants(merchantStats)
+	allTimePayments, allTimeZNHBFlow, activityComplete := s.currentExplorerActivityTotals()
 
 	return &ExplorerSnapshotResult{
 		UpdatedAt:             now.Format(time.RFC3339),
@@ -308,8 +305,9 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 		MempoolSize:           s.node.MempoolSize(),
 		CurrentTps:            roundTo(estimateRecentTPS(s.node), 2),
 		AverageTps24h:         averageSeriesValue(throughputHistory),
-		Payments24h:           totalPayments24h,
-		TotalRewards24h:       roundTo(decimalAsFloat(totalZNHBFlow, explorerTokenDecimals), 6),
+		TotalPayments:         allTimePayments,
+		TotalZNHBFlow:         roundTo(decimalAsFloat(allTimeZNHBFlow, explorerTokenDecimals), 6),
+		ActivityIndexComplete: activityComplete,
 		ZNHBCirculatingSupply: explorerZNHBFixedSupply,
 		ThroughputHistory:     trimSeriesPoints(throughputHistory),
 		PaymentsHistory:       trimSeriesPoints(paymentsHistory),

@@ -297,6 +297,9 @@ type Server struct {
 	explorerHeight   uint64
 	explorerWindow   int
 
+	activityMu     sync.RWMutex
+	activityTotals explorerActivityTotals
+
 	txWindowStatsMu    sync.Mutex
 	txWindowStatsCache map[int64]*txWindowStatsCacheEntry
 }
@@ -576,6 +579,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		srv.posRealtime = NewFinalityStream(node)
 		srv.explorerWindow = explorerDefaultRecentBlocks
 		srv.explorerRealtime = NewExplorerStream()
+		srv.loadExplorerActivityTotals()
 		srv.startExplorerSnapshotLoop()
 	}
 	return srv, nil
@@ -1352,6 +1356,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleTxSetSponsorshipEnabled(recorder, r, req)
 	case "nhb_getBalance":
 		s.handleGetBalance(recorder, r, req)
+	case "nhb_getTotalSupply":
+		s.handleGetTotalSupply(recorder, r, req)
 	case "nhb_getLatestBlocks":
 		s.handleGetLatestBlocks(recorder, r, req)
 	case "nhb_getLatestTransactions":

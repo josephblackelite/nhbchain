@@ -1094,6 +1094,107 @@ func TestHandleGetBalanceRejectsMalformedAddress(t *testing.T) {
 	}
 }
 
+// TestHandleGetTotalSupplyReturnsTrackedNHBSupply proves nhb_getTotalSupply
+// (with no symbol param, defaulting to "NHB") echoes back the live,
+// incrementally-tracked state.Manager.TokenSupply counter -- the same
+// counter core/state_transition.go's applyRedeemNHB/handleMintWithSig
+// adjust on every burn/mint -- rather than any one wallet's balance.
+func TestHandleGetTotalSupplyReturnsTrackedNHBSupply(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	seeded := big.NewInt(4_200_000)
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return m.SetTokenSupply("NHB", seeded)
+	}); err != nil {
+		t.Fatalf("seed token supply: %v", err)
+	}
+
+	server := newTestServer(t, node, nil, ServerConfig{})
+	recorder := httptest.NewRecorder()
+	req := &RPCRequest{ID: 11}
+
+	server.handleGetTotalSupply(recorder, nil, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var resp RPCResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected result type %T", resp.Result)
+	}
+	if got := result["symbol"]; got != "NHB" {
+		t.Fatalf("expected symbol NHB, got %v", got)
+	}
+	if got := result["totalSupplyWei"]; got != seeded.String() {
+		t.Fatalf("expected totalSupplyWei %s, got %v", seeded.String(), got)
+	}
+}
+
+// TestHandleGetTotalSupplyHonorsExplicitSymbolAndDefaultsToZero proves an
+// explicit symbol param is echoed back (uppercased) and that a token whose
+// supply counter has never been written reads back as zero, not an error --
+// matching state.Manager.TokenSupply's documented "missing entries default
+// to zero" behavior.
+func TestHandleGetTotalSupplyHonorsExplicitSymbolAndDefaultsToZero(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	server := newTestServer(t, node, nil, ServerConfig{})
+	recorder := httptest.NewRecorder()
+	param, err := json.Marshal("testcoin")
+	if err != nil {
+		t.Fatalf("marshal param: %v", err)
+	}
+	req := &RPCRequest{ID: 12, Params: []json.RawMessage{param}}
+
+	server.handleGetTotalSupply(recorder, nil, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var resp RPCResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected result type %T", resp.Result)
+	}
+	if got := result["symbol"]; got != "TESTCOIN" {
+		t.Fatalf("expected symbol TESTCOIN, got %v", got)
+	}
+	if got := result["totalSupplyWei"]; got != "0" {
+		t.Fatalf("expected totalSupplyWei 0, got %v", got)
+	}
+}
+
 func TestWriteErrorScrubsInternalDetails(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	writeError(recorder, http.StatusInternalServerError, 42, codeServerError, "failed to encode transaction", "sensitive detail")

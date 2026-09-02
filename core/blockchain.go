@@ -55,6 +55,15 @@ var (
 	// index existed. Blocks added via AddBlock after that point are always
 	// indexed as they commit, so this is a one-time, idempotent flag.
 	txIndexBackfillDoneKey = []byte("txHashIndexBackfillDone")
+	// explorerMetaPrefix namespaces small, non-consensus derived-state blobs
+	// the RPC layer wants persisted alongside chain data (e.g. the all-time
+	// explorer payment-activity index's running totals + watermark, see
+	// rpc/explorer_activity_index.go). Distinct from every other prefix in
+	// this file so these keys can never collide with anything consensus
+	// relevant -- this data carries no weight in the state root or block
+	// hash, and any node can always safely recompute it from its own block
+	// history if it's ever lost or corrupted.
+	explorerMetaPrefix = []byte("explorermeta:")
 )
 
 func txHashKey(hash []byte) []byte {
@@ -62,6 +71,37 @@ func txHashKey(hash []byte) []byte {
 	copy(key, txHashPrefix)
 	copy(key[len(txHashPrefix):], hash)
 	return key
+}
+
+func explorerMetaKey(name string) []byte {
+	key := make([]byte, len(explorerMetaPrefix)+len(name))
+	copy(key, explorerMetaPrefix)
+	copy(key[len(explorerMetaPrefix):], name)
+	return key
+}
+
+// GetExplorerMeta and PutExplorerMeta let the RPC layer persist small,
+// opaque, non-consensus blobs in the same on-disk store as chain data
+// (see explorerMetaPrefix above), without needing a separate file or
+// database of its own. GetExplorerMeta returns (nil, nil) -- not an error
+// -- when the key has never been written, matching storage.Database's own
+// not-found convention for a missing key so callers can treat "never
+// written" and "written as empty" the same way callers of bc.db.Get
+// already do elsewhere in this file.
+func (bc *Blockchain) GetExplorerMeta(name string) ([]byte, error) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	value, err := bc.db.Get(explorerMetaKey(name))
+	if err != nil {
+		return nil, nil
+	}
+	return value, nil
+}
+
+func (bc *Blockchain) PutExplorerMeta(name string, value []byte) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.db.Put(explorerMetaKey(name), value)
 }
 
 func encodeUint64(v uint64) []byte {

@@ -150,16 +150,25 @@ type ExplorerActiveAddressResult struct {
 // ExplorerSnapshotResult aggregates the explorer overview, recent feeds, and
 // search-friendly address lists into a single chain-authentic payload.
 type ExplorerSnapshotResult struct {
-	UpdatedAt             string                        `json:"updatedAt"`
-	LatestHeight          uint64                        `json:"latestHeight"`
-	ActiveValidators      int                           `json:"activeValidators"`
-	CurrentEpoch          uint64                        `json:"currentEpoch"`
-	CurrentTime           int64                         `json:"currentTime"`
-	MempoolSize           int                           `json:"mempoolSize"`
-	CurrentTps            float64                       `json:"currentTps"`
-	AverageTps24h         float64                       `json:"averageTps24h"`
-	Payments24h           int                           `json:"payments24h"`
-	TotalRewards24h       float64                       `json:"totalRewards24h"`
+	UpdatedAt        string  `json:"updatedAt"`
+	LatestHeight     uint64  `json:"latestHeight"`
+	ActiveValidators int     `json:"activeValidators"`
+	CurrentEpoch     uint64  `json:"currentEpoch"`
+	CurrentTime      int64   `json:"currentTime"`
+	MempoolSize      int     `json:"mempoolSize"`
+	CurrentTps       float64 `json:"currentTps"`
+	AverageTps24h    float64 `json:"averageTps24h"`
+	// TotalPayments and TotalZNHBFlow are genuine all-time totals (every
+	// payment-like transaction / ZNHB movement this chain has ever
+	// committed), not a recent-block window -- see
+	// rpc/explorer_activity_index.go. ActivityIndexComplete is false only
+	// while the background index is still catching up on pre-existing
+	// history right after this feature first deploys (or after a long
+	// restart gap); callers should treat the totals as a lower bound, not
+	// yet final, while it's false.
+	TotalPayments         int                           `json:"totalPayments"`
+	TotalZNHBFlow         float64                       `json:"totalZnhbFlow"`
+	ActivityIndexComplete bool                          `json:"activityIndexComplete"`
 	ZNHBCirculatingSupply string                        `json:"znhbCirculatingSupply"`
 	ThroughputHistory     []ExplorerSeriesPoint         `json:"throughputHistory"`
 	PaymentsHistory       []ExplorerSeriesPoint         `json:"paymentsHistory"`

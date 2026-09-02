@@ -72,6 +72,7 @@ func (s *Server) startExplorerSnapshotLoop() {
 
 		var lastHeight uint64
 		for {
+			s.advanceExplorerActivityIndex()
 			currentHeight := s.node.Chain().GetHeight()
 			s.explorerMu.RLock()
 			cachedSnapshot := s.explorerSnapshot
