@@ -4015,14 +4015,26 @@ func (n *Node) validatorSetAtHeight(height uint64) (map[string]*big.Int, error) 
 	if err != nil {
 		return nil, fmt.Errorf("validator set at height %d: open historical trie: %w", height, err)
 	}
-	sp, err := NewStateProcessor(stateTrie)
+	// Deliberately NOT NewStateProcessor(stateTrie) + loadValidatorSet():
+	// that allocates a full StateProcessor (its own state DB handle, the
+	// loyalty/escrow/trade engines, half a dozen maps and default configs)
+	// just to read one already-RLP-encoded trie key. This reads the exact
+	// same key (validatorSetKey, the same constant persistUnlockValidatorSet/
+	// loadValidatorSet use, matched against sp.Trie.Get/Update directly,
+	// not the double-hashed nhbstate.Manager.KVGet/KVPut convention) off a
+	// bare trie view instead -- same result, no per-call allocation of
+	// unrelated subsystems. Matters because, unlike n.GetValidatorSet()
+	// (called once per block from a live, already-warm StateProcessor),
+	// this constructs a fresh historical trie view on every single call.
+	data, err := stateTrie.Get(validatorSetKey)
 	if err != nil {
 		return nil, fmt.Errorf("validator set at height %d: %w", height, err)
 	}
-	if err := sp.loadValidatorSet(); err != nil {
-		return nil, fmt.Errorf("validator set at height %d: %w", height, err)
+	decoded, err := nhbstate.DecodeValidatorSet(data)
+	if err != nil {
+		return nil, fmt.Errorf("validator set at height %d: decode: %w", height, err)
 	}
-	return sp.ValidatorSet, nil
+	return decoded, nil
 }
 
 // SetQuorumCertActivationHeight configures the height at and below which
