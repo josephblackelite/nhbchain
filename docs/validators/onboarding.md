@@ -120,7 +120,9 @@ fails with `dial tcp: address enode://...: too many colons in address`.
    `https://ifconfig.me`) if `--external-address` wasn't passed.
 9. Patches `config.toml` — `ListenAddress`, `RPCAddress`, `DataDir`,
    `ValidatorKMSEnv=NHB_VALIDATOR_RAW_KEY`, `NetworkId`, `ExternalAddress`,
-   and `Bootnodes`/`PersistentPeers`.
+   and `Bootnodes`/`PersistentPeers`. The rest of the file, including
+   `QuorumCertActivationHeight` (see below), is copied through unchanged
+   from the repo's own `config.toml` -- it is not patched per-flag.
 10. Installs `deploy/systemd/nhb.service`, runs `daemon-reload`, enables and
     restarts it.
 11. Polls the node's own RPC (a **POST** to `nhb_getNetworkStats` — a bare
@@ -136,6 +138,22 @@ fails with `dial tcp: address enode://...: too many colons in address`.
     starting.
 13. If `--email` was given, best-effort POSTs to the onboarding-email
     endpoint. Failure here is also just a warning, never fatal.
+
+### A note on QuorumCertActivationHeight
+
+Mainnet enforces a block-level quorum-certificate check on the P2P sync
+path (NHB-TRIAGE-C1): every block above height `451949` must carry proof
+that a real 2/3+ validator quorum actually voted for it, or a syncing node
+should reject it. This is controlled by `QuorumCertActivationHeight` in
+`config.toml`, which **must match** across every validator. As of
+2026-09-02 the repo's own `config.toml` sets this to `451949` to match
+what both live validators already enforce, and Step 1's rsync copies it
+through unchanged to `/etc/nhbchain/config.toml`. If you're running an
+older checkout where this line is missing (or `0`), your node will still
+sync and validate normally, but it silently skips quorum-certificate
+verification on every synced block -- a real security gap, not a visible
+failure. Confirm the line is present before going live:
+`grep QuorumCertActivationHeight /etc/nhbchain/config.toml`.
 
 ## Step 2 — Getting paid
 

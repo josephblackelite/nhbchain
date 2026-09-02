@@ -33,6 +33,18 @@ RPCTLSClientCAFile = ""
 DataDir = "./nhb-data"
 GenesisFile = "./config/genesis.phase-e.json"
 AllowAutogenesis = false
+# Matches the coordinated activation height both live mainnet validators are
+# currently enforcing for NHB-TRIAGE-C1's quorum-certificate check on the
+# untrusted P2P block-sync path (see config/config.go's QuorumCertActivationHeight
+# doc comment and core/node.go's commitBlock). This value must stay identical
+# across every validator -- a new validator whose config leaves this at 0
+# (unset) will sync and commit every historical block above this height with
+# NO quorum-certificate verification at all: a silent security gap, not a
+# functional failure, since sync otherwise succeeds normally. Set 2026-09-02
+# to match the live validators' already-active height; if the network is
+# ever upgraded again with a new activation height, update this value (and
+# redeploy every validator) together, never independently.
+QuorumCertActivationHeight = 451949
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

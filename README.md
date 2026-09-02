@@ -179,11 +179,18 @@ bash scripts/run_nhbcoin_node.sh --reset-state
 
 **That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
-### Step 6: Get paid (delegate 10,000 ZNHB, or more)
+### Step 6: Get paid (self-stake >= 10,000 ZNHB on this server's own key)
 The validator's signing key and your everyday NHBCoin wallet are **two
 different things by design**. The validator key is generated on the server
 itself and never leaves it; you never export or paste a private key
 anywhere for this step.
+
+**Corrected 2026-09-02: validator eligibility is based on this validator's
+own self-stake only.** Delegating from a separate portal wallet (the old
+"Validator Hub -> Delegate" flow previously documented here) does **not**
+count toward eligibility at all, no matter the amount -- see the [Validator
+Onboarding Guide](docs/validators/onboarding.md#staking-self-stake-on-this-server-not-a-portal-delegation)
+for the full explanation.
 
 1. On your Ubuntu validator server, run:
 
@@ -198,16 +205,20 @@ bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS -
    is used for anything else. Add `--email you@example.com` to also get the
    node address and instructions emailed to you.
 
-2. Create or log into your wallet at `nhbcoin.com`.
-3. Go to **Validator Hub -> Delegate**, paste the node address the script
-   printed, and delegate at least `10,000 ZNHB` from that wallet.
+2. **Send >= 10,000 ZNHB directly to this validator's own node address**
+   (printed by the script above) from wherever you actually hold ZNHB -- an
+   ordinary transfer, not a portal delegation.
+3. **Self-stake it on the server itself**, using the validator's own key:
 
-Once the server is online, synced, and emitting validator heartbeats, the
-delegated stake becomes a validator candidate and then joins the active set
-at the next epoch boundary. Your wallet earns the ordinary staking yield via
-the delegation itself; `--beneficiary` additionally routes the separate
-consensus-participation reward to the same wallet, so nothing accumulates at
-an address you can't reach.
+```bash
+sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+```
+
+Once the server is online, synced, has self-staked at least `10,000 ZNHB`
+on its own key, and is emitting validator heartbeats, it becomes a validator
+candidate and then joins the active set at the next epoch boundary.
+`--beneficiary` routes the separate consensus-participation reward to your
+wallet, so nothing accumulates at an address you can't reach.
 
 ---
 
