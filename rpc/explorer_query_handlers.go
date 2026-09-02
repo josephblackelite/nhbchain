@@ -24,6 +24,19 @@ const (
 	explorerHistoricalBackfillLimit    = 50000
 	explorerDefaultLatestBlockCount    = 15
 	explorerDefaultLatestTxCount       = 20
+	// explorerActiveAddressLimit bounds both how many distinct addresses
+	// materializeActiveAddresses will return AND how far the backfill loop
+	// below tries before giving up -- previously the backfill's exit
+	// condition was "found at least one address with activity," which on a
+	// low-traffic chain (or one where the initial window's
+	// isExplorerUserFacingType-flagged transactions are dominated by
+	// senderless system submissions -- see TxTypeBuybackRefPrice/
+	// TxTypeLendingRefPrice below) meant the Addresses tab could stop
+	// after finding a SINGLE real address, even when 50000 more blocks of
+	// backfill budget remained and more real addresses existed further
+	// back. Using the same limit on both ends means the backfill actually
+	// tries to fill a real page, not just avoid an empty one.
+	explorerActiveAddressLimit = 12
 	explorerDefaultAddressHistoryLimit = 50
 	explorerMaxAddressHistoryLimit     = 200
 	explorerSeriesPointLimit           = 24
@@ -262,7 +275,7 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 		collectBlock(block, blockTps, true)
 	}
 
-	if len(latestTransactions) < explorerDefaultLatestTxCount || len(addressStats) == 0 {
+	if len(latestTransactions) < explorerDefaultLatestTxCount || len(addressStats) < explorerActiveAddressLimit {
 		var oldestHeight uint64
 		if len(recent) > 0 && recent[0] != nil && recent[0].Header != nil {
 			oldestHeight = recent[0].Header.Height
@@ -276,7 +289,7 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 			}
 			collectBlock(block, 0, false)
 			backfillScanned++
-			if len(latestTransactions) >= explorerDefaultLatestTxCount && len(addressStats) > 0 {
+			if len(latestTransactions) >= explorerDefaultLatestTxCount && len(addressStats) >= explorerActiveAddressLimit {
 				break
 			}
 		}
@@ -811,8 +824,8 @@ func (s *Server) materializeActiveAddresses(stats map[string]*explorerAddressSta
 		}
 		return addresses[i].txCount24h > addresses[j].txCount24h
 	})
-	if len(addresses) > 12 {
-		addresses = addresses[:12]
+	if len(addresses) > explorerActiveAddressLimit {
+		addresses = addresses[:explorerActiveAddressLimit]
 	}
 	result := make([]ExplorerActiveAddressResult, 0, len(addresses))
 	for _, entry := range addresses {
@@ -1075,9 +1088,24 @@ func buildAdminBuyZNHBCreditRecord(tx *types.Transaction, txHash string, blockHa
 	return result, nil
 }
 
+// isExplorerUserFacingType filters out transaction types that don't
+// represent a real user/recipient's own money movement -- see
+// types.RequiresSignature's doc comment for the authoritative "senderless"
+// list (no real envelope signature, so no real tx.From()).
+// TxTypeBuybackRefPrice/TxTypeLendingRefPrice are buybackd's automated,
+// senderless oracle price submissions -- frequent (every refresh cycle) and
+// carrying no From/To/amount, so leaving them user-facing let them flood
+// the fixed-size latestTransactions window and starve out genuine activity
+// (confirmed live: 20/20 recent slots were refprice submissions with real
+// user transfers pushed entirely out of view). TxTypeMint and
+// TxTypeSwapVoucherMint are also senderless but are deliberately NOT
+// excluded here: both carry a real voucher recipient (see
+// mintVoucherRecipient) who genuinely received real value, so they belong
+// in the feed once correctly attributed -- only the two purely-internal
+// oracle types are filtered.
 func isExplorerUserFacingType(t types.TxType) bool {
 	switch t {
-	case types.TxTypeHeartbeat:
+	case types.TxTypeHeartbeat, types.TxTypeBuybackRefPrice, types.TxTypeLendingRefPrice:
 		return false
 	default:
 		return true
