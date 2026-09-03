@@ -56,6 +56,7 @@ var defaultAllowedGovernanceParams = []string{
 	"potso.rewards.EmissionPerEpochWei",
 	"potso.weights.AlphaStakeBps",
 	governance.ParamKeyMarketFlatFeeWei,
+	governance.ParamKeyPaymasterTopUpFeeWei,
 	// swap.PerAddressDailyCapWei/PerAddressMonthlyCapWei/PerTxMinWei/
 	// PerTxMaxWei were removed from this list: they were never actually
 	// wired to a reader (ParamStoreGet was never called with these exact

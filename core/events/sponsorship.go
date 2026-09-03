@@ -150,6 +150,11 @@ type PaymasterAutoTopUp struct {
         Day       string
         Status    string
         Reason    string
+        // FeeWei is the governance-adjustable skim (governance.ParamKeyPaymasterTopUpFeeWei)
+        // debited from the funding account alongside AmountWei and routed to
+        // the escrow fee treasury, on top of what the paymaster receives.
+        // Left nil (omitted from Event()'s attributes) when no fee applied.
+        FeeWei *big.Int
 }
 
 // EventType satisfies the events.Event interface.
@@ -178,6 +183,9 @@ func (e PaymasterAutoTopUp) Event() *types.Event {
         }
         if e.BalanceWei != nil {
                 attrs["balanceWei"] = new(big.Int).Set(e.BalanceWei).String()
+        }
+        if e.FeeWei != nil {
+                attrs["feeWei"] = new(big.Int).Set(e.FeeWei).String()
         }
         if strings.TrimSpace(e.Day) != "" {
                 attrs["day"] = strings.TrimSpace(e.Day)

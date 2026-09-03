@@ -461,6 +461,14 @@ func validatorForParam(key string) paramValidator {
 			}
 			return nil
 		}
+	case ParamKeyPaymasterTopUpFeeWei:
+		return func(raw json.RawMessage) error {
+			_, err := parseUintRaw(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", ParamKeyPaymasterTopUpFeeWei, err)
+			}
+			return nil
+		}
 	case ParamKeyStakingMaxEmissionPerYearWei,
 		ParamKeyMintNHBMaxEmissionPerYearWei,
 		ParamKeyMintZNHBMaxEmissionPerYearWei:

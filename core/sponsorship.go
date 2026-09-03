@@ -12,6 +12,7 @@ import (
 	nhbstate "nhbchain/core/state"
 	coretx "nhbchain/core/tx"
 	"nhbchain/core/types"
+	"nhbchain/native/governance"
 	"nhbchain/observability"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -561,6 +562,26 @@ func (sp *StateProcessor) emitPaymasterAutoTopUpEvent(paymaster [20]byte, token 
 	sp.AppendEvent(evt.Event())
 }
 
+// defaultPaymasterTopUpFeeWei is 0 -- the paymaster auto-top-up skim fee
+// (governance.ParamKeyPaymasterTopUpFeeWei) is a no-op until governance
+// explicitly sets a nonzero rate. Unlike defaultMarketFlatFeeWei (which
+// ships live at 0.1 NHB), this new fee mechanism defaults OFF so wiring it
+// up here never silently changes the economics of the (currently disabled
+// in production) paymaster auto top-up feature; an operator opts in via a
+// ProposalKindParamUpdate proposal once ready.
+const defaultPaymasterTopUpFeeWei = "0"
+
+// readGovernedPaymasterTopUpFeeWei resolves the flat ZNHB fee skimmed from
+// the funding account on every automatic paymaster top-up from the generic
+// governance param store, falling back to defaultPaymasterTopUpFeeWei when
+// never set. Mirrors core/market_native.go's readGovernedMarketFlatFeeWei
+// exactly -- both are thin wrappers over readGovernedSwapRiskWei (defined in
+// core/swap_risk_params.go), which despite its name/location is a generic
+// "governed wei amount with a string default" reader.
+func readGovernedPaymasterTopUpFeeWei(manager *nhbstate.Manager) (*big.Int, error) {
+	return readGovernedSwapRiskWei(manager, governance.ParamKeyPaymasterTopUpFeeWei, defaultPaymasterTopUpFeeWei)
+}
+
 type paymasterTopUpMutation struct {
 	paymaster        common.Address
 	paymasterBytes   [20]byte
@@ -574,6 +595,17 @@ type paymasterTopUpMutation struct {
 	newBalance       *big.Int
 	previousFunding  *big.Int
 	newFunding       *big.Int
+	// feeWei, treasuryRaw, previousTreasury and newTreasury track the
+	// governance-adjustable skim (see readGovernedPaymasterTopUpFeeWei)
+	// debited from the funding account alongside amount and credited to the
+	// escrow fee treasury -- mirrors native/market/engine.go's FillListing
+	// flatFeeWei pattern. treasuryRaw stays nil/empty when feeWei is zero,
+	// so Rollback below knows not to touch a treasury account this
+	// mutation never wrote to.
+	feeWei           *big.Int
+	treasuryRaw      []byte
+	previousTreasury *big.Int
+	newTreasury      *big.Int
 	day              string
 	previousDay      *nhbstate.PaymasterTopUpDay
 	dayRecordExisted bool
@@ -585,7 +617,26 @@ func (m *paymasterTopUpMutation) Finalize(sp *StateProcessor) {
 	if m == nil || sp == nil {
 		return
 	}
-	sp.emitPaymasterAutoTopUpEvent(m.paymasterBytes, m.token, m.amount, m.newBalance, m.day, "success", "")
+	// Built directly rather than via emitPaymasterAutoTopUpEvent (used by
+	// every failure call site above, whose signature stays untouched) so
+	// the fee can ride along on the success event without threading a new
+	// parameter through call sites that never carry one.
+	evt := events.PaymasterAutoTopUp{
+		Paymaster: m.paymasterBytes,
+		Token:     strings.TrimSpace(m.token),
+		Day:       strings.TrimSpace(m.day),
+		Status:    "success",
+	}
+	if m.amount != nil {
+		evt.AmountWei = new(big.Int).Set(m.amount)
+	}
+	if m.newBalance != nil {
+		evt.BalanceWei = new(big.Int).Set(m.newBalance)
+	}
+	if m.feeWei != nil && m.feeWei.Sign() > 0 {
+		evt.FeeWei = new(big.Int).Set(m.feeWei)
+	}
+	sp.AppendEvent(evt.Event())
 	observability.Paymaster().RecordAutoTopUp("success", m.amount)
 }
 
@@ -622,6 +673,23 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 			fundingAccount.BalanceZNHB = big.NewInt(0)
 		}
 		if err := sp.setAccount(m.fundingRaw, fundingAccount); err != nil {
+			return err
+		}
+	}
+	if len(m.treasuryRaw) > 0 {
+		treasuryAccount, err := sp.getAccount(m.treasuryRaw)
+		if err != nil {
+			return err
+		}
+		if treasuryAccount == nil {
+			treasuryAccount = &types.Account{}
+		}
+		if m.previousTreasury != nil {
+			treasuryAccount.BalanceZNHB = new(big.Int).Set(m.previousTreasury)
+		} else {
+			treasuryAccount.BalanceZNHB = big.NewInt(0)
+		}
+		if err := sp.setAccount(m.treasuryRaw, treasuryAccount); err != nil {
 			return err
 		}
 	}
@@ -698,6 +766,29 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	}
 	paymasterKey := strings.ToLower(addr.Hex())
 	manager := nhbstate.NewManager(sp.Trie)
+	feeWei, err := readGovernedPaymasterTopUpFeeWei(manager)
+	if err != nil {
+		return nil, err
+	}
+	if feeWei.Sign() > 0 && sp.escrowFeeTreasury == ([20]byte{}) {
+		// Fail closed rather than silently crediting the zero address: a
+		// governance vote can set the fee rate independently of whether
+		// SetEscrowFeeTreasury has ever been wired up on this node, and the
+		// two must never disagree about whether there's a real destination
+		// for the skimmed fee.
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, sp.currentPaymasterDay(), "failure", "treasury_missing")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
+	}
+	// totalDebit is what actually leaves the funding account: the amount
+	// credited to the paymaster plus the governance-adjustable skim, per
+	// native/market/engine.go's FillListing (totalDebit = nhbCost +
+	// flatFeeWei) -- feeWei is 0 (see defaultPaymasterTopUpFeeWei) until an
+	// operator opts in, so totalDebit == amount and every byte of existing
+	// behavior below is unchanged in that default case.
+	totalDebit := new(big.Int).Add(amount, feeWei)
 	day := sp.currentPaymasterDay()
 	dayRecord, _, err := manager.PaymasterGetTopUpDay(paymasterKey, day)
 	if err != nil {
@@ -707,7 +798,11 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if dayRecord != nil && dayRecord.DebitedWei != nil {
 		debitedSoFar = new(big.Int).Set(dayRecord.DebitedWei)
 	}
-	projected := new(big.Int).Add(debitedSoFar, amount)
+	// projected (and the DebitedWei value persisted below) is measured
+	// against totalDebit, not the bare amount -- DailyCapWei is a cap on
+	// the funding account's actual daily outflow, and the fee is part of
+	// that outflow.
+	projected := new(big.Int).Add(debitedSoFar, totalDebit)
 	if policy.DailyCapWei != nil && policy.DailyCapWei.Sign() > 0 && projected.Cmp(policy.DailyCapWei) > 0 {
 		var paymasterBytes [20]byte
 		copy(paymasterBytes[:], addr.Bytes())
@@ -790,7 +885,7 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 		}
 	}
 	fundingBalance := new(big.Int).Set(fundingAccount.BalanceZNHB)
-	if fundingBalance.Cmp(amount) < 0 {
+	if fundingBalance.Cmp(totalDebit) < 0 {
 		var paymasterBytes [20]byte
 		copy(paymasterBytes[:], addr.Bytes())
 		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "funding_insufficient")
@@ -805,6 +900,7 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 		fundingRaw:       append([]byte(nil), fundingRaw...),
 		token:            token,
 		amount:           new(big.Int).Set(amount),
+		feeWei:           new(big.Int).Set(feeWei),
 		previousBalance:  new(big.Int).Set(currentBalance),
 		previousFunding:  new(big.Int).Set(fundingBalance),
 		day:              day,
@@ -820,7 +916,7 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if statusRecord != nil {
 		mutation.previousStatus = statusRecord.Clone()
 	}
-	fundingAccount.BalanceZNHB = new(big.Int).Sub(fundingAccount.BalanceZNHB, amount)
+	fundingAccount.BalanceZNHB = new(big.Int).Sub(fundingAccount.BalanceZNHB, totalDebit)
 	if err := sp.setAccount(mutation.fundingRaw, fundingAccount); err != nil {
 		return nil, err
 	}
@@ -829,6 +925,33 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
 	if err := sp.setAccount(raw, account); err != nil {
 		return nil, err
+	}
+
+	if feeWei.Sign() > 0 {
+		treasuryRaw := append([]byte(nil), sp.escrowFeeTreasury[:]...)
+		treasuryAccount, err := sp.getAccount(treasuryRaw)
+		if err != nil {
+			if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
+				return nil, errors.Join(err, rollbackErr)
+			}
+			return nil, err
+		}
+		if treasuryAccount == nil {
+			treasuryAccount = &types.Account{}
+		}
+		if treasuryAccount.BalanceZNHB == nil {
+			treasuryAccount.BalanceZNHB = big.NewInt(0)
+		}
+		mutation.treasuryRaw = treasuryRaw
+		mutation.previousTreasury = new(big.Int).Set(treasuryAccount.BalanceZNHB)
+		treasuryAccount.BalanceZNHB = new(big.Int).Add(treasuryAccount.BalanceZNHB, feeWei)
+		if err := sp.setAccount(treasuryRaw, treasuryAccount); err != nil {
+			if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
+				return nil, errors.Join(err, rollbackErr)
+			}
+			return nil, err
+		}
+		mutation.newTreasury = new(big.Int).Set(treasuryAccount.BalanceZNHB)
 	}
 
 	updatedDay := dayRecord

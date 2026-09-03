@@ -335,6 +335,20 @@ const (
 	// ProposalKindParamUpdate proposal -- no dedicated proposal kind needed
 	// (see core/market_native.go's readGovernedMarketFlatFeeWei).
 	ParamKeyMarketFlatFeeWei = "market.flatFeeWei"
+	// ParamKeyPaymasterTopUpFeeWei controls the flat ZNHB fee skimmed from
+	// the configured Paymaster.AutoTopUp.Governance.FundingAccount on every
+	// automatic paymaster top-up (core/sponsorship.go's
+	// maybeAutoTopUpPaymaster), on top of the TopUpAmountWei credited to the
+	// sponsoring paymaster's own balance -- mirrors ParamKeyMarketFlatFeeWei
+	// (native/market's FillListing flat fee) exactly: the funding account
+	// pays amount+fee, the paymaster still receives the full amount, and the
+	// fee lands in the escrow fee treasury (core/node.go's escrowTreasury).
+	// Settable via a generic ProposalKindParamUpdate proposal -- no
+	// dedicated proposal kind needed (see
+	// core/sponsorship.go's readGovernedPaymasterTopUpFeeWei). Defaults to 0
+	// (no fee) until governance explicitly sets a nonzero rate, so this is
+	// a no-op until an operator deliberately opts in.
+	ParamKeyPaymasterTopUpFeeWei = "paymaster.topUpFeeWei"
 	// ParamKeyLendingFixedTermRateSchedule stores the entire fixed-term
 	// tenure->rate table as one JSON blob (a []LendingTenureRate array, see
 	// LendingRateSchedulePayload), set only via ProposalKindLendingRateSchedule.

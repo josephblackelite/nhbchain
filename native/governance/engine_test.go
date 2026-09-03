@@ -123,6 +123,42 @@ func TestValidatorForParamMarketFlatFeeWei(t *testing.T) {
 	}
 }
 
+// TestValidatorForParamPaymasterTopUpFeeWei mirrors
+// TestValidatorForParamMarketFlatFeeWei above for the new
+// paymaster.topUpFeeWei key (governance.ParamKeyPaymasterTopUpFeeWei, see
+// its doc comment and core/sponsorship.go's
+// readGovernedPaymasterTopUpFeeWei) -- guards against the same class of bug
+// the market fee key once hit: a key present in AllowedParams but missing
+// its validatorForParam case, which would reject every
+// policy.paramUpdate proposal targeting it.
+func TestValidatorForParamPaymasterTopUpFeeWei(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+		wantErr bool
+	}{
+		{name: "valid wei amount", payload: json.RawMessage("\"100000000000000\"")},
+		{name: "zero is allowed", payload: json.RawMessage("0")},
+		{name: "negative rejected", payload: json.RawMessage("-1"), wantErr: true},
+		{name: "non-numeric rejected", payload: json.RawMessage("\"not-a-number\""), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			validator := validatorForParam(ParamKeyPaymasterTopUpFeeWei)
+			if validator == nil {
+				t.Fatalf("expected validator for %s", ParamKeyPaymasterTopUpFeeWei)
+			}
+			err := validator(tc.payload)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validator error = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateParamPayloadAcceptsLegacyWrapperCaseInsensitive(t *testing.T) {
 	t.Parallel()
 
