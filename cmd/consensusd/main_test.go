@@ -38,19 +38,19 @@ GenesisFile = ""
 AllowAutogenesis = true
 ValidatorKeystorePath = %q
 
-[global.governance]
+[global.Governance]
 QuorumBPS = 6000
 PassThresholdBPS = 5000
 VotingPeriodSecs = %d
 
-[global.slashing]
+[global.Slashing]
 MinWindowSecs = 1
 MaxWindowSecs = 10
 
-[global.mempool]
+[global.Mempool]
 MaxBytes = 100
 
-[global.blocks]
+[global.Blocks]
 MaxTxs = 0
 `, dir, keystorePath, config.MinVotingPeriodSeconds)
 	if err := os.WriteFile(cfgPath, []byte(contents), 0o644); err != nil {

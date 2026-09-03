@@ -36,19 +36,19 @@ back to the default ceiling.【F:config/config.go†L107-L109】【F:config/conf
    ```bash
    cp config.toml /tmp/invalid-config.toml
    cat <<'EOCFG' >> /tmp/invalid-config.toml
-   [global.governance]
+   [global.Governance]
    QuorumBPS = 4000
    PassThresholdBPS = 5000
    VotingPeriodSecs = 1800
 
-   [global.slashing]
+   [global.Slashing]
    MinWindowSecs = 120
    MaxWindowSecs = 60
 
-   [global.mempool]
+   [global.Mempool]
    MaxBytes = 0
 
-   [global.blocks]
+   [global.Blocks]
    MaxTxs = 0
    EOCFG
    ```

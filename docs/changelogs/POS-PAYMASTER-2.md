@@ -7,4 +7,4 @@
 
 ## Operator Actions
 - Review `docs/ops/paymaster.md` for budgeting examples and alerting practices.
-- Set `[global.paymaster]` caps in the node configuration and monitor counters for hot merchants/devices.
+- Set `[global.Paymaster]` caps in the node configuration and monitor counters for hot merchants/devices.

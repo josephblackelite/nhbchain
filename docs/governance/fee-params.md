@@ -3,13 +3,13 @@
 There is no "feepolicy" governance module and no CLI path for governance fee
 param queries or proposals today — `cmd/nhbctl`'s entire command set is a
 single `migrate-keystore` subcommand. Fee behaviour is configured locally per
-node under the `[global.fees]` TOML block (`Fees` struct in
+node under the `[global.Fees]` TOML block (`Fees` struct in
 `config/types.go`). `core/node.go`'s `buildFeePolicyFromConfig` reads that
 block once at node startup and builds the runtime `fees.Policy` /
 `fees.DomainPolicy` consumed by `native/fees/apply.go`. Use this page as a
 reference when editing a node's `config.toml`.
 
-## Configurable fields (`[global.fees]`)
+## Configurable fields (`[global.Fees]`)
 
 | Field | Description |
 | --- | --- |
@@ -25,7 +25,7 @@ reference when editing a node's `config.toml`.
 
 ## Changing fee configuration
 
-Edit the `[global.fees]` block in the node's `config.toml` and restart the
+Edit the `[global.Fees]` block in the node's `config.toml` and restart the
 node. `buildFeePolicyFromConfig` only runs at startup, so there is no runtime
 or governance-driven way to change these values without a config edit and
 restart today.

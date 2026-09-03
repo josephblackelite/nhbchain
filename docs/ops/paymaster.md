@@ -4,7 +4,7 @@ The paymaster module can now enforce daily budgets at multiple scopes to prevent
 
 ## Configuration
 
-The global configuration file exposes three knobs under `[global.paymaster]`:
+The global configuration file exposes three knobs under `[global.Paymaster]`:
 
 | Key | Description |
 | --- | --- |
@@ -15,7 +15,7 @@ The global configuration file exposes three knobs under `[global.paymaster]`:
 Values accept the same integer formats as other monetary fields (for example `250000000000000000000`, `250e18`). Update the TOML file and restart consensusd to apply changes:
 
 ```toml
-[global.paymaster]
+[global.Paymaster]
 MerchantDailyCapWei = "250e18"
 DeviceDailyTxCap = 200
 GlobalDailyCapWei = "1000e18"
@@ -64,6 +64,6 @@ If a merchant reports throttled terminals:
 
 1. Check the latest `paymaster.throttled` events to confirm the scope and cap involved.
 2. Query counters for the merchant/device/day via RPC to evaluate actual consumption.
-3. Adjust the relevant cap(s) in `[global.paymaster]` if the budget is too conservative, or contact the merchant if volume looks abnormal.
+3. Adjust the relevant cap(s) in `[global.Paymaster]` if the budget is too conservative, or contact the merchant if volume looks abnormal.
 
 Remember that caps reset at midnight UTC. Counter queries shortly after rollover should show zeroed metrics, confirming the guard reset.

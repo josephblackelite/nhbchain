@@ -25,15 +25,15 @@ assets. The snippet below can be dropped into `config.toml` and edited with the
 correct bech32 addresses.
 
 ```toml
-[global.fees]
+[global.Fees]
 free_tier_tx_per_month = 100
 mdr_basis_points = 150
 
-[[global.fees.assets]]
+[[global.Fees.Assets]]
 asset = "NHB"
 owner_wallet = "nhb1exampleownerwalletxxxxxxxxxxxxxxxxxxxx"
 
-[[global.fees.assets]]
+[[global.Fees.Assets]]
 asset = "ZNHB"
 owner_wallet = "znhb1exampleproceedswalletxxxxxxxxxxxxxxxx"
 ```

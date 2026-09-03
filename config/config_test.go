@@ -330,7 +330,7 @@ func TestEnsureGlobalDefaultsLoyaltyDynamic(t *testing.T) {
 
 func TestEnsureGlobalDefaultsLoyaltyDynamicOverride(t *testing.T) {
 	const raw = `
-[global.loyalty.Dynamic]
+[global.Loyalty.Dynamic]
 TargetBPS = 75
 MinBPS = 15
 MaxBPS = 250
@@ -343,7 +343,7 @@ YearlyCapPctOfInitialSupply = 12.5
 EnableProRate = false
 EnforceProRate = false
 
-  [global.loyalty.Dynamic.PriceGuard]
+  [global.Loyalty.Dynamic.PriceGuard]
   Enabled = true
   PricePair = "ZNHB/EUR"
   TwapWindowSeconds = 7200
@@ -584,7 +584,7 @@ func TestLoadOverridesStakingAndPauses(t *testing.T) {
 	contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
 ValidatorKeystorePath = %s
 
-[global.staking]
+[global.Staking]
 AprBps = 2400
 PayoutPeriodDays = 14
 UnbondingDays = 21
@@ -624,6 +624,112 @@ TransferZNHB = true
 	}
 	if !cfg.Global.Pauses.Staking || !cfg.Global.Pauses.TransferZNHB {
 		t.Fatalf("unexpected pauses: %+v", cfg.Global.Pauses)
+	}
+}
+
+// TestLoadPreservesGlobalSectionOverrides is a direct regression test for a
+// production bug: ensureGlobalDefaults' meta.IsDefined(...) calls used
+// lowercase section names ("fees", "staking", ...) while every real TOML
+// file (including the checked-in config.toml and both live validators'
+// deployed configs) writes PascalCase section headers ([global.Fees],
+// [global.Staking], ...). BurntSushi/toml's IsDefined is case-sensitive on
+// the raw key text, so the check always returned false and the "only
+// default what the operator didn't set" merge always overwrote every
+// [global.X] section with the Go hardcoded default -- confirmed live via
+// nhb_getOwnerWalletStats returning the DefaultConfig() literal instead of
+// config.toml's real value. This test loads a config.toml using the exact
+// real-world PascalCase section casing with non-default values across
+// every affected [global.X] section, and asserts every one survives Load()
+// instead of being silently discarded.
+func TestLoadPreservesGlobalSectionOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	keystorePath := filepath.Join(dir, "validator.keystore")
+	const nonDefaultOwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+	contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+[global.Governance]
+QuorumBPS = 5500
+PassThresholdBPS = 6600
+VotingPeriodSecs = 12345
+
+[global.Slashing]
+MinWindowSecs = 111
+MaxWindowSecs = 222
+
+[global.Mempool]
+MaxBytes = 987654
+POSReservationBPS = 1234
+
+[global.Blocks]
+MaxTxs = 4321
+
+[global.Staking]
+AprBps = 2400
+PayoutPeriodDays = 14
+UnbondingDays = 21
+MinStakeWei = "1000000000000000000"
+MaxEmissionPerYearWei = "2000000000000000000"
+RewardAsset = "TNHB"
+CompoundDefault = true
+
+[global.Paymaster]
+DeviceDailyTxCap = 42
+  [global.Paymaster.AutoTopUp]
+  Token = "ZNHB"
+  CooldownSeconds = 999
+
+[global.Fees]
+FreeTierTxPerMonth = 250
+MDRBasisPoints = 175
+OwnerWallet = %s
+TransferFreeTierSpendWei = "10000000000000000000"
+TransferFeeCollector = %s
+TransferFeeBps = 33
+TransferFeeBpsZNHB = 44
+
+[global.Loyalty]
+  [global.Loyalty.Dynamic]
+  TargetBPS = 75
+  MinBPS = 15
+  MaxBPS = 250
+`, tomlQuoted(keystorePath), tomlQuoted(nonDefaultOwnerWallet), tomlQuoted(nonDefaultOwnerWallet))
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.Global.Governance.QuorumBPS != 5500 || cfg.Global.Governance.PassThresholdBPS != 6600 || cfg.Global.Governance.VotingPeriodSecs != 12345 {
+		t.Fatalf("Governance override discarded: %+v", cfg.Global.Governance)
+	}
+	if cfg.Global.Slashing.MinWindowSecs != 111 || cfg.Global.Slashing.MaxWindowSecs != 222 {
+		t.Fatalf("Slashing override discarded: %+v", cfg.Global.Slashing)
+	}
+	if cfg.Global.Mempool.MaxBytes != 987654 || cfg.Global.Mempool.POSReservationBPS != 1234 {
+		t.Fatalf("Mempool override discarded: %+v", cfg.Global.Mempool)
+	}
+	if cfg.Global.Blocks.MaxTxs != 4321 {
+		t.Fatalf("Blocks override discarded: %+v", cfg.Global.Blocks)
+	}
+	if cfg.Global.Staking.AprBps != 2400 || cfg.Global.Staking.RewardAsset != "TNHB" {
+		t.Fatalf("Staking override discarded: %+v", cfg.Global.Staking)
+	}
+	if cfg.Global.Paymaster.DeviceDailyTxCap != 42 || cfg.Global.Paymaster.AutoTopUp.CooldownSeconds != 999 {
+		t.Fatalf("Paymaster override discarded: %+v", cfg.Global.Paymaster)
+	}
+	if cfg.Global.Fees.OwnerWallet != nonDefaultOwnerWallet {
+		t.Fatalf("Fees.OwnerWallet override discarded: got %q, want %q (this is the exact production bug -- a discarded override silently falls back to the DefaultConfig() literal nhb1tctz3yvhrwztnp6ds3s48qp4jgfujcvhgxxpka)", cfg.Global.Fees.OwnerWallet, nonDefaultOwnerWallet)
+	}
+	if cfg.Global.Fees.MDRBasisPoints != 175 || cfg.Global.Fees.FreeTierTxPerMonth != 250 {
+		t.Fatalf("Fees override discarded: %+v", cfg.Global.Fees)
+	}
+	if cfg.Global.Loyalty.Dynamic.TargetBPS != 75 || cfg.Global.Loyalty.Dynamic.MinBPS != 15 || cfg.Global.Loyalty.Dynamic.MaxBPS != 250 {
+		t.Fatalf("Loyalty.Dynamic override discarded: %+v", cfg.Global.Loyalty.Dynamic)
 	}
 }
 

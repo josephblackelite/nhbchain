@@ -736,43 +736,43 @@ func (cfg *Config) ensureMempoolDefaults() {
 func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	defaults := defaultGlobalConfig()
 
-	if !meta.IsDefined("global", "governance", "QuorumBPS") {
+	if !meta.IsDefined("global", "Governance", "QuorumBPS") {
 		cfg.Global.Governance.QuorumBPS = defaults.Governance.QuorumBPS
 	}
-	if !meta.IsDefined("global", "governance", "PassThresholdBPS") {
+	if !meta.IsDefined("global", "Governance", "PassThresholdBPS") {
 		cfg.Global.Governance.PassThresholdBPS = defaults.Governance.PassThresholdBPS
 	}
-	if !meta.IsDefined("global", "governance", "VotingPeriodSecs") {
+	if !meta.IsDefined("global", "Governance", "VotingPeriodSecs") {
 		cfg.Global.Governance.VotingPeriodSecs = defaults.Governance.VotingPeriodSecs
 	}
 
-	if !meta.IsDefined("global", "slashing", "MinWindowSecs") {
+	if !meta.IsDefined("global", "Slashing", "MinWindowSecs") {
 		cfg.Global.Slashing.MinWindowSecs = defaults.Slashing.MinWindowSecs
 	}
-	if !meta.IsDefined("global", "slashing", "MaxWindowSecs") {
+	if !meta.IsDefined("global", "Slashing", "MaxWindowSecs") {
 		cfg.Global.Slashing.MaxWindowSecs = defaults.Slashing.MaxWindowSecs
 	}
 	if cfg.Global.Slashing.MaxWindowSecs < cfg.Global.Slashing.MinWindowSecs {
 		cfg.Global.Slashing.MaxWindowSecs = cfg.Global.Slashing.MinWindowSecs
 	}
 
-	if !meta.IsDefined("global", "mempool", "MaxBytes") {
+	if !meta.IsDefined("global", "Mempool", "MaxBytes") {
 		cfg.Global.Mempool.MaxBytes = defaults.Mempool.MaxBytes
 	}
-	if !meta.IsDefined("global", "mempool", "POSReservationBPS") {
+	if !meta.IsDefined("global", "Mempool", "POSReservationBPS") {
 		cfg.Global.Mempool.POSReservationBPS = defaults.Mempool.POSReservationBPS
 	}
-	if !meta.IsDefined("global", "blocks", "MaxTxs") {
+	if !meta.IsDefined("global", "Blocks", "MaxTxs") {
 		cfg.Global.Blocks.MaxTxs = defaults.Blocks.MaxTxs
 	}
 
-	if !meta.IsDefined("global", "staking", "AprBps") {
+	if !meta.IsDefined("global", "Staking", "AprBps") {
 		cfg.Global.Staking.AprBps = defaults.Staking.AprBps
 	}
-	if !meta.IsDefined("global", "staking", "PayoutPeriodDays") {
+	if !meta.IsDefined("global", "Staking", "PayoutPeriodDays") {
 		cfg.Global.Staking.PayoutPeriodDays = defaults.Staking.PayoutPeriodDays
 	}
-	if !meta.IsDefined("global", "staking", "UnbondingDays") {
+	if !meta.IsDefined("global", "Staking", "UnbondingDays") {
 		cfg.Global.Staking.UnbondingDays = defaults.Staking.UnbondingDays
 	}
 	if strings.TrimSpace(cfg.Global.Staking.MinStakeWei) == "" {
@@ -784,7 +784,7 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	if strings.TrimSpace(cfg.Global.Staking.RewardAsset) == "" {
 		cfg.Global.Staking.RewardAsset = defaults.Staking.RewardAsset
 	}
-	if !meta.IsDefined("global", "staking", "CompoundDefault") {
+	if !meta.IsDefined("global", "Staking", "CompoundDefault") {
 		cfg.Global.Staking.CompoundDefault = defaults.Staking.CompoundDefault
 	}
 
@@ -794,10 +794,10 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	if strings.TrimSpace(cfg.Global.Paymaster.GlobalDailyCapWei) == "" {
 		cfg.Global.Paymaster.GlobalDailyCapWei = defaults.Paymaster.GlobalDailyCapWei
 	}
-	if !meta.IsDefined("global", "paymaster", "DeviceDailyTxCap") {
+	if !meta.IsDefined("global", "Paymaster", "DeviceDailyTxCap") {
 		cfg.Global.Paymaster.DeviceDailyTxCap = defaults.Paymaster.DeviceDailyTxCap
 	}
-	if !meta.IsDefined("global", "paymaster", "AutoTopUp", "Token") {
+	if !meta.IsDefined("global", "Paymaster", "AutoTopUp", "Token") {
 		cfg.Global.Paymaster.AutoTopUp.Token = defaults.Paymaster.AutoTopUp.Token
 	}
 	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.MinBalanceWei) == "" {
@@ -809,7 +809,7 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.DailyCapWei) == "" {
 		cfg.Global.Paymaster.AutoTopUp.DailyCapWei = defaults.Paymaster.AutoTopUp.DailyCapWei
 	}
-	if !meta.IsDefined("global", "paymaster", "AutoTopUp", "CooldownSeconds") {
+	if !meta.IsDefined("global", "Paymaster", "AutoTopUp", "CooldownSeconds") {
 		cfg.Global.Paymaster.AutoTopUp.CooldownSeconds = defaults.Paymaster.AutoTopUp.CooldownSeconds
 	}
 	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.FundingAccount) == "" {
@@ -827,86 +827,86 @@ func (cfg *Config) ensureGlobalDefaults(meta toml.MetaData) {
 	if strings.TrimSpace(cfg.Global.Paymaster.AutoTopUp.Governance.ApproverRole) == "" {
 		cfg.Global.Paymaster.AutoTopUp.Governance.ApproverRole = defaults.Paymaster.AutoTopUp.Governance.ApproverRole
 	}
-	if !meta.IsDefined("global", "fees", "FreeTierTxPerMonth") {
+	if !meta.IsDefined("global", "Fees", "FreeTierTxPerMonth") {
 		cfg.Global.Fees.FreeTierTxPerMonth = defaults.Fees.FreeTierTxPerMonth
 	}
-	if !meta.IsDefined("global", "fees", "MDRBasisPoints") {
+	if !meta.IsDefined("global", "Fees", "MDRBasisPoints") {
 		cfg.Global.Fees.MDRBasisPoints = defaults.Fees.MDRBasisPoints
 	}
-	if !meta.IsDefined("global", "fees", "OwnerWallet") {
+	if !meta.IsDefined("global", "Fees", "OwnerWallet") {
 		cfg.Global.Fees.OwnerWallet = defaults.Fees.OwnerWallet
 	}
-	if !meta.IsDefined("global", "fees", "TransferFreeTierSpendWei") {
+	if !meta.IsDefined("global", "Fees", "TransferFreeTierSpendWei") {
 		cfg.Global.Fees.TransferFreeTierSpendWei = defaults.Fees.TransferFreeTierSpendWei
 	}
-	if !meta.IsDefined("global", "fees", "TransferFreeTierWindow") {
+	if !meta.IsDefined("global", "Fees", "TransferFreeTierWindow") {
 		cfg.Global.Fees.TransferFreeTierWindow = defaults.Fees.TransferFreeTierWindow
 	}
-	if !meta.IsDefined("global", "fees", "TransferFeeCollector") {
+	if !meta.IsDefined("global", "Fees", "TransferFeeCollector") {
 		cfg.Global.Fees.TransferFeeCollector = defaults.Fees.TransferFeeCollector
 	}
-	if !meta.IsDefined("global", "fees", "TransferFeeBps") {
+	if !meta.IsDefined("global", "Fees", "TransferFeeBps") {
 		cfg.Global.Fees.TransferFeeBps = defaults.Fees.TransferFeeBps
 	}
-	if !meta.IsDefined("global", "fees", "TransferFeeBpsZNHB") {
+	if !meta.IsDefined("global", "Fees", "TransferFeeBpsZNHB") {
 		cfg.Global.Fees.TransferFeeBpsZNHB = defaults.Fees.TransferFeeBpsZNHB
 	}
 	if len(cfg.Global.Fees.Assets) == 0 {
 		cfg.Global.Fees.Assets = append([]FeeAsset{}, defaults.Fees.Assets...)
 	}
 
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "TargetBPS") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "TargetBPS") {
 		cfg.Global.Loyalty.Dynamic.TargetBPS = defaults.Loyalty.Dynamic.TargetBPS
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "MinBPS") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "MinBPS") {
 		cfg.Global.Loyalty.Dynamic.MinBPS = defaults.Loyalty.Dynamic.MinBPS
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "MaxBPS") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "MaxBPS") {
 		cfg.Global.Loyalty.Dynamic.MaxBPS = defaults.Loyalty.Dynamic.MaxBPS
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "SmoothingStepBPS") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "SmoothingStepBPS") {
 		cfg.Global.Loyalty.Dynamic.SmoothingStepBPS = defaults.Loyalty.Dynamic.SmoothingStepBPS
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "CoverageMax") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "CoverageMax") {
 		cfg.Global.Loyalty.Dynamic.CoverageMax = defaults.Loyalty.Dynamic.CoverageMax
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "CoverageLookbackDays") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "CoverageLookbackDays") {
 		cfg.Global.Loyalty.Dynamic.CoverageLookbackDays = defaults.Loyalty.Dynamic.CoverageLookbackDays
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "DailyCapPctOf7dFees") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "DailyCapPctOf7dFees") {
 		cfg.Global.Loyalty.Dynamic.DailyCapPctOf7dFees = defaults.Loyalty.Dynamic.DailyCapPctOf7dFees
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "DailyCapUSD") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "DailyCapUSD") {
 		cfg.Global.Loyalty.Dynamic.DailyCapUSD = defaults.Loyalty.Dynamic.DailyCapUSD
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "YearlyCapPctOfInitialSupply") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "YearlyCapPctOfInitialSupply") {
 		cfg.Global.Loyalty.Dynamic.YearlyCapPctOfInitialSupply = defaults.Loyalty.Dynamic.YearlyCapPctOfInitialSupply
 	}
 	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.PriceGuard.PricePair) == "" {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.PricePair = defaults.Loyalty.Dynamic.PriceGuard.PricePair
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "TwapWindowSeconds") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "PriceGuard", "TwapWindowSeconds") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.TwapWindowSeconds = defaults.Loyalty.Dynamic.PriceGuard.TwapWindowSeconds
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "PriceMaxAgeSeconds") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "PriceGuard", "PriceMaxAgeSeconds") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.PriceMaxAgeSeconds = defaults.Loyalty.Dynamic.PriceGuard.PriceMaxAgeSeconds
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "Enabled") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "PriceGuard", "Enabled") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.Enabled = defaults.Loyalty.Dynamic.PriceGuard.Enabled
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "MaxDeviationBPS") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "PriceGuard", "MaxDeviationBPS") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS = defaults.Loyalty.Dynamic.PriceGuard.MaxDeviationBPS
 	}
 	if strings.TrimSpace(cfg.Global.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei) == "" {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei = defaults.Loyalty.Dynamic.PriceGuard.FallbackMinEmissionZNHBWei
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "PriceGuard", "UseLastGoodPriceFallback") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "PriceGuard", "UseLastGoodPriceFallback") {
 		cfg.Global.Loyalty.Dynamic.PriceGuard.UseLastGoodPriceFallback = defaults.Loyalty.Dynamic.PriceGuard.UseLastGoodPriceFallback
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "EnableProRate") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "EnableProRate") {
 		cfg.Global.Loyalty.Dynamic.EnableProRate = defaults.Loyalty.Dynamic.EnableProRate
 	}
-	if !meta.IsDefined("global", "loyalty", "Dynamic", "EnforceProRate") {
+	if !meta.IsDefined("global", "Loyalty", "Dynamic", "EnforceProRate") {
 		cfg.Global.Loyalty.Dynamic.EnforceProRate = defaults.Loyalty.Dynamic.EnforceProRate
 	}
 }

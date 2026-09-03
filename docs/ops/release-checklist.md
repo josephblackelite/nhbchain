@@ -38,7 +38,7 @@ proration queue.
 ### Fee routing wallets must be set
 
 * `global.fees.owner_wallet` must contain the main fee collector address.
-* Every entry in `[[global.fees.assets]]` needs a non-empty `owner_wallet`.
+* Every entry in `[[global.Fees.Assets]]` needs a non-empty `owner_wallet`.
 
 **Remediation:** fill in the treasury addresses for every asset that will be
 settled on mainnet. Leaving these blank forces the check to fail.

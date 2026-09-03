@@ -33,22 +33,22 @@ ServerCAFile = ""
 # above applies here as well.
 RPCAllowInsecure = false
 
-[global.staking]
+[global.Staking]
 MaxEmissionPerYearWei = "0"
 
-[global.pauses]
+[global.Pauses]
 Staking = true
 
-[global.fees]
+[global.Fees]
 free_tier_tx_per_month = 100
 mdr_basis_points = 150
 owner_wallet = ""
 
-[[global.fees.assets]]
+[[global.Fees.Assets]]
 asset = "NHB"
 mdr_basis_points = 150
 owner_wallet = ""
 
-[global.loyalty.Dynamic]
+[global.Loyalty.Dynamic]
 enableprorate = false
 EnforceProRate = false

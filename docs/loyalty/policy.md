@@ -21,7 +21,7 @@ The loyalty engine ships with an adaptive controller that gently adjusts the bas
 | `EnableProRate` | Toggles queue-and-settle behaviour for base rewards; disabling settles immediately. | `true` |
 | `EnforceProRate` | Prevents disabling pro-rate mode in production environments unless explicitly overridden. | `true` |
 
-Operators can override these settings in `config.toml` under the `[global.loyalty.Dynamic]` section. Leave any field unset (or zero) to continue using the compiled defaults above.
+Operators can override these settings in `config.toml` under the `[global.Loyalty.Dynamic]` section. Leave any field unset (or zero) to continue using the compiled defaults above.
 
 ## Yearly emission cap
 

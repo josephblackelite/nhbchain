@@ -65,30 +65,30 @@ RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
 # Backend = "leveldb"
 # LevelDBPath = "/var/lib/nhb/rpc/swap-nonces"
 
-[global.staking]
+[global.Staking]
 MaxEmissionPerYearWei = "5000000000000000000"
 
-[global.pauses]
+[global.Pauses]
 Consensus = false
 Mempool = false
 Staking = false
 
-[global.fees]
+[global.Fees]
 free_tier_tx_per_month = 100
 mdr_basis_points = 150
 owner_wallet = ""
 
-[[global.fees.assets]]
+[[global.Fees.Assets]]
 asset = "NHB"
 mdr_basis_points = 150
 owner_wallet = ""
 
-[[global.fees.assets]]
+[[global.Fees.Assets]]
 asset = "ZNHB"
 mdr_basis_points = 150
 owner_wallet = ""
 
-[global.loyalty.Dynamic]
+[global.Loyalty.Dynamic]
 targetbps = 50
 minbps = 25
 maxbps = 100
@@ -101,7 +101,7 @@ yearlycappctofinitialsupply = 10
 enableprorate = true
 EnforceProRate = true
 
-  [global.loyalty.Dynamic.PriceGuard]
+  [global.Loyalty.Dynamic.PriceGuard]
   enabled = true
   pricepair = "ZNHB/USD"
   twapwindowseconds = 7200
