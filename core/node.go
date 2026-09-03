@@ -4277,7 +4277,7 @@ func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeig
 	}
 
 	manager := nhbstate.NewManager(state.Trie)
-	slasher := statebank.NewValidatorSlasher(manager)
+	slasher := statebank.NewValidatorSlasher(manager, n.escrowTreasury)
 	engine := penalty.NewEngine(catalog, n.potsoLedger, slasher)
 
 	fromHeight := uint64(0)

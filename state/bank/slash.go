@@ -32,16 +32,28 @@ func (s *NoopSlasher) Slash(addr [20]byte, amount *big.Int) error {
 	return nil
 }
 
-// ValidatorSlasher applies penalty deductions directly to a validator's bonded ZNHB.
+// ValidatorSlasher applies penalty deductions directly to a validator's
+// bonded ZNHB and credits the forfeited amount to a treasury address.
+//
+// ZNHB is a hard-fixed-supply asset (no protocol path to mint more of it
+// after genesis) -- forfeited stake is moved to the treasury's liquid
+// BalanceZNHB, never burned/discarded and never routed through any
+// supply-adjustment call, so total ZNHB supply is unaffected by slashing
+// either way (the locked ZNHB being moved was already counted in supply).
+// No admin action selects the destination -- it is the same protocol-level
+// treasury address genesis/config.toml already designates for ZNHB fee
+// routing, so slashing cannot be "gamed" by an operator choosing where
+// penalties land.
 type ValidatorSlasher struct {
-	mgr *state.Manager
+	mgr      *state.Manager
+	treasury [20]byte
 }
 
 // Ensure ValidatorSlasher implements Slasher
 var _ Slasher = (*ValidatorSlasher)(nil)
 
-func NewValidatorSlasher(mgr *state.Manager) *ValidatorSlasher {
-	return &ValidatorSlasher{mgr: mgr}
+func NewValidatorSlasher(mgr *state.Manager, treasury [20]byte) *ValidatorSlasher {
+	return &ValidatorSlasher{mgr: mgr, treasury: treasury}
 }
 
 func (s *ValidatorSlasher) Slash(addr [20]byte, amount *big.Int) error {
@@ -79,5 +91,26 @@ func (s *ValidatorSlasher) Slash(addr [20]byte, amount *big.Int) error {
 		}
 	}
 
-	return s.mgr.PutAccount(addr[:], account)
+	if err := s.mgr.PutAccount(addr[:], account); err != nil {
+		return err
+	}
+
+	if penalty.Sign() <= 0 {
+		return nil
+	}
+
+	// A validator slashing itself (self-stake) would otherwise re-read the
+	// same account it just wrote above -- refetch rather than reuse the
+	// in-memory `account` value so the credit below is applied on top of
+	// the just-persisted debit, not a stale pre-debit snapshot.
+	treasuryAccount, err := s.mgr.GetAccount(s.treasury[:])
+	if err != nil {
+		return err
+	}
+	if treasuryAccount.BalanceZNHB == nil {
+		treasuryAccount.BalanceZNHB = big.NewInt(0)
+	}
+	treasuryAccount.BalanceZNHB.Add(treasuryAccount.BalanceZNHB, penalty)
+
+	return s.mgr.PutAccount(s.treasury[:], treasuryAccount)
 }
