@@ -239,15 +239,28 @@ ClientVersion = ""
 
 [global]
   [global.Governance]
-    QuorumBPS = 0
-    PassThresholdBPS = 0
-    VotingPeriodSecs = 0
+    # Previously placeholder zero values. Exactly like the Staking section
+    # below, these keys being PRESENT (not absent) meant the case-sensitivity
+    # bug in config/config.go's IsDefined-gated merge (fixed this session)
+    # was the only thing keeping the network on sane defaults -- with that
+    # bug fixed, these literal zeros would otherwise start applying for
+    # real: 0% quorum/pass thresholds and a 0-second voting period would
+    # break governance outright. Corrected to match the Go-level defaults
+    # (config/config.go's DefaultConfig()), which is what the network has
+    # actually been running on this whole time.
+    QuorumBPS = 6000
+    PassThresholdBPS = 5000
+    VotingPeriodSecs = 604800
   [global.Slashing]
-    MinWindowSecs = 0
-    MaxWindowSecs = 0
+    # Same issue as Governance above -- corrected to match DefaultConfig().
+    MinWindowSecs = 60
+    MaxWindowSecs = 600
   [global.Mempool]
-    MaxBytes = 0
-    POSReservationBPS = 0
+    # Same issue as Governance above -- corrected to match DefaultConfig().
+    # A literal MaxBytes=0 would have meant the mempool could accept zero
+    # bytes of pending transactions once the config bug was fixed.
+    MaxBytes = 16777216
+    POSReservationBPS = 1500
   [global.Blocks]
     MaxTxs = 500
   [global.Staking]
@@ -356,7 +369,17 @@ ClientVersion = ""
         MaxDeviationBPS = 300
         PriceMaxAgeSeconds = 600
         FallbackMinEmissionZNHBWei = ""
-        UseLastGoodPriceFallback = false
+        # Was literally `false` here, but -- like Governance/Slashing/Mempool
+        # above -- the config-loading bug fixed this session meant this key
+        # was never actually being read: the node has genuinely been running
+        # on UseLastGoodPriceFallback=true (config/config.go's DefaultConfig())
+        # this whole time. Set to true here so fixing the loading bug doesn't
+        # also silently flip this real financial-safety knob (fail-open vs
+        # fail-closed during a loyalty price-oracle outage) as a side effect.
+        # Whether fail-closed is actually the better policy going forward is
+        # a real, separate decision worth making deliberately, not bundled
+        # into a config-loader bugfix.
+        UseLastGoodPriceFallback = true
 
 [consensus]
   ProposalTimeout = "0s"

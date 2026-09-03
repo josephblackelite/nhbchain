@@ -73,6 +73,12 @@ Consensus = false
 Mempool = false
 Staking = false
 
+# owner_wallet below MUST be filled in with a real treasury address before
+# using this file to bootstrap a node. It used to be silently ignored (a
+# config-loading bug meant every [global.X] section always fell back to the
+# Go-hardcoded default regardless of what was written here) -- now that
+# that bug is fixed, an empty owner_wallet applies literally as empty,
+# not as a safe fallback.
 [global.Fees]
 free_tier_tx_per_month = 100
 mdr_basis_points = 150
