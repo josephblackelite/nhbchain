@@ -1,11 +1,14 @@
 package core
 
 import (
+	"encoding/hex"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/rlp"
+	"google.golang.org/protobuf/proto"
 
+	"nhbchain/consensus/codec"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/tokenomics/curve"
 	"nhbchain/core/types"
@@ -411,4 +414,140 @@ func TestApplySwapMintAndBurn_Disabled(t *testing.T) {
 
 func curveWeiPerToken() *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(curve.Decimals)), nil)
+}
+
+// TestCommitBlockPersistsBuyZNHBCostOnlyAfterRealCommit guards the design's
+// central determinism/safety invariant for the buyZNHBCostMetaPrefix index
+// (core/blockchain.go's BuyZNHBCostMetaKey, written from core/node.go's
+// commitBlock): the NHB cost of a BuyZNHB transaction must be persisted if
+// and only if that transaction's block actually, durably commits via
+// n.chain.AddBlock -- never from any of the three speculative/discardable
+// ApplyTransaction call sites, each of which runs against a throwaway
+// stateCopy sharing the same underlying physical KV store as the live trie
+// (see commitBlock's doc comment): CreateBlock's own buildProposalState
+// draft pass, ValidateBlock's independent re-application, and SimulateTx
+// (backing nhb_getTransactionReceipt). A write embedded in any of those
+// would durably record a phantom cost for a transaction that never actually
+// committed, or one later re-simulated against stale state. This test
+// drives the exact same transaction through all three speculative paths
+// first, asserting no record appears after any of them, then through the
+// real CommitBlock, asserting the record appears afterward with the exact
+// nhbCost applyBuyZNHB computed and credited -- cross-checked against the
+// buyer's own independently-read post-commit balance delta, not merely
+// self-consistent with the persisted value.
+func TestCommitBlockPersistsBuyZNHBCostOnlyAfterRealCommit(t *testing.T) {
+	node := newTestNode(t)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+	if err := node.ConfigureAdminWalletForTests(adminAddr); err != nil {
+		t.Fatalf("configure admin wallet: %v", err)
+	}
+
+	buyerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate buyer key: %v", err)
+	}
+	buyerAddr := buyerKey.PubKey().Address().Bytes()
+	funding := new(big.Int).Mul(big.NewInt(1_000_000), curveWeiPerToken())
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return m.PutAccount(buyerAddr, &types.Account{BalanceNHB: funding, BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	}); err != nil {
+		t.Fatalf("seed buyer: %v", err)
+	}
+
+	znhbAmount := new(big.Int).Mul(big.NewInt(1_000), curveWeiPerToken())
+	cost := expectedCost(t, big.NewInt(0), znhbAmount)
+	maxNHB := new(big.Int).Add(cost, big.NewInt(1))
+	tx := buyZNHBTx(t, 0, znhbAmount, maxNHB)
+	if err := tx.Sign(buyerKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	txHashBytes, err := tx.Hash()
+	if err != nil {
+		t.Fatalf("hash transaction: %v", err)
+	}
+	metaKey := BuyZNHBCostMetaKey(hex.EncodeToString(txHashBytes))
+
+	assertNoCostRecorded := func(step string) {
+		t.Helper()
+		raw, err := node.Chain().GetExplorerMeta(metaKey)
+		if err != nil {
+			t.Fatalf("%s: GetExplorerMeta returned an error: %v", step, err)
+		}
+		if len(raw) != 0 {
+			t.Fatalf("%s: buyZNHB cost must not be recorded before a real commit, got %q", step, raw)
+		}
+	}
+
+	// Speculative path 1: CreateBlock's own buildProposalState draft pass.
+	block, err := node.CreateBlock([]*types.Transaction{tx})
+	if err != nil {
+		t.Fatalf("create block with buyZNHB tx: %v", err)
+	}
+	assertNoCostRecorded("after CreateBlock")
+
+	// Speculative path 2: ValidateBlock independently re-applies the same
+	// block's transactions against its own fresh, throwaway stateCopy.
+	if err := node.ValidateBlock(block); err != nil {
+		t.Fatalf("validate block: %v", err)
+	}
+	assertNoCostRecorded("after ValidateBlock")
+
+	// Speculative path 3: SimulateTx applies the transaction against yet
+	// another throwaway stateCopy -- never n.state, never followed by
+	// AddBlock.
+	protoTx, err := codec.TransactionToProto(tx)
+	if err != nil {
+		t.Fatalf("convert tx to proto: %v", err)
+	}
+	txBytes, err := proto.Marshal(protoTx)
+	if err != nil {
+		t.Fatalf("marshal proto tx: %v", err)
+	}
+	if _, err := node.SimulateTx(txBytes); err != nil {
+		t.Fatalf("simulate tx: %v", err)
+	}
+	assertNoCostRecorded("after SimulateTx")
+
+	// The real thing: commitBlock (via CommitBlock) actually applies this
+	// transaction for real and, only after n.chain.AddBlock succeeds,
+	// persists its NHB cost.
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block with buyZNHB tx: %v", err)
+	}
+
+	raw, err := node.Chain().GetExplorerMeta(metaKey)
+	if err != nil {
+		t.Fatalf("GetExplorerMeta after commit: %v", err)
+	}
+	got, ok := new(big.Int).SetString(string(raw), 10)
+	if !ok {
+		t.Fatalf("persisted buyZNHB cost %q is not a valid decimal amount", raw)
+	}
+	if got.Cmp(cost) != 0 {
+		t.Fatalf("persisted buyZNHB cost = %s, want %s (the exact nhbCost applyBuyZNHB computed and credited)", got, cost)
+	}
+
+	// Cross-check against the buyer's own real, independently-read balance
+	// delta -- not just internal self-consistency with the curve helper.
+	var buyerPost *big.Int
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		account, err := m.GetAccount(buyerAddr)
+		if err != nil {
+			return err
+		}
+		buyerPost = account.BalanceNHB
+		return nil
+	}); err != nil {
+		t.Fatalf("read buyer post-commit balance: %v", err)
+	}
+	actualDelta := new(big.Int).Sub(funding, buyerPost)
+	if got.Cmp(actualDelta) != 0 {
+		t.Fatalf("persisted buyZNHB cost %s does not match buyer's actual NHB balance delta %s", got, actualDelta)
+	}
 }

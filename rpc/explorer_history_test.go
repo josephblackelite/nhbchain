@@ -464,6 +464,16 @@ func TestGetTransactionHistoryLendingDirectionField(t *testing.T) {
 // admin's own history query found nothing for it at all. Also confirms
 // formatTxType/assetLabel actually resolve BuyZNHB to a friendly name
 // instead of falling through to raw hex ("0x19").
+//
+// Also covers the buyZNHBCostMetaPrefix index (core/blockchain.go,
+// core/node.go's commitBlock) end to end: the admin's history for a BuyZNHB
+// transaction committed after that index shipped must show BOTH legs --
+// outgoing ZNHB (buildAdminBuyZNHBCreditRecord, pre-existing) and incoming
+// NHB (buildAdminBuyZNHBDebitRecord, new) -- with the NHB amount checked
+// against the buyer's own real BalanceNHB delta read independently via
+// node.WithState, not against anything buildAdminBuyZNHBDebitRecord itself
+// produced, so this test cannot pass merely by echoing back whatever value
+// the code under test happened to persist.
 func TestGetTransactionHistoryBuyZNHBShowsAdminCredit(t *testing.T) {
 	db := storage.NewMemDB()
 	t.Cleanup(func() { db.Close() })
@@ -545,6 +555,26 @@ func TestGetTransactionHistoryBuyZNHBShowsAdminCredit(t *testing.T) {
 		t.Fatalf("commit block with buyZNHB tx: %v", err)
 	}
 
+	// Independently-verifiable ground truth for the NHB cost: read the
+	// buyer's real post-commit balance straight out of state (not through
+	// any of the code paths under test) and diff it against their known
+	// starting balance.
+	var buyerPostBalance *big.Int
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		account, err := m.GetAccount(buyerAddr[:])
+		if err != nil {
+			return err
+		}
+		buyerPostBalance = account.BalanceNHB
+		return nil
+	}); err != nil {
+		t.Fatalf("read buyer post-purchase balance: %v", err)
+	}
+	actualNHBCost := new(big.Int).Sub(buyerBalance, buyerPostBalance)
+	if actualNHBCost.Sign() <= 0 {
+		t.Fatalf("expected the purchase to have actually cost the buyer NHB, got delta %s", actualNHBCost)
+	}
+
 	server := newTestServer(t, node, nil, ServerConfig{})
 
 	buyerCrypto, err := crypto.NewAddress(crypto.NHBPrefix, buyerAddr[:])
@@ -571,22 +601,61 @@ func TestGetTransactionHistoryBuyZNHBShowsAdminCredit(t *testing.T) {
 	}
 
 	adminHistory := fetchHistory(t, server, adminCrypto.String())
-	if len(adminHistory) != 1 {
-		t.Fatalf("expected exactly one synthesized admin history entry, got %d: %+v", len(adminHistory), adminHistory)
+	if len(adminHistory) != 2 {
+		t.Fatalf("expected exactly two synthesized admin history entries (outgoing ZNHB + incoming NHB), got %d: %+v", len(adminHistory), adminHistory)
 	}
-	if adminHistory[0].Hash != txHash {
-		t.Fatalf("expected admin entry to reference the same buyZNHB tx hash: got %s want %s", adminHistory[0].Hash, txHash)
+	var znhbLeg, nhbLeg *ExplorerTransactionResult
+	for i := range adminHistory {
+		switch adminHistory[i].Asset {
+		case "ZNHB":
+			znhbLeg = &adminHistory[i]
+		case "NHB":
+			nhbLeg = &adminHistory[i]
+		}
 	}
-	if adminHistory[0].Type != "BuyZNHB" {
-		t.Fatalf("expected admin's synthesized entry type BuyZNHB, got %q", adminHistory[0].Type)
+	if znhbLeg == nil {
+		t.Fatalf("expected an outgoing-ZNHB admin entry, got %+v", adminHistory)
 	}
-	if adminHistory[0].Asset != "ZNHB" || adminHistory[0].Amount != znhbAmount.String() {
-		t.Fatalf("unexpected admin entry asset/amount: %+v", adminHistory[0])
+	if nhbLeg == nil {
+		t.Fatalf("expected an incoming-NHB admin entry (buyZNHBCostMetaPrefix index), got %+v", adminHistory)
 	}
-	if adminHistory[0].Direction != "outgoing" {
-		t.Fatalf("expected admin direction outgoing (ZNHB left the admin wallet), got %q", adminHistory[0].Direction)
+
+	if znhbLeg.Hash != txHash {
+		t.Fatalf("expected admin ZNHB entry to reference the same buyZNHB tx hash: got %s want %s", znhbLeg.Hash, txHash)
 	}
-	if adminHistory[0].To != buyerCrypto.String() {
-		t.Fatalf("expected admin entry's To to be the buyer: got %s want %s", adminHistory[0].To, buyerCrypto.String())
+	if znhbLeg.Type != "BuyZNHB" {
+		t.Fatalf("expected admin's synthesized ZNHB entry type BuyZNHB, got %q", znhbLeg.Type)
+	}
+	if znhbLeg.Amount != znhbAmount.String() {
+		t.Fatalf("unexpected admin ZNHB entry amount: %+v", znhbLeg)
+	}
+	if znhbLeg.Direction != "outgoing" {
+		t.Fatalf("expected admin ZNHB direction outgoing (ZNHB left the admin wallet), got %q", znhbLeg.Direction)
+	}
+	if znhbLeg.To != buyerCrypto.String() {
+		t.Fatalf("expected admin ZNHB entry's To to be the buyer: got %s want %s", znhbLeg.To, buyerCrypto.String())
+	}
+
+	if nhbLeg.Hash != txHash {
+		t.Fatalf("expected admin NHB entry to reference the same buyZNHB tx hash: got %s want %s", nhbLeg.Hash, txHash)
+	}
+	if nhbLeg.Type != "BuyZNHB" {
+		t.Fatalf("expected admin's synthesized NHB entry type BuyZNHB, got %q", nhbLeg.Type)
+	}
+	if nhbLeg.Direction != "incoming" {
+		t.Fatalf("expected admin NHB direction incoming (NHB entered the admin wallet), got %q", nhbLeg.Direction)
+	}
+	if nhbLeg.From != buyerCrypto.String() {
+		t.Fatalf("expected admin NHB entry's From to be the buyer: got %s want %s", nhbLeg.From, buyerCrypto.String())
+	}
+	if nhbLeg.To != adminCrypto.String() {
+		t.Fatalf("expected admin NHB entry's To to be the admin wallet: got %s want %s", nhbLeg.To, adminCrypto.String())
+	}
+	// The load-bearing assertion: the persisted/surfaced NHB amount must
+	// exactly match what was actually debited from the buyer's own balance,
+	// independently read via node.WithState above -- not merely internally
+	// self-consistent with whatever buildAdminBuyZNHBDebitRecord computed.
+	if nhbLeg.Amount != actualNHBCost.String() {
+		t.Fatalf("admin NHB entry amount = %s, want %s (buyer's actual NHB balance delta)", nhbLeg.Amount, actualNHBCost.String())
 	}
 }

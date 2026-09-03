@@ -64,7 +64,27 @@ var (
 	// hash, and any node can always safely recompute it from its own block
 	// history if it's ever lost or corrupted.
 	explorerMetaPrefix = []byte("explorermeta:")
+	// buyZNHBCostMetaPrefix namespaces the per-transaction NHB cost record
+	// for a committed TxTypeBuyZNHB transaction (see BuyZNHBCostMetaKey and
+	// Node.commitBlock in core/node.go). Stored as a name under
+	// explorerMetaPrefix via PutExplorerMeta/GetExplorerMeta -- not a new
+	// storage subsystem, just a distinct name prefix within the existing
+	// non-consensus blob store -- so it inherits every guarantee documented
+	// on explorerMetaPrefix above: never hashed into the state root or block
+	// hash, never touched by trie Commit/PendingRoot, safe to lose or omit.
+	buyZNHBCostMetaPrefix = "buyznhbcost:"
 )
+
+// BuyZNHBCostMetaKey builds the GetExplorerMeta/PutExplorerMeta name for the
+// NHB cost record of the BuyZNHB transaction identified by txHash. Strips an
+// optional leading "0x"/"0X" and lowercases the remaining hex before keying,
+// so a writer and reader that disagree on hash formatting (one passing
+// "0xabc...", the other "abc...") still land on the same key rather than
+// silently missing each other.
+func BuyZNHBCostMetaKey(txHash string) string {
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(txHash, "0x"), "0X")
+	return buyZNHBCostMetaPrefix + strings.ToLower(trimmed)
+}
 
 func txHashKey(hash []byte) []byte {
 	key := make([]byte, len(txHashPrefix)+len(hash))

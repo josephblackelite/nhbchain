@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"nhbchain/core"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 )
@@ -427,6 +428,16 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 						history = append(history, *record)
 						recordedOne = true
 					}
+					// The incoming NHB leg (see buildAdminBuyZNHBDebitRecord's
+					// doc comment): absent, not wrong, for a pre-fix historical
+					// BuyZNHB transaction that never had its cost persisted --
+					// buildAdminBuyZNHBDebitRecord returns an error in that
+					// case and this second row is simply omitted, exactly like
+					// any other lookup miss in this loop.
+					if debit, debitErr := buildAdminBuyZNHBDebitRecord(chain, tx, txHash, blockHash, height, block.Header.Timestamp, canonical); debitErr == nil {
+						history = append(history, *debit)
+						recordedOne = true
+					}
 				}
 				if recordedOne {
 					txCount++
@@ -637,10 +648,14 @@ func buildExplorerTransactionResult(tx *types.Transaction, txHash string, blockH
 		// transaction without replaying the bonding curve: the purchase
 		// only ever succeeds for the full requested ZNHBAmount (no partial
 		// fills), unlike the NHB side (nhbCost), which is computed on-chain
-		// from cumulative sale state at execution time and isn't otherwise
-		// recorded anywhere -- so it's deliberately not shown here rather
-		// than approximated from MaxNHBAmount (the buyer's slippage
-		// ceiling, not what they actually paid).
+		// from cumulative sale state at execution time -- so it's
+		// deliberately not shown here rather than approximated from
+		// MaxNHBAmount (the buyer's slippage ceiling, not what they actually
+		// paid). See buildAdminBuyZNHBDebitRecord for where that exact NHB
+		// cost is now surfaced instead (as the admin wallet's synthesized
+		// incoming-NHB row in buildAddressActivity, not here on the buyer's
+		// own outgoing-ZNHB record), sourced from the buyZNHBCostMetaPrefix
+		// index rather than re-derived.
 		var payload struct {
 			ZNHBAmount   *big.Int `json:"znhbAmount"`
 			MaxNHBAmount *big.Int `json:"maxNHBAmount"`
@@ -1038,18 +1053,26 @@ func isPaymentLikeType(t types.TxType) bool {
 	}
 }
 
-// buildAdminBuyZNHBCreditRecord synthesizes the admin wallet's side of a
-// BuyZNHB transaction: real ZNHB left the admin wallet's balance (see
-// applyBuyZNHB), but the admin wallet is never that transaction's own
+// buildAdminBuyZNHBCreditRecord synthesizes the admin wallet's ZNHB-outgoing
+// side of a BuyZNHB transaction: real ZNHB left the admin wallet's balance
+// (see applyBuyZNHB), but the admin wallet is never that transaction's own
 // From/To, so buildExplorerTransactionResult's ordinary record (built for
 // the buyer) never surfaces for the admin's own history. Deliberately shows
 // the ZNHB side only (exact -- see buildExplorerTransactionResult's
 // BuyZNHB doc comment), not an approximated NHB revenue figure: the real
 // NHB cost is computed on-chain from the bonding curve's cumulative-sale
-// state at execution time and isn't otherwise recorded anywhere retrievable
-// from historical block data alone, so showing MaxNHBAmount (the buyer's
-// slippage ceiling) as if it were the settled amount would be a real
-// number that's actively wrong, worse for an audit trail than omitting it.
+// state at execution time. As of the buyZNHBCostMetaPrefix index (see
+// core/blockchain.go's BuyZNHBCostMetaKey and core/node.go's commitBlock),
+// that exact NHB cost IS now durably retrievable for any BuyZNHB committed
+// after that index shipped -- see buildAdminBuyZNHBDebitRecord below, which
+// synthesizes the matching incoming-NHB row from it. This function still
+// deliberately shows ZNHB only, never MaxNHBAmount (the buyer's slippage
+// ceiling) as if it were the settled amount: for a BuyZNHB transaction
+// committed BEFORE the cost index existed, the exact NHB cost remains
+// genuinely unrecoverable from ordinary block data alone (see
+// buildAdminBuyZNHBDebitRecord's doc comment), and an approximation would be
+// a real number that's actively wrong -- worse for an audit trail than the
+// incoming-NHB row simply being absent for that older transaction.
 func buildAdminBuyZNHBCreditRecord(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64, timestamp int64, adminAddress string) (*ExplorerTransactionResult, error) {
 	var payload struct {
 		ZNHBAmount   *big.Int `json:"znhbAmount"`
@@ -1081,6 +1104,73 @@ func buildAdminBuyZNHBCreditRecord(tx *types.Transaction, txHash string, blockHa
 		From:          adminAddress,
 		To:            buyer,
 		Direction:     "outgoing",
+	}
+	if len(blockHash) > 0 {
+		result.BlockHash = ensureHexPrefix(hex.EncodeToString(blockHash))
+	}
+	return result, nil
+}
+
+// buildAdminBuyZNHBDebitRecord synthesizes the admin wallet's incoming-NHB
+// side of a BuyZNHB transaction -- the counterpart to
+// buildAdminBuyZNHBCreditRecord's outgoing-ZNHB row, together giving a
+// BuyZNHB sale the same double-entry rendering (two rows for one atomic
+// multi-asset transaction) already used elsewhere in this file. The NHB
+// amount comes from core/blockchain.go's BuyZNHBCostMetaKey index, populated
+// by core/node.go's commitBlock strictly after a BuyZNHB transaction's block
+// actually commits (never from any speculative ValidateBlock/CreateBlock/
+// SimulateTx pass -- see commitBlock's doc comment for why that split
+// matters) with the exact nhbCost applyBuyZNHB already credited to this same
+// admin wallet's BalanceNHB in that same transaction -- not re-derived or
+// approximated here.
+//
+// Returns an error -- and the caller simply omits this row, never showing a
+// wrong number -- when that index has no entry for txHash. That is expected
+// and permanent for any BuyZNHB transaction committed before this index
+// shipped (the two already-running validators' pre-existing history): the
+// exact cost lived only in an in-memory, per-process, restart-losing event
+// list (StateProcessor.events) until this index started persisting it, so
+// it is not recoverable from ordinary block data alone after the fact
+// (short of a dedicated offline historical-replay tool, out of scope here).
+// It should not otherwise happen for a transaction committed after this
+// index shipped -- see extractBuyZNHBCostRecord's doc comment in
+// core/node.go for the (rare, purely local, never consensus-relevant) gap
+// that could still produce a miss: a disk write failure on this one
+// validator at the exact moment of this one commit.
+func buildAdminBuyZNHBDebitRecord(chain *core.Blockchain, tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64, timestamp int64, adminAddress string) (*ExplorerTransactionResult, error) {
+	if chain == nil {
+		return nil, fmt.Errorf("chain unavailable")
+	}
+	raw, err := chain.GetExplorerMeta(core.BuyZNHBCostMetaKey(txHash))
+	if err != nil || len(raw) == 0 {
+		return nil, fmt.Errorf("buyZNHB cost not recorded for tx %s", txHash)
+	}
+	nhbCost, ok := new(big.Int).SetString(string(raw), 10)
+	if !ok || nhbCost == nil {
+		return nil, fmt.Errorf("buyZNHB cost meta for tx %s is not a valid decimal amount", txHash)
+	}
+	buyer := ""
+	if from, err := tx.From(); err == nil && len(from) == 20 {
+		buyer = crypto.MustNewAddress(crypto.NHBPrefix, from).String()
+	}
+	decimals := explorerTokenDecimals
+	result := &ExplorerTransactionResult{
+		ID:            txHash,
+		Hash:          txHash,
+		Type:          formatTxType(tx.Type),
+		Asset:         "NHB",
+		Amount:        nhbCost.String(),
+		DisplayAmount: formatDecimalAmount(nhbCost, decimals),
+		Decimals:      decimals,
+		BlockNumber:   blockNumber,
+		Timestamp:     timestamp,
+		Nonce:         tx.Nonce,
+		GasLimit:      tx.GasLimit,
+		GasPrice:      integerString(tx.GasPrice),
+		Status:        "confirmed",
+		From:          buyer,
+		To:            adminAddress,
+		Direction:     "incoming",
 	}
 	if len(blockHash) > 0 {
 		result.BlockHash = ensureHexPrefix(hex.EncodeToString(blockHash))

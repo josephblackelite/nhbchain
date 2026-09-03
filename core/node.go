@@ -3847,8 +3847,17 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		return fmt.Errorf("seed genesis NHB supply: %w", err)
 	}
 
-	// Apply transactions deterministically in the canonical topological order
+	// Apply transactions deterministically in the canonical topological order.
+	// buyZNHBCosts stages the NHB cost of every successfully-applied BuyZNHB
+	// transaction in this block for durable, non-consensus persistence below
+	// -- but only after n.chain.AddBlock(b) itself succeeds. Staging here
+	// rather than writing inline keeps this loop's only effect on failure
+	// exactly what it was before this feature: an error and an untouched
+	// chain/db, never a partially-recorded index for a block that never
+	// actually committed.
+	var buyZNHBCosts []buyZNHBCostRecord
 	for i, tx := range b.Transactions {
+		eventsBefore := len(stateCopy.events)
 		if err := stateCopy.ApplyTransaction(tx); err != nil {
 			fatalMint := isFatalMintError(err)
 			if fatalMint {
@@ -3856,6 +3865,11 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 				n.markTransactionsCommitted([]*types.Transaction{tx})
 			}
 			return fmt.Errorf("apply transaction %d: %w", i, err)
+		}
+		if tx != nil && tx.Type == types.TxTypeBuyZNHB {
+			if record, ok := extractBuyZNHBCostRecord(tx, stateCopy.events[eventsBefore:]); ok {
+				buyZNHBCosts = append(buyZNHBCosts, record)
+			}
 		}
 	}
 
@@ -3922,6 +3936,27 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	if err := n.chain.AddBlock(b); err != nil {
 		return err
 	}
+	// Best-effort, strictly-after-commit persistence of this block's BuyZNHB
+	// NHB costs (see buyZNHBCosts above and extractBuyZNHBCostRecord). Only
+	// reached once every consensus-gating check above -- TxRoot,
+	// ExecutionGraphRoot, state-root-mismatch, committed-root-vs-header, and
+	// now AddBlock itself -- has already passed, and writes through
+	// PutExplorerMeta, a key namespace that carries no weight in the state
+	// root or block hash (see explorerMetaPrefix's doc comment in
+	// blockchain.go). A write failure here is logged for ops visibility but
+	// never treated as fatal, matching the existing
+	// advanceExplorerActivityIndex convention for this same class of
+	// node-local, recomputable-in-principle derived data: at worst it leaves
+	// this one validator's own nhb_getTransactionHistory missing the
+	// incoming-NHB leg for this one tx, never a consensus divergence.
+	for _, record := range buyZNHBCosts {
+		if err := n.chain.PutExplorerMeta(BuyZNHBCostMetaKey(record.txHash), []byte(record.nhbCost)); err != nil {
+			slog.Warn("persist buyZNHB cost meta failed",
+				slog.String("txHash", record.txHash),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 	n.state = stateCopy
 	if err := n.refreshModulePauses(); err != nil {
 		return fmt.Errorf("refresh module pauses: %w", err)
@@ -3937,6 +3972,50 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	}
 	n.publishPOSFinalityFinalized(b)
 	return nil
+}
+
+// buyZNHBCostRecord pairs one committed BuyZNHB transaction's hash with the
+// exact NHB cost that applyBuyZNHB already credited to the admin wallet's
+// BalanceNHB in that same transaction (core/state_transition.go's nhbCost).
+// txHash is hex-encoded with no "0x" prefix; nhbCost is nhbCost.String() as
+// carried verbatim by events.BuyZNHBRecorded's "nhbAmount" attribute -- never
+// recomputed, so there is no drift risk between what was actually charged
+// and what gets persisted here.
+type buyZNHBCostRecord struct {
+	txHash  string
+	nhbCost string
+}
+
+// extractBuyZNHBCostRecord pulls a buyZNHBCostRecord out of the event delta
+// a single just-applied BuyZNHB transaction produced (txEvents --
+// stateCopy.events[eventsBefore:] in commitBlock's apply loop, i.e. only the
+// events this one transaction appended, never any other transaction's).
+// Returns ok==false if that delta contains no BuyZNHBRecorded event or the
+// transaction's own hash can't be computed -- both defensive: a successful
+// applyBuyZNHB always emits exactly this event (see
+// core/state_transition.go), so this should never actually miss in
+// production. A miss here costs one row of explorer history, never a
+// consensus issue -- see commitBlock's determinism doc comment at the
+// buyZNHBCosts persistence site.
+func extractBuyZNHBCostRecord(tx *types.Transaction, txEvents []types.Event) (buyZNHBCostRecord, bool) {
+	var nhbAmount string
+	found := false
+	for i := range txEvents {
+		if txEvents[i].Type != events.TypeBuyZNHBRecorded {
+			continue
+		}
+		nhbAmount = txEvents[i].Attributes["nhbAmount"]
+		found = true
+		break
+	}
+	if !found || nhbAmount == "" {
+		return buyZNHBCostRecord{}, false
+	}
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return buyZNHBCostRecord{}, false
+	}
+	return buyZNHBCostRecord{txHash: hex.EncodeToString(hashBytes), nhbCost: nhbAmount}, true
 }
 
 func isFatalMintError(err error) bool {
