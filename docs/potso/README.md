@@ -1,6 +1,6 @@
 # POTSO Telemetry Overview
 
-The POTSO (Proof of Time Spent Online) telemetry service records validator and participant availability without attaching any rewards. It focuses on deterministic daily meters that power dashboards and future incentive programs.
+The POTSO (Proof of Time Spent Online) telemetry service records validator and participant availability. It focuses on deterministic daily meters that power dashboards, incentive programs, and -- via the engagement score derived from these meters -- validator proposer-selection weight (see [consensus integration](consensus-integration.md)). This document covers the telemetry/meter layer itself; the meters do not attach rewards directly.
 
 This document explains the data model, storage layout, and RPC interface so any engineering or analytics team can integrate with the meters quickly.
 
@@ -35,7 +35,7 @@ Key prefixes introduced in the trie:
 - `potso/meter/<day>:<addr>` – RLP-encoded `Meter` struct for the day.
 - `potso/day-index/<day>` – list of addresses with activity on the day (deduplicated) used by the leaderboard.
 
-These records are deterministic and do not alter consensus semantics beyond adding additional state commitments.
+Storing these records is itself deterministic and adds only additional state commitments. The resulting engagement score is not inert, though: it is combined with bonded stake elsewhere in consensus to weight proposer selection, capped so engagement alone can boost a validator's weight by at most 20% of its own stake (see [consensus integration](consensus-integration.md) for the exact mechanism).
 
 ## RPC surface
 
