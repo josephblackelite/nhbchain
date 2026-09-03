@@ -80,8 +80,35 @@ type RedemptionWatchRecord struct {
 	PayoutReference     string
 	FailureReason       string
 	AttestTxHash        string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// AssignedAgentID is the exchange-agent partner ID (see exchange_agents /
+	// ExchangeAgent) this redemption was routed to at discovery time, or ""
+	// if none was active when the row was created -- in which case
+	// processDiscovered falls back to redemptionSettlementPartnerID and the
+	// payout continues through the automated NOWPayments rail exactly as it
+	// did before this feature existed. Frozen once at discovery, same as
+	// PayoutAmountDecimal/Units -- reassigning a request mid-flight would let
+	// two different humans both believe they're responsible for the same
+	// payout.
+	AssignedAgentID string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// ExchangeAgent is a human "exchange agent" payments-gateway knows about for
+// purposes of routing redemption settlements to RailManualTreasury (see
+// redeem_watcher.go's assignAgent). This is a deliberately thin local mirror
+// of nhbportal's ExchangeAgentAccount -- id, display name, active flag --
+// kept in sync via POST /admin/agents whenever nhbportal approves,
+// activates, or deactivates an agent. payments-gateway never needs to know
+// anything else about an agent (bank details, USDT address, etc all stay in
+// nhbportal); it only needs enough to pick a partner ID and keep its rail
+// routing accurate.
+type ExchangeAgent struct {
+	ID        string
+	Name      string
+	Active    bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // initRedemptionTables creates the redemption-payout tables if they don't
@@ -136,11 +163,30 @@ func (s *SQLiteStore) initRedemptionTables() error {
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_redemption_settlements_status ON redemption_settlements(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_redemption_settlements_intent ON redemption_settlements(intent_id);`,
+		// exchange_agents: see ExchangeAgent's doc comment. Kept in its own
+		// table (not folded into redemption_watch) since an agent's identity
+		// outlives any single redemption and is written independently, via
+		// POST /admin/agents, from an entirely separate call path.
+		`CREATE TABLE IF NOT EXISTS exchange_agents (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            active     INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_exchange_agents_active ON exchange_agents(active);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return err
 		}
+	}
+	// assigned_agent_id: added after redemption_watch's original release --
+	// use ensureColumn (storage.go), not the CREATE TABLE above, so an
+	// already-deployed database picks it up idempotently on next startup
+	// rather than needing a manual migration step.
+	if err := s.ensureColumn("redemption_watch", "assigned_agent_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -156,12 +202,12 @@ func (s *SQLiteStore) InsertRedemptionWatch(ctx context.Context, rec RedemptionW
 	const stmt = `INSERT INTO redemption_watch(
             request_id, account, nhb_amount_wei, payout_amount_decimal, payout_amount_units,
             destination_asset, destination_address, local_status, settlement_id, outcome,
-            payout_reference, failure_reason, attest_tx_hash, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            payout_reference, failure_reason, attest_tx_hash, assigned_agent_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, stmt,
 		rec.RequestID, rec.Account, rec.NHBAmountWei, rec.PayoutAmountDecimal, rec.PayoutAmountUnits,
 		rec.DestinationAsset, rec.DestinationAddress, rec.LocalStatus, rec.SettlementID, rec.Outcome,
-		rec.PayoutReference, rec.FailureReason, rec.AttestTxHash, rec.CreatedAt, rec.UpdatedAt)
+		rec.PayoutReference, rec.FailureReason, rec.AttestTxHash, rec.AssignedAgentID, rec.CreatedAt, rec.UpdatedAt)
 	return err
 }
 
@@ -171,7 +217,7 @@ func (s *SQLiteStore) InsertRedemptionWatch(ctx context.Context, rec RedemptionW
 func (s *SQLiteStore) GetRedemptionWatch(ctx context.Context, requestID string) (*RedemptionWatchRecord, error) {
 	const query = `SELECT request_id, account, nhb_amount_wei, payout_amount_decimal, payout_amount_units,
             destination_asset, destination_address, local_status, settlement_id, outcome,
-            payout_reference, failure_reason, attest_tx_hash, created_at, updated_at
+            payout_reference, failure_reason, attest_tx_hash, assigned_agent_id, created_at, updated_at
         FROM redemption_watch WHERE request_id = ?`
 	row := s.db.QueryRowContext(ctx, query, requestID)
 	return scanRedemptionWatch(row)
@@ -186,12 +232,12 @@ func (s *SQLiteStore) UpdateRedemptionWatch(ctx context.Context, rec RedemptionW
 	const stmt = `UPDATE redemption_watch SET
             account = ?, nhb_amount_wei = ?, payout_amount_decimal = ?, payout_amount_units = ?,
             destination_asset = ?, destination_address = ?, local_status = ?, settlement_id = ?,
-            outcome = ?, payout_reference = ?, failure_reason = ?, attest_tx_hash = ?, updated_at = ?
+            outcome = ?, payout_reference = ?, failure_reason = ?, attest_tx_hash = ?, assigned_agent_id = ?, updated_at = ?
         WHERE request_id = ?`
 	_, err := s.db.ExecContext(ctx, stmt,
 		rec.Account, rec.NHBAmountWei, rec.PayoutAmountDecimal, rec.PayoutAmountUnits,
 		rec.DestinationAsset, rec.DestinationAddress, rec.LocalStatus, rec.SettlementID,
-		rec.Outcome, rec.PayoutReference, rec.FailureReason, rec.AttestTxHash, rec.UpdatedAt,
+		rec.Outcome, rec.PayoutReference, rec.FailureReason, rec.AttestTxHash, rec.AssignedAgentID, rec.UpdatedAt,
 		rec.RequestID)
 	return err
 }
@@ -203,7 +249,7 @@ func (s *SQLiteStore) UpdateRedemptionWatch(ctx context.Context, rec RedemptionW
 func (s *SQLiteStore) ListRedemptionWatchByStatus(ctx context.Context, status string) ([]RedemptionWatchRecord, error) {
 	const query = `SELECT request_id, account, nhb_amount_wei, payout_amount_decimal, payout_amount_units,
             destination_asset, destination_address, local_status, settlement_id, outcome,
-            payout_reference, failure_reason, attest_tx_hash, created_at, updated_at
+            payout_reference, failure_reason, attest_tx_hash, assigned_agent_id, created_at, updated_at
         FROM redemption_watch WHERE local_status = ? ORDER BY created_at ASC, request_id ASC`
 	rows, err := s.db.QueryContext(ctx, query, status)
 	if err != nil {
@@ -217,6 +263,106 @@ func (s *SQLiteStore) ListRedemptionWatchByStatus(ctx context.Context, status st
 			return nil, err
 		}
 		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
+// ListRedemptionWatchByAgent returns tracking rows, most-recently-created
+// first, optionally filtered by agent ID and/or local_status (pass "" for
+// either to mean "any"). Backs GET /admin/redemptions?agentId=..., which an
+// exchange agent's dashboard uses (via nhbportal's server-side proxy,
+// always passing a real agentId) to see only requests actually routed to
+// them; an admin-facing overview could call it with agentId="" for a
+// cross-agent view.
+func (s *SQLiteStore) ListRedemptionWatchByAgent(ctx context.Context, agentID, status string, limit int) ([]RedemptionWatchRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	agent := strings.TrimSpace(agentID)
+	statusFilter := strings.TrimSpace(status)
+	const query = `SELECT request_id, account, nhb_amount_wei, payout_amount_decimal, payout_amount_units,
+            destination_asset, destination_address, local_status, settlement_id, outcome,
+            payout_reference, failure_reason, attest_tx_hash, assigned_agent_id, created_at, updated_at
+        FROM redemption_watch
+        WHERE (? = '' OR assigned_agent_id = ?) AND (? = '' OR local_status = ?)
+        ORDER BY created_at DESC, request_id DESC
+        LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, agent, agent, statusFilter, statusFilter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]RedemptionWatchRecord, 0)
+	for rows.Next() {
+		rec, err := scanRedemptionWatchRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
+// CountAssignedRedemptionWatch returns how many redemption_watch rows
+// currently have a non-empty assigned_agent_id -- the running counter
+// assignAgent (redeem_watcher.go) uses to round-robin new requests fairly
+// across active agents without needing any separate mutable counter state.
+func (s *SQLiteStore) CountAssignedRedemptionWatch(ctx context.Context) (int, error) {
+	const query = `SELECT COUNT(*) FROM redemption_watch WHERE assigned_agent_id <> ''`
+	var count int
+	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// UpsertExchangeAgent creates or updates an ExchangeAgent by ID -- called
+// from POST /admin/agents whenever nhbportal approves, activates, or
+// deactivates an exchange agent, keeping this service's local routing table
+// in sync without either side needing shared database access.
+func (s *SQLiteStore) UpsertExchangeAgent(ctx context.Context, agent ExchangeAgent) error {
+	id := strings.TrimSpace(agent.ID)
+	if id == "" {
+		return fmt.Errorf("exchange agent id required")
+	}
+	name := strings.TrimSpace(agent.Name)
+	updatedAt := agent.UpdatedAt.UTC()
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	createdAt := agent.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = updatedAt
+	}
+	const stmt = `
+        INSERT INTO exchange_agents(id, name, active, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            active = excluded.active,
+            updated_at = excluded.updated_at
+    `
+	_, err := s.db.ExecContext(ctx, stmt, id, name, boolToInt(agent.Active), createdAt, updatedAt)
+	return err
+}
+
+// ListActiveExchangeAgentIDs returns every currently-active agent's ID,
+// ordered for deterministic round-robin assignment (see assignAgent in
+// redeem_watcher.go).
+func (s *SQLiteStore) ListActiveExchangeAgentIDs(ctx context.Context) ([]string, error) {
+	const query = `SELECT id FROM exchange_agents WHERE active = 1 ORDER BY id ASC`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, rows.Err()
 }
@@ -240,7 +386,7 @@ func scanRedemptionWatchRow(row rowScanner) (*RedemptionWatchRecord, error) {
 	if err := row.Scan(
 		&rec.RequestID, &rec.Account, &rec.NHBAmountWei, &rec.PayoutAmountDecimal, &rec.PayoutAmountUnits,
 		&rec.DestinationAsset, &rec.DestinationAddress, &rec.LocalStatus, &rec.SettlementID, &rec.Outcome,
-		&rec.PayoutReference, &rec.FailureReason, &rec.AttestTxHash, &rec.CreatedAt, &rec.UpdatedAt,
+		&rec.PayoutReference, &rec.FailureReason, &rec.AttestTxHash, &rec.AssignedAgentID, &rec.CreatedAt, &rec.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

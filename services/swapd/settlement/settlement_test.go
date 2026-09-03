@@ -98,6 +98,80 @@ func TestRailForResolution(t *testing.T) {
 	}
 }
 
+// TestSetPartnerRailAppliesLive confirms SetPartnerRail's whole reason to
+// exist: registering (or updating) a partner's rail override takes effect
+// on the very next Initiate call, with no restart/reconstruction of Manager
+// needed -- e.g. payments-gateway's POST /admin/agents applying a newly
+// approved exchange agent's manual_treasury routing immediately.
+func TestSetPartnerRailAppliesLive(t *testing.T) {
+	store := newFakeStore()
+	client := &fakePayoutClient{ref: "batch-1"}
+	mgr := newTestManager(t, store, Config{DefaultRail: RailNowPayments}, client)
+
+	// Before registering an override, this partner resolves to the default
+	// rail (nowpayments) same as any unconfigured partner.
+	record, err := mgr.Initiate(context.Background(), InitiateRequest{
+		IntentID: "intent-1", ReservationID: "res-1", PartnerID: "agent-1",
+		Asset: "USDT", AmountUnits: 100_000_000, Account: "addr-1",
+	})
+	if err != nil {
+		t.Fatalf("initiate: %v", err)
+	}
+	if record.Rail != string(RailNowPayments) {
+		t.Fatalf("expected nowpayments rail before override, got %s", record.Rail)
+	}
+
+	mgr.SetPartnerRail("agent-1", RailManualTreasury)
+
+	record2, err := mgr.Initiate(context.Background(), InitiateRequest{
+		IntentID: "intent-2", ReservationID: "res-2", PartnerID: "agent-1",
+		Asset: "USDT", AmountUnits: 50_000_000, Account: "addr-1",
+	})
+	if err != nil {
+		t.Fatalf("initiate after override: %v", err)
+	}
+	if record2.Rail != string(RailManualTreasury) {
+		t.Fatalf("expected manual_treasury rail after SetPartnerRail, got %s", record2.Rail)
+	}
+	if record2.Status != string(StatusPending) {
+		t.Fatalf("expected manual_treasury to stay pending (no automated call), got %s", record2.Status)
+	}
+	// A client's own CreatePayout call count must not have grown from the
+	// manual_treasury Initiate -- only the earlier nowpayments call touched
+	// it.
+	if client.calls != 1 {
+		t.Fatalf("expected exactly 1 CreatePayout call total, got %d", client.calls)
+	}
+
+	// A different, never-configured partner is unaffected by agent-1's
+	// override.
+	record3, err := mgr.Initiate(context.Background(), InitiateRequest{
+		IntentID: "intent-3", ReservationID: "res-3", PartnerID: "someone-else",
+		Asset: "USDT", AmountUnits: 25_000_000, Account: "addr-2",
+	})
+	if err != nil {
+		t.Fatalf("initiate unrelated partner: %v", err)
+	}
+	if record3.Rail != string(RailNowPayments) {
+		t.Fatalf("expected an unrelated partner to still resolve to the default rail, got %s", record3.Rail)
+	}
+}
+
+// TestSetPartnerRailNilAndBlankAreNoops confirms SetPartnerRail matches this
+// package's fail-quiet convention for a nil Manager or blank partner ID
+// (mirroring WithClock/WithIDFunc above) rather than panicking.
+func TestSetPartnerRailNilAndBlankAreNoops(t *testing.T) {
+	var nilMgr *Manager
+	nilMgr.SetPartnerRail("agent-1", RailManualTreasury) // must not panic
+
+	store := newFakeStore()
+	mgr := newTestManager(t, store, Config{DefaultRail: RailNowPayments}, nil)
+	mgr.SetPartnerRail("   ", RailManualTreasury)
+	if len(mgr.config.PartnerRails) != 0 {
+		t.Fatalf("expected a blank partner id to be a no-op, got %v", mgr.config.PartnerRails)
+	}
+}
+
 func TestInitiateManualTreasuryStaysPending(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store, Config{DefaultRail: RailManualTreasury}, nil)

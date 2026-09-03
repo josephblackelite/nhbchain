@@ -389,6 +389,30 @@ func (m *Manager) MarkFailed(ctx context.Context, settlementID, reason string) (
 	return record, nil
 }
 
+// SetPartnerRail registers (or updates) a per-partner rail override at
+// runtime -- e.g. so a newly-approved exchange agent's redemptions start
+// routing to RailManualTreasury the moment an admin activates them, without
+// requiring a process restart to pick up a static Config.PartnerRails map.
+// Safe to call concurrently with Initiate/ConfirmSettled/etc (holds the same
+// mutex as every other mutating method). A no-op if m is nil or partnerID is
+// blank, matching this package's fail-quiet convention for the other
+// zero-value-tolerant methods above.
+func (m *Manager) SetPartnerRail(partnerID string, rail Rail) {
+	if m == nil {
+		return
+	}
+	id := strings.TrimSpace(partnerID)
+	if id == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.config.PartnerRails == nil {
+		m.config.PartnerRails = make(map[string]Rail)
+	}
+	m.config.PartnerRails[id] = rail
+}
+
 // List returns persisted settlements, optionally filtered by partner and/or
 // status.
 func (m *Manager) List(ctx context.Context, partnerID, status string, limit int) ([]storage.SettlementRecord, error) {

@@ -111,14 +111,29 @@ func main() {
 		if err != nil {
 			log.Fatalf("configure redemption payout client: %v", err)
 		}
-		// DefaultRail is always RailNowPayments and no PartnerRails override
-		// is configured -- every redemption settlement uses the NOWPayments
-		// mass-payout rail; manual_treasury is never reachable for this
-		// feature.
+		// DefaultRail is RailNowPayments: any redemption with no assigned
+		// exchange agent (or a deployment with none configured at all) keeps
+		// using the automated mass-payout rail exactly as before this
+		// feature existed. Redemptions assigned to an active exchange agent
+		// (see redeem_watcher.go's assignAgent/partnerIDFor) instead resolve
+		// to RailManualTreasury via the PartnerRails overrides registered
+		// just below -- populated at startup from every currently-active
+		// agent, and kept live thereafter by POST /admin/agents calling
+		// settlementMgr.SetPartnerRail directly (see server.go), so an
+		// admin approving/deactivating an agent takes effect immediately,
+		// without a restart.
 		settlementMgr, err := settlement.NewManager(store, settlement.Config{DefaultRail: settlement.RailNowPayments}, payoutClient)
 		if err != nil {
 			log.Fatalf("configure redemption settlement manager: %v", err)
 		}
+		activeAgentIDs, err := store.ListActiveExchangeAgentIDs(context.Background())
+		if err != nil {
+			log.Fatalf("load active exchange agents: %v", err)
+		}
+		for _, agentID := range activeAgentIDs {
+			settlementMgr.SetPartnerRail(agentID, settlement.RailManualTreasury)
+		}
+		server.SetExchangeAgentRailSetter(settlementMgr)
 
 		// payoutClient doubles as the redeem watcher's PayoutStatusChecker --
 		// it's the same NOWPayments account/credentials either way, just a

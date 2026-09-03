@@ -104,6 +104,29 @@ type Server struct {
 	// side-effect-free quote against NOWPayments, safe to call before a user
 	// has even signed a burn.
 	redeemFeeEstimator RedemptionFeeEstimator
+
+	// exchangeAgentRails is optional, set via SetExchangeAgentRailSetter --
+	// only present when the redemption feature is fully configured (same
+	// gate as redeemWatcher; see main.go). Lets POST /admin/agents apply a
+	// newly-approved or newly-deactivated agent's rail override immediately,
+	// without waiting for a process restart to re-read exchange_agents.
+	exchangeAgentRails PartnerRailSetter
+}
+
+// PartnerRailSetter is the narrow interface POST /admin/agents needs.
+// *settlement.Manager satisfies it via SetPartnerRail. Kept as an interface
+// (rather than depending on the concrete type) purely so tests can substitute
+// a fake without constructing a real settlement.Manager.
+type PartnerRailSetter interface {
+	SetPartnerRail(partnerID string, rail settlement.Rail)
+}
+
+// SetExchangeAgentRailSetter wires the settlement manager used by
+// POST /admin/agents to apply rail overrides immediately. Mirrors
+// SetRedeemWatcher's pattern: a setter, not a NewServer parameter, so it
+// stays optional.
+func (s *Server) SetExchangeAgentRailSetter(r PartnerRailSetter) {
+	s.exchangeAgentRails = r
 }
 
 // RedemptionFeeEstimator is the narrow interface GET /swap/redeem-fee-estimate
@@ -275,6 +298,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminFailRedemptionPayout(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/redemptions/") && strings.HasSuffix(r.URL.Path, "/retry-payout"):
 		s.handleAdminRetryRedemptionPayout(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/admin/redemptions":
+		s.handleAdminListRedemptions(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/admin/agents":
+		s.handleAdminUpsertExchangeAgent(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1568,6 +1595,130 @@ func (s *Server) handleAdminRetryRedemptionPayout(w http.ResponseWriter, r *http
 		"status":       rec.Status,
 		"externalRef":  rec.ExternalRef,
 	}, nil)
+}
+
+// formatRedemptionWatch shapes a RedemptionWatchRecord for the admin
+// endpoints below -- a plain field-for-field JSON projection, deliberately
+// exposing assignedAgentId (the whole point of GET /admin/redemptions is
+// letting a caller filter/verify by it) alongside everything an exchange
+// agent's dashboard needs to render a request: who burned it, how much, and
+// its current local status.
+func formatRedemptionWatch(rec RedemptionWatchRecord) map[string]interface{} {
+	return map[string]interface{}{
+		"requestId":           rec.RequestID,
+		"account":             rec.Account,
+		"nhbAmountWei":        rec.NHBAmountWei,
+		"payoutAmountDecimal": rec.PayoutAmountDecimal,
+		"destinationAsset":    rec.DestinationAsset,
+		"destinationAddress":  rec.DestinationAddress,
+		"localStatus":         rec.LocalStatus,
+		"settlementId":        rec.SettlementID,
+		"outcome":             rec.Outcome,
+		"payoutReference":     rec.PayoutReference,
+		"failureReason":       rec.FailureReason,
+		"assignedAgentId":     rec.AssignedAgentID,
+		"createdAt":           rec.CreatedAt.UTC().Format(time.RFC3339),
+		"updatedAt":           rec.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// handleAdminListRedemptions backs GET /admin/redemptions?agentId=&status=,
+// the read endpoint an exchange agent's dashboard needs to see which
+// requests are assigned to them -- nothing like it existed before this
+// feature (the admin surface previously only supported acting on a single
+// known request ID, never listing/discovering them). Same shared-bearer-
+// token auth as every other /admin/* endpoint in this file: payments-gateway
+// itself does not scope by agent identity, so nhbportal (the only intended
+// caller, holding this token server-side) is responsible for only ever
+// passing the agentId of the session's own authenticated, approved agent --
+// see PORTAL-side ownership checks before calling this.
+func (s *Server) handleAdminListRedemptions(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	agentID := strings.TrimSpace(r.URL.Query().Get("agentId"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	rows, err := s.store.ListRedemptionWatchByAgent(r.Context(), agentID, status, limit)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, nil, nil)
+		return
+	}
+	items := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, formatRedemptionWatch(row))
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{"items": items}, nil)
+}
+
+// adminUpsertExchangeAgentRequest is the payload accepted by
+// POST /admin/agents.
+type adminUpsertExchangeAgentRequest struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Active *bool  `json:"active"`
+}
+
+// handleAdminUpsertExchangeAgent registers or updates payments-gateway's
+// local mirror of an nhbportal ExchangeAgentAccount -- called once when an
+// admin approves a new exchange agent (active: true) and again whenever
+// they're deactivated/reactivated. Active defaults to true when omitted, so
+// the common "just approved" call can send only {id, name}. Applies the rail
+// override immediately (via exchangeAgentRails, when configured) so an
+// approval takes effect on the very next redemption discovered, not just
+// after a restart; deactivating an agent intentionally does NOT remove an
+// already-set PartnerRails override (a redemption already routed to them
+// must still resolve consistently), it only stops assignAgent from handing
+// them new ones -- see redeem_watcher.go's assignAgent, which reads
+// ListActiveExchangeAgentIDs.
+func (s *Server) handleAdminUpsertExchangeAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(r) {
+		s.writeError(w, r, http.StatusUnauthorized, errors.New("admin authorization required"), nil, nil)
+		return
+	}
+	body, err := s.readBody(w, r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err, body, nil)
+		return
+	}
+	var req adminUpsertExchangeAgentRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid JSON payload: %w", err), body, nil)
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		s.writeError(w, r, http.StatusBadRequest, errors.New("id required"), body, nil)
+		return
+	}
+	active := true
+	if req.Active != nil {
+		active = *req.Active
+	}
+	now := s.nowFn().UTC()
+	if err := s.store.UpsertExchangeAgent(r.Context(), ExchangeAgent{
+		ID:        id,
+		Name:      strings.TrimSpace(req.Name),
+		Active:    active,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err, body, nil)
+		return
+	}
+	if active && s.exchangeAgentRails != nil {
+		s.exchangeAgentRails.SetPartnerRail(id, settlement.RailManualTreasury)
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		"id":     id,
+		"active": active,
+	}, body)
 }
 
 func parseWebhookEventFilter(r *http.Request) (WebhookEventFilter, error) {

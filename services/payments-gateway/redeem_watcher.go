@@ -26,14 +26,15 @@ const (
 	// decimal places) -- USDT-TRC20's own on-chain precision.
 	redemptionSettlementScale = int64(1_000_000)
 
-	// redemptionSettlementPartnerID is the fixed partner identifier this
-	// service passes to settlement.Manager for every redemption settlement.
-	// Redemption settlements have no partner concept of their own (unlike
-	// swapd's real partner-scoped cash-out intents) -- this constant only
-	// matters if main.go's settlement.Config ever grows a PartnerRails
-	// override, which it does not: DefaultRail is always RailNowPayments, so
-	// every redemption always resolves to the same rail regardless of this
-	// value.
+	// redemptionSettlementPartnerID is the fixed partner identifier used for
+	// any redemption with no assigned exchange agent (see partnerIDFor) --
+	// the same partner ID every redemption used before the exchange-agent
+	// feature existed. main.go never adds a PartnerRails override for this
+	// ID, so it always resolves to Config.DefaultRail (RailNowPayments): the
+	// automated payout path. Assigned redemptions instead pass their agent's
+	// own ID as PartnerID, which main.go/server.go register against
+	// RailManualTreasury via settlement.Manager.SetPartnerRail as agents are
+	// activated.
 	redemptionSettlementPartnerID = "nhb-redeem-nhb"
 
 	// tronAddressVersion is TRON's base58check version byte (mainnet).
@@ -295,11 +296,56 @@ func (w *RedeemWatcher) discoverNew(ctx context.Context, pending []RedemptionReq
 			rec.PayoutAmountDecimal = decimalAmount
 			rec.PayoutAmountUnits = units
 		}
+		rec.AssignedAgentID = w.assignAgent(ctx)
 		if err := w.store.InsertRedemptionWatch(ctx, rec); err != nil {
 			log.Printf("payments-gateway: redeem watcher: insert discovered request %s: %v", requestID, err)
 			continue
 		}
 	}
+}
+
+// assignAgent picks which active exchange agent (if any) a freshly-
+// discovered redemption should route to, or "" if no agent is active --
+// in which case the request falls back to redemptionSettlementPartnerID and
+// the automated NOWPayments rail, exactly as every redemption behaved before
+// this feature existed. Distribution is a simple round robin: the agent at
+// index (rows already assigned so far) % (active agent count), ordered by
+// agent ID. This doesn't need to be perfectly fair under concurrent ticks --
+// runOnce is never called concurrently with itself (see RedeemWatcher's doc
+// comment) -- it only needs to spread load roughly evenly across however
+// many agents are active, which today is expected to be exactly one.
+// Errors reading the agent list are logged and treated as "no agent
+// active" -- never block discovery of a real burn over a local bookkeeping
+// read failure.
+func (w *RedeemWatcher) assignAgent(ctx context.Context) string {
+	agents, err := w.store.ListActiveExchangeAgentIDs(ctx)
+	if err != nil {
+		log.Printf("payments-gateway: redeem watcher: list active exchange agents: %v -- leaving new request unassigned", err)
+		return ""
+	}
+	if len(agents) == 0 {
+		return ""
+	}
+	assignedSoFar, err := w.store.CountAssignedRedemptionWatch(ctx)
+	if err != nil {
+		log.Printf("payments-gateway: redeem watcher: count assigned redemptions: %v -- leaving new request unassigned", err)
+		return ""
+	}
+	return agents[assignedSoFar%len(agents)]
+}
+
+// partnerIDFor resolves the settlement.InitiateRequest.PartnerID for a
+// redemption row: its assigned agent, if any (routing it to that agent's
+// RailManualTreasury override -- see main.go's SetPartnerRail wiring), else
+// the shared redemptionSettlementPartnerID constant every redemption used
+// before this feature existed (routing it to the automated NOWPayments
+// rail). A deployment with zero exchange agents configured behaves
+// identically to before this feature existed.
+func partnerIDFor(row RedemptionWatchRecord) string {
+	if id := strings.TrimSpace(row.AssignedAgentID); id != "" {
+		return id
+	}
+	return redemptionSettlementPartnerID
 }
 
 // processDiscovered advances every discovered row: either straight to an
@@ -365,7 +411,7 @@ func (w *RedeemWatcher) processDiscovered(ctx context.Context) {
 		rec, initErr := w.settlement.Initiate(ctx, settlement.InitiateRequest{
 			IntentID:      row.RequestID,
 			ReservationID: row.RequestID,
-			PartnerID:     redemptionSettlementPartnerID,
+			PartnerID:     partnerIDFor(row),
 			Asset:         row.DestinationAsset,
 			AmountUnits:   row.PayoutAmountUnits,
 			Account:       row.DestinationAddress,
