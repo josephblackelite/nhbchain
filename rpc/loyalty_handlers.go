@@ -163,13 +163,21 @@ type businessResult struct {
 // lending_supply/withdraw/borrow/... and stake_delegate/undelegate/claim/
 // claimRewards). Disabled immediately as an emergency stopgap pending a
 // real signed-transaction conversion that applies through
-// StateProcessor.ApplyTransaction inside the normal consensus path instead
-// -- there is currently no TxType for any loyalty action at all
-// (core/types/transaction.go), so that conversion is real, new work, not a
-// rewire of something that already exists. loyalty_getBusiness/
-// listPrograms/programStats/listAccruals/userDaily/paymasterBalance/
-// resolveUsername/userQR (all read-only) are deliberately left live.
-const loyaltyRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+// StateProcessor.ApplyTransaction inside the normal consensus path instead.
+// That conversion now exists: TxTypeCreateLoyaltyBusiness/
+// LoyaltySetPaymaster/LoyaltyAddMerchant/LoyaltyRemoveMerchant/
+// CreateLoyaltyProgram/UpdateLoyaltyProgram/PauseLoyaltyProgram/
+// ResumeLoyaltyProgram (0x42-0x49, core/types/transaction.go) replace each
+// of these 8 RPC methods respectively -- a caller signs and submits one of
+// those transaction types with their own key instead of calling this RPC
+// method, exactly as escrow/lending/swap already work. These RPC methods
+// stay disabled rather than re-enabled as thin transaction-builders,
+// because that would silently reintroduce a trusted-RPC-signs-for-you model
+// when the actual security model requires the caller to hold and use their
+// own private key. loyalty_getBusiness/listBusinesses/listPrograms/
+// programStats/listAccruals/userDaily/paymasterBalance/resolveUsername/
+// userQR (all read-only) are deliberately left live.
+const loyaltyRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; submit the equivalent TxTypeCreateLoyaltyBusiness/LoyaltySetPaymaster/LoyaltyAddMerchant/LoyaltyRemoveMerchant/CreateLoyaltyProgram/UpdateLoyaltyProgram/PauseLoyaltyProgram/ResumeLoyaltyProgram transaction instead, signed by the caller's own key"
 
 func (s *Server) handleLoyaltyCreateBusiness(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
@@ -280,6 +288,50 @@ func (s *Server) handleLoyaltyListPrograms(w http.ResponseWriter, _ *http.Reques
 	}
 	sort.Slice(programs, func(i, j int) bool { return programs[i].ID < programs[j].ID })
 	writeResult(w, req.ID, programs)
+}
+
+// handleLoyaltyListBusinesses lists every business the given address owns.
+// This is the read path a client uses to discover the BusinessID assigned
+// by a TxTypeCreateLoyaltyBusiness transaction -- RegisterBusiness itself
+// emits no synchronous return value the way this RPC's old create handler
+// once did, and BusinessIDs are sequentially minted so a caller cannot
+// predict theirs in advance.
+func (s *Server) handleLoyaltyListBusinesses(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
+		return
+	}
+	var params struct {
+		Owner string `json:"owner"`
+	}
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
+		return
+	}
+	ownerAddr, err := decodeBech32(params.Owner)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid owner address", err.Error())
+		return
+	}
+	ids, err := s.node.LoyaltyBusinessesByOwner(ownerAddr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to list businesses", err.Error())
+		return
+	}
+	businesses := make([]businessResult, 0, len(ids))
+	for _, id := range ids {
+		business, ok, err := s.node.LoyaltyBusinessByID(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
+			return
+		}
+		if !ok {
+			continue
+		}
+		businesses = append(businesses, formatBusiness(business))
+	}
+	sort.Slice(businesses, func(i, j int) bool { return businesses[i].ID < businesses[j].ID })
+	writeResult(w, req.ID, businesses)
 }
 
 func (s *Server) handleLoyaltyProgramStats(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

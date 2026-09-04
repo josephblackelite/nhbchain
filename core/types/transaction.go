@@ -305,6 +305,75 @@ const (
 	// 65-byte secp256k1 signature over keccak256(Payload). See
 	// Engine.CreateWithSignature (native/escrow/engine.go).
 	TxTypeDelegatedCreateEscrow TxType = 0x41
+
+	// TxTypeCreateLoyaltyBusiness/LoyaltySetPaymaster/LoyaltyAddMerchant/
+	// LoyaltyRemoveMerchant/CreateLoyaltyProgram/UpdateLoyaltyProgram/
+	// PauseLoyaltyProgram/ResumeLoyaltyProgram (0x42-0x49) replace the 8
+	// loyalty_* RPC methods disabled for mutating state outside the block
+	// pipeline (see loyaltyRPCDisabledMessage, rpc/loyalty_handlers.go).
+	// Unlike escrow, none of these are delegated/meta-transactions -- there
+	// is no loyalty-gateway relayer service, and every operation here has
+	// exactly one authorizing party (a business owner or a
+	// RoleLoyaltyAdmin-holding address), never two counterparties needing
+	// third-party reconciliation -- so the transaction's own sender IS the
+	// caller throughout, with no signed-envelope indirection.
+	//
+	// TxTypeCreateLoyaltyBusiness registers a new business with the sender
+	// as its owner outright (tx.Data is JSON {name}) -- self-registration
+	// was always permissionless under the old RPC contract (owner defaulted
+	// to caller), so binding owner to sender simply removes a spoofable
+	// payload field rather than a real capability; see
+	// StateProcessor.applyCreateLoyaltyBusiness.
+	TxTypeCreateLoyaltyBusiness TxType = 0x42
+
+	// TxTypeLoyaltySetPaymaster points a business at the NHB/ZNHB address
+	// that funds its programs' rewards (tx.Data is JSON {businessId,
+	// paymaster} -- an empty/omitted paymaster clears it). Authorization
+	// (sender == business.Owner or RoleLoyaltyAdmin) is enforced inside
+	// native/loyalty/registry.go's SetPaymaster itself; see
+	// StateProcessor.applyLoyaltySetPaymaster.
+	TxTypeLoyaltySetPaymaster TxType = 0x43
+
+	// TxTypeLoyaltyAddMerchant/RemoveMerchant assign or unassign an address
+	// as a merchant of a business (tx.Data is JSON {businessId, merchant}).
+	// UNLIKE every other case here, native/loyalty's
+	// AddMerchantAddress/RemoveMerchantAddress take no caller parameter and
+	// perform NO authorization check internally -- StateProcessor's
+	// applyLoyaltyAddMerchant/applyLoyaltyRemoveMerchant must enforce
+	// sender == business.Owner or RoleLoyaltyAdmin themselves before calling
+	// either, or any sender could add/remove merchants on any business.
+	TxTypeLoyaltyAddMerchant    TxType = 0x44
+	TxTypeLoyaltyRemoveMerchant TxType = 0x45
+
+	// TxTypeCreateLoyaltyProgram creates a reward program under a business
+	// (tx.Data is JSON, see applyCreateLoyaltyProgram for the full field
+	// list). Program.Owner is bound to the sender, never read from the
+	// payload; the sender must already be a registered merchant of the
+	// named business (or hold RoleLoyaltyAdmin) -- the same
+	// isMerchantOf-or-admin gate the old RPC enforced, preserved exactly
+	// (a business's own Owner is not automatically its own merchant unless
+	// explicitly added via TxTypeLoyaltyAddMerchant, matching pre-existing
+	// semantics). native/loyalty/registry.go's sanitizeProgram still
+	// enforces every cap/token/anti-sybil invariant unchanged.
+	TxTypeCreateLoyaltyProgram TxType = 0x46
+
+	// TxTypeUpdateLoyaltyProgram replaces a program's mutable fields
+	// wholesale (full-replace semantics, not a partial patch -- callers must
+	// resend the complete desired state). Authorization is checked against
+	// the EXISTING program's real owner loaded from state (never the
+	// payload), and ID/Owner remain immutable, both enforced inside
+	// native/loyalty/registry.go's UpdateProgram.
+	TxTypeUpdateLoyaltyProgram TxType = 0x47
+
+	// TxTypePauseLoyaltyProgram/ResumeLoyaltyProgram flip a program's Active
+	// flag (tx.Data is JSON {id}). Idempotent no-ops if already in the
+	// target state. Authorization (sender == program.Owner or
+	// RoleLoyaltyAdmin) is enforced inside native/loyalty/registry_program.go
+	// itself.
+	TxTypePauseLoyaltyProgram  TxType = 0x48
+	TxTypeResumeLoyaltyProgram TxType = 0x49
+
+	// Next free TxType byte is 0x4A.
 )
 
 // RequiresSignature reports whether the transaction type must carry an

@@ -359,12 +359,17 @@ ClientVersion = ""
       MaxNHBPerEpoch = 0
       EpochSeconds = 60
     [global.Quotas.Loyalty]
-      # No effect currently -- same as Swap above, no
-      # applyQuota(moduleLoyalty, ...) call site exists anywhere. Left at
-      # 0 for the same reason.
-      MaxRequestsPerMin = 0
+      # Gates TxTypeCreateLoyaltyBusiness and TxTypeCreateLoyaltyProgram --
+      # the two loyalty operations that mint a new ID, same risk profile as
+      # every other module's "creation" action. SetPaymaster/AddMerchant/
+      # RemoveMerchant/UpdateProgram/PauseProgram/ResumeProgram are
+      # deliberately NOT quota-gated -- each is an already-verified business
+      # owner (or ROLE_LOYALTY_ADMIN holder) acting on a single resource
+      # they already control, not a new-ID-minting action a spam quota is
+      # meant to bound.
+      MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0
-      EpochSeconds = 0
+      EpochSeconds = 60
     [global.Quotas.POTSO]
       MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0

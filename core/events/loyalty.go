@@ -1,6 +1,7 @@
 package events
 
 import (
+	"encoding/hex"
 	"math/big"
 	"strconv"
 	"strings"
@@ -63,6 +64,32 @@ type LoyaltyProgramCreated struct {
 // EventType implements the Event interface.
 func (LoyaltyProgramCreated) EventType() string { return TypeLoyaltyProgramCreated }
 
+// Event converts the created program's metadata to the generic event
+// payload. Without this, the generic Emitter fallback (see
+// core/state_transition.go's stateProcessorEmitter) would record only the
+// bare event type with no attributes -- this is the only way an on-chain
+// client can learn the ID of a program it just created via
+// TxTypeCreateLoyaltyProgram, since transactions carry no synchronous
+// return value the way the old RPC's response did.
+func (e LoyaltyProgramCreated) Event() *types.Event {
+	fixedReward := big.NewInt(0)
+	if e.FixedRewardWei != nil {
+		fixedReward = new(big.Int).Set(e.FixedRewardWei)
+	}
+	return &types.Event{
+		Type: TypeLoyaltyProgramCreated,
+		Attributes: map[string]string{
+			"id":             hex.EncodeToString(e.ID[:]),
+			"owner":          hex.EncodeToString(e.Owner[:]),
+			"pool":           hex.EncodeToString(e.Pool[:]),
+			"tokenSymbol":    e.TokenSymbol,
+			"accrualBps":     strconv.FormatUint(uint64(e.AccrualBps), 10),
+			"rewardMode":     strconv.FormatUint(uint64(e.RewardMode), 10),
+			"fixedRewardWei": fixedReward.String(),
+		},
+	}
+}
+
 // LoyaltyProgramUpdated captures the mutable configuration of an existing
 // loyalty program after an update operation.
 type LoyaltyProgramUpdated struct {
@@ -87,6 +114,56 @@ type LoyaltyProgramUpdated struct {
 // EventType implements the Event interface.
 func (LoyaltyProgramUpdated) EventType() string { return TypeLoyaltyProgramUpdated }
 
+// Event converts the updated program's mutable fields to the generic event
+// payload -- see LoyaltyProgramCreated.Event for why this matters now that a
+// real Emitter is wired.
+func (e LoyaltyProgramUpdated) Event() *types.Event {
+	fixedReward, minSpend, capPerTx := big.NewInt(0), big.NewInt(0), big.NewInt(0)
+	dailyCapUser, dailyCapProgram, epochCapProgram, issuanceCapUser := big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0)
+	if e.FixedRewardWei != nil {
+		fixedReward = new(big.Int).Set(e.FixedRewardWei)
+	}
+	if e.MinSpendWei != nil {
+		minSpend = new(big.Int).Set(e.MinSpendWei)
+	}
+	if e.CapPerTx != nil {
+		capPerTx = new(big.Int).Set(e.CapPerTx)
+	}
+	if e.DailyCapUser != nil {
+		dailyCapUser = new(big.Int).Set(e.DailyCapUser)
+	}
+	if e.DailyCapProgram != nil {
+		dailyCapProgram = new(big.Int).Set(e.DailyCapProgram)
+	}
+	if e.EpochCapProgram != nil {
+		epochCapProgram = new(big.Int).Set(e.EpochCapProgram)
+	}
+	if e.IssuanceCapUser != nil {
+		issuanceCapUser = new(big.Int).Set(e.IssuanceCapUser)
+	}
+	return &types.Event{
+		Type: TypeLoyaltyProgramUpdated,
+		Attributes: map[string]string{
+			"id":                 hex.EncodeToString(e.ID[:]),
+			"active":             strconv.FormatBool(e.Active),
+			"accrualBps":         strconv.FormatUint(uint64(e.AccrualBps), 10),
+			"rewardMode":         strconv.FormatUint(uint64(e.RewardMode), 10),
+			"fixedRewardWei":     fixedReward.String(),
+			"minSpendWei":        minSpend.String(),
+			"capPerTx":           capPerTx.String(),
+			"dailyCapUser":       dailyCapUser.String(),
+			"dailyCapProgram":    dailyCapProgram.String(),
+			"epochCapProgram":    epochCapProgram.String(),
+			"epochLengthSeconds": strconv.FormatUint(e.EpochLengthSeconds, 10),
+			"issuanceCapUser":    issuanceCapUser.String(),
+			"startTime":          strconv.FormatUint(e.StartTime, 10),
+			"endTime":            strconv.FormatUint(e.EndTime, 10),
+			"pool":               hex.EncodeToString(e.Pool[:]),
+			"tokenSymbol":        e.TokenSymbol,
+		},
+	}
+}
+
 // LoyaltyProgramPaused captures the pause operation for a loyalty program.
 type LoyaltyProgramPaused struct {
 	ID     [32]byte
@@ -97,6 +174,18 @@ type LoyaltyProgramPaused struct {
 // EventType implements the Event interface.
 func (LoyaltyProgramPaused) EventType() string { return TypeLoyaltyProgramPaused }
 
+// Event converts the pause operation to the generic event payload.
+func (e LoyaltyProgramPaused) Event() *types.Event {
+	return &types.Event{
+		Type: TypeLoyaltyProgramPaused,
+		Attributes: map[string]string{
+			"id":     hex.EncodeToString(e.ID[:]),
+			"owner":  hex.EncodeToString(e.Owner[:]),
+			"caller": hex.EncodeToString(e.Caller[:]),
+		},
+	}
+}
+
 // LoyaltyProgramResumed captures the resume operation for a loyalty program.
 type LoyaltyProgramResumed struct {
 	ID     [32]byte
@@ -106,6 +195,18 @@ type LoyaltyProgramResumed struct {
 
 // EventType implements the Event interface.
 func (LoyaltyProgramResumed) EventType() string { return TypeLoyaltyProgramResumed }
+
+// Event converts the resume operation to the generic event payload.
+func (e LoyaltyProgramResumed) Event() *types.Event {
+	return &types.Event{
+		Type: TypeLoyaltyProgramResumed,
+		Attributes: map[string]string{
+			"id":     hex.EncodeToString(e.ID[:]),
+			"owner":  hex.EncodeToString(e.Owner[:]),
+			"caller": hex.EncodeToString(e.Caller[:]),
+		},
+	}
+}
 
 // LoyaltyPaymasterRotated captures the paymaster rotation for a business.
 type LoyaltyPaymasterRotated struct {
@@ -118,6 +219,20 @@ type LoyaltyPaymasterRotated struct {
 
 // EventType implements the Event interface.
 func (LoyaltyPaymasterRotated) EventType() string { return TypeLoyaltyPaymasterRotated }
+
+// Event converts the paymaster rotation to the generic event payload.
+func (e LoyaltyPaymasterRotated) Event() *types.Event {
+	return &types.Event{
+		Type: TypeLoyaltyPaymasterRotated,
+		Attributes: map[string]string{
+			"businessId":   hex.EncodeToString(e.BusinessID[:]),
+			"owner":        hex.EncodeToString(e.Owner[:]),
+			"caller":       hex.EncodeToString(e.Caller[:]),
+			"oldPaymaster": hex.EncodeToString(e.OldPaymaster[:]),
+			"newPaymaster": hex.EncodeToString(e.NewPaymaster[:]),
+		},
+	}
+}
 
 // LoyaltySmoothingTick captures the runtime adjustment of the effective basis
 // points applied by the loyalty controller.

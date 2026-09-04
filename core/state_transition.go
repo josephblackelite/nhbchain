@@ -3583,6 +3583,36 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applyDelegatedCreateEscrow(tx, sender, senderAccount)
+
+	// --- LOYALTY BUSINESS/PROGRAM ADMINISTRATION ---
+	// Quota-gated only for the two operations that mint a new ID
+	// (CreateBusiness/CreateProgram); the other six are an already-verified
+	// owner/admin acting on a single resource they (or their admin role)
+	// already control -- see each TxType's doc comment in
+	// core/types/transaction.go for the full reasoning.
+	case types.TxTypeCreateLoyaltyBusiness:
+		if err := sp.applyQuota(moduleLoyalty, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyCreateLoyaltyBusiness(tx, sender, senderAccount)
+	case types.TxTypeLoyaltySetPaymaster:
+		return sp.applyLoyaltySetPaymaster(tx, sender, senderAccount)
+	case types.TxTypeLoyaltyAddMerchant:
+		return sp.applyLoyaltyAddMerchant(tx, sender, senderAccount)
+	case types.TxTypeLoyaltyRemoveMerchant:
+		return sp.applyLoyaltyRemoveMerchant(tx, sender, senderAccount)
+	case types.TxTypeCreateLoyaltyProgram:
+		if err := sp.applyQuota(moduleLoyalty, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyCreateLoyaltyProgram(tx, sender, senderAccount)
+	case types.TxTypeUpdateLoyaltyProgram:
+		return sp.applyUpdateLoyaltyProgram(tx, sender, senderAccount)
+	case types.TxTypePauseLoyaltyProgram:
+		return sp.applyPauseLoyaltyProgram(tx, sender, senderAccount)
+	case types.TxTypeResumeLoyaltyProgram:
+		return sp.applyResumeLoyaltyProgram(tx, sender, senderAccount)
+
 	case types.TxTypeSwapPayoutReceipt:
 		if err := sp.applySwapPayoutReceipt(tx); err != nil {
 			return err
@@ -4124,6 +4154,444 @@ func decodeEscrowRealmAddress(bech32 string) ([20]byte, error) {
 	return out, nil
 }
 
+// loyaltyRegistry constructs a fresh native/loyalty.Registry wired to this
+// StateProcessor's current trie, pause state, and event emitter --
+// mirroring configureTradeEngine's shape. Unlike EscrowEngine/TradeEngine,
+// loyalty.Registry bakes its state accessor in at construction time (no
+// SetState setter), so -- exactly like the escrow apply* functions'
+// pattern of constructing a fresh nhbstate.Manager locally rather than
+// caching one -- a new Registry is built per call instead of stored as a
+// StateProcessor field. This must be used for every loyalty TxType
+// dispatch case below; Node.LoyaltyRegistry() (core/node.go) is a separate,
+// unauthenticated, no-emitter instance meant only for legitimate read-only
+// use outside the consensus pipeline and must never be reused here.
+func (sp *StateProcessor) loyaltyRegistry() *loyalty.Registry {
+	manager := nhbstate.NewManager(sp.Trie)
+	r := loyalty.NewRegistry(manager)
+	r.SetPauses(sp.pauses)
+	r.SetEmitter(stateProcessorEmitter{sp: sp})
+	return r
+}
+
+func decodeLoyaltyBusinessID(s string) (loyalty.BusinessID, error) {
+	var id loyalty.BusinessID
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	if trimmed == "" {
+		return id, fmt.Errorf("business id required")
+	}
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return id, fmt.Errorf("invalid business id: %w", err)
+	}
+	if len(raw) != len(id) {
+		return id, fmt.Errorf("business id must be %d bytes", len(id))
+	}
+	copy(id[:], raw)
+	return id, nil
+}
+
+func decodeLoyaltyProgramID(s string) (loyalty.ProgramID, error) {
+	var id loyalty.ProgramID
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	if trimmed == "" {
+		return id, fmt.Errorf("program id required")
+	}
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return id, fmt.Errorf("invalid program id: %w", err)
+	}
+	if len(raw) != len(id) {
+		return id, fmt.Errorf("program id must be %d bytes", len(id))
+	}
+	copy(id[:], raw)
+	return id, nil
+}
+
+// decodeLoyaltyBigInt parses an optional base-10 decimal string field,
+// defaulting to zero when nil/empty and rejecting negative values --
+// mirrors the old loyalty_createProgram RPC handler's parseBigInt.
+func decodeLoyaltyBigInt(s *string) (*big.Int, error) {
+	if s == nil || strings.TrimSpace(*s) == "" {
+		return big.NewInt(0), nil
+	}
+	v, ok := new(big.Int).SetString(strings.TrimSpace(*s), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid decimal amount %q", *s)
+	}
+	if v.Sign() < 0 {
+		return nil, fmt.Errorf("amount %q must be non-negative", *s)
+	}
+	return v, nil
+}
+
+func decodeLoyaltyRewardMode(s string) (loyalty.RewardMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "bps":
+		return loyalty.RewardModeBps, nil
+	case "fixed":
+		return loyalty.RewardModeFixed, nil
+	default:
+		return 0, fmt.Errorf("invalid rewardMode %q", s)
+	}
+}
+
+// applyCreateLoyaltyBusiness handles TxTypeCreateLoyaltyBusiness -- see its
+// doc comment in core/types/transaction.go for why owner is bound to sender
+// rather than accepted from the payload.
+func (sp *StateProcessor) applyCreateLoyaltyBusiness(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty business payload: %w", err)
+	}
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		return fmt.Errorf("loyaltyCreateBusiness: name is required")
+	}
+	owner := bytesToAddress(sender)
+	if _, err := sp.loyaltyRegistry().RegisterBusiness(owner, name); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyLoyaltySetPaymaster handles TxTypeLoyaltySetPaymaster.
+// native/loyalty/registry.go's SetPaymaster performs the caller ==
+// business.Owner || RoleLoyaltyAdmin authorization check internally, so no
+// manual pre-check is needed here.
+func (sp *StateProcessor) applyLoyaltySetPaymaster(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		BusinessID string `json:"businessId"`
+		Paymaster  string `json:"paymaster,omitempty"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty set-paymaster payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	var paymaster [20]byte
+	if trimmed := strings.TrimSpace(payload.Paymaster); trimmed != "" {
+		paymaster, err = decodeEscrowRealmAddress(trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid paymaster address: %w", err)
+		}
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.loyaltyRegistry().SetPaymaster(businessID, caller, paymaster); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyLoyaltyAddMerchant handles TxTypeLoyaltyAddMerchant. UNLIKE
+// SetPaymaster/CreateProgram/UpdateProgram/PauseProgram/ResumeProgram,
+// native/loyalty's AddMerchantAddress takes no caller parameter and
+// performs no authorization check internally -- this function MUST enforce
+// sender == business.Owner || RoleLoyaltyAdmin itself before calling it, or
+// any sender could add a merchant to any business.
+func (sp *StateProcessor) applyLoyaltyAddMerchant(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		BusinessID string `json:"businessId"`
+		Merchant   string `json:"merchant"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty add-merchant payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	merchant, err := decodeEscrowRealmAddress(payload.Merchant)
+	if err != nil {
+		return fmt.Errorf("invalid merchant address: %w", err)
+	}
+	business, ok, err := sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrBusinessNotFound
+	}
+	caller := bytesToAddress(sender)
+	if caller != business.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyAddMerchant: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
+	}
+	if err := sp.loyaltyRegistry().AddMerchantAddress(businessID, merchant); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyLoyaltyRemoveMerchant handles TxTypeLoyaltyRemoveMerchant -- same
+// dispatch-layer authorization gap and manual check as
+// applyLoyaltyAddMerchant (RemoveMerchantAddress also performs no
+// authorization check of its own).
+func (sp *StateProcessor) applyLoyaltyRemoveMerchant(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		BusinessID string `json:"businessId"`
+		Merchant   string `json:"merchant"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty remove-merchant payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	merchant, err := decodeEscrowRealmAddress(payload.Merchant)
+	if err != nil {
+		return fmt.Errorf("invalid merchant address: %w", err)
+	}
+	business, ok, err := sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrBusinessNotFound
+	}
+	caller := bytesToAddress(sender)
+	if caller != business.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyRemoveMerchant: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
+	}
+	if err := sp.loyaltyRegistry().RemoveMerchantAddress(businessID, merchant); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// loyaltyProgramPayload is shared by TxTypeCreateLoyaltyProgram (which reads
+// BusinessID) and TxTypeUpdateLoyaltyProgram (which ignores it -- the
+// program to update is resolved by ID, and its business relationship never
+// changes). Deliberately has no Owner field: Program.Owner is bound to the
+// transaction sender on create and preserved from the existing record on
+// update, never accepted from the payload -- see each TxType's doc comment.
+type loyaltyProgramPayload struct {
+	BusinessID         string  `json:"businessId,omitempty"`
+	ID                 string  `json:"id"`
+	Pool               string  `json:"pool"`
+	TokenSymbol        string  `json:"tokenSymbol"`
+	RewardMode         string  `json:"rewardMode,omitempty"`
+	AccrualBps         uint32  `json:"accrualBps,omitempty"`
+	FixedRewardWei     *string `json:"fixedRewardWei,omitempty"`
+	MinSpendWei        *string `json:"minSpendWei,omitempty"`
+	CapPerTx           *string `json:"capPerTx,omitempty"`
+	DailyCapUser       *string `json:"dailyCapUser,omitempty"`
+	DailyCapProgram    *string `json:"dailyCapProgram,omitempty"`
+	EpochCapProgram    *string `json:"epochCapProgram,omitempty"`
+	IssuanceCapUser    *string `json:"issuanceCapUser,omitempty"`
+	EpochLengthSeconds *uint64 `json:"epochLengthSeconds,omitempty"`
+	StartTime          *uint64 `json:"startTime,omitempty"`
+	EndTime            *uint64 `json:"endTime,omitempty"`
+	Active             *bool   `json:"active,omitempty"`
+}
+
+// buildLoyaltyProgram decodes every cap/token/timing field common to create
+// and update -- the pieces that differ (ID/Owner binding, the
+// merchant-membership vs existing-owner authorization check) are handled by
+// each caller.
+func buildLoyaltyProgram(payload *loyaltyProgramPayload) (*loyalty.Program, error) {
+	pool, err := decodeEscrowRealmAddress(payload.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pool address: %w", err)
+	}
+	rewardMode, err := decodeLoyaltyRewardMode(payload.RewardMode)
+	if err != nil {
+		return nil, err
+	}
+	fixedReward, err := decodeLoyaltyBigInt(payload.FixedRewardWei)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fixedRewardWei: %w", err)
+	}
+	minSpend, err := decodeLoyaltyBigInt(payload.MinSpendWei)
+	if err != nil {
+		return nil, fmt.Errorf("invalid minSpendWei: %w", err)
+	}
+	capPerTx, err := decodeLoyaltyBigInt(payload.CapPerTx)
+	if err != nil {
+		return nil, fmt.Errorf("invalid capPerTx: %w", err)
+	}
+	dailyCapUser, err := decodeLoyaltyBigInt(payload.DailyCapUser)
+	if err != nil {
+		return nil, fmt.Errorf("invalid dailyCapUser: %w", err)
+	}
+	dailyCapProgram, err := decodeLoyaltyBigInt(payload.DailyCapProgram)
+	if err != nil {
+		return nil, fmt.Errorf("invalid dailyCapProgram: %w", err)
+	}
+	epochCapProgram, err := decodeLoyaltyBigInt(payload.EpochCapProgram)
+	if err != nil {
+		return nil, fmt.Errorf("invalid epochCapProgram: %w", err)
+	}
+	issuanceCapUser, err := decodeLoyaltyBigInt(payload.IssuanceCapUser)
+	if err != nil {
+		return nil, fmt.Errorf("invalid issuanceCapUser: %w", err)
+	}
+	var epochLength, startTime, endTime uint64
+	if payload.EpochLengthSeconds != nil {
+		epochLength = *payload.EpochLengthSeconds
+	}
+	if payload.StartTime != nil {
+		startTime = *payload.StartTime
+	}
+	if payload.EndTime != nil {
+		endTime = *payload.EndTime
+	}
+	active := true
+	if payload.Active != nil {
+		active = *payload.Active
+	}
+	return &loyalty.Program{
+		Pool:               pool,
+		TokenSymbol:        payload.TokenSymbol,
+		AccrualBps:         payload.AccrualBps,
+		MinSpendWei:        minSpend,
+		CapPerTx:           capPerTx,
+		DailyCapUser:       dailyCapUser,
+		DailyCapProgram:    dailyCapProgram,
+		EpochCapProgram:    epochCapProgram,
+		EpochLengthSeconds: epochLength,
+		IssuanceCapUser:    issuanceCapUser,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		Active:             active,
+		RewardMode:         rewardMode,
+		FixedRewardWei:     fixedReward,
+	}, nil
+}
+
+// applyCreateLoyaltyProgram handles TxTypeCreateLoyaltyProgram. Program.Owner
+// is bound to the sender; authorization requires the sender already be a
+// registered merchant of the named business (matching the old RPC's
+// isMerchantOf check -- a business's own Owner is NOT automatically its own
+// merchant unless explicitly added via TxTypeLoyaltyAddMerchant, preserved
+// exactly), or hold RoleLoyaltyAdmin as an override.
+func (sp *StateProcessor) applyCreateLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload loyaltyProgramPayload
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty program payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	business, ok, err := sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrBusinessNotFound
+	}
+	callerAddr := bytesToAddress(sender)
+	isMerchant := false
+	for _, merchant := range business.Merchants {
+		if merchant == callerAddr {
+			isMerchant = true
+			break
+		}
+	}
+	if !isMerchant && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyCreateProgram: unauthorized: caller is not a registered merchant of the business and lacks %s", RoleLoyaltyAdmin)
+	}
+	program, err := buildLoyaltyProgram(&payload)
+	if err != nil {
+		return err
+	}
+	program.ID = programID
+	program.Owner = callerAddr
+	if err := sp.loyaltyRegistry().CreateProgram(callerAddr, program); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyUpdateLoyaltyProgram handles TxTypeUpdateLoyaltyProgram. Full-replace
+// semantics -- every mutable field is overwritten from the payload, so a
+// client must resend the complete desired program state, not a partial
+// patch. Authorization is checked against the EXISTING program's real
+// owner loaded from state (never the payload); ID/Owner are always taken
+// from the existing record, never the payload, so they cannot change.
+func (sp *StateProcessor) applyUpdateLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload loyaltyProgramPayload
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty program payload: %w", err)
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	existing, ok, err := sp.LoyaltyProgramByID(programID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrProgramNotFound
+	}
+	caller := bytesToAddress(sender)
+	if caller != existing.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyUpdateProgram: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
+	}
+	program, err := buildLoyaltyProgram(&payload)
+	if err != nil {
+		return err
+	}
+	program.ID = existing.ID
+	program.Owner = existing.Owner
+	if err := sp.loyaltyRegistry().UpdateProgram(caller, program); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyPauseLoyaltyProgram handles TxTypePauseLoyaltyProgram.
+// native/loyalty/registry_program.go's PauseProgram performs the caller ==
+// program.Owner || RoleLoyaltyAdmin authorization check internally and is
+// idempotent if the program is already paused.
+func (sp *StateProcessor) applyPauseLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty pause-program payload: %w", err)
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.loyaltyRegistry().PauseProgram(caller, programID); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyResumeLoyaltyProgram handles TxTypeResumeLoyaltyProgram -- mirror of
+// applyPauseLoyaltyProgram (ResumeProgram performs the same authorization
+// check internally and is idempotent if already active).
+func (sp *StateProcessor) applyResumeLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty resume-program payload: %w", err)
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.loyaltyRegistry().ResumeProgram(caller, programID); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
 // --- NEW: Lock -> Dispute -> Arbitrate flow ---
 
 func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
@@ -4486,6 +4954,22 @@ const RoleSwapPayoutAttestor = "ROLE_SWAP_PAYOUT_ATTESTOR"
 // TxType doc comments in core/types/transaction.go). Same genesis/
 // governance-granted role pattern as RoleSwapPayoutAttestor.
 const RoleEscrowRealmAdmin = "ROLE_ESCROW_REALM_ADMIN"
+
+// RoleLoyaltyAdmin gates the loyalty TxType family (0x42-0x49, see their
+// doc comments in core/types/transaction.go) as the admin-override half of
+// each operation's authorization check. This is NOT a new role -- it is the
+// exact same "ROLE_LOYALTY_ADMIN" string native/loyalty/registry.go's
+// unexported roleLoyaltyAdmin constant already checks internally via
+// HasRole for SetPaymaster/CreateProgram/UpdateProgram/PauseProgram/
+// ResumeProgram; it is declared here, exported, only because
+// applyLoyaltyAddMerchant/applyLoyaltyRemoveMerchant must replicate that
+// same check by hand (the underlying registry methods take no caller
+// parameter and perform no authorization check of their own -- see those
+// TxTypes' doc comments) and need a named constant to reference rather than
+// a bare string literal. A role granted once (genesis or governance,
+// manager.SetRole("ROLE_LOYALTY_ADMIN", addr)) authorizes both the
+// registry-internal checks and this dispatch-layer-only check uniformly.
+const RoleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
 
 // applyRedeemNHB lets a user burn their own NHB to request an off-chain
 // stablecoin payout (swap-out). Per the founder's explicit design, the burn
@@ -7648,6 +8132,37 @@ func (sp *StateProcessor) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.Prog
 			continue
 		}
 		var id loyalty.ProgramID
+		copy(id[:], entry)
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	return ids, nil
+}
+
+// LoyaltyBusinessesByOwner lists every business the given address owns, in
+// deterministic order. This is the read path a client uses to discover the
+// BusinessID assigned by a TxTypeCreateLoyaltyBusiness transaction --
+// RegisterBusiness itself emits no event, and BusinessIDs are sequentially
+// minted so a caller cannot predict theirs in advance; the owner index this
+// reads (LoyaltyBusinessOwnerKey) is populated on every RegisterBusiness
+// call regardless.
+func (sp *StateProcessor) LoyaltyBusinessesByOwner(owner [20]byte) ([]loyalty.BusinessID, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	var raw [][]byte
+	if err := manager.KVGetList(nhbstate.LoyaltyBusinessOwnerKey(owner[:]), &raw); err != nil {
+		return nil, err
+	}
+	ids := make([]loyalty.BusinessID, 0, len(raw))
+	seen := make(map[[32]byte]struct{}, len(raw))
+	for _, entry := range raw {
+		if len(entry) != len(loyalty.BusinessID{}) {
+			continue
+		}
+		var id loyalty.BusinessID
 		copy(id[:], entry)
 		if _, exists := seen[id]; exists {
 			continue

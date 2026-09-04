@@ -5104,6 +5104,10 @@ func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, erro
 	return n.state.LoyaltyProgramsByOwner(owner)
 }
 
+func (n *Node) LoyaltyBusinessesByOwner(owner [20]byte) ([]loyalty.BusinessID, error) {
+	return n.state.LoyaltyBusinessesByOwner(owner)
+}
+
 // SubscriptionsManager returns a fresh state.Manager over the node's
 // current trie -- every accessor below constructs one per call, matching
 // LoyaltyManager's convention (cheap: two pointers + an interface).
