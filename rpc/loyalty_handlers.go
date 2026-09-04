@@ -144,402 +144,63 @@ type businessResult struct {
 	Merchants []string `json:"merchants"`
 }
 
+// loyaltyRPCDisabledMessage: loyalty_createBusiness/setPaymaster/addMerchant/
+// removeMerchant/createProgram/updateProgram/pauseProgram/resumeProgram used
+// to call s.node.LoyaltyRegistry() directly -- a bare
+// nhbstate.NewManager(n.state.Trie) mutation of the live state trie OUTSIDE
+// the transaction/block pipeline entirely (no tx created, signed, or added
+// to any block). CreateBlock/ValidateBlock both derive their working state
+// from that SAME n.state via n.state.Copy() before applying only the
+// block's tx list and requiring the result to match the proposer's
+// header.StateRoot -- so any validator-local RPC mutation here is invisible
+// to every OTHER validator's independently-derived state, and the very next
+// block either validator proposes is guaranteed to be rejected by the other
+// on a state-root mismatch. With exactly 2 validators and zero quorum
+// slack, that is not a risk of a fork -- it is a guaranteed, permanent halt
+// at that height, on the very next legitimate authenticated call to ANY of
+// these methods (same incident class already fixed this session for
+// escrow/claimable/p2p/identity/creator, and previously for
+// lending_supply/withdraw/borrow/... and stake_delegate/undelegate/claim/
+// claimRewards). Disabled immediately as an emergency stopgap pending a
+// real signed-transaction conversion that applies through
+// StateProcessor.ApplyTransaction inside the normal consensus path instead
+// -- there is currently no TxType for any loyalty action at all
+// (core/types/transaction.go), so that conversion is real, new work, not a
+// rewire of something that already exists. loyalty_getBusiness/
+// listPrograms/programStats/listAccruals/userDaily/paymasterBalance/
+// resolveUsername/userQR (all read-only) are deliberately left live.
+const loyaltyRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+
 func (s *Server) handleLoyaltyCreateBusiness(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params createBusinessParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	ownerStr := params.Owner
-	if strings.TrimSpace(ownerStr) == "" {
-		ownerStr = params.Caller
-	}
-	ownerAddr, err := decodeBech32(ownerStr)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid owner address", err.Error())
-		return
-	}
-	if !addressesEqual(callerAddr, ownerAddr) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
-		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
-		return
-	}
-	trimmedName := strings.TrimSpace(params.Name)
-	if trimmedName == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "name is required", nil)
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	businessID, err := registry.RegisterBusiness(ownerAddr, trimmedName)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to create business", err.Error())
-		return
-	}
-	writeResult(w, req.ID, formatBusinessID(businessID))
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltySetPaymaster(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params setPaymasterParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	businessID, err := parseBusinessID(params.BusinessID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid businessId", err.Error())
-		return
-	}
-	business, ok, err := s.node.LoyaltyBusinessByID(businessID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "business not found", params.BusinessID)
-		return
-	}
-	if !addressesEqual(callerAddr, business.Owner) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
-		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
-		return
-	}
-	paymasterAddr, err := decodeOptionalBech32(params.Paymaster)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid paymaster", err.Error())
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.SetPaymaster(businessID, callerAddr, paymasterAddr); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to set paymaster", err.Error())
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyAddMerchant(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params merchantParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	businessID, err := parseBusinessID(params.BusinessID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid businessId", err.Error())
-		return
-	}
-	merchantAddr, err := decodeBech32(params.Merchant)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid merchant address", err.Error())
-		return
-	}
-	business, ok, err := s.node.LoyaltyBusinessByID(businessID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "business not found", params.BusinessID)
-		return
-	}
-	if !addressesEqual(callerAddr, business.Owner) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
-		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.AddMerchantAddress(businessID, merchantAddr); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to add merchant", err.Error())
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyRemoveMerchant(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params merchantParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	businessID, err := parseBusinessID(params.BusinessID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid businessId", err.Error())
-		return
-	}
-	merchantAddr, err := decodeBech32(params.Merchant)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid merchant address", err.Error())
-		return
-	}
-	business, ok, err := s.node.LoyaltyBusinessByID(businessID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "business not found", params.BusinessID)
-		return
-	}
-	if !addressesEqual(callerAddr, business.Owner) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
-		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.RemoveMerchantAddress(businessID, merchantAddr); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to remove merchant", err.Error())
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyCreateProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var envelope programSpecEnvelope
-	if err := json.Unmarshal(req.Params[0], &envelope); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(envelope.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	businessID, err := parseBusinessID(envelope.BusinessID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid businessId", err.Error())
-		return
-	}
-	var spec programSpec
-	if err := json.Unmarshal(envelope.Spec, &spec); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid program spec", err.Error())
-		return
-	}
-	program, err := buildProgramFromSpec(&spec)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid program spec", err.Error())
-		return
-	}
-	if !addressesEqual(callerAddr, program.Owner) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
-		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
-		return
-	}
-	business, ok, err := s.node.LoyaltyBusinessByID(businessID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "business not found", envelope.BusinessID)
-		return
-	}
-	if !isMerchantOf(business, program.Owner) {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "owner is not a registered merchant", nil)
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.CreateProgram(callerAddr, program); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to create program", err.Error())
-		return
-	}
-	writeResult(w, req.ID, formatProgramID(program.ID))
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyUpdateProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var envelope programSpecEnvelope
-	if err := json.Unmarshal(req.Params[0], &envelope); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(envelope.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	var spec programSpec
-	if err := json.Unmarshal(envelope.Spec, &spec); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid program spec", err.Error())
-		return
-	}
-	program, err := buildProgramFromSpec(&spec)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid program spec", err.Error())
-		return
-	}
-	// Authorize against the program's TRUE existing owner, not
-	// program.Owner as parsed from the caller-supplied spec: Owner is
-	// immutable (the registry rejects any spec whose Owner differs from
-	// the stored record), so an attacker could otherwise satisfy a
-	// spec-based check trivially by setting spec.owner to their own
-	// address. Loading the existing record first, as registry.UpdateProgram
-	// itself does, closes that gap and lets us reject unauthorized callers
-	// here with a proper 403 instead of relying solely on the registry's
-	// internal check.
-	existing, ok, err := s.node.LoyaltyProgramByID(program.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load program", err.Error())
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "program not found", nil)
-		return
-	}
-	if !addressesEqual(callerAddr, existing.Owner) && !s.node.HasRole("ROLE_LOYALTY_ADMIN", callerAddr[:]) {
-		writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, "caller not authorized", nil)
-		return
-	}
-	if strings.TrimSpace(envelope.BusinessID) != "" {
-		businessID, err := parseBusinessID(envelope.BusinessID)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid businessId", err.Error())
-			return
-		}
-		business, ok, err := s.node.LoyaltyBusinessByID(businessID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load business", err.Error())
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "business not found", envelope.BusinessID)
-			return
-		}
-		if !isMerchantOf(business, existing.Owner) {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "owner is not a registered merchant", nil)
-			return
-		}
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.UpdateProgram(callerAddr, program); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to update program", err.Error())
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyPauseProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params programLifecycleParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	programID, err := parseProgramID(params.ProgramID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid programId", err.Error())
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.PauseProgram(callerAddr, programID); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to pause program", err.Error())
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyResumeProgram(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params programLifecycleParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	programID, err := parseProgramID(params.ProgramID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid programId", err.Error())
-		return
-	}
-	registry := s.node.LoyaltyRegistry()
-	if err := registry.ResumeProgram(callerAddr, programID); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to resume program", err.Error())
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, loyaltyRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleLoyaltyGetBusiness(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

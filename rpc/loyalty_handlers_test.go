@@ -164,177 +164,115 @@ func decodeProgramID(t *testing.T, idStr string) loyalty.ProgramID {
 	return id
 }
 
-func TestHandleLoyaltyCreateBusinessSuccess(t *testing.T) {
-	env := newTestEnv(t)
-	ownerKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate owner: %v", err)
-	}
-	ownerAddr := ownerKey.PubKey().Address().String()
+// loyalty_createBusiness/setPaymaster/addMerchant/removeMerchant/
+// createProgram/updateProgram/pauseProgram/resumeProgram were disabled (see
+// loyaltyRPCDisabledMessage in loyalty_handlers.go) -- they used to mutate
+// the live state trie directly outside the block pipeline, guaranteeing a
+// consensus fork/halt on this 2-validator zero-quorum-slack chain the
+// moment any of them was called. Every mutating handler now
+// unconditionally returns codeMethodDisabled regardless of input, so the
+// old success/validation/authorization tests (which all depended on the
+// handlers actually writing state) no longer have anything left to
+// exercise -- replaced below with a direct check that each disabled
+// handler returns the disabled error. The read-only handlers
+// (getBusiness/listPrograms/programStats/listAccruals/userDaily/
+// paymasterBalance/resolveUsername/userQR) are unaffected and keep their
+// real behavioral tests elsewhere in this file.
 
+func TestLoyaltyCreateBusinessDisabled(t *testing.T) {
+	env := newTestEnv(t)
 	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller": ownerAddr,
+		"caller": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 		"name":   "Acme Corp",
 	})}}
-	recorder := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateBusiness(recorder, env.newRequest(), req)
-
-	result, rpcErr := decodeRPCResponse(t, recorder)
-	if rpcErr != nil {
-		t.Fatalf("unexpected rpc error: %+v", rpcErr)
-	}
-	var businessID string
-	if err := json.Unmarshal(result, &businessID); err != nil {
-		t.Fatalf("decode business id: %v", err)
-	}
-	id := decodeBusinessID(t, businessID)
-	business, ok, err := env.node.LoyaltyBusinessByID(id)
-	if err != nil {
-		t.Fatalf("load business: %v", err)
-	}
-	if !ok {
-		t.Fatalf("business not found")
-	}
-	if business.Name != "Acme Corp" {
-		t.Fatalf("unexpected business name: %s", business.Name)
-	}
-	if crypto.MustNewAddress(crypto.NHBPrefix, business.Owner[:]).String() != ownerAddr {
-		t.Fatalf("owner mismatch")
-	}
-}
-
-func TestHandleLoyaltyCreateBusinessInvalidAddress(t *testing.T) {
-	env := newTestEnv(t)
-	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller": "invalid",
-		"name":   "Bad",
-	})}}
-	recorder := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateBusiness(recorder, env.newRequest(), req)
-	_, rpcErr := decodeRPCResponse(t, recorder)
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateBusiness(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
 	if rpcErr == nil {
-		t.Fatalf("expected error")
+		t.Fatalf("expected disabled error")
 	}
-	if rpcErr.Code != codeInvalidParams {
-		t.Fatalf("expected invalid params code, got %d", rpcErr.Code)
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
 }
 
-func TestHandleLoyaltySetPaymasterUnauthorized(t *testing.T) {
+func TestLoyaltySetPaymasterDisabled(t *testing.T) {
 	env := newTestEnv(t)
-	ownerKey, _ := crypto.GeneratePrivateKey()
-	ownerAddr := ownerKey.PubKey().Address().String()
 	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller": ownerAddr,
-		"name":   "Biz",
+		"caller":     "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"businessId": "0x" + hex.EncodeToString(make([]byte, 32)),
+		"paymaster":  "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 	})}}
-	recorder := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateBusiness(recorder, env.newRequest(), req)
-	result, rpcErr := decodeRPCResponse(t, recorder)
-	if rpcErr != nil {
-		t.Fatalf("unexpected error creating business: %+v", rpcErr)
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltySetPaymaster(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
 	}
-	var businessID string
-	if err := json.Unmarshal(result, &businessID); err != nil {
-		t.Fatalf("decode business id: %v", err)
-	}
-
-	outsiderKey, _ := crypto.GeneratePrivateKey()
-	outsiderAddr := outsiderKey.PubKey().Address().String()
-	payload := map[string]string{
-		"caller":     outsiderAddr,
-		"businessId": businessID,
-		"paymaster":  ownerAddr,
-	}
-	setReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, payload)}}
-	setRecorder := httptest.NewRecorder()
-	env.server.handleLoyaltySetPaymaster(setRecorder, env.newRequest(), setReq)
-	_, setErr := decodeRPCResponse(t, setRecorder)
-	if setErr == nil {
-		t.Fatalf("expected unauthorized error")
-	}
-	if setErr.Code != codeUnauthorized {
-		t.Fatalf("expected code %d got %d", codeUnauthorized, setErr.Code)
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
 }
 
-func TestHandleLoyaltyCreateProgramSuccess(t *testing.T) {
+func TestLoyaltyAddMerchantDisabled(t *testing.T) {
 	env := newTestEnv(t)
-	manager := env.node.LoyaltyManager()
-	if err := manager.RegisterToken("ZNHB", "Zap", 18); err != nil {
-		t.Fatalf("register token: %v", err)
-	}
-	ownerKey, _ := crypto.GeneratePrivateKey()
-	ownerAddr := ownerKey.PubKey().Address().String()
-	businessReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller": ownerAddr,
-		"name":   "Rewards",
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller":     "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"businessId": "0x" + hex.EncodeToString(make([]byte, 32)),
+		"merchant":   "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 	})}}
-	bizRec := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateBusiness(bizRec, env.newRequest(), businessReq)
-	bizResult, bizErr := decodeRPCResponse(t, bizRec)
-	if bizErr != nil {
-		t.Fatalf("create business: %+v", bizErr)
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyAddMerchant(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
 	}
-	var businessID string
-	if err := json.Unmarshal(bizResult, &businessID); err != nil {
-		t.Fatalf("decode business id: %v", err)
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
+}
 
-	merchantKey, _ := crypto.GeneratePrivateKey()
-	merchantAddr := merchantKey.PubKey().Address().String()
-	addReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller":     ownerAddr,
-		"businessId": businessID,
-		"merchant":   merchantAddr,
+func TestLoyaltyRemoveMerchantDisabled(t *testing.T) {
+	env := newTestEnv(t)
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller":     "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"businessId": "0x" + hex.EncodeToString(make([]byte, 32)),
+		"merchant":   "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 	})}}
-	addRec := httptest.NewRecorder()
-	env.server.handleLoyaltyAddMerchant(addRec, env.newRequest(), addReq)
-	_, addErr := decodeRPCResponse(t, addRec)
-	if addErr != nil {
-		t.Fatalf("add merchant: %+v", addErr)
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyRemoveMerchant(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
 	}
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
+	}
+}
 
-	var programID [32]byte
-	programID[31] = 1
-	programIDHex := "0x" + hex.EncodeToString(programID[:])
-	poolKey, _ := crypto.GeneratePrivateKey()
-	poolAddr := poolKey.PubKey().Address().String()
+func TestLoyaltyCreateProgramDisabled(t *testing.T) {
+	env := newTestEnv(t)
 	spec := map[string]interface{}{
-		"id":              programIDHex,
-		"owner":           merchantAddr,
-		"pool":            poolAddr,
+		"id":              "0x" + hex.EncodeToString(make([]byte, 32)),
+		"owner":           "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"pool":            "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 		"tokenSymbol":     "ZNHB",
 		"accrualBps":      100,
 		"dailyCapProgram": "1000000000000000000000",
 	}
-	envReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
-		"caller":     merchantAddr,
-		"businessId": businessID,
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
+		"caller":     "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"businessId": "0x" + hex.EncodeToString(make([]byte, 32)),
 		"spec":       spec,
 	})}}
-	envRec := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateProgram(envRec, env.newRequest(), envReq)
-	programResult, programErr := decodeRPCResponse(t, envRec)
-	if programErr != nil {
-		t.Fatalf("create program error: %+v", programErr)
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyCreateProgram(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
 	}
-	var returnedID string
-	if err := json.Unmarshal(programResult, &returnedID); err != nil {
-		t.Fatalf("decode program id: %v", err)
-	}
-	if returnedID != programIDHex {
-		t.Fatalf("unexpected program id: %s", returnedID)
-	}
-	loaded, ok, err := env.node.LoyaltyProgramByID(decodeProgramID(t, returnedID))
-	if err != nil {
-		t.Fatalf("load program: %v", err)
-	}
-	if !ok {
-		t.Fatalf("program not found")
-	}
-	if !loaded.Active || loaded.AccrualBps != 100 {
-		t.Fatalf("unexpected program state")
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
 }
 
@@ -689,102 +627,61 @@ func TestHandleLoyaltyListAccruals(t *testing.T) {
 	}
 }
 
-func TestHandleLoyaltyUpdateProgramUnauthorized(t *testing.T) {
+func TestLoyaltyUpdateProgramDisabled(t *testing.T) {
 	env := newTestEnv(t)
-	manager := env.node.LoyaltyManager()
-	if err := manager.RegisterToken("ZNHB", "Zap", 18); err != nil {
-		t.Fatalf("register token: %v", err)
-	}
-	ownerKey, _ := crypto.GeneratePrivateKey()
-	ownerAddr := ownerKey.PubKey().Address().String()
-	businessReq := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller": ownerAddr,
-		"name":   "Rewards",
-	})}}
-	bizRec := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateBusiness(bizRec, env.newRequest(), businessReq)
-	bizResult, bizErr := decodeRPCResponse(t, bizRec)
-	if bizErr != nil {
-		t.Fatalf("create business: %+v", bizErr)
-	}
-	var businessID string
-	if err := json.Unmarshal(bizResult, &businessID); err != nil {
-		t.Fatalf("decode business id: %v", err)
-	}
-
-	merchantKey, _ := crypto.GeneratePrivateKey()
-	merchantAddr := merchantKey.PubKey().Address().String()
-	addReq := &RPCRequest{ID: 2, Params: []json.RawMessage{marshalParam(t, map[string]string{
-		"caller":     ownerAddr,
-		"businessId": businessID,
-		"merchant":   merchantAddr,
-	})}}
-	addRec := httptest.NewRecorder()
-	env.server.handleLoyaltyAddMerchant(addRec, env.newRequest(), addReq)
-	if _, addErr := decodeRPCResponse(t, addRec); addErr != nil {
-		t.Fatalf("add merchant: %+v", addErr)
-	}
-
-	var programID [32]byte
-	programID[31] = 1
-	programIDHex := "0x" + hex.EncodeToString(programID[:])
-	poolKey, _ := crypto.GeneratePrivateKey()
-	poolAddr := poolKey.PubKey().Address().String()
-	createSpec := map[string]interface{}{
-		"id":              programIDHex,
-		"owner":           merchantAddr,
-		"pool":            poolAddr,
-		"tokenSymbol":     "ZNHB",
-		"accrualBps":      100,
-		"dailyCapProgram": "1000000000000000000000",
-	}
-	createReq := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
-		"caller":     merchantAddr,
-		"businessId": businessID,
-		"spec":       createSpec,
-	})}}
-	createRec := httptest.NewRecorder()
-	env.server.handleLoyaltyCreateProgram(createRec, env.newRequest(), createReq)
-	if _, createErr := decodeRPCResponse(t, createRec); createErr != nil {
-		t.Fatalf("create program: %+v", createErr)
-	}
-
-	// An outsider -- neither the program's owner nor a ROLE_LOYALTY_ADMIN --
-	// must not be able to update the program, even by declaring themselves
-	// as both caller and spec owner (Owner is immutable and checked against
-	// the real existing record, not the caller-supplied spec).
-	outsiderKey, _ := crypto.GeneratePrivateKey()
-	outsiderAddr := outsiderKey.PubKey().Address().String()
-	updateSpec := map[string]interface{}{
-		"id":              programIDHex,
-		"owner":           merchantAddr,
-		"pool":            poolAddr,
+	spec := map[string]interface{}{
+		"id":              "0x" + hex.EncodeToString(make([]byte, 32)),
+		"owner":           "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"pool":            "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 		"tokenSymbol":     "ZNHB",
 		"accrualBps":      500,
 		"dailyCapProgram": "1000000000000000000000",
 	}
-	updateReq := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
-		"caller": outsiderAddr,
-		"spec":   updateSpec,
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]interface{}{
+		"caller": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"spec":   spec,
 	})}}
-	updateRec := httptest.NewRecorder()
-	env.server.handleLoyaltyUpdateProgram(updateRec, env.newRequest(), updateReq)
-	_, updateErr := decodeRPCResponse(t, updateRec)
-	if updateErr == nil {
-		t.Fatalf("expected unauthorized error")
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyUpdateProgram(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
 	}
-	if updateErr.Code != codeUnauthorized {
-		t.Fatalf("expected code %d got %d", codeUnauthorized, updateErr.Code)
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
+}
 
-	loaded, ok, err := env.node.LoyaltyProgramByID(decodeProgramID(t, programIDHex))
-	if err != nil {
-		t.Fatalf("load program: %v", err)
+func TestLoyaltyPauseProgramDisabled(t *testing.T) {
+	env := newTestEnv(t)
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller":    "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"programId": "0x" + hex.EncodeToString(make([]byte, 32)),
+	})}}
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyPauseProgram(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
 	}
-	if !ok {
-		t.Fatalf("program not found")
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
-	if loaded.AccrualBps != 100 {
-		t.Fatalf("unauthorized update must not apply: accrualBps = %d, want 100", loaded.AccrualBps)
+}
+
+func TestLoyaltyResumeProgramDisabled(t *testing.T) {
+	env := newTestEnv(t)
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{
+		"caller":    "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
+		"programId": "0x" + hex.EncodeToString(make([]byte, 32)),
+	})}}
+	rec := httptest.NewRecorder()
+	env.server.handleLoyaltyResumeProgram(rec, env.newRequest(), req)
+	_, rpcErr := decodeRPCResponse(t, rec)
+	if rpcErr == nil {
+		t.Fatalf("expected disabled error")
+	}
+	if rpcErr.Code != codeMethodDisabled {
+		t.Fatalf("expected code %d (disabled) got %d", codeMethodDisabled, rpcErr.Code)
 	}
 }
