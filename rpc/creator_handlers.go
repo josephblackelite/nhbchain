@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"math/big"
 	"net/http"
-	"strings"
 
 	"nhbchain/crypto"
 	"nhbchain/native/creator"
@@ -128,191 +127,31 @@ func formatAddress(addr [20]byte) string {
 	return crypto.MustNewAddress(crypto.NHBPrefix, addr[:]).String()
 }
 
+// creatorRPCDisabledMessage: same guaranteed-fork defect as escrow's RPC
+// handlers (see escrowRPCDisabledMessage) -- creator_publish/tip/stake/
+// unstake and creator_payouts' Claim:true path mutated n.state.Trie directly
+// outside the block pipeline. Disabled as an emergency stopgap.
+const creatorRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+
 func (s *Server) handleCreatorPublish(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params creatorPublishParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	trimmedID := strings.TrimSpace(params.ContentID)
-	if trimmedID == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "contentId is required", nil)
-		return
-	}
-	content, err := s.node.CreatorPublish(callerAddr, trimmedID, params.URI, params.Metadata)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to publish content", err.Error())
-		return
-	}
-	result := formatCreatorContent(params.Caller, content)
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, creatorRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleCreatorTip(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params creatorTipParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	amount, err := parseAmount(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	tip, ledger, err := s.node.CreatorTip(callerAddr, params.ContentID, amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to apply tip", err.Error())
-		return
-	}
-	creatorAddr := ""
-	if tip != nil {
-		creatorAddr = formatAddress(tip.Creator)
-	}
-	pending, totalTips, totalYield, _ := formatLedger(ledger)
-	result := creatorTipResult{
-		ContentID:  params.ContentID,
-		Creator:    creatorAddr,
-		Fan:        params.Caller,
-		Amount:     amount.String(),
-		TippedAt:   0,
-		Pending:    pending,
-		TotalTips:  totalTips,
-		TotalYield: totalYield,
-	}
-	if tip != nil {
-		result.TippedAt = tip.TippedAt
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, creatorRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleCreatorStake(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params creatorStakeParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	creatorAddr, err := decodeBech32(params.Creator)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid creator address", err.Error())
-		return
-	}
-	amount, err := parseAmount(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	stake, reward, ledger, err := s.node.CreatorStake(callerAddr, creatorAddr, amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to stake", err.Error())
-		return
-	}
-	pending, totalTips, totalYield, _ := formatLedger(ledger)
-	result := creatorStakeResult{
-		Creator:    params.Creator,
-		Fan:        params.Caller,
-		Amount:     amount.String(),
-		Shares:     "0",
-		StakedAt:   0,
-		Reward:     bigString(reward),
-		Pending:    pending,
-		TotalTips:  totalTips,
-		TotalYield: totalYield,
-	}
-	if stake != nil {
-		result.Shares = bigString(stake.Shares)
-		result.StakedAt = stake.StakedAt
-		result.Amount = bigString(stake.Amount)
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, creatorRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleCreatorUnstake(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)
-		return
-	}
-	var params creatorUnstakeParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-		return
-	}
-	callerAddr, err := decodeBech32(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
-		return
-	}
-	creatorAddr, err := decodeBech32(params.Creator)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid creator address", err.Error())
-		return
-	}
-	amount, err := parseAmount(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, err.Error(), nil)
-		return
-	}
-	stake, err := s.node.CreatorUnstake(callerAddr, creatorAddr, amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to unstake", err.Error())
-		return
-	}
-	result := creatorUnstakeResult{
-		Creator:   params.Creator,
-		Fan:       params.Caller,
-		Amount:    amount.String(),
-		Remaining: "0",
-		Shares:    "0",
-	}
-	if stake != nil {
-		result.Remaining = bigString(stake.Amount)
-		result.Shares = bigString(stake.Shares)
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, creatorRPCDisabledMessage, nil)
 }
 
+// handleCreatorPayouts keeps its READ path (Claim: false, just loading the
+// payout ledger) live -- only Claim: true actually mutates state
+// (CreatorClaimPayouts), so only that path is disabled.
 func (s *Server) handleCreatorPayouts(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if authErr := s.requireAuthInto(&r); authErr != nil {
 		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
@@ -327,27 +166,19 @@ func (s *Server) handleCreatorPayouts(w http.ResponseWriter, r *http.Request, re
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
 		return
 	}
+	if params.Claim {
+		writeError(w, http.StatusGone, req.ID, codeMethodDisabled, creatorRPCDisabledMessage, nil)
+		return
+	}
 	callerAddr, err := decodeBech32(params.Caller)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid caller address", err.Error())
 		return
 	}
-	claimed := big.NewInt(0)
-	var ledger *creator.PayoutLedger
-	if params.Claim {
-		var amount *big.Int
-		ledger, amount, err = s.node.CreatorClaimPayouts(callerAddr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to claim payouts", err.Error())
-			return
-		}
-		claimed = amount
-	} else {
-		ledger, err = s.node.CreatorPayouts(callerAddr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to load payouts", err.Error())
-			return
-		}
+	ledger, err := s.node.CreatorPayouts(callerAddr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to load payouts", err.Error())
+		return
 	}
 	pending, totalTips, totalYield, last := formatLedger(ledger)
 	result := creatorPayoutsResult{
@@ -356,7 +187,7 @@ func (s *Server) handleCreatorPayouts(w http.ResponseWriter, r *http.Request, re
 		TotalTips:  totalTips,
 		TotalYield: totalYield,
 		LastPayout: last,
-		Claimed:    bigString(claimed),
+		Claimed:    bigString(big.NewInt(0)),
 	}
 	writeResult(w, req.ID, result)
 }

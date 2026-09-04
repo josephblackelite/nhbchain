@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"nhbchain/core/claimable"
 	"nhbchain/crypto"
@@ -69,130 +68,22 @@ type claimableJSON struct {
 	Status    string `json:"status"`
 }
 
+// claimableRPCDisabledMessage: same guaranteed-fork defect as escrow's RPC
+// handlers (see escrowRPCDisabledMessage) -- claimable_create/claim/cancel
+// mutated n.state.Trie directly outside the block pipeline. Disabled as an
+// emergency stopgap; claimable_get (read-only) is left live.
+const claimableRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+
 func (s *Server) handleClaimableCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params claimableCreateParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	payer, err := parseBech32Address(params.Payer)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.validateCallerMetadata(callerKeyFromAddress(payer), params.callerMetadataParams); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	token := strings.ToUpper(strings.TrimSpace(params.Token))
-	if token != "NHB" && token != "ZNHB" {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "token must be NHB or ZNHB")
-		return
-	}
-	amount, err := parsePositiveBigInt(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	now := time.Now().Unix()
-	if params.Deadline < now-deadlineSkewSeconds {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "deadline must be in the future")
-		return
-	}
-	hashLock, err := parseHashLock(params.HashLock)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := s.node.ClaimableCreate(payer, token, amount, hashLock, params.Deadline)
-	if err != nil {
-		writeClaimableError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, claimableCreateResult{ID: formatClaimableID(id)})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, claimableRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleClaimableClaim(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params claimableClaimParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseClaimableID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	payee, err := parseBech32Address(params.Payee)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	preimage, err := parseHexBytes(params.Preimage)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.validateCallerMetadata(callerKeyFromAddress(payee), params.callerMetadataParams); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.ClaimableClaim(id, preimage, payee); err != nil {
-		writeClaimableError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, claimableOKResult{OK: true})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, claimableRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleClaimableCancel(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params claimableCancelParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseClaimableID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.validateCallerMetadata(callerKeyFromAddress(caller), params.callerMetadataParams); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeClaimableInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.ClaimableCancel(id, caller); err != nil {
-		writeClaimableError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, claimableOKResult{OK: true})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, claimableRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleClaimableGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

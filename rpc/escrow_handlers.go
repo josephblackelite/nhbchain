@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
-	"time"
 
 	"nhbchain/core"
 	"nhbchain/core/genesis"
@@ -93,74 +92,30 @@ type escrowJSON struct {
 	Arbitrators   []string `json:"arbitrators,omitempty"`
 }
 
+// escrowRPCDisabledMessage: escrow_create/fund/release/refund/dispute/
+// expire/resolve used to call s.node.Escrow* directly -- a bare
+// n.stateMu.Lock()+nhbstate.NewManager(n.state.Trie) mutation of the live
+// state trie OUTSIDE the transaction/block pipeline entirely (no tx created,
+// signed, or added to any block). CreateBlock/ValidateBlock both derive their
+// working state from that SAME n.state via n.state.Copy() before applying
+// only the block's tx list and requiring the result to match the proposer's
+// header.StateRoot -- so any validator-local RPC mutation here is invisible
+// to every OTHER validator's independently-derived state, and the very next
+// block either validator proposes is guaranteed to be rejected by the other
+// on a state-root mismatch. With exactly 2 validators and zero quorum slack,
+// that is not a risk of a fork -- it is a guaranteed, permanent halt at that
+// height, on the very next legitimate authenticated call to ANY of these
+// methods (see project memory: this class of incident has already happened
+// once on this chain). Disabled immediately as an emergency stopgap (mirrors
+// the identical fix already applied to lending_supply/withdraw/borrow/...
+// and stake_delegate/undelegate/claim/claimRewards) pending a real
+// signed-transaction conversion that applies through
+// StateProcessor.ApplyTransaction inside the normal consensus path instead.
+// escrow_get (read-only) is deliberately left live.
+const escrowRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+
 func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params escrowCreateParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	payer, err := parseBech32Address(params.Payer)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	payee, err := parseBech32Address(params.Payee)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	token := strings.ToUpper(strings.TrimSpace(params.Token))
-	if token != "NHB" && token != "ZNHB" {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "token must be NHB or ZNHB")
-		return
-	}
-	amount, err := parsePositiveBigInt(params.Amount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if params.FeeBps > 10_000 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "feeBps must be <= 10000")
-		return
-	}
-	now := time.Now().Unix()
-	if params.Deadline < now-deadlineSkewSeconds {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "deadline must be in the future")
-		return
-	}
-	if params.Nonce == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "nonce must be > 0")
-		return
-	}
-	meta, err := parseMetaHex(params.MetaHex)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	var mediatorPtr *[20]byte
-	if strings.TrimSpace(params.Mediator) != "" {
-		mediator, parseErr := parseBech32Address(params.Mediator)
-		if parseErr != nil {
-			writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", parseErr.Error())
-			return
-		}
-		mediatorCopy := mediator
-		mediatorPtr = &mediatorCopy
-	}
-	id, err := s.node.EscrowCreate(payer, payee, token, amount, params.FeeBps, params.Deadline, params.Nonce, mediatorPtr, meta, strings.TrimSpace(params.Realm))
-	if err != nil {
-		writeEscrowError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, escrowCreateResult{ID: formatEscrowID(id)})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
@@ -187,170 +142,27 @@ func (s *Server) handleEscrowGet(w http.ResponseWriter, _ *http.Request, req *RP
 }
 
 func (s *Server) handleEscrowFund(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params escrowFundParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	from, err := parseBech32Address(params.From)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.EscrowFund(id, from); err != nil {
-		writeEscrowError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowRelease(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleEscrowTransition(w, r, req, s.node.EscrowRelease)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowRefund(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	s.handleEscrowTransition(w, r, req, s.node.EscrowRefund)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowDispute(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params escrowDisputeParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	reason := strings.TrimSpace(params.Reason)
-	if reason == "" {
-		reason = strings.TrimSpace(params.Message)
-	}
-	if err := s.node.EscrowDispute(id, caller, reason); err != nil {
-		writeEscrowError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, "ok")
-}
-
-func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, req *RPCRequest, fn func([32]byte, [20]byte) error) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params escrowActorParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := fn(id, caller); err != nil {
-		writeEscrowError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowExpire(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params escrowIDParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.EscrowExpire(id); err != nil {
-		writeEscrowError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params escrowResolveParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	outcome := strings.ToLower(strings.TrimSpace(params.Outcome))
-	if outcome != "release" && outcome != "refund" {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "outcome must be release or refund")
-		return
-	}
-	if err := s.node.EscrowResolve(id, caller, outcome); err != nil {
-		writeEscrowError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, "ok")
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, escrowRPCDisabledMessage, nil)
 }
 
 func parseBech32Address(addr string) ([20]byte, error) {

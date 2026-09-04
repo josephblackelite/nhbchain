@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"nhbchain/core"
 	"nhbchain/crypto"
@@ -93,98 +92,17 @@ var validP2PResolveOutcomes = map[string]struct{}{
 	"release_quote_refund_base": {},
 }
 
+// p2pRPCDisabledMessage: same guaranteed-fork defect as escrow's RPC handlers
+// (see escrowRPCDisabledMessage) -- p2p_createTrade/settle/dispute/resolve
+// mutated n.state.Trie directly outside the block pipeline. Disabled as an
+// emergency stopgap; p2p_getPeers/getTrade (read-only) are left live. The
+// live P2P market feature itself is unaffected -- it uses a separately
+// signed native-tx path (TX_TYPE_MARKET_CREATE_LISTING/FILL/CANCEL via
+// nhb_sendTransaction), not these RPC methods.
+const p2pRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+
 func (s *Server) handleP2PCreateTrade(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params p2pCreateParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if strings.TrimSpace(params.OfferID) == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "offerId is required")
-		return
-	}
-	buyer, err := parseBech32Address(params.Buyer)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	seller, err := parseBech32Address(params.Seller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	normalizedBase, err := escrow.NormalizeToken(params.BaseToken)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "baseToken must be NHB or ZNHB")
-		return
-	}
-	normalizedQuote, err := escrow.NormalizeToken(params.QuoteToken)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "quoteToken must be NHB or ZNHB")
-		return
-	}
-	baseAmount, err := parsePositiveBigInt(params.BaseAmount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	quoteAmount, err := parsePositiveBigInt(params.QuoteAmount)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	now := time.Now().Unix()
-	if params.Deadline < now {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "deadline must be in the future")
-		return
-	}
-	if params.SlippageBps > 10_000 {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "slippageBps must be <= 10000")
-		return
-	}
-	tradeID, escrowBaseID, escrowQuoteID, err := s.node.P2PCreateTrade(params.OfferID, buyer, seller, normalizedBase, baseAmount, normalizedQuote, quoteAmount, params.Deadline, params.SlippageBps)
-	if err != nil {
-		writeP2PError(w, req.ID, err)
-		return
-	}
-	buyerVault, err := s.node.EscrowVaultAddress(normalizedQuote)
-	if err != nil {
-		writeP2PError(w, req.ID, err)
-		return
-	}
-	sellerVault, err := s.node.EscrowVaultAddress(normalizedBase)
-	if err != nil {
-		writeP2PError(w, req.ID, err)
-		return
-	}
-	result := p2pCreateResult{
-		TradeID:       formatTradeID(tradeID),
-		EscrowBaseID:  formatEscrowID(escrowBaseID),
-		EscrowQuoteID: formatEscrowID(escrowQuoteID),
-		PayIntents: map[string]p2pPayIntentResult{
-			"buyer": {
-				To:     crypto.MustNewAddress(crypto.NHBPrefix, buyerVault[:]).String(),
-				Token:  normalizedQuote,
-				Amount: quoteAmount.String(),
-				Memo:   "ESCROW:" + formatEscrowID(escrowQuoteID),
-			},
-			"seller": {
-				To:     crypto.MustNewAddress(crypto.NHBPrefix, sellerVault[:]).String(),
-				Token:  normalizedBase,
-				Amount: baseAmount.String(),
-				Memo:   "ESCROW:" + formatEscrowID(escrowBaseID),
-			},
-		},
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, p2pRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleP2PGetPeers(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
@@ -234,109 +152,15 @@ func (s *Server) handleP2PGetTrade(w http.ResponseWriter, r *http.Request, req *
 }
 
 func (s *Server) handleP2PSettle(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	handleP2PTransition(w, req, s.node.P2PSettle)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, p2pRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleP2PDispute(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params p2pDisputeParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseTradeID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if strings.TrimSpace(params.Message) == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "message is required")
-		return
-	}
-	if err := s.node.P2PDispute(id, caller, params.Message); err != nil {
-		writeP2PError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, map[string]bool{"ok": true})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, p2pRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleP2PResolve(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params p2pResolveParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseTradeID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	outcome := strings.ToLower(strings.TrimSpace(params.Outcome))
-	if _, ok := validP2PResolveOutcomes[outcome]; !ok {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "invalid outcome")
-		return
-	}
-	if err := s.node.P2PResolve(id, caller, outcome); err != nil {
-		writeP2PError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, map[string]bool{"ok": true})
-}
-
-func handleP2PTransition(w http.ResponseWriter, req *RPCRequest, fn func([32]byte, [20]byte) error) {
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params p2pActorParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseTradeID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeP2PInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := fn(id, caller); err != nil {
-		writeP2PError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, map[string]bool{"ok": true})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, p2pRPCDisabledMessage, nil)
 }
 
 func writeP2PError(w http.ResponseWriter, id interface{}, err error) {
