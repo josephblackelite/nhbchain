@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -208,59 +209,68 @@ func main() {
 		return
 	case "loyalty-create-business":
 		if len(args) < 3 {
-			fmt.Println("Usage: loyalty-create-business <owner> <name>")
+			fmt.Println("Usage: loyalty-create-business <name> <key_file>")
+			fmt.Println("The signing key's own address becomes the business owner -- there is no separate <owner> argument anymore.")
 			return
 		}
-		name := strings.Join(args[2:], " ")
-		loyaltyCreateBusiness(args[1], name)
+		loyaltyCreateBusiness(args[1], args[2])
 	case "loyalty-set-paymaster":
 		if len(args) < 4 {
-			fmt.Println("Usage: loyalty-set-paymaster <caller> <businessId> <paymaster>")
+			fmt.Println("Usage: loyalty-set-paymaster <businessId> <paymaster> <key_file>")
 			return
 		}
 		loyaltySetPaymaster(args[1], args[2], args[3])
 	case "loyalty-add-merchant":
 		if len(args) < 4 {
-			fmt.Println("Usage: loyalty-add-merchant <caller> <businessId> <merchant>")
+			fmt.Println("Usage: loyalty-add-merchant <businessId> <merchant> <key_file>")
 			return
 		}
-		loyaltyModifyMerchant("loyalty_addMerchant", args[1], args[2], args[3])
+		loyaltyModifyMerchant(types.TxTypeLoyaltyAddMerchant, args[1], args[2], args[3])
 	case "loyalty-remove-merchant":
 		if len(args) < 4 {
-			fmt.Println("Usage: loyalty-remove-merchant <caller> <businessId> <merchant>")
+			fmt.Println("Usage: loyalty-remove-merchant <businessId> <merchant> <key_file>")
 			return
 		}
-		loyaltyModifyMerchant("loyalty_removeMerchant", args[1], args[2], args[3])
+		loyaltyModifyMerchant(types.TxTypeLoyaltyRemoveMerchant, args[1], args[2], args[3])
 	case "loyalty-create-program":
 		if len(args) < 4 {
-			fmt.Println("Usage: loyalty-create-program <caller> <businessId> <programSpecJSON>")
+			fmt.Println("Usage: loyalty-create-program <businessId> <programSpecJSON> <key_file>")
+			fmt.Println("The signing key must already be a registered merchant of <businessId> (see loyalty-add-merchant), or hold ROLE_LOYALTY_ADMIN.")
 			return
 		}
 		loyaltyCreateProgram(args[1], args[2], args[3])
 	case "loyalty-update-program":
 		if len(args) < 3 {
-			fmt.Println("Usage: loyalty-update-program <caller> <programSpecJSON>")
+			fmt.Println("Usage: loyalty-update-program <programSpecJSON> <key_file>")
+			fmt.Println("Full replace, not a partial patch -- resend every field, not just what's changing. <programSpecJSON> must include \"id\".")
 			return
 		}
 		loyaltyUpdateProgram(args[1], args[2])
 	case "loyalty-pause-program":
 		if len(args) < 3 {
-			fmt.Println("Usage: loyalty-pause-program <caller> <programId>")
+			fmt.Println("Usage: loyalty-pause-program <programId> <key_file>")
 			return
 		}
-		loyaltyLifecycle("loyalty_pauseProgram", args[1], args[2])
+		loyaltyLifecycle(types.TxTypePauseLoyaltyProgram, args[1], args[2])
 	case "loyalty-resume-program":
 		if len(args) < 3 {
-			fmt.Println("Usage: loyalty-resume-program <caller> <programId>")
+			fmt.Println("Usage: loyalty-resume-program <programId> <key_file>")
 			return
 		}
-		loyaltyLifecycle("loyalty_resumeProgram", args[1], args[2])
+		loyaltyLifecycle(types.TxTypeResumeLoyaltyProgram, args[1], args[2])
 	case "loyalty-get-business":
 		if len(args) < 2 {
 			fmt.Println("Usage: loyalty-get-business <businessId>")
 			return
 		}
 		loyaltyGetBusiness(args[1])
+	case "loyalty-list-businesses":
+		if len(args) < 2 {
+			fmt.Println("Usage: loyalty-list-businesses <owner>")
+			fmt.Println("Lists every business <owner> owns -- use this to find the businessId a loyalty-create-business transaction was just assigned, since transactions return no synchronous result.")
+			return
+		}
+		loyaltyListBusinesses(args[1])
 	case "loyalty-list-programs":
 		if len(args) < 2 {
 			fmt.Println("Usage: loyalty-list-programs <businessId>")
@@ -728,98 +738,164 @@ func decodeStringResult(result json.RawMessage) (string, error) {
 	return out, nil
 }
 
-func loyaltyCreateBusiness(owner, name string) {
-	param := map[string]string{"caller": owner, "name": name}
-	result, err := callLoyaltyRPC("loyalty_createBusiness", param, true)
+// loyaltySendTx signs a loyalty transaction with keyFile's key and its
+// current on-chain nonce, then broadcasts it. All 8 loyalty write
+// operations funnel through this -- the disabled loyalty_* RPC methods
+// this CLI used to call trusted a plaintext "caller" string with no
+// cryptographic proof behind it (the exact bug the whole redesign fixes);
+// a real transaction signature is the replacement, so every one of these
+// commands now needs the actual signing key, not just an address string.
+func loyaltySendTx(txType types.TxType, data []byte, keyFile string) error {
+	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
+		return fmt.Errorf("loading private key: %w", err)
+	}
+	pubAddr := privKey.PubKey().Address().String()
+
+	account, err := fetchAccount(pubAddr)
+	if err != nil {
+		return fmt.Errorf("fetching account details: %w", err)
+	}
+
+	tx := types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     txType,
+		Nonce:    account.Nonce,
+		Data:     data,
+		Value:    big.NewInt(0),
+		GasLimit: 50000,
+		GasPrice: big.NewInt(1),
+	}
+	tx.Sign(privKey.PrivateKey)
+
+	if _, err := sendTransaction(&tx); err != nil {
+		return fmt.Errorf("sending transaction: %w", err)
+	}
+	return nil
+}
+
+func loyaltyCreateBusiness(name, keyFile string) {
+	data, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		fmt.Printf("Error encoding payload: %v\n", err)
+		return
+	}
+	if err := loyaltySendTx(types.TxTypeCreateLoyaltyBusiness, data, keyFile); err != nil {
 		fmt.Printf("Error creating business: %v\n", err)
 		return
 	}
-	id, err := decodeStringResult(result)
-	if err != nil {
-		fmt.Printf("Error decoding response: %v\n", err)
-		return
-	}
-	fmt.Printf("Business created: %s\n", id)
+	fmt.Println("Business creation transaction sent.")
+	fmt.Println("Check the node logs for confirmation, then run 'loyalty-list-businesses <your address>' to find the assigned businessId.")
 }
 
-func loyaltySetPaymaster(caller, businessID, paymaster string) {
-	param := map[string]string{
-		"caller":     caller,
+func loyaltySetPaymaster(businessID, paymaster, keyFile string) {
+	data, err := json.Marshal(map[string]string{
 		"businessId": businessID,
 		"paymaster":  paymaster,
+	})
+	if err != nil {
+		fmt.Printf("Error encoding payload: %v\n", err)
+		return
 	}
-	if _, err := callLoyaltyRPC("loyalty_setPaymaster", param, true); err != nil {
+	if err := loyaltySendTx(types.TxTypeLoyaltySetPaymaster, data, keyFile); err != nil {
 		fmt.Printf("Error setting paymaster: %v\n", err)
 		return
 	}
-	fmt.Println("Paymaster updated.")
+	fmt.Println("Paymaster update transaction sent. Check the node logs for confirmation.")
 }
 
-func loyaltyModifyMerchant(method, caller, businessID, merchant string) {
-	param := map[string]string{
-		"caller":     caller,
+func loyaltyModifyMerchant(txType types.TxType, businessID, merchant, keyFile string) {
+	data, err := json.Marshal(map[string]string{
 		"businessId": businessID,
 		"merchant":   merchant,
+	})
+	if err != nil {
+		fmt.Printf("Error encoding payload: %v\n", err)
+		return
 	}
-	if _, err := callLoyaltyRPC(method, param, true); err != nil {
+	if err := loyaltySendTx(txType, data, keyFile); err != nil {
 		fmt.Printf("Error modifying merchant: %v\n", err)
 		return
 	}
-	fmt.Println("Operation successful.")
+	fmt.Println("Merchant update transaction sent. Check the node logs for confirmation.")
 }
 
-func loyaltyCreateProgram(caller, businessID, spec string) {
-	var raw json.RawMessage
-	if err := json.Unmarshal([]byte(spec), &raw); err != nil {
+// loyaltyCreateProgram merges businessId into the caller-supplied spec JSON
+// (overwriting any businessId already present in it, since the CLI's own
+// <businessId> argument is authoritative) before sending -- the on-chain
+// payload is a single flat object, unlike the old RPC's separate
+// caller/businessId/spec envelope. Also fills in a random 32-byte "id" if
+// the spec doesn't already have one, matching the documented convention
+// (docs/loyalty/loyalty.md) that a program's ID is client-generated.
+func loyaltyCreateProgram(businessID, spec, keyFile string) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(spec), &fields); err != nil {
 		fmt.Printf("Invalid program spec JSON: %v\n", err)
 		return
 	}
-	param := map[string]interface{}{
-		"caller":     caller,
-		"businessId": businessID,
-		"spec":       raw,
-	}
-	result, err := callLoyaltyRPC("loyalty_createProgram", param, true)
+	businessIDJSON, err := json.Marshal(businessID)
 	if err != nil {
+		fmt.Printf("Error encoding businessId: %v\n", err)
+		return
+	}
+	fields["businessId"] = businessIDJSON
+	if raw, ok := fields["id"]; !ok || string(raw) == `""` || string(raw) == "null" {
+		id, err := generateLoyaltyID()
+		if err != nil {
+			fmt.Printf("Error generating program id: %v\n", err)
+			return
+		}
+		idJSON, err := json.Marshal(id)
+		if err != nil {
+			fmt.Printf("Error encoding program id: %v\n", err)
+			return
+		}
+		fields["id"] = idJSON
+		fmt.Printf("Generated program id: %s\n", id)
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		fmt.Printf("Error encoding payload: %v\n", err)
+		return
+	}
+	if err := loyaltySendTx(types.TxTypeCreateLoyaltyProgram, data, keyFile); err != nil {
 		fmt.Printf("Error creating program: %v\n", err)
 		return
 	}
-	id, err := decodeStringResult(result)
-	if err != nil {
-		fmt.Printf("Error decoding response: %v\n", err)
-		return
-	}
-	fmt.Printf("Program created: %s\n", id)
+	fmt.Println("Program creation transaction sent. Check the node logs for confirmation.")
 }
 
-func loyaltyUpdateProgram(caller, spec string) {
-	var raw json.RawMessage
-	if err := json.Unmarshal([]byte(spec), &raw); err != nil {
-		fmt.Printf("Invalid program spec JSON: %v\n", err)
+func generateLoyaltyID() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "0x" + hex.EncodeToString(buf), nil
+}
+
+func loyaltyUpdateProgram(spec, keyFile string) {
+	if !json.Valid([]byte(spec)) {
+		fmt.Println("Invalid program spec JSON.")
 		return
 	}
-	param := map[string]interface{}{
-		"caller": caller,
-		"spec":   raw,
-	}
-	if _, err := callLoyaltyRPC("loyalty_updateProgram", param, true); err != nil {
+	if err := loyaltySendTx(types.TxTypeUpdateLoyaltyProgram, []byte(spec), keyFile); err != nil {
 		fmt.Printf("Error updating program: %v\n", err)
 		return
 	}
-	fmt.Println("Program updated.")
+	fmt.Println("Program update transaction sent (full replace). Check the node logs for confirmation.")
 }
 
-func loyaltyLifecycle(method, caller, programID string) {
-	param := map[string]string{
-		"caller":    caller,
-		"programId": programID,
+func loyaltyLifecycle(txType types.TxType, programID, keyFile string) {
+	data, err := json.Marshal(map[string]string{"id": programID})
+	if err != nil {
+		fmt.Printf("Error encoding payload: %v\n", err)
+		return
 	}
-	if _, err := callLoyaltyRPC(method, param, true); err != nil {
+	if err := loyaltySendTx(txType, data, keyFile); err != nil {
 		fmt.Printf("Error performing operation: %v\n", err)
 		return
 	}
-	fmt.Println("Operation successful.")
+	fmt.Println("Transaction sent. Check the node logs for confirmation.")
 }
 
 func loyaltyGetBusiness(businessID string) {
@@ -827,6 +903,16 @@ func loyaltyGetBusiness(businessID string) {
 	result, err := callLoyaltyRPC("loyalty_getBusiness", param, false)
 	if err != nil {
 		fmt.Printf("Error fetching business: %v\n", err)
+		return
+	}
+	printJSONResult(result)
+}
+
+func loyaltyListBusinesses(owner string) {
+	param := map[string]string{"owner": owner}
+	result, err := callLoyaltyRPC("loyalty_listBusinesses", param, false)
+	if err != nil {
+		fmt.Printf("Error listing businesses: %v\n", err)
 		return
 	}
 	printJSONResult(result)

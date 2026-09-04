@@ -247,29 +247,31 @@ curl -s http://127.0.0.1:8545 -H 'Content-Type: application/json' -d '{
 
 ## 6) CLI – `nhb-cli` (loyalty)
 
-The `nhb-cli` binary ships with subcommands to manage loyalty constructs.
-
-> **The 8 write subcommands below (`loyalty-create-business` through `loyalty-resume-program`) are currently non-functional.** They call the `loyalty_createBusiness`/`setPaymaster`/`addMerchant`/`removeMerchant`/`createProgram`/`updateProgram`/`pauseProgram`/`resumeProgram` RPC methods directly (`cmd/nhb-cli/main.go`'s `callLoyaltyRPC`), which are now permanently disabled (§4 above) — every one of these commands will fail with the disabled-method error until the CLI is updated to build, sign, and broadcast the real `TxTypeCreateLoyaltyBusiness`.. `TxTypeResumeLoyaltyProgram` transactions instead (`cmd/nhb-cli/main.go` already has the primitives this needs — `sendTransaction(tx *types.Transaction)` and the file's existing private-key/keystore loading used by other signed-transaction commands — this is a mechanical rewire, not new infrastructure). The read subcommands (`loyalty-get-business`, `loyalty-list-programs`, `loyalty-program-stats`, `loyalty-user-daily`, `loyalty-paymaster-balance`, `loyalty-resolve-username`, `loyalty-user-qr`) are unaffected and work as documented.
+The `nhb-cli` binary ships with subcommands to manage loyalty constructs. The 8 write subcommands below each build, sign (with a local key file, positioned as the *last* argument, matching every other signed-tx command in the CLI, e.g. `un-stake`/`heartbeat`/`deploy`), and broadcast the corresponding real `TxTypeX` transaction from §4 above -- there is no `<caller>`/`<owner>` address argument on any of them anymore, since the signing key's own address *is* the caller, cryptographically, not a trusted string. `loyalty-create-business` no longer prints a synchronous business ID (transactions don't return one) -- use the new `loyalty-list-businesses <owner>` read command afterward to find it. `loyalty-create-program` auto-generates a random 32-byte `id` if the given spec JSON omits one.
 
 ```bash
-# Create business -- NOT CURRENTLY WORKING, see note above
-nhb-cli loyalty-create-business nhb1... "Zenith Hotels"
+# Create business -- signing key's address becomes the owner
+nhb-cli loyalty-create-business "Zenith Hotels" wallet.key
 
-# Set paymaster -- NOT CURRENTLY WORKING, see note above
-nhb-cli loyalty-set-paymaster nhb1... 0x... nhb1...
+# Find the businessId a create-business transaction was just assigned
+nhb-cli loyalty-list-businesses nhb1...
 
-# Add merchant -- NOT CURRENTLY WORKING, see note above
-nhb-cli loyalty-add-merchant nhb1... 0x... nhb1...
+# Set paymaster
+nhb-cli loyalty-set-paymaster 0x<businessId> nhb1<paymaster> wallet.key
 
-# Create program -- NOT CURRENTLY WORKING, see note above
-nhb-cli loyalty-create-program nhb1... 0x... '{"...program spec JSON..."}'
+# Add / remove merchant
+nhb-cli loyalty-add-merchant 0x<businessId> nhb1<merchant> wallet.key
+nhb-cli loyalty-remove-merchant 0x<businessId> nhb1<merchant> wallet.key
 
-# Update program (full replace, not partial -- see §4) -- NOT CURRENTLY WORKING, see note above
-nhb-cli loyalty-update-program nhb1... '{"...program spec JSON..."}'
+# Create program -- signing key must already be a registered merchant of businessId
+nhb-cli loyalty-create-program 0x<businessId> '{"...program spec JSON..."}' wallet.key
 
-# Pause / Resume -- NOT CURRENTLY WORKING, see note above
-nhb-cli loyalty-pause-program nhb1... 0x...
-nhb-cli loyalty-resume-program nhb1... 0x...
+# Update program (full replace, not partial -- see §4; spec JSON must include "id")
+nhb-cli loyalty-update-program '{"id":"0x...","...program spec JSON..."}' wallet.key
+
+# Pause / Resume
+nhb-cli loyalty-pause-program 0x<programId> wallet.key
+nhb-cli loyalty-resume-program 0x<programId> wallet.key
 
 # Stats -- read-only, works
 nhb-cli loyalty-program-stats 0x... 2025-09-22
