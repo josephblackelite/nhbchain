@@ -1094,6 +1094,99 @@ func parseEscrowActionPayload(id [32]byte, action string, payload []byte) (strin
 	return strings.TrimSpace(envelope.Reason), digest, nil
 }
 
+// escrowCreateEnvelope is Create's delegated counterpart to
+// escrowActionEnvelope -- the exact payload a would-be payer signs to
+// authorize a relayer (e.g. escrow-gateway) to create the escrow on their
+// behalf without the payer needing NHB for gas or to construct a
+// transaction themselves. Every field the escrow will actually be created
+// with is inside the signed envelope, not passed separately -- so
+// CreateWithSignature (below) uses ONLY values decoded from the verified
+// payload, never caller-supplied parameters that could diverge from what
+// was actually signed. Addresses and the meta hash are hex, matching
+// escrowActionEnvelope/decisionEnvelope's convention (this package never
+// decodes bech32 -- that stays a caller/RPC-layer concern).
+type escrowCreateEnvelope struct {
+	Action   string `json:"action"`
+	Payer    string `json:"payer"`
+	Payee    string `json:"payee"`
+	Token    string `json:"token"`
+	Amount   string `json:"amount"`
+	FeeBps   uint32 `json:"feeBps"`
+	Deadline int64  `json:"deadline"`
+	Nonce    uint64 `json:"nonce"`
+	Mediator string `json:"mediator,omitempty"`
+	Meta     string `json:"meta,omitempty"`
+	Realm    string `json:"realm,omitempty"`
+}
+
+// ActionCreate is escrowCreateEnvelope.Action's wire value.
+const ActionCreate = "create"
+
+// CreateWithSignature authorizes Create using an embedded payer signature
+// instead of the transaction's own sender -- see escrowCreateEnvelope's doc
+// comment. The recovered signer becomes the payer Create is called with;
+// if the envelope's own Payer field disagrees with the recovered signer,
+// the request is rejected (defense in depth, same shape as
+// parseEscrowActionPayload's escrowId cross-check) rather than silently
+// preferring one over the other.
+func (e *Engine) CreateWithSignature(payload []byte, signature []byte) (*Escrow, error) {
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("escrow: create payload required")
+	}
+	var envelope escrowCreateEnvelope
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, fmt.Errorf("escrow: invalid create payload: %w", err)
+	}
+	if strings.TrimSpace(envelope.Action) != ActionCreate {
+		return nil, fmt.Errorf("escrow: action mismatch: expected %s", ActionCreate)
+	}
+	hash := ethcrypto.Keccak256Hash(payload)
+	var digest [32]byte
+	copy(digest[:], hash[:])
+	signer, err := recoverSignerFromSignature(digest, signature)
+	if err != nil {
+		return nil, err
+	}
+	claimedPayer, err := decodeFixedHex(strings.TrimSpace(envelope.Payer), 20)
+	if err != nil {
+		return nil, fmt.Errorf("escrow: invalid create payer: %w", err)
+	}
+	var payer [20]byte
+	copy(payer[:], claimedPayer)
+	if payer != signer {
+		return nil, fmt.Errorf("escrow: create payer does not match signer")
+	}
+	payeeBytes, err := decodeFixedHex(strings.TrimSpace(envelope.Payee), 20)
+	if err != nil {
+		return nil, fmt.Errorf("escrow: invalid create payee: %w", err)
+	}
+	var payee [20]byte
+	copy(payee[:], payeeBytes)
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(envelope.Amount), 10)
+	if !ok {
+		return nil, fmt.Errorf("escrow: invalid create amount")
+	}
+	var mediatorPtr *[20]byte
+	if trimmed := strings.TrimSpace(envelope.Mediator); trimmed != "" {
+		mediatorBytes, err := decodeFixedHex(trimmed, 20)
+		if err != nil {
+			return nil, fmt.Errorf("escrow: invalid create mediator: %w", err)
+		}
+		var mediator [20]byte
+		copy(mediator[:], mediatorBytes)
+		mediatorPtr = &mediator
+	}
+	var meta [32]byte
+	if trimmed := strings.TrimSpace(envelope.Meta); trimmed != "" {
+		metaBytes, err := decodeFixedHex(trimmed, 32)
+		if err != nil {
+			return nil, fmt.Errorf("escrow: invalid create meta: %w", err)
+		}
+		copy(meta[:], metaBytes)
+	}
+	return e.Create(payer, payee, envelope.Token, amount, envelope.FeeBps, envelope.Deadline, envelope.Nonce, mediatorPtr, meta, strings.TrimSpace(envelope.Realm))
+}
+
 // ReleaseWithSignature authorizes Release using an embedded off-chain
 // participant signature instead of the transaction's own sender -- see
 // escrowActionEnvelope's doc comment. Delegates entirely to Release once

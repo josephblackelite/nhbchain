@@ -292,6 +292,19 @@ const (
 	// EscrowRealm and a per-realm ACL, not just a global role).
 	TxTypeEscrowCreateRealm TxType = 0x3F
 	TxTypeEscrowUpdateRealm TxType = 0x40
+
+	// TxTypeDelegatedCreateEscrow is TxTypeCreateEscrow's delegated
+	// counterpart -- Create takes payer as an explicit argument rather than
+	// deriving it from the transaction sender (unlike Release/Refund/
+	// Dispute's caller-from-sender pattern), so a relayer submitting a
+	// plain TxTypeCreateEscrow would incorrectly become the escrow's payer.
+	// tx.Data is RLP {Payload []byte, Signature []byte}: Payload is the
+	// JSON escrowCreateEnvelope the real payer signed (every field the
+	// escrow is created with, so nothing about the created escrow can
+	// diverge from what was actually signed); Signature is their raw
+	// 65-byte secp256k1 signature over keccak256(Payload). See
+	// Engine.CreateWithSignature (native/escrow/engine.go).
+	TxTypeDelegatedCreateEscrow TxType = 0x41
 )
 
 // RequiresSignature reports whether the transaction type must carry an

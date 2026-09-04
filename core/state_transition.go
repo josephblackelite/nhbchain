@@ -3572,6 +3572,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		return sp.applyEscrowCreateRealm(tx, sender, senderAccount)
 	case types.TxTypeEscrowUpdateRealm:
 		return sp.applyEscrowUpdateRealm(tx, sender, senderAccount)
+	case types.TxTypeDelegatedCreateEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedCreateEscrow(tx, sender, senderAccount)
 	case types.TxTypeSwapPayoutReceipt:
 		if err := sp.applySwapPayoutReceipt(tx); err != nil {
 			return err
@@ -3902,6 +3907,32 @@ func (sp *StateProcessor) applyExpireEscrow(tx *types.Transaction, sender []byte
 		return err
 	}
 	if err := sp.EscrowEngine.Expire(id, sp.blockTimestamp().Unix()); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyDelegatedCreateEscrow backs TxTypeDelegatedCreateEscrow -- see that
+// TxType's doc comment and escrow.ActionCreate's escrowCreateEnvelope doc
+// comment (native/escrow/engine.go). tx.Data is RLP-encoded {Payload
+// []byte, Signature []byte}; every field the escrow is created with lives
+// inside Payload (verified against Signature by
+// Engine.CreateWithSignature), so sender here is purely the relayer paying
+// gas -- it never becomes the escrow's payer, unlike a direct
+// TxTypeCreateEscrow submission.
+func (sp *StateProcessor) applyDelegatedCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Payload   []byte `json:"payload"`
+		Signature []byte `json:"signature"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("delegated create escrow payload required")
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid delegated create escrow payload: %w", err)
+	}
+	sp.configureTradeEngine()
+	if _, err := sp.EscrowEngine.CreateWithSignature(payload.Payload, payload.Signature); err != nil {
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)

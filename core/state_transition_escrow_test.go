@@ -471,6 +471,150 @@ func hexEncode(b []byte) string {
 // authorization comes entirely from the payee's off-chain signature
 // embedded in the payload -- proving the relayer's own identity is
 // irrelevant to whether the release is authorized.
+// signEscrowCreateEnvelope builds and signs the exact JSON wire payload
+// escrow.CreateWithSignature verifies (escrow.escrowCreateEnvelope,
+// native/escrow/engine.go) -- built from raw JSON tags rather than
+// importing the unexported type, exactly as a real relayer or client
+// would have to.
+func signEscrowCreateEnvelope(t *testing.T, payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, nonce uint64, key *ecdsa.PrivateKey) (payload []byte, signature []byte) {
+	t.Helper()
+	envelope := struct {
+		Action   string `json:"action"`
+		Payer    string `json:"payer"`
+		Payee    string `json:"payee"`
+		Token    string `json:"token"`
+		Amount   string `json:"amount"`
+		FeeBps   uint32 `json:"feeBps"`
+		Deadline int64  `json:"deadline"`
+		Nonce    uint64 `json:"nonce"`
+	}{
+		Action:   "create",
+		Payer:    hexEncode(payer[:]),
+		Payee:    hexEncode(payee[:]),
+		Token:    token,
+		Amount:   amount.String(),
+		FeeBps:   feeBps,
+		Deadline: deadline,
+		Nonce:    nonce,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal create envelope: %v", err)
+	}
+	digest := ethcrypto.Keccak256Hash(data)
+	sig, err := ethcrypto.Sign(digest.Bytes(), key)
+	if err != nil {
+		t.Fatalf("sign create envelope: %v", err)
+	}
+	return data, sig
+}
+
+// TestDelegatedCreateEscrowLifecycle exercises TxTypeDelegatedCreateEscrow:
+// a relayer with no NHB/ZNHB stake in the outcome submits the transaction
+// and pays its own gas, but the created escrow's payer is the address that
+// actually signed the create envelope -- not the relayer -- so the real
+// payer retains every authorization Refund/Expire/Dispute already checks
+// against esc.Payer.
+func TestDelegatedCreateEscrowLifecycle(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	payerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payer key: %v", err)
+	}
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee key: %v", err)
+	}
+	relayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate relayer key: %v", err)
+	}
+	payerAddr := payerKey.PubKey().Address()
+	payeeAddr := payeeKey.PubKey().Address()
+	relayerAddr := relayerKey.PubKey().Address()
+
+	var payerAccountAddr, relayerAccountAddr [20]byte
+	copy(payerAccountAddr[:], payerAddr.Bytes())
+	copy(relayerAccountAddr[:], relayerAddr.Bytes())
+	writeAccount(t, sp, payerAccountAddr, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	writeAccount(t, sp, relayerAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	var payerRaw, payeeRaw [20]byte
+	copy(payerRaw[:], payerAddr.Bytes())
+	copy(payeeRaw[:], payeeAddr.Bytes())
+	deadline := time.Now().Add(2 * time.Hour).Unix()
+	createPayload, createSig := signEscrowCreateEnvelope(t, payerRaw, payeeRaw, "NHB", big.NewInt(100), 100, deadline, 301, payerKey.PrivateKey)
+
+	delegatedCreate := struct {
+		Payload   []byte `json:"payload"`
+		Signature []byte `json:"signature"`
+	}{Payload: createPayload, Signature: createSig}
+	delegatedData, err := rlp.EncodeToBytes(delegatedCreate)
+	if err != nil {
+		t.Fatalf("rlp encode delegated create payload: %v", err)
+	}
+	delegatedTx := &types.Transaction{ChainID: types.NHBChainID(), Type: types.TxTypeDelegatedCreateEscrow, Nonce: 0, Data: delegatedData, GasLimit: 21000, GasPrice: big.NewInt(1)}
+	if err := delegatedTx.Sign(relayerKey.PrivateKey); err != nil {
+		t.Fatalf("sign delegated create: %v", err)
+	}
+	if err := sp.ApplyTransaction(delegatedTx); err != nil {
+		t.Fatalf("apply delegated create: %v", err)
+	}
+
+	meta := [32]byte{}
+	var nonceBytes [8]byte
+	binary.BigEndian.PutUint64(nonceBytes[:], 301)
+	escrowID := ethcrypto.Keccak256Hash(payerAddr.Bytes(), payeeAddr.Bytes(), meta[:], nonceBytes[:])
+
+	manager := nhbstate.NewManager(sp.Trie)
+	esc, ok := manager.EscrowGet(escrowID)
+	if !ok {
+		t.Fatalf("escrow missing after delegated create")
+	}
+	if esc.Payer != payerRaw {
+		t.Fatalf("expected the signer to become payer, got %x want %x (relayer was %x)", esc.Payer, payerRaw, relayerAddr.Bytes())
+	}
+	if esc.Payee != payeeRaw {
+		t.Fatalf("unexpected payee: %x", esc.Payee)
+	}
+	if esc.Status != escrow.EscrowInit {
+		t.Fatalf("unexpected status after delegated create: %v", esc.Status)
+	}
+
+	relayerAccount, err := sp.getAccount(relayerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load relayer account: %v", err)
+	}
+	if relayerAccount.Nonce != 1 {
+		t.Fatalf("expected relayer's own nonce to advance, got %d", relayerAccount.Nonce)
+	}
+
+	// Now prove the real payer -- not the relayer -- actually controls the
+	// escrow: fund and refund it directly via the payer's own key.
+	fundTx := &types.Transaction{ChainID: types.NHBChainID(), Type: types.TxTypeLockEscrow, Nonce: 0, Data: escrowID[:], GasLimit: 21000, GasPrice: big.NewInt(1)}
+	if err := fundTx.Sign(payerKey.PrivateKey); err != nil {
+		t.Fatalf("sign fund: %v", err)
+	}
+	if err := sp.ApplyTransaction(fundTx); err != nil {
+		t.Fatalf("apply fund: %v", err)
+	}
+	refundTx := &types.Transaction{ChainID: types.NHBChainID(), Type: types.TxTypeRefundEscrow, Nonce: 1, Data: escrowID[:], GasLimit: 21000, GasPrice: big.NewInt(1)}
+	if err := refundTx.Sign(payerKey.PrivateKey); err != nil {
+		t.Fatalf("sign refund: %v", err)
+	}
+	if err := sp.ApplyTransaction(refundTx); err != nil {
+		t.Fatalf("apply refund: %v", err)
+	}
+	payerAccount, err := sp.getAccount(payerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load payer account: %v", err)
+	}
+	if payerAccount.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected payer refunded in full, got %s", payerAccount.BalanceNHB)
+	}
+}
+
 func TestDelegatedReleaseEscrowLifecycle(t *testing.T) {
 	sp := newStakingStateProcessor(t)
 

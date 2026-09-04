@@ -1344,6 +1344,75 @@ func signEscrowActionPayload(t *testing.T, payload []byte, key *ecdsa.PrivateKey
 	return sig
 }
 
+func buildEscrowCreateEnvelope(t *testing.T, payer, payee [20]byte, token string, amount *big.Int, feeBps uint32, deadline int64, nonce uint64, mediator *[20]byte, realm string) []byte {
+	t.Helper()
+	envelope := escrowCreateEnvelope{
+		Action:   ActionCreate,
+		Payer:    hex.EncodeToString(payer[:]),
+		Payee:    hex.EncodeToString(payee[:]),
+		Token:    token,
+		Amount:   amount.String(),
+		FeeBps:   feeBps,
+		Deadline: deadline,
+		Nonce:    nonce,
+		Realm:    realm,
+	}
+	if mediator != nil {
+		envelope.Mediator = hex.EncodeToString(mediator[:])
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal create envelope: %v", err)
+	}
+	return data
+}
+
+func TestCreateWithSignatureAuthorizesEmbeddedPayer(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payerKey, payer := mustGenerateArbitrator(t)
+	_, payee := mustGenerateArbitrator(t)
+
+	payload := buildEscrowCreateEnvelope(t, payer, payee, "NHB", big.NewInt(150), 100, 9_999_999_999, 71, nil, "")
+	sig := signEscrowActionPayload(t, payload, payerKey)
+
+	esc, err := engine.CreateWithSignature(payload, sig)
+	if err != nil {
+		t.Fatalf("create with signature: %v", err)
+	}
+	if esc.Payer != payer {
+		t.Fatalf("unexpected payer: got %x want %x", esc.Payer, payer)
+	}
+	if esc.Payee != payee {
+		t.Fatalf("unexpected payee: got %x want %x", esc.Payee, payee)
+	}
+	if esc.Amount.Cmp(big.NewInt(150)) != 0 {
+		t.Fatalf("unexpected amount: %s", esc.Amount)
+	}
+	stored, ok := state.EscrowGet(esc.ID)
+	if !ok || stored.Status != EscrowInit {
+		t.Fatalf("expected escrow to be stored in init status")
+	}
+}
+
+func TestCreateWithSignatureRejectsPayerSignerMismatch(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	_, claimedPayer := mustGenerateArbitrator(t)
+	actualSignerKey, _ := mustGenerateArbitrator(t)
+	_, payee := mustGenerateArbitrator(t)
+
+	// The envelope claims one payer address, but is actually signed by a
+	// different key -- CreateWithSignature must reject this rather than
+	// trusting the claimed Payer field.
+	payload := buildEscrowCreateEnvelope(t, claimedPayer, payee, "NHB", big.NewInt(150), 0, 9_999_999_999, 72, nil, "")
+	sig := signEscrowActionPayload(t, payload, actualSignerKey)
+
+	if _, err := engine.CreateWithSignature(payload, sig); err == nil {
+		t.Fatalf("expected a payer/signer mismatch to be rejected")
+	}
+}
+
 func TestReleaseWithSignatureAuthorizesEmbeddedPayee(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)
