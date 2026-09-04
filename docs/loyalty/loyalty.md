@@ -157,52 +157,63 @@ The loyalty module evaluates active programs for `businessID`, filters by `token
 
 ---
 
-## 4) Node JSON-RPC (Loyalty Admin & Read)
+## 4) Loyalty Admin Transactions & Node JSON-RPC (Read)
 
-All loyalty RPC calls use standard JSON-RPC 2.0 at the node endpoint (default `http://127.0.0.1:8545`). Write operations are executed as on-chain transactions; clients must sign payloads with the invoking wallet. Read operations are free and can use HTTP POST or WebSocket depending on node configuration.
+**Write operations are real, directly-signed on-chain transactions, not JSON-RPC calls.** This is a change from an earlier design: the `loyalty_createBusiness`/`setPaymaster`/`addMerchant`/`removeMerchant`/`createProgram`/`updateProgram`/`pauseProgram`/`resumeProgram` RPC methods described in older revisions of this document are **permanently disabled** (`HTTP 410`, `rpc/loyalty_handlers.go`'s `loyaltyRPCDisabledMessage`) — they used to mutate validator state directly outside the block/consensus pipeline, a guaranteed-fork bug on this chain's 2-validator, zero-quorum-slack topology, fixed 2026-09-04. Every admin action below is now a signed `Transaction` submitted through the ordinary broadcast RPC (`nhb_sendTransaction`), exactly like a transfer or any other native transaction — build it, sign it with the invoking wallet's key, submit it, and (since a transaction has no synchronous return value the way an RPC call did) look up the result afterward via the read methods in the next subsection. There is no `loyalty-gateway` relayer service; unlike escrow, every operation here has exactly one authorizing party, so there's nothing for a relayer to reconcile — the wallet that authorizes an action is the wallet that submits it.
+
+Read operations (business/program lookups, meters) are unaffected and remain ordinary JSON-RPC calls at the node endpoint (default `http://127.0.0.1:8545`), free, via HTTP POST or WebSocket depending on node configuration.
 
 ### Authentication & Authorization
 
-* **Authentication:** Provided via wallet signatures inherent in transaction submission. The node verifies that the transaction sender matches the required role (business owner/admin) before state transition.
-* **Nonce management:** Clients should fetch the latest account nonce before submitting consecutive admin calls to avoid transaction replay errors.
-* **Gas / Fees:** Loyalty transactions follow the same fee schedule as other module calls. Ensure the caller wallet has sufficient NHB for gas.
+* **Authentication:** the transaction's own signature — the node recovers the signer and checks it against the required authority (business/program owner, or an address holding the `ROLE_LOYALTY_ADMIN` role as an operator-granted override) as part of applying the transaction, the same way any other module's authorization check works.
+* **Nonce management:** fetch the account's current nonce before building a transaction, same as any other native transaction.
+* **Gas / Fees:** native transactions on this chain are fee-free by design (`GasLimit`/`GasPrice` only affect mempool tie-breaking, never charged against the sender) — anti-spam is handled by the per-sender request-rate quota described below, not by fees.
+* **Rate limiting:** `TxTypeCreateLoyaltyBusiness`/`CreateLoyaltyProgram` (the two operations that mint a new ID) are gated by `native/common`'s quota mechanism (`config.toml`'s `[global.Quotas.Loyalty]`, currently a generous 6000 requests/min per sender). The other six operations below are deliberately left unquota-gated — each is an already-verified owner/admin acting on a single resource they already control, not a new-ID-minting action a spam quota needs to bound.
 
-### Admin (write)
+### Admin (write — signed transactions, `core/types/transaction.go`)
 
-#### `loyalty_createBusiness(ownerBech32, name) -> businessID`
-* **Parameters**
-  * `ownerBech32` (`string`): address that will own the business.
-  * `name` (`string`): optional display name.
-* **Requirements:** Transaction sender must equal `ownerBech32`.
-* **Returns:** `businessID` (hex-encoded bytes32).
-* **Errors:** `-32602` invalid params (e.g. `"invalid caller address"`, `"invalid owner address"`, `"name is required"`); `-32001` unauthorized (`"caller not authorized"`).
+#### `TxTypeCreateLoyaltyBusiness` (`0x42`)
+* `tx.Data` (JSON): `{ "name": "<business name>" }`.
+* The transaction **sender becomes the business owner** — there is no `owner` payload field to set it to anyone else; this closes a spoofing surface the old RPC's plaintext `owner`/`caller` fields had.
+* **Returns:** nothing synchronous. `RegisterBusiness` emits no event; discover the assigned `businessID` afterward via `loyalty_listBusinesses` (below), keyed by the sender's own address.
+* **Errors:** empty/whitespace-only `name` is rejected.
 
-#### `loyalty_setPaymaster(businessID, paymasterBech32)`
-* Rotates the paymaster pool used for all programs under the business.
-* Emits `loyalty.paymaster.rotated` with `{businessID, old, new}`.
-* **Checks:** caller is business owner/admin; paymaster must be a valid address.
+#### `TxTypeLoyaltySetPaymaster` (`0x43`)
+* `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "paymaster": "nhb1..." }` — omit/empty `paymaster` to clear it.
+* Rotates the paymaster address used to fund all programs under the business. **This transaction only points the business at an address — it moves no funds.** Actually funding that paymaster is a separate, ordinary NHB/ZNHB transfer to it.
+* Emits `loyalty.paymaster.rotated`.
+* **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — enforced inside `native/loyalty`'s `SetPaymaster` itself.
 
-#### `loyalty_addMerchant(businessID, merchantBech32)` / `loyalty_removeMerchant(...)`
-* Adds or removes merchant mappings. Merchants inherit all active programs instantly.
-* Removing a merchant stops future accruals but does not claw back existing rewards.
+#### `TxTypeLoyaltyAddMerchant` (`0x44`) / `TxTypeLoyaltyRemoveMerchant` (`0x45`)
+* `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "merchant": "nhb1..." }`.
+* Adds or removes a merchant address from a business. Merchants inherit all active programs instantly; removing one stops future accruals but does not claw back rewards already paid.
+* **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — unlike every other operation on this list, `native/loyalty`'s underlying `AddMerchantAddress`/`RemoveMerchantAddress` methods perform **no authorization check of their own** (a real gap found while building this), so this check is enforced entirely by the transaction-dispatch layer (`core/state_transition.go`'s `applyLoyaltyAddMerchant`/`applyLoyaltyRemoveMerchant`) before either method is ever called.
 
-#### `loyalty_createProgram(businessID, ProgramSpecJSON) -> programID`
-* `ProgramSpecJSON` includes all fields described in [On-Chain Model](#3-on-chain-model).
-* **Validation:** ensures token symbol is `ZNHB`, time windows are valid, caps are non-negative, and paymaster balance >= configured reserve threshold.
-* Returns `programID` (hex string).
+#### `TxTypeCreateLoyaltyProgram` (`0x46`)
+* `tx.Data` (JSON) includes all fields described in [On-Chain Model](#3-on-chain-model) (`businessId`, `id` — client-generated 32-byte hex, `pool`, `tokenSymbol`, `rewardMode`, `accrualBps`, `fixedRewardWei`, the cap/timing fields, `active`).
+* The transaction **sender becomes the program owner** — there is no `owner` payload field.
+* **Checks:** the sender must already be a registered merchant of the named business (added via `TxTypeLoyaltyAddMerchant` — a business's own owner is *not* automatically its own merchant, matching the pre-existing semantics exactly) or hold `ROLE_LOYALTY_ADMIN`.
+* **Validation** (unchanged, enforced inside `native/loyalty`'s `sanitizeProgram`/`CreateProgram`): token symbol must be a registered token, `accrualBps <= 100000`, time windows valid, all caps non-negative, and **at least one of `dailyCapProgram`/`epochCapProgram` must be greater than zero** — a program with only per-user caps is rejected, since per-user caps alone don't bound total payout exposure against an attacker splitting spend across many wallets.
+* **Returns:** nothing synchronous; look up the program afterward via `loyalty_listPrograms`/a known `id`.
 
-#### `loyalty_updateProgram(programID, ProgramSpecJSON)`
-* Partial updates permitted. Omitted fields remain unchanged.
-* Invalid specs or update failures return `-32602` invalid params with the underlying reason.
+#### `TxTypeUpdateLoyaltyProgram` (`0x47`)
+* `tx.Data` (JSON): same shape as create, minus `businessId` and `owner` (both are resolved from the existing on-chain record, never from the payload — `id`/`owner` can never change via this transaction, even if included).
+* **Full replace, not a partial patch** — every mutable field is overwritten from the payload on every call; resend the complete desired program state, not just what's changing.
+* **Checks:** sender must be the *existing* program's owner (loaded from state, never trusted from the payload) or hold `ROLE_LOYALTY_ADMIN`.
 
-#### `loyalty_pauseProgram(programID)` / `loyalty_resumeProgram(programID)`
-* Toggles `Active` flag. Paused programs skip accruals but maintain meters for historical reference.
-* Emits `loyalty.program.paused` or `loyalty.program.resumed` events.
+#### `TxTypePauseLoyaltyProgram` (`0x48`) / `TxTypeResumeLoyaltyProgram` (`0x49`)
+* `tx.Data` (JSON): `{ "id": "0x<64 hex>" }`.
+* Toggles the `Active` flag. Paused programs skip accruals but keep their meters for historical reference. Idempotent — pausing an already-paused program (or resuming an already-active one) is a no-op, not an error.
+* Emits `loyalty.program.paused`/`loyalty.program.resumed`.
+* **Checks:** sender must be the program owner or hold `ROLE_LOYALTY_ADMIN`.
 
-### Read (dashboard)
+### Read (dashboard — still ordinary JSON-RPC)
 
 #### `loyalty_getBusiness(businessID)`
 * Returns business metadata, current paymaster, and merchant list.
+
+#### `loyalty_listBusinesses(ownerBech32)`
+* Returns every `businessID` the given address owns, in deterministic order. This is the only way to discover the ID a `TxTypeCreateLoyaltyBusiness` transaction was just assigned, since transactions carry no synchronous return value the way the old RPC's response did.
 
 #### `loyalty_listPrograms(businessID)`
 * Returns an array of active and inactive programs.
@@ -236,32 +247,34 @@ curl -s http://127.0.0.1:8545 -H 'Content-Type: application/json' -d '{
 
 ## 6) CLI – `nhb-cli` (loyalty)
 
-The `nhb-cli` binary ships with subcommands to manage loyalty constructs. Commands implicitly use local keystore accounts unless `--from` is specified.
+The `nhb-cli` binary ships with subcommands to manage loyalty constructs.
+
+> **The 8 write subcommands below (`loyalty-create-business` through `loyalty-resume-program`) are currently non-functional.** They call the `loyalty_createBusiness`/`setPaymaster`/`addMerchant`/`removeMerchant`/`createProgram`/`updateProgram`/`pauseProgram`/`resumeProgram` RPC methods directly (`cmd/nhb-cli/main.go`'s `callLoyaltyRPC`), which are now permanently disabled (§4 above) — every one of these commands will fail with the disabled-method error until the CLI is updated to build, sign, and broadcast the real `TxTypeCreateLoyaltyBusiness`.. `TxTypeResumeLoyaltyProgram` transactions instead (`cmd/nhb-cli/main.go` already has the primitives this needs — `sendTransaction(tx *types.Transaction)` and the file's existing private-key/keystore loading used by other signed-transaction commands — this is a mechanical rewire, not new infrastructure). The read subcommands (`loyalty-get-business`, `loyalty-list-programs`, `loyalty-program-stats`, `loyalty-user-daily`, `loyalty-paymaster-balance`, `loyalty-resolve-username`, `loyalty-user-qr`) are unaffected and work as documented.
 
 ```bash
-# Create business
+# Create business -- NOT CURRENTLY WORKING, see note above
 nhb-cli loyalty-create-business nhb1... "Zenith Hotels"
 
-# Set paymaster
+# Set paymaster -- NOT CURRENTLY WORKING, see note above
 nhb-cli loyalty-set-paymaster nhb1... 0x... nhb1...
 
-# Add merchant
+# Add merchant -- NOT CURRENTLY WORKING, see note above
 nhb-cli loyalty-add-merchant nhb1... 0x... nhb1...
 
-# Create program
+# Create program -- NOT CURRENTLY WORKING, see note above
 nhb-cli loyalty-create-program nhb1... 0x... '{"...program spec JSON..."}'
 
-# Update program (partial)
+# Update program (full replace, not partial -- see §4) -- NOT CURRENTLY WORKING, see note above
 nhb-cli loyalty-update-program nhb1... '{"...program spec JSON..."}'
 
-# Pause / Resume
+# Pause / Resume -- NOT CURRENTLY WORKING, see note above
 nhb-cli loyalty-pause-program nhb1... 0x...
 nhb-cli loyalty-resume-program nhb1... 0x...
 
-# Stats
+# Stats -- read-only, works
 nhb-cli loyalty-program-stats 0x... 2025-09-22
 
-# User meter lookup
+# User meter lookup -- read-only, works
 nhb-cli loyalty-user-daily nhb1... 0x... 2025-09-22
 ```
 
