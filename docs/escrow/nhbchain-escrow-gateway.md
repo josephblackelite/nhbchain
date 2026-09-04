@@ -74,6 +74,15 @@ traffic.
   provisioned one yet — that's a one-time operator action, not something the
   gateway does per-request. `POST /escrow/resolve` currently returns `503`.
 
+### Production Deployment
+
+Live since 2026-09-04, co-located with validator1 on `52.1.96.250`:
+
+- Binary: `/opt/nhbchain/bin/escrow-gateway`, systemd unit `escrow-gateway.service`, env file `/etc/nhbchain/escrow-gateway.env` (holds `ESCROW_GATEWAY_RELAYER_KMS_ENV` and friends — see Configuration above).
+- Public routing: nginx on `api.nhbcoin.com` proxies `/escrow/` and `/p2p/` to `localhost:8081`. No separate `gateway.` or `escrow.` subdomain exists or is planned — `api.nhbcoin.com` is the one public API host for both the chain's own JSON-RPC and this gateway's REST surface.
+- Relayer address: a dedicated NHB account funded specifically to pay gas for every delegated transaction this service submits (see "Node Integration" below) — it does not custody user funds, only pays its own transaction fees. **This balance needs periodic monitoring/top-up**; there is no automated low-balance alert wired up yet.
+- Quota: every delegated transaction this gateway submits lands on the recovered *transaction signer* (the relayer's own address, not the end user) for `native/common`'s per-sender request-rate quota (`moduleEscrow`, `config.toml`'s `[global.Quotas.Escrow]`, currently a generous `6000`/min) — worth knowing if the gateway is ever scaled to run genuinely high volume through a single relayer key, since all of that traffic shares one quota bucket.
+
 ### Idempotency
 
 - `Idempotency-Key` header captured with `{appKey, route, key}` for all write endpoints.
