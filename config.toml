@@ -313,16 +313,20 @@ ClientVersion = ""
       MaxNHBPerEpoch = 0
       EpochSeconds = 60
     [global.Quotas.Swap]
-      # No effect currently -- core/state_transition.go's
-      # handleNativeTransaction has no applyQuota(moduleSwap, ...) call
-      # site at all (swap-out redemptions have their own, separate
-      # circuit-breaker cap machinery instead, native/swap/redeem_risk.go
-      # + core/swap_risk_params.go). Left at 0 rather than set a number
-      # that would be pure documentation with no real enforcement behind
-      # it -- wiring real enforcement here is a separate piece of work.
-      MaxRequestsPerMin = 0
+      # Gates TxTypeBuyZNHB (purchase ZNHB from the admin wallet),
+      # TxTypeBuybackAsk (sell ZNHB into the treasury buyback), and
+      # TxTypeRedeemNHB (swap-out) -- the three ordinary, unprivileged
+      # user-facing "swap" actions, each previously completely ungated.
+      # TxTypeAttestRedemption/TxTypeSwapPayoutReceipt are deliberately
+      # excluded -- both are RoleSwapPayoutAttestor-gated trusted-service
+      # calls, not ordinary user actions this quota is meant to bound.
+      # RedeemNHB additionally has its own separate volume-based circuit
+      # breaker (native/swap/redeem_risk.go + core/swap_risk_params.go) --
+      # this request-frequency quota is an independent, complementary
+      # backstop, not a replacement for it.
+      MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0
-      EpochSeconds = 0
+      EpochSeconds = 60
     [global.Quotas.Escrow]
       # Quota is tracked per transaction sender, not per real end user --
       # every delegated escrow action (TxTypeDelegated{Create,Release,

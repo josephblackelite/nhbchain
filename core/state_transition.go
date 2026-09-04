@@ -3511,8 +3511,14 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 	case types.TxTypePOSRegistry:
 		return sp.applyPOSRegistry(tx)
 	case types.TxTypeRedeemNHB:
+		if err := sp.applyQuota(moduleSwap, sender, 1, 0); err != nil {
+			return err
+		}
 		return sp.applyRedeemNHB(tx, sender, senderAccount)
 	case types.TxTypeAttestRedemption:
+		// Deliberately not quota-gated -- RoleSwapPayoutAttestor-checked
+		// (see applyAttestRedemption), a trusted service key, not an
+		// ordinary user action the "swap" quota is meant to bound.
 		return sp.applyAttestRedemption(tx, sender, senderAccount)
 
 	// --- NEW DISPUTE RESOLUTION CASES ---
@@ -3593,11 +3599,17 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
 	case types.TxTypeBuyZNHB:
+		if err := sp.applyQuota(moduleSwap, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyBuyZNHB(tx, sender, senderAccount); err != nil {
 			return err
 		}
 		return nil
 	case types.TxTypeBuybackAsk:
+		if err := sp.applyQuota(moduleSwap, sender, 1, 0); err != nil {
+			return err
+		}
 		if err := sp.applyBuybackAsk(tx, sender, senderAccount); err != nil {
 			return err
 		}

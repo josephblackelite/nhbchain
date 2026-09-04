@@ -9,6 +9,7 @@ import (
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
+	"nhbchain/crypto"
 	nativecommon "nhbchain/native/common"
 	systemquotas "nhbchain/native/system/quotas"
 	"nhbchain/storage"
@@ -118,5 +119,97 @@ func TestQuotaEnforcementHeartbeat(t *testing.T) {
 		t.Fatalf("load counters: %v", err)
 	} else if ok {
 		t.Fatalf("expected epoch 0 counters pruned")
+	}
+}
+
+// TestQuotaEnforcementBuyZNHB proves the "swap" module quota -- previously
+// entirely unconfigurable and unenforced, see config.toml's Quotas.Swap
+// comment -- is now actually reached by TxTypeBuyZNHB, an ordinary,
+// unprivileged, previously-ungated user action (buying ZNHB from the
+// admin wallet at the curve price). Mirrors TestQuotaEnforcementHeartbeat's
+// pattern exactly.
+func TestQuotaEnforcementBuyZNHB(t *testing.T) {
+	sp, _ := newBuyZNHBStateProcessor(t)
+	sp.SetQuotaConfig(map[string]nativecommon.Quota{
+		moduleSwap: {MaxRequestsPerMin: 1, EpochSeconds: 60},
+	})
+
+	buyerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate buyer key: %v", err)
+	}
+	buyerAddr := buyerKey.PubKey().Address().Bytes()
+	if err := sp.setAccount(buyerAddr, &types.Account{
+		BalanceNHB:  big.NewInt(1_000_000_000),
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed buyer: %v", err)
+	}
+
+	small := big.NewInt(1)
+	generousMax := big.NewInt(1_000_000)
+
+	firstTx := buyZNHBTx(t, 0, small, generousMax)
+	acc, err := sp.getAccount(buyerAddr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if err := sp.handleNativeTransaction(firstTx, buyerAddr, acc); err != nil {
+		t.Fatalf("first buy: %v", err)
+	}
+
+	secondTx := buyZNHBTx(t, 1, small, generousMax)
+	acc, err = sp.getAccount(buyerAddr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if err := sp.handleNativeTransaction(secondTx, buyerAddr, acc); err == nil || !errors.Is(err, nativecommon.ErrQuotaRequestsExceeded) {
+		t.Fatalf("expected quota error on second buy, got %v", err)
+	}
+}
+
+// TestQuotaEnforcementRedeemNHB is TestQuotaEnforcementBuyZNHB's counterpart
+// for TxTypeRedeemNHB (swap-out) -- proves the same moduleSwap quota is
+// reached here too, as an additional, independent backstop alongside
+// RedeemNHB's own pre-existing volume-based circuit breaker
+// (native/swap/redeem_risk.go), which bounds aggregate value, not request
+// frequency.
+func TestQuotaEnforcementRedeemNHB(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetQuotaConfig(map[string]nativecommon.Quota{
+		moduleSwap: {MaxRequestsPerMin: 1, EpochSeconds: 60},
+	})
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	userAddr := userKey.PubKey().Address().Bytes()
+	if err := sp.setAccount(userAddr, &types.Account{
+		BalanceNHB:  big.NewInt(1_000),
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	seedTokenSupply(t, sp, big.NewInt(1_000))
+
+	firstTx := redeemNHBTx(t, 0, big.NewInt(10), "usdttrc20", "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
+	acc, err := sp.getAccount(userAddr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if err := sp.handleNativeTransaction(firstTx, userAddr, acc); err != nil {
+		t.Fatalf("first redeem: %v", err)
+	}
+
+	secondTx := redeemNHBTx(t, 1, big.NewInt(10), "usdttrc20", "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb")
+	acc, err = sp.getAccount(userAddr)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if err := sp.handleNativeTransaction(secondTx, userAddr, acc); err == nil || !errors.Is(err, nativecommon.ErrQuotaRequestsExceeded) {
+		t.Fatalf("expected quota error on second redeem, got %v", err)
 	}
 }
