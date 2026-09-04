@@ -22,6 +22,7 @@ import (
 	"nhbchain/core"
 	"nhbchain/core/genesis"
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/lending"
 	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
@@ -41,6 +42,17 @@ const (
 	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
 	znhbOraclePriceEnv  = "NHB_ZNHB_ORACLE_PRICE_USD"
 )
+
+// convertModuleQuota adapts config.Quota (the config.toml-decoded shape) to
+// nativecommon.Quota (what StateProcessor.applyQuota actually reads).
+// Mirrors cmd/consensusd/main.go's identical convertQuota.
+func convertModuleQuota(q config.Quota) nativecommon.Quota {
+	return nativecommon.Quota{
+		MaxRequestsPerMin: q.MaxRequestsPerMin,
+		MaxNHBPerEpoch:    q.MaxNHBPerEpoch,
+		EpochSeconds:      q.EpochSeconds,
+	}
+}
 
 func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
@@ -152,6 +164,22 @@ func main() {
 			logger.Warn("local config expects staking unpaused, but the network's last governance-set value is paused -- this validator enforces the on-chain value, not local config; resolve the mismatch via a real governance action if it is unintentional")
 		}
 	}
+	// Wires config.toml's [global.Quotas] into actual per-module rate/
+	// volume enforcement (StateProcessor.applyQuota, core/state_transition
+	// .go) -- previously only cmd/consensusd did this; cmd/nhb (this
+	// binary, what's actually deployed) loaded the config section into
+	// node.globalCfg.Quotas for read-back/display purposes only and never
+	// called SetModuleQuotas, so every module's quota check was a silent
+	// no-op regardless of what config.toml said. Mirrors cmd/consensusd/
+	// main.go's convertQuota + SetModuleQuotas call exactly.
+	node.SetModuleQuotas(map[string]nativecommon.Quota{
+		"lending": convertModuleQuota(cfg.Global.Quotas.Lending),
+		"swap":    convertModuleQuota(cfg.Global.Quotas.Swap),
+		"escrow":  convertModuleQuota(cfg.Global.Quotas.Escrow),
+		"trade":   convertModuleQuota(cfg.Global.Quotas.Trade),
+		"loyalty": convertModuleQuota(cfg.Global.Quotas.Loyalty),
+		"potso":   convertModuleQuota(cfg.Global.Quotas.POTSO),
+	})
 
 	if err := node.SyncStakingParams(); err != nil {
 		panic(fmt.Sprintf("Failed to apply staking params: %v", err))

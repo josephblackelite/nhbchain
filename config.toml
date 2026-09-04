@@ -303,9 +303,25 @@ ClientVersion = ""
       MaxNHBPerEpoch = 0
       EpochSeconds = 0
     [global.Quotas.Escrow]
-      MaxRequestsPerMin = 0
+      # Quota is tracked per transaction sender, not per real end user --
+      # every delegated escrow action (TxTypeDelegated{Create,Release,
+      # Refund,Dispute}Escrow, core/types/transaction.go) submitted through
+      # escrow-gateway is signed by the gateway's own relayer key, so ALL
+      # of that traffic pools under one address here regardless of how
+      # many distinct people are actually behind it. Set generously enough
+      # to cover the gateway's aggregate expected volume, not a tight
+      # per-user limit -- real per-integrator throttling is
+      # escrow-gateway's own API-key rate limiter's job
+      # (ESCROW_GATEWAY_API_RATE_RPS_PER_KEY-equivalent config), this is a
+      # coarser backstop against a runaway bug or a compromised key
+      # flooding the chain directly. 300/min = 5/sec sustained.
+      MaxRequestsPerMin = 300
+      # Inert for escrow specifically -- every applyQuota(moduleEscrow, ...)
+      # call in core/state_transition.go passes addNHB=0, so this counter
+      # never accumulates regardless of its configured value. Left at 0
+      # rather than set to a number that would never actually be checked.
       MaxNHBPerEpoch = 0
-      EpochSeconds = 0
+      EpochSeconds = 60
     [global.Quotas.Trade]
       MaxRequestsPerMin = 0
       MaxNHBPerEpoch = 0
