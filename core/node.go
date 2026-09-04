@@ -99,7 +99,7 @@ type Node struct {
 	// other block (a peer's proposal, a catch-up/synced block) did not come
 	// from this state, so the drift check still applies to it. See
 	// docs/issue30.md item 2 / task #32.
-	selfProposedHash             []byte
+	selfProposedHash []byte
 	// quorumCertActivationHeight gates NHB-TRIAGE-C1's quorum-certificate
 	// check on the untrusted P2P block-sync path (commitSyncedBlock):
 	// blocks at or below this height are accepted without one (so already
@@ -114,7 +114,7 @@ type Node struct {
 	// validator, as part of one coordinated upgrade -- deliberately NOT
 	// auto-detected from chain state, since that could let one validator
 	// silently enforce while its peers don't.
-	quorumCertActivationHeight uint64
+	quorumCertActivationHeight   uint64
 	escrowTreasury               [20]byte
 	engagementMgr                *engagement.Manager
 	govPolicy                    governance.ProposalPolicy
@@ -569,28 +569,28 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	pLedger, _ := statepotso.NewLedger(nil, nil)
 
 	node := &Node{
-		db:                         db,
-		state:                      stateProcessor,
-		chain:                      chain,
-		validatorKey:               key,
-		mempool:                    make([]*types.Transaction, 0),
-		proposedTxs:                make(map[string]struct{}),
-		posArrival:                 make(map[string]time.Time),
-		senderUsage:                make(map[string]*senderQuotaUsage),
-		senderNonces:               make(map[string]map[uint64]time.Time),
-		pendingNonces:              make(map[string]nonceRecord),
-		escrowTreasury:             treasury,
-		engagementMgr:              engagement.NewManager(stateProcessor.EngagementConfig()),
-		swapCfg:                    defaultSwapCfg,
-		swapSanctions:              swap.DefaultSanctionsChecker,
-		swapRefundSink:             treasury,
-		evidenceStore:              evidence.NewStore(db),
-		evidenceMaxAge:             evidence.DefaultMaxAgeBlocks,
-		paymasterEnabled:           stateProcessor.PaymasterEnabled(),
-		paymasterLimits:            PaymasterLimits{},
-		paymasterTopUpPolicy:       PaymasterAutoTopUpPolicy{Token: "ZNHB"},
-		timestampTolerance:         DefaultBlockTimestampTolerance,
-		timeSource:                 func() time.Time { return time.Now().UTC() },
+		db:                   db,
+		state:                stateProcessor,
+		chain:                chain,
+		validatorKey:         key,
+		mempool:              make([]*types.Transaction, 0),
+		proposedTxs:          make(map[string]struct{}),
+		posArrival:           make(map[string]time.Time),
+		senderUsage:          make(map[string]*senderQuotaUsage),
+		senderNonces:         make(map[string]map[uint64]time.Time),
+		pendingNonces:        make(map[string]nonceRecord),
+		escrowTreasury:       treasury,
+		engagementMgr:        engagement.NewManager(stateProcessor.EngagementConfig()),
+		swapCfg:              defaultSwapCfg,
+		swapSanctions:        swap.DefaultSanctionsChecker,
+		swapRefundSink:       treasury,
+		evidenceStore:        evidence.NewStore(db),
+		evidenceMaxAge:       evidence.DefaultMaxAgeBlocks,
+		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
+		paymasterLimits:      PaymasterLimits{},
+		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		timestampTolerance:   DefaultBlockTimestampTolerance,
+		timeSource:           func() time.Time { return time.Now().UTC() },
 		// Disabled by default (see the field doc comment): every existing
 		// caller of NewNode, including the whole test suite, gets today's
 		// unchanged behavior unless SetQuorumCertActivationHeight is
@@ -1648,12 +1648,14 @@ func (n *Node) globalConfigSnapshot() config.Global {
 			Staking:      n.globalCfg.Pauses.Staking,
 		},
 		Quotas: config.Quotas{
-			Lending: n.globalCfg.Quotas.Lending,
-			Swap:    n.globalCfg.Quotas.Swap,
-			Escrow:  n.globalCfg.Quotas.Escrow,
-			Trade:   n.globalCfg.Quotas.Trade,
-			Loyalty: n.globalCfg.Quotas.Loyalty,
-			POTSO:   n.globalCfg.Quotas.POTSO,
+			Lending:       n.globalCfg.Quotas.Lending,
+			Swap:          n.globalCfg.Quotas.Swap,
+			Escrow:        n.globalCfg.Quotas.Escrow,
+			Trade:         n.globalCfg.Quotas.Trade,
+			Loyalty:       n.globalCfg.Quotas.Loyalty,
+			POTSO:         n.globalCfg.Quotas.POTSO,
+			Subscriptions: n.globalCfg.Quotas.Subscriptions,
+			Market:        n.globalCfg.Quotas.Market,
 		},
 		Fees: config.Fees{
 			FreeTierTxPerMonth:       n.globalCfg.Fees.FreeTierTxPerMonth,

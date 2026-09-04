@@ -256,14 +256,24 @@ type Quota struct {
 	EpochSeconds      uint32 // e.g., 3600
 }
 
-// Quotas groups quotas for each module.
+// Quotas groups quotas for each module. Swap and Loyalty are defined here
+// but currently consulted nowhere -- core/state_transition.go's
+// handleNativeTransaction has no applyQuota(moduleSwap, ...) or
+// applyQuota(moduleLoyalty, ...) call site at all, so any value set for
+// them is inert. Subscriptions and Market DO have real enforcement
+// call sites (handleNativeTransaction's TxTypeSubscription*/
+// TxTypeMarket* cases) but had no config field at all until this was
+// wired up -- added below so they can actually be configured, matching
+// the other enforced modules.
 type Quotas struct {
-	Lending Quota
-	Swap    Quota
-	Escrow  Quota
-	Trade   Quota
-	Loyalty Quota
-	POTSO   Quota
+	Lending       Quota
+	Swap          Quota
+	Escrow        Quota
+	Trade         Quota
+	Loyalty       Quota
+	POTSO         Quota
+	Subscriptions Quota
+	Market        Quota
 }
 
 // Loyalty controls the automatic adjustments applied to the base loyalty reward rate.

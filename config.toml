@@ -294,11 +294,32 @@ ClientVersion = ""
     # blocks attesting an already-burned request paid/failed.
     SwapRedeem = false
   [global.Quotas]
+    # Every module below is checked per transaction SENDER (the recovered
+    # signer), not per real end user, and every applyQuota(...) call site
+    # (core/state_transition.go's handleNativeTransaction) passes addNHB=0
+    # -- MaxNHBPerEpoch is inert chain-wide regardless of module or value,
+    # left at 0 everywhere rather than set to a number that's never
+    # actually checked. MaxRequestsPerMin is the only field that does
+    # anything. Set deliberately generous throughout (100/sec) rather than
+    # a tight per-account number: this is meant as a backstop against a
+    # genuinely runaway flood (a bug, a compromised key), not a meaningful
+    # throttle on real usage -- a tight number here would eventually
+    # bottleneck a legitimate high-volume actor (an exchange hot wallet, a
+    # future gateway/relayer pooling many real users behind one signing
+    # key, the way escrow-gateway already does for escrow today) as this
+    # network grows toward real, global-scale volume.
     [global.Quotas.Lending]
-      MaxRequestsPerMin = 0
+      MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0
-      EpochSeconds = 0
+      EpochSeconds = 60
     [global.Quotas.Swap]
+      # No effect currently -- core/state_transition.go's
+      # handleNativeTransaction has no applyQuota(moduleSwap, ...) call
+      # site at all (swap-out redemptions have their own, separate
+      # circuit-breaker cap machinery instead, native/swap/redeem_risk.go
+      # + core/swap_risk_params.go). Left at 0 rather than set a number
+      # that would be pure documentation with no real enforcement behind
+      # it -- wiring real enforcement here is a separate piece of work.
       MaxRequestsPerMin = 0
       MaxNHBPerEpoch = 0
       EpochSeconds = 0
@@ -314,26 +335,51 @@ ClientVersion = ""
       # escrow-gateway's own API-key rate limiter's job
       # (ESCROW_GATEWAY_API_RATE_RPS_PER_KEY-equivalent config), this is a
       # coarser backstop against a runaway bug or a compromised key
-      # flooding the chain directly. 300/min = 5/sec sustained.
-      MaxRequestsPerMin = 300
-      # Inert for escrow specifically -- every applyQuota(moduleEscrow, ...)
-      # call in core/state_transition.go passes addNHB=0, so this counter
-      # never accumulates regardless of its configured value. Left at 0
-      # rather than set to a number that would never actually be checked.
+      # flooding the chain directly.
+      MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0
       EpochSeconds = 60
     [global.Quotas.Trade]
-      MaxRequestsPerMin = 0
+      # NOT scoped to just Trade-module (arbitration) transactions --
+      # core/node.go's addTransaction also reuses this exact config value
+      # as the chain's ONLY global per-sender MEMPOOL admission cap,
+      # applied to every transaction type from every address
+      # (applySenderQuotaLocked, called unconditionally for any signed
+      # tx). A tight number here throttles a sender's entire transaction
+      # throughput chain-wide, not just arbitration actions -- set very
+      # high deliberately so no legitimate high-volume wallet (an
+      # exchange, a payments aggregator) ever realistically hits it, while
+      # still stopping a truly pathological flood (thousands/sec from one
+      # compromised key) from ever reaching the mempool.
+      MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0
-      EpochSeconds = 0
+      EpochSeconds = 60
     [global.Quotas.Loyalty]
+      # No effect currently -- same as Swap above, no
+      # applyQuota(moduleLoyalty, ...) call site exists anywhere. Left at
+      # 0 for the same reason.
       MaxRequestsPerMin = 0
       MaxNHBPerEpoch = 0
       EpochSeconds = 0
     [global.Quotas.POTSO]
-      MaxRequestsPerMin = 0
+      MaxRequestsPerMin = 6000
       MaxNHBPerEpoch = 0
-      EpochSeconds = 0
+      EpochSeconds = 60
+    [global.Quotas.Subscriptions]
+      # Previously had no config field at all despite real enforcement
+      # (TxTypeSubscriptionCreatePlan/UpdatePlan/Subscribe/Cancel all call
+      # applyQuota(moduleSubscriptions, ...)) -- added alongside Market
+      # below so both can actually be configured.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Market]
+      # Same gap as Subscriptions above -- TxTypeMarketCreateListing/
+      # FillListing/CancelListing call applyQuota(moduleMarket, ...) but
+      # had no config field to actually set until now.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
   [global.Paymaster]
     MerchantDailyCapWei = ""
     DeviceDailyTxCap = 0

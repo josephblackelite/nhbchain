@@ -173,12 +173,14 @@ func main() {
 	// no-op regardless of what config.toml said. Mirrors cmd/consensusd/
 	// main.go's convertQuota + SetModuleQuotas call exactly.
 	node.SetModuleQuotas(map[string]nativecommon.Quota{
-		"lending": convertModuleQuota(cfg.Global.Quotas.Lending),
-		"swap":    convertModuleQuota(cfg.Global.Quotas.Swap),
-		"escrow":  convertModuleQuota(cfg.Global.Quotas.Escrow),
-		"trade":   convertModuleQuota(cfg.Global.Quotas.Trade),
-		"loyalty": convertModuleQuota(cfg.Global.Quotas.Loyalty),
-		"potso":   convertModuleQuota(cfg.Global.Quotas.POTSO),
+		"lending":       convertModuleQuota(cfg.Global.Quotas.Lending),
+		"swap":          convertModuleQuota(cfg.Global.Quotas.Swap),
+		"escrow":        convertModuleQuota(cfg.Global.Quotas.Escrow),
+		"trade":         convertModuleQuota(cfg.Global.Quotas.Trade),
+		"loyalty":       convertModuleQuota(cfg.Global.Quotas.Loyalty),
+		"potso":         convertModuleQuota(cfg.Global.Quotas.POTSO),
+		"subscriptions": convertModuleQuota(cfg.Global.Quotas.Subscriptions),
+		"market":        convertModuleQuota(cfg.Global.Quotas.Market),
 	})
 
 	if err := node.SyncStakingParams(); err != nil {

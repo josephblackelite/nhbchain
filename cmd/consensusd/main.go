@@ -350,12 +350,14 @@ func main() {
 		}
 	}
 	node.SetModuleQuotas(map[string]nativecommon.Quota{
-		"lending": convertQuota(cfg.Global.Quotas.Lending),
-		"swap":    convertQuota(cfg.Global.Quotas.Swap),
-		"escrow":  convertQuota(cfg.Global.Quotas.Escrow),
-		"trade":   convertQuota(cfg.Global.Quotas.Trade),
-		"loyalty": convertQuota(cfg.Global.Quotas.Loyalty),
-		"potso":   convertQuota(cfg.Global.Quotas.POTSO),
+		"lending":       convertQuota(cfg.Global.Quotas.Lending),
+		"swap":          convertQuota(cfg.Global.Quotas.Swap),
+		"escrow":        convertQuota(cfg.Global.Quotas.Escrow),
+		"trade":         convertQuota(cfg.Global.Quotas.Trade),
+		"loyalty":       convertQuota(cfg.Global.Quotas.Loyalty),
+		"potso":         convertQuota(cfg.Global.Quotas.POTSO),
+		"subscriptions": convertQuota(cfg.Global.Quotas.Subscriptions),
+		"market":        convertQuota(cfg.Global.Quotas.Market),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
