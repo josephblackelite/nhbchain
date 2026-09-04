@@ -59,6 +59,14 @@ func main() {
 
 	auth := NewAuthenticator(cfg.APIKeys, cfg.AllowedTimestampSkew, cfg.NonceTTL, cfg.NonceCapacity, nil)
 	node := NewRPCNodeClient(cfg.NodeURL, cfg.NodeAuthToken)
+	relayerKey, err := LoadPrivateKeyFromEnv(cfg.RelayerKMSEnv)
+	if err != nil {
+		log.Fatalf("configure relayer key: %v", err)
+	}
+	if err := node.InitRelayer(context.Background(), relayerKey); err != nil {
+		log.Fatalf("init relayer: %v", err)
+	}
+	log.Printf("escrow gateway relayer address: %s", node.RelayerAddress())
 	queue := NewWebhookQueue(
 		WithWebhookTaskCapacity(cfg.WebhookQueueCapacity),
 		WithWebhookHistoryCapacity(cfg.WebhookHistorySize),

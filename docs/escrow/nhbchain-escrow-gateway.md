@@ -26,15 +26,53 @@ GATEWAY_HMAC_ALG=HMAC_SHA256
 GATEWAY_WEBHOOK_MAX_RETRY=10
 ```
 
+The names above are illustrative of the original design; `LoadConfigFromEnv`
+(`services/escrow-gateway/config.go`) is the source of truth for what's
+actually read, and uses an `ESCROW_GATEWAY_` prefix throughout (e.g.
+`ESCROW_GATEWAY_NODE_URL`, `ESCROW_GATEWAY_API_KEYS`). One variable is new
+as of the meta-transaction rewrite above and **required** for the service to
+start: `ESCROW_GATEWAY_RELAYER_KMS_ENV` names another environment variable
+holding the gateway's own raw hex-encoded secp256k1 private key (same
+indirection pattern as `services/payments-gateway`'s
+`PAY_GATEWAY_ATTESTOR_KMS_ENV`) — this is the relayer key that signs and
+pays gas for every delegated transaction the gateway submits (see "Node
+Integration" below). It must hold enough NHB to cover gas for expected
+traffic.
+
 ### Authentication & Authorization
 
-- API key + HMAC per developer/app (e.g., “usedtown”).
-- Privileged actions (**release**, **dispute**, **resolve**) require participant wallet signature.
-  - `X-Sig-Addr`: `nhb…`/`znhb…`.
-  - `X-Sig`: `hex(eip191_sign(keccak256(method|path|body|timestamp|nonce|escrowId)))`.
-  - `X-Timestamp`: RFC3339 (±300s skew).
-  - `X-Nonce`: required, prevents replay of the same signed payload.
-- Gateway verifies signature matches payer or payee for that escrow, or an arbitrator address.
+- API key + HMAC per developer/app (e.g., “usedtown”), on every request.
+- **Create, release, refund, and dispute additionally require a participant wallet
+  signature** — as of the meta-transaction rewrite below, **create** now needs one
+  too, not just release/dispute/resolve as in the original design: the escrow's
+  `payer` is only ever set to whoever actually signed the create request, never
+  trusted from the API-key-authenticated caller's say-so alone.
+  - `X-Sig-Addr`: `nhb…`/`znhb…` — the participant's own address (payer for
+    create/refund, payee or mediator for release, payer or payee for dispute).
+  - `X-Sig`: `hex(ecdsa_sign(keccak256(canonical_json_envelope)))` — **not**
+    EIP-191-wrapped, and **not** a signature over the HTTP request (method/path/
+    body/timestamp/nonce) the way earlier drafts of this doc described. The
+    participant signs the exact on-chain authorization envelope the gateway will
+    relay in a real transaction:
+    - Create: `{"action":"create","payer":"<20-byte hex>","payee":"<20-byte hex>","token":"NHB|ZNHB","amount":"<decimal>","feeBps":<uint>,"deadline":<unix>,"nonce":<uint>,"mediator":"<hex, omitted if unset>","meta":"<hex, omitted if unset>","realm":"<id, omitted if unset>"}` — note `payer`/`payee`/`mediator` are lower-case hex of the raw 20 address bytes here, not the `nhb1…` bech32 string used everywhere else in this API; the gateway performs that conversion server-side before verifying.
+    - Release/Refund: `{"escrowId":"0x<64 hex>","action":"release"}` (or `"refund"`).
+    - Dispute: `{"escrowId":"0x<64 hex>","action":"dispute","reason":"<free text, omitted if empty>"}`.
+  - `X-Timestamp`/`X-Nonce`: still required for the outer HMAC-signed request
+    (API-key layer, replay protection on the REST transport itself), but no
+    longer part of what the wallet signature covers — the wallet signature's
+    own replay safety comes from the on-chain action being idempotent once
+    submitted (a captured signature can be resubmitted with zero additional
+    effect), not from a timestamp/nonce baked into the signed bytes.
+- The gateway verifies the signature server-side (fast, clear 403 on mismatch)
+  *and* the chain re-verifies it independently once the gateway relays the
+  action in a real transaction — the gateway's own key never authorizes
+  anything by itself, it only pays gas and owns that transaction's nonce. See
+  "Node Integration" below for why this changed.
+- **Resolve is not available yet.** The safe on-chain resolve path requires the
+  escrow to have been created against a registered arbitration realm (a
+  committee of arbitrators + signing threshold), and no deployment has
+  provisioned one yet — that's a one-time operator action, not something the
+  gateway does per-request. `POST /escrow/resolve` currently returns `503`.
 
 ### Idempotency
 
@@ -50,6 +88,7 @@ GATEWAY_WEBHOOK_MAX_RETRY=10
 
 ```
 POST /escrow/create
+Headers: API key, HMAC, X-Sig-Addr (payer), X-Sig (see Authentication above), Idempotency-Key
 Body: {
   "payer":   "nhb1...",
   "payee":   "nhb1...",
@@ -58,7 +97,7 @@ Body: {
   "feeBps":  0,
   "deadline": 1730000000,
   "mediator": "nhb1..." | null,
-  "meta":     { "reference": "ORDER-123", "note":"used stove" }
+  "meta":     "0x<hex, optional>"
 }
 → 201 {
   "escrowId": "0x…32bytes…",
@@ -86,30 +125,30 @@ GET /escrow/{id}
 
 ```
 POST /escrow/release
-Headers: API key, HMAC, X-Sig-Addr (payee or mediator), X-Sig, X-Timestamp, Idempotency-Key
-Body: { "escrowId": "0x…", "reason":"delivered_ok" }
+Headers: API key, HMAC, X-Sig-Addr (payee or mediator), X-Sig, X-Timestamp, X-Nonce, Idempotency-Key
+Body: { "escrowId": "0x…" }
 → 202 { "queued": true }
 ```
 
 ```
 POST /escrow/refund
-Headers: API key, HMAC, X-Sig-Addr (payer), X-Sig, X-Timestamp
-Body: { "escrowId": "0x…", "reason":"mutual_refund" }
+Headers: API key, HMAC, X-Sig-Addr (payer), X-Sig, X-Timestamp, X-Nonce, Idempotency-Key
+Body: { "escrowId": "0x…" }
 → 202 { "queued": true }
 ```
 
 ```
 POST /escrow/dispute
-Headers: API key, HMAC, X-Sig-Addr (payer or payee), X-Sig
-Body: { "escrowId":"0x…", "message":"item damaged", "evidenceUrls":["https://..."] }
+Headers: API key, HMAC, X-Sig-Addr (payer or payee), X-Sig, X-Timestamp, X-Nonce, Idempotency-Key
+Body: { "escrowId":"0x…", "reason":"item damaged" }
 → 202 { "ok": true }
 ```
 
 ```
 POST /escrow/resolve
-Headers: API key, HMAC, X-Sig-Addr (both parties or mediator/arbitrator), X-Sig
+Headers: API key, HMAC, Idempotency-Key
 Body: { "escrowId":"0x…", "outcome":"release"|"refund" }
-→ 202 { "queued": true }
+→ 503 -- not yet available, see Authentication above.
 ```
 
 ### Webhooks
@@ -119,15 +158,48 @@ Body: { "escrowId":"0x…", "outcome":"release"|"refund" }
 
 ### Node Integration
 
-- Calls node RPC (`escrow_create`, `escrow_release`, `escrow_refund`, `escrow_dispute`, `escrow_resolve`, `escrow_get`).
+- **`escrow_create`/`release`/`refund`/`dispute`/`resolve` are permanently
+  disabled chain-side** (see `rpc/escrow_handlers.go`'s
+  `escrowRPCDisabledMessage`) — they used to mutate validator state directly
+  outside the block pipeline, which guaranteed a consensus fork on this
+  2-validator chain the moment any of them was ever called. The gateway no
+  longer calls them at all.
+- Mutating actions now go through real signed transactions
+  (`TxTypeDelegatedCreateEscrow`/`ReleaseEscrow`/`RefundEscrow`/
+  `DisputeEscrow`, `core/types/transaction.go`), submitted via
+  `nhb_sendTransaction` and signed with the gateway's own relayer key
+  (`ESCROW_GATEWAY_RELAYER_KMS_ENV`) — the relayer pays gas and owns each
+  transaction's nonce, but authorization for the underlying action comes
+  entirely from the participant's signature embedded in the transaction
+  payload (verified independently on-chain, not just by this gateway). See
+  `native/escrow/engine.go`'s `*WithSignature` methods and
+  `core/state_transition.go`'s `applyDelegated*Escrow` for the chain-side
+  verification this relies on.
+- `escrow_get`/`escrow_getRealm` remain live, read-only RPC calls — nothing
+  about reads changed.
 - Subscribes to block/events to sync status.
 
 ### Security & Abuse Mitigation
 
 - Per-key rate limits; HMAC body integrity.
-- Wallet signature proves payer/payee/arbitrator control.
+- Wallet signature proves payer/payee/mediator control over the specific
+  on-chain action being authorized, verified both by this gateway (fast,
+  clear 403) and independently by the chain itself once relayed.
 - Idempotency on writes.
 - Append-only audit log (request hash, actor, escrowId, node RPC result, block/tx).
+
+### P2P Trade Creation — Retired
+
+`POST /p2p/accept`'s underlying trade-creation RPC (`p2p_createTrade`) is
+permanently disabled for the same guaranteed-fork reason as the escrow RPCs
+above, and — unlike escrow create/release/refund/dispute — has no
+signed-transaction replacement, because the bilateral OTC trade flow it
+fronted is superseded by the P2P ZNHB market (`native/market`, live since
+2026-08-24), which already does atomic seller-escrows/buyer-pays swaps
+through real signed transactions. `POST /p2p/accept` now always returns a
+502 with a clear "permanently retired" message. `POST /p2p/offers`,
+`GET /p2p/offers`, and `GET /p2p/trades/{id}` (which don't call the disabled
+RPC) are unaffected.
 
 ### Acceptance Criteria
 

@@ -965,12 +965,15 @@ func decodeFixedHex(value string, length int) ([]byte, error) {
 	return decoded, nil
 }
 
-// recoverSignerFromSignature recovers the secp256k1 address that produced
-// signature over digest. Shared by verifyDecisionSignatures (arbitrator
-// committee quorum) and the single-participant delegated-action signatures
-// below (recoverEscrowActionSigner) -- one recovery implementation for every
-// signed-payload path in this package.
-func recoverSignerFromSignature(digest [32]byte, signature []byte) ([20]byte, error) {
+// RecoverSigner recovers the secp256k1 address that produced signature over
+// digest. Shared by verifyDecisionSignatures (arbitrator committee quorum)
+// and the single-participant delegated-action paths (ReleaseWithSignature/
+// RefundWithSignature/DisputeWithSignature/CreateWithSignature) -- one
+// recovery implementation for every signed-payload path in this package.
+// Exported so a relayer (e.g. escrow-gateway) can independently verify a
+// participant's signature before submitting a delegated transaction,
+// without reimplementing ECDSA recovery/malleability normalization.
+func RecoverSigner(digest [32]byte, signature []byte) ([20]byte, error) {
 	var signer [20]byte
 	if len(signature) != 65 {
 		return signer, fmt.Errorf("escrow: signature must be 65 bytes")
@@ -1009,7 +1012,7 @@ func verifyDecisionSignatures(frozen *FrozenArb, digest [32]byte, signatures [][
 	seen := make(map[[20]byte]struct{})
 	unique := make([][20]byte, 0, len(signatures))
 	for i, sig := range signatures {
-		signer, err := recoverSignerFromSignature(digest, sig)
+		signer, err := RecoverSigner(digest, sig)
 		if err != nil {
 			return nil, fmt.Errorf("escrow: signature %d: %w", i, err)
 		}
@@ -1143,7 +1146,7 @@ func (e *Engine) CreateWithSignature(payload []byte, signature []byte) (*Escrow,
 	hash := ethcrypto.Keccak256Hash(payload)
 	var digest [32]byte
 	copy(digest[:], hash[:])
-	signer, err := recoverSignerFromSignature(digest, signature)
+	signer, err := RecoverSigner(digest, signature)
 	if err != nil {
 		return nil, err
 	}
@@ -1199,7 +1202,7 @@ func (e *Engine) ReleaseWithSignature(id [32]byte, payload []byte, signature []b
 	if err != nil {
 		return err
 	}
-	signer, err := recoverSignerFromSignature(digest, signature)
+	signer, err := RecoverSigner(digest, signature)
 	if err != nil {
 		return err
 	}
@@ -1213,7 +1216,7 @@ func (e *Engine) RefundWithSignature(id [32]byte, payload []byte, signature []by
 	if err != nil {
 		return err
 	}
-	signer, err := recoverSignerFromSignature(digest, signature)
+	signer, err := RecoverSigner(digest, signature)
 	if err != nil {
 		return err
 	}
@@ -1229,7 +1232,7 @@ func (e *Engine) DisputeWithSignature(id [32]byte, payload []byte, signature []b
 	if err != nil {
 		return err
 	}
-	signer, err := recoverSignerFromSignature(digest, signature)
+	signer, err := RecoverSigner(digest, signature)
 	if err != nil {
 		return err
 	}

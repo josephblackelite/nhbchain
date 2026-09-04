@@ -22,18 +22,23 @@ import (
 )
 
 type mockNodeClient struct {
-	mu                sync.Mutex
-	createResp        *EscrowCreateResponse
-	createErr         error
-	getResp           *EscrowState
-	getErr            error
-	createCalls       int
-	releaseCalls      int
-	refundCalls       int
-	disputeCalls      int
-	lastDisputeReason string
-	resolveCalls      int
-	resolveArgs       []struct {
+	mu                 sync.Mutex
+	createResp         *EscrowCreateResponse
+	createErr          error
+	lastCreatePayload  []byte
+	lastCreateSig      []byte
+	getResp            *EscrowState
+	getErr             error
+	getCalls           int
+	createCalls        int
+	releaseCalls       int
+	refundCalls        int
+	disputeCalls       int
+	lastReleasePayload []byte
+	lastRefundPayload  []byte
+	lastDisputePayload []byte
+	resolveCalls       int
+	resolveArgs        []struct {
 		escrowID string
 		caller   string
 		outcome  string
@@ -59,10 +64,12 @@ type mockNodeClient struct {
 	eventsCalled int
 }
 
-func (m *mockNodeClient) EscrowCreate(ctx context.Context, req EscrowCreateRequest) (*EscrowCreateResponse, error) {
+func (m *mockNodeClient) EscrowCreate(ctx context.Context, payload, signature []byte) (*EscrowCreateResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.createCalls++
+	m.lastCreatePayload = append([]byte(nil), payload...)
+	m.lastCreateSig = append([]byte(nil), signature...)
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
@@ -77,6 +84,7 @@ func (m *mockNodeClient) EscrowCreate(ctx context.Context, req EscrowCreateReque
 func (m *mockNodeClient) EscrowGet(ctx context.Context, id string) (*EscrowState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.getCalls++
 	if m.getErr != nil {
 		return nil, m.getErr
 	}
@@ -109,31 +117,33 @@ func (m *mockNodeClient) EscrowGetRealm(ctx context.Context, id string) (*Escrow
 	return nil, nil
 }
 
-func (m *mockNodeClient) EscrowRelease(ctx context.Context, escrowID, caller string) error {
+func (m *mockNodeClient) EscrowRelease(ctx context.Context, payload, signature []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.releaseCalls++
+	m.lastReleasePayload = append([]byte(nil), payload...)
 	if m.releaseErr != nil {
 		return m.releaseErr
 	}
 	return nil
 }
 
-func (m *mockNodeClient) EscrowRefund(ctx context.Context, escrowID, caller string) error {
+func (m *mockNodeClient) EscrowRefund(ctx context.Context, payload, signature []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refundCalls++
+	m.lastRefundPayload = append([]byte(nil), payload...)
 	if m.refundErr != nil {
 		return m.refundErr
 	}
 	return nil
 }
 
-func (m *mockNodeClient) EscrowDispute(ctx context.Context, escrowID, caller, reason string) error {
+func (m *mockNodeClient) EscrowDispute(ctx context.Context, payload, signature []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.disputeCalls++
-	m.lastDisputeReason = reason
+	m.lastDisputePayload = append([]byte(nil), payload...)
 	if m.disputeErr != nil {
 		return m.disputeErr
 	}
@@ -224,6 +234,71 @@ func newWallet(t *testing.T) (*ecdsa.PrivateKey, string) {
 	return priv, bech
 }
 
+// signEscrowCreateEnvelope builds and signs the exact JSON wire payload
+// verifyEscrowCreateSignature verifies (escrowCreateEnvelopeWire in
+// server.go, mirroring native/escrow's unexported escrowCreateEnvelope),
+// returning a hex-encoded signature suitable for the X-Sig header. req's
+// Payer/Payee/Mediator must be real bech32 addresses -- payerAddr is
+// passed separately only to sign as that specific key.
+func signEscrowCreateEnvelope(t *testing.T, priv *ecdsa.PrivateKey, req EscrowCreateRequest) string {
+	t.Helper()
+	payerAddr, err := nhbcrypto.DecodeAddress(req.Payer)
+	if err != nil {
+		t.Fatalf("decode payer: %v", err)
+	}
+	payeeAddr, err := nhbcrypto.DecodeAddress(req.Payee)
+	if err != nil {
+		t.Fatalf("decode payee: %v", err)
+	}
+	envelope := escrowCreateEnvelopeWire{
+		Action:   "create",
+		Payer:    hex.EncodeToString(payerAddr.Bytes()),
+		Payee:    hex.EncodeToString(payeeAddr.Bytes()),
+		Token:    req.Token,
+		Amount:   req.Amount,
+		FeeBps:   req.FeeBps,
+		Deadline: req.Deadline,
+		Nonce:    req.Nonce,
+		Meta:     req.Meta,
+		Realm:    req.Realm,
+	}
+	if trimmed := strings.TrimSpace(req.Mediator); trimmed != "" {
+		mediatorAddr, err := nhbcrypto.DecodeAddress(trimmed)
+		if err != nil {
+			t.Fatalf("decode mediator: %v", err)
+		}
+		envelope.Mediator = hex.EncodeToString(mediatorAddr.Bytes())
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal create envelope: %v", err)
+	}
+	digest := ethcrypto.Keccak256Hash(payload)
+	sig, err := ethcrypto.Sign(digest.Bytes(), priv)
+	if err != nil {
+		t.Fatalf("sign create envelope: %v", err)
+	}
+	return hex.EncodeToString(sig)
+}
+
+// signEscrowActionEnvelope builds and signs the exact JSON wire payload
+// verifyEscrowActionSignature verifies (escrowActionEnvelopeWire in
+// server.go, mirroring native/escrow's unexported escrowActionEnvelope).
+func signEscrowActionEnvelope(t *testing.T, priv *ecdsa.PrivateKey, escrowID, action, reason string) string {
+	t.Helper()
+	envelope := escrowActionEnvelopeWire{EscrowID: escrowID, Action: action, Reason: reason}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal action envelope: %v", err)
+	}
+	digest := ethcrypto.Keccak256Hash(payload)
+	sig, err := ethcrypto.Sign(digest.Bytes(), priv)
+	if err != nil {
+		t.Fatalf("sign action envelope: %v", err)
+	}
+	return hex.EncodeToString(sig)
+}
+
 func signWalletRequest(t *testing.T, priv *ecdsa.PrivateKey, method, path string, body []byte, timestamp, nonce, resource string) string {
 	t.Helper()
 	payload := strings.Join([]string{strings.ToUpper(method), path, string(body), timestamp, nonce, strings.ToLower(strings.TrimSpace(resource))}, "|")
@@ -261,13 +336,15 @@ func TestAuthenticateRejectsInvalidSignature(t *testing.T) {
 }
 
 func TestIdempotentCreateCachesResponse(t *testing.T) {
+	payerPriv, payerAddr := newWallet(t)
+	_, payeeAddr := newWallet(t)
 	node := &mockNodeClient{createResp: &EscrowCreateResponse{ID: "0xabc"}}
 	server, store, queue := newTestServer(t, node, nil)
 	defer store.Close()
 
 	payload := EscrowCreateRequest{
-		Payer:    "payer",
-		Payee:    "payee",
+		Payer:    payerAddr,
+		Payee:    payeeAddr,
 		Token:    "NHB",
 		Amount:   "10",
 		FeeBps:   0,
@@ -277,6 +354,7 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 	body, _ := json.Marshal(payload)
 	ts := time.Unix(1700000000, 0).UTC()
 	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-create-1")
+	walletSig := signEscrowCreateEnvelope(t, payerPriv, payload)
 
 	req1 := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
 	req1.Header.Set(headerAPIKey, "test")
@@ -284,11 +362,13 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 	req1.Header.Set(headerNonce, nonce)
 	req1.Header.Set(headerSignature, sig)
 	req1.Header.Set(headerIdempotencyKey, "idem123")
+	req1.Header.Set(headerWalletAddress, payerAddr)
+	req1.Header.Set(headerWalletSig, walletSig)
 
 	rec1 := httptest.NewRecorder()
 	server.ServeHTTP(rec1, req1)
 	if rec1.Code != http.StatusCreated {
-		t.Fatalf("expected 201 created got %d", rec1.Code)
+		t.Fatalf("expected 201 created got %d: %s", rec1.Code, rec1.Body.String())
 	}
 	if node.createCalls != 1 {
 		t.Fatalf("expected one create call, got %d", node.createCalls)
@@ -302,6 +382,8 @@ func TestIdempotentCreateCachesResponse(t *testing.T) {
 	req2.Header.Set(headerAPIKey, "test")
 	req2.Header.Set(headerTimestamp, timestamp2)
 	req2.Header.Set(headerNonce, nonce2)
+	req2.Header.Set(headerWalletAddress, payerAddr)
+	req2.Header.Set(headerWalletSig, walletSig)
 	req2.Header.Set(headerSignature, sig2)
 	req2.Header.Set(headerIdempotencyKey, "idem123")
 
@@ -466,7 +548,7 @@ func TestEscrowReleaseWithValidSignature(t *testing.T) {
 	body := []byte(`{"escrowId":"0xdeadbeef"}`)
 	ts := time.Unix(1700000000, 0).UTC()
 	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/release", body, ts, "nonce-release")
-	walletSig := signWalletRequest(t, priv, http.MethodPost, "/escrow/release", body, timestamp, nonce, "0xdeadbeef")
+	walletSig := signEscrowActionEnvelope(t, priv, "0xdeadbeef", "release", "")
 
 	req := httptest.NewRequest(http.MethodPost, "/escrow/release", bytes.NewReader(body))
 	req.Header.Set(headerAPIKey, "test")
@@ -481,30 +563,128 @@ func TestEscrowReleaseWithValidSignature(t *testing.T) {
 	server.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 accepted got %d", rec.Code)
+		t.Fatalf("expected 202 accepted got %d: %s", rec.Code, rec.Body.String())
 	}
 	if node.releaseCalls != 1 {
 		t.Fatalf("expected release to be invoked once, got %d", node.releaseCalls)
 	}
+	var sentEnvelope escrowActionEnvelopeWire
+	if err := json.Unmarshal(node.lastReleasePayload, &sentEnvelope); err != nil {
+		t.Fatalf("decode forwarded release payload: %v", err)
+	}
+	if sentEnvelope.EscrowID != "0xdeadbeef" || sentEnvelope.Action != "release" {
+		t.Fatalf("unexpected forwarded envelope: %+v", sentEnvelope)
+	}
 }
 
-func TestEscrowResolveAuthorisedSignature(t *testing.T) {
-	priv, addr := newWallet(t)
+// TestEscrowReleaseRejectsWrongSigner confirms a signature from someone who
+// is neither the escrow's payee nor mediator is rejected before ever
+// reaching node.EscrowRelease -- the gateway's own fail-fast check ahead of
+// the (defense-in-depth) on-chain authorization check inside
+// Engine.Release.
+func TestEscrowReleaseRejectsWrongSigner(t *testing.T) {
+	outsiderPriv, outsiderAddr := newWallet(t)
 	node := &mockNodeClient{
 		getResp: &EscrowState{
-			ID:     "0xabc",
-			Payer:  addr,
+			ID:     "0xdeadbeef",
+			Payer:  "nhb1payer",
 			Payee:  "nhb1payee",
-			Status: "disputed",
+			Status: "funded",
 		},
 	}
+	server, store, _ := newTestServer(t, node, nil)
+	defer store.Close()
+
+	body := []byte(`{"escrowId":"0xdeadbeef"}`)
+	ts := time.Unix(1700000000, 0).UTC()
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/release", body, ts, "nonce-release-bad")
+	walletSig := signEscrowActionEnvelope(t, outsiderPriv, "0xdeadbeef", "release", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/escrow/release", bytes.NewReader(body))
+	req.Header.Set(headerAPIKey, "test")
+	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+	req.Header.Set(headerIdempotencyKey, "rel-bad-1")
+	req.Header.Set(headerWalletAddress, outsiderAddr)
+	req.Header.Set(headerWalletSig, walletSig)
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 forbidden got %d: %s", rec.Code, rec.Body.String())
+	}
+	if node.releaseCalls != 0 {
+		t.Fatalf("expected release not to be invoked, got %d", node.releaseCalls)
+	}
+}
+
+// TestEscrowCreateRejectsPayerSignerMismatch confirms create is rejected
+// when X-Sig-Addr/X-Sig belong to a different key than the request's
+// claimed payer -- the gateway's own fail-fast check ahead of the
+// defense-in-depth check inside Engine.CreateWithSignature.
+func TestEscrowCreateRejectsPayerSignerMismatch(t *testing.T) {
+	_, claimedPayerAddr := newWallet(t)
+	actualSignerPriv, actualSignerAddr := newWallet(t)
+	_, payeeAddr := newWallet(t)
+	node := &mockNodeClient{createResp: &EscrowCreateResponse{ID: "0xabc"}}
+	server, store, _ := newTestServer(t, node, nil)
+	defer store.Close()
+
+	payload := EscrowCreateRequest{
+		Payer:    claimedPayerAddr,
+		Payee:    payeeAddr,
+		Token:    "NHB",
+		Amount:   "10",
+		FeeBps:   0,
+		Deadline: 1700000500,
+		Nonce:    1,
+	}
+	body, _ := json.Marshal(payload)
+	ts := time.Unix(1700000000, 0).UTC()
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/create", body, ts, "nonce-create-mismatch")
+	// Signed by a different key than the claimed payer.
+	walletSig := signEscrowCreateEnvelope(t, actualSignerPriv, payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/escrow/create", bytes.NewReader(body))
+	req.Header.Set(headerAPIKey, "test")
+	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+	req.Header.Set(headerIdempotencyKey, "create-mismatch-1")
+	// X-Sig-Addr set to the actual signer, which does not match req.Payer.
+	req.Header.Set(headerWalletAddress, actualSignerAddr)
+	req.Header.Set(headerWalletSig, walletSig)
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 forbidden got %d: %s", rec.Code, rec.Body.String())
+	}
+	if node.createCalls != 0 {
+		t.Fatalf("expected create not to be invoked, got %d", node.createCalls)
+	}
+}
+
+// TestEscrowResolveNotYetAvailable confirms /escrow/resolve fails closed
+// with a clear 503 rather than a confusing error -- RPCNodeClient.
+// EscrowResolve always returns ErrResolveNotConfigured today (see
+// node_client.go's NodeClient interface doc comment: the safe on-chain
+// resolve path needs an arbitration realm provisioned, and no deployment
+// has done that operational step yet). Also confirms the handler no longer
+// requires wallet-signature headers before reaching that point -- it's
+// pointless to demand a signature for an action that cannot proceed
+// regardless.
+func TestEscrowResolveNotYetAvailable(t *testing.T) {
+	node := &mockNodeClient{resolveErr: ErrResolveNotConfigured}
 	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
 	body := []byte(`{"escrowId":"0xabc","outcome":"release"}`)
 	ts := time.Unix(1700000000, 0).UTC()
 	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts, "nonce-resolve")
-	walletSig := signWalletRequest(t, priv, http.MethodPost, "/escrow/resolve", body, timestamp, nonce, "0xabc")
 
 	req := httptest.NewRequest(http.MethodPost, "/escrow/resolve", bytes.NewReader(body))
 	req.Header.Set(headerAPIKey, "test")
@@ -512,20 +692,18 @@ func TestEscrowResolveAuthorisedSignature(t *testing.T) {
 	req.Header.Set(headerNonce, nonce)
 	req.Header.Set(headerSignature, sig)
 	req.Header.Set(headerIdempotencyKey, "res123")
-	req.Header.Set(headerWalletAddress, addr)
-	req.Header.Set(headerWalletSig, walletSig)
 
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 accepted got %d", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 service unavailable got %d: %s", rec.Code, rec.Body.String())
 	}
 	if node.resolveCalls != 1 {
 		t.Fatalf("expected resolve to be invoked once, got %d", node.resolveCalls)
 	}
-	if len(node.resolveArgs) != 1 || node.resolveArgs[0].outcome != "release" {
-		t.Fatalf("unexpected resolve args: %+v", node.resolveArgs)
+	if node.getCalls != 0 {
+		t.Fatalf("expected EscrowGet not to be called -- resolve should fail closed before fetching escrow state, got %d calls", node.getCalls)
 	}
 }
 

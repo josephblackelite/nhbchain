@@ -45,6 +45,23 @@ type Config struct {
 	WebhookQueueCapacity int
 	WebhookHistorySize   int
 	WebhookQueueTTL      time.Duration
+
+	// RelayerKMSEnv names another environment variable holding the
+	// gateway's own raw hex-encoded secp256k1 private key -- an extra
+	// level of indirection mirroring services/payments-gateway's
+	// AttestorKMSEnv, so the actual secret value can live in a
+	// deployment-chosen variable name rather than a hardcoded one. This
+	// key signs every transaction the gateway submits to the chain
+	// (TxTypeDelegated{Create,Release,Refund,Dispute}Escrow) -- it pays
+	// gas and owns the transaction's nonce, but never becomes an escrow's
+	// payer/payee/mediator; authorization for the underlying action comes
+	// entirely from the participant signature embedded in each
+	// transaction's payload (see native/escrow/engine.go's
+	// escrowActionEnvelope/escrowCreateEnvelope). Required -- without it
+	// the gateway can still serve read endpoints (escrow_get, and
+	// anything not gated behind RelayerReady) but every mutating escrow
+	// endpoint fails closed.
+	RelayerKMSEnv string
 }
 
 // LoadConfigFromEnv builds a configuration using environment variables.
@@ -97,6 +114,11 @@ func LoadConfigFromEnv() (Config, error) {
 
 	if cfg.NodeURL == "" {
 		return Config{}, errors.New("ESCROW_GATEWAY_NODE_URL is required")
+	}
+
+	cfg.RelayerKMSEnv = strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_RELAYER_KMS_ENV"))
+	if cfg.RelayerKMSEnv == "" {
+		return Config{}, errors.New("ESCROW_GATEWAY_RELAYER_KMS_ENV is required -- names the env var holding the gateway's relayer private key")
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_QUEUE_CAP")); raw != "" {

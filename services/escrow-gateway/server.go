@@ -161,7 +161,18 @@ func (s *Server) handleEscrowCreate(w http.ResponseWriter, r *http.Request) {
 		s.audit(r.Context(), principal, r, body, status, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
 	}
-	created, err := s.node.EscrowCreate(ctx, req)
+
+	// The real payer must sign the exact fields this escrow will be
+	// created with -- see verifyEscrowCreateSignature's doc comment for
+	// why this is required now, unlike the old (disabled) escrow_create
+	// RPC which trusted the API-key-authenticated caller's claim alone.
+	createPayload, createSig, sigErr := s.verifyEscrowCreateSignature(r, &req)
+	if sigErr != nil {
+		s.writeError(w, http.StatusForbidden, sigErr)
+		s.audit(r.Context(), principal, r, body, http.StatusForbidden, []byte(fmt.Sprintf(`{"error":"%s"}`, sigErr.Error())))
+		return
+	}
+	created, err := s.node.EscrowCreate(ctx, createPayload, createSig)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err)
 		s.audit(r.Context(), principal, r, body, http.StatusBadGateway, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -265,7 +276,8 @@ func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, 
 	}
 
 	allowed := allowedSignersForTransition(kind, esc)
-	signer, sigErr := s.verifyWalletSignature(r, body, req.EscrowID, allowed)
+	action := escrowActionForTransition(kind)
+	_, actionPayload, actionSig, sigErr := s.verifyEscrowActionSignature(r, req.EscrowID, action, req.Reason, allowed)
 	if sigErr != nil {
 		s.writeError(w, http.StatusForbidden, sigErr)
 		s.audit(r.Context(), principal, r, body, http.StatusForbidden, []byte(fmt.Sprintf(`{"error":"%s"}`, sigErr.Error())))
@@ -275,11 +287,11 @@ func (s *Server) handleEscrowTransition(w http.ResponseWriter, r *http.Request, 
 	var callErr error
 	switch kind {
 	case escrowTransitionRelease:
-		callErr = s.node.EscrowRelease(ctx, req.EscrowID, signer)
+		callErr = s.node.EscrowRelease(ctx, actionPayload, actionSig)
 	case escrowTransitionRefund:
-		callErr = s.node.EscrowRefund(ctx, req.EscrowID, signer)
+		callErr = s.node.EscrowRefund(ctx, actionPayload, actionSig)
 	case escrowTransitionDispute:
-		callErr = s.node.EscrowDispute(ctx, req.EscrowID, signer, req.Reason)
+		callErr = s.node.EscrowDispute(ctx, actionPayload, actionSig)
 	default:
 		callErr = errors.New("unsupported transition")
 	}
@@ -322,6 +334,25 @@ func allowedSignersForTransition(kind escrowTransitionKind, esc *EscrowState) []
 		payers = append(payers, esc.Payer, esc.Payee)
 	}
 	return payers
+}
+
+// escrowActionForTransition maps an escrowTransitionKind to the wire
+// Action value native/escrow's escrowActionEnvelope expects. Uses the
+// package's own exported constants (escrowpkg.ActionRelease/Refund/
+// Dispute) so this can never silently drift from what
+// Engine.ReleaseWithSignature/RefundWithSignature/DisputeWithSignature
+// actually check.
+func escrowActionForTransition(kind escrowTransitionKind) string {
+	switch kind {
+	case escrowTransitionRelease:
+		return escrowpkg.ActionRelease
+	case escrowTransitionRefund:
+		return escrowpkg.ActionRefund
+	case escrowTransitionDispute:
+		return escrowpkg.ActionDispute
+	default:
+		return ""
+	}
 }
 
 func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request) {
@@ -379,27 +410,21 @@ func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	esc, err := s.node.EscrowGet(ctx, req.EscrowID)
-	if err != nil {
-		s.writeError(w, http.StatusBadGateway, err)
-		s.audit(r.Context(), principal, r, body, http.StatusBadGateway, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
-		return
-	}
 
-	allowed := []string{esc.Payer, esc.Payee}
-	if esc.Mediator != nil {
-		allowed = append(allowed, *esc.Mediator)
-	}
-	signer, sigErr := s.verifyWalletSignature(r, body, req.EscrowID, allowed)
-	if sigErr != nil {
-		s.writeError(w, http.StatusForbidden, sigErr)
-		s.audit(r.Context(), principal, r, body, http.StatusForbidden, []byte(fmt.Sprintf(`{"error":"%s"}`, sigErr.Error())))
-		return
-	}
-
-	if err := s.node.EscrowResolve(ctx, req.EscrowID, signer, outcome); err != nil {
-		s.writeError(w, http.StatusBadGateway, err)
-		s.audit(r.Context(), principal, r, body, http.StatusBadGateway, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+	// EscrowResolve always returns ErrResolveNotConfigured today -- the
+	// safe on-chain resolve path (TxTypeArbitrateRelease/Refund) requires
+	// the escrow to have been created against a registered arbitration
+	// realm, which no deployment has provisioned yet (see the NodeClient
+	// interface doc comment in node_client.go). Skip the EscrowGet/
+	// wallet-signature work below until that's wired up -- there is no
+	// point verifying a signature for an action that cannot proceed.
+	if err := s.node.EscrowResolve(ctx, req.EscrowID, "", outcome); err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, ErrResolveNotConfigured) {
+			status = http.StatusServiceUnavailable
+		}
+		s.writeError(w, status, err)
+		s.audit(r.Context(), principal, r, body, status, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
 	}
 
@@ -522,6 +547,167 @@ func (s *Server) verifyWalletSignature(r *http.Request, body []byte, resourceID 
 		}
 	}
 	return "", errors.New("signer is not authorised for this action")
+}
+
+// escrowActionEnvelopeWire mirrors native/escrow/engine.go's unexported
+// escrowActionEnvelope field-for-field -- this is the exact JSON a
+// participant must sign to authorize a delegated release/refund/dispute
+// (see docs/escrow/nhbchain-escrow-gateway.md for the full client-facing
+// contract). Kept here rather than exported from native/escrow so that
+// package's internal wire type stays private; the JSON tags are the real
+// contract, enforced by TestDelegated*EscrowLifecycle in
+// core/state_transition_escrow_test.go on the chain side and by this
+// service's own tests.
+type escrowActionEnvelopeWire struct {
+	EscrowID string `json:"escrowId"`
+	Action   string `json:"action"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// verifyEscrowActionSignature is verifyWalletSignature's counterpart for
+// the three delegated escrow actions (release/refund/dispute): instead of
+// a signature over this specific REST request (method|path|body|
+// timestamp|nonce|resourceId, EIP-191-wrapped), it verifies a signature
+// over the exact on-chain authorization envelope -- the same bytes
+// native/escrow.ReleaseWithSignature/RefundWithSignature/
+// DisputeWithSignature verify once this gateway relays the action
+// on-chain. Returns the envelope bytes and raw signature so the caller can
+// forward them to node_client unchanged rather than reconstructing them a
+// second time.
+func (s *Server) verifyEscrowActionSignature(r *http.Request, escrowID, action, reason string, allowed []string) (signer string, payload []byte, signature []byte, err error) {
+	sigAddr := strings.TrimSpace(r.Header.Get(headerWalletAddress))
+	if sigAddr == "" {
+		return "", nil, nil, errors.New("missing X-Sig-Addr header")
+	}
+	sigHex := strings.TrimSpace(r.Header.Get(headerWalletSig))
+	if sigHex == "" {
+		return "", nil, nil, errors.New("missing X-Sig header")
+	}
+	envelope := escrowActionEnvelopeWire{EscrowID: escrowID, Action: action, Reason: reason}
+	payload, err = json.Marshal(envelope)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("build action envelope: %w", err)
+	}
+	cleanedSig := strings.TrimPrefix(strings.TrimPrefix(sigHex, "0x"), "0X")
+	signature, err = hexutil.Decode("0x" + cleanedSig)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("invalid signature encoding: %w", err)
+	}
+	digestHash := ethcrypto.Keccak256Hash(payload)
+	var digest [32]byte
+	copy(digest[:], digestHash[:])
+	recovered, err := escrowpkg.RecoverSigner(digest, signature)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("signature verification failed: %w", err)
+	}
+	decodedAddr, err := nhbcrypto.DecodeAddress(sigAddr)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("invalid signer address: %w", err)
+	}
+	if subtle.ConstantTimeCompare(recovered[:], decodedAddr.Bytes()) != 1 {
+		return "", nil, nil, errors.New("signature does not match supplied address")
+	}
+	if len(allowed) > 0 {
+		matched := false
+		for _, candidate := range allowed {
+			if strings.EqualFold(candidate, sigAddr) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return "", nil, nil, errors.New("signer is not authorised for this action")
+		}
+	}
+	return sigAddr, payload, signature, nil
+}
+
+// escrowCreateEnvelopeWire mirrors native/escrow/engine.go's unexported
+// escrowCreateEnvelope -- see escrowActionEnvelopeWire's doc comment for
+// why this is duplicated here rather than exported.
+type escrowCreateEnvelopeWire struct {
+	Action   string `json:"action"`
+	Payer    string `json:"payer"`
+	Payee    string `json:"payee"`
+	Token    string `json:"token"`
+	Amount   string `json:"amount"`
+	FeeBps   uint32 `json:"feeBps"`
+	Deadline int64  `json:"deadline"`
+	Nonce    uint64 `json:"nonce"`
+	Mediator string `json:"mediator,omitempty"`
+	Meta     string `json:"meta,omitempty"`
+	Realm    string `json:"realm,omitempty"`
+}
+
+// verifyEscrowCreateSignature is verifyEscrowActionSignature's Create
+// counterpart. Unlike the old escrow_create RPC (which trusted the
+// caller's API key alone to assert who the payer is -- itself a real gap,
+// since nothing tied the claimed payer to any actual authorization), the
+// real payer must now sign the exact fields the escrow will be created
+// with, verified here before this gateway ever relays it on-chain. The
+// signer is required to equal req.Payer exactly -- native/escrow's
+// CreateWithSignature enforces the same constraint independently, but
+// failing fast here gives a clear 403 instead of a confusing 502 from a
+// wasted on-chain submission attempt.
+func (s *Server) verifyEscrowCreateSignature(r *http.Request, req *EscrowCreateRequest) (payload []byte, signature []byte, err error) {
+	sigAddr := strings.TrimSpace(r.Header.Get(headerWalletAddress))
+	if sigAddr == "" {
+		return nil, nil, errors.New("missing X-Sig-Addr header")
+	}
+	sigHex := strings.TrimSpace(r.Header.Get(headerWalletSig))
+	if sigHex == "" {
+		return nil, nil, errors.New("missing X-Sig header")
+	}
+	if !strings.EqualFold(sigAddr, req.Payer) {
+		return nil, nil, errors.New("X-Sig-Addr must match the request's payer")
+	}
+	payerAddr, err := nhbcrypto.DecodeAddress(req.Payer)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid payer address: %w", err)
+	}
+	payeeAddr, err := nhbcrypto.DecodeAddress(req.Payee)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid payee address: %w", err)
+	}
+	envelope := escrowCreateEnvelopeWire{
+		Action:   escrowpkg.ActionCreate,
+		Payer:    hex.EncodeToString(payerAddr.Bytes()),
+		Payee:    hex.EncodeToString(payeeAddr.Bytes()),
+		Token:    req.Token,
+		Amount:   req.Amount,
+		FeeBps:   req.FeeBps,
+		Deadline: req.Deadline,
+		Nonce:    req.Nonce,
+		Meta:     req.Meta,
+		Realm:    req.Realm,
+	}
+	if trimmed := strings.TrimSpace(req.Mediator); trimmed != "" {
+		mediatorAddr, err := nhbcrypto.DecodeAddress(trimmed)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid mediator address: %w", err)
+		}
+		envelope.Mediator = hex.EncodeToString(mediatorAddr.Bytes())
+	}
+	payload, err = json.Marshal(envelope)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build create envelope: %w", err)
+	}
+	cleanedSig := strings.TrimPrefix(strings.TrimPrefix(sigHex, "0x"), "0X")
+	signature, err = hexutil.Decode("0x" + cleanedSig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid signature encoding: %w", err)
+	}
+	digestHash := ethcrypto.Keccak256Hash(payload)
+	var digest [32]byte
+	copy(digest[:], digestHash[:])
+	recovered, err := escrowpkg.RecoverSigner(digest, signature)
+	if err != nil {
+		return nil, nil, fmt.Errorf("signature verification failed: %w", err)
+	}
+	if subtle.ConstantTimeCompare(recovered[:], payerAddr.Bytes()) != 1 {
+		return nil, nil, errors.New("signature does not match payer address")
+	}
+	return payload, signature, nil
 }
 
 func (s *Server) audit(ctx context.Context, principal *Principal, r *http.Request, requestBody []byte, status int, responseBody []byte) {

@@ -3,29 +3,91 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
+
+	"nhbchain/core/types"
+	nhbcrypto "nhbchain/crypto"
 )
 
 // NodeClient is a thin JSON-RPC client used by the gateway.
+//
+// EscrowCreate/Release/Refund/Dispute take an already-verified participant
+// signature (payload, signature) rather than a plain caller string --
+// escrow_create/release/refund/dispute/resolve were disabled chain-side
+// (see rpc/escrow_handlers.go's escrowRPCDisabledMessage) because they
+// mutated validator state directly outside the block pipeline, guaranteeing
+// a consensus fork on this 2-validator chain. The replacement is a real
+// signed transaction (TxTypeDelegated{Create,Release,Refund,Dispute}Escrow,
+// core/types/transaction.go) that this gateway submits using its own
+// relayer key -- but authorization for the underlying action still comes
+// entirely from the participant's own signature, embedded in the
+// transaction's payload and verified on-chain
+// (native/escrow/engine.go's *WithSignature methods), never from the
+// gateway's identity. See docs/escrow/nhbchain-escrow-gateway.md for the
+// full signing contract client integrators now need to follow.
 type NodeClient interface {
-	EscrowCreate(ctx context.Context, req EscrowCreateRequest) (*EscrowCreateResponse, error)
+	EscrowCreate(ctx context.Context, payload, signature []byte) (*EscrowCreateResponse, error)
 	EscrowGet(ctx context.Context, id string) (*EscrowState, error)
 	EscrowGetRealm(ctx context.Context, id string) (*EscrowRealm, error)
-	EscrowRelease(ctx context.Context, escrowID, caller string) error
-	EscrowRefund(ctx context.Context, escrowID, caller string) error
-	EscrowDispute(ctx context.Context, escrowID, caller, reason string) error
+	EscrowRelease(ctx context.Context, payload, signature []byte) error
+	EscrowRefund(ctx context.Context, payload, signature []byte) error
+	EscrowDispute(ctx context.Context, payload, signature []byte) error
+	// EscrowResolve is not yet wired to a real transaction. The safe
+	// on-chain resolve path (TxTypeArbitrateRelease/Refund) requires the
+	// escrow to have been created against a registered arbitration realm
+	// (see native/escrow/engine.go's CreateRealm and
+	// core/types/transaction.go's TxTypeEscrowCreateRealm) -- provisioning
+	// realms is an operator action (RoleEscrowRealmAdmin-gated), not
+	// something this gateway does automatically per-request, and no realm
+	// has been provisioned in any deployment yet. Always returns
+	// ErrResolveNotConfigured until that operational step happens.
 	EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error
+	// P2PCreateTrade is permanently retired -- the bilateral OTC trade flow
+	// it fronted (p2p_createTrade et al.) has no signed-transaction
+	// replacement and is superseded by the P2P ZNHB market (native/market,
+	// live since 2026-08-24), which already does atomic seller-escrows/
+	// buyer-pays swaps through real signed transactions. Always returns
+	// ErrP2PTradeRetired.
 	P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error)
 	P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error)
 	FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error)
 }
+
+// ErrResolveNotConfigured is returned by EscrowResolve until the deployment
+// has provisioned an arbitration realm -- see the NodeClient interface doc
+// comment.
+var ErrResolveNotConfigured = errors.New("escrow-gateway: resolve is not yet available -- no arbitration realm has been provisioned for this deployment")
+
+// ErrP2PTradeRetired is returned by P2PCreateTrade -- see the NodeClient
+// interface doc comment.
+var ErrP2PTradeRetired = errors.New("escrow-gateway: p2p trade creation is permanently retired -- use the P2P ZNHB market instead")
+
+// ErrRelayerNotConfigured is returned by every mutating escrow call when
+// InitRelayer has not been called (or failed) -- read endpoints (EscrowGet,
+// EscrowGetRealm, P2PGetTrade, FetchEvents) remain unaffected.
+var ErrRelayerNotConfigured = errors.New("escrow-gateway: relayer key not configured -- mutating escrow endpoints are unavailable")
+
+// escrowRelayerGasLimit/GasPrice are fixed, matching
+// services/payments-gateway/node_client.go's attestRedemptionGasLimit/Price
+// convention for a service-operated relayer key.
+var (
+	escrowRelayerGasLimit = uint64(30_000)
+	escrowRelayerGasPrice = big.NewInt(1)
+)
 
 // RPCNodeClient implements NodeClient against the nhb JSON-RPC server.
 type RPCNodeClient struct {
@@ -33,6 +95,18 @@ type RPCNodeClient struct {
 	authToken string
 	http      *http.Client
 	nextID    atomic.Int64
+
+	// relayerMu serializes every transaction this client submits --
+	// unlike payments-gateway's redemption watcher (single-writer by
+	// design), escrow-gateway's mutating endpoints can be hit by multiple
+	// concurrent HTTP requests, and a blockchain account's nonce sequence
+	// is inherently sequential, so submission itself must be serialized
+	// regardless of how many requests arrive concurrently.
+	relayerMu      sync.Mutex
+	relayerKey     *nhbcrypto.PrivateKey
+	relayerAddress string
+	relayerNonce   uint64
+	relayerReady   bool
 }
 
 func NewRPCNodeClient(baseURL, authToken string) *RPCNodeClient {
@@ -45,50 +119,147 @@ func NewRPCNodeClient(baseURL, authToken string) *RPCNodeClient {
 	}
 }
 
-type jsonRPCRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params"`
-	ID      int64       `json:"id"`
+// InitRelayer configures the gateway's own signing key and fetches its
+// current on-chain nonce once via nhb_getBalance. Must be called before any
+// mutating escrow endpoint is served -- see RPCNodeClient.relayerMu's doc
+// comment for why the nonce is then only ever advanced under that mutex.
+func (c *RPCNodeClient) InitRelayer(ctx context.Context, key *nhbcrypto.PrivateKey) error {
+	if key == nil {
+		return fmt.Errorf("relayer key required")
+	}
+	address := key.PubKey().Address().String()
+	var resp struct {
+		Nonce uint64 `json:"nonce"`
+	}
+	if err := c.call(ctx, "nhb_getBalance", []interface{}{address}, &resp); err != nil {
+		return fmt.Errorf("fetch relayer nonce: %w", err)
+	}
+	c.relayerMu.Lock()
+	defer c.relayerMu.Unlock()
+	c.relayerKey = key
+	c.relayerAddress = address
+	c.relayerNonce = resp.Nonce
+	c.relayerReady = true
+	return nil
 }
 
-type jsonRPCResponse struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      int64            `json:"id"`
-	Result  json.RawMessage  `json:"result"`
-	Error   *jsonRPCErrorObj `json:"error"`
+// RelayerAddress returns the configured relayer's NHB address, or "" if
+// InitRelayer has not been called yet. Used for startup logging/funding
+// checks -- like any transaction sender, the relayer needs its own NHB gas
+// balance.
+func (c *RPCNodeClient) RelayerAddress() string {
+	c.relayerMu.Lock()
+	defer c.relayerMu.Unlock()
+	return c.relayerAddress
 }
 
-type jsonRPCErrorObj struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
+// submitEscrowTx builds, signs (with the relayer key), and submits a
+// transaction of the given type carrying data as its payload. Every
+// TxTypeDelegated*Escrow call funnels through this one method so nonce
+// allocation stays correctly serialized under relayerMu.
+func (c *RPCNodeClient) submitEscrowTx(ctx context.Context, txType types.TxType, data []byte) (string, error) {
+	c.relayerMu.Lock()
+	defer c.relayerMu.Unlock()
+	if !c.relayerReady || c.relayerKey == nil {
+		return "", ErrRelayerNotConfigured
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     txType,
+		Nonce:    c.relayerNonce,
+		GasLimit: escrowRelayerGasLimit,
+		GasPrice: new(big.Int).Set(escrowRelayerGasPrice),
+		Data:     data,
+	}
+	if err := tx.Sign(c.relayerKey.PrivateKey); err != nil {
+		return "", fmt.Errorf("sign transaction: %w", err)
+	}
+	var txHash string
+	if err := c.call(ctx, "nhb_sendTransaction", []interface{}{tx}, &txHash); err != nil {
+		return "", err
+	}
+	// Only advance the cached nonce after a successful submission -- a
+	// failed call (rejected by the node before it ever reached the
+	// mempool) must not burn a nonce slot, mirroring
+	// SendAttestRedemption's exact same reasoning.
+	c.relayerNonce++
+	return txHash, nil
 }
 
-func (c *RPCNodeClient) EscrowCreate(ctx context.Context, req EscrowCreateRequest) (*EscrowCreateResponse, error) {
-	payload := map[string]interface{}{
-		"payer":    req.Payer,
-		"payee":    req.Payee,
-		"token":    req.Token,
-		"amount":   req.Amount,
-		"feeBps":   req.FeeBps,
-		"deadline": req.Deadline,
-		"nonce":    req.Nonce,
+type delegatedCreateEscrowPayload struct {
+	Payload   []byte
+	Signature []byte
+}
+
+type delegatedEscrowActionPayload struct {
+	EscrowID  string
+	Payload   []byte
+	Signature []byte
+}
+
+// escrowCreateEnvelopeFields is the subset of a signed create envelope
+// (native/escrow/engine.go's escrowCreateEnvelope) this client needs to
+// decode back out of payload in order to compute the resulting escrow ID
+// itself -- nhb_sendTransaction only ever returns a bare txHash, never the
+// derived escrow ID, so the gateway must derive it the same deterministic
+// way the engine does (see native/escrow/engine.go's Create: id =
+// keccak256(payer || payee || metaHash || nonce-as-8-byte-big-endian)).
+type escrowCreateEnvelopeFields struct {
+	Payer string `json:"payer"`
+	Payee string `json:"payee"`
+	Nonce uint64 `json:"nonce"`
+	Meta  string `json:"meta,omitempty"`
+}
+
+func (c *RPCNodeClient) EscrowCreate(ctx context.Context, payload, signature []byte) (*EscrowCreateResponse, error) {
+	var fields escrowCreateEnvelopeFields
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil, fmt.Errorf("decode create envelope: %w", err)
 	}
-	if req.Mediator != "" {
-		payload["mediator"] = req.Mediator
+	// Payer/Payee are hex in the envelope, not bech32 -- matching
+	// native/escrow's escrowCreateEnvelope convention (see
+	// server.go's escrowCreateEnvelopeWire, which is what actually
+	// produces this payload: hex.EncodeToString(payerAddr.Bytes())).
+	payerBytes, err := decodeHex(strings.TrimSpace(fields.Payer))
+	if err != nil {
+		return nil, fmt.Errorf("decode create envelope payer: %w", err)
 	}
-	if req.Meta != "" {
-		payload["meta"] = req.Meta
+	payeeBytes, err := decodeHex(strings.TrimSpace(fields.Payee))
+	if err != nil {
+		return nil, fmt.Errorf("decode create envelope payee: %w", err)
 	}
-	if trimmed := strings.TrimSpace(req.Realm); trimmed != "" {
-		payload["realm"] = trimmed
+	if len(payerBytes) != 20 {
+		return nil, fmt.Errorf("create envelope payer must be 20 bytes")
 	}
-	var result EscrowCreateResponse
-	if err := c.call(ctx, "escrow_create", []interface{}{payload}, &result); err != nil {
+	if len(payeeBytes) != 20 {
+		return nil, fmt.Errorf("create envelope payee must be 20 bytes")
+	}
+	var meta [32]byte
+	if trimmed := strings.TrimSpace(fields.Meta); trimmed != "" {
+		metaBytes, err := decodeHex(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("decode create envelope meta: %w", err)
+		}
+		if len(metaBytes) > len(meta) {
+			return nil, fmt.Errorf("create envelope meta must be <= 32 bytes")
+		}
+		copy(meta[:], metaBytes)
+	}
+	if fields.Nonce == 0 {
+		return nil, fmt.Errorf("create envelope nonce must be positive")
+	}
+	var nonceBuf [8]byte
+	binary.BigEndian.PutUint64(nonceBuf[:], fields.Nonce)
+	id := ethcrypto.Keccak256Hash(payerBytes, payeeBytes, meta[:], nonceBuf[:])
+
+	data, err := rlp.EncodeToBytes(delegatedCreateEscrowPayload{Payload: payload, Signature: signature})
+	if err != nil {
+		return nil, fmt.Errorf("encode delegated create payload: %w", err)
+	}
+	if _, err := c.submitEscrowTx(ctx, types.TxTypeDelegatedCreateEscrow, data); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return &EscrowCreateResponse{ID: "0x" + hex.EncodeToString(id[:])}, nil
 }
 
 func (c *RPCNodeClient) EscrowGet(ctx context.Context, id string) (*EscrowState, error) {
@@ -112,46 +283,63 @@ func (c *RPCNodeClient) EscrowGetRealm(ctx context.Context, id string) (*EscrowR
 	return &result, nil
 }
 
-func (c *RPCNodeClient) EscrowRelease(ctx context.Context, escrowID, caller string) error {
-	params := map[string]string{"id": escrowID, "caller": caller}
-	return c.call(ctx, "escrow_release", []interface{}{params}, nil)
-}
-
-func (c *RPCNodeClient) EscrowRefund(ctx context.Context, escrowID, caller string) error {
-	params := map[string]string{"id": escrowID, "caller": caller}
-	return c.call(ctx, "escrow_refund", []interface{}{params}, nil)
-}
-
-func (c *RPCNodeClient) EscrowDispute(ctx context.Context, escrowID, caller, reason string) error {
-	params := map[string]string{"id": escrowID, "caller": caller}
-	if strings.TrimSpace(reason) != "" {
-		params["reason"] = reason
+func (c *RPCNodeClient) escrowDelegatedAction(ctx context.Context, txType types.TxType, escrowID string, payload, signature []byte) error {
+	data, err := rlp.EncodeToBytes(delegatedEscrowActionPayload{
+		EscrowID:  escrowID,
+		Payload:   payload,
+		Signature: signature,
+	})
+	if err != nil {
+		return fmt.Errorf("encode delegated action payload: %w", err)
 	}
-	return c.call(ctx, "escrow_dispute", []interface{}{params}, nil)
+	_, err = c.submitEscrowTx(ctx, txType, data)
+	return err
+}
+
+func (c *RPCNodeClient) EscrowRelease(ctx context.Context, payload, signature []byte) error {
+	escrowID, err := escrowIDFromActionEnvelope(payload)
+	if err != nil {
+		return err
+	}
+	return c.escrowDelegatedAction(ctx, types.TxTypeDelegatedReleaseEscrow, escrowID, payload, signature)
+}
+
+func (c *RPCNodeClient) EscrowRefund(ctx context.Context, payload, signature []byte) error {
+	escrowID, err := escrowIDFromActionEnvelope(payload)
+	if err != nil {
+		return err
+	}
+	return c.escrowDelegatedAction(ctx, types.TxTypeDelegatedRefundEscrow, escrowID, payload, signature)
+}
+
+func (c *RPCNodeClient) EscrowDispute(ctx context.Context, payload, signature []byte) error {
+	escrowID, err := escrowIDFromActionEnvelope(payload)
+	if err != nil {
+		return err
+	}
+	return c.escrowDelegatedAction(ctx, types.TxTypeDelegatedDisputeEscrow, escrowID, payload, signature)
+}
+
+func escrowIDFromActionEnvelope(payload []byte) (string, error) {
+	var fields struct {
+		EscrowID string `json:"escrowId"`
+	}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return "", fmt.Errorf("decode action envelope: %w", err)
+	}
+	trimmed := strings.TrimSpace(fields.EscrowID)
+	if trimmed == "" {
+		return "", fmt.Errorf("action envelope escrowId required")
+	}
+	return trimmed, nil
 }
 
 func (c *RPCNodeClient) EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error {
-	params := map[string]string{"id": escrowID, "caller": caller, "outcome": outcome}
-	return c.call(ctx, "escrow_resolve", []interface{}{params}, nil)
+	return ErrResolveNotConfigured
 }
 
 func (c *RPCNodeClient) P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error) {
-	payload := map[string]interface{}{
-		"offerId":     req.OfferID,
-		"buyer":       req.Buyer,
-		"seller":      req.Seller,
-		"baseToken":   req.BaseToken,
-		"baseAmount":  req.BaseAmount,
-		"quoteToken":  req.QuoteToken,
-		"quoteAmount": req.QuoteAmount,
-		"deadline":    req.Deadline,
-		"slippageBps": req.SlippageBps,
-	}
-	var result P2PAcceptResponse
-	if err := c.call(ctx, "p2p_createTrade", []interface{}{payload}, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	return nil, ErrP2PTradeRetired
 }
 
 func (c *RPCNodeClient) P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error) {
@@ -174,6 +362,31 @@ func (c *RPCNodeClient) FetchEvents(ctx context.Context, afterSeq int64, limit i
 		return nil, err
 	}
 	return result, nil
+}
+
+func decodeHex(value string) ([]byte, error) {
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(value), "0x"), "0X")
+	return hex.DecodeString(trimmed)
+}
+
+type jsonRPCRequest struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params"`
+	ID      int64       `json:"id"`
+}
+
+type jsonRPCResponse struct {
+	JSONRPC string           `json:"jsonrpc"`
+	ID      int64            `json:"id"`
+	Result  json.RawMessage  `json:"result"`
+	Error   *jsonRPCErrorObj `json:"error"`
+}
+
+type jsonRPCErrorObj struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
 }
 
 func (c *RPCNodeClient) call(ctx context.Context, method string, params interface{}, out interface{}) error {
