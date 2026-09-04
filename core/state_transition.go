@@ -3553,6 +3553,25 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applyExpireEscrow(tx, sender, senderAccount)
+	case types.TxTypeDelegatedReleaseEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedEscrowAction(tx, sender, senderAccount, escrow.ActionRelease)
+	case types.TxTypeDelegatedRefundEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedEscrowAction(tx, sender, senderAccount, escrow.ActionRefund)
+	case types.TxTypeDelegatedDisputeEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedEscrowAction(tx, sender, senderAccount, escrow.ActionDispute)
+	case types.TxTypeEscrowCreateRealm:
+		return sp.applyEscrowCreateRealm(tx, sender, senderAccount)
+	case types.TxTypeEscrowUpdateRealm:
+		return sp.applyEscrowUpdateRealm(tx, sender, senderAccount)
 	case types.TxTypeSwapPayoutReceipt:
 		if err := sp.applySwapPayoutReceipt(tx); err != nil {
 			return err
@@ -3886,6 +3905,180 @@ func (sp *StateProcessor) applyExpireEscrow(tx *types.Transaction, sender []byte
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyDelegatedEscrowAction backs TxTypeDelegatedReleaseEscrow/
+// RefundEscrow/DisputeEscrow -- see those TxType doc comments and
+// escrow.ActionRelease/Refund/Dispute's escrowActionEnvelope doc comment
+// (native/escrow/engine.go) for the full design. tx.Data is RLP-encoded
+// {EscrowID string, Payload []byte, Signature []byte}, the same shape as
+// applyArbitrate's {EscrowID, Decision, Signatures}. Authorization comes
+// entirely from the participant signature embedded in Payload/Signature,
+// verified by Engine.ReleaseWithSignature/RefundWithSignature/
+// DisputeWithSignature -- sender here is only the relayer paying gas and
+// owning this transaction's nonce, deliberately never checked against the
+// escrow's payer/payee/mediator.
+func (sp *StateProcessor) applyDelegatedEscrowAction(tx *types.Transaction, sender []byte, senderAccount *types.Account, action string) error {
+	var payload struct {
+		EscrowID  string `json:"escrowId"`
+		Payload   []byte `json:"payload"`
+		Signature []byte `json:"signature"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("delegated escrow action payload required")
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid delegated escrow action payload: %w", err)
+	}
+	trimmedID := strings.TrimSpace(payload.EscrowID)
+	if trimmedID == "" {
+		return fmt.Errorf("delegated escrow action escrowId required")
+	}
+	rawID, err := hex.DecodeString(strings.TrimPrefix(trimmedID, "0x"))
+	if err != nil {
+		return fmt.Errorf("delegated escrow action escrowId must be hex: %w", err)
+	}
+	var id [32]byte
+	if len(rawID) != len(id) {
+		return fmt.Errorf("delegated escrow action escrowId must be %d bytes", len(id))
+	}
+	copy(id[:], rawID)
+
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+
+	switch action {
+	case escrow.ActionRelease:
+		if err := sp.EscrowEngine.ReleaseWithSignature(id, payload.Payload, payload.Signature); err != nil {
+			return err
+		}
+	case escrow.ActionRefund:
+		if err := sp.EscrowEngine.RefundWithSignature(id, payload.Payload, payload.Signature); err != nil {
+			return err
+		}
+	case escrow.ActionDispute:
+		if err := sp.EscrowEngine.DisputeWithSignature(id, payload.Payload, payload.Signature); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("delegated escrow action unknown: %s", action)
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyEscrowCreateRealm/UpdateRealm expose native/escrow/engine.go's
+// CreateRealm/UpdateRealm -- see TxTypeEscrowCreateRealm/UpdateRealm's doc
+// comment for why these are role-gated rather than permissionless.
+func (sp *StateProcessor) applyEscrowCreateRealm(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleEscrowRealmAdmin, sender) {
+		return fmt.Errorf("escrowCreateRealm: unauthorized: caller lacks %s", RoleEscrowRealmAdmin)
+	}
+	realm, err := decodeEscrowRealmPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	sp.configureTradeEngine()
+	if _, err := sp.EscrowEngine.CreateRealm(realm); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func (sp *StateProcessor) applyEscrowUpdateRealm(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleEscrowRealmAdmin, sender) {
+		return fmt.Errorf("escrowUpdateRealm: unauthorized: caller lacks %s", RoleEscrowRealmAdmin)
+	}
+	realm, err := decodeEscrowRealmPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	sp.configureTradeEngine()
+	if _, err := sp.EscrowEngine.UpdateRealm(realm); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func decodeEscrowRealmPayload(data []byte) (*escrow.EscrowRealm, error) {
+	var payload struct {
+		ID                 string   `json:"id"`
+		Threshold          uint32   `json:"threshold"`
+		Scheme             uint8    `json:"scheme"`
+		Members            []string `json:"members"`
+		FeeBps             uint32   `json:"feeBps,omitempty"`
+		FeeRecipient       string   `json:"feeRecipient,omitempty"`
+		Scope              uint8    `json:"scope"`
+		ProviderProfile    string   `json:"providerProfile"`
+		ArbitrationFeeBps  uint32   `json:"arbitrationFeeBps,omitempty"`
+		FeeRecipientBech32 string   `json:"feeRecipientBech32,omitempty"`
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("escrow realm payload required")
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		if rlpErr := rlp.DecodeBytes(data, &payload); rlpErr != nil {
+			return nil, fmt.Errorf("escrow realm payload must be valid JSON or RLP: %w", err)
+		}
+	}
+	trimmedID := strings.TrimSpace(payload.ID)
+	if trimmedID == "" {
+		return nil, fmt.Errorf("escrow realm id required")
+	}
+	if len(payload.Members) == 0 {
+		return nil, fmt.Errorf("escrow realm requires at least one arbitrator member")
+	}
+	members := make([][20]byte, 0, len(payload.Members))
+	for i, m := range payload.Members {
+		addr, err := decodeEscrowRealmAddress(m)
+		if err != nil {
+			return nil, fmt.Errorf("escrow realm member %d: %w", i, err)
+		}
+		members = append(members, addr)
+	}
+	realm := &escrow.EscrowRealm{
+		ID: trimmedID,
+		Arbitrators: &escrow.ArbitratorSet{
+			Scheme:    escrow.ArbitrationScheme(payload.Scheme),
+			Threshold: payload.Threshold,
+			Members:   members,
+		},
+		Metadata: &escrow.EscrowRealmMetadata{
+			Scope:              escrow.EscrowRealmScope(payload.Scope),
+			ProviderProfile:    payload.ProviderProfile,
+			ArbitrationFeeBps:  payload.ArbitrationFeeBps,
+			FeeRecipientBech32: payload.FeeRecipientBech32,
+		},
+	}
+	if payload.FeeBps > 0 || strings.TrimSpace(payload.FeeRecipient) != "" {
+		recipient, err := decodeEscrowRealmAddress(payload.FeeRecipient)
+		if err != nil {
+			return nil, fmt.Errorf("escrow realm fee recipient: %w", err)
+		}
+		realm.FeeSchedule = &escrow.RealmFeeSchedule{FeeBps: payload.FeeBps, Recipient: recipient}
+	}
+	return realm, nil
+}
+
+func decodeEscrowRealmAddress(bech32 string) ([20]byte, error) {
+	var out [20]byte
+	trimmed := strings.TrimSpace(bech32)
+	if trimmed == "" {
+		return out, fmt.Errorf("address required")
+	}
+	addr, err := crypto.DecodeAddress(trimmed)
+	if err != nil {
+		return out, err
+	}
+	b := addr.Bytes()
+	if len(b) != len(out) {
+		return out, fmt.Errorf("address must be %d bytes", len(out))
+	}
+	copy(out[:], b)
+	return out, nil
 }
 
 // --- NEW: Lock -> Dispute -> Arbitrate flow ---
@@ -4245,6 +4438,11 @@ func (sp *StateProcessor) applySetRewardBeneficiary(tx *types.Transaction, sende
 // transaction can claim to be "treasury" (docs/issue30.md item 27). This
 // mechanism does not reuse that pattern.
 const RoleSwapPayoutAttestor = "ROLE_SWAP_PAYOUT_ATTESTOR"
+
+// RoleEscrowRealmAdmin gates TxTypeEscrowCreateRealm/UpdateRealm (see those
+// TxType doc comments in core/types/transaction.go). Same genesis/
+// governance-granted role pattern as RoleSwapPayoutAttestor.
+const RoleEscrowRealmAdmin = "ROLE_ESCROW_REALM_ADMIN"
 
 // applyRedeemNHB lets a user burn their own NHB to request an off-chain
 // stablecoin payout (swap-out). Per the founder's explicit design, the burn

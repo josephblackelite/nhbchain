@@ -1319,3 +1319,216 @@ func TestResolveWithSignaturesReplay(t *testing.T) {
 		t.Fatalf("expected no additional events on replay")
 	}
 }
+
+func buildEscrowActionPayload(t *testing.T, id [32]byte, action, reason string) []byte {
+	t.Helper()
+	envelope := escrowActionEnvelope{
+		EscrowID: "0x" + hex.EncodeToString(id[:]),
+		Action:   action,
+		Reason:   reason,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal action envelope: %v", err)
+	}
+	return data
+}
+
+func signEscrowActionPayload(t *testing.T, payload []byte, key *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	digest := ethcrypto.Keccak256Hash(payload)
+	sig, err := ethcrypto.Sign(digest.Bytes(), key)
+	if err != nil {
+		t.Fatalf("sign action payload: %v", err)
+	}
+	return sig
+}
+
+func TestReleaseWithSignatureAuthorizesEmbeddedPayee(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	_, payer := mustGenerateArbitrator(t)
+	payeeKey, payee := mustGenerateArbitrator(t)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 61, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	payload := buildEscrowActionPayload(t, esc.ID, ActionRelease, "")
+	sig := signEscrowActionPayload(t, payload, payeeKey)
+
+	// A relayer -- neither payer nor payee -- calls this. Authorization
+	// comes entirely from the embedded payee signature, not from any
+	// notion of "who is calling."
+	if err := engine.ReleaseWithSignature(esc.ID, payload, sig); err != nil {
+		t.Fatalf("release with signature: %v", err)
+	}
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowReleased {
+		t.Fatalf("expected released status, got %d", stored.Status)
+	}
+}
+
+func TestReleaseWithSignatureRejectsWrongSigner(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	_, payer := mustGenerateArbitrator(t)
+	_, payee := mustGenerateArbitrator(t)
+	outsiderKey, _ := mustGenerateArbitrator(t)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 62, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	payload := buildEscrowActionPayload(t, esc.ID, ActionRelease, "")
+	// Signed by a random outsider, not payee or mediator.
+	sig := signEscrowActionPayload(t, payload, outsiderKey)
+	if err := engine.ReleaseWithSignature(esc.ID, payload, sig); err == nil {
+		t.Fatalf("expected release with an outsider's signature to be rejected")
+	}
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowFunded {
+		t.Fatalf("expected escrow to remain funded, got status %d", stored.Status)
+	}
+}
+
+func TestRefundWithSignatureAuthorizesEmbeddedPayer(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payerKey, payer := mustGenerateArbitrator(t)
+	_, payee := mustGenerateArbitrator(t)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 9_999_999_999, 63, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	payload := buildEscrowActionPayload(t, esc.ID, ActionRefund, "")
+	sig := signEscrowActionPayload(t, payload, payerKey)
+	if err := engine.RefundWithSignature(esc.ID, payload, sig); err != nil {
+		t.Fatalf("refund with signature: %v", err)
+	}
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowRefunded {
+		t.Fatalf("expected refunded status, got %d", stored.Status)
+	}
+}
+
+func TestDisputeWithSignatureCarriesReasonAndEnforcesLengthCap(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payerKey, payer := mustGenerateArbitrator(t)
+	_, payee := mustGenerateArbitrator(t)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 9_999_999_999, 64, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	payload := buildEscrowActionPayload(t, esc.ID, ActionDispute, "item never arrived")
+	sig := signEscrowActionPayload(t, payload, payerKey)
+	if err := engine.DisputeWithSignature(esc.ID, payload, sig); err != nil {
+		t.Fatalf("dispute with signature: %v", err)
+	}
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowDisputed {
+		t.Fatalf("expected disputed status, got %d", stored.Status)
+	}
+	if stored.DisputeReason != "item never arrived" {
+		t.Fatalf("expected reason to be recorded, got %q", stored.DisputeReason)
+	}
+
+	// A second, independent escrow to prove the oversized-reason path is
+	// still enforced through the delegated entry point (Dispute's own cap,
+	// reused unchanged -- see TestDisputeRejectsOversizedReason).
+	esc2, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 9_999_999_999, 65, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create second escrow: %v", err)
+	}
+	if err := engine.Fund(esc2.ID, payer); err != nil {
+		t.Fatalf("fund second escrow: %v", err)
+	}
+	oversized := strings.Repeat("a", maxDisputeReasonBytes+1)
+	oversizedPayload := buildEscrowActionPayload(t, esc2.ID, ActionDispute, oversized)
+	oversizedSig := signEscrowActionPayload(t, oversizedPayload, payerKey)
+	if err := engine.DisputeWithSignature(esc2.ID, oversizedPayload, oversizedSig); err == nil {
+		t.Fatalf("expected oversized delegated dispute reason to be rejected")
+	}
+}
+
+func TestDelegatedActionSignatureCannotBeReusedForADifferentAction(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	_, payer := mustGenerateArbitrator(t)
+	payeeKey, payee := mustGenerateArbitrator(t)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 66, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	// The payee signs a "dispute" envelope. A relayer (or an attacker who
+	// intercepted it) cannot replay that exact signature against Release --
+	// the Action discriminator inside the signed payload must match, so a
+	// signature minted for one action can never authorize a different one.
+	disputePayload := buildEscrowActionPayload(t, esc.ID, ActionDispute, "wrong item")
+	disputeSig := signEscrowActionPayload(t, disputePayload, payeeKey)
+	if err := engine.ReleaseWithSignature(esc.ID, disputePayload, disputeSig); err == nil {
+		t.Fatalf("expected a dispute-action signature to be rejected as a release authorization")
+	}
+	stored, _ := state.EscrowGet(esc.ID)
+	if stored.Status != EscrowFunded {
+		t.Fatalf("expected escrow to remain funded, got status %d", stored.Status)
+	}
+}
+
+func TestReleaseWithSignatureReplayIsIdempotent(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	emitter := &capturingEmitter{}
+	engine.SetEmitter(emitter)
+	_, payer := mustGenerateArbitrator(t)
+	payeeKey, payee := mustGenerateArbitrator(t)
+	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 67, nil, [32]byte{}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+
+	payload := buildEscrowActionPayload(t, esc.ID, ActionRelease, "")
+	sig := signEscrowActionPayload(t, payload, payeeKey)
+	if err := engine.ReleaseWithSignature(esc.ID, payload, sig); err != nil {
+		t.Fatalf("initial release: %v", err)
+	}
+	firstEvents := len(emitter.events)
+	// A relayer resubmitting the exact same signed payload (retry, or a
+	// captured replay) is a safe no-op, same guarantee already relied on by
+	// TestResolveWithSignaturesReplay -- Release's own idempotent-by-status
+	// check is what makes this safe, not a separate nonce registry.
+	if err := engine.ReleaseWithSignature(esc.ID, payload, sig); err != nil {
+		t.Fatalf("replay should be ignored: %v", err)
+	}
+	if len(emitter.events) != firstEvents {
+		t.Fatalf("expected no additional events on replay")
+	}
+}

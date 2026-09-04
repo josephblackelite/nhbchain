@@ -252,6 +252,46 @@ const (
 	// account can pay the gas to sweep a stale escrow. Idempotent: a second
 	// expire on an already-expired escrow is a no-op, not an error.
 	TxTypeExpireEscrow TxType = 0x3B
+
+	// TxTypeDelegatedReleaseEscrow/RefundEscrow/DisputeEscrow let a relayer
+	// (e.g. escrow-gateway) submit a release/refund/dispute on a
+	// participant's behalf, paying gas itself, while the chain authorizes
+	// the action against an off-chain signature embedded in tx.Data rather
+	// than the transaction's own sender -- the escrow module's version of
+	// the EIP-2771 "trusted forwarder" meta-transaction pattern. tx.Data is
+	// RLP-encoded {EscrowID string, Payload []byte, Signature []byte},
+	// mirroring TxTypeArbitrateRelease/Refund's existing {EscrowID,
+	// Decision, Signatures} shape: Payload is the exact bytes the
+	// participant signed (a JSON escrowActionEnvelope, native/escrow/
+	// engine.go), Signature is their raw 65-byte secp256k1 signature over
+	// keccak256(Payload). See Engine.ReleaseWithSignature/
+	// RefundWithSignature/DisputeWithSignature for the verification and
+	// replay-safety details (idempotent by escrow status transition, same
+	// guarantee TxTypeArbitrate* already relies on -- no separate on-chain
+	// nonce registry needed).
+	TxTypeDelegatedReleaseEscrow TxType = 0x3C
+	TxTypeDelegatedRefundEscrow  TxType = 0x3D
+	TxTypeDelegatedDisputeEscrow TxType = 0x3E
+
+	// TxTypeEscrowCreateRealm/UpdateRealm create or update an escrow
+	// arbitration realm (native/escrow/engine.go's CreateRealm/UpdateRealm
+	// -- previously built but unreachable from any RPC or transaction).  A
+	// realm names a committee of arbitrators and a signing threshold;
+	// escrows opt into one at creation time via TxTypeCreateEscrow's realm
+	// field, and disputes on that escrow are then resolved by that
+	// specific committee via TxTypeArbitrateRelease/Refund. Gated by
+	// RoleEscrowRealmAdmin (core/state_transition.go), matching
+	// RoleSwapPayoutAttestor's genesis/governance-granted role pattern --
+	// CreateRealm/UpdateRealm have no per-realm ownership model in
+	// EscrowRealm itself, so without a role gate any caller could silently
+	// rewrite an existing realm's arbitrator set out from under escrows
+	// already relying on it. This enables NHBCoin's own "internal
+	// arbitrator" realm(s) today; letting individual integrators register
+	// and own their own realm without going through this role is a
+	// natural follow-up, not yet built (would need an Owner field added to
+	// EscrowRealm and a per-realm ACL, not just a global role).
+	TxTypeEscrowCreateRealm TxType = 0x3F
+	TxTypeEscrowUpdateRealm TxType = 0x40
 )
 
 // RequiresSignature reports whether the transaction type must carry an

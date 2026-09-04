@@ -965,6 +965,33 @@ func decodeFixedHex(value string, length int) ([]byte, error) {
 	return decoded, nil
 }
 
+// recoverSignerFromSignature recovers the secp256k1 address that produced
+// signature over digest. Shared by verifyDecisionSignatures (arbitrator
+// committee quorum) and the single-participant delegated-action signatures
+// below (recoverEscrowActionSigner) -- one recovery implementation for every
+// signed-payload path in this package.
+func recoverSignerFromSignature(digest [32]byte, signature []byte) ([20]byte, error) {
+	var signer [20]byte
+	if len(signature) != 65 {
+		return signer, fmt.Errorf("escrow: signature must be 65 bytes")
+	}
+	buf := make([]byte, len(signature))
+	copy(buf, signature)
+	if buf[64] >= 27 {
+		buf[64] -= 27
+	}
+	if buf[64] != 0 && buf[64] != 1 {
+		return signer, fmt.Errorf("escrow: signature has invalid recovery id")
+	}
+	pubKey, err := ethcrypto.SigToPub(digest[:], buf)
+	if err != nil {
+		return signer, fmt.Errorf("escrow: invalid signature: %w", err)
+	}
+	addr := ethcrypto.PubkeyToAddress(*pubKey)
+	copy(signer[:], addr[:])
+	return signer, nil
+}
+
 func verifyDecisionSignatures(frozen *FrozenArb, digest [32]byte, signatures [][]byte) ([][20]byte, error) {
 	if frozen == nil {
 		return nil, fmt.Errorf("escrow: missing frozen arbitrator policy")
@@ -982,24 +1009,10 @@ func verifyDecisionSignatures(frozen *FrozenArb, digest [32]byte, signatures [][
 	seen := make(map[[20]byte]struct{})
 	unique := make([][20]byte, 0, len(signatures))
 	for i, sig := range signatures {
-		if len(sig) != 65 {
-			return nil, fmt.Errorf("escrow: signature %d must be 65 bytes", i)
-		}
-		buf := make([]byte, len(sig))
-		copy(buf, sig)
-		if buf[64] >= 27 {
-			buf[64] -= 27
-		}
-		if buf[64] != 0 && buf[64] != 1 {
-			return nil, fmt.Errorf("escrow: signature %d has invalid recovery id", i)
-		}
-		pubKey, err := ethcrypto.SigToPub(digest[:], buf)
+		signer, err := recoverSignerFromSignature(digest, sig)
 		if err != nil {
-			return nil, fmt.Errorf("escrow: invalid signature %d: %w", i, err)
+			return nil, fmt.Errorf("escrow: signature %d: %w", i, err)
 		}
-		addr := ethcrypto.PubkeyToAddress(*pubKey)
-		var signer [20]byte
-		copy(signer[:], addr[:])
 		if _, ok := allowed[signer]; !ok {
 			return nil, fmt.Errorf("escrow: signature %d not from authorized arbitrator", i)
 		}
@@ -1013,6 +1026,121 @@ func verifyDecisionSignatures(frozen *FrozenArb, digest [32]byte, signatures [][
 		return nil, fmt.Errorf("escrow: insufficient arbitrator quorum: have %d need %d", len(unique), frozen.Threshold)
 	}
 	return unique, nil
+}
+
+// escrowActionEnvelope is the exact JSON payload a participant (payer or
+// payee) signs off-chain to delegate a release/refund/dispute action to a
+// relayer -- e.g. escrow-gateway, submitting on the participant's behalf so
+// they never need NHB for gas or to construct a transaction themselves. The
+// relayer submits it wrapped in a TxTypeDelegated*Escrow transaction it
+// signs and pays gas for itself; the chain authorizes the action against
+// the *embedded* signer recovered from Signature, not the transaction's own
+// sender. This is the escrow module's version of the EIP-2771 "trusted
+// forwarder" meta-transaction pattern, reusing the exact
+// sign-a-canonical-payload-and-recover-the-signer shape already proven by
+// ResolveWithSignatures below (Action functions as that scheme's Outcome
+// discriminator, preventing a signature for one action being replayed as a
+// different one).
+type escrowActionEnvelope struct {
+	EscrowID string `json:"escrowId"`
+	Action   string `json:"action"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ActionRelease/Refund/Dispute are the escrowActionEnvelope.Action wire
+// values -- exported so callers outside this package (core/state_transition
+// .go's TxTypeDelegated* dispatch, and eventually client/gateway code
+// constructing the signed envelope) reference the same literal strings
+// rather than duplicating them.
+const (
+	ActionRelease = "release"
+	ActionRefund  = "refund"
+	ActionDispute = "dispute"
+)
+
+// parseEscrowActionPayload validates a signed escrowActionEnvelope against
+// the expected escrow ID and action, returning the reason (dispute only)
+// and the digest the embedded signature must verify against. Mirrors
+// parseDecisionPayload's shape and guarantees for the single-signer,
+// non-arbitrated actions.
+func parseEscrowActionPayload(id [32]byte, action string, payload []byte) (string, [32]byte, error) {
+	var zero [32]byte
+	if len(payload) == 0 {
+		return "", zero, fmt.Errorf("escrow: action payload required")
+	}
+	var envelope escrowActionEnvelope
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return "", zero, fmt.Errorf("escrow: invalid action payload: %w", err)
+	}
+	trimmedID := strings.TrimSpace(envelope.EscrowID)
+	if trimmedID == "" {
+		return "", zero, fmt.Errorf("escrow: action escrowId required")
+	}
+	decodedID, err := decodeFixedHex(trimmedID, len(id))
+	if err != nil {
+		return "", zero, fmt.Errorf("escrow: invalid action escrowId: %w", err)
+	}
+	var payloadID [32]byte
+	copy(payloadID[:], decodedID)
+	if payloadID != id {
+		return "", zero, fmt.Errorf("escrow: action escrowId mismatch")
+	}
+	if strings.TrimSpace(envelope.Action) != action {
+		return "", zero, fmt.Errorf("escrow: action mismatch: expected %s", action)
+	}
+	hash := ethcrypto.Keccak256Hash(payload)
+	var digest [32]byte
+	copy(digest[:], hash[:])
+	return strings.TrimSpace(envelope.Reason), digest, nil
+}
+
+// ReleaseWithSignature authorizes Release using an embedded off-chain
+// participant signature instead of the transaction's own sender -- see
+// escrowActionEnvelope's doc comment. Delegates entirely to Release once
+// the signer is recovered, so authorization (payee or mediator), status
+// transitions, fee routing, and idempotency are all governed by the exact
+// same code as the direct-signing path; nothing about Release itself
+// changes.
+func (e *Engine) ReleaseWithSignature(id [32]byte, payload []byte, signature []byte) error {
+	_, digest, err := parseEscrowActionPayload(id, ActionRelease, payload)
+	if err != nil {
+		return err
+	}
+	signer, err := recoverSignerFromSignature(digest, signature)
+	if err != nil {
+		return err
+	}
+	return e.Release(id, signer)
+}
+
+// RefundWithSignature is Refund's delegated counterpart -- see
+// ReleaseWithSignature.
+func (e *Engine) RefundWithSignature(id [32]byte, payload []byte, signature []byte) error {
+	_, digest, err := parseEscrowActionPayload(id, ActionRefund, payload)
+	if err != nil {
+		return err
+	}
+	signer, err := recoverSignerFromSignature(digest, signature)
+	if err != nil {
+		return err
+	}
+	return e.Refund(id, signer)
+}
+
+// DisputeWithSignature is Dispute's delegated counterpart -- see
+// ReleaseWithSignature. The reason travels inside the signed envelope, so a
+// relayer cannot alter what the participant actually disputed; Dispute's
+// own length cap and idempotent-already-disputed handling apply unchanged.
+func (e *Engine) DisputeWithSignature(id [32]byte, payload []byte, signature []byte) error {
+	reason, digest, err := parseEscrowActionPayload(id, ActionDispute, payload)
+	if err != nil {
+		return err
+	}
+	signer, err := recoverSignerFromSignature(digest, signature)
+	if err != nil {
+		return err
+	}
+	return e.Dispute(id, signer, reason)
 }
 
 func (e *Engine) arbitratedRelease(esc *Escrow) error {
