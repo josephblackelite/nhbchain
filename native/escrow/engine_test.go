@@ -897,6 +897,63 @@ func TestRefundAfterDeadlineFails(t *testing.T) {
 	}
 }
 
+// TestDisputeRejectsUnauthorizedCallerOnAlreadyDisputedEscrow is a
+// regression test: Dispute used to check caller authorization only on the
+// not-yet-disputed branch, so a non-participant re-invoking Dispute on an
+// already-disputed escrow with a non-empty reason hit the early-return
+// branch before authorization was ever checked -- letting anyone attach an
+// (unauthenticated) reason to someone else's dispute. The check now applies
+// unconditionally, before either branch.
+func TestDisputeRejectsUnauthorizedCallerOnAlreadyDisputedEscrow(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payer := newTestAddress(0x71)
+	payee := newTestAddress(0x72)
+	outsider := newTestAddress(0x73)
+	meta := [32]byte{}
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 9_999_999_999, 21, nil, meta, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if err := engine.Dispute(esc.ID, payer, ""); err != nil {
+		t.Fatalf("initial dispute: %v", err)
+	}
+	if err := engine.Dispute(esc.ID, outsider, "not my dispute"); err == nil {
+		t.Fatalf("expected outsider's dispute on an already-disputed escrow to be rejected")
+	}
+	stored, _ := state.EscrowGet(esc.ID)
+	if strings.TrimSpace(stored.DisputeReason) != "" {
+		t.Fatalf("expected no dispute reason recorded from the unauthorized caller, got %q", stored.DisputeReason)
+	}
+}
+
+// TestDisputeRejectsOversizedReason is a regression test for the missing
+// length cap on the free-text dispute reason, which is written into
+// consensus state as part of the RLP-encoded Escrow record.
+func TestDisputeRejectsOversizedReason(t *testing.T) {
+	state := newMockState()
+	engine := newTestEngine(state)
+	payer := newTestAddress(0x74)
+	payee := newTestAddress(0x75)
+	meta := [32]byte{}
+	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 9_999_999_999, 22, nil, meta, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
+	if err := engine.Fund(esc.ID, payer); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	oversized := strings.Repeat("a", maxDisputeReasonBytes+1)
+	if err := engine.Dispute(esc.ID, payer, oversized); err == nil {
+		t.Fatalf("expected oversized dispute reason to be rejected")
+	}
+}
+
 func TestExpireRefundsAfterDeadline(t *testing.T) {
 	state := newMockState()
 	engine := newTestEngine(state)

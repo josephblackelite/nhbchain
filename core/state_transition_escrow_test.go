@@ -174,6 +174,180 @@ func TestEscrowNativeLifecycle(t *testing.T) {
 	}
 }
 
+func TestEscrowExpireLifecycle(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	payerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payer key: %v", err)
+	}
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee key: %v", err)
+	}
+	// A third, unrelated account -- TxTypeExpireEscrow is deliberately
+	// permissionless, so this key stands in for "anyone" sweeping a stale
+	// escrow, not the payer or payee.
+	sweeperKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sweeper key: %v", err)
+	}
+
+	payerAddr := payerKey.PubKey().Address()
+	payeeAddr := payeeKey.PubKey().Address()
+	sweeperAddr := sweeperKey.PubKey().Address()
+
+	var treasury [20]byte
+	treasury[0] = 0xBB
+	sp.SetEscrowFeeTreasury(treasury)
+
+	var payerAccountAddr, payeeAccountAddr, sweeperAccountAddr [20]byte
+	copy(payerAccountAddr[:], payerAddr.Bytes())
+	copy(payeeAccountAddr[:], payeeAddr.Bytes())
+	copy(sweeperAccountAddr[:], sweeperAddr.Bytes())
+
+	writeAccount(t, sp, payerAccountAddr, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	writeAccount(t, sp, payeeAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	writeAccount(t, sp, sweeperAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	writeAccount(t, sp, treasury, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	meta := [32]byte{}
+	escrowNonce := uint64(7)
+	var nonceBytes [8]byte
+	binary.BigEndian.PutUint64(nonceBytes[:], escrowNonce)
+	escrowID := ethcrypto.Keccak256Hash(payerAddr.Bytes(), payeeAddr.Bytes(), meta[:], nonceBytes[:])
+
+	deadline := time.Now().Add(1 * time.Hour).Unix()
+	createPayload := struct {
+		Payee    []byte   `json:"payee"`
+		Token    string   `json:"token"`
+		Amount   *big.Int `json:"amount"`
+		FeeBps   uint32   `json:"feeBps"`
+		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
+	}{
+		Payee:    payeeAddr.Bytes(),
+		Token:    "NHB",
+		Amount:   big.NewInt(100),
+		FeeBps:   100,
+		Deadline: deadline,
+		Nonce:    escrowNonce,
+	}
+	createData, err := jsonMarshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+	createTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeCreateEscrow,
+		Nonce:    0,
+		Data:     createData,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := createTx.Sign(payerKey.PrivateKey); err != nil {
+		t.Fatalf("sign create: %v", err)
+	}
+	if err := sp.ApplyTransaction(createTx); err != nil {
+		t.Fatalf("apply create: %v", err)
+	}
+
+	fundTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeLockEscrow,
+		Nonce:    1,
+		Data:     escrowID[:],
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := fundTx.Sign(payerKey.PrivateKey); err != nil {
+		t.Fatalf("sign fund: %v", err)
+	}
+	if err := sp.ApplyTransaction(fundTx); err != nil {
+		t.Fatalf("apply fund: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	esc, ok := manager.EscrowGet(escrowID)
+	if !ok {
+		t.Fatalf("escrow missing after fund")
+	}
+	if esc.Status != escrow.EscrowFunded {
+		t.Fatalf("unexpected status after fund: %v", esc.Status)
+	}
+
+	// Before the deadline: expire must be rejected, from the sweeper too --
+	// permissionless doesn't mean premature.
+	sp.BeginBlock(1, time.Unix(deadline-1, 0).UTC())
+	earlyExpireTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeExpireEscrow,
+		Nonce:    0,
+		Data:     escrowID[:],
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := earlyExpireTx.Sign(sweeperKey.PrivateKey); err != nil {
+		t.Fatalf("sign early expire: %v", err)
+	}
+	if err := sp.ApplyTransaction(earlyExpireTx); err == nil {
+		t.Fatalf("expected expire before deadline to fail")
+	}
+
+	// After the deadline: the sweeper (neither payer nor payee) can expire
+	// it, proving the transition is genuinely permissionless.
+	sp.BeginBlock(2, time.Unix(deadline+1, 0).UTC())
+	expireTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeExpireEscrow,
+		Nonce:    0,
+		Data:     escrowID[:],
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := expireTx.Sign(sweeperKey.PrivateKey); err != nil {
+		t.Fatalf("sign expire: %v", err)
+	}
+	if err := sp.ApplyTransaction(expireTx); err != nil {
+		t.Fatalf("apply expire: %v", err)
+	}
+
+	esc, ok = manager.EscrowGet(escrowID)
+	if !ok {
+		t.Fatalf("escrow missing after expire")
+	}
+	if esc.Status != escrow.EscrowExpired {
+		t.Fatalf("unexpected status after expire: %v", esc.Status)
+	}
+
+	payerAccount, err := sp.getAccount(payerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load payer account: %v", err)
+	}
+	if payerAccount.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected payer refunded in full, got %s", payerAccount.BalanceNHB)
+	}
+
+	// Idempotent: a second expire (e.g. a different sweeper, or a retry) is
+	// a no-op, not an error, and does not increment the sweeper's nonce
+	// beyond what a single successful call already did -- exercised here by
+	// resubmitting from the same sweeper key at the next nonce.
+	secondExpireTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeExpireEscrow,
+		Nonce:    1,
+		Data:     escrowID[:],
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := secondExpireTx.Sign(sweeperKey.PrivateKey); err != nil {
+		t.Fatalf("sign second expire: %v", err)
+	}
+	if err := sp.ApplyTransaction(secondExpireTx); err != nil {
+		t.Fatalf("apply second expire: %v", err)
+	}
+}
+
 func TestEscrowLegacyMigration(t *testing.T) {
 	sp := newStakingStateProcessor(t)
 

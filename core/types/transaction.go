@@ -242,6 +242,16 @@ const (
 	// tenureDays, payout} -- the rate is resolved on-chain from the
 	// deposit-side tenure/rate schedule, never client-declared.
 	TxTypeLendingSupplyFixedTerm TxType = 0x3A
+
+	// TxTypeExpireEscrow refunds a funded escrow back to its payer once the
+	// escrow's own deadline has elapsed. tx.Data is the escrow ID ([32]byte),
+	// same encoding as TxTypeLockEscrow/ReleaseEscrow/RefundEscrow/
+	// DisputeEscrow. Deliberately permissionless -- Engine.Expire (native/
+	// escrow/engine.go) authorizes by deadline alone, not by caller identity,
+	// matching TxTypeLendingLiquidate's "anyone may invoke" pattern, so any
+	// account can pay the gas to sweep a stale escrow. Idempotent: a second
+	// expire on an already-expired escrow is a no-op, not an error.
+	TxTypeExpireEscrow TxType = 0x3B
 )
 
 // RequiresSignature reports whether the transaction type must carry an

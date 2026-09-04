@@ -28,6 +28,12 @@ var (
 
 const moduleName = "escrow"
 
+// maxDisputeReasonBytes bounds the free-text dispute reason written into
+// consensus state (part of the RLP-encoded Escrow record hashed into the
+// state root) -- unbounded, it would let any payer/payee stuff arbitrary-size
+// data into every validator's trie for the cost of one escrow dispute.
+const maxDisputeReasonBytes = 512
+
 type engineState interface {
 	EscrowPut(*Escrow) error
 	EscrowGet(id [32]byte) (*Escrow, bool)
@@ -855,7 +861,19 @@ func (e *Engine) Dispute(id [32]byte, caller [20]byte, reason string) error {
 	if err != nil {
 		return err
 	}
+	// Authorization applies unconditionally, before either status branch --
+	// previously only the not-yet-disputed branch below checked the caller,
+	// so a non-participant could call Dispute a second time on an
+	// already-disputed escrow and have their (unauthenticated) reason
+	// accepted, since the already-disputed branch returned before ever
+	// checking who was calling.
+	if caller != esc.Payer && caller != esc.Payee {
+		return fmt.Errorf("escrow: unauthorized dispute caller")
+	}
 	trimmedReason := strings.TrimSpace(reason)
+	if len(trimmedReason) > maxDisputeReasonBytes {
+		return fmt.Errorf("escrow: dispute reason exceeds %d bytes", maxDisputeReasonBytes)
+	}
 	if esc.Status == EscrowDisputed {
 		if trimmedReason == "" || strings.TrimSpace(esc.DisputeReason) != "" {
 			return nil
@@ -869,9 +887,6 @@ func (e *Engine) Dispute(id [32]byte, caller [20]byte, reason string) error {
 	}
 	if esc.Status != EscrowFunded {
 		return fmt.Errorf("escrow: cannot dispute in status %d", esc.Status)
-	}
-	if caller != esc.Payer && caller != esc.Payee {
-		return fmt.Errorf("escrow: unauthorized dispute caller")
 	}
 	esc.Status = EscrowDisputed
 	if trimmedReason != "" {

@@ -3548,6 +3548,11 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeExpireEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyExpireEscrow(tx, sender, senderAccount)
 	case types.TxTypeSwapPayoutReceipt:
 		if err := sp.applySwapPayoutReceipt(tx); err != nil {
 			return err
@@ -3855,6 +3860,29 @@ func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction, sender []byte
 	}
 	caller := bytesToAddress(sender)
 	if err := sp.EscrowEngine.Refund(id, caller); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyExpireEscrow sweeps a stale, still-funded escrow back to its payer
+// once the escrow's own deadline has elapsed. Deliberately permissionless
+// (see TxTypeExpireEscrow's doc comment) -- Engine.Expire itself enforces
+// the only real gate (now >= esc.Deadline), so the sender here need not be
+// the payer, payee, or mediator. Uses the deterministic block timestamp,
+// never time.Now(), so every validator evaluates the same deadline
+// comparison for the identical transaction (see NHB-TRIAGE-H10 in
+// applyRegisterIdentity for the incident class this guards against).
+func (sp *StateProcessor) applyExpireEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	id, err := decodeEscrowID(tx.Data)
+	if err != nil {
+		return err
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	if err := sp.EscrowEngine.Expire(id, sp.blockTimestamp().Unix()); err != nil {
 		return err
 	}
 	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
