@@ -28,6 +28,7 @@ type mockGovernanceState struct {
 	roles          map[string]map[string]struct{}
 	swapSigners    map[string][20]byte
 	audit          []*AuditRecord
+	rewardPool     *big.Int
 }
 
 func TestValidatorForNetworkSeeds(t *testing.T) {
@@ -242,6 +243,21 @@ func (m *mockGovernanceState) GovernanceEscrowUnlock(addr []byte, amount *big.In
 	updated := new(big.Int).Sub(current, unlock)
 	m.escrowBalances[string(addr)] = updated
 	return new(big.Int).Set(updated), nil
+}
+
+func (m *mockGovernanceState) ZNHBRewardPoolBalance() (*big.Int, error) {
+	if m.rewardPool == nil {
+		return big.NewInt(0), nil
+	}
+	return new(big.Int).Set(m.rewardPool), nil
+}
+
+func (m *mockGovernanceState) ZNHBSetRewardPoolBalance(v *big.Int) error {
+	if v == nil {
+		v = big.NewInt(0)
+	}
+	m.rewardPool = new(big.Int).Set(v)
+	return nil
 }
 
 func (m *mockGovernanceState) GovernanceNextProposalID() (uint64, error) {
@@ -1130,6 +1146,159 @@ func TestFinalizeOutcomes(t *testing.T) {
 				t.Fatalf("unexpected event turnout: %s", evt.Attributes["turnoutBps"])
 			}
 		})
+	}
+}
+
+// TestFinalizeSweepsRejectedDepositToAdminWallet reproduces the 2026-09-05
+// finding: proposal 2's 1000 ZNHB deposit was rejected for lack of quorum
+// and then sat permanently locked in its submitter's own escrow ledger
+// entry, unreachable by anyone -- GovernanceEscrowLock (SubmitProposal) has
+// exactly one matching unlock call site, the Passed-branch refund, so a
+// rejected deposit was never swept anywhere. This proves Finalize now
+// routes it to the configured admin/treasury wallet instead, crediting the
+// Reward Pool in lockstep (the same fix CheckZNHBSupplyInvariant's
+// transfer-fee incident needed) so the invariant stays satisfied.
+func TestFinalizeSweepsRejectedDepositToAdminWallet(t *testing.T) {
+	now := time.Unix(1_700_007_000, 0).UTC()
+
+	var proposer [20]byte
+	proposer[19] = 0x42
+	var admin [20]byte
+	admin[19] = 0x99
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: {BalanceZNHB: big.NewInt(0)},
+		admin:    {BalanceZNHB: big.NewInt(5_000)},
+	})
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, proposer[:])
+	deposit := big.NewInt(1_000)
+	const proposalID = 200
+	state.proposals[proposalID] = &Proposal{
+		ID:        proposalID,
+		Submitter: submitter,
+		Status:    ProposalStatusVotingPeriod,
+		VotingEnd: now.Add(-time.Minute),
+		Deposit:   new(big.Int).Set(deposit),
+	}
+	state.escrowBalances[string(proposer[:])] = new(big.Int).Set(deposit)
+	if err := state.ZNHBSetRewardPoolBalance(big.NewInt(2_000)); err != nil {
+		t.Fatalf("seed reward pool: %v", err)
+	}
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+	engine.SetPolicy(ProposalPolicy{QuorumBps: 2000, PassThresholdBps: 5000})
+	engine.SetAdminWallet(admin, true)
+
+	status, _, err := engine.Finalize(proposalID)
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if status != ProposalStatusRejected {
+		t.Fatalf("expected rejected (no votes cast), got %s", status.StatusString())
+	}
+
+	proposerAccount, err := state.GetAccount(proposer[:])
+	if err != nil {
+		t.Fatalf("load proposer: %v", err)
+	}
+	if proposerAccount.BalanceZNHB.Sign() != 0 {
+		t.Fatalf("proposer should not be refunded a rejected deposit, got %s", proposerAccount.BalanceZNHB)
+	}
+	escrow, err := state.GovernanceEscrowBalance(proposer[:])
+	if err != nil {
+		t.Fatalf("escrow balance: %v", err)
+	}
+	if escrow.Sign() != 0 {
+		t.Fatalf("expected proposer's escrow cleared after sweep, got %s", escrow)
+	}
+
+	adminAccount, err := state.GetAccount(admin[:])
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	if adminAccount.BalanceZNHB.Cmp(big.NewInt(6_000)) != 0 {
+		t.Fatalf("expected admin wallet credited the swept deposit (5000+1000), got %s", adminAccount.BalanceZNHB)
+	}
+
+	rewardPool, err := state.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("reward pool balance: %v", err)
+	}
+	if rewardPool.Cmp(big.NewInt(3_000)) != 0 {
+		t.Fatalf("expected reward pool credited in lockstep (2000+1000) to keep the supply invariant satisfied, got %s", rewardPool)
+	}
+
+	proposal, ok, err := state.GovernanceGetProposal(proposalID)
+	if err != nil || !ok {
+		t.Fatalf("reload proposal: ok=%v err=%v", ok, err)
+	}
+	if proposal.Deposit == nil || proposal.Deposit.Sign() != 0 {
+		t.Fatalf("expected proposal.Deposit zeroed after sweep, got %v", proposal.Deposit)
+	}
+}
+
+// TestFinalizeSweepsOwnRejectedDepositWithoutDoubleCountingRewardPool covers
+// the case where the admin wallet itself is the proposer whose deposit gets
+// rejected: adminZNHBOwned (core/state_transition.go) already counts this
+// exact amount via the admin wallet's own GovernanceEscrowBalance (see its
+// doc comment, added after the 2026-08-26 incident), so crediting the
+// Reward Pool here too would double-count it and immediately break the
+// invariant -- the sweep must be a pure escrow -> balance reclassification
+// in this one case.
+func TestFinalizeSweepsOwnRejectedDepositWithoutDoubleCountingRewardPool(t *testing.T) {
+	now := time.Unix(1_700_007_500, 0).UTC()
+
+	var admin [20]byte
+	admin[19] = 0x99
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		admin: {BalanceZNHB: big.NewInt(5_000)},
+	})
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, admin[:])
+	deposit := big.NewInt(1_000)
+	const proposalID = 201
+	state.proposals[proposalID] = &Proposal{
+		ID:        proposalID,
+		Submitter: submitter,
+		Status:    ProposalStatusVotingPeriod,
+		VotingEnd: now.Add(-time.Minute),
+		Deposit:   new(big.Int).Set(deposit),
+	}
+	state.escrowBalances[string(admin[:])] = new(big.Int).Set(deposit)
+	if err := state.ZNHBSetRewardPoolBalance(big.NewInt(2_000)); err != nil {
+		t.Fatalf("seed reward pool: %v", err)
+	}
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetNowFunc(func() time.Time { return now })
+	engine.SetPolicy(ProposalPolicy{QuorumBps: 2000, PassThresholdBps: 5000})
+	engine.SetAdminWallet(admin, true)
+
+	status, _, err := engine.Finalize(proposalID)
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if status != ProposalStatusRejected {
+		t.Fatalf("expected rejected (no votes cast), got %s", status.StatusString())
+	}
+
+	adminAccount, err := state.GetAccount(admin[:])
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+	if adminAccount.BalanceZNHB.Cmp(big.NewInt(6_000)) != 0 {
+		t.Fatalf("expected admin wallet's own deposit reclassified back to balance (5000+1000), got %s", adminAccount.BalanceZNHB)
+	}
+
+	rewardPool, err := state.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("reward pool balance: %v", err)
+	}
+	if rewardPool.Cmp(big.NewInt(2_000)) != 0 {
+		t.Fatalf("reward pool must NOT change when the admin wallet forfeits its own deposit (would double-count), got %s", rewardPool)
 	}
 }
 

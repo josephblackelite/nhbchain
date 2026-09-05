@@ -67,6 +67,7 @@ func (sp *StateProcessor) governanceEngine() *governance.Engine {
 	engine.SetEmitter(governanceEventEmitter{state: sp})
 	engine.SetPolicy(sp.govPolicy)
 	engine.SetNowFunc(func() time.Time { return sp.blockTimestamp().UTC() })
+	engine.SetAdminWallet(sp.adminWallet, sp.hasAdminWallet)
 	return engine
 }
 

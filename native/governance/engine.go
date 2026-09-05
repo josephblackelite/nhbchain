@@ -77,6 +77,8 @@ type proposalState interface {
 	SwapClearPriceSigner(provider string) error
 	PotsoRewardsLastProcessedEpoch() (uint64, bool, error)
 	SnapshotPotsoWeights(epoch uint64) (*potso.StoredWeightSnapshot, bool, error)
+	ZNHBRewardPoolBalance() (*big.Int, error)
+	ZNHBSetRewardPoolBalance(v *big.Int) error
 }
 
 // ProposalPolicy captures the runtime knobs that control proposal admission.
@@ -112,6 +114,8 @@ type Engine struct {
 	quorumBps           uint64
 	passThresholdBps    uint64
 	policyValidator     PolicyValidator
+	adminWallet         [20]byte
+	hasAdminWallet      bool
 }
 
 // NewEngine constructs a governance engine with default no-op dependencies.
@@ -226,6 +230,19 @@ type paramValidator func(raw json.RawMessage) error
 
 // SetState wires the engine to the state backend providing persistence helpers.
 func (e *Engine) SetState(state proposalState) { e.state = state }
+
+// SetAdminWallet configures the network's genesis-declared ZNHB admin/
+// treasury wallet, the destination for a rejected proposal's forfeited
+// deposit (see Finalize's ProposalStatusRejected branch). Mirrors
+// core/state_transition.go's StateProcessor.SetAdminWallet exactly --
+// there is no admin wallet on networks where hasAdminWallet is false, and
+// Finalize leaves a rejected proposal's deposit untouched (unswept,
+// same as before this existed) on those networks rather than guessing a
+// destination.
+func (e *Engine) SetAdminWallet(addr [20]byte, ok bool) {
+	e.adminWallet = addr
+	e.hasAdminWallet = ok
+}
 
 // SetEmitter configures the event emitter used by the engine. Passing nil resets
 // the emitter to a no-op implementation.
@@ -2142,6 +2159,64 @@ func (e *Engine) Finalize(proposalID uint64) (ProposalStatus, *Tally, error) {
 		if err := e.state.PutAccount(submitter, account); err != nil {
 			return ProposalStatusUnspecified, nil, err
 		}
+		if _, err := e.state.GovernanceEscrowUnlock(submitter, proposal.Deposit); err != nil {
+			return ProposalStatusUnspecified, nil, err
+		}
+		proposal.Deposit = big.NewInt(0)
+	}
+
+	// A rejected proposal's deposit was never refunded (the block above only
+	// fires on ProposalStatusPassed) and, before this, was never swept
+	// anywhere either -- GovernanceEscrowLock (SubmitProposal) has exactly
+	// one matching unlock call site in this whole codebase, the refund
+	// above, so a rejected deposit sat permanently locked in the
+	// submitter's own escrow ledger entry, unreachable by anyone, forever.
+	// Confirmed live on 2026-09-05 (proposal 2). ZNHB is meant to be
+	// non-inflationary and fully ledger-tracked, so a forfeited deposit
+	// belongs to the treasury, not nowhere.
+	if status == ProposalStatusRejected && e.hasAdminWallet && proposal.Deposit != nil && proposal.Deposit.Sign() > 0 {
+		submitter := append([]byte(nil), proposal.Submitter.Bytes()...)
+		if len(submitter) != 20 {
+			return ProposalStatusUnspecified, nil, fmt.Errorf("governance: invalid submitter address length")
+		}
+
+		adminAccount, err := e.state.GetAccount(e.adminWallet[:])
+		if err != nil {
+			return ProposalStatusUnspecified, nil, err
+		}
+		if adminAccount == nil {
+			adminAccount = &types.Account{}
+		}
+		if adminAccount.BalanceZNHB == nil {
+			adminAccount.BalanceZNHB = big.NewInt(0)
+		}
+		adminAccount.BalanceZNHB = new(big.Int).Add(adminAccount.BalanceZNHB, proposal.Deposit)
+		if err := e.state.PutAccount(e.adminWallet[:], adminAccount); err != nil {
+			return ProposalStatusUnspecified, nil, err
+		}
+
+		// If the admin wallet forfeited its OWN deposit, this is a pure
+		// escrow -> spendable-balance reclassification: adminZNHBOwned
+		// (core/state_transition.go's CheckZNHBSupplyInvariant) already
+		// counts this exact amount via the admin wallet's own
+		// GovernanceEscrowBalance, so the credit above just moves it
+		// between two fields of the SAME total -- crediting the Reward
+		// Pool too would double-count it and immediately break the
+		// invariant the same way the 2026-09-05 transfer-fee incident did.
+		// Only a THIRD PARTY's forfeited deposit is genuinely new ZNHB
+		// landing on the admin wallet from outside the Sale/Reward Pool
+		// ledger, and only then must the Reward Pool move in lockstep.
+		if !bytes.Equal(submitter, e.adminWallet[:]) {
+			rewardPoolBalance, err := e.state.ZNHBRewardPoolBalance()
+			if err != nil {
+				return ProposalStatusUnspecified, nil, err
+			}
+			newRewardPoolBalance := new(big.Int).Add(rewardPoolBalance, proposal.Deposit)
+			if err := e.state.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
+				return ProposalStatusUnspecified, nil, err
+			}
+		}
+
 		if _, err := e.state.GovernanceEscrowUnlock(submitter, proposal.Deposit); err != nil {
 			return ProposalStatusUnspecified, nil, err
 		}
