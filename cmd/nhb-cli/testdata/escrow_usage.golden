@@ -10,3 +10,4 @@ Commands:
   expire  Sign and submit a permissionless sweep of a stale escrow (requires --key)
   dispute Sign and submit a dispute flag (requires --key; carries no reason -- see 'dispute' source comment)
   resolve Not available via this command -- requires realm-based arbitrator signatures, see error message
+  create-realm Sign and submit a new arbitration realm (requires --key holding ROLE_ESCROW_REALM_ADMIN)

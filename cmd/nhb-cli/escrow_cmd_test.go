@@ -280,6 +280,183 @@ func TestEscrowCreateSignsAndSendsRealTransaction(t *testing.T) {
 	}
 }
 
+// TestEscrowCreateRealmSignsAndSendsRealTransaction proves runEscrowCreateRealm
+// builds a TxTypeEscrowCreateRealm transaction whose payload matches exactly
+// what core/state_transition.go's decodeEscrowRealmPayload expects -- this
+// command was entirely missing before (native/escrow/engine.go's CreateRealm
+// existed but was unreachable from this CLI).
+func TestEscrowCreateRealmSignsAndSendsRealTransaction(t *testing.T) {
+	privKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "realm-admin.key")
+	if err := os.WriteFile(keyPath, privKey.Bytes(), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	adminAddr := privKey.PubKey().Address()
+
+	memberKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate member key: %v", err)
+	}
+	memberAddr := memberKey.PubKey().Address()
+
+	var capturedTx types.Transaction
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		switch req.Method {
+		case "nhb_getBalance":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"address":"","nonce":0}}`))
+		case "nhb_sendTransaction":
+			if err := json.Unmarshal(req.Params[0], &capturedTx); err != nil {
+				t.Fatalf("decode transaction param: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x` + strings.Repeat("cd", 32) + `"}`))
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	originalEndpoint := rpcEndpoint
+	rpcEndpoint = server.URL
+	defer func() { rpcEndpoint = originalEndpoint }()
+
+	originalToken := rpcAuthToken
+	rpcAuthToken = "test-token"
+	defer func() { rpcAuthToken = originalToken }()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	args := []string{
+		"create-realm",
+		"--id", "core-arbitration",
+		"--threshold", "1",
+		"--scheme", "single",
+		"--members", memberAddr.String(),
+		"--scope", "platform",
+		"--provider-profile", "core-team",
+		"--key", keyPath,
+	}
+	exitCode := runEscrowCommand(args, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("unexpected exit code: got %d, want 0, stderr: %s", exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `realm "core-arbitration"`) {
+		t.Fatalf("unexpected stdout: %q", stdout.String())
+	}
+
+	if capturedTx.Type != types.TxTypeEscrowCreateRealm {
+		t.Fatalf("unexpected tx type: got %d, want %d", capturedTx.Type, types.TxTypeEscrowCreateRealm)
+	}
+	sender, err := capturedTx.From()
+	if err != nil {
+		t.Fatalf("recover sender: %v", err)
+	}
+	if !bytes.Equal(sender, adminAddr.Bytes()) {
+		t.Fatalf("recovered sender does not match signing key: got %x want %x", sender, adminAddr.Bytes())
+	}
+
+	var payload struct {
+		ID              string   `json:"id"`
+		Threshold       uint32   `json:"threshold"`
+		Scheme          uint8    `json:"scheme"`
+		Members         []string `json:"members"`
+		Scope           uint8    `json:"scope"`
+		ProviderProfile string   `json:"providerProfile"`
+	}
+	if err := json.Unmarshal(capturedTx.Data, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.ID != "core-arbitration" {
+		t.Fatalf("unexpected id: %s", payload.ID)
+	}
+	if payload.Threshold != 1 {
+		t.Fatalf("unexpected threshold: %d", payload.Threshold)
+	}
+	if payload.Scheme != 1 {
+		t.Fatalf("unexpected scheme: %d, want 1 (single)", payload.Scheme)
+	}
+	if len(payload.Members) != 1 || payload.Members[0] != memberAddr.String() {
+		t.Fatalf("unexpected members: %v", payload.Members)
+	}
+	if payload.Scope != 1 {
+		t.Fatalf("unexpected scope: %d, want 1 (platform)", payload.Scope)
+	}
+	if payload.ProviderProfile != "core-team" {
+		t.Fatalf("unexpected providerProfile: %s", payload.ProviderProfile)
+	}
+}
+
+func TestEscrowCreateRealmArgValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "missing_id",
+			args:    []string{"create-realm", "--members", "nhb1x", "--provider-profile", "x", "--key", "k"},
+			wantErr: "Error: --id is required\n",
+		},
+		{
+			name:    "missing_members",
+			args:    []string{"create-realm", "--id", "r", "--provider-profile", "x", "--key", "k"},
+			wantErr: "Error: --members is required (comma-separated bech32 addresses)\n",
+		},
+		{
+			name:    "threshold_exceeds_members",
+			args:    []string{"create-realm", "--id", "r", "--members", "nhb1x", "--threshold", "2", "--provider-profile", "x", "--key", "k"},
+			wantErr: "Error: --threshold must be between 1 and the number of --members\n",
+		},
+		{
+			name:    "invalid_scheme",
+			args:    []string{"create-realm", "--id", "r", "--members", "nhb1x", "--scheme", "bogus", "--provider-profile", "x", "--key", "k"},
+			wantErr: "Error: --scheme must be single or committee\n",
+		},
+		{
+			name:    "invalid_scope",
+			args:    []string{"create-realm", "--id", "r", "--members", "nhb1x", "--scope", "bogus", "--provider-profile", "x", "--key", "k"},
+			wantErr: "Error: --scope must be platform or marketplace\n",
+		},
+		{
+			name:    "missing_provider_profile",
+			args:    []string{"create-realm", "--id", "r", "--members", "nhb1x", "--key", "k"},
+			wantErr: "Error: --provider-profile is required\n",
+		},
+		{
+			name:    "missing_key",
+			args:    []string{"create-realm", "--id", "r", "--members", "nhb1x", "--provider-profile", "x"},
+			wantErr: "Error: --key is required (path to a private key file holding ROLE_ESCROW_REALM_ADMIN)\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout := &bytes.Buffer{}
+			stderr := &bytes.Buffer{}
+			exitCode := runEscrowCommand(tc.args, stdout, stderr)
+			if exitCode != 1 {
+				t.Fatalf("unexpected exit code: got %d, want 1", exitCode)
+			}
+			if stderr.String() != tc.wantErr {
+				t.Fatalf("unexpected stderr: got %q, want %q", stderr.String(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestNormalizeEscrowAmount(t *testing.T) {
 	cases := []struct {
 		input   string

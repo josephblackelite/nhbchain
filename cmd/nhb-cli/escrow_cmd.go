@@ -68,6 +68,8 @@ func runEscrowCommand(args []string, stdout, stderr io.Writer) int {
 		return runEscrowDispute(args[1:], stdout, stderr)
 	case "resolve":
 		return runEscrowResolve(args[1:], stdout, stderr)
+	case "create-realm":
+		return runEscrowCreateRealm(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "Unknown escrow subcommand: %s\n", args[0])
 		fmt.Fprintln(stderr, escrowUsage())
@@ -373,6 +375,135 @@ func runEscrowResolve(args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
+// createRealmCLIPayload mirrors core/state_transition.go's decodeEscrowRealmPayload
+// field-for-field. Only the fields a client can actually set -- Version,
+// NextPolicyNonce, CreatedAt/UpdatedAt are server-assigned (native/escrow/engine.go's
+// CreateRealm) and have no corresponding JSON field here at all.
+type createRealmCLIPayload struct {
+	ID                 string   `json:"id"`
+	Threshold          uint32   `json:"threshold"`
+	Scheme             uint8    `json:"scheme"`
+	Members            []string `json:"members"`
+	FeeBps             uint32   `json:"feeBps,omitempty"`
+	FeeRecipient       string   `json:"feeRecipient,omitempty"`
+	Scope              uint8    `json:"scope"`
+	ProviderProfile    string   `json:"providerProfile"`
+	ArbitrationFeeBps  uint32   `json:"arbitrationFeeBps,omitempty"`
+	FeeRecipientBech32 string   `json:"feeRecipientBech32,omitempty"`
+}
+
+// runEscrowCreateRealm builds, signs, and broadcasts a TxTypeEscrowCreateRealm
+// transaction (native/escrow/engine.go's CreateRealm) -- previously built but
+// entirely unreachable from this CLI; escrow resolve/arbitration has nothing
+// to operate against without at least one realm existing. The signing key
+// must already hold the on-chain role ROLE_ESCROW_REALM_ADMIN (granted via a
+// governance role.allowlist proposal, see docs/governance/*) -- this command
+// does not grant that role itself, it only submits the realm-creation
+// transaction, which core/state_transition.go's applyEscrowCreateRealm
+// rejects outright if the signer lacks the role.
+func runEscrowCreateRealm(args []string, stdout, stderr io.Writer) int {
+	fs := newEscrowFlagSet("escrow create-realm", stderr)
+	var (
+		id                 string
+		threshold          uint
+		scheme             string
+		members            string
+		scope              string
+		providerProfile    string
+		feeBps             uint
+		feeRecipient       string
+		arbitrationFeeBps  uint
+		feeRecipientBech32 string
+		keyFile            string
+	)
+	fs.StringVar(&id, "id", "", "realm identifier")
+	fs.UintVar(&threshold, "threshold", 1, "number of arbitrator signatures required to resolve a dispute")
+	fs.StringVar(&scheme, "scheme", "single", "arbitration scheme: single or committee")
+	fs.StringVar(&members, "members", "", "comma-separated arbitrator bech32 addresses")
+	fs.StringVar(&scope, "scope", "platform", "realm scope: platform or marketplace")
+	fs.StringVar(&providerProfile, "provider-profile", "", "free-text description of who operates this realm")
+	fs.UintVar(&feeBps, "fee-bps", 0, "optional escrow settlement fee in basis points (requires --fee-recipient)")
+	fs.StringVar(&feeRecipient, "fee-recipient", "", "bech32 address to receive --fee-bps (required if --fee-bps > 0)")
+	fs.UintVar(&arbitrationFeeBps, "arbitration-fee-bps", 0, "optional arbitration fee in basis points (requires --fee-recipient-bech32)")
+	fs.StringVar(&feeRecipientBech32, "fee-recipient-bech32", "", "bech32 address to receive --arbitration-fee-bps")
+	fs.StringVar(&keyFile, "key", "", "path to a private key file holding ROLE_ESCROW_REALM_ADMIN")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
+		return 1
+	}
+	if strings.TrimSpace(id) == "" {
+		return printEscrowError(stderr, "--id is required")
+	}
+	memberList := make([]string, 0)
+	for _, m := range strings.Split(members, ",") {
+		if trimmed := strings.TrimSpace(m); trimmed != "" {
+			memberList = append(memberList, trimmed)
+		}
+	}
+	if len(memberList) == 0 {
+		return printEscrowError(stderr, "--members is required (comma-separated bech32 addresses)")
+	}
+	if threshold == 0 || threshold > uint(len(memberList)) {
+		return printEscrowError(stderr, "--threshold must be between 1 and the number of --members")
+	}
+	var schemeValue uint8
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "single":
+		schemeValue = 1
+	case "committee":
+		schemeValue = 2
+	default:
+		return printEscrowError(stderr, "--scheme must be single or committee")
+	}
+	var scopeValue uint8
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "platform":
+		scopeValue = 1
+	case "marketplace":
+		scopeValue = 2
+	default:
+		return printEscrowError(stderr, "--scope must be platform or marketplace")
+	}
+	if strings.TrimSpace(providerProfile) == "" {
+		return printEscrowError(stderr, "--provider-profile is required")
+	}
+	if feeBps > 0 && strings.TrimSpace(feeRecipient) == "" {
+		return printEscrowError(stderr, "--fee-recipient is required when --fee-bps > 0")
+	}
+	if arbitrationFeeBps > 0 && strings.TrimSpace(feeRecipientBech32) == "" {
+		return printEscrowError(stderr, "--fee-recipient-bech32 is required when --arbitration-fee-bps > 0")
+	}
+	if keyFile == "" {
+		return printEscrowError(stderr, "--key is required (path to a private key file holding ROLE_ESCROW_REALM_ADMIN)")
+	}
+
+	payload := createRealmCLIPayload{
+		ID:                 strings.TrimSpace(id),
+		Threshold:          uint32(threshold),
+		Scheme:             schemeValue,
+		Members:            memberList,
+		Scope:              scopeValue,
+		ProviderProfile:    strings.TrimSpace(providerProfile),
+		FeeBps:             uint32(feeBps),
+		FeeRecipient:       strings.TrimSpace(feeRecipient),
+		ArbitrationFeeBps:  uint32(arbitrationFeeBps),
+		FeeRecipientBech32: strings.TrimSpace(feeRecipientBech32),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return printEscrowError(stderr, fmt.Sprintf("encoding payload: %v", err))
+	}
+	if err := signAndSendTx(types.TxTypeEscrowCreateRealm, data, keyFile); err != nil {
+		fmt.Fprintf(stderr, "Error creating realm: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Realm creation transaction sent for realm %q. Check the node logs for confirmation.\n", payload.ID)
+	return 0
+}
+
 func runEscrowExpire(args []string, stdout, stderr io.Writer) int {
 	fs := newEscrowFlagSet("escrow expire", stderr)
 	var (
@@ -494,6 +625,7 @@ Commands:
   expire  Sign and submit a permissionless sweep of a stale escrow (requires --key)
   dispute Sign and submit a dispute flag (requires --key; carries no reason -- see 'dispute' source comment)
   resolve Not available via this command -- requires realm-based arbitrator signatures, see error message
+  create-realm Sign and submit a new arbitration realm (requires --key holding ROLE_ESCROW_REALM_ADMIN)
 `)
 }
 
