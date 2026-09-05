@@ -1,13 +1,21 @@
 package main
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
+	"nhbchain/core/types"
+	"nhbchain/crypto"
 )
 
 type rpcError struct {
@@ -20,6 +28,22 @@ var (
 	escrowNow     = time.Now
 	escrowRPCCall = callEscrowRPC
 )
+
+// createEscrowCLIPayload mirrors core/state_transition.go's applyCreateEscrow
+// unexported createEscrowPayload struct field-for-field -- Payee/Mediator/Meta
+// are plain []byte fields, which encoding/json base64-encodes automatically,
+// exactly what the chain-side decoder expects.
+type createEscrowCLIPayload struct {
+	Payee    []byte   `json:"payee"`
+	Token    string   `json:"token"`
+	Amount   *big.Int `json:"amount"`
+	FeeBps   uint32   `json:"feeBps"`
+	Deadline int64    `json:"deadline"`
+	Nonce    uint64   `json:"nonce"`
+	Mediator []byte   `json:"mediator,omitempty"`
+	Meta     []byte   `json:"meta,omitempty"`
+	Realm    string   `json:"realm,omitempty"`
+}
 
 func runEscrowCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -51,10 +75,18 @@ func runEscrowCommand(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// runEscrowCreate builds, signs, and broadcasts a real TxTypeCreateEscrow
+// transaction. escrow_create (the RPC method this used to call) is
+// permanently disabled -- see rpc/escrow_handlers.go's
+// escrowRPCDisabledMessage -- because it mutated validator state directly
+// outside the block pipeline, guaranteeing a consensus fork on this
+// 2-validator chain. There is no --payer flag: the signing key's own
+// address becomes the payer, on-chain, exactly like every other rewritten
+// command in this file -- a plaintext caller string is not proof of
+// anything, a transaction signature is.
 func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	fs := newEscrowFlagSet("escrow create", stderr)
 	var (
-		payer     string
 		payee     string
 		token     string
 		amountStr string
@@ -64,26 +96,24 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 		meta      string
 		realm     string
 		nonceStr  string
+		keyFile   string
 	)
-	fs.StringVar(&payer, "payer", "", "payer bech32 address")
 	fs.StringVar(&payee, "payee", "", "payee bech32 address")
 	fs.StringVar(&token, "token", "", "token symbol (NHB or ZNHB)")
 	fs.StringVar(&amountStr, "amount", "", "escrow amount (supports 100e18 shorthand)")
 	fs.StringVar(&feeBpsStr, "fee-bps", "", "fee in basis points")
 	fs.StringVar(&deadline, "deadline", "", "deadline as +duration or RFC3339 timestamp")
 	fs.StringVar(&mediator, "mediator", "", "optional mediator bech32 address")
-	fs.StringVar(&meta, "meta", "", "optional 0x-prefixed metadata hash")
+	fs.StringVar(&meta, "meta", "", "optional 0x-prefixed metadata hash (<=32 bytes)")
 	fs.StringVar(&realm, "realm", "", "optional realm identifier")
-	fs.StringVar(&nonceStr, "nonce", "", "unique nonce for this escrow")
+	fs.StringVar(&nonceStr, "nonce", "", "unique escrow nonce (distinct from the account/tx nonce -- part of the escrow's own ID derivation)")
+	fs.StringVar(&keyFile, "key", "", "path to the payer's private key file")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
 		return 1
-	}
-	if payer == "" {
-		return printEscrowError(stderr, "--payer is required")
 	}
 	if payee == "" {
 		return printEscrowError(stderr, "--payee is required")
@@ -101,6 +131,10 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	normalizedAmount, err := normalizeEscrowAmount(amountStr)
 	if err != nil {
 		return printEscrowError(stderr, err.Error())
+	}
+	amount, ok := new(big.Int).SetString(normalizedAmount, 10)
+	if !ok {
+		return printEscrowError(stderr, "--amount could not be parsed")
 	}
 	if feeBpsStr == "" {
 		return printEscrowError(stderr, "--fee-bps is required")
@@ -126,35 +160,83 @@ func runEscrowCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil || nonceValue == 0 {
 		return printEscrowError(stderr, "--nonce must be a positive integer")
 	}
-
-	params := map[string]interface{}{
-		"payer":    payer,
-		"payee":    payee,
-		"token":    normalizedToken,
-		"amount":   normalizedAmount,
-		"feeBps":   feeBpsValue,
-		"deadline": deadlineUnix,
-		"nonce":    nonceValue,
-	}
-	if strings.TrimSpace(mediator) != "" {
-		params["mediator"] = mediator
-	}
-	if strings.TrimSpace(meta) != "" {
-		params["meta"] = meta
-	}
-	if strings.TrimSpace(realm) != "" {
-		params["realm"] = realm
+	if keyFile == "" {
+		return printEscrowError(stderr, "--key is required (path to the payer's private key file)")
 	}
 
-	result, rpcErr, err := escrowRPCCall("escrow_create", params, true)
+	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
-		return handleRPCCallError(stderr, err)
+		return printEscrowError(stderr, fmt.Sprintf("loading private key: %v", err))
 	}
-	if rpcErr != nil {
-		return handleRPCError(stderr, rpcErr)
+	payerAddr := privKey.PubKey().Address()
+
+	payeeAddr, err := crypto.DecodeAddress(payee)
+	if err != nil {
+		return printEscrowError(stderr, fmt.Sprintf("invalid --payee: %v", err))
 	}
-	writeRPCResult(stdout, result)
+
+	payload := createEscrowCLIPayload{
+		Payee:    payeeAddr.Bytes(),
+		Token:    normalizedToken,
+		Amount:   amount,
+		FeeBps:   uint32(feeBpsValue),
+		Deadline: deadlineUnix,
+		Nonce:    nonceValue,
+		Realm:    strings.TrimSpace(realm),
+	}
+	var metaHash [32]byte
+	if trimmed := strings.TrimSpace(meta); trimmed != "" {
+		metaBytes, err := decodeEscrowMetaHex(trimmed)
+		if err != nil {
+			return printEscrowError(stderr, err.Error())
+		}
+		payload.Meta = metaBytes[:]
+		metaHash = metaBytes
+	}
+	if trimmed := strings.TrimSpace(mediator); trimmed != "" {
+		mediatorAddr, err := crypto.DecodeAddress(trimmed)
+		if err != nil {
+			return printEscrowError(stderr, fmt.Sprintf("invalid --mediator: %v", err))
+		}
+		payload.Mediator = mediatorAddr.Bytes()
+	}
+
+	// The escrow ID is deterministic (keccak256(payer, payee, metaHash,
+	// nonce) -- see native/escrow/engine.go's Create), so it can be computed
+	// and shown up front, before the transaction is even sent, exactly like
+	// the escrow-gateway's POST /escrow/create returns it synchronously.
+	var payerBytes, payeeBytes [20]byte
+	copy(payerBytes[:], payerAddr.Bytes())
+	copy(payeeBytes[:], payeeAddr.Bytes())
+	var nonceBuf [8]byte
+	binary.BigEndian.PutUint64(nonceBuf[:], nonceValue)
+	escrowID := ethcrypto.Keccak256Hash(payerBytes[:], payeeBytes[:], metaHash[:], nonceBuf[:])
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return printEscrowError(stderr, fmt.Sprintf("encoding payload: %v", err))
+	}
+	if err := signAndSendTx(types.TxTypeCreateEscrow, data, keyFile); err != nil {
+		fmt.Fprintf(stderr, "Error creating escrow: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Escrow creation transaction sent. Escrow ID: 0x%s\n", hex.EncodeToString(escrowID[:]))
+	fmt.Fprintln(stdout, "Check the node logs for confirmation, then 'escrow get --id <id>' to verify it landed.")
 	return 0
+}
+
+func decodeEscrowMetaHex(value string) ([32]byte, error) {
+	var out [32]byte
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(value), "0x"), "0X")
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return out, fmt.Errorf("--meta must be a hex string: %w", err)
+	}
+	if len(raw) > len(out) {
+		return out, fmt.Errorf("--meta must be <= %d bytes", len(out))
+	}
+	copy(out[:], raw)
+	return out, nil
 }
 
 func runEscrowGet(args []string, stdout, stderr io.Writer) int {
@@ -183,14 +265,19 @@ func runEscrowGet(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runEscrowFund builds, signs, and broadcasts TxTypeLockEscrow (tx.Data is
+// the bare 32-byte escrow id, per core/state_transition.go's
+// applyLockEscrow) -- the on-chain equivalent of the disabled escrow_fund
+// RPC. There is no --from flag: the signing key's own address is the
+// funder, cryptographically.
 func runEscrowFund(args []string, stdout, stderr io.Writer) int {
 	fs := newEscrowFlagSet("escrow fund", stderr)
 	var (
-		id   string
-		from string
+		id      string
+		keyFile string
 	)
 	fs.StringVar(&id, "id", "", "escrow identifier")
-	fs.StringVar(&from, "from", "", "payer address funding the escrow")
+	fs.StringVar(&keyFile, "key", "", "path to the funder's (payer's) private key file")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -201,39 +288,45 @@ func runEscrowFund(args []string, stdout, stderr io.Writer) int {
 	if err := validateEscrowID(id); err != nil {
 		return printEscrowError(stderr, err.Error())
 	}
-	if from == "" {
-		return printEscrowError(stderr, "--from is required")
+	if keyFile == "" {
+		return printEscrowError(stderr, "--key is required")
 	}
-	params := map[string]interface{}{"id": id, "from": from}
-	result, rpcErr, err := escrowRPCCall("escrow_fund", params, true)
+	idBytes, err := decodeEscrowIDHex(id)
 	if err != nil {
-		return handleRPCCallError(stderr, err)
+		return printEscrowError(stderr, err.Error())
 	}
-	if rpcErr != nil {
-		return handleRPCError(stderr, rpcErr)
+	if err := signAndSendTx(types.TxTypeLockEscrow, idBytes, keyFile); err != nil {
+		fmt.Fprintf(stderr, "Error funding escrow: %v\n", err)
+		return 1
 	}
-	writeRPCResult(stdout, result)
+	fmt.Fprintln(stdout, "Escrow fund transaction sent. Check the node logs for confirmation.")
 	return 0
 }
 
 func runEscrowRelease(args []string, stdout, stderr io.Writer) int {
-	return runEscrowTransition("escrow_release", "--caller", args, stdout, stderr)
+	return runEscrowTransition(types.TxTypeReleaseEscrow, "release funds to the payee", args, stdout, stderr)
 }
 
 func runEscrowRefund(args []string, stdout, stderr io.Writer) int {
-	return runEscrowTransition("escrow_refund", "--caller", args, stdout, stderr)
+	return runEscrowTransition(types.TxTypeRefundEscrow, "refund funds to the payer", args, stdout, stderr)
 }
 
+// runEscrowDispute builds, signs, and broadcasts TxTypeDisputeEscrow. Unlike
+// the old escrow_dispute RPC, the direct on-chain dispute path (applyDisputeEscrow,
+// core/state_transition.go) carries no reason/message field at all -- tx.Data
+// is just the bare escrow id, and Engine.Dispute is always called with an
+// empty reason string on this path. A dispute reason is only supported via
+// the delegated meta-transaction path (TxTypeDelegatedDisputeEscrow) that the
+// escrow-gateway service uses, which requires signing a JSON envelope rather
+// than a bare transaction -- not something this simple CLI command builds.
 func runEscrowDispute(args []string, stdout, stderr io.Writer) int {
 	fs := newEscrowFlagSet("escrow dispute", stderr)
 	var (
 		id      string
-		caller  string
-		message string
+		keyFile string
 	)
 	fs.StringVar(&id, "id", "", "escrow identifier")
-	fs.StringVar(&caller, "caller", "", "payer or payee address")
-	fs.StringVar(&message, "message", "", "dispute message")
+	fs.StringVar(&keyFile, "key", "", "path to the payer's or payee's private key file")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -244,67 +337,50 @@ func runEscrowDispute(args []string, stdout, stderr io.Writer) int {
 	if err := validateEscrowID(id); err != nil {
 		return printEscrowError(stderr, err.Error())
 	}
-	if caller == "" {
-		return printEscrowError(stderr, "--caller is required")
+	if keyFile == "" {
+		return printEscrowError(stderr, "--key is required")
 	}
-	params := map[string]interface{}{"id": id, "caller": caller}
-	if trimmed := strings.TrimSpace(message); trimmed != "" {
-		params["reason"] = trimmed
-	}
-	result, rpcErr, err := escrowRPCCall("escrow_dispute", params, true)
+	idBytes, err := decodeEscrowIDHex(id)
 	if err != nil {
-		return handleRPCCallError(stderr, err)
+		return printEscrowError(stderr, err.Error())
 	}
-	if rpcErr != nil {
-		return handleRPCError(stderr, rpcErr)
+	if err := signAndSendTx(types.TxTypeDisputeEscrow, idBytes, keyFile); err != nil {
+		fmt.Fprintf(stderr, "Error disputing escrow: %v\n", err)
+		return 1
 	}
-	writeRPCResult(stdout, result)
+	fmt.Fprintln(stdout, "Escrow dispute transaction sent (no reason attached -- see this command's source comment). Check the node logs for confirmation.")
 	return 0
 }
 
+// runEscrowResolve is deliberately NOT wired to a working transaction.
+// escrow_resolve (the old RPC) assumed a single designated mediator could
+// resolve with a plain outcome string -- that model no longer exists.
+// Real on-chain resolution now goes through TxTypeArbitrateRelease/
+// ArbitrateRefund (core/state_transition.go's applyArbitrate), which calls
+// Engine.ResolveWithSignatures: it requires the escrow to have been created
+// against a registered arbitration realm (a committee of arbitrators plus a
+// signing threshold) and a bundle of raw signatures from that committee
+// meeting the threshold -- a fundamentally different, multi-party flow this
+// single-command CLI subcommand cannot honestly reduce to a --caller/--outcome
+// pair. Matches the escrow-gateway's own POST /escrow/resolve, which returns
+// a plain 503 for the identical reason (see docs/escrow/nhbchain-escrow-gateway.md).
 func runEscrowResolve(args []string, stdout, stderr io.Writer) int {
-	fs := newEscrowFlagSet("escrow resolve", stderr)
-	var (
-		id      string
-		caller  string
-		outcome string
-	)
-	fs.StringVar(&id, "id", "", "escrow identifier")
-	fs.StringVar(&caller, "caller", "", "mediator address")
-	fs.StringVar(&outcome, "outcome", "", "resolution outcome (release or refund)")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if fs.NArg() > 0 {
-		fmt.Fprintln(stderr, "Error: unexpected positional arguments")
-		return 1
-	}
-	if err := validateEscrowID(id); err != nil {
-		return printEscrowError(stderr, err.Error())
-	}
-	if caller == "" {
-		return printEscrowError(stderr, "--caller is required")
-	}
-	normalizedOutcome := strings.ToLower(strings.TrimSpace(outcome))
-	if normalizedOutcome != "release" && normalizedOutcome != "refund" {
-		return printEscrowError(stderr, "--outcome must be release or refund")
-	}
-	params := map[string]interface{}{"id": id, "caller": caller, "outcome": normalizedOutcome}
-	result, rpcErr, err := escrowRPCCall("escrow_resolve", params, true)
-	if err != nil {
-		return handleRPCCallError(stderr, err)
-	}
-	if rpcErr != nil {
-		return handleRPCError(stderr, rpcErr)
-	}
-	writeRPCResult(stdout, result)
-	return 0
+	fmt.Fprintln(stderr, "Error: escrow resolve is not available via this command.")
+	fmt.Fprintln(stderr, "Resolution now requires a registered arbitration realm and a threshold of arbitrator")
+	fmt.Fprintln(stderr, "signatures (TxTypeArbitrateRelease/ArbitrateRefund, core/state_transition.go's applyArbitrate)")
+	fmt.Fprintln(stderr, "-- a multi-party flow, not a single caller+outcome RPC call. The escrow-gateway's own")
+	fmt.Fprintln(stderr, "POST /escrow/resolve returns 503 for the same reason until a realm is provisioned.")
+	return 1
 }
 
 func runEscrowExpire(args []string, stdout, stderr io.Writer) int {
 	fs := newEscrowFlagSet("escrow expire", stderr)
-	var id string
+	var (
+		id      string
+		keyFile string
+	)
 	fs.StringVar(&id, "id", "", "escrow identifier")
+	fs.StringVar(&keyFile, "key", "", "path to any private key file -- TxTypeExpireEscrow is deliberately permissionless, any funded account may pay gas to sweep a stale escrow")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -315,26 +391,29 @@ func runEscrowExpire(args []string, stdout, stderr io.Writer) int {
 	if err := validateEscrowID(id); err != nil {
 		return printEscrowError(stderr, err.Error())
 	}
-	params := map[string]interface{}{"id": id}
-	result, rpcErr, err := escrowRPCCall("escrow_expire", params, true)
+	if keyFile == "" {
+		return printEscrowError(stderr, "--key is required")
+	}
+	idBytes, err := decodeEscrowIDHex(id)
 	if err != nil {
-		return handleRPCCallError(stderr, err)
+		return printEscrowError(stderr, err.Error())
 	}
-	if rpcErr != nil {
-		return handleRPCError(stderr, rpcErr)
+	if err := signAndSendTx(types.TxTypeExpireEscrow, idBytes, keyFile); err != nil {
+		fmt.Fprintf(stderr, "Error expiring escrow: %v\n", err)
+		return 1
 	}
-	writeRPCResult(stdout, result)
+	fmt.Fprintln(stdout, "Escrow expire transaction sent. Check the node logs for confirmation.")
 	return 0
 }
 
-func runEscrowTransition(method string, callerFlag string, args []string, stdout, stderr io.Writer) int {
-	fs := newEscrowFlagSet(method, stderr)
+func runEscrowTransition(txType types.TxType, description string, args []string, stdout, stderr io.Writer) int {
+	fs := newEscrowFlagSet(fmt.Sprintf("escrow %s", description), stderr)
 	var (
-		id     string
-		caller string
+		id      string
+		keyFile string
 	)
 	fs.StringVar(&id, "id", "", "escrow identifier")
-	fs.StringVar(&caller, "caller", "", "actor address")
+	fs.StringVar(&keyFile, "key", "", "path to the actor's private key file")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -345,18 +424,18 @@ func runEscrowTransition(method string, callerFlag string, args []string, stdout
 	if err := validateEscrowID(id); err != nil {
 		return printEscrowError(stderr, err.Error())
 	}
-	if caller == "" {
-		return printEscrowError(stderr, fmt.Sprintf("%s is required", callerFlag))
+	if keyFile == "" {
+		return printEscrowError(stderr, "--key is required")
 	}
-	params := map[string]interface{}{"id": id, "caller": caller}
-	result, rpcErr, err := escrowRPCCall(method, params, true)
+	idBytes, err := decodeEscrowIDHex(id)
 	if err != nil {
-		return handleRPCCallError(stderr, err)
+		return printEscrowError(stderr, err.Error())
 	}
-	if rpcErr != nil {
-		return handleRPCError(stderr, rpcErr)
+	if err := signAndSendTx(txType, idBytes, keyFile); err != nil {
+		fmt.Fprintf(stderr, "Error performing %s: %v\n", description, err)
+		return 1
 	}
-	writeRPCResult(stdout, result)
+	fmt.Fprintf(stdout, "Escrow %s transaction sent. Check the node logs for confirmation.\n", description)
 	return 0
 }
 
@@ -407,14 +486,14 @@ func escrowUsage() string {
   nhb-cli escrow <command> [flags]
 
 Commands:
-  create  Create a new escrow definition
-  get     Fetch escrow details by id
-  fund    Fund an escrow from the payer account
-  release Release funds to the payee
-  refund  Refund funds to the payer
-  expire  Expire an escrow after the deadline
-  dispute Flag an escrow for mediation
-  resolve Resolve a disputed escrow
+  create  Sign and submit a new escrow (requires --key)
+  get     Fetch escrow details by id (read-only)
+  fund    Sign and submit funding for an escrow (requires --key)
+  release Sign and submit a release to the payee (requires --key)
+  refund  Sign and submit a refund to the payer (requires --key)
+  expire  Sign and submit a permissionless sweep of a stale escrow (requires --key)
+  dispute Sign and submit a dispute flag (requires --key; carries no reason -- see 'dispute' source comment)
+  resolve Not available via this command -- requires realm-based arbitrator signatures, see error message
 `)
 }
 
@@ -593,4 +672,21 @@ func validateEscrowID(value string) error {
 		return fmt.Errorf("--id must contain only hexadecimal characters")
 	}
 	return nil
+}
+
+// decodeEscrowIDHex parses an already-validated (via validateEscrowID)
+// 0x-prefixed 32-byte hex escrow id into the raw bytes core/state_transition.go's
+// decodeEscrowID expects as tx.Data for the plain (non-delegated) escrow
+// lifecycle transactions -- those decode tx.Data directly as the raw id,
+// with no JSON wrapper.
+func decodeEscrowIDHex(value string) ([]byte, error) {
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(value), "0x"), "0X")
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("--id must be valid hex: %w", err)
+	}
+	if len(raw) != 32 {
+		return nil, fmt.Errorf("--id must be 32 bytes")
+	}
+	return raw, nil
 }

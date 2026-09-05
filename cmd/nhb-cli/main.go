@@ -738,14 +738,14 @@ func decodeStringResult(result json.RawMessage) (string, error) {
 	return out, nil
 }
 
-// loyaltySendTx signs a loyalty transaction with keyFile's key and its
-// current on-chain nonce, then broadcasts it. All 8 loyalty write
-// operations funnel through this -- the disabled loyalty_* RPC methods
-// this CLI used to call trusted a plaintext "caller" string with no
-// cryptographic proof behind it (the exact bug the whole redesign fixes);
-// a real transaction signature is the replacement, so every one of these
-// commands now needs the actual signing key, not just an address string.
-func loyaltySendTx(txType types.TxType, data []byte, keyFile string) error {
+// signAndSendTx signs a transaction with keyFile's key and its current
+// on-chain nonce, then broadcasts it. Shared by every loyalty and escrow
+// write subcommand -- both used to trust a plaintext "caller" string with
+// no cryptographic proof behind it (the exact bug their respective RPC
+// disablements fixed on-chain); a real transaction signature is the
+// replacement, so every one of these commands now needs the actual signing
+// key, not just an address string.
+func signAndSendTx(txType types.TxType, data []byte, keyFile string) error {
 	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
 		return fmt.Errorf("loading private key: %w", err)
@@ -780,7 +780,7 @@ func loyaltyCreateBusiness(name, keyFile string) {
 		fmt.Printf("Error encoding payload: %v\n", err)
 		return
 	}
-	if err := loyaltySendTx(types.TxTypeCreateLoyaltyBusiness, data, keyFile); err != nil {
+	if err := signAndSendTx(types.TxTypeCreateLoyaltyBusiness, data, keyFile); err != nil {
 		fmt.Printf("Error creating business: %v\n", err)
 		return
 	}
@@ -797,7 +797,7 @@ func loyaltySetPaymaster(businessID, paymaster, keyFile string) {
 		fmt.Printf("Error encoding payload: %v\n", err)
 		return
 	}
-	if err := loyaltySendTx(types.TxTypeLoyaltySetPaymaster, data, keyFile); err != nil {
+	if err := signAndSendTx(types.TxTypeLoyaltySetPaymaster, data, keyFile); err != nil {
 		fmt.Printf("Error setting paymaster: %v\n", err)
 		return
 	}
@@ -813,7 +813,7 @@ func loyaltyModifyMerchant(txType types.TxType, businessID, merchant, keyFile st
 		fmt.Printf("Error encoding payload: %v\n", err)
 		return
 	}
-	if err := loyaltySendTx(txType, data, keyFile); err != nil {
+	if err := signAndSendTx(txType, data, keyFile); err != nil {
 		fmt.Printf("Error modifying merchant: %v\n", err)
 		return
 	}
@@ -858,7 +858,7 @@ func loyaltyCreateProgram(businessID, spec, keyFile string) {
 		fmt.Printf("Error encoding payload: %v\n", err)
 		return
 	}
-	if err := loyaltySendTx(types.TxTypeCreateLoyaltyProgram, data, keyFile); err != nil {
+	if err := signAndSendTx(types.TxTypeCreateLoyaltyProgram, data, keyFile); err != nil {
 		fmt.Printf("Error creating program: %v\n", err)
 		return
 	}
@@ -878,7 +878,7 @@ func loyaltyUpdateProgram(spec, keyFile string) {
 		fmt.Println("Invalid program spec JSON.")
 		return
 	}
-	if err := loyaltySendTx(types.TxTypeUpdateLoyaltyProgram, []byte(spec), keyFile); err != nil {
+	if err := signAndSendTx(types.TxTypeUpdateLoyaltyProgram, []byte(spec), keyFile); err != nil {
 		fmt.Printf("Error updating program: %v\n", err)
 		return
 	}
@@ -891,7 +891,7 @@ func loyaltyLifecycle(txType types.TxType, programID, keyFile string) {
 		fmt.Printf("Error encoding payload: %v\n", err)
 		return
 	}
-	if err := loyaltySendTx(txType, data, keyFile); err != nil {
+	if err := signAndSendTx(txType, data, keyFile); err != nil {
 		fmt.Printf("Error performing operation: %v\n", err)
 		return
 	}

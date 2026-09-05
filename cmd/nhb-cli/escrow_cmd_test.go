@@ -3,11 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"nhbchain/core/types"
+	"nhbchain/crypto"
 )
 
 func TestEscrowCommandArgValidation(t *testing.T) {
@@ -41,7 +47,10 @@ func TestEscrowCommandArgValidation(t *testing.T) {
 			wantExit: 1,
 		},
 		{
-			name: "create_missing_payer",
+			// create no longer takes --payer -- the signing key's own
+			// address is the payer -- so this now exercises the (new)
+			// --key requirement instead of the (removed) --payer one.
+			name: "create_missing_key",
 			args: []string{
 				"create",
 				"--payee", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
@@ -49,20 +58,21 @@ func TestEscrowCommandArgValidation(t *testing.T) {
 				"--amount", "100",
 				"--fee-bps", "10",
 				"--deadline", "+72h",
+				"--nonce", "1",
 			},
-			wantFile: "escrow_create_missing_payer.golden",
+			wantFile: "escrow_create_missing_key.golden",
 			wantExit: 1,
 		},
 		{
 			name: "create_invalid_amount",
 			args: []string{
 				"create",
-				"--payer", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 				"--payee", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
 				"--token", "NHB",
 				"--amount", "1.23e-1",
 				"--fee-bps", "10",
 				"--deadline", "+72h",
+				"--nonce", "1",
 			},
 			wantFile: "escrow_create_invalid_amount.golden",
 			wantExit: 1,
@@ -98,85 +108,176 @@ func TestEscrowCommandArgValidation(t *testing.T) {
 	}
 }
 
-func TestEscrowRPCErrorsAndSuccess(t *testing.T) {
+func TestEscrowRPCErrors(t *testing.T) {
 	originalNow := escrowNow
 	escrowNow = func() time.Time { return time.Unix(1_700_000_000, 0) }
 	defer func() { escrowNow = originalNow }()
 
-	// Test RPC error response.
-	t.Run("rpc_error", func(t *testing.T) {
-		originalCall := escrowRPCCall
-		escrowRPCCall = func(method string, params interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
-			if method != "escrow_get" {
-				t.Fatalf("unexpected method: %s", method)
-			}
-			return nil, &rpcError{Code: -32022, Message: "not_found"}, nil
+	// escrow_get is the one escrow subcommand still backed by an RPC call
+	// (it's read-only and was never disabled) -- this is the only case
+	// escrowRPCCall's swappable-function mock still applies to.
+	originalCall := escrowRPCCall
+	escrowRPCCall = func(method string, params interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
+		if method != "escrow_get" {
+			t.Fatalf("unexpected method: %s", method)
 		}
-		defer func() { escrowRPCCall = originalCall }()
+		return nil, &rpcError{Code: -32022, Message: "not_found"}, nil
+	}
+	defer func() { escrowRPCCall = originalCall }()
 
-		stdout := &bytes.Buffer{}
-		stderr := &bytes.Buffer{}
-		args := []string{"get", "--id", "0x" + strings.Repeat("0", 64)}
-		exitCode := runEscrowCommand(args, stdout, stderr)
-		if exitCode != 1 {
-			t.Fatalf("unexpected exit code: got %d, want 1", exitCode)
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("expected empty stdout, got %q", stdout.String())
-		}
-		want := "RPC error -32022: not_found\n"
-		if stderr.String() != want {
-			t.Fatalf("unexpected stderr: got %q, want %q", stderr.String(), want)
-		}
-	})
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	args := []string{"get", "--id", "0x" + strings.Repeat("0", 64)}
+	exitCode := runEscrowCommand(args, stdout, stderr)
+	if exitCode != 1 {
+		t.Fatalf("unexpected exit code: got %d, want 1", exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	want := "RPC error -32022: not_found\n"
+	if stderr.String() != want {
+		t.Fatalf("unexpected stderr: got %q, want %q", stderr.String(), want)
+	}
+}
 
-	// Test RPC success response for create path.
-	t.Run("rpc_success", func(t *testing.T) {
-		originalCall := escrowRPCCall
-		escrowRPCCall = func(method string, params interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
-			if method != "escrow_create" {
-				t.Fatalf("unexpected method: %s", method)
-			}
-			expected := map[string]interface{}{
-				"payer":    "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"payee":    "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"token":    "NHB",
-				"amount":   "100000000000000000000",
-				"feeBps":   uint64(10),
-				"deadline": int64(1_700_000_000 + 3600),
-				"nonce":    uint64(42),
-			}
-			if diff := diffParams(params, expected); diff != "" {
-				t.Fatalf("unexpected params diff: %s", diff)
-			}
-			return json.RawMessage(`{"id":"0xabc"}`), nil, nil
-		}
-		defer func() { escrowRPCCall = originalCall }()
+// TestEscrowCreateSignsAndSendsRealTransaction proves runEscrowCreate
+// actually builds, signs, and broadcasts a TxTypeCreateEscrow transaction --
+// unlike the old escrow_create RPC call this replaced, there is no
+// swappable mock function for this path (it goes through
+// loadPrivateKey/fetchAccount/sendTransaction, real HTTP), so this test runs
+// a real httptest.Server standing in for the node's JSON-RPC endpoint and
+// inspects the actual transaction it receives: correct type, correctly
+// recovers to the signing key's own address (proving a real signature was
+// produced, not a placeholder), and a payload that decodes back to exactly
+// what was requested on the command line.
+func TestEscrowCreateSignsAndSendsRealTransaction(t *testing.T) {
+	originalNow := escrowNow
+	escrowNow = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	defer func() { escrowNow = originalNow }()
 
-		stdout := &bytes.Buffer{}
-		stderr := &bytes.Buffer{}
-		args := []string{
-			"create",
-			"--payer", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-			"--payee", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-			"--token", "NHB",
-			"--amount", "100e18",
-			"--fee-bps", "10",
-			"--deadline", "+1h",
-			"--nonce", "42",
+	privKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "payer.key")
+	if err := os.WriteFile(keyPath, privKey.Bytes(), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	payerAddr := privKey.PubKey().Address()
+
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee key: %v", err)
+	}
+	payeeAddr := payeeKey.PubKey().Address()
+
+	var capturedTx types.Transaction
+	var sawGetBalance, sawSendTransaction bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+			ID     int               `json:"id"`
 		}
-		exitCode := runEscrowCommand(args, stdout, stderr)
-		if exitCode != 0 {
-			t.Fatalf("unexpected exit code: got %d, want 0", exitCode)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
 		}
-		if stderr.Len() != 0 {
-			t.Fatalf("expected empty stderr, got %q", stderr.String())
+		switch req.Method {
+		case "nhb_getBalance":
+			sawGetBalance = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"address":"","nonce":0}}`))
+		case "nhb_sendTransaction":
+			sawSendTransaction = true
+			if len(req.Params) != 1 {
+				t.Fatalf("expected exactly one param, got %d", len(req.Params))
+			}
+			if err := json.Unmarshal(req.Params[0], &capturedTx); err != nil {
+				t.Fatalf("decode transaction param: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x` + strings.Repeat("ab", 32) + `"}`))
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
 		}
-		want := "{\"id\":\"0xabc\"}\n"
-		if stdout.String() != want {
-			t.Fatalf("unexpected stdout: got %q, want %q", stdout.String(), want)
-		}
-	})
+	}))
+	defer server.Close()
+
+	originalEndpoint := rpcEndpoint
+	rpcEndpoint = server.URL
+	defer func() { rpcEndpoint = originalEndpoint }()
+
+	originalToken := rpcAuthToken
+	rpcAuthToken = "test-token"
+	defer func() { rpcAuthToken = originalToken }()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	args := []string{
+		"create",
+		"--payee", payeeAddr.String(),
+		"--token", "NHB",
+		"--amount", "100e18",
+		"--fee-bps", "10",
+		"--deadline", "+1h",
+		"--nonce", "42",
+		"--key", keyPath,
+	}
+	exitCode := runEscrowCommand(args, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("unexpected exit code: got %d, want 0, stderr: %s", exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	if !sawGetBalance {
+		t.Fatalf("expected nhb_getBalance to be called for the nonce")
+	}
+	if !sawSendTransaction {
+		t.Fatalf("expected nhb_sendTransaction to be called")
+	}
+	if !strings.Contains(stdout.String(), "Escrow creation transaction sent") {
+		t.Fatalf("unexpected stdout: %q", stdout.String())
+	}
+
+	if capturedTx.Type != types.TxTypeCreateEscrow {
+		t.Fatalf("unexpected tx type: got %d, want %d", capturedTx.Type, types.TxTypeCreateEscrow)
+	}
+	sender, err := capturedTx.From()
+	if err != nil {
+		t.Fatalf("recover sender: %v", err)
+	}
+	if !bytes.Equal(sender, payerAddr.Bytes()) {
+		t.Fatalf("recovered sender does not match signing key: got %x want %x", sender, payerAddr.Bytes())
+	}
+
+	var payload struct {
+		Payee    []byte   `json:"payee"`
+		Token    string   `json:"token"`
+		Amount   *big.Int `json:"amount"`
+		FeeBps   uint32   `json:"feeBps"`
+		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
+	}
+	if err := json.Unmarshal(capturedTx.Data, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if !bytes.Equal(payload.Payee, payeeAddr.Bytes()) {
+		t.Fatalf("payload payee mismatch: got %x want %x", payload.Payee, payeeAddr.Bytes())
+	}
+	if payload.Token != "NHB" {
+		t.Fatalf("unexpected token: %s", payload.Token)
+	}
+	if payload.Amount == nil || payload.Amount.String() != "100000000000000000000" {
+		t.Fatalf("unexpected amount: %v", payload.Amount)
+	}
+	if payload.FeeBps != 10 {
+		t.Fatalf("unexpected feeBps: %d", payload.FeeBps)
+	}
+	if payload.Nonce != 42 {
+		t.Fatalf("unexpected escrow nonce: %d", payload.Nonce)
+	}
 }
 
 func TestNormalizeEscrowAmount(t *testing.T) {
@@ -255,6 +356,7 @@ func readGolden(t *testing.T, name string) string {
 	return string(data)
 }
 
+// diffParams is shared with identity_cmd_test.go and p2p_cmd_test.go.
 func diffParams(actual interface{}, expected map[string]interface{}) string {
 	actualMap, ok := actual.(map[string]interface{})
 	if !ok {

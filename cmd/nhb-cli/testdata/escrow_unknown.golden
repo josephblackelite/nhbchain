@@ -3,11 +3,11 @@ Usage:
   nhb-cli escrow <command> [flags]
 
 Commands:
-  create  Create a new escrow definition
-  get     Fetch escrow details by id
-  fund    Fund an escrow from the payer account
-  release Release funds to the payee
-  refund  Refund funds to the payer
-  expire  Expire an escrow after the deadline
-  dispute Flag an escrow for mediation
-  resolve Resolve a disputed escrow
+  create  Sign and submit a new escrow (requires --key)
+  get     Fetch escrow details by id (read-only)
+  fund    Sign and submit funding for an escrow (requires --key)
+  release Sign and submit a release to the payee (requires --key)
+  refund  Sign and submit a refund to the payer (requires --key)
+  expire  Sign and submit a permissionless sweep of a stale escrow (requires --key)
+  dispute Sign and submit a dispute flag (requires --key; carries no reason -- see 'dispute' source comment)
+  resolve Not available via this command -- requires realm-based arbitrator signatures, see error message
