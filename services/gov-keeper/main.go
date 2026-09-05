@@ -89,20 +89,35 @@ func main() {
 	address := privKey.PubKey().Address().String()
 	log.Printf("gov-keeper: starting, signer=%s rpc=%s poll=%s", address, cfg.rpcEndpoint, cfg.pollInterval)
 
-	token, err := mintJWT(cfg.jwtSecretEnv, cfg.jwtIssuer, cfg.jwtAudience)
-	if err != nil {
-		log.Fatalf("gov-keeper: mint RPC token: %v", err)
-	}
-
-	client := &rpcClient{endpoint: cfg.rpcEndpoint, authToken: token}
-
 	ticker := time.NewTicker(cfg.pollInterval)
 	defer ticker.Stop()
 
-	runOnce(client, privKey, cfg)
+	tick(cfg, privKey)
 	for range ticker.C {
-		runOnce(client, privKey, cfg)
+		tick(cfg, privKey)
 	}
+}
+
+// tick mints a fresh RPC token on every call rather than once at startup --
+// this daemon is meant to run indefinitely (systemd Restart=on-failure only
+// fires on a crash, not on a schedule), but mintJWT's token is only valid
+// for 24h (see its own doc comment). A proposal's own voting/timelock
+// window is routinely a week or more (VotingPeriodSeconds/TimelockSeconds
+// in config.toml), so a token minted once at process start would expire
+// long before the very proposals this daemon exists to finalize/queue/
+// execute ever become eligible, silently disabling every RPC call for the
+// rest of the process's life with no crash and no visible symptom short of
+// reading these logs. A mint failure here (e.g. the JWT secret env var is
+// transiently unreadable) just skips this tick and retries next interval,
+// rather than crash-looping the whole daemon.
+func tick(cfg config, privKey *crypto.PrivateKey) {
+	token, err := mintJWT(cfg.jwtSecretEnv, cfg.jwtIssuer, cfg.jwtAudience)
+	if err != nil {
+		log.Printf("gov-keeper: mint RPC token: %v", err)
+		return
+	}
+	client := &rpcClient{endpoint: cfg.rpcEndpoint, authToken: token}
+	runOnce(client, privKey, cfg)
 }
 
 func parseFlags() config {
