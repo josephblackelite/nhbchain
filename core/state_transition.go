@@ -3149,11 +3149,14 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 
 	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, amount)
 	if gasCost.Sign() > 0 {
+		var feeCreditedTo []byte
 		switch {
 		case bytes.Equal(transferGasPolicy.FeeCollector[:], sender):
 			senderAccount.BalanceZNHB = new(big.Int).Add(senderAccount.BalanceZNHB, gasCost)
+			feeCreditedTo = transferGasPolicy.FeeCollector[:]
 		case !selfTransfer && bytes.Equal(transferGasPolicy.FeeCollector[:], tx.To):
 			recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, gasCost)
+			feeCreditedTo = transferGasPolicy.FeeCollector[:]
 		default:
 			if isZeroAddress(transferGasPolicy.FeeCollector) {
 				return nil, fmt.Errorf("fees: transfer gas collector not configured")
@@ -3168,6 +3171,34 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 			collectorAccount.BalanceZNHB = new(big.Int).Add(collectorAccount.BalanceZNHB, gasCost)
 			if err := sp.setAccount(transferGasPolicy.FeeCollector[:], collectorAccount); err != nil {
 				return nil, err
+			}
+			feeCreditedTo = transferGasPolicy.FeeCollector[:]
+		}
+		// The protocol-enforced ZNHB transfer fee is real ZNHB landing on
+		// whichever wallet FeeCollector names, credited above with no
+		// offsetting decrease anywhere else. When FeeCollector happens to
+		// be the admin/treasury wallet (the default and, as of the 2026-09-05
+		// incident, the live config), that credit silently grew
+		// BalanceZNHB outside the Sale/Reward Pool ledger --
+		// CheckZNHBSupplyInvariant (below) catches the very next block and
+		// halts the chain, since it has no way to know this ZNHB is
+		// legitimate fee revenue rather than an accounting bug. Route it
+		// into the Reward Pool -- the same ring-fenced bucket
+		// settleEpochRewards pays validator/POTSO rewards out of -- so
+		// protocol fee revenue is real, ledger-tracked income the
+		// invariant already expects, not invisible growth. Must run in
+		// this same state transition, not deferred to ProcessBlockLifecycle,
+		// since CheckZNHBSupplyInvariant runs once per block against
+		// whatever this transaction already committed.
+		if sp.hasAdminWallet && bytes.Equal(feeCreditedTo, sp.adminWallet[:]) {
+			manager := nhbstate.NewManager(sp.Trie)
+			rewardPoolBalance, err := manager.ZNHBRewardPoolBalance()
+			if err != nil {
+				return nil, fmt.Errorf("znhb transfer: load reward pool balance: %w", err)
+			}
+			newRewardPoolBalance := new(big.Int).Add(rewardPoolBalance, gasCost)
+			if err := manager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
+				return nil, fmt.Errorf("znhb transfer: update reward pool balance: %w", err)
 			}
 		}
 	}

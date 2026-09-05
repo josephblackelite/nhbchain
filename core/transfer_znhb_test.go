@@ -769,3 +769,87 @@ func TestApplyTransferZNHB_InvalidRecipient(t *testing.T) {
 		t.Fatalf("expected recipient address invalid error, got %v", err)
 	}
 }
+
+// TestApplyTransferZNHB_FeeToAdminWalletKeepsSupplyInvariantSatisfied
+// reproduces the 2026-09-05 production chain halt: a plain wallet-to-wallet
+// ZNHB transfer whose sender has exhausted the free tier pays a protocol fee
+// that lands on the admin/treasury wallet (the live default FeeCollector).
+// Before the fix, that credit grew BalanceZNHB with no offsetting change to
+// the Sale/Reward Pool ledger, so CheckZNHBSupplyInvariant -- called every
+// block -- failed on the very next block and no validator could ever build
+// past it, halting the whole chain (see core/state_transition.go's
+// applyTransferZNHB fee-routing comment). This proves the fee now lands in
+// the Reward Pool too, so the invariant it must satisfy every block still
+// holds immediately after the transfer that used to break it.
+func TestApplyTransferZNHB_FeeToAdminWalletKeepsSupplyInvariantSatisfied(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(996_987_257),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+	if err := sp.EnsureZNHBPoolsBootstrapped(); err != nil {
+		t.Fatalf("bootstrap znhb pools: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold right after bootstrap: %v", err)
+	}
+
+	sp.SetTransferGasPolicy(TransferGasPolicy{
+		Enabled:      false, // force the fee regardless of free-tier bookkeeping
+		FeeCollector: adminAddr,
+		FeeBps:       9_999,
+		FeeBpsZNHB:   10, // matches production's live 10bps ZNHB rate
+	})
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+
+	// 1000 ZNHB at 10bps is exactly a 1 ZNHB fee -- the live incident's
+	// exact reproduction amount.
+	sendAmount := big.NewInt(1000)
+	if err := sp.setAccount(senderAddr, &types.Account{BalanceZNHB: big.NewInt(1_001), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransferZNHB,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    sendAmount,
+		GasLimit: 25_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction: %v", err)
+	}
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transaction: %v", err)
+	}
+
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("supply invariant violated after a ZNHB transfer fee landed on the admin wallet -- this is the exact 2026-09-05 chain-halt bug: %v", err)
+	}
+}
