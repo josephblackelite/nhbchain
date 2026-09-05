@@ -16,7 +16,8 @@ import (
 )
 
 // newBuyZNHBStateProcessor seeds an admin wallet with the real genesis ZNHB
-// total (1,000,000,000 at 18 decimals) and runs the real bootstrap split,
+// total (1,000,008,000 at 18 decimals -- znhbExpectedTotalSupplyWei, the
+// live Phase E genesis snapshot's actual total) and runs the real bootstrap split,
 // so applyBuyZNHB is exercised against the same Sale/Reward Pool accounting
 // it runs against in production -- not an arbitrary placeholder balance.
 func newBuyZNHBStateProcessor(t *testing.T) (*StateProcessor, [20]byte) {

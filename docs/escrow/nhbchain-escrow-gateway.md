@@ -37,7 +37,10 @@ indirection pattern as `services/payments-gateway`'s
 `PAY_GATEWAY_ATTESTOR_KMS_ENV`) — this is the relayer key that signs and
 pays gas for every delegated transaction the gateway submits (see "Node
 Integration" below). It must hold enough NHB to cover gas for expected
-traffic.
+traffic. Two more optional variables (both have defaults, see "Production
+Deployment" below) control the relayer low-balance monitor:
+`ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` (default 1 NHB in wei) and
+`ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` (default `10m`).
 
 ### Authentication & Authorization
 
@@ -80,7 +83,7 @@ Live since 2026-09-04, co-located with validator1 on `52.1.96.250`:
 
 - Binary: `/opt/nhbchain/bin/escrow-gateway`, systemd unit `escrow-gateway.service`, env file `/etc/nhbchain/escrow-gateway.env` (holds `ESCROW_GATEWAY_RELAYER_KMS_ENV` and friends — see Configuration above).
 - Public routing: nginx on `api.nhbcoin.com` proxies `/escrow/` and `/p2p/` to `localhost:8081`. No separate `gateway.` or `escrow.` subdomain exists or is planned — `api.nhbcoin.com` is the one public API host for both the chain's own JSON-RPC and this gateway's REST surface.
-- Relayer address: a dedicated NHB account funded specifically to pay gas for every delegated transaction this service submits (see "Node Integration" below) — it does not custody user funds, only pays its own transaction fees. **This balance needs periodic monitoring/top-up**; there is no automated low-balance alert wired up yet.
+- Relayer address: a dedicated NHB account funded specifically to pay gas for every delegated transaction this service submits (see "Node Integration" below) — it does not custody user funds, only pays its own transaction fees. This balance still needs periodic top-up, but is no longer unmonitored: `main.go`'s `startRelayerBalanceMonitor` checks it via `nhb_getBalance` on startup and every `ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` (default 10m), logging a structured `WARN` (`"escrow gateway relayer balance is low"`) when it's at or below `ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` (default 1 NHB — a low bar meant only to catch the balance heading toward zero, e.g. an operator error, not "enough gas for N more transactions," since native transactions never actually charge gas). This is a log-line alert, matching the project's actual alerting maturity everywhere else (an external Prometheus/Alertmanager+PagerDuty pipeline scrapes structured logs/metrics, per `docs/runbooks/alerts.md`) — there is no in-repo Slack/PagerDuty/email integration anywhere in this codebase to plug into instead.
 - Quota: every delegated transaction this gateway submits lands on the recovered *transaction signer* (the relayer's own address, not the end user) for `native/common`'s per-sender request-rate quota (`moduleEscrow`, `config.toml`'s `[global.Quotas.Escrow]`, currently a generous `6000`/min) — worth knowing if the gateway is ever scaled to run genuinely high volume through a single relayer key, since all of that traffic shares one quota bucket.
 
 ### Idempotency

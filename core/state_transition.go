@@ -893,7 +893,9 @@ func znhbPoolRewardShare(totalWei *big.Int) *big.Int {
 // the split has already run (guarded by the znhbPoolsBootstrapped flag in
 // state). Hard-fails, rather than silently skipping, if a real admin
 // wallet is configured but its ZNHB balance does not exactly match the
-// expected 1,000,000,000 ZNHB genesis allocation -- a mismatch there would
+// expected 1,000,008,000 ZNHB genesis allocation (znhbExpectedTotalSupplyWei
+// below -- the live Phase E genesis snapshot's real total, not the
+// originally-intended round number) -- a mismatch there would
 // mean the pool split is about to start from the wrong number, which must
 // never happen quietly.
 func (sp *StateProcessor) EnsureZNHBPoolsBootstrapped() error {
@@ -1273,8 +1275,9 @@ func (sp *StateProcessor) BackfillValidatorRegistrationOnce() error {
 // been created or destroyed outside the two ring-fenced pools. Intended to
 // be called every block (see core/epochs.go's ProcessBlockLifecycle); a
 // violation is a hard consensus error the caller must halt on, not a
-// warning, since it means the fixed 1,000,000,000 ZNHB supply invariant
-// has already been broken somewhere in that block's transactions.
+// warning, since it means the fixed 1,000,008,000 ZNHB supply invariant
+// (the live Phase E genesis total, znhbExpectedTotalSupplyWei) has already
+// been broken somewhere in that block's transactions.
 func (sp *StateProcessor) CheckZNHBSupplyInvariant() error {
 	if !sp.hasAdminWallet {
 		return nil

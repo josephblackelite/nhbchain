@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +63,24 @@ type Config struct {
 	// anything not gated behind RelayerReady) but every mutating escrow
 	// endpoint fails closed.
 	RelayerKMSEnv string
+
+	// RelayerMinBalanceWei/RelayerBalanceCheckInterval configure the
+	// periodic low-balance monitor (main.go) added after this service ran
+	// in production for a while with literally nothing watching whether
+	// its relayer's gas balance was running low -- see
+	// docs/escrow/nhbchain-escrow-gateway.md's Production Deployment
+	// section. Every interval, the gateway logs a WARN (structured JSON,
+	// scrapeable by the same Prometheus/Alertmanager pipeline
+	// docs/runbooks/alerts.md already describes for consensus-node
+	// metrics) if the relayer's balance is at or below this threshold.
+	// This is deliberately a log-line alert, not a Slack/PagerDuty
+	// integration -- no such integration exists anywhere else in this
+	// codebase (see docs/runbooks/alerts.md: alerting is Alertmanager/
+	// PagerDuty, external to this repo), so a new one here would be
+	// inconsistent with how every other service in this project surfaces
+	// operational problems.
+	RelayerMinBalanceWei        *big.Int
+	RelayerBalanceCheckInterval time.Duration
 }
 
 // LoadConfigFromEnv builds a configuration using environment variables.
@@ -119,6 +138,35 @@ func LoadConfigFromEnv() (Config, error) {
 	cfg.RelayerKMSEnv = strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_RELAYER_KMS_ENV"))
 	if cfg.RelayerKMSEnv == "" {
 		return Config{}, errors.New("ESCROW_GATEWAY_RELAYER_KMS_ENV is required -- names the env var holding the gateway's relayer private key")
+	}
+
+	// Default threshold: 1 NHB. Native transactions are fee-free (gas is
+	// never actually charged, see core/state_transition.go), so this isn't
+	// "enough gas for N more transactions" the way it would be on a
+	// fee-charging chain -- it's a low bar meant only to catch the relayer
+	// balance going to (or toward) zero, e.g. an operator error draining it,
+	// not a transaction-volume-driven depletion. Override via
+	// ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI for a deployment-specific
+	// threshold.
+	cfg.RelayerMinBalanceWei = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI")); raw != "" {
+		val, ok := new(big.Int).SetString(raw, 10)
+		if !ok || val.Sign() < 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI must be a non-negative base-10 integer")
+		}
+		cfg.RelayerMinBalanceWei = val
+	}
+
+	cfg.RelayerBalanceCheckInterval = 10 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL")); raw != "" {
+		dur, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL: %w", err)
+		}
+		if dur <= 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL must be positive")
+		}
+		cfg.RelayerBalanceCheckInterval = dur
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_QUEUE_CAP")); raw != "" {

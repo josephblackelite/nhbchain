@@ -65,6 +65,12 @@ type NodeClient interface {
 	P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error)
 	P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error)
 	FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error)
+	// RelayerBalance returns the configured relayer's current NHB balance
+	// (wei), so main.go's periodic low-balance check has something to poll --
+	// this relayer pays gas for every transaction the gateway submits, and
+	// nothing else previously monitored whether it was running low. Returns
+	// ErrRelayerNotConfigured if InitRelayer has not been called yet.
+	RelayerBalance(ctx context.Context) (*big.Int, error)
 }
 
 // ErrResolveNotConfigured is returned by EscrowResolve until the deployment
@@ -151,6 +157,31 @@ func (c *RPCNodeClient) RelayerAddress() string {
 	c.relayerMu.Lock()
 	defer c.relayerMu.Unlock()
 	return c.relayerAddress
+}
+
+// RelayerBalance queries the relayer's current NHB balance via
+// nhb_getBalance -- the same RPC call InitRelayer already uses for the
+// nonce, just read for its balanceNHB field instead. Does not hold
+// relayerMu across the network call (only to read the address), matching
+// every other read-only method on this client.
+func (c *RPCNodeClient) RelayerBalance(ctx context.Context) (*big.Int, error) {
+	c.relayerMu.Lock()
+	address := c.relayerAddress
+	ready := c.relayerReady
+	c.relayerMu.Unlock()
+	if !ready || address == "" {
+		return nil, ErrRelayerNotConfigured
+	}
+	var resp struct {
+		BalanceNHB *big.Int `json:"balanceNHB"`
+	}
+	if err := c.call(ctx, "nhb_getBalance", []interface{}{address}, &resp); err != nil {
+		return nil, fmt.Errorf("fetch relayer balance: %w", err)
+	}
+	if resp.BalanceNHB == nil {
+		return big.NewInt(0), nil
+	}
+	return resp.BalanceNHB, nil
 }
 
 // submitEscrowTx builds, signs (with the relayer key), and submits a

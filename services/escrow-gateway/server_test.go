@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -62,6 +63,10 @@ type mockNodeClient struct {
 
 	events       []NodeEvent
 	eventsCalled int
+
+	balanceResp  *big.Int
+	balanceErr   error
+	balanceCalls int
 }
 
 func (m *mockNodeClient) EscrowCreate(ctx context.Context, payload, signature []byte) (*EscrowCreateResponse, error) {
@@ -198,6 +203,19 @@ func (m *mockNodeClient) FetchEvents(ctx context.Context, afterSeq int64, limit 
 	defer m.mu.Unlock()
 	m.eventsCalled++
 	return append([]NodeEvent(nil), m.events...), nil
+}
+
+func (m *mockNodeClient) RelayerBalance(ctx context.Context) (*big.Int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.balanceCalls++
+	if m.balanceErr != nil {
+		return nil, m.balanceErr
+	}
+	if m.balanceResp != nil {
+		return new(big.Int).Set(m.balanceResp), nil
+	}
+	return big.NewInt(0), nil
 }
 
 func newTestServer(t *testing.T, node NodeClient, merchants map[string]MerchantConfig) (*Server, *SQLiteStore, *WebhookQueue) {

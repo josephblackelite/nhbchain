@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -67,6 +69,9 @@ func main() {
 		log.Fatalf("init relayer: %v", err)
 	}
 	log.Printf("escrow gateway relayer address: %s", node.RelayerAddress())
+
+	shutdownBalanceMonitor := startRelayerBalanceMonitor(node, node.RelayerAddress(), cfg.RelayerMinBalanceWei, cfg.RelayerBalanceCheckInterval)
+	defer shutdownBalanceMonitor()
 	queue := NewWebhookQueue(
 		WithWebhookTaskCapacity(cfg.WebhookQueueCapacity),
 		WithWebhookHistoryCapacity(cfg.WebhookHistorySize),
@@ -100,3 +105,53 @@ func main() {
 }
 
 const shutdownTimeout = 10 * time.Second
+
+// startRelayerBalanceMonitor checks the relayer's own NHB balance every
+// interval and logs a WARN when it's at or below minBalanceWei -- see
+// Config.RelayerMinBalanceWei's doc comment for why this exists and why
+// it's a log line rather than a Slack/PagerDuty call. Runs one check
+// immediately (so a chronically-empty relayer is visible in the log from
+// the very first minute, not just after the first interval elapses) before
+// starting the ticker. Returns a function that stops the monitor; safe to
+// call multiple times.
+func startRelayerBalanceMonitor(node NodeClient, relayerAddress string, minBalanceWei *big.Int, interval time.Duration) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	checkOnce := func() {
+		balanceCtx, balanceCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer balanceCancel()
+		balance, err := node.RelayerBalance(balanceCtx)
+		if err != nil {
+			slog.Warn("escrow gateway relayer balance check failed", "error", err.Error())
+			return
+		}
+		if minBalanceWei != nil && balance.Cmp(minBalanceWei) <= 0 {
+			slog.Warn("escrow gateway relayer balance is low",
+				"balanceWei", balance.String(),
+				"minBalanceWei", minBalanceWei.String(),
+				"address", relayerAddress,
+			)
+		}
+	}
+
+	go func() {
+		defer close(done)
+		checkOnce()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				checkOnce()
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
