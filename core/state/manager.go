@@ -50,88 +50,89 @@ type TokenMetadata struct {
 }
 
 var (
-	tokenPrefix                     = []byte("token:")
-	tokenListKey                    = ethcrypto.Keccak256([]byte("token-list"))
-	balancePrefix                   = []byte("balance:")
-	rolePrefix                      = []byte("role:")
-	loyaltyGlobalKeyBytes           = ethcrypto.Keccak256([]byte("loyalty:global"))
-	loyaltyDynamicStateKeyBytes     = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
-	loyaltyDailyPrefix              = []byte("loyalty-meter:base-daily:")
-	loyaltyTotalPrefix              = []byte("loyalty-meter:base-total:")
-	loyaltyPairDailyPrefix          = []byte("loyalty-meter:base-pair-daily:")
-	loyaltyProgramDailyPrefix       = []byte("loyalty-meter:program-daily:")
-	loyaltyProgramDailyTotalPrefix  = []byte("loyalty-meter:program-daily-total:")
-	loyaltyProgramDailyTxCountPref  = []byte("loyalty-meter:program-daily-txcount:")
-	loyaltyProgramLifetimePrefix    = []byte("loyalty-meter:program-lifetime:")
-	loyaltyProgramEpochPrefix       = []byte("loyalty-meter:program-epoch:")
-	loyaltyProgramIssuancePrefix    = []byte("loyalty-meter:program-issuance:")
-	loyaltyBusinessPrefix           = []byte("loyalty/business/")
-	loyaltyBusinessOwnerPrefix      = []byte("loyalty/business-owner/")
-	loyaltyMerchantIndexPrefix      = []byte("loyalty/merchant-index/")
-	loyaltyBusinessCounterKey       = []byte("loyalty/business/counter")
-	loyaltyOwnerPaymasterPref       = []byte("loyalty/owner-paymaster/")
-	loyaltyDayPrefix                = []byte("loyalty/day/")
-	escrowRecordPrefix              = []byte("escrow/record/")
-	escrowVaultPrefix               = []byte("escrow/vault/")
-	escrowModuleSeedPrefix          = "module/escrow/vault/"
-	escrowRealmPrefix               = []byte("escrow/realm/")
-	escrowFrozenPolicyPrefix        = []byte("escrow/frozen/")
-	creatorContentPrefix            = []byte("creator/content/")
-	creatorStakePrefix              = []byte("creator/stake/")
-	creatorLedgerPrefix             = []byte("creator/ledger/")
-	creatorRateLimitPrefix          = []byte("creator/rate-limit")
-	claimableRecordPrefix           = []byte("claimable/record/")
-	claimableNoncePrefix            = []byte("claimable/nonce/")
-	tradeRecordPrefix               = []byte("trade/record/")
-	tradeEscrowIndexPrefix          = []byte("trade/index/escrow/")
-	identityAliasPrefix             = []byte("identity/alias/")
-	identityAliasIDPrefix           = []byte("identity/alias-id/")
-	identityReversePrefix           = []byte("identity/reverse/")
-	mintInvoicePrefix               = []byte("mint/invoice/")
-	swapOrderPrefix                 = []byte("swap/order/")
-	swapPriceSignerPrefix           = []byte("swap/oracle/signer/")
-	swapPriceProofPrefix            = []byte("swap/oracle/last/")
-	znhbSalePoolBalanceKey          = []byte("znhb/sale/poolBalance")
-	znhbRewardPoolBalanceKey        = []byte("znhb/reward/poolBalance")
-	znhbCumulativeSoldKey           = []byte("znhb/sale/cumulativeDistributed")
-	znhbBuybackAccrualKey           = []byte("znhb/buyback/baaBalance")
-	znhbPoolsBootstrappedKey        = []byte("znhb/sale/poolsBootstrapped")
-	znhbSupplyDriftReconciledKey    = []byte("znhb/supplyDriftReconciled")
-	znhbAdminStaleUnbondsClearedKey = []byte("znhb/adminStalePendingUnbondsCleared")
-	nhbSupplyGenesisSeededKey       = []byte("nhb/supply/genesisSeeded")
-	potsoHeartbeatPrefix            = []byte("potso/heartbeat/")
-	potsoMeterPrefix                = []byte("potso/meter/")
-	potsoDayIndexPrefix             = []byte("potso/day-index/")
-	potsoStakeTotalPrefix           = []byte("potso/stake/")
-	potsoStakeNoncePrefix           = []byte("potso/stake/nonce/")
-	potsoStakeAuthNoncePrefix       = []byte("potso/stake/authnonce/")
-	potsoStakeLocksPrefix           = []byte("potso/stake/locks/")
-	potsoStakeLockIndexPrefix       = []byte("potso/stake/locks/index/")
-	potsoStakeQueuePrefix           = []byte("potso/stake/unbondq/")
-	potsoStakeModuleSeedPrefix      = "module/potso/stake/vault"
-	potsoStakeOwnerIndexKey         = []byte("potso/stake/owners")
-	potsoRewardLastProcessed        = []byte("potso/rewards/lastProcessed")
-	potsoRewardMetaKeyFormat        = "potso/rewards/epoch/%d/meta"
-	potsoRewardWinnersFormat        = "potso/rewards/epoch/%d/winners"
-	potsoRewardPayoutFormat         = "potso/rewards/epoch/%d/payout/%x"
-	potsoRewardClaimFormat          = "potso/rewards/epoch/%d/claim/%x"
-	potsoRewardHistoryFormat        = "potso/rewards/history/%x"
-	potsoMetricsMeterPrefix         = []byte("potso/metrics/meter/")
-	potsoMetricsIndexPrefix         = []byte("potso/metrics/index/")
-	potsoMetricsSnapshotPrefix      = []byte("potso/metrics/snapshot/")
-	governanceProposalPrefix        = []byte("gov/proposals/")
-	governanceVotePrefix            = []byte("gov/votes/")
-	governanceVoteIndexPrefix       = []byte("gov/vote-index/")
-	governanceSequenceKey           = []byte("gov/seq")
-	governanceAuditPrefix           = []byte("gov/audit/")
-	governanceAuditSequenceKey      = []byte("gov/audit-seq")
-	governanceEscrowPrefix          = []byte("gov/escrow/")
-	paramsNamespacePrefix           = []byte("params/")
-	snapshotPotsoPrefix             = []byte("snapshots/potso/")
-	lendingMarketPrefix             = []byte("lending/market/")
-	lendingFeeAccrualPrefix         = []byte("lending/fees/")
-	lendingUserPrefix               = []byte("lending/user/")
-	lendingPoolIndexKey             = []byte("lending/pools/index")
+	tokenPrefix                      = []byte("token:")
+	tokenListKey                     = ethcrypto.Keccak256([]byte("token-list"))
+	balancePrefix                    = []byte("balance:")
+	rolePrefix                       = []byte("role:")
+	loyaltyGlobalKeyBytes            = ethcrypto.Keccak256([]byte("loyalty:global"))
+	loyaltyDynamicStateKeyBytes      = ethcrypto.Keccak256([]byte("loyalty:dynamic-state"))
+	loyaltyDailyPrefix               = []byte("loyalty-meter:base-daily:")
+	loyaltyTotalPrefix               = []byte("loyalty-meter:base-total:")
+	loyaltyPairDailyPrefix           = []byte("loyalty-meter:base-pair-daily:")
+	loyaltyProgramDailyPrefix        = []byte("loyalty-meter:program-daily:")
+	loyaltyProgramDailyTotalPrefix   = []byte("loyalty-meter:program-daily-total:")
+	loyaltyProgramDailyTxCountPref   = []byte("loyalty-meter:program-daily-txcount:")
+	loyaltyProgramLifetimePrefix     = []byte("loyalty-meter:program-lifetime:")
+	loyaltyProgramEpochPrefix        = []byte("loyalty-meter:program-epoch:")
+	loyaltyProgramIssuancePrefix     = []byte("loyalty-meter:program-issuance:")
+	loyaltyBusinessPrefix            = []byte("loyalty/business/")
+	loyaltyBusinessOwnerPrefix       = []byte("loyalty/business-owner/")
+	loyaltyMerchantIndexPrefix       = []byte("loyalty/merchant-index/")
+	loyaltyBusinessCounterKey        = []byte("loyalty/business/counter")
+	loyaltyOwnerPaymasterPref        = []byte("loyalty/owner-paymaster/")
+	loyaltyDayPrefix                 = []byte("loyalty/day/")
+	escrowRecordPrefix               = []byte("escrow/record/")
+	escrowVaultPrefix                = []byte("escrow/vault/")
+	escrowModuleSeedPrefix           = "module/escrow/vault/"
+	escrowRealmPrefix                = []byte("escrow/realm/")
+	escrowFrozenPolicyPrefix         = []byte("escrow/frozen/")
+	creatorContentPrefix             = []byte("creator/content/")
+	creatorStakePrefix               = []byte("creator/stake/")
+	creatorLedgerPrefix              = []byte("creator/ledger/")
+	creatorRateLimitPrefix           = []byte("creator/rate-limit")
+	claimableRecordPrefix            = []byte("claimable/record/")
+	claimableNoncePrefix             = []byte("claimable/nonce/")
+	tradeRecordPrefix                = []byte("trade/record/")
+	tradeEscrowIndexPrefix           = []byte("trade/index/escrow/")
+	identityAliasPrefix              = []byte("identity/alias/")
+	identityAliasIDPrefix            = []byte("identity/alias-id/")
+	identityReversePrefix            = []byte("identity/reverse/")
+	mintInvoicePrefix                = []byte("mint/invoice/")
+	swapOrderPrefix                  = []byte("swap/order/")
+	swapPriceSignerPrefix            = []byte("swap/oracle/signer/")
+	swapPriceProofPrefix             = []byte("swap/oracle/last/")
+	znhbSalePoolBalanceKey           = []byte("znhb/sale/poolBalance")
+	znhbRewardPoolBalanceKey         = []byte("znhb/reward/poolBalance")
+	znhbCumulativeSoldKey            = []byte("znhb/sale/cumulativeDistributed")
+	znhbBuybackAccrualKey            = []byte("znhb/buyback/baaBalance")
+	znhbPoolsBootstrappedKey         = []byte("znhb/sale/poolsBootstrapped")
+	znhbSupplyDriftReconciledKey     = []byte("znhb/supplyDriftReconciled")
+	znhbAdminStaleUnbondsClearedKey  = []byte("znhb/adminStalePendingUnbondsCleared")
+	govStaleRejectedDepositsSweptKey = []byte("gov/staleRejectedDepositsSwept")
+	nhbSupplyGenesisSeededKey        = []byte("nhb/supply/genesisSeeded")
+	potsoHeartbeatPrefix             = []byte("potso/heartbeat/")
+	potsoMeterPrefix                 = []byte("potso/meter/")
+	potsoDayIndexPrefix              = []byte("potso/day-index/")
+	potsoStakeTotalPrefix            = []byte("potso/stake/")
+	potsoStakeNoncePrefix            = []byte("potso/stake/nonce/")
+	potsoStakeAuthNoncePrefix        = []byte("potso/stake/authnonce/")
+	potsoStakeLocksPrefix            = []byte("potso/stake/locks/")
+	potsoStakeLockIndexPrefix        = []byte("potso/stake/locks/index/")
+	potsoStakeQueuePrefix            = []byte("potso/stake/unbondq/")
+	potsoStakeModuleSeedPrefix       = "module/potso/stake/vault"
+	potsoStakeOwnerIndexKey          = []byte("potso/stake/owners")
+	potsoRewardLastProcessed         = []byte("potso/rewards/lastProcessed")
+	potsoRewardMetaKeyFormat         = "potso/rewards/epoch/%d/meta"
+	potsoRewardWinnersFormat         = "potso/rewards/epoch/%d/winners"
+	potsoRewardPayoutFormat          = "potso/rewards/epoch/%d/payout/%x"
+	potsoRewardClaimFormat           = "potso/rewards/epoch/%d/claim/%x"
+	potsoRewardHistoryFormat         = "potso/rewards/history/%x"
+	potsoMetricsMeterPrefix          = []byte("potso/metrics/meter/")
+	potsoMetricsIndexPrefix          = []byte("potso/metrics/index/")
+	potsoMetricsSnapshotPrefix       = []byte("potso/metrics/snapshot/")
+	governanceProposalPrefix         = []byte("gov/proposals/")
+	governanceVotePrefix             = []byte("gov/votes/")
+	governanceVoteIndexPrefix        = []byte("gov/vote-index/")
+	governanceSequenceKey            = []byte("gov/seq")
+	governanceAuditPrefix            = []byte("gov/audit/")
+	governanceAuditSequenceKey       = []byte("gov/audit-seq")
+	governanceEscrowPrefix           = []byte("gov/escrow/")
+	paramsNamespacePrefix            = []byte("params/")
+	snapshotPotsoPrefix              = []byte("snapshots/potso/")
+	lendingMarketPrefix              = []byte("lending/market/")
+	lendingFeeAccrualPrefix          = []byte("lending/fees/")
+	lendingUserPrefix                = []byte("lending/user/")
+	lendingPoolIndexKey              = []byte("lending/pools/index")
 	// lendingFixedTermLoanPrefix/lendingFixedTermActiveLoanPrefix back the new
 	// fixed-term (locked-rate, 30/90-day) borrow product -- a separate record
 	// family from the flexible-rate lendingUserPrefix accounts above, since a
@@ -2825,6 +2826,25 @@ func (m *Manager) ZNHBAdminStaleUnbondsCleared() (bool, error) {
 // cleanup has run, so it is never repeated.
 func (m *Manager) ZNHBMarkAdminStaleUnbondsCleared() error {
 	return m.KVPut(znhbAdminStaleUnbondsClearedKey, true)
+}
+
+// GovStaleRejectedDepositsSwept reports whether the one-time sweep of the
+// specific already-rejected proposals' forfeited deposits identified live on
+// 2026-09-05 (see StateProcessor.SweepStaleRejectedGovernanceDepositsOnce's
+// doc comment) has already run.
+func (m *Manager) GovStaleRejectedDepositsSwept() (bool, error) {
+	var flag bool
+	ok, err := m.KVGet(govStaleRejectedDepositsSweptKey, &flag)
+	if err != nil {
+		return false, err
+	}
+	return ok && flag, nil
+}
+
+// GovMarkStaleRejectedDepositsSwept records that the one-time stale-deposit
+// sweep has run, so it is never repeated.
+func (m *Manager) GovMarkStaleRejectedDepositsSwept() error {
+	return m.KVPut(govStaleRejectedDepositsSweptKey, true)
 }
 
 // NHBSupplyGenesisSeeded reports whether the one-time genesis NHB supply

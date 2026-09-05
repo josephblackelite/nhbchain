@@ -215,6 +215,14 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.ClearAdminStalePendingUnbondsOnce(); err != nil {
 		return fmt.Errorf("clear admin stale pending unbonds: %w", err)
 	}
+	// One-time sweep of the specific rejected proposals' forfeited deposits
+	// left un-refunded and un-swept by the 2026-09-05 incident (see
+	// SweepStaleRejectedGovernanceDepositsOnce's doc comment) -- must run
+	// before the invariant check below, since it moves ZNHB onto the admin
+	// wallet, and is a no-op forever after its guard flag is set.
+	if err := sp.SweepStaleRejectedGovernanceDepositsOnce(); err != nil {
+		return fmt.Errorf("sweep stale rejected governance deposits: %w", err)
+	}
 	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
 		return err
 	}

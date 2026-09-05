@@ -659,3 +659,167 @@ func TestProcessBlockLifecycle_BootstrapsZNHBPoolsOnFirstBlock(t *testing.T) {
 		t.Fatalf("bootstrap must survive a reset to its own committed root")
 	}
 }
+
+// TestSweepStaleRejectedGovernanceDepositsOnce_SweepsExactMatchAndIsIdempotent
+// reproduces the 2026-09-05 finding directly: proposal 2 was rejected for
+// lack of quorum and its 1000 ZNHB deposit was never refunded (only the
+// Passed branch of Finalize does that) nor swept anywhere -- it just sat
+// permanently locked in the submitter's own escrow ledger entry. This
+// proves the one-time migration sweeps that exact, already-identified
+// deposit to the admin wallet, credits the Reward Pool in lockstep (the
+// same fix native/governance/engine.go's Finalize needed), and never
+// touches it again on a second call.
+func TestSweepStaleRejectedGovernanceDepositsOnce_SweepsExactMatchAndIsIdempotent(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	adminBalanceBefore := big.NewInt(5_000)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: new(big.Int).Set(adminBalanceBefore),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	rewardPoolBefore := big.NewInt(2_000)
+	if err := manager.ZNHBSetRewardPoolBalance(new(big.Int).Set(rewardPoolBefore)); err != nil {
+		t.Fatalf("seed reward pool: %v", err)
+	}
+
+	var proposer [20]byte
+	proposer[19] = 0x42
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, proposer[:])
+	deposit := new(big.Int).Set(staleRejectedGovernanceDepositSeed[0].ExpectedDeposit)
+	proposalID := staleRejectedGovernanceDepositSeed[0].ProposalID
+	if err := manager.GovernancePutProposal(&governance.Proposal{
+		ID:        proposalID,
+		Submitter: submitter,
+		Status:    governance.ProposalStatusRejected,
+		Deposit:   new(big.Int).Set(deposit),
+	}); err != nil {
+		t.Fatalf("seed proposal: %v", err)
+	}
+	if _, err := manager.GovernanceEscrowLock(proposer[:], deposit); err != nil {
+		t.Fatalf("seed escrow lock: %v", err)
+	}
+
+	if err := sp.SweepStaleRejectedGovernanceDepositsOnce(); err != nil {
+		t.Fatalf("sweep stale rejected deposits: %v", err)
+	}
+
+	wantAdminBalance := new(big.Int).Add(adminBalanceBefore, deposit)
+	wantRewardPool := new(big.Int).Add(rewardPoolBefore, deposit)
+
+	admin, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	if admin.BalanceZNHB.Cmp(wantAdminBalance) != 0 {
+		t.Fatalf("expected admin wallet credited the swept deposit, got %s want %s", admin.BalanceZNHB, wantAdminBalance)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("read reward pool: %v", err)
+	}
+	if rewardPool.Cmp(wantRewardPool) != 0 {
+		t.Fatalf("expected reward pool credited in lockstep, got %s want %s", rewardPool, wantRewardPool)
+	}
+	escrow, err := manager.GovernanceEscrowBalance(proposer[:])
+	if err != nil {
+		t.Fatalf("read escrow balance: %v", err)
+	}
+	if escrow.Sign() != 0 {
+		t.Fatalf("expected the proposer's escrow cleared, got %s", escrow)
+	}
+	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
+	if err != nil || !ok {
+		t.Fatalf("reload proposal: ok=%v err=%v", ok, err)
+	}
+	if proposal.Deposit == nil || proposal.Deposit.Sign() != 0 {
+		t.Fatalf("expected proposal.Deposit zeroed after sweep, got %v", proposal.Deposit)
+	}
+
+	swept, err := manager.GovStaleRejectedDepositsSwept()
+	if err != nil {
+		t.Fatalf("read swept flag: %v", err)
+	}
+	if !swept {
+		t.Fatalf("expected the swept flag to be set")
+	}
+
+	// Idempotency: a second call must be a no-op even if this exact
+	// proposal ID were somehow reused with a fresh matching deposit
+	// (mirrors ClearAdminStalePendingUnbondsOnce's own idempotency check).
+	if err := manager.GovernancePutProposal(&governance.Proposal{
+		ID:        proposalID,
+		Submitter: submitter,
+		Status:    governance.ProposalStatusRejected,
+		Deposit:   new(big.Int).Set(deposit),
+	}); err != nil {
+		t.Fatalf("reseed proposal: %v", err)
+	}
+	if err := sp.SweepStaleRejectedGovernanceDepositsOnce(); err != nil {
+		t.Fatalf("second sweep call: %v", err)
+	}
+	admin, err = sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account after second call: %v", err)
+	}
+	if admin.BalanceZNHB.Cmp(wantAdminBalance) != 0 {
+		t.Fatalf("a second call must never sweep again, got admin balance %s want %s", admin.BalanceZNHB, wantAdminBalance)
+	}
+}
+
+// TestSweepStaleRejectedGovernanceDepositsOnce_SkipsMismatchedDeposit
+// confirms the migration never sweeps an entry whose deposit doesn't
+// exactly match what was confirmed live -- it must fail safe (skip)
+// rather than guess, mirroring ClearAdminStalePendingUnbondsOnce's own
+// adversarially-reviewed conservatism.
+func TestSweepStaleRejectedGovernanceDepositsOnce_SkipsMismatchedDeposit(t *testing.T) {
+	sp := newZNHBPoolsStateProcessor(t)
+	adminAddr := [20]byte{0xAD}
+	sp.SetAdminWallet(adminAddr, true)
+	if err := sp.setAccount(adminAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(5_000),
+		Stake:       big.NewInt(0),
+	}); err != nil {
+		t.Fatalf("seed admin wallet: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	var proposer [20]byte
+	proposer[19] = 0x42
+	submitter := crypto.MustNewAddress(crypto.NHBPrefix, proposer[:])
+	wrongDeposit := new(big.Int).Add(staleRejectedGovernanceDepositSeed[0].ExpectedDeposit, big.NewInt(1))
+	proposalID := staleRejectedGovernanceDepositSeed[0].ProposalID
+	if err := manager.GovernancePutProposal(&governance.Proposal{
+		ID:        proposalID,
+		Submitter: submitter,
+		Status:    governance.ProposalStatusRejected,
+		Deposit:   wrongDeposit,
+	}); err != nil {
+		t.Fatalf("seed proposal: %v", err)
+	}
+
+	if err := sp.SweepStaleRejectedGovernanceDepositsOnce(); err != nil {
+		t.Fatalf("sweep stale rejected deposits: %v", err)
+	}
+
+	admin, err := sp.getAccount(adminAddr[:])
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	if admin.BalanceZNHB.Cmp(big.NewInt(5_000)) != 0 {
+		t.Fatalf("a deposit mismatch must be left untouched, got admin balance %s", admin.BalanceZNHB)
+	}
+	proposal, ok, err := manager.GovernanceGetProposal(proposalID)
+	if err != nil || !ok {
+		t.Fatalf("reload proposal: ok=%v err=%v", ok, err)
+	}
+	if proposal.Deposit.Cmp(wrongDeposit) != 0 {
+		t.Fatalf("a deposit mismatch must not be zeroed, got %s", proposal.Deposit)
+	}
+}

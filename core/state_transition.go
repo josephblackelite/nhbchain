@@ -1416,6 +1416,125 @@ func (sp *StateProcessor) ClearAdminStalePendingUnbondsOnce() error {
 	return manager.ZNHBMarkAdminStaleUnbondsCleared()
 }
 
+type staleRejectedGovernanceDepositEntry struct {
+	ProposalID      uint64
+	ExpectedDeposit *big.Int
+}
+
+var staleRejectedGovernanceDepositSeed = []staleRejectedGovernanceDepositEntry{
+	{ProposalID: 2, ExpectedDeposit: func() *big.Int {
+		amount, ok := new(big.Int).SetString("1000000000000000000000", 10)
+		if !ok {
+			panic("staleRejectedGovernanceDepositSeed: invalid constant")
+		}
+		return amount
+	}()},
+}
+
+// SweepStaleRejectedGovernanceDepositsOnce sweeps the specific,
+// already-identified rejected proposals' forfeited deposits listed in
+// staleRejectedGovernanceDepositSeed to the admin/treasury wallet. These
+// predate native/governance/engine.go's Finalize fix, which now performs
+// this sweep automatically for every proposal rejected from here on --
+// GovernanceEscrowLock (SubmitProposal) had exactly one matching unlock
+// call site before that fix (the Passed-branch refund), so a proposal
+// rejected before the fix deployed was never refunded NOR swept anywhere,
+// and just sat permanently locked in its submitter's own escrow ledger
+// entry. Confirmed live on 2026-09-05: proposal 2, rejected for lack of
+// quorum, forfeited 1000 ZNHB with no destination at all. Guarded by a
+// persistent flag so it runs at most once. Deliberately conservative,
+// mirroring ClearAdminStalePendingUnbondsOnce: an entry is only swept if
+// the proposal is still Rejected with its Deposit still exactly the
+// expected amount; if either doesn't match (already resolved some other
+// way) it is left untouched and the discrepancy is recorded in the
+// emitted event for later investigation -- this function must never
+// guess. Must run before CheckZNHBSupplyInvariant (see
+// ProcessBlockLifecycle) so the corrected formula never sees stale state.
+func (sp *StateProcessor) SweepStaleRejectedGovernanceDepositsOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	swept, err := manager.GovStaleRejectedDepositsSwept()
+	if err != nil {
+		return fmt.Errorf("gov: check stale rejected deposits swept flag: %w", err)
+	}
+	if swept {
+		return nil
+	}
+
+	sweptIDs := make([]string, 0, len(staleRejectedGovernanceDepositSeed))
+	skippedIDs := make([]string, 0, len(staleRejectedGovernanceDepositSeed))
+	for _, seed := range staleRejectedGovernanceDepositSeed {
+		proposal, ok, err := manager.GovernanceGetProposal(seed.ProposalID)
+		if err != nil {
+			return fmt.Errorf("gov: load proposal %d: %w", seed.ProposalID, err)
+		}
+		if !ok || proposal == nil {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+		if proposal.Status != governance.ProposalStatusRejected {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+		if proposal.Deposit == nil || seed.ExpectedDeposit == nil || proposal.Deposit.Cmp(seed.ExpectedDeposit) != 0 {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+
+		submitter := append([]byte(nil), proposal.Submitter.Bytes()...)
+		if len(submitter) != 20 {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+
+		adminAccount, err := sp.getAccount(sp.adminWallet[:])
+		if err != nil {
+			return fmt.Errorf("gov: load admin wallet: %w", err)
+		}
+		if adminAccount.BalanceZNHB == nil {
+			adminAccount.BalanceZNHB = big.NewInt(0)
+		}
+		adminAccount.BalanceZNHB = new(big.Int).Add(adminAccount.BalanceZNHB, proposal.Deposit)
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("gov: persist admin wallet credit: %w", err)
+		}
+
+		// Same rationale as native/governance/engine.go's Finalize sweep:
+		// if the admin wallet forfeited its OWN deposit, adminZNHBOwned
+		// already counts it via GovernanceEscrowBalance, so crediting the
+		// Reward Pool too would double-count it. Only a third party's
+		// forfeited deposit is genuinely new ZNHB landing on the admin
+		// wallet from outside the Sale/Reward Pool ledger.
+		if !bytes.Equal(submitter, sp.adminWallet[:]) {
+			rewardPool, err := manager.ZNHBRewardPoolBalance()
+			if err != nil {
+				return fmt.Errorf("gov: load reward pool balance: %w", err)
+			}
+			newRewardPool := new(big.Int).Add(rewardPool, proposal.Deposit)
+			if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+				return fmt.Errorf("gov: update reward pool balance: %w", err)
+			}
+		}
+
+		if _, err := manager.GovernanceEscrowUnlock(submitter, proposal.Deposit); err != nil {
+			return fmt.Errorf("gov: unlock stale escrow for proposal %d: %w", seed.ProposalID, err)
+		}
+		proposal.Deposit = big.NewInt(0)
+		if err := manager.GovernancePutProposal(proposal); err != nil {
+			return fmt.Errorf("gov: persist swept proposal %d: %w", seed.ProposalID, err)
+		}
+		sweptIDs = append(sweptIDs, fmt.Sprintf("%d", seed.ProposalID))
+	}
+
+	sp.AppendEvent(&types.Event{Type: "gov.stale_rejected_deposits_swept", Attributes: map[string]string{
+		"swept_ids":   strings.Join(sweptIDs, ","),
+		"skipped_ids": strings.Join(skippedIDs, ","),
+	}})
+	return manager.GovMarkStaleRejectedDepositsSwept()
+}
+
 // BeginBlock records the execution context for the block currently being applied.
 func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
 	if sp == nil {
