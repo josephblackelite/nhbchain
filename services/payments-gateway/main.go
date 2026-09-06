@@ -140,6 +140,12 @@ func main() {
 		// different method on the same client (GetPayoutStatus vs
 		// CreatePayout), so no separate client/config is needed.
 		redeemWatcher = NewRedeemWatcher(store, nodeClient, settlementMgr, payoutClient, cfg.RedeemWatcherInterval)
+		redeemWatcher.WithStuckReviewSafetyMargin(cfg.StuckReviewSafetyMargin)
+		if notifier := NewHTTPRedemptionNotifier(cfg.RedemptionNotifyURL, cfg.RedemptionNotifySecret); notifier != nil {
+			redeemWatcher.WithNotifier(notifier)
+		} else {
+			log.Printf("payments-gateway: redemption customer-email notifications disabled -- set %s and %s to enable", envRedemptionNotifyURL, envRedemptionNotifySec)
+		}
 		// The admin confirm/fail/retry-payout endpoints call into the
 		// watcher itself (not settlementMgr directly) so every operator
 		// action is serialized against the watcher's own tick -- see

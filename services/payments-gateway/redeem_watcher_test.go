@@ -11,6 +11,7 @@ import (
 
 	"nhbchain/core"
 	"nhbchain/services/swapd/settlement"
+	swapdstorage "nhbchain/services/swapd/storage"
 )
 
 // --- computeRedemptionPayout -----------------------------------------------
@@ -953,6 +954,364 @@ func TestRedeemWatcherRecoverMovesInitiatingToStuckManualReview(t *testing.T) {
 	}
 	if row.LocalStatus != redemptionStatusStuckManualReview {
 		t.Fatalf("expected row to remain stuck_manual_review across ticks, got %s", row.LocalStatus)
+	}
+}
+
+// TestRedeemWatcherReconcileStuckManualReview covers the CORRECTED
+// (post-security-audit) behavior: reconcileStuckManualReview NEVER takes an
+// on-chain-affecting action automatically, no matter how old a row is or
+// how clean its "pending, no external ref" signal looks -- that signal
+// cannot actually distinguish "no payout was ever dispatched" from "a real,
+// already-verified payout's post-success persist failed or was
+// interrupted" (see settlement.Manager.submittedLocked's doc comment), so
+// auto-firing MarkFailed here was a real double-credit bug an adversarial
+// security audit found before this ever reached production. This test
+// pins the corrected behavior: detection and alerting only, zero
+// MarkFailed/attestation/payout calls, regardless of case.
+func TestRedeemWatcherReconcileStuckManualReview(t *testing.T) {
+	store := newTestRedeemStore(t)
+	payoutClient := &fakePayoutClient{}
+	settlementMgr := newTestSettlementManager(t, store, payoutClient)
+	node := newFakeRedeemNode()
+	watcher := NewRedeemWatcher(store, node, settlementMgr, nil, time.Second)
+	watcher.WithStuckReviewSafetyMargin(2 * time.Hour)
+	ctx := context.Background()
+
+	fixedNow := time.Date(2026, 9, 6, 18, 0, 0, 0, time.UTC)
+	watcher.nowFn = func() time.Time { return fixedNow }
+
+	seedStuckRow := func(t *testing.T, requestID string, settlementAge time.Duration, settlementStatus settlement.Status, externalRef string) {
+		t.Helper()
+		createdAt := fixedNow.Add(-settlementAge)
+		settlementID := "settle-" + requestID
+		if err := store.SaveSettlement(ctx, swapdstorage.SettlementRecord{
+			ID:            settlementID,
+			IntentID:      requestID,
+			ReservationID: requestID,
+			PartnerID:     redemptionSettlementPartnerID,
+			Asset:         "USDTTRC20",
+			AmountUnits:   100_000_000,
+			Account:       testValidTRC20Address,
+			Rail:          string(settlement.RailNowPayments),
+			Status:        string(settlementStatus),
+			ExternalRef:   externalRef,
+			Detail:        "{}",
+			CreatedAt:     createdAt,
+			UpdatedAt:     createdAt,
+		}); err != nil {
+			t.Fatalf("seed settlement for %s: %v", requestID, err)
+		}
+		if err := store.InsertRedemptionWatch(ctx, RedemptionWatchRecord{
+			RequestID:           requestID,
+			Account:             "nhb1testaccount",
+			NHBAmountWei:        "100000000000000000000",
+			PayoutAmountDecimal: "100",
+			PayoutAmountUnits:   100_000_000,
+			DestinationAsset:    "USDTTRC20",
+			DestinationAddress:  testValidTRC20Address,
+			LocalStatus:         redemptionStatusStuckManualReview,
+			SettlementID:        settlementID,
+			CreatedAt:           createdAt,
+			UpdatedAt:           createdAt,
+		}); err != nil {
+			t.Fatalf("seed stuck row for %s: %v", requestID, err)
+		}
+	}
+
+	// Case 1: aged well past the margin, settlement still exactly Pending
+	// with no external ref -- the safe-to-auto-resolve case.
+	const requestIDSafe = "req-stuck-safe"
+	seedStuckRow(t, requestIDSafe, 3*time.Hour, settlement.StatusPending, "")
+
+	// Case 2: aged past the margin, but the settlement DOES have an
+	// external ref (CreatePayout's HTTP call actually completed) -- must
+	// never be auto-resolved, no matter how old.
+	const requestIDAmbiguous = "req-stuck-ambiguous"
+	seedStuckRow(t, requestIDAmbiguous, 10*time.Hour, settlement.StatusPending, "batch-real-123")
+
+	// Case 3: still Pending with no external ref, but too recent -- within
+	// the window a genuinely in-flight CreatePayout call could still be
+	// running.
+	const requestIDTooRecent = "req-stuck-recent"
+	seedStuckRow(t, requestIDTooRecent, 5*time.Minute, settlement.StatusPending, "")
+
+	watcher.runOnce(ctx)
+
+	// ALL THREE cases must remain exactly stuck_manual_review -- this method
+	// must never transition any row's LocalStatus, regardless of how old or
+	// "clean-looking" its signal is.
+	for _, id := range []string{requestIDSafe, requestIDAmbiguous, requestIDTooRecent} {
+		row, err := store.GetRedemptionWatch(ctx, id)
+		if err != nil {
+			t.Fatalf("get row %s: %v", id, err)
+		}
+		if row.LocalStatus != redemptionStatusStuckManualReview {
+			t.Fatalf("expected %s to remain stuck_manual_review, got %s", id, row.LocalStatus)
+		}
+	}
+
+	// Zero attestation calls, zero real payout calls -- this method must
+	// NEVER take an on-chain or money-moving action by itself.
+	if node.attestCallCount() != 0 {
+		t.Fatalf("expected zero attestation calls -- reconcileStuckManualReview must never auto-attest, got %d", node.attestCallCount())
+	}
+	if payoutClient.callCount() != 0 {
+		t.Fatalf("expected zero real payout calls, got %d", payoutClient.callCount())
+	}
+
+	// The settlement backing the safe case must still be exactly Pending --
+	// MarkFailed must NEVER be called automatically here.
+	safeSettlement, err := store.GetSettlement(ctx, "settle-"+requestIDSafe)
+	if err != nil {
+		t.Fatalf("get safe settlement: %v", err)
+	}
+	if safeSettlement.Status != string(settlement.StatusPending) {
+		t.Fatalf("expected safe case settlement to remain Pending (no auto-action), got %s", safeSettlement.Status)
+	}
+	ambiguousSettlement, err := store.GetSettlement(ctx, "settle-"+requestIDAmbiguous)
+	if err != nil {
+		t.Fatalf("get ambiguous settlement: %v", err)
+	}
+	if ambiguousSettlement.Status != string(settlement.StatusPending) || ambiguousSettlement.ExternalRef != "batch-real-123" {
+		t.Fatalf("expected ambiguous case settlement to remain untouched (no auto-action), got %+v", ambiguousSettlement)
+	}
+
+	// Both the safe case (past margin, pending, no ref) AND the ambiguous
+	// case (has a real external ref -- the higher-stakes one, per the
+	// follow-up fix) must be alerted on; only the too-recent case (still
+	// within the possible in-flight window) must not be alerted yet.
+	if _, alerted := watcher.stuckReviewAlerted[requestIDSafe]; !alerted {
+		t.Fatalf("expected the safe case to be recorded as alerted")
+	}
+	if _, alerted := watcher.stuckReviewAlerted[requestIDAmbiguous]; !alerted {
+		t.Fatalf("expected the ambiguous case (real external ref) to ALSO be alerted on -- it must never fall silent")
+	}
+	if _, alerted := watcher.stuckReviewAlerted[requestIDTooRecent]; alerted {
+		t.Fatalf("expected the too-recent case to never be alerted on yet")
+	}
+	firstAlertTime := watcher.stuckReviewAlerted[requestIDSafe]
+
+	// A second tick at the same fixed time must not re-alert (within
+	// stuckReviewAlertInterval) and must still take zero action.
+	watcher.runOnce(ctx)
+	if node.attestCallCount() != 0 || payoutClient.callCount() != 0 {
+		t.Fatalf("expected still zero attestation/payout calls after a second tick")
+	}
+	if watcher.stuckReviewAlerted[requestIDSafe] != firstAlertTime {
+		t.Fatalf("expected no re-alert within stuckReviewAlertInterval")
+	}
+
+	// Advancing time past stuckReviewAlertInterval must re-alert (the row is
+	// still unresolved -- an operator hasn't acted on it), but still take no
+	// action.
+	laterNow := fixedNow.Add(stuckReviewAlertInterval + time.Minute)
+	watcher.nowFn = func() time.Time { return laterNow }
+	watcher.runOnce(ctx)
+	if node.attestCallCount() != 0 || payoutClient.callCount() != 0 {
+		t.Fatalf("expected still zero attestation/payout calls even after the alert-interval elapses")
+	}
+	if watcher.stuckReviewAlerted[requestIDSafe] != laterNow {
+		t.Fatalf("expected a fresh alert timestamp once stuckReviewAlertInterval elapses, got %v want %v", watcher.stuckReviewAlerted[requestIDSafe], laterNow)
+	}
+
+	// Once an operator actually resolves a row (the real, human-triggered
+	// admin action -- unaffected by anything in this diff), its entry must
+	// be pruned from the alert map rather than lingering forever.
+	if _, err := settlementMgr.MarkFailed(ctx, "settle-"+requestIDSafe, "operator confirmed no payout was ever sent"); err != nil {
+		t.Fatalf("mark failed via operator action: %v", err)
+	}
+	resolvedRow, err := store.GetRedemptionWatch(ctx, requestIDSafe)
+	if err != nil {
+		t.Fatalf("get resolved row: %v", err)
+	}
+	resolvedRow.LocalStatus = redemptionStatusInitiating // simulates resumeNormalFlow, as FailPayout would do via the admin endpoint
+	resolvedRow.UpdatedAt = laterNow
+	if err := store.UpdateRedemptionWatch(ctx, *resolvedRow); err != nil {
+		t.Fatalf("resume resolved row: %v", err)
+	}
+	watcher.runOnce(ctx)
+	if _, stillAlerted := watcher.stuckReviewAlerted[requestIDSafe]; stillAlerted {
+		t.Fatalf("expected the resolved row's alert entry to be pruned once it left stuck_manual_review")
+	}
+	// The still-unresolved ambiguous case must remain in the map.
+	if _, alerted := watcher.stuckReviewAlerted[requestIDAmbiguous]; !alerted {
+		t.Fatalf("expected the still-unresolved ambiguous case to remain in the alert map")
+	}
+}
+
+// fakeNotifier is a controllable RedemptionNotifier: records every event it
+// receives, and can be configured to fail every call (to prove a failing
+// notifier never blocks or reverses the watcher's own state machine).
+type fakeNotifier struct {
+	mu     sync.Mutex
+	events []RedemptionOutcomeEvent
+	fail   bool
+}
+
+func (f *fakeNotifier) Notify(ctx context.Context, event RedemptionOutcomeEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, event)
+	if f.fail {
+		return errors.New("simulated notify failure")
+	}
+	return nil
+}
+
+func (f *fakeNotifier) recordedEvents() []RedemptionOutcomeEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]RedemptionOutcomeEvent, len(f.events))
+	copy(out, f.events)
+	return out
+}
+
+// TestRedeemWatcherNotifiesOnConfirmedAttestation covers the customer-email
+// hook: once an attestation transaction is confirmed on-chain, the
+// configured notifier must be called exactly once with the right outcome
+// (including Refunded=true for a failed redemption, since this deployment's
+// on-chain change always refunds a failed one), and a failing notifier must
+// never prevent the row from reaching redemptionStatusAttested or affect
+// any subsequent tick.
+func TestRedeemWatcherNotifiesOnConfirmedAttestation(t *testing.T) {
+	store := newTestRedeemStore(t)
+	payoutClient := &fakePayoutClient{ref: "batch-notify-1"}
+	settlementMgr := newTestSettlementManager(t, store, payoutClient)
+	node := newFakeRedeemNode()
+	notifier := &fakeNotifier{fail: true}
+	watcher := NewRedeemWatcher(store, node, settlementMgr, nil, time.Second)
+	watcher.WithNotifier(notifier)
+
+	const requestID = "req-notify-1"
+	node.setPending(RedemptionRequest{
+		RequestID:          requestID,
+		Account:            "nhb1testaccount",
+		NHBAmountWei:       "400000000000000000000",
+		DestinationAsset:   "usdttrc20",
+		DestinationAddress: testValidTRC20Address,
+		Status:             "pending",
+		CreatedAt:          1700000000,
+	})
+
+	ctx := context.Background()
+	watcher.runOnce(ctx) // discover -> initiate (Submitted)
+
+	row, err := store.GetRedemptionWatch(ctx, requestID)
+	if err != nil {
+		t.Fatalf("get redemption watch: %v", err)
+	}
+	if _, err := settlementMgr.MarkFailed(ctx, row.SettlementID, "nowpayments payout status: REJECTED"); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	watcher.runOnce(ctx) // initiating -> attest failed (submits attestation)
+
+	row, err = store.GetRedemptionWatch(ctx, requestID)
+	if err != nil {
+		t.Fatalf("get redemption watch: %v", err)
+	}
+	if row.LocalStatus != redemptionStatusAttesting {
+		t.Fatalf("expected attesting after failed settlement is attested, got %s", row.LocalStatus)
+	}
+	if len(notifier.recordedEvents()) != 0 {
+		t.Fatalf("expected no notify call before the attestation tx is confirmed, got %d", len(notifier.recordedEvents()))
+	}
+
+	// Confirm the attestation transaction landed on-chain -- THIS is when
+	// notify should fire, despite the notifier being configured to fail.
+	node.confirmReceipt(row.AttestTxHash)
+	watcher.runOnce(ctx)
+
+	row, err = store.GetRedemptionWatch(ctx, requestID)
+	if err != nil {
+		t.Fatalf("get redemption watch: %v", err)
+	}
+	if row.LocalStatus != redemptionStatusAttested {
+		t.Fatalf("expected attested even though the notifier fails, got %s", row.LocalStatus)
+	}
+
+	events := notifier.recordedEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one notify call, got %d", len(events))
+	}
+	event := events[0]
+	if event.RequestID != requestID {
+		t.Fatalf("unexpected requestId in notify event: %+v", event)
+	}
+	if event.Outcome != redemptionOutcomeFailed {
+		t.Fatalf("expected outcome failed in notify event, got %s", event.Outcome)
+	}
+	if !event.Refunded {
+		t.Fatalf("expected Refunded=true for a failed outcome, got false: %+v", event)
+	}
+
+	// One more tick must not re-notify (already attested, filtered out of
+	// processAttesting's status query) and must not have been disrupted by
+	// the earlier notify failure.
+	watcher.runOnce(ctx)
+	if len(notifier.recordedEvents()) != 1 {
+		t.Fatalf("expected no additional notify calls on a later tick, got %d", len(notifier.recordedEvents()))
+	}
+}
+
+// TestRedeemWatcherNotifiesPaidWithRefundedFalse covers the mirror-image
+// case of TestRedeemWatcherNotifiesOnConfirmedAttestation: a successful
+// ("paid") redemption must notify with Refunded=false and the real
+// PayoutReference -- guarding against a future regression that marks every
+// outcome refunded regardless of status.
+func TestRedeemWatcherNotifiesPaidWithRefundedFalse(t *testing.T) {
+	store := newTestRedeemStore(t)
+	payoutClient := &fakePayoutClient{ref: "batch-paid-1"}
+	settlementMgr := newTestSettlementManager(t, store, payoutClient)
+	node := newFakeRedeemNode()
+	notifier := &fakeNotifier{}
+	watcher := NewRedeemWatcher(store, node, settlementMgr, nil, time.Second)
+	watcher.WithNotifier(notifier)
+
+	const requestID = "req-notify-paid-1"
+	node.setPending(RedemptionRequest{
+		RequestID:          requestID,
+		Account:            "nhb1testaccount",
+		NHBAmountWei:       "400000000000000000000",
+		DestinationAsset:   "usdttrc20",
+		DestinationAddress: testValidTRC20Address,
+		Status:             "pending",
+		CreatedAt:          1700000000,
+	})
+
+	ctx := context.Background()
+	watcher.runOnce(ctx) // discover -> initiate (Submitted)
+
+	row, err := store.GetRedemptionWatch(ctx, requestID)
+	if err != nil {
+		t.Fatalf("get redemption watch: %v", err)
+	}
+	if _, err := settlementMgr.ConfirmSettled(ctx, row.SettlementID, settlement.Receipt{Reference: "wire-confirmed-paid", Operator: "ops"}); err != nil {
+		t.Fatalf("confirm settled: %v", err)
+	}
+
+	watcher.runOnce(ctx) // initiating -> attest paid
+
+	row, err = store.GetRedemptionWatch(ctx, requestID)
+	if err != nil {
+		t.Fatalf("get redemption watch: %v", err)
+	}
+	node.confirmReceipt(row.AttestTxHash)
+	watcher.runOnce(ctx) // attesting -> attested, fires notify
+
+	events := notifier.recordedEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one notify call, got %d", len(events))
+	}
+	event := events[0]
+	if event.Outcome != redemptionOutcomePaid {
+		t.Fatalf("expected outcome paid, got %s", event.Outcome)
+	}
+	if event.Refunded {
+		t.Fatalf("expected Refunded=false for a paid outcome, got true: %+v", event)
+	}
+	if event.PayoutReference != "wire-confirmed-paid" {
+		t.Fatalf("expected the real payout reference in the notify event, got %+v", event)
 	}
 }
 

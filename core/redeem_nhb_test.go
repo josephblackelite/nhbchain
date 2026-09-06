@@ -6,6 +6,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -311,7 +312,7 @@ func TestApplyAttestRedemption_AuthorizedAttestorMarksPaid(t *testing.T) {
 	}
 }
 
-func TestApplyAttestRedemption_MarksFailedWithoutRefund(t *testing.T) {
+func TestApplyAttestRedemption_MarksFailedAndRefundsBurn(t *testing.T) {
 	sp := newStakingStateProcessor(t)
 
 	userKey, err := crypto.GeneratePrivateKey()
@@ -368,15 +369,222 @@ func TestApplyAttestRedemption_MarksFailedWithoutRefund(t *testing.T) {
 		t.Fatalf("expected failed status, got %s", request.Status)
 	}
 
-	// The burn is not automatically reversed on failure -- by design, see
-	// nhbstate.RedemptionStatusFailed's doc comment. The user's balance stays
-	// at 600 (1000 - 400 burned), not refunded to 1000.
+	// The burn IS automatically reversed on failure -- see
+	// applyAttestRedemption's doc comment. The user's balance returns to
+	// 1000 (the 400 burned is credited straight back).
+	user, err := sp.getAccount(userAddr)
+	if err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if user.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected burn to be refunded back to balance 1000, got %s", user.BalanceNHB)
+	}
+
+	supply, err := manager.TokenSupply("NHB")
+	if err != nil {
+		t.Fatalf("load supply: %v", err)
+	}
+	if supply.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected token supply restored to 1000 after refund, got %s", supply)
+	}
+
+	// The refund must be independently auditable via its own event, not
+	// just inferable from the balance/supply delta.
+	var sawRefundEvent, sawRefundSupplyReason bool
+	for _, evt := range sp.Events() {
+		if evt.Type == events.TypeRedemptionRefunded {
+			sawRefundEvent = true
+			if evt.Attributes["requestId"] != requestID || evt.Attributes["nhbAmount"] != "400" {
+				t.Fatalf("unexpected RedemptionRefunded event attributes: %+v", evt.Attributes)
+			}
+		}
+		if evt.Type == events.TypeTokenSupply && evt.Attributes["reason"] == events.SupplyReasonRedeemRefund {
+			sawRefundSupplyReason = true
+		}
+	}
+	if !sawRefundEvent {
+		t.Fatalf("expected a RedemptionRefunded event to be emitted")
+	}
+	if !sawRefundSupplyReason {
+		t.Fatalf("expected a token.supply event with reason=redeem_refund")
+	}
+}
+
+// TestApplyAttestRedemption_PaidNeverRefunds is the mirror-image safety
+// check: a "paid" outcome must never trigger the refund path (the redeemer
+// already received real off-chain funds -- crediting NHB back on top would
+// be an outright double-spend). Guards against a future refactor
+// accidentally widening the status == RedemptionStatusFailed check in
+// applyAttestRedemption.
+func TestApplyAttestRedemption_PaidNeverRefunds(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	userAddr := userKey.PubKey().Address().Bytes()
+	if err := sp.setAccount(userAddr, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	seedTokenSupply(t, sp, big.NewInt(1_000))
+	burnTx := redeemNHBTx(t, 0, big.NewInt(400), "usdttrc20", "dest")
+	if err := burnTx.Sign(userKey.PrivateKey); err != nil {
+		t.Fatalf("sign burn: %v", err)
+	}
+	if err := sp.ApplyTransaction(burnTx); err != nil {
+		t.Fatalf("apply burn: %v", err)
+	}
+	burnHash, err := burnTx.Hash()
+	if err != nil {
+		t.Fatalf("hash burn: %v", err)
+	}
+	requestID := nhbstate.RedemptionRequestID(burnHash)
+
+	attestorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate attestor key: %v", err)
+	}
+	attestorAddr := attestorKey.PubKey().Address().Bytes()
+	if err := sp.setAccount(attestorAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed attestor: %v", err)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.SetRole(RoleSwapPayoutAttestor, attestorAddr); err != nil {
+		t.Fatalf("grant attestor role: %v", err)
+	}
+
+	attestTx := attestRedemptionTx(t, 0, requestID, "paid", "np-payout-1", "")
+	if err := attestTx.Sign(attestorKey.PrivateKey); err != nil {
+		t.Fatalf("sign attest: %v", err)
+	}
+	if err := sp.ApplyTransaction(attestTx); err != nil {
+		t.Fatalf("apply attestation: %v", err)
+	}
+
 	user, err := sp.getAccount(userAddr)
 	if err != nil {
 		t.Fatalf("load user: %v", err)
 	}
 	if user.BalanceNHB.Cmp(big.NewInt(600)) != 0 {
-		t.Fatalf("expected burn to remain unreversed at balance 600, got %s", user.BalanceNHB)
+		t.Fatalf("expected balance to remain 600 (burn stays burned) after a paid attestation, got %s", user.BalanceNHB)
+	}
+	supply, err := manager.TokenSupply("NHB")
+	if err != nil {
+		t.Fatalf("load supply: %v", err)
+	}
+	if supply.Cmp(big.NewInt(600)) != 0 {
+		t.Fatalf("expected supply to remain 600 after a paid attestation, got %s", supply)
+	}
+}
+
+// TestApplyAttestRedemption_CannotDoubleRefund is the core anti-cheat check
+// for this feature: once a request has been attested failed (and refunded),
+// no subsequent attestRedemption transaction for the same requestID -- paid
+// or failed -- may ever credit the account again. This must hold even
+// though the account's balance has changed since the first attestation
+// (guards against a refund path that keyed off "does the request still look
+// pending" rather than the request's own terminal status).
+func TestApplyAttestRedemption_CannotDoubleRefund(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	userAddr := userKey.PubKey().Address().Bytes()
+	if err := sp.setAccount(userAddr, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	seedTokenSupply(t, sp, big.NewInt(1_000))
+	burnTx := redeemNHBTx(t, 0, big.NewInt(400), "usdttrc20", "dest")
+	if err := burnTx.Sign(userKey.PrivateKey); err != nil {
+		t.Fatalf("sign burn: %v", err)
+	}
+	if err := sp.ApplyTransaction(burnTx); err != nil {
+		t.Fatalf("apply burn: %v", err)
+	}
+	burnHash, err := burnTx.Hash()
+	if err != nil {
+		t.Fatalf("hash burn: %v", err)
+	}
+	requestID := nhbstate.RedemptionRequestID(burnHash)
+
+	attestorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate attestor key: %v", err)
+	}
+	attestorAddr := attestorKey.PubKey().Address().Bytes()
+	if err := sp.setAccount(attestorAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed attestor: %v", err)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	if err := manager.SetRole(RoleSwapPayoutAttestor, attestorAddr); err != nil {
+		t.Fatalf("grant attestor role: %v", err)
+	}
+
+	firstAttest := attestRedemptionTx(t, 0, requestID, "failed", "", "nowpayments: destination address rejected")
+	if err := firstAttest.Sign(attestorKey.PrivateKey); err != nil {
+		t.Fatalf("sign first attest: %v", err)
+	}
+	if err := sp.ApplyTransaction(firstAttest); err != nil {
+		t.Fatalf("apply first attestation: %v", err)
+	}
+
+	user, err := sp.getAccount(userAddr)
+	if err != nil {
+		t.Fatalf("load user after first attestation: %v", err)
+	}
+	if user.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected balance 1000 after first (refunding) attestation, got %s", user.BalanceNHB)
+	}
+
+	// User spends some of the refunded balance elsewhere before the second,
+	// illegitimate attestation attempt arrives -- the double-refund guard
+	// must hold regardless of what the balance has since become; it must
+	// never depend on the balance still looking "un-refunded".
+	spendTx := redeemNHBTx(t, 1, big.NewInt(300), "usdttrc20", "dest2")
+	if err := spendTx.Sign(userKey.PrivateKey); err != nil {
+		t.Fatalf("sign spend: %v", err)
+	}
+	if err := sp.ApplyTransaction(spendTx); err != nil {
+		t.Fatalf("apply spend: %v", err)
+	}
+	user, err = sp.getAccount(userAddr)
+	if err != nil {
+		t.Fatalf("load user after spend: %v", err)
+	}
+	if user.BalanceNHB.Cmp(big.NewInt(700)) != 0 {
+		t.Fatalf("expected balance 700 after spending 300 of the refund, got %s", user.BalanceNHB)
+	}
+
+	// A second attestation for the ORIGINAL requestID -- whether a replayed
+	// "failed" (attempting a second refund) or a late/conflicting "paid" --
+	// must be rejected outright, with zero balance/supply effect.
+	secondAttest := attestRedemptionTx(t, 1, requestID, "failed", "", "replayed")
+	if err := secondAttest.Sign(attestorKey.PrivateKey); err != nil {
+		t.Fatalf("sign second attest: %v", err)
+	}
+	if err := sp.ApplyTransaction(secondAttest); err == nil {
+		t.Fatalf("expected rejection when re-attesting an already-failed (refunded) request")
+	}
+
+	user, err = sp.getAccount(userAddr)
+	if err != nil {
+		t.Fatalf("load user after rejected second attestation: %v", err)
+	}
+	if user.BalanceNHB.Cmp(big.NewInt(700)) != 0 {
+		t.Fatalf("expected balance to remain 700 (no double refund), got %s", user.BalanceNHB)
+	}
+
+	supply, err := manager.TokenSupply("NHB")
+	if err != nil {
+		t.Fatalf("load supply: %v", err)
+	}
+	// 1000 seeded -> 400 burned (600) -> 400 refunded (1000) -> 300 burned
+	// again (700). A double refund would push this to 1100.
+	if supply.Cmp(big.NewInt(700)) != 0 {
+		t.Fatalf("expected token supply 700 (no double refund), got %s", supply)
 	}
 }
 

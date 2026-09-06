@@ -15,6 +15,11 @@ const (
 	SupplyReasonMint = "mint"
 	// SupplyReasonBurn identifies burn driven supply decreases.
 	SupplyReasonBurn = "burn"
+	// SupplyReasonRedeemRefund identifies a supply increase that exactly
+	// reverses an earlier RedeemNHB burn once its off-chain payout is
+	// attested failed -- distinct from SupplyReasonMint so an auditor can
+	// tell a fresh mint apart from a burn being undone.
+	SupplyReasonRedeemRefund = "redeem_refund"
 )
 
 // TokenSupply captures a supply delta for a fungible token.

@@ -268,23 +268,70 @@ func (m *Manager) Initiate(ctx context.Context, req InitiateRequest) (storage.Se
 	}
 }
 
+// submittedPersistRetries/Backoff bound submittedLocked's best-effort retry
+// of the post-CreatePayout persist below. This is a real, already-verified
+// (2FA-completed, per HTTPPayoutClient.CreatePayout) payout at this point --
+// unlike every other persist in this package, silently giving up after one
+// attempt here is what let a stuck settlement's on-disk state (Pending,
+// empty ExternalRef) become indistinguishable from "CreatePayout was never
+// even called", which is exactly the ambiguity an automated downstream
+// reconciler (payments-gateway's reconcileStuckManualReview) cannot safely
+// resolve on its own. A short in-process retry meaningfully shrinks (not
+// eliminates -- see this function's doc comment for the residual case) how
+// often a merely-transient local storage error (lock contention, a brief
+// disk hiccup) produces that ambiguous state at all.
+const submittedPersistRetries = 5
+const submittedPersistBackoff = 200 * time.Millisecond
+
 // submittedLocked persists a record after a successful CreatePayout call.
-// Callers must hold m.mu. If the persist itself fails, the external payout
-// has already happened for real -- the returned error embeds the external
-// reference directly (rather than discarding it) so it reaches whatever
-// logs/audit trail the caller writes to, and the in-memory record (with the
-// external ref and submitted status already set) is returned rather than a
-// zero value, so a caller can still recover and display it even though the
-// database write failed.
+// Callers must hold m.mu. If every retry of the persist still fails, the
+// external payout has already happened for real -- the returned error
+// embeds the external reference directly (rather than discarding it) so it
+// reaches whatever logs/audit trail the caller writes to, and the in-memory
+// record (with the external ref and submitted status already set) is
+// returned rather than a zero value, so a caller can still recover and
+// display it even though the database write failed.
+//
+// IMPORTANT residual risk this retry reduces but does not eliminate: if the
+// process is killed (not just a transient write error) at any point between
+// CreatePayout returning and this persist finally succeeding, the on-disk
+// settlement record is left exactly as Initiate's earlier SaveSettlement
+// call wrote it -- Pending, empty ExternalRef -- indistinguishable from
+// "CreatePayout was never called at all", even though the real payout has
+// already been dispatched and 2FA-verified. No purely-local signal can
+// disambiguate this case; a caller reconciling a stuck settlement long
+// after the fact MUST NOT treat "still Pending, no ExternalRef" as proof no
+// payout occurred without independently corroborating against NOWPayments'
+// own records (or a human operator's judgment) -- see
+// reconcileStuckManualReview's doc comment in
+// services/payments-gateway/redeem_watcher.go for how that reconciler
+// handles this.
 func (m *Manager) submittedLocked(ctx context.Context, record storage.SettlementRecord, result PayoutResult) (storage.SettlementRecord, error) {
 	record.ExternalRef = strings.TrimSpace(result.ExternalRef)
 	record.Status = string(StatusSubmitted)
 	record.Detail = "{}"
-	record.UpdatedAt = m.now()
-	if err := m.store.SaveSettlement(ctx, record); err != nil {
-		return record, fmt.Errorf("settlement: CRITICAL: payout for settlement %s already submitted (external_ref=%s) but failed to persist -- manual reconciliation required: %w", record.ID, record.ExternalRef, err)
+	var lastErr error
+retryLoop:
+	for attempt := 0; attempt < submittedPersistRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				lastErr = ctx.Err()
+				break retryLoop
+			case <-time.After(submittedPersistBackoff):
+			}
+		}
+		// Stamped fresh on every attempt (not once before the loop) so a
+		// write that only succeeds on a retry persists the time it actually
+		// succeeded, not the time the loop started.
+		record.UpdatedAt = m.now()
+		if err := m.store.SaveSettlement(ctx, record); err != nil {
+			lastErr = err
+			continue
+		}
+		return record, nil
 	}
-	return record, nil
+	return record, fmt.Errorf("settlement: CRITICAL: payout for settlement %s already submitted (external_ref=%s) but failed to persist after %d attempts -- manual reconciliation required, and this settlement's on-disk state cannot be trusted to mean \"no payout occurred\": %w", record.ID, record.ExternalRef, submittedPersistRetries, lastErr)
 }
 
 // failLocked persists a failure outcome. Callers must hold m.mu.

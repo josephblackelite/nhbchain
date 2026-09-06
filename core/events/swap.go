@@ -34,6 +34,9 @@ const (
 	// TypeRedemptionAttested is emitted when an authorized attestor confirms
 	// or fails a pending redemption's off-chain payout.
 	TypeRedemptionAttested = "swap.redeem.attested"
+	// TypeRedemptionRefunded is emitted when a failed redemption's burned
+	// NHB is credited back to the original redeemer.
+	TypeRedemptionRefunded = "swap.redeem.refunded"
 )
 
 // RedeemNHBRequested captures a user-initiated NHB burn requesting an
@@ -98,6 +101,35 @@ func (r RedemptionAttested) Event() *types.Event {
 		attrs["failureReason"] = trimmed
 	}
 	return &types.Event{Type: TypeRedemptionAttested, Attributes: attrs}
+}
+
+// RedemptionRefunded captures a failed redemption's NHB burn being reversed:
+// the exact amount originally burned (read from the immutable, on-chain
+// StoredRedemptionRequest, never attacker/attestor-suppliable) is credited
+// back to the original redeemer's balance.
+type RedemptionRefunded struct {
+	RequestID string
+	Account   [20]byte
+	NHBAmount *big.Int
+}
+
+// EventType returns the canonical event identifier.
+func (RedemptionRefunded) EventType() string { return TypeRedemptionRefunded }
+
+// Event renders the redemption-refund event payload.
+func (r RedemptionRefunded) Event() *types.Event {
+	amount := big.NewInt(0)
+	if r.NHBAmount != nil {
+		amount = new(big.Int).Set(r.NHBAmount)
+	}
+	attrs := map[string]string{
+		"requestId": strings.TrimSpace(r.RequestID),
+		"nhbAmount": amount.String(),
+	}
+	if r.Account != ([20]byte{}) {
+		attrs["account"] = crypto.MustNewAddress(crypto.NHBPrefix, r.Account[:]).String()
+	}
+	return &types.Event{Type: TypeRedemptionRefunded, Attributes: attrs}
 }
 
 // BuyZNHBRecorded captures an admin-wallet-mediated ZNHB purchase: NHB moves

@@ -175,6 +175,27 @@ type RedeemWatcher struct {
 	// all of them has no meaningful cost and is simplest to reason about
 	// correctly.
 	mu sync.Mutex
+
+	// stuckReviewSafetyMargin gates reconcileStuckManualReview -- see its
+	// doc comment. Defaults to defaultStuckReviewSafetyMargin; override via
+	// WithStuckReviewSafetyMargin.
+	stuckReviewSafetyMargin time.Duration
+
+	// stuckReviewAlerted tracks, per requestID, the last time
+	// reconcileStuckManualReview logged its CRITICAL action-needed alert --
+	// so an unresolved row re-alerts periodically (stuckReviewAlertInterval)
+	// rather than either spamming every tick or (the bug this replaces)
+	// silently auto-acting exactly once. In-memory only and reset on
+	// restart is intentional: a restart is itself a reasonable moment to
+	// re-surface any still-unresolved manual-review item. Only ever
+	// accessed from runOnce's locked pipeline (single-threaded), so no
+	// separate mutex is needed.
+	stuckReviewAlerted map[string]time.Time
+
+	// notifier reports a redemption's confirmed on-chain outcome to nhbportal
+	// for customer email notification. Optional (nil is a valid, inert
+	// state) -- see WithNotifier and processAttesting's call site.
+	notifier RedemptionNotifier
 }
 
 // NewRedeemWatcher constructs a RedeemWatcher. interval <= 0 falls back to
@@ -186,7 +207,42 @@ func NewRedeemWatcher(store *SQLiteStore, node NodeClient, mgr *settlement.Manag
 	if interval <= 0 {
 		interval = defaultRedeemWatcherInterval
 	}
-	return &RedeemWatcher{store: store, node: node, settlement: mgr, statusChecker: statusChecker, interval: interval, nowFn: time.Now}
+	return &RedeemWatcher{
+		store:                   store,
+		node:                    node,
+		settlement:              mgr,
+		statusChecker:           statusChecker,
+		interval:                interval,
+		nowFn:                   time.Now,
+		stuckReviewSafetyMargin: defaultStuckReviewSafetyMargin,
+	}
+}
+
+// WithStuckReviewSafetyMargin overrides how long a stuck_manual_review row's
+// settlement must sit exactly Pending (no external ref) before
+// reconcileStuckManualReview will auto-resolve it -- see that method's doc
+// comment for the safety reasoning behind the default. Mirrors settlement.
+// Manager.WithClock/WithIDFunc's post-construction-override shape so every
+// existing NewRedeemWatcher call site (13 across this package's tests, plus
+// main.go) keeps working unchanged.
+func (w *RedeemWatcher) WithStuckReviewSafetyMargin(d time.Duration) {
+	if w == nil || d <= 0 {
+		return
+	}
+	w.stuckReviewSafetyMargin = d
+}
+
+// WithNotifier wires an optional RedemptionNotifier -- see processAttesting's
+// call site for exactly when and how it's invoked, and its own doc comment
+// for why a failure there is logged, never retried, and never allowed to
+// affect the state machine. A nil argument (the default, e.g. no notify URL
+// configured) leaves the watcher exactly as it behaved before this feature
+// existed.
+func (w *RedeemWatcher) WithNotifier(n RedemptionNotifier) {
+	if w == nil {
+		return
+	}
+	w.notifier = n
 }
 
 // Recover runs once at startup, BEFORE Run's ticker loop starts. Any row
@@ -197,7 +253,12 @@ func NewRedeemWatcher(store *SQLiteStore, node NodeClient, mgr *settlement.Manag
 // silently ignored. This is the single most safety-critical behavior in the
 // whole feature: an untested version of this could either double-pay a
 // redeemer (auto-retry) or strand a real payout unattested forever (ignore
-// it).
+// it). A row parked here by this method is not necessarily stuck forever,
+// though: every subsequent tick's reconcileStuckManualReview re-examines it
+// and safely auto-resolves the common case (settlement never even reached
+// NOWPayments) once enough time has passed -- see that method's doc
+// comment. Only a genuinely ambiguous row (settlement has a real external
+// reference) waits on a human indefinitely.
 func (w *RedeemWatcher) Recover(ctx context.Context) error {
 	stuck, err := w.store.ListRedemptionWatchByStatus(ctx, redemptionStatusInitiating)
 	if err != nil {
@@ -234,21 +295,175 @@ func (w *RedeemWatcher) Run(ctx context.Context) {
 
 // runOnce processes one full tick: discover newly-burned requests, then
 // advance every row currently awaiting action. Never called concurrently
-// with itself (Run's single select loop guarantees this), but IS
-// serialized against ConfirmPayout/FailPayout/RetryPayout via w.mu -- see
-// its doc comment.
+// with itself (Run's single select loop guarantees this). The locked
+// pipeline (runLockedTick) is serialized against ConfirmPayout/FailPayout/
+// RetryPayout via w.mu -- see its doc comment -- but customer-notification
+// delivery deliberately happens AFTER that lock is released (see
+// processAttesting's doc comment): an audit found that firing Notify() while
+// still holding w.mu let a slow or hanging notifier block every admin
+// action and every other row in the same tick, contradicting this
+// feature's own "never blocks the state machine" design.
 func (w *RedeemWatcher) runOnce(ctx context.Context) {
+	events := w.runLockedTick(ctx)
+	if w.notifier == nil {
+		return
+	}
+	for _, event := range events {
+		if err := w.notifier.Notify(ctx, event); err != nil {
+			log.Printf("payments-gateway: redeem watcher: notify request %s outcome (non-critical, customer email may not have been sent): %v", event.RequestID, err)
+		}
+	}
+}
+
+// runLockedTick holds w.mu for exactly the state-mutating part of a tick and
+// returns any confirmed-attestation events still needing a customer
+// notification -- see runOnce's doc comment for why notification delivery
+// itself happens outside this lock.
+func (w *RedeemWatcher) runLockedTick(ctx context.Context) []RedemptionOutcomeEvent {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	pending, err := w.node.ListPendingRedemptions(ctx)
 	if err != nil {
 		log.Printf("payments-gateway: redeem watcher: list pending redemptions: %v", err)
-		return
+		return nil
 	}
 	w.discoverNew(ctx, pending)
 	w.processDiscovered(ctx)
 	w.processInitiating(ctx)
-	w.processAttesting(ctx)
+	events := w.processAttesting(ctx)
+	w.reconcileStuckManualReview(ctx)
+	return events
+}
+
+// reconcileStuckManualReview does NOT auto-resolve anything on-chain -- see
+// the correction below; it only detects and loudly, repeatedly (once per
+// stuckReviewAlertInterval, not once and never again) surfaces a
+// stuck_manual_review row (see Recover's doc comment for how a row gets
+// here) once its pattern is CONSISTENT WITH -- but does not prove -- no
+// NOWPayments payout ever having been created for it. Before this method
+// existed, the only path to resolving one was an operator manually
+// inspecting the redemption_settlements table and the NOWPayments dashboard
+// by hand with no prompting at all; this method automates the DIAGNOSIS
+// (so an operator doesn't need to know to go looking) while leaving the
+// ACTION -- which is genuinely irreversible and money-affecting -- to the
+// existing, already-authenticated fail-payout admin endpoint.
+//
+// CORRECTED, 2026-09-06, by an adversarial security audit: an earlier
+// version of this method called settlement.MarkFailed + attested "failed"
+// (triggering core/state_transition.go's applyAttestRedemption on-chain
+// refund) automatically once this pattern held for stuckReviewSafetyMargin.
+// That was a real, confirmed bug: settlement.Manager.Initiate's own
+// submittedLocked step (services/swapd/settlement/settlement.go) persists
+// Submitted+ExternalRef ONLY AFTER CreatePayout already returned success --
+// and since NOWPayments 2FA/TOTP is configured live, CreatePayout returning
+// success means the real payout was ALREADY DISPATCHED AND VERIFIED, not
+// merely "batch created". If THAT persist step itself fails or the process
+// is killed in the narrow window between CreatePayout returning and the
+// persist completing (submittedLocked now retries this -- see its doc
+// comment -- but a retry only shrinks, never eliminates, this window), the
+// on-disk settlement is left at Pending/no-ExternalRef: bit-for-bit
+// indistinguishable from "CreatePayout was never called at all". No purely
+// local signal can tell these two cases apart. Auto-triggering a refund on
+// this signal could therefore credit NHB back on top of a real payout that
+// already went out -- a genuine double-credit reachable through an ordinary
+// infrastructure hiccup, not just a compromised attestor key. There is
+// currently no NOWPayments API available to this codebase that can search
+// for a payout by anything other than a batch ID we don't have in this
+// exact failure case, so this ambiguity cannot be safely resolved
+// automatically today -- a human checking NOWPayments' own dashboard (or
+// waiting for a delayed real response to surface some other way) is the
+// only sound resolution, exactly as Recover()'s original, more
+// conservative design already assumed before this feature first added
+// (then had to remove) automatic action here.
+//
+// EXTENDED, same day, by a follow-up verification pass on the fix above: the
+// first corrected version only ever alerted on the "safe-looking" pattern
+// (pending, no external ref, aged past the margin). A row whose settlement
+// carries a REAL external reference -- the genuinely higher-stakes case,
+// since a real payout may already be dispatched or fully verified -- got
+// exactly one CRITICAL log line from Recover() at the moment it was first
+// parked, then silence forever: it could sit unresolved indefinitely with
+// zero further prompting, undermining the entire point of this alerting
+// mechanism for precisely the case where getting it wrong matters most. This
+// method now alerts on every stuck_manual_review row needing attention,
+// with a message tailored to what's actually known about it, all on the
+// same rate-limited cadence.
+func (w *RedeemWatcher) reconcileStuckManualReview(ctx context.Context) {
+	rows, err := w.store.ListRedemptionWatchByStatus(ctx, redemptionStatusStuckManualReview)
+	if err != nil {
+		log.Printf("payments-gateway: redeem watcher: list stuck_manual_review rows: %v", err)
+		return
+	}
+	now := w.nowFn().UTC()
+
+	// Prune resolved rows out of the alert map -- once a requestID is no
+	// longer stuck_manual_review (an operator acted on it), there is no
+	// reason to keep remembering it for the rest of this process's
+	// lifetime. Keeps this map's size bounded by "currently stuck", not
+	// "ever been stuck since the last restart".
+	if len(w.stuckReviewAlerted) > 0 {
+		stillStuck := make(map[string]struct{}, len(rows))
+		for _, row := range rows {
+			stillStuck[row.RequestID] = struct{}{}
+		}
+		for id := range w.stuckReviewAlerted {
+			if _, ok := stillStuck[id]; !ok {
+				delete(w.stuckReviewAlerted, id)
+			}
+		}
+	}
+
+	for _, row := range rows {
+		if strings.TrimSpace(row.SettlementID) == "" {
+			continue
+		}
+		rec, err := w.store.GetSettlement(ctx, row.SettlementID)
+		if err != nil {
+			log.Printf("payments-gateway: redeem watcher: load settlement %s for stuck request %s: %v", row.SettlementID, row.RequestID, err)
+			continue
+		}
+
+		hasRef := strings.TrimSpace(rec.ExternalRef) != ""
+		pending := rec.Status == string(settlement.StatusPending)
+		agedPastMargin := now.Sub(rec.CreatedAt.UTC()) >= w.stuckReviewSafetyMargin
+
+		var message string
+		switch {
+		case pending && !hasRef && !agedPastMargin:
+			// Still within the window a genuinely in-flight CreatePayout call
+			// could occupy -- Recover() already logged once when this row was
+			// first parked; no need to nag again yet.
+			continue
+		case pending && !hasRef && agedPastMargin:
+			message = fmt.Sprintf("this pattern is CONSISTENT WITH (but does not prove) no NOWPayments payout ever having been dispatched -- has been stuck for over %s with its settlement still exactly pending and no external reference. Verify directly against NOWPayments (dashboard or GetPayoutStatus, if a batch ID can be found any other way) before acting. If confirmed no payout occurred: POST /admin/redemptions/%s/fail-payout to close it out -- this will automatically refund the burned NHB on-chain. If a payout DID occur: POST /admin/redemptions/%s/confirm-payout instead.", w.stuckReviewSafetyMargin.Round(time.Minute), row.RequestID, row.RequestID)
+		case pending && hasRef:
+			// The genuinely ambiguous, highest-stakes case: CreatePayout's
+			// HTTP call actually completed and NOWPayments acknowledged a
+			// real batch (external ref present) -- a payout may already be
+			// dispatched and even fully verified. This needs a human to
+			// check NOWPayments directly, not a timer; alerted on every
+			// cycle (rate-limited the same as every other case) rather than
+			// only once at the moment Recover() first parked it, so it can
+			// never silently fall out of view for the rest of this
+			// process's lifetime.
+			message = fmt.Sprintf("its settlement has a REAL external reference (%s) -- a real payout may already be dispatched or fully verified by NOWPayments. Check NOWPayments' dashboard/GetPayoutStatus for this reference NOW. If verified paid: POST /admin/redemptions/%s/confirm-payout. If verified NOT paid/rejected: POST /admin/redemptions/%s/fail-payout (this will automatically refund the burned NHB on-chain).", rec.ExternalRef, row.RequestID, row.RequestID)
+		default:
+			// Settlement already resolved (Settled/Failed) by some other
+			// path (e.g. a direct settlement-level action) but this row was
+			// never resumed back out of stuck_manual_review -- also urgent:
+			// the local bookkeeping has fallen behind a real outcome.
+			message = fmt.Sprintf("its settlement already resolved to status=%q but this request was never resumed out of stuck_manual_review -- call the matching admin endpoint (/admin/redemptions/%s/confirm-payout or /fail-payout) to bring local state back in sync.", rec.Status, row.RequestID)
+		}
+
+		if last, alerted := w.stuckReviewAlerted[row.RequestID]; alerted && now.Sub(last) < stuckReviewAlertInterval {
+			continue
+		}
+		if w.stuckReviewAlerted == nil {
+			w.stuckReviewAlerted = make(map[string]time.Time)
+		}
+		w.stuckReviewAlerted[row.RequestID] = now
+		log.Printf("payments-gateway: redeem watcher: CRITICAL: ACTION NEEDED: redemption request %s (settlement %s, account %s, %s NHB) -- %s Never guess.", row.RequestID, rec.ID, row.Account, row.PayoutAmountDecimal, message)
+	}
 }
 
 // discoverNew inserts a local tracking row (status discovered) for every
@@ -527,12 +742,23 @@ func (w *RedeemWatcher) pollSubmitted(ctx context.Context, row RedemptionWatchRe
 
 // processAttesting polls for confirmation of every already-submitted
 // attestation transaction, marking the row attested once it lands.
-func (w *RedeemWatcher) processAttesting(ctx context.Context) {
+// processAttesting returns one RedemptionOutcomeEvent per row that newly
+// reached redemptionStatusAttested THIS call -- the caller (runOnce) fires
+// notifications for these AFTER releasing w.mu, so a slow or hanging
+// notifier can never block ConfirmPayout/FailPayout/RetryPayout (which also
+// need w.mu) or delay processing any other row in the same tick. See
+// RedemptionNotifier's doc comment for why a notify failure itself is only
+// ever logged, never allowed to affect anything on-chain -- by the time an
+// event is returned here, the on-chain outcome (and, for a failed
+// redemption, its refund -- see core/state_transition.go's
+// applyAttestRedemption) is already fully durable.
+func (w *RedeemWatcher) processAttesting(ctx context.Context) []RedemptionOutcomeEvent {
 	rows, err := w.store.ListRedemptionWatchByStatus(ctx, redemptionStatusAttesting)
 	if err != nil {
 		log.Printf("payments-gateway: redeem watcher: list attesting rows: %v", err)
-		return
+		return nil
 	}
+	var events []RedemptionOutcomeEvent
 	for _, row := range rows {
 		if strings.TrimSpace(row.AttestTxHash) == "" {
 			continue
@@ -552,7 +778,20 @@ func (w *RedeemWatcher) processAttesting(ctx context.Context) {
 			continue
 		}
 		log.Printf("payments-gateway: redeem watcher: request %s attestation confirmed (outcome=%s, tx=%s)", row.RequestID, row.Outcome, row.AttestTxHash)
+
+		if w.notifier != nil {
+			events = append(events, RedemptionOutcomeEvent{
+				RequestID:       row.RequestID,
+				Account:         row.Account,
+				Outcome:         row.Outcome,
+				NHBAmountWei:    row.NHBAmountWei,
+				PayoutReference: row.PayoutReference,
+				FailureReason:   row.FailureReason,
+				Refunded:        row.Outcome == redemptionOutcomeFailed,
+			})
+		}
 	}
+	return events
 }
 
 // attestOutcome builds, signs, and submits an attestRedemption transaction

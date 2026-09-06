@@ -125,9 +125,16 @@ const (
 	// confirmed by an authorized attestor.
 	RedemptionStatusPaid RedemptionStatus = "paid"
 	// RedemptionStatusFailed marks a request whose off-chain payout could
-	// not be completed. The underlying NHB burn is NOT automatically
-	// reversed -- this status exists to surface the failure for manual
-	// operator reconciliation, not to trigger an automated refund.
+	// not be completed. StateProcessor.applyAttestRedemption (core/state_
+	// transition.go) automatically reverses the underlying NHB burn the
+	// instant a request transitions into this status -- see that function's
+	// doc comment. This package only records the terminal status itself;
+	// UpdateRedemptionStatus's one-shot pending->terminal transition (each
+	// requestID can leave RedemptionStatusPending at most once, ever) is
+	// exactly what makes that refund safe to trigger unconditionally on
+	// every transition into Failed, with no separate "already refunded"
+	// flag needed: a second attestation for the same requestID always fails
+	// here, before any refund logic downstream ever runs again.
 	RedemptionStatusFailed RedemptionStatus = "failed"
 )
 

@@ -70,6 +70,23 @@ type Config struct {
 	// RedeemWatcherInterval is the redeem watcher's ticker period, mirroring
 	// reconcileInterval's role for the deposit-side reconciler.
 	RedeemWatcherInterval time.Duration
+
+	// StuckReviewSafetyMargin configures RedeemWatcher.
+	// reconcileStuckManualReview's auto-resolution delay -- see that
+	// method's doc comment. Defaults to defaultStuckReviewSafetyMargin;
+	// mainly an operator escape hatch (e.g. to disable auto-reconciliation
+	// entirely with a very large value while investigating a new failure
+	// mode) rather than something most deployments need to touch.
+	StuckReviewSafetyMargin time.Duration
+
+	// RedemptionNotifyURL/Secret configure the optional customer-email
+	// notification hook (see RedemptionNotifier) -- nhbportal's
+	// /api/internal/redemption-notify endpoint. Both optional: if either is
+	// unset, main.go never constructs a notifier and the watcher behaves
+	// exactly as it did before this feature existed (on-chain state machine
+	// unaffected either way -- see RedemptionNotifier's doc comment).
+	RedemptionNotifyURL    string
+	RedemptionNotifySecret string
 }
 
 const (
@@ -99,6 +116,9 @@ const (
 	envPayoutNowBaseURL      = "PAY_GATEWAY_PAYOUT_NOW_BASE"
 	envPayoutNowTOTPSecret   = "PAY_GATEWAY_PAYOUT_NOW_TOTP_SECRET"
 	envRedeemWatcherInterval = "PAY_GATEWAY_REDEEM_WATCHER_INTERVAL"
+	envStuckReviewMargin     = "PAY_GATEWAY_STUCK_REVIEW_SAFETY_MARGIN"
+	envRedemptionNotifyURL   = "PAY_GATEWAY_REDEMPTION_NOTIFY_URL"
+	envRedemptionNotifySec   = "PAY_GATEWAY_REDEMPTION_NOTIFY_SECRET"
 )
 
 // defaultRedeemWatcherInterval is how often the redeem watcher polls
@@ -108,6 +128,20 @@ const (
 // the attestor's own tx submissions, so a slightly tighter default keeps
 // redeemer-visible latency reasonable without hammering the node.
 const defaultRedeemWatcherInterval = 30 * time.Second
+
+// defaultStuckReviewSafetyMargin is RedeemWatcher.reconcileStuckManualReview's
+// default auto-resolution delay -- see that method's doc comment for why 2
+// hours is a provably safe margin (comfortably beyond both
+// HTTPPayoutClient's 15s call timeout and NOWPayments' own ~1h auto-reject
+// window for an unverified payout batch), not an arbitrary guess.
+const defaultStuckReviewSafetyMargin = 2 * time.Hour
+
+// stuckReviewAlertInterval bounds how often
+// RedeemWatcher.reconcileStuckManualReview re-logs its CRITICAL action-
+// needed alert for the same still-unresolved requestID -- frequent enough
+// that a real incident isn't lost in log volume over a long shift,
+// infrequent enough not to spam.
+const stuckReviewAlertInterval = 1 * time.Hour
 
 // LoadConfigFromEnv resolves configuration from environment variables with sane defaults.
 func LoadConfigFromEnv() (*Config, error) {
@@ -144,6 +178,9 @@ func LoadConfigFromEnv() (*Config, error) {
 		PayoutNowPaymentsBaseURL:    getenvDefault(envPayoutNowBaseURL, "https://api.nowpayments.io/v1"),
 		PayoutNowPaymentsTOTPSecret: strings.TrimSpace(os.Getenv(envPayoutNowTOTPSecret)),
 		RedeemWatcherInterval:       parseDurationDefault(envRedeemWatcherInterval, defaultRedeemWatcherInterval),
+		StuckReviewSafetyMargin:     parseDurationDefault(envStuckReviewMargin, defaultStuckReviewSafetyMargin),
+		RedemptionNotifyURL:         strings.TrimSpace(os.Getenv(envRedemptionNotifyURL)),
+		RedemptionNotifySecret:      strings.TrimSpace(os.Getenv(envRedemptionNotifySec)),
 	}
 
 	if cfg.NodeURL == "" {

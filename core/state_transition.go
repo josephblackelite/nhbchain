@@ -5256,11 +5256,26 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 // applyAttestRedemption lets an address holding RoleSwapPayoutAttestor
 // confirm or fail a pending redemption's off-chain payout. This is how
 // payments-gateway reports the outcome of its NOWPayments payout call back
-// on-chain. Failure does NOT automatically refund the burned NHB -- see
-// nhbstate.RedemptionStatusFailed's doc comment; that requires manual
-// operator reconciliation by design, since automating a reversal of an
-// already-irreversible burn is a separately-risky mechanism this does not
-// attempt.
+// on-chain. A failure automatically refunds the burned NHB back to the
+// original redeemer in this same transaction -- see refundFailedRedemption
+// below and nhbstate.RedemptionStatusFailed's doc comment for why this is
+// safe to do unconditionally, exactly once, with no separate "already
+// refunded" flag: manager.UpdateRedemptionStatus is a one-shot pending->
+// terminal transition, so any second attestRedemption call for a requestID
+// that has already gone to paid or failed is rejected there, before this
+// function ever reaches the refund step again.
+//
+// The attestor is trusted to report the truth (this is the same trust
+// already required for a "paid" attestation, which likewise cannot be
+// independently verified on-chain) -- a compromised attestor key could
+// falsely attest "failed" for a request that was, in reality, already paid
+// out off-chain, refunding NHB the redeemer already received in USDT. This
+// is a real escalation in what a compromised attestor key can do (from
+// "the record is wrong" to "a double-spend"), not a new class of risk: the
+// attestor role already had unilateral, unverifiable control over every
+// redemption's terminal outcome before this change. Mitigate at the
+// operational layer (key custody, anomaly monitoring on refund volume),
+// not by weakening this one-shot on-chain guarantee.
 func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	manager := nhbstate.NewManager(sp.Trie)
 	if !manager.HasRole(RoleSwapPayoutAttestor, sender) {
@@ -5286,10 +5301,40 @@ func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []
 	if status == nhbstate.RedemptionStatusPaid && strings.TrimSpace(payload.PayoutReference) == "" {
 		return fmt.Errorf("attestRedemption: payoutReference required when marking paid: %w", ErrRedeemInvalidPayload)
 	}
+
+	// Read the original request BEFORE transitioning it. Account and
+	// NHBAmountWei are frozen at burn time (PutRedemptionRequest is
+	// create-once; UpdateRedemptionStatus never touches either field), so
+	// this pre-read can never be influenced by anything in this call --
+	// it's exactly the amount that was actually burned, for exactly the
+	// account that burned it, regardless of what the attestor's payload
+	// says. Nothing writes to state between this read and the
+	// UpdateRedemptionStatus call below (state transitions apply
+	// sequentially, never concurrently), so there is no risk of it
+	// observing stale data.
+	stored, exists, err := manager.GetRedemptionRequest(requestID)
+	if err != nil {
+		return fmt.Errorf("attestRedemption: load request: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("attestRedemption: request %s not found: %w", requestID, ErrRedeemInvalidPayload)
+	}
+
 	settledAt := uint64(sp.blockTimestamp().Unix())
 	if err := manager.UpdateRedemptionStatus(requestID, status, settledAt, payload.PayoutReference, payload.FailureReason); err != nil {
 		return fmt.Errorf("attestRedemption: %w", err)
 	}
+
+	// Refund: see this function's doc comment for why it is safe to run
+	// unconditionally here, exactly once per requestID.
+	var refundedAmount *big.Int
+	if status == nhbstate.RedemptionStatusFailed {
+		refundedAmount, err = sp.refundFailedRedemption(manager, stored, requestID)
+		if err != nil {
+			return fmt.Errorf("attestRedemption: refund: %w", err)
+		}
+	}
+
 	if err := sp.incrementNativeAccountNonce(sender); err != nil {
 		return fmt.Errorf("attestRedemption: increment nonce: %w", err)
 	}
@@ -5306,7 +5351,55 @@ func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []
 	if evt != nil {
 		sp.AppendEvent(evt)
 	}
+	if refundedAmount != nil {
+		var acctAddr [20]byte
+		copy(acctAddr[:], stored.Account)
+		if refundEvt := (events.RedemptionRefunded{
+			RequestID: requestID,
+			Account:   acctAddr,
+			NHBAmount: refundedAmount,
+		}.Event()); refundEvt != nil {
+			sp.AppendEvent(refundEvt)
+		}
+	}
 	return nil
+}
+
+// refundFailedRedemption credits requestID's original redeemer with exactly
+// the NHB amount recorded at burn time (stored.NHBAmountWei, immutable since
+// PutRedemptionRequest -- never the attestor's own payload) and mirrors the
+// credit into the tracked NHB total supply, exactly reversing
+// applyRedeemNHB's burn. Callers must have already durably transitioned the
+// request to RedemptionStatusFailed via manager.UpdateRedemptionStatus in
+// this same call -- see applyAttestRedemption's doc comment for why that
+// makes this exactly-once regardless of how many attestRedemption
+// transactions are ever submitted for the same requestID.
+func (sp *StateProcessor) refundFailedRedemption(manager *nhbstate.Manager, stored *nhbstate.StoredRedemptionRequest, requestID string) (*big.Int, error) {
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(stored.NHBAmountWei), 10)
+	if !ok || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid stored NHB amount %q for request %s", stored.NHBAmountWei, requestID)
+	}
+	if len(stored.Account) == 0 {
+		return nil, fmt.Errorf("missing account for request %s", requestID)
+	}
+	account, err := sp.getAccount(stored.Account)
+	if err != nil {
+		return nil, fmt.Errorf("load account: %w", err)
+	}
+	if account.BalanceNHB == nil {
+		account.BalanceNHB = big.NewInt(0)
+	}
+	account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	if err := sp.setAccount(stored.Account, account); err != nil {
+		return nil, fmt.Errorf("persist account: %w", err)
+	}
+
+	totalSupply, err := manager.AdjustTokenSupply("NHB", amount)
+	if err != nil {
+		return nil, fmt.Errorf("adjust token supply: %w", err)
+	}
+	sp.recordTokenSupplyChange("NHB", amount, totalSupply, events.SupplyReasonRedeemRefund)
+	return amount, nil
 }
 
 func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {

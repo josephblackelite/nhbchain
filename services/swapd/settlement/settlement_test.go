@@ -365,24 +365,77 @@ func TestMarkFailedFromPendingOrSubmitted(t *testing.T) {
 }
 
 // failingSaveStore wraps a fakeStore and lets tests inject a SaveSettlement
-// failure on a specific call, to prove the manager preserves the in-memory
-// record (rather than discarding it) when persistence fails.
+// failure starting at a specific call, to prove the manager preserves the
+// in-memory record (rather than discarding it) when persistence fails, and
+// (via permanent=false) that a merely-transient failure is recovered by
+// submittedLocked's retry rather than needing every subsequent call to
+// succeed by luck.
 type failingSaveStore struct {
 	*fakeStore
 	failOnCall int
+	permanent  bool // if true, every call >= failOnCall fails; if false, only call == failOnCall fails
 	calls      int
 }
 
 func (f *failingSaveStore) SaveSettlement(ctx context.Context, record storage.SettlementRecord) error {
 	f.calls++
-	if f.calls == f.failOnCall {
+	if f.permanent {
+		if f.calls >= f.failOnCall {
+			return errors.New("simulated storage failure")
+		}
+	} else if f.calls == f.failOnCall {
 		return errors.New("simulated storage failure")
 	}
 	return f.fakeStore.SaveSettlement(ctx, record)
 }
 
+// TestInitiateNowPaymentsTransientPersistFailureRecoveredByRetry covers the
+// double-credit gap an external security audit found in this package's
+// earlier behavior: a single transient SaveSettlement failure immediately
+// after a real, already-verified NOWPayments payout used to leave the
+// settlement record permanently stuck at Pending/no-ExternalRef --
+// indistinguishable from "CreatePayout was never even called" to any
+// downstream reconciler (see reconcileStuckManualReview in
+// services/payments-gateway/redeem_watcher.go), which could then wrongly
+// conclude no payout occurred and trigger an on-chain refund on top of a
+// real payout. submittedLocked's retry (this package) exists specifically
+// to shrink this window: a single transient failure must now be recovered
+// transparently, with no error and the record durably persisted as
+// Submitted.
+func TestInitiateNowPaymentsTransientPersistFailureRecoveredByRetry(t *testing.T) {
+	store := &failingSaveStore{fakeStore: newFakeStore(), failOnCall: 2} // 1st save = pending, 2nd = post-payout submitted (fails once, then recovers)
+	client := &fakePayoutClient{ref: "batch-already-sent"}
+	mgr := newTestManager(t, store, Config{DefaultRail: RailNowPayments}, client)
+
+	record, err := mgr.Initiate(context.Background(), InitiateRequest{
+		IntentID: "intent-1", ReservationID: "res-1", PartnerID: "partner-a",
+		Asset: "ZNHB", AmountUnits: 100_000_000, Account: "0xabc",
+	})
+	if err != nil {
+		t.Fatalf("expected the retry to recover from a single transient persist failure, got error: %v", err)
+	}
+	if record.ExternalRef != "batch-already-sent" || record.Status != string(StatusSubmitted) {
+		t.Fatalf("expected returned record to reflect the submitted payout, got: %+v", record)
+	}
+	// Must actually be durably persisted this time, not just returned in memory.
+	persisted, err := store.GetSettlement(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("load persisted settlement: %v", err)
+	}
+	if persisted.Status != string(StatusSubmitted) || persisted.ExternalRef != "batch-already-sent" {
+		t.Fatalf("expected persisted record to reflect submitted+external ref after retry, got: %+v", persisted)
+	}
+}
+
+// TestInitiateNowPaymentsPersistFailureAfterSuccessfulPayoutPreservesExternalRef
+// covers the case the retry cannot fix: persistence keeps failing for every
+// attempt (a genuinely down/broken local store, not a blip). The CRITICAL
+// error path must still trigger, with the external ref preserved in the
+// error text and the in-memory record still returned (not a zero value) --
+// exactly as before submittedLocked gained a retry, just after exhausting
+// it instead of on the first attempt.
 func TestInitiateNowPaymentsPersistFailureAfterSuccessfulPayoutPreservesExternalRef(t *testing.T) {
-	store := &failingSaveStore{fakeStore: newFakeStore(), failOnCall: 2} // 1st save = pending, 2nd = post-payout submitted
+	store := &failingSaveStore{fakeStore: newFakeStore(), failOnCall: 2, permanent: true} // 1st save = pending, every save from the 2nd (post-payout submitted) onward fails
 	client := &fakePayoutClient{ref: "batch-already-sent"}
 	mgr := newTestManager(t, store, Config{DefaultRail: RailNowPayments}, client)
 
@@ -391,7 +444,7 @@ func TestInitiateNowPaymentsPersistFailureAfterSuccessfulPayoutPreservesExternal
 		Asset: "ZNHB", AmountUnits: 100_000_000, Account: "0xabc",
 	})
 	if err == nil {
-		t.Fatalf("expected error when the post-payout persist fails")
+		t.Fatalf("expected error when every post-payout persist attempt fails")
 	}
 	// The external ref must not be silently discarded -- it's the only
 	// record that a real payout already happened, and callers log this
