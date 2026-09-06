@@ -47,10 +47,15 @@ func TestAssignAgentNoActiveAgentsLeavesUnassigned(t *testing.T) {
 	}
 }
 
-// TestAssignAgentRoundRobinsAcrossActiveAgents confirms multiple newly
-// discovered requests are spread evenly across every currently-active agent,
-// in a deterministic order, and that a deactivated agent stops receiving new
-// assignments.
+// TestAssignAgentRoundRobinsAcrossActiveAgents confirms assignAgent's own
+// round-robin logic still works correctly -- multiple calls spread evenly
+// across every currently-active agent, in a deterministic order, and a
+// deactivated agent stops being returned. assignAgent is exercised DIRECTLY
+// here, not through discoverNew/runOnce: as of 2026-09-06, discoverNew no
+// longer calls it at all (see discoverNew's own doc comment on why) -- this
+// function and its test are kept only so the still-open agent/cash-out
+// redesign has a working, tested building block to wire back in deliberately,
+// not as a claim that anything currently invokes it.
 func TestAssignAgentRoundRobinsAcrossActiveAgents(t *testing.T) {
 	store := newTestRedeemStore(t)
 	payoutClient := &fakePayoutClient{ref: "batch-1"}
@@ -66,35 +71,78 @@ func TestAssignAgentRoundRobinsAcrossActiveAgents(t *testing.T) {
 		}
 	}
 
-	// Four separate discovery ticks (one request each) -- assignAgent reads
-	// CountAssignedRedemptionWatch fresh every time, so this must alternate
-	// agent-a, agent-b, agent-a, agent-b regardless of batching.
+	// Each call must alternate agent-a, agent-b, agent-a, agent-b -- it reads
+	// CountAssignedRedemptionWatch fresh every time, so seed one assigned row
+	// per iteration to advance that counter exactly like a real assignment
+	// would.
 	wantAgents := []string{"agent-a", "agent-b", "agent-a", "agent-b"}
 	for i, want := range wantAgents {
-		requestID := "req-rr-" + string(rune('1'+i))
-		node.setPending(RedemptionRequest{
-			RequestID: requestID, Account: "nhb1testaccount", NHBAmountWei: "10000000000000000000",
-			DestinationAsset: "usdttrc20", DestinationAddress: testValidTRC20Address, Status: "pending", CreatedAt: 1700000000,
-		})
-		watcher.runOnce(ctx)
-		row, err := store.GetRedemptionWatch(ctx, requestID)
-		if err != nil {
-			t.Fatalf("get redemption watch %s: %v", requestID, err)
+		got := watcher.assignAgent(ctx)
+		if got != want {
+			t.Fatalf("call %d: expected agent %s, got %s", i, want, got)
 		}
-		if row.AssignedAgentID != want {
-			t.Fatalf("request %d: expected assigned agent %s, got %s", i, want, row.AssignedAgentID)
+		requestID := "req-rr-" + string(rune('1'+i))
+		if err := store.InsertRedemptionWatch(ctx, RedemptionWatchRecord{
+			RequestID: requestID, Account: "nhb1testaccount", NHBAmountWei: "10000000000000000000",
+			DestinationAsset: "USDTTRC20", DestinationAddress: testValidTRC20Address,
+			LocalStatus: redemptionStatusDiscovered, AssignedAgentID: got, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("seed assigned row %d: %v", i, err)
 		}
 	}
 
-	// Deactivate agent-b -- new requests from here on must only ever go to
-	// agent-a.
+	// Deactivate agent-b -- subsequent calls must only ever return agent-a.
 	if err := store.UpsertExchangeAgent(ctx, ExchangeAgent{ID: "agent-b", Name: "agent-b", Active: false, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatalf("deactivate agent-b: %v", err)
 	}
 	for i := 0; i < 3; i++ {
+		got := watcher.assignAgent(ctx)
+		if got != "agent-a" {
+			t.Fatalf("expected only agent-a after deactivation, got %s", got)
+		}
 		requestID := "req-rr-after-deactivate-" + string(rune('1'+i))
-		node.setPending(RedemptionRequest{
+		if err := store.InsertRedemptionWatch(ctx, RedemptionWatchRecord{
 			RequestID: requestID, Account: "nhb1testaccount", NHBAmountWei: "10000000000000000000",
+			DestinationAsset: "USDTTRC20", DestinationAddress: testValidTRC20Address,
+			LocalStatus: redemptionStatusDiscovered, AssignedAgentID: got, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("seed assigned row after deactivate %d: %v", i, err)
+		}
+	}
+
+	_ = payoutClient // unused in this direct-call test; kept for a consistent test-setup shape
+}
+
+// TestDiscoverNewNeverAutoAssignsAgent is the regression test for the actual
+// incident: discoverNew must NEVER assign an exchange agent to an ordinary
+// redemption, no matter how many agents are active, because doing so used
+// to silently divert real customer Withdraw-to-USDT requests away from the
+// automated NOWPayments rail onto a human-fulfilled one -- with no way for
+// the customer, or anything in the request itself, to have asked for that.
+// A separate, correctly-isolated agent/cash-out product (nhbportal's
+// "Withdraw NHB to Cash", a plain on-chain Send, never a TxTypeRedeemNHB
+// burn) already covers the legitimate agent use case and never reaches this
+// code at all -- so every ordinary redemption discovered here must always
+// use the shared automated rail, unconditionally.
+func TestDiscoverNewNeverAutoAssignsAgent(t *testing.T) {
+	store := newTestRedeemStore(t)
+	payoutClient := &fakePayoutClient{ref: "batch-restored"}
+	settlementMgr := newTestSettlementManager(t, store, payoutClient)
+	node := newFakeRedeemNode()
+	watcher := NewRedeemWatcher(store, node, settlementMgr, nil, time.Second)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	for _, agent := range []string{"agent-a", "agent-b"} {
+		if err := store.UpsertExchangeAgent(ctx, ExchangeAgent{ID: agent, Name: agent, Active: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatalf("upsert agent %s: %v", agent, err)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		requestID := "req-no-auto-assign-" + string(rune('1'+i))
+		node.setPending(RedemptionRequest{
+			RequestID: requestID, Account: "nhb1testaccount", NHBAmountWei: "20000000000000000000",
 			DestinationAsset: "usdttrc20", DestinationAddress: testValidTRC20Address, Status: "pending", CreatedAt: 1700000000,
 		})
 		watcher.runOnce(ctx)
@@ -102,19 +150,34 @@ func TestAssignAgentRoundRobinsAcrossActiveAgents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get redemption watch %s: %v", requestID, err)
 		}
-		if row.AssignedAgentID != "agent-a" {
-			t.Fatalf("expected only agent-a to receive new assignments after deactivation, got %s", row.AssignedAgentID)
+		if row.AssignedAgentID != "" {
+			t.Fatalf("request %d: expected NO agent assignment despite %d active agents, got %q", i, 2, row.AssignedAgentID)
 		}
+		settlementRec, err := store.GetSettlement(ctx, row.SettlementID)
+		if err != nil {
+			t.Fatalf("get settlement %d: %v", i, err)
+		}
+		if settlementRec.Rail != string(settlement.RailNowPayments) {
+			t.Fatalf("request %d: expected the automated nowpayments rail, got %s", i, settlementRec.Rail)
+		}
+	}
+	if payoutClient.callCount() != 3 {
+		t.Fatalf("expected all 3 requests to go through the automated payout rail, got %d calls", payoutClient.callCount())
 	}
 }
 
-// TestExchangeAgentRoutesToManualTreasuryAndConfirmPayoutWorks is the
-// end-to-end regression test for the whole feature: a redemption assigned to
-// an active exchange agent must route to RailManualTreasury (never touching
-// the automated NOWPayments payout API), stay pending until the agent's
-// "Mark Paid" action (RedeemWatcher.ConfirmPayout, the same mechanism the
-// admin confirm-payout HTTP endpoint calls) supplies a reference, and only
-// then proceed to on-chain attestation exactly like a NOWPayments-settled
+// TestExchangeAgentRoutesToManualTreasuryAndConfirmPayoutWorks covers
+// processDiscovered's own routing/confirm-payout mechanics given a row that
+// IS already assigned to an agent -- independent of HOW it came to be
+// assigned. As of 2026-09-06, discoverNew itself never assigns one (see its
+// doc comment and TestDiscoverNewNeverAutoAssignsAgent); this test seeds an
+// already-assigned "discovered" row directly, simulating whatever the
+// agent/cash-out redesign eventually wires up, and confirms that GIVEN such
+// a row, it still correctly routes to RailManualTreasury (never touching the
+// automated NOWPayments payout API), stays pending until the agent's "Mark
+// Paid" action (RedeemWatcher.ConfirmPayout, the same mechanism the admin
+// confirm-payout HTTP endpoint calls) supplies a reference, and only then
+// proceeds to on-chain attestation exactly like a NOWPayments-settled
 // redemption would.
 func TestExchangeAgentRoutesToManualTreasuryAndConfirmPayoutWorks(t *testing.T) {
 	store := newTestRedeemStore(t)
@@ -134,6 +197,19 @@ func TestExchangeAgentRoutesToManualTreasuryAndConfirmPayoutWorks(t *testing.T) 
 	settlementMgr.SetPartnerRail(agentID, settlement.RailManualTreasury)
 
 	const requestID = "req-agent-flow-1"
+	// Seed the row already assigned and in "discovered" state directly --
+	// bypassing discoverNew/node.setPending entirely, since discovery no
+	// longer performs this assignment itself.
+	if err := store.InsertRedemptionWatch(ctx, RedemptionWatchRecord{
+		RequestID: requestID, Account: "nhb1testaccount", NHBAmountWei: "50000000000000000000",
+		PayoutAmountDecimal: "50", PayoutAmountUnits: 50_000_000,
+		DestinationAsset: "USDTTRC20", DestinationAddress: testValidTRC20Address,
+		LocalStatus: redemptionStatusDiscovered, AssignedAgentID: agentID, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed assigned discovered row: %v", err)
+	}
+	// Still pending on-chain, so processDiscovered's fresh re-read (the race
+	// guard against another watcher instance) finds it unchanged.
 	node.setPending(RedemptionRequest{
 		RequestID: requestID, Account: "nhb1testaccount", NHBAmountWei: "50000000000000000000",
 		DestinationAsset: "usdttrc20", DestinationAddress: testValidTRC20Address, Status: "pending", CreatedAt: 1700000000,

@@ -511,7 +511,31 @@ func (w *RedeemWatcher) discoverNew(ctx context.Context, pending []RedemptionReq
 			rec.PayoutAmountDecimal = decimalAmount
 			rec.PayoutAmountUnits = units
 		}
-		rec.AssignedAgentID = w.assignAgent(ctx)
+		// RESTORED, 2026-09-06: exchange-agent auto-assignment used to run
+		// here (rec.AssignedAgentID = w.assignAgent(ctx)), round-robining
+		// EVERY ordinary redemption -- the same shared pipeline every
+		// customer's standard Withdraw-to-USDT flow uses -- across active
+		// exchange agents, diverting it from the automated NOWPayments rail
+		// to a human-fulfilled rail (RailManualTreasury) the moment any
+		// agent was active. That was a genuine design mistake: a separate,
+		// correctly-isolated agent/cash-out flow already exists (nhbportal's
+		// "Withdraw NHB to Cash" -- a plain on-chain Send to the agent's own
+		// wallet, never a TxTypeRedeemNHB burn) and never touches this
+		// pipeline at all. This line intercepted the SAME shared automated
+		// rail regardless of which flow the customer actually used, with no
+		// field anywhere (on-chain or in the RPC request) to tell the two
+		// apart -- it had zero customer-visible effect while no agents were
+		// active, then silently misrouted real customer withdrawals the
+		// moment agents were activated. Restoring the original, previously-
+		// correct, months-tested behavior: every newly-discovered redemption
+		// always uses the shared automated rail, unconditionally, regardless
+		// of how many exchange agents are active. assignAgent/partnerIDFor
+		// below and the exchange_agents admin surface (server.go's
+		// /admin/agents, /admin/redemptions?agentId=) are deliberately left
+		// in place, not deleted -- the agent/cash-out flow itself is being
+		// redesigned separately -- but neither is wired into this discovery
+		// path anymore.
+		rec.AssignedAgentID = ""
 		if err := w.store.InsertRedemptionWatch(ctx, rec); err != nil {
 			log.Printf("payments-gateway: redeem watcher: insert discovered request %s: %v", requestID, err)
 			continue
