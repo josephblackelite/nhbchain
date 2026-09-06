@@ -9,6 +9,7 @@ import (
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
+	"nhbchain/native/governance"
 	"nhbchain/native/market"
 )
 
@@ -139,6 +140,81 @@ func TestHandleMarketGetListingNotFound(t *testing.T) {
 	}
 	if decoded.Listing != nil {
 		t.Fatalf("expected nil listing for unknown id, got %+v", decoded.Listing)
+	}
+}
+
+// TestHandleMarketGetFlatFeeDefault confirms an untouched deployment (the
+// governance param never set) reports the same default
+// core/market_native.go's readGovernedMarketFlatFeeWei falls back to, so a
+// caller sees the fee actually being charged today rather than an empty/zero
+// value.
+func TestHandleMarketGetFlatFeeDefault(t *testing.T) {
+	env := newTestEnv(t)
+	req := &RPCRequest{ID: 1}
+	recorder := httptest.NewRecorder()
+	env.server.handleMarketGetFlatFee(recorder, env.newRequest(), req)
+
+	result, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcErr)
+	}
+	var decoded struct {
+		FlatFeeWei string `json:"flatFeeWei"`
+		ParamKey   string `json:"paramKey"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if decoded.FlatFeeWei != defaultMarketFlatFeeWeiRPC {
+		t.Fatalf("expected default flat fee %s, got %s", defaultMarketFlatFeeWeiRPC, decoded.FlatFeeWei)
+	}
+	if decoded.ParamKey != governance.ParamKeyMarketFlatFeeWei {
+		t.Fatalf("unexpected param key: %s", decoded.ParamKey)
+	}
+}
+
+// TestHandleMarketGetFlatFeeGoverned confirms a governance-set value
+// overrides the default, exactly mirroring how
+// core/market_native.go's readGovernedMarketFlatFeeWei resolves it on the
+// consensus path.
+func TestHandleMarketGetFlatFeeGoverned(t *testing.T) {
+	env := newTestEnv(t)
+	if err := env.node.WithState(func(manager *nhbstate.Manager) error {
+		return manager.ParamStoreSet(governance.ParamKeyMarketFlatFeeWei, []byte("250000000000000000"))
+	}); err != nil {
+		t.Fatalf("seed governed flat fee: %v", err)
+	}
+
+	req := &RPCRequest{ID: 1}
+	recorder := httptest.NewRecorder()
+	env.server.handleMarketGetFlatFee(recorder, env.newRequest(), req)
+
+	result, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcErr)
+	}
+	var decoded struct {
+		FlatFeeWei string `json:"flatFeeWei"`
+	}
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if decoded.FlatFeeWei != "250000000000000000" {
+		t.Fatalf("expected governed flat fee 250000000000000000, got %s", decoded.FlatFeeWei)
+	}
+}
+
+// TestHandleMarketGetFlatFeeRejectsParams locks in that this method takes no
+// parameters -- it's a fixed, global fee, not scoped to any listing/address.
+func TestHandleMarketGetFlatFeeRejectsParams(t *testing.T) {
+	env := newTestEnv(t)
+	req := &RPCRequest{ID: 1, Params: []json.RawMessage{marshalParam(t, map[string]string{"unexpected": "param"})}}
+	recorder := httptest.NewRecorder()
+	env.server.handleMarketGetFlatFee(recorder, env.newRequest(), req)
+
+	_, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr == nil {
+		t.Fatalf("expected rpc error for unexpected parameters")
 	}
 }
 

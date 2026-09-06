@@ -1567,6 +1567,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleMarketGetMyListings(recorder, r, req)
 	case "market_getMyFills":
 		s.handleMarketGetMyFills(recorder, r, req)
+	case "market_getFlatFee":
+		s.handleMarketGetFlatFee(recorder, r, req)
 	case "stake_delegate":
 		s.handleStakeDelegate(recorder, r, req)
 	case "stake_undelegate":

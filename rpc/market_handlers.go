@@ -10,8 +10,17 @@ import (
 	"strings"
 
 	nhbstate "nhbchain/core/state"
+	"nhbchain/native/governance"
 	"nhbchain/native/market"
 )
+
+// defaultMarketFlatFeeWeiRPC mirrors core/market_native.go's own
+// defaultMarketFlatFeeWei (0.1 NHB, 18 decimals) -- that constant is
+// unexported to package core, so handleMarketGetFlatFee keeps its own copy
+// rather than adding a cross-package export just for this read path. Both
+// values must stay in sync; readGovernedMarketFlatFeeWei's doc comment
+// cross-references this one for exactly that reason.
+const defaultMarketFlatFeeWeiRPC = "100000000000000000"
 
 // defaultMarketListLimit/maxMarketListLimit bound every market_* list
 // method's result size -- an unbounded listing/fill scan would let a client
@@ -178,6 +187,47 @@ func (s *Server) handleMarketListOpenListings(w http.ResponseWriter, _ *http.Req
 		results = append(results, newMarketListingResult(listing))
 	}
 	writeResult(w, req.ID, map[string]interface{}{"listings": results})
+}
+
+// handleMarketGetFlatFee backs market_getFlatFee() -> { flatFeeWei, paramKey }.
+// Reads the buyer-side flat fee (governance.ParamKeyMarketFlatFeeWei,
+// settable via a generic param.update governance proposal) directly from
+// the param store, falling back to the same default
+// core/market_native.go's readGovernedMarketFlatFeeWei uses when the
+// governance param has never been set. Read-only and unauthenticated,
+// matching handleMarketListOpenListings's convention -- the fee schedule is
+// public market data.
+func (s *Server) handleMarketGetFlatFee(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if s == nil || s.node == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	if len(req.Params) > 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "no parameters expected", nil)
+		return
+	}
+
+	flatFeeWei := defaultMarketFlatFeeWeiRPC
+	err := s.node.WithStateView(func(manager *nhbstate.Manager) error {
+		raw, ok, err := manager.ParamStoreGet(governance.ParamKeyMarketFlatFeeWei)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+				flatFeeWei = trimmed
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load market flat fee", err.Error())
+		return
+	}
+	writeResult(w, req.ID, map[string]interface{}{
+		"flatFeeWei": flatFeeWei,
+		"paramKey":   governance.ParamKeyMarketFlatFeeWei,
+	})
 }
 
 // handleMarketGetListing backs market_getListing([{ id }]) -> { listing }.
