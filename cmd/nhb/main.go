@@ -587,7 +587,7 @@ func main() {
 		logger.Error("failed to initialise RPC server", slog.Any("error", err))
 		os.Exit(1)
 	}
-	if err := configureStableTradingEngine(rpcServer, aggregator, logger); err != nil {
+	if err := configureStableTradingEngine(rpcServer, aggregator, manualOracle, logger); err != nil {
 		logger.Error("failed to configure stable trading engine", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -691,7 +691,7 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 	}
 }
 
-func configureStableTradingEngine(rpcServer *rpc.Server, aggregator *swap.OracleAggregator, logger *slog.Logger) error {
+func configureStableTradingEngine(rpcServer *rpc.Server, aggregator *swap.OracleAggregator, manualOracle *swap.ManualOracle, logger *slog.Logger) error {
 	if rpcServer == nil {
 		return nil
 	}
@@ -725,6 +725,28 @@ func configureStableTradingEngine(rpcServer *rpc.Server, aggregator *swap.Oracle
 			return
 		}
 		now := time.Now().UTC()
+		// Re-seed the manual oracle's timestamp every tick, not just once at
+		// process startup. NHB=$1 and ZNHB=resolveZNHBOraclePrice() are
+		// fixed, administratively-set prices by design (see the manual
+		// oracle seed above and the coingecko registration's doc comment --
+		// neither value changes here, only its freshness). But
+		// OracleAggregator.GetRate applies the SAME MaxQuoteAgeSeconds
+		// staleness filter (120s live) to every source in the priority
+		// list, "manual" included -- a quote timestamped once at boot goes
+		// stale in 2 minutes exactly like a real external quote would, so
+		// manual only ever covered the first 2 minutes after each
+		// restart. Confirmed live on 2026-09-06: with nowpayments (404,
+		// since 2026-08-11) and coingecko (unmapped asset, by design --
+		// see above) both failing as expected, manual going stale too left
+		// every withdrawal through the stable engine (core/stable) with no
+		// working price source at all, rejecting real customer
+		// redemptions almost continuously. Re-seeding here, on the same
+		// 20s ticker this closure already runs on, keeps it inside the
+		// 120s window indefinitely.
+		if manualOracle != nil {
+			_ = manualOracle.SetDecimal("USD", "NHB", "1.0", now)
+			_ = manualOracle.SetDecimal("USD", "ZNHB", resolveZNHBOraclePrice(), now)
+		}
 		for _, symbol := range []string{"NHB", "ZNHB"} {
 			quote, err := aggregator.GetRate("USD", symbol)
 			if err != nil {
