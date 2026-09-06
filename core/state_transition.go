@@ -2997,13 +2997,12 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		txHashBytes, _ = tx.Hash()
 	}
 
-	// Skip dynamic global routing tax here as it is handled above for native transfers
-
 	msg := gethcore.Message{
 		From:          fromAddr,
 		To:            toAddrPtr,
 		Nonce:         tx.Nonce,
-		Value:         originalValue, // 98.5% of original transfer
+		Value:         originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
+		// comment used to describe was removed from execution; getGlobalFeeRate is hardcoded to 0.
 		GasLimit:      tx.GasLimit,
 		GasPrice:      tx.GasPrice,
 		GasFeeCap:     tx.GasPrice,
