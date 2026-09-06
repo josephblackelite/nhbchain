@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -251,6 +252,13 @@ func (m *Manager) Initiate(ctx context.Context, req InitiateRequest) (storage.Se
 		if m.nowPayments == nil {
 			return m.failLocked(ctx, record, ErrRailNotConfigured)
 		}
+		// This exact line -- logged BEFORE the call, not just on its outcome
+		// -- is the gap a real incident exposed: a settlement stuck at
+		// Pending with zero log output anywhere in its lifetime, leaving no
+		// way to tell whether CreatePayout was ever even attempted. If the
+		// process dies or this call hangs before returning, this line is
+		// the only trace that it was tried at all.
+		log.Printf("settlement: initiating nowpayments payout for settlement %s (partner=%s asset=%s account=%s amountUnits=%d)", record.ID, record.PartnerID, record.Asset, record.Account, req.AmountUnits)
 		result, err := m.nowPayments.CreatePayout(ctx, PayoutRequest{
 			SettlementID: record.ID,
 			PartnerID:    record.PartnerID,
@@ -259,8 +267,10 @@ func (m *Manager) Initiate(ctx context.Context, req InitiateRequest) (storage.Se
 			Address:      record.Account,
 		})
 		if err != nil {
+			log.Printf("settlement: nowpayments CreatePayout failed for settlement %s: %v", record.ID, err)
 			return m.failLocked(ctx, record, err)
 		}
+		log.Printf("settlement: nowpayments CreatePayout succeeded for settlement %s (external_ref=%s)", record.ID, result.ExternalRef)
 		return m.submittedLocked(ctx, record, result)
 
 	default:
@@ -327,10 +337,13 @@ retryLoop:
 		record.UpdatedAt = m.now()
 		if err := m.store.SaveSettlement(ctx, record); err != nil {
 			lastErr = err
+			log.Printf("settlement: persist submitted settlement %s (external_ref=%s) attempt %d/%d failed: %v", record.ID, record.ExternalRef, attempt+1, submittedPersistRetries, err)
 			continue
 		}
+		log.Printf("settlement: settlement %s durably marked submitted (external_ref=%s)", record.ID, record.ExternalRef)
 		return record, nil
 	}
+	log.Printf("settlement: CRITICAL: settlement %s already submitted (external_ref=%s) but failed to persist after %d attempts: %v -- this settlement's on-disk state cannot be trusted to mean \"no payout occurred\"", record.ID, record.ExternalRef, submittedPersistRetries, lastErr)
 	return record, fmt.Errorf("settlement: CRITICAL: payout for settlement %s already submitted (external_ref=%s) but failed to persist after %d attempts -- manual reconciliation required, and this settlement's on-disk state cannot be trusted to mean \"no payout occurred\": %w", record.ID, record.ExternalRef, submittedPersistRetries, lastErr)
 }
 
@@ -340,8 +353,10 @@ func (m *Manager) failLocked(ctx context.Context, record storage.SettlementRecor
 	record.Detail = detailJSON(map[string]any{"error": cause.Error()})
 	record.UpdatedAt = m.now()
 	if saveErr := m.store.SaveSettlement(ctx, record); saveErr != nil {
+		log.Printf("settlement: CRITICAL: settlement %s failed (%v) AND failed to persist that failure: %v -- this settlement's on-disk status may not reflect its real outcome", record.ID, cause, saveErr)
 		return record, fmt.Errorf("settlement: %v (and failed to persist failure: %w)", cause, saveErr)
 	}
+	log.Printf("settlement: settlement %s durably marked failed: %v", record.ID, cause)
 	return record, cause
 }
 
