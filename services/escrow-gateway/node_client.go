@@ -46,16 +46,28 @@ type NodeClient interface {
 	EscrowRelease(ctx context.Context, payload, signature []byte) error
 	EscrowRefund(ctx context.Context, payload, signature []byte) error
 	EscrowDispute(ctx context.Context, payload, signature []byte) error
-	// EscrowResolve is not yet wired to a real transaction. The safe
-	// on-chain resolve path (TxTypeArbitrateRelease/Refund) requires the
-	// escrow to have been created against a registered arbitration realm
-	// (see native/escrow/engine.go's CreateRealm and
-	// core/types/transaction.go's TxTypeEscrowCreateRealm) -- provisioning
-	// realms is an operator action (RoleEscrowRealmAdmin-gated), not
-	// something this gateway does automatically per-request, and no realm
-	// has been provisioned in any deployment yet. Always returns
-	// ErrResolveNotConfigured until that operational step happens.
-	EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error
+	// EscrowResolve relays a realm arbitration-committee decision on-chain
+	// via TxTypeArbitrateRelease/Refund (native/escrow/engine.go's
+	// ResolveWithSignatures, core/state_transition.go's applyArbitrate) --
+	// mirrors EscrowRelease/Refund/Dispute's relayed-signature model
+	// exactly, except the embedded authorization is a quorum of arbiter
+	// signatures (verified against the escrow's FrozenArb committee) rather
+	// than a single participant's. decision is the exact raw JSON bytes an
+	// arbiter signed (`{escrowId, outcome, policyNonce, metadata?}`,
+	// verbatim -- never re-marshaled, since even a whitespace/key-order
+	// difference would hash differently than what was actually signed);
+	// signatures is each committee member's 65-byte secp256k1 signature
+	// over keccak256(decision). The gateway does not pre-verify the quorum
+	// itself (native/escrow's decision-envelope/quorum helpers are
+	// unexported, and duplicating that logic here risks a subtle
+	// divergence from the chain's own authoritative check) -- it relays
+	// as-is and surfaces whatever the chain returns, exactly like the
+	// other delegated actions. Requires the escrow to have been created
+	// against a registered arbitration realm (TxTypeEscrowCreateRealm,
+	// RoleEscrowRealmAdmin-gated) with a matching PolicyNonce -- an escrow
+	// with no realm attached fails with a clear on-chain error ("missing
+	// frozen arbitrator policy"), not a gateway-side placeholder.
+	EscrowResolve(ctx context.Context, escrowID string, decision []byte, signatures [][]byte) error
 	// P2PCreateTrade is permanently retired -- the bilateral OTC trade flow
 	// it fronted (p2p_createTrade et al.) has no signed-transaction
 	// replacement and is superseded by the P2P ZNHB market (native/market,
@@ -72,11 +84,6 @@ type NodeClient interface {
 	// ErrRelayerNotConfigured if InitRelayer has not been called yet.
 	RelayerBalance(ctx context.Context) (*big.Int, error)
 }
-
-// ErrResolveNotConfigured is returned by EscrowResolve until the deployment
-// has provisioned an arbitration realm -- see the NodeClient interface doc
-// comment.
-var ErrResolveNotConfigured = errors.New("escrow-gateway: resolve is not yet available -- no arbitration realm has been provisioned for this deployment")
 
 // ErrP2PTradeRetired is returned by P2PCreateTrade -- see the NodeClient
 // interface doc comment.
@@ -365,8 +372,70 @@ func escrowIDFromActionEnvelope(payload []byte) (string, error) {
 	return trimmed, nil
 }
 
-func (c *RPCNodeClient) EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error {
-	return ErrResolveNotConfigured
+// arbitrateEscrowPayload mirrors native/escrow's decode target inside
+// applyArbitrate (core/state_transition.go) field-for-field -- that struct
+// is RLP-decoded there (positional, not by its json tags), so field order
+// and type here must match exactly. Signatures are hex strings, matching
+// applyArbitrate's own hex.DecodeString(strings.TrimPrefix(sig, "0x")) loop.
+type arbitrateEscrowPayload struct {
+	EscrowID   string
+	Decision   []byte
+	Signatures []string
+}
+
+// arbitrateTxTypeForOutcome picks TxTypeArbitrateRelease/Refund to match the
+// decision's own outcome field. applyArbitrate's dispatch actually ignores
+// which of the two tx types was used (both call the same
+// ResolveWithSignatures, which derives the real outcome from the signed
+// decision payload itself) -- this is purely so the tx type visible on
+// explorers/audit logs stays meaningful rather than defaulting to one
+// constant regardless of what happened.
+func arbitrateTxTypeForOutcome(decision []byte) (types.TxType, error) {
+	var envelope struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal(decision, &envelope); err != nil {
+		return 0, fmt.Errorf("decode decision outcome: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.Outcome)) {
+	case "release":
+		return types.TxTypeArbitrateRelease, nil
+	case "refund":
+		return types.TxTypeArbitrateRefund, nil
+	default:
+		return 0, fmt.Errorf("escrow resolve: decision outcome must be release or refund, got %q", envelope.Outcome)
+	}
+}
+
+func (c *RPCNodeClient) EscrowResolve(ctx context.Context, escrowID string, decision []byte, signatures [][]byte) error {
+	trimmedID := strings.TrimSpace(escrowID)
+	if trimmedID == "" {
+		return errors.New("escrow resolve: escrowId required")
+	}
+	if len(decision) == 0 {
+		return errors.New("escrow resolve: decision payload required")
+	}
+	if len(signatures) == 0 {
+		return errors.New("escrow resolve: signature bundle required")
+	}
+	txType, err := arbitrateTxTypeForOutcome(decision)
+	if err != nil {
+		return err
+	}
+	sigHex := make([]string, len(signatures))
+	for i, sig := range signatures {
+		sigHex[i] = "0x" + hex.EncodeToString(sig)
+	}
+	data, err := rlp.EncodeToBytes(arbitrateEscrowPayload{
+		EscrowID:   trimmedID,
+		Decision:   decision,
+		Signatures: sigHex,
+	})
+	if err != nil {
+		return fmt.Errorf("encode arbitrate payload: %w", err)
+	}
+	_, err = c.submitEscrowTx(ctx, txType, data)
+	return err
 }
 
 func (c *RPCNodeClient) P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error) {

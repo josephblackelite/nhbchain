@@ -205,12 +205,103 @@ func TestEscrowCreateComputesDeterministicEscrowID(t *testing.T) {
 	}
 }
 
-func TestEscrowResolveAlwaysUnavailable(t *testing.T) {
+func TestEscrowResolveSubmitsArbitrateReleaseTransaction(t *testing.T) {
+	fake := newFakeRPCServer(t)
+	defer fake.Close()
+	fake.nonce = 5
+	client := NewRPCNodeClient(fake.URL, "")
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+
+	escrowID := "0x" + fixedHex64()
+	decision := []byte(`{"escrowId":"` + escrowID + `","outcome":"release","policyNonce":1}`)
+	signatures := [][]byte{[]byte("arbitrator-1-signature-placeholder-0000000000000000000000000000")}
+
+	if err := client.EscrowResolve(context.Background(), escrowID, decision, signatures); err != nil {
+		t.Fatalf("escrow resolve: %v", err)
+	}
+	if fake.lastTx == nil || fake.lastTx.Type != types.TxTypeArbitrateRelease {
+		t.Fatalf("expected a submitted TxTypeArbitrateRelease transaction, got %+v", fake.lastTx)
+	}
+	if fake.lastTx.Nonce != 5 {
+		t.Fatalf("expected relayer nonce 5, got %d", fake.lastTx.Nonce)
+	}
+	var decoded arbitrateEscrowPayload
+	if err := rlp.DecodeBytes(fake.lastTx.Data, &decoded); err != nil {
+		t.Fatalf("decode submitted tx data: %v", err)
+	}
+	if decoded.EscrowID != escrowID {
+		t.Fatalf("unexpected escrowId in submitted tx: %s", decoded.EscrowID)
+	}
+	if string(decoded.Decision) != string(decision) {
+		t.Fatalf("decision mismatch: got %s want %s", decoded.Decision, decision)
+	}
+	if len(decoded.Signatures) != 1 || decoded.Signatures[0] != "0x"+hex.EncodeToString(signatures[0]) {
+		t.Fatalf("unexpected signatures in submitted tx: %+v", decoded.Signatures)
+	}
+}
+
+func TestEscrowResolveSubmitsArbitrateRefundTransaction(t *testing.T) {
 	fake := newFakeRPCServer(t)
 	defer fake.Close()
 	client := NewRPCNodeClient(fake.URL, "")
-	if err := client.EscrowResolve(context.Background(), "0xabc", "nhb1x", "release"); err != ErrResolveNotConfigured {
-		t.Fatalf("expected ErrResolveNotConfigured, got %v", err)
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+
+	escrowID := "0x" + fixedHex64()
+	decision := []byte(`{"escrowId":"` + escrowID + `","outcome":"refund","policyNonce":1}`)
+	signatures := [][]byte{[]byte("arbitrator-1-signature-placeholder-0000000000000000000000000000")}
+
+	if err := client.EscrowResolve(context.Background(), escrowID, decision, signatures); err != nil {
+		t.Fatalf("escrow resolve: %v", err)
+	}
+	if fake.lastTx == nil || fake.lastTx.Type != types.TxTypeArbitrateRefund {
+		t.Fatalf("expected a submitted TxTypeArbitrateRefund transaction, got %+v", fake.lastTx)
+	}
+}
+
+func TestEscrowResolveRejectsInvalidOutcome(t *testing.T) {
+	fake := newFakeRPCServer(t)
+	defer fake.Close()
+	client := NewRPCNodeClient(fake.URL, "")
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+
+	escrowID := "0x" + fixedHex64()
+	decision := []byte(`{"escrowId":"` + escrowID + `","outcome":"cancel","policyNonce":1}`)
+	signatures := [][]byte{[]byte("arbitrator-1-signature-placeholder-0000000000000000000000000000")}
+
+	if err := client.EscrowResolve(context.Background(), escrowID, decision, signatures); err == nil {
+		t.Fatalf("expected an error for an unsupported decision outcome")
+	}
+	if fake.lastTx != nil {
+		t.Fatalf("expected no transaction to be submitted for an invalid outcome")
+	}
+}
+
+func TestEscrowResolveClientRequiresSignatures(t *testing.T) {
+	fake := newFakeRPCServer(t)
+	defer fake.Close()
+	client := NewRPCNodeClient(fake.URL, "")
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+
+	escrowID := "0x" + fixedHex64()
+	decision := []byte(`{"escrowId":"` + escrowID + `","outcome":"release","policyNonce":1}`)
+
+	if err := client.EscrowResolve(context.Background(), escrowID, decision, nil); err == nil {
+		t.Fatalf("expected an error when no signatures are supplied")
+	}
+	if fake.lastTx != nil {
+		t.Fatalf("expected no transaction to be submitted with no signatures")
 	}
 }
 

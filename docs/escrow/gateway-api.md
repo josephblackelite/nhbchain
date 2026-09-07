@@ -71,7 +71,7 @@ response keyed by `(api_key, idempotency_key)`:
 | `POST /escrow/release` | Release funds to payee. | API key + HMAC + wallet signature (payee or mediator). |
 | `POST /escrow/refund` | Refund payer. | API key + HMAC + wallet signature (payer). |
 | `POST /escrow/dispute` | Flag a dispute. | API key + HMAC + wallet signature (payer or payee). |
-| `POST /escrow/resolve` | Resolve a dispute with outcome `release` or `refund`. | API key + HMAC + wallet signature (payer, payee, or mediator). |
+| `POST /escrow/resolve` | Resolve a disputed escrow via a realm arbitration-committee decision. | API key + HMAC + a quorum of the escrow's frozen realm-committee signatures over a signed decision envelope (not a single payer/payee/mediator wallet signature) — see [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md)'s Authentication section for the exact envelope shape and signing contract. |
 
 `release`/`refund`/`resolve` responses are `202 Accepted` with `{"queued": true}` (the node call is made synchronously, but the
 effect is reported as queued); `dispute` responds `202 Accepted` with `{"ok": true}`. `GET /escrow/{id}` returns the escrow struct

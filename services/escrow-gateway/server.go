@@ -401,28 +401,39 @@ func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request) {
 		s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(`{"error":"missing escrowId"}`))
 		return
 	}
-	outcome := strings.ToLower(strings.TrimSpace(req.Outcome))
-	if outcome != "release" && outcome != "refund" {
-		s.writeError(w, http.StatusBadRequest, errors.New("outcome must be release or refund"))
-		s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(`{"error":"invalid outcome"}`))
+	if len(req.Decision) == 0 {
+		s.writeError(w, http.StatusBadRequest, errors.New("decision is required"))
+		s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(`{"error":"missing decision"}`))
 		return
+	}
+	if len(req.Signatures) == 0 {
+		s.writeError(w, http.StatusBadRequest, errors.New("signatures is required"))
+		s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(`{"error":"missing signatures"}`))
+		return
+	}
+	signatures := make([][]byte, len(req.Signatures))
+	for i, sigHex := range req.Signatures {
+		trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(sigHex), "0x"), "0X")
+		sig, err := hex.DecodeString(trimmed)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, fmt.Errorf("invalid signature %d encoding: %w", i, err))
+			s.audit(r.Context(), principal, r, body, http.StatusBadRequest, []byte(fmt.Sprintf(`{"error":"invalid signature %d encoding"}`, i)))
+			return
+		}
+		signatures[i] = sig
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	// EscrowResolve always returns ErrResolveNotConfigured today -- the
-	// safe on-chain resolve path (TxTypeArbitrateRelease/Refund) requires
-	// the escrow to have been created against a registered arbitration
-	// realm, which no deployment has provisioned yet (see the NodeClient
-	// interface doc comment in node_client.go). Skip the EscrowGet/
-	// wallet-signature work below until that's wired up -- there is no
-	// point verifying a signature for an action that cannot proceed.
-	if err := s.node.EscrowResolve(ctx, req.EscrowID, "", outcome); err != nil {
+	// EscrowResolve relays this decision+signature bundle on-chain via
+	// TxTypeArbitrateRelease/Refund and surfaces whatever the chain
+	// returns -- see its doc comment (node_client.go) for the full
+	// authorization model. Requires the escrow to carry a FrozenArb from a
+	// registered realm; an escrow with none fails with a clear on-chain
+	// error, not a gateway-side placeholder.
+	if err := s.node.EscrowResolve(ctx, req.EscrowID, []byte(req.Decision), signatures); err != nil {
 		status := http.StatusBadGateway
-		if errors.Is(err, ErrResolveNotConfigured) {
-			status = http.StatusServiceUnavailable
-		}
 		s.writeError(w, status, err)
 		s.audit(r.Context(), principal, r, body, status, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
 		return
@@ -1236,9 +1247,17 @@ type EscrowActionRequest struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+// EscrowResolveRequest carries a realm arbitration-committee decision --
+// Decision is relayed on-chain byte-for-byte (never re-marshaled: even a
+// whitespace/key-order difference would hash differently than what the
+// committee actually signed), so it's captured as json.RawMessage rather
+// than parsed into individual fields. See EscrowResolve's doc comment
+// (node_client.go) for the exact decision envelope shape
+// (escrowId/outcome/policyNonce/metadata) and signing contract.
 type EscrowResolveRequest struct {
-	EscrowID string `json:"escrowId"`
-	Outcome  string `json:"outcome"`
+	EscrowID   string          `json:"escrowId"`
+	Decision   json.RawMessage `json:"decision"`
+	Signatures []string        `json:"signatures"`
 }
 
 type P2POfferRequest struct {

@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -40,9 +41,9 @@ type mockNodeClient struct {
 	lastDisputePayload []byte
 	resolveCalls       int
 	resolveArgs        []struct {
-		escrowID string
-		caller   string
-		outcome  string
+		escrowID   string
+		decision   []byte
+		signatures [][]byte
 	}
 	releaseErr error
 	refundErr  error
@@ -155,15 +156,15 @@ func (m *mockNodeClient) EscrowDispute(ctx context.Context, payload, signature [
 	return nil
 }
 
-func (m *mockNodeClient) EscrowResolve(ctx context.Context, escrowID, caller, outcome string) error {
+func (m *mockNodeClient) EscrowResolve(ctx context.Context, escrowID string, decision []byte, signatures [][]byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resolveCalls++
 	m.resolveArgs = append(m.resolveArgs, struct {
-		escrowID string
-		caller   string
-		outcome  string
-	}{escrowID: escrowID, caller: caller, outcome: outcome})
+		escrowID   string
+		decision   []byte
+		signatures [][]byte
+	}{escrowID: escrowID, decision: append([]byte(nil), decision...), signatures: signatures})
 	if m.resolveErr != nil {
 		return m.resolveErr
 	}
@@ -686,21 +687,19 @@ func TestEscrowCreateRejectsPayerSignerMismatch(t *testing.T) {
 	}
 }
 
-// TestEscrowResolveNotYetAvailable confirms /escrow/resolve fails closed
-// with a clear 503 rather than a confusing error -- RPCNodeClient.
-// EscrowResolve always returns ErrResolveNotConfigured today (see
-// node_client.go's NodeClient interface doc comment: the safe on-chain
-// resolve path needs an arbitration realm provisioned, and no deployment
-// has done that operational step yet). Also confirms the handler no longer
-// requires wallet-signature headers before reaching that point -- it's
-// pointless to demand a signature for an action that cannot proceed
-// regardless.
-func TestEscrowResolveNotYetAvailable(t *testing.T) {
-	node := &mockNodeClient{resolveErr: ErrResolveNotConfigured}
+// TestEscrowResolveRelaysDecisionAndSignatures confirms /escrow/resolve
+// decodes the hex-encoded signature bundle and relays the raw decision
+// bytes and escrowId straight through to NodeClient.EscrowResolve
+// unmodified -- the decision must reach the chain byte-for-byte, since even
+// a whitespace/key-order difference from re-marshaling would hash
+// differently than what the arbitration committee actually signed.
+func TestEscrowResolveRelaysDecisionAndSignatures(t *testing.T) {
+	node := &mockNodeClient{}
 	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
-	body := []byte(`{"escrowId":"0xabc","outcome":"release"}`)
+	decision := `{"escrowId":"0xabc","outcome":"release","policyNonce":1}`
+	body := []byte(`{"escrowId":"0xabc","decision":` + decision + `,"signatures":["0xAABB"]}`)
 	ts := time.Unix(1700000000, 0).UTC()
 	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts, "nonce-resolve")
 
@@ -714,14 +713,111 @@ func TestEscrowResolveNotYetAvailable(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 service unavailable got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 accepted got %d: %s", rec.Code, rec.Body.String())
 	}
 	if node.resolveCalls != 1 {
 		t.Fatalf("expected resolve to be invoked once, got %d", node.resolveCalls)
 	}
-	if node.getCalls != 0 {
-		t.Fatalf("expected EscrowGet not to be called -- resolve should fail closed before fetching escrow state, got %d calls", node.getCalls)
+	got := node.resolveArgs[0]
+	if got.escrowID != "0xabc" {
+		t.Fatalf("unexpected escrowId: %s", got.escrowID)
+	}
+	if string(got.decision) != decision {
+		t.Fatalf("decision was not relayed byte-for-byte: got %s want %s", got.decision, decision)
+	}
+	if len(got.signatures) != 1 || !bytes.Equal(got.signatures[0], []byte{0xAA, 0xBB}) {
+		t.Fatalf("unexpected decoded signatures: %+v", got.signatures)
+	}
+}
+
+// TestEscrowResolveRequiresDecision confirms a missing decision payload
+// fails fast with 400, without ever reaching NodeClient.EscrowResolve.
+func TestEscrowResolveRequiresDecision(t *testing.T) {
+	node := &mockNodeClient{}
+	server, store, _ := newTestServer(t, node, nil)
+	defer store.Close()
+
+	body := []byte(`{"escrowId":"0xabc","signatures":["0xAABB"]}`)
+	ts := time.Unix(1700000000, 0).UTC()
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts, "nonce-resolve-nodecision")
+
+	req := httptest.NewRequest(http.MethodPost, "/escrow/resolve", bytes.NewReader(body))
+	req.Header.Set(headerAPIKey, "test")
+	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+	req.Header.Set(headerIdempotencyKey, "res124")
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 bad request got %d: %s", rec.Code, rec.Body.String())
+	}
+	if node.resolveCalls != 0 {
+		t.Fatalf("expected resolve not to be invoked, got %d", node.resolveCalls)
+	}
+}
+
+// TestEscrowResolveRequiresSignatures confirms an empty signature bundle
+// fails fast with 400, without ever reaching NodeClient.EscrowResolve.
+func TestEscrowResolveRequiresSignatures(t *testing.T) {
+	node := &mockNodeClient{}
+	server, store, _ := newTestServer(t, node, nil)
+	defer store.Close()
+
+	body := []byte(`{"escrowId":"0xabc","decision":{"escrowId":"0xabc","outcome":"release","policyNonce":1},"signatures":[]}`)
+	ts := time.Unix(1700000000, 0).UTC()
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts, "nonce-resolve-nosigs")
+
+	req := httptest.NewRequest(http.MethodPost, "/escrow/resolve", bytes.NewReader(body))
+	req.Header.Set(headerAPIKey, "test")
+	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+	req.Header.Set(headerIdempotencyKey, "res125")
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 bad request got %d: %s", rec.Code, rec.Body.String())
+	}
+	if node.resolveCalls != 0 {
+		t.Fatalf("expected resolve not to be invoked, got %d", node.resolveCalls)
+	}
+}
+
+// TestEscrowResolvePropagatesChainError confirms a chain-side rejection
+// (e.g. an escrow with no realm attached, or an insufficient arbitrator
+// quorum) surfaces as a 502 rather than a gateway-side placeholder --
+// resolve's authorization is entirely the chain's to enforce, per
+// EscrowResolve's doc comment in node_client.go.
+func TestEscrowResolvePropagatesChainError(t *testing.T) {
+	node := &mockNodeClient{resolveErr: errors.New("escrow: missing frozen arbitrator policy")}
+	server, store, _ := newTestServer(t, node, nil)
+	defer store.Close()
+
+	body := []byte(`{"escrowId":"0xabc","decision":{"escrowId":"0xabc","outcome":"release","policyNonce":1},"signatures":["0xAABB"]}`)
+	ts := time.Unix(1700000000, 0).UTC()
+	timestamp, nonce, sig := signHeaders("secret", http.MethodPost, "/escrow/resolve", body, ts, "nonce-resolve-chainerr")
+
+	req := httptest.NewRequest(http.MethodPost, "/escrow/resolve", bytes.NewReader(body))
+	req.Header.Set(headerAPIKey, "test")
+	req.Header.Set(headerTimestamp, timestamp)
+	req.Header.Set(headerNonce, nonce)
+	req.Header.Set(headerSignature, sig)
+	req.Header.Set(headerIdempotencyKey, "res126")
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 bad gateway got %d: %s", rec.Code, rec.Body.String())
+	}
+	if node.resolveCalls != 1 {
+		t.Fatalf("expected resolve to be invoked once, got %d", node.resolveCalls)
 	}
 }
 

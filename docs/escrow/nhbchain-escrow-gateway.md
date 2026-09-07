@@ -71,11 +71,24 @@ Deployment" below) control the relayer low-balance monitor:
   action in a real transaction — the gateway's own key never authorizes
   anything by itself, it only pays gas and owns that transaction's nonce. See
   "Node Integration" below for why this changed.
-- **Resolve is not available yet.** The safe on-chain resolve path requires the
-  escrow to have been created against a registered arbitration realm (a
-  committee of arbitrators + signing threshold), and no deployment has
-  provisioned one yet — that's a one-time operator action, not something the
-  gateway does per-request. `POST /escrow/resolve` currently returns `503`.
+- **Resolve requires a realm arbitration-committee decision, not a wallet
+  signature header.** Unlike release/refund/dispute (a single participant's
+  signature), resolving a disputed escrow needs a quorum of signatures from
+  the escrow's *frozen* arbitrator committee (captured from its realm at
+  dispute time) over a signed decision envelope:
+  `{"escrowId":"0x<64 hex>","outcome":"release"|"refund","policyNonce":<uint>,"metadata":"<hex, omitted if unset>"}`
+  — `policyNonce` must match the escrow's current `FrozenArb.PolicyNonce`
+  (returned by `GET /escrow/{id}`). Each committee member signs
+  `keccak256(the exact envelope bytes)` independently (same non-EIP-191
+  scheme as the other actions); the gateway relays the raw envelope bytes
+  and the signature bundle on-chain verbatim (see `POST /escrow/resolve`
+  below) — it does not re-marshal or pre-verify the quorum itself, since
+  even a whitespace/key-order difference from re-encoding would hash
+  differently than what the committee actually signed. Only escrows created
+  against a registered realm (`realm` field on `POST /escrow/create`, a
+  `TxTypeEscrowCreateRealm` provisioned by a `RoleEscrowRealmAdmin` operator)
+  carry a `FrozenArb` at all — resolving one without a realm fails with a
+  clear on-chain error, not a gateway placeholder.
 
 ### Production Deployment
 
@@ -159,9 +172,17 @@ Body: { "escrowId":"0x…", "reason":"item damaged" }
 ```
 POST /escrow/resolve
 Headers: API key, HMAC, Idempotency-Key
-Body: { "escrowId":"0x…", "outcome":"release"|"refund" }
-→ 503 -- not yet available, see Authentication above.
+Body: {
+  "escrowId":   "0x…",
+  "decision":   { "escrowId":"0x…", "outcome":"release"|"refund", "policyNonce":1, "metadata":"0x…optional" },
+  "signatures": ["0x…", "0x…"]
+}
+→ 202 { "queued": true }
 ```
+`decision` is relayed on-chain exactly as received (see Authentication
+above) — construct it, then sign `keccak256` of its canonical JSON bytes
+with each arbitrator's key before submitting, rather than sending fields
+separately and letting the gateway reassemble them.
 
 ### Webhooks
 
@@ -187,6 +208,14 @@ Body: { "escrowId":"0x…", "outcome":"release"|"refund" }
   `native/escrow/engine.go`'s `*WithSignature` methods and
   `core/state_transition.go`'s `applyDelegated*Escrow` for the chain-side
   verification this relies on.
+- `resolve` follows the same relayed-signature model via
+  `TxTypeArbitrateRelease`/`TxTypeArbitrateRefund`, except authorization is
+  a quorum of the escrow's frozen realm-committee signatures rather than a
+  single participant's — see `native/escrow/engine.go`'s
+  `ResolveWithSignatures` and `core/state_transition.go`'s `applyArbitrate`.
+  Which of the two tx types the gateway submits only affects on-chain
+  explorer/audit readability: `applyArbitrate` derives the real outcome
+  from the signed decision payload itself regardless of tx type.
 - `escrow_get`/`escrow_getRealm` remain live, read-only RPC calls — nothing
   about reads changed.
 - Subscribes to block/events to sync status.
