@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package lending.v1;
+
+option go_package = "nhbchain/proto/lending/v1;lendingv1";
+
+message MsgSupply {
+  string supplier = 1;
+  string pool_id = 2;
+  string amount = 3;
+}
+
+message MsgBorrow {
+  string borrower = 1;
+  string pool_id = 2;
+  string amount = 3;
+  string recipient = 4;
+}
+
+message MsgRepay {
+  string payer = 1;
+  string pool_id = 2;
+  string amount = 3;
+}
+
+message MsgLiquidate {
+  string liquidator = 1;
+  string pool_id = 2;
+  string borrower = 3;
+  string repay_amount = 4;
+}

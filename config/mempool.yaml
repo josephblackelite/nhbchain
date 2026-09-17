@@ -1,0 +1,9 @@
+# Example mempool configuration fragment highlighting POS QoS controls.
+mempool:
+  maxTransactions: 4000
+  allowUnlimited: false
+
+global:
+  mempool:
+    maxBytes: 16777216
+    posReservationBPS: 1500  # Reserve 15% of each block for POS-tagged transactions.

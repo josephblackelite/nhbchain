@@ -1,0 +1,30 @@
+{
+  "name": "@nhb/escrow-checkout-widget",
+  "version": "0.1.0",
+  "private": false,
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "lint": "echo 'TODO: add lint'",
+    "test": "echo 'TODO: add tests'"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "dependencies": {
+    "clsx": "^2.1.0",
+    "qrcode.react": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.33",
+    "@types/react-dom": "^18.2.14",
+    "tsup": "^7.2.0",
+    "typescript": "^5.3.3"
+  }
+}

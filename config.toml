@@ -1,0 +1,487 @@
+ListenAddress = "127.0.0.1:6001"
+RPCAddress = "127.0.0.1:8545"
+# The node sits behind nginx (nhbcoin.nginx.conf), which already forwards
+# real per-client IPs via X-Real-IP/X-Forwarded-For. Trusting only that one
+# local proxy hop lets the rate limiter attribute requests to real client
+# IPs instead of bucketing all traffic behind one shared proxy address --
+# without this, per-IP limits below are meaningless no matter how tight.
+RPCTrustProxyHeaders = true
+RPCTrustedProxies = ["127.0.0.1"]
+RPCReadHeaderTimeout = 0
+RPCReadTimeout = 0
+RPCWriteTimeout = 0
+RPCIdleTimeout = 0
+# Real per-IP attribution now works (see RPCTrustProxyHeaders above), so
+# these are tight per-bucket limits rather than the previous 10000/60s
+# (~166 req/s, not meaningfully different from unlimited for a public
+# financial RPC endpoint). Tune based on observed legitimate traffic.
+RPCMaxTxPerWindow = 120
+RPCMaxTxPerIP = 120
+RPCMaxTxPerIdentity = 120
+RPCMaxTxPerChain = 120
+RPCMaxTxPerIdentityChain = 120
+RPCRateLimitWindow = 60
+RPCCallerMetadataMaxTTL = 600
+# Safe as-is: rpc/http.go refuses to bind plaintext on a non-loopback
+# address, and RPCAddress above stays 127.0.0.1 -- real TLS termination
+# happens at nginx, which proxies HTTPS down to this loopback-only listener.
+RPCAllowInsecure = true
+RPCAllowInsecureUnspecified = false
+RPCTLSCertFile = ""
+RPCTLSKeyFile = ""
+RPCTLSClientCAFile = ""
+DataDir = "./nhb-data"
+GenesisFile = "./config/genesis.phase-e.json"
+AllowAutogenesis = false
+# Matches the coordinated activation height both live mainnet validators are
+# currently enforcing for NHB-TRIAGE-C1's quorum-certificate check on the
+# untrusted P2P block-sync path (see config/config.go's QuorumCertActivationHeight
+# doc comment and core/node.go's commitBlock). This value must stay identical
+# across every validator -- a new validator whose config leaves this at 0
+# (unset) will sync and commit every historical block above this height with
+# NO quorum-certificate verification at all: a silent security gap, not a
+# functional failure, since sync otherwise succeeds normally. Set 2026-09-02
+# to match the live validators' already-active height; if the network is
+# ever upgraded again with a new activation height, update this value (and
+# redeploy every validator) together, never independently.
+QuorumCertActivationHeight = 451949
+ValidatorKeystorePath = "validator.keystore"
+ValidatorKMSURI = ""
+ValidatorKMSEnv = ""
+NetworkName = "nhb-local"
+MaxPeers = 0
+MaxInbound = 0
+MaxOutbound = 0
+MinPeers = 0
+OutboundPeers = 0
+PeerBanSeconds = 0
+ReadTimeout = 0
+WriteTimeout = 0
+MaxMsgBytes = 0
+MaxMsgsPerSecond = 0.0
+ClientVersion = ""
+
+[RPCProxyHeaders]
+  XForwardedFor = "single"
+  XRealIP = "single"
+
+[RPCJWT]
+  Enable = true
+  Alg = "HS256"
+  HSSecretEnv = "NHB_RPC_JWT_SECRET"
+  RSAPublicKeyFile = ""
+  Issuer = "nhb-rpc"
+  Audience = ["wallets"]
+  MaxSkewSeconds = 120
+
+[RPCSwapAuth]
+  AllowedTimestampSkewSeconds = 0
+  NonceTTLSeconds = 0
+  NonceCapacity = 0
+  RateLimitWindowSeconds = 0
+  [RPCSwapAuth.Persistence]
+    Backend = ""
+    LevelDBPath = ""
+
+[p2p]
+  NetworkId = 430060579445266314
+  ExternalAddress = ""
+  MaxPeers = 64
+  MaxInbound = 60
+  MaxOutbound = 30
+  MinPeers = 12
+  OutboundPeers = 16
+  Bootnodes = []
+  PersistentPeers = []
+  Seeds = []
+  BanScore = 100
+  GreyScore = 50
+  RateMsgsPerSec = 50.0
+  Burst = 200.0
+  HandshakeTimeoutMs = 3000
+  PingIntervalSeconds = 30
+  PingTimeoutSeconds = 90
+  BanDurationSeconds = 3600
+  DialBackoffSeconds = 30
+  PEX = true
+
+[potso]
+  [potso.rewards]
+    EpochLengthBlocks = 120
+    AlphaStakeBps = 7000
+    MinPayoutWei = "1000000000000000"
+    EmissionPerEpoch = "50000000000000000000" # 50 ZNHB reward per epoch (example)
+    TreasuryAddress = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+    MaxWinnersPerEpoch = 5000
+    CarryRemainder = true
+    PayoutMode = "auto"
+  [potso.weights]
+    AlphaStakeBps = 7000
+    TxWeightBps = 6000
+    EscrowWeightBps = 3000
+    UptimeWeightBps = 1000
+    MaxEngagementPerEpoch = 1000
+    MinStakeToWinWei = "0"
+    MinEngagementToWin = 0
+    DecayHalfLifeEpochs = 7
+    TopKWinners = 5000
+    TieBreak = "addrHash"
+  [potso.abuse]
+    MinStakeToEarnWei = "0"
+    QuadraticTxDampenAfter = 0
+    QuadraticTxDampenPower = 2
+    MaxUserShareBps = 0
+
+[governance]
+  MinDepositWei = "1000e18"
+  VotingPeriodSeconds = 604800
+  TimelockSeconds = 172800
+  QuorumBps = 2000
+  PassThresholdBps = 5000
+  # AllowedRoles gates which role names a role.allowlist proposal
+  # (native/governance/engine.go's parseRoleAllowlistPayload) may grant/revoke --
+  # any role not on this list is rejected at proposal-submission time. This
+  # section previously had no AllowedRoles line at all in this file even
+  # though the live, deployed config.toml on both validators has carried
+  # ["MINTER_NHB", "ROLE_SWAP_PAYOUT_ATTESTOR"] since the swap-payout-attestor
+  # role grant executed on 2026-08-24 -- a real drift between this repo and
+  # what's actually running, only discovered while adding ROLE_ESCROW_REALM_ADMIN
+  # here. Reconciled to match live, plus the new role.
+  AllowedRoles = ["MINTER_NHB", "ROLE_SWAP_PAYOUT_ATTESTOR", "ROLE_ESCROW_REALM_ADMIN"]
+  AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps", "market.flatFeeWei"]
+  BlockTimestampToleranceSeconds = 5
+
+[swap]
+  AllowedFiat = ["USD", "EUR", "GBP"]
+  MaxQuoteAgeSeconds = 120
+  SlippageBps = 50
+  OraclePriority = ["nowpayments", "coingecko", "manual"]
+  TwapWindowSeconds = 300
+  TwapSampleCap = 128
+  PriceProofMaxDeviationBps = 0
+  PayoutAuthorities = ["treasury"]
+  # This section's numeric circuit-breaker caps (per-tx min/max, per-address
+  # daily/monthly) are a static, config.toml-driven mint-side defense in
+  # depth -- worst-case exposure is already bounded by the fixed,
+  # pre-allocated genesis treasury Sale Pool (ZNHB voucher mints draw from
+  # it rather than minting new supply), but a single large or duplicated
+  # voucher could otherwise still drain a large fraction of the pool in one
+  # shot. The redeem-side (swap-out burn, TxTypeRedeemNHB) equivalent --
+  # formerly its own [swap.redeemRisk] section here -- is GONE, but for a
+  # different reason: it is now exclusively governance-controlled. Submit a
+  # policy.swapRiskParams proposal (see native/governance/types.go's
+  # ProposalKindSwapRiskParams) to change the redeem caps, which then takes
+  # effect identically on every validator's very next transaction with no
+  # config edit or restart, ever. Until the first such proposal executes,
+  # conservative built-in defaults apply (native/swap/redeem_risk.go's
+  # DefaultRedeem* constants). Query the public swap_getRiskParams RPC
+  # method to see the values currently in effect.
+  [swap.risk]
+    PerAddressDailyCapWei = "10000e18"
+    PerAddressMonthlyCapWei = "300000e18"
+    PerTxMinWei = "1e18"
+    PerTxMaxWei = "50000e18"
+    VelocityWindowSeconds = 600
+    VelocityMaxMints = 5
+    SanctionsCheckEnabled = true
+    PriceProofSignatureRequired = false
+    [swap.risk.cashOut]
+  [swap.providers]
+    Allow = ["nowpayments"]
+  [swap.sanctions]
+
+[lending]
+  # Tightened 2026-08-24 from 7500 (75%) after a live collateral-mispricing
+  # incident: with no ZNHB/NHB reference price ever submitted and the
+  # OracleMaxAgeBlocks guard below previously unset (0, i.e. disabled),
+  # ZNHB collateral was silently valued 1:1 against NHB, letting MaxLTV
+  # pass on borrows that were actually far riskier in real terms. 6000
+  # (60%) is the requested tightened cap, kept well under
+  # LiquidationThresholdBps for a real safety buffer once pricing is fixed.
+  MaxLTVBps = 6000
+  LiquidationThresholdBps = 8500
+  ReserveFactorBps = 1000
+  ProtocolFeeBps = 0
+  DeveloperFeeBps = 0
+  DeveloperFeeCollector = ""
+  # OracleMaxAgeBlocks/OracleMaxDeviationBps bound guardOracle's staleness
+  # and deviation checks on the ZNHB/NHB reference price (see
+  # TxTypeLendingRefPrice). Conservative-but-real defaults: refprice
+  # submitters are expected to update roughly every 5 minutes, so 1000
+  # blocks leaves generous slack before a Borrow/Liquidate is refused for
+  # staleness; 50% deviation tolerates a legitimate manual peg update
+  # without disabling the check outright.
+  OracleMaxAgeBlocks = 1000
+  OracleMaxDeviationBps = 5000
+  [lending.breaker]
+  [lending.collateralRouting]
+    LiquidatorBps = 0
+    DeveloperBps = 0
+    DeveloperAddress = ""
+    ProtocolBps = 0
+    ProtocolAddress = ""
+
+[subscriptions]
+  # ManagementFeeBps is NHBCoin's own platform fee for running the
+  # recurring-billing engine, charged in addition to (never instead of)
+  # the ordinary transfer fee -- a subscription charge never goes through
+  # the transfer-fee path at all. 100 = 1.00%, a fraction of Stripe-class
+  # (~2.9%+30c) take rates by design. ManagementFeeCapBps is a hard
+  # ceiling this value may never exceed without also raising the cap.
+  ManagementFeeBps = 100
+  ManagementFeeCapBps = 500
+  # Treasury receives every charge's management-fee share. Required once
+  # ManagementFeeBps > 0 -- node startup panics otherwise. Set to the
+  # network's single treasury wallet (NHB_MASTER_TREASURY in node.env),
+  # which already receives every other fee app-wide -- confirmed
+  # 2026-08-13 after this placeholder caused both live validators to
+  # crash-loop on their first restart after this section was added.
+  Treasury = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+  # MaxRetries is how many consecutive failed charge attempts a
+  # subscription tolerates (spaced RetryIntervalSeconds apart) before
+  # being permanently suspended.
+  MaxRetries = 3
+  RetryIntervalSeconds = 86400
+
+[mempool]
+  MaxTransactions = 5000
+  AllowUnlimited = false
+
+[global]
+  [global.Governance]
+    # Previously placeholder zero values. Exactly like the Staking section
+    # below, these keys being PRESENT (not absent) meant the case-sensitivity
+    # bug in config/config.go's IsDefined-gated merge (fixed this session)
+    # was the only thing keeping the network on sane defaults -- with that
+    # bug fixed, these literal zeros would otherwise start applying for
+    # real: 0% quorum/pass thresholds and a 0-second voting period would
+    # break governance outright. Corrected to match the Go-level defaults
+    # (config/config.go's DefaultConfig()), which is what the network has
+    # actually been running on this whole time.
+    QuorumBPS = 6000
+    PassThresholdBPS = 5000
+    VotingPeriodSecs = 604800
+  [global.Slashing]
+    # Same issue as Governance above -- corrected to match DefaultConfig().
+    MinWindowSecs = 60
+    MaxWindowSecs = 600
+  [global.Mempool]
+    # Same issue as Governance above -- corrected to match DefaultConfig().
+    # A literal MaxBytes=0 would have meant the mempool could accept zero
+    # bytes of pending transactions once the config bug was fixed.
+    MaxBytes = 16777216
+    POSReservationBPS = 1500
+  [global.Blocks]
+    MaxTxs = 500
+  [global.Staking]
+    # Previously all four of these were placeholder zero/empty values, which
+    # -- since the TOML key is present (not absent) -- actively override the
+    # sensible Go-level defaults (1250/30/7/"ZNHB") rather than falling back
+    # to them, per config/config.go's IsDefined-gated merge logic. That
+    # silently made staking rewards a no-op (0% APR, 0-day payout period,
+    # no reward asset resolvable) and unbonding instant (0 days -- also
+    # moot before this session, since the real unbonding delay was a
+    # hardcoded 72h constant that never read this value at all; see
+    # docs/issue30.md item 15). Corrected to match the Go-level defaults.
+    AprBps = 1250
+    PayoutPeriodDays = 30
+    UnbondingDays = 7
+    MinStakeWei = "10000000000000000000000"
+    MaxEmissionPerYearWei = "5000000000000000000"
+    RewardAsset = "ZNHB"
+    CompoundDefault = false
+  [global.Pauses]
+    Lending = false
+    Swap = false
+    Escrow = false
+    Trade = false
+    Loyalty = false
+    POTSO = false
+    TransferNHB = false
+    TransferZNHB = false
+    Staking = false
+    # SwapRedeem pauses only new swap-out burns (TxTypeRedeemNHB); it never
+    # blocks attesting an already-burned request paid/failed.
+    SwapRedeem = false
+  [global.Quotas]
+    # Every module below is checked per transaction SENDER (the recovered
+    # signer), not per real end user, and every applyQuota(...) call site
+    # (core/state_transition.go's handleNativeTransaction) passes addNHB=0
+    # -- MaxNHBPerEpoch is inert chain-wide regardless of module or value,
+    # left at 0 everywhere rather than set to a number that's never
+    # actually checked. MaxRequestsPerMin is the only field that does
+    # anything. Set deliberately generous throughout (100/sec) rather than
+    # a tight per-account number: this is meant as a backstop against a
+    # genuinely runaway flood (a bug, a compromised key), not a meaningful
+    # throttle on real usage -- a tight number here would eventually
+    # bottleneck a legitimate high-volume actor (an exchange hot wallet, a
+    # future gateway/relayer pooling many real users behind one signing
+    # key, the way escrow-gateway already does for escrow today) as this
+    # network grows toward real, global-scale volume.
+    [global.Quotas.Lending]
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Swap]
+      # Gates TxTypeBuyZNHB (purchase ZNHB from the admin wallet),
+      # TxTypeBuybackAsk (sell ZNHB into the treasury buyback), and
+      # TxTypeRedeemNHB (swap-out) -- the three ordinary, unprivileged
+      # user-facing "swap" actions, each previously completely ungated.
+      # TxTypeAttestRedemption/TxTypeSwapPayoutReceipt are deliberately
+      # excluded -- both are RoleSwapPayoutAttestor-gated trusted-service
+      # calls, not ordinary user actions this quota is meant to bound.
+      # RedeemNHB additionally has its own separate volume-based circuit
+      # breaker (native/swap/redeem_risk.go + core/swap_risk_params.go) --
+      # this request-frequency quota is an independent, complementary
+      # backstop, not a replacement for it.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Escrow]
+      # Quota is tracked per transaction sender, not per real end user --
+      # every delegated escrow action (TxTypeDelegated{Create,Release,
+      # Refund,Dispute}Escrow, core/types/transaction.go) submitted through
+      # escrow-gateway is signed by the gateway's own relayer key, so ALL
+      # of that traffic pools under one address here regardless of how
+      # many distinct people are actually behind it. Set generously enough
+      # to cover the gateway's aggregate expected volume, not a tight
+      # per-user limit -- real per-integrator throttling is
+      # escrow-gateway's own API-key rate limiter's job
+      # (ESCROW_GATEWAY_API_RATE_RPS_PER_KEY-equivalent config), this is a
+      # coarser backstop against a runaway bug or a compromised key
+      # flooding the chain directly.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Trade]
+      # NOT scoped to just Trade-module (arbitration) transactions --
+      # core/node.go's addTransaction also reuses this exact config value
+      # as the chain's ONLY global per-sender MEMPOOL admission cap,
+      # applied to every transaction type from every address
+      # (applySenderQuotaLocked, called unconditionally for any signed
+      # tx). A tight number here throttles a sender's entire transaction
+      # throughput chain-wide, not just arbitration actions -- set very
+      # high deliberately so no legitimate high-volume wallet (an
+      # exchange, a payments aggregator) ever realistically hits it, while
+      # still stopping a truly pathological flood (thousands/sec from one
+      # compromised key) from ever reaching the mempool.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Loyalty]
+      # Gates TxTypeCreateLoyaltyBusiness and TxTypeCreateLoyaltyProgram --
+      # the two loyalty operations that mint a new ID, same risk profile as
+      # every other module's "creation" action. SetPaymaster/AddMerchant/
+      # RemoveMerchant/UpdateProgram/PauseProgram/ResumeProgram are
+      # deliberately NOT quota-gated -- each is an already-verified business
+      # owner (or ROLE_LOYALTY_ADMIN holder) acting on a single resource
+      # they already control, not a new-ID-minting action a spam quota is
+      # meant to bound.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.POTSO]
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Subscriptions]
+      # Previously had no config field at all despite real enforcement
+      # (TxTypeSubscriptionCreatePlan/UpdatePlan/Subscribe/Cancel all call
+      # applyQuota(moduleSubscriptions, ...)) -- added alongside Market
+      # below so both can actually be configured.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+    [global.Quotas.Market]
+      # Same gap as Subscriptions above -- TxTypeMarketCreateListing/
+      # FillListing/CancelListing call applyQuota(moduleMarket, ...) but
+      # had no config field to actually set until now.
+      MaxRequestsPerMin = 6000
+      MaxNHBPerEpoch = 0
+      EpochSeconds = 60
+  [global.Paymaster]
+    MerchantDailyCapWei = ""
+    DeviceDailyTxCap = 0
+    GlobalDailyCapWei = ""
+    [global.Paymaster.AutoTopUp]
+      Enabled = false
+      Token = ""
+      MinBalanceWei = ""
+      TopUpAmountWei = ""
+      DailyCapWei = ""
+      CooldownSeconds = 0
+      [global.Paymaster.AutoTopUp.Governance]
+        FundingAccount = ""
+        Minter = ""
+        Approver = ""
+        MinterRole = ""
+        ApproverRole = ""
+  [global.Fees]
+    FreeTierTxPerMonth = 100
+    MDRBasisPoints = 150
+    OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+
+    [[global.Fees.Assets]]
+      Asset = "NHB"
+      MDRBasisPoints = 150
+      OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+
+    [[global.Fees.Assets]]
+      Asset = "ZNHB"
+      MDRBasisPoints = 200
+      OwnerWallet = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+  [global.Loyalty]
+    [global.Loyalty.Dynamic]
+      TargetBPS = 50
+      MinBPS = 25
+      MaxBPS = 100
+      SmoothingStepBPS = 5
+      CoverageMax = 0.5
+      CoverageLookbackDays = 7
+      DailyCapPctOf7dFees = 0.6
+      DailyCapUSD = 5000.0
+      YearlyCapPctOfInitialSupply = 10.0
+      EnableProRate = true
+      EnforceProRate = true
+      [global.Loyalty.Dynamic.PriceGuard]
+        Enabled = true
+        PricePair = "ZNHB/USD"
+        TwapWindowSeconds = 7200
+        MaxDeviationBPS = 300
+        PriceMaxAgeSeconds = 600
+        FallbackMinEmissionZNHBWei = ""
+        # Was literally `false` here, but -- like Governance/Slashing/Mempool
+        # above -- the config-loading bug fixed this session meant this key
+        # was never actually being read: the node has genuinely been running
+        # on UseLastGoodPriceFallback=true (config/config.go's DefaultConfig())
+        # this whole time. Set to true here so fixing the loading bug doesn't
+        # also silently flip this real financial-safety knob (fail-open vs
+        # fail-closed during a loyalty price-oracle outage) as a side effect.
+        # Whether fail-closed is actually the better policy going forward is
+        # a real, separate decision worth making deliberately, not bundled
+        # into a config-loader bugfix.
+        UseLastGoodPriceFallback = true
+
+[consensus]
+  ProposalTimeout = "0s"
+  PrevoteTimeout = "0s"
+  PrecommitTimeout = "0s"
+  CommitTimeout = "0s"
+
+[network_security]
+  ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"
+  ServerTLSKeyFile = "/etc/nhb/tls/p2pd.key"
+  ServerCAFile = "/etc/nhb/tls/p2pd-ca.pem"
+  ClientCAFile = "/etc/nhb/tls/consensus-ca.pem"
+  ClientTLSCertFile = "/etc/nhb/tls/consensus.crt"
+  ClientTLSKeyFile = "/etc/nhb/tls/consensus.key"
+  AllowInsecure = false
+  AllowUnauthenticatedReads = false
+  SharedSecret = ""
+  SharedSecretFile = "/etc/nhb/network.token"
+  SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"
+  AuthorizationHeader = "x-nhb-network-token"
+  AllowedClientCommonNames = ["consensusd"]
+  ServerName = "p2pd.internal"
+  StreamQueueSize = 0
+  RelayDropLogRatio = 0.0

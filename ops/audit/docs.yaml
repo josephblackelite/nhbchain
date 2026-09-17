@@ -1,0 +1,17 @@
+phase: docs
+description: >-
+  Verifies that API and compliance documentation is current for the audited release.
+checks:
+  - name: Governance specs generated
+    target: docs/governance
+    expect: Documentation generator outputs match committed files.
+  - name: Security readiness guide
+    target: docs/security/audit-readiness.md
+    expect: Release checklist is present and signed off.
+artifacts:
+  - name: Audit readiness guide
+    path: docs/security/audit-readiness.md
+    format: markdown
+metadata:
+  owner: documentation
+  cadence: release

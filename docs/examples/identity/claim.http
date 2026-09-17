@@ -1,0 +1,13 @@
+### Claim funds (JSON-RPC)
+POST {{NODE_RPC_URL}}
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 43,
+  "method": "identity_claim",
+  "params": [
+    "0x92fd...",
+    "0xRECIP_SIG"
+  ]
+}

@@ -1,0 +1,27 @@
+listen: ":50061"
+consensus: "localhost:9090"
+chain_id: "localnet"
+signer_key_env: "GOVERND_SIGNER_KEY"
+nonce_start: 1
+nonce_store_path: "services/governd/data/nonce"
+fee:
+  amount: ""
+  denom: ""
+  payer: ""
+tls:
+  cert: "services/governd/config/server.crt"
+  key_env: "GOVERND_TLS_KEY_PATH"
+  client_ca: ""
+auth:
+  api_tokens: []
+  mtls:
+    allowed_common_names: []
+consensus_client:
+  allow_insecure: true
+  tls:
+    cert: ""
+    key: ""
+    ca: ""
+  shared_secret:
+    header: "authorization"
+    token: ""

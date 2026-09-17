@@ -1,0 +1,14 @@
+{
+  "name": "@nhb/status-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dev-server.js",
+  "scripts": {
+    "dev": "node dev-server.js"
+  },
+  "dependencies": {
+    "@nhb/examples-lib-sdk": "*",
+    "dotenv": "^16.4.5"
+  }
+}

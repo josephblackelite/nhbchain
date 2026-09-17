@@ -1,0 +1,208 @@
+package core
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+)
+
+// MintChainID defines the founder-mainnet chain identifier expected inside mint
+// vouchers. This is the genesis-hash-derived ID (Blockchain.ChainID(), the
+// first 8 bytes of the genesis block hash) for the Phase E relaunch genesis
+// (config/genesis.phase-e.json), read directly from that node's own startup
+// log ("Loaded genesis... chainID=..."), not chosen or guessed. The prior
+// GTM 2026 genesis (launched 2026-08-04, chainID=10698789873712925303) was
+// abandoned: a real consensus bug (see the ensureDefaultLendingPool fix)
+// meant no second validator could ever sync it, so its 35,000+ blocks of
+// history were snapshotted into this new genesis's alloc instead of carried
+// forward on-chain.
+const MintChainID uint64 = 430060579445266314
+
+var (
+	// ErrMintInvalidSigner indicates the recovered signer does not hold the required role.
+	ErrMintInvalidSigner = errors.New("mint: invalid signer")
+	// ErrMintInvoiceUsed indicates the provided invoice identifier has already been processed.
+	ErrMintInvoiceUsed = errors.New("mint: invoice already settled")
+	// ErrMintExpired indicates the voucher expiry timestamp has elapsed.
+	ErrMintExpired = errors.New("mint: voucher expired")
+	// ErrMintInvalidChainID indicates the voucher targets a different chain identifier.
+	ErrMintInvalidChainID = errors.New("mint: invalid chain id")
+	// ErrMintInvalidPayload indicates the mint transaction payload could not be decoded.
+	ErrMintInvalidPayload = errors.New("mint: invalid payload")
+	// ErrMintEmissionCapExceeded indicates the configured emission cap would be exceeded.
+	ErrMintEmissionCapExceeded = errors.New("mint: emission cap exceeded")
+	// ErrMintPaused indicates the token mint path has been paused.
+	ErrMintPaused = errors.New("mint: token mint paused")
+	// ErrMintRecipientUnresolved indicates the voucher's recipient reference
+	// could not be resolved to an address via the on-chain identity registry.
+	// Unlike the other payload checks in this file, this depends on mutable
+	// state (an identity alias registered after this transaction was
+	// submitted could make a retry succeed), so it must not be treated as
+	// permanently unsatisfiable.
+	ErrMintRecipientUnresolved = errors.New("mint: recipient identity unresolved")
+	// ErrMintZNHBNotMintable indicates a mint voucher targeted ZNHB. ZNHB is
+	// a fixed-supply asset by product decision: it is never minted, no
+	// matter what role a signer holds now or is granted in the future. The
+	// only way to acquire ZNHB is to buy NHB and swap it via the
+	// curve-priced NHB->ZNHB path (applyBuyZNHB / the swap-voucher mint
+	// path), which debits the tracked treasury Sale Pool instead of
+	// expanding supply. Wraps ErrMintInvalidPayload so classifyProposalError
+	// (core/node.go) prunes it exactly like every other pure, payload-only
+	// mint rejection in this file: it depends only on the voucher's own
+	// immutable token field, so retrying the identical transaction bytes can
+	// never make it succeed -- no role grant, present or future, can work
+	// around it.
+	ErrMintZNHBNotMintable = fmt.Errorf("%w: ZNHB is fixed supply and cannot be minted; buy NHB and swap to ZNHB instead", ErrMintInvalidPayload)
+)
+
+// MintVoucher represents the canonical payload that is signed off-chain by a mint authority.
+type MintVoucher struct {
+	InvoiceID string `json:"invoiceId"`
+	Recipient string `json:"recipient"`
+	Token     string `json:"token"`
+	Amount    string `json:"amount"`
+	ChainID   uint64 `json:"chainId"`
+	Expiry    int64  `json:"expiry"`
+}
+
+// CanonicalJSON returns the canonical JSON encoding used for signing vouchers.
+func (v MintVoucher) CanonicalJSON() ([]byte, error) {
+	normalizedAmount, err := v.AmountBig()
+	if err != nil {
+		return nil, err
+	}
+	canonical := struct {
+		InvoiceID string `json:"invoiceId"`
+		Recipient string `json:"recipient"`
+		Token     string `json:"token"`
+		Amount    string `json:"amount"`
+		ChainID   uint64 `json:"chainId"`
+		Expiry    int64  `json:"expiry"`
+	}{
+		InvoiceID: strings.TrimSpace(v.InvoiceID),
+		Recipient: strings.TrimSpace(v.Recipient),
+		Token:     strings.ToUpper(strings.TrimSpace(v.Token)),
+		Amount:    normalizedAmount.String(),
+		ChainID:   v.ChainID,
+		Expiry:    v.Expiry,
+	}
+	if canonical.InvoiceID == "" {
+		return nil, fmt.Errorf("invoiceId required")
+	}
+	if canonical.Recipient == "" {
+		return nil, fmt.Errorf("recipient required")
+	}
+	if canonical.Token == "" {
+		return nil, fmt.Errorf("token required")
+	}
+	if canonical.ChainID == 0 {
+		return nil, fmt.Errorf("chainId required")
+	}
+	if canonical.Expiry == 0 {
+		return nil, fmt.Errorf("expiry required")
+	}
+	return json.Marshal(canonical)
+}
+
+// Digest computes the keccak256 hash over the canonical JSON representation.
+func (v MintVoucher) Digest() ([]byte, error) {
+	canonical, err := v.CanonicalJSON()
+	if err != nil {
+		return nil, err
+	}
+	return ethcrypto.Keccak256(canonical), nil
+}
+
+// AmountBig parses the Amount field and returns it as a big integer.
+func (v MintVoucher) AmountBig() (*big.Int, error) {
+	trimmed := strings.TrimSpace(v.Amount)
+	if trimmed == "" {
+		return nil, fmt.Errorf("amount required")
+	}
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid amount: %s", v.Amount)
+	}
+	if value.Sign() <= 0 {
+		return nil, fmt.Errorf("amount must be positive")
+	}
+	return value, nil
+}
+
+// NormalizedToken returns the uppercase token symbol included in the voucher.
+func (v MintVoucher) NormalizedToken() string {
+	return strings.ToUpper(strings.TrimSpace(v.Token))
+}
+
+// TrimmedInvoiceID returns the trimmed invoice identifier.
+func (v MintVoucher) TrimmedInvoiceID() string {
+	return strings.TrimSpace(v.InvoiceID)
+}
+
+// TrimmedRecipient returns the trimmed recipient reference.
+func (v MintVoucher) TrimmedRecipient() string {
+	return strings.TrimSpace(v.Recipient)
+}
+
+type mintTransactionPayload struct {
+	Voucher   MintVoucher `json:"voucher"`
+	Signature string      `json:"signature"`
+}
+
+func encodeMintTransaction(voucher *MintVoucher, signature []byte) ([]byte, error) {
+	if voucher == nil {
+		return nil, fmt.Errorf("voucher required")
+	}
+	if len(signature) == 0 {
+		return nil, fmt.Errorf("signature required")
+	}
+	payload := mintTransactionPayload{
+		Voucher:   *voucher,
+		Signature: "0x" + strings.ToLower(hex.EncodeToString(signature)),
+	}
+	return json.Marshal(payload)
+}
+
+func decodeMintTransaction(data []byte) (*MintVoucher, []byte, error) {
+	if len(data) == 0 {
+		return nil, nil, fmt.Errorf("%w: payload required", ErrMintInvalidPayload)
+	}
+	var payload mintTransactionPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
+	}
+	voucher := payload.Voucher
+	sig := strings.TrimSpace(payload.Signature)
+	if sig == "" {
+		return nil, nil, fmt.Errorf("%w: signature required", ErrMintInvalidPayload)
+	}
+	sig = strings.TrimPrefix(strings.ToLower(sig), "0x")
+	signature, err := hex.DecodeString(sig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
+	}
+	if len(signature) == 0 {
+		return nil, nil, fmt.Errorf("%w: signature required", ErrMintInvalidPayload)
+	}
+	return &voucher, append([]byte(nil), signature...), nil
+}
+
+// MintVoucherHash returns the keccak256 hash of the canonical voucher payload
+// concatenated with the provided signature. This digest was historically used
+// for reconciliation and remains available for downstream tooling.
+func MintVoucherHash(voucher *MintVoucher, signature []byte) (string, error) {
+	if voucher == nil {
+		return "", fmt.Errorf("voucher required")
+	}
+	canonical, err := voucher.CanonicalJSON()
+	if err != nil {
+		return "", err
+	}
+	digest := ethcrypto.Keccak256(append([]byte{}, append(canonical, signature...)...))
+	return "0x" + strings.ToLower(hex.EncodeToString(digest)), nil
+}

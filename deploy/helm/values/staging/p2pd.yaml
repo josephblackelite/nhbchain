@@ -1,0 +1,35 @@
+image:
+  tag: staging
+env:
+  - name: NHB_ENV
+    value: staging
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "true"
+persistence:
+  size: 20Gi
+config:
+  content: |
+    ListenAddress = ":26656"
+    DataDir = "/var/lib/nhb/p2p"
+    AllowAutogenesis = true
+    NetworkName = "nhb-staging"
+    [p2p]
+    NetworkId = 287001
+    MaxPeers = 64
+    MaxInbound = 40
+    MaxOutbound = 24
+    MinPeers = 24
+    OutboundPeers = 16
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 75
+    Burst = 200
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true

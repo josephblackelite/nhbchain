@@ -1,0 +1,33 @@
+phase: ledger
+description: >-
+  Tracks representative voucher events for auditors to reconcile off-chain fiat to
+  on-chain supply adjustments.
+records:
+  - provider: manual
+    provider_tx_id: audit-0001
+    amount_wei: "500000000000000000"
+    status: minted
+  - provider: manual
+    provider_tx_id: audit-0002
+    amount_wei: "750000000000000000"
+    status: reconciled
+  - provider: otc
+    provider_tx_id: audit-0003
+    amount_wei: "1000000000000000000"
+    status: reversed
+expectations:
+  status_counts:
+    minted: 1
+    reconciled: 1
+    reversed: 1
+checks:
+  - name: Voucher uniqueness
+    target: native/swap
+    expect: Provider transaction identifiers remain unique and append-only.
+artifacts:
+  - name: Ledger sample
+    path: ops/audit/ledger.yaml
+    format: yaml
+metadata:
+  owner: treasury
+  cadence: weekly

@@ -1,0 +1,1586 @@
+package lending
+
+import (
+	"errors"
+	"math"
+	"math/big"
+	"strings"
+
+	"nhbchain/core/types"
+	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
+)
+
+var (
+	errNilState                  = errors.New("lending engine: state not configured")
+	errNilMarket                 = errors.New("lending engine: market not initialised")
+	errInvalidAmount             = errors.New("lending engine: amount must be positive")
+	errInsufficientBalance       = errors.New("lending engine: insufficient balance")
+	errInsufficientLiquidity     = errors.New("lending engine: insufficient liquidity")
+	errHealthCheckFailed         = errors.New("lending engine: borrower health factor below 1")
+	errNoDebtToRepay             = errors.New("lending engine: no outstanding debt to repay")
+	errNotLiquidatable           = errors.New("lending engine: borrower not eligible for liquidation")
+	errDeveloperFeeRecipient     = errors.New("lending engine: developer fee recipient not configured")
+	errDeveloperFeeCap           = errors.New("lending engine: developer fee exceeds cap")
+	errPoolNotConfigured         = errors.New("lending engine: pool identifier not configured")
+	errCollateralRoutingBps      = errors.New("lending engine: collateral routing exceeds 100%")
+	errDeveloperCollateral       = errors.New("lending engine: developer collateral recipient not configured")
+	errProtocolCollateral        = errors.New("lending engine: protocol collateral recipient not configured")
+	errSupplyPaused              = errors.New("lending engine: supply operations paused")
+	errBorrowPaused              = errors.New("lending engine: borrow operations paused")
+	errRepayPaused               = errors.New("lending engine: repay operations paused")
+	errLiquidationsPaused        = errors.New("lending engine: liquidation operations paused")
+	errDepositTooSmall           = errors.New("lending engine: deposit below minimum liquidity")
+	errBorrowCapPerBlock         = errors.New("lending engine: borrow exceeds per-block cap")
+	errBorrowCapGlobal           = errors.New("lending engine: borrow exceeds global cap")
+	errBorrowCapUtilisation      = errors.New("lending engine: borrow exceeds utilisation cap")
+	errOracleStale               = errors.New("lending engine: oracle quote stale")
+	errOracleDeviation           = errors.New("lending engine: oracle deviation too large")
+	errMaxLTVExceeded            = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
+	errWithdrawSameBlockAsSupply = errors.New("lending engine: cannot withdraw in the same block as a supply")
+
+	errFixedTermDepositTenureNotAllowed = errors.New("lending engine: tenure not in the fixed-term deposit rate schedule")
+	errFixedTermDepositInvalidPayout    = errors.New("lending engine: invalid fixed-term deposit payout preference")
+	errFixedTermDepositCapacityExceeded = errors.New("lending engine: fixed-term deposit would exceed the pool's fixed-term loan interest capacity")
+	errFixedTermDepositNotFound         = errors.New("lending engine: fixed-term deposit not found")
+	errFixedTermDepositNotActive        = errors.New("lending engine: fixed-term deposit is not active")
+	// errFixedTermDepositReserveInsufficient is a soft, retryable outcome --
+	// a genuine but expected timing mismatch between when fixed-term loan
+	// interest has actually been collected and when a deposit payout comes
+	// due -- never a storage error. Callers (settleLendingDepositPayouts)
+	// must reschedule, never treat this as fatal.
+	errFixedTermDepositReserveInsufficient = errors.New("lending engine: fixed-term deposit reserve insufficient for this payout")
+)
+
+// ErrHealthCheckFailed and ErrMaxLTVExceeded are exported aliases of the
+// same sentinel values above (not new errors) -- core/node.go's
+// classifyProposalError needs to recognize these two specifically as
+// proposalDispositionSkip, not the default Abort: combinedDebtWei (see its
+// own doc comment) means Borrow/WithdrawCollateral's health/MaxLTV outcome
+// can now depend on a same-sender fixed-term borrow/repay applied earlier
+// in the SAME proposal attempt, so a later attempt (different ordering, or
+// after other same-attempt transactions apply) can genuinely change the
+// outcome -- the same "skippable, not prunable" reasoning already applied
+// to the swap daily/monthly caps and module-pause errors.
+var (
+	ErrHealthCheckFailed = errHealthCheckFailed
+	ErrMaxLTVExceeded    = errMaxLTVExceeded
+	// ErrWithdrawSameBlockAsSupply is an exported alias of
+	// errWithdrawSameBlockAsSupply -- like the two above, core/node.go's
+	// classifyProposalError needs to recognize it as
+	// proposalDispositionSkip: whether a Withdraw hits this guard depends on
+	// whether a same-sender Supply was already applied earlier in the SAME
+	// proposal attempt, so a later attempt (different ordering, or a
+	// different transaction set) can genuinely change the outcome.
+	ErrWithdrawSameBlockAsSupply = errWithdrawSameBlockAsSupply
+	// ErrRepayPaused, ErrNoDebtToRepay, and ErrInsufficientBalance are
+	// exported aliases RepayFixedTerm can return for entirely ordinary,
+	// non-storage business/operational reasons (an operator pause, a loan
+	// that reached a terminal status between scheduling and settlement, a
+	// balance race). core/lending_autodebit_settlement.go's settlement hook
+	// needs to recognize these specifically so it can treat them as a soft
+	// missed-payment outcome (like an ordinary insufficient-balance
+	// decision) instead of propagating them as a fatal error that would
+	// abort block production -- see that file's own doc comment for why
+	// only genuine internal/storage errors may do that.
+	ErrRepayPaused         = errRepayPaused
+	ErrNoDebtToRepay       = errNoDebtToRepay
+	ErrInsufficientBalance = errInsufficientBalance
+	// ErrFixedTermDepositReserveInsufficient and ErrInsufficientLiquidity
+	// are exported aliases core/lending_deposit_payout_settlement.go's
+	// settlement hook needs to recognize as soft, retryable outcomes for
+	// the SAME reason as the three above -- a genuine but expected timing
+	// mismatch (fixed-term loan interest, or general pool liquidity,
+	// hasn't caught up with a deposit payout that's come due yet), never a
+	// storage error.
+	ErrFixedTermDepositReserveInsufficient = errFixedTermDepositReserveInsufficient
+	ErrInsufficientLiquidity               = errInsufficientLiquidity
+)
+
+const blocksPerYear = 31_536_000
+
+const moduleName = "lending"
+
+type engineState interface {
+	GetMarket(poolID string) (*Market, error)
+	PutMarket(poolID string, market *Market) error
+	GetUserAccount(poolID string, addr crypto.Address) (*UserAccount, error)
+	PutUserAccount(poolID string, account *UserAccount) error
+	GetAccount(addr crypto.Address) (*types.Account, error)
+	PutAccount(addr crypto.Address, account *types.Account) error
+	GetFeeAccrual(poolID string) (*FeeAccrual, error)
+	PutFeeAccrual(poolID string, fees *FeeAccrual) error
+	GetFixedTermLoan(loanID [32]byte) (*FixedTermLoan, error)
+	PutFixedTermLoan(loan *FixedTermLoan) error
+	GetActiveFixedTermLoanID(poolID string, addr crypto.Address) ([32]byte, bool, error)
+	SetActiveFixedTermLoanID(poolID string, addr crypto.Address, loanID [32]byte) error
+	ClearActiveFixedTermLoan(poolID string, addr crypto.Address) error
+	GetFixedTermDeposit(depositID [32]byte) (*FixedTermDeposit, error)
+	PutFixedTermDeposit(deposit *FixedTermDeposit) error
+}
+
+// Engine orchestrates the primary state transitions for the lending module.
+type Engine struct {
+	state             engineState
+	moduleAddress     crypto.Address
+	collateralAddress crypto.Address
+	params            RiskParameters
+	interestModel     *InterestModel
+	reserveFactorBps  uint64
+	protocolFeeBps    uint64
+	blockHeight       uint64
+	// blockTimestamp is the deterministic block timestamp (Unix seconds) --
+	// set via SetBlockTimestamp from StateProcessor.blockTimestamp(), NEVER
+	// wall-clock time. Backs FixedTermLoan.IssuedAtTime/MaturityTime, which
+	// get hashed into the loan ID and persisted consensus state; using real
+	// time here would repeat the exact non-determinism bug found and fixed
+	// in the market engine (core/market_native.go's marketEngine()).
+	blockTimestamp        int64
+	fixedTermRates        TenureRateSchedule
+	fixedTermDepositRates TenureRateSchedule
+	poolID                string
+	developerFeeBps       uint64
+	developerFeeAddr      crypto.Address
+	collateralRouting     CollateralRouting
+	pauses                nativecommon.PauseView
+}
+
+// NewEngine constructs a lending engine configured with the module treasury
+// addresses and risk parameters.
+func NewEngine(moduleAddr, collateralAddr crypto.Address, params RiskParameters) *Engine {
+	return &Engine{
+		moduleAddress:     moduleAddr,
+		collateralAddress: collateralAddr,
+		params:            params,
+	}
+}
+
+// SetState wires the engine to the external persistence layer.
+func (e *Engine) SetState(state engineState) { e.state = state }
+
+func (e *Engine) SetPauses(p nativecommon.PauseView) {
+	if e == nil {
+		return
+	}
+	e.pauses = p
+}
+
+// SetBlockTimestamp wires the deterministic block timestamp (Unix seconds)
+// used for fixed-term loan issuance/maturity accounting. Must be sourced
+// from the block's own committed timestamp, never wall-clock time -- see
+// the blockTimestamp field's doc comment.
+func (e *Engine) SetBlockTimestamp(ts int64) {
+	if e == nil {
+		return
+	}
+	e.blockTimestamp = ts
+}
+
+// SetFixedTermRateSchedule configures the tenure -> locked-rate table new
+// fixed-term loans are issued against. Changing this never affects an
+// already-issued loan's locked RateBps.
+func (e *Engine) SetFixedTermRateSchedule(schedule TenureRateSchedule) {
+	if e == nil {
+		return
+	}
+	e.fixedTermRates = schedule
+}
+
+// SetFixedTermDepositRateSchedule configures the tenure -> locked-rate table
+// new fixed-term deposits are issued against. Changing this never affects an
+// already-issued deposit's locked RateBps. Deliberately a separate schedule
+// from SetFixedTermRateSchedule (the borrow side) -- a deposit tenure's rate
+// is NOT cross-validated against the borrow side's rate for the same tenure
+// at proposal time (see ProposalKindLendingDepositRateSchedule's doc comment
+// in native/governance/types.go for why). The real solvency backstop is
+// SupplyFixedTerm's aggregate capacity check: a deposit rate set far above
+// the pool's actual fixed-term loan yield just burns through that aggregate
+// cap faster per unit of principal, it can never make the pool insolvent on
+// its own.
+func (e *Engine) SetFixedTermDepositRateSchedule(schedule TenureRateSchedule) {
+	if e == nil {
+		return
+	}
+	e.fixedTermDepositRates = schedule
+}
+
+// SetInterestModel configures the interest rate model used by the engine.
+func (e *Engine) SetInterestModel(model *InterestModel) {
+	if e == nil {
+		return
+	}
+	if model != nil {
+		e.interestModel = model.Clone()
+	} else {
+		e.interestModel = nil
+	}
+}
+
+// SetReserveFactor wires the reserve factor basis points used when accruing interest.
+func (e *Engine) SetReserveFactor(bps uint64) {
+	if e == nil {
+		return
+	}
+	e.reserveFactorBps = bps
+}
+
+// SetProtocolFeeBps configures the protocol fee basis points applied during accrual.
+func (e *Engine) SetProtocolFeeBps(bps uint64) {
+	if e == nil {
+		return
+	}
+	e.protocolFeeBps = bps
+}
+
+// SetBlockHeight records the block height used when computing accrual deltas.
+func (e *Engine) SetBlockHeight(height uint64) {
+	if e == nil {
+		return
+	}
+	e.blockHeight = height
+}
+
+// SetPoolID assigns the lending pool identifier that subsequent operations will
+// operate against.
+func (e *Engine) SetPoolID(poolID string) {
+	if e == nil {
+		return
+	}
+	e.poolID = strings.TrimSpace(poolID)
+}
+
+// PoolID returns the currently configured pool identifier for the engine.
+func (e *Engine) PoolID() string {
+	if e == nil {
+		return ""
+	}
+	return e.poolID
+}
+
+// SetDeveloperFee configures the developer fee defaults applied when the
+// caller does not provide explicit overrides.
+func (e *Engine) SetDeveloperFee(bps uint64, collector crypto.Address) {
+	if e == nil {
+		return
+	}
+	e.developerFeeBps = bps
+	if collector.Bytes() == nil {
+		e.developerFeeAddr = crypto.Address{}
+		return
+	}
+	cloned := append([]byte(nil), collector.Bytes()...)
+	e.developerFeeAddr = crypto.MustNewAddress(collector.Prefix(), cloned)
+}
+
+// SetCollateralRouting configures the default collateral distribution applied
+// during liquidations when per-pool overrides are not supplied.
+func (e *Engine) SetCollateralRouting(routing CollateralRouting) {
+	if e == nil {
+		return
+	}
+	e.collateralRouting = routing.Clone()
+}
+
+// Supply transfers NHB from the supplier into the lending pool and mints LP
+// shares based on the current supply index. The minted share amount is returned
+// to the caller for downstream accounting.
+func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
+	if e.params.Pauses.Supply {
+		return nil, errSupplyPaused
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, err
+	}
+
+	supplierAcc, err := e.loadAccount(supplier)
+	if err != nil {
+		return nil, err
+	}
+	if supplierAcc.BalanceNHB.Cmp(amount) < 0 {
+		return nil, errInsufficientBalance
+	}
+
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	if market.TotalSupplyShares.Sign() == 0 && amount.Cmp(minLiquidity) < 0 {
+		return nil, errDepositTooSmall
+	}
+
+	mintedShares := sharesFromLiquidity(amount, market.SupplyIndex)
+	if mintedShares.Sign() == 0 {
+		return nil, errDepositTooSmall
+	}
+
+	// Adjust balances.
+	supplierAcc.BalanceNHB = new(big.Int).Sub(supplierAcc.BalanceNHB, amount)
+	moduleAcc.BalanceNHB = new(big.Int).Add(moduleAcc.BalanceNHB, amount)
+
+	if err := e.persistAccount(supplier, supplierAcc); err != nil {
+		return nil, err
+	}
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, err
+	}
+
+	user, err := e.ensureUserAccount(supplier)
+	if err != nil {
+		return nil, err
+	}
+	user.SupplyShares = new(big.Int).Add(user.SupplyShares, mintedShares)
+	user.LastSupplyBlock = e.blockHeight
+
+	market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, amount)
+	market.TotalSupplyShares = new(big.Int).Add(market.TotalSupplyShares, mintedShares)
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := e.state.PutUserAccount(e.poolID, user); err != nil {
+		return nil, err
+	}
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
+		return nil, err
+	}
+
+	return mintedShares, nil
+}
+
+// Withdraw burns LP shares and releases the corresponding NHB amount back to
+// the supplier. The redeemed NHB value is returned.
+func (e *Engine) Withdraw(supplier crypto.Address, amountLP *big.Int) (*big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
+	if amountLP == nil || amountLP.Sign() <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, err
+	}
+	if market.TotalSupplyShares.Sign() == 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	user, err := e.ensureUserAccount(supplier)
+	if err != nil {
+		return nil, err
+	}
+	if user.SupplyShares.Cmp(amountLP) < 0 {
+		return nil, errInsufficientBalance
+	}
+	// Rejects a withdrawal in the same block as this account's most recent
+	// Supply -- closes the atomic, zero-real-duration supply-then-withdraw
+	// round trip that could otherwise snipe a disproportionate share of a
+	// same-block lump-sum SupplyIndex bump (see RepayFixedTerm's pool-routing
+	// comment) at genuine long-term suppliers' expense. LastSupplyBlock==0
+	// means no supply has ever been recorded, so it never falsely blocks a
+	// withdrawal at block height 0.
+	if user.LastSupplyBlock != 0 && user.LastSupplyBlock == e.blockHeight {
+		return nil, errWithdrawSameBlockAsSupply
+	}
+
+	// Determine the underlying NHB using the current supply index.
+	redeemAmount := liquidityFromShares(amountLP, market.SupplyIndex)
+
+	liquidity := e.AvailableLiquidity(market)
+	if liquidity.Cmp(redeemAmount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	supplierAcc, err := e.loadAccount(supplier)
+	if err != nil {
+		return nil, err
+	}
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, err
+	}
+	if moduleAcc.BalanceNHB.Cmp(redeemAmount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, redeemAmount)
+	supplierAcc.BalanceNHB = new(big.Int).Add(supplierAcc.BalanceNHB, redeemAmount)
+
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, err
+	}
+	if err := e.persistAccount(supplier, supplierAcc); err != nil {
+		return nil, err
+	}
+
+	user.SupplyShares = new(big.Int).Sub(user.SupplyShares, amountLP)
+	market.TotalSupplyShares = new(big.Int).Sub(market.TotalSupplyShares, amountLP)
+	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, redeemAmount)
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := e.state.PutUserAccount(e.poolID, user); err != nil {
+		return nil, err
+	}
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
+		return nil, err
+	}
+
+	return redeemAmount, nil
+}
+
+// DepositCollateral locks ZNHB collateral for a borrower inside the lending
+// module.
+func (e *Engine) DepositCollateral(userAddr crypto.Address, amount *big.Int) error {
+	if e == nil || e.state == nil {
+		return errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return errInvalidAmount
+	}
+
+	userAcc, err := e.loadAccount(userAddr)
+	if err != nil {
+		return err
+	}
+	if userAcc.BalanceZNHB.Cmp(amount) < 0 {
+		return errInsufficientBalance
+	}
+	moduleAcc, err := e.loadAccount(e.collateralAddress)
+	if err != nil {
+		return err
+	}
+
+	userAcc.BalanceZNHB = new(big.Int).Sub(userAcc.BalanceZNHB, amount)
+	moduleAcc.BalanceZNHB = new(big.Int).Add(moduleAcc.BalanceZNHB, amount)
+
+	if err := e.persistAccount(userAddr, userAcc); err != nil {
+		return err
+	}
+	if err := e.persistAccount(e.collateralAddress, moduleAcc); err != nil {
+		return err
+	}
+
+	user, err := e.ensureUserAccount(userAddr)
+	if err != nil {
+		return err
+	}
+	user.CollateralZNHB = new(big.Int).Add(user.CollateralZNHB, amount)
+
+	return e.state.PutUserAccount(e.poolID, user)
+}
+
+// WithdrawCollateral releases ZNHB collateral back to the user while ensuring
+// the resulting position remains healthy.
+func (e *Engine) WithdrawCollateral(userAddr crypto.Address, amount *big.Int) error {
+	if e == nil || e.state == nil {
+		return errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return err
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return errInvalidAmount
+	}
+
+	user, err := e.ensureUserAccount(userAddr)
+	if err != nil {
+		return err
+	}
+	if user.CollateralZNHB.Cmp(amount) < 0 {
+		return errInsufficientBalance
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return err
+	}
+
+	e.syncDebt(user, market)
+
+	remaining := new(big.Int).Sub(user.CollateralZNHB, amount)
+	// An active fixed-term loan has its own claim on this same collateral
+	// (see combinedDebtWei) -- a withdrawal that leaves the flexible side
+	// looking healthy in isolation must not be allowed to strand a fixed-
+	// term loan under-collateralized.
+	combinedDebt, err := e.combinedDebtWei(userAddr, user.DebtNHB)
+	if err != nil {
+		return err
+	}
+	if combinedDebt != nil && combinedDebt.Sign() > 0 {
+		// Only guard the oracle when the outcome actually depends on
+		// price -- a debt-free withdrawal is always healthy regardless
+		// of quote freshness, and blocking it on a stale price the
+		// check never reads would be pointless friction.
+		if err := e.guardOracle(market); err != nil {
+			return err
+		}
+	}
+	if !e.positionHealthy(market, remaining, combinedDebt) {
+		return errHealthCheckFailed
+	}
+
+	collateralAcc, err := e.loadAccount(e.collateralAddress)
+	if err != nil {
+		return err
+	}
+	if collateralAcc.BalanceZNHB.Cmp(amount) < 0 {
+		return errInsufficientLiquidity
+	}
+
+	userAcc, err := e.loadAccount(userAddr)
+	if err != nil {
+		return err
+	}
+
+	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, amount)
+	userAcc.BalanceZNHB = new(big.Int).Add(userAcc.BalanceZNHB, amount)
+
+	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
+		return err
+	}
+	if err := e.persistAccount(userAddr, userAcc); err != nil {
+		return err
+	}
+
+	user.CollateralZNHB = remaining
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return err
+		}
+	}
+	if err := e.state.PutUserAccount(e.poolID, user); err != nil {
+		return err
+	}
+	return e.state.PutMarket(e.poolID, market)
+}
+
+// Borrow transfers NHB from the module to the borrower while charging a fee to
+// the designated recipient. The method returns the fee that was paid.
+func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient crypto.Address, feeBps uint64) (*big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
+	if e.params.Pauses.Borrow || e.params.CircuitBreakerActive {
+		return nil, errBorrowPaused
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := e.guardOracle(market); err != nil {
+		return nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, err
+	}
+
+	if feeBps == 0 && len(feeRecipient.Bytes()) == 0 && e.developerFeeBps > 0 {
+		if e.developerFeeAddr.Bytes() == nil {
+			return nil, errDeveloperFeeRecipient
+		}
+		feeBps = e.developerFeeBps
+		cloned := append([]byte(nil), e.developerFeeAddr.Bytes()...)
+		feeRecipient = crypto.MustNewAddress(e.developerFeeAddr.Prefix(), cloned)
+	}
+
+	if feeBps > 0 {
+		if len(feeRecipient.Bytes()) == 0 {
+			return nil, errDeveloperFeeRecipient
+		}
+		cap := e.params.DeveloperFeeCapBps
+		if cap == 0 || feeBps > cap {
+			return nil, errDeveloperFeeCap
+		}
+	}
+
+	feeAmount := new(big.Int)
+	if feeBps > 0 {
+		bps := new(big.Int).SetUint64(feeBps)
+		feeAmount.Mul(amount, bps)
+		feeAmount = feeAmount.Quo(feeAmount, basisPoints)
+	}
+
+	totalOut := new(big.Int).Add(amount, feeAmount)
+
+	if cap := e.params.BorrowCaps.PerBlock; cap != nil && cap.Sign() > 0 {
+		if market.LastBorrowBlock != e.blockHeight {
+			market.LastBorrowBlock = e.blockHeight
+			market.BorrowedThisBlock = big.NewInt(0)
+		}
+		projected := new(big.Int).Add(market.BorrowedThisBlock, totalOut)
+		if projected.Cmp(cap) > 0 {
+			return nil, errBorrowCapPerBlock
+		}
+	}
+
+	projectedTotalBorrowed := new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
+	if cap := e.params.BorrowCaps.Total; cap != nil && cap.Sign() > 0 {
+		if projectedTotalBorrowed.Cmp(cap) > 0 {
+			return nil, errBorrowCapGlobal
+		}
+	}
+	if utilCap := e.params.BorrowCaps.UtilisationBps; utilCap > 0 {
+		util := utilisation(projectedTotalBorrowed, market.TotalNHBSupplied)
+		if util > utilCap {
+			return nil, errBorrowCapUtilisation
+		}
+	}
+
+	liquidity := e.AvailableLiquidity(market)
+	if liquidity.Cmp(totalOut) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	borrowerUser, err := e.ensureUserAccount(borrower)
+	if err != nil {
+		return nil, err
+	}
+
+	e.syncDebt(borrowerUser, market)
+
+	// Health factor check using the projected debt after borrowing. Folds in
+	// any active fixed-term loan's outstanding balance (see combinedDebtWei)
+	// -- BorrowFixedTerm's own issuance check has always accounted for
+	// existing flexible DebtNHB, but this flexible path never accounted for
+	// an existing fixed-term loan's claim on the same collateral, letting a
+	// borrower take out a fixed-term loan against their full collateral and
+	// then also borrow flexibly up to that same full collateral again.
+	projectedDebt := new(big.Int).Add(borrowerUser.DebtNHB, totalOut)
+	combinedProjectedDebt, err := e.combinedDebtWei(borrower, projectedDebt)
+	if err != nil {
+		return nil, err
+	}
+	if !e.positionHealthy(market, borrowerUser.CollateralZNHB, combinedProjectedDebt) {
+		return nil, errHealthCheckFailed
+	}
+	// Borrow-time cap, stricter than and independent of the liquidation
+	// threshold above -- see withinMaxLTV.
+	if !e.withinMaxLTV(market, borrowerUser.CollateralZNHB, combinedProjectedDebt) {
+		return nil, errMaxLTVExceeded
+	}
+
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, err
+	}
+	if moduleAcc.BalanceNHB.Cmp(totalOut) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	borrowerAcc, err := e.loadAccount(borrower)
+	if err != nil {
+		return nil, err
+	}
+	var feeAcc *types.Account
+	if feeAmount.Sign() > 0 {
+		feeAcc, err = e.loadAccount(feeRecipient)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, totalOut)
+	borrowerAcc.BalanceNHB = new(big.Int).Add(borrowerAcc.BalanceNHB, amount)
+	if feeAcc != nil {
+		feeAcc.BalanceNHB = new(big.Int).Add(feeAcc.BalanceNHB, feeAmount)
+	}
+
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, err
+	}
+	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
+		return nil, err
+	}
+	if feeAcc != nil {
+		if err := e.persistAccount(feeRecipient, feeAcc); err != nil {
+			return nil, err
+		}
+	}
+
+	borrowerUser.DebtNHB = projectedDebt
+	if borrowerUser.ScaledDebt == nil {
+		borrowerUser.ScaledDebt = big.NewInt(0)
+	}
+	scaledIncrement := scaledDebtFromAmount(totalOut, market.BorrowIndex)
+	borrowerUser.ScaledDebt = new(big.Int).Add(borrowerUser.ScaledDebt, scaledIncrement)
+	borrowerUser.DebtNHB = debtFromScaled(borrowerUser.ScaledDebt, market.BorrowIndex)
+
+	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
+	if e.params.BorrowCaps.PerBlock != nil && e.params.BorrowCaps.PerBlock.Sign() > 0 {
+		market.BorrowedThisBlock = new(big.Int).Add(market.BorrowedThisBlock, totalOut)
+	}
+
+	if feeAmount.Sign() > 0 {
+		fees.DeveloperFeesWei = new(big.Int).Add(fees.DeveloperFeesWei, feeAmount)
+		feesChanged = true
+	}
+
+	if err := e.state.PutUserAccount(e.poolID, borrowerUser); err != nil {
+		return nil, err
+	}
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
+		return nil, err
+	}
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return nil, err
+		}
+	}
+
+	return feeAmount, nil
+}
+
+// Repay transfers NHB from the borrower back to the module and reduces their
+// outstanding debt. The actual principal repaid is returned.
+func (e *Engine) Repay(borrower crypto.Address, amount *big.Int) (*big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
+	if e.params.Pauses.Repay {
+		return nil, errRepayPaused
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, err
+	}
+
+	borrowerUser, err := e.ensureUserAccount(borrower)
+	if err != nil {
+		return nil, err
+	}
+	e.syncDebt(borrowerUser, market)
+	if borrowerUser.DebtNHB.Sign() == 0 {
+		return nil, errNoDebtToRepay
+	}
+
+	repayAmount := new(big.Int).Set(amount)
+	if repayAmount.Cmp(borrowerUser.DebtNHB) > 0 {
+		repayAmount = new(big.Int).Set(borrowerUser.DebtNHB)
+	}
+
+	borrowerAcc, err := e.loadAccount(borrower)
+	if err != nil {
+		return nil, err
+	}
+	if borrowerAcc.BalanceNHB.Cmp(repayAmount) < 0 {
+		return nil, errInsufficientBalance
+	}
+
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	borrowerAcc.BalanceNHB = new(big.Int).Sub(borrowerAcc.BalanceNHB, repayAmount)
+	moduleAcc.BalanceNHB = new(big.Int).Add(moduleAcc.BalanceNHB, repayAmount)
+
+	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
+		return nil, err
+	}
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, err
+	}
+
+	if borrowerUser.ScaledDebt == nil {
+		borrowerUser.ScaledDebt = big.NewInt(0)
+	}
+	scaledRepay := scaledDebtFromAmount(repayAmount, market.BorrowIndex)
+	if scaledRepay.Cmp(borrowerUser.ScaledDebt) > 0 {
+		scaledRepay = new(big.Int).Set(borrowerUser.ScaledDebt)
+	}
+	borrowerUser.ScaledDebt = new(big.Int).Sub(borrowerUser.ScaledDebt, scaledRepay)
+	borrowerUser.DebtNHB = debtFromScaled(borrowerUser.ScaledDebt, market.BorrowIndex)
+
+	market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
+
+	if err := e.state.PutUserAccount(e.poolID, borrowerUser); err != nil {
+		return nil, err
+	}
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
+		return nil, err
+	}
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return nil, err
+		}
+	}
+
+	return repayAmount, nil
+}
+
+// Liquidate allows a third party to repay the borrower's debt in exchange for
+// a discounted amount of their collateral. The repaid debt and seized
+// collateral values are returned.
+func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, nil, errNilState
+	}
+
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, nil, err
+	}
+	if e.params.Pauses.Liquidate {
+		return nil, nil, errLiquidationsPaused
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	fees, feesChanged, err := e.accrueInterest(market)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	borrowerUser, err := e.ensureUserAccount(borrower)
+	if err != nil {
+		return nil, nil, err
+	}
+	e.syncDebt(borrowerUser, market)
+	if borrowerUser.DebtNHB.Sign() == 0 {
+		return nil, nil, errNoDebtToRepay
+	}
+	// A stale or wildly-deviated price can't be trusted to determine
+	// whether this position is actually eligible for liquidation --
+	// guard it before making that call, not just at borrow time.
+	if err := e.guardOracle(market); err != nil {
+		return nil, nil, err
+	}
+	if e.positionHealthy(market, borrowerUser.CollateralZNHB, borrowerUser.DebtNHB) {
+		return nil, nil, errNotLiquidatable
+	}
+
+	repayAmount := new(big.Int).Set(borrowerUser.DebtNHB)
+
+	liquidatorAcc, err := e.loadAccount(liquidator)
+	if err != nil {
+		return nil, nil, err
+	}
+	if liquidatorAcc.BalanceNHB.Cmp(repayAmount) < 0 {
+		return nil, nil, errInsufficientBalance
+	}
+
+	borrowerAcc, err := e.loadAccount(borrower)
+	if err != nil {
+		return nil, nil, err
+	}
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Transfer NHB from liquidator to module to cover the debt.
+	liquidatorAcc.BalanceNHB = new(big.Int).Sub(liquidatorAcc.BalanceNHB, repayAmount)
+	moduleAcc.BalanceNHB = new(big.Int).Add(moduleAcc.BalanceNHB, repayAmount)
+
+	// Determine collateral seized with liquidation bonus.
+	seizeAmount := new(big.Int).Mul(repayAmount, big.NewInt(int64(10_000+e.params.LiquidationBonus)))
+	seizeAmount = seizeAmount.Quo(seizeAmount, basisPoints)
+	if seizeAmount.Cmp(borrowerUser.CollateralZNHB) > 0 {
+		seizeAmount = new(big.Int).Set(borrowerUser.CollateralZNHB)
+	}
+
+	routing := e.collateralRouting
+	totalBps := routing.LiquidatorBps + routing.DeveloperBps + routing.ProtocolBps
+	if totalBps > 10_000 {
+		return nil, nil, errCollateralRoutingBps
+	}
+
+	collateralAcc, err := e.loadAccount(e.collateralAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+	if collateralAcc.BalanceZNHB.Cmp(seizeAmount) < 0 {
+		return nil, nil, errInsufficientLiquidity
+	}
+
+	computeShare := func(amount *big.Int, bps uint64) *big.Int {
+		if amount.Sign() == 0 || bps == 0 {
+			return big.NewInt(0)
+		}
+		bpsInt := new(big.Int).SetUint64(bps)
+		share := new(big.Int).Mul(amount, bpsInt)
+		share.Quo(share, basisPoints)
+		if share.Sign() < 0 {
+			return big.NewInt(0)
+		}
+		return share
+	}
+
+	isZeroAddress := func(addr crypto.Address) bool {
+		bytes := addr.Bytes()
+		if len(bytes) == 0 {
+			return true
+		}
+		for _, b := range bytes {
+			if b != 0 {
+				return false
+			}
+		}
+		return true
+	}
+
+	developerShare := computeShare(seizeAmount, routing.DeveloperBps)
+	protocolShare := computeShare(seizeAmount, routing.ProtocolBps)
+
+	if developerShare.Sign() > 0 {
+		if isZeroAddress(routing.DeveloperTarget) {
+			return nil, nil, errDeveloperCollateral
+		}
+	}
+	if protocolShare.Sign() > 0 {
+		if isZeroAddress(routing.ProtocolTarget) {
+			return nil, nil, errProtocolCollateral
+		}
+	}
+
+	liquidatorShare := new(big.Int).Sub(seizeAmount, developerShare)
+	liquidatorShare.Sub(liquidatorShare, protocolShare)
+	if liquidatorShare.Sign() < 0 {
+		liquidatorShare = big.NewInt(0)
+	}
+
+	allocated := new(big.Int).Add(liquidatorShare, developerShare)
+	allocated.Add(allocated, protocolShare)
+	if allocated.Cmp(seizeAmount) < 0 {
+		remainder := new(big.Int).Sub(seizeAmount, allocated)
+		liquidatorShare = new(big.Int).Add(liquidatorShare, remainder)
+	}
+
+	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, seizeAmount)
+	liquidatorAcc.BalanceZNHB = new(big.Int).Add(liquidatorAcc.BalanceZNHB, liquidatorShare)
+
+	var developerAcc *types.Account
+	if developerShare.Sign() > 0 {
+		developerAcc, err = e.loadAccount(routing.DeveloperTarget)
+		if err != nil {
+			return nil, nil, err
+		}
+		developerAcc.BalanceZNHB = new(big.Int).Add(developerAcc.BalanceZNHB, developerShare)
+	}
+
+	var protocolAcc *types.Account
+	if protocolShare.Sign() > 0 {
+		protocolAcc, err = e.loadAccount(routing.ProtocolTarget)
+		if err != nil {
+			return nil, nil, err
+		}
+		protocolAcc.BalanceZNHB = new(big.Int).Add(protocolAcc.BalanceZNHB, protocolShare)
+	}
+
+	if err := e.persistAccount(liquidator, liquidatorAcc); err != nil {
+		return nil, nil, err
+	}
+	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
+		return nil, nil, err
+	}
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, nil, err
+	}
+	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
+		return nil, nil, err
+	}
+	if developerAcc != nil {
+		if err := e.persistAccount(routing.DeveloperTarget, developerAcc); err != nil {
+			return nil, nil, err
+		}
+	}
+	if protocolAcc != nil {
+		if err := e.persistAccount(routing.ProtocolTarget, protocolAcc); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	borrowerUser.DebtNHB = big.NewInt(0)
+	borrowerUser.ScaledDebt = big.NewInt(0)
+	borrowerUser.CollateralZNHB = new(big.Int).Sub(borrowerUser.CollateralZNHB, seizeAmount)
+
+	market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
+
+	if err := e.state.PutUserAccount(e.poolID, borrowerUser); err != nil {
+		return nil, nil, err
+	}
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
+		return nil, nil, err
+	}
+
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return repayAmount, seizeAmount, nil
+}
+
+func (e *Engine) ensureMarket() (*Market, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if strings.TrimSpace(e.poolID) == "" {
+		return nil, errPoolNotConfigured
+	}
+	market, err := e.state.GetMarket(e.poolID)
+	if err != nil {
+		return nil, err
+	}
+	if market == nil {
+		return nil, errNilMarket
+	}
+	if market.TotalNHBSupplied == nil {
+		market.TotalNHBSupplied = big.NewInt(0)
+	}
+	if market.TotalSupplyShares == nil {
+		market.TotalSupplyShares = big.NewInt(0)
+	}
+	if market.TotalNHBBorrowed == nil {
+		market.TotalNHBBorrowed = big.NewInt(0)
+	}
+	if market.SupplyIndex == nil || market.SupplyIndex.Sign() == 0 {
+		market.SupplyIndex = new(big.Int).Set(ray)
+	}
+	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
+		market.BorrowIndex = new(big.Int).Set(ray)
+	}
+	if market.BorrowedThisBlock == nil {
+		market.BorrowedThisBlock = big.NewInt(0)
+	}
+	if market.OracleMedianWei == nil {
+		market.OracleMedianWei = big.NewInt(0)
+	}
+	if market.OraclePrevMedianWei == nil {
+		market.OraclePrevMedianWei = big.NewInt(0)
+	}
+	return market, nil
+}
+
+func (e *Engine) ensureUserAccount(addr crypto.Address) (*UserAccount, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if strings.TrimSpace(e.poolID) == "" {
+		return nil, errPoolNotConfigured
+	}
+	user, err := e.state.GetUserAccount(e.poolID, addr)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		user = &UserAccount{Address: addr}
+	}
+	if user.CollateralZNHB == nil {
+		user.CollateralZNHB = big.NewInt(0)
+	}
+	if user.SupplyShares == nil {
+		user.SupplyShares = big.NewInt(0)
+	}
+	if user.DebtNHB == nil {
+		user.DebtNHB = big.NewInt(0)
+	}
+	if user.ScaledDebt == nil {
+		user.ScaledDebt = big.NewInt(0)
+	}
+	return user, nil
+}
+
+func (e *Engine) loadAccount(addr crypto.Address) (*types.Account, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	acc, err := e.state.GetAccount(addr)
+	if err != nil {
+		return nil, err
+	}
+	if acc == nil {
+		return nil, errInsufficientBalance
+	}
+	if acc.BalanceNHB == nil {
+		acc.BalanceNHB = big.NewInt(0)
+	}
+	if acc.BalanceZNHB == nil {
+		acc.BalanceZNHB = big.NewInt(0)
+	}
+	return acc, nil
+}
+
+func (e *Engine) persistAccount(addr crypto.Address, acc *types.Account) error {
+	return e.state.PutAccount(addr, acc)
+}
+
+// AvailableLiquidity returns the pool's net-available liquidity --
+// (TotalNHBSupplied + TotalFixedTermDepositPrincipalWei) minus
+// TotalNHBBorrowed, floored at zero -- the same figure Borrow/
+// WithdrawCollateral/BorrowFixedTerm enforce against. Fixed-term deposit
+// principal (Milestone 3) is a real liability the pool must be able to
+// return at maturity, exactly like flexible suppliers' TotalNHBSupplied
+// claim -- deliberately tracked as a separate field rather than folded
+// into TotalNHBSupplied itself (a depositor's claim is their own deposit
+// record, not a SupplyShares balance), so it must be added here explicitly
+// or the pool could lend out money it owes back to a depositor. Exported
+// so rpc/lending_handlers.go can surface the real available-to-borrow
+// number instead of a gross total that double-counts already-borrowed
+// funds as if still on hand.
+func (e *Engine) AvailableLiquidity(market *Market) *big.Int {
+	supplied := market.TotalNHBSupplied
+	if supplied == nil {
+		supplied = big.NewInt(0)
+	}
+	depositPrincipal := market.TotalFixedTermDepositPrincipalWei
+	if depositPrincipal == nil {
+		depositPrincipal = big.NewInt(0)
+	}
+	borrowed := market.TotalNHBBorrowed
+	if borrowed == nil {
+		borrowed = big.NewInt(0)
+	}
+	liquidity := new(big.Int).Add(supplied, depositPrincipal)
+	liquidity.Sub(liquidity, borrowed)
+	if liquidity.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	return liquidity
+}
+
+func (e *Engine) guardOracle(market *Market) error {
+	if market == nil {
+		return errNilMarket
+	}
+	cfg := e.params.Oracle
+	if cfg.MaxAgeBlocks > 0 {
+		if market.OracleUpdatedBlock == 0 {
+			return errOracleStale
+		}
+		if e.blockHeight > market.OracleUpdatedBlock {
+			if e.blockHeight-market.OracleUpdatedBlock > cfg.MaxAgeBlocks {
+				return errOracleStale
+			}
+		}
+	}
+	if cfg.MaxDeviationBps > 0 && market.OraclePrevMedianWei.Sign() > 0 && market.OracleMedianWei.Sign() > 0 {
+		diff := new(big.Int).Sub(market.OracleMedianWei, market.OraclePrevMedianWei)
+		if diff.Sign() < 0 {
+			diff.Neg(diff)
+		}
+		threshold := new(big.Int).Mul(market.OraclePrevMedianWei, big.NewInt(int64(cfg.MaxDeviationBps)))
+		threshold.Quo(threshold, basisPoints)
+		if diff.Cmp(threshold) > 0 {
+			return errOracleDeviation
+		}
+	}
+	return nil
+}
+
+// OracleAdjustedCollateralValue converts a raw ZNHB-wei collateral amount
+// into NHB-wei terms using market.OracleMedianWei -- the NHB-wei value of
+// exactly one whole ZNHB (1e18 ZNHB-wei), as written by
+// applyLendingRefPriceTransaction (core/lending_tx.go). Rounds down
+// (protocol-favoring: a collateral value this conversion produces is never
+// higher than what the signed price bundle actually attests to). Falls back
+// to strict 1:1 when no oracle price has ever been submitted for this market
+// (OracleMedianWei unset/zero), preserving this engine's original behaviour
+// until the first real submission lands.
+//
+// Exported so rpc/lending_handlers.go can render the SAME collateral value
+// this engine actually enforces borrows against, instead of maintaining its
+// own separate conversion that can silently drift from what consensus code
+// does -- see the 2026-08-24 incident where the RPC layer independently
+// hardcoded a 1:1 valuation and displayed it as a real USD figure.
+func OracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *big.Int {
+	if collateralZNHBWei == nil || collateralZNHBWei.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	if market == nil || market.OracleMedianWei == nil || market.OracleMedianWei.Sign() <= 0 {
+		return collateralZNHBWei
+	}
+	value := new(big.Int).Mul(collateralZNHBWei, market.OracleMedianWei)
+	return value.Quo(value, weiPerToken)
+}
+
+// combinedDebtWei folds in a borrower's active fixed-term loan (if any),
+// alongside an already-computed flexible-side debt figure, into the single
+// exposure value a health/LTV check should be evaluated against. The two
+// debt ledgers are deliberately kept separate everywhere else (a fixed-term
+// loan's locked rate is economically incompatible with the flexible side's
+// continuously-reprised BorrowIndex) -- this exists solely so borrow-time
+// and withdraw-time safety checks see the borrower's TRUE combined claim on
+// their collateral, not just whichever ledger happened to change most
+// recently. Uses OutstandingWei() (principal + locked-in interest, less
+// amounts already repaid), not just principal, since that's the loan's real
+// remaining claim -- consistent with how the flexible side's own DebtNHB
+// already reflects accrued interest via BorrowIndex.
+func (e *Engine) combinedDebtWei(borrower crypto.Address, flexibleDebt *big.Int) (*big.Int, error) {
+	combined := flexibleDebt
+	if combined == nil {
+		combined = big.NewInt(0)
+	}
+	loanID, exists, err := e.state.GetActiveFixedTermLoanID(e.poolID, borrower)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return combined, nil
+	}
+	loan, err := e.state.GetFixedTermLoan(loanID)
+	if err != nil {
+		return nil, err
+	}
+	if loan == nil {
+		return combined, nil
+	}
+	return new(big.Int).Add(combined, loan.OutstandingWei()), nil
+}
+
+// positionHealthy compares collateral (ZNHB wei, converted to NHB-wei terms
+// via market's oracle price -- see OracleAdjustedCollateralValue) against
+// debt (NHB wei). Callers that let debt influence the outcome (i.e. debt >
+// 0) must call guardOracle(market) first so a stale or wildly-deviated price
+// can never silently pass this check.
+func (e *Engine) positionHealthy(market *Market, collateral, debt *big.Int) bool {
+	if debt == nil || debt.Sign() == 0 {
+		return true
+	}
+	value := OracleAdjustedCollateralValue(market, collateral)
+	if value.Sign() == 0 {
+		return false
+	}
+	num := new(big.Int).Mul(value, big.NewInt(int64(e.params.LiquidationThreshold)))
+	den := new(big.Int).Mul(debt, basisPoints)
+	return num.Cmp(den) >= 0
+}
+
+// withinMaxLTV enforces RiskParameters.MaxLTV as a borrow-time cap, distinct
+// from and stricter than positionHealthy's LiquidationThreshold. The two
+// were previously configured independently (live config already has a real
+// 75%/85% split) but only LiquidationThreshold was ever checked -- MaxLTV
+// was accepted, stored, and silently ignored, letting a borrower go straight
+// to the liquidation edge with zero safety buffer. Same comparison shape as
+// positionHealthy, deliberately, so the two stay easy to reason about
+// side by side, including the same oracle price conversion.
+func (e *Engine) withinMaxLTV(market *Market, collateral, debt *big.Int) bool {
+	if debt == nil || debt.Sign() == 0 {
+		return true
+	}
+	value := OracleAdjustedCollateralValue(market, collateral)
+	if value.Sign() == 0 {
+		return false
+	}
+	num := new(big.Int).Mul(value, big.NewInt(int64(e.params.MaxLTV)))
+	den := new(big.Int).Mul(debt, basisPoints)
+	return num.Cmp(den) >= 0
+}
+
+func utilisation(borrowed, supplied *big.Int) uint64 {
+	if borrowed == nil || borrowed.Sign() <= 0 {
+		return 0
+	}
+	if supplied == nil || supplied.Sign() <= 0 {
+		return 0
+	}
+	ratio := new(big.Int).Mul(borrowed, basisPoints)
+	ratio.Quo(ratio, supplied)
+	if ratio.Sign() < 0 {
+		return 0
+	}
+	if !ratio.IsUint64() {
+		return math.MaxUint64
+	}
+	return ratio.Uint64()
+}
+
+// WithdrawProtocolFees transfers accrued protocol fees to the provided recipient.
+func (e *Engine) WithdrawProtocolFees(recipient crypto.Address, amount *big.Int) (*big.Int, error) {
+	return e.withdrawFees(recipient, amount, true)
+}
+
+// WithdrawDeveloperFees transfers accrued developer fees to the provided recipient.
+func (e *Engine) WithdrawDeveloperFees(recipient crypto.Address, amount *big.Int) (*big.Int, error) {
+	return e.withdrawFees(recipient, amount, false)
+}
+
+func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protocol bool) (*big.Int, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
+		return nil, err
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	market, err := e.ensureMarket()
+	if err != nil {
+		return nil, err
+	}
+
+	fees, err := e.ensureFeeAccrual()
+	if err != nil {
+		return nil, err
+	}
+
+	var available *big.Int
+	if protocol {
+		available = fees.ProtocolFeesWei
+	} else {
+		available = fees.DeveloperFeesWei
+	}
+	if available == nil || available.Cmp(amount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	if err != nil {
+		return nil, err
+	}
+	if moduleAcc.BalanceNHB.Cmp(amount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
+
+	recipientAcc, err := e.loadAccount(recipient)
+	if err != nil {
+		return nil, err
+	}
+
+	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, amount)
+	recipientAcc.BalanceNHB = new(big.Int).Add(recipientAcc.BalanceNHB, amount)
+
+	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+		return nil, err
+	}
+	if err := e.persistAccount(recipient, recipientAcc); err != nil {
+		return nil, err
+	}
+
+	if protocol {
+		fees.ProtocolFeesWei = new(big.Int).Sub(fees.ProtocolFeesWei, amount)
+	} else {
+		fees.DeveloperFeesWei = new(big.Int).Sub(fees.DeveloperFeesWei, amount)
+	}
+
+	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, amount)
+
+	if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+		return nil, err
+	}
+	if err := e.state.PutMarket(e.poolID, market); err != nil {
+		return nil, err
+	}
+
+	return new(big.Int).Set(amount), nil
+}
+
+func (e *Engine) ensureFeeAccrual() (*FeeAccrual, error) {
+	if e == nil || e.state == nil {
+		return nil, errNilState
+	}
+	if strings.TrimSpace(e.poolID) == "" {
+		return nil, errPoolNotConfigured
+	}
+	fees, err := e.state.GetFeeAccrual(e.poolID)
+	if err != nil {
+		return nil, err
+	}
+	if fees == nil {
+		fees = &FeeAccrual{}
+	}
+	if fees.ProtocolFeesWei == nil {
+		fees.ProtocolFeesWei = big.NewInt(0)
+	}
+	if fees.DeveloperFeesWei == nil {
+		fees.DeveloperFeesWei = big.NewInt(0)
+	}
+	return fees, nil
+}
+
+func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
+	if e == nil || e.state == nil {
+		return nil, false, errNilState
+	}
+	if market == nil {
+		return nil, false, errNilMarket
+	}
+
+	if market.SupplyIndex == nil || market.SupplyIndex.Sign() == 0 {
+		market.SupplyIndex = new(big.Int).Set(ray)
+	}
+	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
+		market.BorrowIndex = new(big.Int).Set(ray)
+	}
+	market.ReserveFactor = e.reserveFactorBps
+
+	fees, err := e.ensureFeeAccrual()
+	if err != nil {
+		return nil, false, err
+	}
+
+	if e.interestModel == nil {
+		if e.blockHeight > market.LastUpdateBlock {
+			market.LastUpdateBlock = e.blockHeight
+		}
+		return fees, false, nil
+	}
+
+	var delta uint64
+	if e.blockHeight > market.LastUpdateBlock {
+		delta = e.blockHeight - market.LastUpdateBlock
+	}
+	if delta == 0 || market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Sign() == 0 {
+		if e.blockHeight > market.LastUpdateBlock {
+			market.LastUpdateBlock = e.blockHeight
+		}
+		return fees, false, nil
+	}
+
+	borrowAPR := e.interestModel.BorrowAPR(market.TotalNHBBorrowed, market.TotalNHBSupplied)
+	if borrowAPR.Sign() == 0 {
+		market.LastUpdateBlock = e.blockHeight
+		return fees, false, nil
+	}
+
+	utilisation := e.interestModel.Utilisation(market.TotalNHBBorrowed, market.TotalNHBSupplied)
+	reserveBps := e.reserveFactorBps
+	protocolBps := e.protocolFeeBps
+	combinedBps := reserveBps + protocolBps
+	if combinedBps > 10_000 {
+		combinedBps = 10_000
+	}
+	combined := new(big.Rat).SetFrac(big.NewInt(int64(combinedBps)), big.NewInt(10_000))
+	oneMinus := new(big.Rat).Sub(big.NewRat(1, 1), combined)
+	if oneMinus.Sign() < 0 {
+		oneMinus.SetInt64(0)
+	}
+	supplyRate := new(big.Rat).Mul(borrowAPR, utilisation)
+	supplyRate.Mul(supplyRate, oneMinus)
+
+	borrowFactor := rateFactor(borrowAPR, delta)
+	supplyFactor := rateFactor(supplyRate, delta)
+
+	market.BorrowIndex = rayMul(market.BorrowIndex, borrowFactor)
+	market.SupplyIndex = rayMul(market.SupplyIndex, supplyFactor)
+
+	interestAmount := computeInterest(market.TotalNHBBorrowed, borrowAPR, delta)
+	interestApplied := interestAmount.Sign() > 0
+	if interestApplied {
+		reserveShare := new(big.Int).Mul(interestAmount, new(big.Int).SetUint64(reserveBps))
+		reserveShare = reserveShare.Quo(reserveShare, basisPoints)
+		protocolShare := new(big.Int).Mul(interestAmount, new(big.Int).SetUint64(protocolBps))
+		protocolShare = protocolShare.Quo(protocolShare, basisPoints)
+		if reserveShare.Sign() > 0 {
+			fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, reserveShare)
+		}
+		if protocolShare.Sign() > 0 {
+			fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, protocolShare)
+		}
+		market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, interestAmount)
+		market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, interestAmount)
+	}
+
+	market.LastUpdateBlock = e.blockHeight
+	return fees, interestApplied, nil
+}
+
+func (e *Engine) syncDebt(user *UserAccount, market *Market) {
+	if user == nil || market == nil {
+		return
+	}
+	if user.ScaledDebt == nil || user.ScaledDebt.Sign() == 0 {
+		user.DebtNHB = big.NewInt(0)
+		return
+	}
+	if market.BorrowIndex == nil || market.BorrowIndex.Sign() == 0 {
+		user.DebtNHB = big.NewInt(0)
+		return
+	}
+	user.DebtNHB = debtFromScaled(user.ScaledDebt, market.BorrowIndex)
+}
+
+// ProjectAccrual runs the same interest-accrual math the block-processing
+// path applies (accrueInterest) against the given market, mutating its
+// indices/totals in place. Exported so read-only RPC handlers
+// (rpc/modules/lending.go's GetMarket/GetUserAccount) can show live-accrued
+// figures instead of whatever a real mutating transaction last wrote --
+// today those reads return a market/account frozen at its last on-chain
+// write, sometimes many blocks stale. Safe to call from a read path only
+// because those handlers already run inside Node.WithStateView, a
+// disposable state-trie copy discarded once the RPC call returns; this
+// mutation never reaches consensus state.
+func (e *Engine) ProjectAccrual(market *Market) error {
+	_, _, err := e.accrueInterest(market)
+	return err
+}
+
+// ProjectUserDebt re-syncs a user's DebtNHB against the market's current
+// BorrowIndex, mirroring what every real Borrow/Repay/Liquidate call does
+// before reading debt (see the accrueInterest-then-syncDebt pairing used
+// throughout this file). Call ProjectAccrual(market) first so the index
+// itself is fresh -- same ordering, same WithStateView safety note as
+// ProjectAccrual above.
+func (e *Engine) ProjectUserDebt(user *UserAccount, market *Market) {
+	e.syncDebt(user, market)
+}

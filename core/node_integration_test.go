@@ -1,0 +1,506 @@
+package core
+
+import (
+	"errors"
+	"math/big"
+	"strings"
+	"testing"
+	"time"
+
+	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
+	"nhbchain/crypto"
+	"nhbchain/storage"
+)
+
+func TestCommitBlockRollsBackOnApplyError(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	parentRoot := node.state.CurrentRoot()
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeRegisterIdentity,
+		Nonce:    0,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(0),
+		Data:     []byte("ab"),
+	}
+	if err := tx.Sign(validatorKey.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+
+	txRoot, err := ComputeTxRoot([]*types.Transaction{tx})
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	fixedTime := time.Unix(1_700_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: fixedTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, []*types.Transaction{tx})
+
+	if err := node.CommitBlock(block); err == nil {
+		t.Fatalf("expected commit error for invalid transaction")
+	}
+
+	if got := node.state.CurrentRoot(); got != parentRoot {
+		t.Fatalf("current root changed on failed commit: got %x want %x", got.Bytes(), parentRoot.Bytes())
+	}
+	if height := node.chain.GetHeight(); height != 0 {
+		t.Fatalf("unexpected chain height after failed commit: got %d want 0", height)
+	}
+}
+
+// TestRegisterIdentityPopulatesAliasForSendToUsername proves the actual bug
+// nhbportal users hit: claiming a username via TxTypeRegisterIdentity (the
+// only claim path the Settings page exposes) must leave the chain in a
+// state where identity_resolve -- what the Send flow's send-to-username
+// resolution actually calls -- can find it. Before this fix, the claim only
+// set Account.Username and a legacy index nothing in the send path ever
+// read; IdentityResolve always returned "not found" for a freshly-claimed
+// username, so sending to it failed 100% of the time.
+func TestRegisterIdentityPopulatesAliasForSendToUsername(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	sender := userKey.PubKey().Address().Bytes()
+	account := &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	}
+	if err := node.state.setAccount(sender, account); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeRegisterIdentity,
+		Nonce:    0,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(0),
+		Data:     []byte("FrankRocks"),
+	}
+	if err := tx.Sign(userKey.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+
+	txRoot, err := ComputeTxRoot([]*types.Transaction{tx})
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+	fixedTime := time.Unix(1_900_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: fixedTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, []*types.Transaction{tx})
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	// The claim itself: Account.Username set, case-folded to match the real
+	// alias registry so the two never silently diverge.
+	updated, err := node.state.getAccount(sender)
+	if err != nil {
+		t.Fatalf("reload account: %v", err)
+	}
+	if updated.Username != "frankrocks" {
+		t.Fatalf("expected normalized username 'frankrocks', got %q", updated.Username)
+	}
+
+	// The actual bug: does the same lookup the Send flow performs
+	// (identity_resolve -> Manager.IdentityResolve) now find this address?
+	manager := nhbstate.NewManager(node.state.Trie)
+	record, ok := manager.IdentityResolve("FrankRocks")
+	if !ok {
+		t.Fatalf("expected identity_resolve to find the freshly claimed username")
+	}
+	var resolved [20]byte
+	copy(resolved[:], sender)
+	if record.Owner != resolved && record.Primary != resolved {
+		t.Fatalf("resolved alias does not point at the claiming account: %+v", record)
+	}
+}
+
+func TestCreateBlockRejectsInvalidChainID(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	sender := userKey.PubKey().Address().Bytes()
+	account := &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	}
+	if err := node.state.setAccount(sender, account); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  big.NewInt(999_999),
+		Type:     types.TxTypeRegisterIdentity,
+		Nonce:    0,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(0),
+		Data:     []byte("bob"),
+	}
+	if err := tx.Sign(userKey.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+
+	if _, err := node.CreateBlock([]*types.Transaction{tx}); err == nil {
+		t.Fatalf("expected error for invalid chain id")
+	} else if !errors.Is(err, ErrInvalidChainID) {
+		t.Fatalf("expected ErrInvalidChainID, got %v", err)
+	}
+}
+
+func TestCommitBlockRejectsInvalidChainID(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	userKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate user key: %v", err)
+	}
+	sender := userKey.PubKey().Address().Bytes()
+	account := &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	}
+	if err := node.state.setAccount(sender, account); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+
+	parentRoot := node.state.CurrentRoot()
+
+	tx := &types.Transaction{
+		ChainID:  big.NewInt(999_999),
+		Type:     types.TxTypeRegisterIdentity,
+		Nonce:    0,
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+		Value:    big.NewInt(0),
+		Data:     []byte("bob"),
+	}
+	if err := tx.Sign(userKey.PrivateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+
+	txRoot, err := ComputeTxRoot([]*types.Transaction{tx})
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	fixedTime := time.Unix(1_800_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: fixedTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, []*types.Transaction{tx})
+
+	if err := node.CommitBlock(block); err == nil {
+		t.Fatalf("expected commit error for invalid chain id")
+	} else if !errors.Is(err, ErrInvalidChainID) {
+		t.Fatalf("expected ErrInvalidChainID, got %v", err)
+	}
+
+	if got := node.state.CurrentRoot(); got != parentRoot {
+		t.Fatalf("current root changed on failed commit: got %x want %x", got.Bytes(), parentRoot.Bytes())
+	}
+	stored, err := node.state.getAccount(sender)
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if stored.Nonce != 0 {
+		t.Fatalf("unexpected nonce mutation: got %d want 0", stored.Nonce)
+	}
+	if height := node.chain.GetHeight(); height != 0 {
+		t.Fatalf("unexpected chain height after failed commit: got %d want 0", height)
+	}
+}
+
+func TestCommitBlockEnforcesTimestampWindow(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	tolerance := 3 * time.Second
+	node.SetBlockTimestampTolerance(tolerance)
+
+	genesisTimestamp := node.chain.LastTimestamp()
+	baseTime := time.Unix(genesisTimestamp+2, 0)
+	node.SetTimeSource(func() time.Time { return baseTime })
+
+	txRoot, err := ComputeTxRoot(nil)
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: baseTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, nil)
+
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit within tolerance failed: %v", err)
+	}
+	if got := node.chain.LastTimestamp(); got != baseTime.Unix() {
+		t.Fatalf("unexpected last timestamp: got %d want %d", got, baseTime.Unix())
+	}
+	if height := node.chain.GetHeight(); height != 1 {
+		t.Fatalf("unexpected height after valid commit: got %d want 1", height)
+	}
+
+	futureNow := baseTime.Add(time.Second)
+	node.SetTimeSource(func() time.Time { return futureNow })
+	futureHeader := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: futureNow.Add(5 * time.Second).Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	futureBlock := types.NewBlock(futureHeader, nil)
+	if err := node.CommitBlock(futureBlock); err == nil {
+		t.Fatalf("expected error for future timestamp beyond tolerance")
+	} else if !errors.Is(err, ErrBlockTimestampOutOfWindow) {
+		t.Fatalf("expected ErrBlockTimestampOutOfWindow, got %v", err)
+	}
+	if height := node.chain.GetHeight(); height != 1 {
+		t.Fatalf("height mutated on rejected future block: got %d want 1", height)
+	}
+
+	laterNow := futureNow.Add(2 * time.Second)
+	node.SetTimeSource(func() time.Time { return laterNow })
+	pastHeader := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 1,
+		Timestamp: baseTime.Add(-time.Second).Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	pastBlock := types.NewBlock(pastHeader, nil)
+	if err := node.CommitBlock(pastBlock); err == nil {
+		t.Fatalf("expected error for timestamp before window")
+	} else if !errors.Is(err, ErrBlockTimestampOutOfWindow) {
+		t.Fatalf("expected ErrBlockTimestampOutOfWindow for past block, got %v", err)
+	}
+	if last := node.chain.LastTimestamp(); last != baseTime.Unix() {
+		t.Fatalf("last timestamp changed on rejection: got %d want %d", last, baseTime.Unix())
+	}
+}
+
+func TestCommitBlockRejectsHeightMismatch(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	parentRoot := node.state.CurrentRoot()
+
+	fixedTime := time.Unix(1_900_000_000, 0).UTC()
+	node.SetTimeSource(func() time.Time { return fixedTime })
+
+	txRoot, err := ComputeTxRoot(nil)
+	if err != nil {
+		t.Fatalf("compute tx root: %v", err)
+	}
+
+	header := &types.BlockHeader{
+		Height:    node.chain.GetHeight() + 2,
+		Timestamp: fixedTime.Unix(),
+		PrevHash:  node.chain.Tip(),
+		TxRoot:    txRoot,
+		Validator: validatorKey.PubKey().Address().Bytes(),
+	}
+	block := types.NewBlock(header, nil)
+
+	if err := node.CommitBlock(block); err == nil {
+		t.Fatalf("expected error for mismatched block height")
+	} else if !strings.Contains(err.Error(), "height mismatch") {
+		t.Fatalf("expected height mismatch error, got %v", err)
+	}
+
+	if got := node.chain.GetHeight(); got != 0 {
+		t.Fatalf("chain height mutated on mismatch: got %d want 0", got)
+	}
+	if got := node.state.CurrentRoot(); got != parentRoot {
+		t.Fatalf("state root changed on mismatch: got %x want %x", got.Bytes(), parentRoot.Bytes())
+	}
+}
+
+func TestCommitBlockSequentialHeightsAdvanceEpochs(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	cfg := node.state.EpochConfig()
+	cfg.Length = 1
+	cfg.StakeWeight = 1
+	cfg.EngagementWeight = 1
+	cfg.RotationEnabled = true
+	cfg.MaxValidators = 1
+	cfg.SnapshotHistory = 8
+	if err := node.SetEpochConfig(cfg); err != nil {
+		t.Fatalf("set epoch config: %v", err)
+	}
+
+	validatorAddr := seedEligibleValidator(t, node.state, 15000, 0)
+
+	currentTime := time.Unix(1_900_000_100, 0).UTC()
+	node.SetTimeSource(func() time.Time { return currentTime })
+	node.stateMu.Lock()
+	account, err := node.state.getAccount(validatorAddr)
+	if err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("load validator account: %v", err)
+	}
+	account.EngagementLastHeartbeat = uint64(currentTime.Unix())
+	if err := node.state.setAccount(validatorAddr, account); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("update validator heartbeat: %v", err)
+	}
+	node.stateMu.Unlock()
+
+	for i := 0; i < 2; i++ {
+		currentTime = currentTime.Add(time.Second)
+		nextHeight := node.chain.GetHeight() + 1
+		// Build the block via the node's own proposal path (not a hand-rolled
+		// header) so CommitBlock recognizes it as self-proposed and carries the
+		// seeded validator/state through instead of resetting to committed state.
+		block, err := node.CreateBlock(nil)
+		if err != nil {
+			t.Fatalf("create block %d: %v", nextHeight, err)
+		}
+		if err := node.CommitBlock(block); err != nil {
+			t.Fatalf("commit block %d: %v", nextHeight, err)
+		}
+	}
+
+	if got := node.chain.GetHeight(); got != 2 {
+		t.Fatalf("unexpected chain height: got %d want 2", got)
+	}
+
+	history := node.state.EpochHistory()
+	if len(history) != 2 {
+		t.Fatalf("expected two epoch snapshots, got %d", len(history))
+	}
+	for i, snapshot := range history {
+		expected := uint64(i + 1)
+		if snapshot.Height != expected {
+			t.Fatalf("snapshot %d height mismatch: got %d want %d", i, snapshot.Height, expected)
+		}
+		if snapshot.Epoch != expected {
+			t.Fatalf("snapshot %d epoch mismatch: got %d want %d", i, snapshot.Epoch, expected)
+		}
+		if len(snapshot.Selected) != 1 {
+			t.Fatalf("snapshot %d selected count mismatch: got %d want 1", i, len(snapshot.Selected))
+		}
+		if string(snapshot.Selected[0]) != string(validatorAddr) {
+			t.Fatalf("snapshot %d selected validator mismatch", i)
+		}
+	}
+
+	if _, ok := node.state.ValidatorSet[string(validatorAddr)]; !ok {
+		t.Fatalf("validator not in active set after commits")
+	}
+}

@@ -1,0 +1,66 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nhbchain/p2pd
+  tag: ""
+  pullPolicy: IfNotPresent
+
+env:
+  - name: NHB_ENV
+    value: staging
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "true"
+
+setAllowAutogenesisFlag: true
+
+service:
+  type: ClusterIP
+  ports:
+    p2p: 26656
+    grpc: 9091
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+
+config:
+  enabled: true
+  path: /etc/nhb/p2p.toml
+  content: |
+    ListenAddress = ":26656"
+    DataDir = "/var/lib/nhb/p2p"
+    GenesisFile = ""
+    AllowAutogenesis = true
+    NetworkName = "nhb-staging"
+
+    [p2p]
+    NetworkId = 187001
+    MaxPeers = 64
+    MaxInbound = 48
+    MaxOutbound = 32
+    MinPeers = 16
+    OutboundPeers = 12
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 50
+    Burst = 200
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

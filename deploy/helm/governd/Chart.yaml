@@ -1,0 +1,6 @@
+apiVersion: v2
+name: governd
+description: NHB governance daemon chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,23 @@
+{
+  "name": "@nhb/examples",
+  "private": true,
+  "packageManager": "yarn@1.22.19",
+  "workspaces": [
+    "lib-sdk",
+    "apps/*",
+    "wallet-lite",
+    "p2p-mini-market",
+    "merchant-loyalty-console",
+    "escrow-checkout/*",
+    "creator-studio"
+  ],
+  "scripts": {
+    "dev": "node ./scripts/dev.js",
+    "build": "yarn workspaces run build",
+    "lint": "yarn workspaces run lint",
+    "test": "yarn workspaces run test"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -1,0 +1,8862 @@
+package core
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"math/big"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"nhbchain/core/engagement"
+	"nhbchain/core/epoch"
+	stakeerrors "nhbchain/core/errors"
+	"nhbchain/core/events"
+	"nhbchain/core/identity"
+	"nhbchain/core/rewards"
+	nhbstate "nhbchain/core/state"
+	"nhbchain/core/tokenomics/buyback"
+	"nhbchain/core/tokenomics/curve"
+	"nhbchain/core/types"
+	"nhbchain/crypto"
+	"nhbchain/native/bank"
+	nativecommon "nhbchain/native/common"
+	"nhbchain/native/escrow"
+	"nhbchain/native/fees"
+	"nhbchain/native/governance"
+	"nhbchain/native/lending"
+	"nhbchain/native/loyalty"
+	"nhbchain/native/pos"
+	"nhbchain/native/potso"
+	"nhbchain/native/subscriptions"
+	swap "nhbchain/native/swap"
+	systemquotas "nhbchain/native/system/quotas"
+	swapv1 "nhbchain/proto/swap/v1"
+	"nhbchain/storage/trie"
+
+	"nhbchain/observability"
+
+	"github.com/ethereum/go-ethereum/common"
+	gethcore "github.com/ethereum/go-ethereum/core"
+	gethstate "github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	gethvm "github.com/ethereum/go-ethereum/core/vm"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/holiman/uint256"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+)
+
+const engagementDayFormat = "2006-01-02"
+
+// unbondingPeriod is the fallback used by stakingUnbondingPeriod when
+// governance hasn't set staking.unbondingDays (ParamKeyStakingUnbondingDays)
+// -- 7 days, matching config/config.go's and core/node.go's own Go-level
+// default. Previously this was the ONLY unbonding period: hardcoded at 72
+// hours and never actually read from config or governance at all, so the
+// configurable staking.unbondingDays parameter silently had no effect on
+// real behavior no matter what it was set to. See docs/issue30.md item 15.
+const unbondingPeriod = 7 * 24 * time.Hour
+
+const defaultIntentTTL = 24 * time.Hour
+
+const (
+	stakePayoutPeriodDays    = 30
+	secondsPerDay            = 86400
+	stakePayoutPeriodSeconds = stakePayoutPeriodDays * secondsPerDay
+)
+
+var (
+	// ErrNonceMismatch is the umbrella sentinel for any tx.Nonce !=
+	// account.Nonce rejection. It always wraps one of the two more specific
+	// sentinels below (ErrNonceTooLow / ErrNonceTooHigh) via a multi-%w
+	// fmt.Errorf, so every existing errors.Is(err, ErrNonceMismatch) check
+	// keeps matching unmodified regardless of which sub-case fired.
+	ErrNonceMismatch = errors.New("transaction nonce mismatch")
+	// ErrNonceTooLow indicates tx.Nonce < account.Nonce: the nonce has
+	// already been consumed (stale resubmission or replay). This is
+	// monotonic -- account.Nonce only ever increases -- so a transaction
+	// that hits this can never succeed later either; CreateBlock's proposal
+	// classifier (classifyProposalError) treats it as PRUNE-safe.
+	ErrNonceTooLow = errors.New("transaction nonce mismatch: already used")
+	// ErrNonceTooHigh indicates tx.Nonce > account.Nonce: a lower-nonce
+	// transaction from the same sender hasn't landed yet. Unlike
+	// ErrNonceTooLow this is genuinely order-dependent -- a different
+	// attempt (later round, different candidate set) can succeed once the
+	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
+	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
+	ErrInvalidChainID      = errors.New("invalid chain id")
+	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
+	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
+	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
+	// ErrStakePaused indicates governance has paused staking mutations.
+	ErrStakePaused = errors.New("staking: module paused")
+	// ErrHeartbeatTooSoon indicates applyHeartbeat rejected a heartbeat
+	// transaction because not enough time has elapsed since the account's
+	// on-chain EngagementLastHeartbeat (the rate-limit check) or because
+	// its payload.Timestamp does not advance past it (the replay check).
+	// Both are timing-ordering rejections specific to a single
+	// transaction, not signs of a malformed or malicious transaction, so
+	// classifyProposalError treats this the same way as ErrNonceTooLow:
+	// drop just this transaction from the proposal instead of aborting the
+	// whole block. See core/node.go's pendingHeartbeatFee and
+	// EngagementValidatorHeartbeatDue for the submission-side mechanics
+	// that keep a well-behaved caller from ever producing a transaction
+	// that hits this in practice.
+	ErrHeartbeatTooSoon = errors.New("heartbeat too soon")
+	// ErrUnknownTransactionType indicates handleNativeTransaction's dispatch
+	// switch found no case for tx.Type. Within one running binary the set of
+	// recognized TxType values is a compiled constant, so retrying the
+	// identical bytes can never succeed for the lifetime of this process --
+	// classifyProposalError treats it as PRUNE-safe (local-mempool-only;
+	// peers running newer software that recognize the type keep their own
+	// copy and can still gossip/re-propagate it).
+	ErrUnknownTransactionType = errors.New("unknown native transaction type")
+)
+
+const stakePauseReasonGovernance = "paused by governance"
+
+var (
+	accountMetadataPrefix = []byte("account-meta:")
+	usernameIndexKey      = ethcrypto.Keccak256([]byte("username-index"))
+	validatorSetKey       = ethcrypto.Keccak256([]byte("validator-set"))
+	validatorEligibleKey  = ethcrypto.Keccak256([]byte("validator-eligible-set"))
+	epochHistoryKey       = ethcrypto.Keccak256([]byte("epoch-history"))
+	rewardHistoryKey      = ethcrypto.Keccak256([]byte("reward-history"))
+	stakeRewardStateKey   = ethcrypto.Keccak256([]byte("stake-reward-state"))
+)
+
+type blockExecutionContext struct {
+	height    uint64
+	timestamp time.Time
+}
+
+// BlockCtx captures per-block runtime state used while processing
+// transactions.
+type BlockCtx struct {
+	PendingRewards nhbstate.PendingRewards
+}
+
+type StateProcessor struct {
+	Trie                       *trie.Trie
+	stateDB                    *gethstate.CachingDB
+	LoyaltyEngine              *loyalty.Engine
+	EscrowEngine               *escrow.Engine
+	TradeEngine                *escrow.TradeEngine
+	pauses                     nativecommon.PauseView
+	escrowFeeTreasury          [20]byte
+	adminWallet                [20]byte
+	hasAdminWallet             bool
+	buybackConfig              buyback.Config
+	hasBuybackConfig           bool
+	buybackAccrualAddr         crypto.Address
+	subscriptionsConfig        subscriptions.Config
+	hasSubscriptionsConfig     bool
+	usernameToAddr             map[string][]byte
+	ValidatorSet               map[string]*big.Int
+	EligibleValidators         map[string]*big.Int
+	committedRoot              common.Hash
+	events                     []types.Event
+	nowFunc                    func() time.Time
+	execContext                *blockExecutionContext
+	engagementConfig           engagement.Config
+	epochConfig                epoch.Config
+	epochHistory               []epoch.Snapshot
+	rewardConfig               rewards.Config
+	rewardAccrual              *rewards.Accumulator
+	rewardHistory              []rewards.EpochSettlement
+	stakeRewardEngine          *rewards.Engine
+	stakeRewardAPR             uint64
+	stakeRewardPersistOverride func() error
+	potsoRewardConfig          potso.RewardConfig
+	potsoWeightConfig          potso.WeightParams
+	paymasterEnabled           bool
+	paymasterLimits            PaymasterLimits
+	paymasterTopUp             PaymasterAutoTopUpPolicy
+	quotaConfig                map[string]nativecommon.Quota
+	quotaStore                 *systemquotas.Store
+	intentTTL                  time.Duration
+	feePolicy                  fees.Policy
+	transferGasPolicy          TransferGasPolicy
+	lendingParams              lending.RiskParameters
+	lendingModuleAddr          crypto.Address
+	lendingCollateralAddr      crypto.Address
+	lendingDeveloperFeeBps     uint64
+	lendingDeveloperCollector  crypto.Address
+	lendingInterestModel       *lending.InterestModel
+	lendingReserveFactorBps    uint64
+	lendingProtocolFeeBps      uint64
+	lendingCollateralRouting   lending.CollateralRouting
+	marketEscrowAddr           crypto.Address
+	marketFeeCollectorAddr     crypto.Address
+	govPolicy                  governance.ProposalPolicy
+	blockCtx                   BlockCtx
+	swapPayoutAuthorities      map[string]struct{}
+	swapConfig                 swap.Config
+	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
+	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
+	// must match. This is deliberately distinct from types.NHBChainID()
+	// (the fixed "NHB" constant used for the outer transaction envelope's
+	// ChainID field, validated separately in executeTransaction) -- the two
+	// have never been the same value in this codebase (see MintChainID for
+	// the analogous case on TxTypeMint). Fixed at genesis and identical
+	// across every validator on the same chain, so comparing against it
+	// here is fully deterministic.
+	swapVoucherChainID uint64
+}
+
+func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
+	stateDB := gethstate.NewDatabase(tr.TrieDB(), nil)
+	escEngine := escrow.NewEngine()
+	tradeEngine := escrow.NewTradeEngine(escEngine)
+	sp := &StateProcessor{
+		Trie:                     tr,
+		stateDB:                  stateDB,
+		LoyaltyEngine:            loyalty.NewEngine(),
+		EscrowEngine:             escEngine,
+		TradeEngine:              tradeEngine,
+		usernameToAddr:           make(map[string][]byte),
+		ValidatorSet:             make(map[string]*big.Int),
+		EligibleValidators:       make(map[string]*big.Int),
+		committedRoot:            tr.Root(),
+		events:                   make([]types.Event, 0),
+		nowFunc:                  time.Now,
+		execContext:              nil,
+		engagementConfig:         engagement.DefaultConfig(),
+		epochConfig:              epoch.DefaultConfig(),
+		epochHistory:             make([]epoch.Snapshot, 0),
+		rewardConfig:             rewards.DefaultConfig(),
+		rewardHistory:            make([]rewards.EpochSettlement, 0),
+		stakeRewardEngine:        rewards.NewEngine(),
+		stakeRewardAPR:           0,
+		potsoRewardConfig:        potso.DefaultRewardConfig(),
+		potsoWeightConfig:        potso.DefaultWeightParams(),
+		paymasterEnabled:         true,
+		paymasterLimits:          PaymasterLimits{},
+		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		quotaConfig:              make(map[string]nativecommon.Quota),
+		intentTTL:                defaultIntentTTL,
+		feePolicy:                fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		transferGasPolicy:        TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
+		lendingParams:            lending.RiskParameters{},
+		lendingModuleAddr:        deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix),
+		lendingCollateralAddr:    deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix),
+		lendingInterestModel:     lending.DefaultInterestModel.Clone(),
+		lendingReserveFactorBps:  0,
+		lendingProtocolFeeBps:    0,
+		lendingCollateralRouting: lending.CollateralRouting{},
+		marketEscrowAddr:         deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
+		marketFeeCollectorAddr:   deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
+		blockCtx:                 BlockCtx{},
+		swapPayoutAuthorities:    make(map[string]struct{}),
+		swapConfig:               swap.Config{},
+	}
+	sp.SetSwapPayoutAuthorities(nil)
+	if err := sp.loadUsernameIndex(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadValidatorSet(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadEpochHistory(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadRewardHistory(); err != nil {
+		return nil, err
+	}
+	if err := sp.loadStakeRewardState(); err != nil {
+		return nil, err
+	}
+	return sp, nil
+}
+
+func (sp *StateProcessor) SetPauseView(p nativecommon.PauseView) {
+	if sp == nil {
+		return
+	}
+	sp.pauses = p
+	if sp.EscrowEngine != nil {
+		sp.EscrowEngine.SetPauses(p)
+	}
+	if sp.TradeEngine != nil {
+		sp.TradeEngine.SetPauses(p)
+	}
+	if sp.LoyaltyEngine != nil {
+		sp.LoyaltyEngine.SetPauses(p)
+	}
+}
+
+// SetQuotaConfig installs the per-module quota configuration for the state processor.
+func (sp *StateProcessor) SetQuotaConfig(cfg map[string]nativecommon.Quota) {
+	if sp == nil {
+		return
+	}
+	if len(cfg) == 0 {
+		sp.quotaConfig = make(map[string]nativecommon.Quota)
+		sp.quotaStore = nil
+		return
+	}
+	cloned := make(map[string]nativecommon.Quota, len(cfg))
+	for module, quota := range cfg {
+		name := normalizeModuleName(module)
+		if name == "" {
+			continue
+		}
+		cloned[name] = quota
+	}
+	sp.quotaConfig = cloned
+	sp.quotaStore = nil
+}
+
+// SetSwapPayoutAuthorities updates the allow-list of attestors permitted to record swap payouts.
+func (sp *StateProcessor) SetSwapPayoutAuthorities(authorities []string) {
+	if sp == nil {
+		return
+	}
+	if sp.swapPayoutAuthorities == nil {
+		sp.swapPayoutAuthorities = make(map[string]struct{})
+	}
+	for k := range sp.swapPayoutAuthorities {
+		delete(sp.swapPayoutAuthorities, k)
+	}
+	if len(authorities) == 0 {
+		sp.swapPayoutAuthorities[strings.ToLower("treasury")] = struct{}{}
+		return
+	}
+	for _, authority := range authorities {
+		canonical := strings.ToLower(strings.TrimSpace(authority))
+		if canonical == "" {
+			continue
+		}
+		sp.swapPayoutAuthorities[canonical] = struct{}{}
+	}
+	if len(sp.swapPayoutAuthorities) == 0 {
+		sp.swapPayoutAuthorities[strings.ToLower("treasury")] = struct{}{}
+	}
+}
+
+func (sp *StateProcessor) isSwapPayoutAuthority(authority string) bool {
+	if sp == nil {
+		return false
+	}
+	canonical := strings.ToLower(strings.TrimSpace(authority))
+	if canonical == "" {
+		return false
+	}
+	_, ok := sp.swapPayoutAuthorities[canonical]
+	return ok
+}
+
+// SetSwapVoucherChainID installs the genesis-derived Blockchain.ChainID()
+// value used to validate TxTypeSwapVoucherMint payloads' embedded voucher
+// chain id deterministically (see the swapVoucherChainID field doc comment).
+func (sp *StateProcessor) SetSwapVoucherChainID(id uint64) {
+	if sp == nil {
+		return
+	}
+	sp.swapVoucherChainID = id
+}
+
+// SetSwapConfig installs the swap module's risk/provider/oracle configuration
+// used by the deterministic TxTypeSwapVoucherMint execution path. This is a
+// plain-data snapshot of operator config (risk limits, provider allow-list,
+// sanctions deny-list, price proof deviation/freshness windows) -- read-only
+// during transaction execution, so a shallow value copy is safe and mirrors
+// how engagementConfig/epochConfig are already carried across Copy().
+func (sp *StateProcessor) SetSwapConfig(cfg swap.Config) {
+	if sp == nil {
+		return
+	}
+	sp.swapConfig = cfg
+}
+
+// SetFeePolicy updates the fee policy applied to eligible transactions.
+func (sp *StateProcessor) SetFeePolicy(policy fees.Policy) {
+	if sp == nil {
+		return
+	}
+	clone := policy.Clone()
+	if clone.Domains == nil {
+		clone.Domains = make(map[string]fees.DomainPolicy)
+	}
+	sp.feePolicy = clone
+}
+
+// FeePolicy returns a copy of the currently configured fee policy.
+func (sp *StateProcessor) FeePolicy() fees.Policy {
+	if sp == nil {
+		return fees.Policy{}
+	}
+	return sp.feePolicy.Clone()
+}
+
+// SetTransferGasPolicy updates the NHB transfer gas sponsorship policy.
+func (sp *StateProcessor) SetTransferGasPolicy(policy TransferGasPolicy) {
+	if sp == nil {
+		return
+	}
+	sp.transferGasPolicy = policy.Clone()
+}
+
+// TransferGasPolicy returns the currently configured NHB transfer gas policy.
+func (sp *StateProcessor) TransferGasPolicy() TransferGasPolicy {
+	if sp == nil {
+		return TransferGasPolicy{}
+	}
+	return sp.transferGasPolicy.Clone()
+}
+
+func (sp *StateProcessor) quotaStoreHandle() (*systemquotas.Store, error) {
+	if sp == nil || sp.Trie == nil {
+		return nil, fmt.Errorf("quota: state unavailable")
+	}
+	if sp.quotaStore != nil {
+		return sp.quotaStore, nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	store := systemquotas.NewStore(manager)
+	sp.quotaStore = store
+	return store, nil
+}
+
+func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []byte, fromAcc, toAcc *types.Account) error {
+	if sp == nil || tx == nil {
+		return nil
+	}
+	var asset string
+	switch tx.Type {
+	case types.TxTypeTransfer:
+		asset = fees.AssetNHB
+	case types.TxTypeTransferZNHB:
+		asset = fees.AssetZNHB
+	default:
+		return nil
+	}
+	domain := strings.TrimSpace(tx.MerchantAddress)
+	if domain == "" {
+		return nil
+	}
+	cfg, ok := sp.feePolicy.DomainConfig(domain)
+	if !ok {
+		return nil
+	}
+	if len(sender) != 20 {
+		return nil
+	}
+	var payer [20]byte
+	copy(payer[:], sender)
+	gross := big.NewInt(0)
+	if tx.Value != nil {
+		gross = new(big.Int).Set(tx.Value)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	now := sp.blockTimestamp()
+	currentWindow := feeWindowStart(now)
+	scope := cfg.FreeTierScope(asset)
+	counter, windowStart, _, err := manager.FeesGetCounter(domain, payer, currentWindow, scope)
+	if err != nil {
+		return err
+	}
+	if windowStart.IsZero() || !sameFeeWindow(windowStart, currentWindow) {
+		windowStart = currentWindow
+		counter = 0
+	}
+	result := fees.Apply(fees.ApplyInput{
+		Domain:        domain,
+		Gross:         gross,
+		UsageCount:    counter,
+		PolicyVersion: sp.feePolicy.Version,
+		Config:        cfg,
+		WindowStart:   windowStart,
+		Asset:         asset,
+	})
+	if result.WindowStart.IsZero() {
+		result.WindowStart = windowStart
+	}
+	if err := manager.FeesPutCounter(domain, payer, result.WindowStart, scope, result.Counter); err != nil {
+		return err
+	}
+	if err := manager.FeesRecordUsage(result.WindowStart, cfg.FreeTierTxPerMonth, result.Counter, result.FreeTierApplied); err != nil {
+		return err
+	}
+	if err := manager.FeesAccumulateTotals(domain, result.Asset, result.OwnerWallet, gross, result.Fee, result.Net); err != nil {
+		return err
+	}
+	if result.Fee != nil && result.Fee.Sign() > 0 {
+		if isZeroAddress(result.OwnerWallet) {
+			return fmt.Errorf("fees: missing route wallet for asset %s", result.Asset)
+		}
+		routed := new(big.Int).Set(result.Fee)
+		var payerAcc *types.Account
+		switch cfg.EffectiveFeePayer() {
+		case fees.FeePayerRecipient:
+			payerAcc = toAcc
+		default:
+			payerAcc = fromAcc
+		}
+		if payerAcc == nil {
+			return fmt.Errorf("fees: insufficient balance to route fee")
+		}
+		switch result.Asset {
+		case fees.AssetNHB:
+			if payerAcc.BalanceNHB == nil || payerAcc.BalanceNHB.Cmp(routed) < 0 {
+				return fmt.Errorf("fees: insufficient balance to route fee")
+			}
+			payerAcc.BalanceNHB.Sub(payerAcc.BalanceNHB, routed)
+		case fees.AssetZNHB:
+			if payerAcc.BalanceZNHB == nil || payerAcc.BalanceZNHB.Cmp(routed) < 0 {
+				return fmt.Errorf("fees: insufficient balance to route fee")
+			}
+			payerAcc.BalanceZNHB.Sub(payerAcc.BalanceZNHB, routed)
+		default:
+			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
+		}
+		// A share of NHB-denominated fee revenue funds the treasury buyback
+		// engine's accrual account (core/tokenomics/buyback) instead of
+		// going entirely to the domain's OwnerWallet. This is a no-op
+		// (buybackShare stays zero) unless a real buyback signer quorum was
+		// configured at genesis -- see SetBuybackConfig/hasBuybackConfig --
+		// so it changes nothing for any node that hasn't opted in.
+		// FeeShareBps is read live from the governance param store (a passed
+		// policy.buybackParams proposal), falling back to the genesis
+		// default when ungoverned -- see effectiveBuybackConfig.
+		ownerShare := new(big.Int).Set(routed)
+		buybackShare := big.NewInt(0)
+		if result.Asset == fees.AssetNHB && sp.hasBuybackConfig && sp.buybackAccrualAddr.Bytes() != nil {
+			feeShareBps := sp.effectiveBuybackConfig(manager).FeeShareBps
+			if feeShareBps > 0 {
+				buybackShare = new(big.Int).Mul(routed, big.NewInt(int64(feeShareBps)))
+				buybackShare.Div(buybackShare, big.NewInt(buyback.SplitDenominator))
+				ownerShare = new(big.Int).Sub(routed, buybackShare)
+			}
+		}
+		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
+		if err != nil {
+			return err
+		}
+		switch result.Asset {
+		case fees.AssetNHB:
+			if routeAcc.BalanceNHB == nil {
+				routeAcc.BalanceNHB = big.NewInt(0)
+			}
+			routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, ownerShare)
+		case fees.AssetZNHB:
+			if routeAcc.BalanceZNHB == nil {
+				routeAcc.BalanceZNHB = big.NewInt(0)
+			}
+			routeAcc.BalanceZNHB.Add(routeAcc.BalanceZNHB, ownerShare)
+		default:
+			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
+		}
+		if err := sp.setAccount(result.OwnerWallet[:], routeAcc); err != nil {
+			return err
+		}
+		if buybackShare.Sign() > 0 {
+			accrualAcc, err := sp.getAccount(sp.buybackAccrualAddr.Bytes())
+			if err != nil {
+				return fmt.Errorf("fees: load buyback accrual account: %w", err)
+			}
+			if accrualAcc.BalanceNHB == nil {
+				accrualAcc.BalanceNHB = big.NewInt(0)
+			}
+			accrualAcc.BalanceNHB.Add(accrualAcc.BalanceNHB, buybackShare)
+			if err := sp.setAccount(sp.buybackAccrualAddr.Bytes(), accrualAcc); err != nil {
+				return fmt.Errorf("fees: persist buyback accrual account: %w", err)
+			}
+			if err := manager.ZNHBSetBuybackAccrualBalance(new(big.Int).Set(accrualAcc.BalanceNHB)); err != nil {
+				return fmt.Errorf("fees: update buyback accrual ledger: %w", err)
+			}
+		}
+	}
+	sp.AppendEvent(events.FeeApplied{
+		Payer:             payer,
+		Domain:            fees.NormalizeDomain(domain),
+		Asset:             result.Asset,
+		Gross:             new(big.Int).Set(gross),
+		Fee:               cloneBigInt(result.Fee),
+		Net:               cloneBigInt(result.Net),
+		PolicyVersion:     result.PolicyVersion,
+		OwnerWallet:       result.OwnerWallet,
+		FreeTierApplied:   result.FreeTierApplied,
+		FreeTierLimit:     result.FreeTierLimit,
+		FreeTierRemaining: result.FreeTierRemaining,
+		UsageCount:        result.Counter,
+		WindowStart:       result.WindowStart,
+		FeeBasisPoints:    result.FeeBasisPoints,
+	}.Event())
+	return nil
+}
+
+func isZeroAddress(addr [20]byte) bool {
+	for _, b := range addr {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func feeWindowStart(ts time.Time) time.Time {
+	if ts.IsZero() {
+		return time.Time{}
+	}
+	utc := ts.UTC()
+	return time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+func sameFeeWindow(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	ua := a.UTC()
+	ub := b.UTC()
+	return ua.Year() == ub.Year() && ua.Month() == ub.Month()
+}
+
+func quotaEpochFor(q nativecommon.Quota, ts time.Time) uint64 {
+	seconds := q.EpochSeconds
+	if seconds == 0 {
+		seconds = 60
+	}
+	if seconds == 0 {
+		return 0
+	}
+	unix := ts.Unix()
+	if unix < 0 {
+		unix = 0
+	}
+	return uint64(unix) / uint64(seconds)
+}
+
+func (sp *StateProcessor) applyQuota(module string, addr []byte, addReq uint32, addNHB uint64) error {
+	if sp == nil {
+		return fmt.Errorf("quota: state processor unavailable")
+	}
+	moduleName := normalizeModuleName(module)
+	if moduleName == "" {
+		return nil
+	}
+	quota, ok := sp.quotaConfig[moduleName]
+	if !ok || (quota.MaxRequestsPerMin == 0 && quota.MaxNHBPerEpoch == 0) {
+		return nil
+	}
+	if addReq == 0 && addNHB == 0 {
+		return nil
+	}
+	store, err := sp.quotaStoreHandle()
+	if err != nil {
+		return err
+	}
+	nowEpoch := quotaEpochFor(quota, sp.blockTimestamp())
+	_, err = nativecommon.Apply(store, moduleName, nowEpoch, addr, quota, addReq, addNHB)
+	if err != nil {
+		sp.emitQuotaExceeded(moduleName, addr, nowEpoch, err)
+		return fmt.Errorf("quota: %s: %w", moduleName, err)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) transferGasWindowKey() string {
+	if sp == nil {
+		return nhbstate.TransferGasWindowLifetime
+	}
+	switch normalizeTransferGasWindow(sp.transferGasPolicy.Window) {
+	case TransferGasWindowMonthly:
+		return nhbstate.TransferGasWindowMonthly
+	default:
+		return nhbstate.TransferGasWindowLifetime
+	}
+}
+
+func (sp *StateProcessor) transferGasStatus(sender []byte, asset string) (nhbstate.TransferGasSpendStatus, error) {
+	if sp == nil {
+		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("fees: state unavailable")
+	}
+	if len(sender) != common.AddressLength {
+		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("fees: sender address invalid")
+	}
+	policy := sp.TransferGasPolicy()
+	var wallet [20]byte
+	copy(wallet[:], sender)
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.TransferGasSpendStatus(wallet, sp.transferGasWindowKey(), sp.blockTimestamp(), policy.FreeSpendLimitWei, asset)
+}
+
+func (sp *StateProcessor) recordTransferGasSpend(sender []byte, amount *big.Int, asset string) error {
+	if sp == nil || amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	if len(sender) != common.AddressLength {
+		return fmt.Errorf("fees: sender address invalid")
+	}
+	policy := sp.TransferGasPolicy()
+	var wallet [20]byte
+	copy(wallet[:], sender)
+	manager := nhbstate.NewManager(sp.Trie)
+	_, err := manager.TransferGasSpendAdd(wallet, sp.transferGasWindowKey(), sp.blockTimestamp(), amount, policy.FreeSpendLimitWei, asset)
+	return err
+}
+
+func (sp *StateProcessor) routeTransferGasFee(amount *big.Int) error {
+	if sp == nil || amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	policy := sp.TransferGasPolicy()
+	if isZeroAddress(policy.FeeCollector) {
+		return fmt.Errorf("fees: transfer gas collector not configured")
+	}
+	account, err := sp.getAccount(policy.FeeCollector[:])
+	if err != nil {
+		return err
+	}
+	if account.BalanceNHB == nil {
+		account.BalanceNHB = big.NewInt(0)
+	}
+	account.BalanceNHB.Add(account.BalanceNHB, amount)
+	return sp.setAccount(policy.FeeCollector[:], account)
+}
+
+func (sp *StateProcessor) emitQuotaExceeded(module string, addr []byte, epoch uint64, cause error) {
+	if sp == nil || cause == nil {
+		return
+	}
+	reason := "unknown"
+	switch {
+	case errors.Is(cause, nativecommon.ErrQuotaRequestsExceeded):
+		reason = "requests"
+	case errors.Is(cause, nativecommon.ErrQuotaNHBCapExceeded):
+		reason = "nhb"
+	case errors.Is(cause, nativecommon.ErrQuotaCounterOverflow):
+		reason = "overflow"
+	}
+	attrs := map[string]string{
+		"module": module,
+		"epoch":  strconv.FormatUint(epoch, 10),
+		"reason": reason,
+	}
+	if len(addr) > 0 {
+		if len(addr) == common.AddressLength {
+			attrs["address"] = crypto.MustNewAddress(crypto.NHBPrefix, addr).String()
+		} else {
+			attrs["address"] = hex.EncodeToString(addr)
+		}
+	}
+	sp.AppendEvent(&types.Event{Type: "QuotaExceeded", Attributes: attrs})
+}
+
+func (sp *StateProcessor) pruneQuotaCounters(ts time.Time) error {
+	if sp == nil {
+		return nil
+	}
+	if len(sp.quotaConfig) == 0 {
+		return nil
+	}
+	store, err := sp.quotaStoreHandle()
+	if err != nil {
+		return err
+	}
+	for module, quota := range sp.quotaConfig {
+		seconds := quota.EpochSeconds
+		if seconds == 0 {
+			seconds = 60
+		}
+		if seconds == 0 {
+			continue
+		}
+		unix := ts.Unix()
+		if unix < 0 {
+			continue
+		}
+		current := uint64(unix) / uint64(seconds)
+		if current < 2 {
+			continue
+		}
+		pruneEpoch := current - 2
+		if err := store.PruneEpoch(module, pruneEpoch); err != nil {
+			return fmt.Errorf("quota: prune %s epoch %d: %w", module, pruneEpoch, err)
+		}
+	}
+	return nil
+}
+
+// SetEscrowFeeTreasury configures the address receiving escrow fees during
+// release transitions.
+func (sp *StateProcessor) SetEscrowFeeTreasury(addr [20]byte) {
+	sp.escrowFeeTreasury = addr
+}
+
+// SetAdminWallet configures the genesis-declared admin/treasury wallet used
+// as the sole counterparty for the ZNHB purchase flow (applyBuyZNHB).
+func (sp *StateProcessor) SetAdminWallet(addr [20]byte, ok bool) {
+	sp.adminWallet = addr
+	sp.hasAdminWallet = ok
+}
+
+// SetBuybackConfig configures the treasury buyback engine's parameters and
+// genesis-immutable reference-price signer quorum. Validates the config
+// before installing it -- an invalid config (e.g. threshold exceeding signer
+// count) must never silently become active.
+func (sp *StateProcessor) SetBuybackConfig(cfg buyback.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("buyback: invalid config: %w", err)
+	}
+	sp.buybackConfig = cfg.Clone()
+	sp.hasBuybackConfig = true
+	return nil
+}
+
+// BuybackConfig returns the currently configured treasury buyback
+// parameters, if the buyback engine has been configured.
+func (sp *StateProcessor) BuybackConfig() (buyback.Config, bool) {
+	if !sp.hasBuybackConfig {
+		return buyback.Config{}, false
+	}
+	return sp.buybackConfig.Clone(), true
+}
+
+// SetBuybackAccrualAddress configures the module account that holds swept
+// NHB fee revenue pending the next buyback auction settlement. Real NHB
+// lives in this account's balance -- the ZNHBBuybackAccrualBalance ledger
+// key (core/state.Manager) is kept as a mirror of it for cheap RPC reads,
+// not an independent source of truth.
+func (sp *StateProcessor) SetBuybackAccrualAddress(addr crypto.Address) {
+	if sp == nil || addr.Bytes() == nil {
+		return
+	}
+	sp.buybackAccrualAddr = cloneAddress(addr)
+}
+
+// SetSubscriptionsConfig configures native/subscriptions' management-fee
+// rate, retry/dunning schedule, and treasury address. Validates the config
+// before installing it, exactly like SetBuybackConfig -- an invalid config
+// (fee exceeding its own cap, zero retry budget) must never silently
+// become active. TxTypeSubscriptionSubscribe and settleSubscriptionCharges
+// both refuse to run until this has been called (mirrors
+// hasBuybackConfig's genesis-opt-in gate).
+func (sp *StateProcessor) SetSubscriptionsConfig(cfg subscriptions.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("subscriptions: invalid config: %w", err)
+	}
+	sp.subscriptionsConfig = cfg
+	sp.hasSubscriptionsConfig = true
+	return nil
+}
+
+// SubscriptionsConfig returns the currently configured subscriptions
+// engine parameters, if configured.
+func (sp *StateProcessor) SubscriptionsConfig() (subscriptions.Config, bool) {
+	if !sp.hasSubscriptionsConfig {
+		return subscriptions.Config{}, false
+	}
+	return sp.subscriptionsConfig, true
+}
+
+// znhbExpectedTotalSupplyWei is a fixed test fixture: the total ZNHB
+// balance test helpers fund a fake admin wallet with before calling
+// EnsureZNHBPoolsBootstrapped, matching the live Phase E genesis
+// snapshot's total at the time this was written (1,000,008,000 ZNHB --
+// 8,000 ZNHB of pre-existing inflation from mint-path bugs, since fixed,
+// that were already live before reconciliation and got carried forward
+// into the snapshot). It is deliberately NOT enforced against the live
+// admin wallet balance -- see EnsureZNHBPoolsBootstrapped's doc comment
+// for why an earlier version of this code tried that and it was wrong.
+//
+// znhbExpectedSalePoolWei/znhbExpectedRewardPoolWei are derived from it
+// via the exact same 80/20 arithmetic EnsureZNHBPoolsBootstrapped uses on
+// a real balance, so these test fixtures can never silently drift out of
+// sync with what the real bootstrap logic actually computes.
+var (
+	znhbExpectedTotalSupplyWei, _ = new(big.Int).SetString("1000008000000000000000000000", 10)
+	znhbExpectedRewardPoolWei     = znhbPoolRewardShare(znhbExpectedTotalSupplyWei)
+	znhbExpectedSalePoolWei       = new(big.Int).Sub(znhbExpectedTotalSupplyWei, znhbExpectedRewardPoolWei)
+)
+
+// znhbPoolRewardShare returns the Reward Pool's 20% share of totalWei,
+// floored (any remainder from integer division goes to the Sale Pool, so
+// the two always sum to exactly totalWei with no wei lost or created).
+func znhbPoolRewardShare(totalWei *big.Int) *big.Int {
+	reward := new(big.Int).Mul(totalWei, big.NewInt(20))
+	return reward.Quo(reward, big.NewInt(100))
+}
+
+// EnsureZNHBPoolsBootstrapped performs the one-time genesis split of the
+// admin/treasury wallet's ZNHB into the fixed Sale Pool and Reward Pool
+// sub-ledgers. Idempotent -- safe to call on every startup, a no-op once
+// the split has already run (guarded by the znhbPoolsBootstrapped flag in
+// state). CORRECTED comment 2026-09-09 (was describing behavior this
+// function doesn't have): it does NOT assert the admin wallet's balance
+// against znhbExpectedTotalSupplyWei or any other fixed constant -- see
+// the function body's own comment for why (a live balance can legitimately
+// differ from any frozen genesis snapshot by the time bootstrap first
+// runs). It only requires the balance be positive; the 80/20 split always
+// runs against whatever that live balance actually is.
+func (sp *StateProcessor) EnsureZNHBPoolsBootstrapped() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if bootstrapped {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Sign() <= 0 {
+		balance := "<nil>"
+		if adminAccount.BalanceZNHB != nil {
+			balance = adminAccount.BalanceZNHB.String()
+		}
+		return fmt.Errorf("znhb: admin wallet ZNHB balance %s is not positive -- refusing to bootstrap pools with nothing to split", balance)
+	}
+
+	// Bootstrap runs exactly once, whenever a node first processes a block
+	// under code that knows about the pools -- not necessarily at genesis.
+	// By the time that happens the admin wallet's live balance may already
+	// differ from any frozen genesis snapshot (real buyZNHB purchases move
+	// it before the first restart that carries this logic). The 80/20
+	// split ratio is the design intent, not a specific absolute number, so
+	// bootstrap always splits whatever the live balance actually is at the
+	// moment it first runs, rather than asserting it against a stale
+	// constant and refusing to start the node.
+	rewardPoolWei := znhbPoolRewardShare(adminAccount.BalanceZNHB)
+	salePoolWei := new(big.Int).Sub(adminAccount.BalanceZNHB, rewardPoolWei)
+
+	if err := manager.ZNHBSetSalePoolBalance(salePoolWei); err != nil {
+		return fmt.Errorf("znhb: set sale pool balance: %w", err)
+	}
+	if err := manager.ZNHBSetRewardPoolBalance(rewardPoolWei); err != nil {
+		return fmt.Errorf("znhb: set reward pool balance: %w", err)
+	}
+	if err := manager.ZNHBSetCumulativeSaleDistributed(big.NewInt(0)); err != nil {
+		return fmt.Errorf("znhb: set cumulative sale distributed: %w", err)
+	}
+	if err := manager.ZNHBMarkPoolsBootstrapped(); err != nil {
+		return fmt.Errorf("znhb: mark pools bootstrapped: %w", err)
+	}
+	return nil
+}
+
+// adminZNHBOwned computes the admin/treasury wallet's own ZNHB exposure for
+// CheckZNHBSupplyInvariant/ReconcileZNHBSupplyDriftOnce: spendable balance,
+// plus anything the wallet itself has locked into a delegation (whether
+// self-staking or delegating out to another validator), plus anything
+// sitting in its own pending unbonds (matured or not), plus anything held in
+// its own governance-proposal deposit escrow (SubmitProposal debits
+// BalanceZNHB and calls nhbstate.Manager.GovernanceEscrowLock, a completely
+// separate KV ledger from the Account struct's own fields -- confirmed live
+// on 2026-08-26: this wallet submitting a governance proposal with a
+// deposit repeatedly failed block-building with an invariant violation
+// until this term was added, since the escrowed deposit had otherwise
+// vanished from this sum entirely). Account.Stake is deliberately excluded:
+// unlike BalanceZNHB/LockedZNHB/PendingUnbonds -- which
+// StakeDelegate/StakeUndelegate/StakeClaim only ever mutate on the
+// delegating account itself -- Stake is also credited on a validator's
+// account when OTHER people delegate TO it (see StakeDelegate's
+// third-party-delegation branch), and nothing prevents anyone from naming
+// this wallet as their validator. Counting Stake here would let a
+// third-party delegation silently inflate what the sale/reward pools are
+// allowed to claim as treasury-owned funds. Verified against self-stake,
+// self-unstake-to-pending, delegating out to another validator, a third
+// party delegating in, and submitting a governance proposal deposit -- this
+// sum tracks the wallet's own money exactly in every case found so far.
+func adminZNHBOwned(account *types.Account, govEscrow *big.Int) *big.Int {
+	owned := big.NewInt(0)
+	if account != nil {
+		if account.BalanceZNHB != nil {
+			owned.Add(owned, account.BalanceZNHB)
+		}
+		if account.LockedZNHB != nil {
+			owned.Add(owned, account.LockedZNHB)
+		}
+		for _, unbond := range account.PendingUnbonds {
+			if unbond.Amount != nil {
+				owned.Add(owned, unbond.Amount)
+			}
+		}
+	}
+	if govEscrow != nil {
+		owned.Add(owned, govEscrow)
+	}
+	return owned
+}
+
+// adjustRewardPoolForAdminZNHBMovement keeps CheckZNHBSupplyInvariant
+// satisfied whenever the admin/treasury wallet's tracked ZNHB (BalanceZNHB/
+// LockedZNHB/PendingUnbonds/GovernanceEscrow -- see adminZNHBOwned) changes
+// through a path that isn't already pool-aware. delta is signed: positive
+// when ZNHB newly lands on the admin wallet's tracked balance from outside
+// (e.g. a market fill paying the admin wallet as buyer, or a listing
+// cancellation refunding it as seller), negative when ZNHB leaves it into
+// somewhere adminZNHBOwned doesn't look (e.g. escrowing ZNHB into a listing
+// as seller). This is the same fix pattern already applied to
+// applyTransferZNHB's fee/amount routing (see its comments and the
+// 2026-09-05/2026-09-16 incidents) generalized into a helper: every new
+// module that lets the admin wallet move ZNHB into or out of a dedicated
+// module-escrow account (a DIFFERENT address adminZNHBOwned never reads)
+// needs this same call, or CheckZNHBSupplyInvariant halts the chain on the
+// very next block. Confirmed live 2026-09-16 via the market/listing module
+// (native/market/engine.go's CreateListing moving admin-owned ZNHB into
+// marketEscrowAddr with no offsetting pool adjustment -- see
+// core/market_native.go's call sites). A no-op if delta is zero or the
+// chain has no configured admin wallet.
+func (sp *StateProcessor) adjustRewardPoolForAdminZNHBMovement(delta *big.Int) error {
+	if !sp.hasAdminWallet || delta == nil || delta.Sign() == 0 {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	rewardPoolBalance, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load reward pool balance for admin-wallet adjustment: %w", err)
+	}
+	newRewardPoolBalance := new(big.Int).Add(rewardPoolBalance, delta)
+	if err := manager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
+		return fmt.Errorf("znhb: update reward pool balance for admin-wallet adjustment: %w", err)
+	}
+	return nil
+}
+
+// ReconcileZNHBSupplyDriftOnce repairs a specific, already-identified,
+// one-time accounting gap: early reward-payout code (see
+// StateProcessor.settleEpochRewards in core/rewards_logic.go) credited
+// recipients' ZNHB balances and decremented the Reward Pool's bookkeeping
+// label, but never debited the admin/treasury wallet's actual BalanceZNHB
+// to fund those payouts -- a real transfer needs both sides. That silently
+// inflated total supply by the cumulative payout amount before this was
+// caught (by CheckZNHBSupplyInvariant halting the chain) and fixed (by
+// settleEpochRewards now debiting the admin wallet alongside the pool
+// label). This function repairs the resulting drift in already-committed
+// state exactly once: it brings the admin wallet's balance back down (or
+// up, in the general case) to match the Sale+Reward pool sum, the
+// authoritative ledger of what should have been distributed. Guarded by a
+// persistent flag so it can never run twice and can never mask a genuine
+// future invariant violation once the underlying bug is fixed.
+func (sp *StateProcessor) ReconcileZNHBSupplyDriftOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if !bootstrapped {
+		return nil
+	}
+	reconciled, err := manager.ZNHBSupplyDriftReconciled()
+	if err != nil {
+		return fmt.Errorf("znhb: check supply drift reconciliation flag: %w", err)
+	}
+	if reconciled {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load sale pool balance: %w", err)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load reward pool balance: %w", err)
+	}
+	sum := new(big.Int).Add(salePool, rewardPool)
+	govEscrow, err := manager.GovernanceEscrowBalance(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
+	}
+	adminOwned := adminZNHBOwned(adminAccount, govEscrow)
+
+	drift := new(big.Int).Sub(adminOwned, sum)
+	if drift.Sign() != 0 {
+		// Only BalanceZNHB is adjustable here -- LockedZNHB/PendingUnbonds
+		// represent real, specific obligations (an active delegation, a
+		// named unbonding entry) that this blunt repair must not disturb.
+		adminBalance := adminAccount.BalanceZNHB
+		if adminBalance == nil {
+			adminBalance = big.NewInt(0)
+		}
+		adminAccount.BalanceZNHB = new(big.Int).Sub(adminBalance, drift)
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("znhb: apply supply drift correction: %w", err)
+		}
+		sp.AppendEvent(&types.Event{Type: "znhb.supply_drift_reconciled", Attributes: map[string]string{
+			"drift":                drift.String(),
+			"admin_balance_before": adminBalance.String(),
+			"admin_balance_after":  adminAccount.BalanceZNHB.String(),
+		}})
+	}
+	return manager.ZNHBMarkSupplyDriftReconciled()
+}
+
+// genesisNHBSupplyWei is the exact sum of every NHB balance genesis
+// allocates directly into account state (config/genesis.phase-e.json's
+// "alloc" section: 9994919800000000000000 + 5000000000000000000 +
+// 80200000000000000 wei), confirmed to equal precisely 10,000 NHB. Genesis
+// writes these balances straight into account state without ever calling
+// MintToken/AdjustTokenSupply, so the tracked token/supply/NHB counter
+// starts at zero regardless of this real, circulating amount -- the first
+// TxTypeRedeemNHB burn on this network (2026-08-24) underflowed
+// immediately as a direct result. Hardcoded rather than re-summed from the
+// genesis file at runtime: this is a fixed historical fact about a specific
+// genesis that already happened, not something that should silently change
+// if a genesis file is ever edited or replaced later.
+var genesisNHBSupplyWei = func() *big.Int {
+	amount, ok := new(big.Int).SetString("10000000000000000000000", 10)
+	if !ok {
+		panic("genesisNHBSupplyWei: invalid constant")
+	}
+	return amount
+}()
+
+// SeedGenesisNHBSupplyOnce repairs the tracked NHB token-supply counter's
+// missing genesis allocation exactly once. See genesisNHBSupplyWei's doc
+// comment for the root cause. Idempotent -- guarded by a persistent flag
+// (NHBSupplyGenesisSeeded), so it is a cheap no-op on every block after the
+// first successful run, and can never mask a genuine future supply-tracking
+// bug once that flag is set. Unlike ReconcileZNHBSupplyDriftOnce, this adds
+// a fixed, known amount rather than resolving to an authoritative live
+// total. CORRECTED comment 2026-09-17 (was wrong): this does NOT rely on
+// ongoing mints already being tracked correctly -- see
+// ReconcileNHBMintSupplyDriftOnce below for the separate, later-discovered
+// gap on the mint side (MintToken, the helper this comment used to credit,
+// has zero callers; applyMintTransaction is what TxTypeMint actually runs,
+// and it never called AdjustTokenSupply until today).
+func (sp *StateProcessor) SeedGenesisNHBSupplyOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	seeded, err := manager.NHBSupplyGenesisSeeded()
+	if err != nil {
+		return fmt.Errorf("nhb: check genesis supply seed flag: %w", err)
+	}
+	if seeded {
+		return nil
+	}
+	before, err := manager.TokenSupply("NHB")
+	if err != nil {
+		return fmt.Errorf("nhb: load token supply: %w", err)
+	}
+	after, err := manager.AdjustTokenSupply("NHB", genesisNHBSupplyWei)
+	if err != nil {
+		return fmt.Errorf("nhb: seed genesis supply: %w", err)
+	}
+	sp.AppendEvent(&types.Event{Type: "nhb.supply_genesis_seeded", Attributes: map[string]string{
+		"seeded_amount": genesisNHBSupplyWei.String(),
+		"supply_before": before.String(),
+		"supply_after":  after.String(),
+	}})
+	return manager.MarkNHBSupplyGenesisSeeded()
+}
+
+// nhbMintSupplyDriftWei is the exact sum of every NHB TxTypeMint
+// transaction that settled on this chain before applyMintTransaction was
+// fixed (2026-09-17) to call AdjustTokenSupply -- computed offline via
+// cmd/nhb-supply-audit walking every block from genesis to height 135621
+// against a copy of validator1's live data directory (3 settled mints
+// found, decode warnings: 0). Hardcoded rather than recomputed at runtime
+// for the same reason genesisNHBSupplyWei is: this is a fixed historical
+// fact about already-committed chain state, not something that should
+// silently change if computed differently later. Every mint from the fix
+// onward is already correctly tracked and must not be double-counted here.
+var nhbMintSupplyDriftWei = func() *big.Int {
+	amount, ok := new(big.Int).SetString("115000000000000000000", 10)
+	if !ok {
+		panic("nhbMintSupplyDriftWei: invalid constant")
+	}
+	return amount
+}()
+
+// ReconcileNHBMintSupplyDriftOnce repairs the tracked NHB token-supply
+// counter's missing mint-side increments exactly once. Root cause:
+// applyMintTransaction credited recipient balances for every custody-
+// deposit-triggered mint since launch but never called AdjustTokenSupply
+// (fixed 2026-09-17, this file) -- every burn path did call it, so the
+// counter has been silently understating real circulating NHB since
+// launch, growing further out of sync with every mint. See
+// nhbMintSupplyDriftWei's doc comment for how the exact drift amount was
+// computed. Idempotent -- guarded by a persistent flag
+// (NHBMintSupplyDriftReconciled), so it is a cheap no-op on every block
+// after the first successful run, and can never mask a genuine future
+// supply-tracking bug once that flag is set. Mirrors
+// SeedGenesisNHBSupplyOnce's shape exactly: adds a fixed, known amount
+// rather than resolving to a live-recomputed total.
+func (sp *StateProcessor) ReconcileNHBMintSupplyDriftOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	reconciled, err := manager.NHBMintSupplyDriftReconciled()
+	if err != nil {
+		return fmt.Errorf("nhb: check mint supply drift reconciliation flag: %w", err)
+	}
+	if reconciled {
+		return nil
+	}
+	before, err := manager.TokenSupply("NHB")
+	if err != nil {
+		return fmt.Errorf("nhb: load token supply: %w", err)
+	}
+	after, err := manager.AdjustTokenSupply("NHB", nhbMintSupplyDriftWei)
+	if err != nil {
+		return fmt.Errorf("nhb: reconcile mint supply drift: %w", err)
+	}
+	sp.AppendEvent(&types.Event{Type: "nhb.supply_mint_drift_reconciled", Attributes: map[string]string{
+		"drift_amount":  nhbMintSupplyDriftWei.String(),
+		"supply_before": before.String(),
+		"supply_after":  after.String(),
+	}})
+	return manager.MarkNHBMintSupplyDriftReconciled()
+}
+
+// stakeDelegationBackfillSeed lists (delegator, validator) pairs known to
+// carry an active third-party delegation created before the 2026-08-13
+// delegator-reward-attribution fix (see StakeDelegate/StakeUndelegate and
+// distributeStakerRewards) -- confirmed directly against live chain state
+// via RPC at the time this fix was written. A full state-trie scan for
+// pre-fix delegations was deliberately not built: this network had two
+// separate consensus-halting incidents in the preceding 24 hours from
+// state-handling bugs, and every real pre-fix delegation that exists today
+// was already confirmed by hand, so a scan would add real risk to close a
+// gap of exactly one known entry. If a later node import (e.g. from a
+// different prior binary, or a fresh validator that turns out to already
+// carry pre-fix state) is found to have pre-fix delegations not listed
+// here, add its (delegator, validator) pair before this runs on that node.
+type stakeDelegationBackfillEntry struct {
+	Delegator string
+	Validator string
+}
+
+var stakeDelegationBackfillSeed = []stakeDelegationBackfillEntry{
+	{Delegator: "nhb1heggsvzc8j8vm3zgwn9m4n236cr5t7u4g3av0t", Validator: "nhb1jyhwc26z0tf7mwkg5fgggrjx23spqaqr2f5yjz"},
+}
+
+// BackfillStakeDelegationIndexOnce populates StakeValidatorDelegators /
+// StakeValidatorDelegatedInTotal for delegations listed in
+// stakeDelegationBackfillSeed that predate the index existing at all.
+// Guarded by StakeDelegationIndexBackfilled so it runs at most once; safe to
+// call on every block otherwise (see ProcessBlockLifecycle). Moves no ZNHB
+// and mints nothing -- every seed entry is re-validated against the
+// delegator's own current, already-correct DelegatedValidator/LockedZNHB
+// fields before indexing, and is skipped (not force-applied) if the
+// delegation has since changed or ended. This only makes an already-true
+// fact discoverable to distributeStakerRewards/stakeRewardBasis; correct
+// splitting begins at the next reward settlement/accrual after it runs.
+func (sp *StateProcessor) BackfillStakeDelegationIndexOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	backfilled, err := manager.StakeDelegationIndexBackfilled()
+	if err != nil {
+		return fmt.Errorf("staking: check delegation index backfill flag: %w", err)
+	}
+	if backfilled {
+		return nil
+	}
+	for _, seed := range stakeDelegationBackfillSeed {
+		delegatorAddr, err := crypto.DecodeAddress(seed.Delegator)
+		if err != nil {
+			return fmt.Errorf("staking: decode backfill delegator %q: %w", seed.Delegator, err)
+		}
+		validatorAddr, err := crypto.DecodeAddress(seed.Validator)
+		if err != nil {
+			return fmt.Errorf("staking: decode backfill validator %q: %w", seed.Validator, err)
+		}
+		delegatorAcc, err := sp.getAccount(delegatorAddr.Bytes())
+		if err != nil {
+			return fmt.Errorf("staking: load backfill delegator %q: %w", seed.Delegator, err)
+		}
+		if len(delegatorAcc.DelegatedValidator) == 0 || !bytes.Equal(delegatorAcc.DelegatedValidator, validatorAddr.Bytes()) {
+			// Delegation changed or ended since this seed was written --
+			// nothing to backfill, the live state is already authoritative.
+			continue
+		}
+		if delegatorAcc.LockedZNHB == nil || delegatorAcc.LockedZNHB.Sign() <= 0 {
+			continue
+		}
+		validatorKey := bytesToAddress(validatorAddr.Bytes())
+		delegatorKey := bytesToAddress(delegatorAddr.Bytes())
+		existing, err := manager.StakeValidatorDelegators(validatorKey)
+		if err != nil {
+			return fmt.Errorf("staking: load delegator index for backfill: %w", err)
+		}
+		alreadyIndexed := false
+		for _, d := range existing {
+			if d == delegatorKey {
+				alreadyIndexed = true
+				break
+			}
+		}
+		if alreadyIndexed {
+			continue
+		}
+		if err := manager.StakeAddValidatorDelegator(validatorKey, delegatorKey); err != nil {
+			return fmt.Errorf("staking: backfill delegator index: %w", err)
+		}
+		delegatedIn, err := manager.StakeValidatorDelegatedInTotal(validatorKey)
+		if err != nil {
+			return fmt.Errorf("staking: load delegated-in total for backfill: %w", err)
+		}
+		delegatedIn = new(big.Int).Add(delegatedIn, delegatorAcc.LockedZNHB)
+		if err := manager.StakeValidatorSetDelegatedInTotal(validatorKey, delegatedIn); err != nil {
+			return fmt.Errorf("staking: backfill delegated-in total: %w", err)
+		}
+	}
+	return manager.MarkStakeDelegationIndexBackfilled()
+}
+
+// BackfillValidatorRegistrationOnce is the item-5 migration: the instant the
+// item-1 "must be explicitly registered" gate deploys, the ONE (or few)
+// currently-active, legitimately-running validator(s) already sitting in
+// ValidatorSet via the old automatic-by-stake mechanism must be
+// grandfathered in as ValidatorRegistered, or they immediately fail the new
+// check and drop out of the eligible set -- with only a handful of
+// validators total, that halts the chain. Scoped deliberately to
+// ValidatorSet ONLY, not the broader EligibleValidators: EligibleValidators
+// may still contain exactly the phantom-eligibility entries (see task #94)
+// this whole fix exists to remove, while ValidatorSet only ever contains
+// addresses already selected into live, running consensus. Guarded by
+// ValidatorRegistrationBackfilled so it runs at most once; safe to call on
+// every block otherwise (see ProcessBlockLifecycle). Mirrors
+// BackfillStakeDelegationIndexOnce's established idiom exactly.
+//
+// A same-block ordering hazard is handled separately, not here: setAccount
+// carries its own transitional-grandfather branch (see its doc comment) so
+// any account touched by an earlier transaction in the same block this
+// migration first runs is protected immediately, before this function ever
+// executes.
+func (sp *StateProcessor) BackfillValidatorRegistrationOnce() error {
+	manager := nhbstate.NewManager(sp.Trie)
+	backfilled, err := manager.ValidatorRegistrationBackfilled()
+	if err != nil {
+		return fmt.Errorf("validator: check registration backfill flag: %w", err)
+	}
+	if backfilled {
+		return nil
+	}
+	addrs := make([][]byte, 0, len(sp.ValidatorSet))
+	for addrKey := range sp.ValidatorSet {
+		// Snapshot keys first, not mutate-while-ranging: setValidatorRegistered
+		// (via setAccount) can touch sp.ValidatorSet as a side effect.
+		addrs = append(addrs, []byte(addrKey))
+	}
+	for _, addr := range addrs {
+		account, err := sp.getAccount(addr)
+		if err != nil {
+			return fmt.Errorf("validator: load backfill candidate: %w", err)
+		}
+		if account.ValidatorRegistered {
+			continue
+		}
+		if err := sp.setValidatorRegistered(addr, account, true); err != nil {
+			return fmt.Errorf("validator: persist registration backfill: %w", err)
+		}
+	}
+	return manager.MarkValidatorRegistrationBackfilled()
+}
+
+// CheckZNHBSupplyInvariant asserts that the Sale Pool and Reward Pool
+// sub-ledgers together account for exactly the admin/treasury wallet's
+// live ZNHB balance -- the consensus-critical guarantee that no ZNHB has
+// been created or destroyed outside the two ring-fenced pools. Intended to
+// be called every block (see core/epochs.go's ProcessBlockLifecycle); a
+// violation is a hard consensus error the caller must halt on, not a
+// warning. CORRECTED comment 2026-09-09: this checks internal pool-ledger
+// self-consistency (sale+reward == admin-owned balance), NOT any fixed
+// absolute total -- znhbExpectedTotalSupplyWei is a test fixture only
+// (see its own doc comment) and is never referenced by this function. A
+// violation means ZNHB moved on/off the admin wallet without the matching
+// pool-ledger update, whatever the wallet's actual total happens to be.
+func (sp *StateProcessor) CheckZNHBSupplyInvariant() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if !bootstrapped {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load sale pool balance: %w", err)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load reward pool balance: %w", err)
+	}
+	sum := new(big.Int).Add(salePool, rewardPool)
+	govEscrow, err := manager.GovernanceEscrowBalance(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
+	}
+	adminOwned := adminZNHBOwned(adminAccount, govEscrow)
+	if sum.Cmp(adminOwned) != 0 {
+		return fmt.Errorf("znhb: supply invariant violated -- sale pool (%s) + reward pool (%s) = %s, but admin wallet BalanceZNHB+LockedZNHB+pendingUnbonds = %s", salePool, rewardPool, sum, adminOwned)
+	}
+	return nil
+}
+
+// staleAdminPendingUnbondSeed lists (unbonding ID, expected amount) pairs on
+// the admin/treasury wallet's own account known to be stale, unclaimable
+// leftovers from the 2026-08-26 incident: the admin wallet self-staked ZNHB
+// (silently breaking the invariant above, since staking moves BalanceZNHB
+// into Stake/LockedZNHB, which the old formula never accounted for), then
+// unstaked into this PendingUnbonds entry. Before the pending unbond
+// matured, the emergency recovery ran ReconcileZNHBSupplyDriftOnce, which
+// (correctly, given what it knew) topped adminAccount.BalanceZNHB back up
+// to match the pool sum -- but that repair predates PendingUnbonds being
+// part of the invariant's accounting, so it silently paid back this exact
+// entry's amount already. Confirmed directly against live chain state via
+// RPC before this was written: Stake=0, LockedZNHB=0, exactly one pending
+// unbond (ID 1, 10,000 ZNHB, self-delegated). If this entry were left in
+// place, CheckZNHBSupplyInvariant's corrected formula (which now includes
+// PendingUnbonds) would immediately double-count it and halt the chain;
+// if it were ever claimed via a normal StakeClaim transaction, the same
+// 10,000 ZNHB would be paid out a second time. Scoped to exact (ID, amount)
+// pairs rather than "clear every pending unbond on this account" so that
+// any pending unbond the admin wallet legitimately creates after this
+// deploys is never touched.
+type staleAdminPendingUnbondEntry struct {
+	ID     uint64
+	Amount *big.Int
+}
+
+var staleAdminPendingUnbondSeed = []staleAdminPendingUnbondEntry{
+	{ID: 1, Amount: func() *big.Int {
+		amount, ok := new(big.Int).SetString("10000000000000000000000", 10)
+		if !ok {
+			panic("staleAdminPendingUnbondSeed: invalid constant")
+		}
+		return amount
+	}()},
+}
+
+// ClearAdminStalePendingUnbondsOnce removes the specific, already-identified
+// stale PendingUnbonds entries listed in staleAdminPendingUnbondSeed from
+// the admin/treasury wallet's account, without crediting BalanceZNHB --
+// that credit already happened, via ReconcileZNHBSupplyDriftOnce (see
+// staleAdminPendingUnbondSeed's doc comment). Guarded by a persistent flag
+// so it runs at most once. Deliberately conservative: an entry is only
+// removed if it is still present with exactly the expected amount; if it is
+// missing (already claimed or already cleared some other way) or its
+// amount doesn't match exactly, it is left untouched and the discrepancy is
+// recorded in the emitted event for later investigation -- this function
+// must never guess. Must run before CheckZNHBSupplyInvariant (see
+// ProcessBlockLifecycle) so the corrected formula never sees this entry.
+func (sp *StateProcessor) ClearAdminStalePendingUnbondsOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	cleared, err := manager.ZNHBAdminStaleUnbondsCleared()
+	if err != nil {
+		return fmt.Errorf("znhb: check admin stale unbonds cleared flag: %w", err)
+	}
+	if cleared {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+
+	removedIDs := make([]string, 0, len(staleAdminPendingUnbondSeed))
+	skippedIDs := make([]string, 0, len(staleAdminPendingUnbondSeed))
+	for _, seed := range staleAdminPendingUnbondSeed {
+		index := -1
+		for i, unbond := range adminAccount.PendingUnbonds {
+			if unbond.ID == seed.ID {
+				index = i
+				break
+			}
+		}
+		if index == -1 {
+			// Already gone (e.g. already claimed) -- nothing to do, and
+			// nothing wrong either.
+			continue
+		}
+		found := adminAccount.PendingUnbonds[index]
+		if found.Amount == nil || seed.Amount == nil || found.Amount.Cmp(seed.Amount) != 0 {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ID))
+			continue
+		}
+		adminAccount.PendingUnbonds = append(adminAccount.PendingUnbonds[:index], adminAccount.PendingUnbonds[index+1:]...)
+		removedIDs = append(removedIDs, fmt.Sprintf("%d", seed.ID))
+	}
+
+	if len(removedIDs) > 0 {
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("znhb: persist admin stale unbonds cleanup: %w", err)
+		}
+	}
+	sp.AppendEvent(&types.Event{Type: "znhb.admin_stale_pending_unbonds_cleared", Attributes: map[string]string{
+		"removed_ids": strings.Join(removedIDs, ","),
+		"skipped_ids": strings.Join(skippedIDs, ","),
+	}})
+	return manager.ZNHBMarkAdminStaleUnbondsCleared()
+}
+
+// ReconcileAdminValidatorFundingDriftOnce is a scoped, one-time catch-up
+// repair for the 2026-09-09 chain halt: before the applyTransferZNHB fix
+// (see its own doc comment on the admin-wallet-as-sender branch) existed,
+// the admin/treasury wallet had already sent ZNHB out via an ordinary
+// transfer -- funding a new wallet's own validator self-stake, a real,
+// legitimate spend per docs/validators/onboarding.md's anyone-can-become-
+// a-validator flow -- with no matching decrease to the Sale/Reward Pool
+// sub-ledgers, which CheckZNHBSupplyInvariant also tracks. That drift was
+// already committed to chain state (confirmed live via RPC: sale pool +
+// reward pool exceeded admin-owned ZNHB by 10,000 ZNHB at height 439, the
+// same class of already-committed gap as the 2026-08-26 incident, see
+// ReconcileZNHBSupplyDriftOnce -- unlike the credit-side 2026-09-05
+// incident, where the offending transaction never actually committed).
+// Debits the Reward Pool sub-ledger by whatever the live drift is at the
+// moment this finally runs inside a successful block -- deliberately
+// general, not gated on an exact expected amount, mirroring
+// ReconcileZNHBSupplyDriftOnce's own approach: an earlier version of this
+// function required an exact match and marked itself done even when the
+// live drift (shifted slightly by ordinary reward flows in the meantime)
+// didn't match, silently disabling itself without ever correcting
+// anything. Guarded by a persistent flag so it still runs at most once;
+// never touches account state, only the pool accounting. Must run before
+// CheckZNHBSupplyInvariant (see core/epochs.go's ProcessBlockLifecycle).
+func (sp *StateProcessor) ReconcileAdminValidatorFundingDriftOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+	if err != nil {
+		return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+	}
+	if !bootstrapped {
+		return nil
+	}
+	reconciled, err := manager.ZNHBAdminValidatorFundingDriftReconciled()
+	if err != nil {
+		return fmt.Errorf("znhb: check validator funding drift reconciliation flag: %w", err)
+	}
+	if reconciled {
+		return nil
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin wallet: %w", err)
+	}
+	salePool, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load sale pool balance: %w", err)
+	}
+	rewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		return fmt.Errorf("znhb: load reward pool balance: %w", err)
+	}
+	sum := new(big.Int).Add(salePool, rewardPool)
+	govEscrow, err := manager.GovernanceEscrowBalance(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
+	}
+	adminOwned := adminZNHBOwned(adminAccount, govEscrow)
+
+	drift := new(big.Int).Sub(sum, adminOwned)
+	if drift.Sign() != 0 {
+		newRewardPool := new(big.Int).Sub(rewardPool, drift)
+		if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+			return fmt.Errorf("znhb: apply validator funding drift correction: %w", err)
+		}
+		sp.AppendEvent(&types.Event{Type: "znhb.admin_validator_funding_drift_reconciled", Attributes: map[string]string{
+			"drift":              drift.String(),
+			"reward_pool_before": rewardPool.String(),
+			"reward_pool_after":  newRewardPool.String(),
+		}})
+	}
+	return manager.ZNHBMarkAdminValidatorFundingDriftReconciled()
+}
+
+type staleRejectedGovernanceDepositEntry struct {
+	ProposalID      uint64
+	ExpectedDeposit *big.Int
+}
+
+var staleRejectedGovernanceDepositSeed = []staleRejectedGovernanceDepositEntry{
+	{ProposalID: 2, ExpectedDeposit: func() *big.Int {
+		amount, ok := new(big.Int).SetString("1000000000000000000000", 10)
+		if !ok {
+			panic("staleRejectedGovernanceDepositSeed: invalid constant")
+		}
+		return amount
+	}()},
+}
+
+// SweepStaleRejectedGovernanceDepositsOnce sweeps the specific,
+// already-identified rejected proposals' forfeited deposits listed in
+// staleRejectedGovernanceDepositSeed to the admin/treasury wallet. These
+// predate native/governance/engine.go's Finalize fix, which now performs
+// this sweep automatically for every proposal rejected from here on --
+// GovernanceEscrowLock (SubmitProposal) had exactly one matching unlock
+// call site before that fix (the Passed-branch refund), so a proposal
+// rejected before the fix deployed was never refunded NOR swept anywhere,
+// and just sat permanently locked in its submitter's own escrow ledger
+// entry. Confirmed live on 2026-09-05: proposal 2, rejected for lack of
+// quorum, forfeited 1000 ZNHB with no destination at all. Guarded by a
+// persistent flag so it runs at most once. Deliberately conservative,
+// mirroring ClearAdminStalePendingUnbondsOnce: an entry is only swept if
+// the proposal is still Rejected with its Deposit still exactly the
+// expected amount; if either doesn't match (already resolved some other
+// way) it is left untouched and the discrepancy is recorded in the
+// emitted event for later investigation -- this function must never
+// guess. Must run before CheckZNHBSupplyInvariant (see
+// ProcessBlockLifecycle) so the corrected formula never sees stale state.
+func (sp *StateProcessor) SweepStaleRejectedGovernanceDepositsOnce() error {
+	if !sp.hasAdminWallet {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	swept, err := manager.GovStaleRejectedDepositsSwept()
+	if err != nil {
+		return fmt.Errorf("gov: check stale rejected deposits swept flag: %w", err)
+	}
+	if swept {
+		return nil
+	}
+
+	sweptIDs := make([]string, 0, len(staleRejectedGovernanceDepositSeed))
+	skippedIDs := make([]string, 0, len(staleRejectedGovernanceDepositSeed))
+	for _, seed := range staleRejectedGovernanceDepositSeed {
+		proposal, ok, err := manager.GovernanceGetProposal(seed.ProposalID)
+		if err != nil {
+			return fmt.Errorf("gov: load proposal %d: %w", seed.ProposalID, err)
+		}
+		if !ok || proposal == nil {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+		if proposal.Status != governance.ProposalStatusRejected {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+		if proposal.Deposit == nil || seed.ExpectedDeposit == nil || proposal.Deposit.Cmp(seed.ExpectedDeposit) != 0 {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+
+		submitter := append([]byte(nil), proposal.Submitter.Bytes()...)
+		if len(submitter) != 20 {
+			skippedIDs = append(skippedIDs, fmt.Sprintf("%d", seed.ProposalID))
+			continue
+		}
+
+		adminAccount, err := sp.getAccount(sp.adminWallet[:])
+		if err != nil {
+			return fmt.Errorf("gov: load admin wallet: %w", err)
+		}
+		if adminAccount.BalanceZNHB == nil {
+			adminAccount.BalanceZNHB = big.NewInt(0)
+		}
+		adminAccount.BalanceZNHB = new(big.Int).Add(adminAccount.BalanceZNHB, proposal.Deposit)
+		if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+			return fmt.Errorf("gov: persist admin wallet credit: %w", err)
+		}
+
+		// Same rationale as native/governance/engine.go's Finalize sweep:
+		// if the admin wallet forfeited its OWN deposit, adminZNHBOwned
+		// already counts it via GovernanceEscrowBalance, so crediting the
+		// Reward Pool too would double-count it. Only a third party's
+		// forfeited deposit is genuinely new ZNHB landing on the admin
+		// wallet from outside the Sale/Reward Pool ledger.
+		if !bytes.Equal(submitter, sp.adminWallet[:]) {
+			rewardPool, err := manager.ZNHBRewardPoolBalance()
+			if err != nil {
+				return fmt.Errorf("gov: load reward pool balance: %w", err)
+			}
+			newRewardPool := new(big.Int).Add(rewardPool, proposal.Deposit)
+			if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+				return fmt.Errorf("gov: update reward pool balance: %w", err)
+			}
+		}
+
+		if _, err := manager.GovernanceEscrowUnlock(submitter, proposal.Deposit); err != nil {
+			return fmt.Errorf("gov: unlock stale escrow for proposal %d: %w", seed.ProposalID, err)
+		}
+		proposal.Deposit = big.NewInt(0)
+		if err := manager.GovernancePutProposal(proposal); err != nil {
+			return fmt.Errorf("gov: persist swept proposal %d: %w", seed.ProposalID, err)
+		}
+		sweptIDs = append(sweptIDs, fmt.Sprintf("%d", seed.ProposalID))
+	}
+
+	sp.AppendEvent(&types.Event{Type: "gov.stale_rejected_deposits_swept", Attributes: map[string]string{
+		"swept_ids":   strings.Join(sweptIDs, ","),
+		"skipped_ids": strings.Join(skippedIDs, ","),
+	}})
+	return manager.GovMarkStaleRejectedDepositsSwept()
+}
+
+// BeginBlock records the execution context for the block currently being applied.
+func (sp *StateProcessor) BeginBlock(height uint64, timestamp time.Time) {
+	if sp == nil {
+		return
+	}
+	sp.execContext = &blockExecutionContext{
+		height:    height,
+		timestamp: timestamp.UTC(),
+	}
+	sp.blockCtx.PendingRewards.ClearPendingRewards()
+}
+
+// FinalizeBlock applies end-of-block state transitions that must be included in
+// the canonical state root before a block is sealed or committed.
+func (sp *StateProcessor) FinalizeBlock() {
+	if sp == nil {
+		return
+	}
+	now := sp.blockTimestamp()
+	_, _ = sp.SweepExpiredPOSAuthorizations(now)
+	sp.EndBlockRewards(now)
+}
+
+// EndBlock clears any active block execution context.
+func (sp *StateProcessor) EndBlock() {
+	if sp == nil {
+		return
+	}
+	sp.execContext = nil
+}
+
+// EndBlockRewards settles any base loyalty rewards that were queued during the
+// block execution. When the daily budget is exceeded payouts are pro-rated to
+// preserve the configured cap.
+func (sp *StateProcessor) EndBlockRewards(now time.Time) {
+	if sp == nil {
+		return
+	}
+	pending := sp.blockCtx.PendingRewards
+	if len(pending) == 0 {
+		return
+	}
+	if now.IsZero() {
+		now = sp.blockTimestamp()
+	}
+
+	demand := pending.SumPending()
+	if demand == nil || demand.Sign() <= 0 {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if _, err := manager.AddProposedTodayZNHB(now, demand); err != nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
+	if err != nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	if fallback != nil {
+		if metrics := observability.Loyalty(); metrics != nil {
+			metrics.RecordGuardFallback(fallback.Strategy)
+		}
+		evt := (events.LoyaltyPriceFallback{Strategy: fallback.Strategy, Base: fallback.Base, BudgetZNHB: fallback.BudgetZNHB}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
+	ratioNum := big.NewInt(1)
+	ratioDen := big.NewInt(1)
+	if demand.Sign() > 0 && budget.Cmp(demand) < 0 {
+		if budget.Sign() <= 0 {
+			ratioNum = big.NewInt(0)
+			ratioDen = big.NewInt(1)
+		} else {
+			ratioNum = new(big.Int).Set(budget)
+			ratioDen = new(big.Int).Set(demand)
+		}
+	}
+
+	cfg, err := manager.LoyaltyGlobalConfig()
+	if err != nil || cfg == nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+	normalized := cfg.Clone().Normalize()
+	if len(normalized.Treasury) != 20 {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+
+	treasuryAcc, err := sp.getAccount(normalized.Treasury)
+	if err != nil {
+		sp.blockCtx.PendingRewards.ClearPendingRewards()
+		return
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+	var treasuryAddr [20]byte
+	copy(treasuryAddr[:], normalized.Treasury)
+
+	updates := make(map[[20]byte]*types.Account)
+	budgetRemaining := new(big.Int).Set(budget)
+	paidTotal := big.NewInt(0)
+
+	for _, reward := range pending {
+		if reward.AmountZNHB == nil || reward.AmountZNHB.Sign() <= 0 {
+			continue
+		}
+		if ratioNum.Sign() == 0 {
+			break
+		}
+		amount := new(big.Int).Set(reward.AmountZNHB)
+		payout := new(big.Int).Mul(amount, ratioNum)
+		payout.Quo(payout, ratioDen)
+		if payout.Sign() <= 0 {
+			continue
+		}
+		if budgetRemaining.Sign() > 0 && budgetRemaining.Cmp(payout) < 0 {
+			payout = new(big.Int).Set(budgetRemaining)
+		}
+		if payout.Sign() <= 0 {
+			continue
+		}
+		if treasuryAcc.BalanceZNHB.Cmp(payout) < 0 {
+			payout = new(big.Int).Set(treasuryAcc.BalanceZNHB)
+		}
+		if payout.Sign() <= 0 {
+			continue
+		}
+
+		var recipient [20]byte
+		copy(recipient[:], reward.Recipient[:])
+		account, ok := updates[recipient]
+		if !ok {
+			acct, err := sp.getAccount(recipient[:])
+			if err != nil {
+				continue
+			}
+			if acct.BalanceZNHB == nil {
+				acct.BalanceZNHB = big.NewInt(0)
+			}
+			account = acct
+			updates[recipient] = account
+		}
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, payout)
+		treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, payout)
+		budgetRemaining.Sub(budgetRemaining, payout)
+		paidTotal.Add(paidTotal, payout)
+		if budgetRemaining.Sign() <= 0 {
+			break
+		}
+	}
+
+	var paidTodayTotal *big.Int
+	if paidTotal.Sign() > 0 {
+		if err := sp.setAccount(treasuryAddr[:], treasuryAcc); err != nil {
+			sp.blockCtx.PendingRewards.ClearPendingRewards()
+			return
+		}
+		for addr, account := range updates {
+			if err := sp.setAccount(addr[:], account); err != nil {
+				sp.blockCtx.PendingRewards.ClearPendingRewards()
+				return
+			}
+		}
+		paidTodayTotal, err = manager.AddPaidTodayZNHB(now, paidTotal)
+		if err != nil {
+			sp.blockCtx.PendingRewards.ClearPendingRewards()
+			return
+		}
+	} else {
+		paidTodayTotal, _ = manager.AddPaidTodayZNHB(now, big.NewInt(0))
+	}
+
+	ratioEvent := ratioNum.Cmp(ratioDen) < 0
+	ratioFP := big.NewInt(0)
+	if ratioDen.Sign() > 0 {
+		ratioFP = new(big.Int).Mul(new(big.Int).Set(ratioNum), big.NewInt(events.LoyaltyProrationScale))
+		ratioFP.Quo(ratioFP, ratioDen)
+	}
+
+	if metrics := observability.Loyalty(); metrics != nil {
+		metrics.RecordBudget(
+			ratioToFloat(budget),
+			ratioToFloat(demand),
+			ratioToFloatFromFrac(ratioNum, ratioDen),
+			ratioToFloat(paidTodayTotal),
+		)
+	}
+
+	if ratioEvent {
+		evt := (events.LoyaltyBudgetProRated{
+			Day:        now.UTC().Format("2006-01-02"),
+			BudgetZNHB: budget,
+			DemandZNHB: demand,
+			RatioFP:    ratioFP,
+		}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
+	sp.blockCtx.PendingRewards.ClearPendingRewards()
+}
+
+// SweepExpiredPOSAuthorizations voids pending POS authorizations that have
+// crossed their expiry timestamp and returns the number of records affected.
+func (sp *StateProcessor) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
+	if sp == nil {
+		return 0, fmt.Errorf("state processor unavailable")
+	}
+	if sp.Trie == nil {
+		return 0, fmt.Errorf("state trie unavailable")
+	}
+	if now.IsZero() {
+		now = sp.blockTimestamp()
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	lifecycle := pos.NewLifecycle(manager)
+	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
+	lifecycle.SetNowFunc(func() time.Time { return now.UTC() })
+	expired, err := lifecycle.SweepExpired(now)
+	if err != nil {
+		return 0, err
+	}
+	count := len(expired)
+	if count == 0 {
+		return 0, nil
+	}
+	if metrics := observability.POSLifecycle(); metrics != nil {
+		for range expired {
+			metrics.RecordAuthExpired()
+		}
+	}
+	return count, nil
+}
+
+func ratioToFloat(value *big.Int) float64 {
+	if value == nil {
+		return 0
+	}
+	f, _ := new(big.Rat).SetInt(value).Float64()
+	return f
+}
+
+func ratioToFloatFromFrac(num, den *big.Int) float64 {
+	if num == nil || den == nil || den.Sign() == 0 {
+		return 0
+	}
+	f, _ := new(big.Rat).SetFrac(num, den).Float64()
+	return f
+}
+
+func (sp *StateProcessor) blockTimestamp() time.Time {
+	if sp != nil && sp.execContext != nil {
+		return sp.execContext.timestamp
+	}
+	return sp.now().UTC()
+}
+
+func (sp *StateProcessor) blockHeight() uint64 {
+	if sp != nil && sp.execContext != nil {
+		return sp.execContext.height
+	}
+	return 0
+}
+
+// BlockContext returns the mutable per-block context, primarily intended for
+// testing.
+func (sp *StateProcessor) BlockContext() *BlockCtx {
+	if sp == nil {
+		return nil
+	}
+	return &sp.blockCtx
+}
+
+// EngagementConfig returns the configuration currently used for engagement
+// scoring.
+func (sp *StateProcessor) EngagementConfig() engagement.Config {
+	return sp.engagementConfig
+}
+
+// SetEngagementConfig replaces the engagement configuration. Callers must
+// ensure the new configuration is valid network wide.
+func (sp *StateProcessor) SetEngagementConfig(cfg engagement.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.engagementConfig = cfg
+	return nil
+}
+
+// EpochConfig returns the active epoch configuration.
+func (sp *StateProcessor) EpochConfig() epoch.Config {
+	return sp.epochConfig
+}
+
+// SetEpochConfig replaces the epoch configuration after validation.
+func (sp *StateProcessor) SetEpochConfig(cfg epoch.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.epochConfig = cfg
+	sp.pruneEpochHistory()
+	return nil
+}
+
+// RewardConfig returns the current reward emission configuration.
+func (sp *StateProcessor) RewardConfig() rewards.Config {
+	return sp.rewardConfig.Clone()
+}
+
+// SetRewardConfig updates the reward configuration after validation.
+func (sp *StateProcessor) SetRewardConfig(cfg rewards.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.rewardConfig = cfg.Clone()
+	sp.rewardAccrual = nil
+	sp.pruneRewardHistory()
+	return sp.persistRewardHistory()
+}
+
+// PotsoRewardConfig returns the current POTSO reward configuration snapshot.
+func (sp *StateProcessor) PotsoRewardConfig() potso.RewardConfig {
+	return clonePotsoRewardConfig(sp.potsoRewardConfig)
+}
+
+// SetPotsoRewardConfig replaces the POTSO reward distribution configuration.
+func (sp *StateProcessor) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.potsoRewardConfig = clonePotsoRewardConfig(cfg)
+	return nil
+}
+
+func clonePotsoRewardConfig(cfg potso.RewardConfig) potso.RewardConfig {
+	clone := cfg
+	if cfg.MinPayoutWei != nil {
+		clone.MinPayoutWei = new(big.Int).Set(cfg.MinPayoutWei)
+	}
+	if cfg.EmissionPerEpoch != nil {
+		clone.EmissionPerEpoch = new(big.Int).Set(cfg.EmissionPerEpoch)
+	}
+	return clone
+}
+
+// PotsoWeightConfig returns the current POTSO weight configuration snapshot.
+func (sp *StateProcessor) PotsoWeightConfig() potso.WeightParams {
+	return clonePotsoWeightConfig(sp.potsoWeightConfig)
+}
+
+// SetPotsoWeightConfig replaces the POTSO weight configuration.
+func (sp *StateProcessor) SetPotsoWeightConfig(cfg potso.WeightParams) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	sp.potsoWeightConfig = clonePotsoWeightConfig(cfg)
+	return nil
+}
+
+func clonePotsoWeightConfig(cfg potso.WeightParams) potso.WeightParams {
+	clone := cfg
+	if cfg.MinStakeToWinWei != nil {
+		clone.MinStakeToWinWei = new(big.Int).Set(cfg.MinStakeToWinWei)
+	} else {
+		clone.MinStakeToWinWei = big.NewInt(0)
+	}
+	if cfg.MinStakeToEarnWei != nil {
+		clone.MinStakeToEarnWei = new(big.Int).Set(cfg.MinStakeToEarnWei)
+	} else {
+		clone.MinStakeToEarnWei = big.NewInt(0)
+	}
+	return clone
+}
+
+func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int64) error {
+	cfg := sp.potsoRewardConfig
+	if cfg.EpochLengthBlocks == 0 {
+		return nil
+	}
+	if cfg.EmissionPerEpoch == nil || cfg.EmissionPerEpoch.Sign() <= 0 {
+		return nil
+	}
+	currentEpoch := height / cfg.EpochLengthBlocks
+	if currentEpoch == 0 {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	lastProcessed, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
+		return err
+	}
+	target := currentEpoch - 1
+	start := uint64(0)
+	if ok {
+		if lastProcessed >= target {
+			return nil
+		}
+		start = lastProcessed + 1
+	}
+	if start > target {
+		return nil
+	}
+	// day is derived from the CALL-TIME timestamp (i.e. whenever this backlog
+	// happens to be processed), not from the epoch's own blocks -- it is
+	// therefore cosmetic-only from here down: a label on the stored
+	// snapshot/meta for human/audit purposes, never a decision input for
+	// participant selection or engagement values. See processPotsoRewardEpoch.
+	day := time.Unix(timestamp, 0).UTC().Format(potso.DayFormat)
+	for epochNumber := start; epochNumber <= target; epochNumber++ {
+		if err := sp.processPotsoRewardEpoch(manager, cfg, epochNumber, day, timestamp); err != nil {
+			return err
+		}
+		if err := manager.PotsoRewardsSetLastProcessedEpoch(epochNumber); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg potso.RewardConfig, epochNumber uint64, day string, settledAt int64) error {
+	if manager == nil {
+		return fmt.Errorf("potso: state manager unavailable")
+	}
+	if _, exists, err := manager.PotsoRewardsGetMeta(epochNumber); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+
+	stakeOwners, err := manager.PotsoStakeOwners()
+	if err != nil {
+		return err
+	}
+	stakeTotals := make(map[[20]byte]*big.Int, len(stakeOwners))
+	for _, owner := range stakeOwners {
+		amount, err := manager.PotsoStakeBondedTotal(owner)
+		if err != nil {
+			return err
+		}
+		if amount == nil || amount.Sign() <= 0 {
+			continue
+		}
+		stakeTotals[owner] = new(big.Int).Set(amount)
+	}
+
+	// Item 3: registered validators (core/epochs.go's EligibleValidators,
+	// gated by ValidatorRegistered + own-basis >= minimumValidatorStake(),
+	// see setAccount) are instant, automatic governance voting members with
+	// no separate registration/threshold, per product decision.
+	// EligibleValidators' map VALUE is already exactly the own-basis
+	// amount (setAccount stores it that way), so it can be added with no
+	// further computation. Additive, not a replacement: POTSO stake-lock
+	// (TxTypePotsoStakeLock) and validator self-stake are two genuinely
+	// different pools of locked capital for the same address, both real
+	// skin-in-the-game, so both should count toward composite weight.
+	for addrKey, basis := range sp.EligibleValidators {
+		if len(addrKey) != 20 || basis == nil || basis.Sign() <= 0 {
+			continue
+		}
+		var key [20]byte
+		copy(key[:], addrKey)
+		if existing, ok := stakeTotals[key]; ok && existing != nil {
+			stakeTotals[key] = new(big.Int).Add(existing, basis)
+		} else {
+			stakeTotals[key] = new(big.Int).Set(basis)
+		}
+	}
+
+	// Participants are read from the epoch-keyed index (populated in
+	// real-time by updatePotsoActivity/PotsoHeartbeat), NOT the day-keyed
+	// index, so that reprocessing this exact epochNumber later -- e.g. a
+	// delayed/backlogged retry that lands on a different UTC calendar day --
+	// always sees the same participant set. `day` is retained only as a
+	// cosmetic label on the stored snapshot/meta below.
+	participants, err := manager.PotsoMetricsListParticipants(epochNumber)
+	if err != nil {
+		return err
+	}
+
+	prevEngagement := make(map[[20]byte]uint64)
+	if epochNumber > 0 {
+		if stored, ok, err := manager.PotsoMetricsGetSnapshot(epochNumber - 1); err != nil {
+			return err
+		} else if ok && stored != nil {
+			for _, entry := range stored.Entries {
+				prevEngagement[entry.Address] = entry.Engagement
+			}
+		}
+	}
+
+	addressSet := make(map[[20]byte]struct{})
+	for owner := range stakeTotals {
+		addressSet[owner] = struct{}{}
+	}
+	for _, addr := range participants {
+		addressSet[addr] = struct{}{}
+	}
+	for addr := range prevEngagement {
+		addressSet[addr] = struct{}{}
+	}
+
+	addresses := make([][20]byte, 0, len(addressSet))
+	for addr := range addressSet {
+		addresses = append(addresses, addr)
+	}
+	sort.Slice(addresses, func(i, j int) bool {
+		return bytes.Compare(addresses[i][:], addresses[j][:]) < 0
+	})
+
+	entries := make([]potso.RewardSnapshotEntry, 0, len(addresses))
+	for _, addr := range addresses {
+		// Pure read: the epoch-keyed meter was already fully accumulated in
+		// real time by updatePotsoActivity/PotsoHeartbeat as the epoch's
+		// blocks were applied, so there is nothing left to write back here.
+		// UptimeDevices is derived from the raw UptimeSeconds accumulator at
+		// this single consumption point (see EngagementMeter's doc comment).
+		engagementMeter, _, err := manager.PotsoMetricsGetMeter(epochNumber, addr)
+		if err != nil {
+			return err
+		}
+		if engagementMeter == nil {
+			engagementMeter = &potso.EngagementMeter{}
+		}
+		engagementMeter.UptimeDevices = engagementMeter.UptimeSeconds / 60
+		stake := big.NewInt(0)
+		if value, ok := stakeTotals[addr]; ok && value != nil {
+			stake = new(big.Int).Set(value)
+		}
+		prev := prevEngagement[addr]
+		entries = append(entries, potso.RewardSnapshotEntry{
+			Address:            addr,
+			Stake:              stake,
+			Meter:              *engagementMeter,
+			PreviousEngagement: prev,
+		})
+	}
+
+	snapshot := potso.RewardSnapshot{
+		Epoch:   epochNumber,
+		Day:     potso.NormaliseDay(day),
+		Entries: entries,
+	}
+
+	emission := big.NewInt(0)
+	if cfg.EmissionPerEpoch != nil {
+		emission = new(big.Int).Set(cfg.EmissionPerEpoch)
+	}
+	treasuryAcc, err := manager.GetAccount(cfg.TreasuryAddress[:])
+	if err != nil {
+		return err
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+	treasuryBalance := new(big.Int).Set(treasuryAcc.BalanceZNHB)
+	budget := new(big.Int).Set(emission)
+	if treasuryBalance.Cmp(budget) < 0 {
+		budget = new(big.Int).Set(treasuryBalance)
+	}
+
+	weightCfg := sp.potsoWeightConfig
+	weightCfg.AlphaStakeBps = cfg.AlphaStakeBps
+	outcome, err := potso.ComputeRewards(cfg, weightCfg, snapshot, budget)
+	if err != nil {
+		return err
+	}
+
+	if outcome.WeightSnapshot != nil {
+		stored := outcome.WeightSnapshot.ToStored()
+		if err := manager.PotsoMetricsSetSnapshot(epochNumber, stored); err != nil {
+			return err
+		}
+		// Governance (CastVote) reads voting power from this key, keyed by
+		// the exact same epoch number PotsoRewardsSetLastProcessedEpoch
+		// records below. Without this write, every proposal is permanently
+		// stuck at the voting stage with "potso snapshot unavailable" --
+		// see docs/nhbgtm2026.md's governance-voting root-cause writeup.
+		if err := manager.SetSnapshotPotsoWeights(epochNumber, stored); err != nil {
+			return err
+		}
+	}
+
+	winnersAddrs := make([][20]byte, 0, len(outcome.Winners))
+	for _, winner := range outcome.Winners {
+		winnersAddrs = append(winnersAddrs, winner.Address)
+	}
+
+	payoutMode := cfg.EffectivePayoutMode()
+	totalPaid := new(big.Int).Set(outcome.TotalPaid)
+	for _, winner := range outcome.Winners {
+		if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
+			return err
+		}
+	}
+	if totalPaid.Sign() > 0 && treasuryBalance.Cmp(totalPaid) < 0 {
+		return potso.ErrInsufficientTreasury
+	}
+	switch payoutMode {
+	case potso.RewardPayoutModeClaim:
+		for _, winner := range outcome.Winners {
+			claim := &potso.RewardClaim{
+				Amount:    new(big.Int).Set(winner.Amount),
+				Claimed:   false,
+				ClaimedAt: 0,
+				Mode:      potso.RewardPayoutModeClaim,
+			}
+			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+				return err
+			}
+			if winner.Amount.Sign() > 0 {
+				if evt := (events.PotsoRewardReady{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeClaim}).Event(); evt != nil {
+					sp.AppendEvent(evt)
+				}
+			}
+		}
+	default:
+		if totalPaid.Sign() > 0 {
+			treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+			if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+				return err
+			}
+			// POTSO's reward treasury commonly points at the same
+			// admin/treasury wallet the ZNHB Reward Pool ledger backs (see
+			// CheckZNHBSupplyInvariant). Debiting that wallet's balance
+			// above without also shrinking the pool label it backs mints
+			// ZNHB from nothing in the invariant's eyes -- mirrors the
+			// identical fix already applied to settleEpochRewards for the
+			// halving-schedule payout path.
+			if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
+				selfPaid := big.NewInt(0)
+				for _, winner := range outcome.Winners {
+					if bytes.Equal(winner.Address[:], sp.adminWallet[:]) {
+						selfPaid.Add(selfPaid, winner.Amount)
+					}
+				}
+				externalPaid := new(big.Int).Sub(totalPaid, selfPaid)
+				if externalPaid.Sign() > 0 {
+					rewardPool, err := manager.ZNHBRewardPoolBalance()
+					if err != nil {
+						return err
+					}
+					newRewardPool := new(big.Int).Sub(rewardPool, externalPaid)
+					if newRewardPool.Sign() < 0 {
+						// Unreachable in practice (the pool dwarfs any single
+						// POTSO epoch's emission), but never let the ledger
+						// go negative regardless of formula/rounding edges.
+						newRewardPool = big.NewInt(0)
+					}
+					if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		for _, winner := range outcome.Winners {
+			if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
+				account, err := manager.GetAccount(winner.Address[:])
+				if err != nil {
+					return err
+				}
+				if account.BalanceZNHB == nil {
+					account.BalanceZNHB = big.NewInt(0)
+				}
+				account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
+				if err := manager.PutAccount(winner.Address[:], account); err != nil {
+					return err
+				}
+			}
+			claim := &potso.RewardClaim{
+				Amount:    new(big.Int).Set(winner.Amount),
+				Claimed:   winner.Amount.Sign() <= 0 || totalPaid.Sign() > 0,
+				ClaimedAt: uint64(settledAt),
+				Mode:      potso.RewardPayoutModeAuto,
+			}
+			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+				return err
+			}
+			if winner.Amount.Sign() > 0 && totalPaid.Sign() > 0 {
+				if err := manager.PotsoRewardsAppendHistory(winner.Address, potso.RewardHistoryEntry{Epoch: epochNumber, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}); err != nil {
+					return err
+				}
+				if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}).Event(); evt != nil {
+					sp.AppendEvent(evt)
+				}
+			}
+		}
+	}
+
+	if err := manager.PotsoRewardsSetWinners(epochNumber, winnersAddrs); err != nil {
+		return err
+	}
+
+	stakeTotal := big.NewInt(0)
+	engagementTotal := big.NewInt(0)
+	if outcome.WeightSnapshot != nil {
+		if outcome.WeightSnapshot.TotalStake != nil {
+			stakeTotal = new(big.Int).Set(outcome.WeightSnapshot.TotalStake)
+		}
+		engagementTotal = new(big.Int).SetUint64(outcome.WeightSnapshot.TotalEngagement)
+	}
+
+	meta := &potso.RewardEpochMeta{
+		Epoch:           epochNumber,
+		Day:             snapshot.Day,
+		StakeTotal:      stakeTotal,
+		EngagementTotal: engagementTotal,
+		AlphaBps:        cfg.AlphaStakeBps,
+		Emission:        new(big.Int).Set(emission),
+		Budget:          new(big.Int).Set(outcome.Budget),
+		TotalPaid:       new(big.Int).Set(outcome.TotalPaid),
+		Remainder:       new(big.Int).Set(outcome.Remainder),
+		Winners:         uint64(len(outcome.Winners)),
+	}
+	if err := manager.PotsoRewardsSetMeta(epochNumber, meta); err != nil {
+		return err
+	}
+
+	if evt := (events.PotsoRewardEpoch{
+		Epoch:     epochNumber,
+		TotalPaid: new(big.Int).Set(outcome.TotalPaid),
+		Winners:   uint64(len(outcome.Winners)),
+		Emission:  new(big.Int).Set(emission),
+		Budget:    new(big.Int).Set(outcome.Budget),
+		Remainder: new(big.Int).Set(outcome.Remainder),
+	}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+// CurrentRoot returns the last committed state root.
+func (sp *StateProcessor) CurrentRoot() common.Hash {
+	return sp.committedRoot
+}
+
+// PendingRoot returns the root of the trie including in-memory mutations.
+func (sp *StateProcessor) PendingRoot() common.Hash {
+	return sp.Trie.Hash()
+}
+
+// ResetToRoot discards any in-memory changes and reloads the trie at the
+// provided root hash.
+func (sp *StateProcessor) ResetToRoot(root common.Hash) error {
+	if err := sp.Trie.Reset(root); err != nil {
+		return err
+	}
+	sp.committedRoot = root
+	return nil
+}
+
+// Commit persists the current trie contents and returns the resulting state
+// root.
+func (sp *StateProcessor) Commit(blockNumber uint64) (common.Hash, error) {
+	newRoot, err := sp.Trie.Commit(sp.committedRoot, blockNumber)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	sp.committedRoot = newRoot
+	return newRoot, nil
+}
+
+// Copy returns a shallow clone of the state processor that can be used for
+// speculative execution without mutating the canonical state.
+func (sp *StateProcessor) Copy() (*StateProcessor, error) {
+	trieCopy, err := sp.Trie.Copy()
+	if err != nil {
+		return nil, err
+	}
+	usernameCopy := make(map[string][]byte, len(sp.usernameToAddr))
+	for k, v := range sp.usernameToAddr {
+		usernameCopy[k] = append([]byte(nil), v...)
+	}
+	validatorCopy := make(map[string]*big.Int, len(sp.ValidatorSet))
+	for k, v := range sp.ValidatorSet {
+		validatorCopy[k] = new(big.Int).Set(v)
+	}
+	eligibleCopy := make(map[string]*big.Int, len(sp.EligibleValidators))
+	for k, v := range sp.EligibleValidators {
+		eligibleCopy[k] = new(big.Int).Set(v)
+	}
+	eventsCopy := make([]types.Event, len(sp.events))
+	for i := range sp.events {
+		attrs := make(map[string]string, len(sp.events[i].Attributes))
+		for k, v := range sp.events[i].Attributes {
+			attrs[k] = v
+		}
+		eventsCopy[i] = types.Event{Type: sp.events[i].Type, Attributes: attrs}
+	}
+	historyCopy := make([]epoch.Snapshot, len(sp.epochHistory))
+	for i := range sp.epochHistory {
+		snapshot := sp.epochHistory[i]
+		totalWeight := big.NewInt(0)
+		if snapshot.TotalWeight != nil {
+			totalWeight = new(big.Int).Set(snapshot.TotalWeight)
+		}
+		copied := epoch.Snapshot{
+			Epoch:       snapshot.Epoch,
+			Height:      snapshot.Height,
+			FinalizedAt: snapshot.FinalizedAt,
+			TotalWeight: totalWeight,
+			Weights:     make([]epoch.Weight, len(snapshot.Weights)),
+			Selected:    make([][]byte, len(snapshot.Selected)),
+		}
+		for j := range snapshot.Weights {
+			stake := big.NewInt(0)
+			if snapshot.Weights[j].Stake != nil {
+				stake = new(big.Int).Set(snapshot.Weights[j].Stake)
+			}
+			composite := big.NewInt(0)
+			if snapshot.Weights[j].Composite != nil {
+				composite = new(big.Int).Set(snapshot.Weights[j].Composite)
+			}
+			copied.Weights[j] = epoch.Weight{
+				Address:    append([]byte(nil), snapshot.Weights[j].Address...),
+				Stake:      stake,
+				Engagement: snapshot.Weights[j].Engagement,
+				Composite:  composite,
+			}
+		}
+		for j := range snapshot.Selected {
+			copied.Selected[j] = append([]byte(nil), snapshot.Selected[j]...)
+		}
+		historyCopy[i] = copied
+	}
+
+	rewardHistoryCopy := make([]rewards.EpochSettlement, len(sp.rewardHistory))
+	for i := range sp.rewardHistory {
+		rewardHistoryCopy[i] = sp.rewardHistory[i].Clone()
+	}
+
+	var quotaCopy map[string]nativecommon.Quota
+	if len(sp.quotaConfig) > 0 {
+		quotaCopy = make(map[string]nativecommon.Quota, len(sp.quotaConfig))
+		for module, quota := range sp.quotaConfig {
+			quotaCopy[module] = quota
+		}
+	}
+
+	var payoutAuthCopy map[string]struct{}
+	if len(sp.swapPayoutAuthorities) > 0 {
+		payoutAuthCopy = make(map[string]struct{}, len(sp.swapPayoutAuthorities))
+		for authority := range sp.swapPayoutAuthorities {
+			payoutAuthCopy[authority] = struct{}{}
+		}
+	}
+
+	var clonedEngine *rewards.Engine
+	if sp.stakeRewardEngine != nil {
+		clonedEngine = sp.stakeRewardEngine.Clone()
+	}
+
+	var pendingRWCopy nhbstate.PendingRewards
+	if len(sp.blockCtx.PendingRewards) > 0 {
+		pendingRWCopy = make(nhbstate.PendingRewards, len(sp.blockCtx.PendingRewards))
+		for i := range sp.blockCtx.PendingRewards {
+			pendingRWCopy[i] = sp.blockCtx.PendingRewards[i]
+			if pendingRWCopy[i].AmountZNHB != nil {
+				pendingRWCopy[i].AmountZNHB = new(big.Int).Set(pendingRWCopy[i].AmountZNHB)
+			}
+		}
+	}
+	blockCtxCopy := BlockCtx{
+		PendingRewards: pendingRWCopy,
+	}
+
+	return &StateProcessor{
+		Trie:                       trieCopy,
+		stateDB:                    sp.stateDB,
+		LoyaltyEngine:              sp.LoyaltyEngine,
+		EscrowEngine:               sp.EscrowEngine,
+		TradeEngine:                sp.TradeEngine,
+		pauses:                     sp.pauses,
+		escrowFeeTreasury:          sp.escrowFeeTreasury,
+		usernameToAddr:             usernameCopy,
+		ValidatorSet:               validatorCopy,
+		EligibleValidators:         eligibleCopy,
+		committedRoot:              sp.committedRoot,
+		events:                     eventsCopy,
+		nowFunc:                    sp.nowFunc,
+		engagementConfig:           sp.engagementConfig,
+		epochConfig:                sp.epochConfig,
+		epochHistory:               historyCopy,
+		rewardConfig:               sp.rewardConfig.Clone(),
+		rewardAccrual:              cloneRewardAccumulator(sp.rewardAccrual),
+		rewardHistory:              rewardHistoryCopy,
+		stakeRewardEngine:          clonedEngine,
+		stakeRewardAPR:             sp.stakeRewardAPR,
+		stakeRewardPersistOverride: sp.stakeRewardPersistOverride,
+		potsoRewardConfig:          clonePotsoRewardConfig(sp.potsoRewardConfig),
+		potsoWeightConfig:          clonePotsoWeightConfig(sp.potsoWeightConfig),
+		paymasterEnabled:           sp.paymasterEnabled,
+		paymasterLimits:            sp.paymasterLimits.Clone(),
+		paymasterTopUp:             sp.paymasterTopUp.Clone(),
+		quotaConfig:                quotaCopy,
+		intentTTL:                  sp.intentTTL,
+		feePolicy:                  sp.feePolicy.Clone(),
+		transferGasPolicy:          sp.transferGasPolicy.Clone(),
+		lendingParams:              cloneLendingRiskParameters(sp.lendingParams),
+		lendingModuleAddr:          cloneAddress(sp.lendingModuleAddr),
+		lendingCollateralAddr:      cloneAddress(sp.lendingCollateralAddr),
+		lendingDeveloperFeeBps:     sp.lendingDeveloperFeeBps,
+		lendingDeveloperCollector:  cloneAddress(sp.lendingDeveloperCollector),
+		lendingInterestModel:       cloneLendingInterestModel(sp.lendingInterestModel),
+		lendingReserveFactorBps:    sp.lendingReserveFactorBps,
+		lendingProtocolFeeBps:      sp.lendingProtocolFeeBps,
+		lendingCollateralRouting:   sp.lendingCollateralRouting.Clone(),
+		marketEscrowAddr:           cloneAddress(sp.marketEscrowAddr),
+		marketFeeCollectorAddr:     cloneAddress(sp.marketFeeCollectorAddr),
+		blockCtx:                   blockCtxCopy,
+		swapPayoutAuthorities:      payoutAuthCopy,
+		swapConfig:                 sp.swapConfig,
+		swapVoucherChainID:         sp.swapVoucherChainID,
+		adminWallet:                sp.adminWallet,
+		hasAdminWallet:             sp.hasAdminWallet,
+		buybackConfig:              sp.buybackConfig.Clone(),
+		hasBuybackConfig:           sp.hasBuybackConfig,
+		buybackAccrualAddr:         cloneAddress(sp.buybackAccrualAddr),
+		subscriptionsConfig:        sp.subscriptionsConfig,
+		hasSubscriptionsConfig:     sp.hasSubscriptionsConfig,
+		govPolicy:                  cloneGovernancePolicy(sp.govPolicy),
+	}, nil
+}
+
+// PaymasterEnabled reports whether transaction sponsorship is currently active.
+func (sp *StateProcessor) PaymasterEnabled() bool {
+	if sp == nil {
+		return false
+	}
+	return sp.paymasterEnabled
+}
+
+// SetPaymasterEnabled toggles the transaction sponsorship module.
+func (sp *StateProcessor) SetPaymasterEnabled(enabled bool) {
+	if sp == nil {
+		return
+	}
+	sp.paymasterEnabled = enabled
+}
+
+func (sp *StateProcessor) ApplyTransaction(tx *types.Transaction) error {
+	_, err := sp.executeTransaction(tx)
+	return err
+}
+
+// ExecuteTransaction applies the transaction and returns execution metadata.
+func (sp *StateProcessor) ExecuteTransaction(tx *types.Transaction) (*SimulationResult, error) {
+	return sp.executeTransaction(tx)
+}
+
+func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*SimulationResult, error) {
+	if tx == nil {
+		// A JSON-encoded block's transactions field is []*Transaction; a
+		// null element (e.g. "transactions":[null]) decodes to a nil
+		// pointer in that slice with no error from encoding/json. The
+		// block-level nil checks in the P2P block-sync path only look at
+		// the block and its header, not each transaction, so a crafted
+		// gossip message reaches commitBlock's apply loop, which calls
+		// this function directly on that nil entry. Without this check the
+		// very next line's tx.ChainID panics on a nil-pointer dereference
+		// -- an unrecovered panic in the per-peer P2P read goroutine that
+		// crashes the entire process, from a single unauthenticated
+		// message. Returning an ordinary error here instead lets the
+		// existing "apply transaction %d: %w" handling in commitBlock
+		// reject the block the same way it rejects any other malformed
+		// transaction.
+		return nil, fmt.Errorf("nil transaction")
+	}
+	if !types.IsValidChainID(tx.ChainID) {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
+	}
+	var (
+		intentManager *nhbstate.Manager
+		intentExpiry  uint64
+		recordIntent  bool
+	)
+	if len(tx.IntentRef) > 0 {
+		intentManager = nhbstate.NewManager(sp.Trie)
+		ttl := sp.intentTTL
+		if ttl <= 0 {
+			ttl = defaultIntentTTL
+		}
+		expiry, err := intentManager.IntentRegistryValidate(tx.IntentRef, tx.IntentExpiry, sp.blockTimestamp(), ttl)
+		if err != nil {
+			return nil, err
+		}
+		intentExpiry = expiry
+		recordIntent = true
+	}
+	var (
+		sender        []byte
+		senderAccount *types.Account
+		err           error
+	)
+	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice && tx.Type != types.TxTypeLendingRefPrice {
+		sender, senderAccount, err = sp.validateSenderAccount(tx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	start := len(sp.events)
+	var result *SimulationResult
+	switch tx.Type {
+	case types.TxTypeMint:
+		err = sp.applyMintTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeSwapVoucherMint:
+		err = sp.applySwapVoucherMintTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeBuybackRefPrice:
+		err = sp.applyBuybackRefPrice(tx)
+		result = &SimulationResult{}
+	case types.TxTypeLendingRefPrice:
+		err = sp.applyLendingRefPriceTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeGovPropose:
+		err = sp.applyGovProposeTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovVote:
+		err = sp.applyGovVoteTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovFinalize:
+		err = sp.applyGovFinalizeTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovQueue:
+		err = sp.applyGovQueueTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeGovExecute:
+		err = sp.applyGovExecuteTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	case types.TxTypeTransfer:
+		result, err = sp.applyEvmTransaction(tx)
+	case types.TxTypeTransferZNHB:
+		result, err = sp.applyTransferZNHB(tx, sender, senderAccount)
+	default:
+		err = sp.handleNativeTransaction(tx, sender, senderAccount)
+		result = &SimulationResult{}
+	}
+	if err != nil {
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) {
+			sp.events = sp.events[:start]
+		}
+		return nil, err
+	}
+	if recordIntent {
+		if intentManager == nil {
+			intentManager = nhbstate.NewManager(sp.Trie)
+		}
+		if err := intentManager.IntentRegistryConsume(tx.IntentRef, intentExpiry); err != nil {
+			if len(sp.events) > start {
+				sp.events = sp.events[:start]
+			}
+			return nil, err
+		}
+		if err := sp.emitPaymentIntentConsumed(tx); err != nil {
+			if len(sp.events) > start {
+				sp.events = sp.events[:start]
+			}
+			return nil, err
+		}
+	}
+	if result == nil {
+		result = &SimulationResult{}
+	}
+	newEvents := sp.events[start:]
+	if len(newEvents) > 0 {
+		copied := make([]types.Event, len(newEvents))
+		for i := range newEvents {
+			attrs := make(map[string]string, len(newEvents[i].Attributes))
+			for k, v := range newEvents[i].Attributes {
+				attrs[k] = v
+			}
+			copied[i] = types.Event{Type: newEvents[i].Type, Attributes: attrs}
+		}
+		result.Events = copied
+	} else {
+		result.Events = nil
+	}
+	return result, nil
+}
+
+type sponsorshipRuntime struct {
+	sponsor  common.Address
+	sender   common.Address
+	budget   *big.Int
+	gasPrice *big.Int
+	txHash   [32]byte
+	merchant string
+	device   string
+	day      string
+}
+
+func (sp *StateProcessor) validateSenderAccount(tx *types.Transaction) ([]byte, *types.Account, error) {
+	sender, err := tx.From()
+	if err != nil {
+		return nil, nil, err
+	}
+	account, err := sp.getAccount(sender)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tx.Nonce != account.Nonce {
+		if tx.Nonce < account.Nonce {
+			return nil, nil, fmt.Errorf("%w: %w: account=%d tx=%d", ErrNonceMismatch, ErrNonceTooLow, account.Nonce, tx.Nonce)
+		}
+		return nil, nil, fmt.Errorf("%w: %w: account=%d tx=%d", ErrNonceMismatch, ErrNonceTooHigh, account.Nonce, tx.Nonce)
+	}
+	return sender, account, nil
+}
+
+// --- EVM path (Geth v1.16.x) ---
+func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*SimulationResult, error) {
+	exec := &SimulationResult{}
+	from, err := tx.From()
+	if err != nil {
+		return nil, err
+	}
+	if tx.Type == types.TxTypeTransfer {
+		if sp.pauses != nil && sp.pauses.IsPaused(moduleTransferNHB) {
+			sp.emitTransferNHBBlocked(tx, from, "paused by governance")
+			return nil, ErrTransferNHBPaused
+		}
+		if tx.To == nil {
+			return nil, fmt.Errorf("%w: transfer: recipient address required", ErrInvalidTransaction)
+		}
+		if len(tx.To) != common.AddressLength {
+			return nil, fmt.Errorf("%w: transfer: recipient address invalid", ErrInvalidTransaction)
+		}
+		var zeroAddress [common.AddressLength]byte
+		if bytes.Equal(tx.To, zeroAddress[:]) {
+			return nil, fmt.Errorf("%w: transfer: recipient address invalid", ErrInvalidTransaction)
+		}
+		if tx.Value == nil || tx.Value.Sign() <= 0 {
+			return nil, fmt.Errorf("%w: transfer: amount must be positive", ErrInvalidTransaction)
+		}
+	}
+	isTransfer := tx.Type == types.TxTypeTransfer
+	var txHash [32]byte
+	var txHashReady bool
+	var refundOrigin [32]byte
+	var hasRefundOrigin bool
+	if isTransfer {
+		hashBytes, err := tx.Hash()
+		if err != nil {
+			return nil, fmt.Errorf("refund ledger: compute hash: %w", err)
+		}
+		if len(hashBytes) != len(txHash) {
+			return nil, fmt.Errorf("refund ledger: expected 32-byte tx hash, got %d", len(hashBytes))
+		}
+		copy(txHash[:], hashBytes)
+		txHashReady = true
+		trimmedRefund := strings.TrimSpace(tx.RefundOf)
+		if trimmedRefund != "" {
+			originHash, err := bank.ParseTxHash(trimmedRefund)
+			if err != nil {
+				return nil, err
+			}
+			manager := nhbstate.NewManager(sp.Trie)
+			if err := bank.ValidateRefund(manager, originHash, tx.Value); err != nil {
+				return nil, err
+			}
+			refundOrigin = originHash
+			hasRefundOrigin = true
+		}
+	}
+
+	originalValue := tx.Value
+
+	blockTime := sp.blockTimestamp()
+	transferGasPolicy := sp.TransferGasPolicy()
+	transferGasCollector := common.Address{}
+	if !isZeroAddress(transferGasPolicy.FeeCollector) {
+		transferGasCollector = common.BytesToAddress(transferGasPolicy.FeeCollector[:])
+	}
+
+	// Fast-path native transfer
+	if isTransfer {
+		assessment, err := sp.EvaluateSponsorship(tx)
+		if err != nil {
+			return nil, err
+		}
+		var sponsorshipCtx *sponsorshipRuntime
+		var sponsorshipErr error
+		var paymasterTopUp *paymasterTopUpMutation
+		if assessment != nil {
+			switch assessment.Status {
+			case SponsorshipStatusReady:
+				ctx := &sponsorshipRuntime{
+					sponsor:  assessment.Sponsor,
+					sender:   common.BytesToAddress(from),
+					budget:   big.NewInt(0),
+					gasPrice: big.NewInt(0),
+					merchant: assessment.merchant,
+					device:   assessment.deviceID,
+					day:      assessment.day,
+				}
+				if txHashReady {
+					ctx.txHash = txHash
+				}
+				if assessment.GasCost != nil {
+					ctx.budget = new(big.Int).Set(assessment.GasCost)
+				}
+				if assessment.GasPrice != nil {
+					ctx.gasPrice = new(big.Int).Set(assessment.GasPrice)
+				}
+				sponsorshipCtx = ctx
+			case SponsorshipStatusNone:
+				// no sponsorship requested
+			default:
+				var txH [32]byte
+				if txHashReady {
+					txH = txHash
+				}
+				sp.emitSponsorshipFailureEvent(common.BytesToAddress(from), assessment, txH)
+				sponsorshipErr = fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, assessment.Status, strings.TrimSpace(assessment.Reason))
+			}
+		}
+		if sponsorshipErr != nil {
+			return nil, sponsorshipErr
+		}
+
+		fromAcc, err := sp.getAccount(from)
+		if err != nil {
+			return nil, err
+		}
+		if fromAcc.BalanceNHB == nil {
+			fromAcc.BalanceNHB = big.NewInt(0)
+		}
+
+		// gasCost is the protocol-enforced fee (docs/issue30.md item 7b) --
+		// a percentage of the transfer value, NOT derived from
+		// tx.GasPrice/GasLimit, which the sender's own wallet sets and could
+		// set to zero, defeating any fee floor.
+		gasCost := transferGasPolicy.ComputeFee("NHB", tx.Value)
+		freeTransferGas := false
+		if sponsorshipCtx == nil && transferGasPolicy.Enabled {
+			status, err := sp.transferGasStatus(from, "NHB")
+			if err != nil {
+				return nil, err
+			}
+			freeTransferGas = status.Eligible
+		}
+		totalRequired := new(big.Int).Set(tx.Value)
+		if sponsorshipCtx == nil && !freeTransferGas {
+			totalRequired.Add(totalRequired, gasCost)
+		}
+
+		if fromAcc.BalanceNHB.Cmp(totalRequired) < 0 {
+			return nil, fmt.Errorf("insufficient funds for transfer+gas")
+		}
+
+		if sponsorshipCtx == nil && !freeTransferGas {
+			fromAcc.BalanceNHB.Sub(fromAcc.BalanceNHB, gasCost)
+		}
+		fromAcc.BalanceNHB.Sub(fromAcc.BalanceNHB, tx.Value)
+
+		selfTransfer := bytes.Equal(from, tx.To)
+		recipientAccount := fromAcc
+		if !selfTransfer {
+			recipientAccount, err = sp.getAccount(tx.To)
+			if err != nil {
+				return nil, err
+			}
+			if recipientAccount.BalanceNHB == nil {
+				recipientAccount.BalanceNHB = big.NewInt(0)
+			}
+		}
+
+		recipientAccount.BalanceNHB.Add(recipientAccount.BalanceNHB, originalValue)
+
+		if err := sp.applyTransactionFee(tx, from, fromAcc, recipientAccount); err != nil {
+			return nil, err
+		}
+		if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
+			sponsorAcc, err := sp.getAccount(tx.Paymaster)
+			if err != nil {
+				return nil, err
+			}
+			if sponsorAcc.BalanceNHB == nil {
+				sponsorAcc.BalanceNHB = big.NewInt(0)
+			}
+			if sponsorAcc.BalanceNHB.Cmp(gasCost) < 0 {
+				return nil, fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, SponsorshipStatusInsufficientBalance, "paymaster balance below required gas budget")
+			}
+			sponsorAcc.BalanceNHB.Sub(sponsorAcc.BalanceNHB, gasCost)
+			if transferGasPolicy.Enabled && bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]) {
+				sponsorAcc.BalanceNHB.Add(sponsorAcc.BalanceNHB, gasCost)
+			} else if transferGasPolicy.Enabled {
+				if err := sp.routeTransferGasFee(gasCost); err != nil {
+					return nil, err
+				}
+			}
+			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc)
+			if err != nil {
+				return nil, err
+			}
+			paymasterTopUp = mutation
+			if err := sp.setAccount(tx.Paymaster, sponsorAcc); err != nil {
+				if paymasterTopUp != nil {
+					_ = paymasterTopUp.Rollback(sp)
+				}
+				return nil, err
+			}
+			sp.emitSponsorshipSuccessEvent(sponsorshipCtx, tx.GasLimit, gasCost, big.NewInt(0))
+			if err := sp.recordPaymasterUsage(sponsorshipCtx, gasCost); err != nil {
+				if paymasterTopUp != nil {
+					if rollbackErr := paymasterTopUp.Rollback(sp); rollbackErr != nil {
+						return nil, errors.Join(err, rollbackErr)
+					}
+				}
+				return nil, err
+			}
+			if paymasterTopUp != nil {
+				paymasterTopUp.Finalize(sp)
+			}
+		} else if transferGasPolicy.Enabled && !freeTransferGas {
+			switch {
+			case bytes.Equal(transferGasPolicy.FeeCollector[:], from):
+				fromAcc.BalanceNHB.Add(fromAcc.BalanceNHB, gasCost)
+			case !selfTransfer && bytes.Equal(transferGasPolicy.FeeCollector[:], tx.To):
+				recipientAccount.BalanceNHB.Add(recipientAccount.BalanceNHB, gasCost)
+			default:
+				if err := sp.routeTransferGasFee(gasCost); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if err := sp.setAccount(from, fromAcc); err != nil {
+			return nil, err
+		}
+		if !selfTransfer {
+			if err := sp.setAccount(tx.To, recipientAccount); err != nil {
+				return nil, err
+			}
+		}
+		if err := sp.updateSenderNonce(from, fromAcc, fromAcc.Nonce+1); err != nil {
+			return nil, err
+		}
+		if err := sp.recordTransferGasSpend(from, tx.Value, "NHB"); err != nil {
+			return nil, err
+		}
+
+		if txHashReady {
+			amount := new(big.Int).Set(tx.Value)
+			timestamp := uint64(blockTime.Unix())
+			manager := nhbstate.NewManager(sp.Trie)
+			if hasRefundOrigin {
+				if err := bank.RecordRefund(manager, refundOrigin, txHash, amount, timestamp); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := bank.RecordOrigin(manager, txHash, amount, timestamp); err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		if err := sp.recordEngagementActivity(from, sp.blockTimestamp(), 1, 0, 0); err != nil {
+			return nil, err
+		}
+
+		var fromAddrBytes [20]byte
+		copy(fromAddrBytes[:], from)
+		var toAddrBytes [20]byte
+		copy(toAddrBytes[:], tx.To)
+		evt := events.Transfer{
+			Asset:  "NHB",
+			From:   fromAddrBytes,
+			To:     toAddrBytes,
+			Amount: new(big.Int).Set(tx.Value),
+			TxHash: txHash,
+		}.Event()
+		if evt != nil {
+			sp.events = append(sp.events, *evt)
+		}
+
+		if metrics := observability.Events(); metrics != nil {
+			metrics.RecordTransfer("NHB")
+		}
+
+		// Let Loyalty engine reward the sender / receiver natively
+		ctx := &loyalty.BaseRewardContext{
+			From:  append([]byte(nil), from...),
+			To:    append([]byte(nil), tx.To...),
+			Token: "NHB",
+			Amount: func() *big.Int {
+				if tx.Value == nil {
+					return big.NewInt(0)
+				}
+				return new(big.Int).Set(tx.Value)
+			}(),
+			Timestamp:   blockTime,
+			FromAccount: fromAcc,
+			ToAccount:   recipientAccount,
+		}
+		if txHashReady {
+			ctx.TxHash = txHash
+		}
+		if sp.LoyaltyEngine != nil {
+			sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+		}
+
+		// Use result simulation mimicking EVM successful consumption
+		return &SimulationResult{
+			GasUsed: tx.GasLimit, // natively consume allocated transfer gas limit
+			GasCost: func() *big.Int {
+				if freeTransferGas {
+					return big.NewInt(0)
+				}
+				return new(big.Int).Set(gasCost)
+			}(),
+		}, nil
+	}
+
+	parentRoot := sp.Trie.Hash()
+	statedb, err := gethstate.New(parentRoot, sp.stateDB)
+	if err != nil {
+		return nil, fmt.Errorf("statedb init: %w", err)
+	}
+
+	fromAddr := common.BytesToAddress(from)
+	var toAddrPtr *common.Address
+	if tx.To != nil {
+		addr := common.BytesToAddress(tx.To)
+		toAddrPtr = &addr
+	}
+
+	blockCtx := gethvm.BlockContext{
+		CanTransfer: gethcore.CanTransfer,
+		Transfer:    gethcore.Transfer,
+		GetHash: func(uint64) common.Hash {
+			return common.Hash{}
+		},
+		Coinbase:    transferGasCollector,
+		BlockNumber: new(big.Int).SetUint64(sp.blockHeight()),
+		Time:        uint64(blockTime.Unix()),
+		Difficulty:  big.NewInt(0),
+		BaseFee:     big.NewInt(0),
+	}
+
+	assessment, err := sp.EvaluateSponsorship(tx)
+	if err != nil {
+		return nil, err
+	}
+	var sponsorshipCtx *sponsorshipRuntime
+	var sponsorshipErr error
+	var paymasterTopUp *paymasterTopUpMutation
+	var txHashBytes []byte
+	if len(tx.Paymaster) > 0 {
+		txHashBytes, _ = tx.Hash()
+	}
+
+	msg := gethcore.Message{
+		From:          fromAddr,
+		To:            toAddrPtr,
+		Nonce:         tx.Nonce,
+		Value:         originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
+		// comment used to describe was removed from execution; getGlobalFeeRate is hardcoded to 0.
+		GasLimit:      tx.GasLimit,
+		GasPrice:      tx.GasPrice,
+		GasFeeCap:     tx.GasPrice,
+		GasTipCap:     tx.GasPrice,
+		Data:          tx.Data,
+		AccessList:    nil,
+		BlobGasFeeCap: nil,
+		BlobHashes:    nil,
+	}
+	txCtx := gethcore.NewEVMTxContext(&msg)
+
+	evm := gethvm.NewEVM(blockCtx, statedb, params.TestChainConfig, gethvm.Config{NoBaseFee: true})
+	evm.SetTxContext(txCtx)
+
+	if assessment != nil {
+		switch assessment.Status {
+		case SponsorshipStatusReady:
+			ctx := &sponsorshipRuntime{
+				sponsor:  assessment.Sponsor,
+				sender:   fromAddr,
+				budget:   big.NewInt(0),
+				gasPrice: big.NewInt(0),
+				merchant: assessment.merchant,
+				device:   assessment.deviceID,
+				day:      assessment.day,
+			}
+			if len(txHashBytes) > 0 {
+				ctx.txHash = bytesToHash32(txHashBytes)
+			}
+			if assessment.GasCost != nil {
+				ctx.budget = new(big.Int).Set(assessment.GasCost)
+			}
+			if assessment.GasPrice != nil {
+				ctx.gasPrice = new(big.Int).Set(assessment.GasPrice)
+			}
+			if ctx.budget.Sign() > 0 {
+				budget := uint256.MustFromBig(ctx.budget)
+				statedb.SubBalance(ctx.sponsor, budget, tracing.BalanceChangeTransfer)
+				statedb.AddBalance(ctx.sender, budget, tracing.BalanceChangeTransfer)
+			}
+			sponsorshipCtx = ctx
+		case SponsorshipStatusNone:
+			// no sponsorship requested
+		default:
+			var txH [32]byte
+			if len(txHashBytes) == 0 {
+				if h, hashErr := tx.Hash(); hashErr == nil {
+					txHashBytes = h
+				}
+			}
+			if len(txHashBytes) > 0 {
+				txH = bytesToHash32(txHashBytes)
+			}
+			sp.emitSponsorshipFailureEvent(fromAddr, assessment, txH)
+			sponsorshipErr = fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, assessment.Status, strings.TrimSpace(assessment.Reason))
+		}
+	}
+
+	if sponsorshipErr != nil {
+		return nil, sponsorshipErr
+	}
+
+	gp := new(gethcore.GasPool).AddGas(tx.GasLimit)
+	result, err := gethcore.ApplyMessage(evm, &msg, gp)
+	if err != nil {
+		return nil, fmt.Errorf("ApplyMessage: %w", err)
+	}
+	if result != nil && result.Err != nil {
+		return nil, fmt.Errorf("EVM error: %w", result.Err)
+	}
+
+	gasPriceUsed := tx.GasPrice
+	var paymasterCharged *big.Int
+	if sponsorshipCtx != nil {
+		usedCost := new(big.Int).Mul(new(big.Int).SetUint64(result.UsedGas), sponsorshipCtx.gasPrice)
+		budget := new(big.Int).Set(sponsorshipCtx.budget)
+		refund := new(big.Int).Sub(budget, usedCost)
+		if refund.Sign() < 0 {
+			refund = big.NewInt(0)
+		}
+		if refund.Sign() > 0 {
+			refundUint := uint256.MustFromBig(refund)
+			statedb.SubBalance(sponsorshipCtx.sender, refundUint, tracing.BalanceChangeTransfer)
+			statedb.AddBalance(sponsorshipCtx.sponsor, refundUint, tracing.BalanceChangeTransfer)
+		}
+		charged := new(big.Int).Sub(budget, refund)
+		if charged.Sign() < 0 {
+			charged = big.NewInt(0)
+		}
+		paymasterCharged = new(big.Int).Set(charged)
+		sp.emitSponsorshipSuccessEvent(sponsorshipCtx, result.UsedGas, charged, refund)
+		if sponsorshipCtx.gasPrice != nil && sponsorshipCtx.gasPrice.Sign() > 0 {
+			gasPriceUsed = sponsorshipCtx.gasPrice
+		}
+	}
+
+	exec.GasUsed = result.UsedGas
+	if gasPriceUsed != nil {
+		exec.GasCost = new(big.Int).Mul(new(big.Int).SetUint64(result.UsedGas), new(big.Int).Set(gasPriceUsed))
+	}
+
+	newRoot, err := statedb.Commit(0, false, false)
+	if err != nil {
+		return nil, fmt.Errorf("statedb commit: %w", err)
+	}
+	if err := sp.Trie.Reset(newRoot); err != nil {
+		return nil, fmt.Errorf("trie reset: %w", err)
+	}
+	if sponsorshipCtx != nil {
+		account, err := sp.getAccount(tx.Paymaster)
+		if err != nil {
+			return nil, err
+		}
+		mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, account)
+		if err != nil {
+			return nil, err
+		}
+		paymasterTopUp = mutation
+	}
+	// Transfer logic completely removed from EVM path as it is handled natively above.
+	// The event emission for NHB transfers is also moved to the native transfer handler.
+	// This block is now empty.
+
+	if sponsorshipCtx != nil {
+		if err := sp.recordPaymasterUsage(sponsorshipCtx, paymasterCharged); err != nil {
+			if paymasterTopUp != nil {
+				if rollbackErr := paymasterTopUp.Rollback(sp); rollbackErr != nil {
+					return nil, errors.Join(err, rollbackErr)
+				}
+			}
+			return nil, err
+		}
+		if paymasterTopUp != nil {
+			paymasterTopUp.Finalize(sp)
+		}
+	}
+
+	fromAcc, err := sp.getAccount(from)
+	if err != nil {
+		return nil, err
+	}
+	var toAcc *types.Account
+	if tx.To != nil {
+		toAcc, err = sp.getAccount(tx.To)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := sp.applyTransactionFee(tx, from, fromAcc, toAcc); err != nil {
+		return nil, err
+	}
+
+	if tx.To != nil {
+		ctx := &loyalty.BaseRewardContext{
+			From:  append([]byte(nil), from...),
+			To:    append([]byte(nil), tx.To...),
+			Token: "NHB",
+			Amount: func() *big.Int {
+				if tx.Value == nil {
+					return big.NewInt(0)
+				}
+				return new(big.Int).Set(tx.Value)
+			}(),
+			Timestamp:   blockTime,
+			FromAccount: fromAcc,
+			ToAccount:   toAcc,
+		}
+		if txHashReady {
+			ctx.TxHash = txHash
+		}
+		sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+	}
+
+	if err := sp.setAccount(from, fromAcc); err != nil {
+		return nil, err
+	}
+	if tx.To != nil && toAcc != nil {
+		if err := sp.setAccount(tx.To, toAcc); err != nil {
+			return nil, err
+		}
+	}
+	if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
+		sponsorAcc, err := sp.getAccount(tx.Paymaster)
+		if err != nil {
+			return nil, err
+		}
+		if err := sp.setAccount(tx.Paymaster, sponsorAcc); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := sp.recordEngagementActivity(from, sp.blockTimestamp(), 1, 0, 0); err != nil {
+		return nil, err
+	}
+
+	return exec, nil
+}
+
+// --- Native handlers (original semantics + new dispute flow) ---
+
+func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) (*SimulationResult, error) {
+	if sp == nil || tx == nil {
+		return nil, fmt.Errorf("znhb transfer: state unavailable")
+	}
+	if sp.pauses != nil && sp.pauses.IsPaused(moduleTransferZNHB) {
+		sp.emitTransferZNHBBlocked(tx, sender, "paused by governance")
+		return nil, ErrTransferZNHBPaused
+	}
+	if len(tx.To) != common.AddressLength {
+		return nil, fmt.Errorf("znhb transfer: recipient address required")
+	}
+	var zeroAddress [common.AddressLength]byte
+	if bytes.Equal(tx.To, zeroAddress[:]) {
+		return nil, fmt.Errorf("znhb transfer: recipient address invalid")
+	}
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return nil, fmt.Errorf("znhb transfer: amount must be positive")
+	}
+	if senderAccount == nil {
+		return nil, fmt.Errorf("znhb transfer: sender account unavailable")
+	}
+	amount := new(big.Int).Set(tx.Value)
+	if senderAccount.BalanceZNHB == nil {
+		senderAccount.BalanceZNHB = big.NewInt(0)
+	}
+
+	// ZNHB equivalent of the NHB free-tier + protocol-enforced fee (same
+	// mechanism as applyEvmTransaction's transfer fast path, tracked under
+	// its own asset-scoped spend counter since NHB and ZNHB are not
+	// fungible for this purpose) -- see docs/issue30.md item 7b.
+	transferGasPolicy := sp.TransferGasPolicy()
+	gasCost := transferGasPolicy.ComputeFee("ZNHB", amount)
+	freeTransferGas := false
+	if transferGasPolicy.Enabled {
+		status, err := sp.transferGasStatus(sender, "ZNHB")
+		if err != nil {
+			return nil, err
+		}
+		freeTransferGas = status.Eligible
+	}
+	if freeTransferGas {
+		gasCost = big.NewInt(0)
+	}
+	totalRequired := new(big.Int).Add(amount, gasCost)
+	if senderAccount.BalanceZNHB.Cmp(totalRequired) < 0 {
+		return nil, fmt.Errorf("znhb transfer: insufficient balance")
+	}
+	senderAccount.BalanceZNHB = new(big.Int).Sub(senderAccount.BalanceZNHB, totalRequired)
+	selfTransfer := bytes.Equal(sender, tx.To)
+	recipientAccount := senderAccount
+	if !selfTransfer {
+		var err error
+		recipientAccount, err = sp.getAccount(tx.To)
+		if err != nil {
+			return nil, err
+		}
+		if recipientAccount.BalanceZNHB == nil {
+			recipientAccount.BalanceZNHB = big.NewInt(0)
+		}
+	}
+
+	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, amount)
+	if gasCost.Sign() > 0 {
+		var feeCreditedTo []byte
+		// feeIsExternalInflowToAdmin tracks whether this gasCost credit
+		// represents genuinely NEW ZNHB landing on the admin/treasury wallet
+		// from someone else -- as opposed to the sender==FeeCollector case
+		// below, where the "credit" is just refunding the same wallet the
+		// fee was deducted from a few lines up (line ~3334), a pure
+		// accounting no-op with zero real net effect on its balance. Only a
+		// genuine external inflow needs a matching Reward Pool credit.
+		feeIsExternalInflowToAdmin := true
+		switch {
+		case bytes.Equal(transferGasPolicy.FeeCollector[:], sender):
+			senderAccount.BalanceZNHB = new(big.Int).Add(senderAccount.BalanceZNHB, gasCost)
+			feeCreditedTo = transferGasPolicy.FeeCollector[:]
+			feeIsExternalInflowToAdmin = false
+		case !selfTransfer && bytes.Equal(transferGasPolicy.FeeCollector[:], tx.To):
+			recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, gasCost)
+			feeCreditedTo = transferGasPolicy.FeeCollector[:]
+		default:
+			if isZeroAddress(transferGasPolicy.FeeCollector) {
+				return nil, fmt.Errorf("fees: transfer gas collector not configured")
+			}
+			collectorAccount, err := sp.getAccount(transferGasPolicy.FeeCollector[:])
+			if err != nil {
+				return nil, err
+			}
+			if collectorAccount.BalanceZNHB == nil {
+				collectorAccount.BalanceZNHB = big.NewInt(0)
+			}
+			collectorAccount.BalanceZNHB = new(big.Int).Add(collectorAccount.BalanceZNHB, gasCost)
+			if err := sp.setAccount(transferGasPolicy.FeeCollector[:], collectorAccount); err != nil {
+				return nil, err
+			}
+			feeCreditedTo = transferGasPolicy.FeeCollector[:]
+		}
+		// The protocol-enforced ZNHB transfer fee is real ZNHB landing on
+		// whichever wallet FeeCollector names, credited above with no
+		// offsetting decrease anywhere else. When FeeCollector happens to
+		// be the admin/treasury wallet (the default and, as of the 2026-09-05
+		// incident, the live config), that credit silently grew
+		// BalanceZNHB outside the Sale/Reward Pool ledger --
+		// CheckZNHBSupplyInvariant (below) catches the very next block and
+		// halts the chain, since it has no way to know this ZNHB is
+		// legitimate fee revenue rather than an accounting bug. Route it
+		// into the Reward Pool -- the same ring-fenced bucket
+		// settleEpochRewards pays validator/POTSO rewards out of -- so
+		// protocol fee revenue is real, ledger-tracked income the
+		// invariant already expects, not invisible growth. Must run in
+		// this same state transition, not deferred to ProcessBlockLifecycle,
+		// since CheckZNHBSupplyInvariant runs once per block against
+		// whatever this transaction already committed.
+		//
+		// Gated on feeIsExternalInflowToAdmin (2026-09-16 fix, the
+		// self-fee-collector chain halt): when the admin/treasury wallet is
+		// simultaneously the SENDER and the FeeCollector -- e.g. the admin
+		// wallet funding another wallet directly, with FeeCollector
+		// defaulting to the same treasury address -- the case above already
+		// refunds gasCost back to that same wallet with zero real net
+		// effect. Crediting the Reward Pool here too, on top of the
+		// separate sender-is-admin debit below (which correctly subtracts
+		// the full `amount` to mirror the wallet's real balance decrease),
+		// double-counts: the pool ends up exactly gasCost ahead of the
+		// admin wallet's actual balance change, tripping
+		// CheckZNHBSupplyInvariant and halting the chain on the very next
+		// block -- confirmed live 2026-09-16 (see docs/incidents, height
+		// 132515: sale+reward pool exceeded the admin wallet's real balance
+		// by exactly one transfer's gasCost). This is not specific to
+		// self-transfers -- it reproduces for ANY recipient, since the
+		// sender-is-admin debit below fires for every non-self-transfer
+		// regardless of who the recipient is.
+		if feeIsExternalInflowToAdmin && sp.hasAdminWallet && bytes.Equal(feeCreditedTo, sp.adminWallet[:]) {
+			manager := nhbstate.NewManager(sp.Trie)
+			rewardPoolBalance, err := manager.ZNHBRewardPoolBalance()
+			if err != nil {
+				return nil, fmt.Errorf("znhb transfer: load reward pool balance: %w", err)
+			}
+			newRewardPoolBalance := new(big.Int).Add(rewardPoolBalance, gasCost)
+			if err := manager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
+				return nil, fmt.Errorf("znhb transfer: update reward pool balance: %w", err)
+			}
+		}
+	}
+	// Mirror of the fee-credit fix above (see its comment and commit
+	// 145c84f, "Fix ZNHB transfer fee bypassing the Sale/Reward Pool
+	// invariant"), for the debit side: when the admin/treasury wallet is
+	// the SENDER of an ordinary transfer -- e.g. funding a new wallet's
+	// own validator self-stake, per docs/validators/onboarding.md's
+	// anyone-can-become-a-validator flow -- `amount` leaves BalanceZNHB
+	// with no offsetting decrease anywhere else, and CheckZNHBSupplyInvariant
+	// (which runs every block) halts the chain on the very next block,
+	// exactly like the credit-side incident. Route it out of the Reward
+	// Pool, the same ring-fenced bucket the credit side pays fee revenue
+	// into, so it stays the invariant's single source of truth for
+	// non-pool-aware ZNHB movement on the admin wallet in either
+	// direction. Skipped for a self-transfer: recipientAccount is the
+	// same object as senderAccount there, so `amount` is added right back
+	// (see above) and BalanceZNHB never actually changes.
+	if sp.hasAdminWallet && !selfTransfer && bytes.Equal(sender, sp.adminWallet[:]) {
+		manager := nhbstate.NewManager(sp.Trie)
+		rewardPoolBalance, err := manager.ZNHBRewardPoolBalance()
+		if err != nil {
+			return nil, fmt.Errorf("znhb transfer: load reward pool balance: %w", err)
+		}
+		newRewardPoolBalance := new(big.Int).Sub(rewardPoolBalance, amount)
+		if err := manager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
+			return nil, fmt.Errorf("znhb transfer: update reward pool balance: %w", err)
+		}
+	}
+	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
+		return nil, err
+	}
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return nil, err
+	}
+	if !selfTransfer {
+		if err := sp.setAccount(tx.To, recipientAccount); err != nil {
+			return nil, err
+		}
+	}
+	if err := sp.recordTransferGasSpend(sender, amount, "ZNHB"); err != nil {
+		return nil, err
+	}
+	if err := sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1); err != nil {
+		return nil, err
+	}
+	if err := sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0); err != nil {
+		return nil, err
+	}
+
+	var txHash [32]byte
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return nil, fmt.Errorf("znhb transfer: compute hash: %w", err)
+	}
+	if len(hashBytes) != len(txHash) {
+		return nil, fmt.Errorf("znhb transfer: expected 32-byte tx hash, got %d", len(hashBytes))
+	}
+	copy(txHash[:], hashBytes)
+	var senderAddr [20]byte
+	copy(senderAddr[:], sender)
+	var recipientAddr [20]byte
+	copy(recipientAddr[:], tx.To)
+	evt := events.Transfer{
+		Asset:  "ZNHB",
+		From:   senderAddr,
+		To:     recipientAddr,
+		Amount: new(big.Int).Set(amount),
+		TxHash: txHash,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	if metrics := observability.Events(); metrics != nil {
+		metrics.RecordTransfer("ZNHB")
+	}
+	return &SimulationResult{}, nil
+}
+
+func (sp *StateProcessor) emitTransferNHBBlocked(tx *types.Transaction, sender []byte, reason string) {
+	if sp == nil || tx == nil {
+		return
+	}
+	evt := events.TransferNHBBlocked{
+		Asset:  "NHB",
+		Reason: strings.TrimSpace(reason),
+	}
+	if len(sender) == len(evt.From) {
+		copy(evt.From[:], sender)
+	}
+	if len(tx.To) == len(evt.To) {
+		copy(evt.To[:], tx.To)
+	}
+	if hash, err := tx.Hash(); err == nil && len(hash) == len(evt.TxHash) {
+		copy(evt.TxHash[:], hash)
+	}
+	if payload := evt.Event(); payload != nil {
+		sp.AppendEvent(payload)
+	}
+}
+
+func (sp *StateProcessor) emitTransferZNHBBlocked(tx *types.Transaction, sender []byte, reason string) {
+	if sp == nil || tx == nil {
+		return
+	}
+	evt := events.TransferZNHBBlocked{
+		Asset:  "ZNHB",
+		Reason: strings.TrimSpace(reason),
+	}
+	if len(sender) == len(evt.From) {
+		copy(evt.From[:], sender)
+	}
+	if len(tx.To) == len(evt.To) {
+		copy(evt.To[:], tx.To)
+	}
+	if hash, err := tx.Hash(); err == nil && len(hash) == len(evt.TxHash) {
+		copy(evt.TxHash[:], hash)
+	}
+	if payload := evt.Event(); payload != nil {
+		sp.AppendEvent(payload)
+	}
+}
+
+func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
+	voucher, signature, err := decodeMintTransaction(tx.Data)
+	if err != nil {
+		return err
+	}
+	if voucher == nil {
+		return fmt.Errorf("%w: voucher required", ErrMintInvalidPayload)
+	}
+	// AmountBig and CanonicalJSON are pure functions of the voucher's own
+	// payload fields (no state/oracle dependency) -- wrap their failures with
+	// ErrMintInvalidPayload so classifyProposalError can recognize them as
+	// permanently unsatisfiable, same as every other payload check in this
+	// function. Do not change these shared MintVoucher methods themselves:
+	// they're also called from core/node.go's pre-enqueue validation and
+	// from off-chain signing code that has no reason to know about this
+	// package's sentinel.
+	amount, err := voucher.AmountBig()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
+	}
+	if voucher.ChainID != MintChainID {
+		return ErrMintInvalidChainID
+	}
+	blockTime := sp.blockTimestamp()
+	if voucher.Expiry <= blockTime.Unix() {
+		return ErrMintExpired
+	}
+	canonical, err := voucher.CanonicalJSON()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
+	}
+	if len(signature) != 65 {
+		return fmt.Errorf("%w: invalid signature length", ErrMintInvalidPayload)
+	}
+	digest := ethcrypto.Keccak256(canonical)
+	pubKey, err := ethcrypto.SigToPub(digest, signature)
+	if err != nil {
+		return fmt.Errorf("%w: recover signer: %v", ErrMintInvalidPayload, err)
+	}
+	recovered := ethcrypto.PubkeyToAddress(*pubKey)
+	var recoveredBytes [20]byte
+	copy(recoveredBytes[:], recovered.Bytes())
+
+	token := voucher.NormalizedToken()
+	// PRODUCT RULE, not an accident of missing config: ZNHB is fixed supply
+	// and can never be minted, under any role grant present or future. This
+	// unconditional rejection sits before the role/cap checks below (and
+	// before manager/state are even touched), so it cannot be worked around
+	// by granting MINTER_ZNHB to some signer later -- the only way to
+	// acquire ZNHB is to buy NHB and swap it via the curve-priced
+	// NHB->ZNHB path (applyBuyZNHB / applySwapVoucherMintTransaction),
+	// which debits the tracked treasury Sale Pool instead of expanding
+	// supply. This makes the "case ZNHB" branches in the requiredRole
+	// switch just below, and in the balance-credit switch further down,
+	// unreachable by design; they are left in place rather than deleted so
+	// this fix stays minimal and the NHB branches are untouched.
+	if token == "ZNHB" {
+		return ErrMintZNHBNotMintable
+	}
+	var requiredRole string
+	switch token {
+	case "NHB":
+		requiredRole = "MINTER_NHB"
+	case "ZNHB":
+		requiredRole = "MINTER_ZNHB"
+	default:
+		return fmt.Errorf("%w: unsupported token %q", ErrMintInvalidPayload, voucher.Token)
+	}
+
+	invoiceID := voucher.TrimmedInvoiceID()
+	if invoiceID == "" {
+		return fmt.Errorf("%w: invoiceId required", ErrMintInvalidPayload)
+	}
+	recipientRef := voucher.TrimmedRecipient()
+	if recipientRef == "" {
+		return fmt.Errorf("%w: recipient required", ErrMintInvalidPayload)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	meta, err := manager.Token(token)
+	if err != nil {
+		return err
+	}
+	if meta != nil && meta.MintPaused {
+		return ErrMintPaused
+	}
+	if !manager.HasRole(requiredRole, recoveredBytes[:]) {
+		return ErrMintInvalidSigner
+	}
+	key := nhbstate.MintInvoiceKey(invoiceID)
+	var used bool
+	if ok, err := manager.KVGet(key, &used); err != nil {
+		return err
+	} else if ok && used {
+		return ErrMintInvoiceUsed
+	}
+
+	var recipient [20]byte
+	if decoded, err := crypto.DecodeAddress(recipientRef); err == nil {
+		copy(recipient[:], decoded.Bytes())
+	} else {
+		resolved, ok := manager.IdentityResolve(recipientRef)
+		if !ok || resolved == nil {
+			// Identity registration is mutable on-chain state -- an alias
+			// registered after this transaction was submitted could resolve
+			// successfully on a later attempt, so this must not be pruned.
+			return fmt.Errorf("%w: %s", ErrMintRecipientUnresolved, recipientRef)
+		}
+		recipient = resolved.Primary
+	}
+
+	emissionYear := uint32(blockTime.UTC().Year())
+	emissionTotal, err := manager.MintEmissionYTD(token, emissionYear)
+	if err != nil {
+		return err
+	}
+	maxEmission, err := sp.mintMaxEmissionPerYear(manager, token)
+	if err != nil {
+		return err
+	}
+	if maxEmission.Sign() > 0 {
+		projected := new(big.Int).Add(emissionTotal, amount)
+		if projected.Cmp(maxEmission) > 0 {
+			return ErrMintEmissionCapExceeded
+		}
+	}
+
+	account, err := manager.GetAccount(recipient[:])
+	if err != nil {
+		return err
+	}
+	switch token {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+	}
+	if err := manager.PutAccount(recipient[:], account); err != nil {
+		return err
+	}
+	// Supply tracking: every credit above must be reflected in the tracked
+	// total token supply, mirroring applyRedeemNHB's AdjustTokenSupply call
+	// on the burn side (this file, ~line 5388) so mint and burn stay
+	// symmetric in the same consensus state trie. Confirmed 2026-09-17: this
+	// call was missing here -- the only other place that credits a balance
+	// and correctly calls AdjustTokenSupply is the unused MintToken helper
+	// (this file, ~line 8719, zero callers) -- so every custody-deposit
+	// mint since launch credited real balances without ever incrementing
+	// the counter, while every burn decremented it. nhb_getTotalSupply has
+	// therefore been silently understating real circulating NHB since
+	// launch; see ReconcileNHBMintSupplyDriftOnce for the one-time repair
+	// of the resulting drift. The ZNHB branch above is unreachable (ZNHB
+	// mint is rejected earlier in this function), so token is always "NHB"
+	// here, but AdjustTokenSupply is called generically on token to stay
+	// correct if that ever changes.
+	totalSupply, err := manager.AdjustTokenSupply(token, amount)
+	if err != nil {
+		return fmt.Errorf("mint: adjust token supply: %w", err)
+	}
+	sp.recordTokenSupplyChange(token, amount, totalSupply, events.SupplyReasonMint)
+	updatedEmission := new(big.Int).Add(emissionTotal, amount)
+	if err := manager.SetMintEmissionYTD(token, emissionYear, updatedEmission); err != nil {
+		return err
+	}
+	if err := manager.KVPut(key, true); err != nil {
+		return err
+	}
+
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return err
+	}
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	voucherHash, err := MintVoucherHash(voucher, signature)
+	if err != nil {
+		return err
+	}
+	evt := events.MintSettled{
+		InvoiceID:   invoiceID,
+		Recipient:   recipient,
+		Token:       token,
+		Amount:      amount,
+		TxHash:      txHash,
+		VoucherHash: voucherHash,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	switch tx.Type {
+	case types.TxTypeRegisterIdentity:
+		if err := sp.applyRegisterIdentity(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeCreateEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyCreateEscrow(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeReleaseEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyReleaseEscrow(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeRefundEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyRefundEscrow(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeStake:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyStake(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
+	case types.TxTypeUnstake:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyUnstake(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
+	case types.TxTypeStakeClaim:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyStakeClaim(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
+	case types.TxTypeStakeClaimRewards:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyStakeClaimRewards(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 1)
+	case types.TxTypeHeartbeat:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyHeartbeat(tx, sender, senderAccount)
+	case types.TxTypePOSAuthorize:
+		return sp.applyPOSAuthorize(tx)
+	case types.TxTypePOSCapture:
+		return sp.applyPOSCapture(tx)
+	case types.TxTypePOSVoid:
+		return sp.applyPOSVoid(tx)
+	case types.TxTypePOSRegistry:
+		return sp.applyPOSRegistry(tx)
+	case types.TxTypeRedeemNHB:
+		if err := sp.applyQuota(moduleSwap, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyRedeemNHB(tx, sender, senderAccount)
+	case types.TxTypeAttestRedemption:
+		// Deliberately not quota-gated -- RoleSwapPayoutAttestor-checked
+		// (see applyAttestRedemption), a trusted service key, not an
+		// ordinary user action the "swap" quota is meant to bound.
+		return sp.applyAttestRedemption(tx, sender, senderAccount)
+
+	// --- NEW DISPUTE RESOLUTION CASES ---
+	case types.TxTypeLockEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLockEscrow(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeDisputeEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyDisputeEscrow(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeArbitrateRelease:
+		if err := sp.applyQuota(moduleTrade, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyArbitrate(tx, sender, senderAccount, true); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeArbitrateRefund:
+		if err := sp.applyQuota(moduleTrade, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyArbitrate(tx, sender, senderAccount, false); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeExpireEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyExpireEscrow(tx, sender, senderAccount)
+	case types.TxTypeDelegatedReleaseEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedEscrowAction(tx, sender, senderAccount, escrow.ActionRelease)
+	case types.TxTypeDelegatedRefundEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedEscrowAction(tx, sender, senderAccount, escrow.ActionRefund)
+	case types.TxTypeDelegatedDisputeEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedEscrowAction(tx, sender, senderAccount, escrow.ActionDispute)
+	case types.TxTypeEscrowCreateRealm:
+		return sp.applyEscrowCreateRealm(tx, sender, senderAccount)
+	case types.TxTypeEscrowUpdateRealm:
+		return sp.applyEscrowUpdateRealm(tx, sender, senderAccount)
+	case types.TxTypeDelegatedCreateEscrow:
+		if err := sp.applyQuota(moduleEscrow, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyDelegatedCreateEscrow(tx, sender, senderAccount)
+
+	// --- LOYALTY BUSINESS/PROGRAM ADMINISTRATION ---
+	// Quota-gated only for the two operations that mint a new ID
+	// (CreateBusiness/CreateProgram); the other six are an already-verified
+	// owner/admin acting on a single resource they (or their admin role)
+	// already control -- see each TxType's doc comment in
+	// core/types/transaction.go for the full reasoning.
+	case types.TxTypeCreateLoyaltyBusiness:
+		if err := sp.applyQuota(moduleLoyalty, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyCreateLoyaltyBusiness(tx, sender, senderAccount)
+	case types.TxTypeLoyaltySetPaymaster:
+		return sp.applyLoyaltySetPaymaster(tx, sender, senderAccount)
+	case types.TxTypeLoyaltyAddMerchant:
+		return sp.applyLoyaltyAddMerchant(tx, sender, senderAccount)
+	case types.TxTypeLoyaltyRemoveMerchant:
+		return sp.applyLoyaltyRemoveMerchant(tx, sender, senderAccount)
+	case types.TxTypeCreateLoyaltyProgram:
+		if err := sp.applyQuota(moduleLoyalty, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyCreateLoyaltyProgram(tx, sender, senderAccount)
+	case types.TxTypeUpdateLoyaltyProgram:
+		return sp.applyUpdateLoyaltyProgram(tx, sender, senderAccount)
+	case types.TxTypePauseLoyaltyProgram:
+		return sp.applyPauseLoyaltyProgram(tx, sender, senderAccount)
+	case types.TxTypeResumeLoyaltyProgram:
+		return sp.applyResumeLoyaltyProgram(tx, sender, senderAccount)
+
+	case types.TxTypeSwapPayoutReceipt:
+		if err := sp.applySwapPayoutReceipt(tx); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeSwapMint:
+		if err := sp.applySwapMint(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeSwapBurn:
+		if err := sp.applySwapBurn(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 1, 0)
+	case types.TxTypeBuyZNHB:
+		if err := sp.applyQuota(moduleSwap, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyBuyZNHB(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeBuybackAsk:
+		if err := sp.applyQuota(moduleSwap, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyBuybackAsk(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeSetRewardBeneficiary:
+		if err := sp.applySetRewardBeneficiary(tx, sender, senderAccount); err != nil {
+			return err
+		}
+		return nil
+	case types.TxTypeLendingCreatePool:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyLendingCreatePoolTransaction(tx, sender)
+	case types.TxTypePotsoStakeLock:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyPotsoStakeLockTransaction(tx, sender)
+	case types.TxTypePotsoStakeUnbond:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyPotsoStakeUnbondTransaction(tx, sender)
+	case types.TxTypePotsoStakeWithdraw:
+		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyPotsoStakeWithdrawTransaction(tx, sender)
+	case types.TxTypeLendingSupplyNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingSupplyNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingWithdrawNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingWithdrawNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingDepositZNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingDepositZNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingWithdrawZNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingWithdrawZNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingBorrowNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingBorrowNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingRepayNHB:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingRepayNHB(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingLiquidate:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingLiquidate(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingBorrowFixedTerm:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingBorrowFixedTerm(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingRepayFixedTerm:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingRepayFixedTerm(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeLendingSupplyFixedTerm:
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		if err := sp.applyLendingSupplyFixedTerm(tx, sender); err != nil {
+			return err
+		}
+		return sp.recordEngagementActivity(sender, sp.blockTimestamp(), 1, 0, 0)
+	case types.TxTypeSubscriptionCreatePlan:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionCreatePlanTransaction(tx, sender)
+	case types.TxTypeSubscriptionUpdatePlan:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionUpdatePlanTransaction(tx, sender)
+	case types.TxTypeSubscriptionSubscribe:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionSubscribeTransaction(tx, sender)
+	case types.TxTypeSubscriptionCancel:
+		if err := sp.applyQuota(moduleSubscriptions, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applySubscriptionCancelTransaction(tx, sender)
+	case types.TxTypeMarketCreateListing:
+		if err := sp.applyQuota(moduleMarket, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyMarketCreateListing(tx, sender)
+	case types.TxTypeMarketFillListing:
+		if err := sp.applyQuota(moduleMarket, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyMarketFillListing(tx, sender)
+	case types.TxTypeMarketCancelListing:
+		if err := sp.applyQuota(moduleMarket, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyMarketCancelListing(tx, sender)
+	}
+	return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
+}
+
+// applyRegisterIdentity claims a username via a signed TxTypeRegisterIdentity
+// transaction (the only username-claim path nhbportal's Settings page
+// exposes to users). Previously this only set Account.Username and the
+// legacy sp.usernameToAddr index (consumed solely by the unrelated
+// loyalty_resolveUsername RPC) -- it never touched the identity.AliasRecord
+// trie that identity_resolve actually reads, which is what the Send flow's
+// send-to-username resolution calls. That meant a claimed username always
+// looked successful but could never actually receive a transaction: sending
+// to it 404'd with "alias not found" every time. Normalizing through
+// identity.NormalizeAlias and writing the real alias record here closes that
+// gap in the same atomic transaction as the claim, so claim and resolve
+// operate on the same registry.
+func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	normalized, err := identity.NormalizeAlias(string(tx.Data))
+	if err != nil {
+		return fmt.Errorf("username: %w", err)
+	}
+	if _, ok := sp.usernameToAddr[normalized]; ok {
+		return fmt.Errorf("username '%s' taken", normalized)
+	}
+	if senderAccount.Username != "" {
+		return fmt.Errorf("account already has username")
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	// Deterministic block timestamp, not time.Now() -- this runs identically
+	// on every validator during ordinary block execution (see the sibling
+	// recordEngagementActivity call below, which already uses the same
+	// accessor). NHB-TRIAGE-H10: IdentitySetAlias used to call time.Now()
+	// internally, so any two validators applying this transaction even a
+	// second apart persisted different CreatedAt/UpdatedAt bytes -- a
+	// different trie leaf, a different state root, and a rejected block on
+	// every ordinary username registration.
+	if err := manager.IdentitySetAlias(sender, normalized, sp.blockTimestamp().Unix()); err != nil {
+		return fmt.Errorf("username: %w", err)
+	}
+	senderAccount.Username = normalized
+	senderAccount.Nonce++
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	_ = tradeEngine
+
+	type createEscrowPayload struct {
+		Payee    []byte   `json:"payee"`
+		Token    string   `json:"token"`
+		Amount   *big.Int `json:"amount"`
+		FeeBps   uint32   `json:"feeBps"`
+		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
+		Mediator []byte   `json:"mediator,omitempty"`
+		Meta     []byte   `json:"meta,omitempty"`
+		Realm    string   `json:"realm,omitempty"`
+	}
+	var payload createEscrowPayload
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid escrow payload: %w", err)
+	}
+	if len(payload.Payee) != common.AddressLength {
+		return fmt.Errorf("payee address must be %d bytes", common.AddressLength)
+	}
+	if payload.Amount == nil || payload.Amount.Cmp(big.NewInt(0)) <= 0 {
+		return fmt.Errorf("escrow amount must be positive")
+	}
+	if strings.TrimSpace(payload.Token) == "" {
+		return fmt.Errorf("token required")
+	}
+	if payload.Deadline <= 0 {
+		return fmt.Errorf("deadline must be positive")
+	}
+	if payload.Nonce == 0 {
+		return fmt.Errorf("escrow nonce must be positive")
+	}
+	payer := bytesToAddress(sender)
+	var payee [common.AddressLength]byte
+	copy(payee[:], payload.Payee)
+	mediatorAddr := [common.AddressLength]byte{}
+	if len(payload.Mediator) != 0 {
+		if len(payload.Mediator) != common.AddressLength {
+			return fmt.Errorf("mediator address must be %d bytes", common.AddressLength)
+		}
+		mediatorAddr = bytesToAddress(payload.Mediator)
+	}
+	meta := [32]byte{}
+	if len(payload.Meta) > len(meta) {
+		return fmt.Errorf("meta payload must be <= 32 bytes")
+	}
+	copy(meta[:], payload.Meta)
+	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, payload.Nonce, &mediatorAddr, meta, strings.TrimSpace(payload.Realm)); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func decodeCreateEscrowPayload(data []byte, payload interface{}) error {
+	if len(data) == 0 {
+		return fmt.Errorf("payload required")
+	}
+	if err := json.Unmarshal(data, payload); err == nil {
+		return nil
+	}
+	if err := rlp.DecodeBytes(data, payload); err == nil {
+		return nil
+	}
+	return fmt.Errorf("payload must be valid JSON or RLP")
+}
+
+func (sp *StateProcessor) applyReleaseEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	id, err := decodeEscrowID(tx.Data)
+	if err != nil {
+		return err
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Release(id, caller); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func (sp *StateProcessor) applyRefundEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	id, err := decodeEscrowID(tx.Data)
+	if err != nil {
+		return err
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Refund(id, caller); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyExpireEscrow sweeps a stale, still-funded escrow back to its payer
+// once the escrow's own deadline has elapsed. Deliberately permissionless
+// (see TxTypeExpireEscrow's doc comment) -- Engine.Expire itself enforces
+// the only real gate (now >= esc.Deadline), so the sender here need not be
+// the payer, payee, or mediator. Uses the deterministic block timestamp,
+// never time.Now(), so every validator evaluates the same deadline
+// comparison for the identical transaction (see NHB-TRIAGE-H10 in
+// applyRegisterIdentity for the incident class this guards against).
+func (sp *StateProcessor) applyExpireEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	id, err := decodeEscrowID(tx.Data)
+	if err != nil {
+		return err
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	if err := sp.EscrowEngine.Expire(id, sp.blockTimestamp().Unix()); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyDelegatedCreateEscrow backs TxTypeDelegatedCreateEscrow -- see that
+// TxType's doc comment and escrow.ActionCreate's escrowCreateEnvelope doc
+// comment (native/escrow/engine.go). tx.Data is RLP-encoded {Payload
+// []byte, Signature []byte}; every field the escrow is created with lives
+// inside Payload (verified against Signature by
+// Engine.CreateWithSignature), so sender here is purely the relayer paying
+// gas -- it never becomes the escrow's payer, unlike a direct
+// TxTypeCreateEscrow submission.
+func (sp *StateProcessor) applyDelegatedCreateEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Payload   []byte `json:"payload"`
+		Signature []byte `json:"signature"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("delegated create escrow payload required")
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid delegated create escrow payload: %w", err)
+	}
+	sp.configureTradeEngine()
+	if _, err := sp.EscrowEngine.CreateWithSignature(payload.Payload, payload.Signature); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyDelegatedEscrowAction backs TxTypeDelegatedReleaseEscrow/
+// RefundEscrow/DisputeEscrow -- see those TxType doc comments and
+// escrow.ActionRelease/Refund/Dispute's escrowActionEnvelope doc comment
+// (native/escrow/engine.go) for the full design. tx.Data is RLP-encoded
+// {EscrowID string, Payload []byte, Signature []byte}, the same shape as
+// applyArbitrate's {EscrowID, Decision, Signatures}. Authorization comes
+// entirely from the participant signature embedded in Payload/Signature,
+// verified by Engine.ReleaseWithSignature/RefundWithSignature/
+// DisputeWithSignature -- sender here is only the relayer paying gas and
+// owning this transaction's nonce, deliberately never checked against the
+// escrow's payer/payee/mediator.
+func (sp *StateProcessor) applyDelegatedEscrowAction(tx *types.Transaction, sender []byte, senderAccount *types.Account, action string) error {
+	var payload struct {
+		EscrowID  string `json:"escrowId"`
+		Payload   []byte `json:"payload"`
+		Signature []byte `json:"signature"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("delegated escrow action payload required")
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid delegated escrow action payload: %w", err)
+	}
+	trimmedID := strings.TrimSpace(payload.EscrowID)
+	if trimmedID == "" {
+		return fmt.Errorf("delegated escrow action escrowId required")
+	}
+	rawID, err := hex.DecodeString(strings.TrimPrefix(trimmedID, "0x"))
+	if err != nil {
+		return fmt.Errorf("delegated escrow action escrowId must be hex: %w", err)
+	}
+	var id [32]byte
+	if len(rawID) != len(id) {
+		return fmt.Errorf("delegated escrow action escrowId must be %d bytes", len(id))
+	}
+	copy(id[:], rawID)
+
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+
+	switch action {
+	case escrow.ActionRelease:
+		if err := sp.EscrowEngine.ReleaseWithSignature(id, payload.Payload, payload.Signature); err != nil {
+			return err
+		}
+	case escrow.ActionRefund:
+		if err := sp.EscrowEngine.RefundWithSignature(id, payload.Payload, payload.Signature); err != nil {
+			return err
+		}
+	case escrow.ActionDispute:
+		if err := sp.EscrowEngine.DisputeWithSignature(id, payload.Payload, payload.Signature); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("delegated escrow action unknown: %s", action)
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyEscrowCreateRealm/UpdateRealm expose native/escrow/engine.go's
+// CreateRealm/UpdateRealm -- see TxTypeEscrowCreateRealm/UpdateRealm's doc
+// comment for why these are role-gated rather than permissionless.
+func (sp *StateProcessor) applyEscrowCreateRealm(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleEscrowRealmAdmin, sender) {
+		return fmt.Errorf("escrowCreateRealm: unauthorized: caller lacks %s", RoleEscrowRealmAdmin)
+	}
+	realm, err := decodeEscrowRealmPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	sp.configureTradeEngine()
+	if _, err := sp.EscrowEngine.CreateRealm(realm); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func (sp *StateProcessor) applyEscrowUpdateRealm(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleEscrowRealmAdmin, sender) {
+		return fmt.Errorf("escrowUpdateRealm: unauthorized: caller lacks %s", RoleEscrowRealmAdmin)
+	}
+	realm, err := decodeEscrowRealmPayload(tx.Data)
+	if err != nil {
+		return err
+	}
+	sp.configureTradeEngine()
+	if _, err := sp.EscrowEngine.UpdateRealm(realm); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func decodeEscrowRealmPayload(data []byte) (*escrow.EscrowRealm, error) {
+	var payload struct {
+		ID                 string   `json:"id"`
+		Threshold          uint32   `json:"threshold"`
+		Scheme             uint8    `json:"scheme"`
+		Members            []string `json:"members"`
+		FeeBps             uint32   `json:"feeBps,omitempty"`
+		FeeRecipient       string   `json:"feeRecipient,omitempty"`
+		Scope              uint8    `json:"scope"`
+		ProviderProfile    string   `json:"providerProfile"`
+		ArbitrationFeeBps  uint32   `json:"arbitrationFeeBps,omitempty"`
+		FeeRecipientBech32 string   `json:"feeRecipientBech32,omitempty"`
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("escrow realm payload required")
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		if rlpErr := rlp.DecodeBytes(data, &payload); rlpErr != nil {
+			return nil, fmt.Errorf("escrow realm payload must be valid JSON or RLP: %w", err)
+		}
+	}
+	trimmedID := strings.TrimSpace(payload.ID)
+	if trimmedID == "" {
+		return nil, fmt.Errorf("escrow realm id required")
+	}
+	if len(payload.Members) == 0 {
+		return nil, fmt.Errorf("escrow realm requires at least one arbitrator member")
+	}
+	members := make([][20]byte, 0, len(payload.Members))
+	for i, m := range payload.Members {
+		addr, err := decodeEscrowRealmAddress(m)
+		if err != nil {
+			return nil, fmt.Errorf("escrow realm member %d: %w", i, err)
+		}
+		members = append(members, addr)
+	}
+	realm := &escrow.EscrowRealm{
+		ID: trimmedID,
+		Arbitrators: &escrow.ArbitratorSet{
+			Scheme:    escrow.ArbitrationScheme(payload.Scheme),
+			Threshold: payload.Threshold,
+			Members:   members,
+		},
+		Metadata: &escrow.EscrowRealmMetadata{
+			Scope:              escrow.EscrowRealmScope(payload.Scope),
+			ProviderProfile:    payload.ProviderProfile,
+			ArbitrationFeeBps:  payload.ArbitrationFeeBps,
+			FeeRecipientBech32: payload.FeeRecipientBech32,
+		},
+	}
+	if payload.FeeBps > 0 || strings.TrimSpace(payload.FeeRecipient) != "" {
+		recipient, err := decodeEscrowRealmAddress(payload.FeeRecipient)
+		if err != nil {
+			return nil, fmt.Errorf("escrow realm fee recipient: %w", err)
+		}
+		realm.FeeSchedule = &escrow.RealmFeeSchedule{FeeBps: payload.FeeBps, Recipient: recipient}
+	}
+	return realm, nil
+}
+
+func decodeEscrowRealmAddress(bech32 string) ([20]byte, error) {
+	var out [20]byte
+	trimmed := strings.TrimSpace(bech32)
+	if trimmed == "" {
+		return out, fmt.Errorf("address required")
+	}
+	addr, err := crypto.DecodeAddress(trimmed)
+	if err != nil {
+		return out, err
+	}
+	b := addr.Bytes()
+	if len(b) != len(out) {
+		return out, fmt.Errorf("address must be %d bytes", len(out))
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+// loyaltyRegistry constructs a fresh native/loyalty.Registry wired to this
+// StateProcessor's current trie, pause state, and event emitter --
+// mirroring configureTradeEngine's shape. Unlike EscrowEngine/TradeEngine,
+// loyalty.Registry bakes its state accessor in at construction time (no
+// SetState setter), so -- exactly like the escrow apply* functions'
+// pattern of constructing a fresh nhbstate.Manager locally rather than
+// caching one -- a new Registry is built per call instead of stored as a
+// StateProcessor field. This must be used for every loyalty TxType
+// dispatch case below; Node.LoyaltyRegistry() (core/node.go) is a separate,
+// unauthenticated, no-emitter instance meant only for legitimate read-only
+// use outside the consensus pipeline and must never be reused here.
+func (sp *StateProcessor) loyaltyRegistry() *loyalty.Registry {
+	manager := nhbstate.NewManager(sp.Trie)
+	r := loyalty.NewRegistry(manager)
+	r.SetPauses(sp.pauses)
+	r.SetEmitter(stateProcessorEmitter{sp: sp})
+	return r
+}
+
+func decodeLoyaltyBusinessID(s string) (loyalty.BusinessID, error) {
+	var id loyalty.BusinessID
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	if trimmed == "" {
+		return id, fmt.Errorf("business id required")
+	}
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return id, fmt.Errorf("invalid business id: %w", err)
+	}
+	if len(raw) != len(id) {
+		return id, fmt.Errorf("business id must be %d bytes", len(id))
+	}
+	copy(id[:], raw)
+	return id, nil
+}
+
+func decodeLoyaltyProgramID(s string) (loyalty.ProgramID, error) {
+	var id loyalty.ProgramID
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	if trimmed == "" {
+		return id, fmt.Errorf("program id required")
+	}
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return id, fmt.Errorf("invalid program id: %w", err)
+	}
+	if len(raw) != len(id) {
+		return id, fmt.Errorf("program id must be %d bytes", len(id))
+	}
+	copy(id[:], raw)
+	return id, nil
+}
+
+// decodeLoyaltyBigInt parses an optional base-10 decimal string field,
+// defaulting to zero when nil/empty and rejecting negative values --
+// mirrors the old loyalty_createProgram RPC handler's parseBigInt.
+func decodeLoyaltyBigInt(s *string) (*big.Int, error) {
+	if s == nil || strings.TrimSpace(*s) == "" {
+		return big.NewInt(0), nil
+	}
+	v, ok := new(big.Int).SetString(strings.TrimSpace(*s), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid decimal amount %q", *s)
+	}
+	if v.Sign() < 0 {
+		return nil, fmt.Errorf("amount %q must be non-negative", *s)
+	}
+	return v, nil
+}
+
+func decodeLoyaltyRewardMode(s string) (loyalty.RewardMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "bps":
+		return loyalty.RewardModeBps, nil
+	case "fixed":
+		return loyalty.RewardModeFixed, nil
+	default:
+		return 0, fmt.Errorf("invalid rewardMode %q", s)
+	}
+}
+
+// applyCreateLoyaltyBusiness handles TxTypeCreateLoyaltyBusiness -- see its
+// doc comment in core/types/transaction.go for why owner is bound to sender
+// rather than accepted from the payload.
+func (sp *StateProcessor) applyCreateLoyaltyBusiness(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty business payload: %w", err)
+	}
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		return fmt.Errorf("loyaltyCreateBusiness: name is required")
+	}
+	owner := bytesToAddress(sender)
+	if _, err := sp.loyaltyRegistry().RegisterBusiness(owner, name); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyLoyaltySetPaymaster handles TxTypeLoyaltySetPaymaster.
+// native/loyalty/registry.go's SetPaymaster performs the caller ==
+// business.Owner || RoleLoyaltyAdmin authorization check internally, so no
+// manual pre-check is needed here.
+func (sp *StateProcessor) applyLoyaltySetPaymaster(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		BusinessID string `json:"businessId"`
+		Paymaster  string `json:"paymaster,omitempty"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty set-paymaster payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	var paymaster [20]byte
+	if trimmed := strings.TrimSpace(payload.Paymaster); trimmed != "" {
+		paymaster, err = decodeEscrowRealmAddress(trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid paymaster address: %w", err)
+		}
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.loyaltyRegistry().SetPaymaster(businessID, caller, paymaster); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyLoyaltyAddMerchant handles TxTypeLoyaltyAddMerchant. UNLIKE
+// SetPaymaster/CreateProgram/UpdateProgram/PauseProgram/ResumeProgram,
+// native/loyalty's AddMerchantAddress takes no caller parameter and
+// performs no authorization check internally -- this function MUST enforce
+// sender == business.Owner || RoleLoyaltyAdmin itself before calling it, or
+// any sender could add a merchant to any business.
+func (sp *StateProcessor) applyLoyaltyAddMerchant(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		BusinessID string `json:"businessId"`
+		Merchant   string `json:"merchant"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty add-merchant payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	merchant, err := decodeEscrowRealmAddress(payload.Merchant)
+	if err != nil {
+		return fmt.Errorf("invalid merchant address: %w", err)
+	}
+	business, ok, err := sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrBusinessNotFound
+	}
+	caller := bytesToAddress(sender)
+	if caller != business.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyAddMerchant: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
+	}
+	if err := sp.loyaltyRegistry().AddMerchantAddress(businessID, merchant); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyLoyaltyRemoveMerchant handles TxTypeLoyaltyRemoveMerchant -- same
+// dispatch-layer authorization gap and manual check as
+// applyLoyaltyAddMerchant (RemoveMerchantAddress also performs no
+// authorization check of its own).
+func (sp *StateProcessor) applyLoyaltyRemoveMerchant(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		BusinessID string `json:"businessId"`
+		Merchant   string `json:"merchant"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty remove-merchant payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	merchant, err := decodeEscrowRealmAddress(payload.Merchant)
+	if err != nil {
+		return fmt.Errorf("invalid merchant address: %w", err)
+	}
+	business, ok, err := sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrBusinessNotFound
+	}
+	caller := bytesToAddress(sender)
+	if caller != business.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyRemoveMerchant: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
+	}
+	if err := sp.loyaltyRegistry().RemoveMerchantAddress(businessID, merchant); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// loyaltyProgramPayload is shared by TxTypeCreateLoyaltyProgram (which reads
+// BusinessID) and TxTypeUpdateLoyaltyProgram (which ignores it -- the
+// program to update is resolved by ID, and its business relationship never
+// changes). Deliberately has no Owner field: Program.Owner is bound to the
+// transaction sender on create and preserved from the existing record on
+// update, never accepted from the payload -- see each TxType's doc comment.
+type loyaltyProgramPayload struct {
+	BusinessID         string  `json:"businessId,omitempty"`
+	ID                 string  `json:"id"`
+	Pool               string  `json:"pool"`
+	TokenSymbol        string  `json:"tokenSymbol"`
+	RewardMode         string  `json:"rewardMode,omitempty"`
+	AccrualBps         uint32  `json:"accrualBps,omitempty"`
+	FixedRewardWei     *string `json:"fixedRewardWei,omitempty"`
+	MinSpendWei        *string `json:"minSpendWei,omitempty"`
+	CapPerTx           *string `json:"capPerTx,omitempty"`
+	DailyCapUser       *string `json:"dailyCapUser,omitempty"`
+	DailyCapProgram    *string `json:"dailyCapProgram,omitempty"`
+	EpochCapProgram    *string `json:"epochCapProgram,omitempty"`
+	IssuanceCapUser    *string `json:"issuanceCapUser,omitempty"`
+	EpochLengthSeconds *uint64 `json:"epochLengthSeconds,omitempty"`
+	StartTime          *uint64 `json:"startTime,omitempty"`
+	EndTime            *uint64 `json:"endTime,omitempty"`
+	Active             *bool   `json:"active,omitempty"`
+}
+
+// buildLoyaltyProgram decodes every cap/token/timing field common to create
+// and update -- the pieces that differ (ID/Owner binding, the
+// merchant-membership vs existing-owner authorization check) are handled by
+// each caller.
+func buildLoyaltyProgram(payload *loyaltyProgramPayload) (*loyalty.Program, error) {
+	pool, err := decodeEscrowRealmAddress(payload.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pool address: %w", err)
+	}
+	rewardMode, err := decodeLoyaltyRewardMode(payload.RewardMode)
+	if err != nil {
+		return nil, err
+	}
+	fixedReward, err := decodeLoyaltyBigInt(payload.FixedRewardWei)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fixedRewardWei: %w", err)
+	}
+	minSpend, err := decodeLoyaltyBigInt(payload.MinSpendWei)
+	if err != nil {
+		return nil, fmt.Errorf("invalid minSpendWei: %w", err)
+	}
+	capPerTx, err := decodeLoyaltyBigInt(payload.CapPerTx)
+	if err != nil {
+		return nil, fmt.Errorf("invalid capPerTx: %w", err)
+	}
+	dailyCapUser, err := decodeLoyaltyBigInt(payload.DailyCapUser)
+	if err != nil {
+		return nil, fmt.Errorf("invalid dailyCapUser: %w", err)
+	}
+	dailyCapProgram, err := decodeLoyaltyBigInt(payload.DailyCapProgram)
+	if err != nil {
+		return nil, fmt.Errorf("invalid dailyCapProgram: %w", err)
+	}
+	epochCapProgram, err := decodeLoyaltyBigInt(payload.EpochCapProgram)
+	if err != nil {
+		return nil, fmt.Errorf("invalid epochCapProgram: %w", err)
+	}
+	issuanceCapUser, err := decodeLoyaltyBigInt(payload.IssuanceCapUser)
+	if err != nil {
+		return nil, fmt.Errorf("invalid issuanceCapUser: %w", err)
+	}
+	var epochLength, startTime, endTime uint64
+	if payload.EpochLengthSeconds != nil {
+		epochLength = *payload.EpochLengthSeconds
+	}
+	if payload.StartTime != nil {
+		startTime = *payload.StartTime
+	}
+	if payload.EndTime != nil {
+		endTime = *payload.EndTime
+	}
+	active := true
+	if payload.Active != nil {
+		active = *payload.Active
+	}
+	return &loyalty.Program{
+		Pool:               pool,
+		TokenSymbol:        payload.TokenSymbol,
+		AccrualBps:         payload.AccrualBps,
+		MinSpendWei:        minSpend,
+		CapPerTx:           capPerTx,
+		DailyCapUser:       dailyCapUser,
+		DailyCapProgram:    dailyCapProgram,
+		EpochCapProgram:    epochCapProgram,
+		EpochLengthSeconds: epochLength,
+		IssuanceCapUser:    issuanceCapUser,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		Active:             active,
+		RewardMode:         rewardMode,
+		FixedRewardWei:     fixedReward,
+	}, nil
+}
+
+// applyCreateLoyaltyProgram handles TxTypeCreateLoyaltyProgram. Program.Owner
+// is bound to the sender; authorization requires the sender already be a
+// registered merchant of the named business (matching the old RPC's
+// isMerchantOf check -- a business's own Owner is NOT automatically its own
+// merchant unless explicitly added via TxTypeLoyaltyAddMerchant, preserved
+// exactly), or hold RoleLoyaltyAdmin as an override.
+func (sp *StateProcessor) applyCreateLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload loyaltyProgramPayload
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty program payload: %w", err)
+	}
+	businessID, err := decodeLoyaltyBusinessID(payload.BusinessID)
+	if err != nil {
+		return err
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	business, ok, err := sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrBusinessNotFound
+	}
+	callerAddr := bytesToAddress(sender)
+	isMerchant := false
+	for _, merchant := range business.Merchants {
+		if merchant == callerAddr {
+			isMerchant = true
+			break
+		}
+	}
+	if !isMerchant && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyCreateProgram: unauthorized: caller is not a registered merchant of the business and lacks %s", RoleLoyaltyAdmin)
+	}
+	program, err := buildLoyaltyProgram(&payload)
+	if err != nil {
+		return err
+	}
+	program.ID = programID
+	program.Owner = callerAddr
+	if err := sp.loyaltyRegistry().CreateProgram(callerAddr, program); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyUpdateLoyaltyProgram handles TxTypeUpdateLoyaltyProgram. Full-replace
+// semantics -- every mutable field is overwritten from the payload, so a
+// client must resend the complete desired program state, not a partial
+// patch. Authorization is checked against the EXISTING program's real
+// owner loaded from state (never the payload); ID/Owner are always taken
+// from the existing record, never the payload, so they cannot change.
+func (sp *StateProcessor) applyUpdateLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload loyaltyProgramPayload
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty program payload: %w", err)
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	existing, ok, err := sp.LoyaltyProgramByID(programID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return loyalty.ErrProgramNotFound
+	}
+	caller := bytesToAddress(sender)
+	if caller != existing.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+		return fmt.Errorf("loyaltyUpdateProgram: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
+	}
+	program, err := buildLoyaltyProgram(&payload)
+	if err != nil {
+		return err
+	}
+	program.ID = existing.ID
+	program.Owner = existing.Owner
+	if err := sp.loyaltyRegistry().UpdateProgram(caller, program); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyPauseLoyaltyProgram handles TxTypePauseLoyaltyProgram.
+// native/loyalty/registry_program.go's PauseProgram performs the caller ==
+// program.Owner || RoleLoyaltyAdmin authorization check internally and is
+// idempotent if the program is already paused.
+func (sp *StateProcessor) applyPauseLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty pause-program payload: %w", err)
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.loyaltyRegistry().PauseProgram(caller, programID); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applyResumeLoyaltyProgram handles TxTypeResumeLoyaltyProgram -- mirror of
+// applyPauseLoyaltyProgram (ResumeProgram performs the same authorization
+// check internally and is idempotent if already active).
+func (sp *StateProcessor) applyResumeLoyaltyProgram(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if err := decodeCreateEscrowPayload(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid loyalty resume-program payload: %w", err)
+	}
+	programID, err := decodeLoyaltyProgramID(payload.ID)
+	if err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.loyaltyRegistry().ResumeProgram(caller, programID); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// --- NEW: Lock -> Dispute -> Arbitrate flow ---
+
+func (sp *StateProcessor) applyLockEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	id, err := decodeEscrowID(tx.Data)
+	if err != nil {
+		return err
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Fund(id, caller); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+func (sp *StateProcessor) applyDisputeEscrow(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	id, err := decodeEscrowID(tx.Data)
+	if err != nil {
+		return err
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	caller := bytesToAddress(sender)
+	if err := sp.EscrowEngine.Dispute(id, caller, ""); err != nil {
+		return err
+	}
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
+}
+
+// applySwapPayoutReceipt records the outcome of an off-chain stablecoin
+// payout against a swap intent. Authorization is checked against the
+// transaction's recovered signer holding RoleSwapPayoutAttestor -- the same
+// real, cryptographic role applyAttestRedemption already uses for the
+// equivalent operation (see that function's doc comment) -- not against
+// MsgPayoutReceipt.Authority, a payload field with no binding to who
+// actually signed the transaction. Previously that field alone gated this
+// call, and it defaulted to accepting the literal string "treasury" with
+// zero configuration, so any account that could produce any validly signed
+// transaction could record arbitrary payout receipts (docs/issue30.md item
+// 27). The Authority field is preserved on the message for logging/audit
+// purposes only now, never as an authorization check.
+func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("swap: transaction required")
+	}
+	sender, err := tx.From()
+	if err != nil {
+		return fmt.Errorf("swap: recover signer: %w", err)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleSwapPayoutAttestor, sender) {
+		return fmt.Errorf("swap: unauthorized payout attestor")
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("swap: payout receipt payload required")
+	}
+	var packed anypb.Any
+	if err := proto.Unmarshal(tx.Data, &packed); err != nil {
+		return fmt.Errorf("swap: decode payload: %w", err)
+	}
+	if url := packed.GetTypeUrl(); url != "type.googleapis.com/swap.v1.MsgPayoutReceipt" {
+		return fmt.Errorf("swap: unsupported payload %s", url)
+	}
+	var msg swapv1.MsgPayoutReceipt
+	if err := packed.UnmarshalTo(&msg); err != nil {
+		return fmt.Errorf("swap: decode payout receipt: %w", err)
+	}
+	protoReceipt := msg.GetReceipt()
+	if protoReceipt == nil {
+		return fmt.Errorf("swap: receipt required")
+	}
+	receipt, err := swapPayoutReceiptFromProto(protoReceipt)
+	if err != nil {
+		return err
+	}
+	store := swap.NewStableStore(manager)
+	if err := store.RecordPayoutReceipt(receipt); err != nil {
+		return fmt.Errorf("swap: record payout receipt: %w", err)
+	}
+	return nil
+}
+
+func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt, error) {
+	if msg == nil {
+		return nil, fmt.Errorf("swap: receipt required")
+	}
+	trimmedID := strings.TrimSpace(msg.GetIntentId())
+	if trimmedID == "" {
+		return nil, fmt.Errorf("swap: intent id required")
+	}
+	stableAmount, ok := new(big.Int).SetString(strings.TrimSpace(msg.GetStableAmount()), 10)
+	if !ok {
+		return nil, fmt.Errorf("swap: invalid stable amount %q", msg.GetStableAmount())
+	}
+	nhbAmount, ok := new(big.Int).SetString(strings.TrimSpace(msg.GetNhbAmount()), 10)
+	if !ok {
+		return nil, fmt.Errorf("swap: invalid nhb amount %q", msg.GetNhbAmount())
+	}
+	receipt := &swap.PayoutReceipt{
+		ReceiptID:    strings.TrimSpace(msg.GetReceiptId()),
+		IntentID:     trimmedID,
+		StableAsset:  swap.StableAsset(strings.ToUpper(strings.TrimSpace(msg.GetStableAsset()))),
+		StableAmount: stableAmount,
+		NhbAmount:    nhbAmount,
+		TxHash:       strings.TrimSpace(msg.GetTxHash()),
+		EvidenceURI:  strings.TrimSpace(msg.GetEvidenceUri()),
+		SettledAt:    msg.GetSettledAt(),
+	}
+	return receipt, nil
+}
+
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *types.Account, releaseToBuyer bool) error {
+	_ = releaseToBuyer
+	var payload struct {
+		EscrowID   string   `json:"escrowId"`
+		Decision   []byte   `json:"decision"`
+		Signatures []string `json:"signatures"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("arbitration payload required")
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid arbitration payload: %w", err)
+	}
+	trimmedID := strings.TrimSpace(payload.EscrowID)
+	if trimmedID == "" {
+		return fmt.Errorf("arbitration escrowId required")
+	}
+	rawID, err := hex.DecodeString(strings.TrimPrefix(trimmedID, "0x"))
+	if err != nil {
+		return fmt.Errorf("arbitration escrowId must be hex: %w", err)
+	}
+	var id [32]byte
+	if len(rawID) != len(id) {
+		return fmt.Errorf("arbitration escrowId must be %d bytes", len(id))
+	}
+	copy(id[:], rawID)
+	if len(payload.Decision) == 0 {
+		return fmt.Errorf("arbitration decision payload required")
+	}
+	if len(payload.Signatures) == 0 {
+		return fmt.Errorf("arbitration signature bundle required")
+	}
+	sigs := make([][]byte, len(payload.Signatures))
+	for i, sigHex := range payload.Signatures {
+		trimmed := strings.TrimSpace(sigHex)
+		decoded, err := hex.DecodeString(strings.TrimPrefix(trimmed, "0x"))
+		if err != nil {
+			return fmt.Errorf("invalid arbitration signature %d: %w", i, err)
+		}
+		sigs[i] = decoded
+	}
+	_, manager := sp.configureTradeEngine()
+	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
+		return err
+	}
+	if err := sp.EscrowEngine.ResolveWithSignatures(id, []byte(payload.Decision), sigs); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applySwapMint and applySwapBurn are deliberately disabled -- see
+// docs/issue30.md item 1. The nhbportal frontend was calling these for the
+// ZNHB-purchase UI flow, but as written applySwapBurn destroyed the sender's
+// NHB with no credit to anything (it only ever incremented a nonce on the
+// mint side), and the frontend's JSON payload encoding didn't even match
+// this RLP decode. Fail loudly rather than silently destroy funds. The
+// correct replacement is TxTypeBuyZNHB / applyBuyZNHB below; nhbportal needs
+// to be repointed at it before either of these can safely return to service
+// for their original (pre-existing, stablecoin-deposit-voucher) purpose.
+func (sp *StateProcessor) applySwapMint(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	return fmt.Errorf("swap: native on-chain swap mint is disabled -- use the buyZNHB transaction type instead")
+}
+
+func (sp *StateProcessor) applySwapBurn(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	return fmt.Errorf("swap: native on-chain swap burn is disabled -- use the buyZNHB transaction type instead")
+}
+
+// applyBuyZNHB implements the founder-specified ZNHB purchase flow, priced
+// by the Genesis Treasury Distribution Curve (core/tokenomics/curve): the
+// buyer's NHB moves to the admin wallet (platform revenue), and the exact
+// curve-computed amount of ZNHB moves from the treasury's Sale Pool
+// sub-ledger to the buyer. This is one of two on-chain paths (together with
+// applySwapVoucherMintTransaction) that move ZNHB out of the Sale Pool, and
+// it is strictly one-directional through THIS function -- there is
+// deliberately no corresponding path that lets a buyer convert ZNHB back
+// into NHB through the admin wallet, since that would let unbacked value
+// leave the system disguised as NHB (which is otherwise always backed 1:1
+// by NOWPayments-custodied USDT/USDC). ZNHB, once purchased, moves
+// peer-to-peer (ordinary TxTypeTransferZNHB) or back into the treasury only
+// via the formulaic buyback -- never through this function.
+//
+// The buyer specifies the ZNHB amount they want and a maximum NHB they are
+// willing to pay (slippage protection); the chain computes the exact cost
+// on-chain from the curve, using cumulative_sale_distributed as it stands
+// at execution time, and rejects the purchase if the cost exceeds the
+// buyer's cap. This is a breaking change from the prior payload shape
+// ({NHBAmount, ZNHBAmount}, a pre-agreed pair trusted with zero on-chain
+// price enforcement) -- nhbportal's buyZNHB() caller must be updated in
+// lockstep.
+func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	if !sp.hasAdminWallet {
+		return fmt.Errorf("buyZNHB: no admin wallet configured for this network")
+	}
+	var payload struct {
+		ZNHBAmount   *big.Int `json:"znhbAmount"`
+		MaxNHBAmount *big.Int `json:"maxNHBAmount"`
+		QuoteID      string   `json:"quoteId,omitempty"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("buyZNHB: decode payload: %w", err)
+	}
+	if payload.ZNHBAmount == nil || payload.ZNHBAmount.Sign() <= 0 {
+		return fmt.Errorf("buyZNHB: znhbAmount must be positive")
+	}
+	if payload.MaxNHBAmount == nil || payload.MaxNHBAmount.Sign() <= 0 {
+		return fmt.Errorf("buyZNHB: maxNHBAmount must be positive")
+	}
+	if bytes.Equal(sender, sp.adminWallet[:]) {
+		return fmt.Errorf("buyZNHB: the admin wallet cannot buy from itself")
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	c0, err := manager.ZNHBCumulativeSaleDistributed()
+	if err != nil {
+		return fmt.Errorf("buyZNHB: load cumulative sale distributed: %w", err)
+	}
+	c1 := new(big.Int).Add(c0, payload.ZNHBAmount)
+
+	params := curve.Default()
+	costRat, err := params.Cost(c0, c1)
+	if err != nil {
+		if errors.Is(err, curve.ErrExceedsSalePool) {
+			return fmt.Errorf("buyZNHB: purchase would exceed the treasury Sale Pool's remaining inventory")
+		}
+		return fmt.Errorf("buyZNHB: compute cost: %w", err)
+	}
+	nhbCost := curve.RoundCostUp(costRat)
+	if nhbCost.Cmp(payload.MaxNHBAmount) > 0 {
+		return fmt.Errorf("buyZNHB: price moved -- cost %s exceeds your maximum %s, please refresh your quote", nhbCost, payload.MaxNHBAmount)
+	}
+
+	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(nhbCost) < 0 {
+		return fmt.Errorf("buyZNHB: insufficient NHB balance")
+	}
+
+	salePoolBalance, err := manager.ZNHBSalePoolBalance()
+	if err != nil {
+		return fmt.Errorf("buyZNHB: load sale pool balance: %w", err)
+	}
+	if salePoolBalance.Cmp(payload.ZNHBAmount) < 0 {
+		return fmt.Errorf("buyZNHB: treasury sale pool has insufficient ZNHB")
+	}
+
+	adminAccount, err := sp.getAccount(sp.adminWallet[:])
+	if err != nil {
+		return fmt.Errorf("buyZNHB: load admin wallet: %w", err)
+	}
+	if adminAccount.BalanceZNHB == nil || adminAccount.BalanceZNHB.Cmp(payload.ZNHBAmount) < 0 {
+		return fmt.Errorf("buyZNHB: admin wallet has insufficient ZNHB")
+	}
+
+	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, nhbCost)
+	if senderAccount.BalanceZNHB == nil {
+		senderAccount.BalanceZNHB = big.NewInt(0)
+	}
+	senderAccount.BalanceZNHB = new(big.Int).Add(senderAccount.BalanceZNHB, payload.ZNHBAmount)
+	senderAccount.Nonce++
+
+	if adminAccount.BalanceNHB == nil {
+		adminAccount.BalanceNHB = big.NewInt(0)
+	}
+	adminAccount.BalanceNHB = new(big.Int).Add(adminAccount.BalanceNHB, nhbCost)
+	adminAccount.BalanceZNHB = new(big.Int).Sub(adminAccount.BalanceZNHB, payload.ZNHBAmount)
+
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return fmt.Errorf("buyZNHB: persist buyer: %w", err)
+	}
+	if err := sp.setAccount(sp.adminWallet[:], adminAccount); err != nil {
+		return fmt.Errorf("buyZNHB: persist admin wallet: %w", err)
+	}
+
+	newSalePoolBalance := new(big.Int).Sub(salePoolBalance, payload.ZNHBAmount)
+	if err := manager.ZNHBSetSalePoolBalance(newSalePoolBalance); err != nil {
+		return fmt.Errorf("buyZNHB: update sale pool balance: %w", err)
+	}
+	if err := manager.ZNHBSetCumulativeSaleDistributed(c1); err != nil {
+		return fmt.Errorf("buyZNHB: advance cumulative sale distributed: %w", err)
+	}
+
+	var buyerAddr [20]byte
+	copy(buyerAddr[:], sender)
+	evt := events.BuyZNHBRecorded{
+		Buyer:      buyerAddr,
+		AdminAddr:  sp.adminWallet,
+		NHBAmount:  nhbCost,
+		ZNHBAmount: payload.ZNHBAmount,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+// applySetRewardBeneficiary lets a validator redirect its own epoch reward
+// payouts (distributeValidatorRewards, core/rewards_logic.go) to a wallet it
+// chooses -- typically one it can actually access day to day, since the
+// validator's own signing key is meant to stay on the validator server and
+// never be loaded into a convenience wallet. Only the account whose own
+// signature authorizes this transaction can set its beneficiary; it is
+// never inferable from delegation, which would otherwise let anyone hijack
+// a validator's future rewards simply by delegating to it first.
+func (sp *StateProcessor) applySetRewardBeneficiary(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		Beneficiary string `json:"beneficiary"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("setRewardBeneficiary: decode payload: %w", err)
+	}
+	trimmed := strings.TrimSpace(payload.Beneficiary)
+	if trimmed == "" {
+		// An empty beneficiary clears the redirect -- rewards resume being
+		// credited to this validator's own address.
+		senderAccount.RewardBeneficiary = nil
+		senderAccount.Nonce++
+		return sp.setAccount(sender, senderAccount)
+	}
+	beneficiary, err := crypto.DecodeAddress(trimmed)
+	if err != nil {
+		return fmt.Errorf("setRewardBeneficiary: invalid beneficiary address: %w", err)
+	}
+	beneficiaryBytes := beneficiary.Bytes()
+	if bytes.Equal(beneficiaryBytes, sender) {
+		return fmt.Errorf("setRewardBeneficiary: beneficiary cannot be the validator's own address")
+	}
+	senderAccount.RewardBeneficiary = append([]byte(nil), beneficiaryBytes...)
+	senderAccount.Nonce++
+	return sp.setAccount(sender, senderAccount)
+}
+
+// RoleSwapPayoutAttestor is the on-chain role required to call
+// applyAttestRedemption -- granted the same way MINTER_NHB/MINTER_ZNHB are,
+// via genesis or governance roles, to whichever off-chain payout operator's
+// own dedicated key is designated for it. Deliberately checked via
+// nhbstate.Manager.HasRole (a real
+// cryptographic role held by the transaction's recovered signer), not a
+// client-supplied "authority" string like applySwapPayoutReceipt's
+// MsgPayoutReceipt.Authority field -- that field is never compared against
+// the recovered signer at all, so anyone who can produce any validly signed
+// transaction can claim to be "treasury" (docs/issue30.md item 27). This
+// mechanism does not reuse that pattern.
+const RoleSwapPayoutAttestor = "ROLE_SWAP_PAYOUT_ATTESTOR"
+
+// RoleEscrowRealmAdmin gates TxTypeEscrowCreateRealm/UpdateRealm (see those
+// TxType doc comments in core/types/transaction.go). Same genesis/
+// governance-granted role pattern as RoleSwapPayoutAttestor.
+const RoleEscrowRealmAdmin = "ROLE_ESCROW_REALM_ADMIN"
+
+// RoleLoyaltyAdmin gates the loyalty TxType family (0x42-0x49, see their
+// doc comments in core/types/transaction.go) as the admin-override half of
+// each operation's authorization check. This is NOT a new role -- it is the
+// exact same "ROLE_LOYALTY_ADMIN" string native/loyalty/registry.go's
+// unexported roleLoyaltyAdmin constant already checks internally via
+// HasRole for SetPaymaster/CreateProgram/UpdateProgram/PauseProgram/
+// ResumeProgram; it is declared here, exported, only because
+// applyLoyaltyAddMerchant/applyLoyaltyRemoveMerchant must replicate that
+// same check by hand (the underlying registry methods take no caller
+// parameter and perform no authorization check of their own -- see those
+// TxTypes' doc comments) and need a named constant to reference rather than
+// a bare string literal. A role granted once (genesis or governance,
+// manager.SetRole("ROLE_LOYALTY_ADMIN", addr)) authorizes both the
+// registry-internal checks and this dispatch-layer-only check uniformly.
+const RoleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
+
+// applyRedeemNHB lets a user burn their own NHB to request an off-chain
+// stablecoin payout (swap-out). Per the founder's explicit design, the burn
+// is immediate and irreversible the moment this transaction applies -- NHB
+// is not held in escrow pending payout confirmation. The off-chain payout
+// is handled by whichever service holds RoleSwapPayoutAttestor; it uses the
+// RedemptionRequest this creates to track the request and, once the payout
+// completes or fails, submits a TxTypeAttestRedemption to record the
+// outcome. See docs/issue30.md item 5/35.
+func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	var payload struct {
+		DestinationAsset   string `json:"destinationAsset"`
+		DestinationAddress string `json:"destinationAddress"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("redeemNHB: decode payload: %w: %w", err, ErrRedeemInvalidPayload)
+	}
+	destAsset := strings.ToUpper(strings.TrimSpace(payload.DestinationAsset))
+	if destAsset == "" {
+		return fmt.Errorf("redeemNHB: destinationAsset required: %w", ErrRedeemInvalidPayload)
+	}
+	destAddr := strings.TrimSpace(payload.DestinationAddress)
+	if destAddr == "" {
+		return fmt.Errorf("redeemNHB: destinationAddress required: %w", ErrRedeemInvalidPayload)
+	}
+	if tx.Value == nil || tx.Value.Sign() <= 0 {
+		return fmt.Errorf("redeemNHB: amount must be positive: %w", ErrRedeemInvalidPayload)
+	}
+	if senderAccount.BalanceNHB == nil || senderAccount.BalanceNHB.Cmp(tx.Value) < 0 {
+		return fmt.Errorf("redeemNHB: insufficient NHB balance: %w", ErrRedeemInsufficientBalance)
+	}
+
+	// Pause guard: gates only new burns (this function), never
+	// applyAttestRedemption -- an in-flight payout that has already burned
+	// its NHB must still be able to close out cleanly while new burns are
+	// paused. See moduleSwapRedeem's doc comment in core/node.go.
+	if err := nativecommon.Guard(sp.pauses, moduleSwapRedeem); err != nil {
+		return err
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+
+	var senderAddr [20]byte
+	copy(senderAddr[:], sender)
+
+	// Circuit breaker: a brand-new, unproven money-moving pathway gets a
+	// conservative per-tx and per-address daily/monthly cap, checked before
+	// the burn is ever applied. See native/swap/redeem_risk.go -- this is a
+	// deliberate clone of, not a reuse of, native/swap/risk.go's mint-side
+	// RiskEngine, so mint and redeem activity for the same address never
+	// share a counter. The caps themselves are governance-controlled (see
+	// core/swap_risk_params.go) -- read fresh from state on every
+	// transaction so a passed policy.swapRiskParams proposal takes effect
+	// immediately, network-wide, with no node restart.
+	redeemRiskParams, err := sp.effectiveRedeemRiskParameters(manager)
+	if err != nil {
+		return fmt.Errorf("redeemNHB: risk config: %w", err)
+	}
+	redeemRiskEngine := swap.NewRedeemRiskEngine(manager)
+	redeemRiskEngine.SetClock(func() time.Time { return sp.blockTimestamp() })
+	violation, err := redeemRiskEngine.CheckLimits(senderAddr, tx.Value, redeemRiskParams)
+	if err != nil {
+		return fmt.Errorf("redeemNHB: check risk limits: %w", err)
+	}
+	if violation != nil {
+		return fmt.Errorf("redeemNHB: %w", violation)
+	}
+
+	txHash, err := tx.Hash()
+	if err != nil {
+		return fmt.Errorf("redeemNHB: compute tx hash: %w", err)
+	}
+	requestID := nhbstate.RedemptionRequestID(sender, txHash)
+
+	if _, exists, err := manager.GetRedemptionRequest(requestID); err != nil {
+		return fmt.Errorf("redeemNHB: check existing request: %w", err)
+	} else if exists {
+		return fmt.Errorf("redeemNHB: request %s already exists: %w", requestID, ErrRedeemRequestExists)
+	}
+
+	// Burn: reduce the sender's balance, credit nothing. Only NHB is ever
+	// destroyed this way -- NOWPayments handles the actual off-chain
+	// release, there is no on-chain path back from a stablecoin to NHB.
+	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, tx.Value)
+	senderAccount.Nonce++
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return fmt.Errorf("redeemNHB: persist sender: %w", err)
+	}
+
+	// Supply tracking: the burn above must be reflected in the tracked total
+	// NHB supply, mirroring MintToken's AdjustTokenSupply call on the mint
+	// side (state_transition.go's MintToken) so mint and burn stay
+	// symmetric in the same consensus state trie.
+	burnDelta := new(big.Int).Neg(tx.Value)
+	totalSupply, err := manager.AdjustTokenSupply("NHB", burnDelta)
+	if err != nil {
+		return fmt.Errorf("redeemNHB: adjust token supply: %w", err)
+	}
+	sp.recordTokenSupplyChange("NHB", burnDelta, totalSupply, events.SupplyReasonBurn)
+
+	if err := redeemRiskEngine.RecordRedeem(senderAddr, tx.Value); err != nil {
+		return fmt.Errorf("redeemNHB: record risk usage: %w", err)
+	}
+
+	request := &nhbstate.StoredRedemptionRequest{
+		RequestID:          requestID,
+		Account:            append([]byte(nil), sender...),
+		NHBAmountWei:       tx.Value.String(),
+		DestinationAsset:   destAsset,
+		DestinationAddress: destAddr,
+		Status:             string(nhbstate.RedemptionStatusPending),
+		CreatedAt:          uint64(sp.blockTimestamp().Unix()),
+	}
+	if err := manager.PutRedemptionRequest(request); err != nil {
+		return fmt.Errorf("redeemNHB: persist request: %w", err)
+	}
+
+	evt := events.RedeemNHBRequested{
+		RequestID:          requestID,
+		Account:            senderAddr,
+		NHBAmount:          new(big.Int).Set(tx.Value),
+		DestinationAsset:   destAsset,
+		DestinationAddress: destAddr,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+// applyAttestRedemption lets an address holding RoleSwapPayoutAttestor
+// confirm or fail a pending redemption's off-chain payout. This is how the
+// off-chain payout service reports the outcome of its payout attempt back
+// on-chain. A failure automatically refunds the burned NHB back to the
+// original redeemer in this same transaction -- see refundFailedRedemption
+// below and nhbstate.RedemptionStatusFailed's doc comment for why this is
+// safe to do unconditionally, exactly once, with no separate "already
+// refunded" flag: manager.UpdateRedemptionStatus is a one-shot pending->
+// terminal transition, so any second attestRedemption call for a requestID
+// that has already gone to paid or failed is rejected there, before this
+// function ever reaches the refund step again.
+//
+// The attestor is trusted to report the truth (this is the same trust
+// already required for a "paid" attestation, which likewise cannot be
+// independently verified on-chain) -- a compromised attestor key could
+// falsely attest "failed" for a request that was, in reality, already paid
+// out off-chain, refunding NHB the redeemer already received in USDT. This
+// is a real escalation in what a compromised attestor key can do (from
+// "the record is wrong" to "a double-spend"), not a new class of risk: the
+// attestor role already had unilateral, unverifiable control over every
+// redemption's terminal outcome before this change. Mitigate at the
+// operational layer (key custody, anomaly monitoring on refund volume),
+// not by weakening this one-shot on-chain guarantee.
+func (sp *StateProcessor) applyAttestRedemption(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	if !manager.HasRole(RoleSwapPayoutAttestor, sender) {
+		return fmt.Errorf("attestRedemption: unauthorized attestor: %w", ErrRedeemUnauthorizedAttestor)
+	}
+	var payload struct {
+		RequestID       string `json:"requestId"`
+		Status          string `json:"status"`
+		PayoutReference string `json:"payoutReference,omitempty"`
+		FailureReason   string `json:"failureReason,omitempty"`
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("attestRedemption: decode payload: %w: %w", err, ErrRedeemInvalidPayload)
+	}
+	requestID := strings.TrimSpace(payload.RequestID)
+	if requestID == "" {
+		return fmt.Errorf("attestRedemption: requestId required: %w", ErrRedeemInvalidPayload)
+	}
+	status := nhbstate.RedemptionStatus(strings.ToLower(strings.TrimSpace(payload.Status)))
+	if status != nhbstate.RedemptionStatusPaid && status != nhbstate.RedemptionStatusFailed {
+		return fmt.Errorf("attestRedemption: status must be paid or failed: %w", ErrRedeemInvalidPayload)
+	}
+	if status == nhbstate.RedemptionStatusPaid && strings.TrimSpace(payload.PayoutReference) == "" {
+		return fmt.Errorf("attestRedemption: payoutReference required when marking paid: %w", ErrRedeemInvalidPayload)
+	}
+
+	// Read the original request BEFORE transitioning it. Account and
+	// NHBAmountWei are frozen at burn time (PutRedemptionRequest is
+	// create-once; UpdateRedemptionStatus never touches either field), so
+	// this pre-read can never be influenced by anything in this call --
+	// it's exactly the amount that was actually burned, for exactly the
+	// account that burned it, regardless of what the attestor's payload
+	// says. Nothing writes to state between this read and the
+	// UpdateRedemptionStatus call below (state transitions apply
+	// sequentially, never concurrently), so there is no risk of it
+	// observing stale data.
+	stored, exists, err := manager.GetRedemptionRequest(requestID)
+	if err != nil {
+		return fmt.Errorf("attestRedemption: load request: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("attestRedemption: request %s not found: %w", requestID, ErrRedeemInvalidPayload)
+	}
+
+	settledAt := uint64(sp.blockTimestamp().Unix())
+	if err := manager.UpdateRedemptionStatus(requestID, status, settledAt, payload.PayoutReference, payload.FailureReason); err != nil {
+		return fmt.Errorf("attestRedemption: %w", err)
+	}
+
+	// Refund: see this function's doc comment for why it is safe to run
+	// unconditionally here, exactly once per requestID.
+	var refundedAmount *big.Int
+	if status == nhbstate.RedemptionStatusFailed {
+		refundedAmount, err = sp.refundFailedRedemption(manager, stored, requestID)
+		if err != nil {
+			return fmt.Errorf("attestRedemption: refund: %w", err)
+		}
+	}
+
+	if err := sp.incrementNativeAccountNonce(sender); err != nil {
+		return fmt.Errorf("attestRedemption: increment nonce: %w", err)
+	}
+
+	var attestorAddr [20]byte
+	copy(attestorAddr[:], sender)
+	evt := events.RedemptionAttested{
+		RequestID:       requestID,
+		Attestor:        attestorAddr,
+		Status:          string(status),
+		PayoutReference: payload.PayoutReference,
+		FailureReason:   payload.FailureReason,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	if refundedAmount != nil {
+		var acctAddr [20]byte
+		copy(acctAddr[:], stored.Account)
+		if refundEvt := (events.RedemptionRefunded{
+			RequestID: requestID,
+			Account:   acctAddr,
+			NHBAmount: refundedAmount,
+		}.Event()); refundEvt != nil {
+			sp.AppendEvent(refundEvt)
+		}
+	}
+	return nil
+}
+
+// refundFailedRedemption credits requestID's original redeemer with exactly
+// the NHB amount recorded at burn time (stored.NHBAmountWei, immutable since
+// PutRedemptionRequest -- never the attestor's own payload) and mirrors the
+// credit into the tracked NHB total supply, exactly reversing
+// applyRedeemNHB's burn. Callers must have already durably transitioned the
+// request to RedemptionStatusFailed via manager.UpdateRedemptionStatus in
+// this same call -- see applyAttestRedemption's doc comment for why that
+// makes this exactly-once regardless of how many attestRedemption
+// transactions are ever submitted for the same requestID.
+func (sp *StateProcessor) refundFailedRedemption(manager *nhbstate.Manager, stored *nhbstate.StoredRedemptionRequest, requestID string) (*big.Int, error) {
+	amount, ok := new(big.Int).SetString(strings.TrimSpace(stored.NHBAmountWei), 10)
+	if !ok || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid stored NHB amount %q for request %s", stored.NHBAmountWei, requestID)
+	}
+	if len(stored.Account) == 0 {
+		return nil, fmt.Errorf("missing account for request %s", requestID)
+	}
+	account, err := sp.getAccount(stored.Account)
+	if err != nil {
+		return nil, fmt.Errorf("load account: %w", err)
+	}
+	if account.BalanceNHB == nil {
+		account.BalanceNHB = big.NewInt(0)
+	}
+	account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	if err := sp.setAccount(stored.Account, account); err != nil {
+		return nil, fmt.Errorf("persist account: %w", err)
+	}
+
+	totalSupply, err := manager.AdjustTokenSupply("NHB", amount)
+	if err != nil {
+		return nil, fmt.Errorf("adjust token supply: %w", err)
+	}
+	sp.recordTokenSupplyChange("NHB", amount, totalSupply, events.SupplyReasonRedeemRefund)
+	return amount, nil
+}
+
+func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big.Int) (*types.Account, error) {
+	if len(delegator) == 0 {
+		return nil, fmt.Errorf("delegator address required")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("stake must be positive")
+	}
+	// The admin/treasury wallet's staking/delegating activity is safe: the
+	// invariant this used to break (see CheckZNHBSupplyInvariant) now
+	// accounts for BalanceZNHB, LockedZNHB, and PendingUnbonds together, so
+	// self-staking, unstaking, and delegating out to another validator all
+	// move this wallet's own ZNHB between fields the invariant already
+	// sums -- none of it can escape unaccounted for. (Account.Stake is
+	// deliberately excluded from that sum instead, since third parties can
+	// delegate in to this wallet with no eligibility check and that must
+	// never be treated as treasury-owned funds -- see adminZNHBOwned's doc
+	// comment.) This is what actually halted the chain on 2026-08-26: not
+	// staking itself, but the invariant's formula being incomplete.
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(delegator, events.StakeOperationDelegate, 0)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
+	}
+	target := validator
+	if len(target) == 0 {
+		target = append([]byte(nil), delegator...)
+	} else {
+		target = append([]byte(nil), target...)
+	}
+	if len(target) != 20 {
+		return nil, fmt.Errorf("validator address must be 20 bytes")
+	}
+
+	index, err := sp.advanceStakeRewards()
+	if err != nil {
+		return nil, err
+	}
+
+	delegatorAcc, err := sp.getAccount(delegator)
+	if err != nil {
+		return nil, err
+	}
+	if delegatorAcc.BalanceZNHB.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("insufficient ZapNHB")
+	}
+	if len(delegatorAcc.DelegatedValidator) > 0 && !bytes.Equal(delegatorAcc.DelegatedValidator, target) && delegatorAcc.LockedZNHB.Sign() > 0 {
+		return nil, fmt.Errorf("existing delegation must be fully undelegated before switching validators")
+	}
+
+	sameValidator := bytes.Equal(target, delegator)
+
+	delegatorPrevShares := new(big.Int).Set(delegatorAcc.StakeShares)
+	sp.accrueStakeAccount(delegatorAcc, delegator, index)
+	delegatorAdded := new(big.Int).Sub(new(big.Int).Set(delegatorAcc.StakeShares), delegatorPrevShares)
+	if delegatorAdded.Sign() < 0 {
+		delegatorAdded = big.NewInt(0)
+	}
+
+	delegatorAcc.BalanceZNHB.Sub(delegatorAcc.BalanceZNHB, amount)
+	delegatorAcc.LockedZNHB.Add(delegatorAcc.LockedZNHB, amount)
+	delegatorAcc.DelegatedValidator = append([]byte(nil), target...)
+	if sameValidator {
+		delegatorAcc.Stake.Add(delegatorAcc.Stake, amount)
+	}
+	delegatorAcc.Nonce++
+
+	if !sameValidator {
+		validatorAcc, err := sp.getAccount(target)
+		if err != nil {
+			return nil, err
+		}
+		validatorPrevShares := new(big.Int).Set(validatorAcc.StakeShares)
+		sp.accrueStakeAccount(validatorAcc, target, index)
+		validatorAdded := new(big.Int).Sub(new(big.Int).Set(validatorAcc.StakeShares), validatorPrevShares)
+		if validatorAdded.Sign() < 0 {
+			validatorAdded = big.NewInt(0)
+		}
+		validatorAcc.Stake.Add(validatorAcc.Stake, amount)
+		manager := nhbstate.NewManager(sp.Trie)
+		wasIndexed := false
+		if existing, err := manager.StakeValidatorDelegators(bytesToAddress(target)); err == nil {
+			delegatorAddr := bytesToAddress(delegator)
+			for _, d := range existing {
+				if d == delegatorAddr {
+					wasIndexed = true
+					break
+				}
+			}
+		}
+		if !wasIndexed {
+			if err := manager.StakeAddValidatorDelegator(bytesToAddress(target), bytesToAddress(delegator)); err != nil {
+				return nil, err
+			}
+		}
+		delegatedIn, err := manager.StakeValidatorDelegatedInTotal(bytesToAddress(target))
+		if err != nil {
+			return nil, err
+		}
+		delegatedIn = new(big.Int).Add(delegatedIn, amount)
+		if err := manager.StakeValidatorSetDelegatedInTotal(bytesToAddress(target), delegatedIn); err != nil {
+			return nil, err
+		}
+		if err := sp.setAccount(target, validatorAcc); err != nil {
+			return nil, err
+		}
+		validatorEvent := events.StakeDelegated{
+			Account:     bytesToAddress(target),
+			SharesAdded: validatorAdded,
+			NewShares:   new(big.Int).Set(validatorAcc.StakeShares),
+			LastIndex:   new(big.Int).Set(validatorAcc.StakeLastIndex),
+			Validator:   bytesToAddress(target),
+			Amount:      new(big.Int).Set(amount),
+		}
+		if evt := validatorEvent.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
+	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
+		return nil, err
+	}
+
+	delegatorEvent := events.StakeDelegated{
+		Account:     bytesToAddress(delegator),
+		SharesAdded: delegatorAdded,
+		NewShares:   new(big.Int).Set(delegatorAcc.StakeShares),
+		LastIndex:   new(big.Int).Set(delegatorAcc.StakeLastIndex),
+		Validator:   bytesToAddress(target),
+		Amount:      new(big.Int).Set(amount),
+		Locked:      new(big.Int).Set(delegatorAcc.LockedZNHB),
+	}
+	if evt := delegatorEvent.Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+
+	return delegatorAcc, nil
+}
+
+func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*types.StakeUnbond, error) {
+	if len(delegator) == 0 {
+		return nil, fmt.Errorf("delegator address required")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("unstake must be positive")
+	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(delegator, events.StakeOperationUndelegate, 0)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
+	}
+	index, err := sp.advanceStakeRewards()
+	if err != nil {
+		return nil, err
+	}
+	delegatorAcc, err := sp.getAccount(delegator)
+	if err != nil {
+		return nil, err
+	}
+	if delegatorAcc.LockedZNHB.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("insufficient locked stake")
+	}
+	if len(delegatorAcc.DelegatedValidator) == 0 {
+		return nil, fmt.Errorf("no active delegation")
+	}
+
+	validator := append([]byte(nil), delegatorAcc.DelegatedValidator...)
+	sameValidator := bytes.Equal(validator, delegator)
+
+	delegatorPrevShares := new(big.Int).Set(delegatorAcc.StakeShares)
+	sp.accrueStakeAccount(delegatorAcc, delegator, index)
+	delegatorRemoved := new(big.Int).Sub(delegatorPrevShares, new(big.Int).Set(delegatorAcc.StakeShares))
+	if delegatorRemoved.Sign() < 0 {
+		delegatorRemoved = big.NewInt(0)
+	}
+
+	if sameValidator {
+		if delegatorAcc.Stake.Cmp(amount) < 0 {
+			return nil, fmt.Errorf("validator stake underflow")
+		}
+		delegatorAcc.Stake.Sub(delegatorAcc.Stake, amount)
+	}
+	delegatorAcc.LockedZNHB.Sub(delegatorAcc.LockedZNHB, amount)
+
+	unbondDuration, err := sp.stakingUnbondingPeriod(nhbstate.NewManager(sp.Trie))
+	if err != nil {
+		return nil, err
+	}
+	releaseTime := uint64(sp.blockTimestamp().Add(unbondDuration).Unix())
+	nextID := delegatorAcc.NextUnbondingID
+	if nextID == 0 {
+		nextID = 1
+	}
+	entry := types.StakeUnbond{
+		ID:          nextID,
+		Validator:   append([]byte(nil), validator...),
+		Amount:      new(big.Int).Set(amount),
+		ReleaseTime: releaseTime,
+	}
+	delegatorAcc.PendingUnbonds = append(delegatorAcc.PendingUnbonds, entry)
+	delegatorAcc.NextUnbondingID = nextID + 1
+	if delegatorAcc.LockedZNHB.Sign() == 0 {
+		delegatorAcc.DelegatedValidator = nil
+	}
+	delegatorAcc.Nonce++
+
+	if !sameValidator {
+		validatorAcc, err := sp.getAccount(validator)
+		if err != nil {
+			return nil, err
+		}
+		validatorPrevShares := new(big.Int).Set(validatorAcc.StakeShares)
+		sp.accrueStakeAccount(validatorAcc, validator, index)
+		validatorRemoved := new(big.Int).Sub(validatorPrevShares, new(big.Int).Set(validatorAcc.StakeShares))
+		if validatorRemoved.Sign() < 0 {
+			validatorRemoved = big.NewInt(0)
+		}
+		if validatorAcc.Stake.Cmp(amount) < 0 {
+			return nil, fmt.Errorf("validator stake underflow")
+		}
+		validatorAcc.Stake.Sub(validatorAcc.Stake, amount)
+		manager := nhbstate.NewManager(sp.Trie)
+		delegatedIn, err := manager.StakeValidatorDelegatedInTotal(bytesToAddress(validator))
+		if err != nil {
+			return nil, err
+		}
+		delegatedIn = new(big.Int).Sub(delegatedIn, amount)
+		if delegatedIn.Sign() < 0 {
+			delegatedIn = big.NewInt(0)
+		}
+		if err := manager.StakeValidatorSetDelegatedInTotal(bytesToAddress(validator), delegatedIn); err != nil {
+			return nil, err
+		}
+		if delegatorAcc.LockedZNHB.Sign() == 0 {
+			if err := manager.StakeRemoveValidatorDelegator(bytesToAddress(validator), bytesToAddress(delegator)); err != nil {
+				return nil, err
+			}
+		}
+		if err := sp.setAccount(validator, validatorAcc); err != nil {
+			return nil, err
+		}
+		validatorEvent := events.StakeUndelegated{
+			Account:       bytesToAddress(validator),
+			SharesRemoved: validatorRemoved,
+			NewShares:     new(big.Int).Set(validatorAcc.StakeShares),
+			LastIndex:     new(big.Int).Set(validatorAcc.StakeLastIndex),
+			Validator:     bytesToAddress(validator),
+			Amount:        new(big.Int).Set(amount),
+		}
+		if evt := validatorEvent.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
+	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
+		return nil, err
+	}
+
+	delegatorEvent := events.StakeUndelegated{
+		Account:       bytesToAddress(delegator),
+		SharesRemoved: delegatorRemoved,
+		NewShares:     new(big.Int).Set(delegatorAcc.StakeShares),
+		LastIndex:     new(big.Int).Set(delegatorAcc.StakeLastIndex),
+		Validator:     bytesToAddress(validator),
+		Amount:        new(big.Int).Set(amount),
+		ReleaseTime:   releaseTime,
+		UnbondingID:   entry.ID,
+	}
+	if evt := delegatorEvent.Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+
+	return &entry, nil
+}
+
+func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.StakeUnbond, error) {
+	if len(delegator) == 0 {
+		return nil, fmt.Errorf("delegator address required")
+	}
+	if unbondID == 0 {
+		return nil, fmt.Errorf("unbondingId must be greater than zero")
+	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(delegator, events.StakeOperationClaim, unbondID)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
+	}
+	currentIndex, err := sp.advanceStakeRewards()
+	if err != nil {
+		return nil, err
+	}
+	delegatorAcc, err := sp.getAccount(delegator)
+	if err != nil {
+		return nil, err
+	}
+	sp.accrueStakeAccount(delegatorAcc, delegator, currentIndex)
+	var (
+		index = -1
+		entry types.StakeUnbond
+	)
+	for i, candidate := range delegatorAcc.PendingUnbonds {
+		if candidate.ID == unbondID {
+			entry = types.StakeUnbond{
+				ID:          candidate.ID,
+				Validator:   append([]byte(nil), candidate.Validator...),
+				Amount:      new(big.Int).Set(candidate.Amount),
+				ReleaseTime: candidate.ReleaseTime,
+			}
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return nil, fmt.Errorf("unbonding entry %d not found", unbondID)
+	}
+	if uint64(sp.blockTimestamp().Unix()) < entry.ReleaseTime {
+		return nil, fmt.Errorf("unbonding entry %d is not yet claimable", unbondID)
+	}
+
+	delegatorAcc.PendingUnbonds = append(delegatorAcc.PendingUnbonds[:index], delegatorAcc.PendingUnbonds[index+1:]...)
+	delegatorAcc.BalanceZNHB.Add(delegatorAcc.BalanceZNHB, entry.Amount)
+	delegatorAcc.Nonce++
+
+	if err := sp.setAccount(delegator, delegatorAcc); err != nil {
+		return nil, err
+	}
+
+	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
+	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, entry.Validator)
+	sp.AppendEvent(&types.Event{
+		Type: "stake.claimed",
+		Attributes: map[string]string{
+			"delegator":   delegatorAddr.String(),
+			"validator":   validatorAddr.String(),
+			"amount":      entry.Amount.String(),
+			"unbondingId": strconv.FormatUint(entry.ID, 10),
+		},
+	})
+
+	return &entry, nil
+}
+
+func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("staking rewards: address required")
+	}
+	if err := nativecommon.Guard(sp.pauses, moduleStaking); err != nil {
+		sp.emitStakePaused(addr, events.StakeOperationClaimRewards, 0)
+		if errors.Is(err, nativecommon.ErrModulePaused) {
+			return nil, ErrStakePaused
+		}
+		return nil, err
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return nil, err
+	}
+	ensureAccountDefaults(account)
+	manager := nhbstate.NewManager(sp.Trie)
+
+	periodSeconds, err := sp.stakingPayoutPeriodSeconds(manager)
+	if err != nil {
+		return nil, err
+	}
+	nowTs := uint64(sp.blockTimestamp().Unix())
+	if periodSeconds == 0 {
+		return nil, fmt.Errorf("staking rewards: invalid payout period")
+	}
+	lastPayoutTs := account.StakeLastPayoutTs
+	if lastPayoutTs == 0 && account.StakingRewards.LastPayoutUnix > 0 {
+		lastPayoutTs = uint64(account.StakingRewards.LastPayoutUnix)
+	}
+	if nowTs <= lastPayoutTs {
+		return nil, stakeerrors.ErrNotDue
+	}
+	elapsed := nowTs - lastPayoutTs
+	if elapsed < periodSeconds {
+		return nil, stakeerrors.ErrNotDue
+	}
+	periods := elapsed / periodSeconds
+	if periods == 0 {
+		return nil, stakeerrors.ErrNotDue
+	}
+
+	legacyAccrued := account.StakingRewards.AccruedZNHB != nil &&
+		account.StakingRewards.AccruedZNHB.Sign() > 0 &&
+		account.StakeLastIndex.Sign() == 0
+	if legacyAccrued {
+		emissionYear := uint32(time.Unix(int64(nowTs), 0).UTC().Year())
+		emissionTotal, err := manager.StakingEmissionYTD(emissionYear)
+		if err != nil {
+			return nil, fmt.Errorf("staking rewards: load emission total: %w", err)
+		}
+		maxEmission, err := sp.stakingMaxEmissionPerYear(manager)
+		if err != nil {
+			return nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
+		}
+		attemptedMint := new(big.Int).Set(account.StakingRewards.AccruedZNHB)
+		minted := new(big.Int).Set(attemptedMint)
+		capHit := false
+		if maxEmission.Sign() > 0 {
+			headroom := new(big.Int).Sub(maxEmission, emissionTotal)
+			if headroom.Sign() <= 0 {
+				minted.SetInt64(0)
+				if attemptedMint.Sign() > 0 {
+					capHit = true
+				}
+			} else if headroom.Cmp(minted) < 0 {
+				minted.Set(headroom)
+				capHit = true
+			}
+		}
+
+		var treasuryAddr [20]byte
+		var treasuryAcc *types.Account
+		sameAccount := false
+		if minted.Sign() > 0 {
+			cfg := sp.PotsoRewardConfig()
+			if cfg.TreasuryAddress == ([20]byte{}) {
+				return nil, fmt.Errorf("staking rewards: treasury not configured")
+			}
+			treasuryAddr = cfg.TreasuryAddress
+			sameAccount = bytes.Equal(treasuryAddr[:], addr)
+			if sameAccount {
+				// The claimant IS the configured rewards treasury: debiting
+				// and crediting the same account nets to zero and must be
+				// applied to the single loaded copy -- loading a second,
+				// separate *types.Account for the treasury side and writing
+				// it first would silently lose the debit the moment
+				// account (loaded earlier, before any mutation) is
+				// persisted afterward, minting minted ZNHB from nothing.
+				if account.BalanceZNHB.Cmp(minted) < 0 {
+					return nil, potso.ErrInsufficientTreasury
+				}
+			} else {
+				treasuryAcc, err = sp.getAccount(treasuryAddr[:])
+				if err != nil {
+					return nil, err
+				}
+				if treasuryAcc.BalanceZNHB == nil {
+					treasuryAcc.BalanceZNHB = big.NewInt(0)
+				}
+				if treasuryAcc.BalanceZNHB.Cmp(minted) < 0 {
+					return nil, potso.ErrInsufficientTreasury
+				}
+				treasuryAcc.BalanceZNHB.Sub(treasuryAcc.BalanceZNHB, minted)
+				account.BalanceZNHB.Add(account.BalanceZNHB, minted)
+			}
+		}
+
+		account.StakingRewards.AccruedZNHB.Sub(account.StakingRewards.AccruedZNHB, minted)
+		newLastPayout := lastPayoutTs + (periods * periodSeconds)
+		account.StakingRewards.LastPayoutUnix = int64(newLastPayout)
+		account.StakeLastPayoutTs = newLastPayout
+
+		updatedEmission := new(big.Int).Add(emissionTotal, minted)
+		if err := manager.SetStakingEmissionYTD(emissionYear, updatedEmission); err != nil {
+			return nil, fmt.Errorf("staking rewards: write emission total: %w", err)
+		}
+		if err := manager.PutAccountStakingRewards(addr, &account.StakingRewards); err != nil {
+			return nil, fmt.Errorf("staking rewards: write legacy snapshot: %w", err)
+		}
+		if minted.Sign() > 0 && !sameAccount {
+			if err := sp.setAccount(treasuryAddr[:], treasuryAcc); err != nil {
+				return nil, err
+			}
+		}
+		if err := sp.setAccount(addr, account); err != nil {
+			return nil, err
+		}
+
+		var claimedAddr [20]byte
+		copy(claimedAddr[:], addr)
+		if capHit {
+			capEvt := events.StakeCapHit{
+				RequestedZNHB: attemptedMint,
+				AllowedZNHB:   new(big.Int).Set(minted),
+				YTD:           new(big.Int).Set(updatedEmission),
+				Cap:           new(big.Int).Set(maxEmission),
+			}
+			if evt := capEvt.Event(); evt != nil {
+				sp.AppendEvent(evt)
+			}
+		}
+		nextEligible := account.StakeLastPayoutTs + periodSeconds
+		evtPayload := events.StakeRewardsClaimed{
+			Addr:             claimedAddr,
+			PaidZNHB:         new(big.Int).Set(minted),
+			Periods:          periods,
+			AprBps:           sp.StakeRewardAPR(),
+			NextEligibleUnix: nextEligible,
+		}
+		if evt := evtPayload.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+		if legacy := evtPayload.LegacyEvent(); legacy != nil {
+			sp.AppendEvent(legacy)
+		}
+		return minted, nil
+	}
+
+	globalIndex, err := manager.StakingGlobalIndex()
+	if err != nil {
+		return nil, fmt.Errorf("staking rewards: load global index: %w", err)
+	}
+	if globalIndex == nil {
+		globalIndex = big.NewInt(0)
+	}
+
+	deltaIndex := new(big.Int).Sub(globalIndex, account.StakeLastIndex)
+	if deltaIndex.Sign() <= 0 || account.StakeShares.Sign() <= 0 {
+		account.StakeLastPayoutTs = nowTs
+		if deltaIndex.Sign() < 0 {
+			account.StakeLastIndex = new(big.Int).Set(globalIndex)
+		}
+		if err := sp.setAccount(addr, account); err != nil {
+			return nil, err
+		}
+		return big.NewInt(0), nil
+	}
+
+	eligibleSeconds := periods * periodSeconds
+	if eligibleSeconds == 0 {
+		return nil, fmt.Errorf("staking rewards: no eligible periods")
+	}
+	elapsedSeconds := elapsed
+	eligibleIndexDelta := new(big.Int).Mul(deltaIndex, new(big.Int).SetUint64(eligibleSeconds))
+	eligibleIndexDelta.Quo(eligibleIndexDelta, new(big.Int).SetUint64(elapsedSeconds))
+	if eligibleIndexDelta.Sign() <= 0 {
+		account.StakeLastPayoutTs = nowTs
+		if err := sp.setAccount(addr, account); err != nil {
+			return nil, err
+		}
+		return big.NewInt(0), nil
+	}
+
+	emissionYear := uint32(time.Unix(int64(nowTs), 0).UTC().Year())
+	emissionTotal, err := manager.StakingEmissionYTD(emissionYear)
+	if err != nil {
+		return nil, fmt.Errorf("staking rewards: load emission total: %w", err)
+	}
+	maxEmission, err := sp.stakingMaxEmissionPerYear(manager)
+	if err != nil {
+		return nil, fmt.Errorf("staking rewards: load emission cap: %w", err)
+	}
+
+	attemptedMint := new(big.Int).Mul(new(big.Int).Set(eligibleIndexDelta), account.StakeShares)
+	appliedDelta := new(big.Int).Set(eligibleIndexDelta)
+	minted := new(big.Int).Mul(appliedDelta, account.StakeShares)
+	capHit := false
+
+	if maxEmission.Sign() > 0 {
+		headroom := new(big.Int).Sub(maxEmission, emissionTotal)
+		if headroom.Sign() <= 0 {
+			appliedDelta.SetInt64(0)
+			minted.SetInt64(0)
+			if eligibleIndexDelta.Sign() > 0 {
+				capHit = true
+			}
+		} else {
+			deltaCap := new(big.Int).Quo(headroom, account.StakeShares)
+			if deltaCap.Sign() == 0 {
+				appliedDelta.SetInt64(0)
+				minted.SetInt64(0)
+				if eligibleIndexDelta.Sign() > 0 {
+					capHit = true
+				}
+			} else if deltaCap.Cmp(appliedDelta) < 0 {
+				appliedDelta.Set(deltaCap)
+				minted = new(big.Int).Mul(appliedDelta, account.StakeShares)
+				capHit = true
+			}
+		}
+	}
+
+	var treasuryAddr [20]byte
+	var treasuryAcc *types.Account
+	sameAccount := false
+	if minted.Sign() > 0 {
+		cfg := sp.PotsoRewardConfig()
+		if cfg.TreasuryAddress == ([20]byte{}) {
+			return nil, fmt.Errorf("staking rewards: treasury not configured")
+		}
+		treasuryAddr = cfg.TreasuryAddress
+		sameAccount = bytes.Equal(treasuryAddr[:], addr)
+		if sameAccount {
+			// See the identical guard in the legacy-accrued branch above:
+			// claimant == treasury nets to zero and must stay on the single
+			// loaded account copy, or the debit is silently lost when this
+			// account is persisted last.
+			if account.BalanceZNHB.Cmp(minted) < 0 {
+				return nil, potso.ErrInsufficientTreasury
+			}
+		} else {
+			treasuryAcc, err = sp.getAccount(treasuryAddr[:])
+			if err != nil {
+				return nil, err
+			}
+			if treasuryAcc.BalanceZNHB == nil {
+				treasuryAcc.BalanceZNHB = big.NewInt(0)
+			}
+			if treasuryAcc.BalanceZNHB.Cmp(minted) < 0 {
+				return nil, potso.ErrInsufficientTreasury
+			}
+			treasuryAcc.BalanceZNHB.Sub(treasuryAcc.BalanceZNHB, minted)
+			account.BalanceZNHB.Add(account.BalanceZNHB, minted)
+		}
+	}
+	if appliedDelta.Sign() > 0 {
+		account.StakeLastIndex.Add(account.StakeLastIndex, appliedDelta)
+	}
+	account.StakeLastPayoutTs = nowTs
+
+	updatedEmission := new(big.Int).Add(emissionTotal, minted)
+	if err := manager.SetStakingEmissionYTD(emissionYear, updatedEmission); err != nil {
+		return nil, fmt.Errorf("staking rewards: write emission total: %w", err)
+	}
+
+	if minted.Sign() > 0 && !sameAccount {
+		if err := sp.setAccount(treasuryAddr[:], treasuryAcc); err != nil {
+			return nil, err
+		}
+	}
+	if err := sp.setAccount(addr, account); err != nil {
+		return nil, err
+	}
+
+	var claimedAddr [20]byte
+	copy(claimedAddr[:], addr)
+
+	if capHit {
+		capEvt := events.StakeCapHit{
+			RequestedZNHB: attemptedMint,
+			AllowedZNHB:   new(big.Int).Set(minted),
+			YTD:           new(big.Int).Set(updatedEmission),
+			Cap:           new(big.Int).Set(maxEmission),
+		}
+		if evt := capEvt.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+
+	nextEligible := account.StakeLastPayoutTs + periodSeconds
+	evtPayload := events.StakeRewardsClaimed{
+		Addr:             claimedAddr,
+		PaidZNHB:         new(big.Int).Set(minted),
+		Periods:          periods,
+		AprBps:           sp.StakeRewardAPR(),
+		NextEligibleUnix: nextEligible,
+	}
+	if evt := evtPayload.Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+	if legacy := evtPayload.LegacyEvent(); legacy != nil {
+		sp.AppendEvent(legacy)
+	}
+
+	return minted, nil
+}
+
+func (sp *StateProcessor) stakingPayoutPeriodSeconds(manager *nhbstate.Manager) (uint64, error) {
+	days := uint64(stakePayoutPeriodDays)
+	if manager != nil {
+		raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays)
+		if err != nil {
+			return 0, fmt.Errorf("staking rewards: load payout period: %w", err)
+		}
+		if ok {
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed != "" {
+				value, parseErr := strconv.ParseUint(trimmed, 10, 64)
+				if parseErr != nil {
+					return 0, fmt.Errorf("staking rewards: parse payout period: %w", parseErr)
+				}
+				if value > 0 {
+					days = value
+				}
+			}
+		}
+	}
+
+	secondsPerDayUint := uint64(secondsPerDay)
+	if days == 0 {
+		return 0, fmt.Errorf("staking rewards: payout period not configured")
+	}
+	if days > math.MaxUint64/secondsPerDayUint {
+		return 0, fmt.Errorf("staking rewards: payout period too large")
+	}
+	return days * secondsPerDayUint, nil
+}
+
+// stakingUnbondingPeriod resolves the real unbonding delay from the
+// governance-configurable staking.unbondingDays parameter, falling back to
+// unbondingPeriod's default (7 days) if unset. See docs/issue30.md item 15
+// -- this parameter previously had no effect on real behavior at all.
+func (sp *StateProcessor) stakingUnbondingPeriod(manager *nhbstate.Manager) (time.Duration, error) {
+	period := unbondingPeriod
+	if manager != nil {
+		raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingUnbondingDays)
+		if err != nil {
+			return 0, fmt.Errorf("staking: load unbonding period: %w", err)
+		}
+		if ok {
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed != "" {
+				days, parseErr := strconv.ParseUint(trimmed, 10, 64)
+				if parseErr != nil {
+					return 0, fmt.Errorf("staking: parse unbonding period: %w", parseErr)
+				}
+				if days > 0 {
+					if days > math.MaxUint64/uint64(secondsPerDay) {
+						return 0, fmt.Errorf("staking: unbonding period too large")
+					}
+					period = time.Duration(days*uint64(secondsPerDay)) * time.Second
+				}
+			}
+		}
+	}
+	return period, nil
+}
+
+// stakePayload is TxTypeStake's decoded RLP payload. RegisterValidator is
+// the new item-1 explicit validator opt-in flag -- only meaningful/settable
+// on a self-stake (no third-party Validator target); it persists onto the
+// signer's account as ValidatorRegistered independent of later stake-level
+// changes. Tagged rlp:"optional" since RLP list decoding is positional and
+// every pre-existing caller (e.g. nhbportal's plain /stake page and
+// delegateToNode) encodes only the original 1-element [Validator] list --
+// without this tag, decoding those legacy payloads would hard-fail on a
+// list-length mismatch, and RegisterValidator would otherwise default false
+// exactly as intended for them anyway.
+type stakePayload struct {
+	Validator         []byte `json:"validator,omitempty"`
+	RegisterValidator bool   `json:"registerValidator,omitempty" rlp:"optional"`
+}
+
+// applyStake handles TxTypeStake. Reusing the existing, already-audited
+// stake envelope (rather than a new TxType) to carry the item-1 validator
+// registration opt-in: RegisterValidator=true on a self-stake (no
+// third-party Validator target) marks the signer as an explicit validator
+// candidate. A "pure registration" call -- RegisterValidator=true with zero
+// tx.Value -- is supported so an account that already carries sufficient
+// self-stake can flip the flag without a forced additional stake delta.
+func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error {
+	var payload stakePayload
+	if len(tx.Data) > 0 {
+		if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+			return fmt.Errorf("invalid stake payload: %w", err)
+		}
+	}
+	if payload.RegisterValidator && len(payload.Validator) > 0 && !bytes.Equal(payload.Validator, sender) {
+		return fmt.Errorf("registerValidator is only valid for self-stake (no third-party validator target)")
+	}
+	pureRegister := payload.RegisterValidator && (tx.Value == nil || tx.Value.Sign() == 0)
+	if !pureRegister {
+		if tx.Value == nil || tx.Value.Sign() <= 0 {
+			return fmt.Errorf("stake must be positive")
+		}
+		account, err := sp.StakeDelegate(sender, payload.Validator, tx.Value)
+		if err != nil {
+			return err
+		}
+		if payload.RegisterValidator {
+			return sp.setValidatorRegistered(sender, account, true)
+		}
+		return nil
+	}
+	account, err := sp.getAccount(sender)
+	if err != nil {
+		return err
+	}
+	return sp.setValidatorRegistered(sender, account, true)
+}
+
+// unstakePayload is TxTypeUnstake's decoded RLP payload, symmetric with
+// stakePayload -- see its doc comment for the rlp:"optional" reasoning,
+// which applies identically here for existing callers (undelegateFromNode).
+type unstakePayload struct {
+	Validator           []byte `json:"validator,omitempty"`
+	DeregisterValidator bool   `json:"deregisterValidator,omitempty" rlp:"optional"`
+}
+
+// applyUnstake handles TxTypeUnstake, symmetric with applyStake. A "pure
+// deregistration" call -- DeregisterValidator=true with zero tx.Value -- is
+// NOT optional polish: StakeUndelegate hard-errors once an account has
+// already fully unstaked (no active delegation / insufficient locked
+// stake), so without this zero-value path an account that already fully
+// exited could never submit any TxTypeUnstake to flip the flag off, would
+// stay permanently ValidatorRegistered, and would silently regain validator
+// eligibility the instant it (or a later controller of that address) ever
+// re-stakes -- exactly the "no way out" gap item 4/5 exist to prevent.
+func (sp *StateProcessor) applyUnstake(tx *types.Transaction, sender []byte) error {
+	var payload unstakePayload
+	if len(tx.Data) > 0 {
+		if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+			return fmt.Errorf("invalid unstake payload: %w", err)
+		}
+	}
+	pureDeregister := payload.DeregisterValidator && (tx.Value == nil || tx.Value.Sign() == 0)
+	unbondValidator := append([]byte(nil), sender...)
+	if !pureDeregister {
+		if tx.Value == nil || tx.Value.Sign() <= 0 {
+			return fmt.Errorf("unstake must be positive")
+		}
+		unbond, err := sp.StakeUndelegate(sender, tx.Value)
+		if err != nil {
+			return err
+		}
+		unbondValidator = unbond.Validator
+		if len(payload.Validator) > 0 && !bytes.Equal(payload.Validator, unbondValidator) {
+			return fmt.Errorf("unstake validator mismatch")
+		}
+	}
+	if payload.DeregisterValidator {
+		if !bytes.Equal(unbondValidator, sender) {
+			return fmt.Errorf("deregisterValidator is only valid for self-stake (no third-party validator target)")
+		}
+		account, err := sp.getAccount(sender)
+		if err != nil {
+			return err
+		}
+		return sp.setValidatorRegistered(sender, account, false)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) applyStakeClaim(tx *types.Transaction, sender []byte) error {
+	var payload struct {
+		UnbondingID uint64 `json:"unbondingId"`
+	}
+	if len(tx.Data) == 0 {
+		return fmt.Errorf("claim payload required")
+	}
+	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
+		return fmt.Errorf("invalid claim payload: %w", err)
+	}
+	if payload.UnbondingID == 0 {
+		return fmt.Errorf("unbondingId must be greater than zero")
+	}
+	_, err := sp.StakeClaim(sender, payload.UnbondingID)
+	return err
+}
+
+// applyStakeClaimRewards handles TxTypeStakeClaimRewards: claims accrued
+// APR-based staking rewards for the transaction's own signer. It replaces
+// the old rpc/stake_handlers.go handleStakeClaimRewards direct-state-trie
+// write (Node.StakeClaimRewards, called outside consensus) -- the payout
+// math itself is unchanged, this only routes it through the standard
+// signed-transaction dispatch so every validator applies it identically.
+// No payload is required: unlike applyStakeClaim's unbondingId, the reward
+// claim operates purely on sender's own account and the current block
+// timestamp. sp.StakeClaimRewards itself never advances the sender's
+// account nonce (unlike sp.StakeClaim, which bumps it internally), so this
+// wrapper does so explicitly on success via incrementNativeAccountNonce --
+// the same pattern applyAttestRedemption uses -- otherwise a real signed
+// transaction of this type would never consume its nonce and would be
+// replayable/reusable.
+func (sp *StateProcessor) applyStakeClaimRewards(tx *types.Transaction, sender []byte) error {
+	if _, err := sp.StakeClaimRewards(sender); err != nil {
+		return err
+	}
+	return sp.incrementNativeAccountNonce(sender)
+}
+
+func (sp *StateProcessor) StakeRewardAPR() uint64 {
+	if sp == nil {
+		return 0
+	}
+	return sp.stakeRewardAPR
+}
+
+func (sp *StateProcessor) SetStakeRewardAPR(apr uint64) error {
+	if sp == nil {
+		return nil
+	}
+	if sp.stakeRewardEngine == nil {
+		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
+	sp.stakeRewardAPR = apr
+	return sp.persistStakeRewardStateInstrumented()
+}
+
+func (sp *StateProcessor) advanceStakeRewards() (*big.Int, error) {
+	if sp == nil {
+		return rewards.IndexUnit(), nil
+	}
+	if sp.stakeRewardEngine == nil {
+		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	index, changed := sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
+	if changed {
+		if err := sp.persistStakeRewardStateInstrumented(); err != nil {
+			return nil, err
+		}
+	}
+	return index, nil
+}
+
+// stakeRewardBasis returns the ZNHB amount an account's APR-based accrual
+// (accrueStakeAccount) should actually be computed against, distinct from
+// account.Stake itself. Added 2026-08-13 alongside the halving-schedule
+// staker-pool fix: StakeDelegate historically added a third-party
+// delegator's amount to the TARGET VALIDATOR's own Stake field, never the
+// delegator's -- so a delegator's own Stake always reads 0 and their basis
+// must come from LockedZNHB instead, while a validator's basis must exclude
+// whatever it's holding on behalf of others (StakeValidatorDelegatedInTotal)
+// so it isn't credited twice for the same delegated amount. For every
+// account nobody has ever delegated to or from -- the entire pre-2026-08-13
+// test suite and the common case -- this returns account.Stake unchanged.
+func (sp *StateProcessor) stakeRewardBasis(account *types.Account, ownAddr []byte) (*big.Int, error) {
+	if account == nil {
+		return big.NewInt(0), nil
+	}
+	if len(account.DelegatedValidator) > 0 && !bytes.Equal(account.DelegatedValidator, ownAddr) {
+		if account.LockedZNHB == nil {
+			return big.NewInt(0), nil
+		}
+		return new(big.Int).Set(account.LockedZNHB), nil
+	}
+	if account.Stake == nil || account.Stake.Sign() == 0 {
+		return big.NewInt(0), nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	delegatedIn, err := manager.StakeValidatorDelegatedInTotal(bytesToAddress(ownAddr))
+	if err != nil {
+		return nil, err
+	}
+	basis := new(big.Int).Sub(account.Stake, delegatedIn)
+	if basis.Sign() < 0 {
+		basis = big.NewInt(0)
+	}
+	return basis, nil
+}
+
+// validatorEligibilityBasis returns ownAddr's total stake for VALIDATOR
+// ELIGIBILITY purposes -- setAccount's meetsStake gate, computeEpochWeights,
+// applyValidatorSelection (both branches), fallbackValidatorSet, and the
+// legacy-account migration below. Deliberately separate from
+// stakeRewardBasis, which computes the same-shaped value for REWARD ACCRUAL
+// (accrueStakeAccount) and must keep excluding delegated-in stake so a
+// validator never accrues APR rewards on capital that isn't theirs (the
+// 2026-08-13 fix -- see stakeRewardBasis's own doc comment;
+// Test_AccrualOnThirdPartyDelegation_CreditsDelegatorNotValidator locks
+// this in). Eligibility has the opposite requirement: by product design, a
+// third party delegating ZNHB to this address IS this address's validator
+// stake -- there is no separate self-stake requirement. The onboarding
+// flow is: stand up a node, get its address, then delegate >= the minimum
+// to that address from any GUI wallet; that delegation alone is what makes
+// the node an eligible validator candidate (see
+// docs/validators/onboarding.md). account.Stake already includes
+// delegated-in amounts (see StakeDelegate's validatorAcc.Stake.Add), so it
+// is used directly here with no subtraction.
+func (sp *StateProcessor) validatorEligibilityBasis(account *types.Account, ownAddr []byte) (*big.Int, error) {
+	if account == nil {
+		return big.NewInt(0), nil
+	}
+	if len(account.DelegatedValidator) > 0 && !bytes.Equal(account.DelegatedValidator, ownAddr) {
+		if account.LockedZNHB == nil {
+			return big.NewInt(0), nil
+		}
+		return new(big.Int).Set(account.LockedZNHB), nil
+	}
+	if account.Stake == nil || account.Stake.Sign() == 0 {
+		return big.NewInt(0), nil
+	}
+	return new(big.Int).Set(account.Stake), nil
+}
+
+// selfDelegated reports whether ownAddr is not currently delegating its
+// stake to a DIFFERENT validator -- i.e. it has no active delegation at all,
+// or its DelegatedValidator target is itself. This is the missing half of
+// every validator-eligibility check that consumes stakeRewardBasis: basis
+// alone answers "how much does this address have staked, attributed to the
+// right owner" (see stakeRewardBasis's own doc comment), but it does NOT
+// answer "is that stake currently backing THIS address's own validator
+// candidacy" -- an account whose DelegatedValidator points elsewhere has
+// moved its own skin-in-the-game to a third party's reward-attribution
+// basis and stakeRewardBasis(account, ownAddr) is reading LockedZNHB (the
+// amount delegated away), not a real own-stake figure, for exactly that
+// account. Every eligibility/voting-power gate that calls stakeRewardBasis
+// (setAccount, computeEpochWeights, applyValidatorSelection's rotation
+// branch, fallbackValidatorSet) must additionally require this before
+// treating basis>=minStake as real eligibility.
+func selfDelegated(account *types.Account, ownAddr []byte) bool {
+	if account == nil {
+		return true
+	}
+	return len(account.DelegatedValidator) == 0 || bytes.Equal(account.DelegatedValidator, ownAddr)
+}
+
+// setValidatorRegistered flips account's explicit validator-registration
+// flag (item 1 of the validator-eligibility redesign) and persists it via
+// setAccount, which is also the single call site that recomputes
+// EligibleValidators/ValidatorSet membership from the new flag value (see
+// setAccount's eligibility-gate block). Idempotent: a call that would not
+// change the flag's current value is a no-op and never touches
+// ValidatorRegisteredAt, which is deliberately only ever updated on a
+// genuine false->true transition (re-registering after unregistering
+// updates it; unregistering does not clear it) so it always reflects "when
+// did this address most recently become registered."
+func (sp *StateProcessor) setValidatorRegistered(addr []byte, account *types.Account, registered bool) error {
+	if account == nil {
+		return fmt.Errorf("validator: account required")
+	}
+	if account.ValidatorRegistered == registered {
+		return nil
+	}
+	account.ValidatorRegistered = registered
+	if registered {
+		account.ValidatorRegisteredAt = uint64(sp.blockTimestamp().Unix())
+	}
+	if err := sp.setAccount(addr, account); err != nil {
+		return err
+	}
+	var addrFixed [20]byte
+	copy(addrFixed[:], addr)
+	evt := events.ValidatorRegistrationChanged{Account: addrFixed, Registered: registered, At: account.ValidatorRegisteredAt}
+	if payload := evt.Event(); payload != nil {
+		sp.AppendEvent(payload)
+	}
+	return nil
+}
+
+// accrueStakeAccount accrues APR-based stake rewards for the account owned
+// by ownAddr up to index, using stakeRewardBasis rather than account.Stake
+// directly so a third-party delegator's own contribution is credited to
+// them, not to whatever validator they delegated to (see stakeRewardBasis).
+// If the basis lookup fails, falls back to today's account.Stake-only
+// behavior rather than aborting the caller's transaction over an accrual
+// bookkeeping read.
+func (sp *StateProcessor) accrueStakeAccount(account *types.Account, ownAddr []byte, index *big.Int) {
+	if account == nil || index == nil {
+		return
+	}
+	basis, err := sp.stakeRewardBasis(account, ownAddr)
+	if err != nil || basis == nil {
+		basis = account.Stake
+	}
+	sp.accrueStakeAccountWithBasis(account, index, basis)
+}
+
+func (sp *StateProcessor) accrueStakeAccountWithBasis(account *types.Account, index *big.Int, basis *big.Int) {
+	if account == nil || index == nil {
+		return
+	}
+	ensureAccountDefaults(account)
+	if basis == nil || basis.Sign() == 0 {
+		account.StakeLastIndex = new(big.Int).Set(index)
+		return
+	}
+	if account.StakeLastIndex == nil || account.StakeLastIndex.Sign() == 0 {
+		account.StakeLastIndex = new(big.Int).Set(index)
+		return
+	}
+	delta := new(big.Int).Sub(index, account.StakeLastIndex)
+	if delta.Sign() <= 0 {
+		account.StakeLastIndex = new(big.Int).Set(index)
+		return
+	}
+	reward := new(big.Int).Mul(basis, delta)
+	reward.Quo(reward, rewards.IndexUnit())
+	if reward.Sign() > 0 {
+		account.StakeShares.Add(account.StakeShares, reward)
+	}
+	account.StakeLastIndex = new(big.Int).Set(index)
+}
+
+func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
+	payload := types.HeartbeatPayload{}
+	if len(tx.Data) > 0 {
+		if err := decodeHeartbeatPayload(tx.Data, &payload); err != nil {
+			return fmt.Errorf("invalid heartbeat payload: %w", err)
+		}
+	}
+	if payload.Timestamp == 0 {
+		// Must be the deterministic block timestamp, not wall-clock time --
+		// this value is written into consensus state (EngagementLastHeartbeat)
+		// and feeds validatorReadyForActivation. A caller that omits an
+		// explicit timestamp (e.g. the portal's manual "send heartbeat"
+		// button) previously got time.Now(), which any node replaying this
+		// same transaction later computes differently, producing a
+		// permanent state-root divergence at the next epoch boundary. See
+		// docs/CLAUDE.md incident log.
+		payload.Timestamp = sp.blockTimestamp().Unix()
+	}
+	now := time.Unix(payload.Timestamp, 0).UTC()
+
+	updates := sp.rolloverEngagement(senderAccount, now)
+	if senderAccount.EngagementLastHeartbeat != 0 {
+		minDelta := int64(sp.engagementConfig.HeartbeatInterval.Seconds())
+		last := int64(senderAccount.EngagementLastHeartbeat)
+		if payload.Timestamp <= last {
+			return fmt.Errorf("heartbeat replay detected: %w", ErrHeartbeatTooSoon)
+		}
+		if payload.Timestamp-last < minDelta {
+			return fmt.Errorf("heartbeat rate limited: %w", ErrHeartbeatTooSoon)
+		}
+	}
+
+	minutes := uint64(1)
+	if senderAccount.EngagementLastHeartbeat != 0 {
+		delta := payload.Timestamp - int64(senderAccount.EngagementLastHeartbeat)
+		if delta > 0 {
+			minutes = uint64(delta / int64(time.Minute/time.Second))
+			if minutes == 0 {
+				minutes = 1
+			}
+		}
+	}
+	if minutes > sp.engagementConfig.MaxMinutesPerHeartbeat {
+		minutes = sp.engagementConfig.MaxMinutesPerHeartbeat
+	}
+
+	senderAccount.EngagementMinutes += minutes
+	senderAccount.EngagementLastHeartbeat = uint64(payload.Timestamp)
+	senderAccount.Nonce++
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return err
+	}
+	sp.emitScoreUpdates(sender, updates)
+
+	var addr [20]byte
+	copy(addr[:], sender)
+	evt := events.EngagementHeartbeat{
+		Address:   addr,
+		DeviceID:  payload.DeviceID,
+		Minutes:   minutes,
+		Timestamp: payload.Timestamp,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+
+	return nil
+}
+
+type stakeUnbond struct {
+	ID          uint64
+	Validator   []byte
+	Amount      *big.Int
+	ReleaseTime uint64
+}
+
+type accountMetadata struct {
+	BalanceZNHB             *big.Int
+	Stake                   *big.Int
+	StakeShares             *big.Int
+	StakeLastIndex          *big.Int
+	StakeLastPayoutTs       uint64
+	LockedZNHB              *big.Int
+	CollateralBalance       *big.Int
+	DebtPrincipal           *big.Int
+	SupplyShares            *big.Int
+	LendingSupplyIndex      *big.Int
+	LendingBorrowIndex      *big.Int
+	DelegatedValidator      []byte
+	RewardBeneficiary       []byte
+	Unbonding               []stakeUnbond
+	UnbondingSeq            uint64
+	Username                string
+	EngagementScore         uint64
+	EngagementDay           string
+	EngagementMinutes       uint64
+	EngagementTxCount       uint64
+	EngagementEscrowEvents  uint64
+	EngagementGovEvents     uint64
+	EngagementLastHeartbeat uint64
+
+	LendingCollateralDisabled bool
+	LendingBorrowDisabled     bool
+
+	// ValidatorRegistered/ValidatorRegisteredAt back types.Account's fields
+	// of the same name (see core/types/account.go's doc comment). Tagged
+	// rlp:"optional" -- MANDATORY, not cosmetic: without it, decoding any
+	// account persisted before this field existed would hard-fail on its
+	// very next getAccount() call, since go-ethereum's rlp decoder requires
+	// an exact list-length match for non-optional trailing fields. Matches
+	// the established idiom in native/loyalty/types.go's RewardMode/
+	// FixedRewardWei and core/state/manager.go's Tally field.
+	ValidatorRegistered   bool   `rlp:"optional"`
+	ValidatorRegisteredAt uint64 `rlp:"optional"`
+}
+
+func ensureAccountDefaults(account *types.Account) {
+	if account.BalanceNHB == nil {
+		account.BalanceNHB = big.NewInt(0)
+	}
+	if account.BalanceZNHB == nil {
+		account.BalanceZNHB = big.NewInt(0)
+	}
+	if account.Stake == nil {
+		account.Stake = big.NewInt(0)
+	}
+	if account.StakeShares == nil {
+		account.StakeShares = big.NewInt(0)
+	}
+	if account.StakeLastIndex == nil {
+		account.StakeLastIndex = big.NewInt(0)
+	}
+	if account.LockedZNHB == nil {
+		account.LockedZNHB = big.NewInt(0)
+	}
+	if account.CollateralBalance == nil {
+		account.CollateralBalance = big.NewInt(0)
+	}
+	if account.DebtPrincipal == nil {
+		account.DebtPrincipal = big.NewInt(0)
+	}
+	if account.SupplyShares == nil {
+		account.SupplyShares = big.NewInt(0)
+	}
+	if account.LendingSnapshot.SupplyIndex == nil {
+		account.LendingSnapshot.SupplyIndex = big.NewInt(0)
+	}
+	if account.LendingSnapshot.BorrowIndex == nil {
+		account.LendingSnapshot.BorrowIndex = big.NewInt(0)
+	}
+	if account.PendingUnbonds == nil {
+		account.PendingUnbonds = make([]types.StakeUnbond, 0)
+	}
+	if len(account.StorageRoot) == 0 {
+		account.StorageRoot = gethtypes.EmptyRootHash.Bytes()
+	} else if len(account.StorageRoot) != common.HashLength {
+		account.StorageRoot = common.BytesToHash(account.StorageRoot).Bytes()
+	}
+	if len(account.CodeHash) == 0 {
+		account.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	} else if len(account.CodeHash) != common.HashLength {
+		account.CodeHash = common.BytesToHash(account.CodeHash).Bytes()
+	}
+}
+
+func (sp *StateProcessor) minimumValidatorStake() (*big.Int, error) {
+	if sp == nil || sp.Trie == nil {
+		return governance.DefaultMinimumValidatorStake(), nil
+	}
+	key := nhbstate.ParamStoreKey(governance.ParamKeyMinimumValidatorStake)
+	raw, err := sp.Trie.Get(ethcrypto.Keccak256(key))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return governance.DefaultMinimumValidatorStake(), nil
+	}
+	var stored []byte
+	if err := rlp.DecodeBytes(raw, &stored); err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(stored))
+	if trimmed == "" {
+		return governance.DefaultMinimumValidatorStake(), nil
+	}
+	parsed, success := new(big.Int).SetString(trimmed, 10)
+	if !success {
+		return nil, fmt.Errorf("minimum validator stake must be a base-10 integer")
+	}
+	if parsed.Sign() <= 0 {
+		return nil, fmt.Errorf("minimum validator stake must be positive")
+	}
+	return parsed, nil
+}
+
+// --- Helpers ---
+
+func (sp *StateProcessor) getAccount(addr []byte) (*types.Account, error) {
+	stateAcc, err := sp.loadStateAccount(addr)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := sp.loadAccountMetadata(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	account := &types.Account{
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(0),
+		StakeShares:             big.NewInt(0),
+		StakeLastIndex:          big.NewInt(0),
+		EngagementScore:         0,
+		EngagementDay:           "",
+		EngagementMinutes:       0,
+		EngagementTxCount:       0,
+		EngagementEscrowEvents:  0,
+		EngagementGovEvents:     0,
+		EngagementLastHeartbeat: 0,
+		StorageRoot:             gethtypes.EmptyRootHash.Bytes(),
+		CodeHash:                gethtypes.EmptyCodeHash.Bytes(),
+	}
+	if stateAcc != nil {
+		if stateAcc.Balance != nil {
+			account.BalanceNHB = new(big.Int).Set(stateAcc.Balance.ToBig())
+		}
+		account.Nonce = stateAcc.Nonce
+		account.StorageRoot = stateAcc.Root.Bytes()
+		account.CodeHash = common.CopyBytes(stateAcc.CodeHash)
+	}
+	if meta != nil {
+		if meta.BalanceZNHB != nil {
+			account.BalanceZNHB = new(big.Int).Set(meta.BalanceZNHB)
+		}
+		if meta.Stake != nil {
+			account.Stake = new(big.Int).Set(meta.Stake)
+		}
+		if meta.StakeShares != nil {
+			account.StakeShares = new(big.Int).Set(meta.StakeShares)
+		}
+		if meta.StakeLastIndex != nil {
+			account.StakeLastIndex = new(big.Int).Set(meta.StakeLastIndex)
+		}
+		if meta.LockedZNHB != nil {
+			account.LockedZNHB = new(big.Int).Set(meta.LockedZNHB)
+		}
+		if meta.CollateralBalance != nil {
+			account.CollateralBalance = new(big.Int).Set(meta.CollateralBalance)
+		}
+		if meta.DebtPrincipal != nil {
+			account.DebtPrincipal = new(big.Int).Set(meta.DebtPrincipal)
+		}
+		if meta.SupplyShares != nil {
+			account.SupplyShares = new(big.Int).Set(meta.SupplyShares)
+		}
+		if meta.LendingSupplyIndex != nil {
+			account.LendingSnapshot.SupplyIndex = new(big.Int).Set(meta.LendingSupplyIndex)
+		}
+		if meta.LendingBorrowIndex != nil {
+			account.LendingSnapshot.BorrowIndex = new(big.Int).Set(meta.LendingBorrowIndex)
+		}
+		if len(meta.DelegatedValidator) > 0 {
+			account.DelegatedValidator = append([]byte(nil), meta.DelegatedValidator...)
+		}
+		if len(meta.RewardBeneficiary) > 0 {
+			account.RewardBeneficiary = append([]byte(nil), meta.RewardBeneficiary...)
+		}
+		if len(meta.Unbonding) > 0 {
+			account.PendingUnbonds = make([]types.StakeUnbond, len(meta.Unbonding))
+			for i, entry := range meta.Unbonding {
+				amount := big.NewInt(0)
+				if entry.Amount != nil {
+					amount = new(big.Int).Set(entry.Amount)
+				}
+				var validator []byte
+				if len(entry.Validator) > 0 {
+					validator = append([]byte(nil), entry.Validator...)
+				}
+				account.PendingUnbonds[i] = types.StakeUnbond{
+					ID:          entry.ID,
+					Validator:   validator,
+					Amount:      amount,
+					ReleaseTime: entry.ReleaseTime,
+				}
+			}
+		}
+		account.NextUnbondingID = meta.UnbondingSeq
+		account.Username = meta.Username
+		account.EngagementScore = meta.EngagementScore
+		account.EngagementDay = meta.EngagementDay
+		account.EngagementMinutes = meta.EngagementMinutes
+		account.EngagementTxCount = meta.EngagementTxCount
+		account.EngagementEscrowEvents = meta.EngagementEscrowEvents
+		account.EngagementGovEvents = meta.EngagementGovEvents
+		account.EngagementLastHeartbeat = meta.EngagementLastHeartbeat
+		account.StakeLastPayoutTs = meta.StakeLastPayoutTs
+		account.LendingBreaker = types.LendingBreakerFlags{
+			CollateralDisabled: meta.LendingCollateralDisabled,
+			BorrowDisabled:     meta.LendingBorrowDisabled,
+		}
+		account.ValidatorRegistered = meta.ValidatorRegistered
+		account.ValidatorRegisteredAt = meta.ValidatorRegisteredAt
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	rewards, err := manager.GetAccountStakingRewards(addr)
+	if err != nil {
+		return nil, err
+	}
+	if rewards != nil {
+		account.StakingRewards = *rewards
+		if account.StakeLastPayoutTs == 0 && rewards.LastPayoutUnix > 0 {
+			account.StakeLastPayoutTs = uint64(rewards.LastPayoutUnix)
+		}
+		if (account.StakeLastIndex == nil || account.StakeLastIndex.Sign() == 0) && !rewards.LastIndexUQ128x128.IsZero() {
+			account.StakeLastIndex = new(big.Int).SetBytes(rewards.LastIndexUQ128x128.Bytes())
+		}
+	}
+	ensureAccountDefaults(account)
+	return account, nil
+}
+
+func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error {
+	if account == nil {
+		return fmt.Errorf("nil account")
+	}
+	ensureAccountDefaults(account)
+
+	prevMeta, err := sp.loadAccountMetadata(addr)
+	if err != nil {
+		return err
+	}
+
+	balance, overflow := uint256.FromBig(account.BalanceNHB)
+	if overflow {
+		return fmt.Errorf("balance overflow")
+	}
+
+	stateAcc := &gethtypes.StateAccount{
+		Nonce:    account.Nonce,
+		Balance:  balance,
+		Root:     common.BytesToHash(account.StorageRoot),
+		CodeHash: common.CopyBytes(account.CodeHash),
+	}
+	if len(stateAcc.CodeHash) == 0 {
+		stateAcc.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	}
+	if stateAcc.Root == (common.Hash{}) {
+		stateAcc.Root = gethtypes.EmptyRootHash
+	}
+
+	if err := sp.writeStateAccount(addr, stateAcc); err != nil {
+		return err
+	}
+
+	var delegated []byte
+	if len(account.DelegatedValidator) > 0 {
+		delegated = append([]byte(nil), account.DelegatedValidator...)
+	}
+	var rewardBeneficiary []byte
+	if len(account.RewardBeneficiary) > 0 {
+		rewardBeneficiary = append([]byte(nil), account.RewardBeneficiary...)
+	}
+	unbonding := make([]stakeUnbond, len(account.PendingUnbonds))
+	for i, entry := range account.PendingUnbonds {
+		amount := big.NewInt(0)
+		if entry.Amount != nil {
+			amount = new(big.Int).Set(entry.Amount)
+		}
+		var validator []byte
+		if len(entry.Validator) > 0 {
+			validator = append([]byte(nil), entry.Validator...)
+		}
+		unbonding[i] = stakeUnbond{
+			ID:          entry.ID,
+			Validator:   validator,
+			Amount:      amount,
+			ReleaseTime: entry.ReleaseTime,
+		}
+	}
+	// Eligibility (and, downstream, real BFT voting power -- see
+	// core/epochs.go's applyValidatorSelection non-rotation branch, which
+	// copies this map's values straight into ValidatorSet) requires explicit
+	// registration (item 1) AND an own-stake basis -- self-stake minus
+	// whatever is tracked as delegated-in for this address, the exact same
+	// subtraction stakeRewardBasis already uses for reward attribution --
+	// meeting minimumValidatorStake() (item 2), AND that the address is not
+	// currently delegating its own stake to a DIFFERENT validator (see
+	// selfDelegated's doc comment): without that third condition, basis
+	// itself is not a trustworthy own-stake figure -- stakeRewardBasis
+	// deliberately returns LockedZNHB (the amount delegated AWAY) once
+	// DelegatedValidator points elsewhere, so basis>=minStake alone could be
+	// satisfied by money this address has delegated to someone else, not by
+	// anything actually backing its own candidacy. Delegated-in stake keeps
+	// earning its proportional reward share elsewhere untouched; it no
+	// longer inflates eligibility or voting power here. Computed here, BEFORE
+	// accountMetadata is built below, so a transitional-grandfather
+	// registration flip (see below) lands in the metadata this call persists
+	// rather than being silently discarded.
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return err
+	}
+	basis, err := sp.validatorEligibilityBasis(account, addr)
+	if err != nil {
+		return err
+	}
+	addrKey := string(addr)
+	registered := account.ValidatorRegistered
+	if !registered {
+		if _, alreadyActive := sp.ValidatorSet[addrKey]; alreadyActive {
+			// Transitional grandfather: the one-time migration
+			// (BackfillValidatorRegistrationOnce, run from
+			// ProcessBlockLifecycle) marks every address already in
+			// ValidatorSet as registered, but it runs AFTER this block's
+			// transactions are applied -- so any earlier transaction this
+			// same block that happens to touch a not-yet-migrated active
+			// validator's account (most plausibly its own heartbeat) would
+			// otherwise evict it before the migration ever runs. Mirror the
+			// same grandfather decision here, persisted immediately (not
+			// just used for this call), so it self-heals on the very first
+			// touch and the later migration pass becomes a no-op for it.
+			manager := nhbstate.NewManager(sp.Trie)
+			migrated, migratedErr := manager.ValidatorRegistrationBackfilled()
+			if migratedErr != nil {
+				return migratedErr
+			}
+			if !migrated {
+				registered = true
+				account.ValidatorRegistered = true
+				account.ValidatorRegisteredAt = uint64(sp.blockTimestamp().Unix())
+			}
+		}
+	}
+	meetsStake := registered && selfDelegated(account, addr) && basis.Cmp(minStake) >= 0
+
+	meta := &accountMetadata{
+		BalanceZNHB:               new(big.Int).Set(account.BalanceZNHB),
+		Stake:                     new(big.Int).Set(account.Stake),
+		StakeShares:               new(big.Int).Set(account.StakeShares),
+		StakeLastIndex:            new(big.Int).Set(account.StakeLastIndex),
+		StakeLastPayoutTs:         account.StakeLastPayoutTs,
+		LockedZNHB:                new(big.Int).Set(account.LockedZNHB),
+		CollateralBalance:         new(big.Int).Set(account.CollateralBalance),
+		DebtPrincipal:             new(big.Int).Set(account.DebtPrincipal),
+		SupplyShares:              new(big.Int).Set(account.SupplyShares),
+		LendingSupplyIndex:        new(big.Int).Set(account.LendingSnapshot.SupplyIndex),
+		LendingBorrowIndex:        new(big.Int).Set(account.LendingSnapshot.BorrowIndex),
+		DelegatedValidator:        delegated,
+		RewardBeneficiary:         rewardBeneficiary,
+		Unbonding:                 unbonding,
+		UnbondingSeq:              account.NextUnbondingID,
+		Username:                  account.Username,
+		EngagementScore:           account.EngagementScore,
+		EngagementDay:             account.EngagementDay,
+		EngagementMinutes:         account.EngagementMinutes,
+		EngagementTxCount:         account.EngagementTxCount,
+		EngagementEscrowEvents:    account.EngagementEscrowEvents,
+		EngagementGovEvents:       account.EngagementGovEvents,
+		EngagementLastHeartbeat:   account.EngagementLastHeartbeat,
+		LendingCollateralDisabled: account.LendingBreaker.CollateralDisabled,
+		LendingBorrowDisabled:     account.LendingBreaker.BorrowDisabled,
+		ValidatorRegistered:       account.ValidatorRegistered,
+		ValidatorRegisteredAt:     account.ValidatorRegisteredAt,
+	}
+	if err := sp.writeAccountMetadata(addr, meta); err != nil {
+		return err
+	}
+
+	prevUsername := ""
+	if prevMeta != nil {
+		prevUsername = prevMeta.Username
+	}
+
+	if prevUsername != "" && prevUsername != account.Username {
+		delete(sp.usernameToAddr, prevUsername)
+	}
+	if account.Username != "" {
+		sp.usernameToAddr[account.Username] = append([]byte(nil), addr...)
+	}
+	if err := sp.persistUsernameIndex(); err != nil {
+		return err
+	}
+
+	if sp.EligibleValidators == nil {
+		sp.EligibleValidators = make(map[string]*big.Int)
+	}
+	if meetsStake {
+		sp.EligibleValidators[addrKey] = new(big.Int).Set(basis)
+	} else {
+		delete(sp.EligibleValidators, addrKey)
+	}
+	if err := sp.persistEligibleValidatorSet(); err != nil {
+		return err
+	}
+
+	if !sp.epochConfig.RotationEnabled {
+		if !meetsStake {
+			delete(sp.ValidatorSet, addrKey)
+			if err := sp.persistValidatorSet(); err != nil {
+				return err
+			}
+		}
+	} else if !meetsStake {
+		if _, exists := sp.ValidatorSet[addrKey]; exists {
+			delete(sp.ValidatorSet, addrKey)
+			if err := sp.persistValidatorSet(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+type engagementScoreUpdate struct {
+	Day string
+	Raw uint64
+	Old uint64
+	New uint64
+}
+
+func (sp *StateProcessor) computeRawEngagement(minutes, tx, escrow, gov uint64) uint64 {
+	cfg := sp.engagementConfig
+	total := new(big.Int)
+	tmp := new(big.Int)
+
+	if cfg.HeartbeatWeight > 0 && minutes > 0 {
+		tmp.SetUint64(minutes)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.HeartbeatWeight))
+		total.Add(total, tmp)
+	}
+	if cfg.TxWeight > 0 && tx > 0 {
+		tmp.SetUint64(tx)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.TxWeight))
+		total.Add(total, tmp)
+	}
+	if cfg.EscrowWeight > 0 && escrow > 0 {
+		tmp.SetUint64(escrow)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.EscrowWeight))
+		total.Add(total, tmp)
+	}
+	if cfg.GovWeight > 0 && gov > 0 {
+		tmp.SetUint64(gov)
+		tmp.Mul(tmp, new(big.Int).SetUint64(cfg.GovWeight))
+		total.Add(total, tmp)
+	}
+
+	if total.BitLen() > 64 {
+		return ^uint64(0)
+	}
+	return total.Uint64()
+}
+
+func (sp *StateProcessor) applyEMAScore(prev, raw uint64) uint64 {
+	cfg := sp.engagementConfig
+	if cfg.LambdaDenominator == 0 {
+		return raw
+	}
+	prevComponent := new(big.Int).SetUint64(prev)
+	prevComponent.Mul(prevComponent, new(big.Int).SetUint64(cfg.LambdaNumerator))
+
+	contribution := cfg.LambdaDenominator - cfg.LambdaNumerator
+	rawComponent := new(big.Int).SetUint64(raw)
+	rawComponent.Mul(rawComponent, new(big.Int).SetUint64(contribution))
+
+	prevComponent.Add(prevComponent, rawComponent)
+	prevComponent.Div(prevComponent, new(big.Int).SetUint64(cfg.LambdaDenominator))
+
+	if prevComponent.BitLen() > 64 {
+		return ^uint64(0)
+	}
+	return prevComponent.Uint64()
+}
+
+func (sp *StateProcessor) rolloverEngagement(account *types.Account, now time.Time) []engagementScoreUpdate {
+	currentDay := now.UTC().Format(engagementDayFormat)
+	if account.EngagementDay == "" {
+		account.EngagementDay = currentDay
+		return nil
+	}
+	if account.EngagementDay == currentDay {
+		return nil
+	}
+	startDay, err := time.Parse(engagementDayFormat, account.EngagementDay)
+	if err != nil {
+		account.EngagementDay = currentDay
+		account.EngagementMinutes = 0
+		account.EngagementTxCount = 0
+		account.EngagementEscrowEvents = 0
+		account.EngagementGovEvents = 0
+		return nil
+	}
+	targetDay, err := time.Parse(engagementDayFormat, currentDay)
+	if err != nil {
+		return nil
+	}
+
+	updates := make([]engagementScoreUpdate, 0)
+	dayCursor := startDay
+	for dayCursor.Before(targetDay) {
+		raw := sp.computeRawEngagement(account.EngagementMinutes, account.EngagementTxCount, account.EngagementEscrowEvents, account.EngagementGovEvents)
+		if raw > sp.engagementConfig.DailyCap {
+			raw = sp.engagementConfig.DailyCap
+		}
+		oldScore := account.EngagementScore
+		newScore := sp.applyEMAScore(oldScore, raw)
+		updates = append(updates, engagementScoreUpdate{
+			Day: dayCursor.Format(engagementDayFormat),
+			Raw: raw,
+			Old: oldScore,
+			New: newScore,
+		})
+		account.EngagementScore = newScore
+		account.EngagementMinutes = 0
+		account.EngagementTxCount = 0
+		account.EngagementEscrowEvents = 0
+		account.EngagementGovEvents = 0
+		dayCursor = dayCursor.AddDate(0, 0, 1)
+	}
+	account.EngagementDay = currentDay
+	return updates
+}
+
+func (sp *StateProcessor) emitScoreUpdates(addr []byte, updates []engagementScoreUpdate) {
+	if len(updates) == 0 {
+		return
+	}
+	var address [20]byte
+	copy(address[:], addr)
+	for _, upd := range updates {
+		evt := events.EngagementScoreUpdated{
+			Address:  address,
+			Day:      upd.Day,
+			RawScore: upd.Raw,
+			OldScore: upd.Old,
+			NewScore: upd.New,
+		}.Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+}
+
+func bytesToHash32(b []byte) [32]byte {
+	var out [32]byte
+	copy(out[:], b)
+	return out
+}
+
+func addressToArray(addr common.Address) [20]byte {
+	var out [20]byte
+	copy(out[:], addr.Bytes())
+	return out
+}
+
+func (sp *StateProcessor) emitSponsorshipFailureEvent(sender common.Address, assessment *SponsorshipAssessment, txHash [32]byte) {
+	if sp == nil || assessment == nil {
+		return
+	}
+	evt := events.TxSponsorshipFailed{
+		TxHash:  txHash,
+		Sender:  addressToArray(sender),
+		Sponsor: addressToArray(assessment.Sponsor),
+		Status:  string(assessment.Status),
+		Reason:  assessment.Reason,
+	}
+	sp.AppendEvent(evt.Event())
+	if assessment.Throttle != nil {
+		sp.emitPaymasterThrottledEvent(txHash, assessment.Throttle)
+	}
+}
+
+func (sp *StateProcessor) emitSponsorshipSuccessEvent(ctx *sponsorshipRuntime, gasUsed uint64, charged, refund *big.Int) {
+	if sp == nil || ctx == nil {
+		return
+	}
+	var gasPriceCopy *big.Int
+	if ctx.gasPrice != nil {
+		gasPriceCopy = new(big.Int).Set(ctx.gasPrice)
+	}
+	var chargedCopy *big.Int
+	if charged != nil {
+		chargedCopy = new(big.Int).Set(charged)
+	}
+	var refundCopy *big.Int
+	if refund != nil {
+		refundCopy = new(big.Int).Set(refund)
+	}
+	evt := events.TxSponsorshipApplied{
+		TxHash:   ctx.txHash,
+		Sender:   addressToArray(ctx.sender),
+		Sponsor:  addressToArray(ctx.sponsor),
+		GasUsed:  gasUsed,
+		GasPrice: gasPriceCopy,
+		Charged:  chargedCopy,
+		Refund:   refundCopy,
+	}
+	sp.AppendEvent(evt.Event())
+}
+
+func (sp *StateProcessor) emitPaymasterThrottledEvent(txHash [32]byte, throttle *PaymasterThrottle) {
+	if sp == nil || throttle == nil {
+		return
+	}
+	evt := events.PaymasterThrottled{
+		TxHash:       txHash,
+		Scope:        string(throttle.Scope),
+		Merchant:     strings.TrimSpace(throttle.Merchant),
+		DeviceID:     strings.TrimSpace(throttle.DeviceID),
+		Day:          strings.TrimSpace(throttle.Day),
+		TxCount:      throttle.TxCount,
+		LimitTxCount: throttle.LimitTxCount,
+	}
+	if throttle.LimitWei != nil {
+		evt.LimitWei = new(big.Int).Set(throttle.LimitWei)
+	}
+	if throttle.UsedBudgetWei != nil {
+		evt.UsedBudgetWei = new(big.Int).Set(throttle.UsedBudgetWei)
+	}
+	if throttle.AttemptBudgetWei != nil {
+		evt.AttemptWei = new(big.Int).Set(throttle.AttemptBudgetWei)
+	}
+	sp.AppendEvent(evt.Event())
+}
+
+func (sp *StateProcessor) recordPaymasterUsage(ctx *sponsorshipRuntime, charged *big.Int) error {
+	if sp == nil || ctx == nil {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	day := nhbstate.NormalizePaymasterDay(ctx.day)
+	if day == "" {
+		day = sp.currentPaymasterDay()
+	}
+	budget := big.NewInt(0)
+	if ctx.budget != nil {
+		budget = new(big.Int).Set(ctx.budget)
+	}
+	chargedTotal := big.NewInt(0)
+	if charged != nil {
+		chargedTotal = new(big.Int).Set(charged)
+	}
+
+	global, _, err := manager.PaymasterGetGlobalDay(day)
+	if err != nil {
+		return err
+	}
+	if global == nil {
+		global = &nhbstate.PaymasterGlobalDay{Day: day, BudgetWei: big.NewInt(0), ChargedWei: big.NewInt(0)}
+	}
+	global.TxCount++
+	global.BudgetWei = new(big.Int).Add(global.BudgetWei, budget)
+	global.ChargedWei = new(big.Int).Add(global.ChargedWei, chargedTotal)
+	if err := manager.PaymasterPutGlobalDay(global); err != nil {
+		return err
+	}
+
+	merchant := nhbstate.NormalizePaymasterMerchant(ctx.merchant)
+	if merchant != "" {
+		merchantRecord, _, err := manager.PaymasterGetMerchantDay(merchant, day)
+		if err != nil {
+			return err
+		}
+		if merchantRecord == nil {
+			merchantRecord = &nhbstate.PaymasterMerchantDay{Merchant: merchant, Day: day, BudgetWei: big.NewInt(0), ChargedWei: big.NewInt(0)}
+		}
+		merchantRecord.TxCount++
+		merchantRecord.BudgetWei = new(big.Int).Add(merchantRecord.BudgetWei, budget)
+		merchantRecord.ChargedWei = new(big.Int).Add(merchantRecord.ChargedWei, chargedTotal)
+		if err := manager.PaymasterPutMerchantDay(merchantRecord); err != nil {
+			return err
+		}
+	}
+
+	device := nhbstate.NormalizePaymasterDevice(ctx.device)
+	if merchant != "" && device != "" {
+		deviceRecord, _, err := manager.PaymasterGetDeviceDay(merchant, device, day)
+		if err != nil {
+			return err
+		}
+		if deviceRecord == nil {
+			deviceRecord = &nhbstate.PaymasterDeviceDay{Merchant: merchant, DeviceID: device, Day: day, BudgetWei: big.NewInt(0), ChargedWei: big.NewInt(0)}
+		}
+		deviceRecord.TxCount++
+		deviceRecord.BudgetWei = new(big.Int).Add(deviceRecord.BudgetWei, budget)
+		deviceRecord.ChargedWei = new(big.Int).Add(deviceRecord.ChargedWei, chargedTotal)
+		if err := manager.PaymasterPutDeviceDay(deviceRecord); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sp *StateProcessor) recordEngagementActivity(addr []byte, now time.Time, txDelta, escrowDelta, govDelta uint64) error {
+	if txDelta == 0 && escrowDelta == 0 && govDelta == 0 {
+		return nil
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return err
+	}
+	updates := sp.rolloverEngagement(account, now)
+	if txDelta > 0 {
+		account.EngagementTxCount += txDelta
+	}
+	if escrowDelta > 0 {
+		account.EngagementEscrowEvents += escrowDelta
+	}
+	if govDelta > 0 {
+		account.EngagementGovEvents += govDelta
+	}
+	if err := sp.setAccount(addr, account); err != nil {
+		return err
+	}
+	if txDelta > 0 || escrowDelta > 0 {
+		if err := sp.updatePotsoActivity(addr, now, txDelta, escrowDelta); err != nil {
+			return err
+		}
+	}
+	sp.emitScoreUpdates(addr, updates)
+	return nil
+}
+
+func (sp *StateProcessor) updatePotsoActivity(addr []byte, now time.Time, txDelta, escrowDelta uint64) error {
+	if len(addr) != 20 {
+		return nil
+	}
+	day := now.UTC().Format(potso.DayFormat)
+	manager := nhbstate.NewManager(sp.Trie)
+	var address [20]byte
+	copy(address[:], addr)
+	meter, _, err := manager.PotsoGetMeter(address, day)
+	if err != nil {
+		return err
+	}
+	meter.Day = day
+	meter.TxCount += txDelta
+	meter.EscrowEvents += escrowDelta
+	meter.RecomputeScore()
+	if err := manager.PotsoPutMeter(address, meter); err != nil {
+		return err
+	}
+	// Epoch-scoped leg of the same activity, keyed by the current block
+	// height (never wall-clock time) so reward processing is a pure function
+	// of already-committed trie state -- see processPotsoRewardEpoch, which
+	// reads exclusively from this epoch-keyed store rather than the
+	// day-keyed one above (which never resets except at UTC midnight and is
+	// therefore unsuitable as a per-epoch decision input).
+	if cfg := sp.potsoRewardConfig; cfg.EpochLengthBlocks > 0 {
+		epochNumber := sp.blockHeight() / cfg.EpochLengthBlocks
+		if err := manager.PotsoMetricsAddEngagement(epochNumber, address, txDelta, escrowDelta, 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func accountStateKey(addr []byte) []byte {
+	return ethcrypto.Keccak256(addr)
+}
+
+func accountMetadataKey(addr []byte) []byte {
+	buf := make([]byte, len(accountMetadataPrefix)+len(addr))
+	copy(buf, accountMetadataPrefix)
+	copy(buf[len(accountMetadataPrefix):], addr)
+	return ethcrypto.Keccak256(buf)
+}
+
+func (sp *StateProcessor) loadStateAccount(addr []byte) (*gethtypes.StateAccount, error) {
+	key := accountStateKey(addr)
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	stateAcc := new(gethtypes.StateAccount)
+	if err := rlp.DecodeBytes(data, stateAcc); err != nil {
+		slim := new(gethtypes.SlimAccount)
+		if errSlim := rlp.DecodeBytes(data, slim); errSlim == nil {
+			restored := &gethtypes.StateAccount{
+				Nonce:   slim.Nonce,
+				Balance: slim.Balance,
+				Root:    gethtypes.EmptyRootHash,
+				CodeHash: func() []byte {
+					if len(slim.CodeHash) == 0 {
+						return gethtypes.EmptyCodeHash.Bytes()
+					}
+					return append([]byte(nil), slim.CodeHash...)
+				}(),
+			}
+			if len(slim.Root) != 0 {
+				restored.Root = common.BytesToHash(slim.Root)
+			}
+			return restored, nil
+		}
+		legacy := new(types.Account)
+		if errLegacy := rlp.DecodeBytes(data, legacy); errLegacy != nil {
+			return nil, err
+		}
+		migrated, migrateErr := sp.migrateLegacyAccount(addr, legacy)
+		if migrateErr != nil {
+			return nil, migrateErr
+		}
+		return migrated, nil
+	}
+	return stateAcc, nil
+}
+
+func (sp *StateProcessor) migrateLegacyAccount(addr []byte, legacy *types.Account) (*gethtypes.StateAccount, error) {
+	ensureAccountDefaults(legacy)
+
+	balance, overflow := uint256.FromBig(legacy.BalanceNHB)
+	if overflow {
+		return nil, fmt.Errorf("balance overflow")
+	}
+
+	stateAcc := &gethtypes.StateAccount{
+		Nonce:    legacy.Nonce,
+		Balance:  balance,
+		Root:     common.BytesToHash(legacy.StorageRoot),
+		CodeHash: common.CopyBytes(legacy.CodeHash),
+	}
+	if len(stateAcc.CodeHash) == 0 {
+		stateAcc.CodeHash = gethtypes.EmptyCodeHash.Bytes()
+	}
+	if stateAcc.Root == (common.Hash{}) {
+		stateAcc.Root = gethtypes.EmptyRootHash
+	}
+	if err := sp.writeStateAccount(addr, stateAcc); err != nil {
+		return nil, err
+	}
+
+	meta := &accountMetadata{
+		BalanceZNHB:           new(big.Int).Set(legacy.BalanceZNHB),
+		Stake:                 new(big.Int).Set(legacy.Stake),
+		StakeShares:           new(big.Int).Set(legacy.StakeShares),
+		StakeLastIndex:        new(big.Int).Set(legacy.StakeLastIndex),
+		StakeLastPayoutTs:     legacy.StakeLastPayoutTs,
+		LockedZNHB:            big.NewInt(0),
+		CollateralBalance:     big.NewInt(0),
+		DebtPrincipal:         big.NewInt(0),
+		SupplyShares:          big.NewInt(0),
+		LendingSupplyIndex:    big.NewInt(0),
+		LendingBorrowIndex:    big.NewInt(0),
+		Unbonding:             make([]stakeUnbond, 0),
+		Username:              legacy.Username,
+		EngagementScore:       legacy.EngagementScore,
+		ValidatorRegistered:   legacy.ValidatorRegistered,
+		ValidatorRegisteredAt: legacy.ValidatorRegisteredAt,
+	}
+	if err := sp.writeAccountMetadata(addr, meta); err != nil {
+		return nil, err
+	}
+
+	if legacy.Username != "" {
+		sp.usernameToAddr[legacy.Username] = append([]byte(nil), addr...)
+		if err := sp.persistUsernameIndex(); err != nil {
+			return nil, err
+		}
+	}
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return nil, err
+	}
+	// Gate identical to setAccount's meetsStake (registration + own-basis +
+	// still-self-delegated) -- a legacy-format account was never able to
+	// have ValidatorRegistered=true (the field didn't exist in the old
+	// encoding, so it decodes to its zero value, false), so in practice
+	// this migration never auto-grants eligibility; a legacy account that
+	// wants to become a validator must explicitly register afterward like
+	// any other account, going through the normal setAccount path. Reusing
+	// the same three-part gate here (rather than the old bare
+	// legacy.Stake>=minStake check) closes an independent instance of the
+	// self-delegation gap described in setAccount's own doc comment, and
+	// stores basis (not raw Stake) to match EligibleValidators' invariant
+	// elsewhere.
+	basis, err := sp.validatorEligibilityBasis(legacy, addr)
+	if err != nil {
+		return nil, err
+	}
+	if legacy.ValidatorRegistered && selfDelegated(legacy, addr) && basis.Cmp(minStake) >= 0 {
+		if sp.EligibleValidators == nil {
+			sp.EligibleValidators = make(map[string]*big.Int)
+		}
+		key := string(addr)
+		sp.EligibleValidators[key] = new(big.Int).Set(basis)
+		sp.ValidatorSet[key] = new(big.Int).Set(basis)
+		if err := sp.persistEligibleValidatorSet(); err != nil {
+			return nil, err
+		}
+		if err := sp.persistValidatorSet(); err != nil {
+			return nil, err
+		}
+	}
+	return stateAcc, nil
+}
+
+func (sp *StateProcessor) writeStateAccount(addr []byte, stateAcc *gethtypes.StateAccount) error {
+	key := accountStateKey(addr)
+	encoded, err := rlp.EncodeToBytes(stateAcc)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(key, encoded)
+}
+
+func (sp *StateProcessor) loadAccountMetadata(addr []byte) (*accountMetadata, error) {
+	key := accountMetadataKey(addr)
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	meta := &accountMetadata{
+		BalanceZNHB:    big.NewInt(0),
+		Stake:          big.NewInt(0),
+		StakeShares:    big.NewInt(0),
+		StakeLastIndex: big.NewInt(0),
+		LockedZNHB:     big.NewInt(0),
+		Unbonding:      make([]stakeUnbond, 0),
+	}
+	if len(data) == 0 {
+		return meta, nil
+	}
+	if err := rlp.DecodeBytes(data, meta); err != nil {
+		return nil, err
+	}
+	if meta.BalanceZNHB == nil {
+		meta.BalanceZNHB = big.NewInt(0)
+	}
+	if meta.Stake == nil {
+		meta.Stake = big.NewInt(0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
+	}
+	if meta.LockedZNHB == nil {
+		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.CollateralBalance == nil {
+		meta.CollateralBalance = big.NewInt(0)
+	}
+	if meta.DebtPrincipal == nil {
+		meta.DebtPrincipal = big.NewInt(0)
+	}
+	if meta.SupplyShares == nil {
+		meta.SupplyShares = big.NewInt(0)
+	}
+	if meta.LendingSupplyIndex == nil {
+		meta.LendingSupplyIndex = big.NewInt(0)
+	}
+	if meta.LendingBorrowIndex == nil {
+		meta.LendingBorrowIndex = big.NewInt(0)
+	}
+	if meta.Unbonding == nil {
+		meta.Unbonding = make([]stakeUnbond, 0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
+	}
+	return meta, nil
+}
+
+func (sp *StateProcessor) writeAccountMetadata(addr []byte, meta *accountMetadata) error {
+	if meta.BalanceZNHB == nil {
+		meta.BalanceZNHB = big.NewInt(0)
+	}
+	if meta.Stake == nil {
+		meta.Stake = big.NewInt(0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
+	}
+	if meta.LockedZNHB == nil {
+		meta.LockedZNHB = big.NewInt(0)
+	}
+	if meta.CollateralBalance == nil {
+		meta.CollateralBalance = big.NewInt(0)
+	}
+	if meta.DebtPrincipal == nil {
+		meta.DebtPrincipal = big.NewInt(0)
+	}
+	if meta.SupplyShares == nil {
+		meta.SupplyShares = big.NewInt(0)
+	}
+	if meta.LendingSupplyIndex == nil {
+		meta.LendingSupplyIndex = big.NewInt(0)
+	}
+	if meta.LendingBorrowIndex == nil {
+		meta.LendingBorrowIndex = big.NewInt(0)
+	}
+	if meta.Unbonding == nil {
+		meta.Unbonding = make([]stakeUnbond, 0)
+	}
+	if meta.StakeShares == nil {
+		meta.StakeShares = big.NewInt(0)
+	}
+	if meta.StakeLastIndex == nil {
+		meta.StakeLastIndex = big.NewInt(0)
+	}
+	encoded, err := rlp.EncodeToBytes(meta)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(accountMetadataKey(addr), encoded)
+}
+
+type usernameIndexEntry struct {
+	Username string
+	Address  []byte
+}
+
+func (sp *StateProcessor) loadUsernameIndex() error {
+	data, err := sp.Trie.Get(usernameIndexKey)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var entries []usernameIndexEntry
+	if err := rlp.DecodeBytes(data, &entries); err != nil {
+		return err
+	}
+	sp.usernameToAddr = make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.Username == "" {
+			continue
+		}
+		sp.usernameToAddr[entry.Username] = append([]byte(nil), entry.Address...)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) persistUsernameIndex() error {
+	entries := make([]usernameIndexEntry, 0, len(sp.usernameToAddr))
+	for username, addr := range sp.usernameToAddr {
+		entries = append(entries, usernameIndexEntry{
+			Username: username,
+			Address:  append([]byte(nil), addr...),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Username < entries[j].Username })
+
+	encoded, err := rlp.EncodeToBytes(entries)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(usernameIndexKey, encoded)
+}
+
+func (sp *StateProcessor) loadValidatorSet() error {
+	data, err := sp.Trie.Get(validatorSetKey)
+	if err != nil {
+		return err
+	}
+	decoded, err := nhbstate.DecodeValidatorSet(data)
+	if err != nil {
+		return err
+	}
+	sp.ValidatorSet = make(map[string]*big.Int, len(decoded))
+	for k, v := range decoded {
+		if v == nil {
+			v = big.NewInt(0)
+		}
+		sp.ValidatorSet[k] = new(big.Int).Set(v)
+	}
+	eligibleData, err := sp.Trie.Get(validatorEligibleKey)
+	if err != nil {
+		return err
+	}
+	if len(eligibleData) == 0 {
+		sp.EligibleValidators = make(map[string]*big.Int, len(sp.ValidatorSet))
+		for k, v := range sp.ValidatorSet {
+			sp.EligibleValidators[k] = new(big.Int).Set(v)
+		}
+		return nil
+	}
+	eligibleDecoded, err := nhbstate.DecodeValidatorSet(eligibleData)
+	if err != nil {
+		return err
+	}
+	sp.EligibleValidators = make(map[string]*big.Int, len(eligibleDecoded))
+	for k, v := range eligibleDecoded {
+		if v == nil {
+			v = big.NewInt(0)
+		}
+		sp.EligibleValidators[k] = new(big.Int).Set(v)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) persistValidatorSet() error {
+	encoded, err := nhbstate.EncodeValidatorSet(sp.ValidatorSet)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(validatorSetKey, encoded)
+}
+
+func (sp *StateProcessor) persistEligibleValidatorSet() error {
+	encoded, err := nhbstate.EncodeValidatorSet(sp.EligibleValidators)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(validatorEligibleKey, encoded)
+}
+
+func (sp *StateProcessor) loadBigInt(key []byte) (*big.Int, error) {
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return big.NewInt(0), nil
+	}
+	value := new(big.Int)
+	if err := rlp.DecodeBytes(data, value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func (sp *StateProcessor) writeBigInt(key []byte, amount *big.Int) error {
+	if amount == nil {
+		amount = big.NewInt(0)
+	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("negative value not allowed")
+	}
+	encoded, err := rlp.EncodeToBytes(amount)
+	if err != nil {
+		return err
+	}
+	return sp.Trie.Update(key, encoded)
+}
+
+func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error {
+	return sp.setAccount(addr, account)
+}
+
+func bytesToAddress(b []byte) [20]byte {
+	var addr [20]byte
+	copy(addr[:], b)
+	return addr
+}
+
+func decodeEscrowID(data []byte) ([32]byte, error) {
+	var id [32]byte
+	if len(data) != len(id) {
+		return id, fmt.Errorf("escrow id must be %d bytes", len(id))
+	}
+	copy(id[:], data)
+	return id, nil
+}
+
+func (sp *StateProcessor) updateSenderNonce(sender []byte, senderAccount *types.Account, newNonce uint64) error {
+	account, err := sp.getAccount(sender)
+	if err != nil {
+		return err
+	}
+	account.Nonce = newNonce
+	if senderAccount != nil {
+		senderAccount.Nonce = newNonce
+	}
+	return sp.setAccount(sender, account)
+}
+
+func (sp *StateProcessor) ensureEscrowReady(id [32]byte, manager *nhbstate.Manager) (*escrow.Escrow, error) {
+	if manager == nil {
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	if esc, ok := manager.EscrowGet(id); ok {
+		return esc, nil
+	}
+	return sp.migrateLegacyEscrow(id, manager)
+}
+
+func (sp *StateProcessor) migrateLegacyEscrow(id [32]byte, manager *nhbstate.Manager) (*escrow.Escrow, error) {
+	if manager == nil {
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	legacyKey := ethcrypto.Keccak256(append([]byte("escrow-"), id[:]...))
+	data, err := sp.Trie.Get(legacyKey)
+	if err != nil || len(data) == 0 {
+		return nil, fmt.Errorf("escrow %x not found", id)
+	}
+	legacy := new(escrow.LegacyEscrow)
+	if err := rlp.DecodeBytes(data, legacy); err != nil {
+		return nil, err
+	}
+	converted, err := sp.convertLegacyEscrow(id, legacy)
+	if err != nil {
+		return nil, err
+	}
+	if err := manager.EscrowPut(converted); err != nil {
+		return nil, err
+	}
+	if err := sp.Trie.Update(legacyKey, nil); err != nil {
+		return nil, err
+	}
+	if converted.Status == escrow.EscrowFunded || converted.Status == escrow.EscrowDisputed {
+		if err := manager.EscrowCredit(converted.ID, converted.Token, converted.Amount); err != nil {
+			return nil, err
+		}
+		if err := sp.creditEscrowVault(manager, converted.Token, converted.Amount); err != nil {
+			return nil, err
+		}
+	}
+	migrated, ok := manager.EscrowGet(converted.ID)
+	if !ok {
+		return nil, fmt.Errorf("escrow migration failed")
+	}
+	return migrated, nil
+}
+
+func (sp *StateProcessor) convertLegacyEscrow(id [32]byte, legacy *escrow.LegacyEscrow) (*escrow.Escrow, error) {
+	if legacy == nil {
+		return nil, fmt.Errorf("legacy escrow not found")
+	}
+	amount := big.NewInt(0)
+	if legacy.Amount != nil {
+		amount = new(big.Int).Set(legacy.Amount)
+	}
+	payer := bytesToAddress(legacy.Seller)
+	payee := payer
+	if len(legacy.Buyer) > 0 {
+		payee = bytesToAddress(legacy.Buyer)
+	}
+	status := escrow.EscrowFunded
+	switch legacy.Status {
+	case escrow.LegacyStatusReleased:
+		status = escrow.EscrowReleased
+	case escrow.LegacyStatusRefunded:
+		status = escrow.EscrowRefunded
+	case escrow.LegacyStatusDisputed:
+		status = escrow.EscrowDisputed
+	case escrow.LegacyStatusOpen, escrow.LegacyStatusInProgress:
+		status = escrow.EscrowFunded
+	default:
+		status = escrow.EscrowFunded
+	}
+	now := sp.now().UTC()
+	created := now.Unix()
+	deadline := now.Add(30 * 24 * time.Hour).Unix()
+	if deadline < created {
+		deadline = created
+	}
+	return &escrow.Escrow{
+		ID:        id,
+		Payer:     payer,
+		Payee:     payee,
+		Mediator:  [20]byte{},
+		Token:     "NHB",
+		Amount:    amount,
+		FeeBps:    0,
+		Deadline:  deadline,
+		CreatedAt: created,
+		Nonce:     1,
+		Status:    status,
+	}, nil
+}
+
+func (sp *StateProcessor) creditEscrowVault(manager *nhbstate.Manager, token string, amount *big.Int) error {
+	if amount == nil || amount.Sign() <= 0 {
+		return nil
+	}
+	normalized, err := escrow.NormalizeToken(token)
+	if err != nil {
+		return err
+	}
+	vault, err := manager.EscrowVaultAddress(normalized)
+	if err != nil {
+		return err
+	}
+	account, err := manager.GetAccount(vault[:])
+	if err != nil {
+		return err
+	}
+	ensureAccountDefaults(account)
+	switch normalized {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+	}
+	return manager.PutAccount(vault[:], account)
+}
+
+func (sp *StateProcessor) now() time.Time {
+	if sp != nil && sp.nowFunc != nil {
+		return sp.nowFunc()
+	}
+	return time.Now()
+}
+
+func (sp *StateProcessor) stakingMaxEmissionPerYear(manager *nhbstate.Manager) (*big.Int, error) {
+	if sp == nil {
+		return big.NewInt(0), nil
+	}
+	if manager == nil {
+		if sp.Trie == nil {
+			return big.NewInt(0), nil
+		}
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingMaxEmissionPerYearWei)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return big.NewInt(0), nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid max emission value %q", trimmed)
+	}
+	if value.Sign() < 0 {
+		return nil, fmt.Errorf("max emission must be non-negative")
+	}
+	return value, nil
+}
+
+func (sp *StateProcessor) mintMaxEmissionPerYear(manager *nhbstate.Manager, token string) (*big.Int, error) {
+	if sp == nil {
+		return big.NewInt(0), nil
+	}
+	if manager == nil {
+		if sp.Trie == nil {
+			return big.NewInt(0), nil
+		}
+		manager = nhbstate.NewManager(sp.Trie)
+	}
+	var paramKey string
+	switch strings.ToUpper(strings.TrimSpace(token)) {
+	case "NHB":
+		paramKey = governance.ParamKeyMintNHBMaxEmissionPerYearWei
+	case "ZNHB":
+		paramKey = governance.ParamKeyMintZNHBMaxEmissionPerYearWei
+	default:
+		return nil, fmt.Errorf("unsupported token %q", token)
+	}
+	raw, ok, err := manager.ParamStoreGet(paramKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return big.NewInt(0), nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return big.NewInt(0), nil
+	}
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid max emission value %q", trimmed)
+	}
+	if value.Sign() < 0 {
+		return nil, fmt.Errorf("max emission must be non-negative")
+	}
+	return value, nil
+}
+
+func (sp *StateProcessor) tickLoyaltySmoothing() error {
+	if sp == nil {
+		return nil
+	}
+	cfg, err := sp.LoyaltyGlobalConfig()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	state, err := manager.LoyaltyDynamicState()
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		state = nhbstate.NewLoyaltyEngineStateFromDynamic(cfg.Dynamic)
+	} else {
+		state = state.Clone().ApplyDynamicConfig(cfg.Dynamic)
+	}
+	state.StepTowardsTarget()
+	if err := manager.SetLoyaltyDynamicState(state); err != nil {
+		return err
+	}
+	if evt := (events.LoyaltySmoothingTick{EffectiveBps: state.EffectiveBps, TargetBps: state.TargetBps}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) LoyaltyGlobalConfig() (*loyalty.GlobalConfig, error) {
+	key := nhbstate.LoyaltyGlobalStorageKey()
+	data, err := sp.Trie.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	cfg := new(loyalty.GlobalConfig)
+	if err := rlp.DecodeBytes(data, cfg); err != nil {
+		return nil, err
+	}
+	return cfg.Normalize(), nil
+}
+
+func (sp *StateProcessor) LoyaltyBaseDailyAccrued(addr []byte, day string) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseDailyMeterKey(addr, day)
+	return sp.loadBigInt(key)
+}
+
+func (sp *StateProcessor) SetLoyaltyBaseDailyAccrued(addr []byte, day string, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseDailyMeterKey(addr, day)
+	return sp.writeBigInt(key, amount)
+}
+
+func (sp *StateProcessor) AppendLoyaltyBaseAccrualRecord(addr []byte, day string, record loyalty.AccrualRecord) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.AppendLoyaltyBaseAccrualRecord(addr, day, record)
+}
+
+func (sp *StateProcessor) LoyaltyBaseTotalAccrued(addr []byte) (*big.Int, error) {
+	if len(addr) == 0 {
+		return nil, fmt.Errorf("address must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseTotalMeterKey(addr)
+	return sp.loadBigInt(key)
+}
+
+func (sp *StateProcessor) SetLoyaltyBaseTotalAccrued(addr []byte, amount *big.Int) error {
+	if len(addr) == 0 {
+		return fmt.Errorf("address must not be empty")
+	}
+	key := nhbstate.LoyaltyBaseTotalMeterKey(addr)
+	return sp.writeBigInt(key, amount)
+}
+
+func (sp *StateProcessor) LoyaltyBasePairDailyAccrued(pairKey []byte, day string) (*big.Int, error) {
+	if len(pairKey) == 0 {
+		return nil, fmt.Errorf("pair key must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return nil, fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBasePairDailyMeterKey(pairKey, day)
+	return sp.loadBigInt(key)
+}
+
+func (sp *StateProcessor) SetLoyaltyBasePairDailyAccrued(pairKey []byte, day string, amount *big.Int) error {
+	if len(pairKey) == 0 {
+		return fmt.Errorf("pair key must not be empty")
+	}
+	if strings.TrimSpace(day) == "" {
+		return fmt.Errorf("day must not be empty")
+	}
+	key := nhbstate.LoyaltyBasePairDailyMeterKey(pairKey, day)
+	return sp.writeBigInt(key, amount)
+}
+
+// QueuePendingBaseReward records a computed base reward for later settlement at
+// the end of the block.
+func (sp *StateProcessor) QueuePendingBaseReward(ctx *loyalty.BaseRewardContext, reward *big.Int) {
+	if sp == nil || reward == nil || reward.Sign() <= 0 {
+		return
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	cfg, err := manager.LoyaltyGlobalConfig()
+	enableProRate := true
+	var normalized *loyalty.GlobalConfig
+	if err == nil && cfg != nil {
+		normalized = cfg.Clone().Normalize()
+		enableProRate = normalized.Dynamic.EnableProRate
+	}
+
+	pending := nhbstate.PendingReward{
+		AmountZNHB: new(big.Int).Set(reward),
+	}
+	if ctx != nil {
+		pending.TxHash = ctx.TxHash
+		if len(ctx.From) == len(pending.Payer) {
+			copy(pending.Payer[:], ctx.From)
+		}
+		// Protocol base rewards follow the spender.
+		if len(ctx.From) == len(pending.Recipient) {
+			copy(pending.Recipient[:], ctx.From)
+		}
+	}
+
+	if enableProRate {
+		sp.blockCtx.PendingRewards.AddPendingReward(pending)
+	} else if normalized != nil {
+		sp.settleBaseRewardImmediate(ctx, pending, reward, normalized, manager)
+	}
+
+	if evt := (events.LoyaltyRewardProposed{TxHash: pending.TxHash, Amount: pending.AmountZNHB}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
+}
+
+func (sp *StateProcessor) settleBaseRewardImmediate(ctx *loyalty.BaseRewardContext, pending nhbstate.PendingReward, amount *big.Int, cfg *loyalty.GlobalConfig, manager *nhbstate.Manager) {
+	if sp == nil || amount == nil || amount.Sign() <= 0 || cfg == nil || len(cfg.Treasury) != 20 {
+		return
+	}
+	now := sp.blockTimestamp()
+	totalProposed, err := manager.AddProposedTodayZNHB(now, amount)
+	if err != nil {
+		return
+	}
+
+	treasuryAcc, err := sp.getAccount(cfg.Treasury)
+	if err != nil {
+		return
+	}
+	if treasuryAcc.BalanceZNHB == nil {
+		treasuryAcc.BalanceZNHB = big.NewInt(0)
+	}
+	requested := new(big.Int).Set(amount)
+	payout := new(big.Int).Set(amount)
+	if treasuryAcc.BalanceZNHB.Cmp(payout) < 0 {
+		payout = new(big.Int).Set(treasuryAcc.BalanceZNHB)
+	}
+
+	var paidTotal *big.Int
+	if payout.Sign() > 0 {
+		treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, payout)
+		if err := sp.setAccount(cfg.Treasury, treasuryAcc); err != nil {
+			return
+		}
+
+		var recipient [20]byte
+		copy(recipient[:], pending.Recipient[:])
+		persist := true
+		var account *types.Account
+		if ctx != nil && ctx.ToAccount != nil && len(ctx.To) == len(recipient) && bytes.Equal(ctx.To, recipient[:]) {
+			account = ctx.ToAccount
+			persist = false
+		} else {
+			acct, err := sp.getAccount(recipient[:])
+			if err != nil {
+				return
+			}
+			account = acct
+		}
+		if account.BalanceZNHB == nil {
+			account.BalanceZNHB = big.NewInt(0)
+		}
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, payout)
+		if persist {
+			if err := sp.setAccount(recipient[:], account); err != nil {
+				return
+			}
+		}
+
+		paidTotal, err = manager.AddPaidTodayZNHB(now, payout)
+		if err != nil {
+			return
+		}
+	} else {
+		paidTotal, err = manager.AddPaidTodayZNHB(now, nil)
+		if err != nil {
+			return
+		}
+	}
+
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
+	if err != nil {
+		budget = big.NewInt(0)
+	} else if fallback != nil {
+		if metrics := observability.Loyalty(); metrics != nil {
+			metrics.RecordGuardFallback(fallback.Strategy)
+		}
+		evt := (events.LoyaltyPriceFallback{Strategy: fallback.Strategy, Base: fallback.Base, BudgetZNHB: fallback.BudgetZNHB}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+	ratio := ratioToFloatFromFrac(payout, requested)
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	if metrics := observability.Loyalty(); metrics != nil {
+		metrics.RecordBudget(
+			ratioToFloat(budget),
+			ratioToFloat(totalProposed),
+			ratio,
+			ratioToFloat(paidTotal),
+		)
+	}
+
+	if payout.Cmp(requested) < 0 {
+		ratioFP := big.NewInt(0)
+		if requested.Sign() > 0 {
+			ratioFP = new(big.Int).Mul(new(big.Int).Set(payout), big.NewInt(events.LoyaltyProrationScale))
+			ratioFP.Quo(ratioFP, requested)
+		}
+		evt := (events.LoyaltyBudgetProRated{
+			Day:        now.UTC().Format("2006-01-02"),
+			BudgetZNHB: budget,
+			DemandZNHB: requested,
+			RatioFP:    ratioFP,
+		}).Event()
+		if evt != nil {
+			sp.AppendEvent(evt)
+		}
+	}
+}
+
+func (sp *StateProcessor) configureTradeEngine() (*escrow.TradeEngine, *nhbstate.Manager) {
+	manager := nhbstate.NewManager(sp.Trie)
+	if sp.EscrowEngine == nil {
+		sp.EscrowEngine = escrow.NewEngine()
+	}
+	sp.EscrowEngine.SetState(manager)
+	sp.EscrowEngine.SetEmitter(stateProcessorEmitter{sp: sp})
+	sp.EscrowEngine.SetFeeTreasury(sp.escrowFeeTreasury)
+	sp.EscrowEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
+	if sp.TradeEngine == nil {
+		sp.TradeEngine = escrow.NewTradeEngine(sp.EscrowEngine)
+	}
+	sp.TradeEngine.SetState(manager)
+	sp.TradeEngine.SetEmitter(stateProcessorEmitter{sp: sp})
+	sp.TradeEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
+	return sp.TradeEngine, manager
+}
+
+type stateProcessorEmitter struct {
+	sp *StateProcessor
+}
+
+func (e stateProcessorEmitter) Emit(evt events.Event) {
+	if e.sp == nil || evt == nil {
+		return
+	}
+	if provider, ok := evt.(interface{ Event() *types.Event }); ok {
+		if payload := provider.Event(); payload != nil {
+			e.sp.AppendEvent(payload)
+		}
+		return
+	}
+	e.sp.AppendEvent(&types.Event{Type: evt.EventType(), Attributes: map[string]string{}})
+}
+
+func (sp *StateProcessor) SettleTradeAtomic(tradeID [32]byte) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.SettleAtomic(tradeID)
+}
+
+func (sp *StateProcessor) TradeTryExpire(tradeID [32]byte, now int64) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.TradeTryExpire(tradeID, now)
+}
+
+func (sp *StateProcessor) OnTradeFundingProgress(tradeID [32]byte) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.OnFundingProgress(tradeID)
+}
+
+func (sp *StateProcessor) OnEscrowFunded(escrowID [32]byte) error {
+	tradeEngine, _ := sp.configureTradeEngine()
+	return tradeEngine.HandleEscrowFunded(escrowID)
+}
+
+func (sp *StateProcessor) emitPaymentIntentConsumed(tx *types.Transaction) error {
+	if tx == nil || len(tx.IntentRef) == 0 {
+		return nil
+	}
+	hash, err := tx.Hash()
+	if err != nil {
+		return err
+	}
+	evt := events.PaymentIntentConsumed{
+		IntentRef: append([]byte(nil), tx.IntentRef...),
+		TxHash:    hash,
+		Merchant:  tx.MerchantAddress,
+		DeviceID:  tx.DeviceID,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+	return nil
+}
+
+func (sp *StateProcessor) AppendEvent(evt *types.Event) {
+	if evt == nil {
+		return
+	}
+	attrs := make(map[string]string, len(evt.Attributes))
+	for k, v := range evt.Attributes {
+		attrs[k] = v
+	}
+	sp.events = append(sp.events, types.Event{Type: evt.Type, Attributes: attrs})
+}
+
+func (sp *StateProcessor) recordTokenSupplyChange(token string, delta, total *big.Int, reason string) {
+	if sp == nil {
+		return
+	}
+	if metrics := observability.Supply(); metrics != nil {
+		metrics.RecordTotal(token, total)
+	}
+	evt := events.TokenSupply{
+		Token:  token,
+		Total:  cloneBigInt(total),
+		Delta:  cloneBigInt(delta),
+		Reason: reason,
+	}.Event()
+	if evt != nil {
+		sp.AppendEvent(evt)
+	}
+}
+
+func (sp *StateProcessor) emitStakePaused(addr []byte, operation string, unbondID uint64) {
+	if sp == nil {
+		return
+	}
+	payload := events.StakePaused{
+		Operation:   operation,
+		Reason:      stakePauseReasonGovernance,
+		UnbondingID: unbondID,
+	}
+	if len(addr) > 0 {
+		payload.Account = bytesToAddress(addr)
+	}
+	sp.AppendEvent(payload.Event())
+}
+
+func (sp *StateProcessor) Events() []types.Event {
+	out := make([]types.Event, len(sp.events))
+	for i := range sp.events {
+		attrs := make(map[string]string, len(sp.events[i].Attributes))
+		for k, v := range sp.events[i].Attributes {
+			attrs[k] = v
+		}
+		out[i] = types.Event{Type: sp.events[i].Type, Attributes: attrs}
+	}
+	return out
+}
+
+func (sp *StateProcessor) GetAccount(addr []byte) (*types.Account, error) { return sp.getAccount(addr) }
+func (sp *StateProcessor) IsValidator(addr []byte) bool {
+	_, ok := sp.ValidatorSet[string(addr)]
+	return ok
+}
+
+func (sp *StateProcessor) ResolveUsername(username string) ([]byte, bool) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		return nil, false
+	}
+	addr, ok := sp.usernameToAddr[trimmed]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), addr...), true
+}
+
+func (sp *StateProcessor) HasRole(role string, addr []byte) bool {
+	if len(addr) == 0 {
+		return false
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.HasRole(role, addr)
+}
+
+func (sp *StateProcessor) LoyaltyBusinessByID(id loyalty.BusinessID) (*loyalty.Business, bool, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	business := new(loyalty.Business)
+	ok, err := manager.KVGet(nhbstate.LoyaltyBusinessKey(id), business)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return business, true, nil
+}
+
+func (sp *StateProcessor) LoyaltyProgramByID(id loyalty.ProgramID) (*loyalty.Program, bool, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	program := new(loyalty.Program)
+	ok, err := manager.KVGet(loyalty.ProgramStorageKey(id), program)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return program, true, nil
+}
+
+func (sp *StateProcessor) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	var raw [][]byte
+	if err := manager.KVGetList(loyalty.ProgramOwnerIndexKey(owner), &raw); err != nil {
+		return nil, err
+	}
+	ids := make([]loyalty.ProgramID, 0, len(raw))
+	seen := make(map[[32]byte]struct{}, len(raw))
+	for _, entry := range raw {
+		if len(entry) != len(loyalty.ProgramID{}) {
+			continue
+		}
+		var id loyalty.ProgramID
+		copy(id[:], entry)
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	return ids, nil
+}
+
+// LoyaltyBusinessesByOwner lists every business the given address owns, in
+// deterministic order. This is the read path a client uses to discover the
+// BusinessID assigned by a TxTypeCreateLoyaltyBusiness transaction --
+// RegisterBusiness itself emits no event, and BusinessIDs are sequentially
+// minted so a caller cannot predict theirs in advance; the owner index this
+// reads (LoyaltyBusinessOwnerKey) is populated on every RegisterBusiness
+// call regardless.
+func (sp *StateProcessor) LoyaltyBusinessesByOwner(owner [20]byte) ([]loyalty.BusinessID, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	var raw [][]byte
+	if err := manager.KVGetList(nhbstate.LoyaltyBusinessOwnerKey(owner[:]), &raw); err != nil {
+		return nil, err
+	}
+	ids := make([]loyalty.BusinessID, 0, len(raw))
+	seen := make(map[[32]byte]struct{}, len(raw))
+	for _, entry := range raw {
+		if len(entry) != len(loyalty.BusinessID{}) {
+			continue
+		}
+		var id loyalty.BusinessID
+		copy(id[:], entry)
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	return ids, nil
+}
+
+func (sp *StateProcessor) LoyaltyBusinessByMerchant(merchant [20]byte) (*loyalty.Business, bool, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	var id loyalty.BusinessID
+	exists, err := manager.KVGet(nhbstate.LoyaltyMerchantIndexKey(merchant[:]), &id)
+	if err != nil || !exists {
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	if id == (loyalty.BusinessID{}) {
+		return nil, false, nil
+	}
+	business := new(loyalty.Business)
+	ok, err := manager.KVGet(nhbstate.LoyaltyBusinessKey(id), business)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return business, true, nil
+}
+
+func (sp *StateProcessor) LoyaltyProgramDailyAccrued(programID loyalty.ProgramID, addr []byte, day string) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyAccrued(programID, addr, day)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramDailyAccrued(programID loyalty.ProgramID, addr []byte, day string, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramDailyAccrued(programID, addr, day, amount)
+}
+
+func (sp *StateProcessor) LoyaltyProgramDailyTotalAccrued(programID loyalty.ProgramID, day string) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyTotalAccrued(programID, day)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramDailyTotalAccrued(programID loyalty.ProgramID, day string, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramDailyTotalAccrued(programID, day, amount)
+}
+
+func (sp *StateProcessor) LoyaltyProgramDailyTxCount(programID loyalty.ProgramID, day string) (uint64, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyTxCount(programID, day)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramDailyTxCount(programID loyalty.ProgramID, day string, count uint64) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramDailyTxCount(programID, day, count)
+}
+
+func (sp *StateProcessor) LoyaltyProgramLifetimeAccrued(programID loyalty.ProgramID) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramLifetimeAccrued(programID)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramLifetimeAccrued(programID loyalty.ProgramID, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramLifetimeAccrued(programID, amount)
+}
+
+func (sp *StateProcessor) LoyaltyProgramEpochAccrued(programID loyalty.ProgramID, epoch uint64) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramEpochAccrued(programID, epoch)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramEpochAccrued(programID loyalty.ProgramID, epoch uint64, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramEpochAccrued(programID, epoch, amount)
+}
+
+func (sp *StateProcessor) LoyaltyProgramIssuanceAccrued(programID loyalty.ProgramID, addr []byte) (*big.Int, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramIssuanceAccrued(programID, addr)
+}
+
+func (sp *StateProcessor) SetLoyaltyProgramIssuanceAccrued(programID loyalty.ProgramID, addr []byte, amount *big.Int) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.SetLoyaltyProgramIssuanceAccrued(programID, addr, amount)
+}
+
+func (sp *StateProcessor) AppendLoyaltyProgramAccrualRecord(programID loyalty.ProgramID, day string, record loyalty.AccrualRecord) error {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.AppendLoyaltyProgramAccrualRecord(programID, day, record)
+}
+
+func (sp *StateProcessor) LoyaltyProgramDailyAccrualRecords(programID loyalty.ProgramID, day string) ([]loyalty.AccrualRecord, error) {
+	manager := nhbstate.NewManager(sp.Trie)
+	return manager.LoyaltyProgramDailyAccrualRecords(programID, day)
+}
+
+func (sp *StateProcessor) MintToken(symbol string, addr []byte, amount *big.Int) error {
+	if len(addr) != 20 {
+		return fmt.Errorf("mint: address must be 20 bytes")
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return fmt.Errorf("mint: invalid amount")
+	}
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	if normalized == "" {
+		return fmt.Errorf("mint: token symbol required")
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return err
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	switch normalized {
+	case "NHB":
+		account.BalanceNHB = new(big.Int).Add(account.BalanceNHB, amount)
+		if err := sp.setAccount(addr, account); err != nil {
+			return err
+		}
+	case "ZNHB":
+		account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
+		if err := sp.setAccount(addr, account); err != nil {
+			return err
+		}
+	default:
+		balance, err := manager.Balance(addr, normalized)
+		if err != nil {
+			return err
+		}
+		updated := new(big.Int).Add(balance, amount)
+		if err := manager.SetBalance(addr, normalized, updated); err != nil {
+			return err
+		}
+	}
+	totalSupply, err := manager.AdjustTokenSupply(normalized, amount)
+	if err != nil {
+		return err
+	}
+	sp.recordTokenSupplyChange(normalized, amount, totalSupply, events.SupplyReasonMint)
+	return nil
+}
+
+func decodeHeartbeatPayload(data []byte, payload *types.HeartbeatPayload) error {
+	if len(data) == 0 || payload == nil {
+		return nil
+	}
+	if err := json.Unmarshal(data, payload); err == nil {
+		return nil
+	}
+	if err := rlp.DecodeBytes(data, payload); err == nil {
+		return nil
+	}
+	return fmt.Errorf("heartbeat payload must be valid JSON or RLP")
+}
+
+// getGlobalFeeRate retrieves the dynamically governed protocol fee rate (in basis points).
+// Dynamic routing fees remain disabled until governance-backed storage and client-visible
+// economics are rolled out together in a coordinated network upgrade.
+func getGlobalFeeRate(_ *gethstate.CachingDB) uint64 {
+	return 0
+}

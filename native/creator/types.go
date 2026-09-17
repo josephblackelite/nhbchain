@@ -1,0 +1,122 @@
+package creator
+
+import "math/big"
+
+// Content represents a piece of media or experience published by a creator.
+type Content struct {
+	ID          string   `json:"id"`
+	Creator     [20]byte `json:"creator"`
+	URI         string   `json:"uri"`
+	Metadata    string   `json:"metadata"`
+	Hash        string   `json:"hash"`
+	PublishedAt int64    `json:"publishedAt"`
+	TotalTips   *big.Int `json:"totalTips"`
+	TotalStake  *big.Int `json:"totalStake"`
+}
+
+// Tip captures a fan contribution directed at a specific piece of content.
+type Tip struct {
+	ContentID string   `json:"contentId"`
+	Creator   [20]byte `json:"creator"`
+	Fan       [20]byte `json:"fan"`
+	Amount    *big.Int `json:"amount"`
+	TippedAt  int64    `json:"tippedAt"`
+}
+
+// Stake records a fan staking position that accrues payouts for the creator.
+type Stake struct {
+	Creator     [20]byte `json:"creator"`
+	Fan         [20]byte `json:"fan"`
+	Amount      *big.Int `json:"amount"`
+	Shares      *big.Int `json:"shares"`
+	StakedAt    int64    `json:"stakedAt"`
+	LastAccrual int64    `json:"lastAccrual"`
+}
+
+// PayoutLedger maintains the cumulative payout accounting for a creator.
+type PayoutLedger struct {
+	Creator             [20]byte `json:"creator"`
+	TotalTips           *big.Int `json:"totalTips"`
+	TotalStakingYield   *big.Int `json:"totalStakingYield"`
+	PendingDistribution *big.Int `json:"pendingDistribution"`
+	LastPayout          int64    `json:"lastPayout"`
+	TotalAssets         *big.Int `json:"totalAssets"`
+	TotalShares         *big.Int `json:"totalShares"`
+	IndexRay            *big.Int `json:"indexRay"`
+}
+
+// Clone returns a deep copy of the payout ledger.
+func (p *PayoutLedger) Clone() *PayoutLedger {
+	if p == nil {
+		return nil
+	}
+	clone := *p
+	if p.TotalTips != nil {
+		clone.TotalTips = new(big.Int).Set(p.TotalTips)
+	}
+	if p.TotalStakingYield != nil {
+		clone.TotalStakingYield = new(big.Int).Set(p.TotalStakingYield)
+	}
+	if p.PendingDistribution != nil {
+		clone.PendingDistribution = new(big.Int).Set(p.PendingDistribution)
+	}
+	if p.TotalAssets != nil {
+		clone.TotalAssets = new(big.Int).Set(p.TotalAssets)
+	}
+	if p.TotalShares != nil {
+		clone.TotalShares = new(big.Int).Set(p.TotalShares)
+	}
+	if p.IndexRay != nil {
+		clone.IndexRay = new(big.Int).Set(p.IndexRay)
+	}
+	return &clone
+}
+
+// StakeRateLimitWindow captures the staking activity tracked for a fan within a
+// rolling window.
+type StakeRateLimitWindow struct {
+	WindowStart int64    `json:"windowStart"`
+	Amount      *big.Int `json:"amount"`
+}
+
+// TipRateLimitWindow records the timestamps of tips applied to a creator
+// within the configured burst window.
+type TipRateLimitWindow struct {
+	Timestamps []int64 `json:"timestamps"`
+}
+
+// RateLimitSnapshot preserves the in-flight rate limit state for the creator
+// engine so it can be restored across restarts.
+type RateLimitSnapshot struct {
+	StakeWindows map[[20]byte]*StakeRateLimitWindow `json:"stakeWindows"`
+	TipWindows   map[[20]byte]*TipRateLimitWindow   `json:"tipWindows"`
+}
+
+// Clone produces a deep copy of the rate limit snapshot.
+func (r *RateLimitSnapshot) Clone() *RateLimitSnapshot {
+	if r == nil {
+		return nil
+	}
+	clone := &RateLimitSnapshot{
+		StakeWindows: make(map[[20]byte]*StakeRateLimitWindow, len(r.StakeWindows)),
+		TipWindows:   make(map[[20]byte]*TipRateLimitWindow, len(r.TipWindows)),
+	}
+	for fan, window := range r.StakeWindows {
+		if window == nil {
+			continue
+		}
+		w := &StakeRateLimitWindow{WindowStart: window.WindowStart}
+		if window.Amount != nil {
+			w.Amount = new(big.Int).Set(window.Amount)
+		}
+		clone.StakeWindows[fan] = w
+	}
+	for creator, window := range r.TipWindows {
+		if window == nil {
+			continue
+		}
+		w := &TipRateLimitWindow{Timestamps: append([]int64(nil), window.Timestamps...)}
+		clone.TipWindows[creator] = w
+	}
+	return clone
+}

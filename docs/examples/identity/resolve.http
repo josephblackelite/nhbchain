@@ -1,0 +1,10 @@
+### Resolve alias (JSON-RPC)
+POST {{NODE_RPC_URL}}
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "identity_resolve",
+  "params": ["frankrocks"]
+}

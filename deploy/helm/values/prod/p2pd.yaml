@@ -1,0 +1,44 @@
+image:
+  tag: prod
+env:
+  - name: NHB_ENV
+    value: prod
+  - name: NHB_ALLOW_AUTOGENESIS
+    value: "false"
+persistence:
+  size: 100Gi
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 2Gi
+setAllowAutogenesisFlag: false
+config:
+  content: |
+    ListenAddress = ":26656"
+    DataDir = "/var/lib/nhb/p2p"
+    GenesisFile = "/var/lib/nhb/genesis.json"
+    AllowAutogenesis = false
+    NetworkName = "nhb-mainnet"
+    [p2p]
+    NetworkId = 387001
+    MaxPeers = 96
+    MaxInbound = 64
+    MaxOutbound = 32
+    MinPeers = 48
+    OutboundPeers = 32
+    Bootnodes = []
+    PersistentPeers = []
+    Seeds = []
+    BanScore = 100
+    GreyScore = 50
+    RateMsgsPerSec = 100
+    Burst = 400
+    HandshakeTimeoutMs = 3000
+    PingIntervalSeconds = 30
+    PingTimeoutSeconds = 90
+    BanDurationSeconds = 3600
+    DialBackoffSeconds = 30
+    PEX = true

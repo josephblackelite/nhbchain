@@ -1,0 +1,26 @@
+phase: supply
+description: >-
+  Summarises the network supply envelope for audit sign-off, including circulating
+  adjustments.
+supply:
+  minted: "2500000000000000000000"
+  burned: "500000000000000000000"
+  circulating: "2000000000000000000000"
+allocations:
+  - label: treasury reserve
+    amount: "1000000000000000000000"
+  - label: community rewards
+    amount: "800000000000000000000"
+  - label: team vesting
+    amount: "200000000000000000000"
+checks:
+  - name: Circulating supply consistency
+    target: ops/audit/supply.yaml
+    expect: Minted minus burned must equal the declared circulating value.
+artifacts:
+  - name: Supply snapshot
+    path: ops/audit/supply.yaml
+    format: yaml
+metadata:
+  owner: finance
+  cadence: monthly

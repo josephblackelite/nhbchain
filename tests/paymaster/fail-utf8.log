@@ -1,0 +1,4 @@
+﻿=== RUN   TestPaymasterAutoTopUpDailyCap
+--- PASS: TestPaymasterAutoTopUpDailyCap (0.01s)
+PASS
+ok  	nhbchain/tests/paymaster	0.131s

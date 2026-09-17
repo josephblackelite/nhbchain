@@ -1,0 +1,116 @@
+{
+  "deliveries": {
+    "02918ca26b4f59facc273f757b8fc62120d7d9b0676cf95c3d5642e35d6b10ee": {
+      "address": "f0f04f163aae13883ff8270f930b76611b692ab1",
+      "amount": "475"
+    },
+    "0fd30977059b2f227684b8a6a563f9d4af9656398d6db1937bdf3fa5ab3bd5a6": {
+      "address": "537d67fa1ed71a2b22ce166733b7d73ccf10a20e",
+      "amount": "460"
+    },
+    "129dc4c785b9c6ba5c91eddca93a394b61c1a0674dbdcbc299a315cf87721975": {
+      "address": "16c45b102ddae75b278e8ef302edca36c71c1b4b",
+      "amount": "565"
+    },
+    "268c82b04ad2eb6f45c7155dfab6495eda34cc60f1a3bc72a202a2818af3af8f": {
+      "address": "a2b3a0b787a8301c5fded376f7a070f5d89f66bf",
+      "amount": "475"
+    },
+    "2f23964f6257dfd9320eb17b9d4403b40b1a18d3ffecd5de63c4026d5261dc7f": {
+      "address": "a2b3a0b787a8301c5fded376f7a070f5d89f66bf",
+      "amount": "316"
+    },
+    "359f312d4f91ac1f50205d6b0d74c03dab8ae8ace3d9e240d875802c4ebb21c4": {
+      "address": "f0f04f163aae13883ff8270f930b76611b692ab1",
+      "amount": "940"
+    },
+    "393f031ef4dca6c64171e454b3bb7b43f36adc5a7d8c9753b4a746be185edcd0": {
+      "address": "4b843edf61a58870d3f96fe7dc8c6d0479af10aa",
+      "amount": "123"
+    },
+    "3cfaae3c61101d46d1b99ef92a134e2478e04c960528f11c627e4192ef7b0526": {
+      "address": "16c45b102ddae75b278e8ef302edca36c71c1b4b",
+      "amount": "745"
+    },
+    "66d82c559ab06c7321e7c628a0c559b8e07118f5ef5f92f1b69da0fe76d5bdcc": {
+      "address": "eb60e88088826c4da71ab0b5bf60cc92690a5f08",
+      "amount": "180"
+    },
+    "6f0b4f148d837967d65c6b8648b3233881b90f616c45e2f2ccd9ac58eb955e7b": {
+      "address": "f0f04f163aae13883ff8270f930b76611b692ab1",
+      "amount": "626"
+    },
+    "a4eb3f85f250bdcb147bc793c7a282b27e071e74ea3966288ec7f62438241af5": {
+      "address": "4b843edf61a58870d3f96fe7dc8c6d0479af10aa",
+      "amount": "185"
+    },
+    "b73e043166c1d528bc58c41c3afe3ce209bd6b68fdeb041c4966bc47c0e72261": {
+      "address": "537d67fa1ed71a2b22ce166733b7d73ccf10a20e",
+      "amount": "909"
+    },
+    "bcb702f38a78922bb636e541b727c0fa617cc8c8a5b9e4098349a2100e4db5e0": {
+      "address": "16c45b102ddae75b278e8ef302edca36c71c1b4b",
+      "amount": "1118"
+    },
+    "bf678c03e0d3ccc39011173990966d05606a53b24087f58c1536ff53c753824f": {
+      "address": "eb60e88088826c4da71ab0b5bf60cc92690a5f08",
+      "amount": "356"
+    },
+    "d9b4420f9ef9a9805c155e3be2858d513e0d420cf6d277fabddd3e49e3a41bb9": {
+      "address": "4b843edf61a58870d3f96fe7dc8c6d0479af10aa",
+      "amount": "94"
+    },
+    "defd8590eed75da3379d801332cc5a8b240552f58f2382096e4c29279791d6f4": {
+      "address": "537d67fa1ed71a2b22ce166733b7d73ccf10a20e",
+      "amount": "606"
+    },
+    "df8eec4003208123857a8e077608be9e46c0831fd026a930eb9ad6a8d545acf1": {
+      "address": "eb60e88088826c4da71ab0b5bf60cc92690a5f08",
+      "amount": "237"
+    },
+    "ea7741554c81f6be9225e4c7df0c537b81cb52e1db7cbafdd709e1992dd16185": {
+      "address": "a2b3a0b787a8301c5fded376f7a070f5d89f66bf",
+      "amount": "240"
+    }
+  },
+  "dust": "3",
+  "rewards": {
+    "1": {
+      "16c45b102ddae75b278e8ef302edca36c71c1b4b": "1118",
+      "4b843edf61a58870d3f96fe7dc8c6d0479af10aa": "185",
+      "537d67fa1ed71a2b22ce166733b7d73ccf10a20e": "909",
+      "a2b3a0b787a8301c5fded376f7a070f5d89f66bf": "475",
+      "eb60e88088826c4da71ab0b5bf60cc92690a5f08": "356",
+      "f0f04f163aae13883ff8270f930b76611b692ab1": "940"
+    },
+    "2": {
+      "16c45b102ddae75b278e8ef302edca36c71c1b4b": "745",
+      "4b843edf61a58870d3f96fe7dc8c6d0479af10aa": "123",
+      "537d67fa1ed71a2b22ce166733b7d73ccf10a20e": "606",
+      "a2b3a0b787a8301c5fded376f7a070f5d89f66bf": "316",
+      "eb60e88088826c4da71ab0b5bf60cc92690a5f08": "237",
+      "f0f04f163aae13883ff8270f930b76611b692ab1": "626"
+    },
+    "3": {
+      "16c45b102ddae75b278e8ef302edca36c71c1b4b": "565",
+      "4b843edf61a58870d3f96fe7dc8c6d0479af10aa": "94",
+      "537d67fa1ed71a2b22ce166733b7d73ccf10a20e": "460",
+      "a2b3a0b787a8301c5fded376f7a070f5d89f66bf": "240",
+      "eb60e88088826c4da71ab0b5bf60cc92690a5f08": "180",
+      "f0f04f163aae13883ff8270f930b76611b692ab1": "475"
+    }
+  },
+  "totals": {
+    "1": "3983",
+    "2": "2653",
+    "3": "2014"
+  },
+  "weights": {
+    "16c45b102ddae75b278e8ef302edca36c71c1b4b": "734",
+    "4b843edf61a58870d3f96fe7dc8c6d0479af10aa": "122",
+    "537d67fa1ed71a2b22ce166733b7d73ccf10a20e": "597",
+    "a2b3a0b787a8301c5fded376f7a070f5d89f66bf": "312",
+    "eb60e88088826c4da71ab0b5bf60cc92690a5f08": "234",
+    "f0f04f163aae13883ff8270f930b76611b692ab1": "617"
+  }
+}

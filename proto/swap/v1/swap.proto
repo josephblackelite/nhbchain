@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package swap.v1;
+
+option go_package = "nhbchain/proto/swap/v1;swapv1";
+
+message PoolKey {
+  string base = 1;
+  string quote = 2;
+}
+
+message Pool {
+  PoolKey key = 1;
+  string base_reserve = 2;
+  string quote_reserve = 3;
+  string swap_fee = 4;
+  string protocol_fee = 5;
+}
+
+message GetPoolRequest {
+  PoolKey key = 1;
+}
+
+message GetPoolResponse {
+  Pool pool = 1;
+}
+
+message ListPoolsRequest {}
+
+message ListPoolsResponse {
+  repeated Pool pools = 1;
+}
+
+message SwapExactInRequest {
+  PoolKey key = 1;
+  string trader = 2;
+  string amount_in = 3;
+  string min_amount_out = 4;
+}
+
+message SwapExactInResponse {
+  string amount_out = 1;
+}
+
+message SwapExactOutRequest {
+  PoolKey key = 1;
+  string trader = 2;
+  string max_amount_in = 3;
+  string amount_out = 4;
+}
+
+message SwapExactOutResponse {
+  string amount_in = 1;
+}
+
+service SwapService {
+  rpc GetPool(GetPoolRequest) returns (GetPoolResponse);
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+  rpc SwapExactIn(SwapExactInRequest) returns (SwapExactInResponse);
+  rpc SwapExactOut(SwapExactOutRequest) returns (SwapExactOutResponse);
+}

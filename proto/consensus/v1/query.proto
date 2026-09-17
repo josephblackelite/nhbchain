@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package consensus.v1;
+
+option go_package = "nhbchain/proto/consensus/v1;consensusv1";
+
+message QueryStateRequest {
+  string namespace = 1;
+  string key = 2;
+}
+
+message QueryStateResponse {
+  bytes value = 1;
+  bytes proof = 2;
+}
+
+message QueryPrefixRequest {
+  string namespace = 1;
+  string prefix = 2;
+}
+
+message QueryPrefixResponse {
+  string key = 1;
+  bytes value = 2;
+  bytes proof = 3;
+}
+
+message SimulateTxRequest {
+  bytes tx_bytes = 1;
+}
+
+message Event {
+  string type = 1;
+  map<string, string> attributes = 2;
+}
+
+message SimulateTxResponse {
+  uint64 gas_used = 1;
+  string gas_cost = 2;
+  repeated Event events = 3;
+}
+
+service QueryService {
+  rpc QueryState(QueryStateRequest) returns (QueryStateResponse);
+  rpc QueryPrefix(QueryPrefixRequest) returns (stream QueryPrefixResponse);
+  rpc SimulateTx(SimulateTxRequest) returns (SimulateTxResponse);
+}

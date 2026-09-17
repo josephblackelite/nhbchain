@@ -1,0 +1,73 @@
+name: "Security vulnerability"
+description: "Report a potential vulnerability to the NHBChain security team"
+labels:
+  - security
+  - needs-triage
+title: "[security] Brief summary of the issue"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        :lock: Thank you for responsibly disclosing a potential vulnerability. Please provide as much detail as possible. Reports created with this template are restricted to the security triage team.
+  - type: input
+    id: contact
+    attributes:
+      label: Preferred contact method
+      description: Include an email address or Signal handle so we can reach you securely.
+      placeholder: signal: +1-415-555-0119
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: High-level description of the potential vulnerability.
+      placeholder: Describe the issue and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Provide step-by-step instructions or proof-of-concept code.
+      placeholder: 1. Setup...
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact assessment
+      description: Describe who could be affected and the worst-case outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or artifacts
+      description: Attach logs, screenshots, or other helpful evidence. Please redact secrets.
+    validations:
+      required: false
+  - type: dropdown
+    id: embargo
+    attributes:
+      label: Coordinated disclosure
+      description: "Do you agree to follow the embargo policy described in docs/security/disclosure.md?"
+      options:
+        - "Yes, I agree to coordinated disclosure"
+        - "I need to discuss timing"
+    validations:
+      required: true
+  - type: textarea
+    id: extras
+    attributes:
+      label: Additional context
+      description: Relevant links, previous conversations, or anything else we should know.
+    validations:
+      required: false
+
+projects:
+  - nhbchain/security-triage
+
+assignees:
+  - nhbchain-security-bot
+

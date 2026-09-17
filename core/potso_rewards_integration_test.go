@@ -1,0 +1,841 @@
+package core
+
+import (
+	"bytes"
+	"encoding/csv"
+	"math/big"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"nhbchain/core/events"
+	nhbstate "nhbchain/core/state"
+	"nhbchain/crypto"
+	"nhbchain/native/potso"
+	"nhbchain/storage"
+	statetrie "nhbchain/storage/trie"
+)
+
+func TestProcessPotsoRewardEpoch(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(db.Close)
+	trie, err := statetrie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	sp, err := NewStateProcessor(trie)
+	if err != nil {
+		t.Fatalf("state processor: %v", err)
+	}
+
+	treasury := [20]byte{1}
+	cfg := potso.RewardConfig{
+		EpochLengthBlocks:  2,
+		AlphaStakeBps:      7000,
+		MinPayoutWei:       big.NewInt(0),
+		EmissionPerEpoch:   big.NewInt(900),
+		TreasuryAddress:    treasury,
+		MaxWinnersPerEpoch: 10,
+		CarryRemainder:     true,
+	}
+	if err := sp.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("set potso config: %v", err)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	treasuryAcc, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("treasury account: %v", err)
+	}
+	treasuryAcc.BalanceZNHB = big.NewInt(900)
+	if err := manager.PutAccount(treasury[:], treasuryAcc); err != nil {
+		t.Fatalf("store treasury: %v", err)
+	}
+
+	participantA := [20]byte{2}
+	participantB := [20]byte{3}
+	if err := manager.PotsoStakeSetBondedTotal(participantA, big.NewInt(600)); err != nil {
+		t.Fatalf("set stake A: %v", err)
+	}
+	if err := manager.PotsoStakeSetBondedTotal(participantB, big.NewInt(400)); err != nil {
+		t.Fatalf("set stake B: %v", err)
+	}
+
+	now := time.Unix(1_700_000_300, 0).UTC()
+	// Seeded into the epoch-keyed engagement store (epoch 0, since
+	// EpochLengthBlocks=2 means heights 1-2 fall in epoch 0), mirroring what
+	// updatePotsoActivity/PotsoHeartbeat write in real time -- NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	if err := manager.PotsoMetricsAddEngagement(0, participantA, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement A: %v", err)
+	}
+	if err := manager.PotsoMetricsAddEngagement(0, participantB, 0, 0, 10*60); err != nil {
+		t.Fatalf("seed engagement B: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
+		t.Fatalf("process block 1: %v", err)
+	}
+	if err := sp.ProcessBlockLifecycle(2, now.Unix()); err != nil {
+		t.Fatalf("process block 2: %v", err)
+	}
+
+	meta, ok, err := manager.PotsoRewardsGetMeta(0)
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if !ok || meta == nil {
+		t.Fatalf("expected epoch meta")
+	}
+	if meta.TotalPaid.Cmp(big.NewInt(899)) != 0 {
+		t.Fatalf("unexpected total paid: %s", meta.TotalPaid)
+	}
+	if meta.Winners != 2 {
+		t.Fatalf("expected 2 winners, got %d", meta.Winners)
+	}
+
+	payoutA, ok, err := manager.PotsoRewardsGetPayout(0, participantA)
+	if err != nil {
+		t.Fatalf("payout A: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected payout for participant A")
+	}
+	payoutB, ok, err := manager.PotsoRewardsGetPayout(0, participantB)
+	if err != nil {
+		t.Fatalf("payout B: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected payout for participant B")
+	}
+	paid := new(big.Int).Add(payoutA, payoutB)
+	if paid.Cmp(big.NewInt(899)) != 0 {
+		t.Fatalf("payout sum mismatch: %s", paid)
+	}
+
+	claimA, ok, err := manager.PotsoRewardsGetClaim(0, participantA)
+	if err != nil || !ok || claimA == nil {
+		t.Fatalf("expected claim record for participant A")
+	}
+	if !claimA.Claimed {
+		t.Fatalf("expected participant A to be marked claimed")
+	}
+	if claimA.Mode != potso.RewardPayoutModeAuto {
+		t.Fatalf("unexpected claim mode for participant A: %s", claimA.Mode)
+	}
+	if claimA.Amount.Cmp(payoutA) != 0 {
+		t.Fatalf("claim amount mismatch: %s vs %s", claimA.Amount, payoutA)
+	}
+
+	historyA, err := manager.PotsoRewardsHistory(participantA)
+	if err != nil {
+		t.Fatalf("history A: %v", err)
+	}
+	if len(historyA) != 1 {
+		t.Fatalf("expected one history entry, got %d", len(historyA))
+	}
+	if historyA[0].Mode != potso.RewardPayoutModeAuto {
+		t.Fatalf("unexpected history mode: %s", historyA[0].Mode)
+	}
+	if historyA[0].Amount.Cmp(payoutA) != 0 {
+		t.Fatalf("history amount mismatch: %s vs %s", historyA[0].Amount, payoutA)
+	}
+
+	updatedTreasury, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("reload treasury: %v", err)
+	}
+	if updatedTreasury.BalanceZNHB.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("treasury balance unexpected: %s", updatedTreasury.BalanceZNHB)
+	}
+
+	events := sp.Events()
+	if len(events) == 0 {
+		t.Fatalf("expected events to be emitted")
+	}
+	foundEpoch := false
+	foundPaid := 0
+	for _, evt := range events {
+		switch evt.Type {
+		case "potso.reward.epoch":
+			foundEpoch = true
+		case "potso.reward.paid":
+			foundPaid++
+		}
+	}
+	if !foundEpoch || foundPaid != 2 {
+		t.Fatalf("unexpected events: epoch=%v paid=%d", foundEpoch, foundPaid)
+	}
+
+	winners, err := manager.PotsoRewardsListWinners(0)
+	if err != nil {
+		t.Fatalf("list winners: %v", err)
+	}
+	if len(winners) != 2 {
+		t.Fatalf("expected 2 stored winners, got %d", len(winners))
+	}
+
+	lastProcessed, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
+		t.Fatalf("last processed: %v", err)
+	}
+	if !ok || lastProcessed != 0 {
+		t.Fatalf("unexpected last processed epoch: %d", lastProcessed)
+	}
+
+	// Governance's CastVote reads voting power from exactly this key/epoch
+	// pair (native/governance/engine.go). Before this fix, nothing ever
+	// wrote it, so every vote failed with "potso snapshot unavailable"
+	// regardless of chain age or treasury funding. Assert it's now
+	// populated with the real, already-computed weights for this epoch.
+	govSnapshot, ok, err := manager.SnapshotPotsoWeights(lastProcessed)
+	if err != nil {
+		t.Fatalf("snapshot potso weights: %v", err)
+	}
+	if !ok || govSnapshot == nil {
+		t.Fatalf("expected governance-facing potso weight snapshot for epoch %d", lastProcessed)
+	}
+	if len(govSnapshot.Entries) != 2 {
+		t.Fatalf("expected 2 weight entries, got %d", len(govSnapshot.Entries))
+	}
+	var sawA, sawB bool
+	for _, entry := range govSnapshot.Entries {
+		if entry.Address == participantA {
+			sawA = true
+			if entry.WeightBps == 0 {
+				t.Fatalf("expected nonzero weight for participant A")
+			}
+		}
+		if entry.Address == participantB {
+			sawB = true
+			if entry.WeightBps == 0 {
+				t.Fatalf("expected nonzero weight for participant B")
+			}
+		}
+	}
+	if !sawA || !sawB {
+		t.Fatalf("expected both participants in governance weight snapshot: sawA=%v sawB=%v", sawA, sawB)
+	}
+
+	// Ensure no additional payouts occur when processing subsequent block in same epoch.
+	if err := sp.ProcessBlockLifecycle(3, now.Add(time.Second).Unix()); err != nil {
+		t.Fatalf("process block 3: %v", err)
+	}
+	repeatPayoutA, ok, err := manager.PotsoRewardsGetPayout(0, participantA)
+	if err != nil || !ok || repeatPayoutA.Cmp(payoutA) != 0 {
+		t.Fatalf("payout mutated after repeat processing")
+	}
+}
+
+// TestProcessPotsoRewardEpoch_PreservesSupplyInvariant reproduces the
+// production incident where POTSO's reward treasury was configured to the
+// same account as the ZNHB admin/treasury wallet: processPotsoRewardEpoch's
+// auto-payout branch used to debit that wallet's BalanceZNHB without ever
+// shrinking the ZNHB Reward Pool ledger, so CheckZNHBSupplyInvariant broke
+// by exactly the paid-out amount the very first time the shared treasury
+// held a real, spendable balance. Real numbers from the incident: emission
+// paid out was 5,415,335,462,788,785,942 wei (~5.415 ZNHB) and the pool
+// sum came up short of the wallet's expected balance by that exact amount.
+func TestProcessPotsoRewardEpoch_PreservesSupplyInvariant(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(db.Close)
+	trie, err := statetrie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	sp, err := NewStateProcessor(trie)
+	if err != nil {
+		t.Fatalf("state processor: %v", err)
+	}
+
+	admin := [20]byte{0xAD}
+	sp.SetAdminWallet(admin, true)
+
+	manager := nhbstate.NewManager(sp.Trie)
+	salePool := big.NewInt(800_000)
+	rewardPool := big.NewInt(200_000)
+	if err := manager.ZNHBSetSalePoolBalance(salePool); err != nil {
+		t.Fatalf("seed sale pool: %v", err)
+	}
+	if err := manager.ZNHBSetRewardPoolBalance(rewardPool); err != nil {
+		t.Fatalf("seed reward pool: %v", err)
+	}
+	adminAcc, err := manager.GetAccount(admin[:])
+	if err != nil {
+		t.Fatalf("admin account: %v", err)
+	}
+	adminAcc.BalanceZNHB = new(big.Int).Add(salePool, rewardPool)
+	if err := manager.PutAccount(admin[:], adminAcc); err != nil {
+		t.Fatalf("store admin account: %v", err)
+	}
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant should hold before any POTSO payout: %v", err)
+	}
+
+	// POTSO's TreasuryAddress deliberately set to the SAME account as the
+	// admin wallet, exactly matching this chain's live config.toml.
+	cfg := potso.RewardConfig{
+		EpochLengthBlocks:  2,
+		AlphaStakeBps:      7000,
+		MinPayoutWei:       big.NewInt(0),
+		EmissionPerEpoch:   big.NewInt(900),
+		TreasuryAddress:    admin,
+		MaxWinnersPerEpoch: 10,
+		CarryRemainder:     true,
+	}
+	if err := sp.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("set potso config: %v", err)
+	}
+
+	participantA := [20]byte{2}
+	participantB := [20]byte{3}
+	if err := manager.PotsoStakeSetBondedTotal(participantA, big.NewInt(600)); err != nil {
+		t.Fatalf("set stake A: %v", err)
+	}
+	if err := manager.PotsoStakeSetBondedTotal(participantB, big.NewInt(400)); err != nil {
+		t.Fatalf("set stake B: %v", err)
+	}
+
+	now := time.Unix(1_700_000_300, 0).UTC()
+	// Seeded into the epoch-keyed engagement store (epoch 0), mirroring what
+	// updatePotsoActivity/PotsoHeartbeat write in real time -- NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	if err := manager.PotsoMetricsAddEngagement(0, participantA, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement A: %v", err)
+	}
+	if err := manager.PotsoMetricsAddEngagement(0, participantB, 0, 0, 10*60); err != nil {
+		t.Fatalf("seed engagement B: %v", err)
+	}
+
+	if err := sp.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
+		t.Fatalf("process block 1: %v", err)
+	}
+	if err := sp.ProcessBlockLifecycle(2, now.Unix()); err != nil {
+		t.Fatalf("process block 2: %v", err)
+	}
+
+	meta, ok, err := manager.PotsoRewardsGetMeta(0)
+	if err != nil || !ok || meta == nil {
+		t.Fatalf("expected epoch meta: ok=%v err=%v", ok, err)
+	}
+	if meta.TotalPaid.Sign() <= 0 {
+		t.Fatalf("expected a nonzero payout so the invariant is actually exercised")
+	}
+
+	if err := sp.CheckZNHBSupplyInvariant(); err != nil {
+		t.Fatalf("invariant violated after POTSO auto payout: %v", err)
+	}
+
+	updatedRewardPool, err := manager.ZNHBRewardPoolBalance()
+	if err != nil {
+		t.Fatalf("reload reward pool: %v", err)
+	}
+	wantRewardPool := new(big.Int).Sub(rewardPool, meta.TotalPaid)
+	if updatedRewardPool.Cmp(wantRewardPool) != 0 {
+		t.Fatalf("reward pool not debited by paid amount: got %s want %s", updatedRewardPool, wantRewardPool)
+	}
+}
+
+func TestPotsoRewardClaimFlow(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(db.Close)
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	treasury := [20]byte{1}
+	cfg := potso.RewardConfig{
+		EpochLengthBlocks:  2,
+		AlphaStakeBps:      7000,
+		MinPayoutWei:       big.NewInt(0),
+		EmissionPerEpoch:   big.NewInt(900),
+		TreasuryAddress:    treasury,
+		MaxWinnersPerEpoch: 10,
+		CarryRemainder:     true,
+		PayoutMode:         potso.RewardPayoutModeClaim,
+	}
+	if err := node.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	manager := nhbstate.NewManager(node.state.Trie)
+	treasuryAcc, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("treasury account: %v", err)
+	}
+	treasuryAcc.BalanceZNHB = big.NewInt(900)
+	if err := manager.PutAccount(treasury[:], treasuryAcc); err != nil {
+		t.Fatalf("store treasury: %v", err)
+	}
+
+	participantA := [20]byte{2}
+	participantB := [20]byte{3}
+	if err := manager.PotsoStakeSetBondedTotal(participantA, big.NewInt(600)); err != nil {
+		t.Fatalf("set stake A: %v", err)
+	}
+	if err := manager.PotsoStakeSetBondedTotal(participantB, big.NewInt(400)); err != nil {
+		t.Fatalf("set stake B: %v", err)
+	}
+
+	now := time.Unix(1_700_000_400, 0).UTC()
+	// Seeded into the epoch-keyed engagement store (epoch 0), mirroring what
+	// updatePotsoActivity/PotsoHeartbeat write in real time -- NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	if err := manager.PotsoMetricsAddEngagement(0, participantA, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement A: %v", err)
+	}
+	if err := manager.PotsoMetricsAddEngagement(0, participantB, 0, 0, 10*60); err != nil {
+		t.Fatalf("seed engagement B: %v", err)
+	}
+
+	if err := node.state.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
+		t.Fatalf("process block 1: %v", err)
+	}
+	if err := node.state.ProcessBlockLifecycle(2, now.Unix()); err != nil {
+		t.Fatalf("process block 2: %v", err)
+	}
+
+	claimA, ok, err := manager.PotsoRewardsGetClaim(0, participantA)
+	if err != nil || !ok || claimA == nil {
+		t.Fatalf("expected claim entry for A")
+	}
+	if claimA.Claimed {
+		t.Fatalf("claim should not be marked claimed before settlement")
+	}
+	if claimA.Mode != potso.RewardPayoutModeClaim {
+		t.Fatalf("unexpected claim mode: %s", claimA.Mode)
+	}
+
+	historyA, err := manager.PotsoRewardsHistory(participantA)
+	if err != nil {
+		t.Fatalf("history retrieval: %v", err)
+	}
+	if len(historyA) != 0 {
+		t.Fatalf("expected empty history before claim")
+	}
+
+	eventsList := node.state.Events()
+	readyCount := 0
+	paidCount := 0
+	for _, evt := range eventsList {
+		switch evt.Type {
+		case events.TypePotsoRewardReady:
+			readyCount++
+		case events.TypePotsoRewardPaid:
+			paidCount++
+		}
+	}
+	if readyCount == 0 {
+		t.Fatalf("expected ready events in claim mode")
+	}
+	if paidCount != 0 {
+		t.Fatalf("expected no paid events before manual claim")
+	}
+
+	payoutA, _, err := manager.PotsoRewardsGetPayout(0, participantA)
+	if err != nil {
+		t.Fatalf("payout lookup: %v", err)
+	}
+	payoutB, _, err := manager.PotsoRewardsGetPayout(0, participantB)
+	if err != nil {
+		t.Fatalf("payout lookup B: %v", err)
+	}
+
+	paid, amount, err := node.PotsoRewardClaim(0, participantA)
+	if err != nil {
+		t.Fatalf("claim payout: %v", err)
+	}
+	if !paid {
+		t.Fatalf("expected payout to occur on first claim")
+	}
+	if amount.Cmp(payoutA) != 0 {
+		t.Fatalf("claimed amount mismatch: %s vs %s", amount, payoutA)
+	}
+
+	claimA, ok, err = manager.PotsoRewardsGetClaim(0, participantA)
+	if err != nil || !ok || claimA == nil || !claimA.Claimed {
+		t.Fatalf("claim should be marked claimed after payout")
+	}
+	if claimA.ClaimedAt == 0 {
+		t.Fatalf("expected claimedAt timestamp to be recorded")
+	}
+
+	historyA, err = manager.PotsoRewardsHistory(participantA)
+	if err != nil {
+		t.Fatalf("history after claim: %v", err)
+	}
+	if len(historyA) != 1 {
+		t.Fatalf("expected one history entry after claim, got %d", len(historyA))
+	}
+	if historyA[0].Mode != potso.RewardPayoutModeClaim {
+		t.Fatalf("unexpected history mode after claim: %s", historyA[0].Mode)
+	}
+
+	paidAgain, _, err := node.PotsoRewardClaim(0, participantA)
+	if err != nil {
+		t.Fatalf("idempotent claim error: %v", err)
+	}
+	if paidAgain {
+		t.Fatalf("expected idempotent claim to report paid=false")
+	}
+
+	updatedTreasury, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("reload treasury: %v", err)
+	}
+	expectedTreasury := big.NewInt(900)
+	expectedTreasury.Sub(expectedTreasury, payoutA)
+	if updatedTreasury.BalanceZNHB.Cmp(expectedTreasury) != 0 {
+		t.Fatalf("treasury not debited after claim: %s", updatedTreasury.BalanceZNHB)
+	}
+
+	eventsList = node.state.Events()
+	paidCount = 0
+	for _, evt := range eventsList {
+		if evt.Type == events.TypePotsoRewardPaid {
+			paidCount++
+		}
+	}
+	if paidCount == 0 {
+		t.Fatalf("expected paid event after manual claim")
+	}
+
+	csvData, totalPaid, winners, err := manager.PotsoRewardsBuildCSV(0)
+	if err != nil {
+		t.Fatalf("build csv: %v", err)
+	}
+	if winners != 2 {
+		t.Fatalf("expected two winners in CSV, got %d", winners)
+	}
+	expectedTotal := new(big.Int).Add(payoutA, payoutB)
+	if totalPaid.Cmp(expectedTotal) != 0 {
+		t.Fatalf("csv total mismatch: %s vs %s", totalPaid, expectedTotal)
+	}
+	records, err := csv.NewReader(bytes.NewReader(csvData)).ReadAll()
+	if err != nil {
+		t.Fatalf("parse csv: %v", err)
+	}
+	if len(records) != 3 { // header + 2 rows
+		t.Fatalf("expected 3 CSV rows, got %d", len(records))
+	}
+	addrA := crypto.MustNewAddress(crypto.NHBPrefix, participantA[:]).String()
+	addrB := crypto.MustNewAddress(crypto.NHBPrefix, participantB[:]).String()
+	seenA := false
+	seenB := false
+	for _, row := range records[1:] {
+		if len(row) != 5 {
+			t.Fatalf("unexpected CSV columns: %v", row)
+		}
+		switch row[0] {
+		case addrA:
+			seenA = true
+			if row[1] != payoutA.String() {
+				t.Fatalf("csv amount mismatch for A: %s", row[1])
+			}
+			if row[2] != "true" {
+				t.Fatalf("expected A to be marked claimed")
+			}
+			claimedAt, err := strconv.ParseUint(row[3], 10, 64)
+			if err != nil || claimedAt == 0 {
+				t.Fatalf("invalid claimedAt for A: %s", row[3])
+			}
+			if row[4] != string(potso.RewardPayoutModeClaim) {
+				t.Fatalf("expected claim mode in CSV for A, got %s", row[4])
+			}
+		case addrB:
+			seenB = true
+			if row[1] != payoutB.String() {
+				t.Fatalf("csv amount mismatch for B: %s", row[1])
+			}
+			if row[2] != "false" {
+				t.Fatalf("expected B to be unclaimed")
+			}
+			if row[3] != "0" {
+				t.Fatalf("expected claimedAt 0 for B, got %s", row[3])
+			}
+			if row[4] != string(potso.RewardPayoutModeClaim) {
+				t.Fatalf("expected claim mode in CSV for B, got %s", row[4])
+			}
+		}
+	}
+	if !seenA || !seenB {
+		t.Fatalf("csv rows missing: A=%v B=%v", seenA, seenB)
+	}
+}
+
+func TestPotsoRewardHistoryPagination(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(db.Close)
+
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+
+	treasury := [20]byte{9}
+	cfg := potso.RewardConfig{
+		EpochLengthBlocks:  2,
+		AlphaStakeBps:      7000,
+		MinPayoutWei:       big.NewInt(0),
+		EmissionPerEpoch:   big.NewInt(900),
+		TreasuryAddress:    treasury,
+		MaxWinnersPerEpoch: 10,
+		CarryRemainder:     true,
+		PayoutMode:         potso.RewardPayoutModeAuto,
+	}
+	if err := node.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	manager := nhbstate.NewManager(node.state.Trie)
+	treasuryAcc, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("treasury account: %v", err)
+	}
+	treasuryAcc.BalanceZNHB = big.NewInt(3000)
+	if err := manager.PutAccount(treasury[:], treasuryAcc); err != nil {
+		t.Fatalf("store treasury: %v", err)
+	}
+
+	participant := [20]byte{4}
+	other := [20]byte{5}
+	if err := manager.PotsoStakeSetBondedTotal(participant, big.NewInt(600)); err != nil {
+		t.Fatalf("set stake participant: %v", err)
+	}
+	if err := manager.PotsoStakeSetBondedTotal(other, big.NewInt(400)); err != nil {
+		t.Fatalf("set stake other: %v", err)
+	}
+
+	base := time.Unix(1_700_000_500, 0).UTC()
+	height := uint64(1)
+	// epochNum identifies the epoch-keyed engagement bucket to seed --
+	// EpochLengthBlocks=2 means the pair of heights processed by each call
+	// below (height, height+1) always falls in epoch (height-1)/2, i.e. 0,
+	// 1, 2 on successive calls. Seeded into the epoch-keyed store (mirroring
+	// updatePotsoActivity/PotsoHeartbeat's real-time writes), NOT the
+	// day-keyed store, which processPotsoRewardEpoch no longer reads from.
+	processEpoch := func(epochNum uint64, ts time.Time) {
+		if err := manager.PotsoMetricsAddEngagement(epochNum, participant, 0, 0, 30*60); err != nil {
+			t.Fatalf("seed engagement participant: %v", err)
+		}
+		if err := manager.PotsoMetricsAddEngagement(epochNum, other, 0, 0, 10*60); err != nil {
+			t.Fatalf("seed engagement other: %v", err)
+		}
+		if err := node.state.ProcessBlockLifecycle(height, ts.Add(-time.Second).Unix()); err != nil {
+			t.Fatalf("process block %d: %v", height, err)
+		}
+		height++
+		if err := node.state.ProcessBlockLifecycle(height, ts.Unix()); err != nil {
+			t.Fatalf("process block %d: %v", height, err)
+		}
+		height++
+	}
+
+	// Epoch 0 auto
+	processEpoch(0, base)
+
+	// Switch to claim mode for epoch 1
+	cfg.PayoutMode = potso.RewardPayoutModeClaim
+	if err := node.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("switch to claim mode: %v", err)
+	}
+	processEpoch(1, base.Add(24*time.Hour))
+	payoutEpoch1, _, err := manager.PotsoRewardsGetPayout(1, participant)
+	if err != nil {
+		t.Fatalf("payout epoch1: %v", err)
+	}
+	if payoutEpoch1.Sign() == 0 {
+		t.Fatalf("expected payout for epoch 1")
+	}
+	if paid, _, err := node.PotsoRewardClaim(1, participant); err != nil || !paid {
+		t.Fatalf("claim epoch1: paid=%v err=%v", paid, err)
+	}
+
+	// Switch back to auto for epoch 2
+	cfg.PayoutMode = potso.RewardPayoutModeAuto
+	if err := node.SetPotsoRewardConfig(cfg); err != nil {
+		t.Fatalf("switch to auto mode: %v", err)
+	}
+	processEpoch(2, base.Add(48*time.Hour))
+
+	entries, nextCursor, err := node.PotsoRewardsHistory(participant, "", 2)
+	if err != nil {
+		t.Fatalf("history page 1: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries on first page, got %d", len(entries))
+	}
+	if entries[0].Mode != potso.RewardPayoutModeAuto || entries[0].Epoch != 2 {
+		t.Fatalf("expected latest entry to be epoch 2 auto, got epoch %d mode %s", entries[0].Epoch, entries[0].Mode)
+	}
+	if entries[1].Mode != potso.RewardPayoutModeClaim || entries[1].Epoch != 1 {
+		t.Fatalf("expected second entry to be epoch 1 claim, got epoch %d mode %s", entries[1].Epoch, entries[1].Mode)
+	}
+	if strings.TrimSpace(nextCursor) == "" {
+		t.Fatalf("expected next cursor for remaining history")
+	}
+
+	more, next, err := node.PotsoRewardsHistory(participant, nextCursor, 2)
+	if err != nil {
+		t.Fatalf("history page 2: %v", err)
+	}
+	if len(more) != 1 {
+		t.Fatalf("expected remaining single entry, got %d", len(more))
+	}
+	if more[0].Epoch != 0 || more[0].Mode != potso.RewardPayoutModeAuto {
+		t.Fatalf("unexpected oldest entry epoch=%d mode=%s", more[0].Epoch, more[0].Mode)
+	}
+	if next != "" {
+		t.Fatalf("expected no further cursor, got %q", next)
+	}
+}
+
+// TestProcessPotsoRewardEpoch_DeterministicAcrossDelayedProcessing is a
+// regression test for the day/epoch nondeterminism bug: processPotsoRewardEpoch
+// used to select participants and read their engagement meters via a
+// UTC-calendar-day key derived from the WALL-CLOCK timestamp of whichever
+// block happened to trigger the backlog catch-up for a given epoch, rather
+// than from the epoch's own already-committed activity. Two validators (or
+// the same validator restarting after a chain stall) could therefore compute
+// two different reward splits for the exact same epoch number, depending
+// solely on what real time it happened to be when they got around to
+// processing it -- a direct consensus-determinism violation, since reward
+// payouts are hashed into the state root.
+//
+// This test drives two independent state processors through an IDENTICAL
+// height/activity sequence -- height 1 applies real engagement activity via
+// recordEngagementActivity (the same path ApplyTransaction uses), then
+// height 2 is the block whose processing triggers maybeProcessPotsoRewards
+// for epoch 0 (EpochLengthBlocks=2, so currentEpoch=2/2=1, target=0). The
+// ONLY difference between the two runs is the wall-clock timestamp attached
+// to height 2: "on time" (same UTC calendar day as height 1's activity) vs.
+// "delayed" (many days later, simulating a backlogged/late catch-up). Epoch
+// 0's own committed activity is byte-identical in both runs.
+//
+// Before this fix, the "delayed" run's calendar day would not match the day
+// under which height 1's activity was indexed, so processPotsoRewardEpoch
+// would silently see zero engagement for both participants (while still
+// including them via their stake), skewing the stake/engagement weighting
+// and producing a DIFFERENT payout split than the "on time" run -- for the
+// identical epoch, identical activity, identical stake. After this fix,
+// participants and their meters are read from the epoch-keyed store (keyed
+// by block height, never wall-clock time), so both runs must produce
+// byte-identical payouts.
+func TestProcessPotsoRewardEpoch_DeterministicAcrossDelayedProcessing(t *testing.T) {
+	participantA := [20]byte{0x10}
+	participantB := [20]byte{0x11}
+	treasury := [20]byte{0xAA}
+
+	// runScenario builds a fresh state processor, applies identical epoch-0
+	// activity at height 1 (real timestamp blockOneTimestamp), then processes
+	// height 2 -- the epoch-0-triggering block -- at heightTwoTimestamp,
+	// which the caller varies to simulate on-time vs. delayed processing.
+	runScenario := func(t *testing.T, heightTwoTimestamp time.Time) (payoutA, payoutB *big.Int) {
+		db := storage.NewMemDB()
+		t.Cleanup(db.Close)
+		trie, err := statetrie.NewTrie(db, nil)
+		if err != nil {
+			t.Fatalf("new trie: %v", err)
+		}
+		sp, err := NewStateProcessor(trie)
+		if err != nil {
+			t.Fatalf("state processor: %v", err)
+		}
+
+		cfg := potso.RewardConfig{
+			EpochLengthBlocks:  2,
+			AlphaStakeBps:      7000,
+			MinPayoutWei:       big.NewInt(0),
+			EmissionPerEpoch:   big.NewInt(900),
+			TreasuryAddress:    treasury,
+			MaxWinnersPerEpoch: 10,
+			CarryRemainder:     true,
+		}
+		if err := sp.SetPotsoRewardConfig(cfg); err != nil {
+			t.Fatalf("set potso config: %v", err)
+		}
+
+		manager := nhbstate.NewManager(sp.Trie)
+		treasuryAcc, err := manager.GetAccount(treasury[:])
+		if err != nil {
+			t.Fatalf("treasury account: %v", err)
+		}
+		treasuryAcc.BalanceZNHB = big.NewInt(900)
+		if err := manager.PutAccount(treasury[:], treasuryAcc); err != nil {
+			t.Fatalf("store treasury: %v", err)
+		}
+		if err := manager.PotsoStakeSetBondedTotal(participantA, big.NewInt(600)); err != nil {
+			t.Fatalf("set stake A: %v", err)
+		}
+		if err := manager.PotsoStakeSetBondedTotal(participantB, big.NewInt(400)); err != nil {
+			t.Fatalf("set stake B: %v", err)
+		}
+
+		blockOneTimestamp := time.Unix(1_700_000_000, 0).UTC()
+
+		// Height 1: real tx-driven engagement activity, exactly as
+		// ApplyTransaction's tx-type handlers would generate it via
+		// recordEngagementActivity -- bracketed by BeginBlock/EndBlock and
+		// followed by ProcessBlockLifecycle, mirroring node.go's CreateBlock
+		// pipeline order (BeginBlock -> ApplyTransaction(s) ->
+		// ProcessBlockLifecycle -> EndBlock) exactly.
+		sp.BeginBlock(1, blockOneTimestamp)
+		if err := sp.recordEngagementActivity(participantA[:], blockOneTimestamp, 5, 0, 0); err != nil {
+			t.Fatalf("record activity A: %v", err)
+		}
+		if err := sp.recordEngagementActivity(participantB[:], blockOneTimestamp, 1, 0, 0); err != nil {
+			t.Fatalf("record activity B: %v", err)
+		}
+		if err := sp.ProcessBlockLifecycle(1, blockOneTimestamp.Unix()); err != nil {
+			t.Fatalf("process block 1: %v", err)
+		}
+		sp.EndBlock()
+
+		// Height 2: no new activity -- this is purely the block whose
+		// processing happens to trigger maybeProcessPotsoRewards for epoch 0.
+		// heightTwoTimestamp is the only thing that varies between the two
+		// calls to runScenario.
+		sp.BeginBlock(2, heightTwoTimestamp)
+		if err := sp.ProcessBlockLifecycle(2, heightTwoTimestamp.Unix()); err != nil {
+			t.Fatalf("process block 2: %v", err)
+		}
+		sp.EndBlock()
+
+		a, _, err := manager.PotsoRewardsGetPayout(0, participantA)
+		if err != nil {
+			t.Fatalf("payout A: %v", err)
+		}
+		b, _, err := manager.PotsoRewardsGetPayout(0, participantB)
+		if err != nil {
+			t.Fatalf("payout B: %v", err)
+		}
+		return a, b
+	}
+
+	onTimeTimestamp := time.Unix(1_700_000_010, 0).UTC()                   // same UTC day as height 1
+	delayedTimestamp := time.Unix(1_700_000_010, 0).UTC().AddDate(0, 0, 5) // 5 days later
+
+	onTimePayoutA, onTimePayoutB := runScenario(t, onTimeTimestamp)
+	delayedPayoutA, delayedPayoutB := runScenario(t, delayedTimestamp)
+
+	if onTimePayoutA.Sign() <= 0 || onTimePayoutB.Sign() <= 0 {
+		t.Fatalf("expected nonzero payouts in the on-time baseline: A=%s B=%s", onTimePayoutA, onTimePayoutB)
+	}
+	if onTimePayoutA.Cmp(delayedPayoutA) != 0 {
+		t.Fatalf("epoch 0 payout for participant A is not deterministic across processing delay: on-time=%s delayed=%s", onTimePayoutA, delayedPayoutA)
+	}
+	if onTimePayoutB.Cmp(delayedPayoutB) != 0 {
+		t.Fatalf("epoch 0 payout for participant B is not deterministic across processing delay: on-time=%s delayed=%s", onTimePayoutB, delayedPayoutB)
+	}
+}

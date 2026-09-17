@@ -1,0 +1,104 @@
+# Lending Developer Guide
+
+This guide outlines the recommended flow for building a lending experience on
+NHBChain using the JSON-RPC endpoints exposed by the node.
+
+## 1. Discover Risk Configuration
+
+- Call [`lend_getPools`](rpc-api.md#lend_getpools) during startup to discover
+  available lending pools. For each active pool invoke
+  [`lending_getMarket`](rpc-api.md#lending_getmarket) with the pool’s `poolId` to
+  cache totals and risk parameters. Surface values such as `maxLTV`,
+  `liquidationThreshold`, and `liquidationBonus` in tooltips so users understand
+  protocol limits.
+- Repeat the calls periodically to refresh supply and borrow totals displayed in
+  the UI.
+- Provision new pools with [`lend_createPool`](rpc-api.md#lend_createpool) when
+  onboarding additional markets. The developer owner becomes the default
+  recipient of per-pool fee streams.
+
+## 2. Authenticate the User
+
+- Prompt the user to connect their NHBChain wallet.
+- Retrieve the bearer token required by the node operator and attach it to every
+  state-changing request:
+
+  ```http
+  Authorization: Bearer <token>
+  ```
+
+  Omit the header when invoking read-only methods such as
+  `lending_getMarket`.
+
+## 3. Load the Account Snapshot
+
+- Fetch the lending position with [`lending_getUserAccount`](rpc-api.md#lending_getuseraccount)
+  for the selected `poolId`. Use the returned balances to pre-fill collateral
+  toggles and outstanding debt amounts.
+- If the endpoint returns a `404`, initialise the UI with zero balances and hide
+  repayment controls until the user supplies or borrows for the first time.
+
+## 4. Supply and Manage Collateral
+
+1. Send a `lending_supplyNHB` request when the user deposits NHB liquidity.
+   Include `poolId` with every transaction payload to target the correct market.
+2. Encourage the user to immediately lock funds with `lending_depositZNHB` so
+   the position can back future borrows.
+3. Allow partial withdrawals by combining `lending_withdrawZNHB` (to reduce
+   collateral) and `lending_withdrawNHB` (to redeem LP shares) while keeping the
+   projected health factor above 1.0.
+
+## 5. Borrowing Workflow
+
+- Compute projected health factors client-side before calling
+  [`lending_borrowNHB`](rpc-api.md#lending_borrownhb). Block requests that would
+  drive HF below 1.0 and warn users when the buffer is thin.
+- If your application charges a fee, coordinate with the node operator to set
+  `DeveloperFeeBps` and `DeveloperFeeCollector` in `config.toml` before creating
+  pools. Each pool inherits these values at creation and `lending_borrowNHBWithFee`
+  automatically applies them while rejecting caller-supplied fee parameters.
+  Surface the configured fee rate in your UI so borrowers understand the total
+  obligation.
+
+## 6. Repayment and Upkeep
+
+- Offer a one-click repay option using `lending_repayNHB` with the outstanding
+  debt value. The engine automatically caps the amount to the borrower’s current
+  debt.
+- Refresh the account snapshot after each state change to keep the UI in sync.
+
+## 7. Liquidation Monitoring
+
+- Background services can poll `lending_getUserAccount` and alert borrowers when
+  their collateral approaches the liquidation threshold.
+- Liquidators can automate [`lending_liquidate`](rpc-api.md#lending_liquidate)
+  calls. Ensure the liquidator wallet holds enough NHB to repay the targeted
+  debt.
+
+## Operational Readiness
+
+- Confirm with your operator that the lending entry in `system/pauses` remains
+  `false`. The helper scripts under `examples/docs/ops` provide ready-made
+  commands for on-call rotations:
+
+  ```bash
+  go run ./examples/docs/ops/read_pauses
+  go run ./examples/docs/ops/pause_toggle --module lending --state pause
+  ```
+
+- Track `riskParameters.BorrowCaps` to understand the live throughput limits.
+  Spikes in utilisation that approach the cap will cause the engine to return
+  `lending engine: borrow exceeds ... cap` errors until utilisation falls back
+  under the threshold.
+
+## Best Practices
+
+- Treat the `txHash` returned by each action as an acknowledgement only. It is
+  not persisted on-chain but can be logged for audit purposes.
+- Clamp user-provided amounts to positive integers and validate input client
+  side before hitting the node.
+- Display the current supply and borrow indexes from `lending_getMarket` if you
+  show yield metrics so users can understand accrual trends.
+- Cache risk parameters but expose a manual refresh so advanced users can verify
+  configuration after governance updates.
+
