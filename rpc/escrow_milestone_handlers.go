@@ -35,6 +35,11 @@ type milestoneCreateParams struct {
 	MetaHex      string                      `json:"meta,omitempty"`
 	Legs         []milestoneLegParam         `json:"legs"`
 	Subscription *milestoneSubscriptionParam `json:"subscription,omitempty"`
+	// Signature is a wallet signature (65-byte secp256k1, hex-encoded)
+	// over the canonical envelope built from this same payer/payee/realm/
+	// meta/legs/subscription (see escrow.RecoverMilestoneCreateSigner) --
+	// NHB-AUDIT-C3: Payer alone is no longer sufficient authorization.
+	Signature string `json:"signature"`
 }
 
 type milestoneIDParams struct {
@@ -42,15 +47,23 @@ type milestoneIDParams struct {
 }
 
 type milestoneLegActionParams struct {
-	ID     string `json:"id"`
-	LegID  uint64 `json:"legId"`
-	Caller string `json:"caller"`
+	ID    string `json:"id"`
+	LegID uint64 `json:"legId"`
+	// Signature is a wallet signature over the canonical action envelope
+	// for (id, legId, action) -- see escrow.RecoverMilestoneActionSigner.
+	// NHB-AUDIT-C3: there is no client-supplied caller field; the
+	// authorized party is derived solely from this signature.
+	Signature string `json:"signature"`
 }
 
 type milestoneSubscriptionUpdateParams struct {
 	ID     string `json:"id"`
-	Caller string `json:"caller"`
 	Active bool   `json:"active"`
+	// Signature is a wallet signature over the canonical action envelope
+	// for (id, "milestoneSubscriptionUpdate", active) -- see
+	// escrow.RecoverMilestoneActionSigner. NHB-AUDIT-C3: there is no
+	// client-supplied caller field.
+	Signature string `json:"signature"`
 }
 
 type milestoneCreateResult struct {
@@ -128,7 +141,12 @@ func (s *Server) handleEscrowMilestoneCreate(w http.ResponseWriter, r *http.Requ
 			Active:          params.Subscription.Active,
 		}
 	}
-	created, err := s.node.EscrowMilestoneCreate(project)
+	signature, err := parseMilestoneSignature(params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	created, err := s.node.EscrowMilestoneCreate(project, signature)
 	if err != nil {
 		writeMilestoneError(w, req.ID, err)
 		return
@@ -178,16 +196,16 @@ func (s *Server) handleEscrowMilestoneFund(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
 	if params.LegID == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "legId must be > 0")
 		return
 	}
-	if err := s.node.EscrowMilestoneFund(id, params.LegID, caller); err != nil {
+	signature, err := parseMilestoneSignature(params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	if err := s.node.EscrowMilestoneFund(id, params.LegID, signature); err != nil {
 		writeMilestoneError(w, req.ID, err)
 		return
 	}
@@ -213,16 +231,16 @@ func (s *Server) handleEscrowMilestoneRelease(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
 	if params.LegID == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "legId must be > 0")
 		return
 	}
-	if err := s.node.EscrowMilestoneRelease(id, params.LegID, caller); err != nil {
+	signature, err := parseMilestoneSignature(params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	if err := s.node.EscrowMilestoneRelease(id, params.LegID, signature); err != nil {
 		writeMilestoneError(w, req.ID, err)
 		return
 	}
@@ -248,16 +266,16 @@ func (s *Server) handleEscrowMilestoneCancel(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	caller, err := parseBech32Address(params.Caller)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
 	if params.LegID == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "legId must be > 0")
 		return
 	}
-	if err := s.node.EscrowMilestoneCancel(id, params.LegID, caller); err != nil {
+	signature, err := parseMilestoneSignature(params.Signature)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
+		return
+	}
+	if err := s.node.EscrowMilestoneCancel(id, params.LegID, signature); err != nil {
 		writeMilestoneError(w, req.ID, err)
 		return
 	}
@@ -283,17 +301,36 @@ func (s *Server) handleEscrowMilestoneSubscriptionUpdate(w http.ResponseWriter, 
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	caller, err := parseBech32Address(params.Caller)
+	signature, err := parseMilestoneSignature(params.Signature)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
 		return
 	}
-	project, err := s.node.EscrowMilestoneSubscriptionUpdate(id, caller, params.Active)
+	project, err := s.node.EscrowMilestoneSubscriptionUpdate(id, params.Active, signature)
 	if err != nil {
 		writeMilestoneError(w, req.ID, err)
 		return
 	}
 	writeResult(w, req.ID, formatMilestoneJSON(project))
+}
+
+// parseMilestoneSignature decodes a hex-encoded (optionally 0x-prefixed)
+// 65-byte secp256k1 signature, matching escrow.RecoverSigner's expected
+// format.
+func parseMilestoneSignature(value string) ([]byte, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, fmt.Errorf("signature required")
+	}
+	cleaned := strings.TrimPrefix(strings.TrimPrefix(trimmed, "0x"), "0X")
+	decoded, err := hex.DecodeString(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("invalid signature encoding: %w", err)
+	}
+	if len(decoded) != 65 {
+		return nil, fmt.Errorf("signature must be 65 bytes, got %d", len(decoded))
+	}
+	return decoded, nil
 }
 
 func parseMilestoneMeta(value string) ([]byte, error) {
