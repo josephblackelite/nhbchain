@@ -30,6 +30,13 @@ const (
 	defaultRateAttempts = 5
 	defaultSkew         = 5 * time.Minute
 	defaultIdemTTL      = 24 * time.Hour
+	// defaultBindTokenTTL bounds how long a completed email verification's
+	// bind token remains usable (NHB-AUDIT-S6) -- short-lived and
+	// single-use, so a leaked/observed token has a small, closing window
+	// rather than being valid indefinitely the way a bare VerifiedAt
+	// timestamp was.
+	defaultBindTokenTTL = 15 * time.Minute
+	bindTokenBytes      = 32
 )
 
 var (
@@ -58,8 +65,10 @@ type Server struct {
 	registerAttempts int
 	timestampSkew    time.Duration
 	idempotencyTTL   time.Duration
+	bindTokenTTL     time.Duration
 	nowFn            func() time.Time
 	codeFn           func() (string, error)
+	bindTokenFn      func() (string, error)
 }
 
 // Config describes the runtime configuration for the server.
@@ -71,6 +80,7 @@ type Config struct {
 	RegisterAttempts int
 	TimestampSkew    time.Duration
 	IdempotencyTTL   time.Duration
+	BindTokenTTL     time.Duration
 }
 
 // NewServer constructs an HTTP server with the supplied dependencies.
@@ -106,6 +116,7 @@ func NewServer(store *Store, emailer Emailer, cfg Config) (*Server, error) {
 		registerAttempts: cfg.RegisterAttempts,
 		timestampSkew:    cfg.TimestampSkew,
 		idempotencyTTL:   cfg.IdempotencyTTL,
+		bindTokenTTL:     cfg.BindTokenTTL,
 		nowFn:            time.Now,
 	}
 	if server.codeTTL <= 0 {
@@ -123,7 +134,11 @@ func NewServer(store *Store, emailer Emailer, cfg Config) (*Server, error) {
 	if server.idempotencyTTL <= 0 {
 		server.idempotencyTTL = defaultIdemTTL
 	}
+	if server.bindTokenTTL <= 0 {
+		server.bindTokenTTL = defaultBindTokenTTL
+	}
 	server.codeFn = server.randomCode
+	server.bindTokenFn = randomBindToken
 	return server, nil
 }
 
@@ -268,6 +283,13 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	emailHash := computeEmailHash(normalized, s.emailSalt)
 	codeDigest := hashVerificationCode(normalized, strings.TrimSpace(req.Code), s.emailSalt)
 	now := s.now()
+	bindToken, err := s.bindTokenFn()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "IDN-500", "failed to generate bind token", nil)
+		return
+	}
+	bindTokenDigest := hashBindToken(bindToken)
+	bindTokenExpires := now.Add(s.bindTokenTTL)
 	record, err := s.store.MutateEmail(emailHash, false, func(rec *EmailRecord) error {
 		if rec.CodeDigest == "" || rec.CodeExpires == nil {
 			return ErrCodeMismatch
@@ -282,6 +304,14 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		rec.VerifiedAt = &verifiedAt
 		rec.CodeDigest = ""
 		rec.CodeExpires = nil
+		// NHB-AUDIT-S6: issuing a fresh bind token on every successful
+		// verification (and requiring it at bind time, see
+		// handleBindAlias) is what actually ties a bind to the party who
+		// just proved control of the inbox -- VerifiedAt alone only ever
+		// proved that SOMEONE did, at SOME point in the past.
+		rec.BindTokenDigest = bindTokenDigest
+		expires := bindTokenExpires
+		rec.BindTokenExpires = &expires
 		return nil
 	})
 	switch {
@@ -302,6 +332,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		"status":     "verified",
 		"verifiedAt": record.VerifiedAt.UTC().Format(time.RFC3339),
 		"emailHash":  emailHash,
+		"bindToken":  bindToken,
 	}
 	s.persistAndWrite(w, r, apiKey.Key, resp, http.StatusOK)
 }
@@ -322,9 +353,10 @@ func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		AliasID string `json:"aliasId"`
-		Email   string `json:"email"`
-		Consent bool   `json:"consent"`
+		AliasID   string `json:"aliasId"`
+		Email     string `json:"email"`
+		Consent   bool   `json:"consent"`
+		BindToken string `json:"bindToken"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "IDN-400", "invalid JSON payload", nil)
@@ -340,15 +372,30 @@ func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "IDN-400", err.Error(), nil)
 		return
 	}
+	// NHB-AUDIT-S6: a bind token is required on every bind -- without one,
+	// this endpoint used to trust ANY caller holding a valid gateway API
+	// key (shared across every partner/demo app, not scoped to a single
+	// end user) to bind ANY alias to ANY email that had EVER been
+	// verified by anyone, with no proof this specific request came from
+	// whoever actually controls that inbox.
+	bindToken := strings.TrimSpace(req.BindToken)
+	if bindToken == "" {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "bind token required", nil)
+		return
+	}
 	emailHash := computeEmailHash(normalized, s.emailSalt)
+	tokenDigest := hashBindToken(bindToken)
 	now := s.now()
-	binding, err := s.store.BindAlias(emailHash, aliasID, req.Consent, now)
+	binding, err := s.store.BindAlias(emailHash, aliasID, req.Consent, tokenDigest, now)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		s.writeError(w, http.StatusUnauthorized, "IDN-401", "email not verified", nil)
 		return
 	case errors.Is(err, ErrNotVerified):
 		s.writeError(w, http.StatusUnauthorized, "IDN-401", "email not verified", nil)
+		return
+	case errors.Is(err, ErrBindTokenInvalid):
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "bind token invalid or expired", nil)
 		return
 	case errors.Is(err, ErrAliasConflict):
 		s.writeError(w, http.StatusConflict, "IDN-409", "alias already linked to another email", nil)
@@ -470,6 +517,26 @@ func (s *Server) randomCode() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%06d", nBig.Int64()), nil
+}
+
+// randomBindToken generates the NHB-AUDIT-S6 bind token: 256 bits from
+// crypto/rand, hex-encoded. High-entropy and unguessable by construction,
+// unlike the 6-digit email code, so no rate limiting is needed on its use
+// the way there is on code attempts.
+func randomBindToken() (string, error) {
+	buf := make([]byte, bindTokenBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// hashBindToken mirrors hashVerificationCode's own reasoning: never persist
+// the raw secret at rest, only a digest a database read can't be replayed
+// from.
+func hashBindToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func computeSignature(secret []byte, method, path string, body []byte, ts string) string {

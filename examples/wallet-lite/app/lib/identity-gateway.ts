@@ -15,6 +15,12 @@ export interface VerifyEmailResponse {
   status: string;
   verifiedAt: string;
   emailHash: string;
+  // NHB-AUDIT-S6: bindToken is the single-use, short-lived token the
+  // gateway now requires at bind time -- without it, bind-email trusted
+  // ANY caller holding a valid gateway API key to bind ANY alias to ANY
+  // email that had EVER been verified by anyone, with nothing tying the
+  // request to whoever actually completed THIS verification.
+  bindToken: string;
 }
 
 export interface BindEmailResponse {
@@ -80,11 +86,12 @@ export async function bindEmailToAlias(
   aliasId: string,
   email: string,
   consent: boolean,
+  bindToken: string,
   options?: RequestOptions
 ): Promise<BindEmailResponse> {
   return gatewayRequest<BindEmailResponse>(
     '/identity/alias/bind-email',
-    { aliasId, email, consent },
+    { aliasId, email, consent, bindToken },
     options
   );
 }
