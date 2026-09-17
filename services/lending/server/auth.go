@@ -233,7 +233,10 @@ func isMsgMethod(fullMethod string) bool {
 	case lendingv1.LendingService_SupplyAsset_FullMethodName,
 		lendingv1.LendingService_WithdrawAsset_FullMethodName,
 		lendingv1.LendingService_BorrowAsset_FullMethodName,
-		lendingv1.LendingService_RepayAsset_FullMethodName:
+		lendingv1.LendingService_RepayAsset_FullMethodName,
+		lendingv1.LendingService_DepositCollateral_FullMethodName,
+		lendingv1.LendingService_WithdrawCollateral_FullMethodName,
+		lendingv1.LendingService_Liquidate_FullMethodName:
 		return true
 	default:
 		return false

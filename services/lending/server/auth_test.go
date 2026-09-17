@@ -74,3 +74,61 @@ func TestMsgRPCAuthentication(t *testing.T) {
 		t.Fatalf("expected authenticated Msg RPC to reach handler, got %v", err)
 	}
 }
+
+// NHB-AUDIT-S1: DepositCollateral/WithdrawCollateral/Liquidate were missing
+// from isMsgMethod entirely, so the interceptor treated them as unauthenticated
+// query RPCs and let any caller reach them with no credentials at all.
+func TestCollateralAndLiquidateRPCsRequireAuthentication(t *testing.T) {
+	cfg := AuthConfig{APITokens: []string{"secret-token"}}
+	unaryAuth, streamAuth := NewAuthInterceptors(cfg)
+
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(unaryAuth),
+		grpc.ChainStreamInterceptor(streamAuth),
+	)
+	lendingv1.RegisterLendingServiceServer(grpcServer, testService{})
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer lis.Close()
+
+	go func() {
+		_ = grpcServer.Serve(lis)
+	}()
+	defer grpcServer.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	client := lendingv1.NewLendingServiceClient(conn)
+	authCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer secret-token")
+
+	if _, err := client.DepositCollateral(ctx, &lendingv1.DepositCollateralRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected DepositCollateral to require auth, got %v", err)
+	}
+	if _, err := client.DepositCollateral(authCtx, &lendingv1.DepositCollateralRequest{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected authenticated DepositCollateral to reach handler, got %v", err)
+	}
+
+	if _, err := client.WithdrawCollateral(ctx, &lendingv1.WithdrawCollateralRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected WithdrawCollateral to require auth, got %v", err)
+	}
+	if _, err := client.WithdrawCollateral(authCtx, &lendingv1.WithdrawCollateralRequest{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected authenticated WithdrawCollateral to reach handler, got %v", err)
+	}
+
+	if _, err := client.Liquidate(ctx, &lendingv1.LiquidateRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Liquidate to require auth, got %v", err)
+	}
+	if _, err := client.Liquidate(authCtx, &lendingv1.LiquidateRequest{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("expected authenticated Liquidate to reach handler, got %v", err)
+	}
+}
