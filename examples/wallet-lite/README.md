@@ -13,6 +13,16 @@ Wallet Lite is a client-side demo that exercises the NHB identity and creator fl
 The demo targets static hosting and only stores private keys in memory. It is suitable for
 walkthroughs and automated test accounts; do not connect production keys.
 
+**Retired RPC methods: most of the flows below are currently non-functional.** `identity_setAlias`,
+`identity_setAvatar`, `identity_addAddress`, `identity_removeAddress`, `identity_setPrimary`,
+`identity_rename`, `identity_createClaimable`, `identity_claim`, `creator_tip`, `creator_stake`, and
+`creator_unstake` all used to mutate validator-local state directly outside the block pipeline, which
+guarantees a consensus fork/halt on this chain's 2-validator zero-quorum-slack topology -- the node's
+RPC layer now returns `410 Gone` for every one of them unconditionally (see `rpc/identity_handlers.go`'s
+`identityRPCDisabledMessage` and `rpc/creator_handlers.go`'s `creatorRPCDisabledMessage`). There is no
+signed-transaction replacement for these yet. Only the read-only `identity_resolve`/`identity_reverse`
+lookups (used for the profile panel) and the client-side QR generation remain live.
+
 ## Getting started
 
 ```bash
