@@ -94,6 +94,16 @@ var (
 	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
 	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
 	ErrInvalidChainID      = errors.New("invalid chain id")
+	// ErrTransactionExpired indicates executeTransaction rejected a
+	// transaction whose MaxBlockHeight has already passed, or whose
+	// IntentExpiry has already passed (NHB-AUDIT-R2) -- checked here,
+	// deterministically, at actual execution, not just once at mempool
+	// admission (core/node.go's addTransaction). Height only increases and
+	// block timestamps only advance, so a transaction that hits this can
+	// never succeed later either; classifyProposalError treats it as
+	// PRUNE-safe, the same disposition ErrSwapExpired already gets for the
+	// identical reason.
+	ErrTransactionExpired = errors.New("transaction expired")
 	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
 	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
@@ -2724,6 +2734,26 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	}
 	if !types.IsValidChainID(tx.ChainID) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
+	}
+	// NHB-AUDIT-R2: MaxBlockHeight/IntentExpiry were only ever checked once,
+	// at mempool admission (core/node.go's addTransaction) -- never here,
+	// at actual execution. A transaction sitting in the mempool past its
+	// declared expiry (or a peer's mempool that skipped/never ran the
+	// admission check) still executed normally once a proposer included
+	// it. Both checks below are deterministic (block height / the block's
+	// own execution-context timestamp, never wall-clock time.Now()) so
+	// every validator reaches the identical accept/reject decision. The
+	// IntentExpiry half only applies when IntentRef is unset -- an
+	// intent-bearing transaction's expiry is already validated
+	// deterministically below via IntentRegistryValidate, which has its
+	// own TTL-extension semantics this must not duplicate or conflict with.
+	if tx.Type > 0 {
+		if tx.MaxBlockHeight > 0 && sp.blockHeight() > tx.MaxBlockHeight {
+			return nil, fmt.Errorf("%w: max block height %d exceeded (current: %d)", ErrTransactionExpired, tx.MaxBlockHeight, sp.blockHeight())
+		}
+		if len(tx.IntentRef) == 0 && tx.IntentExpiry > 0 && uint64(sp.blockTimestamp().Unix()) > tx.IntentExpiry {
+			return nil, fmt.Errorf("%w: transaction expired", ErrTransactionExpired)
+		}
 	}
 	var (
 		intentManager *nhbstate.Manager
