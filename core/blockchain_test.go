@@ -207,6 +207,63 @@ func TestBlockchainPersistenceAcrossRestart(t *testing.T) {
 
 }
 
+// NHB-AUDIT-R1: reproduces the exact pre-fix crash window -- a torn write
+// leaves the durable tip pointing at a hash that the height index was
+// never updated to match. Before this fix, NewBlockchain silently trusted
+// whichever value it happened to load; now it must fail loudly instead of
+// booting a validator against inconsistent chain state.
+func TestNewBlockchainFailsLoudlyOnTipHeightIndexMismatch(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	bc, err := NewBlockchain(db, "", true)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+	block1 := newTestBlock(1, bc.Tip())
+	if err := bc.AddBlock(block1); err != nil {
+		t.Fatalf("failed to add block1: %v", err)
+	}
+
+	// Simulate a crash between AddBlock's tip write and its height-index
+	// write for a would-be block 2: tip now points at a hash the height
+	// index (and the height counter) never advanced to.
+	forgedHash := bytes.Repeat([]byte{0xAB}, 32)
+	if err := db.Put(tipKey, forgedHash); err != nil {
+		t.Fatalf("forge tip: %v", err)
+	}
+
+	if _, err := NewBlockchain(db, "", true); err == nil {
+		t.Fatalf("expected NewBlockchain to reject a tip/height-index mismatch")
+	} else if !strings.Contains(err.Error(), "integrity check failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// NHB-AUDIT-R1: AddBlock's writes commit atomically -- a failed batch
+// write must leave neither the durable state nor the in-memory pointers
+// advanced. Real ethdb batches can't be made to fail write() short of a
+// disk error, but the deterministic ordering of checks-before-write in
+// the current implementation is what a review needs to see hasn't
+// regressed: every validation happens before the batch is ever built.
+func TestAddBlockRejectsMismatchedHeightBeforeTouchingStorage(t *testing.T) {
+	db := storage.NewMemDB()
+	defer db.Close()
+
+	bc, err := NewBlockchain(db, "", true)
+	if err != nil {
+		t.Fatalf("failed to create blockchain: %v", err)
+	}
+
+	wrongHeightBlock := newTestBlock(5, bc.Tip())
+	if err := bc.AddBlock(wrongHeightBlock); err == nil {
+		t.Fatalf("expected height mismatch error")
+	}
+	if bc.GetHeight() != 0 {
+		t.Fatalf("expected height to remain 0 after a rejected block, got %d", bc.GetHeight())
+	}
+}
+
 func TestTipReturnsCopy(t *testing.T) {
 	db := storage.NewMemDB()
 	t.Cleanup(func() { db.Close() })

@@ -236,6 +236,16 @@ func NewBlockchain(db storage.Database, genesisPath string, allowAutogenesis boo
 		bc.heights[i] = cloneBytes(hashBytes)
 	}
 
+	// NHB-AUDIT-R1: cross-check the separately-loaded tip against the
+	// height index's own entry for bc.height. Now that AddBlock commits
+	// both in one atomic batch, a mismatch here can only mean corruption
+	// or a crash from before this fix existed -- fail loudly, the same
+	// way a missing height-index entry above already does, rather than
+	// silently trusting whichever value happened to load.
+	if tipAtHeight, ok := bc.heights[bc.height]; !ok || !bytes.Equal(tipAtHeight, bc.tip) {
+		return nil, fmt.Errorf("crash-recovery integrity check failed: tip %x does not match height-index entry for height %d (%x)", bc.tip, bc.height, tipAtHeight)
+	}
+
 	genesisHash, ok := bc.heights[0]
 	if !ok {
 		return nil, fmt.Errorf("missing genesis hash in height index")
@@ -357,34 +367,40 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 		return fmt.Errorf("hash block: %w", err)
 	}
 
-	if err := bc.db.Put(blockHash, blockBytes); err != nil {
+	newHeight := bc.height + 1
+
+	// NHB-AUDIT-R1: every write below used to be a separate sequential
+	// db.Put call. A crash between any two of them (classically: after
+	// the tip write but before the height-counter write) left the
+	// database durably reporting the NEW tip while still reporting the
+	// OLD height on restart -- silently undetected, since nothing
+	// cross-checked the two against each other. A single atomic batch
+	// write makes this block's entire commit all-or-nothing.
+	batch := bc.db.NewBatch()
+	if err := batch.Put(blockHash, blockBytes); err != nil {
 		return fmt.Errorf("store block: %w", err)
 	}
-	if err := bc.db.Put(tipKey, blockHash); err != nil {
+	if err := batch.Put(tipKey, blockHash); err != nil {
 		return fmt.Errorf("store tip: %w", err)
 	}
-
-	newHeight := bc.height + 1
-	if err := bc.db.Put(heightKeyName, encodeUint64(newHeight)); err != nil {
+	if err := batch.Put(heightKeyName, encodeUint64(newHeight)); err != nil {
 		return fmt.Errorf("store height: %w", err)
 	}
-	if err := bc.db.Put(heightKey(newHeight), blockHash); err != nil {
+	if err := batch.Put(heightKey(newHeight), blockHash); err != nil {
 		return fmt.Errorf("store height index: %w", err)
 	}
-	if err := bc.db.Put(hashKey(blockHash), encodeUint64(newHeight)); err != nil {
+	if err := batch.Put(hashKey(blockHash), encodeUint64(newHeight)); err != nil {
 		return fmt.Errorf("store hash index: %w", err)
 	}
-	if err := bc.db.Put(lastTimestampKey, encodeInt64(b.Header.Timestamp)); err != nil {
+	if err := batch.Put(lastTimestampKey, encodeInt64(b.Header.Timestamp)); err != nil {
 		return fmt.Errorf("store last timestamp: %w", err)
 	}
-	// Index every transaction in this block by hash -> height, same
-	// non-atomic-but-sequential Put pattern already used for the other
-	// indices above (this codebase doesn't batch/transact these writes; a
-	// crash mid-AddBlock already left partial state before this change).
-	// Best-effort: a transaction whose hash computation fails is skipped
-	// rather than failing the whole block commit over an indexing concern
-	// unrelated to consensus -- findTransaction's bounded fallback scan
-	// still covers it if that ever happens.
+	// Index every transaction in this block by hash -> height, in the same
+	// batch as everything else above. Best-effort: a transaction whose
+	// hash computation fails is skipped rather than failing the whole
+	// block commit over an indexing concern unrelated to consensus --
+	// findTransaction's bounded fallback scan still covers it if that
+	// ever happens.
 	for _, tx := range b.Transactions {
 		if tx == nil {
 			continue
@@ -393,9 +409,12 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 		if hashErr != nil {
 			continue
 		}
-		if err := bc.db.Put(txHashKey(txHashBytes), encodeUint64(newHeight)); err != nil {
+		if err := batch.Put(txHashKey(txHashBytes), encodeUint64(newHeight)); err != nil {
 			return fmt.Errorf("store transaction hash index: %w", err)
 		}
+	}
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("commit block batch: %w", err)
 	}
 
 	// Update in-memory pointers after successful persistence.

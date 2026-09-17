@@ -15,6 +15,13 @@ type Database interface {
 	Get(key []byte) ([]byte, error)
 	TrieDB() *triedb.Database
 	Close()
+	// NewBatch exposes the backing ethdb store's native atomic batch write
+	// (NHB-AUDIT-R1) -- both concrete implementations below already wrap an
+	// ethdb.Database, which has always supported this; nothing new to
+	// build, just to expose. A single batch.Write() either applies every
+	// queued Put or none of them, closing the crash window between
+	// sequential individual Put calls (e.g. core/blockchain.go's AddBlock).
+	NewBatch() ethdb.Batch
 }
 
 // --- In-Memory DB (for testing) ---
@@ -43,6 +50,10 @@ func (db *MemDB) Get(key []byte) ([]byte, error) {
 
 func (db *MemDB) TrieDB() *triedb.Database {
 	return db.trieDB
+}
+
+func (db *MemDB) NewBatch() ethdb.Batch {
+	return db.db.NewBatch()
 }
 
 // Close satisfies the Database interface for MemDB.
@@ -85,6 +96,11 @@ func (ldb *LevelDB) Get(key []byte) ([]byte, error) {
 // TrieDB exposes the trie database handle used for MPT storage.
 func (ldb *LevelDB) TrieDB() *triedb.Database {
 	return ldb.trieDB
+}
+
+// NewBatch exposes the backing LevelDB store's native atomic batch write.
+func (ldb *LevelDB) NewBatch() ethdb.Batch {
+	return ldb.db.NewBatch()
 }
 
 // Close closes the database connection.
