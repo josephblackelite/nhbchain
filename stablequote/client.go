@@ -119,10 +119,13 @@ func (c *HTTPClient) CashOut(ctx context.Context, req CashOutRequest) (CashOutRe
 func (c *HTTPClient) Status(ctx context.Context) Status {
 	var resp Status
 	if err := c.do(ctx, http.MethodGet, "/v1/status", nil, &resp); err != nil {
-		// Engine.Status has no error return (see the real engine's own
-		// signature) -- a transport failure here just reads as "empty",
-		// matching how a never-configured engine already reads today.
-		return Status{}
+		// NHB-AUDIT-S4: Engine.Status has no error return (see the real
+		// engine's own signature), but silently returning a bare zero
+		// value made a fully-down upstream indistinguishable from a
+		// healthy, idle one. Down flags this path specifically so callers
+		// (rpc/swap_stable_handlers.go's handleStableGetSwapStatus) can
+		// tell the two apart.
+		return Status{Down: true}
 	}
 	return resp
 }

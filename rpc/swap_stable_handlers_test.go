@@ -315,6 +315,7 @@ type fakeStableEngine struct {
 	assets       map[string]bool
 	quotes       map[string]time.Time // quote ID -> expiresAt
 	reservations map[string]stablequote.Reservation
+	down         bool
 }
 
 func newFakeStableEngine(clock func() time.Time, quoteTTL time.Duration, assets ...string) *fakeStableEngine {
@@ -382,6 +383,9 @@ func (f *fakeStableEngine) CashOut(_ context.Context, req stablequote.CashOutReq
 func (f *fakeStableEngine) Status(context.Context) stablequote.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.down {
+		return stablequote.Status{Down: true}
+	}
 	return stablequote.Status{Quotes: len(f.quotes), Reservations: len(f.reservations), Assets: len(f.assets)}
 }
 
@@ -398,6 +402,41 @@ func newStableRPCTestEngine(t *testing.T, base time.Time) *fakeStableEngine {
 		return ts
 	}
 	return newFakeStableEngine(clock, time.Minute, "ZNHB")
+}
+
+// NHB-AUDIT-S4: handleStableGetSwapStatus must return 503, mirroring its
+// existing nil-engine branch, when the engine itself reports Down --
+// previously a downed upstream and a healthy idle one both looked like a
+// plain 200 with zero counts.
+func TestHandleStableGetSwapStatusReturns503WhenEngineDown(t *testing.T) {
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newStableRPCTestEngine(t, base)
+	engine.down = true
+	srv := newTestServer(t, nil, nil, ServerConfig{})
+	srv.ConfigureStableEngine(engine, stablequote.Limits{}, nil, func() time.Time { return base })
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	recorder := httptest.NewRecorder()
+	srv.handleStableGetSwapStatus(recorder, req, &RPCRequest{ID: 1})
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when engine is down, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleStableGetSwapStatusReturns200WhenEngineHealthy(t *testing.T) {
+	base := time.Date(2024, time.June, 7, 19, 15, 17, 0, time.UTC)
+	engine := newStableRPCTestEngine(t, base)
+	srv := newTestServer(t, nil, nil, ServerConfig{})
+	srv.ConfigureStableEngine(engine, stablequote.Limits{}, nil, func() time.Time { return base })
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	recorder := httptest.NewRecorder()
+	srv.handleStableGetSwapStatus(recorder, req, &RPCRequest{ID: 1})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 when engine is healthy, got %d: %s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func signStableJWT(t *testing.T, now time.Time) string {

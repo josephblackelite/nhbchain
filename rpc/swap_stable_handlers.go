@@ -191,6 +191,10 @@ func (s *Server) handleStableGetSwapStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	status := engine.Status(r.Context())
+	if status.Down {
+		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "stable engine unreachable", nil)
+		return
+	}
 	response := map[string]any{
 		"quotes":       status.Quotes,
 		"reservations": status.Reservations,

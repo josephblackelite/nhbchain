@@ -77,6 +77,12 @@ type Status struct {
 	Quotes       int
 	Reservations int
 	Assets       int
+	// Down is set by HTTPClient.Status when the upstream stable-quote
+	// service could not be reached at all (NHB-AUDIT-S4) -- without it, a
+	// transport/HTTP/decode failure and a genuinely healthy, idle engine
+	// both produced an identical zero-value Status, so a fully-down
+	// service was indistinguishable from healthy on the status RPC.
+	Down bool
 }
 
 type QuoteRequest struct {
