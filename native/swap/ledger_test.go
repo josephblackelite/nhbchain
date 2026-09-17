@@ -106,6 +106,7 @@ func TestLedgerPutAndGet(t *testing.T) {
 		TwapWindowSeconds: 300,
 		TwapStart:         time.Unix(1699999700, 0).Unix(),
 		TwapEnd:           time.Unix(1700000000, 0).Unix(),
+		OrderID:           "order-abc",
 	}
 	if err := ledger.Put(record); err != nil {
 		t.Fatalf("put: %v", err)
@@ -113,6 +114,9 @@ func TestLedgerPutAndGet(t *testing.T) {
 	fetched, ok, err := ledger.Get("np-1")
 	if err != nil || !ok {
 		t.Fatalf("get: %v ok=%v", err, ok)
+	}
+	if fetched.OrderID != "order-abc" {
+		t.Fatalf("unexpected order id: %s", fetched.OrderID)
 	}
 	if fetched.Provider != "nowpayments" {
 		t.Fatalf("unexpected provider %s", fetched.Provider)
@@ -278,6 +282,82 @@ func TestLedgerExportCSVNoPagination(t *testing.T) {
 	}
 	if !strings.Contains(rows[len(rows)-1], "bulk-59") {
 		t.Fatalf("expected last row to include bulk-59, got %s", rows[len(rows)-1])
+	}
+}
+
+// TestLedgerDecodesPreExistingRecordsWithoutOrderID is the direct
+// backward-compatibility regression test for NHB-AUDIT-C8: OrderID was
+// added as a NEW, trailing field on storedVoucherRecord, which is RLP-
+// encoded directly into the live state trie. Without the rlp:"optional"
+// tag (see storedVoucherRecord's doc comment), decoding any voucher
+// record that was persisted before this field existed would hard-fail on
+// its very next Get()/List() call -- exactly the class of bug
+// core/state/accounts.go's ValidatorRegistered field already guards
+// against, reproduced here directly: this test RLP-encodes a record using
+// the OLD (pre-OrderID) field shape, bypassing toStoredVoucher entirely so
+// it genuinely has no OrderID field at all in the encoded bytes, then
+// confirms the CURRENT Get() still decodes it successfully with OrderID
+// simply empty.
+func TestLedgerDecodesPreExistingRecordsWithoutOrderID(t *testing.T) {
+	type legacyStoredVoucherRecord struct {
+		Provider          string
+		ProviderTxID      string
+		FiatCurrency      string
+		FiatAmount        string
+		USD               string
+		Rate              string
+		Token             string
+		MintAmountWei     string
+		Recipient         [20]byte
+		Username          string
+		Address           string
+		QuoteTimestamp    uint64
+		OracleSource      string
+		OracleMedian      string
+		OracleFeeders     []string
+		PriceProofID      string
+		MinterSignature   string
+		Status            string
+		CreatedAt         uint64
+		TwapRate          string
+		TwapObservations  uint32
+		TwapWindowSeconds uint64
+		TwapStart         uint64
+		TwapEnd           uint64
+		// deliberately no OrderID field -- this is the pre-fix shape.
+	}
+
+	store := newMockStorage()
+	legacy := legacyStoredVoucherRecord{
+		Provider:      "nowpayments",
+		ProviderTxID:  "legacy-1",
+		FiatCurrency:  "USD",
+		FiatAmount:    "10.00",
+		Rate:          "0.5",
+		Token:         "ZNHB",
+		MintAmountWei: "5000000000000000000",
+		Status:        VoucherStatusMinted,
+		CreatedAt:     1700000000,
+	}
+	encoded, err := rlp.EncodeToBytes(legacy)
+	if err != nil {
+		t.Fatalf("encode legacy record: %v", err)
+	}
+	store.kv[string(voucherKey("legacy-1"))] = encoded
+
+	ledger := NewLedger(store)
+	fetched, ok, err := ledger.Get("legacy-1")
+	if err != nil {
+		t.Fatalf("BACKWARD COMPATIBILITY REGRESSION: decoding a pre-existing voucher record without OrderID failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected legacy record to be found")
+	}
+	if fetched.Provider != "nowpayments" {
+		t.Fatalf("unexpected provider %s", fetched.Provider)
+	}
+	if fetched.OrderID != "" {
+		t.Fatalf("expected empty OrderID for a legacy record, got %q", fetched.OrderID)
 	}
 }
 

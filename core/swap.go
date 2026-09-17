@@ -29,6 +29,20 @@ var (
 	ErrSwapSlippageExceeded = errors.New("swap: slippage exceeds maximum")
 	// ErrSwapDuplicateProviderTx indicates the provider transaction identifier has already been recorded.
 	ErrSwapDuplicateProviderTx = errors.New("swap: provider transaction already processed")
+	// ErrSwapProviderTxIDCollision indicates the submitted providerTxId
+	// already exists in the ledger, but under a DIFFERENT, already-signed
+	// OrderID than this submission's own OrderID. NHB-AUDIT-C8:
+	// ProviderTxID is never covered by the mint authority's signature
+	// (unlike OrderID, the real anti-double-mint control -- see
+	// VoucherV1.Hash), so anyone holding any validly-signed voucher can
+	// choose an arbitrary providerTxId, including one matching a
+	// different, unrelated, not-yet-processed order -- permanently
+	// blocking that legitimate order under the ledger's current
+	// ProviderTxID-keyed storage. Kept distinct from
+	// ErrSwapDuplicateProviderTx (a genuine, harmless retry of the exact
+	// same order) so this specific, actionable symptom is never
+	// misdiagnosed as an ordinary duplicate.
+	ErrSwapProviderTxIDCollision = errors.New("swap: providerTxId collides with a different order")
 	// ErrSwapProviderNotAllowed indicates the mint originated from a non-whitelisted provider.
 	ErrSwapProviderNotAllowed = errors.New("swap: provider not allowed")
 	// ErrSwapAmountBelowMinimum indicates the mint fell below the configured minimum threshold.
