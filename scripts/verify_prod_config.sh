@@ -119,7 +119,7 @@ rpc_allow_insecure = first_defined((
     ("RPCAllowInsecure",),
     ("global", "RPCAllowInsecure"),
     ("network_security", "RPCAllowInsecure"),
-    ("global", "staking", "RPCAllowInsecure"),
+    ("global", "Staking", "RPCAllowInsecure"),
 ))
 if rpc_allow_insecure is not False:
     errors.append("TLS must be enabled: RPCAllowInsecure must be false")
@@ -140,71 +140,76 @@ ensure_not_unspecified((("RPCAddress",),), "RPCAddress")
 ensure_string((
     ("global", "RPC", "TLSCertFile"),
     ("RPCTLSCertFile",),
-    ("global", "staking", "RPCTLSCertFile"),
+    ("global", "Staking", "RPCTLSCertFile"),
     ("network_security", "RPCTLSCertFile"),
 ), "RPC TLS certificate path")
 ensure_string((
     ("global", "RPC", "TLSKeyFile"),
     ("RPCTLSKeyFile",),
-    ("global", "staking", "RPCTLSKeyFile"),
+    ("global", "Staking", "RPCTLSKeyFile"),
     ("network_security", "RPCTLSKeyFile"),
 ), "RPC TLS key path")
 ensure_string((
     ("global", "RPC", "TLSClientCAFile"),
     ("RPCTLSClientCAFile",),
-    ("global", "staking", "RPCTLSClientCAFile"),
+    ("global", "Staking", "RPCTLSClientCAFile"),
     ("network_security", "RPCTLSClientCAFile"),
 ), "RPC client CA bundle path")
 
 # Loyalty pro-rate enforcement
-enforce_prorate = first_defined((("global", "loyalty", "Dynamic", "EnforceProRate"),))
+# NHB-AUDIT-R4: this repo's TOML section headers use PascalCase
+# (global.Staking, global.Pauses, global.Fees, global.Loyalty -- see
+# config/prod.toml) while these lookups used all-lowercase section names.
+# TOML keys are case-sensitive, so every one of these silently never
+# matched the real config regardless of what was correctly set there.
+enforce_prorate = first_defined((("global", "Loyalty", "Dynamic", "EnforceProRate"),))
 if enforce_prorate is not True:
-    errors.append("global.loyalty.Dynamic.EnforceProRate must be true")
+    errors.append("global.Loyalty.Dynamic.EnforceProRate must be true")
 
-enable_prorate = first_defined((("global", "loyalty", "Dynamic", "enableprorate"),))
+enable_prorate = first_defined((("global", "Loyalty", "Dynamic", "enableprorate"),))
 if enable_prorate is not True:
-    errors.append("global.loyalty.Dynamic.enableprorate must be true")
+    errors.append("global.Loyalty.Dynamic.enableprorate must be true")
 
 # Fee routing wallets
-owner_wallet = first_defined((("global", "fees", "owner_wallet"),))
+owner_wallet = first_defined((("global", "Fees", "owner_wallet"),))
 if not isinstance(owner_wallet, str) or not owner_wallet.strip():
-    errors.append("global.fees.owner_wallet must be set to a non-empty wallet address")
+    errors.append("global.Fees.owner_wallet must be set to a non-empty wallet address")
 
-assets = first_defined((("global", "fees", "assets"),))
+assets = first_defined((("global", "Fees", "Assets"),))
 if not isinstance(assets, list) or not assets:
-    errors.append("global.fees.assets must define at least one asset with an owner wallet")
+    errors.append("global.Fees.Assets must define at least one asset with an owner wallet")
 else:
     for idx, asset in enumerate(assets):
         if not isinstance(asset, dict):
-            errors.append(f"global.fees.assets[{idx}] must be a table")
+            errors.append(f"global.Fees.Assets[{idx}] must be a table")
             continue
         wallet = asset.get("owner_wallet")
         if not isinstance(wallet, str) or not wallet.strip():
             asset_name = asset.get("asset", f"index {idx}")
-            errors.append(f"global.fees.assets entry '{asset_name}' must set owner_wallet")
+            errors.append(f"global.Fees.Assets entry '{asset_name}' must set owner_wallet")
 
 # Staking emission caps
-emission_raw = first_defined((("global", "staking", "MaxEmissionPerYearWei"),))
+emission_raw = first_defined((("global", "Staking", "MaxEmissionPerYearWei"),))
 if emission_raw is None:
-    errors.append("global.staking.MaxEmissionPerYearWei must be defined")
+    errors.append("global.Staking.MaxEmissionPerYearWei must be defined")
 else:
     try:
         emission_val = int(str(emission_raw), 0)
         if emission_val <= 0:
-            errors.append("global.staking.MaxEmissionPerYearWei must be greater than zero")
+            errors.append("global.Staking.MaxEmissionPerYearWei must be greater than zero")
     except ValueError:
-        errors.append("global.staking.MaxEmissionPerYearWei must be a positive integer value")
+        errors.append("global.Staking.MaxEmissionPerYearWei must be a positive integer value")
 
 # Pause checks
-pauses = first_defined((("global", "pauses"),))
+pauses = first_defined((("global", "Pauses"),))
 if isinstance(pauses, dict):
     unsafe = [key for key, value in pauses.items() if value is True]
     if unsafe:
-        errors.append("global.pauses disables critical modules: " + ", ".join(sorted(unsafe)))
+        errors.append("global.Pauses disables critical modules: " + ", ".join(sorted(unsafe)))
 elif pauses is None:
-    errors.append("global.pauses must be defined as a table of pause flags")
+    errors.append("global.Pauses must be defined as a table of pause flags")
 else:
-    errors.append("global.pauses must be a table of pause flags")
+    errors.append("global.Pauses must be a table of pause flags")
 
 if errors:
     for err in errors:
