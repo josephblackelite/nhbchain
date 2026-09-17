@@ -3327,7 +3327,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// on whether a same-sender Supply already applied earlier in this
 		// SAME proposal attempt -- a later attempt can genuinely change the
 		// outcome, same reasoning as the two lending errors above.
-		errors.Is(err, lending.ErrWithdrawSameBlockAsSupply):
+		errors.Is(err, lending.ErrWithdrawSameBlockAsSupply),
+		// NHB-AUDIT-C2: two unrelated accounts racing to claim the same
+		// username is an ordinary same-attempt ordering collision, not a
+		// malformed or malicious transaction -- skip just the losing
+		// RegisterIdentity, don't abort the whole block over it. See
+		// ErrIdentityUsernameTaken's doc comment (core/state_transition.go).
+		errors.Is(err, ErrIdentityUsernameTaken):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort

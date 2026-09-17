@@ -77,6 +77,7 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"mint invalid signer", ErrMintInvalidSigner, proposalDispositionSkip},
 		{"mint emission cap exceeded", ErrMintEmissionCapExceeded, proposalDispositionSkip},
 		{"mint recipient unresolved", ErrMintRecipientUnresolved, proposalDispositionSkip},
+		{"identity username taken", ErrIdentityUsernameTaken, proposalDispositionSkip},
 
 		// ABORT: deliberately unclassified (ambiguous sentinel, or a plain
 		// unrecognized error).
@@ -548,5 +549,163 @@ func TestNonceTooHighClassifiesSkipNotPrune(t *testing.T) {
 	}
 	if got := classifyProposalError(applyErr); got != proposalDispositionSkip {
 		t.Fatalf("expected ErrNonceTooHigh to classify as SKIP, got %v", got)
+	}
+}
+
+// TestUsernameCollisionSkipsNotAbortsProposal is the direct regression test
+// for NHB-AUDIT-C2: two ordinary, unrelated accounts both submitting a
+// RegisterIdentity transaction claiming the SAME username in the same
+// CreateBlock attempt (an entirely ordinary race, no malicious coordination
+// required). Before this fix, applyRegisterIdentity's collision error was a
+// bare, unwrapped fmt.Errorf, so classifyProposalError always fell through
+// to its default ABORT case -- failing the ENTIRE candidate block, every
+// round, until one of the two colliding transactions expired, and blocking
+// every other unrelated pending transaction too. This proves: (1) the block
+// still builds and commits, containing exactly one winner, (2) the loser is
+// excluded from the block but left resident in the mempool (skipped, not
+// pruned -- it's a same-attempt ordering artifact, not a permanently
+// malformed transaction), and (3) an unrelated third transaction in the same
+// attempt is unaffected.
+func TestUsernameCollisionSkipsNotAbortsProposal(t *testing.T) {
+	node := newTestNode(t)
+
+	keyA, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key A: %v", err)
+	}
+	keyB, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key B: %v", err)
+	}
+	addrA := toAddress(keyA)
+	addrB := toAddress(keyB)
+
+	for _, addr := range [][20]byte{addrA, addrB} {
+		node.stateMu.Lock()
+		err := node.state.setAccount(addr[:], &types.Account{
+			BalanceNHB:  big.NewInt(0),
+			BalanceZNHB: big.NewInt(0),
+			Stake:       big.NewInt(0),
+		})
+		node.stateMu.Unlock()
+		if err != nil {
+			t.Fatalf("seed account: %v", err)
+		}
+	}
+
+	const contestedUsername = "SameUsername"
+	txA := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeRegisterIdentity,
+		Nonce: 0, GasLimit: 21_000, GasPrice: big.NewInt(1), Value: big.NewInt(0),
+		Data: []byte(contestedUsername),
+	}
+	if err := txA.Sign(keyA.PrivateKey); err != nil {
+		t.Fatalf("sign tx A: %v", err)
+	}
+	txB := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeRegisterIdentity,
+		Nonce: 0, GasLimit: 21_000, GasPrice: big.NewInt(1), Value: big.NewInt(0),
+		Data: []byte(contestedUsername),
+	}
+	if err := txB.Sign(keyB.PrivateKey); err != nil {
+		t.Fatalf("sign tx B: %v", err)
+	}
+
+	// An unrelated, unaffected third transaction from a distinct sender in
+	// the same attempt -- the abort bug would have taken this down too.
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("sender key: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	node.stateMu.Lock()
+	err = node.state.setAccount(senderAddr, &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(1_000),
+		Stake:       big.NewInt(0),
+	})
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	recipient := make([]byte, 20)
+	recipient[19] = 0x09
+	transferTx := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeTransferZNHB,
+		Nonce: 0, To: recipient, Value: big.NewInt(100),
+		GasLimit: 25_000, GasPrice: big.NewInt(1),
+	}
+	if err := transferTx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+
+	node.mempoolMu.Lock()
+	node.mempool = append(node.mempool, txA, txB, transferTx)
+	node.mempoolMu.Unlock()
+
+	pending := append([]*types.Transaction(nil), node.mempool...)
+	block, err := node.CreateBlock(pending)
+	if err != nil {
+		t.Fatalf("CreateBlock must not abort the whole proposal for a username collision: %v", err)
+	}
+	if block == nil {
+		t.Fatalf("expected a block to be produced")
+	}
+
+	var winners int
+	var sawTransfer bool
+	for _, tx := range block.Transactions {
+		switch tx.Type {
+		case types.TxTypeRegisterIdentity:
+			winners++
+		case types.TxTypeTransferZNHB:
+			sawTransfer = true
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly one RegisterIdentity winner in the block, got %d", winners)
+	}
+	if !sawTransfer {
+		t.Fatalf("expected the unrelated transfer to still be included in the block")
+	}
+
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	// The losing RegisterIdentity must still be resident in the mempool --
+	// skipped, not pruned, not silently lost.
+	node.mempoolMu.Lock()
+	stillPending := len(node.mempool)
+	var stillPendingIsIdentity bool
+	if stillPending == 1 {
+		stillPendingIsIdentity = node.mempool[0].Type == types.TxTypeRegisterIdentity
+	}
+	node.mempoolMu.Unlock()
+	if stillPending != 1 {
+		t.Fatalf("expected exactly the losing RegisterIdentity still resident in mempool after commit, got %d pending", stillPending)
+	}
+	if !stillPendingIsIdentity {
+		t.Fatalf("expected the still-pending transaction to be the losing RegisterIdentity")
+	}
+
+	// Exactly one of A/B actually won the username on-chain.
+	accountA, err := node.GetAccount(addrA[:])
+	if err != nil {
+		t.Fatalf("get account A: %v", err)
+	}
+	accountB, err := node.GetAccount(addrB[:])
+	if err != nil {
+		t.Fatalf("get account B: %v", err)
+	}
+	gotUsername := accountA.Username
+	if gotUsername == "" {
+		gotUsername = accountB.Username
+	}
+	if accountA.Username != "" && accountB.Username != "" {
+		t.Fatalf("SAFETY REGRESSION: both colliding transactions claimed the username (A=%q B=%q)", accountA.Username, accountB.Username)
+	}
+	if gotUsername == "" {
+		t.Fatalf("expected exactly one of A/B to have claimed the username, neither did")
 	}
 }
