@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.6
+FROM golang:1.22 AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/p2pd ./cmd/p2pd
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/grpcurl github.com/fullstorydev/grpcurl/cmd/grpcurl
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /out/p2pd /usr/local/bin/p2pd
+COPY --from=builder /out/grpcurl /usr/local/bin/grpcurl
+COPY examples/compose/mininet/config/p2p.toml /etc/nhb/p2p.toml
+WORKDIR /var/lib/nhb
+ENTRYPOINT ["/usr/local/bin/p2pd"]
+CMD ["--config", "/etc/nhb/p2p.toml"]

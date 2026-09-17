@@ -1,0 +1,13 @@
+image:
+  tag: staging
+env:
+  - name: NHB_ENV
+    value: staging
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+# lendingd preview – override replicaCount to 1+ to enable once stable

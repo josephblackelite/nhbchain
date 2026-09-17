@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package gov.v1;
+
+option go_package = "nhbchain/proto/gov/v1;govv1";
+
+message MsgSubmitProposal {
+  string proposer = 1;
+  string title = 2;
+  string description = 3;
+  string deposit = 4;
+}
+
+message MsgSubmitProposalResponse {
+  string tx_hash = 1;
+}
+
+message MsgVote {
+  string voter = 1;
+  uint64 proposal_id = 2;
+  string option = 3;
+}
+
+message MsgVoteResponse {
+  string tx_hash = 1;
+}
+
+message Pauses {
+  bool lending = 1;
+  bool swap = 2;
+  bool escrow = 3;
+  bool trade = 4;
+  bool loyalty = 5;
+  bool potso = 6;
+}
+
+message MsgSetPauses {
+  string authority = 1;
+  Pauses pauses = 2;
+}
+
+message MsgSetPausesResponse {
+  string tx_hash = 1;
+}
+
+message MsgDeposit {
+  string depositor = 1;
+  uint64 proposal_id = 2;
+  string amount = 3;
+}
+
+message MsgDepositResponse {
+  string tx_hash = 1;
+}
+
+service Msg {
+  rpc SubmitProposal(MsgSubmitProposal) returns (MsgSubmitProposalResponse);
+  rpc Vote(MsgVote) returns (MsgVoteResponse);
+  rpc SetPauses(MsgSetPauses) returns (MsgSetPausesResponse);
+  rpc Deposit(MsgDeposit) returns (MsgDepositResponse);
+}

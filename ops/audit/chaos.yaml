@@ -1,0 +1,17 @@
+phase: chaos
+description: >-
+  Defines the failure injection scenarios for validator restarts and network partitions.
+checks:
+  - name: Validator restart flood
+    target: tests/chaos
+    expect: Node recovers within the configured grace period without double-signing.
+  - name: Partial partition recovery
+    target: p2p
+    expect: Gossip resumes and validator set reaches quorum within timeout thresholds.
+artifacts:
+  - name: Chaos fixture
+    path: ops/audit/chaos.yaml
+    format: yaml
+metadata:
+  owner: sre
+  cadence: weekly

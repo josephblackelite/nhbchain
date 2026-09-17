@@ -1,0 +1,17 @@
+phase: config
+description: >-
+  Records the validator configuration bundle reviewed during release sign-off.
+checks:
+  - name: Validator TOML fingerprints
+    target: config/
+    expect: Hashes for config.toml variants are captured for change control.
+artifacts:
+  - name: Default validator config
+    path: config/config.toml
+    format: toml
+  - name: Peer validator config
+    path: config-peer.toml
+    format: toml
+metadata:
+  owner: devops
+  cadence: release

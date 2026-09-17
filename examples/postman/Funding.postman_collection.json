@@ -1,0 +1,260 @@
+{
+  "info": {
+    "name": "Stable Funding & Cashout",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Regression coverage for swapd's `/v1/stable/*` endpoints. The collection exercises quote \u2192 reserve \u2192 cashout flows and encodes \"preview\" assertions so auditors can verify that disabled deployments still return a 501 with an explicit `stable engine not enabled` error. Set the `stable_state` collection variable to `enabled` once the engine is live to enforce success-path contracts."
+  },
+  "variable": [
+    {
+      "key": "stable_base",
+      "value": "http://localhost:7074"
+    },
+    {
+      "key": "stable_asset",
+      "value": "ZNHB"
+    },
+    {
+      "key": "stable_account",
+      "value": "demo-account"
+    },
+    {
+      "key": "stable_amount",
+      "value": "100"
+    },
+    {
+      "key": "stable_state",
+      "value": "preview"
+    },
+    {
+      "key": "stable_quote_id",
+      "value": ""
+    },
+    {
+      "key": "stable_reservation_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Stable \u25b8 Quote",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const state = pm.collectionVariables.get('stable_state') || 'preview';",
+              "pm.test('quote responds with JSON', function () {",
+              "  pm.response.to.have.statusCode.oneOf([200, 501]);",
+              "  pm.response.to.have.header('Content-Type');",
+              "  pm.expect(() => pm.response.json()).to.not.throw();",
+              "});",
+              "const body = pm.response.json();",
+              "if (state === 'enabled') {",
+              "  pm.test('quote success payload matches contract', function () {",
+              "    pm.expect(pm.response.code).to.eql(200);",
+              "    pm.expect(body).to.have.property('quote_id');",
+              "    pm.expect(body).to.have.property('asset', pm.collectionVariables.get('stable_asset'));",
+              "    pm.expect(body).to.have.property('price');",
+              "    pm.expect(body).to.have.property('expires_at');",
+              "    pm.expect(body).to.have.property('trace_id');",
+              "  });",
+              "  pm.collectionVariables.set('stable_quote_id', body.quote_id || '');",
+              "} else {",
+              "  pm.test('quote preview response is gated', function () {",
+              "    pm.expect(pm.response.code).to.eql(501);",
+              "    pm.expect(body).to.have.property('error');",
+              "    pm.expect(body.error).to.match(/stable engine not enabled/i);",
+              "  });",
+              "  pm.collectionVariables.set('stable_quote_id', 'preview-disabled');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"asset\": \"{{stable_asset}}\",\n  \"amount\": {{stable_amount}},\n  \"account\": \"{{stable_account}}\"\n}"
+        },
+        "url": {
+          "raw": "{{stable_base}}/v1/stable/quote"
+        },
+        "description": "Request a quote for converting voucher supply into USD liquidity."
+      }
+    },
+    {
+      "name": "Stable \u25b8 Reserve quote",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const state = pm.collectionVariables.get('stable_state') || 'preview';",
+              "const quoteId = pm.collectionVariables.get('stable_quote_id');",
+              "pm.test('reserve responds with JSON', function () {",
+              "  pm.response.to.have.statusCode.oneOf([200, 404, 409, 422, 501]);",
+              "  pm.expect(() => pm.response.json()).to.not.throw();",
+              "});",
+              "const body = pm.response.json();",
+              "if (state === 'enabled' && quoteId && quoteId !== 'preview-disabled') {",
+              "  pm.test('reservation confirms quote linkage', function () {",
+              "    pm.expect(pm.response.code).to.eql(200);",
+              "    pm.expect(body).to.have.property('reservation_id');",
+              "    pm.expect(body).to.have.property('quote_id', quoteId);",
+              "    pm.expect(body).to.have.property('amount_in');",
+              "    pm.expect(body).to.have.property('amount_out');",
+              "    pm.expect(body).to.have.property('expires_at');",
+              "  });",
+              "  pm.collectionVariables.set('stable_reservation_id', body.reservation_id || '');",
+              "} else if (state === 'enabled') {",
+              "  pm.test('missing quote is rejected', function () {",
+              "    pm.expect(pm.response.code).to.be.oneOf([404, 409, 422]);",
+              "    pm.expect(body).to.have.property('error');",
+              "  });",
+              "} else {",
+              "  pm.test('preview mode surfaces gating error', function () {",
+              "    pm.expect(pm.response.code).to.eql(501);",
+              "    pm.expect(body).to.have.property('error');",
+              "  });",
+              "  pm.collectionVariables.set('stable_reservation_id', 'preview-disabled');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"quote_id\": \"{{stable_quote_id}}\",\n  \"amount_in\": {{stable_amount}},\n  \"account\": \"{{stable_account}}\"\n}"
+        },
+        "url": {
+          "raw": "{{stable_base}}/v1/stable/reserve"
+        },
+        "description": "Reserve a previously issued quote for settlement."
+      }
+    },
+    {
+      "name": "Stable \u25b8 Cash out intent",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const state = pm.collectionVariables.get('stable_state') || 'preview';",
+              "pm.test('cashout returns JSON', function () {",
+              "  pm.response.to.have.statusCode.oneOf([200, 404, 409, 422, 501]);",
+              "  pm.expect(() => pm.response.json()).to.not.throw();",
+              "});",
+              "const body = pm.response.json();",
+              "if (state === 'enabled') {",
+              "  pm.test('cashout intent includes receipt fields', function () {",
+              "    pm.expect(pm.response.code).to.eql(200);",
+              "    pm.expect(body).to.have.property('intent_id');",
+              "    pm.expect(body).to.have.property('reservation_id');",
+              "    pm.expect(body).to.have.property('amount');",
+              "    pm.expect(body).to.have.property('trace_id');",
+              "  });",
+              "} else {",
+              "  pm.test('preview cashout is gated', function () {",
+              "    pm.expect(pm.response.code).to.eql(501);",
+              "    pm.expect(body).to.have.property('error');",
+              "  });",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"reservation_id\": \"{{stable_reservation_id}}\"\n}"
+        },
+        "url": {
+          "raw": "{{stable_base}}/v1/stable/cashout"
+        },
+        "description": "Create a cash-out intent that treasury can settle on external banking rails."
+      }
+    },
+    {
+      "name": "Stable \u25b8 Service status",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const state = pm.collectionVariables.get('stable_state') || 'preview';",
+              "pm.test('status returns observability payload', function () {",
+              "  pm.response.to.have.statusCode.oneOf([200, 501]);",
+              "  pm.expect(() => pm.response.json()).to.not.throw();",
+              "});",
+              "const body = pm.response.json();",
+              "if (state === 'enabled') {",
+              "  pm.test('status summarises inventory', function () {",
+              "    pm.expect(pm.response.code).to.eql(200);",
+              "    pm.expect(body).to.have.property('quotes');",
+              "    pm.expect(body).to.have.property('reservations');",
+              "    pm.expect(body).to.have.property('assets');",
+              "  });",
+              "} else {",
+              "  pm.test('status gated when previewed', function () {",
+              "    pm.expect(pm.response.code).to.eql(501);",
+              "    pm.expect(body).to.have.property('error');",
+              "  });",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{stable_base}}/v1/stable/status"
+        },
+        "description": "Retrieve a point-in-time snapshot of stable engine counters."
+      }
+    }
+  ]
+}

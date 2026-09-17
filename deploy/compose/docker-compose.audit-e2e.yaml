@@ -1,0 +1,18 @@
+services:
+  nhb-validator:
+    image: nhbchain/node:latest
+    command: ["/bin/nhbd", "--config", "/config/config.toml"]
+    volumes:
+      - ../../config:/config:ro
+  nhb-gateway:
+    image: nhbchain/gateway:latest
+    environment:
+      - NHBCHAIN_RPC_URL=http://nhb-validator:8545
+    depends_on:
+      - nhb-validator
+  nhb-metrics:
+    image: prom/prometheus:latest
+    volumes:
+      - ../../ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - nhb-validator

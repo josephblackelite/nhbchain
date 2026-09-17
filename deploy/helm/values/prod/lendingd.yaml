@@ -1,0 +1,13 @@
+image:
+  tag: prod
+env:
+  - name: NHB_ENV
+    value: prod
+resources:
+  requests:
+    cpu: 300m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 1Gi
+# lendingd preview – override replicaCount to 1+ to enable once stable

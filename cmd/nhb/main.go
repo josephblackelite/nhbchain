@@ -1,0 +1,988 @@
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"nhbchain/cmd/internal/passphrase"
+	"nhbchain/config"
+	"nhbchain/consensus/bft"
+	"nhbchain/core"
+	"nhbchain/core/genesis"
+	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
+	"nhbchain/native/lending"
+	"nhbchain/native/subscriptions"
+	swap "nhbchain/native/swap"
+	"nhbchain/observability/logging"
+	"nhbchain/p2p"
+	"nhbchain/p2p/seeds"
+	"nhbchain/rpc"
+	"nhbchain/stablequote"
+	"nhbchain/storage"
+
+	gatewayauth "nhbchain/gateway/auth"
+)
+
+const (
+	validatorPassEnv    = "NHB_VALIDATOR_PASS"
+	genesisPathEnv      = "NHB_GENESIS"
+	allowAutogenesisEnv = "NHB_ALLOW_AUTOGENESIS"
+	znhbOraclePriceEnv  = "NHB_ZNHB_ORACLE_PRICE_USD"
+	stableQuoteURLEnv   = "NHB_STABLE_QUOTE_SERVICE_URL"
+
+	defaultStableQuoteURL = "http://127.0.0.1:7091"
+)
+
+// convertModuleQuota adapts config.Quota (the config.toml-decoded shape) to
+// nativecommon.Quota (what StateProcessor.applyQuota actually reads).
+// Mirrors cmd/consensusd/main.go's identical convertQuota.
+func convertModuleQuota(q config.Quota) nativecommon.Quota {
+	return nativecommon.Quota{
+		MaxRequestsPerMin: q.MaxRequestsPerMin,
+		MaxNHBPerEpoch:    q.MaxNHBPerEpoch,
+		EpochSeconds:      q.EpochSeconds,
+	}
+}
+
+func main() {
+	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
+	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
+	allowAutogenesisFlag := flag.Bool("allow-autogenesis", false, "DEV ONLY: allow automatic genesis creation when no stored genesis exists")
+	allowMigrateFlag := flag.Bool("allow-migrate", false, "Allow starting with a mismatched state schema (manual migrations only)")
+	flag.Parse()
+
+	allowAutogenesisCLISet := flagWasProvided("allow-autogenesis")
+
+	env := strings.TrimSpace(os.Getenv("NHB_ENV"))
+	logger := logging.Setup("nhb", env)
+
+	passSource := passphrase.NewSource(validatorPassEnv)
+
+	cfg, err := config.Load(*configFile, config.WithKeystorePassphraseSource(passSource.Get))
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load config: %v", err))
+	}
+
+	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
+	if err != nil {
+		logger.Error("Failed to resolve autogenesis setting", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	genesisPath, err := resolveGenesisPath(*genesisFlag, cfg.GenesisFile, allowAutogenesis, os.LookupEnv)
+	if err != nil {
+		logger.Error("Failed to resolve genesis path", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	db, err := storage.NewLevelDB(cfg.DataDir)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to open database: %v", err))
+	}
+	defer db.Close()
+
+	privKey, err := loadValidatorKey(cfg, passSource.Get)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load validator key: %v", err))
+	}
+
+	trimmedGenesis := strings.TrimSpace(genesisPath)
+	if trimmedGenesis != "" {
+		spec, err := genesis.LoadGenesisSpec(trimmedGenesis)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to load genesis spec: %v", err))
+		}
+
+		if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+			panic(fmt.Sprintf("Failed to prepare data directory for genesis spec: %v", err))
+		}
+		resolvedPath := filepath.Join(cfg.DataDir, "genesis.resolved.json")
+		data, err := json.MarshalIndent(spec, "", "  ")
+		if err != nil {
+			panic(fmt.Sprintf("Failed to encode resolved genesis spec: %v", err))
+		}
+		if err := os.WriteFile(resolvedPath, data, 0o644); err != nil {
+			panic(fmt.Sprintf("Failed to write resolved genesis spec: %v", err))
+		}
+		genesisPath = resolvedPath
+	} else {
+		genesisPath = ""
+	}
+
+	peerstoreDir := filepath.Join(cfg.DataDir, "p2p")
+	if err := os.MkdirAll(peerstoreDir, 0o755); err != nil {
+		panic(fmt.Sprintf("Failed to prepare p2p directory: %v", err))
+	}
+	peerstorePath := filepath.Join(peerstoreDir, "peerstore")
+	peerstore, err := p2p.NewPeerstore(peerstorePath, 0, 0)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to open peerstore: %v", err))
+	}
+	defer peerstore.Close()
+
+	identityPath := filepath.Join(peerstoreDir, "node_key.json")
+	identity, err := p2p.LoadOrCreateIdentity(identityPath)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to load node identity: %v", err))
+	}
+
+	// 1. Create the core node.
+	node, err := core.NewNode(db, privKey, genesisPath, allowAutogenesis, *allowMigrateFlag)
+	if err != nil {
+		os.WriteFile("nhb_startup_err.log", []byte(fmt.Sprintf("%v", err)), 0644)
+		panic(fmt.Sprintf("Failed to create node: %v", err))
+	}
+
+	if err := node.SetGlobalConfig(cfg.Global); err != nil {
+		panic(fmt.Sprintf("Failed to apply global config: %v", err))
+	}
+	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
+	if cfg.QuorumCertActivationHeight > 0 {
+		// See config.Config.QuorumCertActivationHeight's doc comment --
+		// left unset (0) here means the NHB-TRIAGE-C1 quorum-certificate
+		// check stays disabled, exactly like every prior release. Enabling
+		// it is a deliberate, coordinated, every-validator-at-once decision
+		// made in config.toml, never inferred.
+		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	}
+	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
+	node.SetModulePauses(cfg.Global.Pauses)
+	if !cfg.Global.Pauses.Staking {
+		if onChainPaused, err := node.StakingPauseOnChain(); err != nil {
+			logger.Warn("failed to check on-chain staking pause state", slog.Any("error", err))
+		} else if onChainPaused {
+			logger.Warn("local config expects staking unpaused, but the network's last governance-set value is paused -- this validator enforces the on-chain value, not local config; resolve the mismatch via a real governance action if it is unintentional")
+		}
+	}
+	// Wires config.toml's [global.Quotas] into actual per-module rate/
+	// volume enforcement (StateProcessor.applyQuota, core/state_transition
+	// .go) -- previously only cmd/consensusd did this; cmd/nhb (this
+	// binary, what's actually deployed) loaded the config section into
+	// node.globalCfg.Quotas for read-back/display purposes only and never
+	// called SetModuleQuotas, so every module's quota check was a silent
+	// no-op regardless of what config.toml said. Mirrors cmd/consensusd/
+	// main.go's convertQuota + SetModuleQuotas call exactly.
+	node.SetModuleQuotas(map[string]nativecommon.Quota{
+		"lending":       convertModuleQuota(cfg.Global.Quotas.Lending),
+		"swap":          convertModuleQuota(cfg.Global.Quotas.Swap),
+		"escrow":        convertModuleQuota(cfg.Global.Quotas.Escrow),
+		"trade":         convertModuleQuota(cfg.Global.Quotas.Trade),
+		"loyalty":       convertModuleQuota(cfg.Global.Quotas.Loyalty),
+		"potso":         convertModuleQuota(cfg.Global.Quotas.POTSO),
+		"subscriptions": convertModuleQuota(cfg.Global.Quotas.Subscriptions),
+		"market":        convertModuleQuota(cfg.Global.Quotas.Market),
+	})
+
+	if err := node.SyncStakingParams(); err != nil {
+		panic(fmt.Sprintf("Failed to apply staking params: %v", err))
+	}
+	if err := node.ValidateStakingConfig(); err != nil {
+		panic(fmt.Sprintf("Failed to validate staking config: %v", err))
+	}
+
+	paymasterLimits, err := cfg.Global.PaymasterLimits()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse paymaster limits: %v", err))
+	}
+	node.SetPaymasterLimits(core.PaymasterLimits{
+		MerchantDailyCapWei: paymasterLimits.MerchantDailyCapWei,
+		DeviceDailyTxCap:    paymasterLimits.DeviceDailyTxCap,
+		GlobalDailyCapWei:   paymasterLimits.GlobalDailyCapWei,
+	})
+	autoTopUpCfg, err := cfg.Global.PaymasterAutoTopUpConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse paymaster auto top-up policy: %v", err))
+	}
+	autoPolicy := core.PaymasterAutoTopUpPolicy{
+		Enabled:        autoTopUpCfg.Enabled,
+		Token:          autoTopUpCfg.Token,
+		Cooldown:       autoTopUpCfg.Cooldown,
+		FundingAccount: autoTopUpCfg.FundingAccount,
+		Minter:         autoTopUpCfg.Minter,
+		Approver:       autoTopUpCfg.Approver,
+		ApproverRole:   autoTopUpCfg.ApproverRole,
+		MinterRole:     autoTopUpCfg.MinterRole,
+	}
+	if autoTopUpCfg.MinBalanceWei != nil {
+		autoPolicy.MinBalanceWei = new(big.Int).Set(autoTopUpCfg.MinBalanceWei)
+	}
+	if autoTopUpCfg.TopUpAmountWei != nil {
+		autoPolicy.TopUpAmountWei = new(big.Int).Set(autoTopUpCfg.TopUpAmountWei)
+	}
+	if autoTopUpCfg.DailyCapWei != nil {
+		autoPolicy.DailyCapWei = new(big.Int).Set(autoTopUpCfg.DailyCapWei)
+	}
+	node.SetPaymasterAutoTopUpPolicy(autoPolicy)
+
+	govPolicy, err := cfg.Governance.Policy()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse governance policy: %v", err))
+	}
+	node.SetGovernancePolicy(govPolicy)
+
+	potsoCfg, err := cfg.PotsoRewardConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse POTSO rewards config: %v", err))
+	}
+	if err := node.SetPotsoRewardConfig(potsoCfg); err != nil {
+		panic(fmt.Sprintf("Failed to apply POTSO rewards config: %v", err))
+	}
+	weightCfg, err := cfg.PotsoWeightConfig()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse POTSO weight config: %v", err))
+	}
+	if err := node.SetPotsoWeightConfig(weightCfg); err != nil {
+		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
+	}
+
+	node.SetLendingRiskParameters(lending.RiskParameters{
+		MaxLTV:               cfg.Lending.MaxLTVBps,
+		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
+		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
+		Oracle: lending.OracleConfig{
+			MaxAgeBlocks:    cfg.Lending.OracleMaxAgeBlocks,
+			MaxDeviationBps: cfg.Lending.OracleMaxDeviationBps,
+		},
+	})
+
+	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)
+
+	devCollectorStr := strings.TrimSpace(cfg.Lending.DeveloperFeeCollector)
+	var devCollector crypto.Address
+	if devCollectorStr != "" {
+		decoded, err := crypto.DecodeAddress(devCollectorStr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode lending developer fee collector: %v", err))
+		}
+		devCollector = decoded
+	} else if cfg.Lending.DeveloperFeeBps > 0 {
+		panic("Lending DeveloperFeeCollector must be configured when DeveloperFeeBps is non-zero")
+	}
+	node.SetLendingDeveloperFee(cfg.Lending.DeveloperFeeBps, devCollector)
+
+	routingCfg := cfg.Lending.CollateralRouting
+	var developerCollateral crypto.Address
+	if routingCfg.DeveloperBps > 0 {
+		addr := strings.TrimSpace(routingCfg.DeveloperAddress)
+		if addr == "" {
+			panic("Lending collateral routing requires DeveloperAddress when DeveloperBps is non-zero")
+		}
+		decoded, err := crypto.DecodeAddress(addr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode lending developer collateral address: %v", err))
+		}
+		developerCollateral = decoded
+	}
+	var protocolCollateral crypto.Address
+	if routingCfg.ProtocolBps > 0 {
+		addr := strings.TrimSpace(routingCfg.ProtocolAddress)
+		if addr == "" {
+			panic("Lending collateral routing requires ProtocolAddress when ProtocolBps is non-zero")
+		}
+		decoded, err := crypto.DecodeAddress(addr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode lending protocol collateral address: %v", err))
+		}
+		protocolCollateral = decoded
+	}
+	totalRoutingBps := routingCfg.LiquidatorBps + routingCfg.DeveloperBps + routingCfg.ProtocolBps
+	if totalRoutingBps > 10_000 {
+		panic("Lending collateral routing shares must not exceed 10000 basis points")
+	}
+	node.SetLendingCollateralRouting(lending.CollateralRouting{
+		LiquidatorBps:   routingCfg.LiquidatorBps,
+		DeveloperBps:    routingCfg.DeveloperBps,
+		DeveloperTarget: developerCollateral,
+		ProtocolBps:     routingCfg.ProtocolBps,
+		ProtocolTarget:  protocolCollateral,
+	})
+
+	subscriptionsTreasuryStr := strings.TrimSpace(cfg.Subscriptions.Treasury)
+	var subscriptionsTreasury [20]byte
+	if subscriptionsTreasuryStr != "" {
+		decoded, err := crypto.DecodeAddress(subscriptionsTreasuryStr)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to decode subscriptions treasury address: %v", err))
+		}
+		copy(subscriptionsTreasury[:], decoded.Bytes())
+	} else if cfg.Subscriptions.ManagementFeeBps > 0 {
+		panic("Subscriptions Treasury must be configured when ManagementFeeBps is non-zero")
+	}
+	if err := node.SetSubscriptionsConfig(subscriptions.Config{
+		ManagementFeeBps:     cfg.Subscriptions.ManagementFeeBps,
+		ManagementFeeCapBps:  cfg.Subscriptions.ManagementFeeCapBps,
+		Treasury:             subscriptionsTreasury,
+		MaxRetries:           cfg.Subscriptions.MaxRetries,
+		RetryIntervalSeconds: cfg.Subscriptions.RetryIntervalSeconds,
+	}); err != nil {
+		panic(fmt.Sprintf("Failed to configure subscriptions engine: %v", err))
+	}
+
+	swapCfg := cfg.SwapSettings()
+	node.SetSwapConfig(swapCfg)
+	manualOracle := swap.NewManualOracle()
+	aggregator := swap.NewOracleAggregator(swapCfg.OraclePriority, swapCfg.MaxQuoteAge())
+	aggregator.SetTWAPWindow(swapCfg.TwapWindow())
+	aggregator.SetTWAPSampleCap(swapCfg.TwapSampleCap)
+	aggregator.SetPriority(swapCfg.OraclePriority)
+	aggregator.Register("manual", manualOracle)
+	npAPIKey := strings.TrimSpace(os.Getenv("NHB_NOWPAYMENTS_API_KEY"))
+	aggregator.Register("nowpayments", swap.NewNowPaymentsOracle(nil, "", npAPIKey))
+	// Neither NHB nor ZNHB has a public CoinGecko listing, so both are
+	// intentionally left out of this id map: CoinGeckoOracle.assetID() only
+	// resolves symbols with an explicit entry here, so quotes for either
+	// fail fast with "unmapped asset" and the aggregator falls through to
+	// the next configured oracle source instead of guessing a nonexistent
+	// id and making a doomed network call. An earlier version of this map
+	// pointed "NHB" at CoinGecko's "tether" id as a stand-in -- that made a
+	// real API call but silently returned Tether's market price mislabeled
+	// as NHB's, which is worse than an honest peg. NHB is a private-chain
+	// gas unit with no external market at all; it is pegged to $1 by
+	// design (see the manual oracle seed below), not floating, so there is
+	// nothing for an external price source to legitimately report.
+	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{}))
+	_ = manualOracle.SetDecimal("USD", "NHB", "1.0", time.Now().UTC())
+	_ = manualOracle.SetDecimal("USD", "ZNHB", resolveZNHBOraclePrice(), time.Now().UTC())
+	node.SetSwapOracle(aggregator)
+	node.SetSwapManualOracle(manualOracle)
+	sanctionsParams, err := swapCfg.Sanctions.Parameters()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse swap sanctions config: %v", err))
+	}
+	node.SetSwapSanctionsChecker(sanctionsParams.Checker())
+
+	// 2. Create the P2P server, passing the node as the MessageHandler.
+	seedStrings := make([]string, 0, len(cfg.P2P.Seeds))
+	seedOrigins := make([]p2p.SeedOrigin, 0, len(cfg.P2P.Seeds))
+	seenSeeds := make(map[string]struct{})
+	for _, raw := range cfg.P2P.Seeds {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		nodePart, addrPart, found := strings.Cut(trimmed, "@")
+		if !found {
+			logger.Warn("Ignoring seed due to missing node ID",
+				logging.MaskField("seed", trimmed),
+				slog.String("reason", "missing node id"))
+			continue
+		}
+		node := strings.TrimSpace(nodePart)
+		addr := strings.TrimSpace(addrPart)
+		if node == "" || addr == "" {
+			logger.Warn("Ignoring seed due to empty components",
+				logging.MaskField("seed", trimmed),
+				slog.String("reason", "empty components"))
+			continue
+		}
+		key := strings.ToLower(node) + "@" + strings.ToLower(addr)
+		if _, ok := seenSeeds[key]; ok {
+			continue
+		}
+		seenSeeds[key] = struct{}{}
+		seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", node, addr))
+		seedOrigins = append(seedOrigins, p2p.SeedOrigin{NodeID: node, Address: addr, Source: "config"})
+	}
+
+	var seedRegistry *seeds.Registry
+	if rawRegistry, ok, err := node.NetworkSeedsParam(); err != nil {
+		logger.Error("Failed to load network seeds", slog.Any("error", err))
+	} else if ok {
+		registry, parseErr := seeds.Parse(rawRegistry)
+		if parseErr != nil {
+			logger.Error("Failed to parse network seeds", slog.Any("error", parseErr))
+		} else {
+			seedRegistry = registry
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			resolved, resolveErr := registry.Resolve(ctx, time.Now(), seeds.DefaultResolver())
+			cancel()
+			if resolveErr != nil {
+				logger.Error("DNS seed resolution failed", slog.Any("error", resolveErr))
+			}
+			for _, entry := range resolved {
+				addr := strings.TrimSpace(entry.Address)
+				key := strings.ToLower(entry.NodeID) + "@" + strings.ToLower(addr)
+				if _, exists := seenSeeds[key]; exists {
+					continue
+				}
+				seenSeeds[key] = struct{}{}
+				seedStrings = append(seedStrings, fmt.Sprintf("%s@%s", entry.NodeID, addr))
+				seedOrigins = append(seedOrigins, p2p.SeedOrigin{
+					NodeID:    entry.NodeID,
+					Address:   addr,
+					Source:    entry.Source,
+					NotBefore: entry.NotBefore,
+					NotAfter:  entry.NotAfter,
+				})
+			}
+		}
+	}
+
+	pexEnabled := true
+	if cfg.P2P.PEX != nil {
+		pexEnabled = *cfg.P2P.PEX
+	}
+	p2pCfg := p2p.ServerConfig{
+		ListenAddress:    cfg.ListenAddress,
+		ExternalAddress:  cfg.P2P.ExternalAddress,
+		ChainID:          node.ChainID(),
+		GenesisHash:      node.GenesisHash(),
+		ClientVersion:    cfg.ClientVersion,
+		MaxPeers:         cfg.MaxPeers,
+		MaxInbound:       cfg.MaxInbound,
+		MaxOutbound:      cfg.MaxOutbound,
+		MinPeers:         cfg.MinPeers,
+		OutboundPeers:    cfg.OutboundPeers,
+		Bootnodes:        append([]string{}, cfg.Bootnodes...),
+		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
+		Seeds:            append([]string{}, seedStrings...),
+		SeedOrigins:      append([]p2p.SeedOrigin{}, seedOrigins...),
+		SeedRegistry:     seedRegistry,
+		SeedResolver:     seeds.DefaultResolver(),
+		PeerBanDuration:  time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
+		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
+		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
+		MaxMessageBytes:  cfg.MaxMsgBytes,
+		RateMsgsPerSec:   cfg.P2P.RateMsgsPerSec,
+		RateBurst:        cfg.P2P.Burst,
+		BanScore:         cfg.P2P.BanScore,
+		GreyScore:        cfg.P2P.GreyScore,
+		HandshakeTimeout: time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
+		PingInterval:     time.Duration(cfg.P2P.PingIntervalSeconds) * time.Second,
+		PingTimeout:      time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
+		DialBackoff:      time.Duration(cfg.P2P.DialBackoffSeconds) * time.Second,
+		EnablePEX:        pexEnabled,
+	}
+	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
+	p2pServer.SetPeerstore(peerstore)
+	node.SetNetworkBroadcaster(p2pServer)
+
+	// 3. Create the BFT engine, passing the node (as NodeInterface) and P2P server (as Broadcaster).
+	bftEngine := bft.NewEngine(node, privKey, p2pServer, bft.WithTimeouts(bft.TimeoutConfig{
+		Proposal:  cfg.Consensus.ProposalTimeout,
+		Prevote:   cfg.Consensus.PrevoteTimeout,
+		Precommit: cfg.Consensus.PrecommitTimeout,
+		Commit:    cfg.Consensus.CommitTimeout,
+	}))
+
+	// 4. Set the fully configured BFT engine on the node.
+	node.SetBftEngine(bftEngine)
+	node.SetExternalCommitNotifier(bftEngine.NotifyExternalCommit)
+
+	// --- Server Startup ---
+	networkAdapter := &p2pNetworkAdapter{server: p2pServer}
+	routeLimits := make(map[string]rpc.RouteRateLimitConfig, len(cfg.RPCRouteRateLimits))
+	for method, limit := range cfg.RPCRouteRateLimits {
+		routeLimits[method] = rpc.RouteRateLimitConfig{
+			MaxTxPerWindow:        limit.MaxTxPerWindow,
+			MaxTxPerIP:            limit.MaxTxPerIP,
+			MaxTxPerIdentity:      limit.MaxTxPerIdentity,
+			MaxTxPerChain:         limit.MaxTxPerChain,
+			MaxTxPerIdentityChain: limit.MaxTxPerIdentityChain,
+		}
+	}
+	swapSecrets := make(map[string]string, len(cfg.RPCSwapAuth.Secrets))
+	for key, secret := range cfg.RPCSwapAuth.Secrets {
+		trimmedKey := strings.TrimSpace(key)
+		trimmedSecret := strings.TrimSpace(secret)
+		if trimmedKey == "" || trimmedSecret == "" {
+			continue
+		}
+		swapSecrets[trimmedKey] = trimmedSecret
+	}
+	partnerLimits := make(map[string]int, len(cfg.RPCSwapAuth.PartnerRateLimits))
+	for key, limit := range cfg.RPCSwapAuth.PartnerRateLimits {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" || limit <= 0 {
+			continue
+		}
+		partnerLimits[trimmedKey] = limit
+	}
+	var swapPersistence gatewayauth.NoncePersistence
+	if len(swapSecrets) > 0 {
+		backend := strings.ToLower(strings.TrimSpace(cfg.RPCSwapAuth.Persistence.Backend))
+		switch backend {
+		case "leveldb":
+			path := strings.TrimSpace(cfg.RPCSwapAuth.Persistence.LevelDBPath)
+			if path == "" {
+				logger.Error("swap RPC auth persistence path required", slog.String("backend", backend))
+				os.Exit(1)
+			}
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cfg.DataDir, path)
+			}
+			store, err := gatewayauth.NewLevelDBNoncePersistence(path)
+			if err != nil {
+				logger.Error("failed to initialise swap nonce persistence", slog.Any("error", err))
+				os.Exit(1)
+			}
+			swapPersistence = store
+			if closer, ok := swapPersistence.(interface{ Close() error }); ok {
+				defer closer.Close()
+			}
+		case "", "none":
+			logger.Error("swap RPC auth persistence backend required when secrets are configured")
+			os.Exit(1)
+		default:
+			logger.Error("unsupported swap RPC auth persistence backend", slog.String("backend", backend))
+			os.Exit(1)
+		}
+	}
+	swapAuthCfg := rpc.SwapAuthConfig{
+		Secrets:              swapSecrets,
+		AllowedTimestampSkew: time.Duration(cfg.RPCSwapAuth.AllowedTimestampSkewSecs) * time.Second,
+		NonceTTL:             time.Duration(cfg.RPCSwapAuth.NonceTTLSeconds) * time.Second,
+		NonceCapacity:        cfg.RPCSwapAuth.NonceCapacity,
+		RateLimitWindow:      time.Duration(cfg.RPCSwapAuth.RateLimitWindowSeconds) * time.Second,
+		PartnerRateLimits:    partnerLimits,
+		Persistence:          swapPersistence,
+	}
+	rpcServer, err := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
+		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
+		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
+		AllowlistCIDRs:    append([]string{}, cfg.RPCAllowlistCIDRs...),
+		ProxyHeaders: rpc.ProxyHeadersConfig{
+			XForwardedFor: rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XForwardedFor)),
+			XRealIP:       rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XRealIP)),
+		},
+		JWT: rpc.JWTConfig{
+			Enable:           cfg.RPCJWT.Enable,
+			Alg:              cfg.RPCJWT.Alg,
+			HSSecretEnv:      cfg.RPCJWT.HSSecretEnv,
+			RSAPublicKeyFile: cfg.RPCJWT.RSAPublicKeyFile,
+			Issuer:           cfg.RPCJWT.Issuer,
+			Audience:         append([]string{}, cfg.RPCJWT.Audience...),
+			MaxSkewSeconds:   cfg.RPCJWT.MaxSkewSeconds,
+		},
+		ReadHeaderTimeout:        time.Duration(cfg.RPCReadHeaderTimeout) * time.Second,
+		ReadTimeout:              time.Duration(cfg.RPCReadTimeout) * time.Second,
+		WriteTimeout:             time.Duration(cfg.RPCWriteTimeout) * time.Second,
+		IdleTimeout:              time.Duration(cfg.RPCIdleTimeout) * time.Second,
+		MaxTxPerWindow:           cfg.RPCMaxTxPerWindow,
+		MaxTxPerIP:               cfg.RPCMaxTxPerIP,
+		MaxTxPerIdentity:         cfg.RPCMaxTxPerIdentity,
+		MaxTxPerChain:            cfg.RPCMaxTxPerChain,
+		MaxTxPerIdentityChain:    cfg.RPCMaxTxPerIdentityChain,
+		RouteRateLimits:          routeLimits,
+		RateLimitWindow:          time.Duration(cfg.RPCRateLimitWindow) * time.Second,
+		CallerMetadataMaxTTL:     time.Duration(cfg.RPCCallerMetadataMaxTTL) * time.Second,
+		TLSCertFile:              cfg.RPCTLSCertFile,
+		TLSKeyFile:               cfg.RPCTLSKeyFile,
+		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
+		AllowInsecure:            cfg.RPCAllowInsecure,
+		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
+		SwapAuth:                 swapAuthCfg,
+	})
+	if err != nil {
+		logger.Error("failed to initialise RPC server", slog.Any("error", err))
+		os.Exit(1)
+	}
+	if err := configureStableTradingEngine(rpcServer, logger); err != nil {
+		logger.Error("failed to configure stable trading engine", slog.Any("error", err))
+		os.Exit(1)
+	}
+	rpcErrCh := make(chan error, 1)
+	go func() {
+		err := rpcServer.Start(cfg.RPCAddress)
+		rpcErrCh <- err
+		close(rpcErrCh)
+	}()
+
+	if err := waitForRPCStartup(cfg.RPCAddress, rpcErrCh, 5*time.Second); err != nil {
+		logger.Error("RPC server failed to start", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	go func() {
+		if err, ok := <-rpcErrCh; ok && err != nil {
+			logger.Error("RPC server terminated", slog.Any("error", err))
+		}
+	}()
+
+	go p2pServer.Start()
+	go startValidatorHeartbeatLoop(node, privKey, logger)
+
+	logger.Info("NHBCoin node initialised and running")
+	go node.StartConsensus()
+	select {}
+}
+
+func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, logger *slog.Logger) {
+	if node == nil || privKey == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "validator"
+	}
+	validatorAddr := privKey.PubKey().Address()
+	var validatorAddrBytes [20]byte
+	copy(validatorAddrBytes[:], validatorAddr.Bytes())
+	deviceID := fmt.Sprintf("%s-%x", strings.ToLower(strings.TrimSpace(host)), validatorAddr.Bytes()[:4])
+	token, err := node.EngagementRegisterDevice(validatorAddrBytes, deviceID)
+	if err != nil {
+		logger.Warn("validator heartbeat registration failed", slog.Any("error", err))
+		return
+	}
+
+	// lastAttempt tracks, purely in-process, the last time this loop
+	// actually called EngagementSubmitHeartbeat -- independent of whether
+	// that attempt ends up mined on-chain. It complements
+	// node.EngagementValidatorHeartbeatDue's on-chain-driven check: if a
+	// submitted heartbeat's on-chain EngagementLastHeartbeat is slow to
+	// advance (for example due to ordinary consensus/mining latency),
+	// EngagementValidatorHeartbeatDue alone would keep reporting "due" on
+	// every tick once its threshold is first crossed, causing this loop to
+	// retry at the ticker's raw ~60s cadence -- which would re-expose the
+	// exact second-rounding jitter race this loop exists to avoid, just
+	// measured against our own last attempt instead of the account's
+	// on-chain timestamp. Requiring both checks to agree keeps every real
+	// attempt spaced by at least the interval-plus-margin regardless of
+	// how quickly heartbeats actually land on-chain. A zero value means
+	// "no attempt yet this process run" and never blocks the first one.
+	var lastAttempt time.Time
+
+	submit := func() {
+		now := time.Now().UTC()
+		minElapsed := node.EngagementHeartbeatInterval() + core.HeartbeatSubmissionMargin
+		if !lastAttempt.IsZero() && now.Sub(lastAttempt) < minElapsed {
+			return
+		}
+		due, err := node.EngagementValidatorHeartbeatDue(validatorAddrBytes[:], now)
+		if err != nil {
+			logger.Warn("validator heartbeat readiness check failed", slog.Any("error", err))
+			return
+		}
+		if !due {
+			return
+		}
+		lastAttempt = now
+		// Pass the timestamp explicitly (never 0) so the value baked into
+		// the signed transaction is exactly the "now" this readiness
+		// check already validated against real on-chain state, rather
+		// than letting the local engagement manager independently
+		// recompute wall-clock time and gate on its own ephemeral,
+		// restart-resetting bookkeeping. See
+		// Node.EngagementValidatorHeartbeatDue's doc comment for why that
+		// ephemeral bookkeeping is unreliable for this specific caller.
+		if _, err := node.EngagementSubmitHeartbeat(deviceID, token, now.Unix()); err != nil {
+			logger.Warn("validator heartbeat submission failed", slog.Any("error", err))
+		}
+	}
+
+	time.AfterFunc(5*time.Second, submit)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		submit()
+	}
+}
+
+// configureStableTradingEngine wires the RPC server's stable-quote surface
+// (rpc/swap_stable_handlers.go) to whatever implements stablequote.Engine
+// -- since 2026-09-17 that's an HTTP client talking to a separate
+// stable-quote-service process (see nhbchain-services' cmd/stable-quote-
+// service), not an in-process engine. The engine's actual reservation/
+// ledger/cash-out logic, and the price-refresh loop that used to run
+// right here, moved there along with the rest of this repo's off-chain
+// money-orchestration code -- see nhbchain/stablequote's package doc for
+// the full boundary this exists to enforce. This function now only
+// builds the wire-shape asset list and points the client at that
+// service; nothing here touches money-movement logic directly anymore.
+func configureStableTradingEngine(rpcServer *rpc.Server, logger *slog.Logger) error {
+	if rpcServer == nil {
+		return nil
+	}
+	assets := []stablequote.Asset{
+		{
+			Symbol:         "NHB",
+			BasePair:       "USD",
+			QuotePair:      "NHB",
+			QuoteTTL:       30 * time.Second,
+			MaxSlippageBps: 250,
+			SoftInventory:  1_000_000_000,
+		},
+		{
+			Symbol:         "ZNHB",
+			BasePair:       "USD",
+			QuotePair:      "ZNHB",
+			QuoteTTL:       30 * time.Second,
+			MaxSlippageBps: 500,
+			SoftInventory:  1_000_000_000,
+		},
+	}
+	limits := stablequote.Limits{DailyCap: 1_000_000_000}
+
+	baseURL := strings.TrimSpace(os.Getenv(stableQuoteURLEnv))
+	if baseURL == "" {
+		baseURL = defaultStableQuoteURL
+	}
+	client := stablequote.NewHTTPClient(baseURL, 10*time.Second)
+	rpcServer.ConfigureStableEngine(client, limits, assets, time.Now)
+	if logger != nil {
+		logger.Info("stable trading engine configured via stable-quote-service", slog.String("url", baseURL))
+	}
+	return nil
+}
+
+type envLookupFunc func(string) (string, bool)
+
+func resolveGenesisPath(cliPath string, cfgPath string, allowAutogenesis bool, lookup envLookupFunc) (string, error) {
+	trimmedCLI := strings.TrimSpace(cliPath)
+	if trimmedCLI != "" {
+		return trimmedCLI, nil
+	}
+
+	if lookup != nil {
+		if value, ok := lookup(genesisPathEnv); ok {
+			trimmedEnv := strings.TrimSpace(value)
+			if trimmedEnv != "" {
+				return trimmedEnv, nil
+			}
+		}
+	}
+
+	trimmedCfg := strings.TrimSpace(cfgPath)
+	if trimmedCfg != "" {
+		if _, err := os.Stat(trimmedCfg); os.IsNotExist(err) && !allowAutogenesis {
+			fmt.Printf("Default genesis file %s not found, writing embedded mainnet genesis...\n", trimmedCfg)
+			if err := os.MkdirAll(filepath.Dir(trimmedCfg), 0755); err != nil {
+				return "", fmt.Errorf("failed to create genesis parent directory: %w", err)
+			}
+			if err := os.WriteFile(trimmedCfg, config.MainnetGenesis, 0644); err != nil {
+				return "", fmt.Errorf("failed to write embedded genesis: %w", err)
+			}
+		}
+		return trimmedCfg, nil
+	}
+
+	if allowAutogenesis {
+		return "", nil
+	}
+
+	return "", fmt.Errorf("no genesis file provided; supply one via --genesis, %s, or config, or explicitly enable autogenesis (--allow-autogenesis / %s / config)", genesisPathEnv, allowAutogenesisEnv)
+}
+
+func resolveAllowAutogenesis(cfgValue bool, cliSet bool, cliValue bool, lookup envLookupFunc) (bool, error) {
+	allow := cfgValue
+
+	if lookup != nil {
+		if value, ok := lookup(allowAutogenesisEnv); ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				parsed, err := strconv.ParseBool(trimmed)
+				if err != nil {
+					return false, fmt.Errorf("invalid %s value %q: %w", allowAutogenesisEnv, trimmed, err)
+				}
+				allow = parsed
+			}
+		}
+	}
+
+	if cliSet {
+		allow = cliValue
+	}
+
+	return allow, nil
+}
+
+func resolveZNHBOraclePrice() string {
+	trimmed := strings.TrimSpace(os.Getenv(znhbOraclePriceEnv))
+	if trimmed == "" {
+		return "0.05"
+	}
+	if _, ok := new(big.Rat).SetString(trimmed); !ok {
+		return "0.05"
+	}
+	return trimmed
+}
+
+func flagWasProvided(name string) bool {
+	provided := false
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
+}
+
+func waitForRPCStartup(addr string, errCh <-chan error, timeout time.Duration) error {
+	dialAddr := dialAddressFor(addr)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err, ok := <-errCh:
+			if !ok {
+				return fmt.Errorf("RPC server terminated before startup confirmation")
+			}
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("RPC server exited before startup confirmation")
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", dialAddr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+
+		select {
+		case err, ok := <-errCh:
+			if !ok {
+				return fmt.Errorf("RPC server terminated before startup confirmation")
+			}
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("RPC server exited before startup confirmation")
+		case <-ticker.C:
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for RPC server to start on %s", addr)
+		}
+	}
+}
+
+func dialAddressFor(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func loadValidatorKey(cfg *config.Config, resolvePassphrase func() (string, error)) (*crypto.PrivateKey, error) {
+	if cfg.ValidatorKMSURI != "" || cfg.ValidatorKMSEnv != "" {
+		return loadFromKMS(cfg)
+	}
+
+	if cfg.ValidatorKeystorePath == "" {
+		return nil, fmt.Errorf("validator keystore path not configured")
+	}
+
+	if resolvePassphrase == nil {
+		return nil, fmt.Errorf("validator keystore passphrase required; set %s or run interactively", validatorPassEnv)
+	}
+
+	passphrase, err := resolvePassphrase()
+	if err != nil {
+		return nil, fmt.Errorf("failed to obtain validator keystore passphrase: %w", err)
+	}
+	if strings.TrimSpace(passphrase) == "" {
+		return nil, fmt.Errorf("validator keystore passphrase cannot be empty")
+	}
+
+	key, err := crypto.LoadFromKeystore(cfg.ValidatorKeystorePath, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("unable to decrypt keystore %s: %w", cfg.ValidatorKeystorePath, err)
+	}
+	return key, nil
+}
+
+type p2pNetworkAdapter struct {
+	server *p2p.Server
+}
+
+func (a *p2pNetworkAdapter) NetworkView(ctx context.Context) (p2p.NetworkView, []string, error) {
+	if a == nil || a.server == nil {
+		return p2p.NetworkView{}, nil, fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.SnapshotNetwork(), a.server.ListenAddresses(), nil
+}
+
+func (a *p2pNetworkAdapter) NetworkPeers(ctx context.Context) ([]p2p.PeerNetInfo, error) {
+	if a == nil || a.server == nil {
+		return nil, fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.NetPeers(), nil
+}
+
+func (a *p2pNetworkAdapter) Dial(ctx context.Context, target string) error {
+	if a == nil || a.server == nil {
+		return fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.DialPeer(target)
+}
+
+func (a *p2pNetworkAdapter) Ban(ctx context.Context, nodeID string, duration time.Duration) error {
+	if a == nil || a.server == nil {
+		return fmt.Errorf("p2p server unavailable")
+	}
+	return a.server.BanPeer(nodeID, duration)
+}
+
+func loadFromKMS(cfg *config.Config) (*crypto.PrivateKey, error) {
+	if envName := cfg.ValidatorKMSEnv; envName != "" {
+		return keyFromEnv(envName)
+	}
+
+	if uri := cfg.ValidatorKMSURI; uri != "" {
+		parsed, err := url.Parse(uri)
+		if err != nil {
+			return nil, fmt.Errorf("invalid KMS URI %q: %w", uri, err)
+		}
+
+		switch parsed.Scheme {
+		case "env":
+			target := parsed.Host
+			if target == "" {
+				target = strings.TrimPrefix(parsed.Path, "/")
+			}
+			if target == "" {
+				return nil, fmt.Errorf("invalid env URI %q", uri)
+			}
+			return keyFromEnv(target)
+		default:
+			return nil, fmt.Errorf("unsupported KMS URI scheme %q", parsed.Scheme)
+		}
+	}
+
+	return nil, fmt.Errorf("no KMS configuration provided")
+}
+
+func keyFromEnv(name string) (*crypto.PrivateKey, error) {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil, fmt.Errorf("environment variable %q not set", name)
+	}
+	return parsePrivateKeyMaterial(value)
+}
+
+func parsePrivateKeyMaterial(material string) (*crypto.PrivateKey, error) {
+	trimmed := strings.TrimSpace(material)
+	trimmed = strings.TrimPrefix(trimmed, "0x")
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty private key material")
+	}
+	bytes, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hex private key: %w", err)
+	}
+	return crypto.PrivateKeyFromBytes(bytes)
+}

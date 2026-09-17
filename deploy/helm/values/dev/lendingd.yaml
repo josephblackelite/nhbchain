@@ -1,0 +1,9 @@
+image:
+  tag: dev
+env:
+  - name: NHB_ENV
+    value: dev
+config:
+  content: |
+    listen: ":50053"
+# lendingd preview – override replicaCount to 1+ to enable once stable

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "p2pd.fullname" . }}
+  labels:
+    {{- include "p2pd.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: p2p
+      port: {{ .Values.service.ports.p2p }}
+      targetPort: p2p
+    - name: grpc
+      port: {{ .Values.service.ports.grpc }}
+      targetPort: grpc
+  selector:
+    app.kubernetes.io/name: {{ include "p2pd.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}

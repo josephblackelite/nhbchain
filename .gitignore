@@ -1,0 +1,119 @@
+# Build artifacts
+/bin/
+/build/
+/dist/
+/out/
+.next/
+node_modules/
+*.exe
+*.test
+*.out
+
+# Go workspace/vendor (if you vendor, you can remove this)
+vendor/
+
+# Runtime / DB state (leveldb/rocksdb/bolt/etc.)
+nhb-data/
+nhb-data-peer/
+nhb-data-mainnet/
+*.db
+*.sqlite
+*.sqlite3
+**/CURRENT
+**/LOCK
+**/LOG
+**/LOG.old
+**/MANIFEST-*
+**/*.sst
+**/*.ldb
+
+# Wallet / CLI secrets
+wallet.key
+wallet-*.key
+*.wallet.key
+*.wallet
+*.mnemonic
+validator-local.keystore
+*.keystore
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.secret
+*.token
+*.jwt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+config-win.toml
+config/local-genesis.json
+nhb-data-local/p2p/node_key.json
+nhb-data-local/000001.log
+nhb-data-local/p2p/peerstore/000001.log
+go.work.sum
+
+# Environments
+.env
+.env.*
+!.env.example
+
+# Internal Mainnet Planning and Audits
+docs/2026-0*-report.md
+docs/2026-0*-mainnet-blueprint.md
+docs/2026-0*-mainnet-task-list.md
+docs/aprilaudit/
+docs/claude.md
+docs/nhbgtm2026.md
+docs/issue30.md
+docs/audit/history/
+docs/deploy/live-rollout-todo.md
+docs/L1_NETWORK_MASTER_PLAYBOOK.md
+audit/*
+!audit/.gitkeep
+ops/audit-pack/seeds-fixtures/
+nhbcoin_economic_engine.md
+.cursorrules
+nhbchain.pem
+codex-audit-april-2026.md
+NHBChain Marketing.txt
+token.txt
+KEYS & ENODE - SUNDAY 14-3.txt
+cmd/nhb/nhb_startup_err.log
+node.log
+build_err.txt
+nowpayments.txt
+adminwallet.txt
+NHBChain Observed Issues.txt
+
+# Ad hoc production incident-response snapshots -- forensic artifacts that
+# belong on the server they were captured from, never in source control.
+live-*.tar
+live-*.tar.gz
+.gitignore
+
+# AI-session continuity notes -- internal working state, not documentation.
+# Never track: same reasoning as .cursorrules/docs/aprilaudit above.
+CONTINUE.md
+
+# Living infra-hardening checklist -- names exact current gaps (open ports,
+# missing MFA, etc.) across every box. Publishing this would hand an
+# attacker a to-do list. Never track, same reasoning as CONTINUE.md above.
+SECURITY_HARDENING.md
+
+# Internal incident-response runbook -- references this session's own
+# private memory files by name and details the real 2026-09 key-compromise
+# incident. Same reasoning as SECURITY_HARDENING.md above: never track.
+INCIDENT_RESPONSE.md
+
+# Never commit deploy/state-sync archives or scratch artifacts (see the
+# 2026-09-17 incident: a bundled deploy tarball containing real key
+# material sat in this repo's history for 5 months before being found).
+tmp-*.tgz
+tmp-*.tar.gz
+tmp-*.toml
+tmp-recovery/
