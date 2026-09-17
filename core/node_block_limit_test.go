@@ -79,6 +79,53 @@ func TestCreateBlockUsesAllTransactionsWhenCapUnchanged(t *testing.T) {
 	}
 }
 
+// NHB-AUDIT-R3: CreateBlock clamped its OWN proposals to Blocks.MaxTxs, but
+// ValidateBlock/CommitBlock -- which run against a block a PEER proposed or
+// a synced block -- never enforced the same cap before running
+// computeDependencyGraph's pairwise conflict comparison. A malicious
+// proposer or sync peer could submit a block far exceeding MaxTxs and force
+// every validator to pay that disproportionate cost. This test builds an
+// honestly-formed block while the cap is generous, then lowers the cap and
+// proves both entry points now reject it outright instead of running the
+// scheduler.
+func TestValidateAndCommitBlockRejectOversizedReceivedBlock(t *testing.T) {
+	node := newTestNode(t)
+
+	cfg := node.globalConfigSnapshot()
+	cfg.Blocks.MaxTxs = 5
+	if err := node.SetGlobalConfig(cfg); err != nil {
+		t.Fatalf("set global config (generous cap): %v", err)
+	}
+
+	txs := []*types.Transaction{
+		buildIdentityRegistrationTx(t, node, "oversized-0"),
+		buildIdentityRegistrationTx(t, node, "oversized-1"),
+		buildIdentityRegistrationTx(t, node, "oversized-2"),
+	}
+	block, err := node.CreateBlock(txs)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if len(block.Transactions) != len(txs) {
+		t.Fatalf("expected the honestly-built block to carry all %d transactions, got %d", len(txs), len(block.Transactions))
+	}
+
+	cfg.Blocks.MaxTxs = 2
+	if err := node.SetGlobalConfig(cfg); err != nil {
+		t.Fatalf("set global config (lowered cap): %v", err)
+	}
+
+	if err := node.ValidateBlock(block); err == nil {
+		t.Fatalf("expected ValidateBlock to reject a block exceeding the configured MaxTxs")
+	}
+	if err := node.CommitBlock(block); err == nil {
+		t.Fatalf("expected CommitBlock to reject a block exceeding the configured MaxTxs")
+	}
+	if node.GetHeight() != 0 {
+		t.Fatalf("expected the oversized block to never commit, height is %d", node.GetHeight())
+	}
+}
+
 func buildIdentityRegistrationTx(t *testing.T, node *Node, username string) *types.Transaction {
 	t.Helper()
 	key, err := crypto.GeneratePrivateKey()
