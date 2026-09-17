@@ -191,6 +191,17 @@ type parsedSwapRiskParams struct {
 	redeemPerAddressMonthlyCapWei *big.Int
 }
 
+// parsedRedemptionFeeParams holds a ProposalKindRedemptionFeeParams
+// payload's fee rate plus its floor/cap already parsed into big.Ints,
+// alongside the original payload for its Memo field -- mirrors
+// parsedSwapRiskParams's payload+derived-value shape.
+type parsedRedemptionFeeParams struct {
+	payload RedemptionFeeParamsPayload
+
+	feeFloorWei *big.Int
+	feeCapWei   *big.Int
+}
+
 // parsedLendingRateSchedule holds a validated ProposalKindLendingRateSchedule
 // payload, alongside the re-serialized JSON that will be persisted verbatim
 // via ParamStoreSet (re-serialized, not the original payloadJSON, so the
@@ -1288,6 +1299,40 @@ func parseBuybackParamsPayload(payloadJSON string) (*BuybackParamsPayload, error
 	return &payload, nil
 }
 
+// parseRedemptionFeeParamsPayload validates a ProposalKindRedemptionFeeParams
+// payload. Follows ProposalKindSwapRiskParams's precedent of being
+// unconditionally available (not gated behind an engine-configured
+// allow-list) -- the safety of the proposal lives in the normal governance
+// quorum/threshold/timelock gate, exactly like every other dedicated
+// proposal kind. FeeFloorWei/FeeCapWei must each be non-negative and
+// FeeFloorWei <= FeeCapWei; a zero cap is rejected (that would mean "no
+// redemption fee ever collectible," which should be expressed as feeBps=0
+// with a real cap, not a zero cap masking a misconfiguration).
+func parseRedemptionFeeParamsPayload(payloadJSON string) (*parsedRedemptionFeeParams, error) {
+	var payload RedemptionFeeParamsPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("governance: invalid payload: %w", err)
+	}
+	if payload.FeeBps > uint32(maxBasisPoints) {
+		return nil, fmt.Errorf("governance: feeBps must be <= %d", maxBasisPoints)
+	}
+	floorWei, err := parseUintString(payload.FeeFloorWei)
+	if err != nil {
+		return nil, fmt.Errorf("governance: invalid feeFloorWei: %w", err)
+	}
+	capWei, err := parseUintString(payload.FeeCapWei)
+	if err != nil {
+		return nil, fmt.Errorf("governance: invalid feeCapWei: %w", err)
+	}
+	if capWei.Sign() <= 0 {
+		return nil, fmt.Errorf("governance: feeCapWei must be positive")
+	}
+	if floorWei.Cmp(capWei) > 0 {
+		return nil, fmt.Errorf("governance: feeFloorWei must be <= feeCapWei")
+	}
+	return &parsedRedemptionFeeParams{payload: payload, feeFloorWei: floorWei, feeCapWei: capWei}, nil
+}
+
 func (e *Engine) parseRoleAllowlistPayload(payloadJSON string) (*parsedRoleAllowlist, error) {
 	if len(e.allowedRoles) == 0 {
 		return nil, fmt.Errorf("governance: role allowlist proposals are disabled")
@@ -1496,6 +1541,35 @@ func (e *Engine) applySwapRiskParams(parsed *parsedSwapRiskParams) (map[string]i
 		"redeemPerTxMaxWei":             parsed.redeemPerTxMaxWei.String(),
 		"redeemPerAddressDailyCapWei":   parsed.redeemPerAddressDailyCapWei.String(),
 		"redeemPerAddressMonthlyCapWei": parsed.redeemPerAddressMonthlyCapWei.String(),
+	}
+	if strings.TrimSpace(parsed.payload.Memo) != "" {
+		detail["memo"] = strings.TrimSpace(parsed.payload.Memo)
+	}
+	return detail, nil
+}
+
+// applyRedemptionFeeParams persists a passed ProposalKindRedemptionFeeParams
+// proposal's fee rate plus its floor/cap via ParamStoreSet -- the bps field
+// via strconv.FormatUint (matching applyBuybackParams's basis-point
+// precedent), the floor/cap wei fields via big.Int.String() (matching
+// applySwapRiskParams's wei precedent).
+func (e *Engine) applyRedemptionFeeParams(parsed *parsedRedemptionFeeParams) (map[string]interface{}, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("governance: nil redemption fee params payload")
+	}
+	if err := e.state.ParamStoreSet(ParamKeyRedemptionFeeBps, []byte(strconv.FormatUint(uint64(parsed.payload.FeeBps), 10))); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(ParamKeyRedemptionFeeFloorWei, []byte(parsed.feeFloorWei.String())); err != nil {
+		return nil, err
+	}
+	if err := e.state.ParamStoreSet(ParamKeyRedemptionFeeCapWei, []byte(parsed.feeCapWei.String())); err != nil {
+		return nil, err
+	}
+	detail := map[string]interface{}{
+		"feeBps":      parsed.payload.FeeBps,
+		"feeFloorWei": parsed.feeFloorWei.String(),
+		"feeCapWei":   parsed.feeCapWei.String(),
 	}
 	if strings.TrimSpace(parsed.payload.Memo) != "" {
 		detail["memo"] = strings.TrimSpace(parsed.payload.Memo)
@@ -1860,6 +1934,10 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindSwapRiskParams:
 		if _, err := parseSwapRiskParamsPayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindRedemptionFeeParams:
+		if _, err := parseRedemptionFeeParamsPayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	case ProposalKindLendingRateSchedule:
@@ -2400,6 +2478,18 @@ func (e *Engine) Execute(proposalID uint64) error {
 			return err
 		}
 		for k, v := range swapRiskDetail {
+			detail[k] = v
+		}
+	case ProposalKindRedemptionFeeParams:
+		parsed, err := parseRedemptionFeeParamsPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		redemptionFeeDetail, err := e.applyRedemptionFeeParams(parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range redemptionFeeDetail {
 			detail[k] = v
 		}
 	case ProposalKindLendingRateSchedule:

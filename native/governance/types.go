@@ -241,6 +241,20 @@ const (
 	// margin -- but the chain enforces solvency via the aggregate cap
 	// regardless of what any schedule says.
 	ProposalKindLendingDepositRateSchedule = "policy.lendingDepositRateSchedule"
+	// ProposalKindRedemptionFeeParams adjusts the redeem-side (swap-out
+	// burn, TxTypeRedeemNHB) redemption fee policy -- the ad-valorem rate
+	// plus its floor/cap, native/swap.RedemptionFeeParameters -- via
+	// ParamStoreSet, following ProposalKindSwapRiskParams's precedent
+	// exactly. The fee itself is still charged off-chain by the payout
+	// service that executes the actual USDT transfer (the chain burns the
+	// full requested NHB amount and has no fee-deduction or payout-amount
+	// bookkeeping of its own -- see core/state_transition.go's
+	// applyRedeemNHB), but the RATE is governance-controlled on-chain so
+	// it's transparent, publicly queryable, and adjustable without
+	// redeploying or restarting that off-chain service. See
+	// core/swap_risk_params.go for the read side and
+	// native/swap/redemption_fee.go for the fee formula and its defaults.
+	ProposalKindRedemptionFeeParams = "policy.redemptionFeeParams"
 )
 
 const (
@@ -363,6 +377,17 @@ const (
 	// ProposalKindLendingDepositRateSchedule. See
 	// core/lending_rate_schedule.go for the read side.
 	ParamKeyLendingFixedTermDepositRateSchedule = "lending.fixedTerm.depositRateSchedule"
+	// ParamKeyRedemptionFeeBps controls the ad-valorem redemption fee rate,
+	// in basis points, applied to a redemption's off-chain USDT payout.
+	ParamKeyRedemptionFeeBps = "swap.redemption.feeBps"
+	// ParamKeyRedemptionFeeFloorWei controls the minimum fee charged on any
+	// redemption, regardless of how small feeBps alone would compute it as.
+	ParamKeyRedemptionFeeFloorWei = "swap.redemption.feeFloorWei"
+	// ParamKeyRedemptionFeeCapWei controls the maximum fee charged on any
+	// redemption, regardless of how large feeBps alone would compute it as
+	// -- this is what makes the effective rate decline on large redemptions,
+	// mirroring how Tether/Circle/Wise price large-value transfers.
+	ParamKeyRedemptionFeeCapWei = "swap.redemption.feeCapWei"
 )
 
 // defaultMinimumValidatorStakeWei is 10,000 ZNHB expressed in the same
@@ -480,6 +505,20 @@ type SwapRiskParamsPayload struct {
 	RedeemPerAddressDailyCapWei   string `json:"redeemPerAddressDailyCapWei"`
 	RedeemPerAddressMonthlyCapWei string `json:"redeemPerAddressMonthlyCapWei"`
 	Memo                          string `json:"memo,omitempty"`
+}
+
+// RedemptionFeeParamsPayload defines the expected schema for
+// ProposalKindRedemptionFeeParams proposals: the redeem-side ad-valorem
+// redemption fee rate plus its floor/cap, wei-denominated fields as decimal
+// integer strings (matching SwapRiskParamsPayload's convention). FeeBps must
+// be within [0, 10_000]; FeeFloorWei must be <= FeeCapWei. See
+// ProposalKindRedemptionFeeParams's doc comment for the full rationale and
+// native/swap/redemption_fee.go for the fee formula.
+type RedemptionFeeParamsPayload struct {
+	FeeBps      uint32 `json:"feeBps"`
+	FeeFloorWei string `json:"feeFloorWei"`
+	FeeCapWei   string `json:"feeCapWei"`
+	Memo        string `json:"memo,omitempty"`
 }
 
 // LendingTenureRate is one entry in a ProposalKindLendingRateSchedule
