@@ -93,13 +93,29 @@ type Position struct {
 	Account *AccountSnapshot `json:"account,omitempty"`
 }
 
-// AccountSnapshot captures on-ledger balances using decimal encoded strings.
+// AccountSnapshot captures on-ledger balances using decimal encoded
+// strings, matching rpc/lending_handlers.go's lendingAccountResult field
+// for field (NHB-AUDIT-S2): the previous shape (CollateralZNHB/
+// SupplyShares/DebtNHB/ScaledDebt) named fields the real
+// lending_getUserAccount response has never had, so every account query
+// silently decoded to an all-zero, all-empty position instead of erroring
+// or surfacing the real balances.
 type AccountSnapshot struct {
-	Address        string `json:"address,omitempty"`
-	CollateralZNHB string `json:"collateralZNHB"`
-	SupplyShares   string `json:"supplyShares"`
-	DebtNHB        string `json:"debtNHB"`
-	ScaledDebt     string `json:"scaledDebt,omitempty"`
+	Address            string            `json:"address,omitempty"`
+	Supplied           []AccountPosition `json:"supplied"`
+	Borrowed           []AccountPosition `json:"borrowed"`
+	CollateralZNHBWei  string            `json:"collateralZnhbWei"`
+	CollateralValueUsd string            `json:"collateralValueUsd"`
+	BorrowedValueUsd   string            `json:"borrowedValueUsd"`
+	RewardsWei         string            `json:"rewardsWei"`
+}
+
+// AccountPosition is a single per-pool supply or borrow entry within an
+// AccountSnapshot's Supplied/Borrowed arrays.
+type AccountPosition struct {
+	PoolID    string `json:"poolId"`
+	AmountWei string `json:"amountWei"`
+	ValueUsd  string `json:"valueUsd"`
 }
 
 // Health combines the market snapshot and user account used for risk checks.

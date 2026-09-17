@@ -587,10 +587,10 @@ func TestService_GetPosition(t *testing.T) {
 				t.Fatalf("expected empty market filter")
 			}
 			return engine.Position{Account: &engine.AccountSnapshot{
-				Address:        "  alice  ",
-				SupplyShares:   "  10  ",
-				DebtNHB:        "  2  ",
-				CollateralZNHB: "  6  ",
+				Address:           "  alice  ",
+				Supplied:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: "  10  "}},
+				Borrowed:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: "  2  "}},
+				CollateralZNHBWei: "  6  ",
 			}}, nil
 		}}}
 

@@ -369,13 +369,31 @@ func toProtoPosition(pos engine.Position) *lendingv1.AccountPosition {
 		return nil
 	}
 	account := pos.Account
+	supplied := sumPositionAmounts(account.Supplied)
+	borrowed := sumPositionAmounts(account.Borrowed)
 	return &lendingv1.AccountPosition{
 		Account:      strings.TrimSpace(account.Address),
-		Supplied:     normalizeAmount(account.SupplyShares),
-		Borrowed:     normalizeAmount(account.DebtNHB),
-		Collateral:   normalizeAmount(account.CollateralZNHB),
-		HealthFactor: computeHealthFactor(account.CollateralZNHB, account.DebtNHB),
+		Supplied:     normalizeAmount(supplied),
+		Borrowed:     normalizeAmount(borrowed),
+		Collateral:   normalizeAmount(account.CollateralZNHBWei),
+		HealthFactor: computeHealthFactor(account.CollateralZNHBWei, borrowed),
 	}
+}
+
+// sumPositionAmounts totals AmountWei across every per-pool entry -- see
+// services/lending/engine/node_adapter.go's identical helper, kept in
+// sync deliberately rather than exported (matching computeHealthFactor's
+// own existing precedent below).
+func sumPositionAmounts(positions []engine.AccountPosition) string {
+	total := new(big.Int)
+	for _, p := range positions {
+		amount, ok := new(big.Int).SetString(strings.TrimSpace(p.AmountWei), 10)
+		if !ok {
+			continue
+		}
+		total.Add(total, amount)
+	}
+	return total.String()
 }
 
 func formatUint(value uint64) string {
