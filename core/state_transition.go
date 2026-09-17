@@ -120,6 +120,18 @@ var (
 	// peers running newer software that recognize the type keep their own
 	// copy and can still gossip/re-propagate it).
 	ErrUnknownTransactionType = errors.New("unknown native transaction type")
+	// ErrIdentityUsernameTaken indicates applyRegisterIdentity found the
+	// requested username already claimed in sp.usernameToAddr. NHB-AUDIT-C2:
+	// this used to be a bare, unwrapped fmt.Errorf, so classifyProposalError
+	// always fell through to its default case -- aborting the ENTIRE
+	// candidate block over one ordinary username collision between two
+	// unrelated accounts, with no malicious coordination required. Wrapping
+	// it in a sentinel lets classifyProposalError skip just the losing
+	// transaction instead. Classified SKIP, not PRUNE: unlike a nonce reuse,
+	// this is a same-attempt ordering artifact (whichever colliding
+	// RegisterIdentity happens to apply first wins), the same reasoning as
+	// ErrNonceTooHigh above.
+	ErrIdentityUsernameTaken = errors.New("username already taken")
 )
 
 const stakePauseReasonGovernance = "paused by governance"
@@ -4206,7 +4218,7 @@ func (sp *StateProcessor) applyRegisterIdentity(tx *types.Transaction, sender []
 		return fmt.Errorf("username: %w", err)
 	}
 	if _, ok := sp.usernameToAddr[normalized]; ok {
-		return fmt.Errorf("username '%s' taken", normalized)
+		return fmt.Errorf("username '%s': %w", normalized, ErrIdentityUsernameTaken)
 	}
 	if senderAccount.Username != "" {
 		return fmt.Errorf("account already has username")
