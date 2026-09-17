@@ -20,6 +20,11 @@ var (
 	ErrAliasConflict = errors.New("alias already bound to a different email")
 	// ErrNotVerified is returned when binding is attempted before verification.
 	ErrNotVerified = errors.New("email has not completed verification")
+	// ErrBindTokenInvalid is returned when the supplied bind token does
+	// not match the digest issued by the most recent verification, or has
+	// expired, or has already been consumed by a prior bind
+	// (NHB-AUDIT-S6).
+	ErrBindTokenInvalid = errors.New("bind token invalid or expired")
 )
 
 // Store persists verification state, bindings, and idempotency responses.
@@ -35,6 +40,14 @@ type EmailRecord struct {
 	CodeExpires *time.Time              `json:"codeExpires,omitempty"`
 	Attempts    []time.Time             `json:"attempts,omitempty"`
 	Bindings    map[string]AliasBinding `json:"bindings,omitempty"`
+	// BindTokenDigest/BindTokenExpires (NHB-AUDIT-S6) track the single-use
+	// bind token issued by the most recent successful verification.
+	// VerifiedAt alone only proves SOMEONE verified this email at SOME
+	// point in the past -- it never tied a later bind-email call to that
+	// same act. Cleared (both fields) the moment a bind consumes it, so
+	// it can never be reused for a second alias.
+	BindTokenDigest  string     `json:"bindTokenDigest,omitempty"`
+	BindTokenExpires *time.Time `json:"bindTokenExpires,omitempty"`
 }
 
 // AliasBinding captures opt-in alias linkage metadata.
@@ -160,8 +173,11 @@ func (s *Store) GetEmail(emailHash string) (EmailRecord, bool, error) {
 	return record, true, nil
 }
 
-// BindAlias links the alias to the supplied email hash, ensuring prior verification.
-func (s *Store) BindAlias(emailHash, aliasID string, consent bool, now time.Time) (AliasBinding, error) {
+// BindAlias links the alias to the supplied email hash, requiring both
+// prior verification AND a matching, unexpired, single-use bind token
+// (NHB-AUDIT-S6) minted by that same verification -- consumed atomically
+// in this same transaction so it can never authorize a second bind.
+func (s *Store) BindAlias(emailHash, aliasID string, consent bool, tokenDigest string, now time.Time) (AliasBinding, error) {
 	aliasKey := []byte(strings.ToLower(aliasID))
 	var binding AliasBinding
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -190,6 +206,17 @@ func (s *Store) BindAlias(emailHash, aliasID string, consent bool, now time.Time
 		if rec.VerifiedAt == nil {
 			return ErrNotVerified
 		}
+		if rec.BindTokenDigest == "" || tokenDigest == "" || rec.BindTokenDigest != tokenDigest {
+			return ErrBindTokenInvalid
+		}
+		if rec.BindTokenExpires == nil || now.After(rec.BindTokenExpires.UTC()) {
+			return ErrBindTokenInvalid
+		}
+		// Single-use: this same write clears the token so a second bind
+		// attempt (a different alias, or a replay of this request)
+		// cannot reuse it.
+		rec.BindTokenDigest = ""
+		rec.BindTokenExpires = nil
 		existingBinding, ok := rec.Bindings[aliasID]
 		if ok {
 			// Preserve original linked timestamp if present.
@@ -228,6 +255,9 @@ func (s *Store) BindAlias(emailHash, aliasID string, consent bool, now time.Time
 	}
 	if errors.Is(err, ErrNotVerified) {
 		return AliasBinding{}, ErrNotVerified
+	}
+	if errors.Is(err, ErrBindTokenInvalid) {
+		return AliasBinding{}, ErrBindTokenInvalid
 	}
 	return binding, err
 }
