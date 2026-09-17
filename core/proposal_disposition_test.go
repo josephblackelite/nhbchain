@@ -36,6 +36,7 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"heartbeat too soon", ErrHeartbeatTooSoon, proposalDispositionPrune},
 		{"unknown transaction type", ErrUnknownTransactionType, proposalDispositionPrune},
 		{"swap duplicate provider tx", ErrSwapDuplicateProviderTx, proposalDispositionPrune},
+		{"swap provider tx id collision", ErrSwapProviderTxIDCollision, proposalDispositionPrune},
 		{"swap nonce used", ErrSwapNonceUsed, proposalDispositionPrune},
 		{"swap expired", ErrSwapExpired, proposalDispositionPrune},
 		{"swap voucher invalid payload", ErrSwapVoucherInvalidPayload, proposalDispositionPrune},

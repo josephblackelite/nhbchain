@@ -382,15 +382,26 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	// root for byte-identical input. See swap_voucher_mint_test.go's flaky
 	// "state root mismatch" failures for the reproduction.
 	ledger.SetClock(func() time.Time { return sp.blockTimestamp() })
-	exists, err := ledger.Exists(providerTxID)
+	// NHB-AUDIT-C8: check the SIGNED nonce (orderID) first -- it is the
+	// real anti-double-mint control (see VoucherV1.Hash) and, unlike
+	// ProviderTxID, cannot be spoofed by whoever constructs this
+	// transaction. Only once that passes do we consult the
+	// ProviderTxID-keyed ledger, and even then we distinguish a genuine
+	// same-order retry from a different-order collision (see
+	// ErrSwapProviderTxIDCollision's doc comment) instead of treating
+	// both identically.
+	if manager.HasSeenSwapNonce(orderID) {
+		return ErrSwapNonceUsed
+	}
+	existingRecord, exists, err := ledger.Get(providerTxID)
 	if err != nil {
 		return err
 	}
 	if exists {
+		if strings.TrimSpace(existingRecord.OrderID) != "" && existingRecord.OrderID != orderID {
+			return ErrSwapProviderTxIDCollision
+		}
 		return ErrSwapDuplicateProviderTx
-	}
-	if manager.HasSeenSwapNonce(orderID) {
-		return ErrSwapNonceUsed
 	}
 
 	usdAmount := strings.TrimSpace(submission.USDAmount)
@@ -488,6 +499,7 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	record := &swap.VoucherRecord{
 		Provider:        provider,
 		ProviderTxID:    providerTxID,
+		OrderID:         orderID,
 		FiatCurrency:    strings.ToUpper(strings.TrimSpace(voucher.Fiat)),
 		FiatAmount:      strings.TrimSpace(voucher.FiatAmount),
 		USD:             usdAmount,

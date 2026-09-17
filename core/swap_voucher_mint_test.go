@@ -515,6 +515,80 @@ func TestSwapVoucherMintDuplicateDoesNotBlockProposal(t *testing.T) {
 	}
 }
 
+// TestSwapVoucherMintProviderTxIDCollisionIsDistinctFromDuplicate is the
+// direct regression test for NHB-AUDIT-C8: ProviderTxID is never covered
+// by the mint authority's signature (unlike OrderID -- see
+// swap.VoucherV1.Hash), so anyone holding any validly-signed voucher can
+// choose an arbitrary providerTxId, including one colliding with a
+// different, unrelated order. This proves that specific case now
+// surfaces as the distinct, actionable ErrSwapProviderTxIDCollision
+// rather than being indistinguishable from an ordinary harmless
+// duplicate, and that the signed OrderID's own nonce check
+// (ErrSwapNonceUsed) -- the real anti-double-mint control -- is checked
+// first and takes precedence for a genuine same-order retry.
+func TestSwapVoucherMintProviderTxIDCollisionIsDistinctFromDuplicate(t *testing.T) {
+	node, minterKey, oracleKey := setupSwapVoucherTestNode(t)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+	recipient := toAddress(recipientKey)
+
+	buildTx := func(providerTxID, orderID string) *types.Transaction {
+		voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", orderID)
+		sig := signSwapVoucherCore(t, minterKey, voucher)
+		proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
+		submission := &swap.VoucherSubmission{
+			Voucher: &voucher, Signature: sig, Provider: "nowpayments",
+			ProviderTxID: providerTxID, PriceProof: proof,
+		}
+		payload, err := encodeSwapVoucherMintTransaction(submission)
+		if err != nil {
+			t.Fatalf("encode voucher: %v", err)
+		}
+		return &types.Transaction{
+			ChainID: types.NHBChainID(), Type: types.TxTypeSwapVoucherMint,
+			Data: payload, GasLimit: 0, GasPrice: big.NewInt(0),
+		}
+	}
+
+	// Voucher A: applied and committed for real -- providerTxID
+	// "COLLIDE-1" is now durably recorded, associated with ORDER-A.
+	txA := buildTx("COLLIDE-1", "ORDER-A")
+	node.stateMu.Lock()
+	errA := node.state.ApplyTransaction(txA)
+	node.stateMu.Unlock()
+	if errA != nil {
+		t.Fatalf("apply voucher A: %v", errA)
+	}
+
+	// Voucher B: a genuinely different, unrelated order, but claims the
+	// SAME providerTxID as A. Must be rejected as a COLLISION, not a
+	// plain duplicate.
+	txB := buildTx("COLLIDE-1", "ORDER-B")
+	node.stateMu.Lock()
+	errB := node.state.ApplyTransaction(txB)
+	node.stateMu.Unlock()
+	if !errors.Is(errB, ErrSwapProviderTxIDCollision) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrSwapProviderTxIDCollision for a different-order providerTxId collision, got %v", errB)
+	}
+	if errors.Is(errB, ErrSwapDuplicateProviderTx) {
+		t.Fatalf("expected the collision to be distinct from ErrSwapDuplicateProviderTx, not wrap/match it")
+	}
+
+	// Re-submitting A's EXACT transaction again must hit the signed
+	// nonce check (ErrSwapNonceUsed) -- the real, unspoofable
+	// anti-double-mint control -- checked before the ledger's own
+	// providerTxId existence check.
+	node.stateMu.Lock()
+	errARetry := node.state.ApplyTransaction(txA)
+	node.stateMu.Unlock()
+	if !errors.Is(errARetry, ErrSwapNonceUsed) {
+		t.Fatalf("expected re-submitting the identical voucher to hit ErrSwapNonceUsed first, got %v", errARetry)
+	}
+}
+
 // TestSwapVoucherMintStalePriceProofDoesNotBlockProposal closes the round 3
 // gap: ErrSwapPriceProofStale has the exact same "monotonic, once-true-
 // always-true" property as ErrSwapExpired (already prunable since round 2)

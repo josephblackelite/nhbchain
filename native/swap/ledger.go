@@ -66,6 +66,14 @@ type VoucherRecord struct {
 	TwapWindowSeconds int64
 	TwapStart         int64
 	TwapEnd           int64
+	// OrderID is the signed voucher's own OrderID (see VoucherV1.Hash --
+	// this is the field actually covered by the mint authority's
+	// signature, unlike ProviderTxID). NHB-AUDIT-C8: stored so a
+	// ProviderTxID collision against a genuinely different order can be
+	// distinguished from a harmless retry of the identical, already-
+	// processed order -- see applySwapVoucherMintTransaction's collision
+	// check.
+	OrderID string
 }
 
 // Copy returns a deep copy to avoid callers mutating shared pointers.
@@ -106,6 +114,13 @@ type storedVoucherRecord struct {
 	TwapWindowSeconds uint64
 	TwapStart         uint64
 	TwapEnd           uint64
+	// OrderID: tagged rlp:"optional" -- without it, decoding any voucher
+	// record persisted before this field existed would hard-fail on its
+	// very next Get()/List() call (same reasoning as core/state/
+	// accounts.go's ValidatorRegistered field). Must stay the last field
+	// in this struct: go-ethereum's rlp package only allows a trailing
+	// run of optional fields.
+	OrderID string `rlp:"optional"`
 }
 
 type voucherIndexEntry struct {
@@ -463,6 +478,7 @@ func toStoredVoucher(record *VoucherRecord) storedVoucherRecord {
 	if record.TwapEnd > 0 {
 		stored.TwapEnd = uint64(record.TwapEnd)
 	}
+	stored.OrderID = strings.TrimSpace(record.OrderID)
 	return stored
 }
 
@@ -497,6 +513,7 @@ func fromStoredVoucher(stored *storedVoucherRecord) (*VoucherRecord, error) {
 		Status:          stored.Status,
 		CreatedAt:       createdAt,
 		TwapRate:        stored.TwapRate,
+		OrderID:         stored.OrderID,
 	}
 	if len(stored.OracleFeeders) > 0 {
 		record.OracleFeeders = append([]string{}, stored.OracleFeeders...)

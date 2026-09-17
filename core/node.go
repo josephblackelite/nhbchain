@@ -3264,6 +3264,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrHeartbeatTooSoon),
 		errors.Is(err, ErrUnknownTransactionType),
 		errors.Is(err, ErrSwapDuplicateProviderTx),
+		// A providerTxId collision against a different order is, like an
+		// ordinary duplicate, a pure function of this transaction's own
+		// immutable payload plus already-committed ledger state -- never
+		// worth a same-block retry. See ErrSwapProviderTxIDCollision's
+		// doc comment (core/swap.go) for why it's a distinct sentinel
+		// from ErrSwapDuplicateProviderTx rather than the same one.
+		errors.Is(err, ErrSwapProviderTxIDCollision),
 		errors.Is(err, ErrSwapNonceUsed),
 		errors.Is(err, ErrSwapExpired),
 		errors.Is(err, ErrSwapVoucherInvalidPayload),
