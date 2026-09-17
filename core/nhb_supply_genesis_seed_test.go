@@ -314,3 +314,90 @@ func TestReconcileNHBMintSupplyDriftOnce_IsIdempotent(t *testing.T) {
 		t.Fatalf("expected supply to stay at %s after a second call, got %s -- drift was double-applied", firstSupply, secondSupply)
 	}
 }
+
+// TestSeedGenesisNHBSupplyOnce_SkipsOnDifferentChain and its sibling below
+// are the direct regression tests for NHB-AUDIT-C9: both historical supply
+// repairs are fixed, magic-number facts about ONE specific chain's real
+// history (see genesisNHBSupplyWei/nhbMintSupplyDriftWei's own doc
+// comments) and must never apply to a different genesis/chain -- e.g. a
+// fresh relaunch, such as the untracked config/genesis.relaunch.json
+// already sitting in this repo's working tree with a real alloc of
+// 100,000 NHB, not 10,000. A StateProcessor wired up (via
+// SetSwapVoucherChainID, exactly as core/node.go does at real startup)
+// with any chain id other than the one these constants were computed for
+// must leave the tracked NHB supply completely untouched.
+func TestSeedGenesisNHBSupplyOnce_SkipsOnDifferentChain(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetSwapVoucherChainID(MintChainID + 1) // a real, different chain id
+	manager := nhbstate.NewManager(sp.Trie)
+
+	if err := sp.SeedGenesisNHBSupplyOnce(); err != nil {
+		t.Fatalf("seed genesis supply: %v", err)
+	}
+
+	after, err := manager.TokenSupply("NHB")
+	if err != nil {
+		t.Fatalf("load supply after seed attempt: %v", err)
+	}
+	if after.Sign() != 0 {
+		t.Fatalf("SAFETY REGRESSION: SeedGenesisNHBSupplyOnce applied a different chain's hardcoded genesis amount, got supply %s", after)
+	}
+	seeded, err := manager.NHBSupplyGenesisSeeded()
+	if err != nil {
+		t.Fatalf("check seeded flag: %v", err)
+	}
+	if seeded {
+		t.Fatalf("expected the seeded flag to remain unset when the repair correctly skipped")
+	}
+}
+
+func TestReconcileNHBMintSupplyDriftOnce_SkipsOnDifferentChain(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetSwapVoucherChainID(MintChainID + 1) // a real, different chain id
+	manager := nhbstate.NewManager(sp.Trie)
+
+	if err := sp.ReconcileNHBMintSupplyDriftOnce(); err != nil {
+		t.Fatalf("reconcile mint supply drift: %v", err)
+	}
+
+	after, err := manager.TokenSupply("NHB")
+	if err != nil {
+		t.Fatalf("load supply after reconcile attempt: %v", err)
+	}
+	if after.Sign() != 0 {
+		t.Fatalf("SAFETY REGRESSION: ReconcileNHBMintSupplyDriftOnce applied a different chain's hardcoded drift amount, got supply %s", after)
+	}
+	reconciled, err := manager.NHBMintSupplyDriftReconciled()
+	if err != nil {
+		t.Fatalf("check reconciled flag: %v", err)
+	}
+	if reconciled {
+		t.Fatalf("expected the reconciled flag to remain unset when the repair correctly skipped")
+	}
+}
+
+// TestSupplyRepairsRunOnTheRealExpectedChain confirms the gate is not
+// merely "skip everything" -- wiring up the SAME chain id these constants
+// were actually computed for (MintChainID, exactly as core/node.go does
+// at real startup) must still apply both repairs normally.
+func TestSupplyRepairsRunOnTheRealExpectedChain(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	sp.SetSwapVoucherChainID(MintChainID)
+	manager := nhbstate.NewManager(sp.Trie)
+
+	if err := sp.SeedGenesisNHBSupplyOnce(); err != nil {
+		t.Fatalf("seed genesis supply: %v", err)
+	}
+	if err := sp.ReconcileNHBMintSupplyDriftOnce(); err != nil {
+		t.Fatalf("reconcile mint supply drift: %v", err)
+	}
+
+	after, err := manager.TokenSupply("NHB")
+	if err != nil {
+		t.Fatalf("load supply: %v", err)
+	}
+	expected := new(big.Int).Add(genesisNHBSupplyWei, nhbMintSupplyDriftWei)
+	if after.Cmp(expected) != 0 {
+		t.Fatalf("expected supply %s on the real expected chain, got %s", expected, after)
+	}
+}
