@@ -3,6 +3,28 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 const RPC_URL = process.env.NHB_RPC_URL ?? 'http://localhost:8545';
 const RPC_TOKEN = process.env.NHB_RPC_TOKEN ?? process.env.NEXT_PUBLIC_NHB_RPC_TOKEN ?? '';
 
+// NHB-AUDIT-C5: this handler used to forward ANY client-specified method
+// to the node with the server's own privileged bearer token attached, no
+// allowlist, no visitor authentication -- turning this demo, if deployed
+// as-is, into a fully open backdoor to every privileged RPC method the
+// underlying node exposes, not just the ones this app actually uses.
+// Only the exact methods this UI calls (see pages/index.tsx) are allowed
+// through; everything else is rejected before ever reaching the node.
+//
+// All four are mutating (they move funds or publish content on behalf of
+// a caller/fan/creator address supplied in the request body) and none of
+// them are verified server-side against the actual visitor -- this demo
+// has no session/login/signature-verification system at all. Deploying
+// this beyond a local/trusted-network demo requires adding real
+// per-visitor authentication (e.g. a wallet-signature challenge) before
+// any of these calls is allowed, not just this allowlist.
+const ALLOWED_METHODS = new Set([
+  'creator_publish',
+  'creator_tip',
+  'creator_stake',
+  'creator_payouts',
+]);
+
 type RPCPayload = {
   jsonrpc: '2.0';
   id: number;
@@ -27,6 +49,10 @@ export default async function handler(
   const { method, params } = req.body ?? {};
   if (typeof method !== 'string') {
     res.status(400).json({ error: 'method is required' });
+    return;
+  }
+  if (!ALLOWED_METHODS.has(method)) {
+    res.status(403).json({ error: `method not allowed: ${method}` });
     return;
   }
 
