@@ -154,7 +154,13 @@ func (s *Server) handleEscrowMilestoneCreate(w http.ResponseWriter, r *http.Requ
 	writeResult(w, req.ID, milestoneCreateResult{ID: formatEscrowID(created.ID)})
 }
 
-func (s *Server) handleEscrowMilestoneGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+// NHB-AUDIT-C4: this endpoint was previously reachable with no
+// authentication at all, unlike every other milestone RPC in this file.
+func (s *Server) handleEscrowMilestoneGet(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	if authErr := s.requireAuthInto(&r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return
+	}
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
 		return

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/native/escrow"
@@ -236,7 +237,17 @@ func TestEscrowMilestoneCancelRefundsFundedLeg(t *testing.T) {
 	}
 }
 
-func TestEscrowMilestoneGetSweepsDueLegAndRefundsPayer(t *testing.T) {
+// TestEscrowMilestoneGetShowsExpiredWithoutMutatingLiveState is the direct
+// regression test for NHB-AUDIT-C4: EscrowMilestoneGet (a read endpoint)
+// must show an accurate, computed "as of now" status for a leg whose
+// deadline has passed -- but must NEVER actually move real balances,
+// persist the expiry, or emit an event as a side effect of a mere read,
+// since none of that corresponds to a transaction any other validator
+// could independently replay (see WithStateView's doc comment on the
+// state-root fork risk). The real refund + persisted expiry + event only
+// happen once an actual mutating call (here, Cancel) runs against the
+// project afterward.
+func TestEscrowMilestoneGetShowsExpiredWithoutMutatingLiveState(t *testing.T) {
 	sp := newStakingStateProcessor(t)
 	current := time.Unix(1_700_200_000, 0).UTC()
 	node := &Node{
@@ -274,36 +285,77 @@ func TestEscrowMilestoneGetSweepsDueLegAndRefundsPayer(t *testing.T) {
 	}
 
 	current = current.Add(2 * time.Hour)
+
+	// Get must show the correct computed status ("expired") -- but must
+	// NOT have moved any real balance, persisted anything, or emitted an
+	// event.
 	stored, err := node.EscrowMilestoneGet(project.ID)
 	if err != nil {
 		t.Fatalf("get milestone after deadline: %v", err)
 	}
 	if stored.Status != escrow.MilestoneStatusCancelled {
-		t.Fatalf("unexpected project status after due sweep: %d", stored.Status)
+		t.Fatalf("unexpected project status after due read: %d", stored.Status)
 	}
 	if leg := stored.FindLeg(3); leg == nil || leg.Status != escrow.MilestoneLegExpired {
-		t.Fatalf("expected expired leg after sweep, got %#v", leg)
+		t.Fatalf("expected expired leg in the computed read view, got %#v", leg)
 	}
+
+	vault := milestoneVaultAddress(project.ID, 3, "NHB")
+	var vaultAddr [20]byte
+	copy(vaultAddr[:], vault.Bytes())
 
 	payerAcc, err := sp.GetAccount(payer[:])
 	if err != nil {
 		t.Fatalf("get payer: %v", err)
 	}
-	if payerAcc.BalanceNHB.Cmp(big.NewInt(250)) != 0 {
-		t.Fatalf("expected payer refunded after due sweep, got %s", payerAcc.BalanceNHB)
+	if payerAcc.BalanceNHB.Cmp(big.NewInt(180)) != 0 {
+		t.Fatalf("SECURITY REGRESSION: a mere read moved real balance (payer expected still-debited 180, got %s)", payerAcc.BalanceNHB)
 	}
-	vault := milestoneVaultAddress(project.ID, 3, "NHB")
-	var vaultAddr [20]byte
-	copy(vaultAddr[:], vault.Bytes())
 	vaultAcc, err := sp.GetAccount(vaultAddr[:])
 	if err != nil {
 		t.Fatalf("get vault: %v", err)
 	}
+	if vaultAcc.BalanceNHB.Cmp(big.NewInt(70)) != 0 {
+		t.Fatalf("SECURITY REGRESSION: a mere read drained the vault (expected still-funded 70, got %s)", vaultAcc.BalanceNHB)
+	}
+	if findCoreEventByType(sp.Events(), escrow.EventTypeMilestoneDue) != nil {
+		t.Fatalf("SECURITY REGRESSION: a mere read emitted a persisted milestone-due event")
+	}
+
+	// The project's REAL persisted status must still show funded/active --
+	// the expiry above was purely a computed read-time projection.
+	rawManager := nhbstate.NewManager(sp.Trie)
+	rawProject, ok, err := getMilestoneProject(rawManager, project.ID)
+	if err != nil || !ok {
+		t.Fatalf("read raw persisted milestone: ok=%v err=%v", ok, err)
+	}
+	if leg := rawProject.FindLeg(3); leg == nil || leg.Status != escrow.MilestoneLegFunded {
+		t.Fatalf("expected the REAL persisted leg to remain funded until an actual mutation runs, got %#v", leg)
+	}
+
+	// Now an actual mutating call runs (Cancel) -- THIS is what performs
+	// the real sweep: real vault refund, real persisted expiry, real event.
+	cancelSig := signMilestoneAction(t, project.ID, 3, escrow.MilestoneActionCancel, nil, payerKey)
+	if err := node.EscrowMilestoneCancel(project.ID, 3, cancelSig); err != nil {
+		t.Fatalf("cancel milestone: %v", err)
+	}
+
+	payerAcc, err = sp.GetAccount(payer[:])
+	if err != nil {
+		t.Fatalf("get payer after real sweep: %v", err)
+	}
+	if payerAcc.BalanceNHB.Cmp(big.NewInt(250)) != 0 {
+		t.Fatalf("expected payer refunded after the real sweep, got %s", payerAcc.BalanceNHB)
+	}
+	vaultAcc, err = sp.GetAccount(vaultAddr[:])
+	if err != nil {
+		t.Fatalf("get vault after real sweep: %v", err)
+	}
 	if vaultAcc.BalanceNHB.Cmp(big.NewInt(0)) != 0 {
-		t.Fatalf("expected empty vault after due sweep, got %s", vaultAcc.BalanceNHB)
+		t.Fatalf("expected empty vault after the real sweep, got %s", vaultAcc.BalanceNHB)
 	}
 	if findCoreEventByType(sp.Events(), escrow.EventTypeMilestoneDue) == nil {
-		t.Fatalf("missing milestone due event")
+		t.Fatalf("missing milestone due event after the real sweep")
 	}
 }
 

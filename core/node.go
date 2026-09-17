@@ -5992,22 +5992,41 @@ func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject, signature
 	return project, nil
 }
 
-// EscrowMilestoneGet returns the current milestone project state from persistence.
+// EscrowMilestoneGet returns the current milestone project state from
+// persistence. NHB-AUDIT-C4: this is a READ endpoint and must never
+// mutate the live state trie -- doing so (as it previously did, via
+// sweepMilestoneDueLegsLocked's real vault refund + persist) makes this
+// validator's pending state diverge from every other validator's the
+// instant any client calls this RPC, since that mutation corresponds to
+// no transaction any other validator can independently replay. If this
+// validator then proposes a block, its state root would disagree with
+// what peers compute -- see WithStateView's doc comment.
+//
+// To still show correct, live status (e.g. a leg whose deadline has
+// passed reads as "expired", not stale "funded"), this computes a
+// display-only projection: engine.ExpireDueLeg's pure status-transition
+// logic (no vault movement, no trie write, no event emission) is applied
+// to a CLONE of the persisted project. The real refund + persisted
+// expiry + event still happen exactly as before, but only as a side
+// effect of an actual mutating call (Fund/Release/Cancel/
+// SubscriptionUpdate) on this project, which already calls
+// sweepMilestoneDueLegsLocked for real.
 func (n *Node) EscrowMilestoneGet(id [32]byte) (*escrow.MilestoneProject, error) {
 	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
 	manager := nhbstate.NewManager(n.state.Trie)
 	project, ok, err := getMilestoneProject(manager, id)
+	n.stateMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("read milestone: %w", err)
 	}
 	if !ok {
 		return nil, escrow.ErrMilestoneNotFound
 	}
-	if err := n.sweepMilestoneDueLegsLocked(manager, project); err != nil {
-		return nil, err
+	view := project.Clone()
+	engine := escrow.NewMilestoneEngine(func() time.Time { return n.currentTime() })
+	for engine.ExpireDueLeg(view) != nil {
 	}
-	return project, nil
+	return view, nil
 }
 
 // EscrowMilestoneFund transitions a milestone leg into the funded state.
