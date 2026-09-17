@@ -3599,6 +3599,29 @@ func (n *Node) CommitBlock(b *types.Block) error {
 	return n.commitBlock(b, false)
 }
 
+// rejectOversizedBlock enforces the same Blocks.MaxTxs cap CreateBlock
+// already clamps its own proposals to (NHB-AUDIT-R3), against a RECEIVED
+// block -- one proposed by a peer, or synced from one. Without this, a
+// malicious proposer or sync peer could submit a block far exceeding
+// MaxTxs and force every validator to pay computeDependencyGraph's
+// disproportionate cost (a pairwise conflict comparison across every
+// transaction in the block) before any other check ever ran. Called at
+// the very top of both ValidateBlock and commitBlock, before either
+// computes the dependency graph.
+func (n *Node) rejectOversizedBlock(b *types.Block) error {
+	if n == nil || b == nil {
+		return nil
+	}
+	maxTxs := n.globalConfigSnapshot().Blocks.MaxTxs
+	if maxTxs <= 0 {
+		return nil
+	}
+	if int64(len(b.Transactions)) > maxTxs {
+		return fmt.Errorf("block exceeds max transaction count: got %d want <= %d", len(b.Transactions), maxTxs)
+	}
+	return nil
+}
+
 func (n *Node) ValidateBlock(b *types.Block) error {
 	if b == nil {
 		return fmt.Errorf("block cannot be nil")
@@ -3608,6 +3631,9 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 	}
 	if n == nil || n.chain == nil {
 		return fmt.Errorf("blockchain not initialised")
+	}
+	if err := n.rejectOversizedBlock(b); err != nil {
+		return err
 	}
 
 	txRoot, err := ComputeTxRoot(b.Transactions)
@@ -3776,6 +3802,9 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	}
 	if n == nil || n.chain == nil {
 		return fmt.Errorf("blockchain not initialised")
+	}
+	if err := n.rejectOversizedBlock(b); err != nil {
+		return err
 	}
 
 	// NHB-TRIAGE-C1: a block reaching this function via the untrusted P2P
