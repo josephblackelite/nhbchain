@@ -3,7 +3,12 @@ name: Deploy Artifacts
 on:
   push:
     branches:
-      - main
+      # NHB-AUDIT-R5: this workflow targeted "main" while the repository's
+      # actual, actively-pushed-to branch is "master" (confirmed via
+      # `git remote show origin`'s HEAD branch and every real push this
+      # session) -- meaning this pipeline may have never actually
+      # triggered on a real production push.
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -96,7 +101,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
