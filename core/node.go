@@ -3292,7 +3292,12 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// duplicate submission is a permanently dead transaction, never
 		// worth a same-block retry. See ErrBuybackRefPriceAlreadyRecorded's
 		// doc comment (core/buyback_tx.go) for the incident this fixes.
-		errors.Is(err, ErrBuybackRefPriceAlreadyRecorded):
+		errors.Is(err, ErrBuybackRefPriceAlreadyRecorded),
+		// NHB-AUDIT-R2: a transaction whose MaxBlockHeight or IntentExpiry
+		// has already passed at execution time can never succeed later
+		// either -- height only increases and block timestamps only
+		// advance -- same reasoning as ErrSwapExpired above.
+		errors.Is(err, ErrTransactionExpired):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),
