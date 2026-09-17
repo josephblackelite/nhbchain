@@ -135,6 +135,11 @@ const (
 	RejectReasonFutureHeight     RejectReason = "future_height"
 	RejectReasonExpired          RejectReason = "expired"
 	RejectReasonUnknownHeight    RejectReason = "unknown_height"
+	// NHB-AUDIT-C10: Details failed to decode as an EquivocationProof, or
+	// decoded but didn't cryptographically prove the offender themselves
+	// signed two conflicting votes. Only reachable for TypeEquivocation --
+	// see equivocation.go.
+	RejectReasonInvalidEquivocationProof RejectReason = "invalid_equivocation_proof"
 )
 
 // ValidationError surfaces deterministic validation failures to callers.

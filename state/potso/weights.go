@@ -143,6 +143,42 @@ func (l *Ledger) Set(addr [20]byte, base, value *big.Int) (*WeightEntry, error) 
 	return &WeightEntry{Base: copyBigInt(rec.base), Value: copyBigInt(rec.value)}, nil
 }
 
+// EnsureBaseline anchors addr's tracked weight to stake (real, current
+// validator stake, supplied by the caller -- this package has no notion
+// of stake itself). The FIRST time addr is seen, both Base and Value are
+// initialized to stake; on every later call, only Base is refreshed
+// (Value, which decay/slash penalties actually mutate over time, is left
+// untouched -- resetting it on every call would let a repeatedly-
+// penalized validator's weight silently heal back to full strength).
+//
+// NHB-AUDIT-C10: without this, Base/Value both default to this ledger's
+// configured floor via getOrCreate -- production constructs this ledger
+// with a nil floor (see core/node.go's statepotso.NewLedger(nil, nil)),
+// so every validator's base weight was permanently zero and every
+// slash/decay percentage computed against it (scaleByBps(base, bps))
+// was zero too, regardless of the configured bps or actual misconduct.
+// Callers should call this with the offender's real current stake
+// immediately before computing any penalty against them (see
+// core/node.go's processPendingEvidenceForState), not just once at
+// startup -- stake legitimately changes over a validator's lifetime.
+func (l *Ledger) EnsureBaseline(addr [20]byte, stake *big.Int) (*WeightEntry, error) {
+	if stake != nil && stake.Sign() < 0 {
+		return nil, errors.New("potso: stake cannot be negative")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, existed := l.entries[addr]
+	rec := l.getOrCreate(addr)
+	if stake != nil {
+		if !existed {
+			rec.value = new(big.Int).Set(stake)
+		}
+		rec.base = new(big.Int).Set(stake)
+	}
+	rec.value = l.clampUnlocked(rec.value)
+	return &WeightEntry{Base: copyBigInt(rec.base), Value: copyBigInt(rec.value)}, nil
+}
+
 func (l *Ledger) Entry(addr [20]byte) WeightEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

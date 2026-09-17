@@ -4434,6 +4434,20 @@ func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeig
 		}
 
 		for _, rec := range records {
+			// NHB-AUDIT-C10: refresh this offender's tracked Base weight
+			// from their REAL, current on-chain stake immediately before
+			// computing any penalty against them -- without this, Base
+			// silently defaults to the ledger's floor (nil -> zero in
+			// production), making every slash/decay percentage compute
+			// against zero regardless of actual stake or misconduct. See
+			// EnsureBaseline's doc comment. A missing/unreadable account
+			// is not fatal here -- it just leaves this offender's weight
+			// untouched for this pass, same as before this fix existed.
+			if account, acctErr := manager.GetAccount(rec.Evidence.Offender[:]); acctErr == nil && account != nil && account.Stake != nil {
+				if _, err := n.potsoLedger.EnsureBaseline(rec.Evidence.Offender, account.Stake); err != nil {
+					return fmt.Errorf("potso: ensure baseline weight for %x: %w", rec.Evidence.Offender, err)
+				}
+			}
 			ctx := penalty.Context{
 				BlockHeight:  currentHeight,
 				MissedEpochs: 0,

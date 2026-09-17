@@ -54,6 +54,16 @@ func ValidateEvidence(e *Evidence, hash [32]byte, currentHeight uint64, maxAge u
 	if !strings.EqualFold(recovered.Hex()[2:], hex.EncodeToString(e.Reporter[:])) {
 		return &ValidationError{Reason: RejectReasonInvalidSignature, Message: "signature does not match reporter"}
 	}
+	// NHB-AUDIT-C10: everything above only proves the REPORTER signed this
+	// accusation -- it says nothing about whether the OFFENDER actually
+	// did anything. For EQUIVOCATION specifically, require and verify a
+	// concrete proof (two conflicting votes signed by the offender's own
+	// key) before this evidence can ever result in a real slash.
+	if e.Type == TypeEquivocation {
+		if err := VerifyEquivocationProof(e.Offender, e.Details); err != nil {
+			return &ValidationError{Reason: RejectReasonInvalidEquivocationProof, Message: err.Error()}
+		}
+	}
 	return nil
 }
 

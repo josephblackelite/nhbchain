@@ -60,6 +60,51 @@ func TestLedgerPenaltyMarkers(t *testing.T) {
 	}
 }
 
+func TestEnsureBaselineSeedsFirstTimeOffenderFromRealStake(t *testing.T) {
+	ledger, err := NewLedger(nil, nil)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	addr := [20]byte{9}
+	entry, err := ledger.EnsureBaseline(addr, mustBig("5000"))
+	if err != nil {
+		t.Fatalf("ensure baseline: %v", err)
+	}
+	if entry.Base.Cmp(mustBig("5000")) != 0 {
+		t.Fatalf("expected base 5000, got %s", entry.Base)
+	}
+	if entry.Value.Cmp(mustBig("5000")) != 0 {
+		t.Fatalf("expected value 5000, got %s", entry.Value)
+	}
+}
+
+func TestEnsureBaselinePreservesValueButRefreshesBaseOnSubsequentCalls(t *testing.T) {
+	ledger, err := NewLedger(nil, nil)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	addr := [20]byte{10}
+	if _, err := ledger.EnsureBaseline(addr, mustBig("1000")); err != nil {
+		t.Fatalf("ensure baseline: %v", err)
+	}
+	// A slash/decay drops Value below Base, as real penalty application does.
+	if _, err := ledger.ApplyDecay(addr, mustBig("400")); err != nil {
+		t.Fatalf("apply decay: %v", err)
+	}
+	// Stake grows before the next offense -- Base should track it, but the
+	// already-applied penalty must not silently heal.
+	entry, err := ledger.EnsureBaseline(addr, mustBig("2000"))
+	if err != nil {
+		t.Fatalf("ensure baseline: %v", err)
+	}
+	if entry.Base.Cmp(mustBig("2000")) != 0 {
+		t.Fatalf("expected refreshed base 2000, got %s", entry.Base)
+	}
+	if entry.Value.Cmp(mustBig("600")) != 0 {
+		t.Fatalf("expected value to stay at post-decay 600, got %s", entry.Value)
+	}
+}
+
 func TestLedgerSetBounds(t *testing.T) {
 	ledger, err := NewLedger(nil, nil)
 	if err != nil {
