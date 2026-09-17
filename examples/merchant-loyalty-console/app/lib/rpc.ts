@@ -26,14 +26,12 @@ export class RpcError extends Error {
 
 export async function rpcCall<T>(
   method: string,
-  params?: unknown[] | Record<string, unknown>,
-  options?: { auth?: boolean }
+  params?: unknown[] | Record<string, unknown>
 ): Promise<T> {
-  const body = {
-    method,
-    params,
-    useAuth: options?.auth !== false
-  };
+  // NHB-AUDIT-C5: whether a call gets the server's privileged bearer
+  // token attached is now decided entirely server-side (app/api/rpc/
+  // route.ts's method allowlist), never by anything sent from here.
+  const body = { method, params };
 
   const response = await fetch('/api/rpc', {
     method: 'POST',

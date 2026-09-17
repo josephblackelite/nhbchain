@@ -14,14 +14,14 @@ yarn install
 yarn workspace @nhb/merchant-loyalty-console dev
 ```
 
-Set the RPC endpoint and authentication token before running in production:
+Set the RPC endpoint and authentication token:
 
 ```bash
 export NHB_RPC_URL=https://api.nhbcoin.net/rpc
 export NHB_RPC_TOKEN=... # bearer token for privileged RPCs
 ```
 
-By default the console proxies JSON-RPC calls through `app/api/rpc/route.ts`. The proxy automatically attaches the bearer token for privileged methods like `loyalty_createBusiness` and `loyalty_setPaymaster`.
+**Security warning: this is a demo, not a production-ready admin console.** The console proxies JSON-RPC calls through `app/api/rpc/route.ts`, which keeps `NHB_RPC_TOKEN` out of the browser and now enforces a server-side allowlist restricting every call to the exact `loyalty_*` methods this UI uses (nothing else can be invoked through the proxy). It does **not** authenticate the *visitor* -- the "Admin / caller wallet" field is a free-text address with no signature or session check behind it, so anyone who can reach this app's `/api/rpc` endpoint can invoke any mutating method (`loyalty_createBusiness`, `loyalty_setPaymaster`, `loyalty_addMerchant`, program create/update/pause/resume, etc.) as any caller address they type in. Do not expose this app on a public network, and do not treat it as sufficient access control for real merchant operations, without first adding real per-visitor authentication (e.g. a wallet-signature challenge) in front of every mutating call.
 
 ## Features
 
