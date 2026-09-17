@@ -181,6 +181,19 @@ func main() {
 		log.Fatal("invalid global configuration", "err", err)
 	}
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
+	// NHB-AUDIT-C6: this binary's untrusted P2P block-sync path never
+	// enabled the NHB-TRIAGE-C1 quorum-certificate check at all, unlike
+	// cmd/nhb/main.go (see its matching QuorumCertActivationHeight guard
+	// and config.Config.QuorumCertActivationHeight's doc comment) --
+	// consensusd permanently accepted any structurally-valid synced block
+	// with zero validator-quorum verification, at every height, forever.
+	// Left unset (0) here, exactly as before, still means the check stays
+	// disabled -- enabling it remains a deliberate, coordinated,
+	// every-validator-at-once decision made in config.toml, never
+	// inferred.
+	if cfg.QuorumCertActivationHeight > 0 {
+		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
