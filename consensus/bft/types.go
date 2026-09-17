@@ -49,38 +49,9 @@ type SignedVote struct {
 }
 
 // Proposal represents a block proposal message sent by the round's proposer.
-//
-// ValidRound is the Proof-of-Lock-Change field (NHB-AUDIT-C1): -1 means
-// "a fresh value, built from mempool, with no prior-round polka behind it".
-// A value >=0 means "this is a re-proposal of a value the proposer itself
-// saw >=2/3 prevote power for (a Polka) at that earlier round" -- receivers
-// never trust this claim blindly; Engine.lockCompliesLocked only honors it
-// if the receiving validator independently observed the same polka itself
-// (see Engine.polkaHistory). This is what lets an honest validator safely
-// switch away from an earlier lock instead of being stuck forever, while
-// still making it impossible for two different quorums to each commit a
-// different block at the same height (see Engine.lockedBlock/lockedRound).
 type Proposal struct {
-	Block      *types.Block `json:"block"`
-	Round      int          `json:"round"`
-	ValidRound int          `json:"validRound"`
-}
-
-// UnmarshalJSON defaults ValidRound to -1 when the field is absent from the
-// payload (e.g. a message from a pre-PoLC peer during a rolling upgrade),
-// rather than silently defaulting to Go's zero value 0 -- which would be
-// misread as "claims a polka at round 0" instead of "no claim at all". -1
-// is always the conservative interpretation: it only ever makes a receiver
-// MORE willing to accept a proposal (the plain not-locked-or-matches check),
-// never less, so a missing field can't be exploited to bypass the lock.
-func (p *Proposal) UnmarshalJSON(data []byte) error {
-	type alias Proposal
-	aux := &struct{ *alias }{alias: (*alias)(p)}
-	p.ValidRound = -1
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	return nil
+	Block *types.Block `json:"block"`
+	Round int          `json:"round"`
 }
 
 // SignedProposal wraps a proposal with proposer identity and signature

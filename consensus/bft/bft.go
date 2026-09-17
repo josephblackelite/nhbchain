@@ -26,14 +26,6 @@ type State struct {
 	Round  int
 }
 
-// polkaRecord captures the single block that reached a prevote Polka
-// (>=2/3 voting power prevoting the same non-nil block) during one round of
-// the current height. See Engine.polkaHistory.
-type polkaRecord struct {
-	block     *types.Block
-	blockHash []byte
-}
-
 // Engine is the core BFT consensus state machine.
 type Engine struct {
 	mu           sync.RWMutex
@@ -50,45 +42,6 @@ type Engine struct {
 	committedBlocks  map[uint64]bool
 	bufferedProposal map[uint64]map[int][]*SignedProposal
 	bufferedVotes    map[uint64]map[int][]*SignedVote
-
-	// --- NHB-AUDIT-C1: Proof-of-Lock-Change state (Tendermint-style safety) ---
-	//
-	// Without this, startNewRound() below wiped every round's vote/proposal
-	// state unconditionally, including a precommit this validator had
-	// already broadcast for real -- so a validator that simply timed out
-	// waiting for a slow quorum on one block was free to precommit a
-	// DIFFERENT block in the next round with no memory of the first. With
-	// n validators split across two message-delivery groups by ordinary
-	// network delay (no attacker needed for the delay itself, though the
-	// audit's minimal reproduction also uses one equivocating validator),
-	// two different 3-of-4-style quorums could each independently commit a
-	// different block at the same height -- a live fork. These four fields
-	// are this validator's LOCK: once >=2/3 voting power prevotes for a
-	// block in some round (a "Polka"), lockedBlock/lockedRound remember it
-	// for the rest of this HEIGHT (never cleared by a round timeout, only
-	// by advancing to a new height -- see resetLockStateLocked), and
-	// prevote()/lockCompliesLocked refuse to prevote a conflicting block
-	// afterward unless a later round proves (via a Polka THIS validator
-	// itself independently observed, never merely claimed) that >=2/3 power
-	// has already moved past that lock. validBlock/validRound track the
-	// single most recent Polka seen (which may be newer than the lock) so
-	// this validator, when it becomes proposer, re-proposes that same value
-	// instead of manufacturing a fresh competing one out of its mempool.
-	lockedBlock *types.Block
-	lockedRound int
-	validBlock  *types.Block
-	validRound  int
-	// polkaHistory records, for each round within the CURRENT height, the
-	// block (if any) that reached a prevote Polka during that round --
-	// exactly what a later round's Proposal.ValidRound claim is checked
-	// against (see lockCompliesLocked). Deliberately keyed by round number
-	// and retained across round transitions within a height (unlike
-	// receivedVotes/receivedPower, which stay round-scoped and ARE wiped
-	// every round) -- a validator that moved on from round vr must still be
-	// able to recall "yes, I really did see a Polka for this exact block at
-	// round vr" when a later round's proposer re-proposes it. Cleared only
-	// alongside the lock fields above, on height advance.
-	polkaHistory map[int]polkaRecord
 
 	proposalCh chan *SignedProposal
 	voteCh     chan *SignedVote
@@ -206,9 +159,6 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		committedBlocks:  make(map[uint64]bool),
 		bufferedProposal: make(map[uint64]map[int][]*SignedProposal),
 		bufferedVotes:    make(map[uint64]map[int][]*SignedVote),
-		lockedRound:      -1,
-		validRound:       -1,
-		polkaHistory:     make(map[int]polkaRecord),
 		proposalCh:       make(chan *SignedProposal, defaultProposalQueueSize),
 		voteCh:           make(chan *SignedVote, calculateVoteQueueCapacity(validatorSet)),
 		externalCommitCh: make(chan struct{}, 1),
@@ -296,7 +246,7 @@ func (e *Engine) runRound() {
 			if err := e.node.ValidateBlock(sp.Proposal.Block); err != nil {
 				fmt.Printf("rejected invalid proposal for height %d: %v\n", sp.Proposal.Block.Header.Height, err)
 				e.mu.Lock()
-				e.broadcastPrevoteNilLocked(fmt.Sprintf("invalid proposal: %v", err))
+				e.broadcastPrevoteNilLocked(err)
 				e.mu.Unlock()
 				continue
 			}
@@ -419,39 +369,20 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 }
 
 func (e *Engine) propose() error {
-	e.mu.RLock()
-	round := e.currentState.Round
-	revalidBlock := e.validBlock
-	revalidRound := e.validRound
-	e.mu.RUnlock()
+	txs := e.node.GetMempool()
+	if len(txs) == 0 {
+		fmt.Println("PROPOSE: Mempool empty, creating empty block proposal.")
+	}
 
-	// NHB-AUDIT-C1: if this validator itself already observed a Polka for
-	// some block (e.validBlock), it MUST re-propose that exact value when
-	// it becomes proposer again, rather than building a fresh one from
-	// mempool -- proposing anything else here would just force other
-	// (correctly) locked validators to prevote nil, stalling the round for
-	// no reason. This is the liveness half of Proof-of-Lock-Change: the
-	// safety half (lockCompliesLocked, in prevote()) is what actually
-	// prevents a fork; this half is what lets the network still make
-	// progress once a value has a Polka behind it instead of stalling
-	// forever.
-	validRound := -1
 	var block *types.Block
 	var err error
-	if revalidBlock != nil {
-		block = revalidBlock
-		validRound = revalidRound
+	if len(txs) == 0 {
+		block, err = e.node.CreateBlock(nil)
 	} else {
-		txs := e.node.GetMempool()
-		if len(txs) == 0 {
-			fmt.Println("PROPOSE: Mempool empty, creating empty block proposal.")
-			block, err = e.node.CreateBlock(nil)
-		} else {
-			block, err = e.node.CreateBlock(txs)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to build block: %w", err)
-		}
+		block, err = e.node.CreateBlock(txs)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to build block: %w", err)
 	}
 	if block == nil || block.Header == nil {
 		return fmt.Errorf("proposed block missing header")
@@ -460,7 +391,11 @@ func (e *Engine) propose() error {
 		return fmt.Errorf("local block validation failed: %w", err)
 	}
 
-	proposal := &Proposal{Block: block, Round: round, ValidRound: validRound}
+	e.mu.RLock()
+	round := e.currentState.Round
+	e.mu.RUnlock()
+
+	proposal := &Proposal{Block: block, Round: round}
 	proposalHash := sha256.Sum256(proposal.bytes())
 	sig, err := ethcrypto.Sign(proposalHash[:], e.privKey.PrivateKey)
 	if err != nil {
@@ -499,23 +434,6 @@ func (e *Engine) prevote() {
 	}
 	round := e.currentState.Round
 	height := e.currentState.Height
-
-	// NHB-AUDIT-C1: this is the safety half of Proof-of-Lock-Change. Refuse
-	// to prevote a block that conflicts with an earlier lock unless this
-	// validator ITSELF independently observed enough voting power move on
-	// (see lockCompliesLocked/polkaHistory) -- never merely because the
-	// proposer's message claims it. This is what makes it impossible for
-	// two different quorums to each commit a different block at this
-	// height, no matter how round timeouts and message delays play out.
-	if !e.lockCompliesLocked(e.activeProposal.Proposal, blockHash) {
-		e.prevoteSent = true
-		reason := fmt.Sprintf("proposal for round %d (validRound=%d) conflicts with lock at round %d",
-			round, e.activeProposal.Proposal.ValidRound, e.lockedRound)
-		e.broadcastPrevoteNilLocked(reason)
-		e.mu.Unlock()
-		fmt.Printf("PREVOTE NIL: refusing to prevote a locked-conflicting proposal: %s\n", reason)
-		return
-	}
 	e.prevoteSent = true
 	e.mu.Unlock()
 
@@ -542,58 +460,6 @@ func (e *Engine) prevote() {
 	if reachedPrecommit {
 		e.commit()
 	}
-}
-
-// lockCompliesLocked reports whether prevoting for blockHash (the hash of
-// proposal.Block) is safe given this validator's current lock state. Must
-// be called with e.mu held. This directly implements Tendermint's
-// Proof-of-Lock-Change rule:
-//
-//   - proposal.ValidRound < 0 (a fresh value, not a re-proposal): allowed
-//     only if this validator is unlocked, or the proposed block IS the
-//     locked block.
-//   - proposal.ValidRound >= 0 (proposer claims a Polka at that round):
-//     allowed only if (a) the claimed round is strictly earlier than this
-//     proposal's own round, (b) this validator itself independently
-//     recorded a Polka for this EXACT block at that round (polkaHistory --
-//     the proposer's claim alone is never trusted), and (c) this
-//     validator's lock (if any) is from that round or earlier, or already
-//     matches this block.
-func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte) bool {
-	if proposal == nil {
-		return false
-	}
-	vr := proposal.ValidRound
-	if vr < 0 {
-		if e.lockedRound < 0 {
-			return true
-		}
-		return bytes.Equal(e.lockedBlockHashLocked(), blockHash)
-	}
-	if vr >= proposal.Round {
-		return false
-	}
-	rec, ok := e.polkaHistory[vr]
-	if !ok || !bytes.Equal(rec.blockHash, blockHash) {
-		return false
-	}
-	if e.lockedRound < 0 || e.lockedRound <= vr {
-		return true
-	}
-	return bytes.Equal(e.lockedBlockHashLocked(), blockHash)
-}
-
-// lockedBlockHashLocked returns the header hash of e.lockedBlock, or nil if
-// unlocked or the hash cannot be computed. Must be called with e.mu held.
-func (e *Engine) lockedBlockHashLocked() []byte {
-	if e.lockedBlock == nil || e.lockedBlock.Header == nil {
-		return nil
-	}
-	hash, err := e.lockedBlock.Header.Hash()
-	if err != nil {
-		return nil
-	}
-	return hash
 }
 
 func (e *Engine) precommit() {
@@ -659,8 +525,8 @@ func (e *Engine) commit() bool {
 	fmt.Printf("COMMIT: Attempting to commit block %d.\n", block.Header.Height)
 	if err := e.node.CommitBlock(block); err != nil {
 		fmt.Printf("failed to commit block: %v\n", err)
-		e.broadcastPrevoteNilLocked(fmt.Sprintf("execution failure: %v", err)) // assumes lock is held
-		e.resetProposalStateLocked()                                          // reset for next round; lock/valid state deliberately untouched, see resetLockStateLocked
+		e.broadcastPrevoteNilLocked(err) // assumes lock is held
+		e.resetProposalStateLocked()     // reset for next round
 		return false
 	}
 	fmt.Printf("COMMIT: Successfully committed block %d.\n", block.Header.Height)
@@ -668,7 +534,6 @@ func (e *Engine) commit() bool {
 	e.committedBlocks[e.currentState.Height] = true
 	e.currentState.Height++
 	e.currentState.Round = 0
-	e.resetLockStateLocked()
 	e.activeProposal = nil
 	e.prevoteSent = false
 	e.precommitSent = false
@@ -891,27 +756,6 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 
 	reachedPrevote := e.hasTwoThirdsPowerLocked(Prevote)
 	reachedPrecommit := e.hasTwoThirdsPowerLocked(Precommit)
-
-	// NHB-AUDIT-C1: the instant >=2/3 voting power prevotes this round's
-	// block for the FIRST time (a Polka), lock onto it for the rest of this
-	// height and remember it happened at this round -- both are read by
-	// lockCompliesLocked/propose() to enforce/continue Proof-of-Lock-Change.
-	// Guarded by polkaHistory's own presence check so a Polka is recorded
-	// (and the lock set) at most once per round, and the lock is never
-	// weakened by later, redundant vote arrivals in the same round.
-	if v.Vote.Type == Prevote && reachedPrevote {
-		round := e.currentState.Round
-		if _, already := e.polkaHistory[round]; !already {
-			block := e.activeProposal.Proposal.Block
-			hashCopy := append([]byte(nil), expectedHash...)
-			e.polkaHistory[round] = polkaRecord{block: block, blockHash: hashCopy}
-			e.validBlock = block
-			e.validRound = round
-			e.lockedBlock = block
-			e.lockedRound = round
-		}
-	}
-
 	return true, reachedPrevote, reachedPrecommit
 }
 
@@ -928,7 +772,7 @@ func stopTimer(t *time.Timer) {
 }
 
 // NOTE: called with e.mu **locked**
-func (e *Engine) broadcastPrevoteNilLocked(reason string) {
+func (e *Engine) broadcastPrevoteNilLocked(execErr error) {
 	if e.broadcaster == nil {
 		return
 	}
@@ -952,7 +796,7 @@ func (e *Engine) broadcastPrevoteNilLocked(reason string) {
 		fmt.Printf("failed to broadcast prevote nil: %v\n", err)
 		return
 	}
-	fmt.Printf("PREVOTE NIL: Broadcasting nil vote: %s\n", reason)
+	fmt.Printf("PREVOTE NIL: Broadcasting nil vote due to execution failure: %v\n", execErr)
 }
 
 // NOTE: called with e.mu **locked**
@@ -1005,7 +849,6 @@ func (e *Engine) startNewRound() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	heightBefore := e.currentState.Height
 	if !e.syncHeightWithNodeLocked() {
 		if e.committedBlocks[e.currentState.Height] {
 			delete(e.committedBlocks, e.currentState.Height)
@@ -1015,15 +858,6 @@ func (e *Engine) startNewRound() {
 		} else {
 			e.currentState.Round++
 		}
-	}
-	// NHB-AUDIT-C1: a round TIMING OUT must never clear the lock -- that
-	// was the exact bug (see the Engine struct's lockedBlock doc comment).
-	// The lock/valid/polka state is per-HEIGHT, so it's only ever reset
-	// here when this call actually advanced the height (via the resync or
-	// catch-up branches above), never on an ordinary same-height round
-	// bump.
-	if e.currentState.Height != heightBefore {
-		e.resetLockStateLocked()
 	}
 	e.activeProposal = nil
 	e.prevoteSent = false
@@ -1035,19 +869,6 @@ func (e *Engine) startNewRound() {
 	}
 	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
-}
-
-// resetLockStateLocked clears all Proof-of-Lock-Change state. Must be
-// called with e.mu held, and only when the engine is genuinely moving to a
-// new height (a lock/valid/polka observation from height H must never
-// leak into height H+1's decisions) -- never merely because a round timed
-// out within the same height.
-func (e *Engine) resetLockStateLocked() {
-	e.lockedBlock = nil
-	e.lockedRound = -1
-	e.validBlock = nil
-	e.validRound = -1
-	e.polkaHistory = make(map[int]polkaRecord)
 }
 
 func (e *Engine) syncHeightWithNodeLocked() bool {
@@ -1254,22 +1075,8 @@ func (e *Engine) verifySignedProposal(p *SignedProposal) error {
 	if p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
 		return fmt.Errorf("proposal missing block header")
 	}
-	// NHB-AUDIT-C1: a re-proposal (ValidRound >= 0) legitimately carries an
-	// earlier round's original author in Header.Validator -- changing it
-	// would change the block's hash, breaking the whole point of
-	// re-proposing the SAME value that earlier reached a Polka -- while
-	// p.Proposer is whoever is actually proposing THIS round. These are
-	// only required to match for a fresh proposal (ValidRound < 0), where
-	// Header.Validator is set by the proposer building a brand new block.
-	// p.Proposer's signature over the full payload is still verified
-	// below either way, and lockCompliesLocked independently re-checks the
-	// ValidRound claim against this validator's own polka history before
-	// anyone acts on it -- relaxing this specific equality check does not
-	// weaken authentication.
-	if p.Proposal.ValidRound < 0 {
-		if !bytes.Equal(p.Proposer, p.Proposal.Block.Header.Validator) {
-			return fmt.Errorf("proposal proposer mismatch")
-		}
+	if !bytes.Equal(p.Proposer, p.Proposal.Block.Header.Validator) {
+		return fmt.Errorf("proposal proposer mismatch")
 	}
 
 	hash := sha256.Sum256(p.Proposal.bytes())
