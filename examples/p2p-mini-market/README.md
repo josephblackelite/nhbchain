@@ -8,6 +8,16 @@ legs, and settle or dispute the trade.
 The UI is intentionally transparent: both wallets live side-by-side so it is
 easy to drive end-to-end QA scenarios.
 
+**Retired RPC methods: this demo's core trade flow is currently non-functional.** `p2p_createTrade`,
+`p2p_settle`, `p2p_dispute`, `p2p_resolve`, and `escrow_fund` all used to mutate validator-local state
+directly outside the block pipeline, which guarantees a consensus fork/halt on this chain's
+2-validator zero-quorum-slack topology -- the node's RPC layer now returns `410 Gone` for every one of
+them unconditionally (see `rpc/p2p_handlers.go`'s `p2pRPCDisabledMessage` and `rpc/escrow_handlers.go`'s
+`escrowRPCDisabledMessage`). There is no signed-transaction replacement for this specific dual-lock
+escrow flow yet. The chain's live P2P market feature (order-book style listing/fill/cancel via
+`TX_TYPE_MARKET_CREATE_LISTING`/`FILL`/`CANCEL` over `nhb_sendTransaction`) is unaffected and still
+works, but it is a different trade model from the one this demo's UI walks through below.
+
 ## Getting started
 
 ```bash

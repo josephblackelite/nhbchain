@@ -11,6 +11,13 @@ the request body) and none of them are verified against who is actually making t
 public network without first adding real per-visitor authentication (e.g. a wallet-signature challenge) in front of every
 call.
 
+**Retired RPC methods: `creator_publish`, `creator_tip`, `creator_stake`, and `creator_unstake` are currently disabled.**
+They used to mutate validator-local state directly outside the block pipeline, which guarantees a consensus fork/halt on
+this chain's 2-validator zero-quorum-slack topology, so the node's RPC layer now returns `410 Gone` for all four
+unconditionally (see `rpc/creator_handlers.go`'s `creatorRPCDisabledMessage`). Every call this demo's publish/tip/stake/
+unstake UI makes will fail until a signed-transaction replacement ships -- there is no working alternative flow yet, so
+this UI's write actions are non-functional today, not just insecure.
+
 ## Getting started
 
 ```bash
