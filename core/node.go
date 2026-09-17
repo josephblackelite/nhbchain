@@ -5948,7 +5948,13 @@ func (n *Node) sweepMilestoneDueLegsLocked(manager *nhbstate.Manager, project *e
 }
 
 // EscrowMilestoneCreate persists a new milestone project to state.
-func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject) (*escrow.MilestoneProject, error) {
+// NHB-AUDIT-C3: signature must be a wallet signature over the canonical
+// envelope built from project's own fields (see
+// escrow.RecoverMilestoneCreateSigner) -- the recovered signer, not
+// project.Payer as supplied by the caller, is what authorizes naming that
+// address as payer. Without this, anyone could create a project naming
+// an arbitrary victim as payer with zero proof of consent.
+func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject, signature []byte) (*escrow.MilestoneProject, error) {
 	if n == nil || n.state == nil {
 		return nil, fmt.Errorf("node or state unavailable")
 	}
@@ -5960,6 +5966,13 @@ func (n *Node) EscrowMilestoneCreate(project *escrow.MilestoneProject) (*escrow.
 	}
 	if project.Payee == ([20]byte{}) {
 		return nil, fmt.Errorf("escrow: milestone payee required")
+	}
+	signer, err := escrow.RecoverMilestoneCreateSigner(project, signature)
+	if err != nil {
+		return nil, fmt.Errorf("escrow: verify milestone create signature: %w", err)
+	}
+	if signer != project.Payer {
+		return nil, milestoneUnauthorized("payer")
 	}
 	engine := escrow.NewMilestoneEngine(func() time.Time { return n.currentTime() })
 	if err := engine.CreateProject(project); err != nil {
@@ -5998,7 +6011,14 @@ func (n *Node) EscrowMilestoneGet(id [32]byte) (*escrow.MilestoneProject, error)
 }
 
 // EscrowMilestoneFund transitions a milestone leg into the funded state.
-func (n *Node) EscrowMilestoneFund(id [32]byte, legID uint64, caller [20]byte) error {
+// NHB-AUDIT-C3: the authorized caller is derived solely from signature
+// (see escrow.RecoverMilestoneActionSigner) -- there is no separate
+// trusted caller parameter to spoof.
+func (n *Node) EscrowMilestoneFund(id [32]byte, legID uint64, signature []byte) error {
+	caller, err := escrow.RecoverMilestoneActionSigner(id, legID, escrow.MilestoneActionFund, nil, signature)
+	if err != nil {
+		return fmt.Errorf("escrow: verify milestone fund signature: %w", err)
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	manager := nhbstate.NewManager(n.state.Trie)
@@ -6052,7 +6072,12 @@ func (n *Node) EscrowMilestoneFund(id [32]byte, legID uint64, caller [20]byte) e
 }
 
 // EscrowMilestoneRelease releases a funded milestone leg to the payee.
-func (n *Node) EscrowMilestoneRelease(id [32]byte, legID uint64, caller [20]byte) error {
+// NHB-AUDIT-C3: see EscrowMilestoneFund's doc comment.
+func (n *Node) EscrowMilestoneRelease(id [32]byte, legID uint64, signature []byte) error {
+	caller, err := escrow.RecoverMilestoneActionSigner(id, legID, escrow.MilestoneActionRelease, nil, signature)
+	if err != nil {
+		return fmt.Errorf("escrow: verify milestone release signature: %w", err)
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	manager := nhbstate.NewManager(n.state.Trie)
@@ -6103,7 +6128,12 @@ func (n *Node) EscrowMilestoneRelease(id [32]byte, legID uint64, caller [20]byte
 }
 
 // EscrowMilestoneCancel cancels a milestone leg.
-func (n *Node) EscrowMilestoneCancel(id [32]byte, legID uint64, caller [20]byte) error {
+// NHB-AUDIT-C3: see EscrowMilestoneFund's doc comment.
+func (n *Node) EscrowMilestoneCancel(id [32]byte, legID uint64, signature []byte) error {
+	caller, err := escrow.RecoverMilestoneActionSigner(id, legID, escrow.MilestoneActionCancel, nil, signature)
+	if err != nil {
+		return fmt.Errorf("escrow: verify milestone cancel signature: %w", err)
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	manager := nhbstate.NewManager(n.state.Trie)
@@ -6157,8 +6187,15 @@ func (n *Node) EscrowMilestoneCancel(id [32]byte, legID uint64, caller [20]byte)
 }
 
 // EscrowMilestoneSubscriptionUpdate updates the subscription toggle for a
-// milestone project.
-func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, caller [20]byte, active bool) (*escrow.MilestoneProject, error) {
+// milestone project. NHB-AUDIT-C3: see EscrowMilestoneFund's doc comment;
+// active also travels inside the signed envelope (see
+// escrow.RecoverMilestoneActionSigner) so a signature authorizing one
+// toggle direction can never be replayed to mean the other.
+func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, active bool, signature []byte) (*escrow.MilestoneProject, error) {
+	caller, err := escrow.RecoverMilestoneActionSigner(id, 0, escrow.MilestoneActionSubscriptionUpdate, &active, signature)
+	if err != nil {
+		return nil, fmt.Errorf("escrow: verify milestone subscription signature: %w", err)
+	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	manager := nhbstate.NewManager(n.state.Trie)

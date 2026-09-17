@@ -2,9 +2,19 @@
 
 This document describes the live milestone escrow workflow exposed through JSON-RPC. Milestone projects are persisted in node state, funded legs lock value into deterministic vault addresses, releases settle to the payee, and funded overdue legs are automatically refunded to the payer when the project is read or mutated.
 
+## Authorization
+
+Every mutating milestone RPC (`escrow_milestoneCreate`, `escrow_milestoneFund`, `escrow_milestoneRelease`, `escrow_milestoneCancel`, `escrow_milestoneSubscriptionUpdate`) requires a wallet signature from the project's payer instead of a plain `caller`/`payer` address field -- the authorized party is derived solely by recovering the signer of a canonical envelope, never trusted from client-supplied text. Each call takes a `signature` parameter (65-byte secp256k1, hex-encoded) over a JSON envelope built from that exact call's own fields (see `native/escrow/engine_milestone_signature.go`'s `MilestoneActionEnvelope`/`MilestoneCreateEnvelope`):
+
+- `escrow_milestoneCreate` signs `{action:"milestoneCreate", payer, payee, realm, meta, legs, subscription}` (addresses as raw hex, matching classic escrow's `CreateWithSignature` convention) -- the recovered signer must equal the claimed `payer`.
+- `escrow_milestoneFund` / `escrow_milestoneRelease` / `escrow_milestoneCancel` sign `{action:"milestoneFund"|"milestoneRelease"|"milestoneCancel", projectId, legId}`.
+- `escrow_milestoneSubscriptionUpdate` signs `{action:"milestoneSubscriptionUpdate", projectId, active}` -- the toggle's target value travels inside the signed envelope so a signature for one direction can never be replayed for the other.
+
+Every action string is part of what gets signed, so a signature produced for one action (or one leg, or one toggle direction) can never be replayed to authorize a different one.
+
 ## Project lifecycle
 
-1. **Creation** - The payer prepares the project graph with a sequence of legs. Each leg declares:
+1. **Creation** - The payer prepares the project graph with a sequence of legs and signs the create envelope. Each leg declares:
    - A deterministic `id` (monotonic per project).
    - Its semantic `type`: `deliverable` for fixed-scope work or `timebox` for subscription-style retainers.
    - Funding token, amount, descriptive metadata, and a deadline.
