@@ -1151,6 +1151,22 @@ var genesisNHBSupplyWei = func() *big.Int {
 // has zero callers; applyMintTransaction is what TxTypeMint actually runs,
 // and it never called AdjustTokenSupply until today).
 func (sp *StateProcessor) SeedGenesisNHBSupplyOnce() error {
+	// NHB-AUDIT-C9: genesisNHBSupplyWei is a fixed historical fact about
+	// ONE specific chain's history (see its own doc comment) -- guarded
+	// only by the once-flag below, this ran unconditionally on ANY
+	// genesis, including a fresh relaunch with a completely different
+	// real allocation (e.g. the untracked config/genesis.relaunch.json
+	// already present in this repo's working tree, alloc 100,000 NHB, not
+	// 10,000), silently seeding the wrong constant at block 1 and locking
+	// it in permanently via the flag. Gate against the specific chain
+	// this constant was computed for. Fails OPEN (runs the repair) only
+	// when swapVoucherChainID is the zero value -- i.e. genuinely unset,
+	// as in a test harness that never wires up a real chain id via
+	// SetSwapVoucherChainID -- so this cannot silently regress every
+	// existing test's behavior; a real node's chain id is never zero.
+	if sp.swapVoucherChainID != 0 && sp.swapVoucherChainID != MintChainID {
+		return nil
+	}
 	manager := nhbstate.NewManager(sp.Trie)
 	seeded, err := manager.NHBSupplyGenesisSeeded()
 	if err != nil {
@@ -1208,6 +1224,12 @@ var nhbMintSupplyDriftWei = func() *big.Int {
 // SeedGenesisNHBSupplyOnce's shape exactly: adds a fixed, known amount
 // rather than resolving to a live-recomputed total.
 func (sp *StateProcessor) ReconcileNHBMintSupplyDriftOnce() error {
+	// NHB-AUDIT-C9: same reasoning as SeedGenesisNHBSupplyOnce's guard --
+	// nhbMintSupplyDriftWei is a fixed historical fact computed for one
+	// specific chain's history and must never apply to a different one.
+	if sp.swapVoucherChainID != 0 && sp.swapVoucherChainID != MintChainID {
+		return nil
+	}
 	manager := nhbstate.NewManager(sp.Trie)
 	reconciled, err := manager.NHBMintSupplyDriftReconciled()
 	if err != nil {
