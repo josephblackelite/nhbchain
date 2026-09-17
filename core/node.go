@@ -7906,6 +7906,28 @@ func (n *Node) SwapRiskParams() (swap.RedeemRiskParameters, error) {
 	return redeem, nil
 }
 
+// RedemptionFeeParams returns the currently-effective redemption fee policy
+// (rate plus floor/cap) -- the governance param store's value if a
+// policy.redemptionFeeParams proposal has ever executed, otherwise the
+// built-in default (see native/swap/redemption_fee.go's Default*
+// constants), read fresh from state on every call. Backs the public
+// swap_getRedemptionFeeParams RPC method, mirroring SwapRiskParams exactly.
+func (n *Node) RedemptionFeeParams() (swap.RedemptionFeeParameters, error) {
+	var params swap.RedemptionFeeParameters
+	err := n.WithState(func(m *nhbstate.Manager) error {
+		resolved, err := n.state.effectiveRedemptionFeeParameters(m)
+		if err != nil {
+			return err
+		}
+		params = resolved
+		return nil
+	})
+	if err != nil {
+		return swap.RedemptionFeeParameters{}, err
+	}
+	return params, nil
+}
+
 // LendingFixedTermRateSchedule returns the currently-effective tenure->rate
 // table for fixed-term lending borrows: the governance param store's value
 // if a policy.lendingRateSchedule proposal has ever executed, otherwise the

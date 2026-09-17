@@ -1913,6 +1913,113 @@ func TestSubmitSwapRiskParamsProposalRejectsBadOrdering(t *testing.T) {
 	}
 }
 
+// TestExecuteRedemptionFeeParamsProposal mirrors
+// TestExecuteSwapRiskParamsProposal exactly: submit -> force Passed -> queue
+// -> timelock elapses -> execute -> confirm all three redemption fee
+// param-store keys hold the proposal's values.
+func TestExecuteRedemptionFeeParamsProposal(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 13
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	now := time.Unix(1_700_300_000, 0).UTC()
+	engine.SetNowFunc(func() time.Time { return now })
+
+	payload := `{"feeBps":250,"feeFloorWei":"1000000000000000000","feeCapWei":"1000000000000000000000","memo":"raise to 2.5%"}`
+	proposalID, err := engine.SubmitProposal(proposer, ProposalKindRedemptionFeeParams, payload, big.NewInt(75))
+	if err != nil {
+		t.Fatalf("submit redemption fee params proposal: %v", err)
+	}
+	proposal := state.proposals[proposalID]
+	proposal.Status = ProposalStatusPassed
+
+	if err := engine.QueueExecution(proposalID); err != nil {
+		t.Fatalf("queue redemption fee params proposal: %v", err)
+	}
+	proposal = state.proposals[proposalID]
+	proposal.TimelockEnd = now.Add(-time.Second)
+	engine.SetNowFunc(func() time.Time { return now.Add(time.Minute) })
+	if err := engine.Execute(proposalID); err != nil {
+		t.Fatalf("execute redemption fee params proposal: %v", err)
+	}
+
+	assertParam := func(key string, want string) {
+		t.Helper()
+		got, ok := state.params[key]
+		if !ok {
+			t.Fatalf("expected param %s to be set", key)
+		}
+		if string(got) != want {
+			t.Fatalf("param %s = %s, want %s", key, got, want)
+		}
+	}
+	assertParam(ParamKeyRedemptionFeeBps, "250")
+	assertParam(ParamKeyRedemptionFeeFloorWei, "1000000000000000000")
+	assertParam(ParamKeyRedemptionFeeCapWei, "1000000000000000000000")
+}
+
+// TestSubmitRedemptionFeeParamsProposalRejectsOutOfRangeBps mirrors
+// TestSubmitBuybackParamsProposalRejectsOutOfRangeBps.
+func TestSubmitRedemptionFeeParamsProposalRejectsOutOfRangeBps(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 14
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	engine.SetNowFunc(func() time.Time { return time.Unix(1_700_300_000, 0).UTC() })
+
+	payload := `{"feeBps":10001,"feeFloorWei":"1","feeCapWei":"1000"}`
+	if _, err := engine.SubmitProposal(proposer, ProposalKindRedemptionFeeParams, payload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected submission to reject feeBps > 10000")
+	}
+}
+
+// TestSubmitRedemptionFeeParamsProposalRejectsFloorAboveCap covers
+// parseRedemptionFeeParamsPayload's ordering check: a floor above its own
+// cap must be rejected at submission time, before any deposit is locked or
+// proposal created.
+func TestSubmitRedemptionFeeParamsProposalRejectsFloorAboveCap(t *testing.T) {
+	var proposer [20]byte
+	proposer[3] = 15
+
+	state := newMockGovernanceState(map[[20]byte]*types.Account{
+		proposer: &types.Account{BalanceZNHB: big.NewInt(1000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)},
+	})
+
+	engine := NewEngine()
+	engine.SetState(state)
+	engine.SetPolicy(ProposalPolicy{
+		MinDepositWei:       big.NewInt(50),
+		VotingPeriodSeconds: 60,
+		TimelockSeconds:     10,
+	})
+	engine.SetNowFunc(func() time.Time { return time.Unix(1_700_300_000, 0).UTC() })
+
+	payload := `{"feeBps":100,"feeFloorWei":"2000","feeCapWei":"1000"}`
+	if _, err := engine.SubmitProposal(proposer, ProposalKindRedemptionFeeParams, payload, big.NewInt(75)); err == nil {
+		t.Fatalf("expected submission to reject feeFloorWei (2000) exceeding feeCapWei (1000)")
+	}
+}
+
 // TestSwapPriceSignerProposalDeterministicAcrossValidators simulates two
 // independent validators (two separate mockGovernanceState instances seeded
 // identically) executing the identical queued proposal payload, and asserts

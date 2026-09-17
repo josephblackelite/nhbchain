@@ -1038,7 +1038,7 @@ func isPublicSwapMethod(method string) bool {
 	case "swap_submitVoucher", "swap_voucher_get", "swap_voucher_list", "swap_voucher_export",
 		"nhb_requestSwapApproval", "nhb_swapMint", "nhb_swapBurn", "nhb_getSwapStatus",
 		"nhb_getSwapQuote", "nhb_checkSwapAllowance", "nhb_getOraclePrice",
-		"swap_getRiskParams":
+		"swap_getRiskParams", "swap_getRedemptionFeeParams":
 		return true
 	default:
 		return false
@@ -1407,6 +1407,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleMintWithSig(recorder, r, req)
 	case "swap_getRiskParams":
 		s.handleSwapGetRiskParams(recorder, r, req)
+	case "swap_getRedemptionFeeParams":
+		s.handleSwapGetRedemptionFeeParams(recorder, r, req)
 	case "swap_submitVoucher":
 		s.handleSwapSubmitVoucher(recorder, r, req)
 	case "swap_voucher_get":
