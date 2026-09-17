@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -59,18 +60,31 @@ func (lr *lendingRoutes) mount(r chi.Router) {
 	r.Post("/withdraw", lr.withdrawAsset)
 	r.Post("/borrow", lr.borrowAsset)
 	r.Post("/repay", lr.repayAsset)
+	r.Post("/collateral/deposit", lr.depositCollateral)
+	r.Post("/collateral/withdraw", lr.withdrawCollateral)
+	r.Post("/liquidate", lr.liquidate)
 }
 
-func (lr *lendingRoutes) context(parent context.Context) (context.Context, context.CancelFunc) {
+// context builds the outbound gRPC context for r, forwarding the caller's
+// Authorization header as gRPC metadata -- lending/server/auth.go's
+// authenticator reads it from incoming metadata via
+// metadata.FromIncomingContext, so without this every collateral/liquidate
+// call reaches the lending service with no credentials at all, regardless
+// of what the HTTP caller supplied.
+func (lr *lendingRoutes) context(r *http.Request) (context.Context, context.CancelFunc) {
 	timeout := lr.timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return context.WithTimeout(parent, timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); auth != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", auth)
+	}
+	return ctx, cancel
 }
 
 func (lr *lendingRoutes) listMarkets(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.ListMarkets(ctx, &lendingv1.ListMarketsRequest{})
@@ -88,7 +102,7 @@ func (lr *lendingRoutes) getMarket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.GetMarket(ctx, req)
@@ -106,7 +120,7 @@ func (lr *lendingRoutes) getPosition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.GetPosition(ctx, req)
@@ -124,7 +138,7 @@ func (lr *lendingRoutes) supplyAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.SupplyAsset(ctx, req)
@@ -142,7 +156,7 @@ func (lr *lendingRoutes) withdrawAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.WithdrawAsset(ctx, req)
@@ -160,7 +174,7 @@ func (lr *lendingRoutes) borrowAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.BorrowAsset(ctx, req)
@@ -178,10 +192,64 @@ func (lr *lendingRoutes) repayAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := lr.context(r.Context())
+	ctx, cancel := lr.context(r)
 	defer cancel()
 
 	resp, err := lr.client.RepayAsset(ctx, req)
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProtoJSON(w, lr.marshal, resp)
+}
+
+func (lr *lendingRoutes) depositCollateral(w http.ResponseWriter, r *http.Request) {
+	req := &lendingv1.DepositCollateralRequest{}
+	if err := lr.decodeRequest(r, req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+
+	ctx, cancel := lr.context(r)
+	defer cancel()
+
+	resp, err := lr.client.DepositCollateral(ctx, req)
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProtoJSON(w, lr.marshal, resp)
+}
+
+func (lr *lendingRoutes) withdrawCollateral(w http.ResponseWriter, r *http.Request) {
+	req := &lendingv1.WithdrawCollateralRequest{}
+	if err := lr.decodeRequest(r, req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+
+	ctx, cancel := lr.context(r)
+	defer cancel()
+
+	resp, err := lr.client.WithdrawCollateral(ctx, req)
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProtoJSON(w, lr.marshal, resp)
+}
+
+func (lr *lendingRoutes) liquidate(w http.ResponseWriter, r *http.Request) {
+	req := &lendingv1.LiquidateRequest{}
+	if err := lr.decodeRequest(r, req); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+
+	ctx, cancel := lr.context(r)
+	defer cancel()
+
+	resp, err := lr.client.Liquidate(ctx, req)
 	if err != nil {
 		writeGRPCError(w, err)
 		return
