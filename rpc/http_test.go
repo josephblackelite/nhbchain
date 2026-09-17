@@ -1067,6 +1067,128 @@ func TestHandleSendTransactionForgetsStaleDuplicateHash(t *testing.T) {
 	}
 }
 
+// NHB-AUDIT-P1: Transaction.Hash() covers only unsigned fields, so two
+// different senders submitting field-identical transactions (same
+// recipient/value/nonce/gas) produce an identical hash despite being
+// genuinely different, independently-signed transactions. The RPC's
+// duplicate-hash short-circuit used to treat the second sender's
+// submission as "already known" purely on that hash match, silently
+// dropping their real transaction and handing back the first sender's
+// hash as if it were their own -- a zero-funds attacker could deliberately
+// craft a colliding transaction to obtain a "confirmed" receipt for a
+// payment they never funded. This test proves the second, genuinely
+// different sender's transaction is now actually admitted to the mempool
+// instead of being silently discarded.
+func TestHandleSendTransactionAdmitsGenuineHashCollisionFromDifferentSender(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	node, err := core.NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	node.SetTransactionSimulationEnabled(false)
+
+	senderAKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender A key: %v", err)
+	}
+	senderBKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender B key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAAddr := senderAKey.PubKey().Address().Bytes()
+	senderBAddr := senderBKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		if err := m.PutAccount(senderAAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0), Nonce: 0}); err != nil {
+			return err
+		}
+		if err := m.PutAccount(senderBAddr, &types.Account{BalanceNHB: big.NewInt(1_000_000_000_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0), Nonce: 0}); err != nil {
+			return err
+		}
+		return m.PutAccount(recipientAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0), Nonce: 0})
+	}); err != nil {
+		t.Fatalf("seed accounts: %v", err)
+	}
+
+	// Field-identical except for who signs -- this is exactly what makes
+	// them collide on Hash() despite being two genuinely different,
+	// independently-signed transactions.
+	buildTx := func() *types.Transaction {
+		return &types.Transaction{
+			ChainID:  types.NHBChainID(),
+			Type:     types.TxTypeTransfer,
+			Nonce:    0,
+			To:       append([]byte(nil), recipientAddr...),
+			Value:    big.NewInt(123),
+			GasLimit: 21_000,
+			GasPrice: big.NewInt(1),
+		}
+	}
+
+	txA := buildTx()
+	if err := txA.Sign(senderAKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction A: %v", err)
+	}
+	txB := buildTx()
+	if err := txB.Sign(senderBKey.PrivateKey); err != nil {
+		t.Fatalf("sign transaction B: %v", err)
+	}
+
+	hashA, err := txA.Hash()
+	if err != nil {
+		t.Fatalf("hash transaction A: %v", err)
+	}
+	hashB, err := txB.Hash()
+	if err != nil {
+		t.Fatalf("hash transaction B: %v", err)
+	}
+	if !bytes.Equal(hashA, hashB) {
+		t.Fatalf("expected txA and txB to collide on hash by construction, got %x vs %x", hashA, hashB)
+	}
+
+	server := newTestServer(t, node, nil, ServerConfig{})
+
+	paramA, err := json.Marshal(txA)
+	if err != nil {
+		t.Fatalf("marshal transaction A: %v", err)
+	}
+	recorderA := httptest.NewRecorder()
+	server.handleSendTransaction(recorderA, httptest.NewRequest(http.MethodPost, "/", nil), &RPCRequest{ID: 1, Params: []json.RawMessage{paramA}})
+	if recorderA.Code != http.StatusOK {
+		t.Fatalf("expected sender A submission to succeed, got %d body=%s", recorderA.Code, recorderA.Body.String())
+	}
+	if got := node.MempoolSize(); got != 1 {
+		t.Fatalf("expected sender A's transaction alone in the mempool, got size %d", got)
+	}
+
+	paramB, err := json.Marshal(txB)
+	if err != nil {
+		t.Fatalf("marshal transaction B: %v", err)
+	}
+	recorderB := httptest.NewRecorder()
+	server.handleSendTransaction(recorderB, httptest.NewRequest(http.MethodPost, "/", nil), &RPCRequest{ID: 2, Params: []json.RawMessage{paramB}})
+	if recorderB.Code != http.StatusOK {
+		t.Fatalf("expected sender B submission to succeed (not rejected), got %d body=%s", recorderB.Code, recorderB.Body.String())
+	}
+
+	// The real, load-bearing assertion: sender B's genuinely distinct,
+	// validly-signed transaction must actually be admitted, not silently
+	// dropped because its hash collided with sender A's.
+	if got := node.MempoolSize(); got != 2 {
+		t.Fatalf("expected BOTH senders' transactions to be admitted to the mempool despite the hash collision, got size %d", got)
+	}
+}
+
 func TestHandleGetBalanceRejectsMalformedAddress(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	recorder := httptest.NewRecorder()

@@ -2644,15 +2644,44 @@ func (s *Server) forgetTx(hash string) {
 	delete(s.txSeen, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "0x")))
 }
 
-func (s *Server) transactionStillKnown(hash string) bool {
-	if s == nil || s.node == nil {
+// transactionKnownForSender reports whether the transaction matching hash
+// (in the mempool or already mined) was actually signed by sender.
+//
+// NHB-AUDIT-P1: Transaction.Hash() covers only unsigned fields (there is no
+// sender/signature component), so two different senders submitting
+// field-identical transactions (same recipient/amount/gas/nonce) produce an
+// identical hash despite being genuinely different, independently-signed
+// transactions. A plain hash-only lookup cannot distinguish "this exact
+// sender's transaction is already known" from "some OTHER sender's
+// colliding transaction happens to be known" -- treating the latter as a
+// duplicate would silently drop this sender's real, validly-signed
+// transaction and hand back a receipt that actually belongs to the other
+// sender, as if it were this sender's own. Callers must fall through to
+// normal processing (which validates against THIS sender's own
+// account/nonce) whenever this returns false, rather than short-circuiting.
+func (s *Server) transactionKnownForSender(hash string, sender []byte) bool {
+	if s == nil || s.node == nil || len(sender) == 0 {
 		return false
 	}
-	if s.node.HasPendingTransactionHash(hash) {
-		return true
+	if tx, ok := s.node.FindPendingTransactionByHash(hash); ok {
+		return transactionSenderMatches(tx, sender)
 	}
 	tx, _, _, _, err := s.findTransaction(hash)
-	return err == nil && tx != nil
+	if err == nil && tx != nil {
+		return transactionSenderMatches(tx, sender)
+	}
+	return false
+}
+
+func transactionSenderMatches(tx *types.Transaction, sender []byte) bool {
+	if tx == nil {
+		return false
+	}
+	existing, err := tx.From()
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(existing, sender)
 }
 
 func (s *Server) evictExpiredTxLocked(now time.Time) {
@@ -3044,14 +3073,24 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	}
 	hash := hex.EncodeToString(hashBytes)
 	if !s.rememberTx(hash, now) {
-		if s.transactionStillKnown(hash) {
+		// NHB-AUDIT-P1: a cache hit on hash alone is not proof this exact
+		// sender's transaction is the one already known -- see
+		// transactionKnownForSender's own doc comment. Only short-circuit
+		// when the matched transaction was genuinely signed by THIS
+		// sender; a hash collision from a different sender falls through
+		// to normal processing below instead, exactly as if the cache
+		// entry belonged to someone else's unrelated transaction (which
+		// it does).
+		if s.transactionKnownForSender(hash, from) {
 			writeResult(w, req.ID, "0x"+hash)
 			return
 		}
 		s.forgetTx(hash)
 		if !s.rememberTx(hash, now) {
-			writeResult(w, req.ID, "0x"+hash)
-			return
+			if s.transactionKnownForSender(hash, from) {
+				writeResult(w, req.ID, "0x"+hash)
+				return
+			}
 		}
 	}
 
