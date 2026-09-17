@@ -2831,12 +2831,26 @@ func (n *Node) MempoolSize() int {
 // HasPendingTransactionHash reports whether the current mempool contains a
 // transaction matching the provided canonical or 0x-prefixed hash.
 func (n *Node) HasPendingTransactionHash(hash string) bool {
+	tx, _ := n.FindPendingTransactionByHash(hash)
+	return tx != nil
+}
+
+// FindPendingTransactionByHash returns the mempool transaction matching the
+// provided canonical or 0x-prefixed hash, if any. NHB-AUDIT-P1: unlike
+// HasPendingTransactionHash's plain bool, this exposes the actual matched
+// transaction so a caller can recover ITS real sender (via tx.From()) and
+// compare it against a newly-submitted transaction's sender before treating
+// a hash match as "already known" -- Transaction.Hash() covers only
+// unsigned fields, so two different senders submitting field-identical
+// transactions produce an identical hash despite being genuinely different,
+// independently-signed transactions.
+func (n *Node) FindPendingTransactionByHash(hash string) (*types.Transaction, bool) {
 	if n == nil {
-		return false
+		return nil, false
 	}
 	normalized := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(hash), "0x"))
 	if normalized == "" {
-		return false
+		return nil, false
 	}
 
 	n.mempoolMu.Lock()
@@ -2851,11 +2865,11 @@ func (n *Node) HasPendingTransactionHash(hash string) bool {
 			continue
 		}
 		if strings.EqualFold(hex.EncodeToString(txHash), normalized) {
-			return true
+			return tx, true
 		}
 	}
 
-	return false
+	return nil, false
 }
 
 func transactionKey(tx *types.Transaction) (string, error) {
