@@ -35,15 +35,25 @@ func TestGetHealthDerivesFromWorkingMethods(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch body.Method {
 		case "lending_getUserAccount":
+			// NHB-AUDIT-S2: this mirrors the REAL response shape
+			// (rpc/lending_handlers.go's lendingAccountResult) -- nested
+			// supplied/borrowed arrays and collateralZnhbWei, not the
+			// flat collateralZNHB/supplyShares/debtNHB fields this test
+			// used to fake, which happened to round-trip cleanly against
+			// the (bug-for-bug matching) old AccountSnapshot without ever
+			// proving anything against what the node actually sends.
 			_, _ = w.Write([]byte(`{
 				"jsonrpc": "2.0",
 				"id": 1,
 				"result": {
 					"account": {
 						"address": "nhb1testaddress",
-						"collateralZNHB": "200",
-						"supplyShares": "0",
-						"debtNHB": "50"
+						"supplied": [],
+						"borrowed": [{"poolId": "default", "amountWei": "50", "valueUsd": "50"}],
+						"collateralZnhbWei": "200",
+						"collateralValueUsd": "200",
+						"borrowedValueUsd": "50",
+						"rewardsWei": "0"
 					}
 				}
 			}`))
@@ -83,6 +93,52 @@ func TestGetHealthDerivesFromWorkingMethods(t *testing.T) {
 	}
 	if health.RiskParameters.MaxLTV != 7500 {
 		t.Fatalf("expected risk parameters to be populated, got %+v", health.RiskParameters)
+	}
+}
+
+// TestListMarketsCallsTheRealRPCMethod proves the other half of
+// NHB-AUDIT-S2: ListMarkets used to call "lending_getPools", a method
+// that has never existed on the node (the real, registered method is
+// "lend_getPools" -- see rpc/http.go's method switch); every call failed
+// outright. This fake node only understands the real method name.
+func TestListMarketsCallsTheRealRPCMethod(t *testing.T) {
+	type rpcRequestBody struct {
+		Method string `json:"method"`
+		ID     int    `json:"id"`
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body rpcRequestBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body.Method != "lend_getPools" {
+			t.Fatalf("expected lend_getPools, got %q", body.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"result": {
+				"pools": [{"poolID": "default"}],
+				"riskParameters": {"maxLTV": 7500}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := rpcclient.NewClient(rpcclient.Config{BaseURL: server.URL, AllowInsecure: true})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	adapter := NewNodeAdapter(client)
+
+	markets, err := adapter.ListMarkets(context.Background())
+	if err != nil {
+		t.Fatalf("list markets: %v", err)
+	}
+	if len(markets) != 1 || markets[0].Market == nil || markets[0].Market.PoolID != "default" {
+		t.Fatalf("expected one decoded market, got %+v", markets)
 	}
 }
 

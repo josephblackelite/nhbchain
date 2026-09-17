@@ -68,10 +68,10 @@ func TestIntegration_LendingService(t *testing.T) {
 			}
 			return engine.Position{
 				Account: &engine.AccountSnapshot{
-					Address:        "  charlie  ",
-					SupplyShares:   " 100 ",
-					DebtNHB:        " 50 ",
-					CollateralZNHB: " 150 ",
+					Address:           "  charlie  ",
+					Supplied:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: " 100 "}},
+					Borrowed:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: " 50 "}},
+					CollateralZNHBWei: " 150 ",
 				},
 			}, nil
 		},

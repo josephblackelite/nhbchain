@@ -100,8 +100,11 @@ func (a *NodeAdapter) GetMarket(ctx context.Context, market string) (Market, err
 }
 
 func (a *NodeAdapter) ListMarkets(ctx context.Context) ([]Market, error) {
+	// NHB-AUDIT-S2: the real, registered node RPC method is "lend_getPools"
+	// (see rpc/http.go's method switch) -- "lending_getPools" has never
+	// existed, so every call here failed outright.
 	var resp lendingPoolsResult
-	if err := a.invoke(ctx, "lending_getPools", nil, &resp); err != nil {
+	if err := a.invoke(ctx, "lend_getPools", nil, &resp); err != nil {
 		return nil, err
 	}
 	var markets []Market
@@ -151,8 +154,26 @@ func (a *NodeAdapter) GetHealth(ctx context.Context, addr string) (Health, error
 		Market:         market.Market,
 		RiskParameters: market.RiskParameters,
 		Account:        position.Account,
-		HealthFactor:   computeHealthFactor(position.Account.CollateralZNHB, position.Account.DebtNHB),
+		HealthFactor:   computeHealthFactor(position.Account.CollateralZNHBWei, sumPositionAmounts(position.Account.Borrowed)),
 	}, nil
+}
+
+// sumPositionAmounts totals AmountWei across every per-pool entry --
+// today there is exactly one pool ("default"), so this is equivalent to
+// looking that entry up directly, but stays correct if a second pool is
+// ever added. Kept in sync with services/lending/server/server.go's
+// identical helper for the same reason computeHealthFactor is duplicated
+// below rather than exported.
+func sumPositionAmounts(positions []AccountPosition) string {
+	total := new(big.Int)
+	for _, p := range positions {
+		amount, ok := new(big.Int).SetString(strings.TrimSpace(p.AmountWei), 10)
+		if !ok {
+			continue
+		}
+		total.Add(total, amount)
+	}
+	return total.String()
 }
 
 // computeHealthFactor mirrors services/lending/server/server.go's function
