@@ -1,18 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { rpcRequest } from '../../../lib/rpc';
 
 const schema = z.object({
   escrowId: z.string().min(1),
   from: z.string().min(1)
 });
 
+// escrow_fund is disabled server-side (410 Gone): it used to mutate
+// validator-local state outside the block pipeline, which guarantees a
+// consensus fork/halt on this chain's 2-validator zero-quorum-slack
+// topology, and no signed-transaction replacement exists yet (see
+// rpc/escrow_handlers.go's escrowRPCDisabledMessage). This route returns
+// the retired response itself, before ever calling the chain.
+const RETIRED_MESSAGE =
+  'escrow_fund is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending.';
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const payload = schema.parse(body);
-    const result = await rpcRequest('escrow_fund', [{ id: payload.escrowId, from: payload.from }], true);
-    return NextResponse.json(result, { status: 200 });
+    schema.parse(body);
+    return NextResponse.json(
+      { error: RETIRED_MESSAGE, retired: true, method: 'escrow_fund' },
+      { status: 410 },
+    );
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: error.flatten() }, { status: 400 });

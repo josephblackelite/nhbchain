@@ -31,6 +31,17 @@ type ContentResult = {
   totalStake: string;
 };
 
+// creator_publish, creator_tip, creator_stake and creator_payouts' claim:true
+// path are disabled server-side (410 Gone): they used to mutate
+// validator-local state outside the block pipeline, which guarantees a
+// consensus fork/halt on this chain's 2-validator zero-quorum-slack
+// topology, and no signed-transaction replacement exists yet (see
+// rpc/creator_handlers.go's creatorRPCDisabledMessage). The buttons below
+// are disabled so this UI never shows a working-looking control for a flow
+// that cannot succeed.
+const RETIRED_NOTE =
+  'Retired: this method is disabled server-side (410 Gone) until a signed-transaction replacement ships.';
+
 export default function CreatorStudio() {
   const [creator, setCreator] = useState('');
   const [fan, setFan] = useState('');
@@ -59,78 +70,26 @@ export default function CreatorStudio() {
     }
   };
 
-  const handlePublish = async (event: FormEvent) => {
+  const handlePublish = (event: FormEvent) => {
     event.preventDefault();
-    if (!creator) {
-      log('creator address required');
-      return;
-    }
-    try {
-      const result = (await call('creator_publish', [
-        {
-          caller: creator,
-          contentId,
-          uri,
-          metadata,
-        },
-      ])) as ContentResult;
-      setContent(result);
-    } catch (error) {
-      console.error(error);
-    }
+    log(`creator_publish → ${RETIRED_NOTE}`);
   };
 
-  const handleTip = async (event: FormEvent) => {
+  const handleTip = (event: FormEvent) => {
     event.preventDefault();
-    if (!fan) {
-      log('fan address required');
-      return;
-    }
-    try {
-      const result = (await call('creator_tip', [
-        {
-          caller: fan,
-          contentId,
-          amount: tipAmount,
-        },
-      ])) as LedgerState & { creator: string; fan: string; amount: string };
-      setLedger((prev) => ({
-        pending: result.pending,
-        totalTips: result.totalTips,
-        totalYield: result.totalYield,
-        lastPayout: prev?.lastPayout ?? 0,
-      }));
-    } catch (error) {
-      console.error(error);
-    }
+    log(`creator_tip → ${RETIRED_NOTE}`);
   };
 
-  const handleStake = async (event: FormEvent) => {
+  const handleStake = (event: FormEvent) => {
     event.preventDefault();
-    if (!fan || !creator) {
-      log('creator and fan addresses required');
-      return;
-    }
-    try {
-      const result = (await call('creator_stake', [
-        {
-          caller: fan,
-          creator,
-          amount: stakeAmount,
-        },
-      ])) as LedgerState & { shares: string; reward: string };
-      setLedger({
-        pending: result.pending,
-        totalTips: result.totalTips,
-        totalYield: result.totalYield,
-        lastPayout: result.lastPayout ?? 0,
-      });
-    } catch (error) {
-      console.error(error);
-    }
+    log(`creator_stake → ${RETIRED_NOTE}`);
   };
 
   const handlePayouts = async (claim: boolean) => {
+    if (claim) {
+      log(`creator_payouts (claim) → ${RETIRED_NOTE}`);
+      return;
+    }
     if (!creator) {
       log('creator address required');
       return;
@@ -200,20 +159,21 @@ export default function CreatorStudio() {
         <form onSubmit={handlePublish} className="grid">
           <label>
             Content ID
-            <input value={contentId} onChange={(event) => setContentId(event.target.value)} />
+            <input value={contentId} onChange={(event) => setContentId(event.target.value)} disabled />
           </label>
           <label>
             Content URI
-            <input value={uri} onChange={(event) => setUri(event.target.value)} />
+            <input value={uri} onChange={(event) => setUri(event.target.value)} disabled />
           </label>
           <label style={{ gridColumn: 'span 2' }}>
             Metadata JSON
-            <textarea rows={3} value={metadata} onChange={(event) => setMetadata(event.target.value)} />
+            <textarea rows={3} value={metadata} onChange={(event) => setMetadata(event.target.value)} disabled />
           </label>
-          <button type="submit" disabled={!creator}>
-            Publish
+          <button type="submit" disabled title={RETIRED_NOTE}>
+            Publish (retired)
           </button>
         </form>
+        <p style={{ marginTop: '1rem' }}>{RETIRED_NOTE}</p>
         {content && (
           <p style={{ marginTop: '1rem' }}>
             Latest content <strong>{content.id}</strong> published at{' '}
@@ -227,10 +187,13 @@ export default function CreatorStudio() {
         <form onSubmit={handleTip} className="grid">
           <label>
             Amount (wei)
-            <input value={tipAmount} onChange={(event) => setTipAmount(event.target.value)} />
+            <input value={tipAmount} onChange={(event) => setTipAmount(event.target.value)} disabled />
           </label>
-          <button type="submit">Send Tip</button>
+          <button type="submit" disabled title={RETIRED_NOTE}>
+            Send Tip (retired)
+          </button>
         </form>
+        <p style={{ marginTop: '1rem' }}>{RETIRED_NOTE}</p>
       </section>
 
       <section className="card">
@@ -238,10 +201,13 @@ export default function CreatorStudio() {
         <form onSubmit={handleStake} className="grid">
           <label>
             Amount (wei)
-            <input value={stakeAmount} onChange={(event) => setStakeAmount(event.target.value)} />
+            <input value={stakeAmount} onChange={(event) => setStakeAmount(event.target.value)} disabled />
           </label>
-          <button type="submit">Stake</button>
+          <button type="submit" disabled title={RETIRED_NOTE}>
+            Stake (retired)
+          </button>
         </form>
+        <p style={{ marginTop: '1rem' }}>{RETIRED_NOTE}</p>
       </section>
 
       <section className="card">
@@ -250,10 +216,11 @@ export default function CreatorStudio() {
           <button type="button" onClick={() => handlePayouts(false)}>
             Refresh Ledger
           </button>
-          <button type="button" onClick={() => handlePayouts(true)}>
-            Claim Pending
+          <button type="button" disabled title={RETIRED_NOTE} onClick={() => handlePayouts(true)}>
+            Claim Pending (retired)
           </button>
         </div>
+        <p style={{ marginTop: '1rem' }}>Claiming pending payouts is retired. {RETIRED_NOTE}</p>
         <div className="log" style={{ marginTop: '1.5rem' }}>
           {prettyLedger}
         </div>
