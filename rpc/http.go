@@ -789,25 +789,31 @@ func (s *Server) Serve(listener net.Listener) error {
 		posv1.RegisterRealtimeServer(grpcServer, s.posRealtime)
 	}
 
-	// Register POS Tx and Registry services.
-	//
-	// NHB-AUDIT-S3: this Tx service (AuthorizePayment/CapturePayment/
-	// VoidPayment) cannot perform real, authorized payment mutations -- see
-	// pos_grpc.go's submitPayload doc comment for why a nil signer here is
-	// correct, not a bug to "fix" by wiring in a server-held key. The real,
-	// working, production POS integration (nhbportal's business/pos
-	// feature) does not call this gRPC service at all: it builds and signs
-	// TxTypePOSAuthorize/Capture/Void transactions client-side with the
-	// merchant's own wallet key and submits them via the standard
-	// nhb_sendTransaction JSON-RPC path, exactly like every other
-	// wallet-signed transaction type -- confirmed via
-	// core/state_transition.go's applyPOSAuthorize, which requires
-	// payer == transaction signer. Registered here only for its read-only
-	// Registry methods and as a stub for future third-party POS-terminal
-	// integrations that would need to sign client-side the same way.
-	posSrv := NewPOSServer(s.node, "nhbchain", nil)
-	posv1.RegisterTxServer(grpcServer, posSrv)
-	posv1.RegisterRegistryServer(grpcServer, posSrv)
+	// NHB-AUDIT-S3, RETIRED 2026-09-18: the POS Tx and Registry gRPC
+	// services (AuthorizePayment/CapturePayment/VoidPayment and
+	// RegisterMerchant/RegisterDevice/PauseMerchant/ResumeMerchant/
+	// RevokeDevice/RestoreDevice) are no longer registered on this server.
+	// Every one of those methods -- Registry included, despite an earlier
+	// comment here calling it "read-only": it is not, RegisterMerchant/
+	// PauseMerchant/etc. are all mutations -- routed through the same
+	// submitPayload helper (rpc/pos_grpc.go), which can never produce a
+	// genuinely authorized transaction: core/state_pos.go's
+	// applyPOSAuthorize (and its siblings) require the signer to equal the
+	// message's own payer/merchant field, but these proto messages carry no
+	// signature field for a real caller to supply one, and a server-held
+	// signer would make the validator itself the on-chain payer/merchant --
+	// moving the validator's own funds, not fixing the gap. There is no
+	// server-side change that makes this service produce a real
+	// authorization; the working pattern (used by nhbportal's own POS
+	// feature today) signs TxTypePOSAuthorize/Capture/Void client-side with
+	// the payer's own wallet key and submits via standard
+	// nhb_sendTransaction, exactly like any other wallet transaction. This
+	// was a formal retirement decision, not an oversight: rather than leave
+	// a permanently-erroring service reachable on the RPC port indefinitely,
+	// it is unregistered here. The implementation (posServer in
+	// pos_grpc.go) is left in place, unregistered, as a reference for a
+	// future real client-signed-envelope submission path if one is ever
+	// built with an actual signature field on the wire messages.
 
 	baseHandler := grpcHandler(grpcServer, mux)
 	srv := &http.Server{
@@ -1542,6 +1548,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSwapVoucherReverse(recorder, r, req)
+	case "swap_markReconciled":
+		if authErr := s.requireAuthInto(&r); authErr != nil {
+			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+			return
+		}
+		s.handleSwapMarkReconciled(recorder, r, req)
 	case "swap_setManualQuote":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
 			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)

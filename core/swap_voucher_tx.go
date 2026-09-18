@@ -38,10 +38,16 @@ type swapVoucherMintPriceProofPayload struct {
 // already builds can be carried unmodified inside a signed, gossiped,
 // consensus-ordered transaction.
 type swapVoucherMintPayload struct {
-	Voucher      swap.VoucherV1                    `json:"voucher"`
+	Voucher   *swap.VoucherV1 `json:"voucher,omitempty"`
+	// VoucherV2 carries a V2 schema voucher (see swap.VoucherDomainV2). It is
+	// mutually exclusive with Voucher: a transaction carries exactly one of
+	// the two. When present, this transaction's Provider/ProviderTxID (the
+	// top-level fields below) are ignored on decode in favour of the values
+	// signed inside VoucherV2 itself -- see decodeSwapVoucherMintTransaction.
+	VoucherV2    *swap.VoucherV2                   `json:"voucherV2,omitempty"`
 	Signature    string                            `json:"signature"`
-	Provider     string                            `json:"provider"`
-	ProviderTxID string                            `json:"providerTxId"`
+	Provider     string                            `json:"provider,omitempty"`
+	ProviderTxID string                            `json:"providerTxId,omitempty"`
 	Username     string                            `json:"username,omitempty"`
 	Address      string                            `json:"address,omitempty"`
 	USDAmount    string                            `json:"usdAmount,omitempty"`
@@ -51,20 +57,30 @@ type swapVoucherMintPayload struct {
 // encodeSwapVoucherMintTransaction serialises a voucher submission into the
 // canonical Data payload for a TxTypeSwapVoucherMint transaction.
 func encodeSwapVoucherMintTransaction(submission *swap.VoucherSubmission) ([]byte, error) {
-	if submission == nil || submission.Voucher == nil {
+	if submission == nil || (submission.Voucher == nil && submission.VoucherV2 == nil) {
 		return nil, fmt.Errorf("swap: voucher required")
 	}
 	if len(submission.Signature) == 0 {
 		return nil, fmt.Errorf("swap: signature required")
 	}
 	payload := swapVoucherMintPayload{
-		Voucher:      *submission.Voucher,
-		Signature:    "0x" + strings.ToLower(hex.EncodeToString(submission.Signature)),
-		Provider:     strings.TrimSpace(submission.Provider),
-		ProviderTxID: strings.TrimSpace(submission.ProviderTxID),
-		Username:     strings.TrimSpace(submission.Username),
-		Address:      strings.TrimSpace(submission.Address),
-		USDAmount:    strings.TrimSpace(submission.USDAmount),
+		Signature: "0x" + strings.ToLower(hex.EncodeToString(submission.Signature)),
+		Username:  strings.TrimSpace(submission.Username),
+		Address:   strings.TrimSpace(submission.Address),
+		USDAmount: strings.TrimSpace(submission.USDAmount),
+	}
+	if submission.VoucherV2 != nil {
+		// V2: Provider/ProviderTxID live solely inside the signed VoucherV2
+		// struct -- deliberately NOT duplicated into the top-level
+		// Provider/ProviderTxID fields here, so nothing unsigned could ever
+		// masquerade as the authoritative value on decode.
+		v2 := *submission.VoucherV2
+		payload.VoucherV2 = &v2
+	} else {
+		v1 := *submission.Voucher
+		payload.Voucher = &v1
+		payload.Provider = strings.TrimSpace(submission.Provider)
+		payload.ProviderTxID = strings.TrimSpace(submission.ProviderTxID)
 	}
 	if submission.PriceProof != nil {
 		proof := submission.PriceProof
@@ -106,15 +122,35 @@ func decodeSwapVoucherMintTransaction(data []byte) (*swap.VoucherSubmission, err
 	if err != nil || len(signature) == 0 {
 		return nil, fmt.Errorf("%w: invalid signature", ErrSwapVoucherInvalidPayload)
 	}
-	voucher := payload.Voucher
 	submission := &swap.VoucherSubmission{
-		Voucher:      &voucher,
-		Signature:    signature,
-		Provider:     strings.TrimSpace(payload.Provider),
-		ProviderTxID: strings.TrimSpace(payload.ProviderTxID),
-		Username:     strings.TrimSpace(payload.Username),
-		Address:      strings.TrimSpace(payload.Address),
-		USDAmount:    strings.TrimSpace(payload.USDAmount),
+		Signature: signature,
+		Username:  strings.TrimSpace(payload.Username),
+		Address:   strings.TrimSpace(payload.Address),
+		USDAmount: strings.TrimSpace(payload.USDAmount),
+	}
+	switch {
+	case payload.VoucherV2 != nil:
+		v2 := *payload.VoucherV2
+		submission.VoucherV2 = &v2
+		// NHB-AUDIT-C8 follow-up: Provider/ProviderTxID for a V2 submission
+		// are ALWAYS derived from the signed VoucherV2 payload itself, never
+		// from the top-level (unsigned, at the transaction-assembly level)
+		// Provider/ProviderTxID fields -- this is exactly what makes the V2
+		// guarantee (ProviderTxID collision fully prevented) hold: every
+		// downstream use of these two values (provider allow-list check,
+		// ledger key, emitted events) is cryptographically bound to this
+		// voucher's own signature, so whoever assembles/broadcasts this
+		// transaction cannot swap in a different value the way they still
+		// can for a V1 submission below.
+		submission.Provider = strings.TrimSpace(v2.Provider)
+		submission.ProviderTxID = strings.TrimSpace(v2.ProviderTxID)
+	case payload.Voucher != nil:
+		voucher := *payload.Voucher
+		submission.Voucher = &voucher
+		submission.Provider = strings.TrimSpace(payload.Provider)
+		submission.ProviderTxID = strings.TrimSpace(payload.ProviderTxID)
+	default:
+		return nil, fmt.Errorf("%w: voucher required", ErrSwapVoucherInvalidPayload)
 	}
 	if payload.PriceProof != nil {
 		p := payload.PriceProof
@@ -166,14 +202,35 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	if err != nil {
 		return err
 	}
-	voucher := submission.Voucher
-	if voucher == nil {
+	// NHB-AUDIT-C8 follow-up: dispatch on schema version. voucher (a
+	// *swap.VoucherV1) and voucherHash are populated from whichever of
+	// submission.Voucher / submission.VoucherV2 is set, and every check
+	// below this point operates on those two shared local values exactly as
+	// before -- V1's own field values, domain expectation, and hash
+	// computation are completely untouched (see swapVoucherTestVoucher-based
+	// tests), only now reached via this switch instead of being the sole
+	// path.
+	var (
+		voucher        *swap.VoucherV1
+		voucherHash    []byte
+		expectedDomain string
+	)
+	switch {
+	case submission.VoucherV2 != nil:
+		voucher = &submission.VoucherV2.Voucher
+		voucherHash = submission.VoucherV2.Hash()
+		expectedDomain = swap.VoucherDomainV2
+	case submission.Voucher != nil:
+		voucher = submission.Voucher
+		voucherHash = voucher.Hash()
+		expectedDomain = swap.VoucherDomainV1
+	default:
 		return fmt.Errorf("%w: voucher required", ErrSwapVoucherInvalidPayload)
 	}
 	if err := nativecommon.Guard(sp.pauses, moduleSwap); err != nil {
 		return err
 	}
-	if strings.TrimSpace(voucher.Domain) != swap.VoucherDomainV1 {
+	if strings.TrimSpace(voucher.Domain) != expectedDomain {
 		return ErrSwapInvalidDomain
 	}
 	if voucher.ChainID != sp.swapVoucherChainID {
@@ -212,7 +269,11 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	if token != "ZNHB" {
 		return ErrSwapInvalidToken
 	}
-	hash := voucher.Hash()
+	// hash was already computed above as voucherHash (voucher.Hash() for V1,
+	// submission.VoucherV2.Hash() -- which additionally covers Provider and
+	// ProviderTxID -- for V2); see the version dispatch near the top of this
+	// function.
+	hash := voucherHash
 	if len(hash) == 0 {
 		return ErrSwapInvalidSignature
 	}

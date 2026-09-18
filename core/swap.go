@@ -42,6 +42,16 @@ var (
 	// ErrSwapDuplicateProviderTx (a genuine, harmless retry of the exact
 	// same order) so this specific, actionable symptom is never
 	// misdiagnosed as an ordinary duplicate.
+	//
+	// NHB-AUDIT-C8 follow-up: this collision can still occur for a V1
+	// voucher (see swap.VoucherV1.Hash's doc comment). A V2 voucher (see
+	// swap.VoucherV2.Hash / swap.VoucherDomainV2) folds Provider and
+	// ProviderTxID into the signed digest, so its signature is only ever
+	// valid for the exact ProviderTxID the mint authority signed -- nobody
+	// downstream of the signer can pair a valid V2 signature with a
+	// different, self-chosen ProviderTxID, closing this specific griefing
+	// vector for V2 vouchers. See applySwapVoucherMintTransaction in
+	// swap_voucher_tx.go for the version-aware verification.
 	ErrSwapProviderTxIDCollision = errors.New("swap: providerTxId collides with a different order")
 	// ErrSwapProviderNotAllowed indicates the mint originated from a non-whitelisted provider.
 	ErrSwapProviderNotAllowed = errors.New("swap: provider not allowed")
@@ -109,4 +119,28 @@ var (
 	// the transaction's own immutable bytes, it can never become valid
 	// later -- prunable, mirroring ErrSwapVoucherInvalidPayload above.
 	ErrRedeemInvalidPayload = errors.New("redeem: invalid transaction payload")
+	// ErrSwapAdminInvalidPayload indicates a TxTypeSwapVoucherReverse or
+	// TxTypeSwapMarkReconciled transaction's Data payload failed to decode,
+	// or its embedded signature is malformed/unrecoverable. Since this is a
+	// pure function of the transaction's own immutable bytes, it can never
+	// become valid later -- prunable, mirroring ErrSwapVoucherInvalidPayload
+	// above.
+	ErrSwapAdminInvalidPayload = errors.New("swap: invalid admin transaction payload")
+	// ErrSwapAdminUnauthorized indicates a TxTypeSwapVoucherReverse or
+	// TxTypeSwapMarkReconciled transaction's embedded signature recovers to
+	// an address that does not currently hold RoleSwapAdmin. Skippable, not
+	// prunable, mirroring ErrRedeemUnauthorizedAttestor above: the role
+	// could be granted to this signer by a later governance action, so a
+	// same-attempt exclusion (not a permanent mempool removal) is the
+	// correct disposition.
+	ErrSwapAdminUnauthorized = errors.New("swap: unauthorized admin")
+	// ErrSwapVoucherReversalNotFound indicates a TxTypeSwapVoucherReverse
+	// transaction names a providerTxId with no ledger record at all yet.
+	// Skippable, not prunable: unlike a status that has already moved past
+	// "minted" (a one-way, permanent transition -- see
+	// ErrSwapVoucherNotMinted/ErrSwapVoucherAlreadyReversed), a voucher that
+	// does not exist YET could still be minted by a later transaction (e.g.
+	// still sitting in the same mempool), so this providerTxId could
+	// legitimately become reversible on a later attempt.
+	ErrSwapVoucherReversalNotFound = errors.New("swap: voucher not found")
 )

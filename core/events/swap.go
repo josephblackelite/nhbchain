@@ -24,6 +24,9 @@ const (
 	TypeSwapBurnRecorded = "swap.burn.recorded"
 	// TypeSwapTreasuryReconciled is emitted when vouchers are marked as reconciled against treasury records.
 	TypeSwapTreasuryReconciled = "swap.treasury.reconciled"
+	// TypeSwapVoucherReversed is emitted when a previously minted voucher is
+	// reversed and its balance moved to the refund sink.
+	TypeSwapVoucherReversed = "swap.voucher.reversed"
 	// TypeSwapRedeemProof references the oracle proofs associated with redeemed vouchers.
 	TypeSwapRedeemProof = "swap.redeem.proof"
 	// TypeBuyZNHBRecorded is emitted when a user purchases ZNHB from the admin wallet using NHB.
@@ -450,4 +453,41 @@ func (r SwapTreasuryReconciled) Event() *types.Event {
 		attrs["observedAt"] = strconv.FormatInt(r.ObservedAt, 10)
 	}
 	return &types.Event{Type: TypeSwapTreasuryReconciled, Attributes: attrs}
+}
+
+// SwapVoucherReversed captures a minted voucher's reversal: its recipient
+// balance was clawed back and credited to the configured refund sink.
+type SwapVoucherReversed struct {
+	ProviderTxID string
+	Admin        [20]byte
+	Recipient    [20]byte
+	Token        string
+	Amount       *big.Int
+	ObservedAt   int64
+}
+
+// EventType returns the canonical reversal event identifier.
+func (SwapVoucherReversed) EventType() string { return TypeSwapVoucherReversed }
+
+// Event renders the reversal event payload.
+func (r SwapVoucherReversed) Event() *types.Event {
+	trimmed := strings.TrimSpace(r.ProviderTxID)
+	if trimmed == "" {
+		return nil
+	}
+	amount := big.NewInt(0)
+	if r.Amount != nil {
+		amount = r.Amount
+	}
+	attrs := map[string]string{
+		"providerTxId": trimmed,
+		"admin":        crypto.MustNewAddress(crypto.NHBPrefix, r.Admin[:]).String(),
+		"recipient":    crypto.MustNewAddress(crypto.NHBPrefix, r.Recipient[:]).String(),
+		"token":        strings.ToUpper(strings.TrimSpace(r.Token)),
+		"amountWei":    amount.String(),
+	}
+	if r.ObservedAt > 0 {
+		attrs["observedAt"] = strconv.FormatInt(r.ObservedAt, 10)
+	}
+	return &types.Event{Type: TypeSwapVoucherReversed, Attributes: attrs}
 }

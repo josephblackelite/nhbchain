@@ -232,6 +232,12 @@ func formatTxType(t types.TxType) string {
 		return "Mint"
 	case types.TxTypeSwapVoucherMint:
 		return "SwapVoucherMint"
+	case types.TxTypeSwapVoucherReverse:
+		return "SwapVoucherReverse"
+	case types.TxTypeSwapMarkReconciled:
+		return "SwapMarkReconciled"
+	case types.TxTypeSubmitEvidence:
+		return "SubmitEvidence"
 	case types.TxTypeSwapPayoutReceipt:
 		return "SwapPayoutReceipt"
 	case types.TxTypeLendingSupplyNHB:

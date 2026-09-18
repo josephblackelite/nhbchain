@@ -16,6 +16,7 @@ Reversals are an emergency tool for clawing back mistaken mints.
 * The recipient’s custodial balance must cover the mint amount; otherwise the request fails.
 * Reversals transfer funds from the recipient to the configured refund sink. No burn is performed—funds stay on-chain for auditors.
 * Reversal attempts are idempotent. A second call returns `{ "ok": true }` if the voucher is already reversed.
+* Both `swap_voucher_reverse` and `swap_markReconciled` submit a real, signed on-chain transaction (`TxTypeSwapVoucherReverse` / `TxTypeSwapMarkReconciled`) rather than mutating state directly: the RPC call only enqueues it, and every validator applies it identically once a block includes it. The `signature` field on each call must be produced by a private key whose address has been granted the on-chain `ROLE_SWAP_ADMIN` role (via genesis or a governance role grant) — the RPC bearer token alone no longer authorizes the mutation, only the ability to submit the request.
 
 Document the customer ticket, PSP communication, and reason for reversal in the compliance system before executing the command.
 
@@ -59,16 +60,18 @@ Use this endpoint in dashboards to confirm that PSP integrations remain enabled.
 
 ### `swap_voucher_reverse`
 
-Reverse a voucher by provider transaction identifier.
+Submit a signed reversal for a voucher by provider transaction identifier. `signature` is a hex-encoded 65-byte secp256k1 signature over `keccak256("NHB_SWAP_VOUCHER_REVERSE_V1|providerTxId=<providerTxId>")`, produced by a key holding the on-chain `ROLE_SWAP_ADMIN` role.
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 3,
   "method": "swap_voucher_reverse",
-  "params": ["order-12345"]
+  "params": [{"providerTxId": "order-12345", "signature": "0x..."}]
 }
 ```
+
+The call returns `{ "ok": true, "txHash": "0x..." }` once the transaction is accepted into the mempool; the reversal itself only takes effect once a block applies it (poll the voucher's status, or watch for the `swap.voucher.reversed` event, to confirm).
 
 Checklist before executing:
 
@@ -81,6 +84,22 @@ If the command returns an error, inspect the JSON error message for guidance:
 
 * `insufficient balance` – the custodial account lacks funds; coordinate with treasury.
 * `voucher not found` – confirm the `providerTxId` matches the PSP record exactly.
+* `unauthorized` – the signature did not recover to an address holding `ROLE_SWAP_ADMIN`.
+
+### `swap_markReconciled`
+
+Submit a signed batch marking one or more vouchers as reconciled against treasury records. `signature` is a hex-encoded 65-byte secp256k1 signature over `keccak256("NHB_SWAP_MARK_RECONCILED_V1|providerTxIds=<comma-joined providerTxIds>")` (trimmed, blank entries removed, in the exact order submitted), produced by a key holding `ROLE_SWAP_ADMIN`.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "swap_markReconciled",
+  "params": [{"providerTxIds": ["order-12345", "order-12346"], "signature": "0x..."}]
+}
+```
+
+Returns `{ "ok": true, "txHash": "0x..." }` the same way `swap_voucher_reverse` does.
 
 ### `swap_setManualQuote`
 
