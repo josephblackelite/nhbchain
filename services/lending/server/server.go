@@ -372,11 +372,19 @@ func toProtoPosition(pos engine.Position) *lendingv1.AccountPosition {
 	supplied := sumPositionAmounts(account.Supplied)
 	borrowed := sumPositionAmounts(account.Borrowed)
 	return &lendingv1.AccountPosition{
-		Account:      strings.TrimSpace(account.Address),
-		Supplied:     normalizeAmount(supplied),
-		Borrowed:     normalizeAmount(borrowed),
-		Collateral:   normalizeAmount(account.CollateralZNHBWei),
-		HealthFactor: computeHealthFactor(account.CollateralZNHBWei, borrowed),
+		Account:    strings.TrimSpace(account.Address),
+		Supplied:   normalizeAmount(supplied),
+		Borrowed:   normalizeAmount(borrowed),
+		Collateral: normalizeAmount(account.CollateralZNHBWei),
+		// engine.ComputeHealthFactor (not a local reimplementation -- see
+		// NHB-AUDIT-S2 follow-up) reads account.CollateralValueUsd/
+		// BorrowedValueUsd, the already oracle-adjusted, already fixed-term
+		// -loan-inclusive figures, instead of the raw CollateralZNHBWei/
+		// summed-Borrowed[] pair this used to recompute locally and which
+		// silently diverged from the chain's own positionHealthy/
+		// withinMaxLTV math whenever the oracle price was not exactly 1:1
+		// or the borrower had an active fixed-term loan.
+		HealthFactor: engine.ComputeHealthFactor(account.CollateralZNHBWei, account.CollateralValueUsd, account.BorrowedValueUsd),
 	}
 }
 
@@ -406,36 +414,6 @@ func normalizeAmount(value string) string {
 		return "0"
 	}
 	return trimmed
-}
-
-func computeHealthFactor(collateral, debt string) string {
-	collateralValue := parseAmount(collateral)
-	debtValue := parseAmount(debt)
-	if debtValue.Sign() <= 0 {
-		return "0"
-	}
-	if collateralValue.Sign() < 0 {
-		return "0"
-	}
-	rat := new(big.Rat).SetFrac(collateralValue, debtValue)
-	decimal := rat.FloatString(18)
-	decimal = strings.TrimRight(strings.TrimRight(decimal, "0"), ".")
-	if decimal == "" {
-		return "0"
-	}
-	return decimal
-}
-
-func parseAmount(value string) *big.Int {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return big.NewInt(0)
-	}
-	parsed, ok := new(big.Int).SetString(trimmed, 10)
-	if !ok {
-		return big.NewInt(0)
-	}
-	return parsed
 }
 
 const defaultBaseAsset = "NHB"

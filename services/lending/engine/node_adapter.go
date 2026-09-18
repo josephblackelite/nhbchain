@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"nhbchain/services/lending/engine/rpcclient"
@@ -136,11 +135,19 @@ func (a *NodeAdapter) GetPosition(ctx context.Context, addr, market string) (Pos
 // on the node's RPC dispatch table (confirmed by grepping rpc/http.go's
 // full method switch) -- every call failed. There was never a missing
 // computation to add: the exact health-factor math this needs
-// (computeHealthFactor in services/lending/server/server.go) already runs
-// against GetPosition's response wherever a position is converted to its
-// proto form. Derive the same result here from GetPosition + GetMarket,
-// both of which call real, working node RPC methods
-// (lending_getUserAccount, lending_getMarket), instead of a dead one.
+// (ComputeHealthFactor, this package's health.go) already runs against
+// GetPosition's response wherever a position is converted to its proto
+// form. Derive the same result here from GetPosition + GetMarket, both of
+// which call real, working node RPC methods (lending_getUserAccount,
+// lending_getMarket), instead of a dead one.
+//
+// ComputeHealthFactor is fed position.Account's already oracle-adjusted
+// CollateralValueUsd and already fixed-term-loan-inclusive BorrowedValueUsd
+// (see that function's doc comment) rather than the raw
+// CollateralZNHBWei/Borrowed[] fields a NHB-AUDIT-S2-follow-up audit found
+// this call silently reconstructing on its own -- diverging from the
+// chain's own positionHealthy/withinMaxLTV math whenever the oracle price
+// was not exactly 1:1 or the borrower had an active fixed-term loan.
 func (a *NodeAdapter) GetHealth(ctx context.Context, addr string) (Health, error) {
 	position, err := a.GetPosition(ctx, addr, "")
 	if err != nil {
@@ -154,56 +161,12 @@ func (a *NodeAdapter) GetHealth(ctx context.Context, addr string) (Health, error
 		Market:         market.Market,
 		RiskParameters: market.RiskParameters,
 		Account:        position.Account,
-		HealthFactor:   computeHealthFactor(position.Account.CollateralZNHBWei, sumPositionAmounts(position.Account.Borrowed)),
+		HealthFactor: ComputeHealthFactor(
+			position.Account.CollateralZNHBWei,
+			position.Account.CollateralValueUsd,
+			position.Account.BorrowedValueUsd,
+		),
 	}, nil
-}
-
-// sumPositionAmounts totals AmountWei across every per-pool entry --
-// today there is exactly one pool ("default"), so this is equivalent to
-// looking that entry up directly, but stays correct if a second pool is
-// ever added. Kept in sync with services/lending/server/server.go's
-// identical helper for the same reason computeHealthFactor is duplicated
-// below rather than exported.
-func sumPositionAmounts(positions []AccountPosition) string {
-	total := new(big.Int)
-	for _, p := range positions {
-		amount, ok := new(big.Int).SetString(strings.TrimSpace(p.AmountWei), 10)
-		if !ok {
-			continue
-		}
-		total.Add(total, amount)
-	}
-	return total.String()
-}
-
-// computeHealthFactor mirrors services/lending/server/server.go's function
-// of the same name exactly (collateral/debt as a decimal ratio, "0" for no
-// debt or negative collateral) -- kept in sync deliberately rather than
-// exported/shared across packages, since engine is the lower-level package
-// server already depends on and importing back the other way would invert
-// that dependency.
-func computeHealthFactor(collateral, debt string) string {
-	collateralValue, ok := new(big.Int).SetString(strings.TrimSpace(collateral), 10)
-	if !ok {
-		collateralValue = big.NewInt(0)
-	}
-	debtValue, ok := new(big.Int).SetString(strings.TrimSpace(debt), 10)
-	if !ok {
-		debtValue = big.NewInt(0)
-	}
-	if debtValue.Sign() <= 0 {
-		return "0"
-	}
-	if collateralValue.Sign() < 0 {
-		return "0"
-	}
-	rat := new(big.Rat).SetFrac(collateralValue, debtValue)
-	decimal := rat.FloatString(18)
-	decimal = strings.TrimRight(strings.TrimRight(decimal, "0"), ".")
-	if decimal == "" {
-		return "0"
-	}
-	return decimal
 }
 
 func (a *NodeAdapter) invoke(ctx context.Context, method string, params any, result any) error {

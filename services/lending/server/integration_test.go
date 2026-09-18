@@ -72,6 +72,13 @@ func TestIntegration_LendingService(t *testing.T) {
 					Supplied:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: " 100 "}},
 					Borrowed:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: " 50 "}},
 					CollateralZNHBWei: " 150 ",
+					// HealthFactor is now derived from these already
+					// oracle-adjusted/fixed-term-inclusive fields
+					// (NHB-AUDIT-S2 follow-up), not from
+					// CollateralZNHBWei/Borrowed above -- see
+					// engine.ComputeHealthFactor.
+					CollateralValueUsd: " 150 ",
+					BorrowedValueUsd:   " 50 ",
 				},
 			}, nil
 		},

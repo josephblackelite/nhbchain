@@ -591,6 +591,12 @@ func TestService_GetPosition(t *testing.T) {
 				Supplied:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: "  10  "}},
 				Borrowed:          []engine.AccountPosition{{PoolID: "nhb", AmountWei: "  2  "}},
 				CollateralZNHBWei: "  6  ",
+				// HealthFactor is now derived from these already
+				// oracle-adjusted/fixed-term-inclusive fields (NHB-AUDIT-S2
+				// follow-up), not from CollateralZNHBWei/Borrowed above --
+				// see engine.ComputeHealthFactor.
+				CollateralValueUsd: "  6  ",
+				BorrowedValueUsd:   "  2  ",
 			}}, nil
 		}}}
 
