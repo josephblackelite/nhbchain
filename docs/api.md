@@ -205,7 +205,7 @@ Report the configured provider allow list and the timestamp of the last successf
 
 ## swap_voucher_reverse
 
-Reverse a minted voucher and transfer funds from the custodial account to the refund sink.
+Submit a signed reversal for a minted voucher, transferring funds from the custodial account to the refund sink. `signature` is a hex-encoded 65-byte secp256k1 signature over `keccak256("NHB_SWAP_VOUCHER_REVERSE_V1|providerTxId=<providerTxId>")`, produced by a key holding the on-chain `ROLE_SWAP_ADMIN` role. The call only enqueues the transaction; the reversal itself takes effect once a block applies it.
 
 **Request**
 ```json
@@ -213,7 +213,7 @@ Reverse a minted voucher and transfer funds from the custodial account to the re
   "jsonrpc": "2.0",
   "id": 8,
   "method": "swap_voucher_reverse",
-  "params": ["order-12345"]
+  "params": [{"providerTxId": "order-12345", "signature": "0x..."}]
 }
 ```
 
@@ -222,7 +222,30 @@ Reverse a minted voucher and transfer funds from the custodial account to the re
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "result": {"ok": true}
+  "result": {"ok": true, "txHash": "0x..."}
+}
+```
+
+## swap_markReconciled
+
+Submit a signed batch marking one or more vouchers as reconciled against treasury records. `signature` is a hex-encoded 65-byte secp256k1 signature over `keccak256("NHB_SWAP_MARK_RECONCILED_V1|providerTxIds=<comma-joined providerTxIds>")` (trimmed, blank entries removed, in the exact order submitted), produced by a key holding `ROLE_SWAP_ADMIN`.
+
+**Request**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "swap_markReconciled",
+  "params": [{"providerTxIds": ["order-12345"], "signature": "0x..."}]
+}
+```
+
+**Response**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {"ok": true, "txHash": "0x..."}
 }
 ```
 

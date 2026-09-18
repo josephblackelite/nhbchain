@@ -16,6 +16,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"nhbchain/consensus/potso/evidence"
 	"nhbchain/core/identity"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -111,6 +112,8 @@ var (
 	potsoStakeLocksPrefix            = []byte("potso/stake/locks/")
 	potsoStakeLockIndexPrefix        = []byte("potso/stake/locks/index/")
 	potsoStakeQueuePrefix            = []byte("potso/stake/unbondq/")
+	potsoEvidenceRecordPrefix        = []byte("potso/evidence/record/")
+	potsoEvidencePendingIndexKey     = []byte("potso/evidence/pending")
 	potsoStakeModuleSeedPrefix       = "module/potso/stake/vault"
 	potsoStakeOwnerIndexKey          = []byte("potso/stake/owners")
 	potsoRewardLastProcessed         = []byte("potso/rewards/lastProcessed")
@@ -3387,6 +3390,88 @@ func (m *Manager) PotsoStakeQueueRemove(day string, owner [20]byte, nonce uint64
 // PotsoStakeVaultAddress returns the deterministic module vault used for staking locks.
 func (m *Manager) PotsoStakeVaultAddress() [20]byte {
 	return potsoStakeModuleAddress()
+}
+
+// potsoEvidenceRecordKey returns the (unwrapped) key a submitted evidence
+// record is stored under, keyed by its own canonical hash. Callers MUST
+// only reach this through KVGet/KVPut (never m.trie.Get/Update directly),
+// which apply their own single kvKey() wrap -- see
+// PotsoStakePutLockNonces's doc comment for why mixing a pre-wrapped key
+// with a helper that wraps again (or a direct trie call that doesn't wrap
+// at all) silently produces two different physical keys for what call
+// sites believe is the same logical entry.
+func potsoEvidenceRecordKey(hash [32]byte) []byte {
+	buf := make([]byte, len(potsoEvidenceRecordPrefix)+len(hash))
+	copy(buf, potsoEvidenceRecordPrefix)
+	copy(buf[len(potsoEvidenceRecordPrefix):], hash[:])
+	return buf
+}
+
+// PotsoEvidenceGetRecord retrieves a previously recorded misbehaviour report
+// by its canonical hash.
+//
+// NHB-AUDIT-C10 follow-up: unlike the pre-fix design (a separate
+// consensus/potso/evidence.Store backed by this node's own local, non-trie
+// storage.Database, populated directly by an RPC handler), this record
+// lives in the state trie itself -- written only by
+// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) as part of
+// applying a real TxTypeSubmitEvidence transaction. Its presence and
+// content are therefore part of consensus state: byte-identical on every
+// validator that has applied the same chain of blocks, never dependent on
+// which single validator a reporter happened to call over RPC.
+func (m *Manager) PotsoEvidenceGetRecord(hash [32]byte) (*evidence.Record, bool, error) {
+	var record evidence.Record
+	ok, err := m.KVGet(potsoEvidenceRecordKey(hash), &record)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return &record, true, nil
+}
+
+// PotsoEvidencePutRecord persists a newly accepted misbehaviour report and
+// appends its hash to the pending index (see PotsoEvidencePendingHashes).
+// Callers must confirm via PotsoEvidenceGetRecord that the hash is not
+// already recorded before calling this -- it does not itself re-check, to
+// keep the already-exists/idempotent decision (and any accompanying event)
+// entirely in the caller's hands, matching every other apply*Transaction
+// idempotency pattern in this codebase.
+func (m *Manager) PotsoEvidencePutRecord(record *evidence.Record) error {
+	if record == nil {
+		return fmt.Errorf("potso: evidence record must not be nil")
+	}
+	if err := m.KVPut(potsoEvidenceRecordKey(record.Hash), record); err != nil {
+		return err
+	}
+	return m.KVAppend(potsoEvidencePendingIndexKey, record.Hash[:])
+}
+
+// PotsoEvidencePendingHashes returns every evidence hash ever recorded via a
+// TxTypeSubmitEvidence transaction, oldest-appended first. Entries are never
+// removed here even after core/node.go's processPendingEvidenceForState has
+// applied their penalty -- state/potso.Ledger's WasPenaltyApplied/
+// MarkPenaltyApplied pair is what makes re-processing an already-penalized
+// entry a safe no-op, exactly the idempotency guarantee this same index
+// relied on before this migration (consensus/potso/evidence.Store's own Put
+// was already a hash-keyed upsert that never needed a matching "delete once
+// processed" step).
+func (m *Manager) PotsoEvidencePendingHashes() ([][32]byte, error) {
+	var raw [][]byte
+	if err := m.KVGetList(potsoEvidencePendingIndexKey, &raw); err != nil {
+		return nil, err
+	}
+	hashes := make([][32]byte, 0, len(raw))
+	for _, entry := range raw {
+		if len(entry) != 32 {
+			continue
+		}
+		var hash [32]byte
+		copy(hash[:], entry)
+		hashes = append(hashes, hash)
+	}
+	return hashes, nil
 }
 
 func (m *Manager) appendStakeOwner(owner [20]byte) error {

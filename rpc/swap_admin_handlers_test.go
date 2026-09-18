@@ -1,15 +1,20 @@
 package rpc
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"math/big"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 	swap "nhbchain/native/swap"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 type limitsResponse struct {
@@ -162,6 +167,18 @@ func TestHandleSwapBurnList(t *testing.T) {
 	}
 }
 
+// signSwapAdminHash signs digest with key and hex-encodes the 65-byte
+// secp256k1 signature the way swap_voucher_reverse/swap_markReconciled
+// expect it on the wire.
+func signSwapAdminHash(t *testing.T, key *crypto.PrivateKey, digest []byte) string {
+	t.Helper()
+	sig, err := ethcrypto.Sign(digest, key.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return "0x" + hex.EncodeToString(sig)
+}
+
 func TestHandleSwapVoucherReverse(t *testing.T) {
 	env := newTestEnv(t)
 	minterKey, _ := crypto.GeneratePrivateKey()
@@ -173,6 +190,19 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 	var sinkAddr [20]byte
 	copy(sinkAddr[:], sinkKey.PubKey().Address().Bytes())
 	env.node.SetSwapRefundSink(sinkAddr)
+
+	// NHB-AUDIT-C4 follow-up: swap_voucher_reverse no longer mutates state
+	// itself -- it enqueues a real TxTypeSwapVoucherReverse transaction, so
+	// the caller-supplied signature must recover to an address holding
+	// RoleSwapAdmin (core/swap_admin_tx.go).
+	adminKey, _ := crypto.GeneratePrivateKey()
+	var adminAddr [20]byte
+	copy(adminAddr[:], adminKey.PubKey().Address().Bytes())
+	if err := env.node.WithState(func(m *nhbstate.Manager) error {
+		return m.SetRole(core.RoleSwapAdmin, adminAddr[:])
+	}); err != nil {
+		t.Fatalf("grant RoleSwapAdmin: %v", err)
+	}
 
 	recipientKey, _ := crypto.GeneratePrivateKey()
 	var recipient [20]byte
@@ -199,7 +229,9 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	req := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, providerTxID)}}
+	signature := signSwapAdminHash(t, adminKey, core.SwapVoucherReverseSigningHash(providerTxID))
+	params := swapVoucherReverseParams{ProviderTxID: providerTxID, Signature: signature}
+	req := &RPCRequest{ID: 3, Params: []json.RawMessage{marshalParam(t, params)}}
 	recorder := httptest.NewRecorder()
 	env.server.handleSwapVoucherReverse(recorder, env.newRequest(), req)
 
@@ -208,13 +240,30 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 		t.Fatalf("unexpected rpc error: %+v", rpcErr)
 	}
 	var okResp struct {
-		OK bool `json:"ok"`
+		OK     bool   `json:"ok"`
+		TxHash string `json:"txHash"`
 	}
 	if err := json.Unmarshal(raw, &okResp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !okResp.OK {
-		t.Fatalf("expected ok response")
+	if !okResp.OK || okResp.TxHash == "" {
+		t.Fatalf("expected ok response with a txHash, got %+v", okResp)
+	}
+
+	// The reversal is only enqueued so far -- it becomes real once a block
+	// actually applies it (see core/swap_admin_tx.go's
+	// applySwapVoucherReverseTransaction), mirroring swap_submitVoucher's
+	// own "enqueue now, consensus mutates later" contract.
+	pending := env.node.GetMempool()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending transaction, got %d", len(pending))
+	}
+	block, err := env.node.CreateBlock(pending)
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if err := env.node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
 	}
 
 	if err := env.node.WithState(func(m *nhbstate.Manager) error {
@@ -245,8 +294,14 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 		t.Fatalf("verify state: %v", err)
 	}
 
+	// A second reversal attempt for the same, now-already-reversed voucher
+	// must still resolve as an idempotent success -- AddTransaction's
+	// synchronous simulation catches ErrSwapVoucherAlreadyReversed against
+	// the now-updated committed state before the transaction is ever
+	// admitted to the mempool.
+	req2 := &RPCRequest{ID: 4, Params: []json.RawMessage{marshalParam(t, params)}}
 	recorder2 := httptest.NewRecorder()
-	env.server.handleSwapVoucherReverse(recorder2, env.newRequest(), req)
+	env.server.handleSwapVoucherReverse(recorder2, env.newRequest(), req2)
 	raw2, rpcErr2 := decodeRPCResponse(t, recorder2)
 	if rpcErr2 != nil {
 		t.Fatalf("unexpected rpc error on second call: %+v", rpcErr2)
@@ -256,6 +311,64 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 	}
 	if !okResp.OK {
 		t.Fatalf("expected ok response on idempotent call")
+	}
+	if pending := env.node.GetMempool(); len(pending) != 0 {
+		t.Fatalf("expected the already-reversed resubmission to never reach the mempool, got %d pending", len(pending))
+	}
+}
+
+// TestHandleSwapVoucherReverseUnauthorizedSigner proves the RoleSwapAdmin
+// check is enforced even though the caller already passed requireAuthInto's
+// HTTP-layer bearer-auth gate (env.newRequest() always attaches a valid
+// JWT) -- a valid bearer token alone must not be enough once the mutation
+// is a real, network-wide-agreed transaction.
+func TestHandleSwapVoucherReverseUnauthorizedSigner(t *testing.T) {
+	env := newTestEnv(t)
+	minterKey, _ := crypto.GeneratePrivateKey()
+	var minterAddr [20]byte
+	copy(minterAddr[:], minterKey.PubKey().Address().Bytes())
+	configureSwapToken(t, env.node, minterAddr)
+
+	recipientKey, _ := crypto.GeneratePrivateKey()
+	var recipient [20]byte
+	copy(recipient[:], recipientKey.PubKey().Address().Bytes())
+	amount := big.NewInt(250)
+	providerTxID := "order-unauthorized"
+	if err := env.node.WithState(func(m *nhbstate.Manager) error {
+		ledger := swap.NewLedger(m)
+		record := &swap.VoucherRecord{
+			Provider:      "nowpayments",
+			ProviderTxID:  providerTxID,
+			Token:         "ZNHB",
+			MintAmountWei: amount,
+			Recipient:     recipient,
+			Status:        swap.VoucherStatusMinted,
+		}
+		if err := ledger.Put(record); err != nil {
+			return err
+		}
+		return m.SetBalance(recipient[:], "ZNHB", new(big.Int).Set(amount))
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	// rogueKey never receives RoleSwapAdmin.
+	rogueKey, _ := crypto.GeneratePrivateKey()
+	signature := signSwapAdminHash(t, rogueKey, core.SwapVoucherReverseSigningHash(providerTxID))
+	params := swapVoucherReverseParams{ProviderTxID: providerTxID, Signature: signature}
+	req := &RPCRequest{ID: 5, Params: []json.RawMessage{marshalParam(t, params)}}
+	recorder := httptest.NewRecorder()
+	env.server.handleSwapVoucherReverse(recorder, env.newRequest(), req)
+
+	_, rpcErr := decodeRPCResponse(t, recorder)
+	if rpcErr == nil {
+		t.Fatalf("expected an rpc error for an unauthorized signer")
+	}
+	if !strings.Contains(strings.ToLower(rpcErr.Message), "unauthorized") {
+		t.Fatalf("expected an unauthorized error, got %+v", rpcErr)
+	}
+	if pending := env.node.GetMempool(); len(pending) != 0 {
+		t.Fatalf("expected the unauthorized submission to never reach the mempool, got %d pending", len(pending))
 	}
 }
 

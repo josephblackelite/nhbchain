@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -218,44 +219,135 @@ func (s *Server) handleSwapSetManualQuote(w http.ResponseWriter, _ *http.Request
 	})
 }
 
-// handleSwapVoucherReverse reverses a minted voucher and moves funds into the refund sink.
+// swapVoucherReverseParams captures the payload accepted by
+// swap_voucher_reverse. NHB-AUDIT-C4 follow-up: this handler no longer
+// mutates state itself -- signature must be a hex-encoded 65-byte
+// secp256k1 signature, produced off-chain by an operator key holding
+// on-chain RoleSwapAdmin, over core/swap_admin_tx.go's
+// SwapVoucherReverseSigningHash(providerTxId). This handler only wraps
+// that caller-supplied signature into a real TxTypeSwapVoucherReverse
+// transaction and submits it via Node.SwapReverseVoucher -> AddTransaction,
+// exactly mirroring swap_submitVoucher's own "accept an already-signed
+// payload, never sign anything itself" contract (see
+// core.Node.SwapSubmitVoucher's doc comment). The real authorization check
+// now lives in applySwapVoucherReverseTransaction, enforced identically by
+// every validator; requireAuthInto below remains defense-in-depth so only
+// already-trusted callers can even reach this endpoint.
+type swapVoucherReverseParams struct {
+	ProviderTxID string `json:"providerTxId"`
+	Signature    string `json:"signature"`
+}
+
+// handleSwapVoucherReverse submits a signed reversal of a minted voucher --
+// see swapVoucherReverseParams's doc comment.
 func (s *Server) handleSwapVoucherReverse(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected providerTxId", nil)
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected {providerTxId, signature}", nil)
 		return
 	}
-	var providerTxID string
-	if err := json.Unmarshal(req.Params[0], &providerTxID); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid providerTxId", err.Error())
+	var params swapVoucherReverseParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid payload", err.Error())
 		return
 	}
-	trimmed := strings.TrimSpace(providerTxID)
+	trimmed := strings.TrimSpace(params.ProviderTxID)
 	if trimmed == "" {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "providerTxId required", nil)
 		return
 	}
-	err := s.node.SwapReverseVoucher(trimmed)
+	signature, sigErr := decodeSwapAdminSignatureParam(params.Signature)
+	if sigErr != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, sigErr.Error(), nil)
+		return
+	}
+	txHash, err := s.node.SwapReverseVoucher(trimmed, signature)
 	if err != nil {
 		switch {
 		case errors.Is(err, core.ErrSwapVoucherAlreadyReversed):
 			writeResult(w, req.ID, map[string]bool{"ok": true})
 			return
-		case errors.Is(err, core.ErrSwapVoucherNotMinted):
+		case errors.Is(err, core.ErrSwapAdminUnauthorized):
+			writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, err.Error(), nil)
+			return
+		case errors.Is(err, core.ErrSwapVoucherNotMinted),
+			errors.Is(err, core.ErrSwapReversalInsufficientBalance):
 			writeError(w, http.StatusConflict, req.ID, codeInvalidParams, err.Error(), nil)
 			return
-		case errors.Is(err, core.ErrSwapReversalInsufficientBalance):
-			writeError(w, http.StatusConflict, req.ID, codeInvalidParams, err.Error(), nil)
+		case errors.Is(err, core.ErrSwapVoucherReversalNotFound):
+			writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, err.Error(), trimmed)
 			return
 		default:
-			if strings.Contains(err.Error(), "not found") {
-				writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, err.Error(), trimmed)
-				return
-			}
 			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to reverse voucher", err.Error())
 			return
 		}
 	}
-	writeResult(w, req.ID, map[string]bool{"ok": true})
+	writeResult(w, req.ID, map[string]any{"ok": true, "txHash": txHash})
+}
+
+// swapMarkReconciledParams captures the payload accepted by
+// swap_markReconciled -- mirrors swapVoucherReverseParams's contract; see
+// its doc comment. signature must cover
+// SwapMarkReconciledSigningHash(providerTxIds) over the exact trimmed,
+// blank-filtered slice Node.SwapMarkReconciled derives from providerTxIds
+// below (whitespace trimmed, blanks removed, original order preserved).
+type swapMarkReconciledParams struct {
+	ProviderTxIDs []string `json:"providerTxIds"`
+	Signature     string   `json:"signature"`
+}
+
+// handleSwapMarkReconciled submits a signed batch marking the supplied
+// vouchers as reconciled against treasury records -- see
+// swapMarkReconciledParams's doc comment.
+func (s *Server) handleSwapMarkReconciled(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 1 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected {providerTxIds, signature}", nil)
+		return
+	}
+	var params swapMarkReconciledParams
+	if err := json.Unmarshal(req.Params[0], &params); err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid payload", err.Error())
+		return
+	}
+	if len(params.ProviderTxIDs) == 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "providerTxIds required", nil)
+		return
+	}
+	signature, sigErr := decodeSwapAdminSignatureParam(params.Signature)
+	if sigErr != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, sigErr.Error(), nil)
+		return
+	}
+	txHash, err := s.node.SwapMarkReconciled(params.ProviderTxIDs, signature)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrSwapAdminUnauthorized):
+			writeError(w, http.StatusForbidden, req.ID, codeUnauthorized, err.Error(), nil)
+			return
+		default:
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to mark vouchers reconciled", err.Error())
+			return
+		}
+	}
+	writeResult(w, req.ID, map[string]any{"ok": true, "txHash": txHash})
+}
+
+// decodeSwapAdminSignatureParam decodes an RPC-supplied hex signature
+// string (with or without a "0x" prefix). It intentionally leaves length
+// validation (must be exactly 65 bytes) to
+// core/swap_admin_tx.go's decodeSwapAdminSignature, which
+// applySwapVoucherReverseTransaction/applySwapMarkReconciledTransaction
+// consult identically on every validator -- this handler-level decode only
+// needs to produce well-formed bytes to embed in the transaction payload.
+func decodeSwapAdminSignatureParam(raw string) ([]byte, error) {
+	sigHex := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "0x")
+	if sigHex == "" {
+		return nil, errors.New("signature required")
+	}
+	signature, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return nil, errors.New("invalid signature")
+	}
+	return signature, nil
 }
 
 func formatBurnReceipt(receipt *swap.BurnReceipt) map[string]interface{} {

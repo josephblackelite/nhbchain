@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -71,6 +73,29 @@ func signSwapVoucherCore(t *testing.T, key *crypto.PrivateKey, voucher swap.Vouc
 	sig, err := ethcrypto.Sign(voucher.Hash(), key.PrivateKey)
 	if err != nil {
 		t.Fatalf("sign voucher: %v", err)
+	}
+	return sig
+}
+
+// swapVoucherTestVoucherV2 builds a V2 schema voucher (see
+// swap.VoucherDomainV2 / swap.VoucherV2): the same shape as
+// swapVoucherTestVoucher, plus Provider/ProviderTxID folded into the value
+// that gets signed (see signSwapVoucherV2Core).
+func swapVoucherTestVoucherV2(chainID uint64, recipient [20]byte, rate, orderID, provider, providerTxID string) swap.VoucherV2 {
+	inner := swapVoucherTestVoucher(chainID, recipient, rate, orderID)
+	inner.Domain = swap.VoucherDomainV2
+	return swap.VoucherV2{
+		Voucher:      inner,
+		Provider:     provider,
+		ProviderTxID: providerTxID,
+	}
+}
+
+func signSwapVoucherV2Core(t *testing.T, key *crypto.PrivateKey, voucher swap.VoucherV2) []byte {
+	t.Helper()
+	sig, err := ethcrypto.Sign(voucher.Hash(), key.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign v2 voucher: %v", err)
 	}
 	return sig
 }
@@ -708,5 +733,223 @@ func TestSwapVoucherMintStalePriceProofDoesNotBlockProposal(t *testing.T) {
 	}
 	if account.BalanceZNHB.Cmp(voucherB.Amount) != 0 {
 		t.Fatalf("expected ZNHB balance %s from voucher B, got %s", voucherB.Amount, account.BalanceZNHB)
+	}
+}
+
+// TestSwapVoucherMintV1UnchangedAfterV2Schema is test (1) from the
+// NHB-AUDIT-C8 follow-up: a V1 voucher, applied through
+// applySwapVoucherMintTransaction after the VoucherV2 schema addition, must
+// verify and mint exactly as it did before -- same domain check, same
+// Hash(), same signer recovery, same ledger record. It uses the identical
+// signSwapVoucherCore/swapVoucherTestVoucher helpers every pre-existing V1
+// test in this file already relies on, so this is a direct, explicit pin on
+// top of the fact that every one of those pre-existing tests above still
+// passes unmodified.
+func TestSwapVoucherMintV1UnchangedAfterV2Schema(t *testing.T) {
+	node, minterKey, oracleKey := setupSwapVoucherTestNode(t)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+	recipient := toAddress(recipientKey)
+
+	voucher := swapVoucherTestVoucher(node.chain.ChainID(), recipient, "0.05", "ORDER-V1-STILL")
+	sig := signSwapVoucherCore(t, minterKey, voucher)
+	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
+	submission := &swap.VoucherSubmission{
+		Voucher: &voucher, Signature: sig, Provider: "nowpayments",
+		ProviderTxID: "V1-STILL-1", PriceProof: proof,
+	}
+	payload, err := encodeSwapVoucherMintTransaction(submission)
+	if err != nil {
+		t.Fatalf("encode voucher: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeSwapVoucherMint,
+		Data: payload, GasLimit: 0, GasPrice: big.NewInt(0),
+	}
+
+	node.stateMu.Lock()
+	applyErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if applyErr != nil {
+		t.Fatalf("expected a V1 voucher to verify and mint exactly as before the V2 schema addition, got %v", applyErr)
+	}
+
+	account, err := node.GetAccount(recipient[:])
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if account.BalanceZNHB.Cmp(voucher.Amount) != 0 {
+		t.Fatalf("expected ZNHB balance %s, got %s", voucher.Amount, account.BalanceZNHB)
+	}
+
+	node.stateMu.Lock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	ledger := swap.NewLedger(manager)
+	record, ok, err := ledger.Get("V1-STILL-1")
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("ledger get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected voucher ledger record to exist after a V1 mint")
+	}
+	if record.OrderID != "ORDER-V1-STILL" || record.Status != swap.VoucherStatusMinted {
+		t.Fatalf("unexpected ledger record: %+v", record)
+	}
+}
+
+// TestSwapVoucherMintV2TamperedProviderTxIDRejected is test (2) from the
+// NHB-AUDIT-C8 follow-up: a V2 voucher, validly signed by the mint
+// authority, whose ProviderTxID is then changed to a different value (the
+// exact griefing move NHB-AUDIT-C8 described for V1 -- pairing a valid
+// signature with an arbitrary, self-chosen providerTxId) must be rejected.
+// Because VoucherV2.Hash covers ProviderTxID, the tampered voucher's digest
+// no longer matches what was signed, so ethcrypto.SigToPub recovers a
+// different address than the real mint authority, and
+// applySwapVoucherMintTransaction rejects it as ErrSwapInvalidSigner --
+// never reaching (and never recording) either providerTxId.
+func TestSwapVoucherMintV2TamperedProviderTxIDRejected(t *testing.T) {
+	node, minterKey, oracleKey := setupSwapVoucherTestNode(t)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+	recipient := toAddress(recipientKey)
+
+	voucherV2 := swapVoucherTestVoucherV2(node.chain.ChainID(), recipient, "0.05", "ORDER-V2-TAMPER", "nowpayments", "LEGIT-TAMPER-1")
+	sig := signSwapVoucherV2Core(t, minterKey, voucherV2)
+	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
+
+	// Tamper ProviderTxID AFTER signing -- the signature above was computed
+	// over voucherV2's original Hash(), never re-signed for this value.
+	tampered := voucherV2
+	tampered.ProviderTxID = "EVIL-COLLIDE-1"
+
+	submission := &swap.VoucherSubmission{
+		VoucherV2: &tampered, Signature: sig, PriceProof: proof,
+	}
+	payload, err := encodeSwapVoucherMintTransaction(submission)
+	if err != nil {
+		t.Fatalf("encode voucher: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeSwapVoucherMint,
+		Data: payload, GasLimit: 0, GasPrice: big.NewInt(0),
+	}
+
+	node.stateMu.Lock()
+	applyErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if !errors.Is(applyErr, ErrSwapInvalidSigner) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrSwapInvalidSigner for a V2 voucher with a tampered ProviderTxID, got %v", applyErr)
+	}
+
+	node.stateMu.Lock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	ledger := swap.NewLedger(manager)
+	_, existsEvil, err1 := ledger.Get("EVIL-COLLIDE-1")
+	_, existsLegit, err2 := ledger.Get("LEGIT-TAMPER-1")
+	node.stateMu.Unlock()
+	if err1 != nil || err2 != nil {
+		t.Fatalf("ledger get: %v / %v", err1, err2)
+	}
+	if existsEvil || existsLegit {
+		t.Fatalf("expected no ledger record under either providerTxId after a rejected tampered V2 submission")
+	}
+}
+
+// TestSwapVoucherMintV2AcceptsAndEnforcesSignedProviderTxID is test (3) from
+// the NHB-AUDIT-C8 follow-up: a V2 voucher with a legitimate, untampered
+// ProviderTxID mints successfully, and the resulting ledger record's
+// Provider/ProviderTxID exactly match the SIGNED values. It also proves the
+// enforcement half directly: even if a transaction is hand-assembled with
+// different, unsigned top-level Provider/ProviderTxID fields alongside a
+// valid VoucherV2 payload, decodeSwapVoucherMintTransaction still derives
+// the submission's authoritative Provider/ProviderTxID from the signed
+// VoucherV2 struct, never from those unsigned top-level fields.
+func TestSwapVoucherMintV2AcceptsAndEnforcesSignedProviderTxID(t *testing.T) {
+	node, minterKey, oracleKey := setupSwapVoucherTestNode(t)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+	recipient := toAddress(recipientKey)
+
+	voucherV2 := swapVoucherTestVoucherV2(node.chain.ChainID(), recipient, "0.05", "ORDER-V2-LEGIT", "nowpayments", "LEGIT-V2-1")
+	sig := signSwapVoucherV2Core(t, minterKey, voucherV2)
+	proof := signedPriceProofCore(t, oracleKey, "nowpayments", "0.05", time.Now())
+
+	submission := &swap.VoucherSubmission{VoucherV2: &voucherV2, Signature: sig, PriceProof: proof}
+	payload, err := encodeSwapVoucherMintTransaction(submission)
+	if err != nil {
+		t.Fatalf("encode voucher: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeSwapVoucherMint,
+		Data: payload, GasLimit: 0, GasPrice: big.NewInt(0),
+	}
+
+	node.stateMu.Lock()
+	applyErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if applyErr != nil {
+		t.Fatalf("expected a legitimately-signed V2 voucher to mint, got %v", applyErr)
+	}
+
+	account, err := node.GetAccount(recipient[:])
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	if account.BalanceZNHB.Cmp(voucherV2.Voucher.Amount) != 0 {
+		t.Fatalf("expected ZNHB balance %s, got %s", voucherV2.Voucher.Amount, account.BalanceZNHB)
+	}
+
+	node.stateMu.Lock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	ledger := swap.NewLedger(manager)
+	record, ok, err := ledger.Get("LEGIT-V2-1")
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("ledger get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected voucher ledger record to exist after a V2 mint")
+	}
+	if record.Provider != "nowpayments" || record.ProviderTxID != "LEGIT-V2-1" {
+		t.Fatalf("expected ledger record provider/providerTxId to match the SIGNED VoucherV2 fields, got provider=%q providerTxId=%q", record.Provider, record.ProviderTxID)
+	}
+	if record.OrderID != "ORDER-V2-LEGIT" || record.Status != swap.VoucherStatusMinted {
+		t.Fatalf("unexpected ledger record: %+v", record)
+	}
+
+	// Enforcement: hand-assemble a second, otherwise-valid V2 transaction
+	// whose unsigned top-level Provider/ProviderTxID fields deliberately
+	// disagree with the signed VoucherV2 payload (encodeSwapVoucherMintTransaction
+	// itself never even writes those top-level fields for a V2 submission --
+	// this simulates an adversary who assembles the transaction bytes
+	// directly). Decode must still recover the SIGNED values.
+	voucherV2b := swapVoucherTestVoucherV2(node.chain.ChainID(), recipient, "0.05", "ORDER-V2-LEGIT-B", "nowpayments", "LEGIT-V2-2")
+	sigB := signSwapVoucherV2Core(t, minterKey, voucherV2b)
+	rawPayload := swapVoucherMintPayload{
+		VoucherV2:    &voucherV2b,
+		Signature:    "0x" + hex.EncodeToString(sigB),
+		Provider:     "spoofed-provider",
+		ProviderTxID: "SPOOFED-TX-ID",
+	}
+	data, err := json.Marshal(rawPayload)
+	if err != nil {
+		t.Fatalf("marshal raw payload: %v", err)
+	}
+	decoded, err := decodeSwapVoucherMintTransaction(data)
+	if err != nil {
+		t.Fatalf("decode raw payload: %v", err)
+	}
+	if decoded.Provider != "nowpayments" || decoded.ProviderTxID != "LEGIT-V2-2" {
+		t.Fatalf("SECURITY REGRESSION: decode must derive Provider/ProviderTxID from the signed VoucherV2 payload, not the unsigned top-level fields; got provider=%q providerTxId=%q", decoded.Provider, decoded.ProviderTxID)
 	}
 }

@@ -373,7 +373,110 @@ const (
 	TxTypePauseLoyaltyProgram  TxType = 0x48
 	TxTypeResumeLoyaltyProgram TxType = 0x49
 
-	// Next free TxType byte is 0x4A.
+	// TxTypeSwapVoucherReverse/SwapMarkReconciled replace the old
+	// Node.SwapReverseVoucher/SwapMarkReconciled direct-state-trie writes
+	// (core/node.go, executed synchronously inside an admin-gated RPC call
+	// under n.stateMu.Lock(), completely outside CreateBlock/
+	// ApplyTransaction/ValidateBlock -- NHB-AUDIT-C4 follow-up) with real
+	// signed, gossiped, consensus-routed transactions, so every validator
+	// applies the identical reversal/reconciliation instead of only the one
+	// that happened to receive the RPC call.
+	//
+	// Senderless/envelope-unsigned, like TxTypeSwapVoucherMint and
+	// TxTypeDelegatedReleaseEscrow/RefundEscrow/DisputeEscrow just above:
+	// tx.Data carries its own embedded secp256k1 signature (see
+	// core/swap_admin_tx.go's SwapVoucherReverseSigningHash /
+	// SwapMarkReconciledSigningHash and the exact same
+	// ethcrypto.SigToPub-based recovery core/swap_voucher_tx.go's
+	// applySwapVoucherMintTransaction already uses), because the operator
+	// key authorizing these actions is not this node's own; it is verified
+	// via nhbstate.Manager.HasRole(RoleSwapAdmin, recoveredSigner) --
+	// core/state_transition.go's RoleSwapAdmin doc comment -- the same
+	// genesis/governance-granted role pattern as RoleSwapPayoutAttestor,
+	// checked at ApplyTransaction time so a malicious mempool submission
+	// from a non-admin key can never apply, not merely rejected by the old
+	// RPC layer's bearer-auth check. Both operations are naturally
+	// idempotent by ledger status transition (VoucherRecord.Status:
+	// minted->reversed/reconciled are one-way; MarkReconciled is a no-op
+	// for an already-reconciled id) -- the exact same "no separate on-chain
+	// nonce registry needed" guarantee TxTypeArbitrateRelease/Refund and
+	// TxTypeDelegatedReleaseEscrow already rely on, so a resubmitted or
+	// replayed signature is harmless rather than a double-spend. 0x4A/0x4B
+	// are the next free bytes after TxTypeResumeLoyaltyProgram (0x49) --
+	// verified against this file's real, current tip; do not reuse without
+	// re-checking for newly added types above this comment.
+	TxTypeSwapVoucherReverse TxType = 0x4A
+	TxTypeSwapMarkReconciled TxType = 0x4B
+
+	// TxTypeSubmitEvidence replaces the old Node.PotsoSubmitEvidence
+	// direct-write RPC handler (rpc/potso_evidence_handlers.go's
+	// potso_submitEvidence, kept only as a client convenience that now
+	// internally constructs and submits this transaction -- see
+	// core/potso_evidence_tx.go) with a real, senderless, gossiped,
+	// consensus-routed transaction (NHB-AUDIT-C10 follow-up).
+	//
+	// The old design let evidence.Store (consensus/potso/evidence/store.go)
+	// be populated directly from an RPC call, entirely outside CreateBlock/
+	// ApplyTransaction/ValidateBlock -- whichever single validator a
+	// reporter happened to call would record and later penalize the
+	// offender via processPendingEvidenceForState (core/node.go), while
+	// every OTHER validator's own local evidence.Store stayed empty for
+	// that report. Two validators processing the identical block height
+	// could legitimately hold different evidence and therefore compute
+	// different state roots for the same block -- a fork risk, not merely
+	// double-counting, since processPendingEvidenceForState's slash
+	// mutations (via state/bank.Slasher) land in the account trie and feed
+	// the block's state root.
+	//
+	// Senderless/envelope-unsigned, like TxTypeSwapVoucherMint and
+	// TxTypeSwapVoucherReverse/TxTypeSwapMarkReconciled just above: the
+	// payload is the evidence.Evidence value itself, which already carries
+	// its own embedded ReporterSig -- evidence.ValidateEvidence recovers
+	// and verifies that signature against Evidence.Reporter (plus, for
+	// TypeEquivocation, the NHB-AUDIT-C10 VerifyEquivocationProof check
+	// that the OFFENDER's own key signed two conflicting votes), so no
+	// separate envelope signature is required or meaningful here -- unlike
+	// TxTypePotsoStakeLock/Unbond/Withdraw's conversion, this evidence
+	// payload's authorization was never "prove you are the reporter via a
+	// standard account key"; it is "prove, with a self-contained signature
+	// scheme this codebase is intentionally not replacing, that a specific
+	// reporter key vouches for this accusation and (for equivocation) that
+	// the offender's own key produced the conflicting proof." Building a
+	// new envelope-signature requirement on top would only add an
+	// unrelated second identity (whoever pays gas to relay the tx), so
+	// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) calls the
+	// existing evidence.ValidateEvidence exactly as the old RPC handler
+	// did, unmodified.
+	//
+	// Unlike the old RPC path, applySubmitEvidenceTransaction only records
+	// a validated report into the trie (nhbstate.Manager's
+	// PotsoEvidencePutRecord/PotsoEvidencePendingHashes) -- it deliberately
+	// does NOT itself compute or apply any penalty. processPendingEvidence
+	// -ForState still does that, at its existing three call sites
+	// (CreateBlock/ValidateBlock/CommitBlock), but now reads the pending
+	// set from the trie instead of the old node-local evidence.Store: since
+	// every validator applies the identical sequence of transactions to
+	// reach a given block, the trie-backed pending set (and therefore the
+	// penalties computed from it) is now byte-identical across validators,
+	// the same guarantee every other trie-backed queue in this codebase
+	// (stake locks, escrow records, governance proposals, ...) already
+	// provides. Keeping the penalty computation out of
+	// applySubmitEvidenceTransaction itself matters because that function
+	// is also invoked by ordinary mempool-admission simulation
+	// (Node.validateTransaction's stateCopy.ExecuteTransaction, run before
+	// a transaction is even gossiped) -- state/potso.Ledger's weight/
+	// idempotency bookkeeping is a Node-global in-memory structure, not
+	// scoped to a particular state copy, so applying a real penalty from a
+	// speculative, possibly-never-committed simulation would corrupt that
+	// bookkeeping for every validator that merely simulates a transaction
+	// it never ends up including in its own committed chain.
+	//
+	// 0x4C is the next free byte after TxTypeSwapMarkReconciled (0x4B) --
+	// verified against this file's real, current tip; do not reuse without
+	// re-checking for newly added types above this comment.
+	TxTypeSubmitEvidence TxType = 0x4C
+
+	// Next free TxType byte is 0x4D.
 )
 
 // RequiresSignature reports whether the transaction type must carry an
@@ -381,7 +484,8 @@ const (
 // from module attestations rely on their envelope signatures instead.
 func RequiresSignature(t TxType) bool {
 	switch t {
-	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice, TxTypeLendingRefPrice:
+	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice, TxTypeLendingRefPrice,
+		TxTypeSwapVoucherReverse, TxTypeSwapMarkReconciled, TxTypeSubmitEvidence:
 		return false
 	default:
 		return true

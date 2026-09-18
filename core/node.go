@@ -126,8 +126,6 @@ type Node struct {
 	swapSanctions                swap.SanctionsChecker
 	swapStatusMu                 sync.RWMutex
 	swapOracleLast               int64
-	swapRefundSink               [20]byte
-	evidenceStore                *evidence.Store
 	evidenceMaxAge               uint64
 	paymasterMu                  sync.RWMutex
 	paymasterEnabled             bool
@@ -510,6 +508,12 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 	stateProcessor.SetAdminWallet(treasury, hasAdminWallet)
+	// Defaults the consensus-level voucher-reversal refund sink to the same
+	// treasury address SetAdminWallet just installed -- matching this
+	// field's pre-existing default before it moved from Node (see
+	// StateProcessor.SetSwapRefundSink's doc comment). Node.SetSwapRefundSink
+	// can still override it independently after startup.
+	stateProcessor.SetSwapRefundSink(treasury)
 	// Deliberately NOT calling EnsureZNHBPoolsBootstrapped() here. A prior
 	// version of this code did, and it caused a real production incident:
 	// this call happens before ensurePendingStateMatchesCommittedHeadLocked
@@ -593,8 +597,6 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		engagementMgr:        engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapCfg:              defaultSwapCfg,
 		swapSanctions:        swap.DefaultSanctionsChecker,
-		swapRefundSink:       treasury,
-		evidenceStore:        evidence.NewStore(db),
 		evidenceMaxAge:       evidence.DefaultMaxAgeBlocks,
 		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
 		paymasterLimits:      PaymasterLimits{},
@@ -1920,13 +1922,16 @@ func (n *Node) SetSwapManualOracle(manual *swap.ManualOracle) {
 }
 
 // SetSwapRefundSink overrides the refund sink used for voucher reversals.
+// Delegates to StateProcessor.SetSwapRefundSink -- see its doc comment --
+// since applySwapVoucherReverseTransaction (core/swap_admin_tx.go) reads
+// this value deterministically from consensus state, not from Node.
 func (n *Node) SetSwapRefundSink(addr [20]byte) {
-	if n == nil {
+	if n == nil || n.state == nil {
 		return
 	}
-	n.swapCfgMu.Lock()
-	n.swapRefundSink = addr
-	n.swapCfgMu.Unlock()
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.state.SetSwapRefundSink(addr)
 }
 
 // SetSwapSanctionsChecker configures the sanctions hook invoked during swap mint processing.
@@ -3301,6 +3306,17 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrRedeemRequestExists),
 		errors.Is(err, nhbstate.ErrRedeemRequestNotPending),
 		errors.Is(err, ErrRedeemInvalidPayload),
+		// TxTypeSwapVoucherReverse/TxTypeSwapMarkReconciled's payload/
+		// signature decode failure is a pure function of the transaction's
+		// own immutable bytes, mirroring ErrSwapVoucherInvalidPayload above.
+		errors.Is(err, ErrSwapAdminInvalidPayload),
+		// A voucher's ledger status only ever moves forward from "minted" to
+		// "reversed" or "reconciled" -- once it has left "minted", a
+		// TxTypeSwapVoucherReverse targeting it can never become valid
+		// again, mirroring ErrSwapNonceUsed's "pure function of
+		// already-committed ledger state" reasoning above.
+		errors.Is(err, ErrSwapVoucherNotMinted),
+		errors.Is(err, ErrSwapVoucherAlreadyReversed),
 		// A ref price for a given epoch, once recorded, can never become
 		// unrecorded -- the epoch number only moves forward -- so a
 		// duplicate submission is a permanently dead transaction, never
@@ -3340,6 +3356,19 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrMintRecipientUnresolved),
 		errors.Is(err, ErrRedeemInsufficientBalance),
 		errors.Is(err, ErrRedeemUnauthorizedAttestor),
+		// The signer could be granted RoleSwapAdmin by a later governance
+		// action, mirroring ErrRedeemUnauthorizedAttestor's own reasoning
+		// immediately above.
+		errors.Is(err, ErrSwapAdminUnauthorized),
+		// The named providerTxId could still be minted by a later
+		// transaction (e.g. one still sitting in the same mempool) -- see
+		// ErrSwapVoucherReversalNotFound's doc comment (core/swap.go).
+		errors.Is(err, ErrSwapVoucherReversalNotFound),
+		// A same-block-or-later credit to the voucher's recipient could
+		// make a currently-insufficient reversal succeed on a later
+		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning
+		// immediately above.
+		errors.Is(err, ErrSwapReversalInsufficientBalance),
 		// A lending health/MaxLTV outcome can now depend on a same-sender
 		// fixed-term borrow/repay applied earlier in the SAME proposal
 		// attempt (see native/lending's combinedDebtWei) -- a later attempt
@@ -4364,7 +4393,30 @@ func (n *Node) GetBlockByHeight(height uint64) (*types.Block, error) {
 	return n.chain.GetBlockByHeight(height)
 }
 
-// PotsoSubmitEvidence validates and persists a misbehaviour report.
+// PotsoSubmitEvidence is a client convenience that constructs and submits a
+// signed TxTypeSubmitEvidence transaction, returning a receipt shaped like
+// the old direct-write API's.
+//
+// NHB-AUDIT-C10 follow-up: this used to validate the report and write it
+// straight into a node-local evidence.Store, entirely outside CreateBlock/
+// ApplyTransaction/ValidateBlock -- a different validator that never
+// independently received this exact RPC call would never learn about the
+// evidence at all, a real state-root-divergence/fork risk (see
+// TxTypeSubmitEvidence's doc comment, core/types/transaction.go). Routing
+// through AddTransaction -> mempool -> gossip -> ApplyTransaction makes it a
+// real, network-wide-agreed state transition: see
+// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) for the
+// deterministic execution path every validator now runs identically,
+// including the evidence.ValidateEvidence check this method used to run
+// only against its own local chain height.
+//
+// AddTransaction synchronously simulates the transaction before admitting it
+// to the mempool (see SwapReverseVoucher's identical doc comment for why),
+// so a malformed or forged submission still fails synchronously from this
+// caller's point of view: a validation failure surfaces here as
+// *evidence.ValidationError (via errors.As), reconstructed into a Rejected
+// receipt exactly like the old direct-write path returned, rather than as a
+// bare error.
 func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, error) {
 	if n == nil {
 		return nil, fmt.Errorf("node not initialised")
@@ -4372,71 +4424,52 @@ func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, err
 	if err := nativecommon.Guard(n, modulePotso); err != nil {
 		return nil, err
 	}
-	if n.evidenceStore == nil {
-		n.evidenceStore = evidence.NewStore(n.db)
-	}
 	hash, err := ev.CanonicalHash()
 	if err != nil {
 		return nil, err
 	}
-	currentHeight := uint64(0)
-	if n.chain != nil {
-		currentHeight = n.chain.Height()
+	if record, ok, err := n.PotsoEvidenceByHash(hash); err == nil && ok {
+		return &evidence.Receipt{Hash: hash, Status: evidence.ReceiptStatusIdempotent, Record: record}, nil
 	}
-	maxAge := n.evidenceMaxAge
-	if maxAge == 0 {
-		maxAge = evidence.DefaultMaxAgeBlocks
-	}
-	heightLookup := func(height uint64) bool {
-		if n.chain == nil {
-			return false
-		}
-		_, err := n.chain.GetBlockByHeight(height)
-		return err == nil
-	}
-	validationErr := evidence.ValidateEvidence(&ev, hash, currentHeight, maxAge, heightLookup)
-	receipt := &evidence.Receipt{Hash: hash}
-	if validationErr != nil {
-		receipt.Status = evidence.ReceiptStatusRejected
-		receipt.Reason = validationErr
-		if evt := (events.PotsoEvidenceRejected{Reporter: ev.Reporter, Reason: string(validationErr.Reason)}).Event(); evt != nil {
-			n.state.AppendEvent(evt)
-		}
-		return receipt, nil
-	}
-	record, created, err := n.evidenceStore.Put(hash, ev, time.Now().Unix())
+	payload, err := encodeSubmitEvidenceTransaction(ev)
 	if err != nil {
 		return nil, err
 	}
-	receipt.Record = record
-	if created {
-		receipt.Status = evidence.ReceiptStatusAccepted
-		minHeight := uint64(0)
-		if record != nil {
-			minHeight = record.MinHeight()
-		}
-		evt := events.PotsoEvidenceAccepted{
-			Hash:         hash,
-			EvidenceType: string(ev.Type),
-			Offender:     ev.Offender,
-			Height:       minHeight,
-			Reporter:     ev.Reporter,
-		}.Event()
-		if evt != nil {
-			n.state.AppendEvent(evt)
-		}
-	} else {
-		receipt.Status = evidence.ReceiptStatusIdempotent
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSubmitEvidence,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
 	}
+	receipt := &evidence.Receipt{Hash: hash}
+	if err := n.AddTransaction(tx); err != nil {
+		var verr *evidence.ValidationError
+		if errors.As(err, &verr) {
+			receipt.Status = evidence.ReceiptStatusRejected
+			receipt.Reason = verr
+			return receipt, nil
+		}
+		return nil, err
+	}
+	receipt.Status = evidence.ReceiptStatusAccepted
 	return receipt, nil
 }
 
-// PotsoEvidenceByHash retrieves persisted evidence by canonical hash.
+// PotsoEvidenceByHash retrieves persisted evidence by canonical hash from
+// the state trie -- see PotsoEvidencePendingHashes'/PotsoSubmitEvidence's
+// doc comments for why this is trie-backed rather than a node-local store.
 func (n *Node) PotsoEvidenceByHash(hash [32]byte) (*evidence.Record, bool, error) {
-	if n == nil || n.evidenceStore == nil {
-		return nil, false, fmt.Errorf("evidence store not initialised")
+	if n == nil {
+		return nil, false, fmt.Errorf("node not initialised")
 	}
-	return n.evidenceStore.Get(hash)
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, false, fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	return manager.PotsoEvidenceGetRecord(hash)
 }
 
 // processPendingEvidence loops over all unprocessed POTSO evidence and applies them through the penalty engine.
@@ -4447,8 +4480,24 @@ func (n *Node) processPendingEvidence(currentHeight uint64) error {
 	return n.processPendingEvidenceForState(n.state, currentHeight)
 }
 
+// processPendingEvidenceForState applies every trie-recorded evidence
+// report's penalty against state.
+//
+// NHB-AUDIT-C10 follow-up: this used to list evidence from a node-local
+// evidence.Store fed directly by an RPC handler (PotsoSubmitEvidence),
+// meaning two validators processing the identical block height could
+// legitimately hold different evidence and therefore compute different
+// state roots. The evidence set is now read via nhbstate.Manager from
+// state.Trie itself, written only by applySubmitEvidenceTransaction
+// (core/potso_evidence_tx.go) as part of applying a real, gossiped
+// TxTypeSubmitEvidence transaction -- since every validator applies the
+// identical transaction sequence to reach a given block, this set (and the
+// penalties computed from it below) is now byte-identical on every
+// validator that reaches that block, the same guarantee CreateBlock/
+// ValidateBlock/CommitBlock already provide for every other piece of
+// consensus state.
 func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeight uint64) error {
-	if n == nil || state == nil || n.evidenceStore == nil {
+	if n == nil || state == nil {
 		return nil
 	}
 
@@ -4470,60 +4519,122 @@ func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeig
 		fromHeight = currentHeight - n.evidenceMaxAge
 	}
 
-	filter := evidence.Filter{
-		FromHeight: &fromHeight,
-		Limit:      evidence.DefaultPageLimit,
+	hashes, err := manager.PotsoEvidencePendingHashes()
+	if err != nil {
+		return fmt.Errorf("list evidence: %w", err)
 	}
 
-	for {
-		records, nextOffset, err := n.evidenceStore.List(filter)
+	for _, hash := range hashes {
+		rec, ok, err := manager.PotsoEvidenceGetRecord(hash)
 		if err != nil {
-			return fmt.Errorf("list evidence: %w", err)
+			return fmt.Errorf("load evidence %x: %w", hash, err)
+		}
+		if !ok || rec == nil {
+			continue
+		}
+		if rec.MinHeight() < fromHeight {
+			continue
 		}
 
-		for _, rec := range records {
-			// NHB-AUDIT-C10: refresh this offender's tracked Base weight
-			// from their REAL, current on-chain stake immediately before
-			// computing any penalty against them -- without this, Base
-			// silently defaults to the ledger's floor (nil -> zero in
-			// production), making every slash/decay percentage compute
-			// against zero regardless of actual stake or misconduct. See
-			// EnsureBaseline's doc comment. A missing/unreadable account
-			// is not fatal here -- it just leaves this offender's weight
-			// untouched for this pass, same as before this fix existed.
-			if account, acctErr := manager.GetAccount(rec.Evidence.Offender[:]); acctErr == nil && account != nil && account.Stake != nil {
-				if _, err := n.potsoLedger.EnsureBaseline(rec.Evidence.Offender, account.Stake); err != nil {
-					return fmt.Errorf("potso: ensure baseline weight for %x: %w", rec.Evidence.Offender, err)
-				}
-			}
-			ctx := penalty.Context{
-				BlockHeight:  currentHeight,
-				MissedEpochs: 0,
-			}
-			res, err := engine.Apply(rec, ctx)
-			if err != nil {
-				return fmt.Errorf("apply penalty for %x: %w", rec.Hash, err)
-			}
-			if !res.Idempotent && res.Event != nil {
-				state.AppendEvent(res.Event)
+		// NHB-AUDIT-C10: refresh this offender's tracked Base weight
+		// from their REAL, current on-chain stake immediately before
+		// computing any penalty against them -- without this, Base
+		// silently defaults to the ledger's floor (nil -> zero in
+		// production), making every slash/decay percentage compute
+		// against zero regardless of actual stake or misconduct. See
+		// EnsureBaseline's doc comment. A missing/unreadable account
+		// is not fatal here -- it just leaves this offender's weight
+		// untouched for this pass, same as before this fix existed.
+		if account, acctErr := manager.GetAccount(rec.Evidence.Offender[:]); acctErr == nil && account != nil && account.Stake != nil {
+			if _, err := n.potsoLedger.EnsureBaseline(rec.Evidence.Offender, account.Stake); err != nil {
+				return fmt.Errorf("potso: ensure baseline weight for %x: %w", rec.Evidence.Offender, err)
 			}
 		}
-
-		if nextOffset < 0 {
-			break
+		ctx := penalty.Context{
+			BlockHeight:  currentHeight,
+			MissedEpochs: 0,
 		}
-		filter.Offset = nextOffset
+		res, err := engine.Apply(rec, ctx)
+		if err != nil {
+			return fmt.Errorf("apply penalty for %x: %w", rec.Hash, err)
+		}
+		if !res.Idempotent && res.Event != nil {
+			state.AppendEvent(res.Event)
+		}
 	}
 
 	return nil
 }
 
-// PotsoEvidenceList returns stored evidence filtered by the provided constraints.
+// PotsoEvidenceList returns trie-recorded evidence filtered by the provided
+// constraints, newest-submitted first -- the same ordering and pagination
+// contract (Offset/Limit/NextOffset) the old node-local evidence.Store.List
+// provided.
 func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, int, error) {
-	if n == nil || n.evidenceStore == nil {
-		return nil, 0, fmt.Errorf("evidence store not initialised")
+	if n == nil {
+		return nil, 0, fmt.Errorf("node not initialised")
 	}
-	return n.evidenceStore.List(filter)
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil, 0, fmt.Errorf("state unavailable")
+	}
+	manager := nhbstate.NewManager(n.state.Trie)
+	hashes, err := manager.PotsoEvidencePendingHashes()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = evidence.DefaultPageLimit
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	matches := make([]*evidence.Record, 0, limit)
+	matchCount := 0
+	hasMore := false
+
+	for i := len(hashes) - 1; i >= 0; i-- {
+		record, ok, err := manager.PotsoEvidenceGetRecord(hashes[i])
+		if err != nil {
+			return nil, 0, err
+		}
+		if !ok || record == nil {
+			continue
+		}
+		if filter.Offender != nil && record.Evidence.Offender != *filter.Offender {
+			continue
+		}
+		if filter.Type != "" && record.Evidence.Type != filter.Type {
+			continue
+		}
+		minHeight := record.MinHeight()
+		if filter.FromHeight != nil && minHeight < *filter.FromHeight {
+			continue
+		}
+		if filter.ToHeight != nil && minHeight > *filter.ToHeight {
+			continue
+		}
+		if matchCount < offset {
+			matchCount++
+			continue
+		}
+		if len(matches) >= limit {
+			hasMore = true
+			break
+		}
+		matches = append(matches, record)
+		matchCount++
+	}
+	nextOffset := -1
+	if hasMore {
+		nextOffset = offset + len(matches)
+	}
+	return matches, nextOffset, nil
 }
 
 // SyncManager exposes the fast-sync subsystem for RPC handlers.
@@ -8129,66 +8240,72 @@ func (n *Node) SwapProviderStatus() swap.ProviderStatus {
 	}
 }
 
-// SwapReverseVoucher reverses a previously minted voucher and moves funds into the refund sink.
-func (n *Node) SwapReverseVoucher(providerTxID string) error {
-	if err := nativecommon.Guard(n, moduleSwap); err != nil {
-		return err
-	}
-	trimmed := strings.TrimSpace(providerTxID)
-	if trimmed == "" {
-		return fmt.Errorf("swap: providerTxId required")
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
-	ledger := swap.NewLedger(manager)
-	record, ok, err := ledger.Get(trimmed)
+// SwapReverseVoucher submits a signed TxTypeSwapVoucherReverse transaction
+// that reverses a previously minted voucher and moves its funds into the
+// configured refund sink, returning the transaction hash immediately --
+// mirroring SwapSubmitVoucher's own "enqueue now, consensus mutates later"
+// contract, never returned "ok" today.
+//
+// NHB-AUDIT-C4 follow-up: this used to mutate n.state.Trie directly and
+// synchronously, under n.stateMu.Lock(), inside an admin-gated RPC call
+// entirely outside CreateBlock/ApplyTransaction/ValidateBlock -- a
+// different validator that never independently received/replayed that
+// exact RPC call would never apply the reversal at all, a real fork risk.
+// Routing through AddTransaction -> mempool -> gossip -> ApplyTransaction
+// makes it a real, network-wide-agreed state transition: see
+// applySwapVoucherReverseTransaction (core/swap_admin_tx.go) for the
+// deterministic execution path every validator now runs identically,
+// including the RoleSwapAdmin authorization check the old direct-mutation
+// path left entirely to the RPC layer's bearer-auth middleware to enforce.
+//
+// signature must be a 65-byte secp256k1 signature, produced by an operator
+// key holding RoleSwapAdmin, over SwapVoucherReverseSigningHash(providerTxID)
+// (core/swap_admin_tx.go) -- this node never signs on the caller's behalf,
+// the same way SwapSubmitVoucher never signs the fiat gateway's voucher
+// itself. Only shallow shape validation happens here; every stateful check
+// (voucher status, balance sufficiency, the RoleSwapAdmin check itself)
+// lives solely in applySwapVoucherReverseTransaction, which AddTransaction
+// synchronously simulates before admitting the transaction to the mempool
+// -- see SwapSubmitVoucher's own doc comment for why that keeps malformed/
+// unauthorized submissions failing synchronously from this caller's point
+// of view.
+func (n *Node) SwapReverseVoucher(providerTxID string, signature []byte) (string, error) {
+	payload, err := encodeSwapVoucherReverseTransaction(providerTxID, signature)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !ok {
-		return fmt.Errorf("swap: voucher not found")
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSwapVoucherReverse,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
 	}
-	switch strings.ToLower(strings.TrimSpace(record.Status)) {
-	case swap.VoucherStatusReversed:
-		return ErrSwapVoucherAlreadyReversed
-	case swap.VoucherStatusMinted:
-		// proceed
-	default:
-		return ErrSwapVoucherNotMinted
-	}
-	if record.MintAmountWei == nil || record.MintAmountWei.Sign() <= 0 {
-		return fmt.Errorf("swap: voucher amount invalid")
-	}
-	balance, err := manager.Balance(record.Recipient[:], record.Token)
+	hashBytes, err := tx.Hash()
 	if err != nil {
-		return err
+		return "", err
 	}
-	if balance.Cmp(record.MintAmountWei) < 0 {
-		return ErrSwapReversalInsufficientBalance
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if err := n.AddTransaction(tx); err != nil {
+		return "", err
 	}
-	updatedRecipient := new(big.Int).Sub(balance, record.MintAmountWei)
-	if err := manager.SetBalance(record.Recipient[:], record.Token, updatedRecipient); err != nil {
-		return err
-	}
-	sink := n.swapRefundSink
-	sinkBalance, err := manager.Balance(sink[:], record.Token)
-	if err != nil {
-		return err
-	}
-	updatedSink := new(big.Int).Add(sinkBalance, record.MintAmountWei)
-	if err := manager.SetBalance(sink[:], record.Token, updatedSink); err != nil {
-		return err
-	}
-	if err := ledger.MarkReversed(trimmed); err != nil {
-		return err
-	}
-	return nil
+	return txHash, nil
 }
 
-// SwapMarkReconciled marks the supplied vouchers as reconciled in the ledger.
-func (n *Node) SwapMarkReconciled(ids []string) error {
+// SwapMarkReconciled submits a signed TxTypeSwapMarkReconciled transaction
+// marking the supplied vouchers as reconciled against treasury records,
+// returning the transaction hash immediately -- see SwapReverseVoucher's
+// doc comment above for why this moved off the old direct-mutation path.
+//
+// signature must be a 65-byte secp256k1 signature, produced by an operator
+// key holding RoleSwapAdmin, over SwapMarkReconciledSigningHash(trimmed)
+// (core/swap_admin_tx.go), where trimmed is ids with blank entries removed
+// and whitespace trimmed -- the exact same normalisation this function
+// itself applies below and applySwapMarkReconciledTransaction's decode step
+// re-derives, so the caller must sign over its OWN pre-normalised ids, not
+// this method's raw ids parameter, or the recovered signer will not match
+// what was actually signed.
+func (n *Node) SwapMarkReconciled(ids []string, signature []byte) (string, error) {
 	trimmed := make([]string, 0, len(ids))
 	for _, id := range ids {
 		if t := strings.TrimSpace(id); t != "" {
@@ -8196,25 +8313,28 @@ func (n *Node) SwapMarkReconciled(ids []string) error {
 		}
 	}
 	if len(trimmed) == 0 {
-		return nil
+		return "", nil
 	}
-	if err := nativecommon.Guard(n, moduleSwap); err != nil {
-		return err
+	payload, err := encodeSwapMarkReconciledTransaction(trimmed, signature)
+	if err != nil {
+		return "", err
 	}
-	return n.WithState(func(m *nhbstate.Manager) error {
-		ledger := swap.NewLedger(m)
-		if err := ledger.MarkReconciled(trimmed); err != nil {
-			return err
-		}
-		evt := events.SwapTreasuryReconciled{
-			VoucherIDs: trimmed,
-			ObservedAt: time.Now().UTC().Unix(),
-		}.Event()
-		if evt != nil {
-			n.state.AppendEvent(evt)
-		}
-		return nil
-	})
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSwapMarkReconciled,
+		Data:     payload,
+		GasLimit: 0,
+		GasPrice: big.NewInt(0),
+	}
+	hashBytes, err := tx.Hash()
+	if err != nil {
+		return "", err
+	}
+	txHash := "0x" + strings.ToLower(hex.EncodeToString(hashBytes))
+	if err := n.AddTransaction(tx); err != nil {
+		return "", err
+	}
+	return txHash, nil
 }
 
 // SwapRecordBurn persists a burn-for-redeem receipt and marks associated vouchers as reconciled.

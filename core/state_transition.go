@@ -177,6 +177,7 @@ type StateProcessor struct {
 	escrowFeeTreasury          [20]byte
 	adminWallet                [20]byte
 	hasAdminWallet             bool
+	swapRefundSink             [20]byte
 	buybackConfig              buyback.Config
 	hasBuybackConfig           bool
 	buybackAccrualAddr         crypto.Address
@@ -820,6 +821,20 @@ func (sp *StateProcessor) SetEscrowFeeTreasury(addr [20]byte) {
 func (sp *StateProcessor) SetAdminWallet(addr [20]byte, ok bool) {
 	sp.adminWallet = addr
 	sp.hasAdminWallet = ok
+}
+
+// SetSwapRefundSink configures the destination address credited when
+// applySwapVoucherReverseTransaction reverses a minted voucher (core/
+// swap_admin_tx.go). Consulted deterministically from StateProcessor state
+// -- never from the reversal transaction's own payload -- so every
+// validator moves the refunded balance to the identical address; a
+// transaction-supplied sink would let whoever crafts the transaction
+// redirect the refund anywhere. Defaults to the same genesis-declared
+// treasury address SetAdminWallet installs (see core/node.go's NewNode),
+// and can be overridden independently of it, mirroring the pre-existing
+// Node.SetSwapRefundSink knob this replaces.
+func (sp *StateProcessor) SetSwapRefundSink(addr [20]byte) {
+	sp.swapRefundSink = addr
 }
 
 // SetBuybackConfig configures the treasury buyback engine's parameters and
@@ -2679,6 +2694,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		swapVoucherChainID:         sp.swapVoucherChainID,
 		adminWallet:                sp.adminWallet,
 		hasAdminWallet:             sp.hasAdminWallet,
+		swapRefundSink:             sp.swapRefundSink,
 		buybackConfig:              sp.buybackConfig.Clone(),
 		hasBuybackConfig:           sp.hasBuybackConfig,
 		buybackAccrualAddr:         cloneAddress(sp.buybackAccrualAddr),
@@ -2778,7 +2794,8 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		senderAccount *types.Account
 		err           error
 	)
-	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice && tx.Type != types.TxTypeLendingRefPrice {
+	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice && tx.Type != types.TxTypeLendingRefPrice &&
+		tx.Type != types.TxTypeSwapVoucherReverse && tx.Type != types.TxTypeSwapMarkReconciled && tx.Type != types.TxTypeSubmitEvidence {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -2792,6 +2809,15 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	case types.TxTypeSwapVoucherMint:
 		err = sp.applySwapVoucherMintTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeSwapVoucherReverse:
+		err = sp.applySwapVoucherReverseTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeSwapMarkReconciled:
+		err = sp.applySwapMarkReconciledTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeSubmitEvidence:
+		err = sp.applySubmitEvidenceTransaction(tx)
 		result = &SimulationResult{}
 	case types.TxTypeBuybackRefPrice:
 		err = sp.applyBuybackRefPrice(tx)
@@ -5414,6 +5440,22 @@ func (sp *StateProcessor) applySetRewardBeneficiary(tx *types.Transaction, sende
 // transaction can claim to be "treasury" (docs/issue30.md item 27). This
 // mechanism does not reuse that pattern.
 const RoleSwapPayoutAttestor = "ROLE_SWAP_PAYOUT_ATTESTOR"
+
+// RoleSwapAdmin is the on-chain role required to authorize
+// TxTypeSwapVoucherReverse/TxTypeSwapMarkReconciled (core/swap_admin_tx.go)
+// -- granted the same way RoleSwapPayoutAttestor is, via genesis or
+// governance roles, to whichever operator key the fiat-gateway operator
+// designates for treasury reversal/reconciliation actions. Checked against
+// the transaction's own embedded-signature recovered signer (see
+// core/swap_admin_tx.go's SwapVoucherReverseSigningHash /
+// SwapMarkReconciledSigningHash), not tx.From() -- both transaction types
+// are senderless like TxTypeSwapVoucherMint, for the same reason
+// TxTypeDelegatedReleaseEscrow/RefundEscrow/DisputeEscrow are: the
+// authorizing key is not this node's own. This closes the NHB-AUDIT-C4
+// follow-up gap where the old Node.SwapReverseVoucher/SwapMarkReconciled
+// RPC handlers trusted the HTTP layer's bearer-auth check alone, with zero
+// cryptographic proof of key possession and zero cross-validator agreement.
+const RoleSwapAdmin = "ROLE_SWAP_ADMIN"
 
 // RoleEscrowRealmAdmin gates TxTypeEscrowCreateRealm/UpdateRealm (see those
 // TxType doc comments in core/types/transaction.go). Same genesis/

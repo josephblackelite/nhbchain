@@ -6,9 +6,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/rlp"
 	"lukechampine.com/blake3"
 )
 
@@ -104,6 +106,65 @@ func (e Evidence) SigningDigest(hash [32]byte) []byte {
 	return digest[:]
 }
 
+// evidenceRLPShadow mirrors Evidence field-for-field except Timestamp, which
+// is carried as uint64 instead of int64 -- go-ethereum's rlp package has no
+// encoding for signed integers at all ("rlp: type int64 is not
+// RLP-serializable"), so a plain rlp.EncodeToBytes(Evidence{...}) has always
+// failed for every real submission (Timestamp is never the zero value in
+// practice). EncodeRLP/DecodeRLP below route every RLP encode/decode of an
+// Evidence value through this shadow so consensus/potso/evidence/store.go's
+// Store (and, for the NHB-AUDIT-C10 follow-up, the state-trie-backed
+// TxTypeSubmitEvidence record) can actually round-trip evidence at all. This
+// is purely a wire-format fix: it does not change CanonicalHash or
+// SigningDigest, which never used RLP to begin with (see their own
+// hand-rolled, delimited-buffer encodings above) -- so no signature a
+// reporter has ever produced is affected.
+type evidenceRLPShadow struct {
+	Type        string
+	Offender    [20]byte
+	Heights     []uint64
+	Details     []byte
+	Reporter    [20]byte
+	ReporterSig []byte
+	Timestamp   uint64
+}
+
+// EncodeRLP implements rlp.Encoder. Timestamp must be non-negative to be
+// representable -- true of every Evidence this codebase has ever
+// constructed (always a Unix timestamp near time.Now()).
+func (e Evidence) EncodeRLP(w io.Writer) error {
+	if e.Timestamp < 0 {
+		return fmt.Errorf("evidence: timestamp must not be negative, got %d", e.Timestamp)
+	}
+	shadow := evidenceRLPShadow{
+		Type:        string(e.Type),
+		Offender:    e.Offender,
+		Heights:     e.Heights,
+		Details:     e.Details,
+		Reporter:    e.Reporter,
+		ReporterSig: e.ReporterSig,
+		Timestamp:   uint64(e.Timestamp),
+	}
+	return rlp.Encode(w, &shadow)
+}
+
+// DecodeRLP implements rlp.Decoder, reconstructing an Evidence value from
+// the shadow layout EncodeRLP writes.
+func (e *Evidence) DecodeRLP(s *rlp.Stream) error {
+	var shadow evidenceRLPShadow
+	if err := s.Decode(&shadow); err != nil {
+		return err
+	}
+	e.Type = Type(shadow.Type)
+	e.Offender = shadow.Offender
+	e.Heights = shadow.Heights
+	e.Details = shadow.Details
+	e.Reporter = shadow.Reporter
+	e.ReporterSig = shadow.ReporterSig
+	e.Timestamp = int64(shadow.Timestamp)
+	return nil
+}
+
 func writeDelimited(buf *bytes.Buffer, data []byte) error {
 	length := uint32(0)
 	if data != nil {
@@ -176,6 +237,39 @@ func (r *Record) Clone() *Record {
 		ReceivedAt: r.ReceivedAt,
 	}
 	return clone
+}
+
+// recordRLPShadow mirrors Record field-for-field except ReceivedAt, carried
+// as uint64 -- see evidenceRLPShadow's doc comment (same file) for why a
+// plain int64 field is never RLP-serializable via go-ethereum's rlp
+// package. Evidence itself round-trips via its own EncodeRLP/DecodeRLP
+// (recursed into automatically by rlp.Encode/Stream.Decode below), so only
+// this struct's own ReceivedAt field needs the same treatment here.
+type recordRLPShadow struct {
+	Hash       [32]byte
+	Evidence   Evidence
+	ReceivedAt uint64
+}
+
+// EncodeRLP implements rlp.Encoder.
+func (r Record) EncodeRLP(w io.Writer) error {
+	if r.ReceivedAt < 0 {
+		return fmt.Errorf("evidence: receivedAt must not be negative, got %d", r.ReceivedAt)
+	}
+	shadow := recordRLPShadow{Hash: r.Hash, Evidence: r.Evidence, ReceivedAt: uint64(r.ReceivedAt)}
+	return rlp.Encode(w, &shadow)
+}
+
+// DecodeRLP implements rlp.Decoder.
+func (r *Record) DecodeRLP(s *rlp.Stream) error {
+	var shadow recordRLPShadow
+	if err := s.Decode(&shadow); err != nil {
+		return err
+	}
+	r.Hash = shadow.Hash
+	r.Evidence = shadow.Evidence
+	r.ReceivedAt = int64(shadow.ReceivedAt)
+	return nil
 }
 
 // MinHeight returns the smallest height referenced by the evidence.
