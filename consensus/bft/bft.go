@@ -77,10 +77,43 @@ type Engine struct {
 	// (which may be newer than the lock) so this validator, when it
 	// becomes proposer, re-proposes that same value instead of
 	// manufacturing a fresh competing one out of its mempool.
-	lockedBlock *types.Block
-	lockedRound int
-	validBlock  *types.Block
-	validRound  int
+	//
+	// NHB-AUDIT-C2: lockedBlockHash (not a *types.Block) is deliberately
+	// the storage form of the lock -- every real use of the lock
+	// (lockCompliesLocked's two bytes.Equal calls) only ever needs the
+	// HASH, never the block object, so the hash alone is sufficient to
+	// enforce safety. That is what makes it possible to persist just this
+	// field to lockSnapshotPath (see lock_snapshot.go) on every write and
+	// restore it on restart: a crash between "this validator locked" and
+	// "this height committed" would otherwise leave the in-memory lock
+	// gone after restart, silently re-permitting a prevote for a
+	// conflicting block that a live quorum may already be precommitting
+	// around -- undetectable in normal operation (needs a crash at exactly
+	// the wrong instant) and only surfacing as a fork under bad luck or an
+	// adversary timing a crash deliberately. validBlock/validRound, and the
+	// polkaHistory entry for lockedRound (the actual signed prevotes behind
+	// the lock), are ALSO persisted and restored on a matching-height
+	// restart -- see lock_snapshot.go's LockedBlock/PolkaVotes fields and
+	// NewEngine's restore step. An earlier version of this engine persisted
+	// only the lock itself and treated the rest as a liveness-only
+	// optimization safe to lose on restart; that was wrong, because losing
+	// it everywhere at once (e.g. every validator that observed the polka
+	// also crashes -- this chain's real topology has exactly two
+	// validators) leaves every restored validator holding a prohibition
+	// with no possible compliant re-proposal ever again, including the
+	// proposer rejecting its own proposal: a permanent liveness deadlock,
+	// not merely a lost optimization. See
+	// lock_snapshot_deadlock_test.go's
+	// TestRestoredLockWithPolkaProofRecoversAndCommits for the regression
+	// test.
+	lockedBlockHash []byte
+	lockedRound     int
+	validBlock      *types.Block
+	validRound      int
+	// lockSnapshotPath, when set via WithLockSnapshotPath, is where the
+	// lock (lockedRound/lockedBlockHash) is durably mirrored on every
+	// change; see lock_snapshot.go.
+	lockSnapshotPath string
 	// polkaHistory records, for each round within the CURRENT height, the
 	// block and the actual signed prevotes that constituted that round's
 	// Polka (if any) -- this validator's own bookkeeping, consulted only
@@ -90,7 +123,12 @@ type Engine struct {
 	// cryptographically instead, which is what makes this safe even when
 	// this validator's own round advanced past vr before independently
 	// confirming a peer's polka at that round. Cleared only alongside the
-	// lock fields above, on height advance.
+	// lock fields above, on height advance. The entry for lockedRound is
+	// the one exception to "in-memory only": it is also what NewEngine
+	// restores from lockSnapshotPath after a crash/restart (see
+	// lock_snapshot.go), so a validator that crashed after locking still
+	// has, once restarted, exactly the one entry it actually needs to
+	// satisfy its own restored lock in propose().
 	polkaHistory map[int]polkaRecord
 
 	proposalCh chan *SignedProposal
@@ -185,6 +223,21 @@ func WithTimeouts(cfg TimeoutConfig) Option {
 	}
 }
 
+// WithLockSnapshotPath enables crash-safe persistence of the
+// Proof-of-Lock-Change lock (see the Engine struct's lockedBlockHash doc
+// comment). NewEngine will attempt to restore the lock from this path if
+// present, and the engine keeps it up to date on every lock change/clear
+// (see lock_snapshot.go). A blank path (the default when this option is
+// never applied) leaves persistence off, matching prior behavior exactly.
+func WithLockSnapshotPath(path string) Option {
+	return func(e *Engine) {
+		if e == nil {
+			return
+		}
+		e.lockSnapshotPath = path
+	}
+}
+
 func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broadcaster, opts ...Option) *Engine {
 	validatorSet := node.GetValidatorSet()
 	totalPower := big.NewInt(0)
@@ -224,6 +277,58 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 	for _, opt := range opts {
 		if opt != nil {
 			opt(engine)
+		}
+	}
+
+	// NHB-AUDIT-C2: restore the lock from disk, if this engine was
+	// configured with a snapshot path and one exists. Only ever applied
+	// when snap.Height == engine.currentState.Height -- i.e. the snapshot
+	// describes the SAME height this engine is about to contest. A
+	// snapshot for an earlier height means that height already committed
+	// (durably, since currentState.Height is derived from the node's own
+	// real GetHeight() above) and the old lock is stale and MUST NOT be
+	// reapplied; a snapshot for a later height should not be possible
+	// (this engine has never run at that height yet) and is equally
+	// discarded rather than trusted. Either mismatch is treated exactly
+	// like "no snapshot" -- restoring nothing is always safe, since an
+	// unlocked validator still can never single-handedly cause a fork.
+	if snap, err := readLockSnapshot(engine.lockSnapshotPath); err != nil {
+		fmt.Printf("failed to read lock snapshot: %v\n", err)
+	} else if snap != nil && snap.Height == engine.currentState.Height && snap.LockedRound >= 0 && len(snap.LockedBlockHash) > 0 {
+		engine.lockedRound = snap.LockedRound
+		engine.lockedBlockHash = snap.LockedBlockHash
+
+		// NHB-AUDIT-C2-followup: the assignment above is the PROHIBITION
+		// (never prevote a conflicting block) and is always restored when
+		// present, exactly as before this change. What follows is the
+		// PERMISSION -- the actual locked block and the signed prevotes
+		// that constituted its Polka -- restored into the exact fields
+		// propose() already reads (e.validBlock/e.validRound/
+		// e.polkaHistory[revalidRound]) so a validator that becomes
+		// proposer again after a restart can re-propose the locked value
+		// with a valid ValidRoundProof, precisely as an un-crashed
+		// validator already does. It is only trusted after being
+		// independently re-verified here -- never merely because it is
+		// present in the file -- so a corrupt or partial snapshot can
+		// never fabricate a lock or a proof that never genuinely happened;
+		// on any verification failure this falls back to restoring the
+		// prohibition alone, exactly like the pre-fix behavior.
+		if snap.LockedBlock != nil && snap.LockedBlock.Header != nil && len(snap.PolkaVotes) > 0 {
+			if blockHash, hashErr := snap.LockedBlock.Header.Hash(); hashErr == nil && bytes.Equal(blockHash, snap.LockedBlockHash) {
+				if engine.verifyPolkaProofLocked(snap.PolkaVotes, snap.LockedRound, snap.LockedBlockHash, snap.Height) {
+					engine.validBlock = snap.LockedBlock
+					engine.validRound = snap.LockedRound
+					engine.polkaHistory[snap.LockedRound] = polkaRecord{
+						block:     snap.LockedBlock,
+						blockHash: append([]byte(nil), snap.LockedBlockHash...),
+						votes:     snap.PolkaVotes,
+					}
+				} else {
+					fmt.Println("lock snapshot: persisted polka proof failed cryptographic verification; restoring lock without a re-propose value")
+				}
+			} else {
+				fmt.Println("lock snapshot: persisted block hash does not match locked hash; restoring lock without a re-propose value")
+			}
 		}
 	}
 
@@ -517,7 +622,7 @@ func (e *Engine) prevote() {
 	// validator personally witnessed that round's gossip live (an earlier
 	// version of this fix relied on the latter and could deadlock
 	// permanently when validators' round counters drifted out of sync;
-	// see the Engine struct's lockedBlock doc comment). This is what makes
+	// see the Engine struct's lockedBlockHash doc comment). This is what makes
 	// it impossible for two different quorums to each commit a different
 	// block at this height, no matter how round timeouts and message
 	// delays play out.
@@ -604,7 +709,7 @@ func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte, height
 // a pure, stateless check -- it never asks whether this validator itself
 // witnessed round vr's gossip in real time, which is exactly what makes it
 // safe even when this validator's own round counter has already advanced
-// past vr (see the Engine struct's lockedBlock doc comment for why that
+// past vr (see the Engine struct's lockedBlockHash doc comment for why that
 // distinction matters). Must be called with e.mu held.
 func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash []byte, height uint64) bool {
 	if len(proof) == 0 || e.totalVotingPower == nil || e.totalVotingPower.Sign() <= 0 {
@@ -641,17 +746,12 @@ func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash [
 	return signedPower.Cmp(threshold) >= 0
 }
 
-// lockedBlockHashLocked returns the header hash of e.lockedBlock, or nil if
-// unlocked or the hash cannot be computed. Must be called with e.mu held.
+// lockedBlockHashLocked returns the hash of the currently locked block, or
+// nil if unlocked. Must be called with e.mu held. A plain field getter --
+// see the Engine struct's lockedBlockHash doc comment for why the hash
+// (rather than the block object) is what this engine actually stores.
 func (e *Engine) lockedBlockHashLocked() []byte {
-	if e.lockedBlock == nil || e.lockedBlock.Header == nil {
-		return nil
-	}
-	hash, err := e.lockedBlock.Header.Hash()
-	if err != nil {
-		return nil
-	}
-	return hash
+	return e.lockedBlockHash
 }
 
 func (e *Engine) precommit() {
@@ -973,8 +1073,35 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 			e.polkaHistory[round] = polkaRecord{block: block, blockHash: hashCopy, votes: votes}
 			e.validBlock = block
 			e.validRound = round
-			e.lockedBlock = block
+			e.lockedBlockHash = hashCopy
 			e.lockedRound = round
+			// NHB-AUDIT-C2: mirror the new lock to disk immediately, before
+			// this vote's caller ever acts on it (e.g. broadcasting our own
+			// prevote/precommit for this height/round) -- see
+			// lock_snapshot.go for why an atomic overwrite here is
+			// sufficient for crash safety without append-log/fsync-ordering
+			// complexity. A write failure is logged, never fatal: it only
+			// degrades this feature back to pre-NHB-AUDIT-C2 behavior for
+			// this one height, it never corrupts the in-memory lock that
+			// just took effect above.
+			//
+			// NHB-AUDIT-C2-followup: LockedBlock/PolkaVotes below persist
+			// the exact same block and votes slice just written into
+			// polkaHistory[round] above -- the liveness PERMISSION, not
+			// just the safety PROHIBITION -- so a restart that loses this
+			// in-memory polkaHistory (see the Engine struct's polkaHistory
+			// doc comment) can still recover it from disk via NewEngine
+			// instead of leaving every restarted validator holding a lock
+			// no future proposal could ever satisfy again.
+			if err := writeLockSnapshot(e.lockSnapshotPath, lockSnapshot{
+				Height:          e.currentState.Height,
+				LockedRound:     e.lockedRound,
+				LockedBlockHash: e.lockedBlockHash,
+				LockedBlock:     block,
+				PolkaVotes:      votes,
+			}); err != nil {
+				fmt.Printf("failed to write lock snapshot: %v\n", err)
+			}
 		}
 	}
 
@@ -1083,7 +1210,7 @@ func (e *Engine) startNewRound() {
 		}
 	}
 	// NHB-AUDIT-C1: a round TIMING OUT must never clear the lock -- that
-	// was the exact bug (see the Engine struct's lockedBlock doc comment).
+	// was the exact bug (see the Engine struct's lockedBlockHash doc comment).
 	// The lock/valid/polka state is per-HEIGHT, so it's only ever reset
 	// here when this call actually advanced the height (via the resync or
 	// catch-up branches above), never on an ordinary same-height round
@@ -1109,11 +1236,32 @@ func (e *Engine) startNewRound() {
 // leak into height H+1's decisions) -- never merely because a round timed
 // out within the same height.
 func (e *Engine) resetLockStateLocked() {
-	e.lockedBlock = nil
+	e.lockedBlockHash = nil
 	e.lockedRound = -1
 	e.validBlock = nil
 	e.validRound = -1
 	e.polkaHistory = make(map[int]polkaRecord)
+	// NHB-AUDIT-C2: overwrite the on-disk snapshot to match -- tagged with
+	// e.currentState.Height, which by the time either call site reaches
+	// this function is already the NEW (post-advance) height (commit()
+	// increments it at line ~727 before calling this; startNewRound()'s
+	// call is gated on syncHeightWithNodeLocked/the catch-up branch having
+	// already updated it). This is what prevents a stale on-disk lock from
+	// height H being wrongly reapplied at height H+1: even if the process
+	// crashes immediately after this write, NewEngine's restore only ever
+	// applies a snapshot whose Height equals the height it is about to
+	// contest, and this write already recorded that height as unlocked. If
+	// the crash instead happens BEFORE this write (between the height
+	// advance above and reaching this line), NewEngine still rejects the
+	// old, still-locked snapshot on restart because ITS Height field is the
+	// prior height, which by then is behind the node's real committed
+	// chain height -- see the height-equality check in NewEngine.
+	if err := writeLockSnapshot(e.lockSnapshotPath, lockSnapshot{
+		Height:      e.currentState.Height,
+		LockedRound: -1,
+	}); err != nil {
+		fmt.Printf("failed to clear lock snapshot: %v\n", err)
+	}
 }
 
 func (e *Engine) syncHeightWithNodeLocked() bool {
