@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/text/unicode/norm"
+
+	"nhbchain/core/identity"
 )
 
 const (
@@ -58,6 +60,7 @@ type apiKeySecret struct {
 type Server struct {
 	store            *Store
 	emailer          Emailer
+	chainClient      AliasOwnerLookup
 	keys             map[string]apiKeySecret
 	emailSalt        []byte
 	codeTTL          time.Duration
@@ -84,12 +87,18 @@ type Config struct {
 }
 
 // NewServer constructs an HTTP server with the supplied dependencies.
-func NewServer(store *Store, emailer Emailer, cfg Config) (*Server, error) {
+// chainClient resolves an alias's real on-chain owner (NHB-AUDIT-S6b) --
+// required so handleBindAlias never has to trust a client-supplied
+// address in place of it.
+func NewServer(store *Store, emailer Emailer, chainClient AliasOwnerLookup, cfg Config) (*Server, error) {
 	if store == nil {
 		return nil, errors.New("store required")
 	}
 	if emailer == nil {
 		return nil, errors.New("emailer required")
+	}
+	if chainClient == nil {
+		return nil, errors.New("chain client required")
 	}
 	if len(cfg.EmailSalt) == 0 {
 		return nil, errors.New("email salt required")
@@ -109,6 +118,7 @@ func NewServer(store *Store, emailer Emailer, cfg Config) (*Server, error) {
 	server := &Server{
 		store:            store,
 		emailer:          emailer,
+		chainClient:      chainClient,
 		keys:             secrets,
 		emailSalt:        append([]byte(nil), cfg.EmailSalt...),
 		codeTTL:          cfg.CodeTTL,
@@ -353,10 +363,12 @@ func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		AliasID   string `json:"aliasId"`
-		Email     string `json:"email"`
-		Consent   bool   `json:"consent"`
-		BindToken string `json:"bindToken"`
+		AliasID        string `json:"aliasId"`
+		Alias          string `json:"alias"`
+		Email          string `json:"email"`
+		Consent        bool   `json:"consent"`
+		BindToken      string `json:"bindToken"`
+		AliasSignature string `json:"aliasSignature"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "IDN-400", "invalid JSON payload", nil)
@@ -384,6 +396,61 @@ func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emailHash := computeEmailHash(normalized, s.emailSalt)
+	// NHB-AUDIT-S6b: the bind token above only ever proves control of the
+	// EMAIL inbox. It never proved the caller also controls the ALIAS --
+	// without this, anyone holding a bind token for a verified email could
+	// bind that email to ANY syntactically-valid alias string they do not
+	// own or control on-chain. This block requires a second, independent
+	// proof: a signature from the alias's own on-chain controlling key
+	// over a canonical envelope naming this exact (aliasId, emailHash,
+	// bindToken) tuple, checked against the alias's REAL on-chain owner
+	// (never a client-supplied address) via s.chainClient. Both proofs are
+	// now required together; neither weakens the other -- this check runs
+	// (and can fail closed) before s.store.BindAlias ever touches/consumes
+	// the bind token, so a bad alias signature can never burn a victim's
+	// legitimate token. Missing-required-proof cases use 401 (matching the
+	// bind-token-required check above), not 400, so a request missing this
+	// new proof is rejected the same way a request missing the email-side
+	// proof always was.
+	aliasNameRaw := strings.TrimSpace(req.Alias)
+	if aliasNameRaw == "" {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "alias required", nil)
+		return
+	}
+	aliasSigHex := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(req.AliasSignature), "0x"), "0X")
+	if aliasSigHex == "" {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "alias signature required", nil)
+		return
+	}
+	aliasName, err := identity.NormalizeAlias(aliasNameRaw)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "IDN-400", fmt.Sprintf("invalid alias: %v", err), nil)
+		return
+	}
+	derivedID := identity.DeriveAliasID(aliasName)
+	if !strings.EqualFold(aliasID, "0x"+hex.EncodeToString(derivedID[:])) {
+		s.writeError(w, http.StatusBadRequest, "IDN-400", "aliasId does not match alias", nil)
+		return
+	}
+	aliasSig, err := hex.DecodeString(aliasSigHex)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "invalid alias signature encoding", nil)
+		return
+	}
+	recoveredSigner, err := RecoverAliasBindSigner(aliasID, emailHash, bindToken, aliasSig)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "alias signature invalid", nil)
+		return
+	}
+	onChainOwner, err := s.chainClient.ResolveOwner(r.Context(), aliasName)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "alias has no resolvable on-chain owner", nil)
+		return
+	}
+	if !hmac.Equal(recoveredSigner[:], onChainOwner[:]) {
+		s.writeError(w, http.StatusUnauthorized, "IDN-401", "alias signature does not match on-chain owner", nil)
+		return
+	}
 	tokenDigest := hashBindToken(bindToken)
 	now := s.now()
 	binding, err := s.store.BindAlias(emailHash, aliasID, req.Consent, tokenDigest, now)
