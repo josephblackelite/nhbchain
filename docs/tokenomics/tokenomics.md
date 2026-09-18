@@ -18,7 +18,7 @@
 
 ## 1) Overview
 
-NHBCoin runs a deliberate two-token model. **NHB** is the commerce currency: an elastic, deposit-backed unit meant to feel like spending dollars. **ZNHB** is the network's fixed-supply security and scarcity asset: exactly 1,000,008,000 ZNHB exist, forever, split once at genesis into two purpose-built pools that never mix (the 8,000 ZNHB above the originally-intended 1,000,000,000 figure is a documented reconciliation remainder from pre-existing mint-path bugs already fixed in the code that produced the live genesis snapshot — see §3).
+NHBCoin runs a deliberate two-token model. **NHB** is the commerce currency: an elastic, deposit-backed unit meant to feel like spending dollars. **ZNHB** is the network's fixed-supply security and scarcity asset: exactly 1,000,000,000 ZNHB exist, forever, split once at genesis into two purpose-built pools that never mix. (An earlier chain, abandoned after a 2026-09-09 key compromise forced a full rebuild, had carried forward 8,000 ZNHB of pre-existing mint-path-bug inflation into its own genesis snapshot -- that chain no longer exists; the current chain's genesis mints exactly the round 1,000,000,000 figure, with no such carried-forward drift. See §3.)
 
 **Funding invariants**
 
@@ -37,14 +37,14 @@ NHB is the settlement and payments rail: mint-on-deposit, burn-on-redemption, no
 
 ## 3) ZNHB — the fixed-supply network asset
 
-ZNHB has a hard genesis supply of **1,000,008,000 ZNHB**, split once, permanently, the first time a real admin/treasury wallet is configured (`StateProcessor.EnsureZNHBPoolsBootstrapped`, `core/state_transition.go`):
+ZNHB has a hard genesis supply of **1,000,000,000 ZNHB**, split once, permanently, the first time a real admin/treasury wallet is configured (`StateProcessor.EnsureZNHBPoolsBootstrapped`, `core/state_transition.go`):
 
 | Pool | Size | Purpose |
 | --- | --- | --- |
-| Sale Pool | 800,008,000 ZNHB | Sold to buyers via the Genesis Treasury Distribution Curve; also receives bought-back ZNHB from the treasury buyback engine ([§6](#6-the-treasury-buyback-engine)) |
+| Sale Pool | 800,000,000 ZNHB | Sold to buyers via the Genesis Treasury Distribution Curve; also receives bought-back ZNHB from the treasury buyback engine ([§6](#6-the-treasury-buyback-engine)) |
 | Reward Pool | 200,000,000 ZNHB | Backs validator/staking rewards via a halving schedule |
 
-The Sale Pool's ledger balance carries an extra 8,000 ZNHB beyond the curve's own sellable cap (16,000 tranches × 50,000 ZNHB = 800,000,000 ZNHB exactly). That 8,000 ZNHB is a permanent, documented reconciliation remainder from pre-existing mint-path bugs (since fixed) baked into the live genesis snapshot before this reconciliation — it sits in the Sale Pool ledger but is never reachable by an ordinary curve purchase, and the Reward Pool stays at exactly 200,000,000 ZNHB so the halving schedule's convergence proof (§5) remains exact.
+The Sale Pool's ledger balance matches the curve's own sellable cap exactly (16,000 tranches × 50,000 ZNHB = 800,000,000 ZNHB), with no remainder. (An earlier, now-abandoned chain had an extra 8,000 ZNHB of carried-forward mint-path-bug inflation sitting in this pool beyond the curve's reachable cap -- that chain no longer exists; the current chain's genesis has no such drift.) The Reward Pool stays at exactly 200,000,000 ZNHB so the halving schedule's convergence proof (§5) remains exact.
 
 ZNHB makes **no protocol-defined valuation promise**. The curve in §4 governs only how treasury-owned Sale Pool inventory is priced as it sells down — it is not a ceiling, floor, or guarantee on what ZNHB trades for once it leaves the treasury and moves peer-to-peer.
 
