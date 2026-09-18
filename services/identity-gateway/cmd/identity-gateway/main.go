@@ -82,6 +82,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// NHB-AUDIT-S6b: handleBindAlias now requires proof the caller controls
+	// the alias's own on-chain key, checked against the alias's real
+	// on-chain owner -- this gateway needs somewhere to resolve that owner
+	// from, hence a node RPC endpoint (the same public identity_resolve
+	// method any integrator can already call), mirroring
+	// services/escrow-gateway's own *_NODE_URL convention.
+	nodeRPCURL := strings.TrimSpace(os.Getenv("IDENTITY_GATEWAY_NODE_URL"))
+	if nodeRPCURL == "" {
+		return errors.New("IDENTITY_GATEWAY_NODE_URL is required")
+	}
 	codeTTL := parseDurationDefault(os.Getenv("IDENTITY_GATEWAY_CODE_TTL"), 10*time.Minute)
 	registerWindow := parseDurationDefault(os.Getenv("IDENTITY_GATEWAY_REGISTER_WINDOW"), time.Hour)
 	timestampSkew := parseDurationDefault(os.Getenv("IDENTITY_GATEWAY_TIMESTAMP_SKEW"), 5*time.Minute)
@@ -95,7 +105,8 @@ func run() error {
 	defer store.Close()
 
 	emailer := &identitygateway.LogEmailer{}
-	server, err := identitygateway.NewServer(store, emailer, identitygateway.Config{
+	chainClient := identitygateway.NewRPCAliasOwnerLookup(nodeRPCURL)
+	server, err := identitygateway.NewServer(store, emailer, chainClient, identitygateway.Config{
 		APIKeys:          apiKeys,
 		EmailSalt:        []byte(emailSalt),
 		CodeTTL:          codeTTL,
