@@ -23,9 +23,17 @@ type milestoneLegParam struct {
 }
 
 type milestoneSubscriptionParam struct {
-	IntervalSeconds int64 `json:"intervalSeconds"`
-	NextReleaseAt   int64 `json:"nextReleaseAt"`
-	Active          bool  `json:"active"`
+	IntervalSeconds int64  `json:"intervalSeconds"`
+	NextReleaseAt   int64  `json:"nextReleaseAt"`
+	Active          bool   `json:"active"`
+	// Sequence echoes the subscription's current update-sequence counter
+	// (see escrow.MilestoneSubscription.Sequence / NHB-AUDIT-C3
+	// follow-up) on responses so a wallet can learn the value it must
+	// sign over for its NEXT milestoneSubscriptionUpdate call. It is
+	// always ignored on create requests -- a new subscription's sequence
+	// always starts at 0 regardless of any value supplied here (see
+	// handleEscrowMilestoneCreate).
+	Sequence uint64 `json:"sequence,omitempty"`
 }
 
 type milestoneCreateParams struct {
@@ -60,9 +68,15 @@ type milestoneSubscriptionUpdateParams struct {
 	ID     string `json:"id"`
 	Active bool   `json:"active"`
 	// Signature is a wallet signature over the canonical action envelope
-	// for (id, "milestoneSubscriptionUpdate", active) -- see
-	// escrow.RecoverMilestoneActionSigner. NHB-AUDIT-C3: there is no
-	// client-supplied caller field.
+	// for (id, "milestoneSubscriptionUpdate", active, sequence) -- see
+	// escrow.RecoverMilestoneSubscriptionSigner. NHB-AUDIT-C3: there is no
+	// client-supplied caller field. NHB-AUDIT-C3 follow-up: the sequence
+	// value is the project's own current, persisted
+	// MilestoneSubscription.Sequence (surfaced on every read via
+	// milestoneSubscriptionParam.Sequence so a wallet can learn what to
+	// sign next) -- it is never read from this request, only reconstructed
+	// server-side from state, so a stale signature naturally stops
+	// matching once any toggle has actually committed.
 	Signature string `json:"signature"`
 }
 
@@ -446,6 +460,7 @@ func formatMilestoneJSON(project *escrow.MilestoneProject) milestoneProjectJSON 
 			IntervalSeconds: project.Subscription.IntervalSeconds,
 			NextReleaseAt:   project.Subscription.NextReleaseAt,
 			Active:          project.Subscription.Active,
+			Sequence:        project.Subscription.Sequence,
 		}
 	}
 	return milestoneProjectJSON{
