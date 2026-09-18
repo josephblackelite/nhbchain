@@ -594,11 +594,11 @@ func TestResetLockStateOnlyHappensOnHeightAdvance(t *testing.T) {
 
 	engine.mu.Lock()
 	engine.currentState = State{Height: 2, Round: 3}
-	engine.lockedBlock = lockedBlock
+	engine.lockedBlockHash = lockedHash
 	engine.lockedRound = 1
-	engine.validBlock = engine.lockedBlock
+	engine.validBlock = lockedBlock
 	engine.validRound = 1
-	engine.polkaHistory[1] = polkaRecord{block: engine.lockedBlock, blockHash: lockedHash, votes: nil}
+	engine.polkaHistory[1] = polkaRecord{block: lockedBlock, blockHash: lockedHash, votes: nil}
 	engine.mu.Unlock()
 
 	engine.startNewRound() // node is at height 5; engine resyncs to height 6
@@ -608,7 +608,7 @@ func TestResetLockStateOnlyHappensOnHeightAdvance(t *testing.T) {
 	if engine.currentState.Height != 6 {
 		t.Fatalf("expected engine to resync to height 6, got %d", engine.currentState.Height)
 	}
-	if engine.lockedBlock != nil || engine.lockedRound != -1 || engine.validBlock != nil || engine.validRound != -1 {
+	if engine.lockedBlockHash != nil || engine.lockedRound != -1 || engine.validBlock != nil || engine.validRound != -1 {
 		t.Fatalf("expected lock/valid state to be cleared on height advance, got lockedRound=%d validRound=%d", engine.lockedRound, engine.validRound)
 	}
 	if len(engine.polkaHistory) != 0 {
