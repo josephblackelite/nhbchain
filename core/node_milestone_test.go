@@ -45,6 +45,19 @@ func signMilestoneAction(t *testing.T, id [32]byte, legID uint64, action string,
 	return sig
 }
 
+// signMilestoneSubscription signs a milestoneSubscriptionUpdate envelope
+// bound to expectedSequence (NHB-AUDIT-C3 follow-up), the way a real
+// wallet must after reading the subscription's current Sequence off
+// EscrowMilestoneGet.
+func signMilestoneSubscription(t *testing.T, id [32]byte, active bool, expectedSequence uint64, priv *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	sig, err := escrow.SignMilestoneSubscriptionEnvelope(id, active, expectedSequence, priv)
+	if err != nil {
+		t.Fatalf("sign milestone subscription: %v", err)
+	}
+	return sig
+}
+
 func findCoreEventByType(events []types.Event, eventType string) *types.Event {
 	for i := range events {
 		if events[i].Type == eventType {
@@ -542,8 +555,8 @@ func TestEscrowMilestoneSubscriptionSignatureBindsActiveValue(t *testing.T) {
 		t.Fatalf("create milestone: %v", err)
 	}
 
-	falseVal := false
-	sigForFalse := signMilestoneAction(t, project.ID, 0, escrow.MilestoneActionSubscriptionUpdate, &falseVal, payerKey)
+	// A freshly created subscription starts at Sequence 0.
+	sigForFalse := signMilestoneSubscription(t, project.ID, false, 0, payerKey)
 
 	// Using the "turn off" signature to request "turn on" must fail.
 	if _, err := node.EscrowMilestoneSubscriptionUpdate(project.ID, true, sigForFalse); err == nil {
@@ -557,5 +570,164 @@ func TestEscrowMilestoneSubscriptionSignatureBindsActiveValue(t *testing.T) {
 	}
 	if updated.Subscription.Active {
 		t.Fatalf("expected subscription to be inactive after toggle")
+	}
+	if updated.Subscription.Sequence != 1 {
+		t.Fatalf("expected subscription sequence to advance to 1 after the toggle, got %d", updated.Subscription.Sequence)
+	}
+}
+
+// TestEscrowMilestoneSubscriptionUpdateNormalFlowWorks proves the ordinary,
+// single-toggle path: a payer reads the subscription's current sequence,
+// signs exactly that value, and the toggle is applied and the sequence
+// advances by one.
+func TestEscrowMilestoneSubscriptionUpdateNormalFlowWorks(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	current := time.Unix(1_700_650_000, 0).UTC()
+	node := &Node{state: sp, timeSource: func() time.Time { return current }}
+
+	payer, payerKey := milestoneTestSigner(t)
+	var payee [20]byte
+	payee[0] = 0x67
+
+	writeAccount(t, sp, payer, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	writeAccount(t, sp, payee, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	newProject := &escrow.MilestoneProject{
+		Payer: payer,
+		Payee: payee,
+		Legs: []*escrow.MilestoneLeg{{
+			ID:       1,
+			Type:     escrow.MilestoneLegTypeTimebox,
+			Title:    "retainer",
+			Token:    "NHB",
+			Amount:   big.NewInt(10),
+			Deadline: current.Add(time.Hour).Unix(),
+			Status:   escrow.MilestoneLegPending,
+		}},
+		Subscription: &escrow.MilestoneSubscription{
+			IntervalSeconds: 3600,
+			NextReleaseAt:   current.Add(time.Hour).Unix(),
+			Active:          true,
+		},
+	}
+	project, err := node.EscrowMilestoneCreate(newProject, signMilestoneCreate(t, newProject, payerKey))
+	if err != nil {
+		t.Fatalf("create milestone: %v", err)
+	}
+	if project.Subscription.Sequence != 0 {
+		t.Fatalf("expected a freshly created subscription to start at sequence 0, got %d", project.Subscription.Sequence)
+	}
+
+	// Turn it off, signing the sequence read from the just-created project.
+	offSig := signMilestoneSubscription(t, project.ID, false, project.Subscription.Sequence, payerKey)
+	updated, err := node.EscrowMilestoneSubscriptionUpdate(project.ID, false, offSig)
+	if err != nil {
+		t.Fatalf("expected normal single toggle to succeed: %v", err)
+	}
+	if updated.Subscription.Active {
+		t.Fatalf("expected subscription inactive after toggle")
+	}
+	if updated.Subscription.Sequence != 1 {
+		t.Fatalf("expected sequence 1 after first toggle, got %d", updated.Subscription.Sequence)
+	}
+
+	// Turn it back on, signing the NEW current sequence.
+	onSig := signMilestoneSubscription(t, project.ID, true, updated.Subscription.Sequence, payerKey)
+	updated, err = node.EscrowMilestoneSubscriptionUpdate(project.ID, true, onSig)
+	if err != nil {
+		t.Fatalf("expected second normal toggle to succeed: %v", err)
+	}
+	if !updated.Subscription.Active {
+		t.Fatalf("expected subscription active after second toggle")
+	}
+	if updated.Subscription.Sequence != 2 {
+		t.Fatalf("expected sequence 2 after second toggle, got %d", updated.Subscription.Sequence)
+	}
+}
+
+// TestEscrowMilestoneSubscriptionSignatureCannotBeReplayedAfterNewerToggle
+// is the direct regression test for the NHB-AUDIT-C3 follow-up: a captured
+// signature that legitimately authorized one toggle must not remain
+// forever valid -- specifically, it must not be resubmittable AFTER a
+// later, legitimate toggle has already moved the subscription's state,
+// which is exactly the attack the missing sequence binding allowed.
+func TestEscrowMilestoneSubscriptionSignatureCannotBeReplayedAfterNewerToggle(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+	current := time.Unix(1_700_700_000, 0).UTC()
+	node := &Node{state: sp, timeSource: func() time.Time { return current }}
+
+	payer, payerKey := milestoneTestSigner(t)
+	var payee [20]byte
+	payee[0] = 0x68
+
+	writeAccount(t, sp, payer, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	writeAccount(t, sp, payee, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	newProject := &escrow.MilestoneProject{
+		Payer: payer,
+		Payee: payee,
+		Legs: []*escrow.MilestoneLeg{{
+			ID:       1,
+			Type:     escrow.MilestoneLegTypeTimebox,
+			Title:    "retainer",
+			Token:    "NHB",
+			Amount:   big.NewInt(10),
+			Deadline: current.Add(time.Hour).Unix(),
+			Status:   escrow.MilestoneLegPending,
+		}},
+		Subscription: &escrow.MilestoneSubscription{
+			IntervalSeconds: 3600,
+			NextReleaseAt:   current.Add(time.Hour).Unix(),
+			Active:          true,
+		},
+	}
+	project, err := node.EscrowMilestoneCreate(newProject, signMilestoneCreate(t, newProject, payerKey))
+	if err != nil {
+		t.Fatalf("create milestone: %v", err)
+	}
+
+	// The payer signs (and an attacker captures) a signature turning the
+	// subscription off, bound to sequence 0.
+	capturedOffSig := signMilestoneSubscription(t, project.ID, false, 0, payerKey)
+
+	// The payer legitimately applies it once -- sequence advances to 1.
+	updated, err := node.EscrowMilestoneSubscriptionUpdate(project.ID, false, capturedOffSig)
+	if err != nil {
+		t.Fatalf("expected the first, genuine application to succeed: %v", err)
+	}
+	if updated.Subscription.Sequence != 1 {
+		t.Fatalf("expected sequence 1 after the legitimate toggle, got %d", updated.Subscription.Sequence)
+	}
+
+	// The payer later, legitimately, turns it back on -- a NEWER toggle,
+	// signed against the now-current sequence 1. Sequence advances to 2.
+	onSig := signMilestoneSubscription(t, project.ID, true, 1, payerKey)
+	updated, err = node.EscrowMilestoneSubscriptionUpdate(project.ID, true, onSig)
+	if err != nil {
+		t.Fatalf("expected the legitimate newer toggle to succeed: %v", err)
+	}
+	if !updated.Subscription.Active {
+		t.Fatalf("expected subscription active after the legitimate newer toggle")
+	}
+	if updated.Subscription.Sequence != 2 {
+		t.Fatalf("expected sequence 2 after the legitimate newer toggle, got %d", updated.Subscription.Sequence)
+	}
+
+	// The attacker now resubmits the ORIGINAL captured "turn off" signature
+	// (still bound to the stale sequence 0). It must be rejected outright,
+	// and it must NOT reverse the legitimate newer state.
+	if _, err := node.EscrowMilestoneSubscriptionUpdate(project.ID, false, capturedOffSig); err == nil {
+		t.Fatalf("SECURITY REGRESSION: a captured signature was replayed after a legitimate newer toggle")
+	}
+
+	final, err := node.EscrowMilestoneGet(project.ID)
+	if err != nil {
+		t.Fatalf("get milestone: %v", err)
+	}
+	if !final.Subscription.Active {
+		t.Fatalf("SECURITY REGRESSION: the replayed signature reversed the legitimate newer toggle (subscription should still be active)")
+	}
+	if final.Subscription.Sequence != 2 {
+		t.Fatalf("SECURITY REGRESSION: the rejected replay must not advance the sequence, got %d", final.Subscription.Sequence)
 	}
 }

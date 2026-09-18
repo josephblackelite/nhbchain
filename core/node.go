@@ -6277,13 +6277,23 @@ func (n *Node) EscrowMilestoneCancel(id [32]byte, legID uint64, signature []byte
 // EscrowMilestoneSubscriptionUpdate updates the subscription toggle for a
 // milestone project. NHB-AUDIT-C3: see EscrowMilestoneFund's doc comment;
 // active also travels inside the signed envelope (see
-// escrow.RecoverMilestoneActionSigner) so a signature authorizing one
+// escrow.RecoverMilestoneSubscriptionSigner) so a signature authorizing one
 // toggle direction can never be replayed to mean the other.
+//
+// NHB-AUDIT-C3 follow-up: unlike Fund/Release/Cancel, whose one-way status
+// transitions make a repeated signature a harmless no-op, Active is a
+// plain bool that can be flipped back and forth -- a signature alone
+// carries no proof of freshness, so a captured "set active=false" (or
+// true) signature would otherwise remain valid forever and could be
+// resubmitted at any later time to reverse a legitimate later toggle. The
+// signature must therefore also bind the project's current, persisted
+// MilestoneSubscription.Sequence (read from state below, never from a
+// client-supplied field): the project must be loaded BEFORE the signature
+// is verified so the exact live sequence value can be reconstructed into
+// the signed envelope. On success Sequence advances by exactly one, so
+// this same signature can never satisfy a later check again -- the
+// instant this toggle commits, it is burned.
 func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, active bool, signature []byte) (*escrow.MilestoneProject, error) {
-	caller, err := escrow.RecoverMilestoneActionSigner(id, 0, escrow.MilestoneActionSubscriptionUpdate, &active, signature)
-	if err != nil {
-		return nil, fmt.Errorf("escrow: verify milestone subscription signature: %w", err)
-	}
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	manager := nhbstate.NewManager(n.state.Trie)
@@ -6294,17 +6304,25 @@ func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, active bool, signa
 	if !ok {
 		return nil, escrow.ErrMilestoneNotFound
 	}
+	if project.Subscription == nil {
+		return nil, fmt.Errorf("escrow: project does not have a subscription")
+	}
+	caller, err := escrow.RecoverMilestoneSubscriptionSigner(id, active, project.Subscription.Sequence, signature)
+	if err != nil {
+		return nil, fmt.Errorf("escrow: verify milestone subscription signature: %w", err)
+	}
 	if project.Payer != caller {
 		return nil, milestoneUnauthorized("payer")
 	}
 	if err := n.sweepMilestoneDueLegsLocked(manager, project); err != nil {
 		return nil, err
 	}
-
 	if project.Subscription == nil {
 		return nil, fmt.Errorf("escrow: project does not have a subscription")
 	}
+
 	project.Subscription.Active = active
+	project.Subscription.Sequence++
 	project.UpdatedAt = n.currentTime().Unix()
 
 	if err := putMilestoneProject(manager, project); err != nil {

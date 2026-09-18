@@ -163,6 +163,22 @@ type MilestoneSubscription struct {
 	IntervalSeconds int64
 	NextReleaseAt   int64
 	Active          bool
+	// Sequence is a monotonically increasing update-sequence counter for
+	// this subscription's Active toggle. NHB-AUDIT-C3 follow-up:
+	// Fund/Release/Cancel are naturally replay-safe because their status
+	// transitions are one-way (persisting the same result twice is a
+	// harmless no-op), but Active is a plain bool that can be flipped back
+	// and forth, so a captured "set active=false" (or true) signature
+	// carries no proof of freshness on its own and could otherwise be
+	// resubmitted at any later time -- including after a legitimate newer
+	// toggle -- to silently reverse it. RecoverMilestoneSubscriptionSigner
+	// binds a signature to the exact Sequence value the signer observed;
+	// core.Node.EscrowMilestoneSubscriptionUpdate advances Sequence by
+	// exactly one the instant a toggle actually commits, so the very same
+	// signature can never satisfy a subsequent check. Scoped to the
+	// subscription only: it never changes what Fund/Release/Cancel/Create
+	// sign over.
+	Sequence uint64
 }
 
 // Clone returns a copy safe for modification.

@@ -36,6 +36,14 @@ type MilestoneActionEnvelope struct {
 	LegID     uint64 `json:"legId,omitempty"`
 	Action    string `json:"action"`
 	Active    *bool  `json:"active,omitempty"`
+	// Sequence binds a milestoneSubscriptionUpdate signature to the
+	// subscription's current MilestoneSubscription.Sequence counter
+	// (NHB-AUDIT-C3 follow-up) so a captured toggle signature can never be
+	// replayed once any later toggle has actually committed. It is always
+	// nil (and therefore omitted from the signed JSON entirely) for every
+	// other action, so it never changes what Fund/Release/Cancel/Create
+	// sign over.
+	Sequence *uint64 `json:"sequence,omitempty"`
 }
 
 // MilestoneAction* are MilestoneActionEnvelope.Action's wire values.
@@ -47,12 +55,13 @@ const (
 	MilestoneActionSubscriptionUpdate = "milestoneSubscriptionUpdate"
 )
 
-func buildMilestoneActionEnvelope(id [32]byte, legID uint64, action string, active *bool) ([]byte, error) {
+func buildMilestoneActionEnvelope(id [32]byte, legID uint64, action string, active *bool, sequence *uint64) ([]byte, error) {
 	envelope := MilestoneActionEnvelope{
 		ProjectID: hex.EncodeToString(id[:]),
 		LegID:     legID,
 		Action:    action,
 		Active:    active,
+		Sequence:  sequence,
 	}
 	payload, err := json.Marshal(envelope)
 	if err != nil {
@@ -66,9 +75,10 @@ func buildMilestoneActionEnvelope(id [32]byte, legID uint64, action string, acti
 // active]) tuple and recovers the address that produced signature over
 // it. The caller (core.Node) must treat the RETURNED address as the sole
 // source of truth for who is authorizing this action -- never a
-// separately supplied address parameter.
+// separately supplied address parameter. Sequence is always omitted here;
+// use RecoverMilestoneSubscriptionSigner for milestoneSubscriptionUpdate.
 func RecoverMilestoneActionSigner(id [32]byte, legID uint64, action string, active *bool, signature []byte) ([20]byte, error) {
-	payload, err := buildMilestoneActionEnvelope(id, legID, action, active)
+	payload, err := buildMilestoneActionEnvelope(id, legID, action, active, nil)
 	if err != nil {
 		return [20]byte{}, err
 	}
@@ -79,8 +89,51 @@ func RecoverMilestoneActionSigner(id [32]byte, legID uint64, action string, acti
 // for (projectId, legId, action[, active]) with priv. Exported for tests
 // and reference Go clients constructing the wire signature -- the actual
 // authorization check (RecoverMilestoneActionSigner) never calls this.
+// Sequence is always omitted here; use SignMilestoneSubscriptionEnvelope
+// for milestoneSubscriptionUpdate.
 func SignMilestoneActionEnvelope(id [32]byte, legID uint64, action string, active *bool, priv *ecdsa.PrivateKey) ([]byte, error) {
-	payload, err := buildMilestoneActionEnvelope(id, legID, action, active)
+	payload, err := buildMilestoneActionEnvelope(id, legID, action, active, nil)
+	if err != nil {
+		return nil, err
+	}
+	return signMilestonePayload(payload, priv)
+}
+
+// RecoverMilestoneSubscriptionSigner reconstructs the canonical
+// MilestoneActionEnvelope for a milestoneSubscriptionUpdate action bound to
+// (projectId, active, expectedSequence) and recovers the address that
+// produced signature over it. NHB-AUDIT-C3 follow-up: the caller
+// (core.Node) must pass the project's OWN current, persisted
+// MilestoneSubscription.Sequence as expectedSequence -- read from state,
+// never from a client-supplied field -- so a signature only recovers to
+// the true payer when it was produced against the sequence value that is
+// actually live right now. A captured signature for an earlier sequence
+// value reconstructs a different envelope once the state has moved on
+// (whether from this same toggle already applying once, or from any later
+// toggle), so it recovers a signer that will not equal the project's
+// payer and the update is rejected -- exactly the same "derive the caller
+// solely from the signature" pattern RecoverMilestoneActionSigner already
+// uses for Fund/Release/Cancel, extended with the one extra binding this
+// action's mutable Active field requires.
+func RecoverMilestoneSubscriptionSigner(id [32]byte, active bool, expectedSequence uint64, signature []byte) ([20]byte, error) {
+	payload, err := buildMilestoneActionEnvelope(id, 0, MilestoneActionSubscriptionUpdate, &active, &expectedSequence)
+	if err != nil {
+		return [20]byte{}, err
+	}
+	return recoverMilestoneSigner(payload, signature)
+}
+
+// SignMilestoneSubscriptionEnvelope signs the canonical
+// milestoneSubscriptionUpdate envelope for (projectId, active,
+// expectedSequence) with priv. expectedSequence must be the CURRENT
+// MilestoneSubscription.Sequence the signer observed (e.g. via
+// EscrowMilestoneGet) -- signing a stale value produces a signature that
+// RecoverMilestoneSubscriptionSigner will reject once state has moved past
+// it. Exported for tests and reference Go clients constructing the wire
+// signature -- the actual authorization check
+// (RecoverMilestoneSubscriptionSigner) never calls this.
+func SignMilestoneSubscriptionEnvelope(id [32]byte, active bool, expectedSequence uint64, priv *ecdsa.PrivateKey) ([]byte, error) {
+	payload, err := buildMilestoneActionEnvelope(id, 0, MilestoneActionSubscriptionUpdate, &active, &expectedSequence)
 	if err != nil {
 		return nil, err
 	}
