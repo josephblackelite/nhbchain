@@ -247,6 +247,90 @@ func TestMintWithSignatureExecutesInBlock(t *testing.T) {
 	}
 }
 
+// TestMintWithSignatureRejectsReplayAfterMining is the direct regression
+// test for NHB-AUDIT-W28: a live, confirmed double-mint incident where a
+// caller (nhbportal, due to a since-fixed stale-claim retry bug) submitted
+// two mint_with_sig calls for the same real-world deposit, the second
+// arriving roughly 5 minutes after the first had already been mined --
+// i.e. AFTER the original transaction was gone from the mempool, unlike
+// TestMintWithSignatureReplayInvoice above (which only proves the
+// mempool-scan check catches a replay while the original is still
+// pending). Confirms the system's whole safety assumption for a same-
+// invoiceId retry -- "the chain's own on-chain InvoiceID uniqueness check
+// makes it a safe no-op" (see nhb-custody's mint.ts doc comment) -- still
+// holds once the original is durably committed: addTransaction's
+// admission-time simulation (validateTransaction -> ExecuteTransaction ->
+// applyMintTransaction, run against a copy of committed state) rejects
+// the replay with ErrMintInvoiceUsed before it ever reaches the mempool,
+// so no double credit and no wasted mempool slot occur either.
+func TestMintWithSignatureRejectsReplayAfterMining(t *testing.T) {
+	node := newTestNode(t)
+
+	minterKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("minter key: %v", err)
+	}
+	assignRole(t, node, "MINTER_NHB", toAddress(minterKey))
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("recipient key: %v", err)
+	}
+
+	voucher := MintVoucher{
+		InvoiceID: "inv-mined-replay",
+		Recipient: recipientKey.PubKey().Address().String(),
+		Token:     "NHB",
+		Amount:    "125",
+		ChainID:   MintChainID,
+		Expiry:    time.Now().Add(time.Hour).Unix(),
+	}
+	sig := signVoucher(t, minterKey, voucher)
+
+	if _, err := node.MintWithSignature(&voucher, sig); err != nil {
+		t.Fatalf("first mint failed: %v", err)
+	}
+
+	block, err := node.CreateBlock(append([]*types.Transaction(nil), node.mempool...))
+	if err != nil {
+		t.Fatalf("create block: %v", err)
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("expected mempool empty after commit, got %d -- the original must be gone before the replay below means anything", got)
+	}
+
+	account, err := node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get account: %v", err)
+	}
+	amount, _ := voucher.AmountBig()
+	if account.BalanceNHB.Cmp(amount) != 0 {
+		t.Fatalf("expected NHB balance %s after the first mint, got %s", amount, account.BalanceNHB)
+	}
+
+	// The replay: same voucher, same signature, submitted now that the
+	// original is durably mined and long gone from the mempool -- exactly
+	// the live incident's ~5-minutes-later timing.
+	if _, err := node.MintWithSignature(&voucher, sig); err == nil || !errors.Is(err, ErrMintInvoiceUsed) {
+		t.Fatalf("expected ErrMintInvoiceUsed for a same-invoice replay after mining, got %v", err)
+	}
+
+	if got := len(node.mempool); got != 0 {
+		t.Fatalf("the replay must never be admitted to the mempool at all, got %d entries", got)
+	}
+
+	account, err = node.GetAccount(recipientKey.PubKey().Address().Bytes())
+	if err != nil {
+		t.Fatalf("get account after replay attempt: %v", err)
+	}
+	if account.BalanceNHB.Cmp(amount) != 0 {
+		t.Fatalf("NHB BALANCE CHANGED AFTER A REJECTED REPLAY -- exactly the double-mint this test guards against: expected %s (unchanged), got %s", amount, account.BalanceNHB)
+	}
+}
+
 // TestMintWithSignatureIncrementsTokenSupply is the direct regression test
 // for the 2026-09-17 fix: applyMintTransaction credited recipient balances
 // but never called AdjustTokenSupply, so nhb_getTotalSupply silently
