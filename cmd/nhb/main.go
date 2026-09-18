@@ -476,7 +476,7 @@ func main() {
 		Prevote:   cfg.Consensus.PrevoteTimeout,
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
-	}))
+	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")))
 
 	// 4. Set the fully configured BFT engine on the node.
 	node.SetBftEngine(bftEngine)
