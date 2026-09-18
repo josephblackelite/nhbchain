@@ -64,6 +64,23 @@ func urlEscape(s string) string {
 	return replacer.Replace(s)
 }
 
+// NHB-AUDIT-S3: this example computes a real ed25519 signature over the
+// canonical NHB Pay URI string below (for the QR-code/deep-link flow) but
+// never attaches it to the AuthorizePayment call that follows -- the
+// MsgAuthorizePayment proto has no signature field to carry it, and the
+// gRPC Tx service this calls has no way to verify a caller-supplied
+// signature for a real, authorized payment (see rpc/pos_grpc.go's
+// submitPayload doc comment for why). This call will fail against a real
+// node for exactly that reason -- it is not something this example can
+// "fix" locally, since it needs a real, working signed-submission path.
+// The actual working pattern -- used by nhbportal's own POS feature today
+// -- signs a TxTypePOSAuthorize transaction client-side with the payer's
+// own wallet key and submits it via the standard nhb_sendTransaction
+// JSON-RPC method, exactly like any other wallet transaction (see
+// nhbportal's src/lib/services/walletManager.ts, submitPosAuthorize and
+// its signAndAssembleL1Tx call). This example is kept as a reference for
+// the canonical-string/QR-code signing shape only, not as a working
+// end-to-end authorization flow.
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

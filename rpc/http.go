@@ -789,8 +789,23 @@ func (s *Server) Serve(listener net.Listener) error {
 		posv1.RegisterRealtimeServer(grpcServer, s.posRealtime)
 	}
 
-	// Register POS Tx and Registry services
-	posSrv := NewPOSServer(s.node, "nhbchain", nil) // Gateway delegates signature to the frontend intent or node
+	// Register POS Tx and Registry services.
+	//
+	// NHB-AUDIT-S3: this Tx service (AuthorizePayment/CapturePayment/
+	// VoidPayment) cannot perform real, authorized payment mutations -- see
+	// pos_grpc.go's submitPayload doc comment for why a nil signer here is
+	// correct, not a bug to "fix" by wiring in a server-held key. The real,
+	// working, production POS integration (nhbportal's business/pos
+	// feature) does not call this gRPC service at all: it builds and signs
+	// TxTypePOSAuthorize/Capture/Void transactions client-side with the
+	// merchant's own wallet key and submits them via the standard
+	// nhb_sendTransaction JSON-RPC path, exactly like every other
+	// wallet-signed transaction type -- confirmed via
+	// core/state_transition.go's applyPOSAuthorize, which requires
+	// payer == transaction signer. Registered here only for its read-only
+	// Registry methods and as a stub for future third-party POS-terminal
+	// integrations that would need to sign client-side the same way.
+	posSrv := NewPOSServer(s.node, "nhbchain", nil)
 	posv1.RegisterTxServer(grpcServer, posSrv)
 	posv1.RegisterRegistryServer(grpcServer, posSrv)
 

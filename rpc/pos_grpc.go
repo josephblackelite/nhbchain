@@ -32,6 +32,25 @@ func NewPOSServer(node core.ConsensusAPI, chainID string, signer *crypto.Private
 	}
 }
 
+// submitPayload wraps msg in an envelope and submits it to the node.
+//
+// NHB-AUDIT-S3: this can never produce a genuinely authorized payment
+// mutation. core/state_pos.go's applyPOSAuthorize (and its Capture/Void
+// siblings) require the transaction's cryptographic signer to equal the
+// message's own payer/merchant field -- so the only two signers this
+// method could ever use are both wrong for real use: an empty/simulated
+// signature (this service has no way to verify or attach a genuine
+// caller-supplied signature -- the proto messages have no signature field
+// at all) fails decode/sender-derivation outright, and a server-held
+// signer (e.g. the validator's own key) would make the VALIDATOR the
+// on-chain payer/merchant for every request, moving the validator's own
+// funds instead of the real payer's or merchant's -- a different kind of
+// wrong, not a fix. Do not wire in a signer here to "fix" the rejection;
+// see NewPOSServer's own call site in http.go for the real, working
+// integration path (client-side signing + nhb_sendTransaction), which
+// nhbportal's actual POS feature already uses correctly. This method only
+// serves this service's read-only Registry methods and stands ready for a
+// real client-signed-envelope submission path if one is ever built.
 func (s *posServer) submitPayload(msg proto.Message) (string, error) {
 	payload, err := anypb.New(msg)
 	if err != nil {
@@ -48,7 +67,10 @@ func (s *posServer) submitPayload(msg proto.Message) (string, error) {
 			return "", err
 		}
 	} else {
-		// Provide a simulated/unsigned envelope if testing without a signer
+		// Deliberately unsigned -- see this function's doc comment. Left
+		// as-is (not "fixed" to succeed) so this path fails the same way
+		// a real unauthorized submission would, rather than silently
+		// accepting one.
 		signedEnvelope = &consensusv1.SignedTxEnvelope{
 			Envelope:  envelope,
 			Signature: &consensusv1.TxSignature{},
