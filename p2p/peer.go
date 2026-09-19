@@ -13,6 +13,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,12 +39,28 @@ type Peer struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+
+	// queuedBytes is the payload size currently waiting in outbound, capped by
+	// queueByteLimit so that a slow reader cannot pin an unbounded amount of
+	// memory behind the message-count limit. dropped and lastDropLog rate-limit
+	// the log line about messages dropped for a slow peer.
+	queuedBytes    atomic.Int64
+	queueByteLimit int64
+	dropped        atomic.Uint64
+	lastDropLog    atomic.Int64
 }
 
 const (
 	persistentPeerRateFloor  = 256.0
 	persistentPeerBurstFloor = 1024.0
 	persistentPeerRateFactor = 8.0
+
+	// A peer's outbound queue holds at most outboundQueueSize messages and, in
+	// bytes, queueBytesFactor times the largest message the server accepts (but
+	// never less than minQueueBytes).
+	queueBytesFactor     = 4
+	minQueueBytes        = 4 << 20
+	queueDropLogInterval = 10 * time.Second
 )
 
 func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reader, server *Server, inbound bool, persistent bool, dialAddr string) *Peer {
@@ -76,7 +93,24 @@ func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reade
 		ctx:           ctx,
 		cancel:        cancel,
 		closed:        make(chan struct{}),
+
+		queueByteLimit: queueByteLimit(server.cfg.MaxMessageBytes),
 	}
+}
+
+func queueByteLimit(maxMessageBytes int) int64 {
+	limit := int64(maxMessageBytes) * queueBytesFactor
+	if limit < minQueueBytes {
+		limit = minQueueBytes
+	}
+	return limit
+}
+
+func messageSize(msg *Message) int64 {
+	if msg == nil {
+		return 0
+	}
+	return int64(len(msg.Payload))
 }
 
 func maxFloat(a, b float64) float64 {
@@ -112,21 +146,47 @@ func (p *Peer) start() {
 	go p.keepaliveLoop()
 }
 
+// Enqueue queues a message for this peer alone. It never blocks: when the queue
+// is full, by count or by bytes, the message is not queued and errQueueFull is
+// returned. A queue that cannot keep up costs that peer messages, not the
+// connection.
 func (p *Peer) Enqueue(msg *Message) error {
 	select {
 	case <-p.ctx.Done():
 		return fmt.Errorf("peer shutting down")
 	default:
 	}
+	if msg != nil && msg.Type == MsgTypePexRequest && p.server != nil {
+		p.server.noteOutgoingPexRequest(p.id, msg)
+	}
 
+	size := messageSize(msg)
+	if prev := p.queuedBytes.Add(size) - size; prev > 0 && prev+size > p.queueByteLimit {
+		p.queuedBytes.Add(-size)
+		return errQueueFull
+	}
 	select {
 	case p.outbound <- msg:
 		return nil
 	case <-p.ctx.Done():
+		p.queuedBytes.Add(-size)
 		return fmt.Errorf("peer shutting down")
 	default:
+		p.queuedBytes.Add(-size)
 		return errQueueFull
 	}
+}
+
+// noteDrop counts a message dropped for this peer and reports whether it is time
+// to log about it again.
+func (p *Peer) noteDrop() (uint64, bool) {
+	total := p.dropped.Add(1)
+	now := time.Now().UnixNano()
+	last := p.lastDropLog.Load()
+	if now-last < int64(queueDropLogInterval) {
+		return total, false
+	}
+	return total, p.lastDropLog.CompareAndSwap(last, now)
 }
 
 func (p *Peer) keepaliveLoop() {
@@ -153,6 +213,10 @@ func (p *Peer) keepaliveLoop() {
 				continue
 			}
 			if err := p.Enqueue(msg); err != nil {
+				if errors.Is(err, errQueueFull) {
+					// A full queue is a slow peer, not a dead one: ping again next tick.
+					continue
+				}
 				fmt.Printf("enqueue ping to %s: %v\n", p.id, err)
 				return
 			}
@@ -279,7 +343,10 @@ func (p *Peer) readLoop() {
 			continue
 		}
 
-		if err := p.server.handler.HandleMessage(&msg); err != nil {
+		if !p.server.admitRequest(p, &msg) {
+			continue
+		}
+		if err := p.server.dispatch(p, &msg); err != nil {
 			if p.server != nil && IsInvalidPayload(err) {
 				p.server.handleProtocolViolation(p, err)
 				return
@@ -299,6 +366,7 @@ func (p *Peer) writeLoop() {
 			if !ok {
 				return
 			}
+			p.queuedBytes.Add(-messageSize(msg))
 			ctx, cancel := context.WithTimeout(p.ctx, p.server.cfg.WriteTimeout)
 			err := p.writeMessage(ctx, msg)
 			cancel()
@@ -340,7 +408,9 @@ func (p *Peer) handleControlMessage(msg *Message) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("build pong: %w", err)
 		}
-		if err := p.Enqueue(pong); err != nil {
+		// A pong the peer's full queue has no room for is dropped: the
+		// connection is not ended over it.
+		if err := p.Enqueue(pong); err != nil && !errors.Is(err, errQueueFull) {
 			return false, fmt.Errorf("send pong: %w", err)
 		}
 		p.server.touchPeer(p.id)
@@ -372,6 +442,17 @@ func (p *Peer) handleControlMessage(msg *Message) (bool, error) {
 		}
 		return true, nil
 	case MsgTypePexAddresses:
+		if p.server.pex == nil {
+			return true, nil
+		}
+		// Addresses are only taken as the reply to a request this node sent.
+		// Anything else is refused before its payload is decoded.
+		if !p.server.pex.expectingReply(p.id) {
+			return false, errUnsolicitedPex
+		}
+		if len(msg.Payload) > pexMaxAddressesPayload {
+			return false, fmt.Errorf("pex addresses payload exceeds %d bytes", pexMaxAddressesPayload)
+		}
 		var payload PexAddressesPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			return false, fmt.Errorf("malformed pex addresses: %w", err)
