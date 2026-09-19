@@ -1,34 +1,34 @@
 # Merchant Loyalty Console
 
-A Next.js dashboard for NHBChain loyalty operations teams. It lets you:
+A Next.js dashboard for loyalty operations. Reads work; the write actions call RPC methods that the node has retired.
 
-- Create loyalty businesses and register paymasters.
-- Manage merchant assignments and rotate pools without leaving the browser.
-- Configure loyalty programs that accrue ZNHB at settlement.
-- Track daily reward stats to verify that accruals fire after real escrow payments.
+**Retired RPC methods.** `loyalty_createBusiness`, `loyalty_setPaymaster`, `loyalty_addMerchant`, `loyalty_removeMerchant`, `loyalty_createProgram`, `loyalty_updateProgram`, `loyalty_pauseProgram` and `loyalty_resumeProgram` return HTTP `410 Gone` (`loyaltyRPCDisabledMessage` in `rpc/loyalty_handlers.go`). The equivalent operations are signed transactions (`TxTypeCreateLoyaltyBusiness` `0x42` through `TxTypeResumeLoyaltyProgram` `0x49`) submitted with `nhb_sendTransaction`; see [`docs/loyalty/loyalty.md`](../../docs/loyalty/loyalty.md).
+
+**Missing RPC methods.** The "Fan rewards" tab calls `loyalty_getCreatorRewardsPool`, `loyalty_creatorRewardsStats` and `loyalty_setCreatorRewardsPool`. No such methods exist in the node (`rpc/http.go`), so those calls return `unknown method`.
+
+What works today: `loyalty_getBusiness`, `loyalty_listPrograms`, `loyalty_paymasterBalance` and `loyalty_programStats` (the four reads the console uses that the node implements; none of them requires a token).
 
 ## Getting started
 
 ```bash
+cd examples
 yarn install
 yarn workspace @nhb/merchant-loyalty-console dev
 ```
 
-Set the RPC endpoint and authentication token:
-
 ```bash
-export NHB_RPC_URL=https://api.nhbcoin.net/rpc
-export NHB_RPC_TOKEN=... # bearer token for privileged RPCs
+export NHB_RPC_URL=<node or gateway JSON-RPC URL>   # default https://api.nhbcoin.net/rpc
+export NHB_RPC_TOKEN=<bearer token>                  # attached only to calls in the console's mutating list
 ```
 
-**Security warning: this is a demo, not a production-ready admin console.** The console proxies JSON-RPC calls through `app/api/rpc/route.ts`, which keeps `NHB_RPC_TOKEN` out of the browser and now enforces a server-side allowlist restricting every call to the exact `loyalty_*` methods this UI uses (nothing else can be invoked through the proxy). It does **not** authenticate the *visitor* -- the "Admin / caller wallet" field is a free-text address with no signature or session check behind it, so anyone who can reach this app's `/api/rpc` endpoint can invoke any mutating method (`loyalty_createBusiness`, `loyalty_setPaymaster`, `loyalty_addMerchant`, program create/update/pause/resume, etc.) as any caller address they type in. Do not expose this app on a public network, and do not treat it as sufficient access control for real merchant operations, without first adding real per-visitor authentication (e.g. a wallet-signature challenge) in front of every mutating call.
+## Security warning
 
-## Features
+`app/api/rpc/route.ts` allows only the `loyalty_*` methods the UI uses and attaches `NHB_RPC_TOKEN` only to the ones it classes as mutating. It does not authenticate the visitor: the "Admin / caller wallet" field is free text with no signature or session check. Do not expose this app on a public network.
 
-- **Business bootstrap:** Create a business, add merchants, and rotate paymasters via JSON-RPC (`loyalty_*`).
-- **Program orchestration:** Generate deterministic program IDs, configure accrual rates, and pause/resume programs.
-- **Fan rewards:** Dedicated tab to inspect the creator rewards pool, tweak share splits, and monitor fan payout stats alongside loyalty programs.
-- **Stats monitor:** Pull `loyalty_programStats` and `loyalty_paymasterBalance` to verify ZNHB accrual after settlements.
-- **Auto-refresh:** Optional polling keeps paymaster balances and program stats current when payments settle in real time.
+## What the page does
 
-Refer to [`docs/loyalty/loyalty.md`](../../docs/loyalty/loyalty.md) for RPC semantics and role requirements.
+- Load a business by ID (`loyalty_getBusiness`), then its programs, paymaster balance and fan-rewards config.
+- Program stats for a chosen day (`loyalty_programStats`).
+- Optional auto-refresh every 15 seconds of the program list, per-program stats and paymaster balance.
+
+RPC semantics and roles are in [`docs/loyalty/loyalty.md`](../../docs/loyalty/loyalty.md).

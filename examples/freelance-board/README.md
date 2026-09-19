@@ -1,8 +1,6 @@
 # Freelance Board
 
-The freelance board is a Next.js reference app for milestone marketplaces and retainers. It mirrors the scenarios captured in
-[`docs/examples/freelance-board.md`](../../docs/examples/freelance-board.md) and focuses on deterministic data structures rather
-than production APIs.
+A static Next.js mock-up of a milestone marketplace: three pages (`/`, `/subscriptions`, `/skills`) with hard-coded sample data. It makes no RPC or WebSocket calls. The page text names the `escrow_milestone*` and `reputation_verifySkill` RPC methods and the `escrow.milestone.*` event topics; those are documented, with their parameters and results as implemented in the node, in [`docs/examples/freelance-board.md`](../../docs/examples/freelance-board.md).
 
 ## Getting started
 
@@ -11,6 +9,3 @@ cd examples/freelance-board
 npm install
 npm run dev
 ```
-
-Refer to the documentation for the milestone engine roadmap, example RPC payloads, and the event keys to monitor when
-connecting to devnet: [`docs/examples/freelance-board.md`](../../docs/examples/freelance-board.md).

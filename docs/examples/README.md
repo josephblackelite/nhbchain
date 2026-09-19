@@ -1,64 +1,69 @@
-# Example Applications
+# Example applications
 
-This page indexes what is actually in the `examples/` directory of this repository and how to run it. Every path below exists in the repository; there is no separate examples repository to clone.
+This directory documents the code under [`/examples`](../../examples). Every statement here was checked against the source in this repository; the source is the reference if the two ever disagree.
+
+## Read this first: several examples call retired RPC methods
+
+The node's RPC layer permanently disables a set of write methods. They return HTTP `410 Gone` with error code `codeMethodDisabled` (defined in `rpc/http.go`), because they used to mutate validator-local state outside the block pipeline. Disabled methods, by handler file:
+
+| Family | Disabled methods | Source |
+| --- | --- | --- |
+| `creator_*` | `creator_publish`, `creator_tip`, `creator_stake`, `creator_unstake`, and `creator_payouts` with `claim: true` | `rpc/creator_handlers.go` |
+| `identity_*` | `identity_setAlias`, `identity_setAvatar`, `identity_addAddress`, `identity_removeAddress`, `identity_setPrimary`, `identity_rename`, `identity_createClaimable`, `identity_claim` | `rpc/identity_handlers.go` |
+| `claimable_*` | `claimable_create`, `claimable_claim`, `claimable_cancel` | `rpc/claimable_handlers.go` |
+| `escrow_*` | `escrow_create`, `escrow_fund`, `escrow_release`, `escrow_refund`, `escrow_dispute`, `escrow_expire`, `escrow_resolve` (`escrow_get`, `escrow_getRealm`, `escrow_getSnapshot`, `escrow_listEvents` and the `escrow_milestone*` methods are not disabled, but the milestone write methods have the same defect, see below) | `rpc/escrow_handlers.go` |
+| `p2p_*` | `p2p_createTrade`, `p2p_settle`, `p2p_dispute`, `p2p_resolve` (`p2p_getTrade` is live) | `rpc/p2p_handlers.go` |
+| `lending_*` | `lending_supplyNHB`, `lending_withdrawNHB`, `lending_depositZNHB`, `lending_withdrawZNHB`, `lending_borrowNHB`, `lending_borrowNHBWithFee`, `lending_repayNHB`, `lending_liquidate` | `rpc/lending_handlers.go` |
+| `stake_*` | `stake_delegate`, `stake_undelegate`, `stake_claim`, `stake_claimRewards` | `rpc/stake_handlers.go` |
+| `loyalty_*` | `loyalty_createBusiness`, `loyalty_setPaymaster`, `loyalty_addMerchant`, `loyalty_removeMerchant`, `loyalty_createProgram`, `loyalty_updateProgram`, `loyalty_pauseProgram`, `loyalty_resumeProgram` | `rpc/loyalty_handlers.go` |
+
+The lending and stake error messages (`rpc/lending_handlers.go`, `rpc/stake_handlers.go`) tell callers to submit the equivalent signed transaction through `nhb_sendTransaction`. The loyalty message (`rpc/loyalty_handlers.go`) tells callers to submit the equivalent transaction of the matching `TxType`, signed by the caller's own key, without naming a method. The escrow, creator, identity, claimable and p2p messages say a signed-transaction replacement is pending. There is no creator transaction type in `core/types/transaction.go`.
+
+Caution: the `escrow_milestone*` write methods (`escrow_milestoneCreate`, `Fund`, `Release`, `Cancel`, `SubscriptionUpdate`) and `reputation_verifySkill` are not disabled, but the node methods behind them (`core/node.go`: `EscrowMilestoneCreate`, `EscrowMilestoneFund`, `EscrowMilestoneRelease`, `EscrowMilestoneCancel`, `EscrowMilestoneSubscriptionUpdate`, `ReputationVerifySkill`) take `n.stateMu` and write `n.state.Trie` directly, outside the block pipeline. That is the same pattern that the comment on `escrowRPCDisabledMessage` in `rpc/escrow_handlers.go` describes as the reason the other methods were retired (a validator-local state change that other validators do not reproduce, leading to a state-root mismatch on the next block). Do not call them against a multi-validator network.
+
+## The examples
+
+| Example | Guide | Status against the current node |
+| --- | --- | --- |
+| Workspace, shared SDK, status dashboard, network monitor | [overview.md](overview.md) | Runs. The dashboard's `/rpc-status` route calls an RPC method named `status` that the node does not have. |
+| RPC cookbook scripts | [cookbook.md](cookbook.md) | The `nhb_getBalance` and `nhb_getLatestTransactions` calls work. The REST leg calls routes that do not exist in `services/escrow-gateway`. |
+| Wallet gateway submission | [wallets.md](wallets.md) | Route exists in `gateway/routes/transactions.go`. |
+| Wallet Lite | [wallet-lite.md](wallet-lite.md) | Read paths work (`nhb_getBalance`, `identity_resolve`). Alias, claimable, claim and creator flows hit retired methods. |
+| P2P Mini-Market | [p2p-mini-market.md](p2p-mini-market.md) | Read paths work. Every write route returns `410` locally. |
+| Creator Studio | [creator-studio.md](creator-studio.md) | Only the payout ledger read works. |
+| Escrow checkout widget and merchant demo | [escrow-checkout.md](escrow-checkout.md) | Talks to a REST API whose routes are not implemented in this repository. |
+| Freelance board | [freelance-board.md](freelance-board.md) | Static UI, makes no RPC calls. |
+| Merchant Loyalty Console | [`examples/merchant-loyalty-console/README.md`](../../examples/merchant-loyalty-console/README.md) | Reads work. Writes hit retired methods. Fan-rewards calls use methods the node does not have. |
+| Lending dApp | [`examples/lending-dapp/README.md`](../../examples/lending-dapp/README.md) | Mock data only, no network calls. |
 
 ## Two kinds of examples
 
-1. **Go and TypeScript snippets** that talk to the chain directly (JSON-RPC, or the consensus gRPC service through `sdk/consensus`, `sdk/lending`).
-2. **Web demos** (Next.js and Express) that call HTTP services such as an escrow, swap or creator REST gateway. Those HTTP services are not implemented in this repository, so a demo of this kind needs a compatible service that you supply, and its request signing cannot be checked against the code here. See [escrow-checkout.md](./escrow-checkout.md) for a worked example of that boundary.
+- Yarn v1 for the workspace (`packageManager` is `yarn@1.22.19` in `examples/package.json`) and Node.js with a global `fetch` (the cookbook script and the lib-sdk client rely on it).
+- Go, at the version in the root `go.mod` (`go 1.24.0`), for the Go programs. They live in the root module `nhbchain`, so run them from the repository root, for example `go run ./examples/cookbook/go`.
 
-## Layout
+## Governance payload example
 
-| Path | What it is |
-| --- | --- |
-| `examples/package.json` | Yarn workspace root (`@nhb/examples`, `packageManager` `yarn@1.22.19`). Workspaces: `lib-sdk`, `apps/*`, `wallet-lite`, `p2p-mini-market`, `merchant-loyalty-console`, `escrow-checkout/*`, `creator-studio`. |
-| `examples/scripts/dev.js` | `yarn dev` runs the `dev` script of three workspaces: `@nhb/status-dashboard`, `@nhb/network-monitor` and `@nhb/p2p-mini-market`. |
-| `examples/apps/status-dashboard`, `examples/apps/network-monitor` | Small dev servers (`dev-server.js`). Their ports come from `STATUS_DASHBOARD_PORT` and `NETWORK_MONITOR_PORT` in `examples/.env.example` (4300 and 4301). |
-| `examples/lib-sdk` | Shared JS helpers used by the web demos. |
-| `examples/wallet-lite`, `examples/p2p-mini-market`, `examples/merchant-loyalty-console`, `examples/creator-studio` | Next.js demos, each with its own README. |
-| `examples/escrow-checkout/widget`, `examples/escrow-checkout/merchant-demo` | React widget and Express merchant server, see [escrow-checkout.md](./escrow-checkout.md). |
-| `examples/freelance-board`, `examples/lending-dapp` | Next.js projects that are not listed in the workspace `workspaces` array; install and run them from their own directory. |
-| `examples/docs/go/first_transaction`, `examples/docs/go/price_oracle_publish`, `examples/docs/ts/*.ts` | Go and TypeScript snippets used by the developer docs. |
-| `examples/docs/ops/read_pauses`, `pause_toggle`, `quota_dump`, `swap_pause_inspect` | Operator helpers, see below. |
-| `examples/clients/go/basic_consensus_client`, `examples/clients/ts/basic_consensus_client.ts` | Minimal consensus gRPC client. |
-| `examples/txs/go/borrow.go`, `examples/txs/ts/supply.ts`, `examples/lending/quickstart.ts`, `examples/swap/redeem.ts`, `examples/gov/`, `examples/queries/` | Single-purpose transaction, query and governance snippets. |
-| `examples/cookbook/go/main.go`, `examples/cookbook/js/index.mjs` | The cookbook scripts. |
-| `examples/gateway/openapi.yaml`, `examples/postman/*.json` | An OpenAPI description and Postman collections. |
-| `examples/compose/` | Docker Compose files, including `mininet/` (see `docs/cookbooks/operators.md`) and `lendingd.yml`. |
-
-## Running the web demos
+[`gov/param-update-proposal.json`](gov/param-update-proposal.json) is a `param.update` payload. `nhb-cli gov propose` takes it as `--payload` (JSON, or `@path` to a file):
 
 ```bash
-cd examples
-cp .env.example .env
-yarn install
-yarn dev
+nhb-cli gov propose \
+  --kind param.update \
+  --payload @docs/examples/gov/param-update-proposal.json \
+  --key ./proposer.key \
+  --deposit 1000e18
 ```
 
-`.env.example` defines `NHB_RPC_URL`, `NHB_RPC_TOKEN`, `NHB_WS_URL`, `NHB_API_URL`, `NHB_CHAIN_ID`, `NHB_API_KEY`, `NHB_API_SECRET`, `NHB_WALLET_PRIVATE_KEY`, `NHB_WALLET_ADDRESS` and the two port variables. Its values are demo placeholders. Note that the file sets `NHB_CHAIN_ID` to a decimal value that is not the chain ID the node accepts (`0x4e4842`, `types.NHBChainID()`; see the [wallet builder guide](../sdk/wallets.md)); set it to the real chain ID before signing anything with these demos.
+Flags are defined in `cmd/nhb-cli/gov.go` (`runGovPropose`): `--kind`, `--payload`, `--key` are required; `--deposit` defaults to `0` and accepts wei or the `1000e18` shorthand; the governance policy rejects any deposit below `[governance] MinDepositWei` with `governance: deposit below minimum` (`native/governance/engine.go`). That value is `1000e18` in the checked-in `config.toml` and is the default applied by `config/config.go` when the setting is empty, so the example above uses exactly the minimum; a node configured with a different `MinDepositWei` needs a different `--deposit`. The command signs a `TxTypeGovPropose` (`0x27`) transaction and sends it with `nhb_sendTransaction`, so `NHB_RPC_TOKEN` must be set (see `rpcAuthToken` in `cmd/nhb-cli/main.go`). A `param.update` payload may only contain keys in the node's governance allow-list (`AllowedParams` in `config.toml`; enforced in `native/governance/engine.go`, `validateParamPayload`).
 
-To run a single demo, use its own script, for example `yarn workspace @nhb/escrow-merchant-demo dev`. The `lint` and `test` scripts of the two `escrow-checkout` packages are placeholders that only print a TODO.
+## Identity HTTP examples
 
-## Running the Go snippets
+[`identity/`](identity) holds `.http` request files:
 
-The Go programs are part of the repository's main Go module (`go.mod`), so run them from the repository root:
+- `resolve.http` calls `identity_resolve` (live).
+- `email-verify.http` calls the identity gateway's `/identity/email/register`, `/identity/email/verify` and `/identity/alias/bind-email` (`services/identity-gateway/server.go`).
 
-```bash
-go run ./examples/docs/go/first_transaction
-```
-
-`first_transaction` reads the consensus gRPC address from the `CONSENSUSD_GRPC_ADDR` environment variable (`examples/docs/go/first_transaction/main.go`). See each file for the other environment variables it reads. For the gRPC transport requirements (shared secret or client certificate, `--allow-insecure` on a loopback listener) see [`docs/sdk/go.md`](../sdk/go.md).
+The four `.http` files for the retired write methods (`identity_setAlias`, `identity_addAddress`, `identity_createClaimable`, `identity_claim`) were removed.
 
 ## Operator helpers
 
-All four read the consensus data directory (`--db`, default `./nhb-data`) and the consensus gRPC endpoint (`--consensus`, default `localhost:9090`).
-
-- `go run ./examples/docs/ops/read_pauses` dumps the `system/pauses` map.
-- `go run ./examples/docs/ops/pause_toggle --module <name> --state pause` stages a `gov.v1` `MsgSetPauses` transaction; use `--state resume` to lift the pause. Modules: `lending`, `swap`, `escrow`, `trade`, `loyalty`, `potso`, `transfer_nhb`, `transfer_znhb`. Extra flags: `--governance` (governance gRPC endpoint, default `localhost:50061`) and `--authority` (governance authority address).
-- `go run ./examples/docs/ops/quota_dump --module <name> --address nhb1...` inspects quota usage for one address (`--epoch`, `--epoch-seconds` optional).
-- `examples/docs/ops/swap_pause_inspect` prints the on-chain `pauses.swap` value and then calls `GET /v1/stable/status` on an off-chain HTTP service whose base URL is set by a flag (default `http://localhost:7074`). That service is not part of this repository, so the second half of the output needs one you provide.
-
-## Related pages
-
-- [overview.md](./overview.md), [cookbook.md](./cookbook.md), [wallets.md](./wallets.md), [wallet-lite.md](./wallet-lite.md), [creator-studio.md](./creator-studio.md), [freelance-board.md](./freelance-board.md), [p2p-mini-market.md](./p2p-mini-market.md).
-- [`docs/sdk/examples.md`](../sdk/examples.md) for the SDK example programs.
+`examples/docs/ops` holds Go programs that read node state directly. They are documented in [`examples/README.md`](../../examples/README.md#operator-tooling).
