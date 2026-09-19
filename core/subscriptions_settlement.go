@@ -145,16 +145,32 @@ func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager,
 }
 
 func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Manager, registry *subscriptions.Registry, sub *subscriptions.Subscription, decision subscriptions.ChargeDecision, payerAcc *types.Account, payerBalance *big.Int, cfg subscriptions.Config, attemptNumber uint32, now uint64) error {
-	merchantAcc, err := sp.getAccount(sub.Merchant[:])
-	if err != nil {
-		return fmt.Errorf("subscriptions: load merchant %x: %w", sub.Merchant, err)
+	// Payer, merchant and treasury may resolve to the same address. Each
+	// address is loaded once and persisted once, so every delta lands on one
+	// account object: two copies of one account would let the last
+	// setAccount overwrite the others' deltas, creating or destroying value.
+	merchantAcc := payerAcc
+	if sub.Merchant != sub.Payer {
+		var err error
+		merchantAcc, err = sp.getAccount(sub.Merchant[:])
+		if err != nil {
+			return fmt.Errorf("subscriptions: load merchant %x: %w", sub.Merchant, err)
+		}
 	}
 
 	var treasuryAcc *types.Account
 	if decision.FeeWei.Sign() > 0 {
-		treasuryAcc, err = sp.getAccount(cfg.Treasury[:])
-		if err != nil {
-			return fmt.Errorf("subscriptions: load treasury: %w", err)
+		switch cfg.Treasury {
+		case sub.Payer:
+			treasuryAcc = payerAcc
+		case sub.Merchant:
+			treasuryAcc = merchantAcc
+		default:
+			var err error
+			treasuryAcc, err = sp.getAccount(cfg.Treasury[:])
+			if err != nil {
+				return fmt.Errorf("subscriptions: load treasury: %w", err)
+			}
 		}
 	}
 
@@ -167,10 +183,12 @@ func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Ma
 	if err := sp.setAccount(sub.Payer[:], payerAcc); err != nil {
 		return err
 	}
-	if err := sp.setAccount(sub.Merchant[:], merchantAcc); err != nil {
-		return err
+	if merchantAcc != payerAcc {
+		if err := sp.setAccount(sub.Merchant[:], merchantAcc); err != nil {
+			return err
+		}
 	}
-	if treasuryAcc != nil {
+	if treasuryAcc != nil && treasuryAcc != payerAcc && treasuryAcc != merchantAcc {
 		if err := sp.setAccount(cfg.Treasury[:], treasuryAcc); err != nil {
 			return err
 		}
