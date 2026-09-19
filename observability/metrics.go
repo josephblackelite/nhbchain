@@ -31,6 +31,15 @@ type MempoolMetrics struct {
 	posLaneBacklog *prometheus.GaugeVec
 	posEnqueued    prometheus.Counter
 	posFinality    prometheus.Histogram
+
+	// Block-production containment instrumentation. Every label set below is
+	// a small fixed enumeration -- never a transaction hash, sender or error
+	// text -- so an attacker cannot inflate metric cardinality.
+	txFailures         *prometheus.CounterVec
+	evictions          *prometheus.CounterVec
+	strikeRecords      prometheus.Gauge
+	strikeOverflow     prometheus.Counter
+	inflightLeaseLapse prometheus.Counter
 }
 
 // PaymasterMetrics captures observability counters for automatic paymaster top-ups.
@@ -447,12 +456,47 @@ func Mempool() *MempoolMetrics {
 				Help:      "Latency for POS-tagged transactions from enqueue to finality in milliseconds.",
 				Buckets:   []float64{50, 100, 200, 400, 800, 1_600, 3_200, 6_400, 12_800},
 			}),
+			txFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "tx_failures_total",
+				Help:      "Transactions that failed while a block proposal was being assembled, by disposition (prune, skip, quarantine, nondeterministic).",
+			}, []string{"disposition"}),
+			evictions: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "evictions_total",
+				Help:      "Transactions removed from the local mempool by block-production containment, by reason (classified_prune, strikes, ttl, isolation).",
+			}, []string{"reason"}),
+			strikeRecords: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "strike_records",
+				Help:      "Number of resident transactions with a recorded proposal-time failure history.",
+			}),
+			strikeOverflow: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "strike_overflow_evictions_total",
+				Help:      "Failure-history records dropped because the bounded strike book was full.",
+			}),
+			inflightLeaseLapse: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "mempool",
+				Name:      "inflight_leases_expired_total",
+				Help:      "Times an in-flight proposal lease lapsed and the transaction was offered again.",
+			}),
 		}
 		prometheus.MustRegister(
 			mempoolRegistry.posLaneFill,
 			mempoolRegistry.posLaneBacklog,
 			mempoolRegistry.posEnqueued,
 			mempoolRegistry.posFinality,
+			mempoolRegistry.txFailures,
+			mempoolRegistry.evictions,
+			mempoolRegistry.strikeRecords,
+			mempoolRegistry.strikeOverflow,
+			mempoolRegistry.inflightLeaseLapse,
 		)
 	})
 	return mempoolRegistry
@@ -733,6 +777,19 @@ func (m *StakingMetrics) IndexPersistFailureCounter() prometheus.Counter {
 
 type consensusMetrics struct {
 	blockInterval prometheus.Gauge
+
+	// Block-production liveness instrumentation (see
+	// core/proposal_containment.go and core/liveness_watchdog.go).
+	buildFailuresConsecutive prometheus.Gauge
+	buildFailures            *prometheus.CounterVec
+	emptyBlockFallbacks      prometheus.Counter
+	buildDuration            prometheus.Histogram
+	buildWaves               prometheus.Histogram
+	secondsSinceLastCommit   prometheus.Gauge
+	lastCommitHeight         prometheus.Gauge
+	livenessStalled          prometheus.Gauge
+	txPanicsRecovered        prometheus.Counter
+	localValidationFailures  prometheus.Counter
 }
 
 // Consensus exposes the metrics registry for consensus level instrumentation.
@@ -745,8 +802,82 @@ func Consensus() *consensusMetrics {
 				Name:      "block_interval_seconds",
 				Help:      "Interval in seconds between the timestamps of consecutive committed blocks.",
 			}),
+			buildFailuresConsecutive: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "build_failures_consecutive",
+				Help:      "Consecutive block-build attempts that could not include the offered transactions and fell back to (or failed to build) an empty block.",
+			}),
+			buildFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "build_failures_total",
+				Help:      "Whole-block build failures by reason (lifecycle, evidence, state_copy, budget, waves, infra, panic, other).",
+			}, []string{"reason"}),
+			emptyBlockFallbacks: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "empty_block_fallbacks_total",
+				Help:      "Block proposals that fell back to an empty block after the full build failed.",
+			}),
+			buildDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "build_duration_seconds",
+				Help:      "Wall-clock time spent assembling one block proposal.",
+				Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+			}),
+			buildWaves: prometheus.NewHistogram(prometheus.HistogramOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "build_waves",
+				Help:      "Number of execution waves needed to assemble one block proposal.",
+				Buckets:   []float64{1, 2, 3, 4, 5, 6, 7},
+			}),
+			secondsSinceLastCommit: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "seconds_since_last_commit",
+				Help:      "Seconds since this node last saw its committed height advance (process start counts as a commit).",
+			}),
+			lastCommitHeight: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "last_commit_height",
+				Help:      "Committed chain height as last observed by the liveness watchdog.",
+			}),
+			livenessStalled: prometheus.NewGauge(prometheus.GaugeOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "liveness_stalled",
+				Help:      "1 while no block has committed for longer than the configured stall threshold, else 0.",
+			}),
+			txPanicsRecovered: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "tx_panics_recovered_total",
+				Help:      "Panics raised while applying a candidate transaction during block assembly that were contained.",
+			}),
+			localValidationFailures: prometheus.NewCounter(prometheus.CounterOpts{
+				Namespace: "nhb",
+				Subsystem: "consensus",
+				Name:      "local_validation_failures_total",
+				Help:      "Own block proposals that this node's own validation rejected.",
+			}),
 		}
-		prometheus.MustRegister(consensusRegistry.blockInterval)
+		prometheus.MustRegister(
+			consensusRegistry.blockInterval,
+			consensusRegistry.buildFailuresConsecutive,
+			consensusRegistry.buildFailures,
+			consensusRegistry.emptyBlockFallbacks,
+			consensusRegistry.buildDuration,
+			consensusRegistry.buildWaves,
+			consensusRegistry.secondsSinceLastCommit,
+			consensusRegistry.lastCommitHeight,
+			consensusRegistry.livenessStalled,
+			consensusRegistry.txPanicsRecovered,
+			consensusRegistry.localValidationFailures,
+		)
 	})
 	return consensusRegistry
 }
@@ -761,6 +892,153 @@ func (m *consensusMetrics) RecordBlockInterval(interval time.Duration) {
 		seconds = 0
 	}
 	m.blockInterval.Set(seconds)
+}
+
+// buildFailureReasons is the closed set of labels RecordBuildFailure accepts;
+// anything else is recorded as "other" so the label set stays bounded.
+var buildFailureReasons = map[string]struct{}{
+	"lifecycle": {}, "evidence": {}, "state_copy": {}, "budget": {},
+	"waves": {}, "infra": {}, "panic": {}, "other": {},
+}
+
+// RecordBuildFailure counts one whole-block build failure under reason.
+func (m *consensusMetrics) RecordBuildFailure(reason string) {
+	if m == nil {
+		return
+	}
+	if _, ok := buildFailureReasons[reason]; !ok {
+		reason = "other"
+	}
+	m.buildFailures.WithLabelValues(reason).Inc()
+}
+
+// SetConsecutiveBuildFailures publishes the current consecutive-failure streak.
+func (m *consensusMetrics) SetConsecutiveBuildFailures(n int) {
+	if m == nil {
+		return
+	}
+	m.buildFailuresConsecutive.Set(float64(n))
+}
+
+// RecordEmptyBlockFallback counts one proposal that fell back to an empty block.
+func (m *consensusMetrics) RecordEmptyBlockFallback() {
+	if m == nil {
+		return
+	}
+	m.emptyBlockFallbacks.Inc()
+}
+
+// ObserveBuild records how long one proposal took to assemble and in how many
+// execution waves.
+func (m *consensusMetrics) ObserveBuild(duration time.Duration, waves int) {
+	if m == nil {
+		return
+	}
+	m.buildDuration.Observe(duration.Seconds())
+	m.buildWaves.Observe(float64(waves))
+}
+
+// SetSecondsSinceLastCommit publishes the watchdog's stall clock.
+func (m *consensusMetrics) SetSecondsSinceLastCommit(seconds float64) {
+	if m == nil {
+		return
+	}
+	m.secondsSinceLastCommit.Set(seconds)
+}
+
+// SetLastCommitHeight publishes the last committed height the watchdog saw.
+func (m *consensusMetrics) SetLastCommitHeight(height uint64) {
+	if m == nil {
+		return
+	}
+	m.lastCommitHeight.Set(float64(height))
+}
+
+// SetLivenessStalled publishes whether the stall threshold is currently exceeded.
+func (m *consensusMetrics) SetLivenessStalled(stalled bool) {
+	if m == nil {
+		return
+	}
+	if stalled {
+		m.livenessStalled.Set(1)
+		return
+	}
+	m.livenessStalled.Set(0)
+}
+
+// RecordTxPanicRecovered counts one contained panic from a candidate transaction.
+func (m *consensusMetrics) RecordTxPanicRecovered() {
+	if m == nil {
+		return
+	}
+	m.txPanicsRecovered.Inc()
+}
+
+// RecordLocalValidationFailure counts one own proposal rejected by this node.
+func (m *consensusMetrics) RecordLocalValidationFailure() {
+	if m == nil {
+		return
+	}
+	m.localValidationFailures.Inc()
+}
+
+var (
+	txFailureDispositions = map[string]struct{}{
+		"prune": {}, "skip": {}, "quarantine": {}, "nondeterministic": {}, "abort": {},
+	}
+	evictionReasons = map[string]struct{}{
+		"classified_prune": {}, "strikes": {}, "ttl": {}, "isolation": {},
+	}
+)
+
+// RecordTxFailure counts one transaction that failed while a proposal was
+// being assembled. Unknown dispositions are recorded as "abort" so the label
+// set stays closed.
+func (m *MempoolMetrics) RecordTxFailure(disposition string) {
+	if m == nil {
+		return
+	}
+	if _, ok := txFailureDispositions[disposition]; !ok {
+		disposition = "abort"
+	}
+	m.txFailures.WithLabelValues(disposition).Inc()
+}
+
+// RecordEviction counts one transaction removed from the local mempool by
+// block-production containment. Unknown reasons are recorded as "strikes".
+func (m *MempoolMetrics) RecordEviction(reason string) {
+	if m == nil {
+		return
+	}
+	if _, ok := evictionReasons[reason]; !ok {
+		reason = "strikes"
+	}
+	m.evictions.WithLabelValues(reason).Inc()
+}
+
+// SetStrikeRecords publishes the number of tracked failure histories.
+func (m *MempoolMetrics) SetStrikeRecords(n int) {
+	if m == nil {
+		return
+	}
+	m.strikeRecords.Set(float64(n))
+}
+
+// RecordStrikeOverflowEvictions counts failure-history records dropped because
+// the strike book was full.
+func (m *MempoolMetrics) RecordStrikeOverflowEvictions(n uint64) {
+	if m == nil || n == 0 {
+		return
+	}
+	m.strikeOverflow.Add(float64(n))
+}
+
+// RecordInflightLeaseExpired counts one lapsed in-flight proposal lease.
+func (m *MempoolMetrics) RecordInflightLeaseExpired() {
+	if m == nil {
+		return
+	}
+	m.inflightLeaseLapse.Inc()
 }
 
 func labelAsset(asset string) string {

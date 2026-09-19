@@ -135,3 +135,77 @@ groups:
             More than three automatic paymaster top-up failures occurred within 15 minutes. The
             paymaster is likely saturating its mint cap—raise limits or replenish balances before
             sponsored transactions are throttled.
+
+  - name: consensus-liveness
+    interval: 30s
+    rules:
+      - alert: ConsensusNoCommit
+        expr: nhb_consensus_seconds_since_last_commit > 60
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "No block committed for over a minute"
+          description: |
+            This validator has seen its committed height stand still for {{ $value | printf "%.0f" }}s.
+            Grep the validator log for `LIVENESS:` lines: the structured fields separate a peer that is
+            down (bft_round advancing with no proposals) from a proposer that cannot build
+            (consecutive_build_failures > 0, last_build_error set), from one whose own proposals are
+            rejected (`local validation of own proposal failed`), from a lock that cannot be satisfied
+            (bft_locked_round >= 0 with the round climbing). See the block production section of the
+            validator runbook before restarting anything.
+
+      - alert: ConsensusBuildFailing
+        expr: nhb_consensus_build_failures_consecutive >= 2
+        for: 30s
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Block proposals keep falling back to empty blocks"
+          description: |
+            At least two consecutive block builds could not include the offered transactions. The
+            chain is producing empty blocks (or none) while transactions wait. Check
+            nhb_consensus_build_failures_total by reason: `lifecycle` or `evidence` failures that
+            persist on the empty block are not attributable to any transaction and need an operator.
+
+      - alert: ConsensusEmptyBlockFallbackRate
+        expr: increase(nhb_consensus_empty_block_fallbacks_total[5m]) > 20
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High rate of empty-block fallbacks"
+          description: |
+            More than twenty proposals fell back to an empty block in five minutes. Review the
+            `proposal containment` log lines for the dominant error class.
+
+      - alert: MempoolNondeterministicTransactions
+        expr: increase(nhb_mempool_tx_failures_total{disposition="nondeterministic"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Transactions excluded because they read the wall clock"
+          description: |
+            A transaction read the wall clock while applying and was not proposed, because a block
+            containing it cannot be re-executed identically by another validator. No shipped
+            transaction type does this (escrow and trade timestamps come from the block time), so this
+            points at a code change that brought a wall-clock read back. See the `NONDETERMINISM:` log
+            line for the type.
+
+      - alert: ConsensusTxPanicRecovered
+        expr: increase(nhb_consensus_tx_panics_recovered_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "A transaction handler panicked while a block was being built"
+          description: |
+            The panic was contained and the transaction excluded, but a handler that panics on
+            submitted input is a bug that can crash a validator that is not running the containment
+            layer. Report it with the transaction type from the `proposal containment` log line.
