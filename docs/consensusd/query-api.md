@@ -1,57 +1,71 @@
 # Consensus Query API
 
-The consensus daemon now exposes a read-only gRPC surface that mirrors the module state the in-process services previously consumed. This allows external operators to pull consistent snapshots without reaching into node memory.
+`consensusd` exposes a read-only gRPC service, `consensus.v1.QueryService`
+(`proto/consensus/v1/query.proto`, handlers in
+`consensus/service/query_server.go`). It is registered on the same listener and
+behind the same authentication as the consensus service; see
+[consensusd Getting Started](getting-started.md).
 
 ## Service definition
 
-The `consensus.v1.QueryService` gRPC interface provides three RPCs:
+| RPC | Request | Response |
+| --- | --- | --- |
+| `QueryState` | `namespace`, `key` (strings) | `value` (bytes), `proof` (bytes) |
+| `QueryPrefix` | `namespace`, `prefix` (strings) | server stream of `key` (string), `value` (bytes), `proof` (bytes) |
+| `SimulateTx` | `tx_bytes` (a serialized `consensus.v1.Transaction`) | `gas_used` (uint64), `gas_cost` (decimal string), `events` (`type` plus `attributes` map) |
 
-| RPC | Description |
+Values are raw bytes; the namespaces below return JSON. The `proof` fields are
+never populated by the current router (`core.QueryResult.Proof` is not set
+anywhere), so they arrive empty.
+
+Namespaces are matched case-insensitively after trimming whitespace, and `gov`
+and `governance` are the same namespace. An unknown namespace or path returns
+the error `ErrQueryNotSupported`.
+
+## Namespaces
+
+Implemented in `core/query_router.go` and, for the fallbacks, `core/node.go`
+(`queryStateFallback`, `queryPrefixFallback`).
+
+### `lending`
+
+| Call | Result |
 | --- | --- |
-| `QueryState(namespace, key)` | Fetch a single value for the supplied namespace/path. Returns the raw bytes alongside an optional Merkle proof (proofs are reserved for a future upgrade and currently omitted). |
-| `QueryPrefix(namespace, prefix)` | Streams key/value records whose key falls beneath the provided namespace prefix. |
-| `SimulateTx(tx_bytes)` | Executes a transaction against a copy of the latest state and returns gas usage, total gas cost and emitted events. |
+| `QueryState("lending", "markets")` | JSON array of `lending.Market`. |
+| `QueryState("lending", "positions/{address}")` | JSON array of `{poolId, account}` for every pool where the address has a lending account. The address is Bech32 (`nhb1...`) or `0x` plus 40 hex characters. |
+| `QueryPrefix("lending", "")` or `QueryPrefix("lending", "markets")` | One record per market: key = pool ID, value = JSON of the market. Any other prefix returns `ErrQueryNotSupported`. |
 
-All responses are byte-oriented so callers can choose their own decoding strategy (JSON, protobuf, etc.).
+### `swap`
 
-## Well-known namespaces
-
-The query router recognises the following module paths. Additional namespaces can be added in follow-up releases without breaking existing consumers.
-
-### Lending
-
-| Path | Semantics |
+| Call | Result |
 | --- | --- |
-| `lending/markets` | Returns a JSON array of `lending.Market` definitions. |
-| `lending/positions/{address}` | Returns JSON describing the borrower’s open positions across all pools. Addresses may be Bech32 (`nhb1…`) or 20-byte hex. |
+| `QueryState("swap", "vouchers/{id}")` | JSON of the stored voucher record for that identifier; an empty value if there is none. |
+| `QueryState("swap", "oracles")` | JSON of the node's swap provider status (`Node.SwapProviderStatus`). |
 
-### Swap
+There is no `QueryPrefix` for `swap`.
 
-| Path | Semantics |
+### `gov` / `governance`
+
+| Call | Result |
 | --- | --- |
-| `swap/vouchers/{providerTxId}` | Returns the stored `swap.VoucherRecord` for the provider transaction identifier. |
-| `swap/oracles` | Returns the current provider/oracle status JSON (including feed health) mirrored from the in-memory swap service. |
-
-### Governance
-
-| Path | Semantics |
-| --- | --- |
-| `gov/proposals/{id}` | Returns a JSON encoded `governance.Proposal`. |
-| `gov/params` | Returns JSON containing the active governance proposal policy and the parameter store contents for all allowed keys. |
-| `QueryPrefix("gov", "params")` | Streams individual parameter key/value pairs for incremental consumption. |
+| `QueryState("gov", "proposals/{id}")` | JSON of the proposal; an empty value if the ID does not exist. |
+| `QueryState("gov", "tallies/{id}")` | `{"proposal_id", "status", "tally"}` computed from the stored votes; only `{"proposal_id"}` if the proposal does not exist. |
+| `QueryState("gov", "params")` | `{"policy": <ProposalPolicy>, "params": {key: value}}` for every key in the governance policy's allowed-parameter list plus `staking.minimumValidatorStake`, for those that have a stored value. |
+| `QueryPrefix("gov", "params")` | Key/value records for `staking.minimumValidatorStake` only, if it has a stored value (`StateProcessor.queryGovernancePrefix`, `core/query_router.go` line 191). This call succeeds, so the node's wider fallback that lists every allowed parameter (`queryPrefixFallback`, `core/node.go`) is not reached; it returns a different, smaller set than `QueryState("gov", "params")`. Any other prefix returns `ErrQueryNotSupported`. |
 
 ## Transaction simulation
 
-`SimulateTx` expects the transaction encoded as a `consensus.v1.Transaction` protobuf message. Clients can leverage the generated stubs (Go/TypeScript) or marshal the message manually. The response includes:
+`SimulateTx` decodes `tx_bytes` as a `consensus.v1.Transaction` protobuf message
+(`proto/consensus/v1/tx.proto`) and converts it with `codec.TransactionFromProto`
+(`Node.SimulateTx`, `core/node.go` line 8594). It then runs
+`ExecuteTransaction` on a copy of the current state at the chain's current
+height and time, and discards the copy, so nothing is written. The response has
+the execution's gas figures and the events it emitted. Native transaction types
+report empty gas fields, because `executeTransaction` returns an empty
+`SimulationResult` for them; `gas_used` and `gas_cost` carry whatever the
+execution result contains.
 
-- `gas_used`: Gas consumed by execution.
-- `gas_cost`: Decimal string representing `gas_used * gas_price`.
-- `events`: The structured event list emitted by the state processor.
+## Limits
 
-Simulation mutates an ephemeral state copy so it is safe to invoke against production validators.
-
-## Limits and proofs
-
-- Proof generation is deferred to a subsequent milestone; the `proof` fields are currently empty slices.
-- Prefix scans operate on module-maintained indexes to avoid walking the hashed trie. Large datasets (e.g. voucher history) should continue to use the bespoke pagination APIs.
-- Queries always execute against the latest committed state snapshot. Consumers requiring historical consistency should pin the consensus height before querying.
+- Queries read the node's current state, not a historical height.
+- `QueryPrefix` results are built in memory and then streamed.

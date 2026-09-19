@@ -1,33 +1,52 @@
-# Fast sync workflow
+# Fast sync components
 
-Fast sync brings a node from genesis to the current tip in two phases: snapshot import and range synchronization.
+`core/sync/` contains the pieces of a snapshot-plus-range fast sync. Which parts a
+running node actually uses is stated per component below; the snapshot format is
+in [snapshots.md](snapshots.md).
 
-## Phase 1 – snapshot import
+## What is wired to the node
 
-1. Fetch the manifest over HTTPS with TLS fingerprint pinning (the node checks the provided SHA-256 fingerprint).
-2. Verify manifest signatures – at least 2/3 of the validator voting power must sign the digest. A governance anchor may be
-   provided as a fallback trust root.
-3. Download chunk files (resumable). Each file is hashed after download; corrupt files are retried.
-4. Apply the snapshot in a temporary database and atomically swap it in for the live DB. A `.bak` copy of the original database
-   is retained until the node finalizes the new state.
-5. Reset the state processor to the imported root and persist the snapshot height as the fast-sync checkpoint.
+- `Node` creates a `sync.Manager` at start (`core/node.go`, ~line 708) with the
+  chain ID, the current height and the trie database, and a validator set built
+  from the active validators' voting power. It updates the manager's height as
+  blocks commit (~line 4138).
+- JSON-RPC exposes `sync_snapshot_export`, `sync_snapshot_import` and
+  `sync_status` (`rpc/sync_handlers.go`); see [snapshots.md](snapshots.md#json-rpc).
+  `sync_status` returns
+  `{"chainHeight": n, "snapshotHeight": n, "managerReady": bool}`.
 
-## Phase 2 – range sync
+## Range verification (library code)
 
-Starting from the snapshot checkpoint the node requests block proofs from peers and verifies them before applying headers to the
-local chain. A simplified flow:
+`Manager.RangeSync` and `RangeSyncer` (`core/sync/blockproof.go`) verify a chain of
+block proofs starting from a checkpoint header:
 
 ```
-checkpoint -> request proof (height+1) -> verify header linkage -> verify validator quorum -> apply header -> repeat
+checkpoint -> fetch proof for height+1 -> check height and PrevHash linkage
+           -> check validator quorum over the proof digest -> apply header -> repeat
 ```
 
-The range syncer stops once the fetcher signals `EOF`. Verified headers are optionally persisted by the caller to close the gap
-between the snapshot height and the current tip.
+Details:
 
-## Operator checklist
+- A proof is a header plus validator signatures (`BlockProof`).
+- The signed digest is `sha256(chainID (8 bytes BE) || height (8 bytes BE) ||
+  header hash)`.
+- Quorum: the signatures' voting power must satisfy `signed * 3 >= total * 2`
+  against the manager's validator set; unknown signers, wrong-length signatures
+  and signatures that do not recover to the signer's address fail the proof.
+- The syncer stops when the proof fetcher returns `io.EOF` and returns the last
+  verified header. Headers are handed to a `HeaderApplier` as they verify.
 
-* Validate the manifest digest and signature quorum before importing.
-* Confirm the `chainId`, `height`, and `stateRoot` match the intended network.
-* Ensure the snapshot directory has sufficient disk space (chunk size defaults to 16 MiB).
-* After import, monitor `sync_status` RPC until the node catches up to the network tip.
-* Retain the `.bak` database until the range sync has finalized and the node survives a restart.
+Nothing in the node, the CLI or the RPC layer calls `RangeSync`, `EnsureChunks`,
+`HTTPFetcher` or `InstallSnapshot`; only tests do. A running node catches up by
+ordinary block sync over P2P (the `GetStatus`/`GetBlocks` messages in
+[overview.md](overview.md#wire-format)), where blocks above
+`QuorumCertActivationHeight` must carry a verified quorum certificate.
+
+## Operator checklist for a snapshot import
+
+- Check the manifest's `chainId`, `height` and `stateRoot` against the network you
+  intend to join before importing.
+- Confirm the manifest carries validator signatures; an unsigned manifest is
+  rejected.
+- After `sync_snapshot_import`, watch `sync_status` (`chainHeight`,
+  `snapshotHeight`).

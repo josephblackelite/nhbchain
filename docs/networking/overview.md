@@ -1,277 +1,199 @@
 # Networking Overview
 
-This document captures the foundational pieces of the NHB peer-to-peer
-subsystem introduced in NET-2A.
+This page describes the peer-to-peer layer in `p2p/`: node identity, the wire
+format, the handshake, peer discovery, the peerstore, and the connection
+manager. It is written from the code; file references are to `p2p/` unless
+stated otherwise. Related pages:
 
-## Identity & NodeID
+- [Security notes](security.md): handshake digest, replay guard, bans.
+- [Peer exchange](pex.md), [seeds](seeds.md), [operations](ops.md),
+  [network RPC](net-rpc.md), [observability](observability.md).
+- [p2p rate limits](../p2p/ratelimits.md), [reputation](../p2p/reputation.md),
+  [p2pd service](../p2p/service.md).
 
-Each node maintains a persistent secp256k1 identity stored on disk. By default
-`cmd/nhb` writes the key to `<DataDir>/p2p/node_key.json`, creating the directory
-on first run. The public component of this key is hashed with Keccak-256 to
-produce the node's canonical identifier:
+The transport is **plain TCP** carrying newline-delimited JSON. The P2P code has
+no TLS, QUIC or UDP (`server.go`: `net.Listen("tcp", ...)` and
+`net.Dialer.DialContext(ctx, "tcp", ...)`). Node identity is proven by a
+signature inside the handshake, not by the transport.
 
-```
-nodeID = keccak256(uncompressedPubKey[1:]) // 0x-prefixed, lower-case hex
-```
+## Identity and node ID
 
-Loading (or generating) an identity is handled by `p2p.LoadOrCreateIdentity`. The
-helper returns both the private key and derived `NodeID`:
-
-```go
-identityPath := filepath.Join(cfg.DataDir, "p2p", "node_key.json")
-identity, err := p2p.LoadOrCreateIdentity(identityPath)
-if err != nil {
-        log.Fatalf("load node identity: %v", err)
-}
-log.Printf("nodeId=%s", identity.NodeID)
-```
-
-Persisting the identity allows subsequent restarts to present a stable node ID
-and signature key without manual key management.
-
-## Handshake v1
-
-The handshake is an authenticated JSON frame exchanged immediately after a TCP
-connection is established. Both peers transmit the following payload:
-
-| Field | Description |
-| ----- | ----------- |
-| `protoVersion` | Static protocol discriminator (`1`). |
-| `chainId` | Target chain identifier the node belongs to. |
-| `genesisHash` | Hex-encoded canonical genesis hash (32 bytes). |
-| `nodeId` | Sender's 0x-prefixed NodeID derived from its identity key. |
-| `nonce` | 32-byte random challenge encoded as hex. |
-| `clientVersion` | Free-form software/version string exposed via RPC. |
-| `sig` | 65-byte ECDSA signature covering the handshake digest. |
-
-The signature is produced with the sender's node identity over the digest
-outlined in [the security notes](./security.md). Peers reply with a
-`HANDSHAKE_ACK` message type once the frame validates, although the payload is
-the same as the initial `HANDSHAKE` frame.
-
-A minimal illustration of constructing the outbound message is shown below. It
-mirrors the logic in `p2p/handshake.go` and can be used for integration tests or
-other tooling:
-
-```go
-nonce := make([]byte, 32)
-if _, err := rand.Read(nonce); err != nil {
-        log.Fatal(err)
-}
-msg := struct {
-        Proto uint32 `json:"protoVersion"`
-        Chain uint64 `json:"chainId"`
-        Genesis string `json:"genesisHash"`
-        NodeID string `json:"nodeId"`
-        Nonce  string `json:"nonce"`
-        Client string `json:"clientVersion"`
-        Sig    string `json:"sig"`
-}{
-        Proto: 1,
-        Chain: cfg.ChainID,
-        Genesis: hex.EncodeToString(genesisBytes),
-        NodeID: identity.NodeID,
-        Nonce:  hex.EncodeToString(nonce),
-        Client: cfg.ClientVersion,
-}
-digestInput := bytes.Join([][]byte{
-        uint64ToBytes(msg.Chain),
-        genesisBytes,
-        nonce,
-        mustDecodeHex(msg.NodeID),
-}, nil)
-digest := crypto.Keccak256(digestInput)
-signature, err := ethcrypto.Sign(digest, identity.PrivateKey.PrivateKey)
-if err != nil {
-        log.Fatal(err)
-}
-msg.Sig = hex.EncodeToString(signature)
-```
-
-*Helper functions such as `uint64ToBytes` simply encode the integer into an
-8-byte big-endian buffer; the production code uses the same representation.*
-
-### Flow
-
-The handshake flow is intentionally symmetric and short:
-
-1. **Dialing** – initiate or accept a TCP connection.
-2. **Handshaking** – exchange the JSON frames above and validate the digest,
-   chain/genesis compatibility, and nonce replay window. A `HANDSHAKE_ACK`
-   message signals success once verification completes.
-3. **Connected** – both peers register the connection, start the read/write
-   loops, and enable keepalive pings.
-
-Failures at any stage immediately close the socket and increment the peer's
-reputation penalties. Handshake success snapshots the peer metadata for RPC
-exposure.
-
-## State Machine
-
-At a high level the peer lifecycle is:
+Each node has a persistent secp256k1 key. `p2p.LoadOrCreateIdentity(path)`
+(`identity.go`) reads it or creates it. `cmd/nhb` and `cmd/p2pd` use
+`<DataDir>/p2p/node_key.json`, a JSON file `{"privateKey": "<hex>"}` written with
+mode `0600` (a raw-hex file is also accepted when reading). The node ID is
 
 ```
-Outbound Dial Loop
-        |
-        v
-Dialing  -->  Handshaking  -->  Connected
-   ^            |               |
-   |            v               v
-Reconnect   Reject/Ban      Keepalive
+nodeID = "0x" + hex(keccak256(uncompressedPublicKey[1:]))   // lower-case
 ```
 
-* **Outbound Dial Loop** – iterates through configured seeds and peerstore
-  entries, scheduling eligible outbound dials while respecting backoff and ban
-  windows.
-* **Dialing** – initiated either manually (`Connect`) or by the connection
-  manager.
-* **Handshaking** – performs the authenticated handshake exchange and enforces
-  policy (chain, genesis, signature, nonce replay).
-* **Connected** – schedules read/write loops, activates PING/PONG keepalive, and
-  feeds traffic into the application handler.
+This key is separate from the validator's consensus key and is not tied to any
+funded wallet or account.
 
-Peers that violate protocol expectations during any phase are disconnected and
-optionally banned according to the configured reputation policy.
+## Wire format
 
-## Discovery Lifecycle
+After the handshake, every message is one JSON object followed by `\n`:
 
-Peer discovery progresses through a short pipeline before settling into the
-steady gossip mesh:
-
-```
-Seed Bootstrapping --> Authenticated Handshake --> PEX Gossip --> Steady-State Mesh
-        ^                                                      |
-        |------------------------------------------------------|
+```json
+{"Type": 9, "Payload": "<base64 of the type's JSON payload>"}
 ```
 
-1. **Seed Bootstrapping** – the node dials the configured seed list and any
-   persisted peers from the peerstore, establishing an initial foothold.
-2. **Authenticated Handshake** – successful handshakes elevate peers into the
-   active set and record their addresses with fresh timestamps.
-3. **PEX Gossip** – connected peers exchange `PEX_REQUEST`/`PEX_ADDRESSES`
-   messages to learn about additional endpoints while enforcing the address
-   TTL window and deduplication rules.
-4. **Steady-State Mesh** – the connection manager maintains target counts by
-   recycling aged peers, periodically requesting PEX samples to replenish the
-   dial queue as nodes churn.
+(`Message{Type byte; Payload []byte}` in `interface.go`; `peer.go` `writeMessage`
+and `readLoop`.) Frames larger than `MaxMsgBytes` (default 1 MiB) are a protocol
+violation. Message types (`protocol.go`):
 
-### Steady-State Mini Mesh (NET-2H)
+| Type | Name | Payload |
+| --- | --- | --- |
+| `0x01` | Tx | transaction JSON |
+| `0x02` | Block | block JSON |
+| `0x03` / `0x04` | GetStatus / Status | `{}` / `{"Height": n}` |
+| `0x05` / `0x06` | GetBlocks / Blocks | `{"From": n}` / `{"Blocks": [...]}` |
+| `0x07` | Proposal | BFT signed proposal |
+| `0x08` | Vote | BFT signed vote |
+| `0x09` / `0x0A` | Ping / Pong | `{"nonce": n, "timestamp": unixNano}` |
+| `0x0B` / `0x0C` | Handshake / HandshakeAck | reserved; received frames of these types are accepted and ignored |
+| `0x0D` / `0x0E` | PexRequest / PexAddresses | see [pex.md](pex.md) |
 
-The NET-2H milestone validates the discovery loop by forming a three-node mesh
-anchored by a seed and exercising peer exchange. The healthy nodes maintain
-bidirectional links while a fourth node advertising the wrong chain is rejected
-during the handshake. The steady-state topology is illustrated below:
+Ping and Pong are answered inside the peer; everything else that is not a PEX
+message goes to the node's message handler.
 
-```mermaid
-graph LR
-    SeedN1[Seed N1]
-    N2[Node N2]
-    N3[Node N3]
-    Wrong[Node N4\nWrong Chain]
+## Handshake (protocol version 1)
 
-    SeedN1 <--> N2
-    SeedN1 <--> N3
-    N2 <--> N3
-    Wrong -.-> SeedN1
+Right after the TCP connection is up, **both sides send one frame and then read
+one frame** (`handshake.go`, `performHandshake`). The frame is a JSON object
+followed by `\n` (this initial frame is not wrapped in the `Message` envelope):
+
+| Field | Meaning |
+| --- | --- |
+| `protoVersion` | `1`. Any other value is rejected. |
+| `chainId` | uint64. Must equal the local chain ID, which is the first 8 bytes of the genesis hash read big-endian (`core/blockchain.go`, lines 197 and 257). |
+| `genesisHash` | `0x` hex of the genesis hash. Must equal the local one. |
+| `nodeId` | Sender's node ID, canonical lower-case `0x` hex. |
+| `nonce` | 12 random bytes, `0x` hex. |
+| `clientVersion` | Non-empty free-form string (config `ClientVersion`, default `nhbchain/node`). |
+| `listenAddrs` | Optional list of the sender's dialable `host:port` addresses (its `ListenAddress` and `ExternalAddress`; unspecified hosts and port `0` are dropped). |
+| `sig` | 65-byte secp256k1 signature, `0x` hex. |
+
+The signed digest is
+
+```
+keccak256( "nhb-handshake-v1"
+           || chainId as 8 bytes big-endian
+           || genesis hash (raw bytes)
+           || nonce (raw 12 bytes)
+           || the ASCII bytes of the canonical "0x..." nodeId string )
 ```
 
-Dashed edges represent rejected handshakes. Successful connections participate
-in the authenticated mesh, enabling PEX gossip and keepalive traffic.
+(`handshakeDigest`). The verifier recovers the public key from `sig`, derives the
+node ID from it, and requires it to equal the claimed `nodeId`.
+
+Checks run in this order (`verifyHandshake`): protocol version; non-empty
+`clientVersion`; non-empty canonical `nodeId`; canonical 12-byte nonce; chain ID
+(mismatch bans the peer); genesis hash (mismatch bans the peer); signature length
+and recovery (a mismatch bans the peer); nonce replay (bans the peer). Then
+`initPeer` rejects a connection to itself, a peer that is currently banned, and a
+node ID that is already connected, and registers the peer subject to `MaxPeers`,
+`MaxInbound` and `MaxOutbound`.
+
+The whole exchange must finish within `HandshakeTimeout` (`HandshakeTimeoutMs`,
+3000 in the repo `config.toml`; the server's own default is 5 s). The outcome is
+counted in `nhb_p2p_handshakes_total{result="success"|"failure"}`.
+
+Persistent-peer status is granted by node ID only. The `listenAddrs` a peer
+reports are unsigned, so matching them against the configured bootnode and
+persistent-peer list does not confer trust (`isPersistentRemote`).
+
+## Peer lifecycle
+
+1. **Dial or accept.** Outbound dials come from the sources below; inbound
+   connections come from the listener.
+2. **Handshake** as above.
+3. **Connected.** The peer starts three goroutines: a read loop, a write loop and
+   a keepalive loop that sends a Ping every `PingIntervalSeconds` (30 in
+   `config.toml`). The read loop sets a read deadline of `ReadTimeout` (90 s by
+   default) before every frame, so a peer that sends nothing for that long is
+   disconnected.
+4. **Disconnect.** Any protocol violation, rate-limit hit, write error, or
+   connection-manager prune terminates the peer. Terminating with `ban = true`
+   applies a ban score. A persistent outbound peer is re-dialed with exponential
+   backoff.
+
+## Discovery
+
+Outbound targets come from:
+
+1. `[p2p] Bootnodes` and `PersistentPeers`, dialed at start
+   (`startDialers`, `connmanager.go`). Both lists are treated as persistent
+   addresses. A failed dial is retried with a delay that starts at
+   `DialBackoffSeconds` (30 in `config.toml`) and doubles up to one minute.
+2. **Seeds**: `[p2p] Seeds` entries (`0xNODEID@host:port`) plus entries from the
+   on-chain `network.seeds` registry; see [seeds.md](seeds.md). The connection
+   manager runs one dial loop per active seed.
+3. **The peerstore**: previously seen peers with their addresses.
+4. **Handshake addresses.** Each successful handshake records the peer's
+   `listenAddrs` (or, if it sent none, the address it was dialed at, or the
+   connection's remote address) in the PEX address book and the peerstore.
+
+The node answers `PexRequest` messages from peers (see [pex.md](pex.md)), but the
+node's own code never sends a `PexRequest`: `NewPexRequestMessage` has no caller
+outside tests. Address discovery therefore relies on handshakes, seeds and the
+peerstore.
+
+`p2p/integration/mesh_test.go` (`TestMiniMeshIntegration`) exercises a small mesh
+of nodes plus a node on a different chain ID that is rejected in the handshake:
+
+```bash
+go test ./p2p/integration -run TestMiniMeshIntegration -count=1
+```
 
 ## Peerstore
 
-The NET-2B release introduces a durable peerstore backed by LevelDB. Every
-successful handshake writes an entry that survives restarts, ensuring dial
-scheduling, bans, and scores persist across crashes or maintenance reboots.
+`p2p.NewPeerstore(path, 0, 0)` (`peerstore.go`) is a LevelDB database at
+`<DataDir>/p2p/peerstore`, with an in-memory index by node ID and by address.
+Each record (key `peer:<nodeID>`, JSON value) has:
 
-### Stored Fields
+| Field | Meaning |
+| --- | --- |
+| `addr`, `nodeID` | Last known address and the node ID. One record per node ID; a new address replaces the old one. |
+| `score` | Float in `[-100, 1000]`. `RecordSuccess` adds 1; `RecordFail` halves a positive score; `RecordViolation` subtracts 10. |
+| `lastSeen` | Time of the last success, failure or violation. |
+| `fails` | Consecutive failed dials; reset to 0 on success. |
+| `bannedUntil` | Ban expiry. |
+| `violations`, `lastViolation` | Handshake violation counters. |
 
-| Field | Description |
-| ----- | ----------- |
-| `addr` | Last observed multiaddr/TCP endpoint for the peer. |
-| `nodeID` | Canonical NodeID derived from the identity key. |
-| `score` | Rolling health score; successes increment, failures decay. |
-| `lastSeen` | Timestamp of the most recent dial outcome (success or fail). |
-| `fails` | Consecutive failure counter driving exponential backoff. |
-| `bannedUntil` | Wall-clock time after which the peer may reconnect. |
+Dial scheduling (`NextDialAt`): a banned peer waits until `bannedUntil`; with no
+failures the next dial is now; otherwise the peer waits
+`baseBackoff * 2^(fails-1)` after `lastSeen`, where `baseBackoff` is 1 s and the
+cap is 30 minutes.
 
-Entries are deduplicated by `nodeID`. When a peer re-announces itself with a new
-address the previous mapping is replaced, preventing stale endpoints from
-lingering. LevelDB handles on-disk compaction automatically; no proactive
-eviction policy is required, but operators can trigger `compactdb` if the store
-grows unusually large.
+## Connection manager
 
-### Dial Backoff
+`connManager` (`connmanager.go`) runs a check every 3 seconds:
 
-Dial attempts follow an exponential backoff controlled by the failure counter.
+- **Fill.** It computes `needed = max(OutboundPeers - outbound, MinPeers - total)`,
+  limited to the free slots (`MaxPeers - total`), and dials up to that many
+  candidates. Candidates are peerstore entries sorted by score (highest first)
+  then most recent `lastSeen`, skipping connected peers, banned peers (runtime
+  reputation or peerstore) and peers whose backoff has not elapsed; active seeds
+  are appended only if fewer candidates were found than requested.
+- **Prune.** If more than `MaxPeers` peers are connected, it disconnects the
+  worst until the count fits. Persistent peers are never chosen. The victim is the
+  peer with, in order: more misbehavior incidents, a lower score, fewer useful
+  messages, a higher ping latency, an older `lastSeen`; on a tie, inbound before
+  outbound.
 
-```text
-# Exponential dial backoff
-function nextDial(lastSeen, fails):
-    if fails <= 0:
-        return now
-    delay = baseBackoff * 2^(fails-1)
-    delay = min(delay, maxBackoff)
-    return lastSeen + delay
-```
+`MaxPeers`, `MaxInbound`, `MaxOutbound` are also enforced when a peer registers.
+Values in the repo `config.toml` `[p2p]` section: `MaxPeers = 64`,
+`MaxInbound = 60`, `MaxOutbound = 30`, `MinPeers = 12`, `OutboundPeers = 16`.
+When a value is unset, `MaxPeers` defaults to 64, `MaxInbound` and `MaxOutbound`
+to `MaxPeers`, `MinPeers` to half of `MaxPeers`, and `OutboundPeers` to
+`MaxOutbound` (`config/config.go` `Load`, `p2p/server.go` `NewServer`).
 
-For example, with `baseBackoff = 1s` and `maxBackoff = 30m`, a peer that fails
-three consecutive dials will be retried after 4 seconds, then 8 seconds, then
-16 seconds. A successful dial resets both the failure counter and backoff delay
-to zero.
+## NAT
 
-## Connection Manager Policy
-
-NET-2E expands the connection manager into an active curator of the peer set.
-The controller maintains separate targets for **total** connections and
-**outbound** dials while respecting the configured hard maximum.
-
-* **MinPeers** – the minimum healthy peer count the node aims to keep. When the
-  total number of connected peers drops below this floor the manager immediately
-  schedules new dials.
-* **OutboundPeers** – the desired number of outbound sessions. If churn leaves
-  the node with too few outbound links (even if `MinPeers` is satisfied) the
-  manager replenishes the shortfall.
-* **MaxPeers** – an absolute ceiling enforced during registration. The manager
-  never attempts to exceed this value.
-
-Target selection is score-aware. The dial queue is populated by taking a
-snapshot of the peerstore, discarding banned entries, and then sorting by:
-
-1. Highest reputation score (`PeerstoreEntry.Score`).
-2. Most recent `lastSeen` timestamp.
-
-Seed entries are only considered when the peerstore cannot satisfy demand.
-Before scheduling a dial the manager checks:
-
-* The peer is not already connected nor pending.
-* The peer is not banned by either the peerstore or the runtime reputation
-  engine.
-* The exponential backoff window (`NextDialAt`) has elapsed.
-
-### Pruning Rules
-
-When churn or manual overrides push the active set above `MaxPeers`, the manager
-selects a victim to disconnect. Candidates that are flagged as persistent are
-never pruned. Among the remaining peers the selection algorithm chooses:
-
-1. The lowest reputation score.
-2. If scores tie, the stalest `lastSeen` timestamp.
-3. If the tie persists, inbound peers are preferred for pruning ahead of
-   outbound peers.
-
-Pruned peers are disconnected with a log entry indicating the score and last
-contact time. Persistent peers (bootnodes, static peers) remain untouched so
-operators retain deterministic connectivity anchors.
-
-### Recommended Targets
-
-| Hardware Tier | MinPeers | OutboundPeers | MaxPeers |
-| ------------- | -------- | ------------- | -------- |
-| Light (1 vCPU / 2 GiB) | 8  | 6  | 16 |
-| Standard (2 vCPU / 4 GiB) | 16 | 12 | 32 |
-| Validator (4+ vCPU / 8+ GiB) | 24 | 18 | 48 |
-
-These values balance CPU, memory, and bandwidth trade-offs. Operators can raise
-`MaxPeers` or `MinPeers` further on high-end hardware, but the defaults ensure a
-robust gossip mesh without overwhelming smaller instances.
+At start the connection manager logs whether `ListenAddress` is public, private
+or unspecified. For a private or unspecified address it logs that UPnP mapping is
+not supported and that the operator must forward the TCP port by hand
+(`logNATStatus`, `logUPnPStub`). No UPnP or NAT-PMP negotiation exists in the
+code. Set `[p2p] ExternalAddress` (`host:port`) so peers that reach you inbound
+learn a dialable address from your handshake.

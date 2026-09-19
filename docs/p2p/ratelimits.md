@@ -1,41 +1,50 @@
 # Rate Limits
 
-Rate limiting protects each node from floods while allowing legitimate bursts.
-Three layers are enforced:
+Every inbound frame a peer sends is checked against three token buckets before it
+is decoded. Buckets refill continuously from the wall clock
+(`p2p/ratelimit.go`, `p2p/peer.go` `readLoop`).
 
-1. **Per-peer token bucket** — configured by `RateMsgsPerSec` and `Burst`.
-   Every inbound message consumes one token. Tokens regenerate at
-   `RateMsgsPerSec` (default `50 msg/s`) up to the burst capacity. Greylisted
-   peers automatically receive a 75% reduction in both rate and burst.
-2. **Per-IP bucket** — shares the same rate and burst settings and prevents many
-   connections from the same IP from overwhelming the node. Exceeding this limit
-   penalises the offending peer's reputation and terminates the connection.
-3. **Global bucket** — scaled by `RateMsgsPerSec × MaxPeers` to provide a soft
-   cap on aggregate throughput. When depleted, new messages are dropped and the
-   peer is disconnected without a reputation penalty.
+## The three layers
 
-All buckets are implemented as thread-safe token buckets with floating point
-counters. Buckets refill based on wall-clock time; clock drift is therefore
-irrelevant.
+Checked in this order for each frame, one token per frame (Ping and Pong frames
+count):
 
-## Configuration summary
+1. **Per-IP bucket.** One bucket per remote host (the IP part of the connection's
+   remote address), with the same rate and burst as the per-peer bucket. Buckets
+   idle for 15 minutes are evicted.
+2. **Per-peer bucket.** Rate `RateMsgsPerSec` tokens per second, capacity
+   `Burst` (raised to the rate if `Burst` is lower; every bucket's capacity is at
+   least its rate). A greylisted peer's bucket is set to 25% of both rate and burst until
+   the greylist ends.
+3. **Global bucket.** Rate `RateMsgsPerSec * MaxPeers`, capacity
+   `MaxPeers * max(Burst, RateMsgsPerSec)`.
+
+Peers marked persistent (addresses in `Bootnodes` / `PersistentPeers`, or node IDs
+already recognised as such) skip all three checks.
+
+## Configuration
 
 ```
 [p2p]
-RateMsgsPerSec = 50   # steady-state tokens per second per peer
-Burst          = 200  # per-peer & per-IP burst size
-MaxPeers       = 64   # global bucket = RateMsgsPerSec * MaxPeers
+RateMsgsPerSec = 50    # tokens per second, per peer and per IP
+Burst          = 200   # bucket capacity, per peer and per IP
+MaxPeers       = 64    # multiplies into the global bucket
 ```
 
-Messages exceeding the limits trigger the following outcomes:
+These are the values in the repo `config.toml`. If `RateMsgsPerSec` is unset the
+node falls back to the top-level `MaxMsgsPerSecond`, and then to 32
+(`config/config.go`, `p2p/server.go`); `Burst` defaults to 200.
 
-| Layer | Behaviour |
+## Outcomes
+
+| Layer | What happens |
 | --- | --- |
-| Per-peer | Connection terminated, reputation `-10`. |
-| Per-IP | Connection terminated, reputation `-10`. |
-| Global | Connection terminated without penalty. |
+| Per-IP or per-peer | The reputation misbehavior counter increases, the score drops by 10, and the connection is closed. The peer is banned only if its score is now at or below `-BanScore`. |
+| Global | The connection is closed with no score change and no ban. |
 
-Operators should tune the burst value to accommodate expected gossip fan-out
-without allowing a single peer to monopolise bandwidth. Greylisted peers are
-throttled to 25% of the configured rate and burst until their reputation
-recovers above `-GreyScore`.
+For a persistent peer these outcomes are not applied (the frame is not counted at
+all, and if a rate-limit handler is reached it logs and ignores the event).
+
+Metrics and logs: `Peer exceeded rate limit` and `Global rate cap exceeded` log
+lines, and the `nhb_p2p_peer_misbehavior` gauge; see
+[networking observability](../networking/observability.md).
