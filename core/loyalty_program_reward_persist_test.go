@@ -98,6 +98,9 @@ func newLoyaltyRewardEnv(t *testing.T, paymasterRole string) *loyaltyRewardEnv {
 	if err != nil {
 		t.Fatalf("register business: %v", err)
 	}
+	if err := registry.SetPaymaster(bizID, env.paymaster, env.paymaster); err != nil {
+		t.Fatalf("paymaster opt-in: %v", err)
+	}
 	if err := registry.SetPaymaster(bizID, env.merchant, env.paymaster); err != nil {
 		t.Fatalf("set paymaster: %v", err)
 	}

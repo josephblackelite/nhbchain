@@ -39,6 +39,13 @@ func (r *Registry) RegisterBusiness(owner [20]byte, name string) (BusinessID, er
 	return id, nil
 }
 
+// SetPaymaster assigns the wallet that funds a business's program rewards. A
+// business owner or loyalty admin may only name a paymaster that has agreed to
+// it: the paymaster is the owner, is the caller itself, or has previously
+// recorded its own opt-in for this business by calling SetPaymaster with its
+// own address as the new paymaster. Without that rule, naming any account as
+// paymaster would let the business drain that account's ZNHB into rewards. The
+// opt-in is consumed by the assignment it authorizes.
 func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20]byte) error {
 	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
 		return err
@@ -48,10 +55,26 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 		return ErrBusinessNotFound
 	}
 	if caller != business.Owner && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
+		if !isZeroAddress(newPaymaster) && newPaymaster == caller {
+			return r.st.KVPut(paymasterConsentKey(business.ID, caller), uint64(1))
+		}
 		return ErrUnauthorized
 	}
 	if business.Paymaster == newPaymaster {
 		return nil
+	}
+	consentKey := paymasterConsentKey(business.ID, newPaymaster)
+	consumeConsent := false
+	if !isZeroAddress(newPaymaster) && newPaymaster != business.Owner && newPaymaster != caller {
+		var consent uint64
+		found, err := r.st.KVGet(consentKey, &consent)
+		if err != nil {
+			return err
+		}
+		if !found || consent != 1 {
+			return ErrPaymasterConsent
+		}
+		consumeConsent = true
 	}
 	oldPaymaster := business.Paymaster
 	ownerKey := ownerPaymasterKey(business.Owner)
@@ -80,6 +103,11 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 	business.Paymaster = newPaymaster
 	if err := r.st.KVPut(businessKey(business.ID), business); err != nil {
 		return err
+	}
+	if consumeConsent {
+		if err := r.st.KVPut(consentKey, uint64(0)); err != nil {
+			return err
+		}
 	}
 	r.emit(newPaymasterRotatedEvent(business, caller, oldPaymaster, newPaymaster))
 	return nil
