@@ -14,6 +14,9 @@ import (
 
 const (
 	defaultConnmgrCheckInterval = 3 * time.Second
+
+	// How often peers not seen for the peerstore's time-to-live are pruned.
+	peerstorePruneInterval = time.Hour
 )
 
 type connManager struct {
@@ -182,11 +185,16 @@ func (m *connManager) run() {
 	}
 	ticker := time.NewTicker(m.checkInterval)
 	defer ticker.Stop()
+	var lastPrune time.Time
 	for {
 		select {
 		case <-ticker.C:
 			m.enforceLimits()
 			m.fillOutbound()
+			if now := m.now(); m.store != nil && now.Sub(lastPrune) >= peerstorePruneInterval {
+				lastPrune = now
+				m.store.Prune(now)
+			}
 		case <-m.quit:
 			return
 		}

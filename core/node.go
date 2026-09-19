@@ -2252,7 +2252,7 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		}
 
 	case p2p.MsgTypeGetStatus:
-		return n.handleNetworkGetStatus()
+		return n.handleNetworkGetStatus(n.networkBroadcast())
 
 	case p2p.MsgTypeStatus:
 		var status p2p.StatusPayload
@@ -2266,7 +2266,7 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			return err
 		}
-		return n.handleNetworkGetBlocks(payload)
+		return n.handleNetworkGetBlocks(payload, n.networkBroadcast())
 
 	case p2p.MsgTypeBlocks:
 		var payload p2p.BlocksPayload
@@ -2285,17 +2285,57 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 	return nil
 }
 
-const networkBlockSyncBatchSize = 128
+const (
+	networkBlockSyncBatchSize = 128
+	// networkBlockSyncMaxBytes bounds the encoded size of the blocks in one
+	// reply to a block request, on top of the block count: a batch of large
+	// blocks must still fit the peer-to-peer message size limit (1 MiB by
+	// default) once it is wrapped in a message. The first block is always sent.
+	networkBlockSyncMaxBytes = 512 * 1024
+)
 
-func (n *Node) handleNetworkGetStatus() error {
+// networkBroadcast returns the function that broadcasts to every connected
+// peer, or nil when this node has no network attached.
+func (n *Node) networkBroadcast() func(*p2p.Message) error {
 	if n == nil || n.networkBroadcaster == nil {
+		return nil
+	}
+	return n.networkBroadcaster.Broadcast
+}
+
+// HandlePeerMessage is the entry point the peer-to-peer server uses when it can
+// say which peer a message came from. A request for chain data is answered to
+// that peer alone; every other message is handled exactly as
+// ProcessNetworkMessage handles it.
+func (n *Node) HandlePeerMessage(from p2p.PeerSender, msg *p2p.Message) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	if from != nil && msg != nil {
+		switch msg.Type {
+		case p2p.MsgTypeGetStatus:
+			return n.handleNetworkGetStatus(from.Enqueue)
+		case p2p.MsgTypeGetBlocks:
+			var payload p2p.GetBlocksPayload
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				return err
+			}
+			return n.handleNetworkGetBlocks(payload, from.Enqueue)
+		}
+	}
+	return n.ProcessNetworkMessage(msg)
+}
+
+// handleNetworkGetStatus answers a status request through send.
+func (n *Node) handleNetworkGetStatus(send func(*p2p.Message) error) error {
+	if n == nil || send == nil {
 		return nil
 	}
 	msg, err := p2p.NewStatusMessage(n.GetHeight())
 	if err != nil {
 		return err
 	}
-	return n.networkBroadcaster.Broadcast(msg)
+	return send(msg)
 }
 
 func (n *Node) handleNetworkStatus(status p2p.StatusPayload) error {
@@ -2309,8 +2349,11 @@ func (n *Node) handleNetworkStatus(status p2p.StatusPayload) error {
 	return n.requestBlockSync(localHeight + 1)
 }
 
-func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload) error {
-	if n == nil || n.chain == nil || n.networkBroadcaster == nil {
+// handleNetworkGetBlocks answers a block request through send with at most
+// networkBlockSyncBatchSize blocks and networkBlockSyncMaxBytes of encoded
+// blocks (but always at least one block).
+func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload, send func(*p2p.Message) error) error {
+	if n == nil || n.chain == nil || send == nil {
 		return nil
 	}
 	from := payload.From
@@ -2325,14 +2368,7 @@ func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload) error {
 	if to < from || to > latest {
 		to = latest
 	}
-	blocks := make([]*types.Block, 0, to-from+1)
-	for height := from; height <= to; height++ {
-		block, err := n.chain.GetBlockByHeight(height)
-		if err != nil || block == nil {
-			break
-		}
-		blocks = append(blocks, block)
-	}
+	blocks := n.syncBatch(from, to, networkBlockSyncMaxBytes)
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -2340,7 +2376,31 @@ func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload) error {
 	if err != nil {
 		return err
 	}
-	return n.networkBroadcaster.Broadcast(msg)
+	return send(msg)
+}
+
+// syncBatch returns the blocks from height from up to height to, stopping
+// before the block that would take their encoded size past maxBytes. The first
+// block is returned whatever its size.
+func (n *Node) syncBatch(from, to uint64, maxBytes int) []*types.Block {
+	blocks := make([]*types.Block, 0, to-from+1)
+	encodedBytes := 0
+	for height := from; height <= to; height++ {
+		block, err := n.chain.GetBlockByHeight(height)
+		if err != nil || block == nil {
+			break
+		}
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			break
+		}
+		if len(blocks) > 0 && encodedBytes+len(encoded) > maxBytes {
+			break
+		}
+		encodedBytes += len(encoded)
+		blocks = append(blocks, block)
+	}
+	return blocks
 }
 
 func (n *Node) handleNetworkBlocks(blocks []*types.Block) error {

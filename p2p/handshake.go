@@ -22,6 +22,11 @@ const (
 	handshakeNonceSize           = 12
 	handshakeReplayWindow        = 10 * time.Minute
 	handshakeDomain              = "nhb-handshake-v1"
+
+	// A handshake advertises at most maxHandshakeListenAddrs addresses; only the
+	// first maxHandshakeListenAddrScan entries of the list are looked at.
+	maxHandshakeListenAddrs    = 8
+	maxHandshakeListenAddrScan = 64
 )
 
 var (
@@ -162,7 +167,7 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 		return fmt.Errorf("handshake nonce must use canonical encoding")
 	}
 	if packet.ChainID != s.cfg.ChainID {
-		s.markHandshakeViolation(packet.NodeID)
+		s.markHandshakeViolation(packet.NodeID, handshakeSignedByClaimedNode(packet))
 		return fmt.Errorf("%w: chain ID mismatch: remote %d local %d", errHandshakeChainMismatch, packet.ChainID, s.cfg.ChainID)
 	}
 	remoteGenesis, err := decodeHex(packet.GenesisHash)
@@ -173,7 +178,7 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 		return fmt.Errorf("handshake missing genesis hash")
 	}
 	if !bytesEqual(remoteGenesis, s.genesis) {
-		s.markHandshakeViolation(packet.NodeID)
+		s.markHandshakeViolation(packet.NodeID, handshakeSignedByClaimedNode(packet))
 		return fmt.Errorf("%w: genesis hash mismatch: remote %x local %x", errHandshakeGenesisMismatch, remoteGenesis, s.genesis)
 	}
 	sigBytes, err := decodeHex(packet.Signature)
@@ -204,7 +209,7 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	nonceKey := hex.EncodeToString(nonceBytes)
 	if !s.nonceGuard.Remember(derived, nonceKey, s.now()) {
 		fmt.Printf("Handshake nonce replay from %s rejected\n", derived)
-		s.markHandshakeViolation(derived)
+		s.markHandshakeViolation(derived, true)
 		return fmt.Errorf("handshake nonce replay detected")
 	}
 
@@ -216,7 +221,7 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 
 func (s *Server) signatureMismatch(packet *handshakePacket, format string, args ...any) error {
 	if s != nil && packet != nil {
-		s.markHandshakeViolation(packet.NodeID)
+		s.markHandshakeViolation(packet.NodeID, false)
 	}
 	params := make([]any, 0, len(args)+1)
 	params = append(params, errHandshakeSignatureFailure)
@@ -228,9 +233,17 @@ func sanitizeListenAddrs(addrs []string) []string {
 	if len(addrs) == 0 {
 		return nil
 	}
+	// The list comes from the remote peer: only look at the first few entries and
+	// keep at most maxHandshakeListenAddrs of them.
+	if len(addrs) > maxHandshakeListenAddrScan {
+		addrs = addrs[:maxHandshakeListenAddrScan]
+	}
 	cleaned := make([]string, 0, len(addrs))
 	seen := make(map[string]struct{}, len(addrs))
 	for _, raw := range addrs {
+		if len(cleaned) >= maxHandshakeListenAddrs {
+			break
+		}
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
 			continue
@@ -263,7 +276,46 @@ func sanitizeListenAddrs(addrs []string) []string {
 	return cleaned
 }
 
-func (s *Server) markHandshakeViolation(nodeID string) {
+// handshakeSignedByClaimedNode reports whether the packet's signature really
+// comes from the node ID the packet claims. It has no side effects.
+func handshakeSignedByClaimedNode(packet *handshakePacket) bool {
+	if packet == nil {
+		return false
+	}
+	canonicalNonce, ok := canonicalizeNonce(packet.Nonce)
+	if !ok {
+		return false
+	}
+	nonceBytes, err := hex.DecodeString(canonicalNonce)
+	if err != nil {
+		return false
+	}
+	genesis, err := decodeHex(packet.GenesisHash)
+	if err != nil {
+		return false
+	}
+	sigBytes, err := decodeHex(packet.Signature)
+	if err != nil || len(sigBytes) != 65 {
+		return false
+	}
+	digest, err := handshakeDigest(packet.ChainID, genesis, nonceBytes, packet.NodeID)
+	if err != nil {
+		return false
+	}
+	recovered, err := ethcrypto.SigToPub(digest, sigBytes)
+	if err != nil {
+		return false
+	}
+	derived := normalizeHex(deriveNodeIDFromPub(recovered))
+	claimed := normalizeHex(packet.NodeID)
+	return derived != "" && claimed != "" && strings.EqualFold(derived, claimed)
+}
+
+// markHandshakeViolation bans a node that failed the handshake. The ban is kept
+// in memory whatever the identity; a peerstore record is only written when the
+// packet was signed by the node it names (authenticated), because otherwise the
+// node ID is just a string the remote chose and would only fill the store.
+func (s *Server) markHandshakeViolation(nodeID string, authenticated bool) {
 	if s == nil {
 		return
 	}
@@ -281,7 +333,7 @@ func (s *Server) markHandshakeViolation(nodeID string) {
 	if s.reputation != nil {
 		s.reputation.SetBan(normalized, until, now)
 	}
-	if s.peerstore != nil {
+	if s.peerstore != nil && authenticated {
 		if _, err := s.peerstore.RecordViolation(normalized, now); err != nil {
 			fmt.Printf("record handshake violation %s: %v\n", normalized, err)
 		}
