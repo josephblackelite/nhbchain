@@ -1,18 +1,24 @@
 # Paymaster Sponsorship Guardrails
 
-The paymaster module can now enforce daily budgets at multiple scopes to prevent runaway fee sponsorship. Operators can configure caps, monitor usage, and react to throttling events using the guidance in this document.
+When a transaction names a paymaster (gas sponsor), the state processor checks
+the sponsorship against daily caps before accepting it (`core/sponsorship.go`).
+The caps are read from `[global.Paymaster]` when the node starts, by both
+`cmd/nhb` (the binary `nhb.service` runs) and `cmd/consensusd`
+(`cmd/nhb/main.go` and `cmd/consensusd/main.go`, `Node.SetPaymasterLimits`).
 
 ## Configuration
 
-The global configuration file exposes three knobs under `[global.Paymaster]`:
+| Key | Type | Meaning |
+| --- | ---- | ------- |
+| `MerchantDailyCapWei` | string | Maximum sponsored gas cost (wei) per merchant per day. `0` disables the check. |
+| `DeviceDailyTxCap` | integer | Maximum number of sponsored transactions per merchant device per day. `0` disables the check. |
+| `GlobalDailyCapWei` | string | Maximum sponsored gas cost (wei) across all merchants per day. `0` disables the check. |
 
-| Key | Description |
-| --- | --- |
-| `MerchantDailyCapWei` | Maximum NHB (wei) a merchant can sponsor across all devices in a UTC day. `0` disables the bound. |
-| `DeviceDailyTxCap` | Maximum number of sponsored transactions a single device may submit per day. `0` disables the bound. |
-| `GlobalDailyCapWei` | Network-wide NHB (wei) sponsorship budget per day. `0` disables the bound. |
-
-Values accept the same integer formats as other monetary fields (for example `250000000000000000000`, `250e18`). Update the TOML file and restart consensusd to apply changes:
+All three default to `0` (`defaultGlobalConfig`). The amount strings are parsed
+by `config.ParseAmount`: digits with optional `_` separators, an optional decimal
+point and an optional `e` exponent, as long as the result is a non-negative
+integer (for example `250000000000000000000` or `250e18`). An invalid value makes
+either binary panic at startup with `Failed to parse paymaster limits`. Restart the node to apply changes.
 
 ```toml
 [global.Paymaster]
@@ -21,49 +27,57 @@ DeviceDailyTxCap = 200
 GlobalDailyCapWei = "1000e18"
 ```
 
-## Budget Planning
+`[global.Paymaster.AutoTopUp]` configures automatic replenishment (`Enabled`,
+`Token`, `MinBalanceWei`, `TopUpAmountWei`, `DailyCapWei`, `CooldownSeconds`, and
+`[global.Paymaster.AutoTopUp.Governance]` with `FundingAccount`, `Minter`,
+`Approver`, `MinterRole`, `ApproverRole`). `Token` may only be `ZNHB`, and
+`DailyCapWei` must be positive when `Enabled` is true (`config/global.go`). See
+the [auto top-up runbook](../runbooks/paymaster-autotopup.md).
 
-When sizing caps consider:
+## How the caps are enforced
 
-* **Average ticket size**: Multiply the expected gas limit by the gas price to estimate per-transaction sponsorship cost.
-* **Device distribution**: Set `DeviceDailyTxCap` slightly above the peak per-terminal volume to catch abuse without harming legitimate traffic.
-* **Merchant spread**: Derive `MerchantDailyCapWei` by multiplying the average device spend by the number of active devices plus a safety margin.
-* **Network aggregate**: Ensure `GlobalDailyCapWei` comfortably exceeds the sum of merchant budgets so a single participant cannot starve the fleet.
+For each sponsored transaction the state processor computes the gas cost
+(`checkPaymasterCaps`, `core/sponsorship.go`) and checks, in this order:
 
-Example: if a POS transaction consumes ~25,000 gas at 1 gwei, each sponsorship costs `2.5e4 * 1e9 = 2.5e13 wei` (~0.000025 NHB). A merchant operating 40 lanes with a target of 1,500 transactions per lane could be capped at:
+1. Global: used budget for the day plus this cost must not exceed
+   `GlobalDailyCapWei`.
+2. Merchant (when `MerchantDailyCapWei > 0`): the transaction must carry a
+   merchant address, and the merchant's used budget plus this cost must not
+   exceed the cap.
+3. Device (when `DeviceDailyTxCap > 0`): the transaction must carry both a
+   merchant address and a device ID, and the device's transaction count for the
+   day must be below the cap.
 
-```
-MerchantDailyCapWei = 40 lanes * 1,500 tx * 2.5e13 wei ≈ 1.5e18 wei (1.5 NHB)
-DeviceDailyTxCap   = 2,000
-GlobalDailyCapWei  = number_of_merchants * MerchantDailyCapWei * 1.2 safety factor
-```
+The day is the UTC date (`2006-01-02`) of the block timestamp, so counters start
+again at UTC midnight. A failed check marks the sponsorship as throttled with the
+reason `global sponsorship cap reached`, `merchant sponsorship cap reached`,
+`device sponsorship cap reached`, or a message saying the merchant or device
+identifier is required.
 
-## Monitoring & Alerting
+## Monitoring
 
-* The node emits a `paymaster.throttled` event whenever a sponsorship attempt exceeds a cap. Attributes include the scope (`merchant`, `device`, or `global`), the day, and limit metadata.
-* Use the RPC method `transactions_sponsorshipCounters` to poll current usage. Example request:
+- The `paymaster.throttled` event is emitted for each throttled attempt
+  (`core/events/sponsorship.go`). Attributes: `scope` (`merchant`, `device` or
+  `global`), `txHash`, `merchant`, `deviceId`, `day`, `limitWei`, `usedBudgetWei`,
+  `attemptBudgetWei`, `txCount` and `limitTxCount` (unset ones are omitted).
+- `tx_previewSponsorship` returns the assessment for a transaction payload
+  without executing it: `status`, `reason`, `sponsor`, `gasPriceWei`,
+  `requiredBudgetWei`, `moduleEnabled` and a `throttle` object with the same
+  fields as the event. `tx_getSponsorshipConfig` returns `enabled` and
+  `adminRole`. `tx_setSponsorshipEnabled` (JWT required) takes `caller` and
+  `enabled` (`rpc/modules/transactions.go`, `rpc/http.go`).
+- Auto top-ups are counted by `nhb_paymaster_autotopups_total{outcome}` and
+  `nhb_paymaster_autotopup_amount_wei_total{outcome}`.
 
-```json
-{
-  "method": "transactions_sponsorshipCounters",
-  "params": [{
-    "merchant": "merchant-1",
-    "deviceId": "device-12",
-    "day": "2024-05-19"
-  }]
-}
-```
+`TransactionsModule.SponsorshipCounters` in `rpc/modules/transactions.go` can
+return per-day counters (`budgetWei`, `chargedWei`, `txCount` for merchant,
+device and global scope), but `rpc/http.go` has no method routed to it, so no
+RPC exposes the counters today.
 
-The response returns per-scope budgets (`budgetWei`), actual charges (`chargedWei`), and transaction counts for the day.
+## Troubleshooting a throttled merchant
 
-Set alerts when usage approaches 80–90% of any cap so operators can increase limits or investigate abuse before throttling begins.
-
-## Troubleshooting
-
-If a merchant reports throttled terminals:
-
-1. Check the latest `paymaster.throttled` events to confirm the scope and cap involved.
-2. Query counters for the merchant/device/day via RPC to evaluate actual consumption.
-3. Adjust the relevant cap(s) in `[global.Paymaster]` if the budget is too conservative, or contact the merchant if volume looks abnormal.
-
-Remember that caps reset at midnight UTC. Counter queries shortly after rollover should show zeroed metrics, confirming the guard reset.
+1. Find the latest `paymaster.throttled` events for the merchant and read `scope`,
+   `limitWei` / `limitTxCount` and `usedBudgetWei` / `txCount`.
+2. Raise the relevant cap in `[global.Paymaster]` and restart the nodes, or
+   investigate the traffic.
+3. Counters are keyed by UTC day, so a new day starts from zero.

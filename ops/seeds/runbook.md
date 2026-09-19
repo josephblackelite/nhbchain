@@ -1,146 +1,125 @@
 # Seed Server Runbook
 
-This runbook describes how to bootstrap and operate an independent NHB seed
-server. It assumes a fresh Linux host (Ubuntu 24.04 or similar), a DNS zone you
-control, and access to the governance process to stage `network.seeds`
-proposals.
+How seed nodes are advertised to the network. A seed is an ordinary `nhb` node
+(`cmd/nhb`); the repository has no separate seed binary and no seed-only
+configuration mode. Seed discovery is implemented in `p2p/seeds/registry.go` and
+`cmd/nhb/main.go`; the helpers under `ops/seeds/tools` create and serve the DNS
+records it reads.
 
-## 1. Provision the host
+## How nodes find seeds
 
-1. **Create a dedicated VM** with a static public IP. Allocate at least 2 vCPU,
-   4 GiB RAM and 40 GiB of SSD-backed storage.
-2. **Harden the OS**: update packages, create a dedicated `nhb` user, enable the
-   firewall and restrict inbound traffic to TCP/46656 and SSH.
-   ```bash
-   sudo apt update && sudo apt upgrade -y
-   sudo adduser --system --group nhb
-   sudo ufw default deny incoming
-   sudo ufw allow 22/tcp
-   sudo ufw allow 46656/tcp
-   sudo ufw enable
-   ```
-3. **Install dependencies**: Go toolchain (1.23+), Git, and Supervisor/`systemd`
-   to manage the process.
+A node builds its seed list from three sources (`cmd/nhb/main.go`):
 
-## 2. Build the seed binary
+1. `Seeds` under `[p2p]` in `config.toml`, each entry written
+   `<nodeId>@<host:port>` (entries without `@` are ignored with a warning). Source
+   label: `config`.
+2. Static entries in the on-chain `network.seeds` registry. Source label:
+   `registry.static` unless the entry sets `source`.
+3. DNS TXT records published by an authority listed in the same registry. Source
+   label: `dns:<domain>`.
 
-1. Clone the repository and build the node:
-   ```bash
-   git clone https://github.com/josephblackelite/nhbchain.git
-   cd nhbchain
-   go build ./cmd/nhb
-   sudo install -o nhb -g nhb -m 0755 nhb /usr/local/bin/nhb
-   ```
-2. Copy the default configuration and adjust it for the seed role. Disable the
-   validator and RPC services, and leave `[p2p].Seeds` empty – the governance
-   registry will backfill them at runtime.
+The registry is the value of governance parameter `network.seeds` (one of the keys
+in the default `Governance.AllowedParams`). It is JSON:
 
-## 3. Generate the node identity
+```json
+{
+  "version": 1,
+  "refreshSeconds": 900,
+  "authorities": [
+    { "domain": "seeds.example.org", "algorithm": "ed25519",
+      "publicKey": "<base64 ed25519 public key>",
+      "lookup": "", "notBefore": 0, "notAfter": 0 }
+  ],
+  "static": [
+    { "nodeId": "0x...", "address": "host:port", "source": "", "notBefore": 0, "notAfter": 0 }
+  ]
+}
+```
 
-1. Use the bundled helper to create a long-term P2P identity:
-   ```bash
-   sudo -u nhb /usr/local/bin/nhb --config /etc/nhb/config.toml --generate-identity
-   ```
-   This writes `peerstore/node_key.json` which contains the Ed25519 key used to
-   derive the NodeID advertised in seed lists.
-2. Record the NodeID from the startup logs or via `nhbctl net_info`. You will
-   publish it alongside the seed address.
+`version` must be `1` (0 is read as 1). `algorithm` is optional: empty means `ed25519`, and any other value (compared case-insensitively) is rejected with `unsupported algorithm` (`p2p/seeds/registry.go`, `Authority.validate`).
+`refreshSeconds` defaults to 900. `lookup` defaults to `_nhbseed.<domain>`. An
+entry is used only between its `notBefore` and `notAfter` (Unix seconds) when set.
+Each TXT record must start with `nhbseed:v1:` followed by base64 JSON
+(`nodeId`, `address`, optional `notBefore`/`notAfter`, `signature`); it is accepted
+only if the ed25519 signature verifies against the authority's `publicKey` for
+`nodeId`, `address`, the validity window and the domain.
 
-## 4. Publish DNS entries
+## 1. Build and run the seed node
 
-1. Generate an authority key and seed record using the helper script shipped in
-   this repository:
-   ```bash
-   go run ./ops/seeds/tools/authority \\
-     --domain seeds.mainnet.example.org \\
-     --host seed-a.mainnet.example.org \\
-     --port 46656 \\
-     --node-id <0xNODEID> \\
-     --out authority.json
-   ```
-   The tool prints the TXT payload (`nhbseed:v1:...`) and the public key that
-   must be inserted into the `network.seeds` governance payload.
-2. Add the TXT record to your DNS provider with a short TTL (60–300 seconds).
-   Example record:
-   ```
-   _nhbseed.seeds.mainnet.example.org.  300  IN TXT  "nhbseed:v1:<base64 payload>"
-   ```
-3. If you operate multiple seeds, repeat the process for each host and include
-   all TXT blobs under the authority lookup name.
+```bash
+go build -o nhb ./cmd/nhb
+./nhb --config /etc/nhb/config.toml
+```
 
-## 5. Stage the governance proposal
+The p2p listen address is `ListenAddress` in `config.toml` (the repository's
+`config.toml` uses `127.0.0.1:6001`; set an address peers can reach). `nhb` flags:
+`--config`, `--genesis`, `--allow-autogenesis`, `--allow-migrate`. The
+`nhb.service` unit in `deploy/systemd` is the packaged way to run it
+([One-shot deployment](../../docs/deploy/one-shot-deploy.md)).
 
-1. Prepare a `network.seeds` JSON payload referencing the new authority public
-   key and the canonical seed addresses. Include static fallback entries pointing
-   at the same hosts to cover temporary DNS outages.
-2. Submit the proposal, monitor voting, and queue execution once it passes.
-   Remember to keep the previous DNS records live until the proposal executes so
-   existing nodes can bridge the rotation.
+## 2. Node identity
 
-## 6. Deploy the seed service
+There is no identity-generation flag. On first start `nhb` creates
+`<DataDir>/p2p/node_key.json` (`p2p.LoadOrCreateIdentity`) and keeps the peerstore
+in `<DataDir>/p2p/peerstore`. Read the node ID from the `net_info` RPC (no
+authentication needed):
 
-1. Create a systemd unit `/etc/systemd/system/nhb-seed.service`:
-   ```ini
-   [Unit]
-   Description=NHB seed node
-   After=network.target
+```bash
+curl -s -X POST http://<RPCAddress>/ -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"net_info","params":[]}'
+```
 
-   [Service]
-   User=nhb
-   Group=nhb
-   ExecStart=/usr/local/bin/nhb --config /etc/nhb/config.toml
-   Restart=on-failure
-   RestartSec=5s
-   LimitNOFILE=65536
+The result contains `nodeId`, `peerCounts`, `chainId`, `genesisHash` and
+`listenAddrs`.
 
-   [Install]
-   WantedBy=multi-user.target
-   ```
-2. Enable and start the service:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now nhb-seed.service
-   ```
-3. Tail the logs and confirm the node announces the correct listen address and
-   reports the merged seed catalogue:
-   ```bash
-   journalctl -u nhb-seed.service -f
-   ```
+## 3. Create a DNS authority record
 
-## 7. Health checks & monitoring
+`ops/seeds/tools/authority` generates a new ed25519 authority key pair on every
+run and signs one seed record with it:
 
-* **DNS resolution** – run `dig TXT _nhbseed.seeds.mainnet.example.org` from a
-  remote host and verify the signed payload matches the expected NodeID/address.
-* **P2P reachability** – from another NHB node run `nhbctl net_dial` targeting
-  the seed. Ensure the handshake succeeds and the node appears in `net_peers`.
-* **Registry refresh** – inspect `net_info` to confirm the seed is listed with
-  `source="dns:seeds.mainnet.example.org"` and that the refresh timestamp in the
-  logs updates periodically.
-* **Alerting** – hook the service into your monitoring stack. Alert on process
-  crashes, TCP listener failures, and DNS lookup errors.
+```bash
+go run ./ops/seeds/tools/authority \
+  --domain seeds.example.org \
+  --host seed-a.example.org \
+  --port 46656 \
+  --node-id <0xNODEID> \
+  --out authority.json
+```
 
-## 8. Rotation & retirement
+Flags: `--domain`, `--host`, `--node-id` (all required), `--port` (default
+`46656`), `--lookup` (override the TXT name), `--not-before`, `--not-after`
+(Unix seconds), `--out` (default `authority.json`). It writes `authority.json`
+(mode 0600) containing `publicKey` **and `privateKey`**, and prints the TXT line
+and a registry snippet with `domain`, `algorithm` and `publicKey`. Keep the file
+private.
 
-1. Stage the replacement DNS records and governance payload as described above.
-2. Once the new entries are active and healthy, remove the old TXT records and
-   decommission the retired seed host.
-3. Keep historical seeds in the governance payload until the majority of the
-   network has upgraded to avoid stranding lagging nodes.
+Because each run creates a new key, records for several seeds signed by separate
+runs do not verify under a single `authorities` entry (an entry holds one public
+key). The tool has no option to reuse an existing key.
 
-## Appendix: Files & directories
+Publish the printed TXT record at `_nhbseed.<domain>` (or your `--lookup` name).
 
-* `/etc/nhb/config.toml` – seed node configuration.
-* `/var/lib/nhb/p2p/peerstore` – LevelDB peerstore; safe to delete if the host is
-  rebuilt.
-* `/var/log/nhb` – optional log directory if you redirect `systemd` output.
+`ops/seeds/tools/dnsstub` serves the TXT record from an `authority.json` for local
+testing (`--authority`, `--listen` default `127.0.0.1:8053`, `--ttl` default 60).
 
-## Appendix: Emergency procedures
+## 4. Stage the governance change
 
-* **DNS authority compromised** – submit a proposal removing the authority and
-  pointing to static fallbacks while you rotate keys.
-* **Seed host offline** – update the DNS record with a new IP (keeping the same
-  NodeID) and restart the service. Because the signed payload binds the host and
-  port, you must regenerate it if the TCP endpoint changes.
-* **Registry unavailable** – the runtime continues using the last known DNS set
-  plus any static fallbacks. Update `[p2p].Seeds` in configs only as a last
-  resort; the registry should remain the source of truth.
+Submit a governance parameter proposal that sets `network.seeds` to the registry
+JSON above, then follow the normal voting, queue and execution steps. Payloads
+that fail `seeds.Parse` are rejected by the governance engine
+(`native/governance/engine.go`).
+
+## 5. Check the result
+
+- `net_info` shows the node's own `nodeId` and `listenAddrs`; `net_peers` lists
+  connected peers. Both are unauthenticated JSON-RPC methods.
+- `net_dial` with `{"target": "<target>"}` dials a peer (`Server.DialPeer` in
+  `p2p/server.go` accepts a node ID or an address) and needs a JWT.
+- The node re-resolves the registry every `refreshSeconds` (`p2p/server.go`).
+- To inspect the DNS side, run `dig TXT _nhbseed.<domain>` and decode the
+  base64 part after `nhbseed:v1:`.
+
+## Files and directories
+
+- `<DataDir>/p2p/node_key.json`: node identity.
+- `<DataDir>/p2p/peerstore`: peerstore database.

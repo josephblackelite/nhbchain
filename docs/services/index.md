@@ -1,62 +1,105 @@
 # Service Directory
 
-Each NHBChain workload is deployed as an independently scalable service. Use the
-following references to configure, monitor, and integrate with each component.
+The binaries and services in this repository, with the configuration surface
+each one reads in code. Anything not listed here is not implemented in this
+repository.
 
-## Gateway Service
+## Gateway (`cmd/gateway`)
 
-- **Endpoint:** HTTPS / REST, proxying to lendingd, swapd, governd, and
-  consensusd.
-- **Responsibilities:** Request authentication, REST to gRPC translation, rate
-  limiting, and transaction memo enrichment.
-- **Key configuration:** `cmd/gateway` (`cmd/gateway/main.go`) is configured via
-  a `-config` flag pointing at a TOML file, plus environment variables
-  `NHB_ENV`, `NHB_COMPAT_MODE`, `NHB_GATEWAY_AUTO_HTTPS`, and the per-backend
-  upstream URLs `NHB_GATEWAY_LENDING_URL`, `NHB_GATEWAY_SWAP_URL`,
-  `NHB_GATEWAY_GOV_URL`, `NHB_GATEWAY_CONSENSUS_URL`. Rate limits are
-  configured as structured `cfg.RateLimits` entries in the config file, not a
-  single env var.
-- **Operational notes:** Deploy at least two replicas behind your public load
-  balancer. Gateways should be stateless and read the validator set from the
-  consensus service on startup.
+- **Protocol:** HTTP(S) reverse proxy in front of `lendingd`, `governd`,
+  `consensusd` and a swap backend. The lending routes call `lendingd` over gRPC; other routes are
+  proxied as HTTP.
+- **Responsibilities:** JWT bearer authentication with per-route scopes, per-route
+  rate limits, CORS, Prometheus metrics, OpenTelemetry tracing, and the optional
+  `/rpc` JSON-RPC compatibility dispatcher.
+- **Configuration:** `--config <yaml>`, `--compat-mode`, `--allow-insecure`, and
+  the environment variables `NHB_ENV`, `NHB_COMPAT_MODE`, `NHB_GATEWAY_AUTO_HTTPS`,
+  `NHB_GATEWAY_LENDING_URL`, `NHB_GATEWAY_SWAP_URL`, `NHB_GATEWAY_GOV_URL` and
+  `NHB_GATEWAY_CONSENSUS_URL`. Rate limits are the `rateLimits` list in the YAML
+  file. Details: [Gateway Overview](../gateway/overview.md).
+- **Not in this repository:** the swap backend. The gateway still requires an
+  endpoint for it (default `http://127.0.0.1:7102`) and routes `/v1/swap` to it.
 
-## Consensus Service
+## Consensus daemon (`cmd/consensusd`)
 
-- **Endpoint:** gRPC on `9090` by default.
-- **Responsibilities:** Validates signed envelopes, executes transactions,
-  materialises blocks, and exposes deterministic state queries.
-- **Key configuration:** `cmd/consensusd` (`cmd/consensusd/main.go`) is
-  configured via flags: `-config` (path to `config.toml`, default
-  `./config.toml`), `-genesis` (genesis JSON, overrides `NHB_GENESIS`), `-grpc`
-  (gRPC listen address, default `127.0.0.1:9090`), and `-p2p` (p2p daemon
-  network service address, default `localhost:9091`).
-- **Operational notes:** Validators run the consensus service co-located with a
-  `p2pd` instance. Horizontally scale read-only replicas for query workloads.
+- **Protocol:** gRPC (`ConsensusService` and `QueryService`), default
+  `127.0.0.1:9090`. It does not serve JSON-RPC over HTTP; that server is in
+  `cmd/nhb`.
+- **Flags:** `-config` (default `./config.toml`), `-genesis` (overrides
+  `NHB_GENESIS` and the config's `GenesisFile`), `-grpc` (default
+  `127.0.0.1:9090`), `-p2p` (address of the `p2pd` gRPC service, default
+  `localhost:9091`), `-allow-autogenesis`, `-allow-migrate`, `-allow-insecure`,
+  and `-consensus-timeout-proposal|prevote|precommit|commit`.
+- **Environment:** `NHB_VALIDATOR_PASS` (keystore passphrase), `NHB_GENESIS`,
+  `NHB_ALLOW_AUTOGENESIS`, `NHB_CONSENSUS_TIMEOUT_PROPOSAL`,
+  `NHB_CONSENSUS_TIMEOUT_PREVOTE`, `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`,
+  `NHB_CONSENSUS_TIMEOUT_COMMIT`, `NHB_ENV`, `OTEL_EXPORTER_OTLP_*`.
+- **Requirements:** a `[network_security]` section giving TLS material (or
+  `AllowInsecure = true` together with `-allow-insecure` on a loopback target),
+  and a shared secret or client-certificate authentication for its own gRPC
+  server (`cmd/consensusd/main.go`).
+- See [Runtime Configuration Guardrails](../ops/configuration.md) for the
+  `config.toml` checks.
 
-## Lending Service
+## P2P daemon (`cmd/p2pd`)
 
-- **Endpoint:** HTTPS/mTLS REST on `0.0.0.0:9444` (configurable).
-- **Responsibilities:** Enforces lending business logic, risk limits, and emits
-  health factor telemetry per account.
-- **Key configuration:** `services/lending` (`services/lending/config.go`) is
-  configured via environment variables: `LEND_NODE_RPC_URL`,
-  `LEND_NODE_RPC_TOKEN`, `LEND_SHARED_SECRET_HEADER`, `LEND_SHARED_SECRET`,
-  `LEND_TLS_CERT_FILE`, `LEND_TLS_KEY_FILE`, `LEND_TLS_CLIENT_CA_FILE`,
-  `LEND_ALLOW_INSECURE`, `LEND_LISTEN` (default `0.0.0.0:9444`),
-  `LEND_RATE_PER_MIN`, `LEND_MTLS_REQUIRED`, and `LEND_ALLOWED_CNS`.
-- **Operational notes:** Co-locate near the consensus service to minimise
-  envelope latency. Configure circuit breakers for price oracle unavailability.
+- **Protocol:** an internal gRPC network service (`-grpc`, default
+  `127.0.0.1:9091`) that `consensusd` connects to, plus the p2p listener
+  configured by `ListenAddress` in the config file.
+- **Flags:** `-config` (default `./config.toml`), `-genesis`,
+  `-allow-autogenesis`, `-grpc`, `-allow-insecure`.
 
-## P2P Daemon (`p2pd`)
+## Lending service (`services/lendingd`, `services/lending`)
 
-- **Endpoint:** libp2p gossip ports (default `26656`).
-- **Responsibilities:** Maintains the gossip mesh, exchanges seed lists, and
-  propagates consensus metadata to validators and observers.
-- **Operational notes:** Operators deploy `p2pd` alongside every consensus node
-  and at edge locations serving RPC read replicas.
+Two entry points register the same gRPC `LendingService`
+(`services/lending/server`), which forwards to a node's JSON-RPC:
 
-Refer to the [migration guide](../migrate/services.md) when upgrading from the
-legacy JSON-RPC topology.
+- `services/lendingd` (used by the compose stack, the Helm chart and CI image
+  builds): `--config <yaml>` (default `services/lending/config.yaml`). Keys:
+  `listen` (default `:50053`), `node_rpc_url` (default `https://127.0.0.1:8081`),
+  `node_rpc_token`, `shared_secret_header` (default `X-NHB-Shared-Secret`),
+  `shared_secret_value`, `rate_limit_per_min` (default `120`), `tls.cert`,
+  `tls.key`, `tls.client_ca`, `tls.allow_insecure`, `auth.api_tokens`,
+  `auth.mtls.allowed_common_names`. TLS material is required unless
+  `tls.allow_insecure` is true, and at least one API token or mTLS common name
+  is required (`services/lendingd/config/config.go`).
+- `services/lending` (standalone binary): environment variables `LEND_NODE_RPC_URL`
+  (default `https://127.0.0.1:8081`), `LEND_NODE_RPC_TOKEN`,
+  `LEND_SHARED_SECRET_HEADER`, `LEND_SHARED_SECRET`, `LEND_TLS_CERT_FILE`,
+  `LEND_TLS_KEY_FILE`, `LEND_TLS_CLIENT_CA_FILE`, `LEND_ALLOW_INSECURE`,
+  `LEND_LISTEN` (default `0.0.0.0:9444`), `LEND_RATE_PER_MIN` (default `120`),
+  `LEND_MTLS_REQUIRED`, `LEND_ALLOWED_CNS`; each also has a command-line flag
+  (`-listen`, `-tls-cert`, `-mtls-required`, `-mtls-allowed-cn`, ...). It
+  also starts an HTTP `/healthz` listener on a random loopback port.
+
+The transport is gRPC in both cases (not REST).
+
+## Governance service (`services/governd`)
+
+- **Protocol:** gRPC, `gov.v1.Msg` and `gov.v1.Query` (including `SetPauses`).
+- **Configuration:** `--config <yaml>` (default `services/governd/config.yaml`).
+  Keys include `listen`, `consensus`, `chain_id`, `signer_key` /
+  `signer_key_file` / `signer_key_env`, `nonce_start`, `nonce_store_path`, `fee`,
+  `tls`, `auth` and `consensus_client` (`services/governd/config/config.go`).
+  The compose file supplies the signer key through `GOVERND_SIGNER_KEY`.
+
+## Other services
+
+- `services/gov-keeper`: a standalone daemon that polls `gov_list` on a
+  validator's JSON-RPC and submits the Finalize/Queue/Execute transactions that
+  proposals become eligible for (flags `-rpc`, `-jwt-secret-env`, `-jwt-issuer`,
+  `-jwt-audience`, `-key`, `-poll-interval-seconds`, `-list-limit`).
+- `services/identity-gateway`: HTTP identity service. Environment:
+  `IDENTITY_GATEWAY_LISTEN` (default `:8095`), `IDENTITY_GATEWAY_PORT`,
+  `IDENTITY_GATEWAY_DB` (default `identity-gateway.db`), and the required
+  `IDENTITY_EMAIL_SALT`, `IDENTITY_GATEWAY_API_KEYS`, `IDENTITY_GATEWAY_NODE_URL`.
+  See [identity-gateway](../identity/identity-gateway.md).
+- `services/escrow-gateway`: REST gateway for escrow and P2P trade flows. See
+  [Escrow gateway](../escrow/nhbchain-escrow-gateway.md) and
+  [Escrow gateway webhook queue operations](../ops/webhooks.md).
+
+Refer to the [migration guide](../migrate/services.md) when moving from the
+JSON-RPC node to the gateway topology.
 
 ---
 

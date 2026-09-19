@@ -1,118 +1,140 @@
-# Observability Stack
+# Observability
 
-This document describes how the NHB Chain observability stack is deployed, how data flows through the system, and how to operate the dashboards and alerts that keep the network healthy.
+What the code in this repository emits, and the sample configuration for
+collecting it. Sources: `observability/`, `gateway/middleware/observability.go`,
+`ops/`, `examples/compose/observability.yml`.
 
-## Metrics
+## OpenTelemetry export
 
-### Collection
-- **Prometheus** scrapes the `/metrics` endpoint on every validator, RPC node, and oracle service.
-- Exporters: `prometheus-node-exporter` for host-level stats, custom NHB Chain exporters for consensus and RPC metrics, and the OpenTelemetry collector's Prometheus exporter for application metrics.
-- Metrics are labeled with `cluster`, `role`, `shard`, and `env` to enable granular dashboards.
-- The Prometheus configuration is versioned at [`ops/prometheus/prometheus.yml`](../../ops/prometheus/prometheus.yml) with SLO recording and alerting rules in [`ops/prometheus/rules/slo.rules.yml`](../../ops/prometheus/rules/slo.rules.yml).
-- Module-level request instrumentation is exposed via the `nhb_module_*` Prometheus series to track per-method QPS, latency, and throttle pressure.
+`cmd/consensusd`, `cmd/p2pd`, `cmd/gateway`, `services/governd`,
+`services/lendingd`, `services/lending`, `services/identity-gateway`
+and `services/escrow-gateway` call `telemetry.Init`
+(`observability/otel/init.go`). It sets up OTLP over HTTP for both traces and
+metrics:
 
-### Key Metrics & Thresholds
-- **Consensus health**: `nhb_consensus_finality_lag_seconds` should remain < 15s; alert at 30s.
-- **RPC latency**: `nhb_rpc_request_duration_seconds` 95th percentile < 500ms; alert at 1s.
-- **Module health**: `nhb_module_requests_total` error outcome < 5% and `nhb_module_request_duration_seconds` p95 < 1s per module.
-- **Throttle pressure**: `nhb_module_throttles_total` increases > 25/5m per module or any `reason="quota"` increment.
-- **Block production**: `nhb_validator_blocks_signed_total` should increase every epoch; alert if flat for > 2 epochs.
-- **Oracle freshness**: `nhb_oracle_update_age_seconds` < 60s; alert at 120s.
+| Variable | Effect |
+| -------- | ------ |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `host:port` of the OTLP/HTTP receiver. Default `localhost:4318`. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Comma-separated `key=value` headers. |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Boolean; plaintext is used unless this is set to a false value (default true). |
+| `NHB_ENV` | Recorded as the `deployment.environment` resource attribute. |
 
-### Dashboards
-- **Network Overview**: per-cluster latency, throughput, and finality trends.
-- **Validator Drill-down**: CPU, memory, disk I/O, and consensus participation for each validator.
-- **RPC Performance**: request throughput, error rates, cache hit ratio, HMAC auth failures.
-- **Oracle Health**: feed latency, signer distribution, on-chain submission success.
-- **Services Overview**: error budget burn, p95 latency, and throughput per service sourced from the spanmetrics connector (see [`ops/grafana/dashboards/services-overview.json`](../../ops/grafana/dashboards/services-overview.json)).
-- **Staking Health**: emissions cadence, bonded supply, pause state, and emission-cap pressure for the staking module (see [`observability/grafana/staking.json`](../../observability/grafana/staking.json)).
-- **Loyalty Budget**: proration posture, queued demand, and daily payout trend so operators can correlate emission throttling with the configured caps.
+Traces are batched (2 s timeout, 512 spans per batch) and metrics are pushed every
+15 s. No sampler is configured, so the OpenTelemetry SDK default applies. The
+propagators are W3C Trace Context and Baggage. The gRPC servers use the
+`otelgrpc` interceptors; the gateway proxies inject trace context into upstream
+requests.
 
-#### Staking Health Dashboard
+## Prometheus metrics defined in Go
 
-The staking dashboard focuses on the four telemetry signals operations teams need to keep validator incentives healthy:
+`observability/metrics.go`, `observability/metrics/potso.go`, `network/metrics.go`
+and `p2p/metrics.go` register these collectors on the default Prometheus
+registry. The only listener in this repository that serves a Prometheus endpoint
+is the gateway (below); no node, consensus or p2p binary mounts a `/metrics`
+handler.
 
-- **Rewards Paid per Day** visualises `nhb_staking_rewards_paid_zn_total` converted to ZNHB with a daily window. The panel should jump on payout days—flat lines indicate missed payouts, while spikes beyond expectations suggest runaway emissions.
-- **Total Staked ZNHB** aggregates the `nhb_staking_total_staked{account="…"}` gauges into a single timeseries. Track this for sudden drawdowns that could precede churn or validator instability.
-- **Staking Pause Status** reflects `nhb_staking_paused`. `0` (green) means delegation, undelegation, and reward claims are accepted; `1` (red) means the module is administratively frozen and all mutations will return `codeModulePaused` until governance clears the pause.
-- **Emission Cap Hits** counts `nhb_staking_cap_hit_total`. The stat remains green at zero, turns yellow on the first cap exhaustion, and red once multiple hits accumulate—those events require treasury coordination before the next payout.
+| Metric | Labels |
+| ------ | ------ |
+| `nhb_module_requests_total` | `module`, `method`, `outcome` (`success` or `error`) |
+| `nhb_module_errors_total` | `module`, `method`, `status` |
+| `nhb_module_request_duration_seconds` | `module`, `method` |
+| `nhb_module_throttles_total` | `module`, `reason` (only `rate_limit` is recorded by the RPC server) |
+| `nhb_rpc_limiter_hits_total` | `scope`, `module`, `route` |
+| `nhb_security_insecure_binds_total` | `service`, `loopback` |
+| `nhb_token_supply_total` | `token` |
+| `nhb_consensus_block_interval_seconds` | none |
+| `nhb_mempool_pos_lane_fill`, `nhb_mempool_pos_lane_backlog{asset}`, `nhb_mempool_pos_tx_enqueued_total`, `nhb_mempool_pos_p95_finality_ms` | |
+| `nhb_pos_auth_expired_total` | none |
+| `nhb_paymaster_autotopups_total{outcome}`, `nhb_paymaster_autotopup_amount_wei_total{outcome}` | |
+| `nhb_loyalty_budget_zn`, `nhb_loyalty_demand_zn`, `nhb_loyalty_prorate_ratio`, `nhb_loyalty_paid_today_zn` | none |
+| `nhb_loyalty_price_fallback_total` | `strategy` |
+| `nhb_staking_rewards_paid_zn`, `nhb_staking_paused`, `nhb_staking_cap_hit`, `nhb_staking_index_persist_failures_total` | none |
+| `nhb_staking_total_staked` | `account` |
+| `nhb_events_transfers_total` | `asset` |
+| `nhb_network_relay_queue_enqueued_total`, `nhb_network_relay_queue_dropped_total`, `nhb_network_relay_queue_occupancy` | none |
+| `nhb_p2p_peer_score`, `nhb_p2p_peer_latency_ms`, `nhb_p2p_peer_useful_events`, `nhb_p2p_peer_misbehavior` | `peer` |
+| `nhb_p2p_handshakes_total` | `result` |
+| `nhb_p2p_gossip_messages_total` | `direction`, `type` |
+| `nhb_swapd_stable_requests_total`, `nhb_swapd_stable_request_duration_seconds`, `nhb_swapd_stable_errors_total` | `operation`, `outcome` / `operation` / `operation`, `reason` |
+| `potso_evidence_accepted_total`, `potso_penalty_applied_total` | `type` |
+| `potso_epoch_pool` | none |
+| `potso_rewards_sum`, `potso_rounding_dust`, `potso_heartbeat_unique_peers`, `potso_heartbeat_avg_session_seconds` | `epoch` |
+| `potso_heartbeat_total`, `potso_heartbeat_rate_limited_total`, `potso_heartbeat_wash_total` | `epoch`, `address` |
+| `potso_webhook_failures_total` | `destination` |
 
-Pair these panels with alerting on the `Emission Cap Hits` and pause flag so operators are paged when the module halts or emissions saturate.
+`nhb_loyalty_prorate_ratio` is `1.0` for a full payout and lower while
+pro-rating applies (`Loyalty()` in `observability/metrics.go`).
+`nhb_staking_paused` is `1` when staking mutations are paused.
 
-#### Loyalty Budget Dashboard
+The escrow gateway records one OpenTelemetry counter,
+`nhb.escrow.webhooks.dropped` (attribute `reason`); see
+[Escrow gateway webhook queue operations](./webhooks.md).
 
-Use the loyalty dashboard to understand when the pro-rate guardrail is active and how quickly the treasury budget is being consumed:
+### Gateway endpoint
 
-- **Budget Remaining (`loyalty_budget_zn`)** tracks the ZNHB still available to issue for the current UTC day. Sudden drops without matching payouts may indicate configuration drift or a stale fee window.
-- **Queued Demand (`loyalty_demand_zn`)** mirrors the pending payout total collected at `EndBlockRewards`. Rising demand with a flat budget hints that future blocks will be prorated.
-- **Prorate Ratio (`loyalty_prorate_ratio`)** exposes the applied multiplier (1.0 means 100% payout). Values below `1` confirm that pro-rate mode has engaged and the ratio reflected in the `LoyaltyBudgetProRated` event was emitted.
-- **Paid Today (`loyalty_paid_today_zn`)** increments as payouts land. The series resets on the UTC day boundary; if it fails to reset, inspect the day-rollover cron or block timestamps.
-- **Prorate Hits (`loyalty_budget_events_total`)** counts the number of blocks that emitted `LoyaltyBudgetProRated`. Alert when the counter grows faster than normal fee inflows.
-- **Price Guard (`loyalty_price_guard_deviation_bps`, `loyalty_price_guard_fallback_total`)** surfaces TWAP deviation and fallback activations. Pair this with `nhb_oracle_update_age_seconds` on the Oracle Health dashboard to distinguish stale-data pauses from legitimate demand spikes.
+`GET /metrics` on the gateway serves its own registry: `<metricsPrefix>_requests_total{route,method,status}`
+and `<metricsPrefix>_request_duration_seconds{route,method}` (prefix default
+`gateway`). See [Gateway Overview](../gateway/overview.md#observability).
 
-When `loyalty_prorate_ratio` drops under `1`, correlate the timestamp with `LoyaltyBudgetProRated` events and treasury balances to validate that proration is expected and not the result of price-guard failures.
+## Sample collector and Prometheus configuration
 
-## Tracing
+- `ops/otel/collector.yaml`: OTLP receivers on `0.0.0.0:4317` (gRPC) and
+  `0.0.0.0:4318` (HTTP); a Prometheus receiver scraping `gateway`, `consensusd`,
+  `p2pd`, `governd`, `lendingd` and `swapd` on port `9464`; processors
+  `memory_limiter` and `batch`, and `attributes/redact` which deletes the span
+  attributes `account_number` and `auth_token`; the `spanmetrics` connector
+  (dimensions `service.name`, `rpc.system`, `rpc.service`, `http.method`,
+  `http.route`); exporters `otlp/tempo` (`tempo:4318`), `prometheus` (`0.0.0.0:9464`,
+  namespace `nhb`), `loki` and `logging`. Trace pipeline: `otlp` receiver, exporters
+  `otlp/tempo`, `spanmetrics`, `logging`.
+- `ops/prometheus/prometheus.yml`: 15 s scrape and evaluation intervals,
+  external label `cluster: nhb-local`, jobs `otel-collector` (`otel-collector:8888`)
+  and `nhb-services` (the same six hosts on `:9464`), and the rule file
+  `ops/prometheus/rules/slo.rules.yml`.
+- `examples/compose/observability.yml`: Tempo, Loki, the OpenTelemetry Collector
+  (contrib image, ports 4317, 4318, 9464, 13133), Prometheus (port 9090) and
+  Grafana (port 3000) using the two files above and `ops/grafana/dashboards`.
 
-### Instrumentation
-- Services emit OpenTelemetry traces with span attributes for `request_id`, `client_id`, and `txn_hash`.
-- All gRPC servers register the `otelgrpc` unary and stream interceptors so that trace IDs, baggage, and relevant RPC attributes are captured automatically.
-- gRPC and HTTP clients use `otelgrpc`/`otelhttp` instrumentation so trace context flows through downstream calls with no manual propagation.
-- RPC nodes and the HTTP gateway forward W3C Trace Context (`traceparent`, `tracestate`) headers on every proxied request to keep cross-service traces stitched together.
-- Sample rate defaults to 10% for production, 100% for staging to aid debugging and is controlled via the collector configuration.
+The sample Prometheus configuration targets `<service>:9464`, which is the
+collector's Prometheus exporter port in `collector.yaml`; the services themselves
+do not listen on 9464.
 
-### Export & Storage
-- **OTLP/HTTP** exporter ships traces to Tempo, retained for 72 hours.
-- Derived metrics for trace errors feed into Prometheus via the spanmetrics connector.
-- Sensitive values (`account_number`, `auth_token`) must be redacted before spans are exported; the collector removes these attributes before export.
-- The canonical configuration lives in [`ops/otel/collector.yaml`](../../ops/otel/collector.yaml); update it when adding receivers, exporters, or attribute processors.
+## Alert rules in the repository
 
-### Dashboards & Usage
-- Use Grafana Explore with the Tempo data source to follow requests across RPC, consensus, and storage services.
-- Trace exemplars are linked from latency panels in the RPC dashboard and the Services Overview latency panel.
-- The [`examples/compose/observability.yml`](../../examples/compose/observability.yml) stack provisions Prometheus, Tempo, Loki, and Grafana locally with the NHB dashboards and data sources for quick validation.
+`ops/prometheus/rules/slo.rules.yml` records `slo:service_error_ratio:5m` and
+`slo:service_latency_p95:5m` from the spanmetrics series and defines
+`ServiceErrorBudgetBurn` (error ratio above 2% for 10 minutes) and
+`ServiceLatencyRegression` (p95 above 750 ms for 10 minutes).
 
-## Structured Logging
+`observability/alerts.yaml`:
 
-### Format & Routing
-- Logs are JSON with fields `timestamp`, `severity`, `service`, `env`, `request_id`, and `message`.
-- PII is hashed or dropped at the source. Access tokens and HMAC secrets are never logged.
-- Fluent Bit forwards logs to Loki with retention of 14 days.
+| Alert | Expression summary |
+| ----- | ------------------ |
+| `ModuleHighErrorRate` | error outcome above 5% of `nhb_module_requests_total` per module for 10 min |
+| `ModuleLatencyP95Degraded` | p95 of `nhb_module_request_duration_seconds` above 1 s for 15 min |
+| `ModuleThrottleSaturation` | more than 25 `nhb_module_throttles_total` increases in 5 min for 5 min |
+| `ModulePauseEngaged` | `nhb_module_throttles_total{reason="pause"}` changed within 1 h |
+| `ModuleQuotaExhausted` | `nhb_module_throttles_total{reason="quota"}` increased in 10 min |
+| `OracleFeedStale` | `max(nhb_oracle_update_age_seconds) > 120` for 5 min |
+| `PaymasterAutoTopUp*` | four alerts on `nhb_paymaster_autotopups_total` (success spikes above 3 and 10 in 5 min; failures) |
 
-### Searching & Alerts
-- LogQL dashboards surface error spikes, failed signature verifications, and oracle stale data messages.
-- Critical log patterns (e.g., `validator_missed_signature`, `kms_rotation_failed`) generate alerts routed through Alertmanager.
+`observability/alerts/alert_rules.yaml` holds the `POTSO*` alerts and
+`TokenSupplyJumpIncrease` / `TokenSupplyJumpDecrease`.
 
-## Alerting
+## Dashboards in the repository
 
-### Routing
-- Alertmanager routes incidents by severity:
-  - **P1**: paging SRE on-call via PagerDuty and #sre-alerts.
-  - **P2**: notify ops triage channel and create Jira ticket.
-  - **P3**: email weekly digest to platform team.
-- Alerts include RACI contacts and runbook links.
+- `ops/grafana/dashboards/services-overview.json` ("NHB Services Overview"): error
+  budget, p95 latency, throughput (from the spanmetrics series) and token supply.
+- `ops/grafana/dashboards/fees.json` ("NHB Fee Transparency").
+- `observability/grafana/staking.json` and `observability/dashboards/staking.json`
+  (staking), `observability/dashboards/paymaster-autotopup.json`, and the POTSO
+  dashboards in `observability/grafana/dashboards/`.
 
-### Policy Highlights
-- **Finality lag**: triggered when lag > 30s for 3 consecutive intervals.
-- **RPC failure rate**: triggered at > 2% error rate over 10 minutes.
-- **Module high error rate**: `ModuleHighErrorRate` fires after 10 minutes above the 5% budget per module.
-- **Module latency regression**: `ModuleLatencyP95Degraded` warns when the p95 exceeds 1s for 15 minutes.
-- **Module throttles**: `ModuleThrottleSaturation`, `ModulePauseEngaged`, and `ModuleQuotaExhausted` surface rate-limit backpressure, pause guards, and quota exhaustion.
-- **Oracle stale data**: triggered when data age > 2 minutes.
-- **Validator downtime**: triggered when heartbeat missing for 3 epochs.
+## Logging
 
-## Operations
-
-### Access Control
-- Use least-privilege Prometheus and Grafana API tokens scoped per environment.
-- Rotate tokens quarterly or immediately after staff changes.
-
-### Incident Readiness
-- Quarterly alert routing drills verify contact accuracy.
-- Dashboards and alert definitions are version-controlled and peer reviewed.
-
-## Validation Checklist
-- [ ] Metrics endpoints respond with `200 OK` and expected labels.
-- [ ] Grafana dashboards display live data for consensus, RPC, oracle, and storage services.
-- [ ] Tempo contains traces linked to Grafana panels.
-- [ ] Alertmanager test notifications reach the correct channels.
+`logging.Setup` (`observability/logging/logging.go`) writes JSON to stdout with
+the fields `timestamp`, `severity`, `message`, `service` and, when `NHB_ENV` is
+set, `env`. If `NHB_LOG_FILE` is set, output is also written to that file with
+rotation (100 MB per file, 5 backups, 28 days, compressed). It also redirects the
+standard-library `log` output through the same handler. `observability/logging/redact.go`
+provides redaction helpers.
