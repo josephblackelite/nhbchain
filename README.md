@@ -241,7 +241,7 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
 - **Mainnet P2P Bootnode:**
-  `"52.1.96.250:6001"`
+  `"198.51.100.10:6001"`
   *(This node's `Bootnodes`/`PersistentPeers` config values are plain `host:port` -- the P2P dialer connects directly with `net.Dial("tcp", addr)` and does not parse an `enode://nodeid@host:port` URI scheme, so don't use that format here even though it's a common convention on other chains. Updated 2026-08-06 for the Phase E genesis relaunch — this address changes on any future genesis relaunch too; verify against the live node's `p2p_info` RPC result if this ever looks stale.)*
 
 ### Join As A Validator In One Command

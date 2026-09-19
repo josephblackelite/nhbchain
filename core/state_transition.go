@@ -8180,7 +8180,9 @@ func (sp *StateProcessor) convertLegacyEscrow(id [32]byte, legacy *escrow.Legacy
 	default:
 		status = escrow.EscrowFunded
 	}
-	now := sp.now().UTC()
+	// The migration result is persisted, so it is stamped from the block
+	// timestamp rather than the wall clock.
+	now := sp.blockTimestamp().UTC()
 	created := now.Unix()
 	deadline := now.Add(30 * 24 * time.Hour).Unix()
 	if deadline < created {
@@ -8576,13 +8578,16 @@ func (sp *StateProcessor) configureTradeEngine() (*escrow.TradeEngine, *nhbstate
 	sp.EscrowEngine.SetState(manager)
 	sp.EscrowEngine.SetEmitter(stateProcessorEmitter{sp: sp})
 	sp.EscrowEngine.SetFeeTreasury(sp.escrowFeeTreasury)
-	sp.EscrowEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
+	// Deterministic block timestamp, never the wall clock: CreatedAt/UpdatedAt
+	// and the deadline checks are persisted into consensus state, so every
+	// validator (and any later replay) must derive the identical value.
+	sp.EscrowEngine.SetNowFunc(func() int64 { return sp.blockTimestamp().Unix() })
 	if sp.TradeEngine == nil {
 		sp.TradeEngine = escrow.NewTradeEngine(sp.EscrowEngine)
 	}
 	sp.TradeEngine.SetState(manager)
 	sp.TradeEngine.SetEmitter(stateProcessorEmitter{sp: sp})
-	sp.TradeEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
+	sp.TradeEngine.SetNowFunc(func() int64 { return sp.blockTimestamp().Unix() })
 	return sp.TradeEngine, manager
 }
 
