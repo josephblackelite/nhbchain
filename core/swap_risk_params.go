@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	nhbstate "nhbchain/core/state"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/governance"
 	"nhbchain/native/swap"
 )
@@ -108,7 +109,7 @@ func readGovernedSwapRiskWei(manager *nhbstate.Manager, key, defaultWei string) 
 		return nil, err
 	}
 	if ok {
-		if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+		if trimmed := nativecommon.ParamDecimal(raw); trimmed != "" {
 			text = trimmed
 		}
 	}

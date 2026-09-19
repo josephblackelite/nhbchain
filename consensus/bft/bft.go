@@ -27,7 +27,7 @@ type State struct {
 }
 
 // polkaRecord captures the single block that reached a prevote Polka
-// (>=2/3 voting power prevoting the same non-nil block) during one round of
+// (>2/3 voting power prevoting the same non-nil block) during one round of
 // the current height, along with the actual signed prevotes that
 // constitute that Polka -- so this validator, if it becomes proposer
 // again later, can attach them as portable, independently-verifiable
@@ -65,14 +65,14 @@ type Engine struct {
 	// ordinary network delay (no attacker required), two different
 	// quorums could each independently commit a different block at the
 	// same height -- a live fork. These fields are this validator's LOCK:
-	// once >=2/3 voting power prevotes for a block in some round (a
+	// once >2/3 voting power prevotes for a block in some round (a
 	// "Polka"), lockedBlock/lockedRound remember it for the rest of this
 	// HEIGHT (never cleared by a round timeout, only by advancing to a new
 	// height -- see resetLockStateLocked), and prevote()/lockCompliesLocked
 	// refuse to prevote a conflicting block afterward unless a later round
 	// carries CRYPTOGRAPHIC PROOF (never a bare claim, never a "did I
 	// personally witness that round's gossip" check -- see
-	// verifyPolkaProofLocked) that >=2/3 power already moved past that
+	// verifyPolkaProofLocked) that >2/3 power already moved past that
 	// lock. validBlock/validRound track the single most recent Polka seen
 	// (which may be newer than the lock) so this validator, when it
 	// becomes proposer, re-proposes that same value instead of
@@ -616,7 +616,7 @@ func (e *Engine) prevote() {
 
 	// NHB-AUDIT-C1: this is the safety half of Proof-of-Lock-Change. Refuse
 	// to prevote a block that conflicts with an earlier lock unless the
-	// proposal carries cryptographic proof (>=2/3 signed prevotes) that
+	// proposal carries cryptographic proof (>2/3 signed prevotes) that
 	// enough voting power already moved on -- never merely because the
 	// proposer's message claims it, and never by asking whether this
 	// validator personally witnessed that round's gossip live (an earlier
@@ -674,7 +674,7 @@ func (e *Engine) prevote() {
 //   - proposal.ValidRound >= 0 (proposer claims a Polka at that round):
 //     allowed only if (a) the claimed round is strictly earlier than this
 //     proposal's own round, (b) proposal.ValidRoundProof cryptographically
-//     verifies as a real >=2/3 Polka for this EXACT block at that round
+//     verifies as a real >2/3 Polka for this EXACT block at that round
 //     (see verifyPolkaProofLocked -- the proposer's claim alone is never
 //     trusted, but neither is this validator's own possibly-incomplete
 //     memory of that round), and (c) this validator's lock (if any) is
@@ -704,7 +704,7 @@ func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte, height
 
 // verifyPolkaProofLocked cryptographically verifies that proof contains
 // enough distinct, validly-signed Prevote signatures for
-// (height, round=vr, blockHash) to constitute a real Polka (>=2/3 voting
+// (height, round=vr, blockHash) to constitute a real Polka (>2/3 voting
 // power) against the validator set active for the current height. This is
 // a pure, stateless check -- it never asks whether this validator itself
 // witnessed round vr's gossip in real time, which is exactly what makes it
@@ -740,10 +740,7 @@ func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash [
 		seen[key] = struct{}{}
 		signedPower.Add(signedPower, weight)
 	}
-	threshold := new(big.Int).Mul(e.totalVotingPower, big.NewInt(2))
-	threshold.Add(threshold, big.NewInt(2))
-	threshold.Div(threshold, big.NewInt(3))
-	return signedPower.Cmp(threshold) >= 0
+	return types.HasQuorum(signedPower, e.totalVotingPower)
 }
 
 // lockedBlockHashLocked returns the hash of the currently locked block, or
@@ -1050,7 +1047,7 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	reachedPrevote := e.hasTwoThirdsPowerLocked(Prevote)
 	reachedPrecommit := e.hasTwoThirdsPowerLocked(Precommit)
 
-	// NHB-AUDIT-C1: the instant >=2/3 voting power prevotes this round's
+	// NHB-AUDIT-C1: the instant >2/3 voting power prevotes this round's
 	// block for the FIRST time (a Polka), lock onto it for the rest of this
 	// height and snapshot the actual signed prevotes that constitute it --
 	// both read by lockCompliesLocked/propose() to enforce/continue
@@ -1179,6 +1176,9 @@ func (e *Engine) recalculateVotingPowerLocked() {
 	}
 }
 
+// hasTwoThirdsPowerLocked reports whether strictly more than two thirds of
+// the voting power has cast vt for the active proposal (types.HasQuorum;
+// exactly 2/3 is not enough). Must be called with e.mu held.
 func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
 	if e.totalVotingPower == nil || e.totalVotingPower.Sign() <= 0 {
 		return false
@@ -1187,10 +1187,7 @@ func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
 	if !ok || power == nil {
 		return false
 	}
-	threshold := new(big.Int).Mul(e.totalVotingPower, big.NewInt(2))
-	threshold.Add(threshold, big.NewInt(2))
-	threshold.Div(threshold, big.NewInt(3))
-	return power.Cmp(threshold) >= 0
+	return types.HasQuorum(power, e.totalVotingPower)
 }
 
 func (e *Engine) startNewRound() {
