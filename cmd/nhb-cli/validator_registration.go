@@ -95,7 +95,7 @@ func registerValidator(amountStr string, keyFile string) int {
 	} else {
 		fmt.Printf("Submitted validator registration for %s (no additional stake).\n", pubAddr)
 	}
-	fmt.Println("Eligibility takes effect once own self-stake (minus any delegated-in total) meets the governed minimum and the account is heartbeat-active.")
+	fmt.Println("The account becomes a validator candidate once its total stake (its own stake plus any ZNHB delegated to it) meets the governed minimum and it is not delegating its own stake to a different validator. It enters the active validator set at an epoch boundary while its heartbeats are recent.")
 	return 0
 }
 

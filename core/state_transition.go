@@ -7212,22 +7212,20 @@ func (sp *StateProcessor) setAccount(addr []byte, account *types.Account) error 
 	// Eligibility (and, downstream, real BFT voting power -- see
 	// core/epochs.go's applyValidatorSelection non-rotation branch, which
 	// copies this map's values straight into ValidatorSet) requires explicit
-	// registration (item 1) AND an own-stake basis -- self-stake minus
-	// whatever is tracked as delegated-in for this address, the exact same
-	// subtraction stakeRewardBasis already uses for reward attribution --
-	// meeting minimumValidatorStake() (item 2), AND that the address is not
-	// currently delegating its own stake to a DIFFERENT validator (see
-	// selfDelegated's doc comment): without that third condition, basis
-	// itself is not a trustworthy own-stake figure -- stakeRewardBasis
-	// deliberately returns LockedZNHB (the amount delegated AWAY) once
-	// DelegatedValidator points elsewhere, so basis>=minStake alone could be
-	// satisfied by money this address has delegated to someone else, not by
-	// anything actually backing its own candidacy. Delegated-in stake keeps
-	// earning its proportional reward share elsewhere untouched; it no
-	// longer inflates eligibility or voting power here. Computed here, BEFORE
-	// accountMetadata is built below, so a transitional-grandfather
-	// registration flip (see below) lands in the metadata this call persists
-	// rather than being silently discarded.
+	// registration (item 1) AND a stake basis from validatorEligibilityBasis
+	// -- the account's total Stake INCLUDING ZNHB other wallets have
+	// delegated to it, with no subtraction (see that function's doc comment:
+	// there is no separate self-stake requirement) -- meeting
+	// minimumValidatorStake() (item 2), AND that the address is not currently
+	// delegating its own stake to a DIFFERENT validator (see selfDelegated's
+	// doc comment): once DelegatedValidator points elsewhere the basis
+	// degrades to LockedZNHB (the amount delegated AWAY), which must not
+	// count as backing this address's own candidacy. Reward accrual is
+	// deliberately different: stakeRewardBasis excludes delegated-in stake so
+	// a validator never accrues APR on capital that is not theirs. Computed
+	// here, BEFORE accountMetadata is built below, so a
+	// transitional-grandfather registration flip (see below) lands in the
+	// metadata this call persists rather than being silently discarded.
 	minStake, err := sp.minimumValidatorStake()
 	if err != nil {
 		return err

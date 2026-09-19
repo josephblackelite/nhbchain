@@ -252,12 +252,13 @@ func TestApplyUnstake_DeregisterValidator_PureZeroValue(t *testing.T) {
 	}
 }
 
-// (b) TestValidatorVotingPower_ExcludesDelegatedIn is the crux test for
+// (b) TestValidatorVotingPower_IncludesDelegatedIn is the crux test for
 // item 2: a validator's eligibility basis AND its live BFT ValidatorSet
-// voting-power entry must equal its OWN stake basis (self-stake minus
-// delegated-in), not the combined total inflated by a real third-party
-// delegation -- with the delegator's reward-share attribution (untouched)
-// deliberately not asserted here since that is covered by
+// voting-power entry must equal its COMBINED total stake -- its own stake
+// plus what a third party delegated to it -- because validatorEligibilityBasis,
+// unlike the reward basis, does not subtract delegated-in stake. The
+// delegator's reward-share attribution (untouched) is deliberately not
+// asserted here since that is covered by
 // core/staking_delegation_rewards_test.go.
 func TestValidatorVotingPower_IncludesDelegatedIn(t *testing.T) {
 	sp := newStakingStateProcessor(t)
