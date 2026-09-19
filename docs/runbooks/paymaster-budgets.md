@@ -1,66 +1,84 @@
 # Paymaster Budget Runbook
 
-This runbook documents how operations teams manage POS sponsorship budgets, enforce daily caps, and monitor utilisation. The limits configured here align with the runtime enforcement in `core.PaymasterLimits` and the network configuration loader.【F:core/sponsorship.go†L92-L145】【F:config/global.go†L8-L56】
+This runbook covers the sponsorship limits the state processor enforces and where they are
+configured. Sources: `core/sponsorship.go`, `config/global.go`, `config/types.go`,
+`cmd/nhb/main.go`, `cmd/consensusd/main.go`, `core/tx/checks.go`.
 
-## 1. Budget sources
+## 1. What is checked, in order
 
-* **Global cap** – Upper bound for sponsored outflow across all merchants per UTC day.
-* **Merchant cap** – Daily limit for a specific merchant; enforced before device-level checks.
-* **Device cap** – Optional limit on the number of sponsored transactions per device per day.
+When a transaction requests sponsorship (see [Paymaster administration](../launch/paymaster-admin.md)),
+`EvaluateSponsorship` runs these checks after the module, signature and balance checks. The
+first failure gives the status `throttled`. Only the cap results (steps 2 to 4) carry the
+`throttle` details and produce a `paymaster.throttled` event; the POS registry results (step 1)
+set only the status and reason, so the rejection is reported by `tx.sponsorship.failed` alone:
 
-The values are supplied through the `Global.Paymaster` section of the cluster configuration. Changes must be committed to the configuration repository and rolled out through CI before taking effect.【F:config/global.go†L8-L56】
+1. **POS registry.** The merchant and device named by the transaction's `merchantAddr` and
+   `deviceId` are looked up in the [POS registry](./pos-onboarding.md). A paused merchant gives
+   `merchant sponsorship paused`; a revoked device gives `device sponsorship revoked`; a device
+   registered to a different merchant gives `device registered to merchant <address>`.
+2. **Global daily cap.** The sum of `gasLimit * gasPrice` budgets already used today plus this
+   one must not exceed `GlobalDailyCapWei`. (Steps 2 to 4 apply only when the budget is above
+   zero, see below.)
+3. **Merchant daily cap.** The same test per merchant against `MerchantDailyCapWei`. When this
+   cap is set, a transaction without a `merchantAddr` is throttled with
+   `merchant address required for sponsorship throttling`.
+4. **Device transaction cap.** A device may have at most `DeviceDailyTxCap` sponsored
+   transactions per day. When this cap is set, a transaction without both `merchantAddr` and
+   `deviceId` is throttled with `device identifier required for sponsorship throttling`.
 
-## 2. Updating limits
+The three cap checks (steps 2 to 4, including both "required" checks) are skipped entirely when
+the requested budget `gasLimit * gasPrice` is zero or less (`checkPaymasterCaps` in
+`core/sponsorship.go` returns without a throttle). A sponsored transaction that signs off on a
+zero `gasPrice` or a zero `gasLimit` is therefore never throttled by a cap, and a missing
+`merchantAddr` or `deviceId` is not reported for it. The POS registry check in step 1 still runs.
 
-1. **Stage the change**
-   * Edit the environment overlay (for example `deploy/environments/prod/global.yaml`) to update `paymaster.global_daily_cap`, `paymaster.merchant_daily_cap`, or `paymaster.device_daily_tx_cap`.
-   * Open a change request with the diff and obtain the required approvals.
-2. **Apply to the cluster**
-   * Deploy the update via the GitOps pipeline or run `kubectl apply -f deploy/environments/prod` from the release runner.
-   * Watch the rollout status: `kubectl rollout status deploy/consensus`.
-3. **Verify runtime limits**
-   * Review the consensus node logs for the refreshed limits (`kubectl logs deploy/consensus | grep PaymasterLimits`).
-   * Cross-check Prometheus metrics `pos_paymaster_global_remaining` and `pos_paymaster_merchant_remaining` to confirm they reflect the new caps.
+A cap set to `0` (or an empty string) is not enforced. The day is the UTC calendar date of
+the block time (format `2006-01-02`). The caps compare the requested budget, `gasLimit * gasPrice`,
+not the amount finally charged.
 
-## 3. Monitoring utilisation
+## 2. Configuration
 
-1. **Dashboards**
-   * Grafana dashboard `POS Sponsorship Budgets` charts the remaining global and merchant capacity alongside burn rate forecasts.
-   * The dashboard reads from Prometheus metrics emitted by the consensus node’s state processor.【F:core/sponsorship.go†L231-L247】【F:core/sponsorship.go†L388-L410】
-2. **Daily reports**
-   * Export the paymaster usage CSV from the data warehouse and attach it to the daily operations report.
-   * Investigate any merchant exceeding 80% of their allocation by opening an escalation ticket.
+The limits are read from the `[global.Paymaster]` section of the node's `config.toml`:
 
-## 4. Alerts
+```toml
+[global.Paymaster]
+  MerchantDailyCapWei = ""   # integer in wei, empty or 0 = no cap
+  DeviceDailyTxCap = 0       # sponsored transactions per device per day, 0 = no cap
+  GlobalDailyCapWei = ""     # integer in wei, empty or 0 = no cap
+```
 
-1. **Threshold alerts**
-   * Configure Prometheus alert rules for `pos_paymaster_global_remaining < (0.1 * pos_paymaster_global_cap)` and merchant equivalents.
-   * Route alerts to the on-call rotation and tag the affected merchant.
-2. **Anomaly alerts**
-   * Set up alerting on `pos_paymaster_device_rejects` spikes to catch runaway devices.
-   * Include a playbook link back to this runbook and the device attestation procedure.
+They are parsed and applied once, when `nhb` or `consensusd` starts (`SetPaymasterLimits` in
+`cmd/nhb/main.go` and `cmd/consensusd/main.go`). A change takes effect after the node is
+restarted. The values are per node configuration, not chain state. There are no metrics named
+`pos_paymaster_*` in the code, and no RPC method returns the usage counters.
 
-## 5. Automatic top-ups
+## 3. Monitoring
 
-Automatic top-ups ensure the paymaster never runs dry during busy settlement windows. The feature is disabled by default and is only active when the `auto_top_up` block is configured under `Global.Paymaster` with a `ZNHB` token, operator address, mint/approve roles, and rate limits.【F:config/types.go†L142-L186】【F:config/global.go†L101-L165】
+* **Events.** `paymaster.throttled` carries `scope` (global, merchant or device), `txHash`,
+  `merchant`, `deviceId`, `day`, `limitWei`, `usedBudgetWei`, `attemptBudgetWei`, `txCount` and
+  `limitTxCount`. `tx.sponsorship.applied` and `tx.sponsorship.failed` are listed in
+  [Paymaster administration](../launch/paymaster-admin.md#5-events).
+* **Preview.** `tx_previewSponsorship` shows `status`, `reason` and the `throttle` details for
+  a transaction without submitting it.
+* **State.** Per-day counters are stored per global scope, per merchant and per device
+  (`core/state/paymaster_counters.go`): budget used, amount charged and transaction count.
+  Read them with a tool that opens the state trie (`Manager.PaymasterCounters`).
+* **Metrics.** The paymaster metrics the node registers are
+  `nhb_paymaster_autotopups_total{outcome}` and `nhb_paymaster_autotopup_amount_wei_total{outcome}`
+  (see [auto top-up](./paymaster-autotopup.md)). The POS lane metrics are in
+  [POS SLA and troubleshooting](./pos-slas.md).
 
-1. **Configuration**
-   * `min_balance_wei` – threshold that triggers a top-up when the on-chain balance drops below the value.
-   * `top_up_amount_wei` – amount of ZNHB minted on each execution.
-   * `daily_cap_wei` and `cooldown` – guardrails that limit aggregate minting and cadence.【F:core/state/paymaster_counters.go†L388-L444】【F:core/sponsorship.go†L571-L668】
-   * `operator`, `approver_role`, and `minter_role` – governance controls that must be satisfied before minting occurs.【F:core/sponsorship.go†L604-L647】
-2. **Execution flow**
-   * During sponsorship evaluation, the state processor checks the current ZNHB balance and enforces the policy, aborting with explicit failure reasons if guardrails or roles are not satisfied.【F:core/sponsorship.go†L552-L647】
-   * Successful executions persist the daily mint counter and last-run timestamp to prevent duplicate minting within the cooldown window.【F:core/state/paymaster_counters.go†L388-L444】【F:core/sponsorship.go†L642-L668】
-3. **Observability**
-   * Events: monitor `paymaster.autotopup` for both success and failure outcomes. The payload includes status, reason, amounts, and the observed balance.【F:core/events/sponsorship.go†L144-L187】
-   * Metrics: Grafana dashboards should scrape `nhb_paymaster_autotopups_total{outcome="success"|"failure"}` and `nhb_paymaster_autotopup_amount_wei_total` to alert on unexpected minting or repeated failures.【F:observability/metrics.go†L205-L233】
-4. **Operational procedures**
-   * Rotate operators or update governance roles by amending the configuration and pushing a governed change; nodes reload the policy at block boundaries.【F:core/node.go†L214-L271】【F:core/state_transition.go†L140-L207】
-   * When pausing the engine, set `enabled: false` in the config and redeploy; the scheduler stops minting immediately after the new policy is active.【F:config/global.go†L101-L165】【F:core/sponsorship.go†L556-L575】
+## 4. Automatic top-ups
 
-## 6. Troubleshooting
+The optional automatic top-up of a sponsor's ZNHB balance has its own runbook:
+[Paymaster automatic top-up](./paymaster-autotopup.md).
 
-* If new limits are not visible, confirm the configuration map rollout finished and the consensus node picked up the change (check `kubectl logs deploy/consensus | grep PaymasterLimits`).
-* If Prometheus metrics are missing, ensure the scrape job `consensus` is healthy and the node exports the paymaster collector.
-* For repeated merchant cap exhaustion, coordinate with risk to re-evaluate the merchant’s credit line before raising limits.
+## 5. Troubleshooting
+
+* **New limits not applied.** The node was not restarted, or a different `config.toml` is
+  in use. The values are not reloaded at runtime.
+* **Unexpected `throttled` results.** Read the `reason` from `tx_previewSponsorship` and
+  compare with the check list above. A paused merchant or a revoked device is the most common
+  reason and does not involve a cap.
+* **Repeated merchant cap exhaustion.** Raise `MerchantDailyCapWei` in the configuration of
+  every validator and restart them; the caps are evaluated by each node's own configuration.

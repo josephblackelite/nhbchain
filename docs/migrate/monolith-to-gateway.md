@@ -1,50 +1,110 @@
 # Migrating from the Legacy JSON-RPC Node
 
-The gateway keeps the public JSON-RPC surface available under `/rpc` while
-backfilling requests to dedicated services. New integrations should migrate to
-the service-specific REST and gRPC surfaces exposed behind the gateway.
+The gateway (`cmd/gateway`) can expose a JSON-RPC endpoint at `/rpc` that translates each
+request into a REST call on an upstream service. New integrations should call the
+service-specific REST and gRPC routes the gateway proxies directly. The `/rpc` endpoint is
+controlled by `--compat-mode` / `NHB_COMPAT_MODE` and follows the plan in the
+[decommission timeline](./deprecation-timeline.md).
 
-## Method Mapping
+## Method mapping
 
-| Legacy JSON-RPC method | Gateway path | HTTP method | Backend service |
-| ---------------------- | ------------ | ----------- | --------------- |
-| `lending_getMarket` | `/v1/lending/markets/get` | `POST` | `lendingd` |
-| `lend_getPools` | `/v1/lending/pools` | `GET` | `lendingd` |
-| `lend_createPool` | `/v1/lending/pools` | `POST` | `lendingd` |
-| `lending_getUserAccount` | `/v1/lending/accounts/get` | `POST` | `lendingd` |
-| `lending_supplyNHB` | `/v1/lending/supply` | `POST` | `lendingd` |
-| `lending_withdrawNHB` | `/v1/lending/withdraw` | `POST` | `lendingd` |
-| `lending_depositZNHB` | `/v1/lending/collateral/deposit` | `POST` | `lendingd` |
-| `lending_withdrawZNHB` | `/v1/lending/collateral/withdraw` | `POST` | `lendingd` |
-| `lending_borrowNHB` | `/v1/lending/borrow` | `POST` | `lendingd` |
-| `lending_borrowNHBWithFee` | `/v1/lending/borrow/with-fee` | `POST` | `lendingd` |
-| `lending_repayNHB` | `/v1/lending/repay` | `POST` | `lendingd` |
-| `lending_liquidate` | `/v1/lending/liquidate` | `POST` | `lendingd` |
-| `swap_submitVoucher` | `/v1/swap/voucher/submit` | `POST` | `swapd` |
-| `swap_voucher_get` | `/v1/swap/voucher/get` | `POST` | `swapd` |
-| `swap_voucher_list` | `/v1/swap/voucher/list` | `POST` | `swapd` |
-| `swap_voucher_export` | `/v1/swap/voucher/export` | `POST` | `swapd` |
-| `swap_limits` | `/v1/swap/limits` | `GET` | `swapd` |
-| `swap_provider_status` | `/v1/swap/providers/status` | `GET` | `swapd` |
-| `swap_burn_list` | `/v1/swap/burn/list` | `GET` | `swapd` |
-| `swap_voucher_reverse` | `/v1/swap/voucher/reverse` | `POST` | `swapd` |
-| `gov_getProposal` | `/v1/gov/proposals/get` | `POST` | `governd` |
-| `gov_listProposals` | `/v1/gov/proposals` | `GET` | `governd` |
-| `gov_getTally` | `/v1/gov/proposals/tally` | `POST` | `governd` |
-| `gov_submitProposal` | `/v1/gov/proposals` | `POST` | `governd` |
-| `gov_vote` | `/v1/gov/votes` | `POST` | `governd` |
-| `gov_deposit` | `/v1/gov/deposits` | `POST` | `governd` |
-| `consensus_status` | `/v1/consensus/status` | `GET` | `consensusd` |
-| `consensus_validators` | `/v1/consensus/validators` | `GET` | `consensusd` |
-| `consensus_block` | `/v1/consensus/block` | `POST` | `consensusd` |
+These are the lending, governance and consensus entries of `DefaultMappings` in
+`gateway/compat/mapping.go`; the map contains further entries that this page does not list. The dispatcher sends the JSON-RPC
+`params` value as the request body (or `{}` when there are no params) for `POST`, and sends no
+body for `GET`. It calls the upstream at the path shown, under the base URL configured for that
+upstream.
 
-Legacy JSON-RPC clients can continue posting to `/rpc`. The gateway converts the
-request into the corresponding REST call shown above, forwards it to the
-appropriate service, and wraps the response back into a JSON-RPC envelope.
+| Legacy JSON-RPC method | Gateway path | HTTP method | Upstream |
+| ---------------------- | ------------ | ----------- | -------- |
+| `lending_getMarket` | `/v1/lending/markets/get` | `POST` | lending |
+| `lend_getPools` | `/v1/lending/pools` | `GET` | lending |
+| `lend_createPool` | `/v1/lending/pools` | `POST` | lending |
+| `lending_getUserAccount` | `/v1/lending/accounts/get` | `POST` | lending |
+| `lending_supplyNHB` | `/v1/lending/supply` | `POST` | lending |
+| `lending_withdrawNHB` | `/v1/lending/withdraw` | `POST` | lending |
+| `lending_depositZNHB` | `/v1/lending/collateral/deposit` | `POST` | lending |
+| `lending_withdrawZNHB` | `/v1/lending/collateral/withdraw` | `POST` | lending |
+| `lending_borrowNHB` | `/v1/lending/borrow` | `POST` | lending |
+| `lending_borrowNHBWithFee` | `/v1/lending/borrow/with-fee` | `POST` | lending |
+| `lending_repayNHB` | `/v1/lending/repay` | `POST` | lending |
+| `lending_liquidate` | `/v1/lending/liquidate` | `POST` | lending |
+| `gov_getProposal` | `/v1/gov/proposals/get` | `POST` | governance |
+| `gov_listProposals` | `/v1/gov/proposals` | `GET` | governance |
+| `gov_getTally` | `/v1/gov/proposals/tally` | `POST` | governance |
+| `gov_submitProposal` | `/v1/gov/proposals` | `POST` | governance |
+| `gov_vote` | `/v1/gov/votes` | `POST` | governance |
+| `gov_deposit` | `/v1/gov/deposits` | `POST` | governance |
+| `consensus_status` | `/v1/consensus/status` | `GET` | consensus |
+| `consensus_validators` | `/v1/consensus/validators` | `GET` | consensus |
+| `consensus_block` | `/v1/consensus/block` | `POST` | consensus |
 
-## Authentication and Rate Limits
+The lending, governance and consensus upstreams correspond to `services/lendingd`,
+`services/governd` and `cmd/consensusd` in this repository. The mapping only defines what the gateway forwards. Whether an upstream implements a given
+path is decided by that upstream.
 
-All mutating endpoints require a bearer token signed with the configured JWT/OAuth
-secret. Supply the token via the standard `Authorization: Bearer <token>` header.
-The gateway applies per-route rate limits which can be tuned in the configuration
-file under the `rateLimits` section.
+## Behaviour of `/rpc`
+
+* It accepts one JSON-RPC object or a batch array, with a request body limit of 1 MiB.
+* Error codes (`gateway/compat/compat.go`):
+  * `-32700` when the request body cannot be read or is not valid JSON (`read body`,
+    `decode request`, `decode batch`).
+  * `-32600 empty request body` when the body is empty or only whitespace.
+  * `-32601 method not found` for a method with no mapping.
+  * `-32001 service unavailable` when the mapping names an upstream that is not registered
+    in the dispatcher.
+  * `-32602` when the upstream HTTP request cannot be built (`build request: ...`).
+  * `-32002` when the upstream cannot be reached (message `upstream error: <cause>`).
+  * `-32003 read response: ...` when the upstream response body cannot be read.
+  * `-32000 upstream error` when the upstream answers with HTTP status 400 or above, with the
+    upstream body in `data`.
+* A successful upstream body is returned unchanged as the JSON-RPC `result`. An empty body
+  becomes `null`.
+* Each call to an upstream uses a 15 second HTTP client timeout.
+
+## Upstream endpoints and configuration
+
+The gateway keeps a base URL for each of four upstreams, with a default for each
+(`ensureServiceConfig` in `cmd/gateway/main.go`). Defaults for
+the three described on this page are `http://127.0.0.1:7101` (`lendingd`), `http://127.0.0.1:7103`
+(`governd`) and `http://127.0.0.1:7104` (`consensusd`). They can be overridden with
+`NHB_GATEWAY_LENDING_URL`, `NHB_GATEWAY_GOV_URL` and `NHB_GATEWAY_CONSENSUS_URL`. The fourth
+upstream has its own fixed name, default and environment variable in the same function.
+
+The `services` list in the gateway YAML overrides an endpoint too, and a YAML entry wins over
+the environment variable. Each entry has `name`, `endpoint`, `timeout` and
+`insecureSkipVerify`, but only `name` and `endpoint` have any effect:
+
+* `name` must be exactly one of the fixed upstream names (`lendingd`, `governd`, `consensusd`,
+  or the fourth name in `ensureServiceConfig`). An entry with any other name is accepted but
+  never used. Entries with an empty `name` or `endpoint` are skipped.
+* `timeout` is parsed (`gateway/config/config.go`) but never applied: the gateway builds each
+  upstream as `compat.Service{Name, BaseURL}` (`cmd/gateway/main.go`) and the `/rpc` HTTP
+  client always uses a fixed 15 second timeout (`NewDispatcher` in `gateway/compat/compat.go`).
+* `insecureSkipVerify` is parsed but not read anywhere in the gateway code.
+
+Unless `NHB_ENV=dev`, every upstream URL must use `https://`; this check runs when the
+endpoints are collected, before `security.autoUpgradeHTTP` can apply, so an `http://` URL is
+rejected outside dev even with auto-upgrade enabled.
+
+## Authentication and rate limits
+
+Routes under `/v1/lending`, `/v1/gov`, `/gov.v1.Msg` and `/v1/transactions` (and the other
+route groups marked `RequireAuth` in `cmd/gateway/main.go`) require
+`Authorization: Bearer <token>`, an HMAC-signed JWT checked against `auth.hmacSecret`. Groups
+with `RequiredScopes` also require that scope (`lending` for `/v1/lending`, `gov` for the gov
+groups). The
+`/v1/consensus`, `/consensus.v1.ConsensusService` and `/gov.v1.Query` groups do not require a
+token. Details and the anonymous-access settings are in
+[gateway anonymous routes](./gateway-anonymous-routes.md).
+
+Rate limits come from the `rateLimits` list in the gateway YAML. Each entry has an `id`, a
+rate (`ratePerSecond`, or `requestsPerMinute` divided by 60 when `ratePerSecond` is not above
+zero) and a `burst`. The `id` is the route group's rate-limit key: `lending`, `gov` and
+`consensus` (`/v1/transactions` uses `consensus`) among the groups described here. Entries
+with an empty `id` are skipped. The entries also have a `paths` field; it is parsed but never
+used, since only the `id`, rate and `burst` are read (`cmd/gateway/main.go`). When no entry
+has an `id` the gateway uses 2/s burst 20 for `lending`, 1/s burst 10 for `gov`, and 4/s
+burst 40 for `consensus` (plus a default for the group not described here).
+
+The `/rpc` route is registered outside these groups: it is not subject to the token check or to
+these rate limits, and the caller's `Authorization` header is not forwarded to the upstream.
