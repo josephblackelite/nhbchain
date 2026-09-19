@@ -1,54 +1,20 @@
-# Avatar Specification
+# Avatar References
 
-Aliases can present avatars to improve recognition and reduce payment errors. Avatars are referenced on-chain as immutable
-strings (`avatarRef`); the chain itself stores only the string and does not host or retrieve the underlying media.
+An alias record has an optional `AvatarRef` string. The chain stores only the string; it does not host, fetch or validate the media. Code: `core/identity/alias.go` (`NormalizeAvatarRef`), `core/state/manager.go` (`IdentitySetAvatar`), `rpc/identity_handlers.go`.
 
-## Allowed Sources
+## Validation rules (`NormalizeAvatarRef`)
 
-| Source | Format | Notes |
-| --- | --- | --- |
-| HTTPS URL | `https://cdn.nhb/...` or partner CDN. | Must use TLS 1.2+. Wallets should enforce HTTPS and check MIME type. |
-| Blob-shaped reference | `blob://<cid>`-formatted string. | There is no on-chain blob storage or blob RPC. The node only checks
-  for the `blob://` prefix; resolving the CID to actual media is entirely up to the client (e.g. a wallet-configured IPFS
-  gateway or partner CDN). |
+* Trimmed, non-empty.
+* At most 512 bytes (`avatarRefMaxBytes`, compared with `len` of the trimmed string).
+* Must start with `https://` or `blob://` (case-insensitive prefix check). Nothing else about the value is checked: not the host, the CID, the MIME type or the size of the referenced file.
+* Invalid values fail with `identity: invalid avatar reference`.
 
-## Size & Content Rules
+`identity_resolve` returns the stored value as `avatarRef`, omitted when empty.
 
-* Maximum file size: **512 KB** for HTTPS uploads; **256 KB** for on-chain blobs.
-* Supported MIME types: `image/png`, `image/jpeg`, `image/webp`, `image/svg+xml` (SVG sanitized server-side).
-* Aspect ratio: ideally 1:1. Wallets should display within a 128×128 px circle or rounded square.
-* Content policy forbids violence, nudity, hateful symbols, QR codes, or misleading brand usage. Gateway rejects uploads failing
-  automated or manual review.
+## Setting an avatar
 
-## Caching Guidance
+The only interface that sets an avatar is `identity_setAvatar` (and `nhb-cli id set-avatar`), which is **disabled** (HTTP 410, code `-32060`). No transaction type sets an avatar and the identity gateway has no avatar endpoint. New aliases registered with `TxTypeRegisterIdentity` therefore have no avatar. See [`identity.md`](./identity.md).
 
-* Wallets may cache avatars for 24 hours. Include `ETag` or `Last-Modified` headers.
-* Respect CDN caching directives; avoid hotlinking third-party domains outside partner registry.
-* Provide blurhash or placeholder color derived from aliasId for offline UX.
+## Client guidance
 
-## Updating Avatars
-
-1. Owner hosts the avatar media externally (HTTPS CDN) or otherwise obtains a `blob://`-shaped reference; there is no gateway
-   upload endpoint.
-2. Owner calls `identity_setAvatar(ownerAddr, avatarRef)` over authenticated RPC to update the on-chain record. The node only
-   checks that `avatarRef` has an `https://` or `blob://` prefix — it performs no content validation or storage.
-3. Event `identity.alias.avatarUpdated` notifies subscribers to refresh caches.
-
-## Recommended Client Behavior
-
-* Fallback to generated identicon (e.g., BLAKE3 aliasId hashed to color palette) when no avatar set.
-* Preload avatars when scanning QR codes or directory listings.
-* Display moderation badges for avatars flagged by governance (future field `avatarFlag`).
-
-## RPC & CLI Exposure
-
-* JSON-RPC: `identity_setAvatar(addressBech32, avatarRef)` (authenticated).
-* CLI: `nhb-cli id set-avatar --addr nhb1... --avatar https://cdn/...`.
-
-## Security Notes
-
-* Wallets must enforce content type after download; reject mismatched MIME signatures.
-* Avoid embedding avatar binary directly into QR codes or URIs; rely on references to prevent bloat.
-* For blob references, validate CID before fetching to avoid SSRF.
-
-For additional context on alias management, see [identity.md](./identity.md) and [identity-gateway.md](./identity-gateway.md).
+Anything beyond the rules above is a client decision. If a wallet displays avatars it must fetch and validate the referenced content itself; the node provides no guarantee about it.

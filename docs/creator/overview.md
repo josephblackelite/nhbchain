@@ -1,46 +1,49 @@
 # Creator Module Overview
 
-The creator module powers a native fan economy on NHB Chain. It lets artists and communities publish content, receive direct tips, and bootstrap sustainable revenue via fan staking. Every action emits structured events so downstream indexers, discovery portals, and devnet demos can track lifecycle changes in real time.
+The creator module (`native/creator`) models content publication, tips and fan staking behind a creator. Code: `native/creator/engine.go`, `types.go`, `events.go`, `math.go`, the node wrappers in `core/node.go` (`Node.Creator*`) and the RPC handlers in `rpc/creator_handlers.go`.
 
-## Core Concepts
+## Availability
+
+* There is **no creator transaction type**. The only way in the repository to run the engine's write operations is the RPC handlers, and those are disabled: `creator_publish`, `creator_tip`, `creator_stake`, `creator_unstake` and `creator_payouts` with `claim: true` return HTTP 410 with error code `-32060` (`creatorRPCDisabledMessage`).
+* The read path of `creator_payouts` (with `claim` omitted or false) is live and requires RPC authentication.
+* As a result no creator state can currently be created on a running chain through the node's public interfaces. The engine and its rules are described below because they are present in the code; see [`api.md`](./api.md) for the RPC surface.
+
+## Core concepts (`native/creator/types.go`)
 
 | Concept | Description |
 | --- | --- |
-| **Content** | Immutable publication envelope containing the creator address, canonical ID, off-chain URI, metadata stub, publish timestamp, and cumulative engagement counters. |
-| **Tip** | Transfer of liquid NHB from a fan to a content creator. Tips immediately credit the creator’s balance and are tracked against the originating content. |
-| **Stake** | Fans can lock NHB behind a creator to signal long-term support. Staking mints yield into the creator’s payout ledger at a configurable reward rate. |
-| **Payout Ledger** | Rolling ledger that records total tips, staking yield, pending distribution, and last payout time for each creator. Creators can inspect or claim the ledger at any time via JSON-RPC. |
+| **Content** | `{ID, Creator, URI, Metadata, Hash, PublishedAt, TotalTips, TotalStake}`. `Hash` is the hex BLAKE3-256 of the trimmed metadata string. |
+| **Tip** | NHB moved from a fan to the module payout vault, recorded against a piece of content and added to the creator's pending payout. |
+| **Stake** | `{Creator, Fan, Amount, Shares, StakedAt, LastAccrual}`: a fan's position behind a creator, measured in shares. |
+| **Payout ledger** | Per creator: `TotalTips`, `TotalStakingYield`, `PendingDistribution`, `LastPayout`, `TotalAssets`, `TotalShares`, `IndexRay`. |
 
-## State Layout
+The payout vault is a module address derived from the seed `module/creator/payout`; the staking-yield source is the module address derived from `module/creator/rewards` (`core/node.go`).
 
-The module persists data under the following storage prefixes:
+## State layout (`core/state/manager.go`)
 
-- `creator/content/<contentId>` – RLP-encoded `Content` records.
-- `creator/stake/<creator>/<fan>` – RLP-encoded `Stake` positions keyed by creator/fan pair.
-- `creator/ledger/<creator>` – RLP-encoded `PayoutLedger` for each creator.
+* `creator/content/<contentId>`: content record.
+* `creator/stake/<creator>/<fan>`: stake position.
+* `creator/ledger/<creator>`: payout ledger.
+* A snapshot of the rate-limit windows is also persisted (`CreatorRateLimitPut`) so limits survive restarts.
 
-Accounts are debited/credited atomically through the existing account manager, ensuring balance consistency with other modules.
+## Engine behavior
 
-## Event Stream
+* **Publish** (`PublishContent`): content ID is trimmed and must be non-empty and not already used (`creator engine: content already exists`). URI must be at most 512 bytes and use the scheme `https`, `ipfs`, `ar` or `nhb`. Metadata is trimmed, at most 4096 bytes and valid UTF-8. Emits `creator.content.published`.
+* **Tip** (`TipContent`): amount must be positive; the payout vault must be configured; the content must exist. The fan's NHB balance is debited and the payout vault credited; content `TotalTips`, ledger `TotalTips` and `PendingDistribution` increase by the amount. A creator can receive at most 5 tips per rolling 1-second window (`creator engine: tip rate limit exceeded`). Emits `creator.content.tipped` and `creator.payout.accrued`.
+* **Stake** (`StakeCreator`): amount must be positive; a fan can stake at most `fanStakeEpochCap` = 1,000,000,000,000 base units in any window that starts at its first stake and rolls after 3600 seconds (`creator engine: per-epoch stake cap exceeded`). Shares are minted as described in [`economics.md`](./economics.md). A yield of `deposit * 250 / 10000` (2.5%) is moved from the rewards-treasury account to the payout vault and added to the ledger's `TotalStakingYield` and `PendingDistribution`, only if the treasury account's NHB balance covers it; otherwise the yield is zero and the stake still succeeds. Emits `creator.fan.staked` and, if a yield was paid, `creator.payout.accrued`.
+* **Unstake** (`UnstakeCreator`): the amount is a number of **shares**, not NHB. The NHB paid out is computed from the ledger's assets and shares (see [`economics.md`](./economics.md)). Emits `creator.fan.unstaked` with the assets returned.
+* **Claim** (`ClaimPayouts`): moves `PendingDistribution` from the payout vault to the creator's NHB balance (fails with `creator engine: payout vault underfunded` if the vault is short), zeroes it and sets `LastPayout`. Emits `creator.payout.accrued`.
 
-Every mutation emits an indexed event ready for discovery tooling:
+All amounts are NHB base units (18 decimals).
+
+## Events
+
+Addresses in event attributes are `0x` plus lowercase hex of the 20 address bytes.
 
 | Event | Attributes |
 | --- | --- |
 | `creator.content.published` | `contentId`, `creator`, `uri` |
 | `creator.content.tipped` | `contentId`, `creator`, `fan`, `amount` |
-| `creator.fan.staked` | `creator`, `fan`, `amount`, `shares` |
-| `creator.fan.unstaked` | `creator`, `fan`, `amount` |
+| `creator.fan.staked` | `creator`, `fan`, `amount`, `shares` (the fan's total shares after the stake) |
+| `creator.fan.unstaked` | `creator`, `fan`, `amount` (NHB returned) |
 | `creator.payout.accrued` | `creator`, `pending`, `totalTips`, `totalYield` |
-
-Events are wrapped with the standard `events.Event` interface so `StateProcessor.AppendEvent` receives structured payloads for RPC and archive indexing. Devnet scripts can subscribe to this stream to power the creator studio demo and surface live accrual progress.
-
-## Lifecycle Flow
-
-1. **Publish** – A creator calls `creator_publish` to register a new content ID. The engine normalises the payload, persists the record, and emits `creator.content.published`.
-2. **Tip** – A fan calls `creator_tip` with the published ID and amount. Balances are transferred, content totals incremented, the payout ledger is updated, and twin `creator.content.tipped` / `creator.payout.accrued` events fire.
-3. **Stake** – Supporters lock NHB with `creator_stake`, producing shares and a staking yield bump that is added to `PendingDistribution`. A discovery event highlights the backing and yield change.
-4. **Unstake** – Fans can exit via `creator_unstake`, returning funds and adjusting share counts while emitting `creator.fan.unstaked`.
-5. **Claim** – Creators view or withdraw pending balances through `creator_payouts`, optionally zeroing the pending amount and logging the new ledger snapshot.
-
-This flow is mirrored in the `/examples/creator-studio` Next.js app and the accompanying documentation so operators can experiment end-to-end on devnet.

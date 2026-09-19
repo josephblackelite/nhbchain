@@ -1,440 +1,110 @@
-# NHBChain Loyalty Engine – Developer Guide
+# NHBChain Loyalty Engine: Developer Guide
 
-> Version: v0 (Phase 1–4) • ChainID: **14699254016670310680** • HRPs: **nhb**, **znhb**  
-> Status: **Beta** (APIs stable; subject to additive changes)
+This guide describes the loyalty module as implemented in `native/loyalty`, the transaction handlers in `core/state_transition.go`, the RPC handlers in `rpc/loyalty_handlers.go` and the CLI in `cmd/nhb-cli`. Related pages: [`payouts.md`](./payouts.md) (base reward), [`paymaster.md`](./paymaster.md), [`policy.md`](./policy.md) (daily budget and pro-rating), [`rewards.md`](./rewards.md) (epoch emissions, a separate mechanism).
 
-## Table of Contents
-1. [Overview](#1-overview)
-2. [Concepts & Roles](#2-concepts--roles)
-3. [On-Chain Model](#3-on-chain-model)
-4. [Node JSON-RPC (Loyalty Admin & Read)](#4-node-json-rpc-loyalty-admin--read)
-6. [CLI (`nhb-cli`) Command Reference](#6-cli--nhb-cli-loyalty)
-7. [Events & Analytics](#7-events--analytics)
-8. [Security & Compliance (Regulators--Auditors)](#8-security--compliance-regulators--auditors)
-9. [End-to-End Flows](#9-end-to-end-flows)
-10. [Errors & Troubleshooting](#10-errors--troubleshooting)
-11. [Versioning & Migration](#11-versioning--migration)
-12. [Appendices](#appendices)
-
----
+## 1. Overview
 
-## 1) Overview
-
-The Loyalty Engine grants **ZNHB** rewards to users based on **final settlement** of payments and/or via **business-funded programs**. There is no implicit or “magic” minting in the engine: rewards are **funded from the protocol loyalty treasury and merchant paymasters**, preserving the circulating supply of the reward token and allowing auditors to reconcile balances.
+Loyalty pays **ZNHB** to a user (the spender) when the user pays **NHB**. There are two independent mechanisms, both evaluated by `Engine.OnTransactionSuccess` (`native/loyalty/loyalty.go`):
 
-**Key properties**
+1. **Base reward.** A chain-wide reward funded from the loyalty treasury account configured in the stored `GlobalConfig`.
+2. **Business program reward.** A reward defined by a merchant's program and funded from the paymaster address of the merchant's business.
 
-* **Deterministic:** reward amounts are derived from deterministic calculations performed at escrow release.
-* **Idempotent:** duplicate award submissions with identical settlement identifiers are ignored after the first success.
-* **Composable:** programs can be combined with base network rewards or marketing incentives without double-counting accruals.
-* **Observable:** every action emits an event and can be retrieved from RPC or the Escrow Gateway for analytics tooling.
+**What triggers them.** `OnTransactionSuccess` is called from the state processor after a successful native NHB transfer (`TxTypeTransfer`, both execution paths in `core/state_transition.go`) that has a recipient. The context is: from = the sender, to = the recipient, token `NHB`, amount = the transfer value. Nothing else calls it: escrow releases, POS captures, ZNHB transfers and mints do not trigger loyalty rewards. Both engines require the spend token to be `NHB`; both pay ZNHB.
 
-**Reward triggers**
+The engine is skipped entirely when the `loyalty` module pause flag is set (`nativecommon.Guard`, `[global.Pauses] Loyalty` in `config.toml`).
 
-* **Escrow-linked rewards:** On escrow `release` the engine checks the active programs for the merchant/business and allocates rewards from their paymaster wallets.
-* **Base rewards:** network-wide base reward funded from the protocol loyalty treasury and credited to the **spender** on qualifying NHB commerce payments.
+Every outcome of an evaluation is an event: a success emits `loyalty.base.accrued` / `loyalty.program.accrued`, and every non-qualifying case emits `loyalty.base.skipped` / `loyalty.program.skipped` with a `reason` attribute. Because the engine runs for every qualifying NHB transfer, a transfer whose recipient is not a merchant with a program emits a skip event with reason `program_not_found` (or `program_lookup_error`, `business_not_found`, ...).
 
-**Qualified spend guardrail**
+## 2. Roles and identifiers
 
-Founder mainnet should treat protocol base rewards as a commerce incentive, not a generic transfer rebate.
-In practice that means the reward path is intended for qualifying spend flows such as:
+| Concept | Description |
+|---------|-------------|
+| **Business** | Registered by an owner address (`RegisterBusiness`). ID is a 32-byte value minted from a global counter: the counter, big-endian, in the last 8 bytes (first business is `0x00...01`). You cannot predict your ID; look it up with `loyalty_listBusinesses`. |
+| **Merchant** | An address added to a business. An address can belong to at most one business (`loyalty: merchant already assigned`). A business's owner is not a merchant unless added explicitly. |
+| **Program** | A reward configuration created by a merchant of the business. The 32-byte program ID is chosen by the client. The program's owner is the transaction sender. |
+| **Paymaster** | An address set on the business; its ZNHB balance pays program rewards. Setting it moves no funds. One owner can have a paymaster on only one business at a time (`loyalty: paymaster already assigned`). |
+| **`ROLE_LOYALTY_ADMIN`** | On-chain role (`RoleLoyaltyAdmin`) that may act on any business or program in place of the owner. Granted through the role allowlist governance flow (`config.toml` `AllowedRoles`). |
 
-* POS authorization/capture settlement
-* merchant invoice payment
-* marketplace or escrow settlement to a merchant/payee
-* OTC or approved commerce-tagged settlement flows
+A program pays the merchants' customers: at accrual time the engine finds the recipient of the transfer (the merchant), takes the first program owned by that merchant address (programs indexed by owner, sorted by ID) that is active for the current time, and finds the merchant's business to get the paymaster.
 
-It should not be marketed or interpreted as rewarding arbitrary wallet-to-wallet transfers,
-treasury movements, swap minting, or cash-out/redemption flows.
+## 3. Base reward
 
-**Funding invariants**
+Implemented in `native/loyalty/engine_base.go` (`ApplyBaseReward`). Details: [`payouts.md`](./payouts.md).
 
-* Protocol base rewards move `ZNHB` from the **loyalty treasury → spender**.
-* Merchant bonus rewards move `ZNHB` from the **business paymaster → spender**.
-* Founder mainnet treats `ZNHB` as a fixed-supply asset; ongoing loyalty execution does not depend on post-genesis `ZNHB` minting.
-* Paymaster balances must be topped up by the business before reward execution. Insufficient paymaster balance causes the accrual to be skipped (event) without impacting settlement completion.
+* Pays `amount * baseBps / 10000` ZNHB to the sender, taken from the treasury. `baseBps` defaults to 50 (0.50%) when zero.
+* Clamped by `capPerTx`, `dailyCapUser` (per sender, per UTC day) and `dailyCapCounterparty` (per unordered address pair, per UTC day).
+* Skipped when: the config is inactive, the token is not NHB, sender equals recipient (`self_transfer`), the amount is below `minSpend`, or the treasury holds less than the reward.
+* Configuration is stored on-chain in the `GlobalConfig` record and is written only by the genesis loader (`loyaltyGlobal` in the genesis file). There is no transaction or RPC that changes it after genesis.
 
----
+## 4. Business programs
 
-## 2) Concepts & Roles
+### 4.1 Fields
 
-| Actor / Concept | Description | Keys / IDs |
-|-----------------|-------------|------------|
-| **Business** | An owner address that manages one or more loyalty programs. Responsible for funding paymaster wallets and defining program parameters. | `businessID` (bytes32); owner wallet (Bech32 HRP `nhb`). |
-| **Merchant** | Receiving address associated with a business. Merchants inherit the business’s programs. | `merchantID` (derived from address); registered via RPC or CLI. |
-| **Program** | Reward configuration (basis points, caps, eligibility windows) funded via a business paymaster wallet. | `programID` (bytes32); references paymaster address. |
-| **User** | An address that receives rewards. | Bech32 addresses with HRPs `nhb` or `znhb`. |
-| **Paymaster** | Wallet holding ZNHB reserved for merchant-funded loyalty rewards. | Standard on-chain account managed by the business. |
-| **Roles (on-chain)** | Privileged roles that govern advanced functionality. | `ROLE_ARBITRATOR`, `PAYMASTER`, `MINTER_NHB`. |
+`loyalty.Program` (`native/loyalty/types.go`) and the transaction payload (`loyaltyProgramPayload`):
 
-**Access patterns**
+| Payload field | Program field | Meaning |
+|---------------|---------------|---------|
+| `id` | `ID` | 32-byte hex program ID. Required on create. |
+| `businessId` | | 32-byte hex business ID. Create only. |
+| `pool` | `Pool` | Bech32 address, required, stored and echoed in events. The accrual engine does not read it: rewards are paid from the business paymaster. |
+| `tokenSymbol` | `TokenSymbol` | Must be a registered token; accrual only pays programs whose token is `ZNHB` (otherwise `reward_token_not_supported`). |
+| `rewardMode` | `RewardMode` | `"bps"` (default) or `"fixed"`. |
+| `accrualBps` | `AccrualBps` | Reward = `spend * accrualBps / 10000` in bps mode. Maximum 100000. |
+| `fixedRewardWei` | `FixedRewardWei` | Flat reward per qualifying payment in fixed mode; must be positive in fixed mode. |
+| `minSpendWei` | `MinSpendWei` | Minimum NHB payment that qualifies. |
+| `capPerTx` | `CapPerTx` | Maximum reward for one payment (reward is clamped to it). |
+| `dailyCapUser` | `DailyCapUser` | Maximum reward per sender per UTC day. |
+| `dailyCapProgram` | `DailyCapProgram` | Maximum total reward per UTC day across all senders. |
+| `epochCapProgram`, `epochLengthSeconds` | `EpochCapProgram`, `EpochLengthSeconds` | Maximum total reward per epoch window; `epochLengthSeconds` must be greater than zero when an epoch cap is set. Epoch key = `timestamp / epochLengthSeconds`. |
+| `issuanceCapUser` | `IssuanceCapUser` | Lifetime maximum reward per sender for this program. |
+| `startTime`, `endTime` | `StartTime`, `EndTime` | Unix seconds; `0` means unbounded; `endTime` must not be earlier than `startTime` when set. |
+| `active` | `Active` | Defaults to true when omitted. |
 
-* Administrative RPC calls require transactions from the business owner or delegated admin. Ownership is validated on-chain (no off-chain ACLs).
-* Program updates pause/resume reward accrual for new settlements but do not retroactively adjust previously accrued rewards.
-* Multiple merchants can map to the same business, allowing consolidated program management while supporting per-merchant analytics through metadata fields.
+All amounts are decimal strings in wei (18 decimals); omitted amounts are zero, and zero caps mean "no such cap". There is no `owner`, `includeP2P` or `metadata` field.
 
----
+**Anti-sybil requirement** (`sanitizeProgram`): every create and update is rejected with `loyalty: invalid program` unless `dailyCapProgram` or `epochCapProgram` is greater than zero.
 
-## 3) On-Chain Model
+### 4.2 Accrual order (`ApplyProgramReward`)
 
-### Program Structure
+For each qualifying NHB transfer:
 
-Programs are stored as structured data within the chain’s state. Typical fields:
+1. Resolve the program and business (skip reasons `merchant_missing`, `program_not_found`, `business_not_found`, ...). While scanning the merchant's programs (`LoyaltyProgramsByOwner`), `resolveProgram` passes over any program that is paused or outside `startTime`/`endTime` and uses the first one that is active in the window. If none qualifies, the skip reason is `program_not_found`: a paused, not-yet-started or ended program is reported as `program_not_found`, not as a distinct reason. The reasons `program_inactive`, `not_started` and `program_ended` exist in `ApplyProgramReward` but are only reachable when the caller sets `ProgramRewardContext.ProgramHint`, and nothing outside `native/loyalty/engine_program.go` and its tests sets it, so the transfer path never emits them.
+2. Spend token must be `NHB` (`token_not_supported`); program token must be `ZNHB` (`reward_token_not_supported`); amount at least `minSpendWei` (`below_min_spend`).
+3. Compute the reward: fixed mode uses `fixedRewardWei`; bps mode uses `amount * accrualBps / 10000` (`no_reward_rate` when zero, `reward_zero` when it rounds to zero).
+4. Clamp in this order: `capPerTx`, remaining `dailyCapUser`, remaining `dailyCapProgram`, remaining epoch cap, remaining `issuanceCapUser`. If a remaining allowance is zero the accrual is skipped (`daily_cap_reached`, `daily_program_cap_reached`, `epoch_cap_reached`, `issuance_cap_reached`).
+5. The business must have a paymaster (`paymaster_missing`) whose ZNHB balance covers the reward (`paymaster_insufficient`). See [`paymaster.md`](./paymaster.md) for the reserve check.
+6. The reward moves from the paymaster to the sender, the meters are updated, an accrual record is appended, and `loyalty.program.accrued` is emitted. Settlement of the NHB transfer itself never depends on this outcome.
 
-* `ID` (`bytes32`): unique identifier returned upon creation.
-* `Owner` (`nhb…`): business owner address; must sign admin transactions.
-* `Paymaster` (`nhb…`): address holding ZNHB for merchant-funded rewards.
-* `TokenSymbol` = `"ZNHB"` (fixed for loyalty payouts).
-* `AccrualBps` (`uint32`): basis points applied to eligible settlement amounts (500 = 5%).
-* `MinSpendWei` (`*big.Int`): minimum qualifying spend.
-* `CapPerTx` (`*big.Int`): maximum reward per transaction.
-* `DailyCapUser` (`*big.Int`): maximum reward per user per UTC day.
-* `DailyCapProgram` (`*big.Int`): maximum total reward the program pays out across *all* users per UTC day.
-* `EpochCapProgram` (`*big.Int`) / `EpochLengthSeconds` (`uint64`): maximum total reward per program epoch, and the epoch's length in seconds. `EpochLengthSeconds` is required (>0) whenever `EpochCapProgram` is set.
-* `IssuanceCapUser` (`*big.Int`): maximum reward a single user can ever earn from this program, lifetime.
-* `StartTime`, `EndTime` (`int64`): UNIX timestamps bounding program validity.
-* `Active` (`bool`): indicates whether accrual logic executes.
-* `includeP2P` (`bool`): include P2P escrow releases; default `false`.
-* `metadata` (`map[string]string`): optional key/value data surfaced via analytics.
+Program rewards are credited immediately; they do not go through the pro-rating queue.
 
-**Anti-sybil requirement**: `CreateProgram`/`UpdateProgram` reject any program where both `DailyCapProgram` and `EpochCapProgram` are unset/zero (`ErrInvalidProgram`). A per-user cap alone doesn't bound total payout -- an attacker can split spend across any number of self-controlled wallets, each staying under the per-user cap, to draw an unbounded multiple of it from the same merchant's paymaster. At least one program-wide ceiling must always be in place, regardless of how many distinct addresses participate.
+Meters (`core/state`, keyed by program): per-sender per-day total, program per-day total, per-day accrual count, program per-epoch total, per-sender lifetime total, program lifetime total, and a per-day list of accrual records.
 
-### Global base reward
-
-The chain stores a single `loyalty.GlobalConfig` record that governs the optional
-network-wide base reward. Operators can toggle or tune it through governance:
-
-* `Active` (`bool`): when `false`, base rewards are skipped entirely.
-* `Treasury` (`[20]byte`): address that funds base payouts.
-* `BaseBps` (`uint32`): founder default is **50 bps (0.50%)**, paying 0.5 ZNHB for every 100 NHB of qualifying spend.
-* `MinSpend`, `CapPerTx`, `DailyCapUser` (`*big.Int`): caps expressed in wei (18 decimal places).
-* `DailyCapCounterparty` (`*big.Int`, wei): anti-wash-trading control. Bounds how much base reward can
-  accrue in one UTC day between one specific pair of addresses, regardless of which side sends --
-  A→B and B→A share the same budget. Genuine commerce naturally spreads across many distinct
-  counterparties (a merchant with many customers); two wallets cycling funds back and forth to farm
-  rewards do not. Set to `0` to disable (matches pre-existing behavior). Configured at genesis via
-  `LoyaltyGlobalSpec.dailyCapCounterparty` alongside the other caps above; there is no runtime RPC to
-  change it.
+## 5. Transactions
 
-With the default 50 bps rate, a settlement of `100 NHB` (`100 * 10^18` wei) accrues
-`0.5 ZNHB` (`0.5 * 10^18` wei) to the **spender** so long as the treasury holds enough balance and the
-per-transaction, daily, and counterparty-pair caps permit it.
+Administration is done with signed native transactions submitted through `nhb_sendTransaction`. The loyalty write RPC methods (`loyalty_createBusiness`, `loyalty_setPaymaster`, `loyalty_addMerchant`, `loyalty_removeMerchant`, `loyalty_createProgram`, `loyalty_updateProgram`, `loyalty_pauseProgram`, `loyalty_resumeProgram`) are disabled and return HTTP 410 with code `-32060` (`loyaltyRPCDisabledMessage`). The transaction sender is the acting party; there are no `caller` or `owner` payload fields. `tx.Data` is JSON (RLP also accepted, `decodeCreateEscrowPayload`). Transactions return no result; read the outcome with the read methods or the events.
 
-Founder mainnet treats `ZNHB` as fixed-supply in practice:
+| Type | Value | `tx.Data` | Authorization |
+|------|-------|-----------|---------------|
+| `TxTypeCreateLoyaltyBusiness` | `0x42` | `{"name": "..."}` | Anyone; the sender becomes the owner. Name must not be empty. Subject to the `loyalty` quota. |
+| `TxTypeLoyaltySetPaymaster` | `0x43` | `{"businessId": "0x...", "paymaster": "nhb1..."}` (omit `paymaster` to clear) | Business owner or `ROLE_LOYALTY_ADMIN`. Emits `loyalty.paymaster.rotated`. |
+| `TxTypeLoyaltyAddMerchant` | `0x44` | `{"businessId": "0x...", "merchant": "nhb1..."}` | Business owner or `ROLE_LOYALTY_ADMIN` (checked by the handler). |
+| `TxTypeLoyaltyRemoveMerchant` | `0x45` | same | same; fails with `loyalty: merchant not found` if the address is not a merchant of that business. |
+| `TxTypeCreateLoyaltyProgram` | `0x46` | program payload (section 4.1) | Sender must be a merchant of `businessId` or hold `ROLE_LOYALTY_ADMIN`. The sender becomes the program owner. Subject to the `loyalty` quota. Emits `loyalty.program.created`. |
+| `TxTypeUpdateLoyaltyProgram` | `0x47` | program payload; `id` required | Existing program's owner or `ROLE_LOYALTY_ADMIN`. Full replace of the mutable fields; `id` and owner cannot change. Emits `loyalty.program.updated`. |
+| `TxTypePauseLoyaltyProgram` | `0x48` | `{"id": "0x..."}` | Program owner or `ROLE_LOYALTY_ADMIN`. Idempotent. Emits `loyalty.program.paused` when the state changes. |
+| `TxTypeResumeLoyaltyProgram` | `0x49` | `{"id": "0x..."}` | same; emits `loyalty.program.resumed`. |
 
-* the full founder reserve is preallocated at genesis
-* protocol loyalty draws from the configured treasury wallet
-* merchant bonus rewards draw from business paymasters
-* routine founder-mainnet loyalty does not depend on post-genesis `ZNHB` minting
+Removing a merchant stops future accruals through that merchant; rewards already paid are not reversed.
 
-### Deterministic meters
-
-Meters are ledger entries that enforce daily caps and provide fast analytics queries:
-
-* Key format: `loyalty/meter/<programID>/<user>/<YYYYMMDD>` → `*big.Int` (total accrued reward for that day).
-* Resets automatically on UTC day rollover. Cap checks read the meter before writing.
-* Meter updates are atomic with reward transfers to avoid race conditions.
-
-### Settlement hooks
-
-Escrow release triggers loyalty accruals via a module hook that receives:
-
-```
-struct SettlementContext {
-  escrowID     [32]byte
-  businessID   [32]byte
-  merchant     [20]byte
-  payer        [20]byte
-  payee        [20]byte
-  token        string
-  amount       *big.Int
-  txHash       [32]byte
-  metadata     map[string]string
-}
-```
-
-The loyalty module evaluates active programs for `businessID`, filters by `token` and thresholds, computes rewards, debits paymaster pools, and emits `loyalty.program.accrued` events per user.
-
----
-
-## 4) Loyalty Admin Transactions & Node JSON-RPC (Read)
-
-**Write operations are real, directly-signed on-chain transactions, not JSON-RPC calls.** This is a change from an earlier design: the `loyalty_createBusiness`/`setPaymaster`/`addMerchant`/`removeMerchant`/`createProgram`/`updateProgram`/`pauseProgram`/`resumeProgram` RPC methods described in older revisions of this document are **permanently disabled** (`HTTP 410`, `rpc/loyalty_handlers.go`'s `loyaltyRPCDisabledMessage`) — they used to mutate validator state directly outside the block/consensus pipeline, a guaranteed-fork bug on this chain's 2-validator, zero-quorum-slack topology, fixed 2026-09-04. Every admin action below is now a signed `Transaction` submitted through the ordinary broadcast RPC (`nhb_sendTransaction`), exactly like a transfer or any other native transaction — build it, sign it with the invoking wallet's key, submit it, and (since a transaction has no synchronous return value the way an RPC call did) look up the result afterward via the read methods in the next subsection. There is no `loyalty-gateway` relayer service; unlike escrow, every operation here has exactly one authorizing party, so there's nothing for a relayer to reconcile — the wallet that authorizes an action is the wallet that submits it.
-
-Read operations (business/program lookups, meters) are unaffected and remain ordinary JSON-RPC calls at the node endpoint (default `http://127.0.0.1:8545`), free, via HTTP POST or WebSocket depending on node configuration.
-
-### Authentication & Authorization
-
-* **Authentication:** the transaction's own signature — the node recovers the signer and checks it against the required authority (business/program owner, or an address holding the `ROLE_LOYALTY_ADMIN` role as an operator-granted override) as part of applying the transaction, the same way any other module's authorization check works.
-* **Nonce management:** fetch the account's current nonce before building a transaction, same as any other native transaction.
-* **Gas / Fees:** native transactions on this chain are fee-free by design (`GasLimit`/`GasPrice` only affect mempool tie-breaking, never charged against the sender) — anti-spam is handled by the per-sender request-rate quota described below, not by fees.
-* **Rate limiting:** `TxTypeCreateLoyaltyBusiness`/`CreateLoyaltyProgram` (the two operations that mint a new ID) are gated by `native/common`'s quota mechanism (`config.toml`'s `[global.Quotas.Loyalty]`, currently a generous 6000 requests/min per sender). The other six operations below are deliberately left unquota-gated — each is an already-verified owner/admin acting on a single resource they already control, not a new-ID-minting action a spam quota needs to bound.
-
-### Admin (write — signed transactions, `core/types/transaction.go`)
-
-#### `TxTypeCreateLoyaltyBusiness` (`0x42`)
-* `tx.Data` (JSON): `{ "name": "<business name>" }`.
-* The transaction **sender becomes the business owner** — there is no `owner` payload field to set it to anyone else; this closes a spoofing surface the old RPC's plaintext `owner`/`caller` fields had.
-* **Returns:** nothing synchronous. `RegisterBusiness` emits no event; discover the assigned `businessID` afterward via `loyalty_listBusinesses` (below), keyed by the sender's own address.
-* **Errors:** empty/whitespace-only `name` is rejected.
-
-#### `TxTypeLoyaltySetPaymaster` (`0x43`)
-* `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "paymaster": "nhb1..." }` — omit/empty `paymaster` to clear it.
-* Rotates the paymaster address used to fund all programs under the business. **This transaction only points the business at an address — it moves no funds.** Actually funding that paymaster is a separate, ordinary NHB/ZNHB transfer to it.
-* Emits `loyalty.paymaster.rotated`.
-* **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — enforced inside `native/loyalty`'s `SetPaymaster` itself.
-
-#### `TxTypeLoyaltyAddMerchant` (`0x44`) / `TxTypeLoyaltyRemoveMerchant` (`0x45`)
-* `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "merchant": "nhb1..." }`.
-* Adds or removes a merchant address from a business. Merchants inherit all active programs instantly; removing one stops future accruals but does not claw back rewards already paid.
-* **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — unlike every other operation on this list, `native/loyalty`'s underlying `AddMerchantAddress`/`RemoveMerchantAddress` methods perform **no authorization check of their own** (a real gap found while building this), so this check is enforced entirely by the transaction-dispatch layer (`core/state_transition.go`'s `applyLoyaltyAddMerchant`/`applyLoyaltyRemoveMerchant`) before either method is ever called.
-
-#### `TxTypeCreateLoyaltyProgram` (`0x46`)
-* `tx.Data` (JSON) includes all fields described in [On-Chain Model](#3-on-chain-model) (`businessId`, `id` — client-generated 32-byte hex, `pool`, `tokenSymbol`, `rewardMode`, `accrualBps`, `fixedRewardWei`, the cap/timing fields, `active`).
-* The transaction **sender becomes the program owner** — there is no `owner` payload field.
-* **Checks:** the sender must already be a registered merchant of the named business (added via `TxTypeLoyaltyAddMerchant` — a business's own owner is *not* automatically its own merchant, matching the pre-existing semantics exactly) or hold `ROLE_LOYALTY_ADMIN`.
-* **Validation** (unchanged, enforced inside `native/loyalty`'s `sanitizeProgram`/`CreateProgram`): token symbol must be a registered token, `accrualBps <= 100000`, time windows valid, all caps non-negative, and **at least one of `dailyCapProgram`/`epochCapProgram` must be greater than zero** — a program with only per-user caps is rejected, since per-user caps alone don't bound total payout exposure against an attacker splitting spend across many wallets.
-* **Returns:** nothing synchronous; look up the program afterward via `loyalty_listPrograms`/a known `id`.
-
-#### `TxTypeUpdateLoyaltyProgram` (`0x47`)
-* `tx.Data` (JSON): same shape as create, minus `businessId` and `owner` (both are resolved from the existing on-chain record, never from the payload — `id`/`owner` can never change via this transaction, even if included).
-* **Full replace, not a partial patch** — every mutable field is overwritten from the payload on every call; resend the complete desired program state, not just what's changing.
-* **Checks:** sender must be the *existing* program's owner (loaded from state, never trusted from the payload) or hold `ROLE_LOYALTY_ADMIN`.
-
-#### `TxTypePauseLoyaltyProgram` (`0x48`) / `TxTypeResumeLoyaltyProgram` (`0x49`)
-* `tx.Data` (JSON): `{ "id": "0x<64 hex>" }`.
-* Toggles the `Active` flag. Paused programs skip accruals but keep their meters for historical reference. Idempotent — pausing an already-paused program (or resuming an already-active one) is a no-op, not an error.
-* Emits `loyalty.program.paused`/`loyalty.program.resumed`.
-* **Checks:** sender must be the program owner or hold `ROLE_LOYALTY_ADMIN`.
-
-### Read (dashboard — still ordinary JSON-RPC)
-
-#### `loyalty_getBusiness(businessID)`
-* Returns business metadata, current paymaster, and merchant list.
-
-#### `loyalty_listBusinesses(ownerBech32)`
-* Returns every `businessID` the given address owns, in deterministic order. This is the only way to discover the ID a `TxTypeCreateLoyaltyBusiness` transaction was just assigned, since transactions carry no synchronous return value the way the old RPC's response did.
-
-#### `loyalty_listPrograms(businessID)`
-* Returns an array of active and inactive programs.
-* Supports optional pagination parameters: `offset`, `limit` when provided via named params.
-
-#### `loyalty_programStats(programID, dayUTC) -> { rewardsPaid, txCount, capUsage }`
-* Returns real, on-chain meter data for the given program and UTC day (`YYYY-MM-DD`). `programID` must reference an existing program (`-32602 "program not found"` otherwise).
-* **`rewardsPaid`** (`string`, wei): the program's total ZNHB rewards paid out across *all* users on that UTC day. Sourced from an always-on per-program daily meter that `ApplyProgramReward` (`native/loyalty/engine_program.go`) writes on every successful accrual, regardless of whether the program has any cap configured.
-* **`txCount`** (`string`, integer): the number of successful accrual events (reward payouts) for the program on that day. Written alongside `rewardsPaid` by the same code path; not affected by `loyalty.program.skipped` events (skips are not counted).
-* **`capUsage`** (`string` or `null`): `rewardsPaid / DailyCapProgram`, formatted as a decimal fraction to 4 places (e.g. `"0.2500"` = 25% of the daily cap used). Returned as JSON `null` when the program has **no configured `DailyCapProgram`** (there is no denominator to divide by) -- this is deliberately distinct from `"0.0000"`, which means a *capped* program with genuinely zero usage that day. A program can have `EpochCapProgram` set without `DailyCapProgram`; `capUsage` does not reflect epoch-cap usage, since epoch windows aren't guaranteed to align with UTC day boundaries.
-* **Known limitation:** `rewardsPaid`/`txCount` are only as complete as the on-chain meter history. Any UTC day that predates this method's real implementation (previously a stub returning hardcoded zeros, and before that the underlying per-program daily-total meter was only written for programs with a configured `DailyCapProgram`) will read back as `"0"`/`"0"` even if real rewards were paid that day -- indistinguishable from genuine zero activity. This cannot be backfilled retroactively from state alone; only days observed after the fix was deployed have complete data.
-
-#### `loyalty_userDaily(userBech32, programID, dayUTC)`
-* Returns user-specific meter details for compliance or customer support.
-
-#### `loyalty_paymasterBalance(businessID)`
-* Returns the ZNHB balance of the current paymaster pool and reserved amounts (pending awards).
-
-**JSON-RPC cURL example**
-
-```bash
-curl -s http://127.0.0.1:8545 -H 'Content-Type: application/json' -d '{
-  "jsonrpc":"2.0",
-  "id":1,
-  "method":"loyalty_listPrograms",
-  "params":["0x<businessID>"]
-}'
-```
-
----
-
-## 6) CLI – `nhb-cli` (loyalty)
-
-The `nhb-cli` binary ships with subcommands to manage loyalty constructs. The 8 write subcommands below each build, sign (with a local key file, positioned as the *last* argument, matching every other signed-tx command in the CLI, e.g. `un-stake`/`heartbeat`/`deploy`), and broadcast the corresponding real `TxTypeX` transaction from §4 above -- there is no `<caller>`/`<owner>` address argument on any of them anymore, since the signing key's own address *is* the caller, cryptographically, not a trusted string. `loyalty-create-business` no longer prints a synchronous business ID (transactions don't return one) -- use the new `loyalty-list-businesses <owner>` read command afterward to find it. `loyalty-create-program` auto-generates a random 32-byte `id` if the given spec JSON omits one.
-
-```bash
-# Create business -- signing key's address becomes the owner
-nhb-cli loyalty-create-business "Zenith Hotels" wallet.key
-
-# Find the businessId a create-business transaction was just assigned
-nhb-cli loyalty-list-businesses nhb1...
-
-# Set paymaster
-nhb-cli loyalty-set-paymaster 0x<businessId> nhb1<paymaster> wallet.key
-
-# Add / remove merchant
-nhb-cli loyalty-add-merchant 0x<businessId> nhb1<merchant> wallet.key
-nhb-cli loyalty-remove-merchant 0x<businessId> nhb1<merchant> wallet.key
-
-# Create program -- signing key must already be a registered merchant of businessId
-nhb-cli loyalty-create-program 0x<businessId> '{"...program spec JSON..."}' wallet.key
-
-# Update program (full replace, not partial -- see §4; spec JSON must include "id")
-nhb-cli loyalty-update-program '{"id":"0x...","...program spec JSON..."}' wallet.key
-
-# Pause / Resume
-nhb-cli loyalty-pause-program 0x<programId> wallet.key
-nhb-cli loyalty-resume-program 0x<programId> wallet.key
-
-# Stats -- read-only, works
-nhb-cli loyalty-program-stats 0x... 2025-09-22
-
-# User meter lookup -- read-only, works
-nhb-cli loyalty-user-daily nhb1... 0x... 2025-09-22
-```
-
-**CLI configuration tips**
-
-* Use `--rpc http://127.0.0.1:8545` to override default RPC URL.
-* Combine with `jq` to parse JSON output for automation pipelines.
-
----
-
-## 7) Events & Analytics
-
-Events are emitted both on-chain and via the Escrow Gateway for downstream ingestion.
-
-| Event | Description | Payload fields |
-|-------|-------------|----------------|
-| `loyalty.program.accrued` | Program-funded reward successfully applied to a user. | `{ program, user, merchant, token, amount, bps, escrowId, txHash }` |
-| `loyalty.program.skipped` | Program-funded reward skipped due to validation failure or insufficient funds. | `{ program, user, reason, ctx }` |
-| `loyalty.base.accrued` | Base (protocol treasury) reward successfully applied to a spender. | `{ user, token, amount, txHash }` |
-| `loyalty.base.skipped` | Base reward skipped due to validation failure or insufficient funds. | `{ user, reason, ctx }` |
-| `loyalty.program.paused` / `loyalty.program.resumed` | Program state toggled. | `{ program, actor, timestamp }` |
-| `loyalty.paymaster.rotated` | Paymaster changed for a business. | `{ business, old, new, actor }` |
-
-**Analytics guidance**
-
-* Subscribe to events via node WebSocket or replicate using the indexer service.
-* Correlate `escrowId` with settlement records to compute blended take rates.
-* Use meters in combination with events to reconcile totals (events provide context, meters provide authoritative counts).
-
----
-
-## 8) Security & Compliance (Regulators / Auditors)
-
-### Authentication
-
-* **Node access:** requires wallet signatures. Private keys must be stored in secure keystores (HSM, KMS, or encrypted files). Avoid exporting raw keys.
-* **Gateway access:** API Key + HMAC. Rotate API keys quarterly or upon personnel changes. Use TLS 1.2+ and enforce IP allow-lists for production.
-* **Wallet signatures for privileged REST endpoints:** Use EIP-191 style signing, ensuring the `timestamp` and request body are included in the signed payload to prevent replay.
-
-### Authorization
-
-* Business owners may delegate admin privileges via on-chain role assignments (future additive feature). Until then, use multisig or KMS-managed keys to enforce dual control.
-* Arbitrator and paymaster roles are set by governance. Ensure separation of duties: arbitrators should not control paymaster funds.
-
-### Determinism & Accounting Controls
-
-* All reward computations use fixed-point math via `big.Int`. Avoid floating-point operations in client code.
-* Programs cannot overdraft paymaster pools. When funds are insufficient, the accrual is skipped and flagged. Businesses should monitor balances via `loyalty_paymasterBalance`.
-* Daily and per-transaction caps are enforced at the time of accrual; updates to caps affect only future accruals.
-
-### Audit & Retention
-
-* Escrow Gateway maintains an append-only audit log with request hash, actor, RPC response, and blockchain transaction hash.
-* Retain logs for a minimum of **7 years** or as required by jurisdictional regulations.
-* Provide auditors with read-only API keys or offline exports from RPC and gateway logs. Use hashed identifiers when sharing user-level data.
-
-### Privacy & Data Handling
-
-* Do not persist raw PII outside secure, access-controlled systems.
-
-### Compliance Checklist
-
-* ✅ API key rotation policy defined and documented.
-* ✅ Dual control for paymaster funding (multisig or approval workflow).
-* ✅ Monitoring alerts for low paymaster balance and high skip rates.
-* ✅ Periodic reconciliation between on-chain events, meters, and accounting ledgers.
-* ✅ Incident response playbook for compromised keys or suspicious award activity.
-
----
-
-## 9) End-to-End Flows
-
-### Business Program Setup & Settlement
-
-1. **Create business** using RPC or CLI. Record `businessID`.
-2. **Assign paymaster** wallet funded with ZNHB.
-3. **Add merchants** that process transactions for the business.
-4. **Create program** defining accrual rate and caps.
-5. **Fund paymaster** periodically (`wallet send` or bridging). Ensure buffer covers expected rewards.
-6. **Escrow release** occurs → loyalty engine evaluates and transfers rewards.
-7. **Event handling:** `loyalty.program.accrued` event notifies downstream systems.
-8. **Reporting:** Use `loyalty_programStats` and `loyalty_userDaily` to reconcile payouts.
-
-### Automation example (CLI)
-
-```bash
-# Query program stats for daily reconciliation
-nhb-cli loyalty-program-stats 0x... $(date -u +%Y-%m-%d)
-```
-
----
-
-## 10) Errors & Troubleshooting
-
-### JSON-RPC error codes
-
-Loyalty RPC handlers return standard numeric JSON-RPC error codes paired with a plain-English message, not string error codes:
-
-| Code | Description | Recommended action |
-|------|-------------|--------------------|
-| `-32602` (invalid params) | Malformed or invalid request parameters, e.g. `"invalid caller address"`, `"invalid businessId"`, `"business not found"`. | Check the message text and correct the request. |
-| `-32001` (unauthorized) | Caller lacks required role or ownership, e.g. `"caller not authorized"`. | Sign the transaction with the business owner wallet or a `ROLE_LOYALTY_ADMIN` holder. |
-| `-32000` (server error) | Internal failure loading state (business, account, meters, programs). | Retry; if persistent, contact node operator. |
-
-### Troubleshooting checklist
-
-* **High skip rate:** monitor `loyalty.program.skipped` / `loyalty.base.skipped` events; inspect the `reason` field for patterns (caps, balance, inactive program).
-* **Program not applying to merchant:** verify merchant is registered to the business and program `StartTime/EndTime` encompasses settlement timestamp.
-* **Module paused:** run `go run ./examples/docs/ops/read_pauses` to confirm the loyalty flag is `false`; resume with `go run ./examples/docs/ops/pause_toggle --module loyalty --state resume` when cleared by governance.
-* **Cap rejections:** inspect the program meters via `loyalty_programStats` to see `capUsage` and compare against configured per-transaction / daily caps before retrying. `capUsage` is `null` for programs without a configured `DailyCapProgram` -- see [Section 4](#4-node-json-rpc-loyalty-admin--read) for the full field contract.
-
----
-
-## 11) Versioning & Migration
-
-* This documentation covers **Phase 1–4** features. Future phases will add additive fields/endpoints while preserving backward compatibility.
-* All changes will be tracked in `docs/CHANGELOG.md` (forthcoming). Subscribe to release notes to keep client integrations up to date.
-* Migration best practices:
-  * Test new program configurations on **devnet (ChainID 187001)** before mainnet.
-  * Use feature flags in client applications to gradually roll out new program logic.
-  * Maintain compatibility tests that validate RPC and REST schemas using golden fixtures.
-
----
-
-## Appendices
-
-### Appendix A – HMAC Example (Pseudo)
-
-```
-data = method + "|" + path + "|" + body + "|" + timestamp
-sig  = hex( HMAC_SHA256(secret_for_api_key, data) )
-```
-
-* Ensure `body` is the exact raw JSON string sent over the wire.
-* When `body` is empty (e.g., GET requests), use an empty string between separators.
-
-### Appendix B – Wallet Signature (EIP-191 style)
-
-```
-message = keccak256(method|path|body|timestamp|id)
-sig     = wallet.sign(message)
-headers = {
-  "X-Sig-Addr": "nhb1...",
-  "X-Sig": sig,
-  "X-Timestamp": timestamp
-}
-```
-
-* Use `id` = `Idempotency-Key` to bind the signature to a unique request instance.
-* Verify signatures server-side using `recoverAddress` to ensure caller authorization.
-
----
-
-### Appendix C – Sample Program Spec
+### Sample create-program payload
 
 ```json
 {
+  "businessId": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "id": "0x<64 hex characters chosen by the client>",
+  "pool": "nhb1...",
   "tokenSymbol": "ZNHB",
+  "rewardMode": "bps",
   "accrualBps": 500,
   "minSpendWei": "100000000000000000",
   "capPerTx": "5000000000000000000",
@@ -442,12 +112,88 @@ headers = {
   "dailyCapProgram": "500000000000000000000",
   "startTime": 1730400000,
   "endTime": 1762032000,
-  "includeP2P": false,
-  "metadata": {
-    "tier": "gold",
-    "region": "NA"
-  }
+  "active": true
 }
 ```
 
----
+## 6. Read RPC methods
+
+Requests use one parameter object: `{"jsonrpc":"2.0","id":1,"method":"loyalty_listPrograms","params":[{"businessId":"0x..."}]}`. None of these methods require authentication. IDs are 32-byte hex, with or without `0x`.
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `loyalty_getBusiness` | `{"businessId"}` | `{id, owner, name, paymaster, merchants[]}` (addresses bech32; `paymaster` empty when unset). |
+| `loyalty_listBusinesses` | `{"owner": "nhb1..."}` | Array of business objects owned by the address, sorted by ID. |
+| `loyalty_listPrograms` | `{"businessId"}` | Programs owned by the business's merchants, sorted by ID: `id, owner, pool, tokenSymbol, rewardMode, accrualBps, fixedRewardWei, minSpendWei, capPerTx, dailyCapUser, dailyCapProgram, epochCapProgram, epochLengthSeconds, issuanceCapUser, startTime, endTime, active`. No pagination parameters. |
+| `loyalty_programStats` | `{"programId", "day"}` (`day` = `YYYY-MM-DD`, UTC) | `{rewardsPaid, txCount, capUsage, lifetimeRewardsPaid}`, all strings. `rewardsPaid` is the program's total for that day; `txCount` counts accruals that day; `capUsage` is `rewardsPaid / dailyCapProgram` to 4 decimals, or `null` when the program has no `dailyCapProgram`; `lifetimeRewardsPaid` is the never-reset total. Unknown program: HTTP 404 with code `-32602`, message `program not found`. Days recorded before these meters were always written read as `"0"`. |
+| `loyalty_listAccruals` | `{"programId", "day"}` | Array of `{programId, address, amount, kind, txHash, timestamp}`, one per accrual that day. |
+| `loyalty_userDaily` | `{"user": "nhb1...", "programId", "day"}` | Decimal string: what the user accrued from the program that day. |
+| `loyalty_paymasterBalance` | `{"businessId"}` | Decimal string: the paymaster address's ZNHB balance, `"0"` if none is set. |
+| `loyalty_resolveUsername` | `{"username"}` | Bech32 address; HTTP 404 with `-32602` when unknown. |
+| `loyalty_userQR` | `{"address"}` or `{"username"}` | `{"address": "nhb1...", "payload": "nhb:nhb1..."}`. |
+
+Error codes: `-32602` for invalid or unknown inputs (including 404 "business not found"), `-32000` for internal failures, `-32060` for the disabled write methods.
+
+## 7. CLI
+
+`nhb-cli` (`cmd/nhb-cli/main.go`). The RPC endpoint defaults to `http://localhost:8080`, or the `RPC_URL` environment variable, or the `--rpc <url>` flag. Write commands sign with the key file given as the **last** argument; there is no caller or owner argument.
+
+```bash
+nhb-cli loyalty-create-business <name> <key_file>
+nhb-cli loyalty-list-businesses <owner>                       # find the assigned businessId
+nhb-cli loyalty-set-paymaster <businessId> <paymaster> <key_file>
+nhb-cli loyalty-add-merchant <businessId> <merchant> <key_file>
+nhb-cli loyalty-remove-merchant <businessId> <merchant> <key_file>
+nhb-cli loyalty-create-program <businessId> '<programSpecJSON>' <key_file>   # generates "id" if the spec has none
+nhb-cli loyalty-update-program '<programSpecJSON with "id">' <key_file>       # full replace
+nhb-cli loyalty-pause-program <programId> <key_file>
+nhb-cli loyalty-resume-program <programId> <key_file>
+nhb-cli loyalty-get-business <businessId>
+nhb-cli loyalty-list-programs <businessId>
+nhb-cli loyalty-program-stats <programId> <day>
+nhb-cli loyalty-user-daily <user> <programId> <day>
+nhb-cli loyalty-paymaster-balance <businessId>
+nhb-cli loyalty-resolve-username <username>
+nhb-cli loyalty-user-qr <username|address> <value>
+```
+
+Transactions are sent with gas limit 50000 and gas price 1.
+
+## 8. Events
+
+Attribute values are strings. Addresses in events are lowercase hex without `0x`.
+
+| Event | Attributes |
+|-------|------------|
+| `loyalty.program.created` | `id`, `owner`, `pool`, `tokenSymbol`, `accrualBps`, `rewardMode` (0 = bps, 1 = fixed), `fixedRewardWei` |
+| `loyalty.program.updated` | `id`, `active`, `accrualBps`, `rewardMode`, `fixedRewardWei`, `minSpendWei`, `capPerTx`, `dailyCapUser`, `dailyCapProgram`, `epochCapProgram`, `epochLengthSeconds`, `issuanceCapUser`, `startTime`, `endTime`, `pool`, `tokenSymbol` |
+| `loyalty.program.paused`, `loyalty.program.resumed` | `id`, `owner`, `caller` |
+| `loyalty.paymaster.rotated` | `businessId`, `owner`, `caller`, `oldPaymaster`, `newPaymaster` |
+| `loyalty.program.accrued` | `day`, `token`, `amount`, `from`, `to`, `programId`, `rewardMode`, `accrualBps` (bps mode) or `fixedRewardWei` (fixed mode), `rewardToken`, `programOwner`, `paymaster`, `merchant`, `reward` |
+| `loyalty.program.skipped` | the same attributes as `accrued` where known, plus `reason` and reason-specific extras (for example `dailyCap`, `available`) |
+| `loyalty.program.paymaster_warning` | program attributes plus `balance`, `reserveMin` (see [`paymaster.md`](./paymaster.md)) |
+| `loyalty.base.accrued` | `day`, `token`, `amount`, `from`, `to`, `reward`, `baseBps` |
+| `loyalty.base.skipped` | `day`, `token`, `amount`, `from`, `to`, `reason`, plus extras |
+| `loyalty.reward.proposed` | `tx_hash`, `amount` (base reward queued) |
+| `loyalty.budget.prorated`, `loyalty.price.fallback`, `loyalty.smoothing.tick` | see [`policy.md`](./policy.md) |
+
+`RegisterBusiness` and `AddMerchantAddress`/`RemoveMerchantAddress` emit no event.
+
+Events are held by the node for the block that produced them and are not a persistent store. The durable record is the accrual index behind `loyalty_listAccruals` and the meters behind `loyalty_programStats` and `loyalty_userDaily`.
+
+## 9. Configuration and limits
+
+* **Pause:** `[global.Pauses] Loyalty` (`config.toml`).
+* **Quota:** `[global.Quotas.Loyalty]` (`MaxRequestsPerMin`; the sample `config.toml` sets 6000) gates `TxTypeCreateLoyaltyBusiness` and `TxTypeCreateLoyaltyProgram` only. The other loyalty transactions are not quota-gated.
+* **Base reward and dynamic policy:** see [`payouts.md`](./payouts.md) and [`policy.md`](./policy.md).
+* **Governance:** the parameters `loyalty.dynamic.*` are accepted governance parameter names (`native/governance`); see [`policy.md`](./policy.md) for what actually reads the loyalty configuration at run time.
+
+## 10. Errors
+
+Registry errors (`native/loyalty/errors.go`) appear as transaction failures: `loyalty: unauthorized`, `loyalty: program already exists`, `loyalty: program not found`, `loyalty: invalid program`, `loyalty: immutable field`, `loyalty: token not registered`, `loyalty: accrual bps too high`, `loyalty: business not found`, `loyalty: invalid business`, `loyalty: paymaster already assigned`, `loyalty: merchant already assigned`, `loyalty: merchant not found`. Handler-level failures use messages such as `loyaltyCreateProgram: unauthorized: caller is not a registered merchant of the business and lacks ROLE_LOYALTY_ADMIN`.
+
+**Troubleshooting**
+
+* Program does not apply: check that the merchant address (the transfer recipient) is a merchant of the business, owns an active program inside its `startTime`/`endTime`, and that the business has a paymaster with a sufficient ZNHB balance. Only the first eligible program of a merchant is evaluated.
+* Look at `loyalty.program.skipped` / `loyalty.base.skipped` events and their `reason`. A program that is paused or outside its `startTime`/`endTime` window shows up as `program_not_found`.
+* Module paused: `go run ./examples/docs/ops/read_pauses` shows the pause flags.
