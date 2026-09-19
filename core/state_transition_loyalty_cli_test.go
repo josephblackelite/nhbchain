@@ -98,6 +98,26 @@ func TestLoyaltyCLIPayloadsRoundTripThroughApplyTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal set-paymaster payload: %v", err)
 	}
+	// The paymaster address must opt in with its own signed transaction
+	// before the owner can name it.
+	var paymasterAccountAddr [20]byte
+	copy(paymasterAccountAddr[:], paymasterAddr.Bytes())
+	writeAccount(t, sp, paymasterAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	optIn := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeLoyaltySetPaymaster,
+		Nonce:    0,
+		Data:     data,
+		Value:    big.NewInt(0),
+		GasLimit: 50000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := optIn.Sign(paymasterKey.PrivateKey); err != nil {
+		t.Fatalf("sign paymaster opt-in: %v", err)
+	}
+	if err := sp.ApplyTransaction(optIn); err != nil {
+		t.Fatalf("paymaster opt-in: %v", err)
+	}
 	send(types.TxTypeLoyaltySetPaymaster, data)
 
 	business, ok, err = sp.LoyaltyBusinessByID(businessID)
