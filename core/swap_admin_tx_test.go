@@ -96,6 +96,20 @@ func buildSwapAdminTestNode(t *testing.T, genesisPath string) *Node {
 	return node
 }
 
+// seedZNHBAccountBalance funds addr's real account balance -- the balance a
+// minted voucher credits and a reversal debits.
+func seedZNHBAccountBalance(manager *nhbstate.Manager, addr [20]byte, amount *big.Int) error {
+	return manager.PutAccount(addr[:], &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: new(big.Int).Set(amount), Stake: big.NewInt(0)})
+}
+
+func znhbAccountBalance(manager *nhbstate.Manager, addr [20]byte) (*big.Int, error) {
+	acc, err := manager.GetAccount(addr[:])
+	if err != nil {
+		return nil, err
+	}
+	return acc.BalanceZNHB, nil
+}
+
 // seedSwapAdminVoucher performs the identical, deterministic sequence of
 // direct trie writes needed to exercise a reversal/reconciliation: register
 // ZNHB, grant RoleSwapAdmin to adminAddr, record a minted voucher, and fund
@@ -130,7 +144,7 @@ func seedSwapAdminVoucher(t *testing.T, node *Node, adminAddr, recipient [20]byt
 	if err := ledger.Put(record); err != nil {
 		t.Fatalf("seed voucher record: %v", err)
 	}
-	if err := manager.SetBalance(recipient[:], "ZNHB", new(big.Int).Set(amount)); err != nil {
+	if err := seedZNHBAccountBalance(manager, recipient, amount); err != nil {
 		t.Fatalf("seed recipient balance: %v", err)
 	}
 }
@@ -232,7 +246,7 @@ func TestSwapVoucherReverseApply_IndependentStatesAgree(t *testing.T) {
 		manager := nhbstate.NewManager(node.state.Trie)
 		ledger := swap.NewLedger(manager)
 		record, ok, getErr := ledger.Get(providerTxID)
-		balance, balErr := manager.Balance(recipient[:], "ZNHB")
+		balance, balErr := znhbAccountBalance(manager, recipient)
 		node.stateMu.Unlock()
 		if getErr != nil || !ok {
 			t.Fatalf("expected voucher record to exist: ok=%v err=%v", ok, getErr)
@@ -371,7 +385,7 @@ func TestSwapVoucherReverseApply_RejectsNonAdminSignerAtApplyTime(t *testing.T) 
 		node.stateMu.Unlock()
 		t.Fatalf("seed voucher record: %v", err)
 	}
-	if err := manager.SetBalance(recipient[:], "ZNHB", new(big.Int).Set(amount)); err != nil {
+	if err := seedZNHBAccountBalance(manager, recipient, amount); err != nil {
 		node.stateMu.Unlock()
 		t.Fatalf("seed recipient balance: %v", err)
 	}
@@ -410,7 +424,7 @@ func TestSwapVoucherReverseApply_RejectsNonAdminSignerAtApplyTime(t *testing.T) 
 	manager2 := nhbstate.NewManager(node.state.Trie)
 	ledger2 := swap.NewLedger(manager2)
 	after, _, getErr := ledger2.Get(providerTxID)
-	balance, balErr := manager2.Balance(recipient[:], "ZNHB")
+	balance, balErr := znhbAccountBalance(manager2, recipient)
 	node.stateMu.Unlock()
 	if getErr != nil {
 		t.Fatalf("read voucher record: %v", getErr)
@@ -472,7 +486,7 @@ func TestSwapReverseVoucherNoLongerMutatesSynchronously(t *testing.T) {
 		node.stateMu.Unlock()
 		t.Fatalf("seed voucher record: %v", err)
 	}
-	if err := manager.SetBalance(recipient[:], "ZNHB", new(big.Int).Set(amount)); err != nil {
+	if err := seedZNHBAccountBalance(manager, recipient, amount); err != nil {
 		node.stateMu.Unlock()
 		t.Fatalf("seed recipient balance: %v", err)
 	}
@@ -499,7 +513,7 @@ func TestSwapReverseVoucherNoLongerMutatesSynchronously(t *testing.T) {
 	manager2 := nhbstate.NewManager(node.state.Trie)
 	ledger2 := swap.NewLedger(manager2)
 	preCommit, _, getErr := ledger2.Get(providerTxID)
-	preBalance, balErr := manager2.Balance(recipient[:], "ZNHB")
+	preBalance, balErr := znhbAccountBalance(manager2, recipient)
 	node.stateMu.Unlock()
 	if getErr != nil {
 		t.Fatalf("read voucher record: %v", getErr)
