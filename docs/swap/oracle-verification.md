@@ -1,55 +1,101 @@
 # Swap Oracle Price Proofs
 
-Swap voucher mints now require a signed price proof that anchors the USD conversion rate for NHB/ZNHB. The proof couples the provider identifier, currency pair, observed price, and timestamp with a deterministic message hash that is verified on-chain prior to minting.
+Every `TxTypeSwapVoucherMint` must carry a signed price proof. The chain
+verifies it deterministically against on-chain state; it does not call any live
+oracle while executing a block (`core/swap_voucher_tx.go` lines 183-196).
 
 ## Payload format
 
-A price proof contains the following fields:
-
-| Field        | Description                                                                 |
+| Field | Description |
 |--------------|-----------------------------------------------------------------------------|
-| `domain`     | Must equal `NHB_SWAP_PRICE_V1`.                                             |
-| `provider`   | Lower-case provider identifier registered in the signer allow-list.         |
-| `pair`       | Canonical `BASE/QUOTE` string. Only `NHB/USD` and `ZNHB/USD` are accepted.  |
-| `rate`       | USD price rendered as a decimal string (18 decimal precision recommended).  |
-| `timestamp`  | Unix timestamp (seconds) in UTC when the price was observed.                |
-| `signature`  | 65-byte secp256k1 signature over the canonical message (see below).         |
+| `domain` | Must equal `NHB_SWAP_PRICE_V1` (compared case-insensitively). |
+| `provider` | Provider identifier. Must match the voucher submission's `provider` (case-insensitive). |
+| `pair` | `BASE/QUOTE`. The verifier accepts base `NHB` or `ZNHB` with quote `USD`, and the base must equal the voucher token. Because vouchers must be `ZNHB`, only `ZNHB/USD` succeeds on the mint path. |
+| `rate` | Positive decimal string, USD per token. |
+| `timestamp` | Positive Unix seconds. |
+| `signature` | 65-byte signature. Mandatory on the mint path. |
 
-The canonical message that is signed is rendered as:
+The signed message is
 
 ```
 NHB_SWAP_PRICE_V1|provider=<provider>|pair=<BASE>/<QUOTE>|rate=<rate>|ts=<timestamp>
 ```
 
-`<provider>` is lower-cased, `<BASE>`/`<QUOTE>` are upper-cased, `<rate>` is normalised with 18 decimal places, and `<timestamp>` is the Unix seconds value. The on-chain verifier recomputes this payload, derives the keccak256 hash, and recovers the signer using the supplied signature.
+`<provider>` is lower-cased, `<BASE>`/`<QUOTE>` upper-cased, `<rate>` is
+rendered with exactly 18 decimal places, and `<timestamp>` is Unix seconds.
+The digest is `keccak256` of that string (`PriceProof.CanonicalMessage`,
+`Hash` in `native/swap/oracle_verify.go`). The proof ID stored on the voucher
+(`priceProofId`) is the hex of that digest.
 
-## Validation pipeline
+## Validation
 
-During `swap_submitVoucher` the node performs the following checks before minting:
+`PriceProofEngine.Verify` (`native/swap/engine.go`) runs these checks, in this
+order:
 
-1. **Signer allow-list** – the recovered signer address must match the provider signer stored in state (`swap/oracle/signer/{provider}`). Unknown providers are rejected.
-2. **Domain & pair guards** – the proof must use the `NHB_SWAP_PRICE_V1` domain and the base token must be either `NHB` or `ZNHB` with `USD` as the quote.
-3. **Freshness** – proofs older than `swap.MaxQuoteAgeSeconds` or more than 30 seconds in the future are rejected (`swap.ErrPriceProofStale`).
-4. **Deviation** – the new rate may not deviate from the previous stored proof by more than `swap.PriceProofMaxDeviationBps` basis points (`swap.ErrPriceProofDeviation`). The last accepted proof is persisted under `swap/oracle/last/{base}`.
-5. **Oracle parity** – the configured price oracle is still queried; the returned rate must match the signed proof within the configured deviation tolerance. This prevents replaying stale proofs while the live oracle disagrees.
+1. **Domain** - `ErrPriceProofDomain`.
+2. **Provider** - proof provider must be non-empty and match the submission
+   provider (`ErrPriceProofProviderMismatch`).
+3. **Pair** - base `NHB`/`ZNHB`, quote `USD`, base equal to the token
+   (`ErrPriceProofPair`).
+4. **Signature** - the mint path forces `RequireSignature(true)`, regardless
+   of `swap.risk.PriceProofSignatureRequired`. The signer registered for the
+   lower-cased provider is looked up in state (`ErrPriceProofSignerUnknown` if
+   none); the signature must be 65 bytes and recover to that address
+   (`ErrPriceProofSignatureInvalid`).
+5. **Freshness** - a timestamp more than 30 seconds after block time, or older
+   than `MaxQuoteAgeSeconds`, fails with `ErrPriceProofStale`. Time is the
+   block timestamp.
+6. **Deviation** - if `PriceProofMaxDeviationBps > 0` and a previous proof
+   exists for the same base, `|rate - previous| > previous * bps / 10000`
+   fails with `ErrPriceProofDeviation`.
 
-Only after all validation steps succeed does the node record the proof and mint tokens. The voucher ledger stores the proof hash (`priceProofId`) and the proof timestamp as the canonical quote time.
+After the price proof passes, the mint path also runs the provider allow-list,
+sanctions, risk limits, mint-authority signature, slippage, duplicate and
+Sale Pool checks. Only when those pass does it call
+`PriceProofEngine.Record`, which stores the proof as the last accepted proof
+for that base at `swap/oracle/last/<BASE>` (`core/swap_voucher_tx.go`
+line 531). The voucher record stores the proof ID as `priceProofId` and the
+proof timestamp as `quoteTs`; `source` is the lower-cased proof provider.
+
+The mint-amount check derives the expected amount from the proof rate:
+`fiatAmount / rate * 10^decimals`, and requires the voucher `amount` to be
+within `SlippageBps` of it (`swap.ComputeMintAmount`,
+`core/swap_voucher_tx.go` lines 405-428). There is no comparison against a
+live oracle rate on this path.
+
+### Error mapping in the mint transaction
+
+| Verifier error | Chain error (message) |
+| --- | --- |
+| nil proof, missing signature | `ErrSwapPriceProofRequired` (`swap: price proof required`) |
+| domain, pair, provider mismatch, invalid signature | `ErrSwapPriceProofInvalid` (`swap: invalid price proof`) |
+| unknown signer | `ErrSwapPriceProofSignerUnknown` (`swap: price proof signer unknown`) |
+| stale (including future-dated) | `ErrSwapPriceProofStale` (`swap: price proof stale`) |
+| deviation | `ErrSwapPriceProofDeviation` (`swap: price proof deviation too large`) |
+
+`rpc/swap_handlers.go` returns all of these as HTTP 400 / `codeInvalidParams`.
 
 ## Signer management
 
-Signer addresses are stored in consensus state via the `swap/oracle/signer/{provider}` key. Governance tooling must update this mapping whenever a provider rotates keys. The helper API `SwapSetPriceSigner` in the state manager simplifies integration tests and tooling.
+Signers are stored at `swap/oracle/signer/<lower-case provider>`. They are
+registered or revoked by a governance proposal of kind `policy.swapPriceSigner`
+with payload `{"provider": "...", "signerAddress": "...", "memo": "...",
+"revoke": false}` (`native/governance/types.go` `SwapPriceSignerPayload`,
+`native/governance/engine.go` `parseSwapPriceSignerPayload`). `provider` is
+required and at most 64 characters; `signerAddress` is required unless
+`revoke` is true and must not be the zero address.
 
 ## Configuration
 
-`swap.PriceProofMaxDeviationBps` controls the allowed basis-point difference between consecutive proofs and between the proof and the live oracle rate. The default is `100` (1%). Setting the value to `0` disables deviation enforcement, although this is not recommended for production environments.
+`[swap]` keys that feed this path (`native/swap/oracle.go` `Config.Normalise`):
 
-## Failure modes
+| Key | Effect | Value when unset or `0` |
+| --- | --- | --- |
+| `MaxQuoteAgeSeconds` | Maximum proof age | `120` |
+| `PriceProofMaxDeviationBps` | Maximum rate move between consecutive accepted proofs | `100` |
+| `SlippageBps` | Maximum voucher-amount deviation from the computed amount | `50` |
 
-The RPC service maps the new validation errors to user-facing responses:
-
-- Missing or malformed proofs → `invalid params` with `swap: price proof required/invalid`.
-- Unknown signer → `invalid params` with `swap: price proof signer unknown`.
-- Stale proofs → `invalid params` with `swap: price proof stale`.
-- Deviation breaches → `invalid params` with `swap: price proof deviation too large`.
-
-Clients should log and alert on these failures because they may indicate compromised providers or upstream oracle drift.
+`Normalise` replaces `0` with the default for all three, so
+`PriceProofMaxDeviationBps` cannot be set to `0` to disable the deviation
+check. The repository `config.toml` sets `PriceProofMaxDeviationBps = 0`,
+which therefore resolves to `100`.
