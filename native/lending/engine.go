@@ -961,9 +961,10 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	liquidatorAcc.BalanceNHB = new(big.Int).Sub(liquidatorAcc.BalanceNHB, repayAmount)
 	moduleAcc.BalanceNHB = new(big.Int).Add(moduleAcc.BalanceNHB, repayAmount)
 
-	// Determine collateral seized with liquidation bonus.
-	seizeAmount := new(big.Int).Mul(repayAmount, big.NewInt(int64(10_000+e.params.LiquidationBonus)))
-	seizeAmount = seizeAmount.Quo(seizeAmount, basisPoints)
+	// Determine collateral seized with liquidation bonus. The repaid debt is
+	// NHB wei and the collateral is ZNHB wei, so the bonus-inclusive NHB value
+	// is converted at the same oracle price the eligibility check above used.
+	seizeAmount := CollateralForDebtValue(market, repayAmount, 10_000+e.params.LiquidationBonus)
 	if seizeAmount.Cmp(borrowerUser.CollateralZNHB) > 0 {
 		seizeAmount = new(big.Int).Set(borrowerUser.CollateralZNHB)
 	}
@@ -1263,6 +1264,28 @@ func OracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *
 	}
 	value := new(big.Int).Mul(collateralZNHBWei, market.OracleMedianWei)
 	return value.Quo(value, weiPerToken)
+}
+
+// CollateralForDebtValue is the inverse of OracleAdjustedCollateralValue: it
+// converts an NHB-wei debt amount, scaled by factorBps (10_000 = 1.0, so a
+// liquidation bonus is 10_000 + bonusBps), into the raw ZNHB-wei collateral
+// amount worth that much at market.OracleMedianWei. The scaling and the price
+// division happen in one integer division, rounding down (borrower-favoring:
+// the liquidator never receives more than the bonus-inclusive value it repaid).
+// Falls back to strict 1:1 when no oracle price is set, exactly like
+// OracleAdjustedCollateralValue, so eligibility and seizure always use the
+// same valuation.
+func CollateralForDebtValue(market *Market, debtNHBWei *big.Int, factorBps uint64) *big.Int {
+	if debtNHBWei == nil || debtNHBWei.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	num := new(big.Int).Mul(debtNHBWei, new(big.Int).SetUint64(factorBps))
+	if market == nil || market.OracleMedianWei == nil || market.OracleMedianWei.Sign() <= 0 {
+		return num.Quo(num, basisPoints)
+	}
+	num.Mul(num, weiPerToken)
+	den := new(big.Int).Mul(market.OracleMedianWei, basisPoints)
+	return num.Quo(num, den)
 }
 
 // combinedDebtWei folds in a borrower's active fixed-term loan (if any),
