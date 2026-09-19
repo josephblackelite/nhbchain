@@ -181,6 +181,11 @@ func (r *Registry) CreateSubscription(s *Subscription) error {
 	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
 		return err
 	}
+	// A self-subscription has no purpose: the charge would move the price
+	// from an account to itself, minus the management fee.
+	if s.Payer == s.Merchant {
+		return ErrSelfSubscription
+	}
 	exists, err := r.st.KVGet(subscriptionKey(s.ID), new(Subscription))
 	if err != nil {
 		return err

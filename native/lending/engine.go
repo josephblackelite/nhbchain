@@ -38,6 +38,7 @@ var (
 	errOracleDeviation           = errors.New("lending engine: oracle deviation too large")
 	errMaxLTVExceeded            = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
 	errWithdrawSameBlockAsSupply = errors.New("lending engine: cannot withdraw in the same block as a supply")
+	errSelfLiquidation           = errors.New("lending engine: a borrower cannot liquidate their own position")
 
 	errFixedTermDepositTenureNotAllowed = errors.New("lending engine: tenure not in the fixed-term deposit rate schedule")
 	errFixedTermDepositInvalidPayout    = errors.New("lending engine: invalid fixed-term deposit payout preference")
@@ -73,6 +74,12 @@ var (
 	// proposal attempt, so a later attempt (different ordering, or a
 	// different transaction set) can genuinely change the outcome.
 	ErrWithdrawSameBlockAsSupply = errWithdrawSameBlockAsSupply
+	// ErrSelfLiquidation is an exported alias of errSelfLiquidation --
+	// core/node.go's classifyProposalError recognizes it as
+	// proposalDispositionPrune: the liquidator is the transaction signer and
+	// the borrower is named in its payload, so a resubmission can never
+	// succeed.
+	ErrSelfLiquidation = errSelfLiquidation
 	// ErrRepayPaused, ErrNoDebtToRepay, and ErrInsufficientBalance are
 	// exported aliases RepayFixedTerm can return for entirely ordinary,
 	// non-storage business/operational reasons (an operator pause, a loan
@@ -710,7 +717,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		return nil, errMaxLTVExceeded
 	}
 
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	accounts := e.newAccountSet()
+	moduleAcc, err := accounts.load(e.moduleAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -718,13 +726,13 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		return nil, errInsufficientLiquidity
 	}
 
-	borrowerAcc, err := e.loadAccount(borrower)
+	borrowerAcc, err := accounts.load(borrower)
 	if err != nil {
 		return nil, err
 	}
 	var feeAcc *types.Account
 	if feeAmount.Sign() > 0 {
-		feeAcc, err = e.loadAccount(feeRecipient)
+		feeAcc, err = accounts.load(feeRecipient)
 		if err != nil {
 			return nil, err
 		}
@@ -736,16 +744,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		feeAcc.BalanceNHB = new(big.Int).Add(feeAcc.BalanceNHB, feeAmount)
 	}
 
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return nil, err
-	}
-	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
-		return nil, err
-	}
-	if feeAcc != nil {
-		if err := e.persistAccount(feeRecipient, feeAcc); err != nil {
-			return nil, err
-		}
 	}
 
 	borrowerUser.DebtNHB = projectedDebt
@@ -880,6 +880,9 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	if e == nil || e.state == nil {
 		return nil, nil, errNilState
 	}
+	if string(liquidator.Bytes()) == string(borrower.Bytes()) {
+		return nil, nil, errSelfLiquidation
+	}
 
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, nil, err
@@ -918,7 +921,27 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 
 	repayAmount := new(big.Int).Set(borrowerUser.DebtNHB)
 
-	liquidatorAcc, err := e.loadAccount(liquidator)
+	// Each address is loaded exactly once and persisted once, so roles that
+	// resolve to the same address (liquidator, borrower, module, collateral
+	// vault, developer and protocol targets) share one account object and
+	// every delta lands on it.
+	accounts := make(map[string]*types.Account)
+	var loaded []crypto.Address
+	account := func(addr crypto.Address) (*types.Account, error) {
+		key := string(addr.Bytes())
+		if acc, ok := accounts[key]; ok {
+			return acc, nil
+		}
+		acc, err := e.loadAccount(addr)
+		if err != nil {
+			return nil, err
+		}
+		accounts[key] = acc
+		loaded = append(loaded, addr)
+		return acc, nil
+	}
+
+	liquidatorAcc, err := account(liquidator)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -926,11 +949,10 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errInsufficientBalance
 	}
 
-	borrowerAcc, err := e.loadAccount(borrower)
-	if err != nil {
+	if _, err := account(borrower); err != nil {
 		return nil, nil, err
 	}
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	moduleAcc, err := account(e.moduleAddress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -952,7 +974,7 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errCollateralRoutingBps
 	}
 
-	collateralAcc, err := e.loadAccount(e.collateralAddress)
+	collateralAcc, err := account(e.collateralAddress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1016,43 +1038,24 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, seizeAmount)
 	liquidatorAcc.BalanceZNHB = new(big.Int).Add(liquidatorAcc.BalanceZNHB, liquidatorShare)
 
-	var developerAcc *types.Account
 	if developerShare.Sign() > 0 {
-		developerAcc, err = e.loadAccount(routing.DeveloperTarget)
+		developerAcc, err := account(routing.DeveloperTarget)
 		if err != nil {
 			return nil, nil, err
 		}
 		developerAcc.BalanceZNHB = new(big.Int).Add(developerAcc.BalanceZNHB, developerShare)
 	}
 
-	var protocolAcc *types.Account
 	if protocolShare.Sign() > 0 {
-		protocolAcc, err = e.loadAccount(routing.ProtocolTarget)
+		protocolAcc, err := account(routing.ProtocolTarget)
 		if err != nil {
 			return nil, nil, err
 		}
 		protocolAcc.BalanceZNHB = new(big.Int).Add(protocolAcc.BalanceZNHB, protocolShare)
 	}
 
-	if err := e.persistAccount(liquidator, liquidatorAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
-		return nil, nil, err
-	}
-	if developerAcc != nil {
-		if err := e.persistAccount(routing.DeveloperTarget, developerAcc); err != nil {
-			return nil, nil, err
-		}
-	}
-	if protocolAcc != nil {
-		if err := e.persistAccount(routing.ProtocolTarget, protocolAcc); err != nil {
+	for _, addr := range loaded {
+		if err := e.persistAccount(addr, accounts[string(addr.Bytes())]); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1394,7 +1397,8 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 		return nil, errInsufficientLiquidity
 	}
 
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	accounts := e.newAccountSet()
+	moduleAcc, err := accounts.load(e.moduleAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -1402,7 +1406,7 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 		return nil, errInsufficientLiquidity
 	}
 
-	recipientAcc, err := e.loadAccount(recipient)
+	recipientAcc, err := accounts.load(recipient)
 	if err != nil {
 		return nil, err
 	}
@@ -1410,10 +1414,7 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, amount)
 	recipientAcc.BalanceNHB = new(big.Int).Add(recipientAcc.BalanceNHB, amount)
 
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
-		return nil, err
-	}
-	if err := e.persistAccount(recipient, recipientAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return nil, err
 	}
 
