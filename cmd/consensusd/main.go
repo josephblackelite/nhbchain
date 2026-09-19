@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/url"
@@ -35,6 +36,7 @@ import (
 	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
+	"nhbchain/observability"
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
 	consensusv1 "nhbchain/proto/consensus/v1"
@@ -392,6 +394,11 @@ func main() {
 		Commit:    cfg.Consensus.CommitTimeout,
 	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")))
 	node.SetBftEngine(bftEngine)
+	// Bound one block build to half the proposal timeout (see cmd/nhb/main.go)
+	// and start the optional Prometheus listener (NHB_METRICS_ADDR); a failure
+	// to start it is logged and never stops the validator.
+	node.SetProposalBuildBudget(cfg.Consensus.ProposalTimeout / 2)
+	observability.StartMetricsServerFromEnv(slog.Default())
 
 	grpcListener, err := net.Listen("tcp", *grpcAddress)
 	if err != nil {

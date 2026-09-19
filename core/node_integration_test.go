@@ -201,10 +201,20 @@ func TestCreateBlockRejectsInvalidChainID(t *testing.T) {
 		t.Fatalf("sign tx: %v", err)
 	}
 
-	if _, err := node.CreateBlock([]*types.Transaction{tx}); err == nil {
-		t.Fatalf("expected error for invalid chain id")
-	} else if !errors.Is(err, ErrInvalidChainID) {
-		t.Fatalf("expected ErrInvalidChainID, got %v", err)
+	// A transaction with a bad envelope chain id can never apply. CreateBlock
+	// used to fail the whole proposal with ErrInvalidChainID; it now classifies
+	// the error as prunable, leaves the transaction out and still builds the
+	// block. The commit path (TestCommitBlockRejectsInvalidChainID) is
+	// unchanged: a BLOCK that contains such a transaction is still rejected.
+	block, err := node.CreateBlock([]*types.Transaction{tx})
+	if err != nil {
+		t.Fatalf("CreateBlock must not fail the whole proposal for one bad transaction: %v", err)
+	}
+	if len(block.Transactions) != 0 {
+		t.Fatalf("expected the invalid-chain-id transaction to be excluded, got %d transactions", len(block.Transactions))
+	}
+	if got := classifyProposalError(ErrInvalidChainID); got != proposalDispositionPrune {
+		t.Fatalf("expected an invalid chain id to classify as prune, got %v", got)
 	}
 }
 

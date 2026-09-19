@@ -476,14 +476,40 @@ func TestCreateBlockFailureRequeuesProposedTransactions(t *testing.T) {
 		t.Fatalf("expected 1 transaction to propose, got %d", len(proposed))
 	}
 
+	// The sender's balance drops between admission and block building (family
+	// (i) of the block-production poison classes). Before the containment
+	// layer this aborted the WHOLE proposal every round; now the transaction
+	// is excluded from the block, the block is still produced, and the
+	// transaction is neither lost nor stuck "in flight".
 	setAccountBalanceNHB(t, node, senderKey.PubKey().Address().Bytes(), 0, big.NewInt(0))
-	if _, err := node.CreateBlock(proposed); err == nil {
-		t.Fatalf("expected create block to fail after sender balance dropped")
+	block, err := node.CreateBlock(proposed)
+	if err != nil {
+		t.Fatalf("create block must not fail because one transaction can no longer apply: %v", err)
+	}
+	if len(block.Transactions) != 0 {
+		t.Fatalf("expected the unaffordable transaction to be excluded, got %d transactions", len(block.Transactions))
+	}
+	if size := node.MempoolSize(); size != 1 {
+		t.Fatalf("expected the excluded transaction to stay resident in the mempool, got %d", size)
+	}
+	node.mempoolMu.Lock()
+	inFlight := len(node.proposedTxs)
+	node.mempoolMu.Unlock()
+	if inFlight != 0 {
+		t.Fatalf("expected the excluded transaction to be released from in-flight bookkeeping, got %d in flight", inFlight)
 	}
 
+	// It backs off for the rest of this height (it just failed), and is
+	// offered again once the chain has moved on.
+	if held := node.GetMempool(); len(held) != 0 {
+		t.Fatalf("expected the just-failed transaction to be held back at the same height, got %d", len(held))
+	}
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
 	reproposed := node.GetMempool()
 	if len(reproposed) != 1 {
-		t.Fatalf("expected stranded transaction to be requeued after create-block failure, got %d", len(reproposed))
+		t.Fatalf("expected the stranded transaction to be offered again at the next height, got %d", len(reproposed))
 	}
 }
 

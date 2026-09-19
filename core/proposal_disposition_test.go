@@ -1,13 +1,20 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	gethtrie "github.com/ethereum/go-ethereum/trie"
+	"github.com/syndtr/goleveldb/leveldb"
+
 	"nhbchain/config"
+	"nhbchain/consensus/potso/evidence"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -16,9 +23,18 @@ import (
 	swap "nhbchain/native/swap"
 )
 
+// infraErr is an error that opts in to infrastructure classification through
+// the Infrastructure() marker interface, the way another package can without
+// core importing it.
+type infraErr struct{}
+
+func (infraErr) Error() string        { return "storage backend unavailable" }
+func (infraErr) Infrastructure() bool { return true }
+
 // TestClassifyProposalErrorDispositions pins down classifyProposalError's
 // verdict for every sentinel it is documented to recognize, plus the default
-// (unclassified -> ABORT) behavior for anything it doesn't. Each case is also
+// (unclassified -> QUARANTINE) behavior for anything it doesn't, and the
+// infrastructure-only ABORT class. Each case is also
 // checked wrapped one level deeper (fmt.Errorf("...: %w", sentinel)) to
 // confirm the classifier relies on errors.Is semantics, not direct equality
 // -- exactly how every real call site in applySwapVoucherMintTransaction,
@@ -84,11 +100,37 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"identity username taken", ErrIdentityUsernameTaken, proposalDispositionSkip},
 		{"buyback ref price future epoch", ErrBuybackRefPriceFutureEpoch, proposalDispositionSkip},
 
-		// ABORT: deliberately unclassified (ambiguous sentinel, or a plain
-		// unrecognized error).
-		{"swap price proof invalid stays unclassified", ErrSwapPriceProofInvalid, proposalDispositionAbort},
-		{"invalid chain id stays unclassified", ErrInvalidChainID, proposalDispositionAbort},
-		{"generic error stays unclassified", errors.New("boom"), proposalDispositionAbort},
+		// PRUNE (added with the block-production hardening): a pure function
+		// of the transaction's own immutable payload, or of a height that
+		// only grows.
+		{"invalid chain id", ErrInvalidChainID, proposalDispositionPrune},
+		{"evidence expired", &evidence.ValidationError{Reason: evidence.RejectReasonExpired}, proposalDispositionPrune},
+		{"evidence invalid signature", &evidence.ValidationError{Reason: evidence.RejectReasonInvalidSignature}, proposalDispositionPrune},
+		{"evidence invalid equivocation proof", &evidence.ValidationError{Reason: evidence.RejectReasonInvalidEquivocationProof}, proposalDispositionPrune},
+		{"evidence empty heights", &evidence.ValidationError{Reason: evidence.RejectReasonEmptyHeights}, proposalDispositionPrune},
+
+		// SKIP (added with the hardening): becomes valid once the chain
+		// reaches the claimed height.
+		{"evidence future height", &evidence.ValidationError{Reason: evidence.RejectReasonFutureHeight}, proposalDispositionSkip},
+
+		// QUARANTINE: the default for everything nobody classified. These
+		// rows used to be ABORT, which failed the whole proposal on every
+		// round -- the halt this design closes.
+		{"swap price proof invalid is quarantined", ErrSwapPriceProofInvalid, proposalDispositionQuarantine},
+		{"generic error is quarantined", errors.New("boom"), proposalDispositionQuarantine},
+		{"bare escrow status race is quarantined", errors.New("escrow: cannot release in status 3"), proposalDispositionQuarantine},
+		{"evidence unknown reason is quarantined", &evidence.ValidationError{Reason: evidence.RejectReasonUnknown}, proposalDispositionQuarantine},
+		{"recovered apply panic", &txPanicError{Value: "boom"}, proposalDispositionQuarantine},
+
+		// ABORT: only infrastructure errors -- this node cannot read or write
+		// state; excluding transactions cannot fix that and nothing may be
+		// struck for it.
+		{"context deadline exceeded", context.DeadlineExceeded, proposalDispositionAbort},
+		{"context canceled", context.Canceled, proposalDispositionAbort},
+		{"missing trie node", &gethtrie.MissingNodeError{NodeHash: common.HexToHash("0x01")}, proposalDispositionAbort},
+		{"leveldb closed", leveldb.ErrClosed, proposalDispositionAbort},
+		{"disk full", syscall.ENOSPC, proposalDispositionAbort},
+		{"opt-in infrastructure error", infraErr{}, proposalDispositionAbort},
 	}
 
 	for _, tc := range cases {
