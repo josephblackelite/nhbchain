@@ -183,33 +183,35 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	}
 	sigBytes, err := decodeHex(packet.Signature)
 	if err != nil {
-		return s.signatureMismatch(packet, "invalid signature encoding: %v", err)
+		return signatureMismatch("invalid signature encoding: %v", err)
 	}
 	if len(sigBytes) != 65 {
-		return s.signatureMismatch(packet, "invalid handshake signature length: %d", len(sigBytes))
+		return signatureMismatch("invalid handshake signature length: %d", len(sigBytes))
 	}
 
 	digest, err := handshakeDigest(packet.ChainID, remoteGenesis, nonceBytes, packet.NodeID)
 	if err != nil {
-		return s.signatureMismatch(packet, "%v", err)
+		return signatureMismatch("%v", err)
 	}
 	recovered, err := ethcrypto.SigToPub(digest, sigBytes)
 	if err != nil {
-		return s.signatureMismatch(packet, "recover signature: %v", err)
+		return signatureMismatch("recover signature: %v", err)
 	}
 	derived := normalizeHex(deriveNodeIDFromPub(recovered))
 	claimed := normalizeHex(packet.NodeID)
 	if derived == "" || claimed == "" {
-		return s.signatureMismatch(packet, "unable to derive node identity")
+		return signatureMismatch("unable to derive node identity")
 	}
 	if !strings.EqualFold(derived, claimed) {
-		return s.signatureMismatch(packet, "node ID mismatch: derived %s claimed %s", derived, claimed)
+		return signatureMismatch("node ID mismatch: derived %s claimed %s", derived, claimed)
 	}
 
 	nonceKey := hex.EncodeToString(nonceBytes)
 	if !s.nonceGuard.Remember(derived, nonceKey, s.now()) {
+		// A handshake is not a challenge: whoever has seen this node's handshake
+		// can send it again, so the copy is refused but nothing is held against
+		// the node that signed it.
 		fmt.Printf("Handshake nonce replay from %s rejected\n", derived)
-		s.markHandshakeViolation(derived, true)
 		return fmt.Errorf("handshake nonce replay detected")
 	}
 
@@ -219,10 +221,11 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	return nil
 }
 
-func (s *Server) signatureMismatch(packet *handshakePacket, format string, args ...any) error {
-	if s != nil && packet != nil {
-		s.markHandshakeViolation(packet.NodeID, false)
-	}
+// signatureMismatch builds the error for a handshake whose signature does not
+// verify. Nothing is held against the node ID the packet names: the packet does
+// not come from that node, and a ban on the ID would lock out whoever really
+// holds it.
+func signatureMismatch(format string, args ...any) error {
 	params := make([]any, 0, len(args)+1)
 	params = append(params, errHandshakeSignatureFailure)
 	params = append(params, args...)
@@ -311,16 +314,19 @@ func handshakeSignedByClaimedNode(packet *handshakePacket) bool {
 	return derived != "" && claimed != "" && strings.EqualFold(derived, claimed)
 }
 
-// markHandshakeViolation bans a node that failed the handshake. The ban is kept
-// in memory whatever the identity; a peerstore record is only written when the
-// packet was signed by the node it names (authenticated), because otherwise the
-// node ID is just a string the remote chose and would only fill the store.
+// markHandshakeViolation bans a node that failed the handshake, when the node
+// itself signed the evidence (authenticated). The node ID in a packet is a
+// string the sender chose, so a packet that is not signed by that node is never
+// held against it: a ban would lock out whoever really holds the ID, in memory
+// as much as in the peerstore. A configured persistent peer is not banned on
+// handshake evidence either, so that it can reconnect as soon as its fault is
+// fixed.
 func (s *Server) markHandshakeViolation(nodeID string, authenticated bool) {
-	if s == nil {
+	if s == nil || !authenticated {
 		return
 	}
 	normalized := normalizeHex(nodeID)
-	if normalized == "" {
+	if normalized == "" || s.isConfiguredPersistentPeer(normalized) {
 		return
 	}
 	now := s.now()
@@ -333,7 +339,7 @@ func (s *Server) markHandshakeViolation(nodeID string, authenticated bool) {
 	if s.reputation != nil {
 		s.reputation.SetBan(normalized, until, now)
 	}
-	if s.peerstore != nil && authenticated {
+	if s.peerstore != nil {
 		if _, err := s.peerstore.RecordViolation(normalized, now); err != nil {
 			fmt.Printf("record handshake violation %s: %v\n", normalized, err)
 		}

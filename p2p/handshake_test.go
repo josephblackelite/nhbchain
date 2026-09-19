@@ -107,8 +107,10 @@ func TestHandshakeRejectsTamperedSignature(t *testing.T) {
 	if err := local.verifyHandshake(packet); err == nil || (!strings.Contains(err.Error(), "recover signature") && !strings.Contains(strings.ToLower(err.Error()), "node id")) {
 		t.Fatalf("expected signature error, got %v", err)
 	}
-	if !local.isBanned(normalizeHex(packet.NodeID)) {
-		t.Fatalf("expected peer to be banned after signature mismatch")
+	// The packet does not carry the node's signature, so it proves nothing about
+	// the node it names: banning that ID would lock out whoever really holds it.
+	if local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("a packet without the node's signature must not ban the node it names")
 	}
 }
 
@@ -126,8 +128,8 @@ func TestHandshakeRejectsNodeIDTamper(t *testing.T) {
 	if err := local.verifyHandshake(packet); err == nil || (!strings.Contains(err.Error(), "recover signature") && !strings.Contains(strings.ToLower(err.Error()), "node id")) {
 		t.Fatalf("expected node ID failure, got %v", err)
 	}
-	if !local.isBanned(normalizeHex(packet.NodeID)) {
-		t.Fatalf("expected peer to be banned after node ID tamper")
+	if local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("a packet whose node ID does not match its signature must not ban the ID it names")
 	}
 }
 
@@ -147,8 +149,10 @@ func TestHandshakeNonceReplay(t *testing.T) {
 	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "nonce replay") {
 		t.Fatalf("expected nonce replay error, got %v", err)
 	}
-	if !local.isBanned(normalizeHex(packet.NodeID)) {
-		t.Fatalf("expected peer to be banned after nonce replay")
+	// Anybody who has seen the handshake can send it again, so the replay is
+	// refused without holding it against the node that signed it.
+	if local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("a replayed handshake must not ban the node that signed it")
 	}
 }
 
@@ -227,8 +231,8 @@ func TestHandshakeNonceReplayAfterWindow(t *testing.T) {
 	if err := local.verifyHandshake(packet); err == nil || !strings.Contains(err.Error(), "nonce replay") {
 		t.Fatalf("expected nonce replay after ttl eviction, got %v", err)
 	}
-	if !local.isBanned(normalizeHex(packet.NodeID)) {
-		t.Fatalf("expected peer to be banned after nonce replay beyond ttl")
+	if local.isBanned(normalizeHex(packet.NodeID)) {
+		t.Fatalf("a replayed handshake must not ban the node that signed it")
 	}
 }
 

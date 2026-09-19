@@ -161,6 +161,13 @@ type Node struct {
 	networkMode                  string
 	networkBroadcaster           p2p.Broadcaster
 	blockSyncMu                  sync.Mutex
+	// blockSyncRequest* remember the last block request sent to the peers, so
+	// that a request for the same blocks is not sent again within
+	// networkBlockSyncRequestGap. Node-local pacing only: nothing here reaches
+	// state or the outcome of a transaction or a block.
+	blockSyncRequestMu   sync.Mutex
+	blockSyncRequestFrom uint64
+	blockSyncRequestAt   time.Time
 	// externalCommitNotifier, if set, is called after a block committed via
 	// the peer-sync path (handleNetworkBlocks/commitSyncedBlock) so the BFT
 	// engine can immediately abandon a stale in-flight round for a height
@@ -2292,6 +2299,13 @@ const (
 	// blocks must still fit the peer-to-peer message size limit (1 MiB by
 	// default) once it is wrapped in a message. The first block is always sent.
 	networkBlockSyncMaxBytes = 512 * 1024
+	// networkBlockSyncRequestGap is the shortest time between two requests for
+	// the blocks that start at the same height. A status report, or a block that
+	// is ahead of this node, comes from a peer that has proved nothing and is
+	// answered with a request to every peer: a stream of such messages must not
+	// become a stream of requests. A request for the next height, which follows
+	// applying blocks, is not held back.
+	networkBlockSyncRequestGap = time.Second
 )
 
 // networkBroadcast returns the function that broadcasts to every connected
@@ -2441,11 +2455,29 @@ func (n *Node) requestBlockSync(from uint64) error {
 	if n == nil || n.networkBroadcaster == nil {
 		return nil
 	}
+	if !n.allowBlockSyncRequest(from) {
+		return nil
+	}
 	msg, err := p2p.NewGetBlocksMessage(from)
 	if err != nil {
 		return err
 	}
 	return n.networkBroadcaster.Broadcast(msg)
+}
+
+// allowBlockSyncRequest reports whether a request for the blocks from the given
+// height may be sent now, and notes it when it may. The request is the same
+// whoever asked for it, so one that is already out serves every trigger that
+// arrives within networkBlockSyncRequestGap of it.
+func (n *Node) allowBlockSyncRequest(from uint64) bool {
+	now := time.Now()
+	n.blockSyncRequestMu.Lock()
+	defer n.blockSyncRequestMu.Unlock()
+	if !n.blockSyncRequestAt.IsZero() && n.blockSyncRequestFrom == from && now.Sub(n.blockSyncRequestAt) < networkBlockSyncRequestGap {
+		return false
+	}
+	n.blockSyncRequestFrom, n.blockSyncRequestAt = from, now
+	return true
 }
 
 // HandleMessage satisfies the p2p.MessageHandler interface by forwarding to ProcessNetworkMessage.
