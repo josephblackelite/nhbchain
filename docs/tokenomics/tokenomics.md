@@ -1,136 +1,135 @@
-# NHBCoin Tokenomics – Reference Guide
+# NHBCoin Tokenomics - Reference Guide
 
-> Status: **Live** (Sale Pool curve pricing; validator/staking reward halving schedule; treasury buyback engine)
-> Applies to: `core/tokenomics/curve`, `core/tokenomics/buyback`, `core/state/manager.go` (ZNHB pool ledgers), `core/rewards` (halving schedule)
+> Applies to: `core/tokenomics/curve`, `core/tokenomics/buyback`, `core/rewards` (halving schedule), the ZNHB pool ledgers in `core/state/manager.go`, and the transaction handlers in `core/state_transition.go`, `core/swap_voucher_tx.go`, `core/buyback_tx.go` and `core/buyback_settlement.go`.
 
 ## Table of Contents
 1. [Overview](#1-overview)
-2. [NHB — the commerce currency](#2-nhb--the-commerce-currency)
-3. [ZNHB — the fixed-supply network asset](#3-znhb--the-fixed-supply-network-asset)
+2. [NHB](#2-nhb)
+3. [ZNHB supply and pools](#3-znhb-supply-and-pools)
 4. [The Genesis Treasury Distribution Curve](#4-the-genesis-treasury-distribution-curve)
-5. [The Reward Pool and the validator/staking halving schedule](#5-the-reward-pool-and-the-validatorstaking-halving-schedule)
+5. [The Reward Pool and the halving schedule](#5-the-reward-pool-and-the-halving-schedule)
 6. [The treasury buyback engine](#6-the-treasury-buyback-engine)
 7. [What governance can and cannot change](#7-what-governance-can-and-cannot-change)
 8. [RPC reference](#8-rpc-reference)
-9. [What this document does not claim](#9-what-this-document-does-not-claim)
+9. [Not in the code](#9-not-in-the-code)
 
 ---
 
 ## 1) Overview
 
-NHBCoin runs a deliberate two-token model. **NHB** is the commerce currency: an elastic, deposit-backed unit meant to feel like spending dollars. **ZNHB** is the network's fixed-supply security and scarcity asset: exactly 1,000,000,000 ZNHB exist, forever, split once at genesis into two purpose-built pools that never mix. (An earlier chain, abandoned after a 2026-09-09 key compromise forced a full rebuild, had carried forward 8,000 ZNHB of pre-existing mint-path-bug inflation into its own genesis snapshot -- that chain no longer exists; the current chain's genesis mints exactly the round 1,000,000,000 figure, with no such carried-forward drift. See §3.)
+There are two native tokens. **NHB** has no supply cap constant in the code; `TxTypeMint` (signed vouchers) is its mint transaction and `TxTypeRedeemNHB` its burn transaction. **ZNHB** cannot be minted: `applyMintTransaction` rejects any ZNHB mint with `ErrMintZNHBNotMintable`. The chain's ZNHB supply is whatever genesis allocates, and the admin (treasury) wallet's ZNHB is split into two ledgers, a **Sale Pool** and a **Reward Pool**.
 
-**Funding invariants**
-
-* Every ZNHB a buyer receives from the treasury — through a direct purchase or a swap-voucher mint — moves out of the **Sale Pool**, priced by the Genesis Treasury Distribution Curve. Nothing is minted to satisfy a purchase.
-* Every ZNHB a validator or staker receives as a network reward moves out of the separate **Reward Pool**, following a halving schedule — see [§5](#5-the-reward-pool-and-the-validatorstaking-halving-schedule).
-* A share of NHB transaction-fee revenue automatically funds a **treasury buyback** that repurchases ZNHB from willing sellers and recycles it back into the Sale Pool, never burning it and never minting new supply — see [§6](#6-the-treasury-buyback-engine).
-* `core/state_transition.go`'s `CheckZNHBSupplyInvariant` asserts, every block, that `Sale Pool balance + Reward Pool balance == the treasury wallet's live ZNHB balance`. A violation is a hard consensus error, not a warning.
+* ZNHB bought from the treasury (`TxTypeBuyZNHB`, or a swap-voucher mint) moves out of the Sale Pool. Nothing is minted for a purchase.
+* ZNHB paid as validator/staking/engagement epoch rewards moves out of the Reward Pool.
+* If a genesis buyback signer quorum is configured, a share of NHB domain-fee revenue funds a treasury buyback of ZNHB, and bought-back ZNHB is added back to the Sale Pool.
+* `CheckZNHBSupplyInvariant` (`core/state_transition.go`) runs every block once the pools are bootstrapped and requires `Sale Pool + Reward Pool == the admin wallet's spendable ZNHB + its locked ZNHB + its pending unbonds + its governance escrow` (`adminZNHBOwned`). A violation is a hard error.
 
 ---
 
-## 2) NHB — the commerce currency
+## 2) NHB
 
-NHB is the settlement and payments rail: mint-on-deposit, burn-on-redemption, no fixed supply cap. It is designed to be backed 1:1 by custodied reserves (USDT/USDC via the swap/OTC pipeline) — this document makes no claim about NHB's price beyond that backing relationship; it is not a speculative asset.
+* **Minting.** `TxTypeMint` carries a signed voucher. The recovered signer must hold the role `MINTER_NHB`; the voucher chain id and expiry are checked; each `invoiceId` can be used once. If `mint.nhb.maxEmissionPerYearWei` is a positive governance value, a mint that would exceed it in the current calendar year fails with `ErrMintEmissionCapExceeded`. Mints increase the tracked total supply.
+* **Burning.** `TxTypeRedeemNHB` burns the requested NHB immediately and records a redemption request (`swap.redeem.requested`); per-transaction and per-address caps come from `policy.swapRiskParams` (defaults in [params](../governance/params.md)). Total supply is decreased by the burn.
 
 ---
 
-## 3) ZNHB — the fixed-supply network asset
+## 3) ZNHB supply and pools
 
-ZNHB has a hard genesis supply of **1,000,000,000 ZNHB**, split once, permanently, the first time a real admin/treasury wallet is configured (`StateProcessor.EnsureZNHBPoolsBootstrapped`, `core/state_transition.go`):
+`config/genesis.json` and `config/genesis.mainnet.json` allocate `1000000000000000000000000000` wei (1,000,000,000 ZNHB) to the admin wallet. `EnsureZNHBPoolsBootstrapped` runs once (guarded by a state flag, called from `ProcessBlockLifecycle`) and splits the admin wallet's **live** ZNHB balance at that moment: the Reward Pool gets 20% (floored) and the Sale Pool gets the remainder. It refuses to run when the balance is not positive, and it does not assert any absolute total. For a balance of exactly 1,000,000,000 ZNHB the pools are 800,000,000 (Sale) and 200,000,000 (Reward).
 
-| Pool | Size | Purpose |
+| Pool | Share of the admin wallet's ZNHB at bootstrap | Purpose |
 | --- | --- | --- |
-| Sale Pool | 800,000,000 ZNHB | Sold to buyers via the Genesis Treasury Distribution Curve; also receives bought-back ZNHB from the treasury buyback engine ([§6](#6-the-treasury-buyback-engine)) |
-| Reward Pool | 200,000,000 ZNHB | Backs validator/staking rewards via a halving schedule |
+| Sale Pool | 80% (the remainder) | Sold through the curve in section 4; also receives bought-back ZNHB (section 6) |
+| Reward Pool | 20% | Backs epoch rewards (section 5); also receives forfeited governance deposits and ZNHB transfer fees credited to the admin wallet |
 
-The Sale Pool's ledger balance matches the curve's own sellable cap exactly (16,000 tranches × 50,000 ZNHB = 800,000,000 ZNHB), with no remainder. (An earlier, now-abandoned chain had an extra 8,000 ZNHB of carried-forward mint-path-bug inflation sitting in this pool beyond the curve's reachable cap -- that chain no longer exists; the current chain's genesis has no such drift.) The Reward Pool stays at exactly 200,000,000 ZNHB so the halving schedule's convergence proof (§5) remains exact.
+Two effects on the Reward Pool ledger outside epoch rewards, both in `core/state_transition.go`: a ZNHB transfer sent from the admin wallet debits the Reward Pool ledger by the amount sent, and a transfer fee credited to the admin wallet (or a rejected governance proposal's deposit forfeited to it) credits the Reward Pool ledger.
 
-ZNHB makes **no protocol-defined valuation promise**. The curve in §4 governs only how treasury-owned Sale Pool inventory is priced as it sells down — it is not a ceiling, floor, or guarantee on what ZNHB trades for once it leaves the treasury and moves peer-to-peer.
+The curve can sell at most 800,000,000 ZNHB in total (16,000 tranches of 50,000, section 4). The Sale Pool ledger is a separate number; a purchase needs both room under the curve and enough Sale Pool and admin-wallet ZNHB.
 
 ---
 
 ## 4) The Genesis Treasury Distribution Curve
 
-The Sale Pool is not sold at a flat price. It is divided into **16,000 tranches of 50,000 ZNHB each**, and each tranche is priced higher than the last:
+The Sale Pool is sold in **16,000 tranches of 50,000 ZNHB each**. Prices are in NHB per whole ZNHB (USD-equivalent):
 
 ```
-P(i) = P0 · r^i
-P0 = $0.05           (tranche 0 spot price)
-r  = 20^(1/16000)     (frozen at genesis, identical across every validator)
+P(i) = P0 * r^i          i = 0 .. 15,999
+P0   = 0.05              (tranche 0)
+r    = 20^(1/16000)       (frozen as an exact 50-digit rational, curve.go)
 ```
 
-The terminal price — the spot price of the last tranche, approached but never exceeded within the Sale Pool's own inventory — is **$1.00**. That $1.00 describes only what the treasury itself would charge for its very last unit of Sale Pool inventory; it is not a market cap, a price ceiling, or a promise about ZNHB's value once it trades peer-to-peer.
+`Params.TerminalPrice()` is `P0 * r^16000` = 1.00, the price one step past the last tranche; it is what `znhb_getTokenomicsState` reports once the Sale Pool is fully sold (`fullySoldOut`). The last purchasable tranche (index 15,999) is priced `P0 * r^15999`, just under 1.00. Per-tranche prices are built once by iterative multiplication and rounded to 50 decimal digits at each step (`buildPriceTable`), which keeps every validator's result identical.
 
-**How a purchase is actually priced:** the chain tracks one consensus counter, `cumulative_sale_distributed` — the running total of ZNHB the Sale Pool has ever sold. A purchase's cost is the exact integral of `P(i)` across the tranche boundaries it spans (`core/tokenomics/curve.Params.Cost`), computed in exact rational arithmetic (`math/big.Rat`, never floats) so every validator derives an identical result. This makes the pricing **immune to order-splitting**: buying 100,000 ZNHB in one transaction costs exactly the same as buying it in ten 10,000-ZNHB transactions.
+**Purchase pricing.** The chain keeps one counter, `cumulative_sale_distributed` (attoZNHB sold so far). A purchase moving it from `c0` to `c1` costs `Params.Cost(c0, c1)`: the exact sum of `price(tranche) * amount-in-that-tranche` across the tranches the range spans, computed with `math/big.Rat`. The exact cost is path-independent (`Cost(a,c) == Cost(a,b) + Cost(b,c)`). The amount actually charged is rounded up to the next attoNHB (`RoundCostUp`), so it can differ by at most one attoNHB per transaction between one large and several small purchases.
 
-**Two on-chain paths draw from the Sale Pool, both curve-priced, both real:**
+Two transaction paths sell from the Sale Pool:
 
-* **Direct purchase** (`TxTypeBuyZNHB`, `core/state_transition.go`'s `applyBuyZNHB`) — the buyer specifies the ZNHB amount they want and a maximum NHB they're willing to pay (slippage protection); the chain computes the exact cost from the live curve position and rejects the transaction if it exceeds the buyer's cap.
-* **Swap-voucher mint** (`applySwapVoucherMintTransaction`, `core/swap_voucher_tx.go`) — an OTC/fiat on-ramp path that independently verifies the requested ZNHB amount against the curve's own price before moving it out of the Sale Pool, in addition to its existing price-proof and fraud-control checks.
+* **Direct purchase**, `TxTypeBuyZNHB` (`0x19`, `applyBuyZNHB`). Payload: `znhbAmount`, `maxNHBAmount`, optional `quoteId`. The chain computes the cost from the live counter and fails with `price moved` if it exceeds `maxNHBAmount`. The buyer pays NHB, which is credited to the admin wallet; the buyer receives ZNHB, the Sale Pool ledger decreases and `cumulative_sale_distributed` increases. The admin wallet cannot buy from itself. Emits `swap.buyznhb.recorded`.
+* **Swap-voucher mint**, `applySwapVoucherMintTransaction` (`core/swap_voucher_tx.go`). Besides its price-proof signature and risk checks, it requires the voucher's ZNHB amount to be within `[swap] SlippageBps` (default `50`) of the amount the price proof's rate implies for the voucher's fiat amount (`swap.ComputeMintAmount`), and separately computes the curve cost of that ZNHB amount and requires the voucher's USD budget to be within the same `SlippageBps` of the curve cost. Both checks must pass. It then moves the ZNHB from the admin wallet and Sale Pool to the recipient.
 
-Neither path can create ZNHB beyond what the Sale Pool has left — both fail cleanly (a retriable error, not a permanent one, since a future buyback could free up room) once `cumulative_sale_distributed` would exceed 800,000,000 ZNHB.
+Both fail when `cumulative_sale_distributed` plus the amount would exceed 800,000,000 ZNHB (`curve.ErrExceedsSalePool`); a later buyback can lower the counter.
 
 ---
 
-## 5) The Reward Pool and the validator/staking halving schedule
+## 5) The Reward Pool and the halving schedule
 
-Validator and staking rewards are funded from the 200,000,000-ZNHB Reward Pool, using a Bitcoin-style halving schedule (`core/rewards/halving.go`):
+`core/rewards/halving.go`:
 
 ```
-B0 = 200 ZNHB / epoch        (base emission, era 0)
-E  = 500,000 epochs / era    (era length)
-emission(epoch) = B0 >> floor((epoch-1) / E)
+B0 = 200 ZNHB per epoch      (HalvingBaseEmissionZNHB)
+E  = 500,000 epochs per era  (HalvingEraLengthEpochs)
+emission(epoch) = B0 >> floor((epoch-1) / E)     at attoZNHB precision, epoch >= 1
 ```
 
-Integer halving is applied at attoZNHB precision (a right shift, rounding down every era), which means the cumulative emission across every era converges to **strictly less than 200,000,000 ZNHB**, forever — it approaches the Reward Pool's exact size without ever reaching or exceeding it, the same convergence property that gives Bitcoin's own 21,000,000-BTC cap its guarantee.
+The shift rounds down each era; 200 ZNHB is about 2^67.4 attoZNHB, so the per-epoch emission reaches `0` after roughly 68 halvings, and `HalvingEmissionForEpoch` returns `0` for every era from `maxHalvingEras` (80) on. Since `2 * B0 * E` is 200,000,000 ZNHB, the sum of all eras is strictly less than 200,000,000 ZNHB. An "epoch" here is the reward epoch of `epochConfig.Length` blocks.
 
-`StateProcessor.settleEpochRewards` (`core/rewards_logic.go`) enforces this at the ledger level, independent of the emission formula: whatever an epoch's schedule calls for is clamped to the Reward Pool's live remaining balance before any validator or staker is paid, and the pool is debited by the exact amount actually paid out — never the nominal, requested amount. If the pool is ever fully drawn down, further epochs pay zero rather than manufacturing new ZNHB.
+`StateProcessor.settleEpochRewards` (`core/rewards_logic.go`) reads the Reward Pool ledger: if the epoch's planned payout exceeds the pool balance, the plans are scaled down to the balance, and the pool is debited by what is paid.
 
-**Current status: live.** `core/node.go`'s `NewNode` activates the schedule automatically (`rewards.HalvingScheduleConfig(2000, 5000, 3000, 2000)` — 20% validator / 50% staker / 30% engagement split) whenever a real admin/treasury wallet is configured for the network. There is no separate opt-out: any network that has a working ZNHB Sale Pool (§3, §4) also has this schedule active. `rewards.Config.Schedule`/the validator/staker/engagement split percentages are not currently reachable by any governance proposal kind — changing them requires a code change and a redeploy, not a vote.
+`NewNode` (`core/node.go`) activates the schedule with `rewards.HalvingScheduleConfig(2000, 5000, 3000, 2000)` (20% validator / 50% staker / 30% engagement split, history length 2000) whenever an admin wallet is configured. The split and schedule are not reachable by any governance proposal kind.
 
 ---
 
 ## 6) The treasury buyback engine
 
-A share of every NHB-denominated transaction fee automatically funds a treasury buyback: a per-epoch, budget-capped repurchase of ZNHB from willing sellers, recycled back into the Sale Pool (never burned, never re-minted). This closes the loop the other direction from §4 — instead of only ever selling Sale Pool inventory outward, the treasury can also buy ZNHB back in when it makes sense to.
+The engine is dormant unless the genesis file declares `buybackSigners` and `buybackSignerThreshold` (`GenesisSpec.BuybackSignerConfig`, `core/genesis/spec.go`). Among the genesis files in `config/`, only `genesis.phase-e.json` declares them. When they are absent, `applyBuybackAsk`, `applyBuybackRefPrice` and `settleBuybackEpoch` do nothing or fail with `treasury buyback engine is not configured for this network`.
 
-**Funding.** `core/state_transition.go`'s `applyTransactionFee` sweeps a configurable share (`fee_share_bps`, launch default **20%**) of NHB fee revenue into a dedicated on-chain Buyback Accrual account (`core/tokenomics/buyback`) — a real account balance, not a virtual counter, so there is always genuine NHB behind whatever the engine later pays sellers. The remaining share still routes to the fee's normal owner wallet exactly as before; this is a no-op change in NHB actually collected from payers. That underlying revenue is the separate, opt-in merchant/POS domain fee (keyed on `tx.MerchantAddress`, `native/fees`, default **150 bps (1.50%)** MDR) — distinct from the protocol-enforced network transfer fee (`core/transfer_gas_policy.go`'s `TransferGasPolicy`), which applies to ordinary transfers once a wallet's free tier is exhausted, at its own per-asset rate — **20 bps (0.20%) on NHB transfers**, **10 bps (0.10%) on ZNHB transfers** — and is routed entirely to `TransferGasPolicy.FeeCollector`, with no buyback share of its own. NHB's transfer rate is kept higher deliberately, to generate revenue and encourage holding NHB, while ZNHB's lower rate reflects its own use case as a lower-priced asset.
+**Funding.** `applyTransactionFee` (`core/state_transition.go`), the domain-fee path described in [fee policy](../fees/policy.md), credits `feeShareBps` of each NHB fee to the buyback accrual account, a real account balance, and the rest to the fee's route wallet. The default `feeShareBps` is `2000` (20%) and can be changed by a `policy.buybackParams` proposal. The protocol transfer fee (`TransferFeeBps` 20 for NHB, `TransferFeeBpsZNHB` 10 for ZNHB by default) goes entirely to the transfer fee collector and has no buyback share.
 
-**Selling in.** Any ZNHB holder can submit a market ask (`TxTypeBuybackAsk`) at any point during an epoch, naming the amount of ZNHB they're willing to sell — no price is named; the treasury sets the price (see below). The ask's ZNHB is escrowed into the Buyback Accrual account immediately on submission, not just promised, so a seller can never ask for more than they actually have. The treasury's own admin/treasury wallet and any address currently holding bonded validator stake are protocol-barred from selling in — an obvious conflict-of-interest a treasury shouldn't be able to trade against itself, or that a validator shouldn't be able to exploit around its own participation in finalizing the very epoch that settles it.
+**Selling in.** `TxTypeBuybackAsk` (`0x24`) with `znhbAmount`. The seller's ZNHB is moved into the accrual account immediately and the ask is recorded for the current epoch. No price is named. These are rejected: the admin wallet, the accrual account, and any address whose `Stake` is positive.
 
-**Pricing.** Settlement never trusts a single number. It computes a hard ceiling, `MaxBuybackPrice`, as the *lesser* of two independently derived prices:
+**Pricing.** Settlement computes
 
 ```
-MaxBuybackPrice = min(
-  curve_price      × (1 − discount_bps),        // the Sale Pool's own live spot price, discounted
-  reference_price   × (1 − safety_margin_bps),   // an independently signed external price, margined
-)
+MaxBuybackPrice = min( curve_price * (1 - discount_bps/10000),
+                       reference_price * (1 - safety_margin_bps/10000) )
 ```
 
-`curve_price` is the Genesis Treasury Distribution Curve's live spot price (§4) — no separate oracle needed for this half. `reference_price` comes from a genesis-declared, permanently non-governable M-of-N signer quorum (`TxTypeBuybackRefPrice`): a bundle of signatures over a canonical per-epoch price message, verified the same way `native/escrow`'s frozen-arbitration signer sets are (independently reimplemented, not imported, to keep the two domains from coupling). If no valid reference price is signed and submitted for an epoch, the treasury does not guess — no purchase happens that epoch, and every pending ask is refunded in full.
+`curve_price` is the price of the current tranche (the terminal price if sold out). `reference_price` comes from `TxTypeBuybackRefPrice` (`0x25`): a rate (`rateNum/rateDenom`), epoch and timestamp with signatures over the message `NHB_BUYBACK_REFPRICE_V1|epoch=..|rate=..|ts=..` (keccak256, 65-byte signatures), from at least `threshold` distinct genesis signers. Only one reference price is accepted per epoch and the epoch must be the current open epoch. Defaults for `discount_bps` and `safety_margin_bps` are `500` each (`core/node.go`), adjustable by `policy.buybackParams`. If no reference price is on file for the epoch, no purchase happens and every ask is refunded in full.
 
-**Settlement.** Once per epoch, at the same finalization point where validator/staking rewards settle (`core/buyback_settlement.go`'s `settleBuybackEpoch`, called from `core/epochs.go`'s `finalizeEpoch`), every pending ask is filled pro-rata against the Buyback Accrual account's live NHB balance at `MaxBuybackPrice`: if total demand fits inside budget, every seller is filled in full; if demand exceeds budget, every seller is scaled down by the identical ratio, so no seller is filled while another is starved. Filled ZNHB moves into the treasury's own admin wallet and the Sale Pool balance grows by the same amount — recycled inventory, not new supply — while `cumulative_sale_distributed` (§4) decrements accordingly, making the curve's very next tranche a little cheaper than it would otherwise have been. Sellers are paid NHB for whatever filled, and refunded ZNHB for whatever didn't.
-
-**Current status: live mechanism, governance-adjustable parameters.** The engine activates automatically whenever a genesis-declared buyback signer quorum is configured (`genesis.BuybackSignerConfig`) — a network without one behaves exactly as if this section didn't exist, zero behavioral change. `fee_share_bps` (20% at launch), `discount_bps` (5%), and `safety_margin_bps` (5%) start as code-level defaults but are adjustable via the `policy.buybackParams` governance proposal kind (`native/governance`), each within `[0, 10000]` bps, applied via the normal quorum/threshold/timelock gate every other proposal kind uses. The signer quorum itself has no field in that payload and no governance path at all — see [§7](#7-what-governance-can-and-cannot-change).
+**Settlement.** `settleBuybackEpoch` runs in `finalizeEpoch` (`core/epochs.go`) right after reward settlement. Every ask is filled pro-rata against the accrual account's NHB balance at `MaxBuybackPrice`: all asks fill fully if total demand fits the budget, otherwise each is scaled by the same ratio (rounding down). Sellers receive NHB for filled ZNHB and get unfilled ZNHB refunded. Filled ZNHB is credited to the admin wallet, the Sale Pool ledger increases by the same amount, and `cumulative_sale_distributed` decreases (floored at `0`). Emits `BuybackEpochSettled`.
 
 ---
 
 ## 7) What governance can and cannot change
 
-NHBChain's live governance system (8 proposal kinds — parameter updates, slashing policy, fee rate changes, swap price-signer registration, treasury buyback parameters, and two disabled-by-default kinds for role allowlists and treasury directives) is documented in full, with exact mechanics (POTSO-weighted voting, quorum, timelock), in the nhbportal wallet's **Governance → How governance works** tab.
+There are 12 proposal kinds ([overview](../governance/overview.md)). Related to this document:
 
-The short version for this document: **almost none of it reaches ZNHB's tokenomics.** The Sale Pool split, the curve's price/tranche parameters, and the Reward Pool's halving schedule are genesis-fixed constants and one-time bootstrap logic — not parameters in the governable `ParamStore`, and not reachable by any proposal kind that exists today. The one deliberate exception is the buyback engine's three bps parameters: `fee_share_bps`/`discount_bps`/`safety_margin_bps` are governance-adjustable via `policy.buybackParams` (`native/governance`'s `ProposalKindBuybackParams`), each bounded to `[0, 10000]` and gated by the same quorum/threshold/timelock every other proposal goes through. Its M-of-N reference-price signer quorum has **no** governance path at all, permanently, by the same architecture that keeps everything else in this document out of governance's reach — `BuybackParamsPayload` has no field for it, and no other proposal kind can touch it either. A fixed-supply asset's guarantees only hold if the things that matter can't be voted away by whoever shows up to a proposal.
+* `policy.buybackParams` sets `feeShareBps`, `discountBps` and `safetyMarginBps`, each `0`-`10000`. The payload has no field for the reference-price signers, which come only from genesis.
+* `param.update` can set `mint.nhb.maxEmissionPerYearWei`, `mint.znhb.maxEmissionPerYearWei` (the ZNHB mint path is closed regardless) and the `staking.*` keys, see [params](../governance/params.md).
+* `role.allowlist` cannot grant `MINTER_ZNHB`.
+* `treasury.directive`, when `TreasuryAllowList` is configured, debits and credits ZNHB account balances directly and does not update the Sale Pool or Reward Pool ledgers.
+
+No proposal kind changes the curve parameters, the pool split, the halving schedule or the reward split.
 
 ---
 
 ## 8) RPC reference
 
-Both methods are public (no authentication required) and read-only.
+`znhb_getTokenomicsState` and `znhb_quoteBuy` are read-only and unauthenticated.
 
 ### `znhb_getTokenomicsState`
 
-Returns the curve's live position, both pool balances, and the treasury buyback engine's current NHB accrual balance. No parameters.
+No parameters. Returns zero values (not an error) before the pools are bootstrapped. Example for a freshly bootstrapped 1,000,000,000 ZNHB supply:
 
 ```json
 {
@@ -138,17 +137,17 @@ Returns the curve's live position, both pool balances, and the treasury buyback 
   "currentTrancheIndex": 0,
   "fullySoldOut": false,
   "cumulativeSaleDistributedWei": "0",
-  "salePoolBalanceWei": "800008000000000000000000000",
+  "salePoolBalanceWei": "800000000000000000000000000",
   "rewardPoolBalanceWei": "200000000000000000000000000",
   "buybackAccrualBalanceWei": "0"
 }
 ```
 
-`buybackAccrualBalanceWei` mirrors the Buyback Accrual account's live NHB balance (§6) — NHB fee revenue pending the next epoch's settlement. This RPC does not yet expose per-epoch ask/settlement history or the reference-price signer set; that is tracked follow-up work, not yet built.
+`buybackAccrualBalanceWei` is the NHB balance recorded for the buyback accrual account.
 
 ### `znhb_quoteBuy`
 
-Returns the exact NHB cost of buying a given amount of ZNHB from the Sale Pool right now — the same figure `applyBuyZNHB` would charge if the transaction were submitted immediately. Takes one positional parameter: the ZNHB amount in attoZNHB (wei), as a decimal string.
+One positional parameter: the ZNHB amount in attoZNHB as a decimal string. Returns the cost `applyBuyZNHB` would charge at the current counter (rounded up):
 
 ```
 params: ["1000000000000000000"]   // 1 ZNHB
@@ -162,15 +161,19 @@ params: ["1000000000000000000"]   // 1 ZNHB
 }
 ```
 
-Callers building a `TxTypeBuyZNHB` transaction should use `nhbCostWei` plus a small slippage buffer as the transaction's `maxNHBAmount` — never approximate the curve client-side, since it is a bonding curve and its price moves as other purchases land between a quote and a transaction's execution.
+An amount above the remaining curve capacity returns `znhbAmount exceeds the treasury Sale Pool's remaining inventory`. Use `nhbCostWei` plus a buffer as `maxNHBAmount`, since the price moves as other purchases land.
+
+### `buyback_getRefPriceStatus`
+
+Public. Params: `[{"epoch": <uint64>}]` (optional; defaults to the current open epoch). Returns `{epoch, hasRefPrice, rateNum, rateDenom, timestampAt, signerCount}` (the last four are omitted when no price is on file). Returns `buyback epoch scheduling is not enabled on this network` when epochs are not configured.
+
+### `buyback_submitRefPrice`
+
+Requires RPC authentication. Params: `[{"rateNum": "<int>", "rateDenom": "<int>", "epoch": <uint64>, "timestamp": <uint64>, "signatures": ["<hex 65 bytes>", ...]}]`. It wraps the payload in a `TxTypeBuybackRefPrice` transaction and returns `{"txHash": ...}`; signature verification happens on-chain.
 
 ---
 
-## 9) What this document does not claim
+## 9) Not in the code
 
-* ZNHB has no protocol-defined valuation ceiling, floor, or price guarantee once it leaves the treasury.
-* The treasury buyback engine (§6) is real, tested code, but only activates on a network whose genesis actually configures a reference-price signer quorum — this document does not claim any *specific* deployed network has done so, only that the mechanism exists and behaves as described once it has.
-* No specific deployed network has necessarily passed a `policy.buybackParams` proposal yet; this document does not claim any network's current bps values have ever diverged from the code-level defaults, only that the proposal kind exists and works — see §6/§7.
-* `policy.trancheGating` (future-tranche release conditions on the Genesis Treasury Distribution Curve, §4) is a separate, still-undesigned governance kind — not part of the buyback engine, and not built.
-* `znhb_getTokenomicsState` does not yet expose per-epoch buyback ask/settlement history or the reference-price signer set as structured data — only the current accrual balance.
-* NHB's backing claim (1:1 custodied reserves) describes the intended architecture; verifying live reserve custody is outside the scope of this document.
+* No governance proposal kind or on-chain mechanism gates or schedules the release of future curve tranches. `curve.ReleaseGate` and `AlwaysOpenGate` are defined in `core/tokenomics/curve/gate.go` but are not called by the purchase handlers.
+* `znhb_getTokenomicsState` does not return per-epoch buyback asks, settlements or the signer set.

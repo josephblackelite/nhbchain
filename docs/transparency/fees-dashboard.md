@@ -1,69 +1,37 @@
-# Network-wide Fee Transparency Dashboard
+# Fee Transparency Dashboard
 
-The fees dashboard is the canonical reference for understanding how network fees accrue, are
-recognized, and ultimately settle into the Network Hub Bank (NHB) treasury accounts. It combines
-on-chain event data with custodied wallet balances to deliver a reconciled view of fee revenue and
-free-tier consumption.
+This page describes the Grafana dashboard definition and the on-chain fee data
+it is meant to be fed from.
 
-The authoritative Grafana configuration is versioned at
-[`ops/grafana/dashboards/fees.json`](../../ops/grafana/dashboards/fees.json) and is validated by the
-POS readiness test suite to ensure the JSON schema remains loadable.
+## What is in the repository
 
-## Methodology
+[`ops/grafana/dashboards/fees.json`](../../ops/grafana/dashboards/fees.json) is
+a Grafana dashboard titled "NHB Fee Transparency" that refreshes every `5m`.
+`tests/posreadiness/fees/reconcile_test.go` loads the file as part of the
+readiness tests. Its four panels query ClickHouse tables:
 
-The dashboard is composed of two data lenses that are reconciled on a daily basis:
+| Panel | Type | Table it reads |
+| --- | --- | --- |
+| Fee Total by Domain | time series | `fee_total_by_domain` (last 30 days, grouped by `domain`) |
+| Fee p95 per Transaction | time series | `fee_p95_per_tx` (95th percentile of `fee_per_tx`, last 30 days) |
+| Free Tier Burn Down | bar gauge | `free_tier_burn_down` (`burned_ratio`; colour thresholds at `0.8` yellow and `0.9` red) |
+| Route Balances | time series | `route_balances` (`wallet_label`, `balance_usd`, last 14 days) |
 
-1. **On-chain events** &mdash; Streaming the single `fees.applied` event (`TypeFeeApplied`,
-   `core/events/fees.go`), emitted from `core/state_transition.go` and consumed by the explorer and
-   RPC handlers. This event is used to calculate per-transaction fees, domain-level aggregates, and
-   free-tier burns. All examples use the SQL and RPC snippets published in
-   [`docs/queries/fees.sql`](../queries/fees.sql) and [`docs/api/fees-query.md`](../api/fees-query.md).
-2. **Wallet balances** &mdash; Tracking the NHB owner multi-sig, ZNHB proceeds wallet, and USDC
-   payout wallet across the supported L2 networks. Balance snapshots are ingested hourly and rolled
-   up to daily closing positions.
+The ClickHouse tables are not created by any code in this repository. Loading
+them is left to whoever runs the dashboard; example SQL and an export recipe
+are in [`docs/queries/fees.sql`](../queries/fees.sql) and
+[`docs/api/fees-query.md`](../api/fees-query.md).
 
-The delta between event-derived fees and wallet balance movements is surfaced in the
-**Reconciliation Checklist** panel so finance teams can investigate variances quickly.
+## On-chain data available as inputs
 
-## Core Panels
+- The `fees.applied` event (`TypeFeeApplied`, `core/events/fees.go`), emitted
+  by `applyTransactionFee` in `core/state_transition.go`. Attributes are listed
+  in [fee accounting](../fees/accounting.md).
+- `fees_listTotals`, `fees_getMonthlyStatus`, `fees_getTransferStatus` and
+  `fees_getTransferQuote` (`rpc/fees_handlers.go`, `rpc/fees_query.go`).
+- Account balances of the route wallets, for example from `nhb_getBalance`.
 
-The dashboard publishes the following top-level widgets, matching the panels shipped in
-[`ops/grafana/dashboards/fees.json`](../../ops/grafana/dashboards/fees.json):
-
-- **Fee Total by Domain** &mdash; Bar chart comparing fee realization by domain (e.g. `gateway`, `swap`,
-  `loyalty`). The Grafana panel uses the `fee_total_by_domain` series produced by the ClickHouse
-  query in `docs/queries/fees.sql`.
-- **Fee p95 per Transaction** &mdash; P95, median, and minimum per-transaction fees to identify outlier
-  routing costs.
-- **Free Tier Burn Down** &mdash; Combines the `free_tier_burn_down` series and remaining allocation
-  to highlight how much of the subsidized quota remains. Alerting is configured at 80% consumption.
-- **Route Balances** &mdash; Wallet balance spark-lines for the NHB routing accounts (owner NHB wallet,
-  ZNHB proceeds wallet, owner USDC wallet) with annotations for manual adjustments.
-
-## Drill-down Metrics
-
-For deeper analysis, use the following interactive panels:
-
-- **Fee p95 per Transaction** &mdash; P95, median, and minimum per-transaction fees to identify outlier
-  routing costs.
-- **Route Balances** &mdash; Wallet balance spark-lines for the NHB routing accounts (owner NHB wallet,
-  ZNHB proceeds wallet, owner USDC wallet) with annotations for manual adjustments.
-
-## Reconciliation Checklist
-
-Finance should complete this checklist as part of daily close:
-
-1. **Owner NHB wallet** &mdash; Confirm balance change matches the net of fees routed into NHB. Expected
-   delta: `fee_total_by_domain` minus passthrough network reimbursements.
-2. **ZNHB proceeds wallet** &mdash; Validate inflows align with fee settlements earmarked for ZNHB
-   buybacks. Expected delta: 0 after accounting for pending swaps queued in the bridge contract.
-3. **Owner USDC wallet** &mdash; Verify payouts to treasury match the USDC portion of collected fees.
-   Expected delta: pending merchant reimbursements < 2% of prior-day fees.
-
-Any discrepancies should be logged in the finance recon issue template and investigated within 24h.
-
-## Operational Notes
-
-- Dashboard auto-refresh interval is 5 minutes; p95 panels require 24h backfill after deployment.
-- Queries are versioned alongside these docs. Update both the SQL and RPC references when modifying
-  metrics to keep data consumers aligned.
+`fees.applied` covers only transfers matched to a fee domain; the protocol
+transfer fee (see [fee policy](../fees/policy.md#1-protocol-transfer-fee-transfergaspolicy))
+does not emit it. Reconciling the two requires balance data for the transfer
+fee collector as well.
