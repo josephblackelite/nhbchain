@@ -3354,7 +3354,12 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
 		// advance -- same reasoning as ErrSwapExpired above.
-		errors.Is(err, ErrTransactionExpired):
+		errors.Is(err, ErrTransactionExpired),
+		// A capture or void whose authorization id is not a 32-byte hex
+		// string is a pure function of the transaction's own payload, so
+		// it can never become valid. See ErrPOSInvalidAuthorizationID
+		// (core/state_pos.go).
+		errors.Is(err, ErrPOSInvalidAuthorizationID):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),

@@ -283,6 +283,13 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int, caller [20]byte) (*Aut
 	merchantAcc = cloneAccount(merchantAcc)
 	originalPayer := cloneAccount(payerAcc)
 	originalMerchant := cloneAccount(merchantAcc)
+	if bytes.Equal(auth.Payer[:], auth.Merchant[:]) {
+		// One account plays both roles: apply the release, refund and
+		// capture credit to a single object so the second PutAccount below
+		// cannot overwrite the first with a stale copy of the same address.
+		merchantAcc = payerAcc
+		originalMerchant = originalPayer
+	}
 	if payerAcc.LockedZNHB.Cmp(auth.Amount) < 0 {
 		return nil, fmt.Errorf("pos: locked balance inconsistent")
 	}
