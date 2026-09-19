@@ -1,141 +1,87 @@
-# Hardened Escrow Engine Routing
+# Escrow Engine Routing
 
 ## Purpose
 
-The hardened escrow engine replaces the prototype "legacy" state transition logic
-with a deterministic, audited implementation that shares the same code paths used
-by the RPC gateway and custody services. Routing all native escrow transactions
-through the engine guarantees:
+All native escrow transactions are applied by the escrow engine in `native/escrow/engine.go`. The state processor (`core/state_transition.go`) decodes each transaction into an engine call, so one implementation serves every path. There is no separate "legacy" transition logic; only a one-time migration of old records remains (see Legacy migration below).
 
-- **Single source of truth.** Every escrow lifecycle event is handled by the
-  hardened engine, ensuring identical behaviour for RPC-triggered and
-  consensus-triggered flows.
-- **Deterministic accounting.** Balances, vault credits, and fee routing are
-  executed by the engine against the canonical state manager, eliminating custom
-  bookkeeping in the state processor.
-- **Forward compatibility.** Native transactions can exercise new engine
-  features (disputes, mediation, atomic trade settlement) without additional
-  protocol changes.
-- **Transparent migration.** Historical `escrow-<id>` trie entries are migrated
-  lazily into the new storage layout the first time they are touched, avoiding
-  disruptive network upgrades.
+For the status machine, fees and transaction table see [`escrow.md`](./escrow.md).
 
-## Design Overview
+## How a transaction reaches the engine
 
-1. **State processor wrapper.** `StateProcessor.configureTradeEngine` now wires
-   both the escrow engine and the trade engine against `core/state.Manager`,
-   configures the fee treasury and clock source, and registers an event emitter
-   so consensus events are produced identically to RPC flows.
-2. **Native transaction handlers.** The `apply*Escrow` handlers convert the
-   transaction payloads into engine calls:
-   - `TxTypeCreateEscrow` → `Engine.Create`
-   - `TxTypeLockEscrow`   → `Engine.Fund`
-   - `TxTypeReleaseEscrow`→ `Engine.Release`
-   - `TxTypeRefundEscrow` → `Engine.Refund`
-   - `TxTypeDisputeEscrow`→ `Engine.Dispute`
-   - `TxTypeArbitrate*`   → `Engine.Resolve` (validates the `ROLE_ARBITRATOR`
-     committee stored with the escrow)
-   After the engine call succeeds the sender nonce is incremented using the
-   freshly persisted account state.
-3. **Fee treasury management.** `StateProcessor.SetEscrowFeeTreasury` allows the
-   node to configure the address that receives release fees (wired during node
-   start-up). The engine refuses to release funds if the treasury is unset,
-   ensuring fee routing remains explicit.
-4. **Legacy migration.** When an engine operation cannot find a modern escrow
-   record the state processor attempts a one-off migration:
-   - The legacy RLP payload stored at `keccak("escrow-" || id)` is decoded into
-     an `escrow.LegacyEscrow`.
-   - The data is normalised into an `escrow.Escrow` with default mediator,
-     deadlines, and status mapping.
-   - Funds that were implicitly "burned" in the prototype are re-materialised in
-     the deterministic escrow vault accounts so future releases/refunds mirror
-     hardened engine semantics.
-   - The legacy key is cleared to prevent double migrations.
-5. **Trade integration.** The trade engine shares the same configuration path,
-   so dual-leg trades automatically react to escrow funding updates emitted from
-   native transactions.
+1. **State processor wiring.** `StateProcessor.configureTradeEngine` (`core/state_transition.go`) binds the escrow engine and the trade engine to the state manager (`core/state`), sets the fee treasury and the clock (block time), and installs an emitter that appends engine events to the block's event list.
+2. **Handlers.** Each escrow transaction type maps to one engine call:
 
-## Native Transaction Payloads
+   | Transaction type | Engine call |
+   |------------------|-------------|
+   | `TxTypeCreateEscrow` | `Engine.Create` (sender is the payer) |
+   | `TxTypeLockEscrow` | `Engine.Fund` |
+   | `TxTypeReleaseEscrow` | `Engine.Release` |
+   | `TxTypeRefundEscrow` | `Engine.Refund` |
+   | `TxTypeDisputeEscrow` | `Engine.Dispute` (empty reason) |
+   | `TxTypeExpireEscrow` | `Engine.Expire` (block time) |
+   | `TxTypeArbitrateRelease`, `TxTypeArbitrateRefund` | `Engine.ResolveWithSignatures` |
+   | `TxTypeDelegatedCreateEscrow` | `Engine.CreateWithSignature` |
+   | `TxTypeDelegatedReleaseEscrow`, `...RefundEscrow`, `...DisputeEscrow` | `Engine.ReleaseWithSignature`, `RefundWithSignature`, `DisputeWithSignature` |
+   | `TxTypeEscrowCreateRealm`, `TxTypeEscrowUpdateRealm` | `Engine.CreateRealm`, `Engine.UpdateRealm` (after a `ROLE_ESCROW_REALM_ADMIN` check) |
 
-| Transaction Type         | Payload Fields |
-|--------------------------|----------------|
-| `TxTypeCreateEscrow`     | `payee` (`[]byte`), `token` (`"NHB"`/`"ZNHB"`), `amount` (`big.Int`), `feeBps` (`uint32`), `deadline` (`int64`), optional `mediator` (`[]byte`), optional `meta` (`[]byte <=32`). |
-| `TxTypeLockEscrow`       | `data` = escrow ID (`[32]byte`). |
-| `TxTypeReleaseEscrow`    | `data` = escrow ID (`[32]byte`), caller must be payee or mediator. |
-| `TxTypeRefundEscrow`     | `data` = escrow ID (`[32]byte`), caller must be payer prior to deadline. |
-| `TxTypeDisputeEscrow`    | `data` = escrow ID (`[32]byte`), caller must be payer or payee. |
-| `TxTypeArbitrateRelease` | `data` = escrow ID (`[32]byte`), caller must satisfy the `ROLE_ARBITRATOR` committee threshold recorded on the escrow. |
-| `TxTypeArbitrateRefund`  | Same as above; outcome instructs the engine to refund the payer after committee approval. |
+   After the engine call succeeds the sender's account nonce is incremented on the freshly persisted account (`updateSenderNonce`), so balance changes made by the engine are preserved. The arbitration handler (`applyArbitrate`) does not increment the sender nonce.
+3. **Fee treasury.** `StateProcessor.SetEscrowFeeTreasury` sets the address that receives escrow fees; the node wires it when it starts (`core/node.go`). The engine returns `escrow engine: fee treasury not configured` if a release or refund has a non-zero fee and no treasury is set.
+4. **Trade engine.** The trade engine is constructed and configured in the same place, but no escrow transaction handler notifies it: `applyLockEscrow` calls only `Engine.Fund`. See [`trade.md`](./trade.md).
 
-The engine resolves arbitration transactions by loading the escrow's frozen
-arbitrator policy—which captures the committee membership and signing
-threshold at creation time—and verifying that the native transaction sender is
-authorised. The policy is persisted alongside the escrow record when the
-`Create` operation runs so later `TxTypeArbitrate*` submissions can enforce the
-same governance-managed committee the RPC flows rely on. See
-[`docs/services/escrow.md`](../services/escrow.md) and
-[`docs/escrow/escrow.md`](./escrow.md) for additional context on how arbitrator
-policies are registered and frozen during escrow creation.
+## Transaction payloads
 
-### Example Create Payload
+See [`escrow.md`](./escrow.md) section 4 for the full table. In short:
+
+* `TxTypeCreateEscrow` (`0x03`): JSON or RLP object `payee`, `token`, `amount`, `feeBps`, `deadline`, `nonce`, optional `mediator`, `meta`, `realm`. `payee`, `mediator` and `meta` are byte fields (base64 in JSON). `nonce` is required and must be greater than zero.
+* `TxTypeLockEscrow` (`0x09`), `TxTypeReleaseEscrow` (`0x04`), `TxTypeRefundEscrow` (`0x05`), `TxTypeDisputeEscrow` (`0x0A`), `TxTypeExpireEscrow` (`0x3B`): `tx.Data` is the raw 32-byte escrow ID.
+* `TxTypeArbitrateRelease` (`0x0B`) and `TxTypeArbitrateRefund` (`0x0C`): RLP `{escrowId, decision, signatures}`. The outcome is taken from the signed `decision` JSON, not from which of the two types is used. Authorization is a quorum of the escrow's frozen arbitrators, not the transaction sender.
+
+### Example create payload
 
 ```json
 {
-  "payee": "\u0001...20-byte...",
+  "payee": "<base64 of the 20 payee address bytes>",
   "token": "NHB",
-  "amount":  "1000000000000000000",
+  "amount": 1000000000000000000,
   "feeBps": 100,
   "deadline": 1735689600,
-  "mediator": "\u0000...optional...",
-  "meta": "\u0012\u0034...optional..."
+  "nonce": 1,
+  "mediator": "<optional, base64 of 20 bytes>",
+  "meta": "<optional, base64 of up to 32 bytes>",
+  "realm": "<optional realm id>"
 }
 ```
 
-### Escrow ID Derivation
+`nhb-cli escrow create` builds and signs this payload; use it instead of assembling JSON by hand.
 
-The engine derives the escrow identifier deterministically as:
+### Escrow ID derivation
 
 ```
 escrowID = keccak256(payer || payee || metaHash || nonce)
 ```
 
-where `nonce` is the mandatory, caller-supplied positive `uint64` encoded as 8 bytes big-endian. `Create` rejects any request with
-`nonce == 0`. Because native transactions now defer creation to the engine, clients can pre-compute IDs using the same rule
-(including the nonce), guaranteeing they match the stored record.
+`nonce` is the positive, caller-supplied `uint64` encoded as 8 bytes big-endian; `metaHash` is the 32-byte meta value (zero-filled if none). `Create` rejects `nonce == 0`. Clients can compute the ID before sending the transaction.
 
-## Behavioural Guarantees
+## Behavioural notes
 
-- **Nonce management:** Sender nonces are incremented after the engine mutates
-  state, ensuring account balances updated by the engine are preserved when the
-  nonce is written back.
-- **Vault accounting:** Funds locked by legacy escrows are credited into the
-  deterministic module vault during migration so future releases operate on real
-  balances rather than implicit debits.
-- **Event parity:** All engine calls emit the same `types.Event` payloads used by
-  the RPC services, allowing observers to rely on a single event schema.
-- **Idempotency:** Engine methods remain idempotent; repeated fund/release calls
-  are no-ops after the terminal state is reached, matching RPC behaviour.
+* **Nonce handling.** Handlers increment the sender nonce after the engine mutates state.
+* **Idempotency.** Repeating fund, release, refund, expire or dispute on an escrow that already reached the target state succeeds without change. `ResolveWithSignatures` returns success without change for any escrow that is already `released`, `refunded` or `expired`, whatever the decision submitted (`native/escrow/engine.go`).
+* **Determinism.** The engine's clock is the block timestamp (`sp.now()`), and the expiry handler passes the block timestamp explicitly.
+* **Events.** Every engine call appends the events listed in [`escrow.md`](./escrow.md) section 6.
+
+## Legacy migration
+
+When a handler looks up an escrow ID and the modern record does not exist, `ensureEscrowReady` calls `migrateLegacyEscrow` (`core/state_transition.go`):
+
+* The legacy record is read from the trie key `keccak256("escrow-" || id)` and decoded as an `escrow.LegacyEscrow` (`buyer`, `seller`, `amount`, `status`).
+* It is converted by `convertLegacyEscrow`: payer = legacy seller, payee = legacy buyer (or the seller if no buyer), token `NHB`, no mediator, `feeBps` 0, nonce 1, `createdAt` = now, `deadline` = now + 30 days. Legacy status maps as: released to `released`, refunded to `refunded`, disputed to `disputed`, open or in-progress (and anything else) to `funded`.
+* For `funded` and `disputed` results the amount is credited to the escrow's vault balance and to the vault account, so later releases and refunds operate on real balances.
+* The legacy key is cleared so the migration runs once.
+
+If neither record exists (or the legacy trie read fails or returns empty data) the handler fails with `escrow <id> not found`, where `<id>` is the 64-character lowercase hex of the ID with no `0x` prefix (`fmt.Errorf("escrow %x not found", id)` in `migrateLegacyEscrow`, `core/state_transition.go`).
 
 ## Examples
 
-1. **Native single-leg escrow:**
-   - Create escrow with JSON payload embedded in `TxTypeCreateEscrow`.
-   - Payer submits `TxTypeLockEscrow` once funds are deposited on-chain.
-   - Payee finalises with `TxTypeReleaseEscrow`, triggering fee routing to the
-     configured treasury.
-
-2. **Legacy dispute resolution:**
-   - A historical `escrow-<id>` entry is encountered when a validator submits a
-     `TxTypeArbitrateRelease` transaction.
-   - Migration converts the record, rehydrates the vault balance, and
-     `Engine.Resolve` releases the funds once the arbitrator committee
-     authorises the outcome while recording the modern escrow status.
-
-3. **Trade escrow update:**
-   - When an escrow leg is funded via `TxTypeLockEscrow`, the trade engine (bound
-     through `configureTradeEngine`) receives the funding event and advances the
-     trade status to `TradeFunded` once both legs are complete.
-
-By funnelling all native transactions through the hardened engine, the network
-benefits from consistent validation logic, richer telemetry, and automatic
-support for future escrow and trade extensions.
+1. **Single escrow, direct transactions.** Payer sends `TxTypeCreateEscrow`, then `TxTypeLockEscrow` to fund it; the payee (or mediator) sends `TxTypeReleaseEscrow`, which pays the payee and routes the fee to the treasury.
+2. **Dispute with a realm.** An escrow created with `realm` is funded, then the payer or payee sends `TxTypeDisputeEscrow`. A quorum of the frozen arbitrators signs a decision envelope and anyone submits it in a `TxTypeArbitrateRelease` or `TxTypeArbitrateRefund` transaction; `ResolveWithSignatures` releases to the payee or refunds the payer.
+3. **Relayed action.** A participant signs the release, refund, dispute or create envelope off-chain and a relayer submits it in the matching `TxTypeDelegated*Escrow` transaction; the chain authorizes against the embedded signature.

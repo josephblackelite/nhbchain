@@ -1,151 +1,51 @@
 # `nhb-cli` Identity Commands
 
-The `nhb-cli` tool includes subcommands under `nhb-cli id` for interacting with the identity module. Ensure your CLI is
-configured with the correct node endpoint (`--node`) and chain ID.
+`nhb-cli` (`cmd/nhb-cli/main.go`, `cmd/nhb-cli/identity_cmd.go`) has an `id` command group and a top-level `claim-username` command. The RPC endpoint defaults to `http://localhost:8080`, or the `RPC_URL` environment variable, or the `--rpc <url>` flag. There are no `--node` or `--chain-id` flags.
 
-## Common Flags
+## Working commands
 
-* `--node`: JSON-RPC endpoint (default from config).
-* `--chain-id`: chain ID (e.g., `14699254016670310680`).
-
-Commands build and submit their RPC payload directly — there is no local signing step or broadcast confirmation prompt.
-
-## Register Alias
+### Claim a username
 
 ```bash
-nhb-cli id set-alias \
-  --addr nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
-  --alias frankrocks
+nhb-cli claim-username <username> <key_file>
 ```
 
-**Response (JSON)**
+Builds and signs a `TxTypeRegisterIdentity` transaction (type `0x02`, `tx.Data` = the username, gas limit 50000, gas price 1) from the key file and submits it. The username is normalized and validated on-chain (3 to 32 characters of `a-z 0-9 . _ -`). See [`identity.md`](./identity.md).
 
-```json
-{"ok":true}
-```
-
-## Add Address
+### Resolve an alias
 
 ```bash
-nhb-cli id add-address \
-  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
-  --alias frankrocks \
-  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
+nhb-cli id resolve --alias frankrocks
 ```
 
-**Response (JSON)**
+Calls `identity_resolve` and prints the raw JSON result (`alias`, `aliasId`, `primary`, `addresses`, `avatarRef` if set, `createdAt`, `updatedAt`).
 
-```json
-{
-  "alias": "frankrocks",
-  "aliasId": "0x5e2c4fd5...",
-  "primary": "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm",
-  "addresses": [
-    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm",
-    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y"
-  ],
-  "createdAt": 1718216400,
-  "updatedAt": 1718217000
-}
-```
-
-## Remove Address
+### Reverse lookup
 
 ```bash
-nhb-cli id remove-address \
-  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
-  --alias frankrocks \
-  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
+nhb-cli id reverse --addr nhb1...
 ```
 
-## Set Primary Address
+Calls `identity_reverse` and prints `{"alias": ..., "aliasId": ...}`.
 
-```bash
-nhb-cli id set-primary \
-  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
-  --alias frankrocks \
-  --addr nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y
-```
+## Commands that do not work
 
-**Response (JSON)**
+These `nhb-cli id` subcommands exist but call JSON-RPC methods that are disabled on the node (HTTP 410, error code `-32060`), so they fail:
 
-```json
-{
-  "alias": "frankrocks",
-  "aliasId": "0x5e2c4fd5...",
-  "primary": "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
-  "addresses": [
-    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
-    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm"
-  ],
-  "createdAt": 1718216400,
-  "updatedAt": 1718217600
-}
-```
+| Command | Flags | RPC method |
+| --- | --- | --- |
+| `id set-alias` | `--addr`, `--alias` | `identity_setAlias` |
+| `id set-avatar` | `--addr`, `--avatar` | `identity_setAvatar` |
+| `id add-address` | `--owner`, `--alias`, `--addr` | `identity_addAddress` |
+| `id remove-address` | `--owner`, `--alias`, `--addr` | `identity_removeAddress` |
+| `id set-primary` | `--owner`, `--alias`, `--addr` | `identity_setPrimary` |
+| `id rename` | `--owner`, `--alias`, `--new-alias` | `identity_rename` |
+| `id create-claimable` | `--payer`, `--recipient`, `--token` (default `NHB`), `--amount`, `--deadline` | `identity_createClaimable` |
+| `id claim` | `--id`, `--payee`, `--preimage` | `identity_claim` |
 
-## Rename Alias
+Use `claim-username` to register a username.
 
-```bash
-nhb-cli id rename \
-  --owner nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm \
-  --alias frankrocks \
-  --new-alias frankr0cks
-```
+## Notes
 
-## Resolve Alias
-
-```bash
-nhb-cli id resolve --alias frankr0cks
-```
-
-**Sample Output**
-
-```json
-{
-  "alias": "frankr0cks",
-  "aliasId": "0x7be9a4c1...",
-  "primary": "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
-  "addresses": [
-    "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y",
-    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgpprm"
-  ],
-  "avatarRef": "https://cdn.nhb/id/frankr0cks.png",
-  "createdAt": 1718216400,
-  "updatedAt": 1718218200
-}
-```
-
-## Create Claimable (Pay by Email)
-
-```bash
-nhb-cli id create-claimable \
-  --payer nhb1payer... \
-  --recipient 0x3a4b... \
-  --token NHB \
-  --amount 10.00 \
-  --deadline 1718736000
-```
-
-CLI prints the raw JSON-RPC result (`claimId`, `expiresAt`, etc). Notify the recipient with the claim information.
-
-## Claim Funds
-
-```bash
-nhb-cli id claim \
-  --id 0x92fd... \
-  --payee nhb1recipient... \
-  --preimage 0x3a4b...
-```
-
-**Output**
-
-```json
-{"ok":true,"token":"NHB","amount":"25"}
-```
-
----
-
-Tips:
-
-* Output is always raw JSON — no flag needed for machine-readable responses.
-* For advanced scripting, pipe outputs into `jq`.
+* Output of the `id` commands is the raw JSON result; RPC errors print as `RPC error <code>: <message>`.
+* The write RPCs (when they were enabled) were called with the authentication token from `NHB_RPC_TOKEN`; `resolve` and `reverse` need no token.

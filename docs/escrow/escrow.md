@@ -1,279 +1,263 @@
-# NHBChain Escrow & P2P Settlement
+# NHBChain Escrow
 
-> Version: v1 (Task 5 rollout) • ChainID: **14699254016670310680** • HRPs: **nhb**, **znhb**
+This document describes the escrow module as implemented in `native/escrow`, the state processor handlers in `core/state_transition.go`, and the RPC surface in `rpc/`. The escrow module holds funds in a per-token vault until a payee release, a payer refund, an expiry, or an arbitration decision moves them out.
 
-NHBChain's escrow module safeguards funds until a deterministic terminal outcome is reached. With Task 5 the module now drives
-**atomic dual-lock settlement** for peer-to-peer (P2P) commerce, enabling both sides of a trade to fund independent legs while the
-chain settles them together. This document describes the on-chain state machines, RPC interfaces, emitted events, and operational
-considerations for building against the updated settlement flow.
+Related documents: [`hardened-engine.md`](./hardened-engine.md) (transaction routing and legacy migration), [`milestones.md`](./milestones.md), [`trade.md`](./trade.md), [`gateway-api.md`](./gateway-api.md), [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md), [`mint-settlement.md`](./mint-settlement.md).
 
 ---
 
-## 1. Module Overview
+## 1. Module overview
 
-* **Deterministic transitions.** Every state change is validated against predicates before being applied. Repeated calls on an
-  escrow or trade that has already reached a terminal state are structural no-ops, so replays do not mutate state.
-* **Atomic two-leg settlement.** Trades reference two escrow vaults (base and quote legs). Settlement either applies to both vaults
-  or reverts entirely.
-* **Dispute lifecycle.** Parties (payer/payee or buyer/seller) can dispute before final settlement. Authorized arbitrators resolve
-disputes with explicit outcomes that move both escrows to terminal states.
-* **Auditable history.** Transition logs, event emissions, and export APIs allow merchants to reconcile gateway activity against
-chain state.
+* **Tokens.** Only `NHB` and `ZNHB` are accepted (`native/escrow/types.go`, `defaultTokenRegistry`). Symbols are trimmed and upper-cased; anything else fails with `unsupported escrow token`.
+* **Transitions are idempotent.** Calling a transition that has already been applied returns success without changing state (`Engine.Fund`, `Release`, `Refund`, `Expire`, `Dispute`, `Resolve` in `native/escrow/engine.go`). There is no client-supplied idempotency key.
+* **Writes are signed transactions.** The `escrow_create`, `escrow_fund`, `escrow_release`, `escrow_refund`, `escrow_expire`, `escrow_dispute` and `escrow_resolve` JSON-RPC methods are permanently disabled; they answer HTTP 410 with error code `-32060` (`rpc/escrow_handlers.go`, `escrowRPCDisabledMessage`). Every state change goes through a signed transaction submitted with `nhb_sendTransaction` (section 4).
+* **Pause switch.** Every engine transition first checks the `escrow` module pause flag (`nativecommon.Guard(e.pauses, "escrow")`).
 
 ---
 
-## 2. State Machines & Data Model
+## 2. Data model
 
-### 2.1 Escrow state machine
+### 2.1 Escrow statuses
 
-Each escrow record tracks token funds owned by a payer for a designated payee.
+`native/escrow/types.go` defines six statuses. The RPC returns them as lowercase strings (`rpc/escrow_handlers.go`, `escrowStatusString`).
 
-```go
-// enums
-const (
-  EscrowInit EscrowStatus = iota
-  EscrowFunding
-  EscrowFunded
-  EscrowReleased
-  EscrowRefunded
-  EscrowExpired
-  EscrowDisputed
-  EscrowResolved
-)
+| Value | Constant | RPC string | Terminal |
+|-------|----------|------------|----------|
+| 0 | `EscrowInit` | `init` | no |
+| 1 | `EscrowFunded` | `funded` | no |
+| 2 | `EscrowReleased` | `released` | yes |
+| 3 | `EscrowRefunded` | `refunded` | yes |
+| 4 | `EscrowExpired` | `expired` | yes |
+| 5 | `EscrowDisputed` | `disputed` | no |
+
+There is no "funding", "resolved" or "cancelled" status. A resolved dispute ends as `released` or `refunded`; the decision is recorded in the `escrow.resolved` event and in the escrow's `resolutionHash`.
+
+Allowed transitions (from `native/escrow/engine.go`):
+
+| From | Action | To | Who may call |
+|------|--------|----|--------------|
+| (none) | create | `init` | the payer (sender of `TxTypeCreateEscrow`, or the signer of a delegated create) |
+| `init` | fund (`Fund`) | `funded` | the payer only |
+| `funded` | release (`Release`) | `released` | the payee, or the mediator if one is set |
+| `funded` | refund (`Refund`) | `refunded` | the payer, and only while `now < deadline` |
+| `funded` | expire (`Expire`) | `expired` | anyone, once `now >= deadline` |
+| `funded` | dispute (`Dispute`) | `disputed` | the payer or the payee |
+| `disputed` | release (`Release`) | `released` | the mediator only |
+| `disputed` | committee decision (`ResolveWithSignatures`) | `released` or `refunded` | a quorum of the escrow's frozen arbitrators |
+
+Notes:
+
+* `Expire` on an escrow that is not `funded` (and not already `expired`) is a no-op once the deadline has passed; before the deadline it fails with `escrow: deadline not reached`.
+* A `disputed` escrow cannot be expired or refunded by the payer.
+* `Engine.Resolve` (single mediator plus `release`/`refund` outcome string) exists in the package but no transaction type or RPC calls it; on-chain resolution is `ResolveWithSignatures` only (section 5).
+
+### 2.2 Escrow ID
+
+```
+escrowID = keccak256(payer || payee || metaHash || nonce)
 ```
 
-| State             | Description                                                                                   | Terminal | Allowed transitions                                               |
-|-------------------|-----------------------------------------------------------------------------------------------|----------|-------------------------------------------------------------------|
-| `EscrowInit`      | Record created, no funds locked.                                                              | No       | `EscrowFunding`, `EscrowCancelled` (implicit delete)              |
-| `EscrowFunding`   | Vault expects inbound transfer (watcher or module auto-collect).                              | No       | `EscrowFunded`, `EscrowExpired`                                   |
-| `EscrowFunded`    | Funds held in module vault.                                                                   | No       | `EscrowReleased`, `EscrowRefunded`, `EscrowExpired`, `EscrowDisputed` |
-| `EscrowReleased`  | Funds paid to payee; fee routed.                                                              | Yes      | –                                                                 |
-| `EscrowRefunded`  | Funds returned to payer.                                                                      | Yes      | –                                                                 |
-| `EscrowExpired`   | Deadline passed before settlement; auto-refund to payer.                                      | Yes      | –                                                                 |
-| `EscrowDisputed`  | Funds frozen pending arbitrator outcome.                                                      | No       | `EscrowResolved`                                                  |
-| `EscrowResolved`  | Arbitrator resolved dispute with explicit `release` or `refund`. Escrow closed with outcome.  | Yes      | –                                                                 |
+`payer` and `payee` are the 20-byte addresses, `metaHash` is the 32-byte meta value (zero if none), and `nonce` is a mandatory positive `uint64` encoded as 8 bytes big-endian (`Engine.Create`). Creating the same definition twice returns the existing escrow; the same ID with a different definition fails with `escrow: identifier already exists with different definition`. The escrow `nonce` is unrelated to the account transaction nonce.
 
-> **Idempotency:** Every transition records a transition hash (`escrow/history/<id>/<seq>`) so replays of identical operations are rejected.
+### 2.3 Create-time validation (`Engine.Create`)
 
-### 2.2 Dual-lock trade state machine
+* `nonce > 0`; `amount > 0`; `feeBps <= 10000`.
+* `deadline >= now` (block time on-chain). A deadline in the past fails with `escrow: deadline before creation time`.
+* `applyCreateEscrow` additionally requires a 20-byte payee, a non-empty token, `deadline > 0`, a 20-byte mediator if one is supplied, and `meta` of at most 32 bytes.
+* If `realm` is set, the realm must exist and the engine freezes its current arbitrator policy into the escrow (section 5).
 
-Trades orchestrate two escrow legs. Each leg is an `Escrow` (base and quote) referenced by the trade record.
-
-```go
-const (
-  TradeInit TradeStatus = iota
-  TradePartialFunded
-  TradeFunded
-  TradeDisputed
-  TradeSettled
-  TradeCancelled
-  TradeExpired
-)
-```
-
-| State                | Description                                                                 | Terminal | Allowed transitions                                                |
-|----------------------|-----------------------------------------------------------------------------|----------|--------------------------------------------------------------------|
-| `TradeInit`          | Trade and both escrow IDs created. No deposits observed.                    | No       | `TradePartialFunded`, `TradeCancelled`, `TradeExpired`              |
-| `TradePartialFunded` | One leg funded, waiting for counterpart.                                    | No       | `TradeFunded`, `TradeExpired`, `TradeCancelled`                     |
-| `TradeFunded`        | Both escrows funded. Atomic settlement or dispute can occur.                | No       | `TradeSettled`, `TradeDisputed`, `TradeExpired`                     |
-| `TradeDisputed`      | Either party escalated. Both escrows frozen awaiting arbitrator decision.   | No       | `TradeSettled` (arbitrator `release` outcome), `TradeCancelled` (arbitrator `refund`) |
-| `TradeSettled`       | Both escrows released atomically according to settlement outcome.           | Yes      | –                                                                  |
-| `TradeCancelled`     | Both escrows refunded atomically (voluntary cancel or arbitrator outcome).  | Yes      | –                                                                  |
-| `TradeExpired`       | Deadline passed before funding or settlement; both escrows refunded.        | Yes      | –                                                                  |
-
-### 2.3 Storage & references
-
-* `escrow/<id>` → canonical escrow struct (payer, payee, token, amount, fee, deadlines, metadata hash, status, idempotency keys).
-* `escrow/bal/<id>/<token>` → amount stored in the module vault.
-* `trade/<id>` → trade struct (buyer, seller, offer metadata, base/quote escrow IDs, aggregate status, dispute notes).
-* `trade/history/<id>/<seq>` → canonical log of trade-level transitions.
-
----
-
-## 3. Atomic Settlement Lifecycle
-
-1. **Trade creation.** Seller publishes an offer off-chain. Buyer accepts via `p2p_createTrade` RPC (see §5). The call returns
-   `tradeId`, `escrowBaseId` (seller leg), and `escrowQuoteId` (buyer leg), plus payment intents for each wallet.
-2. **Funding.**
-   * Each party transfers funds into their escrow vault using native token transfer or module auto-debit.
-   * Watchers (gateway or merchants) call `escrow_fund` to mark completion. Once both legs are `EscrowFunded`, trade status becomes
-     `TradeFunded`.
-3. **Atomic settlement.**
-   * When both legs are funded, either party or the gateway invokes `p2p_settle(tradeId, caller)`.
-   * Settlement executes two sub-transactions inside a single commit:
-     1. Release base escrow to buyer (or seller depending on offer direction) and apply fees.
-     2. Release quote escrow to seller.
-   * If any release fails (insufficient balance, vault transfer error), the entire transaction reverts and both escrows remain funded.
-4. **Disputes.**
-   * `p2p_dispute(tradeId, caller, reason)` marks both escrows as disputed. `EscrowDisputed` status prevents release/refund.
-   * Arbitrators submit `p2p_resolve(tradeId, outcome, resolutionMemo)` with one of four outcomes: `release_both`, `refund_both`,
-     `release_base_refund_quote`, or `release_quote_refund_base`. The decision is atomic across both escrows.
-5. **Expiry & cancellation.** Deadlines are tracked at both escrow and trade level. Cancels initiated by buyer/seller unwind both
-   legs.
-
----
-
-## 4. Events & Monitoring
-
-### 4.1 Escrow events
-
-| Event                    | Emitted when                                         | Payload highlights                                         |
-|--------------------------|------------------------------------------------------|-------------------------------------------------------------|
-| `escrow.created`         | Escrow record created                                | `escrowId`, `payer`, `payee`, `token`, `amount`, `deadline` |
-| `escrow.funded`          | Module confirms funds in vault                       | `escrowId`, `txHash`, `amount`                              |
-| `escrow.released`        | Funds released to payee                              | `escrowId`, `payee`, `netAmount`, `feeAmount`               |
-| `escrow.refunded`        | Funds returned to payer                              | `escrowId`, `payer`, `amount`                               |
-| `escrow.expired`         | Deadline exceeded, auto-refund executed              | `escrowId`, `deadline`, `amount`                            |
-| `escrow.disputed`        | Payer or payee opens dispute                         | `escrowId`, `initiator`, `reasonCode`                       |
-| `escrow.resolved`        | Arbitrator settles dispute                           | `escrowId`, `outcome`, `arbitrator`, `resolutionMemo`       |
-
-### 4.2 Trade events
-
-| Event                          | Emitted when                                          | Payload highlights                                                           |
-|--------------------------------|-------------------------------------------------------|-------------------------------------------------------------------------------|
-| `escrow.trade.created`         | Trade initialized                                     | `tradeId`, `escrowBaseId`, `escrowQuoteId`, `buyer`, `seller`, `offerId`      |
-| `escrow.trade.partial_funded`  | One leg funded                                        | `tradeId`, `fundedLeg`                                                        |
-| `escrow.trade.funded`          | Both legs funded                                      | `tradeId`                                                                    |
-| `escrow.trade.settled`         | Atomic release executed                               | `tradeId`, `releaseTxHash`, `netBase`, `netQuote`                             |
-| `escrow.trade.disputed`        | Dispute opened at trade level                         | `tradeId`, `initiator`, `reasonCode`                                         |
-| `escrow.trade.resolved`        | Arbitrator outcome (maps to `escrow.trade.settled`/expiry) | `tradeId`, `outcome`, `arbitrator`, `resolutionMemo`                     |
-| `escrow.trade.expired`         | Deadline triggered refund                             | `tradeId`, `expiredLegs`                                                      |
-
-Events include `sequence`, `blockHeight`, and `eventTime` fields for downstream ordering. Merchants should treat event delivery as
-at-least-once and deduplicate using `eventId` + `sequence`.
-
----
-
-## 5. JSON-RPC Interface
-
-### 5.1 Escrow RPC methods
-
-| Method | Description |
-|--------|-------------|
-| `escrow_create(payer, payee, token, amount, feeBps, deadline, nonce, mediator?, meta?) -> { id }` | Create escrow record; status `EscrowInit`. `nonce` is required and must be greater than 0. Optionally assign mediator and metadata. |
-| `escrow_fund(id, payer)` | Marks escrow as funded after deposit. Idempotent; repeated calls ignored once funded. |
-| `escrow_release(id, caller)` | Releases funds to payee. Allowed: payee, mediator, arbitrator. Fails if disputed or not funded. |
-| `escrow_refund(id, caller)` | Refunds payer. Allowed: payer (pre-dispute) or arbitrator (via `escrow_resolve`). |
-| `escrow_expire(id)` | Public method: if deadline passed and escrow funded but unsettled, auto-refund to payer. |
-| `escrow_dispute(id, caller, reason)` | Marks escrow as disputed. Allowed: payer or payee. |
-| `escrow_resolve(id, caller, outcome, memo?)` | Authorized by the escrow's own `mediator` field (caller must equal the escrow's mediator), not the global arbitrator role. Outcome `release` or `refund`. Sets `EscrowResolved` and executes atomic payout. |
-| `escrow_get(id)` | Returns escrow struct, including current status, leg balances, deadlines, dispute info, and history cursor. |
-
-All write methods require signed transactions using account keys. Idempotency is structural: repeated calls on an escrow that has
-already reached a terminal state are no-ops and do not mutate state.
-
-#### Client helper & wallet route
-
-TypeScript integrations can rely on the `EscrowDisputeClient` helper in [`clients/ts/escrow/dispute.ts`](../../clients/ts/escrow/dispute.ts).
-The helper automatically fetches the recorded payer address via `escrow_get` before invoking `escrow_dispute`, ensuring the dispute
-payload uses the canonical caller. An optional reason string is forwarded for downstream audit trails:
-
-```ts
-import EscrowDisputeClient from '../../clients/ts/escrow/dispute';
-
-const client = new EscrowDisputeClient({
-  baseUrl: process.env.NHB_RPC_URL!,
-  authToken: process.env.NHB_RPC_TOKEN!,
-});
-
-await client.dispute('ESC123...', 'suspected fraud');
-```
-
-Wallet surfaces can display payee identity metadata through the gateway helper route `GET /v1/consensus/wallet/escrows/{escrowId}`.
-The endpoint resolves the escrow record and, when available, enriches it with the alias returned by `identity_reverse`. UI flows can
-combine the gateway response with the dispute helper above to implement a “mark as scam” toggle that both freezes the escrow and
-records the merchant-provided reason.
-
-### 5.2 P2P trade RPC methods
-
-| Method | Description |
-|--------|-------------|
-| `p2p_createTrade(offerId, buyer, seller, baseToken, baseAmount, quoteToken, quoteAmount, deadline, metadata?) -> { tradeId, escrowBaseId, escrowQuoteId, intents }` | Creates trade and both escrow legs. Optional metadata is hashed into each leg. |
-| `p2p_getTrade(tradeId)` | Returns trade struct, aggregated status, dispute notes, escrow snapshots, and settlement history. |
-| `p2p_settle(tradeId, caller)` | When both legs funded, atomically releases base to buyer and quote to seller. Caller must be buyer, seller, or gateway service key. |
-| `p2p_dispute(tradeId, caller, reason)` | Moves trade to `TradeDisputed`. Both escrows become `EscrowDisputed`. |
-| `p2p_resolve(tradeId, outcome, memo?, evidenceUri?)` | Arbitrator-only. Outcome must be one of `release_both`, `refund_both`, `release_base_refund_quote`, `release_quote_refund_base`. |
-
----
-
-## 6. Security, Roles & Authorization
-
-* **Atomicity guarantees.** Dual-lock settlement is guarded by a single module call which either releases both legs or reverts.
-  Partial release is impossible because both `Escrow` releases share a transaction-scoped state machine lock.
-* **Arbitrator role.** `p2p_resolve` is gated by `ROLE_ARBITRATOR`, with governance controlling role assignment. `escrow_resolve`
-  is authorized separately: the caller must equal the escrow's own `mediator` field, not the global arbitrator role. Arbitration
-  transactions must include an `arbitratorMemo` stored in history.
-* **Mediator role.** Mediators can release funds (if mutually agreed off-chain) but cannot resolve disputes once flagged.
-* **Deadlines & expiries.** Both escrows and trades enforce `deadline` (Unix epoch). Validators run cron-like watchers to execute
-  expiry transitions; merchants should monitor events for refunds.
-* **Fee routing.** Fees are debited from each escrow during release and deposited into the configured fee collector account. Fee
-  configuration remains unchanged from previous releases.
-
----
-
-## 7. Operational Guidelines
-
-1. **Idempotency is structural.** `escrow_*` and `p2p_*` writes are idempotent by state: once an escrow or trade reaches a terminal
-   status, repeated calls with the same parameters are no-ops and do not mutate state. There is no client-supplied idempotency key.
-2. **Monitor events.** Subscribe to WebSocket or use the REST gateway webhooks (see `gateway-api.md`). Use block height + event ID
-   to deduplicate.
-3. **Handle disputes promptly.** Once `EscrowDisputed`, only arbitrators can resolve. Merchants should surface dispute status in
-   dashboards and notify support teams.
-4. **Reconciliation.** Combine on-chain events with settlement exports from the gateway (§8) to reconcile merchant balances.
-5. **Testing.** Use the sandbox simulator (see `/docs/commerce/merchant-tools.md`) to exercise trade lifecycle before going live.
-
----
-
-## 8. Appendices
-
-### 8.1 Error Codes
-
-Escrow and P2P RPC errors use standard numeric JSON-RPC error codes, not symbolic string constants. The `message` field carries a
-plain Go error string describing the specific failure.
-
-| Code     | Constant                                             | Meaning                                                                 |
-|----------|-------------------------------------------------------|--------------------------------------------------------------------------|
-| `-32602` | `codeInvalidParams`                                    | Malformed or missing request parameters.                                |
-| `-32021` | `codeEscrowInvalidParams` / `codeP2PInvalidParams`     | Invalid parameters for an `escrow_*`/`p2p_*` call.                      |
-| `-32022` | `codeEscrowNotFound` / `codeP2PNotFound`               | Escrow or trade ID not found.                                           |
-| `-32023` | `codeEscrowForbidden` / `codeP2PForbidden`             | Caller lacks permission for the requested action.                       |
-| `-32024` | `codeEscrowConflict` / `codeP2PConflict`               | Requested transition not valid from the escrow/trade's current status.  |
-| `-32025` | `codeEscrowInternal` / `codeP2PInternal`               | Internal error while processing the request.                            |
-| `-32010` | `codeDuplicateTx`                                      | Duplicate transaction (same sender/nonce) already known.                |
-| `-32030` | `codeMempoolFull`                                      | Mempool full; resubmit later.                                           |
-
-### 8.2 Reference types
+### 2.4 Reference types
 
 ```go
 type Escrow struct {
-  ID         [32]byte
-  Payer      Address
-  Payee      Address
-  Mediator   *Address
-  Token      string
-  Amount     *big.Int
-  FeeBps     uint32
-  Deadline   int64
-  CreatedAt  int64
-  MetaHash   [32]byte
-  Status     EscrowStatus
-  Dispute    *DisputeInfo // null unless disputed
-  HistoryPos uint64       // last history sequence number
-}
-
-type Trade struct {
-  ID            [32]byte
-  OfferID       string
-  Buyer         Address
-  Seller        Address
-  BaseEscrowID  [32]byte
-  QuoteEscrowID [32]byte
-  Deadline      int64
-  CreatedAt     int64
-  Status        TradeStatus
-  LastActionAt  int64
-  Dispute       *TradeDisputeInfo
+  ID             [32]byte
+  Payer          [20]byte
+  Payee          [20]byte
+  Mediator       [20]byte   // zero value = no mediator
+  Token          string     // "NHB" or "ZNHB"
+  Amount         *big.Int
+  FeeBps         uint32
+  Deadline       int64
+  CreatedAt      int64
+  Nonce          uint64
+  MetaHash       [32]byte
+  Status         EscrowStatus
+  RealmID        string
+  FrozenArb      *FrozenArb // set only when created against a realm
+  ResolutionHash [32]byte   // keccak256 of the applied decision payload
+  DisputeReason  string
 }
 ```
 
-Use these structures as canonical references when building merchant integrations.
+Storage lives in the state manager (`core/state`): the escrow record, a per-escrow vault balance (`EscrowCredit`/`EscrowDebit`/`EscrowBalance`), and the frozen policy. Funds sit at the vault address returned by `EscrowVaultAddress(token)`.
+
+---
+
+## 3. Money flow and fees
+
+* **Fund** (`Fund`): moves `amount` from the payer to the token vault and credits the escrow's vault balance.
+* **Release** (`Release`): `fee = amount * feeBps / 10000` (integer division, rounded down). The payee receives `amount - fee`; the fee goes to the node's configured escrow fee treasury. If the fee is greater than zero and no treasury is configured, release fails with `escrow engine: fee treasury not configured`.
+* **Release or refund of a `disputed` escrow** (`computeDisputePayouts`): the payout is `amount - fee - realmFee`, where `fee` uses the escrow's `feeBps` and `realmFee = amount * frozenSchedule.FeeBps / 10000` when the frozen policy carries a fee schedule. The realm fee is paid to the schedule's recipient. If the fees exceed the amount the call fails. A refund of a `funded` (not disputed) escrow returns the full amount with no fee.
+* **Refund / Expire** of a `funded` escrow: the full amount returns to the payer, no fee.
+
+The escrow fee treasury is set on the state processor (`SetEscrowFeeTreasury`) when the node starts (`core/node.go`).
+
+---
+
+## 4. Transactions
+
+Write access is through these transaction types (`core/types/transaction.go`). The transaction `Type` is the numeric value shown.
+
+| Type | Value | `tx.Data` | Authorization |
+|------|-------|-----------|---------------|
+| `TxTypeCreateEscrow` | `0x03` | JSON (or RLP) object: `payee` (20 bytes), `token`, `amount`, `feeBps`, `deadline`, `nonce`, optional `mediator` (20 bytes), optional `meta` (up to 32 bytes), optional `realm` | The sender becomes the payer. |
+| `TxTypeReleaseEscrow` | `0x04` | the 32-byte escrow ID | Sender must be the payee or the mediator (mediator only, if disputed). |
+| `TxTypeRefundEscrow` | `0x05` | the 32-byte escrow ID | Sender must be the payer, before the deadline. |
+| `TxTypeLockEscrow` | `0x09` | the 32-byte escrow ID | Sender must be the payer; this is the funding step (`Engine.Fund`). |
+| `TxTypeDisputeEscrow` | `0x0A` | the 32-byte escrow ID | Sender must be the payer or payee. Carries no reason. |
+| `TxTypeArbitrateRelease` | `0x0B` | RLP `{escrowId string, decision bytes, signatures []string}` | Committee signatures (section 5); the transaction sender is not checked. |
+| `TxTypeArbitrateRefund` | `0x0C` | same as above | same as above; the outcome comes from the signed decision, not from the transaction type. |
+| `TxTypeExpireEscrow` | `0x3B` | the 32-byte escrow ID | Anyone. |
+| `TxTypeDelegatedReleaseEscrow` | `0x3C` | RLP `{escrowId string, payload bytes, signature bytes}` | Signature of a participant embedded in the payload (below). |
+| `TxTypeDelegatedRefundEscrow` | `0x3D` | same | same |
+| `TxTypeDelegatedDisputeEscrow` | `0x3E` | same | same |
+| `TxTypeEscrowCreateRealm` | `0x3F` | JSON (or RLP) realm definition (section 5) | Sender must hold `ROLE_ESCROW_REALM_ADMIN`. |
+| `TxTypeEscrowUpdateRealm` | `0x40` | same | same |
+| `TxTypeDelegatedCreateEscrow` | `0x41` | RLP `{payload bytes, signature bytes}` | The payer's signature embedded in the payload. |
+
+JSON encoding notes for `TxTypeCreateEscrow` (`applyCreateEscrow`): `payee`, `mediator` and `meta` are Go `[]byte` fields, so as JSON they are base64 strings; `amount` is a JSON number. The `nhb-cli escrow create` command builds this payload for you.
+
+Each accepted escrow transaction except the arbitration types increments the sender's account nonce (`applyArbitrate` does not, see `core/state_transition.go`), and is counted against the `escrow` module quota (`applyQuota(moduleEscrow, ...)`); arbitration transactions count against the `trade` module quota, and the two realm transactions are not quota-gated.
+
+Escrow IDs in `tx.Data` for release/refund/lock/dispute/expire are the raw 32 bytes (`decodeEscrowID`).
+
+### 4.1 Delegated (signed-envelope) actions
+
+A relayer can submit a release, refund, dispute or create on a participant's behalf. The chain authorizes against the signature embedded in the payload, not against the transaction sender (`applyDelegatedEscrowAction`, `applyDelegatedCreateEscrow`). Signatures are 65-byte secp256k1 signatures over `keccak256(payload)` (no EIP-191 prefix); the recovery byte may be 0/1 or 27/28 (`RecoverSigner`).
+
+* Release / refund / dispute payload (`escrowActionEnvelope`):
+
+  ```json
+  {"escrowId":"<64 hex>","action":"release|refund|dispute","reason":"<optional, dispute only>"}
+  ```
+
+  `escrowId` must equal the target ID and `action` must equal the transaction's action. The recovered signer is then used exactly as if it had sent the direct transaction, so the same role rules apply (payee/mediator for release, payer for refund, payer/payee for dispute).
+* Create payload (`escrowCreateEnvelope`):
+
+  ```json
+  {"action":"create","payer":"<40 hex>","payee":"<40 hex>","token":"NHB","amount":"<decimal>",
+   "feeBps":0,"deadline":1730000000,"nonce":1,"mediator":"<40 hex, optional>","meta":"<64 hex, optional>","realm":"<optional>"}
+  ```
+
+  `payer` must equal the recovered signer. Addresses are raw hex of the 20 address bytes, not bech32.
+
+Replay safety comes from idempotent status transitions; there is no separate nonce registry for signed envelopes.
+
+### 4.2 Legacy records
+
+If an escrow ID is not found in the modern store, the state processor looks for a legacy record at `keccak256("escrow-" || id)` and migrates it once (`migrateLegacyEscrow`). See [`hardened-engine.md`](./hardened-engine.md).
+
+---
+
+## 5. Realms and arbitration
+
+A realm is a named arbitrator committee. Realms are created and updated only by holders of `ROLE_ESCROW_REALM_ADMIN` (`RoleEscrowRealmAdmin`, `core/state_transition.go`).
+
+### 5.1 Realm definition
+
+`TxTypeEscrowCreateRealm`/`TxTypeEscrowUpdateRealm` payload (`decodeEscrowRealmPayload`, JSON or RLP):
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Realm identifier, required. |
+| `scheme` | `1` = single, `2` = committee. |
+| `threshold` | Signatures required. Must be positive and not exceed the member count. |
+| `members` | Bech32 arbitrator addresses, at least one, none zero. |
+| `scope` | `1` = platform, `2` = marketplace. |
+| `providerProfile` | Required free text, at most 512 characters. |
+| `feeBps`, `feeRecipient` | Optional dispute fee schedule (`RealmFeeSchedule`); `feeBps <= 10000`; a recipient is required when `feeBps > 0`. |
+| `arbitrationFeeBps`, `feeRecipientBech32` | Metadata mirror of the fee; `arbitrationFeeBps <= 10000`; a recipient is required when it is greater than zero. |
+
+Create fails if the realm already exists; update fails if it does not. An update replaces the arbitrator set, bumps `version` by one, and replaces the fee schedule.
+
+Governance bounds (parameter store keys in `native/escrow/types.go`): `escrow.realm.MinThreshold` (default 1), `escrow.realm.MaxThreshold` (default 10) and `escrow.realm.AllowedSchemes` (default single and committee). The arbitrator set must have at least `MinThreshold` members and the threshold must lie within the bounds.
+
+### 5.2 Frozen policy
+
+When an escrow is created with `realm`, `Engine.prepareFrozenPolicy` copies the realm's members, threshold, scheme, fee schedule, metadata, realm `version` and a `policyNonce` (the realm's `nextPolicyNonce`, which then increments) into `FrozenArb`. Later realm updates do not change existing escrows.
+
+### 5.3 Resolving a dispute
+
+`TxTypeArbitrateRelease` / `TxTypeArbitrateRefund` call `Engine.ResolveWithSignatures`:
+
+1. The escrow must be `disputed` (already released, refunded or expired escrows return success without change) and must have a frozen policy.
+2. `decision` is a JSON envelope: `{"escrowId":"<64 hex>","outcome":"release|refund","policyNonce":<uint>,"metadata":"<optional 64 hex>"}`. `policyNonce` must be non-zero and equal the escrow's frozen `policyNonce`.
+3. Each entry of `signatures` is a 65-byte signature (hex, optional `0x`) over `keccak256(decision)`. Every signer must be a frozen member; duplicates count once; the number of distinct signers must reach the frozen `threshold`.
+4. `release` pays the payee and `refund` pays the payer, both after the dispute fee rules in section 3. The digest is stored as `resolutionHash`. Once the escrow is `released`, `refunded` or `expired`, any later decision (the same one or a different one) is ignored and the call returns success without changing anything (`native/escrow/engine.go`, `ResolveWithSignatures` early return). If a resolution fails part-way, the previous `resolutionHash` is restored.
+
+An escrow created without a realm has no frozen policy and cannot be resolved this way (`escrow: missing frozen arbitrator policy`). A mediator can still release a disputed escrow with `TxTypeReleaseEscrow`.
+
+---
+
+## 6. Events
+
+Escrow events are emitted by the state processor into the block's event list. Type strings (`native/escrow/events.go`):
+
+`escrow.created`, `escrow.funded`, `escrow.released`, `escrow.refunded`, `escrow.expired`, `escrow.disputed`, `escrow.resolved`, `escrow.realm.created`, `escrow.realm.updated`, `escrow.trade.created`, `escrow.trade.partial_funded`, `escrow.trade.funded`, `escrow.trade.disputed`, `escrow.trade.resolved`, `escrow.trade.settled`, `escrow.trade.expired`, `escrow.milestone.created`, `escrow.milestone.funded`, `escrow.milestone.released`, `escrow.milestone.cancelled`, `escrow.milestone.leg_due`.
+
+All escrow events (`escrow.created` through `escrow.resolved`) carry these attributes, all as strings: `id`, `payer`, `payee` (lowercase hex of the 20 bytes, no `0x`), `token`, `amount`, `feeBps`, `createdAt`, `nonce`; plus `mediator`, `disputeReason`, `realmId` when set; and, for realm-bound escrows, `realmVersion`, `policyNonce`, `arbScheme`, `arbThreshold`, `arbitrators`, `realmScope`, `realmProfile`, `realmFeeBps`, `realmFeeRecipient`. `escrow.resolved` adds `decision` (`release` or `refund`), `decisionMetadata` and `decisionSigners` when present. An `escrow.disputed` event is emitted again if a reason is supplied later for an already-disputed escrow that had none.
+
+Realm events carry `realmId`, `version`, `nextNonce`, `createdAt`, `updatedAt`, `arbScheme`, `arbThreshold`, `arbitrators` and the realm metadata attributes.
+
+Trade and milestone event attributes are described in [`trade.md`](./trade.md) and [`milestones.md`](./milestones.md).
+
+---
+
+## 7. JSON-RPC (read methods)
+
+Requests use the node's JSON-RPC envelope with `params` as an array holding one object, for example `{"jsonrpc":"2.0","id":1,"method":"escrow_get","params":[{"id":"0x..."}]}`.
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `escrow_get` | `{"id": "<64 hex, optional 0x>"}` | Escrow object: `id`, `payer`, `payee`, `mediator?`, `token`, `amount` (decimal string), `feeBps`, `deadline`, `createdAt`, `nonce`, `status`, `meta` (`0x` + 64 hex), `disputeReason?`, and for realm-bound escrows `realm`, `realmVersion`, `policyNonce`, `arbScheme` (number), `arbThreshold`, `frozenAt`, `arbitrators` (`rpc/escrow_handlers.go`, `escrowJSON`). Addresses are bech32 (`nhb1...`). |
+| `escrow_getSnapshot` | `{"id": ...}` | Same core fields plus `frozenPolicy` (scheme as `single`/`committee`, threshold, members, metadata) and `resolutionHash?` (`rpc/modules/escrow.go`). |
+| `escrow_getRealm` | `{"id": "<realm id>"}` | `id`, `version`, `nextPolicyNonce`, `createdAt`, `updatedAt`, `arbitrators` (`scheme`, `threshold`, `members`), `metadata` (`scope`, `providerProfile`, `arbitrationFeeBps`, `feeRecipient?`). Unknown realm: HTTP 404, code `-32602`, message `realm not found`. |
+| `escrow_listEvents` | optional `{"prefix": "escrow.", "limit": N}` | Events currently held in the node's in-memory event buffer whose type starts with the prefix (default `escrow.`), each `{sequence, type, attributes}`; `sequence` is the position within this response, not a stable cursor. |
+| `escrow_milestone*` | see [`milestones.md`](./milestones.md) | |
+
+`escrow_get` reports unknown IDs with HTTP 404 and code `-32022`.
+
+### Error codes
+
+| Code | Meaning (`rpc/escrow_handlers.go`, `rpc/http.go`) |
+|------|------|
+| `-32602` | Invalid parameters on the module-backed methods (`escrow_getRealm`, `escrow_getSnapshot`, `escrow_listEvents`). |
+| `-32021` | Invalid parameters (`escrow_get` and milestone methods). |
+| `-32022` | Escrow not found. |
+| `-32023` | Forbidden. |
+| `-32024` | Conflict (transition not valid from the current status, identifier already exists). |
+| `-32025` | Internal error. |
+| `-32060` | Method disabled (the write `escrow_*` methods and `p2p_createTrade`/`p2p_settle`/`p2p_dispute`/`p2p_resolve`). |
+| `-32010`, `-32030` | Returned by `nhb_sendTransaction`: duplicate transaction, mempool full. |
+
+Transaction-level failures (for example `escrow: unauthorized release caller`) surface when the block is executed, as plain Go error strings.
+
+---
+
+## 8. Command line
+
+`nhb-cli escrow <command>` (`cmd/nhb-cli/escrow_cmd.go`). Every command that writes takes `--key <path to private key file>`; the signer is the actor.
+
+| Command | Flags | Transaction |
+|---------|-------|-------------|
+| `create` | `--payee`, `--token` (NHB or ZNHB), `--amount` (accepts `100e18` shorthand), `--fee-bps`, `--deadline` (`+duration` such as `+72h` or `+3d`, or RFC3339), `--nonce`, `--key`; optional `--mediator`, `--meta` (0x hex, at most 32 bytes), `--realm` | `TxTypeCreateEscrow`; prints the computed escrow ID |
+| `get` | `--id` | `escrow_get` (read-only) |
+| `fund` | `--id`, `--key` | `TxTypeLockEscrow` |
+| `release` | `--id`, `--key` | `TxTypeReleaseEscrow` |
+| `refund` | `--id`, `--key` | `TxTypeRefundEscrow` |
+| `expire` | `--id`, `--key` | `TxTypeExpireEscrow` |
+| `dispute` | `--id`, `--key` | `TxTypeDisputeEscrow` (no reason is attached) |
+| `create-realm` | `--id`, `--members` (comma-separated bech32), `--provider-profile`, `--key`; optional `--threshold` (default 1), `--scheme` (`single`/`committee`, default `single`), `--scope` (`platform`/`marketplace`, default `platform`), `--fee-bps` + `--fee-recipient`, `--arbitration-fee-bps` + `--fee-recipient-bech32` | `TxTypeEscrowCreateRealm` |
+| `resolve` | none | Not available; prints an error explaining that resolution needs committee signatures |
+
+Funding is a separate step from creation: after `create`, the payer must send `fund` (`TxTypeLockEscrow`). Sending tokens to the vault address by an ordinary transfer does not mark an escrow funded.

@@ -1,36 +1,29 @@
-# Identity Audit & Compliance
+# Identity Events and Audit Data
 
-Identity operations on NHBChain are intentionally observable so that custodians, gateways, and regulators can reconstruct user journeys without accessing raw PII. This note describes the emitted event streams, retention guidance, and recommended review procedures.
+What the identity and claimable code records or emits. Code: `core/events/identity.go`, `core/events/claimable.go`, `core/state_transition.go`, `core/node.go`, `services/identity-gateway`.
 
-## Event Streams
+## Events defined
 
-| Event | Purpose | Payload Highlights |
+| Event | Attributes | Emitted by |
 | --- | --- | --- |
-| `identity.alias.set` | First-time alias registration. | `alias`, `address` |
-| `identity.alias.renamed` | Alias string changed for an existing owner. | `old`, `new`, `address` |
-| `identity.alias.avatarUpdated` | Avatar reference updated. | `alias`, `address`, `avatarRef` |
-| `claimable.created` | Pay-by-email claimable funded. | `id`, `payer`, `token`, `amount`, `recipientHint`, `deadline` |
-| `claimable.claimed` | Claimable settled to a recipient. | `id`, `payer`, `payee`, `token`, `amount`, `recipientHint` |
-| `claimable.cancelled` / `claimable.expired` | Funds returned to the payer. | `id`, `payer`, `token`, `amount` |
+| `identity.alias.set` | `alias`, `address` | `Node.IdentitySetAlias` (behind the disabled `identity_setAlias`) |
+| `identity.alias.renamed` | `old`, `new`, `address` | `Node.IdentitySetAlias` / `Node.IdentityRename` (disabled paths) |
+| `identity.alias.avatarUpdated` | `alias`, `address`, `avatarRef` | `Node.IdentitySetAvatar` (disabled path) |
+| `identity.alias.addressLinked` | `alias`, `address` | `Node.IdentityAddAddress` (disabled path) |
+| `identity.alias.addressRemoved` | `alias`, `address` | `Node.IdentityRemoveAddress` (disabled path) |
+| `identity.alias.primaryUpdated` | `alias`, `address` | `Node.IdentitySetPrimary` (disabled path) |
+| `claimable.created` | `id`, `payer`, `token`, `amount`, `deadline`, `createdAt`, `recipientHint` | `Node.ClaimableCreate` / `IdentityCreateClaimable` (disabled paths) |
+| `claimable.claimed` | `id`, `payer`, `payee`, `token`, `amount`, `recipientHint` | `Node.ClaimableClaim` / `IdentityClaim` (disabled paths) |
+| `claimable.cancelled`, `claimable.expired` | `id`, `payer`, `token`, `amount` | `Node.ClaimableCancel` / `ClaimableExpire` (disabled paths) |
 
-All events are appended to the node state log and exposed via:
+Addresses in these events are bech32 (`nhb1...`); `id` and `recipientHint` are hex without `0x`.
 
-* Block logs – every committed block includes emitted events in execution order.
-* Gateway webhooks – operators can relay selected events to merchants or compliance tooling.
+The one live way to create an alias, `TxTypeRegisterIdentity` (`applyRegisterIdentity`), emits **no identity event**. Its trace is the transaction itself, the alias record (`identity/alias/<alias>`) with `CreatedAt`/`UpdatedAt`, and `Account.Username` on the sender's account.
 
-## Retention & Access
+## Where events go
 
-* **Node state** – full nodes implicitly retain the entire event log; archival nodes should keep at least 18 months to satisfy typical KYC/AML retention windows.
-* **Gateway logs** – store email verification records for 18 months. Hashes only; purge on DSAR unless subject to legal hold.
-* **Wallet telemetry** – avoid storing raw emails. Persist claimable IDs, hint hashes, and timestamps instead.
-* **Access control** – production RPC endpoints require bearer tokens. Restrict webhook URLs to trusted systems and sign payloads (HMAC SHA-256 recommended).
+Events emitted during block execution are appended to the block's event list (`StateProcessor.AppendEvent`). The node exposes recent events of the escrow module through `escrow_listEvents`; there is no identity-specific event RPC.
 
-## Regulator Guidance
+## Identity gateway records
 
-* **PII minimisation** – on-chain data excludes plaintext email; regulators inspecting the chain see only salted hashes and alias metadata.
-* **Lawful disclosure** – when compelled, operators can map salted hashes back to email addresses using gateway logs. Document the salt rotation schedule to prove uniqueness.
-* **Abuse monitoring** – maintain dashboards tracking alias registrations per IP, verification retries, and claim velocity per payer. Alert on anomalies (e.g., >20 failed verifications/hour from one IP, bursts of high-value claims sharing the same hint).
-* **Incident response** – Wallets should surface alias `UpdatedAt` and event history to end users.
-* **Audit trails** – retain the RPC request metadata (caller IP, authenticated user) for identity mutations. Pair with event logs to reconstruct end-to-end changes.
-
-For more operational controls see [identity-security-compliance.md](./identity-security-compliance.md) and the platform observability runbooks.
+The gateway (`services/identity-gateway`) keeps a BoltDB file with per-email records (salted hash, code digest and expiry, register attempt timestamps, verification time, bind token digest and expiry, alias bindings), an alias-to-email-hash index, and idempotency records. It has no audit-log endpoint and no configured retention beyond the idempotency TTL (default 24 hours) and the verification/bind token lifetimes (10 minutes and 15 minutes by default). See [`identity-gateway.md`](./identity-gateway.md).
