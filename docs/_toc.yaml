@@ -27,7 +27,7 @@ toc:
         toc:
           - name: Device onboarding
             path: runbooks/pos-onboarding.md
-          - name: Device attestation
+          - name: Device registry
             path: runbooks/device-attestation.md
           - name: Paymaster budgets
             path: runbooks/paymaster-budgets.md

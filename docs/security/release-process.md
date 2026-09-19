@@ -22,11 +22,12 @@ If an issue risks funds or validator safety, treat it as a release blocker regar
 
 ## Freeze procedures
 
-1. Announce the freeze window and the commit hash.
-2. Restrict pushes to the release branch and require reviews.
-3. Disable automatic deployments. The repository's deploy workflow, `.github/workflows/deploy.yml`, runs on pushes to a branch named `master`, on `v*` tags and on manual dispatch, and builds and pushes container images and Helm charts. The upstream repository's default branch is `main` and it has no `master` branch (the workflow's own comment at lines 6-10 notes the mismatch), so a push to `main` does not match the branch filter; only `v*` tags and manual dispatch trigger it today. Check the workflow's `branches` list on your fork or deployment branch before relying on this step.
-4. Export a snapshot of the validator state (`sync_snapshot_export`) and keep the artifacts.
-5. Watch consensus health and endpoint latency using the metrics the node exposes (see `docs/ops/observability.md`).
+* Validate state sync snapshots and signature bundles.
+* Verify hardened configuration templates for validators, seeds, RPC, and faucet nodes.
+* Confirm seed rotation and faucet abuse scripts are operational.
+* Rehearse swap, escrow, identity, POTSO, and governance end-to-end scenarios.
+* Ensure all public endpoints (RPC/REST/WS, faucet API, explorer) pass synthetic monitoring checks.
+* Publish launch documentation.
 
 ## Incident response
 
