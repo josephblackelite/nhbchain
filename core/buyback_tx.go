@@ -33,6 +33,37 @@ import (
 // that triggers proposalDispositionAbort here.
 var ErrBuybackRefPriceAlreadyRecorded = errors.New("buybackRefPrice: a reference price has already been recorded for this epoch")
 
+// ErrBuybackRefPriceStaleEpoch indicates a reference price was submitted for
+// an epoch that has already closed: its epoch is lower than the epoch the
+// block being built is evaluated in. The epoch number only moves forward, so
+// this can never become valid again -- a permanently dead transaction, the
+// same failure class as ErrBuybackRefPriceAlreadyRecorded, and prunable for
+// the same reason. It arises in ordinary operation, not only through
+// misbehavior: a reference price submitted while the last block of an epoch
+// is next passes admission (which simulates against the next block's
+// height), but if that block is produced without it -- a proposal already
+// built, or a proposer that had not yet received the transaction -- the
+// following block is in the next epoch and the still-pending transaction is
+// stale. Before this sentinel existed the mismatch was a bare fmt.Errorf that
+// classifyProposalError (core/node.go) could not recognize, so it fell
+// through to proposalDispositionAbort: every block build failed on every
+// validator, and the transaction was never pruned from the mempool, halting
+// block production until the mempool was cleared (the 2026-09-18 incident,
+// ~12h at height 180301). See TestCreateBlockStaleEpochBuybackRefPriceIsPrunedNotAborting.
+var ErrBuybackRefPriceStaleEpoch = errors.New("stale reference-price epoch")
+
+// ErrBuybackRefPriceFutureEpoch indicates a reference price was submitted for
+// an epoch that has not opened yet: its epoch is higher than the epoch the
+// block being built is evaluated in (for example a transaction relayed from
+// a peer that is a block ahead). Unlike ErrBuybackRefPriceStaleEpoch this is
+// NOT permanently dead -- it becomes valid as soon as the chain enters that
+// epoch -- so it is skippable (excluded from this block, kept in the
+// mempool, offered again on the next attempt), not prunable. It must still
+// never abort the block build: as a bare error it would have the same
+// halting effect as the stale case. See
+// TestCreateBlockFutureEpochBuybackRefPriceIsSkippedNotAborting.
+var ErrBuybackRefPriceFutureEpoch = errors.New("future reference-price epoch")
+
 // applyBuybackAsk handles TxTypeBuybackAsk: a ZNHB holder's market ask into
 // the current epoch's treasury buyback. The seller's ZNHB is escrowed
 // immediately (moved into the buyback accrual/escrow module account) rather
@@ -140,7 +171,14 @@ func (sp *StateProcessor) applyBuybackRefPrice(tx *types.Transaction) error {
 		return fmt.Errorf("buybackRefPrice: epoch scheduling is not enabled on this network")
 	}
 	if payload.Epoch != epochNumber {
-		return fmt.Errorf("buybackRefPrice: submitted epoch %d does not match the current open epoch %d", payload.Epoch, epochNumber)
+		// The message text is unchanged for operators; the wrapped sentinel
+		// only tells classifyProposalError which way the mismatch points
+		// (a closed epoch is permanently dead, an unopened one is not).
+		mismatch := ErrBuybackRefPriceFutureEpoch
+		if payload.Epoch < epochNumber {
+			mismatch = ErrBuybackRefPriceStaleEpoch
+		}
+		return fmt.Errorf("buybackRefPrice: submitted epoch %d does not match the current open epoch %d: %w", payload.Epoch, epochNumber, mismatch)
 	}
 
 	manager := nhbstate.NewManager(sp.Trie)

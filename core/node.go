@@ -3146,6 +3146,17 @@ const (
 //     ErrMintExpired, and ErrMintInvalidPayload (all pure functions of the
 //     voucher's own immutable payload, same pattern as their swap
 //     equivalents).
+//   - ErrBuybackRefPriceAlreadyRecorded, ErrBuybackRefPriceStaleEpoch: a
+//     buyback reference price is recorded once per epoch and the epoch
+//     number only moves forward, so a duplicate or an already-closed-epoch
+//     submission can never become valid again (monotonic state, same
+//     pattern as ErrSwapNonceUsed). Both used to be bare errors that fell
+//     through to ABORT and halted block production outright -- see their
+//     doc comments in core/buyback_tx.go.
+//   - ErrLendingRefPriceStaleTimestamp: the lending reference-price
+//     counterpart -- it has no epochs, but the accepted timestamp only
+//     moves forward, so a submission at or before the last accepted
+//     timestamp is equally permanently dead.
 //
 // == SKIP: depends on mutable state shared across transactions in this
 // attempt, or on ordering within this attempt -- a later attempt can
@@ -3218,6 +3229,10 @@ const (
 //     classifying it SKIP rather than relying on that invariant is cheap
 //     defense-in-depth against a future admission-time relaxation (e.g.
 //     nonce-queuing for UX) or a scheduler reordering bug.
+//   - ErrBuybackRefPriceFutureEpoch: a buyback reference price for an epoch
+//     the chain has not entered yet becomes valid the moment that epoch
+//     opens, so it stays in the mempool and is offered again -- the
+//     counterpart to ErrBuybackRefPriceStaleEpoch (PRUNE) above.
 //
 // == ABORT: deliberately still unclassified ==
 //
@@ -3323,6 +3338,18 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// worth a same-block retry. See ErrBuybackRefPriceAlreadyRecorded's
 		// doc comment (core/buyback_tx.go) for the incident this fixes.
 		errors.Is(err, ErrBuybackRefPriceAlreadyRecorded),
+		// A ref price whose epoch has already closed can likewise never
+		// become valid again -- the epoch number only moves forward -- so a
+		// stale-epoch submission (e.g. one that missed the last block of its
+		// epoch) is a permanently dead transaction. See
+		// ErrBuybackRefPriceStaleEpoch's doc comment (core/buyback_tx.go)
+		// for the 2026-09-18 incident this fixes.
+		errors.Is(err, ErrBuybackRefPriceStaleEpoch),
+		// The lending ref price has no epoch, but its accepted timestamp is
+		// monotonic in the same way, so a submission at or behind it is
+		// equally dead. See ErrLendingRefPriceStaleTimestamp's doc comment
+		// (core/lending_tx.go).
+		errors.Is(err, ErrLendingRefPriceStaleTimestamp),
 		// NHB-AUDIT-R2: a transaction whose MaxBlockHeight or IntentExpiry
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
@@ -3388,7 +3415,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// malformed or malicious transaction -- skip just the losing
 		// RegisterIdentity, don't abort the whole block over it. See
 		// ErrIdentityUsernameTaken's doc comment (core/state_transition.go).
-		errors.Is(err, ErrIdentityUsernameTaken):
+		errors.Is(err, ErrIdentityUsernameTaken),
+		// A ref price for an epoch the chain has not reached yet becomes
+		// valid the moment that epoch opens, so it is skippable (kept in
+		// the mempool, offered again), not prunable -- mirroring the
+		// stale-epoch case above from the other side. See
+		// ErrBuybackRefPriceFutureEpoch's doc comment (core/buyback_tx.go).
+		errors.Is(err, ErrBuybackRefPriceFutureEpoch):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
