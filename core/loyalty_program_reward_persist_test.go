@@ -98,10 +98,17 @@ func newLoyaltyRewardEnv(t *testing.T, paymasterRole string) *loyaltyRewardEnv {
 	if err != nil {
 		t.Fatalf("register business: %v", err)
 	}
+	// A wallet other than the owner's is assigned by a loyalty admin, and only
+	// after that wallet has recorded its own opt-in.
+	var admin [20]byte
+	admin[19] = 0x50
+	if err := manager.SetRole(RoleLoyaltyAdmin, admin[:]); err != nil {
+		t.Fatalf("grant loyalty admin role: %v", err)
+	}
 	if err := registry.SetPaymaster(bizID, env.paymaster, env.paymaster); err != nil {
 		t.Fatalf("paymaster opt-in: %v", err)
 	}
-	if err := registry.SetPaymaster(bizID, env.merchant, env.paymaster); err != nil {
+	if err := registry.SetPaymaster(bizID, admin, env.paymaster); err != nil {
 		t.Fatalf("set paymaster: %v", err)
 	}
 	if err := registry.AddMerchantAddress(bizID, env.merchant); err != nil {

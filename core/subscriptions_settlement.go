@@ -145,10 +145,14 @@ func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager,
 }
 
 func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Manager, registry *subscriptions.Registry, sub *subscriptions.Subscription, decision subscriptions.ChargeDecision, payerAcc *types.Account, payerBalance *big.Int, cfg subscriptions.Config, attemptNumber uint32, now uint64) error {
-	// Payer, merchant and treasury may resolve to the same address. Each
-	// address is loaded once and persisted once, so every delta lands on one
-	// account object: two copies of one account would let the last
-	// setAccount overwrite the others' deltas, creating or destroying value.
+	// Payer, merchant and fee treasury are independent roles, and any two of
+	// them can be one address (a plan subscribed to by its own merchant, a
+	// merchant that is also the fee treasury, ...). Every account is persisted
+	// from the object it was loaded into, so two objects for one address would
+	// be written back one after the other and the later one, which never saw
+	// the earlier one's delta, would overwrite it: the debit or a credit
+	// would vanish and the charge would mint or destroy its amount. Hence one
+	// object per address, all deltas applied to it, and one write.
 	merchantAcc := payerAcc
 	if sub.Merchant != sub.Payer {
 		var err error

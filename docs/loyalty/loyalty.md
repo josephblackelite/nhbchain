@@ -182,7 +182,10 @@ Read operations (business/program lookups, meters) are unaffected and remain ord
 * `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "paymaster": "nhb1..." }` — omit/empty `paymaster` to clear it.
 * Rotates the paymaster address used to fund all programs under the business. **This transaction only points the business at an address — it moves no funds.** Actually funding that paymaster is a separate, ordinary NHB/ZNHB transfer to it.
 * Emits `loyalty.paymaster.rotated`.
-* **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — enforced inside `native/loyalty`'s `SetPaymaster` itself.
+* **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — enforced inside `native/loyalty`'s `SetPaymaster` itself. The one exception is a sender naming **its own address**, which only records that wallet's opt-in (see below) and assigns nothing.
+* **Consent:** program rewards are debited from the paymaster's own balance and the named wallet never signs this transaction, so two rules keep a wallet from being committed without its say.
+  * An owner may only name its own wallet (or clear the paymaster). Naming any other wallet is rejected with `ErrPaymasterConsentRequired`, which the block builder prunes: it can never succeed for that sender.
+  * A sender holding `ROLE_LOYALTY_ADMIN`, the role trusted with assigning wallets, may name another wallet only if that wallet is the business owner or has recorded its own opt-in for this business, by sending a `TxTypeLoyaltySetPaymaster` naming its own address. Without the opt-in the call is rejected with `ErrPaymasterConsent`, which the block builder skips (the opt-in can still arrive). The opt-in is per business and is consumed by the assignment it authorizes.
 
 #### `TxTypeLoyaltyAddMerchant` (`0x44`) / `TxTypeLoyaltyRemoveMerchant` (`0x45`)
 * `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "merchant": "nhb1..." }`.

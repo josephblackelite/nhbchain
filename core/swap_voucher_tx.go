@@ -513,18 +513,23 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	if !sp.hasAdminWallet {
 		return fmt.Errorf("%w: no admin wallet configured for this network", ErrSwapInvalidSigner)
 	}
+	// The mint below debits the admin wallet and credits the recipient as two
+	// separately loaded accounts, so a recipient that IS the admin wallet
+	// would have its credit overwritten by the debit (the ZNHB vanishes while
+	// the Sale Pool still shrinks and its counters still advance). Selling the
+	// treasury's own inventory to the treasury is meaningless anyway --
+	// applyBuyZNHB rejects it the same way -- and the outcome is a pure
+	// function of the voucher's own payload, so it is permanently
+	// unsatisfiable (PRUNE).
+	if voucher.Recipient == sp.adminWallet {
+		return fmt.Errorf("%w: recipient must not be the treasury admin wallet", ErrSwapVoucherInvalidPayload)
+	}
 	salePoolBalance, err := curveManager.ZNHBSalePoolBalance()
 	if err != nil {
 		return fmt.Errorf("swap: load sale pool balance: %w", err)
 	}
 	if salePoolBalance.Cmp(voucher.Amount) < 0 {
 		return fmt.Errorf("%w: treasury sale pool has insufficient ZNHB", ErrSwapInvalidSigner)
-	}
-	if bytes.Equal(voucher.Recipient[:], sp.adminWallet[:]) {
-		// The recipient and the Sale Pool source would be one account, so the
-		// two balance updates below would overwrite each other while the pool
-		// counters still advanced.
-		return fmt.Errorf("%w: recipient cannot be the admin wallet", ErrSwapVoucherInvalidPayload)
 	}
 	adminAccount, err := sp.getAccount(sp.adminWallet[:])
 	if err != nil {

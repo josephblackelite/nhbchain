@@ -3370,7 +3370,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// string is a pure function of the transaction's own payload, so
 		// it can never become valid. See ErrPOSInvalidAuthorizationID
 		// (core/state_pos.go).
-		errors.Is(err, ErrPOSInvalidAuthorizationID):
+		errors.Is(err, ErrPOSInvalidAuthorizationID),
+		// An owner naming a wallet other than its own as the loyalty paymaster
+		// is refused as a pure function of the transaction's own sender and
+		// payload and the business's owner, which never changes, so it can
+		// never become valid later. A sender later granted the loyalty admin
+		// role resubmits. See loyalty.ErrPaymasterConsentRequired.
+		errors.Is(err, loyalty.ErrPaymasterConsentRequired):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),
@@ -3441,7 +3447,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// A paymaster's opt-in for a business can be recorded by a later (or
 		// same-attempt) transaction from the paymaster address, after which
 		// the same assignment succeeds.
-		errors.Is(err, loyalty.ErrPaymasterConsent):
+		errors.Is(err, loyalty.ErrPaymasterConsent),
+		// The treasury wallet's outflow is capped by the Reward Pool
+		// sub-ledger, which later inflows (fees, forfeited deposits) can
+		// refill, so this is skippable, not prunable. See
+		// ErrTreasuryRewardPoolInsufficient's doc comment
+		// (core/znhb_treasury_pool.go).
+		errors.Is(err, ErrTreasuryRewardPoolInsufficient):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
@@ -4564,7 +4576,7 @@ func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeig
 	}
 
 	manager := nhbstate.NewManager(state.Trie)
-	slasher := statebank.NewValidatorSlasher(manager, n.escrowTreasury)
+	slasher := state.bookedSlasher(statebank.NewValidatorSlasher(manager, n.escrowTreasury))
 	engine := penalty.NewEngine(catalog, n.potsoLedger, slasher)
 
 	fromHeight := uint64(0)
