@@ -18,7 +18,7 @@ ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://nhbcoin.com/api/v1/validators/onboard
 # this script and the README used the enode:// form, which live-tested
 # as a real bug: "dial tcp: address enode://...: too many colons in
 # address" -- the node never dialed its bootnode at all.
-BOOTNODE_DEFAULT='52.1.96.250:6001'
+BOOTNODE_DEFAULT='198.51.100.10:6001'
 NETWORK_ID_DEFAULT='430060579445266314'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'

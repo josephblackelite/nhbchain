@@ -22,7 +22,7 @@ type BlockHeader struct {
 type Block struct {
 	Header       *BlockHeader
 	Transactions []*Transaction
-	// QuorumCert proves >=2/3 of the validator set's voting power
+	// QuorumCert proves >2/3 of the validator set's voting power
 	// precommitted to this exact block during BFT consensus. Deliberately
 	// a Block field, not a BlockHeader field -- BlockHeader.Hash() never
 	// marshals Block, so this can be added, populated, or left nil on an

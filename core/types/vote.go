@@ -77,7 +77,7 @@ type QuorumSignature struct {
 }
 
 // QuorumCert bundles the set of validator precommit signatures that
-// certified a block's commit under BFT quorum (>=2/3 voting power),
+// certified a block's commit under BFT quorum (>2/3 voting power),
 // reusing the exact signatures each validator already produced during the
 // live consensus round -- not a separate attestation requiring extra
 // signing. Attached to Block (not BlockHeader) so its presence, absence, or
@@ -99,7 +99,7 @@ type QuorumCert struct {
 	Signatures []QuorumSignature `json:"signatures"`
 }
 
-// Verify checks that qc's signatures collectively represent >=2/3 of the
+// Verify checks that qc's signatures collectively represent >2/3 of the
 // supplied validator set's voting power, over the vote payload
 // (height, round, blockHash, type=precommit) qc itself claims to certify,
 // checked against headerHash (the block's actual, independently-recomputed
@@ -172,13 +172,10 @@ func (qc *QuorumCert) Verify(headerHash []byte, validatorPower map[string]*big.I
 		signedPower.Add(signedPower, power)
 	}
 
-	// threshold = ceil(2*total/3), identical formula to
-	// consensus/bft.Engine.hasTwoThirdsPowerLocked so a QuorumCert is held
-	// to exactly the same quorum bar the live BFT round already enforced
-	// when these signatures were originally collected.
-	threshold := new(big.Int).Mul(big.NewInt(2), totalPower)
-	threshold.Add(threshold, big.NewInt(2))
-	threshold.Div(threshold, big.NewInt(3))
+	// The same QuorumThreshold consensus/bft.Engine.hasTwoThirdsPowerLocked
+	// uses, so a QuorumCert is held to exactly the quorum bar the live BFT
+	// round already enforced when these signatures were originally collected.
+	threshold := QuorumThreshold(totalPower)
 	if signedPower.Cmp(threshold) < 0 {
 		return fmt.Errorf("quorum certificate: insufficient voting power: signed=%s threshold=%s total=%s", signedPower, threshold, totalPower)
 	}

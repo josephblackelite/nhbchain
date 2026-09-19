@@ -1,11 +1,13 @@
 package governance
 
 import (
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
 
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 )
 
 // ProposalStatus enumerates the lifecycle phases a governance proposal
@@ -414,6 +416,31 @@ func DefaultMinimumValidatorStake() *big.Int {
 		panic("governance: invalid defaultMinimumValidatorStakeWei constant")
 	}
 	return value
+}
+
+// MinimumValidatorStakeFromParam decodes the stored value of
+// staking.minimumValidatorStake. An empty value means the parameter is unset
+// and yields DefaultMinimumValidatorStake. A proposal is persisted exactly as
+// its author spelled it, so the number may be bare or a quoted decimal string
+// (both pass proposal validation); both decode to the same amount.
+//
+// Every account write and every epoch's validator selection consults this
+// threshold, so a stored value that is not a positive base-10 integer (which
+// proposal validation cannot produce) must not fail all of them: it degrades
+// to DefaultMinimumValidatorStake, deterministically from the stored bytes
+// alone, and is reported loudly.
+func MinimumValidatorStakeFromParam(raw []byte) *big.Int {
+	text := nativecommon.ParamDecimal(raw)
+	if text == "" {
+		return DefaultMinimumValidatorStake()
+	}
+	parsed, ok := new(big.Int).SetString(text, 10)
+	if !ok || parsed.Sign() <= 0 {
+		nativecommon.ReportMalformedParam(ParamKeyMinimumValidatorStake, raw,
+			fmt.Errorf("minimum validator stake must be a positive base-10 integer"), defaultMinimumValidatorStakeWei)
+		return DefaultMinimumValidatorStake()
+	}
+	return parsed
 }
 
 // AuditEvent identifies the lifecycle milestone captured by a governance audit

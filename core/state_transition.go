@@ -6429,7 +6429,7 @@ func (sp *StateProcessor) stakingPayoutPeriodSeconds(manager *nhbstate.Manager) 
 			return 0, fmt.Errorf("staking rewards: load payout period: %w", err)
 		}
 		if ok {
-			trimmed := strings.TrimSpace(string(raw))
+			trimmed := nativecommon.ParamDecimal(raw)
 			if trimmed != "" {
 				value, parseErr := strconv.ParseUint(trimmed, 10, 64)
 				if parseErr != nil {
@@ -6464,7 +6464,7 @@ func (sp *StateProcessor) stakingUnbondingPeriod(manager *nhbstate.Manager) (tim
 			return 0, fmt.Errorf("staking: load unbonding period: %w", err)
 		}
 		if ok {
-			trimmed := strings.TrimSpace(string(raw))
+			trimmed := nativecommon.ParamDecimal(raw)
 			if trimmed != "" {
 				days, parseErr := strconv.ParseUint(trimmed, 10, 64)
 				if parseErr != nil {
@@ -7010,18 +7010,10 @@ func (sp *StateProcessor) minimumValidatorStake() (*big.Int, error) {
 	if err := rlp.DecodeBytes(raw, &stored); err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(string(stored))
-	if trimmed == "" {
-		return governance.DefaultMinimumValidatorStake(), nil
-	}
-	parsed, success := new(big.Int).SetString(trimmed, 10)
-	if !success {
-		return nil, fmt.Errorf("minimum validator stake must be a base-10 integer")
-	}
-	if parsed.Sign() <= 0 {
-		return nil, fmt.Errorf("minimum validator stake must be positive")
-	}
-	return parsed, nil
+	// The stored value is whatever the proposal wrote (bare or quoted number);
+	// a value that cannot be used degrades to the default instead of failing
+	// every account write -- see MinimumValidatorStakeFromParam.
+	return governance.MinimumValidatorStakeFromParam(stored), nil
 }
 
 // --- Helpers ---
@@ -8251,7 +8243,7 @@ func (sp *StateProcessor) stakingMaxEmissionPerYear(manager *nhbstate.Manager) (
 	if !ok {
 		return big.NewInt(0), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
+	trimmed := nativecommon.ParamDecimal(raw)
 	if trimmed == "" {
 		return big.NewInt(0), nil
 	}
@@ -8291,7 +8283,7 @@ func (sp *StateProcessor) mintMaxEmissionPerYear(manager *nhbstate.Manager, toke
 	if !ok {
 		return big.NewInt(0), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
+	trimmed := nativecommon.ParamDecimal(raw)
 	if trimmed == "" {
 		return big.NewInt(0), nil
 	}
