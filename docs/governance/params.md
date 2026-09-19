@@ -1,40 +1,151 @@
 # Governance Parameters
 
-> Include function-level documentation for developer integrations and technical specs; docs must be generated into /docs/governance/* for auditors, investors, regulators, and consumers.
+Reference for the keys a `param.update` (or `param.emergency_override` /
+`param.update_fee_rate`) proposal can set, and for the keys written by the
+dedicated proposal kinds. Everything here is taken from
+`native/governance/engine.go` (`validatorForParam`), `native/governance/types.go`
+(key constants), `config/config.go` (`defaultAllowedGovernanceParams`) and the
+code that reads each key back.
 
-The following parameters are governable once their key is present in
-`AllowedParams` (`config.toml`'s `[governance]` block). Not every key below
-ships in the default `AllowedParams` list — `gov.deposit.MinProposalDeposit`,
-`gov.tally.QuorumBps`, `gov.tally.ThresholdBps`, and
-`gov.timelock.DurationSeconds` are recognised by the governance engine's
-validation logic but are not included by default; an operator must add them
-to `AllowedParams` before they can be targeted by a proposal. Governance
-payloads must respect the validation guidance for each key; values outside
-the documented range are rejected during execution. All parameters are
-community-controlled via
-open voting and should be interpreted as configuration levers, not investment
-contracts. Adjustments do not create an expectation of profit and should be
-considered in light of the risk notes below.
+## How a parameter proposal is checked
 
-| Key | Description | Validation Guidance | Risk Notes & Disclosures |
+`Engine.validateParamPayload` (`native/governance/engine.go`):
+
+- the payload must be a JSON object with at least one key; a single top-level
+  key named `update`, `parameter` or `params` whose value is an object is
+  unwrapped;
+- every key must be in the node's `AllowedParams` (`governance: parameter
+  "<key>" not in allow-list`);
+- every key must have a validator in `validatorForParam` (`governance:
+  parameter "<key>" missing validation rule`), and the value must pass it.
+
+On execution the raw JSON text of each value is written to the param store
+(`ParamStoreSet(key, raw)`), exactly as submitted. Validators accept an
+integer either as a JSON number or as a decimal string, but a quoted string is
+stored **with its quotes**, and the readers that consume the stored value
+(for example the staking reward engine and `staking.minimumValidatorStake`)
+parse it as a bare integer. Submit integer values as unquoted JSON numbers,
+for example `{"staking.aprBps": 1250}`. Integer validators also reject
+decimals and exponents, and `uint64` values are limited to `2^53 - 1`.
+
+## Default `AllowedParams`
+
+`AllowedParams` in the node's `[governance]` block replaces the default list
+when it is non-empty. The default list (`config/config.go:25`) is:
+
+`fees.baseFee`, `staking.minimumValidatorStake`, `staking.aprBps`,
+`staking.payoutPeriodDays`, `staking.unbondingDays`, `staking.minStakeWei`,
+`staking.maxEmissionPerYearWei`, `mint.nhb.maxEmissionPerYearWei`,
+`mint.znhb.maxEmissionPerYearWei`, `staking.rewardAsset`,
+`staking.compoundDefault`, the fourteen `loyalty.dynamic.*` keys below,
+`network.seeds`, `potso.abuse.MaxUserShareBps`, `potso.abuse.MinStakeToEarnWei`,
+`potso.abuse.QuadraticTxDampenAfter`, `potso.abuse.QuadraticTxDampenPower`,
+`potso.rewards.EmissionPerEpochWei`, `potso.weights.AlphaStakeBps`,
+`market.flatFeeWei`, `paymaster.topUpFeeWei`, and the ten keys listed under
+[Allowed by default but not settable](#allowed-by-default-but-not-settable).
+
+The repository's root `config.toml` sets its own `AllowedParams` (it does not
+include the `mint.*` or `paymaster.topUpFeeWei` keys).
+
+## Keys with a validator
+
+"Read by" names the code that uses the stored value. "No reader found" means a
+search of the repository found no code that reads the key from the param
+store, so setting it has no effect on chain behavior.
+
+| Key | Validation | Default (when unset) | Read by |
 | --- | --- | --- | --- |
-| `gov.deposit.MinProposalDeposit` | Minimum deposit required to submit a proposal. Held in escrow to deter spam. | Unsigned integer in Wei. Must be non-negative and less than total supply to avoid overflow. | Deposits are anti-spam bonds only. They are returned or partially slashed per policy and never accrue yield or profit participation. |
-| `gov.tally.QuorumBps` | Minimum participation (turnout) required for a proposal to be valid. | Integer basis points `0`–`10,000`. Runtime rejects values above `10,000`. | Low quorum may allow low-participation changes; high quorum can stall governance. Communicate changes to stakeholders before adoption. |
-| `gov.tally.ThresholdBps` | Approval threshold for yes votes relative to active votes (yes + no). | Integer basis points `0`–`10,000`. Must be >= `5,000` to avoid trivial approvals. | Raising the threshold increases safety but may slow emergency responses. Lowering below 2/3 should include rationale and mitigation plan. |
-| `gov.timelock.DurationSeconds` | Delay between proposal queueing and execution. | Unsigned integer seconds. Must be >= network minimum (default 86,400) and < 30 days to prevent overflow. | Short timelocks reduce review windows; long timelocks delay urgent fixes. Announce changes widely to integrators. |
-| `potso.weights.AlphaStakeBps` | Proportion of POTSO rewards attributed to validator staking weight. | Integer basis points `0`–`10,000`. Values above bounds are rejected. | Adjusting weight influences validator incentives but does not guarantee return. Communicate redistributive effects to delegators. |
-| `potso.rewards.EmissionPerEpochWei` | ZNHB treasury budget allocated per epoch for POTSO incentives. | Unsigned integer in Wei. Must be `>= 0` and `< 9.22e18` to avoid overflow. | Higher budgets increase treasury burn. Include reserve impact analysis when changing this value. |
-| `fees.baseFee` | Minimum base fee charged for network transactions. | Unsigned integer in Wei per gas. Must be non-negative; typical range `0`–`1e15`. | Fee adjustments are for network sustainability. They do not represent revenue sharing and should be accompanied by usage impact notes. |
-| `slashing.policy.enabled` | Toggles the on-chain slashing engine. | Boolean `true` or `false`. | Disabling slashing pauses treasury debits from evidence processing. Communicate mitigation plans before re-enabling. |
-| `slashing.policy.maxPenaltyBps` | Maximum penalty applied per infraction in basis points. | Integer basis points `0`–`10,000`. | Higher caps increase deterrence but amplify downside risk for operators. Document rationale and thresholds. |
-| `slashing.policy.windowSeconds` | Rolling window used to enforce slashing penalties. | Unsigned integer seconds between `60` and `2,592,000` (30 days). | Very short windows can miss repeated behaviour; long windows may extend incident response timelines. |
-| `slashing.policy.evidenceTtlSeconds` | Maximum age of evidence accepted by the slashing module. | Unsigned integer seconds `>= windowSeconds` and `<= 7,776,000` (90 days). | Ensures stale evidence cannot trigger penalties indefinitely. Align TTL with compliance retention policies. |
-| `slashing.policy.maxSlashWei` | Cap on the slash amount routed from treasury per infraction. | Unsigned integer in Wei `>= 0` and `< 9.22e18`. | Sets an upper bound on treasury exposure for any single event. Keep aligned with risk appetite and reserve levels. |
-| `staking.minimumValidatorStake` | Minimum self-bond required for a validator to be eligible for selection. | Positive decimal integer in Wei representing ZNHB; governance may not set `0` or negative values. | Defaults to `10,000` ZNHB during migrations to ensure continuity. Raising the floor tightens validator admission and may reduce decentralisation; lowering it can increase validator set churn and affect selection fairness based on stake-weighted rotation. |
-| `staking.aprBps` | Target APR expressed in basis points used to advance the reward index each payout cycle. | Integer `0`–`2,000` (0%–20%). Runtime enforces the bounds; values above 1,250 bps (12.5%) should include justification and downstream communication. | Adjusting APR impacts expected rewards but does not guarantee return. Lower APRs reduce emissions; higher APRs draw from the emission cap sooner. Communicate rationale to delegators and include a monetary policy note. |
-| `staking.payoutPeriodDays` | Interval between reward snapshots and distribution cycles. | Unsigned integer `>= 1` and `<= 90` days. Runtime rounds fractional input. | Shorter cycles increase operational load and treasury flow variance; longer cycles delay cash realisation for delegators. Share any schedule changes with integrators and dashboards. |
-| `staking.unbondingDays` | Cooling-off period before undelegated stake becomes liquid. | Unsigned integer `>= 1` and `<= 90` days. | Longer unbonding periods improve security but raise liquidity risk for participants; shorter windows should include monitoring upgrades to detect churn. |
-| `staking.minStakeWei` | Floor on the amount a delegator or validator must stake to participate. | Positive decimal integer in Wei; empty strings default to `1`. | A very low minimum (default `1`) keeps the network open to small holders. Raising the floor can reduce spam but increases barriers to entry—consider messaging to affected wallets. |
-| `staking.rewardAsset` | Token symbol used when emitting staking payouts. | Uppercase ASCII string matching a supported asset (default `ZNHB`). | Changing the reward asset requires wallet and accounting coordination. Communicate symbol updates to exchanges, custodians, and explorers. |
-| `staking.compoundDefault` | Whether newly accrued rewards auto-compound for delegators. | Boolean `true` or `false`. Defaults to `false` when unspecified. | Auto-compounding increases exposure to staking returns but may have tax or accounting implications. Provide opt-out instructions before enabling by default. |
-| `staking.maxEmissionPerYearWei` | Hard cap on treasury-funded staking rewards payable in a calendar year across all delegators. | Unsigned integer in Wei `>= 0` and `< 9.22e18`. | Reaching the cap stops new rewards until the next year or until governance raises the limit. Increase only with treasury buy-in; document the reserve impact. |
+| `staking.minimumValidatorStake` | positive integer (wei) | `10000000000000000000000` (10,000 ZNHB), `governance.DefaultMinimumValidatorStake` | `Manager.MinimumValidatorStake`, `StateProcessor.minimumValidatorStake` (validator eligibility) |
+| `staking.aprBps` | integer `0`-`10000` | `1250` (`defaultGlobalConfig`) | `core/state/staking_rewards.go`, `Node.SyncStakingParams` |
+| `staking.payoutPeriodDays` | integer `>= 1` (no upper bound in the validator) | `30` | `core/state/staking_rewards.go`, `core/state_transition.go` |
+| `staking.unbondingDays` | integer `>= 1` (no upper bound) | `7` | `core/state_transition.go` |
+| `staking.minStakeWei` | non-negative integer | `10000000000000000000000` | Merged into the node's staking config by `SyncStakingParams`; the constant's own doc comment in `types.go` states it has no enforcement path in the delegation handler and is not the validator-eligibility gate |
+| `staking.maxEmissionPerYearWei` | integer `>= 0` | `5000000000000000000` | `core/state/staking_rewards.go`, `core/state_transition.go` |
+| `staking.rewardAsset` | non-empty JSON string | `ZNHB` | Merged into the node's staking config by `SyncStakingParams` |
+| `staking.compoundDefault` | boolean (or the strings `true`/`false`) | `false` | Merged into the node's staking config by `SyncStakingParams` |
+| `mint.nhb.maxEmissionPerYearWei` | integer `>= 0` | none (`0` or unset means no cap) | `applyMintTransaction` (`core/state_transition.go`): a mint that would push the calendar-year NHB total over a positive cap fails with `ErrMintEmissionCapExceeded` |
+| `mint.znhb.maxEmissionPerYearWei` | integer `>= 0` | none | Only reachable from the ZNHB branch of `applyMintTransaction`, which is preceded by an unconditional `ErrMintZNHBNotMintable` rejection |
+| `market.flatFeeWei` | non-negative integer | none | `core/market_native.go` (`readGovernedMarketFlatFeeWei`), `rpc/market_handlers.go` |
+| `paymaster.topUpFeeWei` | non-negative integer | `0` (no fee) | `core/sponsorship.go` (`readGovernedPaymasterTopUpFeeWei`) |
+| `network.seeds` | non-empty, must parse with `seeds.Parse` | none | `core/node.go` (`ParamStoreGet("network.seeds")`), `cmd/p2pd/main.go` |
+| `fees.baseFee` | integer `<= 1000000000000000` (1e15) | none | No reader found |
+| `potso.weights.AlphaStakeBps` | integer `<= 10000` | none | No reader found |
+| `potso.rewards.EmissionPerEpochWei` | integer `<= 9223372036854775807` | none | No reader found |
+| `potso.abuse.MaxUserShareBps` | integer `<= 10000` | none | No reader found |
+| `potso.abuse.MinStakeToEarnWei` | integer `>= 0` | none | No reader found |
+| `potso.abuse.QuadraticTxDampenAfter` | unsigned integer | none | No reader found |
+| `potso.abuse.QuadraticTxDampenPower` | integer, not `1` (`0` disables, otherwise `>= 2`) | none | No reader found |
+| `loyalty.dynamic.targetBps`, `.minBps`, `.maxBps` | integer `<= 10000` | none | No reader found |
+| `loyalty.dynamic.smoothingStepBps` | integer `1`-`10000` | none | No reader found |
+| `loyalty.dynamic.coverageMax` | number `0`-`1` | none | No reader found |
+| `loyalty.dynamic.coverageLookbackDays` | integer `>= 1` | none | No reader found |
+| `loyalty.dynamic.dailyCapPctOf7dFees` | number `0`-`1` | none | No reader found |
+| `loyalty.dynamic.dailyCapUsd` | number `>= 0` | none | No reader found |
+| `loyalty.dynamic.yearlyCapPctOfInitialSupply` | number `0`-`100` | none | No reader found |
+| `loyalty.dynamic.priceGuard.pricePair` | non-empty string | none | No reader found |
+| `loyalty.dynamic.priceGuard.twapWindowSeconds`, `.priceMaxAgeSeconds` | integer `>= 1` | none | No reader found |
+| `loyalty.dynamic.priceGuard.maxDeviationBps` | integer `<= 10000` | none | No reader found |
+| `loyalty.dynamic.priceGuard.enabled` | boolean | none | No reader found |
+| `slashing.policy.enabled` | boolean | none | No reader found |
+| `slashing.policy.maxPenaltyBps` | integer `<= 10000` | none | No reader found |
+| `slashing.policy.windowSeconds` | integer `60`-`2592000` | none | No reader found |
+| `slashing.policy.evidenceTtlSeconds` | integer `60`-`7776000` | none | No reader found |
+| `slashing.policy.maxSlashWei` | integer `<= 9223372036854775807` | none | No reader found |
+| `protocol.feeRateBps` | integer `<= 10000` | none | No reader found; not in the default `AllowedParams` |
+| `escrow.realm.MinThreshold`, `escrow.realm.MaxThreshold` | integer `1`-`100` | none | `native/escrow/engine.go`; not in the default `AllowedParams` |
+| `escrow.realm.AllowedSchemes` | non-empty array (or single string) of `single`, `committee` or a numeric scheme id | none | `native/escrow/engine.go`; not in the default `AllowedParams` |
+| `gov.deposit.MinProposalDeposit` | non-negative integer | none | No reader found; not in the default `AllowedParams` |
+| `gov.tally.QuorumBps` | integer `<= 10000` | none | No reader found (the running quorum comes from `[governance] QuorumBps`); not in the default `AllowedParams` |
+| `gov.tally.ThresholdBps` | integer `5000`-`10000` | none | No reader found (the running threshold comes from `[governance] PassThresholdBps`); not in the default `AllowedParams` |
+| `gov.timelock.DurationSeconds` | integer `3600`-`2592000` | none | No reader found (the running timelock comes from `[governance] TimelockSeconds`); not in the default `AllowedParams` |
+
+The fourteen `loyalty.dynamic.*` keys are `targetBps`, `minBps`, `maxBps`,
+`smoothingStepBps`, `coverageMax`, `coverageLookbackDays`,
+`dailyCapPctOf7dFees`, `dailyCapUsd`, `yearlyCapPctOfInitialSupply`,
+`priceGuard.pricePair`, `priceGuard.twapWindowSeconds`,
+`priceGuard.priceMaxAgeSeconds`, `priceGuard.maxDeviationBps` and
+`priceGuard.enabled`. The loyalty dynamic engine reads its configuration through
+`StateProcessor.LoyaltyGlobalConfig` (a record in the state trie,
+`core/state_transition.go`), not from these param keys.
+
+`staking.minimumValidatorStake` is the validator-eligibility threshold
+(`StateProcessor.setAccount`, `core/state_transition.go`). An address becomes a
+validator candidate when it is registered, is not delegating its own stake to a
+different validator, and its total `Stake` (which includes ZNHB delegated in by
+other wallets, see `validatorEligibilityBasis`) is at least the threshold.
+
+## Allowed by default but not settable
+
+These keys are in `defaultAllowedGovernanceParams` but `validatorForParam` has
+no case for them, so a proposal that names one fails at submission with
+`missing validation rule`:
+
+`swap.VelocityWindowSeconds`, `swap.VelocityMaxMints`,
+`swap.cashOut.assetMonthlyCapWei`, `lending.MaxLTVBps`,
+`lending.LiquidationThresholdBps`, `lending.ReserveFactorBps`,
+`lending.ProtocolFeeBps`, `lending.breaker.MaxTotalSupplyWei`,
+`lending.breaker.MaxTotalBorrowWei`, `lending.breaker.MaxTotalCollateralWei`.
+
+## Keys written by dedicated proposal kinds
+
+These do not use `AllowedParams` (see [proposal types](../gov/proposal-types.md)).
+
+| Kind | Param-store keys written | Value when never set | Read by |
+| --- | --- | --- | --- |
+| `policy.buybackParams` | `buyback.feeShareBps`, `buyback.discountBps`, `buyback.safetyMarginBps` | Genesis defaults `2000`, `500`, `500` (`core/node.go`, only when a genesis buyback signer quorum exists) | `core/buyback_settlement.go` (`effectiveBuybackConfig`), `core/state_transition.go` (`applyTransactionFee`) |
+| `policy.swapRiskParams` | `swap.risk.redeem.perTxMinWei`, `.perTxMaxWei`, `.perAddressDailyCapWei`, `.perAddressMonthlyCapWei` | `5e18`, `1e21`, `2e21`, `2e22` wei (`native/swap/redeem_risk.go`) | `core/swap_risk_params.go` |
+| `policy.redemptionFeeParams` | `swap.redemption.feeBps`, `.feeFloorWei`, `.feeCapWei` | `100` bps, `1e18`, `1e21` wei (`native/swap/redemption_fee.go`) | `core/swap_risk_params.go` |
+| `policy.lendingRateSchedule` | `lending.fixedTerm.rateSchedule` (one JSON blob) | `{30 days: 1200 bps, 90 days: 1600 bps}` (`native/lending/fixed_term.go`) | `core/lending_rate_schedule.go` |
+| `policy.lendingDepositRateSchedule` | `lending.fixedTerm.depositRateSchedule` (one JSON blob) | Empty: no tenure is deposit-eligible until a proposal sets one | `core/lending_rate_schedule.go` |
+| `policy.slashing` | `slashing.policy.enabled`, `.maxPenaltyBps`, `.windowSeconds`, `.evidenceTtlSeconds`, `.maxSlashWei` | none | No reader found |
+
+`policy.swapPriceSigner` writes the swap price-signer registry
+(`SwapSetPriceSigner` / `SwapClearPriceSigner`), and `role.allowlist` writes
+role membership; neither uses the param store.
+
+## Not governable
+
+`rewards.HalvingScheduleConfig(2000, 5000, 3000, 2000)` in `core/node.go` (the
+20/50/30 validator/staker/engagement split) and the buyback reference-price
+signer quorum (`genesis.BuybackSignerConfig`) are not reachable by any
+proposal kind.

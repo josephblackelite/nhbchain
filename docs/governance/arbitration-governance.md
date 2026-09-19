@@ -1,99 +1,73 @@
 # Arbitration Governance Guide
 
-The arbitration program operates under the same transparent, proposal-driven
-controls as the broader governance system. This guide explains how policy
-changes reach the `ROLE_ARBITRATOR` allowlist, how frozen arbitrator policies are
-captured inside escrow records, and which artifacts oversight teams should
-collect when evaluating dispute outcomes.
+This page covers how governance interacts with escrow arbitration, as
+implemented in `native/escrow`, `core/state_transition.go` and
+`rpc/modules/escrow.go`.
 
-## Managing the `ROLE_ARBITRATOR` Allowlist
+## Who can change an arbitration realm
 
-Governance proposals that add or remove arbitrators use the `role.allowlist`
-proposal kind. Payloads must target the `ROLE_ARBITRATOR` identifier and include
-three components:
+An arbitration realm (`escrow.EscrowRealm`: `ID`, `Version`, `NextPolicyNonce`,
+`CreatedAt`, `UpdatedAt`, arbitrator set, fee schedule, metadata) is created or
+replaced by a signed transaction, not by a governance proposal payload:
 
-1. **Action list** – A deterministic list of addresses to grant or revoke.
-2. **Realm scope** – The arbitration realm (for example, `core`) that the
-   allowlist applies to. Governance rejects payloads that omit the realm or
-   attempt to modify multiple realms in a single proposal.
-3. **Audit memo** – A human-readable justification describing why each change is
-   necessary and how conflicts of interest were evaluated. This memo is hashed
-   into the proposal metadata so downstream reviewers can confirm it has not
-   been altered.
+- `TxTypeEscrowCreateRealm` / `TxTypeEscrowUpdateRealm`
+  (`applyEscrowCreateRealm`, `applyEscrowUpdateRealm`,
+  `core/state_transition.go`).
+- The signer must hold the role `ROLE_ESCROW_REALM_ADMIN`
+  (`RoleEscrowRealmAdmin`); otherwise the transaction fails with
+  `escrowCreateRealm: unauthorized: caller lacks ROLE_ESCROW_REALM_ADMIN` or
+  `escrowUpdateRealm: unauthorized: caller lacks ROLE_ESCROW_REALM_ADMIN`
+  respectively.
+- `nhb-cli escrow create-realm --key <keyfile> ...` builds and submits the
+  create transaction (`cmd/nhb-cli/escrow_cmd.go`). The JSON payload fields are
+  `id`, `threshold`, `scheme`, `members`, `feeBps`, `feeRecipient`, `scope`,
+  `providerProfile`, `arbitrationFeeBps`, `feeRecipientBech32`
+  (`decodeEscrowRealmPayload`).
 
-When the proposal enters the voting period, observers can replay the proposal
-by querying the governance archive or the RPC gateway to confirm the address
-list matches the published memorandum.
+Governance controls who holds that role. A `role.allowlist` proposal can grant
+or revoke `ROLE_ESCROW_REALM_ADMIN` only if the role name is in the node's
+`[governance] AllowedRoles` (the repository's root `config.toml` lists it).
+The `role.allowlist` payload has only `role`, `address` and `memo`; it has no
+realm field.
 
-Upon execution, the runtime updates the allowlist and appends an immutable
-`gov.executed` audit entry. Arbitrator credentials take effect immediately after
-execution; no manual key distribution occurs outside the on-chain state
-transition. Rollback proposals follow the same structure so that removals are
-verifiable and contestable.
+## Governed realm bounds
 
-## Frozen Policies Within Escrows
+The escrow engine reads three param-store keys when it validates a realm
+(`native/escrow/engine.go`):
 
-Each escrow is bound to the arbitration realm that existed at creation time. The
-`escrow_getSnapshot` helper returns the frozen realm policy, including the
-`realmVersion`, `policyNonce`, committee threshold, and exact arbitrator roster
-captured when the escrow was opened. Because the frozen policy travels with the
-escrow record and is re-surfaced in `escrow.*` events, arbitrators and
-integrators can demonstrate that a dispute was evaluated under the rules that
-were active when the contract was formed. Even if governance updates the realm
-policy later, existing escrows continue to reference their embedded policy to
-prevent retroactive changes.
+| Key | Validation | Value when unset |
+| --- | --- | --- |
+| `escrow.realm.MinThreshold` | integer `1`-`100` | `1` |
+| `escrow.realm.MaxThreshold` | integer `1`-`100` | `10` |
+| `escrow.realm.AllowedSchemes` | non-empty array (or string) of `single`, `committee` or a numeric scheme id | `single` and `committee` |
 
-The frozen policy metadata is also embedded in `escrow_listEvents` payloads
-(`escrow.realm.*`, `escrow.disputed`, `escrow.trade.disputed`, `escrow.resolved`). Indexers should
-persist these attributes so external dashboards, regulators, and auditors can
-reconstruct which rule set governed the resolution without performing additional
-state reads.
+A `param.update` proposal can set them only if they are in `AllowedParams`; they
+are not in the default list (see [params](./params.md)). The engine rejects a
+configuration where the minimum exceeds the maximum.
 
-## Expected Audit Artifacts
+## `ROLE_ARBITRATOR`
 
-Regulators, investors, and third-party auditors should expect the following
-artifacts when reviewing arbitration operations:
+`ROLE_ARBITRATOR` is checked by `Node.P2PResolve` (`core/node.go`), the
+resolution path for peer-to-peer trade disputes: a caller without the role gets
+`trade: caller lacks arbitrator role`. Granting it through `role.allowlist`
+requires it to be in `AllowedRoles`.
 
-- **Proposal packet** – Original payload JSON and the governance
-  archive entries (`gov.proposed`, `gov.finalized`, `gov.executed`).
-- **Allowlist diff** – A before/after comparison of the arbitrator roster using
-  `escrow_getRealm` responses for the relevant realm. The diff should include the
-  `Version` and `updatedAt` timestamp emitted when governance executed the
-  change.
-- **Escrow evidence bundle** – Snapshot exports (via `escrow_getSnapshot`) for
-  each disputed contract, including frozen policy metadata, dispute memos, and
-  resolution payload hashes.
-- **Event transcript** – Ordered `escrow_listEvents` output covering the dispute
-  lifecycle, resolution decision, and signer fingerprints. This transcript lets
-  auditors confirm that only allowlisted arbitrators signed the outcome.
-- **Quarterly disclosures** – Aggregated statistics covering dispute volume,
-  average time-to-resolution, and any escalations to governance for role updates
-  or policy amendments.
+## Frozen policy inside an escrow
 
-## Reporting Cadence and Oversight Hooks
+When an escrow is created with a realm id, `Engine.Create` copies the realm's
+arbitrator policy into the escrow record as `FrozenArb`
+(`native/escrow/types.go`): `RealmID`, `RealmVersion`, `PolicyNonce`, `Scheme`,
+`Threshold`, `Members`, `FrozenAt`, fee schedule and metadata. The escrow keeps
+that copy, so a later realm update does not change an existing escrow's policy.
 
-Arbitration reporting layers on top of the governance cadence:
+## RPC methods
 
-- **Monthly dispute digest** – Published within seven days of month end. Includes
-  dispute counts, outcome ratios (release/refund), average resolution time, and
-  links to representative escrow snapshots. The digest must cite `escrow_getRealm`
-  (realm version) and `escrow_listEvents` (decision sequence numbers) to prove
-  figures can be independently verified.
-- **Immediate disclosures** – Any revocation or suspension of arbitrator access
-  requires same-day notice via a governance proposal update and a bulletin to the
-  regulatory mailing list. The bulletin should link to the proposal ID and the
-  allowlist diff derived from `escrow_getRealm`.
-- **Oversight subscriptions** – Regulators and investors are encouraged to
-  subscribe to `escrow.realm.updated` and `escrow.resolved` streams using
-  `escrow_listEvents`. These hooks surface role changes and dispute outcomes in
-  near real time, enabling watchdogs to cross-check that resolutions are signed
-  by authorized arbitrators.
-- **Annual controls review** – Once per fiscal year, governance sponsors a
-  walkthrough of arbitration controls, including a sampling of frozen policy
-  bundles, event transcripts, and reconciliation of dispute metrics against the
-  published digests.
+| Method | Use |
+| --- | --- |
+| `escrow_getRealm` | Current realm definition. |
+| `escrow_getSnapshot` | The escrow plus `frozenPolicy` (`realmId`, `realmVersion`, `policyNonce`, `scheme`, `threshold`, `members`, `frozenAt`, `metadata`), when the escrow has one. |
+| `escrow_listEvents` | Escrow events in order. |
 
-By anchoring each report and oversight hook to the canonical RPC endpoints
-(`escrow_getRealm`, `escrow_listEvents`, and `escrow_getSnapshot`), stakeholders
-can verify that arbitration remains governed by transparent, deterministic
-processes aligned with the broader protocol lifecycle.
+Realm events are `escrow.realm.created` and `escrow.realm.updated`; dispute
+events include `escrow.disputed`, `escrow.resolved`, `escrow.trade.disputed`
+and `escrow.trade.resolved` (`native/escrow/events.go`).

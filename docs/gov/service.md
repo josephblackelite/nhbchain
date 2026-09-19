@@ -1,139 +1,109 @@
 # Governance Service (`governd`)
 
-The governance service exposes a gRPC surface for submitting proposals and
-ballots while mirroring on-chain governance state through a set of read models.
-It wraps the consensus transaction envelope helpers so that downstream tooling
-can interact with governance without embedding consensus-specific logic.
+`governd` (`services/governd`) is a gRPC service that registers `gov.v1.Query`
+and `gov.v1.Msg` (`proto/gov/v1`). The `Query` service reads governance state
+through the consensus service's `QueryState` call. The `Msg` service wraps
+messages in signed consensus envelopes.
+
+**Write path status.** The `Msg` RPCs cannot change chain state today. They
+build a `SignedTxEnvelope` whose payload is a `gov.v1` message
+(`MsgSubmitProposal`, `MsgVote`, `MsgDeposit`, `MsgSetPauses`), and the
+consensus envelope decoder (`transactionFromModulePayload` in
+`consensus/codec/codec.go`) has no case for them: it only maps swap
+payout-receipt and POS messages to transactions and rejects any other module
+payload (`envelope: unsupported module payload type`, or `envelope: decode
+module payload` when the type is not linked into the node, which is the case
+for `proto/gov/v1`). `MsgSubmitProposal` also has no field for a proposal kind
+or payload (`sdk/gov/tx.go`). Governance writes go through the `TxTypeGov*` transactions
+described in [governance overview](../governance/overview.md), for example with
+`nhb-cli gov ...`. The `Query` RPCs work.
+
+## Running
+
+```bash
+go run ./services/governd --config services/governd/config.yaml
+```
+
+`--config` defaults to `services/governd/config.yaml`. The process listens on
+`listen`, dials the consensus endpoint, and logs `governd listening on <addr>`.
+`NHB_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` and
+`OTEL_EXPORTER_OTLP_INSECURE` configure logging and telemetry
+(`services/governd/main.go`).
 
 ## Configuration
 
-`governd` loads a YAML configuration file. The example below matches the default
-`services/governd/config.yaml` shipped with the repository.
+YAML, loaded by `services/governd/config/config.go`. The shipped
+`services/governd/config.yaml` sets the values marked (shipped).
 
-```yaml
-listen: ":50061"              # gRPC listen address
-consensus: "localhost:9090"   # consensus service endpoint
-chain_id: "localnet"          # consensus chain identifier
-signer_key_env: "GOVERND_SIGNER_KEY" # environment variable containing a 32 byte hex encoded key
-nonce_start: 1                 # baseline account nonce used when no persisted state exists
-nonce_store_path: "services/governd/data/nonce" # file used to persist the next nonce across restarts
-fee:                           # optional transaction fee metadata
-  amount: ""
-  denom: ""
-  payer: ""
-tls:                           # TLS assets for the gRPC listener
-  cert: "services/governd/config/server.crt"
-  key_env: "GOVERND_TLS_KEY_PATH" # path supplied via environment variable/secret manager
-  client_ca: ""               # optional PEM bundle of allowed client certificate authorities
-auth:
-  api_tokens: []               # list of accepted bearer tokens for Msg RPCs
-  mtls:
-    allowed_common_names: []   # optional set of authorised client certificate common names
-consensus_client:              # security settings for the outbound consensus client
-  allow_insecure: true         # development override for plaintext consensus connections
-  tls:
-    cert: ""                   # optional client certificate for mutual TLS
-    key: ""
-    ca: ""                    # optional PEM bundle of trusted consensus server roots
-  shared_secret:
-    header: "authorization"   # metadata key for the shared-secret token
-    token: ""                 # optional static shared secret sent to consensus
-```
+| Key | Default in code | Notes |
+| --- | --- | --- |
+| `listen` | `:50061` | gRPC listen address. |
+| `consensus` | `localhost:9090` | Consensus service endpoint. |
+| `chain_id` | `localnet` | Placed in the envelope. |
+| `signer_key` | none | 32-byte secp256k1 private key, hex. If set it wins over the two options below. |
+| `signer_key_env` | none (shipped: `GOVERND_SIGNER_KEY`) | Name of an environment variable holding the hex key. Used when `signer_key` is empty. |
+| `signer_key_file` | none | Path to a file holding the hex key. Used when neither of the above is set. One of the three is required. |
+| `nonce_start` | `1` | Baseline nonce when nothing is persisted. |
+| `nonce_store_path` | `/var/lib/nhb/governd-nonce` (shipped: `services/governd/data/nonce`) | Required, non-empty. Written after each successful envelope submission. |
+| `fee.amount`, `fee.denom`, `fee.payer` | empty | Copied into each envelope. |
+| `tls.cert` / `tls.cert_env` | none | Server certificate path, or the name of an environment variable whose value is that path. One is required. |
+| `tls.key` / `tls.key_env` | none (shipped: `tls.key_env: GOVERND_TLS_KEY_PATH`) | Server key path, or the name of an environment variable whose value is that path. One is required. |
+| `tls.client_ca` | empty | PEM bundle of client CAs. When set, clients must present a certificate signed by it (`RequireAndVerifyClientCert`). |
+| `auth.api_tokens` | empty | Accepted bearer tokens for `Msg` RPCs. |
+| `auth.mtls.allowed_common_names` | empty | Client certificate common names accepted for `Msg` RPCs. |
+| `consensus_client.allow_insecure` | `false` (shipped: `true`) | Permit a plaintext consensus connection with no TLS and no shared secret. |
+| `consensus_client.tls.cert`, `.key`, `.ca` (also `cert_env`, `key_env`) | none | Client mTLS material for the consensus connection. Cert and key must be given together. |
+| `consensus_client.shared_secret.header`, `.token` | none (shipped header: `authorization`) | Static token sent as per-RPC credentials to the consensus service. |
 
-* **`signer_key_env`** points to an environment variable resolved at runtime. The
-  variable must contain the lowercase hexadecimal encoding of the 32 byte
-  secp256k1 private key used to sign governance transactions. For local testing,
-  the legacy `signer_key` scalar is still accepted but should not be used in
-  production deployments.
-* **`nonce_start`** should be set to the next available account nonce for the
-  configured signer. The service treats this as a baseline when no persisted
-  nonce information is available on disk.
-* **`nonce_store_path`** identifies a writable file used to persist the next
-  nonce after each successful transaction broadcast. The value is reloaded
-  during startup so restarts continue from the last used nonce.
-* **`tls`** must point at the PEM encoded certificate and private key the
-  service should present. Production deployments should inject the private key
-  path using `tls.key_env` (for example via Kubernetes secrets or HashiCorp
-  Vault agents). Supplying `client_ca` enables mTLS and requires clients to
-  authenticate with a certificate issued by the supplied authority.
-* **`auth.api_tokens`** accepts static bearer tokens. Requests should send the
-  token using the `authorization: bearer <token>` metadata entry. The
-  `x-api-token` metadata key is also supported for backwards compatibility with
-  HTTP gateways.
-* **`auth.mtls.allowed_common_names`** lists the client certificate subjects
-  permitted to call the `gov.v1.Msg` RPCs when mTLS is enabled. Leave the list
-  empty to disable subject filtering.
-* **`consensus_client`** controls how the service authenticates to the
-  consensus endpoint. Production deployments should provision TLS material and
-  optionally set a shared-secret token enforced by the validator. Leave
-  `allow_insecure` disabled outside of throwaway lab environments; the process
-  now fails fast if neither TLS nor a shared secret are configured.
+Startup fails with `requires tls material or shared-secret authentication
+unless allow_insecure=true` when the consensus client has none of TLS, a
+shared secret, or `allow_insecure`.
 
-## Running the service
+### Nonce handling
 
-```bash
-$ go run services/governd/main.go --config services/governd/config.yaml
-2024/05/28 09:15:24 governd listening on :50061
-```
+The service keeps the next nonce in memory. Each `Msg` call reserves a nonce
+before submitting the envelope; the counter is saved to `nonce_store_path`
+after a successful submission. If the submission fails the reserved nonce is
+not returned. On start, the nonce is the larger of `nonce_start` and the
+persisted value (`RestoreNonce`).
 
-The service establishes a single consensus client connection and registers both
-`gov.v1.Query` and `gov.v1.Msg` gRPC services.
+## Authentication
+
+Only `Msg` methods (`/nhbchain.gov.v1.Msg/*`) are authenticated
+(`services/governd/server/auth.go`); `Query` methods are open to anyone who can
+reach the port. A `Msg` call is accepted when it carries either
+
+- `authorization: Bearer <token>` or `x-api-token: <token>` metadata matching
+  an entry in `auth.api_tokens`, or
+- a verified client certificate whose common name is in
+  `auth.mtls.allowed_common_names`.
+
+With neither list configured every `Msg` call is refused with
+`PermissionDenied` (`authentication is not configured`); with credentials
+configured but not matched, `Unauthenticated`.
 
 ## Query API
 
-The read API mirrors the structures returned by the on-chain governance module
-while using pagination primitives friendly to explorer-style consumers.
+`gov.v1.Query` (`services/governd/server/server.go`):
 
-| RPC | Description |
-| --- | ----------- |
-| `GetProposal` | Returns a single proposal by identifier. |
-| `ListProposals` | Streams proposals in reverse identifier order with optional status filtering. |
-| `GetTally` | Computes the latest tally for a proposal using the consensus state votes. |
+| RPC | Behavior |
+| --- | --- |
+| `GetProposal` | `QueryState("gov", "proposals/<id>")`. `id` must be non-zero (`InvalidArgument`); a missing proposal returns `NotFound`. |
+| `ListProposals` | Newest first. `page_size` defaults to `20` and is capped at `100`. `page_token` is the id to continue from; when absent the latest id comes from `QueryState("gov", "proposals/latest")`. `status_filter` filters by status. `next_page_token` is set when older ids remain. Ids that do not exist are skipped. |
+| `GetTally` | `QueryState("gov", "tallies/<id>")`. The tally and status are computed live from the stored votes (see [state indexes](../governance/state-indexes.md)); a proposal with no tally returns `NotFound`. |
 
-### Pagination semantics
+Query failures against the consensus service return `Internal`, and an
+unavailable consensus client returns `Unavailable`.
 
-`ListProposals` uses a cursor-based token. The response `next_page_token` can be
-fed back into subsequent requests to continue iterating older proposal
-identifiers. When the token is absent all proposals have been consumed.
+## Message API
 
-## Transaction API
+`gov.v1.Msg` RPCs: `SubmitProposal`, `Vote`, `Deposit`, `SetPauses`. Each
+validates fields with `sdk/gov` (violations return `InvalidArgument`), signs
+the envelope with the configured key, submits it, and returns the SHA-256 of
+the marshaled signed envelope as `tx_hash`. See the write-path note above:
+the chain rejects these envelopes.
 
-The `gov.v1.Msg` surface converts module messages into signed consensus
-transactions before forwarding them to the validator. Responses contain the
-transaction hash so callers can correlate with block explorers or observability
-pipelines.
+## Generated clients
 
-All `gov.v1.Msg` RPCs require authentication. Clients must present a configured
-API token or connect using mTLS with an authorised client certificate.
-
-| RPC | Description |
-| --- | ----------- |
-| `SubmitProposal` | Broadcasts a `MsgSubmitProposal` locking the provided deposit. |
-| `Vote` | Broadcasts a `MsgVote` selecting `yes`, `no`, or `abstain`. |
-| `Deposit` | Broadcasts a `MsgDeposit` to top-up proposal escrow. |
-
-All transaction helpers validate basic fields using the Go SDK prior to
-constructing the consensus envelope. Validation errors are surfaced as
-`INVALID_ARGUMENT` gRPC codes.
-
-### Nonce management
-
-`governd` tracks the next nonce in memory and persists the counter to the
-configured `nonce_store_path` after every successful broadcast. If the consensus
-submission fails the nonce is still considered consumed to avoid double-use.
-Operators should update the persisted value (or adjust `nonce_start` for fresh
-deployments) when resynchronising with state or rotating the signing account.
-
-## Error handling
-
-| Scenario | gRPC status |
-| -------- | ------------ |
-| Unknown proposal or tally | `NOT_FOUND` |
-| Invalid identifiers or malformed payloads | `INVALID_ARGUMENT` |
-| Consensus connectivity issues | `UNAVAILABLE` or `INTERNAL` depending on the failure point |
-
-## Generated client stubs
-
-The repository includes generated Go and TypeScript stubs under
-`proto/gov/v1` and `clients/ts/gov/v1`. Use the Go SDK helpers in `sdk/gov` to
-simplify message construction and submission from custom tooling.
+Generated Go stubs are in `proto/gov/v1`, TypeScript stubs in
+`clients/ts/gov/v1`, and message constructors in `sdk/gov`.

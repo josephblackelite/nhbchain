@@ -1,118 +1,102 @@
 # Fee policy
 
-The NHB fee stack balances affordability for low-volume users with predictable
-merchant pricing and safety guardrails. This page summarises the default policy
-that the network governance committee stewards and enumerates the knobs that can
-be tuned through parameter proposals.
+The chain has two independent fee mechanisms, both configured from the
+`[global.Fees]` block of the node config (see
+[fee configuration](../governance/fee-params.md)). Neither is adjustable by a
+governance proposal.
 
-## Free tier
+## 1. Protocol transfer fee (`TransferGasPolicy`)
 
-Wallets receive a **monthly allowance of 100 NHB-sponsored transactions** that
-is shared across NHB and ZNHB transfers. Transactions that qualify for the free
-tier are debited against the sender's usage for the current UTC calendar month.
-Balances reset automatically at the start of each month. Once the allowance is
-exhausted the standard fee schedule applies. The allowance can be reconfigured
-via governance (see [fee parameters](../governance/fee-params.md)). Domains can
-opt into per-asset tracking, but the default aggregates both assets so the 100
-free transactions cover any combination of NHB and ZNHB activity.
+Source: `core/transfer_gas_policy.go`, and the NHB and ZNHB transfer paths in
+`core/state_transition.go`.
 
-Operators can monitor network-wide utilisation with the JSON-RPC method
-`fees_getMonthlyStatus`, which surfaces the active window, free-tier
-transactions consumed, and the most recent rollover month. The CLI mirrors the
-endpoint as `nhb-cli fees status` for quick checks during incident response.
+Applies to `TxTypeTransfer` (NHB) and `TxTypeTransferZNHB` (ZNHB).
 
-### Eligibility
+- **Free tier.** Each wallet has a tracked spend per asset (NHB and ZNHB are
+  tracked separately), summed from the `Value` of its transfers, in a window
+  that is `lifetime` or `monthly` (UTC calendar month) according to
+  `TransferFreeTierWindow`. A transfer is fee-free while the wallet's tracked
+  spend before that transfer is below `TransferFreeTierSpendWei`
+  (default 1,000 tokens, `1000000000000000000000` wei). The transfer that takes
+  the tracked spend past the limit is still free; afterwards every transfer is
+  charged. The spend is recorded after each transfer
+  (`TransferGasSpendAdd`, `core/state/transfer_gas.go`).
+- **Fee.** Once the free tier is used up the fee is
+  `floor(value * bps / 10000)` in the transferred asset, with `bps` =
+  `TransferFeeBps` for NHB (default `20`, 0.20%) and `TransferFeeBpsZNHB` for
+  ZNHB (default `10`, 0.10%). The sender pays the fee on top of `value`; a
+  sender whose balance cannot cover `value + fee` fails with an insufficient
+  balance error.
+- **Collector.** The fee is credited to `TransferFeeCollector`, or to the
+  node's escrow fee treasury address when that is empty. If the collector is
+  the chain's admin wallet, a ZNHB fee is also added to the ZNHB Reward Pool
+  ledger, and a ZNHB transfer sent from the admin wallet is debited from the
+  Reward Pool ledger, to keep `CheckZNHBSupplyInvariant` true
+  (`core/state_transition.go`).
+- **Sponsored NHB transfers.** When a paymaster sponsors an NHB transfer
+  (`EvaluateSponsorship`), the paymaster's balance pays the fee instead of the
+  sender.
+- **Disabling.** `buildTransferGasPolicyFromConfig` marks the policy
+  `Enabled = false` when `TransferFreeTierSpendWei` is `0` or empty. In that
+  state the NHB path still computes the fee from `TransferFeeBps` and deducts
+  it from the sender, but the code that credits the collector is gated on
+  `Enabled`, so the amount is not credited to any account
+  (`applyEvmTransaction`, `core/state_transition.go`). The ZNHB path
+  (`applyTransferZNHB`) does not check `Enabled` when crediting: it still
+  charges the ZNHB fee, without a free tier, and credits it to the collector.
+  To turn the fee off, set `TransferFeeBps` and `TransferFeeBpsZNHB` to `0`
+  rather than only zeroing the free-tier limit.
 
-* **Retail wallets:** always accrue against the free tier for POS and P2P flows.
-* **Developer/test accounts:** can be marked as *exempt* to preserve sandbox
-  behaviour. Exemptions are tracked on-chain and audited during governance
-  reviews.
-* **High-volume merchants and OTC desks:** do not consume free-tier capacity;
-  their fees are charged according to the MDR schedule below.
+Query methods:
 
-### Exhaustion handling
+| Method | Params | Result |
+| --- | --- | --- |
+| `fees_getTransferStatus` | `[{"address": "<bech32>"}]` | NHB status: `window`, `window_key`, `spentWei`, `freeLimitWei`, `remainingWei`, `eligible`, `nextResetUnix` (omitted when zero). |
+| `fees_getTransferQuote` | `[{"address": "<bech32>", "asset": "NHB" or "ZNHB", "amountWei": "<positive integer>"}]` | `eligible`, `feeWei` (`"0"` while eligible), `feeBps`. |
 
-The gateway and node expose the current allowance and trailing usage so clients
-can warn users before the cutoff. Once exhausted, the transaction estimator
-quotes the paid rate and the intent must include sufficient balance to cover the
-fee.
+(`rpc/fees_handlers.go`.)
 
-## Transfer gas sponsorship
+## 2. Fee domains (`fees.Apply`)
 
-Native NHB transfers now support an explicit **spend-based gas sponsorship**
-policy alongside the fee-router free tier above.
+Source: `native/fees/apply.go`, `applyTransactionFee` in
+`core/state_transition.go`, `buildFeePolicyFromConfig` in `core/node.go`.
 
-Default rebuild policy:
+This mechanism runs for `TxTypeTransfer` and `TxTypeTransferZNHB` when the
+transaction's `MerchantAddress` field, trimmed and lower-cased
+(`NormalizeDomain`, `native/fees/apply.go`), equals a configured domain name,
+so the match is case-insensitive. `buildFeePolicyFromConfig` configures three
+domains with the same policy: `pos`, `p2p` and `otc`. A transaction whose `MerchantAddress` is empty
+or is any other string (for example a merchant address used for sponsorship)
+skips this mechanism.
 
-* a wallet pays **no transfer gas** while its tracked NHB spend remains below
-  `1000`
-* the transfer that crosses the threshold remains free
-* once the tracked spend is already at or above the threshold, normal gas is
-  charged on subsequent transfers
-* charged gas is credited to the configured **master treasury / admin wallet**
-  instead of disappearing through implicit burn-like behaviour
+For a matching transaction:
 
-The active status for a wallet can be queried through JSON-RPC with
-`fees_getTransferStatus`, which returns the tracked spend, remaining sponsored
-headroom, and whether the wallet is still eligible.
+- **Free tier.** A counter per payer, domain and UTC month (`FeesGetCounter`).
+  While the counter is below `FreeTierTxPerMonth` (default `100`) no fee is
+  charged. The counter is shared by NHB and ZNHB (the aggregate scope), because
+  the configuration builder does not set per-asset tracking.
+- **Fee.** After that, `fee = floor(value * bps / 10000)`, where `bps` is the
+  asset entry's `MDRBasisPoints` (an asset entry with `0` inherits
+  `MDRBasisPoints`, default `150`, 1.5%). The fee never exceeds the value.
+- **Payer and routing.** The fee is debited from the sender's balance in
+  addition to the transferred amount, and credited to the asset's
+  `OwnerWallet` (`fees: missing route wallet for asset <asset>` when it is
+  unset). See [fee routing](./routing.md). The `fees.applied` event's `netWei`
+  is `value - fee` as computed by `fees.Apply`; the transfer itself credits the
+  recipient the full `value`.
+- **Records.** Each evaluation updates the monthly usage counters, the
+  per-domain/asset/wallet totals, and emits `fees.applied`
+  ([accounting](./accounting.md)).
 
-The sponsorship window is governance/configurable and currently supports:
+Per-asset overrides come from `[[global.Fees.Assets]]`: an asset without an
+entry has no fee rate and is not charged (only NHB gets a default entry when no
+assets are configured at all, `DomainPolicy.normalized`). There is no
+exemption list, minimum or maximum fee guard, or on-chain fee-policy record in
+the code.
 
-* `lifetime`
-* `monthly`
+Query methods:
 
-## Merchant discount rate (MDR)
-
-Point-of-sale payments are charged an **ad valorem fee of 1.5%** of the payment
-amount (`pos_mdr_bps = 150`). The MDR applies after any free-tier exemption is
-processed. Governance may adjust the basis points value and the protocol
-propagates the new rate in the next epoch.
-
-* **Split settlements:** When MDR applies, the paymaster withholds the fee from
-the merchant leg before settlement. The withheld amount is routed according to
-the [fee routing policy](./routing.md).
-* **Pass-through sponsorship:** If a merchant funds the transaction directly,
-the MDR still applies unless the merchant wallet is on the *exemptions* list.
-* **Asset-specific overrides:** Each fee domain advertises the assets it
-  accepts (e.g. NHB, ZNHB) and maps them to bespoke MDR basis points and routing
-  wallets. Governance can, for example, charge 150 bps on NHB while routing
-  ZNHB through a different wallet at 200 bps. Omitted asset entries fall back to
-  the domain default.
-
-## Minimum and maximum fee guards
-
-To keep fee collection predictable at the extremes the policy enforces both a
-floor and a ceiling:
-
-* `min_fee`: the absolute minimum charged when MDR × amount would fall below the
-  threshold (e.g. micro-payments).
-* `max_fee_bps`: the upper bound expressed in basis points. For large tickets
-  the effective fee is `min(MDR, max_fee_bps)`.
-
-Governance can adjust either guard alongside the MDR value. All parameters are
-covered in [governance controls](../governance/fee-params.md).
-
-## Exemptions
-
-The exemptions list enumerates wallet addresses or classification tags that are
-not charged the default fees. Exemptions can be scoped by domain (POS, P2P, OTC)
-or by program (e.g. public-goods campaign). Operators should keep the list short
-and justify each entry in governance discussions. Changes are enacted through a
-parameter proposal that updates the on-chain `FeePolicy` record.
-
-## Domain matrix
-
-| Domain | Default payer | Fee schedule | Notes |
-| --- | --- | --- | --- |
-| POS | Merchant paymaster | 1.5% MDR with min/max guards | Free tier applies to sponsored consumer wallets. Merchant exemptions override MDR. |
-| P2P | Sender wallet | Flat fee derived from `nhb_payment_fee_bps`; free tier applies to wallets under allowance. | OTC desks can be exempted from the free tier to avoid subsidy abuse. |
-| OTC | Desk operator | MDR or fixed quote depending on deal leg; honours min/max guards. | Desk exemptions apply when governance designates regulated partners. |
-
-## Governance and monitoring
-
-* The parameter set is audited quarterly; deltas require governance approval.
-* Fee metrics are exported via the observability stack and surfaced in the POS
-  and OTC dashboards. Monitoring alerts operators when the free-tier utilisation
-  exceeds 80% or MDR revenue drifts outside forecast bands.
-* Refer to [fee routing](./routing.md) for the distribution of collected fees
-  across the NHB ecosystem wallets.
+| Method | Params | Result |
+| --- | --- | --- |
+| `fees_getMonthlyStatus` | none | `window_yyyymm`, `used` (free-tier transactions consumed this UTC month), `remaining` (network-wide allowance minus `used`: the allowance grows by `FreeTierTxPerMonth` the first time each payer is seen in the month), `last_rollover_yyyymm`. `nhb-cli fees status` calls it. |
+| `fees_listTotals` | `[{"domain": "pos"}]` | Array of `{domain, wallet, grossWei, feeWei, netWei}`, one per accumulated (domain, asset, wallet) record; the JSON has no `asset` field. |

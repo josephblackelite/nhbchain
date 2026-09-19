@@ -149,5 +149,42 @@ Result: `{"receipts": [...], "nextCursor": "..."}`. See
 emitted by the mint path; attributes are listed in
 [risk-controls.md](risk-controls.md#events).
 
-The voucher ledger can be exported with `swap_voucher_export`; filter the CSV
-`status` column for `reversed`.
+Submit a signed batch marking one or more vouchers as reconciled against treasury records. `signature` is a hex-encoded 65-byte secp256k1 signature over `keccak256("NHB_SWAP_MARK_RECONCILED_V1|providerTxIds=<comma-joined providerTxIds>")` (trimmed, blank entries removed, in the exact order submitted), produced by a key holding `ROLE_SWAP_ADMIN`.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "swap_markReconciled",
+  "params": [{"providerTxIds": ["order-12345", "order-12346"], "signature": "0x..."}]
+}
+```
+
+Returns `{ "ok": true, "txHash": "0x..." }` the same way `swap_voucher_reverse` does.
+
+### `swap_setManualQuote`
+
+Publishes a manual override rate for a currency pair on the manual oracle tier. Manual rates sit at the bottom of the priority stack (see `docs/treasury/peg-policy.md`) and are the on-call circuit breaker used during custody outages or extreme volatility. Without a fresh call to this endpoint, the manual tier goes stale after `MaxQuoteAgeSeconds` and is skipped by the aggregator.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "swap_setManualQuote",
+  "params": [{"base": "USD", "quote": "ZNHB", "rate": "0.05", "timestamp": 1734000000}]
+}
+```
+
+* `base` / `quote` – currency pair, e.g. `USD` / `ZNHB`.
+* `rate` – decimal string, quote per base (must be positive).
+* `timestamp` – optional Unix seconds; defaults to the current time when omitted.
+
+Record the justification and incident ticket ID before invoking this command.
+
+## Incident Response
+
+* Spike in `swap.alert.velocity` – confirm PSP behaviour, temporarily raise `VelocityMaxMints` if needed, and log the change.
+* Sanctions alert – freeze the account, notify compliance, and coordinate with the sanctions provider.
+* Repeated provider rejections – verify the allow list matches the operational roster and update `[swap.providers]` if a new PSP is onboarded.
+
+Maintain a weekly audit of reversal activity by exporting the voucher ledger and filtering for `status = reversed`.

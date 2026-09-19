@@ -1,9 +1,8 @@
 # ZNHB Staking and Delegation
 
-This document describes what the staking code does: the transactions, account
-fields, unbonding queue, reward index, JSON-RPC methods, CLI commands and
-events. It is written from the source in this repository. File and line
-references are to `origin/main` at the time of writing.
+This document describes the ZapNHB staking pipeline, on-chain state layout, JSON-RPC surface, and emitted events following the introduction of delegation, unbonding, and claim flows. It is intended for auditors, investors, developers, end users, and regulators who require a comprehensive view of the staking module.
+
+> **Pause control:** Staking availability is controlled by the `Staking` flag in the node's `[global.Pauses]` config block, which `SetModulePauses` loads into the node (`core/node.go`); the stake RPC handlers return `codeModulePaused` while it is set (`rpc/stake_handlers.go`). The reward engine separately reads the `staking` flag of the `system/pauses` parameter-store entry (`native/params/state/pauses.go`, `core/state/staking_rewards.go`) and returns `ErrStakingPaused` when it is true. There is no `staking.pause.enabled` governance key: it is not in the [governance parameter catalog](../governance/params.md), and no proposal kind writes `system/pauses` (`gov.v1/MsgSetPauses` cannot change chain state, see [governance service](../gov/service.md)).
 
 ## Overview
 
