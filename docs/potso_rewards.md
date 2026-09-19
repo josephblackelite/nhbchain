@@ -1,96 +1,89 @@
 # POTSO Epoch Rewards (ZNHB)
 
-This document describes how the POTSO rewards module distributes epoch-based ZNHB incentives using a hybrid of staked balance and engagement activity. It is intended for node operators, governance participants, and auditors who require both technical and compliance-oriented context.
+This document describes how `processPotsoRewardEpoch` (`core/state_transition.go`) distributes ZNHB each reward epoch from a configured treasury account, using the composite weights in [weights.md](potso/weights.md).
 
 ## Overview
 
-- **Objective:** Periodically distribute ZNHB from a pre-funded treasury pool to active participants.
-- **Cadence:** Rewards are processed once per POTSO epoch. Epoch length is configurable via `potso.rewards.EpochLengthBlocks` in `config.toml`.
-- **Inputs:**
-  - Bonded ZNHB stake snapshots sourced from the POTSO staking subsystem.
-  - Engagement meters representing user activity (transactions, escrow touchpoints, uptime) recorded during the epoch. These
-    counters feed the composite weighting pipeline described in [`weights.md`](potso/weights.md).
-- **Budget:** Rewards are paid entirely from the treasury address configured in `potso.rewards.TreasuryAddress`. No new ZNHB is minted. If the treasury balance is below the configured emission for an epoch, payouts are scaled down pro-rata.
+- **What it does:** at each epoch boundary, transfers up to `EmissionPerEpoch` ZNHB from the account at `[potso.rewards].TreasuryAddress` to winning addresses (auto mode) or records claimable amounts (claim mode, see [payout modes](potso/rewards-modes.md)). No ZNHB is minted by this code; balances are moved from the treasury account.
+- **Cadence:** `ProcessBlockLifecycle` (`core/epochs.go`) calls `maybeProcessPotsoRewards` on every block. With `currentEpoch = height / EpochLengthBlocks`, it processes every epoch from the one after `potso/rewards/lastProcessed` (or 0 if none) up to `currentEpoch - 1`, in order. Nothing is processed when `EpochLengthBlocks = 0`, `EmissionPerEpoch <= 0`, or `currentEpoch = 0`.
+- **Inputs:** POTSO stake locks, the stake basis of eligible validators, and per-epoch engagement counters, combined as described in [weights.md](potso/weights.md).
+- **Budget:** `B = min(EmissionPerEpoch, treasury ZNHB balance)`. A smaller treasury therefore shrinks the payouts proportionally. If `B <= 0`, no weights are computed, no snapshot is stored and no winners are paid, but the epoch is still marked processed.
 
-## Weighting Model
-
-Each participant’s payout weight combines stake share and the composite
-engagement share produced by the [POTSO weighting pipeline](potso/weights.md):
+## Weighting model
 
 ```
 w_i = α * stakeShare_i + (1 − α) * engagementShare_i
 ```
 
-Where:
+- `α = AlphaStakeBps / 10000`. The value used is `RewardConfig.AlphaStakeBps`, which comes from `[potso.weights].AlphaStakeBps` when that is non-zero (always, after `config.Load` defaults; default `7000`).
+- `stakeShare_i` is `stake_i` over the total stake of the candidates that passed the filters. `stake_i` is the POTSO bonded total plus, for eligible validators, their eligibility basis.
+- `engagementShare_i` is the decayed engagement after filters and cap over the total.
+- A zero total makes that component 0.
 
-- `α` is configured by `AlphaStakeBps` (basis points, default `7000` → 70% stake / 30% engagement).
-- `stakeShare_i` is the participant’s bonded stake divided by the total bonded stake captured at epoch close.
-- `engagementShare_i` is the participant’s decayed engagement score (after filters and caps) divided by the total engagement for the epoch.
+Candidates are ranked by `w_i`. At most `MaxWinnersPerEpoch` (when non-zero) of the ranked entries are paid, and the ranking itself is cut to `TopKWinners` beforehand.
 
-If either the total stake or engagement denominator is zero, that component contributes zero weight.
+## Payout calculation
 
-Participants are ranked by composite weight. The highest weights receive rewards up to the minimum of
-`MaxWinnersPerEpoch` (from `[potso.rewards]`) and `TopKWinners` (from `[potso.weights]`) to protect block processing time.
+1. `payout_i = floor(B * w_i)`, then the optional per-winner cap `MaxUserShareBps` with redistribution ([spec.md](potso/spec.md)).
+2. Payouts that are `<= 0` or below `MinPayoutWei` are dropped.
+3. `TotalPaid` is the sum of the remaining payouts and `Remainder = B - TotalPaid` (stored in the epoch meta). The remainder is simply not debited from the treasury (auto mode) or not recorded (claim mode). The `CarryRemainder` setting is not read by any code, so there is no separate carry-over.
+4. Auto mode: debit the treasury by `TotalPaid`, credit each winner, write a claim record (`claimed = true`, `mode = auto`, `claimedAt` = block time of settlement) and a history entry per winner. Claim mode: write a claim record per winner (`claimed = false`).
+5. Persist winners, meta and emit events:
+   - `potso.reward.paid` per winner in auto mode: `epoch`, `address`, `amount`, `mode`.
+   - `potso.reward.ready` per winner in claim mode: same attributes.
+   - `potso.reward.epoch`: `epoch`, `totalPaid`, `winners`, `emission`, `budget`, `remainder`.
 
-## Payout Calculation
+## State persistence
 
-1. Compute the epoch budget `B_E = min(TreasuryBalance, EmissionPerEpoch)`.
-2. For each selected participant, calculate `payout_i = floor(B_E * w_i)`.
-3. Drop payouts below `MinPayoutWei` (default `1e15` wei = 0.001 ZNHB). Removed amounts remain in the treasury and may be re-distributed in future epochs when `CarryRemainder` is `true`.
-4. Sum payouts and transfer ZNHB from the treasury account to each winner.
-5. Persist the distribution and emit events:
-   - `potso.reward.paid` per winner.
-   - `potso.reward.epoch` summarizing totals for the epoch.
+Records use `KVPut` with the plain format-string keys below (`potsoReward*Key` in `core/state/manager.go`, which do not pre-hash), so each RLP value is stored under a single `Keccak256(key)`. `<addr>` in the reward keys is lower-case hex of the 20 address bytes.
 
-## State Persistence
+- `potso/rewards/lastProcessed` - latest epoch index processed.
+- `potso/rewards/epoch/<E>/meta` - `RewardEpochMeta` (`Epoch`, `Day`, `StakeTotal`, `EngagementTotal`, `AlphaBps`, `Emission`, `Budget`, `TotalPaid`, `Remainder`, `Winners`). `Day` is the UTC date of the block that processed the epoch, used only as a label.
+- `potso/rewards/epoch/<E>/winners` - ordered winner addresses.
+- `potso/rewards/epoch/<E>/payout/<addr>` - payout amount.
+- `potso/rewards/epoch/<E>/claim/<addr>` - `RewardClaim` (`Amount`, `Claimed`, `ClaimedAt`, `Mode`).
+- `potso/rewards/history/<addr>` - settled payouts for the address, oldest first.
+- `potso/metrics/snapshot/<E>` and `snapshots/potso/<E>/weights` - the weight snapshot ([weights.md](potso/weights.md#persistence)).
 
-The following keys are stored in the application state trie:
+An epoch whose meta already exists is skipped, so processing is idempotent.
 
-- `potso/rewards/lastProcessed` → latest epoch index processed.
-- `potso/rewards/epoch/<E>/meta` → serialized [`RewardEpochMeta`](../native/potso/rewards.go) structure.
-- `potso/rewards/epoch/<E>/winners` → ordered list of winner addresses.
-- `potso/rewards/epoch/<E>/payout/<address>` → payout amount per winner.
+## RPC endpoints
 
-Snapshots are idempotent; re-processing an already finalised epoch has no effect.
+Routing is in `rpc/http.go`. Every parameter list is a single JSON object. No authentication is required for `potso_epoch_info`, `potso_epoch_payouts`, `potso_rewards_history`, `potso_rewards_outflow` and `potso_export_epoch`, and none of them changes state:
 
-## RPC Endpoints
+- `potso_epoch_info` - params optional `{"epoch": N}`; default is the last processed epoch. Result: `epoch`, `day`, `stakeTotal`, `engagementTotal`, `alphaBps`, `emission`, `budget`, `totalPaid`, `remainder`, `winners` (amounts are decimal wei strings). Unknown epoch: HTTP 404, "epoch not found".
+- `potso_epoch_payouts` - params `{"epoch": N, "cursor": "nhb1...", "limit": N}` (`cursor` and `limit` optional; `limit` defaults to 50). Result: `{"epoch": N, "payouts": [{"user": "nhb1...", "amount": "..."}]}`. The cursor is the last address of the previous page; the next page starts after it in winner order. An unknown cursor restarts from the first winner. There is no next-cursor field.
+- `potso_rewards_history` and `potso_export_epoch`: see [rewards API](potso/rewards-api.md).
+- `potso_rewards_outflow` - see below.
 
-Two read-only JSON-RPC methods expose epoch results:
+`potso_reward_claim` is different: it requires authentication (`requireAuthInto` in `rpc/http.go`) and a signature by the winning address, and it changes state (`Node.PotsoRewardClaim`). See [rewards API](potso/rewards-api.md).
 
-- `potso_epoch_info` (optional `{"epoch": <number>}` param): returns totals, configuration parameters, and winner count for the requested epoch. Defaults to the latest processed epoch.
-- `potso_epoch_payouts` (`{"epoch": <number>, "cursor": "nhb1...", "limit": N}`): paginated list of winners and payout amounts. Cursor is an optional Bech32 address; pagination defaults to 50 entries.
+### `potso_rewards_outflow`
 
-These endpoints do not require authentication and never reveal internal state beyond persisted results.
+Params `{"lookbackDays": N}` with `N > 0` (otherwise HTTP 400, "lookbackDays must be positive"). The handler (`rpc/potso_reward_handlers.go`, `computePotsoRewardsOutflow`) reports two adjacent windows of `RewardEpochMeta.TotalPaid` sums, using the node's wall-clock UTC date as "today". It walks epochs backwards from the latest processed one and assigns each epoch by its `Day` label: `daysAgo = today - Day` in whole days. `daysAgo < N` goes to the latest window, `N <= daysAgo < 2N` to the previous window. The walk stops at the first epoch older than that, at epoch 0, or after 2,000,000 epochs (`potsoRewardsOutflowMaxEpochsScanned`). An epoch whose meta is missing or whose `Day` does not parse is skipped but still counted in `epochsScanned`.
 
-## Configuration Parameters
+Result:
 
-All reward controls reside under `[potso.rewards]` in `config.toml`:
-
-| Key | Description |
+| Field | Meaning |
 | --- | --- |
-| `EpochLengthBlocks` | Number of blocks per rewards epoch. Set to `0` to disable payouts. |
-| `AlphaStakeBps` | Stake weighting factor in basis points (0–10000). |
-| `EmissionPerEpoch` | Maximum wei budget per epoch. Combined with treasury balance to produce the spend ceiling. |
-| `TreasuryAddress` | Bech32 NHB address supplying reward funds. Must be pre-funded. |
-| `MinPayoutWei` | Dust floor; payouts below this amount are skipped. |
-| `MaxWinnersPerEpoch` | Hard cap on winners stored per epoch. |
-| `CarryRemainder` | When `true`, unallocated amounts remain in the treasury for future epochs. |
+| `lookbackDays` | the requested `N` |
+| `latestTotalPaid` / `previousTotalPaid` | decimal wei sums for the two windows |
+| `latestEpochs` / `previousEpochs` | number of epochs counted in each window |
+| `latestComplete` / `previousComplete` | `false` only if the scan hit the 2,000,000-epoch limit before finishing that window; a `false` total is partial |
+| `epochsScanned` | epochs visited |
+| `oldestEpochScanned` / `newestEpochScanned` | epoch range visited (`newestEpochScanned` is the latest processed epoch) |
+| `asOfDay` | today's UTC date, `YYYY-MM-DD` |
 
-Changes take effect when the node reloads configuration (e.g., at start-up).
+If no epoch has ever been processed, both totals are `"0"`, both `Complete` flags are `true` and the other counters are 0. A failure returns HTTP 500, code `-32000`, "failed to compute rewards outflow".
 
-## Compliance & Governance Considerations
+## Configuration
 
-- **Treasury Funding:** Governance is responsible for ensuring the configured treasury address holds sufficient ZNHB. Under-funding directly reduces payouts; no implicit minting occurs.
-- **Audit Trail:** Persisted metadata, payout lists, and emitted events provide a verifiable trail for auditors. Stored values can be retrieved via RPC or by inspecting the state trie.
-- **Parameter Updates:** Adjustments to weighting or emission should follow existing governance procedures. Parameter changes influence future epochs only; historical payouts remain immutable.
-- **Participant Privacy:** Addresses and payout amounts are public, aligning with on-chain transparency requirements. No additional personally identifiable information is stored.
-- **Regulatory Reporting:** Reward distributions may be subject to local taxation or incentive reporting rules. Operators should monitor aggregate payouts (`totalPaid`) per epoch as an input into compliance workflows.
+`[potso.rewards]` keys, defaults and validation are in [config.md](potso/config.md). They are read from the node TOML file at start-up.
 
-## Operational Notes
+## Operational notes
 
-- Epoch processing occurs automatically during block execution. If the node falls behind, missed epochs are processed sequentially on the next block, maintaining deterministic results.
-- Reward logic avoids double payouts through idempotent state checks (`rewards/epoch/<E>/meta`).
-- Unit tests (`native/potso/rewards_test.go`) cover weighting, dust filtering, alpha extremes, and winner capping. Integration coverage (`core/potso_rewards_integration_test.go`) simulates state persistence, balance transfers, and event emission.
-- Always run `go test ./...` after modifying reward logic to ensure determinism and regression safety.
+- A block that processes a backlog of epochs runs them all in that block.
+- If the treasury cannot cover a payout when paying (checked after the budget was already capped to the balance), the epoch fails with `potso.ErrInsufficientTreasury` (`core/state_transition.go`). With `B = min(emission, balance)` this check cannot trigger in the same call.
+- Unit tests: `native/potso/rewards_test.go`, `metrics_test.go`, `metrics_abuse_test.go`.
 
-For deeper technical reference see the implementation in [`native/potso/rewards.go`](../native/potso/rewards.go) and state processing in [`core/state_transition.go`](../core/state_transition.go).
+Implementation: [`native/potso/rewards.go`](../native/potso/rewards.go), [`native/potso/metrics.go`](../native/potso/metrics.go), [`core/state_transition.go`](../core/state_transition.go).

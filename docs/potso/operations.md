@@ -1,76 +1,39 @@
-# POTSO Operations Guide
+# POTSO Operations
 
-This note captures the runtime invariants and telemetry surfaced by the POTSO
-heartbeat pipeline. It supplements the [abuse controls](abuse-controls.md) and
-is aimed at validators and SREs operating public endpoints.
+Runtime invariants and controls for validators operating POTSO-enabled nodes. See [abuse controls](abuse-controls.md) for the weighting guardrails.
 
 ## Emission safety
 
-Reward epochs can only be enabled when both of the following hold:
+`RewardConfig.Enabled` is true only when `EpochLengthBlocks > 0` and `EmissionPerEpoch > 0`. `RewardConfig.Validate` rejects a config with `EpochLengthBlocks > 0` and a non-positive `EmissionPerEpoch`, and rejects an enabled config with a zero `TreasuryAddress`. The node panics at start-up on a rejected config (`cmd/nhb/main.go`). Values are documented in [config.md](config.md).
 
-- `EpochLengthBlocks > 0`
-- `EmissionPerEpoch > 0`
+## Heartbeat rate limit and metrics
 
-Configurations that attempt to enable epochs with zero emission are rejected at
-validation time. This guarantees that once the module is "enabled" an emission
-budget exists, eliminating the accidental "enabled but zero emissions" state.
+`native/potso/engine.go` implements a per-address, per-epoch heartbeat limit (`EngineParams.MaxHeartbeatsPerEpoch`, default 1440) and the Prometheus series `potso_heartbeat_total`, `potso_heartbeat_rate_limited_total`, `potso_heartbeat_unique_peers`, `potso_heartbeat_avg_session_seconds` and `potso_heartbeat_wash_total` (`observability/metrics/potso.go`). The engine is used only by `Node.PotsoHeartbeat`, which no running code path calls because the `potso_heartbeat` RPC is disabled (see [README](README.md)). These series are registered but stay at zero. There is no caller of `Node.SetPotsoEngineParams`, so the limit is not configurable from config or governance.
 
-When emissions are disabled (for example, during maintenance) the node records
-any meter growth as a wash-engagement signal. These events appear on the metric
-`potso_heartbeat_wash_total` labelled by epoch and participant address.
+The six other POTSO metrics registered in the same file (`potso_evidence_accepted_total`, `potso_penalty_applied_total`, `potso_epoch_pool`, `potso_rewards_sum`, `potso_rounding_dust`, `potso_webhook_failures_total`) have no callers of their setter methods either. See [emissions.md](emissions.md).
 
-## Heartbeat abuse counters
+## Pause switch
 
-To surface basic anti-abuse signals the node publishes the following Prometheus
-series:
+The POTSO module honours the `potso` entry of the `system/pauses` parameter and the `[global.Pauses] POTSO` config value (`nativecommon.Guard(..., "potso")`). The node enforces one in-memory flag per module (`Node.IsPaused`). It is set from `[global.Pauses]` at start-up (`cmd/nhb/main.go:162`, `Node.SetModulePauses`) and reloaded from the on-chain `system/pauses` value by `refreshModulePauses` in the block validate/commit/create paths, so once blocks are processed the on-chain value is what is enforced.
 
-| Metric | Labels | Description |
-|--------|--------|-------------|
-| `potso_heartbeat_total` | `epoch`, `address` | Count of accepted heartbeats per address for the epoch. |
-| `potso_heartbeat_rate_limited_total` | `epoch`, `address` | Heartbeats rejected because the per-address quota was exceeded. |
-| `potso_heartbeat_unique_peers` | `epoch` | Number of distinct addresses that submitted heartbeats in the epoch. |
-| `potso_heartbeat_avg_session_seconds` | `epoch` | Average session length derived from uptime deltas inside the epoch. |
-| `potso_heartbeat_wash_total` | `epoch`, `address` | Meter increases recorded while emissions were disabled. |
+The guard blocks the POTSO stake transactions, evidence submission (RPC and transaction), reward claims and `Node.PotsoHeartbeat`. It does not stop reward epoch processing in `processPotsoRewardEpoch`.
 
-Use these counters to alert on suspicious behaviour (e.g. high rate-limited
-counts for a single address) and to track organic participation growth.
+Start-up caveat: `cmd/nhb/main.go` applies `[global.Pauses]` (line 162) before it applies the POTSO reward and weight configuration (`Node.SetPotsoRewardConfig`, `Node.SetPotsoWeightConfig`, lines 240 to 248). Both setters begin with `nativecommon.Guard(n, modulePotso)` (`core/node.go:4929` and `core/node.go:4958`). With `POTSO = true` in `[global.Pauses]` the guard returns "module paused" and the node panics at start-up with "Failed to apply POTSO rewards config: module paused". Leave `POTSO = false` in the config file and pause the module through the on-chain parameter instead.
 
-## Per-address rate limit
-
-A rate limit of **1440 heartbeats per epoch** is enforced for every address by
-default. This corresponds to one heartbeat per minute across a 24 hour epoch and
-prevents automated wash engagement. The limit can be tuned by governance via the
-engine parameters if future epochs deviate significantly from 24 hours.
-
-Rate-limited submissions return a descriptive error to clients and increment
-`potso_heartbeat_rate_limited_total`. Accepted heartbeats continue to enforce
-the existing 60-second interval gate to guard against short-term replay spam.
-
-## Kill switch & reward caps
-
-The POTSO module participates in the global `system/pauses` map. Operators can
-verify the live state and stage a governance toggle with the doc helpers:
+Read the live state and stage a change with the example programs under `examples/docs/ops/`:
 
 ```bash
-go run ./examples/docs/ops/read_pauses
-go run ./examples/docs/ops/pause_toggle --module potso --state pause
+go run ./examples/docs/ops/read_pauses [--db ./nhb-data] [--consensus localhost:9090]
+go run ./examples/docs/ops/pause_toggle --authority <governance authority address> \
+    --module potso --state pause [--db ./nhb-data] [--consensus localhost:9090] [--governance localhost:50061]
 ```
 
-Reward concentration is governed by `MaxUserShareBps`. When a participant hits
-the configured cap the engine emits `potso.reward.capped` and returns
-`codeInvalidParams` to clients. Monitor `capUsage` via `potso_rewards` metrics
-and reset the cap only after auditing the incident.
+`pause_toggle` requires `--authority` and `--module`, and broadcasts a set-pauses message to the governance service endpoint.
 
-## Dashboards
+## Transaction quota
 
-Ensure the new metrics are scraped by your Prometheus deployment. Suggested
-panels include:
+`applyQuota("potso", ...)` counts the following per sender against `[global.Quotas.POTSO]` (`MaxRequestsPerMin`, `EpochSeconds`): `TxTypeStake`, `TxTypeUnstake`, `TxTypeStakeClaim`, `TxTypeStakeClaimRewards`, `TxTypeHeartbeat` and the three POTSO stake transaction types (`core/state_transition.go`, `handleNativeTransaction`).
 
-- **Heartbeat rate limiting**: plot `sum by (address) (increase(potso_heartbeat_rate_limited_total[5m]))` to surface abusers.
-- **Unique peers per epoch**: graph `potso_heartbeat_unique_peers` to monitor
-  validator participation.
-- **Average session length**: track `potso_heartbeat_avg_session_seconds` to
-  catch clients that drift from the expected cadence.
+## Reward concentration
 
-Combined with the existing emissions telemetry, these signals enable quick
-triage when abuse or misconfiguration occurs.
+`MaxUserShareBps` caps a winner's share of an epoch budget. Clipping is silent: the code emits no event and returns no error when a cap applies, and there is no `potso.reward.capped` event or `capUsage` metric for POTSO rewards. The effect is visible as `remainder` in `potso_epoch_info` and the `potso.reward.epoch` event.

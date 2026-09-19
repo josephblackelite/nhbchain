@@ -1,62 +1,27 @@
-# POTSO Frontend Integration Guide
+# POTSO Frontend Integration
 
-This guide targets web and mobile engineers building dashboards or wallets that surface POTSO telemetry. It walks through authentication, signing, RPC calls, and rendering recommendations.
+Notes for web and mobile clients that display POTSO data. All methods are JSON-RPC 2.0 calls to the node's RPC endpoint with `params` as a one-element array holding an object.
 
-## Prerequisites
+## Reading meters and leaderboards
 
-- Access to an NHB private key for the participant whose uptime should be reported.
-- Network connectivity to a node exposing the JSON-RPC interface with the POTSO methods wired.
-- Ability to fetch the latest block header in order to include the canonical `lastBlock` and `lastBlockHash` in the heartbeat payload.
+- `potso_userMeters` with `{"user": "nhb1...", "day": "2025-09-24"}` returns that day's meter (`day`, `uptimeSeconds`, `txCount`, `escrowEvents`, `rawScore`, `score`). Omit `day` for today (UTC).
+- `potso_top` with `{"day": "...", "limit": 10}` returns `[{"user": "nhb1...", "meter": {...}}]`, already sorted by the node.
+- `potso_leaderboard`, `potso_getWeight` and `potso_params` expose the reward-epoch snapshot: [leaderboard.md](leaderboard.md).
+- Meters only change as transactions are applied; a day's meter does not change after that UTC day ends.
+- Field definitions: [README](README.md). `uptimeSeconds` is not written by any live code path, so expect it to stay `0`.
 
-## Heartbeat submission flow
+## Heartbeats
 
-1. **Fetch latest block**
-   - Call `nhb_getLatestBlocks` with `params: [1]` to retrieve the tip.
-   - Extract `header.height` and compute the header hash using the same JSON serialization as the node (SHA-256 over the JSON-encoded header).
+`potso_heartbeat` is disabled. The handler always answers HTTP 503, code `-32000`, message "potso heartbeat rpc is temporarily disabled; submit engagement through the canonical transaction pipeline". Clients should not build a heartbeat flow on it, and `nhb-cli potso heartbeat` (which calls it) fails.
 
-2. **Construct payload**
-   - Collect the fields `user` (bech32 address), `lastBlock`, `lastBlockHash` (hex string), and `timestamp` (UTC UNIX seconds).
-   - The timestamp must be within ±120 seconds of the node's clock. Consider calling `nhb_getLatestBlocks` immediately before signing to minimise drift.
+## Staking and rewards
 
-3. **Sign payload**
-   - Canonical message: `potso_heartbeat|<lowercase user>|<lastBlock>|<lowercase hex hash>|<timestamp>`.
-   - Hash the message with SHA-256 and sign using the participant's secp256k1 key (same flow as signing NHB transactions). Encode the 65-byte signature as a hex string.
+- POTSO stake lock, unbond and withdraw are signed transactions of type `0x2D`, `0x2E`, `0x2F` sent with `nhb_sendTransaction`; read state with `potso_stake_info` (authenticated). See [stake.md](stake.md).
+- Reward history and CSV export are unauthenticated reads; claiming requires an authenticated call plus a signature by the winner. See [rewards-api.md](rewards-api.md).
+- Amounts are decimal wei strings; addresses are `nhb1...` Bech32.
 
-4. **Submit RPC**
-   - Call `potso_heartbeat` with body:
+## Errors
 
-```json
-{
-  "method": "potso_heartbeat",
-  "params": [
-    {
-      "user": "nhb1...",
-      "lastBlock": 1024,
-      "lastBlockHash": "0x...",
-      "timestamp": 1732473600,
-      "signature": "0x..."
-    }
-  ]
-}
-```
-
-   - Successful responses include the credited `uptimeDelta` and the updated `meter` struct. When the heartbeat is throttled (interval not satisfied) `accepted` will be `false` and the delta will be `0`.
-
-## Displaying meters
-
-- Use `potso_userMeters` to fetch the current day or a specific day by passing `{"user":"nhb1...", "day":"2025-09-24"}`.
-- Render uptime in hours or minutes, and surface transaction + escrow counts alongside the derived score so users understand the breakdown.
-- When building leaderboards, call `potso_top` with a limit (default 10). Sort order is already normalised server-side.
-- Cache responses by day to avoid redundant calls; meters only change within the current UTC day.
-
-## Error handling
-
-- HTTP 400 responses with `codeInvalidParams` indicate malformed payloads (bad signature, hash mismatch, stale timestamp). Expose actionable messages to the user and prompt for a retry.
-- When the node clock diverges from the client, resynchronise by refetching the block tip and recomputing the timestamp.
-- Duplicate submissions within 60 seconds return success with `accepted=false`. Handle idempotence on the client to prevent confusing error toasts.
-
-## Security recommendations
-
-- Keep signing keys in secure enclaves. The CLI example (`nhb-cli potso heartbeat`) demonstrates fetching the block tip, signing, and submitting in one command for auditing and automation.
-- Validate the `meter` returned by the server against expected monotonic increases. Any decreases indicate a configuration or clock issue.
-- Log the emitted `potso.heartbeat` events (subscribe via node logs) to cross-check that heartbeats arrive in the expected cadence.
+- Invalid parameters return HTTP 400 with code `-32602` and a message such as "user is required", "invalid user" or "invalid request parameters".
+- Calls that need authentication and lack a valid credential return HTTP 401 with code `-32001`.
+- Server-side failures return code `-32000`.
