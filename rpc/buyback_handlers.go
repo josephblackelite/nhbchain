@@ -10,7 +10,11 @@ import (
 
 // handleBuybackGetRefPriceStatus is a public read: reports whether a
 // verified reference price is already on file for the requested epoch (or
-// the current open epoch, if none is supplied). A submission service should
+// the current open epoch, if none is supplied). "Current open epoch" means
+// the epoch the NEXT block (latest committed height + 1) will be evaluated
+// in -- the height a submission is checked against -- so once the last block
+// of an epoch has committed this already reports the following epoch; see
+// core.Node.CurrentBuybackEpoch. A submission service should
 // call this before signing and submitting -- only the first submission per
 // epoch is ever accepted (see core/buyback_tx.go's applyBuybackRefPrice),
 // so checking first avoids a wasted signing round, and confirms a prior

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -12,6 +13,20 @@ import (
 	"nhbchain/core/tokenomics/lendingoracle"
 	"nhbchain/core/types"
 )
+
+// ErrLendingRefPriceStaleTimestamp indicates a lending reference price was
+// submitted with a timestamp that is not strictly newer than the last
+// accepted one. Lending reference prices carry no epoch -- replay protection
+// is this monotonic timestamp instead -- so this is the counterpart of
+// ErrBuybackRefPriceStaleEpoch: the last accepted timestamp only moves
+// forward, so once a submission is at or behind it, it can never become valid
+// again, and it is a permanently dead transaction that classifyProposalError
+// (core/node.go) prunes. Two submissions can both pass admission (which
+// simulates against committed state) while neither has landed; once the
+// newer one is applied, the older one is stale. As a bare fmt.Errorf it
+// would fall through to proposalDispositionAbort and, never being pruned,
+// fail every block build on every validator until the mempool was cleared.
+var ErrLendingRefPriceStaleTimestamp = errors.New("stale reference-price timestamp")
 
 // oneWholeZNHBWei is 1e18: both the ZNHB-wei scale of one whole ZNHB and the
 // scale Market.OracleMedianWei is stored at (the NHB-wei value of exactly
@@ -58,7 +73,7 @@ func (sp *StateProcessor) applyLendingRefPriceTransaction(tx *types.Transaction)
 		return fmt.Errorf("lendingRefPrice: check existing record: %w", err)
 	}
 	if exists && payload.Timestamp <= last.Timestamp {
-		return fmt.Errorf("lendingRefPrice: submitted timestamp %d is not newer than the last accepted timestamp %d", payload.Timestamp, last.Timestamp)
+		return fmt.Errorf("lendingRefPrice: submitted timestamp %d is not newer than the last accepted timestamp %d: %w", payload.Timestamp, last.Timestamp, ErrLendingRefPriceStaleTimestamp)
 	}
 
 	rp := &lendingoracle.ReferencePrice{

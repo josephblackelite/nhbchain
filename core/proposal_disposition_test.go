@@ -50,6 +50,9 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"mint invalid chain id", ErrMintInvalidChainID, proposalDispositionPrune},
 		{"mint expired", ErrMintExpired, proposalDispositionPrune},
 		{"mint invalid payload", ErrMintInvalidPayload, proposalDispositionPrune},
+		{"buyback ref price already recorded", ErrBuybackRefPriceAlreadyRecorded, proposalDispositionPrune},
+		{"buyback ref price stale epoch", ErrBuybackRefPriceStaleEpoch, proposalDispositionPrune},
+		{"lending ref price stale timestamp", ErrLendingRefPriceStaleTimestamp, proposalDispositionPrune},
 
 		// SKIP: depends on mutable state shared across transactions in this
 		// attempt, or on ordering within this attempt.
@@ -79,6 +82,7 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"mint emission cap exceeded", ErrMintEmissionCapExceeded, proposalDispositionSkip},
 		{"mint recipient unresolved", ErrMintRecipientUnresolved, proposalDispositionSkip},
 		{"identity username taken", ErrIdentityUsernameTaken, proposalDispositionSkip},
+		{"buyback ref price future epoch", ErrBuybackRefPriceFutureEpoch, proposalDispositionSkip},
 
 		// ABORT: deliberately unclassified (ambiguous sentinel, or a plain
 		// unrecognized error).
