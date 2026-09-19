@@ -2,6 +2,7 @@ package types
 
 import (
 	"crypto/ecdsa"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -38,22 +39,79 @@ func buildSignedQuorumCert(t *testing.T, headerHash []byte, height uint64, round
 	return qc
 }
 
-func TestQuorumCertVerifyAcceptsGenuineTwoThirdsQuorum(t *testing.T) {
+func TestQuorumCertVerifyAcceptsGenuineSuperMajorityQuorum(t *testing.T) {
 	keyA, addrA := genValidatorKey(t)
 	keyB, addrB := genValidatorKey(t)
-	_, addrC := genValidatorKey(t)
+	keyC, addrC := genValidatorKey(t)
+	_, addrD := genValidatorKey(t)
 
 	headerHash := []byte("block-123-header-hash")
 	power := map[string]*big.Int{
 		string(addrA): big.NewInt(1),
 		string(addrB): big.NewInt(1),
 		string(addrC): big.NewInt(1),
+		string(addrD): big.NewInt(1),
 	}
 
-	// Exactly 2 of 3 equal-power validators = 2/3, at the threshold.
-	qc := buildSignedQuorumCert(t, headerHash, 10, 0, []*ecdsa.PrivateKey{keyA, keyB})
+	// 3 of 4 equal-power validators = 75%, strictly more than 2/3.
+	qc := buildSignedQuorumCert(t, headerHash, 10, 0, []*ecdsa.PrivateKey{keyA, keyB, keyC})
 	if err := qc.Verify(headerHash, power); err != nil {
-		t.Fatalf("expected genuine 2/3 quorum to verify, got %v", err)
+		t.Fatalf("expected genuine >2/3 quorum to verify, got %v", err)
+	}
+}
+
+// TestQuorumCertVerifyRejectsExactlyTwoThirds is the DC-01 regression: the
+// threshold used to be ceil(2*total/3), so on any validator set whose total
+// power is a multiple of 3 exactly 2/3 of the power was accepted. Two such
+// quorums can overlap in a single (faulty) validator.
+func TestQuorumCertVerifyRejectsExactlyTwoThirds(t *testing.T) {
+	keys := make([]*ecdsa.PrivateKey, 6)
+	addrs := make([][]byte, 6)
+	for i := range keys {
+		keys[i], addrs[i] = genValidatorKey(t)
+	}
+
+	tests := []struct {
+		name    string
+		powers  []int64
+		signers []int
+		wantOK  bool
+	}{
+		{name: "two of three equal validators", powers: []int64{1, 1, 1}, signers: []int{0, 1}, wantOK: false},
+		{name: "three of three equal validators", powers: []int64{1, 1, 1}, signers: []int{0, 1, 2}, wantOK: true},
+		{name: "four of six equal validators", powers: []int64{1, 1, 1, 1, 1, 1}, signers: []int{0, 1, 2, 3}, wantOK: false},
+		{name: "five of six equal validators", powers: []int64{1, 1, 1, 1, 1, 1}, signers: []int{0, 1, 2, 3, 4}, wantOK: true},
+		{name: "weighted set exactly two thirds", powers: []int64{4, 1, 1}, signers: []int{0}, wantOK: false},
+		{name: "weighted set just above two thirds", powers: []int64{4, 1, 1}, signers: []int{0, 1}, wantOK: true},
+		{name: "total not a multiple of three keeps the old bar", powers: []int64{1, 1, 1, 1}, signers: []int{0, 1, 2}, wantOK: true},
+		{name: "total not a multiple of three, one short", powers: []int64{1, 1, 1, 1}, signers: []int{0, 1}, wantOK: false},
+	}
+	for i, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			power := make(map[string]*big.Int, len(tt.powers))
+			for j, p := range tt.powers {
+				power[string(addrs[j])] = big.NewInt(p)
+			}
+			signers := make([]*ecdsa.PrivateKey, 0, len(tt.signers))
+			for _, idx := range tt.signers {
+				signers = append(signers, keys[idx])
+			}
+			headerHash := []byte(fmt.Sprintf("block-two-thirds-%d", i))
+			qc := buildSignedQuorumCert(t, headerHash, uint64(100+i), 0, signers)
+			err := qc.Verify(headerHash, power)
+			if tt.wantOK && err != nil {
+				t.Fatalf("expected quorum to verify, got %v", err)
+			}
+			if !tt.wantOK {
+				if err == nil {
+					t.Fatalf("SECURITY: exactly 2/3 of the voting power must not be accepted as a quorum")
+				}
+				if !strings.Contains(err.Error(), "insufficient voting power") {
+					t.Fatalf("expected an insufficient-power error, got %v", err)
+				}
+			}
+		})
 	}
 }
 

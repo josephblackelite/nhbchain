@@ -6,7 +6,6 @@ import (
 	"math"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,6 +13,7 @@ import (
 	stakeerrors "nhbchain/core/errors"
 	"nhbchain/core/events"
 	"nhbchain/core/types"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/governance"
 	paramsstate "nhbchain/native/params/state"
 	"nhbchain/observability"
@@ -524,7 +524,7 @@ func (e *RewardEngine) stakingEmissionCap() (*big.Int, error) {
 	if !ok {
 		return big.NewInt(0), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
+	trimmed := nativecommon.ParamDecimal(raw)
 	if trimmed == "" {
 		return big.NewInt(0), nil
 	}
@@ -576,7 +576,7 @@ func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err er
 	if raw, ok, getErr := e.mgr.ParamStoreGet(governance.ParamKeyStakingAprBps); getErr != nil {
 		return 0, 0, fmt.Errorf("load staking apr: %w", getErr)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 64)
 			if parseErr != nil {
@@ -589,7 +589,7 @@ func (e *RewardEngine) stakingParams() (aprBps uint64, payoutDays uint64, err er
 	if raw, ok, getErr := e.mgr.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays); getErr != nil {
 		return 0, 0, fmt.Errorf("load staking payout period: %w", getErr)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 64)
 			if parseErr != nil {

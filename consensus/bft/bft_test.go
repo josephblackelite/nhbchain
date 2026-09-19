@@ -874,9 +874,16 @@ func TestHasTwoThirdsPowerLockedThresholds(t *testing.T) {
 		expectMet bool
 	}{
 		{
+			// Exactly 2/3 is not a quorum: it takes strictly more.
 			name:      "exactTwoThirds",
 			total:     6,
 			power:     4,
+			expectMet: false,
+		},
+		{
+			name:      "aboveTwoThirds",
+			total:     6,
+			power:     5,
 			expectMet: true,
 		},
 		{
