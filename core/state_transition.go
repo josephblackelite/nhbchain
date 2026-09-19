@@ -3137,9 +3137,22 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			return nil, err
 		}
 		if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
-			sponsorAcc, err := sp.getAccount(tx.Paymaster)
-			if err != nil {
-				return nil, err
+			// The sender and the recipient are persisted below, after this block,
+			// from the objects loaded above. A sponsor that is one of them must
+			// therefore be that very object: a second copy loaded from state
+			// would be overwritten by the later write and the sponsor's debit
+			// would vanish, creating the fee out of nothing.
+			var sponsorAcc *types.Account
+			switch {
+			case bytes.Equal(tx.Paymaster, from):
+				sponsorAcc = fromAcc
+			case bytes.Equal(tx.Paymaster, tx.To):
+				sponsorAcc = recipientAccount
+			default:
+				sponsorAcc, err = sp.getAccount(tx.Paymaster)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if sponsorAcc.BalanceNHB == nil {
 				sponsorAcc.BalanceNHB = big.NewInt(0)
@@ -3148,11 +3161,21 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 				return nil, fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, SponsorshipStatusInsufficientBalance, "paymaster balance below required gas budget")
 			}
 			sponsorAcc.BalanceNHB.Sub(sponsorAcc.BalanceNHB, gasCost)
-			if transferGasPolicy.Enabled && bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]) {
-				sponsorAcc.BalanceNHB.Add(sponsorAcc.BalanceNHB, gasCost)
-			} else if transferGasPolicy.Enabled {
-				if err := sp.routeTransferGasFee(gasCost); err != nil {
-					return nil, err
+			if transferGasPolicy.Enabled {
+				// The fee collector is subject to the same rule as the sponsor:
+				// when it is the sender or the recipient the credit goes to the
+				// object persisted below, not to a copy that write overwrites.
+				switch {
+				case bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]):
+					sponsorAcc.BalanceNHB.Add(sponsorAcc.BalanceNHB, gasCost)
+				case bytes.Equal(transferGasPolicy.FeeCollector[:], from):
+					fromAcc.BalanceNHB.Add(fromAcc.BalanceNHB, gasCost)
+				case !selfTransfer && bytes.Equal(transferGasPolicy.FeeCollector[:], tx.To):
+					recipientAccount.BalanceNHB.Add(recipientAccount.BalanceNHB, gasCost)
+				default:
+					if err := sp.routeTransferGasFee(gasCost); err != nil {
+						return nil, err
+					}
 				}
 			}
 			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc)
