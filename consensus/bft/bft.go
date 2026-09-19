@@ -7,8 +7,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -154,6 +157,52 @@ type Engine struct {
 	prevoteSent   bool
 	precommitSent bool
 	lastCatchUpAt time.Time
+
+	// ownFailed counts, per height, this validator's own proposals that did
+	// not turn into a committed block (the build failed, its own validation
+	// rejected it, or the round ended without a commit). emptyAfter is how
+	// many such failures at one height make propose() stop offering
+	// transactions and propose an empty block instead, which depends on no
+	// transaction at all. Zero disables the fallback. Both are guarded by mu.
+	ownFailed  map[uint64]int
+	emptyAfter int
+}
+
+// defaultEmptyAfterFailures is how many of its own failed proposals at one
+// height make a proposer fall back to an empty block. Two failures are enough
+// to rule out one-off causes (a dropped message, one slow round) while keeping
+// a peer-rejection stall to a couple of rounds per height.
+const defaultEmptyAfterFailures = 2
+
+// emptyAfterEnv overrides defaultEmptyAfterFailures; "0" disables the fallback.
+const emptyAfterEnv = "NHB_BFT_EMPTY_AFTER_FAILURES"
+
+// proposalFeedback is an optional extension of NodeInterface: a node that
+// implements it is told how this validator's own proposals fared, so it can
+// log, count and attribute failures. It is an optional interface (not part of
+// NodeInterface) so the many NodeInterface test doubles keep compiling.
+type proposalFeedback interface {
+	NoteProposalOutcome(height uint64, round int, kind string, txCount int, err error)
+}
+
+// Proposal outcome kinds passed to proposalFeedback.
+const (
+	outcomeBuildFailed           = "build_failed"
+	outcomeLocalValidationFailed = "local_validation_failed"
+	outcomeNotCommitted          = "not_committed"
+)
+
+func emptyAfterFromEnv() int {
+	raw := os.Getenv(emptyAfterEnv)
+	if raw == "" {
+		return defaultEmptyAfterFailures
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		slog.Warn("ignoring malformed "+emptyAfterEnv, slog.String("value", raw))
+		return defaultEmptyAfterFailures
+	}
+	return n
 }
 
 // TimeoutConfig captures the per-phase round timers used by the engine.
@@ -272,6 +321,8 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		prevoteTimeout:   defaultPrevoteTimeout,
 		precommitTimeout: defaultPrecommitTimeout,
 		commitTimeout:    defaultCommitTimeout,
+		ownFailed:        make(map[uint64]int),
+		emptyAfter:       emptyAfterFromEnv(),
 	}
 
 	for _, opt := range opts {
@@ -359,6 +410,13 @@ func (e *Engine) runRound() {
 	if bytes.Equal(proposer, myAddr) {
 		if err := e.propose(); err != nil {
 			fmt.Printf("failed to propose block: %v\n", err)
+			// Greppable and structured: this line used to be the only signal a
+			// stalled proposer produced, and only on stdout.
+			slog.Error("LIVENESS: failed to propose block",
+				slog.String("event", "propose_failed"),
+				slog.Uint64("height", height),
+				slog.Int("round", round),
+				slog.String("error", boundedErrorText(err)))
 		} else {
 			e.prevote()
 		}
@@ -456,6 +514,71 @@ func (e *Engine) requeueActiveProposal() {
 	e.node.RequeueTransactions(txs)
 }
 
+// ownFailedAt returns how many of this validator's own proposals at height
+// have failed.
+func (e *Engine) ownFailedAt(height uint64) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.ownFailed[height]
+}
+
+// noteOwnFailure records a failed own proposal at height and tells the node.
+func (e *Engine) noteOwnFailure(height uint64, round int, kind string, txCount int, err error) {
+	e.mu.Lock()
+	if e.ownFailed == nil {
+		e.ownFailed = make(map[uint64]int)
+	}
+	e.ownFailed[height]++
+	e.mu.Unlock()
+	if fb, ok := e.node.(proposalFeedback); ok {
+		fb.NoteProposalOutcome(height, round, kind, txCount, err)
+	}
+}
+
+// countOwnUncommittedLocked counts previous as a failed own proposal if this
+// validator authored it. Must be called with e.mu held.
+func (e *Engine) countOwnUncommittedLocked(previous *SignedProposal) {
+	if previous == nil || previous.Proposal == nil || previous.Proposal.Block == nil || previous.Proposal.Block.Header == nil {
+		return
+	}
+	if !bytes.Equal(previous.Proposer, e.privKey.PubKey().Address().Bytes()) {
+		return
+	}
+	height := previous.Proposal.Block.Header.Height
+	if height != e.currentState.Height {
+		return
+	}
+	if e.ownFailed == nil {
+		e.ownFailed = make(map[uint64]int)
+	}
+	e.ownFailed[height]++
+	if fb, ok := e.node.(proposalFeedback); ok {
+		fb.NoteProposalOutcome(height, e.currentState.Round, outcomeNotCommitted, len(previous.Proposal.Block.Transactions), nil)
+	}
+}
+
+// pruneOwnFailuresLocked forgets failure counts for heights below the current
+// one. Must be called with e.mu held.
+func (e *Engine) pruneOwnFailuresLocked() {
+	for height := range e.ownFailed {
+		if height < e.currentState.Height {
+			delete(e.ownFailed, height)
+		}
+	}
+}
+
+// boundedErrorText keeps an error's text to a length safe for a log line.
+func boundedErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if len(text) > 200 {
+		text = text[:200]
+	}
+	return text
+}
+
 func (e *Engine) HandleProposal(p *SignedProposal) error {
 	if err := e.verifySignedProposal(p); err != nil {
 		return err
@@ -529,6 +652,7 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 func (e *Engine) propose() error {
 	e.mu.RLock()
 	round := e.currentState.Round
+	height := e.currentState.Height
 	revalidBlock := e.validBlock
 	revalidRound := e.validRound
 	var revalidProof []*SignedVote
@@ -557,6 +681,17 @@ func (e *Engine) propose() error {
 		validRound = revalidRound
 	} else {
 		txs := e.node.GetMempool()
+		if len(txs) > 0 && e.emptyAfter > 0 && e.ownFailedAt(height) >= e.emptyAfter {
+			// This validator's own proposals at this height keep failing to
+			// commit although they build and pass its own validation, so
+			// something about the transactions on offer is being rejected
+			// elsewhere. Stop offering them for this height: an empty block
+			// depends on no transaction. They are released, not dropped, and
+			// are offered again at the next height.
+			fmt.Printf("PROPOSE: %d earlier proposals at height %d did not commit; proposing an empty block.\n", e.ownFailedAt(height), height)
+			e.node.RequeueTransactions(txs)
+			txs = nil
+		}
 		if len(txs) == 0 {
 			fmt.Println("PROPOSE: Mempool empty, creating empty block proposal.")
 			block, err = e.node.CreateBlock(nil)
@@ -564,6 +699,7 @@ func (e *Engine) propose() error {
 			block, err = e.node.CreateBlock(txs)
 		}
 		if err != nil {
+			e.noteOwnFailure(height, round, outcomeBuildFailed, len(txs), err)
 			return fmt.Errorf("failed to build block: %w", err)
 		}
 	}
@@ -571,6 +707,10 @@ func (e *Engine) propose() error {
 		return fmt.Errorf("proposed block missing header")
 	}
 	if err := e.node.ValidateBlock(block); err != nil {
+		// The transactions of a block that will never be proposed must not stay
+		// marked in flight; nothing else would release them.
+		e.node.RequeueTransactions(block.Transactions)
+		e.noteOwnFailure(height, round, outcomeLocalValidationFailed, len(block.Transactions), err)
 		return fmt.Errorf("local block validation failed: %w", err)
 	}
 
@@ -1196,6 +1336,7 @@ func (e *Engine) startNewRound() {
 	defer e.mu.Unlock()
 
 	heightBefore := e.currentState.Height
+	previous := e.activeProposal
 	if !e.syncHeightWithNodeLocked() {
 		if e.committedBlocks[e.currentState.Height] {
 			delete(e.committedBlocks, e.currentState.Height)
@@ -1203,9 +1344,13 @@ func (e *Engine) startNewRound() {
 			e.currentState.Round = 0
 			e.syncHeightWithNodeLocked()
 		} else {
+			// Same height, no commit: if the round that just ended was
+			// carrying this validator's own proposal, that proposal failed.
+			e.countOwnUncommittedLocked(previous)
 			e.currentState.Round++
 		}
 	}
+	e.pruneOwnFailuresLocked()
 	// NHB-AUDIT-C1: a round TIMING OUT must never clear the lock -- that
 	// was the exact bug (see the Engine struct's lockedBlockHash doc comment).
 	// The lock/valid/polka state is per-HEIGHT, so it's only ever reset
@@ -1535,4 +1680,17 @@ func (vt VoteType) String() string {
 		return "Prevote"
 	}
 	return "Precommit"
+}
+
+// Status returns the engine's current height, round and locked round (-1 when
+// unlocked). It is a read-only view for liveness reporting: the watchdog puts
+// it in its diagnostics so a stall can be told apart from a peer that is down
+// or a lock that cannot be satisfied.
+func (e *Engine) Status() (height uint64, round int, lockedRound int) {
+	if e == nil {
+		return 0, 0, -1
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.currentState.Height, e.currentState.Round, e.lockedRound
 }

@@ -26,6 +26,7 @@ import (
 	"nhbchain/native/lending"
 	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
+	"nhbchain/observability"
 	"nhbchain/observability/logging"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
@@ -481,6 +482,13 @@ func main() {
 	// 4. Set the fully configured BFT engine on the node.
 	node.SetBftEngine(bftEngine)
 	node.SetExternalCommitNotifier(bftEngine.NotifyExternalCommit)
+	// Bound one block build to half the proposal timeout: the proposer's own
+	// validation, the broadcast and the peer's validation all follow it, and
+	// the peer's round timers are already running while this node builds.
+	node.SetProposalBuildBudget(cfg.Consensus.ProposalTimeout / 2)
+	// Optional Prometheus listener (NHB_METRICS_ADDR); a failure to start it is
+	// logged and never stops the validator.
+	observability.StartMetricsServerFromEnv(logger)
 
 	// --- Server Startup ---
 	networkAdapter := &p2pNetworkAdapter{server: p2pServer}
