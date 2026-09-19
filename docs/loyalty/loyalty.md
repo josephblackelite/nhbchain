@@ -183,6 +183,7 @@ Read operations (business/program lookups, meters) are unaffected and remain ord
 * Rotates the paymaster address used to fund all programs under the business. **This transaction only points the business at an address — it moves no funds.** Actually funding that paymaster is a separate, ordinary NHB/ZNHB transfer to it.
 * Emits `loyalty.paymaster.rotated`.
 * **Checks:** sender must be the business owner or hold `ROLE_LOYALTY_ADMIN` — enforced inside `native/loyalty`'s `SetPaymaster` itself.
+* **Consent:** program rewards are debited from the paymaster's own balance and the named wallet never signs this transaction, so an owner may only name its own wallet (or clear the paymaster). Naming any other wallet is rejected with `ErrPaymasterConsentRequired` unless the sender holds `ROLE_LOYALTY_ADMIN`, the role trusted with assigning wallets.
 
 #### `TxTypeLoyaltyAddMerchant` (`0x44`) / `TxTypeLoyaltyRemoveMerchant` (`0x45`)
 * `tx.Data` (JSON): `{ "businessId": "0x<64 hex>", "merchant": "nhb1..." }`.

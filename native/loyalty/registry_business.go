@@ -50,6 +50,17 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 	if caller != business.Owner && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
 		return ErrUnauthorized
 	}
+	// Every program reward is debited from the paymaster's own balance, so
+	// naming an address commits that address's funds. The named wallet never
+	// signs this call, which leaves only two ways to be sure it consents: it is
+	// the caller itself, or the caller is a loyalty admin, the role trusted
+	// with assigning wallets. Without this any business owner could point a
+	// program at somebody else's wallet -- an ordinary user's, or one that
+	// holds protocol funds -- and have each reward paid out of it to a spender
+	// of their choosing.
+	if !isZeroAddress(newPaymaster) && newPaymaster != caller && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
+		return ErrPaymasterConsentRequired
+	}
 	if business.Paymaster == newPaymaster {
 		return nil
 	}

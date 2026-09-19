@@ -175,7 +175,8 @@ func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateN
 		return existing.Clone(), nil
 	}
 
-	sellerAcc, err := e.loadAccount(seller)
+	accounts := newAccountBook(e)
+	sellerAcc, err := accounts.load(seller)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +184,7 @@ func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateN
 		return nil, errInsufficientBalance
 	}
 
-	escrowAcc, err := e.loadAccount(e.marketEscrowAddress)
+	escrowAcc, err := accounts.load(e.marketEscrowAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -191,10 +192,7 @@ func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateN
 	sellerAcc.BalanceZNHB = new(big.Int).Sub(sellerAcc.BalanceZNHB, znhbAmount)
 	escrowAcc.BalanceZNHB = new(big.Int).Add(escrowAcc.BalanceZNHB, znhbAmount)
 
-	if err := e.persistAccount(seller, sellerAcc); err != nil {
-		return nil, err
-	}
-	if err := e.persistAccount(e.marketEscrowAddress, escrowAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return nil, err
 	}
 
@@ -275,7 +273,12 @@ func (e *Engine) FillListing(buyer crypto.Address, listingID [32]byte, znhbAmoun
 
 	totalDebit := new(big.Int).Add(nhbCost, flatFeeWei)
 
-	buyerAcc, err := e.loadAccount(buyer)
+	// Buyer, seller, fee collector and escrow are loaded through one book so a
+	// role played by the same address (a buyer filling its own listing, a fee
+	// collector that also trades) shares a single account object -- see
+	// accountBook.
+	accounts := newAccountBook(e)
+	buyerAcc, err := accounts.load(buyer)
 	if err != nil {
 		return nil, err
 	}
@@ -283,20 +286,20 @@ func (e *Engine) FillListing(buyer crypto.Address, listingID [32]byte, znhbAmoun
 		return nil, errInsufficientBalance
 	}
 
-	sellerAcc, err := e.loadAccount(listing.Seller)
+	sellerAcc, err := accounts.load(listing.Seller)
 	if err != nil {
 		return nil, err
 	}
 
 	var feeAcc *types.Account
 	if flatFeeWei.Sign() > 0 {
-		feeAcc, err = e.loadAccount(e.feeCollectorAddress)
+		feeAcc, err = accounts.load(e.feeCollectorAddress)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	escrowAcc, err := e.loadAccount(e.marketEscrowAddress)
+	escrowAcc, err := accounts.load(e.marketEscrowAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -312,18 +315,7 @@ func (e *Engine) FillListing(buyer crypto.Address, listingID [32]byte, znhbAmoun
 	escrowAcc.BalanceZNHB = new(big.Int).Sub(escrowAcc.BalanceZNHB, znhbAmountRequested)
 	buyerAcc.BalanceZNHB = new(big.Int).Add(buyerAcc.BalanceZNHB, znhbAmountRequested)
 
-	if err := e.persistAccount(buyer, buyerAcc); err != nil {
-		return nil, err
-	}
-	if err := e.persistAccount(listing.Seller, sellerAcc); err != nil {
-		return nil, err
-	}
-	if feeAcc != nil {
-		if err := e.persistAccount(e.feeCollectorAddress, feeAcc); err != nil {
-			return nil, err
-		}
-	}
-	if err := e.persistAccount(e.marketEscrowAddress, escrowAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return nil, err
 	}
 
@@ -387,11 +379,12 @@ func (e *Engine) CancelListing(seller crypto.Address, listingID [32]byte) error 
 		return errNotSeller
 	}
 
-	sellerAcc, err := e.loadAccount(seller)
+	accounts := newAccountBook(e)
+	sellerAcc, err := accounts.load(seller)
 	if err != nil {
 		return err
 	}
-	escrowAcc, err := e.loadAccount(e.marketEscrowAddress)
+	escrowAcc, err := accounts.load(e.marketEscrowAddress)
 	if err != nil {
 		return err
 	}
@@ -402,10 +395,7 @@ func (e *Engine) CancelListing(seller crypto.Address, listingID [32]byte) error 
 	sellerAcc.BalanceZNHB = new(big.Int).Add(sellerAcc.BalanceZNHB, listing.RemainingAmount)
 	escrowAcc.BalanceZNHB = new(big.Int).Sub(escrowAcc.BalanceZNHB, listing.RemainingAmount)
 
-	if err := e.persistAccount(seller, sellerAcc); err != nil {
-		return err
-	}
-	if err := e.persistAccount(e.marketEscrowAddress, escrowAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return err
 	}
 
@@ -415,6 +405,56 @@ func (e *Engine) CancelListing(seller crypto.Address, listingID [32]byte) error 
 		return err
 	}
 	return e.state.RemoveOpenListing(listing.ID)
+}
+
+// accountBook hands out one account object per address for the duration of a
+// single engine operation and writes each back once. Buyer, seller, fee
+// collector and escrow are separate roles but can be played by one address
+// (a buyer filling its own listing, a fee collector that also trades). The
+// state returns a fresh object on every load, so two loads of one address
+// would be persisted one after the other and the later write, which never saw
+// the earlier object's changes, would overwrite them: NHB minted, ZNHB
+// destroyed. With one shared object every change lands on it.
+//
+// Accounts are persisted in the order they were first loaded, so the writes
+// are deterministic.
+type accountBook struct {
+	engine  *Engine
+	entries []bookedAccount
+}
+
+type bookedAccount struct {
+	addr crypto.Address
+	acc  *types.Account
+}
+
+func newAccountBook(e *Engine) *accountBook { return &accountBook{engine: e} }
+
+// load returns the operation's account object for addr, fetching it from the
+// state the first time only.
+func (b *accountBook) load(addr crypto.Address) (*types.Account, error) {
+	raw := addr.Bytes()
+	for _, entry := range b.entries {
+		if bytes.Equal(entry.addr.Bytes(), raw) {
+			return entry.acc, nil
+		}
+	}
+	acc, err := b.engine.loadAccount(addr)
+	if err != nil {
+		return nil, err
+	}
+	b.entries = append(b.entries, bookedAccount{addr: addr, acc: acc})
+	return acc, nil
+}
+
+// persist writes every loaded account back exactly once.
+func (b *accountBook) persist() error {
+	for _, entry := range b.entries {
+		if err := b.engine.persistAccount(entry.addr, entry.acc); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // loadAccount fetches an account, defaulting nil balance fields to zero.

@@ -3262,7 +3262,26 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			ctx.TxHash = txHash
 		}
 		if sp.LoyaltyEngine != nil {
+			fromZNHB := new(big.Int).Set(znhbBalanceOf(fromAcc))
+			recipientZNHB := new(big.Int).Set(znhbBalanceOf(recipientAccount))
 			sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+			// Both accounts were persisted above, before the loyalty step ran,
+			// but the step credits a program reward to the sender's in-memory
+			// object (and debits a paymaster that is the recipient from the
+			// recipient's): persist what it changed or the reward is debited
+			// from the paymaster and never reaches the sender. Written as a
+			// change on a fresh load, not as these stale objects, which would
+			// also overwrite what the engagement and gas-spend bookkeeping
+			// stored since they were loaded. Nothing changes when no reward
+			// was paid.
+			if err := sp.persistZNHBChange(from, fromZNHB, znhbBalanceOf(fromAcc)); err != nil {
+				return nil, err
+			}
+			if !selfTransfer {
+				if err := sp.persistZNHBChange(tx.To, recipientZNHB, znhbBalanceOf(recipientAccount)); err != nil {
+					return nil, err
+				}
+			}
 		}
 
 		// Use result simulation mimicking EVM successful consumption
@@ -4813,7 +4832,10 @@ func (sp *StateProcessor) applyCreateLoyaltyBusiness(tx *types.Transaction, send
 // applyLoyaltySetPaymaster handles TxTypeLoyaltySetPaymaster.
 // native/loyalty/registry.go's SetPaymaster performs the caller ==
 // business.Owner || RoleLoyaltyAdmin authorization check internally, so no
-// manual pre-check is needed here.
+// manual pre-check is needed here. It also refuses an owner naming any
+// wallet but its own (loyalty.ErrPaymasterConsentRequired): rewards are paid
+// out of the paymaster's balance and the named wallet never signs this
+// transaction.
 func (sp *StateProcessor) applyLoyaltySetPaymaster(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	var payload struct {
 		BusinessID string `json:"businessId"`
@@ -8156,6 +8178,30 @@ func decodeEscrowID(data []byte) ([32]byte, error) {
 	}
 	copy(id[:], data)
 	return id, nil
+}
+
+// znhbBalanceOf reads an account's ZNHB balance, treating an unset one as zero.
+func znhbBalanceOf(account *types.Account) *big.Int {
+	if account == nil || account.BalanceZNHB == nil {
+		return new(big.Int)
+	}
+	return account.BalanceZNHB
+}
+
+// persistZNHBChange stores the change an in-memory account's ZNHB balance went
+// through since it was last persisted (before -> after) as a change on a fresh
+// load of the account, leaving every other field as stored.
+func (sp *StateProcessor) persistZNHBChange(addr []byte, before, after *big.Int) error {
+	delta := new(big.Int).Sub(after, before)
+	if delta.Sign() == 0 {
+		return nil
+	}
+	account, err := sp.getAccount(addr)
+	if err != nil {
+		return err
+	}
+	account.BalanceZNHB = new(big.Int).Add(znhbBalanceOf(account), delta)
+	return sp.setAccount(addr, account)
 }
 
 func (sp *StateProcessor) updateSenderNonce(sender []byte, senderAccount *types.Account, newNonce uint64) error {
