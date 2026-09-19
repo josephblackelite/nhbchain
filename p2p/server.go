@@ -919,10 +919,15 @@ func (s *Server) admitInbound(conn net.Conn) (func(), bool) {
 }
 
 // admitRequest applies the budgets for requests that make this node read and
-// send chain data. A peer over the budget of its own address is treated like
-// any other rate violation; when only the budget shared by all addresses is
-// spent the request is dropped without blaming the peer. Configured persistent
-// peers are not limited. It reports whether the request may be handled.
+// send chain data: one per remote address and one shared by all addresses. A
+// request over either budget is dropped and the peer is not blamed for it. A
+// request costs its sender next to nothing and an honest node can be led into
+// sending many (a status report it has no way to check makes it ask for blocks,
+// and catching up on a long chain asks for a batch as fast as it can apply
+// one), so ending the connection over it would let anybody cost a node its
+// peers; a flood far above the message rate limit is ended by that limit.
+// Configured persistent peers are not limited. It reports whether the request
+// may be handled.
 func (s *Server) admitRequest(peer *Peer, msg *Message) bool {
 	var perIP *ipRateLimiter
 	var shared *tokenBucket
@@ -939,7 +944,11 @@ func (s *Server) admitRequest(peer *Peer, msg *Message) bool {
 	}
 	now := time.Now()
 	if !perIP.allow(remoteHost(peer.remoteAddr), now) {
-		s.handleRateLimit(peer, false)
+		if s.allowLog("request_over_budget", inboundLogInterval) {
+			s.log().Warn("Dropping chain data requests from a peer over its budget",
+				logging.MaskField("peer_id", peer.id),
+				logging.MaskField("peer_address", peer.remoteAddr))
+		}
 		return false
 	}
 	return shared.allow(now)

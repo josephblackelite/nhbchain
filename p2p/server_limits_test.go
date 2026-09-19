@@ -558,9 +558,10 @@ func (r *peerRecorder) HandlePeerMessage(from PeerSender, msg *Message) error {
 	return r.HandleMessage(msg)
 }
 
-// floodPeer starts a peer's read loop on a pipe and writes n copies of a
-// message type into it, as fast as the pipe takes them.
-func floodPeer(t *testing.T, server *Server, id string, remote net.Addr, persistent bool, msgType byte, n int) *Peer {
+// peerOnPipe starts a peer's read loop on a pipe. The function it returns writes
+// n copies of a message type into the pipe, as fast as the pipe takes them, and
+// its channel is closed once they are all written.
+func peerOnPipe(t *testing.T, server *Server, id string, remote net.Addr, persistent bool) (*Peer, func(msgType byte, n int) <-chan struct{}) {
 	t.Helper()
 	left, right := net.Pipe()
 	t.Cleanup(func() {
@@ -574,19 +575,32 @@ func floodPeer(t *testing.T, server *Server, id string, remote net.Addr, persist
 	server.mu.Unlock()
 	go peer.readLoop()
 
-	line, err := json.Marshal(&Message{Type: msgType, Payload: []byte("{}")})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	line = append(line, '\n')
-	go func() {
-		for i := 0; i < n; i++ {
-			right.SetWriteDeadline(time.Now().Add(2 * time.Second))
-			if _, err := right.Write(line); err != nil {
-				return
-			}
+	return peer, func(msgType byte, n int) <-chan struct{} {
+		line, err := json.Marshal(&Message{Type: msgType, Payload: []byte("{}")})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
-	}()
+		line = append(line, '\n')
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; i < n; i++ {
+				right.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				if _, err := right.Write(line); err != nil {
+					return
+				}
+			}
+		}()
+		return done
+	}
+}
+
+// floodPeer starts a peer's read loop on a pipe and writes n copies of a
+// message type into it, as fast as the pipe takes them.
+func floodPeer(t *testing.T, server *Server, id string, remote net.Addr, persistent bool, msgType byte, n int) *Peer {
+	t.Helper()
+	peer, send := peerOnPipe(t, server, id, remote, persistent)
+	send(msgType, n)
 	return peer
 }
 
@@ -614,18 +628,49 @@ func TestChainDataRequestsAreLimitedPerAddress(t *testing.T) {
 			server := NewServer(handler, mustKey(t), requestFloodConfig(0xC1))
 			peer := floodPeer(t, server, "asker", tcpAddr("203.0.113.30", 44000), false, tc.msg, 10*tc.burst)
 
+			waitUntil(t, 3*time.Second, "the budget to be spent", func() bool { return handler.count(tc.msg) >= tc.burst })
+			time.Sleep(300 * time.Millisecond)
+			if got := handler.count(tc.msg); got > tc.burst+1 {
+				t.Fatalf("expected at most %d %s requests to reach the handler, got %d", tc.burst+1, tc.name, got)
+			}
+			// Going over the budget costs the requests, not the connection: an
+			// honest node can be led into sending many of them.
 			select {
 			case <-peer.closed:
-			case <-time.After(3 * time.Second):
-				t.Fatalf("a peer far over its request budget must be disconnected")
+				t.Fatalf("a peer over its request budget must not be disconnected")
+			default:
 			}
-			if got := handler.count(tc.msg); got == 0 || got > tc.burst+1 {
-				t.Fatalf("expected between 1 and %d %s requests to reach the handler, got %d", tc.burst+1, tc.name, got)
-			}
-			if status := server.reputation.Snapshot(time.Now())["asker"]; status.Misbehavior == 0 {
-				t.Fatalf("expected the peer to be marked for exceeding its budget, got %+v", status)
+			if status := server.reputation.Snapshot(time.Now())["asker"]; status.Misbehavior != 0 || status.Score < 0 || status.Banned {
+				t.Fatalf("a peer over its request budget must not be blamed for it, got %+v", status)
 			}
 		})
+	}
+}
+
+// A peer that overshoots its budget, as an honest node catching up on a long
+// chain does, is answered again as soon as the budget has refilled.
+func TestARequesterOverItsBudgetIsServedAgainOnceTheBudgetRefills(t *testing.T) {
+	handler := &requestRecorder{}
+	server := NewServer(handler, mustKey(t), requestFloodConfig(0xC5))
+	peer, send := peerOnPipe(t, server, "syncer", tcpAddr("203.0.113.32", 44002), false)
+
+	<-send(MsgTypeGetBlocks, 4*int(getBlocksBurstPerIP))
+	time.Sleep(200 * time.Millisecond)
+	served := handler.count(MsgTypeGetBlocks)
+	if served == 0 || served > int(getBlocksBurstPerIP)+1 {
+		t.Fatalf("expected between 1 and %d requests to be served from the burst, got %d", int(getBlocksBurstPerIP)+1, served)
+	}
+
+	// Two requests' worth of budget comes back.
+	time.Sleep(time.Duration(2 / getBlocksRatePerIP * float64(time.Second)))
+	<-send(MsgTypeGetBlocks, 1)
+	waitUntil(t, 2*time.Second, "a request after the budget refilled to be served", func() bool {
+		return handler.count(MsgTypeGetBlocks) > served
+	})
+	select {
+	case <-peer.closed:
+		t.Fatalf("the peer was disconnected for asking too fast")
+	default:
 	}
 }
 
