@@ -19,7 +19,11 @@ ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://nhbcoin.com/api/v1/validators/onboard
 # as a real bug: "dial tcp: address enode://...: too many colons in
 # address" -- the node never dialed its bootnode at all.
 BOOTNODE_DEFAULT='198.51.100.10:6001'
-NETWORK_ID_DEFAULT='430060579445266314'
+NETWORK_ID_DEFAULT='18346390202490284624'
+# The live network's genesis file. Its hash is the chain id, so the copy this
+# script runs from must match byte for byte (the node then reports NETWORK_ID_DEFAULT).
+GENESIS_FILE_REL='config/genesis.relaunch.json'
+GENESIS_SHA256='10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
@@ -54,7 +58,9 @@ Options:
                            be sent).
   --bootnode <host:port>   Bootnode address to join (plain host:port, not
                            an enode:// URI). Default: NHBCoin mainnet bootnode.
-  --network-id <id>        P2P network ID. Default: 430060579445266314
+  --network-id <id>        P2P network ID. Default: 18346390202490284624 (the live
+                           network). The node must report this chain id once it
+                           starts, or this script stops with an error.
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
   --external-address <ip>  This node's own publicly-dialable IP (the address
@@ -239,6 +245,15 @@ sudo chmod 700 "${CONFIG_DIR}"
 
 sudo rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 
+# A node started from a modified or different genesis file writes it into its
+# database and can never peer with the live network, so stop before anything
+# starts if the file differs from the one the live network was started from.
+if ! echo "${GENESIS_SHA256}  ${INSTALL_ROOT}/${GENESIS_FILE_REL}" | sha256sum -c --status; then
+  echo "[ERROR] ${INSTALL_ROOT}/${GENESIS_FILE_REL} is not the live network's genesis file" >&2
+  echo "        (expected sha256 ${GENESIS_SHA256}). Restore it from the repository." >&2
+  exit 1
+fi
+
 echo "[INFO] building NHB validator binaries"
 cd "${INSTALL_ROOT}"
 # Go's module cache for this dependency tree (go-ethereum, protobuf, sqlite,
@@ -346,6 +361,7 @@ sudo cp "${REPO_ROOT}/config.toml" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ListenAddress = \".*\"#ListenAddress = \"${LISTEN_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^RPCAddress = \".*\"#RPCAddress = \"${RPC_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^DataDir = \".*\"#DataDir = \"${STATE_DIR}/nhb-data\"#;" "${CONFIG_DIR}/config.toml"
+sudo perl -0pi -e "s#(?m)^GenesisFile = \".*\"#GenesisFile = \"${INSTALL_ROOT}/${GENESIS_FILE_REL}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ValidatorKeystorePath = \".*\"#ValidatorKeystorePath = \"\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ValidatorKMSEnv = \".*\"#ValidatorKMSEnv = \"NHB_VALIDATOR_RAW_KEY\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^NetworkName = \".*\"#NetworkName = \"nhb-mainnet-validator\"#;" "${CONFIG_DIR}/config.toml"
@@ -421,32 +437,111 @@ if [[ "${NODE_HEALTHY}" != "1" ]]; then
   exit 1
 fi
 
-if [[ -n "${BENEFICIARY}" ]]; then
-  echo "[INFO] setting reward beneficiary to ${BENEFICIARY}"
-  if ! sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" \
-      set-reward-beneficiary "${BENEFICIARY}" "${VALIDATOR_KEY_FILE}"; then
-    echo "[WARN] could not set the reward beneficiary automatically -- retry later with:"
-    echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli set-reward-beneficiary ${BENEFICIARY} ${VALIDATOR_KEY_FILE}"
-  fi
+# A node started from any other genesis has a different chain id and can never
+# peer with the live network, so confirm the identity the running node reports
+# before doing anything else. net_info is public and has no side effects.
+NET_INFO=$(curl -fsS -m 5 "http://${RPC_ADDR}/" \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"net_info","params":[]}' 2>/dev/null || true)
+NODE_CHAIN_ID=$(printf '%s' "${NET_INFO}" | grep -o '"chainId":[0-9]*' | head -1 | cut -d: -f2 || true)
+if [[ "${NODE_CHAIN_ID}" != "${NETWORK_ID}" ]]; then
+  echo
+  echo "=================================================================="
+  echo "[ERROR] this node reports chain id '${NODE_CHAIN_ID:-unknown}', expected ${NETWORK_ID}."
+  echo "It was not started from the live network's genesis, so it cannot join that network."
+  echo "  Genesis file: ${INSTALL_ROOT}/${GENESIS_FILE_REL}"
+  echo "  If this host holds state from another chain, run this script again with --reset-state."
+  echo "=================================================================="
+  exit 1
 fi
+echo "[INFO] node reports chain id ${NODE_CHAIN_ID}"
 
-# Validator eligibility is gated on an explicit on-chain opt-in
-# (ValidatorRegistered) plus the account's total stake -- its own stake AND ZNHB
-# delegated to it by any wallet, added together -- meeting
-# staking.minimumValidatorStake, and the address not delegating its own stake to
-# a different validator (core/state_transition.go's setAccount and
-# validatorEligibilityBasis). This "pure registration" call (zero value,
-# RegisterValidator=true) costs nothing and needs no pre-funding -- it just
-# flips the flag now, so the only step left for the operator is getting stake
-# onto this validator's address, by delegation or self-stake (printed below).
-# Best-effort, same as set-reward-beneficiary above: warn and print the retry
-# command rather than fail the script.
-echo "[INFO] registering this validator's on-chain eligibility flag"
-if ! sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" \
-    register-validator 0 "${VALIDATOR_KEY_FILE}"; then
-  echo "[WARN] could not register validator eligibility automatically -- retry later with:"
-  echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli register-validator 0 ${VALIDATOR_KEY_FILE}"
+# --- begin validator CLI helpers (exercised by tests/scripts) ---
+# nhb-cli submits the transactions below through the node's privileged RPC,
+# which needs a bearer token (NHB_RPC_TOKEN). Mint a short-lived one from the
+# JWT secret this run wrote to node.env. The secret reaches nhb-cli on stdin,
+# not on a command line, and neither it nor the token is ever printed.
+mint_rpc_token() {
+  printf '%s' "${JWT_SECRET}" | sudo -u "${SERVICE_USER}" \
+    "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
+}
+
+run_cli() {
+  sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" NHB_RPC_TOKEN="${RPC_TOKEN}" \
+    "${INSTALL_ROOT}/bin/nhb-cli" "$@"
+}
+
+# How an operator runs a signing command later (the messages below print
+# these): the command needs a fresh token exactly like the steps in this script.
+TOKEN_RECIPE="TOKEN=\$(sudo sh -c '. ${CONFIG_DIR}/node.env && printf %s \"\$NHB_RPC_JWT_SECRET\"' | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
+cli_recipe() {
+  echo "sudo -u ${SERVICE_USER} env RPC_URL=http://${RPC_ADDR} NHB_RPC_TOKEN=\"\$TOKEN\" ${INSTALL_ROOT}/bin/nhb-cli $*"
+}
+
+# The node may still be finishing its own startup, so try a few times.
+run_cli_step() {
+  local attempt
+  for attempt in 1 2 3; do
+    if run_cli "$@"; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      sleep "${CLI_RETRY_DELAY:-5}"
+    fi
+  done
+  return 1
+}
+
+# Submits the reward-beneficiary and validator-registration transactions.
+# Returns 1 -- after saying which steps failed and how to run them again -- if
+# any did not go through, so the caller never reports success for a step that
+# did not happen.
+submit_validator_steps() {
+  local failed=() step
+
+  if [[ -n "${BENEFICIARY}" ]]; then
+    echo "[INFO] setting reward beneficiary to ${BENEFICIARY}"
+    run_cli_step set-reward-beneficiary "${BENEFICIARY}" "${VALIDATOR_KEY_FILE}" \
+      || failed+=("set-reward-beneficiary ${BENEFICIARY} ${VALIDATOR_KEY_FILE}")
+  fi
+
+  # Validator eligibility is gated on an explicit on-chain opt-in
+  # (ValidatorRegistered) plus the account's total stake -- its own stake AND ZNHB
+  # delegated to it by any wallet, added together -- meeting
+  # staking.minimumValidatorStake, and the address not delegating its own stake to
+  # a different validator (core/state_transition.go's setAccount and
+  # validatorEligibilityBasis). This "pure registration" call (zero value,
+  # RegisterValidator=true) costs nothing and needs no pre-funding -- it just
+  # flips the flag now, so the only step left for the operator is getting stake
+  # onto this validator's address, by delegation or self-stake (printed below).
+  echo "[INFO] registering this validator's on-chain eligibility flag"
+  run_cli_step register-validator 0 "${VALIDATOR_KEY_FILE}" \
+    || failed+=("register-validator 0 ${VALIDATOR_KEY_FILE}")
+
+  if [[ "${#failed[@]}" -gt 0 ]]; then
+    echo
+    echo "=================================================================="
+    echo "[ERROR] The node is running, but these steps did not complete:"
+    for step in "${failed[@]}"; do
+      echo "  nhb-cli ${step}"
+    done
+    echo
+    echo "Once the error above is fixed, run them again with:"
+    echo "  ${TOKEN_RECIPE}"
+    for step in "${failed[@]}"; do
+      echo "  $(cli_recipe "${step}")"
+    done
+    echo "=================================================================="
+    return 1
+  fi
+}
+# --- end validator CLI helpers ---
+
+if ! RPC_TOKEN=$(mint_rpc_token); then
+  echo "[ERROR] could not create an RPC token for the local node" >&2
+  exit 1
 fi
+submit_validator_steps || exit 1
 
 if [[ -n "${OPERATOR_EMAIL}" ]]; then
   echo "[INFO] requesting onboarding instructions be emailed to ${OPERATOR_EMAIL}"
@@ -482,17 +577,19 @@ echo "     validator's node address (printed above), for example with the"
 echo "     Delegate form in the Validator Hub of the NHBCoin portal."
 echo "  B. Self-stake: send at least 10,000 ZNHB to this validator's node"
 echo "     address, and once it has arrived, stake it from this server:"
-echo "     sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli register-validator 10000000000000000000000 ${VALIDATOR_KEY_FILE}"
-echo "  (this validator's registration flag was already set automatically"
-echo "   above; this node's own address must not itself be delegating its stake"
-echo "   to a different validator.)"
+echo "     ${TOKEN_RECIPE}"
+echo "     $(cli_recipe register-validator 10000000000000000000000 "${VALIDATOR_KEY_FILE}")"
+echo "  (the registration transaction was submitted above and takes effect once a"
+echo "   block includes it; this node's own address must not itself be delegating"
+echo "   its stake to a different validator.)"
 if [[ -z "${BENEFICIARY}" ]]; then
   echo
   echo "You did not pass --beneficiary, so this validator's epoch consensus"
   echo "reward (separate from the staking yield above) will accumulate at its"
   echo "own address, which this server's key controls. To redirect it to a"
   echo "wallet you can actually spend from, run:"
-  echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli set-reward-beneficiary <your-wallet-address> ${VALIDATOR_KEY_FILE}"
+  echo "  ${TOKEN_RECIPE}"
+  echo "  $(cli_recipe set-reward-beneficiary "<your-wallet-address>" "${VALIDATOR_KEY_FILE}")"
 fi
 echo
 echo "Check status with:"

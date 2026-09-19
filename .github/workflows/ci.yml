@@ -73,7 +73,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
       - name: Verify production config safety rails
-        run: bash scripts/verify_prod_config.sh -c config/prod.toml
+        run: |
+          bash scripts/verify_prod_config.sh -c config/prod.toml
+          bash scripts/verify_prod_config.sh -c config.toml
       - name: Run bugcheck pipeline
         env:
           GOFLAGS: -buildvcs=false

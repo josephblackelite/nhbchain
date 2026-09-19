@@ -17,7 +17,7 @@ import (
 	"sync"
 )
 
-// Decimals is ZNHB's on-chain decimal precision (see config/genesis.json's
+// Decimals is ZNHB's on-chain decimal precision (see config/genesis.relaunch.json's
 // token registration), matching how amounts are represented as attoZNHB
 // *big.Int values everywhere else in this codebase.
 const Decimals = 18
