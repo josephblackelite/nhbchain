@@ -1,104 +1,123 @@
 # Kubernetes deployment with Helm
 
-The `deploy/helm` directory contains self-contained Helm charts for every
-runtime service required in a production NHB stack:
+`deploy/helm` contains one Helm chart per service (all `version: 0.1.0`,
+`appVersion: "0.1.0"`):
 
-- `p2pd`
-- `consensusd`
-- `lendingd` (preview – disabled by default)
-- `swapd`
-- `governd`
-- `gateway`
+| Chart | Workload | Service ports | Notes |
+| ----- | -------- | ------------- | ----- |
+| `p2pd` | StatefulSet | `p2p` 26656, `grpc` 9091 | PVC via `persistence` (default 10Gi, `ReadWriteOnce`) |
+| `consensusd` | StatefulSet | `grpc` 9090, `rpc` 8081 | PVC via `persistence` (default 10Gi); container args `--grpc :9090 --p2p <p2pEndpoint>` |
+| `lendingd` | Deployment | `grpc` 50053 | `replicaCount: 0` by default |
+| `governd` | Deployment | `grpc` 50061 | |
+| `gateway` | Deployment | `http` 8080 | Optional Ingress (`ingress.enabled`, default `false`) |
 
-Each chart packages:
+There is no chart for the swap backend that the gateway requires (see
+[Gateway Overview](../gateway/overview.md#backend-endpoints)). Each chart renders a ConfigMap from `config.content`
+mounted at `config.path`, and passes `--config <config.path>` to the container.
+Images default to `ghcr.io/nhbchain/<service>:<image.tag or appVersion>`.
 
-- a Deployment or StatefulSet
-- a Service definition
-- optional Ingress (gateway) and ConfigMaps for application configuration
-- knobs for persistence, resources, and environment variables
+Per-environment overrides are in `deploy/helm/values/{dev,staging,prod}/<chart>.yaml`.
+`deploy/helm/values.yaml` and `deploy/helm/values-prod.yaml` only set
+`lendingd.replicaCount: 0`.
 
-> **Preview:** `lendingd` is included for completeness but the default values
-> scale it to zero replicas. Override `replicaCount` only if you are testing the
-> preview service and accept that all RPCs return `UNIMPLEMENTED`.
+## Installing
 
-## Pre-requisites
-
-- Kubernetes 1.27+
-- Helm 3.12+
-- A container registry accessible from the cluster (GHCR by default)
-- Secrets populated following `k8s/secrets.example.yaml`
-- Ingress controller (e.g. NGINX) if you plan to expose the public endpoints
-
-## Installing charts
-
-All charts are standard Helm packages. Install each component with
-`helm upgrade --install` and the relevant values file for your environment.
-
-Example (staging):
+Use `helm upgrade --install` with the release name, chart directory and the
+environment's values file:
 
 ```sh
 helm upgrade --install p2pd deploy/helm/p2pd -f deploy/helm/values/staging/p2pd.yaml
 helm upgrade --install consensusd deploy/helm/consensusd -f deploy/helm/values/staging/consensusd.yaml
-# (Optional once RPCs are implemented)
-# helm upgrade --install lendingd deploy/helm/lendingd -f deploy/helm/values/staging/lendingd.yaml \
-#   --set replicaCount=1
-helm upgrade --install swapd deploy/helm/swapd -f deploy/helm/values/staging/swapd.yaml
-helm upgrade --install governd deploy/helm/governd -f deploy/helm/values/staging/governd.yaml \
-  --set secrets.signerKey="$(kubectl get secret nhb-governance -o jsonpath='{.data.signer-key}' | base64 -d)"
+helm upgrade --install governd deploy/helm/governd -f deploy/helm/values/staging/governd.yaml
 helm upgrade --install gateway deploy/helm/gateway -f deploy/helm/values/staging/gateway.yaml \
-  --set secrets.gatewayHMAC="$(kubectl get secret nhb-gateway-auth -o jsonpath='{.data.hmac-secret}' | base64 -d)"
+  --set secrets.gatewayHMAC="<gateway HMAC secret>"
+# lendingd is scaled to zero by default:
+helm upgrade --install lendingd deploy/helm/lendingd -f deploy/helm/values/staging/lendingd.yaml \
+  --set replicaCount=1
 ```
 
-> **Tip:** the `deploy/helm/values` directory contains dev/staging/prod samples.
-> Adjust secrets and domain names before deploying.
+Tear down with `helm uninstall <release>`.
 
-## Ingress & DNS
-
-Use `k8s/ingress.yaml` as a starting point for publishing the public
-interfaces. It maps:
-
-- `api.nhbcoin.com` → `gateway`
-- `rpc.nhbcoin.net` → `consensusd` (HTTP RPC port)
-
-Update the TLS secret reference and annotations to match your ingress
-controller. For mTLS within the cluster consider layering a service mesh and
-updating the charts with sidecar injection labels.
+`lendingd` is off by default because the chart values say so
+(`deploy/helm/lendingd/values.yaml`); the service in `services/lendingd`
+registers the lending gRPC handlers, so the chart comment about "preview" does not
+describe missing handlers. Its chart config only sets `listen`, while
+`services/lendingd/config/config.go` requires a TLS certificate and key (or
+`tls.allow_insecure: true`) and at least one API token or mTLS common name, so
+extend `config.content` before scaling it up.
 
 ## Secrets
 
-Populate the secrets referenced by the charts before installing:
+The charts read secrets in two different ways:
+
+- `consensusd`: env `NHB_VALIDATOR_PASS` comes from Kubernetes Secret
+  `nhb-validator`, key `password` (`deploy/helm/consensusd/values.yaml`).
+- `governd`: env `GOVERND_SIGNER_KEY` comes from Secret `governd-secrets`, key
+  `signer-key`, and `GOVERND_TLS_KEY_PATH` is a fixed path. The chart's
+  `secrets.*` values are not referenced by any template, so
+  `--set secrets.signerKey=...` has no effect. You must create the
+  `governd-secrets` Secret yourself.
+- `gateway`: `secrets.gatewayHMAC` is templated into the gateway config as
+  `auth.hmacSecret`.
+
+`k8s/secrets.example.yaml` creates Secrets named `nhb-validator` (key
+`password`), `nhb-governance` (key `signer-key`), `nhb-gateway-auth` (key
+`hmac-secret`) and a fourth Secret for an external API key. Only
+`nhb-validator` matches a name the charts read. Apply it as a starting point and rename or copy the others to match:
 
 ```sh
 kubectl apply -f k8s/secrets.example.yaml
 ```
 
-Customize the placeholder values with production credentials. The example
-covers:
+## Gateway configuration in the chart
 
-- `nhb-validator` – validator keystore password
-- `nhb-governance` – hex-encoded private key for governd signing
-- `nhb-gateway-auth` – optional gateway HMAC secret
-- `nhb-swapd-apis` – external oracle API tokens
+The gateway chart's default `config.content` lists `http://` endpoints for
+`lendingd`, `governd` and `consensusd`, sets no TLS files and no `NHB_ENV`.
+Per [Gateway Overview](../gateway/overview.md#transport-security), the gateway
+exits in that state: outside `NHB_ENV=dev` every endpoint must be `https://`
+(the auto-upgrade setting does not help) and a TLS certificate and key are
+required. The gateway also requires an endpoint for the swap backend, which no chart provides (the built-in default is
+`http://127.0.0.1:7102`). Set these through `env`, `config.content` and the
+TLS volumes before deploying.
 
-## Chart releases & CI
+## Ingress
 
-The repository ships with a GitHub Actions workflow (`.github/workflows/deploy.yml`)
-that builds container images and pushes packaged charts to GHCR. Trigger it by
-pushing to `main` or tagging a release. You can also package and publish
-manually:
+`k8s/ingress.yaml` is a sample manifest for an `nginx` ingress class with a
+TLS secret name. It maps one host name to Service `gateway` port 8080 and a
+second host name to Service `consensusd` port 8081. Replace the host names and
+the TLS secret name in the manifest with your own. The chart's
+consensusd config binds `RPCAddress` to `127.0.0.1:8081` inside the pod and
+`cmd/consensusd` does not start an HTTP RPC listener, so nothing serves port 8081
+on that Service. The gateway chart can also render its own Ingress from
+`ingress.hosts`; `values/staging` and `values/prod` enable it.
+
+## Images and chart publishing
+
+`.github/workflows/deploy.yml` (triggers: push to branch `master`, tags `v*`, and
+manual dispatch) does the following:
+
+1. Runs `buf lint` and `buf breaking --against '.git#branch=main'`.
+2. Builds and pushes images for `gateway`, `consensusd`, `p2pd`, `lendingd` and
+   `governd` using `deploy/compose/Dockerfile` to
+   `ghcr.io/<repository>/<service>` with tags `type=ref,event=tag`, `type=sha`,
+   and `latest` on `master`.
+3. Packages and pushes the same five charts to
+   `oci://ghcr.io/<repository_owner>/nhb-charts`.
+
+To do the last step by hand:
 
 ```sh
 helm package deploy/helm/gateway
-helm push gateway-0.1.0.tgz oci://ghcr.io/<org>/nhb-charts
+helm push gateway-0.1.0.tgz oci://ghcr.io/<owner>/nhb-charts
 ```
 
-## Validating a staging install
+## Checking an install
 
-After installing the staging values:
+```sh
+kubectl get pods -l app.kubernetes.io/instance=<release>
+kubectl port-forward svc/gateway 8080:8080
+```
 
-1. Confirm pods are running: `kubectl get pods -l app.kubernetes.io/instance=p2pd`
-2. Forward the gateway service: `kubectl port-forward svc/gateway 8080:8080`
-3. Call `/v1/consensus/status` to verify the API proxy is wired up.
-4. Inspect consensus height via the RPC ingress: `curl https://rpc.nhbcoin.net/status`
-
-Tear down with `helm uninstall <release>` for each component.
+The gateway serves `GET /healthz` (returns `ok`). `GET /v1/consensus/status` is
+proxied to whatever service the gateway's `consensusd` endpoint points at; no code
+in this repository serves that path.
