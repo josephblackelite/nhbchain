@@ -1,27 +1,27 @@
 # Audit Readiness Guide
 
-This guide equips independent assessors with the artifacts and processes required to audit NHBChain.
+This guide lists what an independent assessor can find in this repository and how to reproduce it.
 
-## Scope & Architecture Overview
-Audits should prioritize the consensus engine, staking and escrow modules, RPC gateway, and validator configuration. The [ops/audit-pack](../../ops/audit-pack/README.md) contains architecture diagrams, frozen dependencies, and configuration references. External smart contracts deployed by partners are out of scope unless explicitly documented in the audit brief.
+## Scope
 
-## Documentation & Artifacts
-- **Frozen Commit Hash:** `ops/audit-pack/FROZEN_COMMIT.txt` currently records a hash that does not exist in this repository's git history. It must be regenerated from a real commit before it can be relied on to identify the revision to audit.
-- **Reproducible Build:** `ops/audit-pack/BUILD_STEPS.md` walks through deterministic builds using Docker and Nix.
-- **Configuration Samples:** Example validator, RPC, and wallet configuration lives under `ops/audit-pack/config-samples/`.
-- **Seeds & Fixtures:** Deterministic chain seeds and integration fixtures are published under `ops/audit-pack/seeds-fixtures/` to help auditors replay consensus scenarios.
-- **Release Notes:** Security-impacting release notes are in `docs/security/release-process.md`.
+The code most relevant to an audit lives in `consensus/` (BFT engine and POTSO), `core/` (state transition, staking, sponsorship), `native/` (escrow, lending, swap and other native modules), `rpc/` (JSON-RPC, WebSocket and gRPC server), `p2p/` (peer networking and handshake), `config/` (configuration loading and defaults), `gateway/` and `services/` (HTTP services) and `cmd/` (binaries).
 
-## Expectations & SLAs
-- **Kickoff:** We schedule an onboarding call within 2 business days of receiving an audit request.
-- **Response Time:** Clarifications and artifact requests receive answers within 1 business day during the engagement.
-- **Patch Turnaround:** Critical findings receive hotfix builds within 7 days; high-severity issues within 14 days.
+## Artifacts in the repository
 
-## Embargo & Disclosure
-Audit findings are treated under the same embargo rules as vulnerability submissions: 45 days for critical issues and 30 days for others, unless early release is mutually agreed. Public disclosure will include auditor attribution when approved.
+- **Revision under audit.** No commit hash is recorded in the repository. Record the exact commit (`git rev-parse HEAD`) with the audit.
+- **Build.** CI (`.github/workflows/ci.yml`) builds the node with Go 1.24.3 using `go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/nhb ./cmd/nhb`; `go.mod` declares `go 1.24.0` and `toolchain go1.24.3`. `go.sum` is committed.
+- **Configuration samples.** `config.toml`, `config/prod.toml`, `config/genesis*.json`, `config/security.yaml`, `gateway/config.yaml`, and the deployment manifests under `deploy/` (`compose/`, `helm/`, `systemd/`, `env/`).
+- **Tests and fixtures.** Go tests throughout the tree, integration tests under `tests/`, golden files under `tests/golden/`, and audit phase plans and fixtures under `ops/audit/`.
+- **Audit tooling.** See [../audit/overview.md](../audit/overview.md) for the `make audit:*` and `make bugcheck` targets.
+- **Change history.** `docs/CHANGELOG.md` and `docs/changelogs/` record documentation changes.
+- **Related security documents.** [transport.md](./transport.md), [network-hardening.md](./network-hardening.md), [api-auth.md](./api-auth.md), [handshake.md](./handshake.md), [snapshots-audit.md](./snapshots-audit.md), [mint-controls.md](./mint-controls.md).
 
-## Contacts & Encryption
-- **Program Lead:** `audit@nhbcoin.com`
-- **Security Team:** `security@nhbcoin.com`
-- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt anything. It must be regenerated before relying on it; no working fingerprint is published until then.
+## Embargo and disclosure
 
+Findings from an audit are handled under the same timelines as vulnerability reports; see [disclosure.md](./disclosure.md).
+
+## Contacts and encryption
+
+- **Program lead:** `audit@nhbcoin.com`
+- **Security team:** `security@nhbcoin.com`
+- **PGP key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is an RSA 4096 key for `NHBCoin Security Team <security@nhbcoin.com>` with an encryption subkey. Its fingerprint is `8C12 7674 689A AB92 A4DE  4643 E847 50CA 0E2F 4459`. Confirm that the fingerprint of the key you import matches before encrypting anything to it.
