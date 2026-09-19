@@ -33,6 +33,7 @@ func TestMinimumValidatorStakeFromParamRoundTrip(t *testing.T) {
 		` "20000000000000000000000" `,
 		`"  20000000000000000000000  "`,
 		`"+20000000000000000000000"`,
+		`"++20000000000000000000000"`,
 		`+20000000000000000000000`,
 	} {
 		if got := MinimumValidatorStakeFromParam([]byte(raw)); got.Cmp(amount) != 0 {

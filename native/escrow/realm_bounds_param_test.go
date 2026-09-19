@@ -8,7 +8,9 @@ import "testing"
 // read both.
 func TestRealmBoundsAcceptBareAndQuotedThresholdParams(t *testing.T) {
 	spellings := func(v string) []string {
-		return []string{v, `"` + v + `"`, " " + v + " ", `" ` + v + ` "`, `"+` + v + `"`}
+		// Governance validation also accepts a doubled plus ("++2"), which is
+		// stored verbatim.
+		return []string{v, `"` + v + `"`, " " + v + " ", `" ` + v + ` "`, `"+` + v + `"`, `"++` + v + `"`}
 	}
 	for i, minSpelling := range spellings("2") {
 		maxSpelling := spellings("5")[i]

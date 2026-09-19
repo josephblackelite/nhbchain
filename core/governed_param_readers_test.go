@@ -36,6 +36,9 @@ func numberSpellings(v string) []string {
 		"  " + v + "\n",
 		`" ` + v + ` "`,
 		`"+` + v + `"`,
+		// Governance strips one '+' and hands the rest to big.Int.SetString,
+		// which takes a sign of its own, so "++v" passes validation too.
+		`"++` + v + `"`,
 	}
 }
 

@@ -31,12 +31,16 @@ func ParamText(raw []byte) string {
 	return text
 }
 
-// ParamDecimal is ParamText for a numeric parameter. It also drops one
-// leading '+', which governance's own numeric validation accepts (the string
-// "+5" passes it), so every spelling a proposal may carry for a number can be
-// read back by the code that consumes it.
+// ParamDecimal is ParamText for a numeric parameter. It also drops every
+// leading '+'. Governance's own numeric validation strips one '+' and hands the
+// rest to big.Int.SetString, which accepts a sign of its own, so "+5" and "++5"
+// both pass it and are stored verbatim. Readers parse the result with
+// big.Int.SetString or strconv.ParseUint, and the latter rejects any sign, so
+// only a number with no plus left in front of it can be read back by all of
+// them: a stored "++5" reads as 5 instead of failing (or degrading to a default)
+// in the reader that happens to use ParseUint.
 func ParamDecimal(raw []byte) string {
-	return strings.TrimPrefix(ParamText(raw), "+")
+	return strings.TrimLeft(ParamText(raw), "+")
 }
 
 var reportedMalformedParams sync.Map
