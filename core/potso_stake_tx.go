@@ -212,9 +212,11 @@ func (sp *StateProcessor) applyPotsoStakeUnbondTransaction(tx *types.Transaction
 		}
 		unbonded.Add(unbonded, take)
 		remaining.Sub(remaining, take)
-		if remaining.Sign() == 0 {
-			break
-		}
+		// No early break once remaining hits zero: every nonce after this
+		// one must still be carried into newNonces (the loop head does that
+		// for locks it does not touch), otherwise PotsoStakePutLockNonces
+		// below would drop the untouched later locks from the owner's index
+		// and their stake could never be unbonded or withdrawn again.
 	}
 
 	if err := manager.PotsoStakePutLockNonces(owner, newNonces); err != nil {
