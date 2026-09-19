@@ -153,10 +153,15 @@ type JWTConfig struct {
 
 // ServerConfig controls optional behaviours of the RPC server.
 type ServerConfig struct {
-	// TrustProxyHeaders, when set, will cause the server to honour proxy
-	// forwarding headers such as X-Forwarded-For regardless of the caller's
-	// remote address. Use with caution when the server is guaranteed to be
-	// behind a trusted reverse proxy.
+	// TrustProxyHeaders states that the server runs behind a reverse proxy. It
+	// does not widen who is trusted: proxy forwarding headers such as
+	// X-Forwarded-For are honoured only from a caller listed in TrustedProxies,
+	// never regardless of the caller's remote address -- the forwarded address
+	// becomes the client identity that rate limits and AllowlistCIDRs are
+	// applied to, so trusting every caller would let any client choose it.
+	// Setting it while TrustedProxies is empty therefore trusts nobody (the
+	// server says so at start-up); list the proxy's address (127.0.0.1 for a
+	// proxy on the same host) in TrustedProxies.
 	TrustProxyHeaders bool
 	// TrustedProxies enumerates remote addresses that are authorised to relay
 	// client requests. When a request originates from one of these proxies the
@@ -245,7 +250,6 @@ type Server struct {
 	transactions             *modules.TransactionsModule
 	escrow                   *modules.EscrowModule
 	lending                  *modules.LendingModule
-	trustProxyHeaders        bool
 	trustedProxies           map[string]struct{}
 	readHeaderTimeout        time.Duration
 	readTimeout              time.Duration
@@ -347,6 +351,9 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		}
 		trusted[trimmed] = struct{}{}
 		count++
+	}
+	if cfg.TrustProxyHeaders && len(trusted) == 0 {
+		slog.Warn("rpc: TrustProxyHeaders is set but TrustedProxies is empty; forwarded client addresses are honoured only from listed proxies, so none will be honoured until the proxy's address is listed")
 	}
 	policy := proxyPolicy{
 		xForwardedFor: normalizeProxyMode(cfg.ProxyHeaders.XForwardedFor),
@@ -545,7 +552,6 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		transactions:             modules.NewTransactionsModule(node),
 		escrow:                   modules.NewEscrowModule(node),
 		lending:                  modules.NewLendingModule(node),
-		trustProxyHeaders:        cfg.TrustProxyHeaders,
 		trustedProxies:           trusted,
 		readHeaderTimeout:        cfg.ReadHeaderTimeout,
 		readTimeout:              cfg.ReadTimeout,
@@ -1389,10 +1395,6 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "tx_getSponsorshipConfig":
 		s.handleTxGetSponsorshipConfig(recorder, r, req)
 	case "tx_setSponsorshipEnabled":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
 		s.handleTxSetSponsorshipEnabled(recorder, r, req)
 	case "nhb_getBalance":
 		s.handleGetBalance(recorder, r, req)
@@ -2752,7 +2754,9 @@ func (s *Server) resolveClientIP(r *http.Request) (string, error) {
 		return "", errors.New("unable to determine remote address")
 	}
 
-	trusted := s.trustProxyHeaders || s.isTrustedProxy(host)
+	// Only a listed proxy may relay a client address; TrustProxyHeaders alone
+	// (which used to trust every caller) never does.
+	trusted := s.isTrustedProxy(host)
 	forwardedValues := r.Header.Values("X-Forwarded-For")
 	if len(forwardedValues) > 0 {
 		if s.proxyPolicy.xForwardedFor == ProxyHeaderModeIgnore {
@@ -3215,21 +3219,22 @@ func (s *Server) handleTxPreviewSponsorship(w http.ResponseWriter, _ *http.Reque
 	writeResult(w, req.ID, result)
 }
 
+// sponsorshipToggleRPCDisabledMessage: tx_setSponsorshipEnabled took a
+// "caller" address from the request body on trust -- nothing proved the
+// requester held that key, so anyone able to reach the method who knew a
+// ROLE_PAYMASTER_ADMIN holder's address (public chain state) could use it --
+// and flipped an in-memory flag on the one validator that handled the call.
+// That flag decides whether a sponsored transaction is valid at all (a
+// disabled module makes every sponsored transfer fail), so flipping it on one
+// validator changes which blocks that validator accepts, and it reset on
+// restart. Disabled, like the other RPC mutators that acted on an unsigned
+// caller (see escrowRPCDisabledMessage and stakeRPCDisabledMessage).
+// Sponsorship stays enabled on every node; tx_getSponsorshipConfig (read-only)
+// and tx_previewSponsorship are left live.
+const sponsorshipToggleRPCDisabledMessage = "this method is disabled -- it trusted an unsigned caller address and flipped a validator-local flag that decides whether sponsored transactions are valid, so validators could disagree on which blocks are acceptable; sponsorship stays enabled on every node"
+
 func (s *Server) handleTxSetSponsorshipEnabled(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
-		return
-	}
-	if s.transactions == nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "transactions module unavailable", nil)
-		return
-	}
-	result, modErr := s.transactions.SetSponsorshipEnabled(req.Params[0])
-	if modErr != nil {
-		writeModuleError(w, req.ID, modErr)
-		return
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, sponsorshipToggleRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleTxGetSponsorshipConfig(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

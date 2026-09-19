@@ -168,20 +168,6 @@ func TestClientSourceHonorsForwardedForFromTrustedProxy(t *testing.T) {
 	}
 }
 
-func TestClientSourceHonorsForwardedForWhenTrustFlagEnabled(t *testing.T) {
-	server := newTestServer(t, nil, nil, ServerConfig{
-		TrustProxyHeaders: true,
-		ProxyHeaders:      ProxyHeadersConfig{XForwardedFor: ProxyHeaderModeSingle},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/", nil)
-	req.RemoteAddr = "192.0.2.10:7000"
-	req.Header.Set("X-Forwarded-For", "198.51.100.8")
-	req = injectClientIP(t, server, req)
-	if source := server.clientSource(req); source != "198.51.100.8" {
-		t.Fatalf("expected forwarded client, got %q", source)
-	}
-}
-
 func TestRateLimitTrustedProxyHonorsForwardedFor(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{
 		TrustedProxies: []string{"10.0.0.1"},

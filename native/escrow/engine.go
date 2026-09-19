@@ -297,7 +297,8 @@ func defaultRealmSchemeMap() map[ArbitrationScheme]struct{} {
 }
 
 func parseUintParam(raw []byte) (uint64, error) {
-	text := strings.TrimSpace(string(raw))
+	// The stored value is whatever the proposal wrote: bare or quoted number.
+	text := nativecommon.ParamDecimal(raw)
 	if text == "" {
 		return 0, fmt.Errorf("value must not be empty")
 	}

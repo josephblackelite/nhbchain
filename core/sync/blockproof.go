@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -61,7 +62,9 @@ func (s *ValidatorSet) TotalPower() uint64 {
 	return s.totalPower
 }
 
-// VerifyQuorum ensures the provided signatures collectively represent >= 2/3 of the voting power.
+// VerifyQuorum ensures the provided signatures collectively represent more
+// than 2/3 of the voting power (types.QuorumThreshold, the same bar the live
+// BFT round and QuorumCert.Verify apply).
 func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) error {
 	if s == nil {
 		return fmt.Errorf("validator set not configured")
@@ -70,7 +73,7 @@ func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) 
 		return fmt.Errorf("no signatures provided")
 	}
 	seen := make(map[string]struct{})
-	var signed uint64
+	signed := new(big.Int)
 	for _, sig := range signatures {
 		key := normalizeAddress(sig.Address)
 		if _, dup := seen[key]; dup {
@@ -91,15 +94,20 @@ func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) 
 		if !bytes.Equal(derived.Bytes(), validator.Address) {
 			return fmt.Errorf("signature address mismatch: expected %x got %x", validator.Address, derived.Bytes())
 		}
-		signed += validator.Power
+		signed.Add(signed, new(big.Int).SetUint64(validator.Power))
 		seen[key] = struct{}{}
 	}
-	total := s.totalPower
-	if total == 0 {
+	// Summed as big integers: with stake-scale powers the uint64 running
+	// total (s.totalPower) wraps around and would corrupt the comparison.
+	total := new(big.Int)
+	for _, validator := range s.validators {
+		total.Add(total, new(big.Int).SetUint64(validator.Power))
+	}
+	if total.Sign() == 0 {
 		return fmt.Errorf("validator set has zero total power")
 	}
-	if signed*3 < total*2 {
-		return fmt.Errorf("insufficient voting power: signed=%d total=%d", signed, total)
+	if !types.HasQuorum(signed, total) {
+		return fmt.Errorf("insufficient voting power: signed=%s total=%s", signed, total)
 	}
 	return nil
 }

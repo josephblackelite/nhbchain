@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	nhbstate "nhbchain/core/state"
+	nativecommon "nhbchain/native/common"
 	"nhbchain/native/governance"
 	"nhbchain/native/market"
 )
@@ -214,7 +215,7 @@ func (s *Server) handleMarketGetFlatFee(w http.ResponseWriter, _ *http.Request, 
 			return err
 		}
 		if ok {
-			if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+			if trimmed := nativecommon.ParamDecimal(raw); trimmed != "" {
 				flatFeeWei = trimmed
 			}
 		}

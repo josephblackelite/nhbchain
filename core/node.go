@@ -183,7 +183,6 @@ type Node struct {
 }
 
 const (
-	rolePaymasterAdmin     = "ROLE_PAYMASTER_ADMIN"
 	roleReputationVerifier = "ROLE_REPUTATION_VERIFIER"
 	moduleLending          = "lending"
 	moduleSwap             = "swap"
@@ -207,8 +206,6 @@ const (
 	// engine.SetPauses(sp.pauses), not via a call site in this package.
 	moduleMarket = "market"
 )
-
-var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
 
 // ErrReputationVerifierUnauthorized is returned when a caller lacks the
 // required verifier role to issue skill attestations.
@@ -1485,14 +1482,16 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingAprBps, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingAprBps, parseErr)
+				// A stored value that cannot be read keeps the configured
+				// value (loudly) instead of aborting startup.
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingAprBps, raw, parseErr, strconv.FormatUint(uint64(merged.AprBps), 10))
+			} else {
+				merged.AprBps = uint32(value)
 			}
-			merged.AprBps = uint32(value)
 		}
 	}
 
@@ -1500,14 +1499,14 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingPayoutPeriodDays, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingPayoutPeriodDays, parseErr)
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingPayoutPeriodDays, raw, parseErr, strconv.FormatUint(uint64(merged.PayoutPeriodDays), 10))
+			} else {
+				merged.PayoutPeriodDays = uint32(value)
 			}
-			merged.PayoutPeriodDays = uint32(value)
 		}
 	}
 
@@ -1515,14 +1514,14 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingUnbondingDays, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingUnbondingDays, parseErr)
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingUnbondingDays, raw, parseErr, strconv.FormatUint(uint64(merged.UnbondingDays), 10))
+			} else {
+				merged.UnbondingDays = uint32(value)
 			}
-			merged.UnbondingDays = uint32(value)
 		}
 	}
 
@@ -1530,9 +1529,13 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingMinStakeWei, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
-			merged.MinStakeWei = trimmed
+			if _, valid := new(big.Int).SetString(trimmed, 10); !valid {
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingMinStakeWei, raw, fmt.Errorf("not a base-10 integer"), merged.MinStakeWei)
+			} else {
+				merged.MinStakeWei = trimmed
+			}
 		}
 	}
 
@@ -1540,9 +1543,13 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingMaxEmissionPerYearWei, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
-			merged.MaxEmissionPerYearWei = trimmed
+			if _, valid := new(big.Int).SetString(trimmed, 10); !valid {
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingMaxEmissionPerYearWei, raw, fmt.Errorf("not a base-10 integer"), merged.MaxEmissionPerYearWei)
+			} else {
+				merged.MaxEmissionPerYearWei = trimmed
+			}
 		}
 	}
 
@@ -1550,7 +1557,9 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingRewardAsset, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		// The value is always stored as a JSON string, so the quotes are
+		// stripped before it is used as the asset symbol.
+		trimmed := nativecommon.ParamText(raw)
 		if trimmed != "" {
 			merged.RewardAsset = trimmed
 		}
@@ -1560,14 +1569,14 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingCompoundDefault, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamText(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseBool(strings.ToLower(trimmed))
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingCompoundDefault, parseErr)
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingCompoundDefault, raw, parseErr, strconv.FormatBool(merged.CompoundDefault))
+			} else {
+				merged.CompoundDefault = value
 			}
-			merged.CompoundDefault = value
 		}
 	}
 
@@ -1803,28 +1812,11 @@ func (n *Node) PaymasterAutoTopUpPolicy() PaymasterAutoTopUpPolicy {
 	return n.paymasterTopUpPolicy.Clone()
 }
 
-// SetPaymasterModuleEnabled toggles the paymaster module after verifying the caller has admin privileges.
-func (n *Node) SetPaymasterModuleEnabled(caller []byte, enabled bool) error {
-	if n == nil {
-		return fmt.Errorf("node unavailable")
-	}
-	if len(caller) == 0 {
-		return fmt.Errorf("caller address required")
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	if n.state == nil {
-		return fmt.Errorf("state unavailable")
-	}
-	if !n.state.HasRole(rolePaymasterAdmin, caller) {
-		return ErrPaymasterUnauthorized
-	}
-	n.state.SetPaymasterEnabled(enabled)
-	n.paymasterMu.Lock()
-	n.paymasterEnabled = enabled
-	n.paymasterMu.Unlock()
-	return nil
-}
+// The paymaster module's enabled flag has no runtime setter: it decides whether
+// a sponsored transaction is valid, so it must be identical on every validator
+// and cannot be flipped on one node by a caller that never signed anything.
+// (SetPaymasterModuleEnabled, which did that on an unsigned "caller" address
+// behind the tx_setSponsorshipEnabled RPC, has been removed along with it.)
 
 // EvaluateSponsorship returns the sponsorship assessment for the provided transaction without executing it.
 func (n *Node) EvaluateSponsorship(tx *types.Transaction) (*SponsorshipAssessment, error) {
@@ -5715,7 +5707,7 @@ func (n *Node) StakePreviewClaim(addr [20]byte, at time.Time) (*big.Int, uint64,
 
 	payoutDays := uint64(30)
 	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays); err == nil && ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			if value, parseErr := strconv.ParseUint(trimmed, 10, 64); parseErr == nil && value > 0 {
 				payoutDays = value

@@ -1145,18 +1145,7 @@ func (m *Manager) MinimumValidatorStake() (*big.Int, error) {
 	if !ok {
 		return governance.DefaultMinimumValidatorStake(), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
-		return governance.DefaultMinimumValidatorStake(), nil
-	}
-	parsed, success := new(big.Int).SetString(trimmed, 10)
-	if !success {
-		return nil, fmt.Errorf("params: minimum validator stake must be a base-10 integer")
-	}
-	if parsed.Sign() <= 0 {
-		return nil, fmt.Errorf("params: minimum validator stake must be positive")
-	}
-	return parsed, nil
+	return governance.MinimumValidatorStakeFromParam(raw), nil
 }
 
 // SnapshotPotsoWeightsKey exposes the read-only snapshot handle for POTSO
