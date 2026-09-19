@@ -2472,7 +2472,14 @@ func (n *Node) handleNetworkBlocks(blocks []*types.Block) error {
 		}
 	}
 
-	if applied > 0 && len(blocks) >= networkBlockSyncBatchSize {
+	// Ask for what follows whenever this reply moved the chain. A peer cuts a
+	// reply off at networkBlockSyncBatchSize blocks or networkBlockSyncMaxBytes
+	// of encoded blocks, whichever comes first, so a reply shorter than a full
+	// batch does not mean the peer has nothing more; waiting for the next
+	// status report would stall the catch-up. A peer that has nothing more
+	// answers with nothing, and requestBlockSync's pacing keeps a request for
+	// the same height from going out twice within the gap.
+	if applied > 0 {
 		return n.requestBlockSync(n.GetHeight() + 1)
 	}
 	return nil
