@@ -918,7 +918,27 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 
 	repayAmount := new(big.Int).Set(borrowerUser.DebtNHB)
 
-	liquidatorAcc, err := e.loadAccount(liquidator)
+	// Each address is loaded exactly once and persisted once, so roles that
+	// resolve to the same address (liquidator, borrower, module, collateral
+	// vault, developer and protocol targets) share one account object and
+	// every delta lands on it.
+	accounts := make(map[string]*types.Account)
+	var loaded []crypto.Address
+	account := func(addr crypto.Address) (*types.Account, error) {
+		key := string(addr.Bytes())
+		if acc, ok := accounts[key]; ok {
+			return acc, nil
+		}
+		acc, err := e.loadAccount(addr)
+		if err != nil {
+			return nil, err
+		}
+		accounts[key] = acc
+		loaded = append(loaded, addr)
+		return acc, nil
+	}
+
+	liquidatorAcc, err := account(liquidator)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -926,11 +946,10 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errInsufficientBalance
 	}
 
-	borrowerAcc, err := e.loadAccount(borrower)
-	if err != nil {
+	if _, err := account(borrower); err != nil {
 		return nil, nil, err
 	}
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	moduleAcc, err := account(e.moduleAddress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -939,9 +958,10 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	liquidatorAcc.BalanceNHB = new(big.Int).Sub(liquidatorAcc.BalanceNHB, repayAmount)
 	moduleAcc.BalanceNHB = new(big.Int).Add(moduleAcc.BalanceNHB, repayAmount)
 
-	// Determine collateral seized with liquidation bonus.
-	seizeAmount := new(big.Int).Mul(repayAmount, big.NewInt(int64(10_000+e.params.LiquidationBonus)))
-	seizeAmount = seizeAmount.Quo(seizeAmount, basisPoints)
+	// Determine collateral seized with liquidation bonus. The repaid debt is
+	// NHB wei and the collateral is ZNHB wei, so the bonus-inclusive NHB value
+	// is converted at the same oracle price the eligibility check above used.
+	seizeAmount := CollateralForDebtValue(market, repayAmount, 10_000+e.params.LiquidationBonus)
 	if seizeAmount.Cmp(borrowerUser.CollateralZNHB) > 0 {
 		seizeAmount = new(big.Int).Set(borrowerUser.CollateralZNHB)
 	}
@@ -952,7 +972,7 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errCollateralRoutingBps
 	}
 
-	collateralAcc, err := e.loadAccount(e.collateralAddress)
+	collateralAcc, err := account(e.collateralAddress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1016,43 +1036,24 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, seizeAmount)
 	liquidatorAcc.BalanceZNHB = new(big.Int).Add(liquidatorAcc.BalanceZNHB, liquidatorShare)
 
-	var developerAcc *types.Account
 	if developerShare.Sign() > 0 {
-		developerAcc, err = e.loadAccount(routing.DeveloperTarget)
+		developerAcc, err := account(routing.DeveloperTarget)
 		if err != nil {
 			return nil, nil, err
 		}
 		developerAcc.BalanceZNHB = new(big.Int).Add(developerAcc.BalanceZNHB, developerShare)
 	}
 
-	var protocolAcc *types.Account
 	if protocolShare.Sign() > 0 {
-		protocolAcc, err = e.loadAccount(routing.ProtocolTarget)
+		protocolAcc, err := account(routing.ProtocolTarget)
 		if err != nil {
 			return nil, nil, err
 		}
 		protocolAcc.BalanceZNHB = new(big.Int).Add(protocolAcc.BalanceZNHB, protocolShare)
 	}
 
-	if err := e.persistAccount(liquidator, liquidatorAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
-		return nil, nil, err
-	}
-	if developerAcc != nil {
-		if err := e.persistAccount(routing.DeveloperTarget, developerAcc); err != nil {
-			return nil, nil, err
-		}
-	}
-	if protocolAcc != nil {
-		if err := e.persistAccount(routing.ProtocolTarget, protocolAcc); err != nil {
+	for _, addr := range loaded {
+		if err := e.persistAccount(addr, accounts[string(addr.Bytes())]); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1260,6 +1261,28 @@ func OracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *
 	}
 	value := new(big.Int).Mul(collateralZNHBWei, market.OracleMedianWei)
 	return value.Quo(value, weiPerToken)
+}
+
+// CollateralForDebtValue is the inverse of OracleAdjustedCollateralValue: it
+// converts an NHB-wei debt amount, scaled by factorBps (10_000 = 1.0, so a
+// liquidation bonus is 10_000 + bonusBps), into the raw ZNHB-wei collateral
+// amount worth that much at market.OracleMedianWei. The scaling and the price
+// division happen in one integer division, rounding down (borrower-favoring:
+// the liquidator never receives more than the bonus-inclusive value it repaid).
+// Falls back to strict 1:1 when no oracle price is set, exactly like
+// OracleAdjustedCollateralValue, so eligibility and seizure always use the
+// same valuation.
+func CollateralForDebtValue(market *Market, debtNHBWei *big.Int, factorBps uint64) *big.Int {
+	if debtNHBWei == nil || debtNHBWei.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	num := new(big.Int).Mul(debtNHBWei, new(big.Int).SetUint64(factorBps))
+	if market == nil || market.OracleMedianWei == nil || market.OracleMedianWei.Sign() <= 0 {
+		return num.Quo(num, basisPoints)
+	}
+	num.Mul(num, weiPerToken)
+	den := new(big.Int).Mul(market.OracleMedianWei, basisPoints)
+	return num.Quo(num, den)
 }
 
 // combinedDebtWei folds in a borrower's active fixed-term loan (if any),
