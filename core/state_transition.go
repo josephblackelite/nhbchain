@@ -3209,7 +3209,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			ctx.TxHash = txHash
 		}
 		if sp.LoyaltyEngine != nil {
-			sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+			sp.LoyaltyEngine.OnTransactionSuccess(loyaltyRewardState{sp}, ctx)
 		}
 
 		// Use result simulation mimicking EVM successful consumption
@@ -3439,7 +3439,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		if txHashReady {
 			ctx.TxHash = txHash
 		}
-		sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+		sp.LoyaltyEngine.OnTransactionSuccess(loyaltyRewardState{sp}, ctx)
 	}
 
 	if err := sp.setAccount(from, fromAcc); err != nil {
@@ -8076,6 +8076,44 @@ func (sp *StateProcessor) writeBigInt(key []byte, amount *big.Int) error {
 }
 
 func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error {
+	return sp.setAccount(addr, account)
+}
+
+// loyaltyRewardState is the state view handed to the loyalty engine when it
+// pays a transaction reward. It behaves exactly like the StateProcessor except
+// that persisting the admin/treasury wallet's account also moves the Reward
+// Pool by the same amount of ZNHB (see adjustRewardPoolForAdminZNHBMovement),
+// so a program reward funded by, or paid to, that wallet cannot break
+// CheckZNHBSupplyInvariant. The adjustment is made before the account is
+// written, so a pool that cannot cover it rejects the write and leaves both
+// untouched.
+type loyaltyRewardState struct {
+	*StateProcessor
+}
+
+func (s loyaltyRewardState) PutAccount(addr []byte, account *types.Account) error {
+	sp := s.StateProcessor
+	if sp.hasAdminWallet && bytes.Equal(addr, sp.adminWallet[:]) && account != nil {
+		manager := nhbstate.NewManager(sp.Trie)
+		bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+		if err != nil {
+			return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+		}
+		if bootstrapped {
+			stored, err := sp.getAccount(addr)
+			if err != nil {
+				return err
+			}
+			govEscrow, err := manager.GovernanceEscrowBalance(addr)
+			if err != nil {
+				return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
+			}
+			delta := new(big.Int).Sub(adminZNHBOwned(account, govEscrow), adminZNHBOwned(stored, govEscrow))
+			if err := sp.adjustRewardPoolForAdminZNHBMovement(delta); err != nil {
+				return err
+			}
+		}
+	}
 	return sp.setAccount(addr, account)
 }
 

@@ -3421,7 +3421,11 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// the mempool, offered again), not prunable -- mirroring the
 		// stale-epoch case above from the other side. See
 		// ErrBuybackRefPriceFutureEpoch's doc comment (core/buyback_tx.go).
-		errors.Is(err, ErrBuybackRefPriceFutureEpoch):
+		errors.Is(err, ErrBuybackRefPriceFutureEpoch),
+		// A paymaster's opt-in for a business can be recorded by a later (or
+		// same-attempt) transaction from the paymaster address, after which
+		// the same assignment succeeds.
+		errors.Is(err, loyalty.ErrPaymasterConsent):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
