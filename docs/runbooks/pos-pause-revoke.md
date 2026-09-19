@@ -1,22 +1,8 @@
 # POS Pause & Revoke Runbook
 
-This runbook covers pausing a merchant's sponsorship and revoking a device. Both are flags in
-the POS registry that only affect sponsored transactions; a raw transfer is never blocked by
-them. Read [POS merchant and device onboarding](./pos-onboarding.md) first: it lists the
-registry records, the messages, and the current behaviour of the transaction path.
+Use this runbook to pause merchant sponsorship or revoke compromised POS devices without interrupting raw transfers. The runtime checks the POS registry before quota enforcement, so registry updates take effect immediately for sponsored requests while the sender-funded path remains available.【F:core/sponsorship.go†L231-L247】 The proto definitions in `proto/pos/registry.proto` describe pause/resume and revoke/restore messages, but the gRPC service is retired (see the status note below).【F:proto/pos/registry.proto†L37-L82】
 
-## Effect of the flags
-
-`CheckPOSRegistry` (`core/tx/checks.go`) runs as part of `EvaluateSponsorship`
-(`core/sponsorship.go`) before any cap check:
-
-* Merchant `Paused = true`: the sponsorship status is `throttled` with the reason
-  `merchant sponsorship paused`.
-* Device `Revoked = true`: `throttled` with `device sponsorship revoked`.
-* Both changes apply to the next evaluation. In the NHB transfer path a sponsored transaction
-  that is not `ready` is rejected with `transaction sponsorship rejected: status=throttled
-  reason=<reason>` and a `tx.sponsorship.failed` event; it is not executed with sender-paid
-  gas (`core/state_transition.go`). Transfers that do not name a paymaster are not affected.
+> **Status note (verified against the code):** the `pos.v1.Registry` gRPC service is retired and not registered on the node (`rpc/http.go` `Serve`, NHB-AUDIT-S3). The registry messages are carried by `TxTypePOSRegistry` (`0x23`) transactions, and `applyPOSRegistry` (`core/state_pos.go`) currently applies only `MsgRegisterMerchant`, `MsgRegisterDevice` and `MsgPauseMerchant`; `MsgResumeMerchant`, `MsgRevokeDevice` and `MsgRestoreDevice` are accepted but change nothing. Steps below that mention `pos.v1.Msg*` refer to those transaction payloads, not to a gRPC endpoint.
 
 ## Pause or resume a merchant
 

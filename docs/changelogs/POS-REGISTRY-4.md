@@ -1,9 +1,9 @@
 # POS-REGISTRY-4 — Merchant/Device Registry & Pause Controls
 
 ## Summary
-- Added a POS registry module that normalises merchant/device identifiers, supports idempotent onboarding, and toggles pause or revocation flags in place.【F:native/pos/registry.go†L15-L220】
-- Exposed state-manager helpers, sponsorship gating, and regression tests so paused merchants or revoked devices block sponsored transactions without affecting raw transfers.【F:core/state/pos_registry.go†L22-L116】【F:core/tx/checks.go†L9-L45】【F:core/sponsorship.go†L231-L247】【F:core/sponsorship_test.go†L203-L330】
-- Published `pos.v1.Registry` gRPC definitions plus runbooks covering onboarding, pause, and revoke workflows for operators.【F:proto/pos/registry.proto†L7-L82】【F:docs/runbooks/pos-onboarding.md†L1-L17】【F:docs/runbooks/pos-pause-revoke.md†L1-L19】
+- Added a POS registry module that normalises merchant/device identifiers, supports idempotent onboarding, and toggles pause or revocation flags in place.
+- Exposed state-manager helpers, sponsorship gating, and regression tests so paused merchants or revoked devices block sponsored transactions without affecting raw transfers.
+- Published `pos.v1.Registry` protobuf definitions (`proto/pos/registry.proto`) plus runbooks covering onboarding, pause, and revoke workflows. The `Registry` gRPC service itself is retired and not registered on the node (`rpc/http.go`, NHB-AUDIT-S3); registry mutations are carried by `TxTypePOSRegistry` (0x23) transactions (`core/state_pos.go` `applyPOSRegistry`), which currently apply only `MsgRegisterMerchant`, `MsgRegisterDevice` and `MsgPauseMerchant`. `MsgResumeMerchant`, `MsgRevokeDevice` and `MsgRestoreDevice` are accepted but change nothing.
 
 ## Operator Actions
-- Follow the onboarding and pause/revoke runbooks to register merchants, bind devices, and execute emergency controls as required.【F:docs/runbooks/pos-onboarding.md†L5-L17】【F:docs/runbooks/pos-pause-revoke.md†L5-L19】
+- The onboarding and pause/revoke runbooks describe the intended registry workflows; note the limits above (no gRPC endpoint, and resume/revoke/restore are not applied by the transaction handler) before relying on them operationally.

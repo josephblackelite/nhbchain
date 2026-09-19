@@ -5,7 +5,22 @@ then captured (fully or partly) by the merchant or voided. Code:
 `native/pos/auth.go` (the `Lifecycle` engine), `core/state_pos.go`
 (transaction handlers), `core/events/payments.go`.
 
-## States
+This task introduces a card-style lifecycle for point-of-sale (POS) payments.
+Merchants can lock ZapNHB from a payer, capture any amount up to the locked
+value, or void the authorization to return funds. Expired authorizations are
+voided automatically to guarantee balances are restored without manual
+intervention.
+
+Key additions include:
+
+* A lifecycle engine that manages authorizations, captures, and voids while
+  updating account balances atomically.
+* Events emitted for each lifecycle milestone so downstream services can track
+  payments in real time.
+* Proto messages (`MsgAuthorizePayment`, `MsgCapturePayment`, `MsgVoidPayment`) for authorization, capture, and void. The gRPC service that carried them is retired; see Integration points.
+* Documentation of timing guarantees, error codes, and state transitions.
+
+## Lifecycle flow
 
 ```mermaid
 graph TD
@@ -15,13 +30,27 @@ graph TD
     B -->|expiry reached, swept| E[expired]
 ```
 
-Status values in RPC results: `pending`, `captured`, `voided`, `expired`.
+* **Authorize**: Locks the requested ZapNHB in `LockedZNHB` and records an
+  authorization ID tied to the payer, merchant, amount, expiry, and optional
+  `intent_ref`.
+* **Capture**: Transfers any amount up to the authorized total to the merchant
+  account. Remaining funds are returned to the payer in the same transaction.
+* **Void**: Releases the entire lock back to the payer. This can be triggered
+  manually via a `TxTypePOSVoid` transaction or automatically when the expiry timestamp is
+  reached.
 
 ## Transactions
 
-Submitted as signed native transactions through `nhb_sendTransaction`
-([POS gateway API](../api/gateway-pos.md)); `data` is the raw protobuf of the
-message in `proto/pos/tx.proto`:
+These proto messages are defined in `proto/pos/tx.proto`. The `pos.v1.Tx` gRPC
+service that carried them is retired and not registered on the node
+(`rpc/http.go`, NHB-AUDIT-S3); on-chain the same operations are the
+`TxTypePOSAuthorize`/`Capture`/`Void` transactions.
+
+| Message | Description |
+| --- | --- |
+| `MsgAuthorizePayment` | Locks ZapNHB on the payer account. Returns `authorization_id`. |
+| `MsgCapturePayment` | Captures up to the locked amount, refunding any remainder. |
+| `MsgVoidPayment` | Manually voids an authorization prior to capture. |
 
 | Type | Message | Signer must be |
 | --- | --- | --- |
@@ -88,9 +117,30 @@ attributes that would be empty or zero are omitted. Amounts are decimal strings.
 
 ## Read methods
 
-`pos_getAuthorization`, `pos_getAuthorizationByIntentRef` (no auth) and
-`pos_sweepVoids` (auth) are described in [POS gateway API](../api/gateway-pos.md).
-`pos_sweepVoids` takes an optional `{"timestamp": <unix seconds>}` and returns
-`{"voided": N}`; `nhb-cli pos sweep-voids [--timestamp <RFC3339|unix|+1h>]` calls
-it. It runs the same sweep as the end-of-block hook, against this node's local
-state, at the given time.
+* **gRPC service retired**: `proto/pos/tx.proto` still defines a `pos.v1.Tx`
+  service (`rpc/pos_grpc.go`), but it is no longer registered on the node's
+  gRPC server (`rpc/http.go` `Serve`, NHB-AUDIT-S3, retired 2026-09-18), so
+  `AuthorizePayment`/`CapturePayment`/`VoidPayment` return `Unimplemented`.
+  The messages carry no signature field, and the authorize handler requires
+  the transaction signer to equal the payer (`core/state_pos.go`
+  `applyPOSAuthorize`). Do not
+  integrate against this service.
+* **Real integration path**: authorize/capture/void are native transactions
+  (`TxTypePOSAuthorize`/`Capture`/`Void`, `0x20`/`0x21`/`0x22`) signed
+  client-side with the payer's or merchant's own wallet key and submitted via
+  the standard `nhb_sendTransaction` RPC, the same path every other native
+  transaction type uses.
+* **Read-only lookups** (undocumented elsewhere, also exposed via
+  `rpc/http.go`'s dispatch table):
+  * `pos_getAuthorization(id)` -- looks up an authorization by its ID, returns
+    a `POSAuthorizationResult` or `null`.
+  * `pos_getAuthorizationByIntentRef(intentRef)` -- the way a merchant/gateway
+    discovers an authorization ID from a client-supplied `intent_ref` after
+    submitting an Authorize transaction. Same response shape.
+  * `pos_sweepVoids(timestamp?)` -- the RPC-level equivalent of
+    `nhb-cli pos sweep-voids`; requires RPC auth (unlike the two lookups
+    above) and returns `{"voided": N}`.
+* **Testing**: Unit tests cover partial capture, double-capture rejection, and
+  automatic expiry handling.
+* **Telemetry**: Existing payment processors can subscribe to the new event
+  types to synchronize state with NHBChain.
