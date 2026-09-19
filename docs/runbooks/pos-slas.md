@@ -10,12 +10,9 @@ Prometheus metrics registered by the node (`observability/metrics.go`):
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `nhb_mempool_pos_lane_fill` | gauge | POS transactions waiting divided by the lane's target capacity. A value above 1 means the lane is over its reservation. When the target is zero it reports the raw POS count. |
-| `nhb_mempool_pos_lane_backlog{asset}` | gauge | POS-tagged transfers waiting, per asset (`nhb`, `znhb`). |
-| `nhb_mempool_pos_tx_enqueued_total` | counter | POS-tagged transactions admitted to the mempool. |
-| `nhb_mempool_pos_p95_finality_ms` | histogram | POS enqueue-to-finality latency in milliseconds, buckets 50 to 12800. The name says p95 but it is a histogram; compute the quantile in Prometheus. |
-| `nhb_pos_auth_expired_total` | counter | POS authorizations voided automatically after expiry. |
-| `nhb_paymaster_autotopups_total{outcome}` | counter | Automatic paymaster top-ups (see [auto top-up](./paymaster-autotopup.md)). |
+| Finality latency (p95) | ≤ 3.5s enqueue → finality | `nhb_mempool_pos_p95_finality_ms` histogram on the consensus metrics endpoint.【F:observability/metrics.go†L425-L450】 |
+| Gateway acceptance rate | ≥ 99.5% | Gateway ingestion logs (no `pos_gateway_rejections_total` metric exists in the code). |
+| Sponsored throughput headroom | ≥ 20% above rolling 7d average | Paymaster burn-rate panel in Grafana. |
 
 Events: `pos.auth_auto_voided` (expiry sweep), `tx.sponsorship.failed` and
 `paymaster.throttled` (sponsorship rejected; `paymaster.throttled` is emitted only when a daily cap was hit, not for a paused merchant or revoked device; see

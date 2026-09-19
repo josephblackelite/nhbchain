@@ -9,11 +9,9 @@ Facts about the creator module that matter for operators (`native/creator`, `rpc
 
 ## Engine guards
 
-* Content IDs are unique; publishing an existing ID fails (`creator engine: content already exists`).
-* Amounts must be positive; balances are checked before debit (`creator engine: insufficient balance`).
-* Rate limits kept in the engine and persisted with state: 5 tips per creator per rolling second, and 1,000,000,000,000 base units staked per fan per 3600-second window.
-* Content URIs are restricted to the schemes `https`, `ipfs`, `ar`, `nhb` and 512 bytes; metadata to UTF-8 and 4096 bytes. The chain stores only these references.
-* The staking yield rate (250 bps of the deposit) is a constant in the engine (`stakingAccrualBps`); it is not a configuration value.
+* **Sufficient funds** – Tipping and staking debit the caller immediately. Failed balance checks surface as validation errors; clients should present clear messaging to avoid repeated retries.
+* **Rate limits** – The RPC server enforces a per-source transaction quota over a sliding `RPCRateLimitWindow` (code default 5 per 60s when `RPCMaxTxPerWindow` is unset; the shipped `config.toml` sets 120). Consider lowering this in public devnets to reduce griefing and wash trading.
+* **Reward configuration** – Staking yield is controlled in-code (2.5% BPS in this build). Networks can fork to adjust or gate staking entirely if needed.
 
 ## Known accounting behavior
 
