@@ -26,6 +26,15 @@ func ValidateEvidence(e *Evidence, hash [32]byte, currentHeight uint64, maxAge u
 	if len(e.Heights) == 0 {
 		return &ValidationError{Reason: RejectReasonEmptyHeights, Message: "at least one block height required"}
 	}
+	if len(e.Heights) > MaxHeightsPerEvidence {
+		return &ValidationError{Reason: RejectReasonOversized, Message: fmt.Sprintf("at most %d block heights per report", MaxHeightsPerEvidence)}
+	}
+	if len(e.Details) > MaxDetailsBytes {
+		return &ValidationError{Reason: RejectReasonOversized, Message: fmt.Sprintf("details exceed %d bytes", MaxDetailsBytes)}
+	}
+	if e.Timestamp < 0 {
+		return &ValidationError{Reason: RejectReasonInvalidTimestamp, Message: "timestamp must not be negative"}
+	}
 	for i := 1; i < len(e.Heights); i++ {
 		if e.Heights[i] < e.Heights[i-1] {
 			return &ValidationError{Reason: RejectReasonUnsortedHeights, Message: "heights must be provided in ascending order"}

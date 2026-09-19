@@ -12,27 +12,18 @@ import (
 	"nhbchain/crypto"
 )
 
+// PotsoEvidenceModule serves the read-only evidence queries. There is no
+// submit call: evidence is reported with a signed TxTypeSubmitEvidence
+// transaction sent through nhb_sendTransaction like every other native
+// transaction, so the reporter is always the transaction's recovered signer
+// (see core/potso_evidence_tx.go). An RPC method that built and injected the
+// transaction on the caller's behalf could not carry that signature.
 type PotsoEvidenceModule struct {
 	node *core.Node
 }
 
 func NewPotsoEvidenceModule(node *core.Node) *PotsoEvidenceModule {
 	return &PotsoEvidenceModule{node: node}
-}
-
-type submitEvidenceParams struct {
-	Type        string          `json:"type"`
-	Offender    string          `json:"offender"`
-	Heights     []uint64        `json:"heights"`
-	Reporter    string          `json:"reporter"`
-	ReporterSig string          `json:"reporterSig"`
-	Details     json.RawMessage `json:"details,omitempty"`
-	Timestamp   int64           `json:"timestamp"`
-}
-
-type SubmitEvidenceResult struct {
-	Hash   string `json:"hash"`
-	Status string `json:"status"`
 }
 
 type getEvidenceParams struct {
@@ -67,61 +58,6 @@ type listPageRequest struct {
 type ListEvidenceResult struct {
 	Records    []EvidenceRecord `json:"records"`
 	NextOffset *int             `json:"nextOffset,omitempty"`
-}
-
-func (m *PotsoEvidenceModule) Submit(raw json.RawMessage) (*SubmitEvidenceResult, *ModuleError) {
-	if m == nil || m.node == nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: "evidence module not initialised"}
-	}
-	var params submitEvidenceParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "invalid parameter object", Data: err.Error()}
-	}
-	if strings.TrimSpace(params.Type) == "" {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "type is required"}
-	}
-	evType, err := evidence.ParseType(params.Type)
-	if err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: err.Error()}
-	}
-	offender, err := decodeBech32(strings.TrimSpace(params.Offender))
-	if err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "invalid offender", Data: err.Error()}
-	}
-	reporter, err := decodeBech32(strings.TrimSpace(params.Reporter))
-	if err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "invalid reporter", Data: err.Error()}
-	}
-	sigBytes, err := decodeHexString(params.ReporterSig)
-	if err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "invalid reporterSig", Data: err.Error()}
-	}
-	evidencePayload := evidence.Evidence{
-		Type:        evType,
-		Offender:    offender,
-		Heights:     append([]uint64(nil), params.Heights...),
-		Details:     append([]byte(nil), params.Details...),
-		Reporter:    reporter,
-		ReporterSig: sigBytes,
-		Timestamp:   params.Timestamp,
-	}
-	receipt, err := m.node.PotsoSubmitEvidence(evidencePayload)
-	if err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: err.Error()}
-	}
-	if receipt == nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: "empty receipt"}
-	}
-	if receipt.Status == evidence.ReceiptStatusRejected {
-		message := "evidence rejected"
-		if receipt.Reason != nil && receipt.Reason.Message != "" {
-			message = receipt.Reason.Message
-		}
-		data := map[string]string{"hash": formatHash(receipt.Hash)}
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: message, Data: data}
-	}
-	result := &SubmitEvidenceResult{Hash: formatHash(receipt.Hash), Status: string(receipt.Status)}
-	return result, nil
 }
 
 func (m *PotsoEvidenceModule) Get(raw json.RawMessage) (*EvidenceRecord, *ModuleError) {

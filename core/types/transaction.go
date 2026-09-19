@@ -409,67 +409,51 @@ const (
 	TxTypeSwapMarkReconciled TxType = 0x4B
 
 	// TxTypeSubmitEvidence replaces the old Node.PotsoSubmitEvidence
-	// direct-write RPC handler (rpc/potso_evidence_handlers.go's
-	// potso_submitEvidence, kept only as a client convenience that now
-	// internally constructs and submits this transaction -- see
-	// core/potso_evidence_tx.go) with a real, senderless, gossiped,
-	// consensus-routed transaction (NHB-AUDIT-C10 follow-up).
+	// direct-write RPC handler (potso_submitEvidence, since removed) with a
+	// real, gossiped, consensus-routed transaction (NHB-AUDIT-C10 follow-up).
 	//
 	// The old design let evidence.Store (consensus/potso/evidence/store.go)
 	// be populated directly from an RPC call, entirely outside CreateBlock/
 	// ApplyTransaction/ValidateBlock -- whichever single validator a
 	// reporter happened to call would record and later penalize the
-	// offender via processPendingEvidenceForState (core/node.go), while
+	// offender via processPendingEvidence (core/potso_evidence_tx.go), while
 	// every OTHER validator's own local evidence.Store stayed empty for
 	// that report. Two validators processing the identical block height
 	// could legitimately hold different evidence and therefore compute
 	// different state roots for the same block -- a fork risk, not merely
-	// double-counting, since processPendingEvidenceForState's slash
-	// mutations (via state/bank.Slasher) land in the account trie and feed
-	// the block's state root.
+	// double-counting, since the slash mutations (via state/bank.Slasher)
+	// land in the account trie and feed the block's state root.
 	//
-	// Senderless/envelope-unsigned, like TxTypeSwapVoucherMint and
-	// TxTypeSwapVoucherReverse/TxTypeSwapMarkReconciled just above: the
-	// payload is the evidence.Evidence value itself, which already carries
-	// its own embedded ReporterSig -- evidence.ValidateEvidence recovers
-	// and verifies that signature against Evidence.Reporter (plus, for
-	// TypeEquivocation, the NHB-AUDIT-C10 VerifyEquivocationProof check
-	// that the OFFENDER's own key signed two conflicting votes), so no
-	// separate envelope signature is required or meaningful here -- unlike
-	// TxTypePotsoStakeLock/Unbond/Withdraw's conversion, this evidence
-	// payload's authorization was never "prove you are the reporter via a
-	// standard account key"; it is "prove, with a self-contained signature
-	// scheme this codebase is intentionally not replacing, that a specific
-	// reporter key vouches for this accusation and (for equivocation) that
-	// the offender's own key produced the conflicting proof." Building a
-	// new envelope-signature requirement on top would only add an
-	// unrelated second identity (whoever pays gas to relay the tx), so
-	// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) calls the
-	// existing evidence.ValidateEvidence exactly as the old RPC handler
-	// did, unmodified.
+	// An ordinary signed native transaction: the envelope signature
+	// identifies the reporter (Evidence.Reporter must be the recovered
+	// signer), the account nonce is checked and consumed like any other
+	// native transaction, and the reporter must have at least the minimum
+	// validator stake bonded. An earlier revision made this senderless, on the
+	// grounds that the payload carries its own reporter signature -- but that
+	// let anyone with a freshly generated key submit evidence for free, from
+	// no account and with no replay protection, into a set that lives in
+	// state for its whole retention window. evidence.ValidateEvidence still
+	// recovers and verifies the embedded ReporterSig against Evidence.Reporter
+	// (plus, for TypeEquivocation, the NHB-AUDIT-C10 VerifyEquivocationProof
+	// check that the OFFENDER's own key signed two conflicting votes), and
+	// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) additionally
+	// bounds how many records a reporter and the chain as a whole can hold.
 	//
-	// Unlike the old RPC path, applySubmitEvidenceTransaction only records
-	// a validated report into the trie (nhbstate.Manager's
-	// PotsoEvidencePutRecord/PotsoEvidencePendingHashes) -- it deliberately
-	// does NOT itself compute or apply any penalty. processPendingEvidence
-	// -ForState still does that, at its existing three call sites
-	// (CreateBlock/ValidateBlock/CommitBlock), but now reads the pending
-	// set from the trie instead of the old node-local evidence.Store: since
-	// every validator applies the identical sequence of transactions to
-	// reach a given block, the trie-backed pending set (and therefore the
-	// penalties computed from it) is now byte-identical across validators,
-	// the same guarantee every other trie-backed queue in this codebase
-	// (stake locks, escrow records, governance proposals, ...) already
-	// provides. Keeping the penalty computation out of
-	// applySubmitEvidenceTransaction itself matters because that function
-	// is also invoked by ordinary mempool-admission simulation
-	// (Node.validateTransaction's stateCopy.ExecuteTransaction, run before
-	// a transaction is even gossiped) -- state/potso.Ledger's weight/
-	// idempotency bookkeeping is a Node-global in-memory structure, not
-	// scoped to a particular state copy, so applying a real penalty from a
-	// speculative, possibly-never-committed simulation would corrupt that
-	// bookkeeping for every validator that merely simulates a transaction
-	// it never ends up including in its own committed chain.
+	// applySubmitEvidenceTransaction only records a validated report into the
+	// trie (nhbstate.Manager's PotsoEvidencePutRecord/PotsoEvidenceIndex) -- it
+	// deliberately does NOT itself compute or apply any penalty.
+	// processPendingEvidence does that, called from the three real block
+	// sites (CreateBlock/ValidateBlock/CommitBlock), reading the pending set
+	// from the trie: since every validator applies the identical sequence of
+	// transactions to reach a given block, the trie-backed set (and the
+	// penalties computed from it, including the record of which have been
+	// applied) is byte-identical across validators, the same guarantee every
+	// other trie-backed queue in this codebase (stake locks, escrow records,
+	// governance proposals, ...) already provides. Keeping the penalty out of
+	// applySubmitEvidenceTransaction itself matters because that function is
+	// also invoked by ordinary mempool-admission simulation
+	// (Node.validateTransaction's stateCopy.ExecuteTransaction, run before a
+	// transaction is even gossiped), whose state copy is thrown away.
 	//
 	// 0x4C is the next free byte after TxTypeSwapMarkReconciled (0x4B) --
 	// verified against this file's real, current tip; do not reuse without
@@ -485,7 +469,7 @@ const (
 func RequiresSignature(t TxType) bool {
 	switch t {
 	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice, TxTypeLendingRefPrice,
-		TxTypeSwapVoucherReverse, TxTypeSwapMarkReconciled, TxTypeSubmitEvidence:
+		TxTypeSwapVoucherReverse, TxTypeSwapMarkReconciled:
 		return false
 	default:
 		return true
