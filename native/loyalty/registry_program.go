@@ -10,6 +10,7 @@ var (
 	merchantBusinessIndexPref = []byte("loyalty/merchant-index/")
 	businessCounterKeyBytes   = []byte("loyalty/business/counter")
 	ownerPaymasterPrefix      = []byte("loyalty/owner-paymaster/")
+	paymasterConsentPrefix    = []byte("loyalty/paymaster-consent/")
 )
 
 func programKey(id ProgramID) []byte {
@@ -65,6 +66,16 @@ func ownerPaymasterKey(owner [20]byte) []byte {
 	key := make([]byte, len(ownerPaymasterPrefix)+len(owner))
 	copy(key, ownerPaymasterPrefix)
 	copy(key[len(ownerPaymasterPrefix):], owner[:])
+	return key
+}
+
+// paymasterConsentKey addresses the one-shot opt-in a paymaster address
+// records for one business.
+func paymasterConsentKey(id BusinessID, paymaster [20]byte) []byte {
+	key := make([]byte, 0, len(paymasterConsentPrefix)+len(id)+len(paymaster))
+	key = append(key, paymasterConsentPrefix...)
+	key = append(key, id[:]...)
+	key = append(key, paymaster[:]...)
 	return key
 }
 

@@ -107,65 +107,18 @@ type milestoneLegJSON struct {
 	Status   string `json:"status"`
 }
 
+// milestoneRPCDisabledMessage: same guaranteed-fork defect as escrow's RPC
+// handlers (see escrowRPCDisabledMessage) -- escrow_milestoneCreate/Fund/
+// Release/Cancel/SubscriptionUpdate called s.node.EscrowMilestone* directly,
+// a bare n.stateMu.Lock() mutation of the live state trie (project records
+// and real NHB/ZNHB account balances) outside the transaction/block
+// pipeline, so the receiving validator's state diverged from its peers.
+// Disabled as an emergency stopgap pending a signed-transaction
+// replacement; escrow_milestoneGet (read-only) is left live.
+const milestoneRPCDisabledMessage = "this method is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending"
+
 func (s *Server) handleEscrowMilestoneCreate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params milestoneCreateParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	payer, err := parseBech32Address(params.Payer)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	payee, err := parseBech32Address(params.Payee)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	project := &escrow.MilestoneProject{
-		Payer:   payer,
-		Payee:   payee,
-		RealmID: strings.TrimSpace(params.Realm),
-	}
-	metaBytes, err := parseMilestoneMeta(params.MetaHex)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	project.Metadata = metaBytes
-	legs, err := parseMilestoneLegs(params.Legs)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	project.Legs = legs
-	if params.Subscription != nil {
-		project.Subscription = &escrow.MilestoneSubscription{
-			IntervalSeconds: params.Subscription.IntervalSeconds,
-			NextReleaseAt:   params.Subscription.NextReleaseAt,
-			Active:          params.Subscription.Active,
-		}
-	}
-	signature, err := parseMilestoneSignature(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	created, err := s.node.EscrowMilestoneCreate(project, signature)
-	if err != nil {
-		writeMilestoneError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, milestoneCreateResult{ID: formatEscrowID(created.ID)})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, milestoneRPCDisabledMessage, nil)
 }
 
 // NHB-AUDIT-C4: this endpoint was previously reachable with no
@@ -198,140 +151,19 @@ func (s *Server) handleEscrowMilestoneGet(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleEscrowMilestoneFund(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params milestoneLegActionParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if params.LegID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "legId must be > 0")
-		return
-	}
-	signature, err := parseMilestoneSignature(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.EscrowMilestoneFund(id, params.LegID, signature); err != nil {
-		writeMilestoneError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, map[string]string{"status": "funded"})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, milestoneRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowMilestoneRelease(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params milestoneLegActionParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if params.LegID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "legId must be > 0")
-		return
-	}
-	signature, err := parseMilestoneSignature(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.EscrowMilestoneRelease(id, params.LegID, signature); err != nil {
-		writeMilestoneError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, map[string]string{"status": "released"})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, milestoneRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowMilestoneCancel(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params milestoneLegActionParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if params.LegID == 0 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "legId must be > 0")
-		return
-	}
-	signature, err := parseMilestoneSignature(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if err := s.node.EscrowMilestoneCancel(id, params.LegID, signature); err != nil {
-		writeMilestoneError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, map[string]string{"status": "cancelled"})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, milestoneRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleEscrowMilestoneSubscriptionUpdate(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params milestoneSubscriptionUpdateParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	id, err := parseEscrowID(params.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	signature, err := parseMilestoneSignature(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeEscrowInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	project, err := s.node.EscrowMilestoneSubscriptionUpdate(id, params.Active, signature)
-	if err != nil {
-		writeMilestoneError(w, req.ID, err)
-		return
-	}
-	writeResult(w, req.ID, formatMilestoneJSON(project))
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, milestoneRPCDisabledMessage, nil)
 }
 
 // parseMilestoneSignature decodes a hex-encoded (optionally 0x-prefixed)

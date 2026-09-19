@@ -134,7 +134,7 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 	_, owner := newLoyaltyTestKey(t, sp)
 	_, attacker := newLoyaltyTestKey(t, sp)
 	adminAddr, admin := newLoyaltyTestKey(t, sp)
-	paymasterAddr, _ := newLoyaltyTestKey(t, sp)
+	paymasterAddr, paymaster := newLoyaltyTestKey(t, sp)
 
 	businessID := loyaltyCreateBusinessTx(t, sp, owner, "Acme Coffee")
 
@@ -163,6 +163,12 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 		t.Fatalf("paymaster must be unchanged after unauthorized attempt")
 	}
 
+	if err := setPaymasterTx(owner, paymasterAddr); !errors.Is(err, loyalty.ErrPaymasterConsent) {
+		t.Fatalf("expected ErrPaymasterConsent without the paymaster's opt-in, got %v", err)
+	}
+	if err := setPaymasterTx(paymaster, paymasterAddr); err != nil {
+		t.Fatalf("paymaster opt-in: %v", err)
+	}
 	if err := setPaymasterTx(owner, paymasterAddr); err != nil {
 		t.Fatalf("owner set paymaster: %v", err)
 	}
@@ -180,7 +186,10 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 	if err := manager.SetRole(RoleLoyaltyAdmin, adminAddr.Bytes()); err != nil {
 		t.Fatalf("grant loyalty admin role: %v", err)
 	}
-	altPaymasterAddr, _ := newLoyaltyTestKey(t, sp)
+	altPaymasterAddr, altPaymaster := newLoyaltyTestKey(t, sp)
+	if err := setPaymasterTx(altPaymaster, altPaymasterAddr); err != nil {
+		t.Fatalf("alt paymaster opt-in: %v", err)
+	}
 	if err := setPaymasterTx(admin, altPaymasterAddr); err != nil {
 		t.Fatalf("admin set paymaster: %v", err)
 	}

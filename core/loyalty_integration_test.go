@@ -70,6 +70,9 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register business: %v", err)
 	}
+	if err := registry.SetPaymaster(bizID, paymaster, paymaster); err != nil {
+		t.Fatalf("paymaster opt-in: %v", err)
+	}
 	if err := registry.SetPaymaster(bizID, merchant, paymaster); err != nil {
 		t.Fatalf("set paymaster: %v", err)
 	}

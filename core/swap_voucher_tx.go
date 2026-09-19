@@ -520,6 +520,12 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 	if salePoolBalance.Cmp(voucher.Amount) < 0 {
 		return fmt.Errorf("%w: treasury sale pool has insufficient ZNHB", ErrSwapInvalidSigner)
 	}
+	if bytes.Equal(voucher.Recipient[:], sp.adminWallet[:]) {
+		// The recipient and the Sale Pool source would be one account, so the
+		// two balance updates below would overwrite each other while the pool
+		// counters still advanced.
+		return fmt.Errorf("%w: recipient cannot be the admin wallet", ErrSwapVoucherInvalidPayload)
+	}
 	adminAccount, err := sp.getAccount(sp.adminWallet[:])
 	if err != nil {
 		return fmt.Errorf("swap: load admin wallet: %w", err)

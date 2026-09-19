@@ -1,6 +1,7 @@
 package loyalty
 
 import (
+	"bytes"
 	"encoding/hex"
 	"math/big"
 	"strconv"
@@ -352,16 +353,57 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 		return "paymaster_insufficient"
 	}
 
+	// The reward is one conserved movement paymaster -> customer. Each address
+	// is loaded once and persisted once: when the paymaster and the customer
+	// are the same address they share a single account object and the move nets
+	// to zero, so no balance is ever overwritten by a stale copy of the same
+	// address.
+	recipientAcc := paymasterAcc
+	if !bytes.Equal(business.Paymaster[:], fromAddr) {
+		recipientAcc, err = st.GetAccount(fromAddr)
+		if err != nil {
+			emitProgramSkip(st, ctx, program, business, "recipient_error", map[string]string{"error": err.Error()})
+			return "recipient_error"
+		}
+		if recipientAcc.BalanceZNHB == nil {
+			recipientAcc.BalanceZNHB = big.NewInt(0)
+		}
+	}
+	paymasterBefore := new(big.Int).Set(paymasterAcc.BalanceZNHB)
 	paymasterAcc.BalanceZNHB = new(big.Int).Sub(paymasterAcc.BalanceZNHB, reward)
+	recipientAcc.BalanceZNHB = new(big.Int).Add(recipientAcc.BalanceZNHB, reward)
 	if err := st.PutAccount(business.Paymaster[:], paymasterAcc); err != nil {
 		emitProgramSkip(st, ctx, program, business, "paymaster_persist_error", map[string]string{"error": err.Error()})
 		return "paymaster_persist_error"
 	}
-
-	if baseCtx.FromAccount.BalanceZNHB == nil {
-		baseCtx.FromAccount.BalanceZNHB = big.NewInt(0)
+	if recipientAcc != paymasterAcc {
+		if err := st.PutAccount(fromAddr, recipientAcc); err != nil {
+			// Undo the debit so a failed credit never burns the paymaster's funds.
+			paymasterAcc.BalanceZNHB = paymasterBefore
+			_ = st.PutAccount(business.Paymaster[:], paymasterAcc)
+			emitProgramSkip(st, ctx, program, business, "recipient_persist_error", map[string]string{"error": err.Error()})
+			return "recipient_persist_error"
+		}
 	}
-	baseCtx.FromAccount.BalanceZNHB = new(big.Int).Add(baseCtx.FromAccount.BalanceZNHB, reward)
+
+	// Mirror the movement onto the caller's in-memory accounts. Callers that
+	// persist those objects after this hook (the EVM path) would otherwise write
+	// back a stale balance over what was just stored, and callers that do not
+	// still expose the credited balance to later logic.
+	if !bytes.Equal(business.Paymaster[:], fromAddr) {
+		if baseCtx.FromAccount != recipientAcc {
+			if baseCtx.FromAccount.BalanceZNHB == nil {
+				baseCtx.FromAccount.BalanceZNHB = big.NewInt(0)
+			}
+			baseCtx.FromAccount.BalanceZNHB = new(big.Int).Add(baseCtx.FromAccount.BalanceZNHB, reward)
+		}
+		if baseCtx.ToAccount != nil && baseCtx.ToAccount != paymasterAcc && bytes.Equal(baseCtx.To, business.Paymaster[:]) {
+			if baseCtx.ToAccount.BalanceZNHB == nil {
+				baseCtx.ToAccount.BalanceZNHB = big.NewInt(0)
+			}
+			baseCtx.ToAccount.BalanceZNHB = new(big.Int).Sub(baseCtx.ToAccount.BalanceZNHB, reward)
+		}
+	}
 
 	// The program's all-time lifetime total is metered unconditionally here,
 	// independent of the day-scoped meters below and independent of any

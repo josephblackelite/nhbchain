@@ -14,6 +14,7 @@ var (
 	ErrBusinessNotFound   = errors.New("loyalty: business not found")
 	ErrInvalidBusiness    = errors.New("loyalty: invalid business")
 	ErrPaymasterConflict  = errors.New("loyalty: paymaster already assigned")
+	ErrPaymasterConsent   = errors.New("loyalty: paymaster has not consented")
 	ErrMerchantAssigned   = errors.New("loyalty: merchant already assigned")
 	ErrMerchantNotFound   = errors.New("loyalty: merchant not found")
 )
