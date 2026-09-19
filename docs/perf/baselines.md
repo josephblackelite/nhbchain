@@ -1,40 +1,43 @@
-# Performance Baselines
+# Performance measurement
 
-Use this document to record the throughput and latency expectations for nhbchain components. Operators should track these metrics continuously to detect regressions during releases.
+This repository does not contain measured baseline results. The audit plan
+`ops/audit/perf.yaml` records two expectations, not measurements: ledger
+insertions stay below 5 ms median latency under benchmark load, and governance
+apply commits keep p95 finality latency within the configured SLA at about 1,000
+tx/min synthetic load. The tools and metrics that exist for measuring the node
+are listed here; record your own baselines from them.
 
-## Consensus
+## Benchmarks
 
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Block time | 2.5s ± 0.5s | `consensus.block_interval_seconds` Prometheus gauge |
-| Transactions per second | 300 TPS sustained | `consensus.tx_applied_total` rate |
-| Finality lag | < 5s | Difference between block time and `consensus.finalized_height` timestamps |
+* `make audit:perf` runs `go test -run '^$' -bench=. -benchtime=100x -benchmem
+  ./tests/perf/...` and writes `artifacts/perf/bench.txt`. The benchmarks are
+  `BenchmarkLedgerPut` (`tests/perf/perf_test.go`, an in-memory swap-ledger
+  benchmark) and `BenchmarkConsensusFinalityLatency`
+  (`tests/perf/consensus_latency_test.go`). The latter drives the in-process stub
+  cluster from `tests/support/cluster` (see [e2e testing](../testing/e2e.md)) and
+  writes `consensus_latency_report.json` and `.txt`; it skips under `-short`.
+  The Makefile target then calls `scripts/audit/run_phase.sh perf
+  ops/audit/perf.yaml artifacts/perf --hash artifacts/perf/bench.txt --hash
+  artifacts/perf/consensus_latency_report.json`; `ops/audit/perf.yaml` is tracked
+  in the repository.
+* `bench/posloader` is a POS-transaction load generator. Flags: `--rpc` (default
+  `http://127.0.0.1:8545`), `--key` (hex private key, or `POSLOADER_KEY`),
+  `--rate` (transactions per minute, default 600), `--duration` (default 2m),
+  `--intent-prefix` (default `pos-load`). It requires `NHB_RPC_TOKEN` and submits
+  through `nhb_sendTransaction`.
 
-## Gateway
+## Prometheus metrics
 
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| API p95 latency | < 250ms | `http_server_request_duration_seconds` histogram |
-| Order ingest rate | 100 rps sustained | `gateway.orders_ingested_total` rate |
-| Voucher mint SLA | < 60s | Difference between request timestamp and mint confirmation |
+Metrics registered in `observability/metrics.go` (all under the `nhb` namespace):
 
-## OTC Reconciler
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Reconciliation duration | < 10 minutes per 24h window | Scheduler logs and `recon_run_duration_seconds` metric |
-| Anomaly rate | < 1% of invoices | Ratio of flagged rows to total invoices |
-
-## Validator operations
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| State sync duration | < 30 minutes from snapshot | Operator logs and `consensus.statesync_duration_seconds` |
-| Gossip peers | ≥ 30 stable peers | `p2p_peer_count` gauge |
-| CPU utilization | < 75% sustained | Node exporter metrics |
-
-## Tracking and alerts
-
-- Store baseline values in Grafana dashboards tagged `baseline:true`.
-- Configure alert rules to trigger when metrics exceed ±20% of baseline for two consecutive evaluation periods.
-- Re-baseline after major releases or infrastructure changes and update this document with the new targets.
+| Metric | Meaning |
+| --- | --- |
+| `nhb_consensus_block_interval_seconds` | Gauge: seconds between timestamps of consecutive committed blocks. |
+| `nhb_mempool_pos_lane_fill` | Gauge: POS backlog divided by reserved POS slots ([QoS](../specs/pos-qos.md)). |
+| `nhb_mempool_pos_lane_backlog{asset}` | Gauge: pending POS-tagged transfers by asset. |
+| `nhb_mempool_pos_tx_enqueued_total` | Counter of POS-tagged transactions admitted. |
+| `nhb_mempool_pos_p95_finality_ms` | Histogram of POS enqueue-to-finality latency in ms (buckets 50 to 12800). |
+| `nhb_rpc_limiter_hits_total` | RPC rate-limiter hits. |
+| `nhb_module_requests_total`, `nhb_module_errors_total`, `nhb_module_request_duration_seconds`, `nhb_module_throttles_total` | Per RPC module/method request statistics. |
+| `nhb_pos_auth_expired_total` | POS authorizations voided by expiry sweeps. |
+| `nhb_staking_*`, `nhb_loyalty_*`, `nhb_paymaster_*`, `nhb_token_supply_total`, `nhb_security_insecure_binds_total` | Module-specific gauges and counters. |

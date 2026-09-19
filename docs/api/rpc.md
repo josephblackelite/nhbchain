@@ -1,133 +1,111 @@
-# JSON-RPC Highlights
+# JSON-RPC reference (core methods)
 
-## `nhb_getTransaction`
+This page covers the transport rules and the core account/transaction/staking
+methods of the node's JSON-RPC server (`rpc/http.go`). Module-specific methods
+(escrow, identity, loyalty, lending, ...) are documented with their modules.
 
-Returns a transaction summary with the asset inferred from the type. ZapNHB
-(transfer type `TransferZNHB`) responses will include `"asset": "ZNHB"` so
-explorers and wallets can distinguish token flows without re-simulating the
-payload. All RPC calls issued to validator endpoints must include the standard
-bearer token in the `Authorization` header (see the
-[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
-guide for full header context).
+## Transport
 
-```json
-{
-  "id": 1,
-  "jsonrpc": "2.0",
-  "result": {
-    "hash": "0xabc123…",
-    "type": "TransferZNHB",
-    "asset": "ZNHB",
-    "from": "nhb1…",
-    "to": "nhb1…",
-    "value": "0xde0b6b3a7640000"
-  }
-}
-```
+* `POST` a single JSON object to the node's RPC address (`RPCAddress` in
+  `config.toml`; the code default is `:8080`, the repository `config.toml` sets
+  `127.0.0.1:8545`). Batch arrays are not supported: the body is decoded into
+  one request object (`RPCRequest` in `rpc/http.go`).
+* Request shape: `{"jsonrpc":"2.0","id":1,"method":"...","params":[...]}`.
+  `jsonrpc` may be omitted but must be `"2.0"` if present. `id` is decoded as a
+  Go `int`, so it must be a JSON integer. `params` is always a JSON array.
+* Maximum request body: 1 MiB (`maxRequestBytes`).
+* Errors are JSON-RPC error objects returned with a non-200 HTTP status
+  (`writeError`). For 5xx responses and `-32000` errors the `data` field is
+  removed (`shouldScrubErrorDetails`).
+* `X-Forwarded-For` is honoured only when the peer address is listed in
+  `RPCTrustedProxies` and `RPCTrustProxyHeaders = true`. `RPCAllowlistCIDRs`
+  restricts which client addresses may call the server at all.
 
-## `nhb_getTransactionReceipt`
+### Authentication
 
-Receipts now surface the asset for transfer logs and fee events so downstream
-systems can render them unambiguously.
+Methods marked "auth" below call `requireAuth`: the request must carry
+`Authorization: Bearer <JWT>` (verified against the `RPCJWT` settings), or, when
+the server requires client certificates, present a verified client certificate.
+Failures return HTTP 401 with code `-32001`. The messages come from
+`rpc/http.go`: `missing Authorization header`, `Authorization header must use
+Bearer scheme`, `invalid JWT`, `JWT authentication not configured`.
 
-```json
-{
-  "id": 2,
-  "jsonrpc": "2.0",
-  "result": {
-    "transactionHash": "0xabc123…",
-    "status": "0x1",
-    "logs": [
-      {
-        "event": "Transfer",
-        "asset": "ZNHB",
-        "from": "nhb1…",
-        "to": "nhb1…",
-        "value": "0xde0b6b3a7640000"
-      },
-      {
-        "event": "FeeApplied",
-        "asset": "NHB",
-        "payer": "0x7f…",
-        "fee": "0x38d7ea4c68000"
-      }
-    ]
-  }
-}
-```
+Methods that need auth include: `nhb_sendTransaction`, `tx_setSponsorshipEnabled`,
+`nhb_requestSwapApproval`, `nhb_getSwapQuote`, `nhb_swapMint`, `nhb_swapBurn`,
+`nhb_getSwapStatus`, `nhb_checkSwapAllowance`, `swap_limits`,
+`swap_provider_status`, `swap_burn_list`, `swap_voucher_reverse`,
+`swap_markReconciled`, `swap_setManualQuote`, `swap_listPendingRedemptions`,
+`buyback_submitRefPrice`, `lending_submitRefPrice`, `pos_sweepVoids`,
+`engagement_register_device`, `engagement_submit_heartbeat`, `potso_stake_info`,
+`potso_reward_claim`, `stake_getPosition`, `stake_previewClaim`.
 
-## Sending ZNHB via `nhb_sendTransaction`
+### Error codes
 
-Wallet integrations submit signed ZNHB transfers through the privileged
-`nhb_sendTransaction` RPC using the `TransferZNHB (0x10)` transaction type. Fetch
-the next nonce from `nhb_getBalance` before signing so the payload aligns with
-validator expectations. The `NHB_RPC_TOKEN` referenced in the examples below must
-be a short-lived JWT issued by your infrastructure with the issuer/audience
-configured under `RPCJWT`; refresh the token before it expires so the server
-accepts the request:
+| Code | Constant | Typical HTTP status |
+| --- | --- | --- |
+| -32700 | `codeParseError` | 400 |
+| -32600 | `codeInvalidRequest` | 400 |
+| -32601 | `codeMethodNotFound` | 404 |
+| -32602 | `codeInvalidParams` | 400 (some handlers use 404/409) |
+| -32000 | `codeServerError` | 500/503 |
+| -32001 | `codeUnauthorized` | 401/403 |
+| -32010 | `codeDuplicateTx` | |
+| -32020 | `codeRateLimited` | 429 |
+| -32030 | `codeMempoolFull` | 503 |
+| -32040 | `codeInvalidPolicyInvariants` | |
+| -32050 | `codeModulePaused` | 503 |
+| -32060 | `codeMethodDisabled` | 410 |
 
-```jsonc
-// Request
-// Authorization: Bearer <NHB_RPC_TOKEN>
-{
-  "id": 1,
-  "jsonrpc": "2.0",
-  "method": "nhb_getBalance",
-  "params": ["nhb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"]
-}
+Module handlers define additional codes (`-32021`..`-32025` escrow,
+`-32041`..`-32045` claimable, and others in `rpc/*_handlers.go`). These codes are
+reused across handlers, so a code alone does not identify the module:
+`rpc/p2p_handlers.go` also uses `-32021`..`-32025`; `rpc/net_handlers.go` uses
+`-32040` (invalid params), `-32041` (unknown peer) and `-32042` (peer banned),
+overlapping `codeInvalidPolicyInvariants` and the claimable codes;
+`rpc/sync_handlers.go` uses `-32060` (invalid params) and `-32061` (unavailable),
+where `-32060` is also `codeMethodDisabled`. Use the method name and the error
+message to tell them apart.
 
-// Response
-{
-  "id": 1,
-  "jsonrpc": "2.0",
-  "result": {
-    "address": "nhb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-    "balanceNHB": 10000000000000000,
-    "balanceZNHB": 2500000000000000000,
-    "nonce": 42
-  }
-}
-```
+### Rate limits
 
-With the nonce in hand, sign the envelope and forward the full JSON-RPC request
-from trusted infrastructure. Attach `Authorization: Bearer <NHB_RPC_TOKEN>` to
-the HTTP headers (see the
-[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
-walkthrough for the complete header list). The RPC layer enforces the bearer
-token via [`requireAuth`](../../rpc/http.go#L2230-L2256), which rejects requests
-missing the header or using the wrong scheme.
+Every method except `nhb_sendTransaction` is checked with `allowSource` before
+dispatch; `nhb_sendTransaction` is checked after signature recovery, keyed also
+by `chainId:nonce`. Buckets are per source IP, JWT subject, chain nonce and
+identity+chain, per method. Defaults from `config/config.go`:
+`RPCMaxTxPerWindow = 5` (and the same for the `PerIP`, `PerIdentity`, `PerChain`,
+`PerIdentityChain` variants) per `RPCRateLimitWindow = 60` seconds; the repository
+`config.toml` raises them to 120. `RPCRouteRateLimits` overrides limits per
+method. A limited call returns HTTP 429, code `-32020` and message `RPC rate
+limit exceeded` (or `transaction rate limit exceeded` for
+`nhb_sendTransaction`). Hits are counted by `nhb_rpc_limiter_hits_total`.
 
-```bash
-curl https://validator.nhbchain.example/rpc \
-  -H "Authorization: Bearer ${NHB_RPC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data '{
-    "id": 2,
-    "jsonrpc": "2.0",
-    "method": "nhb_sendTransaction",
-    "params": [
-      {
-        "chainId": "0x4e4842",
-        "type": 16,
-        "nonce": 42,
-        "to": "0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a",
-        "value": "0xde0b6b3a7640000",
-        "gasLimit": "0x61a8",
-        "gasPrice": "0x3b9aca00",
-        "data": "0x",
-        "r": "0x9d6bb1226fb5c07f42d41f017cbf6f6fb1dcf1c563cb5b5b6f2a7d2639a4bce1",
-        "s": "0x42fdedb6f5b1f59fa3d793c9d86b8b156382fa4995df794ba53d0d2ca4f8cb22",
-        "v": "0x1c"
-      }
-    ]
-  }'
-```
+## Transaction encoding
 
-The example above mirrors the exact payload format validators accept,
-including populated `r`/`s`/`v` signature components:
+`nhb_sendTransaction` takes one parameter: a signed transaction object
+(`types.Transaction`, `core/types/transaction.go`). The handler's DTO
+(`handleSendTransaction`) accepts:
+
+| Field | Encoding |
+| --- | --- |
+| `chainId` | integer, decimal string or `0x` hex string; must equal `0x4e4842` (`types.NHBChainID`) |
+| `type` | integer transaction type (see [overview](../overview/README.md#transaction-types)) |
+| `nonce`, `gasLimit`, `intentExpiry` | integer, decimal string or `0x` hex string (uint64) |
+| `value`, `gasPrice`, `r`, `s`, `v` | integer, decimal string or `0x` hex string |
+| `to`, `data`, `paymaster`, `intentRef` | **base64** strings (Go `[]byte` JSON encoding), not hex |
+| `merchantAddr`, `deviceId`, `refundOf` | strings |
+| `paymasterR`, `paymasterS`, `paymasterV` | as `r`, `s`, `v` |
+
+`gasLimit` must be greater than zero and `gasPrice` greater than zero. `to` is
+the 20-byte address. The signature is secp256k1 over the transaction hash (see
+[signing](../transactions/signing.md)); `s` must be in the lower half of the curve
+order and `v` is `27` or `28`.
+
+The result is the transaction hash as a `0x`-prefixed string. An identical
+transaction already known from the same sender returns the same hash.
+Rejections: `invalid transaction` (`-32602`, 400), `mempool full` (`-32030`, 503),
+`nonce N has already been used; current account nonce is M` (`-32602`, 400).
 
 ```json
-// Authorization: Bearer <NHB_RPC_TOKEN>
 {
   "id": 2,
   "jsonrpc": "2.0",
@@ -137,148 +115,136 @@ including populated `r`/`s`/`v` signature components:
       "chainId": "0x4e4842",
       "type": 16,
       "nonce": 42,
-      "to": "0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a",
+      "to": "XJ1M3iP2jNIgmi9erwodNKw+Xyo=",
       "value": "0xde0b6b3a7640000",
       "gasLimit": "0x61a8",
       "gasPrice": "0x3b9aca00",
-      "data": "0x",
-      "r": "0x9d6bb1226fb5c07f42d41f017cbf6f6fb1dcf1c563cb5b5b6f2a7d2639a4bce1",
-      "s": "0x42fdedb6f5b1f59fa3d793c9d86b8b156382fa4995df794ba53d0d2ca4f8cb22",
+      "r": "0x<32-byte r>",
+      "s": "0x<32-byte s>",
       "v": "0x1c"
     }
   ]
 }
 ```
 
-The RPC returns the transaction hash on success. Poll `nhb_getTransactionReceipt`
-to observe settlement and the emitted ZNHB `Transfer` log, or see
-[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md) for a
-full walkthrough that pairs the JSON-RPC example with signing guidance.
+`to` above is the base64 form of the 20-byte address
+`5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a`. The `r`/`s`/`v` values must be a real
+signature over the hash of exactly these fields. See
+[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md).
 
-## Staking helpers
+## `nhb_getBalance`
 
-The staking surface now exposes read-only previews and a reward claim helper.
-All three methods require the standard bearer token in the `Authorization`
-header. Calls are rate limited using the same per-source window that guards
-transaction submission and will reject requests with HTTP `429` and the
-`staking rate limit exceeded` message once the limit is hit. If governance
-pauses the staking module the methods return HTTP `503` with the
-`staking module paused` error payload.
-
-### `stake_previewClaim`
-
-Returns the rewards currently payable for the supplied delegator alongside the
-timestamp of the next eligible payout window.
-
-```json
-// Authorization: Bearer <NHB_RPC_TOKEN>
-{
-  "id": 3,
-  "jsonrpc": "2.0",
-  "method": "stake_previewClaim",
-  "params": ["nhb1exampledelegator…"]
-}
-```
+Params: `["<bech32 address>"]`. Returns the account summary
+(`BalanceResponse`, `rpc/http.go`). Big integers are JSON numbers.
 
 ```json
 {
-  "id": 3,
+  "id": 1,
   "jsonrpc": "2.0",
   "result": {
-    "payable": "7425000000000000000000",
-    "nextPayoutTs": 1719969600
+    "address": "nhb1...",
+    "balanceNHB": 10000000000000000,
+    "balanceZNHB": 2500000000000000000,
+    "stake": 0,
+    "lockedZNHB": 0,
+    "pendingStakingRewards": 0,
+    "username": "",
+    "nonce": 42,
+    "engagementScore": 0,
+    "validatorRegistered": false
   }
 }
 ```
 
-If the payout window has not elapsed the method returns a zero `payable` value
-and the timestamp of the next payout window. When the module is paused the
-response mirrors the claim helper below.
+Optional fields: `delegatedValidator`, `pendingUnbonds[]` (`id`, `validator`,
+`amount`, `releaseTime`), `unbondingCompletesAt`, `validatorRegisteredAt`. `nonce`
+is the account nonce; a transaction with a lower nonce is rejected.
 
-### `stake_getPosition`
+## `nhb_getTransaction`
 
-Exposes the delegator’s current staking ledger snapshot so operators can check
-shares, reward index, and payout timing without inspecting raw account state.
+Params: `["<tx hash>"]`. Returns `null` if the hash is unknown. Otherwise
+(`TransactionResult`, `rpc/types.go`) all numeric fields are hex strings and
+addresses are bech32:
 
 ```json
-// Authorization: Bearer <NHB_RPC_TOKEN>
 {
-  "id": 4,
-  "jsonrpc": "2.0",
-  "method": "stake_getPosition",
-  "params": ["nhb1exampledelegator…"]
+  "hash": "0x...",
+  "type": "TransferZNHB",
+  "asset": "ZNHB",
+  "blockHash": "0x...",
+  "blockNumber": "0x1a",
+  "from": "nhb1...",
+  "to": "nhb1...",
+  "value": "0xde0b6b3a7640000",
+  "nonce": "0x2a",
+  "gasLimit": "0x61a8",
+  "gasPrice": "0x3b9aca00",
+  "input": "0x"
 }
 ```
 
-```json
-{
-  "id": 4,
-  "jsonrpc": "2.0",
-  "result": {
-    "shares": "5000000000000000000",
-    "lastIndex": "1500",
-    "lastPayoutTs": 1717387200
-  }
-}
-```
+`type` is the name from `formatTxType`; `asset` is set by `assetLabel` (`NHB` for
+`Transfer` and the NHB lending types, `ZNHB` for `TransferZNHB`, the ZNHB lending
+types and `BuyZNHB`, and `NHB` for `RedeemNHB`; it is omitted for every other type).
 
-### `stake_claimRewards`
+## `nhb_getTransactionReceipt`
 
-Claims accrued staking rewards and returns the total minted amount, the number
-of reward periods settled, the APR (in basis points) used for the payout, and
-the timestamp when the next payout becomes available.
-
-```json
-// Authorization: Bearer <NHB_RPC_TOKEN>
-{
-  "id": 5,
-  "jsonrpc": "2.0",
-  "method": "stake_claimRewards",
-  "params": ["nhb1exampledelegator…"]
-}
-```
+Params: `["<tx hash>"]`. Returns `null` if the hash is unknown. The receipt is
+not a stored record: `buildReceiptResult` re-simulates the transaction with
+`SimulateTx` and converts the resulting events to logs. `status` is always
+`"0x1"`, including for a transaction whose simulation fails.
 
 ```json
 {
-  "id": 5,
-  "jsonrpc": "2.0",
-  "result": {
-    "minted": "7425000000000000000000",
-    "periods": 2,
-    "aprBps": 1250,
-    "nextEligibleTs": 1722561600
-  }
-}
-```
-
-Attempting to claim before the payout window elapses yields a `409` response
-with the `stake: claim not yet due` message and a `nextEligibleTs` hint in the
-error `data` field. For example:
-
-```json
-{
-  "id": 5,
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32602,
-    "message": "stake: claim not yet due",
-    "data": {
-      "nextEligibleTs": 1719979200
+  "transactionHash": "0x...",
+  "blockHash": "0x...",
+  "blockNumber": "0x1a",
+  "status": "0x1",
+  "gasUsed": "0x...",
+  "logs": [
+    {
+      "event": "Transfer",
+      "asset": "ZNHB",
+      "from": "nhb1...",
+      "to": "nhb1...",
+      "txHash": "0x...",
+      "value": "0xde0b6b3a7640000"
     }
-  }
+  ]
 }
 ```
 
-When the module is paused the helper returns HTTP `503` with the `staking
-module paused` message.
+Each log is a flat string map. For events of type `transfer.native` the `event`
+key is `Transfer`, `amount` is renamed `value` (hex); for `fees.applied` the
+`event` key is `FeeApplied` and `grossWei`/`feeWei`/`netWei` are renamed
+`gross`/`fee`/`net` (hex). Other events use their event type as `event`. If the
+simulation yields no logs and the type has an asset label, a fallback `Transfer`
+log is synthesised. See [events](./events.md) for event attributes.
 
-Error responses include:
+## Staking methods
 
-* `503 Service Unavailable` with JSON-RPC code `-32050` (`codeModulePaused`) and
-  the `staking module paused` message when governance pauses staking.
-* `409 Conflict` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
-  `stake: claim not yet due` message when the payout window has not elapsed. The
-  response includes a `nextEligibleTs` hint in the error `data` field.
-* `400 Bad Request` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
-  `failed to claim staking rewards` message for malformed parameters or other
-  validation failures.
+`stake_previewClaim` and `stake_getPosition` require auth, are rate limited under
+the message `staking rate limit exceeded` (HTTP 429), and return HTTP 503 with
+code `-32050` and `staking module paused` while the staking module is paused.
+Params: `["<bech32 address>"]`.
+
+`stake_previewClaim` returns `{"payable": "<wei>", "nextPayoutTs": <unix>}`. When
+no full payout period has elapsed since `StakeLastPayoutTs`, `payable` is `"0"`
+and `nextPayoutTs` is the end of the current period (period length is the
+governed `staking.payoutPeriodDays`, default 30).
+
+`stake_getPosition` returns `{"shares": "...", "lastIndex": "...",
+"lastPayoutTs": <unix>}` from the account's stake ledger fields.
+
+`stake_delegate`, `stake_undelegate`, `stake_claim` and `stake_claimRewards` are
+disabled. They return HTTP 410, code `-32060`, with a message directing the
+caller to sign and submit `TxTypeStake`, `TxTypeUnstake`, `TxTypeStakeClaim` or
+`TxTypeStakeClaimRewards` through `nhb_sendTransaction`
+(`rpc/stake_handlers.go`).
+
+## Other methods
+
+Governance reads (`gov_proposal`, `gov_list`) and swap administration are in
+[`docs/api.md`](../api.md). Fee queries are in [fees-query](./fees-query.md).
+The full method table is the `switch` in `handle` (`rpc/http.go`); anything not
+listed there returns `unknown method <name>` (`-32601`, HTTP 404).
