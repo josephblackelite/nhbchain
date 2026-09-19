@@ -1,37 +1,39 @@
 # Documentation Quality Review Guide
 
-Strong documentation ensures audit findings can be reproduced and remediations can be executed quickly. Use this checklist to evaluate the completeness and accuracy of technical content across the project.
+Documentation is part of what an auditor reproduces, so the repository has an automated check for a subset of documentation defects, and a manual checklist for the rest.
 
-## Scope
+## Automated check
 
-- Service READMEs (`services/*/README.md`)
-- Operational runbooks (`docs/runbooks/`, `docs/ops/`)
-- Architecture overviews (`docs/architecture/`, `docs/consensus/`)
-- Onboarding guides (`docs/overview/`, `docs/sdk/`)
+```bash
+make audit:docs
+# or, directly:
+go run ./tools/docs/verify.go
+go run ./scripts/verify-docs-snippets --root docs
+```
 
-## Evaluation criteria
+Both entry points call `snippets.Verify` (`tools/docs/snippets/snippets.go`) on the `docs/` tree. It:
 
-1. **Accuracy.** Verify instructions align with the current codebase and configuration defaults.
-2. **Completeness.** Ensure critical workflows (deployment, upgrade, rollback, incident response) are covered end-to-end.
-3. **Freshness.** Check commit history or embedded version tags to confirm the document has been updated within the last two releases.
-4. **Traceability.** Confirm references link to actual code paths, dashboards, or runbooks.
-5. **Accessibility.** Content should be concise, use consistent terminology, and provide prerequisite context.
+- reads every `.md` file under the root;
+- for each `<!-- embed:path -->` marker followed by a code fence, compares the fenced block with the referenced file and fails with `out of sync` if they differ;
+- runs `go build` on the referenced file for every embed fenced as `go`, and `npx tsc --noEmit --project examples/docs/tsconfig.json` if any embed is fenced as `ts` or `typescript`;
+- checks that the target of every Markdown link or image with a relative path resolves to an existing file. The scan is a regular expression over the raw text, so it also matches link syntax inside code spans. `http(s)`, `mailto`, `tel`, `data:` and `#anchor` targets and site-absolute paths starting with `/` are skipped, and anchors are not checked.
 
-## Review process
+`make audit:docs` then runs `scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs`, which hashes `docs/security/audit-readiness.md` and `ops/audit-pack/BUILD_STEPS.md` into the phase report; that command fails if either file is missing. `ops/audit-pack/BUILD_STEPS.md` does not exist in the repository, so `make audit:docs` (and therefore `make bugcheck-docs` and the `docs` bugcheck) currently fails at this step even when the snippet check passes. The snippet check on its own (`go run ./tools/docs/verify.go`) does not depend on that file.
 
-- Sample at least one document from each scope category.
-- Walk through the steps as if you were a new operator; note missing prerequisites or ambiguous commands.
-- Capture screenshots or logs when instructions are unclear or produce unexpected results.
-- Create tickets for stale diagrams, broken links, or missing cross-references.
+The check does not verify that prose statements are true. That is the manual part.
 
-## Deliverables
+## Manual review
 
-- Annotated checklist summarizing which documents were reviewed and any action items.
-- Pull requests or issues filed to address identified gaps.
-- Suggested improvements to the documentation style guide (if recurring problems emerge).
+For each document sampled:
+
+1. **Accuracy.** Compare every command, flag, configuration key, default value and RPC method name with the code that implements it. Treat a statement you cannot find in code as unverified.
+2. **Working examples.** Run the commands. Where a document refers to a file or target, confirm it exists (for example, that the Makefile target is defined).
+3. **Links.** The automated check covers relative links; confirm external links by hand.
+4. **Scope.** Documents must describe on-chain and node behavior implemented in this repository. Remove statements about planned features.
+
+The `docs/` tree has these directories that hold operator and developer material: `docs/runbooks/`, `docs/ops/`, `docs/architecture/`, `docs/consensus/`, `docs/overview/`, `docs/sdk/`. There is no `README.md` directly inside any `services/<name>/` directory.
 
 ## Exit criteria
 
-- No critical documentation gaps remain unresolved.
-- Runbooks and READMEs referenced during the audit include working commands and updated links.
-- Audit artifact bundle includes the completed checklist and remediation tickets.
+- `go run ./tools/docs/verify.go` succeeds on the commit under review (`make audit:docs` also needs `ops/audit-pack/BUILD_STEPS.md`, which is missing).
+- Each sampled document was checked against the code and any discrepancy was corrected or filed as an issue.

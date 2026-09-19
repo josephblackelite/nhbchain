@@ -1,34 +1,31 @@
 # Supply Chain Security Guide
 
-This document covers controls for managing dependencies, build systems, and release artifacts.
+This page records what the repository does today for dependency and build integrity, and how to check it.
 
-## Dependency management
+## Dependencies
 
-- **Lockfiles.** Commit `go.sum`, `package-lock.json`, and equivalent files. Regenerate on updates to detect tampering.
-- **Source pinning.** Use tagged releases or commit hashes for third-party modules. Avoid floating `latest` references.
-- **Vulnerability scanning.** Run `go list -m -u all` and `npm audit` monthly. Track findings in the security backlog.
+- **Lockfiles.** `go.sum` and `package-lock.json` are committed; `go.work` joins the root module and `sdk/`.
+- **Toolchain.** `go.mod` declares `go 1.24.0` and `toolchain go1.24.3`; CI uses Go 1.24.3.
+- **Vulnerability scanning.** `govulncheck ./...` runs in `make bugcheck-static` and `make audit:static`, and optionally in the English audit (`make audit:english`, see [../audit/README.md](../audit/README.md)). `go list -m -u all` lists available module updates.
+- **Static checks.** `gosec`, `staticcheck` and `golangci-lint` run in the same targets (see [../audit/static-analysis.md](../audit/static-analysis.md)).
 
 ## Build pipeline
 
-- **Reproducible builds.** Configure CI to build from clean containers with pinned base images. Compare build hashes between CI and local reproducible runs.
-- **Code signing.** Sign binaries and container images using `cosign` with keys stored in HSM or KMS.
-- **Access controls.** Restrict who can modify CI/CD pipelines. Require code review for pipeline changes.
+- CI (`.github/workflows/ci.yml`) runs `go mod tidy`, then builds the node with `go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/nhb ./cmd/nhb` and runs `go test ./...` on Ubuntu, macOS and Windows.
+- A `secrets-scan` job runs `scripts/check_private_keys.sh`, which uses `git-secrets` to fail on PEM private-key headers in tracked or staged files. The other CI jobs wait for it.
+- `.github/workflows/deploy.yml` (pushes to a branch named `master`, `v*` tags, manual dispatch; the upstream default branch is `main`, so a push to `main` does not match) runs `buf lint` and `buf breaking`, then builds container images for `gateway`, `consensusd`, `p2pd`, `lendingd` and `governd` from `deploy/compose/Dockerfile` and pushes them to GitHub Container Registry with tags for the git tag, the commit SHA and, only on `refs/heads/master`, `latest`, then packages and pushes the Helm charts under `deploy/helm/`.
+- The repository contains no artifact-signing (for example `cosign`) or SBOM-generation configuration.
 
-## Artifact distribution
+## Checking a build
 
-- Store release artifacts in immutable object storage with versioning enabled.
-- Publish checksums and signatures alongside downloads.
-- Maintain an SBOM (e.g., `syft packages dir`) for each release and archive it with the release notes.
+- Build with the same Go version and flags as CI and compare hashes of the resulting binaries between machines.
+- Run `go mod verify` to check downloaded modules against `go.sum`.
 
 ## Incident handling
 
-1. Freeze releases and notify stakeholders.
-2. Identify the compromised dependency or build step.
-3. Patch or replace affected components, regenerate artifacts, and update signatures.
-4. Document the incident in `docs/security/disclosure.md` with remediation steps and follow-up actions.
+If a dependency or build step is suspected to be compromised:
 
-## Continuous improvement
-
-- Conduct quarterly dependency review meetings with engineering leads.
-- Rotate signing keys annually or after any suspected compromise.
-- Automate SBOM generation and verification in CI to catch drift early.
+1. Stop releases and notify stakeholders.
+2. Identify the affected module or step.
+3. Pin or replace the dependency, regenerate artifacts and record the change.
+4. Follow [release-process.md](./release-process.md) for disclosure and rollout.

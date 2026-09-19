@@ -1,43 +1,39 @@
 # End-to-End Flow Validation Guide
 
-End-to-end (E2E) testing verifies that user-critical workflows continue to operate once code and configuration changes land. This guide covers environment setup, execution, and interpreting the resulting telemetry.
+This page describes the end-to-end tests that exist in the repository, what each one exercises, and what it does not.
 
-## Core flows
+## What runs
 
-| Flow | Components | Success signals |
+| Command | What it does |
+| --- | --- |
+| `make audit:e2e` | Runs `go test -json -run TestAuditSmokePlan ./tests/e2e/...`, then `scripts/audit/run_phase.sh e2e ops/audit/e2e.yaml artifacts/e2e --compose deploy/compose/docker-compose.audit-e2e.yaml`. Output goes to `artifacts/e2e/` and `logs/`. |
+| `make bugcheck-gateway` | Runs `go test -run TestEndToEndFinancialFlows ./tests/e2e`. |
+| `go test ./tests/e2e/...` | Runs every test in the package, listed below. |
+
+There is no `make e2e` target.
+
+`TestAuditSmokePlan` (`tests/e2e/audit_smoke_test.go`) only reads `ops/audit/e2e.yaml` and fails if it defines no checks. `scripts/audit/run_phase.sh` calls `tools/audit`, which records each check from the YAML file with the status `pending`, hashes the config, and parses the compose file. It does not execute the checks or start the compose stack.
+
+## Tests in `tests/e2e`
+
+| Test | Implementation | Coverage |
 | --- | --- | --- |
-| Retail payment | Wallet → Gateway → Consensus | Transaction confirmed on-chain, receipt in gateway logs, customer notification emitted. |
-| OTC voucher mint | Back-office → Swap RPC → Reconciler | Voucher minted on-chain, reconciler exports CSV/Parquet with no anomalies. |
-| Validator join | Bootstrapper → Consensus node → Monitoring | Node catches up to latest height, shares state snapshot, alerts remain green. |
-| Bridge transfer | External chain → Relayer → nhbchain | Proof accepted, assets minted/burned with finality metrics recorded. |
+| `TestEndToEndFinancialFlows` | in-process HTTP simulation (`tests/support/cluster`) | Through a simulated gateway: lending supply (with an idempotent replay), borrow, repay; swap mint and redeem; governance proposal, vote and apply; then a consensus snapshot check. |
+| `TestLendingRPCEndpoints` | real `core.Node` and `rpc.Server` with an in-memory database, HS256 JWT | Lending JSON-RPC endpoints. |
+| `TestPotsoTask3Determinism` | real POTSO evidence, penalty and reward packages, two pipeline instances per seed (42, 1337, 9001) | Both instances must end in identical snapshots, duplicate deliveries must occur, and results are compared to golden files (`UPDATE_POTSO_GOLDEN=1` rewrites them). |
 
-## Environment preparation
+`tests/support/cluster` imports no `nhbchain` package. Its "consensusd", "p2pd", "lendingd", "swapd", "governd" and "gateway" services are handlers over an in-memory state on loopback ports, not the real binaries or chain code. The tests in `tests/chaos` (service kill and restart; run them with `go test ./tests/chaos/...`, because `make audit:chaos` does not run them) and `tests/perf` (`BenchmarkConsensusFinalityLatency`) run against the same simulation, so a pass there says nothing about the real node's consensus, lending, swap or governance logic.
 
-1. **Select a target network.** Use devnet for rapid iteration, staging for production-like checks, and mainnet only for observability audits.
-2. **Provision data.** Seed accounts with known balances, configure OTC vouchers, and prepare validator keys as needed.
-3. **Enable tracing and metrics.** Ensure Jaeger/Tempo, Prometheus, and log aggregation are active so failures can be diagnosed.
-4. **Snapshot baseline dashboards.** Capture pre-run metrics for comparison.
+## Running against a real network
 
-## Running test scenarios
+The repository contains no scripted end-to-end suite that drives a real node cluster. For manual checks against a running node:
 
-- Execute scripted flows using `make e2e` or service-specific CLI helpers (e.g., `cmd/nhbchain` for validator actions).
-- For manual runs, follow the runbooks referenced in `docs/runbooks/` and record every command executed.
-- Tag test transactions with unique memos or metadata so they can be located in block explorers and logs.
-
-## Observability checklist
-
-- **Logs:** Confirm expected log entries appear in gateway, consensus, and relayer services. Flag errors and warnings for follow-up.
-- **Metrics:** Compare latency, error rate, and throughput counters to baseline values. Note any deviations larger than 10%.
-- **Traces:** Inspect distributed traces for long spans (>2x baseline) or missing instrumentation.
-
-## Failure handling
-
-1. Capture logs, metrics screenshots, and trace IDs immediately.
-2. File an incident or bug ticket with reproduction steps and environment details.
-3. Coordinate with service owners to triage and verify fixes.
+1. Choose the target network and note its chain ID and RPC endpoint.
+2. Submit transactions with the CLI or SDKs and record the transaction hashes.
+3. Confirm each result with the JSON-RPC read methods (for example `nhb_getTransactionReceipt`).
+4. Keep the commands, hashes and outputs with the audit record.
 
 ## Exit criteria
 
-- All core flows complete without critical alerts or untriaged regressions.
-- Evidence (logs, metrics, traces) is archived in the audit artifact store.
-- Runbooks are updated if manual steps changed or new remediation procedures were required.
+- The tests above pass on the commit under review.
+- Anything that needed manual steps is written down so it can be repeated.
