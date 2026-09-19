@@ -14,8 +14,10 @@ import (
 // TestLoyaltyPaymasterMustConsentToBeNamed replays the drain a business owner
 // could run against any account: name the victim as paymaster, create a rich
 // program, and pay the merchant address from a second account. The victim
-// never signs anything, so the assignment must be refused and the victim ZNHB
-// must stay put.
+// never signs anything, so the owner's assignment must be refused
+// (ErrPaymasterConsentRequired: an owner names only its own wallet), a loyalty
+// admin's must be refused too until the victim has signed its own opt-in
+// (ErrPaymasterConsent), and the victim ZNHB must stay put.
 func TestLoyaltyPaymasterMustConsentToBeNamed(t *testing.T) {
 	sp := newLoyaltyTestProcessor(t)
 	manager := nhbstate.NewManager(sp.Trie)
@@ -57,8 +59,20 @@ func TestLoyaltyPaymasterMustConsentToBeNamed(t *testing.T) {
 		return sp.handleNativeTransaction(tx, sender, acc)
 	}
 	victimAddr := victimKey.PubKey().Address()
-	if err := setPaymaster(merchant[:], victimAddr); !errors.Is(err, loyalty.ErrPaymasterConsent) {
-		t.Fatalf("naming a non-consenting paymaster: want ErrPaymasterConsent, got %v", err)
+	if err := setPaymaster(merchant[:], victimAddr); !errors.Is(err, loyalty.ErrPaymasterConsentRequired) {
+		t.Fatalf("the owner naming another wallet: want ErrPaymasterConsentRequired, got %v", err)
+	}
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	admin := toAddress(adminKey)
+	mustWriteAccount(t, sp, admin, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+	if err := manager.SetRole(RoleLoyaltyAdmin, admin[:]); err != nil {
+		t.Fatalf("grant loyalty admin role: %v", err)
+	}
+	if err := setPaymaster(admin[:], victimAddr); !errors.Is(err, loyalty.ErrPaymasterConsent) {
+		t.Fatalf("a loyalty admin naming a non-consenting paymaster: want ErrPaymasterConsent, got %v", err)
 	}
 	business, _, err := sp.LoyaltyBusinessByID(businessID)
 	if err != nil {
@@ -93,12 +107,16 @@ func TestLoyaltyPaymasterMustConsentToBeNamed(t *testing.T) {
 	assertBig(t, "victim ZNHB", victimAcc.BalanceZNHB, 1_000_000)
 	assertBig(t, "customer ZNHB", customerAcc.BalanceZNHB, 0)
 
-	// Once the victim signs its own opt-in the owner may name it.
+	// Once the victim signs its own opt-in a loyalty admin may name it; the
+	// owner still may not.
 	if err := setPaymaster(victim[:], victimAddr); err != nil {
 		t.Fatalf("victim opt-in: %v", err)
 	}
-	if err := setPaymaster(merchant[:], victimAddr); err != nil {
-		t.Fatalf("owner naming a consenting paymaster: %v", err)
+	if err := setPaymaster(merchant[:], victimAddr); !errors.Is(err, loyalty.ErrPaymasterConsentRequired) {
+		t.Fatalf("the owner naming a consenting wallet: want ErrPaymasterConsentRequired, got %v", err)
+	}
+	if err := setPaymaster(admin[:], victimAddr); err != nil {
+		t.Fatalf("loyalty admin naming a consenting paymaster: %v", err)
 	}
 }
 

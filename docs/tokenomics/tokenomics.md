@@ -26,6 +26,7 @@ NHBCoin runs a deliberate two-token model. **NHB** is the commerce currency: an 
 * Every ZNHB a validator or staker receives as a network reward moves out of the separate **Reward Pool**, following a halving schedule — see [§5](#5-the-reward-pool-and-the-validatorstaking-halving-schedule).
 * A share of NHB transaction-fee revenue automatically funds a **treasury buyback** that repurchases ZNHB from willing sellers and recycles it back into the Sale Pool, never burning it and never minting new supply — see [§6](#6-the-treasury-buyback-engine).
 * `core/state_transition.go`'s `CheckZNHBSupplyInvariant` asserts, every block, that `Sale Pool balance + Reward Pool balance == the treasury wallet's live ZNHB balance`. A violation is a hard consensus error, not a warning.
+* ZNHB that reaches or leaves the treasury wallet any other way -- a plain transfer to it, an escrow or subscription fee, a POS capture, a slashed stake, a staking, loyalty or POTSO payout -- is booked into the **Reward Pool** in the same state transition (`core/znhb_treasury_pool.go`), so none of these can leave the invariant above broken for the next block. An outflow larger than the Reward Pool holds is rejected as an ordinary per-transaction error (`ErrTreasuryRewardPoolInsufficient`), and the block builder skips it.
 
 ---
 

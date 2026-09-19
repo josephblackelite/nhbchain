@@ -131,7 +131,7 @@ func TestLoyaltyCreateBusinessLifecycle(t *testing.T) {
 
 func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 	sp := newLoyaltyTestProcessor(t)
-	_, owner := newLoyaltyTestKey(t, sp)
+	ownerAddr, owner := newLoyaltyTestKey(t, sp)
 	_, attacker := newLoyaltyTestKey(t, sp)
 	adminAddr, admin := newLoyaltyTestKey(t, sp)
 	paymasterAddr, paymaster := newLoyaltyTestKey(t, sp)
@@ -163,13 +163,35 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 		t.Fatalf("paymaster must be unchanged after unauthorized attempt")
 	}
 
-	if err := setPaymasterTx(owner, paymasterAddr); !errors.Is(err, loyalty.ErrPaymasterConsent) {
-		t.Fatalf("expected ErrPaymasterConsent without the paymaster's opt-in, got %v", err)
+	// Rewards are paid out of the paymaster's balance, so an owner may not
+	// commit somebody else's wallet: only naming its own is accepted.
+	if err := setPaymasterTx(owner, paymasterAddr); !errors.Is(err, loyalty.ErrPaymasterConsentRequired) {
+		t.Fatalf("expected ErrPaymasterConsentRequired when the owner names another wallet, got %v", err)
 	}
+	business, _, err = sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		t.Fatalf("load business: %v", err)
+	}
+	if business.Paymaster != zero {
+		t.Fatalf("paymaster must be unchanged after the owner named a wallet that is not its own")
+	}
+	// The wallet's own opt-in assigns nothing and does not let the owner name
+	// it either; only a loyalty admin may, as below.
 	if err := setPaymasterTx(paymaster, paymasterAddr); err != nil {
 		t.Fatalf("paymaster opt-in: %v", err)
 	}
-	if err := setPaymasterTx(owner, paymasterAddr); err != nil {
+	if err := setPaymasterTx(owner, paymasterAddr); !errors.Is(err, loyalty.ErrPaymasterConsentRequired) {
+		t.Fatalf("expected ErrPaymasterConsentRequired for the owner even after the opt-in, got %v", err)
+	}
+	business, _, err = sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		t.Fatalf("load business: %v", err)
+	}
+	if business.Paymaster != zero {
+		t.Fatalf("an opt-in must not assign the paymaster")
+	}
+
+	if err := setPaymasterTx(owner, ownerAddr); err != nil {
 		t.Fatalf("owner set paymaster: %v", err)
 	}
 	business, _, err = sp.LoyaltyBusinessByID(businessID)
@@ -177,7 +199,7 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 		t.Fatalf("load business: %v", err)
 	}
 	var wantPaymaster [20]byte
-	copy(wantPaymaster[:], paymasterAddr.Bytes())
+	copy(wantPaymaster[:], ownerAddr.Bytes())
 	if business.Paymaster != wantPaymaster {
 		t.Fatalf("paymaster not set by owner")
 	}
@@ -187,6 +209,9 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 		t.Fatalf("grant loyalty admin role: %v", err)
 	}
 	altPaymasterAddr, altPaymaster := newLoyaltyTestKey(t, sp)
+	if err := setPaymasterTx(admin, altPaymasterAddr); !errors.Is(err, loyalty.ErrPaymasterConsent) {
+		t.Fatalf("expected ErrPaymasterConsent for an admin naming a wallet that has not opted in, got %v", err)
+	}
 	if err := setPaymasterTx(altPaymaster, altPaymasterAddr); err != nil {
 		t.Fatalf("alt paymaster opt-in: %v", err)
 	}

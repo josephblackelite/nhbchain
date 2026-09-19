@@ -39,13 +39,20 @@ func (r *Registry) RegisterBusiness(owner [20]byte, name string) (BusinessID, er
 	return id, nil
 }
 
-// SetPaymaster assigns the wallet that funds a business's program rewards. A
-// business owner or loyalty admin may only name a paymaster that has agreed to
-// it: the paymaster is the owner, is the caller itself, or has previously
-// recorded its own opt-in for this business by calling SetPaymaster with its
-// own address as the new paymaster. Without that rule, naming any account as
-// paymaster would let the business drain that account's ZNHB into rewards. The
-// opt-in is consumed by the assignment it authorizes.
+// SetPaymaster assigns the wallet that funds a business's program rewards.
+// Every reward is debited from the paymaster's own balance, and the named
+// wallet never signs the assignment, so two rules keep a wallet from being
+// committed without its say:
+//
+//   - A business owner may name only its own wallet (or clear the paymaster).
+//     Naming any other wallet is refused with ErrPaymasterConsentRequired,
+//     which can never succeed for that signer.
+//   - A loyalty admin may name another wallet only if that wallet is the
+//     business owner or has recorded its own opt-in for this business, by
+//     calling SetPaymaster with its own address as the new paymaster. Without
+//     the opt-in the call is refused with ErrPaymasterConsent, which a later
+//     opt-in by the named wallet turns into a success. The opt-in is
+//     per business and is consumed by the assignment it authorizes.
 func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20]byte) error {
 	if err := nativecommon.Guard(r.pauses, moduleName); err != nil {
 		return err
@@ -59,6 +66,17 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 			return r.st.KVPut(paymasterConsentKey(business.ID, caller), uint64(1))
 		}
 		return ErrUnauthorized
+	}
+	// Naming an address commits that address's funds. Without this rule any
+	// business owner could point a program at somebody else's wallet -- an
+	// ordinary user's, or one that holds protocol funds -- and have each
+	// reward paid out of it to a spender of their choosing. An owner can
+	// therefore commit only its own wallet; only the role trusted with
+	// assigning wallets may name another one, and then only with that wallet's
+	// recorded opt-in (checked below). Checked before the no-op case so
+	// re-affirming the current paymaster is still a request about that wallet.
+	if !isZeroAddress(newPaymaster) && newPaymaster != caller && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
+		return ErrPaymasterConsentRequired
 	}
 	if business.Paymaster == newPaymaster {
 		return nil

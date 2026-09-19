@@ -12,6 +12,7 @@ import (
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	nativecommon "nhbchain/native/common"
+	"nhbchain/native/loyalty"
 	nativeparams "nhbchain/native/params"
 	swap "nhbchain/native/swap"
 )
@@ -53,6 +54,7 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"buyback ref price already recorded", ErrBuybackRefPriceAlreadyRecorded, proposalDispositionPrune},
 		{"buyback ref price stale epoch", ErrBuybackRefPriceStaleEpoch, proposalDispositionPrune},
 		{"lending ref price stale timestamp", ErrLendingRefPriceStaleTimestamp, proposalDispositionPrune},
+		{"loyalty paymaster consent required", loyalty.ErrPaymasterConsentRequired, proposalDispositionPrune},
 
 		// SKIP: depends on mutable state shared across transactions in this
 		// attempt, or on ordering within this attempt.

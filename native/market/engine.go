@@ -175,7 +175,7 @@ func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateN
 		return existing.Clone(), nil
 	}
 
-	accounts := &accountBook{engine: e}
+	accounts := newAccountBook(e)
 	sellerAcc, err := accounts.load(seller)
 	if err != nil {
 		return nil, err
@@ -276,7 +276,11 @@ func (e *Engine) FillListing(buyer crypto.Address, listingID [32]byte, znhbAmoun
 
 	totalDebit := new(big.Int).Add(nhbCost, flatFeeWei)
 
-	accounts := &accountBook{engine: e}
+	// Buyer, seller, fee collector and escrow are loaded through one book so a
+	// role played by the same address (a buyer filling its own listing, a fee
+	// collector that also trades) shares a single account object -- see
+	// accountBook.
+	accounts := newAccountBook(e)
 	buyerAcc, err := accounts.load(buyer)
 	if err != nil {
 		return nil, err
@@ -378,7 +382,7 @@ func (e *Engine) CancelListing(seller crypto.Address, listingID [32]byte) error 
 		return errNotSeller
 	}
 
-	accounts := &accountBook{engine: e}
+	accounts := newAccountBook(e)
 	sellerAcc, err := accounts.load(seller)
 	if err != nil {
 		return err
@@ -404,6 +408,56 @@ func (e *Engine) CancelListing(seller crypto.Address, listingID [32]byte) error 
 		return err
 	}
 	return e.state.RemoveOpenListing(listing.ID)
+}
+
+// accountBook hands out one account object per address for the duration of a
+// single engine operation and writes each back once. Buyer, seller, fee
+// collector and escrow are separate roles but can be played by one address
+// (a buyer filling its own listing, a fee collector that also trades). The
+// state returns a fresh object on every load, so two loads of one address
+// would be persisted one after the other and the later write, which never saw
+// the earlier object's changes, would overwrite them: NHB minted, ZNHB
+// destroyed. With one shared object every change lands on it.
+//
+// Accounts are persisted in the order they were first loaded, so the writes
+// are deterministic.
+type accountBook struct {
+	engine  *Engine
+	entries []bookedAccount
+}
+
+type bookedAccount struct {
+	addr crypto.Address
+	acc  *types.Account
+}
+
+func newAccountBook(e *Engine) *accountBook { return &accountBook{engine: e} }
+
+// load returns the operation's account object for addr, fetching it from the
+// state the first time only.
+func (b *accountBook) load(addr crypto.Address) (*types.Account, error) {
+	raw := addr.Bytes()
+	for _, entry := range b.entries {
+		if bytes.Equal(entry.addr.Bytes(), raw) {
+			return entry.acc, nil
+		}
+	}
+	acc, err := b.engine.loadAccount(addr)
+	if err != nil {
+		return nil, err
+	}
+	b.entries = append(b.entries, bookedAccount{addr: addr, acc: acc})
+	return acc, nil
+}
+
+// persist writes every loaded account back exactly once.
+func (b *accountBook) persist() error {
+	for _, entry := range b.entries {
+		if err := b.engine.persistAccount(entry.addr, entry.acc); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // loadAccount fetches an account, defaulting nil balance fields to zero.
@@ -433,40 +487,4 @@ func (e *Engine) loadAccount(addr crypto.Address) (*types.Account, error) {
 
 func (e *Engine) persistAccount(addr crypto.Address, acc *types.Account) error {
 	return e.state.PutAccount(addr, acc)
-}
-
-// accountBook loads each address once, so roles that resolve to the same
-// address (the buyer and the seller, or either of them and the fee collector
-// or the escrow account) share one account object and every delta lands on
-// it. State adapters return a fresh copy per load; with one copy per role the
-// last persist would overwrite the deltas of the others and create or destroy
-// value. persist writes each address once, in load order.
-type accountBook struct {
-	engine *Engine
-	addrs  []crypto.Address
-	accs   []*types.Account
-}
-
-func (b *accountBook) load(addr crypto.Address) (*types.Account, error) {
-	for i, known := range b.addrs {
-		if bytes.Equal(known.Bytes(), addr.Bytes()) {
-			return b.accs[i], nil
-		}
-	}
-	acc, err := b.engine.loadAccount(addr)
-	if err != nil {
-		return nil, err
-	}
-	b.addrs = append(b.addrs, addr)
-	b.accs = append(b.accs, acc)
-	return acc, nil
-}
-
-func (b *accountBook) persist() error {
-	for i, addr := range b.addrs {
-		if err := b.engine.persistAccount(addr, b.accs[i]); err != nil {
-			return err
-		}
-	}
-	return nil
 }

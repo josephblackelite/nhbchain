@@ -18,3 +18,15 @@ var (
 	ErrMerchantAssigned   = errors.New("loyalty: merchant already assigned")
 	ErrMerchantNotFound   = errors.New("loyalty: merchant not found")
 )
+
+// ErrPaymasterConsentRequired rejects a business owner naming a wallet other
+// than its own as the paymaster: rewards are paid out of the paymaster's
+// balance, so only that wallet (or a loyalty admin assigning one that has
+// opted in) may commit its funds. It never turns into a success for the same
+// signer.
+//
+// Its counterpart ErrPaymasterConsent rejects a loyalty admin naming a wallet
+// that has not recorded its own opt-in for the business; that one turns into a
+// success once the named wallet opts in with a transaction of its own. See
+// Registry.SetPaymaster.
+var ErrPaymasterConsentRequired = errors.New("loyalty: paymaster must be the caller's own wallet unless assigned by a loyalty admin")
