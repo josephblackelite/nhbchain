@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { rpcRequest } from '../../../lib/rpc';
-import { computeEmailHash } from '../../../lib/email';
-import { normalizeAmount, formatDeadline } from '../../../lib/identity';
+import { normalizeAmount } from '../../../lib/identity';
 
 interface ClaimableBody {
   payer?: string;
@@ -14,49 +12,49 @@ interface ClaimableBody {
   recipientHash?: string;
 }
 
+// identity_createClaimable is disabled server-side (410 Gone): it used to
+// mutate validator-local state outside the block pipeline, which guarantees
+// a consensus fork/halt on this chain's 2-validator zero-quorum-slack
+// topology, and no signed-transaction replacement exists yet (see
+// rpc/identity_handlers.go's identityRPCDisabledMessage). This route returns
+// the retired response itself, before ever calling the chain, so the
+// failure is instant and self-explanatory instead of a generic upstream
+// error.
+const RETIRED_MESSAGE =
+  'identity_createClaimable is disabled -- it mutated validator-local state outside the block pipeline, guaranteeing a consensus fork/halt on a 2-validator zero-quorum-slack chain; a signed-transaction replacement is pending.';
+
 export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => ({}))) as ClaimableBody;
   const payer = body.payer?.trim();
-  const token = body.token?.trim().toUpperCase() || 'NHB';
   const amountInput = body.amount?.trim() ?? '0';
-  const deadlineHours = typeof body.deadlineHours === 'number' ? body.deadlineHours : 24;
   if (!payer) {
     return NextResponse.json({ error: 'payer is required' }, { status: 400 });
   }
   try {
-    const amount = normalizeAmount(amountInput);
-    const deadline = formatDeadline(deadlineHours);
-    let recipient: string | undefined;
+    // Malformed amounts and missing recipients are still rejected as 400.
+    normalizeAmount(amountInput);
     switch (body.recipientType) {
       case 'email':
-        if (!body.email) {
+        if (!body.email?.trim()) {
           throw new Error('email required');
         }
-        recipient = computeEmailHash(body.email);
         break;
       case 'hash':
         if (!body.recipientHash) {
           throw new Error('recipient hash required');
         }
-        recipient = body.recipientHash;
         break;
       default:
         if (!body.alias) {
           throw new Error('alias required');
         }
-        recipient = body.alias;
         break;
     }
-    const payload = {
-      payer,
-      recipient,
-      token,
-      amount,
-      deadline
-    };
-    const result = await rpcRequest('identity_createClaimable', [payload], true);
-    return NextResponse.json(result, { status: 200 });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 400 });
   }
+  return NextResponse.json(
+    { error: RETIRED_MESSAGE, retired: true, method: 'identity_createClaimable' },
+    { status: 410 },
+  );
 }
