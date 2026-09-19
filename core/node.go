@@ -24,7 +24,6 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/codec"
 	"nhbchain/consensus/potso/evidence"
-	"nhbchain/consensus/potso/penalty"
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
@@ -59,9 +58,6 @@ import (
 	consensusv1 "nhbchain/proto/consensus/v1"
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
-
-	statebank "nhbchain/state/bank"
-	statepotso "nhbchain/state/potso"
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -127,7 +123,6 @@ type Node struct {
 	swapSanctions                swap.SanctionsChecker
 	swapStatusMu                 sync.RWMutex
 	swapOracleLast               int64
-	evidenceMaxAge               uint64
 	paymasterMu                  sync.RWMutex
 	paymasterEnabled             bool
 	paymasterLimits              PaymasterLimits
@@ -156,7 +151,6 @@ type Node struct {
 	transferGasPolicy            TransferGasPolicy
 	potsoEngineMu                sync.Mutex
 	potsoEngine                  *potso.Engine
-	potsoLedger                  *statepotso.Ledger
 	globalCfgMu                  sync.RWMutex
 	globalCfg                    config.Global
 	networkMode                  string
@@ -581,8 +575,6 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetSwapConfig(defaultSwapCfg)
 	stateProcessor.SetSwapVoucherChainID(chain.ChainID())
 
-	pLedger, _ := statepotso.NewLedger(nil, nil)
-
 	node := &Node{
 		db:                   db,
 		state:                stateProcessor,
@@ -598,7 +590,6 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		engagementMgr:        engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapCfg:              defaultSwapCfg,
 		swapSanctions:        swap.DefaultSanctionsChecker,
-		evidenceMaxAge:       evidence.DefaultMaxAgeBlocks,
 		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
 		paymasterLimits:      PaymasterLimits{},
 		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: "ZNHB"},
@@ -634,7 +625,6 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			FeeBpsZNHB: 10,
 		},
 		potsoEngine:         potsoEngine,
-		potsoLedger:         pLedger,
 		txSimulationEnabled: true,
 		globalCfg: config.Global{
 			Governance: config.Governance{
@@ -3299,6 +3289,18 @@ func classifyProposalError(err error) proposalTxDisposition {
 	if errors.As(err, &redeemViolation) {
 		return proposalDispositionSkip
 	}
+	// *evidence.ValidationError is the outcome of evidence.ValidateEvidence
+	// for a TxTypeSubmitEvidence report -- a pure function of the report
+	// itself and the block height, so it is prunable, with one exception: a
+	// report citing a height the chain has not reached yet becomes valid the
+	// moment it does, so that one is skippable.
+	var evidenceViolation *evidence.ValidationError
+	if errors.As(err, &evidenceViolation) {
+		if evidenceViolation.Reason == evidence.RejectReasonFutureHeight {
+			return proposalDispositionSkip
+		}
+		return proposalDispositionPrune
+	}
 	switch {
 	case errors.Is(err, ErrNonceTooLow),
 		errors.Is(err, ErrHeartbeatTooSoon),
@@ -3361,6 +3363,15 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// equally dead. See ErrLendingRefPriceStaleTimestamp's doc comment
 		// (core/lending_tx.go).
 		errors.Is(err, ErrLendingRefPriceStaleTimestamp),
+		// A TxTypeSubmitEvidence payload that does not decode, or whose
+		// reporter is not the account that signed it, is a pure function of
+		// the transaction's own immutable bytes. A report that is already
+		// recorded can never become a first report again (a record only
+		// leaves state once it is too old to be submitted). None of them
+		// can ever succeed later.
+		errors.Is(err, ErrEvidenceInvalidPayload),
+		errors.Is(err, ErrEvidenceReporterMismatch),
+		errors.Is(err, ErrEvidenceAlreadyRecorded),
 		// NHB-AUDIT-R2: a transaction whose MaxBlockHeight or IntentExpiry
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
@@ -3438,6 +3449,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// RegisterIdentity, don't abort the whole block over it. See
 		// ErrIdentityUsernameTaken's doc comment (core/state_transition.go).
 		errors.Is(err, ErrIdentityUsernameTaken),
+		// A TxTypeSubmitEvidence reporter can bond more stake later, and the
+		// evidence index and a reporter's share of it free up as records age
+		// out of the evidence window -- all transient, so skippable rather
+		// than prunable, like the caps and pauses above.
+		errors.Is(err, ErrEvidenceReporterNotBonded),
+		errors.Is(err, evidence.ErrIndexFull),
+		errors.Is(err, evidence.ErrReporterQuota),
 		// A ref price for an epoch the chain has not reached yet becomes
 		// valid the moment that epoch opens, so it is skippable (kept in
 		// the mempool, offered again), not prunable -- mirroring the
@@ -4458,72 +4476,10 @@ func (n *Node) GetBlockByHeight(height uint64) (*types.Block, error) {
 	return n.chain.GetBlockByHeight(height)
 }
 
-// PotsoSubmitEvidence is a client convenience that constructs and submits a
-// signed TxTypeSubmitEvidence transaction, returning a receipt shaped like
-// the old direct-write API's.
-//
-// NHB-AUDIT-C10 follow-up: this used to validate the report and write it
-// straight into a node-local evidence.Store, entirely outside CreateBlock/
-// ApplyTransaction/ValidateBlock -- a different validator that never
-// independently received this exact RPC call would never learn about the
-// evidence at all, a real state-root-divergence/fork risk (see
-// TxTypeSubmitEvidence's doc comment, core/types/transaction.go). Routing
-// through AddTransaction -> mempool -> gossip -> ApplyTransaction makes it a
-// real, network-wide-agreed state transition: see
-// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) for the
-// deterministic execution path every validator now runs identically,
-// including the evidence.ValidateEvidence check this method used to run
-// only against its own local chain height.
-//
-// AddTransaction synchronously simulates the transaction before admitting it
-// to the mempool (see SwapReverseVoucher's identical doc comment for why),
-// so a malformed or forged submission still fails synchronously from this
-// caller's point of view: a validation failure surfaces here as
-// *evidence.ValidationError (via errors.As), reconstructed into a Rejected
-// receipt exactly like the old direct-write path returned, rather than as a
-// bare error.
-func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, error) {
-	if n == nil {
-		return nil, fmt.Errorf("node not initialised")
-	}
-	if err := nativecommon.Guard(n, modulePotso); err != nil {
-		return nil, err
-	}
-	hash, err := ev.CanonicalHash()
-	if err != nil {
-		return nil, err
-	}
-	if record, ok, err := n.PotsoEvidenceByHash(hash); err == nil && ok {
-		return &evidence.Receipt{Hash: hash, Status: evidence.ReceiptStatusIdempotent, Record: record}, nil
-	}
-	payload, err := encodeSubmitEvidenceTransaction(ev)
-	if err != nil {
-		return nil, err
-	}
-	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
-		Type:     types.TxTypeSubmitEvidence,
-		Data:     payload,
-		GasLimit: 0,
-		GasPrice: big.NewInt(0),
-	}
-	receipt := &evidence.Receipt{Hash: hash}
-	if err := n.AddTransaction(tx); err != nil {
-		var verr *evidence.ValidationError
-		if errors.As(err, &verr) {
-			receipt.Status = evidence.ReceiptStatusRejected
-			receipt.Reason = verr
-			return receipt, nil
-		}
-		return nil, err
-	}
-	receipt.Status = evidence.ReceiptStatusAccepted
-	return receipt, nil
-}
-
 // PotsoEvidenceByHash retrieves persisted evidence by canonical hash from
-// the state trie -- see PotsoEvidencePendingHashes'/PotsoSubmitEvidence's
-// doc comments for why this is trie-backed rather than a node-local store.
+// the state trie -- see applySubmitEvidenceTransaction's doc comment for why
+// this is trie-backed rather than a node-local store. Records are dropped once
+// they age out of the evidence window.
 func (n *Node) PotsoEvidenceByHash(hash [32]byte) (*evidence.Record, bool, error) {
 	if n == nil {
 		return nil, false, fmt.Errorf("node not initialised")
@@ -4546,95 +4502,33 @@ func (n *Node) processPendingEvidence(currentHeight uint64) error {
 }
 
 // processPendingEvidenceForState applies every trie-recorded evidence
-// report's penalty against state.
+// report's penalty against state, and drops the records that have aged out of
+// the evidence window (see StateProcessor.processPendingEvidence).
 //
 // NHB-AUDIT-C10 follow-up: this used to list evidence from a node-local
-// evidence.Store fed directly by an RPC handler (PotsoSubmitEvidence),
-// meaning two validators processing the identical block height could
-// legitimately hold different evidence and therefore compute different
-// state roots. The evidence set is now read via nhbstate.Manager from
-// state.Trie itself, written only by applySubmitEvidenceTransaction
-// (core/potso_evidence_tx.go) as part of applying a real, gossiped
-// TxTypeSubmitEvidence transaction -- since every validator applies the
-// identical transaction sequence to reach a given block, this set (and the
-// penalties computed from it below) is now byte-identical on every
-// validator that reaches that block, the same guarantee CreateBlock/
-// ValidateBlock/CommitBlock already provide for every other piece of
-// consensus state.
+// evidence.Store fed directly by an RPC handler, meaning two validators
+// processing the identical block height could legitimately hold different
+// evidence and therefore compute different state roots. The evidence set is
+// now read via nhbstate.Manager from state.Trie itself, written only by
+// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) as part of
+// applying a real, gossiped TxTypeSubmitEvidence transaction. It also no
+// longer keeps anything in this Node: the record of which penalties have been
+// applied is a trie record too, so this is a pure function of state and gives
+// the same result whether it is run while building, validating, committing or
+// replaying a block.
 func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeight uint64) error {
 	if n == nil || state == nil {
 		return nil
 	}
-
-	cfg := penalty.DefaultConfig()
-	cfg.SlashEnabled = true
-	cfg.EquivocationSlashBps = 10000 // 100% slashing on equivocation
-
-	catalog, err := penalty.BuildCatalog(cfg)
-	if err != nil {
-		return fmt.Errorf("build penalty catalog: %w", err)
-	}
-
-	manager := nhbstate.NewManager(state.Trie)
-	slasher := state.bookedSlasher(statebank.NewValidatorSlasher(manager, n.escrowTreasury))
-	engine := penalty.NewEngine(catalog, n.potsoLedger, slasher)
-
-	fromHeight := uint64(0)
-	if currentHeight > n.evidenceMaxAge {
-		fromHeight = currentHeight - n.evidenceMaxAge
-	}
-
-	hashes, err := manager.PotsoEvidencePendingHashes()
-	if err != nil {
-		return fmt.Errorf("list evidence: %w", err)
-	}
-
-	for _, hash := range hashes {
-		rec, ok, err := manager.PotsoEvidenceGetRecord(hash)
-		if err != nil {
-			return fmt.Errorf("load evidence %x: %w", hash, err)
-		}
-		if !ok || rec == nil {
-			continue
-		}
-		if rec.MinHeight() < fromHeight {
-			continue
-		}
-
-		// NHB-AUDIT-C10: refresh this offender's tracked Base weight
-		// from their REAL, current on-chain stake immediately before
-		// computing any penalty against them -- without this, Base
-		// silently defaults to the ledger's floor (nil -> zero in
-		// production), making every slash/decay percentage compute
-		// against zero regardless of actual stake or misconduct. See
-		// EnsureBaseline's doc comment. A missing/unreadable account
-		// is not fatal here -- it just leaves this offender's weight
-		// untouched for this pass, same as before this fix existed.
-		if account, acctErr := manager.GetAccount(rec.Evidence.Offender[:]); acctErr == nil && account != nil && account.Stake != nil {
-			if _, err := n.potsoLedger.EnsureBaseline(rec.Evidence.Offender, account.Stake); err != nil {
-				return fmt.Errorf("potso: ensure baseline weight for %x: %w", rec.Evidence.Offender, err)
-			}
-		}
-		ctx := penalty.Context{
-			BlockHeight:  currentHeight,
-			MissedEpochs: 0,
-		}
-		res, err := engine.Apply(rec, ctx)
-		if err != nil {
-			return fmt.Errorf("apply penalty for %x: %w", rec.Hash, err)
-		}
-		if !res.Idempotent && res.Event != nil {
-			state.AppendEvent(res.Event)
-		}
-	}
-
-	return nil
+	return state.processPendingEvidence(currentHeight)
 }
 
 // PotsoEvidenceList returns trie-recorded evidence filtered by the provided
 // constraints, newest-submitted first -- the same ordering and pagination
 // contract (Offset/Limit/NextOffset) the old node-local evidence.Store.List
-// provided.
+// provided. It reads only the bounded evidence index (at most
+// evidence.MaxPendingRecords live records) and never returns more than
+// evidence.MaxPageLimit records in one page.
 func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, int, error) {
 	if n == nil {
 		return nil, 0, fmt.Errorf("node not initialised")
@@ -4653,6 +4547,9 @@ func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, in
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = evidence.DefaultPageLimit
+	}
+	if limit > evidence.MaxPageLimit {
+		limit = evidence.MaxPageLimit
 	}
 	offset := filter.Offset
 	if offset < 0 {

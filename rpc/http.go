@@ -1814,8 +1814,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleTxWindowStats(recorder, r, req)
 	case "potso_export_epoch":
 		s.handlePotsoExportEpoch(recorder, r, req)
-	case "potso_submitEvidence":
-		s.handlePotsoSubmitEvidence(recorder, r, req)
+	// potso_submitEvidence was removed -- evidence is reported with a signed
+	// TxTypeSubmitEvidence transaction sent through nhb_sendTransaction like
+	// every other signed native transaction (see
+	// rpc/modules/potso_evidence.go). Only the read-only queries remain.
 	case "potso_getEvidence":
 		s.handlePotsoGetEvidence(recorder, r, req)
 	case "potso_listEvidence":

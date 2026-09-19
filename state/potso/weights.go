@@ -241,6 +241,12 @@ func (l *Ledger) ApplyDecay(addr [20]byte, amount *big.Int) (*WeightUpdate, erro
 	return update, nil
 }
 
+// WasPenaltyApplied and MarkPenaltyApplied keep the applied-penalty record in
+// this ledger's own memory. That record belongs to one process: it is never
+// versioned with chain state and is not rolled back when an execution is
+// discarded, so nothing that runs as part of a block may depend on it. Block
+// execution supplies a state-backed record to penalty.Engine (WithRecords)
+// instead; these remain for tools and tests that run the engine standalone.
 func (l *Ledger) WasPenaltyApplied(hash [32]byte, offender [20]byte) bool {
 	key := penaltyKey(hash, offender)
 	l.mu.RLock()
