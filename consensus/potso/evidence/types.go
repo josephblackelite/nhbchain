@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -201,6 +202,13 @@ const (
 	// signed two conflicting votes. Only reachable for TypeEquivocation --
 	// see equivocation.go.
 	RejectReasonInvalidEquivocationProof RejectReason = "invalid_equivocation_proof"
+	// The payload is larger than the fixed bounds below allow (too many
+	// heights, or Details longer than MaxDetailsBytes). Evidence is stored
+	// in state for its whole retention window, so its size is bounded.
+	RejectReasonOversized RejectReason = "oversized"
+	// Timestamp is negative. It is part of the signed digest but is stored
+	// as an unsigned value, so a negative one could never be recorded.
+	RejectReasonInvalidTimestamp RejectReason = "invalid_timestamp"
 )
 
 // ValidationError surfaces deterministic validation failures to callers.
@@ -316,4 +324,31 @@ type Filter struct {
 const (
 	DefaultMaxAgeBlocks uint64 = 8640
 	DefaultPageLimit           = 50
+	// MaxPageLimit caps how many records one list call returns, whatever
+	// Limit the caller asks for.
+	MaxPageLimit = 200
+
+	// MaxPendingRecords is the hard bound on evidence records held in state
+	// at once. A record leaves the index once every height it references is
+	// older than DefaultMaxAgeBlocks (the same window ValidateEvidence
+	// admits), so the index -- and the per-block work that walks it -- can
+	// never grow past this many entries.
+	MaxPendingRecords = 256
+	// MaxRecordsPerReporter bounds how many live records one reporter can
+	// hold, so filling the index takes MaxPendingRecords/MaxRecordsPerReporter
+	// distinct bonded reporters rather than one.
+	MaxRecordsPerReporter = 4
+	// MaxHeightsPerEvidence and MaxDetailsBytes bound the size of a single
+	// stored record. A genuine equivocation proof is well under 1 KiB.
+	MaxHeightsPerEvidence = 64
+	MaxDetailsBytes       = 2048
+)
+
+var (
+	// ErrIndexFull is returned when a new record would push the index past
+	// MaxPendingRecords. It is transient: room returns as old records age out.
+	ErrIndexFull = errors.New("evidence: pending evidence index is full")
+	// ErrReporterQuota is returned when a reporter already holds
+	// MaxRecordsPerReporter live records. Also transient.
+	ErrReporterQuota = errors.New("evidence: reporter already holds the maximum number of live evidence records")
 )
