@@ -100,19 +100,13 @@ live-*.tar.gz
 # Never track: same reasoning as .cursorrules/docs/aprilaudit above.
 CONTINUE.md
 
-# Living infra-hardening checklist -- names exact current gaps (open ports,
-# missing MFA, etc.) across every box. Publishing this would hand an
-# attacker a to-do list. Never track, same reasoning as CONTINUE.md above.
+# Internal security notes -- never track, same reasoning as CONTINUE.md above.
 SECURITY_HARDENING.md
 
-# Internal incident-response runbook -- references this session's own
-# private memory files by name and details the real 2026-09 key-compromise
-# incident. Same reasoning as SECURITY_HARDENING.md above: never track.
+# Internal runbook -- never track, same reasoning as the entry above.
 INCIDENT_RESPONSE.md
 
-# Never commit deploy/state-sync archives or scratch artifacts (see the
-# 2026-09-17 incident: a bundled deploy tarball containing real key
-# material sat in this repo's history for 5 months before being found).
+# Never commit deploy/state-sync archives or scratch artifacts.
 tmp-*.tgz
 tmp-*.tar.gz
 tmp-*.toml

@@ -147,7 +147,10 @@ ClientVersion = ""
   # role grant executed on 2026-08-24 -- a real drift between this repo and
   # what's actually running, only discovered while adding ROLE_ESCROW_REALM_ADMIN
   # here. Reconciled to match live, plus the new role.
-  AllowedRoles = ["MINTER_NHB", "ROLE_SWAP_PAYOUT_ATTESTOR", "ROLE_ESCROW_REALM_ADMIN"]
+  # ROLE_LOYALTY_ADMIN was added (and granted through a role.allowlist proposal)
+  # so the portal's admin backend can pause/resume loyalty programs; it stays on
+  # this list so a future revoke proposal can still be executed.
+  AllowedRoles = ["MINTER_NHB", "ROLE_SWAP_PAYOUT_ATTESTOR", "ROLE_ESCROW_REALM_ADMIN", "ROLE_LOYALTY_ADMIN"]
   AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps", "market.flatFeeWei"]
   BlockTimestampToleranceSeconds = 5
 
