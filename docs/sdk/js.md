@@ -1,99 +1,124 @@
 # JavaScript & TypeScript SDK Guide
 
-This guide explains how to install and use the NHB Chain JavaScript/TypeScript SDK to build secure, idempotent integrations.
+The TypeScript code lives in `sdk/ts/` and the generated gRPC stubs in
+`clients/ts/`. There is no published npm package: `sdk/ts/package.json` contains
+only `{"type": "module"}` (no name, version or dependencies), and nothing in the
+repository defines `@nhbchain/sdk`. Use the sources directly from a checkout.
 
-## Installation
+`sdk/ts/src/wallet.ts` and `sdk/ts/src/identityGateway.ts` import
+`@scure/base`, `@noble/hashes`, `@noble/secp256k1` (wallet) and Node's `crypto`
+(identity gateway). The repository root `package.json` declares the three npm
+packages. Its only SDK script is:
 
 ```bash
-npm install @nhbchain/sdk
-# or
-yarn add @nhbchain/sdk
+npm run test:sdk:ts   # tsx --test sdk/ts/test/wallet.test.ts
 ```
 
-## Authentication
+## `WalletClient` (`sdk/ts/src/wallet.ts`)
 
-The SDK authenticates every RPC call with HMAC signatures.
-
-```ts
-import { NhbClient } from "@nhbchain/sdk";
-
-const client = new NhbClient({
-  endpoint: "https://rpc.testnet.nhbcoin.net",
-  apiKey: process.env.NHB_API_KEY!,
-  apiSecret: process.env.NHB_API_SECRET!,
-});
-
-const account = await client.accounts.get("merchant-123");
-```
-
-- API keys are issued with least privilege scopes (e.g., `payments:read`, `escrow:write`).
-- Secrets should be stored in a vault and injected at runtime.
-
-## HMAC Signing & Idempotency
-
-The client signs requests using `HMAC-SHA256` with the `apiSecret` and injects headers:
-
-- `X-NHB-APIKEY`
-- `X-NHB-SIGNATURE`
-- `X-NHB-TIMESTAMP`
-- Optional `Idempotency-Key`
-
-The SDK exposes helpers to generate idempotency keys tied to business identifiers:
+`WalletClient` builds and submits NHB and ZapNHB (ZNHB) transfers over JSON-RPC.
+It is both the default export and a named export.
 
 ```ts
-import { createIdempotencyKey } from "@nhbchain/sdk/idempotency";
+import WalletClient from './sdk/ts/src/wallet'; // adjust the relative path
 
-const key = createIdempotencyKey({
-  namespace: "merchant-123",
-  reference: order.id,
+const client = new WalletClient({
+  baseUrl: process.env.NHB_RPC_URL!,      // for example http://localhost:8080
+  authToken: process.env.NHB_RPC_TOKEN!,  // bearer token for nhb_sendTransaction
 });
 
-await client.payments.create({
-  amount: "25.00",
-  currency: "USD",
-  idempotencyKey: key,
+const { transaction, response } = await client.sendTransfer({
+  privateKey: process.env.SENDER_KEY!,    // 32-byte hex (0x prefix optional) or Uint8Array
+  recipient: 'nhb1recipient...',
+  amount: 1000000000000000000n,
+  asset: 'ZNHB',                          // 'NHB' or 'ZNHB'
 });
 ```
 
-## Retries & Error Handling
+Behavior:
 
-- Automatic retries with exponential backoff (max 3 attempts) on transient errors (`429`, `5xx`).
-- Circuit breaker trips when error rate exceeds 20% in 1 minute; manual reset via `client.resetBreaker()`.
-- Structured errors contain `code`, `message`, and optional `traceId` for Grafana Tempo lookup.
+- Constructor options: `baseUrl` (required), `authToken`, `fetchImpl` (defaults to
+  `globalThis.fetch`; one must exist), `chainId` (default `0x4e4842`),
+  `gasLimit` (default `25000`), `gasPrice` (default `1`). Gas values must be
+  greater than zero.
+- `sendTransfer` options: `recipient`, `amount`, `privateKey`, `asset`
+  (`'NHB'` or `'ZNHB'`; **the default is `'ZNHB'`**), and optional `gasLimit` and
+  `gasPrice`. The amount must be positive.
+- The recipient must be a bech32 address with the `nhb` prefix and 20 data bytes.
+  A string that does not decode as bech32, or decodes with a different prefix,
+  throws `Invalid NHB address.`; a valid `nhb` bech32 string whose data is not 20
+  bytes throws `Expected a 20-byte address.` (`sdk/ts/src/wallet.ts:31-46`).
+- Other input errors (`sdk/ts/src/wallet.ts`): `Transfer amount must be positive.`,
+  `Private key must be 32 bytes.` (a `Uint8Array` of the wrong length),
+  `Expected a 32-byte hex private key.` (a hex string of the wrong length),
+  `Invalid hex character in private key.`, and `Gas limit must be greater than
+  zero.` / `Gas price must be greater than zero.`
+- It derives the sender address from the key (keccak-256 of the public key, last
+  20 bytes, bech32 with prefix `nhb`), reads the nonce with `nhb_getBalance` (no
+  token), signs, and submits with `nhb_sendTransaction`.
+- Transfer type constants: `TRANSFER_TYPE_NHB = 0x01`,
+  `TRANSFER_TYPE_ZNHB = 0x10`.
+- `sendTransfer` throws if `authToken` is not set (`Method nhb_sendTransaction
+  requires an authorization token.`), and on a non-2xx HTTP status or a JSON-RPC
+  `error`.
+- It returns `{ transaction, response }`. `transaction` is the signed payload
+  (`chainId`, `type`, `nonce`, `to` and `data` as base64, `value`, `gasLimit`,
+  `gasPrice`, `r`, `s`, `v` as decimal strings). `response` is the string the
+  node returned, which is `0x` plus the transaction hash.
 
-## Tracing
+**Known signing mismatch.** The wallet signs
+`sha256` of a JSON string built by `serializeTxForHash` in `wallet.ts`. For any
+transaction type above zero, including both transfer types, the node computes its
+signing hash differently: `Transaction.Hash` in `core/types/transaction.go` hashes
+the `NHB_TX_V3_MAINNET` binary encoding, and `Transaction.From` recovers the
+sender from that hash. A signature produced over the JSON hash therefore does not
+recover to the sender's address on the node. The unit tests
+(`sdk/ts/test/wallet.test.ts`) run against a mock server and do not check the
+signature against the node. Until this is reconciled, use the Go SDK
+(`docs/sdk/go.md`) or the `nhb-cli send-nhb` / `send-znhb` commands to send
+transfers.
 
-The client propagates W3C trace headers and supports manual span creation:
+## `IdentityGatewayClient` (`sdk/ts/src/identityGateway.ts`)
 
 ```ts
-const span = client.tracer.startSpan("checkout.createPayment");
-await client.withSpan(span, () => client.payments.create({...}));
-span.end();
+import IdentityGatewayClient from './sdk/ts/src/identityGateway';
+
+const gateway = new IdentityGatewayClient({
+  baseUrl: 'https://identity.example',
+  apiKey: process.env.ID_API_KEY!,
+  apiSecret: process.env.ID_API_SECRET!,
+});
+
+await gateway.registerEmail('user@example.com', 'alias-hint', { idempotencyKey: 'k1' });
+await gateway.verifyEmail('user@example.com', '123456');
+await gateway.bindEmail('alias-id', 'user@example.com', true);
 ```
 
-## Example Apps
+It POSTs to `/identity/email/register`, `/identity/email/verify` and
+`/identity/alias/bind-email`. Each request is signed exactly like the Go client:
 
-Clone the sample repositories and follow `/docs/examples/README.md` to run:
+- `X-API-Key`, `X-API-Timestamp` (Unix seconds) and `X-API-Signature`, where the
+  signature is hex `HMAC-SHA256(apiSecret, "POST\n" + path + "\n" +
+  hex(sha256(body)) + "\n" + timestamp)`;
+- an optional `Idempotency-Key` header from `options.idempotencyKey`.
 
-- `examples/merchant-js`
-- `examples/escrow-js`
-- `examples/swap-js`
+A non-2xx response throws an `Error` (`identity gateway <status>: <body>`) with
+`status` and `body` properties. The `clock` option (milliseconds) replaces
+`Date.now` for tests. The server's timestamp tolerance and idempotency replay are
+described in [the Go SDK guide](./go.md#identity-gateway-client).
 
-## Testing Against Testnet
+## Generated gRPC stubs (`clients/ts`)
 
-```ts
-const health = await client.system.health();
-console.log(health.status);
-```
+`clients/ts/` holds code generated by `protoc-gen-ts_proto` with
+`outputServices=grpc-js` (`buf.gen.yaml`): `consensus/v1`, `lending/v1`, `gov/v1`,
+`swap/v1`, `network/v1`, `fees/v1`, `pos/` and `tx/`. `clients/ts/escrow/dispute.ts`
+is hand-written and talks to the JSON-RPC endpoint. For a walk-through of the
+lending stub see `sdk/examples/lending/ts/README.md`. The POS examples in
+`sdk/pos/examples/` (`create_intent.go`, `submit_and_watch.ts`, `subscriber.ts`)
+show intent creation and finality subscription.
 
-Run integration tests with `npm test` after configuring environment variables:
+## Examples workspace
 
-- `NHB_API_KEY`
-- `NHB_API_SECRET`
-- `NHB_ENV=testnet`
-
-## Security Notes
-
-- Rotate API secrets every 90 days.
-- Redact sensitive fields when logging (`client.enableRedaction()` can help mask payloads).
-- Monitor `nhb_rpc_auth_failure_total` in Grafana for brute-force attempts.
+`examples/` is a separate workspace (`examples/package.json`); it includes
+`examples/lib-sdk`, a small helper package named `@nhb/examples-lib-sdk` used by
+those example apps. It is example code, not part of the SDK.

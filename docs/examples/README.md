@@ -1,104 +1,64 @@
 # Example Applications
 
-This guide shows how to run the NHB Chain example applications against the public testnet. Each project demonstrates authentication, idempotency, and tracing best practices from the SDKs.
+This page indexes what is actually in the `examples/` directory of this repository and how to run it. Every path below exists in the repository; there is no separate examples repository to clone.
 
-## Prerequisites
+## Two kinds of examples
 
-- Node.js 18+ and Go 1.21+
-- Docker and Docker Compose
-- NHB Chain API credentials with least-privilege scopes for the relevant product areas
-- Access to the testnet RPC endpoint (`https://rpc.testnet.nhbcoin.net`)
+1. **Go and TypeScript snippets** that talk to the chain directly (JSON-RPC, or the consensus gRPC service through `sdk/consensus`, `sdk/lending`).
+2. **Web demos** (Next.js and Express) that call HTTP services such as an escrow, swap or creator REST gateway. Those HTTP services are not implemented in this repository, so a demo of this kind needs a compatible service that you supply, and its request signing cannot be checked against the code here. See [escrow-checkout.md](./escrow-checkout.md) for a worked example of that boundary.
 
-## Repository Layout
+## Layout
 
-- `examples/merchant-js`: browser checkout flow using the JS SDK
-- `examples/escrow-js`: custodial escrow workflow with automated release
-- `examples/swap-js`: token swap integration demonstrating idempotent order placement
-- `examples/merchant-go`: backend service for merchant settlement
-- `examples/escrow-go`: escrow orchestration microservice
-- `examples/swap-go`: Go-based swap engine with Prometheus metrics
+| Path | What it is |
+| --- | --- |
+| `examples/package.json` | Yarn workspace root (`@nhb/examples`, `packageManager` `yarn@1.22.19`). Workspaces: `lib-sdk`, `apps/*`, `wallet-lite`, `p2p-mini-market`, `merchant-loyalty-console`, `escrow-checkout/*`, `creator-studio`. |
+| `examples/scripts/dev.js` | `yarn dev` runs the `dev` script of three workspaces: `@nhb/status-dashboard`, `@nhb/network-monitor` and `@nhb/p2p-mini-market`. |
+| `examples/apps/status-dashboard`, `examples/apps/network-monitor` | Small dev servers (`dev-server.js`). Their ports come from `STATUS_DASHBOARD_PORT` and `NETWORK_MONITOR_PORT` in `examples/.env.example` (4300 and 4301). |
+| `examples/lib-sdk` | Shared JS helpers used by the web demos. |
+| `examples/wallet-lite`, `examples/p2p-mini-market`, `examples/merchant-loyalty-console`, `examples/creator-studio` | Next.js demos, each with its own README. |
+| `examples/escrow-checkout/widget`, `examples/escrow-checkout/merchant-demo` | React widget and Express merchant server, see [escrow-checkout.md](./escrow-checkout.md). |
+| `examples/freelance-board`, `examples/lending-dapp` | Next.js projects that are not listed in the workspace `workspaces` array; install and run them from their own directory. |
+| `examples/docs/go/first_transaction`, `examples/docs/go/price_oracle_publish`, `examples/docs/ts/*.ts` | Go and TypeScript snippets used by the developer docs. |
+| `examples/docs/ops/read_pauses`, `pause_toggle`, `quota_dump`, `swap_pause_inspect` | Operator helpers, see below. |
+| `examples/clients/go/basic_consensus_client`, `examples/clients/ts/basic_consensus_client.ts` | Minimal consensus gRPC client. |
+| `examples/txs/go/borrow.go`, `examples/txs/ts/supply.ts`, `examples/lending/quickstart.ts`, `examples/swap/redeem.ts`, `examples/gov/`, `examples/queries/` | Single-purpose transaction, query and governance snippets. |
+| `examples/cookbook/go/main.go`, `examples/cookbook/js/index.mjs` | The cookbook scripts. |
+| `examples/gateway/openapi.yaml`, `examples/postman/*.json` | An OpenAPI description and Postman collections. |
+| `examples/compose/` | Docker Compose files, including `mininet/` (see `docs/cookbooks/operators.md`) and `lendingd.yml`. |
 
-## Environment Setup
-
-1. Clone the repository and install dependencies:
-
-   ```bash
-   git clone https://github.com/nhbchain/examples.git
-   cd examples
-   npm install && go mod tidy
-   ```
-
-2. Copy the sample environment file and configure secrets:
-
-   ```bash
-   cp .env.example .env
-   # Set NHB_API_KEY, NHB_API_SECRET, NHB_ENV=testnet
-   ```
-
-3. Start shared services (Redis, Postgres, mock webhooks):
-
-   ```bash
-   docker compose up -d
-   ```
-
-## Network Alignment
-
-Before running any demo, confirm your environment variables point at the
-current testnet release:
+## Running the web demos
 
 ```bash
-export NHB_ENV=testnet
-export NHB_RPC_URL=https://rpc.testnet.nhbcoin.net
-export NHB_CHAIN_ID=nhb-testnet-1
+cd examples
+cp .env.example .env
+yarn install
+yarn dev
 ```
 
-Use `curl $NHB_RPC_URL/healthz` and `./nhb-cli status --env $NHB_ENV` to verify
-connectivity. Mismatched endpoints or chain IDs will cause idempotency checks
-and signature verification to fail.
+`.env.example` defines `NHB_RPC_URL`, `NHB_RPC_TOKEN`, `NHB_WS_URL`, `NHB_API_URL`, `NHB_CHAIN_ID`, `NHB_API_KEY`, `NHB_API_SECRET`, `NHB_WALLET_PRIVATE_KEY`, `NHB_WALLET_ADDRESS` and the two port variables. Its values are demo placeholders. Note that the file sets `NHB_CHAIN_ID` to a decimal value that is not the chain ID the node accepts (`0x4e4842`, `types.NHBChainID()`; see the [wallet builder guide](../sdk/wallets.md)); set it to the real chain ID before signing anything with these demos.
 
-## Running the JavaScript Apps
+To run a single demo, use its own script, for example `yarn workspace @nhb/escrow-merchant-demo dev`. The `lint` and `test` scripts of the two `escrow-checkout` packages are placeholders that only print a TODO.
+
+## Running the Go snippets
+
+The Go programs are part of the repository's main Go module (`go.mod`), so run them from the repository root:
 
 ```bash
-cd examples/merchant-js
-npm run dev
+go run ./examples/docs/go/first_transaction
 ```
 
-- Visit `http://localhost:3000` for the merchant checkout demo.
-- Use the provided test cards; the app calls the RPC with HMAC auth and logs trace IDs to the console.
+`first_transaction` reads the consensus gRPC address from the `CONSENSUSD_GRPC_ADDR` environment variable (`examples/docs/go/first_transaction/main.go`). See each file for the other environment variables it reads. For the gRPC transport requirements (shared secret or client certificate, `--allow-insecure` on a loopback listener) see [`docs/sdk/go.md`](../sdk/go.md).
 
-For the escrow and swap apps, run `npm run start` in their respective directories. Each app exports Prometheus metrics at `http://localhost:9464/metrics`.
+## Operator helpers
 
-## Running the Go Apps
+All four read the consensus data directory (`--db`, default `./nhb-data`) and the consensus gRPC endpoint (`--consensus`, default `localhost:9090`).
 
-```bash
-cd examples/merchant-go
-NHB_API_KEY=... NHB_API_SECRET=... go run ./cmd/server
-```
+- `go run ./examples/docs/ops/read_pauses` dumps the `system/pauses` map.
+- `go run ./examples/docs/ops/pause_toggle --module <name> --state pause` stages a `gov.v1` `MsgSetPauses` transaction; use `--state resume` to lift the pause. Modules: `lending`, `swap`, `escrow`, `trade`, `loyalty`, `potso`, `transfer_nhb`, `transfer_znhb`. Extra flags: `--governance` (governance gRPC endpoint, default `localhost:50061`) and `--authority` (governance authority address).
+- `go run ./examples/docs/ops/quota_dump --module <name> --address nhb1...` inspects quota usage for one address (`--epoch`, `--epoch-seconds` optional).
+- `examples/docs/ops/swap_pause_inspect` prints the on-chain `pauses.swap` value and then calls `GET /v1/stable/status` on an off-chain HTTP service whose base URL is set by a flag (default `http://localhost:7074`). That service is not part of this repository, so the second half of the output needs one you provide.
 
-- Health endpoint: `GET /healthz`
-- Metrics endpoint: `GET /metrics`
-- Structured logs are emitted to stdout in JSON format.
+## Related pages
 
-For automated tests:
-
-```bash
-go test ./...
-```
-
-## Observability Hooks
-
-- All apps emit traces via OpenTelemetry; configure the OTLP endpoint with `OTEL_EXPORTER_OTLP_ENDPOINT`.
-- Logs include redaction utilities to avoid leaking secrets.
-- Alerts can be simulated by running the `scripts/fire-alerts.sh` script to raise sample PagerDuty events.
-
-## Troubleshooting
-
-- Verify API credentials with `curl https://rpc.testnet.nhbcoin.net/healthz`.
-- If HMAC verification fails, ensure system clocks are in sync (use `chronyd` or `ntpd`).
-- For persistent errors, capture trace IDs from logs and inspect in Grafana Tempo.
-
-## Next Steps
-
-- Deploy the examples to staging to validate CI/CD pipelines.
-- Integrate dashboards from `/docs/ops/observability.md` to monitor sample traffic.
-- Contribute improvements back via pull requests following the standard review checklist.
+- [overview.md](./overview.md), [cookbook.md](./cookbook.md), [wallets.md](./wallets.md), [wallet-lite.md](./wallet-lite.md), [creator-studio.md](./creator-studio.md), [freelance-board.md](./freelance-board.md), [p2p-mini-market.md](./p2p-mini-market.md).
+- [`docs/sdk/examples.md`](../sdk/examples.md) for the SDK example programs.

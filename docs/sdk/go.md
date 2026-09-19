@@ -1,119 +1,249 @@
 # Go SDK Guide
 
-Use the NHB Chain Go SDK to build backend services with robust authentication, tracing, and idempotency support.
+The Go SDK lives in the `sdk/` directory of this repository. It is a separate Go
+module, `nhbchain/sdk` (`sdk/go.mod`), that depends on the root module `nhbchain`
+through `replace nhbchain => ../`. The repository's `go.work` lists both modules
+(`.` and `./sdk`). Neither module path contains a host name, so the SDK is used
+from inside this repository's workspace; it is not fetched with `go get`.
 
-## Installation
+## Packages
 
-```bash
-go get github.com/nhbchain/go-sdk
-```
+| Import path | What it is |
+| --- | --- |
+| `nhbchain/sdk/go/client` | JSON-RPC client that builds, signs and submits NHB and ZapNHB (ZNHB) transfers, and looks up an account nonce. |
+| `nhbchain/sdk/consensus` | gRPC client for `consensusd` (`ConsensusService` and `QueryService`), plus envelope helpers `NewTx`, `Sign`, `Submit`. |
+| `nhbchain/sdk/network` | gRPC client for the `p2pd` `NetworkService`. |
+| `nhbchain/sdk/lending` | gRPC client for the lending service, plus builders and a signer for the lending transactions. |
+| `nhbchain/sdk/gov` | gRPC client for the governance service (`gov.v1` `Query` and `Msg`). |
+| `nhbchain/sdk/swap` | gRPC client for `swap.v1` `SwapService`. No server for this service is registered anywhere in this repository. |
+| `nhbchain/sdk/go/identity/gateway` | HTTP client for the identity gateway's email endpoints, with HMAC request signing. |
 
-Initialize the client in your application:
+`sdk/internal/dial` holds the shared dial options. It is an `internal` package,
+so code outside `sdk/` uses the option variables re-exported by each client
+package (for example `consensus.WithInsecure`).
+
+## JSON-RPC transfers: `sdk/go/client`
 
 ```go
 package main
 
 import (
-    "context"
-    "log"
+	"context"
+	"encoding/hex"
+	"log"
+	"math/big"
+	"os"
+	"strings"
+	"time"
 
-    nhb "github.com/nhbchain/go-sdk"
+	"nhbchain/crypto"
+	"nhbchain/sdk/go/client"
 )
 
 func main() {
-    client, err := nhb.NewClient(nhb.Config{
-        Endpoint:  "https://rpc.testnet.nhbcoin.net",
-        APIKey:    getenv("NHB_API_KEY"),
-        APISecret: getenv("NHB_API_SECRET"),
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-    account, err := client.Accounts.Get(context.Background(), "merchant-123")
-    if err != nil {
-        log.Fatal(err)
-    }
+	keyBytes, err := hex.DecodeString(strings.TrimPrefix(os.Getenv("SENDER_KEY_HEX"), "0x"))
+	if err != nil {
+		log.Fatalf("decode key: %v", err)
+	}
+	key, err := crypto.PrivateKeyFromBytes(keyBytes)
+	if err != nil {
+		log.Fatalf("parse key: %v", err)
+	}
 
-    log.Printf("balance: %s", account.Balance)
+	rpc, err := client.New(
+		os.Getenv("NHB_RPC_URL"), // for example http://localhost:8080
+		client.WithAuthToken(os.Getenv("NHB_RPC_TOKEN")),
+	)
+	if err != nil {
+		log.Fatalf("new client: %v", err)
+	}
+
+	tx, hash, err := rpc.SendZNHBTransfer(ctx, key, "nhb1recipient...", big.NewInt(1000))
+	if err != nil {
+		log.Fatalf("send: %v", err)
+	}
+	log.Printf("submitted nonce=%d hash=%s", tx.Nonce, hash)
 }
 ```
 
-## Authentication & Signing
+Behavior, from `sdk/go/client/tx.go`:
 
-- Requests use HMAC-SHA256 signatures computed over the HTTP method, path, timestamp, and payload.
-- Signatures are attached via headers `X-NHB-APIKEY`, `X-NHB-SIGNATURE`, and `X-NHB-TIMESTAMP`.
-- The SDK enforces a 5-minute timestamp skew window.
+- `client.New(endpoint, opts...)` requires a non-empty endpoint. Options:
+  `WithHTTPClient`, `WithAuthToken`, `WithChainID`, `WithGasLimit`, `WithGasPrice`.
+- Defaults: chain ID `types.NHBChainID()` (`0x4e4842`), gas limit `25000`, gas
+  price `1`.
+- `SendNHBTransfer` (transaction type `TxTypeTransfer`, `0x01`) and
+  `SendZNHBTransfer` (`TxTypeTransferZNHB`, `0x10`) take
+  `(ctx, key, recipient, amount, ...TxOption)`. `TxWithGasLimit` and
+  `TxWithGasPrice` override the defaults for one call.
+- The recipient is decoded with `crypto.DecodeAddress`, so it must be a bech32
+  address. The amount must be greater than zero.
+- Each call fetches the sender's nonce with `nhb_getBalance` (no token needed),
+  signs with `Transaction.Sign`, then submits with `nhb_sendTransaction`. That
+  call needs the bearer token; without one the client returns
+  `client: auth token required for nhb_sendTransaction`.
+- Both methods return the signed `*types.Transaction` and the string the node
+  returned, which is `0x` plus the transaction hash. Acceptance into the mempool
+  is not confirmation; poll `nhb_getTransactionReceipt`.
+- `AccountNonce(ctx, address)` is exported for callers that build other
+  transaction types.
 
-## Idempotency Helpers
+## gRPC clients and TLS
 
-```go
-key := nhb.IdempotencyKey{
-    Namespace: "merchant-123",
-    Reference: orderID,
-}.String()
+`consensus`, `network`, `lending`, `gov` and `swap` share the same shape:
+`Dial(ctx, target, opts ...DialOption)`, `New(conn)` to wrap an existing
+`*grpc.ClientConn`, `Close()`, and (except `gov`, which has `Query()` and `Msg()`)
+`Raw()` for the generated client. `Dial` adds the OpenTelemetry gRPC interceptors
+(`otelgrpc`).
 
-payment, err := client.Payments.Create(ctx, nhb.CreatePaymentRequest{
-    Amount:         "25.00",
-    Currency:       "USD",
-    IdempotencyKey: key,
-})
-```
+Transport defaults (`sdk/internal/dial/options.go`): when you pass no transport
+option, the client uses TLS with a minimum version of TLS 1.2 and the host's
+system certificate pool. Plaintext must be requested explicitly with
+`WithInsecure()`. The available options are re-exported in each package:
 
-The helper normalizes whitespace, truncates long references, and includes a SHA-256 checksum.
+- `WithTransportCredentials(creds)`
+- `WithTLSConfig(*tls.Config)` (clones the config and raises the minimum version
+  to TLS 1.2 if lower)
+- `WithTLSFromFiles(certPath, keyPath, caPath)` and
+  `WithSystemCertPool(serverName)`, which both return `(DialOption, error)`.
+  The cert and key must be given together; the CA path is optional.
+- `WithInsecure()`
+- `WithContextDialer(fn)`, `WithPerRPCCredentials(creds)`, `WithDialOptions(...)`
 
-## Retries & Timeouts
+## Consensus client: `sdk/consensus`
 
-- Default timeout: 10 seconds per request; override with `client.WithTimeout()`.
-- Retries: exponential backoff with jitter, max 4 attempts on retryable errors (`context.DeadlineExceeded`, `HTTP 429`, `HTTP >= 500`).
-- Hooks: implement `RetryObserver` to emit custom metrics.
+`consensus.Client` methods: `SubmitTransaction`, `SubmitEnvelope`, `GetHeight`,
+`GetBlockByHeight`, `GetValidatorSet`, `GetMempool`, `QueryState`, `QueryPrefix`,
+`SimulateTx`, `Raw()` and `QueryClient()`.
 
-## Tracing Integration
+`consensusd` listens for gRPC on `127.0.0.1:9090` by default (`--grpc` flag,
+`cmd/consensusd/main.go`). Its server requires either a shared secret or a
+client certificate (`buildConsensusServerSecurity`). The shared secret is read
+from the `authorization` request metadata (or the header named by
+`NetworkSecurity.AuthorizationHeader`), as either the bare secret or
+`Bearer <secret>` (`network.NewTokenAuthenticator`); attach it with
+`consensus.WithPerRPCCredentials`. Plaintext is accepted only when the config
+sets `AllowInsecure`, the process runs with `--allow-insecure`, and the listener
+is on a loopback address. In `consensusd`, the same flag and config setting also
+gate its own plaintext connection to `p2pd` (`buildNetworkDialOptions`,
+`cmd/consensusd/main.go:543-620`).
 
-The SDK integrates with OpenTelemetry:
+### State queries
 
-```go
-import "go.opentelemetry.io/otel"
+`QueryState(ctx, namespace, key)` and `QueryPrefix(ctx, namespace, prefix)` are
+served by `core/query_router.go` and `core/node.go`. The supported queries are:
 
-tracer := otel.Tracer("nhbchain-go-sdk")
-ctx, span := tracer.Start(ctx, "payments.create")
-defer span.End()
+| Namespace | `QueryState` key | `QueryPrefix` prefix |
+| --- | --- | --- |
+| `lending` | `markets`; `positions/<address>` (bech32 or `0x` hex) | `markets` (or empty) |
+| `swap` | `vouchers/<id>`; `oracles` | none |
+| `gov` (or `governance`) | `proposals/<id>`; `tallies/<id>`; `params` | `params` |
 
-_, err := client.Payments.Create(ctx, req)
-if err != nil {
-    span.RecordError(err)
-}
-```
+`proposals/latest` is not usable today: `queryGovernanceState` matches every key that starts
+with `proposals/` and parses the remainder as an unsigned integer, so `latest` fails with
+`gov: invalid proposal id` (`core/query_router.go:163-171`) before the node's fallback handler
+(`core/node.go:8684`) is reached. Anything else returns the error `query: not supported`. `positions/<address>` returns a JSON
+array of `{ "poolId": ..., "account": ... }`, one entry per pool where the
+address has an account.
 
-Trace context is propagated downstream so service spans align with RPC traces in Tempo.
+### Transaction envelopes
 
-## Logging & Redaction
+`consensus.NewTx(payload, nonce, chainID, feeAmount, feeDenom, feePayer, memo)`
+wraps a protobuf message in a `TxEnvelope`, `consensus.Sign(envelope, key)`
+signs `sha256(proto.Marshal(envelope))`, and `Client.SubmitEnvelope` sends it.
+The server verifies that signature and then converts the envelope to a
+transaction in `consensus/codec/codec.go` (`TransactionFromEnvelope`). It
+accepts only these payload types: `consensus.v1.Transaction`, the POS messages
+(`MsgAuthorizePayment`, `MsgCapturePayment`, `MsgVoidPayment` and the
+registry messages) and the swap `MsgPayoutReceipt`. Any other payload, including
+the lending `MsgSupply` produced by `lending.NewMsgSupply`, is rejected with
+`envelope: unsupported module payload type`. To move lending funds, build and
+sign a native transaction with the lending package (next section).
 
-- Structured logs via `zap` or `log/slog` include `trace_id`, `request_id`, and sanitized payload excerpts.
-- Enable payload redaction with `client.SetRedactor(nhb.DefaultRedactor())` to mask PANs and secrets.
+## Lending: `sdk/lending`
 
-## Example Applications
+Read calls on `lending.Client`: `GetMarket`, `ListMarkets`, `GetPosition`.
 
-Reference the Go sample apps for end-to-end flows:
+Mutation calls (`SupplyAsset`, `WithdrawAsset`, `BorrowAsset`, `RepayAsset`,
+`DepositCollateral`, `WithdrawCollateral`, `Liquidate`) do not sign anything.
+Each takes a `signedTxJSON` string, an already-signed native transaction, and
+returns the transaction hash the node returned. The lending service relays that
+JSON to the node's `nhb_sendTransaction` unchanged (see the comment on
+`signed_tx_json` in `proto/lending/v1/lending.proto`); the signer recovered from
+the signature is the account acting. The other request fields are used for
+validation and logging.
 
-- `examples/merchant-go`
-- `examples/escrow-go`
-- `examples/swap-go`
+Build and sign the transaction with `sdk/lending/txbuilder.go`:
 
-Each example includes Docker Compose files to start dependencies and run against testnet.
+- `NewSupplyTx`, `NewWithdrawTx`, `NewBorrowTx`, `NewRepayTx`,
+  `NewDepositCollateralTx`, `NewWithdrawCollateralTx`
+  `(chainID, nonce, poolID, amount, ...TxOption)`, and
+  `NewLiquidateTx(chainID, nonce, poolID, borrower, ...TxOption)`. They produce
+  transaction types `TxTypeLendingSupplyNHB` (`0x13`), `TxTypeLendingWithdrawNHB`
+  (`0x14`), `TxTypeLendingBorrowNHB` (`0x17`), `TxTypeLendingRepayNHB` (`0x18`),
+  `TxTypeLendingDepositZNHB` (`0x15`), `TxTypeLendingWithdrawZNHB` (`0x16`) and
+  `TxTypeLendingLiquidate` (`0x1D`). Amounts are positive base-10 integer
+  strings. Defaults: gas limit `50000`, gas price `1`; `WithGasLimit` and
+  `WithGasPrice` override them. For the six supply, withdraw, borrow, repay
+  and collateral builders, a pool ID of empty or `default` produces no payload and any other
+  pool ID is sent as JSON `{"poolId": "..."}` (`sdk/lending/txbuilder.go:56-62`).
+  `NewLiquidateTx` always sends a payload, JSON `{"poolId": "...", "borrower": "..."}`, with an
+  empty pool ID replaced by `default` (`sdk/lending/txbuilder.go:154-166`).
+- `SignAndEncode(tx, ecdsaKey)` signs and returns the JSON string to pass as
+  `signedTxJSON`. `SenderAddress(key)` returns the bech32 account string.
+- `lending.NewMsgSupply`, `NewMsgBorrow`, `NewMsgRepay` and `NewMsgLiquidate`
+  only validate and build protobuf messages; they do not create native
+  transactions (see the envelope note above).
 
-## Testing & CI
+`sdk/examples/lending/go/main.go` is a complete example: it looks up the nonce
+through `sdk/go/client`, builds and signs supply, borrow and repay transactions,
+and relays each through the lending service. Its flags are `-lending-endpoint`,
+`-node-endpoint`, `-key`, `-market`, `-supply`, `-borrow`, `-repay`, `-insecure`
+and `-timeout`.
 
-```bash
-NHB_API_KEY=... NHB_API_SECRET=... go test ./...
-```
+The lending service's mutation RPCs require authentication (an API token in the
+`authorization` or `x-api-token` metadata, or an mTLS client certificate) when
+either is configured (`services/lending/server/auth.go`). Its default listen
+address is `:50053` (`services/lendingd/config/config.go`).
 
-- Use the provided `httptest` mocks under `sdk/testutil` for offline tests.
-- Capture coverage reports and ship metrics to Prometheus using the `sdk/metrics` helper.
-- gRPC clients in `nhbchain/sdk` now require explicit dial options. Connections default to TLS using the host certificate pool; pass `consensus.WithInsecure()` (or the equivalent helper in other SDK packages) when developing against local plaintext endpoints.
+## Governance and swap clients
 
-## Security Practices
+`gov.Client`: `GetProposal`, `ListProposals(ctx, status, pageSize, pageToken)`,
+`GetTally`, `SubmitProposal`, `Vote`, `Deposit`, `SetPauses`, and `Query()` /
+`Msg()` for the generated clients. Message constructors: `NewMsgSubmitProposal`,
+`NewMsgVote`, `NewMsgDeposit`, `NewMsgSetPauses`.
 
-- Store secrets in environment variables or KMS-managed secrets, never in source control.
-- Rotate API credentials at least quarterly.
-- Monitor `nhb_rpc_auth_failure_total` and `nhb_sdk_idempotency_conflict_total` metrics for anomalies.
+`swap.Client`: `GetPool`, `ListPools`, `SwapExactIn`, `SwapExactOut`, and
+`NewMsgSwapExactIn` / `NewMsgSwapExactOut`.
+
+`network.Client`: `Gossip`, `GetView`, `ListPeers`, `DialPeer`, `BanPeer`,
+`Raw()`. `p2pd` serves this API on `127.0.0.1:9091` by default (`--grpc`).
+
+## Identity gateway client
+
+`gateway.New(baseURL, apiKey, apiSecret, opts...)` (options `WithHTTPClient`,
+`WithClock`) returns a client with `RegisterEmail(ctx, email, aliasHint, ...)`,
+`VerifyEmail(ctx, email, code, ...)` and `BindEmail(ctx, aliasID, email, consent, ...)`,
+which POST to `/identity/email/register`, `/identity/email/verify` and
+`/identity/alias/bind-email`. `WithIdempotencyKey(key)` sets the
+`Idempotency-Key` header.
+
+Every request carries these headers (`sdk/go/identity/gateway/client.go`):
+
+- `X-API-Key`: the API key.
+- `X-API-Timestamp`: Unix seconds.
+- `X-API-Signature`: hex `HMAC-SHA256(apiSecret, method + "\n" + path + "\n" +
+  hex(sha256(body)) + "\n" + timestamp)`.
+
+The server (`services/identity-gateway/server.go`) rejects timestamps more than
+its configured skew away from its clock, five minutes by default, and replays a
+cached response when an `Idempotency-Key` repeats.
+
+## Tests
+
+The packages ship unit tests next to the code (for example
+`sdk/go/client/tx_test.go`, `sdk/consensus/client_test.go`). Run them with
+`go test ./...` from the `sdk/` directory.
