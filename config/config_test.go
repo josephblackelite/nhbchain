@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"nhbchain/crypto"
+	"nhbchain/native/subscriptions"
 
 	"github.com/BurntSushi/toml"
 )
@@ -787,5 +788,45 @@ func TestLoadCreatesKeystoreWithPassphrase(t *testing.T) {
 	}
 	if key == nil {
 		t.Fatalf("expected decrypted key")
+	}
+}
+
+// A config generated on first run must be exactly what the next start reads
+// back from the file just written. The generated literal used to skip the
+// defaults Load fills in (subscriptions, swap, POTSO weights, ...), so the
+// first run alone failed at startup.
+func TestLoadCreatesDefaultConfigEqualToTheNextLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	first, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	second, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("the generated config differs from what the next start reads:\nfirst:  %+v\nsecond: %+v", first, second)
+	}
+}
+
+// cmd/nhb and cmd/consensusd refuse to start with a subscriptions config that
+// does not validate, and used to do exactly that on the first run.
+func TestLoadCreatesDefaultConfigTheSubscriptionsEngineAccepts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	engineCfg := subscriptions.Config{
+		ManagementFeeBps:     cfg.Subscriptions.ManagementFeeBps,
+		ManagementFeeCapBps:  cfg.Subscriptions.ManagementFeeCapBps,
+		MaxRetries:           cfg.Subscriptions.MaxRetries,
+		RetryIntervalSeconds: cfg.Subscriptions.RetryIntervalSeconds,
+	}
+	if err := engineCfg.Validate(); err != nil {
+		t.Fatalf("the generated subscriptions config is not accepted: %v (%+v)", err, cfg.Subscriptions)
 	}
 }

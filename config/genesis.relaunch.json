@@ -1,0 +1,75 @@
+{
+  "genesisTime": "2026-09-09T11:00:00Z",
+  "nativeTokens": [
+    {
+      "symbol": "NHB",
+      "name": "NHBCoin",
+      "decimals": 18,
+      "mintAuthority": "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
+    },
+    {
+      "symbol": "ZNHB",
+      "name": "ZapNHB",
+      "decimals": 18,
+      "mintAuthority": "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn",
+      "initialMintPaused": true
+    }
+  ],
+  "validators": [
+    {
+      "address": "nhb1uy6sfhsqaas7mx05mlkv9xwu9ynfwyhyg00lm0",
+      "power": 10,
+      "moniker": "validator-1"
+    }
+  ],
+  "alloc": {
+    "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj": {
+      "NHB": "100000000000000000000000"
+    },
+    "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn": {
+      "ZNHB": "1000000000000000000000000000"
+    }
+  },
+  "roles": {
+    "MINTER_NHB": [
+      "nhb1g5xvuynmmp2av5792l427f9gr0qnshuq9j7uh7",
+      "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
+    ]
+  },
+  "loyaltyGlobal": {
+    "active": true,
+    "treasury": "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn",
+    "baseBps": 50,
+    "minSpend": "1000000000000000000",
+    "capPerTx": "50000000000000000000",
+    "dailyCapUser": "200000000000000000000",
+    "seedZNHB": "0",
+    "dynamic": {
+      "targetBps": 50,
+      "minBps": 25,
+      "maxBps": 100,
+      "smoothingStepBps": 5,
+      "coverageMax": 0.5,
+      "coverageLookbackDays": 7,
+      "dailyCapPctOf7dFees": 0.6,
+      "dailyCapUsd": 5000,
+      "yearlyCapPctOfInitialSupply": 10,
+      "priceGuard": {
+        "enabled": true,
+        "pricePair": "ZNHB/USD",
+        "twapWindowSeconds": 7200,
+        "maxDeviationBps": 300,
+        "priceMaxAgeSeconds": 600,
+        "fallbackMinEmissionZNHBWei": "0",
+        "useLastGoodPriceFallback": true
+      }
+    }
+  },
+  "adminWallet": "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj",
+  "buybackSigners": [
+    "nhb1x9fxn8vcscc86l5m4c8xpx38mguwr9dhjjjtc4",
+    "nhb18xrvd7v345370qsj5p53xt85sc7rnwgjvhpcff",
+    "nhb1qz7uqqgskp2e2gud62592j4v73ke9welc8hd3a"
+  ],
+  "buybackSignerThreshold": 2
+}

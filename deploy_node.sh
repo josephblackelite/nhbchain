@@ -1,11 +1,13 @@
 #!/bin/bash
 # This script wipes existing chain state (nhb-data) and the validator
-# keystore, then bootstraps a brand-new genesis and hot validator key. It is
-# NOT a routine "redeploy latest code" script despite the generic name --
-# running it against a server with real chain history will destroy that
-# history. Guarded behind NHB_CONFIRM_RESET so it cannot run by accident.
+# keystore, generates a new hot validator key and starts a node from the live
+# network's genesis file (config/genesis.relaunch.json, used exactly as
+# shipped). It is NOT a routine "redeploy latest code" script despite the
+# generic name -- running it against a server with real chain history will
+# destroy that history. Guarded behind NHB_CONFIRM_RESET so it cannot run by
+# accident.
 if [ "${NHB_CONFIRM_RESET:-}" != "yes" ]; then
-  echo "Error: this script deletes nhb-data and validator.keystore and rebuilds genesis from scratch."
+  echo "Error: this script deletes nhb-data and validator.keystore and starts a fresh node from the shipped genesis."
   echo "Set NHB_CONFIRM_RESET=yes if that is genuinely what you intend to do."
   exit 1
 fi
@@ -25,6 +27,19 @@ git pull origin main
 chmod +x scripts/build.sh
 ./scripts/build.sh
 
+# The node starts from the live network's genesis file, unmodified:
+# config.toml's GenesisFile already points at it. Its hash is the chain id, so
+# rewriting anything inside it (a validator address, for one) would start a
+# different chain that no peer of the live network talks to. Check it before
+# anything is deleted.
+GENESIS_FILE=config/genesis.relaunch.json
+GENESIS_SHA256=10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b
+LIVE_CHAIN_ID=18346390202490284624
+if ! echo "$GENESIS_SHA256  $GENESIS_FILE" | sha256sum -c --status; then
+    echo "Error: $GENESIS_FILE is not the live network's genesis file (expected sha256 $GENESIS_SHA256)."
+    exit 1
+fi
+
 # Cleanup previous state
 rm -rf nhb-data
 rm -f validator.keystore
@@ -41,9 +56,9 @@ if [ -z "$HOT_ADDRESS" ]; then
 fi
 echo "[SUCCESS] Generated Hot Validator: $HOT_ADDRESS"
 
-# Inject into Genesis Block safely
-cp config/genesis.mainnet.json config/genesis.json
-sed -i -E "s/\"address\": \"nhb1[a-zA-Z0-9]+\"/\"address\": \"$HOT_ADDRESS\"/g" config/genesis.json
+# The key generated above is not a genesis validator (the genesis is used
+# unmodified, see the check before the cleanup step): it is registered on chain
+# like any other new validator.
 
 # Provide the node with an encrypted keystore (converted from the raw wallet.key)
 cat << 'EOF' > convert_key.go
@@ -84,4 +99,18 @@ sed -i 's/Seeds = \["nhb1seed.*\]/Seeds = \[\]/g' config.toml
 nohup ./bin/nhb --config config.toml > node.log 2>&1 &
 sleep 5
 cat node.log
+
+# Confirm the node came up on the live chain identity.
+NODE_CHAIN_ID=""
+for _ in $(seq 1 30); do
+    NODE_CHAIN_ID=$(curl -fsS -m 5 http://127.0.0.1:8545/ -X POST -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"net_info","params":[]}' 2>/dev/null | grep -o '"chainId":[0-9]*' | head -1 | cut -d: -f2)
+    [ -n "$NODE_CHAIN_ID" ] && break
+    sleep 2
+done
+if [ "$NODE_CHAIN_ID" != "$LIVE_CHAIN_ID" ]; then
+    echo "Error: the node reports chain id '${NODE_CHAIN_ID:-unknown}', expected $LIVE_CHAIN_ID. Check node.log."
+    exit 1
+fi
+echo "[SUCCESS] Node is running on chain id $NODE_CHAIN_ID"
 
