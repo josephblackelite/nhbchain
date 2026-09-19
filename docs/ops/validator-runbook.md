@@ -29,39 +29,20 @@ re-enabling signing.
 Settings are top-level keys in `config.toml` (`config/config.go`). Defaults come
 from `config.Load`.
 
-- **Trusted proxies.** `RPCTrustedProxies` lists the peer addresses whose
-  `X-Forwarded-For` / `X-Real-IP` headers are honoured. `RPCTrustProxyHeaders =
-  true` honours them from any peer, so leave it `false` unless the proxy tier is
-  locked down. A forwarded header from an untrusted peer is rejected with `403`
-  (see [Gateway and RPC Security Settings](./security.md#rpc-hardening-cmdnhb)).
-- **Per-source transaction quota.** `RPCMaxTxPerWindow` (default `5`) is the
-  number of `nhb_sendTransaction` requests allowed per `RPCRateLimitWindow`
-  (default 60 seconds). `RPCMaxTxPerIP`, `RPCMaxTxPerIdentity` and
-  `RPCMaxTxPerChain` default to `RPCMaxTxPerWindow`; `RPCMaxTxPerIdentityChain`
-  defaults to the smaller of the identity and chain limits. Other methods are
-  limited per source by the same limiter. A rejected call gets HTTP `429` with
-  JSON-RPC code `-32020` (`transaction rate limit exceeded` or `RPC rate limit
-  exceeded`). Hits are counted in `nhb_rpc_limiter_hits_total{scope,module,route}`.
-- **Per-method overrides.** `RPCRouteRateLimits` is a table keyed by JSON-RPC
-  method name. Each entry accepts `MaxTxPerWindow`, `MaxTxPerIP`,
-  `MaxTxPerIdentity`, `MaxTxPerChain` and `MaxTxPerIdentityChain`; an unset or
-  zero value falls back to the entry's `MaxTxPerWindow`, and that falls back to
-  the global limit.
-
-  ```toml
-  [RPCRouteRateLimits."nhb_sendTransaction"]
-  MaxTxPerWindow = 3
-  MaxTxPerIP = 3
-  ```
-
-- **Timeouts.** `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout` and
-  `RPCIdleTimeout` are in seconds and go straight to the Go `http.Server`; `0`
-  means no timeout (the repository's `config.toml` sets all four to `0`). Match
-  them to your load balancer's idle settings.
-- **Mempool size.** `[mempool] MaxTransactions` defaults to 4,000 pending
-  transactions; an unbounded pool needs `AllowUnlimited = true` together with
-  `MaxTransactions = 0` ([Runtime Configuration Guardrails](./configuration.md#block-and-mempool-limits)).
-- **TLS.** `RPCTLSCertFile` and `RPCTLSKeyFile` enable TLS on the RPC listener;
-  `RPCTLSClientCAFile` additionally requires client certificates. Without
-  certificates the listener runs only if `RPCAllowInsecure = true` and it is bound
-  to a loopback address.
+```toml
+[RPCRouteRateLimits."nhb_sendTransaction"]
+MaxTxPerWindow = 3
+MaxTxPerIP = 3
+```
+- Align `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
+  `RPCIdleTimeout` with upstream load-balancer/ingress settings to avoid idle
+  disconnects. Document the final values in the deployment checklist.
+- Set `[mempool] MaxTransactions` to a value that meets throughput expectations
+  without exhausting memory. Nodes default to 4,000 pending transactions unless
+  you opt into an unbounded queue by pairing `AllowUnlimited = true` with
+  `MaxTransactions = 0`. Smaller devnet clusters can lower the ceiling in `config.toml`. The
+  `NHB_MEMPOOL_MAX_TX` variable in `examples/.env.example` is not read by any
+  code and has no effect on the node.
+- Store TLS material in `RPCTLSCertFile` / `RPCTLSKeyFile` or enforce mutual TLS
+  between the proxy and node. Rotate certificates on the same cadence as the
+  proxy tier and track expirations in monitoring.
