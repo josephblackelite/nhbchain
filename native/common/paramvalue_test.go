@@ -56,7 +56,13 @@ func TestParamTextMatchesTrimSpaceForUnquotedValues(t *testing.T) {
 	}
 }
 
-func TestParamDecimalDropsOneLeadingPlus(t *testing.T) {
+// Governance's numeric validation strips one '+' and then hands the rest to
+// big.Int.SetString, which accepts a sign of its own, so the quoted string
+// "++5" passes proposal validation and is stored verbatim. Every reader must be
+// able to read it back, including the ones that parse with strconv.ParseUint,
+// which rejects any sign: the reader therefore gets the number with every
+// leading plus removed.
+func TestParamDecimalDropsEveryLeadingPlus(t *testing.T) {
 	tests := []struct {
 		raw  string
 		want string
@@ -66,10 +72,16 @@ func TestParamDecimalDropsOneLeadingPlus(t *testing.T) {
 		{"+1250", "1250"},
 		{`"+1250"`, "1250"},
 		{`" +1250 "`, "1250"},
-		{"++5", "+5"},
+		{"++5", "5"},
+		{`"++5"`, "5"},
+		{`" ++5 "`, "5"},
+		{"+++5", "5"},
+		{`"++++++++5"`, "5"},
+		{"+-5", "-5"},
 		{"-5", "-5"},
 		{`"-5"`, "-5"},
 		{"+", ""},
+		{"++", ""},
 		{"", ""},
 		{`""`, ""},
 	}
