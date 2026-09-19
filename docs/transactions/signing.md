@@ -1,6 +1,16 @@
 # Signing transactions
 
-## Native transactions (`nhb_sendTransaction`)
+> This page covers signing a consensus `TxEnvelope` for the consensus gRPC
+> service (`sdk/consensus`). It does not describe the transaction hash used by the
+> `nhb_sendTransaction` JSON-RPC method, which is the SHA-256 of the
+> `NHB_TX_V3_MAINNET` binary encoding (`Transaction.Hash`,
+> `core/types/transaction.go`). For that, see the [wallet builder
+> guide](../sdk/wallets.md).
+
+Once a `TxEnvelope` has been prepared it must be signed before the consensus
+service will accept it. The Go SDK provides a [`consensus.Sign`](../../sdk/consensus/tx.go)
+helper that performs the canonical encoding and secp256k1 signing routine used
+by the validators.
 
 Native transactions (`types.Transaction`, `core/types/transaction.go`) are signed
 with secp256k1. For any `type` greater than zero the signed hash
@@ -32,35 +42,10 @@ recovered from `(hash, r, s, v)`; `s` must be at most half the curve order
 bytes. The transaction hash returned by `nhb_sendTransaction` is this same
 SHA-256 value; it does not cover `r`, `s` or `v`.
 
-A paymaster (gas sponsor), when present, signs the same hash and supplies
-`paymasterR`, `paymasterS`, `paymasterV`; the recovered address must equal the
-`paymaster` field.
-
-Go code that signs: `Transaction.Sign(privateKey)`; `nhb-cli send-nhb`,
-`send-znhb`, `gov ...`, and the other CLI commands build and sign transactions
-this way (`cmd/nhb-cli`). The full JSON encoding accepted by the RPC is in
-[rpc.md](../api/rpc.md#transaction-encoding).
-
-## Consensus envelopes (`SubmitTxEnvelope`)
-
-`consensus.Sign` (`sdk/consensus/tx.go`) signs a `TxEnvelope`
-([envelope](./envelope.md)):
-
-1. The envelope is marshaled with `proto.Marshal`.
-2. `digest = sha256(bytes)`.
-3. `signature = secp256k1.Sign(digest, key)` (go-ethereum `crypto.Sign`, 65 bytes,
-   recovery id 0 or 1 in the last byte).
-4. `TxSignature.public_key` is the **uncompressed** public key
-   (`crypto.FromECDSAPub`, 65 bytes); `TxSignature.signature` is the 65-byte
-   signature.
-
-The server (`consensus/codec.TransactionFromEnvelope`) recomputes the digest and
-verifies the first 64 bytes of `signature` against `public_key`.
-`consensus.Submit` signs (when given an unsigned envelope and a key) and sends
-through `Client.SubmitEnvelope`.
-
-`examples/txs/ts/supply.ts` computes the SHA-256 digest of the encoded envelope and
-uses a placeholder random signature; it does not sign.
-
-For NHB and ZNHB transfer payloads see
-[znhb-transfer.md](./znhb-transfer.md).
+For concrete `nhb_sendTransaction` JSON-RPC payloads that cover both NHB
+(`TxTypeTransfer`) and ZNHB (`TxTypeTransferZNHB`) transfers, see
+[`znhb-transfer.md`](./znhb-transfer.md) and the
+[Sending ZNHB via `nhb_sendTransaction`](../api/rpc.md#sending-znhb-via-nhb_sendtransaction)
+example. Those transactions are signed with the `nhb_sendTransaction` hash
+described in the [wallet builder guide](../sdk/wallets.md), not with the envelope
+digest on this page.

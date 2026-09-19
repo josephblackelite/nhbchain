@@ -23,15 +23,14 @@ Only `TxTypeTransfer` (type `1`, NHB transfer) and `TxTypeTransferZNHB` (type
 
 ## Request format
 
-The body is the JSON-RPC request. The gateway defaults `jsonrpc` to `2.0` and
-`method` to `nhb_sendTransaction` when omitted, and rejects any other method.
-`params[0]` is decoded into `types.Transaction` with standard Go JSON rules, so:
-
-- `chainId`, `value`, `gasPrice`, `r`, `s`, `v`, `nonce`, `gasLimit` and `type`
-  must be unquoted JSON numbers. Quoted values (including `"0x..."` strings) fail
-  with `decode transaction: ...`.
-- `to` and `data` are `[]byte` fields, which encode as base64 strings.
-- `chainId` must be the NHB chain ID, `0x4e4842` (`5130306`).
+Send a JSON-RPC payload for `nhb_sendTransaction`. The gateway defaults `jsonrpc`
+to `2.0` and `method` to `nhb_sendTransaction` when omitted, and rejects any
+other method. Before relaying, it decodes `params[0]` with the standard Go JSON
+decoding of `types.Transaction` (`gateway/routes/transactions.go`). That means
+the numeric fields (`chainId`, `nonce`, `value`, `gasLimit`, `gasPrice`, `r`,
+`s`, `v`) must be JSON numbers, and `to` and `data` must be base64 strings. The
+`0x`-prefixed hex strings that the node itself also accepts are rejected by the
+gateway with a `decode transaction` error.
 
 ```jsonc
 {
@@ -46,10 +45,11 @@ The body is the JSON-RPC request. The gateway defaults `jsonrpc` to `2.0` and
       "to": "XJ1M3iP2jNIgmi9erwodNKw+Xyo=",
       "value": 1000000000000000000,
       "gasLimit": 25000,
-      "gasPrice": 1000000000,
-      "r": <signature r as a JSON integer>,
-      "s": <signature s as a JSON integer>,
-      "v": <signature v as a JSON integer>
+      "gasPrice": 1,
+      "data": "",
+      "r": <signature r as a decimal number>,
+      "s": <signature s as a decimal number>,
+      "v": <signature v as a decimal number, 27 or 28>
     }
   ]
 }
@@ -74,13 +74,30 @@ curl -s \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d @znhb-transfer.json \
-  https://<gateway-host>/v1/transactions/send
+  https://gateway.example/v1/transactions/send
 ```
 
-`znhb-transfer.json` holds a signed payload shaped like the one above. The
-backend's response is returned with its original status code and body. On
-success the JSON-RPC `result` is the transaction hash as a `0x`-prefixed string
-(`rpc/http.go`, `handleSendTransaction`).
+Where `znhb-transfer.json` contains the JSON-RPC payload shown above (with the
+signature filled in). The gateway copies the node's status, headers and body, so
+a successful response is the node's JSON-RPC result, which is `0x` plus the
+transaction hash:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "0x<transaction hash>"
+}
+```
+
+## Example: ZNHB transfer via Postman
+
+1. Create a new `POST` request to `https://gateway.example/v1/transactions/send`.
+2. Under **Headers** add `Authorization: Bearer {{NHB_RPC_TOKEN}}` and
+   `Content-Type: application/json`.
+3. Paste the JSON-RPC payload into the **Body** tab (`raw`, `JSON`).
+4. Send the request. A successful submission returns the same JSON payload as
+   the underlying node, while authentication failures return `401`.
 
 ## Error responses
 

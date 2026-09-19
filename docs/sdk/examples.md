@@ -1,105 +1,86 @@
 # SDK transfer examples
 
-The SDKs expose thin helpers for composing NHB and ZapNHB (ZNHB) transfers. The
-examples below show the minimal setup for both token types using Go and
-TypeScript.
+Sending NHB and ZapNHB (ZNHB) transfers with the code in `sdk/`. Both assets use
+the same flow: read the sender's nonce with `nhb_getBalance`, sign a transaction
+(`TxTypeTransfer`, `0x01`, for NHB; `TxTypeTransferZNHB`, `0x10`, for ZNHB), and
+submit it with `nhb_sendTransaction`, which needs a bearer token
+(`NHB_RPC_TOKEN`). Amounts are positive integers in base units and recipients are
+bech32 addresses.
 
 ## Go
 
-### NHB transfer
+`sdk/go/client` (see the [Go SDK guide](./go.md)) does the nonce lookup, signing
+and submission. Its default gas limit is `25000` and gas price `1`.
 
 ```go
-recipient, _ := crypto.DecodeAddress("nhb1recipient...")
-account := fetchAccount("nhb1senderaddress...") // reuse the nhb-cli helper
+package main
 
-tx := &types.Transaction{
-    ChainID:  types.NHBChainID(),
-    Type:     types.TxTypeTransfer,
-    Nonce:    account.Nonce,
-    To:       recipient.Bytes(),
-    Value:    big.NewInt(100_000_000_000_000_000),
-    GasLimit: 25_000,
-    GasPrice: big.NewInt(1),
-}
+import (
+	"context"
+	"encoding/hex"
+	"log"
+	"math/big"
+	"os"
+	"strings"
+	"time"
 
-if err := tx.Sign(loadPrivateKey()); err != nil {
-    log.Fatalf("sign transaction: %v", err)
-}
+	"nhbchain/crypto"
+	"nhbchain/sdk/go/client"
+)
 
-payload := map[string]any{
-    "jsonrpc": "2.0",
-    "id":      1,
-    "method":  "nhb_sendTransaction",
-    "params":  []any{tx},
-}
-if err := postWithAuth(context.Background(), payload); err != nil {
-    log.Fatalf("submit transaction: %v", err)
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	keyBytes, err := hex.DecodeString(strings.TrimPrefix(os.Getenv("SENDER_KEY_HEX"), "0x"))
+	if err != nil {
+		log.Fatalf("decode key: %v", err)
+	}
+	key, err := crypto.PrivateKeyFromBytes(keyBytes)
+	if err != nil {
+		log.Fatalf("parse key: %v", err)
+	}
+
+	rpc, err := client.New(
+		os.Getenv("NHB_RPC_URL"),
+		client.WithAuthToken(os.Getenv("NHB_RPC_TOKEN")),
+	)
+	if err != nil {
+		log.Fatalf("new client: %v", err)
+	}
+
+	recipient := "nhb1recipient..."
+	amount := big.NewInt(100_000_000_000_000_000)
+
+	// NHB transfer.
+	tx, hash, err := rpc.SendNHBTransfer(ctx, key, recipient, amount)
+	if err != nil {
+		log.Fatalf("send nhb transfer: %v", err)
+	}
+	log.Printf("NHB transfer nonce=%d hash=%s", tx.Nonce, hash)
+
+	// ZNHB transfer, with a per-call gas limit override.
+	tx, hash, err = rpc.SendZNHBTransfer(ctx, key, recipient, amount, client.TxWithGasLimit(30_000))
+	if err != nil {
+		log.Fatalf("send znhb transfer: %v", err)
+	}
+	log.Printf("ZNHB transfer nonce=%d hash=%s", tx.Nonce, hash)
 }
 ```
 
-The snippet mirrors the helpers shipped with `cmd/nhb-cli`: `fetchAccount`,
-`loadPrivateKey`, and `postWithAuth` wrap the JSON-RPC calls and bearer-token
-submission.
+The second return value is the string `nhb_sendTransaction` returned: `0x` plus
+the transaction hash. Use it with `nhb_getTransactionReceipt` to confirm
+inclusion.
 
-### ZNHB transfer
-
-```go
-key := loadPrivateKey()
-client, err := wallet.New(
-    "https://rpc.nhb.dev",
-    wallet.WithAuthToken(os.Getenv("NHB_RPC_TOKEN")),
-)
-if err != nil {
-    log.Fatalf("new wallet client: %v", err)
-}
-
-tx, result, err := client.SendZNHBTransfer(
-    context.Background(),
-    key,
-    "nhb1recipient...",
-    big.NewInt(100_000_000_000_000_000),
-)
-if err != nil {
-    log.Fatalf("send znhb transfer: %v", err)
-}
-log.Printf("Queued ZNHB transfer nonce=%d result=%s", tx.Nonce, result)
-```
-
-The helper fetches the latest nonce via `nhb_getBalance`, signs the
-`TxTypeTransferZNHB` payload, and forwards it through `nhb_sendTransaction` with
-the provided bearer token.
+To do the same from the command line, see [`send-nhb` and `send-znhb`](../cli/send.md).
 
 ## TypeScript
 
-### NHB transfer
+`sdk/ts/src/wallet.ts` exposes `WalletClient` with a single `sendTransfer`
+method; the `asset` option selects `'NHB'` or `'ZNHB'` and defaults to `'ZNHB'`.
 
 ```ts
-import { rpcClient } from '@nhb/examples-lib-sdk';
-import { keccak_256 } from '@noble/hashes/sha3';
-import { getPublicKey, signSync } from '@noble/secp256k1';
-
-const rpc = rpcClient({ baseUrl: process.env.NHB_RPC_URL!, apiKey: process.env.NHB_RPC_TOKEN! });
-
-async function sendNHB(privateKey: Uint8Array, recipient: string, amount: bigint) {
-  const sender = deriveBech32(privateKey);
-  const account = await rpc.request('nhb_getBalance', [sender]);
-  const tx = buildTransaction({
-    type: 0x01,
-    nonce: BigInt(account.nonce),
-    to: decodeRecipient(recipient),
-    value: amount,
-  });
-  const digest = sha256(encodeForHash(tx));
-  const [sig, recid] = signSync(digest, privateKey, { der: false, recovered: true });
-  attachSignature(tx, sig, recid);
-  await rpc.request('nhb_sendTransaction', [tx]);
-}
-```
-
-### ZNHB transfer
-
-```ts
-import WalletClient from 'nhbchain/sdk/ts/src/wallet';
+import WalletClient from './sdk/ts/src/wallet'; // adjust the relative path
 
 const client = new WalletClient({
   baseUrl: process.env.NHB_RPC_URL!,
@@ -116,6 +97,6 @@ const { transaction, response } = await client.sendTransfer({
 console.log('Submitted ZNHB transfer', transaction.nonce, response);
 ```
 
-The `WalletClient` class performs the nonce lookup, signs the payload with the
-provided private key, and submits the envelope with the configured RPC token.
-Use `asset: 'NHB'` to reuse the helper for standard NHB transfers.
+Read the "Known signing mismatch" note in the [JavaScript & TypeScript SDK
+guide](./js.md#walletclient-sdktssrcwalletts) before relying on this client: its
+signing hash differs from the one the node verifies.

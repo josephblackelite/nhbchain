@@ -2,7 +2,7 @@
 
 This page collects ready-made calls for wallet backends that proxy signed
 transactions through the gateway. All examples assume the gateway is reachable
-at `https://app.nhbcoin.com`, the consensus node expects bearer authentication,
+at `https://gateway.example`, the consensus node expects bearer authentication,
 and the wallet server holds the `NHB_RPC_TOKEN` secret.
 
 ## Sending a ZNHB transfer with `curl`
@@ -18,31 +18,35 @@ curl -s \
         "method":"nhb_sendTransaction",
         "params":[
           {
-            "chainId":"0x4e4842",
+            "chainId":5130306,
             "type":16,
             "nonce":7,
-            "to":"0x1b9b9fb69f2c6c9c1d4c1c4e7b999b20461ab29f",
-            "value":"0x2386f26fc10000",
-            "gasLimit":"0x61a8",
-            "gasPrice":"0x3b9aca00",
-            "data":"0x",
-            "r":"0xc1efc6c2f0c3f3d71e2c195911edbf7a7e8bc2bd52d4b3f6b14d4b0e54738b62",
-            "s":"0x27a1a8e31f42d8c3e65d021779f8921bb5ca5066a8b0f67fc6f2df548b6e2771",
-            "v":"0x1b"
+            "to":"G5uftp8sbJwdTBxOe5mbIEYasp8=",
+            "value":10000000000000000,
+            "gasLimit":25000,
+            "gasPrice":1,
+            "data":"",
+            "r":SIGNATURE_R,
+            "s":SIGNATURE_S,
+            "v":SIGNATURE_V
           }
         ]
       }' \
-  https://app.nhbcoin.com/v1/transactions/send
+  https://gateway.example/v1/transactions/send
 ```
 
-Successful requests return the JSON-RPC response from the node, confirming that
-the transaction hit the mempool. Any `401` or `429` errors indicate the standard
+Replace `SIGNATURE_R`, `SIGNATURE_S` and `SIGNATURE_V` with the decimal values of
+your signature. The gateway decodes the transaction with Go's standard JSON
+rules, so numeric fields are JSON numbers and `to`/`data` are base64 (see
+[`docs/gateway/transactions.md`](../gateway/transactions.md)). Successful
+requests return the JSON-RPC response from the node, whose result is `0x` plus
+the transaction hash. Any `401` or `429` errors indicate the standard
 authentication and rate limit guards are still enforced through the gateway.
 
 ## Sending the same payload with Postman
 
 1. Create a `POST` request pointing at
-   `https://app.nhbcoin.com/v1/transactions/send`.
+   `https://gateway.example/v1/transactions/send`.
 2. Add headers: `Content-Type: application/json` and
    `Authorization: Bearer {{NHB_RPC_TOKEN}}`.
 3. Switch the body to **raw** JSON and paste the transaction payload.
