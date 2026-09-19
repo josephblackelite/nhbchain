@@ -29,7 +29,7 @@ NHBCoin abstracts away the traditional complexities of crypto networks. Native a
   - [Step 3: Prepare the Server](#step-3-prepare-the-server)
   - [Step 4: Clone the Code](#step-4-clone-the-code)
   - [Step 5: Run the Automated Node Bootstrap](#step-5-run-the-automated-node-bootstrap)
-  - [Step 6: Get Paid](#step-6-get-paid-delegate-10000-znhb-or-more)
+  - [Step 6: Get Paid](#step-6-get-paid-stake-at-least-10000-znhb)
 - [Network Connection Details](#-network-connection-details)
   - [Join As A Validator In One Command](#join-as-a-validator-in-one-command)
 - [Command-Line Interface](#command-line-interface)
@@ -96,7 +96,7 @@ The L1 is organized into modular layers that together deliver the payment networ
 - **ZapNHB (ZNHB)** — A hard-capped, genesis-fixed **1,000,000,000 ZNHB** total supply, no more, ever. Secures the network, powers protocol and merchant loyalty rewards, and governs validator elections. ZNHB carries **no protocol-defined valuation ceiling or promise** — see below.
 - **Dual-Purpose Staking** — Staking ZNHB serves two simultaneous functions:
   1. **Governance:** Voting power in NHBChain governance is POTSO-weighted (network participation), not raw staked balance — see the nhbportal wallet's **Governance → How governance works** tab for the full, accurate breakdown of what's votable today.
-  2. **Validation:** If the stake equals or exceeds 10,000 ZNHB, the delegator becomes a **validator candidate**. The node joins the active validator set at the next epoch only after it is online, synced, and submitting validator heartbeats. You do **not** need a separate stake for governance.
+  2. **Validation:** A registered validator whose stake is at least 10,000 ZNHB (`staking.minimumValidatorStake`, adjustable by governance) is a **validator candidate**. Its stake counts both ZNHB it staked itself and ZNHB delegated to it; a validator that delegates its own stake to a different validator is not eligible. The node joins the active validator set at the next epoch only while its validator heartbeat is current.
 
 ### How ZNHB enters circulation
 
@@ -173,18 +173,11 @@ bash scripts/run_nhbcoin_node.sh --reset-state
 
 **That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
-### Step 6: Get paid (self-stake >= 10,000 ZNHB on this server's own key)
+### Step 6: Get paid (stake at least 10,000 ZNHB)
 The validator's signing key and your everyday NHBCoin wallet are **two
 different things by design**. The validator key is generated on the server
 itself and never leaves it; you never export or paste a private key
 anywhere for this step.
-
-**Corrected 2026-09-02: validator eligibility is based on this validator's
-own self-stake only.** Delegating from a separate portal wallet (the old
-"Validator Hub -> Delegate" flow previously documented here) does **not**
-count toward eligibility at all, no matter the amount -- see the [Validator
-Onboarding Guide](docs/validators/onboarding.md#staking-self-stake-on-this-server-not-a-portal-delegation)
-for the full explanation.
 
 1. On your Ubuntu validator server, run:
 
@@ -194,25 +187,38 @@ bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS -
 
    This generates a fresh validator key **on this machine** the first time
    it runs (reused on later runs), prints that validator's node address, and
-   automatically redirects its future consensus rewards to your
+   automatically redirects its future epoch reward payouts to your
    `--beneficiary` wallet address (required), signed locally before the key
    is used for anything else. Add `--email you@example.com` to also get the
    node address and instructions emailed to you.
 
-2. **Send >= 10,000 ZNHB directly to this validator's own node address**
-   (printed by the script above) from wherever you actually hold ZNHB -- an
-   ordinary transfer, not a portal delegation.
-3. **Self-stake it on the server itself**, using the validator's own key:
+2. **Get the validator's stake to at least 10,000 ZNHB.** A validator's stake
+   is its account's total stake, which includes ZNHB that other wallets
+   delegate to it. Either way counts toward the minimum:
+   - **Delegate:** from any wallet, delegate ZNHB to the validator's node
+     address (the NHBCoin wallet's Validator Hub -> Delegate tab does this).
+   - **Self-stake:** send ZNHB to the validator's own node address, then run
+     step 3 on the server.
+3. **If you chose to self-stake:** stake it on the server itself, using the
+   validator's own key:
 
 ```bash
 sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
 ```
 
-Once the server is online, synced, has self-staked at least `10,000 ZNHB`
-on its own key, and is emitting validator heartbeats, it becomes a validator
-candidate and then joins the active set at the next epoch boundary.
-`--beneficiary` routes the separate consensus-participation reward to your
-wallet, so nothing accumulates at an address you can't reach.
+   `10000000000000000000000` is 10,000 ZNHB in base units.
+
+A validator is eligible when all three of these are true:
+
+- it is registered as a validator (the bootstrap script does this
+  automatically with `register-validator 0`, which needs no funds),
+- it is not delegating its own stake to a different validator, and
+- its stake is at least `staking.minimumValidatorStake` (10,000 ZNHB by
+  default; governance can change it).
+
+An eligible validator joins the active set at the next epoch boundary, and
+only while its validator heartbeat is current. `--beneficiary` routes the
+validator's epoch reward payouts to your wallet.
 
 ---
 
@@ -257,8 +263,8 @@ validating -- drop the flag on any re-run.
 
 Never pass a private key to this script -- it generates one for you, on
 this machine, the first time it runs. `--beneficiary` is **required**: it
-points this validator's consensus reward at a wallet you actually use (see
-"Getting paid" below). Without it, that reward would accumulate at the
+points this validator's epoch reward payouts at a wallet you actually use (see
+"Getting paid" below). Without it, those payouts would accumulate at the
 validator's own address, whose key intentionally never leaves this server --
 the script refuses to proceed without a beneficiary specifically to avoid
 that.
@@ -274,7 +280,7 @@ What this does:
 - syncs block history from the network until it reaches the current head
 - starts the validator and keeps validator heartbeats flowing automatically
 - signs a one-time transaction locally redirecting this validator's
-  consensus reward to the `--beneficiary` address you provided
+  epoch reward payouts to the `--beneficiary` address you provided
 - signs a second one-time, zero-value transaction registering this
   validator's on-chain eligibility flag (`ValidatorRegistered`) -- needs no
   funds, always succeeds
@@ -282,30 +288,35 @@ What this does:
 
 Getting paid:
 
-- **Staking yield, self-stake required**: eligibility is based on this
-  validator's **own self-stake only** -- portal delegation from a separate
-  wallet does not count toward it at all, no matter the amount. Send
-  `>= 10,000 ZNHB` directly to the node address this script printed (an
-  ordinary transfer, not a delegation), then self-stake it on the server:
-  `nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key`
-  (the script already ran this same command once with amount `0` to flip
-  the eligibility flag on; this second call with real ZNHB behind it is
-  what actually reaches the minimum). See the [Validator Onboarding
-  Guide](docs/validators/onboarding.md#staking-self-stake-on-this-server-not-a-portal-delegation)
-  for the full explanation of why delegation doesn't count here.
-- **Consensus reward**: a separate, smaller reward for actively
-  participating in consensus. Defaults to the validator's own
-  (server-only) address; `--beneficiary` redirects it to your wallet
-  automatically. You can set or change this later without rerunning the
-  whole script:
+- **Stake (eligibility)**: a validator is eligible when it is registered, is
+  not delegating its own stake to a different validator, and its stake is at
+  least `staking.minimumValidatorStake` (10,000 ZNHB by default). Its stake is
+  its account's total stake, so ZNHB delegated to it counts, and so does ZNHB
+  it stakes itself. To delegate, send a stake transaction targeting the
+  validator's node address (the NHBCoin wallet's Validator Hub -> Delegate
+  tab does this). To self-stake, send ZNHB to the node address this script
+  printed, then run
+  `sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key`
+  on the server (`10000000000000000000000` is 10,000 ZNHB in base units; the
+  script already ran the same command once with amount `0` to register the
+  validator, which needs no funds).
+- **Staking yield**: accrues against each account's own stake. ZNHB you
+  delegate to a validator accrues to you, the delegator; the validator's own
+  accrual excludes what others delegated to it.
+- **Epoch reward payouts**: paid to the validator's own address unless a
+  beneficiary is set. `--beneficiary` sets it automatically; you can set or
+  change it later, signed with the validator's own key file on the server,
+  without rerunning the whole script:
   `nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key`
+  (the beneficiary cannot be the validator's own address).
 
 Operational model:
 
-- self-staking `>= 10,000 ZNHB` on the validator's own key makes it a
-  **validator candidate**
+- a registered validator whose stake is at least the minimum (10,000 ZNHB by
+  default), whether staked by itself or delegated to it, is a **validator
+  candidate**
 - the server becomes **active next epoch**, not instantly
-- readiness requires the node to be online, synced, and heartbeat-ready
+- readiness requires a current validator heartbeat
 
 Compatibility note:
 
@@ -319,7 +330,7 @@ Compatibility note:
 Anyone can connect a wallet to the network, send funds, vote in governance, or use smart contracts with absolutely **zero** minimum balances. The 10,000 ZNHB requirement applies *strictly to Server Operators (Validators)*.
 
 ### What is the benefit of running a Validator Server?
-Validators earn staking yield on delegated stake today. A separate, additional **POTSO (Proof of Time Spent Online)**-weighted reward pays out ZNHB from the fixed 200,000,000-ZNHB Reward Pool on a halving schedule (never newly minted) — see [Token Economics](#token-economics) for the current status.
+A validator's staking yield accrues on its own stake; ZNHB delegated to it accrues to the delegator. A separate, additional **POTSO (Proof of Time Spent Online)**-weighted reward pays out ZNHB from the fixed 200,000,000-ZNHB Reward Pool on a halving schedule (never newly minted) — see [Token Economics](#token-economics) for the current status.
 Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Score**, so validators that process more transactions, handle escrow events, and maintain perfect uptime earn significantly higher yields than passive, wealthy nodes.
 
 ## Command-Line Interface
