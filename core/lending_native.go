@@ -530,7 +530,7 @@ func (sp *StateProcessor) applyLendingLiquidate(tx *types.Transaction, sender []
 		return fmt.Errorf("invalid borrower address: %w", err)
 	}
 	if bytes.Equal(borrowerAddr.Bytes(), sender) {
-		return fmt.Errorf("lending: a borrower cannot liquidate their own position; use repay instead")
+		return fmt.Errorf("%w; use repay instead", lending.ErrSelfLiquidation)
 	}
 	engine, _, err := sp.lendingEngine(payload.PoolID)
 	if err != nil {

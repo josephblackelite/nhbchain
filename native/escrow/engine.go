@@ -208,12 +208,19 @@ func (e *Engine) transferToken(from, to [20]byte, token string, amount *big.Int)
 	if err != nil {
 		return err
 	}
-	toAcc, err := e.state.GetAccount(to[:])
-	if err != nil {
-		return err
-	}
 	fromAcc = ensureAccount(fromAcc)
-	toAcc = ensureAccount(toAcc)
+	// A leg whose two ends are one address (a payee, fee treasury or realm fee
+	// recipient that is the vault itself) works on a single account object:
+	// two copies of one account would let the credit overwrite the debit and
+	// create the amount from nothing.
+	toAcc := fromAcc
+	if to != from {
+		toAcc, err = e.state.GetAccount(to[:])
+		if err != nil {
+			return err
+		}
+		toAcc = ensureAccount(toAcc)
+	}
 	switch normalized {
 	case "NHB":
 		if fromAcc.BalanceNHB.Cmp(amt) < 0 {
@@ -233,8 +240,10 @@ func (e *Engine) transferToken(from, to [20]byte, token string, amount *big.Int)
 	if err := e.state.PutAccount(from[:], fromAcc); err != nil {
 		return err
 	}
-	if err := e.state.PutAccount(to[:], toAcc); err != nil {
-		return err
+	if to != from {
+		if err := e.state.PutAccount(to[:], toAcc); err != nil {
+			return err
+		}
 	}
 	return nil
 }

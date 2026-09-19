@@ -47,6 +47,7 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/market"
 	nativeparams "nhbchain/native/params"
 	"nhbchain/native/pos"
 	"nhbchain/native/potso"
@@ -3157,6 +3158,11 @@ const (
 //     counterpart -- it has no epochs, but the accepted timestamp only
 //     moves forward, so a submission at or before the last accepted
 //     timestamp is equally permanently dead.
+//   - subscriptions.ErrSelfSubscription, market.ErrSelfFill,
+//     lending.ErrSelfLiquidation: a transaction whose signer and a counterparty
+//     address already fixed in committed state (the plan's merchant, the
+//     listing's seller, the payload's borrower) are the same address can never
+//     become valid.
 //
 // == SKIP: depends on mutable state shared across transactions in this
 // attempt, or on ordering within this attempt -- a later attempt can
@@ -3318,6 +3324,11 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrMintInvalidChainID),
 		errors.Is(err, ErrMintExpired),
 		errors.Is(err, ErrMintInvalidPayload),
+		// Self-dealing: the signer and the counterparty recorded in committed
+		// state are one address, which can never change.
+		errors.Is(err, subscriptions.ErrSelfSubscription),
+		errors.Is(err, market.ErrSelfFill),
+		errors.Is(err, lending.ErrSelfLiquidation),
 		errors.Is(err, ErrRedeemRequestExists),
 		errors.Is(err, nhbstate.ErrRedeemRequestNotPending),
 		errors.Is(err, ErrRedeemInvalidPayload),
