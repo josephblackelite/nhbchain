@@ -63,7 +63,7 @@ type Engine struct {
 	// engine is usable standalone/in tests, but production wiring must
 	// override it with the deterministic block timestamp -- mirroring
 	// native/escrow's Engine.nowFn and core/state_transition.go's
-	// `sp.EscrowEngine.SetNowFunc(func() int64 { return sp.now().Unix() })`
+	// `sp.EscrowEngine.SetNowFunc(func() int64 { return sp.blockTimestamp().Unix() })`
 	// -- so that ID derivation never depends on a validator's local clock.
 	nowFn func() int64
 	// blockHeight is stamped onto every Fill (Fill.BlockHeight), mirroring
