@@ -215,8 +215,11 @@ func TestCatchUpAsksForTheNextBatchAsSoonAsTheLastOneIsApplied(t *testing.T) {
 		t.Fatalf("expected the target at height %d, got %d", source.GetHeight(), got)
 	}
 	got := requestedFrom(t, broadcaster)
-	want := []uint64{1, networkBlockSyncBatchSize + 1}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	// The request for the first blocks, the one for the next batch as soon as
+	// the first was applied, and one for whatever follows the last block: the
+	// peer, which has nothing more, answers it with nothing.
+	want := []uint64{1, networkBlockSyncBatchSize + 1, source.GetHeight() + 1}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("expected the request for the first blocks and then for the next batch %v, got %v", want, got)
 	}
 }
@@ -268,5 +271,95 @@ func TestAStatusFloodFromAnAnonymousPeerDoesNotGetTheNodeDroppedByItsPeers(t *te
 	}
 	if got := honest.count(p2p.MsgTypeGetBlocks); got > 3 {
 		t.Fatalf("the honest peer received %d block requests for %d claims", got, flood)
+	}
+}
+
+// A reply is cut off at networkBlockSyncBatchSize blocks or at
+// networkBlockSyncMaxBytes of encoded blocks, whichever comes first, so one
+// shorter than a full batch does not mean the peer has nothing more. Catching
+// up must go on with the next request after every reply that moved the chain,
+// or it would stall until the next status report.
+func TestCatchUpAsksForTheNextBlocksAfterAReplyCutShortByTheByteCap(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	sourceDB := storage.NewMemDB()
+	t.Cleanup(func() { sourceDB.Close() })
+	source, err := NewNode(sourceDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new source node: %v", err)
+	}
+	targetDB := storage.NewMemDB()
+	t.Cleanup(func() { targetDB.Close() })
+	target, err := NewNode(targetDB, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new target node: %v", err)
+	}
+	broadcaster := &testBroadcaster{}
+	target.SetNetworkBroadcaster(broadcaster)
+
+	const chainLength = 5
+	commitEmptyBlocks(t, source, chainLength)
+
+	// The peer's byte cap leaves room for one block per reply.
+	var want []uint64
+	for target.GetHeight() < source.GetHeight() {
+		from := target.GetHeight() + 1
+		reply := source.syncBatch(from, source.GetHeight(), 1)
+		if len(reply) != 1 || len(reply) >= networkBlockSyncBatchSize {
+			t.Fatalf("expected a reply of one block, well under a full batch, got %d", len(reply))
+		}
+		if err := target.handleNetworkBlocks(reply); err != nil {
+			t.Fatalf("apply the reply from height %d: %v", from, err)
+		}
+		if got := target.GetHeight(); got != from {
+			t.Fatalf("expected the target at height %d after the reply, got %d", from, got)
+		}
+		want = append(want, from+1)
+	}
+	got := requestedFrom(t, broadcaster)
+	if len(got) != len(want) {
+		t.Fatalf("expected a request for the next blocks after each of the %d replies %v, got %v", len(want), want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected requests %v, got %v", want, got)
+		}
+	}
+}
+
+// A reply that moves nothing (blocks the node already has) is not answered with
+// a request: nothing was learned about what the peer has beyond them.
+func TestAReplyThatAppliesNothingIsNotAnsweredWithARequest(t *testing.T) {
+	t.Setenv("NHB_ENV", "dev")
+	validatorKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate validator key: %v", err)
+	}
+	db := storage.NewMemDB()
+	t.Cleanup(func() { db.Close() })
+	node, err := NewNode(db, validatorKey, "", true, false)
+	if err != nil {
+		t.Fatalf("new node: %v", err)
+	}
+	broadcaster := &testBroadcaster{}
+	node.SetNetworkBroadcaster(broadcaster)
+	commitEmptyBlocks(t, node, 3)
+
+	var known []*types.Block
+	for height := uint64(1); height <= node.GetHeight(); height++ {
+		block, err := node.GetBlockByHeight(height)
+		if err != nil {
+			t.Fatalf("get block %d: %v", height, err)
+		}
+		known = append(known, block)
+	}
+	if err := node.handleNetworkBlocks(known); err != nil {
+		t.Fatalf("handle blocks the node already has: %v", err)
+	}
+	if got := requestedFrom(t, broadcaster); len(got) != 0 {
+		t.Fatalf("a reply of blocks already applied must not trigger a request, got %v", got)
 	}
 }
