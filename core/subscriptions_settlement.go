@@ -152,9 +152,20 @@ func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Ma
 
 	var treasuryAcc *types.Account
 	if decision.FeeWei.Sign() > 0 {
-		treasuryAcc, err = sp.getAccount(cfg.Treasury[:])
-		if err != nil {
-			return fmt.Errorf("subscriptions: load treasury: %w", err)
+		switch cfg.Treasury {
+		case sub.Merchant:
+			// The treasury IS the merchant (or the payer): credit the
+			// already-loaded object. A second copy of the same address is
+			// persisted last and would overwrite the first credit, destroying
+			// it.
+			treasuryAcc = merchantAcc
+		case sub.Payer:
+			treasuryAcc = payerAcc
+		default:
+			treasuryAcc, err = sp.getAccount(cfg.Treasury[:])
+			if err != nil {
+				return fmt.Errorf("subscriptions: load treasury: %w", err)
+			}
 		}
 	}
 

@@ -561,9 +561,27 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 				ownerShare = new(big.Int).Sub(routed, buybackShare)
 			}
 		}
-		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
-		if err != nil {
-			return err
+		// For ZNHB the transfer's own sender/recipient accounts are still
+		// unpersisted objects in the caller (applyTransferZNHB writes them
+		// after this returns), so when the route wallet IS the sender or the
+		// recipient -- e.g. the fee wallet is the treasury and a user pays it
+		// -- credit that same object. A separately loaded copy would hold the
+		// pre-transfer balance and be overwritten by the caller's write,
+		// silently destroying the fee.
+		var routeAcc *types.Account
+		if result.Asset == fees.AssetZNHB {
+			switch {
+			case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
+				routeAcc = fromAcc
+			case toAcc != nil && bytes.Equal(result.OwnerWallet[:], tx.To):
+				routeAcc = toAcc
+			}
+		}
+		if routeAcc == nil {
+			routeAcc, err = sp.getAccount(result.OwnerWallet[:])
+			if err != nil {
+				return err
+			}
 		}
 		switch result.Asset {
 		case fees.AssetNHB:
@@ -1811,6 +1829,14 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 	if len(pending) == 0 {
 		return
 	}
+	// Payouts below come out of the loyalty treasury, which the live config
+	// points at the admin/treasury wallet, and can land on it when it is the
+	// spender. Book the net movement into the Reward Pool on every exit path,
+	// in this same state transition. Not a transaction, so a shortfall is
+	// drawn from the Sale Pool rather than failing the block.
+	if before, err := sp.captureTreasuryPoolPosition(); err == nil && before != nil {
+		defer func() { _ = sp.bookTreasuryPoolMovement(before, true) }()
+	}
 	if now.IsZero() {
 		now = sp.blockTimestamp()
 	}
@@ -1910,6 +1936,14 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 		var recipient [20]byte
 		copy(recipient[:], reward.Recipient[:])
 		account, ok := updates[recipient]
+		if !ok && recipient == treasuryAddr {
+			// The spender is the treasury itself: pay it on the treasury's own
+			// loaded object. A second copy of the same address would be
+			// persisted after the debit and overwrite it, minting the payout.
+			account = treasuryAcc
+			updates[recipient] = account
+			ok = true
+		}
 		if !ok {
 			acct, err := sp.getAccount(recipient[:])
 			if err != nil {
@@ -2803,6 +2837,19 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	}
 	start := len(sp.events)
 	var result *SimulationResult
+	// Captured before the handler runs and booked after it succeeds, both
+	// inside this same state transition: CheckZNHBSupplyInvariant only runs
+	// once per block, after every transaction, so a transaction that moved
+	// the admin/treasury wallet's ZNHB without the pool sub-ledgers following
+	// would poison block building with no single transaction to blame. See
+	// treasuryZNHBFlowTracked.
+	var treasuryBefore *treasuryPoolPosition
+	if treasuryZNHBFlowTracked(tx.Type) {
+		treasuryBefore, err = sp.captureTreasuryPoolPosition()
+		if err != nil {
+			return nil, err
+		}
+	}
 	switch tx.Type {
 	case types.TxTypeMint:
 		err = sp.applyMintTransaction(tx)
@@ -2850,6 +2897,12 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	}
 	if err != nil {
 		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) {
+			sp.events = sp.events[:start]
+		}
+		return nil, err
+	}
+	if err := sp.bookTreasuryPoolMovement(treasuryBefore, false); err != nil {
+		if len(sp.events) > start {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -3635,10 +3688,21 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 			return nil, fmt.Errorf("znhb transfer: load reward pool balance: %w", err)
 		}
 		newRewardPoolBalance := new(big.Int).Sub(rewardPoolBalance, amount)
+		if newRewardPoolBalance.Sign() < 0 {
+			return nil, fmt.Errorf("znhb transfer: %w: sends %s, reward pool holds %s", ErrTreasuryRewardPoolInsufficient, amount, rewardPoolBalance)
+		}
 		if err := manager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
 			return nil, fmt.Errorf("znhb transfer: update reward pool balance: %w", err)
 		}
 	}
+	// The two blocks above cover the admin wallet as fee collector and as
+	// sender. Every other way this transfer can move the wallet's ZNHB -- it
+	// is the recipient (a plain transfer straight to the public treasury
+	// address used to break CheckZNHBSupplyInvariant on the very next block),
+	// the sender paying the fee to a different collector, or the recipient of
+	// the domain fee routed by applyTransactionFee -- is booked into the
+	// Reward Pool by executeTransaction (see treasuryZNHBFlowTracked), in this
+	// same state transition.
 	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
 		return nil, err
 	}

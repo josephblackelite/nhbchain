@@ -78,7 +78,7 @@ Drop it on any later run.
 | `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
 | `--email` | *(none)* | Best-effort onboarding notification; failure to send is a warning, not fatal. |
 | `--onboarding-email-endpoint` | `https://nhbcoin.com/api/v1/validators/onboarding-email` | Where the onboarding email is POSTed. |
-| `--bootnode` | `52.1.96.250:6001` | Must be plain `host:port` — see the enode warning below. |
+| `--bootnode` | `198.51.100.10:6001` | Must be plain `host:port` — see the enode warning below. |
 | `--network-id` | `430060579445266314` | Mainnet network ID. |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
 | `--rpc-addr` | `127.0.0.1:8545` | Not exposed externally by default. |
@@ -87,7 +87,7 @@ Drop it on any later run.
 | `--help` | | Prints usage. |
 
 **Bootnode format warning:** the bootnode value must be plain `host:port`
-(e.g. `52.1.96.250:6001`), *never* an `enode://nodeid@host:port` URI. This
+(e.g. `198.51.100.10:6001`), *never* an `enode://nodeid@host:port` URI. This
 codebase's P2P dialer calls `net.Dial("tcp", addr)` directly and never
 parses the `enode://` scheme at all. If you find an `enode://`-style example
 in old docs, a stale screenshot, or notes from elsewhere, ignore it — using
@@ -310,7 +310,7 @@ yourself.
 
 **Cause:** an `enode://` URI was used instead of plain `host:port` for the
 bootnode.
-**Fix:** always use `host:port` form, e.g. `52.1.96.250:6001`. See the
+**Fix:** always use `host:port` form, e.g. `198.51.100.10:6001`. See the
 bootnode format warning in Step 1 above.
 
 ### 5. Validator's heartbeat gets permanently stuck (nonce never advances, node looks alive but never becomes eligible)

@@ -3421,7 +3421,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// the mempool, offered again), not prunable -- mirroring the
 		// stale-epoch case above from the other side. See
 		// ErrBuybackRefPriceFutureEpoch's doc comment (core/buyback_tx.go).
-		errors.Is(err, ErrBuybackRefPriceFutureEpoch):
+		errors.Is(err, ErrBuybackRefPriceFutureEpoch),
+		// The treasury wallet's outflow is capped by the Reward Pool
+		// sub-ledger, which later inflows (fees, forfeited deposits) can
+		// refill, so this is skippable, not prunable. See
+		// ErrTreasuryRewardPoolInsufficient's doc comment
+		// (core/znhb_treasury_pool.go).
+		errors.Is(err, ErrTreasuryRewardPoolInsufficient):
 		return proposalDispositionSkip
 	}
 	return proposalDispositionAbort
@@ -4544,7 +4550,7 @@ func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeig
 	}
 
 	manager := nhbstate.NewManager(state.Trie)
-	slasher := statebank.NewValidatorSlasher(manager, n.escrowTreasury)
+	slasher := state.bookedSlasher(statebank.NewValidatorSlasher(manager, n.escrowTreasury))
 	engine := penalty.NewEngine(catalog, n.potsoLedger, slasher)
 
 	fromHeight := uint64(0)
