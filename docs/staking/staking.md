@@ -1,264 +1,348 @@
-# ZapNHB Staking and Delegation
+# ZNHB Staking and Delegation
 
-This document describes the ZapNHB staking pipeline, on-chain state layout, JSON-RPC surface, and emitted events following the introduction of delegation, unbonding, and claim flows. It is intended for auditors, investors, developers, end users, and regulators who require a comprehensive view of the staking module.
-
-> ✅ **General availability and pause control:** Staking is GA on supported networks. Governance manages availability via the `staking.pause.enabled` toggle described in the [governance parameter catalog](../governance/params.md#staking-pause-enabled). When the corresponding `system/pauses` entry reports `staking = false`, delegation, undelegation, and claims are accepted. Operators can unpause the module by executing `gov.v1/MsgSetPauses` with `pauses.staking = false` and can temporarily halt flows by flipping the same flag back to `true`.
+This document describes what the staking code does: the transactions, account
+fields, unbonding queue, reward index, JSON-RPC methods, CLI commands and
+events. It is written from the source in this repository. File and line
+references are to `origin/main` at the time of writing.
 
 ## Overview
 
-Stakeholders can lock ZapNHB (ZNHB) balances, optionally delegate voting power to validators, and later queue withdrawals through an unbonding period before claiming their tokens. Rewards accrue at a **fixed 12.5% annual percentage rate (APR)** that is **non-compounding**—each reward period mints a linear share of the annual budget using a global reward index instead of rolling previous interest into the next cycle. Payouts settle on a **30-day interval** (2,592,000 seconds) aligned to the first reward minted after activation. The staking module supports:
+- A holder locks ZNHB (`BalanceZNHB` to `LockedZNHB`) by signing a `TxTypeStake`
+  transaction. The lock goes to the holder's own validator address
+  (self-stake) or to another address named in the payload (delegation).
+- Withdrawing is two transactions: `TxTypeUnstake` starts an unbonding entry,
+  and `TxTypeStakeClaim` returns the ZNHB to `BalanceZNHB` once the entry's
+  release time has passed.
+- Staking rewards are a separate flow: accrual against a global index, claimed
+  with `TxTypeStakeClaimRewards` once per payout period.
+- The stake of an address also feeds validator eligibility and BFT voting power;
+  see the [validator onboarding guide](../validators/onboarding.md).
 
-- Self-staking and third-party delegation with validator power tracking.
-- Deterministic unbonding queues per delegator with a 72-hour release window.
-- A global reward index model that updates proportionally to stake and time, avoiding compounding interest.
-- JSON-RPC endpoints and CLI commands to delegate, undelegate, claim matured stake, and inspect reward indexes.
-- Event emission for delegated, undelegated, claimed stake, reward index updates, and emission-cap events.
-- Expanded balance queries that expose locked amounts, delegation targets, reward indexes, pending unbond queues, and unclaimed rewards.
+### Transaction types
 
-### Reward Index Model (Auditors & Developers)
+Values from `core/types/transaction.go`.
 
-Rewards accrue through a pair of monotonically increasing indexes: a global reward index that advances every 30-day interval and per-delegator cursors stored in account metadata. When the network mints rewards, it increments the global index by `(targetAPR / 12) * indexScale` to reflect the monthly share of the 12.5% APR. Individual delegators earn `lockedZNHB * (globalIndex - delegatorIndex)` and then advance their personal index cursor. Because the calculation references the difference between indexes, rewards do **not** compound—the principal stays constant across periods while unclaimed rewards accumulate separately.
-
-Delegators can safely miss one or more 30-day payouts: their index cursor advances when they eventually claim, minting the entire accrued balance in a single transaction.
-
-## State Model (Auditors & Developers)
-
-Each account (`types.Account`) now contains the following staking-related fields:
-
-| Field | Type | Description |
+| Type | Value | Signer's payload |
 | --- | --- | --- |
-| `Stake` | `*big.Int` | Amount of voting power currently attributed to the account as a validator. Includes self-stake and delegated stake. |
-| `LockedZNHB` | `*big.Int` | Total ZapNHB locked by the account and actively delegated. |
-| `DelegatedValidator` | `[]byte` | Raw 20-byte address of the validator receiving this account's delegation. Empty when not delegated. |
-| `PendingUnbonds` | `[]types.StakeUnbond` | Queue of unbonding entries awaiting maturity. Each entry carries the unbond ID, validator, amount, and UNIX release time. |
-| `NextUnbondingID` | `uint64` | Monotonic counter used to assign unique IDs to new unbond entries. |
+| `TxTypeStake` | `0x06` | RLP `[validator bytes, registerValidator bool (optional)]`; `Value` = amount in base units |
+| `TxTypeUnstake` | `0x07` | RLP `[validator bytes, deregisterValidator bool (optional)]`; `Value` = amount |
+| `TxTypeStakeClaim` | `0x0D` | RLP `[unbondingId uint64]` (required, must be non-zero) |
+| `TxTypeStakeClaimRewards` | `0x34` | none |
+| `TxTypeSetRewardBeneficiary` | `0x1A` | RLP `[beneficiary string]`; see the onboarding guide |
+| `TxTypeHeartbeat` | `0x08` | optional heartbeat payload; see the onboarding guide |
 
-Metadata is persisted via the account metadata trie and automatically populated for existing accounts with zero values. Validator set updates occur whenever an account's `Stake` meets or exceeds the configurable `staking.minimumValidatorStake` parameter. Networks that have not yet set this governance parameter fall back to the legacy 1,000 ZNHB threshold exposed by `DefaultMinimumValidatorStake`. Operators can inspect or propose adjustments to this threshold through the [governance parameter catalog](../governance/params.md).
+Handlers: `applyStake`, `applyUnstake`, `applyStakeClaim`,
+`applyStakeClaimRewards` in `core/state_transition.go` (lines 6507-6626),
+dispatched from `handleNativeTransaction` (line 3958 onward). Each of the four
+staking transaction types is counted against the `potso` module quota
+(`applyQuota(modulePotso, ...)`).
 
-### Unbonding Entries
+Every one of these operations is refused while the staking module is paused
+(see [Pause](#pause)).
 
-`types.StakeUnbond` captures pending releases:
+### Account fields
 
-- `ID`: Unique sequence per delegator.
-- `Validator`: 20-byte address that previously held the delegation.
-- `Amount`: ZNHB scheduled for release.
-- `ReleaseTime`: UNIX timestamp when the delegator can claim.
+`types.Account` (`core/types/account.go`) carries the staking state:
 
-Entries are appended when `StakeUndelegate` is invoked and removed upon successful `StakeClaim` calls after the release time has elapsed.
+| Field | Meaning |
+| --- | --- |
+| `Stake` | Voting power attributed to the address as a validator: its own self-stake plus ZNHB delegated in by others. |
+| `LockedZNHB` | ZNHB this account has locked, whether self-staked or delegated to someone else. |
+| `DelegatedValidator` | 20-byte address the account's `LockedZNHB` is delegated to. Empty when nothing is locked. Equal to the account's own address for self-stake. |
+| `PendingUnbonds` | Queue of `StakeUnbond{ID, Validator, Amount, ReleaseTime}`. |
+| `NextUnbondingID` | Counter for unbond IDs; the first ID assigned is `1`. |
+| `StakeShares`, `StakeLastIndex`, `StakeLastPayoutTs` | Reward accrual state (see [Rewards](#rewards)). |
+| `ValidatorRegistered`, `ValidatorRegisteredAt` | Explicit validator opt-in flag and the block time it last turned on. |
 
-## Business Logic (Auditors, Developers, Regulators)
+### Minimum validator stake
 
-### Delegation Flow
+The threshold for validator eligibility is the governance parameter
+`staking.minimumValidatorStake`. When it has never been set, the default is
+`10000000000000000000000` base units = 10,000 ZNHB
+(`native/governance/types.go`, `defaultMinimumValidatorStakeWei`; read in
+`core/state_transition.go` `minimumValidatorStake`, line 6997). The
+`[global.Staking].MinStakeWei` value in `config.toml` is only validated as an
+integer at startup (`core/node.go` `ValidateStakingConfig`); it does not set
+this threshold. The parameter `staking.minStakeWei` is in the governance
+allow-list but, per its own doc comment (`native/governance/types.go`, line
+272), has no enforcement path in the delegation handler.
 
-1. **Eligibility**: Delegator must hold sufficient liquid ZNHB and optionally specify a validator address. Omitted validator defaults to self.
-2. **State mutations**:
-   - Deduct ZNHB from `BalanceZNHB` and increment `LockedZNHB`.
-   - Record validator in `DelegatedValidator` (unless delegation cleared).
-   - Increase validator `Stake` to reflect new voting power.
-   - Append `stake.delegated` event with amount and validator metadata.
+## Delegation (`TxTypeStake`)
 
-3. **Validator Accounting**: Self-delegation increases both `LockedZNHB` and `Stake`. Delegation to another validator only touches `LockedZNHB` for the delegator while increasing the validator's `Stake`.
+`StakeDelegate` (`core/state_transition.go`, line 5759):
 
-### Unbonding Flow
+1. Rejected if the staking module is paused (`ErrStakePaused`), if `Value` is
+   not positive (`stake must be positive`), or if the validator address is not
+   20 bytes.
+2. An empty validator field means self-stake (target = the signer).
+3. The signer needs `BalanceZNHB >= amount`, else `insufficient ZapNHB`.
+4. If the signer already has locked stake delegated to a different address,
+   the call fails with `existing delegation must be fully undelegated before
+   switching validators`.
+5. Effects on the signer: `BalanceZNHB -= amount`, `LockedZNHB += amount`,
+   `DelegatedValidator = target`, nonce incremented.
+   - Self-stake: `Stake += amount` on the signer.
+   - Delegation to another address: `Stake += amount` on the target account,
+     the signer is added to the target's delegator index, and the target's
+     "delegated-in" total increases by `amount`. There is no check that the
+     target is a registered validator.
+6. `RegisterValidator = true` in the payload is only accepted with no
+   third-party target (`registerValidator is only valid for self-stake`); with
+   zero `Value` it is a pure registration that sets the flag without moving
+   funds.
 
-1. **Preconditions**: Delegator must have sufficient locked ZNHB and an active delegation.
-2. **Execution**:
-   - Decrease `LockedZNHB` by the requested amount.
-   - If self-staked, reduce `Stake` proportionally.
-   - Generate a new unbond entry with `ReleaseTime = now + 72h`.
-   - Clear `DelegatedValidator` when no locked stake remains.
-   - Decrease validator `Stake` when delegating away from another validator.
-   - Emit `stake.undelegated` event (contains amount, validator, release time, unbond ID).
+## Unbonding (`TxTypeUnstake`)
 
-3. **Claiming**: Before release time, claims are rejected. After maturity, tokens are returned to `BalanceZNHB`, the unbond entry is removed, and a `stake.claimed` event is emitted.
+`StakeUndelegate` (line 5899):
 
-## JSON-RPC Interface (Developers & Integrators)
+1. Requires `LockedZNHB >= amount` (`insufficient locked stake`) and a non-empty
+   `DelegatedValidator` (`no active delegation`).
+2. `LockedZNHB -= amount`. For self-stake `Stake -= amount` on the signer; for a
+   delegation `Stake -= amount` on the validator account and its delegated-in
+   total decreases (`validator stake underflow` if it would go negative).
+3. A `StakeUnbond` is appended with `ReleaseTime = block time + unbonding
+   period` and the next `NextUnbondingID`.
+4. `DelegatedValidator` is cleared when `LockedZNHB` reaches zero.
+5. The unbonded amount is not in `BalanceZNHB` yet; it is only claimable after
+   `ReleaseTime`.
 
-### Updated Balance Query
+**Unbonding period.** It is the governance parameter `staking.unbondingDays`
+(integer `>= 1`; validator in `native/governance/engine.go`). When that
+parameter is unset the fallback is **7 days** (`unbondingPeriod`,
+`core/state_transition.go` line 67; `stakingUnbondingPeriod`, line 6459). The
+`[global.Staking].UnbondingDays` config value defaults to 7 as well
+(`config/config.go`, line 242) but the state transition reads only the
+governance parameter and the constant.
 
-`nhb_getBalance` now returns the extended `BalanceResponse` payload, including the delegator-specific reward index cursor and unclaimed reward amount:
+A `TxTypeUnstake` with `deregisterValidator = true` and zero `Value` clears the
+`ValidatorRegistered` flag without unbonding (`applyUnstake`, line 6555); it is
+only valid for a self-stake account (`deregisterValidator is only valid for
+self-stake`).
+
+## Claiming unbonded stake (`TxTypeStakeClaim`)
+
+`StakeClaim` (line 6037): `unbondingId` must be non-zero; an unknown ID returns
+`unbonding entry N not found`; before `ReleaseTime` it returns `unbonding entry
+N is not yet claimable`. On success the entry is removed, `BalanceZNHB +=
+amount`, the nonce increments, and a `stake.claimed` event is emitted (see the
+note on the duplicate event name below).
+
+## Rewards
+
+Reward code: `core/rewards/engine.go` (index), `core/state_transition.go`
+(accrual and claim), `core/state/staking_rewards.go`.
+
+### Global index
+
+`rewards.Engine` keeps a global index that starts at `1e18` and, whenever it is
+advanced, grows linearly with elapsed block time:
+
+```
+increment = elapsedSeconds * aprBps * 1e18 / (31,536,000 * 10,000)
+```
+
+(`core/rewards/engine.go`, `UpdateGlobalIndex`; a year is
+`365 * 24 * 60 * 60` seconds.) It is simple interest; nothing compounds. The
+engine is advanced by every stake, unstake, claim and APR change
+(`advanceStakeRewards`, line 6647).
+
+### APR
+
+The APR in basis points is `[global.Staking].AprBps`, default `1250` (12.5%),
+overridable by the governance parameter `staking.aprBps` (`<= 10000`). It is
+loaded into the state processor at node startup by `SyncStakingParams`
+(`core/node.go` line 1479; call in `cmd/nhb/main.go` line 189).
+
+### Accrual
+
+When an account stakes or unstakes, `accrueStakeAccount` adds
+`basis * (index - StakeLastIndex) / 1e18` to `StakeShares` and sets
+`StakeLastIndex = index` (`accrueStakeAccountWithBasis`, line 6829). `basis` is
+`stakeRewardBasis` (line 6674):
+
+- an account delegating to another validator uses its `LockedZNHB`;
+- otherwise it uses `Stake` minus the ZNHB delegated in by others, so a
+  validator does not accrue on capital that is not its own.
+
+### Claiming rewards (`TxTypeStakeClaimRewards`)
+
+`StakeClaimRewards` (line 6106), invoked for the signer with no payload:
+
+- The payout period is the governance parameter `staking.payoutPeriodDays`,
+  falling back to 30 days (`stakePayoutPeriodDays = 30`, line 72;
+  `stakingPayoutPeriodSeconds`, line 6424). A claim is accepted only when at
+  least one whole period has elapsed since `StakeLastPayoutTs`; otherwise the
+  transaction fails with `stake: claim not yet due` (`ErrNotDue`,
+  `core/errors/stake.go`).
+- Elapsed whole periods are paid together; the remainder of the index delta is
+  kept for later.
+- The payout is `StakeShares * eligibleIndexDelta` (line 6310), where
+  `eligibleIndexDelta` is the index delta since `StakeLastIndex` scaled by
+  whole periods over total elapsed time. The code does not divide by the `1e18`
+  index scale here, unlike the accrual step above.
+- **The payout is a transfer, not a mint.** It is debited from the treasury
+  account configured as `[potso.rewards] TreasuryAddress`
+  (`sp.PotsoRewardConfig().TreasuryAddress`) and credited to the claimant. If
+  the treasury balance is short the transaction fails with
+  `potso.ErrInsufficientTreasury`; if no treasury is configured it fails with
+  `staking rewards: treasury not configured`.
+- **Annual cap.** The governance parameter `staking.maxEmissionPerYearWei`
+  caps the total claimed per UTC calendar year; when it is unset, or `0`, there
+  is no cap (`stakingMaxEmissionPerYear`, line 8237). A capped payout emits
+  `stake.emissionCapHit`. The `MaxEmissionPerYearWei` value in `config.toml`
+  is not read by the state transition.
+- After a successful claim `StakeLastPayoutTs` is set to the block time, the
+  nonce advances, and the events below are emitted.
+
+The parameters `staking.rewardAsset` and `staking.compoundDefault` are in the
+governance allow-list and are copied into the node's runtime configuration
+(`core/node.go`, `SyncStakingParams`), but nothing in the state transition
+reads them; rewards are always paid in ZNHB and there is no compounding.
+
+## JSON-RPC
+
+The node's JSON-RPC endpoint accepts `POST` with a JSON body. `nhb_getBalance`
+needs no authentication; the `stake_*` read methods require a bearer JWT
+(`s.requireAuthInto`, `rpc/stake_handlers.go`).
+
+### `nhb_getBalance`
+
+Params: `["<nhb1... address>"]`. Result is `BalanceResponse`
+(`rpc/http.go`, line 1069):
 
 ```json
 {
   "address": "nhb1...",
-  "balanceNHB": "0",
-  "balanceZNHB": "5000",
-  "stake": "1000",
-  "lockedZNHB": "1000",
+  "balanceNHB": 0,
+  "balanceZNHB": 5000,
+  "stake": 1000,
+  "lockedZNHB": 1000,
   "delegatedValidator": "nhb1validator...",
-  "rewardIndex": "285000000000000000000", // scaled global index snapshot
-  "delegatorIndex": "280000000000000000000", // delegator's personal cursor
-  "accruedRewards": "520", // total rewards yet to claim
- "pendingUnbonds": [
-    {
-      "id": 1,
-      "validator": "nhb1validator...",
-      "amount": "1000",
-      "releaseTime": 1700003600
-    }
+  "pendingUnbonds": [
+    { "id": 1, "validator": "nhb1validator...", "amount": 1000, "releaseTime": 1700003600 }
   ],
+  "unbondingCompletesAt": 1700003600,
+  "pendingStakingRewards": 0,
   "username": "example",
   "nonce": 3,
-  "engagementScore": 42
+  "engagementScore": 42,
+  "validatorRegistered": false
 }
 ```
 
-When a caller has never delegated the staking fields remain zeroed, but the schema is always present so integrators can rely on a consistent payload. If governance pauses staking, read-only calls such as `nhb_getBalance` continue to succeed while mutations return `codeModulePaused`.
+`delegatedValidator`, `pendingUnbonds`, `unbondingCompletesAt` and
+`validatorRegisteredAt` are omitted when empty. Amounts are `big.Int` JSON
+numbers. `pendingStakingRewards` is the `payable` value of the claim preview
+computed at the node's current time. This method keeps working while staking is
+paused.
 
-### `stake_delegate`
+### `stake_getPosition`
 
-Permanently disabled. `handleStakeDelegate` unconditionally returns `HTTP 410
-Gone` (`codeMethodDisabled`) regardless of params, because the endpoint used
-to trust a client-supplied `caller` address with no signature proving the
-caller actually controlled it. The real path is signing a `TxTypeStake`
-transaction and submitting it via `nhb_sendTransaction`, so the caller's own
-signature authorizes the action. There is no CLI tool for this today —
-construct and sign the transaction directly.
+Params: `["<nhb1... address>"]`. Requires auth. Result:
 
-### `stake_undelegate`
+```json
+{ "shares": "0", "lastIndex": "0", "lastPayoutTs": 0 }
+```
 
-Permanently disabled for the same reason as `stake_delegate`. `handleStakeUndelegate`
-unconditionally returns `HTTP 410 Gone` (`codeMethodDisabled`). Queue an
-unbonding entry by signing a `TxTypeUnstake` transaction and submitting it via
-`nhb_sendTransaction`. There is no CLI tool for this today.
-
-### `stake_claim`
-
-Permanently disabled for the same reason as `stake_delegate`. `handleStakeClaim`
-unconditionally returns `HTTP 410 Gone` (`codeMethodDisabled`). Claim a matured
-unbond entry by signing a `TxTypeStakeClaim` transaction and submitting it via
-`nhb_sendTransaction`. There is no CLI tool for this today.
+(`rpc/stake_handlers.go`, `stakePositionResult`).
 
 ### `stake_previewClaim`
 
-The read-only method `stake_previewClaim` reveals the current monthly payout window for a delegator. Responses include the projected emission for the next period, the reward indexes, and the timestamp when rewards become claimable. The request follows the same authentication rules as `nhb_getBalance`.
+Params: `["<nhb1... address>"]`. Requires auth. Result:
 
 ```json
-{
-  "caller": "nhb1delegator..."
-}
+{ "payable": "0", "nextPayoutTs": 0 }
 ```
 
-CLI equivalent:
+`payable` is computed by `Node.StakePreviewClaim` (`core/node.go`, line 5755).
 
-```bash
-nhb-cli stake preview nhb1delegator...
-```
+Both read methods return HTTP 503 with code `-32050` (`codeModulePaused`,
+message `staking module paused`) while staking is paused, and HTTP 429 with code
+`-32020` when the per-source rate limit is exceeded.
 
-### Error Semantics
+### Disabled methods
 
-- Calls made while governance has toggled `staking.pause.enabled = true` return `codeModulePaused` with contextual messaging so integrators can surface the blocked state to users.
-- Invalid amounts (`<= 0`) trigger `codeInvalidParams`.
-- Switching validators without fully removing existing delegation returns a descriptive error.
-- Claims before maturity return `unbonding entry is not yet claimable` messages.
+`stake_delegate`, `stake_undelegate`, `stake_claim` and `stake_claimRewards`
+always return HTTP `410 Gone` with code `-32060` (`codeMethodDisabled`) and a
+message telling the caller to sign a transaction and submit it with
+`nhb_sendTransaction` (`rpc/stake_handlers.go`, `stakeRPCDisabledMessage`). They
+were disabled because they trusted a client-supplied address with no signature
+proving control of it, or (for `stake_claimRewards`) wrote to state outside
+consensus.
 
-## Monitoring & Tooling (Operators)
+To stake, unstake, claim unbonded stake or claim rewards, sign the matching
+transaction type and submit it with `nhb_sendTransaction`.
 
-- **Grafana**: Import [`observability/grafana/staking.json`](../../observability/grafana/staking.json) to visualise daily rewards, bonded supply, pause status, and emission-cap hits. Pair the pause and cap panels with alerts so on-call engineers are paged when staking halts or emissions saturate.
-- **CLI quick checks**: Use `nhb-cli` for authenticated spot checks when dashboards are unavailable:
+### Errors
 
-  ```bash
-  nhb-cli stake position nhb1delegator...
-  ```
+- Paused module: `ErrStakePaused` (`staking: module paused`,
+  `core/state_transition.go` line 111) from the state transition; HTTP 503 /
+  `-32050` from the read methods.
+- Non-positive amount: `stake must be positive` / `unstake must be positive`.
+- Switching validators with locked stake:
+  `existing delegation must be fully undelegated before switching validators`.
+- Claim too early: `unbonding entry N is not yet claimable`
+  (unbond claim) or `stake: claim not yet due` (reward claim).
 
-  ```
-  Stake position for nhb1delegator...
-    Shares:       5000000000000000000
-    Last index:   285000000000000000000
-    Last payout:  2024-06-01T00:00:00Z (1717209600)
-  ```
+## CLI
 
-  ```bash
-  nhb-cli stake preview nhb1delegator...
-  ```
+`nhb-cli` (`cmd/nhb-cli/stake.go`, `main.go`):
 
-  ```
-  Stake rewards preview for nhb1delegator...
-    Claimable now: 742.5 ZapNHB
-    Next payout:   2024-07-01T00:00:00Z (1719792000)
-  ```
+| Command | What it does |
+| --- | --- |
+| `nhb-cli stake <amount> <key_file>` | Signs and sends a `TxTypeStake` with no payload (self-stake). `amount` is a base-10 integer in base units. |
+| `nhb-cli un-stake <amount> <key_file>` | Signs and sends a `TxTypeUnstake` (`Value = amount`, no payload). |
+| `nhb-cli register-validator <amount> <key_file>` | `TxTypeStake` with `registerValidator = true`. `0` registers without adding stake. |
+| `nhb-cli deregister-validator <key_file>` | `TxTypeUnstake` with `deregisterValidator = true` and zero value. |
+| `nhb-cli stake position <address>` | Calls `stake_getPosition`; prints shares, last index, last payout. |
+| `nhb-cli stake preview <address>` | Calls `stake_previewClaim`; prints `Claimable now` and the next payout time. |
+| `nhb-cli stake claim <address>` | Calls `stake_claimRewards`, which the server always rejects with 410 (see Disabled methods), so this command cannot succeed. |
+| `nhb-cli balance <address>` | Calls `nhb_getBalance`; prints staked, locked, delegated validator, validator registration, pending unbonds. |
 
-- **RPC quick checks**: Issue authenticated JSON-RPC calls directly when automating runbooks or integrating with other systems:
+There is no `nhb-cli` command that submits `TxTypeStakeClaim` or
+`TxTypeStakeClaimRewards`, or one that delegates to another validator. Every
+transaction command needs `NHB_RPC_TOKEN` set, and the CLI defaults to
+`http://localhost:8080` unless `RPC_URL` or `--rpc` is set.
 
-  ```bash
-  curl -sS -X POST http://127.0.0.1:8545 \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer ${RPC_TOKEN}" \
-    -d '{
-      "jsonrpc": "2.0",
-      "id": 1,
-      "method": "stake_getPosition",
-      "params": ["nhb1delegator..."]
-    }'
-  ```
+## Events
 
-  ```json
-  {
-    "id": 1,
-    "jsonrpc": "2.0",
-    "result": {
-      "shares": "5000000000000000000",
-      "lastIndex": "285000000000000000000",
-      "lastPayoutTs": 1717209600
-    }
-  }
-  ```
+Attribute names below are what the code emits (`core/events/stake.go`,
+`core/state_transition.go`).
 
-  ```bash
-  curl -sS -X POST http://127.0.0.1:8545 \
-    -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer ${RPC_TOKEN}" \
-    -d '{
-      "jsonrpc": "2.0",
-      "id": 2,
-      "method": "stake_claimRewards",
-      "params": ["nhb1delegator..."]
-    }'
-  ```
-
-  ```json
-  {
-    "id": 2,
-    "jsonrpc": "2.0",
-    "result": {
-      "minted": "742500000000000000000",
-      "periods": 1,
-      "aprBps": 1250,
-      "nextEligibleTs": 1719792000
-    }
-  }
-  ```
-
-These commands complement the staking dashboard so operations teams can verify health from shell environments, CI pipelines, or incident response playbooks.
-
-## Event Catalogue (Auditors, Integrators)
-
-| Event | Attributes | Purpose |
+| Event | Attributes | Emitted by |
 | --- | --- | --- |
-| `stake.delegated` | `delegator`, `validator`, `amount`, `locked` | Tracks delegation adjustments and validator power changes. |
-| `stake.undelegated` | `delegator`, `validator`, `amount`, `releaseTime`, `unbondingId` | Signals the start of an unbonding period. |
-| `stake.claimed` | `delegator`, `validator`, `amount`, `unbondingId` | Indicates matured stake reclaimed by the delegator. |
-| `stake.rewardsClaimed` | `addr`, `paidZNHB`, `periods`, `aprBps`, `nextEligibleUnix` | Records reward mints when delegators claim accrued payouts. |
+| `stake.delegated` | `addr`, `sharesAdded`, `newShares`, `lastIndex`, `validator`, `amount`, `locked` (`locked` only on the delegator's event) | `StakeDelegate`; one event for the delegator and, for a third-party target, one for the validator account |
+| `stake.undelegated` | `addr`, `sharesRemoved`, `newShares`, `lastIndex`, `validator`, `amount`, `releaseTime`, `unbondingId` (release time and ID only on the delegator's event) | `StakeUndelegate` |
+| `stake.claimed` (unbond claim) | `delegator`, `validator`, `amount`, `unbondingId` | `StakeClaim` |
+| `stake.rewardsClaimed` | `addr`, `paidZNHB`, `periods`, `aprBps`, `nextEligibleUnix` | `StakeClaimRewards` |
+| `stake.claimed` (reward claim alias) | `addr`, `minted`, `periods`, `aprBps`, `nextEligibleUnix` | `StakeClaimRewards`, alongside `stake.rewardsClaimed` |
+| `stake.emissionCapHit` | `requestedZNHB`, `attemptedZNHB`, `allowedZNHB`, `ytd`, `cap` | `StakeClaimRewards` when the annual cap limits a payout |
+| `stake.paused` | `addr`, `operation` (`delegate`, `undelegate`, `claim`, `claimRewards`), `reason`, `unbondingId` | Appended when a staking call is refused because of the pause; see the note below |
+| `stake.validatorRegistrationChanged` | `addr`, `registered`, `at` | `setValidatorRegistered` |
 
-These events stream through the existing node event feed so external observers and webhook infrastructure receive timely updates. When governance pauses staking, `stake.paused` events accompany rejected mutations to document the reason.
+Two different events share the name `stake.claimed`: the unbond-claim event and
+the legacy alias of the reward claim. Consumers must tell them apart by their
+attributes.
 
-## Operational Considerations (Regulators & Investors)
+`executeTransaction` drops the events appended by a transaction that returns an
+error (`core/state_transition.go`, lines 2851-2869, except the transfer-paused
+and sponsorship errors), so the `stake.paused` event is appended but discarded
+together with the rejected transaction.
 
-- **Unbonding Period**: Fixed at 72 hours to balance liquidity and security. Regulators can audit compliance by inspecting `ReleaseTime` values and event chronology.
-- **Validator Accountability**: Validator power is updated immediately upon delegation/undelegation, ensuring consensus weights are accurate.
-- **Transparency**: RPC surfaces provide complete insight into locked balances and pending exits, supporting investor reporting and regulatory audits.
-- **Safety Checks**: All staking operations are subject to standard authentication, parameter validation, and state consistency checks to prevent unauthorized delegation or premature claims.
+## Pause
 
-## User Experience Notes (End Users)
+`staking` is one of the module pause flags. The state transition reads it from
+the on-chain parameter entry `system/pauses` (`native/params/keys.go`), reloaded
+by `refreshModulePauses` (`core/node.go`, line 804). Local `config.toml`
+`[global.Pauses].Staking` is not enforced against that value: at startup the
+node only logs a warning if the two disagree
+(`cmd/nhb/main.go` line 165, `Node.StakingPauseOnChain`). This repository
+contains no code path that writes `system/pauses`, so how the flag is changed
+is not described here.
 
-1. Lock ZNHB and optionally support a validator by signing and submitting a `TxTypeStake` transaction via `nhb_sendTransaction`. If the network is paused you will receive `codeModulePaused` until governance resumes the module.
-2. Monitor `nhb_getBalance` or the CLI `balance` command to view locked stake, delegation target, and pending unbonds. Accounts without historical delegations still return zeroed staking fields.
-3. Initiate withdrawals by signing and submitting a `TxTypeUnstake` transaction via `nhb_sendTransaction`. Tokens become claimable after ~72 hours; attempts before then are rejected.
-4. Complete the process by signing and submitting a `TxTypeStakeClaim` transaction via `nhb_sendTransaction` to restore ZNHB to the liquid balance once the release time has elapsed.
+## Observability
 
-The `stake_delegate`, `stake_undelegate`, and `stake_claim` JSON-RPC methods
-and any `nhbctl stake ...` CLI commands are not available — see the
-[JSON-RPC Interface](#json-rpc-interface-developers--integrators) section
-above.
-
-This flow ensures a predictable staking lifecycle with observable state transitions for all stakeholders.
+`observability/metrics.go` registers `nhb_staking_rewards_paid_zn`,
+`nhb_staking_paused`, `nhb_staking_total_staked{account}`, `nhb_staking_cap_hit`
+and `nhb_staking_index_persist_failures_total`. A dashboard definition is in
+[`observability/grafana/staking.json`](../../observability/grafana/staking.json).

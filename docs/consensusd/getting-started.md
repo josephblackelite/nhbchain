@@ -1,56 +1,91 @@
 # consensusd Getting Started
 
-`consensusd` runs the NHB Chain consensus node as a gRPC service. The daemon exposes
-consensus-specific APIs without any HTTP or JSON-RPC endpoints, making it suitable
-for deployments where the validator stack is isolated from external clients.
+`consensusd` (`cmd/consensusd`) runs the node's consensus engine as a gRPC
+service. It has no HTTP or JSON-RPC listener. It connects out to a separate
+`p2pd` process (`cmd/p2pd`) for peer-to-peer gossip. The all-in-one binary
+`cmd/nhb` (used by the validator bootstrap script and `deploy/systemd/nhb.service`)
+runs consensus, P2P and JSON-RPC in a single process instead.
 
 ## Prerequisites
 
-* Go-built binaries of `consensusd` and `p2pd` in your `$PATH` (see the `cmd/`
-  directory for build instructions).
-* A populated `config.toml` and keystore compatible with the validator account.
-* Access to a running `p2pd` instance reachable over the network.
-* Shared-secret or mutual TLS credentials so that only trusted peers can reach
-  the consensus gRPC API.
+- Built binaries of `consensusd` and `p2pd` (`go build ./cmd/consensusd`,
+  `go build ./cmd/p2pd`).
+- A `config.toml` and a validator key source. The key is loaded from, in order:
+  `ValidatorKMSEnv` / `ValidatorKMSURI` (an `env:` URI naming an environment
+  variable that holds the hex private key), otherwise the keystore file at
+  `ValidatorKeystorePath`, decrypted with the passphrase from
+  `NHB_VALIDATOR_PASS` (or an interactive prompt when stdin is a terminal;
+  `cmd/internal/passphrase`).
+- A reachable `p2pd` (default `localhost:9091`).
+- Authentication material for the gRPC link: a shared secret, mutual TLS, or
+  both. `consensusd` refuses to start when neither is configured
+  (`consensus security requires a shared secret or client certificate
+  authentication`, `cmd/consensusd/main.go`, `buildConsensusServerSecurity`).
 
-> **Important:** `consensusd` refuses to start when the `[network_security]`
-> block is missing or resolves to an empty shared secret. For quick local
-> experiments, copy the inline example from `config-local.toml` (set
-> `AllowInsecure = true` and provide a short `SharedSecret`). Production
-> deployments must supply the token via `SharedSecretEnv` or `SharedSecretFile`,
-> leave `AllowInsecure = false`, and provision TLS material so both `consensusd`
-> and `p2pd` authenticate each other.
+## Security configuration
 
-## Command Flags
+Both `consensusd` and `p2pd` read the `[network_security]` section of
+`config.toml` (`config.NetworkSecurity`, `config/config.go` line 169):
+
+| Key | Meaning |
+| --- | --- |
+| `SharedSecretEnv` / `SharedSecretFile` / `SharedSecret` | Shared secret, resolved in that order: non-empty environment variable named by `SharedSecretEnv`, then the file, then the inline value. Relative file paths resolve against the config file's directory. |
+| `AuthorizationHeader` | gRPC metadata key that carries the secret. Empty means `authorization`; the value is lower-cased. A `Bearer <secret>` value is accepted as well as the bare secret. |
+| `ServerTLSCertFile`, `ServerTLSKeyFile` | TLS certificate and key for the `consensusd` gRPC server (both required together). |
+| `ClientCAFile`, `AllowedClientCommonNames` | Require and verify client certificates on the server; the allow-list matches certificate DNS names or URIs. Needs the server cert and key. |
+| `ServerCAFile`, `ClientTLSCertFile`, `ClientTLSKeyFile`, `ServerName` | Used by `consensusd` when it dials `p2pd`. |
+| `AllowInsecure` | Permits plaintext, but only together with the `--allow-insecure` command-line flag and a loopback address; otherwise startup fails. |
+| `AllowUnauthenticatedReads` | Read by `p2pd` only. |
+| `StreamQueueSize`, `RelayDropLogRatio` | Gossip relay queue size (default 128) and drop-alert ratio (default 0.1). |
+
+The repo `config.toml` sets `SharedSecretEnv = "NHB_NETWORK_SHARED_SECRET"`,
+`SharedSecretFile = "/etc/nhb/network.token"`,
+`AuthorizationHeader = "x-nhb-network-token"`, TLS file paths under
+`/etc/nhb/tls/`, and `AllowInsecure = false`. Those files must exist for
+`consensusd` to start with that file.
+
+If the secret resolves to an empty string and no client CA is configured, the
+server fails at startup. If TLS material is missing and `AllowInsecure` is not
+enabled with `--allow-insecure` on a loopback listener, the server also fails
+(`consensus security requires TLS material`).
+
+## Command flags
 
 | Flag | Default | Description |
-| ---- | ------- | ----------- |
+| --- | --- | --- |
 | `--config` | `./config.toml` | Path to the TOML configuration file. |
-| `--genesis` | _unset_ | Override path to a genesis JSON file. Takes precedence over the config file and `NHB_GENESIS`. |
-| `--allow-autogenesis` | `false` | Development flag enabling automatic genesis creation when no data exists. |
-| `--grpc` | `127.0.0.1:9090` | Listen address for the consensus gRPC API. |
-| `--p2p` | `localhost:9091` | Target address of the `p2pd` gRPC service. |
-| `--consensus-timeout-proposal` | Config (default `2s`) | Wait for a proposal before prevoting. |
-| `--consensus-timeout-prevote` | Config (default `2s`) | Wait after prevoting before moving to precommit. |
-| `--consensus-timeout-precommit` | Config (default `2s`) | Wait after precommitting before attempting commit. |
-| `--consensus-timeout-commit` | Config (default `4s`) | Maximum time allotted for committing a block before starting a new round. |
+| `--genesis` | empty | Genesis JSON path. Overrides `NHB_GENESIS` and the config `GenesisFile`. |
+| `--allow-autogenesis` | `false` | Development only: create a genesis automatically when none is stored. Overrides `NHB_ALLOW_AUTOGENESIS` and config `AllowAutogenesis`. |
+| `--allow-migrate` | `false` | Allow starting with a mismatched state schema (manual migrations only). |
+| `--grpc` | `127.0.0.1:9090` | Listen address of the consensus gRPC API. |
+| `--p2p` | `localhost:9091` | Address of the `p2pd` gRPC service. |
+| `--allow-insecure` | `false` | Development only: permit plaintext gRPC on loopback (also needs `AllowInsecure = true` in config). |
+| `--consensus-timeout-proposal` | config value | Wait for a proposal before prevoting. |
+| `--consensus-timeout-prevote` | config value | Wait after prevoting. |
+| `--consensus-timeout-precommit` | config value | Wait after precommitting. |
+| `--consensus-timeout-commit` | config value | Total time allowed to commit before a new round starts. |
 
-Environment helpers:
+Genesis resolution order: `--genesis`, then `NHB_GENESIS`, then config
+`GenesisFile`. If `GenesisFile` is set, does not exist, and autogenesis is off,
+`consensusd` writes the embedded mainnet genesis (`config.MainnetGenesis`) to
+that path.
 
-* `NHB_GENESIS` – provides a genesis path when `--genesis` is not supplied.
-* `NHB_ALLOW_AUTOGENESIS` – mirrors the `--allow-autogenesis` flag.
-* `NHB_VALIDATOR_PASS` – required to decrypt the validator keystore unless KMS is configured.
-* `NHB_NETWORK_SHARED_SECRET` (or the value of `network_security.SharedSecretEnv`)
-  – supplies the shared-secret token used to authorize gRPC requests. The daemon
-  exits during startup if the resolved secret is blank.
-* `NHB_CONSENSUS_TIMEOUT_PROPOSAL`, `NHB_CONSENSUS_TIMEOUT_PREVOTE`, `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`, and `NHB_CONSENSUS_TIMEOUT_COMMIT`
-  – override the matching CLI flags with duration strings such as `500ms` or `3s`.
+Environment variables read by `consensusd`:
 
-## Consensus Timeouts
+- `NHB_GENESIS`, `NHB_ALLOW_AUTOGENESIS` as above.
+- `NHB_VALIDATOR_PASS`: keystore passphrase.
+- The variable named by `SharedSecretEnv` (`NHB_NETWORK_SHARED_SECRET` in the
+  repo `config.toml`): the shared secret.
+- `NHB_CONSENSUS_TIMEOUT_PROPOSAL`, `NHB_CONSENSUS_TIMEOUT_PREVOTE`,
+  `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`, `NHB_CONSENSUS_TIMEOUT_COMMIT`: Go duration
+  strings such as `500ms` or `3s`. A flag beats the environment variable, which
+  beats the config value. Values must be positive.
+- `NHB_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `OTEL_EXPORTER_OTLP_INSECURE`: logging environment and OpenTelemetry export.
 
-`consensusd` reads the round timers from the `[consensus]` section of `config.toml`
-and falls back to the built-in defaults when the values are omitted. All duration
-values accept the Go duration format (`750ms`, `2s`, `1m30s`, etc.).
+## Consensus timeouts
+
+The round timers come from `[consensus]` in `config.toml`:
 
 ```toml
 [consensus]
@@ -60,41 +95,56 @@ PrecommitTimeout = "2s"
 CommitTimeout = "4s"
 ```
 
-Operators can adjust the timers at runtime with CLI flags or the environment
-variables listed above to better match their network latency profile.
+If a key is absent from the file the built-in default applies (2s, 2s, 2s, 4s;
+`config.defaultConsensusConfig`). If a key is present it is used as written:
+`consensusd` validates the final values with `config.ValidateConsensus` and exits
+when any is not positive. The repo `config.toml` currently sets all four to
+`"0s"`, so `consensusd` started with that file needs the four flags or
+environment variables above (or edited values). The `cmd/nhb` binary passes the
+values to `bft.WithTimeouts`, which ignores non-positive durations and keeps the
+engine defaults.
 
-## Ports and Connectivity
+## Ports and connectivity
 
-* Consensus gRPC service: defaults to `127.0.0.1:9090` and refuses
-  unauthenticated connections.
-* P2P backhaul (p2pd gRPC): defaults to `localhost:9091` and is maintained with
-  exponential backoff and backlog replay on reconnect.
+- Consensus gRPC server: `--grpc`, default `127.0.0.1:9090`. Every RPC checks the
+  configured authenticators before running.
+- `p2pd` link: `--p2p`, default `localhost:9091`. `consensusd` keeps one
+  bidirectional gossip stream to `p2pd` open and reconnects with exponential
+  backoff starting at 500 ms and capped at 30 s
+  (`maintainNetworkStream`). Outbound gossip is held in a queue of up to 4096
+  messages (the oldest is dropped when full) and retried with a delay that
+  grows from 100 ms to 5 s while the link is down
+  (`cmd/consensusd/resilient_broadcaster.go`).
 
-The daemon keeps the consensus ↔︎ P2P bidirectional stream alive, automatically
-re-dialling `p2pd` and re-flushing queued gossip after transient failures.
+## Services on the gRPC port
 
-## Health and Diagnostics
+`consensusd` registers `consensus.v1.ConsensusService`
+(`SubmitTxEnvelope`, `SubmitTransaction`, `GetValidatorSet`, `GetBlockByHeight`,
+`GetHeight`, `GetMempool`, `CreateBlock`, `CommitBlock`, `GetLastCommitHash`) and
+`consensus.v1.QueryService` (see [Consensus Query API](query-api.md)). Definitions
+are in `proto/consensus/v1/`. Server reflection is not registered.
 
-`consensusd` does not expose an HTTP health check. Operators can rely on the
-following gRPC level checks:
+## Health and diagnostics
 
-* Establish a gRPC connection to the consensus port and invoke `GetHeight`
-  (defined in `consensus.v1.ConsensusService`). A successful response confirms
-  the service is healthy.
-* Inspect logs for reconnect notices emitted when the P2P link drops.
-
-For liveness probes in container environments, use a lightweight gRPC probe such
-as [`grpcurl`](https://github.com/fullstorydev/grpcurl) and include the shared
-secret or present a client certificate:
+There is no HTTP health endpoint. Call `GetHeight` on the consensus port; a
+successful reply means the service is up. Because reflection is off, `grpcurl`
+needs the proto file. The example below assumes TLS; use `-plaintext` instead
+of `-cacert` only for a loopback listener started with `--allow-insecure`. Add
+`-cert`/`-key` when client certificates are required. The header name must match
+`AuthorizationHeader` (shown here with the repo config value):
 
 ```bash
 grpcurl \
-  -plaintext \
-  -H 'authorization: Bearer ${NHB_NETWORK_SHARED_SECRET}' \
-  localhost:9090 consensus.v1.ConsensusService/GetHeight
+  -import-path proto -proto consensus/v1/consensus.proto \
+  -H "x-nhb-network-token: ${NHB_NETWORK_SHARED_SECRET}" \
+  -cacert <ca-file-that-signed-the-consensusd-server-certificate> \
+  127.0.0.1:9090 consensus.v1.ConsensusService/GetHeight
 ```
 
-## Example Startup
+Reconnect notices to `p2pd` are written to stderr
+(`Failed to connect to p2pd at ...`, `Network stream terminated: ...`).
+
+## Example startup
 
 ```bash
 consensusd \
@@ -102,6 +152,5 @@ consensusd \
   --p2p p2pd.internal:9091
 ```
 
-The gRPC server enforces the shared secret (and mutual TLS when configured)
-before executing any RPC, so expose the port outside of localhost only after
-provisioning the required credentials.
+Expose the gRPC port beyond localhost only after configuring TLS and an
+authenticator.

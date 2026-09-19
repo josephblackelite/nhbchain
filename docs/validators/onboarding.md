@@ -1,396 +1,352 @@
 # Validator Onboarding Guide
 
-This is a literal, cold-start walkthrough for standing up a brand-new NHBChain
-validator on a fresh EC2 instance you have never touched before. It assumes
-nothing except a running Ubuntu server with SSH access and a terminal in
-front of you. Follow it top to bottom in order.
+This guide walks through standing up an NHBChain validator on a fresh Ubuntu
+server with `scripts/validator-only-bootstrap.sh`, and then explains, from the
+code, what makes that node a validator: registration, stake, heartbeats and
+epoch selection. Every statement here is taken from the source in this
+repository; where behaviour is not defined in code this guide does not describe
+it.
 
-If you just want the one-liner and already know what you're doing, see
-["Join As A Validator In One Command"](../../README.md#join-as-a-validator-in-one-command)
-in the repo README. This document exists for everything that command doesn't
-tell you: what it actually does, how to get paid once it's running, how to
-check whether your validator is really active, and what to do when something
-goes wrong.
+The one-command version is in the repo README under
+["Join As A Validator In One Command"](../../README.md#join-as-a-validator-in-one-command).
+
+## How a node becomes an active validator
+
+A node's validator key is a secp256k1 key. Its address is the account that
+carries the validator's state. Three separate things have to be true, and they
+are checked in different places:
+
+1. **Registered.** The account's `ValidatorRegistered` flag is set. The flag is
+   set only by a transaction the validator key itself signs: a `TxTypeStake`
+   whose payload has `registerValidator = true` and no third-party validator
+   target (`core/state_transition.go`, `applyStake`, ~line 6507). No other
+   account can set it. `nhb-cli register-validator` builds that transaction.
+2. **Enough stake, not delegated away.** `core/state_transition.go` `setAccount`
+   (~line 7266) computes
+   `meetsStake := registered && selfDelegated(account, addr) && basis >= minStake`.
+   - `basis` is the account's total `Stake`, which includes ZNHB delegated in by
+     any other wallet with nothing subtracted (`validatorEligibilityBasis`,
+     ~line 6717; its doc comment says there is no separate self-stake
+     requirement). Delegating at least the minimum to a node address from any
+     wallet therefore counts, and so does self-staking, and so does a mix.
+   - `selfDelegated` is true when the account is not delegating its own stake
+     to a different validator (`DelegatedValidator` empty or equal to itself,
+     ~line 6748).
+   - `minStake` is the governance parameter `staking.minimumValidatorStake`;
+     when unset it is `10000000000000000000000` base units = 10,000 ZNHB
+     (`native/governance/types.go` `defaultMinimumValidatorStakeWei`, line 402;
+     read by `minimumValidatorStake`, `core/state_transition.go` ~line 6997).
+     `[global.Staking].MinStakeWei` in `config.toml` is only format-checked at
+     startup and does not set this threshold (`core/node.go`
+     `ValidateStakingConfig`, ~line 1604).
+   - Reward accrual is different: `stakeRewardBasis` (~line 6674) excludes
+     delegated-in stake, so a validator earns staking rewards only on capital
+     it staked itself.
+3. **Selected at an epoch boundary.** Accounts that satisfy step 2 are recorded
+   in `EligibleValidators`. The active validator set is recomputed only when
+   `height % epochLength == 0` (`core/epochs.go` `ProcessBlockLifecycle`,
+   ~line 251, and `applyValidatorSelection`, ~line 374). With validator
+   rotation disabled, which is the only configuration production code creates
+   (`core/epoch/config.go` `DefaultConfig`: `RotationEnabled: false`; nothing
+   outside tests calls `SetEpochConfig`), every eligible account whose latest
+   heartbeat is recent enough joins the set, with no cap. Its BFT voting power
+   is its `basis`. If no account qualifies, `fallbackValidatorSet`
+   (`core/epochs.go` line 484) builds the set instead from the previous active
+   set, the eligible accounts and past epoch selections. It still requires
+   registration, the minimum stake, not being delegated away, and at least one
+   heartbeat ever, but it skips the freshness window. The result replaces the
+   set only if it is not empty (`applyValidatorSelection`, `core/epochs.go`
+   lines 447-454).
+
+   `epochLength` in this code path is `epoch.DefaultConfig().Length`
+   = **100 blocks**. The `EpochLengthBlocks = 120` value in `config.toml` belongs
+   to the POTSO reward epoch (`[potso.rewards]`), not to validator selection.
+
+An account that stops meeting step 2 is removed from the active set
+immediately, in the transaction that changes it (`setAccount` deletes it from
+`ValidatorSet`); joining waits for the next epoch boundary.
+
+**Heartbeat freshness.** `validatorReadyForActivation` (`core/epochs.go`
+~line 558) requires the account to be registered, to have sent at least one
+heartbeat, and for the last heartbeat to be no more than the grace period
+before the epoch boundary block time. The grace period is
+`max(5 x heartbeat interval, 15 minutes)`; the heartbeat interval is one
+minute (`core/engagement/config.go` `DefaultConfig`), so the grace period is
+15 minutes (`validatorReadinessMinGrace`, `core/epochs.go` line 16).
 
 ## Pre-flight checklist
 
-Do these four things *before* you run anything:
+1. **Ports.** The P2P server listens on TCP only (`p2p/server.go`, `Start`:
+   `net.Listen("tcp", ...)`; there is no UDP listener in the P2P code).
+   - `22/tcp` for your own SSH access.
+   - `6001/tcp` for P2P. This is the port in `ListenAddress = "0.0.0.0:6001"`
+     that the bootstrap script writes.
+   - The JSON-RPC port (`8545`) is bound to `127.0.0.1` by default
+     (`--rpc-addr` in the script, `RPCAddress` in `config.toml`). Without TLS
+     certificates the RPC server refuses to start unless
+     `RPCAllowInsecure = true` (`rpc/http.go`, lines 840-843), and with it set
+     it starts only on a loopback address (an unspecified `0.0.0.0` bind is
+     accepted only with `RPCAllowInsecureUnspecified = true`; lines 844-865). To
+     serve it on another address, configure `RPCTLSCertFile` / `RPCTLSKeyFile`.
+2. **At least 10,000 ZNHB** (the default `staking.minimumValidatorStake`),
+   sent to the validator's own address once you know it (printed at the end of
+   Step 1). It can be staked from the validator key itself (Step 2) or
+   delegated to the address from any other wallet.
+3. **No NHB is needed for the validator's own heartbeat or beneficiary
+   transactions.** `TxTypeHeartbeat` and `TxTypeSetRewardBeneficiary` go through
+   `handleNativeTransaction` (`core/state_transition.go`, ~line 3927), which
+   contains no fee debit for them. The `nhb-cli` commands set `GasLimit` and
+   `GasPrice` on the transaction anyway.
+4. **An RPC bearer token for `nhb-cli`.** `nhb-cli` submits every transaction
+   through `nhb_sendTransaction`, which requires a bearer JWT
+   (`rpc/http.go`, ~line 1381), and `nhb-cli` refuses to send unless the
+   `NHB_RPC_TOKEN` environment variable is set
+   (`cmd/nhb-cli/main.go`, lines 20 and 638-641). The node verifies the token
+   with the `[RPCJWT]` settings in `config.toml`: HS256, secret read from the
+   environment variable named by `HSSecretEnv` (`NHB_RPC_JWT_SECRET`), issuer
+   `nhb-rpc`, audience `wallets`. `generate_jwt.go` in the repo root
+   (`//go:build ignore`) signs such a token from `NHB_RPC_JWT_SECRET`. The
+   bootstrap script writes that secret to `/etc/nhbchain/node.env`.
+5. **`nhb-cli` talks to `http://localhost:8080` unless told otherwise**
+   (`cmd/nhb-cli/main.go`, `defaultRPCEndpoint`). The validator's RPC is on
+   `127.0.0.1:8545`, so pass `--rpc http://127.0.0.1:8545` or set `RPC_URL`
+   (the bootstrap script sets `RPC_URL` for its own calls).
 
-1. **Server sizing.** Use at least a `t3.medium` (2 vCPU, 4GB RAM) with
-   enough free disk for the Go module cache — 90GB+ of headroom is a safe
-   recommendation. Smaller instances (e.g. `t3.micro`-class, ~908MB RAM, no
-   swap) **will** get OOM-killed while compiling this dependency tree, even
-   with plenty of free disk space. See "Troubleshooting" below if you're
-   stuck on a small box.
-2. **Firewall / security group**, opened *before* you start:
-   - `22/tcp` — SSH, your own access.
-   - `6001` **TCP and UDP** — P2P. Both protocols are required; UDP is the
-     one people forget.
-   - `8545/tcp` is **optional**. The bootstrap script binds RPC to
-     `127.0.0.1` by default (not externally reachable). Only open this if
-     you deliberately want direct external RPC/MetaMask access — leaving it
-     internal-only is the safer default.
-3. **At least `10,000 ZNHB` ready to send to this validator's OWN node
-   address** once you know it (printed at the end of Step 1). Validator
-   eligibility is now based on this validator's own self-stake only --
-   ZNHB delegated in from a separate wallet does **not** count toward
-   eligibility at all (see "Staking" under Step 2 below). You'll send the
-   ZNHB to the server's own address and self-stake it directly on the
-   server; this is *not* a portal delegation.
-4. **Understand gas vs. stake before you start** — this is the single most
-   common point of confusion:
-   - **ZNHB for staking** needs to end up on *this server's own validator
-     key* (send it there once the key exists, then self-stake it) — a
-     separate wallet's stake never counts toward this validator's own
-     eligibility, no matter how much is delegated.
-   - **NHB for gas** is *not* required to run this validator's heartbeat or
-     to set its reward beneficiary — see "Getting paid" below for why.
+## Step 1 - Run the bootstrap script
 
-   Don't send NHB to the server's validator key expecting it to be needed
-   for either of those operations; it currently isn't. ZNHB, unlike NHB, IS
-   needed there now — see item 3 above.
-
-## Step 1 — Run the bootstrap script
-
-On the fresh server, clone the repo (or otherwise get the source onto the
-box), then run:
+On the fresh server, get the source onto the box and run:
 
 ```bash
 bash scripts/validator-only-bootstrap.sh \
   --beneficiary nhb1youroperatorwalletaddresshere \
-  --email you@example.com \
   --reset-state
 ```
 
-`scripts/deployvalidator.sh` is the same script under the hood —
-`validator-only-bootstrap.sh` is a 5-line wrapper around it, and both accept
-identical flags.
+`scripts/validator-only-bootstrap.sh` only `exec`s `scripts/deployvalidator.sh`
+with the same arguments.
 
-**Only pass `--reset-state` the first time**, on a genuinely fresh machine
-with no existing chain data. It wipes local chain state and is destructive
-if re-run against a node that has already synced or is already validating.
-Drop it on any later run.
+**Pass `--reset-state` only the first time**, on a machine with no chain data
+you want to keep. It runs `rm -rf /var/lib/nhbchain/nhb-data` before the first
+start.
 
 ### Flags
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
-| `--email` | *(none)* | Best-effort onboarding notification; failure to send is a warning, not fatal. |
-| `--onboarding-email-endpoint` | `https://nhbcoin.com/api/v1/validators/onboarding-email` | Where the onboarding email is POSTed. |
-| `--bootnode` | `198.51.100.10:6001` | Must be plain `host:port` — see the enode warning below. |
-| `--network-id` | `430060579445266314` | Mainnet network ID. |
-| `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
-| `--rpc-addr` | `127.0.0.1:8545` | Not exposed externally by default. |
-| `--external-address` | *(auto-detected)* | Falls back to EC2 IMDSv2, then `https://ifconfig.me`, if omitted. |
-| `--reset-state` | *(off)* | **Destructive.** Wipes local chain state. Fresh starts only. |
-| `--help` | | Prints usage. |
+| `--beneficiary` | none, **required** | Wallet that receives this validator's epoch reward payouts. The script exits with an error if omitted. It must differ from the validator's own address; the chain rejects a beneficiary equal to the sender (`applySetRewardBeneficiary`, `core/state_transition.go` ~line 5424). |
+| `--bootnode` | the script's built-in default (`BOOTNODE_DEFAULT`, `scripts/deployvalidator.sh` line 21) | Plain `host:port` only (see below), for example `<bootnode-host>:6001`. Written to both `Bootnodes` and `PersistentPeers`. |
+| `--network-id` | `430060579445266314` | Written to `[p2p] NetworkId`. See the note below: the P2P handshake does not read this value. |
+| `--listen-addr` | `0.0.0.0:6001` | Written to `ListenAddress`. |
+| `--rpc-addr` | `127.0.0.1:8545` | Written to `RPCAddress`; also used by the script's own health check and `nhb-cli` calls. |
+| `--external-address` | auto-detected | Publicly dialable IP (or `host:port`). If omitted the script tries to detect this machine's public IP. If detection fails, `ExternalAddress` stays empty. |
+| `--reset-state` | off | Deletes local chain state before the first start. |
+| `--help` | | Prints usage, including options not listed here. |
 
-**Bootnode format warning:** the bootnode value must be plain `host:port`
-(e.g. `198.51.100.10:6001`), *never* an `enode://nodeid@host:port` URI. This
-codebase's P2P dialer calls `net.Dial("tcp", addr)` directly and never
-parses the `enode://` scheme at all. If you find an `enode://`-style example
-in old docs, a stale screenshot, or notes from elsewhere, ignore it — using
-that form here means the node never even attempts to dial its bootnode, and
-fails with `dial tcp: address enode://...: too many colons in address`.
+**Bootnode format.** The dialer does `net.Dial("tcp", addr)` on the string
+(`p2p/server.go` `defaultDialer`), so the value must be `host:port`. An
+`enode://...` URI fails with `too many colons in address`.
 
-### What the script actually does, in order
+**`--network-id` has no effect on peering.** The handshake's chain ID is
+`binary.BigEndian.Uint64(genesisHash[:8])` computed from the loaded genesis
+(`core/blockchain.go`, lines 197 and 257), and `[p2p] NetworkId` is parsed into
+`cfg.P2P.NetworkID` (`config/config.go` ~line 542) but nothing reads it. A node
+peers with nodes that share its genesis hash.
 
-1. Installs Go 1.24.3 if it isn't already present.
-2. Adds a 4G swap file automatically on low-RAM/no-swap hosts. This exists
-   because a real `t3.micro`-class box (908MB RAM, no swap) was OOM-killed
-   compiling this dependency tree, even with plenty of disk free.
-3. Creates the `nhb` system user, and creates `/etc/nhbchain` (owned
-   `nhb:nhb`, mode `700`) and `/var/lib/nhbchain`. This directory **must**
-   be owned by `nhb`, not `root` — see Troubleshooting item 3 for what
-   happens if it isn't.
-4. Rsyncs the repo to `/opt/nhbchain`.
-5. Builds `bin/nhb` and `bin/nhb-cli`, using disk-backed
-   `GOCACHE`/`GOPATH`/`GOTMPDIR` under `/opt/nhbchain/.gocache` — because
-   `/tmp` is often a small RAM-backed tmpfs on stock EC2 AMIs, and a real
-   build filled it and failed with "no space left on device" even with 90GB+
-   free on the real disk.
-6. Generates a **fresh** validator key locally at `/etc/nhbchain/validator.key`
-   (mode `0600`, owned `nhb:nhb`) the first time it runs. It never accepts a
-   key via flag or environment variable, and reuses the existing key on
-   later runs.
-7. Writes `/etc/nhbchain/node.env` (mode `600`, owned `root:root`) with a
-   freshly generated `NHB_RPC_JWT_SECRET`.
-8. Auto-detects the server's external IP (EC2 IMDSv2 first, then
-   `https://ifconfig.me`) if `--external-address` wasn't passed.
-9. Patches `config.toml` — `ListenAddress`, `RPCAddress`, `DataDir`,
-   `ValidatorKMSEnv=NHB_VALIDATOR_RAW_KEY`, `NetworkId`, `ExternalAddress`,
-   and `Bootnodes`/`PersistentPeers`. The rest of the file, including
-   `QuorumCertActivationHeight` (see below), is copied through unchanged
-   from the repo's own `config.toml` -- it is not patched per-flag.
-10. Installs `deploy/systemd/nhb.service`, runs `daemon-reload`, enables and
-    restarts it.
-11. Polls the node's own RPC (a **POST** to `nhb_getNetworkStats` — a bare
-    `GET` always returns 400 even on a healthy node, so don't try to
-    health-check this with `curl -f` on a `GET`) for up to 60 seconds, and
-    **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
-    node never comes up.
-12. Runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` as the
-    `nhb` user, using the `--beneficiary` address you passed (the script
-    already exited earlier if you didn't pass one — see Step 1). If this
-    step fails, the script only **warns** and prints the exact retry
-    command — it does not fail the script or block the validator from
-    starting.
-13. If `--email` was given, best-effort POSTs to the onboarding-email
-    endpoint. Failure here is also just a warning, never fatal.
+### What the script does, in order
 
-### A note on QuorumCertActivationHeight
+Verified against `scripts/deployvalidator.sh`:
 
-Mainnet enforces a block-level quorum-certificate check on the P2P sync
-path (NHB-TRIAGE-C1): every block above height `451949` must carry proof
-that a real 2/3+ validator quorum actually voted for it, or a syncing node
-should reject it. This is controlled by `QuorumCertActivationHeight` in
-`config.toml`, which **must match** across every validator. As of
-2026-09-02 the repo's own `config.toml` sets this to `451949` to match
-what both live validators already enforce, and Step 1's rsync copies it
-through unchanged to `/etc/nhbchain/config.toml`. If you're running an
-older checkout where this line is missing (or `0`), your node will still
-sync and validate normally, but it silently skips quorum-certificate
-verification on every synced block -- a real security gap, not a visible
-failure. Confirm the line is present before going live:
-`grep QuorumCertActivationHeight /etc/nhbchain/config.toml`.
+1. Installs `rsync`, `perl` and `curl` with `apt-get` if missing, and Go
+   1.24.3 into `/usr/local/go` if `/usr/local/go/bin/go` is missing.
+2. If `/swapfile` does not exist, no swap is active, and `MemTotal` is under
+   4 GiB, creates and enables a 4G swap file and adds it to `/etc/fstab`.
+3. Creates the `nhb` system user, `/etc/nhbchain` (owner `nhb:nhb`, mode `700`)
+   and `/var/lib/nhbchain`.
+4. `rsync -a --delete` of the repo into `/opt/nhbchain`.
+5. Builds `bin/nhb` from `./cmd/nhb` and `bin/nhb-cli` from `./cmd/nhb-cli`,
+   with `GOCACHE`, `GOPATH` and `GOTMPDIR` under `/opt/nhbchain` so the build
+   does not use `/tmp`.
+6. If `/etc/nhbchain/validator.key` does not exist, runs `nhb-cli generate-key`
+   and installs the result there (mode `0600`, owner `nhb`). An existing key is
+   reused. The script never accepts a key as a flag or environment variable.
+7. Writes `/etc/nhbchain/node.env` (mode `600`, owner `root:root`) containing
+   `NHB_ENV=prod`, a freshly generated `NHB_RPC_JWT_SECRET`, and
+   `NHB_VALIDATOR_RAW_KEY` (the hex of the key file).
+8. Auto-detects the external address if `--external-address` was not given.
+9. Copies the repo's `config.toml` to `/etc/nhbchain/config.toml` and rewrites
+   these keys: `ListenAddress`, `RPCAddress`, `DataDir`
+   (`/var/lib/nhbchain/nhb-data`), `ValidatorKeystorePath` (set to `""`),
+   `ValidatorKMSEnv` (`NHB_VALIDATOR_RAW_KEY`), `NetworkName`
+   (`nhb-mainnet-validator`), `[p2p] NetworkId`, `[p2p] ExternalAddress` (if
+   known), and `[p2p] Bootnodes` / `PersistentPeers`. Everything else,
+   including `QuorumCertActivationHeight`, is copied unchanged.
+10. Installs `deploy/systemd/nhb.service` (runs
+    `/opt/nhbchain/bin/nhb --config /etc/nhbchain/config.toml` as user `nhb`,
+    `Restart=on-failure`), then `daemon-reload`, `enable`, `restart`.
+11. Polls `POST http://<rpc-addr>/` with `nhb_getNetworkStats` up to 30 times,
+    2 seconds apart. If it never answers, the script prints diagnostics
+    commands and exits with status 1. A bare `GET` returns 400, so do not
+    health-check with `curl -f` on a `GET`.
+12. Runs `nhb-cli set-reward-beneficiary <beneficiary> <validator.key>` as user
+    `nhb`. On failure it prints a warning and the retry command and continues.
+13. Runs `nhb-cli register-validator 0 <validator.key>` (registration with no
+    added stake). On failure it prints a warning and the retry command and
+    continues.
+14. Prints the validator address and next steps.
 
-## Step 2 — Getting paid
+Steps 12 and 13 call `nhb-cli` without setting `NHB_RPC_TOKEN`; see
+"Known issues" at the end of this guide.
 
-There are two separate things, and they are not the same operation:
+### `QuorumCertActivationHeight`
 
-### Staking (self-stake, on this server, not a portal delegation)
-
-Validator eligibility requires **>= 10,000 ZNHB of this validator's own
-self-stake** (`staking.minimumValidatorStake`, governance-adjustable,
-currently unchanged from its default). This is a real, load-bearing
-distinction from how staking used to work: ZNHB delegated in from a
-*separate* wallet through the portal's Validator Hub -> Delegate flow is
-tracked separately and does **not** count toward this validator's own
-eligibility at all, no matter the amount. Only stake sitting on the
-validator's own key, self-staked directly, counts (see
-`core/state_transition.go`'s `stakeRewardBasis` if you want the exact
-mechanics).
-
-Two steps, both involving this server's own key:
-
-1. **Send >= 10,000 ZNHB directly to this validator's own node address**
-   (the `nhb1...` address printed at the end of Step 1) from wherever you
-   actually hold ZNHB — an ordinary transfer, the same as sending to any
-   other address. Not a portal delegation.
-2. **Self-stake it and register in one transaction**, run on the server
-   itself using the validator's own key:
-
-   ```bash
-   sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
-   ```
-
-   (`10000000000000000000000` is exactly 10,000 ZNHB in base units --
-   raise it if you want extra headroom against the minimum ever being
-   raised by governance later.) The bootstrap script already ran this same
-   command once automatically with an amount of `0` right after startup,
-   purely to flip this validator's on-chain `ValidatorRegistered` flag on
-   (that part needs no funds and always succeeds) -- this second call with
-   real stake is what actually brings its own stake up to the required
-   minimum. It's safe to run again with a larger amount later if you want
-   to add more self-stake; it isn't a one-time-only operation.
-
-### Consensus reward beneficiary
-
-Without `--beneficiary`, the consensus reward would accrue to the
-validator's own server-only address — the bootstrap script requires
-`--beneficiary` up front specifically to avoid that. You can also change
-the beneficiary later, directly on the server:
+Blocks that arrive by peer sync above `QuorumCertActivationHeight` must carry a
+quorum certificate that verifies against the validator set that was active at
+the parent height, or the node rejects them (`core/node.go`, ~line 3921;
+`core/types/vote.go` `QuorumCert.Verify`: at least ceil(2/3) of voting power).
+Blocks at or below the height sync without one. A value of `0` (or a missing
+line) leaves the check off (`cmd/nhb/main.go` line 153 only applies it when
+greater than zero). The repo `config.toml` sets `451949`. Every validator must
+use the same value. Check it with:
 
 ```bash
-nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key
+grep QuorumCertActivationHeight /etc/nhbchain/config.toml
 ```
 
-Pass an empty string instead of an address to clear a previously-set
-beneficiary.
+## Step 2 - Stake and get paid
 
-This command **must** be run using the validator's own local key file
-(`/etc/nhbchain/validator.key`) directly on the validator server itself —
-it's deliberately a local signed-transaction operation, and the key should
-never leave the server. This is exactly the retry command the bootstrap
-script prints if its automatic `--beneficiary` attempt only warned instead
-of succeeding.
+### Staking
 
-**Do not use the portal's "Reward Payout" tab (Validator Hub) to set a real
-server-hosted validator's beneficiary.** That form signs with your logged-in
-portal wallet's own key, not your validator server's key, so it cannot
-correctly redirect a real, independently-keyed validator's rewards. Use the
-`nhb-cli` command above, on the server, instead.
+Two ways to bring the validator address up to the minimum stake; both count:
 
-### A note on gas
-
-Contrary to older internal notes you may run across, sending a heartbeat
-transaction or a `set-reward-beneficiary` transaction from the validator's
-own key does **not** require any NHB balance on that key. Both transaction
-types go through the default native-transaction handling path and are not
-debited against `BalanceNHB`, unlike an ordinary transfer. You do not need
-to pre-fund the validator server's key with NHB gas for either operation.
-The only real "bring money" step in this whole process is the ZNHB
-self-stake onto this server's own validator key, described above.
-
-## Step 3 — Checking status and eligibility
-
-There is currently no single "is my validator active" command. Here is the
-best available combination:
-
-- **Stake / delegation state:**
+- **Self-stake on the server** using the validator's own key. First send at
+  least 10,000 ZNHB to the validator address with an ordinary transfer, then:
 
   ```bash
-  nhb-cli balance <your-validator-node-address>
+  sudo -u nhb env RPC_URL=http://127.0.0.1:8545 NHB_RPC_TOKEN=<jwt> \
+    /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
   ```
 
-  Shows Staked / Delegated Validator / Pending Unbonds for that address.
-  Query this against the node's own local RPC or the public RPC endpoint.
+  The amount is in base units (18 decimals), so `10000000000000000000000` is
+  10,000 ZNHB. The command signs a `TxTypeStake` with `registerValidator = true`
+  and `Value = amount` (`cmd/nhb-cli/validator_registration.go`). `0` means
+  register with no added stake. It can be run again later with a further amount.
+- **Delegate from any wallet** to the validator address by submitting a
+  `TxTypeStake` whose payload names the validator. `StakeDelegate`
+  (`core/state_transition.go`, ~line 5759) locks the delegator's ZNHB and adds
+  the amount to the validator account's `Stake`. `nhb-cli stake <amount> <key>`
+  builds a `TxTypeStake` with no payload, so it self-stakes; it cannot target
+  another validator.
 
-- **Service health:**
+Registration is separate from stake: delegation cannot set the
+`ValidatorRegistered` flag, so a delegated-only node still needs
+`register-validator 0` (or any `register-validator <amount>`) run with its own
+key. The bootstrap script attempts this once (step 13 above).
+
+A validator account that delegates its own stake to a different validator fails
+`selfDelegated` and is not eligible. Unstaking below the minimum, or
+`nhb-cli deregister-validator <key>`, removes it from the active set
+immediately (`applyUnstake`, `core/state_transition.go` ~line 6555).
+
+### Reward beneficiary
+
+`nhb-cli set-reward-beneficiary <address> <key-file>` signs a
+`TxTypeSetRewardBeneficiary` (0x1A) with the validator key. When the epoch
+reward settlement pays this validator, the amount is credited to the beneficiary
+address instead of the validator address (`core/rewards_logic.go`, lines
+286-291). An empty string clears the beneficiary. The beneficiary cannot be the
+validator's own address. Run it on the server with the local key file; the key
+should not leave the server.
+
+## Step 3 - Check status
+
+- **Registration, stake and last heartbeat:** `nhb_getValidatorInfo` takes one
+  parameter, an address parsed with `common.HexToAddress`, so pass the 20-byte
+  address as `0x...` hex (`rpc/explorer_handlers.go`, line 109). It returns
+  `address`, `stake`, `engagementScore`, `validatorRegistered`,
+  `validatorRegisteredAt`, `engagementLastHeartbeat`, `delegatedValidator`,
+  `nonce`.
+- **Account view:** `nhb-cli balance <address>` prints Staked, Locked,
+  Delegated Validator, `Validator Registered: yes|no`, pending unbonds and
+  nonce (`cmd/nhb-cli/main.go`, `getBalance`).
+- **Active set:** `nhb_getValidatorSet` takes optional `[offset, limit]`
+  (default limit 100, max 500) and returns `validators` (each with `address`
+  and `stake` = voting power), `totalCount`, `offset`, `limit`, `hasMore`,
+  `timestamp`. `nhb_getNetworkStats` returns `activeValidators`,
+  `currentEpoch`, `currentTime`, `mempoolSize`, `tps`.
+- **Service:**
 
   ```bash
   sudo systemctl status nhb.service
   sudo journalctl -u nhb.service -f
   ```
 
-  Use these to confirm the node is actually running and not crash-looping.
+The node sends its own heartbeats: `cmd/nhb/main.go`
+`startValidatorHeartbeatLoop` submits one 5 seconds after start and then checks
+every minute. It submits when the on-chain last heartbeat is older than the
+heartbeat interval plus a 15-second margin, and at most once per that period
+per process (`core/node.go` `EngagementValidatorHeartbeatDue`, `HeartbeatSubmissionMargin`).
+If a heartbeat is still pending in the mempool at the same nonce, the retry
+raises the gas price above the pending one so replace-by-fee accepts it
+(`core/node.go` `EngagementSubmitHeartbeat`).
 
-- **Network / block height:** query `nhb_getNetworkStats` on the node's RPC,
-  or check the public explorer, to see current block height and active
-  validator count.
-
-Once registered (the bootstrap script already did this automatically) and
-self-staked to the minimum, your node becomes a validator **candidate**. It
-joins the **active** set only after (1) it is online and synced, and (2) it
-has begun submitting heartbeats successfully — at the start of the next
-epoch boundary after both conditions are met. Epoch length is 120 blocks
-(`EpochLengthBlocks = 120` in `config.toml`). This chain's BFT engine does
-not produce blocks on a fixed time interval (block time varies with network
-conditions and round timeouts), so this document will not give you a precise
-"epoch = X minutes" figure — it would not be verifiable and would likely be
-wrong. Watch block height / active validator count via the explorer or
-`nhb_getNetworkStats` to estimate when the next epoch boundary will land.
+Epoch length for validator selection is 100 blocks. Block time is not fixed in
+the code, so this guide gives no wall-clock estimate; watch `currentEpoch` and
+the height from `nhb_getNetworkStats`.
 
 ## Troubleshooting
 
-All six of these are fixed in the current script. They're documented here
-so that if you hit something similar — on an older checkout, a modified
-script, or an unusual host — you can recognize the symptom and know the
-cause and fix.
+Each item below is the symptom, the cause in the script or code, and the fix.
 
-### 1. Build gets OOM-killed (`signal: killed`, or the build process just vanishes)
+**Build is killed (`signal: killed`).** The build ran out of memory. The script
+adds a 4G swap file only when the host has under 4 GiB of RAM and no swap. Add
+swap yourself or build on a larger host.
 
-**Cause:** compiling this dependency tree needs real memory headroom, and a
-tiny or no-swap instance runs out.
-**Fix:** the current script auto-adds a 4G swapfile on such hosts — if
-you're still hitting this, confirm you're on a current script checkout.
-Otherwise, manually add swap, or move to a larger instance
-(`t3.medium` / 2 vCPU / 4GB RAM is the recommended minimum).
+**Build fails with `no space left on device`.** Go's scratch directory
+defaulted to `/tmp`. The script sets `GOCACHE`, `GOPATH` and `GOTMPDIR` under
+`/opt/nhbchain`; if you build by hand, do the same.
 
-### 2. Build fails with "no space left on device" despite plenty of free disk
+**`nhb.service` crash-loops with `Failed to load config ... permission denied`.**
+`/etc/nhbchain` must be owned by `nhb`, the user the unit runs as
+(`deploy/systemd/nhb.service`). Fix: `chown -R nhb:nhb /etc/nhbchain`.
 
-**Cause:** `/tmp` is a small RAM-backed tmpfs on many EC2 AMIs, and Go's
-build scratch space defaults there.
-**Fix:** the current script builds with disk-backed
-`GOCACHE`/`GOPATH`/`GOTMPDIR` under `/opt/nhbchain`. If you're hitting this,
-confirm you're on a current script checkout.
+**Bootnode dial fails with `too many colons in address`.** An `enode://` URI was
+used. Use `host:port`.
 
-### 3. `nhb.service` crash-loops with `panic: Failed to load config: ... permission denied`
+**Heartbeat nonce never advances.** A heartbeat at the same gas price as one
+still pending is rejected by replace-by-fee. The node bumps the price on retry
+(see Step 3). If you see it on an older build, update.
 
-**Cause:** `/etc/nhbchain` was created with mode `700` owned by `root`
-(typically from a manual `sudo mkdir`) instead of the service user `nhb`.
-Since the systemd unit runs as `User=nhb`, it can't even traverse a
-root-owned `700` directory.
-**Fix:** `chown -R nhb:nhb /etc/nhbchain`. The script does this
-automatically — this is only relevant if you hand-rolled part of the setup
-yourself.
+**The script printed success but the node is not running.** The script now
+exits 1 if the RPC never answers within about 60 seconds; check
+`systemctl status nhb.service` and `journalctl -u nhb.service`.
 
-### 4. Node never comes up / bootnode dial fails with "too many colons in address"
+## Common questions
 
-**Cause:** an `enode://` URI was used instead of plain `host:port` for the
-bootnode.
-**Fix:** always use `host:port` form, e.g. `198.51.100.10:6001`. See the
-bootnode format warning in Step 1 above.
+**Do I need NHB to send heartbeats or set the beneficiary?** No; see
+pre-flight item 3.
 
-### 5. Validator's heartbeat gets permanently stuck (nonce never advances, node looks alive but never becomes eligible)
+**I registered and staked; why is the validator not active?** The active set
+changes only at epoch boundaries (every 100 blocks), and only includes accounts
+whose last heartbeat is within 15 minutes of the boundary block time.
 
-**Cause:** a resubmitted heartbeat at the same gas price as one still
-pending in the mempool gets rejected by replace-by-fee rules, and a
-non-block-proposing validator could previously fail to even notice its own
-pending heartbeat in order to bump the price. This was a real production
-bug. It's now fixed — the node auto-bumps the fee on retry and reads its own
-mempool directly.
-**Fix:** if you're seeing a stuck nonce on a very old build, that's the
-signal to update.
+**I delegated 10,000 ZNHB from a wallet; why is it not active?** Delegation
+counts toward the stake threshold, but the validator's own registration flag is
+separate and can only be set by the validator key: run
+`nhb-cli register-validator 0 <key>` on the server, and check
+`validatorRegistered` with `nhb_getValidatorInfo`.
 
-### 6. The bootstrap script prints a false-looking `[OK] Validator node started` even though the service is actually crash-looping
+**Where do I set the reward beneficiary?** With `nhb-cli set-reward-beneficiary`
+and the validator's own key file; the transaction is only valid when signed by
+the validator key.
 
-**Cause:** an old version of the script assumed success once the service
-unit started, without verifying it.
-**Fix:** the current script polls real RPC health via a POST to
-`nhb_getNetworkStats` and hard-fails with diagnostics on timeout, instead of
-assuming success. If you see the old banner-only behavior on an old
-checkout, don't trust it — check `systemctl status` yourself.
+## Known issues in the scripts and CLI
 
-## Common confusions
+These are behaviours found while checking this guide against the code. They are
+recorded here so operators are not surprised; the code has not been changed.
 
-**"Do I need NHB on the server to run heartbeats or set my beneficiary?"**
-No. Neither `TxTypeHeartbeat` nor `TxTypeSetRewardBeneficiary` debits
-`BalanceNHB` today — see "A note on gas" above. Don't send NHB to the
-server's key expecting it to be required for either.
-
-**"I staked ZNHB, why isn't my validator active yet?"**
-Self-staking (on the server, via `register-validator`) makes your validator
-a *candidate*. It only becomes *active* at the next epoch boundary
-(120-block increments) after it is online, synced, and successfully
-submitting heartbeats. There's no exact wall-clock number to give you
-here — watch block height via `nhb_getNetworkStats` or the explorer.
-
-**"I delegated ZNHB to my validator's address through the portal's
-Validator Hub, why is it still not active?"**
-Corrected 2026-09-09 — this used to say portal delegation "doesn't count."
-That is no longer true: by design, delegated-in ZNHB (from any wallet,
-including the portal's Validator Hub Delegate flow) counts fully toward
-the `staking.minimumValidatorStake` threshold, same as self-stake. If your
-delegation already meets the minimum and your validator still isn't
-active, the far more likely cause is the *separate* one-time step below —
-check that first before moving any more ZNHB around.
-
-**"I delegated enough ZNHB and my node is online/synced, why is it still
-not active?"**
-Stake *amount* (self-stake or delegated-in, either counts) and the
-validator's own on-chain **registration flag** are two different things.
-The flag can only ever be set by a self-signed transaction from the
-validator's own server key — no third-party delegation transaction can
-set it, by design (so a random wallet can never force-register someone
-as a validator just by delegating to their address without consent). The
-bootstrap script normally flips this automatically via a zero-amount
-`register-validator` call right after first startup (see Step 2) — so if
-your node went through that script, this is almost certainly already
-done. If it didn't (a manually-migrated or hand-configured node, for
-example), run it yourself once:
-
-```bash
-sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 0 /etc/nhbchain/validator.key
-```
-
-This costs no funds and only needs to succeed once. After that, delegate
-(or self-stake) up to the minimum through whichever path you prefer, and
-your validator becomes active at the next epoch boundary once synced and
-heartbeating.
-
-**"Where do I set my reward beneficiary — the portal or the server?"**
-The server, using `nhb-cli set-reward-beneficiary` with
-`/etc/nhbchain/validator.key`. The portal's "Reward Payout" tab signs with
-your portal wallet's key, not your validator server's key, so it can't
-correctly redirect a real server-hosted validator's rewards.
-
-## Known discrepancy
-
-You may find internal planning notes (not part of the committed docs) that
-refer to a second validator's onboarding as "Phase H" — a normal join flow
-using this document, distinct from "Phase E," which refers specifically to
-the *primary* validator's own genesis relaunch (2026-08-06). If you're
-cross-referencing old internal task names elsewhere, "Phase E" is not this
-document's process — it's the primary validator's genesis event.
+- `scripts/deployvalidator.sh` runs `nhb-cli set-reward-beneficiary` and
+  `register-validator` (lines 426-427 and 445-446) as
+  `sudo -u <user> env RPC_URL=... nhb-cli ...` without `NHB_RPC_TOKEN`, and
+  `nhb-cli` returns an error before sending when that variable is empty
+  (`cmd/nhb-cli/main.go`, lines 638-641). Those two steps therefore only warn,
+  and you must run the printed retry commands with the token set.
