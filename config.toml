@@ -31,7 +31,9 @@ RPCTLSCertFile = ""
 RPCTLSKeyFile = ""
 RPCTLSClientCAFile = ""
 DataDir = "./nhb-data"
-GenesisFile = "./config/genesis.phase-e.json"
+# The live network's genesis file. The chain id (see [p2p] NetworkId) is the
+# first 8 bytes of its block hash, so this file must never be edited.
+GenesisFile = "./config/genesis.relaunch.json"
 AllowAutogenesis = false
 # Matches the coordinated activation height both live mainnet validators are
 # currently enforcing for NHB-TRIAGE-C1's quorum-certificate check on the
@@ -84,7 +86,7 @@ ClientVersion = ""
     LevelDBPath = ""
 
 [p2p]
-  NetworkId = 430060579445266314
+  NetworkId = 18346390202490284624
   ExternalAddress = ""
   MaxPeers = 64
   MaxInbound = 60

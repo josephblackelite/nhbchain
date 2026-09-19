@@ -19,3 +19,7 @@
 *.dll   binary
 *.so    binary
 *.a     binary
+
+# The genesis file of the live network. Its hash is the chain identity, so it
+# is stored and checked out byte for byte, whatever the local line-ending settings.
+config/genesis.relaunch.json -text

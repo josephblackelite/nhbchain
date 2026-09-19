@@ -38,7 +38,7 @@ func main() {
 	lines := strings.Split(string(data), "\n")
 	for i, line := range lines {
 		if strings.HasPrefix(line, "NHB_CHAIN_ID=") {
-			lines[i] = "NHB_CHAIN_ID=5756470643927894962"
+			lines[i] = "NHB_CHAIN_ID=18346390202490284624"
 		} else if strings.HasPrefix(line, "NODE_RPC_TOKEN=") {
 			lines[i] = "NODE_RPC_TOKEN=" + tokenString
 		} else if strings.HasPrefix(line, "L1_NODE_RPC_TOKEN=") {
