@@ -16,6 +16,19 @@ type Engine struct {
 	catalog *Catalog
 	weights *statepotso.Ledger
 	slasher statebank.Slasher
+	records Records
+}
+
+// Records is the durable record of which evidence reports have already had
+// their penalty applied. Anything that executes as part of a block must supply
+// one backed by that block's own state (core/state.Manager satisfies it), so a
+// provisional execution whose state is discarded leaves nothing behind and every
+// node reaches the same answer for the same block. Without one the engine falls
+// back to the weight ledger's own in-memory record, which belongs to a single
+// process and is only suitable for tools and tests.
+type Records interface {
+	PotsoPenaltyApplied(hash [32]byte, offender [20]byte) (bool, error)
+	PotsoPenaltyMarkApplied(hash [32]byte, offender [20]byte) error
 }
 
 type Context struct {
@@ -36,6 +49,28 @@ func NewEngine(catalog *Catalog, weights *statepotso.Ledger, slasher statebank.S
 	return &Engine{catalog: catalog, weights: weights, slasher: slasher}
 }
 
+// WithRecords makes the engine read and write its applied-penalty record
+// through records instead of the weight ledger's in-memory one.
+func (e *Engine) WithRecords(records Records) *Engine {
+	e.records = records
+	return e
+}
+
+func (e *Engine) penaltyApplied(hash [32]byte, offender [20]byte) (bool, error) {
+	if e.records != nil {
+		return e.records.PotsoPenaltyApplied(hash, offender)
+	}
+	return e.weights.WasPenaltyApplied(hash, offender), nil
+}
+
+func (e *Engine) markPenaltyApplied(hash [32]byte, offender [20]byte) error {
+	if e.records != nil {
+		return e.records.PotsoPenaltyMarkApplied(hash, offender)
+	}
+	e.weights.MarkPenaltyApplied(hash, offender)
+	return nil
+}
+
 func (e *Engine) Apply(record *evidence.Record, ctx Context) (*Result, error) {
 	if record == nil {
 		return nil, errors.New("penalty: nil record")
@@ -46,7 +81,11 @@ func (e *Engine) Apply(record *evidence.Record, ctx Context) (*Result, error) {
 	if e.weights == nil {
 		return nil, errors.New("penalty: weight ledger unavailable")
 	}
-	if e.weights.WasPenaltyApplied(record.Hash, record.Evidence.Offender) {
+	applied, err := e.penaltyApplied(record.Hash, record.Evidence.Offender)
+	if err != nil {
+		return nil, fmt.Errorf("penalty: load applied record: %w", err)
+	}
+	if applied {
 		entry := e.weights.Entry(record.Evidence.Offender)
 		evt := events.PotsoPenaltyApplied{
 			Hash:       record.Hash,
@@ -103,7 +142,9 @@ func (e *Engine) Apply(record *evidence.Record, ctx Context) (*Result, error) {
 	} else {
 		slashApplied = big.NewInt(0)
 	}
-	e.weights.MarkPenaltyApplied(record.Hash, record.Evidence.Offender)
+	if err := e.markPenaltyApplied(record.Hash, record.Evidence.Offender); err != nil {
+		return nil, fmt.Errorf("penalty: record applied: %w", err)
+	}
 	evt := events.PotsoPenaltyApplied{
 		Hash:       record.Hash,
 		Type:       string(record.Evidence.Type),

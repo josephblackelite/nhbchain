@@ -113,7 +113,6 @@ var (
 	potsoStakeLockIndexPrefix        = []byte("potso/stake/locks/index/")
 	potsoStakeQueuePrefix            = []byte("potso/stake/unbondq/")
 	potsoEvidenceRecordPrefix        = []byte("potso/evidence/record/")
-	potsoEvidencePendingIndexKey     = []byte("potso/evidence/pending")
 	potsoStakeModuleSeedPrefix       = "module/potso/stake/vault"
 	potsoStakeOwnerIndexKey          = []byte("potso/stake/owners")
 	potsoRewardLastProcessed         = []byte("potso/rewards/lastProcessed")
@@ -3429,49 +3428,6 @@ func (m *Manager) PotsoEvidenceGetRecord(hash [32]byte) (*evidence.Record, bool,
 		return nil, false, nil
 	}
 	return &record, true, nil
-}
-
-// PotsoEvidencePutRecord persists a newly accepted misbehaviour report and
-// appends its hash to the pending index (see PotsoEvidencePendingHashes).
-// Callers must confirm via PotsoEvidenceGetRecord that the hash is not
-// already recorded before calling this -- it does not itself re-check, to
-// keep the already-exists/idempotent decision (and any accompanying event)
-// entirely in the caller's hands, matching every other apply*Transaction
-// idempotency pattern in this codebase.
-func (m *Manager) PotsoEvidencePutRecord(record *evidence.Record) error {
-	if record == nil {
-		return fmt.Errorf("potso: evidence record must not be nil")
-	}
-	if err := m.KVPut(potsoEvidenceRecordKey(record.Hash), record); err != nil {
-		return err
-	}
-	return m.KVAppend(potsoEvidencePendingIndexKey, record.Hash[:])
-}
-
-// PotsoEvidencePendingHashes returns every evidence hash ever recorded via a
-// TxTypeSubmitEvidence transaction, oldest-appended first. Entries are never
-// removed here even after core/node.go's processPendingEvidenceForState has
-// applied their penalty -- state/potso.Ledger's WasPenaltyApplied/
-// MarkPenaltyApplied pair is what makes re-processing an already-penalized
-// entry a safe no-op, exactly the idempotency guarantee this same index
-// relied on before this migration (consensus/potso/evidence.Store's own Put
-// was already a hash-keyed upsert that never needed a matching "delete once
-// processed" step).
-func (m *Manager) PotsoEvidencePendingHashes() ([][32]byte, error) {
-	var raw [][]byte
-	if err := m.KVGetList(potsoEvidencePendingIndexKey, &raw); err != nil {
-		return nil, err
-	}
-	hashes := make([][32]byte, 0, len(raw))
-	for _, entry := range raw {
-		if len(entry) != 32 {
-			continue
-		}
-		var hash [32]byte
-		copy(hash[:], entry)
-		hashes = append(hashes, hash)
-	}
-	return hashes, nil
 }
 
 func (m *Manager) appendStakeOwner(owner [20]byte) error {
