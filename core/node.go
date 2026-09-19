@@ -3354,7 +3354,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
 		// advance -- same reasoning as ErrSwapExpired above.
-		errors.Is(err, ErrTransactionExpired):
+		errors.Is(err, ErrTransactionExpired),
+		// An owner naming a wallet other than its own as the loyalty paymaster
+		// is refused as a pure function of the transaction's own sender and
+		// payload and the business's owner, which never changes, so it can
+		// never become valid later. A sender later granted the loyalty admin
+		// role resubmits. See loyalty.ErrPaymasterConsentRequired.
+		errors.Is(err, loyalty.ErrPaymasterConsentRequired):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),

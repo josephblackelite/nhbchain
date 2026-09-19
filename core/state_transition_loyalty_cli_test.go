@@ -85,12 +85,11 @@ func TestLoyaltyCLIPayloadsRoundTripThroughApplyTransaction(t *testing.T) {
 		t.Fatalf("business name mismatch: got %q want %q", business.Name, businessName)
 	}
 
-	// Step 3: loyaltySetPaymaster's exact payload shape.
-	paymasterKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate paymaster key: %v", err)
-	}
-	paymasterAddr := paymasterKey.PubKey().Address()
+	// Step 3: loyaltySetPaymaster's exact payload shape. A business owner may
+	// only name its own wallet as the paymaster
+	// (loyalty.ErrPaymasterConsentRequired); naming any other wallet is a
+	// loyalty admin's call.
+	paymasterAddr := ownerAddr
 	data, err = json.Marshal(map[string]string{
 		"businessId": businessIDHex,
 		"paymaster":  paymasterAddr.String(),

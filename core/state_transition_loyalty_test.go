@@ -131,7 +131,7 @@ func TestLoyaltyCreateBusinessLifecycle(t *testing.T) {
 
 func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 	sp := newLoyaltyTestProcessor(t)
-	_, owner := newLoyaltyTestKey(t, sp)
+	ownerAddr, owner := newLoyaltyTestKey(t, sp)
 	_, attacker := newLoyaltyTestKey(t, sp)
 	adminAddr, admin := newLoyaltyTestKey(t, sp)
 	paymasterAddr, _ := newLoyaltyTestKey(t, sp)
@@ -163,7 +163,20 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 		t.Fatalf("paymaster must be unchanged after unauthorized attempt")
 	}
 
-	if err := setPaymasterTx(owner, paymasterAddr); err != nil {
+	// Rewards are paid out of the paymaster's balance, so an owner may not
+	// commit somebody else's wallet: only naming its own is accepted.
+	if err := setPaymasterTx(owner, paymasterAddr); !errors.Is(err, loyalty.ErrPaymasterConsentRequired) {
+		t.Fatalf("expected ErrPaymasterConsentRequired when the owner names another wallet, got %v", err)
+	}
+	business, _, err = sp.LoyaltyBusinessByID(businessID)
+	if err != nil {
+		t.Fatalf("load business: %v", err)
+	}
+	if business.Paymaster != zero {
+		t.Fatalf("paymaster must be unchanged after the owner named a wallet that is not its own")
+	}
+
+	if err := setPaymasterTx(owner, ownerAddr); err != nil {
 		t.Fatalf("owner set paymaster: %v", err)
 	}
 	business, _, err = sp.LoyaltyBusinessByID(businessID)
@@ -171,7 +184,7 @@ func TestLoyaltySetPaymasterRequiresOwnership(t *testing.T) {
 		t.Fatalf("load business: %v", err)
 	}
 	var wantPaymaster [20]byte
-	copy(wantPaymaster[:], paymasterAddr.Bytes())
+	copy(wantPaymaster[:], ownerAddr.Bytes())
 	if business.Paymaster != wantPaymaster {
 		t.Fatalf("paymaster not set by owner")
 	}

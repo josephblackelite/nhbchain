@@ -65,12 +65,20 @@ func TestLoyaltyEngineAppliesBaseAndProgramRewards(t *testing.T) {
 	mustWriteAccount(t, sp, from, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	mustWriteAccount(t, sp, merchant, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 
+	// The paymaster is a wallet other than the business owner's, which only a
+	// loyalty admin may assign (loyalty.ErrPaymasterConsentRequired).
+	var admin [20]byte
+	admin[19] = 0x50
+	if err := manager.SetRole(RoleLoyaltyAdmin, admin[:]); err != nil {
+		t.Fatalf("grant loyalty admin role: %v", err)
+	}
+
 	registry := loyalty.NewRegistry(manager)
 	bizID, err := registry.RegisterBusiness(merchant, "merchant")
 	if err != nil {
 		t.Fatalf("register business: %v", err)
 	}
-	if err := registry.SetPaymaster(bizID, merchant, paymaster); err != nil {
+	if err := registry.SetPaymaster(bizID, admin, paymaster); err != nil {
 		t.Fatalf("set paymaster: %v", err)
 	}
 	if err := registry.AddMerchantAddress(bizID, merchant); err != nil {

@@ -1,6 +1,7 @@
 package loyalty
 
 import (
+	"bytes"
 	"encoding/hex"
 	"math/big"
 	"strconv"
@@ -323,7 +324,7 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 		emitProgramSkip(st, ctx, program, business, "paymaster_missing", nil)
 		return "paymaster_missing"
 	}
-	paymasterAcc, err := st.GetAccount(business.Paymaster[:])
+	paymasterAcc, callerOwned, err := programPaymasterAccount(st, baseCtx, business.Paymaster)
 	if err != nil {
 		emitProgramSkip(st, ctx, program, business, "paymaster_error", map[string]string{"error": err.Error()})
 		return "paymaster_error"
@@ -353,9 +354,11 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 	}
 
 	paymasterAcc.BalanceZNHB = new(big.Int).Sub(paymasterAcc.BalanceZNHB, reward)
-	if err := st.PutAccount(business.Paymaster[:], paymasterAcc); err != nil {
-		emitProgramSkip(st, ctx, program, business, "paymaster_persist_error", map[string]string{"error": err.Error()})
-		return "paymaster_persist_error"
+	if !callerOwned {
+		if err := st.PutAccount(business.Paymaster[:], paymasterAcc); err != nil {
+			emitProgramSkip(st, ctx, program, business, "paymaster_persist_error", map[string]string{"error": err.Error()})
+			return "paymaster_persist_error"
+		}
 	}
 
 	if baseCtx.FromAccount.BalanceZNHB == nil {
@@ -482,6 +485,24 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 
 	emitProgramAccrued(st, ctx, program, business, reward)
 	return resultAccrued
+}
+
+// programPaymasterAccount returns the account the reward is debited from. The
+// caller persists ctx.FromAccount and ctx.ToAccount itself once the engine
+// returns, so a paymaster that is the spender or the merchant must be debited
+// on that very object (callerOwned is true and the engine must not persist
+// it): a separately loaded copy of the same address would be written back
+// here and then be overwritten by, or overwrite, the caller's write, and the
+// reward would be minted or destroyed instead of moved.
+func programPaymasterAccount(st ProgramRewardState, ctx *BaseRewardContext, paymaster [20]byte) (acc *types.Account, callerOwned bool, err error) {
+	switch {
+	case bytes.Equal(paymaster[:], ctx.From):
+		return ctx.FromAccount, true, nil
+	case ctx.ToAccount != nil && bytes.Equal(paymaster[:], ctx.To):
+		return ctx.ToAccount, true, nil
+	}
+	acc, err = st.GetAccount(paymaster[:])
+	return acc, false, err
 }
 
 type programResolution struct {

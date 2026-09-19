@@ -702,60 +702,15 @@ func TestStakeClaimRewardsRolesKeepSupplyInvariant(t *testing.T) {
 
 // TestSubscriptionChargeRolesKeepSupplyInvariant bills a ZNHB subscription
 // with the treasury wallet as the payer, the merchant and/or the management
-// fee treasury (config.toml points the fee treasury at the admin wallet).
-// Billing runs in ProcessBlockLifecycle, so a mismatch there fails the block
-// itself, not just one transaction. Payer and merchant being one account is a
-// separate defect (a self-subscription pays itself) and is not exercised.
+// fee treasury (config.toml points the fee treasury at the admin wallet), and
+// with any two of the three being one account, a plan subscribed to by its
+// own merchant included. Billing runs in ProcessBlockLifecycle, so a mismatch
+// there fails the block itself, not just one transaction.
 func TestSubscriptionChargeRolesKeepSupplyInvariant(t *testing.T) {
 	names := []string{"payer", "merchant", "feeTreasury"}
 	for _, who := range roleAssignments(len(names)) {
-		if who[0] == who[1] {
-			continue
-		}
 		name := describeAssignment(names, who)
-		t.Run(name, func(t *testing.T) {
-			f := newTreasuryFixture(t)
-			payer, merchant, treasury := who[0], who[1], who[2]
-			f.fund(payer, 5_000_000)
-			f.fund(merchant, 5_000_000)
-			f.fund(treasury, 5_000_000)
-			if err := f.sp.SetSubscriptionsConfig(subscriptions.Config{
-				ManagementFeeBps:     100,
-				ManagementFeeCapBps:  500,
-				Treasury:             f.addr(treasury),
-				MaxRetries:           3,
-				RetryIntervalSeconds: 86400,
-			}); err != nil {
-				t.Fatalf("configure subscriptions: %v", err)
-			}
-			planData, err := rlp.EncodeToBytes(struct {
-				Name               string
-				PriceWei           *big.Int
-				Asset              string
-				IntervalSeconds    uint64
-				TrialPeriodSeconds uint64
-			}{Name: "plan", PriceWei: big.NewInt(100_000), Asset: "ZNHB", IntervalSeconds: 86400})
-			if err != nil {
-				t.Fatalf("encode plan: %v", err)
-			}
-			f.mustApply("create plan", f.signed(merchant, &types.Transaction{Type: types.TxTypeSubscriptionCreatePlan, Data: planData}))
-			subscribeData, err := rlp.EncodeToBytes(struct{ PlanID uint64 }{PlanID: 1})
-			if err != nil {
-				t.Fatalf("encode subscribe: %v", err)
-			}
-			f.mustApply("subscribe", f.signed(payer, &types.Transaction{Type: types.TxTypeSubscriptionSubscribe, Data: subscribeData}))
-
-			payerBefore := f.balanceZNHB(f.addr(payer))
-			f.lifecycle("first charge", 1)
-			// The first charge really settled: the payer, if it is not also
-			// receiving part of it, is down by the price.
-			if who[0] != who[1] && who[0] != who[2] {
-				spent := new(big.Int).Sub(payerBefore, f.balanceZNHB(f.addr(payer)))
-				if spent.Cmp(big.NewInt(100_000)) != 0 {
-					t.Fatalf("payer paid %s, want 100000: the charge did not settle", spent)
-				}
-			}
-		})
+		t.Run(name, func(t *testing.T) { chargeSubscriptionForRoles(t, subscriptions.AssetZNHB, who) })
 	}
 }
 

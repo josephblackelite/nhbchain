@@ -145,23 +145,32 @@ func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager,
 }
 
 func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Manager, registry *subscriptions.Registry, sub *subscriptions.Subscription, decision subscriptions.ChargeDecision, payerAcc *types.Account, payerBalance *big.Int, cfg subscriptions.Config, attemptNumber uint32, now uint64) error {
-	merchantAcc, err := sp.getAccount(sub.Merchant[:])
-	if err != nil {
-		return fmt.Errorf("subscriptions: load merchant %x: %w", sub.Merchant, err)
+	// Payer, merchant and fee treasury are independent roles, and any two of
+	// them can be one address (a plan subscribed to by its own merchant, a
+	// merchant that is also the fee treasury, ...). Every account is persisted
+	// from the object it was loaded into, so two objects for one address would
+	// be written back one after the other and the later one, which never saw
+	// the earlier one's delta, would overwrite it: the debit or a credit
+	// would vanish and the charge would mint or destroy its amount. Hence one
+	// object per address, all deltas applied to it, and one write.
+	merchantAcc := payerAcc
+	if sub.Merchant != sub.Payer {
+		var err error
+		merchantAcc, err = sp.getAccount(sub.Merchant[:])
+		if err != nil {
+			return fmt.Errorf("subscriptions: load merchant %x: %w", sub.Merchant, err)
+		}
 	}
 
 	var treasuryAcc *types.Account
 	if decision.FeeWei.Sign() > 0 {
 		switch cfg.Treasury {
-		case sub.Merchant:
-			// The treasury IS the merchant (or the payer): credit the
-			// already-loaded object. A second copy of the same address is
-			// persisted last and would overwrite the first credit, destroying
-			// it.
-			treasuryAcc = merchantAcc
 		case sub.Payer:
 			treasuryAcc = payerAcc
+		case sub.Merchant:
+			treasuryAcc = merchantAcc
 		default:
+			var err error
 			treasuryAcc, err = sp.getAccount(cfg.Treasury[:])
 			if err != nil {
 				return fmt.Errorf("subscriptions: load treasury: %w", err)
@@ -178,10 +187,12 @@ func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Ma
 	if err := sp.setAccount(sub.Payer[:], payerAcc); err != nil {
 		return err
 	}
-	if err := sp.setAccount(sub.Merchant[:], merchantAcc); err != nil {
-		return err
+	if sub.Merchant != sub.Payer {
+		if err := sp.setAccount(sub.Merchant[:], merchantAcc); err != nil {
+			return err
+		}
 	}
-	if treasuryAcc != nil {
+	if treasuryAcc != nil && cfg.Treasury != sub.Payer && cfg.Treasury != sub.Merchant {
 		if err := sp.setAccount(cfg.Treasury[:], treasuryAcc); err != nil {
 			return err
 		}
