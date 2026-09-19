@@ -88,6 +88,9 @@ type Config struct {
 	RPCTrustedProxies           []string                     `toml:"RPCTrustedProxies"`
 	RPCTrustProxyHeaders        bool                         `toml:"RPCTrustProxyHeaders"`
 	RPCAllowlistCIDRs           []string                     `toml:"RPCAllowlistCIDRs"`
+	RPCWebSocketOrigins         []string                     `toml:"RPCWebSocketOrigins"`
+	RPCWebSocketMaxConnections  int                          `toml:"RPCWebSocketMaxConnections"`
+	RPCWebSocketMaxPerIP        int                          `toml:"RPCWebSocketMaxPerIP"`
 	RPCProxyHeaders             RPCProxyHeaders              `toml:"RPCProxyHeaders"`
 	RPCJWT                      RPCJWT                       `toml:"RPCJWT"`
 	RPCSwapAuth                 RPCSwapAuth                  `toml:"RPCSwapAuth"`

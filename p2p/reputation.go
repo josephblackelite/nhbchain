@@ -12,6 +12,10 @@ const (
 	invalidBlockPenaltyDelta     = -20
 	malformedMessagePenaltyDelta = -5
 	spamPenaltyDelta             = -10
+
+	// defaultReputationMaxRecords bounds the per-peer table: peers are keyed by
+	// identifiers that remote parties choose, so it must not grow without limit.
+	defaultReputationMaxRecords = 4096
 )
 
 // ReputationConfig defines the thresholds for the reputation engine.
@@ -21,6 +25,10 @@ type ReputationConfig struct {
 	BanDuration      time.Duration
 	GreylistDuration time.Duration
 	DecayHalfLife    time.Duration
+	// MaxRecords caps the number of peers tracked at once; the least recently
+	// updated peer without an active ban is dropped first. Zero selects the
+	// default.
+	MaxRecords int
 }
 
 // ReputationStatus represents the state of a peer after an adjustment.
@@ -62,6 +70,9 @@ func NewReputationManager(cfg ReputationConfig) *ReputationManager {
 	}
 	if cfg.BanDuration <= 0 {
 		cfg.BanDuration = 15 * time.Minute
+	}
+	if cfg.MaxRecords <= 0 {
+		cfg.MaxRecords = defaultReputationMaxRecords
 	}
 	return &ReputationManager{cfg: cfg, records: make(map[string]*reputationRecord)}
 }
@@ -303,10 +314,41 @@ func (m *ReputationManager) Snapshot(now time.Time) map[string]ReputationStatus 
 func (m *ReputationManager) ensureRecordLocked(id string, now time.Time) *reputationRecord {
 	rec := m.records[id]
 	if rec == nil {
+		for m.cfg.MaxRecords > 0 && len(m.records) >= m.cfg.MaxRecords {
+			if !m.evictOneLocked(now) {
+				break
+			}
+		}
 		rec = &reputationRecord{updatedAt: now}
 		m.records[id] = rec
 	}
 	return rec
+}
+
+// evictOneLocked drops the least recently updated record, preferring peers that
+// are not currently banned, and reports whether a record was removed.
+func (m *ReputationManager) evictOneLocked(now time.Time) bool {
+	victim, banned := "", ""
+	var victimAt, bannedAt time.Time
+	for id, rec := range m.records {
+		if rec.bannedTill.After(now) {
+			if banned == "" || rec.updatedAt.Before(bannedAt) || (rec.updatedAt.Equal(bannedAt) && id < banned) {
+				banned, bannedAt = id, rec.updatedAt
+			}
+			continue
+		}
+		if victim == "" || rec.updatedAt.Before(victimAt) || (rec.updatedAt.Equal(victimAt) && id < victim) {
+			victim, victimAt = id, rec.updatedAt
+		}
+	}
+	if victim == "" {
+		victim = banned
+	}
+	if victim == "" {
+		return false
+	}
+	delete(m.records, victim)
+	return true
 }
 
 func (m *ReputationManager) composeStatusLocked(rec *reputationRecord, now time.Time) ReputationStatus {

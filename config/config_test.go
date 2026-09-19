@@ -789,3 +789,20 @@ func TestLoadCreatesKeystoreWithPassphrase(t *testing.T) {
 		t.Fatalf("expected decrypted key")
 	}
 }
+
+func TestConfigDecodesWebSocketSettings(t *testing.T) {
+	var cfg Config
+	contents := `RPCWebSocketOrigins = ["app.example", "*.app.example"]
+RPCWebSocketMaxConnections = 128
+RPCWebSocketMaxPerIP = 4
+`
+	if _, err := toml.Decode(contents, &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := []string{"app.example", "*.app.example"}; !reflect.DeepEqual(cfg.RPCWebSocketOrigins, want) {
+		t.Fatalf("unexpected WebSocket origins: %v", cfg.RPCWebSocketOrigins)
+	}
+	if cfg.RPCWebSocketMaxConnections != 128 || cfg.RPCWebSocketMaxPerIP != 4 {
+		t.Fatalf("unexpected WebSocket limits: %d %d", cfg.RPCWebSocketMaxConnections, cfg.RPCWebSocketMaxPerIP)
+	}
+}

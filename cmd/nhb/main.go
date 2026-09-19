@@ -554,6 +554,7 @@ func main() {
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
 		AllowlistCIDRs:    append([]string{}, cfg.RPCAllowlistCIDRs...),
+		WebSocketOrigins:  append([]string{}, cfg.RPCWebSocketOrigins...),
 		ProxyHeaders: rpc.ProxyHeadersConfig{
 			XForwardedFor: rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XForwardedFor)),
 			XRealIP:       rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XRealIP)),
@@ -584,6 +585,8 @@ func main() {
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
 		AllowInsecure:            cfg.RPCAllowInsecure,
 		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
+		WebSocketMaxConnections:  cfg.RPCWebSocketMaxConnections,
+		WebSocketMaxPerIP:        cfg.RPCWebSocketMaxPerIP,
 		SwapAuth:                 swapAuthCfg,
 	})
 	if err != nil {

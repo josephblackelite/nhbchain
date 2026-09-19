@@ -133,16 +133,25 @@ func (s *Server) handleExplorerWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "client address not allowed", http.StatusForbidden)
 		return
 	}
+	release, ok := s.acquireStream(clientIP)
+	if !ok {
+		http.Error(w, "too many open streams", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
 	ctx := context.WithValue(r.Context(), clientIPContextKey, clientIP)
 	r = r.WithContext(ctx)
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+	conn, err := websocket.Accept(w, r, s.streamAcceptOptions())
 	if err != nil {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "stream closed")
+	// The stream only writes. Reading in the background notices a client that
+	// went away, so that its slot is freed at once instead of at the next update.
+	ctx = conn.CloseRead(r.Context())
 
 	if snapshot := s.cachedExplorerSnapshot(explorerDefaultRecentBlocks); snapshot != nil {
-		if err := writeExplorerSnapshotEvent(r.Context(), conn, explorerSnapshotEvent{
+		if err := writeExplorerSnapshotEvent(ctx, conn, explorerSnapshotEvent{
 			Type:      "explorer_snapshot",
 			Height:    snapshot.LatestHeight,
 			UpdatedAt: snapshot.UpdatedAt,
@@ -153,7 +162,7 @@ func (s *Server) handleExplorerWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.explorerRealtime == nil {
-		<-r.Context().Done()
+		<-ctx.Done()
 		return
 	}
 	updates, cancel := s.explorerRealtime.Subscribe()
@@ -161,13 +170,13 @@ func (s *Server) handleExplorerWS(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case event, ok := <-updates:
 			if !ok {
 				return
 			}
-			if err := writeExplorerSnapshotEvent(r.Context(), conn, event); err != nil {
+			if err := writeExplorerSnapshotEvent(ctx, conn, event); err != nil {
 				if status := websocket.CloseStatus(err); status == -1 {
 					_ = conn.Close(websocket.StatusInternalError, "stream error")
 				}
