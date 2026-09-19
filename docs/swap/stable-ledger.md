@@ -1,66 +1,52 @@
 # Stable Ledger Records
 
-The swap module maintains an append-only ledger for USD-backed stablecoin flows. The
-state is split across five record types that map to the operational lifecycle of a
-deposit or redemption:
+`native/swap/stable_store.go` (`StableStore`) defines an append-only record
+set for USDC/USDT deposits and cash-outs. **Only one of its mutations is
+reachable from a live transaction type, and that one cannot succeed without a
+record that no live path creates.** Details per record below.
 
-- **DepositVoucher** – immutable record describing a USDC/USDT deposit that minted NHB.
-- **CashOutIntent** – user's request to redeem NHB for stablecoins, paired with an escrow lock.
-- **EscrowLock** – the NHB amount isolated on-chain until a payout receipt is observed.
-- **PayoutReceipt** – attestation emitted by treasury operators after the fiat leg settles.
-- **TreasurySoftInventory** – running aggregate of deposits minus payouts per asset.
+## Record types
 
-## Data model
+| Record | Go type | Key |
+|--------|---------|-----|
+| Deposit voucher | `DepositVoucher` | `swap/stable/voucher/<invoice_id>` (index at `swap/stable/voucher/index`) |
+| Cash-out intent | `CashOutIntent` | `swap/stable/intent/<intent_id>` |
+| Escrow lock | `EscrowLock` | `swap/stable/escrow/<intent_id>` |
+| Payout receipt | `PayoutReceipt` | `swap/stable/receipt/<intent_id>` |
+| Treasury soft inventory | `TreasurySoftInventory` | `swap/stable/inventory/<ASSET>` |
 
-| Record | Key | Notes |
-|--------|-----|-------|
-| DepositVoucher | `swap/stable/voucher/<invoice_id>` | Enforces invoice idempotency and stores metadata used for reconciliation. |
-| CashOutIntent | `swap/stable/intent/<intent_id>` | Captures account, requested asset amounts, and status transitions (`pending`, `settled`, `aborted`). |
-| EscrowLock | `swap/stable/escrow/<intent_id>` | Tracks the escrowed NHB amount and whether it has been burned. |
-| PayoutReceipt | `swap/stable/receipt/<intent_id>` | One-to-one with the intent; once present the escrow is burned and the intent is settled. |
-| TreasurySoftInventory | `swap/stable/inventory/<asset>` | Maintains deposit/payout totals, updated timestamp, and current balance. |
+Keys are in `native/swap/keys.go`. Amounts are stored as base-10 integer
+strings. Stable assets are normalised to upper case and only `USDC` and `USDT`
+are accepted (`StableAsset` in `native/swap/types.go`). Intent statuses are
+`pending`, `settled`, `aborted`.
 
-All amounts are stored as 10-base integer strings. Stable assets are normalised to upper
-case (currently `USDC` and `USDT`) and rejected if unsupported.
+## Mutations
 
-## Events & mutations
+1. **`PutDepositVoucher`** - rejects a duplicate `InvoiceID`, requires positive
+   stable and NHB amounts, stores the voucher and adds the stable amount to the
+   soft inventory. Not reachable: `TxTypeSwapMint` (`0x11`) is stubbed to
+   return "native on-chain swap mint is disabled" and the only callers of
+   `PutDepositVoucher` are tests.
+2. **`CreateCashOutIntent`** - requires enough soft inventory, stores a
+   `pending` intent and an escrow lock (burn deferred). Not reachable:
+   `TxTypeSwapBurn` (`0x12`) is stubbed the same way and the only callers are
+   tests.
+3. **`RecordPayoutReceipt`** - requires an existing `pending` intent, no
+   existing receipt for it, decrements soft inventory, marks the escrow burned,
+   reduces the NHB token supply by the intent's NHB amount and marks the
+   intent `settled`; the receipt's asset and amounts must match the intent. This is wired to `TxTypeSwapPayoutReceipt`
+   (`0x0F`): the sender must hold `ROLE_SWAP_PAYOUT_ATTESTOR` and the payload
+   is a protobuf `Any` of `swap.v1.MsgPayoutReceipt`
+   (`core/state_transition.go` `applySwapPayoutReceipt`). Because no live path
+   creates an intent, it fails with `stable: intent <id> not found`.
+4. **`AbortCashOutIntent`** - requires a `pending` intent whose escrow is not
+   burned; sets the status to `aborted`. It has no caller in non-test code.
+   The store only flips the status; it does not move any balance.
 
-1. **Voucher mint** (`MsgMintDepositVoucher`)
-   - Validates the invoice is new, persists the `DepositVoucher`, and appends it to the
-     stable voucher index.
-   - Adds the deposit amount to the treasury soft inventory for the asset.
-   - Not currently reachable: `TxTypeSwapMint` is stubbed in `core/state_transition.go`
-     to return "native on-chain swap mint is disabled -- use the buyZNHB transaction
-     type instead", and `PutDepositVoucher` is only called from test files.
+## Query surface
 
-2. **Cash-out intent** (`MsgCreateCashOutIntent`)
-   - Requires sufficient soft inventory balance before locking NHB in escrow.
-   - Stores the pending `CashOutIntent` and associated `EscrowLock` (burn deferred).
-   - Not currently reachable: `TxTypeSwapBurn` is stubbed the same way, and
-     `CreateCashOutIntent` is only called from test files - no transaction type or RPC
-     handler wires it up today.
-
-3. **Payout receipt** (`MsgPayoutReceipt`)
-   - Verifies the receipt matches the intent, decrements soft inventory, and burns the
-     escrowed NHB.
-   - Persists the `PayoutReceipt` and marks the intent as `settled` with a timestamp.
-
-4. **Abort** (`MsgAbortCashOutIntent`)
-   - Releases the escrow and marks the intent `aborted` (implementation TBD).
-   - Not currently reachable from any live transaction type or RPC handler today.
-
-## Invariants
-
-- Deposit vouchers are append-only; attempting to mint the same invoice fails.
-- Cash-out intents must settle to exactly the requested amounts (both NHB and stable).
-- Soft inventory balance can never go negative; payouts are rejected if insufficient
-  deposits exist.
-- Escrow locks burn exactly once after a matching payout receipt, satisfying
-  "burn-after-settle" requirements.
-- Stable assets are validated for every mutation to avoid unexpected buckets.
-
-The keeper exposes `GetDepositVoucher`, `GetCashOutIntent`, and `GetSoftInventory`
-methods (`native/swap/stable_store.go`) that could back treasury dashboards and
-auditors with real-time views. These are Go methods only - the generated protobuf
-`Query*` message types exist with no service/rpc block, so there is no RPC/gRPC
-endpoint exposing them under any name today.
+`GetDepositVoucher`, `GetCashOutIntent`, `GetEscrowLock`, `GetPayoutReceipt`
+and `GetSoftInventory` are Go methods. The `Query*` messages in
+`proto/swap/v1/stable.proto` have no service definition, so none of these is
+reachable over RPC or gRPC. (`proto/swap/v1/swap.proto` defines a separate
+`SwapService` for pools; it is unrelated to these records.)

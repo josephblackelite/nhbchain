@@ -1,104 +1,202 @@
 # On-Chain Lending Architecture
 
-This document provides a technical overview of how the NHBChain lending module
-operates on-chain. It is intended for smart contract developers, auditors, and
-infrastructure partners who need to understand the protocol\'s accounting and
-risk controls.
+How the native lending module (`native/lending`, applied by
+`core/lending_native.go`) accounts for balances, prices interest, values
+collateral and liquidates. Everything here is from the Go source.
 
-## Interest Rate Model
+## Assets and pools
 
-Each market tracks supply utilization `U = totalBorrowed / totalSupplied`. The
-protocol applies a piecewise-linear interest rate curve:
+* Supplied and borrowed asset: `NHB`. Collateral: `ZNHB`. There is no
+  per-asset market list. A pool is identified by `poolId`; `default` exists
+  implicitly and other pools are created with `TxTypeLendingCreatePool`.
+* NHB lives in a module account and ZNHB collateral in a separate collateral
+  account (`Node.LendingModuleAddress`, `Node.LendingCollateralAddress`).
+* Suppliers hold **shares** in `UserAccount.SupplyShares`; they are ledger
+  entries, not transferable tokens. Redeemable NHB is
+  `shares * SupplyIndex / 1e27`, rounded half-up.
+* Indexes and shares use 1e27 fixed-point ("ray") arithmetic with half-up
+  rounding (`native/lending/math.go`).
+* The first supply into a pool with zero total shares must be at least 1 NHB
+  (`1e18` wei) or it fails with `deposit below minimum liquidity`; a supply
+  that would mint zero shares fails the same way.
+* A supplier cannot withdraw in the same block as their own supply
+  (`cannot withdraw in the same block as a supply`).
+* Available liquidity is `TotalNHBSupplied + TotalFixedTermDepositPrincipalWei - TotalNHBBorrowed`,
+  floored at zero. Borrows and withdrawals are limited to it.
 
-- **Base Rate:** Applied when utilization is zero, representing the minimum
-  borrow APR.
-- **Slope 1:** Gradually increases the borrow rate from the base rate until the
-  optimal utilization point.
-- **Slope 2:** A steeper increase that kicks in after optimal utilization to
-  discourage further borrowing and incentivize more supply.
+## Interest rate model
 
-Borrow interest is compounded each block by updating the borrow index. The
-supply rate is derived from the borrow rate using the reserve factor `r` and the
-protocol fee share `p`:
+`InterestModel` (`native/lending/interest.go`) with utilisation
+`U = TotalNHBBorrowed / TotalNHBSupplied`:
 
-```
-supplyRate = borrowRate * U * (1 - r - p)
-```
+* `U == 0`: borrow APR = `BaseRate`.
+* `U <= Kink` (or `Kink == 0`): `BaseRate + Slope1 * U`.
+* `U > Kink`: `BaseRate + Slope1 * Kink + Slope2 * (U - Kink)`.
 
-All rates are quoted per-second but can be accumulated to APRs for user-facing
-interfaces.
+The node uses `DefaultInterestModel`: base 2%, slope 1 15%, slope 2 60%, kink
+80% (`NewInterestModel(0.02, 0.15, 0.6, 0.8)`). The model is not read from
+config or governance.
 
-## Interest Accrual Mechanics
+Supplier rate is `borrowAPR * U * (1 - (ReserveFactorBps + ProtocolFeeBps) / 10000)`
+(the sum is capped at 10000 bps). `config.toml` sets `ReserveFactorBps = 1000`
+and `ProtocolFeeBps = 0`.
 
-1. **Accrual Trigger:** Every market accrues interest during state-changing
-   operations (supply, withdraw, borrow, repay, liquidation, and collateral
-   withdrawals).
-2. **Borrow Index Update:** The protocol calculates the time delta since the
-   last accrual and multiplies it by the current borrow rate to update the
-   borrow index.
-3. **Reserve Growth:** A portion of the interest (based on the reserve factor)
-   and the configured protocol fee share is redirected to the protocol fee
-   accrual.
-4. **Supplier Yield:** The remaining interest is distributed proportionally to
-   suppliers by increasing the exchange rate between deposit receipts and the
-   underlying asset.
+## Accrual
 
-The protocol tracks protocol and developer fees in a `FeeAccrual` structure.
-Those balances can be withdrawn to external accounts, reducing the pool's
-reported liquidity while keeping historical accounting intact.
+`accrueInterest` runs at the start of supply, withdraw, collateral
+withdrawal, borrow, repay and liquidate, and per block-height delta:
 
-## Collateral Evaluation
+1. `delta = currentHeight - market.LastUpdateBlock`. Nothing accrues when
+   `delta == 0` or nothing is borrowed.
+2. Per-block rate is `APR / 31,536,000` (`blocksPerYear`, which equals seconds
+   per year, so it assumes one block per second). The borrow and supply
+   indexes grow by `1 + perBlockRate * delta` (linear within one step).
+3. Interest `= TotalNHBBorrowed * perBlockRate * delta` is added to both
+   `TotalNHBBorrowed` and `TotalNHBSupplied`.
+4. `ReserveFactorBps` and `ProtocolFeeBps` shares of that interest are added
+   to `FeeAccrual.ProtocolFeesWei`.
 
-- **Oracle Prices:** Prices are fetched from NHBChain\'s decentralized oracle
-  network and normalized to 18 decimals.
-- **Collateral Factor:** Each asset has an LTV (maximum borrowing power) and a
-  liquidation threshold (safety buffer).
-- **Borrow Power:** The protocol sums the USD value of enabled collateral assets
-  multiplied by their LTV to compute total borrowing capacity.
-- **Shortfall:** If the USD value of borrows exceeds the liquidation-adjusted
-  collateral value, the account is flagged for liquidation.
+Borrower debt is stored as `ScaledDebt` (debt divided by the borrow index at
+borrow time) and read back as `ScaledDebt * BorrowIndex / 1e27`.
 
-## Liquidation Flow
+`FeeAccrual` also has `DeveloperFeesWei`, credited by the developer fee
+charged at borrow time. `Engine.WithdrawProtocolFees` and
+`WithdrawDeveloperFees` exist but have no caller outside the engine's own
+tests, so accrued fee balances have no on-chain withdrawal path today.
 
-1. **Detection:** When an account\'s health factor drops below 1.0, the
-   position becomes liquidatable.
-2. **Repayment:** A liquidator specifies the asset and repayment amount to cover
-   part of the borrower\'s debt.
-3. **Seizure:** The contract transfers collateral to the liquidator, applying an incentive bonus defined per market.
-4. **Close Factor:** A maximum percentage of the outstanding borrow can be
-   liquidated in a single transaction to prevent full wipeouts in thin markets.
+## Collateral valuation
 
-### Collateral Distribution
+`OracleAdjustedCollateralValue` (`native/lending/engine.go`):
 
-Liquidation collateral is routed to multiple parties based on the node's
-`[lending.collateralRouting]` configuration. Operators can split the seized
-collateral between the liquidator, a developer recovery wallet, and a protocol
-reserve address:
+* If the market has a reference price (`Market.OracleMedianWei > 0`), ZNHB
+  collateral value in NHB-wei is `collateral * OracleMedianWei / 1e18`, rounded
+  down.
+* If it has never received one, collateral is valued **1:1** with NHB.
 
-- `LiquidatorBps` — basis points paid to the liquidator.
-- `DeveloperBps` / `DeveloperAddress` — optional share routed to the
-  developer-controlled treasury. An address is required when the share is
-  non-zero.
-- `ProtocolBps` / `ProtocolAddress` — optional share allocated to the
-  protocol reserve wallet.
+The reference price is written to every market by `TxTypeLendingRefPrice`
+(see [rpc-api.md](rpc-api.md#lending_submitrefprice-jwt-required)). Before a
+new median overwrites it, the old one is saved as `OraclePrevMedianWei`.
 
-The configured basis points must sum to at most 10,000 (100%). Any remainder is
-credited to the liquidator, ensuring they always receive the incentive bonus.
-If a share is non-zero but the destination address is missing, liquidations are
-rejected to avoid burning collateral.
+`guardOracle` runs on borrow, fixed-term borrow (`native/lending/fixed_term.go`),
+liquidation, and on collateral withdrawal while the account has debt:
 
-## Risk Parameters
+* If `Oracle.MaxAgeBlocks > 0`: a market whose `OracleUpdatedBlock` is `0`
+  (never updated) or older than `MaxAgeBlocks` returns `oracle quote stale`.
+  With the shipped `OracleMaxAgeBlocks = 1000`, borrowing is blocked until a
+  first reference price lands.
+* If `Oracle.MaxDeviationBps > 0` and both medians are positive: a move larger
+  than that share of the previous median returns `oracle deviation too large`.
 
-All risk parameters (LTV, liquidation threshold, reserve factor, close factor,
-liquidation bonus) are governed on-chain. Governance proposals update the
-configuration contract, which is referenced by every market instance. Changes
-become active immediately after the proposal execution block.
+## Health and borrow limits
 
-## Events and Indexing
+For collateral value `V` (NHB-wei) and debt `D`:
 
-Markets emit events for all critical actions, including accrual updates,
-liquidations, and reserve transfers. Indexing services can subscribe to these
-logs to provide real-time analytics and alerting for borrowers.
+* **Healthy** when `V * LiquidationThreshold >= D * 10000`. A position with no
+  debt is healthy; a position with zero collateral value and debt is not.
+* **Borrow limit**: a borrow must leave `V * MaxLTV >= D * 10000`, where `D`
+  includes the new borrow, the developer fee if any, and the outstanding amount
+  of an active fixed-term loan.
 
-For implementation details, refer to the NHBChain lending smart contracts in the
-`native` repository and the associated unit tests in `tests/`.
+The same checks apply to collateral withdrawals (health only) and borrows
+(health and max LTV). There is no stored "health factor" number on-chain; the
+`lendingd` gateway computes one (see [`docs/lending/service.md`](../../lending/service.md)).
+
+Repay is capped at the current debt and is available while the oracle is
+stale; it is blocked only by pauses.
+
+## Liquidation
+
+`Engine.Liquidate(liquidator, borrower)`:
+
+1. Requires the borrower to have flexible-rate debt and to be **not healthy**
+   (fixed-term debt is not counted for liquidation eligibility). Runs
+   `guardOracle` first.
+2. The liquidator repays the borrower's **entire** flexible debt in NHB; there
+   is no close factor and no partial liquidation.
+3. The seized collateral is `repayAmount * (10000 + LiquidationBonus) / 10000`,
+   computed directly on the NHB-wei debt amount and taken from the borrower's
+   ZNHB collateral (capped at the collateral held). No oracle price is applied
+   to this conversion.
+4. The borrower's debt and scaled debt are set to zero.
+
+The node binaries never set `LiquidationBonus` (see below), so the bonus is
+`0`.
+
+### Collateral routing
+
+`[lending.collateralRouting]` (`LiquidatorBps`, `DeveloperBps`,
+`DeveloperAddress`, `ProtocolBps`, `ProtocolAddress`) splits seized collateral.
+Developer and protocol shares are `seized * bps / 10000`; the liquidator gets
+the rest. The sum of the three basis points must not exceed 10000 (startup
+panics otherwise, `cmd/nhb/main.go`); a non-zero developer or protocol share
+requires its address (startup panics otherwise). The shipped `config.toml`
+sets all three shares to `0`, so the liquidator receives everything.
+
+## Developer fee
+
+`DeveloperFeeBps` and `DeveloperFeeCollector` in `[lending]` are copied into
+each pool at creation. When a pool has a non-zero developer fee, the engine
+charges it on every borrow: the borrower receives `amount`, the collector
+receives `amount * bps / 10000`, and both are added to the borrower's debt.
+`useDeveloperFee: true` in the borrow payload additionally requires the pool to
+have a fee and collector configured, otherwise the borrow fails with
+`developer fee disabled`. The fee must not exceed `DeveloperFeeCapBps`, which
+the node sets equal to `DeveloperFeeBps`. `config.toml` sets `DeveloperFeeBps = 0`.
+A non-zero `DeveloperFeeBps` with an empty collector makes the node panic at
+startup.
+
+## Risk parameters
+
+`RiskParameters` is populated at startup from `[lending]` in `config.toml`
+(`cmd/nhb/main.go`):
+
+| Config key | Field | Shipped value |
+| --- | --- | --- |
+| `MaxLTVBps` | `MaxLTV` | `6000` |
+| `LiquidationThresholdBps` | `LiquidationThreshold` | `8500` |
+| `DeveloperFeeBps` | `DeveloperFeeCapBps` | `0` |
+| `OracleMaxAgeBlocks` | `Oracle.MaxAgeBlocks` | `1000` (`0` disables) |
+| `OracleMaxDeviationBps` | `Oracle.MaxDeviationBps` | `5000` (`0` disables) |
+| `ReserveFactorBps`, `ProtocolFeeBps` | accrual split | `1000`, `0` |
+
+`LiquidationBonus`, `BorrowCaps`, `CircuitBreakerActive`, `OracleAddress` and
+the per-action `Pauses` exist in the struct but no config key or governance
+proposal sets them; they stay at zero or `false`. The `[lending.breaker]`
+section (`MaxTotalSupplyWei`, `MaxTotalBorrowWei`, `MaxTotalCollateralWei`) is
+parsed into `lending.Config` and is not passed to the engine. The `lending`
+module-wide pause is the only live pause.
+
+These values are fixed per node from local config. Governance can currently
+change only the fixed-term rate schedules (`policy.lendingRateSchedule`,
+`policy.lendingDepositRateSchedule`). Every validator must run the same config.
+
+## Fixed-term products
+
+Separate state from the flexible ledger (`native/lending/fixed_term.go`,
+`fixed_term_deposit.go`, `autodebit.go`, `deposit_payout.go`):
+
+* **Fixed-term loan**: one active loan per borrower per pool. Interest is
+  `principal * rateBps / 10000` for the whole tenure regardless of when it is
+  repaid. Default schedule: 30 days at 1200 bps, 90 days at 1600 bps.
+* **Auto-debit**: interest is collected in 30-day cycles (a 30-day loan has one
+  cycle, a 90-day loan three). Three consecutive missed debits mark the loan
+  `delinquent`; no collateral is seized by that transition.
+* **Fixed-term deposit**: locked rate and tenure; payout is either
+  `lump_sum_at_maturity` or `periodic_interest_principal_at_maturity`. New
+  deposits are capped by the pool's aggregate fixed-term loan interest
+  receivable (`fixed-term deposit would exceed the pool's fixed-term loan
+  interest capacity`).
+
+## Events
+
+The lending code emits these event types (`core/events/lending_*.go`):
+
+* `lending.refprice.recorded`
+* `lending.autodebit.succeeded`, `lending.autodebit.failed`,
+  `lending.fixedterm.delinquent`
+* `lending.depositpayout.succeeded`, `lending.depositpayout.delayed`
+
+`core/lending_native.go` and `native/lending/engine.go` do not append events
+for supply, withdraw, collateral, borrow, repay or liquidate. Read state
+through the RPC methods in [rpc-api.md](rpc-api.md) or the query router in
+[state-indexes.md](state-indexes.md).
