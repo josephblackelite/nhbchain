@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhbchain/config"
@@ -71,14 +72,42 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db                    storage.Database
-	state                 *StateProcessor
-	chain                 *Blockchain
-	syncMgr               *syncmgr.Manager
-	validatorKey          *crypto.PrivateKey
-	mempool               []*types.Transaction
-	mempoolMu             sync.Mutex
-	proposedTxs           map[string]struct{}
+	db           storage.Database
+	state        *StateProcessor
+	chain        *Blockchain
+	syncMgr      *syncmgr.Manager
+	validatorKey *crypto.PrivateKey
+	mempool      []*types.Transaction
+	mempoolMu    sync.Mutex
+	// proposedTxs marks transactions currently offered to a block proposal
+	// ("in flight") so GetMempool does not offer them again. The value is the
+	// lease expiry: a lease that lapses (a proposal that never finished, a
+	// polling consumer of GetMempool, any missed release path) simply makes
+	// the transaction offerable again instead of hiding it forever.
+	proposedTxs map[string]time.Time
+	// Block-production containment (core/proposal_containment.go). None of
+	// this is consensus state: it only decides which transactions this
+	// proposer includes, and reports on it.
+	//
+	//   poison          bounded strike book of failing resident transactions
+	//   getMempoolCalls counts GetMempool calls for the periodic sweep
+	//                   (guarded by mempoolMu)
+	//   buildMu         guards buildCfg and buildClock
+	//   hooks           test seams, nil in production
+	//   isolating       single-flight guard for async isolation
+	//   build           counters and watchdog state
+	//   lastBuilt       transactions of the block most recently sealed
+	poison          *txStrikeBook
+	getMempoolCalls uint64
+	buildMu         sync.RWMutex
+	buildCfg        buildConfig
+	buildClock      func() time.Time
+	hooks           atomic.Pointer[proposalHooks]
+	isolating       atomic.Bool
+	build           buildTelemetry
+	lastBuilt       atomic.Pointer[builtRecord]
+	watchdogOnce    sync.Once
+
 	mempoolLimit          int
 	allowUnlimitedMempool bool
 	senderUsage           map[string]*senderQuotaUsage
@@ -588,7 +617,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		chain:                chain,
 		validatorKey:         key,
 		mempool:              make([]*types.Transaction, 0),
-		proposedTxs:          make(map[string]struct{}),
+		proposedTxs:          make(map[string]time.Time),
+		poison:               newTxStrikeBook(defaultStrikeBookCapacity),
 		posArrival:           make(map[string]time.Time),
 		senderUsage:          make(map[string]*senderQuotaUsage),
 		senderNonces:         make(map[string]map[uint64]time.Time),
@@ -675,6 +705,15 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 
 	if node.networkMode == "" {
 		node.networkMode = "prod"
+	}
+
+	// Block-production containment tunables: built-in defaults, then any
+	// NHB_* environment overrides. Malformed values are reported and ignored;
+	// a typo in a tuning knob must never stop a validator from starting.
+	buildCfg, buildCfgWarnings := loadBuildConfig(defaultBuildConfig(), os.Getenv)
+	node.buildCfg = buildCfg
+	for _, warning := range buildCfgWarnings {
+		slog.Warn("block-production configuration override ignored", slog.String("detail", warning))
 	}
 
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
@@ -1304,6 +1343,7 @@ func (n *Node) SetMempoolLimit(limit int) {
 						delete(n.posArrival, key)
 					}
 					n.untrackTransactionLocked(key)
+					n.poison.forget(key)
 				}
 			}
 		}
@@ -2209,6 +2249,10 @@ func (n *Node) emitSwapSanctionAlert(alert events.SwapSanctionAlert) {
 }
 
 func (n *Node) StartConsensus() {
+	// The watchdog starts before the engine: bftEngine.Start blocks for the
+	// life of the process, and a stall is exactly when the engine cannot be
+	// relied on to report on itself.
+	n.startLivenessWatchdog()
 	if n.bftEngine != nil {
 		n.bftEngine.Start()
 	}
@@ -2477,6 +2521,12 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 					}
 
 					if newFee.Cmp(existingFee) > 0 {
+						// The replaced transaction leaves the mempool: drop its
+						// in-flight lease and failure history with it.
+						if replacedKey, replacedErr := transactionKey(existing); replacedErr == nil {
+							delete(n.proposedTxs, replacedKey)
+							n.poison.forget(replacedKey)
+						}
 						n.mempool[i] = tx
 						if key, keyErr := transactionKey(tx); keyErr == nil {
 							n.trackTransactionLocked(key, sender, nonce, now)
@@ -2728,6 +2778,29 @@ func (n *Node) SubmitTxEnvelope(envelope *consensusv1.SignedTxEnvelope) error {
 
 // --- Methods for bft.NodeInterface ---
 
+// strikeBookSweepInterval is how often (in GetMempool calls) the strike book is
+// reconciled against the live mempool, as a safety net for any mempool exit
+// path that forgot to drop a transaction's failure history.
+const strikeBookSweepInterval = 64
+
+// GetMempool returns the transactions eligible for the next block proposal, in
+// scheduling order, and leases the first Blocks.MaxTxs of them so they are not
+// offered again while that proposal is in flight.
+//
+// Ineligible transactions are filtered out BEFORE scheduling, so a transaction
+// that is in flight, backing off after a failure, or excluded by the operator
+// never displaces an eligible one from the MaxTxs window:
+//
+//   - leased (in flight) transactions, until the lease lapses;
+//   - transactions whose failure backoff has not elapsed (see txStrikeBook.gate);
+//   - transactions of an operator-excluded type (NHB_PROPOSER_EXCLUDE_TXTYPES);
+//   - transactions whose failure-history TTL has elapsed are evicted outright.
+//
+// Only the first MaxTxs of the returned list are leased. The full list is still
+// returned so existing callers are unchanged; CreateBlock clamps to the same
+// window. The old behaviour leased every returned transaction even though a
+// proposal can hold at most MaxTxs, so a burst above the cap hid the overflow
+// from every later call until restart.
 func (n *Node) GetMempool() []*types.Transaction {
 	if n == nil {
 		return nil
@@ -2736,18 +2809,41 @@ func (n *Node) GetMempool() []*types.Transaction {
 	defer n.mempoolMu.Unlock()
 
 	if n.proposedTxs == nil {
-		n.proposedTxs = make(map[string]struct{})
+		n.proposedTxs = make(map[string]time.Time)
 	}
+
+	cfg := n.buildConfigSnapshot()
+	localNow := n.localNow()
+	var nextHeight uint64 = 1
+	if n.chain != nil {
+		nextHeight = n.chain.GetHeight() + 1
+	}
+	metrics := observability.Mempool()
 
 	var (
 		lanes   mempool.Lanes
 		ordered []*types.Transaction
+		keys    map[*types.Transaction]string
 	)
+	n.getMempoolCalls++
+	sweep := n.getMempoolCalls%strikeBookSweepInterval == 0
+	var liveKeys map[string]struct{}
+	if sweep {
+		liveKeys = make(map[string]struct{}, len(n.mempool))
+	}
 	if len(n.mempool) > 0 {
 		now := n.currentTime().Unix()
 		original := n.mempool
 		filtered := original[:0]
+		keys = make(map[*types.Transaction]string, len(original))
 		lanes = mempool.Lanes{POS: make([]*types.Transaction, 0, len(original)), Normal: make([]*types.Transaction, 0, len(original))}
+		forgetKey := func(key string) {
+			delete(n.proposedTxs, key)
+			if n.posArrival != nil {
+				delete(n.posArrival, key)
+			}
+			n.poison.forget(key)
+		}
 		for _, tx := range original {
 			if tx == nil {
 				continue
@@ -2756,10 +2852,7 @@ func (n *Node) GetMempool() []*types.Transaction {
 				voucher, _, err := decodeMintTransaction(tx.Data)
 				if err != nil || voucher == nil || voucher.Expiry <= now {
 					if key, keyErr := transactionKey(tx); keyErr == nil {
-						delete(n.proposedTxs, key)
-						if n.posArrival != nil {
-							delete(n.posArrival, key)
-						}
+						forgetKey(key)
 					}
 					continue
 				}
@@ -2768,15 +2861,52 @@ func (n *Node) GetMempool() []*types.Transaction {
 				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
 				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= now {
 					if key, keyErr := transactionKey(tx); keyErr == nil {
-						delete(n.proposedTxs, key)
-						if n.posArrival != nil {
-							delete(n.posArrival, key)
-						}
+						forgetKey(key)
 					}
 					continue
 				}
 			}
+			key, keyErr := transactionKey(tx)
+			if keyErr != nil {
+				// Not schedulable, but not this function's business to drop.
+				filtered = append(filtered, tx)
+				continue
+			}
+			keys[tx] = key
+
+			// Failure-history TTL: evict, do not just hide.
+			if verdict, reason := n.poison.gate(key, nextHeight, localNow, cfg.SkipTTL, cfg.AbsoluteTTL); verdict == gateExpired {
+				forgetKey(key)
+				n.untrackTransactionLocked(key)
+				metrics.RecordEviction("ttl")
+				slog.Warn("transaction evicted from the local mempool",
+					slog.String("txType", types.TxTypeName(tx.Type)),
+					slog.String("key", truncateText(key, 24)),
+					slog.String("reason", reason))
+				continue
+			} else if verdict == gateBackoff {
+				filtered = append(filtered, tx)
+				if sweep {
+					liveKeys[key] = struct{}{}
+				}
+				continue
+			}
 			filtered = append(filtered, tx)
+			if sweep {
+				liveKeys[key] = struct{}{}
+			}
+
+			// In flight: hidden until the lease lapses.
+			if expiry, inFlight := n.proposedTxs[key]; inFlight {
+				if localNow.Before(expiry) {
+					continue
+				}
+				delete(n.proposedTxs, key)
+				metrics.RecordInflightLeaseExpired()
+			}
+			if _, excluded := cfg.ExcludeTypes[tx.Type]; excluded {
+				continue
+			}
 			if mempool.IsPOSLaneEligible(tx) {
 				lanes.POS = append(lanes.POS, tx)
 			} else {
@@ -2788,35 +2918,39 @@ func (n *Node) GetMempool() []*types.Transaction {
 		}
 		n.mempool = filtered
 	}
+	if sweep {
+		n.poison.sweep(liveKeys)
+	}
+	metrics.SetStrikeRecords(n.poison.size())
 
-	if len(n.mempool) == 0 {
-		if metrics := observability.Mempool(); metrics != nil {
-			metrics.RecordPOSLaneFill(mempool.Usage{})
-		}
+	if len(lanes.POS)+len(lanes.Normal) == 0 {
+		metrics.RecordPOSLaneFill(mempool.Usage{})
 		return nil
 	}
 
 	snapshot := n.globalConfigSnapshot()
 	maxTxs := snapshot.Blocks.MaxTxs
 	if maxTxs <= 0 || maxTxs > int64(math.MaxInt) {
-		maxTxs = int64(len(n.mempool))
+		maxTxs = int64(len(lanes.POS) + len(lanes.Normal))
 	}
 	planner := consensus.POSQuota{ReservationBPS: snapshot.Mempool.POSReservationBPS}
 	ordered, usage := mempool.Schedule(lanes, int(maxTxs), planner)
-	if metrics := observability.Mempool(); metrics != nil {
-		metrics.RecordPOSLaneFill(usage)
-	}
+	metrics.RecordPOSLaneFill(usage)
 
+	lease := cfg.InflightLease
+	if lease <= 0 {
+		lease = defaultInflightLease
+	}
+	leaseUntil := localNow.Add(lease)
 	txs := make([]*types.Transaction, 0, len(ordered))
 	for _, tx := range ordered {
-		key, err := transactionKey(tx)
-		if err != nil {
+		key, ok := keys[tx]
+		if !ok {
 			continue
 		}
-		if _, alreadyProposed := n.proposedTxs[key]; alreadyProposed {
-			continue
+		if int64(len(txs)) < maxTxs {
+			n.proposedTxs[key] = leaseUntil
 		}
-		n.proposedTxs[key] = struct{}{}
 		txs = append(txs, tx)
 	}
 	return txs
@@ -2922,6 +3056,34 @@ func (n *Node) requeueTransactions(txs []*types.Transaction) {
 	}
 }
 
+// releaseInflightKeys is requeueTransactions for callers that already hold the
+// transactions' keys (CreateBlock's completion step), so nothing is hashed
+// twice.
+func (n *Node) releaseInflightKeys(keys []string) {
+	if n == nil || len(keys) == 0 {
+		return
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	if len(n.proposedTxs) == 0 {
+		return
+	}
+	for _, key := range keys {
+		delete(n.proposedTxs, key)
+	}
+}
+
+// mempoolCounts reports the resident and in-flight transaction counts for
+// diagnostics, without mutating proposal bookkeeping.
+func (n *Node) mempoolCounts() (resident, inFlight int) {
+	if n == nil {
+		return 0, 0
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	return len(n.mempool), len(n.proposedTxs)
+}
+
 // RequeueTransactions releases proposal bookkeeping for transactions that were
 // selected into a round but not finalized, allowing them to be proposed again
 // in a later round.
@@ -2948,6 +3110,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		committed[key] = struct{}{}
 		delete(n.proposedTxs, key)
 		n.untrackTransactionLocked(key)
+		n.poison.forget(key)
 		if mempool.IsPOSLaneEligible(tx) && n.posArrival != nil {
 			if enqueuedAt, ok := n.posArrival[key]; ok {
 				latency := n.currentTime().Sub(enqueuedAt)
@@ -2971,6 +3134,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		}
 		if _, ok := committed[key]; ok {
 			n.untrackTransactionLocked(key)
+			n.poison.forget(key)
 			continue
 		}
 		filtered = append(filtered, tx)
@@ -3000,6 +3164,7 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 			delete(n.posArrival, key)
 		}
 		n.untrackTransactionLocked(key)
+		n.poison.forget(key)
 	}
 	if len(dropped) == 0 || len(n.mempool) == 0 {
 		return
@@ -3023,19 +3188,21 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 	n.mempool = filtered
 }
 
-// proposalTxDisposition is classifyProposalError's verdict for a transaction
-// that failed stateCopy.ApplyTransaction while CreateBlock's buildProposalState
-// is speculatively assembling a block.
+// proposalTxDisposition is the verdict for a transaction that failed
+// ApplyTransaction while CreateBlock (core/proposal_containment.go) is
+// speculatively assembling a block. It is produced by classifyProposalError
+// (plus the two verdicts only the wave engine can reach).
 type proposalTxDisposition int
 
 const (
-	// proposalDispositionAbort is the zero value and the safe default for
-	// any error classifyProposalError does not explicitly recognize: the
-	// whole in-progress proposal attempt fails and CreateBlock returns the
-	// error to its caller. This is deliberately what "unclassified" means
-	// -- adding a new disposition always requires a positive, reviewed
-	// decision (see the ABORT-is-correct discussion below); silence must
-	// never be read as "safe to skip or prune".
+	// proposalDispositionAbort is the zero value. After the block-production
+	// hardening it means exactly one thing: an INFRASTRUCTURE error -- this
+	// node cannot read or write state (see isInfrastructureError) -- which is
+	// not attributable to the transaction and which excluding transactions
+	// cannot fix. The wave fails, no transaction is struck, and CreateBlock
+	// falls back to the empty block. Unclassified errors used to land here
+	// and halted the chain; they now default to
+	// proposalDispositionQuarantine instead.
 	proposalDispositionAbort proposalTxDisposition = iota
 	// proposalDispositionPrune means the transaction is permanently
 	// unexecutable -- a pure function of its own immutable payload, or of
@@ -3049,24 +3216,49 @@ const (
 	// registry) or on ordering within this attempt -- a later attempt
 	// (next round, a different candidate set, state that has since
 	// changed) can genuinely succeed. It is excluded from THIS attempt's
-	// block but its mempool "in-flight" mark is released
-	// (n.requeueTransactions) so it is reconsidered next round; it is
-	// never removed from n.mempool.
+	// block and released from the "in-flight" bookkeeping so it is
+	// reconsidered later; it is never removed from n.mempool by this
+	// verdict, carries no strike, and backs off by height only after
+	// repeated skips (see txStrikeBook.noteSkip).
 	proposalDispositionSkip
+	// proposalDispositionQuarantine is the default for every error nobody
+	// classified: the transaction is excluded from this proposal, struck, and
+	// held back for a height or two. It is evicted only after several strikes
+	// AND a solo dry run showing it fails even on its own against committed
+	// state, so an innocent transaction that merely lost a same-block conflict
+	// is never evicted by it (see Node.confirmAndEvict). A contained panic is
+	// always quarantined and confirmed at its first strike.
+	proposalDispositionQuarantine
+	// proposalDispositionNondeterministic marks a transaction that read the
+	// wall clock while applying. Such a transaction succeeds here but cannot
+	// be re-executed identically by a validator a moment later (escrow
+	// creation stores the wall-clock second in the trie), so a block that
+	// contains it can fail to commit and, through the BFT lock, deadlock the
+	// validators. It is never proposed; it is struck like a quarantined
+	// transaction. Produced by the wave engine's clock detector, never by
+	// classifyProposalError.
+	proposalDispositionNondeterministic
 )
 
 // classifyProposalError reports the disposition for a transaction that
-// failed during proposal building (stateCopy.ApplyTransaction in
-// CreateBlock's buildProposalState). Getting this wrong in either direction
-// is dangerous: classifying a transiently-failing error as PRUNE silently
-// and permanently destroys a transaction that would have succeeded later;
-// leaving a routinely-occurring error unclassified (ABORT) lets it block
-// EVERY OTHER pending transaction, for EVERY subsequent round, until the
-// offending transaction's own expiry -- a validator-wide liveness stall, not
-// just a loss for one submitter. This function (and the SKIP disposition
-// specifically) exists because that second failure mode was found to be far
-// more common, and far more severe, than originally assumed -- see the
-// module-pause discussion below.
+// failed during proposal building (ApplyTransaction inside CreateBlock's
+// wave engine, core/proposal_containment.go). It is called ONLY from
+// CreateBlock: ValidateBlock and commitBlock never call it -- they re-execute
+// a block's transactions and reject the block on any apply error -- so what
+// it returns can only change which transactions THIS proposer includes, never
+// what any validator accepts.
+//
+// Classification is now a matter of speed and precision, not of liveness:
+// every error this function does not recognise is QUARANTINED (excluded from
+// the proposal, struck, evicted after repeated confirmed failures), so an
+// unclassified error can no longer halt block production. Getting a verdict
+// wrong in either direction still matters for the submitter: classifying a
+// transiently-failing error as PRUNE silently and permanently destroys a
+// transaction that would have succeeded later, while leaving a permanently
+// dead one unclassified keeps it resident for a few rounds until its strikes
+// run out. The SKIP disposition specifically exists for designed-transient
+// causes (a module pause, a rolling cap) that are routine and must never be
+// struck -- see the module-pause discussion below.
 //
 // This matters most for TxTypeSwapVoucherMint: when the same fiat voucher
 // reaches two validators nearly simultaneously (each independently
@@ -3234,56 +3426,90 @@ const (
 //     opens, so it stays in the mempool and is offered again -- the
 //     counterpart to ErrBuybackRefPriceStaleEpoch (PRUNE) above.
 //
-// == ABORT: deliberately still unclassified ==
+// == QUARANTINE: the default for everything else ==
 //
-//   - ErrSwapPriceProofInvalid: its signature-mismatch case is checked
-//     against the SAME mutable SwapPriceSigner registry as
-//     ErrSwapPriceProofSignerUnknown (recovered-pubkey-vs-currently-
-//     registered-signer), so a correction to a stale/incorrect signer
-//     registration could make a later resubmission succeed -- SKIP-shaped
-//     reasoning. But it ALSO covers pure-payload causes (domain/pair
-//     mismatch, a non-positive rate) that are PRUNE-shaped, and Go's
-//     errors.Is cannot distinguish which branch fired. The conservative,
-//     correct choice for an ambiguous sentinel is to leave it unclassified
-//     (ABORT) rather than risk either silently, permanently dropping a
-//     transaction that would have succeeded (wrong PRUNE), or endlessly
-//     retrying real corruption forever masked as "try again later" (wrong
-//     SKIP). This is intentionally NOT the same risk profile as a routine
-//     operational event like a pause or a cap -- it requires a genuinely
-//     malformed or adversarial payload to trigger, so ABORT's liveness cost
-//     is bounded to that rare case rather than to ordinary usage.
-//   - Two node-infrastructure failure classes that run in buildProposalState
-//     before or after the per-tx loop, not inside it, and are therefore
-//     never seen by this function at all: n.refreshModulePauses() /
-//     n.state.Copy() failures (a precondition for building ANY block,
-//     including an empty one -- no transaction-exclusion strategy can fix
-//     an inability to read config or snapshot state), and
-//     stateCopy.ProcessBlockLifecycle / n.processPendingEvidenceForState
-//     failures (whole-block epoch rollover and slashing-evidence
-//     processing, not attributable to any single pending transaction).
-//     Both are surfaced as CreateBlock errors so the round fails visibly
-//     and another validator's block production can cover it.
+// Any error not listed above or below -- including a bare fmt.Errorf from a
+// handler that nobody has reviewed yet, and a recovered panic -- is excluded
+// from this proposal, struck, and held back for a height or two; after
+// Strikes failures across distinct builds, and only if a solo dry run shows
+// it fails even alone against committed state, it is evicted from the local
+// mempool (see Node.confirmAndEvict). This is what closes the class the
+// three incidents belonged to: an unknown apply error costs the submitter
+// their transaction, never the chain its liveness.
+//
+//   - ErrSwapPriceProofInvalid used to be deliberately left unclassified
+//     (ABORT) because Go's errors.Is cannot tell its signature-mismatch
+//     branch (checked against the same mutable signer registry as
+//     ErrSwapPriceProofSignerUnknown, so SKIP-shaped) from its pure-payload
+//     branches (domain/pair mismatch, a non-positive rate, so PRUNE-shaped),
+//     and neither wrong verdict was acceptable. Quarantine is the verdict
+//     that needs no guess: a transaction whose proof is wrong stays a few
+//     rounds, fails alone, and is evicted; one whose signer registration is
+//     corrected in the meantime simply passes.
+//
+// == ABORT: infrastructure errors only ==
+//
+// The only errors that still abort a wave are those isolated by
+// isInfrastructureError (a closed or corrupt database, a missing trie node, a
+// cancelled context, a full disk): they say nothing about the transaction,
+// and excluding transactions cannot fix them. No transaction is struck for
+// one, and CreateBlock falls back to the empty block.
+//
+// Two node-level failure classes never reach this function at all because
+// they are not attributable to any transaction: state copy / pause refresh
+// failures (a precondition for building ANY block) and
+// ProcessBlockLifecycle / processPendingEvidenceForState failures (whole-block
+// epoch rollover and evidence processing). CreateBlock reports them, falls
+// back to an empty block, and -- because the lifecycle also runs for the empty
+// block -- can only alarm (LIVENESS log lines, metrics, the watchdog) when the
+// fault is in committed state itself.
 //
 // == Termination ==
 //
-// The per-tx loop in buildProposalState never stops scanning on a PRUNE or
-// SKIP verdict (it `continue`s), so every candidate is attempted exactly
-// once per retry. CreateBlock's outer loop retries only when the candidate
-// set strictly shrank (at least one PRUNE or SKIP hit), so it terminates in
-// at most len(original txs)+1 iterations -- the last one either succeeding
-// (trivially, on an empty set if every transaction was excluded) or
-// hard-erroring via an ABORT-classified error. Worst case, EVERY mempool
-// transaction is SKIP-classified (e.g. a burst that trips a shared cap, or
-// a module pause hitting a fully-transfer-heavy mempool): the candidate set
-// shrinks to empty within that same bound, computeDependencyGraph(nil)
-// succeeds trivially, and buildProposalState returns a valid, successful,
-// EMPTY *StateProcessor -- CreateBlock returns an empty block, not an
-// error, not a hang. The validator stays live and proposes an empty block
-// instead of dropping out of the round entirely. See
-// TestCreateBlockAllSkippableTransactionsProducesEmptyBlockNotHang for a
-// test that exercises exactly this worst case with a large synthetic
-// mempool.
+// CreateBlock executes waves: each wave applies every remaining candidate
+// against a fresh state copy and collects ALL failures instead of stopping at
+// the first; the failed candidates are excluded and the survivors run again.
+// Every wave either finishes clean or removes at least one candidate, the
+// number of waves is capped, and a wall-clock budget is checked between
+// transactions. On exhaustion the clean prefix of the last wave is
+// re-verified and used, and failing that an EMPTY block is built -- the block a
+// proposer builds on every idle round -- which depends on no transaction at
+// all. See TestCreateBlockAllSkippableTransactionsProducesEmptyBlockNotHang
+// for the all-skipped worst case and the poison-matrix tests
+// (core/poison_matrix_test.go) for every transaction type.
 func classifyProposalError(err error) proposalTxDisposition {
+	// A recovered apply panic (see applyTx) is never the transaction's
+	// "fault" in the sense of a known sentinel, but it is exactly as
+	// unexecutable as any other error -- quarantine it, and confirm it at its
+	// first strike.
+	var panicErr *txPanicError
+	if errors.As(err, &panicErr) {
+		return proposalDispositionQuarantine
+	}
+	if isInfrastructureError(err) {
+		return proposalDispositionAbort
+	}
+	// Evidence submissions are senderless, so nothing at admission ever limits
+	// how many can sit in a mempool; each of these reasons is decided by the
+	// payload alone (or, for expiry, by a height that only grows), so they are
+	// dead on arrival, while a future-height claim becomes valid once the chain
+	// reaches it.
+	var evidenceErr *evidence.ValidationError
+	if errors.As(err, &evidenceErr) && evidenceErr != nil {
+		switch evidenceErr.Reason {
+		case evidence.RejectReasonExpired,
+			evidence.RejectReasonInvalidType,
+			evidence.RejectReasonInvalidOffender,
+			evidence.RejectReasonInvalidReporter,
+			evidence.RejectReasonEmptyHeights,
+			evidence.RejectReasonUnsortedHeights,
+			evidence.RejectReasonInvalidSignature,
+			evidence.RejectReasonInvalidEquivocationProof:
+			return proposalDispositionPrune
+		case evidence.RejectReasonFutureHeight:
+			return proposalDispositionSkip
+		}
+	}
 	// *swap.RedeemRiskViolation is a struct type, not a sentinel value, so it
 	// needs errors.As rather than errors.Is -- same disposition as the
 	// mint-side cap-violation sentinels below (a redeem risk cap can free up
@@ -3354,7 +3580,13 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
 		// advance -- same reasoning as ErrSwapExpired above.
-		errors.Is(err, ErrTransactionExpired):
+		errors.Is(err, ErrTransactionExpired),
+		// The outer envelope's chain id is a pure function of the
+		// transaction's own immutable payload; it cannot become valid later.
+		// (Unreachable through the mempool today because admission rejects
+		// it, which is exactly why it used to be left at ABORT; a
+		// gRPC-supplied or injected transaction can still carry one.)
+		errors.Is(err, ErrInvalidChainID):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),
@@ -3424,251 +3656,7 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrBuybackRefPriceFutureEpoch):
 		return proposalDispositionSkip
 	}
-	return proposalDispositionAbort
-}
-
-func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
-	proposedTxs := append([]*types.Transaction(nil), txs...)
-	var prunedTxs []*types.Transaction
-	// skippedTxs accumulates every transaction excluded from this attempt via
-	// proposalDispositionSkip across every buildProposalState retry within
-	// this single CreateBlock call. Unlike prunedTxs it is never a mempool
-	// structure and never persisted -- it exists only for the duration of
-	// this call, exactly like prunedTxs already does.
-	var skippedTxs []*types.Transaction
-	defer func() {
-		// Unconditional release, regardless of whether CreateBlock ultimately
-		// succeeds or fails: buildProposalState already calls
-		// n.requeueTransactions(attemptSkipped) immediately upon detecting a
-		// SKIP disposition (see below), releasing the mempool "in-flight"
-		// mark as early as correctness allows. This second call is
-		// deliberately redundant -- requeueTransactions only ever does
-		// delete(n.proposedTxs, key), so deleting an already-deleted key is a
-		// safe no-op -- and exists as a structural guarantee: on the SUCCESS
-		// path (err == nil) the rest of this defer never runs (see the next
-		// check), so without this unconditional release here, a
-		// successfully-skipped transaction's "in-flight" mark would never be
-		// cleared, permanently hiding it from every future GetMempool() call
-		// even though it is still physically resident in n.mempool -- a
-		// silent, latent "phantom prune" bug distinct from, but just as bad
-		// as, calling dropTransactionsFromMempool on it.
-		if len(skippedTxs) > 0 {
-			n.requeueTransactions(skippedTxs)
-		}
-		if err == nil || len(proposedTxs) == 0 {
-			return
-		}
-		if len(prunedTxs) == 0 {
-			n.requeueTransactions(proposedTxs)
-			return
-		}
-		dropped := make(map[string]struct{}, len(prunedTxs))
-		for _, tx := range prunedTxs {
-			key, keyErr := transactionKey(tx)
-			if keyErr != nil {
-				continue
-			}
-			dropped[key] = struct{}{}
-		}
-		if len(dropped) == 0 {
-			n.requeueTransactions(proposedTxs)
-			return
-		}
-		requeue := make([]*types.Transaction, 0, len(proposedTxs))
-		for _, tx := range proposedTxs {
-			key, keyErr := transactionKey(tx)
-			if keyErr != nil {
-				continue
-			}
-			if _, skip := dropped[key]; skip {
-				continue
-			}
-			requeue = append(requeue, tx)
-		}
-		n.requeueTransactions(requeue)
-	}()
-
-	blockTime := n.currentTime()
-	timestamp := blockTime.Unix()
-
-	if len(txs) > 0 {
-		filtered := make([]*types.Transaction, 0, len(txs))
-		for _, tx := range txs {
-			if tx == nil {
-				continue
-			}
-			if tx.Type == types.TxTypeMint {
-				voucher, _, err := decodeMintTransaction(tx.Data)
-				if err != nil || voucher == nil || voucher.Expiry <= timestamp {
-					prunedTxs = append(prunedTxs, tx)
-					continue
-				}
-			}
-			if tx.Type == types.TxTypeSwapVoucherMint {
-				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
-				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= timestamp {
-					prunedTxs = append(prunedTxs, tx)
-					continue
-				}
-			}
-			filtered = append(filtered, tx)
-		}
-		txs = filtered
-	}
-
-	if len(prunedTxs) > 0 {
-		n.markTransactionsCommitted(prunedTxs)
-	}
-
-	// Clamp the proposal to the configured transaction cap to avoid building
-	// blocks that exceed the active limit. The slice header is adjusted
-	// locally so callers (for example, the mempool) retain their full view of
-	// pending transactions.
-	maxTxs := n.globalConfigSnapshot().Blocks.MaxTxs
-	if maxTxs > 0 && int64(len(txs)) > maxTxs {
-		if maxTxs > int64(math.MaxInt) {
-			maxTxs = int64(math.MaxInt)
-		}
-		txs = txs[:int(maxTxs)]
-	}
-
-	height := n.chain.GetHeight() + 1
-	prevHash := n.chain.Tip()
-	validator := n.validatorKey.PubKey().Address().Bytes()
-
-	buildProposalState := func(candidateTxs []*types.Transaction) (*StateProcessor, []*types.Transaction, []byte, error) {
-		orderedTxs, executionGraphRoot, err := computeDependencyGraph(candidateTxs)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("canonical scheduler failed: %w", err)
-		}
-
-		n.stateMu.Lock()
-		if err := n.refreshModulePauses(); err != nil {
-			n.stateMu.Unlock()
-			return nil, nil, nil, err
-		}
-		stateCopy, err := n.state.Copy()
-		n.stateMu.Unlock()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		stateCopy.SetPauseView(n)
-		stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
-		blockTime = time.Unix(timestamp, 0).UTC()
-		stateCopy.BeginBlock(height, blockTime)
-
-		// Must run before this block's own transactions, not just before
-		// ProcessBlockLifecycle further below -- ProcessBlockLifecycle only
-		// runs AFTER the tx-application loop, so relying on it alone leaves
-		// a window where a TxTypeRedeemNHB burn in this very block executes
-		// before the genesis supply is seeded and underflows (the exact
-		// 2026-08-24 incident this seed exists to fix, now reproducible as a
-		// full block-production abort instead of one rejected tx). Idempotent
-		// and cheap after its first real run, so calling it here in addition
-		// to its existing call inside ProcessBlockLifecycle is safe.
-		if err := stateCopy.SeedGenesisNHBSupplyOnce(); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, fmt.Errorf("seed genesis NHB supply: %w", err)
-		}
-		if err := stateCopy.ReconcileNHBMintSupplyDriftOnce(); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, fmt.Errorf("reconcile NHB mint supply drift: %w", err)
-		}
-
-		keptTxs := make([]*types.Transaction, 0, len(orderedTxs))
-		attemptPruned := make([]*types.Transaction, 0)
-		// attemptSkipped collects this attempt's SKIP-classified failures --
-		// see classifyProposalError's proposalDispositionSkip doc for why
-		// these must NOT be treated like attemptPruned (mempool-removed) or
-		// silently left in-flight (never reconsidered again).
-		attemptSkipped := make([]*types.Transaction, 0)
-		for _, tx := range orderedTxs {
-			if err := stateCopy.ApplyTransaction(tx); err != nil {
-				switch classifyProposalError(err) {
-				case proposalDispositionPrune:
-					attemptPruned = append(attemptPruned, tx)
-					continue
-				case proposalDispositionSkip:
-					attemptSkipped = append(attemptSkipped, tx)
-					if hash, hashErr := tx.Hash(); hashErr == nil {
-						slog.Warn("transaction skipped from block, remains in mempool",
-							slog.String("txHash", "0x"+hex.EncodeToString(hash)),
-							slog.Any("reason", err))
-					}
-					continue
-				default: // proposalDispositionAbort
-					stateCopy.EndBlock()
-					return nil, nil, nil, err
-				}
-			}
-			keptTxs = append(keptTxs, tx)
-		}
-		if len(attemptPruned) > 0 || len(attemptSkipped) > 0 {
-			prunedTxs = append(prunedTxs, attemptPruned...)
-			skippedTxs = append(skippedTxs, attemptSkipped...)
-			// PRUNE txs are permanently removed from the real mempool.
-			n.dropTransactionsFromMempool(attemptPruned)
-			// SKIP txs are released from "in-flight" bookkeeping immediately
-			// (as early as correctness allows, matching
-			// dropTransactionsFromMempool's timing above) so the next
-			// GetMempool() call can offer them again -- but n.mempool itself
-			// is deliberately left untouched: requeueTransactions only ever
-			// deletes from n.proposedTxs, never from n.mempool. See
-			// CreateBlock's top-level defer for the unconditional,
-			// idempotent backstop release of the same set.
-			n.requeueTransactions(attemptSkipped)
-			stateCopy.EndBlock()
-			return nil, keptTxs, nil, nil
-		}
-		if err := stateCopy.ProcessBlockLifecycle(height, timestamp); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, err
-		}
-		if err := n.processPendingEvidenceForState(stateCopy, height); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, err
-		}
-		stateCopy.FinalizeBlock()
-		return stateCopy, keptTxs, executionGraphRoot, nil
-	}
-
-	var (
-		stateCopy          *StateProcessor
-		executionGraphRoot []byte
-	)
-	for {
-		stateCopy, txs, executionGraphRoot, err = buildProposalState(txs)
-		if err != nil {
-			return nil, err
-		}
-		if stateCopy != nil {
-			break
-		}
-	}
-	defer stateCopy.EndBlock()
-
-	header := &types.BlockHeader{
-		Height:             height,
-		Timestamp:          timestamp,
-		PrevHash:           prevHash,
-		Validator:          validator,
-		ExecutionGraphRoot: executionGraphRoot,
-	}
-
-	txRoot, err := ComputeTxRoot(txs)
-	if err != nil {
-		return nil, err
-	}
-	header.TxRoot = txRoot
-	header.StateRoot = stateCopy.PendingRoot().Bytes()
-
-	block = types.NewBlock(header, txs)
-	if hash, hashErr := header.Hash(); hashErr == nil {
-		n.stateMu.Lock()
-		n.selfProposedHash = hash
-		n.stateMu.Unlock()
-	}
-	return block, nil
+	return proposalDispositionQuarantine
 }
 
 func (n *Node) CommitBlock(b *types.Block) error {
@@ -3788,7 +3776,10 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 	}
 	for i, tx := range orderedTxs {
 		if err := stateCopy.ApplyTransaction(tx); err != nil {
-			return fmt.Errorf("apply transaction %d: %w", i, err)
+			// Same message as before ("apply transaction N: ..."); the typed
+			// wrapper only lets a proposer attribute a rejection of its own
+			// block to the transaction that caused it.
+			return &blockApplyError{Index: i, Err: err}
 		}
 	}
 	if err := stateCopy.ProcessBlockLifecycle(b.Header.Height, b.Header.Timestamp); err != nil {
@@ -4032,7 +4023,7 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 				prunedTxs = append(prunedTxs, tx)
 				n.markTransactionsCommitted([]*types.Transaction{tx})
 			}
-			return fmt.Errorf("apply transaction %d: %w", i, err)
+			return &blockApplyError{Index: i, Err: err}
 		}
 		if tx != nil && tx.Type == types.TxTypeBuyZNHB {
 			if record, ok := extractBuyZNHBCostRecord(tx, stateCopy.events[eventsBefore:]); ok {
