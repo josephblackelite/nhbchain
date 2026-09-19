@@ -2,6 +2,8 @@ package core
 
 import (
 	"bytes"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -71,6 +73,36 @@ func (sp *StateProcessor) applyPOSAuthorize(tx *types.Transaction) error {
 	return sp.incrementNativeAccountNonce(signer)
 }
 
+// ErrPOSInvalidAuthorizationID marks a capture or void whose authorization id
+// is not a 32-byte hex string. It is a pure function of the transaction's own
+// payload, so the block builder prunes it (see classifyProposalError).
+var ErrPOSInvalidAuthorizationID = errors.New("pos: invalid authorization id")
+
+// decodePOSAuthorizationID decodes the authorization id carried by a capture
+// or void message. Authorization ids are 32-byte hashes, and every place the
+// chain reports one (the pos_getAuthorization result, the payment event
+// attributes) writes it as lowercase hex, with a 0x prefix in the RPC result
+// and without one in event attributes. Capture and void therefore accept
+// exactly that hex text, optionally 0x/0X prefixed, and nothing else: a raw
+// 32-byte id cannot travel in a proto3 string field, and anything that does
+// not decode to exactly 32 bytes could only ever address a different record.
+func decodePOSAuthorizationID(raw string) ([32]byte, error) {
+	var id [32]byte
+	trimmed := raw
+	if len(trimmed) >= 2 && trimmed[0] == '0' && (trimmed[1] == 'x' || trimmed[1] == 'X') {
+		trimmed = trimmed[2:]
+	}
+	if len(trimmed) != 2*len(id) {
+		return id, fmt.Errorf("%w: expected 64 hex characters, optionally prefixed with 0x", ErrPOSInvalidAuthorizationID)
+	}
+	decoded, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return id, fmt.Errorf("%w: not valid hex", ErrPOSInvalidAuthorizationID)
+	}
+	copy(id[:], decoded)
+	return id, nil
+}
+
 // applyPOSCapture claims funds against a pending authorization. Only the
 // merchant the authorization was created for may capture it -- enforced by
 // passing the transaction's recovered signer, not any payload-supplied
@@ -96,12 +128,9 @@ func (sp *StateProcessor) applyPOSCapture(tx *types.Transaction) error {
 	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
 	lifecycle.SetNowFunc(func() time.Time { return sp.blockTimestamp().UTC() })
 
-	var authID [32]byte
-	copy(authID[:], []byte(msg.GetAuthorizationId()))
-	if len(msg.GetAuthorizationId()) == 64 {
-		// assuming hex encoded
-		parsed, _ := common.ParseHexOrString(msg.GetAuthorizationId())
-		copy(authID[:], parsed)
+	authID, err := decodePOSAuthorizationID(msg.GetAuthorizationId())
+	if err != nil {
+		return err
 	}
 
 	if _, err := lifecycle.Capture(authID, amount, caller); err != nil {
@@ -130,11 +159,9 @@ func (sp *StateProcessor) applyPOSVoid(tx *types.Transaction) error {
 	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
 	lifecycle.SetNowFunc(func() time.Time { return sp.blockTimestamp().UTC() })
 
-	var authID [32]byte
-	copy(authID[:], []byte(msg.GetAuthorizationId()))
-	if len(msg.GetAuthorizationId()) == 64 {
-		parsed, _ := common.ParseHexOrString(msg.GetAuthorizationId())
-		copy(authID[:], parsed)
+	authID, err := decodePOSAuthorizationID(msg.GetAuthorizationId())
+	if err != nil {
+		return err
 	}
 
 	if _, err := lifecycle.Void(authID, msg.GetReason(), caller); err != nil {

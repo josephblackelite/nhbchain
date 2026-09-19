@@ -175,3 +175,30 @@ func TestLifecycleAutoVoidOnExpiry(t *testing.T) {
 		t.Fatalf("payer balance after auto-void: got %s want 800", payerAcc.BalanceZNHB)
 	}
 }
+
+// With one account as both payer and merchant, Capture must apply the hold
+// release, the refund and the merchant credit to a single account object:
+// balance plus locked is unchanged by the capture and nothing stays locked.
+func TestLifecycleCaptureSamePayerAndMerchantConservesSupply(t *testing.T) {
+	for _, capture := range []int64{600, 250, 1} {
+		state := newMemoryLifecycleState()
+		var acct [20]byte
+		acct[5] = 0x66
+		state.accounts[string(acct[:])] = &types.Account{BalanceZNHB: big.NewInt(1_000), BalanceNHB: big.NewInt(0), LockedZNHB: big.NewInt(0)}
+		engine := NewLifecycle(state)
+		base := time.Unix(1_700_000_000, 0)
+		engine.SetNowFunc(func() time.Time { return base })
+
+		auth, err := engine.Authorize(acct, acct, big.NewInt(600), uint64(base.Add(time.Hour).Unix()), nil)
+		if err != nil {
+			t.Fatalf("authorize: %v", err)
+		}
+		if _, err := engine.Capture(auth.ID, big.NewInt(capture), acct); err != nil {
+			t.Fatalf("capture %d: %v", capture, err)
+		}
+		got, _ := state.GetAccount(acct[:])
+		if got.BalanceZNHB.Cmp(big.NewInt(1_000)) != 0 || got.LockedZNHB.Sign() != 0 {
+			t.Fatalf("capture %d: balance %s locked %s, want 1000 / 0", capture, got.BalanceZNHB, got.LockedZNHB)
+		}
+	}
+}
