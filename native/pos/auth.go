@@ -281,6 +281,14 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int, caller [20]byte) (*Aut
 	}
 	payerAcc = cloneAccount(payerAcc)
 	merchantAcc = cloneAccount(merchantAcc)
+	if auth.Payer == auth.Merchant {
+		// One account plays both roles: apply the release and the credit to a
+		// single object. Two copies of the same address would be persisted one
+		// after the other, and the merchant copy (which never saw the
+		// release) would overwrite it -- the capture would mint its amount
+		// while the hold stayed locked.
+		merchantAcc = payerAcc
+	}
 	originalPayer := cloneAccount(payerAcc)
 	originalMerchant := cloneAccount(merchantAcc)
 	if payerAcc.LockedZNHB.Cmp(auth.Amount) < 0 {

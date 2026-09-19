@@ -134,8 +134,14 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	// settleBuybackEpoch below, this must not wait for an epoch boundary.
 	// settleSubscriptionCharges is internally day-gated against its own
 	// persisted watermark, so calling it unconditionally on every block is
-	// a cheap no-op on every block that isn't a day rollover.
-	if err := sp.settleSubscriptionCharges(timestamp); err != nil {
+	// a cheap no-op on every block that isn't a day rollover. A ZNHB charge
+	// can pay the management fee to the treasury wallet (config.toml points it
+	// at the admin/treasury wallet) or debit/credit that wallet as payer or
+	// merchant, none of which touches the pool sub-ledgers: book the net
+	// movement into the Reward Pool in this same step. There is no
+	// transaction to reject here, so a shortfall is drawn from the Sale Pool
+	// rather than failing the block.
+	if err := sp.withTreasuryPoolBooking(true, func() error { return sp.settleSubscriptionCharges(timestamp) }); err != nil {
 		return err
 	}
 	// Fixed-term lending's interest-installment billing has the same
@@ -153,7 +159,11 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.settleLendingDepositPayouts(timestamp); err != nil {
 		return err
 	}
-	if err := sp.maybeProcessPotsoRewards(height, timestamp); err != nil {
+	// processPotsoRewardEpoch mirrors the payout into the Reward Pool itself
+	// when the treasury wallet is the reward treasury, but not when it is only
+	// one of the winners of another treasury's payout -- book whatever is
+	// left unmirrored here, in this same step.
+	if err := sp.withTreasuryPoolBooking(true, func() error { return sp.maybeProcessPotsoRewards(height, timestamp) }); err != nil {
 		return err
 	}
 	if err := sp.accrueEpochRewards(height); err != nil {
