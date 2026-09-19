@@ -170,6 +170,16 @@ type ServerConfig struct {
 	// AllowlistCIDRs enumerates client IP ranges permitted to access the RPC
 	// server. When empty, all clients are allowed.
 	AllowlistCIDRs []string
+	// WebSocketOrigins lists the host patterns (matched case-insensitively with
+	// path.Match) of the browser origins that may open the WebSocket streams in
+	// addition to the request's own host. Like AllowlistCIDRs, an empty list
+	// allows any origin; clients that send no Origin header are not affected.
+	WebSocketOrigins []string
+	// WebSocketMaxConnections caps the WebSocket streams open at once and
+	// WebSocketMaxPerIP those open per client address. Zero selects the
+	// defaults (defaultWebSocketMaxConnections, defaultWebSocketMaxPerIP).
+	WebSocketMaxConnections int
+	WebSocketMaxPerIP       int
 	// ProxyHeaders configures handling of reverse proxy headers such as
 	// X-Forwarded-For and X-Real-IP.
 	ProxyHeaders ProxyHeadersConfig
@@ -300,6 +310,15 @@ type Server struct {
 	explorerSnapshot *ExplorerSnapshotResult
 	explorerHeight   uint64
 	explorerWindow   int
+
+	// WebSocket streams: allowed origins and how many are open, in total and
+	// per client address.
+	wsOrigins  []string
+	wsMu       sync.Mutex
+	wsOpen     int
+	wsOpenByIP map[string]int
+	wsMaxOpen  int
+	wsMaxPerIP int
 
 	activityMu     sync.RWMutex
 	activityTotals explorerActivityTotals
@@ -578,6 +597,16 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		rateLimitWindow:          rateWindow,
 		rateLimiterStaleAfter:    staleAfter,
 		rateLimiterSweepBackoff:  rateWindow,
+		wsOrigins:                trimmedNonEmpty(cfg.WebSocketOrigins),
+		wsOpenByIP:               make(map[string]int),
+		wsMaxOpen:                cfg.WebSocketMaxConnections,
+		wsMaxPerIP:               cfg.WebSocketMaxPerIP,
+	}
+	if srv.wsMaxOpen <= 0 {
+		srv.wsMaxOpen = defaultWebSocketMaxConnections
+	}
+	if srv.wsMaxPerIP <= 0 {
+		srv.wsMaxPerIP = defaultWebSocketMaxPerIP
 	}
 	srv.swapStable.assets = make(map[string]stablequote.Asset)
 	srv.swapStable.now = time.Now

@@ -1,9 +1,11 @@
 package p2p
 
 import (
+	"container/heap"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"time"
@@ -18,7 +20,19 @@ const (
 	peerstoreMaxScore     = 1000.0
 	peerstoreMinScore     = -100.0
 	violationScorePenalty = 10.0
+
+	// The peerstore is fed, directly or indirectly, by remote peers, so it is
+	// bounded in every dimension: number of entries, age of an entry and the
+	// size of each persisted record. Entries beyond the cap are evicted least
+	// recently seen first; entries not seen for the TTL are pruned.
+	defaultPeerstoreMaxEntries = 2048
+	defaultPeerstoreTTL        = 14 * 24 * time.Hour
+	maxPeerstoreRecordBytes    = 4096
+	maxPeerstoreAddrLen        = 255
+	maxPeerstoreNodeIDLen      = 128
 )
+
+var errPeerstoreFull = errors.New("peerstore full")
 
 // PeerstoreEntry captures the dial metadata we persist for each peer.
 type PeerstoreEntry struct {
@@ -43,6 +57,13 @@ type Peerstore struct {
 
 	baseBackoff time.Duration
 	maxBackoff  time.Duration
+
+	// maxEntries and ttl bound the store (zero disables the respective bound).
+	// protected holds the node IDs that must survive eviction and pruning, such
+	// as the peers we are connected to right now.
+	maxEntries int
+	ttl        time.Duration
+	protected  map[string]struct{}
 }
 
 // NewPeerstore opens (or creates) a peerstore backed by LevelDB at the given path.
@@ -67,12 +88,82 @@ func NewPeerstore(path string, baseBackoff, maxBackoff time.Duration) (*Peerstor
 		byNode:      make(map[string]*PeerstoreEntry),
 		baseBackoff: baseBackoff,
 		maxBackoff:  maxBackoff,
+		maxEntries:  defaultPeerstoreMaxEntries,
+		ttl:         defaultPeerstoreTTL,
+		protected:   make(map[string]struct{}),
 	}
 	if err := store.load(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return store, nil
+}
+
+// SetLimits changes the entry cap and the time-to-live of unseen entries (zero
+// disables the respective bound) and immediately trims the store to fit.
+func (ps *Peerstore) SetLimits(maxEntries int, ttl time.Duration) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.maxEntries = maxEntries
+	ps.ttl = ttl
+	if ps.byNode == nil {
+		return
+	}
+	for ps.maxEntries > 0 && len(ps.byNode) > ps.maxEntries {
+		victim := ps.pickVictimLocked(time.Now())
+		if victim == "" {
+			break
+		}
+		ps.deleteLocked(victim)
+	}
+}
+
+// Len reports how many peers the store currently holds.
+func (ps *Peerstore) Len() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.byNode)
+}
+
+// Protect exempts a node from eviction and pruning until Unprotect is called.
+func (ps *Peerstore) Protect(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.protected == nil {
+		ps.protected = make(map[string]struct{})
+	}
+	ps.protected[nodeID] = struct{}{}
+}
+
+// Unprotect makes a node subject to eviction and pruning again.
+func (ps *Peerstore) Unprotect(nodeID string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	delete(ps.protected, nodeID)
+}
+
+// Prune drops every unprotected, unbanned entry that has not been seen for the
+// time-to-live and reports how many were removed.
+func (ps *Peerstore) Prune(now time.Time) int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.ttl <= 0 {
+		return 0
+	}
+	removed := 0
+	for nodeID, rec := range ps.byNode {
+		if _, keep := ps.protected[nodeID]; keep || rec.BannedUntil.After(now) {
+			continue
+		}
+		if now.Sub(rec.LastSeen) > ps.ttl {
+			ps.deleteLocked(nodeID)
+			removed++
+		}
+	}
+	return removed
 }
 
 // Close flushes and closes the underlying database.
@@ -93,6 +184,9 @@ func (ps *Peerstore) Close() error {
 func (ps *Peerstore) Put(rec PeerstoreEntry) error {
 	if rec.NodeID == "" {
 		return errors.New("nodeID required")
+	}
+	if len(rec.NodeID) > maxPeerstoreNodeIDLen || len(rec.Addr) > maxPeerstoreAddrLen {
+		return errors.New("peerstore record too large")
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -174,6 +268,12 @@ func (ps *Peerstore) RecordViolation(nodeID string, now time.Time) (PeerstoreEnt
 
 	rec := ps.byNode[nodeID]
 	if rec == nil {
+		if len(nodeID) > maxPeerstoreNodeIDLen {
+			return PeerstoreEntry{}, errors.New("peerstore record too large")
+		}
+		if !ps.makeRoomLocked(now) {
+			return PeerstoreEntry{}, errPeerstoreFull
+		}
 		rec = &PeerstoreEntry{NodeID: nodeID}
 		ps.byNode[nodeID] = rec
 	}
@@ -306,8 +406,13 @@ func (ps *Peerstore) putLocked(rec *PeerstoreEntry) error {
 		if existing.Addr != "" && existing.Addr != rec.Addr {
 			delete(ps.byAddr, existing.Addr)
 		}
-	} else if rec.LastSeen.IsZero() {
-		rec.LastSeen = time.Now()
+	} else {
+		if rec.LastSeen.IsZero() {
+			rec.LastSeen = time.Now()
+		}
+		if !ps.makeRoomLocked(rec.LastSeen) {
+			return errPeerstoreFull
+		}
 	}
 	copy := *rec
 	ps.byNode[rec.NodeID] = &copy
@@ -343,25 +448,161 @@ func clampScore(value float64) float64 {
 	return value
 }
 
+// pickVictimLocked chooses the entry to evict: the least recently seen one that
+// is neither protected nor under an active ban. Entries under an active ban are
+// only chosen when nothing else is left. It returns "" when every entry is
+// protected.
+func (ps *Peerstore) pickVictimLocked(now time.Time) string {
+	victim, banned := "", ""
+	var victimSeen, bannedSeen time.Time
+	for nodeID, rec := range ps.byNode {
+		if _, keep := ps.protected[nodeID]; keep {
+			continue
+		}
+		if rec.BannedUntil.After(now) {
+			if banned == "" || rec.LastSeen.Before(bannedSeen) || (rec.LastSeen.Equal(bannedSeen) && nodeID < banned) {
+				banned, bannedSeen = nodeID, rec.LastSeen
+			}
+			continue
+		}
+		if victim == "" || rec.LastSeen.Before(victimSeen) || (rec.LastSeen.Equal(victimSeen) && nodeID < victim) {
+			victim, victimSeen = nodeID, rec.LastSeen
+		}
+	}
+	if victim == "" {
+		return banned
+	}
+	return victim
+}
+
+// makeRoomLocked evicts entries until one more can be added. It reports false
+// when the store is full of protected entries.
+func (ps *Peerstore) makeRoomLocked(now time.Time) bool {
+	if ps.maxEntries <= 0 {
+		return true
+	}
+	for len(ps.byNode) >= ps.maxEntries {
+		victim := ps.pickVictimLocked(now)
+		if victim == "" {
+			return false
+		}
+		ps.deleteLocked(victim)
+	}
+	return true
+}
+
+func (ps *Peerstore) deleteLocked(nodeID string) {
+	rec := ps.byNode[nodeID]
+	if rec == nil {
+		return
+	}
+	delete(ps.byNode, nodeID)
+	if rec.Addr != "" && ps.byAddr[rec.Addr] == rec {
+		delete(ps.byAddr, rec.Addr)
+	}
+	if ps.db != nil {
+		_ = ps.db.Delete([]byte("peer:"+nodeID), nil)
+	}
+}
+
+// peerstoreLoadItem and peerstoreLoadHeap keep the most recently seen records
+// while the database is scanned, so that load never holds more than the cap.
+type peerstoreLoadItem struct {
+	key string
+	rec PeerstoreEntry
+}
+
+type peerstoreLoadHeap []peerstoreLoadItem
+
+func (h peerstoreLoadHeap) Len() int           { return len(h) }
+func (h peerstoreLoadHeap) Less(i, j int) bool { return h[i].rec.LastSeen.Before(h[j].rec.LastSeen) }
+func (h peerstoreLoadHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *peerstoreLoadHeap) Push(x any)        { *h = append(*h, x.(peerstoreLoadItem)) }
+func (h *peerstoreLoadHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+// load reads the persisted records into memory. It keeps at most maxEntries of
+// them (the most recently seen) and skips, and deletes from disk, records that
+// are expired, oversized or undecodable, so that neither a crowded database nor
+// a single damaged record can keep the node from starting.
 func (ps *Peerstore) load() error {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	now := time.Now()
 	iter := ps.db.NewIterator(nil, nil)
 	defer iter.Release()
+
+	keep := &peerstoreLoadHeap{}
+	batch := new(leveldb.Batch)
+	dropped := 0
+	flush := func() error {
+		if batch.Len() == 0 {
+			return nil
+		}
+		err := ps.db.Write(batch, nil)
+		batch.Reset()
+		return err
+	}
+	drop := func(key string) error {
+		batch.Delete([]byte(key))
+		dropped++
+		if batch.Len() >= 512 {
+			return flush()
+		}
+		return nil
+	}
+
 	for iter.Next() {
 		key := string(iter.Key())
 		if len(key) < 5 || key[:5] != "peer:" {
 			continue
 		}
+		value := iter.Value()
 		var rec PeerstoreEntry
-		if err := json.Unmarshal(iter.Value(), &rec); err != nil {
-			return fmt.Errorf("decode peer %s: %w", key, err)
+		if len(value) > maxPeerstoreRecordBytes || json.Unmarshal(value, &rec) != nil ||
+			rec.NodeID == "" || key[5:] != rec.NodeID ||
+			len(rec.NodeID) > maxPeerstoreNodeIDLen || len(rec.Addr) > maxPeerstoreAddrLen {
+			if err := drop(key); err != nil {
+				return err
+			}
+			continue
 		}
-		copy := rec
-		ps.byNode[rec.NodeID] = &copy
-		if rec.Addr != "" {
-			ps.byAddr[rec.Addr] = &copy
+		if ps.ttl > 0 && now.Sub(rec.LastSeen) > ps.ttl && !rec.BannedUntil.After(now) {
+			if err := drop(key); err != nil {
+				return err
+			}
+			continue
+		}
+		heap.Push(keep, peerstoreLoadItem{key: key, rec: rec})
+		if ps.maxEntries > 0 && keep.Len() > ps.maxEntries {
+			oldest := heap.Pop(keep).(peerstoreLoadItem)
+			if err := drop(oldest.key); err != nil {
+				return err
+			}
 		}
 	}
-	return iter.Error()
+	if err := iter.Error(); err != nil {
+		return err
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	if dropped > 0 {
+		slog.Default().Warn("Pruned peerstore records while loading",
+			slog.Int("dropped", dropped),
+			slog.Int("kept", keep.Len()))
+	}
+	for _, item := range *keep {
+		copy := item.rec
+		ps.byNode[copy.NodeID] = &copy
+		if copy.Addr != "" {
+			ps.byAddr[copy.Addr] = &copy
+		}
+	}
+	return nil
 }

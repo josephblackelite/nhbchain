@@ -68,9 +68,14 @@ entries, easily handled in memory. Operators can reduce the window with
 `P2P.HandshakeReplayWindow` once that configuration surface lands; until then the
 default offers conservative protection without noticeable memory pressure.
 
-In addition to nonce tracking, peers that fail handshake validation accrue
-reputation penalties and may be temporarily banned depending on the configured
-policy.
+A handshake that fails validation is refused. What is held against the node it
+names depends on the evidence. Only a node that itself signed a handshake for
+another chain or genesis is banned. A packet whose signature does not match the
+node ID it names, and a replay of a handshake that was seen before, are refused
+without a ban: the node ID in a packet is a string the sender chose, and a
+replayed handshake is not sent by the node that signed it, so banning on either
+would let anybody lock a node out of its peers. A configured persistent peer is
+not banned on handshake evidence at all.
 
 ## RPC perimeter expectations
 
@@ -92,7 +97,8 @@ disconnects.
 
 | Event | Trigger | Default action | Operator notes |
 | ----- | ------- | -------------- | -------------- |
-| Handshake violation | Chain/genesis mismatch, signature failure, nonce replay | Immediate ban for `PeerBanDuration` (15m default) and peerstore entry marked via `RecordViolation`. | Verify the remote `nodeId` and published chain parameters before unbanning. Persistent mismatches usually indicate misconfiguration or an attempted Sybil. |
+| Handshake violation | Chain/genesis mismatch in a handshake signed by the node it names | Ban for `PeerBanDuration` (15m default) and peerstore entry marked via `RecordViolation`. Configured persistent peers are never banned on this evidence. | Verify the remote `nodeId` and published chain parameters before unbanning. Persistent mismatches usually indicate misconfiguration. |
+| Handshake refused | Signature that does not match the node ID, or a replayed nonce | The connection is closed. Nothing is held against the node ID in the packet. | Repeated refusals from one address are limited by the per-address handshake budget and are what to look for in the logs. |
 | Invalid message rate | >50% invalid messages within 5-frame window (`invalidRateThresholdPerc`) | Disconnect and ban if repeated; log `Protocol violation from <id>` with reason. | Inspect application logs for malformed payloads. If caused by a buggy release, roll back before whitelisting the peer. |
 | Per-peer rate limit | Message throughput exceeds configured `RateMsgsPerSec` | Disconnect, optionally ban if reputation drops below `BanScore`. | Increase per-peer rate limits only if the remote is a trusted bulk publisher. Otherwise the throttle prevents spam amplification. |
 | Global rate cap | Aggregate throughput exceeds `RateMsgsPerSec * MaxPeers` | Connection dropped (`global rate cap exceeded`) without banning. | Typically symptomatic of DDoS attempts. Raise global caps cautiously and monitor CPU load. |
@@ -102,6 +108,24 @@ All bans honour the configured `PeerBanDuration` unless overridden by the
 peerstore entry. Persistent peers are re-dialled automatically once the ban
 expires.
 
+## Requests for chain data
+
+A request for blocks or for the chain height is cheap to send and costs the node
+that answers it reads and bandwidth. Each remote address has a budget for them,
+and there is one more budget shared by all addresses. A request over either
+budget is dropped, and the peer is not disconnected or blamed for it, because an
+honest node can be led into sending many: a status report it has no way to check
+makes it ask for blocks, and a node catching up on a long chain asks for the
+next batch as fast as it applies the last. Configured persistent peers are not
+limited. The answer to a request goes to the peer that asked, never to every
+peer.
+
+A node that is told a peer is ahead of it, by a status report or by a block that
+does not follow its own chain, asks its peers for blocks from the height it
+needs. However many such messages arrive, it asks for the blocks from the same
+height at most once a second, and it asks for the next batch as soon as it has
+applied the last one.
+
 ## Security event log taxonomy
 
 Operational logs form the primary audit trail for network policy decisions. The
@@ -110,12 +134,13 @@ table below summarises the high-signal log messages emitted by the P2P layer:
 | Log snippet | Source | Meaning |
 | ----------- | ------ | ------- |
 | `Inbound connection from <addr> rejected: <err>` | `server.handleInbound` | Handshake failed. `err` contains specifics (chain mismatch, signature, timeout, nonce replay). |
-| `Handshake nonce replay from <id> rejected` | `verifyHandshake` | A peer attempted to reuse a signed handshake and was banned. Monitor to detect replay probes. |
+| `Handshake nonce replay from <id> rejected` | `verifyHandshake` | A signed handshake that was seen before was sent again and refused. The node it names is not banned, since anybody who has seen a handshake can send it again. Monitor to detect replay probes. |
+| `Dropping chain data requests from a peer over its budget` | `admitRequest` | A peer asked for blocks or for the chain height faster than its address is allowed to. The requests were dropped; the peer was not disconnected or blamed. |
 | `Protocol violation from <id>: <err> (score X)` | `handleProtocolViolation` | Peer sent malformed or unauthorized messages. Reputation adjusted accordingly. |
 | `Peer <id> exceeded rate limit (score X)` | `handleRateLimit` | Per-peer message rate exceeded allowance; connection dropped and potentially banned. |
 | `Dropping message from <id> due to global rate cap` | `handleRateLimit` (global) | The server hit its aggregate throughput budget and disconnected the peer without banning. |
 | `Peer <id> disconnected and banned: <reason>` | `removePeer` | Final disposition when a peer crosses the ban threshold. Includes the rationale recorded in reputation/peerstore. |
-| `Record handshake violation <id>: <err>` / `record handshake ban` | `markHandshakeViolation` | Persistence layer acknowledgement that the peer was banned for handshake faults. |
+| `Record handshake violation <id>: <err>` / `record handshake ban` | `markHandshakeViolation` | Persistence layer acknowledgement that a node was banned for signing a handshake for another chain or genesis. |
 
 Collect these messages alongside RPC access logs to produce a full audit trail.
 For production deployments forward them to a SIEM or long-term log store so that
